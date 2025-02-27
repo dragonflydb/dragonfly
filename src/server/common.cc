@@ -397,7 +397,7 @@ GenericError ExecutionState::ReportErrorInternal(GenericError&& err) {
   // This context is either new or was Reset, where the handler was joined
   CHECK(!err_handler_fb_.IsJoinable());
 
-  DVLOG(1) << "ReportError: " << err_.Format();
+  LOG(ERROR) << "ReportError: " << err_.Format();
 
   // We can move err_handler_ because it should run at most once.
   if (err_handler_)

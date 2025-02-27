@@ -48,6 +48,7 @@ class IncomingSlotMigration {
   }
 
   void ReportError(dfly::GenericError err) ABSL_LOCKS_EXCLUDED(error_mu_) {
+    errors_count_.fetch_add(1, std::memory_order_relaxed);
     util::fb2::LockGuard lk(error_mu_);
     last_error_ = std::move(err);
   }
@@ -55,6 +56,10 @@ class IncomingSlotMigration {
   std::string GetErrorStr() const ABSL_LOCKS_EXCLUDED(error_mu_) {
     util::fb2::LockGuard lk(error_mu_);
     return last_error_.Format();
+  }
+
+  size_t GetErrorsCount() const {
+    return errors_count_.load(std::memory_order_relaxed);
   }
 
   size_t GetKeyCount() const;
@@ -70,6 +75,7 @@ class IncomingSlotMigration {
   ExecutionState cntx_;
   mutable util::fb2::Mutex error_mu_;
   dfly::GenericError last_error_ ABSL_GUARDED_BY(error_mu_);
+  std::atomic<size_t> errors_count_ = 0;
 
   // when migration is finished we need to store number of migrated keys
   // because new request can add or remove keys and we get incorrect statistic

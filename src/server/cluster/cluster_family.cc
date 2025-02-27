@@ -1043,6 +1043,22 @@ void ClusterFamily::PauseAllIncomingMigrations(bool pause) {
   }
 }
 
+size_t ClusterFamily::MigrationsErrorsCount() const {
+  util::fb2::LockGuard lk(migration_mu_);
+
+  size_t error_num = 0;
+
+  for (const auto& mj : incoming_migrations_jobs_) {
+    error_num += mj->GetErrorsCount();
+  }
+
+  for (const auto& mj : outgoing_migration_jobs_) {
+    error_num += mj->GetErrorsCount();
+  }
+
+  return error_num;
+}
+
 using EngineFunc = void (ClusterFamily::*)(CmdArgList args, const CommandContext& cmd_cntx);
 
 inline CommandId::Handler3 HandlerFunc(ClusterFamily* se, EngineFunc f) {

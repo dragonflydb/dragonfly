@@ -66,9 +66,8 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     }
 
     if (!CheckRespIsSimpleReply("OK")) {
-      LOG(WARNING) << "Incorrect response for FLOW cmd: "
-                   << ToSV(LastResponseArgs().front().GetBuf());
-      cntx_.ReportError("Incorrect response for FLOW cmd");
+      cntx_.ReportError(absl::StrCat("Incorrect response for FLOW cmd: ",
+                                     ToSV(LastResponseArgs().front().GetBuf())));
       return;
     }
   }
@@ -188,6 +187,8 @@ MigrationState OutgoingMigration::GetState() const {
 void OutgoingMigration::SyncFb() {
   VLOG(1) << "Starting outgoing migration fiber for migration " << migration_info_.ToString();
 
+  const absl::Time start_time = absl::Now();
+
   // we retry starting migration until "cancel" is happened
   while (GetState() != MigrationState::C_FINISHED) {
     if (!ChangeState(MigrationState::C_CONNECTING)) {
@@ -195,11 +196,9 @@ void OutgoingMigration::SyncFb() {
     }
 
     if (cntx_.IsError()) {
-      last_error_ = cntx_.GetError();
-      LOG(ERROR) << last_error_;
-      ThisFiber::SleepFor(1000ms);  // wait some time before next retry
+      ResetError();
+      ThisFiber::SleepFor(500ms);  // wait some time before next retry
     }
-    cntx_.Reset(nullptr);
 
     VLOG(1) << "Connecting to target node";
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
@@ -224,11 +223,13 @@ void OutgoingMigration::SyncFb() {
 
     if (!CheckRespIsSimpleReply("OK")) {
       if (CheckRespIsSimpleReply(kUnknownMigration)) {
-        VLOG(2) << "Target node does not recognize migration; retrying";
-        ThisFiber::SleepFor(1000ms);
+        const absl::Duration passed = absl::Now() - start_time;
+        // we provide 30 seconds to distribute the config to all nodes to avoid extra errors
+        // reporting
+        if (passed >= absl::Milliseconds(30000))
+          cntx_.ReportError(GenericError(LastResponseArgs().front().GetString()));
       } else {
-        LOG(WARNING) << "Unable to initialize migration";
-        cntx_.ReportError(GenericError(std::string(ToSV(LastResponseArgs().front().GetBuf()))));
+        cntx_.ReportError(GenericError(LastResponseArgs().front().GetString()));
       }
       continue;
     }

@@ -2981,6 +2981,51 @@ async def test_cluster_sharded_pub_sub(df_factory: DflyInstanceFactory):
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+async def test_cluster_migration_errors_num(df_factory: DflyInstanceFactory):
+    # create cluster with several nodes and create migrations from one node to others
+    # but config propagated only to source node to get errors for migrations
+    # number of errors should be the same as number of target nodes
+    nodes = [
+        df_factory.create(
+            port=next(next_port),
+            admin_port=next(next_port),
+            vmodule="cluster_family=2,outgoing_slot_migration=2,incoming_slot_migration=2",
+        )
+        for i in range(3)
+    ]
+    df_factory.start_all(nodes)
+
+    c_nodes = [node.client() for node in nodes]
+
+    nodes_info = [(await create_node_info(instance)) for instance in nodes]
+    nodes_info[0].slots = [(0, 16383)]
+    nodes_info[1].slots = []
+    nodes_info[2].slots = []
+
+    await push_config(json.dumps(generate_config(nodes_info)), c_nodes)
+
+    async def wait_for_errors_num(client, err_num, timeout=10):
+        cluster_info = lambda: client.info("CLUSTER")
+
+        async for info, breaker in tick_timer(cluster_info, timeout=timeout):
+            with breaker:
+                assert info["migration_errors_total"] == err_num
+
+    await wait_for_errors_num(c_nodes[0], 0)
+
+    nodes_info[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes_info[1].instance.admin_port, [(0, 100)], nodes_info[1].id)
+    )
+
+    await push_config(json.dumps(generate_config(nodes_info)), [c_nodes[0]])
+
+    # the error will be reported after 30 seconds, because config is missing for target node
+    await wait_for_errors_num(c_nodes[0], 1, timeout=40)
+    # the migration process attempt to start migration in a second so we get more errors
+    await wait_for_errors_num(c_nodes[0], 2)
+
+
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 async def test_cluster_sharded_pub_sub_migration(df_factory: DflyInstanceFactory):
     instances = [df_factory.create(port=next(next_port)) for i in range(2)]
     df_factory.start_all(instances)
