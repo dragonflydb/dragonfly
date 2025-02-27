@@ -187,6 +187,8 @@ MigrationState OutgoingMigration::GetState() const {
 void OutgoingMigration::SyncFb() {
   VLOG(1) << "Starting outgoing migration fiber for migration " << migration_info_.ToString();
 
+  const absl::Time start_time = absl::Now();
+
   // we retry starting migration until "cancel" is happened
   while (GetState() != MigrationState::C_FINISHED) {
     if (!ChangeState(MigrationState::C_CONNECTING)) {
@@ -220,7 +222,15 @@ void OutgoingMigration::SyncFb() {
     }
 
     if (!CheckRespIsSimpleReply("OK")) {
-      cntx_.ReportError(GenericError(LastResponseArgs().front().GetString()));
+      if (CheckRespIsSimpleReply(kUnknownMigration)) {
+        const absl::Duration passed = absl::Now() - start_time;
+        // we provide 30 seconds to distribute the config to all nodes to avoid extra errors
+        // reporting
+        if (passed >= absl::Milliseconds(30000))
+          cntx_.ReportError(GenericError(LastResponseArgs().front().GetString()));
+      } else {
+        cntx_.ReportError(GenericError(LastResponseArgs().front().GetString()));
+      }
       continue;
     }
 

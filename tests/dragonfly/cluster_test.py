@@ -3019,7 +3019,8 @@ async def test_cluster_migration_errors_num(df_factory: DflyInstanceFactory):
 
     await push_config(json.dumps(generate_config(nodes_info)), [c_nodes[0]])
 
-    await wait_for_errors_num(c_nodes[0], 1)
+    # the error will be reported after 30 seconds, because config is missing for target node
+    await wait_for_errors_num(c_nodes[0], 1, timeout=40)
     # the migration process attempt to start migration in a second so we get more errors
     await wait_for_errors_num(c_nodes[0], 2)
 
