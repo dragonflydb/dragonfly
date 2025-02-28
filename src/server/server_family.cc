@@ -3229,7 +3229,7 @@ void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,
   const auto timeout_ms = timeout * 1ms;
   auto is_pause_in_progress = [this, end_time = chrono::steady_clock::now() + timeout_ms] {
     return ServerState::tlocal()->gstate() != GlobalState::SHUTTING_DOWN &&
-           chrono::steady_clock::now() < end_time;
+           chrono::steady_clock::now() < end_time && client_pause_.load();
   };
 
   auto cleanup = [this] {
@@ -3240,7 +3240,7 @@ void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,
   if (auto pause_fb_opt = Pause(listeners, cntx->ns, cntx->conn(), pause_state,
                                 std::move(is_pause_in_progress), cleanup);
       pause_fb_opt) {
-    client_pause_.store(true, std::memory_order_relaxed);
+    client_pause_.store(true);
     active_pauses_.fetch_add(1);
     pause_fb_opt->Detach();
     builder->SendOk();

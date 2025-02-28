@@ -1171,14 +1171,15 @@ async def test_client_unpause(df_factory):
 
     async def set_foo():
         client = server.client()
-        await client.execute_command("SET", "foo", "bar")
+        async with async_timeout.timeout(2):
+            await client.execute_command("SET", "foo", "bar")
 
     p1 = asyncio.create_task(set_foo())
 
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.5)
     assert not p1.done()
 
-    async with async_timeout.timeout(1):
+    async with async_timeout.timeout(0.5):
         await async_client.client_unpause()
 
     await p1
