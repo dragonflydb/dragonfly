@@ -899,6 +899,8 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
 }
 
 void DbSlice::FlushDb(DbIndex db_ind) {
+  DVLOG(1) << "Flushing db " << db_ind;
+
   // clear client tracking map.
   client_tracking_map_.clear();
 
@@ -1320,8 +1322,8 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     if (ttl <= 0) {
       auto prime_it = db.prime.Find(it->first);
       if (prime_it.is_done()) {  // A workaround for the case our tables are inconsistent.
-        LOG(DFATAL) << "Expired key " << key << " not found in prime table, expire_done: "
-                   << it.is_done();
+        LOG(DFATAL) << "Expired key " << key
+                    << " not found in prime table, expire_done: " << it.is_done();
         if (!it.is_done()) {
           db.expire.Erase(it->first);
         }

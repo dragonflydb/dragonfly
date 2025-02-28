@@ -2870,3 +2870,29 @@ async def test_replicaof_does_not_flush_if_it_fails_to_connect(df_factory):
         await c_replica.execute_command(f"REPLICAOF localhost {replica.port}")
     res = await c_replica.execute_command("dbsize")
     assert res == 1
+
+
+@pytest.mark.skip("Subject to fix of #4663")
+async def test_replicaof_within_transaction(df_factory: DflyInstanceFactory):
+    """
+    Simulates a scenario where REPLICAOF is called by valkey sentinel.
+    """
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+    logging.info(f"Replica at port {replica.port}")
+
+    async def push_pipeline(size):
+        p = c_replica.pipeline(transaction=True)
+        for i in range(size):
+            p.execute_command("type", "foo")
+        p.replicaof("localhost", master.port)
+        await p.execute()
+
+    lst = []
+    for _ in range(0, 5):
+        lst.append(asyncio.create_task(push_pipeline(5)))
+
+    asyncio.gather(*lst)

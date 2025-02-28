@@ -1177,9 +1177,10 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
     return;
   }
 
-  VLOG_IF(1, cid->opt_mask() & CO::CommandOpt::DANGEROUS)
-      << "Executing dangerous command " << cid->name() << " "
-      << ConnectionLogContext(dfly_cntx->conn());
+  if (cid->opt_mask() & CO::CommandOpt::DANGEROUS) {
+    VLOG(1) << "Executing dangerous command " << cid->name() << " "
+            << ConnectionLogContext(dfly_cntx->conn());
+  }
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
