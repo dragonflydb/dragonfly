@@ -87,7 +87,7 @@ Replica::~Replica() {
 static const char kConnErr[] = "could not connect to master: ";
 
 GenericError Replica::Start() {
-  VLOG(1) << "Starting replication";
+  VLOG(1) << "Starting replication " << this;
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
 
@@ -138,7 +138,7 @@ void Replica::EnableReplication(facade::SinkReplyBuilder* builder) {
 }
 
 void Replica::Stop() {
-  VLOG(1) << "Stopping replication";
+  VLOG(1) << "Stopping replication " << this;
   // Stops the loop in MainReplicationFb.
 
   proactor_->Await([this] {
@@ -149,6 +149,7 @@ void Replica::Stop() {
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
   sync_fb_.JoinIfNeeded();
+  DVLOG(1) << "MainReplicationFb stopped " << this;
   acks_fb_.JoinIfNeeded();
   for (auto& flow : shard_flows_) {
     flow.reset();
@@ -183,7 +184,7 @@ std::error_code Replica::TakeOver(std::string_view timeout, bool save_flag) {
 }
 
 void Replica::MainReplicationFb() {
-  VLOG(1) << "Main replication fiber started";
+  VLOG(1) << "Main replication fiber started " << this;
   // Switch shard states to replication.
   SetShardStates(true);
 
@@ -546,11 +547,14 @@ error_code Replica::InitiateDflySync() {
         std::accumulate(is_full_sync.get(), is_full_sync.get() + num_df_flows, 0);
 
     if (num_full_flows == num_df_flows) {
+      DVLOG(1) << "Calling Flush on all slots " << this;
+
       if (slot_range_.has_value()) {
         JournalExecutor{&service_}.FlushSlots(slot_range_.value());
       } else {
         JournalExecutor{&service_}.FlushAll();
       }
+      DVLOG(1) << "Flush on all slots ended " << this;
     } else if (num_full_flows == 0) {
       sync_type = "partial";
     } else {

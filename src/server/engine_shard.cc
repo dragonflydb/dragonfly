@@ -706,7 +706,7 @@ void EngineShard::RemoveContTx(Transaction* tx) {
 }
 
 void EngineShard::Heartbeat() {
-  DVLOG(2) << " Hearbeat";
+  DVLOG(3) << " Hearbeat";
   DCHECK(namespaces);
 
   CacheStats();
