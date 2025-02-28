@@ -2230,17 +2230,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   return result;
 }
 
-void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (args.size() > 1) {
-    return cmd_cntx.rb->SendError(kSyntaxErr);
-  }
-
-  string section;
-
-  if (args.size() == 1) {
-    section = absl::AsciiStrToUpper(ArgS(args, 0));
-  }
-
+string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view section,
+                                       bool priveleged) const {
   string info;
 
   auto should_enter = [&](string_view name, bool hidden = false) {
@@ -2256,13 +2247,13 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     absl::StrAppend(&info, a1, ":", a2, "\r\n");
   };
 
-  ServerState* ss = ServerState::tlocal();
-
-  bool show_managed_info =
-      !absl::GetFlag(FLAGS_managed_service_info) || cmd_cntx.conn_cntx->conn()->IsPrivileged();
+  bool show_managed_info = priveleged || !absl::GetFlag(FLAGS_managed_service_info);
 
   if (should_enter("SERVER")) {
-    auto kind = ProactorBase::me()->GetKind();
+    ProactorBase* proactor = ProactorBase::me();
+
+    // proactor might be null in tests.
+    auto kind = proactor ? ProactorBase::me()->GetKind() : ProactorBase::EPOLL;
     const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
 
     append("redis_version", kRedisVersion);
@@ -2280,12 +2271,6 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     uint64_t uptime = time(NULL) - start_time_;
     append("uptime_in_seconds", uptime);
     append("uptime_in_days", uptime / (3600 * 24));
-  }
-
-  Metrics m;
-  // Save time by not calculating metrics if we don't need them.
-  if (!(section == "SERVER" || section == "REPLICATION")) {
-    m = GetMetrics(cmd_cntx.conn_cntx->ns);
   }
 
   DbStats total;
@@ -2486,7 +2471,10 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("last_saved_file", save_info.file_name);
     append("last_success_save_duration_sec", save_info.success_duration_sec);
 
-    unsigned is_loading = (ss->gstate() == GlobalState::LOADING);
+    ServerState* ss = ServerState::tlocal();
+
+    // ss can be null in tests.
+    unsigned is_loading = ss && (ss->gstate() == GlobalState::LOADING);
     append("loading", is_loading);
     append("saving", is_saving);
     append("current_save_duration_sec", curent_durration_sec);
@@ -2653,6 +2641,30 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("cluster_enabled", IsClusterEnabledOrEmulated());
     append("migration_errors_total", service_.cluster_family().MigrationsErrorsCount());
   }
+
+  return info;
+}
+
+void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
+  if (args.size() > 1) {
+    return cmd_cntx.rb->SendError(kSyntaxErr);
+  }
+
+  string section;
+
+  if (args.size() == 1) {
+    section = absl::AsciiStrToUpper(ArgS(args, 0));
+  }
+
+  Metrics metrics;
+
+  // Save time by not calculating metrics if we don't need them.
+  if (!(section == "SERVER" || section == "REPLICATION")) {
+    metrics = GetMetrics(cmd_cntx.conn_cntx->ns);
+  }
+
+  string info = FormatInfoMetrics(metrics, section, cmd_cntx.conn_cntx->conn()->IsPrivileged());
+
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   rb->SendVerbatimString(info);
 }

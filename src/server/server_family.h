@@ -180,6 +180,9 @@ class ServerFamily {
 
   Metrics GetMetrics(Namespace* ns) const;
 
+  std::string FormatInfoMetrics(const Metrics& metrics, std::string_view section,
+                                bool priveleged) const;
+
   ScriptMgr* script_mgr() {
     return script_mgr_.get();
   }

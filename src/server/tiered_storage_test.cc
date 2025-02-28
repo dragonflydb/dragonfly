@@ -273,14 +273,22 @@ TEST_F(TieredStorageTest, FlushAll) {
     }
   });
 
-  ExpectConditionWithinTimeout([&] { return GetMetrics().events.hits > 2; });
+  Metrics metrics;
+  ExpectConditionWithinTimeout([&] {
+    metrics = GetMetrics();
+    return metrics.events.hits > 2;
+  });
+  LOG(INFO) << FormatMetrics(metrics);
+
   Run({"FLUSHALL"});
 
   done = true;
-  util::ThisFiber::SleepFor(50ms);
+  util::ThisFiber::SleepFor(100ms);
   reader.Join();
 
-  auto metrics = GetMetrics();
+  metrics = GetMetrics();
+  LOG(INFO) << FormatMetrics(metrics);
+
   EXPECT_EQ(metrics.db_stats.front().tiered_entries, 0u);
   EXPECT_GT(metrics.tiered_stats.total_fetches, 2u);
 }
