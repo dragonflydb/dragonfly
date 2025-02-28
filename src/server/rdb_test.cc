@@ -33,6 +33,7 @@ using absl::StrCat;
 ABSL_DECLARE_FLAG(int32, list_compress_depth);
 ABSL_DECLARE_FLAG(int32, list_max_listpack_size);
 ABSL_DECLARE_FLAG(dfly::CompressionMode, compression_mode);
+ABSL_DECLARE_FLAG(bool, ignore_expiry);
 
 namespace dfly {
 
@@ -748,6 +749,34 @@ TEST_F(RdbTest, HugeKeyIssue4554) {
   EXPECT_EQ(Run({"save", "df", "hugekey"}), "OK");
   EXPECT_EQ(Run({"dfly", "load", "hugekey-summary.dfs"}), "OK");
   EXPECT_EQ(Run({"flushall"}), "OK");
+}
+
+// ignore_expiry.rdb contains 2 keys which are expired keys
+// this test case verifies wheather new added flag is working as expected.
+TEST_F(RdbTest, IgnoreExpiryFlag) {
+  SetTestFlag("ignore_expiry", "true");
+  ResetService();
+  auto ec = LoadRdb("ignore_expiry.rdb");
+
+  ASSERT_FALSE(ec) << ec.message();
+
+  auto resp = Run({"scan", "0"});
+
+  ASSERT_THAT(resp, ArrLen(2));
+
+  EXPECT_THAT(StrArray(resp.GetVec()[1]), UnorderedElementsAre("test", "test2"));
+
+  EXPECT_THAT(Run({"get", "test"}), "expkey");
+  EXPECT_THAT(Run({"get", "test2"}), "expkey");
+
+  int ttl = CheckedInt({"ttl", "test"});  // should ignore expiry for keys
+  EXPECT_EQ(ttl, -1);
+
+  int ttl2 = CheckedInt({"ttl", "test2"});  // should ignore expiry for key
+  EXPECT_EQ(ttl2, -1);
+
+  // reverting back the changes before next text case run
+  SetTestFlag("ignore_expiry", "false");
 }
 
 }  // namespace dfly
