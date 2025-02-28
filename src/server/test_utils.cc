@@ -368,6 +368,10 @@ void BaseFamilyTest::ClearMetrics() {
   });
 }
 
+string BaseFamilyTest::FormatMetrics(const Metrics& metrics) const {
+  return service_->server_family().FormatInfoMetrics(metrics, "ALL", true);
+}
+
 void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double timeout) {
   auto step = 50us;
   auto timeout_micro = chrono::duration_cast<chrono::microseconds>(1000ms * timeout);
