@@ -699,7 +699,8 @@ void SlowLogGet(dfly::CmdArgList args, std::string_view sub_cmd, util::ProactorP
 
 std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namespace* ns,
                                 facade::Connection* conn, ClientPause pause_state,
-                                std::function<bool()> is_pause_in_progress) {
+                                std::function<bool()> is_pause_in_progress,
+                                std::function<void()> maybe_cleanup) {
   // Track connections and set pause state to be able to wait untill all running transactions read
   // the new pause state. Exlude already paused commands from the busy count. Exlude tracking
   // blocked connections because: a) If the connection is blocked it is puased. b) We read pause
@@ -729,23 +730,28 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
   shard_set->RunBriefInParallel(
       [ns](EngineShard* shard) { ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(false); });
 
-  return fb2::Fiber("client_pause", [is_pause_in_progress, pause_state, ns]() mutable {
-    // On server shutdown we sleep 10ms to make sure all running task finish, therefore 10ms steps
-    // ensure this fiber will not left hanging .
-    constexpr auto step = 10ms;
-    while (is_pause_in_progress()) {
-      ThisFiber::SleepFor(step);
-    }
+  return fb2::Fiber("client_pause",
+                    [is_pause_in_progress, pause_state, ns, maybe_cleanup]() mutable {
+                      // On server shutdown we sleep 10ms to make sure all running task finish,
+                      // therefore 10ms steps ensure this fiber will not left hanging .
+                      constexpr auto step = 10ms;
+                      while (is_pause_in_progress()) {
+                        ThisFiber::SleepFor(step);
+                      }
 
-    ServerState& etl = *ServerState::tlocal();
-    if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
-      shard_set->pool()->AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
-        ServerState::tlocal()->SetPauseState(pause_state, false);
-      });
-      shard_set->RunBriefInParallel(
-          [ns](EngineShard* shard) { ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(true); });
-    }
-  });
+                      ServerState& etl = *ServerState::tlocal();
+                      if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
+                        shard_set->pool()->AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
+                          ServerState::tlocal()->SetPauseState(pause_state, false);
+                        });
+                        shard_set->RunBriefInParallel([ns](EngineShard* shard) {
+                          ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
+                        });
+                      }
+                      if (maybe_cleanup) {
+                        maybe_cleanup();
+                      }
+                    });
 }
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
@@ -935,7 +941,7 @@ void ServerFamily::JoinSnapshotSchedule() {
 void ServerFamily::Shutdown() {
   VLOG(1) << "ServerFamily::Shutdown";
 
-  client_pause_fb_.JoinIfNeeded();
+  client_pause_.store(true);
 
   load_fiber_.JoinIfNeeded();
 
@@ -956,6 +962,8 @@ void ServerFamily::Shutdown() {
       }
     });
   }
+
+  client_pause_ec_.await([this] { return active_pauses_.load() == 0; });
 
   pb_task_->Await([this] {
     auto ec = journal_->Close();
@@ -1860,9 +1868,7 @@ void ServerFamily::ClientUnPauseCmd(CmdArgList args, SinkReplyBuilder* builder) 
     builder->SendError(facade::kSyntaxErr);
     return;
   }
-  std::unique_lock lk(client_pause_mu_);
   client_pause_.store(false, std::memory_order_relaxed);
-  client_pause_fb_.JoinIfNeeded();
   builder->SendOk();
 }
 
@@ -3223,16 +3229,20 @@ void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,
   const auto timeout_ms = timeout * 1ms;
   auto is_pause_in_progress = [this, end_time = chrono::steady_clock::now() + timeout_ms] {
     return ServerState::tlocal()->gstate() != GlobalState::SHUTTING_DOWN &&
-           chrono::steady_clock::now() < end_time && client_pause_.load(std::memory_order_relaxed);
+           chrono::steady_clock::now() < end_time;
   };
 
-  std::unique_lock lk(client_pause_mu_);
-  if (auto pause_fb_opt =
-          Pause(listeners, cntx->ns, cntx->conn(), pause_state, std::move(is_pause_in_progress));
+  auto cleanup = [this] {
+    active_pauses_.fetch_sub(1);
+    client_pause_ec_.notify();
+  };
+
+  if (auto pause_fb_opt = Pause(listeners, cntx->ns, cntx->conn(), pause_state,
+                                std::move(is_pause_in_progress), cleanup);
       pause_fb_opt) {
-    client_pause_fb_.JoinIfNeeded();
     client_pause_.store(true, std::memory_order_relaxed);
-    client_pause_fb_ = std::move(*pause_fb_opt);
+    active_pauses_.fetch_add(1);
+    pause_fb_opt->Detach();
     builder->SendOk();
   } else {
     builder->SendError("Failed to pause all running clients");

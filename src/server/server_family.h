@@ -337,7 +337,7 @@ class ServerFamily {
   bool accepting_connections_ = true;
   util::ProactorBase* pb_task_ = nullptr;
 
-  mutable util::fb2::Mutex replicaof_mu_, save_mu_, client_pause_mu_;
+  mutable util::fb2::Mutex replicaof_mu_, save_mu_;
   std::shared_ptr<Replica> replica_ ABSL_GUARDED_BY(replicaof_mu_);
   std::vector<std::unique_ptr<Replica>> cluster_replicas_
       ABSL_GUARDED_BY(replicaof_mu_);  // used to replicating multiple nodes to single dragonfly
@@ -362,7 +362,10 @@ class ServerFamily {
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
 
   std::atomic<bool> client_pause_ = false;
-  util::fb2::Fiber client_pause_fb_;
+  // We need this because if dragonfly shuts down during pause, ServerState will destruct
+  // before the dettached fiber Pause() causing a seg fault.
+  std::atomic<size_t> active_pauses_ = 0;
+  util::fb2::EventCount client_pause_ec_;
 
   // protected by save_mu_
   util::fb2::Fiber bg_save_fb_;
@@ -377,6 +380,7 @@ class ServerFamily {
 // Reusable CLIENT PAUSE implementation that blocks while polling is_pause_in_progress
 std::optional<util::fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namespace* ns,
                                       facade::Connection* conn, ClientPause pause_state,
-                                      std::function<bool()> is_pause_in_progress);
+                                      std::function<bool()> is_pause_in_progress,
+                                      std::function<void()> maybe_cleanup = {});
 
 }  // namespace dfly
