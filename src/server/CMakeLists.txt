@@ -77,8 +77,6 @@ if (WITH_ASAN OR WITH_USAN)
   target_compile_definitions(dfly_transaction PRIVATE SANITIZERS)
 endif()
 
-find_library(ZSTD_LIB NAMES libzstd.a libzstdstatic.a zstd NAMES_PER_DIR REQUIRED)
-
 if (WITH_AWS)
   SET(AWS_LIB awsv2_lib)
   add_definitions(-DWITH_AWS)
@@ -87,7 +85,7 @@ endif()
 cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float)
 cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib ${AWS_LIB} jsonpath
          strings_lib html_lib gcp_lib
-         http_client_lib absl::random_random TRDP::jsoncons ${ZSTD_LIB} TRDP::lz4
+         http_client_lib absl::random_random TRDP::jsoncons TRDP::zstd TRDP::lz4
          TRDP::croncpp TRDP::flatbuffers)
 
 if (DF_USE_SSL)
