@@ -34,8 +34,6 @@ cxx_link(dash_bench dfly_core redis_test_lib)
 
 
 
-find_library(ZSTD_LIB NAMES libzstd.a libzstdstatic.a zstd NAMES_PER_DIR REQUIRED)
-
 cxx_test(dfly_core_test dfly_core TRDP::fast_float ${PCRE2_LIB} ${RE2_LIB} LABELS DFLY)
 cxx_test(compact_object_test dfly_core LABELS DFLY)
 cxx_test(extent_tree_test dfly_core LABELS DFLY)
@@ -51,7 +49,7 @@ cxx_test(flatbuffers_test dfly_core TRDP::flatbuffers LABELS DFLY)
 cxx_test(bloom_test dfly_core LABELS DFLY)
 cxx_test(allocation_tracker_test dfly_core absl::random_random LABELS DFLY)
 cxx_test(qlist_test dfly_core DATA testdata/list.txt.zst LABELS DFLY)
-cxx_test(zstd_test dfly_core ${ZSTD_LIB} LABELS DFLY)
+cxx_test(zstd_test dfly_core TRDP::zstd LABELS DFLY)
 cxx_test(top_keys_test dfly_core LABELS DFLY)
 
 if(LIB_PCRE2)

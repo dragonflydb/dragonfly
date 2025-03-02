@@ -2,6 +2,7 @@ default_stages: [commit]
 exclude: |
     (?x)(
       src/redis/.* |
+      src/huff/.* |
       contrib/charts/dragonfly/ci/.* |
       patches/.*
     )

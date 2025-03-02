@@ -3,7 +3,11 @@
 //
 #include "server/debugcmd.h"
 
+#define HUF_STATIC_LINKING_ONLY
+
 extern "C" {
+#include "huff/hist.h"
+#include "huff/huf.h"
 #include "redis/redis_aux.h"
 }
 
@@ -11,6 +15,8 @@ extern "C" {
 #include <absl/random/random.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <lz4.h>
+#include <zdict.h>
 #include <zstd.h>
 
 #include <filesystem>
@@ -312,6 +318,64 @@ void DoBuildObjHist(EngineShard* shard, ConnectionContext* cntx, ObjHistMap* obj
   }
 }
 
+void FillDictSamples(PrimeTable* table, string* sample_buf) {
+  PrimeTable::Cursor cursor;
+  unsigned steps = 0;
+  string scratch;
+  constexpr size_t kMaxLen = 512;
+  do {
+    cursor = table->Traverse(cursor, [&](PrimeIterator it) {
+      it->first.GetString(&scratch);
+      size_t len = std::min(scratch.size(), kMaxLen);
+      sample_buf->append(scratch.data(), len);
+    });
+
+    if (sample_buf->size() > 1_MB)
+      return;
+
+    if (steps >= 20000) {
+      steps = 0;
+      ThisFiber::Yield();
+    }
+  } while (cursor);
+}
+
+struct HufHist {
+  static constexpr unsigned kMaxSymbol = 255;
+  unsigned hist[kMaxSymbol + 1];  // histogram of symbols.
+  unsigned max_symbol = 0;        // what is the max symbol of the histogram.
+
+  HufHist() {
+    memset(hist, 0, sizeof(hist));
+  }
+
+  void Merge(const HufHist& other) {
+    max_symbol = std::max(max_symbol, other.max_symbol);
+    for (unsigned i = 0; i <= max_symbol; ++i) {
+      hist[i] += other.hist[i];
+    }
+  }
+};
+
+void DoComputeHist(EngineShard* shard, ConnectionContext* cntx, HufHist* dest) {
+  auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
+  DbTable* dbt = db_slice.GetDBTable(cntx->db_index());
+  CHECK(dbt);
+
+  string sample_buf;
+  FillDictSamples(&dbt->prime, &sample_buf);
+
+  if (sample_buf.empty()) {
+    return;
+  }
+  dest->max_symbol = 255;
+
+  unique_ptr<uint32_t[]> wksp(new uint32_t[HIST_WKSP_SIZE_U32]);
+  size_t max_freq = HIST_count_wksp(dest->hist, &dest->max_symbol, sample_buf.data(),
+                                    sample_buf.size(), wksp.get(), HIST_WKSP_SIZE);
+  CHECK(!HIST_isError(max_freq));
+}
+
 ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
   auto& db_slice = cntx->ns->GetCurrentDbSlice();
   auto db_index = cntx->db_index();
@@ -514,6 +578,8 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    traffic logging is stopped.",
         "RECVSIZE [<tid> | ENABLE | DISABLE]",
         "    Prints the histogram of the received request sizes on the given thread",
+        "COMPRESSION"
+        "    Estimate the compressability of values of the given type",
         "HELP",
         "    Prints this help.",
     };
@@ -583,6 +649,10 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
 
   if (subcmd == "KEYS" && args.size() >= 2) {
     return Keys(args.subspan(1), builder);
+  }
+
+  if (subcmd == "COMPRESSION") {
+    return Compression(builder);
   }
 
   string reply = UnknownSubCmd(subcmd, "DEBUG");
@@ -1207,6 +1277,49 @@ void DebugCmd::Keys(CmdArgList args, facade::SinkReplyBuilder* builder) {
   }
 
   return builder->SendError(kSyntaxErr);
+}
+
+void DebugCmd::Compression(facade::SinkReplyBuilder* builder) {
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+
+  fb2::Mutex mu;
+  HufHist hist;
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    HufHist local;
+    DoComputeHist(shard, cntx_, &local);
+    std::unique_lock lk(mu);
+    hist.Merge(local);
+  });
+
+  HUF_CREATE_STATIC_CTABLE(huf_ctable, HufHist::kMaxSymbol);
+
+  size_t num_bits = 0, compressed_size = 0, raw_size = 0;
+
+  if (hist.max_symbol) {
+    unique_ptr<uint32_t[]> wrkspace(new uint32_t[HUF_CTABLE_WORKSPACE_SIZE_U32]);
+    constexpr size_t kWspSize = HUF_CTABLE_WORKSPACE_SIZE;
+    num_bits =
+        HUF_buildCTable_wksp(huf_ctable, hist.hist, hist.max_symbol, 0, wrkspace.get(), kWspSize);
+
+    compressed_size = HUF_estimateCompressedSize(huf_ctable, hist.hist, hist.max_symbol);
+    raw_size = 0;
+    for (unsigned i = 0; i < hist.max_symbol; i++) {
+      raw_size += hist.hist[i];
+    }
+  }
+
+  rb->StartCollection(5, RedisReplyBuilder::CollectionType::MAP);
+  rb->SendSimpleString("max_symbol");
+  rb->SendLong(hist.max_symbol);
+  rb->SendSimpleString("max_bits");
+  rb->SendLong(num_bits);
+  rb->SendSimpleString("raw_size");
+  rb->SendLong(raw_size);
+  rb->SendSimpleString("compressed_size");
+  rb->SendLong(compressed_size);
+  rb->SendSimpleString("ratio");
+  double ratio = raw_size > 0 ? static_cast<double>(compressed_size) / raw_size : 0;
+  rb->SendDouble(ratio);
 }
 
 }  // namespace dfly

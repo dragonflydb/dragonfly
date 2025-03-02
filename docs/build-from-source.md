@@ -15,22 +15,22 @@ but you can also run Dragonfly on older kernels as well.
 On Debian/Ubuntu:
 
 ```bash
-sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
-     autoconf-archive libtool cmake g++ libzstd-dev bison libxml2-dev zlib1g-dev
+sudo apt install ninja-build libunwind-dev libboost-context-dev libssl-dev \
+     autoconf-archive libtool cmake g++ bison  zlib1g-dev
 ```
 
 On Fedora:
 
 ```bash
-sudo dnf install -y automake boost-devel g++ git cmake libtool ninja-build libzstd-devel  \
-     openssl-devel libunwind-devel autoconf-archive patch bison libxml2-devel libstdc++-static
+sudo dnf install -y automake boost-devel g++ git cmake libtool ninja-build \
+     openssl-devel libunwind-devel autoconf-archive patch bison libstdc++-static
 ```
 
 On openSUSE:
 
 ```bash
-sudo zypper install automake boost-devel gcc-c++ git cmake libtool ninja libzstd-devel  \
-     openssl-devel libunwind-devel autoconf-archive patch bison libxml2-devel \
+sudo zypper install automake boost-devel gcc-c++ git cmake libtool ninja \
+     openssl-devel libunwind-devel autoconf-archive patch bison \
      libboost_context-devel libboost_system-devel
 ```
 
