@@ -1983,4 +1983,35 @@ TEST_F(SearchFamilyTest, InvalidAggregateOptions) {
   EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
 }
 
+TEST_F(SearchFamilyTest, InvalidCreateOptions) {
+  // Test with a duplicate field in the schema
+  auto resp = Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "title", "TEXT", "title", "TEXT"});
+  EXPECT_THAT(resp, ErrArg("Duplicate field in schema - title"));
+
+  // Test with no fields in the schema
+  resp = Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA"});
+  EXPECT_THAT(resp, ErrArg("Fields arguments are missing"));
+
+  // Test with an invalid field type
+  resp = Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "title", "UNKNOWN_TYPE"});
+  EXPECT_THAT(resp, ErrArg("Field type UNKNOWN_TYPE is not supported"));
+
+  // Test with an invalid STOPWORDS argument
+  resp = Run({"FT.CREATE", "index", "ON", "HASH", "STOPWORDS", "10", "the", "and", "of", "SCHEMA",
+              "title", "TEXT"});
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
+
+  resp = Run({"FT.CREATE", "index", "ON", "HASH", "STOPWORDS", "99999999999999999999", "the", "and",
+              "of", "SCHEMA", "title", "TEXT"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp = Run({"FT.CREATE", "index", "ON", "HASH", "STOPWORDS", "-1", "the", "and", "of", "SCHEMA",
+              "title", "TEXT"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp = Run({"FT.CREATE", "index", "ON", "HASH", "STOPWORDS", "not_a_number", "the", "and", "of",
+              "SCHEMA", "title", "TEXT"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+}
+
 }  // namespace dfly

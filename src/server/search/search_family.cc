@@ -192,6 +192,10 @@ ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
 ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
   auto& schema = index->schema;
 
+  if (!parser->HasNext()) {
+    return CreateSyntaxError("Fields arguments are missing"sv);
+  }
+
   while (parser->HasNext()) {
     string_view field = parser->Next();
     string_view field_alias = field;
@@ -204,10 +208,20 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
     // AS [alias]
     parser->Check("AS", &field_alias);
 
+    if (schema.field_names.contains(field_alias)) {
+      return CreateSyntaxError(absl::StrCat("Duplicate field in schema - "sv, field_alias));
+    }
+
     // Determine type
     using search::SchemaField;
-    auto parsed_params = parser->MapNext("TAG"sv, &ParseTag, "TEXT"sv, &ParseText, "NUMERIC"sv,
-                                         &ParseNumeric, "VECTOR"sv, &ParseVector)(parser);
+    auto params_parser = parser->TryMapNext("TAG"sv, &ParseTag, "TEXT"sv, &ParseText, "NUMERIC"sv,
+                                            &ParseNumeric, "VECTOR"sv, &ParseVector);
+    if (!params_parser) {
+      return CreateSyntaxError(
+          absl::StrCat("Field type "sv, parser->Next(), " is not supported"sv));
+    }
+
+    auto parsed_params = params_parser.value()(parser);
     if (!parsed_params) {
       return make_unexpected(parsed_params.error());
     }
@@ -231,11 +245,8 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
       parser->Skip(2);
 
     schema.fields[field] = {field_type, flags, string{field_alias}, params};
+    schema.field_names[field_alias] = field;
   }
-
-  // Build field name mapping table
-  for (const auto& [field_ident, field_info] : schema.fields)
-    schema.field_names[field_info.short_name] = field_ident;
 
   return false;
 }
