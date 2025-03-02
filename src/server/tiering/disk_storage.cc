@@ -201,9 +201,9 @@ error_code DiskStorage::Grow(off_t grow_size) {
   DCHECK(CanGrow());
 
   if (std::exchange(grow_pending_, true)) {
-    // TODO: to introduce future like semantics where multiple flow can block on the
+    // TODO: to introduce future like semantics where multiple flows can block on the
     // ongoing Grow operation.
-    LOG(WARNING) << "Concurrent grow request detected ";
+    LOG(WARNING) << "Concurrent grow request detected from size " << alloc_.capacity();
     return make_error_code(errc::operation_in_progress);
   }
   off_t end = alloc_.capacity();
