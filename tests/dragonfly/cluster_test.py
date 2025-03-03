@@ -2983,6 +2983,58 @@ async def test_cluster_sharded_pub_sub(df_factory: DflyInstanceFactory):
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+async def test_cluster_sharded_pubsub_shard_commands(df_factory: DflyInstanceFactory):
+    nodes = [df_factory.create(port=next(next_port)) for i in range(2)]
+    df_factory.start_all(nodes)
+
+    c_nodes = [node.client() for node in nodes]
+
+    nodes_info = [(await create_node_info(instance)) for instance in nodes]
+    nodes_info[0].slots = [(0, 16383)]
+    nodes_info[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes_info)), [node.client for node in nodes_info])
+
+    node_a = ClusterNode("localhost", nodes[0].port)
+    node_b = ClusterNode("localhost", nodes[1].port)
+
+    consumer_client = RedisCluster(startup_nodes=[node_a, node_b])
+    consumer = consumer_client.pubsub()
+    consumer.ssubscribe("pubsub-shard-channel")
+
+    await c_nodes[0].execute_command("SPUBLISH pubsub-shard-channel 1")
+
+    # Consume subscription message result from above
+    message = consumer.get_sharded_message(target_node=node_a)
+    assert message == {"type": "subscribe", "pattern": None, "channel": b"pubsub-shard-channel", "data": 1,}
+  
+    message = await c_nodes[0].execute_command("PUBSUB SHARDCHANNELS")
+    assert message == ["pubsub-shard-channel"]
+
+    message = await c_nodes[0].execute_command("PUBSUB SHARDCHANNELS pubsub*")
+    assert message == ["pubsub-shard-channel"]
+
+    message = await c_nodes[0].execute_command("PUBSUB SHARDNUMSUB pubsub-shard-channel")
+    assert message == ["pubsub-shard-channel", 1]
+
+    message = await c_nodes[0].execute_command("PUBSUB SHARDNUMSUB")
+    assert message == []
+
+    # Should fail because PUBSUB CHANNELS/NUMSUB/NUMPAT is not supported cluster mode yet
+
+    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+        await c_nodes[0].execute_command("PUBSUB CHANNELS")
+    assert str(moved_error.value) == f"PUBSUB CHANNELS is not supported in cluster mode yet"
+
+    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+        await c_nodes[0].execute_command("PUBSUB NUMSUB")
+    assert str(moved_error.value) == f"PUBSUB NUMSUB is not supported in cluster mode yet"
+
+    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+        await c_nodes[0].execute_command("PUBSUB NUMPAT")
+    assert str(moved_error.value) == f"PUBSUB NUMPAT is not supported in cluster mode yet"
+
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 async def test_cluster_migration_errors_num(df_factory: DflyInstanceFactory):
     # create cluster with several nodes and create migrations from one node to others
     # but config propagated only to source node to get errors for migrations
