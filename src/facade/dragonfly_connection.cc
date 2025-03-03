@@ -1734,6 +1734,7 @@ void Connection::LaunchAsyncFiberIfNeeded() {
   }
 }
 
+// Should never block - the callers may run in as a a brief callback.
 void Connection::SendAsync(MessageHandle msg) {
   DCHECK(cc_);
   DCHECK(listener());
