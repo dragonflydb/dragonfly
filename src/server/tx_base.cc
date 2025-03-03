@@ -62,7 +62,7 @@ void RecordJournal(const OpArgs& op_args, std::string_view cmd, facade::ArgSlice
   op_args.tx->LogJournalOnShard(op_args.shard, Payload(cmd, args), shard_cnt);
 }
 
-void RecordExpiry(DbIndex dbid, string_view key) {
+void RecordExpiryBlocking(DbIndex dbid, string_view key) {
   auto journal = EngineShard::tlocal()->journal();
   CHECK(journal);
 

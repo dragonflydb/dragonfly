@@ -223,8 +223,8 @@ void RestoreStreamer::Run() {
       std::lock_guard guard(big_value_mu_);
 
       // Locking this never preempts. See snapshot.cc for why we need it.
-      auto* blocking_counter = db_slice_->BlockingCounter();
-      std::lock_guard blocking_counter_guard(*blocking_counter);
+      auto* blocking_counter = db_slice_->GetLatch();
+      lock_guard blocking_counter_guard(*blocking_counter);
 
       stats_.buckets_loop += WriteBucket(it);
     });

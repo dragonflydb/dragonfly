@@ -527,11 +527,11 @@ class DbSlice {
   void SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events);
 
   bool WillBlockOnJournalWrite() const {
-    return block_counter_.IsBlocked();
+    return serialization_latch_.IsBlocked();
   }
 
-  LocalBlockingCounter* BlockingCounter() {
-    return &block_counter_;
+  LocalLatch* GetLatch() {
+    return &serialization_latch_;
   }
 
   void StartSampleTopK(DbIndex db_ind, uint32_t min_freq);
@@ -547,7 +547,7 @@ class DbSlice {
   size_t StopSampleKeys(DbIndex db_ind);
 
  private:
-  void PreUpdate(DbIndex db_ind, Iterator it, std::string_view key);
+  void PreUpdateBlocking(DbIndex db_ind, Iterator it, std::string_view key);
   void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
 
   bool DelEmptyPrimeValue(const Context& cntx, Iterator it);
@@ -606,8 +606,8 @@ class DbSlice {
 
   // We need this because registered callbacks might yield and when they do so we want
   // to avoid Heartbeat or Flushing the db.
-  // This counter protects us against this case.
-  mutable LocalBlockingCounter block_counter_;
+  // This latch protects us against this case.
+  mutable LocalLatch serialization_latch_;
 
   ShardId shard_id_;
   uint8_t cache_mode_ : 1;

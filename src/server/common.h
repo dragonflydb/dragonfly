@@ -393,7 +393,9 @@ struct BorrowedInterpreter {
   bool owned_ = false;
 };
 
-class LocalBlockingCounter {
+// A single threaded latch that passes a waiter fiber if its count is 0.
+// Fibers that increase/decrease the count do not wait on the latch.
+class LocalLatch {
  public:
   void lock() {
     ++mutating_;

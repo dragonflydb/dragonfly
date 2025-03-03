@@ -481,15 +481,15 @@ BorrowedInterpreter::~BorrowedInterpreter() {
     ServerState::tlocal()->ReturnInterpreter(interpreter_);
 }
 
-void LocalBlockingCounter::unlock() {
-  DCHECK(mutating_ > 0);
+void LocalLatch::unlock() {
+  DCHECK_GT(mutating_, 0u);
   --mutating_;
   if (mutating_ == 0) {
     cond_var_.notify_all();
   }
 }
 
-void LocalBlockingCounter::Wait() {
+void LocalLatch::Wait() {
   util::fb2::NoOpLock noop_lk_;
   cond_var_.wait(noop_lk_, [this]() { return mutating_ == 0; });
 }

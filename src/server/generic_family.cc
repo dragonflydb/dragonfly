@@ -610,7 +610,8 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   // ScanCb can preempt due to journaling expired entries and we need to make sure that
   // we enter the callback in a timing when journaling will not cause preemptions. Otherwise,
   // the bucket might change as we Traverse and yield.
-  db_slice.BlockingCounter()->Wait();
+  db_slice.GetLatch()->Wait();
+
   // Disable flush journal changes to prevent preemtion in traverse.
   journal::JournalFlushGuard journal_flush_guard(op_args.shard->journal());
   unsigned cnt = 0;
@@ -793,15 +794,15 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
   if (!IsValid(from_res.it))
     return OpStatus::KEY_NOTFOUND;
 
+  // Ensure target database exists.
+  db_slice.ActivateDb(target_db);
+
   // Fetch value at key in target db.
   DbContext target_cntx = op_args.db_cntx;
   target_cntx.db_index = target_db;
   auto to_res = db_slice.FindReadOnly(target_cntx, key);
   if (IsValid(to_res.it))
     return OpStatus::KEY_EXISTS;
-
-  // Ensure target database exists.
-  db_slice.ActivateDb(target_db);
 
   bool sticky = from_res.it->first.IsSticky();
   uint64_t exp_ts = db_slice.ExpireTime(from_res.exp_it);
