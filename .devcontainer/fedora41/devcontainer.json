@@ -1,0 +1,21 @@
+{
+  "name": "fedora41",
+  "image": "ghcr.io/romange/fedora:41",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools",
+        "ms-vscode.cpptools-themes",
+        "twxs.cmake"
+      ],
+      "settings": {
+        "cmake.buildDirectory": "/build",
+        "extensions.ignoreRecommendations": true
+      }
+    }
+  },
+  "mounts": [
+    "source=fedora41-vol,target=/build,type=volume"
+  ]
+}
