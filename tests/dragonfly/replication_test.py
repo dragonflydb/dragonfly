@@ -2898,3 +2898,7 @@ async def test_replicaof_inside_multi(df_factory):
     num_successes = 0
     for result in asyncio.as_completed(replication_commands, timeout=80):
         num_successes += await result
+
+    logging.info(f"succeses: {num_successes}")
+    assert MULTI_COMMANDS_TO_ISSUE > num_successes, "At least one REPLICAOF must be cancelled"
+    assert num_successes > 0, "At least one REPLICAOF must success"
