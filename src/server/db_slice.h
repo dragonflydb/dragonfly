@@ -568,11 +568,13 @@ class DbSlice {
   // Clear tiered storage entries for the specified indices.
   void ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbTableArray& db_arr);
 
-  void PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* table);
+  //
+  void PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable* table);
   void PerformDeletion(PrimeIterator del_it, DbTable* table);
 
-  // Send invalidation message to the clients that are tracking the change to a key.
-  void SendInvalidationTrackingMessage(std::string_view key);
+  // Queues invalidation message to the clients that are tracking the change to a key.
+  void QueueInvalidationTrackingMessageAtomic(std::string_view key);
+  void SendQueuedInvalidationMessages();
 
   void CreateDb(DbIndex index);
 
@@ -679,7 +681,7 @@ class DbSlice {
   absl::flat_hash_map<std::string, ConnectionHashSet,
                       absl::container_internal::hash_default_hash<std::string>,
                       absl::container_internal::hash_default_eq<std::string>, AllocatorType>
-      client_tracking_map_;
+      client_tracking_map_, pending_send_map_;
 
   class PrimeBumpPolicy;
 };

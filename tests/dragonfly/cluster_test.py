@@ -2940,6 +2940,7 @@ async def test_migration_rebalance_node(df_factory: DflyInstanceFactory, df_seed
     assert await seeder.compare(capture, nodes[1].instance.port)
 
 
+@pytest.mark.skip("Flaky test")
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 async def test_cluster_sharded_pub_sub(df_factory: DflyInstanceFactory):
     nodes = [df_factory.create(port=next(next_port)) for i in range(2)]

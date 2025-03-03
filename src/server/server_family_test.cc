@@ -441,11 +441,9 @@ TEST_F(ServerFamilyTest, ClientTrackingUpdateKey) {
   std::vector<std::string_view> keys_invalidated;
   for (unsigned int i = 2; i < 6; ++i)
     keys_invalidated.push_back(GetInvalidationMessage("IO0", i).key);
-  ASSERT_THAT(keys_invalidated, ElementsAre("X1", "Y3", "Z2", "Z4"));
+  ASSERT_THAT(keys_invalidated, UnorderedElementsAre("X1", "Y3", "Z2", "Z4"));
 
-  // The following doesn't work correctly as we currently can't mock listener.
-  // flushdb command
-  // Run({"FLUSHDB"});
+  Run({"FLUSHDB"});
 }
 
 TEST_F(ServerFamilyTest, ClientTrackingDeleteKey) {
