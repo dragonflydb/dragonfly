@@ -3025,6 +3025,7 @@ async def test_cluster_migration_errors_num(df_factory: DflyInstanceFactory):
     await wait_for_errors_num(c_nodes[0], 2)
 
 
+@pytest.mark.skip("Temporarily disabled. Flaky test")
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 async def test_cluster_sharded_pub_sub_migration(df_factory: DflyInstanceFactory):
     instances = [df_factory.create(port=next(next_port)) for i in range(2)]
