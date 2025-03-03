@@ -6,7 +6,6 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
-
 #include "core/top_keys.h"
 #include "server/cluster_support.h"
 #include "server/server_state.h"
@@ -85,7 +84,7 @@ DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
       mcflag(0, detail::ExpireTablePolicy{}, mr),
       index(db_index) {
   if (IsClusterEnabled()) {
-    slots_stats.resize(kMaxSlotNum + 1);
+    slots_stats.reset(new SlotStats[kMaxSlotNum + 1]);
   }
   thread_index = ServerState::tlocal()->thread_index();
 }

@@ -187,6 +187,9 @@ void JournalSlice::AddLogRecord(const Entry& entry) {
 }
 
 void JournalSlice::CallOnChange(const JournalItem& item) {
+  // This lock is never blocking because it contends with UnregisterOnChange, which is cpu only.
+  // Hence this lock prevents the UnregisterOnChange to start running in the middle of CallOnChange.
+  // CallOnChange is atomic iff JournalSlice::SetFlushMode(false) is called before.
   std::shared_lock lk(cb_mu_);
 
   const size_t size = change_cb_arr_.size();
