@@ -6,6 +6,7 @@
 
 #include <deque>
 
+#include "server/cluster/slot_set.h"
 #include "server/common.h"
 #include "server/db_slice.h"
 #include "server/journal/journal.h"

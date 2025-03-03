@@ -126,7 +126,7 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   mutable std::vector<std::string> expired_keys_events_;
 
   mutable DbTableStats stats;
-  std::vector<SlotStats> slots_stats;
+  std::unique_ptr<SlotStats[]> slots_stats;
   ExpireTable::Cursor expire_cursor;
 
   TopKeys* top_keys = nullptr;

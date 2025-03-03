@@ -18,6 +18,7 @@
 #include "core/intent_lock.h"
 #include "core/tx_queue.h"
 #include "facade/op_status.h"
+#include "server/cluster_support.h"
 #include "server/common.h"
 #include "server/journal/types.h"
 #include "server/namespaces.h"

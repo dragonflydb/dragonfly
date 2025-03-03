@@ -111,7 +111,7 @@ class SliceSnapshot {
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
 
   // Journal listener
-  void OnJournalEntry(const journal::JournalItem& item, bool unused_await_arg);
+  void OnJournalEntry(const journal::JournalItem& item, bool allow_await);
 
   // Push serializer's internal buffer.
   // Push regardless of buffer size if force is true.

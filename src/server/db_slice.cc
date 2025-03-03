@@ -15,6 +15,7 @@ extern "C" {
 #include "core/top_keys.h"
 #include "search/doc_index.h"
 #include "server/channel_store.h"
+#include "server/cluster/slot_set.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -67,7 +68,7 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* 
 
   stats.AddTypeMemoryUsage(type, size);
 
-  if (IsClusterEnabled()) {
+  if (db->slots_stats) {
     db->slots_stats[KeySlot(key)].memory_bytes += size;
   }
 }
@@ -157,6 +158,7 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& e
   if (db_slice_->WillBlockOnJournalWrite()) {
     return res;
   }
+
   // Disable flush journal changes to prevent preemtion in GarbageCollect.
   journal::JournalFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
 
@@ -187,6 +189,7 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& e
 unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeTable* me) {
   if (!can_evict_ || db_slice_->WillBlockOnJournalWrite())
     return 0;
+
   // Disable flush journal changes to prevent preemtion in evict.
   journal::JournalFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
 
@@ -594,7 +597,7 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
       break;
     case UpdateStatsMode::kReadStats:
       events_.hits++;
-      if (IsClusterEnabled()) {
+      if (db.slots_stats) {
         db.slots_stats[KeySlot(key)].total_reads++;
       }
       if (res.it->second.IsExternal()) {
@@ -756,7 +759,7 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   events_.stash_unloaded = db.prime.stash_unloaded();
   events_.evicted_keys += evp.evicted();
   events_.garbage_checked += evp.checked();
-  if (IsClusterEnabled()) {
+  if (db.slots_stats) {
     SlotId sid = KeySlot(key);
     db.slots_stats[sid].key_count += 1;
   }
@@ -855,7 +858,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   etl.DecommitMemory(ServerState::kDataHeap);
 }
 
-void DbSlice::FlushSlots(cluster::SlotRanges slot_ranges) {
+void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
   cluster::SlotSet slot_set(slot_ranges);
   InvalidateSlotWatches(slot_set);
   fb2::Fiber("flush_slots", [this, slot_set = std::move(slot_set)]() mutable {
@@ -1179,7 +1182,7 @@ void DbSlice::PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size
 
   ++events_.update;
 
-  if (IsClusterEnabled()) {
+  if (db.slots_stats) {
     db.slots_stats[KeySlot(key)].total_writes += 1;
   }
 
@@ -1320,8 +1323,8 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     if (ttl <= 0) {
       auto prime_it = db.prime.Find(it->first);
       if (prime_it.is_done()) {  // A workaround for the case our tables are inconsistent.
-        LOG(DFATAL) << "Expired key " << key << " not found in prime table, expire_done: "
-                   << it.is_done();
+        LOG(DFATAL) << "Expired key " << key
+                    << " not found in prime table, expire_done: " << it.is_done();
         if (!it.is_done()) {
           db.expire.Erase(it->first);
         }
@@ -1682,7 +1685,7 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
     }
   }  // del_it->first.IsAsyncDelete()
 
-  if (IsClusterEnabled()) {
+  if (table->slots_stats) {
     SlotId sid = KeySlot(del_it.key());
     table->slots_stats[sid].key_count -= 1;
   }

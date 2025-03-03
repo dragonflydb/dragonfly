@@ -23,6 +23,7 @@ extern "C" {
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
 #include "server/blocking_controller.h"
+#include "server/cluster/cluster_defs.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"

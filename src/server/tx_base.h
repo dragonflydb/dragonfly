@@ -222,14 +222,13 @@ void RecordJournal(const OpArgs& op_args, std::string_view cmd, const ShardArgs&
 void RecordJournal(const OpArgs& op_args, std::string_view cmd, ArgSlice args,
                    uint32_t shard_cnt = 1);
 
-// Record expiry in journal with independent transaction. Must be called from shard thread holding
-// key.
+// Record expiry in journal with independent transaction.
+// Must be called from shard thread owning key.
+// Might block the calling fiber unless Journal::SetFlushMode(false) is called.
 void RecordExpiry(DbIndex dbid, std::string_view key);
 
 // Trigger journal write to sink, no journal record will be added to journal.
 // Must be called from shard thread of journal to sink.
 void TriggerJournalWriteToSink();
-
-// std::ostream& operator<<(std::ostream& os, ArgSlice list);
 
 }  // namespace dfly

@@ -8,7 +8,6 @@
 #include "core/string_or_view.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/op_status.h"
-#include "server/cluster/slot_set.h"
 #include "server/common.h"
 #include "server/conn_context.h"
 #include "server/table.h"
@@ -16,6 +15,11 @@
 #include "util/fibers/synchronization.h"
 
 namespace dfly {
+
+namespace cluster {
+class SlotRanges;
+class SlotSet;
+}  // namespace cluster
 
 using facade::OpResult;
 
@@ -355,7 +359,7 @@ class DbSlice {
   void FlushDb(DbIndex db_ind);
 
   // Flushes the data of given slot ranges.
-  void FlushSlots(cluster::SlotRanges slot_ranges);
+  void FlushSlots(const cluster::SlotRanges& slot_ranges);
 
   EngineShard* shard_owner() const {
     return owner_;
