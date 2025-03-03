@@ -3025,6 +3025,53 @@ async def test_cluster_migration_errors_num(df_factory: DflyInstanceFactory):
     await wait_for_errors_num(c_nodes[0], 2)
 
 
+@pytest.mark.slow
+@pytest.mark.exclude_epoll
+@pytest.mark.asyncio
+@dfly_args({"cluster_mode": "yes"})
+async def test_migration_to_slow_target_node(df_factory: DflyInstanceFactory, df_seeder_factory):
+    # 1. Create cluster of 3 nodes with all slots allocated to first node.
+    instances = [
+        df_factory.create(
+            port=next(next_port),
+            admin_port=next(next_port),
+            proactor_threads=16 if i == 0 else 1,
+            vmodule="outgoing_slot_migration=2,cluster_family=2,incoming_slot_migration=2,streamer=2",
+        )
+        for i in range(2)
+    ]
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 9000)]
+    nodes[1].slots = [(9001, 16383)]
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug(f"DEBUG POPULATE")
+    await nodes[0].client.execute_command("DEBUG POPULATE 100000 test 100 RAND SLOTS 0 9000")
+
+    logging.debug("start seeding")
+    seeder = df_seeder_factory.create(
+        keys=50_000, port=instances[0].port, cluster_mode=True, pipeline=False
+    )
+    await seeder.run(target_deviation=0.1)
+    seed = asyncio.create_task(seeder.run())
+
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 9000)], nodes[1].id),
+    )
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+    await wait_for_status(nodes[0].client, nodes[1].id, "FINISHED", 40)
+
+    seeder.stop()
+    await seed
+
+    cluster_info = await nodes[0].admin_client.info("CLUSTER")
+    assert cluster_info["migration_errors_total"] == 0
+
+
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 async def test_cluster_sharded_pub_sub_migration(df_factory: DflyInstanceFactory):
     instances = [df_factory.create(port=next(next_port)) for i in range(2)]

@@ -299,6 +299,10 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     }
   }
 
+  // If a target node is slower than source node or is under the huge load we need sometime to
+  // finish process data that was sent, so we add a small delay before sending finalization
+  ThisFiber::SleepFor(5000ms);
+
   // Migration finalization has to be done via client pause because commands need to
   // be blocked on coordinator level to avoid intializing transactions with stale cluster slot info
   // TODO implement blocking on migrated slots only
