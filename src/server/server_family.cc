@@ -1857,6 +1857,12 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
     cntx->pub_sub = std::move(cred.pub_sub);
     cntx->ns = &namespaces->GetOrInsert(cred.ns);
     cntx->authenticated = true;
+    cntx->acl_db_idx = cred.db;
+    if (cred.db == std::numeric_limits<size_t>::max()) {
+      cntx->conn_state.db_index = 0;
+    } else {
+      cntx->conn_state.db_index = cred.db;
+    }
   }
   return is_authorized;
 }
