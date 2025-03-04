@@ -1360,6 +1360,18 @@ OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, facade::ArgRang
 OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key,
                                   facade::ArgRange members) {
   auto res_it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
+
+  // If the key doesn't exist and there's only one member, return KEY_NOTFOUND
+  if (res_it.status() == OpStatus::KEY_NOTFOUND) {
+    if (members.Size() == 1) {
+      return OpStatus::KEY_NOTFOUND;
+    }
+
+    // If the key doesn't exist and there are multiple members, return an array of NIL values
+    MScoreResponse result(members.Size(), std::nullopt);
+    return result;
+  }
+
   if (!res_it)
     return res_it.status();
 
@@ -2651,6 +2663,10 @@ void ZSetFamily::ZMScore(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
   OpResult<MScoreResponse> result = ZGetMembers(args, cmd_cntx.tx, rb);
+
+  if (result.status() == OpStatus::KEY_NOTFOUND) {
+    return rb->SendNull();
+  }
 
   if (result.status() == OpStatus::WRONG_TYPE) {
     return rb->SendError(kWrongTypeErr);
