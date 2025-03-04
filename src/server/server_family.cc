@@ -1447,15 +1447,21 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   if (!m.cmd_stats_map.empty()) {
     string command_metrics;
 
-    AppendMetricHeader("commands", "Metrics for all commands ran", MetricType::COUNTER,
+    AppendMetricHeader("commands_total", "Total number of commands executed", MetricType::COUNTER,
                        &command_metrics);
     for (const auto& [name, stat] : m.cmd_stats_map) {
       const auto calls = stat.first;
-      const double duration_seconds = stat.second * 1e-6;
       AppendMetricValue("commands_total", calls, {"cmd"}, {name}, &command_metrics);
+    }
+
+    AppendMetricHeader("commands_duration_seconds", "Duration of commands in seconds",
+                       MetricType::HISTOGRAM, &command_metrics);
+    for (const auto& [name, stat] : m.cmd_stats_map) {
+      const double duration_seconds = stat.second * 1e-6;
       AppendMetricValue("commands_duration_seconds", duration_seconds, {"cmd"}, {name},
                         &command_metrics);
     }
+
     absl::StrAppend(&resp->body(), command_metrics);
   }
 
