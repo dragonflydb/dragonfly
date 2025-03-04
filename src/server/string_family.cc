@@ -869,6 +869,19 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
         e_it->second = db_slice.FromAbsoluteTime(at_ms);
       } else {
         // Add new expiry information.
+
+        // Note: some consistency checks, following #4672. Once it's resolved we can remove them.
+        // -------------------------------------------------------------------------------------
+        ExpireTable* etable = db_slice.GetTables(op_args_.db_cntx.db_index).second;
+        ExpireIterator check_it = etable->Find(it->first.AsRef());
+        if (IsValid(check_it)) {
+          LOG(ERROR) << "Inconsistent state in SetCmd::SetExisting "
+                     << " key: " << key << ", "
+                     << "it.key:" << it.key() << ", "
+                     << "it->first:" << it->first.ToString()
+                     << " params.prev_val: " << params.prev_val << " " << params.flags;
+        }
+        // ------------------------------------------------
         db_slice.AddExpire(op_args_.db_cntx.db_index, it, at_ms);
       }
     } else {
