@@ -898,6 +898,8 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
 }
 
 void DbSlice::FlushDb(DbIndex db_ind) {
+  DVLOG(1) << "Flushing db " << db_ind;
+
   // clear client tracking map.
   client_tracking_map_.clear();
 

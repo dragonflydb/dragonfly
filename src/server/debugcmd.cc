@@ -1114,7 +1114,20 @@ void DebugCmd::ObjHist(facade::SinkReplyBuilder* builder) {
 void DebugCmd::Stacktrace(facade::SinkReplyBuilder* builder) {
   fb2::Mutex m;
   shard_set->pool()->AwaitFiberOnAll([&m](unsigned index, ProactorBase* base) {
+    EngineShard* es = EngineShard::tlocal();
+    string txq;
+    if (es) {
+      EngineShard::TxQueueInfo txq_info = es->AnalyzeTxQueue();
+      if (txq_info.tx_total > 0) {
+        txq = StrCat("tx armed ", txq_info.tx_armed, ", total: ", txq_info.tx_total,
+                     ",global:", txq_info.tx_global, ",runnable:", txq_info.tx_runnable, "\n");
+        StrAppend(&txq, "locks total:", txq_info.total_locks,
+                  ",contended:", txq_info.contended_locks, ", head: ", txq_info.head.debug_id_info,
+                  "\n");
+      }
+    }
     std::unique_lock lk(m);
+    LOG_IF(INFO, !txq.empty()) << "Shard" << index << ": " << txq;
     fb2::detail::FiberInterface::PrintAllFiberStackTraces();
   });
   base::FlushLogs();
