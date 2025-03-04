@@ -361,7 +361,7 @@ class ServerFamily {
   std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
 
-  std::atomic<bool> client_pause_ = false;
+  std::atomic<bool> is_c_pause_in_progress_ = false;
   // We need this because if dragonfly shuts down during pause, ServerState will destruct
   // before the dettached fiber Pause() causing a seg fault.
   std::atomic<size_t> active_pauses_ = 0;

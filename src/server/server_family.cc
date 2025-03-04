@@ -941,8 +941,6 @@ void ServerFamily::JoinSnapshotSchedule() {
 void ServerFamily::Shutdown() {
   VLOG(1) << "ServerFamily::Shutdown";
 
-  client_pause_.store(true);
-
   load_fiber_.JoinIfNeeded();
 
   JoinSnapshotSchedule();
@@ -1868,7 +1866,7 @@ void ServerFamily::ClientUnPauseCmd(CmdArgList args, SinkReplyBuilder* builder) 
     builder->SendError(facade::kSyntaxErr);
     return;
   }
-  client_pause_.store(false, std::memory_order_relaxed);
+  is_c_pause_in_progress_.store(false, std::memory_order_relaxed);
   builder->SendOk();
 }
 
@@ -3229,7 +3227,7 @@ void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,
   const auto timeout_ms = timeout * 1ms;
   auto is_pause_in_progress = [this, end_time = chrono::steady_clock::now() + timeout_ms] {
     return ServerState::tlocal()->gstate() != GlobalState::SHUTTING_DOWN &&
-           chrono::steady_clock::now() < end_time && client_pause_.load();
+           chrono::steady_clock::now() < end_time && is_c_pause_in_progress_.load();
   };
 
   auto cleanup = [this] {
@@ -3240,7 +3238,7 @@ void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,
   if (auto pause_fb_opt = Pause(listeners, cntx->ns, cntx->conn(), pause_state,
                                 std::move(is_pause_in_progress), cleanup);
       pause_fb_opt) {
-    client_pause_.store(true);
+    is_c_pause_in_progress_.store(true);
     active_pauses_.fetch_add(1);
     pause_fb_opt->Detach();
     builder->SendOk();

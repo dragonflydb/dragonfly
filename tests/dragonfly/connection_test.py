@@ -1182,8 +1182,9 @@ async def test_client_unpause(df_factory):
     async with async_timeout.timeout(0.5):
         await async_client.client_unpause()
 
-    await p1
-    assert p1.done()
+    async with async_timeout.timeout(0.5):
+        await p1
+        assert p1.done()
 
     await async_client.client_pause(1, all=False)
     await asyncio.sleep(2)
