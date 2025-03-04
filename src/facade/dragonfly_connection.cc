@@ -492,6 +492,7 @@ void Connection::AsyncOperations::operator()(const AclUpdateMessage& msg) {
       self->cntx()->acl_commands = msg.commands;
       self->cntx()->keys = msg.keys;
       self->cntx()->pub_sub = msg.pub_sub;
+      self->cntx()->acl_db_idx = msg.db_indx;
     }
   }
 }
