@@ -2918,8 +2918,11 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
     builder->SendError(ec ? ec.Format() : "replication cancelled");
     return;
   }
-
+  // Successfully connected now we flush
+  // If we are called by "Replicate", tx will be null but we do not need
+  // to flush anything.
   if (on_err == ActionOnConnectionFail::kReturnOnError) {
+    Drakarys(tx, DbSlice::kDbAll);
     new_replica->StartMainReplicationFiber();
   }
   builder->SendOk();

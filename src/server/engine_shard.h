@@ -181,6 +181,8 @@ class EngineShard {
 
     // We can use a vector to hold debug info for all items in the txqueue
     TxQueueItem head;
+
+    std::string Format() const;
   };
 
   TxQueueInfo AnalyzeTxQueue() const;

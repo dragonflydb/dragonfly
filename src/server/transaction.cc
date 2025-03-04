@@ -49,19 +49,14 @@ void AnalyzeTxQueue(const EngineShard* shard, const TxQueue* txq) {
     if (now >= last_log_time + 10) {
       last_log_time = now;
       EngineShard::TxQueueInfo info = shard->AnalyzeTxQueue();
-      string msg =
-          StrCat("TxQueue is too long. Tx count:", info.tx_total, ", armed:", info.tx_armed,
-                 ", runnable:", info.tx_runnable, ", total locks: ", info.total_locks,
-                 ", contended locks: ", info.contended_locks, "\n");
-      absl::StrAppend(&msg, "max contention score: ", info.max_contention_score,
-                      ", lock: ", info.max_contention_lock,
-                      ", poll_executions:", shard->stats().poll_execution_total);
+      string msg = StrCat("TxQueue is too long. ", info.Format());
+      absl::StrAppend(&msg, "poll_executions:", shard->stats().poll_execution_total);
+
       const Transaction* cont_tx = shard->GetContTx();
       if (cont_tx) {
         absl::StrAppend(&msg, " continuation_tx: ", cont_tx->DebugId(shard->shard_id()), " ",
                         cont_tx->DEBUG_IsArmedInShard(shard->shard_id()) ? " armed" : "");
       }
-      absl::StrAppend(&msg, "\nTxQueue head debug info ", info.head.debug_id_info);
 
       LOG(WARNING) << msg;
     }

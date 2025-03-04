@@ -1066,12 +1066,7 @@ void DebugCmd::TxAnalysis(facade::SinkReplyBuilder* builder) {
   string result;
   for (unsigned i = 0; i < shard_set->size(); ++i) {
     const auto& info = shard_info[i];
-    StrAppend(&result, "shard", i, ":\n", "  tx armed ", info.tx_armed, ", total: ", info.tx_total,
-              ",global:", info.tx_global, ",runnable:", info.tx_runnable, "\n");
-    StrAppend(&result, "  locks total:", info.total_locks, ",contended:", info.contended_locks,
-              "\n");
-    StrAppend(&result, "  max contention score: ", info.max_contention_score,
-              ",lock_name:", info.max_contention_lock, "\n");
+    StrAppend(&result, "shard", i, ":\n", info.Format(), "\n");
   }
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   rb->SendVerbatimString(result);
@@ -1118,13 +1113,7 @@ void DebugCmd::Stacktrace(facade::SinkReplyBuilder* builder) {
     string txq;
     if (es) {
       EngineShard::TxQueueInfo txq_info = es->AnalyzeTxQueue();
-      if (txq_info.tx_total > 0) {
-        txq = StrCat("tx armed ", txq_info.tx_armed, ", total: ", txq_info.tx_total,
-                     ",global:", txq_info.tx_global, ",runnable:", txq_info.tx_runnable, "\n");
-        StrAppend(&txq, "locks total:", txq_info.total_locks,
-                  ",contended:", txq_info.contended_locks, ", head: ", txq_info.head.debug_id_info,
-                  "\n");
-      }
+      txq = txq_info.Format();
     }
     std::unique_lock lk(m);
     LOG_IF(INFO, !txq.empty()) << "Shard" << index << ": " << txq;
