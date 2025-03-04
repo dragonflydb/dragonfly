@@ -34,12 +34,12 @@ class Master:
         self.replicas = []
 
 
-def start_node(node, threads):
+def start_node(node, dragonfly_bin, threads):
     f = open(f"/tmp/dfly.cluster.node.{node.port}.log", "w")
     print(f"- Log file for node {node.port}: {f.name}")
     subprocess.Popen(
         [
-            "../build-opt/dragonfly",
+            f"{dragonfly_bin}",
             f"--port={node.port}",
             "--cluster_mode=yes",
             f"--proactor_threads={threads}",
@@ -140,7 +140,7 @@ def create_locally(args):
 
     print("Starting nodes...")
     for node in nodes:
-        start_node(node, args.threads)
+        start_node(node, args.dragonfly_bin, args.threads)
     print()
 
     if args.replicas_per_master > 0:
@@ -444,7 +444,7 @@ Dragonfly Manual Cluster Manager
 
 This tool helps managing a Dragonfly cluster manually.
 Cluster can either be local or remote:
-- Starting Dragonfly instances must be done locally, binary is assumed to be under ../build-opt
+- Starting Dragonfly instances must be done locally, binary path can be set with `--dragonfly_bin` (default: ../build-opt/dragonfly)
 - Remote Dragonflies must already be started, and initialized with `--cluster_mode=yes`
 
 Example usage:
@@ -537,6 +537,9 @@ WARNING: Be careful! This will close all Dragonfly servers connected to the clus
     )
     parser.add_argument(
         "--attach_as_replica", type=bool, default=False, help="Is the attached node a replica?"
+    )
+    parser.add_argument(
+        "--dragonfly_bin", default="../build-opt/dragonfly", help="Dragonfly binary path"
     )
     args = parser.parse_args()
 
