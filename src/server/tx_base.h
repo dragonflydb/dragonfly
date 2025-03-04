@@ -225,7 +225,7 @@ void RecordJournal(const OpArgs& op_args, std::string_view cmd, ArgSlice args,
 // Record expiry in journal with independent transaction.
 // Must be called from shard thread owning key.
 // Might block the calling fiber unless Journal::SetFlushMode(false) is called.
-void RecordExpiry(DbIndex dbid, std::string_view key);
+void RecordExpiryBlocking(DbIndex dbid, std::string_view key);
 
 // Trigger journal write to sink, no journal record will be added to journal.
 // Must be called from shard thread of journal to sink.

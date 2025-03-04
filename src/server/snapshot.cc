@@ -272,7 +272,8 @@ bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator i
   db_slice_->FlushChangeToEarlierCallbacks(db_index, DbSlice::Iterator::FromPrime(it),
                                            snapshot_version_);
 
-  auto* blocking_counter = db_slice_->BlockingCounter();
+  auto* blocking_counter = db_slice_->GetLatch();
+
   // Locking this never preempts. We merely just increment the underline counter such that
   // if SerializeBucket preempts, Heartbeat() won't run because the blocking counter is not
   // zero.
