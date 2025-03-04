@@ -3030,7 +3030,8 @@ async def test_cluster_migration_errors_num(df_factory: DflyInstanceFactory):
 @pytest.mark.asyncio
 @dfly_args({"cluster_mode": "yes"})
 async def test_migration_to_slow_target_node(df_factory: DflyInstanceFactory, df_seeder_factory):
-    # 1. Create cluster of 3 nodes with all slots allocated to first node.
+    # 1. Create cluster with one fast and one slow node. We test that migration can be finished correctly
+    # from fast node to slow under some load
     instances = [
         df_factory.create(
             port=next(next_port),
@@ -3055,18 +3056,28 @@ async def test_migration_to_slow_target_node(df_factory: DflyInstanceFactory, df
     seeder = df_seeder_factory.create(
         keys=50_000, port=instances[0].port, cluster_mode=True, pipeline=False
     )
-    await seeder.run(target_deviation=0.1)
-    seed = asyncio.create_task(seeder.run())
+    seed_source = asyncio.create_task(seeder.run())
+
+    stop = False
+
+    async def fill_target_node():
+        i = 0
+        while not stop:
+            await nodes[1].client.set(f"{{somekey}}:{i}", i)  # somekey belongs to slot 11058
+
+    seed_target = asyncio.create_task(fill_target_node())
 
     nodes[0].migrations.append(
         MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 9000)], nodes[1].id),
     )
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
-    await wait_for_status(nodes[0].client, nodes[1].id, "FINISHED", 40)
+    await wait_for_status(nodes[0].client, nodes[1].id, "FINISHED", 100)
 
     seeder.stop()
-    await seed
+    await seed_source
+    stop = True
+    await seed_target
 
     cluster_info = await nodes[0].admin_client.info("CLUSTER")
     assert cluster_info["migration_errors_total"] == 0
