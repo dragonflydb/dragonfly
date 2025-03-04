@@ -322,6 +322,7 @@ class RdbLoader : protected RdbLoaderBase {
   Service* service_;
   bool override_existing_keys_ = false;
   bool load_unowned_slots_ = false;
+  bool rdb_ignore_expiry_;
   ScriptMgr* script_mgr_;
   std::vector<ItemsBuf> shard_buf_;
 

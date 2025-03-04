@@ -58,6 +58,7 @@ ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_DECLARE_FLAG(bool, list_experimental_v2);
 ABSL_FLAG(bool, rdb_load_dry_run, false, "Dry run RDB load without applying changes");
+ABSL_FLAG(bool, rdb_ignore_expiry, false, "Ignore Key Expiry when loding from RDB snapshot");
 
 namespace dfly {
 
@@ -1810,7 +1811,7 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
         }*/
       }
     }  // while (consumers_num)
-  }  // while (cgroup_num)
+  }    // while (cgroup_num)
 
   return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
 }
@@ -1935,6 +1936,7 @@ struct RdbLoader::ObjSettings {
 
 RdbLoader::RdbLoader(Service* service)
     : service_{service},
+      rdb_ignore_expiry_{GetFlag(FLAGS_rdb_ignore_expiry)},
       script_mgr_{service == nullptr ? nullptr : service->script_mgr()},
       shard_buf_{shard_set->size()} {
 }
@@ -2029,7 +2031,9 @@ error_code RdbLoader::Load(io::Source* src) {
       /* EXPIRETIME_MS: milliseconds precision expire times introduced
        * with RDB v3. Like EXPIRETIME but no with more precision. */
       SET_OR_RETURN(FetchInt<int64_t>(), val);
-      settings.SetExpire(val);
+      if (!rdb_ignore_expiry_) {
+        settings.SetExpire(val);
+      }
       continue; /* Read next opcode. */
     }
 

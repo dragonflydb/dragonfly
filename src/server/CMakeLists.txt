@@ -113,7 +113,7 @@ cxx_test(bitops_family_test dfly_test_lib LABELS DFLY)
 cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_small.rdb
          testdata/redis6_stream.rdb testdata/hll.rdb testdata/redis7_small.rdb
          testdata/redis_json.rdb testdata/RDB_TYPE_STREAM_LISTPACKS_2.rdb
-         testdata/RDB_TYPE_STREAM_LISTPACKS_3.rdb LABELS DFLY)
+         testdata/RDB_TYPE_STREAM_LISTPACKS_3.rdb testdata/ignore_expiry.rdb LABELS DFLY)
 cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(geo_family_test dfly_test_lib LABELS DFLY)
 cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
