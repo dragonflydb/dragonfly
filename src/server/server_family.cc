@@ -2903,6 +2903,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
   // If the replication attempt failed, clean up global state. The replica should have stopped
   // internally.
   util::fb2::LockGuard lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
+
   // If there was an error above during Start we must not start the main replication fiber.
   // However, it could be the case that Start() above connected succefully and by the time
   // we acquire the lock, the context got cancelled because another ReplicaOf command

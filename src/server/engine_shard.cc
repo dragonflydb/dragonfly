@@ -5,6 +5,7 @@
 #include "server/engine_shard.h"
 
 #include <absl/strings/match.h>
+#include <absl/strings/str_cat.h>
 
 #include "base/flags.h"
 #include "io/proc_reader.h"
@@ -274,6 +275,25 @@ ShardId Shard(string_view v, ShardId shard_num) {
   }
 
   return hash % shard_num;
+}
+
+string EngineShard::TxQueueInfo::Format() const {
+  string res;
+
+  if (tx_total > 0) {
+    absl::StrAppend(&res, "tx armed ", tx_armed, ", total: ", tx_total, ",global:", tx_global,
+                    ",runnable:", tx_runnable, "\n");
+    absl::StrAppend(&res, ", head: ", head.debug_id_info, "\n");
+  }
+  if (total_locks > 0) {
+    absl::StrAppend(&res, "locks total:", total_locks, ",contended:", contended_locks, "\n");
+  }
+  if (max_contention_score > 0) {
+    absl::StrAppend(&res, "max contention score: ", max_contention_score,
+                    ", lock: ", max_contention_lock, "\n");
+  }
+
+  return res;
 }
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
@@ -706,7 +726,7 @@ void EngineShard::RemoveContTx(Transaction* tx) {
 }
 
 void EngineShard::Heartbeat() {
-  DVLOG(2) << " Hearbeat";
+  DVLOG(3) << " Hearbeat";
   DCHECK(namespaces);
 
   CacheStats();
