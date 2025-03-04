@@ -2233,6 +2233,10 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view section,
                                        bool priveleged) const {
   string info;
+  DbStats total;
+
+  for (const auto& db_stats : m.db_stats)
+    total += db_stats;
 
   auto should_enter = [&](string_view name, bool hidden = false) {
     if ((!hidden && section.empty()) || section == "ALL" || section == name) {
@@ -2243,13 +2247,16 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     return false;
   };
 
-  auto append = [&info](absl::AlphaNum a1, absl::AlphaNum a2) {
+  auto append = [&info](const absl::AlphaNum& a1, const absl::AlphaNum& a2) {
     absl::StrAppend(&info, a1, ":", a2, "\r\n");
   };
 
   bool show_managed_info = priveleged || !absl::GetFlag(FLAGS_managed_service_info);
 
-  if (should_enter("SERVER")) {
+  // For some reason on some distributions (like Fedora and OpenSuse) each call to append
+  // increase the stack usage of this function. So we use the lambda trick to avoid this.
+  // Also, it's more readable.
+  auto add_server_info = [&] {
     ProactorBase* proactor = ProactorBase::me();
 
     // proactor might be null in tests.
@@ -2271,13 +2278,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     uint64_t uptime = time(NULL) - start_time_;
     append("uptime_in_seconds", uptime);
     append("uptime_in_days", uptime / (3600 * 24));
-  }
+  };
 
-  DbStats total;
-  for (const auto& db_stats : m.db_stats)
-    total += db_stats;
-
-  if (should_enter("CLIENTS")) {
+  auto add_clients_info = [&] {
     append("connected_clients", m.facade_stats.conn_stats.num_conns);
     append("max_clients", GetFlag(FLAGS_maxclients));
     append("client_read_buffer_bytes", m.facade_stats.conn_stats.read_buf_capacity);
@@ -2286,9 +2289,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 
     append("send_delay_ms", GetDelayMs(m.oldest_pending_send_ts));
     append("timeout_disconnects", m.coordinator_stats.conn_timeout_events);
-  }
+  };
 
-  if (should_enter("MEMORY")) {
+  auto add_mem_info = [&] {
     append("used_memory", m.heap_used_bytes);
     append("used_memory_human", HumanReadableNumBytes(m.heap_used_bytes));
     const auto ump = used_mem_peak.load(memory_order_relaxed);
@@ -2359,9 +2362,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
         append("save_buffer_bytes", save_controller_->GetSaveBuffersSize());
       }
     }
-  }
+  };
 
-  if (should_enter("STATS")) {
+  auto add_stats_info = [&] {
     auto& conn_stats = m.facade_stats.conn_stats;
     auto& reply_stats = m.facade_stats.reply_stats;
 
@@ -2409,9 +2412,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 
     // Total number of events of when a connection was blocked on grabbing interpreter.
     append("lua_blocked_total", m.lua_stats.blocked_cnt);
-  }
+  };
 
-  if (should_enter("TIERED", true)) {
+  auto add_tiered_info = [&] {
     append("tiered_entries", total.tiered_entries);
     append("tiered_entries_bytes", total.tiered_used_bytes);
 
@@ -2439,9 +2442,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("tiered_ram_hits", m.events.ram_hits);
     append("tiered_ram_cool_hits", m.events.ram_cool_hits);
     append("tiered_ram_misses", m.events.ram_misses);
-  }
+  };
 
-  if (should_enter("PERSISTENCE", true)) {
+  auto add_persistence_info = [&] {
     size_t current_snap_keys = 0;
     size_t total_snap_keys = 0;
     double perc = 0;
@@ -2488,9 +2491,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("last_failed_save", save_info.last_error_time);
     append("last_error", save_info.last_error.Format());
     append("last_failed_save_duration_sec", save_info.failed_duration_sec);
-  }
+  };
 
-  if (should_enter("TRANSACTION", true)) {
+  auto add_tx_info = [&] {
     append("tx_shard_polls", m.shard_stats.poll_execution_total);
     append("tx_shard_optimistic_total", m.shard_stats.tx_optimistic_total);
     append("tx_shard_ooo_total", m.shard_stats.tx_ooo_total);
@@ -2510,9 +2513,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("multi_squash_execution_total", m.coordinator_stats.multi_squash_executions);
     append("multi_squash_execution_hop_usec", m.coordinator_stats.multi_squash_exec_hop_usec);
     append("multi_squash_execution_reply_usec", m.coordinator_stats.multi_squash_exec_reply_usec);
-  }
+  };
 
-  if (should_enter("REPLICATION")) {
+  auto add_repl_info = [&] {
     bool is_master = true;
     // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
     // ensuring eventual consistency of is_master. When determining if the server is a replica and
@@ -2563,9 +2566,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
         replication_info_cb(replica->GetSummary());
       }
     }
-  }
+  };
 
-  if (should_enter("COMMANDSTATS", true)) {
+  auto add_cmdstats = [&] {
     auto append_sorted = [&append](string_view prefix, auto display) {
       sort(display.begin(), display.end());
       for (const auto& k_v : display) {
@@ -2587,6 +2590,42 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append_sorted("cmdstat_", std::move(commands));
     append_sorted("unknown_",
                   vector<pair<string_view, uint64_t>>(unknown_cmd.cbegin(), unknown_cmd.cend()));
+  };
+
+  if (should_enter("SERVER")) {
+    add_server_info();
+  }
+
+  if (should_enter("CLIENTS")) {
+    add_clients_info();
+  }
+
+  if (should_enter("MEMORY")) {
+    add_mem_info();
+  }
+
+  if (should_enter("STATS")) {
+    add_stats_info();
+  }
+
+  if (should_enter("TIERED", true)) {
+    add_tiered_info();
+  }
+
+  if (should_enter("PERSISTENCE", true)) {
+    add_persistence_info();
+  }
+
+  if (should_enter("TRANSACTION", true)) {
+    add_tx_info();
+  }
+
+  if (should_enter("REPLICATION")) {
+    add_repl_info();
+  }
+
+  if (should_enter("COMMANDSTATS", true)) {
+    add_cmdstats();
   }
 
   if (should_enter("MODULES")) {
