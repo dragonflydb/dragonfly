@@ -2870,3 +2870,35 @@ async def test_replicaof_does_not_flush_if_it_fails_to_connect(df_factory):
         await c_replica.execute_command(f"REPLICAOF localhost {replica.port}")
     res = await c_replica.execute_command("dbsize")
     assert res == 1
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_replicaof_inside_multi(df_factory):
+    master = df_factory.create()
+    replica = df_factory.create()
+    df_factory.start_all([master, replica])
+
+    async def replicate_inside_multi():
+        try:
+            c_master = master.client()
+            p = c_master.pipeline(transaction=True)
+            for i in range(5):
+                p.execute_command("dbsize")
+            p.execute_command(f"replicaof localhost {replica.port}")
+            await p.execute()
+            return True
+        except redis.exceptions.ResponseError:
+            return False
+
+    MULTI_COMMANDS_TO_ISSUE = 30
+    replication_commands = [
+        asyncio.create_task(replicate_inside_multi()) for _ in range(MULTI_COMMANDS_TO_ISSUE)
+    ]
+
+    num_successes = 0
+    for result in asyncio.as_completed(replication_commands, timeout=80):
+        num_successes += await result
+
+    logging.info(f"succeses: {num_successes}")
+    assert MULTI_COMMANDS_TO_ISSUE > num_successes, "At least one REPLICAOF must be cancelled"
+    assert num_successes > 0, "At least one REPLICAOF must success"

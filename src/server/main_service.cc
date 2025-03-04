@@ -621,6 +621,7 @@ Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
                                       const ScriptMgr& script_mgr) {
   // Check if script most LIKELY has global eval transactions
   bool contains_global = false;
+  bool contains_admin_cmd = false;
   Transaction::MultiMode multi_mode = Transaction::LOCK_AHEAD;
 
   if (state == ExecScriptUse::SCRIPT_RUN) {
@@ -641,6 +642,7 @@ Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
         transactional |= scmd.Cid()->IsTransactional();
       }
       contains_global |= scmd.Cid()->opt_mask() & CO::GLOBAL_TRANS;
+      contains_admin_cmd |= scmd.Cid()->opt_mask() & CO::ADMIN;
 
       // We can't run no-key-transactional commands in lock-ahead mode currently,
       // because it means we have to schedule on all shards
@@ -656,9 +658,13 @@ Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
   if (!transactional && exec_info.watched_keys.empty())
     return Transaction::NOT_DETERMINED;
 
+  if (contains_admin_cmd) {
+    multi_mode = Transaction::NON_ATOMIC;
+  }
   // Atomic modes fall back to GLOBAL if they contain global commands.
-  if (contains_global && multi_mode == Transaction::LOCK_AHEAD)
+  else if (contains_global && multi_mode == Transaction::LOCK_AHEAD) {
     multi_mode = Transaction::GLOBAL;
+  }
 
   return multi_mode;
 }
