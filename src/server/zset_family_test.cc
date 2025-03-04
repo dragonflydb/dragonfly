@@ -291,20 +291,22 @@ TEST_F(ZSetFamilyTest, ZMScore) {
 TEST_F(ZSetFamilyTest, ZMScoreSingleMemberNonExistentKey) {
   // Case 1: Single member with non-existent key (ZMSCORE abc x)
   auto resp = Run({"zmscore", "abc", "x"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL)) << "Expected NIL response for non-existent key with single member";
+
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL))
+      << "Expected NIL response for non-existent key with single member";
 }
 
 // Test for ZMSCORE with multiple members on a non-existent key
 TEST_F(ZSetFamilyTest, ZMScoreMultipleMembersNonExistentKey) {
   // Case 2: Multiple members with non-existent key (ZMSCORE abc x y z)
   auto resp = Run({"zmscore", "abc", "x", "y", "z"});
-  ASSERT_EQ(RespExpr::ARRAY, resp.type) << "Expected array response for non-existent key with multiple members";
+
+  ASSERT_EQ(RespExpr::ARRAY, resp.type)
+      << "Expected array response for non-existent key with multiple members";
   ASSERT_EQ(3, resp.GetVec().size()) << "Expected array with 3 elements";
-  EXPECT_THAT(resp.GetVec(), ElementsAre(
-    ArgType(RespExpr::NIL),
-    ArgType(RespExpr::NIL),
-    ArgType(RespExpr::NIL)
-  ));
+
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL), ArgType(RespExpr::NIL)));
 }
 
 TEST_F(ZSetFamilyTest, ZRangeRank) {
