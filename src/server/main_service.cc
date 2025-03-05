@@ -2330,25 +2330,18 @@ void Service::Function(CmdArgList args, const CommandContext& cmd_cntx) {
   return cmd_cntx.rb->SendError(err, kSyntaxErrType);
 }
 
-void Service::PubsubChannels(bool reject_cluster, string_view pattern, SinkReplyBuilder* builder) {
+void Service::PubsubChannels(string_view pattern, SinkReplyBuilder* builder) {
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  if (reject_cluster && IsClusterEnabled()) {
-    return rb->SendError("PUBSUB CHANNELS is not supported in cluster mode yet");
-  }
   rb->SendBulkStrArr(ServerState::tlocal()->channel_store()->ListChannels(pattern));
 }
 
 void Service::PubsubPatterns(SinkReplyBuilder* builder) {
   size_t pattern_count = ServerState::tlocal()->channel_store()->PatternCount();
-
   builder->SendLong(pattern_count);
 }
 
-void Service::PubsubNumSub(bool reject_cluster, CmdArgList args, SinkReplyBuilder* builder) {
+void Service::PubsubNumSub(CmdArgList args, SinkReplyBuilder* builder) {
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  if (reject_cluster && IsClusterEnabled()) {
-    return rb->SendError("PUBSUB NUMSUB is not supported in cluster mode yet");
-  }
   rb->StartArray(args.size() * 2);
   for (string_view channel : args) {
     rb->SendBulkString(channel);
@@ -2397,20 +2390,34 @@ void Service::Pubsub(CmdArgList args, const CommandContext& cmd_cntx) {
     return;
   }
 
+  auto cmd_err = [&]() {
+    auto err = absl::StrCat("PUBSUB ", subcmd, " is not supported",
+                            IsClusterEnabled() ? " in cluster mode yet" : " in non cluster mode");
+    rb->SendError(err);
+  };
+
   if (subcmd == "CHANNELS" || subcmd == "SHARDCHANNELS") {
     string_view pattern;
+    if ((subcmd == "CHANNELS" && IsClusterEnabled()) ||
+        (subcmd == "SHARDCHANNELS" && !IsClusterEnabled())) {
+      return cmd_err();
+    }
     if (args.size() > 1) {
       pattern = ArgS(args, 1);
     }
-    PubsubChannels(subcmd == "CHANNELS", pattern, rb);
+    PubsubChannels(pattern, rb);
   } else if (subcmd == "NUMPAT") {
     if (IsClusterEnabled()) {
-      return rb->SendError("PUBSUB NUMPAT is not supported in cluster mode yet");
+      return cmd_err();
     }
     PubsubPatterns(rb);
   } else if (subcmd == "NUMSUB" || subcmd == "SHARDNUMSUB") {
+    if ((subcmd == "NUMSUB" && IsClusterEnabled()) ||
+        (subcmd == "SHARDNUMSUB" && !IsClusterEnabled())) {
+      return cmd_err();
+    }
     args.remove_prefix(1);
-    PubsubNumSub(subcmd == "NUMSUB", args, rb);
+    PubsubNumSub(args, rb);
   } else {
     rb->SendError(UnknownSubCmd(subcmd, "PUBSUB"));
   }
