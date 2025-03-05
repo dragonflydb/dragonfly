@@ -85,6 +85,8 @@ ABSL_FLAG(uint16_t, uring_recv_buffer_cnt, 0,
           "How many socket recv buffers of size 256 to allocate per thread."
           "Relevant only for modern kernels with io_uring enabled");
 
+ABSL_FLAG(bool, omit_basic_usage, false, "Omit printing basic usage info.");
+
 using namespace util;
 using namespace facade;
 using namespace io;
@@ -740,7 +742,10 @@ Usage: dragonfly [FLAGS]
 
   ParseFlagsFromEnv();
 
-  PrintBasicUsageInfo();
+  if (!GetFlag(FLAGS_omit_basic_usage)) {
+    PrintBasicUsageInfo();
+  }
+
   LOG(INFO) << "Starting dragonfly " << GetVersion() << "-" << kGitSha;
 
   struct sigaction act;
