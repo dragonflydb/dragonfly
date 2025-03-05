@@ -2428,7 +2428,6 @@ async def test_replicate_old_master(
         version=1.19,
         path=released_dfly_path,
         cluster_mode=cluster_mode,
-        use_skip_basic_usage_flag=False,
     )
     replica = df_factory.create(
         cluster_mode=cluster_mode,
@@ -2468,10 +2467,7 @@ async def test_empty_hash_map_replicate_old_master(df_factory):
     dfly_version = "v1.21.2"
     released_dfly_path = download_dragonfly_release(dfly_version)
     # old versions
-    instances = [
-        df_factory.create(path=released_dfly_path, version=1.21, use_skip_basic_usage_flag=False)
-        for i in range(3)
-    ]
+    instances = [df_factory.create(path=released_dfly_path, version=1.21) for i in range(3)]
     # new version
     instances.append(df_factory.create())
 
@@ -2529,9 +2525,7 @@ async def test_empty_hashmap_loading_bug(df_factory: DflyInstanceFactory):
     dfly_version = "v1.21.2"
     released_dfly_path = download_dragonfly_release(dfly_version)
 
-    master = df_factory.create(
-        path=released_dfly_path, version=1.21, use_skip_basic_usage_flag=False
-    )
+    master = df_factory.create(path=released_dfly_path, version=1.21)
     master.start()
 
     c_master = master.client()
