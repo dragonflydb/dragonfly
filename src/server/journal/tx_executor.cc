@@ -92,6 +92,9 @@ TransactionData TransactionData::FromEntry(journal::ParsedEntry&& entry) {
 
 std::optional<TransactionData> TransactionReader::NextTxData(JournalReader* reader,
                                                              ExecutionState* cntx) {
+  if (!cntx->IsRunning()) {
+    return std::nullopt;
+  }
   io::Result<journal::ParsedEntry> res;
   if (res = reader->ReadEntry(); !res) {
     cntx->ReportError(res.error());

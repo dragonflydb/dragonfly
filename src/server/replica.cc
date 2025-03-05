@@ -866,11 +866,8 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
 
   acks_fb_ = fb2::Fiber("shard_acks", &DflyShardReplica::StableSyncDflyAcksFb, this, cntx);
 
-  while (cntx->IsRunning()) {
-    auto tx_data = tx_reader.NextTxData(&reader, cntx);
-    if (!tx_data)
-      break;
-
+  std::optional<TransactionData> tx_data;
+  while ((tx_data = tx_reader.NextTxData(&reader, cntx))) {
     DVLOG(3) << "Lsn: " << tx_data->lsn;
 
     last_io_time_ = Proactor()->GetMonotonicTimeNs();

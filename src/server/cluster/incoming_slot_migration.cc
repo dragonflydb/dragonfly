@@ -67,8 +67,6 @@ class ClusterShardMigration {
 
       auto tx_data = tx_reader.NextTxData(&reader, cntx);
       if (!tx_data) {
-        in_migration_->ReportError(GenericError("No tx data"));
-        VLOG(1) << "No tx data";
         break;
       }
 
