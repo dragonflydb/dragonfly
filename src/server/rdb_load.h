@@ -331,12 +331,12 @@ class RdbLoader : protected RdbLoaderBase {
 
   DbIndex cur_db_index_ = 0;
   bool pause_ = false;
+  bool is_tiered_enabled_ = false;
   AggregateError ec_;
 
   // We use atomics here because shard threads can notify RdbLoader fiber from another thread
   // that it should stop early.
   std::atomic_bool stop_early_{false};
-  std::atomic_uint blocked_shards_{0};
 
   // Callback when receiving RDB_OPCODE_FULLSYNC_END
   std::function<void()> full_sync_cut_cb;

@@ -255,7 +255,7 @@ bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator i
 
   ++stats_.savecb_calls;
 
-  auto check = [&](auto v) {
+  auto check = [&](uint64_t v) {
     if (v >= snapshot_version_) {
       // either has been already serialized or added after snapshotting started.
       DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << " at " << v;
@@ -310,18 +310,11 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
     auto eit = db_array_[db_indx]->expire.Find(pk);
     expire_time = db_slice_->ExpireTime(eit);
   }
-
   uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(db_indx, pk) : 0;
 
   if (pv.IsExternal()) {
-    // We can't block, so we just schedule a tiered read and append it to the delayed entries
-    util::fb2::Future<PrimeValue> future;
-    EngineShard::tlocal()->tiered_storage()->Read(
-        db_indx, pk.ToString(), pv,
-        [future](const std::string& v) mutable { future.Resolve(PrimeValue(v)); });
-    delayed_entries_.push_back(
-        {db_indx, PrimeKey(pk.ToString()), std::move(future), expire_time, mc_flags});
-    ++type_freq_map_[RDB_TYPE_STRING];
+    // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
+    SerializeExternal(db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
   } else {
     io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
     CHECK(res);
@@ -362,7 +355,7 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
 }
 
 bool SliceSnapshot::PushSerialized(bool force) {
-  if (!force && serializer_->SerializedLen() < kMinBlobSize)
+  if (!force && serializer_->SerializedLen() < kMinBlobSize && delayed_entries_.size() < 32)
     return false;
 
   // Flush any of the leftovers to avoid interleavings
@@ -373,8 +366,16 @@ bool SliceSnapshot::PushSerialized(bool force) {
     // Because we can finally block in this function, we'll await and serialize them
     do {
       auto& entry = delayed_entries_.back();
-      serializer_->SaveEntry(entry.key, entry.value.Get(), entry.expire, entry.dbid,
-                             entry.mc_flags);
+
+      // TODO: https://github.com/dragonflydb/dragonfly/issues/4654
+      // there are a few problems with how we serialize external values.
+      // 1. We may block here too frequently, slowing down the process.
+      // 2. For small bin values, we issue multiple reads for the same page, creating
+      //    read factor amplification that can reach factor of ~60.
+      PrimeValue pv{entry.value.Get()};  // Might block until the future resolves.
+
+      // TODO: to introduce RdbSerializer::SaveString that can accept a string value directly.
+      serializer_->SaveEntry(entry.key, pv, entry.expire, entry.mc_flags, entry.dbid);
       delayed_entries_.pop_back();
     } while (!delayed_entries_.empty());
 
@@ -382,6 +383,18 @@ bool SliceSnapshot::PushSerialized(bool force) {
     serialized += FlushSerialized(FlushState::kFlushEndEntry);
   }
   return serialized > 0;
+}
+
+void SliceSnapshot::SerializeExternal(DbIndex db_index, PrimeKey key, const PrimeValue& pv,
+                                      time_t expire_time, uint32_t mc_flags) {
+  // We prefer avoid blocking, so we just schedule a tiered read and append
+  // it to the delayed entries.
+  util::fb2::Future<string> future;
+  auto cb = [future](const std::string& v) mutable { future.Resolve(v); };
+  EngineShard::tlocal()->tiered_storage()->Read(db_index, key.ToString(), pv, std::move(cb));
+
+  delayed_entries_.push_back({db_index, std::move(key), std::move(future), expire_time, mc_flags});
+  ++type_freq_map_[RDB_TYPE_STRING];
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {

@@ -89,6 +89,20 @@ class SliceSnapshot {
     snapshot_fb_.JoinIfNeeded();
   }
 
+  uint64_t snapshot_version() const {
+    return snapshot_version_;
+  }
+
+  const RdbTypeFreqMap& freq_map() const {
+    return type_freq_map_;
+  }
+
+  // Get different sizes, in bytes. All disjoint.
+  size_t GetBufferCapacity() const;
+  size_t GetTempBuffersSize() const;
+
+  RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
+
  private:
   // Main snapshotting fiber that iterates over all buckets in the db slice
   // and submits them to SerializeBucket.
@@ -117,33 +131,19 @@ class SliceSnapshot {
   // Push regardless of buffer size if force is true.
   // Return true if pushed. Can block. Is called from the snapshot thread.
   bool PushSerialized(bool force);
+  void SerializeExternal(DbIndex db_index, PrimeKey key, const PrimeValue& pv, time_t expire_time,
+                         uint32_t mc_flags);
 
   // Helper function that flushes the serialized items into the RecordStream.
   // Can block.
   using FlushState = SerializerBase::FlushState;
   size_t FlushSerialized(FlushState flush_state);
 
- public:
-  uint64_t snapshot_version() const {
-    return snapshot_version_;
-  }
-
-  const RdbTypeFreqMap& freq_map() const {
-    return type_freq_map_;
-  }
-
-  // Get different sizes, in bytes. All disjoint.
-  size_t GetBufferCapacity() const;
-  size_t GetTempBuffersSize() const;
-
-  RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
-
- private:
   // An entry whose value must be awaited
   struct DelayedEntry {
     DbIndex dbid;
-    CompactObj key;
-    util::fb2::Future<PrimeValue> value;
+    PrimeKey key;
+    util::fb2::Future<string> value;
     time_t expire;
     uint32_t mc_flags;
   };

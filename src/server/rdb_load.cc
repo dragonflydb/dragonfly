@@ -1915,7 +1915,7 @@ struct RdbLoader::ObjSettings {
   bool has_mc_flags = false;
 
   void Reset() {
-    expiretime = 0;
+    mc_flags = expiretime = 0;
     has_expired = false;
     is_sticky = false;
     has_mc_flags = false;
@@ -1958,6 +1958,9 @@ RdbLoader::~RdbLoader() {
 
 error_code RdbLoader::Load(io::Source* src) {
   CHECK(!src_ && src);
+
+  is_tiered_enabled_ =
+      shard_set->Await(0, [] { return EngineShard::tlocal()->tiered_storage() != nullptr; });
 
   absl::Time start = absl::Now();
   src_ = src;
@@ -2245,7 +2248,7 @@ error_code RdbLoaderBase::EnsureReadInternal(size_t min_to_read) {
   }
   if (*res < min_sz)
     return RdbError(errc::rdb_file_corrupted);
-
+  DVLOG(2) << "EnsureRead " << *res << " bytes";
   bytes_read_ += *res;
 
   DCHECK_LE(bytes_read_, source_limit_);
@@ -2341,6 +2344,7 @@ error_code RdbLoaderBase::SkipModuleData() {
 }
 
 error_code RdbLoaderBase::HandleCompressedBlob(int op_type) {
+  DVLOG(2) << "HandleCompressedBlob: " << op_type;
   RETURN_ON_ERR(AllocateDecompressOnce(op_type));
 
   // Fetch uncompress blob
@@ -2356,6 +2360,8 @@ error_code RdbLoaderBase::HandleCompressedBlob(int op_type) {
 }
 
 error_code RdbLoaderBase::HandleCompressedBlobFinish() {
+  DVLOG(2) << "HandleCompressedBlobFinish";
+
   CHECK_NE(&origin_mem_buf_, mem_buf_);
   CHECK_EQ(mem_buf_->InputLen(), size_t(0));
   mem_buf_ = &origin_mem_buf_;
@@ -2443,8 +2449,11 @@ error_code RdbLoader::HandleAux() {
       VLOG(1) << "RDB memory usage when created " << strings::HumanReadableNumBytes(usedmem);
       if (usedmem > ssize_t(max_memory_limit)) {
         if (IsClusterEnabled()) {
-          LOG(INFO) << "Attempting to load a snapshot of size " << usedmem
-                    << ", despite memory limit of " << max_memory_limit;
+          LOG(INFO) << "Allowing to load a snapshot of size " << usedmem
+                    << ", despite memory limit of " << max_memory_limit << " due to cluster mode";
+        } else if (is_tiered_enabled_) {
+          LOG(INFO) << "Allowing to load a snapshot of size " << usedmem
+                    << ", despite memory limit of " << max_memory_limit << " due to tiered storage";
         } else {
           LOG(WARNING) << "Could not load snapshot - its used memory is " << usedmem
                        << " but the limit is " << max_memory_limit;
@@ -2499,14 +2508,10 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
 
     // Block, if tiered storage is active, but can't keep up
     while (db_slice.shard_owner()->ShouldThrottleForTiering()) {
-      this->blocked_shards_.fetch_add(1, memory_order_relaxed);  // stop adding items to shard queue
       ThisFiber::SleepFor(100us);
-      this->blocked_shards_.fetch_sub(1, memory_order_relaxed);
     }
   };
 
-  while (blocked_shards_.load(memory_order_relaxed) > 0)
-    ThisFiber::SleepFor(100us);
   bool preempted = shard_set->Add(sid, std::move(cb));
   VLOG_IF(2, preempted) << "FlushShardAsync was throttled";
 }
