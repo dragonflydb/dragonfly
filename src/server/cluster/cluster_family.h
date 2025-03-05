@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <absl/container/btree_map.h>
-
 #include <string>
 
 #include "facade/conn_context.h"
