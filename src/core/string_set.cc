@@ -96,7 +96,7 @@ unsigned StringSet::AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec
   // SADDEX, but this method is called from SADD as well, where ttl is set to UINT32_MAX value,
   // which results in has_ttl being false. This means that ObjUpdateExpireTime is never called from
   // SADD code path even when update_ttl is true.
-  const bool update_ttl = !absl::GetFlag(FLAGS_legacy_saddex_keepttl);
+  const thread_local bool update_ttl = !absl::GetFlag(FLAGS_legacy_saddex_keepttl);
 
   for (unsigned i = 0; i < count; ++i) {
     void* prev = FindInternal(&span[i], hash[i], 1);

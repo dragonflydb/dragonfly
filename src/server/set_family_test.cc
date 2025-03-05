@@ -389,20 +389,6 @@ TEST_F(SetFamilyTest, SAddEx) {
   EXPECT_THAT(Run({"saddex", "key", "2", "val"}), IntArg(0));
   AdvanceTime(1000);
   EXPECT_EQ(1, CheckedInt({"sismember", "key", "val"}));
-
-  {
-    absl::FlagSaver fs;
-    absl::SetFlag(&FLAGS_legacy_saddex_keepttl, true);
-
-    EXPECT_THAT(Run({"srem", "key", "val"}), IntArg(1));
-
-    TEST_current_time_ms = kMemberExpiryBase * 1000;
-    EXPECT_THAT(Run({"saddex", "key", "2", "val"}), IntArg(1));
-    AdvanceTime(1500);
-    EXPECT_THAT(Run({"saddex", "key", "2", "val"}), IntArg(0));
-    AdvanceTime(1000);
-    EXPECT_EQ(0, CheckedInt({"sismember", "key", "val"}));
-  }
 }
 
 }  // namespace dfly
