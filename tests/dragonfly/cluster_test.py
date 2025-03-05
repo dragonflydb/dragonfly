@@ -3000,27 +3000,26 @@ async def test_cluster_sharded_pubsub_shard_commands(df_factory: DflyInstanceFac
 
     consumer_client = RedisCluster(startup_nodes=[node_a, node_b])
     consumer = consumer_client.pubsub()
+
     consumer.ssubscribe("pubsub-shard-channel")
-
-    await c_nodes[0].execute_command("SPUBLISH pubsub-shard-channel 1")
-
-    # Consume subscription message result from above
-    message = consumer.get_sharded_message(target_node=node_a)
-    assert message == {
-        "type": "subscribe",
-        "pattern": None,
-        "channel": b"pubsub-shard-channel",
-        "data": 1,
-    }
+    consumer.ssubscribe("shard-channel")
 
     message = await c_nodes[0].execute_command("PUBSUB SHARDCHANNELS")
-    assert message == ["pubsub-shard-channel"]
+    assert message == ["pubsub-shard-channel", "shard-channel"]
 
     message = await c_nodes[0].execute_command("PUBSUB SHARDCHANNELS pubsub*")
     assert message == ["pubsub-shard-channel"]
 
+    message = await c_nodes[0].execute_command("PUBSUB SHARDCHANNELS *channel")
+    assert message == ["pubsub-shard-channel", "shard-channel"]
+
     message = await c_nodes[0].execute_command("PUBSUB SHARDNUMSUB pubsub-shard-channel")
     assert message == ["pubsub-shard-channel", 1]
+
+    message = await c_nodes[0].execute_command(
+        "PUBSUB SHARDNUMSUB pubsub-shard-channel shard-channel"
+    )
+    assert message == ["pubsub-shard-channel", 1, "shard-channel", 1]
 
     message = await c_nodes[0].execute_command("PUBSUB SHARDNUMSUB")
     assert message == []

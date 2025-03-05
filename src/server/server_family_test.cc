@@ -547,4 +547,14 @@ TEST_F(ServerFamilyTest, CommandDocsOk) {
   EXPECT_THAT(Run({"command", "docs"}), "OK");
 }
 
+TEST_F(ServerFamilyTest, PubSubCommandErr) {
+  EXPECT_THAT(Run({"PUBSUB", "SHARDCHANNELS"}),
+              ErrArg("PUBSUB SHARDCHANNELS is not supported in non cluster mode"));
+  EXPECT_THAT(Run({"PUBSUB", "SHARDNUMSUB"}),
+              ErrArg("PUBSUB SHARDNUMSUB is not supported in non cluster mode"));
+  EXPECT_THAT(Run({"PUBSUB", "INVALIDSUBCOMMAND"}),
+              ErrArg("Unknown subcommand or wrong number of arguments for 'INVALIDSUBCOMMAND'. Try "
+                     "PUBSUB HELP."));
+}
+
 }  // namespace dfly

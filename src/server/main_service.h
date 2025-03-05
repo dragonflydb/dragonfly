@@ -148,9 +148,9 @@ class Service : public facade::ServiceInterface {
   void Pubsub(CmdArgList args, const CommandContext& cmd_cntx);
   void Command(CmdArgList args, const CommandContext& cmd_cntx);
 
-  void PubsubChannels(bool reject_cluster, std::string_view pattern, SinkReplyBuilder* builder);
+  void PubsubChannels(std::string_view pattern, SinkReplyBuilder* builder);
   void PubsubPatterns(SinkReplyBuilder* builder);
-  void PubsubNumSub(bool reject_cluster, CmdArgList channels, SinkReplyBuilder* builder);
+  void PubsubNumSub(CmdArgList channels, SinkReplyBuilder* builder);
 
   struct EvalArgs {
     std::string_view sha;  // only one of them is defined.
