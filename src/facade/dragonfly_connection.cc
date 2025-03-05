@@ -1150,8 +1150,11 @@ Connection::ParserStatus Connection::ParseRedis() {
     return {FromArgs(std::move(parse_args), tlh)};
   };
 
+  RedisParser::Buffer input_buf = io_buf_.InputBuffer();
+  size_t available_to_parse = io_buf_.InputLen();
+
   do {
-    result = redis_parser_->Parse(io_buf_.InputBuffer(), &consumed, &parse_args);
+    result = redis_parser_->Parse(input_buf, &consumed, &parse_args);
     request_consumed_bytes_ += consumed;
     if (result == RedisParser::OK && !parse_args.empty()) {
       if (RespExpr& first = parse_args.front(); first.type == RespExpr::STRING)
@@ -1160,7 +1163,7 @@ Connection::ParserStatus Connection::ParseRedis() {
       if (io_req_size_hist)
         io_req_size_hist->Add(request_consumed_bytes_);
       request_consumed_bytes_ = 0;
-      bool has_more = consumed < io_buf_.InputLen();
+      bool has_more = consumed < available_to_parse;
 
       if (tl_traffic_logger.log_file && IsMain() /* log only on the main interface */) {
         LogTraffic(id_, has_more, absl::MakeSpan(parse_args), service_->GetContextInfo(cc_.get()));
@@ -1168,15 +1171,19 @@ Connection::ParserStatus Connection::ParseRedis() {
 
       DispatchSingle(has_more, dispatch_sync, dispatch_async);
     }
-    io_buf_.ConsumeInput(consumed);
-  } while (RedisParser::OK == result && io_buf_.InputLen() > 0 && !reply_builder_->GetError());
+    available_to_parse -= consumed;
+    input_buf.remove_prefix(consumed);
+  } while (RedisParser::OK == result && available_to_parse > 0 && !reply_builder_->GetError());
 
+  io_buf_.ConsumeInput(io_buf_.InputLen());
   parser_error_ = result;
   if (result == RedisParser::OK)
     return OK;
 
   if (result == RedisParser::INPUT_PENDING)
     return NEED_MORE;
+
+  VLOG(1) << "Parser error " << result;
 
   return ERROR;
 }
@@ -1305,11 +1312,10 @@ void Connection::HandleMigrateRequest() {
 }
 
 error_code Connection::HandleRecvSocket() {
+  phase_ = READ_SOCKET;
+
   io::MutableBytes append_buf = io_buf_.AppendBuffer();
   DCHECK(!append_buf.empty());
-
-  phase_ = READ_SOCKET;
-  error_code ec;
 
   ::io::Result<size_t> recv_sz = socket_->Recv(append_buf);
   last_interaction_ = time(nullptr);
@@ -1324,7 +1330,7 @@ error_code Connection::HandleRecvSocket() {
   stats_->io_read_bytes += commit_sz;
   ++stats_->io_read_cnt;
 
-  return ec;
+  return {};
 }
 
 auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
