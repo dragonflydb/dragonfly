@@ -411,7 +411,9 @@ class DflyInstanceFactory:
         self.params = params
         self.instances = []
 
-    def create(self, existing_port=None, path=None, version=100, **kwargs) -> DflyInstance:
+    def create(
+        self, existing_port=None, path=None, version=100, use_skip_basic_usage_flag=True, **kwargs
+    ) -> DflyInstance:
         args = {**self.args, **kwargs}
         args.setdefault("dbfilename", "")
         args.setdefault("noversion_check", None)
@@ -420,7 +422,8 @@ class DflyInstanceFactory:
         vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,proactor_pool=1,dflycmd=1,snapshot=1,streamer=1"
         args.setdefault("vmodule", vmod)
         args.setdefault("jsonpathv2")
-        args.setdefault("skip_basic_usage")
+        if use_skip_basic_usage_flag:
+            args.setdefault("skip_basic_usage")
 
         # If path is not set, we assume that we are running the latest dragonfly.
         if not path:
