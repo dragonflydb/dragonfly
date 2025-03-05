@@ -1157,3 +1157,55 @@ async def test_pipeline_cache_size(df_factory):
             info = await good_client.info()
 
     assert info["dispatch_queue_bytes"] == 0
+
+
+async def test_client_unpause(df_factory):
+    server = df_factory.create()
+    server.start()
+
+    async_client = server.client()
+    await async_client.client_pause(3000, all=False)
+
+    async def set_foo():
+        client = server.client()
+        async with async_timeout.timeout(2):
+            await client.execute_command("SET", "foo", "bar")
+
+    p1 = asyncio.create_task(set_foo())
+
+    await asyncio.sleep(0.5)
+    assert not p1.done()
+
+    async with async_timeout.timeout(0.5):
+        await async_client.client_unpause()
+
+    async with async_timeout.timeout(0.5):
+        await p1
+        assert p1.done()
+
+    await async_client.client_pause(1, all=False)
+    await asyncio.sleep(2)
+    server.stop()
+
+
+async def test_client_pause_b2b(async_client):
+    async with async_timeout.timeout(1):
+        await async_client.client_pause(2000, all=False)
+        await async_client.client_pause(2000, all=False)
+
+
+async def test_client_unpause_after_pause_all(async_client):
+    await async_client.client_pause(2000, all=True)
+    # Blocks and waits
+    res = await async_client.client_unpause()
+    assert res == "OK"
+    await async_client.client_pause(2000, all=False)
+    res = await async_client.client_unpause()
+
+
+async def test_client_detached_crash(df_factory):
+    server = df_factory.create(proactor_threads=1)
+    server.start()
+    async_client = server.client()
+    await async_client.client_pause(2, all=False)
+    server.stop()

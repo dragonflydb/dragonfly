@@ -329,6 +329,9 @@ class ServerFamily {
 
   static bool DoAuth(ConnectionContext* cntx, std::string_view username, std::string_view password);
 
+  void ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void ClientUnPauseCmd(CmdArgList args, SinkReplyBuilder* builder);
+
   util::fb2::Fiber snapshot_schedule_fb_;
   util::fb2::Fiber load_fiber_;
 
@@ -363,6 +366,12 @@ class ServerFamily {
   std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
 
+  std::atomic<bool> is_c_pause_in_progress_ = false;
+  // We need this because if dragonfly shuts down during pause, ServerState will destruct
+  // before the dettached fiber Pause() causing a seg fault.
+  std::atomic<size_t> active_pauses_ = 0;
+  util::fb2::EventCount client_pause_ec_;
+
   // protected by save_mu_
   util::fb2::Fiber bg_save_fb_;
 
@@ -376,6 +385,7 @@ class ServerFamily {
 // Reusable CLIENT PAUSE implementation that blocks while polling is_pause_in_progress
 std::optional<util::fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namespace* ns,
                                       facade::Connection* conn, ClientPause pause_state,
-                                      std::function<bool()> is_pause_in_progress);
+                                      std::function<bool()> is_pause_in_progress,
+                                      std::function<void()> maybe_cleanup = {});
 
 }  // namespace dfly

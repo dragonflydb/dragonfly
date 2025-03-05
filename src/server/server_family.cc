@@ -361,35 +361,6 @@ void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkRe
   return rb->SendVerbatimString(result);
 }
 
-void ClientPauseCmd(CmdArgList args, vector<facade::Listener*> listeners, SinkReplyBuilder* builder,
-                    ConnectionContext* cntx) {
-  CmdArgParser parser(args);
-
-  auto timeout = parser.Next<uint64_t>();
-  ClientPause pause_state = ClientPause::ALL;
-  if (parser.HasNext()) {
-    pause_state = parser.MapNext("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
-  }
-  if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
-  }
-
-  const auto timeout_ms = timeout * 1ms;
-  auto is_pause_in_progress = [end_time = chrono::steady_clock::now() + timeout_ms] {
-    return ServerState::tlocal()->gstate() != GlobalState::SHUTTING_DOWN &&
-           chrono::steady_clock::now() < end_time;
-  };
-
-  if (auto pause_fb_opt =
-          Pause(listeners, cntx->ns, cntx->conn(), pause_state, std::move(is_pause_in_progress));
-      pause_fb_opt) {
-    pause_fb_opt->Detach();
-    builder->SendOk();
-  } else {
-    builder->SendError("Failed to pause all running clients");
-  }
-}
-
 void ClientTracking(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (!rb->IsResp3())
@@ -728,7 +699,8 @@ void SlowLogGet(dfly::CmdArgList args, std::string_view sub_cmd, util::ProactorP
 
 std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namespace* ns,
                                 facade::Connection* conn, ClientPause pause_state,
-                                std::function<bool()> is_pause_in_progress) {
+                                std::function<bool()> is_pause_in_progress,
+                                std::function<void()> maybe_cleanup) {
   // Track connections and set pause state to be able to wait untill all running transactions read
   // the new pause state. Exlude already paused commands from the busy count. Exlude tracking
   // blocked connections because: a) If the connection is blocked it is puased. b) We read pause
@@ -758,23 +730,28 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
   shard_set->RunBriefInParallel(
       [ns](EngineShard* shard) { ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(false); });
 
-  return fb2::Fiber("client_pause", [is_pause_in_progress, pause_state, ns]() mutable {
-    // On server shutdown we sleep 10ms to make sure all running task finish, therefore 10ms steps
-    // ensure this fiber will not left hanging .
-    constexpr auto step = 10ms;
-    while (is_pause_in_progress()) {
-      ThisFiber::SleepFor(step);
-    }
+  return fb2::Fiber("client_pause",
+                    [is_pause_in_progress, pause_state, ns, maybe_cleanup]() mutable {
+                      // On server shutdown we sleep 10ms to make sure all running task finish,
+                      // therefore 10ms steps ensure this fiber will not left hanging .
+                      constexpr auto step = 10ms;
+                      while (is_pause_in_progress()) {
+                        ThisFiber::SleepFor(step);
+                      }
 
-    ServerState& etl = *ServerState::tlocal();
-    if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
-      shard_set->pool()->AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
-        ServerState::tlocal()->SetPauseState(pause_state, false);
-      });
-      shard_set->RunBriefInParallel(
-          [ns](EngineShard* shard) { ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(true); });
-    }
-  });
+                      ServerState& etl = *ServerState::tlocal();
+                      if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
+                        shard_set->pool()->AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
+                          ServerState::tlocal()->SetPauseState(pause_state, false);
+                        });
+                        shard_set->RunBriefInParallel([ns](EngineShard* shard) {
+                          ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
+                        });
+                      }
+                      if (maybe_cleanup) {
+                        maybe_cleanup();
+                      }
+                    });
 }
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
@@ -983,6 +960,8 @@ void ServerFamily::Shutdown() {
       }
     });
   }
+
+  client_pause_ec_.await([this] { return active_pauses_.load() == 0; });
 
   pb_task_->Await([this] {
     auto ec = journal_->Close();
@@ -1897,6 +1876,54 @@ void ServerFamily::Auth(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
+void ServerFamily::ClientUnPauseCmd(CmdArgList args, SinkReplyBuilder* builder) {
+  if (!args.empty()) {
+    builder->SendError(facade::kSyntaxErr);
+    return;
+  }
+  is_c_pause_in_progress_.store(false, std::memory_order_relaxed);
+  builder->SendOk();
+}
+
+void ClientHelp(SinkReplyBuilder* builder) {
+  string_view help_arr[] = {
+      "CLIENT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+      "CACHING (YES|NO)",
+      "    Enable/disable tracking of the keys for next command in OPTIN/OPTOUT modes.",
+      "GETNAME",
+      "    Return the name of the current connection.",
+      "ID",
+      "    Return the ID of the current connection.",
+      "KILL <ip:port>",
+      "    Kill connection made from <ip:port>.",
+      "KILL <option> <value> [<option> <value> [...]]",
+      "    Kill connections. Options are:",
+      "    * ADDR (<ip:port>|<unixsocket>:0)",
+      "      Kill connections made from the specified address",
+      "    * LADDR (<ip:port>|<unixsocket>:0)",
+      "      Kill connections made to specified local address",
+      "    * ID <client-id>",
+      "      Kill connections by client id.",
+      "LIST",
+      "    Return information about client connections.",
+      "UNPAUSE",
+      "    Stop the current client pause, resuming traffic.",
+      "PAUSE <timeout> [WRITE|ALL]",
+      "    Suspend all, or just write, clients for <timeout> milliseconds.",
+      "SETNAME <name>",
+      "    Assign the name <name> to the current connection.",
+      "SETINFO <option> <value>",
+      "Set client meta attr. Options are:",
+      "    * LIB-NAME: the client lib name.",
+      "    * LIB-VER: the client lib version.",
+      "TRACKING (ON|OFF) [OPTIN] [OPTOUT] [NOLOOP]",
+      "    Control server assisted client side caching.",
+      "HELP",
+      "    Print this help."};
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  return rb->SendSimpleStrArr(help_arr);
+}
+
 void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
   CmdArgList sub_args = args.subspan(1);
@@ -1910,7 +1937,9 @@ void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
   } else if (sub_cmd == "LIST") {
     return ClientList(sub_args, absl::MakeSpan(listeners_), builder, cntx);
   } else if (sub_cmd == "PAUSE") {
-    return ClientPauseCmd(sub_args, GetNonPriviligedListeners(), builder, cntx);
+    return ClientPauseCmd(sub_args, builder, cntx);
+  } else if (sub_cmd == "UNPAUSE") {
+    return ClientUnPauseCmd(sub_args, builder);
   } else if (sub_cmd == "TRACKING") {
     return ClientTracking(sub_args, builder, cntx);
   } else if (sub_cmd == "KILL") {
@@ -1921,6 +1950,8 @@ void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
     return ClientSetInfo(sub_args, builder, cntx);
   } else if (sub_cmd == "ID") {
     return ClientId(sub_args, builder, cntx);
+  } else if (sub_cmd == "HELP") {
+    return ClientHelp(builder);
   }
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
@@ -3256,6 +3287,43 @@ void ServerFamily::Module(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendSimpleString("search");
   rb->SendSimpleString("ver");
   rb->SendLong(20'000);  // we target v2
+}
+
+void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,
+                                  ConnectionContext* cntx) {
+  CmdArgParser parser(args);
+  auto listeners = GetNonPriviligedListeners();
+
+  auto timeout = parser.Next<uint64_t>();
+  ClientPause pause_state = ClientPause::ALL;
+  if (parser.HasNext()) {
+    pause_state = parser.MapNext("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
+  }
+  if (auto err = parser.Error(); err) {
+    return builder->SendError(err->MakeReply());
+  }
+
+  const auto timeout_ms = timeout * 1ms;
+  auto is_pause_in_progress = [this, end_time = chrono::steady_clock::now() + timeout_ms] {
+    return ServerState::tlocal()->gstate() != GlobalState::SHUTTING_DOWN &&
+           chrono::steady_clock::now() < end_time && is_c_pause_in_progress_.load();
+  };
+
+  auto cleanup = [this] {
+    active_pauses_.fetch_sub(1);
+    client_pause_ec_.notify();
+  };
+
+  if (auto pause_fb_opt = Pause(listeners, cntx->ns, cntx->conn(), pause_state,
+                                std::move(is_pause_in_progress), cleanup);
+      pause_fb_opt) {
+    is_c_pause_in_progress_.store(true);
+    active_pauses_.fetch_add(1);
+    pause_fb_opt->Detach();
+    builder->SendOk();
+  } else {
+    builder->SendError("Failed to pause all running clients");
+  }
 }
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))
