@@ -3005,12 +3005,14 @@ async def test_cluster_sharded_pubsub_shard_commands(df_factory: DflyInstanceFac
     consumer.ssubscribe("shard-channel")
 
     message = await c_nodes[0].execute_command("PUBSUB SHARDCHANNELS")
+    message.sort()
     assert message == ["pubsub-shard-channel", "shard-channel"]
 
     message = await c_nodes[0].execute_command("PUBSUB SHARDCHANNELS pubsub*")
     assert message == ["pubsub-shard-channel"]
 
     message = await c_nodes[0].execute_command("PUBSUB SHARDCHANNELS *channel")
+    message.sort()
     assert message == ["pubsub-shard-channel", "shard-channel"]
 
     message = await c_nodes[0].execute_command("PUBSUB SHARDNUMSUB pubsub-shard-channel")
