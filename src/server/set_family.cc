@@ -26,6 +26,9 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/transaction.h"
 
+ABSL_FLAG(bool, legacy_saddex_keepttl, false,
+          "If true SADDEX does not update TTL for existing fields");
+
 namespace dfly {
 
 using namespace facade;
@@ -89,7 +92,7 @@ struct StringSetWrapper {
     obj->InitRobj(OBJ_SET, kEncodingStrMap2, CompactObj::AllocateMR<StringSet>());
   }
 
-  unsigned Add(const NewEntries& entries, uint32_t ttl_sec) const {
+  unsigned Add(const NewEntries& entries, uint32_t ttl_sec, bool update_ttl = true) const {
     unsigned res = 0;
     string_view members[StringSet::kMaxBatchLen];
     size_t entries_len = std::visit([](const auto& e) { return e.size(); }, entries);
@@ -100,13 +103,13 @@ struct StringSetWrapper {
     for (string_view member : EntriesRange(entries)) {
       members[len++] = member;
       if (len == StringSet::kMaxBatchLen) {
-        res += ss->AddMany(absl::MakeSpan(members, StringSet::kMaxBatchLen), ttl_sec);
+        res += ss->AddMany(absl::MakeSpan(members, StringSet::kMaxBatchLen), ttl_sec, update_ttl);
         len = 0;
       }
     }
 
     if (len) {
-      res += ss->AddMany(absl::MakeSpan(members, len), ttl_sec);
+      res += ss->AddMany(absl::MakeSpan(members, len), ttl_sec, update_ttl);
     }
 
     return res;
@@ -500,7 +503,8 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   }
 
   if (co.Encoding() != kEncodingIntSet) {
-    res = StringSetWrapper{co, op_args.db_cntx}.Add(vals, UINT32_MAX);
+    // update_ttl is false as SADD does not allow specifying expiry
+    res = StringSetWrapper{co, op_args.db_cntx}.Add(vals, UINT32_MAX, false);
   }
 
   if (journal_update && op_args.shard->journal()) {
@@ -546,7 +550,8 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
     CHECK(IsDenseEncoding(co));
   }
 
-  return StringSetWrapper{co, op_args.db_cntx}.Add(vals, ttl_sec);
+  bool update_ttl = !absl::GetFlag(FLAGS_legacy_saddex_keepttl);
+  return StringSetWrapper{co, op_args.db_cntx}.Add(vals, ttl_sec, update_ttl);
 }
 
 OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, facade::ArgRange vals,

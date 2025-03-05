@@ -29,7 +29,7 @@ class StringSet : public DenseSet {
   // Returns true if elem was added.
   bool Add(std::string_view s1, uint32_t ttl_sec = UINT32_MAX);
 
-  unsigned AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec);
+  unsigned AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec, bool update_ttl = true);
 
   bool Erase(std::string_view str) {
     return EraseInternal(&str, 1);
@@ -108,7 +108,10 @@ class StringSet : public DenseSet {
  protected:
   uint64_t Hash(const void* ptr, uint32_t cookie) const override;
 
-  unsigned AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec);
+  // Returns the number of new fields added to string set. If update_ttl is true and ttl_sec is a
+  // valid TTL value (less than UINT32_MAX), then TTL for existing fields is updated with given
+  // value.
+  unsigned AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec, bool update_ttl);
 
   bool ObjEqual(const void* left, const void* right, uint32_t right_cookie) const override;
 

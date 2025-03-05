@@ -51,7 +51,7 @@ bool StringSet::Add(string_view src, uint32_t ttl_sec) {
   return true;
 }
 
-unsigned StringSet::AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec) {
+unsigned StringSet::AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec, bool update_ttl) {
   std::string_view views[kMaxBatchLen];
   unsigned res = 0;
   if (BucketCount() < span.size()) {
@@ -63,19 +63,19 @@ unsigned StringSet::AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec)
       views[i] = span[i];
 
     span.remove_prefix(kMaxBatchLen);
-    res += AddBatch(absl::MakeSpan(views), ttl_sec);
+    res += AddBatch(absl::MakeSpan(views), ttl_sec, update_ttl);
   }
 
   if (span.size()) {
     for (size_t i = 0; i < span.size(); i++)
       views[i] = span[i];
 
-    res += AddBatch(absl::MakeSpan(views, span.size()), ttl_sec);
+    res += AddBatch(absl::MakeSpan(views, span.size()), ttl_sec, update_ttl);
   }
   return res;
 }
 
-unsigned StringSet::AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec) {
+unsigned StringSet::AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec, bool update_ttl) {
   uint64_t hash[kMaxBatchLen];
   bool has_ttl = ttl_sec != UINT32_MAX;
   unsigned count = span.size();
@@ -94,6 +94,8 @@ unsigned StringSet::AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec
       ++res;
       sds field = MakeSetSds(span[i], ttl_sec);
       AddUnique(field, has_ttl, hash[i]);
+    } else if (update_ttl && has_ttl) {
+      ObjUpdateExpireTime(prev, ttl_sec);
     }
   }
 
