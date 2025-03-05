@@ -4,153 +4,221 @@
 
 #pragma once
 
+#include <cassert>
 #include <cstring>
 #include <memory>
 #include <string_view>
 #include <vector>
 
+#include "base/hash.h"
+
 namespace dfly {
 
-class ISSEntry {
+class ISLEntry {
+  friend class IntrusiveStringList;
+
  public:
-  ISSEntry(std::string_view key) {
-    ISSEntry* next = nullptr;
+  ISLEntry() = default;
+
+  ISLEntry(char* data) {
+    data_ = data;
+  }
+
+  operator bool() const {
+    return data_;
+  }
+
+  std::string_view Key() const {
+    return {GetKeyData(), GetKeySize()};
+  }
+
+ private:
+  static ISLEntry Create(std::string_view key) {
+    char* next = nullptr;
     uint32_t key_size = key.size();
 
     auto size = sizeof(next) + sizeof(key_size) + key_size;
 
-    data_ = (char*)malloc(size);
+    char* data = (char*)malloc(size);
 
-    std::memcpy(data_, &next, sizeof(next));
+    std::memcpy(data, &next, sizeof(next));
 
-    auto* key_size_pos = data_ + sizeof(next);
+    auto* key_size_pos = data + sizeof(next);
     std::memcpy(key_size_pos, &key_size, sizeof(key_size));
 
     auto* key_pos = key_size_pos + sizeof(key_size);
     std::memcpy(key_pos, key.data(), key_size);
+
+    return ISLEntry(data);
   }
 
-  std::string_view Key() const {
-    return {GetKeyData(), GetKeySize()};
+  static void Destroy(ISLEntry entry) {
+    free(entry.data_);
   }
 
-  ISSEntry* Next() const {
-    ISSEntry* next = nullptr;
-    std::memcpy(&next, data_, sizeof(next));
+  ISLEntry Next() const {
+    ISLEntry next;
+    std::memcpy(&next.data_, data_, sizeof(next));
     return next;
   }
 
-  void SetNext(ISSEntry* next) {
+  void SetNext(ISLEntry next) {
     std::memcpy(data_, &next, sizeof(next));
   }
 
- private:
   const char* GetKeyData() const {
-    return data_ + sizeof(ISSEntry*) + sizeof(uint32_t);
+    return data_ + sizeof(ISLEntry*) + sizeof(uint32_t);
   }
 
   uint32_t GetKeySize() const {
     uint32_t size = 0;
-    std::memcpy(&size, data_ + sizeof(ISSEntry*), sizeof(size));
+    std::memcpy(&size, data_ + sizeof(ISLEntry*), sizeof(size));
     return size;
   }
 
   // TODO consider use SDS strings or other approach
   // TODO add optimization for big keys
-  // memory daya layout [ISSEntry*, key_size, key]
-  char* data_;
+  // memory daya layout [ISLEntry*, key_size, key]
+  char* data_ = nullptr;
 };
 
-class ISMEntry {
- public:
-  ISMEntry(std::string_view key, std::string_view val) {
-    ISMEntry* next = nullptr;
-    uint32_t key_size = key.size();
-    uint32_t val_size = val.size();
-
-    auto size = sizeof(next) + sizeof(key_size) + sizeof(val_size) + key_size + val_size;
-
-    data_ = (char*)malloc(size);
-
-    std::memcpy(data_, &next, sizeof(next));
-
-    auto* key_size_pos = data_ + sizeof(next);
-    std::memcpy(key_size_pos, &key_size, sizeof(key_size));
-
-    auto* val_size_pos = key_size_pos + sizeof(key_size);
-    std::memcpy(val_size_pos, &val_size, sizeof(val_size));
-
-    auto* key_pos = val_size_pos + sizeof(val_size);
-    std::memcpy(key_pos, key.data(), key_size);
-
-    auto* val_pos = key_pos + key_size;
-    std::memcpy(val_pos, val.data(), val_size);
-  }
-
-  std::string_view Key() const {
-    return {GetKeyData(), GetKeySize()};
-  }
-
-  std::string_view Val() const {
-    return {GetValData(), GetValSize()};
-  }
-
-  ISMEntry* Next() const {
-    ISMEntry* next = nullptr;
-    std::memcpy(&next, data_, sizeof(next));
-    return next;
-  }
-
-  void SetVal(std::string_view val) {
-    // TODO add optimization for the same size key
-    uint32_t val_size = val.size();
-    auto new_size =
-        sizeof(ISMEntry*) + sizeof(uint32_t) + sizeof(uint32_t) + GetKeySize() + val_size;
-
-    data_ = (char*)realloc(data_, new_size);
-
-    auto* val_size_pos = data_ + sizeof(ISMEntry*) + sizeof(uint32_t);
-    std::memcpy(val_size_pos, &val_size, sizeof(val_size));
-
-    auto* val_pos = val_size_pos + sizeof(val_size) + GetKeySize();
-    std::memcpy(val_pos, val.data(), val_size);
-  }
-
-  void SetNext(ISMEntry* next) {
-    std::memcpy(data_, &next, sizeof(next));
+class FakePrevISLEntry : public ISLEntry {
+  FakePrevISLEntry(ISLEntry) {
+    fake_allocated_mem_ = ;
   }
 
  private:
-  const char* GetKeyData() const {
-    return data_ + sizeof(ISMEntry*) + sizeof(uint32_t) + sizeof(uint32_t);
+  void* fake_allocated_mem_;
+}
+
+class IntrusiveStringList {
+ public:
+  ~IntrusiveStringList() {
+    while (start_) {
+      auto next = start_.Next();
+      ISLEntry::Destroy(start_);
+      start_ = next;
+    }
   }
 
-  uint32_t GetKeySize() const {
-    uint32_t size = 0;
-    std::memcpy(&size, data_ + sizeof(ISMEntry*), sizeof(size));
-    return size;
+  ISLEntry Insert(ISLEntry e) {
+    e.SetNext(start_);
+    start_ = e;
+    return start_;
   }
 
-  const char* GetValData() const {
-    return GetKeyData() + GetKeySize();
+  ISLEntry Emplace(std::string_view key) {
+    return Insert(ISLEntry::Create(key));
   }
 
-  uint32_t GetValSize() const {
-    uint32_t size = 0;
-    std::memcpy(&size, data_ + sizeof(ISMEntry*) + sizeof(uint32_t), sizeof(size));
-    return size;
+  ISLEntry Find(std::string_view str) {
+    auto it = start_;
+    for (; it && it.Key() != str; it = it.Next())
+      ;
+    return it;
   }
 
-  // TODO consider use SDS strings or other approach
-  // TODO add optimization for big keys
-  // memory daya layout [ISMEntry*, key_size, val_size, key, val]
-  char* data_;
+  bool Erase(std::string_view str) {
+    if (!start_) {
+      return false;
+    }
+    auto it = start_;
+    if (it.Key() == str) {
+      start_ = it.Next();
+      ISLEntry::Destroy(it);
+      return true;
+    }
+
+    auto prev = it;
+    for (it = it.Next(); it; prev = it, it = it.Next()) {
+      if (it.Key() == str) {
+        prev.SetNext(it.Next());
+        ISLEntry::Destroy(it);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void MoveNext(ISLEntry& prev) {
+    auto next = prev.Next();
+    prev.SetNext(next.Next());
+    Insert(next);
+  }
+
+ private:
+  ISLEntry start_;
 };
 
-template <class EntryT> class IntrusiveStringSet {
+class IntrusiveStringSet {
  public:
+  // TODO add TTL processing
+  ISLEntry Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX) {
+    if (size_ >= entries_.size()) {
+      Grow();
+    }
+    auto bucket_id = BucketId(Hash(str));
+    auto& bucket = entries_[bucket_id];
+
+    if (auto existed_item = bucket.Find(str); existed_item) {
+      // TODO consider common implementation for key value pair
+      return ISLEntry();
+    }
+
+    ++size_;
+    return bucket.Emplace(str);
+  }
+
+  bool Erase(std::string_view str) {
+    auto bucket_id = BucketId(Hash(str));
+    return entries_[bucket_id].Erase(str);
+  }
+
+  ISLEntry Find(std::string_view member) {
+    auto bucket_id = BucketId(Hash(member));
+    return entries_[bucket_id].Find(member);
+  }
+
+  // Returns the number of elements in the map. Note that it might be that some of these elements
+  // have expired and can't be accessed.
+  size_t UpperBoundSize() const {
+    return size_;
+  }
+
+  bool Empty() const {
+    return size_ == 0;
+  }
+
  private:
-  std::vector<EntryT*> entries_;
+  std::uint32_t Capacity() const {
+    return 1 << capacity_log_;
+  }
+
+  void Grow() {
+    ++capacity_log_;
+    entries_.resize(Capacity());
+
+    // TODO rehashing
+  }
+
+  uint32_t BucketId(uint64_t hash) const {
+    assert(capacity_log_ > 0);
+    return hash >> (64 - capacity_log_);
+  }
+
+  uint64_t Hash(std::string_view str) const {
+    constexpr XXH64_hash_t kHashSeed = 24061983;
+    return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
+  }
+
+ private:
+  static constexpr size_t kMinSizeShift = 2;
+  std::uint32_t capacity_log_ = 1;
+  std::uint32_t size_ = 0;  // number of elements in the set.
+
+  static_assert(sizeof(IntrusiveStringList) == sizeof(void*),
+                "IntrusiveStringList should be just a pointer");
+  std::vector<IntrusiveStringList> entries_;
 };
 
 }  // namespace dfly

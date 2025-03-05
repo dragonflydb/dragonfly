@@ -25,31 +25,30 @@ class IntrusiveStringSetTest : public ::testing::Test {
   }
 };
 
-TEST_F(IntrusiveStringSetTest, ISSEntryTest) {
-  ISSEntry test("0123456789");
+TEST_F(IntrusiveStringSetTest, IntrusiveStringListTest) {
+  IntrusiveStringList isl;
+  ISLEntry test = isl.Emplace("0123456789");
 
   EXPECT_EQ(test.Key(), "0123456789"sv);
-  EXPECT_EQ(test.Next(), nullptr);
 
-  test.SetNext(&test);
+  test = isl.Emplace("123456789");
 
-  EXPECT_EQ(test.Key(), "0123456789"sv);
-  EXPECT_EQ(test.Next(), &test);
-}
+  EXPECT_EQ(test.Key(), "123456789"sv);
 
-TEST_F(IntrusiveStringSetTest, ISMEntryTest) {
-  ISMEntry test("0123456789", "qwertyuiopasdfghjklzxcvbnm");
+  test = isl.Emplace("23456789");
 
-  EXPECT_EQ(test.Key(), "0123456789"sv);
-  EXPECT_EQ(test.Val(), "qwertyuiopasdfghjklzxcvbnm"sv);
-  EXPECT_EQ(test.Next(), nullptr);
+  EXPECT_EQ(isl.Find("0123456789").Key(), "0123456789"sv);
+  EXPECT_EQ(isl.Find("23456789").Key(), "23456789"sv);
+  EXPECT_EQ(isl.Find("123456789").Key(), "123456789"sv);
+  EXPECT_EQ(isl.Find("test"), ISLEntry());
 
-  test.SetVal("QWERTYUIOPASDFGHJKLZXCVBNM");
-  test.SetNext(&test);
+  EXPECT_TRUE(isl.Erase("23456789"));
+  EXPECT_EQ(isl.Find("23456789"), ISLEntry());
+  EXPECT_FALSE(isl.Erase("test"));
+  EXPECT_EQ(isl.Find("test"), ISLEntry());
 
-  EXPECT_EQ(test.Key(), "0123456789"sv);
-  EXPECT_EQ(test.Val(), "QWERTYUIOPASDFGHJKLZXCVBNM"sv);
-  EXPECT_EQ(test.Next(), &test);
+  IntrusiveStringList isl2;
+  isl2.MoveNext()
 }
 
 }  // namespace dfly
