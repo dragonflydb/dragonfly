@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2025, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -59,7 +59,7 @@ class AclFamily final {
   void StreamUpdatesToAllProactorConnections(const std::string& user,
                                              const Commands& update_commands,
                                              const AclKeys& update_keys,
-                                             const AclPubSub& update_pub_sub);
+                                             const AclPubSub& update_pub_sub, size_t db);
 
   // Helper function that closes all open connection from the deleted user
   void EvictOpenConnectionsOnAllProactors(const absl::flat_hash_set<std::string_view>& user);
@@ -160,6 +160,8 @@ class AclFamily final {
     static CategoryToCommandsIndexStore index = std::move(store);
     return index;
   }
+
+  size_t dbnum_ = 0;
 
   // Only for testing interface
  public:

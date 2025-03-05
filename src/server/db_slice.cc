@@ -40,6 +40,8 @@ ABSL_FLAG(double, table_growth_margin, 0.4,
 ABSL_FLAG(std::string, notify_keyspace_events, "",
           "notify-keyspace-events. Only Ex is supported for now");
 
+ABSL_DECLARE_FLAG(uint32_t, dbnum);
+
 namespace dfly {
 
 using namespace std;
@@ -375,6 +377,12 @@ DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
       client_tracking_map_(owner->memory_resource()) {
   db_arr_.emplace_back();
   CreateDb(0);
+  const uint32_t dbnum = absl::GetFlag(FLAGS_dbnum);
+  // We need this to avoid a hop during Auth for users because the ACL select rule
+  // might contain a db that is not active.
+  for (size_t i = 1; i < dbnum; ++i) {
+    ActivateDb(i);
+  }
   expire_base_[0] = expire_base_[1] = 0;
   soft_budget_limit_ = (0.3 * max_memory_limit / shard_set->size());
 

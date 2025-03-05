@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -43,6 +44,7 @@ struct UserCredentials {
   AclKeys keys;
   AclPubSub pub_sub;
   std::string ns;
+  size_t db;
 };
 
 }  // namespace dfly::acl

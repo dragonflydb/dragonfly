@@ -74,6 +74,8 @@ class User final {
     // TODO allow reset all
     // bool reset_all{false};
 
+    // DFLY specific
+    std::optional<size_t> select_db;
     std::string ns;
   };
 
@@ -123,6 +125,8 @@ class User final {
 
   const std::string& Namespace() const;
 
+  size_t Db() const;
+
   using CategoryChanges = absl::flat_hash_map<CategoryChange, ChangeMetadata>;
   using CommandChanges = absl::flat_hash_map<CommandChange, ChangeMetadata>;
 
@@ -160,6 +164,8 @@ class User final {
 
   void SetNamespace(const std::string& ns);
 
+  void SetSelectDb(std::optional<size_t> db);
+
   // Set NOPASS and remove all passwords
   void SetNopass();
 
@@ -195,6 +201,10 @@ class User final {
   bool is_active_{false};
 
   std::string namespace_;
+
+  // if db == std::numeric_limits<size_t>::max() then all db's.
+  // Otherwise user restricted to the value of db_
+  size_t db_{std::numeric_limits<size_t>::max()};
 };
 
 }  // namespace dfly::acl

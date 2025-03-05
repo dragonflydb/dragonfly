@@ -116,6 +116,7 @@ class Connection : public util::Connection {
     std::vector<uint64_t> commands;
     dfly::acl::AclKeys keys;
     dfly::acl::AclPubSub pub_sub;
+    size_t db_indx;
   };
 
   // Migration request message, the async fiber stops to give way for thread migration.
