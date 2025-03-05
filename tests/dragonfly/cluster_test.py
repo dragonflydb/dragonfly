@@ -2139,6 +2139,7 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 @pytest.mark.parametrize("chunk_size", [1_000_000, 30])
 @pytest.mark.asyncio
+@pytest.mark.exclude_epoll
 async def test_cluster_migration_while_seeding(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory, chunk_size
 ):
