@@ -1361,7 +1361,6 @@ OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key,
                                   facade::ArgRange members) {
   auto res_it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
 
-  // If the key doesn't exist and there's only one member, return KEY_NOTFOUND
   if (res_it.status() == OpStatus::KEY_NOTFOUND) {
     // If the key doesn't exist return an array of NIL values
     MScoreResponse result(members.Size(), std::nullopt);
