@@ -287,6 +287,18 @@ TEST_F(ZSetFamilyTest, ZMScore) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("42", "3.14", ArgType(RespExpr::NIL)));
 }
 
+// Test for ZMSCORE with member on a non-existent keys
+TEST_F(ZSetFamilyTest, ZMScoreNonExistentKeys) {
+  // Case 1: Single member with non-existent key (ZMSCORE abc x)
+  auto resp = Run({"zmscore", "abc", "x"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  // Case 2: Multiple members with non-existent key (ZMSCORE abc x y z)
+  resp = Run({"zmscore", "abc", "x", "y", "z"});
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL), ArgType(RespExpr::NIL)));
+}
+
 TEST_F(ZSetFamilyTest, ZRangeRank) {
   Run({"zadd", "x", "1.1", "a", "2.1", "b"});
   EXPECT_THAT(Run({"zrangebyscore", "x", "0", "(1.1"}), ArrLen(0));

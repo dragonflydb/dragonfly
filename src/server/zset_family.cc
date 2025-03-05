@@ -1360,6 +1360,13 @@ OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, facade::ArgRang
 OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key,
                                   facade::ArgRange members) {
   auto res_it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
+
+  if (res_it.status() == OpStatus::KEY_NOTFOUND) {
+    // If the key doesn't exist return an array of NIL values
+    MScoreResponse result(members.Size(), std::nullopt);
+    return result;
+  }
+
   if (!res_it)
     return res_it.status();
 
