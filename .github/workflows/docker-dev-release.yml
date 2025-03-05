@@ -87,24 +87,27 @@ jobs:
           load: true  # Load the build images into the local docker.
       - name: Test Image
         run: |
-          image_tag=${{ steps.metadata.outputs.tags }}
           echo ${{ steps.build.outputs.digest }}
-          image_digest=${{ env.image }}@${{ steps.build.outputs.digest }}
+          image_tags=(${{ steps.metadata.outputs.tags }})
 
           # install redis-tools
           sudo apt-get install redis-tools -y
 
-          docker image inspect ${image_tag}
-          echo "Testing ${{ matrix.flavor }} image"
+          for image_tag in "${image_tags[@]}"; do
+            echo "Testing image: ${image_tag}"
+            docker image inspect ${image_tag}
+            echo "Testing ${{ matrix.flavor }} image"
 
-          # docker run with port-forwarding
-          docker run -d -p 6379:6379 ${image_tag}
-          sleep 5
-          if [[ $(redis-cli -h localhost ping) != "PONG" ]]; then
-            echo "Redis ping failed"
-            exit 1
-          fi
-          echo "Redis ping succeeded"
+            # docker run with port-forwarding
+            docker run -d -p 6379:6379 ${image_tag}
+            sleep 5
+            if [[ $(redis-cli -h localhost ping) != "PONG" ]]; then
+              echo "Redis ping failed for ${image_tag}"
+              exit 1
+            fi
+            echo "Redis ping succeeded for ${image_tag}"
+            docker stop $(docker ps -q --filter ancestor=${image_tag})
+          done
           exit 0
 
     outputs:
