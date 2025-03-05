@@ -46,6 +46,7 @@ cxx_test(interpreter_test dfly_core LABELS DFLY)
 
 cxx_test(string_set_test dfly_core LABELS DFLY)
 cxx_test(string_map_test dfly_core LABELS DFLY)
+cxx_test(intrusive_string_set_test dfly_core LABELS DFLY)
 cxx_test(sorted_map_test dfly_core redis_test_lib LABELS DFLY)
 cxx_test(bptree_set_test dfly_core LABELS DFLY)
 cxx_test(linear_search_map_test dfly_core LABELS DFLY)
