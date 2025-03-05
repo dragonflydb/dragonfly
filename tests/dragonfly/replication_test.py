@@ -1103,6 +1103,7 @@ More details in https://github.com/dragonflydb/dragonfly/issues/1231
 
 
 @pytest.mark.slow
+@pytest.mark.exclude_epoll
 async def test_flushall_in_full_sync(df_factory):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=2)
