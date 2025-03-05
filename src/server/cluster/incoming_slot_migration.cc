@@ -217,7 +217,7 @@ bool IncomingSlotMigration::Join(long attempt) {
 void IncomingSlotMigration::Stop() {
   string_view log_state = state_.load() == MigrationState::C_FINISHED ? "Finishing" : "Cancelling";
   LOG(INFO) << log_state << " incoming migration of slots " << slots_.ToString();
-  cntx_.ReportCancelError();
+  cntx_.Cancel();
 
   for (auto& flow : shard_flows_) {
     if (auto err = flow->Cancel(); err) {

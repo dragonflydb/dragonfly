@@ -309,8 +309,11 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
                   nullptr, ClientPause::WRITE, is_pause_in_progress);
 
   if (!pause_fb_opt) {
-    LOG(WARNING) << "Migration finalization time out " << cf_->MyID() << " : "
-                 << migration_info_.node_info.id << " attempt " << attempt;
+    auto err = absl::StrCat("Migration finalization time out ", cf_->MyID(), " : ",
+                            migration_info_.node_info.id, " attempt ", attempt);
+
+    LOG(WARNING) << err;
+    SetLastError(std::move(err));
   }
 
   absl::Cleanup cleanup([&is_block_active, &pause_fb_opt]() {

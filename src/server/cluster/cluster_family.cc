@@ -941,8 +941,6 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, SinkReplyBuilder* builder,
     return builder->SendError(err->MakeReply());
   }
 
-  auto host_ip = cntx->conn()->RemoteEndpointAddress();
-
   VLOG(1) << "Create flow " << source_id << " shard_id: " << shard_id;
 
   cntx->conn()->SetName(absl::StrCat("migration_flow_", source_id));
