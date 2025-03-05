@@ -3006,8 +3006,13 @@ async def test_cluster_sharded_pubsub_shard_commands(df_factory: DflyInstanceFac
 
     # Consume subscription message result from above
     message = consumer.get_sharded_message(target_node=node_a)
-    assert message == {"type": "subscribe", "pattern": None, "channel": b"pubsub-shard-channel", "data": 1,}
-  
+    assert message == {
+        "type": "subscribe",
+        "pattern": None,
+        "channel": b"pubsub-shard-channel",
+        "data": 1,
+    }
+
     message = await c_nodes[0].execute_command("PUBSUB SHARDCHANNELS")
     assert message == ["pubsub-shard-channel"]
 
@@ -3033,6 +3038,7 @@ async def test_cluster_sharded_pubsub_shard_commands(df_factory: DflyInstanceFac
     with pytest.raises(redis.exceptions.ResponseError) as moved_error:
         await c_nodes[0].execute_command("PUBSUB NUMPAT")
     assert str(moved_error.value) == f"PUBSUB NUMPAT is not supported in cluster mode yet"
+
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 async def test_cluster_migration_errors_num(df_factory: DflyInstanceFactory):
