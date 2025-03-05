@@ -11,8 +11,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  image: ghcr.io/abhra303/dragonfly-dev
-  GCS_IMAGE: us-central1-docker.pkg.dev/dragonflydb-public/dragonfly-registry/dragonfly
+  image: ghcr.io/dragonflydb/dragonfly-dev
+  GCS_IMAGE: us-central1-docker.pkg.dev/dragonflydb-public/dragonfly-registry/dragonfly-dev
 
 jobs:
   build_and_tag:
@@ -46,7 +46,7 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to GitHub Container Registry
+      - name: Login to Gcp Artifact Registry
         uses: docker/login-action@v3
         with:
           registry: us-central1-docker.pkg.dev
@@ -129,7 +129,7 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to GitHub Container Registry
+      - name: Login to Gcp Artifact Registry
         uses: docker/login-action@v3
         with:
           registry: us-central1-docker.pkg.dev
@@ -145,10 +145,17 @@ jobs:
             docker manifest create ${sha_tag} --amend ${sha_tag}-amd64 --amend ${sha_tag}-arm64
             docker manifest push ${sha_tag}
 
-            gcs_tag="${{ env.GCS_IMAGE }}:alpha-${{ matrix.flavor }}"
-
             # Create and push the manifest like dragonfly-dev:alpine
             docker manifest create ${flavor_tag} --amend ${sha_tag}-amd64 --amend ${sha_tag}-arm64
             docker manifest push ${flavor_tag}
-            docker manifest create ${gcs_tag} --amend ${sha_amd} --amend ${sha_arm}
+
+            gcs_tag="${{ env.GCS_IMAGE }}:${{ matrix.flavor }}"
+            gcs_sha=${gcs_tag}-${{ needs.build_and_tag.outputs.sha }}
+
+            # Create and push the manifest like dragonfly-dev:alpine-<sha>
+            docker manifest create ${gcs_sha} --amend ${gcs_sha}-amd64 --amend ${gcs_sha}-arm64
+            docker manifest push ${gcs_sha}
+
+            # Create and push the manifest like dragonfly-dev:alpine
+            docker manifest create ${gcs_tag} --amend ${gcs_sha}-amd64 --amend ${gcs_sha}-arm64
             docker manifest push ${gcs_tag}
