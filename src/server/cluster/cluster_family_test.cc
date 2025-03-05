@@ -625,7 +625,12 @@ TEST_F(ClusterFamilyTest, ClusterModePubSubNotAllowed) {
               ErrArg("PSUBSCRIBE is not supported in cluster mode yet"));
   EXPECT_THAT(Run({"PUNSUBSCRIBE", "ch?"}),
               ErrArg("PUNSUBSCRIBE is not supported in cluster mode yet"));
-  EXPECT_THAT(Run({"PUBSUB", "CHANNELS"}), ErrArg("PUBSUB is not supported in cluster mode yet"));
+  EXPECT_THAT(Run({"PUBSUB", "CHANNELS"}),
+              ErrArg("PUBSUB CHANNELS is not supported in cluster mode yet"));
+  EXPECT_THAT(Run({"PUBSUB", "NUMSUB"}),
+              ErrArg("PUBSUB NUMSUB is not supported in cluster mode yet"));
+  EXPECT_THAT(Run({"PUBSUB", "NUMPAT"}),
+              ErrArg("PUBSUB NUMPAT is not supported in cluster mode yet"));
 }
 
 TEST_F(ClusterFamilyTest, ClusterFirstConfigCallDropsEntriesNotOwnedByNode) {
