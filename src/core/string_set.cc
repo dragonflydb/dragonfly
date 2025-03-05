@@ -4,6 +4,7 @@
 
 #include "core/string_set.h"
 
+#include "absl/flags/flag.h"
 #include "core/compact_object.h"
 #include "core/sds_utils.h"
 
@@ -13,6 +14,9 @@ extern "C" {
 }
 
 #include "base/logging.h"
+
+ABSL_FLAG(bool, legacy_saddex_keepttl, false,
+          "If true SADDEX does not update TTL for existing fields");
 
 using namespace std;
 
@@ -51,7 +55,7 @@ bool StringSet::Add(string_view src, uint32_t ttl_sec) {
   return true;
 }
 
-unsigned StringSet::AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec, bool update_ttl) {
+unsigned StringSet::AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec) {
   std::string_view views[kMaxBatchLen];
   unsigned res = 0;
   if (BucketCount() < span.size()) {
@@ -63,19 +67,19 @@ unsigned StringSet::AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec,
       views[i] = span[i];
 
     span.remove_prefix(kMaxBatchLen);
-    res += AddBatch(absl::MakeSpan(views), ttl_sec, update_ttl);
+    res += AddBatch(absl::MakeSpan(views), ttl_sec);
   }
 
   if (span.size()) {
     for (size_t i = 0; i < span.size(); i++)
       views[i] = span[i];
 
-    res += AddBatch(absl::MakeSpan(views, span.size()), ttl_sec, update_ttl);
+    res += AddBatch(absl::MakeSpan(views, span.size()), ttl_sec);
   }
   return res;
 }
 
-unsigned StringSet::AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec, bool update_ttl) {
+unsigned StringSet::AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec) {
   uint64_t hash[kMaxBatchLen];
   bool has_ttl = ttl_sec != UINT32_MAX;
   unsigned count = span.size();
@@ -87,6 +91,12 @@ unsigned StringSet::AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec
     hash[i] = CompactObj::HashCode(span[i]);
     Prefetch(hash[i]);
   }
+
+  // update ttl if legacy_saddex_keepttl is off (which is default). This variable is intended for
+  // SADDEX, but this method is called from SADD as well, where ttl is set to UINT32_MAX value,
+  // which results in has_ttl being false. This means that ObjUpdateExpireTime is never called from
+  // SADD code path even when update_ttl is true.
+  const bool update_ttl = !absl::GetFlag(FLAGS_legacy_saddex_keepttl);
 
   for (unsigned i = 0; i < count; ++i) {
     void* prev = FindInternal(&span[i], hash[i], 1);
