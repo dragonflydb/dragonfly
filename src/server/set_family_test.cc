@@ -4,15 +4,19 @@
 
 #include "server/set_family.h"
 
+#include "absl/flags/flag.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
 #include "server/command_registry.h"
 #include "server/test_utils.h"
+
 extern "C" {
 #include "redis/intset.h"
 #include "redis/zmalloc.h"
 }
+
+ABSL_DECLARE_FLAG(bool, legacy_saddex_keepttl);
 
 using namespace testing;
 using namespace std;
@@ -376,6 +380,15 @@ TEST_F(SetFamilyTest, IntSetMemcpy) {
 
   zfree(original);
   zfree(replacement);
+}
+
+TEST_F(SetFamilyTest, SAddEx) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+  EXPECT_THAT(Run({"saddex", "key", "2", "val"}), IntArg(1));
+  AdvanceTime(1500);
+  EXPECT_THAT(Run({"saddex", "key", "2", "val"}), IntArg(0));
+  AdvanceTime(1000);
+  EXPECT_EQ(1, CheckedInt({"sismember", "key", "val"}));
 }
 
 }  // namespace dfly
