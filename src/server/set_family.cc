@@ -1437,10 +1437,9 @@ void SScan(CmdArgList args, const CommandContext& cmd_cntx) {
 void SAddEx(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser(args);
 
-  auto key = parser.Next<std::string_view>();
+  const std::string_view key = parser.Next<std::string_view>();
   const bool keepttl = parser.Check("KEEPTTL");
-
-  auto ttl_sec = parser.Next<uint32_t>();
+  const uint32_t ttl_sec = parser.Next<uint32_t>();
 
   if (auto err = parser.Error(); err) {
     return cmd_cntx.rb->SendError(err->MakeReply());
