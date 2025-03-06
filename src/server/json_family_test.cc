@@ -3046,4 +3046,21 @@ TEST_F(JsonFamilyTest, MaxNestingJsonDepth) {
   EXPECT_THAT(resp, ErrArg("failed to parse JSON"));
 }
 
+TEST_F(JsonFamilyTest, SetNestedFields) {
+  auto resp = Run({"JSON.SET", "json", "$", "{}"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json", "$['field1']", "1"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"field1":1})");
+
+  resp = Run({"JSON.SET", "json", "$['-field2']", "2"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"-field2":2,"field1":1})");
+}
+
 }  // namespace dfly
