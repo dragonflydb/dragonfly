@@ -18,7 +18,7 @@ namespace facade {
 
 class RespExpr {
  public:
-  using Buffer = absl::Span<const uint8_t>;
+  using Buffer = absl::Span<uint8_t>;
 
   enum Type : uint8_t { STRING, ARRAY, INT64, DOUBLE, NIL, NIL_ARRAY, ERROR };
 
@@ -70,7 +70,7 @@ using RespVec = RespExpr::Vec;
 using RespSpan = absl::Span<const RespExpr>;
 
 inline std::string_view ToSV(RespExpr::Buffer buf) {
-  return std::string_view{reinterpret_cast<const char*>(buf.data()), buf.size()};
+  return std::string_view{reinterpret_cast<char*>(buf.data()), buf.size()};
 }
 
 }  // namespace facade

@@ -185,11 +185,11 @@ void RedisParser::StashState(RespExpr::Vec* res) {
 auto RedisParser::ParseInline(Buffer str) -> ResultConsumed {
   DCHECK(!str.empty());
 
-  const uint8_t* ptr = str.begin();
-  const uint8_t* end = str.end();
-  const uint8_t* token_start = ptr;
+  uint8_t* ptr = str.begin();
+  uint8_t* end = str.end();
+  uint8_t* token_start = ptr;
 
-  auto find_token_end = [](const uint8_t* ptr, const uint8_t* end) {
+  auto find_token_end = [](uint8_t* ptr, uint8_t* end) {
     while (ptr != end && *ptr > 32)
       ++ptr;
     return ptr;
@@ -411,8 +411,8 @@ auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
     return ConsumeArrayLen(str);
   }
 
-  const char* s = reinterpret_cast<const char*>(str.data());
-  const char* eol = reinterpret_cast<const char*>(memchr(s, '\n', str.size()));
+  char* s = reinterpret_cast<char*>(str.data());
+  char* eol = reinterpret_cast<char*>(memchr(s, '\n', str.size()));
 
   // TODO: in client mode we still may not consume everything (see INPUT_PENDING below).
   // It's not a problem, because we need consume all the input only in server mode.
@@ -428,7 +428,7 @@ auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
       return {BAD_STRING, 0};
 
     cached_expr_->emplace_back(arg_c_ == '+' ? RespExpr::STRING : RespExpr::ERROR);
-    cached_expr_->back().u = Buffer{reinterpret_cast<const uint8_t*>(s), size_t((eol - 1) - s)};
+    cached_expr_->back().u = Buffer{reinterpret_cast<uint8_t*>(s), size_t((eol - 1) - s)};
   } else if (arg_c_ == ':') {
     DCHECK(!server_mode_);
     if (!eol) {
@@ -477,7 +477,7 @@ auto RedisParser::ConsumeBulk(Buffer str) -> ResultConsumed {
       // is_broken_token_ can be false, if we just parsed the bulk length but have
       // not parsed the token itself.
       if (is_broken_token_) {
-        memcpy(const_cast<uint8_t*>(bulk_str.end()), str.data(), bulk_len_);
+        memcpy(bulk_str.end(), str.data(), bulk_len_);
         bulk_str = Buffer{bulk_str.data(), bulk_str.size() + bulk_len_};
       } else {
         bulk_str = str.subspan(0, bulk_len_);
@@ -506,7 +506,7 @@ auto RedisParser::ConsumeBulk(Buffer str) -> ResultConsumed {
   size_t len = std::min<size_t>(str.size(), bulk_len_);
 
   if (is_broken_token_) {
-    memcpy(const_cast<uint8_t*>(bulk_str.end()), str.data(), len);
+    memcpy(bulk_str.end(), str.data(), len);
     bulk_str = Buffer{bulk_str.data(), bulk_str.size() + len};
     DVLOG(1) << "Extending bulk stash to size " << bulk_str.size();
   } else {
