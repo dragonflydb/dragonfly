@@ -2903,3 +2903,32 @@ async def test_replicaof_inside_multi(df_factory):
     logging.info(f"succeses: {num_successes}")
     assert MULTI_COMMANDS_TO_ISSUE > num_successes, "At least one REPLICAOF must be cancelled"
     assert num_successes > 0, "At least one REPLICAOF must success"
+
+
+async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFactory):
+    master = df_factory.create(proactor_threads=1, serialization_max_chunk_size=100000000000)
+    replicas = [df_factory.create(proactor_threads=1) for i in range(2)]
+
+    # Start instances and connect clients
+    df_factory.start_all([master] + replicas)
+    c_master = master.client()
+    c_replicas = [replica.client() for replica in replicas]
+
+    total = 100000
+    await c_master.execute_command(f"DEBUG POPULATE {total} tmp 100 TYPE SET ELEMENTS 100")
+
+    thresehold = 50000
+    for i in range(thresehold):
+        rand = random.randint(1, 10)
+        await c_master.execute_command(f"EXPIRE tmp:{i} {rand} NX")
+
+    seeder = StaticSeeder(key_target=10000)
+    fill_task = asyncio.create_task(seeder.run(master.client()))
+
+    for replica in c_replicas:
+        await replica.execute_command(f"REPLICAOF LOCALHOST {master.port}")
+
+    async with async_timeout.timeout(240):
+        await wait_for_replicas_state(*c_replicas)
+
+    await fill_task
