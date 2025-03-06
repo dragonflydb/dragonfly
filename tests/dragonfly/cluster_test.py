@@ -2983,6 +2983,51 @@ async def test_cluster_sharded_pub_sub(df_factory: DflyInstanceFactory):
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+async def test_cluster_sharded_pubsub_shard_commands(df_factory: DflyInstanceFactory):
+    nodes = [df_factory.create(port=next(next_port)) for i in range(2)]
+    df_factory.start_all(nodes)
+
+    c_nodes = [node.client() for node in nodes]
+
+    nodes_info = [(await create_node_info(instance)) for instance in nodes]
+    nodes_info[0].slots = [(0, 16383)]
+    nodes_info[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes_info)), [node.client for node in nodes_info])
+
+    node_a = ClusterNode("localhost", nodes[0].port)
+    node_b = ClusterNode("localhost", nodes[1].port)
+
+    consumer_client = RedisCluster(startup_nodes=[node_a, node_b])
+    consumer = consumer_client.pubsub()
+
+    consumer.ssubscribe("pubsub-shard-channel")
+    consumer.ssubscribe("shard-channel")
+
+    message = await c_nodes[0].execute_command("PUBSUB SHARDCHANNELS")
+    message.sort()
+    assert message == ["pubsub-shard-channel", "shard-channel"]
+
+    message = await c_nodes[0].execute_command("PUBSUB SHARDCHANNELS pubsub*")
+    assert message == ["pubsub-shard-channel"]
+
+    message = await c_nodes[0].execute_command("PUBSUB SHARDCHANNELS *channel")
+    message.sort()
+    assert message == ["pubsub-shard-channel", "shard-channel"]
+
+    message = await c_nodes[0].execute_command("PUBSUB SHARDNUMSUB pubsub-shard-channel")
+    assert message == ["pubsub-shard-channel", 1]
+
+    message = await c_nodes[0].execute_command(
+        "PUBSUB SHARDNUMSUB pubsub-shard-channel shard-channel"
+    )
+    assert message == ["pubsub-shard-channel", 1, "shard-channel", 1]
+
+    message = await c_nodes[0].execute_command("PUBSUB SHARDNUMSUB")
+    assert message == []
+
+
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 async def test_cluster_migration_errors_num(df_factory: DflyInstanceFactory):
     # create cluster with several nodes and create migrations from one node to others
     # but config propagated only to source node to get errors for migrations

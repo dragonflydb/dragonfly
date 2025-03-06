@@ -2337,14 +2337,12 @@ void Service::PubsubChannels(string_view pattern, SinkReplyBuilder* builder) {
 
 void Service::PubsubPatterns(SinkReplyBuilder* builder) {
   size_t pattern_count = ServerState::tlocal()->channel_store()->PatternCount();
-
   builder->SendLong(pattern_count);
 }
 
 void Service::PubsubNumSub(CmdArgList args, SinkReplyBuilder* builder) {
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   rb->StartArray(args.size() * 2);
-
   for (string_view channel : args) {
     rb->SendBulkString(channel);
     rb->SendLong(ServerState::tlocal()->channel_store()->FetchSubscribers(channel).size());
@@ -2362,9 +2360,6 @@ void Service::Monitor(CmdArgList args, const CommandContext& cmd_cntx) {
 void Service::Pubsub(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
-  if (IsClusterEnabled()) {
-    return rb->SendError("PUBSUB is not supported in cluster mode yet");
-  }
   if (args.size() < 1) {
     rb->SendError(WrongNumArgsError(cmd_cntx.conn_cntx->cid->name()));
     return;
@@ -2382,6 +2377,12 @@ void Service::Pubsub(CmdArgList args, const CommandContext& cmd_cntx) {
         "NUMSUB [<channel> <channel...>]",
         "\tReturns the number of subscribers for the specified channels, excluding",
         "\tpattern subscriptions.",
+        "SHARDCHANNELS [pattern]",
+        "\tReturns a list of active shard channels, optionally matching the specified pattern ",
+        "(default: '*').",
+        "SHARDNUMSUB [<channel> <channel...>]",
+        "\tReturns the number of subscribers for the specified shard channels, excluding",
+        "\tpattern subscriptions.",
         "HELP",
         "\tPrints this help."};
 
@@ -2389,16 +2390,21 @@ void Service::Pubsub(CmdArgList args, const CommandContext& cmd_cntx) {
     return;
   }
 
-  if (subcmd == "CHANNELS") {
+  // Don't allow SHARD subcommands in non cluster mode
+  if (!IsClusterEnabledOrEmulated() && ((subcmd == "SHARDCHANNELS") || (subcmd == "SHARDNUMSUB"))) {
+    auto err = absl::StrCat("PUBSUB ", subcmd, " is not supported in non cluster mode");
+    return rb->SendError(err);
+  }
+
+  if (subcmd == "CHANNELS" || subcmd == "SHARDCHANNELS") {
     string_view pattern;
     if (args.size() > 1) {
       pattern = ArgS(args, 1);
     }
-
     PubsubChannels(pattern, rb);
   } else if (subcmd == "NUMPAT") {
     PubsubPatterns(rb);
-  } else if (subcmd == "NUMSUB") {
+  } else if (subcmd == "NUMSUB" || subcmd == "SHARDNUMSUB") {
     args.remove_prefix(1);
     PubsubNumSub(args, rb);
   } else {
