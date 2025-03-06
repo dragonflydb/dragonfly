@@ -147,7 +147,6 @@ jobs:
               tag="${{ env.IMAGE }}:alpha-${{ matrix.flavor }}"
               docker manifest create ${tag} --amend ${sha_amd} --amend ${sha_arm}
               docker manifest push ${tag}
-
             elif [[ "${{matrix.flavor}}" == 'ubuntu' ]]; then
               tag="${{ env.IMAGE }}:latest"
               # Create and push the manifest like dragonfly:latest
