@@ -395,8 +395,13 @@ TEST_F(SetFamilyTest, SAddEx) {
 
   // KEEPTTL support. add field orig with TTL=10
   EXPECT_THAT(Run({"saddex", "key", "10", "orig"}), IntArg(1));
-  // add fields new and orig with TTL=5 and KEEPTTL=true. orig ttl should be preserved
+
+  // add fields new and orig with TTL=1 and KEEPTTL=true. orig ttl should be preserved
   EXPECT_THAT(Run({"saddex", "key", "KEEPTTL", "1", "orig", "new"}), IntArg(1));
+  EXPECT_LE(CheckedInt({"fieldttl", "key", "new"}), 1);
+
+  // The expiry for orig should be unchanged, at least greater than 5 at this point given some time
+  // has passed since we set it to 10
   EXPECT_GT(CheckedInt({"fieldttl", "key", "orig"}), 5);
 
   // without KEEPTTL the TTL should be overwritten
