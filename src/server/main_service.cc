@@ -2390,25 +2390,10 @@ void Service::Pubsub(CmdArgList args, const CommandContext& cmd_cntx) {
     return;
   }
 
-  auto subcmd_not_allowed_err = [&]() {
-    auto err = absl::StrCat(
-        "PUBSUB ", subcmd, " is not supported",
-        IsClusterEnabledOrEmulated() ? " in cluster mode yet" : " in non cluster mode");
-    rb->SendError(err);
-  };
-
-  const bool is_shard_subcmd = (subcmd == "SHARDCHANNELS") || (subcmd == "SHARDNUMSUB");
-  const bool is_non_shard_subcmd =
-      (subcmd == "CHANNELS") || (subcmd == "NUMSUB") || (subcmd == "NUMPAT");
-
-  // Don't allow non SHARD sub commands in cluster mode
-  if (IsClusterEnabled() && is_non_shard_subcmd) {
-    return subcmd_not_allowed_err();
-  }
-
-  // Don't allow SHARD sub commands in non cluster mode
-  if (!IsClusterEnabledOrEmulated() && is_shard_subcmd) {
-    return subcmd_not_allowed_err();
+  // Don't allow SHARD subcommands in non cluster mode
+  if (!IsClusterEnabledOrEmulated() && ((subcmd == "SHARDCHANNELS") || (subcmd == "SHARDNUMSUB"))) {
+    auto err = absl::StrCat("PUBSUB ", subcmd, " is not supported in non cluster mode");
+    return rb->SendError(err);
   }
 
   if (subcmd == "CHANNELS" || subcmd == "SHARDCHANNELS") {

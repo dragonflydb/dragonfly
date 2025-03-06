@@ -548,10 +548,14 @@ TEST_F(ServerFamilyTest, CommandDocsOk) {
 }
 
 TEST_F(ServerFamilyTest, PubSubCommandErr) {
-  EXPECT_THAT(Run({"PUBSUB", "SHARDCHANNELS"}),
-              ErrArg("PUBSUB SHARDCHANNELS is not supported in non cluster mode"));
-  EXPECT_THAT(Run({"PUBSUB", "SHARDNUMSUB"}),
-              ErrArg("PUBSUB SHARDNUMSUB is not supported in non cluster mode"));
+  auto* flag = absl::FindCommandLineFlag("cluster_mode");
+  // Check conditions only in non cluster mode
+  if (flag->CurrentValue() == "") {
+    EXPECT_THAT(Run({"PUBSUB", "SHARDCHANNELS"}),
+                ErrArg("PUBSUB SHARDCHANNELS is not supported in non cluster mode"));
+    EXPECT_THAT(Run({"PUBSUB", "SHARDNUMSUB"}),
+                ErrArg("PUBSUB SHARDNUMSUB is not supported in non cluster mode"));
+  }
   EXPECT_THAT(Run({"PUBSUB", "INVALIDSUBCOMMAND"}),
               ErrArg("Unknown subcommand or wrong number of arguments for 'INVALIDSUBCOMMAND'. Try "
                      "PUBSUB HELP."));

@@ -3026,20 +3026,6 @@ async def test_cluster_sharded_pubsub_shard_commands(df_factory: DflyInstanceFac
     message = await c_nodes[0].execute_command("PUBSUB SHARDNUMSUB")
     assert message == []
 
-    # Should fail because PUBSUB CHANNELS/NUMSUB/NUMPAT is not supported cluster mode yet
-
-    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
-        await c_nodes[0].execute_command("PUBSUB CHANNELS")
-    assert str(moved_error.value) == f"PUBSUB CHANNELS is not supported in cluster mode yet"
-
-    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
-        await c_nodes[0].execute_command("PUBSUB NUMSUB")
-    assert str(moved_error.value) == f"PUBSUB NUMSUB is not supported in cluster mode yet"
-
-    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
-        await c_nodes[0].execute_command("PUBSUB NUMPAT")
-    assert str(moved_error.value) == f"PUBSUB NUMPAT is not supported in cluster mode yet"
-
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 async def test_cluster_migration_errors_num(df_factory: DflyInstanceFactory):
