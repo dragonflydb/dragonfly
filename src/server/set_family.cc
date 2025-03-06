@@ -1435,16 +1435,21 @@ void SScan(CmdArgList args, const CommandContext& cmd_cntx) {
 
 // Syntax: saddex key ttl_sec member [member...]
 void SAddEx(CmdArgList args, const CommandContext& cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view ttl_str = ArgS(args, 1);
-  uint32_t ttl_sec;
-  constexpr uint32_t kMaxTtl = (1UL << 26);
+  CmdArgParser parser(args);
 
-  if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
+  std::string_view key;
+  uint32_t ttl_sec;
+  std::tie(key, ttl_sec) = parser.Next<std::string_view, uint32_t>();
+
+  if (auto err = parser.Error(); err) {
+    return cmd_cntx.rb->SendError(err->MakeReply());
+  }
+  constexpr uint32_t kMaxTtl = (1UL << 26);
+  if (ttl_sec == 0 || ttl_sec > kMaxTtl) {
     return cmd_cntx.rb->SendError(kInvalidIntErr);
   }
 
-  auto vals = args.subspan(2);
+  auto vals = parser.Tail();
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpAddEx(t->GetOpArgs(shard), key, ttl_sec, vals);
   };

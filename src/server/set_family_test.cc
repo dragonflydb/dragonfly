@@ -389,6 +389,9 @@ TEST_F(SetFamilyTest, SAddEx) {
   EXPECT_THAT(Run({"saddex", "key", "2", "val"}), IntArg(0));
   AdvanceTime(1000);
   EXPECT_EQ(1, CheckedInt({"sismember", "key", "val"}));
+
+  auto resp = Run({"saddex", "k", "one", "v"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
 }
 
 }  // namespace dfly
