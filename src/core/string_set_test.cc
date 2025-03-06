@@ -124,7 +124,7 @@ TEST_F(StringSetTest, StandardAddErase) {
 TEST_F(StringSetTest, DisplacedBug) {
   string_view vals[] = {"imY", "OVl", "NhH", "BCe", "YDL", "lpb",
                         "nhF", "xod", "zYR", "PSa", "hce", "cTR"};
-  ss_->AddMany(absl::MakeSpan(vals), UINT32_MAX);
+  ss_->AddMany(absl::MakeSpan(vals), UINT32_MAX, false);
 
   ss_->Add("fIc");
   ss_->Erase("YDL");
@@ -622,7 +622,7 @@ void BM_AddMany(benchmark::State& state) {
     svs.push_back(str);
   }
   while (state.KeepRunning()) {
-    ss.AddMany(absl::MakeSpan(svs), UINT32_MAX);
+    ss.AddMany(absl::MakeSpan(svs), UINT32_MAX, false);
     state.PauseTiming();
     CHECK_EQ(ss.UpperBoundSize(), elems);
     ss.Clear();

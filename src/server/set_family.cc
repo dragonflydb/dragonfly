@@ -89,7 +89,7 @@ struct StringSetWrapper {
     obj->InitRobj(OBJ_SET, kEncodingStrMap2, CompactObj::AllocateMR<StringSet>());
   }
 
-  unsigned Add(const NewEntries& entries, uint32_t ttl_sec) const {
+  unsigned Add(const NewEntries& entries, uint32_t ttl_sec, bool keepttl) const {
     unsigned res = 0;
     string_view members[StringSet::kMaxBatchLen];
     size_t entries_len = std::visit([](const auto& e) { return e.size(); }, entries);
@@ -100,13 +100,13 @@ struct StringSetWrapper {
     for (string_view member : EntriesRange(entries)) {
       members[len++] = member;
       if (len == StringSet::kMaxBatchLen) {
-        res += ss->AddMany(absl::MakeSpan(members, StringSet::kMaxBatchLen), ttl_sec);
+        res += ss->AddMany(absl::MakeSpan(members, StringSet::kMaxBatchLen), ttl_sec, keepttl);
         len = 0;
       }
     }
 
     if (len) {
-      res += ss->AddMany(absl::MakeSpan(members, len), ttl_sec);
+      res += ss->AddMany(absl::MakeSpan(members, len), ttl_sec, keepttl);
     }
 
     return res;
@@ -500,7 +500,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   }
 
   if (co.Encoding() != kEncodingIntSet) {
-    res = StringSetWrapper{co, op_args.db_cntx}.Add(vals, UINT32_MAX);
+    res = StringSetWrapper{co, op_args.db_cntx}.Add(vals, UINT32_MAX, false);
   }
 
   if (journal_update && op_args.shard->journal()) {
@@ -517,7 +517,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
 }
 
 OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_sec,
-                           const NewEntries& vals) {
+                           const NewEntries& vals, bool keepttl) {
   auto& db_slice = op_args.GetDbSlice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
@@ -546,7 +546,7 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
     CHECK(IsDenseEncoding(co));
   }
 
-  return StringSetWrapper{co, op_args.db_cntx}.Add(vals, ttl_sec);
+  return StringSetWrapper{co, op_args.db_cntx}.Add(vals, ttl_sec, keepttl);
 }
 
 OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, facade::ArgRange vals,
@@ -1437,9 +1437,10 @@ void SScan(CmdArgList args, const CommandContext& cmd_cntx) {
 void SAddEx(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser(args);
 
-  std::string_view key;
-  uint32_t ttl_sec;
-  std::tie(key, ttl_sec) = parser.Next<std::string_view, uint32_t>();
+  auto key = parser.Next<std::string_view>();
+  const bool keepttl = parser.Check("KEEPTTL");
+
+  auto ttl_sec = parser.Next<uint32_t>();
 
   if (auto err = parser.Error(); err) {
     return cmd_cntx.rb->SendError(err->MakeReply());
@@ -1449,9 +1450,13 @@ void SAddEx(CmdArgList args, const CommandContext& cmd_cntx) {
     return cmd_cntx.rb->SendError(kInvalidIntErr);
   }
 
-  auto vals = parser.Tail();
+  CmdArgList vals = parser.Tail();
+  if (vals.empty()) {
+    return cmd_cntx.rb->SendError(WrongNumArgsError("SADDEX"));
+  }
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpAddEx(t->GetOpArgs(shard), key, ttl_sec, vals);
+    return OpAddEx(t->GetOpArgs(shard), key, ttl_sec, vals, keepttl);
   };
 
   OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
