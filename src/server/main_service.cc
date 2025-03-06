@@ -2390,32 +2390,36 @@ void Service::Pubsub(CmdArgList args, const CommandContext& cmd_cntx) {
     return;
   }
 
-  auto cmd_err = [&]() {
-    auto err = absl::StrCat("PUBSUB ", subcmd, " is not supported",
-                            IsClusterEnabled() ? " in cluster mode yet" : " in non cluster mode");
+  auto subcmd_not_allowed_err = [&]() {
+    auto err = absl::StrCat(
+        "PUBSUB ", subcmd, " is not supported",
+        IsClusterEnabledOrEmulated() ? " in cluster mode yet" : " in non cluster mode");
     rb->SendError(err);
   };
 
+  const bool is_shard_subcmd = (subcmd == "SHARDCHANNELS") || (subcmd == "SHARDNUMSUB");
+  const bool is_non_shard_subcmd =
+      (subcmd == "CHANNELS") || (subcmd == "NUMSUB") || (subcmd == "NUMPAT");
+
+  // Don't allow non SHARD sub commands in cluster mode
+  if (IsClusterEnabled() && is_non_shard_subcmd) {
+    return subcmd_not_allowed_err();
+  }
+
+  // Don't allow SHARD sub commands in non cluster mode
+  if (!IsClusterEnabledOrEmulated() && is_shard_subcmd) {
+    return subcmd_not_allowed_err();
+  }
+
   if (subcmd == "CHANNELS" || subcmd == "SHARDCHANNELS") {
     string_view pattern;
-    if ((subcmd == "CHANNELS" && IsClusterEnabled()) ||
-        (subcmd == "SHARDCHANNELS" && !IsClusterEnabled())) {
-      return cmd_err();
-    }
     if (args.size() > 1) {
       pattern = ArgS(args, 1);
     }
     PubsubChannels(pattern, rb);
   } else if (subcmd == "NUMPAT") {
-    if (IsClusterEnabled()) {
-      return cmd_err();
-    }
     PubsubPatterns(rb);
   } else if (subcmd == "NUMSUB" || subcmd == "SHARDNUMSUB") {
-    if ((subcmd == "NUMSUB" && IsClusterEnabled()) ||
-        (subcmd == "SHARDNUMSUB" && !IsClusterEnabled())) {
-      return cmd_err();
-    }
     args.remove_prefix(1);
     PubsubNumSub(args, rb);
   } else {
