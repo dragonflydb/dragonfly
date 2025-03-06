@@ -7,6 +7,7 @@
 #include <absl/strings/match.h>
 
 #include "absl/strings/str_cat.h"
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -16,6 +17,8 @@ using namespace testing;
 using namespace std;
 using namespace util;
 using namespace boost;
+
+ABSL_DECLARE_FLAG(string, cluster_mode);
 
 namespace dfly {
 
@@ -548,9 +551,8 @@ TEST_F(ServerFamilyTest, CommandDocsOk) {
 }
 
 TEST_F(ServerFamilyTest, PubSubCommandErr) {
-  auto* flag = absl::FindCommandLineFlag("cluster_mode");
   // Check conditions only in non cluster mode
-  if (flag->CurrentValue() == "") {
+  if (auto cluster_mode = absl::GetFlag(FLAGS_cluster_mode); cluster_mode == "") {
     EXPECT_THAT(Run({"PUBSUB", "SHARDCHANNELS"}),
                 ErrArg("PUBSUB SHARDCHANNELS is not supported in non cluster mode"));
     EXPECT_THAT(Run({"PUBSUB", "SHARDNUMSUB"}),
