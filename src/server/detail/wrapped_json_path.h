@@ -269,6 +269,10 @@ class WrappedJsonPath {
     return std::get<JsonExpression>(parsed_path_);
   }
 
+  std::string_view Path() const {
+    return path_.view();
+  }
+
  private:
   CallbackResultOptions InitializePathType(CallbackResultOptions options) const {
     if (!options.path_type) {

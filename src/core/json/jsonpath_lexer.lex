@@ -59,7 +59,7 @@
               return Parser::make_INT(val, loc());
             }
 
-\w[\w_\-]*  return Parser::make_UNQ_STR(str(), loc());
+[\w_\-]+    return Parser::make_UNQ_STR(str(), loc());
 <<EOF>>     return Parser::make_YYEOF(loc());
 .           throw Parser::syntax_error(loc(), UnknownTokenMsg());
 %%
