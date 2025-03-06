@@ -3,9 +3,6 @@
 //
 #pragma once
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "io/io.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/protocol_client.h"
 #include "server/transaction.h"
@@ -53,16 +50,19 @@ class OutgoingMigration : private ProtocolClient {
     return migration_info_;
   }
 
-  void ResetError() ABSL_LOCKS_EXCLUDED(error_mu_) {
+  void ResetError() {
     if (cntx_.IsError()) {
-      errors_count_.fetch_add(1, std::memory_order_relaxed);
-      auto err = cntx_.GetError();
-      {
-        util::fb2::LockGuard lk(error_mu_);
-        last_error_ = std::move(err);
-      }
+      SetLastError(cntx_.GetError());
       cntx_.Reset(nullptr);
     }
+  }
+
+  void SetLastError(dfly::GenericError err) ABSL_LOCKS_EXCLUDED(error_mu_) {
+    if (!err)
+      return;
+    errors_count_.fetch_add(1, std::memory_order_relaxed);
+    util::fb2::LockGuard lk(error_mu_);
+    last_error_ = std::move(err);
   }
 
   std::string GetErrorStr() const ABSL_LOCKS_EXCLUDED(error_mu_) {
