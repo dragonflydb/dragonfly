@@ -1433,7 +1433,7 @@ void SScan(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-// Syntax: saddex key ttl_sec member [member...]
+// Syntax: saddex key [KEEPTTL] ttl_sec member [member...]
 void SAddEx(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser(args);
 
