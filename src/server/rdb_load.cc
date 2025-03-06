@@ -34,7 +34,7 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
-#include "server/cluster/cluster_family.h"
+#include "server/cluster/cluster_config.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -2731,8 +2731,8 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
 
 bool RdbLoader::ShouldDiscardKey(std::string_view key, ObjSettings* settings) const {
   if (!load_unowned_slots_ && IsClusterEnabled()) {
-    const cluster::ClusterConfig* cluster_config = cluster::ClusterFamily::cluster_config();
-    if (cluster_config != nullptr && !cluster_config->IsMySlot(key)) {
+    const auto cluster_config = cluster::ClusterConfig::Current();
+    if (cluster_config && !cluster_config->IsMySlot(key)) {
       return true;
     }
   }

@@ -7,11 +7,9 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 
+#include "cluster_config.h"
 #include "facade/error.h"
 #include "slot_set.h"
-
-// TODO remove when tl_cluster_config will be moved out from it
-#include "server/cluster/cluster_family.h"
 
 using namespace std;
 
@@ -63,7 +61,7 @@ ClusterShardInfos::ClusterShardInfos(std::vector<ClusterShardInfo> infos)
 }
 
 facade::ErrorReply SlotOwnershipError(SlotId slot_id) {
-  const cluster::ClusterConfig* cluster_config = ClusterFamily::cluster_config();
+  const auto cluster_config = ClusterConfig::Current();
   if (!cluster_config)
     return facade::ErrorReply{facade::kClusterNotConfigured};
 
