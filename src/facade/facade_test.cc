@@ -34,7 +34,7 @@ bool RespMatcher::MatchAndExplain(RespExpr e, MatchResultListener* listener) con
 
   if (type_ == RespExpr::STRING || type_ == RespExpr::ERROR) {
     RespExpr::Buffer ebuf = e.GetBuf();
-    std::string_view actual{reinterpret_cast<const char*>(ebuf.data()), ebuf.size()};
+    std::string_view actual{reinterpret_cast<char*>(ebuf.data()), ebuf.size()};
 
     if (type_ == RespExpr::ERROR && !absl::StrContains(actual, exp_str_)) {
       *listener << "Actual does not contain '" << exp_str_ << "'";
