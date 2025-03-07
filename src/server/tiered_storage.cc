@@ -393,8 +393,28 @@ bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
   // This invariant should always hold because ShouldStash tests for IoPending flag.
   CHECK(!bins_->IsPending(dbid, key));
 
-  // TODO: When we are low on memory we should introduce a back-pressure, to avoid OOMs
-  // with a lot of underutilized disk space.
+  // When memory is low, actively attempt to reclaim memory.
+  if (op_manager_->db_slice_.memory_budget() < op_manager_->memory_low_limit_) {
+    // Calculate how much additional memory we need
+    size_t needed = op_manager_->memory_low_limit_ - op_manager_->db_slice_.memory_budget();
+    // First pass: reclaim memory from cold entries in the queue.
+    size_t reclaimed = ReclaimMemory(needed);
+
+    // If the first pass didn’t free enough, try a second pass with the remaining gap.
+    if (reclaimed < needed / 2) {
+      size_t additional = ReclaimMemory(needed - reclaimed);
+      reclaimed += additional;
+    }
+
+    // After two attempts, if we still cannot free sufficient memory and the stash queue is large,
+    // we throttle this stash to avoid further overloading the system.
+    if (reclaimed < needed / 2 &&
+        op_manager_->GetStats().pending_stash_cnt > write_depth_limit_ / 2) {
+      ++stats_.stash_overflow_cnt;
+      return false;
+    }
+  }  
+          
   if (op_manager_->GetStats().pending_stash_cnt >= write_depth_limit_) {
     ++stats_.stash_overflow_cnt;
     return false;
