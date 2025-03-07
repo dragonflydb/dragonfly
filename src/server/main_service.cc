@@ -551,10 +551,10 @@ void ClusterHtmlPage(const http::QueryArgs& args, HttpContext* send,
   }
 
   if (IsClusterEnabled()) {
-    if (cluster::ClusterFamily::cluster_config() == nullptr) {
+    if (cluster::ClusterConfig::Current() == nullptr) {
       resp.body() += "<h2>Not yet configured.</h2>\n";
     } else {
-      auto config = cluster::ClusterFamily::cluster_config()->GetConfig();
+      auto config = cluster::ClusterConfig::Current()->GetConfig();
       for (const auto& shard : config) {
         resp.body() += "<div class='master'>\n";
         resp.body() += "<h3>Master</h3>\n";

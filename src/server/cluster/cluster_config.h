@@ -52,6 +52,12 @@ class ClusterConfig {
     return my_incoming_migrations_;
   }
 
+  // Returns a thread-local pointer.
+  static std::shared_ptr<ClusterConfig> Current();
+
+  // Set a thread-local pointer.
+  static void SetCurrent(std::shared_ptr<ClusterConfig> config);
+
  private:
   struct SlotEntry {
     const ClusterShardInfo* shard = nullptr;

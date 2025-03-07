@@ -17,6 +17,9 @@ using namespace std;
 namespace dfly::cluster {
 
 namespace {
+
+thread_local shared_ptr<ClusterConfig> tl_cluster_config;
+
 bool HasValidNodeIds(const ClusterShardInfos& new_config) {
   absl::flat_hash_set<string_view> nodes;
 
@@ -388,6 +391,14 @@ std::vector<MigrationInfo> ClusterConfig::GetFinishedIncomingMigrations(
     const std::shared_ptr<ClusterConfig>& prev) const {
   return prev ? GetMissingMigrations(prev->my_incoming_migrations_, my_incoming_migrations_)
               : std::vector<MigrationInfo>();
+}
+
+std::shared_ptr<ClusterConfig> ClusterConfig::Current() {
+  return tl_cluster_config;
+}
+
+void ClusterConfig::SetCurrent(std::shared_ptr<ClusterConfig> config) {
+  tl_cluster_config = std::move(config);
 }
 
 }  // namespace dfly::cluster

@@ -32,9 +32,6 @@ class ClusterFamily {
 
   void Shutdown() ABSL_LOCKS_EXCLUDED(set_config_mu);
 
-  // Returns a thread-local pointer.
-  static ClusterConfig* cluster_config();
-
   void ApplyMigrationSlotRangeToConfig(std::string_view node_id, const SlotRanges& slots,
                                        bool is_outgoing);
 
