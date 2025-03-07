@@ -152,14 +152,13 @@ class CommandGenerator {
  private:
   enum TemplateType { KEY, VALUE, SCORE };
 
-  void FillSet(string_view key);
-  void FillGet(string_view key);
+  string FillSet(string_view key);
+  string FillGet(string_view key);
   void AddTemplateIndices(string_view pattern, TemplateType t);
 
   KeyGenerator* keygen_;
   uint32_t ratio_set_ = 0, ratio_get_ = 0;
   string command_;
-  string cmd_;
 
   vector<pair<size_t, TemplateType>> key_indices_;
   string value_;
@@ -175,18 +174,22 @@ CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
     pair<string, string> ratio_str = absl::StrSplit(GetFlag(FLAGS_ratio), ':');
     CHECK(absl::SimpleAtoi(ratio_str.first, &ratio_set_));
     CHECK(absl::SimpleAtoi(ratio_str.second, &ratio_get_));
-  } else {
-    AddTemplateIndices(kTmplPatterns[KEY], KEY);
-    AddTemplateIndices(kTmplPatterns[VALUE], VALUE);
-    AddTemplateIndices(kTmplPatterns[SCORE], SCORE);
-    sort(key_indices_.begin(), key_indices_.end());
+    return;
+  }
+
+  AddTemplateIndices(kTmplPatterns[KEY], KEY);
+  AddTemplateIndices(kTmplPatterns[VALUE], VALUE);
+  AddTemplateIndices(kTmplPatterns[SCORE], SCORE);
+  sort(key_indices_.begin(), key_indices_.end());
+  if (absl::StartsWithIgnoreCase(command_, "get") || absl::StartsWithIgnoreCase(command_, "mget")) {
+    might_hit_ = true;
   }
 }
 
 string CommandGenerator::Next(SlotRange range) {
-  cmd_.clear();
   noreply_ = false;
   uint16_t slot_id = 0;
+
   if (keygen_->IsClusterEnabled()) {
     slot_id = absl::Uniform(absl::IntervalClosedClosed, bit_gen, range.first, range.second);
   }
@@ -194,55 +197,57 @@ string CommandGenerator::Next(SlotRange range) {
     string key = (*keygen_)(slot_id);
 
     if (absl::Uniform(bit_gen, 0U, ratio_get_ + ratio_set_) < ratio_set_) {
-      FillSet(key);
       might_hit_ = false;
-    } else {
-      FillGet(key);
-
-      might_hit_ = true;
+      return FillSet(key);
     }
-  } else {
-    size_t last_pos = 0;
-    const size_t kPatLen[] = {kTmplPatterns[KEY].size(), kTmplPatterns[VALUE].size(),
-                              kTmplPatterns[SCORE].size()};
-    string str;
-    for (auto [pos, type] : key_indices_) {
-      switch (type) {
-        case KEY:
-          str = (*keygen_)(slot_id);
-          break;
-        case VALUE:
-          str = GetRandomHex(value_.size());
-          break;
-        case SCORE: {
-          uniform_real_distribution<double> uniform(0, 1);
-          str = absl::StrCat(uniform(bit_gen));
-        }
+    might_hit_ = true;
+    return FillGet(key);
+  }
+
+  size_t last_pos = 0;
+  const size_t kPatLen[] = {kTmplPatterns[KEY].size(), kTmplPatterns[VALUE].size(),
+                            kTmplPatterns[SCORE].size()};
+  string str, gen_cmd;
+  for (auto [pos, type] : key_indices_) {
+    switch (type) {
+      case KEY:
+        str = (*keygen_)(slot_id);
+        break;
+      case VALUE:
+        str = GetRandomHex(value_.size());
+        break;
+      case SCORE: {
+        uniform_real_distribution<double> uniform(0, 1);
+        str = absl::StrCat(uniform(bit_gen));
       }
-      absl::StrAppend(&cmd_, command_.substr(last_pos, pos - last_pos), str);
-      last_pos = pos + kPatLen[type];
     }
-    absl::StrAppend(&cmd_, command_.substr(last_pos), "\r\n");
+    absl::StrAppend(&gen_cmd, command_.substr(last_pos, pos - last_pos), str);
+    last_pos = pos + kPatLen[type];
   }
-  return cmd_;
+  absl::StrAppend(&gen_cmd, command_.substr(last_pos), "\r\n");
+
+  return gen_cmd;
 }
 
-void CommandGenerator::FillSet(string_view key) {
+string CommandGenerator::FillSet(string_view key) {
   if (protocol == RESP) {
-    absl::StrAppend(&cmd_, "set ", key, " ", value_, "\r\n");
-  } else {
-    DCHECK_EQ(protocol, MC_TEXT);
-    absl::StrAppend(&cmd_, "set ", key, " 0 0 ", value_.size());
-    if (GetFlag(FLAGS_noreply)) {
-      absl::StrAppend(&cmd_, " noreply");
-      noreply_ = true;
-    }
-    absl::StrAppend(&cmd_, "\r\n", value_, "\r\n");
+    return absl::StrCat("set ", key, " ", value_, "\r\n");
   }
+
+  DCHECK_EQ(protocol, MC_TEXT);
+  string res;
+  absl::StrAppend(&res, "set ", key, " 0 0 ", value_.size());
+  if (GetFlag(FLAGS_noreply)) {
+    absl::StrAppend(&res, " noreply");
+    noreply_ = true;
+  }
+
+  absl::StrAppend(&res, "\r\n", value_, "\r\n");
+  return res;
 }
 
-void CommandGenerator::FillGet(string_view key) {
-  absl::StrAppend(&cmd_, "get ", key, "\r\n");
+string CommandGenerator::FillGet(string_view key) {
+  return absl::StrCat("get ", key, "\r\n");
 }
 
 void CommandGenerator::AddTemplateIndices(string_view pattern, TemplateType t) {

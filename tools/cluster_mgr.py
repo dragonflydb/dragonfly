@@ -503,7 +503,7 @@ Migrate slots 10-20 to target:
 Unlike --action=move above, this will migrate the data to the new owner.
 
 Connect to cluster and shutdown all nodes:
-  ./cluster_mgr.py --action=shutdown
+  ./cluster_mgr.py --action=shutdown --target_port=X
 WARNING: Be careful! This will close all Dragonfly servers connected to the cluster.
 """,
         formatter_class=RawTextHelpFormatter,
