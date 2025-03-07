@@ -195,8 +195,8 @@ class ServerFamily {
 
   // if new_version is true, saves DF specific, non redis compatible snapshot.
   // if basename is not empty it will override dbfilename flag.
-  GenericError DoSave(bool new_version, std::string_view basename, Transaction* transaction,
-                      bool ignore_state = false);
+  GenericError DoSave(bool new_version, std::string_view sub_path, std::string_view basename,
+                      Transaction* transaction, bool ignore_state = false);
 
   // Calls DoSave with a default generated transaction and with the format
   // specified in --df_snapshot_format
@@ -313,15 +313,17 @@ class ServerFamily {
 
   void SendInvalidationMessages() const;
 
-  // Helper function to retrieve version(true if format is dfs rdb), and basename from args.
-  // In case of an error an empty optional is returned.
-  using VersionBasename = std::pair<bool, std::string_view>;
-  std::optional<VersionBasename> GetVersionAndBasename(CmdArgList args, SinkReplyBuilder* builder);
+  // Helper function to retrieve version(true if format is dfs rdb), sub path and basename from
+  // args. In case of an error an empty optional is returned.
+  using VersionSubPathBasename = std::tuple<bool, std::string, std::string>;
+  std::optional<VersionSubPathBasename> GetVersionSubPathAndBasename(CmdArgList args,
+                                                                     SinkReplyBuilder* builder);
 
   void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
 
-  GenericError DoSaveCheckAndStart(bool new_version, string_view basename, Transaction* trans,
-                                   bool ignore_state = false) ABSL_LOCKS_EXCLUDED(save_mu_);
+  GenericError DoSaveCheckAndStart(bool new_version, string_view sub_path, string_view basename,
+                                   Transaction* trans, bool ignore_state = false)
+      ABSL_LOCKS_EXCLUDED(save_mu_);
 
   GenericError WaitUntilSaveFinished(Transaction* trans,
                                      bool ignore_state = false) ABSL_NO_THREAD_SAFETY_ANALYSIS;

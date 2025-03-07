@@ -1655,11 +1655,12 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
   CHECK_NOTNULL(cid);
   boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
   trans->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
-  return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, trans.get(), ignore_state);
+  return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, {}, trans.get(), ignore_state);
 }
 
-GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view basename,
-                                               Transaction* trans, bool ignore_state) {
+GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view sub_path,
+                                               string_view basename, Transaction* trans,
+                                               bool ignore_state) {
   auto state = ServerState::tlocal()->gstate();
 
   // In some cases we want to create a snapshot even if server is not active, f.e in takeover
@@ -1674,10 +1675,13 @@ GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view bas
                           "SAVING - can not save database"};
     }
 
-    VLOG(1) << "Saving snapshot to " << basename;
+    VLOG(1) << "Saving snapshot to: "
+            << absl::StrCat(sub_path.empty() ? basename
+                                             : string{sub_path} + "/" + string{basename});
 
-    save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
-        new_version, basename, trans, &service_, fq_threadpool_.get(), snapshot_storage_});
+    save_controller_ = make_unique<SaveStagesController>(
+        detail::SaveStagesInputs{new_version, sub_path, basename, trans, &service_,
+                                 fq_threadpool_.get(), snapshot_storage_});
 
     auto res = save_controller_->InitResourcesAndStart();
 
@@ -1714,9 +1718,9 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   return save_info.error;
 }
 
-GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
-                                  bool ignore_state) {
-  if (auto ec = DoSaveCheckAndStart(new_version, basename, trans, ignore_state); ec) {
+GenericError ServerFamily::DoSave(bool new_version, string_view sub_path, string_view basename,
+                                  Transaction* trans, bool ignore_state) {
+  if (auto ec = DoSaveCheckAndStart(new_version, sub_path, basename, trans, ignore_state); ec) {
     return ec;
   }
 
@@ -2078,7 +2082,7 @@ void ServerFamily::BgSaveFb(boost::intrusive_ptr<Transaction> trans) {
   }
 }
 
-std::optional<ServerFamily::VersionBasename> ServerFamily::GetVersionAndBasename(
+std::optional<ServerFamily::VersionSubPathBasename> ServerFamily::GetVersionSubPathAndBasename(
     CmdArgList args, SinkReplyBuilder* builder) {
   if (args.size() > 2) {
     builder->SendError(kSyntaxErr);
@@ -2099,25 +2103,29 @@ std::optional<ServerFamily::VersionBasename> ServerFamily::GetVersionAndBasename
     }
   }
 
-  string_view basename;
+  string sub_path;
+  string basename;
   if (args.size() == 2) {
-    basename = ArgS(args, 1);
+    fs::path path(ArgS(args, 1));
+    sub_path = path.parent_path().relative_path().string();
+    basename = path.filename().string();
   }
 
-  return ServerFamily::VersionBasename{new_version, basename};
+  return ServerFamily::VersionSubPathBasename{new_version, std::move(sub_path),
+                                              std::move(basename)};
 }
 
-// BGSAVE [DF|RDB] [basename]
+// BGSAVE [DF|RDB] [subpath/basename]
 // TODO add missing [SCHEDULE]
 void ServerFamily::BgSave(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto maybe_res = GetVersionAndBasename(args, cmd_cntx.rb);
+  auto maybe_res = GetVersionSubPathAndBasename(args, cmd_cntx.rb);
   if (!maybe_res) {
     return;
   }
 
-  const auto [version, basename] = *maybe_res;
+  const auto& [version, sub_path, basename] = *maybe_res;
 
-  if (auto ec = DoSaveCheckAndStart(version, basename, cmd_cntx.tx); ec) {
+  if (auto ec = DoSaveCheckAndStart(version, sub_path, basename, cmd_cntx.tx); ec) {
     cmd_cntx.rb->SendError(ec.Format());
     return;
   }
@@ -2127,18 +2135,18 @@ void ServerFamily::BgSave(CmdArgList args, const CommandContext& cmd_cntx) {
   cmd_cntx.rb->SendOk();
 }
 
-// SAVE [DF|RDB] [basename]
+// SAVE [DF|RDB] [subpath/basename]
 // Allows saving the snapshot of the dataset on disk, potentially overriding the format
 // and the snapshot name.
 void ServerFamily::Save(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto maybe_res = GetVersionAndBasename(args, cmd_cntx.rb);
+  auto maybe_res = GetVersionSubPathAndBasename(args, cmd_cntx.rb);
   if (!maybe_res) {
     return;
   }
 
-  const auto [version, basename] = *maybe_res;
+  const auto& [version, sub_path, basename] = *maybe_res;
 
-  GenericError ec = DoSave(version, basename, cmd_cntx.tx);
+  GenericError ec = DoSave(version, sub_path, basename, cmd_cntx.tx);
   if (ec) {
     cmd_cntx.rb->SendError(ec.Format());
   } else {
