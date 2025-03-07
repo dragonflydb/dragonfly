@@ -135,7 +135,13 @@ ProtocolClient::~ProtocolClient() {
 
 error_code ProtocolClient::ResolveHostDns() {
   char ip_addr[INET6_ADDRSTRLEN];
-  auto ec = util::fb2::DnsResolve(server_context_.host, 0, ip_addr, ProactorBase::me());
+
+  std::string host = server_context_.host;
+  if (!host.empty() && host.front() == '[' && host.back() == ']') {
+    host = host.substr(1, host.size() - 2);
+  }
+
+  auto ec = util::fb2::DnsResolve(host, 0, ip_addr, ProactorBase::me());
   if (ec) {
     LOG(ERROR) << "Dns error " << ec << ", host: " << server_context_.host;
     return make_error_code(errc::host_unreachable);
