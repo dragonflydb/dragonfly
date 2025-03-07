@@ -3153,9 +3153,9 @@ async def test_readonly_replication(
 
     await wait_available_async(r1_node.admin_client)
 
-    assert await m1_node.client.execute_command("GET X") == "1"
-    assert await m1_node.client.execute_command("READONLY")
-    assert await m1_node.client.execute_command("GET X") == "1"
+    assert await r1_node.client.execute_command("GET X") == "1"
+    assert await r1_node.client.execute_command("READONLY")
+    assert await r1_node.client.execute_command("GET X") == "1"
 
     # This behavior can be changed in the future
-    assert await m1_node.client.execute_command("GET Y") == None
+    assert await r1_node.client.execute_command("GET Y") == None
