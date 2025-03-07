@@ -317,12 +317,15 @@ class DenseSet {
 
   // Returns the previous object if it has been replaced.
   // nullptr, if obj was added.
-  void* AddOrReplaceObj(void* obj, bool has_ttl);
+  void* AddOrReplaceObj(void* obj, bool has_ttl, void* old_obj = nullptr);
 
   // Assumes that the object does not exist in the set.
   void AddUnique(void* obj, bool has_ttl, uint64_t hashcode);
 
   void Prefetch(uint64_t hash);
+
+  // Attempts to find object. If found the dense ptr and raw ptr are returned.
+  std::pair<void*, void*> FindObjPtr(const void* ptr, uint64_t hash, uint32_t cookie);
 
  private:
   DenseSet(const DenseSet&) = delete;
