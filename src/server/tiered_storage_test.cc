@@ -314,7 +314,7 @@ TEST_F(TieredStorageTest, MemoryPressure) {
 
   constexpr size_t kNum = 10000;
   for (size_t i = 0; i < kNum; i++) {
-    auto resp = Run({"SET", absl::StrCat("k", i), BuildString(10000)});
+    auto resp = Run({"SETEX", absl::StrCat("k", i), "1000", BuildString(10000)});
     if (resp != "OK"sv) {
       resp = Run({"INFO", "ALL"});
       ASSERT_FALSE(true) << i << "\nInfo ALL:\n" << resp.GetString();
@@ -323,6 +323,20 @@ TEST_F(TieredStorageTest, MemoryPressure) {
   }
 
   EXPECT_LT(used_mem_peak.load(), 20_MB);
+  for (size_t i = 0; i < kNum; i++) {
+    auto resp = Run({"ttl", absl::StrCat("k", i)});
+    EXPECT_THAT(resp, IntArg(1000));
+  }
+
+  for (size_t i = 0; i < kNum; i++) {
+    auto resp = Run({"get", absl::StrCat("k", i)});
+    EXPECT_THAT(resp, ArgType(RespExpr::STRING));
+  }
+
+  for (size_t i = 0; i < kNum; i++) {
+    auto resp = Run({"ttl", absl::StrCat("k", i)});
+    EXPECT_THAT(resp, IntArg(1000));
+  }
 }
 
 TEST_F(TieredStorageTest, Expiry) {
