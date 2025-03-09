@@ -3,6 +3,9 @@
 # Exit on error
 set -e
 
+# Path to the file list
+FILES_LIST="$(dirname "$0")/ignore-files-list.txt"
+
 # Function to display help information
 show_help() {
     echo "Usage: ./setup-git-ignore-local.sh [OPTION]"
@@ -15,11 +18,32 @@ show_help() {
     echo "  --reset      Same as --unignore"
     echo ""
     echo "Without options, the script will configure Git to ignore local changes"
-    echo "in specific files (.vscode/launch.json, .vscode/settings.json, etc.)"
+    echo "in files listed in $(basename "$FILES_LIST")"
+    echo ""
+    echo "Details:"
+    echo "  When running without parameters (default 'ignore' mode):"
+    echo "  - Configured files won't show up in git status when locally modified"
+    echo "  - This is useful for local configuration files you don't want to commit"
+    echo ""
+    echo "  When running with --unignore or --reset:"
+    echo "  - Configured files will show up in git status when locally modified"
+    echo "  - This is needed if you actually want to commit changes to these files"
+    echo ""
+    echo "  Workflow for committing changes to an ignored file:"
+    echo "  1. Run './setup-git-ignore-local.sh --unignore' (or for a specific file:"
+    echo "     'git update-index --no-assume-unchanged <file_path>')"
+    echo "  2. Make and commit your changes"
+    echo "  3. Run './setup-git-ignore-local.sh' again to re-ignore the files"
+    echo "     (or for a specific file: 'git update-index --assume-unchanged <file_path>')"
     echo ""
     echo "Examples:"
     echo "  ./setup-git-ignore-local.sh            # Ignore local changes"
     echo "  ./setup-git-ignore-local.sh --unignore # Track local changes"
+    echo ""
+    echo "File List:"
+    echo "  The list of files to process is stored in $(basename "$FILES_LIST")"
+    echo "  - Each line should contain a path relative to the repository root"
+    echo "  - Empty lines and lines starting with # are ignored"
     echo ""
     echo "For more information, see CONTRIBUTING.md"
     exit 0
@@ -28,6 +52,13 @@ show_help() {
 # Check if help was requested
 if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
     show_help
+fi
+
+# Check if the files list exists
+if [ ! -f "$FILES_LIST" ]; then
+    echo "Error: Files list not found at: $FILES_LIST"
+    echo "Create this file with a list of files to be processed, one per line."
+    exit 1
 fi
 
 # Default mode is to ignore changes (assume-unchanged)
@@ -49,56 +80,51 @@ else
     echo "Setting up Git to track changes in previously ignored files..."
 fi
 
-# Process launch.json file
-if git update-index $GIT_COMMAND .vscode/launch.json; then
-    echo "Successfully configured .vscode/launch.json to be $ACTION_PARTICIPLE"
-else
-    echo "Error: Failed to configure .vscode/launch.json"
-    exit 1
-fi
+# Process each file from the list
+PROCESSED_COUNT=0
+ERRORS_COUNT=0
 
-# Find and configure all .db files in .vscode directory if they exist
-DB_FILES=$(find .vscode -name "*.db" 2>/dev/null || true)
-if [ -n "$DB_FILES" ]; then
-    for file in $DB_FILES; do
-        if git update-index $GIT_COMMAND "$file"; then
-            echo "Successfully configured $file to be $ACTION_PARTICIPLE"
-        else
-            echo "Error: Failed to configure $file"
-            exit 1
-        fi
-    done
-fi
-
-# Settings.json file if it exists
-if [ -f ".vscode/settings.json" ]; then
-    if git update-index $GIT_COMMAND .vscode/settings.json; then
-        echo "Successfully configured .vscode/settings.json to be $ACTION_PARTICIPLE"
-    else
-        echo "Error: Failed to configure .vscode/settings.json"
-        exit 1
+while IFS= read -r line || [ -n "$line" ]; do
+    # Skip empty lines and comments
+    if [[ -z "$line" || "$line" == \#* ]]; then
+        continue
     fi
-fi
 
-echo "Git configuration successfully completed!"
+    # Check if the file exists
+    if [ ! -f "$line" ]; then
+        echo "Warning: File '$line' does not exist, skipping..."
+        continue
+    fi
+
+    # Apply the git command
+    if git update-index $GIT_COMMAND "$line"; then
+        echo "Successfully configured $line to be $ACTION_PARTICIPLE"
+        ((PROCESSED_COUNT++))
+    else
+        echo "Error: Failed to configure $line"
+        ((ERRORS_COUNT++))
+    fi
+done < "$FILES_LIST"
+
+echo ""
+echo "Summary:"
+echo "- $PROCESSED_COUNT files processed successfully"
+if [ "$ERRORS_COUNT" -gt 0 ]; then
+    echo "- $ERRORS_COUNT errors encountered"
+    echo "Git configuration completed with errors!"
+else
+    echo "Git configuration successfully completed!"
+fi
 echo ""
 
+# Simplified output after execution
 if [ "$MODE" = "ignore" ]; then
-    echo "Now configured files won't show up in git status when locally modified."
-    echo ""
-    echo "If you want to commit changes to a specific file, use:"
-    echo "  ./setup-git-ignore-local.sh --unignore"
-    echo "or for a specific file only:"
-    echo "  git update-index --no-assume-unchanged <file_path>"
-    echo ""
-    echo "After committing, don't forget to run again:"
-    echo "  ./setup-git-ignore-local.sh"
-    echo "or for a specific file only:"
-    echo "  git update-index --assume-unchanged <file_path>"
+    echo "Configured files won't show up in git status when locally modified."
+    echo "To commit changes to these files later, run: ./setup-git-ignore-local.sh --unignore"
 else
-    echo "Now configured files will show up in git status when locally modified."
-    echo ""
-    echo "After committing your changes, you can run the script without parameters"
-    echo "to ignore local changes again:"
-    echo "  ./setup-git-ignore-local.sh"
+    echo "Configured files will now show up in git status when locally modified."
+    echo "After committing, run: ./setup-git-ignore-local.sh to ignore them again."
 fi
+
+echo ""
+echo "For more details, run: ./setup-git-ignore-local.sh --help"
