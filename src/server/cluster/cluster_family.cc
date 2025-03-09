@@ -442,9 +442,6 @@ void ClusterFamily::Cluster(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void ClusterFamily::ReadOnly(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (!IsClusterEmulated()) {
-    return cmd_cntx.rb->SendError(kClusterDisabled);
-  }
   cmd_cntx.rb->SendOk();
 }
 

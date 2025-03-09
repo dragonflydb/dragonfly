@@ -3118,3 +3118,44 @@ async def test_cluster_sharded_pub_sub_migration(df_factory: DflyInstanceFactory
     assert message == {"type": "subscribe", "pattern": None, "channel": b"kostas", "data": 1}
     message = consumer.get_sharded_message(target_node=node_a)
     assert message == {"type": "unsubscribe", "pattern": None, "channel": b"kostas", "data": 0}
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_readonly_replication(
+    df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
+):
+    # create cluster master and replica
+    # For now replica always should work in read-only mode
+    # READONLY command returns always OK without any impact
+    # In the future we may decide to implement the same behavior as REDIS
+    instances = [
+        df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)
+    ]
+    df_factory.start_all(instances)
+
+    nodes = [await create_node_info(n) for n in instances]
+    m1_node, r1_node = nodes
+    master_nodes = [m1_node]
+
+    m1_node.slots = [(0, 16383)]
+    m1_node.replicas = [r1_node]
+
+    logging.debug("Push initial config")
+    await push_config(
+        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
+    )
+
+    logging.debug("create data")
+    await m1_node.client.execute_command("SET X 1")
+
+    logging.debug("start replication")
+    await r1_node.admin_client.execute_command(f"replicaof localhost {m1_node.instance.port}")
+
+    await wait_available_async(r1_node.admin_client)
+
+    assert await r1_node.client.execute_command("GET X") == "1"
+    assert await r1_node.client.execute_command("READONLY")
+    assert await r1_node.client.execute_command("GET X") == "1"
+
+    # This behavior can be changed in the future
+    assert await r1_node.client.execute_command("GET Y") == None
