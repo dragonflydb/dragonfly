@@ -393,19 +393,29 @@ AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool htt
 
 io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::OpenWriteFile(
     const std::string& path) {
-  fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
-  return proactor->Await([&]() -> io::Result<std::pair<io::Sink*, uint8_t>, GenericError> {
-    pair<string, string> bucket_path = GetBucketPath(path);
+  optional<pair<string, string>> bucket_path = GetBucketPath(path);
+  if (!bucket_path) {
+    return nonstd::make_unexpected(GenericError("Invalid S3 path"));
+  }
+  auto [bucket, key] = *bucket_path;
 
-    auto [bucket, key] = bucket_path;
-    io::Result<aws::S3WriteFile> file = aws::S3WriteFile::Open(bucket, key, s3_);
-    if (!file) {
-      return nonstd::make_unexpected(GenericError(file.error(), "Failed to open write file"));
-    }
+  fb2::ProactorBase* proactor = ProactorBase::me();
 
-    aws::S3WriteFile* f = new aws::S3WriteFile(std::move(*file));
-    return std::pair<io::Sink*, uint8_t>(f, FileType::CLOUD);
-  });
+  // We run S3 operations via a temporary fiber to avoid agressive stack consumption.
+  io::Result<std::pair<io::Sink*, uint8_t>, GenericError> result;
+  auto fb = proactor->LaunchFiber(
+      fb2::Launch::post, boost::context::fixedsize_stack{40 * 1024}, "open_s3_write", [&] {
+        io::Result<aws::S3WriteFile> file = aws::S3WriteFile::Open(bucket, key, s3_);
+        if (!file) {
+          result = nonstd::make_unexpected(GenericError(file.error(), "Failed to open write file"));
+          return;
+        }
+
+        aws::S3WriteFile* f = new aws::S3WriteFile(std::move(*file));
+        result = std::pair<io::Sink*, uint8_t>(f, FileType::CLOUD);
+      });
+  fb.Join();
+  return result;
 }
 
 io::ReadonlyFileOrError AwsS3SnapshotStorage::OpenReadFile(const std::string& path) {
@@ -424,14 +434,9 @@ io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(std::string
 
   auto [bucket_name, prefix] = GetBucketPath(dir);
 
-  fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
-
-  io::Result<std::vector<SnapStat>, GenericError> keys =
-      proactor->Await([&, bucket_name = bucket_name, prefix = prefix] {
-        LOG(INFO) << "Load snapshot: Searching for snapshot in S3 path: " << kS3Prefix
-                  << bucket_name << "/" << prefix;
-        return ListObjects(bucket_name, prefix);
-      });
+  LOG(INFO) << "Load snapshot: Searching for snapshot in S3 path: " << kS3Prefix << bucket_name
+            << "/" << prefix;
+  io::Result<std::vector<SnapStat>, GenericError> keys = ListObjects(bucket_name, prefix);
   if (!keys) {
     return nonstd::make_unexpected(keys.error());
   }
@@ -446,7 +451,6 @@ io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(std::string
 
 io::Result<vector<string>, GenericError> AwsS3SnapshotStorage::ExpandFromPath(
     const string& load_path) {
-  fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
   optional<pair<string, string>> bucket_path = GetBucketPath(load_path);
   if (!bucket_path) {
     return nonstd::make_unexpected(
@@ -459,30 +463,26 @@ io::Result<vector<string>, GenericError> AwsS3SnapshotStorage::ExpandFromPath(
   const size_t pos = obj_path.find_last_of('/');
   const std::string prefix = (pos == std::string_view::npos) ? "" : obj_path.substr(0, pos);
 
-  auto paths = proactor->Await([&, &bucket_name =
-                                       bucket_name]() -> io::Result<vector<string>, GenericError> {
-    const io::Result<std::vector<SnapStat>, GenericError> keys = ListObjects(bucket_name, prefix);
-    if (!keys) {
-      return nonstd::make_unexpected(keys.error());
-    }
-    vector<string> res;
-    for (const SnapStat& key : *keys) {
-      std::smatch m;
-      if (std::regex_match(key.name, m, re)) {
-        res.push_back(std::string(kS3Prefix) + bucket_name + "/" + key.name);
-      }
-    }
+  io::Result<std::vector<SnapStat>, GenericError> list_res = ListObjects(bucket_name, prefix);
+  if (!list_res) {
+    return nonstd::make_unexpected(list_res.error());
+  }
 
-    return res;
-  });
+  vector<string> paths;
+  for (const SnapStat& key : *list_res) {
+    std::smatch m;
+    if (std::regex_match(key.name, m, re)) {
+      paths.push_back(std::string(kS3Prefix) + bucket_name + "/" + key.name);
+    }
+  }
 
-  if (!paths || paths->empty()) {
+  if (paths.empty()) {
     return nonstd::make_unexpected(
         GenericError{std::make_error_code(std::errc::no_such_file_or_directory),
                      "Cound not find DFS snapshot shard files"});
   }
 
-  return *paths;
+  return paths;
 }
 
 error_code AwsS3SnapshotStorage::CheckPath(const std::string& path) {
@@ -495,6 +495,10 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
   // objects if needed.
   std::string continuation_token;
   std::vector<SnapStat> keys;
+
+  // We use a random proactor because this function might be called from the main thread.
+  fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
+
   do {
     Aws::S3::Model::ListObjectsV2Request request;
     request.SetBucket(std::string(bucket_name));
@@ -503,7 +507,15 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
       request.SetContinuationToken(continuation_token);
     }
 
-    Aws::S3::Model::ListObjectsV2Outcome outcome = s3_->ListObjectsV2(request);
+    Aws::S3::Model::ListObjectsV2Outcome outcome;
+
+    // We use fibers to wrap the s3 call to avoid stack exhaustion.
+    auto fb = proactor->LaunchFiber(
+        fb2::Launch::post, boost::context::fixedsize_stack{40 * 1024}, "list_s3",
+        [&, &bucket_name = bucket_name] { outcome = s3_->ListObjectsV2(request); });
+
+    fb.Join();
+
     if (outcome.IsSuccess()) {
       continuation_token = outcome.GetResult().GetNextContinuationToken();
       for (const auto& object : outcome.GetResult().GetContents()) {

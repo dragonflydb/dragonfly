@@ -1178,9 +1178,15 @@ io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
   VLOG(1) << "Loading data from " << rdb_file;
   CHECK(fb2::ProactorBase::IsProactorThread()) << "must be called from proactor thread";
 
-  error_code ec;
-  io::ReadonlyFileOrError res = snapshot_storage_->OpenReadFile(rdb_file);
-  if (res) {
+  io::Result<size_t> result;
+  ProactorBase* proactor = fb2::ProactorBase::me();
+  auto fb = proactor->LaunchFiber([&] {
+    io::ReadonlyFileOrError res = snapshot_storage_->OpenReadFile(rdb_file);
+    if (!res) {
+      result = nonstd::make_unexpected(res.error());
+      return;
+    }
+
     io::FileSource fs(*res);
 
     RdbLoader loader{&service_};
@@ -1188,16 +1194,18 @@ io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
       loader.SetOverrideExistingKeys(true);
     }
 
-    ec = loader.Load(&fs);
-    if (!ec) {
+    auto ec = loader.Load(&fs);
+    if (ec) {
+      result = nonstd::make_unexpected(ec);
+    } else {
       VLOG(1) << "Done loading RDB from " << rdb_file << ", keys loaded: " << loader.keys_loaded();
       VLOG(1) << "Loading finished after " << strings::HumanReadableElapsedTime(loader.load_time());
-      return loader.keys_loaded();
+      result = loader.keys_loaded();
     }
-  } else {
-    ec = res.error();
-  }
-  return nonstd::make_unexpected(ec);
+  });
+
+  fb.Join();
+  return result;
 }
 
 enum MetricType { COUNTER, GAUGE, SUMMARY, HISTOGRAM };
