@@ -104,6 +104,48 @@ The Dragonfly DB team has agreed to systematically use several pre-commit hooks 
 normalize the formatting of code. You need to install and enable pre-commit to have these used
 when you do your commits.
 
+## Git workflow
+
+### Repository Setup
+
+After cloning the repository, run the script to set up Git filters:
+
+```bash
+chmod +x setup-git-filters.sh
+./setup-git-filters.sh
+```
+
+### Special Handling of Certain Files
+
+The project has files (e.g., `.vscode/launch.json`) that:
+- Are included in the repository as default templates
+- Local changes to these files will NOT appear in `git status`
+- This allows you to make your own configurations that won't be accidentally committed
+
+### If You Need to Commit Changes to Ignored Files
+
+1. Disable ignoring for the file:
+   ```bash
+   git update-index --no-assume-unchanged .vscode/launch.json
+   ```
+
+2. Add the file and create a commit as usual:
+   ```bash
+   git add .vscode/launch.json
+   git commit -m "Updated launch.json configuration"
+   ```
+
+3. After committing, re-enable ignoring:
+   ```bash
+   git update-index --assume-unchanged .vscode/launch.json
+   ```
+
+### List of Files with Special Handling
+
+- `.vscode/launch.json` - launch configuration
+- `.vscode/*.db` - VS Code database files
+- `.vscode/settings.json` - VS Code settings
+
 ## Codebase guidelines
 
 This repo conforms to the Google's C++ Style Guide. Keep in mind we use an older version of the
