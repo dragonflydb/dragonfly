@@ -18,7 +18,7 @@ show_help() {
     echo "in specific files (.vscode/launch.json, .vscode/settings.json, etc.)"
     echo ""
     echo "Examples:"
-    echo "  ./setup-git-ignore-local.sh           # Ignore local changes"
+    echo "  ./setup-git-ignore-local.sh            # Ignore local changes"
     echo "  ./setup-git-ignore-local.sh --unignore # Track local changes"
     echo ""
     echo "For more information, see CONTRIBUTING.md"
@@ -41,12 +41,10 @@ fi
 # Set the appropriate Git command based on mode
 if [ "$MODE" = "ignore" ]; then
     GIT_COMMAND="--assume-unchanged"
-    ACTION_VERB="ignore"
     ACTION_PARTICIPLE="ignored"
     echo "Setting up Git to ignore local changes in specific files..."
 else
     GIT_COMMAND="--no-assume-unchanged"
-    ACTION_VERB="track"
     ACTION_PARTICIPLE="tracked"
     echo "Setting up Git to track changes in previously ignored files..."
 fi
