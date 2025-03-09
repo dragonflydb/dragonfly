@@ -318,35 +318,13 @@ void DoBuildObjHist(EngineShard* shard, ConnectionContext* cntx, ObjHistMap* obj
   }
 }
 
-void FillDictSamples(PrimeTable* table, string* sample_buf) {
-  PrimeTable::Cursor cursor;
-  unsigned steps = 0;
-  string scratch;
-  constexpr size_t kMaxLen = 512;
-  do {
-    cursor = table->Traverse(cursor, [&](PrimeIterator it) {
-      it->first.GetString(&scratch);
-      size_t len = std::min(scratch.size(), kMaxLen);
-      sample_buf->append(scratch.data(), len);
-    });
-
-    if (sample_buf->size() > 1_MB)
-      return;
-
-    if (steps >= 20000) {
-      steps = 0;
-      ThisFiber::Yield();
-    }
-  } while (cursor);
-}
-
 struct HufHist {
   static constexpr unsigned kMaxSymbol = 255;
-  unsigned hist[kMaxSymbol + 1];  // histogram of symbols.
-  unsigned max_symbol = 0;        // what is the max symbol of the histogram.
+  array<unsigned, kMaxSymbol + 1> hist;  // histogram of symbols.
+  unsigned max_symbol = 0;               // what is the max symbol of the histogram.
 
   HufHist() {
-    memset(hist, 0, sizeof(hist));
+    hist.fill(0);
   }
 
   void Merge(const HufHist& other) {
@@ -362,18 +340,27 @@ void DoComputeHist(EngineShard* shard, ConnectionContext* cntx, HufHist* dest) {
   DbTable* dbt = db_slice.GetDBTable(cntx->db_index());
   CHECK(dbt);
 
-  string sample_buf;
-  FillDictSamples(&dbt->prime, &sample_buf);
+  PrimeTable::Cursor cursor;
+  unsigned steps = 0;
+  string scratch;
+  constexpr size_t kMaxLen = 512;
+  PrimeTable& table = dbt->prime;
 
-  if (sample_buf.empty()) {
-    return;
-  }
-  dest->max_symbol = 255;
+  do {
+    cursor = table.Traverse(cursor, [&](PrimeIterator it) {
+      it->first.GetString(&scratch);
+      size_t len = std::min(scratch.size(), kMaxLen);
+      HIST_add(dest->hist.data(), scratch.data(), len);
+    });
 
-  unique_ptr<uint32_t[]> wksp(new uint32_t[HIST_WKSP_SIZE_U32]);
-  size_t max_freq = HIST_count_wksp(dest->hist, &dest->max_symbol, sample_buf.data(),
-                                    sample_buf.size(), wksp.get(), HIST_WKSP_SIZE);
-  CHECK(!HIST_isError(max_freq));
+    if (steps >= 20000) {
+      steps = 0;
+      ThisFiber::Yield();
+    }
+  } while (cursor);
+  dest->max_symbol = HufHist::kMaxSymbol;
+  while (dest->max_symbol && dest->hist[dest->max_symbol] == 0)
+    --dest->max_symbol;
 }
 
 ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
@@ -1300,10 +1287,10 @@ void DebugCmd::Compression(facade::SinkReplyBuilder* builder) {
   if (hist.max_symbol) {
     unique_ptr<uint32_t[]> wrkspace(new uint32_t[HUF_CTABLE_WORKSPACE_SIZE_U32]);
     constexpr size_t kWspSize = HUF_CTABLE_WORKSPACE_SIZE;
-    num_bits =
-        HUF_buildCTable_wksp(huf_ctable, hist.hist, hist.max_symbol, 0, wrkspace.get(), kWspSize);
+    num_bits = HUF_buildCTable_wksp(huf_ctable, hist.hist.data(), hist.max_symbol, 0,
+                                    wrkspace.get(), kWspSize);
 
-    compressed_size = HUF_estimateCompressedSize(huf_ctable, hist.hist, hist.max_symbol);
+    compressed_size = HUF_estimateCompressedSize(huf_ctable, hist.hist.data(), hist.max_symbol);
     raw_size = 0;
     for (unsigned i = 0; i < hist.max_symbol; i++) {
       raw_size += hist.hist[i];
