@@ -19,3 +19,4 @@ releases
 .idea/*
 .hypothesis
 .secrets
+cmake-build-debug
