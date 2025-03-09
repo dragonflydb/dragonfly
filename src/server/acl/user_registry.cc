@@ -36,7 +36,8 @@ UserCredentials UserRegistry::GetCredentials(std::string_view username) const {
     return {};
   }
   auto& user = it->second;
-  return {user.AclCategory(), user.AclCommands(), user.Keys(), user.PubSub(), user.Namespace()};
+  return {user.AclCategory(), user.AclCommands(), user.Keys(),
+          user.PubSub(),      user.Namespace(),   user.Db()};
 }
 
 bool UserRegistry::IsUserActive(std::string_view username) const {

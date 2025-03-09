@@ -1,4 +1,4 @@
-// Copyright 2023, DragonflyDB authors.  All rights reserved.
+// Copyright 2025, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -14,10 +14,51 @@
 
 namespace dfly::acl {
 
-inline bool Matches(std::string_view pattern, std::string_view target) {
+namespace {
+
+bool Matches(std::string_view pattern, std::string_view target) {
   GlobMatcher matcher(pattern, true);
   return matcher.Matches(target);
 };
+
+bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId& id) {
+  const size_t index = id.GetFamily();
+  const uint64_t command_mask = id.GetBitIndex();
+  DCHECK_LT(index, acl_commands.size());
+
+  return (acl_commands[index] & command_mask) != 0;
+}
+
+[[nodiscard]] std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(
+    bool literal_match, const std::vector<uint64_t>& acl_commands, const AclPubSub& pub_sub,
+    CmdArgList tail_args, const CommandId& id) {
+  if (!ValidateCommand(acl_commands, id)) {
+    return {false, AclLog::Reason::COMMAND};
+  }
+
+  auto iterate_globs = [&](std::string_view target) {
+    for (auto& [glob, has_asterisk] : pub_sub.globs) {
+      if (literal_match && (glob == target)) {
+        return true;
+      }
+      if (!literal_match && Matches(glob, target)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  bool allowed = true;
+  if (!pub_sub.all_channels) {
+    for (auto channel : tail_args) {
+      allowed &= iterate_globs(facade::ToSV(channel));
+    }
+  }
+
+  return {allowed, AclLog::Reason::PUB_SUB};
+}
+
+}  // namespace
 
 [[nodiscard]] bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const CommandId& id,
                                                 ArgSlice tail_args) {
@@ -32,7 +73,7 @@ inline bool Matches(std::string_view pattern, std::string_view target) {
   } else if (id.IsPSub()) {
     auth_res = IsPubSubCommandAuthorized(true, cntx.acl_commands, cntx.pub_sub, tail_args, id);
   } else {
-    auth_res = IsUserAllowedToInvokeCommandGeneric(cntx.acl_commands, cntx.keys, tail_args, id);
+    auth_res = IsUserAllowedToInvokeCommandGeneric(cntx, id, tail_args);
   }
 
   const auto [is_authed, reason] = auth_res;
@@ -45,17 +86,24 @@ inline bool Matches(std::string_view pattern, std::string_view target) {
   return is_authed;
 }
 
-static bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId& id) {
-  const size_t index = id.GetFamily();
-  const uint64_t command_mask = id.GetBitIndex();
-  DCHECK_LT(index, acl_commands.size());
-
-  return (acl_commands[index] & command_mask) != 0;
-}
-
 [[nodiscard]] std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
-    const std::vector<uint64_t>& acl_commands, const AclKeys& keys, CmdArgList tail_args,
-    const CommandId& id) {
+    const ConnectionContext& cntx, const CommandId& id, CmdArgList tail_args) {
+  const size_t max = std::numeric_limits<size_t>::max();
+  // Once we support ranges this must change
+  const bool reject_move_command = cntx.acl_db_idx != max && id.name() == "MOVE";
+  const bool reject_trans_command =
+      cntx.acl_db_idx != max && cntx.acl_db_idx != cntx.db_index() && id.IsTransactional();
+  if (reject_move_command || reject_trans_command) {
+    return {false, AclLog::Reason::AUTH};
+  }
+  size_t res = 0;
+  if (tail_args.size() == 1 && id.name() == "SELECT" && absl::SimpleAtoi(tail_args[0], &res) &&
+      cntx.acl_db_idx != max && cntx.acl_db_idx != res) {
+    return {false, AclLog::Reason::AUTH};
+  }
+
+  const auto& acl_commands = cntx.acl_commands;
+  const auto& keys = cntx.keys;
   if (!ValidateCommand(acl_commands, id)) {
     return {false, AclLog::Reason::COMMAND};
   }
@@ -87,35 +135,6 @@ static bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const Com
   }
 
   return {keys_allowed, AclLog::Reason::KEY};
-}
-
-[[nodiscard]] std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(
-    bool literal_match, const std::vector<uint64_t>& acl_commands, const AclPubSub& pub_sub,
-    CmdArgList tail_args, const CommandId& id) {
-  if (!ValidateCommand(acl_commands, id)) {
-    return {false, AclLog::Reason::COMMAND};
-  }
-
-  auto iterate_globs = [&](std::string_view target) {
-    for (auto& [glob, has_asterisk] : pub_sub.globs) {
-      if (literal_match && (glob == target)) {
-        return true;
-      }
-      if (!literal_match && Matches(glob, target)) {
-        return true;
-      }
-    }
-    return false;
-  };
-
-  bool allowed = true;
-  if (!pub_sub.all_channels) {
-    for (auto channel : tail_args) {
-      allowed &= iterate_globs(facade::ToSV(channel));
-    }
-  }
-
-  return {allowed, AclLog::Reason::PUB_SUB};
 }
 
 }  // namespace dfly::acl

@@ -65,6 +65,8 @@ class ConnectionContext {
   dfly::acl::AclKeys keys{{}, true};
   // pub/sub
   dfly::acl::AclPubSub pub_sub{{}, true};
+  // db index, empty optional means ALL db's
+  size_t acl_db_idx;
 
  private:
   Connection* owner_;

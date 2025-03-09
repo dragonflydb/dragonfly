@@ -1,4 +1,4 @@
-// Copyright 2023, DragonflyDB authors.  All rights reserved.
+// Copyright 2025, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -15,17 +15,10 @@ namespace dfly::acl {
 struct AclKeys;
 struct AclPubSub;
 
-std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
-    const std::vector<uint64_t>& acl_commands, const AclKeys& keys, facade::CmdArgList tail_args,
-    const CommandId& id);
+std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(const ConnectionContext& cntx,
+                                                                    const CommandId& id,
+                                                                    facade::CmdArgList tail_args);
 
 bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const CommandId& id,
                                   facade::CmdArgList tail_args);
-
-std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
-                                                          const std::vector<uint64_t>& acl_commands,
-                                                          const AclPubSub& pub_sub,
-                                                          facade::CmdArgList tail_args,
-                                                          const CommandId& id);
-
 }  // namespace dfly::acl

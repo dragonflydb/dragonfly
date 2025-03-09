@@ -113,6 +113,7 @@ ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredent
   } else {
     acl_commands = std::move(cred.acl_commands);
   }
+  acl_db_idx = cred.db;
 }
 
 ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction* tx)
@@ -122,6 +123,7 @@ ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction
     keys = owner->keys;
     pub_sub = owner->pub_sub;
     skip_acl_validation = owner->skip_acl_validation;
+    acl_db_idx = owner->acl_db_idx;
     ns = owner->ns;
   } else {
     acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::NONE_COMMANDS);
