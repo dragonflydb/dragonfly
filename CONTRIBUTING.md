@@ -108,11 +108,11 @@ when you do your commits.
 
 ### Repository Setup
 
-After cloning the repository, run the script to set up Git filters:
+After cloning the repository, run the script to set up Git to ignore local changes in specific files:
 
 ```bash
-chmod +x setup-git-filters.sh
-./setup-git-filters.sh
+chmod +x setup-git-ignore-local.sh
+./setup-git-ignore-local.sh
 ```
 
 ### Special Handling of Certain Files

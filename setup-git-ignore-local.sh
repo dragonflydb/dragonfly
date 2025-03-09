@@ -3,13 +3,7 @@
 # Exit on error
 set -e
 
-# Setting up Git filter for ignoring local changes in certain files
-git config filter.ignorelocalchanges.smudge cat
-git config filter.ignorelocalchanges.clean cat
-git config filter.ignorelocalchanges.required true
-
-# Setting assume-unchanged flag for files
-echo "Setting up Git filters for specific files..."
+echo "Setting up Git to ignore local changes in specific files..."
 
 # Launch.json file
 if git update-index --assume-unchanged .vscode/launch.json; then
@@ -42,7 +36,7 @@ if [ -f ".vscode/settings.json" ]; then
     fi
 fi
 
-echo "Git filters successfully configured!"
+echo "Git configuration successfully completed!"
 echo ""
 echo "Now configured files won't show up in git status when locally modified."
 echo ""
