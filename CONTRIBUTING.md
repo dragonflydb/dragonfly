@@ -126,25 +126,21 @@ The project has files (e.g., `.vscode/launch.json`) that:
 
 1. Disable ignoring for the file:
    ```bash
+   git update-index --no-assume-unchanged <file_path>
+   # For example:
    git update-index --no-assume-unchanged .vscode/launch.json
    ```
 
 2. Add the file and create a commit as usual:
    ```bash
-   git add .vscode/launch.json
-   git commit -m "Updated launch.json configuration"
+   git add <file_path>
+   git commit -m "fix: Updated configuration"
    ```
 
 3. After committing, re-enable ignoring:
    ```bash
-   git update-index --assume-unchanged .vscode/launch.json
+   git update-index --assume-unchanged <file_path>
    ```
-
-### List of Files with Special Handling
-
-- `.vscode/launch.json` - launch configuration
-- `.vscode/*.db` - VS Code database files
-- `.vscode/settings.json` - VS Code settings
 
 ## Codebase guidelines
 
