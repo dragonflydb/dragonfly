@@ -115,6 +115,11 @@ chmod +x setup-git-ignore-local.sh
 ./setup-git-ignore-local.sh
 ```
 
+To see all available options, run:
+```bash
+./setup-git-ignore-local.sh --help
+```
+
 ### Special Handling of Certain Files
 
 The project has files (e.g., `.vscode/launch.json`) that:
@@ -124,7 +129,29 @@ The project has files (e.g., `.vscode/launch.json`) that:
 
 ### If You Need to Commit Changes to Ignored Files
 
-1. Disable ignoring for the file:
+There are two ways to handle this:
+
+#### Option 1: Using the script to unignore all files
+
+1. Unignore all configured files:
+   ```bash
+   ./setup-git-ignore-local.sh --unignore
+   ```
+
+2. Add the file and create a commit as usual:
+   ```bash
+   git add <file_path>
+   git commit -m "fix: Updated configuration"
+   ```
+
+3. After committing, re-enable ignoring:
+   ```bash
+   ./setup-git-ignore-local.sh
+   ```
+
+#### Option 2: Manually unignore specific files
+
+1. Disable ignoring for a specific file:
    ```bash
    git update-index --no-assume-unchanged <file_path>
    # For example:
@@ -137,7 +164,7 @@ The project has files (e.g., `.vscode/launch.json`) that:
    git commit -m "fix: Updated configuration"
    ```
 
-3. After committing, re-enable ignoring:
+3. After committing, re-enable ignoring for that file:
    ```bash
    git update-index --assume-unchanged <file_path>
    ```
