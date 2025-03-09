@@ -21,6 +21,9 @@ ABSL_FLAG(uint32_t, replication_timeout, 30000,
 ABSL_FLAG(uint32_t, replication_stream_output_limit, 64_KB,
           "Time to wait for the replication output buffer go below the throttle limit");
 
+ABSL_FLAG(uint32_t, migration_buckets_serialization_threshold, 100,
+          "The Number of buckets to serialize on each iteration before yielding");
+
 namespace dfly {
 using namespace util;
 using namespace journal;
@@ -32,6 +35,7 @@ iovec IoVec(io::Bytes src) {
 }
 
 uint32_t replication_stream_output_limit_cached = 64_KB;
+uint32_t migration_buckets_serialization_threshold_cached = 100;
 
 }  // namespace
 
@@ -186,6 +190,8 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal
                                  ExecutionState* cntx)
     : JournalStreamer(journal, cntx), db_slice_(slice), my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
+  migration_buckets_serialization_threshold_cached =
+      absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);
   db_array_ = slice->databases();  // Inc ref to make sure DB isn't deleted while we use it
 }
 
@@ -229,7 +235,7 @@ void RestoreStreamer::Run() {
       stats_.buckets_loop += WriteBucket(it);
     });
 
-    if (++last_yield >= 100) {
+    if (++last_yield >= migration_buckets_serialization_threshold_cached) {
       ThisFiber::Yield();
       last_yield = 0;
     }

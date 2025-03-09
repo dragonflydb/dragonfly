@@ -2136,7 +2136,9 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
     assert extract_int_after_prefix("buckets on_db_update ", line) == 0
 
 
-@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+@dfly_args(
+    {"proactor_threads": 2, "cluster_mode": "yes", "migration_buckets_serialization_threshold": 3}
+)
 @pytest.mark.parametrize("chunk_size", [1_000_000, 30])
 @pytest.mark.asyncio
 @pytest.mark.exclude_epoll
