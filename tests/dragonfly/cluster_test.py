@@ -2969,6 +2969,9 @@ async def test_cluster_sharded_pub_sub(df_factory: DflyInstanceFactory):
     consumer.ssubscribe("kostas")
 
     await c_nodes[0].execute_command("SPUBLISH kostas hello")
+    # We need to sleep cause we use DispatchBrief internally. Otherwise we can't really gurantee
+    # that the client received the message
+    await asyncio.sleep(1)
 
     # Consume subscription message result from above
     message = consumer.get_sharded_message(target_node=node_a)
@@ -2978,6 +2981,7 @@ async def test_cluster_sharded_pub_sub(df_factory: DflyInstanceFactory):
     assert message == {"type": "message", "pattern": None, "channel": b"kostas", "data": b"hello"}
 
     consumer.sunsubscribe("kostas")
+    await asyncio.sleep(1)
     await c_nodes[0].execute_command("SPUBLISH kostas new_message")
     message = consumer.get_sharded_message(target_node=node_a)
     assert message == {"type": "unsubscribe", "pattern": None, "channel": b"kostas", "data": 0}
