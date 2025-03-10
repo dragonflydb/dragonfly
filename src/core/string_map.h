@@ -104,7 +104,8 @@ class StringMap : public DenseSet {
   };
 
   // otherwise updates its value and returns false.
-  bool AddOrUpdate(std::string_view field, std::string_view value, uint32_t ttl_sec = UINT32_MAX);
+  bool AddOrUpdate(std::string_view field, std::string_view value, uint32_t ttl_sec = UINT32_MAX,
+                   bool keepttl = false);
 
   // Returns true if field was added
   // false, if already exists. In that case no update is done.
