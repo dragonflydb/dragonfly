@@ -387,8 +387,8 @@ GenericError SaveStagesController::FinalizeFileMovement() {
 
 // Build full path: get dir, try creating dirs, get filename with placeholder
 GenericError SaveStagesController::BuildFullPath() {
-  fs::path dir_path = fs::path(GetFlag(FLAGS_dir)) / sub_path_;
-  if (!dir_path.empty() && !IsCloudPath(GetFlag(FLAGS_dir))) {
+  fs::path dir_path = cloud_uri_.empty() ? GetFlag(FLAGS_dir) : cloud_uri_;
+  if (!dir_path.empty() && cloud_uri_.empty() && !IsCloudPath(GetFlag(FLAGS_dir))) {
     if (auto ec = CreateDirs(dir_path); ec)
       return {ec, "Failed to create directories"};
   }
