@@ -124,8 +124,9 @@ unsigned ChannelStore::SendMessages(std::string_view channel, facade::ArgRange m
 
   // Make sure none of the threads publish buffer limits is reached. We don't reserve memory ahead
   // and don't prevent the buffer from possibly filling, but the approach is good enough for
-  // limiting fast producers. Most importantly, we can use DispatchBrief below as we block here
+  // limiting fast producers.
   int32_t last_thread = -1;
+
   for (auto& sub : subscribers) {
     int sub_thread = sub.Thread();
     DCHECK_LE(last_thread, sub_thread);
@@ -152,7 +153,7 @@ unsigned ChannelStore::SendMessages(std::string_view channel, facade::ArgRange m
       it++;
     }
   };
-  shard_set->pool()->DispatchBrief(std::move(cb));
+  shard_set->pool()->AwaitBrief(std::move(cb));
 
   return subscribers_ptr->size();
 }
@@ -323,7 +324,9 @@ void ChannelStoreUpdater::Apply() {
   // queued SubscribeMaps in the freelist are no longer in use.
   shard_set->pool()->AwaitBrief([](unsigned idx, util::ProactorBase*) {
     ServerState::tlocal()->UpdateChannelStore(
-        ChannelStore::control_block.most_recent.load(memory_order_relaxed));
+        // Do not use memory_order_relaxed, we need to fetch the latest value of
+        // the control block
+        ChannelStore::control_block.most_recent.load());
   });
 
   // Delete previous map and channel store.
