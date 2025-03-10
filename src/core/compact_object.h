@@ -75,7 +75,7 @@ class RobjWrapper {
   bool DefragIfNeeded(float ratio);
 
   // as defined in zset.h
-  int ZsetAdd(double score, char* ele, int in_flags, int* out_flags, double* newscore);
+  int ZsetAdd(double score, std::string_view ele, int in_flags, int* out_flags, double* newscore);
 
  private:
   void ReallocateString(MemoryResource* mr);
@@ -140,7 +140,7 @@ class CompactObj {
     // IO_PENDING is set when the tiered storage has issued an i/o request to save the value. It is
     // cleared when the io request finishes or is cancelled.
     IO_PENDING = 0x20,
-    
+
     // Applied only on keys that should be deleted asynchronously.
     // (it can be the same value as IO_PENDING) that is applied only on values.
     KEY_ASYNC_DELETE = 0x20,
