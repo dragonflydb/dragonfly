@@ -65,8 +65,8 @@ class ConnectionContext {
   dfly::acl::AclKeys keys{{}, true};
   // pub/sub
   dfly::acl::AclPubSub pub_sub{{}, true};
-  // db index, empty optional means ALL db's
-  size_t acl_db_idx;
+  // db index, std::numeric_limits<size_t>::max for ALL db's
+  size_t acl_db_idx = 0;
 
  private:
   Connection* owner_;
