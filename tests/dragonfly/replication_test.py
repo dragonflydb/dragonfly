@@ -589,6 +589,10 @@ async def test_rewrites(df_factory):
     async def skip_cmd():
         await is_match_rsp(r".*")
 
+    async def skip_cmds(n):
+        for _ in range(n):
+            await skip_cmd()
+
     async def check(cmd, rx):
         await c_master.execute_command(cmd)
         match = await is_match_rsp(rx)
@@ -730,6 +734,21 @@ async def test_rewrites(df_factory):
             [r"DEL renamed", r"RESTORE renamekey (.*?) (.*?) REPLACE ABSTTL"],
         )
         await check_expire("renamekey")
+
+        # Test autojournaling in the multi-mode
+        await c_master.execute_command("XADD k-stream * field value")
+        await c_master.execute_command("SADD k-one-element-set value1 value2")
+        sha = await c_master.script_load(
+            "redis.call('XTRIM', KEYS[1], 'MINID', '0'); return redis.call('SPOP', KEYS[2]);"
+        )
+        await skip_cmds(3)
+        # The first call to XTRIM triggers autojournaling.
+        # The SPOP command is executed with CO::NO_AUTOJOURNALING.
+        # This test ensures that the SPOP command is still properly replicated
+        await check_list_ooo(
+            f"EVALSHA {sha} 2 k-stream k-one-element-set",
+            [r"XTRIM k-stream MINID 0", r"SREM k-one-element-set value[12]"],
+        )
 
 
 """
