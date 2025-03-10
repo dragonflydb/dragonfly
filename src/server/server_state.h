@@ -210,8 +210,12 @@ class ServerState {  // public struct - to allow initialization.
     return qps_.SumTail();
   }
 
-  void RecordCmd() {
-    ++tl_connection_stats()->command_cnt;
+  void RecordCmd(const bool is_main_conn) {
+    if (is_main_conn) {
+      ++tl_connection_stats()->command_cnt_main;
+    } else {
+      ++tl_connection_stats()->command_cnt_other;
+    }
     qps_.Inc();
   }
 

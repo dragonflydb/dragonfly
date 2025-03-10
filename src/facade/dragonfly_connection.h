@@ -383,7 +383,7 @@ class Connection : public util::Connection {
 
   std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
 
-  void DecreaseStatsOnClose();
+  void DecreaseStatsOnClose() const;
   void BreakOnce(uint32_t ev_mask);
 
   void ConfigureProvidedBuffer();
@@ -474,6 +474,7 @@ class Connection : public util::Connection {
       bool is_http_ : 1;
       bool is_tls_ : 1;
       bool recv_provided_ : 1;
+      bool is_main_ : 1;
     };
   };
 };

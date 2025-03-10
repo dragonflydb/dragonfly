@@ -834,4 +834,16 @@ TEST_F(DflyEngineTest, ReplicaofRejectOnLoad) {
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.
 
+TEST_F(DflyEngineTest, CommandMetricLabels) {
+  EXPECT_EQ(Run({"SET", "foo", "bar"}), "OK");
+  EXPECT_EQ(Run({"GET", "foo"}), "bar");
+  const Metrics metrics = GetMetrics();
+
+  // The test connection counts as other
+  EXPECT_EQ(metrics.facade_stats.conn_stats.command_cnt_other, 2);
+  EXPECT_EQ(metrics.facade_stats.conn_stats.command_cnt_main, 0);
+  EXPECT_EQ(metrics.facade_stats.conn_stats.num_conns_main, 0);
+  EXPECT_EQ(metrics.facade_stats.conn_stats.num_conns_other, 0);
+}
+
 }  // namespace dfly

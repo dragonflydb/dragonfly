@@ -700,7 +700,7 @@ void Connection::OnPostMigrateThread() {
   }
 
   stats_ = &tl_facade_stats->conn_stats;
-  ++stats_->num_conns;
+  IsMain() ? ++stats_->num_conns_main : ++stats_->num_conns_other;
   stats_->read_buf_capacity += io_buf_.Capacity();
 }
 
@@ -708,6 +708,10 @@ void Connection::OnConnectionStart() {
   ThisFiber::SetName("DflyConnection");
 
   stats_ = &tl_facade_stats->conn_stats;
+
+  if (const Listener* ls = dynamic_cast<Listener*>(listener()); ls) {
+    is_main_ = ls->IsMainInterface();
+  }
 }
 
 void Connection::HandleRequests() {
@@ -918,7 +922,7 @@ bool Connection::IsPrivileged() const {
 }
 
 bool Connection::IsMain() const {
-  return static_cast<Listener*>(listener())->IsMainInterface();
+  return is_main_;
 }
 
 void Connection::SetName(string name) {
@@ -992,7 +996,7 @@ void Connection::ConnectionFlow() {
 
   ConfigureProvidedBuffer();
 
-  ++stats_->num_conns;
+  IsMain() ? ++stats_->num_conns_main : ++stats_->num_conns_other;
   ++stats_->conn_received_cnt;
   stats_->read_buf_capacity += io_buf_.Capacity();
 
@@ -1920,10 +1924,10 @@ Connection::MemoryUsage Connection::GetMemoryUsage() const {
   };
 }
 
-void Connection::DecreaseStatsOnClose() {
+void Connection::DecreaseStatsOnClose() const {
   stats_->read_buf_capacity -= io_buf_.Capacity();
 
-  --stats_->num_conns;
+  IsMain() ? --stats_->num_conns_main : --stats_->num_conns_other;
 }
 
 void Connection::BreakOnce(uint32_t ev_mask) {
@@ -2061,11 +2065,11 @@ bool Connection::WeakRef::operator==(const WeakRef& other) const {
 
 void ResetStats() {
   auto& cstats = tl_facade_stats->conn_stats;
-  cstats.command_cnt = 0;
   cstats.pipelined_cmd_cnt = 0;
   cstats.conn_received_cnt = 0;
   cstats.pipelined_cmd_cnt = 0;
-  cstats.command_cnt = 0;
+  cstats.command_cnt_main = 0;
+  cstats.command_cnt_other = 0;
   cstats.io_read_cnt = 0;
   cstats.io_read_bytes = 0;
 
