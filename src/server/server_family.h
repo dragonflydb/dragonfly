@@ -202,7 +202,7 @@ class ServerFamily {
 
   void StatsMC(std::string_view section, SinkReplyBuilder* builder);
 
-  GenericError DoSave(SaveCmdOptions save_cmd_opts, Transaction* transaction,
+  GenericError DoSave(const SaveCmdOptions& save_cmd_opts, Transaction* transaction,
                       bool ignore_state = false);
 
   // Calls DoSave with a default generated transaction and with the format
@@ -324,7 +324,7 @@ class ServerFamily {
 
   void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
 
-  GenericError DoSaveCheckAndStart(SaveCmdOptions save_cmd_opts, Transaction* trans,
+  GenericError DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts, Transaction* trans,
                                    bool ignore_state = false) ABSL_LOCKS_EXCLUDED(save_mu_);
 
   GenericError WaitUntilSaveFinished(Transaction* trans,

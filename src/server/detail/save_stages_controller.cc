@@ -35,10 +35,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-bool IsCloudPath(string_view path) {
-  return absl::StartsWith(path, kS3Prefix) || absl::StartsWith(path, kGCSPrefix);
-}
-
 // Create a directory and all its parents if they don't exist.
 error_code CreateDirs(fs::path dir_path) {
   error_code ec;

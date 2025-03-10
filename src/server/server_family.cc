@@ -251,16 +251,8 @@ string UnknownCmd(string cmd, CmdArgList args) {
                       absl::StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
 }
 
-bool IsS3Path(string_view path) {
-  return absl::StartsWith(path, detail::kS3Prefix);
-}
-
-bool IsGCSPath(string_view path) {
-  return absl::StartsWith(path, detail::kGCSPrefix);
-}
-
 std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_view uri) {
-  if (IsS3Path(uri)) {
+  if (detail::IsS3Path(uri)) {
 #ifdef WITH_AWS
     shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
     return std::make_shared<detail::AwsS3SnapshotStorage>(
@@ -270,7 +262,7 @@ std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_
     LOG(ERROR) << "Compiled without AWS support";
     exit(1);
 #endif
-  } else if (IsGCSPath(uri)) {
+  } else if (detail::IsGCSPath(uri)) {
     auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
     auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return gcs->Init(3000); });
     if (ec) {
@@ -880,7 +872,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
 
   string flag_dir = GetFlag(FLAGS_dir);
 
-  if (IsS3Path(flag_dir) || IsGCSPath(flag_dir)) {
+  if (detail::IsCloudPath(flag_dir)) {
     snapshot_storage_ = CreateCloudSnapshotStorage(flag_dir);
   } else if (fq_threadpool_) {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
@@ -1669,8 +1661,8 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
                 ignore_state);
 }
 
-GenericError ServerFamily::DoSaveCheckAndStart(SaveCmdOptions save_cmd_opts, Transaction* trans,
-                                               bool ignore_state) {
+GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts,
+                                               Transaction* trans, bool ignore_state) {
   auto state = ServerState::tlocal()->gstate();
 
   // In some cases we want to create a snapshot even if server is not active, f.e in takeover
@@ -1728,9 +1720,9 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   return save_info.error;
 }
 
-GenericError ServerFamily::DoSave(SaveCmdOptions save_cmd_opts, Transaction* trans,
+GenericError ServerFamily::DoSave(const SaveCmdOptions& save_cmd_opts, Transaction* trans,
                                   bool ignore_state) {
-  if (auto ec = DoSaveCheckAndStart(std::move(save_cmd_opts), trans, ignore_state); ec) {
+  if (auto ec = DoSaveCheckAndStart(save_cmd_opts, trans, ignore_state); ec) {
     return ec;
   }
 
@@ -2115,23 +2107,24 @@ std::optional<SaveCmdOptions> ServerFamily::GetSaveCmdOpts(CmdArgList args,
   }
 
   if (args.size() >= 2) {
-    if (IsS3Path(ArgS(args, 1))) {
+    if (detail::IsS3Path(ArgS(args, 1))) {
 #ifdef WITH_AWS
       save_cmd_opts.cloud_uri = ArgS(args, 1);
 #else
       LOG(ERROR) << "Compiled without AWS support";
       exit(1);
 #endif
-    } else if (IsGCSPath(ArgS(args, 1))) {
+    } else if (detail::IsGCSPath(ArgS(args, 1))) {
       save_cmd_opts.cloud_uri = ArgS(args, 1);
     } else {
-      // Probably basename than
+      // no cloud_uri get basename and return
       save_cmd_opts.basename = ArgS(args, 1);
+      return save_cmd_opts;
     }
-  }
-
-  if (save_cmd_opts.basename.empty() && args.size() == 3) {
-    save_cmd_opts.basename = ArgS(args, 2);
+    // cloud_uri is set so get basename if provided
+    if (args.size() == 3) {
+      save_cmd_opts.basename = ArgS(args, 2);
+    }
   }
 
   return save_cmd_opts;
@@ -2145,7 +2138,7 @@ void ServerFamily::BgSave(CmdArgList args, const CommandContext& cmd_cntx) {
     return;
   }
 
-  if (auto ec = DoSaveCheckAndStart(std::move(*maybe_res), cmd_cntx.tx); ec) {
+  if (auto ec = DoSaveCheckAndStart(*maybe_res, cmd_cntx.tx); ec) {
     cmd_cntx.rb->SendError(ec.Format());
     return;
   }
@@ -2164,7 +2157,7 @@ void ServerFamily::Save(CmdArgList args, const CommandContext& cmd_cntx) {
     return;
   }
 
-  GenericError ec = DoSave(std::move(*maybe_res), cmd_cntx.tx);
+  GenericError ec = DoSave(*maybe_res, cmd_cntx.tx);
   if (ec) {
     cmd_cntx.rb->SendError(ec.Format());
   } else {
