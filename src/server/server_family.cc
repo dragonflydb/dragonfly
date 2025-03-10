@@ -259,7 +259,7 @@ bool IsGCSPath(string_view path) {
   return absl::StartsWith(path, detail::kGCSPrefix);
 }
 
-std::shared_ptr<dfly::detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_view uri) {
+std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_view uri) {
   if (IsS3Path(uri)) {
 #ifdef WITH_AWS
     shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
@@ -879,24 +879,9 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   }
 
   string flag_dir = GetFlag(FLAGS_dir);
-  if (IsS3Path(flag_dir)) {
-#ifdef WITH_AWS
-    shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
-    snapshot_storage_ = std::make_shared<detail::AwsS3SnapshotStorage>(
-        absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_use_https),
-        absl::GetFlag(FLAGS_s3_ec2_metadata), absl::GetFlag(FLAGS_s3_sign_payload));
-#else
-    LOG(ERROR) << "Compiled without AWS support";
-    exit(1);
-#endif
-  } else if (IsGCSPath(flag_dir)) {
-    auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
-    auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return gcs->Init(3000); });
-    if (ec) {
-      LOG(ERROR) << "Failed to initialize GCS snapshot storage: " << ec.message();
-      exit(1);
-    }
-    snapshot_storage_ = std::move(gcs);
+
+  if (IsS3Path(flag_dir) || IsGCSPath(flag_dir)) {
+    snapshot_storage_ = CreateCloudSnapshotStorage(flag_dir);
   } else if (fq_threadpool_) {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {
