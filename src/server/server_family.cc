@@ -1844,6 +1844,18 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
     cntx->pub_sub = std::move(cred.pub_sub);
     cntx->ns = &namespaces->GetOrInsert(cred.ns);
     cntx->authenticated = true;
+    cntx->acl_db_idx = cred.db;
+    if (cred.db == std::numeric_limits<size_t>::max()) {
+      cntx->conn_state.db_index = 0;
+    } else {
+      auto cb = [ns = cntx->ns, index = cred.db](EngineShard* shard) {
+        auto& db_slice = ns->GetDbSlice(shard->shard_id());
+        db_slice.ActivateDb(index);
+        return OpStatus::OK;
+      };
+      shard_set->RunBriefInParallel(std::move(cb));
+      cntx->conn_state.db_index = cred.db;
+    }
   }
   return is_authorized;
 }

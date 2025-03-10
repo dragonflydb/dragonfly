@@ -84,6 +84,8 @@ void User::Update(UpdateRequest&& req, const CategoryToIdxStore& cat_to_id,
     SetIsActive(*req.is_active);
   }
 
+  SetSelectDb(req.select_db);
+
   SetNamespace(req.ns);
 }
 
@@ -107,6 +109,16 @@ void User::UnsetPassword(std::string_view password) {
 
 void User::SetNamespace(const std::string& ns) {
   namespace_ = ns;
+}
+
+void User::SetSelectDb(std::optional<size_t> db) {
+  if (db) {
+    db_ = *db;
+  }
+}
+
+size_t User::Db() const {
+  return db_;
 }
 
 const std::string& User::Namespace() const {
