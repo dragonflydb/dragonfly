@@ -99,12 +99,14 @@ struct ConnectionStats {
   uint64_t io_read_cnt = 0;
   size_t io_read_bytes = 0;
 
-  uint64_t command_cnt = 0;
+  uint64_t command_cnt_main = 0;
+  uint64_t command_cnt_other = 0;
   uint64_t pipelined_cmd_cnt = 0;
   uint64_t pipelined_cmd_latency = 0;  // in microseconds
   uint64_t conn_received_cnt = 0;
 
-  uint32_t num_conns = 0;
+  uint32_t num_conns_main = 0;
+  uint32_t num_conns_other = 0;
   uint32_t num_blocked_clients = 0;
   uint64_t num_migrations = 0;
   uint64_t num_recv_provided_calls = 0;
