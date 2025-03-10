@@ -697,9 +697,11 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
 
   stream* stream_inst = (stream*)it->second.RObjPtr();
 
-  streamID result_id;
   const auto& parsed_id = opts.parsed_id;
   streamID passed_id = parsed_id.val;
+  DCHECK(!op_args.shard->IsReplica() || (op_args.shard->IsReplica() && parsed_id.id_given));
+
+  streamID result_id;
   int res = StreamAppendItem(stream_inst, args, op_args.db_cntx.time_now_ms, &result_id,
                              parsed_id.id_given ? &passed_id : nullptr, parsed_id.has_seq);
 

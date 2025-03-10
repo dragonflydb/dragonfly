@@ -499,6 +499,7 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
   kv_fp_.clear();
 
   cid_ = cid;
+  re_enabled_auto_journal_ = false;
   cb_ptr_ = nullptr;
 
   for (auto& sd : shard_data_) {

@@ -2932,3 +2932,36 @@ async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFa
         await wait_for_replicas_state(*c_replicas)
 
     await fill_task
+
+
+async def test_autojournaling_in_multi_mode(df_factory):
+    master = df_factory.create(proactor_threads=1)
+    replica = df_factory.create(proactor_threads=1)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("XADD stream * field value")
+
+    for i in range(300):
+        await c_master.execute_command(f"SADD set {i}")
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    # The first call to XTRIM triggers autojournaling.
+    # The SPOP command is executed with CO::NO_AUTOJOURNALING.
+    # This test ensures that the SPOP command is still properly replicated
+    await c_master.execute_command(
+        "EVAL",
+        "redis.call('XTRIM', KEYS[1], 'MINID', '0'); return redis.call('SPOP', KEYS[2]);",
+        2,
+        "stream",
+        "set",
+    )
+
+    # Check replica data consistent
+    replica_data = await StaticSeeder.capture(c_replica)
+    master_data = await StaticSeeder.capture(c_master)
+    assert master_data == replica_data
