@@ -409,6 +409,8 @@ class Connection : public util::Connection {
   io::Bytes NextBundleBuffer(size_t total_len);
   void MarkReadBufferConsumed();
 
+  uint32_t& NumConns();
+
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
   util::fb2::Fiber async_fb_;             // async fiber (if started)
@@ -474,6 +476,7 @@ class Connection : public util::Connection {
       bool is_http_ : 1;
       bool is_tls_ : 1;
       bool recv_provided_ : 1;
+      bool is_main_ : 1;
     };
   };
 };
