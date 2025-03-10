@@ -151,7 +151,16 @@ error_code RdbSnapshot::Close() {
     return static_cast<LinuxWriteWrapper*>(io_sink_.get())->Close();
   }
 #endif
-  return static_cast<io::WriteFile*>(io_sink_.get())->Close();
+
+  error_code ec;
+
+  // S3 implementation is stack hungry. We use a fiber to close the file to
+  // avoid wasting stack space.
+  auto fb = ProactorBase::me()->LaunchFiber(
+      fb2::Launch::post, boost::context::fixedsize_stack{40 * 1024}, "write_file_close",
+      [&] { ec = static_cast<io::WriteFile*>(io_sink_.get())->Close(); });
+  fb.Join();
+  return ec;
 }
 
 void RdbSnapshot::StartInShard(EngineShard* shard) {
