@@ -386,6 +386,29 @@ class Connection : public util::Connection {
   void DecreaseStatsOnClose();
   void BreakOnce(uint32_t ev_mask);
 
+  void ConfigureProvidedBuffer();
+
+  // The read buffer with read data that needs to be parsed and processed.
+  // For io_uring bundles we may have available_bytes larger than slice.size()
+  // which means that there are more buffers available to read.
+  struct ReadBuffer {
+    size_t available_bytes;
+    io::Bytes slice;
+
+    bool ShouldAdvance() const {
+      return slice.empty();
+    }
+
+    void Consume(size_t len) {
+      available_bytes -= len;
+      slice.remove_prefix(len);
+    }
+  };
+
+  ReadBuffer GetReadBuffer();
+  io::Bytes NextBundleBuffer(size_t total_len);
+  void MarkReadBufferConsumed();
+
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
   util::fb2::Fiber async_fb_;             // async fiber (if started)
@@ -395,6 +418,7 @@ class Connection : public util::Connection {
   // how many bytes of the current request have been consumed
   size_t request_consumed_bytes_ = 0;
 
+  util::FiberSocketBase::ProvidedBuffer recv_buf_;
   io::IoBuf io_buf_;  // used in io loop and parsers
   std::unique_ptr<RedisParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
@@ -449,6 +473,7 @@ class Connection : public util::Connection {
       bool migration_in_process_ : 1;
       bool is_http_ : 1;
       bool is_tls_ : 1;
+      bool recv_provided_ : 1;
     };
   };
 };
