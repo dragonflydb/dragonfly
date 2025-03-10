@@ -126,6 +126,7 @@ unsigned ChannelStore::SendMessages(std::string_view channel, facade::ArgRange m
   // and don't prevent the buffer from possibly filling, but the approach is good enough for
   // limiting fast producers. Most importantly, we can use DispatchBrief below as we block here
   int32_t last_thread = -1;
+
   for (auto& sub : subscribers) {
     int sub_thread = sub.Thread();
     DCHECK_LE(last_thread, sub_thread);
@@ -323,7 +324,9 @@ void ChannelStoreUpdater::Apply() {
   // queued SubscribeMaps in the freelist are no longer in use.
   shard_set->pool()->AwaitBrief([](unsigned idx, util::ProactorBase*) {
     ServerState::tlocal()->UpdateChannelStore(
-        ChannelStore::control_block.most_recent.load(memory_order_relaxed));
+        // Do not use memory_order_relaxed, we need to fetch the latest value of
+        // the control block
+        ChannelStore::control_block.most_recent.load(std::memory_order_seq_cst));
   });
 
   // Delete previous map and channel store.
