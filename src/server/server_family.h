@@ -158,6 +158,15 @@ struct ReplicaOffsetInfo {
   std::vector<uint64_t> flow_offsets;
 };
 
+struct SaveCmdOptions {
+  // if new_version is true, saves DF specific, non redis compatible snapshot.
+  bool new_version;
+  // cloud storage URI
+  std::string_view cloud_uri;
+  // if basename is not empty it will override dbfilename flag
+  std::string_view basename;
+};
+
 class ServerFamily {
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
@@ -193,10 +202,8 @@ class ServerFamily {
 
   void StatsMC(std::string_view section, SinkReplyBuilder* builder);
 
-  // if new_version is true, saves DF specific, non redis compatible snapshot.
-  // if basename is not empty it will override dbfilename flag.
-  GenericError DoSave(bool new_version, std::string_view sub_path, std::string_view basename,
-                      Transaction* transaction, bool ignore_state = false);
+  GenericError DoSave(SaveCmdOptions save_cmd_opts, Transaction* transaction,
+                      bool ignore_state = false);
 
   // Calls DoSave with a default generated transaction and with the format
   // specified in --df_snapshot_format
@@ -313,17 +320,12 @@ class ServerFamily {
 
   void SendInvalidationMessages() const;
 
-  // Helper function to retrieve version(true if format is dfs rdb), sub path and basename from
-  // args. In case of an error an empty optional is returned.
-  using VersionSubPathBasename = std::tuple<bool, std::string, std::string>;
-  std::optional<VersionSubPathBasename> GetVersionSubPathAndBasename(CmdArgList args,
-                                                                     SinkReplyBuilder* builder);
+  std::optional<SaveCmdOptions> GetSaveCmdOpts(CmdArgList args, SinkReplyBuilder* builder);
 
   void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
 
-  GenericError DoSaveCheckAndStart(bool new_version, string_view sub_path, string_view basename,
-                                   Transaction* trans, bool ignore_state = false)
-      ABSL_LOCKS_EXCLUDED(save_mu_);
+  GenericError DoSaveCheckAndStart(SaveCmdOptions save_cmd_opts, Transaction* trans,
+                                   bool ignore_state = false) ABSL_LOCKS_EXCLUDED(save_mu_);
 
   GenericError WaitUntilSaveFinished(Transaction* trans,
                                      bool ignore_state = false) ABSL_NO_THREAD_SAFETY_ANALYSIS;
