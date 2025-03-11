@@ -311,6 +311,21 @@ async def test_info_persistence_field(async_client):
     assert "loading:0" in (await async_client.execute_command("INFO PERSISTENCE"))
 
 
+def delete_s3_objects(bucket, prefix):
+    client = boto3.client("s3")
+    resp = client.list_objects_v2(
+        Bucket=bucket,
+        Prefix=prefix,
+    )
+    keys = []
+    for obj in resp["Contents"]:
+        keys.append({"Key": obj["Key"]})
+    client.delete_objects(
+        Bucket=bucket,
+        Delete={"Objects": keys},
+    )
+
+
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
 # configured.
 @pytest.mark.skipif(
@@ -338,22 +353,7 @@ async def test_s3_snapshot(async_client, tmp_dir):
         assert await StaticSeeder.capture(async_client) == start_capture
 
     finally:
-
-        def delete_objects(bucket, prefix):
-            client = boto3.client("s3")
-            resp = client.list_objects_v2(
-                Bucket=bucket,
-                Prefix=prefix,
-            )
-            keys = []
-            for obj in resp["Contents"]:
-                keys.append({"Key": obj["Key"]})
-            client.delete_objects(
-                Bucket=bucket,
-                Delete={"Objects": keys},
-            )
-
-        delete_objects(
+        delete_s3_objects(
             os.environ["DRAGONFLY_S3_BUCKET"],
             str(tmp_dir)[1:],
         )
@@ -366,7 +366,7 @@ async def test_s3_snapshot(async_client, tmp_dir):
     reason="AWS S3 snapshots bucket is not configured",
 )
 @dfly_args({**BASIC_ARGS})
-async def test_s3_save(async_client):
+async def test_s3_save_local_dir(async_client):
     seeder = StaticSeeder(key_target=10_000)
     await seeder.run(async_client)
 
@@ -377,22 +377,7 @@ async def test_s3_save(async_client):
         )
 
     finally:
-
-        def delete_objects(bucket, prefix):
-            client = boto3.client("s3")
-            resp = client.list_objects_v2(
-                Bucket=bucket,
-                Prefix=prefix,
-            )
-            keys = []
-            for obj in resp["Contents"]:
-                keys.append({"Key": obj["Key"]})
-            client.delete_objects(
-                Bucket=bucket,
-                Delete={"Objects": keys},
-            )
-
-        delete_objects(
+        delete_s3_objects(
             os.environ["DRAGONFLY_S3_BUCKET"],
             "s3_dump",
         )
