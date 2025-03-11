@@ -7,9 +7,9 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <absl/time/time.h>
 #include <mimalloc.h>
 
-#include <chrono>
 #include <numeric>
 #include <variant>
 
@@ -323,26 +323,24 @@ thread_local vector<Connection::PipelineMessagePtr> Connection::pipeline_req_poo
 class PipelineCacheSizeTracker {
  public:
   bool CheckAndUpdateWatermark(size_t pipeline_sz) {
-    const auto now = Clock::now();
+    const auto now = absl::Now();
     const auto elapsed = now - last_check_;
     min_ = std::min(min_, pipeline_sz);
-    if (elapsed < std::chrono::milliseconds(10)) {
+    if (elapsed < absl::Milliseconds(10)) {
       return false;
     }
 
     const bool watermark_reached = (min_ > 0);
     min_ = Limits::max();
-    last_check_ = Clock::now();
+    last_check_ = absl::Now();
 
     return watermark_reached;
   }
 
  private:
-  using Tp = std::chrono::time_point<std::chrono::system_clock>;
-  using Clock = std::chrono::system_clock;
   using Limits = std::numeric_limits<size_t>;
 
-  Tp last_check_ = Clock::now();
+  absl::Time last_check_ = absl::Now();
   size_t min_ = Limits::max();
 };
 
