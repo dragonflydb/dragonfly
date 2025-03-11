@@ -72,10 +72,10 @@ bool StringMap::AddOrUpdate(std::string_view field, std::string_view value, uint
 
   // Replace the whole entry.
   if (sds prev_entry = (sds)AddOrReplaceObj(newkey, sdsval_tag & kValTtlBit); prev_entry) {
-    if (keepttl) {
-      if (const uint32_t prev_ttl = ObjExpireTime(prev_entry); prev_ttl != UINT32_MAX) {
-        ObjUpdateExpireTime(newkey, prev_ttl);
-      }
+    const bool prev_has_ttl =
+        absl::little_endian::Load64(prev_entry + sdslen(prev_entry) + 1) & kValTtlBit;
+    if (keepttl && prev_has_ttl) {
+      SdsUpdateExpireTime(newkey, ObjExpireTime(prev_entry), 8);
     }
     ObjDelete(prev_entry, false);
     return false;

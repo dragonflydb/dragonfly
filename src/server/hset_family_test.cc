@@ -368,11 +368,12 @@ TEST_F(HSetFamilyTest, HSetEx) {
   // KEEPTTL related asserts
   EXPECT_THAT(Run({"HSETEX", "k", long_time, "kttlfield", "value"}), IntArg(1));
   EXPECT_EQ(Run({"HGET", "k", "kttlfield"}), "value");
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k", "kttlfield"}), 100);
 
   // KEEPTTL resets value of kttlfield, but preserves its TTL. afield is added with TTL=1
   EXPECT_THAT(Run({"HSETEX", "k", "KEEPTTL", "1", "kttlfield", "resetvalue", "afield", "aval"}),
               IntArg(1));
-  EXPECT_EQ(Run({"FIELDTTL", "k", "kttlfield"}).GetInt(), long_time);
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k", "kttlfield"}), 100);
   EXPECT_EQ(Run({"FIELDTTL", "k", "afield"}).GetInt(), 1);
   EXPECT_EQ(Run({"HGET", "k", "afield"}), "aval");
   // make afield expire
@@ -381,19 +382,19 @@ TEST_F(HSetFamilyTest, HSetEx) {
 
   // kttlfield is still present although with updated value
   EXPECT_EQ(Run({"HGET", "k", "kttlfield"}), "resetvalue");
-  EXPECT_GT(Run({"FIELDTTL", "k", "kttlfield"}).GetInt(), 10);
+  EXPECT_EQ(Run({"FIELDTTL", "k", "kttlfield"}).GetInt(), 99);
 
   // If NX is supplied, with or without KEEPTTL neither expiry nor value is updated
-  EXPECT_THAT(Run({"HSETEX", "k", "KEEPTTL", "NX", "1", "kttlfield", "value"}), IntArg(0));
+  EXPECT_THAT(Run({"HSETEX", "k", "NX", "KEEPTTL", "1", "kttlfield", "value"}), IntArg(0));
 
   // No updates
   EXPECT_EQ(Run({"HGET", "k", "kttlfield"}), "resetvalue");
-  EXPECT_GT(Run({"FIELDTTL", "k", "kttlfield"}).GetInt(), 10);
+  EXPECT_EQ(Run({"FIELDTTL", "k", "kttlfield"}).GetInt(), 99);
 
   EXPECT_THAT(Run({"HSETEX", "k", "NX", "1", "kttlfield", "value"}), IntArg(0));
   // No updates
   EXPECT_EQ(Run({"HGET", "k", "kttlfield"}), "resetvalue");
-  EXPECT_GT(Run({"FIELDTTL", "k", "kttlfield"}).GetInt(), 10);
+  EXPECT_EQ(Run({"FIELDTTL", "k", "kttlfield"}).GetInt(), 99);
 
   // Invalid TTL handling
   EXPECT_THAT(Run({"HSETEX", "k", "NX", "zero", "kttlfield", "value"}),
