@@ -721,29 +721,17 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
   return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, key, values, pv);
 }
 
-OpSetParams LoadHSetExParams(CmdArgParser& parser) {
-  OpSetParams op_sp{};
-  while (true) {
-    if (parser.Check("NX")) {
-      op_sp.skip_if_exists = true;
-    } else if (parser.Check("KEEPTTL")) {
-      op_sp.keepttl = true;
-    } else {
-      break;
-    }
-  }
-
-  // Conversion errors are handled by caller
-  op_sp.ttl = parser.Next<uint32_t>();
-  return op_sp;
-}
-
 // HSETEX key [NX] [KEEPTTL] tll_sec field value field value ...
 void HSetEx(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser{args};
 
   string_view key = parser.Next();
-  const OpSetParams op_sp = LoadHSetExParams(parser);
+  OpSetParams op_sp;
+
+  op_sp.skip_if_exists = parser.Check("NX");
+  op_sp.keepttl = parser.Check("KEEPTTL");
+  op_sp.ttl = parser.Next<uint32_t>();
+
   if (parser.HasError()) {
     return cmd_cntx.rb->SendError(parser.Error()->MakeReply());
   }

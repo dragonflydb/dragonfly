@@ -372,6 +372,8 @@ TEST_F(HSetFamilyTest, HSetEx) {
   // KEEPTTL resets value of kttlfield, but preserves its TTL. afield is added with TTL=1
   EXPECT_THAT(Run({"HSETEX", "k", "KEEPTTL", "1", "kttlfield", "resetvalue", "afield", "aval"}),
               IntArg(1));
+  EXPECT_EQ(Run({"FIELDTTL", "k", "kttlfield"}).GetInt(), long_time);
+  EXPECT_EQ(Run({"FIELDTTL", "k", "afield"}).GetInt(), 1);
   EXPECT_EQ(Run({"HGET", "k", "afield"}), "aval");
   // make afield expire
   AdvanceTime(1000);
