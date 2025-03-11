@@ -91,6 +91,11 @@ TEST_P(HestFamilyTestProtocolVersioned, Get) {
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre("1", "3", ArgType(RespExpr::NIL)));
 
+  resp = Run({"hmget", "x", "a", "c", "d", "d", "c", "a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("1", "3", ArgType(RespExpr::NIL), ArgType(RespExpr::NIL), "3", "1"));
+
   resp = Run({"hgetall", "x"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "b", "2", "c", "3"));
