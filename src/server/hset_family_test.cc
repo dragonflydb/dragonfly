@@ -399,6 +399,12 @@ TEST_F(HSetFamilyTest, HSetEx) {
   // Invalid TTL handling
   EXPECT_THAT(Run({"HSETEX", "k", "NX", "zero", "kttlfield", "value"}),
               ErrArg("ERR value is not an integer or out of range"));
+
+  // Exercise the code path where a field is added without TTL, but then we set a new expiration AND
+  // provide KEEPTTL. Since there was no old expiry, the new TTL should be applied.
+  EXPECT_EQ(Run({"HSET", "k", "nottl", "val"}), 1);
+  EXPECT_EQ(Run({"HSETEX", "k", "KEEPTTL", long_time, "nottl", "newval"}), 0);
+  EXPECT_EQ(Run({"FIELDTTL", "k", "nottl"}).GetInt(), 100);
 }
 
 TEST_F(HSetFamilyTest, TriggerConvertToStrMap) {
