@@ -59,16 +59,6 @@ pair<sds, uint64_t> CreateEntry(string_view field, string_view value, uint32_t t
   return {newkey, sdsval_tag};
 }
 
-std::pair<uint64_t, const char*> LoadValPtr(const void* obj) {
-  sds str = (sds)obj;
-  const char* val_ptr = str + sdslen(str) + 1;
-  return {absl::little_endian::Load64(val_ptr), val_ptr};
-}
-
-uint32_t GetExpiry(const char* val_ptr) {
-  return absl::little_endian::Load32(val_ptr + 8);
-}
-
 }  // namespace
 
 StringMap::~StringMap() {
@@ -77,28 +67,16 @@ StringMap::~StringMap() {
 
 bool StringMap::AddOrUpdate(std::string_view field, std::string_view value, uint32_t ttl_sec,
                             bool keepttl) {
-  void* dptr = nullptr;
-  void* raw = nullptr;
-  // If keepttl was specified, do a search. If the object is found pass it to AddOrReplaceObj
-  // to avoid another search. We might end up doing two searches if keepttl is specified and
-  // field is not present already.
-  if (keepttl) {
-    uint64_t hashcode = Hash(&field, 1);
-    // dense ptr for AddOrReplaceObj and sds for getting expire time.
-    std::tie(dptr, raw) = FindObjPtr(&field, hashcode, 1);
-
-    if (raw) {
-      if (const auto [val, val_ptr] = LoadValPtr(raw); val & kValTtlBit) {
-        ttl_sec = GetExpiry(val_ptr);
-      }
-    }
-  }
-
   // 8 additional bytes for a pointer to value.
   auto [newkey, sdsval_tag] = CreateEntry(field, value, time_now(), ttl_sec);
 
   // Replace the whole entry.
-  if (sds prev_entry = (sds)AddOrReplaceObj(newkey, sdsval_tag & kValTtlBit, dptr); prev_entry) {
+  if (sds prev_entry = (sds)AddOrReplaceObj(newkey, sdsval_tag & kValTtlBit); prev_entry) {
+    if (keepttl) {
+      if (const uint32_t prev_ttl = ObjExpireTime(prev_entry); prev_ttl != UINT32_MAX) {
+        ObjUpdateExpireTime(newkey, prev_ttl);
+      }
+    }
     ObjDelete(prev_entry, false);
     return false;
   }
@@ -285,10 +263,14 @@ size_t StringMap::ObjectAllocSize(const void* obj) const {
 }
 
 uint32_t StringMap::ObjExpireTime(const void* obj) const {
-  auto [val, valptr] = LoadValPtr(obj);
+  sds str = (sds)obj;
+  const char* valptr = str + sdslen(str) + 1;
+
+  uint64_t val = absl::little_endian::Load64(valptr);
+
   DCHECK(val & kValTtlBit);
   if (val & kValTtlBit) {
-    return GetExpiry(valptr);
+    return absl::little_endian::Load32(valptr + 8);
   }
 
   // Should not reach.

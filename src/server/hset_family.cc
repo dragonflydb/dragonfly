@@ -721,25 +721,16 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
   return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, key, values, pv);
 }
 
-enum class HSetExOpts {
-  NX,
-  KEEPTTL,
-};
-
 OpSetParams LoadHSetExParams(CmdArgParser& parser) {
   OpSetParams op_sp{};
-
-  auto res = parser.TryMapNext("NX"sv, HSetExOpts::NX, "KEEPTTL"sv, HSetExOpts::KEEPTTL);
-  while (res.has_value()) {
-    switch (res.value()) {
-      case HSetExOpts::NX:
-        op_sp.skip_if_exists = true;
-        break;
-      case HSetExOpts::KEEPTTL:
-        op_sp.keepttl = true;
-        break;
+  while (true) {
+    if (parser.Check("NX")) {
+      op_sp.skip_if_exists = true;
+    } else if (parser.Check("KEEPTTL")) {
+      op_sp.keepttl = true;
+    } else {
+      break;
     }
-    res = parser.TryMapNext("NX"sv, HSetExOpts::NX, "KEEPTTL"sv, HSetExOpts::KEEPTTL);
   }
 
   // Conversion errors are handled by caller
@@ -752,7 +743,7 @@ void HSetEx(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser{args};
 
   string_view key = parser.Next();
-  OpSetParams op_sp = LoadHSetExParams(parser);
+  const OpSetParams op_sp = LoadHSetExParams(parser);
   if (parser.HasError()) {
     return cmd_cntx.rb->SendError(parser.Error()->MakeReply());
   }

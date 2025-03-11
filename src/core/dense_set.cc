@@ -569,19 +569,6 @@ void DenseSet::Prefetch(uint64_t hash) {
   PREFETCH_READ(&entries_[bid]);
 }
 
-std::pair<void*, void*> DenseSet::FindObjPtr(const void* ptr, uint64_t hash, uint32_t cookie) {
-  if (entries_.empty()) {
-    return {nullptr, nullptr};
-  }
-
-  DensePtr* old_obj = std::get<2>(Find2(ptr, BucketId(hash), cookie));
-  if (old_obj != nullptr) {
-    return {old_obj, old_obj->GetObject()};
-  }
-
-  return {nullptr, nullptr};
-}
-
 auto DenseSet::Find2(const void* ptr, uint32_t bid, uint32_t cookie)
     -> tuple<size_t, DensePtr*, DensePtr*> {
   DCHECK_LT(bid, entries_.size());
@@ -701,14 +688,10 @@ void* DenseSet::PopInternal() {
   return ret;
 }
 
-void* DenseSet::AddOrReplaceObj(void* obj, bool has_ttl, void* old_obj) {
+void* DenseSet::AddOrReplaceObj(void* obj, bool has_ttl) {
   uint64_t hc = Hash(obj, 0);
 
-  DensePtr* dptr = old_obj ? static_cast<DensePtr*>(old_obj) : nullptr;
-  if (!dptr) {
-    dptr = entries_.empty() ? nullptr : Find(obj, BucketId(hc), 0).second;
-  }
-
+  DensePtr* dptr = entries_.empty() ? nullptr : Find(obj, BucketId(hc), 0).second;
   if (dptr) {  // replace existing object.
     // A bit confusing design: ttl bit is located on the wrapping pointer,
     // therefore we must set ttl bit before unrapping below.
