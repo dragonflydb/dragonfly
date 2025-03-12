@@ -35,10 +35,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-bool IsCloudPath(string_view path) {
-  return absl::StartsWith(path, kS3Prefix) || absl::StartsWith(path, kGCSPrefix);
-}
-
 // Create a directory and all its parents if they don't exist.
 error_code CreateDirs(fs::path dir_path) {
   error_code ec;
@@ -387,8 +383,8 @@ GenericError SaveStagesController::FinalizeFileMovement() {
 
 // Build full path: get dir, try creating dirs, get filename with placeholder
 GenericError SaveStagesController::BuildFullPath() {
-  fs::path dir_path = GetFlag(FLAGS_dir);
-  if (!dir_path.empty() && !IsCloudPath(GetFlag(FLAGS_dir))) {
+  fs::path dir_path = cloud_uri_.empty() ? GetFlag(FLAGS_dir) : cloud_uri_;
+  if (!dir_path.empty() && cloud_uri_.empty() && !IsCloudPath(GetFlag(FLAGS_dir))) {
     if (auto ec = CreateDirs(dir_path); ec)
       return {ec, "Failed to create directories"};
   }

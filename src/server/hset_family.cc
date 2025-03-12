@@ -728,8 +728,26 @@ void HSetEx(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = parser.Next();
   OpSetParams op_sp;
 
-  op_sp.skip_if_exists = parser.Check("NX");
-  op_sp.keepttl = parser.Check("KEEPTTL");
+  const auto option_already_set = [&cmd_cntx] {
+    return cmd_cntx.rb->SendError(WrongNumArgsError(cmd_cntx.conn_cntx->cid->name()));
+  };
+
+  while (true) {
+    if (parser.Check("NX")) {
+      if (op_sp.skip_if_exists) {
+        return option_already_set();
+      }
+      op_sp.skip_if_exists = true;
+    } else if (parser.Check("KEEPTTL")) {
+      if (op_sp.keepttl) {
+        return option_already_set();
+      }
+      op_sp.keepttl = true;
+    } else {
+      break;
+    }
+  }
+
   op_sp.ttl = parser.Next<uint32_t>();
 
   if (parser.HasError()) {

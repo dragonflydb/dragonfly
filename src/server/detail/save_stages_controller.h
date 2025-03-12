@@ -29,6 +29,7 @@ struct SaveInfo {
 
 struct SaveStagesInputs {
   bool use_dfs_format_;
+  std::string_view cloud_uri_;
   std::string_view basename_;
   Transaction* trans_;
   Service* service_;

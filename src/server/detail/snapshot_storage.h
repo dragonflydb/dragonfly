@@ -7,6 +7,8 @@
 #include <aws/s3/S3Client.h>
 #endif
 
+#include <absl/strings/match.h>
+
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -185,6 +187,18 @@ struct FilenameSubstitutions {
 };
 
 void SubstituteFilenamePlaceholders(fs::path* filename, const FilenameSubstitutions& fns);
+
+inline bool IsS3Path(std::string_view path) {
+  return absl::StartsWith(path, detail::kS3Prefix);
+}
+
+inline bool IsGCSPath(std::string_view path) {
+  return absl::StartsWith(path, detail::kGCSPrefix);
+}
+
+inline bool IsCloudPath(std::string_view path) {
+  return IsS3Path(path) || IsGCSPath(path);
+}
 
 }  // namespace detail
 }  // namespace dfly
