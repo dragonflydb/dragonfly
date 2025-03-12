@@ -251,12 +251,29 @@ string UnknownCmd(string cmd, CmdArgList args) {
                       absl::StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
 }
 
-bool IsS3Path(string_view path) {
-  return absl::StartsWith(path, detail::kS3Prefix);
-}
-
-bool IsGCSPath(string_view path) {
-  return absl::StartsWith(path, detail::kGCSPrefix);
+std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_view uri) {
+  if (detail::IsS3Path(uri)) {
+#ifdef WITH_AWS
+    shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
+    return std::make_shared<detail::AwsS3SnapshotStorage>(
+        absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_use_https),
+        absl::GetFlag(FLAGS_s3_ec2_metadata), absl::GetFlag(FLAGS_s3_sign_payload));
+#else
+    LOG(ERROR) << "Compiled without AWS support";
+    exit(1);
+#endif
+  } else if (detail::IsGCSPath(uri)) {
+    auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
+    auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return gcs->Init(3000); });
+    if (ec) {
+      LOG(ERROR) << "Failed to initialize GCS snapshot storage: " << ec.message();
+      exit(1);
+    }
+    return gcs;
+  } else {
+    LOG(ERROR) << "Uknown cloud storage " << uri;
+    exit(1);
+  }
 }
 
 // Check that if TLS is used at least one form of client authentication is
@@ -854,24 +871,9 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   }
 
   string flag_dir = GetFlag(FLAGS_dir);
-  if (IsS3Path(flag_dir)) {
-#ifdef WITH_AWS
-    shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
-    snapshot_storage_ = std::make_shared<detail::AwsS3SnapshotStorage>(
-        absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_use_https),
-        absl::GetFlag(FLAGS_s3_ec2_metadata), absl::GetFlag(FLAGS_s3_sign_payload));
-#else
-    LOG(ERROR) << "Compiled without AWS support";
-    exit(1);
-#endif
-  } else if (IsGCSPath(flag_dir)) {
-    auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
-    auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return gcs->Init(3000); });
-    if (ec) {
-      LOG(ERROR) << "Failed to initialize GCS snapshot storage: " << ec.message();
-      exit(1);
-    }
-    snapshot_storage_ = std::move(gcs);
+
+  if (detail::IsCloudPath(flag_dir)) {
+    snapshot_storage_ = CreateCloudSnapshotStorage(flag_dir);
   } else if (fq_threadpool_) {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {
@@ -1655,10 +1657,11 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
   CHECK_NOTNULL(cid);
   boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
   trans->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
-  return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, trans.get(), ignore_state);
+  return DoSave(SaveCmdOptions{absl::GetFlag(FLAGS_df_snapshot_format), {}, {}}, trans.get(),
+                ignore_state);
 }
 
-GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view basename,
+GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts,
                                                Transaction* trans, bool ignore_state) {
   auto state = ServerState::tlocal()->gstate();
 
@@ -1674,10 +1677,13 @@ GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view bas
                           "SAVING - can not save database"};
     }
 
-    VLOG(1) << "Saving snapshot to " << basename;
+    auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
+                                ? snapshot_storage_
+                                : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
 
     save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
-        new_version, basename, trans, &service_, fq_threadpool_.get(), snapshot_storage_});
+        save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
+        &service_, fq_threadpool_.get(), snapshot_storage});
 
     auto res = save_controller_->InitResourcesAndStart();
 
@@ -1714,9 +1720,9 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   return save_info.error;
 }
 
-GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
+GenericError ServerFamily::DoSave(const SaveCmdOptions& save_cmd_opts, Transaction* trans,
                                   bool ignore_state) {
-  if (auto ec = DoSaveCheckAndStart(new_version, basename, trans, ignore_state); ec) {
+  if (auto ec = DoSaveCheckAndStart(save_cmd_opts, trans, ignore_state); ec) {
     return ec;
   }
 
@@ -2078,46 +2084,61 @@ void ServerFamily::BgSaveFb(boost::intrusive_ptr<Transaction> trans) {
   }
 }
 
-std::optional<ServerFamily::VersionBasename> ServerFamily::GetVersionAndBasename(
-    CmdArgList args, SinkReplyBuilder* builder) {
-  if (args.size() > 2) {
+std::optional<SaveCmdOptions> ServerFamily::GetSaveCmdOpts(CmdArgList args,
+                                                           SinkReplyBuilder* builder) {
+  if (args.size() > 3) {
     builder->SendError(kSyntaxErr);
     return {};
   }
 
-  bool new_version = absl::GetFlag(FLAGS_df_snapshot_format);
+  SaveCmdOptions save_cmd_opts;
+  save_cmd_opts.new_version = absl::GetFlag(FLAGS_df_snapshot_format);
 
   if (args.size() >= 1) {
     string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
     if (sub_cmd == "DF") {
-      new_version = true;
+      save_cmd_opts.new_version = true;
     } else if (sub_cmd == "RDB") {
-      new_version = false;
+      save_cmd_opts.new_version = false;
     } else {
       builder->SendError(UnknownSubCmd(sub_cmd, "SAVE"), kSyntaxErrType);
       return {};
     }
   }
 
-  string_view basename;
-  if (args.size() == 2) {
-    basename = ArgS(args, 1);
+  if (args.size() >= 2) {
+    if (detail::IsS3Path(ArgS(args, 1))) {
+#ifdef WITH_AWS
+      save_cmd_opts.cloud_uri = ArgS(args, 1);
+#else
+      LOG(ERROR) << "Compiled without AWS support";
+      exit(1);
+#endif
+    } else if (detail::IsGCSPath(ArgS(args, 1))) {
+      save_cmd_opts.cloud_uri = ArgS(args, 1);
+    } else {
+      // no cloud_uri get basename and return
+      save_cmd_opts.basename = ArgS(args, 1);
+      return save_cmd_opts;
+    }
+    // cloud_uri is set so get basename if provided
+    if (args.size() == 3) {
+      save_cmd_opts.basename = ArgS(args, 2);
+    }
   }
 
-  return ServerFamily::VersionBasename{new_version, basename};
+  return save_cmd_opts;
 }
 
-// BGSAVE [DF|RDB] [basename]
+// SAVE [DF|RDB] [CLOUD_URI] [BASENAME]
 // TODO add missing [SCHEDULE]
 void ServerFamily::BgSave(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto maybe_res = GetVersionAndBasename(args, cmd_cntx.rb);
+  auto maybe_res = GetSaveCmdOpts(args, cmd_cntx.rb);
   if (!maybe_res) {
     return;
   }
 
-  const auto [version, basename] = *maybe_res;
-
-  if (auto ec = DoSaveCheckAndStart(version, basename, cmd_cntx.tx); ec) {
+  if (auto ec = DoSaveCheckAndStart(*maybe_res, cmd_cntx.tx); ec) {
     cmd_cntx.rb->SendError(ec.Format());
     return;
   }
@@ -2127,18 +2148,16 @@ void ServerFamily::BgSave(CmdArgList args, const CommandContext& cmd_cntx) {
   cmd_cntx.rb->SendOk();
 }
 
-// SAVE [DF|RDB] [basename]
+// SAVE [DF|RDB] [CLOUD_URI] [BASENAME]
 // Allows saving the snapshot of the dataset on disk, potentially overriding the format
 // and the snapshot name.
 void ServerFamily::Save(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto maybe_res = GetVersionAndBasename(args, cmd_cntx.rb);
+  auto maybe_res = GetSaveCmdOpts(args, cmd_cntx.rb);
   if (!maybe_res) {
     return;
   }
 
-  const auto [version, basename] = *maybe_res;
-
-  GenericError ec = DoSave(version, basename, cmd_cntx.tx);
+  GenericError ec = DoSave(*maybe_res, cmd_cntx.tx);
   if (ec) {
     cmd_cntx.rb->SendError(ec.Format());
   } else {

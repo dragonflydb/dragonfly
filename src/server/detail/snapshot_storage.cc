@@ -34,9 +34,6 @@ using namespace util;
 using namespace std;
 
 namespace {
-inline bool IsGcsPath(string_view path) {
-  return absl::StartsWith(path, kGCSPrefix);
-}
 
 constexpr string_view kSummarySuffix = "summary.dfs"sv;
 
@@ -270,7 +267,7 @@ io::Result<std::pair<io::Sink*, uint8_t>, GenericError> GcsSnapshotStorage::Open
 }
 
 io::ReadonlyFileOrError GcsSnapshotStorage::OpenReadFile(const std::string& path) {
-  if (!IsGcsPath(path))
+  if (!IsGCSPath(path))
     return nonstd::make_unexpected(GenericError("Invalid GCS path"));
 
   auto [bucket, key] = GetBucketPath(path);
@@ -321,7 +318,7 @@ io::Result<std::string, GenericError> GcsSnapshotStorage::LoadPath(string_view d
 
 io::Result<vector<string>, GenericError> GcsSnapshotStorage::ExpandFromPath(
     const string& load_path) {
-  if (!IsGcsPath(load_path))
+  if (!IsGCSPath(load_path))
     return nonstd::make_unexpected(
         GenericError(make_error_code(errc::invalid_argument), "Invalid GCS path"));
 
