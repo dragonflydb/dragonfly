@@ -122,7 +122,8 @@ constexpr unsigned kConvFlags = DoubleToStringConverter::UNIQUE_ZERO;
 DoubleToStringConverter score_conv(kConvFlags, "inf", "nan", 'e', -6, 21, 6, 0);
 
 // Copied from redis code but uses double_conversion to encode double values.
-unsigned char* zzlInsertAt(unsigned char* zl, unsigned char* eptr, sds ele, double score) {
+unsigned char* zzlInsertAt(unsigned char* zl, unsigned char* eptr, const unsigned char* ele,
+                           const uint32_t ele_size, double score) {
   unsigned char* sptr;
   char scorebuf[128];
   unsigned scorelen = 0;
@@ -138,14 +139,14 @@ unsigned char* zzlInsertAt(unsigned char* zl, unsigned char* eptr, sds ele, doub
   }
 
   if (eptr == NULL) {
-    zl = lpAppend(zl, (unsigned char*)ele, sdslen(ele));
+    zl = lpAppend(zl, ele, ele_size);
     if (score_is_long)
       zl = lpAppendInteger(zl, lscore);
     else
       zl = lpAppend(zl, (unsigned char*)scorebuf, scorelen);
   } else {
     /* Insert member before the element 'eptr'. */
-    zl = lpInsertString(zl, (unsigned char*)ele, sdslen(ele), eptr, LP_BEFORE, &sptr);
+    zl = lpInsertString(zl, ele, ele_size, eptr, LP_BEFORE, &sptr);
 
     /* Insert score after the member. */
     if (score_is_long)
@@ -160,7 +161,7 @@ unsigned char* zzlInsertAt(unsigned char* zl, unsigned char* eptr, sds ele, doub
 
 /* Insert (element,score) pair in listpack. This function assumes the element is
  * not yet present in the list. */
-unsigned char* ZzlInsert(unsigned char* zl, sds ele, double score) {
+unsigned char* ZzlInsert(unsigned char* zl, std::string_view ele, double score) {
   unsigned char *eptr = NULL, *sptr = lpSeek(zl, -1);
   double s;
 
@@ -182,11 +183,11 @@ unsigned char* ZzlInsert(unsigned char* zl, sds ele, double score) {
       /* First element with score larger than score for element to be
        * inserted. This means we should take its spot in the list to
        * maintain ordering. */
-      return zzlInsertAt(zl, eptr, ele, score);
+      return zzlInsertAt(zl, eptr, (unsigned char*)ele.data(), ele.size(), score);
     } else if (s == score) {
       /* Ensure lexicographical ordering for elements. */
-      if (zzlCompareElements(eptr, (unsigned char*)ele, sdslen(ele)) > 0) {
-        return zzlInsertAt(zl, eptr, ele, score);
+      if (zzlCompareElements(eptr, (unsigned char*)ele.data(), ele.size()) > 0) {
+        return zzlInsertAt(zl, eptr, (unsigned char*)ele.data(), ele.size(), score);
       }
     }
 
@@ -195,7 +196,26 @@ unsigned char* ZzlInsert(unsigned char* zl, sds ele, double score) {
   }
 
   /* Push on tail of list when it was not yet inserted. */
-  return zzlInsertAt(zl, NULL, ele, score);
+  return zzlInsertAt(zl, NULL, (unsigned char*)ele.data(), ele.size(), score);
+}
+
+unsigned char* ZzlFind(unsigned char* lp, std::string_view ele, double* score) {
+  unsigned char *eptr, *sptr;
+
+  if ((eptr = lpFirst(lp)) == nullptr)
+    return nullptr;
+  eptr = lpFind(lp, eptr, (unsigned char*)ele.data(), ele.size(), 1);
+  if (eptr) {
+    sptr = lpNext(lp, eptr);
+    serverAssert(sptr != NULL);
+
+    /* Matching element, pull out score. */
+    if (score != nullptr)
+      *score = zzlGetScore(sptr);
+    return eptr;
+  }
+
+  return nullptr;
 }
 
 SortedMap::SortedMap(PMR_NS::memory_resource* mr)
@@ -287,7 +307,7 @@ int SortedMap::AddElem(double score, std::string_view ele, int in_flags, int* ou
   return 1;
 }
 
-optional<double> SortedMap::GetScore(sds ele) const {
+optional<double> SortedMap::GetScore(std::string_view ele) const {
   ScoreSds obj = score_map->FindObj(ele);
   if (obj != nullptr) {
     return GetObjScore(obj);
@@ -465,14 +485,14 @@ uint8_t* SortedMap::ToListPack() const {
   uint8_t* lp = lpNew(0);
 
   score_tree->Iterate(0, UINT32_MAX, [&](ScoreSds ele) {
-    lp = zzlInsertAt(lp, NULL, (sds)ele, GetObjScore(ele));
+    lp = zzlInsertAt(lp, NULL, (unsigned char*)ele, sdslen((sds)ele), GetObjScore(ele));
     return true;
   });
 
   return lp;
 }
 
-bool SortedMap::Delete(sds ele) {
+bool SortedMap::Delete(std::string_view ele) const {
   ScoreSds obj = score_map->FindObj(ele);
   if (obj == nullptr)
     return false;
