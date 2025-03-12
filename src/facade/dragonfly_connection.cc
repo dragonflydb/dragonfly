@@ -700,7 +700,7 @@ void Connection::OnPostMigrateThread() {
   }
 
   stats_ = &tl_facade_stats->conn_stats;
-  ++NumConns();
+  IncrNumConns();
   stats_->read_buf_capacity += io_buf_.Capacity();
 }
 
@@ -998,7 +998,7 @@ void Connection::ConnectionFlow() {
 
   ConfigureProvidedBuffer();
 
-  ++NumConns();
+  IncrNumConns();
   ++stats_->conn_received_cnt;
   stats_->read_buf_capacity += io_buf_.Capacity();
 
@@ -1928,7 +1928,7 @@ Connection::MemoryUsage Connection::GetMemoryUsage() const {
 
 void Connection::DecreaseStatsOnClose() {
   stats_->read_buf_capacity -= io_buf_.Capacity();
-  --NumConns();
+  DecrNumConns();
 }
 
 void Connection::BreakOnce(uint32_t ev_mask) {
@@ -2000,8 +2000,18 @@ void Connection::MarkReadBufferConsumed() {
   }
 }
 
-uint32_t& Connection::NumConns() {
-  return HasMainListener() ? stats_->num_conns_main : stats_->num_conns_other;
+void Connection::IncrNumConns() {
+  if (HasMainListener())
+    ++stats_->num_conns_main;
+  else
+    ++stats_->num_conns_other;
+}
+
+void Connection::DecrNumConns() {
+  if (HasMainListener())
+    --stats_->num_conns_main;
+  else
+    --stats_->num_conns_other;
 }
 
 void Connection::SetMaxQueueLenThreadLocal(unsigned tid, uint32_t val) {

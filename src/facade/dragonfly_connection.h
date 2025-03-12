@@ -413,7 +413,8 @@ class Connection : public util::Connection {
   io::Bytes NextBundleBuffer(size_t total_len);
   void MarkReadBufferConsumed();
 
-  uint32_t& NumConns();
+  void IncrNumConns();
+  void DecrNumConns();
 
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
