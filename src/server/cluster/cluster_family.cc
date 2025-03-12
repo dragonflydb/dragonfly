@@ -94,7 +94,7 @@ void ClusterFamily::Shutdown() {
 
       util::fb2::LockGuard migration_lk(migration_mu_);
       DCHECK(outgoing_migration_jobs_.empty());
-      DCHECK(incoming_migrations_jobs_.empty());
+      DCHECK(incoming_migration_jobs_.empty());
     }
   });
 }
@@ -580,7 +580,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, SinkReplyBuilder* builder
       util::fb2::LockGuard lk(migration_mu_);
       // If migration state is changed simultaneously, the changes to config will be applied after
       // set_config_mu is unlocked and even if we apply the same changes 2 times it's not a problem
-      for (const auto& m : incoming_migrations_jobs_) {
+      for (const auto& m : incoming_migration_jobs_) {
         if (m->GetState() == MigrationState::C_FINISHED) {
           enable_slots.Merge(m->GetSlots());
         }
@@ -594,7 +594,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, SinkReplyBuilder* builder
 
     new_config = new_config->CloneWithChanges(enable_slots, disable_slots);
 
-    StartSlotMigrations(new_config->GetNewOutgoingMigrations(ClusterConfig::Current()));
+    StartNewSlotMigrations(new_config);
 
     SlotSet before =
         ClusterConfig::Current() ? ClusterConfig::Current()->GetOwnedSlots() : SlotSet(true);
@@ -700,11 +700,23 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, SinkReplyBuilder* bui
   return builder->SendOk();
 }
 
-void ClusterFamily::StartSlotMigrations(std::vector<MigrationInfo> migrations) {
-  // Add validating and error processing
-  for (auto& m : migrations) {
-    auto outgoing_migration = CreateOutgoingMigration(std::move(m));
-    outgoing_migration->Start();
+void ClusterFamily::StartNewSlotMigrations(std::shared_ptr<ClusterConfig> new_config) {
+  // TODO Add validating and error processing
+  auto out_migrations = new_config->GetNewOutgoingMigrations(ClusterConfig::Current());
+  auto in_migrations = new_config->GetNewIncomingMigrations(ClusterConfig::Current());
+
+  util::fb2::LockGuard lk(migration_mu_);
+
+  for (auto& m : out_migrations) {
+    auto migration = make_shared<OutgoingMigration>(std::move(m), this, server_family_);
+    outgoing_migration_jobs_.emplace_back(migration);
+    migration->Start();
+  }
+
+  for (auto& m : in_migrations) {
+    auto migration =
+        make_shared<IncomingMigration>(m.node_info.id, &server_family_->service(), m.slot_ranges);
+    incoming_migration_jobs_.emplace_back(migration);
   }
 }
 
@@ -745,7 +757,7 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, SinkReplyBuilder* b
     string error;
   };
   vector<Reply> reply;
-  reply.reserve(incoming_migrations_jobs_.size() + outgoing_migration_jobs_.size());
+  reply.reserve(incoming_migration_jobs_.size() + outgoing_migration_jobs_.size());
 
   auto append_answer = [&reply](string_view direction, string node_id, string_view filter,
                                 MigrationState state, size_t keys_number, string error) {
@@ -756,7 +768,7 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, SinkReplyBuilder* b
     }
   };
 
-  for (const auto& m : incoming_migrations_jobs_) {
+  for (const auto& m : incoming_migration_jobs_) {
     // TODO add error status
     append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetKeyCount(),
                   m->GetErrorStr());
@@ -793,10 +805,9 @@ void ClusterFamily::DflyMigrate(CmdArgList args, const CommandContext& cmd_cntx)
   }
 }
 
-std::shared_ptr<IncomingSlotMigration> ClusterFamily::GetIncomingMigration(
-    std::string_view source_id) {
+std::shared_ptr<IncomingMigration> ClusterFamily::GetIncomingMigration(std::string_view source_id) {
   util::fb2::LockGuard lk(migration_mu_);
-  for (const auto& mj : incoming_migrations_jobs_) {
+  for (const auto& mj : incoming_migration_jobs_) {
     if (mj->GetSourceID() == source_id) {
       return mj;
     }
@@ -842,7 +853,7 @@ ClusterFamily::TakeOutOutgoingMigrations(shared_ptr<ClusterConfig> new_config,
 namespace {
 
 // returns removed incoming migration
-bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigration>>& jobs,
+bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingMigration>>& jobs,
                                  string_view source_id) {
   auto it = std::find_if(jobs.begin(), jobs.end(), [source_id](const auto& im) {
     // we can have only one migration per target-source pair
@@ -852,7 +863,7 @@ bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigrati
     return false;
   }
   DCHECK(it->get() != nullptr);
-  std::shared_ptr<IncomingSlotMigration> migration = *it;
+  std::shared_ptr<IncomingMigration> migration = *it;
 
   // Flush non-owned migrations
   SlotSet migration_slots(migration->GetSlots());
@@ -878,7 +889,7 @@ bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigrati
 void ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations) {
   util::fb2::LockGuard lk(migration_mu_);
   for (const auto& m : migrations) {
-    RemoveIncomingMigrationImpl(incoming_migrations_jobs_, m.node_info.id);
+    RemoveIncomingMigrationImpl(incoming_migration_jobs_, m.node_info.id);
     VLOG(1) << "Migration was canceled from: " << m.node_info.id;
   }
 }
@@ -900,33 +911,32 @@ void ClusterFamily::InitMigration(CmdArgList args, SinkReplyBuilder* builder) {
 
   SlotRanges slot_ranges(std::move(slots));
 
-  const auto& incoming_migrations = ClusterConfig::Current()->GetIncomingMigrations();
-  bool found = any_of(incoming_migrations.begin(), incoming_migrations.end(),
-                      [source_id = source_id, &slot_ranges](const MigrationInfo& info) {
-                        return info.node_info.id == source_id && info.slot_ranges == slot_ranges;
-                      });
-  if (!found) {
+  util::fb2::LockGuard lk(migration_mu_);
+
+  auto it = find_if(incoming_migration_jobs_.begin(), incoming_migration_jobs_.end(),
+                    [source_id = source_id, &slot_ranges](const auto& migration) {
+                      return migration->GetSourceID() == source_id &&
+                             migration->GetSlots() == slot_ranges;
+                    });
+
+  if (it == incoming_migration_jobs_.end()) {
     VLOG(1) << "Unrecognized incoming migration from " << source_id;
     return builder->SendSimpleString(OutgoingMigration::kUnknownMigration);
   }
 
-  VLOG(1) << "Init migration " << source_id;
+  std::shared_ptr<IncomingMigration> migration = *it;
 
-  util::fb2::LockGuard lk(migration_mu_);
-  auto was_removed = RemoveIncomingMigrationImpl(incoming_migrations_jobs_, source_id);
-  LOG_IF(WARNING, was_removed) << "Reinit issued for migration from:" << source_id;
+  if (migration->GetState() != MigrationState::C_CONNECTING) {
+    migration->Stop();
+    auto slots = migration->GetSlots();
+    LOG(INFO) << "Flushing slots during migration reinitialization " << migration->GetSourceID()
+              << ", slots: " << slots.ToString();
+    DeleteSlots(slots);
+  }
 
-  incoming_migrations_jobs_.emplace_back(make_shared<IncomingSlotMigration>(
-      string(source_id), &server_family_->service(), std::move(slot_ranges), flows_num));
+  migration->Init(flows_num);
 
   return builder->SendOk();
-}
-
-std::shared_ptr<OutgoingMigration> ClusterFamily::CreateOutgoingMigration(MigrationInfo info) {
-  util::fb2::LockGuard lk(migration_mu_);
-  auto migration = make_shared<OutgoingMigration>(std::move(info), this, server_family_);
-  outgoing_migration_jobs_.emplace_back(migration);
-  return migration;
 }
 
 void ClusterFamily::DflyMigrateFlow(CmdArgList args, SinkReplyBuilder* builder,
@@ -966,7 +976,7 @@ void ClusterFamily::ApplyMigrationSlotRangeToConfig(std::string_view node_id,
 
   bool is_migration_valid = false;
   if (is_incoming) {
-    for (const auto& mj : incoming_migrations_jobs_) {
+    for (const auto& mj : incoming_migration_jobs_) {
       if (mj->GetSourceID() == node_id && slots == mj->GetSlots()) {
         is_migration_valid = true;
         break;
@@ -1032,8 +1042,8 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, SinkReplyBuilder* builder) {
 
 void ClusterFamily::PauseAllIncomingMigrations(bool pause) {
   util::fb2::LockGuard lk(migration_mu_);
-  LOG_IF(ERROR, incoming_migrations_jobs_.empty()) << "No incoming migrations!";
-  for (auto& im : incoming_migrations_jobs_) {
+  LOG_IF(ERROR, incoming_migration_jobs_.empty()) << "No incoming migrations!";
+  for (auto& im : incoming_migration_jobs_) {
     im->Pause(pause);
   }
 }
@@ -1043,7 +1053,7 @@ size_t ClusterFamily::MigrationsErrorsCount() const {
 
   size_t error_num = 0;
 
-  for (const auto& mj : incoming_migrations_jobs_) {
+  for (const auto& mj : incoming_migration_jobs_) {
     error_num += mj->GetErrorsCount();
   }
 
