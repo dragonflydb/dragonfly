@@ -318,7 +318,7 @@ class ConnectionContext : public facade::ConnectionContext {
   FlowInfo* replication_flow = nullptr;
 
   // The related connection is bound to main listener or serves the memcached protocol
-  bool has_main_listener = false;
+  bool has_main_or_memcache_listener = false;
 
  private:
   void EnableMonitoring(bool enable) {

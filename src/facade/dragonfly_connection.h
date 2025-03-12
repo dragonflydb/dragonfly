@@ -263,7 +263,7 @@ class Connection : public util::Connection {
 
   // In addition to the listener role being main, also returns true if the protocol is Memcached.
   // This method returns true for customer facing listeners.
-  bool HasMainListener() const;
+  bool IsMainOrMemcache() const;
 
   void SetName(std::string name);
 

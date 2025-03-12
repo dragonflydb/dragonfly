@@ -104,7 +104,7 @@ ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredent
     : facade::ConnectionContext(owner) {
   if (owner) {
     skip_acl_validation = owner->IsPrivileged();
-    has_main_listener = owner->HasMainListener();
+    has_main_or_memcache_listener = owner->IsMainOrMemcache();
   }
 
   keys = std::move(cred.keys);
@@ -127,7 +127,7 @@ ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction
     acl_db_idx = owner->acl_db_idx;
     ns = owner->ns;
     if (owner->conn()) {
-      has_main_listener = owner->conn()->HasMainListener();
+      has_main_or_memcache_listener = owner->conn()->IsMainOrMemcache();
     }
   } else {
     acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::NONE_COMMANDS);

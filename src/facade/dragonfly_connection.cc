@@ -925,16 +925,13 @@ bool Connection::IsMain() const {
   return is_main_;
 }
 
-bool Connection::HasMainListener() const {
+bool Connection::IsMainOrMemcache() const {
   if (is_main_) {
     return true;
   }
 
-  if (const Listener* lsnr = static_cast<Listener*>(listener()); lsnr) {
-    return lsnr->protocol() == Protocol::MEMCACHE;
-  }
-
-  return false;
+  const Listener* lsnr = static_cast<Listener*>(listener());
+  return lsnr && lsnr->protocol() == Protocol::MEMCACHE;
 }
 
 void Connection::SetName(string name) {
@@ -2011,14 +2008,14 @@ void Connection::MarkReadBufferConsumed() {
 }
 
 void Connection::IncrNumConns() {
-  if (HasMainListener())
+  if (IsMainOrMemcache())
     ++stats_->num_conns_main;
   else
     ++stats_->num_conns_other;
 }
 
 void Connection::DecrNumConns() {
-  if (HasMainListener())
+  if (IsMainOrMemcache())
     --stats_->num_conns_main;
   else
     --stats_->num_conns_other;
