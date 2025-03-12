@@ -149,21 +149,24 @@ ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) co
                                   ? static_cast<uint16_t>(absl::GetFlag(FLAGS_port))
                                   : cluster_announce_port;
 
-    info.master = {.id = id_, .ip = preferred_endpoint, .port = preferred_port};
+    info.master = {{.id = id_, .ip = preferred_endpoint, .port = preferred_port}, NodeHealth::NONE};
 
     if (cntx->conn()->IsPrivileged() || !absl::GetFlag(FLAGS_managed_service_info)) {
       for (const auto& replica : server_family_->GetDflyCmd()->GetReplicasRoleInfo()) {
-        info.replicas.push_back({.id = replica.id,
-                                 .ip = replica.address,
-                                 .port = static_cast<uint16_t>(replica.listening_port)});
+        info.replicas.push_back({{.id = replica.id,
+                                  .ip = replica.address,
+                                  .port = static_cast<uint16_t>(replica.listening_port)},
+                                 NodeHealth::NONE});
       }
     }
   } else {
     // TODO: We currently don't save the master's ID in the replica
-    info.master = {.id = "", .ip = replication_info->host, .port = replication_info->port};
-    info.replicas.push_back({.id = id_,
-                             .ip = cntx->conn()->LocalBindAddress(),
-                             .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))});
+    info.master = {{.id = "", .ip = replication_info->host, .port = replication_info->port},
+                   NodeHealth::ONLINE};
+    info.replicas.push_back({{.id = id_,
+                              .ip = cntx->conn()->LocalBindAddress(),
+                              .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))},
+                             NodeHealth::NONE});
   }
 
   return info;
