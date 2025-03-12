@@ -153,8 +153,9 @@ tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
 }
 
 void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool random_value,
-                     int32_t elements, const PopulateBatch& batch, ServerFamily* sf,
-                     ConnectionContext* cntx) {
+                     int32_t elements,
+                     std::optional<std::pair<uint32_t, uint32_t>> expire_ttl_range,
+                     const PopulateBatch& batch, ServerFamily* sf, ConnectionContext* cntx) {
   boost::intrusive_ptr<Transaction> local_tx =
       new Transaction{sf->service().mutable_registry()->Find("EXEC")};
   local_tx->StartMultiNonAtomic();
@@ -194,6 +195,28 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
       stub_tx->InitByArgs(cntx->ns, local_cntx.conn_state.db_index, args_span);
 
       sf->service().InvokeCmd(cid, args_span, &crb, &local_cntx);
+
+      if (expire_ttl_range.has_value()) {
+        uint32_t start = expire_ttl_range->first;
+        uint32_t end = expire_ttl_range->second;
+        uint32_t expire_ttl = rand() % (end - start) + start;
+        VLOG(1) << "set key " << key << " expire ttl as " << expire_ttl;
+        auto cid = sf->service().mutable_registry()->Find("EXPIRE");
+        absl::InlinedVector<string, 5> args;
+        args.push_back(std::move(key));
+        args.push_back(to_string(expire_ttl));
+        args_view.clear();
+        for (auto& arg : args) {
+          args_view.push_back(arg);
+        }
+        auto args_span = absl::MakeSpan(args_view);
+        stub_tx->MultiSwitchCmd(cid);
+        local_cntx.cid = cid;
+        crb.SetReplyMode(ReplyMode::NONE);
+        stub_tx->InitByArgs(cntx->ns, local_cntx.conn_state.db_index, args_span);
+
+        sf->service().InvokeCmd(cid, args_span, &crb, &local_cntx);
+      }
     }
   }
 
@@ -536,7 +559,8 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    Return sync id and array of number of journal commands executed for each replica flow",
         "WATCHED",
         "    Shows the watched keys as a result of BLPOP and similar operations.",
-        "POPULATE <count> [prefix] [size] [RAND] [SLOTS start end] [TYPE type] [ELEMENTS elements]",
+        "POPULATE <count> [prefix] [size] [RAND] [SLOTS start end] [TYPE type] [ELEMENTS elements]"
+        "[EXPIRE start end]",
         "    Create <count> string keys named key:<num> with value value:<num>.",
         "    If <prefix> is specified then it is used instead of the 'key' prefix.",
         "    If <size> is specified then X character is concatenated multiple times to value:<num>",
@@ -545,6 +569,7 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    If SLOTS is specified then create keys only in given slots range.",
         "    TYPE specifies data type (must be STRING/LIST/SET/HASH/ZSET/JSON), default STRING.",
         "    ELEMENTS specifies how many sub elements if relevant (like entries in a list / set).",
+        "    EXPIRE specifies key expire ttl range.",
         "OBJHIST",
         "    Prints histogram of object sizes.",
         "STACKTRACE",
@@ -729,6 +754,9 @@ void DebugCmd::Migration(CmdArgList args, facade::SinkReplyBuilder* builder) {
   return builder->SendError(UnknownSubCmd("MIGRATION", "DEBUG"));
 }
 
+// Populate arguments format:
+// required: (total count) (key prefix) (val size)
+// optional: [RAND | TYPE typename | ELEMENTS element num | SLOTS (key value)+ | EXPIRE start end]
 optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
                                                                 facade::SinkReplyBuilder* builder) {
   if (args.size() < 2) {
@@ -802,7 +830,25 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
       }
       options.slot_range = cluster::SlotRange{.start = static_cast<SlotId>(start.value()),
                                               .end = static_cast<SlotId>(end.value())};
-
+    } else if (str == "EXPIRE") {
+      if (args.size() < index + 3) {
+        builder->SendError(kSyntaxErr);
+        return nullopt;
+      }
+      uint32_t start, end;
+      if (!absl::SimpleAtoi(ArgS(args, ++index), &start)) {
+        builder->SendError(kSyntaxErr);
+        return nullopt;
+      }
+      if (!absl::SimpleAtoi(ArgS(args, ++index), &end)) {
+        builder->SendError(kSyntaxErr);
+        return nullopt;
+      }
+      if (start >= end) {
+        builder->SendError(kExpiryOutOfRange);
+        return nullopt;
+      }
+      options.expire_ttl_range = std::make_pair(start, end);
     } else {
       builder->SendError(kSyntaxErr);
       return nullopt;
@@ -889,7 +935,8 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
     if (shard_batch.sz == 32) {
       ess.Add(sid, [this, index, options, shard_batch] {
         DoPopulateBatch(options.type, options.prefix, options.val_size,
-                        options.populate_random_values, options.elements, shard_batch, &sf_, cntx_);
+                        options.populate_random_values, options.elements, options.expire_ttl_range,
+                        shard_batch, &sf_, cntx_);
         if (index % 50 == 0) {
           ThisFiber::Yield();
         }
@@ -902,7 +949,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
 
   ess.AwaitRunningOnShardQueue([&](EngineShard* shard) {
     DoPopulateBatch(options.type, options.prefix, options.val_size, options.populate_random_values,
-                    options.elements, ps[shard->shard_id()], &sf_, cntx_);
+                    options.elements, options.expire_ttl_range, ps[shard->shard_id()], &sf_, cntx_);
     // Debug populate does not use transaction framework therefore we call OnCbFinish manually
     // after running the callback
     // Note that running debug populate while running flushall/db can cause dcheck fail because the
