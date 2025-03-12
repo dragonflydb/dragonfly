@@ -405,6 +405,11 @@ TEST_F(HSetFamilyTest, HSetEx) {
   EXPECT_EQ(Run({"HSET", "k", "nottl", "val"}), 1);
   EXPECT_EQ(Run({"HSETEX", "k", "KEEPTTL", long_time, "nottl", "newval"}), 0);
   EXPECT_EQ(Run({"FIELDTTL", "k", "nottl"}).GetInt(), 100);
+
+  EXPECT_THAT(Run({"HSETEX", "k", "NX", "KEEPTTL", "NX", "1", "v", "v2"}),
+              ErrArg("ERR wrong number of arguments for 'hsetex' command"));
+  EXPECT_THAT(Run({"HSETEX", "k", "KEEPTTL", "KEEPTTL", "1", "v", "v2"}),
+              ErrArg("ERR wrong number of arguments for 'hsetex' command"));
 }
 
 TEST_F(HSetFamilyTest, TriggerConvertToStrMap) {
