@@ -565,6 +565,14 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
       events_.misses += miss_weight;
       return OpStatus::KEY_NOTFOUND;
     }
+  } else {
+    auto eit = db.expire.Find(key);
+    if (IsValid(eit)) {
+      // We have an expired item in the expire table, but not in the prime table.
+      // This is a bug, as we should have removed the item from the prime table when it expired.
+      LOG(ERROR) << "Expired item in expire table, but not in prime table: " << key << " "
+                 << res.it->second.IsCool() << " " << res.it->second.IsExternal();
+    }
   }
 
   DCHECK(IsValid(res.it));
