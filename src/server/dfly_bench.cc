@@ -61,6 +61,7 @@ ABSL_FLAG(bool, noreply, false, "If true, does not wait for replies. Relevant on
 ABSL_FLAG(bool, greet, true,
           "If true, sends a greeting command on each connection, "
           "to make sure the connection succeeded");
+ABSL_FLAG(bool, ascii, true, "If true, use ascii characters for values");
 
 using namespace std;
 using namespace util;
@@ -82,9 +83,7 @@ enum Protocol { RESP, MC_TEXT } protocol;
 enum DistType { UNIFORM, NORMAL, ZIPFIAN, SEQUENTIAL } dist_type{UNIFORM};
 constexpr uint16_t kNumSlots = 16384;
 
-string_view kTmplPatterns[] = {"__key__"sv, "__data__"sv, "__score__"sv};
-
-static string GetRandomHex(size_t len) {
+static string GetRandomHex(size_t len, bool ascii) {
   std::string res(len, '\0');
   size_t indx = 0;
 
@@ -103,6 +102,11 @@ static string GetRandomHex(size_t len) {
     }
   }
 
+  if (!ascii) {
+    for (size_t i = 0; i < len; i++) {
+      res[i] += 80;
+    }
+  }
   return res;
 }
 
@@ -154,21 +158,24 @@ class CommandGenerator {
 
   string FillSet(string_view key);
   string FillGet(string_view key);
-  void AddTemplateIndices(string_view pattern, TemplateType t);
 
   KeyGenerator* keygen_;
   uint32_t ratio_set_ = 0, ratio_get_ = 0;
   string command_;
 
-  vector<pair<size_t, TemplateType>> key_indices_;
+  using CmdPart = variant<string_view, TemplateType>;
+  vector<CmdPart> cmd_parts_;
+
   string value_;
   bool might_hit_ = false;
   bool noreply_ = false;
+  bool is_ascii_ = true;
 };
 
 CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
   command_ = GetFlag(FLAGS_command);
-  value_ = string(GetFlag(FLAGS_d), 'a');
+  is_ascii_ = GetFlag(FLAGS_ascii);
+  value_ = string(GetFlag(FLAGS_d), is_ascii_ ? 'a' : char(130));
 
   if (command_.empty()) {
     pair<string, string> ratio_str = absl::StrSplit(GetFlag(FLAGS_ratio), ':');
@@ -177,12 +184,24 @@ CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
     return;
   }
 
-  AddTemplateIndices(kTmplPatterns[KEY], KEY);
-  AddTemplateIndices(kTmplPatterns[VALUE], VALUE);
-  AddTemplateIndices(kTmplPatterns[SCORE], SCORE);
-  sort(key_indices_.begin(), key_indices_.end());
-  if (absl::StartsWithIgnoreCase(command_, "get") || absl::StartsWithIgnoreCase(command_, "mget")) {
-    might_hit_ = true;
+  vector<string_view> parts = absl::StrSplit(command_, ' ', absl::SkipEmpty());
+  for (string_view p : parts) {
+    if (p == "__key__"sv) {
+      cmd_parts_.emplace_back(KEY);
+    } else if (p == "__data__"sv) {
+      cmd_parts_.emplace_back(VALUE);
+    } else if (p == "__score__"sv) {
+      cmd_parts_.emplace_back(SCORE);
+    } else {
+      cmd_parts_.emplace_back(p);
+    }
+  }
+
+  if (!cmd_parts_.empty()) {
+    const string_view* cmd = get_if<string_view>(&cmd_parts_.front());
+    if (cmd) {
+      might_hit_ = absl::EqualsIgnoreCase(*cmd, "get") || absl::StartsWithIgnoreCase(*cmd, "mget");
+    }
   }
 }
 
@@ -204,56 +223,52 @@ string CommandGenerator::Next(SlotRange range) {
     return FillGet(key);
   }
 
-  size_t last_pos = 0;
-  const size_t kPatLen[] = {kTmplPatterns[KEY].size(), kTmplPatterns[VALUE].size(),
-                            kTmplPatterns[SCORE].size()};
   string str, gen_cmd;
-  for (auto [pos, type] : key_indices_) {
-    switch (type) {
-      case KEY:
-        str = (*keygen_)(slot_id);
-        break;
-      case VALUE:
-        str = GetRandomHex(value_.size());
-        break;
-      case SCORE: {
-        uniform_real_distribution<double> uniform(0, 1);
-        str = absl::StrCat(uniform(bit_gen));
+  absl::StrAppend(&gen_cmd, "*", cmd_parts_.size(), "\r\n");
+  for (const CmdPart& part : cmd_parts_) {
+    if (auto p = get_if<string_view>(&part)) {
+      absl::StrAppend(&gen_cmd, "$", p->size(), "\r\n", *p, "\r\n");
+    } else {
+      switch (get<TemplateType>(part)) {
+        case KEY:
+          str = (*keygen_)(slot_id);
+          break;
+        case VALUE:
+          str = GetRandomHex(value_.size(), is_ascii_);
+          break;
+        case SCORE: {
+          uniform_real_distribution<double> uniform(0, 1);
+          str = absl::StrCat(uniform(bit_gen));
+        }
       }
+      absl::StrAppend(&gen_cmd, "$", str.size(), "\r\n", str, "\r\n");
     }
-    absl::StrAppend(&gen_cmd, command_.substr(last_pos, pos - last_pos), str);
-    last_pos = pos + kPatLen[type];
   }
-  absl::StrAppend(&gen_cmd, command_.substr(last_pos), "\r\n");
 
   return gen_cmd;
 }
 
 string CommandGenerator::FillSet(string_view key) {
-  if (protocol == RESP) {
-    return absl::StrCat("set ", key, " ", value_, "\r\n");
-  }
-
-  DCHECK_EQ(protocol, MC_TEXT);
   string res;
-  absl::StrAppend(&res, "set ", key, " 0 0 ", value_.size());
-  if (GetFlag(FLAGS_noreply)) {
-    absl::StrAppend(&res, " noreply");
-    noreply_ = true;
-  }
 
-  absl::StrAppend(&res, "\r\n", value_, "\r\n");
+  if (protocol == RESP) {
+    absl::StrAppend(&res, "*3\r\n$3\r\nset\r\n$", key.size(), "\r\n", key);
+    absl::StrAppend(&res, "\r\n$", value_.size(), "\r\n", value_, "\r\n");
+  } else {
+    DCHECK_EQ(protocol, MC_TEXT);
+    absl::StrAppend(&res, "set ", key, " 0 0 ", value_.size());
+    if (GetFlag(FLAGS_noreply)) {
+      absl::StrAppend(&res, " noreply");
+      noreply_ = true;
+    }
+
+    absl::StrAppend(&res, "\r\n", value_, "\r\n");
+  }
   return res;
 }
 
 string CommandGenerator::FillGet(string_view key) {
   return absl::StrCat("get ", key, "\r\n");
-}
-
-void CommandGenerator::AddTemplateIndices(string_view pattern, TemplateType t) {
-  for (size_t pos = 0; (pos = command_.find(pattern, pos)) != string::npos; pos += pattern.size()) {
-    key_indices_.emplace_back(pos, t);
-  }
 }
 
 struct ClientStats {
@@ -766,7 +781,7 @@ void TLocalClient::AdjustCycle() {
 
 thread_local unique_ptr<TLocalClient> client;
 
-void WatchFiber(atomic_bool* finish_signal, ProactorPool* pp) {
+void WatchFiber(size_t num_shards, atomic_bool* finish_signal, ProactorPool* pp) {
   fb2::Mutex mutex;
 
   int64_t start_time = absl::GetCurrentTimeNanos();
@@ -774,8 +789,8 @@ void WatchFiber(atomic_bool* finish_signal, ProactorPool* pp) {
 
   int64_t last_print = start_time;
   uint64_t num_last_resp_cnt = 0;
-
-  uint64_t resp_goal = GetFlag(FLAGS_c) * pp->size() * GetFlag(FLAGS_n);
+  num_shards = max<size_t>(num_shards, 1u);
+  uint64_t resp_goal = GetFlag(FLAGS_c) * pp->size() * GetFlag(FLAGS_n) * num_shards;
   uint32_t time_limit = GetFlag(FLAGS_test_time);
 
   while (*finish_signal == false) {
@@ -1007,7 +1022,8 @@ int main(int argc, char* argv[]) {
     client->Start(key_minimum + index * thread_key_step, key_max, interval);
   });
 
-  auto watch_fb = pp->GetNextProactor()->LaunchFiber([&] { WatchFiber(&finish, pp.get()); });
+  auto watch_fb =
+      pp->GetNextProactor()->LaunchFiber([&] { WatchFiber(shards.size(), &finish, pp.get()); });
   const absl::Time start_time = absl::Now();
 
   // The actual run.
