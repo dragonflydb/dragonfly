@@ -195,28 +195,28 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
       stub_tx->InitByArgs(cntx->ns, local_cntx.conn_state.db_index, args_span);
 
       sf->service().InvokeCmd(cid, args_span, &crb, &local_cntx);
+    }
 
-      if (expire_ttl_range.has_value()) {
-        uint32_t start = expire_ttl_range->first;
-        uint32_t end = expire_ttl_range->second;
-        uint32_t expire_ttl = rand() % (end - start) + start;
-        VLOG(1) << "set key " << key << " expire ttl as " << expire_ttl;
-        auto cid = sf->service().mutable_registry()->Find("EXPIRE");
-        absl::InlinedVector<string, 5> args;
-        args.push_back(std::move(key));
-        args.push_back(to_string(expire_ttl));
-        args_view.clear();
-        for (auto& arg : args) {
-          args_view.push_back(arg);
-        }
-        auto args_span = absl::MakeSpan(args_view);
-        stub_tx->MultiSwitchCmd(cid);
-        local_cntx.cid = cid;
-        crb.SetReplyMode(ReplyMode::NONE);
-        stub_tx->InitByArgs(cntx->ns, local_cntx.conn_state.db_index, args_span);
-
-        sf->service().InvokeCmd(cid, args_span, &crb, &local_cntx);
+    if (expire_ttl_range.has_value()) {
+      uint32_t start = expire_ttl_range->first;
+      uint32_t end = expire_ttl_range->second;
+      uint32_t expire_ttl = rand() % (end - start) + start;
+      VLOG(1) << "set key " << key << " expire ttl as " << expire_ttl;
+      auto cid = sf->service().mutable_registry()->Find("EXPIRE");
+      absl::InlinedVector<string, 5> args;
+      args.push_back(std::move(key));
+      args.push_back(to_string(expire_ttl));
+      args_view.clear();
+      for (auto& arg : args) {
+        args_view.push_back(arg);
       }
+      auto args_span = absl::MakeSpan(args_view);
+      stub_tx->MultiSwitchCmd(cid);
+      local_cntx.cid = cid;
+      crb.SetReplyMode(ReplyMode::NONE);
+      stub_tx->InitByArgs(cntx->ns, local_cntx.conn_state.db_index, args_span);
+
+      sf->service().InvokeCmd(cid, args_span, &crb, &local_cntx);
     }
   }
 
