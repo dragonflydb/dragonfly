@@ -607,6 +607,7 @@ OpResult<size_t> OpStrLen(const OpArgs& op_args, string_view key, string_view fi
 struct OpSetParams {
   bool skip_if_exists = false;
   uint32_t ttl = UINT32_MAX;
+  bool keepttl = false;
 };
 
 OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList values,
@@ -673,7 +674,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
       if (op_sp.skip_if_exists)
         added = sm->AddOrSkip(field, value, op_sp.ttl);
       else
-        added = sm->AddOrUpdate(field, value, op_sp.ttl);
+        added = sm->AddOrUpdate(field, value, op_sp.ttl, op_sp.keepttl);
 
       created += unsigned(added);
     }
@@ -720,19 +721,23 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
   return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, key, values, pv);
 }
 
-// HSETEX key [NX] tll_sec field value field value ...
+// HSETEX key [NX] [KEEPTTL] tll_sec field value field value ...
 void HSetEx(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser{args};
 
   string_view key = parser.Next();
+  OpSetParams op_sp;
 
-  bool skip_if_exists = static_cast<bool>(parser.Check("NX"sv));
-  string_view ttl_str = parser.Next();
+  op_sp.skip_if_exists = parser.Check("NX");
+  op_sp.keepttl = parser.Check("KEEPTTL");
+  op_sp.ttl = parser.Next<uint32_t>();
 
-  uint32_t ttl_sec;
+  if (parser.HasError()) {
+    return cmd_cntx.rb->SendError(parser.Error()->MakeReply());
+  }
+
   constexpr uint32_t kMaxTtl = (1UL << 26);
-
-  if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
+  if (op_sp.ttl == 0 || op_sp.ttl > kMaxTtl) {
     return cmd_cntx.rb->SendError(kInvalidIntErr);
   }
 
@@ -742,8 +747,6 @@ void HSetEx(CmdArgList args, const CommandContext& cmd_cntx) {
     return cmd_cntx.rb->SendError(facade::WrongNumArgsError(cmd_cntx.conn_cntx->cid->name()),
                                   kSyntaxErrType);
   }
-
-  OpSetParams op_sp{skip_if_exists, ttl_sec};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, fields, op_sp);

@@ -364,6 +364,47 @@ TEST_F(HSetFamilyTest, HSetEx) {
   resp = Run({"HGET", "k", "field4"});
   EXPECT_THAT(resp,
               "value");  // HSETEX with NX option; old expiration time was NOT replaced by a new one
+
+  // KEEPTTL related asserts
+  EXPECT_THAT(Run({"HSETEX", "k", long_time, "kttlfield", "value"}), IntArg(1));
+  EXPECT_EQ(Run({"HGET", "k", "kttlfield"}), "value");
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k", "kttlfield"}), 100);
+
+  // KEEPTTL resets value of kttlfield, but preserves its TTL. afield is added with TTL=1
+  EXPECT_THAT(Run({"HSETEX", "k", "KEEPTTL", "1", "kttlfield", "resetvalue", "afield", "aval"}),
+              IntArg(1));
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k", "kttlfield"}), 100);
+  EXPECT_EQ(Run({"FIELDTTL", "k", "afield"}).GetInt(), 1);
+  EXPECT_EQ(Run({"HGET", "k", "afield"}), "aval");
+  // make afield expire
+  AdvanceTime(1000);
+  EXPECT_THAT(Run({"HGET", "k", "afield"}), ArgType(RespExpr::NIL));
+
+  // kttlfield is still present although with updated value
+  EXPECT_EQ(Run({"HGET", "k", "kttlfield"}), "resetvalue");
+  EXPECT_EQ(Run({"FIELDTTL", "k", "kttlfield"}).GetInt(), 99);
+
+  // If NX is supplied, with or without KEEPTTL neither expiry nor value is updated
+  EXPECT_THAT(Run({"HSETEX", "k", "NX", "KEEPTTL", "1", "kttlfield", "value"}), IntArg(0));
+
+  // No updates
+  EXPECT_EQ(Run({"HGET", "k", "kttlfield"}), "resetvalue");
+  EXPECT_EQ(Run({"FIELDTTL", "k", "kttlfield"}).GetInt(), 99);
+
+  EXPECT_THAT(Run({"HSETEX", "k", "NX", "1", "kttlfield", "value"}), IntArg(0));
+  // No updates
+  EXPECT_EQ(Run({"HGET", "k", "kttlfield"}), "resetvalue");
+  EXPECT_EQ(Run({"FIELDTTL", "k", "kttlfield"}).GetInt(), 99);
+
+  // Invalid TTL handling
+  EXPECT_THAT(Run({"HSETEX", "k", "NX", "zero", "kttlfield", "value"}),
+              ErrArg("ERR value is not an integer or out of range"));
+
+  // Exercise the code path where a field is added without TTL, but then we set a new expiration AND
+  // provide KEEPTTL. Since there was no old expiry, the new TTL should be applied.
+  EXPECT_EQ(Run({"HSET", "k", "nottl", "val"}), 1);
+  EXPECT_EQ(Run({"HSETEX", "k", "KEEPTTL", long_time, "nottl", "newval"}), 0);
+  EXPECT_EQ(Run({"FIELDTTL", "k", "nottl"}).GetInt(), 100);
 }
 
 TEST_F(HSetFamilyTest, TriggerConvertToStrMap) {

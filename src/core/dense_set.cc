@@ -690,8 +690,8 @@ void* DenseSet::PopInternal() {
 
 void* DenseSet::AddOrReplaceObj(void* obj, bool has_ttl) {
   uint64_t hc = Hash(obj, 0);
-  DensePtr* dptr = entries_.empty() ? nullptr : Find(obj, BucketId(hc), 0).second;
 
+  DensePtr* dptr = entries_.empty() ? nullptr : Find(obj, BucketId(hc), 0).second;
   if (dptr) {  // replace existing object.
     // A bit confusing design: ttl bit is located on the wrapping pointer,
     // therefore we must set ttl bit before unrapping below.
