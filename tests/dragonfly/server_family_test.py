@@ -175,7 +175,7 @@ async def test_blocking_commands_should_not_show_up_in_slow_log(
     assert reply[0]["command"] == "SLOWLOG RESET"
 
 
-@dfly_args({"memcached_port": 11211})
+@dfly_args({"memcached_port": 11211, "admin_port": 1112})
 async def test_metric_labels(
     df_server: DflyInstance, async_client: aioredis.Redis, memcached_client: Client
 ):
@@ -198,13 +198,26 @@ async def test_metric_labels(
         match_label_value(sample, "main", lambda v: v == 1)
         match_label_value(sample, "other", lambda v: v == 0)
 
+    # Memcached client also counts as main
     memcached_client.set("foo", "bar")
 
     metrics = await df_server.metrics()
     for sample in metrics["dragonfly_commands_processed"].samples:
         match_label_value(sample, "main", lambda v: v > 0)
-        # memcached listener processes command as other
-        match_label_value(sample, "other", lambda v: v == 1)
+        match_label_value(sample, "other", lambda v: v == 0)
     for sample in metrics["dragonfly_connected_clients"].samples:
-        match_label_value(sample, "main", lambda v: v == 1)
-        match_label_value(sample, "other", lambda v: v == 1)
+        match_label_value(sample, "main", lambda v: v == 2)
+        match_label_value(sample, "other", lambda v: v == 0)
+
+    # admin client counts as other
+    async with aioredis.Redis(port=1112) as admin:
+        await admin.ping()
+
+        metrics = await df_server.metrics()
+        for sample in metrics["dragonfly_commands_processed"].samples:
+            match_label_value(sample, "main", lambda v: v > 0)
+            # memcached listener processes command as other
+            match_label_value(sample, "other", lambda v: v > 0)
+        for sample in metrics["dragonfly_connected_clients"].samples:
+            match_label_value(sample, "main", lambda v: v == 2)
+            match_label_value(sample, "other", lambda v: v == 1)

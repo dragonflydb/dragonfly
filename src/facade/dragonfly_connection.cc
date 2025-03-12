@@ -923,6 +923,10 @@ bool Connection::IsMain() const {
   return is_main_;
 }
 
+bool Connection::HasMainListener() const {
+  return is_main_ || static_cast<Listener*>(listener())->protocol() == Protocol::MEMCACHE;
+}
+
 void Connection::SetName(string name) {
   util::ThisFiber::SetName(absl::StrCat("DflyConnection_", name));
   name_ = std::move(name);
@@ -1997,7 +2001,7 @@ void Connection::MarkReadBufferConsumed() {
 }
 
 uint32_t& Connection::NumConns() {
-  return IsMain() ? stats_->num_conns_main : stats_->num_conns_other;
+  return HasMainListener() ? stats_->num_conns_main : stats_->num_conns_other;
 }
 
 void Connection::SetMaxQueueLenThreadLocal(unsigned tid, uint32_t val) {
