@@ -820,6 +820,16 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
 
   if (params.IsConditionalSet()) {
     auto find_res = db_slice.FindMutable(op_args_.db_cntx, key);
+    if (IsValid(find_res.it) && !IsValid(find_res.exp_it)) {
+      ExpireTable* etable = db_slice.GetTables(op_args_.db_cntx.db_index).second;
+      ExpireIterator check_it = etable->Find(key);
+      if (IsValid(check_it)) {
+        LOG(ERROR) << "Inconsistent state in SetCmd::Set, has_expire: "
+                   << find_res.it->second.HasExpire() << ", is_external "
+                   << find_res.it->second.IsExternal()
+                   << ", is_cold: " << find_res.it->second.IsCool();
+      }
+    }
     if (auto status = CachePrevIfNeeded(params, find_res.it); status != OpStatus::OK)
       return status;
 

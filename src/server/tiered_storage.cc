@@ -154,7 +154,19 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
       if (absl::GetFlag(FLAGS_tiered_experimental_cooling)) {
         RetireColdEntries(pv->MallocUsed());
+        bool has_expire = pv->HasExpire();
+        if (!has_expire) {
+          auto eit = db_slice_.GetDBTable(key.first)->expire.Find(key.second);
+          if (IsValid(eit)) {
+            LOG(DFATAL) << "Inconsistent expire state for " << key.second;
+          }
+        }
         ts_->CoolDown(key.first, key.second, segment, pv);
+        bool has_expire_after = pv->HasExpire();
+        if (has_expire != has_expire_after) {
+          LOG(DFATAL) << "Inconsistent expire state for " << key.second
+                      << ", before: " << has_expire << ", after: " << has_expire_after;
+        }
       } else {
         stats->AddTypeMemoryUsage(pv->ObjType(), -pv->MallocUsed());
         pv->SetExternal(segment.offset, segment.length);
@@ -203,6 +215,14 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
     PrimeValue& pv = it->second;
     if (pv.IsCool()) {
       PrimeValue::CoolItem item = pv.GetCool();
+      if (!item.record->value.HasExpire()) {
+        auto eit = db_slice_.GetDBTable(dbid)->expire.Find(it->first);
+        if (IsValid(eit)) {
+          LOG(DFATAL) << "Inconsistent expire state for: " << it->first.ToString();
+        }
+      }
+
+      // We cannot restore the value to memory, so we just remove it from the cool storage.
       tiering::DiskSegment segment = FromCoolItem(item);
 
       // We remove it from both cool storage and the offline storage.
@@ -239,12 +259,18 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, string_view value,
   if (!should_upload)
     return false;
 
-  auto key = get<OpManager::KeyRef>(id);
+  KeyRef key = get<OpManager::KeyRef>(id);
   auto* pv = Find(key);
   if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
     if (modified || pv->WasTouched()) {
       bool is_raw = !modified;
       ++stats_.total_uploads;
+      if (!pv->HasExpire()) {
+        auto eit = db_slice_.GetDBTable(key.first)->expire.Find(key.second);
+        if (IsValid(eit)) {
+          LOG(DFATAL) << "Inconsistent expire state for: " << key.second;
+        }
+      }
       Upload(key.first, value, is_raw, segment.length, pv);
       return true;
     }
@@ -575,9 +601,15 @@ void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
   record->key_hash = CompactObj::HashCode(str);
   record->db_index = db_ind;
   record->page_index = segment.offset / tiering::kPageSize;
+  bool has_expire = pv->HasExpire();
   record->value = std::move(*pv);
 
+  bool record_expire = record->value.HasExpire();
   pv->SetCool(segment.offset, segment.length, record);
+  if (pv->HasExpire() != has_expire) {
+    LOG(DFATAL) << "Inconsistent expire state during cooling down, before: " << has_expire
+                << " after: " << pv->HasExpire() << ", record: " << record_expire;
+  }
   DCHECK_EQ(pv->Size(), record->value.Size());
 }
 
