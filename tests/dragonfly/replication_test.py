@@ -50,7 +50,7 @@ Test full replication pipeline. Test full sync with streaming changes and stable
         # Quick general test that replication is working
         (1, 3 * [1], dict(key_target=1_000), 500),
         # A lot of huge values
-        (2, 2 * [1], dict(key_target=1_000, huge_value_target=30), 500),
+        (2, 2 * [1], dict(key_target=5_000, huge_value_target=30), 500),
         (4, [4, 4], dict(key_target=10_000), 1_000),
         pytest.param(6, [6, 6, 6], dict(key_target=100_000), 20_000, marks=M_OPT),
         # Skewed tests with different thread ratio
