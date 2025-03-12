@@ -709,7 +709,9 @@ void Connection::OnConnectionStart() {
 
   stats_ = &tl_facade_stats->conn_stats;
 
-  is_main_ = static_cast<Listener*>(listener())->IsMainInterface();
+  if (const Listener* lsnr = static_cast<Listener*>(listener()); lsnr) {
+    is_main_ = lsnr->IsMainInterface();
+  }
 }
 
 void Connection::HandleRequests() {
@@ -924,7 +926,15 @@ bool Connection::IsMain() const {
 }
 
 bool Connection::HasMainListener() const {
-  return is_main_ || static_cast<Listener*>(listener())->protocol() == Protocol::MEMCACHE;
+  if (is_main_) {
+    return true;
+  }
+
+  if (const Listener* lsnr = static_cast<Listener*>(listener()); lsnr) {
+    return lsnr->protocol() == Protocol::MEMCACHE;
+  }
+
+  return false;
 }
 
 void Connection::SetName(string name) {
