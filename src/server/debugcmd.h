@@ -27,6 +27,7 @@ class DebugCmd {
     uint32_t elements = 1;
 
     std::optional<cluster::SlotRange> slot_range;
+    std::optional<std::pair<uint32_t, uint32_t>> expire_ttl_range;
   };
 
  public:
