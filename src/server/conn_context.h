@@ -317,6 +317,9 @@ class ConnectionContext : public facade::ConnectionContext {
   // Reference to a FlowInfo for this connection if from a master to a replica.
   FlowInfo* replication_flow = nullptr;
 
+  // The related connection is bound to main listener or serves the memcached protocol
+  bool has_main_or_memcache_listener = false;
+
  private:
   void EnableMonitoring(bool enable) {
     subscriptions++;  // required to support the monitoring

@@ -698,7 +698,7 @@ void Connection::OnPostMigrateThread() {
   }
 
   stats_ = &tl_facade_stats->conn_stats;
-  ++stats_->num_conns;
+  IncrNumConns();
   stats_->read_buf_capacity += io_buf_.Capacity();
 }
 
@@ -706,6 +706,10 @@ void Connection::OnConnectionStart() {
   ThisFiber::SetName("DflyConnection");
 
   stats_ = &tl_facade_stats->conn_stats;
+
+  if (const Listener* lsnr = static_cast<Listener*>(listener()); lsnr) {
+    is_main_ = lsnr->IsMainInterface();
+  }
 }
 
 void Connection::HandleRequests() {
@@ -916,7 +920,16 @@ bool Connection::IsPrivileged() const {
 }
 
 bool Connection::IsMain() const {
-  return static_cast<Listener*>(listener())->IsMainInterface();
+  return is_main_;
+}
+
+bool Connection::IsMainOrMemcache() const {
+  if (is_main_) {
+    return true;
+  }
+
+  const Listener* lsnr = static_cast<Listener*>(listener());
+  return lsnr && lsnr->protocol() == Protocol::MEMCACHE;
 }
 
 void Connection::SetName(string name) {
@@ -990,7 +1003,7 @@ void Connection::ConnectionFlow() {
 
   ConfigureProvidedBuffer();
 
-  ++stats_->num_conns;
+  IncrNumConns();
   ++stats_->conn_received_cnt;
   stats_->read_buf_capacity += io_buf_.Capacity();
 
@@ -1920,8 +1933,7 @@ Connection::MemoryUsage Connection::GetMemoryUsage() const {
 
 void Connection::DecreaseStatsOnClose() {
   stats_->read_buf_capacity -= io_buf_.Capacity();
-
-  --stats_->num_conns;
+  DecrNumConns();
 }
 
 void Connection::BreakOnce(uint32_t ev_mask) {
@@ -1993,6 +2005,20 @@ void Connection::MarkReadBufferConsumed() {
   }
 }
 
+void Connection::IncrNumConns() {
+  if (IsMainOrMemcache())
+    ++stats_->num_conns_main;
+  else
+    ++stats_->num_conns_other;
+}
+
+void Connection::DecrNumConns() {
+  if (IsMainOrMemcache())
+    --stats_->num_conns_main;
+  else
+    --stats_->num_conns_other;
+}
+
 void Connection::SetMaxQueueLenThreadLocal(unsigned tid, uint32_t val) {
   thread_queue_backpressure[tid].pipeline_queue_max_len = val;
   thread_queue_backpressure[tid].pipeline_cnd.notify_all();
@@ -2059,11 +2085,11 @@ bool Connection::WeakRef::operator==(const WeakRef& other) const {
 
 void ResetStats() {
   auto& cstats = tl_facade_stats->conn_stats;
-  cstats.command_cnt = 0;
   cstats.pipelined_cmd_cnt = 0;
   cstats.conn_received_cnt = 0;
   cstats.pipelined_cmd_cnt = 0;
-  cstats.command_cnt = 0;
+  cstats.command_cnt_main = 0;
+  cstats.command_cnt_other = 0;
   cstats.io_read_cnt = 0;
   cstats.io_read_bytes = 0;
 

@@ -261,6 +261,10 @@ class Connection : public util::Connection {
 
   bool IsMain() const;
 
+  // In addition to the listener role being main, also returns true if the protocol is Memcached.
+  // This method returns true for customer facing listeners.
+  bool IsMainOrMemcache() const;
+
   void SetName(std::string name);
 
   void SetLibName(std::string name);
@@ -409,6 +413,9 @@ class Connection : public util::Connection {
   io::Bytes NextBundleBuffer(size_t total_len);
   void MarkReadBufferConsumed();
 
+  void IncrNumConns();
+  void DecrNumConns();
+
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
   util::fb2::Fiber async_fb_;             // async fiber (if started)
@@ -474,6 +481,7 @@ class Connection : public util::Connection {
       bool is_http_ : 1;
       bool is_tls_ : 1;
       bool recv_provided_ : 1;
+      bool is_main_ : 1;
     };
   };
 };

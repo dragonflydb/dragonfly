@@ -1318,7 +1318,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
     DispatchMonitor(cntx, cid, tail_args);
   }
 
-  ServerState::tlocal()->RecordCmd();
+  ServerState::tlocal()->RecordCmd(cntx->has_main_or_memcache_listener);
   Transaction* tx = cntx->transaction;
   auto& info = cntx->conn_state.tracking_info_;
   const bool is_read_only = cid->opt_mask() & CO::READONLY;

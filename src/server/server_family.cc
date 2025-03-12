@@ -1283,8 +1283,11 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   const auto& conn_stats = m.facade_stats.conn_stats;
   AppendMetricWithoutLabels("max_clients", "Maximal number of clients", GetFlag(FLAGS_maxclients),
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("connected_clients", "", conn_stats.num_conns, MetricType::GAUGE,
-                            &resp->body());
+  AppendMetricHeader("connected_clients", "", MetricType::GAUGE, &resp->body());
+  AppendMetricValue("connected_clients", conn_stats.num_conns_main, {"listener"}, {"main"},
+                    &resp->body());
+  AppendMetricValue("connected_clients", conn_stats.num_conns_other, {"listener"}, {"other"},
+                    &resp->body());
   AppendMetricWithoutLabels("client_read_buffer_bytes", "", conn_stats.read_buf_capacity,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("blocked_clients", "", conn_stats.num_blocked_clients,
@@ -1381,8 +1384,11 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("connections_received_total", "", conn_stats.conn_received_cnt,
                             MetricType::COUNTER, &resp->body());
 
-  AppendMetricWithoutLabels("commands_processed_total", "", conn_stats.command_cnt,
-                            MetricType::COUNTER, &resp->body());
+  AppendMetricHeader("commands_processed_total", "", MetricType::COUNTER, &resp->body());
+  AppendMetricValue("commands_processed_total", conn_stats.command_cnt_main, {"listener"}, {"main"},
+                    &resp->body());
+  AppendMetricValue("commands_processed_total", conn_stats.command_cnt_other, {"listener"},
+                    {"other"}, &resp->body());
   AppendMetricWithoutLabels("keyspace_hits_total", "", m.events.hits, MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("keyspace_misses_total", "", m.events.misses, MetricType::COUNTER,
@@ -1628,6 +1634,8 @@ void ServerFamily::StatsMC(std::string_view section, SinkReplyBuilder* builder) 
   Metrics m = GetMetrics(&namespaces->GetDefaultNamespace());
   uint64_t uptime = time(NULL) - start_time_;
 
+  const uint32_t total_conns =
+      m.facade_stats.conn_stats.num_conns_main + m.facade_stats.conn_stats.num_conns_other;
   ADD_LINE(pid, getpid());
   ADD_LINE(uptime, uptime);
   ADD_LINE(time, now);
@@ -1637,7 +1645,7 @@ void ServerFamily::StatsMC(std::string_view section, SinkReplyBuilder* builder) 
   ADD_LINE(rusage_user, utime);
   ADD_LINE(rusage_system, systime);
   ADD_LINE(max_connections, -1);
-  ADD_LINE(curr_connections, m.facade_stats.conn_stats.num_conns);
+  ADD_LINE(curr_connections, total_conns);
   ADD_LINE(total_connections, -1);
   ADD_LINE(rejected_connections, -1);
   ADD_LINE(bytes_read, m.facade_stats.conn_stats.io_read_bytes);
@@ -2357,7 +2365,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
   };
 
   auto add_clients_info = [&] {
-    append("connected_clients", m.facade_stats.conn_stats.num_conns);
+    append("connected_clients",
+           m.facade_stats.conn_stats.num_conns_main + m.facade_stats.conn_stats.num_conns_other);
     append("max_clients", GetFlag(FLAGS_maxclients));
     append("client_read_buffer_bytes", m.facade_stats.conn_stats.read_buf_capacity);
     append("blocked_clients", m.facade_stats.conn_stats.num_blocked_clients);
@@ -2445,7 +2454,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     auto& reply_stats = m.facade_stats.reply_stats;
 
     append("total_connections_received", conn_stats.conn_received_cnt);
-    append("total_commands_processed", conn_stats.command_cnt);
+    append("total_commands_processed", conn_stats.command_cnt_main + conn_stats.command_cnt_other);
     append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
     append("total_pipelined_squashed_commands", m.coordinator_stats.squashed_commands);
