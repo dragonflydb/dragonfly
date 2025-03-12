@@ -709,9 +709,7 @@ void Connection::OnConnectionStart() {
 
   stats_ = &tl_facade_stats->conn_stats;
 
-  if (const Listener* ls = dynamic_cast<Listener*>(listener()); ls) {
-    is_main_ = ls->IsMainInterface();
-  }
+  is_main_ = static_cast<Listener*>(listener())->IsMainInterface();
 }
 
 void Connection::HandleRequests() {
