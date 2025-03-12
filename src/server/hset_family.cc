@@ -408,14 +408,10 @@ OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, Cm
   if (pv.Encoding() == kEncodingListPack) {
     uint8_t* lp = (uint8_t*)pv.RObjPtr();
 
-    absl::flat_hash_map<string_view, std::vector<size_t>> reverse;
+    absl::flat_hash_map<string_view, absl::InlinedVector<size_t, 3>> reverse;
     reverse.reserve(fields.size() + 1);
     for (size_t i = 0; i < fields.size(); ++i) {
-      auto [res_it, is_inserted] =
-          reverse.emplace(ArgS(fields, i), std::vector<size_t>{i});  // map fields to their index.
-      if (!is_inserted) {
-        res_it->second.push_back(i);
-      }
+      reverse[ArgS(fields, i)].push_back(i);  // map fields to their index.
     }
 
     size_t lplen = lpLength(lp);
