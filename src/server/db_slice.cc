@@ -1718,7 +1718,8 @@ void DbSlice::PerformDeletion(Iterator del_it, DbTable* table) {
   ExpIterator exp_it;
   if (del_it->second.HasExpire()) {
     exp_it = ExpIterator::FromPrime(table->expire.Find(del_it->first));
-    DCHECK(!exp_it.is_done());
+    LOG_IF(DFATAL, exp_it.is_done())
+        << "Internal error, entry " << del_it.key() << " not found in expire table";
   }
 
   PerformDeletionAtomic(del_it, exp_it, table);
