@@ -120,9 +120,7 @@ struct ShardInfo {
 
 using ClusterSpec = vector<ShardInfo>;
 
-template <typename D>
-ClusterSpec FetchCluster(const unique_ptr<FiberSocketBase, D>& socket,
-                         bool connection_shard_only = false) {
+ClusterSpec FetchCluster(FiberSocketBase* socket, bool connection_shard_only = false) {
   error_code ec = socket->Write(io::Buffer("cluster nodes\r\n"));
   CHECK(!ec);
   facade::RedisParser parser{RedisParser::CLIENT, 1024};
@@ -734,7 +732,7 @@ void Driver::ParseRESP() {
           CHECK_EQ(host_port.size(), 2u);
           LOG_EVERY_T(INFO, 1) << "Moved: " << slot_id << " to " << parts[1];
           // Slot is moved so update slots information for connecting shard only
-          ClusterSpec shard = FetchCluster(socket_, true);
+          ClusterSpec shard = FetchCluster(socket_.get(), true);
           slots_ = shard[0].slots;
         }
         ++stats_.num_errors;
@@ -982,7 +980,7 @@ int main(int argc, char* argv[]) {
       unique_ptr<FiberSocketBase, FiberSocketClose> socket(proactor->CreateSocket());
       error_code ec = socket->Connect(ep);
       CHECK(!ec) << "Could not connect to " << ep << " " << ec;
-      return FetchCluster(socket);
+      return FetchCluster(socket.get());
     });
   }
   LOG(INFO) << "Connecting threads to "
