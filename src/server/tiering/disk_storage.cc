@@ -30,7 +30,7 @@ namespace {
 
 UringBuf AllocateTmpBuf(size_t size) {
   size = (size + kPageSize - 1) / kPageSize * kPageSize;
-  VLOG(1) << "Fallback to temporary allocation: " << size;
+  VLOG(2) << "Fallback to temporary allocation: " << size;
 
   uint8_t* buf = new (align_val_t(kPageSize)) uint8_t[size];
   return UringBuf{{buf, size}, nullopt};
@@ -207,6 +207,8 @@ error_code DiskStorage::Grow(off_t grow_size) {
     return make_error_code(errc::operation_in_progress);
   }
   off_t end = alloc_.capacity();
+
+  VLOG(1) << "Growing from " << end << " by " << grow_size;
   auto err = DoFiberCall(&SubmitEntry::PrepFallocate, backing_file_->fd(), 0, end, grow_size);
   grow_pending_ = false;
   RETURN_ON_ERR(err);

@@ -538,6 +538,7 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
 
   if (SliceSnapshot::IsSnaphotInProgress())
     return;
+  VLOG(1) << "Offloading for dbid: " << dbid;
 
   // Don't run offloading if there's only very little space left
   auto disk_stats = op_manager_->GetStats().disk_stats;
@@ -553,13 +554,21 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
         it->first.SetTouched(false);
       } else {
         stats_.offloading_stashes++;
-        TryStash(dbid, it->first.GetSlice(&tmp), &it->second);
+        string_view key = it->first.GetSlice(&tmp);
+        if (!it->second.HasExpire()) {
+          auto eit = op_manager_->db_slice_.GetDBTable(dbid)->expire.Find(key);
+          if (IsValid(eit)) {
+            LOG(DFATAL) << "Inconsistent expire state for: " << key;
+          }
+        }
+        TryStash(dbid, key, &it->second);
       }
     }
   };
 
   PrimeTable& table = op_manager_->db_slice_.GetDBTable(dbid)->prime;
   PrimeTable::Cursor start_cursor{};
+  FiberAtomicGuard guard;
 
   // Loop while we haven't traversed all entries or reached our stash io device limit.
   // Keep number of iterations below resonable limit to keep datastore always responsive
@@ -567,11 +576,14 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   do {
     if (op_manager_->GetStats().pending_stash_cnt >= write_depth_limit_)
       break;
+
     offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
   } while (offloading_cursor_ != start_cursor && iterations++ < kMaxIterations);
 }
 
 size_t TieredStorage::ReclaimMemory(size_t goal) {
+  VLOG(1) << "Reclaiming memory, goal: " << goal;
+
   size_t gained = 0;
   do {
     size_t memory_before = stats_.cool_memory_used;

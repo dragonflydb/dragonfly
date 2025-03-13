@@ -34,6 +34,7 @@
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "util/fibers/future.h"
+#include "util/fibers/stacktrace.h"
 
 namespace dfly {
 
@@ -948,9 +949,16 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
   EngineShard* shard = op_args_.shard;
 
   // Currently we always try to offload, but Stash may ignore it, if disk I/O is overloaded.
-  if (auto* ts = shard->tiered_storage(); ts)
+  if (auto* ts = shard->tiered_storage(); ts) {
+    if (!pv->HasExpire()) {
+      auto& db_slice = op_args_.GetDbSlice();
+      auto eit = db_slice.GetDBTable(op_args_.db_cntx.db_index)->expire.Find(key);
+      if (IsValid(eit)) {
+        LOG(DFATAL) << "Inconsistent expire state for: " << key << fb2::GetStacktrace();
+      }
+    }
     ts->TryStash(op_args_.db_cntx.db_index, key, pv);
-
+  }
   if (manual_journal_ && op_args_.shard->journal()) {
     RecordJournal(params, key, value);
   }
