@@ -87,7 +87,16 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Clear IO pending flag for entry
   void ClearIoPending(OpManager::KeyRef key) {
     if (auto pv = Find(key); pv) {
+      bool has_expire = pv->HasExpire();
       pv->SetStashPending(false);
+      if (!pv->HasExpire()) {
+        auto eit = db_slice_.GetDBTable(key.first)->expire.Find(key.second);
+        if (IsValid(eit)) {
+          LOG(DFATAL) << "Inconsistent expire state for " << key.second
+                      << " previous state: " << has_expire;
+        }
+      }
+
       stats_.total_cancels++;
     }
   }
@@ -144,9 +153,10 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Find entry by key in db_slice and store external segment in place of original value.
   // Update memory stats
   void SetExternal(OpManager::KeyRef key, tiering::DiskSegment segment) {
+    FiberAtomicGuard guard;
     if (auto* pv = Find(key); pv) {
       auto* stats = GetDbTableStats(key.first);
-
+      bool has_expire_before = pv->HasExpire();
       pv->SetStashPending(false);
       stats->tiered_entries++;
       stats->tiered_used_bytes += segment.length;
@@ -154,18 +164,19 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
       if (absl::GetFlag(FLAGS_tiered_experimental_cooling)) {
         RetireColdEntries(pv->MallocUsed());
-        bool has_expire = pv->HasExpire();
-        if (!has_expire) {
+
+        if (!has_expire_before || !pv->HasExpire()) {
           auto eit = db_slice_.GetDBTable(key.first)->expire.Find(key.second);
           if (IsValid(eit)) {
-            LOG(DFATAL) << "Inconsistent expire state for " << key.second;
+            LOG(DFATAL) << "Inconsistent expire state for " << key.second << " "
+                        << has_expire_before;
           }
         }
         ts_->CoolDown(key.first, key.second, segment, pv);
         bool has_expire_after = pv->HasExpire();
-        if (has_expire != has_expire_after) {
+        if (has_expire_before != has_expire_after) {
           LOG(DFATAL) << "Inconsistent expire state for " << key.second
-                      << ", before: " << has_expire << ", after: " << has_expire_after;
+                      << ", before: " << has_expire_before << ", after: " << has_expire_after;
         }
       } else {
         stats->AddTypeMemoryUsage(pv->ObjType(), -pv->MallocUsed());
@@ -429,6 +440,13 @@ bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
   StringOrView raw_string = value->GetRawString();
   value->SetStashPending(true);
 
+  if (!value->HasExpire()) {
+    auto eit = op_manager_->db_slice_.GetDBTable(dbid)->expire.Find(key);
+    if (IsValid(eit)) {
+      LOG(DFATAL) << "Inconsistent expire state for: " << key;
+    }
+  }
+
   tiering::OpManager::EntryId id;
   error_code ec;
   if (OccupiesWholePages(value->Size())) {  // large enough for own page
@@ -572,14 +590,23 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
                            ->prime.FindFirst(record->key_hash, predicate);
     CHECK(IsValid(it));
     PrimeValue& pv = it->second;
+    bool has_expire = pv.HasExpire();
+    if (!has_expire) {
+      auto eit = op_manager_->db_slice_.GetDBTable(record->db_index)->expire.Find(it->first);
+      if (IsValid(eit)) {
+        LOG(DFATAL) << "Inconsistent expire state for: " << it->first.ToString();
+      }
+    }
     tiering::DiskSegment segment = FromCoolItem(pv.GetCool());
 
     // Now the item is only in storage.
     pv.SetExternal(segment.offset, segment.length);
-
     auto* stats = op_manager_->GetDbTableStats(record->db_index);
     stats->AddTypeMemoryUsage(record->value.ObjType(), -record->value.MallocUsed());
     CompactObj::DeleteMR<detail::TieredColdRecord>(record);
+    if (pv.HasExpire() != has_expire) {
+      LOG(DFATAL) << "Inconsistent expire state for: " << it->first.ToString();
+    }
   } while (gained < goal);
 
   return gained;
