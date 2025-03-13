@@ -6,6 +6,7 @@ extern "C" {
 #include "redis/crc16.h"
 }
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/random/random.h>
 #include <absl/strings/match.h>
@@ -927,12 +928,6 @@ void WatchFiber(size_t num_shards, atomic_bool* finish_signal, ProactorPool* pp)
   }
 }
 
-struct FiberSocketClose {
-  void operator()(FiberSocketBase* socket) {
-    std::ignore = socket->Close();
-  }
-};
-
 int main(int argc, char* argv[]) {
   MainInitGuard guard(&argc, &argv);
 
@@ -977,7 +972,8 @@ int main(int argc, char* argv[]) {
   ClusterSpec shards;
   if (protocol == RESP) {
     shards = proactor->Await([&] {
-      unique_ptr<FiberSocketBase, FiberSocketClose> socket(proactor->CreateSocket());
+      unique_ptr<FiberSocketBase> socket(proactor->CreateSocket());
+      absl::Cleanup socket_close([&] { std::ignore = socket->Close(); });
       error_code ec = socket->Connect(ep);
       CHECK(!ec) << "Could not connect to " << ep << " " << ec;
       return FetchCluster(socket.get());
