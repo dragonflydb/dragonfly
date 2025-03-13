@@ -5,6 +5,7 @@
 #include "cluster_config.h"
 
 #include <absl/container/flat_hash_set.h>
+#include <absl/strings/match.h>
 
 #include <optional>
 #include <string_view>
@@ -161,13 +162,13 @@ optional<SlotRanges> GetClusterSlotRanges(const JsonType& slots) {
   return SlotRanges(ranges);
 }
 
-optional<ClusterNodeInfo> ParseClusterNode(const JsonType& json) {
+optional<ClusterExtendedNodeInfo> ParseClusterNode(const JsonType& json) {
   if (!json.is_object()) {
     LOG(WARNING) << kInvalidConfigPrefix << "node config is not an object " << json;
     return nullopt;
   }
 
-  ClusterNodeInfo node;
+  ClusterExtendedNodeInfo node;
 
   {
     auto id = json.at_or_null("id");
@@ -193,6 +194,26 @@ optional<ClusterNodeInfo> ParseClusterNode(const JsonType& json) {
       return nullopt;
     }
     node.port = port.value();
+  }
+
+  {
+    auto health = json.at_or_null("health");
+    if (!health.is_null()) {
+      if (!health.is_string()) {
+        LOG(WARNING) << kInvalidConfigPrefix << "invalid health status for node " << json;
+      } else {
+        auto health_str = std::move(health).as_string();
+        if (absl::EqualsIgnoreCase(health_str, "FAIL")) {
+          node.health = NodeHealth::FAIL;
+        } else if (absl::EqualsIgnoreCase(health_str, "LOADING")) {
+          node.health = NodeHealth::LOADING;
+        } else if (absl::EqualsIgnoreCase(health_str, "ONLINE")) {
+          node.health = NodeHealth::ONLINE;
+        } else {
+          LOG(WARNING) << kInvalidConfigPrefix << "invalid health status for node: " << health_str;
+        }
+      }
+    }
   }
 
   return node;

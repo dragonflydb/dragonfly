@@ -94,6 +94,12 @@ struct ClusterNodeInfo {
   }
 };
 
+enum class NodeHealth : std::uint8_t { NONE, FAIL, LOADING, ONLINE };
+
+struct ClusterExtendedNodeInfo : ClusterNodeInfo {
+  NodeHealth health = NodeHealth::NONE;
+};
+
 struct MigrationInfo {
   SlotRanges slot_ranges;
   ClusterNodeInfo node_info;
@@ -111,8 +117,8 @@ struct MigrationInfo {
 
 struct ClusterShardInfo {
   SlotRanges slot_ranges;
-  ClusterNodeInfo master;
-  std::vector<ClusterNodeInfo> replicas;
+  ClusterExtendedNodeInfo master;
+  std::vector<ClusterExtendedNodeInfo> replicas;
   std::vector<MigrationInfo> migrations;
 
   bool operator==(const ClusterShardInfo& r) const;
