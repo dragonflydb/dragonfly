@@ -36,7 +36,6 @@ extern "C" {
 using std::string;
 
 ABSL_FLAG(uint16_t, p, 6379, "Server port");
-ABSL_FLAG(uint16_t, pool_size, 0, "Number of threads");
 ABSL_FLAG(uint32_t, c, 20, "Number of connections per thread");
 ABSL_FLAG(uint32_t, qps, 20, "QPS schedule at which the generator sends requests to the server");
 ABSL_FLAG(uint32_t, n, 1000, "Number of requests to send per connection");
@@ -734,6 +733,8 @@ void Driver::ParseRESP() {
           LOG_EVERY_T(INFO, 1) << "Moved: " << slot_id << " to " << parts[1];
           // Slot is moved so update slots information for connecting shard only
           ClusterSpec shard = FetchCluster(socket_.get(), true);
+          // Returned cluster specification vector have only *one* entry (connecting shard)
+          // so it safe to access it and copy slot range information
           slots_ = shard[0].slots;
         }
         ++stats_.num_errors;
@@ -931,9 +932,8 @@ void WatchFiber(size_t num_shards, atomic_bool* finish_signal, ProactorPool* pp)
 int main(int argc, char* argv[]) {
   MainInitGuard guard(&argc, &argv);
 
-  std::size_t pool_size = GetFlag(FLAGS_pool_size);
   unique_ptr<ProactorPool> pp;
-  pp.reset(fb2::Pool::IOUring(256, pool_size));
+  pp.reset(fb2::Pool::IOUring(256));
   pp->Run();
   fb2::InitDnsResolver(2000);
 
