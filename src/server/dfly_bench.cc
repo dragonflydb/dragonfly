@@ -120,6 +120,9 @@ struct ShardInfo {
 
 using ClusterSpec = vector<ShardInfo>;
 
+// Execute `cluster nodes` and return configuration for each master node.
+// If `connection_shard_only` is set to `true` we are skipping nodes that do not have
+// flag set to `myself` - effectively returning only configuration for node we are connected to.
 ClusterSpec FetchCluster(FiberSocketBase* socket, bool connection_shard_only = false) {
   error_code ec = socket->Write(io::Buffer("cluster nodes\r\n"));
   CHECK(!ec);
