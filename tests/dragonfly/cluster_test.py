@@ -3000,14 +3000,10 @@ async def test_cluster_sharded_pubsub_shard_commands(df_factory: DflyInstanceFac
 
     await push_config(json.dumps(generate_config(nodes_info)), [node.client for node in nodes_info])
 
-    node_a = ClusterNode("localhost", nodes[0].port)
-    node_b = ClusterNode("localhost", nodes[1].port)
-
-    consumer_client = RedisCluster(startup_nodes=[node_a, node_b])
-    consumer = consumer_client.pubsub()
-
-    consumer.ssubscribe("pubsub-shard-channel")
-    consumer.ssubscribe("shard-channel")
+    # We are executing SSUBSCRIBE commands and wait for them to be sure that
+    # channels are created
+    message = await c_nodes[0].execute_command("SSUBSCRIBE pubsub-shard-channel")
+    message = await c_nodes[0].execute_command("SSUBSCRIBE shard-channel")
 
     message = await c_nodes[0].execute_command("PUBSUB SHARDCHANNELS")
     message.sort()
