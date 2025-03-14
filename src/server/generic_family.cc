@@ -587,7 +587,17 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
   }
 
   bool matches = !opts.type_filter || it->second.ObjType() == opts.type_filter;
-
+  if (opts.mask.has_value()) {
+    if (opts.mask == ScanOpts::Mask::Volatile) {
+      matches &= it->second.HasExpire();
+    } else if (opts.mask == ScanOpts::Mask::Permanent) {
+      matches &= !it->second.HasExpire();
+    } else if (opts.mask == ScanOpts::Mask::Accessed) {
+      matches &= it->first.WasTouched();
+    } else if (opts.mask == ScanOpts::Mask::Untouched) {
+      matches &= !it->first.WasTouched();
+    }
+  }
   if (!matches)
     return false;
 
@@ -1735,6 +1745,7 @@ void GenericFamily::Echo(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 // SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [BUCKET <bucket_id>]
+// [ATTR <mask>]
 void GenericFamily::Scan(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view token = ArgS(args, 0);
   uint64_t cursor = 0;
