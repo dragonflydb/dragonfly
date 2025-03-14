@@ -136,6 +136,10 @@ ProtocolClient::~ProtocolClient() {
 error_code ProtocolClient::ResolveHostDns() {
   char ip_addr[INET6_ADDRSTRLEN];
 
+  // IPv6 address can be enclosed in square brackets.
+  // https://www.rfc-editor.org/rfc/rfc2732#section-2
+  // We need to remove the brackets before resolving the DNS.
+  // Enclosed IPv6 addresses can't be resolved by the DNS resolver.
   std::string host = server_context_.host;
   if (!host.empty() && host.front() == '[' && host.back() == ']') {
     host = host.substr(1, host.size() - 2);
