@@ -157,9 +157,8 @@ class RdbRestoreValue : protected RdbLoaderBase {
     rdb_version_ = rdb_version;
   }
 
-  OpResult<DbSlice::AddOrFindResult> Add(string_view key, string_view payload,
-                                         const DbContext& cntx, const RestoreArgs& args,
-                                         DbSlice* db_slice);
+  OpResult<DbSlice::ItAndUpdater> Add(string_view key, string_view payload, const DbContext& cntx,
+                                      const RestoreArgs& args, DbSlice* db_slice);
 
  private:
   std::optional<OpaqueObj> Parse(io::Source* source);
@@ -190,10 +189,9 @@ std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(io::Source* sourc
   return std::optional<OpaqueObj>(std::move(obj));
 }
 
-OpResult<DbSlice::AddOrFindResult> RdbRestoreValue::Add(string_view key, string_view data,
-                                                        const DbContext& cntx,
-                                                        const RestoreArgs& args,
-                                                        DbSlice* db_slice) {
+OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_view data,
+                                                     const DbContext& cntx, const RestoreArgs& args,
+                                                     DbSlice* db_slice) {
   InMemSource data_src(data);
   PrimeValue pv;
   bool first_parse = true;
@@ -715,7 +713,7 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
 OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uint32_t ttl_sec,
                                      CmdArgList values) {
   auto& db_slice = op_args.GetDbSlice();
-  auto [it, expire_it, auto_updater] = db_slice.FindMutable(op_args.db_cntx, key);
+  auto [it, expire_it, auto_updater, is_new] = db_slice.FindMutable(op_args.db_cntx, key);
 
   if (!IsValid(it) || (it->second.ObjType() != OBJ_SET && it->second.ObjType() != OBJ_HASH)) {
     std::vector<long> res(values.size(), -2);

@@ -328,8 +328,8 @@ std::optional<JsonType> ShardJsonFromString(std::string_view input) {
   return dfly::JsonFromString(input, CompactObj::memory_resource());
 }
 
-OpResult<DbSlice::AddOrFindResult> SetJson(const OpArgs& op_args, string_view key,
-                                           string_view json_str) {
+OpResult<DbSlice::ItAndUpdater> SetJson(const OpArgs& op_args, string_view key,
+                                        string_view json_str) {
   auto& db_slice = op_args.GetDbSlice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
@@ -1330,7 +1330,7 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
     }
 
     JsonMemTracker mem_tracker;
-    OpResult<DbSlice::AddOrFindResult> st = SetJson(op_args, key, json_str);
+    auto st = SetJson(op_args, key, json_str);
     RETURN_ON_BAD_STATUS(st);
     mem_tracker.SetJsonSize(st->it->second, st->is_new);
     return true;

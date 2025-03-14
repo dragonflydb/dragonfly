@@ -326,7 +326,7 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
 OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
                           bool skip_notexist, facade::ArgRange vals, bool journal_rewrite) {
   EngineShard* es = op_args.shard;
-  DbSlice::AddOrFindResult res;
+  DbSlice::ItAndUpdater res;
 
   if (skip_notexist) {
     auto tmp_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_LIST);

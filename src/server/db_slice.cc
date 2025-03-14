@@ -479,14 +479,6 @@ DbSlice::AutoUpdater::AutoUpdater(const Fields& fields) : fields_(fields) {
   fields_.orig_heap_size = fields.it->second.MallocUsed();
 }
 
-DbSlice::AddOrFindResult& DbSlice::AddOrFindResult::operator=(ItAndUpdater&& o) {
-  it = o.it;
-  exp_it = o.exp_it;
-  is_new = false;
-  post_updater = std::move(o).post_updater;
-  return *this;
-}
-
 DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key) {
   return std::move(FindMutableInternal(cntx, key, std::nullopt).value());
 }
@@ -626,12 +618,11 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   return res;
 }
 
-OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFind(const Context& cntx, string_view key) {
+OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_view key) {
   return AddOrFindInternal(cntx, key);
 }
 
-OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cntx,
-                                                              string_view key) {
+OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, string_view key) {
   DCHECK(IsDbValid(cntx.db_index));
 
   DbTable& db = *db_arr_[cntx.db_index];
@@ -644,15 +635,15 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
 
     // PreUpdate() might have caused a deletion of `it`
     if (res->it.IsOccupied()) {
-      return DbSlice::AddOrFindResult{
+      return ItAndUpdater{
           .it = it,
           .exp_it = exp_it,
-          .is_new = false,
           .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
                                        .db_slice = this,
                                        .db_ind = cntx.db_index,
                                        .it = it,
-                                       .key = key})};
+                                       .key = key}),
+          .is_new = false};
     } else {
       res = OpStatus::KEY_NOTFOUND;
     }
@@ -760,15 +751,14 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
     db.slots_stats[sid].key_count += 1;
   }
 
-  return DbSlice::AddOrFindResult{
-      .it = Iterator(it, StringOrView::FromView(key)),
-      .exp_it = ExpIterator{},
-      .is_new = true,
-      .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
-                                   .db_slice = this,
-                                   .db_ind = cntx.db_index,
-                                   .it = Iterator(it, StringOrView::FromView(key)),
-                                   .key = key})};
+  return ItAndUpdater{.it = Iterator(it, StringOrView::FromView(key)),
+                      .exp_it = ExpIterator{},
+                      .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
+                                                   .db_slice = this,
+                                                   .db_ind = cntx.db_index,
+                                                   .it = Iterator(it, StringOrView::FromView(key)),
+                                                   .key = key}),
+                      .is_new = true};
 }
 
 void DbSlice::ActivateDb(DbIndex db_ind) {
@@ -1049,11 +1039,10 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   }
 }
 
-OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrUpdateInternal(const Context& cntx,
-                                                                std::string_view key,
-                                                                PrimeValue obj,
-                                                                uint64_t expire_at_ms,
-                                                                bool force_update) {
+OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx,
+                                                             std::string_view key, PrimeValue obj,
+                                                             uint64_t expire_at_ms,
+                                                             bool force_update) {
   DCHECK(!obj.IsRef());
 
   auto op_result = AddOrFind(cntx, key);
@@ -1084,8 +1073,8 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrUpdateInternal(const Context& c
   return op_result;
 }
 
-OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrUpdate(const Context& cntx, string_view key,
-                                                        PrimeValue obj, uint64_t expire_at_ms) {
+OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdate(const Context& cntx, string_view key,
+                                                     PrimeValue obj, uint64_t expire_at_ms) {
   return AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, true);
 }
 
@@ -1545,6 +1534,7 @@ void DbSlice::SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events) {
 }
 
 void DbSlice::QueueInvalidationTrackingMessageAtomic(std::string_view key) {
+  FiberAtomicGuard guard;
   auto it = client_tracking_map_.find(key);
   if (it == client_tracking_map_.end()) {
     return;
@@ -1649,10 +1639,6 @@ size_t DbSlice::StopSampleKeys(DbIndex db_ind) {
   db.dense_hll = nullptr;
 
   return count;
-}
-
-void DbSlice::PerformDeletion(PrimeIterator del_it, DbTable* table) {
-  return PerformDeletion(Iterator::FromPrime(del_it), table);
 }
 
 void DbSlice::PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable* table) {
