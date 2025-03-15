@@ -7,6 +7,7 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 
+#include "base/logging.h"
 #include "cluster_config.h"
 #include "facade/error.h"
 #include "slot_set.h"
@@ -73,4 +74,21 @@ facade::ErrorReply SlotOwnershipError(SlotId slot_id) {
   }
   return facade::ErrorReply{facade::OpStatus::OK};
 }
+
+std::string_view ToString(NodeHealth nh) {
+  switch (nh) {
+    case NodeHealth::FAIL:
+      return "fail";
+    case NodeHealth::LOADING:
+      return "loading";
+    case NodeHealth::ONLINE:
+      return "online";
+    case NodeHealth::HIDDEN:
+      DCHECK(false);  // shouldn't be used
+      return "hidden";
+  }
+  DCHECK(false);
+  return "undefined_health";
+}
+
 }  // namespace dfly::cluster

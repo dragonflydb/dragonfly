@@ -31,12 +31,12 @@ bool HasValidNodeIds(const ClusterShardInfos& new_config) {
 
   for (const auto& shard : new_config) {
     if (!CheckAndInsertNode(shard.master.id)) {
-      LOG(WARNING) << "Master " << shard.master.id << " appears more than once";
+      LOG(ERROR) << "Master " << shard.master.id << " appears more than once";
       return false;
     }
     for (const auto& replica : shard.replicas) {
       if (!CheckAndInsertNode(replica.id)) {
-        LOG(WARNING) << "Replica " << replica.id << " appears more than once";
+        LOG(ERROR) << "Replica " << replica.id << " appears more than once";
         return false;
       }
     }
@@ -56,21 +56,21 @@ bool IsConfigValid(const ClusterShardInfos& new_config) {
   for (const auto& shard : new_config) {
     for (const auto& slot_range : shard.slot_ranges) {
       if (slot_range.start > slot_range.end) {
-        LOG(WARNING) << "Invalid cluster config: start=" << slot_range.start
-                     << " is larger than end=" << slot_range.end;
+        LOG(ERROR) << "Invalid cluster config: start=" << slot_range.start
+                   << " is larger than end=" << slot_range.end;
         return false;
       }
 
       for (SlotId slot = slot_range.start; slot <= slot_range.end; ++slot) {
         if (slot >= slots_found.size()) {
-          LOG(WARNING) << "Invalid cluster config: slot=" << slot
-                       << " is bigger than allowed max=" << slots_found.size();
+          LOG(ERROR) << "Invalid cluster config: slot=" << slot
+                     << " is bigger than allowed max=" << slots_found.size();
           return false;
         }
 
         if (slots_found[slot]) {
-          LOG(WARNING) << "Invalid cluster config: slot=" << slot
-                       << " was already configured by another slot range.";
+          LOG(ERROR) << "Invalid cluster config: slot=" << slot
+                     << " was already configured by another slot range.";
           return false;
         }
 
@@ -80,7 +80,7 @@ bool IsConfigValid(const ClusterShardInfos& new_config) {
   }
 
   if (!all_of(slots_found.begin(), slots_found.end(), [](bool b) { return b; }) > 0UL) {
-    LOG(WARNING) << "Invalid cluster config: some slots were missing.";
+    LOG(ERROR) << "Invalid cluster config: some slots were missing.";
     return false;
   }
 
@@ -129,7 +129,7 @@ constexpr string_view kInvalidConfigPrefix = "Invalid JSON cluster config: "sv;
 
 template <typename T> optional<T> ReadNumeric(const JsonType& obj) {
   if (!obj.is_number()) {
-    LOG(WARNING) << kInvalidConfigPrefix << "object is not a number " << obj;
+    LOG(ERROR) << kInvalidConfigPrefix << "object is not a number " << obj;
     return nullopt;
   }
 
@@ -138,7 +138,7 @@ template <typename T> optional<T> ReadNumeric(const JsonType& obj) {
 
 optional<SlotRanges> GetClusterSlotRanges(const JsonType& slots) {
   if (!slots.is_array()) {
-    LOG(WARNING) << kInvalidConfigPrefix << "slot_ranges is not an array " << slots;
+    LOG(ERROR) << kInvalidConfigPrefix << "slot_ranges is not an array " << slots;
     return nullopt;
   }
 
@@ -146,7 +146,7 @@ optional<SlotRanges> GetClusterSlotRanges(const JsonType& slots) {
 
   for (const auto& range : slots.array_range()) {
     if (!range.is_object()) {
-      LOG(WARNING) << kInvalidConfigPrefix << "slot_ranges element is not an object " << range;
+      LOG(ERROR) << kInvalidConfigPrefix << "slot_ranges element is not an object " << range;
       return nullopt;
     }
 
@@ -164,7 +164,7 @@ optional<SlotRanges> GetClusterSlotRanges(const JsonType& slots) {
 
 optional<ClusterExtendedNodeInfo> ParseClusterNode(const JsonType& json) {
   if (!json.is_object()) {
-    LOG(WARNING) << kInvalidConfigPrefix << "node config is not an object " << json;
+    LOG(ERROR) << kInvalidConfigPrefix << "node config is not an object " << json;
     return nullopt;
   }
 
@@ -173,7 +173,7 @@ optional<ClusterExtendedNodeInfo> ParseClusterNode(const JsonType& json) {
   {
     auto id = json.at_or_null("id");
     if (!id.is_string()) {
-      LOG(WARNING) << kInvalidConfigPrefix << "invalid id for node " << json;
+      LOG(ERROR) << kInvalidConfigPrefix << "invalid id for node " << json;
       return nullopt;
     }
     node.id = std::move(id).as_string();
@@ -182,7 +182,7 @@ optional<ClusterExtendedNodeInfo> ParseClusterNode(const JsonType& json) {
   {
     auto ip = json.at_or_null("ip");
     if (!ip.is_string()) {
-      LOG(WARNING) << kInvalidConfigPrefix << "invalid ip for node " << json;
+      LOG(ERROR) << kInvalidConfigPrefix << "invalid ip for node " << json;
       return nullopt;
     }
     node.ip = std::move(ip).as_string();
@@ -200,7 +200,7 @@ optional<ClusterExtendedNodeInfo> ParseClusterNode(const JsonType& json) {
     auto health = json.at_or_null("health");
     if (!health.is_null()) {
       if (!health.is_string()) {
-        LOG(WARNING) << kInvalidConfigPrefix << "invalid health status for node " << json;
+        LOG(ERROR) << kInvalidConfigPrefix << "invalid health status for node " << json;
       } else {
         auto health_str = std::move(health).as_string();
         if (absl::EqualsIgnoreCase(health_str, "FAIL")) {
@@ -209,8 +209,10 @@ optional<ClusterExtendedNodeInfo> ParseClusterNode(const JsonType& json) {
           node.health = NodeHealth::LOADING;
         } else if (absl::EqualsIgnoreCase(health_str, "ONLINE")) {
           node.health = NodeHealth::ONLINE;
+        } else if (absl::EqualsIgnoreCase(health_str, "HIDDEN")) {
+          node.health = NodeHealth::HIDDEN;
         } else {
-          LOG(WARNING) << kInvalidConfigPrefix << "invalid health status for node: " << health_str;
+          LOG(ERROR) << kInvalidConfigPrefix << "invalid health status for node: " << health_str;
         }
       }
     }
@@ -237,7 +239,7 @@ optional<std::vector<MigrationInfo>> ParseMigrations(const JsonType& json) {
     auto slots = GetClusterSlotRanges(element.at_or_null("slot_ranges"));
 
     if (!node_id.is_string() || !ip.is_string() || !port || !slots) {
-      LOG(WARNING) << kInvalidConfigPrefix << "invalid migration json " << json;
+      LOG(ERROR) << kInvalidConfigPrefix << "invalid migration json " << json;
       return nullopt;
     }
 
@@ -253,7 +255,7 @@ optional<ClusterShardInfos> BuildClusterConfigFromJson(const JsonType& json) {
   std::vector<ClusterShardInfo> config;
 
   if (!json.is_array()) {
-    LOG(WARNING) << kInvalidConfigPrefix << "not an array " << json;
+    LOG(ERROR) << kInvalidConfigPrefix << "not an array " << json;
     return nullopt;
   }
 
@@ -261,7 +263,7 @@ optional<ClusterShardInfos> BuildClusterConfigFromJson(const JsonType& json) {
     ClusterShardInfo shard;
 
     if (!element.is_object()) {
-      LOG(WARNING) << kInvalidConfigPrefix << "shard element is not an object " << element;
+      LOG(ERROR) << kInvalidConfigPrefix << "shard element is not an object " << element;
       return nullopt;
     }
 
@@ -279,7 +281,7 @@ optional<ClusterShardInfos> BuildClusterConfigFromJson(const JsonType& json) {
 
     auto replicas = element.at_or_null("replicas");
     if (!replicas.is_array()) {
-      LOG(WARNING) << kInvalidConfigPrefix << "replicas is not an array " << replicas;
+      LOG(ERROR) << kInvalidConfigPrefix << "replicas is not an array " << replicas;
       return nullopt;
     }
 
@@ -309,7 +311,7 @@ shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
                                                           std::string_view json_str) {
   optional<JsonType> json_config = JsonFromString(json_str, PMR_NS::get_default_resource());
   if (!json_config.has_value()) {
-    LOG(WARNING) << "Can't parse JSON for ClusterConfig " << json_str;
+    LOG(ERROR) << "Can't parse JSON for ClusterConfig " << json_str;
     return nullptr;
   }
 
