@@ -998,9 +998,7 @@ bool ShouldDenyOnOOM(const CommandId* cid) {
     uint64_t start_ns = absl::GetCurrentTimeNanos();
     auto memory_stats = etl.GetMemoryUsage(start_ns);
 
-    if (memory_stats.used_mem > max_memory_limit ||
-        (etl.rss_oom_deny_ratio > 0 &&
-         memory_stats.rss_mem > (max_memory_limit * etl.rss_oom_deny_ratio))) {
+    if (memory_stats.used_mem > max_memory_limit) {
       DLOG(WARNING) << "Out of memory, used " << memory_stats.used_mem << " ,rss "
                     << memory_stats.rss_mem << " ,limit " << max_memory_limit;
       etl.stats.oom_error_cmd_cnt++;

@@ -816,7 +816,22 @@ Usage: dragonfly [FLAGS]
   // export MIMALLOC_VERBOSE=1 to see the options before the override.
   mi_option_enable(mi_option_show_errors);
   mi_option_set(mi_option_max_warnings, 0);
+
   mi_option_enable(mi_option_purge_decommits);
+  DCHECK(mi_option_get(mi_option_reset_decommits) == 1);
+
+  mi_option_set(mi_option_purge_delay, 0);
+  DCHECK(!mi_option_get(mi_option_reset_delay));
+
+  /*
+  mi_option_arena_eager_commit
+  MIMALLOC_PAGE_RESET=1
+  MIMALLOC_RESET_DECOMMITS=1
+  MIMALLOC_ABANDONED_PAGE_RESET=1
+  MIMALLOC_RESET_DELAY=1
+
+  MIMALLOC_ARENA_EAGER_COMMIT=0
+  */
 
   fb2::SetDefaultStackResource(&fb2::std_malloc_resource, kFiberDefaultStackSize);
 
