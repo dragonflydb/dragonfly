@@ -128,7 +128,7 @@ class ClusterShardMigration {
       return;
     }
     if (!tx_data.IsGlobalCmd()) {
-      executor_.Execute(tx_data.dbid, tx_data.command);
+      // executor_.Execute(tx_data.dbid, tx_data.command);
     } else {
       // TODO check which global commands should be supported
       std::string error =
