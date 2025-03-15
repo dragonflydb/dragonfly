@@ -6,6 +6,7 @@ extern "C" {
 #include "redis/crc16.h"
 }
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/random/random.h>
 #include <absl/strings/match.h>
@@ -118,6 +119,91 @@ struct ShardInfo {
 };
 
 using ClusterSpec = vector<ShardInfo>;
+
+// Execute `cluster nodes` and return configuration for each master node.
+// If `connection_shard_only` is set to `true` we are skipping nodes that do not have
+// flag set to `myself` - effectively returning only configuration for node we are connected to.
+ClusterSpec FetchCluster(FiberSocketBase* socket, bool connection_shard_only) {
+  error_code ec = socket->Write(io::Buffer("cluster nodes\r\n"));
+  CHECK(!ec);
+  facade::RedisParser parser{RedisParser::CLIENT, 1024};
+  uint8_t buf[1024];
+  RespVec resp_vec;
+  while (true) {
+    io::Result<size_t> res = socket->Recv(buf);
+    CHECK(res) << res.error().message();
+    RespExpr::Buffer bytes(buf, *res);
+    uint32_t consumed = 0;
+    facade::RedisParser::Result result = parser.Parse(bytes, &consumed, &resp_vec);
+    if (result == facade::RedisParser::OK) {
+      break;
+    }
+    CHECK_EQ(result, facade::RedisParser::INPUT_PENDING);
+  }
+  CHECK_EQ(1u, resp_vec.size());
+  if (resp_vec.front().type == RespExpr::ERROR) {
+    LOG(INFO) << "Cluster command failed " << resp_vec.front().GetString();
+    return {};
+  }
+  string cluster_spec = resp_vec.front().GetString();
+  LOG(INFO) << "Cluster spec: " << cluster_spec;
+  vector<string_view> lines = absl::StrSplit(cluster_spec, '\n', absl::SkipEmpty());
+  ClusterSpec res;
+  for (string_view line : lines) {
+    vector<string_view> parts = absl::StrSplit(line, ' ');
+    // <id> <ip:port@cport[,hostname]> <flags> <master> <ping-sent> <pong-recv>
+    // <config-epoch> <link-state> <slot> <slot> ... <slot>
+    if (parts.size() < 9) {
+      LOG(WARNING) << "Skipping line: " << line;
+      continue;
+    }
+
+    ShardInfo shard;
+
+    string_view flags = parts[2];
+    absl::flat_hash_set<string_view> flags_set(absl::StrSplit(flags, ','));
+    if (!flags_set.contains("master")) {
+      LOG(INFO) << "Skipping non-master node " << shard.endpoint << " " << flags;
+      continue;
+    } else if (!flags_set.contains("myself") && connection_shard_only) {
+      LOG(INFO) << "Skipping non connecting shard node " << shard.endpoint << " " << flags;
+      continue;
+    }
+
+    vector<string_view> addr_parts = absl::StrSplit(parts[1], ':');
+    CHECK_EQ(2u, addr_parts.size());
+    string host(addr_parts[0]);
+    char ip_addr[INET6_ADDRSTRLEN];
+    std::error_code ec = fb2::DnsResolve(host, ip_addr);
+    CHECK(!ec) << "Could not resolve " << host << " " << ec;
+    auto address = ::boost::asio::ip::make_address(ip_addr);
+
+    uint32_t val;
+    vector<string_view> port_parts = absl::StrSplit(addr_parts[1], '@');
+    CHECK_EQ(2u, port_parts.size());
+    CHECK(absl::SimpleAtoi(port_parts[0], &val));
+    CHECK_LT(val, 65536u);
+
+    shard.endpoint = tcp::endpoint(address, val);
+
+    for (size_t i = 8; i < parts.size(); ++i) {
+      vector<string_view> slots = absl::StrSplit(parts[i], '-');
+      if (!absl::SimpleAtoi(slots[0], &val) || val >= kNumSlots) {
+        LOG(ERROR) << "Invalid slot definition " << parts[i];
+        continue;
+      }
+      SlotRange slot_range{uint16_t(val), uint16_t(val)};
+      if (slots.size() > 1) {
+        CHECK(absl::SimpleAtoi(slots[1], &val));
+        slot_range.second = val;
+      }
+      shard.slots.push_back(slot_range);
+    }
+    res.push_back(shard);
+  }
+
+  return res;
+}
 
 class KeyGenerator {
  public:
@@ -647,9 +733,12 @@ void Driver::ParseRESP() {
           CHECK(absl::SimpleAtoi(parts[0], &slot_id));
           vector<string_view> host_port = absl::StrSplit(parts[1], ':');
           CHECK_EQ(host_port.size(), 2u);
-
-          // TODO: to support slot migration.
           LOG_EVERY_T(INFO, 1) << "Moved: " << slot_id << " to " << parts[1];
+          // Slot is moved so update slots information for connecting shard only
+          ClusterSpec shard = FetchCluster(socket_.get(), true);
+          // Returned cluster specification vector have only *one* entry (connecting shard)
+          // so it safe to access it and copy slot range information
+          slots_ = shard[0].slots;
         }
         ++stats_.num_errors;
       } else if (reqs_.front().might_hit && parse_args[0].type != RespExpr::NIL) {
@@ -724,7 +813,7 @@ void TLocalClient::Connect(tcp::endpoint ep, const ClusterSpec& cluster) {
       slots = cluster[shard].slots;
       shard_ep = cluster[shard].endpoint;
     }
-    fbs[i] = MakeFiber([&, shard_ep, i, slots = move(slots)] {
+    fbs[i] = MakeFiber([&, shard_ep, i, slots = std::move(slots)] {
       ThisFiber::SetName(StrCat("connect/", i));
       drivers_[i]->Connect(i, shard_ep, slots);
     });
@@ -843,87 +932,6 @@ void WatchFiber(size_t num_shards, atomic_bool* finish_signal, ProactorPool* pp)
   }
 }
 
-ClusterSpec FetchCluster(const tcp::endpoint& ep, ProactorBase* proactor) {
-  unique_ptr<FiberSocketBase> socket(proactor->CreateSocket());
-  error_code ec = socket->Connect(ep);
-  CHECK(!ec) << "Could not connect to " << ep << " " << ec;
-  ec = socket->Write(io::Buffer("cluster nodes\r\n"));
-  CHECK(!ec);
-  facade::RedisParser parser{RedisParser::CLIENT, 1024};
-  uint8_t buf[1024];
-  RespVec resp_vec;
-  while (true) {
-    io::Result<size_t> res = socket->Recv(buf);
-    CHECK(res) << res.error().message();
-    RespExpr::Buffer bytes(buf, *res);
-    uint32_t consumed = 0;
-    facade::RedisParser::Result result = parser.Parse(bytes, &consumed, &resp_vec);
-    if (result == facade::RedisParser::OK) {
-      break;
-    }
-    CHECK_EQ(result, facade::RedisParser::INPUT_PENDING);
-  }
-  CHECK_EQ(1u, resp_vec.size());
-  std::ignore = socket->Close();
-  if (resp_vec.front().type == RespExpr::ERROR) {
-    LOG(INFO) << "Cluster command failed " << resp_vec.front().GetString();
-    return {};
-  }
-  string cluster_spec = resp_vec.front().GetString();
-  LOG(INFO) << "Cluster spec: " << cluster_spec;
-  vector<string_view> lines = absl::StrSplit(cluster_spec, '\n', absl::SkipEmpty());
-  ClusterSpec res;
-  for (string_view line : lines) {
-    vector<string_view> parts = absl::StrSplit(line, ' ');
-    // <id> <ip:port@cport[,hostname]> <flags> <master> <ping-sent> <pong-recv>
-    // <config-epoch> <link-state> <slot> <slot> ... <slot>
-    if (parts.size() < 9) {
-      LOG(WARNING) << "Skipping line: " << line;
-      continue;
-    }
-    ShardInfo shard;
-    vector<string_view> addr_parts = absl::StrSplit(parts[1], ':');
-    CHECK_EQ(2u, addr_parts.size());
-    string host(addr_parts[0]);
-    char ip_addr[INET6_ADDRSTRLEN];
-    std::error_code ec = fb2::DnsResolve(host, ip_addr);
-    CHECK(!ec) << "Could not resolve " << host << " " << ec;
-    auto address = ::boost::asio::ip::make_address(ip_addr);
-
-    uint32_t val;
-    vector<string_view> port_parts = absl::StrSplit(addr_parts[1], '@');
-    CHECK_EQ(2u, port_parts.size());
-    CHECK(absl::SimpleAtoi(port_parts[0], &val));
-    CHECK_LT(val, 65536u);
-
-    shard.endpoint = tcp::endpoint(address, val);
-
-    string_view flags = parts[2];
-    absl::flat_hash_set<string_view> flags_set(absl::StrSplit(flags, ','));
-    if (!flags_set.contains("master")) {
-      LOG(INFO) << "Skipping non-master node " << shard.endpoint << " " << flags;
-      continue;
-    }
-
-    for (size_t i = 8; i < parts.size(); ++i) {
-      vector<string_view> slots = absl::StrSplit(parts[i], '-');
-      if (!absl::SimpleAtoi(slots[0], &val) || val >= kNumSlots) {
-        LOG(ERROR) << "Invalid slot definition " << parts[i];
-        continue;
-      }
-      SlotRange slot_range{uint16_t(val), uint16_t(val)};
-      if (slots.size() > 1) {
-        CHECK(absl::SimpleAtoi(slots[1], &val));
-        slot_range.second = val;
-      }
-      shard.slots.push_back(slot_range);
-    }
-    res.push_back(shard);
-  }
-
-  return res;
-}
-
 int main(int argc, char* argv[]) {
   MainInitGuard guard(&argc, &argv);
 
@@ -966,7 +974,14 @@ int main(int argc, char* argv[]) {
 
   ClusterSpec shards;
   if (protocol == RESP) {
-    shards = proactor->Await([&] { return FetchCluster(ep, proactor); });
+    shards = proactor->Await([&] {
+      unique_ptr<FiberSocketBase> socket(proactor->CreateSocket());
+      absl::Cleanup socket_close([&] { std::ignore = socket->Close(); });
+      error_code ec = socket->Connect(ep);
+      CHECK(!ec) << "Could not connect to " << ep << " " << ec;
+      // Initial request so fetch all cluster nodes
+      return FetchCluster(socket.get(), false);
+    });
   }
   LOG(INFO) << "Connecting threads to "
             << (shards.empty() ? string("single node ")
