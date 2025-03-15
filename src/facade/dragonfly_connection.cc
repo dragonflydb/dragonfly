@@ -668,8 +668,6 @@ void Connection::OnShutdown() {
 }
 
 void Connection::OnPreMigrateThread() {
-  DVLOG(1) << "OnPreMigrateThread " << GetClientId();
-
   CHECK(!cc_->conn_closing);
 
   DCHECK(!migration_in_process_);
@@ -683,14 +681,16 @@ void Connection::OnPreMigrateThread() {
 }
 
 void Connection::OnPostMigrateThread() {
-  DVLOG(1) << "[" << id_ << "] OnPostMigrateThread";
+  VLOG(1) << "[" << id_ << "] OnPostMigrateThread: "
+          << " " << cc_->replica_conn << " " << fb2::detail::FiberActive();
 
   // Once we migrated, we should rearm OnBreakCb callback.
   if (breaker_cb_ && socket()->IsOpen()) {
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
   }
+
   migration_in_process_ = false;
-  DCHECK(!async_fb_.IsJoinable());
+  CHECK(!async_fb_.IsJoinable());
 
   // If someone had sent Async during the migration, we must create async_fb_.
   if (!dispatch_q_.empty()) {
@@ -1102,6 +1102,8 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
     LOG_EVERY_T(WARNING, 10) << "Pipeline buffer over limit: pipeline_bytes "
                              << stats_->dispatch_queue_bytes << " queue_size " << dispatch_q_.size()
                              << ", consider increasing pipeline_buffer_limit/pipeline_queue_limit";
+    CHECK(async_fb_.IsJoinable());
+    CHECK(async_fb_.IsLocal());
     fb2::NoOpLock noop;
     qbp.pipeline_cnd.wait(noop, [this, &qbp] {
       bool over_limits =
