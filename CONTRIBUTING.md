@@ -104,6 +104,14 @@ The Dragonfly DB team has agreed to systematically use several pre-commit hooks 
 normalize the formatting of code. You need to install and enable pre-commit to have these used
 when you do your commits.
 
+## Optional: Special handling for files in .gitignore
+
+Most developers won't need any special setup as the configuration files (like `.vscode/launch.json` and other VSCode configuration files) are already included in `.gitignore`.
+
+However, if you encounter problems with tracking these files or if your git client behaves unexpectedly with these files, we provide an alternative solution. This solution uses Git's `assume-unchanged` feature to handle files that need local configuration but should remain in the repository as templates.
+
+If you need this alternative approach, please refer to [SETUP_GIT_IGNORE_LOCAL.md](./tools/local/SETUP_GIT_IGNORE_LOCAL.md) for detailed instructions.
+
 ## Codebase guidelines
 
 This repo conforms to the Google's C++ Style Guide. Keep in mind we use an older version of the

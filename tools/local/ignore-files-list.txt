@@ -1,0 +1,7 @@
+# List of files to be processed by setup-git-ignore-local.sh
+# Each line should contain a path to a file relative to the repository root
+# Empty lines and lines starting with # are ignored
+
+.vscode/launch.json
+.vscode/settings.json
+# You can add other files here as needed
