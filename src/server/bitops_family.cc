@@ -261,7 +261,7 @@ class ElementAccess {
   EngineShard* shard_ = nullptr;
   mutable DbSlice::AutoUpdater post_updater_;
 
-  void SetFields(EngineShard* shard, DbSlice::AddOrFindResult res);
+  void SetFields(EngineShard* shard, DbSlice::ItAndUpdater res);
 
  public:
   ElementAccess(string_view key, const OpArgs& args) : key_{key}, context_{args.db_cntx} {
@@ -298,7 +298,7 @@ std::optional<bool> ElementAccess::Exists(EngineShard* shard) {
   return res.status() != OpStatus::KEY_NOTFOUND;
 }
 
-void ElementAccess::SetFields(EngineShard* shard, DbSlice::AddOrFindResult res) {
+void ElementAccess::SetFields(EngineShard* shard, DbSlice::ItAndUpdater res) {
   element_iter_ = res.it;
   added_ = res.is_new;
   shard_ = shard;

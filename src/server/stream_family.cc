@@ -673,7 +673,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
 
   auto& db_slice = op_args.GetDbSlice();
 
-  DbSlice::AddOrFindResult add_res;
+  DbSlice::ItAndUpdater add_res;
   if (opts.no_mkstream) {
     auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
     RETURN_ON_BAD_STATUS(res_it);

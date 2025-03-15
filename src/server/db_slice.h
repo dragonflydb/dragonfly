@@ -285,10 +285,7 @@ class DbSlice {
     Iterator it;
     ExpIterator exp_it;
     AutoUpdater post_updater;
-
-    bool IsValid() const {
-      return !it.is_done();
-    }
+    bool is_new = false;
   };
 
   ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
@@ -304,20 +301,11 @@ class DbSlice {
   OpResult<ConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
                                        unsigned req_obj_type) const;
 
-  struct AddOrFindResult {
-    Iterator it;
-    ExpIterator exp_it;
-    bool is_new = false;
-    AutoUpdater post_updater;
-
-    AddOrFindResult& operator=(ItAndUpdater&& o);
-  };
-
-  OpResult<AddOrFindResult> AddOrFind(const Context& cntx, std::string_view key);
+  OpResult<ItAndUpdater> AddOrFind(const Context& cntx, std::string_view key);
 
   // Same as AddOrSkip, but overwrites in case entry exists.
-  OpResult<AddOrFindResult> AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
-                                        uint64_t expire_at_ms);
+  OpResult<ItAndUpdater> AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
+                                     uint64_t expire_at_ms);
 
   // Adds a new entry. Requires: key does not exist in this slice.
   // Returns the iterator to the newly added entry.
@@ -552,9 +540,9 @@ class DbSlice {
 
   bool DelEmptyPrimeValue(const Context& cntx, Iterator it);
 
-  OpResult<AddOrFindResult> AddOrUpdateInternal(const Context& cntx, std::string_view key,
-                                                PrimeValue obj, uint64_t expire_at_ms,
-                                                bool force_update);
+  OpResult<ItAndUpdater> AddOrUpdateInternal(const Context& cntx, std::string_view key,
+                                             PrimeValue obj, uint64_t expire_at_ms,
+                                             bool force_update);
 
   void FlushSlotsFb(const cluster::SlotSet& slot_ids);
   void FlushDbIndexes(const std::vector<DbIndex>& indexes);
@@ -568,9 +556,7 @@ class DbSlice {
   // Clear tiered storage entries for the specified indices.
   void ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbTableArray& db_arr);
 
-  //
   void PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable* table);
-  void PerformDeletion(PrimeIterator del_it, DbTable* table);
 
   // Queues invalidation message to the clients that are tracking the change to a key.
   void QueueInvalidationTrackingMessageAtomic(std::string_view key);
@@ -590,7 +576,7 @@ class DbSlice {
 
   PrimeItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
 
-  OpResult<AddOrFindResult> AddOrFindInternal(const Context& cntx, std::string_view key);
+  OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key);
 
   OpResult<PrimeItAndExp> FindInternal(const Context& cntx, std::string_view key,
                                        std::optional<unsigned> req_obj_type,
