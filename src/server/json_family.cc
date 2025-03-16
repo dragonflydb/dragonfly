@@ -339,6 +339,7 @@ OpResult<DbSlice::ItAndUpdater> SetJson(const OpArgs& op_args, string_view key,
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, res.it->second);
 
+  JsonMemTracker tracker;
   std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
@@ -354,6 +355,9 @@ OpResult<DbSlice::ItAndUpdater> SetJson(const OpArgs& op_args, string_view key,
   } else {
     res.it->second.SetJson(std::move(*parsed_json));
   }
+
+  tracker.SetJsonSize(res.it->second, res.is_new);
+
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, res.it->second);
   return std::move(res);
 }
@@ -1329,10 +1333,8 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
       }
     }
 
-    JsonMemTracker mem_tracker;
     auto st = SetJson(op_args, key, json_str);
     RETURN_ON_BAD_STATUS(st);
-    mem_tracker.SetJsonSize(st->it->second, st->is_new);
     return true;
   }
 

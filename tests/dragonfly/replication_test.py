@@ -2951,3 +2951,35 @@ async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFa
         await wait_for_replicas_state(*c_replicas)
 
     await fill_task
+
+
+async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
+    """
+    This test reproduces a bug in the JSON memory tracking.
+    """
+    master = df_factory.create(proactor_threads=2, serialization_max_chunk_size=1)
+    replicas = [df_factory.create(proactor_threads=2) for i in range(2)]
+
+    # Start instances and connect clients
+    df_factory.start_all([master] + replicas)
+    c_master = master.client()
+    c_replicas = [replica.client() for replica in replicas]
+
+    total = 100000
+    await c_master.execute_command(f"DEBUG POPULATE {total} tmp 1000 TYPE SET ELEMENTS 100")
+
+    thresehold = 25000
+    for i in range(thresehold):
+        rand = random.randint(1, 4)
+        await c_master.execute_command(f"EXPIRE tmp:{i} {rand} NX")
+
+    seeder = StaticSeeder(key_target=100_000)
+    fill_task = asyncio.create_task(seeder.run(master.client()))
+
+    for replica in c_replicas:
+        await replica.execute_command(f"REPLICAOF LOCALHOST {master.port}")
+
+    async with async_timeout.timeout(240):
+        await wait_for_replicas_state(*c_replicas)
+
+    await fill_task
