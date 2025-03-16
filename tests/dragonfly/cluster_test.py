@@ -2753,6 +2753,10 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
     await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
 
+    with pytest.raises(aioredis.ResponseError) as e_info:
+        await nodes[0].client.get("x")
+    assert f"MOVED 16287 127.0.0.1:{instances[1].port}" == str(e_info.value)
+
     nodes[0].migrations = []
     nodes[0].slots = []
     nodes[1].slots = [(0, 16383)]
