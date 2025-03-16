@@ -98,7 +98,7 @@ enum class NodeHealth : std::uint8_t { FAIL, LOADING, ONLINE, HIDDEN };
 std::string_view ToString(NodeHealth nh);
 
 struct ClusterExtendedNodeInfo : ClusterNodeInfo {
-  NodeHealth health = NodeHealth::FAIL;
+  NodeHealth health = NodeHealth::ONLINE;
 };
 
 struct MigrationInfo {

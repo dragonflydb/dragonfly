@@ -307,7 +307,7 @@ void ClusterNodesImpl(const ClusterShardInfos& config, string_view my_id,
 
   string result;
 
-  auto WriteNode = [&](const ClusterNodeInfo& node, string_view role, string_view master_id,
+  auto WriteNode = [&](const ClusterExtendedNodeInfo& node, string_view role, string_view master_id,
                        const SlotRanges& ranges) {
     absl::StrAppend(&result, node.id, " ");
 
@@ -320,7 +320,8 @@ void ClusterNodesImpl(const ClusterShardInfos& config, string_view my_id,
 
     absl::StrAppend(&result, master_id, " ");
 
-    absl::StrAppend(&result, "0 0 0 connected");
+    absl::StrAppend(&result,
+                    node.health != NodeHealth::FAIL ? "0 0 0 connected" : "0 0 0 disconnected");
 
     for (const auto& range : ranges) {
       absl::StrAppend(&result, " ", range.start);

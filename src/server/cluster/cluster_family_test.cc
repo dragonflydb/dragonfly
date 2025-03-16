@@ -432,12 +432,12 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
                                             "qwerty1")))))));
 
   EXPECT_THAT(Run({"cluster", "nodes"}),
-              "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-10000\n"
+              "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 disconnected 0-10000\n"
               "wxyz 10.0.0.10:8000@8000 slave abcd1234 0 0 0 connected\n"
               "efgh7890 10.0.0.2:7001@7001 master - 0 0 0 connected 10001-16383\n"
               "qwerty 10.0.0.11:8001@8001 slave efgh7890 0 0 0 connected\n"
               "qwerty1 10.0.0.12:8002@8002 slave efgh7890 0 0 0 connected\n"
-              "qwerty2 10.0.0.13:8003@8003 slave efgh7890 0 0 0 connected\n");
+              "qwerty2 10.0.0.13:8003@8003 slave efgh7890 0 0 0 disconnected\n");
 
   absl::InsecureBitGen eng;
   while (true) {
