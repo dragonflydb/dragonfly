@@ -582,6 +582,8 @@ TEST_F(RdbTest, LoadHugeSet) {
 
   ASSERT_EQ(100000, CheckedInt({"scard", "test:0"}));
   ASSERT_EQ(100000, CheckedInt({"scard", "test:1"}));
+  auto metrics = GetMetrics();
+  EXPECT_GT(metrics.db_stats[0].obj_memory_usage, 24'000'000u);
 }
 
 // Tests loading a huge hmap, where the map is loaded in multiple partial
@@ -602,6 +604,8 @@ TEST_F(RdbTest, LoadHugeHMap) {
 
   ASSERT_EQ(100000, CheckedInt({"hlen", "test:0"}));
   ASSERT_EQ(100000, CheckedInt({"hlen", "test:1"}));
+  auto metrics = GetMetrics();
+  EXPECT_GT(metrics.db_stats[0].obj_memory_usage, 29'000'000u);
 }
 
 // Tests loading a huge zset, where the zset is loaded in multiple partial
@@ -622,6 +626,8 @@ TEST_F(RdbTest, LoadHugeZSet) {
 
   ASSERT_EQ(100000, CheckedInt({"zcard", "test:0"}));
   ASSERT_EQ(100000, CheckedInt({"zcard", "test:1"}));
+  auto metrics = GetMetrics();
+  EXPECT_GT(metrics.db_stats[0].obj_memory_usage, 26'000'000u);
 }
 
 // Tests loading a huge list, where the list is loaded in multiple partial
@@ -642,6 +648,8 @@ TEST_F(RdbTest, LoadHugeList) {
 
   ASSERT_EQ(100000, CheckedInt({"llen", "test:0"}));
   ASSERT_EQ(100000, CheckedInt({"llen", "test:1"}));
+  auto metrics = GetMetrics();
+  EXPECT_GT(metrics.db_stats[0].obj_memory_usage, 20'000'000u);
 }
 
 // Tests loading a huge stream, where the stream is loaded in multiple partial

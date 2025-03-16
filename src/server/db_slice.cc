@@ -62,6 +62,9 @@ static_assert(kExpireSegmentSize == 23528);
 
 void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* db) {
   DCHECK_NE(db, nullptr);
+  if (size == 0)
+    return;
+
   DbTableStats& stats = db->stats;
   DCHECK_GE(static_cast<int64_t>(stats.obj_memory_usage) + size, 0)
       << "Can't decrease " << size << " from " << stats.obj_memory_usage;
@@ -500,6 +503,8 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
   PreUpdateBlocking(cntx.db_index, it, key);
   // PreUpdate() might have caused a deletion of `it`
   if (res->it.IsOccupied()) {
+    DCHECK_GE(db_arr_[cntx.db_index]->stats.obj_memory_usage, res->it->second.MallocUsed());
+
     return {{it, exp_it,
              AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
                           .db_slice = this,
