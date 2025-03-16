@@ -95,11 +95,17 @@ std::error_code OpManager::Stash(EntryId id_ref, std::string_view value) {
     ProcessStashed(Borrowed(id), version, segment);
   };
 
-  // May block due to blocking call to Grow.
-  auto ec = storage_.Stash(buf_view, std::move(io_cb));
-  if (ec)
-    pending_stash_ver_.erase(ToOwned(id_ref));
-  return ec;
+  while (true) {
+    size_t res = storage_.StashAsync(buf_view, std::move(io_cb));
+    if (res == 0)
+      break;
+
+    if (auto ec = storage_.Grow(res); ec) {
+      pending_stash_ver_.erase(ToOwned(id_ref));
+      return ec;
+    }
+  }
+  return {};
 }
 
 OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {

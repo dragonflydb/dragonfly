@@ -42,18 +42,24 @@ class DiskStorage {
   // Mark segment as free, performed immediately
   void MarkAsFree(DiskSegment segment);
 
-  // Request bytes to be stored, cb will be called with assigned segment on completion. Can block to
-  // grow backing file. Returns error code if operation failed  immediately (most likely it failed
-  // to grow the backing file) or passes an empty segment if the final write operation failed.
-  // Bytes are copied and can be dropped before cb is resolved
-  std::error_code Stash(io::Bytes bytes, StashCb cb);
+  // Request 'bytes' to be stored, Returns 0 if stash operation was successfully scheduled
+  // and in that case cb will be called with assigned segment on completion.
+  // Otherwise, returns number of bytes to Grow in case the backing file has no space
+  // to store the bytes. In that case cb will not be called. It is possible to call Grow method
+  // and retry the StashAsync operation.
+  // If the operation is scheduled, 'bytes' are copied and can be discarded before cb is resolved.
+  // StashCb&& cb is temporary, so it won't be moved from in case StashAsync fails
+  // (returns non-zero).
+  size_t StashAsync(io::Bytes bytes, StashCb&& cb);
 
   Stats GetStats() const;
+
+  std::error_code Grow(size_t grow_size);
 
  private:
   bool CanGrow() const;
 
-  std::error_code Grow(off_t grow_size);
+  void GrowAsync(off_t grow_size);
 
   // Returns a buffer with size greater or equal to len.
   util::fb2::UringBuf PrepareBuf(size_t len);
@@ -65,6 +71,8 @@ class DiskStorage {
   uint64_t heap_buf_alloc_cnt_ = 0, reg_buf_alloc_cnt_ = 0;
 
   bool grow_pending_ = false;
+  std::error_code grow_err_;
+  util::fb2::CondVarAny grow_cv_;
   std::unique_ptr<util::fb2::LinuxFile> backing_file_;
 
   ExternalAllocator alloc_;

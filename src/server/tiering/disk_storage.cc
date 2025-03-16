@@ -79,7 +79,7 @@ error_code DiskStorage::Open(string_view path) {
     return res.error();
   backing_file_ = std::move(res.value());
 
-  int fd = backing_file_->fd();
+  int fd = backing_file_->GetFd();
   RETURN_ON_ERR(DoFiberCall(&SubmitEntry::PrepFallocate, fd, 0, 0L, kInitialSize));
   RETURN_ON_ERR(DoFiberCall(&SubmitEntry::PrepFadvise, fd, 0L, 0L, POSIX_FADV_RANDOM));
 
@@ -136,7 +136,7 @@ void DiskStorage::MarkAsFree(DiskSegment segment) {
   alloc_.Free(segment.offset, segment.length);
 }
 
-std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
+size_t DiskStorage::StashAsync(io::Bytes bytes, StashCb&& cb) {
   DCHECK_GT(bytes.length(), 0u);
 
   size_t len = bytes.size();
@@ -144,22 +144,13 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
 
   // If we've run out of space, block and grow as much as needed
   if (offset < 0) {
-    if (CanGrow()) {
-      // TODO: To introduce asynchronous call that starts resizing before we reach this step.
-      // Right now we do it synchronously as well (see Grow(256MB) call.)
-      RETURN_ON_ERR(Grow(-offset));
-    } else {
-      return make_error_code(errc::file_too_large);
-    }
-    offset = alloc_.Malloc(len);
-    if (offset < 0)  // we can't fit it even after resizing
-      return make_error_code(errc::file_too_large);
+    return -offset;
   }
 
   UringBuf buf = PrepareBuf(len);
   memcpy(buf.bytes.data(), bytes.data(), bytes.length());
 
-  auto io_cb = [this, cb, offset, buf, len](int io_res) {
+  auto io_cb = [this, cb = std::move(cb), offset, buf, len](int io_res) {
     if (io_res < 0) {
       MarkAsFree({size_t(offset), len});
       cb(nonstd::make_unexpected(error_code{-io_res, std::system_category()}));
@@ -180,11 +171,10 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
   size_t capacity = alloc_.capacity();
   size_t available = capacity - alloc_.allocated_bytes();
   if ((available < 256_MB) && (available < capacity * 0.15) && !grow_pending_ && CanGrow()) {
-    auto ec = Grow(256_MB);
-    LOG_IF(ERROR, ec) << "Could not call grow :" << ec.message();
-    return ec;
+    GrowAsync(256_MB);
   }
-  return {};
+
+  return 0;
 }
 
 DiskStorage::Stats DiskStorage::GetStats() const {
@@ -193,27 +183,47 @@ DiskStorage::Stats DiskStorage::GetStats() const {
       static_cast<size_t>(max_size_), pending_ops_};
 }
 
+error_code DiskStorage::Grow(size_t grow_size) {
+  // Need to grow if not yet in progress.
+  if (!CanGrow())
+    return make_error_code(std::errc::file_too_large);
+
+  if (!grow_pending_) {
+    GrowAsync(grow_size);
+  }
+  util::fb2::NoOpLock lock;
+  grow_cv_.wait(lock);
+  return grow_err_;
+}
+
 bool DiskStorage::CanGrow() const {
   return alloc_.capacity() + ExternalAllocator::kExtAlignment <= static_cast<size_t>(max_size_);
 }
 
-error_code DiskStorage::Grow(off_t grow_size) {
+void DiskStorage::GrowAsync(off_t grow_size) {
   DCHECK(CanGrow());
 
   if (std::exchange(grow_pending_, true)) {
-    // TODO: to introduce future like semantics where multiple flows can block on the
-    // ongoing Grow operation.
-    LOG(WARNING) << "Concurrent grow request detected from size " << alloc_.capacity();
-    return make_error_code(errc::operation_in_progress);
+    // We do not allow this to happen, as it would cause deadlock because cb is not called.
+    // Another option to call cb with errc::operation_in_progress.
+    LOG(FATAL) << "Can not call GrowAsync while another grow is in progress";
+    return;
   }
-  off_t end = alloc_.capacity();
-  auto err = DoFiberCall(&SubmitEntry::PrepFallocate, backing_file_->fd(), 0, end, grow_size);
-  grow_pending_ = false;
-  RETURN_ON_ERR(err);
 
-  alloc_.AddStorage(end, grow_size);
+  auto entry_cb = [this, grow_size](auto*, UringProactor::IoResult res, uint32_t, uint32_t) {
+    this->grow_pending_ = false;
+    grow_err_ = error_code{-res, system_category()};
+    if (res < 0) {
+      LOG(ERROR) << "Could not grow :" << grow_err_.message();
+    } else {
+      alloc_.AddStorage(alloc_.capacity(), grow_size);
+    }
+    grow_cv_.notify_all();
+  };
 
-  return {};
+  auto* proactor = static_cast<UringProactor*>(ProactorBase::me());
+  SubmitEntry se = proactor->GetSubmitEntry(std::move(entry_cb));
+  se.PrepFallocate(backing_file_->GetFd(), 0, alloc_.capacity(), grow_size);
 }
 
 UringBuf DiskStorage::PrepareBuf(size_t size) {

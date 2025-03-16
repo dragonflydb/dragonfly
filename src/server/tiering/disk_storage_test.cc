@@ -37,12 +37,20 @@ struct DiskStorageTest : public PoolTestBase {
   void Stash(size_t index, string value) {
     pending_ops_++;
     auto buf = make_shared<string>(value);
-    storage_->Stash(io::Buffer(*buf), [this, index, buf](io::Result<DiskSegment> segment) {
-      EXPECT_TRUE(segment);
-      EXPECT_GT(segment->length, 0u);
-      segments_[index] = *segment;
-      pending_ops_--;
-    });
+    while (true) {
+      size_t res = storage_->StashAsync(io::Buffer(*buf),
+                                        [this, index, buf](io::Result<DiskSegment> segment) {
+                                          EXPECT_TRUE(segment);
+                                          EXPECT_GT(segment->length, 0u);
+                                          segments_[index] = *segment;
+                                          pending_ops_--;
+                                        });
+      if (res == 0)
+        break;
+
+      error_code ec = storage_->Grow(res);
+      CHECK(!ec) << ec.message();
+    };
   }
 
   void Read(size_t index) {
