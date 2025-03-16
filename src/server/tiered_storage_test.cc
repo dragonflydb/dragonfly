@@ -276,7 +276,10 @@ TEST_F(TieredStorageTest, FlushAll) {
   Metrics metrics;
   ExpectConditionWithinTimeout([&] {
     metrics = GetMetrics();
-    return metrics.events.hits > 2;
+
+    // Note that metrics.events.hits is not consistent with total_fetches
+    // and it can happen that hits is greater than total_fetches due to in-progress reads.
+    return metrics.tiered_stats.total_fetches > 2;
   });
   LOG(INFO) << FormatMetrics(metrics);
 
@@ -290,7 +293,6 @@ TEST_F(TieredStorageTest, FlushAll) {
   LOG(INFO) << FormatMetrics(metrics);
 
   EXPECT_EQ(metrics.db_stats.front().tiered_entries, 0u);
-  EXPECT_GT(metrics.tiered_stats.total_fetches, 2u);
 }
 
 TEST_F(TieredStorageTest, FlushPending) {
