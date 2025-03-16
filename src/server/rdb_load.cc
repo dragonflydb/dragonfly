@@ -2544,11 +2544,15 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
                         item->val.rdb_type);
   };
 
+  // The scope is important here, as we need to ensure that the object memory is properly
+  // accounted for.
+  DbSlice::ItAndUpdater append_res;
+
   // If we're appending the item to an existing key, first load the
   // object.
   if (item->load_config.append) {
-    auto res = db_slice->FindMutable(db_cntx, item->key);
-    if (!IsValid(res.it)) {
+    append_res = db_slice->FindMutable(db_cntx, item->key);
+    if (!IsValid(append_res.it)) {
       // If the item has expired we may not find the key. Note if the key
       // is found, but expired since we started loading, we still append to
       // avoid an inconsistent state where only part of the key is loaded.
@@ -2557,7 +2561,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
       }
       return;
     }
-    pv_ptr = &res.it->second;
+    pv_ptr = &append_res.it->second;
   }
 
   if (ec_ = FromOpaque(item->val, item->load_config, pv_ptr); ec_) {
@@ -2598,7 +2602,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
     return;
   }
 
-  auto& res = *op_res;
+  DbSlice::ItAndUpdater& res = *op_res;
   res.it->first.SetSticky(item->is_sticky);
   if (item->has_mc_flags) {
     res.it->second.SetFlag(true);
