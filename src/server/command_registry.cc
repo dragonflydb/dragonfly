@@ -22,6 +22,9 @@ using namespace std;
 ABSL_FLAG(vector<string>, rename_command, {},
           "Change the name of commands, format is: <cmd1_name>=<cmd1_new_name>, "
           "<cmd2_name>=<cmd2_new_name>");
+ABSL_FLAG(vector<string>, command_alias, {},
+          "Add an alias for given commands, format is: <alias>=<original>, "
+          "<alias>=<original>");
 ABSL_FLAG(vector<string>, restricted_commands, {},
           "Commands restricted to connections on the admin port");
 
@@ -171,6 +174,7 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
 
 CommandRegistry::CommandRegistry() {
   cmd_rename_map_ = ParseCmdlineArgMap(FLAGS_rename_command);
+  cmd_aliases_ = ParseCmdlineArgMap(FLAGS_command_alias, true);
 
   for (string name : GetFlag(FLAGS_restricted_commands)) {
     restricted_cmds_.emplace(AsciiStrToUpper(name));
