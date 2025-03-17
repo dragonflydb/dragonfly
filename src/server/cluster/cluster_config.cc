@@ -365,9 +365,8 @@ ClusterNodeInfo ClusterConfig::GetMasterNodeForSlot(SlotId id) const {
             }
           }
         }
-      } else {
-        return shard.master;
       }
+      return shard.master;
     }
   }
 
