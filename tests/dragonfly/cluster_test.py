@@ -108,6 +108,7 @@ class NodeInfo:
     slots: list
     migrations: list
     replicas: list
+    health: str
 
 
 async def create_node_info(instance) -> NodeInfo:
@@ -121,6 +122,7 @@ async def create_node_info(instance) -> NodeInfo:
         slots=[],
         migrations=[],
         replicas=[],
+        health="online",
     )
     return ninfo
 
@@ -133,12 +135,14 @@ def generate_config(nodes):
                 "id": node.id,
                 "ip": "127.0.0.1",
                 "port": node.instance.port,
+                "health": node.health,
             },
             "replicas": [
                 {
                     "id": replica.id,
                     "ip": "127.0.0.1",
                     "port": replica.instance.port,
+                    "health": node.health,
                 }
                 for replica in node.replicas
             ],

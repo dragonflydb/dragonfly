@@ -72,16 +72,12 @@ ClusterShardInfos GetConfigForStats(ConnectionContext* cntx) {
     return config;
   }
 
-  // We can't mutate `config` so we copy it over
-  std::vector<ClusterShardInfo> infos;
-  infos.reserve(config.size());
-
-  for (auto& node : config) {
-    infos.push_back(node);
-    infos.rbegin()->replicas.clear();
+  auto shards_info = config.Unwrap();
+  for (auto& node : shards_info) {
+    node.replicas.clear();
   }
 
-  return ClusterShardInfos{std::move(infos)};
+  return shards_info;
 }
 
 }  // namespace
@@ -149,14 +145,15 @@ ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) co
                                   ? static_cast<uint16_t>(absl::GetFlag(FLAGS_port))
                                   : cluster_announce_port;
 
-    info.master = {{.id = id_, .ip = preferred_endpoint, .port = preferred_port}, NodeHealth::NONE};
+    info.master = {{.id = id_, .ip = preferred_endpoint, .port = preferred_port},
+                   NodeHealth::ONLINE};
 
     if (cntx->conn()->IsPrivileged() || !absl::GetFlag(FLAGS_managed_service_info)) {
       for (const auto& replica : server_family_->GetDflyCmd()->GetReplicasRoleInfo()) {
         info.replicas.push_back({{.id = replica.id,
                                   .ip = replica.address,
                                   .port = static_cast<uint16_t>(replica.listening_port)},
-                                 NodeHealth::NONE});
+                                 NodeHealth::ONLINE});
       }
     }
   } else {
@@ -166,7 +163,7 @@ ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) co
     info.replicas.push_back({{.id = id_,
                               .ip = cntx->conn()->LocalBindAddress(),
                               .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))},
-                             NodeHealth::NONE});
+                             NodeHealth::ONLINE});
   }
 
   return info;
@@ -196,7 +193,7 @@ void ClusterShardsImpl(const ClusterShardInfos& config, SinkReplyBuilder* builde
   constexpr unsigned int kEntrySize = 4;
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
 
-  auto WriteNode = [&](const ClusterNodeInfo& node, string_view role) {
+  auto WriteNode = [&](const ClusterExtendedNodeInfo& node, string_view role) {
     constexpr unsigned int kNodeSize = 14;
     rb->StartArray(kNodeSize);
     rb->SendBulkString("id");
@@ -212,7 +209,7 @@ void ClusterShardsImpl(const ClusterShardInfos& config, SinkReplyBuilder* builde
     rb->SendBulkString("replication-offset");
     rb->SendLong(0);
     rb->SendBulkString("health");
-    rb->SendBulkString("online");
+    rb->SendBulkString(ToString(node.health));
   };
 
   rb->StartArray(config.size());
@@ -237,15 +234,22 @@ void ClusterShardsImpl(const ClusterShardInfos& config, SinkReplyBuilder* builde
 }  // namespace
 
 void ClusterFamily::ClusterShards(SinkReplyBuilder* builder, ConnectionContext* cntx) {
-  auto shard_infos = GetShardInfos(cntx);
-  if (shard_infos) {
-    return ClusterShardsImpl(*shard_infos, builder);
+  auto config = GetShardInfos(cntx);
+  if (config) {
+    // we need to remove hiden replicas
+    auto shards_info = config->Unwrap();
+    for (auto& shard : shards_info) {
+      auto new_end = std::remove_if(shard.replicas.begin(), shard.replicas.end(),
+                                    [](const auto& r) { return r.health == NodeHealth::HIDDEN; });
+      shard.replicas.erase(new_end, shard.replicas.end());
+    }
+    return ClusterShardsImpl({shards_info}, builder);
   }
   return builder->SendError(kClusterNotConfigured);
 }
 
 namespace {
-void ClusterSlotsImpl(const ClusterShardInfos& config, SinkReplyBuilder* builder) {
+void ClusterSlotsImpl(ClusterShardInfos config, SinkReplyBuilder* builder) {
   // For more details https://redis.io/commands/cluster-slots/
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
 
@@ -258,9 +262,19 @@ void ClusterSlotsImpl(const ClusterShardInfos& config, SinkReplyBuilder* builder
   };
 
   unsigned int slot_ranges = 0;
-  for (const auto& shard : config) {
+
+  // we need to remove hiden and fail replicas
+  auto shards_info = config.Unwrap();
+  for (auto& shard : shards_info) {
     slot_ranges += shard.slot_ranges.Size();
+    auto new_end = std::remove_if(shard.replicas.begin(), shard.replicas.end(), [](const auto& r) {
+      return r.health == NodeHealth::HIDDEN || r.health == NodeHealth::FAIL ||
+             r.health == NodeHealth::LOADING;
+    });
+    shard.replicas.erase(new_end, shard.replicas.end());
   }
+
+  config = {shards_info};
 
   rb->StartArray(slot_ranges);
   for (const auto& shard : config) {
@@ -294,7 +308,7 @@ void ClusterNodesImpl(const ClusterShardInfos& config, string_view my_id,
 
   string result;
 
-  auto WriteNode = [&](const ClusterNodeInfo& node, string_view role, string_view master_id,
+  auto WriteNode = [&](const ClusterExtendedNodeInfo& node, string_view role, string_view master_id,
                        const SlotRanges& ranges) {
     absl::StrAppend(&result, node.id, " ");
 
@@ -307,7 +321,8 @@ void ClusterNodesImpl(const ClusterShardInfos& config, string_view my_id,
 
     absl::StrAppend(&result, master_id, " ");
 
-    absl::StrAppend(&result, "0 0 0 connected");
+    absl::StrAppend(&result,
+                    node.health != NodeHealth::FAIL ? "0 0 0 connected" : "0 0 0 disconnected");
 
     for (const auto& range : ranges) {
       absl::StrAppend(&result, " ", range.start);
@@ -324,7 +339,9 @@ void ClusterNodesImpl(const ClusterShardInfos& config, string_view my_id,
     WriteNode(shard.master, "master", "-", shard.slot_ranges);
     for (const auto& replica : shard.replicas) {
       // Only the master prints ranges, so we send an empty set for replicas.
-      WriteNode(replica, "slave", shard.master.id, {});
+      if (replica.health != NodeHealth::HIDDEN) {
+        WriteNode(replica, "slave", shard.master.id, {});
+      }
     }
   }
 

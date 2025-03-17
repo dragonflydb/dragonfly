@@ -94,10 +94,11 @@ struct ClusterNodeInfo {
   }
 };
 
-enum class NodeHealth : std::uint8_t { NONE, FAIL, LOADING, ONLINE };
+enum class NodeHealth : std::uint8_t { FAIL, LOADING, ONLINE, HIDDEN };
+std::string_view ToString(NodeHealth nh);
 
 struct ClusterExtendedNodeInfo : ClusterNodeInfo {
-  NodeHealth health = NodeHealth::NONE;
+  NodeHealth health = NodeHealth::ONLINE;
 };
 
 struct MigrationInfo {
@@ -157,6 +158,10 @@ class ClusterShardInfos {
 
   bool operator!=(const ClusterShardInfos& r) const noexcept {
     return infos_ != r.infos_;
+  }
+
+  auto Unwrap() const {
+    return infos_;
   }
 
  private:
