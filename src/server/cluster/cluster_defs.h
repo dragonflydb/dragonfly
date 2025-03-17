@@ -99,6 +99,13 @@ std::string_view ToString(NodeHealth nh);
 
 struct ClusterExtendedNodeInfo : ClusterNodeInfo {
   NodeHealth health = NodeHealth::ONLINE;
+  bool operator==(const ClusterExtendedNodeInfo& r) const noexcept {
+    return health == r.health && ClusterNodeInfo::operator==(r);
+  }
+
+  bool operator<(const ClusterNodeInfo& r) const noexcept {
+    return id < r.id || health < r.health;
+  }
 };
 
 struct MigrationInfo {
