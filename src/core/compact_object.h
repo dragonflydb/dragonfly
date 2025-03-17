@@ -140,7 +140,7 @@ class CompactObj {
     // IO_PENDING is set when the tiered storage has issued an i/o request to save the value. It is
     // cleared when the io request finishes or is cancelled.
     IO_PENDING = 0x20,
-    
+
     // Applied only on keys that should be deleted asynchronously.
     // (it can be the same value as IO_PENDING) that is applied only on values.
     KEY_ASYNC_DELETE = 0x20,
@@ -363,6 +363,12 @@ class CompactObj {
   }
 
   void SetExternal(size_t offset, uint32_t sz);
+
+  // Switches to empty, non-external string.
+  // Preserves all the attributes.
+  void RemoveExternal() {
+    SetMeta(0, mask_);
+  }
 
   // Assigns a cooling record to the object together with its external slice.
   void SetCool(size_t offset, uint32_t serialized_size, detail::TieredColdRecord* record);

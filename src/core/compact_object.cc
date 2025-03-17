@@ -875,6 +875,8 @@ void CompactObj::InitRobj(CompactObjType type, unsigned encoding, void* obj) {
 }
 
 void CompactObj::SetInt(int64_t val) {
+  DCHECK(!IsExternal());
+
   if (INT_TAG != taglen_) {
     SetMeta(INT_TAG, mask_ & ~kEncMask);
   }

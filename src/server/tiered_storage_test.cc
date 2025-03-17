@@ -334,4 +334,25 @@ TEST_F(TieredStorageTest, Expiry) {
   EXPECT_EQ(resp, val);
 }
 
+TEST_F(TieredStorageTest, SetExistingExpire) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+  SetFlag(&FLAGS_tiered_experimental_cooling, false);
+
+  const int kNum = 20;
+  for (size_t i = 0; i < kNum; i++) {
+    Run({"SETEX", absl::StrCat("k", i), "100", BuildString(256)});
+  }
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.total_stashes > 1; });
+
+  for (size_t i = 0; i < kNum; i++) {
+    Run({"SETEX", absl::StrCat("k", i), "100", BuildString(256)});
+  }
+
+  for (size_t i = 0; i < kNum; i++) {
+    auto resp = Run({"TTL", absl::StrCat("k", i)});
+    EXPECT_THAT(resp, IntArg(100));
+  }
+}
+
 }  // namespace dfly
