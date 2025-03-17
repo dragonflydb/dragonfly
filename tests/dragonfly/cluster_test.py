@@ -3168,3 +3168,85 @@ async def test_readonly_replication(
 
     # This behavior can be changed in the future
     assert await r1_node.client.execute_command("GET Y") == None
+
+
+@pytest.mark.asyncio
+@dfly_args(
+    {"proactor_threads": 4, "cluster_mode": "yes", "migration_buckets_serialization_threshold": 100}
+)
+async def test_migration_get_commands(df_factory: DflyInstanceFactory, df_seeder_factory):
+    # 1. Create cluster of 2 nodes with all slots allocated to first node.
+    instances = [
+        df_factory.create(
+            port=next(next_port),
+            admin_port=next(next_port),
+            vmodule="outgoing_slot_migration=2,cluster_family=2,incoming_slot_migration=2,streamer=2",
+        )
+        for i in range(2)
+    ]
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug("DEBUG POPULATE first node")
+    key_num = 1000000
+    await nodes[0].client.execute_command("debug", "populate", key_num, "test", "160", "RAND")
+
+    dbsize_node0 = await nodes[0].client.dbsize()
+    assert dbsize_node0 > (key_num * 0.95)
+
+    stop = False
+
+    async def run_gets():
+        cluster_client = aioredis.RedisCluster(host="127.0.0.1", port=instances[0].port)
+        while not stop:
+            pipeline = cluster_client.pipeline()
+            for _ in range(80):
+                pipeline.get(f"test:{random.randint(1, key_num)}")
+            val = await pipeline.execute()
+        await cluster_client.aclose()
+
+    # logging.debug("Seed before first migration")
+    # seed_task = [asyncio.create_task(run_gets()) for _ in range(3)]
+    # await asyncio.sleep(10)
+    # stop = True
+    # for seed in seed_task:
+    #    await seed
+
+    info = await nodes[0].admin_client.info("commandstats")
+    logging.debug(f"info before migration is {info}")
+
+    stop = False
+    # 2. Start migrating part of the slots from first node to second
+    logging.debug("Start first migration")
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 500)], nodes[1].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    seed_task = [asyncio.create_task(run_gets()) for _ in range(20)]
+
+    # 3. Wait for migratin finish
+    logging.debug("Wait migration finished")
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", timeout=300)
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED", timeout=300)
+    logging.debug("Migration finished")
+
+    info = await nodes[0].admin_client.info("commandstats")
+    logging.debug(f"info after migration is {info}")
+
+    stop = True
+    for seed in seed_task:
+        await seed
+    logging.debug("Get finished")
+
+    nodes[0].migrations = []
+    nodes[0].slots = [(501, 16383)]
+    nodes[1].slots = [(0, 500)]
+    logging.debug("remove finished migrations")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+    logging.debug("done")
