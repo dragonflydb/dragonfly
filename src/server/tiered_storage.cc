@@ -424,6 +424,8 @@ bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
 
 void TieredStorage::Delete(DbIndex dbid, PrimeValue* value) {
   DCHECK(value->IsExternal());
+  DCHECK(!value->HasStashPending());
+
   ++stats_.total_deletes;
 
   tiering::DiskSegment segment = value->GetExternalSlice();
@@ -433,7 +435,7 @@ void TieredStorage::Delete(DbIndex dbid, PrimeValue* value) {
   }
 
   // In any case we delete the offloaded segment and reset the value.
-  value->Reset();
+  value->RemoveExternal();
   op_manager_->DeleteOffloaded(dbid, segment);
 }
 

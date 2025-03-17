@@ -110,8 +110,8 @@ class SetCmd {
   OpStatus SetExisting(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
                        std::string_view key, std::string_view value);
 
-  void AddNew(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
-              std::string_view key, std::string_view value);
+  void AddNew(const SetParams& params, DbSlice::Iterator it, std::string_view key,
+              std::string_view value);
 
   // Called at the end of AddNew of SetExisting
   void PostEdit(const SetParams& params, std::string_view key, std::string_view value,
@@ -846,7 +846,7 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
 
     return SetExisting(params, op_res->it, op_res->exp_it, key, value);
   } else {
-    AddNew(params, op_res->it, op_res->exp_it, key, value);
+    AddNew(params, op_res->it, key, value);
     return OpStatus::OK;
   }
 }
@@ -869,19 +869,6 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
         e_it->second = db_slice.FromAbsoluteTime(at_ms);
       } else {
         // Add new expiry information.
-
-        // Note: some consistency checks, following #4672. Once it's resolved we can remove them.
-        // -------------------------------------------------------------------------------------
-        ExpireTable* etable = db_slice.GetTables(op_args_.db_cntx.db_index).second;
-        ExpireIterator check_it = etable->Find(it->first.AsRef());
-        if (IsValid(check_it)) {
-          LOG(ERROR) << "Inconsistent state in SetCmd::SetExisting "
-                     << " key: " << key << ", "
-                     << "it.key:" << it.key() << ", "
-                     << "it->first:" << it->first.ToString()
-                     << " params.prev_val: " << params.prev_val << " " << params.flags;
-        }
-        // ------------------------------------------------
         db_slice.AddExpire(op_args_.db_cntx.db_index, it, at_ms);
       }
     } else {
@@ -892,6 +879,8 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
   if (params.flags & SET_STICK) {
     it->first.SetSticky(true);
   }
+
+  bool has_expire = prime_value.HasExpire();
 
   // Update flags
   prime_value.SetFlag(params.memcache_flags != 0);
@@ -905,12 +894,14 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
   // overwrite existing entry.
   prime_value.SetString(value);
 
+  DCHECK_EQ(has_expire, prime_value.HasExpire());
+
   PostEdit(params, key, value, &prime_value);
   return OpStatus::OK;
 }
 
-void SetCmd::AddNew(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
-                    std::string_view key, std::string_view value) {
+void SetCmd::AddNew(const SetParams& params, DbSlice::Iterator it, std::string_view key,
+                    std::string_view value) {
   auto& db_slice = op_args_.GetDbSlice();
 
   // Adding new value.
