@@ -268,7 +268,8 @@ void ClusterSlotsImpl(ClusterShardInfos config, SinkReplyBuilder* builder) {
   for (auto& shard : shards_info) {
     slot_ranges += shard.slot_ranges.Size();
     auto new_end = std::remove_if(shard.replicas.begin(), shard.replicas.end(), [](const auto& r) {
-      return r.health == NodeHealth::HIDDEN || r.health == NodeHealth::FAIL;
+      return r.health == NodeHealth::HIDDEN || r.health == NodeHealth::FAIL ||
+             r.health == NodeHealth::LOADING;
     });
     shard.replicas.erase(new_end, shard.replicas.end());
   }

@@ -425,11 +425,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
                                         RespArray(ElementsAre(  //
                                             "10.0.0.11",        //
                                             IntArg(8'001),      //
-                                            "qwerty")),         //
-                                        RespArray(ElementsAre(  //
-                                            "10.0.0.12",        //
-                                            IntArg(8'002),      //
-                                            "qwerty1")))))));
+                                            "qwerty")))))));
 
   EXPECT_THAT(Run({"cluster", "nodes"}),
               "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 disconnected 0-10000\n"
