@@ -1532,7 +1532,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     if (m.facade_stats.reply_stats.err_count.contains("MOVED")) {
       moved_total_errors = m.facade_stats.reply_stats.err_count.at("MOVED");
     }
-    AppendMetricHeader("moved_errors_total", "Total error numbers of moved slot errors",
+    AppendMetricHeader("moved_errors_total", "Total number of moved slot errors",
                        MetricType::COUNTER, &moved_errors_str);
     AppendMetricValue("moved_errors_total", moved_total_errors, {"num"}, {"moved errors"},
                       &moved_errors_str);
