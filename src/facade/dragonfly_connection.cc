@@ -313,7 +313,8 @@ QueueBackpressure* thread_queue_backpressure = nullptr;
 
 QueueBackpressure& GetQueueBackpressure() {
   DCHECK(thread_queue_backpressure != nullptr);
-  return *thread_queue_backpressure;
+
+  return thread_queue_backpressure[ProactorBase::me()->GetPoolIndex()];
 }
 
 }  // namespace
