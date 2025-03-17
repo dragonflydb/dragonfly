@@ -351,7 +351,6 @@ bool ClusterConfig::IsMySlot(std::string_view key) const {
 
 ClusterNodeInfo ClusterConfig::GetMasterNodeForSlot(SlotId id) const {
   CHECK_LE(id, kMaxSlotNum) << "Requesting a non-existing slot id " << id;
-
   for (const auto& shard : config_) {
     if (shard.slot_ranges.Contains(id)) {
       if (shard.master.id == my_id_) {
@@ -359,7 +358,11 @@ ClusterNodeInfo ClusterConfig::GetMasterNodeForSlot(SlotId id) const {
         // migrated
         for (const auto& m : shard.migrations) {
           if (m.slot_ranges.Contains(id)) {
-            return m.node_info;
+            for (const auto& shard : config_) {
+              if (shard.master.id == m.node_info.id) {
+                return shard.master;
+              }
+            }
           }
         }
       }
