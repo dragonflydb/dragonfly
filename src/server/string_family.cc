@@ -34,6 +34,7 @@
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "util/fibers/future.h"
+#include "util/fibers/stacktrace.h"
 
 namespace dfly {
 
@@ -110,8 +111,8 @@ class SetCmd {
   OpStatus SetExisting(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
                        std::string_view key, std::string_view value);
 
-  void AddNew(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
-              std::string_view key, std::string_view value);
+  void AddNew(const SetParams& params, DbSlice::Iterator it, std::string_view key,
+              std::string_view value);
 
   // Called at the end of AddNew of SetExisting
   void PostEdit(const SetParams& params, std::string_view key, std::string_view value,
@@ -854,16 +855,28 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
     if (auto status = CachePrevIfNeeded(params, op_res->it); status != OpStatus::OK)
       return status;
 
+    CHECK(op_res->it->first == key)
+        << "Key mismatch: " << key << " " << op_res->it.key() << " " << params.prev_val;
+
+    if (!op_res->it->second.HasExpire()) {
+      auto eit = db_slice.GetDBTable(op_args_.db_cntx.db_index)->expire.Find(key);
+      if (IsValid(eit)) {
+        LOG(FATAL) << "Inconsistent state before SetExisting, is_external "
+                   << op_res->it->second.IsExternal()
+                   << ", is_cold: " << op_res->it->second.IsCool() << " "
+                   << " " << params.prev_val;
+      }
+    }
     return SetExisting(params, op_res->it, op_res->exp_it, key, value);
   } else {
-    AddNew(params, op_res->it, op_res->exp_it, key, value);
+    AddNew(params, op_res->it, key, value);
     return OpStatus::OK;
   }
 }
 
 OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
                              DbSlice::ExpIterator e_it, string_view key, string_view value) {
-  DCHECK_EQ(params.flags & SET_IF_NOTEXIST, 0);
+  CHECK_EQ(params.flags & SET_IF_NOTEXIST, 0);
 
   PrimeValue& prime_value = it->second;
   EngineShard* shard = op_args_.shard;
@@ -871,6 +884,8 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
   auto& db_slice = op_args_.GetDbSlice();
   uint64_t at_ms =
       params.expire_after_ms ? params.expire_after_ms + op_args_.db_cntx.time_now_ms : 0;
+
+  CHECK(it->first == key) << "Key mismatch: " << key << " " << it.key();
 
   if (!(params.flags & SET_KEEP_EXPIRE)) {
     if (at_ms) {  // Command has an expiry paramater.
@@ -895,7 +910,22 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
         db_slice.AddExpire(op_args_.db_cntx.db_index, it, at_ms);
       }
     } else {
-      db_slice.RemoveExpire(op_args_.db_cntx.db_index, it);
+      bool removed = db_slice.RemoveExpire(op_args_.db_cntx.db_index, it);
+      ExpireTable* etable = db_slice.GetTables(op_args_.db_cntx.db_index).second;
+      ExpireIterator check_it = etable->Find(key);
+      if (IsValid(check_it)) {
+        LOG(ERROR) << "Did not remove expiry information for key: " << key
+                   << " removed: " << removed;
+      }
+    }
+  }
+
+  bool has_expire = it->second.HasExpire();
+  if (!has_expire) {
+    auto eit = db_slice.GetDBTable(op_args_.db_cntx.db_index)->expire.Find(key);
+    if (IsValid(eit)) {
+      LOG(DFATAL) << "Inconsistent expire state for: " << key << " " << params.expire_after_ms
+                  << " it->first.key" << it->first.ToString();
     }
   }
 
@@ -915,18 +945,26 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
   // overwrite existing entry.
   prime_value.SetString(value);
 
+  CHECK_EQ(prime_value.HasExpire(), has_expire)
+      << "Inconsistent state in SetCmd::SetExisting, key: " << key << " " << params.expire_after_ms
+      << " has_expire:" << has_expire;
+
   PostEdit(params, key, value, &prime_value);
   return OpStatus::OK;
 }
 
-void SetCmd::AddNew(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
-                    std::string_view key, std::string_view value) {
+void SetCmd::AddNew(const SetParams& params, DbSlice::Iterator it, std::string_view key,
+                    std::string_view value) {
+  CHECK(it->first == key) << "Key mismatch: " << key << " " << it.key();
   auto& db_slice = op_args_.GetDbSlice();
 
   // Adding new value.
   PrimeValue tvalue{value};
   tvalue.SetFlag(params.memcache_flags != 0);
   it->second = std::move(tvalue);
+
+  auto eit = db_slice.GetDBTable(op_args_.db_cntx.db_index)->expire.Find(key);
+  CHECK(!IsValid(eit)) << "Inconsistent state in SetCmd::AddNew, key: " << key;
 
   if (params.expire_after_ms) {
     db_slice.AddExpire(op_args_.db_cntx.db_index, it,
@@ -940,6 +978,13 @@ void SetCmd::AddNew(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpI
     it->first.SetSticky(true);
   }
 
+  if (!it->second.HasExpire()) {
+    auto eit = db_slice.GetDBTable(op_args_.db_cntx.db_index)->expire.Find(key);
+    if (IsValid(eit)) {
+      LOG(DFATAL) << "Inconsistent expire state for: " << key << " " << params.expire_after_ms;
+    }
+  }
+
   PostEdit(params, key, value, &it->second);
 }
 
@@ -948,9 +993,9 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
   EngineShard* shard = op_args_.shard;
 
   // Currently we always try to offload, but Stash may ignore it, if disk I/O is overloaded.
-  if (auto* ts = shard->tiered_storage(); ts)
+  if (auto* ts = shard->tiered_storage(); ts) {
     ts->TryStash(op_args_.db_cntx.db_index, key, pv);
-
+  }
   if (manual_journal_ && op_args_.shard->journal()) {
     RecordJournal(params, key, value);
   }

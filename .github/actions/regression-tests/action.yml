@@ -37,6 +37,15 @@ runs:
   # bring back timeouts once composite actions start supporting them
   # timeout-minutes: 20
   steps:
+    - name: Setup
+      shell: bash
+      run: |
+        echo "-----------------------------"
+        echo "disk space is:"
+        df -h
+        echo "-----------------------------"
+        mkdir -p /tmp/tiered
+
     - name: Run PyTests
       id: main
       shell: bash
