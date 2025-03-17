@@ -1520,12 +1520,23 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   }
 
   if (IsClusterEnabled()) {
-    string str;
+    string migration_errors_str;
     AppendMetricHeader("migration_errors_total", "Total error numbers of current migrations",
-                       MetricType::GAUGE, &str);
+                       MetricType::GAUGE, &migration_errors_str);
     AppendMetricValue("migration_errors_total", m.migration_errors_total, {"num"},
-                      {"migration errors"}, &str);
-    absl::StrAppend(&resp->body(), str);
+                      {"migration errors"}, &migration_errors_str);
+    absl::StrAppend(&resp->body(), migration_errors_str);
+
+    string moved_errors_str;
+    uint64_t moved_total_errors = 0;
+    if (m.facade_stats.reply_stats.err_count.contains("MOVED")) {
+      moved_total_errors = m.facade_stats.reply_stats.err_count.at("MOVED");
+    }
+    AppendMetricHeader("moved_errors_total", "Total number of moved slot errors",
+                       MetricType::COUNTER, &moved_errors_str);
+    AppendMetricValue("moved_errors_total", moved_total_errors, {"num"}, {"moved errors"},
+                      &moved_errors_str);
+    absl::StrAppend(&resp->body(), moved_errors_str);
   }
 
   string db_key_metrics;
