@@ -1079,38 +1079,51 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view index_name = ArgS(args, 0);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
-  // Check if index exists and get synonym data from current shard
-  bool index_not_found = false;
-  absl::flat_hash_map<std::string, std::vector<uint32_t>> term_groups;
+  std::atomic_bool index_not_found{true};
+  // Store per-shard synonym data
+  vector<absl::flat_hash_map<std::string, std::vector<uint32_t>>> shard_term_groups(
+      shard_set->size());
 
-  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    auto* index = es->search_indices()->GetIndex(index_name);
-    if (!index) {
-      index_not_found = true;
-      return OpStatus::OK;
-    }
+  // Collect synonym data from all shards
+  cmd_cntx.tx->Execute(
+      [&](Transaction* t, EngineShard* es) {
+        auto* index = es->search_indices()->GetIndex(index_name);
+        if (!index)
+          return OpStatus::OK;
 
-    // Get synonym data from current shard's index
-    const auto& info = index->GetInfo();
-    const auto& groups = info.base_index.synonym_manager->GetGroups();
+        index_not_found.store(false, std::memory_order_relaxed);
 
-    // Build term -> group_ids mapping
-    for (const auto& [group_id, group] : groups) {
-      for (const auto& term : group.terms) {
-        term_groups[term].push_back(group_id);
-      }
-    }
+        // Get synonym data from current shard
+        const auto& groups = index->GetSynonymManager().GetGroups();
 
-    return OpStatus::OK;
-  });
+        // Build term -> group_ids mapping for this shard
+        auto& term_groups = shard_term_groups[es->shard_id()];
+        for (const auto& [group_id, group] : groups) {
+          for (const auto& term : group.terms) {
+            term_groups[term].push_back(group_id);
+          }
+        }
 
-  if (index_not_found)
+        return OpStatus::OK;
+      },
+      true);
+
+  if (index_not_found.load(std::memory_order_relaxed))
     return rb->SendError(string{index_name} + ": no such index");
+
+  // Merge data from all shards into a single map
+  absl::flat_hash_map<std::string, std::vector<uint32_t>> merged_term_groups;
+  for (const auto& shard_groups : shard_term_groups) {
+    for (const auto& [term, group_ids] : shard_groups) {
+      auto& merged_ids = merged_term_groups[term];
+      merged_ids.insert(merged_ids.end(), group_ids.begin(), group_ids.end());
+    }
+  }
 
   // Format response according to Redis protocol:
   // Array of term + array of group IDs pairs
-  rb->StartArray(term_groups.size() * 2);
-  for (const auto& [term, group_ids] : term_groups) {
+  rb->StartArray(merged_term_groups.size() * 2);
+  for (const auto& [term, group_ids] : merged_term_groups) {
     rb->SendBulkString(term);
     rb->StartArray(group_ids.size());
     for (uint32_t id : group_ids) {

@@ -213,9 +213,6 @@ struct DocIndex {
   search::IndicesOptions options{};
   std::string prefix{};
   DataType type{HASH};
-
-  // Synonym manager for this index
-  std::shared_ptr<SynonymManager> synonym_manager = std::make_shared<SynonymManager>();
 };
 
 struct DocIndexInfo {
@@ -271,6 +268,16 @@ class ShardDocIndex {
 
   io::Result<StringVec, facade::ErrorReply> GetTagVals(std::string_view field) const;
 
+  // Get synonym manager for this shard
+  const SynonymManager& GetSynonymManager() const {
+    return *synonym_manager_;
+  }
+
+  // Replace synonym manager with a new one
+  void SetSynonymManager(std::shared_ptr<SynonymManager> manager) {
+    synonym_manager_ = std::move(manager);
+  }
+
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
@@ -279,6 +286,7 @@ class ShardDocIndex {
   std::shared_ptr<const DocIndex> base_;
   std::optional<search::FieldIndices> indices_;
   DocKeyIndex key_index_;
+  std::shared_ptr<SynonymManager> synonym_manager_ = std::make_shared<SynonymManager>();
 };
 
 // Stores shard doc indices by name on a specific shard.
