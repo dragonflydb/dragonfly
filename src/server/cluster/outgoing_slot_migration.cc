@@ -226,8 +226,11 @@ void OutgoingMigration::SyncFb() {
         const absl::Duration passed = absl::Now() - start_time;
         // we provide 30 seconds to distribute the config to all nodes to avoid extra errors
         // reporting
-        if (passed >= absl::Milliseconds(30000))
+        if (passed >= absl::Milliseconds(30000)) {
           cntx_.ReportError(GenericError(LastResponseArgs().front().GetString()));
+        } else {
+          ThisFiber::SleepFor(500ms);  // to prevent too many attempts
+        }
       } else {
         cntx_.ReportError(GenericError(LastResponseArgs().front().GetString()));
       }
