@@ -172,6 +172,33 @@ struct AggregateParams {
   std::vector<aggregate::AggregationStep> steps;
 };
 
+// Manages synonyms for search indices
+class SynonymManager {
+ public:
+  // Structure representing a group of synonyms with unique ID
+  struct Group {
+    uint32_t id;
+    std::vector<std::string> terms;
+  };
+
+  // Returns next available group ID
+  uint32_t GetNextGroupId() const;
+
+  // Get all terms and their group IDs
+  const absl::flat_hash_map<uint32_t, Group>& GetGroups() const;
+
+  // Add new synonym group
+  void AddGroup(uint32_t id, std::vector<std::string> terms);
+
+  // Remove synonym group
+  void RemoveGroup(uint32_t id);
+
+ private:
+  // Maps group ID to group data
+  absl::flat_hash_map<uint32_t, Group> groups_;
+  uint32_t next_group_id_ = 1;
+};
+
 // Stores basic info about a document index.
 struct DocIndex {
   enum DataType { HASH, JSON };
@@ -186,6 +213,9 @@ struct DocIndex {
   search::IndicesOptions options{};
   std::string prefix{};
   DataType type{HASH};
+
+  // Synonym manager for this index
+  std::shared_ptr<SynonymManager> synonym_manager = std::make_shared<SynonymManager>();
 };
 
 struct DocIndexInfo {

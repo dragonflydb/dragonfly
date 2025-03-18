@@ -1075,6 +1075,50 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
   }
 }
 
+void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
+  string_view index_name = ArgS(args, 0);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+
+  // Check if index exists and get synonym data from current shard
+  bool index_not_found = false;
+  absl::flat_hash_map<std::string, std::vector<uint32_t>> term_groups;
+
+  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    auto* index = es->search_indices()->GetIndex(index_name);
+    if (!index) {
+      index_not_found = true;
+      return OpStatus::OK;
+    }
+
+    // Get synonym data from current shard's index
+    const auto& info = index->GetInfo();
+    const auto& groups = info.base_index.synonym_manager->GetGroups();
+
+    // Build term -> group_ids mapping
+    for (const auto& [group_id, group] : groups) {
+      for (const auto& term : group.terms) {
+        term_groups[term].push_back(group_id);
+      }
+    }
+
+    return OpStatus::OK;
+  });
+
+  if (index_not_found)
+    return rb->SendError(string{index_name} + ": no such index");
+
+  // Format response according to Redis protocol:
+  // Array of term + array of group IDs pairs
+  rb->StartArray(term_groups.size() * 2);
+  for (const auto& [term, group_ids] : term_groups) {
+    rb->SendBulkString(term);
+    rb->StartArray(group_ids.size());
+    for (uint32_t id : group_ids) {
+      rb->SendLong(id);
+    }
+  }
+}
+
 #define HFUNC(x) SetHandler(&SearchFamily::x)
 
 // Redis search is a module. Therefore we introduce dragonfly extension search
@@ -1100,7 +1144,8 @@ void SearchFamily::Register(CommandRegistry* registry) {
             << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch)
             << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAggregate)
             << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile)
-            << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::FT_SEARCH}.HFUNC(FtTagVals);
+            << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::FT_SEARCH}.HFUNC(FtTagVals)
+            << CI{"FT.SYNDUMP", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtSynDump);
 }
 
 }  // namespace dfly

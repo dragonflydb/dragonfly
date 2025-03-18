@@ -29,6 +29,7 @@ class SearchFamily {
   static void FtProfile(CmdArgList args, const CommandContext& cmd_cntx);
   static void FtAggregate(CmdArgList args, const CommandContext& cmd_cntx);
   static void FtTagVals(CmdArgList args, const CommandContext& cmd_cntx);
+  static void FtSynDump(CmdArgList args, const CommandContext& cmd_cntx);
 
  public:
   static void Register(CommandRegistry* registry);

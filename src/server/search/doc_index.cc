@@ -479,4 +479,21 @@ SearchStats ShardDocIndices::GetStats() const {
   return {GetUsedMemory(), indices_.size(), total_entries};
 }
 
+uint32_t SynonymManager::GetNextGroupId() const {
+  return next_group_id_;
+}
+
+const absl::flat_hash_map<uint32_t, SynonymManager::Group>& SynonymManager::GetGroups() const {
+  return groups_;
+}
+
+void SynonymManager::AddGroup(uint32_t id, std::vector<std::string> terms) {
+  groups_[id] = Group{id, std::move(terms)};
+  next_group_id_ = std::max(next_group_id_, id + 1);
+}
+
+void SynonymManager::RemoveGroup(uint32_t id) {
+  groups_.erase(id);
+}
+
 }  // namespace dfly
