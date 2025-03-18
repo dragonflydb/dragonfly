@@ -1,0 +1,24 @@
+{
+  "nodes": [
+    {
+      "externally_routable_ip": "127.0.0.1",
+      "ssh_config": {
+        "host": "server",
+        "hostname": "127.0.0.1",
+        "password": "passwd",
+        "port": 2222,
+        "user": "root"
+      }
+    },
+    {
+      "externally_routable_ip": "127.0.0.1",
+      "ssh_config": {
+        "host": "client",
+        "hostname": "127.0.0.1",
+        "password": "passwd",
+        "port": 2223,
+        "user": "root"
+      }
+    }
+  ]
+}

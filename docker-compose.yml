@@ -1,0 +1,18 @@
+services:
+  dragonfly:
+    image: dflyssh
+    ulimits:
+      memlock: -1
+    ports:
+      - "6379:6379"
+      - "2222:22"
+    volumes:
+      - dragonflydata:/data
+  client:
+    image: dflyssh
+    ulimits:
+      memlock: -1
+    ports:
+      - "2223:22"
+volumes:
+  dragonflydata:

@@ -20,3 +20,5 @@ releases
 .hypothesis
 .secrets
 cmake-build-debug
+results
+.ducktape
