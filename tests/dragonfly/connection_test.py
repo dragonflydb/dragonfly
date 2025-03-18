@@ -1159,7 +1159,7 @@ async def test_pipeline_cache_size(df_factory):
     assert info["dispatch_queue_bytes"] == 0
 
 
-@dfly_args({"proactor_threads": 4, "pipeline_queue_limit": 100})
+@dfly_args({"proactor_threads": 4, "pipeline_queue_limit": 10})
 async def test_pipeline_overlimit(df_factory: DflyInstanceFactory):
     server = df_factory.create()
     server.start()
