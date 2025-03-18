@@ -169,16 +169,17 @@ class CommandRegistry {
   CommandRegistry& operator<<(CommandId cmd);
 
   const CommandId* Find(std::string_view cmd) const {
-    const auto it = cmd_map_.find(cmd);
-    if (it == cmd_map_.end()) {
-      if (const auto alias_it = cmd_aliases_.find(cmd); alias_it != cmd_aliases_.end()) {
-        if (alias_it->first == alias_it->second) {
-          return nullptr;
-        }
-        return Find(alias_it->second);
-      }
+    if (const auto it = cmd_map_.find(cmd); it != cmd_map_.end()) {
+      return &it->second;
     }
-    return it == cmd_map_.end() ? nullptr : &it->second;
+
+    if (const auto it = cmd_aliases_.find(cmd); it != cmd_aliases_.end()) {
+      if (it->first == it->second) {
+        return nullptr;
+      }
+      return Find(it->second);
+    }
+    return nullptr;
   }
 
   CommandId* Find(std::string_view cmd) {

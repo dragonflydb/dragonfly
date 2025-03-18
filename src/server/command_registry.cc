@@ -82,21 +82,15 @@ absl::flat_hash_map<std::string, std::string> ParseCmdlineArgMap(
   parsed_mappings.reserve(mappings.size());
 
   for (const std::string& mapping : mappings) {
-    if (mapping.find('=') == std::string::npos) {
+    std::vector<std::string_view> kv = absl::StrSplit(mapping, '=');
+    if (kv.size() != 2) {
       LOG(ERROR) << "Malformed command " << mapping << " for " << flag.Name()
                  << ", expected key=value";
       exit(1);
     }
 
-    const std::vector<std::string> kv = absl::StrSplit(mapping, '=');
-    if (kv.size() > 2) {
-      LOG(ERROR) << "Malformed command " << mapping << " for " << flag.Name()
-                 << ", expected key=value";
-      exit(1);
-    }
-
-    const std::string key = absl::AsciiStrToUpper(std::move(kv[0]));
-    const std::string value = kv.size() == 1 ? "" : absl::AsciiStrToUpper(std::move(kv[1]));
+    std::string key = absl::AsciiStrToUpper(kv[0]);
+    std::string value = kv.size() == 1 ? "" : absl::AsciiStrToUpper(kv[1]);
 
     if (key == value) {
       LOG(ERROR) << "Invalid attempt to map " << key << " to itself in " << flag.Name();

@@ -2,6 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
+#include "absl/strings/str_split.h"
 extern "C" {
 #include "redis/sds.h"
 #include "redis/zmalloc.h"
@@ -9,7 +10,6 @@ extern "C" {
 
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_join.h>
-#include <absl/strings/strip.h>
 #include <gmock/gmock.h>
 #include <reflex/matcher.h>
 
@@ -17,7 +17,6 @@ extern "C" {
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
-#include "server/conn_context.h"
 #include "server/main_service.h"
 #include "server/test_utils.h"
 
