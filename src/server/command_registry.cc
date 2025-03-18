@@ -90,7 +90,7 @@ absl::flat_hash_map<std::string, std::string> ParseCmdlineArgMap(
     }
 
     std::string key = absl::AsciiStrToUpper(kv[0]);
-    std::string value = kv.size() == 1 ? "" : absl::AsciiStrToUpper(kv[1]);
+    std::string value = absl::AsciiStrToUpper(kv[1]);
 
     if (key == value) {
       LOG(ERROR) << "Invalid attempt to map " << key << " to itself in " << flag.Name();
