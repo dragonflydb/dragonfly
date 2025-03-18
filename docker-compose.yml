@@ -4,15 +4,12 @@ services:
     ulimits:
       memlock: -1
     ports:
-      - "6379:6379"
-      - "2222:22"
+      - "8000-8020:6379"
+      - "9000-9020:22"
     volumes:
       - dragonflydata:/data
-  client:
-    image: dflyssh
-    ulimits:
-      memlock: -1
-    ports:
-      - "2223:22"
+    deploy:
+      mode: replicated
+      replicas: 5
 volumes:
   dragonflydata:

@@ -1,0 +1,64 @@
+{
+  "nodes": [
+    {
+      "externally_routable_ip": "127.0.0.1",
+      "ssh_config": {
+        "host": "dragonfly-dragonfly-1",
+        "hostname": "127.0.0.1",
+        "password": "passwd",
+        "user": "root",
+        "port": 9000
+      },
+      "app_port": 8010,
+      "hostname": "dragonfly-dragonfly-1"
+    },
+    {
+      "externally_routable_ip": "127.0.0.1",
+      "ssh_config": {
+        "host": "dragonfly-dragonfly-5",
+        "hostname": "127.0.0.1",
+        "password": "passwd",
+        "user": "root",
+        "port": 9001
+      },
+      "app_port": 8011,
+      "hostname": "dragonfly-dragonfly-5"
+    },
+    {
+      "externally_routable_ip": "127.0.0.1",
+      "ssh_config": {
+        "host": "dragonfly-dragonfly-2",
+        "hostname": "127.0.0.1",
+        "password": "passwd",
+        "user": "root",
+        "port": 9002
+      },
+      "app_port": 8012,
+      "hostname": "dragonfly-dragonfly-2"
+    },
+    {
+      "externally_routable_ip": "127.0.0.1",
+      "ssh_config": {
+        "host": "dragonfly-dragonfly-4",
+        "hostname": "127.0.0.1",
+        "password": "passwd",
+        "user": "root",
+        "port": 9003
+      },
+      "app_port": 8013,
+      "hostname": "dragonfly-dragonfly-4"
+    },
+    {
+      "externally_routable_ip": "127.0.0.1",
+      "ssh_config": {
+        "host": "dragonfly-dragonfly-3",
+        "hostname": "127.0.0.1",
+        "password": "passwd",
+        "user": "root",
+        "port": 9004
+      },
+      "app_port": 8014,
+      "hostname": "dragonfly-dragonfly-3"
+    }
+  ]
+}
