@@ -355,4 +355,24 @@ TEST_F(TieredStorageTest, SetExistingExpire) {
   }
 }
 
+TEST_F(TieredStorageTest, Dump) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+
+  // we want to test without cooling to trigger disk I/O on reads.
+  SetFlag(&FLAGS_tiered_experimental_cooling, false);
+
+  const int kNum = 10;
+  for (size_t i = 0; i < kNum; i++) {
+    Run({"SET", absl::StrCat("k", i), BuildString(3000)});  // big enough to trigger offloading.
+  }
+
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.total_stashes == kNum; });
+
+  auto resp = Run({"DUMP", "k0"});
+  EXPECT_THAT(Run({"del", "k0"}), IntArg(1));
+  resp = Run({"restore", "k0", "0", facade::ToSV(resp.GetBuf())});
+  EXPECT_EQ(resp, "OK");
+}
+
 }  // namespace dfly

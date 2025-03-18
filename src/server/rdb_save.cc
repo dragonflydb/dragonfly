@@ -243,7 +243,14 @@ std::error_code RdbSerializer::SaveValue(const PrimeValue& pv) {
     if (opt_int) {
       ec = SaveLongLongAsString(*opt_int);
     } else {
-      ec = SaveString(pv.GetSlice(&tmp_str_));
+      if (pv.IsExternal()) {
+        if (pv.IsCool()) {
+          return SaveValue(pv.GetCool().record->value);
+        }
+        LOG(FATAL) << "External string not supported yet";
+      } else {
+        ec = SaveString(pv.GetSlice(&tmp_str_));
+      }
     }
   } else {
     ec = SaveObject(pv);
