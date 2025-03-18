@@ -31,7 +31,9 @@ extern "C" {
 #include "server/rdb_save.h"
 #include "server/search/doc_index.h"
 #include "server/set_family.h"
+#include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "util/fibers/future.h"
 #include "util/varz.h"
 
 ABSL_FLAG(uint32_t, dbnum, 16, "Number of databases");
@@ -524,9 +526,21 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
   if (IsValid(it)) {
     DVLOG(1) << "Dump: key '" << key << "' successfully found, going to dump it";
     io::StringSink sink;
-    SerializerBase::DumpObject(it->second, &sink);
-    return sink.str();  // TODO: Add rvalue overload to str()
+    const PrimeValue& pv = it->second;
+
+    if (pv.IsExternal() && !pv.IsCool()) {
+      util::fb2::Future<string> future =
+          op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv);
+
+      CompactObj co(future.Get());
+      SerializerBase::DumpObject(co, &sink);
+    } else {
+      SerializerBase::DumpObject(it->second, &sink);
+    }
+
+    return std::move(sink).str();
   }
+
   // fallback
   DVLOG(1) << "Dump: '" << key << "' Not found";
   return OpStatus::KEY_NOTFOUND;
