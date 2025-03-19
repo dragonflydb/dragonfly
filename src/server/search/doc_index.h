@@ -175,24 +175,21 @@ struct AggregateParams {
 // Manages synonyms for search indices
 class SynonymManager {
  public:
-  // Structure representing a group of synonyms with unique ID
-  struct Group {
-    uint32_t id;
-    std::vector<std::string> terms;
-  };
+  // Represents a group of synonymous terms
+  using Group = std::vector<std::string>;
 
-  // Get all terms and their group IDs
+  // Get all synonym groups
   const absl::flat_hash_map<uint32_t, Group>& GetGroups() const {
     return groups_;
   }
 
-  // Update or create synonym group
+  // Update or create a synonym group
   void UpdateGroup(uint32_t id, std::vector<std::string> terms) {
-    groups_[id] = Group{id, std::move(terms)};
+    groups_[id] = std::move(terms);
   }
 
  private:
-  // Maps group ID to group data
+  // Maps group ID to synonym group
   absl::flat_hash_map<uint32_t, Group> groups_;
 };
 

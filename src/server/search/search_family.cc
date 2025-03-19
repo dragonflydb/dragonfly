@@ -1099,7 +1099,7 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
         // Build term -> group_ids mapping for this shard
         auto& term_groups = shard_term_groups[es->shard_id()];
         for (const auto& [group_id, group] : groups) {
-          for (const auto& term : group.terms) {
+          for (const auto& term : group) {
             term_groups[term].push_back(group_id);
           }
         }
