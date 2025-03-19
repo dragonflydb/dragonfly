@@ -1079,7 +1079,7 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view index_name = ArgS(args, 0);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
-  std::atomic_bool index_not_found{true};
+  atomic_bool index_not_found{true};
   // Store per-shard synonym data
   vector<absl::flat_hash_map<std::string, std::vector<uint32_t>>> shard_term_groups(
       shard_set->size());
@@ -1132,6 +1132,59 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
+void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) {
+  facade::CmdArgParser parser{args};
+  string_view index_name = parser.Next();
+  string_view group_id_str = parser.Next();
+  [[maybe_unused]] bool skip_initial_scan = parser.Check("SKIPINITIALSCAN");
+
+  // Parse group ID
+  uint32_t group_id;
+  if (!absl::SimpleAtoi(group_id_str, &group_id)) {
+    return cmd_cntx.rb->SendError("Invalid group id");
+  }
+
+  // Collect terms
+  std::vector<std::string> terms;
+  while (parser.HasNext()) {
+    terms.emplace_back(parser.Next());
+  }
+
+  if (terms.empty()) {
+    return cmd_cntx.rb->SendError("No terms specified");
+  }
+
+  if (auto err = parser.Error(); err) {
+    return cmd_cntx.rb->SendError(err->MakeReply());
+  }
+
+  std::atomic_bool index_not_found{true};
+
+  // Update synonym groups in all shards
+  cmd_cntx.tx->Execute(
+      [&](Transaction* t, EngineShard* es) {
+        auto* index = es->search_indices()->GetIndex(index_name);
+        if (!index)
+          return OpStatus::OK;
+
+        index_not_found.store(false, std::memory_order_relaxed);
+
+        // Update synonym group in this shard
+        SynonymManager synonym_manager = index->GetSynonymManager();
+        synonym_manager.AddGroup(group_id, terms);
+
+        index->SetSynonymManager(std::make_shared<SynonymManager>(synonym_manager));
+
+        return OpStatus::OK;
+      },
+      true);
+
+  if (index_not_found.load(std::memory_order_relaxed))
+    return cmd_cntx.rb->SendError(string{index_name} + ": no such index");
+
+  cmd_cntx.rb->SendOk();
+}
+
 #define HFUNC(x) SetHandler(&SearchFamily::x)
 
 // Redis search is a module. Therefore we introduce dragonfly extension search
@@ -1158,7 +1211,9 @@ void SearchFamily::Register(CommandRegistry* registry) {
             << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAggregate)
             << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile)
             << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::FT_SEARCH}.HFUNC(FtTagVals)
-            << CI{"FT.SYNDUMP", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtSynDump);
+            << CI{"FT.SYNDUMP", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtSynDump)
+            << CI{"FT.SYNUPDATE", CO::WRITE | CO::GLOBAL_TRANS, -4, 0, 0, acl::FT_SEARCH}.HFUNC(
+                   FtSynUpdate);
 }
 
 }  // namespace dfly
