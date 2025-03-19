@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 
 #include <memory>
 #include <optional>
@@ -176,7 +177,7 @@ struct AggregateParams {
 class SynonymManager {
  public:
   // Represents a group of synonymous terms
-  using Group = std::vector<std::string>;
+  using Group = absl::flat_hash_set<std::string>;
 
   // Get all synonym groups
   const absl::flat_hash_map<uint32_t, Group>& GetGroups() const {
@@ -185,7 +186,19 @@ class SynonymManager {
 
   // Update or create a synonym group
   void UpdateGroup(uint32_t id, std::vector<std::string> terms) {
-    groups_[id] = std::move(terms);
+    auto& group = groups_[id];
+    group.insert(terms.begin(), terms.end());
+  }
+
+  // Get all group IDs for a term
+  absl::flat_hash_set<uint32_t> GetGroupIds(const std::string& term) const {
+    absl::flat_hash_set<uint32_t> result;
+    for (const auto& [group_id, group] : groups_) {
+      if (group.contains(term)) {
+        result.insert(group_id);
+      }
+    }
+    return result;
   }
 
  private:

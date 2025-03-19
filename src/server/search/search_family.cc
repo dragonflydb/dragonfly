@@ -1081,7 +1081,7 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
 
   atomic_bool index_not_found{true};
   // Store per-shard synonym data
-  vector<absl::flat_hash_map<std::string, std::vector<uint32_t>>> shard_term_groups(
+  vector<absl::flat_hash_map<std::string, absl::flat_hash_set<uint32_t>>> shard_term_groups(
       shard_set->size());
 
   // Collect synonym data from all shards
@@ -1100,7 +1100,7 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
         auto& term_groups = shard_term_groups[es->shard_id()];
         for (const auto& [group_id, group] : groups) {
           for (const auto& term : group) {
-            term_groups[term].push_back(group_id);
+            term_groups[term].insert(group_id);
           }
         }
 
@@ -1109,25 +1109,25 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
       true);
 
   if (index_not_found.load(std::memory_order_relaxed))
-    return rb->SendError(string{index_name} + ": no such index");
+    return rb->SendError("Unknown index name");
 
   // Merge data from all shards into a single map
-  absl::flat_hash_map<std::string, std::vector<uint32_t>> merged_term_groups;
+  absl::flat_hash_map<std::string, absl::flat_hash_set<uint32_t>> merged_term_groups;
   for (const auto& shard_groups : shard_term_groups) {
     for (const auto& [term, group_ids] : shard_groups) {
       auto& merged_ids = merged_term_groups[term];
-      merged_ids.insert(merged_ids.end(), group_ids.begin(), group_ids.end());
+      merged_ids.insert(group_ids.begin(), group_ids.end());
     }
   }
 
   // Format response according to Redis protocol:
-  // Array of term + array of group IDs pairs
+  // Array of term + array of group ids pairs
   rb->StartArray(merged_term_groups.size() * 2);
   for (const auto& [term, group_ids] : merged_term_groups) {
     rb->SendBulkString(term);
     rb->StartArray(group_ids.size());
     for (uint32_t id : group_ids) {
-      rb->SendLong(id);
+      rb->SendBulkString(absl::StrCat(id));
     }
   }
 }
