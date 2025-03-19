@@ -2014,4 +2014,26 @@ TEST_F(SearchFamilyTest, InvalidCreateOptions) {
   EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
 }
 
+TEST_F(SearchFamilyTest, SynonymManagement) {
+  // Create index with prefix
+  EXPECT_EQ(
+      Run({"FT.CREATE", "my_idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT"}),
+      "OK");
+
+  // Add first group of synonyms
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "my_idx", "1", "cat", "feline", "kitty"}), "OK");
+
+  // Add second group of synonyms
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "my_idx", "2", "kitty", "cute", "adorable"}), "OK");
+
+  // Add third group of synonyms
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "my_idx", "3", "kitty", "tiger", "cub"}), "OK");
+
+  // Check the dump output
+  auto resp = Run({"FT.SYNDUMP", "my_idx"});
+  EXPECT_THAT(resp, IsUnordArray("cub", IsArray("3"), "cute", IsArray("2"), "adorable",
+                                 IsArray("2"), "kitty", IsArray("1", "2", "3"), "feline",
+                                 IsArray("1"), "tiger", IsArray("3"), "cat", IsArray("1")));
+}
+
 }  // namespace dfly

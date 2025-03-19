@@ -1126,7 +1126,12 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
   for (const auto& [term, group_ids] : merged_term_groups) {
     rb->SendBulkString(term);
     rb->StartArray(group_ids.size());
-    for (uint32_t id : group_ids) {
+
+    // Sort group_ids before sending
+    std::vector<uint32_t> sorted_ids(group_ids.begin(), group_ids.end());
+    std::sort(sorted_ids.begin(), sorted_ids.end());
+
+    for (uint32_t id : sorted_ids) {
       rb->SendBulkString(absl::StrCat(id));
     }
   }
