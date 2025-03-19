@@ -992,10 +992,13 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     size_t start_size = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
     {
       auto json = JsonFromString(blob, CompactObj::memory_resource());
-      if (!json) {
+      if (json) {
+        pv_->SetJson(std::move(*json));
+      } else {
+        LOG(ERROR) << "Invalid JSON string";
         ec_ = RdbError(errc::bad_json_string);
+        return;
       }
-      pv_->SetJson(std::move(*json));
     }
     size_t end_size = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
     DCHECK(end_size > start_size);
