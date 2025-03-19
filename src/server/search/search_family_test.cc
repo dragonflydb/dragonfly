@@ -2014,4 +2014,76 @@ TEST_F(SearchFamilyTest, InvalidCreateOptions) {
   EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
 }
 
+TEST_F(SearchFamilyTest, ConfigMaxSearchResults) {
+  Run({"HSET", "doc1", "title", "hello world1"});
+  Run({"HSET", "doc2", "title", "hello world2"});
+  Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "title", "TEXT"});
+
+  auto resp = Run({"FT.SEARCH", "index", "*", "NOCONTENT"});
+  EXPECT_THAT(resp, IsUnordArray(IntArg(2), "doc1", "doc2"));
+
+  resp = Run({"FT.CONFIG", "GET", "MAXSEARCHRESULTS"});
+  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", IntArg(10000)));
+
+  resp = Run({"FT.CONFIG", "SET", "MAXSEARCHRESULTS", "1"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.SEARCH", "index", "*", "NOCONTENT"});
+  EXPECT_THAT(resp, IsUnordArray(IntArg(2), AnyOf("doc1", "doc2")));
+
+  resp = Run({"FT.CONFIG", "GET", "MAXSEARCHRESULTS"});
+  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", IntArg(1)));
+}
+
+TEST_F(SearchFamilyTest, ConfigMaxAggregateResult) {
+  Run({"HSET", "doc1", "title", "hello world1"});
+  Run({"HSET", "doc2", "title", "hello world2"});
+  Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "title", "TEXT"});
+
+  auto resp = Run({"FT.AGGREGATE", "index", "*", "GROUPBY", "1", "@title", "REDUCE", "COUNT", "0",
+                   "AS", "count"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("title", "hello world1", "count", "1"),
+                                         IsMap("title", "hello world2", "count", "1")));
+
+  resp = Run({"FT.CONFIG", "GET", "MAXAGGREGATERESULTS"});
+  EXPECT_THAT(resp, IsArray("MAXAGGREGATERESULTS", IntArg(10000)));
+
+  resp = Run({"FT.CONFIG", "SET", "MAXAGGREGATERESULTS", "1"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.AGGREGATE", "index", "*", "GROUPBY", "1", "@title", "REDUCE", "COUNT", "0", "AS",
+              "count"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(AnyOf(IsMap("title", "hello world1", "count", "1"),
+                                               IsMap("title", "hello world2", "count", "1"))));
+
+  resp = Run({"FT.CONFIG", "GET", "MAXAGGREGATERESULTS"});
+  EXPECT_THAT(resp, IsArray("MAXAGGREGATERESULTS", IntArg(1)));
+}
+
+TEST_F(SearchFamilyTest, InvalidConfigOptions) {
+  // Test with an invalid argument
+  auto resp = Run({"FT.CONFIG", "INVALIDARG", "INVLIDARG"});
+  EXPECT_THAT(resp, ErrArg("Unknown subcommand"));
+
+  // Test with an invalid argument
+  resp = Run({"FT.CONFIG", "GET", "INVALIDARG"});
+  EXPECT_THAT(resp, IsArray());
+
+  // Test with an invalid argument
+  resp = Run({"FT.CONFIG", "SET", "INVALIDARG"});
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
+
+  // Test with an invalid argument
+  resp = Run({"FT.CONFIG", "SET", "INVALIDARG", "5"});
+  EXPECT_THAT(resp, ErrArg("Invalid option"));
+
+  // Test with an invalid value
+  resp = Run({"FT.CONFIG", "SET", "MAXSEARCHRESULTS", "not_a_number"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test with an invalid argument
+  resp = Run({"FT.CONFIG", "HELP", "INVALIDARG"});
+  EXPECT_THAT(resp, IsArray());
+}
+
 }  // namespace dfly

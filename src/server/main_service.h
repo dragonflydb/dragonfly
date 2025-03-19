@@ -16,6 +16,7 @@
 #include "server/command_registry.h"
 #include "server/config_registry.h"
 #include "server/engine_shard_set.h"
+#include "server/search/search_family.h"
 #include "server/server_family.h"
 
 namespace util {
@@ -185,6 +186,7 @@ class Service : public facade::ServiceInterface {
   acl::AclFamily acl_family_;
   ServerFamily server_family_;
   cluster::ClusterFamily cluster_family_;
+  SearchFamily search_family_;
   CommandRegistry registry_;
   absl::flat_hash_map<std::string, unsigned> unknown_cmds_;
 
