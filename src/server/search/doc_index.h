@@ -181,22 +181,19 @@ class SynonymManager {
     std::vector<std::string> terms;
   };
 
-  // Returns next available group ID
-  uint32_t GetNextGroupId() const;
-
   // Get all terms and their group IDs
-  const absl::flat_hash_map<uint32_t, Group>& GetGroups() const;
+  const absl::flat_hash_map<uint32_t, Group>& GetGroups() const {
+    return groups_;
+  }
 
-  // Add new synonym group
-  void AddGroup(uint32_t id, std::vector<std::string> terms);
-
-  // Remove synonym group
-  void RemoveGroup(uint32_t id);
+  // Update or create synonym group
+  void UpdateGroup(uint32_t id, std::vector<std::string> terms) {
+    groups_[id] = Group{id, std::move(terms)};
+  }
 
  private:
   // Maps group ID to group data
   absl::flat_hash_map<uint32_t, Group> groups_;
-  uint32_t next_group_id_ = 1;
 };
 
 // Stores basic info about a document index.
@@ -270,12 +267,11 @@ class ShardDocIndex {
 
   // Get synonym manager for this shard
   const SynonymManager& GetSynonymManager() const {
-    return *synonym_manager_;
+    return synonym_manager_;
   }
 
-  // Replace synonym manager with a new one
-  void SetSynonymManager(std::shared_ptr<SynonymManager> manager) {
-    synonym_manager_ = std::move(manager);
+  SynonymManager& GetSynonymManager() {
+    return synonym_manager_;
   }
 
  private:
@@ -286,7 +282,7 @@ class ShardDocIndex {
   std::shared_ptr<const DocIndex> base_;
   std::optional<search::FieldIndices> indices_;
   DocKeyIndex key_index_;
-  std::shared_ptr<SynonymManager> synonym_manager_ = std::make_shared<SynonymManager>();
+  SynonymManager synonym_manager_;
 };
 
 // Stores shard doc indices by name on a specific shard.

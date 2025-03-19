@@ -1170,10 +1170,8 @@ void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) 
         index_not_found.store(false, std::memory_order_relaxed);
 
         // Update synonym group in this shard
-        SynonymManager synonym_manager = index->GetSynonymManager();
-        synonym_manager.AddGroup(group_id, terms);
-
-        index->SetSynonymManager(std::make_shared<SynonymManager>(synonym_manager));
+        SynonymManager& synonym_manager = index->GetSynonymManager();
+        synonym_manager.UpdateGroup(group_id, terms);
 
         return OpStatus::OK;
       },
