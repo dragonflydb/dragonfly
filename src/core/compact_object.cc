@@ -55,6 +55,29 @@ size_t QlMAllocSize(quicklist* ql, bool slow) {
   return node_size + ql->count * 16;  // we account for each member 16 bytes.
 }
 
+size_t UpdateSize(size_t size, int64_t update) {
+  if (update >= 0) {
+    return size + update;
+  }
+
+  // update < 0, so we need to convert it to unsigned
+  uint64_t unsigned_update = 0;
+  if (update > std::numeric_limits<int64_t>::min()) {
+    unsigned_update = -update;
+  } else {
+    static constexpr uint64_t kMaxUpdate = std::numeric_limits<int64_t>::max();
+    unsigned_update = kMaxUpdate + 1;
+  }
+
+  if (unsigned_update > std::numeric_limits<size_t>::max()) {
+    LOG(DFATAL) << "Overflow. Update size is too large. Size: " << size << ", update: " << update;
+    return 0;
+  }
+
+  DCHECK(static_cast<uint64_t>(size) >= unsigned_update);
+  return size - unsigned_update;
+}
+
 inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
   switch (encoding) {
     case kEncodingStrMap2: {
@@ -927,22 +950,16 @@ void CompactObj::SetJson(JsonType&& j) {
 void CompactObj::SetJsonSize(int64_t size) {
   if (taglen_ == JSON_TAG && JsonEnconding() == kEncodingJsonCons) {
     // JSON.SET or if mem hasn't changed from a JSON op then we just update.
-    if (size < 0) {
-      DCHECK(static_cast<int64_t>(u_.json_obj.cons.bytes_used) >= size);
-    }
-    u_.json_obj.cons.bytes_used += size;
+    u_.json_obj.cons.bytes_used = UpdateSize(u_.json_obj.cons.bytes_used, size);
   }
 }
 
 void CompactObj::AddStreamSize(int64_t size) {
-  if (size < 0) {
-    // We might have a negative size. For example, if we remove a consumer,
-    // the tracker will report a negative net (since we deallocated),
-    // so the object now consumes less memory than it did before. This DCHECK
-    // is for fanity and to catch any potential issues with our tracking approach.
-    DCHECK(static_cast<int64_t>(u_.r_obj.Size()) >= size);
-  }
-  u_.r_obj.SetSize((u_.r_obj.Size() + size));
+  // We might have a negative size. For example, if we remove a consumer,
+  // the tracker will report a negative net (since we deallocated),
+  // so the object now consumes less memory than it did before. This DCHECK
+  // is for fanity and to catch any potential issues with our tracking approach.
+  u_.r_obj.SetSize(UpdateSize(u_.r_obj.Size(), size));
 }
 
 void CompactObj::SetJson(const uint8_t* buf, size_t len) {
