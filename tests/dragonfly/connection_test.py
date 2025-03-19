@@ -1159,6 +1159,32 @@ async def test_pipeline_cache_size(df_factory):
     assert info["dispatch_queue_bytes"] == 0
 
 
+@dfly_args({"proactor_threads": 4, "pipeline_queue_limit": 10})
+async def test_pipeline_overlimit(df_factory: DflyInstanceFactory):
+    server = df_factory.create()
+    server.start()
+
+    client = server.client()
+
+    await client.set("x", "a" * 1024 * 5)
+
+    async def pipe_overlimit():
+        c = server.client()
+        pipe = c.pipeline()
+        for i in range(1000):
+            pipe.get("x")
+        logging.debug("Executing...")
+        res = await pipe.execute()
+        logging.debug(f"Executed.")
+
+    pipeline_tasks = [asyncio.create_task(pipe_overlimit()) for _ in range(20)]
+
+    await asyncio.sleep(2)
+    await client.config_set("pipeline_queue_limit", 10000)
+    for task in pipeline_tasks:
+        await task
+
+
 async def test_client_unpause(df_factory):
     server = df_factory.create()
     server.start()
