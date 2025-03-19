@@ -43,6 +43,13 @@ namespace {
 constexpr XXH64_hash_t kHashSeed = 24061983;
 constexpr size_t kAlignSize = 8u;
 
+// This is needed for LOG_EVERY_N to work.
+#ifdef NDEBUG
+#define FATAL_IF_DEBUG ERROR
+#else
+#define FATAL_IF_DEBUG FATAL
+#endif
+
 // Approximation since does not account for listpacks.
 size_t QlMAllocSize(quicklist* ql, bool slow) {
   size_t node_size = ql->len * sizeof(quicklistNode) + znallocx(sizeof(quicklist));
@@ -61,7 +68,8 @@ size_t UpdateSize(size_t size, int64_t update) {
   }
 
   int64_t result = static_cast<int64_t>(size) + update;
-  DCHECK_GE(result, 0) << "Can't decrease " << size << " from " << -update;
+  LOG_IF_EVERY_N(FATAL_IF_DEBUG, result < 0, 30)
+      << "Can't decrease " << size << " from " << -update;
   return result;
 }
 
