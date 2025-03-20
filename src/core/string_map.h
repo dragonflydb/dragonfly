@@ -147,7 +147,7 @@ class StringMap : public DenseSet {
   void RandomPairs(unsigned int count, std::vector<sds>& keys, std::vector<sds>& vals,
                    bool with_value);
 
-  static sds GetValue(sds key, std::optional<size_t> len = std::nullopt);
+  static sds GetValue(sds key);
 
  private:
   // Reallocate key and/or value if their pages are underutilized.

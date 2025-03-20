@@ -183,8 +183,8 @@ void StringMap::RandomPairs(unsigned int count, std::vector<sds>& keys, std::vec
   }
 }
 
-sds StringMap::GetValue(sds key, std::optional<size_t> len) {
-  char* valptr = key + len.value_or(sdslen(key)) + 1;
+sds StringMap::GetValue(sds key) {
+  char* valptr = key + sdslen(key) + 1;
   const uint64_t val = absl::little_endian::Load64(valptr);
   return (sds)(kValMask & val);
 }
