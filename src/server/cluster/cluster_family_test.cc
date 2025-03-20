@@ -224,14 +224,14 @@ TEST_F(ClusterFamilyTest, ClusterConfigFull) {
       ])json"}),
             "OK");
 
-  string cluster_info = Run({"cluster", "info"}).GetString();
+  string cluster_info = RunPrivileged({"cluster", "info"}).GetString();
   EXPECT_THAT(cluster_info, HasSubstr("cluster_state:ok"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_assigned:16384"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_ok:16384"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:2"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:1"));
 
-  EXPECT_THAT(Run({"cluster", "shards"}),
+  EXPECT_THAT(RunPrivileged({"cluster", "shards"}),
               RespArray(ElementsAre("slots",                                            //
                                     RespArray(ElementsAre(IntArg(0), IntArg(16'383))),  //
                                     "nodes",                                            //
@@ -253,7 +253,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFull) {
                                             "replication-offset", IntArg(0),            //
                                             "health", "online")))))));
 
-  EXPECT_THAT(Run({"cluster", "slots"}),
+  EXPECT_THAT(RunPrivileged({"cluster", "slots"}),
               RespArray(ElementsAre(IntArg(0),              //
                                     IntArg(16'383),         //
                                     RespArray(ElementsAre(  //
@@ -265,7 +265,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFull) {
                                         IntArg(8'000),      //
                                         "wxyz")))));
 
-  EXPECT_EQ(Run({"cluster", "nodes"}),
+  EXPECT_EQ(RunPrivileged({"cluster", "nodes"}),
             "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-16383\n"
             "wxyz 10.0.0.10:8000@8000 slave abcd1234 0 0 0 connected\n");
 }
@@ -338,14 +338,14 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
       ])json"}),
             "OK");
 
-  string cluster_info = Run({"cluster", "info"}).GetString();
+  string cluster_info = RunPrivileged({"cluster", "info"}).GetString();
   EXPECT_THAT(cluster_info, HasSubstr("cluster_state:ok"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_assigned:16384"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_ok:16384"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:7"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:2"));
 
-  EXPECT_THAT(Run({"cluster", "shards"}),
+  EXPECT_THAT(RunPrivileged({"cluster", "shards"}),
               RespArray(ElementsAre(
                   RespArray(ElementsAre("slots",                                                 //
                                         RespArray(ElementsAre(IntArg(0), IntArg(10'000))),       //
@@ -404,7 +404,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
                                                 "replication-offset", IntArg(0),                 //
                                                 "health", "fail")))))))));
 
-  EXPECT_THAT(Run({"cluster", "slots"}),
+  EXPECT_THAT(RunPrivileged({"cluster", "slots"}),
               RespArray(ElementsAre(                            //
                   RespArray(ElementsAre(IntArg(0),              //
                                         IntArg(10'000),         //
@@ -427,7 +427,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
                                             IntArg(8'001),      //
                                             "qwerty")))))));
 
-  EXPECT_THAT(Run({"cluster", "nodes"}),
+  EXPECT_THAT(RunPrivileged({"cluster", "nodes"}),
               "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 disconnected 0-10000\n"
               "wxyz 10.0.0.10:8000@8000 slave abcd1234 0 0 0 connected\n"
               "efgh7890 10.0.0.2:7001@7001 master - 0 0 0 connected 10001-16383\n"

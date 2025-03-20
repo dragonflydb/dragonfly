@@ -459,7 +459,8 @@ async def test_cluster_managed_service_info(df_factory):
             replica_id,
         ]
     )
-    assert await c_master.execute_command("CLUSTER SLOTS") == expected_full_cluster_slots
+    # managed_service_info is ignored for cluster because we have "hidden" health for replica
+    assert await c_master.execute_command("CLUSTER SLOTS") == expected_hidden_cluster_slots
     assert await c_master_admin.execute_command("CLUSTER SLOTS") == expected_full_cluster_slots
 
     expected_hidden_cluster_nodes = {
@@ -489,7 +490,8 @@ async def test_cluster_managed_service_info(df_factory):
         "node_id": replica_id,
         "slots": [],
     }
-    assert await c_master.execute_command("CLUSTER NODES") == expected_full_cluster_nodes
+    # managed_service_info is ignored for cluster because we have "hidden" health for replica
+    assert await c_master.execute_command("CLUSTER NODES") == expected_hidden_cluster_nodes
     assert await c_master_admin.execute_command("CLUSTER NODES") == expected_full_cluster_nodes
 
     expected_hidden_cluster_shards = [
@@ -536,7 +538,8 @@ async def test_cluster_managed_service_info(df_factory):
             "online",
         ]
     )
-    assert await c_master.execute_command("CLUSTER SHARDS") == expected_full_cluster_shards
+    # managed_service_info is ignored for cluster because we have "hidden" health for replica
+    assert await c_master.execute_command("CLUSTER SHARDS") == expected_hidden_cluster_shards
     assert await c_master_admin.execute_command("CLUSTER SHARDS") == expected_full_cluster_shards
 
     await c_master.execute_command("config set managed_service_info true")

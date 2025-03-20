@@ -68,7 +68,7 @@ ClusterShardInfos GetConfigForStats(ConnectionContext* cntx) {
   CHECK(ClusterConfig::Current() != nullptr);
 
   auto config = ClusterConfig::Current()->GetConfig();
-  if (cntx->conn()->IsPrivileged() || !absl::GetFlag(FLAGS_managed_service_info)) {
+  if (cntx->conn()->IsPrivileged()) {
     return config;
   }
 
