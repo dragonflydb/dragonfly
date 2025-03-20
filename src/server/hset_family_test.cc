@@ -507,4 +507,18 @@ TEST_F(HSetFamilyTest, EmptyHashBug) {
   EXPECT_THAT(Run({"EXISTS", "foo"}), IntArg(0));
 }
 
+TEST_F(HSetFamilyTest, ScanAfterExpireSet) {
+  EXPECT_THAT(Run({"HSET", "aset", "afield", "avalue"}), IntArg(1));
+  EXPECT_THAT(Run({"HEXPIRE", "aset", "1", "FIELDS", "1", "afield"}), IntArg(1));
+
+  const auto resp = Run({"HSCAN", "aset", "0", "count", "100"});
+  EXPECT_THAT(resp, ArrLen(2));
+
+  const auto vec = StrArray(resp.GetVec()[1]);
+  EXPECT_EQ(vec.size(), 2);
+
+  EXPECT_THAT(vec, Contains("afield").Times(1));
+  EXPECT_THAT(vec, Contains("avalue").Times(1));
+}
+
 }  // namespace dfly
