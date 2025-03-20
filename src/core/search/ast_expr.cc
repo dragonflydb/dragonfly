@@ -46,7 +46,8 @@ AstLogicalNode::AstLogicalNode(AstNode&& l, AstNode&& r, LogicOp op) : op{op}, n
 }
 
 AstFieldNode::AstFieldNode(string field, AstNode&& node)
-    : field{field.substr(1)}, node{make_unique<AstNode>(std::move(node))} {
+    : field{field[0] == '@' ? field.substr(1) : field},
+      node{make_unique<AstNode>(std::move(node))} {
 }
 
 AstTagsNode::AstTagsNode(TagValue tag) {
@@ -65,7 +66,7 @@ AstKnnNode::AstKnnNode(uint32_t limit, std::string_view field, OwnedFtVector vec
                        std::string_view score_alias, std::optional<size_t> ef_runtime)
     : filter{nullptr},
       limit{limit},
-      field{field.substr(1)},
+      field{field[0] == '@' ? field.substr(1) : field},
       vec{std::move(vec)},
       score_alias{score_alias},
       ef_runtime{ef_runtime} {

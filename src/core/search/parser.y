@@ -131,6 +131,8 @@ search_unary_expr:
   | PREFIX                            { $$ = AstPrefixNode(std::move($1)); }
   | UINT32                            { $$ = AstTermNode(std::move($1)); }
   | FIELD COLON field_cond            { $$ = AstFieldNode(std::move($1), std::move($3)); }
+  | TERM COLON field_cond             { $$ = AstFieldNode(std::move($1), std::move($3)); }
+  | FIELD                             { $$ = AstTermNode(std::move($1)); }
 
 field_cond:
   TERM                                                  { $$ = AstTermNode(std::move($1)); }
