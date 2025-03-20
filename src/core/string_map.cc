@@ -19,15 +19,6 @@ namespace dfly {
 
 namespace {
 
-constexpr uint64_t kValTtlBit = 1ULL << 63;
-constexpr uint64_t kValMask = ~kValTtlBit;
-
-inline sds GetValue(sds key) {
-  char* valptr = key + sdslen(key) + 1;
-  uint64_t val = absl::little_endian::Load64(valptr);
-  return (sds)(kValMask & val);
-}
-
 // Returns key, tagged value pair
 pair<sds, uint64_t> CreateEntry(string_view field, string_view value, uint32_t time_now,
                                 uint32_t ttl_sec) {
@@ -48,7 +39,7 @@ pair<sds, uint64_t> CreateEntry(string_view field, string_view value, uint32_t t
     newkey = AllocSdsWithSpace(field.size(), 8 + 4);
     uint32_t at = time_now + ttl_sec;
     absl::little_endian::Store32(newkey + meta_offset + 8, at);  // skip the value pointer.
-    sdsval_tag |= kValTtlBit;
+    sdsval_tag |= StringMap::kValTtlBit;
   }
 
   if (!field.empty()) {
@@ -187,6 +178,12 @@ void StringMap::RandomPairs(unsigned int count, std::vector<sds>& keys, std::vec
     ++index;
     ++itr;
   }
+}
+
+sds StringMap::GetValue(sds key, std::optional<size_t> len) {
+  char* valptr = key + len.value_or(sdslen(key)) + 1;
+  const uint64_t val = absl::little_endian::Load64(valptr);
+  return (sds)(kValMask & val);
 }
 
 pair<sds, bool> StringMap::ReallocIfNeeded(void* obj, float ratio) {
