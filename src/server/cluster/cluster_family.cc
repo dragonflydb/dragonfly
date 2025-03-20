@@ -63,23 +63,6 @@ constexpr char kIdNotFound[] = "syncid not found";
 constexpr string_view kClusterDisabled =
     "Cluster is disabled. Enabled via passing --cluster_mode=emulated|yes";
 
-ClusterShardInfos GetConfigForStats(ConnectionContext* cntx) {
-  CHECK(!IsClusterEmulated());
-  CHECK(ClusterConfig::Current() != nullptr);
-
-  auto config = ClusterConfig::Current()->GetConfig();
-  if (cntx->conn()->IsPrivileged()) {
-    return config;
-  }
-
-  auto shards_info = config.Unwrap();
-  for (auto& node : shards_info) {
-    node.replicas.clear();
-  }
-
-  return shards_info;
-}
-
 }  // namespace
 
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
@@ -122,7 +105,7 @@ std::optional<ClusterShardInfos> ClusterFamily::GetShardInfos(ConnectionContext*
   }
 
   if (ClusterConfig::Current() != nullptr) {
-    return GetConfigForStats(cntx);
+    return ClusterConfig::Current()->GetConfig();
   }
   return nullopt;
 }
