@@ -2088,7 +2088,6 @@ async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
         proactor_threads=2,
         cache_mode="true",
         maxmemory="512mb",
-        logtostdout="true",
         enable_heartbeat_eviction="false",
         rss_oom_deny_ratio=1.3,
     )
@@ -2098,7 +2097,7 @@ async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_master.execute_command("DEBUG POPULATE 6000 size 88000")
+    await c_master.execute_command("DEBUG POPULATE 6000 size 89000")
 
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)

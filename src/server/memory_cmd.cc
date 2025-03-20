@@ -326,7 +326,7 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
   }
 
   if (show_arenas) {
-    // mi_debug_show_arenas(true, true, true);
+    mi_debug_show_arenas();
     return builder_->SendOk();
   }
 
