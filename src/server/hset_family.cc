@@ -320,8 +320,7 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
       size_t len = sdslen(val);
       if (scan_op.Matches(string_view(val, len))) {
         res.emplace_back(val, len);
-        val += (len + 1);
-        val = (sds)absl::little_endian::Load64(val);
+        val = StringMap::GetValue(val);
         res.emplace_back(val, sdslen(val));
       }
     };
