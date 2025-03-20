@@ -147,9 +147,6 @@ class StringMap : public DenseSet {
   void RandomPairs(unsigned int count, std::vector<sds>& keys, std::vector<sds>& vals,
                    bool with_value);
 
-  static constexpr uint64_t kValTtlBit = 1ULL << 63;
-  static constexpr uint64_t kValMask = ~kValTtlBit;
-
   static sds GetValue(sds key, std::optional<size_t> len = std::nullopt);
 
  private:

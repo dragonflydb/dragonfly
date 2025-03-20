@@ -19,6 +19,9 @@ namespace dfly {
 
 namespace {
 
+constexpr uint64_t kValTtlBit = 1ULL << 63;
+constexpr uint64_t kValMask = ~kValTtlBit;
+
 // Returns key, tagged value pair
 pair<sds, uint64_t> CreateEntry(string_view field, string_view value, uint32_t time_now,
                                 uint32_t ttl_sec) {
@@ -39,7 +42,7 @@ pair<sds, uint64_t> CreateEntry(string_view field, string_view value, uint32_t t
     newkey = AllocSdsWithSpace(field.size(), 8 + 4);
     uint32_t at = time_now + ttl_sec;
     absl::little_endian::Store32(newkey + meta_offset + 8, at);  // skip the value pointer.
-    sdsval_tag |= StringMap::kValTtlBit;
+    sdsval_tag |= kValTtlBit;
   }
 
   if (!field.empty()) {
