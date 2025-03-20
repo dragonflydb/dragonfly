@@ -5,7 +5,6 @@ on:
     - cron: '15 0 * * *'
   workflow_dispatch:
 
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -37,21 +36,22 @@ jobs:
         with:
           fetch-depth: 1
           submodules: true
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to Gcp Artifact Registry
+      - name: Login to Registries
         uses: docker/login-action@v3
         with:
-          registry: us-central1-docker.pkg.dev
-          username: _json_key
-          password: ${{ secrets.GCP_SA_KEY }}
+          registry: |
+            ghcr.io
+            us-central1-docker.pkg.dev
+          username: |
+            ${{ github.repository_owner }}
+            _json_key
+          password: |
+            ${{ secrets.GITHUB_TOKEN }}
+            ${{ secrets.GCP_SA_KEY }}
 
       - name: Get Build Information
         id: build_info
@@ -101,14 +101,9 @@ jobs:
             # docker run with port-forwarding
             docker run -d -p 6379:6379 ${image_tag}
             sleep 5
-            if [[ $(redis-cli -h localhost ping) != "PONG" ]]; then
-              echo "Redis ping failed for ${image_tag}"
-              exit 1
-            fi
-            echo "Redis ping succeeded for ${image_tag}"
+            redis-cli -h localhost ping | grep -q "PONG" || exit 1
             docker stop $(docker ps -q --filter ancestor=${image_tag})
           done
-          exit 0
 
     outputs:
       # matrix jobs outputs override each other, but we use the same sha
@@ -138,24 +133,24 @@ jobs:
 
       - name: Merge and Push
         run: |
-            flavor_tag=${{ env.image }}:${{matrix.flavor}}
-            sha_tag=${flavor_tag}-${{ needs.build_and_tag.outputs.sha }}
+            ghcr_flavor_tag=${{ env.image }}:${{matrix.flavor}}
+            ghcr_sha_tag=${ghcr_flavor_tag}-${{ needs.build_and_tag.outputs.sha }}
 
             # Create and push the manifest like dragonfly-dev:alpine-<sha>
-            docker manifest create ${sha_tag} --amend ${sha_tag}-amd64 --amend ${sha_tag}-arm64
-            docker manifest push ${sha_tag}
+            docker manifest create ${ghcr_sha_tag} --amend ${ghcr_sha_tag}-amd64 --amend ${ghcr_sha_tag}-arm64
+            docker manifest push ${ghcr_sha_tag}
 
             # Create and push the manifest like dragonfly-dev:alpine
-            docker manifest create ${flavor_tag} --amend ${sha_tag}-amd64 --amend ${sha_tag}-arm64
-            docker manifest push ${flavor_tag}
+            docker manifest create ${ghcr_flavor_tag} --amend ${ghcr_sha_tag}-amd64 --amend ${ghcr_sha_tag}-arm64
+            docker manifest push ${ghcr_flavor_tag}
 
-            gcs_tag="${{ env.GCS_IMAGE }}:${{ matrix.flavor }}"
-            gcs_sha=${gcs_tag}-${{ needs.build_and_tag.outputs.sha }}
+            gar_flavor_tag="${{ env.GCS_IMAGE }}:${{ matrix.flavor }}"
+            gar_sha_tag=${gar_flavor_tag}-${{ needs.build_and_tag.outputs.sha }}
 
             # Create and push the manifest like dragonfly-dev:alpine-<sha>
-            docker manifest create ${gcs_sha} --amend ${gcs_sha}-amd64 --amend ${gcs_sha}-arm64
-            docker manifest push ${gcs_sha}
+            docker manifest create ${gar_sha_tag} --amend ${gar_sha_tag}-amd64 --amend ${gar_sha_tag}-arm64
+            docker manifest push ${gar_sha_tag}
 
             # Create and push the manifest like dragonfly-dev:alpine
-            docker manifest create ${gcs_tag} --amend ${gcs_sha}-amd64 --amend ${gcs_sha}-arm64
-            docker manifest push ${gcs_tag}
+            docker manifest create ${gar_flavor_tag} --amend ${gar_sha_tag}-amd64 --amend ${gar_sha_tag}-arm64
+            docker manifest push ${gar_flavor_tag}
