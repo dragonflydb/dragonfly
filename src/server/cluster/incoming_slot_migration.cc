@@ -28,7 +28,7 @@ using namespace facade;
 // It is created per shard on the target node to initiate FLOW step.
 class ClusterShardMigration {
  public:
-  ClusterShardMigration(uint32_t shard_id, Service* service, IncomingSlotMigration* in_migration,
+  ClusterShardMigration(uint32_t shard_id, Service* service, IncomingMigration* in_migration,
                         util::fb2::BlockingCounter bc)
       : source_shard_id_(shard_id),
         is_finished_(false),
@@ -145,36 +145,27 @@ class ClusterShardMigration {
   bool is_finished_ ABSL_GUARDED_BY(mu_);
   util::FiberSocketBase* socket_ ABSL_GUARDED_BY(mu_);
   JournalExecutor executor_;
-  IncomingSlotMigration* in_migration_;
+  IncomingMigration* in_migration_;
   util::fb2::BlockingCounter bc_;
   atomic_long last_attempt_{-1};
   atomic_bool pause_ = false;
 };
 
-IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, SlotRanges slots,
-                                             uint32_t shards_num)
-    : source_id_(std::move(source_id)),
-      service_(*se),
-      slots_(std::move(slots)),
-      state_(MigrationState::C_CONNECTING),
-      bc_(shards_num) {
-  shard_flows_.resize(shards_num);
-  for (unsigned i = 0; i < shards_num; ++i) {
-    shard_flows_[i].reset(new ClusterShardMigration(i, &service_, this, bc_));
-  }
+IncomingMigration::IncomingMigration(string source_id, Service* se, SlotRanges slots)
+    : source_id_(std::move(source_id)), service_(*se), slots_(std::move(slots)), bc_(0) {
 }
 
-IncomingSlotMigration::~IncomingSlotMigration() {
+IncomingMigration::~IncomingMigration() {
 }
 
-void IncomingSlotMigration::Pause(bool pause) {
+void IncomingMigration::Pause(bool pause) {
   VLOG(1) << "Pausing migration " << pause;
   for (auto& flow : shard_flows_) {
     flow->Pause(pause);
   }
 }
 
-bool IncomingSlotMigration::Join(long attempt) {
+bool IncomingMigration::Join(long attempt) {
   const absl::Time start = absl::Now();
   const absl::Duration timeout =
       absl::Milliseconds(absl::GetFlag(FLAGS_migration_finalization_timeout_ms));
@@ -203,7 +194,8 @@ bool IncomingSlotMigration::Join(long attempt) {
     auto wait_res = bc_->WaitFor(wait_time);
     if (is_attempt_correct) {
       if (wait_res) {
-        state_.store(MigrationState::C_FINISHED);
+        util::fb2::LockGuard lk(state_mu_);
+        state_ = MigrationState::C_FINISHED;
         keys_number_ = cluster::GetKeyCount(slots_);
       } else {
         LOG(WARNING) << "Can't join migration because of data after LSN for " << source_id_;
@@ -214,8 +206,9 @@ bool IncomingSlotMigration::Join(long attempt) {
   }
 }
 
-void IncomingSlotMigration::Stop() {
-  string_view log_state = state_.load() == MigrationState::C_FINISHED ? "Finishing" : "Cancelling";
+void IncomingMigration::Stop() {
+  util::fb2::LockGuard lk(state_mu_);
+  string_view log_state = state_ == MigrationState::C_FINISHED ? "Finishing" : "Cancelling";
   LOG(INFO) << log_state << " incoming migration of slots " << slots_.ToString();
   cntx_.Cancel();
 
@@ -244,17 +237,31 @@ void IncomingSlotMigration::Stop() {
   }
 }
 
-void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
-  state_.store(MigrationState::C_SYNC);
+void IncomingMigration::Init(uint32_t shards_num) {
+  util::fb2::LockGuard lk(state_mu_);
+  cntx_.Reset(nullptr);
+  state_ = MigrationState::C_SYNC;
 
+  bc_ = BlockingCounter(shards_num);
+  shard_flows_.resize(shards_num);
+  for (unsigned i = 0; i < shards_num; ++i) {
+    shard_flows_[i].reset(new ClusterShardMigration(i, &service_, this, bc_));
+  }
+}
+
+void IncomingMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
   shard_flows_[shard]->Start(&cntx_, source);
   VLOG(1) << "Incoming flow " << shard << " finished for " << source_id_;
 }
 
-size_t IncomingSlotMigration::GetKeyCount() const {
-  if (state_.load() == MigrationState::C_FINISHED) {
-    return keys_number_;
+size_t IncomingMigration::GetKeyCount() const {
+  {
+    util::fb2::LockGuard lk(state_mu_);
+    if (state_ == MigrationState::C_FINISHED) {
+      return keys_number_;
+    }
   }
+
   return cluster::GetKeyCount(slots_);
 }
 
