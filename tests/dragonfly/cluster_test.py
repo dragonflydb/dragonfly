@@ -539,15 +539,16 @@ async def test_cluster_managed_service_info(df_factory):
     assert await c_master.execute_command("CLUSTER SHARDS") == expected_full_cluster_shards
     assert await c_master_admin.execute_command("CLUSTER SHARDS") == expected_full_cluster_shards
 
+    # this flag doesn't affect cluster anymore so the results will be the same
     await c_master.execute_command("config set managed_service_info true")
 
-    assert await c_master.execute_command("CLUSTER SLOTS") == expected_hidden_cluster_slots
+    assert await c_master.execute_command("CLUSTER SLOTS") == expected_full_cluster_slots
     assert await c_master_admin.execute_command("CLUSTER SLOTS") == expected_full_cluster_slots
 
-    assert await c_master.execute_command("CLUSTER NODES") == expected_hidden_cluster_nodes
+    assert await c_master.execute_command("CLUSTER NODES") == expected_full_cluster_nodes
     assert await c_master_admin.execute_command("CLUSTER NODES") == expected_full_cluster_nodes
 
-    assert await c_master.execute_command("CLUSTER SHARDS") == expected_hidden_cluster_shards
+    assert await c_master.execute_command("CLUSTER SHARDS") == expected_full_cluster_shards
     assert await c_master_admin.execute_command("CLUSTER SHARDS") == expected_full_cluster_shards
 
 
