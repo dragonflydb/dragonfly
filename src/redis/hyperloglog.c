@@ -1370,8 +1370,7 @@ int64_t pfcountSingle(struct HllBufferPtr hll_ptr) {
 }
 
 /* Merge dense-encoded HLL */
-static void hllMergeDense(uint8_t* max, struct HllBufferPtr to) {
-  uint8_t* registers = max + HLL_HDR_SIZE;
+static void hllMergeDense(uint8_t* registers, struct HllBufferPtr to) {
   uint8_t val;
   struct hllhdr* hll_hdr = (struct hllhdr*)to.hll;
 
