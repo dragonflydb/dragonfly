@@ -5,6 +5,7 @@
 #include "server/search/search_family.h"
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/flags/flag.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_format.h>
@@ -28,6 +29,8 @@
 #include "server/search/doc_index.h"
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
+
+ABSL_FLAG(bool, omit_removing_search_at_sign, false, "Omit removing @ from field names");
 
 namespace dfly {
 
@@ -283,20 +286,8 @@ ParseResult<DocIndex> ParseCreateParams(CmdArgParser* parser) {
 
 std::string_view ParseField(CmdArgParser* parser) {
   std::string_view field = parser->Next();
-  if (absl::StartsWith(field, "@"sv)) {
+  if (!absl::GetFlag(FLAGS_omit_removing_search_at_sign) && absl::StartsWith(field, "@"sv)) {
     field.remove_prefix(1);  // remove leading @ if exists
-  }
-  return field;
-}
-
-std::string_view ParseFieldWithAtSign(CmdArgParser* parser) {
-  std::string_view field = parser->Next();
-  if (absl::StartsWith(field, "@"sv)) {
-    field.remove_prefix(1);  // remove leading @
-  } else {
-    // Temporary warning until we can throw an error. Log every 30 seconds
-    LOG_EVERY_T(WARNING, 30) << "bad arguments: Field name '" << field
-                             << "' should start with '@'. '@" << field << "' is expected";
   }
   return field;
 }
@@ -311,7 +302,7 @@ void ParseLoadFields(CmdArgParser* parser, std::optional<SearchFieldsList>* load
   while (parser->HasNext() && num_fields--) {
     string_view str = parser->Next();
 
-    if (absl::StartsWith(str, "@"sv)) {
+    if (!absl::GetFlag(FLAGS_omit_removing_search_at_sign) && absl::StartsWith(str, "@"sv)) {
       str.remove_prefix(1);  // remove leading @
     }
 
@@ -395,7 +386,7 @@ std::optional<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* par
 
   while (parser->HasNext() && strings_num > 0) {
     // TODO: Throw an error if the field has no '@' sign at the beginning
-    std::string_view parsed_field = ParseFieldWithAtSign(parser);
+    std::string_view parsed_field = ParseField(parser);
     strings_num--;
 
     SortOrder sord_order = SortOrder::ASC;
@@ -439,7 +430,7 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       std::vector<std::string> fields;
       fields.reserve(num_fields);
       while (parser->HasNext() && num_fields > 0) {
-        auto parsed_field = ParseFieldWithAtSign(parser);
+        auto parsed_field = ParseField(parser);
 
         /*
         TODO: Throw an error if the field has no '@' sign at the beginning
