@@ -55,6 +55,19 @@ size_t QlMAllocSize(quicklist* ql, bool slow) {
   return node_size + ql->count * 16;  // we account for each member 16 bytes.
 }
 
+size_t UpdateSize(size_t size, int64_t update) {
+  if (update >= 0) {
+    return size + update;
+  }
+
+  int64_t result = static_cast<int64_t>(size) + update;
+  if (result < 0) {
+    DCHECK(false) << "Can't decrease " << size << " from " << -update;
+    LOG_EVERY_N(ERROR, 30) << "Can't decrease " << size << " from " << -update;
+  }
+  return result;
+}
+
 inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
   switch (encoding) {
     case kEncodingStrMap2: {
@@ -927,10 +940,7 @@ void CompactObj::SetJson(JsonType&& j) {
 void CompactObj::SetJsonSize(int64_t size) {
   if (taglen_ == JSON_TAG && JsonEnconding() == kEncodingJsonCons) {
     // JSON.SET or if mem hasn't changed from a JSON op then we just update.
-    if (size < 0) {
-      DCHECK(static_cast<int64_t>(u_.json_obj.cons.bytes_used) >= size);
-    }
-    u_.json_obj.cons.bytes_used += size;
+    u_.json_obj.cons.bytes_used = UpdateSize(u_.json_obj.cons.bytes_used, size);
   }
 }
 
