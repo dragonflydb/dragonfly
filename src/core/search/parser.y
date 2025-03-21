@@ -131,7 +131,7 @@ search_unary_expr:
   | PREFIX                            { $$ = AstPrefixNode(std::move($1)); }
   | UINT32                            { $$ = AstTermNode(std::move($1)); }
   | FIELD COLON field_cond            { $$ = AstFieldNode(std::move($1), std::move($3)); }
-  | TERM_OR_FIELD COLON field_cond    { $$ = AstFieldNode(std::move($1), std::move($3)); }
+//  | TERM_OR_FIELD COLON field_cond    { $$ = AstFieldNode(std::move($1), std::move($3)); }
 
 field_cond:
   TERM_OR_FIELD                                         { $$ = AstTermNode(std::move($1)); }
@@ -168,7 +168,7 @@ field_or_expr:
 field_unary_expr:
   LPAREN field_cond_expr RPAREN                  { $$ = std::move($2); }
   | NOT_OP field_unary_expr                      { $$ = AstNegateNode(std::move($2)); };
-  | TERM_OR_FIELD                                         { $$ = AstTermNode(std::move($1)); }
+  | TERM_OR_FIELD                                { $$ = AstTermNode(std::move($1)); }
   | UINT32                                       { $$ = AstTermNode(std::move($1)); }
 
 tag_list:

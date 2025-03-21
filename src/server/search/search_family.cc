@@ -30,8 +30,6 @@
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 
-ABSL_FLAG(bool, omit_removing_search_at_sign, false, "Omit removing @ from field names");
-
 namespace dfly {
 
 using namespace std;
@@ -286,7 +284,7 @@ ParseResult<DocIndex> ParseCreateParams(CmdArgParser* parser) {
 
 std::string_view ParseField(CmdArgParser* parser) {
   std::string_view field = parser->Next();
-  if (!absl::GetFlag(FLAGS_omit_removing_search_at_sign) && absl::StartsWith(field, "@"sv)) {
+  if (absl::StartsWith(field, "@"sv)) {
     field.remove_prefix(1);  // remove leading @ if exists
   }
   return field;
@@ -302,7 +300,7 @@ void ParseLoadFields(CmdArgParser* parser, std::optional<SearchFieldsList>* load
   while (parser->HasNext() && num_fields--) {
     string_view str = parser->Next();
 
-    if (!absl::GetFlag(FLAGS_omit_removing_search_at_sign) && absl::StartsWith(str, "@"sv)) {
+    if (absl::StartsWith(str, "@"sv)) {
       str.remove_prefix(1);  // remove leading @
     }
 
