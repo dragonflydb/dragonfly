@@ -1039,44 +1039,17 @@ TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
                                    IsMap("even", "true", "count", "51", "distinct_tags", "1",
                                          "distinct_vals", "51", "max_val", "100", "min_val", "0")));
   absl::SetFlag(&FLAGS_search_reject_legacy_field, old_value);
-  resp = Run({"ft.aggregate",
-              "i1",
-              "*",
-              "GROUPBY",
-              "1",
-              "@even",
-              "REDUCE",
-              "count",
-              "0",
-              "as",
-              "count",
-              "REDUCE",
-              "count_distinct",
-              "1",
-              "even",
-              "as",
-              "distinct_tags",
-              "REDUCE",
-              "count_distinct",
-              "1",
-              "value",
-              "as",
-              "distinct_vals",
-              "REDUCE",
-              "max",
-              "1",
-              "value",
-              "as",
-              "max_val",
-              "REDUCE",
-              "min",
-              "1",
-              "value",
-              "as",
-              "min_val",
-              "SORTBY",
-              "1",
-              "count"});
+  // clang-format off
+  resp = Run({"ft.aggregate", "i1", "*",
+                  "GROUPBY", "1", "@even",
+                      "REDUCE", "count", "0", "as", "count",
+                      "REDUCE", "count_distinct", "1", "even", "as", "distinct_tags",
+                      "REDUCE", "count_distinct", "1", "value", "as", "distinct_vals",
+                      "REDUCE", "max", "1", "value", "as", "max_val",
+                      "REDUCE", "min", "1", "value", "as", "min_val",
+                  "SORTBY", "1", "count"});
+  // clang-format on
+
   EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
 }
 
