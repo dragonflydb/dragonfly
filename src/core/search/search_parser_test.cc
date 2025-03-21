@@ -2,11 +2,15 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/flags/flag.h>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/search/base.h"
 #include "core/search/query_driver.h"
 #include "core/search/search.h"
+
+ABSL_DECLARE_FLAG(bool, at_sign_in_field_optional);
 
 namespace dfly::search {
 
@@ -264,6 +268,22 @@ TEST_F(SearchParserTest, KNNfull) {
   NEXT_EQ(TOK_UINT32, string, "15");
 
   NEXT_TOK(TOK_RBRACKET);
+}
+
+TEST_F(SearchParserTest, FieldWithAndWithoutAtSign) {
+  bool old_value = absl::GetFlag(FLAGS_at_sign_in_field_optional);
+
+  absl::SetFlag(&FLAGS_at_sign_in_field_optional, true);
+  auto driver = search::SearchAlgorithm();
+  EXPECT_TRUE(driver.Init("field:term", nullptr));
+  EXPECT_TRUE(driver.Init("@field:term", nullptr));
+
+  absl::SetFlag(&FLAGS_at_sign_in_field_optional, false);
+  auto driver2 = search::SearchAlgorithm();
+  EXPECT_FALSE(driver2.Init("field:term", nullptr));
+  EXPECT_TRUE(driver2.Init("@field:term", nullptr));
+
+  absl::SetFlag(&FLAGS_at_sign_in_field_optional, old_value);
 }
 
 }  // namespace dfly::search
