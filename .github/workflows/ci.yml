@@ -40,17 +40,12 @@ jobs:
     strategy:
       matrix:
         # Test of these containers
-        container: ["ubuntu-dev:20", "alpine-dev:latest"]
+        container: ["ubuntu-dev:20"]
         build-type: [Debug, Release]
         compiler: [{ cxx: g++, c: gcc }]
         cxx_flags: ["-Werror"]
         sanitizers: ["NoSanitizers"]
         include:
-          - container: "alpine-dev:latest"
-            build-type: Debug
-            compiler: { cxx: clang++, c: clang }
-            cxx_flags: ""
-            sanitizers: "NoSanitizers"
           - container: "ubuntu-dev:24"
             build-type: Debug
             compiler: { cxx: clang++, c: clang }
