@@ -136,7 +136,7 @@ jobs:
             -DCMAKE_C_COMPILER="${{matrix.compiler.c}}" \
             -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}} -no-pie" -DWITH_AWS:BOOL=OFF \
+            -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}} -no-pie" \
             -DWITH_ASAN="${ASAN}" \
             -DWITH_USAN="${USAN}" \
             -L
