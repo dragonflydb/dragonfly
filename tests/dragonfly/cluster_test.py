@@ -3168,3 +3168,70 @@ async def test_readonly_replication(
 
     # This behavior can be changed in the future
     assert await r1_node.client.execute_command("GET Y") == None
+
+
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+async def test_cluster_reconnect(df_factory: DflyInstanceFactory):
+    # Check data migration from one node to another
+    instances = [
+        df_factory.create(
+            port=next(next_port),
+            admin_port=next(next_port),
+            vmodule="cluster_family=2,outgoing_slot_migration=2,incoming_slot_migration=2",
+        )
+        for i in range(3)
+    ]
+
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 5999)]
+    nodes[1].slots = [(6000, 8999)]
+    nodes[2].slots = [(9000, 16383)]
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug("Start seeding")
+    await StaticSeeder(key_target=10000).run(nodes[0].client)
+
+    proxy = Proxy("127.0.0.1", next(next_port), "127.0.0.1", nodes[1].instance.admin_port)
+    await proxy.start()
+    task = asyncio.create_task(proxy.serve())
+
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", proxy.port, [(0, 5000)], nodes[1].id),
+    )
+
+    nodes[2].migrations.append(
+        MigrationInfo("127.0.0.1", proxy.port, [(9000, 11000)], nodes[1].id),
+    )
+
+    try:
+        logging.debug("Start migration")
+        await push_config(
+            json.dumps(generate_config(nodes)), [nodes[0].admin_client, nodes[2].admin_client]
+        )
+
+        for _ in range(30):
+            await asyncio.sleep(random.randint(30, 100) / 100)
+            logging.debug("drop connections")
+            proxy.drop_connection()
+            logging.debug(
+                await nodes[0].admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
+            )
+    finally:
+        await proxy.close(task)
+
+    await proxy.start()
+    task = asyncio.create_task(proxy.serve())
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    try:
+        await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
+        await wait_for_status(nodes[2].admin_client, nodes[1].id, "FINISHED")
+
+        await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
+        await wait_for_status(nodes[1].admin_client, nodes[2].id, "FINISHED")
+    finally:
+        await proxy.close(task)
