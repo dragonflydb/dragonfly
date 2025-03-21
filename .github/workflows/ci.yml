@@ -167,6 +167,9 @@ jobs:
           build-folder-name: build
           # Non-release build will not run tests marked as slow or opt_only
           # "not empty" string is needed for release build because pytest command can not get empty string for filter
+          aws-access-key-id: ${{ secrets.AWS_S3_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_S3_ACCESS_SECRET }}
+          s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
           filter: ${{ matrix.build-type == 'Release' && 'not empty' || '(not slow) and (not opt_only)' }}
 
       - name: Upload regression logs on failure
