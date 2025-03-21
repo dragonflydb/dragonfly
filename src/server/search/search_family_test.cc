@@ -4,6 +4,8 @@
 
 #include "server/search/search_family.h"
 
+#include <absl/flags/flag.h>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/error.h"
@@ -15,6 +17,8 @@ using namespace testing;
 using namespace std;
 using namespace util;
 using namespace facade;
+
+ABSL_DECLARE_FLAG(bool, search_reject_legacy_field);
 
 namespace dfly {
 
@@ -989,6 +993,7 @@ TEST_F(SearchFamilyTest, JsonAggregateGroupBy) {
 }
 
 TEST_F(SearchFamilyTest, JsonAggregateGroupByWithoutAtSign) {
+  absl::FlagSaver fs;
   Run({"HSET", "h1", "group", "first", "value", "1"});
   Run({"HSET", "h2", "group", "second", "value", "2"});
   Run({"HSET", "h3", "group", "first", "value", "3"});
@@ -997,11 +1002,15 @@ TEST_F(SearchFamilyTest, JsonAggregateGroupByWithoutAtSign) {
       Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "group", "TAG", "value", "NUMERIC"});
   EXPECT_EQ(resp, "OK");
 
-  // TODO: Throw an error when no '@' is provided in the GROUPBY option
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   resp = Run({"FT.AGGREGATE", "index", "*", "GROUPBY", "1", "group", "REDUCE", "COUNT", "0", "AS",
               "count"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("count", "2", "group", "first"),
                                          IsMap("group", "second", "count", "1")));
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
+  resp = Run({"FT.AGGREGATE", "index", "*", "GROUPBY", "1", "group", "REDUCE", "COUNT", "0", "AS",
+              "count"});
+  EXPECT_THAT(resp, ErrArg("bad arguments: Field name should start with '@'"));
 }
 
 TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
@@ -1011,6 +1020,8 @@ TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
   }
   Run({"ft.create", "i1", "schema", "even", "tag", "sortable", "value", "numeric", "sortable"});
 
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   // clang-format off
   auto resp = Run({"ft.aggregate", "i1", "*",
                   "GROUPBY", "1", "@even",
@@ -1027,6 +1038,19 @@ TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
                                          "distinct_vals", "50", "max_val", "99", "min_val", "1"),
                                    IsMap("even", "true", "count", "51", "distinct_tags", "1",
                                          "distinct_vals", "51", "max_val", "100", "min_val", "0")));
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
+  // clang-format off
+  resp = Run({"ft.aggregate", "i1", "*",
+                  "GROUPBY", "1", "@even",
+                      "REDUCE", "count", "0", "as", "count",
+                      "REDUCE", "count_distinct", "1", "even", "as", "distinct_tags",
+                      "REDUCE", "count_distinct", "1", "value", "as", "distinct_vals",
+                      "REDUCE", "max", "1", "value", "as", "max_val",
+                      "REDUCE", "min", "1", "value", "as", "min_val",
+                  "SORTBY", "1", "count"});
+  // clang-format on
+
+  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
 }
 
 TEST_F(SearchFamilyTest, AggregateLoadGroupBy) {
@@ -1237,12 +1261,19 @@ TEST_F(SearchFamilyTest, WrongFieldTypeJson) {
       resp, IsMapWithSize("j2", IsMap("$", R"({"value":1})"), "j4",
                           IsMap("$", R"({"another_value":2,"value":2})", "$.another_value", "2")));
 
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   resp = Run({"FT.AGGREGATE", "i2", "*", "LOAD", "2", "$.value", "$.another_value", "GROUPBY", "2",
               "$.value", "$.another_value", "REDUCE", "COUNT", "0", "AS", "count"});
   EXPECT_THAT(resp,
               IsUnordArrayWithSize(
                   IsMap("$.value", "1", "$.another_value", ArgType(RespExpr::NIL), "count", "1"),
                   IsMap("$.value", "2", "$.another_value", "2", "count", "1")));
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
+
+  resp = Run({"FT.AGGREGATE", "i2", "*", "LOAD", "2", "$.value", "$.another_value", "GROUPBY", "2",
+              "$.value", "$.another_value", "REDUCE", "COUNT", "0", "AS", "count"});
+  EXPECT_THAT(resp, ErrArg("bad arguments: Field name should start with '@'"));
 
   // Test multiple field values
   Run({"JSON.SET", "j5", ".", R"({"arr":[{"id":1},{"id":"two"}]})"});
@@ -1653,19 +1684,33 @@ TEST_F(SearchFamilyTest, AggregateResultFields) {
   resp = Run({"FT.AGGREGATE", "i1", "*"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap(), IsMap(), IsMap()));
 
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("a", "1"), IsMap("a", "4"), IsMap("a", "7")));
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
+  resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a"});
+  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
 
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "@b", "SORTBY", "1", "a"});
   EXPECT_THAT(resp,
               IsUnordArrayWithSize(IsMap("b", "\"2\"", "a", "1"), IsMap("b", "\"5\"", "a", "4"),
                                    IsMap("b", "\"8\"", "a", "7")));
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
+  resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "@b", "SORTBY", "1", "a"});
+  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
 
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a", "GROUPBY", "2", "@b", "@a", "REDUCE",
               "COUNT", "0", "AS", "count"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("b", "\"8\"", "a", "7", "count", "1"),
                                          IsMap("b", "\"2\"", "a", "1", "count", "1"),
                                          IsMap("b", "\"5\"", "a", "4", "count", "1")));
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
+  resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a", "GROUPBY", "2", "@b", "@a", "REDUCE",
+              "COUNT", "0", "AS", "count"});
+  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
 
   Run({"JSON.SET", "j4", ".", R"({"id":1, "number":4})"});
   Run({"JSON.SET", "j5", ".", R"({"id":2})"});
