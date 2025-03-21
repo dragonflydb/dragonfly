@@ -381,6 +381,8 @@ async def test_s3_save_local_dir(async_client):
     seeder = StaticSeeder(key_target=10_000)
     await seeder.run(async_client)
 
+    list_s3_objects(os.environ["DRAGONFLY_S3_BUCKET"])
+
     try:
         # SAVE to S3 bucket with `s3_dump` as filename prefix
         await async_client.execute_command(
