@@ -75,7 +75,7 @@ class RobjWrapper {
   bool DefragIfNeeded(float ratio);
 
   // as defined in zset.h
-  int ZsetAdd(double score, char* ele, int in_flags, int* out_flags, double* newscore);
+  int ZsetAdd(double score, std::string_view ele, int in_flags, int* out_flags, double* newscore);
 
  private:
   void ReallocateString(MemoryResource* mr);

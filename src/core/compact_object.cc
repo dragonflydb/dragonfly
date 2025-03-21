@@ -609,7 +609,8 @@ bool RobjWrapper::DefragIfNeeded(float ratio) {
   return false;
 }
 
-int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, double* newscore) {
+int RobjWrapper::ZsetAdd(double score, std::string_view ele, int in_flags, int* out_flags,
+                         double* newscore) {
   *out_flags = 0; /* We'll return our response flags. */
   double curscore;
 
@@ -631,7 +632,7 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
     unsigned char* eptr;
     uint8_t* lp = (uint8_t*)inner_obj_;
 
-    if ((eptr = zzlFind(lp, ele, &curscore)) != NULL) {
+    if ((eptr = ZzlFind(lp, ele, &curscore)) != NULL) {
       /* NX? Return, same element already exists. */
       if (nx) {
         *out_flags |= ZADD_OUT_NOP;
@@ -671,7 +672,7 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
       /* check if the element is too large or the list
        * becomes too long *before* executing zzlInsert. */
       if (zl_len >= server.zset_max_listpack_entries ||
-          sdslen(ele) > server.zset_max_listpack_value) {
+          ele.size() > server.zset_max_listpack_value) {
         inner_obj_ = SortedMap::FromListPack(tl.local_mr, lp);
         lpFree(lp);
         encoding_ = OBJ_ENCODING_SKIPLIST;
@@ -691,8 +692,7 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
 
   CHECK_EQ(encoding_, OBJ_ENCODING_SKIPLIST);
   SortedMap* ss = (SortedMap*)inner_obj_;
-  string_view elem(ele, sdslen(ele));
-  return ss->AddElem(score, elem, in_flags, out_flags, newscore);
+  return ss->AddElem(score, ele, in_flags, out_flags, newscore);
 }
 
 void RobjWrapper::ReallocateString(MemoryResource* mr) {
