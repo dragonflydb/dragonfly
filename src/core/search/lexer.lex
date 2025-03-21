@@ -76,7 +76,7 @@ tag_val_char {term_char}|\\[,.<>{}\[\]\\\"\':;!@#$%^&*()\-+=~\/ ]
 "@"{term_char}+ return Parser::make_FIELD(str(), loc());
 {term_char}+"*" return Parser::make_PREFIX(str(), loc());
 
-{term_char}+ return Parser::make_TERM(str(), loc());
+{term_char}+ return Parser::make_TERM_OR_FIELD(str(), loc());
 {tag_val_char}+   return make_TagVal(str(), loc());
 
 <<EOF>>    return Parser::make_YYEOF(loc());
@@ -87,7 +87,7 @@ Parser::symbol_type make_StringLit(string_view src, const Parser::location_type&
   if (!absl::CUnescape(src, &res))
     throw Parser::syntax_error (loc, "bad escaped string: " + string(src));
 
-  return Parser::make_TERM(res, loc);
+  return Parser::make_TERM_OR_FIELD(res, loc);
 }
 
 Parser::symbol_type make_TagVal(string_view src, const Parser::location_type& loc) {

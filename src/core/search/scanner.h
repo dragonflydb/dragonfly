@@ -47,7 +47,7 @@ class Scanner : public Lexer {
 
     uint32_t val = 0;
     if (!absl::SimpleAtoi(str, &val))
-      return Parser::make_TERM(std::string{str}, loc);
+      return Parser::make_TERM_OR_FIELD(std::string{str}, loc);
 
     return Parser::make_UINT32(std::string{str}, loc);
   }

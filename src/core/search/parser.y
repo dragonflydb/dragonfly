@@ -65,9 +65,9 @@ double toDouble(string_view src);
 
 // Needed 0 at the end to satisfy bison 3.5.1
 %token YYEOF 0
-%token <std::string> TERM "term" TAG_VAL "tag_val" PARAM "param" FIELD "field" PREFIX "prefix"
+%token <std::string> TERM_OR_FIELD "term_or_field" TAG_VAL "tag_val" PARAM "param" FIELD "field" PREFIX "prefix"
 
-%precedence TERM TAG_VAL
+%precedence TERM_OR_FIELD TAG_VAL
 %left OR_OP
 %left AND_OP
 %right NOT_OP
@@ -96,11 +96,11 @@ final_query:
       { driver->Set(AstKnnNode(std::move($1), std::move($3))); }
 
 knn_query:
-  LBRACKET KNN UINT32 FIELD TERM opt_knn_alias opt_ef_runtime RBRACKET
+  LBRACKET KNN UINT32 FIELD TERM_OR_FIELD opt_knn_alias opt_ef_runtime RBRACKET
     { $$ = AstKnnNode(toUint32($3), $4, BytesToFtVector($5), $6, $7); }
 
 opt_knn_alias:
-  AS TERM { $$ = std::move($2); }
+  AS TERM_OR_FIELD { $$ = std::move($2); }
   | { $$ = std::string{}; }
 
 opt_ef_runtime:
@@ -127,15 +127,14 @@ search_or_expr:
 search_unary_expr:
   LPAREN search_expr RPAREN           { $$ = std::move($2); }
   | NOT_OP search_unary_expr          { $$ = AstNegateNode(std::move($2)); }
-  | TERM                              { $$ = AstTermNode(std::move($1)); }
+  | TERM_OR_FIELD                     { $$ = AstTermNode(std::move($1)); }
   | PREFIX                            { $$ = AstPrefixNode(std::move($1)); }
   | UINT32                            { $$ = AstTermNode(std::move($1)); }
   | FIELD COLON field_cond            { $$ = AstFieldNode(std::move($1), std::move($3)); }
-  | TERM COLON field_cond             { $$ = AstFieldNode(std::move($1), std::move($3)); }
-  | FIELD                             { $$ = AstTermNode(std::move($1)); }
+  | TERM_OR_FIELD COLON field_cond    { $$ = AstFieldNode(std::move($1), std::move($3)); }
 
 field_cond:
-  TERM                                                  { $$ = AstTermNode(std::move($1)); }
+  TERM_OR_FIELD                                         { $$ = AstTermNode(std::move($1)); }
   | UINT32                                              { $$ = AstTermNode(std::move($1)); }
   | NOT_OP field_cond                                   { $$ = AstNegateNode(std::move($2)); }
   | LPAREN field_cond_expr RPAREN                       { $$ = std::move($2); }
@@ -169,7 +168,7 @@ field_or_expr:
 field_unary_expr:
   LPAREN field_cond_expr RPAREN                  { $$ = std::move($2); }
   | NOT_OP field_unary_expr                      { $$ = AstNegateNode(std::move($2)); };
-  | TERM                                         { $$ = AstTermNode(std::move($1)); }
+  | TERM_OR_FIELD                                         { $$ = AstTermNode(std::move($1)); }
   | UINT32                                       { $$ = AstTermNode(std::move($1)); }
 
 tag_list:
@@ -177,11 +176,11 @@ tag_list:
   | tag_list OR_OP tag_list_element      { $$ = AstTagsNode(std::move($1), std::move($3)); }
 
 tag_list_element:
-  TERM        { $$ = AstTermNode(std::move($1)); }
-  | PREFIX    { $$ = AstPrefixNode(std::move($1)); }
-  | UINT32    { $$ = AstTermNode(std::move($1)); }
-  | DOUBLE    { $$ = AstTermNode(std::move($1)); }
-  | TAG_VAL   { $$ = AstTermNode(std::move($1)); }
+  TERM_OR_FIELD { $$ = AstTermNode(std::move($1)); }
+  | PREFIX      { $$ = AstPrefixNode(std::move($1)); }
+  | UINT32      { $$ = AstTermNode(std::move($1)); }
+  | DOUBLE      { $$ = AstTermNode(std::move($1)); }
+  | TAG_VAL     { $$ = AstTermNode(std::move($1)); }
 
 
 %%
