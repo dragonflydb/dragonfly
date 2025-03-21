@@ -69,8 +69,8 @@ TEST_F(SearchParserTest, Scanner) {
   // 3.5.1 does not have name() method.
   // EXPECT_STREQ("term", tok.name());
 
-  NEXT_EQ(TOK_TERM, string, "ab");
-  NEXT_EQ(TOK_TERM, string, "cd");
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, "ab");
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, "cd");
   NEXT_TOK(TOK_YYEOF);
 
   SetInput("*");
@@ -78,23 +78,23 @@ TEST_F(SearchParserTest, Scanner) {
 
   SetInput("(5a 6) ");
   NEXT_TOK(TOK_LPAREN);
-  NEXT_EQ(TOK_TERM, string, "5a");
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, "5a");
   NEXT_EQ(TOK_UINT32, string, "6");
   NEXT_TOK(TOK_RPAREN);
 
   SetInput(R"( "hello\"world" )");
-  NEXT_EQ(TOK_TERM, string, R"(hello"world)");
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, R"(hello"world)");
 
   SetInput("@field:hello");
   NEXT_EQ(TOK_FIELD, string, "@field");
   NEXT_TOK(TOK_COLON);
-  NEXT_EQ(TOK_TERM, string, "hello");
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, "hello");
 
   SetInput("@field:{ tag }");
   NEXT_EQ(TOK_FIELD, string, "@field");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_TERM, string, "tag");
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, "tag");
   NEXT_TOK(TOK_RCURLBR);
 
   SetInput("@color:{blue\\,1\\\\\\$\\+}");
@@ -175,17 +175,17 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_EQ(TOK_FIELD, string, "@color");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_TERM, string, "prefix*");
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, "prefix*");
   NEXT_TOK(TOK_RCURLBR);
 
   // Prefix spaced with star
   SetInput("pre *");
-  NEXT_EQ(TOK_TERM, string, "pre");
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, "pre");
   NEXT_TOK(TOK_STAR);
 
   SetInput("почтальон Печкин");
-  NEXT_EQ(TOK_TERM, string, "почтальон");
-  NEXT_EQ(TOK_TERM, string, "Печкин");
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, "почтальон");
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, "Печкин");
 
   SetInput("33.3");
   NEXT_EQ(TOK_DOUBLE, string, "33.3");
@@ -219,23 +219,23 @@ TEST_F(SearchParserTest, ParseParams) {
   SetParams(&params);
 
   SetInput("$name $k");
-  NEXT_EQ(TOK_TERM, string, "alex");
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, "alex");
   NEXT_EQ(TOK_UINT32, string, "10");
 }
 
 TEST_F(SearchParserTest, Quotes) {
   SetInput(" \"fir  st\"  'sec@o@nd' \":third:\" 'four\\\"th' ");
-  NEXT_EQ(TOK_TERM, string, "fir  st");
-  NEXT_EQ(TOK_TERM, string, "sec@o@nd");
-  NEXT_EQ(TOK_TERM, string, ":third:");
-  NEXT_EQ(TOK_TERM, string, "four\"th");
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, "fir  st");
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, "sec@o@nd");
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, ":third:");
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, "four\"th");
 }
 
 TEST_F(SearchParserTest, Numeric) {
   SetInput("11 123123123123 '22'");
   NEXT_EQ(TOK_UINT32, string, "11");
   NEXT_EQ(TOK_DOUBLE, string, "123123123123");
-  NEXT_EQ(TOK_TERM, string, "22");
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, "22");
 }
 
 TEST_F(SearchParserTest, KNN) {
@@ -254,10 +254,10 @@ TEST_F(SearchParserTest, KNNfull) {
   NEXT_TOK(TOK_KNN);
   NEXT_EQ(TOK_UINT32, string, "1");
   NEXT_TOK(TOK_FIELD);
-  NEXT_TOK(TOK_TERM);
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, "field_vec");
 
   NEXT_TOK(TOK_AS);
-  NEXT_EQ(TOK_TERM, string, "vec_sort");
+  NEXT_EQ(TOK_TERM_OR_FIELD, string, "vec_sort");
 
   NEXT_TOK(TOK_EF_RUNTIME);
   NEXT_EQ(TOK_UINT32, string, "15");
