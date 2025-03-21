@@ -174,10 +174,9 @@ class CommandRegistry {
     }
 
     if (const auto it = cmd_aliases_.find(cmd); it != cmd_aliases_.end()) {
-      if (it->first == it->second) {
-        return nullptr;
+      if (const auto alias_lookup = cmd_map_.find(it->second); alias_lookup != cmd_map_.end()) {
+        return &alias_lookup->second;
       }
-      return Find(it->second);
     }
     return nullptr;
   }
