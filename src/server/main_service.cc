@@ -714,7 +714,8 @@ Service::Service(ProactorPool* pp)
     : pp_(*pp),
       acl_family_(&user_registry_, pp),
       server_family_(this),
-      cluster_family_(&server_family_) {
+      cluster_family_(&server_family_),
+      search_family_(&server_family_) {
   CHECK(pp);
   CHECK(shard_set == NULL);
 
@@ -2694,10 +2695,10 @@ void Service::RegisterCommands() {
   JsonFamily::Register(&registry_);
   BitOpsFamily::Register(&registry_);
   HllFamily::Register(&registry_);
-  SearchFamily::Register(&registry_);
   BloomFamily::Register(&registry_);
   server_family_.Register(&registry_);
   cluster_family_.Register(&registry_);
+  search_family_.Register(&registry_);
 
   // AclFamily should always be registered last
   // If we add a new familly, register that first above and *not* below
