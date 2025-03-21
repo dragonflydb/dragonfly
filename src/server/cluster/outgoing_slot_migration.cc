@@ -197,7 +197,7 @@ void OutgoingMigration::SyncFb() {
 
     if (cntx_.IsError()) {
       ResetError();
-      ThisFiber::SleepFor(500ms);  // wait some time before next retry
+      // ThisFiber::SleepFor(500ms);  // wait some time before next retry
     }
 
     VLOG(1) << "Connecting to target node";
@@ -229,7 +229,7 @@ void OutgoingMigration::SyncFb() {
         if (passed >= absl::Milliseconds(30000)) {
           cntx_.ReportError(GenericError(LastResponseArgs().front().GetString()));
         } else {
-          ThisFiber::SleepFor(500ms);  // to prevent too many attempts
+          // ThisFiber::SleepFor(500ms);  // to prevent too many attempts
         }
       } else {
         cntx_.ReportError(GenericError(LastResponseArgs().front().GetString()));
