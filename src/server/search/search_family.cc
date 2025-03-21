@@ -30,8 +30,7 @@
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 
-ABSL_FLAG(bool, omit_warn_msg_atprefix, false,
-          "FT.AGGREGATE: Omit warning log message for at prefix.");
+ABSL_FLAG(bool, search_reject_legacy_field, true, "FT.AGGREGATE: Reject legacy field names.");
 
 namespace dfly {
 
@@ -293,14 +292,13 @@ std::string_view ParseField(CmdArgParser* parser) {
   return field;
 }
 
-std::string_view ParseFieldWithAtSign(CmdArgParser* parser) {
+std::optional<std::string_view> ParseFieldWithAtSign(CmdArgParser* parser) {
   std::string_view field = parser->Next();
   if (absl::StartsWith(field, "@"sv)) {
     field.remove_prefix(1);  // remove leading @
   } else {
-    if (!absl::GetFlag(FLAGS_omit_warn_msg_atprefix)) {
-      LOG_EVERY_T(WARNING, 30) << "bad arguments: Field name '" << field
-                               << "' should start with '@'. '@" << field << "' is expected";
+    if (absl::GetFlag(FLAGS_search_reject_legacy_field)) {
+      return std::nullopt;
     }
   }
   return field;
@@ -399,8 +397,10 @@ std::optional<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* par
   sort_params.fields.reserve(strings_num / 2);
 
   while (parser->HasNext() && strings_num > 0) {
-    // TODO: Throw an error if the field has no '@' sign at the beginning
-    std::string_view parsed_field = ParseFieldWithAtSign(parser);
+    std::optional<std::string_view> parsed_field = ParseFieldWithAtSign(parser);
+    if (!parsed_field) {
+      return std::nullopt;
+    }
     strings_num--;
 
     SortOrder sord_order = SortOrder::ASC;
@@ -412,7 +412,7 @@ std::optional<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* par
       }
     }
 
-    sort_params.fields.emplace_back(parsed_field, sord_order);
+    sort_params.fields.emplace_back(*parsed_field, sord_order);
   }
 
   if (strings_num) {
@@ -445,8 +445,11 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       fields.reserve(num_fields);
       while (parser->HasNext() && num_fields > 0) {
         auto parsed_field = ParseFieldWithAtSign(parser);
+        if (!parsed_field) {
+          return CreateSyntaxError("bad arguments: Field name should start with '@'"sv);
+        }
 
-        fields.emplace_back(parsed_field);
+        fields.emplace_back(*parsed_field);
         num_fields--;
       }
 
