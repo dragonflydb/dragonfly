@@ -24,6 +24,8 @@
 
 // Added to cc file
 %code {
+#include <absl/flags/flag.h>
+
 #include "core/search/query_driver.h"
 #include "core/search/vector_utils.h"
 
@@ -33,6 +35,8 @@ using namespace std;
 
 uint32_t toUint32(string_view src);
 double toDouble(string_view src);
+
+ABSL_FLAG(bool, at_sign_in_field_optional, false, "Backward compatibility flag. If true, @ sign in field name is optional.");
 
 }
 
@@ -131,7 +135,13 @@ search_unary_expr:
   | PREFIX                            { $$ = AstPrefixNode(std::move($1)); }
   | UINT32                            { $$ = AstTermNode(std::move($1)); }
   | FIELD COLON field_cond            { $$ = AstFieldNode(std::move($1), std::move($3)); }
-//  | TERM_OR_FIELD COLON field_cond    { $$ = AstFieldNode(std::move($1), std::move($3)); }
+  | TERM_OR_FIELD COLON field_cond    {
+    if (absl::GetFlag(FLAGS_at_sign_in_field_optional)) {
+      $$ = AstFieldNode(std::move($1), std::move($3));
+    } else {
+      error(@1, "Query syntax error");
+    }
+  }
 
 field_cond:
   TERM_OR_FIELD                                         { $$ = AstTermNode(std::move($1)); }
