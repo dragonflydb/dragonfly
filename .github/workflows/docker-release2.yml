@@ -52,17 +52,10 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Login to Registries
-        uses: docker/login-action@v3
+        uses: ./.github/actions/multi-registry-docker-login
         with:
-          registry: |
-            ghcr.io
-            us-central1-docker.pkg.dev
-          username: |
-            ${{ github.repository_owner }}
-            _json_key
-          password: |
-            ${{ secrets.GITHUB_TOKEN }}
-            ${{ secrets.GCP_SA_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
 
       - name: Fetch release asset
         uses: dsaltares/fetch-gh-release-asset@1.1.2
@@ -138,18 +131,14 @@ jobs:
       matrix:
         flavor: [ubuntu]
     steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
       - name: Login to Registries
-        uses: docker/login-action@v3
+        uses: ./.github/actions/multi-registry-docker-login
         with:
-          registry: |
-            ghcr.io
-            us-central1-docker.pkg.dev
-          username: |
-            ${{ github.repository_owner }}
-            _json_key
-          password: |
-            ${{ secrets.GITHUB_TOKEN }}
-            ${{ secrets.GCP_SA_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
 
       - name: Merge and Push
         run: |

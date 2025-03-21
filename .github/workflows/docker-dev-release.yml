@@ -41,17 +41,10 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Login to Registries
-        uses: docker/login-action@v3
+        uses: ./.github/actions/multi-registry-docker-login
         with:
-          registry: |
-            ghcr.io
-            us-central1-docker.pkg.dev
-          username: |
-            ${{ github.repository_owner }}
-            _json_key
-          password: |
-            ${{ secrets.GITHUB_TOKEN }}
-            ${{ secrets.GCP_SA_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
 
       - name: Get Build Information
         id: build_info
@@ -117,19 +110,14 @@ jobs:
       matrix:
         flavor: [alpine,ubuntu]
     steps:
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: checkout
+        uses: actions/checkout@v4
 
-      - name: Login to Gcp Artifact Registry
-        uses: docker/login-action@v3
+      - name: Login to Registries
+        uses: ./.github/actions/multi-registry-docker-login
         with:
-          registry: us-central1-docker.pkg.dev
-          username: _json_key
-          password: ${{ secrets.GCP_SA_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
 
       - name: Merge and Push
         run: |
