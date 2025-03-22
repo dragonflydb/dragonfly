@@ -326,6 +326,17 @@ def delete_s3_objects(bucket, prefix):
     )
 
 
+def list_s3_objects(bucket):
+    client = boto3.client("s3")
+    resp = client.list_objects_v2(Bucket=bucket)
+    logger = logging.getLogger(__name__)
+    logger.debug("+++ list_s3_objects")
+    logger.debug(resp)
+    for obj in resp["Contents"]:
+        logger.debug(": " + obj["Key"])
+    logger.debug("++ list_s3_objects")
+
+
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
 # configured.
 @pytest.mark.skipif(
@@ -370,13 +381,18 @@ async def test_s3_save_local_dir(async_client):
     seeder = StaticSeeder(key_target=10_000)
     await seeder.run(async_client)
 
+    # list_s3_objects(os.environ["DRAGONFLY_S3_BUCKET"])
+
     try:
         # SAVE to S3 bucket with `s3_dump` as filename prefix
-        await async_client.execute_command(
+        v = await async_client.execute_command(
             "SAVE", "DF", "s3://" + os.environ["DRAGONFLY_S3_BUCKET"], "s3_dump"
         )
+        logger = logging.getLogger(__name__)
+        logger.debug(v)
 
     finally:
+        list_s3_objects(os.environ["DRAGONFLY_S3_BUCKET"])
         delete_s3_objects(
             os.environ["DRAGONFLY_S3_BUCKET"],
             "s3_dump",
