@@ -3,6 +3,7 @@ import argparse
 from argparse import RawTextHelpFormatter
 import json
 import math
+from typing import Iterable
 import redis
 import subprocess
 import time
@@ -46,6 +47,7 @@ def start_node(node, dragonfly_bin, threads):
             "--dbfilename=",
             f"--logtostderr",
             "--proactor_affinity_mode=off",
+            "--omit_basic_usage",
         ],
         stderr=f,
     )
@@ -71,6 +73,55 @@ def send_command(node, command, print_errors=True):
     return Exception()
 
 
+class SlotRange:
+    def __init__(self, start, end):
+        assert start <= end
+        self.start = start
+        self.end = end
+
+    def to_dict(self):
+        return {"start": self.start, "end": self.end}
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(d["start"], d["end"])
+
+    def __repr__(self):
+        return f"({self.start}-{self.end})"
+
+    def merge(self, other):
+        if self.end + 1 == other.start:
+            self.end = other.end
+            return True
+        elif other.end + 1 == self.start:
+            self.start = other.start
+            return True
+        return False
+
+    def contains(self, slot_id):
+        return self.start <= slot_id <= self.end
+
+    def split(self, slot_id):
+        assert self.contains(slot_id)
+
+        if self.start < self.end:
+            if slot_id == self.start:
+                return None, SlotRange(self.start + 1, self.end)
+            elif slot_id == self.end:
+                return SlotRange(self.start, self.end - 1), None
+            elif self.start < slot_id < self.end:
+                return SlotRange(self.start, slot_id - 1), SlotRange(slot_id + 1, self.end)
+        return None, None
+
+
+# Custom JSON encoder to handle SlotRange objects
+class ClusterConfigEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, SlotRange):
+            return obj.to_dict()
+        return super().default(obj)
+
+
 def build_node(node):
     return {"id": node.id, "ip": node.host, "port": node.port}
 
@@ -81,15 +132,16 @@ def build_config_from_list(masters):
 
     config = []
     for i, master in enumerate(masters):
+        slot_range = SlotRange(i * slots_per_node, (i + 1) * slots_per_node - 1)
         c = {
-            "slot_ranges": [{"start": i * slots_per_node, "end": (i + 1) * slots_per_node - 1}],
+            "slot_ranges": [slot_range],
             "master": build_node(master.node),
             "replicas": [build_node(replica) for replica in master.replicas],
         }
-
         config.append(c)
 
-    config[-1]["slot_ranges"][-1]["end"] += total_slots % len(masters)
+    # Adjust the last slot range to include any remaining slots
+    config[-1]["slot_ranges"][-1].end += total_slots % len(masters)
     return config
 
 
@@ -106,7 +158,8 @@ def get_nodes_from_config(config):
 
 def push_config(config):
     def push_to_node(node, config):
-        config_str = json.dumps(config, indent=2)
+        # Use the custom encoder to convert SlotRange objects during serialization
+        config_str = json.dumps(config, indent=2, cls=ClusterConfigEncoder)
         response = send_command(node, ["dflycluster", "config", config_str])
         print(f"- Push to {node.port}: {response}")
 
@@ -191,7 +244,7 @@ def build_config_from_existing(args):
     def build_slots(slot_list):
         slots = []
         for i in range(0, len(slot_list), 2):
-            slots.append({"start": slot_list[i], "end": slot_list[i + 1]})
+            slots.append(SlotRange(slot_list[i], slot_list[i + 1]))
         return slots
 
     client = redis.Redis(decode_responses=True, host=args.target_host, port=args.target_port)
@@ -308,68 +361,42 @@ def move(args):
     config = build_config_from_existing(args)
     new_owner = find_master(config, args.target_host, args.target_port)
 
-    def remove_slot(slot, from_range, from_shard):
-        if from_range["start"] == slot:
-            from_range["start"] += 1
-            if from_range["start"] > from_range["end"]:
-                from_shard["slot_ranges"].remove(from_range)
-        elif from_range["end"] == slot:
-            from_range["end"] -= 1
-            if from_range["start"] > from_range["end"]:
-                from_shard["slot_ranges"].remove(from_range)
-        else:
-            assert (
-                slot > from_range["start"] and slot < from_range["end"]
-            ), f'{slot} {from_range["start"]} {from_range["end"]}'
-            from_shard["slot_ranges"].append({"start": slot + 1, "end": from_range["end"]})
-            from_range["end"] = slot - 1
+    def remove_slot(slot, from_range: SlotRange, from_shard):
+        left, right = from_range.split(slot)
+        if left:
+            from_shard["slot_ranges"].append(left)
+        if right:
+            from_shard["slot_ranges"].append(right)
+        from_shard["slot_ranges"].remove(from_range)
 
     def add_slot(slot, to_shard):
-        for slot_range in to_shard["slot_ranges"]:
-            if slot == slot_range["start"] - 1:
-                slot_range["start"] -= 1
+        slot_range = SlotRange(slot, slot)
+        for existing_range in to_shard["slot_ranges"]:
+            if existing_range.merge(slot_range):
                 return
-            if slot == slot_range["end"] + 1:
-                slot_range["end"] += 1
-                return
-        to_shard["slot_ranges"].append({"start": slot, "end": slot})
+        to_shard["slot_ranges"].append(slot_range)
 
     def find_slot(slot, config):
         for shard in config:
             if shard == new_owner:
                 continue
             for slot_range in shard["slot_ranges"]:
-                if slot >= slot_range["start"] and slot <= slot_range["end"]:
+                if slot_range.contains(slot):
                     return shard, slot_range
         return None, None
 
     def pack(slot_ranges):
-        new_range = []
-        while True:
-            changed = False
-            new_range = []
-            slot_ranges.sort(key=lambda x: x["start"])
-            for i, slot_range in enumerate(slot_ranges):
-                added = False
-                for j in range(i):
-                    prev_slot_range = slot_ranges[j]
-                    if prev_slot_range["end"] + 1 == slot_range["start"]:
-                        prev_slot_range["end"] = slot_range["end"]
-                        changed = True
-                        added = True
-                        break
-                if not added:
-                    new_range.append(slot_range)
-            slot_ranges = new_range
-            if not changed:
-                break
-        return new_range
+        slot_objects = sorted(slot_ranges, key=lambda x: x.start)
+        packed = []
+        for slot_range in slot_objects:
+            if packed and packed[-1].merge(slot_range):
+                continue
+            packed.append(slot_range)
+        return packed
 
     for slot in range(args.slot_start, args.slot_end + 1):
         shard, slot_range = find_slot(slot, config)
-        if shard == None:
-            continue
-        if shard == new_owner:
+        if shard == None or shard == new_owner:
             continue
         remove_slot(slot, slot_range, shard)
         add_slot(slot, new_owner)
@@ -377,7 +404,8 @@ def move(args):
     for shard in config:
         shard["slot_ranges"] = pack(shard["slot_ranges"])
 
-    print(f"Pushing new config:\n{json.dumps(config, indent=2)}\n")
+    # Use the custom encoder for printing the JSON
+    print(f"Pushing new config:\n{json.dumps(config, indent=2, cls=ClusterConfigEncoder)}\n")
     push_config(config)
 
 
@@ -390,9 +418,9 @@ def migrate(args):
     # Find source node
     source = None
     for node in config:
-        slots = node["slot_ranges"]
+        slots: Iterable[SlotRange] = node["slot_ranges"]
         for slot in slots:
-            if slot["start"] <= args.slot_start and slot["end"] >= args.slot_end:
+            if slot.start <= args.slot_start and slot.end >= args.slot_end:
                 source = node
                 break
     if source == None:
@@ -428,7 +456,7 @@ def migrate(args):
 
 def print_config(args):
     config = build_config_from_existing(args)
-    print(json.dumps(config, indent=2))
+    print(json.dumps(config, indent=2, cls=ClusterConfigEncoder))
 
 
 def shutdown(args):
