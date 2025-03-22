@@ -1,0 +1,26 @@
+name: 'Multi-Registry Docker Login'
+description: 'Authenticate with both GHCR and Google Artifact Registry'
+inputs:
+  GITHUB_TOKEN:
+    description: 'GitHub token for GHCR'
+    required: true
+  GCP_SA_KEY:
+    description: 'Google Service Account JSON key'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Login to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.repository_owner }}
+        password: ${{ inputs.GITHUB_TOKEN }}
+
+    - name: Login to Google Artifact Registry
+      uses: docker/login-action@v3
+      with:
+        registry: us-central1-docker.pkg.dev
+        username: _json_key
+        password: ${{ inputs.GCP_SA_KEY }}
