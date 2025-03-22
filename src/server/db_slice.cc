@@ -838,9 +838,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
     PrimeTable::Cursor next = pt->Traverse(cursor, del_entry_cb);
     ++i;
     cursor = next;
-    if (i % 100 == 0) {
-      ThisFiber::Yield();
-    }
+    ThisFiber::Yield();
 
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
 
