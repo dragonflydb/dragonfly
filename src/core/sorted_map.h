@@ -43,14 +43,6 @@ class SortedMap {
   SortedMap(const SortedMap&) = delete;
   SortedMap& operator=(const SortedMap&) = delete;
 
-  struct ScoreSdsPolicy {
-    using KeyT = ScoreSds;
-
-    struct KeyCompareTo {
-      int operator()(KeyT a, KeyT b) const;
-    };
-  };
-
   bool Reserve(size_t sz);
   int AddElem(double score, std::string_view ele, int in_flags, int* out_flags, double* newscore);
 
@@ -97,6 +89,14 @@ class SortedMap {
   bool DefragIfNeeded(float ratio);
 
  private:
+  struct ScoreSdsPolicy {
+    using KeyT = ScoreSds;
+
+    struct KeyCompareTo {
+      int operator()(KeyT a, KeyT b) const;
+    };
+  };
+
   using ScoreTree = BPTree<ScoreSds, ScoreSdsPolicy>;
 
   // hash map from fields to scores.

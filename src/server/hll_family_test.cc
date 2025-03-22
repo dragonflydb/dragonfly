@@ -166,8 +166,15 @@ TEST_F(HllFamilyTest, MergeToNew) {
 TEST_F(HllFamilyTest, MergeToExisting) {
   EXPECT_EQ(CheckedInt({"pfadd", "key1", "1", "2", "3"}), 1);
   EXPECT_EQ(CheckedInt({"pfadd", "key2", "4", "5"}), 1);
-  EXPECT_EQ(Run({"pfmerge", "key2", "key1"}), "OK");
-  EXPECT_EQ(CheckedInt({"pfcount", "key2"}), 5);
+  EXPECT_EQ(Run({"pfmerge", "key3", "key2", "key1"}), "OK");
+  EXPECT_EQ(CheckedInt({"pfcount", "key3"}), 5);
+  EXPECT_EQ(Run({"pfmerge", "key3", "key3"}), "OK");
+  EXPECT_EQ(CheckedInt({"pfcount", "key3"}), 5);
+  EXPECT_EQ(Run({"pfmerge", "key3"}), "OK");
+  EXPECT_EQ(CheckedInt({"pfcount", "key3"}), 5);
+  EXPECT_EQ(CheckedInt({"pfadd", "key4", "4", "5", "6"}), 1);
+  EXPECT_EQ(Run({"pfmerge", "key3", "key4"}), "OK");
+  EXPECT_EQ(CheckedInt({"pfcount", "key3"}), 6);
 }
 
 TEST_F(HllFamilyTest, MergeNonExisting) {
