@@ -22,6 +22,9 @@ using namespace std;
 ABSL_FLAG(vector<string>, rename_command, {},
           "Change the name of commands, format is: <cmd1_name>=<cmd1_new_name>, "
           "<cmd2_name>=<cmd2_new_name>");
+ABSL_FLAG(vector<string>, command_alias, {},
+          "Add an alias for given commands, format is: <alias>=<original>, "
+          "<alias>=<original>");
 ABSL_FLAG(vector<string>, restricted_commands, {},
           "Commands restricted to connections on the admin port");
 
@@ -70,6 +73,37 @@ uint32_t ImplicitAclCategories(uint32_t mask) {
     out |= acl::SLOW;
 
   return out;
+}
+
+absl::flat_hash_map<std::string, std::string> ParseCmdlineArgMap(
+    const absl::Flag<std::vector<std::string>>& flag, const bool allow_duplicates = false) {
+  const auto& mappings = absl::GetFlag(flag);
+  absl::flat_hash_map<std::string, std::string> parsed_mappings;
+  parsed_mappings.reserve(mappings.size());
+
+  for (const std::string& mapping : mappings) {
+    std::vector<std::string_view> kv = absl::StrSplit(mapping, '=');
+    if (kv.size() != 2) {
+      LOG(ERROR) << "Malformed command " << mapping << " for " << flag.Name()
+                 << ", expected key=value";
+      exit(1);
+    }
+
+    std::string key = absl::AsciiStrToUpper(kv[0]);
+    std::string value = absl::AsciiStrToUpper(kv[1]);
+
+    if (key == value) {
+      LOG(ERROR) << "Invalid attempt to map " << key << " to itself in " << flag.Name();
+      exit(1);
+    }
+
+    const bool inserted = parsed_mappings.emplace(std::move(key), std::move(value)).second;
+    if (!allow_duplicates && !inserted) {
+      LOG(ERROR) << "Duplicate insert to " << flag.Name() << " not allowed";
+      exit(1);
+    }
+  }
+  return parsed_mappings;
 }
 
 }  // namespace
@@ -133,17 +167,8 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
 }
 
 CommandRegistry::CommandRegistry() {
-  vector<string> rename_command = GetFlag(FLAGS_rename_command);
-
-  for (string command_data : rename_command) {
-    pair<string_view, string_view> kv = StrSplit(command_data, '=');
-    auto [_, inserted] =
-        cmd_rename_map_.emplace(AsciiStrToUpper(kv.first), AsciiStrToUpper(kv.second));
-    if (!inserted) {
-      LOG(ERROR) << "Invalid rename_command flag, trying to give 2 names to a command";
-      exit(1);
-    }
-  }
+  cmd_rename_map_ = ParseCmdlineArgMap(FLAGS_rename_command);
+  cmd_aliases_ = ParseCmdlineArgMap(FLAGS_command_alias, true);
 
   for (string name : GetFlag(FLAGS_restricted_commands)) {
     restricted_cmds_.emplace(AsciiStrToUpper(name));
@@ -165,8 +190,7 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
 
   absl::InlinedVector<std::string_view, 2> maybe_subcommand = StrSplit(cmd.name(), " ");
   const bool is_sub_command = maybe_subcommand.size() == 2;
-  auto it = cmd_rename_map_.find(maybe_subcommand.front());
-  if (it != cmd_rename_map_.end()) {
+  if (const auto it = cmd_rename_map_.find(maybe_subcommand.front()); it != cmd_rename_map_.end()) {
     if (it->second.empty()) {
       return *this;  // Incase of empty string we want to remove the command from registry.
     }
