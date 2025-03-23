@@ -2293,6 +2293,7 @@ async def await_no_lag(client: aioredis.Redis, timeout=10):
     raise RuntimeError("Lag did not reduced to 0!")
 
 
+@pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 4})
 async def test_replicate_cluster(df_factory: DflyInstanceFactory, df_seeder_factory):
     """
