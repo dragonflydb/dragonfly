@@ -16,6 +16,7 @@
 #include "base/pmr/memory_resource.h"
 #include "core/mi_memory_resource.h"
 #include "core/search/search.h"
+#include "core/search/synonyms.h"
 #include "server/common.h"
 #include "server/search/aggregator.h"
 #include "server/table.h"
@@ -23,6 +24,7 @@
 namespace dfly {
 
 using SearchDocData = absl::flat_hash_map<std::string /*field*/, search::SortableValue /*value*/>;
+using Synonyms = search::Synonyms;
 
 std::string_view SearchFieldTypeToString(search::SchemaField::FieldType);
 
@@ -173,39 +175,6 @@ struct AggregateParams {
   std::vector<aggregate::AggregationStep> steps;
 };
 
-// Manages synonyms for search indices
-class SynonymManager {
- public:
-  // Represents a group of synonymous terms
-  using Group = absl::flat_hash_set<std::string>;
-
-  // Get all synonym groups
-  const absl::flat_hash_map<uint32_t, Group>& GetGroups() const {
-    return groups_;
-  }
-
-  // Update or create a synonym group
-  void UpdateGroup(uint32_t id, std::vector<std::string> terms) {
-    auto& group = groups_[id];
-    group.insert(terms.begin(), terms.end());
-  }
-
-  // Get all group IDs for a term
-  absl::flat_hash_set<uint32_t> GetGroupIds(const std::string& term) const {
-    absl::flat_hash_set<uint32_t> result;
-    for (const auto& [group_id, group] : groups_) {
-      if (group.contains(term)) {
-        result.insert(group_id);
-      }
-    }
-    return result;
-  }
-
- private:
-  // Maps group ID to synonym group
-  absl::flat_hash_map<uint32_t, Group> groups_;
-};
-
 // Stores basic info about a document index.
 struct DocIndex {
   enum DataType { HASH, JSON };
@@ -276,12 +245,12 @@ class ShardDocIndex {
   io::Result<StringVec, facade::ErrorReply> GetTagVals(std::string_view field) const;
 
   // Get synonym manager for this shard
-  const SynonymManager& GetSynonymManager() const {
-    return synonym_manager_;
+  const Synonyms& GetSynonyms() const {
+    return synonyms_;
   }
 
-  SynonymManager& GetSynonymManager() {
-    return synonym_manager_;
+  Synonyms& GetSynonyms() {
+    return synonyms_;
   }
 
  private:
@@ -292,7 +261,7 @@ class ShardDocIndex {
   std::shared_ptr<const DocIndex> base_;
   std::optional<search::FieldIndices> indices_;
   DocKeyIndex key_index_;
-  SynonymManager synonym_manager_;
+  Synonyms synonyms_;
 };
 
 // Stores shard doc indices by name on a specific shard.

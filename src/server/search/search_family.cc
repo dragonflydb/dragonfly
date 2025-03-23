@@ -1094,7 +1094,7 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
         index_not_found.store(false, std::memory_order_relaxed);
 
         // Get synonym data from current shard
-        const auto& groups = index->GetSynonymManager().GetGroups();
+        const auto& groups = index->GetSynonyms().GetGroups();
 
         // Build term -> group_ids mapping for this shard
         auto& term_groups = shard_term_groups[es->shard_id()];
@@ -1175,8 +1175,7 @@ void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) 
         index_not_found.store(false, std::memory_order_relaxed);
 
         // Update synonym group in this shard
-        SynonymManager& synonym_manager = index->GetSynonymManager();
-        synonym_manager.UpdateGroup(group_id, terms);
+        index->GetSynonyms().UpdateGroup(group_id, terms);
 
         return OpStatus::OK;
       },
