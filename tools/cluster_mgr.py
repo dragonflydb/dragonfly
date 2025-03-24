@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
+
 import argparse
 from argparse import RawTextHelpFormatter
 import json
 import math
-from typing import Iterable
+from typing import Iterable, List
 import redis
 import subprocess
 import time
@@ -128,7 +129,7 @@ class ClusterConfigEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
-def build_config_from_list(masters: list[Master]):
+def build_config_from_list(masters: List[Master]):
     total_slots = 16384
     slots_per_node = math.floor(total_slots / len(masters))
 
