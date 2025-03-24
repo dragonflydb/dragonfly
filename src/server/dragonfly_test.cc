@@ -37,8 +37,11 @@ using absl::StrCat;
 using fb2::Fiber;
 using ::io::Result;
 using testing::AnyOf;
+using testing::Contains;
 using testing::ElementsAre;
 using testing::HasSubstr;
+using testing::Key;
+using testing::Pair;
 
 namespace {
 
@@ -864,6 +867,13 @@ TEST_F(DflyCommandAliasTest, Aliasing) {
   EXPECT_EQ(Run({"gnip"}), "PONG");
   // the original command is not accessible
   EXPECT_THAT(Run({"PING"}), ErrArg("unknown command `PING`"));
+
+  const Metrics metrics = GetMetrics();
+  const auto& stats = metrics.cmd_stats_map;
+  EXPECT_THAT(stats, Contains(Pair("___set", Key(1))));
+  EXPECT_THAT(stats, Contains(Pair("set", Key(1))));
+  EXPECT_THAT(stats, Contains(Pair("___ping", Key(1))));
+  EXPECT_THAT(stats, Contains(Pair("get", Key(2))));
 }
 
 }  // namespace dfly

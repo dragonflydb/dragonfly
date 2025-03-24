@@ -2211,7 +2211,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   uint64_t start = absl::GetCurrentTimeNanos();
 
-  auto cmd_stat_cb = [&dest = result.cmd_stats_map](string_view name, const CmdCallStats& stat) {
+  auto cmd_stat_cb = [&dest = result.cmd_stats_map](string_view name,
+                                                    const CmdCallStats::mapped_type& stat) {
     auto& [calls, sum] = dest[absl::AsciiStrToLower(name)];
     calls += stat.first;
     sum += stat.second;

@@ -71,8 +71,9 @@ static_assert(!IsEvalKind(""));
 
 };  // namespace CO
 
-// Per thread vector of command stats. Each entry is {cmd_calls, cmd_latency_agg in usec}.
-using CmdCallStats = std::pair<uint64_t, uint64_t>;
+// Per thread vector of command stats. Each entry is:
+// command invocation string -> {cmd_calls, cmd_latency_agg in usec}.
+using CmdCallStats = absl::flat_hash_map<std::string, std::pair<uint64_t, uint64_t>>;
 
 struct CommandContext {
   CommandContext(Transaction* _tx, facade::SinkReplyBuilder* _rb, ConnectionContext* cntx)
@@ -102,8 +103,10 @@ class CommandId : public facade::CommandId {
   using ArgValidator = fu2::function_base<true, true, fu2::capacity_default, false, false,
                                           std::optional<facade::ErrorReply>(CmdArgList) const>;
 
-  // Returns the invoke time in usec.
-  uint64_t Invoke(CmdArgList args, const CommandContext& cmd_cntx) const;
+  // Invokes the command handler. Returns the invoke time in usec. The invoked_by parameter is set
+  // to the string passed in by user, if available. If not set, defaults to command name.
+  uint64_t Invoke(CmdArgList args, const CommandContext& cmd_cntx,
+                  std::optional<std::string_view> orig_cmd_name = std::nullopt) const;
 
   // Returns error if validation failed, otherwise nullopt
   std::optional<facade::ErrorReply> Validate(CmdArgList tail_args) const;
@@ -141,7 +144,7 @@ class CommandId : public facade::CommandId {
   }
 
   void ResetStats(unsigned thread_index) {
-    command_stats_[thread_index] = {0, 0};
+    command_stats_[thread_index].clear();
   }
 
   CmdCallStats GetStats(unsigned thread_index) const {
@@ -200,13 +203,17 @@ class CommandRegistry {
     }
   }
 
-  void MergeCallStats(unsigned thread_index,
-                      std::function<void(std::string_view, const CmdCallStats&)> cb) const {
-    for (const auto& k_v : cmd_map_) {
-      auto src = k_v.second.GetStats(thread_index);
-      if (src.first == 0)
-        continue;
-      cb(k_v.second.name(), src);
+  void MergeCallStats(
+      unsigned thread_index,
+      std::function<void(std::string_view, const CmdCallStats::mapped_type&)> cb) const {
+    for (const auto& [_, cmd_id] : cmd_map_) {
+      for (const auto& [cmd_name, call_stats] : cmd_id.GetStats(thread_index)) {
+        if (call_stats.first == 0) {
+          continue;
+        }
+
+        cb(cmd_name, call_stats);
+      }
     }
   }
 
@@ -219,6 +226,8 @@ class CommandRegistry {
 
   std::pair<const CommandId*, facade::ArgSlice> FindExtended(std::string_view cmd,
                                                              facade::ArgSlice tail_args) const;
+
+  bool IsAlias(std::string_view cmd) const;
 
  private:
   absl::flat_hash_map<std::string, CommandId> cmd_map_;
