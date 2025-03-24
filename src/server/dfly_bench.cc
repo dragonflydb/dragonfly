@@ -56,11 +56,15 @@ ABSL_FLAG(string, command, "",
           "custom command with __key__ placeholder for keys, "
           "__data__ for values, __score__ for doubles");
 ABSL_FLAG(string, P, "", "protocol can be empty (for RESP) or memcache_text");
+
 ABSL_FLAG(bool, tcp_nodelay, false, "If true, set nodelay option on tcp socket");
 ABSL_FLAG(bool, noreply, false, "If true, does not wait for replies. Relevant only for memcached.");
 ABSL_FLAG(bool, greet, true,
           "If true, sends a greeting command on each connection, "
           "to make sure the connection succeeded");
+ABSL_FLAG(bool, cluster_skip_tags, true,
+          "If true, skips tags (compatible with memtier benchmark) in cluster mode, "
+          "othewise adds hash tags to keys");
 ABSL_FLAG(bool, ascii, true, "If true, use ascii characters for values");
 
 using namespace std;
@@ -110,6 +114,10 @@ static string GetRandomHex(size_t len, bool ascii) {
   return res;
 }
 
+uint16_t SlotId(string_view str) {
+  return crc16(str.data(), str.size()) % kNumSlots;
+}
+
 using SlotRange = pair<uint16_t, uint16_t>;
 
 struct ShardInfo {
@@ -123,7 +131,7 @@ class KeyGenerator {
  public:
   KeyGenerator(uint32_t min, uint32_t max);
 
-  string operator()(uint16_t slot_id) const;
+  string operator()(uint16_t from, uint16_t to) const;
   void EnableClusterMode();
 
   bool IsClusterEnabled() const {
@@ -207,13 +215,9 @@ CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
 
 string CommandGenerator::Next(SlotRange range) {
   noreply_ = false;
-  uint16_t slot_id = 0;
 
-  if (keygen_->IsClusterEnabled()) {
-    slot_id = absl::Uniform(absl::IntervalClosedClosed, bit_gen, range.first, range.second);
-  }
   if (command_.empty()) {
-    string key = (*keygen_)(slot_id);
+    string key = (*keygen_)(range.first, range.second);
 
     if (absl::Uniform(bit_gen, 0U, ratio_get_ + ratio_set_) < ratio_set_) {
       might_hit_ = false;
@@ -221,6 +225,13 @@ string CommandGenerator::Next(SlotRange range) {
     }
     might_hit_ = true;
     return FillGet(key);
+  }
+
+  // For custom commands, we select a random slot and then use it for key generation.
+  uint16_t slot_id = 0;
+
+  if (keygen_->IsClusterEnabled()) {
+    slot_id = absl::Uniform(absl::IntervalClosedClosed, bit_gen, range.first, range.second);
   }
 
   string str, gen_cmd;
@@ -231,7 +242,7 @@ string CommandGenerator::Next(SlotRange range) {
     } else {
       switch (get<TemplateType>(part)) {
         case KEY:
-          str = (*keygen_)(slot_id);
+          str = (*keygen_)(slot_id, slot_id);
           break;
         case VALUE:
           str = GetRandomHex(value_.size(), is_ascii_);
@@ -419,31 +430,52 @@ KeyGenerator::KeyGenerator(uint32_t min, uint32_t max)
   }
 }
 
-string KeyGenerator::operator()(uint16_t slot_id) const {
-  uint64_t key_suffix{0};
-  switch (dist_type) {
-    case UNIFORM:
-      key_suffix = absl::Uniform(bit_gen, min_, max_);
-      break;
-    case NORMAL: {
-      double val = absl::Gaussian(bit_gen, 0.5, stddev_);
-      key_suffix = min_ + uint64_t(val * range_);
-      break;
+string KeyGenerator::operator()(uint16_t from, uint16_t to) const {
+  uint64_t key_suffix = 0;
+  uint16_t slot_id = from;
+  bool skip_tags = IsClusterEnabled() && GetFlag(FLAGS_cluster_skip_tags);
+  string res;
+
+  do {
+    switch (dist_type) {
+      case UNIFORM:
+        key_suffix = absl::Uniform(bit_gen, min_, max_);
+        break;
+      case NORMAL: {
+        double val = absl::Gaussian(bit_gen, 0.5, stddev_);
+        key_suffix = min_ + uint64_t(val * range_);
+        break;
+      }
+      case ZIPFIAN:
+        key_suffix = zipf_->Next(bit_gen);
+        break;
+      case SEQUENTIAL:
+        key_suffix = seq_cursor_++;
+        if (seq_cursor_ > max_)
+          seq_cursor_ = min_;
+        break;
     }
-    case ZIPFIAN:
-      key_suffix = zipf_->Next(bit_gen);
+
+    if (!skip_tags)
       break;
-    case SEQUENTIAL:
-      key_suffix = seq_cursor_++;
-      if (seq_cursor_ > max_)
-        seq_cursor_ = min_;
-      break;
-  }
-  string res = prefix_;
+
+    // If we skip tags, we must make sure that the key fits the slot range.
+    res = absl::StrCat(prefix_, key_suffix);
+    slot_id = SlotId(res);
+  } while (slot_id < from || slot_id > to);
+
+  // If we are in cluster mode we add the hash slot to the key to make sure it lands in the correct
+  // range.
   if (IsClusterEnabled()) {
-    absl::StrAppend(&res, "{", hash_slots_[slot_id], "}");
+    if (!skip_tags) {
+      if (to > from)
+        slot_id = absl::Uniform(absl::IntervalClosedClosed, bit_gen, from, to);
+      absl::StrAppend(&res, prefix_, "{", hash_slots_[slot_id], "}", key_suffix);
+    }
+  } else {
+    absl::StrAppend(&res, prefix_, key_suffix);
   }
-  absl::StrAppend(&res, key_suffix);
+
   return res;
 }
 
@@ -455,10 +487,10 @@ void KeyGenerator::EnableClusterMode() {
   // Precompute the hash slots for each of the slot ids so given the slot id
   // we could generate a key that belongs to that slot.
   while (num_slots_filled < kNumSlots) {
-    string slot = absl::StrCat(i);
-    uint16_t id = crc16(slot.data(), slot.length()) % kNumSlots;
+    string key = absl::StrCat(i);
+    uint16_t id = SlotId(key);
     if (hash_slots_[id].empty()) {
-      hash_slots_[id] = slot;
+      hash_slots_[id] = std::move(key);
       num_slots_filled++;
     }
     ++i;
@@ -971,6 +1003,12 @@ int main(int argc, char* argv[]) {
   LOG(INFO) << "Connecting threads to "
             << (shards.empty() ? string("single node ")
                                : absl::StrCat(shards.size(), " shard cluster"));
+
+  if (!shards.empty() && !GetFlag(FLAGS_command).empty() && GetFlag(FLAGS_cluster_skip_tags)) {
+    // For custom commands we may need to use the same hashtag for multiple keys.
+    LOG(WARNING) << "Enforcing hash tags for custom commands";
+    absl::SetFlag(&FLAGS_cluster_skip_tags, false);
+  }
 
   pp->AwaitFiberOnAll([&](unsigned index, auto* p) {
     base::SplitMix64 seed_mix(GetFlag(FLAGS_seed) + index * 0x6a45554a264d72bULL);
