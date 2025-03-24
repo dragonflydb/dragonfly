@@ -787,6 +787,7 @@ void DbSlice::Del(Context cntx, Iterator it) {
 }
 
 void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
+  LOG(INFO) << "Flushing slots ";
   // Slot deletion can take time as it traverses all the database, hence it runs in fiber.
   // We want to flush all the data of a slot that was added till the time the call to FlushSlotsFb
   // was made. Therefore we delete slots entries with version < next_version
@@ -833,19 +834,26 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   ServerState& etl = *ServerState::tlocal();
   PrimeTable* pt = &db_arr_[0]->prime;
   PrimeTable::Cursor cursor;
+  const auto& pb_stats = ProactorBase::me()->stats();
   uint64_t i = 0;
   do {
     PrimeTable::Cursor next = pt->Traverse(cursor, del_entry_cb);
     ++i;
     cursor = next;
     if (i % 100 == 0) {
+      LOG(INFO) << "Yield Before: " << EngineShard::tlocal()->stats().tx_optimistic_total << " "
+                << pb_stats.completions_fetches << " " << pb_stats.uring_submit_calls;
+      fb2::detail::FiberActive()->scheduler()->log_switch = true;
       ThisFiber::Yield();
+      fb2::detail::FiberActive()->scheduler()->log_switch = false;
+      LOG(INFO) << "Yield After: " << EngineShard::tlocal()->stats().tx_optimistic_total << " "
+                << pb_stats.completions_fetches << " " << pb_stats.uring_submit_calls;
     }
 
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
 
   UnregisterOnChange(next_version);
-
+  LOG(INFO) << "Flushing slots end";
   etl.DecommitMemory(ServerState::kDataHeap);
 }
 

@@ -746,13 +746,13 @@ void Driver::ParseRESP() {
     result = parser_.Parse(io_buf_.InputBuffer(), &consumed, &parse_args);
     if (result == RedisParser::OK && !parse_args.empty()) {
       if (parse_args[0].type == RespExpr::ERROR) {
-        string_view error = io::View(io_buf_.InputBuffer());
+        string_view error = parse_args[0].GetView();
         VLOG(2) << "Error " << error;
         if (absl::StartsWith(error, "-MOVED ")) {
           error = error.substr(7);
           vector<string_view> parts =
               absl::StrSplit(absl::StripTrailingAsciiWhitespace(error), ' ', absl::SkipEmpty());
-          CHECK_EQ(parts.size(), 2u);
+          CHECK_EQ(parts.size(), 2u) << error;
           uint32_t slot_id;
           CHECK(absl::SimpleAtoi(parts[0], &slot_id));
 
@@ -762,7 +762,7 @@ void Driver::ParseRESP() {
           auto host = ::boost::asio::ip::make_address(addr_parts[0]);
 
           uint32_t port;
-          CHECK(absl::SimpleAtoi(addr_parts[1], &port));
+          CHECK(absl::SimpleAtoi(addr_parts[1], &port)) << error;
           CHECK_LT(port, 65536u);
 
           shard_slots_.MoveSlot(ep_, tcp::endpoint(host, port), slot_id);
