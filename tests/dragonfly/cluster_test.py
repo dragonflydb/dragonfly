@@ -2503,6 +2503,7 @@ async def await_eq_offset(client: aioredis.Redis, timeout=20):
     raise RuntimeError("offset not equal!")
 
 
+@pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 4})
 async def test_replicate_redis_cluster(redis_cluster, df_factory, df_seeder_factory):
     """
