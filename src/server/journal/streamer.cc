@@ -236,7 +236,7 @@ void RestoreStreamer::Run() {
     });
 
     if (++last_yield >= migration_buckets_serialization_threshold_cached) {
-      ThisFiber::Yield();
+      ThisFiber::SleepFor(30us);
       last_yield = 0;
     }
   } while (cursor);

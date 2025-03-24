@@ -787,7 +787,7 @@ void DbSlice::Del(Context cntx, Iterator it) {
 }
 
 void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
-  VLOG(3) << "Start FlushSlotsFb";
+  VLOG(1) << "Start FlushSlotsFb";
   // Slot deletion can take time as it traverses all the database, hence it runs in fiber.
   // We want to flush all the data of a slot that was added till the time the call to FlushSlotsFb
   // was made. Therefore we delete slots entries with version < next_version
@@ -795,20 +795,15 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   uint64_t del_count = 0;
 
   std::string tmp;
-  auto del_entry_cb = [&](PrimeTable::iterator it) {
-    ++del_count;
-    std::string_view key = it->first.GetSlice(&tmp);
-    SlotId sid = KeySlot(key);
-    if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
-      PerformDeletion(Iterator::FromPrime(it), db_arr_[0].get());
-    }
-    return true;
-  };
-
   auto iterate_bucket = [&](PrimeTable::bucket_iterator it) {
     it.AdvanceIfNotOccupied();
     while (!it.is_done()) {
-      del_entry_cb(it);
+      std::string_view key = it->first.GetSlice(&tmp);
+      SlotId sid = KeySlot(key);
+      if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
+        PerformDeletion(Iterator::FromPrime(it), db_arr_[0].get());
+        ++del_count;
+      }
       ++it;
     }
   };
@@ -842,16 +837,16 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
     ++traverse_calls;
     cursor = next;
     int64_t after = absl::GetCurrentTimeNanos();
-    int64_t exec_time_ms = (after - start) / 1000000;
-    if (exec_time_ms > 1) {
-      VLOG(3) << "Yield after: " << exec_time_ms << " traverse calls: " << traverse_calls;
-      ThisFiber::Yield();
+    int64_t exec_time_us = (after - start) / 1000;
+    if (exec_time_us > 300) {
+      VLOG(2) << "Yield after: " << exec_time_us << " traverse calls: " << traverse_calls;
+      ThisFiber::SleepFor(30us);
       traverse_calls = 0;
       start = absl::GetCurrentTimeNanos();
     }
 
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
-  VLOG(3) << "Del count is: " << del_count;
+  VLOG(1) << "FlushSlotsFb del count is: " << del_count;
   UnregisterOnChange(next_version);
 
   etl.DecommitMemory(ServerState::kDataHeap);
