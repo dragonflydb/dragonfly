@@ -80,7 +80,7 @@ ABSL_FLAG(
 ABSL_FLAG(bool, version_check, true,
           "If true, Will monitor for new releases on Dragonfly servers once a day.");
 
-ABSL_FLAG(uint16_t, tcp_backlog, 256, "TCP listen(2) backlog parameter.");
+ABSL_FLAG(uint16_t, tcp_backlog, 512, "TCP listen(2) backlog parameter.");
 ABSL_FLAG(uint16_t, uring_recv_buffer_cnt, 0,
           "How many socket recv buffers of size 256 to allocate per thread."
           "Relevant only for modern kernels with io_uring enabled");
