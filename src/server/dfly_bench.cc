@@ -140,20 +140,16 @@ class ShardSlots {
       for (auto& slot : shard.slots) {
         shard_slots_.insert(Interval::closed(slot.first, slot.second));
       }
-      shards_slots_.emplace_back(shard.endpoint, shard_slots_);
+      shards_slots_.emplace(shard.endpoint, shard_slots_);
     }
   }
 
   SlotRange NextSlotRange(const tcp::endpoint& ep, size_t i) {
     shared_lock<fb2::SharedMutex> lock(mu_);
-    for (auto& shard : shards_slots_) {
-      if (shard.first == ep) {
-        unsigned index = i % shard.second.iterative_size();
-        const auto& interval = next(shard.second.begin(), index);
-        return SlotRange{boost::icl::first(*interval), boost::icl::last(*interval)};
-      }
-    }
-    return {};
+    const auto& shard_slot_interval = shards_slots_[ep];
+    unsigned index = i % shard_slot_interval.iterative_size();
+    const auto& interval = next(shard_slot_interval.begin(), index);
+    return SlotRange{boost::icl::first(*interval), boost::icl::last(*interval)};
   }
 
   bool Empty() const {
@@ -164,7 +160,7 @@ class ShardSlots {
     return shards_slots_.size();
   }
 
-  vector<tcp::endpoint> Endpoints() {
+  vector<tcp::endpoint> Endpoints() const {
     vector<tcp::endpoint> endpoints;
     for (const auto& shard : shards_slots_) {
       endpoints.push_back(shard.first);
@@ -172,28 +168,23 @@ class ShardSlots {
     return endpoints;
   }
 
-  void MoveSlot(const tcp::endpoint& src_ep, tcp::endpoint dst_ep, size_t slot_id) {
+  void MoveSlot(const tcp::endpoint& src_ep, const tcp::endpoint& dst_ep, uint16_t slot_id) {
     unique_lock<fb2::SharedMutex> lock(mu_);
-    for (auto& shard : shards_slots_) {
-      // If slot was already moved we can return early
-      if (shard.first == src_ep) {
-        if (auto it = shard.second.find(slot_id); it == shard.second.end()) {
-          return;
-        }
-        shard.second.subtract(slot_id);
-      }
-      if (shard.first == dst_ep) {
-        if (auto it = shard.second.find(slot_id); it != shard.second.end()) {
-          return;
-        }
-        shard.second.insert(slot_id);
-      }
+    // Remove slot from source ep
+    auto& src_shard_slots = shards_slots_[src_ep];
+    // If slot id doesn't exists on source ep we have moved this slot before
+    if (src_shard_slots.find(slot_id) == src_shard_slots.end()) {
+      return;
     }
+    src_shard_slots.subtract(slot_id);
+    // Add slot to dest ep
+    auto& dst_shard_slots = shards_slots_[dst_ep];
+    dst_shard_slots.insert(slot_id);
   }
 
  private:
   fb2::SharedMutex mu_;
-  std::vector<pair<tcp::endpoint, IntervalSet>> shards_slots_;
+  absl::flat_hash_map<tcp::endpoint, IntervalSet> shards_slots_;
 };
 
 class KeyGenerator {
@@ -750,17 +741,14 @@ void Driver::ParseRESP() {
 
           vector<string_view> addr_parts = absl::StrSplit(parts[1], ':');
           CHECK_EQ(2u, addr_parts.size());
-          string host(addr_parts[0]);
-          char ip_addr[INET6_ADDRSTRLEN];
-          std::error_code ec = fb2::DnsResolve(host, ip_addr);
-          CHECK(!ec) << "Could not resolve " << host << " " << ec;
-          auto address = ::boost::asio::ip::make_address(ip_addr);
+
+          auto host = ::boost::asio::ip::make_address(addr_parts[0]);
 
           uint32_t port;
           CHECK(absl::SimpleAtoi(addr_parts[1], &port));
           CHECK_LT(port, 65536u);
 
-          shard_slots_.MoveSlot(ep_, tcp::endpoint(address, port), slot_id);
+          shard_slots_.MoveSlot(ep_, tcp::endpoint(host, port), slot_id);
         }
         ++stats_.num_errors;
       } else if (reqs_.front().might_hit && parse_args[0].type != RespExpr::NIL) {
