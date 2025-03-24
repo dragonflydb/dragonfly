@@ -60,6 +60,17 @@ class DebugCmd {
   void Keys(CmdArgList args, facade::SinkReplyBuilder* builder);
   void Compression(facade::SinkReplyBuilder* builder);
 
+  struct PopulateBatch {
+    DbIndex dbid;
+    uint64_t index[32];
+    uint64_t sz = 0;
+
+    PopulateBatch(DbIndex id) : dbid(id) {
+    }
+  };
+
+  void DoPopulateBatch(const PopulateOptions& options, const PopulateBatch& batch);
+
   ServerFamily& sf_;
   cluster::ClusterFamily& cf_;
   ConnectionContext* cntx_;
