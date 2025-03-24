@@ -183,8 +183,26 @@ class ShardSlots {
   }
 
  private:
+  struct Hasher {
+    using is_transparent = void;
+    size_t operator()(const tcp::endpoint& ep) const {
+      // c/p from boost asio
+      std::size_t hash1 = std::hash<boost::asio::ip::address>()(ep.address());
+      std::size_t hash2 = std::hash<unsigned short>()(ep.port());
+      return hash1 ^ (hash2 + 0x9e3779b9 + (hash1 << 6) + (hash1 >> 2));
+    }
+  };
+
+  struct Eq {
+    using is_transparent = void;
+    bool operator()(const tcp::endpoint& left, const tcp::endpoint& right) const {
+      return left == right;
+    }
+  };
+
+ private:
   fb2::SharedMutex mu_;
-  absl::flat_hash_map<tcp::endpoint, IntervalSet> shards_slots_;
+  absl::flat_hash_map<tcp::endpoint, IntervalSet, Hasher, Eq> shards_slots_;
 };
 
 class KeyGenerator {
