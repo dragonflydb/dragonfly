@@ -843,7 +843,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
     cursor = next;
     int64_t after = absl::GetCurrentTimeNanos();
     int64_t exec_time_ms = (after - start) / 1000000;
-    if (exec_time_ms > 10) {
+    if (exec_time_ms > 1) {
       VLOG(3) << "Yield after: " << exec_time_ms << " traverse calls: " << traverse_calls;
       ThisFiber::Yield();
       traverse_calls = 0;
