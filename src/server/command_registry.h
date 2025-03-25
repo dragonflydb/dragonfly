@@ -169,8 +169,16 @@ class CommandRegistry {
   CommandRegistry& operator<<(CommandId cmd);
 
   const CommandId* Find(std::string_view cmd) const {
-    auto it = cmd_map_.find(cmd);
-    return it == cmd_map_.end() ? nullptr : &it->second;
+    if (const auto it = cmd_map_.find(cmd); it != cmd_map_.end()) {
+      return &it->second;
+    }
+
+    if (const auto it = cmd_aliases_.find(cmd); it != cmd_aliases_.end()) {
+      if (const auto alias_lookup = cmd_map_.find(it->second); alias_lookup != cmd_map_.end()) {
+        return &alias_lookup->second;
+      }
+    }
+    return nullptr;
   }
 
   CommandId* Find(std::string_view cmd) {
@@ -215,6 +223,11 @@ class CommandRegistry {
  private:
   absl::flat_hash_map<std::string, CommandId> cmd_map_;
   absl::flat_hash_map<std::string, std::string> cmd_rename_map_;
+  // Stores a mapping from alias to original command. During the find operation, the first lookup is
+  // done in the cmd_map_, then in the alias map. This results in two lookups but only for commands
+  // which are not in original map, ie either typos or aliases. While it would be faster, we cannot
+  // store iterators into cmd_map_ here as they may be invalidated on rehashing.
+  absl::flat_hash_map<std::string, std::string> cmd_aliases_;
   absl::flat_hash_set<std::string> restricted_cmds_;
   absl::flat_hash_set<std::string> oomdeny_cmds_;
 

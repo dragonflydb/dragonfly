@@ -13,6 +13,7 @@ extern "C" {
 #include <absl/strings/str_format.h>
 #include <absl/strings/str_split.h>
 
+#include <boost/icl/interval_set.hpp>
 #include <queue>
 #include <tuple>
 
@@ -56,11 +57,15 @@ ABSL_FLAG(string, command, "",
           "custom command with __key__ placeholder for keys, "
           "__data__ for values, __score__ for doubles");
 ABSL_FLAG(string, P, "", "protocol can be empty (for RESP) or memcache_text");
+
 ABSL_FLAG(bool, tcp_nodelay, false, "If true, set nodelay option on tcp socket");
 ABSL_FLAG(bool, noreply, false, "If true, does not wait for replies. Relevant only for memcached.");
 ABSL_FLAG(bool, greet, true,
           "If true, sends a greeting command on each connection, "
           "to make sure the connection succeeded");
+ABSL_FLAG(bool, cluster_skip_tags, true,
+          "If true, skips tags (compatible with memtier benchmark) in cluster mode, "
+          "othewise adds hash tags to keys");
 ABSL_FLAG(bool, ascii, true, "If true, use ascii characters for values");
 
 using namespace std;
@@ -110,6 +115,10 @@ static string GetRandomHex(size_t len, bool ascii) {
   return res;
 }
 
+uint16_t SlotId(string_view str) {
+  return crc16(str.data(), str.size()) % kNumSlots;
+}
+
 using SlotRange = pair<uint16_t, uint16_t>;
 
 struct ShardInfo {
@@ -117,13 +126,89 @@ struct ShardInfo {
   tcp::endpoint endpoint;
 };
 
-using ClusterSpec = vector<ShardInfo>;
+using ClusterShards = vector<ShardInfo>;
+
+class ShardSlots {
+ private:
+  using IntervalSet = boost::icl::interval_set<uint16_t>;
+  using Interval = boost::icl::interval<uint16_t>;
+
+ public:
+  void SetClusterSlotRanges(const ClusterShards& cluster_shards) {
+    for (auto shard : cluster_shards) {
+      IntervalSet shard_slots_;
+      for (auto& slot : shard.slots) {
+        shard_slots_.insert(Interval::closed(slot.first, slot.second));
+      }
+      shards_slots_.emplace(shard.endpoint, shard_slots_);
+    }
+  }
+
+  SlotRange NextSlotRange(const tcp::endpoint& ep, size_t i) {
+    shared_lock<fb2::SharedMutex> lock(mu_);
+    const auto& shard_slot_interval = shards_slots_[ep];
+    unsigned index = i % shard_slot_interval.iterative_size();
+    const auto& interval = next(shard_slot_interval.begin(), index);
+    return SlotRange{boost::icl::first(*interval), boost::icl::last(*interval)};
+  }
+
+  bool Empty() const {
+    return shards_slots_.empty();
+  }
+
+  size_t Size() const {
+    return shards_slots_.size();
+  }
+
+  vector<tcp::endpoint> Endpoints() const {
+    vector<tcp::endpoint> endpoints;
+    for (const auto& shard : shards_slots_) {
+      endpoints.push_back(shard.first);
+    }
+    return endpoints;
+  }
+
+  void MoveSlot(const tcp::endpoint& src_ep, const tcp::endpoint& dst_ep, uint16_t slot_id) {
+    unique_lock<fb2::SharedMutex> lock(mu_);
+    // Remove slot from source ep
+    auto& src_shard_slots = shards_slots_[src_ep];
+    // If slot id doesn't exists on source ep we have moved this slot before
+    if (src_shard_slots.find(slot_id) == src_shard_slots.end()) {
+      return;
+    }
+    src_shard_slots.subtract(slot_id);
+    // Add slot to dest ep
+    auto& dst_shard_slots = shards_slots_[dst_ep];
+    dst_shard_slots.insert(slot_id);
+  }
+
+ private:
+  struct Hasher {
+    using is_transparent = void;
+    size_t operator()(const tcp::endpoint& ep) const {
+      std::size_t hash1 = std::hash<string>()(ep.address().to_string());
+      std::size_t hash2 = std::hash<unsigned short>()(ep.port());
+      return hash1 ^ (hash2 + 0x9e3779b9 + (hash1 << 6) + (hash1 >> 2));
+    }
+  };
+
+  struct Eq {
+    using is_transparent = void;
+    bool operator()(const tcp::endpoint& left, const tcp::endpoint& right) const {
+      return left == right;
+    }
+  };
+
+ private:
+  fb2::SharedMutex mu_;
+  absl::flat_hash_map<tcp::endpoint, IntervalSet, Hasher, Eq> shards_slots_;
+};
 
 class KeyGenerator {
  public:
   KeyGenerator(uint32_t min, uint32_t max);
 
-  string operator()(uint16_t slot_id) const;
+  string operator()(uint16_t from, uint16_t to) const;
   void EnableClusterMode();
 
   bool IsClusterEnabled() const {
@@ -207,13 +292,9 @@ CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
 
 string CommandGenerator::Next(SlotRange range) {
   noreply_ = false;
-  uint16_t slot_id = 0;
 
-  if (keygen_->IsClusterEnabled()) {
-    slot_id = absl::Uniform(absl::IntervalClosedClosed, bit_gen, range.first, range.second);
-  }
   if (command_.empty()) {
-    string key = (*keygen_)(slot_id);
+    string key = (*keygen_)(range.first, range.second);
 
     if (absl::Uniform(bit_gen, 0U, ratio_get_ + ratio_set_) < ratio_set_) {
       might_hit_ = false;
@@ -221,6 +302,13 @@ string CommandGenerator::Next(SlotRange range) {
     }
     might_hit_ = true;
     return FillGet(key);
+  }
+
+  // For custom commands, we select a random slot and then use it for key generation.
+  uint16_t slot_id = 0;
+
+  if (keygen_->IsClusterEnabled()) {
+    slot_id = absl::Uniform(absl::IntervalClosedClosed, bit_gen, range.first, range.second);
   }
 
   string str, gen_cmd;
@@ -231,7 +319,7 @@ string CommandGenerator::Next(SlotRange range) {
     } else {
       switch (get<TemplateType>(part)) {
         case KEY:
-          str = (*keygen_)(slot_id);
+          str = (*keygen_)(slot_id, slot_id);
           break;
         case VALUE:
           str = GetRandomHex(value_.size(), is_ascii_);
@@ -294,8 +382,9 @@ struct ClientStats {
 // Per connection driver.
 class Driver {
  public:
-  explicit Driver(uint32_t num_reqs, uint32_t time_limit, ClientStats* stats, ProactorBase* p)
-      : num_reqs_(num_reqs), time_limit_(time_limit), stats_(*stats) {
+  explicit Driver(uint32_t num_reqs, uint32_t time_limit, ClientStats* stats, ProactorBase* p,
+                  ShardSlots* ss)
+      : num_reqs_(num_reqs), time_limit_(time_limit), shard_slots_(*ss), stats_(*stats) {
     socket_.reset(p->CreateSocket());
     if (time_limit_ > 0)
       num_reqs_ = UINT32_MAX;
@@ -305,7 +394,7 @@ class Driver {
   Driver(Driver&&) = delete;
   Driver& operator=(Driver&&) = delete;
 
-  void Connect(unsigned index, const tcp::endpoint& ep, const vector<SlotRange>& slots);
+  void Connect(unsigned index, const tcp::endpoint& ep);
   void Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen);
 
   float done() const {
@@ -332,9 +421,10 @@ class Driver {
   uint32_t num_reqs_, time_limit_, received_ = 0;
   int64_t start_ns_ = 0;
 
+  tcp::endpoint ep_;
+  ShardSlots& shard_slots_;
   ClientStats& stats_;
   unique_ptr<FiberSocketBase> socket_;
-  vector<SlotRange> slots_;
   fb2::Fiber receive_fb_;
   queue<Req> reqs_;
   fb2::CondVarAny cnd_;
@@ -346,12 +436,12 @@ class Driver {
 // Per thread client.
 class TLocalClient {
  public:
-  explicit TLocalClient(ProactorBase* p) : p_(p) {
+  explicit TLocalClient(ProactorBase* p, ShardSlots* ss) : p_(p), shard_slots_(ss) {
   }
 
   TLocalClient(const TLocalClient&) = delete;
 
-  void Connect(tcp::endpoint ep, const ClusterSpec& cluster);
+  void Connect(tcp::endpoint ep, const vector<tcp::endpoint>& shard_endpoints);
   void Start(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns);
   void Join();
 
@@ -387,12 +477,12 @@ class TLocalClient {
 
  private:
   ProactorBase* p_;
+  ShardSlots* shard_slots_;
   vector<unique_ptr<Driver>> drivers_;
   optional<KeyGenerator> key_gen_;
   optional<CommandGenerator> cmd_gen_;
 
   vector<fb2::Fiber> driver_fbs_;
-  ClusterSpec cluster_spec_;
   uint64_t cur_cycle_ns_;
   uint64_t target_cycle_;
   int64_t start_time_;
@@ -419,31 +509,52 @@ KeyGenerator::KeyGenerator(uint32_t min, uint32_t max)
   }
 }
 
-string KeyGenerator::operator()(uint16_t slot_id) const {
-  uint64_t key_suffix{0};
-  switch (dist_type) {
-    case UNIFORM:
-      key_suffix = absl::Uniform(bit_gen, min_, max_);
-      break;
-    case NORMAL: {
-      double val = absl::Gaussian(bit_gen, 0.5, stddev_);
-      key_suffix = min_ + uint64_t(val * range_);
-      break;
+string KeyGenerator::operator()(uint16_t from, uint16_t to) const {
+  uint64_t key_suffix = 0;
+  uint16_t slot_id = from;
+  bool skip_tags = IsClusterEnabled() && GetFlag(FLAGS_cluster_skip_tags);
+  string res;
+
+  do {
+    switch (dist_type) {
+      case UNIFORM:
+        key_suffix = absl::Uniform(bit_gen, min_, max_);
+        break;
+      case NORMAL: {
+        double val = absl::Gaussian(bit_gen, 0.5, stddev_);
+        key_suffix = min_ + uint64_t(val * range_);
+        break;
+      }
+      case ZIPFIAN:
+        key_suffix = zipf_->Next(bit_gen);
+        break;
+      case SEQUENTIAL:
+        key_suffix = seq_cursor_++;
+        if (seq_cursor_ > max_)
+          seq_cursor_ = min_;
+        break;
     }
-    case ZIPFIAN:
-      key_suffix = zipf_->Next(bit_gen);
+
+    if (!skip_tags)
       break;
-    case SEQUENTIAL:
-      key_suffix = seq_cursor_++;
-      if (seq_cursor_ > max_)
-        seq_cursor_ = min_;
-      break;
-  }
-  string res = prefix_;
+
+    // If we skip tags, we must make sure that the key fits the slot range.
+    res = absl::StrCat(prefix_, key_suffix);
+    slot_id = SlotId(res);
+  } while (slot_id < from || slot_id > to);
+
+  // If we are in cluster mode we add the hash slot to the key to make sure it lands in the correct
+  // range.
   if (IsClusterEnabled()) {
-    absl::StrAppend(&res, "{", hash_slots_[slot_id], "}");
+    if (!skip_tags) {
+      if (to > from)
+        slot_id = absl::Uniform(absl::IntervalClosedClosed, bit_gen, from, to);
+      absl::StrAppend(&res, prefix_, "{", hash_slots_[slot_id], "}", key_suffix);
+    }
+  } else {
+    absl::StrAppend(&res, prefix_, key_suffix);
   }
-  absl::StrAppend(&res, key_suffix);
+
   return res;
 }
 
@@ -455,17 +566,17 @@ void KeyGenerator::EnableClusterMode() {
   // Precompute the hash slots for each of the slot ids so given the slot id
   // we could generate a key that belongs to that slot.
   while (num_slots_filled < kNumSlots) {
-    string slot = absl::StrCat(i);
-    uint16_t id = crc16(slot.data(), slot.length()) % kNumSlots;
+    string key = absl::StrCat(i);
+    uint16_t id = SlotId(key);
     if (hash_slots_[id].empty()) {
-      hash_slots_[id] = slot;
+      hash_slots_[id] = std::move(key);
       num_slots_filled++;
     }
     ++i;
   }
 }
 
-void Driver::Connect(unsigned index, const tcp::endpoint& ep, const vector<SlotRange>& slots) {
+void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
   VLOG(2) << "Connecting " << index << " to " << ep;
   error_code ec = socket_->Connect(ep);
   CHECK(!ec) << "Could not connect to " << ep << " " << ec;
@@ -487,7 +598,7 @@ void Driver::Connect(unsigned index, const tcp::endpoint& ep, const vector<SlotR
     string_view resp = io::View(io::Bytes(buf, *res_sz));
     CHECK(absl::EndsWith(resp, "\r\n")) << resp;
   }
-  slots_ = slots;
+  ep_ = ep;
   receive_fb_ = MakeFiber(fb2::Launch::dispatch, [this] { ReceiveFb(); });
 }
 
@@ -534,9 +645,8 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
     // TODO: this skews the distribution if slot ranges are uneven.
     // Ideally we would like to pick randomly a single slot from all the ranges we have
     // and pass it to cmd_gen->Next below.
-    if (!slots_.empty()) {
-      unsigned index = i % slots_.size();
-      slot_range = slots_[index];
+    if (!shard_slots_.Empty()) {
+      slot_range = shard_slots_.NextSlotRange(ep_, i);
     }
 
     string cmd = cmd_gen->Next(slot_range);
@@ -631,25 +741,33 @@ void Driver::ParseRESP() {
   uint32_t consumed = 0;
   RedisParser::Result result = RedisParser::OK;
   RespVec parse_args;
+  constexpr string_view kMovedErrorKey = "MOVED"sv;
 
   do {
     result = parser_.Parse(io_buf_.InputBuffer(), &consumed, &parse_args);
     if (result == RedisParser::OK && !parse_args.empty()) {
       if (parse_args[0].type == RespExpr::ERROR) {
-        string_view error = io::View(io_buf_.InputBuffer());
+        string_view error = parse_args[0].GetView();
         VLOG(2) << "Error " << error;
-        if (absl::StartsWith(error, "-MOVED ")) {
-          error = error.substr(7);
+        if (absl::StartsWith(error, kMovedErrorKey)) {
+          error = error.substr(kMovedErrorKey.length());
           vector<string_view> parts =
               absl::StrSplit(absl::StripTrailingAsciiWhitespace(error), ' ', absl::SkipEmpty());
+
           CHECK_EQ(parts.size(), 2u);
           uint32_t slot_id;
           CHECK(absl::SimpleAtoi(parts[0], &slot_id));
-          vector<string_view> host_port = absl::StrSplit(parts[1], ':');
-          CHECK_EQ(host_port.size(), 2u);
 
-          // TODO: to support slot migration.
-          LOG_EVERY_T(INFO, 1) << "Moved: " << slot_id << " to " << parts[1];
+          vector<string_view> addr_parts = absl::StrSplit(parts[1], ':');
+          CHECK_EQ(2u, addr_parts.size());
+
+          auto host = ::boost::asio::ip::make_address(addr_parts[0]);
+
+          uint32_t port;
+          CHECK(absl::SimpleAtoi(addr_parts[1], &port));
+          CHECK_LT(port, 65536u);
+
+          shard_slots_.MoveSlot(ep_, tcp::endpoint(host, port), slot_id);
         }
         ++stats_.num_errors;
       } else if (reqs_.front().might_hit && parse_args[0].type != RespExpr::NIL) {
@@ -700,33 +818,31 @@ void Driver::ParseMC() {
   }
 }
 
-void TLocalClient::Connect(tcp::endpoint ep, const ClusterSpec& cluster) {
+void TLocalClient::Connect(tcp::endpoint ep, const vector<tcp::endpoint>& endpoints) {
   VLOG(2) << "Connecting client...";
 
-  cluster_spec_ = cluster;
   unsigned conn_per_shard = GetFlag(FLAGS_c);
-  if (cluster.empty()) {
+  if (shard_slots_->Empty()) {
     drivers_.resize(conn_per_shard);
   } else {
-    drivers_.resize(cluster.size() * conn_per_shard);
+    drivers_.resize(shard_slots_->Size() * conn_per_shard);
   }
 
   for (auto& driver : drivers_) {
-    driver.reset(new Driver{GetFlag(FLAGS_n), GetFlag(FLAGS_test_time), &stats, p_});
+    driver.reset(new Driver{GetFlag(FLAGS_n), GetFlag(FLAGS_test_time), &stats, p_, shard_slots_});
   }
   vector<fb2::Fiber> fbs(drivers_.size());
 
   for (size_t i = 0; i < fbs.size(); ++i) {
     vector<SlotRange> slots;
     tcp::endpoint shard_ep = ep;
-    if (!cluster.empty()) {
+    if (!shard_slots_->Empty()) {
       size_t shard = i / conn_per_shard;
-      slots = cluster[shard].slots;
-      shard_ep = cluster[shard].endpoint;
+      shard_ep = endpoints[shard];
     }
-    fbs[i] = MakeFiber([&, shard_ep, i, slots = move(slots)] {
+    fbs[i] = MakeFiber([&, shard_ep, i] {
       ThisFiber::SetName(StrCat("connect/", i));
-      drivers_[i]->Connect(i, shard_ep, slots);
+      drivers_[i]->Connect(i, shard_ep);
     });
   }
 
@@ -739,7 +855,7 @@ void TLocalClient::Start(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns) 
   cmd_gen_.emplace(&key_gen_.value());
 
   driver_fbs_.resize(drivers_.size());
-  if (!cluster_spec_.empty()) {
+  if (!shard_slots_->Empty()) {
     key_gen_->EnableClusterMode();
   }
   cur_cycle_ns_ = cycle_ns;
@@ -843,7 +959,7 @@ void WatchFiber(size_t num_shards, atomic_bool* finish_signal, ProactorPool* pp)
   }
 }
 
-ClusterSpec FetchCluster(const tcp::endpoint& ep, ProactorBase* proactor) {
+ClusterShards FetchClusterInfo(const tcp::endpoint& ep, ProactorBase* proactor) {
   unique_ptr<FiberSocketBase> socket(proactor->CreateSocket());
   error_code ec = socket->Connect(ep);
   CHECK(!ec) << "Could not connect to " << ep << " " << ec;
@@ -872,7 +988,7 @@ ClusterSpec FetchCluster(const tcp::endpoint& ep, ProactorBase* proactor) {
   string cluster_spec = resp_vec.front().GetString();
   LOG(INFO) << "Cluster spec: " << cluster_spec;
   vector<string_view> lines = absl::StrSplit(cluster_spec, '\n', absl::SkipEmpty());
-  ClusterSpec res;
+  ClusterShards res;
   for (string_view line : lines) {
     vector<string_view> parts = absl::StrSplit(line, ' ');
     // <id> <ip:port@cport[,hostname]> <flags> <master> <ping-sent> <pong-recv>
@@ -964,21 +1080,31 @@ int main(int argc, char* argv[]) {
   auto address = ::boost::asio::ip::make_address(ip_addr);
   tcp::endpoint ep{address, GetFlag(FLAGS_p)};
 
-  ClusterSpec shards;
+  ClusterShards shards;
   if (protocol == RESP) {
-    shards = proactor->Await([&] { return FetchCluster(ep, proactor); });
+    shards = proactor->Await([&] { return FetchClusterInfo(ep, proactor); });
   }
   LOG(INFO) << "Connecting threads to "
             << (shards.empty() ? string("single node ")
                                : absl::StrCat(shards.size(), " shard cluster"));
+
+  if (!shards.empty() && !GetFlag(FLAGS_command).empty() && GetFlag(FLAGS_cluster_skip_tags)) {
+    // For custom commands we may need to use the same hashtag for multiple keys.
+    LOG(WARNING) << "Enforcing hash tags for custom commands";
+    absl::SetFlag(&FLAGS_cluster_skip_tags, false);
+  }
+
+  ShardSlots shard_slots;
+  shard_slots.SetClusterSlotRanges(shards);
+  std::vector<tcp::endpoint> shard_endpoints = shard_slots.Endpoints();
 
   pp->AwaitFiberOnAll([&](unsigned index, auto* p) {
     base::SplitMix64 seed_mix(GetFlag(FLAGS_seed) + index * 0x6a45554a264d72bULL);
     auto seed = seed_mix();
     VLOG(1) << "Seeding bitgen with seed " << seed;
     bit_gen.seed(seed);
-    client = make_unique<TLocalClient>(p);
-    client->Connect(ep, shards);
+    client = make_unique<TLocalClient>(p, &shard_slots);
+    client->Connect(ep, shard_endpoints);
   });
 
   const uint32_t key_minimum = GetFlag(FLAGS_key_minimum);

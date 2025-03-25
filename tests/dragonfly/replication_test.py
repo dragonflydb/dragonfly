@@ -1264,6 +1264,7 @@ async def test_take_over_counters(df_factory, master_threads, replica_threads):
         assert client_value == int(replicated_value)
 
 
+@pytest.mark.exclude_epoll
 @pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
 async def test_take_over_seeder(
     request, df_factory, df_seeder_factory, master_threads, replica_threads
@@ -2366,6 +2367,7 @@ async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory,
     await assert_replica_reconnections(replica, 0)
 
 
+@pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 1})
 async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
     # disconnect after 1 second of being blocked

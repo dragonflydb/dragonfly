@@ -366,20 +366,20 @@ async def test_s3_snapshot(async_client, tmp_dir):
     reason="AWS S3 snapshots bucket is not configured",
 )
 @dfly_args({**BASIC_ARGS})
-async def test_s3_save_local_dir(async_client):
+async def test_s3_save_local_dir(async_client, tmp_dir):
     seeder = StaticSeeder(key_target=10_000)
     await seeder.run(async_client)
 
     try:
         # SAVE to S3 bucket with `s3_dump` as filename prefix
         await async_client.execute_command(
-            "SAVE", "DF", "s3://" + os.environ["DRAGONFLY_S3_BUCKET"], "s3_dump"
+            "SAVE", "DF", "s3://" + os.environ["DRAGONFLY_S3_BUCKET"] + str(tmp_dir), "s3_dump"
         )
 
     finally:
         delete_s3_objects(
             os.environ["DRAGONFLY_S3_BUCKET"],
-            "s3_dump",
+            str(tmp_dir)[1:] + "/s3_dump",
         )
 
 

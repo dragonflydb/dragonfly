@@ -89,11 +89,21 @@ class SortedMap {
   bool DefragIfNeeded(float ratio);
 
  private:
+  struct Query {
+    ScoreSds item;
+    bool ignore_score;
+    bool str_is_infinite;
+
+    Query(ScoreSds key, bool ign_score = false, int is_inf = 0)
+        : item(key), ignore_score(ign_score), str_is_infinite(is_inf != 0) {
+    }
+  };
+
   struct ScoreSdsPolicy {
     using KeyT = ScoreSds;
 
     struct KeyCompareTo {
-      int operator()(KeyT a, KeyT b) const;
+      int operator()(Query q, ScoreSds key) const;
     };
   };
 
