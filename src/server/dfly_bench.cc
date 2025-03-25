@@ -741,17 +741,19 @@ void Driver::ParseRESP() {
   uint32_t consumed = 0;
   RedisParser::Result result = RedisParser::OK;
   RespVec parse_args;
+  constexpr string_view kMovedErrorKey = "MOVED"sv;
 
   do {
     result = parser_.Parse(io_buf_.InputBuffer(), &consumed, &parse_args);
     if (result == RedisParser::OK && !parse_args.empty()) {
       if (parse_args[0].type == RespExpr::ERROR) {
-        string_view error = io::View(io_buf_.InputBuffer());
+        string_view error = parse_args[0].GetView();
         VLOG(2) << "Error " << error;
-        if (absl::StartsWith(error, "-MOVED ")) {
-          error = error.substr(7);
+        if (absl::StartsWith(error, kMovedErrorKey)) {
+          error = error.substr(kMovedErrorKey.length());
           vector<string_view> parts =
               absl::StrSplit(absl::StripTrailingAsciiWhitespace(error), ' ', absl::SkipEmpty());
+
           CHECK_EQ(parts.size(), 2u);
           uint32_t slot_id;
           CHECK(absl::SimpleAtoi(parts[0], &slot_id));
