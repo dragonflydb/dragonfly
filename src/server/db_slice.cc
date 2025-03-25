@@ -830,21 +830,11 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   ServerState& etl = *ServerState::tlocal();
   PrimeTable* pt = &db_arr_[0]->prime;
   PrimeTable::Cursor cursor;
-  int64_t start = absl::GetCurrentTimeNanos();
-  int32_t traverse_calls = 0;
+
   do {
     PrimeTable::Cursor next = pt->TraverseBuckets(cursor, iterate_bucket);
-    ++traverse_calls;
     cursor = next;
-    int64_t after = absl::GetCurrentTimeNanos();
-    int64_t exec_time_us = (after - start) / 1000;
-    if (exec_time_us > 300) {
-      VLOG(2) << "Yield after: " << exec_time_us << " traverse calls: " << traverse_calls;
-      ThisFiber::SleepFor(30us);
-      traverse_calls = 0;
-      start = absl::GetCurrentTimeNanos();
-    }
-
+    ThisFiber::Yield();
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
   VLOG(1) << "FlushSlotsFb del count is: " << del_count;
   UnregisterOnChange(next_version);
