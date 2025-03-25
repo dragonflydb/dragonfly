@@ -22,6 +22,7 @@ env:
   TAG_NAME: ${{ github.event.inputs.TAG_NAME || github.event.release.tag_name }}
   IS_PRERELEASE: ${{ github.event.release.prerelease || github.event.inputs.PRERELEASE }}
   IMAGE: ghcr.io/dragonflydb/dragonfly
+  GCS_IMAGE: us-central1-docker.pkg.dev/dragonflydb-public/dragonfly-registry/dragonfly
 
 jobs:
   build_and_tag:
@@ -49,12 +50,12 @@ jobs:
           submodules: true
       - name: Set up Docker Build
         uses: docker/setup-buildx-action@v3
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+
+      - name: Login to Registries
+        uses: ./.github/actions/multi-registry-docker-login
         with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
 
       - name: Fetch release asset
         uses: dsaltares/fetch-gh-release-asset@1.1.2
@@ -80,6 +81,7 @@ jobs:
         with:
           images: |
             ${{ env.IMAGE }}
+            ${{ env.GCS_IMAGE }}
           flavor: |
             latest=false
             prefix=${{ matrix.flavor}}-
@@ -129,35 +131,54 @@ jobs:
       matrix:
         flavor: [ubuntu]
     steps:
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: Login to Registries
+        uses: ./.github/actions/multi-registry-docker-login
         with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
 
       - name: Merge and Push
         run: |
-            sha_amd=${{ env.IMAGE }}@${{ needs.build_and_tag.outputs.sha_amd }}
-            sha_arm=${{ env.IMAGE }}@${{ needs.build_and_tag.outputs.sha_arm }}
-            echo "shas: $sha_amd $sha_arm"
+            # Function to create and push manifests for a given registry
+            create_and_push_manifests() {
+              local registry=$1
+              local sha_amd=$2
+              local sha_arm=$3
+              local flavor=$4
+              local tag_name=$5
+              local is_prerelease=$6
 
-            if [[ "${{ env.IS_PRERELEASE }}" == 'true' ]]; then
-              # Create and push the manifest like dragonfly:alpha-ubuntu
-              tag="${{ env.IMAGE }}:alpha-${{ matrix.flavor }}"
+              if [[ "$is_prerelease" == 'true' ]]; then
+                # Create and push the manifest like dragonfly:alpha-ubuntu
+                tag="${registry}:alpha-${flavor}"
+                docker manifest create ${tag} --amend ${sha_amd} --amend ${sha_arm}
+                docker manifest push ${tag}
+              elif [[ "$flavor" == 'ubuntu' ]]; then
+                tag="${registry}:latest"
+                # Create and push the manifest like dragonfly:latest
+                docker manifest create ${tag} --amend ${sha_amd} --amend ${sha_arm}
+                docker manifest push ${tag}
+              fi
+
+              # Create and push the manifest like dragonfly:v1.26.4
+              tag="${registry}:${tag_name}"
               docker manifest create ${tag} --amend ${sha_amd} --amend ${sha_arm}
               docker manifest push ${tag}
-            elif [[ "${{matrix.flavor}}" == 'ubuntu' ]]; then
-              tag="${{ env.IMAGE }}:latest"
-              # Create and push the manifest like dragonfly:latest
-              docker manifest create ${tag} --amend ${sha_amd} --amend ${sha_arm}
-              docker manifest push ${tag}
-            fi
+            }
 
-            # Create and push the manifest like dragonfly:v1.26.4
-            tag=${{ env.IMAGE }}:${{ env.TAG_NAME }}
-            docker manifest create ${tag} --amend ${sha_amd} --amend ${sha_arm}
-            docker manifest push ${tag}
+            # GitHub Container Registry manifests
+            ghcr_sha_amd=${{ env.IMAGE }}@${{ needs.build_and_tag.outputs.sha_amd }}
+            ghcr_sha_arm=${{ env.IMAGE }}@${{ needs.build_and_tag.outputs.sha_arm }}
+            create_and_push_manifests "${{ env.IMAGE }}" "$ghcr_sha_amd" "$ghcr_sha_arm" "${{ matrix.flavor }}" "${{ env.TAG_NAME }}" "${{ env.IS_PRERELEASE }}"
+
+            # Google Artifact Registry manifests
+            gar_sha_amd=${{ env.GCS_IMAGE }}@${{ needs.build_and_tag.outputs.sha_amd }}
+            gar_sha_arm=${{ env.GCS_IMAGE }}@${{ needs.build_and_tag.outputs.sha_arm }}
+            create_and_push_manifests "${{ env.GCS_IMAGE }}" "$gar_sha_amd" "$gar_sha_arm" "${{ matrix.flavor }}" "${{ env.TAG_NAME }}" "${{ env.IS_PRERELEASE }}"
+
   release_helm_and_notify:
     needs: [merge_manifest]
     runs-on: ubuntu-latest
