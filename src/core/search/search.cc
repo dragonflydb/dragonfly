@@ -177,8 +177,8 @@ struct ProfileBuilder {
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
 
-  BasicSearch(const FieldIndices* indices, size_t limit)
-      : indices_{indices}, limit_{limit}, tmp_vec_{} {
+  BasicSearch(const FieldIndices* indices, const search::Synonyms* synonyms, size_t limit)
+      : indices_{indices}, synonyms_{synonyms}, limit_{limit}, tmp_vec_{} {
   }
 
   void EnableProfiling() {
@@ -477,6 +477,7 @@ struct BasicSearch {
   }
 
   const FieldIndices* indices_;
+  const search::Synonyms* synonyms_ = nullptr;
   size_t limit_;
 
   size_t preagg_total_ = 0;
@@ -681,8 +682,9 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params, const S
   return true;
 }
 
-SearchResult SearchAlgorithm::Search(const FieldIndices* index, size_t limit) const {
-  auto bs = BasicSearch{index, limit};
+SearchResult SearchAlgorithm::Search(const FieldIndices* index, const search::Synonyms* synonyms,
+                                     size_t limit) const {
+  auto bs = BasicSearch{index, synonyms, limit};
   if (profiling_enabled_)
     bs.EnableProfiling();
   return bs.Search(*query_);

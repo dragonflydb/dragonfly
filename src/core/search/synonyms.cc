@@ -15,14 +15,4 @@ void Synonyms::UpdateGroup(uint32_t id, std::vector<std::string> terms) {
   group.insert(terms.begin(), terms.end());
 }
 
-absl::flat_hash_set<uint32_t> Synonyms::GetGroupIds(const std::string& term) const {
-  absl::flat_hash_set<uint32_t> result;
-  for (const auto& [group_id, group] : groups_) {
-    if (group.contains(term)) {
-      result.insert(group_id);
-    }
-  }
-  return result;
-}
-
 }  // namespace dfly::search

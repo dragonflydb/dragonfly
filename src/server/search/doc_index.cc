@@ -238,7 +238,8 @@ SearchFieldsList ToSV(const search::Schema& schema, const std::optional<SearchFi
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
                                    search::SearchAlgorithm* search_algo) const {
   auto& db_slice = op_args.GetDbSlice();
-  auto search_results = search_algo->Search(&*indices_, params.limit_offset + params.limit_total);
+  auto search_results =
+      search_algo->Search(&*indices_, &synonyms_, params.limit_offset + params.limit_total);
 
   if (!search_results.error.empty())
     return SearchResult{facade::ErrorReply{std::move(search_results.error)}};
@@ -340,7 +341,7 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
     const OpArgs& op_args, const AggregateParams& params,
     search::SearchAlgorithm* search_algo) const {
   auto& db_slice = op_args.GetDbSlice();
-  auto search_results = search_algo->Search(&*indices_);
+  auto search_results = search_algo->Search(&*indices_, &synonyms_);
 
   if (!search_results.error.empty())
     return {};

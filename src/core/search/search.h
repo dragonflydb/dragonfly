@@ -16,6 +16,7 @@
 
 #include "base/pmr/memory_resource.h"
 #include "core/search/base.h"
+#include "core/search/synonyms.h"
 
 namespace dfly::search {
 
@@ -150,7 +151,7 @@ class SearchAlgorithm {
   // Init with query and return true if successful.
   bool Init(std::string_view query, const QueryParams* params, const SortOption* sort = nullptr);
 
-  SearchResult Search(const FieldIndices* index,
+  SearchResult Search(const FieldIndices* index, const search::Synonyms* synonyms,
                       size_t limit = std::numeric_limits<size_t>::max()) const;
 
   // if enabled, return limit & alias for knn query
