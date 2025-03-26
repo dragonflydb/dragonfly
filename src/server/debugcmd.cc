@@ -28,6 +28,7 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
+#include "facade/cmd_arg_parser.h"
 #include "server/blocking_controller.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
@@ -38,7 +39,6 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
-
 using namespace std;
 
 ABSL_DECLARE_FLAG(string, dir);
@@ -722,45 +722,52 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
     return nullopt;
   }
 
+  CmdArgParser parser(args.subspan(1));
   PopulateOptions options;
-  if (!absl::SimpleAtoi(ArgS(args, 1), &options.total_count)) {
+
+  auto total_count = parser.Next();
+  if (parser.HasError()) {
+    builder->SendError(kUintErr);
+    return nullopt;
+  }
+  if (!absl::SimpleAtoi(total_count, &options.total_count)) {
     builder->SendError(kUintErr);
     return nullopt;
   }
 
-  if (args.size() > 2) {
-    options.prefix = ArgS(args, 2);
+  if (parser.HasNext()) {
+    options.prefix = parser.Next();
   }
 
-  if (args.size() > 3) {
-    if (!absl::SimpleAtoi(ArgS(args, 3), &options.val_size)) {
+  if (parser.HasNext()) {
+    auto val_size_str = parser.Next();
+    if (!absl::SimpleAtoi(val_size_str, &options.val_size)) {
       builder->SendError(kUintErr);
       return nullopt;
     }
   }
 
-  for (size_t index = 4; args.size() > index; ++index) {
-    string str = absl::AsciiStrToUpper(ArgS(args, index));
-    if (str == "RAND") {
+  while (parser.HasNext()) {
+    auto flag = absl::AsciiStrToUpper(parser.Next());
+    if (flag == "RAND") {
       options.populate_random_values = true;
-    } else if (str == "TYPE") {
-      if (args.size() < index + 2) {
+    } else if (flag == "TYPE") {
+      if (!parser.HasNext()) {
         builder->SendError(kSyntaxErr);
         return nullopt;
       }
-      ++index;
-      options.type = absl::AsciiStrToUpper(ArgS(args, index));
-    } else if (str == "ELEMENTS") {
-      if (args.size() < index + 2) {
+      options.type = absl::AsciiStrToUpper(parser.Next());
+    } else if (flag == "ELEMENTS") {
+      if (!parser.HasNext()) {
         builder->SendError(kSyntaxErr);
         return nullopt;
       }
-      if (!absl::SimpleAtoi(ArgS(args, ++index), &options.elements)) {
+      if (!absl::SimpleAtoi(parser.Next(), &options.elements)) {
         builder->SendError(kSyntaxErr);
         return nullopt;
       }
-    } else if (str == "SLOTS") {
-      if (args.size() < index + 3) {
+    } else if (flag == "SLOTS") {
+      if (!parser.HasAtLeast(2)) {
         builder->SendError(kSyntaxErr);
         return nullopt;
       }
@@ -776,29 +783,29 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
         return slot_id;
       };
 
-      auto start = parse_slot(ArgS(args, ++index));
+      auto start = parse_slot(parser.Next());
       if (start.status() != facade::OpStatus::OK) {
         builder->SendError(start.status());
         return nullopt;
       }
-      auto end = parse_slot(ArgS(args, ++index));
+      auto end = parse_slot(parser.Next());
       if (end.status() != facade::OpStatus::OK) {
         builder->SendError(end.status());
         return nullopt;
       }
       options.slot_range = cluster::SlotRange{.start = static_cast<SlotId>(start.value()),
                                               .end = static_cast<SlotId>(end.value())};
-    } else if (str == "EXPIRE") {
-      if (args.size() < index + 3) {
+    } else if (flag == "EXPIRE") {
+      if (!parser.HasAtLeast(2)) {
         builder->SendError(kSyntaxErr);
         return nullopt;
       }
       uint32_t start, end;
-      if (!absl::SimpleAtoi(ArgS(args, ++index), &start)) {
+      if (!absl::SimpleAtoi(parser.Next(), &start)) {
         builder->SendError(kSyntaxErr);
         return nullopt;
       }
-      if (!absl::SimpleAtoi(ArgS(args, ++index), &end)) {
+      if (!absl::SimpleAtoi(parser.Next(), &end)) {
         builder->SendError(kSyntaxErr);
         return nullopt;
       }
