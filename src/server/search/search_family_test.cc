@@ -2036,4 +2036,87 @@ TEST_F(SearchFamilyTest, SynonymManagement) {
                                  IsArray("1"), "tiger", IsArray("3"), "cat", IsArray("1")));
 }
 
+TEST_F(SearchFamilyTest, SynonymsSearch) {
+  // Create search index
+  auto resp =
+      Run({"FT.CREATE", "myIndex", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  // Add documents
+  EXPECT_THAT(Run({"HSET", "doc:1", "title", "car"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:2", "title", "automobile"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:3", "title", "vehicle"}), IntArg(1));
+
+  // Add synonyms "car" and "automobile" to group 1
+  resp = Run({"FT.SYNUPDATE", "myIndex", "1", "car", "automobile"});
+  EXPECT_EQ(resp, "OK");
+
+  // Check synonyms list
+  resp = Run({"FT.SYNDUMP", "myIndex"});
+  ASSERT_THAT(resp, ArrLen(4));
+
+  // Search for "car" (should find both "car" and "automobile")
+  resp = Run({"FT.SEARCH", "myIndex", "car"});
+  ASSERT_THAT(resp, ArrLen(5));
+  EXPECT_THAT(resp.GetVec()[0], IntArg(2));  // Number of documents found
+
+  // Check for doc:1 and doc:2 in results
+  bool found_doc1 = false;
+  bool found_doc2 = false;
+
+  for (size_t i = 1; i < resp.GetVec().size(); i += 2) {
+    if (resp.GetVec()[i] == "doc:1")
+      found_doc1 = true;
+    if (resp.GetVec()[i] == "doc:2")
+      found_doc2 = true;
+  }
+
+  EXPECT_TRUE(found_doc1);
+  EXPECT_TRUE(found_doc2);
+
+  // Search for "automobile" (should find both "car" and "automobile")
+  resp = Run({"FT.SEARCH", "myIndex", "automobile"});
+  ASSERT_THAT(resp, ArrLen(5));
+  EXPECT_THAT(resp.GetVec()[0], IntArg(2));  // Number of documents found
+
+  found_doc1 = false;
+  found_doc2 = false;
+
+  for (size_t i = 1; i < resp.GetVec().size(); i += 2) {
+    if (resp.GetVec()[i] == "doc:1")
+      found_doc1 = true;
+    if (resp.GetVec()[i] == "doc:2")
+      found_doc2 = true;
+  }
+
+  EXPECT_TRUE(found_doc1);
+  EXPECT_TRUE(found_doc2);
+
+  // Add "vehicle" to the synonym group
+  resp = Run({"FT.SYNUPDATE", "myIndex", "1", "vehicle"});
+  EXPECT_EQ(resp, "OK");
+
+  // Search for "vehicle" (should find all three documents)
+  resp = Run({"FT.SEARCH", "myIndex", "vehicle"});
+  ASSERT_THAT(resp, ArrLen(7));
+  EXPECT_THAT(resp.GetVec()[0], IntArg(3));  // Number of documents found
+
+  found_doc1 = false;
+  found_doc2 = false;
+  bool found_doc3 = false;
+
+  for (size_t i = 1; i < resp.GetVec().size(); i += 2) {
+    if (resp.GetVec()[i] == "doc:1")
+      found_doc1 = true;
+    if (resp.GetVec()[i] == "doc:2")
+      found_doc2 = true;
+    if (resp.GetVec()[i] == "doc:3")
+      found_doc3 = true;
+  }
+
+  EXPECT_TRUE(found_doc1);
+  EXPECT_TRUE(found_doc2);
+  EXPECT_TRUE(found_doc3);
+}
+
 }  // namespace dfly
