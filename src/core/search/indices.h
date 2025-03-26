@@ -79,8 +79,8 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
 struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
   using StopWords = absl::flat_hash_set<std::string>;
 
-  TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords)
-      : BaseStringIndex(mr, false), stopwords_{stopwords} {
+  TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords, const Synonyms* synonyms)
+      : BaseStringIndex(mr, false), stopwords_{stopwords}, synonyms_{synonyms} {
   }
 
  protected:
@@ -90,6 +90,7 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
 
  private:
   const StopWords* stopwords_;
+  const Synonyms* synonyms_;
 };
 
 // Index for text fields.

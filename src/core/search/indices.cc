@@ -194,7 +194,28 @@ std::optional<DocumentAccessor::StringList> TextIndex::GetStrings(const Document
 }
 
 absl::flat_hash_set<std::string> TextIndex::Tokenize(std::string_view value) const {
-  return TokenizeWords(value, *stopwords_);
+  absl::flat_hash_set<std::string> tokens = TokenizeWords(value, *stopwords_);
+
+  if (!synonyms_) {
+    return tokens;
+  }
+
+  const auto& groups = synonyms_->GetGroups();
+  absl::flat_hash_set<std::string> expanded_tokens = tokens;
+
+  for (const auto& token : tokens) {
+    for (const auto& [group_id, group] : groups) {
+      if (group.contains(token)) {
+        for (const auto& synonym : group) {
+          if (synonym != token) {
+            expanded_tokens.insert(synonym);
+          }
+        }
+      }
+    }
+  }
+
+  return expanded_tokens;
 }
 
 std::optional<DocumentAccessor::StringList> TagIndex::GetStrings(const DocumentAccessor& doc,

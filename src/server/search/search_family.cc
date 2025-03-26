@@ -1141,7 +1141,7 @@ void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) 
   facade::CmdArgParser parser{args};
   string_view index_name = parser.Next();
   string_view group_id_str = parser.Next();
-  [[maybe_unused]] bool skip_initial_scan = parser.Check("SKIPINITIALSCAN");
+  bool skip_initial_scan = parser.Check("SKIPINITIALSCAN");
 
   // Parse group ID
   uint32_t group_id;
@@ -1176,6 +1176,11 @@ void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) 
 
         // Update synonym group in this shard
         index->GetSynonyms().UpdateGroup(group_id, terms);
+
+        if (!skip_initial_scan) {
+          es->search_indices()->RebuildAllIndices(OpArgs{
+              es, nullptr, DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}});
+        }
 
         return OpStatus::OK;
       },

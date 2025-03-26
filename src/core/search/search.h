@@ -79,7 +79,8 @@ struct IndicesOptions {
 class FieldIndices {
  public:
   // Create indices based on schema and options. Both must outlive the indices
-  FieldIndices(const Schema& schema, const IndicesOptions& options, PMR_NS::memory_resource* mr);
+  FieldIndices(const Schema& schema, const IndicesOptions& options, PMR_NS::memory_resource* mr,
+               const Synonyms* synonyms);
 
   // Returns true if document was added
   bool Add(DocId doc, const DocumentAccessor& access);
@@ -103,6 +104,7 @@ class FieldIndices {
   std::vector<DocId> all_ids_;
   absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>> indices_;
   absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>> sort_indices_;
+  const Synonyms* synonyms_;
 };
 
 struct AlgorithmProfile {
@@ -151,7 +153,7 @@ class SearchAlgorithm {
   // Init with query and return true if successful.
   bool Init(std::string_view query, const QueryParams* params, const SortOption* sort = nullptr);
 
-  SearchResult Search(const FieldIndices* index, const search::Synonyms* synonyms,
+  SearchResult Search(const FieldIndices* index,
                       size_t limit = std::numeric_limits<size_t>::max()) const;
 
   // if enabled, return limit & alias for knn query

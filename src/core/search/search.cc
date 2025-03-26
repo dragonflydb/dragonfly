@@ -177,8 +177,8 @@ struct ProfileBuilder {
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
 
-  BasicSearch(const FieldIndices* indices, const search::Synonyms* synonyms, size_t limit)
-      : indices_{indices}, synonyms_{synonyms}, limit_{limit}, tmp_vec_{} {
+  BasicSearch(const FieldIndices* indices, size_t limit)
+      : indices_{indices}, limit_{limit}, tmp_vec_{} {
   }
 
   void EnableProfiling() {
@@ -518,8 +518,8 @@ IndicesOptions::IndicesOptions() {
 }
 
 FieldIndices::FieldIndices(const Schema& schema, const IndicesOptions& options,
-                           PMR_NS::memory_resource* mr)
-    : schema_{schema}, options_{options} {
+                           PMR_NS::memory_resource* mr, const Synonyms* synonyms)
+    : schema_{schema}, options_{options}, synonyms_{synonyms} {
   CreateIndices(mr);
   CreateSortIndices(mr);
 }
@@ -531,7 +531,7 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
 
     switch (field_info.type) {
       case SchemaField::TEXT:
-        indices_[field_ident] = make_unique<TextIndex>(mr, &options_.stopwords);
+        indices_[field_ident] = make_unique<TextIndex>(mr, &options_.stopwords, synonyms_);
         break;
       case SchemaField::NUMERIC:
         indices_[field_ident] = make_unique<NumericIndex>(mr);
@@ -682,9 +682,8 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params, const S
   return true;
 }
 
-SearchResult SearchAlgorithm::Search(const FieldIndices* index, const search::Synonyms* synonyms,
-                                     size_t limit) const {
-  auto bs = BasicSearch{index, synonyms, limit};
+SearchResult SearchAlgorithm::Search(const FieldIndices* index, size_t limit) const {
+  auto bs = BasicSearch{index, limit};
   if (profiling_enabled_)
     bs.EnableProfiling();
   return bs.Search(*query_);
