@@ -723,7 +723,7 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
   ExpectConditionWithinTimeout([&]() {
     return RunPrivileged({"dflycluster", "flushslots", "0", "0"}) == "OK";
   });
-
+  util::ThisFiber::SleepFor(1ms);
   EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", "1"}),
               RespArray(ElementsAre(
                   RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads", _,
@@ -732,7 +732,7 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
                                         "total_writes", _, "memory_bytes", _)))));
 
   EXPECT_EQ(RunPrivileged({"dflycluster", "flushslots", "0", "1"}), "OK");
-
+  util::ThisFiber::SleepFor(1ms);
   EXPECT_THAT(
       RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", "1"}),
       RespArray(ElementsAre(RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads",
