@@ -201,7 +201,7 @@ absl::flat_hash_set<std::string> TextIndex::Tokenize(std::string_view value) con
   }
 
   const auto& groups = synonyms_->GetGroups();
-  absl::flat_hash_set<std::string> expanded_tokens = tokens;
+  absl::flat_hash_set<std::string> expanded_tokens;
 
   for (const auto& token : tokens) {
     for (const auto& [group_id, group] : groups) {
@@ -215,7 +215,8 @@ absl::flat_hash_set<std::string> TextIndex::Tokenize(std::string_view value) con
     }
   }
 
-  return expanded_tokens;
+  tokens.merge(expanded_tokens);
+  return tokens;
 }
 
 std::optional<DocumentAccessor::StringList> TagIndex::GetStrings(const DocumentAccessor& doc,

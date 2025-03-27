@@ -1155,8 +1155,8 @@ void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) 
     return cmd_cntx.rb->SendError("No terms specified");
   }
 
-  if (auto err = parser.Error(); err) {
-    return cmd_cntx.rb->SendError(err->MakeReply());
+  if (!parser.Finalize()) {
+    return cmd_cntx.rb->SendError(parser.Error()->MakeReply());
   }
 
   std::atomic_bool index_not_found{true};
