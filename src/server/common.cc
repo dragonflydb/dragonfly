@@ -308,6 +308,19 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
       if (!absl::SimpleAtoi(ArgS(args, i + 1), &scan_opts.bucket_id)) {
         return facade::OpStatus::INVALID_INT;
       }
+    } else if (opt == "ATTR") {
+      string_view mask = ArgS(args, i + 1);
+      if (mask == "v") {
+        scan_opts.mask = ScanOpts::Mask::Volatile;
+      } else if (mask == "p") {
+        scan_opts.mask = ScanOpts::Mask::Permanent;
+      } else if (mask == "a") {
+        scan_opts.mask = ScanOpts::Mask::Accessed;
+      } else if (mask == "u") {
+        scan_opts.mask = ScanOpts::Mask::Untouched;
+      } else {
+        return facade::OpStatus::SYNTAX_ERR;
+      }
     } else {
       return facade::OpStatus::SYNTAX_ERR;
     }
