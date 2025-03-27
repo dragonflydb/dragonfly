@@ -2102,40 +2102,13 @@ TEST_F(SearchFamilyTest, SynonymsSearch) {
 
   // Search for "car" (should find both "car" and "automobile")
   resp = Run({"FT.SEARCH", "myIndex", "car"});
-  ASSERT_THAT(resp, ArrLen(5));
-  EXPECT_THAT(resp.GetVec()[0], IntArg(2));  // Number of documents found
-
-  // Check for doc:1 and doc:2 in results
-  bool found_doc1 = false;
-  bool found_doc2 = false;
-
-  for (size_t i = 1; i < resp.GetVec().size(); i += 2) {
-    if (resp.GetVec()[i] == "doc:1")
-      found_doc1 = true;
-    if (resp.GetVec()[i] == "doc:2")
-      found_doc2 = true;
-  }
-
-  EXPECT_TRUE(found_doc1);
-  EXPECT_TRUE(found_doc2);
+  EXPECT_THAT(resp,
+              IsMapWithSize("doc:1", IsMap("title", "car"), "doc:2", IsMap("title", "automobile")));
 
   // Search for "automobile" (should find both "car" and "automobile")
   resp = Run({"FT.SEARCH", "myIndex", "automobile"});
-  ASSERT_THAT(resp, ArrLen(5));
-  EXPECT_THAT(resp.GetVec()[0], IntArg(2));  // Number of documents found
-
-  found_doc1 = false;
-  found_doc2 = false;
-
-  for (size_t i = 1; i < resp.GetVec().size(); i += 2) {
-    if (resp.GetVec()[i] == "doc:1")
-      found_doc1 = true;
-    if (resp.GetVec()[i] == "doc:2")
-      found_doc2 = true;
-  }
-
-  EXPECT_TRUE(found_doc1);
-  EXPECT_TRUE(found_doc2);
+  EXPECT_THAT(resp,
+              IsMapWithSize("doc:1", IsMap("title", "car"), "doc:2", IsMap("title", "automobile")));
 
   // Add "vehicle" to the synonym group
   resp = Run({"FT.SYNUPDATE", "myIndex", "1", "vehicle"});
@@ -2143,25 +2116,9 @@ TEST_F(SearchFamilyTest, SynonymsSearch) {
 
   // Search for "vehicle" (should find all three documents)
   resp = Run({"FT.SEARCH", "myIndex", "vehicle"});
-  ASSERT_THAT(resp, ArrLen(7));
-  EXPECT_THAT(resp.GetVec()[0], IntArg(3));  // Number of documents found
-
-  found_doc1 = false;
-  found_doc2 = false;
-  bool found_doc3 = false;
-
-  for (size_t i = 1; i < resp.GetVec().size(); i += 2) {
-    if (resp.GetVec()[i] == "doc:1")
-      found_doc1 = true;
-    if (resp.GetVec()[i] == "doc:2")
-      found_doc2 = true;
-    if (resp.GetVec()[i] == "doc:3")
-      found_doc3 = true;
-  }
-
-  EXPECT_TRUE(found_doc1);
-  EXPECT_TRUE(found_doc2);
-  EXPECT_TRUE(found_doc3);
+  EXPECT_THAT(resp,
+              IsMapWithSize("doc:1", IsMap("title", "car"), "doc:2", IsMap("title", "automobile"),
+                            "doc:3", IsMap("title", "vehicle")));
 }
 
 }  // namespace dfly

@@ -1140,16 +1140,10 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
 void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) {
   facade::CmdArgParser parser{args};
   string_view index_name = parser.Next();
-  string_view group_id_str = parser.Next();
+  uint32_t group_id = parser.Next<uint32_t>();
 
   // Redis ignores this parameter. Checked on redis_version:6.2.13
   [[maybe_unused]] bool skip_initial_scan = parser.Check("SKIPINITIALSCAN");
-
-  // Parse group ID
-  uint32_t group_id;
-  if (!absl::SimpleAtoi(group_id_str, &group_id)) {
-    return cmd_cntx.rb->SendError("Invalid group id");
-  }
 
   // Collect terms
   std::vector<std::string> terms;
