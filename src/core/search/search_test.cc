@@ -500,6 +500,80 @@ TEST_F(SearchTest, Errors) {
   EXPECT_THAT(algo.Search(&indices).error, HasSubstr("Wrong vector index dimensions"));
 }
 
+TEST_F(SearchTest, MatchNumericRangeWithCommas) {
+  PrepareSchema({{"f1", SchemaField::NUMERIC}, {"draw_end", SchemaField::NUMERIC}});
+
+  // Main tests for point range with identical values and different delimiters
+  {
+    // 1. Standard with space
+    PrepareQuery("@draw_end:[1742916180 1742916180]");
+    ExpectAll(Map{{"draw_end", "1742916180"}});
+    ExpectNone(Map{{"draw_end", "1742916181"}}, Map{{"draw_end", "1742916179"}});
+    EXPECT_TRUE(Check()) << GetError();
+  }
+
+  {
+    // 2. With comma
+    PrepareQuery("@draw_end:[1742916180, 1742916180]");
+    ExpectAll(Map{{"draw_end", "1742916180"}});
+    ExpectNone(Map{{"draw_end", "1742916181"}}, Map{{"draw_end", "1742916179"}});
+    EXPECT_TRUE(Check()) << GetError();
+  }
+
+  {
+    // 3. With multiple commas
+    PrepareQuery("@draw_end:[1742916180,,1742916180]");
+    ExpectAll(Map{{"draw_end", "1742916180"}});
+    ExpectNone(Map{{"draw_end", "1742916181"}}, Map{{"draw_end", "1742916179"}});
+    EXPECT_TRUE(Check()) << GetError();
+  }
+
+  {
+    // 4. With many commas - this is the key variant that didn't work
+    PrepareQuery("@draw_end:[1742916180,,,1742916180]");
+    ExpectAll(Map{{"draw_end", "1742916180"}});
+    ExpectNone(Map{{"draw_end", "1742916181"}}, Map{{"draw_end", "1742916179"}});
+    EXPECT_TRUE(Check()) << GetError();
+  }
+
+  {
+    // 5. With multiple spaces
+    PrepareQuery("@draw_end:[1742916180   1742916180]");
+    ExpectAll(Map{{"draw_end", "1742916180"}});
+    ExpectNone(Map{{"draw_end", "1742916181"}}, Map{{"draw_end", "1742916179"}});
+    EXPECT_TRUE(Check()) << GetError();
+  }
+
+  // Tests for checking ranges with different values and delimiters
+  {
+    PrepareQuery("@f1:[100 200]");
+    ExpectAll(Map{{"f1", "100"}}, Map{{"f1", "150"}}, Map{{"f1", "200"}});
+    ExpectNone(Map{{"f1", "99"}}, Map{{"f1", "201"}});
+    EXPECT_TRUE(Check()) << GetError();
+  }
+
+  {
+    PrepareQuery("@f1:[100, 200]");
+    ExpectAll(Map{{"f1", "100"}}, Map{{"f1", "150"}}, Map{{"f1", "200"}});
+    ExpectNone(Map{{"f1", "99"}}, Map{{"f1", "201"}});
+    EXPECT_TRUE(Check()) << GetError();
+  }
+
+  {
+    PrepareQuery("@f1:[100,,200]");
+    ExpectAll(Map{{"f1", "100"}}, Map{{"f1", "150"}}, Map{{"f1", "200"}});
+    ExpectNone(Map{{"f1", "99"}}, Map{{"f1", "201"}});
+    EXPECT_TRUE(Check()) << GetError();
+  }
+
+  {
+    PrepareQuery("@f1:[100,,,200]");
+    ExpectAll(Map{{"f1", "100"}}, Map{{"f1", "150"}}, Map{{"f1", "200"}});
+    ExpectNone(Map{{"f1", "99"}}, Map{{"f1", "201"}});
+    EXPECT_TRUE(Check()) << GetError();
+  }
+}
+
 class KnnTest : public SearchTest, public testing::WithParamInterface<bool /* hnsw */> {};
 
 TEST_P(KnnTest, Simple1D) {
