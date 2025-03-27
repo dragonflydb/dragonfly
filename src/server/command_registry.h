@@ -106,7 +106,7 @@ class CommandId : public facade::CommandId {
   // Invokes the command handler. Returns the invoke time in usec. The invoked_by parameter is set
   // to the string passed in by user, if available. If not set, defaults to command name.
   uint64_t Invoke(CmdArgList args, const CommandContext& cmd_cntx,
-                  std::optional<std::string_view> orig_cmd_name = std::nullopt) const;
+                  std::string_view orig_cmd_name) const;
 
   // Returns error if validation failed, otherwise nullopt
   std::optional<facade::ErrorReply> Validate(CmdArgList tail_args) const;

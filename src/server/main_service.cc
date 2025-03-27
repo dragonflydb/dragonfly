@@ -1350,7 +1350,8 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
   auto last_error = builder->ConsumeLastError();
   DCHECK(last_error.empty());
   try {
-    invoke_time_usec = cid->Invoke(tail_args, CommandContext{tx, builder, cntx}, orig_cmd_name);
+    invoke_time_usec = cid->Invoke(tail_args, CommandContext{tx, builder, cntx},
+                                   orig_cmd_name.value_or(cid->name()));
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
