@@ -2487,7 +2487,9 @@ void Service::Command(CmdArgList args, const CommandContext& cmd_cntx) {
 
   sufficient_args = (args.size() == 1);
   if (subcmd == "DOCS" && sufficient_args) {
-    return rb->SendOk();
+    // Returning an error here forces the interactive CLI client to fall back to static hints and
+    // tab completion
+    return rb->SendError("COMMAND DOCS Not Implemented");
   }
 
   return rb->SendError(kSyntaxErr, kSyntaxErrType);
