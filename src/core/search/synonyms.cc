@@ -10,9 +10,10 @@ const absl::flat_hash_map<uint32_t, Synonyms::Group>& Synonyms::GetGroups() cons
   return groups_;
 }
 
-void Synonyms::UpdateGroup(uint32_t id, std::vector<std::string> terms) {
+const Synonyms::Group& Synonyms::UpdateGroup(uint32_t id, std::vector<std::string> terms) {
   auto& group = groups_[id];
   group.insert(terms.begin(), terms.end());
+  return group;
 }
 
 }  // namespace dfly::search

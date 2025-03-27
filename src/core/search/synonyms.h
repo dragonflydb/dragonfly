@@ -19,7 +19,7 @@ class Synonyms {
   const absl::flat_hash_map<uint32_t, Group>& GetGroups() const;
 
   // Update or create a synonym group
-  void UpdateGroup(uint32_t id, std::vector<std::string> terms);
+  const Group& UpdateGroup(uint32_t id, std::vector<std::string> terms);
 
  private:
   // Maps group ID to synonym group
