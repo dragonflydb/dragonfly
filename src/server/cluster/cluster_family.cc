@@ -594,7 +594,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, SinkReplyBuilder* builder
 
     new_config = new_config->CloneWithChanges(enable_slots, disable_slots);
 
-    StartNewSlotMigrations(new_config);
+    StartNewSlotMigrations(*new_config);
 
     SlotSet before =
         ClusterConfig::Current() ? ClusterConfig::Current()->GetOwnedSlots() : SlotSet(true);
@@ -700,10 +700,10 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, SinkReplyBuilder* bui
   return builder->SendOk();
 }
 
-void ClusterFamily::StartNewSlotMigrations(std::shared_ptr<ClusterConfig> new_config) {
+void ClusterFamily::StartNewSlotMigrations(const ClusterConfig& new_config) {
   // TODO Add validating and error processing
-  auto out_migrations = new_config->GetNewOutgoingMigrations(ClusterConfig::Current());
-  auto in_migrations = new_config->GetNewIncomingMigrations(ClusterConfig::Current());
+  auto out_migrations = new_config.GetNewOutgoingMigrations(ClusterConfig::Current());
+  auto in_migrations = new_config.GetNewIncomingMigrations(ClusterConfig::Current());
 
   util::fb2::LockGuard lk(migration_mu_);
 
@@ -911,20 +911,25 @@ void ClusterFamily::InitMigration(CmdArgList args, SinkReplyBuilder* builder) {
 
   SlotRanges slot_ranges(std::move(slots));
 
-  util::fb2::LockGuard lk(migration_mu_);
+  std::shared_ptr<IncomingMigration> migration;
+  {
+    util::fb2::LockGuard lk(migration_mu_);
 
-  auto it = find_if(incoming_migration_jobs_.begin(), incoming_migration_jobs_.end(),
-                    [source_id = source_id, &slot_ranges](const auto& migration) {
-                      return migration->GetSourceID() == source_id &&
-                             migration->GetSlots() == slot_ranges;
-                    });
+    auto it = find_if(incoming_migration_jobs_.begin(), incoming_migration_jobs_.end(),
+                      [source_id = source_id, &slot_ranges](const auto& migration) {
+                        return migration->GetSourceID() == source_id &&
+                               migration->GetSlots() == slot_ranges;
+                      });
 
-  if (it == incoming_migration_jobs_.end()) {
+    if (it != incoming_migration_jobs_.end()) {
+      migration = *it;
+    }
+  }
+
+  if (!migration) {
     VLOG(1) << "Unrecognized incoming migration from " << source_id;
     return builder->SendSimpleString(OutgoingMigration::kUnknownMigration);
   }
-
-  std::shared_ptr<IncomingMigration> migration = *it;
 
   if (migration->GetState() != MigrationState::C_CONNECTING) {
     migration->Stop();
