@@ -668,7 +668,7 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params, const S
     LOG(INFO) << "Failed to parse query \"" << query << "\":" << se.what();
     return false;
   } catch (...) {
-    LOG(INFO) << "Unexpected query parser error";
+    LOG_EVERY_T(INFO, 10) << "Unexpected query parser error \"" << query << "\"";
     return false;
   }
 
