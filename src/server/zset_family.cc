@@ -102,11 +102,11 @@ bool IsListPack(const detail::RobjWrapper* robj_wrapper) {
  * taken from t_zset.c
  */
 
-int ZsetDel(detail::RobjWrapper* robj_wrapper, sds ele) {
+int ZsetDel(detail::RobjWrapper* robj_wrapper, std::string_view ele) {
   if (IsListPack(robj_wrapper)) {
     unsigned char* eptr;
     uint8_t* lp = (uint8_t*)robj_wrapper->inner_obj();
-    if ((eptr = zzlFind(lp, ele, NULL)) != NULL) {
+    if ((eptr = detail::ZzlFind(lp, ele, nullptr)) != nullptr) {
       lp = lpDeleteRangeWithEntry(lp, &eptr, 2);
       robj_wrapper->set_inner_obj(lp);
       return 1;
@@ -120,10 +120,11 @@ int ZsetDel(detail::RobjWrapper* robj_wrapper, sds ele) {
 }
 
 // taken from t_zset.c
-std::optional<double> GetZsetScore(const detail::RobjWrapper* robj_wrapper, sds member) {
+std::optional<double> GetZsetScore(const detail::RobjWrapper* robj_wrapper,
+                                   std::string_view member) {
   if (IsListPack(robj_wrapper)) {
     double score;
-    if (zzlFind((uint8_t*)robj_wrapper->inner_obj(), member, &score) == NULL)
+    if (detail::ZzlFind((uint8_t*)robj_wrapper->inner_obj(), member, &score) == NULL)
       return std::nullopt;
     return score;
   }
@@ -1345,7 +1346,7 @@ OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, facade::ArgRang
   detail::RobjWrapper* robj_wrapper = res_it->it->second.GetRobjWrapper();
   unsigned deleted = 0;
   for (string_view member : members)
-    deleted += ZsetDel(robj_wrapper, WrapSds(member));
+    deleted += ZsetDel(robj_wrapper, member);
 
   auto zlen = robj_wrapper->Size();
   res_it->post_updater.Run();
@@ -1376,7 +1377,7 @@ OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key,
 
   size_t i = 0;
   for (string_view member : members.Range())
-    scores[i++] = GetZsetScore(robj_wrapper, WrapSds(member));
+    scores[i++] = GetZsetScore(robj_wrapper, member);
 
   return scores;
 }
@@ -1976,8 +1977,7 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
 
   for (size_t j = 0; j < members.size(); j++) {
     const auto& m = members[j];
-    int retval =
-        robj_wrapper->ZsetAdd(m.first, WrapSds(m.second), zparams.flags, &retflags, &new_score);
+    int retval = robj_wrapper->ZsetAdd(m.first, m.second, zparams.flags, &retflags, &new_score);
 
     if (zparams.flags & ZADD_IN_INCR) {
       if (retval == 0) {
@@ -2021,7 +2021,7 @@ OpResult<double> ZSetFamily::OpScore(const OpArgs& op_args, string_view key, str
 
   const PrimeValue& pv = res_it.value()->second;
   const detail::RobjWrapper* robj_wrapper = pv.GetRobjWrapper();
-  auto res = GetZsetScore(robj_wrapper, WrapSds(member));
+  auto res = GetZsetScore(robj_wrapper, member);
   if (!res) {
     return OpStatus::MEMBER_NOTFOUND;
   }
