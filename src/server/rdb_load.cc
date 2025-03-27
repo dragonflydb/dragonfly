@@ -995,7 +995,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       if (json) {
         pv_->SetJson(std::move(*json));
       } else {
-        LOG(ERROR) << "Invalid JSON string";
+        LOG(INFO) << "Invalid JSON string during rdb load of JSON object: " << blob;
         ec_ = RdbError(errc::bad_json_string);
         return;
       }
