@@ -817,6 +817,7 @@ Usage: dragonfly [FLAGS]
   mi_option_enable(mi_option_show_errors);
   mi_option_set(mi_option_max_warnings, 0);
   mi_option_enable(mi_option_purge_decommits);
+  mi_option_set(mi_option_purge_delay, 0);
 
   fb2::SetDefaultStackResource(&fb2::std_malloc_resource, kFiberDefaultStackSize);
 
