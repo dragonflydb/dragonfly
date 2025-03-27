@@ -547,7 +547,7 @@ TEST_F(ServerFamilyTest, ConfigNormalization) {
 }
 
 TEST_F(ServerFamilyTest, CommandDocsOk) {
-  EXPECT_THAT(Run({"command", "docs"}), "OK");
+  EXPECT_THAT(Run({"command", "docs"}), ErrArg("COMMAND DOCS Not Implemented"));
 }
 
 TEST_F(ServerFamilyTest, PubSubCommandErr) {
