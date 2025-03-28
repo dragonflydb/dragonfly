@@ -4,15 +4,23 @@
 
 #include "synonyms.h"
 
+#include <uni_algo/case.h>
+
 namespace dfly::search {
 
-const absl::flat_hash_map<uint32_t, Synonyms::Group>& Synonyms::GetGroups() const {
+const absl::flat_hash_map<std::string, Synonyms::Group>& Synonyms::GetGroups() const {
   return groups_;
 }
 
-const Synonyms::Group& Synonyms::UpdateGroup(uint32_t id, std::vector<std::string> terms) {
+const Synonyms::Group& Synonyms::UpdateGroup(std::string id,
+                                             const std::vector<std::string>& terms) {
   auto& group = groups_[id];
-  group.insert(terms.begin(), terms.end());
+
+  // Convert all terms to lowercase before adding them to the group
+  for (const std::string& term : terms) {
+    group.insert(una::cases::to_lowercase_utf8(term));
+  }
+
   return group;
 }
 

@@ -16,14 +16,14 @@ class Synonyms {
   using Group = absl::flat_hash_set<std::string>;
 
   // Get all synonym groups
-  const absl::flat_hash_map<uint32_t, Group>& GetGroups() const;
+  const absl::flat_hash_map<std::string, Group>& GetGroups() const;
 
   // Update or create a synonym group
-  const Group& UpdateGroup(uint32_t id, std::vector<std::string> terms);
+  const Group& UpdateGroup(std::string id, const std::vector<std::string>& terms);
 
  private:
   // Maps group ID to synonym group
-  absl::flat_hash_map<uint32_t, Group> groups_;
+  absl::flat_hash_map<std::string, Group> groups_;
 };
 
 }  // namespace dfly::search

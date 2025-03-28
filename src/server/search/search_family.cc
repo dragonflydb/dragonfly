@@ -1081,7 +1081,7 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
 
   atomic_bool index_not_found{true};
   // Store per-shard synonym data
-  vector<absl::flat_hash_map<std::string, absl::flat_hash_set<uint32_t>>> shard_term_groups(
+  vector<absl::flat_hash_map<std::string, absl::flat_hash_set<std::string>>> shard_term_groups(
       shard_set->size());
 
   // Collect synonym data from all shards
@@ -1112,7 +1112,7 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
     return rb->SendError("Unknown index name");
 
   // Merge data from all shards into a single map
-  absl::flat_hash_map<std::string, absl::flat_hash_set<uint32_t>> merged_term_groups;
+  absl::flat_hash_map<std::string, absl::flat_hash_set<std::string>> merged_term_groups;
   for (const auto& shard_groups : shard_term_groups) {
     for (const auto& [term, group_ids] : shard_groups) {
       auto& merged_ids = merged_term_groups[term];
@@ -1128,11 +1128,11 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
     rb->StartArray(group_ids.size());
 
     // Sort group_ids before sending
-    std::vector<uint32_t> sorted_ids(group_ids.begin(), group_ids.end());
+    std::vector<std::string> sorted_ids(group_ids.begin(), group_ids.end());
     std::sort(sorted_ids.begin(), sorted_ids.end());
 
-    for (uint32_t id : sorted_ids) {
-      rb->SendBulkString(absl::StrCat(id));
+    for (const auto& id : sorted_ids) {
+      rb->SendBulkString(id);
     }
   }
 }
@@ -1140,7 +1140,7 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
 void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) {
   facade::CmdArgParser parser{args};
   string_view index_name = parser.Next();
-  uint32_t group_id = parser.Next<uint32_t>();
+  std::string group_id = std::string(parser.Next());
 
   // Redis ignores this parameter. Checked on redis_version:6.2.13
   [[maybe_unused]] bool skip_initial_scan = parser.Check("SKIPINITIALSCAN");
