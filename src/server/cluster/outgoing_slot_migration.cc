@@ -35,13 +35,13 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
  public:
   SliceSlotMigration(DbSlice* slice, ServerContext server_context, SlotSet slots,
                      journal::Journal* journal, OutgoingMigration* om)
-      : ProtocolClient(server_context), streamer_(slice, std::move(slots), journal, &cntx_) {
-    cntx_.SwitchErrorHandler([om](auto ge) { om->Finish(std::move(ge)); });
+      : ProtocolClient(server_context), streamer_(slice, std::move(slots), journal, &exec_st_) {
+    exec_st_.SwitchErrorHandler([om](auto ge) { om->Finish(std::move(ge)); });
   }
 
   ~SliceSlotMigration() {
     Cancel();
-    cntx_.JoinErrorHandler();
+    exec_st_.JoinErrorHandler();
   }
 
   // Send DFLYMIGRATE FLOW
@@ -50,8 +50,8 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
 
     VLOG(1) << "Connecting to source node_id " << node_id << " shard_id " << shard_id;
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
-    if (auto ec = ConnectAndAuth(timeout, &cntx_); ec) {
-      cntx_.ReportError(GenericError(ec, "Couldn't connect to source."));
+    if (auto ec = ConnectAndAuth(timeout, &exec_st_); ec) {
+      exec_st_.ReportError(GenericError(ec, "Couldn't connect to source."));
       return;
     }
 
@@ -61,13 +61,13 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     VLOG(1) << "cmd: " << cmd;
 
     if (auto ec = SendCommandAndReadResponse(cmd); ec) {
-      cntx_.ReportError(GenericError(ec, cmd));
+      exec_st_.ReportError(GenericError(ec, cmd));
       return;
     }
 
     if (!CheckRespIsSimpleReply("OK")) {
-      cntx_.ReportError(absl::StrCat("Incorrect response for FLOW cmd: ",
-                                     ToSV(LastResponseArgs().front().GetBuf())));
+      exec_st_.ReportError(absl::StrCat("Incorrect response for FLOW cmd: ",
+                                        ToSV(LastResponseArgs().front().GetBuf())));
       return;
     }
   }
@@ -93,7 +93,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   }
 
   const dfly::GenericError GetError() const {
-    return cntx_.GetError();
+    return exec_st_.GetError();
   }
 
  private:
@@ -113,7 +113,7 @@ OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, Serv
 OutgoingMigration::~OutgoingMigration() {
   main_sync_fb_.JoinIfNeeded();
 
-  cntx_.JoinErrorHandler();
+  exec_st_.JoinErrorHandler();
   // Destroy each flow in its dedicated thread, because we could be the last
   // owner of the db tables
   OnAllShards([](auto& migration) { migration.reset(); });
@@ -144,7 +144,7 @@ void OutgoingMigration::Finish(GenericError error) {
     next_state = MigrationState::C_ERROR;
     LOG(WARNING) << "Finish outgoing migration for " << cf_->MyID() << ": "
                  << migration_info_.node_info.id << " with error: " << error.Format();
-    cntx_.ReportError(std::move(error));
+    exec_st_.ReportError(std::move(error));
   } else {
     LOG(INFO) << "Finish outgoing migration for " << cf_->MyID() << ": "
               << migration_info_.node_info.id;
@@ -175,7 +175,7 @@ void OutgoingMigration::Finish(GenericError error) {
       CHECK(migration != nullptr);
       migration->Cancel();
     });
-    cntx_.JoinErrorHandler();
+    exec_st_.JoinErrorHandler();
   }
 }
 
@@ -195,16 +195,16 @@ void OutgoingMigration::SyncFb() {
       break;
     }
 
-    if (cntx_.IsError()) {
+    if (exec_st_.IsError()) {
       ResetError();
       ThisFiber::SleepFor(500ms);  // wait some time before next retry
     }
 
     VLOG(1) << "Connecting to target node";
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
-    if (auto ec = ConnectAndAuth(timeout, &cntx_); ec) {
+    if (auto ec = ConnectAndAuth(timeout, &exec_st_); ec) {
       LOG(WARNING) << "Can't connect to target node";
-      cntx_.ReportError(GenericError(ec, "Couldn't connect to source."));
+      exec_st_.ReportError(GenericError(ec, "Couldn't connect to source."));
       continue;
     }
 
@@ -217,7 +217,7 @@ void OutgoingMigration::SyncFb() {
 
     if (auto ec = SendCommandAndReadResponse(cmd); ec) {
       LOG(WARNING) << "Can't connect to target node";
-      cntx_.ReportError(GenericError(ec, "Could not send INIT command."));
+      exec_st_.ReportError(GenericError(ec, "Could not send INIT command."));
       continue;
     }
 
@@ -227,12 +227,12 @@ void OutgoingMigration::SyncFb() {
         // we provide 30 seconds to distribute the config to all nodes to avoid extra errors
         // reporting
         if (passed >= absl::Milliseconds(30000)) {
-          cntx_.ReportError(GenericError(LastResponseArgs().front().GetString()));
+          exec_st_.ReportError(GenericError(LastResponseArgs().front().GetString()));
         } else {
           ThisFiber::SleepFor(500ms);  // to prevent too many attempts
         }
       } else {
-        cntx_.ReportError(GenericError(LastResponseArgs().front().GetString()));
+        exec_st_.ReportError(GenericError(LastResponseArgs().front().GetString()));
       }
       continue;
     }
@@ -249,7 +249,7 @@ void OutgoingMigration::SyncFb() {
     }
 
     OnAllShards([this](auto& migration) { migration->PrepareFlow(cf_->MyID()); });
-    if (!cntx_.IsRunning()) {
+    if (!exec_st_.IsRunning()) {
       continue;
     }
 
@@ -260,13 +260,13 @@ void OutgoingMigration::SyncFb() {
       OnAllShards([](auto& migration) { migration->PrepareSync(); });
     }
 
-    if (!cntx_.IsRunning()) {
+    if (!exec_st_.IsRunning()) {
       continue;
     }
 
     OnAllShards([](auto& migration) { migration->RunSync(); });
 
-    if (!cntx_.IsRunning()) {
+    if (!exec_st_.IsRunning()) {
       continue;
     }
 
@@ -276,7 +276,7 @@ void OutgoingMigration::SyncFb() {
       VLOG(1) << "Waiting for migration to finalize...";
       ThisFiber::SleepFor(500ms);
     }
-    if (!cntx_.IsRunning()) {
+    if (!exec_st_.IsRunning()) {
       continue;
     }
     break;
@@ -291,11 +291,11 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   LOG(INFO) << "Finalize migration for " << cf_->MyID() << " : " << migration_info_.node_info.id
             << " attempt " << attempt;
   if (attempt > 1) {
-    if (!cntx_.IsRunning()) {
+    if (!exec_st_.IsRunning()) {
       return true;
     }
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
-    if (auto ec = ConnectAndAuth(timeout, &cntx_); ec) {
+    if (auto ec = ConnectAndAuth(timeout, &exec_st_); ec) {
       LOG(WARNING) << "Couldn't connect " << cf_->MyID() << " : " << migration_info_.node_info.id
                    << " attempt " << attempt;
       return false;
@@ -369,7 +369,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     }
   }
 
-  if (!cntx_.GetError()) {
+  if (!exec_st_.GetError()) {
     Finish();
     keys_number_ = cluster::GetKeyCount(migration_info_.slot_ranges);
     cf_->ApplyMigrationSlotRangeToConfig(migration_info_.node_info.id, migration_info_.slot_ranges,
@@ -381,7 +381,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
 void OutgoingMigration::Start() {
   VLOG(1) << "Resolving host DNS for outgoing migration";
   if (error_code ec = ResolveHostDns(); ec) {
-    cntx_.ReportError(GenericError(ec, "Could not resolve host dns."));
+    exec_st_.ReportError(GenericError(ec, "Could not resolve host dns."));
     return;
   }
 

@@ -51,9 +51,9 @@ class OutgoingMigration : private ProtocolClient {
   }
 
   void ResetError() {
-    if (cntx_.IsError()) {
-      SetLastError(cntx_.GetError());
-      cntx_.Reset(nullptr);
+    if (exec_st_.IsError()) {
+      SetLastError(exec_st_.GetError());
+      exec_st_.Reset(nullptr);
     }
   }
 

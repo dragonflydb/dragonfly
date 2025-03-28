@@ -105,7 +105,7 @@ class DflyCmd {
     ReplicaInfo(unsigned flow_count, std::string address, uint32_t listening_port,
                 ExecutionState::ErrHandler err_handler)
         : replica_state{SyncState::PREPARATION},
-          cntx{std::move(err_handler)},
+          exec_st{std::move(err_handler)},
           address{std::move(address)},
           listening_port(listening_port),
           flows{flow_count} {
@@ -115,7 +115,7 @@ class DflyCmd {
     void Cancel();
 
     SyncState replica_state;  // always guarded by shared_mu
-    ExecutionState cntx;
+    ExecutionState exec_st;
 
     std::string id;
     std::string address;

@@ -88,7 +88,7 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
                    << ", expecting " << shard->journal()->GetLsn();
       return false;
     }
-    if (!replica->cntx.IsRunning()) {
+    if (!replica->exec_st.IsRunning()) {
       return false;
     }
     VLOG(1) << "Replica lsn:" << flow->last_acked_lsn
@@ -111,7 +111,7 @@ void DflyCmd::ReplicaInfo::Cancel() {
 
   // Update state and cancel context.
   replica_state = SyncState::CANCELLED;
-  cntx.ReportCancelError();
+  exec_st.ReportCancelError();
   // Wait for tasks to finish.
   shard_set->RunBlockingInParallel([this](EngineShard* shard) {
     VLOG(2) << "Disconnecting flow " << shard->shard_id();
@@ -124,7 +124,7 @@ void DflyCmd::ReplicaInfo::Cancel() {
     flow->conn = nullptr;
   });
   // Wait for error handler to quit.
-  cntx.JoinErrorHandler();
+  exec_st.JoinErrorHandler();
   VLOG(1) << "Disconnecting replica " << address << ":" << listening_port;
 }
 
@@ -332,8 +332,8 @@ void DflyCmd::Sync(CmdArgList args, Transaction* tx, RedisReplyBuilder* rb) {
 
     // Use explicit assignment for replica_ptr, because capturing structured bindings is C++20.
     auto cb = [this, &status, replica_ptr = replica_ptr](EngineShard* shard) {
-      status =
-          StartFullSyncInThread(&replica_ptr->flows[shard->shard_id()], &replica_ptr->cntx, shard);
+      status = StartFullSyncInThread(&replica_ptr->flows[shard->shard_id()], &replica_ptr->exec_st,
+                                     shard);
     };
     shard_set->RunBlockingInParallel(std::move(cb));
 
@@ -370,11 +370,11 @@ void DflyCmd::StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* r
     auto cb = [this, &status, replica_ptr = replica_ptr](EngineShard* shard) {
       FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
 
-      status = StopFullSyncInThread(flow, &replica_ptr->cntx, shard);
+      status = StopFullSyncInThread(flow, &replica_ptr->exec_st, shard);
       if (*status != OpStatus::OK) {
         return;
       }
-      StartStableSyncInThread(flow, &replica_ptr->cntx, shard);
+      StartStableSyncInThread(flow, &replica_ptr->exec_st, shard);
     };
     shard_set->RunBlockingInParallel(std::move(cb));
 
@@ -548,7 +548,8 @@ void DflyCmd::Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
   rb->SendOk();
 }
 
-OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, ExecutionState* cntx, EngineShard* shard) {
+OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, ExecutionState* exec_st,
+                                        EngineShard* shard) {
   DCHECK(shard);
   DCHECK(flow->conn);
 
@@ -577,30 +578,31 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, ExecutionState* cntx, En
     ec = saver->SaveHeader({});
   }
   if (ec) {
-    cntx->ReportError(ec);
+    exec_st->ReportError(ec);
     return OpStatus::CANCELLED;
   }
 
   if (flow->start_partial_sync_at.has_value())
-    saver->StartIncrementalSnapshotInShard(*flow->start_partial_sync_at, cntx, shard);
+    saver->StartIncrementalSnapshotInShard(*flow->start_partial_sync_at, exec_st, shard);
   else
-    saver->StartSnapshotInShard(true, cntx, shard);
+    saver->StartSnapshotInShard(true, exec_st, shard);
 
   return OpStatus::OK;
 }
 
-OpStatus DflyCmd::StopFullSyncInThread(FlowInfo* flow, ExecutionState* cntx, EngineShard* shard) {
+OpStatus DflyCmd::StopFullSyncInThread(FlowInfo* flow, ExecutionState* exec_st,
+                                       EngineShard* shard) {
   DCHECK(shard);
 
   error_code ec = flow->saver->StopFullSyncInShard(shard);
   if (ec) {
-    cntx->ReportError(ec);
+    exec_st->ReportError(ec);
     return OpStatus::CANCELLED;
   }
 
   ec = flow->conn->socket()->Write(io::Buffer(flow->eof_token));
   if (ec) {
-    cntx->ReportError(ec);
+    exec_st->ReportError(ec);
     return OpStatus::CANCELLED;
   }
 
@@ -610,12 +612,12 @@ OpStatus DflyCmd::StopFullSyncInThread(FlowInfo* flow, ExecutionState* cntx, Eng
   return OpStatus::OK;
 }
 
-void DflyCmd::StartStableSyncInThread(FlowInfo* flow, ExecutionState* cntx, EngineShard* shard) {
+void DflyCmd::StartStableSyncInThread(FlowInfo* flow, ExecutionState* exec_st, EngineShard* shard) {
   // Create streamer for shard flows.
   DCHECK(shard);
   DCHECK(flow->conn);
 
-  flow->streamer.reset(new JournalStreamer(sf_->journal(), cntx));
+  flow->streamer.reset(new JournalStreamer(sf_->journal(), exec_st));
   bool send_lsn = flow->version >= DflyVersion::VER4;
   flow->streamer->Start(flow->conn->socket(), send_lsn);
 
