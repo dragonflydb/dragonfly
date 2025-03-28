@@ -2676,7 +2676,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
 
     error_code ec = ReadObj(type, &item->val);
     if (ec) {
-      VLOG(1) << "ReadObj error " << ec << " for key " << key;
+      VLOG(2) << "ReadObj error " << ec << " for key " << key;
       return ec;
     }
 
