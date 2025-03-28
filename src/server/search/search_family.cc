@@ -1113,10 +1113,10 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
 
   // Merge data from all shards into a single map
   absl::flat_hash_map<std::string, absl::flat_hash_set<std::string>> merged_term_groups;
-  for (const auto& shard_groups : shard_term_groups) {
-    for (const auto& [term, group_ids] : shard_groups) {
+  for (auto& shard_groups : shard_term_groups) {
+    for (auto& [term, group_ids] : shard_groups) {
       auto& merged_ids = merged_term_groups[term];
-      merged_ids.insert(group_ids.begin(), group_ids.end());
+      merged_ids.merge(group_ids);
     }
   }
 

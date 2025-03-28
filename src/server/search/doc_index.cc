@@ -217,9 +217,6 @@ void ShardDocIndex::RebuildForGroup(const OpArgs& op_args,
     }
   }
 
-  if (docs_to_rebuild.empty())
-    return;
-
   auto& db_slice = op_args.GetDbSlice();
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
 
