@@ -56,10 +56,6 @@ size_t QlMAllocSize(quicklist* ql, bool slow) {
 }
 
 size_t UpdateSize(size_t size, int64_t update) {
-  if (update >= 0) {
-    return size + update;
-  }
-
   int64_t result = static_cast<int64_t>(size) + update;
   if (result < 0) {
     DCHECK(false) << "Can't decrease " << size << " from " << -update;
