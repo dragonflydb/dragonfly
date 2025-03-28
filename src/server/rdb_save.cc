@@ -788,7 +788,7 @@ error_code RdbSerializer::SendJournalOffset(uint64_t journal_offset) {
 }
 
 error_code SerializerBase::SendFullSyncCut() {
-  VLOG(2) << "SendFullSyncCut";
+  VLOG(1) << "SendFullSyncCut";
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_FULLSYNC_END));
 
   // RDB_OPCODE_FULLSYNC_END followed by 8 bytes of 0.
