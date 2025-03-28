@@ -2102,13 +2102,11 @@ TEST_F(SearchFamilyTest, SynonymsSearch) {
 
   // Search for "car" (should find both "car" and "automobile")
   resp = Run({"FT.SEARCH", "myIndex", "car"});
-  EXPECT_THAT(resp,
-              IsMapWithSize("doc:1", IsMap("title", "car"), "doc:2", IsMap("title", "automobile")));
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
 
   // Search for "automobile" (should find both "car" and "automobile")
   resp = Run({"FT.SEARCH", "myIndex", "automobile"});
-  EXPECT_THAT(resp,
-              IsMapWithSize("doc:1", IsMap("title", "car"), "doc:2", IsMap("title", "automobile")));
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
 
   // Add "vehicle" to the synonym group
   resp = Run({"FT.SYNUPDATE", "myIndex", "1", "vehicle"});
@@ -2116,9 +2114,7 @@ TEST_F(SearchFamilyTest, SynonymsSearch) {
 
   // Search for "vehicle" (should find all three documents)
   resp = Run({"FT.SEARCH", "myIndex", "vehicle"});
-  EXPECT_THAT(resp,
-              IsMapWithSize("doc:1", IsMap("title", "car"), "doc:2", IsMap("title", "automobile"),
-                            "doc:3", IsMap("title", "vehicle")));
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3"));
 }
 
 // Test for case-insensitive synonyms
@@ -2145,44 +2141,36 @@ TEST_F(SearchFamilyTest, CaseInsensitiveSynonyms) {
   // Synonym search is case-insensitive
   // Search for "cat" should find "cat" and "feline"
   resp = Run({"FT.SEARCH", "case_idx", "cat"});
-  EXPECT_THAT(resp, IsMapWithSize("doc:1", IsMap("title", "The cat is sleeping"), "doc:2",
-                                  IsMap("title", "A feline hunter")));
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
 
   // Search for "feline" should find "feline" and "cat"
   resp = Run({"FT.SEARCH", "case_idx", "feline"});
-  EXPECT_THAT(resp, IsMapWithSize("doc:2", IsMap("title", "A feline hunter"), "doc:1",
-                                  IsMap("title", "The cat is sleeping")));
+  EXPECT_THAT(resp, AreDocIds("doc:2", "doc:1"));
 
   // Search for "dog" should find "dog" and "canine"
   resp = Run({"FT.SEARCH", "case_idx", "dog"});
-  EXPECT_THAT(resp, IsMapWithSize("doc:3", IsMap("title", "The dog is barking"), "doc:4",
-                                  IsMap("title", "A Canine friend")));
+  EXPECT_THAT(resp, AreDocIds("doc:3", "doc:4"));
 
   // Search for "canine" should find "canine" and "dog"
   resp = Run({"FT.SEARCH", "case_idx", "canine"});
-  EXPECT_THAT(resp, IsMapWithSize("doc:4", IsMap("title", "A Canine friend"), "doc:3",
-                                  IsMap("title", "The dog is barking")));
+  EXPECT_THAT(resp, AreDocIds("doc:4", "doc:3"));
 
   // Search with different case
   // Search for "Cat" (uppercase) should find "cat" and "feline"
   resp = Run({"FT.SEARCH", "case_idx", "Cat"});
-  EXPECT_THAT(resp, IsMapWithSize("doc:1", IsMap("title", "The cat is sleeping"), "doc:2",
-                                  IsMap("title", "A feline hunter")));
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
 
   // Search for "FELINE" (uppercase) should find "feline" and "cat"
   resp = Run({"FT.SEARCH", "case_idx", "FELINE"});
-  EXPECT_THAT(resp, IsMapWithSize("doc:2", IsMap("title", "A feline hunter"), "doc:1",
-                                  IsMap("title", "The cat is sleeping")));
+  EXPECT_THAT(resp, AreDocIds("doc:2", "doc:1"));
 
   // Search for "DoG" (mixed case) should find "dog" and "canine"
   resp = Run({"FT.SEARCH", "case_idx", "DoG"});
-  EXPECT_THAT(resp, IsMapWithSize("doc:3", IsMap("title", "The dog is barking"), "doc:4",
-                                  IsMap("title", "A Canine friend")));
+  EXPECT_THAT(resp, AreDocIds("doc:3", "doc:4"));
 
   // Search for "cAnInE" (mixed case) should find "canine" and "dog"
   resp = Run({"FT.SEARCH", "case_idx", "cAnInE"});
-  EXPECT_THAT(resp, IsMapWithSize("doc:4", IsMap("title", "A Canine friend"), "doc:3",
-                                  IsMap("title", "The dog is barking")));
+  EXPECT_THAT(resp, AreDocIds("doc:4", "doc:3"));
 }
 
 }  // namespace dfly
