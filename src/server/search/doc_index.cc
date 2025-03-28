@@ -231,7 +231,8 @@ void ShardDocIndex::RebuildForGroup(const OpArgs& op_args,
 
     auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
     indices_->Remove(doc_id, *accessor);
-    indices_->Add(doc_id, *accessor);
+    // Add in this case always succeeds, because we are adding the same document again
+    DCHECK(indices_->Add(doc_id, *accessor));
   }
 }
 
