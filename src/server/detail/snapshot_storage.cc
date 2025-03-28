@@ -288,6 +288,11 @@ io::Result<std::string, GenericError> GcsSnapshotStorage::LoadPath(string_view d
 
   auto [bucket_name, prefix] = GetBucketPath(dir);
 
+  // GCS needs trailing slash to match prefix sub path
+  if (!prefix.empty() && prefix.back() != '/') {
+    prefix += '/';
+  }
+
   fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
 
   io::Result<vector<SnapStat>, GenericError> keys =
