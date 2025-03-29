@@ -122,8 +122,11 @@ BaseStringIndex<C>::BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensi
 }
 
 template <typename C>
-const typename BaseStringIndex<C>::Container* BaseStringIndex<C>::Matching(string_view str) const {
-  // str = absl::StripAsciiWhitespace(str);
+const typename BaseStringIndex<C>::Container* BaseStringIndex<C>::Matching(
+    string_view str, bool strip_whitespace) const {
+  if (strip_whitespace) {
+    str = absl::StripAsciiWhitespace(str);
+  }
 
   string tmp;
   if (!case_sensitive_) {

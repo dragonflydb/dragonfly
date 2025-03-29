@@ -281,23 +281,27 @@ struct BasicSearch {
   // "term": access field's text index or unify results from all text indices if no field is set
   IndexResult Search(const AstTermNode& node, string_view active_field) {
     std::string term = node.term;
+    bool strip_whitespace = true;
 
     if (auto synonyms = indices_->GetSynonyms(); synonyms) {
       if (auto group_id = synonyms->GetGroupIDbyTerm(term); group_id) {
         // Add space before group id to avoid matching the term itself
         // This is coding of the "synonym" concept
         term = absl::StrCat(" ", *group_id);
+        strip_whitespace = false;
       }
     }
 
     if (!active_field.empty()) {
       if (auto* index = GetIndex<TextIndex>(active_field); index)
-        return index->Matching(term);
+        return index->Matching(term, strip_whitespace);
       return IndexResult{};
     }
 
     vector<TextIndex*> selected_indices = indices_->GetAllTextIndices();
-    auto mapping = [&term](TextIndex* index) { return index->Matching(term); };
+    auto mapping = [&term, strip_whitespace](TextIndex* index) {
+      return index->Matching(term, strip_whitespace);
+    };
 
     return UnifyResults(GetSubResults(selected_indices, mapping), LogicOp::OR);
   }

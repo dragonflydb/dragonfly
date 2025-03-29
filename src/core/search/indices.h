@@ -50,7 +50,7 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
 
   // Pointer is valid as long as index is not mutated. Nullptr if not found
-  const Container* Matching(std::string_view str) const;
+  const Container* Matching(std::string_view str, bool strip_whitespace = true) const;
 
   // Iterate over all Matching on prefix.
   void MatchingPrefix(std::string_view prefix, absl::FunctionRef<void(const Container*)> cb) const;
