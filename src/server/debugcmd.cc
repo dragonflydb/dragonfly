@@ -712,6 +712,8 @@ void DebugCmd::Migration(CmdArgList args, facade::SinkReplyBuilder* builder) {
   return builder->SendError(UnknownSubCmd("MIGRATION", "DEBUG"));
 }
 
+enum PopulateFlag { FLAG_RAND, FLAG_TYPE, FLAG_ELEMENTS, FLAG_SLOT, FLAG_EXPIRE, FLAG_UNKNOWN };
+
 // Populate arguments format:
 // required: (total count) (key prefix) (val size)
 // optional: [RAND | TYPE typename | ELEMENTS element num | SLOTS (key value)+ | EXPIRE start end]
@@ -725,99 +727,54 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
   CmdArgParser parser(args.subspan(1));
   PopulateOptions options;
 
-  auto total_count = parser.Next();
-  if (parser.HasError()) {
-    builder->SendError(kUintErr);
-    return nullopt;
-  }
-  if (!absl::SimpleAtoi(total_count, &options.total_count)) {
-    builder->SendError(kUintErr);
-    return nullopt;
+  options.total_count = parser.Next<uint64_t>();
+
+  if (parser.HasNext()) {
+    options.prefix = parser.Next<string_view>();
   }
 
   if (parser.HasNext()) {
-    options.prefix = parser.Next();
-  }
-
-  if (parser.HasNext()) {
-    auto val_size_str = parser.Next();
-    if (!absl::SimpleAtoi(val_size_str, &options.val_size)) {
-      builder->SendError(kUintErr);
-      return nullopt;
-    }
+    options.val_size = parser.Next<uint32_t>();
   }
 
   while (parser.HasNext()) {
-    auto flag = absl::AsciiStrToUpper(parser.Next());
-    if (flag == "RAND") {
+    PopulateFlag flag = parser.MapNext("RAND", FLAG_RAND, "TYPE", FLAG_TYPE, "ELEMENTS",
+                                       FLAG_ELEMENTS, "SLOT", FLAG_SLOT, "EXPIRE", FLAG_EXPIRE);
+
+    if (flag == FLAG_RAND) {
       options.populate_random_values = true;
-    } else if (flag == "TYPE") {
-      if (!parser.HasNext()) {
-        builder->SendError(kSyntaxErr);
-        return nullopt;
-      }
-      options.type = absl::AsciiStrToUpper(parser.Next());
-    } else if (flag == "ELEMENTS") {
-      if (!parser.HasNext()) {
-        builder->SendError(kSyntaxErr);
-        return nullopt;
-      }
-      if (!absl::SimpleAtoi(parser.Next(), &options.elements)) {
-        builder->SendError(kSyntaxErr);
-        return nullopt;
-      }
-    } else if (flag == "SLOTS") {
-      if (!parser.HasAtLeast(2)) {
-        builder->SendError(kSyntaxErr);
-        return nullopt;
-      }
+      continue;
+    }
 
-      auto parse_slot = [](string_view slot_str) -> OpResult<uint32_t> {
-        uint32_t slot_id;
-        if (!absl::SimpleAtoi(slot_str, &slot_id)) {
-          return facade::OpStatus::INVALID_INT;
-        }
-        if (slot_id > kMaxSlotNum) {
-          return facade::OpStatus::INVALID_VALUE;
-        }
-        return slot_id;
-      };
+    if (flag == FLAG_TYPE) {
+      options.type = absl::AsciiStrToUpper(parser.Next<string_view>());
+      continue;
+    }
 
-      auto start = parse_slot(parser.Next());
-      if (start.status() != facade::OpStatus::OK) {
-        builder->SendError(start.status());
-        return nullopt;
-      }
-      auto end = parse_slot(parser.Next());
-      if (end.status() != facade::OpStatus::OK) {
-        builder->SendError(end.status());
-        return nullopt;
-      }
-      options.slot_range = cluster::SlotRange{.start = static_cast<SlotId>(start.value()),
-                                              .end = static_cast<SlotId>(end.value())};
-    } else if (flag == "EXPIRE") {
-      if (!parser.HasAtLeast(2)) {
-        builder->SendError(kSyntaxErr);
-        return nullopt;
-      }
-      uint32_t start, end;
-      if (!absl::SimpleAtoi(parser.Next(), &start)) {
-        builder->SendError(kSyntaxErr);
-        return nullopt;
-      }
-      if (!absl::SimpleAtoi(parser.Next(), &end)) {
-        builder->SendError(kSyntaxErr);
-        return nullopt;
-      }
-      if (start >= end) {
+    if (flag == FLAG_ELEMENTS) {
+      options.elements = parser.Next<uint32_t>();
+      continue;
+    }
+    if (flag == FLAG_SLOT) {
+      auto [start, end] = parser.Next<FInt<0, 16383>, FInt<0, 16383>>();
+      options.slot_range = cluster::SlotRange{static_cast<SlotId>(start), static_cast<SlotId>(end)};
+      continue;
+    }
+    if (flag == FLAG_EXPIRE) {
+      auto [min_ttl, max_ttl] = parser.Next<uint32_t, uint32_t>();
+      if (min_ttl >= max_ttl) {
         builder->SendError(kExpiryOutOfRange);
         return nullopt;
       }
-      options.expire_ttl_range = std::make_pair(start, end);
-    } else {
-      builder->SendError(kSyntaxErr);
-      return nullopt;
+      options.expire_ttl_range = std::make_pair(min_ttl, max_ttl);
+      continue;
     }
+    builder->SendError(kSyntaxErr);
+    return nullopt;
+  }
+  if (parser.HasError()) {
+    builder->SendError(kSyntaxErr);
+    return nullopt;
   }
   return options;
 }
