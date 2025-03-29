@@ -1139,14 +1139,13 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
 
 void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) {
   facade::CmdArgParser parser{args};
-  string_view index_name = parser.Next();
-  std::string group_id = std::string(parser.Next());
+  auto [index_name, group_id] = parser.Next<string_view, string>();
 
   // Redis ignores this parameter. Checked on redis_version:6.2.13
   [[maybe_unused]] bool skip_initial_scan = parser.Check("SKIPINITIALSCAN");
 
   // Collect terms
-  std::vector<std::string> terms;
+  std::vector<std::string_view> terms;
   while (parser.HasNext()) {
     terms.emplace_back(parser.Next());
   }

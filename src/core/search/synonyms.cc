@@ -13,11 +13,11 @@ const absl::flat_hash_map<std::string, Synonyms::Group>& Synonyms::GetGroups() c
 }
 
 const Synonyms::Group& Synonyms::UpdateGroup(std::string id,
-                                             const std::vector<std::string>& terms) {
+                                             const std::vector<std::string_view>& terms) {
   auto& group = groups_[id];
 
   // Convert all terms to lowercase before adding them to the group
-  for (const std::string& term : terms) {
+  for (const std::string_view& term : terms) {
     group.insert(una::cases::to_lowercase_utf8(term));
   }
 
