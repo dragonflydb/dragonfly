@@ -992,10 +992,13 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     size_t start_size = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
     {
       auto json = JsonFromString(blob, CompactObj::memory_resource());
-      if (!json) {
+      if (json) {
+        pv_->SetJson(std::move(*json));
+      } else {
+        LOG(INFO) << "Invalid JSON string during rdb load of JSON object: " << blob;
         ec_ = RdbError(errc::bad_json_string);
+        return;
       }
-      pv_->SetJson(std::move(*json));
     }
     size_t end_size = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
     DCHECK(end_size > start_size);
@@ -2676,7 +2679,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
 
     error_code ec = ReadObj(type, &item->val);
     if (ec) {
-      VLOG(1) << "ReadObj error " << ec << " for key " << key;
+      VLOG(2) << "ReadObj error " << ec << " for key " << key;
       return ec;
     }
 

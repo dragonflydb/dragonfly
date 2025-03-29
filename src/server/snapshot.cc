@@ -114,7 +114,7 @@ void SliceSnapshot::StartIncremental(LSN start_lsn) {
 
 // Called only for replication use-case.
 void SliceSnapshot::FinalizeJournalStream(bool cancel) {
-  DVLOG(1) << "Finalize Snapshot";
+  VLOG(1) << "Finalize Snapshot";
   DCHECK(db_slice_->shard_owner()->IsMyThread());
   if (!journal_cb_id_) {  // Finalize only once.
     return;

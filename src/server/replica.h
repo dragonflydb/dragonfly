@@ -73,7 +73,7 @@ class Replica : ProtocolClient {
   std::error_code TakeOver(std::string_view timeout, bool save_flag);
 
   bool IsContextCancelled() const {
-    return !cntx_.IsRunning();
+    return !exec_st_.IsRunning();
   }
 
  private: /* Main standalone mode functions */

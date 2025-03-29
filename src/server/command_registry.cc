@@ -130,7 +130,8 @@ bool CommandId::IsMultiTransactional() const {
   return CO::IsTransKind(name()) || CO::IsEvalKind(name());
 }
 
-uint64_t CommandId::Invoke(CmdArgList args, const CommandContext& cmd_cntx) const {
+uint64_t CommandId::Invoke(CmdArgList args, const CommandContext& cmd_cntx,
+                           std::string_view orig_cmd_name) const {
   int64_t before = absl::GetCurrentTimeNanos();
   handler_(args, cmd_cntx);
   int64_t after = absl::GetCurrentTimeNanos();
@@ -138,7 +139,7 @@ uint64_t CommandId::Invoke(CmdArgList args, const CommandContext& cmd_cntx) cons
   ServerState* ss = ServerState::tlocal();  // Might have migrated thread, read after invocation
   int64_t execution_time_usec = (after - before) / 1000;
 
-  auto& ent = command_stats_[ss->thread_index()];
+  auto& ent = command_stats_[ss->thread_index()][orig_cmd_name];
 
   ++ent.first;
   ent.second += execution_time_usec;
@@ -263,6 +264,10 @@ std::pair<const CommandId*, ArgSlice> CommandRegistry::FindExtended(string_view 
     }
   }
   return {res, tail_args};
+}
+
+bool CommandRegistry::IsAlias(std::string_view cmd) const {
+  return cmd_aliases_.contains(cmd);
 }
 
 namespace CO {

@@ -122,7 +122,7 @@ class ProtocolClient {
   util::fb2::Mutex sock_mu_;
 
  protected:
-  ExecutionState cntx_;  // context for tasks in replica.
+  ExecutionState exec_st_;  // context for tasks in replica.
 
   std::string last_cmd_;
   std::string last_resp_;
