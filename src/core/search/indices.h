@@ -2,6 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
+#pragma once
+
 #include <absl/container/btree_set.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
@@ -48,7 +50,7 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
 
   // Pointer is valid as long as index is not mutated. Nullptr if not found
-  const Container* Matching(std::string_view str) const;
+  const Container* Matching(std::string_view str, bool strip_whitespace = true) const;
 
   // Iterate over all Matching on prefix.
   void MatchingPrefix(std::string_view prefix, absl::FunctionRef<void(const Container*)> cb) const;
@@ -77,8 +79,8 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
 struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
   using StopWords = absl::flat_hash_set<std::string>;
 
-  TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords)
-      : BaseStringIndex(mr, false), stopwords_{stopwords} {
+  TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords, const Synonyms* synonyms)
+      : BaseStringIndex(mr, false), stopwords_{stopwords}, synonyms_{synonyms} {
   }
 
  protected:
@@ -88,6 +90,7 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
 
  private:
   const StopWords* stopwords_;
+  const Synonyms* synonyms_;
 };
 
 // Index for text fields.

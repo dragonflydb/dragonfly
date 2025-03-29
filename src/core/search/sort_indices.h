@@ -2,6 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
+#pragma once
+
 #include <absl/container/btree_set.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>

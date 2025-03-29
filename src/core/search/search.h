@@ -16,6 +16,7 @@
 
 #include "base/pmr/memory_resource.h"
 #include "core/search/base.h"
+#include "core/search/synonyms.h"
 
 namespace dfly::search {
 
@@ -78,7 +79,8 @@ struct IndicesOptions {
 class FieldIndices {
  public:
   // Create indices based on schema and options. Both must outlive the indices
-  FieldIndices(const Schema& schema, const IndicesOptions& options, PMR_NS::memory_resource* mr);
+  FieldIndices(const Schema& schema, const IndicesOptions& options, PMR_NS::memory_resource* mr,
+               const Synonyms* synonyms);
 
   // Returns true if document was added
   bool Add(DocId doc, const DocumentAccessor& access);
@@ -91,6 +93,8 @@ class FieldIndices {
   const std::vector<DocId>& GetAllDocs() const;
   const Schema& GetSchema() const;
 
+  const Synonyms* GetSynonyms() const;
+
   SortableValue GetSortIndexValue(DocId doc, std::string_view field_identifier) const;
 
  private:
@@ -102,6 +106,7 @@ class FieldIndices {
   std::vector<DocId> all_ids_;
   absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>> indices_;
   absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>> sort_indices_;
+  const Synonyms* synonyms_;
 };
 
 struct AlgorithmProfile {
