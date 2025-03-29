@@ -40,11 +40,20 @@ string ToLower(string_view word) {
 
 // Get all words from text as matched by the ICU library
 absl::flat_hash_set<std::string> TokenizeWords(std::string_view text,
-                                               const TextIndex::StopWords& stopwords) {
+                                               const TextIndex::StopWords& stopwords,
+                                               const Synonyms* synonyms) {
   absl::flat_hash_set<std::string> words;
   for (std::string_view word : una::views::word_only::utf8(text)) {
-    if (std::string word_lc = una::cases::to_lowercase_utf8(word); !stopwords.contains(word_lc))
+    if (std::string word_lc = una::cases::to_lowercase_utf8(word); !stopwords.contains(word_lc)) {
+      if (synonyms) {
+        if (auto group_id = synonyms->GetGroupIDbyTerm(word_lc); group_id) {
+          words.insert(absl::StrCat(" ", *group_id));
+          continue;
+        }
+      }
+
       words.insert(std::move(word_lc));
+    }
   }
   return words;
 }
@@ -114,7 +123,7 @@ BaseStringIndex<C>::BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensi
 
 template <typename C>
 const typename BaseStringIndex<C>::Container* BaseStringIndex<C>::Matching(string_view str) const {
-  str = absl::StripAsciiWhitespace(str);
+  // str = absl::StripAsciiWhitespace(str);
 
   string tmp;
   if (!case_sensitive_) {
@@ -194,29 +203,7 @@ std::optional<DocumentAccessor::StringList> TextIndex::GetStrings(const Document
 }
 
 absl::flat_hash_set<std::string> TextIndex::Tokenize(std::string_view value) const {
-  absl::flat_hash_set<std::string> tokens = TokenizeWords(value, *stopwords_);
-
-  if (!synonyms_) {
-    return tokens;
-  }
-
-  const auto& groups = synonyms_->GetGroups();
-  absl::flat_hash_set<std::string> expanded_tokens;
-
-  for (const auto& token : tokens) {
-    for (const auto& [group_id, group] : groups) {
-      if (group.contains(token)) {
-        for (const auto& synonym : group) {
-          if (synonym != token) {
-            expanded_tokens.insert(synonym);
-          }
-        }
-      }
-    }
-  }
-
-  tokens.merge(expanded_tokens);
-  return tokens;
+  return TokenizeWords(value, *stopwords_, synonyms_);
 }
 
 std::optional<DocumentAccessor::StringList> TagIndex::GetStrings(const DocumentAccessor& doc,

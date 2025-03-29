@@ -93,6 +93,8 @@ class FieldIndices {
   const std::vector<DocId>& GetAllDocs() const;
   const Schema& GetSchema() const;
 
+  const Synonyms* GetSynonyms() const;
+
   SortableValue GetSortIndexValue(DocId doc, std::string_view field_identifier) const;
 
  private:

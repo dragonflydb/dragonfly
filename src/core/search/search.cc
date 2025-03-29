@@ -280,14 +280,24 @@ struct BasicSearch {
 
   // "term": access field's text index or unify results from all text indices if no field is set
   IndexResult Search(const AstTermNode& node, string_view active_field) {
+    std::string term = node.term;
+
+    if (auto synonyms = indices_->GetSynonyms(); synonyms) {
+      if (auto group_id = synonyms->GetGroupIDbyTerm(term); group_id) {
+        // Add space before group id to avoid matching the term itself
+        // This is coding of the "synonym" concept
+        term = absl::StrCat(" ", *group_id);
+      }
+    }
+
     if (!active_field.empty()) {
       if (auto* index = GetIndex<TextIndex>(active_field); index)
-        return index->Matching(node.term);
+        return index->Matching(term);
       return IndexResult{};
     }
 
     vector<TextIndex*> selected_indices = indices_->GetAllTextIndices();
-    auto mapping = [&node](TextIndex* index) { return index->Matching(node.term); };
+    auto mapping = [&term](TextIndex* index) { return index->Matching(term); };
 
     return UnifyResults(GetSubResults(selected_indices, mapping), LogicOp::OR);
   }
@@ -477,7 +487,6 @@ struct BasicSearch {
   }
 
   const FieldIndices* indices_;
-  const search::Synonyms* synonyms_ = nullptr;
   size_t limit_;
 
   size_t preagg_total_ = 0;
@@ -657,6 +666,10 @@ SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view field_
   auto it = sort_indices_.find(field_identifier);
   DCHECK(it != sort_indices_.end());
   return it->second->Lookup(doc);
+}
+
+const Synonyms* FieldIndices::GetSynonyms() const {
+  return synonyms_;
 }
 
 SearchAlgorithm::SearchAlgorithm() = default;

@@ -24,4 +24,15 @@ const Synonyms::Group& Synonyms::UpdateGroup(std::string id,
   return group;
 }
 
+std::optional<std::string> Synonyms::GetGroupIDbyTerm(std::string term) const {
+  term = una::cases::to_lowercase_utf8(term);
+  for (const auto& [id, group] : groups_) {
+    if (group.count(term)) {
+      return id;
+    }
+  }
+
+  return std::nullopt;
+}
+
 }  // namespace dfly::search
