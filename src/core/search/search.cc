@@ -284,10 +284,8 @@ struct BasicSearch {
     bool strip_whitespace = true;
 
     if (auto synonyms = indices_->GetSynonyms(); synonyms) {
-      if (auto group_id = synonyms->GetGroupIDbyTerm(term); group_id) {
-        // Add space before group id to avoid matching the term itself
-        // This is coding of the "synonym" concept
-        term = absl::StrCat(" ", *group_id);
+      if (auto group_id = synonyms->GetGroupToken(term); group_id) {
+        term = *group_id;
         strip_whitespace = false;
       }
     }

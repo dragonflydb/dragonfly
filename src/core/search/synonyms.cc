@@ -4,6 +4,7 @@
 
 #include "synonyms.h"
 
+#include <absl/strings/str_cat.h>
 #include <uni_algo/case.h>
 
 namespace dfly::search {
@@ -24,11 +25,12 @@ const Synonyms::Group& Synonyms::UpdateGroup(std::string id,
   return group;
 }
 
-std::optional<std::string> Synonyms::GetGroupIDbyTerm(std::string term) const {
+std::optional<std::string> Synonyms::GetGroupToken(std::string term) const {
   term = una::cases::to_lowercase_utf8(term);
   for (const auto& [id, group] : groups_) {
     if (group.count(term)) {
-      return id;
+      // Add space before group id to avoid matching the term itself
+      return absl::StrCat(" ", id);
     }
   }
 

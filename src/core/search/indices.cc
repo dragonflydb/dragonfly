@@ -46,8 +46,8 @@ absl::flat_hash_set<std::string> TokenizeWords(std::string_view text,
   for (std::string_view word : una::views::word_only::utf8(text)) {
     if (std::string word_lc = una::cases::to_lowercase_utf8(word); !stopwords.contains(word_lc)) {
       if (synonyms) {
-        if (auto group_id = synonyms->GetGroupIDbyTerm(word_lc); group_id) {
-          words.insert(absl::StrCat(" ", *group_id));
+        if (auto group_id = synonyms->GetGroupToken(word_lc); group_id) {
+          words.insert(*group_id);
           continue;
         }
       }
