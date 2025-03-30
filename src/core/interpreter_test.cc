@@ -517,4 +517,9 @@ end
   EXPECT_EQ("i(1)", ser_.res);
 }
 
+TEST_F(InterpreterTest, AvoidIntOverflow) {
+  EXPECT_TRUE(Execute("return bit.tohex(65535, -2147483648)"));
+  EXPECT_EQ("str(0000FFFF)", ser_.res);
+}
+
 }  // namespace dfly
