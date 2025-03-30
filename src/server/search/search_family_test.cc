@@ -2173,4 +2173,34 @@ TEST_F(SearchFamilyTest, CaseInsensitiveSynonyms) {
   EXPECT_THAT(resp, AreDocIds("doc:4", "doc:3"));
 }
 
+TEST_F(SearchFamilyTest, SynonymsWithSpaces) {
+  EXPECT_EQ(Run({"FT.CREATE", "my_index", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "field",
+                 "TEXT"}),
+            "OK");
+
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "my_index", "syn_group", "word1", "word2"}), "OK");
+
+  EXPECT_THAT(Run({"HSET", "doc:1", "field", " syn_group"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:2", "field", "syn_group"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:3", "field", "word1"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:4", "field", "word2"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:5", "field", R"(\ syn_group)"}), IntArg(1));
+
+  auto resp = Run({"FT.SEARCH", "my_index", "word1"});
+  EXPECT_THAT(resp, AreDocIds("doc:3", "doc:4"));
+
+  resp = Run({"FT.SEARCH", "my_index", "word2"});
+  EXPECT_THAT(resp, AreDocIds("doc:4", "doc:3"));
+
+  resp = Run({"FT.SEARCH", "my_index", "syn_group"});
+  EXPECT_THAT(resp, AreDocIds("doc:2", "doc:1", "doc:5"));
+
+  // FT.SEARCH my_index "\ syn_group"
+  // FT.SEARCH my_index " syn_group"
+  // The both transform to " syn_group" after syntax analysis
+  // " syn_group" passes to query_str in FtSearch
+  resp = Run({"FT.SEARCH", "my_index", " syn_group"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:5"));
+}
+
 }  // namespace dfly
