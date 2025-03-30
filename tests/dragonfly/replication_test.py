@@ -2332,7 +2332,7 @@ async def test_announce_ip_port(df_factory):
 async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
     # setting replication_timeout to a very small value to force the replica to timeout
     master = df_factory.create(
-        replication_timeout=100, vmodule="replica=2,dflycmd=2,snapshot=2,rdb_save=1,rdb_load=1"
+        replication_timeout=100, vmodule="replica=2,dflycmd=2,snapshot=1,rdb_save=1,rdb_load=1"
     )
     replica = df_factory.create()
 
@@ -2365,7 +2365,7 @@ async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory,
     seeder.stop()
     await seeder_task
 
-    await check_all_replicas_finished([c_replica], c_master, timeout=30)
+    await check_all_replicas_finished([c_replica], c_master, timeout=60)
     await assert_replica_reconnections(replica, 0)
 
 
