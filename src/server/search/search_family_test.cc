@@ -2203,4 +2203,31 @@ TEST_F(SearchFamilyTest, SynonymsWithSpaces) {
   EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:5"));
 }
 
+TEST_F(SearchFamilyTest, SynonymsWithLeadingSpaces) {
+  EXPECT_EQ(Run({"FT.CREATE", "my_index", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title",
+                 "TEXT"}),
+            "OK");
+
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "my_index", "group1", "word", "    several_spaces_synonym"}),
+            "OK");
+
+  auto resp = Run({"FT.SYNDUMP", "my_index"});
+  EXPECT_THAT(resp, IsUnordArray("    several_spaces_synonym", IsArray("group1"), "word",
+                                 IsArray("group1")));
+
+  EXPECT_THAT(Run({"HSET", "doc:1", "title", "word"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:2", "title", "several_spaces_synonym"}), IntArg(1));
+
+  resp = Run({"FT.SEARCH", "my_index", "word"});
+  EXPECT_THAT(resp, AreDocIds("doc:1"));
+
+  resp = Run({"FT.SEARCH", "my_index", "several_spaces_synonym"});
+  EXPECT_THAT(resp, AreDocIds("doc:2"));
+
+  EXPECT_THAT(Run({"HSET", "doc:3", "title", "    several_spaces_synonym"}), IntArg(1));
+
+  resp = Run({"FT.SEARCH", "my_index", "word"});
+  EXPECT_THAT(resp, AreDocIds("doc:1"));
+}
+
 }  // namespace dfly
