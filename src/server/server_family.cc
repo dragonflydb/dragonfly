@@ -1999,7 +1999,6 @@ void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
     return ClientHelp(builder);
   }
 
-  LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
   return builder->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
 }
 
@@ -3252,8 +3251,7 @@ void ServerFamily::Latency(CmdArgList args, const CommandContext& cmd_cntx) {
     return rb->SendEmptyArray();
   }
 
-  LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
-  rb->SendError(kSyntaxErr);
+  return rb->SendError(UnknownSubCmd(sub_cmd, "LATENCY"), kSyntaxErrType);
 }
 
 void ServerFamily::ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx) {
