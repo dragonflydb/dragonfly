@@ -693,10 +693,10 @@ async def test_cluster_slot_ownership_changes(df_factory: DflyInstanceFactory):
     # node0 should have removed "KEY1" as it no longer owns it
     # deleting non owned keys is background operation therefore we add timeout to this check
     @assert_eventually(times=2)
-    async def check_dbsize():
-        assert await c_nodes[0].execute_command("DBSIZE") == 1
+    async def check_dbsize(node_index, expected_size):
+        assert await c_nodes[node_index].execute_command("DBSIZE") == expected_size
 
-    await check_dbsize()
+    await check_dbsize(node_index=0, expected_size=1)
     # node0 should still own "KEY0" though
     assert (await c_nodes[0].get("KEY0")) == "value"
     # node1 should still have "KEY2"
@@ -734,7 +734,7 @@ async def test_cluster_slot_ownership_changes(df_factory: DflyInstanceFactory):
 
     assert await c_nodes[0].execute_command("DBSIZE") == 1
     assert (await c_nodes[0].get("KEY0")) == "value"
-    assert await c_nodes[1].execute_command("DBSIZE") == 0
+    await check_dbsize(node_index=1, expected_size=0)
 
 
 # Tests that master commands to the replica are applied regardless of slot ownership
