@@ -2988,3 +2988,32 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
         await wait_for_replicas_state(*c_replicas)
 
     await fill_task
+
+
+@dfly_args({"proactor_threads": 4, "serialization_max_chunk_size": 1})
+async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyInstanceFactory):
+    master = df_factory.create()
+    replica = df_factory.create()
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # 50% big values
+    seeder_config = dict(key_target=5_000, huge_value_target=2000)
+    # Fill instance with test data
+    seeder = SeederV2(**seeder_config)
+    await seeder.run(c_master, target_deviation=0.01)
+
+    assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    async with async_timeout.timeout(60):
+        await wait_for_replicas_state(c_replica)
+
+    # Start data stream
+    stream_task = asyncio.create_task(seeder.run(c_master, target_ops=5000))
+
+    assert await c_replica.execute_command("SAVE DF tmp_dump") == "OK"
+    await stream_task
+
+    # Check that everything is in sync
+    hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master, c_replica]))
+    assert len(set(hashes)) == 1
