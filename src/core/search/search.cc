@@ -672,8 +672,10 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params, const S
     return false;
   }
 
-  if (holds_alternative<monostate>(*query_))
+  if (holds_alternative<monostate>(*query_)) {
+    LOG_EVERY_T(INFO, 10) << "Empty result after parsing query \"" << query << "\"";
     return false;
+  }
 
   if (sort != nullptr)
     query_ = make_unique<AstNode>(AstSortNode{std::move(query_), sort->field, sort->descending});
