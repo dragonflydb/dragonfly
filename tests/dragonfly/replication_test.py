@@ -3009,11 +3009,29 @@ async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyIn
         await wait_for_replicas_state(c_replica)
 
     # Start data stream
-    stream_task = asyncio.create_task(seeder.run(c_master, target_ops=5000))
+    stream_task = asyncio.create_task(seeder.run(c_master))
+    await asyncio.sleep(2)
 
     assert await c_replica.execute_command("SAVE DF tmp_dump") == "OK"
+    await seeder.stop(c_master)
     await stream_task
 
     # Check that everything is in sync
     hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master, c_replica]))
     assert len(set(hashes)) == 1
+
+    replica.stop()
+    lines = replica.find_in_logs("Exit SnapshotSerializer")
+    assert len(lines) == 3
+    for line in lines:
+        index = line.rfind(":")
+        sub = line[index:].split("/")
+        # side saved count, (stats_.side_saved)
+        assert int(sub[1]) > 0
+
+    # Check that the produced rdb is loaded correctly
+    node = df_factory.create(dbfilename="tmp_dump")
+    node.start()
+    c_node = node.client()
+    await wait_available_async(c_node)
+    assert await c_node.execute_command("dbsize") > 0
