@@ -69,11 +69,11 @@ TEST_F(BloomTest, Extreme) {
 
   EXPECT_EQ(512, b2.bitlen());  // minimal bit length, even though requested smaller capacity.
   EXPECT_LT(b2.Capacity(0.999), 512);  // make sure our element capacity is smaller.
-  b2.Destroy(PMR_NS::get_default_resource());
+  b2.Destroy(PMR_NS::get_default_resource()):
 }
 
 TEST_F(BloomTest, SBF) {
-  SBF sbf(10, 0.001, 2, PMR_NS::get_default_resource());
+  SBF sbf(10, 0.0001, 2, PMR_NS::get_default_resource());
 
   unsigned collisions = 0;
   constexpr unsigned kNumElems = 2000000;
