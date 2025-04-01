@@ -1075,6 +1075,116 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
   }
 }
 
+void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
+  string_view index_name = ArgS(args, 0);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+
+  atomic_bool index_not_found{true};
+  // Store per-shard synonym data
+  vector<absl::flat_hash_map<std::string, absl::flat_hash_set<std::string>>> shard_term_groups(
+      shard_set->size());
+
+  // Collect synonym data from all shards
+  cmd_cntx.tx->Execute(
+      [&](Transaction* t, EngineShard* es) {
+        auto* index = es->search_indices()->GetIndex(index_name);
+        if (!index)
+          return OpStatus::OK;
+
+        index_not_found.store(false, std::memory_order_relaxed);
+
+        // Get synonym data from current shard
+        const auto& groups = index->GetSynonyms().GetGroups();
+
+        // Build term -> group_ids mapping for this shard
+        auto& term_groups = shard_term_groups[es->shard_id()];
+        for (const auto& [group_id, group] : groups) {
+          for (const auto& term : group) {
+            term_groups[term].insert(group_id);
+          }
+        }
+
+        return OpStatus::OK;
+      },
+      true);
+
+  if (index_not_found.load(std::memory_order_relaxed))
+    return rb->SendError("Unknown index name");
+
+  // Merge data from all shards into a single map
+  absl::flat_hash_map<std::string, absl::flat_hash_set<std::string>> merged_term_groups;
+  for (auto& shard_groups : shard_term_groups) {
+    for (auto& [term, group_ids] : shard_groups) {
+      auto& merged_ids = merged_term_groups[term];
+      merged_ids.merge(group_ids);
+    }
+  }
+
+  // Format response according to Redis protocol:
+  // Array of term + array of group ids pairs
+  rb->StartArray(merged_term_groups.size() * 2);
+  for (const auto& [term, group_ids] : merged_term_groups) {
+    rb->SendBulkString(term);
+    rb->StartArray(group_ids.size());
+
+    // Sort group_ids before sending
+    std::vector<std::string> sorted_ids(group_ids.begin(), group_ids.end());
+    std::sort(sorted_ids.begin(), sorted_ids.end());
+
+    for (const auto& id : sorted_ids) {
+      rb->SendBulkString(id);
+    }
+  }
+}
+
+void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) {
+  facade::CmdArgParser parser{args};
+  auto [index_name, group_id] = parser.Next<string_view, string>();
+
+  // Redis ignores this parameter. Checked on redis_version:6.2.13
+  [[maybe_unused]] bool skip_initial_scan = parser.Check("SKIPINITIALSCAN");
+
+  // Collect terms
+  std::vector<std::string_view> terms;
+  while (parser.HasNext()) {
+    terms.emplace_back(parser.Next());
+  }
+
+  if (terms.empty()) {
+    return cmd_cntx.rb->SendError("No terms specified");
+  }
+
+  if (!parser.Finalize()) {
+    return cmd_cntx.rb->SendError(parser.Error()->MakeReply());
+  }
+
+  std::atomic_bool index_not_found{true};
+
+  // Update synonym groups in all shards
+  cmd_cntx.tx->Execute(
+      [&](Transaction* t, EngineShard* es) {
+        auto* index = es->search_indices()->GetIndex(index_name);
+        if (!index)
+          return OpStatus::OK;
+
+        index_not_found.store(false, std::memory_order_relaxed);
+
+        // Rebuild indices only for documents containing terms from the updated group
+        index->RebuildForGroup(
+            OpArgs{es, nullptr,
+                   DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}},
+            group_id, terms);
+
+        return OpStatus::OK;
+      },
+      true);
+
+  if (index_not_found.load(std::memory_order_relaxed))
+    return cmd_cntx.rb->SendError(string{index_name} + ": no such index");
+
+  cmd_cntx.rb->SendOk();
+}
+
 #define HFUNC(x) SetHandler(&SearchFamily::x)
 
 // Redis search is a module. Therefore we introduce dragonfly extension search
@@ -1100,7 +1210,10 @@ void SearchFamily::Register(CommandRegistry* registry) {
             << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch)
             << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAggregate)
             << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile)
-            << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::FT_SEARCH}.HFUNC(FtTagVals);
+            << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::FT_SEARCH}.HFUNC(FtTagVals)
+            << CI{"FT.SYNDUMP", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtSynDump)
+            << CI{"FT.SYNUPDATE", CO::WRITE | CO::GLOBAL_TRANS, -4, 0, 0, acl::FT_SEARCH}.HFUNC(
+                   FtSynUpdate);
 }
 
 }  // namespace dfly

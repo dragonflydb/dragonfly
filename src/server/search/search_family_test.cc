@@ -2069,4 +2069,175 @@ TEST_F(SearchFamilyTest, InvalidCreateOptions) {
   EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
 }
 
+TEST_F(SearchFamilyTest, SynonymManagement) {
+  // Create index with prefix
+  EXPECT_EQ(
+      Run({"FT.CREATE", "my_idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT"}),
+      "OK");
+
+  // Add first group of synonyms
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "my_idx", "1", "cat", "feline", "kitty"}), "OK");
+
+  // Add second group of synonyms
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "my_idx", "2", "kitty", "cute", "adorable"}), "OK");
+
+  // Add third group of synonyms
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "my_idx", "3", "kitty", "tiger", "cub"}), "OK");
+
+  // Check the dump output
+  auto resp = Run({"FT.SYNDUMP", "my_idx"});
+  EXPECT_THAT(resp, IsUnordArray("cub", IsArray("3"), "cute", IsArray("2"), "adorable",
+                                 IsArray("2"), "kitty", IsArray("1", "2", "3"), "feline",
+                                 IsArray("1"), "tiger", IsArray("3"), "cat", IsArray("1")));
+}
+
+TEST_F(SearchFamilyTest, SynonymsSearch) {
+  // Create search index
+  auto resp =
+      Run({"FT.CREATE", "myIndex", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  // Add documents
+  EXPECT_THAT(Run({"HSET", "doc:1", "title", "car"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:2", "title", "automobile"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:3", "title", "vehicle"}), IntArg(1));
+
+  // Add synonyms "car" and "automobile" to group 1
+  resp = Run({"FT.SYNUPDATE", "myIndex", "1", "car", "automobile"});
+  EXPECT_EQ(resp, "OK");
+
+  // Check synonyms list
+  resp = Run({"FT.SYNDUMP", "myIndex"});
+  ASSERT_THAT(resp, ArrLen(4));
+
+  // Search for "car" (should find both "car" and "automobile")
+  resp = Run({"FT.SEARCH", "myIndex", "car"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
+
+  // Search for "automobile" (should find both "car" and "automobile")
+  resp = Run({"FT.SEARCH", "myIndex", "automobile"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
+
+  // Add "vehicle" to the synonym group
+  resp = Run({"FT.SYNUPDATE", "myIndex", "1", "vehicle"});
+  EXPECT_EQ(resp, "OK");
+
+  // Search for "vehicle" (should find all three documents)
+  resp = Run({"FT.SEARCH", "myIndex", "vehicle"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3"));
+}
+
+// Test for case-insensitive synonyms
+TEST_F(SearchFamilyTest, CaseInsensitiveSynonyms) {
+  // Create an index
+  EXPECT_EQ(Run({"FT.CREATE", "case_idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title",
+                 "TEXT"}),
+            "OK");
+
+  // Add documents with different case words
+  EXPECT_THAT(Run({"HSET", "doc:1", "title", "The cat is sleeping"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:2", "title", "A feline hunter"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:3", "title", "The dog is barking"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:4", "title", "A Canine friend"}), IntArg(1));
+
+  // Add synonym groups with text IDs
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "case_idx", "my_synonyms_group0", "cat", "feline"}), "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "case_idx", "my_synonyms_group1", "dog", "canine"}), "OK");
+
+  // Check synonym output
+  auto resp = Run({"FT.SYNDUMP", "case_idx"});
+  EXPECT_THAT(resp, ArrLen(8));  // 4 terms, each with a list of groups
+
+  // Synonym search is case-insensitive
+  // Search for "cat" should find "cat" and "feline"
+  resp = Run({"FT.SEARCH", "case_idx", "cat"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
+
+  // Search for "feline" should find "feline" and "cat"
+  resp = Run({"FT.SEARCH", "case_idx", "feline"});
+  EXPECT_THAT(resp, AreDocIds("doc:2", "doc:1"));
+
+  // Search for "dog" should find "dog" and "canine"
+  resp = Run({"FT.SEARCH", "case_idx", "dog"});
+  EXPECT_THAT(resp, AreDocIds("doc:3", "doc:4"));
+
+  // Search for "canine" should find "canine" and "dog"
+  resp = Run({"FT.SEARCH", "case_idx", "canine"});
+  EXPECT_THAT(resp, AreDocIds("doc:4", "doc:3"));
+
+  // Search with different case
+  // Search for "Cat" (uppercase) should find "cat" and "feline"
+  resp = Run({"FT.SEARCH", "case_idx", "Cat"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
+
+  // Search for "FELINE" (uppercase) should find "feline" and "cat"
+  resp = Run({"FT.SEARCH", "case_idx", "FELINE"});
+  EXPECT_THAT(resp, AreDocIds("doc:2", "doc:1"));
+
+  // Search for "DoG" (mixed case) should find "dog" and "canine"
+  resp = Run({"FT.SEARCH", "case_idx", "DoG"});
+  EXPECT_THAT(resp, AreDocIds("doc:3", "doc:4"));
+
+  // Search for "cAnInE" (mixed case) should find "canine" and "dog"
+  resp = Run({"FT.SEARCH", "case_idx", "cAnInE"});
+  EXPECT_THAT(resp, AreDocIds("doc:4", "doc:3"));
+}
+
+TEST_F(SearchFamilyTest, SynonymsWithSpaces) {
+  EXPECT_EQ(Run({"FT.CREATE", "my_index", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "field",
+                 "TEXT"}),
+            "OK");
+
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "my_index", "syn_group", "word1", "word2"}), "OK");
+
+  EXPECT_THAT(Run({"HSET", "doc:1", "field", " syn_group"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:2", "field", "syn_group"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:3", "field", "word1"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:4", "field", "word2"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:5", "field", R"(\ syn_group)"}), IntArg(1));
+
+  auto resp = Run({"FT.SEARCH", "my_index", "word1"});
+  EXPECT_THAT(resp, AreDocIds("doc:3", "doc:4"));
+
+  resp = Run({"FT.SEARCH", "my_index", "word2"});
+  EXPECT_THAT(resp, AreDocIds("doc:4", "doc:3"));
+
+  resp = Run({"FT.SEARCH", "my_index", "syn_group"});
+  EXPECT_THAT(resp, AreDocIds("doc:2", "doc:1", "doc:5"));
+
+  // FT.SEARCH my_index "\ syn_group"
+  // FT.SEARCH my_index " syn_group"
+  // The both transform to " syn_group" after syntax analysis
+  // " syn_group" passes to query_str in FtSearch
+  resp = Run({"FT.SEARCH", "my_index", " syn_group"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:5"));
+}
+
+TEST_F(SearchFamilyTest, SynonymsWithLeadingSpaces) {
+  EXPECT_EQ(Run({"FT.CREATE", "my_index", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title",
+                 "TEXT"}),
+            "OK");
+
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "my_index", "group1", "word", "    several_spaces_synonym"}),
+            "OK");
+
+  auto resp = Run({"FT.SYNDUMP", "my_index"});
+  EXPECT_THAT(resp, IsUnordArray("    several_spaces_synonym", IsArray("group1"), "word",
+                                 IsArray("group1")));
+
+  EXPECT_THAT(Run({"HSET", "doc:1", "title", "word"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:2", "title", "several_spaces_synonym"}), IntArg(1));
+
+  resp = Run({"FT.SEARCH", "my_index", "word"});
+  EXPECT_THAT(resp, AreDocIds("doc:1"));
+
+  resp = Run({"FT.SEARCH", "my_index", "several_spaces_synonym"});
+  EXPECT_THAT(resp, AreDocIds("doc:2"));
+
+  EXPECT_THAT(Run({"HSET", "doc:3", "title", "    several_spaces_synonym"}), IntArg(1));
+
+  resp = Run({"FT.SEARCH", "my_index", "word"});
+  EXPECT_THAT(resp, AreDocIds("doc:1"));
+}
+
 }  // namespace dfly
