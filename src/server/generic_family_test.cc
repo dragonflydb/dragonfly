@@ -412,6 +412,49 @@ TEST_F(GenericFamilyTest, Scan) {
   EXPECT_EQ(resp, "");
 }
 
+TEST_F(GenericFamilyTest, ScanWithAttr) {
+  Run({"flushdb"});
+
+  Run({"set", "hello", "world"});
+  Run({"set", "foo", "bar"});
+
+  Run({"expire", "hello", "1000"});
+
+  auto resp = Run({"scan", "0", "attr", "v"});
+  auto vec = StrArray(resp.GetVec()[1]);
+  ASSERT_EQ(1, vec.size());
+  EXPECT_EQ(vec[0], "hello");
+
+  resp = Run({"scan", "0", "attr", "p"});
+  vec = StrArray(resp.GetVec()[1]);
+  ASSERT_EQ(1, vec.size());
+  EXPECT_EQ(vec[0], "foo");
+
+  // before run get "foo", scan with a attr should return "hello", because set "hello" expire before
+  resp = Run({"scan", "0", "attr", "a"});
+  vec = StrArray(resp.GetVec()[1]);
+  ASSERT_EQ(1, vec.size());
+  EXPECT_EQ(vec[0], "hello");
+
+  // before run get "foo", scan with a attr should return "foo"
+  resp = Run({"scan", "0", "attr", "u"});
+  vec = StrArray(resp.GetVec()[1]);
+  ASSERT_EQ(1, vec.size());
+  EXPECT_EQ(vec[0], "foo");
+
+  ASSERT_THAT(Run({"get", "foo"}), "bar");
+
+  // after run get "foo", scan with a attr should return "foo" and "hello"
+  resp = Run({"scan", "0", "attr", "a"});
+  vec = StrArray(resp.GetVec()[1]);
+  ASSERT_EQ(2, vec.size());
+
+  // after run get "foo", scan with a attr should return empty set
+  resp = Run({"scan", "0", "attr", "u"});
+  vec = StrArray(resp.GetVec()[1]);
+  ASSERT_EQ(0, vec.size());
+}
+
 TEST_F(GenericFamilyTest, Sort) {
   // Test list sort with params
   Run({"del", "list-1"});

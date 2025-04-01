@@ -312,6 +312,14 @@ struct ScanOpts {
   size_t limit = 10;
   std::optional<CompactObjType> type_filter;
   unsigned bucket_id = UINT_MAX;
+  enum class Mask {
+    Volatile,   // volatile, keys that have ttl
+    Permanent,  // permanent, keys that do not have ttl
+    Accessed,   // accessed, the key has been accessed since the last load/flush event, or the last
+                // time a flag was reset.
+    Untouched,  // untouched, the key has not been accessed/touched.
+  };
+  std::optional<Mask> mask;
 
   bool Matches(std::string_view val_name) const;
   static OpResult<ScanOpts> TryFrom(CmdArgList args);
