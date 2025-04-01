@@ -1169,14 +1169,11 @@ void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) 
 
         index_not_found.store(false, std::memory_order_relaxed);
 
-        // Update synonym group in this shard
-        const auto& group = index->GetSynonyms().UpdateGroup(group_id, terms);
-
         // Rebuild indices only for documents containing terms from the updated group
         index->RebuildForGroup(
             OpArgs{es, nullptr,
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}},
-            group);
+            group_id, terms);
 
         return OpStatus::OK;
       },

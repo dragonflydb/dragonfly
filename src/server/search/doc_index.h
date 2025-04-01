@@ -254,7 +254,8 @@ class ShardDocIndex {
   }
 
   // Rebuild indices only for documents containing terms from the updated synonym group
-  void RebuildForGroup(const OpArgs& op_args, const absl::flat_hash_set<std::string>& terms);
+  void RebuildForGroup(const OpArgs& op_args, const std::string_view& group_id,
+                       const std::vector<std::string_view>& terms);
 
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
