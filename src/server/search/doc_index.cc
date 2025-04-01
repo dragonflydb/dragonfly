@@ -184,7 +184,7 @@ ShardDocIndex::ShardDocIndex(shared_ptr<const DocIndex> index)
 
 void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) {
   key_index_ = DocKeyIndex{};
-  indices_.emplace(base_->schema, base_->options, mr);
+  indices_.emplace(base_->schema, base_->options, mr, &synonyms_);
 
   auto cb = [this](string_view key, const BaseAccessor& doc) {
     DocId id = key_index_.Add(key);
@@ -196,6 +196,53 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) 
   TraverseAllMatching(*base_, op_args, cb);
 
   VLOG(1) << "Indexed " << key_index_.Size() << " docs on " << base_->prefix;
+}
+
+void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_view& group_id,
+                                    const std::vector<std::string_view>& terms) {
+  if (!indices_)
+    return;
+
+  absl::flat_hash_set<DocId> docs_to_rebuild;
+  std::vector<search::TextIndex*> text_indices = indices_->GetAllTextIndices();
+
+  // Find all documents containing any term from the synonyms group
+  for (auto* text_index : text_indices) {
+    for (const auto& term : terms) {
+      if (const auto* container = text_index->Matching(term)) {
+        for (DocId doc_id : *container) {
+          docs_to_rebuild.insert(doc_id);
+        }
+      }
+    }
+  }
+
+  auto& db_slice = op_args.GetDbSlice();
+  DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
+
+  auto update_indices = [&](bool remove) {
+    for (DocId doc_id : docs_to_rebuild) {
+      std::string_view key = key_index_.Get(doc_id);
+      auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
+
+      if (!it || !IsValid(*it)) {
+        continue;
+      }
+
+      auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
+      if (remove) {
+        indices_->Remove(doc_id, *accessor);
+      } else {
+        // Add in this case always succeeds, because we are adding the same document again
+        [[maybe_unused]] bool res = indices_->Add(doc_id, *accessor);
+        DCHECK(res);
+      }
+    }
+  };
+
+  update_indices(true);
+  synonyms_.UpdateGroup(group_id, terms);
+  update_indices(false);
 }
 
 void ShardDocIndex::AddDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {

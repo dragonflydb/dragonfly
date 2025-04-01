@@ -144,7 +144,7 @@ class SearchTest : public ::testing::Test {
   bool Check() {
     absl::Cleanup cl{[this] { entries_.clear(); }};
 
-    FieldIndices index{schema_, kEmptyOptions, PMR_NS::get_default_resource()};
+    FieldIndices index{schema_, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
     shuffle(entries_.begin(), entries_.end(), default_random_engine{});
     for (DocId i = 0; i < entries_.size(); i++)
@@ -447,7 +447,7 @@ TEST_F(SearchTest, StopWords) {
   auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
   IndicesOptions options{{"some", "words", "are", "left", "out"}};
 
-  FieldIndices indices{schema, options, PMR_NS::get_default_resource()};
+  FieldIndices indices{schema, options, PMR_NS::get_default_resource(), nullptr};
   SearchAlgorithm algo{};
   QueryParams params;
 
@@ -481,7 +481,7 @@ TEST_F(SearchTest, Errors) {
   auto schema = MakeSimpleSchema(
       {{"score", SchemaField::NUMERIC}, {"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource()};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   SearchAlgorithm algo{};
   QueryParams params;
@@ -545,7 +545,7 @@ class KnnTest : public SearchTest, public testing::WithParamInterface<bool /* hn
 TEST_P(KnnTest, Simple1D) {
   auto schema = MakeSimpleSchema({{"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{GetParam(), 1};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource()};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   // Place points on a straight line
   for (size_t i = 0; i < 100; i++) {
@@ -602,7 +602,7 @@ TEST_P(KnnTest, Simple2D) {
 
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{GetParam(), 2};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource()};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
     string coords = ToBytes({kTestCoords[i].first, kTestCoords[i].second});
@@ -664,7 +664,7 @@ TEST_P(KnnTest, Cosine) {
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params =
       SchemaField::VectorParams{GetParam(), 2, VectorSimilarity::COSINE};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource()};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
     string coords = ToBytes({kTestCoords[i].first, kTestCoords[i].second});
@@ -708,7 +708,7 @@ TEST_P(KnnTest, AddRemove) {
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params =
       SchemaField::VectorParams{GetParam(), 1, VectorSimilarity::L2};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource()};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   vector<MockedDocument> documents(10);
   for (size_t i = 0; i < 10; i++) {
@@ -756,7 +756,7 @@ TEST_P(KnnTest, AutoResize) {
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params =
       SchemaField::VectorParams{GetParam(), 1, VectorSimilarity::L2, kInitialCapacity};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource()};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   for (size_t i = 0; i < 100; i++) {
     MockedDocument doc{Map{{"pos", ToBytes({float(i)})}}};
@@ -775,7 +775,7 @@ static void BM_VectorSearch(benchmark::State& state) {
 
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{false, ndims};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource()};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   auto random_vec = [ndims]() {
     vector<float> coords;

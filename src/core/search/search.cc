@@ -280,14 +280,26 @@ struct BasicSearch {
 
   // "term": access field's text index or unify results from all text indices if no field is set
   IndexResult Search(const AstTermNode& node, string_view active_field) {
+    std::string term = node.term;
+    bool strip_whitespace = true;
+
+    if (auto synonyms = indices_->GetSynonyms(); synonyms) {
+      if (auto group_id = synonyms->GetGroupToken(term); group_id) {
+        term = *group_id;
+        strip_whitespace = false;
+      }
+    }
+
     if (!active_field.empty()) {
       if (auto* index = GetIndex<TextIndex>(active_field); index)
-        return index->Matching(node.term);
+        return index->Matching(term, strip_whitespace);
       return IndexResult{};
     }
 
     vector<TextIndex*> selected_indices = indices_->GetAllTextIndices();
-    auto mapping = [&node](TextIndex* index) { return index->Matching(node.term); };
+    auto mapping = [&term, strip_whitespace](TextIndex* index) {
+      return index->Matching(term, strip_whitespace);
+    };
 
     return UnifyResults(GetSubResults(selected_indices, mapping), LogicOp::OR);
   }
@@ -517,8 +529,8 @@ IndicesOptions::IndicesOptions() {
 }
 
 FieldIndices::FieldIndices(const Schema& schema, const IndicesOptions& options,
-                           PMR_NS::memory_resource* mr)
-    : schema_{schema}, options_{options} {
+                           PMR_NS::memory_resource* mr, const Synonyms* synonyms)
+    : schema_{schema}, options_{options}, synonyms_{synonyms} {
   CreateIndices(mr);
   CreateSortIndices(mr);
 }
@@ -530,7 +542,7 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
 
     switch (field_info.type) {
       case SchemaField::TEXT:
-        indices_[field_ident] = make_unique<TextIndex>(mr, &options_.stopwords);
+        indices_[field_ident] = make_unique<TextIndex>(mr, &options_.stopwords, synonyms_);
         break;
       case SchemaField::NUMERIC:
         indices_[field_ident] = make_unique<NumericIndex>(mr);
@@ -656,6 +668,10 @@ SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view field_
   auto it = sort_indices_.find(field_identifier);
   DCHECK(it != sort_indices_.end());
   return it->second->Lookup(doc);
+}
+
+const Synonyms* FieldIndices::GetSynonyms() const {
+  return synonyms_;
 }
 
 SearchAlgorithm::SearchAlgorithm() = default;
