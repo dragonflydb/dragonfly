@@ -56,6 +56,7 @@ double toDouble(string_view src);
   LCURLBR     "{"
   RCURLBR     "}"
   OR_OP       "|"
+  COMMA       ","
   KNN         "KNN"
   AS          "AS"
   EF_RUNTIME  "EF_RUNTIME"
@@ -141,7 +142,8 @@ field_cond:
   | LCURLBR tag_list RCURLBR                            { $$ = std::move($2); }
 
 numeric_filter_expr:
-opt_lparen generic_number opt_lparen generic_number { $$ = AstRangeNode($2, $1, $4, $3); }
+  opt_lparen generic_number opt_lparen generic_number { $$ = AstRangeNode($2, $1, $4, $3); }
+  | opt_lparen generic_number COMMA opt_lparen generic_number { $$ = AstRangeNode($2, $1, $5, $4); }
 
 generic_number:
   DOUBLE { $$ = toDouble($1); }
