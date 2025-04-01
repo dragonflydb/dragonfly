@@ -23,6 +23,8 @@ extern "C" {
 ABSL_FLAG(uint32_t, interpreter_per_thread, 10, "Lua interpreters per thread");
 ABSL_FLAG(uint32_t, timeout, 0,
           "Close the connection after it is idle for N seconds (0 to disable)");
+ABSL_FLAG(uint32_t, send_timeout, 0,
+          "Close the connection after it is stuck on send for N seconds (0 to disable)");
 
 namespace dfly {
 
@@ -239,7 +241,8 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
     }
 
     uint32_t timeout = absl::GetFlag(FLAGS_timeout);
-    if (timeout == 0) {
+    uint32_t send_timeout = absl::GetFlag(FLAGS_send_timeout);
+    if (timeout == 0 && send_timeout == 0) {
       continue;
     }
 
@@ -262,8 +265,9 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
         is_replica = dfly_conn->cntx()->replica_conn;
       }
 
-      if ((phase == Phase::READ_SOCKET || dfly_conn->IsSending()) && !is_replica &&
-          dfly_conn->idle_time() > timeout) {
+      if ((timeout != 0 && phase == Phase::READ_SOCKET && !is_replica &&
+           dfly_conn->idle_time() > timeout) ||
+          (send_timeout != 0 && dfly_conn->IsSending() && dfly_conn->idle_time() > send_timeout)) {
         conn_refs.push_back(dfly_conn->Borrow());
       }
     };

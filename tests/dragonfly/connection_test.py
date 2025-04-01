@@ -1059,6 +1059,13 @@ async def test_hiredis(df_factory):
     client.ping()
 
 
+@assert_eventually()
+async def wait_for_conn_drop(async_client):
+    clients = await async_client.client_list()
+    logging.info("wait_for_conn_drop clients: %s", clients)
+    assert len(clients) <= 1
+
+
 @dfly_args({"timeout": 1})
 async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
     another_client = df_server.client()
@@ -1068,13 +1075,38 @@ async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
 
     await asyncio.sleep(2)
 
-    @assert_eventually
-    async def wait_for_conn_drop():
-        clients = await async_client.client_list()
-        logging.info("clients: %s", clients)
-        assert len(clients) <= 1
+    await wait_for_conn_drop(async_client)
+    info = await async_client.info("clients")
+    assert int(info["timeout_disconnects"]) >= 1
 
-    await wait_for_conn_drop()
+
+@dfly_args({"send_timeout": 3})
+async def test_send_timeout(df_server, async_client: aioredis.Redis):
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+    writer.write(f"client setname writer_test\n".encode())
+    clients = await async_client.client_list()
+    assert len(clients) == 2
+    size = 1024 * 1024
+    writer.write(f"SET a {'v'*size}\n".encode())
+
+    async def get_task():
+        while True:
+            writer.write(f"GET a\n".encode())
+            await asyncio.sleep(0.1)
+
+    get = asyncio.create_task(get_task())
+
+    @assert_eventually(times=600)
+    async def wait_for_stuck_on_send():
+        clients = await async_client.client_list()
+        logging.info("wait_for_stuck_on_send clients: %s", clients)
+        phase = next(
+            (client["phase"] for client in clients if client["name"] == "writer_test"), None
+        )
+        assert phase == "send"
+
+    await wait_for_stuck_on_send()
+    await wait_for_conn_drop(async_client)
     info = await async_client.info("clients")
     assert int(info["timeout_disconnects"]) >= 1
 
