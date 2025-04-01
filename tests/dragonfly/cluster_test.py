@@ -2720,7 +2720,7 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
             port=next(next_port),
             admin_port=next(next_port),
             replication_timeout=3000,
-            vmodule="outgoing_slot_migration=2,cluster_family=2,incoming_slot_migration=2,streamer=2",
+            vmodule="outgoing_slot_migration=2,cluster_family=2,incoming_slot_migration=2,main_service=2",
         )
         for i in range(2)
     ]
