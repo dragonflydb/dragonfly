@@ -62,6 +62,7 @@ asterisk_char \*
 "{"            return Parser::make_LCURLBR (loc());
 "}"            return Parser::make_RCURLBR (loc());
 "|"            return Parser::make_OR_OP (loc());
+","            return Parser::make_COMMA (loc());
 "KNN"          return Parser::make_KNN (loc());
 "AS"           return Parser::make_AS (loc());
 "EF_RUNTIME"   return Parser::make_EF_RUNTIME (loc());
