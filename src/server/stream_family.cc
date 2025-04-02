@@ -4,6 +4,7 @@
 
 #include "server/stream_family.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 
 extern "C" {
@@ -28,6 +29,10 @@ using namespace facade;
 using namespace std;
 
 StreamMemTracker::StreamMemTracker() {
+  start_size_ = zmalloc_used_memory_tl;
+}
+
+void StreamMemTracker::UpdateStartSize() {
   start_size_ = zmalloc_used_memory_tl;
 }
 
@@ -1208,6 +1213,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
   auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   int64_t entries_read = SCG_INVALID_ENTRIES_READ;
+
   StreamMemTracker mem_tracker;
   if (!res_it) {
     if (opts.flags & kCreateOptMkstream) {
@@ -1215,6 +1221,8 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
       res_it = db_slice.AddNew(op_args.db_cntx, key, PrimeValue{}, 0);
       if (!res_it)
         return res_it.status();
+
+      mem_tracker.UpdateStartSize();
 
       stream* s = streamNew();
       res_it->it->second.InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, s);
@@ -1274,6 +1282,16 @@ streamConsumer* FindOrAddConsumer(string_view name, streamCG* cg, uint64_t now_m
     consumer->seen_time = now_ms;
   else  // TODO: notify xgroup-createconsumer event once we support stream events.
     consumer = StreamCreateConsumer(cg, name, now_ms, SCC_DEFAULT);
+  return consumer;
+}
+
+// Try to get the consumer
+streamConsumer* FindConsumer(string_view name, streamCG* cg, uint64_t now_ms) {
+  // Try to get the consumer. If not found, create a new one.
+  auto cname = WrapSds(name);
+  streamConsumer* consumer = streamLookupConsumer(cg, cname);
+  DCHECK(consumer);
+  consumer->seen_time = now_ms;
   return consumer;
 }
 
@@ -1499,6 +1517,7 @@ OpStatus OpSetId(const OpArgs& op_args, string_view key, string_view gname, stri
       return OpStatus::SYNTAX_ERR;
     }
   }
+  // We are not using stream memory tracker here because we are not allocating
   cgr_res->cg->last_id = sid;
 
   return OpStatus::OK;
@@ -1844,6 +1863,8 @@ OpResult<PendingResult> OpPending(const OpArgs& op_args, string_view key, const 
   auto cgroup_res = FindGroup(op_args, key, opts.group_name);
   RETURN_ON_BAD_STATUS(cgroup_res);
 
+  StreamMemTracker mem_tracker;
+
   streamConsumer* consumer = nullptr;
   if (!opts.consumer_name.empty()) {
     consumer = streamLookupConsumer(cgroup_res->cg, WrapSds(opts.consumer_name));
@@ -1856,6 +1877,9 @@ OpResult<PendingResult> OpPending(const OpArgs& op_args, string_view key, const 
   } else {
     result = GetPendingExtendedResult(op_args.db_cntx.time_now_ms, cgroup_res->cg, consumer, opts);
   }
+
+  mem_tracker.UpdateStreamSize(cgroup_res->it->second);
+
   return result;
 }
 
@@ -2442,8 +2466,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
 
       // Update consumer
       if (sitem.group) {
-        range_opts.consumer =
-            FindOrAddConsumer(opts->consumer_name, sitem.group, GetCurrentTimeMs());
+        range_opts.consumer = FindConsumer(opts->consumer_name, sitem.group, GetCurrentTimeMs());
         sitem.consumer = range_opts.consumer;
         if (!sitem.consumer) {
           return OpStatus::OUT_OF_MEMORY;
@@ -3193,7 +3216,7 @@ void StreamFamily::XRevRange(CmdArgList args, const CommandContext& cmd_cntx) {
 variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view skey,
                                               ReadOpts* opts) {
   auto& db_slice = op_args.GetDbSlice();
-  auto res_it = db_slice.FindReadOnly(op_args.db_cntx, skey, OBJ_STREAM);
+  auto res_it = db_slice.FindMutable(op_args.db_cntx, skey, OBJ_STREAM);
   if (!res_it) {
     if (res_it.status() == OpStatus::WRONG_TYPE)
       return facade::ErrorReply{res_it.status()};
@@ -3203,7 +3226,11 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
     return false;
   }
 
-  const CompactObj& cobj = (*res_it)->second;
+  StreamMemTracker mem_tracker;
+
+  absl::Cleanup update_size_cb([&]() { mem_tracker.UpdateStreamSize(res_it->it->second); });
+
+  const CompactObj& cobj = res_it->it->second;
   stream* s = GetReadOnlyStream(cobj);
 
   // Fetch last id
@@ -3223,7 +3250,7 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
       return facade::ErrorReply{
           NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option")};
 
-    consumer = FindOrAddConsumer(opts->consumer_name, group, op_args.db_cntx.time_now_ms);
+    consumer = FindConsumer(opts->consumer_name, group, op_args.db_cntx.time_now_ms);
 
     requested_sitem.group = group;
     requested_sitem.consumer = consumer;
