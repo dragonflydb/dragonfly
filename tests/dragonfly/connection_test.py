@@ -1084,14 +1084,18 @@ async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
 async def test_send_timeout(df_server, async_client: aioredis.Redis):
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
     writer.write(f"client setname writer_test\n".encode())
+    await writer.drain()
+    assert "OK" in (await reader.readline()).decode()
     clients = await async_client.client_list()
     assert len(clients) == 2
     size = 1024 * 1024
     writer.write(f"SET a {'v'*size}\n".encode())
+    await writer.drain()
 
     async def get_task():
         while True:
             writer.write(f"GET a\n".encode())
+            await writer.drain()
             await asyncio.sleep(0.1)
 
     get = asyncio.create_task(get_task())
@@ -1109,6 +1113,8 @@ async def test_send_timeout(df_server, async_client: aioredis.Redis):
     await wait_for_conn_drop(async_client)
     info = await async_client.info("clients")
     assert int(info["timeout_disconnects"]) >= 1
+    logging.info("finished disconnect")
+    get.cancel()
 
 
 # Test that the cache pipeline does not grow or shrink under constant pipeline load.
