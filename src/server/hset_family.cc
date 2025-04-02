@@ -166,7 +166,44 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
   param->emplace<int64_t>(new_val);
 
   return OpStatus::OK;
+}
+
+struct HSetCleanupCtx {
+  StringMap** sm_ptr;
+  DbSlice& db_slice;
+  const OpArgs& op_args;
+  std::string_view key;
+
+  void DelKeyIfEmpty() const;
 };
+
+void HSetCleanupCtx::DelKeyIfEmpty() const {
+  if (const auto* sm = *sm_ptr; sm && !sm->Empty()) {
+    return;
+  }
+
+  if (auto it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH); it) {
+    it->post_updater.Run();
+    db_slice.Del(op_args.db_cntx, it->it);
+    if (op_args.shard->journal()) {
+      RecordJournal(op_args, "DEL"sv, {key});
+    }
+  }
+
+  *sm_ptr = nullptr;
+}
+
+bool ContainsWithCleanupBlocking(HSetCleanupCtx ctx, const std::string_view field) {
+  const bool found = (*ctx.sm_ptr)->Contains(field);
+  ctx.DelKeyIfEmpty();
+  return found;
+}
+
+StringMap::iterator FindWithCleanupBlocking(HSetCleanupCtx ctx, const std::string_view field) {
+  const auto find_it = (*ctx.sm_ptr)->Find(field);
+  ctx.DelKeyIfEmpty();
+  return find_it;
+}
 
 OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, IncrByParam* param) {
   auto& db_slice = op_args.GetDbSlice();
@@ -274,7 +311,8 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
    * of returning no or very few elements. (taken from redis code at db.c line 904 */
   constexpr size_t INTERATION_FACTOR = 10;
 
-  auto find_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+  DbSlice& db_slice = op_args.GetDbSlice();
+  auto find_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
 
   if (!find_res) {
     DVLOG(1) << "ScanOp: find failed: " << find_res << ", baling out";
@@ -328,6 +366,9 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
     do {
       *cursor = sm->Scan(*cursor, scanCb);
     } while (*cursor && max_iterations-- && res.size() < count);
+
+    const HSetCleanupCtx ctx{.sm_ptr = &sm, .db_slice = db_slice, .op_args = op_args, .key = key};
+    ctx.DelKeyIfEmpty();
   }
 
   return res;
@@ -368,13 +409,15 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
     for (auto s : values) {
-      bool res = sm->Erase(ToSV(s));
-      if (res) {
+      if (sm->Erase(ToSV(s))) {
         ++deleted;
-        if (sm->UpperBoundSize() == 0) {
-          key_remove = true;
-          break;
-        }
+      }
+
+      // Even if the previous Erase op did not erase anything, it can remove expired fields as a
+      // side effect.
+      if (sm->Empty()) {
+        key_remove = true;
+        break;
       }
     }
   }
@@ -443,9 +486,16 @@ OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, Cm
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
     for (size_t i = 0; i < fields.size(); ++i) {
-      auto it = sm->Find(ToSV(fields[i]));
-      if (it != sm->end()) {
+      if (auto it = FindWithCleanupBlocking(
+              {.sm_ptr = &sm, .db_slice = db_slice, .op_args = op_args, .key = key},
+              ToSV(fields[i]));
+          it != sm->end()) {
         result[i].emplace(it->second, sdslen(it->second));
+      }
+
+      // If the set is empty, FindWithCleanup will have removed the key and set sm to nullptr
+      if (sm == nullptr) {
+        return OpStatus::KEY_NOTFOUND;
       }
     }
   }
@@ -486,8 +536,9 @@ OpResult<int> OpExist(const OpArgs& op_args, string_view key, string_view field)
 
   DCHECK_EQ(kEncodingStrMap2, pv.Encoding());
   StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-
-  return sm->Contains(field) ? 1 : 0;
+  const bool contains = ContainsWithCleanupBlocking(
+      {.sm_ptr = &sm, .db_slice = db_slice, .op_args = op_args, .key = key}, field);
+  return contains ? 1 : 0;
 };
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key, string_view field) {
@@ -510,12 +561,13 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key, string_view field
 
   DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
   StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-  auto it = sm->Find(field);
+  if (const auto it = FindWithCleanupBlocking(
+          {.sm_ptr = &sm, .db_slice = db_slice, .op_args = op_args, .key = key}, field);
+      it != sm->end()) {
+    return string(it->second, sdslen(it->second));
+  }
 
-  if (it == sm->end())
-    return OpStatus::KEY_NOTFOUND;
-
-  return string(it->second, sdslen(it->second));
+  return OpStatus::KEY_NOTFOUND;
 }
 
 OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_t mask) {
@@ -601,7 +653,8 @@ OpResult<size_t> OpStrLen(const OpArgs& op_args, string_view key, string_view fi
   DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
   StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
-  auto it = sm->Find(field);
+  auto it = FindWithCleanupBlocking(
+      {.sm_ptr = &sm, .db_slice = db_slice, .op_args = op_args, .key = key}, field);
   return it != sm->end() ? sdslen(it->second) : 0;
 }
 
