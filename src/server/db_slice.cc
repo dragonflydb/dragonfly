@@ -355,20 +355,9 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
 
 class DbSlice::PrimeBumpPolicy {
  public:
-  PrimeBumpPolicy(absl::flat_hash_set<uint64_t, FpHasher>* items) : fetched_items_(items) {
-  }
-
-  // returns true if we can change the object location in dash table.
   bool CanBump(const CompactObj& obj) const {
-    if (obj.IsSticky()) {
-      return false;
-    }
-    auto hc = obj.HashCode();
-    return fetched_items_->insert(hc).second;
+    return obj.IsSticky() ? false : true;
   }
-
- private:
-  mutable absl::flat_hash_set<uint64_t, FpHasher>* fetched_items_;
 };
 
 DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
@@ -565,21 +554,9 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   }
 
   DCHECK(IsValid(res.it));
-  if (IsCacheMode()) {
-    if (!change_cb_.empty()) {
-      auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
-        CallChangeCallbacks(cntx.db_index, key, bit);
-      };
-      db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
-    }
 
-    // We must not change the bucket's internal order during serialization
-    serialization_latch_.Wait();
-    auto bump_it = db.prime.BumpUp(res.it, PrimeBumpPolicy{&fetched_items_});
-    if (bump_it != res.it) {  // the item was bumped
-      res.it = bump_it;
-      ++events_.bumpups;
-    }
+  if (IsCacheMode()) {
+    fetched_items_[res.it->first.HashCode()] = {cntx.db_index, key};
   }
 
   switch (stats_mode) {
@@ -1715,9 +1692,36 @@ void DbSlice::PerformDeletion(Iterator del_it, DbTable* table) {
 }
 
 void DbSlice::OnCbFinish() {
-  // TBD update bumpups logic we can not clear now after cb finish as cb can preempt
-  // btw what do we do with inline?
-  fetched_items_.clear();
+  if (IsCacheMode()) {
+    for (const auto& item : fetched_items_) {
+      auto& db = *db_arr_[item.second.first];
+
+      auto predicate = [item_key = item.second.second](const PrimeKey& key) {
+        return key == item_key;
+      };
+
+      PrimeIterator it = db.prime.FindFirst(item.first, predicate);
+
+      if (!IsValid(it)) {
+        continue;
+      }
+
+      if (!change_cb_.empty()) {
+        auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
+          CallChangeCallbacks(item.second.first, item.second.second, bit);
+        };
+        db.prime.CVCUponBump(change_cb_.back().first, it, bump_cb);
+      }
+
+      // We must not change the bucket's internal order during serialization
+      serialization_latch_.Wait();
+      auto bump_it = db.prime.BumpUp(it, PrimeBumpPolicy{});
+      if (bump_it != it) {  // the item was bumped
+        ++events_.bumpups;
+      }
+    }
+    fetched_items_.clear();
+  }
 
   if (!pending_send_map_.empty()) {
     SendQueuedInvalidationMessages();
