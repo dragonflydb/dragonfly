@@ -17,7 +17,12 @@ COPY --from=libpfm_donor /usr/local/lib/libpfm.so* /usr/local/lib/
 
 WORKDIR /build
 
-COPY . ./
+COPY ./Makefile ./CMakeLists.txt ./
+COPY src ./src
+
+COPY .git ./.git
+COPY cmake ./cmake
+COPY helio ./helio
 
 RUN make release
 
