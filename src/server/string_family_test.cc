@@ -332,7 +332,7 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2465) {
 
   resp = Run({"info", "stats"});
   size_t bumps = get_bump_ups(resp.GetString());
-  EXPECT_EQ(bumps, 3);  // one bump for del and one for get and one for mget
+  EXPECT_EQ(bumps, 2);  // one bump for get and one for mget
 }
 
 TEST_F(StringFamilyTest, MSetGet) {

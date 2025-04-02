@@ -635,7 +635,8 @@ class DbSlice {
   // for operations that preempt in the middle we have another mechanism -
   // auto laundering iterators, so in case of preemption we do not mind that fetched_items are
   // cleared or changed.
-  mutable absl::flat_hash_set<uint64_t, FpHasher> fetched_items_;
+  mutable absl::flat_hash_map<uint64_t, std::pair<DbIndex, std::string_view>, FpHasher>
+      fetched_items_;
 
   // Registered by shard indices on when first document index is created.
   DocDeletionCallback doc_del_cb_;
