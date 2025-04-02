@@ -296,9 +296,9 @@ void DoComputeHist(optional<CompactObjType> type, EngineShard* shard, Connection
       scratch.clear();
       if (!type) {
         it->first.GetString(&scratch);
-      } else if (type == OBJ_STRING && it->second.ObjType() == OBJ_STRING) {
+      } else if (*type == OBJ_STRING && it->second.ObjType() == OBJ_STRING) {
         it->second.GetString(&scratch);
-      } else if (type == OBJ_ZSET && it->second.ObjType() == OBJ_ZSET) {
+      } else if (*type == OBJ_ZSET && it->second.ObjType() == OBJ_ZSET) {
         container_utils::IterateSortedSet(
             it->second.GetRobjWrapper(), [&](container_utils::ContainerEntry entry, double) {
               if (entry.value) {
@@ -306,14 +306,14 @@ void DoComputeHist(optional<CompactObjType> type, EngineShard* shard, Connection
               }
               return true;
             });
-      } else if (type == OBJ_LIST && it->second.ObjType() == OBJ_LIST) {
+      } else if (*type == OBJ_LIST && it->second.ObjType() == OBJ_LIST) {
         container_utils::IterateList(it->second, [&](container_utils::ContainerEntry entry) {
           if (entry.value) {
             HIST_add(dest->hist.data(), entry.value, entry.length);
           }
           return true;
         });
-      } else if (type == OBJ_HASH && it->second.ObjType() == OBJ_HASH) {
+      } else if (*type == OBJ_HASH && it->second.ObjType() == OBJ_HASH) {
         container_utils::IterateMap(it->second, [&](container_utils::ContainerEntry key,
                                                     container_utils::ContainerEntry value) {
           if (key.value) {
@@ -325,8 +325,9 @@ void DoComputeHist(optional<CompactObjType> type, EngineShard* shard, Connection
           return true;
         });
       }
+
       size_t len = std::min(scratch.size(), kMaxLen);
-      if (len > 16)
+      if (len > 16)  // filtering out values that are too small and hosted inline.
         HIST_add(dest->hist.data(), scratch.data(), len);
     });
 
@@ -545,8 +546,8 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "RECVSIZE [<tid> | ENABLE | DISABLE]",
         "    Prints the histogram of the received request sizes on the given thread",
         "COMPRESSION [type]"
-        "    Estimate the compressability of values of the given type. if no type is given, ",
-        "    checks compressability of keys",
+        "    Estimate the compressibility of values of the given type. if no type is given, ",
+        "    checks compressibility of keys",
         "HELP",
         "    Prints this help.",
     };
