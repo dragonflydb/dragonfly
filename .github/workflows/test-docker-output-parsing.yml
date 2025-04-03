@@ -1,0 +1,56 @@
+name: Test Docker Run Output Parsing
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test_output_parsing:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test version extraction
+        shell: bash
+        run: |
+          echo "Testing Docker version extraction logic used in docker-release2.yml"
+
+          # Variables for testing
+          registry="ghcr.io/dragonflydb/dragonfly"
+
+          # The exact command from the main workflow
+          if docker pull ${registry}:latest &>/dev/null; then
+            echo "Found latest tag, checking its version..."
+
+            echo -e "\n1. Original command output (without head):"
+            # Run without head to show the problem
+            docker run --rm --entrypoint /bin/sh ${registry}:latest -c "dragonfly --version | cut -d' ' -f2"
+
+            echo -e "\n2. Fixed command output (with head -n 1):"
+            # Run the container to get its version - FIXED VERSION WITH HEAD
+            latest_full_version=$(docker run --rm --entrypoint /bin/sh ${registry}:latest -c "dragonfly --version | cut -d' ' -f2 | head -n 1")
+            echo "Latest full version: ${latest_full_version}"
+
+            # Extract only the semantic version part (before any dash)
+            latest_version=$(echo "${latest_full_version}" | cut -d'-' -f1)
+            # Remove 'v' prefix if present
+            latest_version=${latest_version#v}
+            echo "Current latest version: ${latest_version}"
+          else
+            echo "No latest tag found or couldn't pull it"
+          fi
+
+          # Verify with other available version tags
+          echo -e "\n3. Verifying with specific version tags:"
+          for tag in v1.28.0 v1.27.3 v1.28.1; do
+            if docker pull ${registry}:${tag} &>/dev/null; then
+              echo -e "\nTesting with tag ${tag}:"
+              # Using the exact fixed command from the main workflow
+              version_output=$(docker run --rm --entrypoint /bin/sh ${registry}:${tag} -c "dragonfly --version | cut -d' ' -f2 | head -n 1")
+              echo "Full version: ${version_output}"
+
+              # Process as per main workflow
+              clean_version=$(echo "${version_output}" | cut -d'-' -f1)
+              clean_version=${clean_version#v}
+              echo "Semantic version: ${clean_version}"
+            else
+              echo "Tag ${tag} not available"
+            fi
+          done
