@@ -556,7 +556,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   DCHECK(IsValid(res.it));
 
   if (IsCacheMode()) {
-    fetched_items_[res.it->first.HashCode()] = {cntx.db_index, key};
+    fetched_items_.insert({res.it->first.HashCode(), cntx.db_index, key});
   }
 
   switch (stats_mode) {
@@ -1693,14 +1693,12 @@ void DbSlice::PerformDeletion(Iterator del_it, DbTable* table) {
 
 void DbSlice::OnCbFinish() {
   if (IsCacheMode()) {
-    for (const auto& item : fetched_items_) {
-      auto& db = *db_arr_[item.second.first];
+    for (const auto& [key_hash, db_index, key] : fetched_items_) {
+      auto& db = *db_arr_[db_index];
 
-      auto predicate = [item_key = item.second.second](const PrimeKey& key) {
-        return key == item_key;
-      };
+      auto predicate = [&key](const PrimeKey& key_) { return key_ == key; };
 
-      PrimeIterator it = db.prime.FindFirst(item.first, predicate);
+      PrimeIterator it = db.prime.FindFirst(key_hash, predicate);
 
       if (!IsValid(it)) {
         continue;
@@ -1708,7 +1706,7 @@ void DbSlice::OnCbFinish() {
 
       if (!change_cb_.empty()) {
         auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
-          CallChangeCallbacks(item.second.first, item.second.second, bit);
+          CallChangeCallbacks(db_index, key, bit);
         };
         db.prime.CVCUponBump(change_cb_.back().first, it, bump_cb);
       }
