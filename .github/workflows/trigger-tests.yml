@@ -1,0 +1,94 @@
+name: Trigger All Tests
+
+on:
+  push:
+    branches:
+      - bobik/docker_release_update_latest_tag_by_semantic_version
+
+jobs:
+  run-version-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run version comparison test
+        shell: bash
+        run: |
+          # Input values
+          current_version="1.28.0"
+          latest_version="1.27.3"
+
+          echo "Testing with current_version=$current_version, latest_version=$latest_version"
+
+          # Compare versions only if we have a latest version
+          should_update_latest=true
+          if [[ -n "$latest_version" ]]; then
+            # Simple semantic version comparison
+            # Extract major.minor.patch components
+            IFS='.' read -ra CURRENT_PARTS <<< "$current_version"
+            IFS='.' read -ra LATEST_PARTS <<< "$latest_version"
+
+            # Pad arrays to same length for comparison
+            while [ ${#CURRENT_PARTS[@]} -lt 3 ]; do CURRENT_PARTS+=(0); done
+            while [ ${#LATEST_PARTS[@]} -lt 3 ]; do LATEST_PARTS+=(0); done
+
+            # Compare major.minor.patch numerically
+            if (( 10#${CURRENT_PARTS[0]} < 10#${LATEST_PARTS[0]} )); then
+              should_update_latest=false
+            elif (( 10#${CURRENT_PARTS[0]} == 10#${LATEST_PARTS[0]} )) && (( 10#${CURRENT_PARTS[1]} < 10#${LATEST_PARTS[1]} )); then
+              should_update_latest=false
+            elif (( 10#${CURRENT_PARTS[0]} == 10#${LATEST_PARTS[0]} )) && (( 10#${CURRENT_PARTS[1]} == 10#${LATEST_PARTS[1]} )) && (( 10#${CURRENT_PARTS[2]} < 10#${LATEST_PARTS[2]} )); then
+              should_update_latest=false
+            fi
+
+            echo "Version comparison: current=${CURRENT_PARTS[0]}.${CURRENT_PARTS[1]}.${CURRENT_PARTS[2]} vs latest=${LATEST_PARTS[0]}.${LATEST_PARTS[1]}.${LATEST_PARTS[2]}"
+          fi
+
+          if [[ "$should_update_latest" == true ]]; then
+            echo "Version $current_version is newer than or equal to current latest ($latest_version), would update latest tag"
+          else
+            echo "Version $current_version is older than current latest ($latest_version), would NOT update latest tag"
+          fi
+
+          # Test additional cases
+          echo -e "\nAdditional tests:"
+          for current in "1.28.0" "1.27.3" "1.28.1" "2.0.0" "1.2.3"; do
+            for latest in "1.27.3" "1.28.0" "1.27.0"; do
+              echo -e "\nTesting current=$current, latest=$latest"
+
+              # Reset flag
+              should_update=true
+
+              # Extract and pad parts
+              IFS='.' read -ra CURR <<< "$current"
+              IFS='.' read -ra LATST <<< "$latest"
+              while [ ${#CURR[@]} -lt 3 ]; do CURR+=(0); done
+              while [ ${#LATST[@]} -lt 3 ]; do LATST+=(0); done
+
+              # Compare
+              if (( 10#${CURR[0]} < 10#${LATST[0]} )); then
+                should_update=false
+              elif (( 10#${CURR[0]} == 10#${LATST[0]} )) && (( 10#${CURR[1]} < 10#${LATST[1]} )); then
+                should_update=false
+              elif (( 10#${CURR[0]} == 10#${LATST[0]} )) && (( 10#${CURR[1]} == 10#${LATST[1]} )) && (( 10#${CURR[2]} < 10#${LATST[2]} )); then
+                should_update=false
+              fi
+
+              result="SHOULD"
+              [[ "$should_update" == false ]] && result="should NOT"
+
+              echo "Result: $current $result replace $latest as latest"
+            done
+          done
+
+  test-docker-pull:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test Docker pull
+        run: |
+          echo "Testing Docker pulls..."
+          docker pull ghcr.io/dragonflydb/dragonfly:latest
+          docker run --rm --entrypoint /bin/sh ghcr.io/dragonflydb/dragonfly:latest -c "dragonfly --version | cut -d' ' -f2"
+          echo "With head -n 1:"
+          docker run --rm --entrypoint /bin/sh ghcr.io/dragonflydb/dragonfly:latest -c "dragonfly --version | cut -d' ' -f2 | head -n 1"
