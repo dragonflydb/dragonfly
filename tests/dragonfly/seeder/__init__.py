@@ -70,7 +70,7 @@ class SeederBase:
         return script
 
 
-class StaticSeeder(SeederBase):
+class DebugPopulateSeeder(SeederBase):
     """Wrapper around DEBUG POPULATE with fuzzy key sizes and a balanced type mix"""
 
     def __init__(

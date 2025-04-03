@@ -1290,6 +1290,7 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
   for (unsigned i = 0; i < batch.sz; ++i) {
     string key = StrCat(options.prefix, ":", batch.index[i]);
     uint32_t elements_left = options.elements;
+    DCHECK(sf_.AreAllReplicasInStableSync());
 
     while (elements_left) {
       // limit rss grow by 32K by limiting the element count in each command.

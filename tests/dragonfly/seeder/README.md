@@ -4,20 +4,20 @@ Please use the testing frameworks factories to obtain proper seeder instances!
 
 ### 1. Static seeder
 
-The StaticSeeder is a thin wrapper around `DEBUG POPULATE` with a little bit of fuzziness for collection sizes. It should be preffered for generating "static" data for snapshotting, memory consumption tests, etc.
+The DebugPopulateSeeder is a thin wrapper around `DEBUG POPULATE` with a little bit of fuzziness for collection sizes. It should be preffered for generating "static" data for snapshotting, memory consumption tests, etc.
 
 ```python
-s = StaticSeeder(key_target=10_000)
+s = DebugPopulateSeeder(key_target=10_000)
 await s.run(client) # Creates around 10k keys
 ```
 
 ### 2. Checking consistency
 
-Use `SeederBase.capture()` (accessed via `StaticSeeder` or `Seeder`) to calculate a "state hashes" based on all the data inside an instance. Equal data produces equal hashes (equal hashes don't guarantee equal data but what are the odds...).
+Use `SeederBase.capture()` (accessed via `DebugPopulateSeeder` or `Seeder`) to calculate a "state hashes" based on all the data inside an instance. Equal data produces equal hashes (equal hashes don't guarantee equal data but what are the odds...).
 
 ```python
 # Fill master with ~10k keys
-s = StaticSeeder(key_target=10_000)
+s = DebugPopulateSeeder(key_target=10_000)
 await seeder.run(master)
 
 # "Replicate" or other operations
@@ -25,8 +25,8 @@ replicate(master, replica)
 
 # Ensure master and replica have same state hashes
 master_hashes, replica_hashes = await asyncio.gather(
-    StaticSeeder.capture(master), # note it's a static method
-    StaticSeeder.capture(replica)
+    DebugPopulateSeeder.capture(master), # note it's a static method
+    DebugPopulateSeeder.capture(replica)
 )
 assert master_hashes == replica_hashes
 ```
