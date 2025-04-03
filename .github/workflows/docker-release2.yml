@@ -157,10 +157,62 @@ jobs:
                 docker manifest create ${tag} --amend ${sha_amd} --amend ${sha_arm}
                 docker manifest push ${tag}
               elif [[ "$flavor" == 'ubuntu' ]]; then
-                tag="${registry}:latest"
-                # Create and push the manifest like dragonfly:latest
-                docker manifest create ${tag} --amend ${sha_amd} --amend ${sha_arm}
-                docker manifest push ${tag}
+                # Checking if this version should be tagged as latest
+                echo "Checking if ${tag_name} should be tagged as latest..."
+
+                # Remove 'v' prefix if present for semantic comparison
+                current_version=${tag_name#v}
+
+                # Get the current latest version by running the latest image
+                latest_version=""
+                if docker pull ${registry}:latest &>/dev/null; then
+                  echo "Found latest tag, checking its version..."
+                  # Run the container to get its version
+                  latest_full_version=$(docker run --rm --entrypoint /bin/sh ${registry}:latest -c "dragonfly --version | cut -d' ' -f2 | head -n 1")
+                  echo "Latest full version: ${latest_full_version}"
+
+                  # Extract only the semantic version part (before any dash)
+                  latest_version=$(echo "${latest_full_version}" | cut -d'-' -f1)
+                  # Remove 'v' prefix if present
+                  latest_version=${latest_version#v}
+                  echo "Current latest version: ${latest_version}"
+                else
+                  echo "No latest tag found yet or couldn't pull it"
+                fi
+
+                # Compare versions only if we have a latest version
+                should_update_latest=true
+                if [[ -n "$latest_version" ]]; then
+                  # Simple semantic version comparison
+                  # Extract major.minor.patch components
+                  IFS='.' read -ra CURRENT_PARTS <<< "$current_version"
+                  IFS='.' read -ra LATEST_PARTS <<< "$latest_version"
+
+                  # Pad arrays to same length for comparison
+                  while [ ${#CURRENT_PARTS[@]} -lt 3 ]; do CURRENT_PARTS+=(0); done
+                  while [ ${#LATEST_PARTS[@]} -lt 3 ]; do LATEST_PARTS+=(0); done
+
+                  # Compare major.minor.patch numerically
+                  if (( 10#${CURRENT_PARTS[0]} < 10#${LATEST_PARTS[0]} )); then
+                    should_update_latest=false
+                  elif (( 10#${CURRENT_PARTS[0]} == 10#${LATEST_PARTS[0]} )) && (( 10#${CURRENT_PARTS[1]} < 10#${LATEST_PARTS[1]} )); then
+                    should_update_latest=false
+                  elif (( 10#${CURRENT_PARTS[0]} == 10#${LATEST_PARTS[0]} )) && (( 10#${CURRENT_PARTS[1]} == 10#${LATEST_PARTS[1]} )) && (( 10#${CURRENT_PARTS[2]} < 10#${LATEST_PARTS[2]} )); then
+                    should_update_latest=false
+                  fi
+
+                  echo "Version comparison: current=${CURRENT_PARTS[0]}.${CURRENT_PARTS[1]}.${CURRENT_PARTS[2]} vs latest=${LATEST_PARTS[0]}.${LATEST_PARTS[1]}.${LATEST_PARTS[2]}"
+                fi
+
+                if [[ "$should_update_latest" == true ]]; then
+                  echo "Version ${tag_name} is newer than or equal to current latest, updating latest tag"
+                  tag="${registry}:latest"
+                  # Create and push the manifest like dragonfly:latest
+                  docker manifest create ${tag} --amend ${sha_amd} --amend ${sha_arm}
+                  docker manifest push ${tag}
+                else
+                  echo "Version ${tag_name} is older than current latest (${latest_version}), NOT updating latest tag"
+                fi
               fi
 
               # Create and push the manifest like dragonfly:v1.26.4
