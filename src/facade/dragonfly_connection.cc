@@ -1107,7 +1107,8 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
     qbp.pipeline_cnd.wait(noop, [this, &qbp] {
       bool over_limits =
           qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, dispatch_q_.size());
-      return !over_limits || (dispatch_q_.empty() && !cc_->async_dispatch) || cc_->conn_closing;
+      // Stop waiting if we are below limits or connection is closing
+      return !over_limits || cc_->conn_closing;
     });
     if (cc_->conn_closing)
       return;
