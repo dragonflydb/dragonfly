@@ -1353,8 +1353,12 @@ int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) c
          db_arr_[db_ind]->prime.GetSegmentCount();
 }
 
-pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t starting_segment_id,
-                                                        size_t increase_goal_bytes) {
+pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind,
+                                                              size_t starting_segment_id,
+                                                              size_t increase_goal_bytes) {
+  // Disable flush journal changes to prevent preemtion
+  journal::JournalFlushGuard journal_flush_guard(shard_owner()->journal());
+  FiberAtomicGuard guard;
   DCHECK(!owner_->IsReplica());
 
   size_t evicted_items = 0, evicted_bytes = 0;
@@ -1381,64 +1385,62 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t s
   bool record_keys = owner_->journal() != nullptr || expired_keys_events_recording_;
   vector<string> keys_to_journal;
 
-  {
-    FiberAtomicGuard guard;
-    for (int32_t slot_id = num_slots - 1; slot_id >= 0; --slot_id) {
-      for (int32_t bucket_id = num_buckets - 1; bucket_id >= 0; --bucket_id) {
-        // pick a random segment to start with in each eviction,
-        // as segment_id does not imply any recency, and random selection should be fair enough
-        int32_t segment_id = starting_segment_id;
-        for (size_t num_seg_visited = 0; num_seg_visited < max_segment_to_consider;
-             ++num_seg_visited, segment_id = GetNextSegmentForEviction(segment_id, db_ind)) {
-          const auto& bucket = db_table->prime.GetSegment(segment_id)->GetBucket(bucket_id);
-          if (bucket.IsEmpty())
-            continue;
+  auto finalize = [&]() {
+    // send the deletion to the replicas.
+    for (string_view key : keys_to_journal) {
+      if (auto journal = owner_->journal(); journal)
+        RecordExpiryBlocking(db_ind, key);
 
-          if (!bucket.IsBusy(slot_id))
-            continue;
+      if (expired_keys_events_recording_)
+        db_table->expired_keys_events_.emplace_back(key);
+    }
 
-          auto evict_it = db_table->prime.GetIterator(segment_id, bucket_id, slot_id);
-          if (evict_it->first.IsSticky() || !evict_it->second.HasAllocated())
-            continue;
+    SendQueuedInvalidationMessagesAsync();
+    auto time_finish = absl::GetCurrentTimeNanos();
+    events_.evicted_keys += evicted_items;
+    DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
+    return pair<uint64_t, size_t>{evicted_items, evicted_bytes};
+  };
 
-          // check if the key is locked by looking up transaction table.
-          const auto& lt = db_table->trans_locks;
-          string_view key = evict_it->first.GetSlice(&tmp);
-          if (lt.Find(LockTag(key)).has_value())
-            continue;
+  for (int32_t slot_id = num_slots - 1; slot_id >= 0; --slot_id) {
+    for (int32_t bucket_id = num_buckets - 1; bucket_id >= 0; --bucket_id) {
+      // pick a random segment to start with in each eviction,
+      // as segment_id does not imply any recency, and random selection should be fair enough
+      int32_t segment_id = starting_segment_id;
+      for (size_t num_seg_visited = 0; num_seg_visited < max_segment_to_consider;
+           ++num_seg_visited, segment_id = GetNextSegmentForEviction(segment_id, db_ind)) {
+        const auto& bucket = db_table->prime.GetSegment(segment_id)->GetBucket(bucket_id);
+        if (bucket.IsEmpty())
+          continue;
 
-          if (record_keys)
-            keys_to_journal.emplace_back(key);
+        if (!bucket.IsBusy(slot_id))
+          continue;
 
-          evicted_bytes += evict_it->first.MallocUsed() + evict_it->second.MallocUsed();
-          ++evicted_items;
-          PerformDeletion(Iterator(evict_it, StringOrView::FromView(key)), db_table.get());
+        auto evict_it = db_table->prime.GetIterator(segment_id, bucket_id, slot_id);
+        if (evict_it->first.IsSticky() || !evict_it->second.HasAllocated())
+          continue;
 
-          // returns when whichever condition is met first
-          if ((evicted_items == max_eviction_per_hb) || (evicted_bytes >= increase_goal_bytes))
-            goto finish;
-        }
+        // check if the key is locked by looking up transaction table.
+        const auto& lt = db_table->trans_locks;
+        string_view key = evict_it->first.GetSlice(&tmp);
+        if (lt.Find(LockTag(key)).has_value())
+          continue;
+
+        if (record_keys)
+          keys_to_journal.emplace_back(key);
+
+        evicted_bytes += evict_it->first.MallocUsed() + evict_it->second.MallocUsed();
+        ++evicted_items;
+        PerformDeletion(Iterator(evict_it, StringOrView::FromView(key)), db_table.get());
+
+        // returns when whichever condition is met first
+        if ((evicted_items == max_eviction_per_hb) || (evicted_bytes >= increase_goal_bytes))
+          return finalize();
       }
     }
-  }  // FiberAtomicGuard
-
-finish:
-
-  // send the deletion to the replicas.
-  // fiber preemption could happen in this phase.
-  for (string_view key : keys_to_journal) {
-    if (auto journal = owner_->journal(); journal)
-      RecordExpiryBlocking(db_ind, key);
-
-    if (expired_keys_events_recording_)
-      db_table->expired_keys_events_.emplace_back(key);
   }
 
-  SendQueuedInvalidationMessages();
-  auto time_finish = absl::GetCurrentTimeNanos();
-  events_.evicted_keys += evicted_items;
-  DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
-  return pair<uint64_t, size_t>{evicted_items, evicted_bytes};
+  return finalize();
 }
 
 void DbSlice::CreateDb(DbIndex db_ind) {
@@ -1550,31 +1552,43 @@ void DbSlice::QueueInvalidationTrackingMessageAtomic(std::string_view key) {
   }
 }
 
+void DbSlice::SendQueuedInvalidationMessagesCb(const TrackingMap& track_map, unsigned idx) const {
+  for (auto& [key, client_list] : track_map) {
+    for (auto& client : client_list) {
+      if (client.IsExpired() || (client.Thread() != idx)) {
+        continue;
+      }
+      auto* conn = client.Get();
+      auto* cntx = static_cast<ConnectionContext*>(conn->cntx());
+      if (cntx && cntx->conn_state.tracking_info_.IsTrackingOn()) {
+        conn->SendInvalidationMessageAsync({key});
+      }
+    }
+  }
+}
+
 void DbSlice::SendQueuedInvalidationMessages() {
   // We run while loop because when we block below, we might have new items added to
   // pending_send_map_.
   while (!pending_send_map_.empty()) {
-    auto local_map = std::move(pending_send_map_);
-
     // Notify all the clients. this function is not efficient,
     // because it broadcasts to all threads unrelated to the subscribers for the key.
+    auto local_map = std::move(pending_send_map_);
     auto cb = [&](unsigned idx, util::ProactorBase*) {
-      for (auto& [key, client_list] : local_map) {
-        for (auto& client : client_list) {
-          if (client.IsExpired() || (client.Thread() != idx)) {
-            continue;
-          }
-          auto* conn = client.Get();
-          auto* cntx = static_cast<ConnectionContext*>(conn->cntx());
-          if (cntx && cntx->conn_state.tracking_info_.IsTrackingOn()) {
-            conn->SendInvalidationMessageAsync({key});
-          }
-        }
-      }
+      SendQueuedInvalidationMessagesCb(local_map, idx);
     };
 
     shard_set->pool()->AwaitBrief(std::move(cb));
   }
+}
+
+void DbSlice::SendQueuedInvalidationMessagesAsync() {
+  // DispatchBrief will copy local_map
+  auto cb = [lm = std::move(pending_send_map_), this](unsigned idx, util::ProactorBase*) {
+    SendQueuedInvalidationMessagesCb(lm, idx);
+  };
+
+  shard_set->pool()->DispatchBrief(std::move(cb));
 }
 
 void DbSlice::StartSampleTopK(DbIndex db_ind, uint32_t min_freq) {
@@ -1719,9 +1733,8 @@ void DbSlice::OnCbFinish() {
   // btw what do we do with inline?
   fetched_items_.clear();
 
-  if (!pending_send_map_.empty()) {
-    SendQueuedInvalidationMessages();
-  }
+  // Sends only if !pending_send_map_.empty()
+  SendQueuedInvalidationMessages();
 }
 
 void DbSlice::CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const {

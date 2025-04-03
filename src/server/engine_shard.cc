@@ -813,7 +813,7 @@ void EngineShard::RetireExpiredAndEvict() {
     if (eviction_goal) {
       uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
       auto [evicted_items, evicted_bytes] =
-          db_slice.FreeMemWithEvictionStep(i, starting_segment_id, eviction_goal);
+          db_slice.FreeMemWithEvictionStepAtomic(i, starting_segment_id, eviction_goal);
 
       DVLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
                << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
