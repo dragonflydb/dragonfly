@@ -2992,14 +2992,14 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
 
 @dfly_args({"proactor_threads": 4, "serialization_max_chunk_size": 1})
 async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyInstanceFactory):
-    master = df_factory.create()
-    replica = df_factory.create()
+    master = df_factory.create(dbfilename="")
+    replica = df_factory.create(dbfilename="")
     df_factory.start_all([master, replica])
     c_master = master.client()
     c_replica = replica.client()
 
     # 50% big values
-    seeder_config = dict(key_target=5_000, huge_value_target=2000)
+    seeder_config = dict(key_target=20_000, huge_value_target=10000)
     # Fill instance with test data
     seeder = SeederV2(**seeder_config)
     await seeder.run(c_master, target_deviation=0.01)
@@ -3010,9 +3010,10 @@ async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyIn
 
     # Start data stream
     stream_task = asyncio.create_task(seeder.run(c_master))
-    await asyncio.sleep(2)
+    await asyncio.sleep(1)
 
-    assert await c_replica.execute_command("SAVE DF tmp_dump") == "OK"
+    file_name = tmp_file_name()
+    assert await c_replica.execute_command(f"SAVE DF {file_name}") == "OK"
     await seeder.stop(c_master)
     await stream_task
 
@@ -3024,14 +3025,13 @@ async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyIn
     lines = replica.find_in_logs("Exit SnapshotSerializer")
     assert len(lines) == 3
     for line in lines:
-        index = line.rfind(":")
-        sub = line[index:].split("/")
-        # side saved count, (stats_.side_saved)
-        assert int(sub[1]) > 0
+        side_saved = extract_int_after_prefix("side_saved ", line)
+        assert side_saved > 0
 
     # Check that the produced rdb is loaded correctly
-    node = df_factory.create(dbfilename="tmp_dump")
+    node = df_factory.create(dbfilename=file_name)
     node.start()
     c_node = node.client()
     await wait_available_async(c_node)
     assert await c_node.execute_command("dbsize") > 0
+    await c_node.execute_command("FLUSHALL")
