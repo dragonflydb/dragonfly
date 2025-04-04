@@ -168,43 +168,6 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
   return OpStatus::OK;
 }
 
-struct HSetCleanupCtx {
-  StringMap** sm_ptr;
-  DbSlice& db_slice;
-  const OpArgs& op_args;
-  std::string_view key;
-
-  void DelKeyIfEmpty() const;
-};
-
-void HSetCleanupCtx::DelKeyIfEmpty() const {
-  if (const auto* sm = *sm_ptr; sm && !sm->Empty()) {
-    return;
-  }
-
-  if (auto it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH); it) {
-    it->post_updater.Run();
-    db_slice.Del(op_args.db_cntx, it->it);
-    if (op_args.shard->journal()) {
-      RecordJournal(op_args, "DEL"sv, {key});
-    }
-  }
-
-  *sm_ptr = nullptr;
-}
-
-bool ContainsWithCleanupBlocking(HSetCleanupCtx ctx, const std::string_view field) {
-  const bool found = (*ctx.sm_ptr)->Contains(field);
-  ctx.DelKeyIfEmpty();
-  return found;
-}
-
-StringMap::iterator FindWithCleanupBlocking(HSetCleanupCtx ctx, const std::string_view field) {
-  const auto find_it = (*ctx.sm_ptr)->Find(field);
-  ctx.DelKeyIfEmpty();
-  return find_it;
-}
-
 OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, IncrByParam* param) {
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
@@ -301,6 +264,62 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   return OpStatus::OK;
 }
 
+struct KeyCleanup {
+  using CleanupFuncT = std::function<void(std::string_view)>;
+  explicit KeyCleanup(CleanupFuncT func, const std::string_view key_view)
+      : f{std::move(func)}, key{key_view} {
+  }
+  ~KeyCleanup() {
+    if (armed) {
+      f(key);
+    }
+  }
+
+  void arm() {
+    armed = true;
+  }
+
+  CleanupFuncT f;
+  std::string key;
+  bool armed{false};
+};
+
+void DeleteKey(DbSlice& db_slice, const OpArgs& op_args, std::string_view key) {
+  if (auto del_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH); del_it) {
+    del_it->post_updater.Run();
+    db_slice.Del(op_args.db_cntx, del_it->it);
+    if (op_args.shard->journal()) {
+      RecordJournal(op_args, "DEL"sv, {key});
+    }
+  }
+}
+
+std::pair<OpResult<DbSlice::ConstIterator>, KeyCleanup> FindReadOnly(DbSlice& db_slice,
+                                                                     const OpArgs& op_args,
+                                                                     std::string_view key) {
+  return std::pair{db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH),
+                   KeyCleanup{[&](const auto& k) { DeleteKey(db_slice, op_args, k); }, key}};
+}
+
+// The find and contains functions perform the usual search on string maps, with the added argument
+// KeyCleanup. This object is armed if the string map becomes empty during search due to keys being
+// expired. An armed object on destruction removes the key which has just become empty.
+StringMap::iterator Find(StringMap* sm, const std::string_view field, KeyCleanup& defer_cleanup) {
+  auto it = sm->Find(field);
+  if (sm->Empty()) {
+    defer_cleanup.arm();
+  }
+  return it;
+}
+
+bool Contains(StringMap* sm, const std::string_view field, KeyCleanup& defer_cleanup) {
+  auto result = sm->Contains(field);
+  if (sm->Empty()) {
+    defer_cleanup.arm();
+  }
+  return result;
+}
+
 OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t* cursor,
                            const ScanOpts& scan_op) {
   constexpr size_t HASH_TABLE_ENTRIES_FACTOR = 2;  // return key/value
@@ -312,7 +331,7 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
   constexpr size_t INTERATION_FACTOR = 10;
 
   DbSlice& db_slice = op_args.GetDbSlice();
-  auto find_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+  auto [find_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
 
   if (!find_res) {
     DVLOG(1) << "ScanOp: find failed: " << find_res << ", baling out";
@@ -367,8 +386,9 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
       *cursor = sm->Scan(*cursor, scanCb);
     } while (*cursor && max_iterations-- && res.size() < count);
 
-    const HSetCleanupCtx ctx{.sm_ptr = &sm, .db_slice = db_slice, .op_args = op_args, .key = key};
-    ctx.DelKeyIfEmpty();
+    if (sm->Empty()) {
+      defer_cleanup.arm();
+    }
   }
 
   return res;
@@ -438,7 +458,7 @@ OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, Cm
   DCHECK(!fields.empty());
 
   auto& db_slice = op_args.GetDbSlice();
-  auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+  auto [it_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
 
   if (!it_res)
     return it_res.status();
@@ -486,16 +506,8 @@ OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, Cm
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
     for (size_t i = 0; i < fields.size(); ++i) {
-      if (auto it = FindWithCleanupBlocking(
-              {.sm_ptr = &sm, .db_slice = db_slice, .op_args = op_args, .key = key},
-              ToSV(fields[i]));
-          it != sm->end()) {
+      if (auto it = Find(sm, ToSV(fields[i]), defer_cleanup); it != sm->end()) {
         result[i].emplace(it->second, sdslen(it->second));
-      }
-
-      // If the set is empty, FindWithCleanup will have removed the key and set sm to nullptr
-      if (sm == nullptr) {
-        return OpStatus::KEY_NOTFOUND;
       }
     }
   }
@@ -518,7 +530,7 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
 
 OpResult<int> OpExist(const OpArgs& op_args, string_view key, string_view field) {
   auto& db_slice = op_args.GetDbSlice();
-  auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+  auto [it_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
 
   if (!it_res) {
     if (it_res.status() == OpStatus::KEY_NOTFOUND)
@@ -536,14 +548,13 @@ OpResult<int> OpExist(const OpArgs& op_args, string_view key, string_view field)
 
   DCHECK_EQ(kEncodingStrMap2, pv.Encoding());
   StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-  const bool contains = ContainsWithCleanupBlocking(
-      {.sm_ptr = &sm, .db_slice = db_slice, .op_args = op_args, .key = key}, field);
-  return contains ? 1 : 0;
+  return Contains(sm, field, defer_cleanup) ? 1 : 0;
 };
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key, string_view field) {
   auto& db_slice = op_args.GetDbSlice();
-  auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+  auto [it_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
+
   if (!it_res)
     return it_res.status();
 
@@ -561,9 +572,7 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key, string_view field
 
   DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
   StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-  if (const auto it = FindWithCleanupBlocking(
-          {.sm_ptr = &sm, .db_slice = db_slice, .op_args = op_args, .key = key}, field);
-      it != sm->end()) {
+  if (const auto it = Find(sm, field, defer_cleanup); it != sm->end()) {
     return string(it->second, sdslen(it->second));
   }
 
@@ -622,10 +631,7 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
   // and the enconding is guaranteed to be a DenseSet since we only support expiring
   // value with that enconding.
   if (res.empty()) {
-    // post_updater will run immediately
-    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;
-
-    db_slice.Del(op_args.db_cntx, it);
+    DeleteKey(db_slice, op_args, key);
   }
 
   return res;
@@ -633,7 +639,7 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
 
 OpResult<size_t> OpStrLen(const OpArgs& op_args, string_view key, string_view field) {
   auto& db_slice = op_args.GetDbSlice();
-  auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+  auto [it_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
 
   if (!it_res) {
     if (it_res.status() == OpStatus::KEY_NOTFOUND)
@@ -653,8 +659,7 @@ OpResult<size_t> OpStrLen(const OpArgs& op_args, string_view key, string_view fi
   DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
   StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
-  auto it = FindWithCleanupBlocking(
-      {.sm_ptr = &sm, .db_slice = db_slice, .op_args = op_args, .key = key}, field);
+  auto it = Find(sm, field, defer_cleanup);
   return it != sm->end() ? sdslen(it->second) : 0;
 }
 
