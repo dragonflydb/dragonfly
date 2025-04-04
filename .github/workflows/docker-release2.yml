@@ -175,7 +175,10 @@ jobs:
                   should_update=false
                 fi
 
-                echo "Version comparison: current=${CURRENT_PARTS[0]}.${CURRENT_PARTS[1]}.${CURRENT_PARTS[2]} vs latest=${LATEST_PARTS[0]}.${LATEST_PARTS[1]}.${LATEST_PARTS[2]}"
+                # Log debug info to stderr instead of stdout
+                echo "Version comparison: current=${CURRENT_PARTS[0]}.${CURRENT_PARTS[1]}.${CURRENT_PARTS[2]} vs latest=${LATEST_PARTS[0]}.${LATEST_PARTS[1]}.${LATEST_PARTS[2]}" >&2
+
+                # Return only the result
                 echo $should_update
               }
 

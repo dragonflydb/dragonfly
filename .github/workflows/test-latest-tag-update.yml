@@ -58,7 +58,10 @@ jobs:
                 should_update=false
               fi
 
-              echo "Version comparison: current=${CURRENT_PARTS[0]}.${CURRENT_PARTS[1]}.${CURRENT_PARTS[2]} vs latest=${LATEST_PARTS[0]}.${LATEST_PARTS[1]}.${LATEST_PARTS[2]}"
+              # Log debug info to stderr instead of stdout
+              echo "Version comparison: current=${CURRENT_PARTS[0]}.${CURRENT_PARTS[1]}.${CURRENT_PARTS[2]} vs latest=${LATEST_PARTS[0]}.${LATEST_PARTS[1]}.${LATEST_PARTS[2]}" >&2
+
+              # Return only the result
               echo $should_update
             }
 
@@ -88,8 +91,8 @@ jobs:
             echo "Should update latest tag: $should_update_latest"
 
             # Simulate the actual tag update logic
-            if [[ "$should_update_latest" == true ]]; then
-              echo "✅ Version ${CURRENT_VERSION} is newer than or equal to current latest, would update latest tag"
+            if [[ "$should_update_latest" == "true" ]]; then
+              echo "✅ Version ${CURRENT_VERSION} is newer than or equal to current latest (${LATEST_VERSION}), would update latest tag"
               echo "Command that would run: docker manifest create ${registry}:latest --amend ${sha_amd} --amend ${sha_arm}"
               echo "Command that would run: docker manifest push ${registry}:latest"
             else
