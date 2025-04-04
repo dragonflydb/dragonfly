@@ -1,0 +1,115 @@
+name: Test Semantic Version Comparison
+
+on:
+  push:
+    branches: [ "**" ]
+    paths:
+      - '.github/workflows/test-version-comparison.yml'
+  workflow_dispatch:
+
+jobs:
+  test_semver_comparison:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Test semver_cmp function
+        run: |
+          # Create outer function to replicate the structure in docker-release2.yml
+          create_and_push_manifests() {
+            # Function for semantic version comparison
+            # Returns true if current_version >= latest_version
+            semver_cmp() {
+              local current_version=$1
+              local latest_version=$2
+              local should_update=true
+
+              # Extract major.minor.patch components
+              IFS='.' read -ra CURRENT_PARTS <<< "$current_version"
+              IFS='.' read -ra LATEST_PARTS <<< "$latest_version"
+
+              # Pad arrays to same length for comparison
+              while [ ${#CURRENT_PARTS[@]} -lt 3 ]; do CURRENT_PARTS+=(0); done
+              while [ ${#LATEST_PARTS[@]} -lt 3 ]; do LATEST_PARTS+=(0); done
+
+              # Compare major.minor.patch numerically
+              if (( 10#${CURRENT_PARTS[0]} < 10#${LATEST_PARTS[0]} )); then
+                should_update=false
+              elif (( 10#${CURRENT_PARTS[0]} == 10#${LATEST_PARTS[0]} )) && (( 10#${CURRENT_PARTS[1]} < 10#${LATEST_PARTS[1]} )); then
+                should_update=false
+              elif (( 10#${CURRENT_PARTS[0]} == 10#${LATEST_PARTS[0]} )) && (( 10#${CURRENT_PARTS[1]} == 10#${LATEST_PARTS[1]} )) && (( 10#${CURRENT_PARTS[2]} < 10#${LATEST_PARTS[2]} )); then
+                should_update=false
+              fi
+
+              echo "Version comparison: current=${CURRENT_PARTS[0]}.${CURRENT_PARTS[1]}.${CURRENT_PARTS[2]} vs latest=${LATEST_PARTS[0]}.${LATEST_PARTS[1]}.${LATEST_PARTS[2]}"
+              echo $should_update
+            }
+
+            # Use the nested semver_cmp function
+            run_test() {
+              local current_version=$1
+              local latest_version=$2
+              local expected_result=$3
+
+              result=$(semver_cmp "$current_version" "$latest_version")
+
+              echo "Test: $current_version vs $latest_version, Expected: $expected_result, Got: $result"
+
+              if [ "$result" == "$expected_result" ]; then
+                echo "✅ Test PASSED"
+              else
+                echo "❌ Test FAILED"
+                exit 1
+              fi
+            }
+
+            echo "=== Running tests for semver_cmp function ==="
+
+            # Test cases for semver_cmp
+            echo "--- Test case: newer major version ---"
+            run_test "2.0.0" "1.0.0" "true"
+
+            echo "--- Test case: older major version ---"
+            run_test "1.0.0" "2.0.0" "false"
+
+            echo "--- Test case: newer minor version ---"
+            run_test "1.2.0" "1.1.0" "true"
+
+            echo "--- Test case: older minor version ---"
+            run_test "1.1.0" "1.2.0" "false"
+
+            echo "--- Test case: newer patch version ---"
+            run_test "1.1.2" "1.1.1" "true"
+
+            echo "--- Test case: older patch version ---"
+            run_test "1.1.1" "1.1.2" "false"
+
+            echo "--- Test case: equal versions ---"
+            run_test "1.1.1" "1.1.1" "true"
+
+            echo "--- Test case: missing patch in current ---"
+            run_test "1.1" "1.1.0" "true"
+
+            echo "--- Test case: missing patch in latest ---"
+            run_test "1.1.0" "1.1" "true"
+
+            echo "--- Test case: missing minor in current ---"
+            run_test "1" "1.0.0" "true"
+
+            echo "--- Test case: missing minor in latest ---"
+            run_test "1.0.0" "1" "true"
+
+            echo "--- Test case: with v prefix ---"
+            # Remove 'v' prefix if present for semantic comparison
+            current_with_v="v1.2.3"
+            latest_with_v="v1.2.0"
+            current_version=${current_with_v#v}
+            latest_version=${latest_with_v#v}
+            run_test "$current_version" "$latest_version" "true"
+
+            echo "=== All tests completed successfully! ==="
+          }
+
+          # Call the outer function to run tests
+          create_and_push_manifests

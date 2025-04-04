@@ -151,6 +151,34 @@ jobs:
               local tag_name=$5
               local is_prerelease=$6
 
+              # Function for semantic version comparison
+              # Returns true if current_version >= latest_version
+              semver_cmp() {
+                local current_version=$1
+                local latest_version=$2
+                local should_update=true
+
+                # Extract major.minor.patch components
+                IFS='.' read -ra CURRENT_PARTS <<< "$current_version"
+                IFS='.' read -ra LATEST_PARTS <<< "$latest_version"
+
+                # Pad arrays to same length for comparison
+                while [ ${#CURRENT_PARTS[@]} -lt 3 ]; do CURRENT_PARTS+=(0); done
+                while [ ${#LATEST_PARTS[@]} -lt 3 ]; do LATEST_PARTS+=(0); done
+
+                # Compare major.minor.patch numerically
+                if (( 10#${CURRENT_PARTS[0]} < 10#${LATEST_PARTS[0]} )); then
+                  should_update=false
+                elif (( 10#${CURRENT_PARTS[0]} == 10#${LATEST_PARTS[0]} )) && (( 10#${CURRENT_PARTS[1]} < 10#${LATEST_PARTS[1]} )); then
+                  should_update=false
+                elif (( 10#${CURRENT_PARTS[0]} == 10#${LATEST_PARTS[0]} )) && (( 10#${CURRENT_PARTS[1]} == 10#${LATEST_PARTS[1]} )) && (( 10#${CURRENT_PARTS[2]} < 10#${LATEST_PARTS[2]} )); then
+                  should_update=false
+                fi
+
+                echo "Version comparison: current=${CURRENT_PARTS[0]}.${CURRENT_PARTS[1]}.${CURRENT_PARTS[2]} vs latest=${LATEST_PARTS[0]}.${LATEST_PARTS[1]}.${LATEST_PARTS[2]}"
+                echo $should_update
+              }
+
               if [[ "$is_prerelease" == 'true' ]]; then
                 # Create and push the manifest like dragonfly:alpha-ubuntu
                 tag="${registry}:alpha-${flavor}"
@@ -167,8 +195,30 @@ jobs:
                 latest_version=""
                 if docker pull ${registry}:latest &>/dev/null; then
                   echo "Found latest tag, checking its version..."
-                  # Run the container to get its version
-                  latest_full_version=$(docker run --rm --entrypoint /bin/sh ${registry}:latest -c "dragonfly --version | cut -d' ' -f2 | head -n 1")
+
+                  # First try to get version from image labels using docker inspect
+                  echo "Method 1: Trying to get version from image labels..."
+                  label_version=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' ${registry}:latest 2>/dev/null || echo "")
+
+                  if [[ -n "$label_version" ]]; then
+                    echo "Found version from image labels: $label_version"
+
+                    # Extract version from format like "ubuntu-1.28.1-arm64"
+                    if [[ $label_version == ubuntu-*-* ]]; then
+                      # Extract the middle part (version) from ubuntu-VERSION-arch
+                      latest_full_version=$(echo "$label_version" | cut -d'-' -f2)
+                    else
+                      # Use the label as is
+                      latest_full_version=$label_version
+                    fi
+
+                    echo "Extracted version: $latest_full_version"
+                  else
+                    # Fallback to running the container if label inspect failed
+                    echo "Method 2: Falling back to container execution..."
+                    latest_full_version=$(docker run --rm --entrypoint /bin/sh ${registry}:latest -c "dragonfly --version | cut -d' ' -f2 | head -n 1")
+                  fi
+
                   echo "Latest full version: ${latest_full_version}"
 
                   # Extract only the semantic version part (before any dash)
@@ -183,25 +233,8 @@ jobs:
                 # Compare versions only if we have a latest version
                 should_update_latest=true
                 if [[ -n "$latest_version" ]]; then
-                  # Simple semantic version comparison
-                  # Extract major.minor.patch components
-                  IFS='.' read -ra CURRENT_PARTS <<< "$current_version"
-                  IFS='.' read -ra LATEST_PARTS <<< "$latest_version"
-
-                  # Pad arrays to same length for comparison
-                  while [ ${#CURRENT_PARTS[@]} -lt 3 ]; do CURRENT_PARTS+=(0); done
-                  while [ ${#LATEST_PARTS[@]} -lt 3 ]; do LATEST_PARTS+=(0); done
-
-                  # Compare major.minor.patch numerically
-                  if (( 10#${CURRENT_PARTS[0]} < 10#${LATEST_PARTS[0]} )); then
-                    should_update_latest=false
-                  elif (( 10#${CURRENT_PARTS[0]} == 10#${LATEST_PARTS[0]} )) && (( 10#${CURRENT_PARTS[1]} < 10#${LATEST_PARTS[1]} )); then
-                    should_update_latest=false
-                  elif (( 10#${CURRENT_PARTS[0]} == 10#${LATEST_PARTS[0]} )) && (( 10#${CURRENT_PARTS[1]} == 10#${LATEST_PARTS[1]} )) && (( 10#${CURRENT_PARTS[2]} < 10#${LATEST_PARTS[2]} )); then
-                    should_update_latest=false
-                  fi
-
-                  echo "Version comparison: current=${CURRENT_PARTS[0]}.${CURRENT_PARTS[1]}.${CURRENT_PARTS[2]} vs latest=${LATEST_PARTS[0]}.${LATEST_PARTS[1]}.${LATEST_PARTS[2]}"
+                  # Call our semver comparison function
+                  should_update_latest=$(semver_cmp "$current_version" "$latest_version")
                 fi
 
                 if [[ "$should_update_latest" == true ]]; then
