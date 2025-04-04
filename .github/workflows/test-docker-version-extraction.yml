@@ -1,0 +1,316 @@
+name: Test Docker Version Extraction
+
+on:
+  push:
+    branches: [ "**" ]
+    paths:
+      - '.github/workflows/test-docker-version-extraction.yml'
+  workflow_dispatch:
+
+jobs:
+  test_version_extraction:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Test Docker Version Extraction
+        run: |
+          # Function to test version extraction from different formats
+          test_version_extraction() {
+            # Test format: ubuntu-1.28.1-arm64
+            label_version="ubuntu-1.28.1-arm64"
+            echo "Testing extraction from: $label_version"
+
+            if [[ $label_version == ubuntu-*-* ]]; then
+              # Extract the middle part (version) from ubuntu-VERSION-arch
+              latest_full_version=$(echo "$label_version" | cut -d'-' -f2)
+              echo "Extracted version: $latest_full_version"
+
+              if [[ "$latest_full_version" == "1.28.1" ]]; then
+                echo "✅ Test PASSED"
+              else
+                echo "❌ Test FAILED - expected 1.28.1, got $latest_full_version"
+                exit 1
+              fi
+            else
+              echo "❌ Test FAILED - pattern not recognized"
+              exit 1
+            fi
+
+            # Test format: 1.29.0
+            label_version="1.29.0"
+            echo "Testing extraction from: $label_version"
+
+            if [[ $label_version == ubuntu-*-* ]]; then
+              # Extract the middle part (version) from ubuntu-VERSION-arch
+              latest_full_version=$(echo "$label_version" | cut -d'-' -f2)
+            else
+              # Use the label as is
+              latest_full_version=$label_version
+            fi
+
+            echo "Extracted version: $latest_full_version"
+            if [[ "$latest_full_version" == "1.29.0" ]]; then
+              echo "✅ Test PASSED"
+            else
+              echo "❌ Test FAILED - expected 1.29.0, got $latest_full_version"
+              exit 1
+            fi
+
+            # Test format: v1.30.0
+            label_version="v1.30.0"
+            echo "Testing extraction from: $label_version"
+
+            if [[ $label_version == ubuntu-*-* ]]; then
+              # Extract the middle part (version) from ubuntu-VERSION-arch
+              latest_full_version=$(echo "$label_version" | cut -d'-' -f2)
+            else
+              # Use the label as is
+              latest_full_version=$label_version
+            fi
+
+            # Remove 'v' prefix if present
+            latest_version=${latest_full_version#v}
+            echo "Extracted version (after v removal): $latest_version"
+
+            if [[ "$latest_version" == "1.30.0" ]]; then
+              echo "✅ Test PASSED"
+            else
+              echo "❌ Test FAILED - expected 1.30.0, got $latest_version"
+              exit 1
+            fi
+
+            # Test format: ubuntu-v1.31.0-amd64
+            label_version="ubuntu-v1.31.0-amd64"
+            echo "Testing extraction from: $label_version"
+
+            if [[ $label_version == ubuntu-*-* ]]; then
+              # Extract the middle part (version) from ubuntu-VERSION-arch
+              latest_full_version=$(echo "$label_version" | cut -d'-' -f2)
+              echo "Middle part extracted: $latest_full_version"
+
+              # Remove 'v' prefix if present
+              latest_version=${latest_full_version#v}
+              echo "After v removal: $latest_version"
+
+              if [[ "$latest_version" == "1.31.0" ]]; then
+                echo "✅ Test PASSED"
+              else
+                echo "❌ Test FAILED - expected 1.31.0, got $latest_version"
+                exit 1
+              fi
+            else
+              echo "❌ Test FAILED - pattern not recognized"
+              exit 1
+            fi
+
+            echo "All version extraction tests PASSED!"
+          }
+
+          # Test for the real docker image inspect command simulation
+          test_docker_inspect_simulation() {
+            echo "===== Testing Docker Inspect Version Extraction ====="
+
+            # Simulating the output of docker image inspect for different formats
+
+            # Simulate a successful inspect command with ubuntu-VERSION-arch format
+            echo "Test case 1: ubuntu-VERSION-arch format"
+            label_version="ubuntu-1.28.1-arm64"
+
+            # Extracting as in the real workflow
+            if [[ -n "$label_version" ]]; then
+              echo "Found version from image labels: $label_version"
+
+              if [[ $label_version == ubuntu-*-* ]]; then
+                # Extract the middle part (version) from ubuntu-VERSION-arch
+                latest_full_version=$(echo "$label_version" | cut -d'-' -f2)
+              else
+                # Use the label as is
+                latest_full_version=$label_version
+              fi
+
+              echo "Extracted version: $latest_full_version"
+
+              # Extract only the semantic version part (before any dash)
+              latest_version=$(echo "${latest_full_version}" | cut -d'-' -f1)
+              # Remove 'v' prefix if present
+              latest_version=${latest_version#v}
+              echo "Final version for comparison: $latest_version"
+
+              if [[ "$latest_version" == "1.28.1" ]]; then
+                echo "✅ Test PASSED"
+              else
+                echo "❌ Test FAILED - expected 1.28.1, got $latest_version"
+                exit 1
+              fi
+            else
+              echo "❌ Test FAILED - empty label_version"
+              exit 1
+            fi
+
+            # Simulate a more complex version with additional components
+            echo "Test case 2: Version with additional dash components"
+            label_version="ubuntu-1.28.1-beta.2-arm64"
+
+            # Extracting as in the real workflow
+            if [[ -n "$label_version" ]]; then
+              echo "Found version from image labels: $label_version"
+
+              if [[ $label_version == ubuntu-*-* ]]; then
+                # Extract the middle parts (everything between first and last dash)
+                latest_full_version=$(echo "$label_version" | sed 's/^ubuntu-\(.*\)-arm64$/\1/')
+              else
+                # Use the label as is
+                latest_full_version=$label_version
+              fi
+
+              echo "Extracted full version: $latest_full_version"
+
+              # Extract only the semantic version part (before any dash)
+              latest_version=$(echo "${latest_full_version}" | cut -d'-' -f1)
+              # Remove 'v' prefix if present
+              latest_version=${latest_version#v}
+              echo "Final version for comparison: $latest_version"
+
+              if [[ "$latest_version" == "1.28.1" ]]; then
+                echo "✅ Test PASSED"
+              else
+                echo "❌ Test FAILED - expected 1.28.1, got $latest_version"
+                exit 1
+              fi
+            else
+              echo "❌ Test FAILED - empty label_version"
+              exit 1
+            fi
+
+            # Simulate fallback case where inspect returns empty
+            echo "Test case 3: Fallback to container execution"
+            label_version=""
+
+            # In the real workflow, this would run the container to get version
+            # Here we simulate the output from dragonfly --version
+            if [[ -n "$label_version" ]]; then
+              echo "Found version from image labels"
+            else
+              echo "Method 1 failed, falling back to container execution..."
+              latest_full_version="v1.29.2"
+              echo "Latest full version from container: ${latest_full_version}"
+
+              # Extract only the semantic version part (before any dash)
+              latest_version=$(echo "${latest_full_version}" | cut -d'-' -f1)
+              # Remove 'v' prefix if present
+              latest_version=${latest_version#v}
+              echo "Final version for comparison: $latest_version"
+
+              if [[ "$latest_version" == "1.29.2" ]]; then
+                echo "✅ Test PASSED"
+              else
+                echo "❌ Test FAILED - expected 1.29.2, got $latest_version"
+                exit 1
+              fi
+            fi
+
+            echo "All docker inspect simulation tests PASSED!"
+          }
+
+          # Test for real docker pull and inspect commands
+          test_real_docker_commands() {
+            echo "===== Testing Real Docker Pull and Inspect Commands ====="
+
+            # Pull the latest dragonfly image
+            echo "Pulling latest Dragonfly image..."
+            if docker pull ghcr.io/dragonflydb/dragonfly:latest; then
+              echo "Successfully pulled ghcr.io/dragonflydb/dragonfly:latest"
+            else
+              echo "⚠️ Failed to pull image, but continuing with test"
+            fi
+
+            # Get version from image labels using docker inspect
+            echo "Getting version from image labels using docker inspect..."
+            label_version=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' ghcr.io/dragonflydb/dragonfly:latest 2>/dev/null || echo "")
+
+            if [[ -n "$label_version" ]]; then
+              echo "Found version from image labels: $label_version"
+
+              # Process the version string according to its format
+              if [[ $label_version == ubuntu-*-* ]]; then
+                # Extract the middle part (version) from ubuntu-VERSION-arch
+                latest_full_version=$(echo "$label_version" | cut -d'-' -f2)
+              else
+                # Use the label as is
+                latest_full_version=$label_version
+              fi
+
+              echo "Extracted full version: $latest_full_version"
+
+              # Extract only the semantic version part (before any dash)
+              latest_version=$(echo "${latest_full_version}" | cut -d'-' -f1)
+              # Remove 'v' prefix if present
+              latest_version=${latest_version#v}
+              echo "Final version for comparison: $latest_version"
+
+              # Validate that we extracted a valid semantic version
+              if [[ "$latest_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "✅ Successfully extracted semantic version: $latest_version"
+              else
+                echo "⚠️ Extracted version doesn't match expected semantic format: $latest_version"
+              fi
+
+              # Try to get version by running the container
+              echo "Testing container execution method as well..."
+              container_version=$(docker run --rm --entrypoint /bin/sh ghcr.io/dragonflydb/dragonfly:latest -c "dragonfly --version | cut -d' ' -f2 | head -n 1" 2>/dev/null || echo "")
+
+              if [[ -n "$container_version" ]]; then
+                echo "Version from container execution: $container_version"
+
+                # Remove 'v' prefix if present
+                container_version=${container_version#v}
+
+                # Compare with the version from labels
+                if [[ "$container_version" == "$latest_version" ]]; then
+                  echo "✅ Versions match between label and container execution"
+                else
+                  echo "⚠️ Version mismatch: label=$latest_version, container=$container_version"
+                fi
+              else
+                echo "⚠️ Could not get version from container execution"
+              fi
+            else
+              echo "⚠️ Could not extract version from image labels"
+
+              # Fallback to running the container
+              echo "Falling back to container execution method..."
+              latest_full_version=$(docker run --rm --entrypoint /bin/sh ghcr.io/dragonflydb/dragonfly:latest -c "dragonfly --version | cut -d' ' -f2 | head -n 1" 2>/dev/null || echo "")
+
+              if [[ -n "$latest_full_version" ]]; then
+                echo "Latest full version from container: ${latest_full_version}"
+
+                # Remove 'v' prefix if present
+                latest_version=${latest_full_version#v}
+                echo "Final version for comparison: $latest_version"
+
+                # Validate that we extracted a valid semantic version
+                if [[ "$latest_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                  echo "✅ Successfully extracted semantic version: $latest_version"
+                else
+                  echo "⚠️ Extracted version doesn't match expected semantic format: $latest_version"
+                fi
+              else
+                echo "❌ Could not determine version from image or container"
+                exit 1
+              fi
+            fi
+
+            echo "Real docker command tests completed!"
+          }
+
+          # Run the tests
+          echo "===== Testing Basic Version Extraction Logic ====="
+          test_version_extraction
+
+          echo "===== Testing Docker Inspect Workflow ====="
+          test_docker_inspect_simulation
+
+          echo "===== Testing Real Docker Commands ====="
+          test_real_docker_commands
