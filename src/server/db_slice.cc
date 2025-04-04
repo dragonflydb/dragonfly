@@ -356,7 +356,7 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
 class DbSlice::PrimeBumpPolicy {
  public:
   bool CanBump(const CompactObj& obj) const {
-    return obj.IsSticky() ? false : true;
+    return !obj.IsSticky();
   }
 };
 
@@ -1691,9 +1691,11 @@ void DbSlice::PerformDeletion(Iterator del_it, DbTable* table) {
   PerformDeletionAtomic(del_it, exp_it, table);
 }
 
-void DbSlice::OnCbFinish() {
+void DbSlice::OnCbFinishBlocking() {
   if (IsCacheMode()) {
-    for (const auto& [key_hash, db_index, key] : fetched_items_) {
+    // move fetched items to local variable
+    auto moved_fetched_items_ = std::move(fetched_items_);
+    for (const auto& [key_hash, db_index, key] : moved_fetched_items_) {
       auto& db = *db_arr_[db_index];
 
       auto predicate = [&key](const PrimeKey& key_) { return key_ == key; };
