@@ -545,6 +545,16 @@ TEST_F(SearchFamilyTest, TagNumbers) {
   EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|hello|2}"}), AreDocIds("d:1", "d:2"));
 }
 
+TEST_F(SearchFamilyTest, TagEscapeCharacters) {
+  EXPECT_EQ(Run({"ft.create", "item_idx", "ON", "JSON", "PREFIX", "1", "p", "SCHEMA", "$.name",
+                 "AS", "name", "TAG"}),
+            "OK");
+  EXPECT_EQ(Run({"json.set", "p:1", "$", "{\"name\":\"escape-error\"}"}), "OK");
+
+  auto resp = Run({"ft.search", "item_idx", "@name:{escape\\-err*}"});
+  EXPECT_THAT(resp, AreDocIds("p:1"));
+}
+
 TEST_F(SearchFamilyTest, Numbers) {
   for (unsigned i = 0; i <= 10; i++) {
     for (unsigned j = 0; j <= 10; j++) {

@@ -191,6 +191,36 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_EQ(TOK_DOUBLE, string, "33.3");
 }
 
+TEST_F(SearchParserTest, EscapedTagPrefixes) {
+  SetInput("@name:{escape\\-err*}");
+  NEXT_EQ(TOK_FIELD, string, "@name");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_PREFIX, string, "escape-err*");
+  NEXT_TOK(TOK_RCURLBR);
+
+  SetInput("@name:{escape\\+pre*}");
+  NEXT_EQ(TOK_FIELD, string, "@name");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_PREFIX, string, "escape+pre*");
+  NEXT_TOK(TOK_RCURLBR);
+
+  SetInput("@name:{escape\\.pre*}");
+  NEXT_EQ(TOK_FIELD, string, "@name");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_PREFIX, string, "escape.pre*");
+  NEXT_TOK(TOK_RCURLBR);
+
+  SetInput("@name:{complex\\-escape\\+with\\.many\\*chars*}");
+  NEXT_EQ(TOK_FIELD, string, "@name");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_PREFIX, string, "complex-escape+with.many*chars*");
+  NEXT_TOK(TOK_RCURLBR);
+}
+
 TEST_F(SearchParserTest, Parse) {
   EXPECT_EQ(0, Parse(" foo bar (baz) "));
   EXPECT_EQ(0, Parse(" -(foo) @foo:bar @ss:[1 2]"));
@@ -199,6 +229,8 @@ TEST_F(SearchParserTest, Parse) {
   EXPECT_EQ(0, Parse("@foo:{1|2}"));
   EXPECT_EQ(0, Parse("@foo:{1|2.0|4|3.0}"));
   EXPECT_EQ(0, Parse("@foo:{1|hello|3.0|world|4}"));
+
+  EXPECT_EQ(0, Parse("@name:{escape\\-err*}"));
 
   EXPECT_EQ(1, Parse(" -(foo "));
   EXPECT_EQ(1, Parse(" foo:bar "));
