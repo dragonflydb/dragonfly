@@ -357,7 +357,7 @@ class DbSlice {
     return shard_id_;
   }
 
-  void OnCbFinish();
+  void OnCbFinishBlocking();
 
   bool Acquire(IntentLock::Mode m, const KeyLockArgs& lock_args);
   void Release(IntentLock::Mode m, const KeyLockArgs& lock_args);

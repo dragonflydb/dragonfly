@@ -695,7 +695,7 @@ void Transaction::RunCallback(EngineShard* shard) {
   }
 
   auto& db_slice = GetDbSlice(shard->shard_id());
-  db_slice.OnCbFinish();
+  db_slice.OnCbFinishBlocking();
 
   // Handle result flags to alter behaviour.
   if (result.flags & RunnableResult::AVOID_CONCLUDING) {
@@ -1364,7 +1364,7 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   auto& db_slice = GetDbSlice(shard->shard_id());
 
   auto result = cb(this, shard);
-  db_slice.OnCbFinish();
+  db_slice.OnCbFinishBlocking();
 
   LogAutoJournalOnShard(shard, result);
   MaybeInvokeTrackingCb();
