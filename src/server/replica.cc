@@ -1106,7 +1106,16 @@ auto Replica::GetSummary() const -> Summary {
     res.master_link_established = (state_mask_.load() & R_TCP_CONNECTED);
     res.full_sync_in_progress = (state_mask_.load() & R_SYNCING);
     res.full_sync_done = (state_mask_.load() & R_SYNC_OK);
-    res.master_last_io_sec = (ProactorBase::GetMonotonicTimeNs() - last_io_time) / 1000000000UL;
+
+    uint64_t current_time = ProactorBase::GetMonotonicTimeNs();
+    // Handle the case when last_io_time is greater than current time
+    // to prevent overflow when calculating master_last_io_sec.
+    if (last_io_time > current_time) {
+      res.master_last_io_sec = 0;
+    } else {
+      res.master_last_io_sec = (current_time - last_io_time) / 1000000000UL;
+    }
+
     res.master_id = master_context_.master_repl_id;
     res.reconnect_count = reconnect_count_;
     res.repl_offset_sum = 0;
