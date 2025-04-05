@@ -8,7 +8,7 @@
 #include "server/transaction.h"
 
 namespace dfly {
-class DbSlice;
+
 class ServerFamily;
 
 namespace journal {
