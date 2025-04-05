@@ -521,4 +521,24 @@ TEST_F(HSetFamilyTest, ScanAfterExpireSet) {
   EXPECT_THAT(vec, Contains("avalue").Times(1));
 }
 
+TEST_F(HSetFamilyTest, KeyRemovedWhenEmpty) {
+  auto test_cmd = [&](const std::function<void()>& f, const std::string_view tag) {
+    EXPECT_THAT(Run({"HSET", "a", "afield", "avalue"}), IntArg(1));
+    EXPECT_THAT(Run({"HEXPIRE", "a", "1", "FIELDS", "1", "afield"}), IntArg(1));
+    AdvanceTime(1000);
+
+    EXPECT_THAT(Run({"EXISTS", "a"}), IntArg(1));
+    f();
+    EXPECT_THAT(Run({"EXISTS", "a"}), IntArg(0)) << "failed when testing " << tag;
+  };
+
+  test_cmd([&] { EXPECT_THAT(Run({"HGET", "a", "afield"}), ArgType(RespExpr::NIL)); }, "HGET");
+  test_cmd([&] { EXPECT_THAT(Run({"HGETALL", "a"}), RespArray(ElementsAre())); }, "HGETALL");
+  test_cmd([&] { EXPECT_THAT(Run({"HDEL", "a", "afield"}), IntArg(0)); }, "HDEL");
+  test_cmd([&] { EXPECT_THAT(Run({"HSCAN", "a", "0"}).GetVec()[0], "0"); }, "HSCAN");
+  test_cmd([&] { EXPECT_THAT(Run({"HMGET", "a", "afield"}), ArgType(RespExpr::NIL)); }, "HMGET");
+  test_cmd([&] { EXPECT_THAT(Run({"HEXISTS", "a", "afield"}), IntArg(0)); }, "HEXISTS");
+  test_cmd([&] { EXPECT_THAT(Run({"HSTRLEN", "a", "afield"}), IntArg(0)); }, "HSTRLEN");
+}
+
 }  // namespace dfly
