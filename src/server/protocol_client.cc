@@ -316,6 +316,7 @@ error_code ProtocolClient::ReadLine(base::IoBuf* io_buf, string_view* line) {
     if (!input_str.empty())
       break;
     RETURN_ON_ERR(Recv(sock_.get(), io_buf));
+    TouchIoTime();
     input_str = ToSV(io_buf->InputBuffer());
   };
 
@@ -333,6 +334,7 @@ error_code ProtocolClient::ReadLine(base::IoBuf* io_buf, string_view* line) {
     }
 
     RETURN_ON_ERR(Recv(sock_.get(), io_buf));
+    TouchIoTime();
     input_str = ToSV(io_buf->InputBuffer());
   }
 
