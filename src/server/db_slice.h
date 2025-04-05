@@ -449,9 +449,10 @@ class DbSlice {
 
   // Evicts items with dynamically allocated data from the primary table.
   // Does not shrink tables.
-  // Returnes number of (elements,bytes) freed due to evictions.
-  std::pair<uint64_t, size_t> FreeMemWithEvictionStep(DbIndex db_indx, size_t starting_segment_id,
-                                                      size_t increase_goal_bytes);
+  // Returns number of (elements,bytes) freed due to evictions.
+  std::pair<uint64_t, size_t> FreeMemWithEvictionStepAtomic(DbIndex db_indx,
+                                                            size_t starting_segment_id,
+                                                            size_t increase_goal_bytes);
 
   int32_t GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const;
 
@@ -561,6 +562,7 @@ class DbSlice {
   // Queues invalidation message to the clients that are tracking the change to a key.
   void QueueInvalidationTrackingMessageAtomic(std::string_view key);
   void SendQueuedInvalidationMessages();
+  void SendQueuedInvalidationMessagesAsync();
 
   void CreateDb(DbIndex index);
 
@@ -664,10 +666,13 @@ class DbSlice {
 
   using AllocatorType = PMR_NS::polymorphic_allocator<std::pair<std::string, ConnectionHashSet>>;
 
-  absl::flat_hash_map<std::string, ConnectionHashSet,
-                      absl::container_internal::hash_default_hash<std::string>,
-                      absl::container_internal::hash_default_eq<std::string>, AllocatorType>
-      client_tracking_map_, pending_send_map_;
+  using TrackingMap =
+      absl::flat_hash_map<std::string, ConnectionHashSet,
+                          absl::container_internal::hash_default_hash<std::string>,
+                          absl::container_internal::hash_default_eq<std::string>, AllocatorType>;
+  TrackingMap client_tracking_map_, pending_send_map_;
+
+  void SendQueuedInvalidationMessagesCb(const TrackingMap& track_map, unsigned idx) const;
 
   class PrimeBumpPolicy;
 };
