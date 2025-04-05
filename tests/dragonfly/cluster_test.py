@@ -2955,6 +2955,7 @@ async def test_migration_rebalance_node(df_factory: DflyInstanceFactory, df_seed
     logging.debug("stop seeding")
     seeder.stop()
     await seed
+    await asyncio.sleep(0.5)  # wait untill all keys with ttl are expired
     capture = await seeder.capture_fake_redis()
     assert await seeder.compare(capture, nodes[1].instance.port)
 
