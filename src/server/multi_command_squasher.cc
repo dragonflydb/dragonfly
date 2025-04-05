@@ -168,8 +168,7 @@ bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, Stor
   return true;
 }
 
-OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard* es,
-                                             RespVersion resp_v) {
+OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v) {
   auto& sinfo = sharded_[es->shard_id()];
   DCHECK(!sinfo.cmds.empty());
 
@@ -242,14 +241,13 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     auto cb = [this](ShardId sid) { return !sharded_[sid].cmds.empty(); };
     tx->PrepareSquashedMultiHop(base_cid_, cb);
     tx->ScheduleSingleHop(
-        [this, rb](auto* tx, auto* es) { return SquashedHopCb(tx, es, rb->GetRespVersion()); });
+        [this, rb](auto* tx, auto* es) { return SquashedHopCb(es, rb->GetRespVersion()); });
   } else {
-#if 1
     fb2::BlockingCounter bc(num_shards);
     DVLOG(1) << "Squashing " << num_shards << " " << tx->DebugId();
 
     auto cb = [this, tx, bc, rb]() mutable {
-      this->SquashedHopCb(tx, EngineShard::tlocal(), rb->GetRespVersion());
+      this->SquashedHopCb(EngineShard::tlocal(), rb->GetRespVersion());
       bc->Dec();
     };
 
@@ -258,11 +256,6 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
         shard_set->AddL2(i, cb);
     }
     bc->Wait();
-#else
-    shard_set->RunBlockingInParallel(
-        [this, tx, rb](auto* es) { SquashedHopCb(tx, es, rb->GetRespVersion()); },
-        [this](auto sid) { return !sharded_[sid].cmds.empty(); });
-#endif
   }
 
   uint64_t after_hop = proactor->GetMonotonicTimeNs();

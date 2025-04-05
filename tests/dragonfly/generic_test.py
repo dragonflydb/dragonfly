@@ -7,7 +7,7 @@ from redis import asyncio as aioredis
 from . import dfly_multi_test_args, dfly_args
 from .instance import DflyInstance, DflyStartException
 from .utility import batch_fill_data, gen_test_data, EnvironCntx
-from .seeder import StaticSeeder
+from .seeder import DebugPopulateSeeder
 
 
 @dfly_multi_test_args({"keys_output_limit": 512}, {"keys_output_limit": 1024})
@@ -114,7 +114,6 @@ async def test_blocking_multiple_dbs(async_client: aioredis.Redis, df_server: Df
             tasks.append(block(i))
         await asyncio.gather(*tasks)
 
-
     # produce is constantly waking up consumers. It is used to trigger the
     # flow that creates wake ups on a differrent database in the
     # middle of continuation transaction.
@@ -122,11 +121,12 @@ async def test_blocking_multiple_dbs(async_client: aioredis.Redis, df_server: Df
         LPUSH_SCRIPT = """
             redis.call('LPUSH', KEYS[1], "val")
         """
+
         async def produce(id):
             c = df_server.client(db=1)  # important to be on a different db
             for i in range(iters):
                 # Must be a lua script and not multi-exec for some reason.
-                await c.eval(LPUSH_SCRIPT, 1,  f"list{{{id}}}")
+                await c.eval(LPUSH_SCRIPT, 1, f"list{{{id}}}")
 
         tasks = []
         for i in range(num):
@@ -150,7 +150,6 @@ async def test_blocking_multiple_dbs(async_client: aioredis.Redis, df_server: Df
 
         await asyncio.gather(*tasks)
         logging.info("Finished consuming")
-
 
     num_keys = 32
     num_iters = 200
@@ -264,7 +263,7 @@ async def test_rename_huge_values(df_factory, type):
     client = df_server.client()
 
     logging.debug(f"Generating huge {type}")
-    seeder = StaticSeeder(
+    seeder = DebugPopulateSeeder(
         key_target=1,
         data_size=10_000_000,
         collection_size=10_000,
@@ -273,7 +272,7 @@ async def test_rename_huge_values(df_factory, type):
         types=[type],
     )
     await seeder.run(client)
-    source_data = await StaticSeeder.capture(client)
+    source_data = await DebugPopulateSeeder.capture(client)
     logging.debug(f"src {source_data}")
 
     # Rename multiple times to make sure the key moves between shards
@@ -285,6 +284,6 @@ async def test_rename_huge_values(df_factory, type):
         await client.execute_command(f"rename {old_name} {new_name}")
         old_name = new_name
     await client.execute_command(f"rename {new_name} {orig_name}")
-    target_data = await StaticSeeder.capture(client)
+    target_data = await DebugPopulateSeeder.capture(client)
 
     assert source_data == target_data

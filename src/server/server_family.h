@@ -266,6 +266,18 @@ class ServerFamily {
 
   void UpdateMemoryGlobalStats();
 
+  // Return true if no replicas are registered or if all replicas reached stable sync
+  // Used in debug populate to DCHECK insocsistent flows that violate transaction gurantees
+  bool AreAllReplicasInStableSync() const {
+    auto roles = dfly_cmd_->GetReplicasRoleInfo();
+    if (roles.empty()) {
+      return true;
+    }
+    auto match = SyncStateName(DflyCmd::SyncState::STABLE_SYNC);
+    return std::all_of(roles.begin(), roles.end(),
+                       [&match](auto& elem) { return elem.state == match; });
+  }
+
  private:
   bool HasPrivilegedInterface();
   void JoinSnapshotSchedule();

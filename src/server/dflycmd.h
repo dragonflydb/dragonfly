@@ -143,7 +143,7 @@ class DflyCmd {
   // Create new sync session. Returns (session_id, number of flows)
   std::pair<uint32_t, unsigned> CreateSyncSession(ConnectionState* state) ABSL_LOCKS_EXCLUDED(mu_);
 
-  // Master side acces method to replication info of that connection.
+  // Master side access method to replication info of that connection.
   std::shared_ptr<ReplicaInfo> GetReplicaInfoFromConnection(ConnectionState* state);
 
   // Master-side command. Provides Replica info.
@@ -234,5 +234,7 @@ class DflyCmd {
 
   mutable util::fb2::Mutex mu_;  // Guard global operations. See header top for locking levels.
 };
+
+std::string_view SyncStateName(DflyCmd::SyncState sync_state);
 
 }  // namespace dfly

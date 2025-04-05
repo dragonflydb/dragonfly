@@ -44,20 +44,6 @@ using namespace util;
 using std::string;
 using util::ProactorBase;
 
-namespace {
-const char kBadMasterId[] = "bad master id";
-const char kIdNotFound[] = "syncid not found";
-const char kInvalidSyncId[] = "bad sync id";
-const char kInvalidState[] = "invalid state";
-
-bool ToSyncId(string_view str, uint32_t* num) {
-  if (!absl::StartsWith(str, "SYNC"))
-    return false;
-  str.remove_prefix(4);
-
-  return absl::SimpleAtoi(str, num);
-}
-
 std::string_view SyncStateName(DflyCmd::SyncState sync_state) {
   switch (sync_state) {
     case DflyCmd::SyncState::PREPARATION:
@@ -71,6 +57,20 @@ std::string_view SyncStateName(DflyCmd::SyncState sync_state) {
   }
   DCHECK(false) << "Unspported state " << int(sync_state);
   return "unsupported";
+}
+
+namespace {
+const char kBadMasterId[] = "bad master id";
+const char kIdNotFound[] = "syncid not found";
+const char kInvalidSyncId[] = "bad sync id";
+const char kInvalidState[] = "invalid state";
+
+bool ToSyncId(string_view str, uint32_t* num) {
+  if (!absl::StartsWith(str, "SYNC"))
+    return false;
+  str.remove_prefix(4);
+
+  return absl::SimpleAtoi(str, num);
 }
 
 bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* replica,

@@ -1114,11 +1114,11 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
   // Acquire intent locks. Intent locks are always acquired, even if already locked by others.
   if (!IsGlobal()) {
     lock_args = GetLockArgs(shard->shard_id());
-    bool shard_unlocked = shard->shard_lock()->Check(mode);
+    const bool shard_unlocked = shard->shard_lock()->Check(mode);
 
     // We need to acquire the fp locks because the executing callback
     // within RunCallback below might preempt.
-    bool keys_unlocked = GetDbSlice(shard->shard_id()).Acquire(mode, lock_args);
+    const bool keys_unlocked = GetDbSlice(shard->shard_id()).Acquire(mode, lock_args);
     lock_granted = shard_unlocked && keys_unlocked;
 
     sd.local_mask |= KEYLOCK_ACQUIRED;
@@ -1129,7 +1129,7 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
     DVLOG(3) << "Lock granted " << lock_granted << " for trans " << DebugId();
 
     // Check if we can run immediately
-    if (shard_unlocked && execute_optimistic && lock_granted) {
+    if (lock_granted && execute_optimistic) {
       sd.local_mask |= OPTIMISTIC_EXECUTION;
       shard->stats().tx_optimistic_total++;
 
