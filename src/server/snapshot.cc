@@ -201,8 +201,8 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   }
 
   // serialized + side_saved must be equal to the total saved.
-  VLOG(1) << "Exit SnapshotSerializer (loop_serialized/side_saved/cbcalls): "
-          << stats_.loop_serialized << "/" << stats_.side_saved << "/" << stats_.savecb_calls;
+  VLOG(1) << "Exit SnapshotSerializer loop_serialized: " << stats_.loop_serialized
+          << ", side_saved " << stats_.side_saved << ", cbcalls " << stats_.savecb_calls;
 }
 
 void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {

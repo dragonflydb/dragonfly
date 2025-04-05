@@ -17,6 +17,7 @@ import os
 import fakeredis
 from typing import Iterable, Union
 from enum import Enum
+import re
 
 
 def tmp_file_name():
@@ -781,3 +782,9 @@ class ExpirySeeder:
 
     def stop(self):
         self.stop_flag = True
+
+
+def extract_int_after_prefix(prefix, line):
+    match = re.search(prefix + "(\\d+)", line)
+    assert match
+    return int(match.group(1))

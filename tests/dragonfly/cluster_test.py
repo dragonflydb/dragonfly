@@ -227,12 +227,6 @@ def stop_and_get_restore_log(instance):
     return line
 
 
-def extract_int_after_prefix(prefix, line):
-    match = re.search(prefix + "(\\d+)", line)
-    assert match
-    return int(match.group(1))
-
-
 @dfly_args({})
 class TestNotEmulated:
     async def test_cluster_commands_fails_when_not_emulate(self, async_client: aioredis.Redis):
