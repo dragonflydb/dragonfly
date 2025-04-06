@@ -94,6 +94,7 @@ jobs:
             org.opencontainers.image.vendor=DragonflyDB LTD
             org.opencontainers.image.title=Dragonfly Production Image
             org.opencontainers.image.description=The fastest in-memory store
+            org.opencontainers.image.version=${{ env.TAG_NAME }}
 
       - name: Build image
         id: build
