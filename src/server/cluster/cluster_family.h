@@ -107,7 +107,7 @@ class ClusterFamily {
 
   mutable util::fb2::Mutex migration_mu_;  // guard migrations operations
   // holds all incoming slots migrations that are currently in progress.
-  std::vector<std::shared_ptr<IncomingMigration>> incoming_migration_jobs_
+  std::vector<std::shared_ptr<IncomingMigration>> incoming_migrations_jobs_
       ABSL_GUARDED_BY(migration_mu_);
 
   // holds all outgoing slots migrations that are currently in progress
