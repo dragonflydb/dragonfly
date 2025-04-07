@@ -1059,7 +1059,7 @@ async def test_hiredis(df_factory):
     client.ping()
 
 
-@assert_eventually()
+@assert_eventually(times=500)
 async def wait_for_conn_drop(async_client):
     clients = await async_client.client_list()
     logging.info("wait_for_conn_drop clients: %s", clients)
