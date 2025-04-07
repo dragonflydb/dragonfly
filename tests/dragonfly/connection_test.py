@@ -1080,7 +1080,7 @@ async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
     assert int(info["timeout_disconnects"]) >= 1
 
 
-@dfly_args({"send_timeout": 3})
+@dfly_args({"send_timeout": 5})
 async def test_send_timeout(df_server, async_client: aioredis.Redis):
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
     writer.write(f"client setname writer_test\n".encode())
