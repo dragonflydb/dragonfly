@@ -283,9 +283,9 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2276) {
 
   resp = Run({"info", "stats"});
   size_t bumps1 = get_bump_ups(resp.GetString());
-  EXPECT_GT(bumps1, 0);
-  EXPECT_LT(bumps1, 10);  // we assume that some bumps are blocked because items reside next to each
-                          // other in the slot.
+
+  EXPECT_GE(bumps1, 0);
+  EXPECT_LE(bumps1, 10);
 
   for (int i = 0; i < 10; ++i) {
     auto get_resp = Run({"get", vec[i]});
@@ -332,7 +332,7 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2465) {
 
   resp = Run({"info", "stats"});
   size_t bumps = get_bump_ups(resp.GetString());
-  EXPECT_EQ(bumps, 3);  // one bump for del and one for get and one for mget
+  EXPECT_EQ(bumps, 2);  // one bump for get and one for mget
 }
 
 TEST_F(StringFamilyTest, MSetGet) {

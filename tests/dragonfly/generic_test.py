@@ -287,3 +287,58 @@ async def test_rename_huge_values(df_factory, type):
     target_data = await DebugPopulateSeeder.capture(client)
 
     assert source_data == target_data
+
+
+@pytest.mark.asyncio
+async def test_key_bump_ups(df_factory):
+    master = df_factory.create(
+        proactor_threads=2,
+        cache_mode="true",
+    )
+    df_factory.start_all([master])
+    c_master = master.client()
+
+    await c_master.execute_command("DEBUG POPULATE 18000 KEY 32 RAND")
+
+    info = await c_master.info("stats")
+    assert info["bump_ups"] == 0
+
+    keys = await c_master.execute_command("SCAN 0")
+    keys = keys[1][0:10]
+
+    # Bump keys
+    for key in keys:
+        await c_master.execute_command("GET " + key)
+    info = await c_master.info("stats")
+    assert info["bump_ups"] <= 10
+
+    # Multi get bump
+    await c_master.execute_command("MGET " + " ".join(keys))
+    info = await c_master.info("stats")
+    assert info["bump_ups"] >= 10 and info["bump_ups"] <= 20
+    last_bump_ups = info["bump_ups"]
+
+    for key in keys:
+        await c_master.execute_command("DEL " + key)
+
+    # DEL should not bump up any key
+    info = await c_master.info("stats")
+    assert last_bump_ups == info["bump_ups"]
+
+    #  Find key that has slot > 0 and bump it
+    while True:
+        keys = await c_master.execute_command("SCAN 0")
+        key = keys[1][0]
+
+        debug_key_info = await c_master.execute_command("DEBUG OBJECT " + key)
+        slot_id = int(dict(map(lambda s: s.split(":"), debug_key_info.split()))["slot"])
+        if slot_id == 0:
+            # delete the key and continue
+            await c_master.execute_command("DEL " + key)
+            continue
+
+        await c_master.execute_command("GET " + key)
+        debug_key_info = await c_master.execute_command("DEBUG OBJECT " + key)
+        new_slot_id = int(dict(map(lambda s: s.split(":"), debug_key_info.split()))["slot"])
+        assert new_slot_id + 1 == slot_id
+        break

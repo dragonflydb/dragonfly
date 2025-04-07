@@ -355,20 +355,9 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
 
 class DbSlice::PrimeBumpPolicy {
  public:
-  PrimeBumpPolicy(absl::flat_hash_set<uint64_t, FpHasher>* items) : fetched_items_(items) {
-  }
-
-  // returns true if we can change the object location in dash table.
   bool CanBump(const CompactObj& obj) const {
-    if (obj.IsSticky()) {
-      return false;
-    }
-    auto hc = obj.HashCode();
-    return fetched_items_->insert(hc).second;
+    return !obj.IsSticky();
   }
-
- private:
-  mutable absl::flat_hash_set<uint64_t, FpHasher>* fetched_items_;
 };
 
 DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
@@ -565,21 +554,9 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   }
 
   DCHECK(IsValid(res.it));
-  if (IsCacheMode()) {
-    if (!change_cb_.empty()) {
-      auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
-        CallChangeCallbacks(cntx.db_index, key, bit);
-      };
-      db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
-    }
 
-    // We must not change the bucket's internal order during serialization
-    serialization_latch_.Wait();
-    auto bump_it = db.prime.BumpUp(res.it, PrimeBumpPolicy{&fetched_items_});
-    if (bump_it != res.it) {  // the item was bumped
-      res.it = bump_it;
-      ++events_.bumpups;
-    }
+  if (IsCacheMode()) {
+    fetched_items_.insert({res.it->first.HashCode(), cntx.db_index});
   }
 
   switch (stats_mode) {
@@ -1714,10 +1691,40 @@ void DbSlice::PerformDeletion(Iterator del_it, DbTable* table) {
   PerformDeletionAtomic(del_it, exp_it, table);
 }
 
-void DbSlice::OnCbFinish() {
-  // TBD update bumpups logic we can not clear now after cb finish as cb can preempt
-  // btw what do we do with inline?
-  fetched_items_.clear();
+void DbSlice::OnCbFinishBlocking() {
+  if (IsCacheMode()) {
+    // move fetched items to local variable
+    auto fetched_items = std::move(fetched_items_);
+    for (const auto& [key_hash, db_index] : fetched_items) {
+      auto& db = *db_arr_[db_index];
+
+      // We intentionally don't do extra key checking on this callback to speedup
+      // fetching. Probability of having hash collision is quite low and for bumpup
+      // purposes it should be fine if different key (with same hash) is returned.
+      auto predicate = [](const PrimeKey&) { return true; };
+
+      PrimeIterator it = db.prime.FindFirst(key_hash, predicate);
+
+      if (!IsValid(it)) {
+        continue;
+      }
+
+      if (!change_cb_.empty()) {
+        auto key = it->first.ToString();
+        auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
+          CallChangeCallbacks(db_index, key, bit);
+        };
+        db.prime.CVCUponBump(change_cb_.back().first, it, bump_cb);
+      }
+
+      // We must not change the bucket's internal order during serialization
+      serialization_latch_.Wait();
+      auto bump_it = db.prime.BumpUp(it, PrimeBumpPolicy{});
+      if (bump_it != it) {  // the item was bumped
+        ++events_.bumpups;
+      }
+    }
+  }
 
   if (!pending_send_map_.empty()) {
     SendQueuedInvalidationMessages();
