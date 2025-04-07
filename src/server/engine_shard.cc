@@ -735,11 +735,14 @@ void EngineShard::Heartbeat() {
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
   // Skip heartbeat if we are serializing a big value
   static auto start = std::chrono::system_clock::now();
-  if (db_slice.WillBlockOnJournalWrite()) {
+  // Skip heartbeat if global transaction is in process.
+  // This is determined by attempting to check if shard lock can be acquired.
+  const bool can_acquire_global_lock = shard_lock()->Check(IntentLock::Mode::EXCLUSIVE);
+
+  if (db_slice.WillBlockOnJournalWrite() || !can_acquire_global_lock) {
     const auto elapsed = std::chrono::system_clock::now() - start;
     if (elapsed > std::chrono::seconds(1)) {
-      LOG_EVERY_T(WARNING, 5) << "Stalled heartbeat() fiber for " << elapsed.count()
-                              << " seconds because of big value serialization";
+      LOG_EVERY_T(WARNING, 5) << "Stalled heartbeat() fiber for " << elapsed.count() << " seconds";
     }
     return;
   }
