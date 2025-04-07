@@ -52,20 +52,19 @@ using namespace facade;
 using absl::GetFlag;
 using absl::StrCat;
 
-namespace {
-
-error_code Recv(FiberSocketBase* input, base::IoBuf* dest) {
+error_code ProtocolClient::Recv(FiberSocketBase* input, base::IoBuf* dest) {
   auto buf = dest->AppendBuffer();
   io::Result<size_t> exp_size = input->Recv(buf);
-  if (!exp_size)
+  if (!exp_size) {
+    LOG(ERROR) << "Socket error " << exp_size.error();
     return exp_size.error();
+  }
+
+  TouchIoTime();
 
   dest->CommitWrite(*exp_size);
-
   return error_code{};
 }
-
-}  // namespace
 
 std::string ProtocolClient::ServerContext::Description() const {
   return absl::StrCat(host, ":", port);
@@ -256,17 +255,14 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(base::IoBu
     uint32_t consumed;
     if (buffer->InputLen() == 0 || result == RedisParser::INPUT_PENDING) {
       DCHECK_GT(buffer->AppendLen(), 0u);
-      io::MutableBytes buf = buffer->AppendBuffer();
-      io::Result<size_t> size_res = sock_->Recv(buf);
-      if (!size_res) {
-        LOG(ERROR) << "Socket error " << size_res.error();
-        return nonstd::make_unexpected(size_res.error());
+
+      ec = Recv(sock_.get(), buffer);
+      if (ec) {
+        LOG(ERROR) << "Socket error " << ec;
+        return nonstd::make_unexpected(ec);
       }
 
-      VLOG(2) << "Read master response of " << *size_res << " bytes";
-
-      TouchIoTime();
-      buffer->CommitWrite(*size_res);
+      VLOG(2) << "Read master response";
     }
 
     result = parser_->Parse(buffer->InputBuffer(), &consumed, &resp_args_);
@@ -315,8 +311,8 @@ error_code ProtocolClient::ReadLine(base::IoBuf* io_buf, string_view* line) {
     input_str = ToSV(io_buf->InputBuffer());
     if (!input_str.empty())
       break;
+
     RETURN_ON_ERR(Recv(sock_.get(), io_buf));
-    TouchIoTime();
     input_str = ToSV(io_buf->InputBuffer());
   };
 
@@ -334,7 +330,6 @@ error_code ProtocolClient::ReadLine(base::IoBuf* io_buf, string_view* line) {
     }
 
     RETURN_ON_ERR(Recv(sock_.get(), io_buf));
-    TouchIoTime();
     input_str = ToSV(io_buf->InputBuffer());
   }
 
