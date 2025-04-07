@@ -1108,8 +1108,9 @@ auto Replica::GetSummary() const -> Summary {
     res.full_sync_done = (state_mask_.load() & R_SYNC_OK);
 
     uint64_t current_time = ProactorBase::GetMonotonicTimeNs();
-    // Handle the case when last_io_time is greater than current time
-    // to prevent overflow when calculating master_last_io_sec.
+    // last_io_time is derived above by reading last_io_time_ from all the flows,
+    // by accessing them from a foreign thread, see the loop above. As a result some
+    // threads may have last_io_time_ bigger than our current time, so we fix it here.
     if (last_io_time > current_time) {
       res.master_last_io_sec = 0;
     } else {

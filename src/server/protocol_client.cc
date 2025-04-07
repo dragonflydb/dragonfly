@@ -56,7 +56,7 @@ error_code ProtocolClient::Recv(FiberSocketBase* input, base::IoBuf* dest) {
   auto buf = dest->AppendBuffer();
   io::Result<size_t> exp_size = input->Recv(buf);
   if (!exp_size) {
-    LOG(ERROR) << "Socket error " << exp_size.error();
+    LOG(WARNING) << "Socket error " << exp_size.error();
     return exp_size.error();
   }
 
@@ -258,11 +258,11 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(base::IoBu
 
       ec = Recv(sock_.get(), buffer);
       if (ec) {
-        LOG(ERROR) << "Socket error " << ec;
+        LOG(WARNING) << "Socket error " << ec;
         return nonstd::make_unexpected(ec);
       }
 
-      VLOG(2) << "Read master response";
+      VLOG(3) << "Read master response";
     }
 
     result = parser_->Parse(buffer->InputBuffer(), &consumed, &resp_args_);
