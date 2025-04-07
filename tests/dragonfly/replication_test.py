@@ -17,7 +17,7 @@ from .instance import DflyInstanceFactory, DflyInstance
 from .seeder import Seeder as SeederV2
 from . import dfly_args
 from .proxy import Proxy
-from .seeder import StaticSeeder
+from .seeder import DebugPopulateSeeder
 
 ADMIN_PORT = 1211
 
@@ -1132,7 +1132,7 @@ async def test_flushall_in_full_sync(df_factory):
     c_replica = replica.client()
 
     # Fill master with test data
-    seeder = StaticSeeder(key_target=100_000)
+    seeder = DebugPopulateSeeder(key_target=100_000)
     await seeder.run(c_master)
 
     # Start replication and wait for full sync
@@ -2754,8 +2754,8 @@ async def test_memory_on_big_string_loading(df_factory):
     assert replica_peak_memory < 1.1 * replica_used_memory
 
     # Check replica data consistent
-    replica_data = await StaticSeeder.capture(c_replica)
-    master_data = await StaticSeeder.capture(c_master)
+    replica_data = await DebugPopulateSeeder.capture(c_replica)
+    master_data = await DebugPopulateSeeder.capture(c_master)
     assert master_data == replica_data
 
 
@@ -2774,7 +2774,7 @@ async def test_big_containers(df_factory, element_size, elements_number):
     c_replica = replica.client()
 
     logging.debug("Fill master with test data")
-    seeder = StaticSeeder(
+    seeder = DebugPopulateSeeder(
         key_target=50,
         data_size=element_size * elements_number,
         collection_size=elements_number,
@@ -2809,8 +2809,8 @@ async def test_big_containers(df_factory, element_size, elements_number):
     assert replica_peak_memory < 1.1 * replica_used_memory
 
     # Check replica data consistent
-    replica_data = await StaticSeeder.capture(c_replica)
-    master_data = await StaticSeeder.capture(c_master)
+    replica_data = await DebugPopulateSeeder.capture(c_replica)
+    master_data = await DebugPopulateSeeder.capture(c_master)
     assert master_data == replica_data
 
 
@@ -2860,8 +2860,8 @@ async def test_stream_approximate_trimming(df_factory):
     await asyncio.sleep(1)
 
     # Check replica data consistent
-    master_data = await StaticSeeder.capture(c_master)
-    replica_data = await StaticSeeder.capture(c_replica)
+    master_data = await DebugPopulateSeeder.capture(c_master)
+    replica_data = await DebugPopulateSeeder.capture(c_replica)
     assert master_data == replica_data
 
     # Step 3: Trim all streams to 0
@@ -2870,8 +2870,8 @@ async def test_stream_approximate_trimming(df_factory):
         await c_master.execute_command("XTRIM", stream_name, "MAXLEN", "0")
 
     # Check replica data consistent
-    master_data = await StaticSeeder.capture(c_master)
-    replica_data = await StaticSeeder.capture(c_replica)
+    master_data = await DebugPopulateSeeder.capture(c_master)
+    replica_data = await DebugPopulateSeeder.capture(c_replica)
     assert master_data == replica_data
 
 
@@ -2945,7 +2945,7 @@ async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFa
         rand = random.randint(1, 10)
         await c_master.execute_command(f"EXPIRE tmp:{i} {rand} NX")
 
-    seeder = StaticSeeder(key_target=10000)
+    seeder = SeederV2(key_target=10_000)
     fill_task = asyncio.create_task(seeder.run(master.client()))
 
     for replica in c_replicas:
@@ -2957,7 +2957,6 @@ async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFa
     await fill_task
 
 
-@pytest.mark.skip(reason="Temporary skip it. We have a bug around memory tracking")
 async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     """
     This test reproduces a bug in the JSON memory tracking.
@@ -2978,7 +2977,7 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
         rand = random.randint(1, 4)
         await c_master.execute_command(f"EXPIRE tmp:{i} {rand} NX")
 
-    seeder = StaticSeeder(key_target=100_000)
+    seeder = SeederV2(key_target=100_000)
     fill_task = asyncio.create_task(seeder.run(master.client()))
 
     for replica in c_replicas:

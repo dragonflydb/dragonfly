@@ -818,6 +818,8 @@ void DebugCmd::Populate(CmdArgList args, facade::SinkReplyBuilder* builder) {
   if (!options.has_value()) {
     return;
   }
+  DCHECK(sf_.AreAllReplicasInStableSync());
+
   ProactorPool& pp = sf_.service().proactor_pool();
   size_t runners_count = pp.size();
   vector<pair<uint64_t, uint64_t>> ranges(runners_count - 1);
@@ -843,6 +845,8 @@ void DebugCmd::Populate(CmdArgList args, facade::SinkReplyBuilder* builder) {
     fb.Join();
 
   builder->SendOk();
+
+  DCHECK(sf_.AreAllReplicasInStableSync());
 }
 
 void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
