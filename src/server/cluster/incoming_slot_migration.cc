@@ -28,7 +28,7 @@ using namespace facade;
 // It is created per shard on the target node to initiate FLOW step.
 class ClusterShardMigration {
  public:
-  ClusterShardMigration(uint32_t shard_id, Service* service, IncomingMigration* in_migration,
+  ClusterShardMigration(uint32_t shard_id, Service* service, IncomingSlotMigration* in_migration,
                         util::fb2::BlockingCounter bc)
       : source_shard_id_(shard_id),
         is_finished_(false),
@@ -145,27 +145,27 @@ class ClusterShardMigration {
   bool is_finished_ ABSL_GUARDED_BY(mu_);
   util::FiberSocketBase* socket_ ABSL_GUARDED_BY(mu_);
   JournalExecutor executor_;
-  IncomingMigration* in_migration_;
+  IncomingSlotMigration* in_migration_;
   util::fb2::BlockingCounter bc_;
   atomic_long last_attempt_{-1};
   atomic_bool pause_ = false;
 };
 
-IncomingMigration::IncomingMigration(string source_id, Service* se, SlotRanges slots)
+IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, SlotRanges slots)
     : source_id_(std::move(source_id)), service_(*se), slots_(std::move(slots)), bc_(0) {
 }
 
-IncomingMigration::~IncomingMigration() {
+IncomingSlotMigration::~IncomingSlotMigration() {
 }
 
-void IncomingMigration::Pause(bool pause) {
+void IncomingSlotMigration::Pause(bool pause) {
   VLOG(1) << "Pausing migration " << pause;
   for (auto& flow : shard_flows_) {
     flow->Pause(pause);
   }
 }
 
-bool IncomingMigration::Join(long attempt) {
+bool IncomingSlotMigration::Join(long attempt) {
   const absl::Time start = absl::Now();
   const absl::Duration timeout =
       absl::Milliseconds(absl::GetFlag(FLAGS_migration_finalization_timeout_ms));
@@ -206,7 +206,7 @@ bool IncomingMigration::Join(long attempt) {
   }
 }
 
-void IncomingMigration::Stop() {
+void IncomingSlotMigration::Stop() {
   util::fb2::LockGuard lk(state_mu_);
   string_view log_state = state_ == MigrationState::C_FINISHED ? "Finishing" : "Cancelling";
   LOG(INFO) << log_state << " incoming migration of slots " << slots_.ToString();
@@ -237,7 +237,7 @@ void IncomingMigration::Stop() {
   }
 }
 
-void IncomingMigration::Init(uint32_t shards_num) {
+void IncomingSlotMigration::Init(uint32_t shards_num) {
   util::fb2::LockGuard lk(state_mu_);
   cntx_.Reset(nullptr);
   state_ = MigrationState::C_SYNC;
@@ -249,12 +249,12 @@ void IncomingMigration::Init(uint32_t shards_num) {
   }
 }
 
-void IncomingMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
+void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
   shard_flows_[shard]->Start(&cntx_, source);
   VLOG(1) << "Incoming flow " << shard << " finished for " << source_id_;
 }
 
-size_t IncomingMigration::GetKeyCount() const {
+size_t IncomingSlotMigration::GetKeyCount() const {
   {
     util::fb2::LockGuard lk(state_mu_);
     if (state_ == MigrationState::C_FINISHED) {

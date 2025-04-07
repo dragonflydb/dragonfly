@@ -714,8 +714,8 @@ void ClusterFamily::StartNewSlotMigrations(const ClusterConfig& new_config) {
   }
 
   for (auto& m : in_migrations) {
-    auto migration =
-        make_shared<IncomingMigration>(m.node_info.id, &server_family_->service(), m.slot_ranges);
+    auto migration = make_shared<IncomingSlotMigration>(m.node_info.id, &server_family_->service(),
+                                                        m.slot_ranges);
     incoming_migrations_jobs_.emplace_back(migration);
   }
 }
@@ -805,7 +805,8 @@ void ClusterFamily::DflyMigrate(CmdArgList args, const CommandContext& cmd_cntx)
   }
 }
 
-std::shared_ptr<IncomingMigration> ClusterFamily::GetIncomingMigration(std::string_view source_id) {
+std::shared_ptr<IncomingSlotMigration> ClusterFamily::GetIncomingMigration(
+    std::string_view source_id) {
   util::fb2::LockGuard lk(migration_mu_);
   for (const auto& mj : incoming_migrations_jobs_) {
     if (mj->GetSourceID() == source_id) {
@@ -853,7 +854,7 @@ ClusterFamily::TakeOutOutgoingMigrations(shared_ptr<ClusterConfig> new_config,
 namespace {
 
 // returns removed incoming migration
-bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingMigration>>& jobs,
+bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigration>>& jobs,
                                  string_view source_id) {
   auto it = std::find_if(jobs.begin(), jobs.end(), [source_id](const auto& im) {
     // we can have only one migration per target-source pair
@@ -863,7 +864,7 @@ bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingMigration>>
     return false;
   }
   DCHECK(it->get() != nullptr);
-  std::shared_ptr<IncomingMigration> migration = *it;
+  std::shared_ptr<IncomingSlotMigration> migration = *it;
 
   // Flush non-owned migrations
   SlotSet migration_slots(migration->GetSlots());
@@ -911,7 +912,7 @@ void ClusterFamily::InitMigration(CmdArgList args, SinkReplyBuilder* builder) {
 
   SlotRanges slot_ranges(std::move(slots));
 
-  std::shared_ptr<IncomingMigration> migration;
+  std::shared_ptr<IncomingSlotMigration> migration;
   {
     util::fb2::LockGuard lk(migration_mu_);
 

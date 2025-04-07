@@ -17,10 +17,10 @@ class ClusterShardMigration;
 // The main entity on the target side that manage slots migration process
 // Manage connections between the target and source node,
 // manage migration process state and data
-class IncomingMigration {
+class IncomingSlotMigration {
  public:
-  IncomingMigration(std::string source_id, Service* se, SlotRanges slots);
-  ~IncomingMigration();
+  IncomingSlotMigration(std::string source_id, Service* se, SlotRanges slots);
+  ~IncomingSlotMigration();
 
   // process data from FDLYMIGRATE FLOW cmd
   // executes until Stop called or connection closed
