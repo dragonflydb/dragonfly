@@ -735,8 +735,8 @@ void EngineShard::Heartbeat() {
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
   // Skip heartbeat if we are serializing a big value
   static auto start = std::chrono::system_clock::now();
-  // We acquire exlusive locks during global transactions
-  // If we can't acquire this it means the shard is under global lock.
+  // Skip heartbeat if global transaction is in process.
+  // This is determined by attempting to check if shard lock can be acquired.
   const bool can_acquire_global_lock = shard_lock()->Check(IntentLock::Mode::EXCLUSIVE);
 
   if (db_slice.WillBlockOnJournalWrite() || !can_acquire_global_lock) {
