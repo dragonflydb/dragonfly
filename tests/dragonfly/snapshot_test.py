@@ -332,6 +332,24 @@ def delete_s3_objects(bucket, prefix):
     "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
     reason="AWS S3 snapshots bucket is not configured",
 )
+async def test_exit_on_s3_snapshot_load_err(df_factory):
+    invalid_s3_dir = "s3://{DRAGONFLY_S3_BUCKET}" + "_invalid_bucket_"
+    df_server = df_factory.create(
+        dir=invalid_s3_dir, dbfilename="db", exit_on_cloud_dir_snapshot_load_err=True
+    )
+    df_server.start()
+    # Let's wait so that process exit
+    await asyncio.sleep(2)
+    with pytest.raises(Exception):
+        df_server._check_status()
+
+
+# If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
+# configured.
+@pytest.mark.skipif(
+    "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
+    reason="AWS S3 snapshots bucket is not configured",
+)
 @dfly_args({**BASIC_ARGS, "dir": "s3://{DRAGONFLY_S3_BUCKET}{DRAGONFLY_TMP}", "dbfilename": ""})
 async def test_s3_snapshot(async_client, tmp_dir):
     seeder = DebugPopulateSeeder(key_target=10_000)

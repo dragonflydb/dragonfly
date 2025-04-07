@@ -927,9 +927,11 @@ void ServerFamily::LoadFromSnapshot() {
     if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
       LOG(WARNING) << "Load snapshot: No snapshot found";
     } else {
-      util::fb2::LockGuard lk{loading_stats_mu_};
+      loading_stats_mu_.lock();
       loading_stats_.failed_restore_count++;
-      LOG(ERROR) << "Failed to load snapshot: " << load_path_result.error().Format();
+      loading_stats_mu_.unlock();
+      LOG(ERROR) << "Failed to load snapshot with error: " << load_path_result.error().Format();
+      exit(1);
     }
   }
 }
