@@ -556,7 +556,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   DCHECK(IsValid(res.it));
 
   if (IsCacheMode()) {
-    fetched_items_.insert({res.it->first.HashCode(), cntx.db_index, key});
+    fetched_items_.insert({res.it->first.HashCode(), cntx.db_index});
   }
 
   switch (stats_mode) {
@@ -1694,11 +1694,14 @@ void DbSlice::PerformDeletion(Iterator del_it, DbTable* table) {
 void DbSlice::OnCbFinishBlocking() {
   if (IsCacheMode()) {
     // move fetched items to local variable
-    auto moved_fetched_items_ = std::move(fetched_items_);
-    for (const auto& [key_hash, db_index, key] : moved_fetched_items_) {
+    auto fetched_items = std::move(fetched_items_);
+    for (const auto& [key_hash, db_index] : fetched_items) {
       auto& db = *db_arr_[db_index];
 
-      auto predicate = [&key](const PrimeKey& key_) { return key_ == key; };
+      // We intentionally don't do extra key checking on this callback to speedup
+      // fetching. Probability of having hash collision is quite low and for bumpup
+      // purposes it should be fine if different key (with same hash) is returned.
+      auto predicate = [](const PrimeKey&) { return true; };
 
       PrimeIterator it = db.prime.FindFirst(key_hash, predicate);
 
@@ -1707,6 +1710,7 @@ void DbSlice::OnCbFinishBlocking() {
       }
 
       if (!change_cb_.empty()) {
+        auto key = it->first.ToString();
         auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
           CallChangeCallbacks(db_index, key, bit);
         };
@@ -1720,7 +1724,6 @@ void DbSlice::OnCbFinishBlocking() {
         ++events_.bumpups;
       }
     }
-    fetched_items_.clear();
   }
 
   if (!pending_send_map_.empty()) {

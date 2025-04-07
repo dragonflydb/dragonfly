@@ -615,15 +615,15 @@ class DbSlice {
 
   DbTableArray db_arr_;
 
-  // key for bump up items tuple contains <key hash, db_index, key>
-  using FetchedItemKey = std::tuple<uint64_t, DbIndex, std::string_view>;
+  // key for bump up items pair contains <key hash, db_index>
+  using FetchedItemKey = std::pair<uint64_t, DbIndex>;
 
   struct FpHasher {
     size_t operator()(uint64_t val) const {
       return val;
     }
     size_t operator()(const FetchedItemKey& val) const {
-      return std::get<0>(val);
+      return val.first;
     }
   };
 
