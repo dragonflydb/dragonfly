@@ -2945,7 +2945,7 @@ async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFa
         rand = random.randint(1, 10)
         await c_master.execute_command(f"EXPIRE tmp:{i} {rand} NX")
 
-    seeder = DebugPopulateSeeder(key_target=10000)
+    seeder = SeederV2(key_target=10_000)
     fill_task = asyncio.create_task(seeder.run(master.client()))
 
     for replica in c_replicas:

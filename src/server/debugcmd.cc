@@ -783,6 +783,8 @@ void DebugCmd::Populate(CmdArgList args, facade::SinkReplyBuilder* builder) {
   if (!options.has_value()) {
     return;
   }
+  DCHECK(sf_.AreAllReplicasInStableSync());
+
   ProactorPool& pp = sf_.service().proactor_pool();
   size_t runners_count = pp.size();
   vector<pair<uint64_t, uint64_t>> ranges(runners_count - 1);
@@ -808,6 +810,8 @@ void DebugCmd::Populate(CmdArgList args, facade::SinkReplyBuilder* builder) {
     fb.Join();
 
   builder->SendOk();
+
+  DCHECK(sf_.AreAllReplicasInStableSync());
 }
 
 void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
@@ -1290,7 +1294,6 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
   for (unsigned i = 0; i < batch.sz; ++i) {
     string key = StrCat(options.prefix, ":", batch.index[i]);
     uint32_t elements_left = options.elements;
-    DCHECK(sf_.AreAllReplicasInStableSync());
 
     while (elements_left) {
       // limit rss grow by 32K by limiting the element count in each command.
