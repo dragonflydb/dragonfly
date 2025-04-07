@@ -2990,10 +2990,10 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     await fill_task
 
 
-@dfly_args({"proactor_threads": 4, "serialization_max_chunk_size": 1})
 async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyInstanceFactory):
-    master = df_factory.create(dbfilename="")
-    replica = df_factory.create(dbfilename="")
+    proactors = 4
+    master = df_factory.create(proactor_threads=proactors, dbfilename="")
+    replica = df_factory.create(proactor_threads=proactors, dbfilename="")
     df_factory.start_all([master, replica])
     c_master = master.client()
     c_replica = replica.client()
@@ -3023,8 +3023,9 @@ async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyIn
 
     replica.stop()
     lines = replica.find_in_logs("Exit SnapshotSerializer")
-    assert len(lines) == 3
+    assert len(lines) == (proactors - 1)
     for line in lines:
+        # We test the serializtion path of command execution
         side_saved = extract_int_after_prefix("side_saved ", line)
         assert side_saved > 0
 
