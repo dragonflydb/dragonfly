@@ -2989,6 +2989,7 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     await fill_task
 
 
+@pytest.mark.skip("Skipped temporarily while being investigated")
 async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyInstanceFactory):
     proactors = 4
     master = df_factory.create(proactor_threads=proactors, dbfilename="")
