@@ -27,9 +27,12 @@
   using namespace std;
 
   Parser::symbol_type make_StringLit(string_view src, const Parser::location_type& loc);
-  Parser::symbol_type make_TagVal(string_view src, bool is_prefix, const Parser::location_type& loc);
-  Parser::symbol_type make_TagSuffix(string_view src, const Parser::location_type& loc);
-  Parser::symbol_type make_TagInfix(string_view src, const Parser::location_type& loc);
+
+  // Enum for tag token types
+  enum class TagType { PREFIX, SUFFIX, INFIX, REGULAR };
+
+  // Universal function for processing tag tokens
+  Parser::symbol_type make_Tag(string_view src, TagType type, const Parser::location_type& loc);
 %}
 
 dq    \"
@@ -82,10 +85,10 @@ astrsk_ch \*
 {astrsk_ch}{term_char}+{astrsk_ch}    return Parser::make_INFIX(string{matched_view(1, 1)}, loc());
 
 {term_char}+                          return Parser::make_TERM(str(), loc());
-{tag_val_char}+{astrsk_ch}            return make_TagVal(str(), true, loc());
-{astrsk_ch}{tag_val_char}+            return make_TagSuffix(str(), loc());
-{astrsk_ch}{tag_val_char}+{astrsk_ch} return make_TagInfix(str(), loc());
-{tag_val_char}+                       return make_TagVal(str(), false, loc());
+{tag_val_char}+{astrsk_ch}            return make_Tag(str(), TagType::PREFIX, loc());
+{astrsk_ch}{tag_val_char}+            return make_Tag(str(), TagType::SUFFIX, loc());
+{astrsk_ch}{tag_val_char}+{astrsk_ch} return make_Tag(str(), TagType::INFIX, loc());
+{tag_val_char}+                       return make_Tag(str(), TagType::REGULAR, loc());
 
 <<EOF>>    return Parser::make_YYEOF(loc());
 %%
@@ -98,14 +101,20 @@ Parser::symbol_type make_StringLit(string_view src, const Parser::location_type&
   return Parser::make_TERM(res, loc);
 }
 
-Parser::symbol_type make_TagVal(string_view src, bool is_prefix, const Parser::location_type& loc) {
+Parser::symbol_type make_Tag(string_view src, TagType type, const Parser::location_type& loc) {
   string res;
   res.reserve(src.size());
 
-  bool escaped = false;
-  size_t len = is_prefix ? src.size() - 1 : src.size(); // Exclude the '*' at the end for prefix
+  // Determine processing boundaries
+  size_t start = (type == TagType::SUFFIX || type == TagType::INFIX) ? 1 : 0;
+  size_t end = src.size();
+  if (type == TagType::PREFIX || type == TagType::INFIX) {
+    end--; // Skip the last '*' character
+  }
 
-  for (size_t i = 0; i < len; ++i) {
+  // Handle escaping
+  bool escaped = false;
+  for (size_t i = start; i < end; ++i) {
     if (escaped) {
       escaped = false;
     } else if (src[i] == '\\') {
@@ -115,47 +124,16 @@ Parser::symbol_type make_TagVal(string_view src, bool is_prefix, const Parser::l
     res.push_back(src[i]);
   }
 
-  if (is_prefix) {
-    return Parser::make_PREFIX(res, loc);
+  // Return the appropriate token type
+  switch (type) {
+    case TagType::PREFIX:
+      return Parser::make_PREFIX(res, loc);
+    case TagType::SUFFIX:
+      return Parser::make_SUFFIX(res, loc);
+    case TagType::INFIX:
+      return Parser::make_INFIX(res, loc);
+    case TagType::REGULAR:
+    default:
+      return Parser::make_TAG_VAL(res, loc);
   }
-
-  return Parser::make_TAG_VAL(res, loc);
-}
-
-Parser::symbol_type make_TagSuffix(string_view src, const Parser::location_type& loc) {
-  string res;
-  res.reserve(src.size());
-
-  bool escaped = false;
-  for (size_t i = 1; i < src.size(); ++i) { // Skip the first asterisk
-    if (escaped) {
-      escaped = false;
-    } else if (src[i] == '\\') {
-      escaped = true;
-      continue;
-    }
-    res.push_back(src[i]);
-  }
-
-  // TODO: make_TAG_VAL ?
-  return Parser::make_SUFFIX(res, loc);
-}
-
-Parser::symbol_type make_TagInfix(string_view src, const Parser::location_type& loc) {
-  string res;
-  res.reserve(src.size());
-
-  bool escaped = false;
-  for (size_t i = 1; i < src.size() - 1; ++i) { // Skip the first and last asterisks
-    if (escaped) {
-      escaped = false;
-    } else if (src[i] == '\\') {
-      escaped = true;
-      continue;
-    }
-    res.push_back(src[i]);
-  }
-
-  // TODO: make_TAG_VAL ?
-  return Parser::make_INFIX(res, loc);
 }

@@ -89,16 +89,6 @@ ostream& operator<<(ostream& os, optional<size_t> o) {
 }
 
 ostream& operator<<(ostream& os, dfly::search::AstTagsNode::TagValueProxy o) {
-  /*using dfly::search::AstTermNode;
-  using dfly::search::AstPrefixNode;
-  using dfly::search::AstSuffixNode;
-  using dfly::search::AstInfixNode;
-
-  get_if<AstTermNode>(&o) ? os << get<AstTermNode>(o).term :
-  get_if<AstPrefixNode>(&o) ? os << get<AstPrefixNode>(o).prefix :
-  get_if<AstSuffixNode>(&o) ? os << get<AstSuffixNode>(o).suffix :
-  get_if<AstInfixNode>(&o) ? os << get<AstInfixNode>(o).infix : os;*/
-
   return os;
 }
 }  // namespace std
