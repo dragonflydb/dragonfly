@@ -1246,15 +1246,12 @@ async def test_take_over_counters(df_factory, master_threads, replica_threads):
         "Add a blocking command during takeover to make sure it doesn't block it."
         start = time.time()
         # The command should just be canceled
-        try:
-            assert await c_blocking.execute_command("BLPOP BLOCKING_KEY1 BLOCKING_KEY2 100") is None
-        except redis.exceptions.ConnectionError as e:
-            pass
+        assert await c_blocking.execute_command("BLPOP BLOCKING_KEY1 BLOCKING_KEY2 100") is None
         # And it should happen in reasonable amount of time.
         assert time.time() - start < 10
 
     async def delayed_takeover():
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(1)
         await c1.execute_command(f"REPLTAKEOVER 5")
 
     _, _, *results = await asyncio.gather(
