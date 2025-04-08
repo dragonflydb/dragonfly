@@ -2141,7 +2141,7 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
 
 
 @dfly_args(
-    {"proactor_threads": 2, "cluster_mode": "yes", "migration_buckets_serialization_threshold": 3}
+    {"proactor_threads": 2, "cluster_mode": "yes", "migration_buckets_serialization_threshold": 1}
 )
 @pytest.mark.parametrize("chunk_size", [1_000_000, 30])
 @pytest.mark.asyncio
@@ -2168,7 +2168,7 @@ async def test_cluster_migration_while_seeding(
 
     logging.debug("Seeding cluster")
     seeder = df_seeder_factory.create(
-        keys=10_000, port=instances[0].port, cluster_mode=True, mirror_to_fake_redis=True
+        keys=20_000, port=instances[0].port, cluster_mode=True, mirror_to_fake_redis=True
     )
     await seeder.run(target_deviation=0.1)
 
@@ -2207,7 +2207,8 @@ async def test_cluster_migration_while_seeding(
     line = stop_and_get_restore_log(nodes[0].instance)
     assert extract_int_after_prefix("Keys skipped ", line) == 0
     assert extract_int_after_prefix("buckets skipped ", line) > 0
-    assert extract_int_after_prefix("keys written ", line) >= 9_000
+    assert extract_int_after_prefix("keys written ", line) >= 15_000
+    # buckets on_db_update can be 0 once in a while because we can not predict keys distribution during migration
     assert extract_int_after_prefix("buckets on_db_update ", line) > 0
 
 
