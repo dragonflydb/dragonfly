@@ -719,61 +719,87 @@ enum PopulateFlag { FLAG_RAND, FLAG_TYPE, FLAG_ELEMENTS, FLAG_SLOT, FLAG_EXPIRE,
 // optional: [RAND | TYPE typename | ELEMENTS element num | SLOTS (key value)+ | EXPIRE start end]
 optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
                                                                 facade::SinkReplyBuilder* builder) {
-  if (args.size() < 2) {
-    builder->SendError(UnknownSubCmd("populate", "DEBUG"));
-    return nullopt;
-  }
-
   CmdArgParser parser(args.subspan(1));
   PopulateOptions options;
 
   options.total_count = parser.Next<uint64_t>();
-
-  if (parser.HasNext()) {
-    options.prefix = parser.Next<string_view>();
+  if (parser.HasError()) {
+    builder->SendError("Invalid total count");
+    parser.Error();
+    return nullopt;
   }
 
-  if (parser.HasNext()) {
-    options.val_size = parser.Next<uint32_t>();
+  options.prefix = parser.NextOrDefault<string_view>("");
+  options.val_size = parser.NextOrDefault<uint32_t>(100);
+
+  if (parser.HasError()) {
+    builder->SendError("Invalid value size");
+    parser.Error();
+    return nullopt;
   }
 
   while (parser.HasNext()) {
     PopulateFlag flag = parser.MapNext("RAND", FLAG_RAND, "TYPE", FLAG_TYPE, "ELEMENTS",
                                        FLAG_ELEMENTS, "SLOT", FLAG_SLOT, "EXPIRE", FLAG_EXPIRE);
-
-    if (flag == FLAG_RAND) {
-      options.populate_random_values = true;
-      continue;
+    if (parser.HasError()) {
+      builder->SendError("Unknown or invalid flag");
+      parser.Error();
+      return nullopt;
     }
-
-    if (flag == FLAG_TYPE) {
-      options.type = absl::AsciiStrToUpper(parser.Next<string_view>());
-      continue;
-    }
-
-    if (flag == FLAG_ELEMENTS) {
-      options.elements = parser.Next<uint32_t>();
-      continue;
-    }
-    if (flag == FLAG_SLOT) {
-      auto [start, end] = parser.Next<FInt<0, 16383>, FInt<0, 16383>>();
-      options.slot_range = cluster::SlotRange{static_cast<SlotId>(start), static_cast<SlotId>(end)};
-      continue;
-    }
-    if (flag == FLAG_EXPIRE) {
-      auto [min_ttl, max_ttl] = parser.Next<uint32_t, uint32_t>();
-      if (min_ttl >= max_ttl) {
-        builder->SendError(kExpiryOutOfRange);
-        return nullopt;
+    switch (flag) {
+      case FLAG_RAND:
+        options.populate_random_values = true;
+        break;
+      case FLAG_TYPE:
+        options.type = absl::AsciiStrToUpper(parser.Next<string_view>());
+        if (parser.HasError()) {
+          builder->SendError("Invalid type name");
+          parser.Error();
+          return nullopt;
+        }
+        break;
+      case FLAG_ELEMENTS:
+        options.elements = parser.Next<uint32_t>();
+        if (parser.HasError()) {
+          builder->SendError("Invalid elements count");
+          parser.Error();
+          return nullopt;
+        }
+        break;
+      case FLAG_SLOT: {
+        auto [start, end] = parser.Next<FInt<0, 16383>, FInt<0, 16383>>();
+        if (parser.HasError()) {
+          builder->SendError("Invalid slot range");
+          parser.Error();
+          return nullopt;
+        }
+        options.slot_range = cluster::SlotRange{start, end};
+        break;
       }
-      options.expire_ttl_range = std::make_pair(min_ttl, max_ttl);
-      continue;
+      case FLAG_EXPIRE: {
+        auto [min_ttl, max_ttl] = parser.Next<uint32_t, uint32_t>();
+        if (parser.HasError()) {
+          builder->SendError("Invalid expire range");
+          parser.Error();
+          return nullopt;
+        }
+        if (min_ttl >= max_ttl) {
+          builder->SendError(kExpiryOutOfRange);
+          parser.Error();
+          return nullopt;
+        }
+        options.expire_ttl_range = std::make_pair(min_ttl, max_ttl);
+        break;
+      }
+      default:
+        builder->SendError(kSyntaxErr);
+        parser.Error();
+        return nullopt;
     }
-    builder->SendError(kSyntaxErr);
-    return nullopt;
   }
   if (parser.HasError()) {
     builder->SendError(kSyntaxErr);
+    parser.Error();
     return nullopt;
   }
   return options;
