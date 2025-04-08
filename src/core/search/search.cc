@@ -123,6 +123,12 @@ struct ProfileBuilder {
       void operator()(std::string* out, const AstTermNode& node) const {
         out->append(node.term);
       }
+      void operator()(std::string* out, const AstSuffixNode& node) const {
+        out->append(node.suffix);
+      }
+      void operator()(std::string* out, const AstInfixNode& node) const {
+        out->append(node.infix);
+      }
       void operator()(std::string* out, const AstTagsNode::TagValue& value) const {
         visit([this, out](const auto& n) { this->operator()(out, n); }, value);
       }
@@ -131,6 +137,8 @@ struct ProfileBuilder {
         [](monostate) -> string { return ""s; },
         [](const AstTermNode& n) { return absl::StrCat("Term{", n.term, "}"); },
         [](const AstPrefixNode& n) { return absl::StrCat("Prefix{", n.prefix, "}"); },
+        [](const AstSuffixNode& n) { return absl::StrCat("Suffix{", n.suffix, "}"); },
+        [](const AstInfixNode& n) { return absl::StrCat("Infix{", n.infix, "}"); },
         [](const AstRangeNode& n) { return absl::StrCat("Range{", n.lo, "<>", n.hi, "}"); },
         [](const AstLogicalNode& n) {
           auto op = n.op == AstLogicalNode::AND ? "and" : "or";
@@ -321,6 +329,85 @@ struct BasicSearch {
     return UnifyResults(GetSubResults(indices, mapping), LogicOp::OR);
   }
 
+  IndexResult Search(const AstSuffixNode& node, string_view active_field) {
+    // Suffix search (e.g. "*text") is implemented in a simple way:
+    // Get all terms and filter those that end with the required suffix
+
+    vector<TextIndex*> indices;
+    if (!active_field.empty()) {
+      if (auto* index = GetIndex<TextIndex>(active_field); index)
+        indices = {index};
+      else
+        return IndexResult{};
+    } else {
+      indices = indices_->GetAllTextIndices();
+    }
+
+    vector<IndexResult> results;
+    for (auto* index : indices) {
+      vector<DocId> matched;
+
+      for (const auto& term : index->GetTerms()) {
+        // Check if term ends with node.suffix
+        if (term.size() >= node.suffix.size() &&
+            term.compare(term.size() - node.suffix.size(), node.suffix.size(), node.suffix) == 0) {
+          if (auto* container = index->Matching(term)) {
+            for (DocId doc_id : *container) {
+              matched.push_back(doc_id);
+            }
+          }
+        }
+      }
+
+      // Remove duplicates
+      sort(matched.begin(), matched.end());
+      matched.erase(unique(matched.begin(), matched.end()), matched.end());
+
+      results.push_back(std::move(matched));
+    }
+
+    return UnifyResults(std::move(results), LogicOp::OR);
+  }
+
+  IndexResult Search(const AstInfixNode& node, string_view active_field) {
+    // Infix search (e.g. "*text*") is implemented in a simple way:
+    // Get all terms and filter those that contain the required infix
+
+    vector<TextIndex*> indices;
+    if (!active_field.empty()) {
+      if (auto* index = GetIndex<TextIndex>(active_field); index)
+        indices = {index};
+      else
+        return IndexResult{};
+    } else {
+      indices = indices_->GetAllTextIndices();
+    }
+
+    vector<IndexResult> results;
+    for (auto* index : indices) {
+      vector<DocId> matched;
+
+      for (const auto& term : index->GetTerms()) {
+        // Check if term contains node.infix
+        if (term.find(node.infix) != string::npos) {
+          if (auto* container = index->Matching(term)) {
+            for (DocId doc_id : *container) {
+              matched.push_back(doc_id);
+            }
+          }
+        }
+      }
+
+      // Remove duplicates
+      sort(matched.begin(), matched.end());
+      matched.erase(unique(matched.begin(), matched.end()), matched.end());
+
+      results.push_back(std::move(matched));
+    }
+
+    return UnifyResults(std::move(results), LogicOp::OR);
+  }
+
   // [range]: access field's numeric index
   IndexResult Search(const AstRangeNode& node, string_view active_field) {
     DCHECK(!active_field.empty());
@@ -345,7 +432,7 @@ struct BasicSearch {
 
   // logical query: unify all sub results
   IndexResult Search(const AstLogicalNode& node, string_view active_field) {
-    auto mapping = [&](auto& node) { return SearchGeneric(node, active_field); };
+    auto mapping = [&](auto& node) { return Search(node, active_field); };
     return UnifyResults(GetSubResults(node.nodes, mapping), node.op);
   }
 
@@ -367,6 +454,48 @@ struct BasicSearch {
                   },
                   [tag_index, this](const AstPrefixNode& prefix) {
                     return CollectPrefixMatches(tag_index, prefix.prefix);
+                  },
+                  [tag_index, this](const AstSuffixNode& suffix) -> IndexResult {
+                    // Suffix search in tags (similar to implementation for text fields)
+                    vector<DocId> matched;
+
+                    for (const auto& term : tag_index->GetTerms()) {
+                      if (term.size() >= suffix.suffix.size() &&
+                          term.compare(term.size() - suffix.suffix.size(), suffix.suffix.size(),
+                                       suffix.suffix) == 0) {
+                        if (auto* container = tag_index->Matching(term)) {
+                          for (DocId doc_id : *container) {
+                            matched.push_back(doc_id);
+                          }
+                        }
+                      }
+                    }
+
+                    // Remove duplicates
+                    sort(matched.begin(), matched.end());
+                    matched.erase(unique(matched.begin(), matched.end()), matched.end());
+
+                    return matched;
+                  },
+                  [tag_index, this](const AstInfixNode& infix) -> IndexResult {
+                    // Infix search in tags (similar to implementation for text fields)
+                    vector<DocId> matched;
+
+                    for (const auto& term : tag_index->GetTerms()) {
+                      if (term.find(infix.infix) != string::npos) {
+                        if (auto* container = tag_index->Matching(term)) {
+                          for (DocId doc_id : *container) {
+                            matched.push_back(doc_id);
+                          }
+                        }
+                      }
+                    }
+
+                    // Remove duplicates
+                    sort(matched.begin(), matched.end());
+                    matched.erase(unique(matched.begin(), matched.end()), matched.end());
+
+                    return matched;
                   }};
     auto mapping = [ov](const auto& tag) { return visit(ov, tag); };
     return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
@@ -451,7 +580,10 @@ struct BasicSearch {
     return out;
   }
 
-  // Determine node type and call specific search function
+  /*
+   * Generic search that dispatches to specific handler based on node type.
+   */
+  template <typename AstNode>
   IndexResult SearchGeneric(const AstNode& node, string_view active_field, bool top_level = false) {
     if (!error_.empty())
       return IndexResult{};
@@ -470,6 +602,12 @@ struct BasicSearch {
       profile_builder_->Finish(start, node, result);
 
     return result;
+  }
+
+  // Resolve overload through Overloaded wrapper
+  IndexResult Search(const AstExpr& expr, string_view active_field) {
+    Overloaded ov{[this, active_field](const auto& n) { return Search(n, active_field); }};
+    return std::visit(ov, expr);
   }
 
   SearchResult Search(const AstNode& query) {

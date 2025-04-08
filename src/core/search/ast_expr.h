@@ -35,6 +35,18 @@ struct AstPrefixNode {
   std::string prefix;
 };
 
+struct AstSuffixNode {
+  explicit AstSuffixNode(std::string suffix);
+
+  std::string suffix;
+};
+
+struct AstInfixNode {
+  explicit AstInfixNode(std::string infix);
+
+  std::string infix;
+};
+
 // Matches numeric range
 struct AstRangeNode {
   AstRangeNode(double lo, bool lo_excl, double hi, bool hi_excl);
@@ -70,7 +82,7 @@ struct AstFieldNode {
 
 // Stores a list of tags for a tag query
 struct AstTagsNode {
-  using TagValue = std::variant<AstTermNode, AstPrefixNode>;
+  using TagValue = std::variant<AstTermNode, AstPrefixNode, AstSuffixNode, AstInfixNode>;
 
   struct TagValueProxy
       : public AstTagsNode::TagValue {  // bison needs it to be default constructible
@@ -79,6 +91,10 @@ struct AstTagsNode {
     TagValueProxy(AstPrefixNode tv) : AstTagsNode::TagValue(std::move(tv)) {
     }
     TagValueProxy(AstTermNode tv) : AstTagsNode::TagValue(std::move(tv)) {
+    }
+    TagValueProxy(AstSuffixNode tv) : AstTagsNode::TagValue(std::move(tv)) {
+    }
+    TagValueProxy(AstInfixNode tv) : AstTagsNode::TagValue(std::move(tv)) {
     }
   };
 
@@ -115,11 +131,17 @@ struct AstSortNode {
 };
 
 using NodeVariants =
-    std::variant<std::monostate, AstStarNode, AstTermNode, AstPrefixNode, AstRangeNode,
-                 AstNegateNode, AstLogicalNode, AstFieldNode, AstTagsNode, AstKnnNode, AstSortNode>;
+    std::variant<std::monostate, AstStarNode, AstTermNode, AstPrefixNode, AstSuffixNode,
+                 AstInfixNode, AstRangeNode, AstNegateNode, AstLogicalNode, AstFieldNode,
+                 AstTagsNode, AstKnnNode, AstSortNode>;
 
 struct AstNode : public NodeVariants {
-  using variant::variant;
+  // Default constructor creates an empty node (monostate)
+  AstNode() : NodeVariants(std::monostate{}) {
+  }
+
+  template <typename T> AstNode(T&& t) : NodeVariants(std::forward<T>(t)) {
+  }
 
   friend std::ostream& operator<<(std::ostream& stream, const AstNode& matrix) {
     return stream;
@@ -127,6 +149,14 @@ struct AstNode : public NodeVariants {
 
   const NodeVariants& Variant() const& {
     return *this;
+  }
+
+  NodeVariants& Variant() & {
+    return *this;
+  }
+
+  NodeVariants&& Variant() && {
+    return std::move(*this);
   }
 };
 

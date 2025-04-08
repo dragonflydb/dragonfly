@@ -66,7 +66,7 @@ double toDouble(string_view src);
 
 // Needed 0 at the end to satisfy bison 3.5.1
 %token YYEOF 0
-%token <std::string> TERM "term" TAG_VAL "tag_val" PARAM "param" FIELD "field" PREFIX "prefix"
+%token <std::string> TERM "term" TAG_VAL "tag_val" PARAM "param" FIELD "field" PREFIX "prefix" SUFFIX "suffix" INFIX "infix"
 
 %precedence TERM TAG_VAL
 %left OR_OP
@@ -128,14 +128,16 @@ search_or_expr:
 search_unary_expr:
   LPAREN search_expr RPAREN           { $$ = std::move($2); }
   | NOT_OP search_unary_expr          { $$ = AstNegateNode(std::move($2)); }
-  | TERM                              { $$ = AstTermNode(std::move($1)); }
+  | TERM                              { $$ = AstTermNode(std::move($1));   }
   | PREFIX                            { $$ = AstPrefixNode(std::move($1)); }
-  | UINT32                            { $$ = AstTermNode(std::move($1)); }
+  | SUFFIX                            { $$ = AstSuffixNode(std::move($1)); }
+  | INFIX                             { $$ = AstInfixNode(std::move($1));  }
+  | UINT32                            { $$ = AstTermNode(std::move($1));   }
   | FIELD COLON field_cond            { $$ = AstFieldNode(std::move($1), std::move($3)); }
 
 field_cond:
-  TERM                                                  { $$ = AstTermNode(std::move($1)); }
-  | UINT32                                              { $$ = AstTermNode(std::move($1)); }
+  TERM                                                  { $$ = AstTermNode(std::move($1));   }
+  | UINT32                                              { $$ = AstTermNode(std::move($1));   }
   | NOT_OP field_cond                                   { $$ = AstNegateNode(std::move($2)); }
   | LPAREN field_cond_expr RPAREN                       { $$ = std::move($2); }
   | LBRACKET numeric_filter_expr RBRACKET               { $$ = std::move($2); }
@@ -177,11 +179,13 @@ tag_list:
   | tag_list OR_OP tag_list_element      { $$ = AstTagsNode(std::move($1), std::move($3)); }
 
 tag_list_element:
-  TERM        { $$ = AstTermNode(std::move($1)); }
+  TERM        { $$ = AstTermNode(std::move($1));   }
   | PREFIX    { $$ = AstPrefixNode(std::move($1)); }
-  | UINT32    { $$ = AstTermNode(std::move($1)); }
-  | DOUBLE    { $$ = AstTermNode(std::move($1)); }
-  | TAG_VAL   { $$ = AstTermNode(std::move($1)); }
+  | SUFFIX    { $$ = AstSuffixNode(std::move($1)); }
+  | INFIX     { $$ = AstInfixNode(std::move($1));  }
+  | UINT32    { $$ = AstTermNode(std::move($1));   }
+  | DOUBLE    { $$ = AstTermNode(std::move($1));   }
+  | TAG_VAL   { $$ = AstTermNode(std::move($1));   }
 
 
 %%
