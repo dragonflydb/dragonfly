@@ -32,9 +32,6 @@ cxx_link(dfly_core base absl::flat_hash_map absl::str_format redis_lib TRDP::lua
 add_executable(dash_bench dash_bench.cc)
 cxx_link(dash_bench dfly_core redis_test_lib)
 
-add_executable(string_set_bench string_set_bench.cc)
-cxx_link(string_set_bench dfly_core base benchmark)
-
 cxx_test(dfly_core_test dfly_core TRDP::fast_float ${PCRE2_LIB} ${RE2_LIB} LABELS DFLY)
 cxx_test(compact_object_test dfly_core LABELS DFLY)
 cxx_test(extent_tree_test dfly_core LABELS DFLY)
