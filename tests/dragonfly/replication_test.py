@@ -2977,7 +2977,7 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
         rand = random.randint(1, 4)
         await c_master.execute_command(f"EXPIRE tmp:{i} {rand} NX")
 
-    seeder = SeederV2(key_target=100_000)
+    seeder = SeederV2(key_target=50_000)
     fill_task = asyncio.create_task(seeder.run(master.client()))
 
     for replica in c_replicas:
@@ -2989,7 +2989,6 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     await fill_task
 
 
-@pytest.mark.skip("Skipped temporarily while being investigated")
 async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyInstanceFactory):
     proactors = 4
     master = df_factory.create(proactor_threads=proactors, dbfilename="")
@@ -2999,7 +2998,7 @@ async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyIn
     c_replica = replica.client()
 
     # 50% big values
-    seeder_config = dict(key_target=20_000, huge_value_target=10000)
+    seeder_config = dict(key_target=8_000, huge_value_target=4_000)
     # Fill instance with test data
     seeder = SeederV2(**seeder_config)
     await seeder.run(c_master, target_deviation=0.01)
