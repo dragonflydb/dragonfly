@@ -1106,7 +1106,17 @@ auto Replica::GetSummary() const -> Summary {
     res.master_link_established = (state_mask_.load() & R_TCP_CONNECTED);
     res.full_sync_in_progress = (state_mask_.load() & R_SYNCING);
     res.full_sync_done = (state_mask_.load() & R_SYNC_OK);
-    res.master_last_io_sec = (ProactorBase::GetMonotonicTimeNs() - last_io_time) / 1000000000UL;
+
+    uint64_t current_time = ProactorBase::GetMonotonicTimeNs();
+    // last_io_time is derived above by reading last_io_time_ from all the flows,
+    // by accessing them from a foreign thread, see the loop above. As a result some
+    // threads may have last_io_time_ bigger than our current time, so we fix it here.
+    if (last_io_time > current_time) {
+      res.master_last_io_sec = 0;
+    } else {
+      res.master_last_io_sec = (current_time - last_io_time) / 1000000000UL;
+    }
+
     res.master_id = master_context_.master_repl_id;
     res.reconnect_count = reconnect_count_;
     res.repl_offset_sum = 0;
