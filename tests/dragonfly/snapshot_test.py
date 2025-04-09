@@ -334,9 +334,7 @@ def delete_s3_objects(bucket, prefix):
 )
 async def test_exit_on_s3_snapshot_load_err(df_factory):
     invalid_s3_dir = "s3://{DRAGONFLY_S3_BUCKET}" + "_invalid_bucket_"
-    df_server = df_factory.create(
-        dir=invalid_s3_dir, dbfilename="db", exit_on_cloud_dir_snapshot_load_err=True
-    )
+    df_server = df_factory.create(dir=invalid_s3_dir, dbfilename="db")
     df_server.start()
     # Let's wait so that process exit
     await asyncio.sleep(2)
