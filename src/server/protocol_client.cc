@@ -258,11 +258,8 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(base::IoBu
 
       ec = Recv(sock_.get(), buffer);
       if (ec) {
-        LOG(WARNING) << "Socket error " << ec;
         return nonstd::make_unexpected(ec);
       }
-
-      VLOG(3) << "Read master response";
     }
 
     result = parser_->Parse(buffer->InputBuffer(), &consumed, &resp_args_);
