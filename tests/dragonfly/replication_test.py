@@ -1251,7 +1251,7 @@ async def test_take_over_counters(df_factory, master_threads, replica_threads):
         assert time.time() - start < 10
 
     async def delayed_takeover():
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(1)
         await c1.execute_command(f"REPLTAKEOVER 5")
 
     _, _, *results = await asyncio.gather(
