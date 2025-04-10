@@ -50,13 +50,28 @@ void DenseSet::IteratorBase::SetExpiryTime(uint32_t ttl_sec) {
   DensePtr* ptr = curr_entry_->IsLink() ? curr_entry_->AsLink() : curr_entry_;
   void* src = ptr->GetObject();
   if (!HasExpiry()) {
+    const size_t old_size = owner_->ObjectAllocSize(ptr->Raw());
     void* new_obj = owner_->ObjectClone(src, false, true);
     ptr->SetObject(new_obj);
+
+    const size_t new_size = owner_->ObjectAllocSize(ptr->Raw());
 
     // Important: we set the ttl bit on the wrapping pointer.
     curr_entry_->SetTtl(true);
     owner_->ObjDelete(src, false);
     src = new_obj;
+
+    // Because setting TTL requires an extra 4 bytes for the key, the allocated size may push the
+    // object into a different mi-malloc page category (e.g. 16 byte page -> 32 byte page). This
+    // results in increased reporting in ObjAllocSize.
+    //
+    // If this size increase is not accounted for, it will cause an overflow in
+    // DenseSet::AddOrReplaceObj due to subtracting larger size from smaller and the type of
+    // obj_malloc_used_ being size_t.
+    if (old_size != new_size) {
+      owner_->DecreaseMallocUsed(old_size);
+      owner_->IncreaseMallocUsed(new_size);
+    }
   }
   owner_->ObjUpdateExpireTime(src, ttl_sec);
 }
@@ -701,7 +716,10 @@ void* DenseSet::AddOrReplaceObj(void* obj, bool has_ttl) {
       dptr = dptr->AsLink();
 
     void* res = dptr->Raw();
-    obj_malloc_used_ -= ObjectAllocSize(res);
+    const size_t res_sz = ObjectAllocSize(res);
+    DCHECK(obj_malloc_used_ >= res_sz) << "Invalid deduction of object size " << res_sz
+                                       << " from total set size " << obj_malloc_used_;
+    obj_malloc_used_ -= res_sz;
     obj_malloc_used_ += ObjectAllocSize(obj);
 
     dptr->SetObject(obj);
