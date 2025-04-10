@@ -163,7 +163,7 @@ bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, Stor
 
   if (cmd->Cid()->IsTransactional())
     tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
-  service_->InvokeCmd(cmd->Cid(), args, rb, cntx_);
+  service_->InvokeCmd(cmd->Cid(), args, rb, cntx_, cmd->Cid()->name());
 
   return true;
 }
@@ -201,7 +201,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     crb.SetReplyMode(cmd->ReplyMode());
 
     local_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args);
-    service_->InvokeCmd(cmd->Cid(), args, &crb, &local_cntx);
+    service_->InvokeCmd(cmd->Cid(), args, &crb, &local_cntx, cmd->Cid()->name());
 
     sinfo.replies.emplace_back(crb.Take());
     current_reply_size_.fetch_add(Size(sinfo.replies.back()), std::memory_order_relaxed);

@@ -1237,10 +1237,7 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
 
   // If cmd is an alias, pass it to Invoke so the stats are updated against the alias. By defaults
   // stats will be updated for cid.name
-  std::optional<std::string_view> orig_cmd_name = std::nullopt;
-  if (registry_.IsAlias(cmd)) {
-    orig_cmd_name = cmd;
-  }
+  std::string_view orig_cmd_name = registry_.IsAlias(cmd) ? cmd : cid->name();
   if (!InvokeCmd(cid, args_no_cmd, builder, dfly_cntx, orig_cmd_name)) {
     builder->SendError("Internal Error");
     builder->CloseConnection();
@@ -1302,7 +1299,7 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
 }
 
 bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBuilder* builder,
-                        ConnectionContext* cntx, std::optional<std::string_view> orig_cmd_name) {
+                        ConnectionContext* cntx, const std::string_view orig_cmd_name) {
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
@@ -1351,8 +1348,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
   auto last_error = builder->ConsumeLastError();
   DCHECK(last_error.empty());
   try {
-    invoke_time_usec = cid->Invoke(tail_args, CommandContext{tx, builder, cntx},
-                                   orig_cmd_name.value_or(cid->name()));
+    invoke_time_usec = cid->Invoke(tail_args, CommandContext{tx, builder, cntx}, orig_cmd_name);
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
@@ -2228,7 +2224,7 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
           }
         }
 
-        bool ok = InvokeCmd(scmd.Cid(), args, rb, cmd_cntx.conn_cntx);
+        bool ok = InvokeCmd(scmd.Cid(), args, rb, cmd_cntx.conn_cntx, scmd.Cid()->name());
         if (!ok || rb->GetError())  // checks for i/o error, not logical error.
           break;
       }
