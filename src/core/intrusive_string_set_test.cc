@@ -4,6 +4,8 @@
 
 #include "core/intrusive_string_set.h"
 
+#include <set>
+
 #include "base/gtest.h"
 
 namespace dfly {
@@ -46,9 +48,27 @@ TEST_F(IntrusiveStringSetTest, IntrusiveStringListTest) {
   EXPECT_EQ(isl.Find("23456789"), ISLEntry());
   EXPECT_FALSE(isl.Erase("test"));
   EXPECT_EQ(isl.Find("test"), ISLEntry());
+}
 
-  IntrusiveStringList isl2;
-  isl2.MoveNext()
+TEST_F(IntrusiveStringSetTest, IntrusiveStringSetAddFindTest) {
+  IntrusiveStringSet ss;
+  std::set<std::string> test_set;
+
+  for (int i = 0; i < 10000; ++i) {
+    test_set.insert(base::RandStr(20));
+  }
+
+  for (const auto& s : test_set) {
+    auto e = ss.Add(s);
+    EXPECT_EQ(e.Key(), s);
+  }
+
+  for (const auto& s : test_set) {
+    auto e = ss.Find(s);
+    EXPECT_EQ(e.Key(), s);
+  }
+
+  EXPECT_EQ(ss.Capacity(), 16384);
 }
 
 }  // namespace dfly

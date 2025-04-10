@@ -82,15 +82,6 @@ class ISLEntry {
   char* data_ = nullptr;
 };
 
-class FakePrevISLEntry : public ISLEntry {
-  FakePrevISLEntry(ISLEntry) {
-    fake_allocated_mem_ = ;
-  }
-
- private:
-  void* fake_allocated_mem_;
-}
-
 class IntrusiveStringList {
  public:
   ~IntrusiveStringList() {
@@ -101,17 +92,32 @@ class IntrusiveStringList {
     }
   }
 
+  IntrusiveStringList() = default;
+  IntrusiveStringList(IntrusiveStringList&& r) {
+    start_ = r.start_;
+    r.start_ = {};
+  }
+
   ISLEntry Insert(ISLEntry e) {
     e.SetNext(start_);
     start_ = e;
     return start_;
   }
 
+  ISLEntry Pop() {
+    auto res = start_;
+    if (start_) {
+      start_ = start_.Next();
+      // TODO consider to res.SetNext(nullptr); for now it looks superfluous
+    }
+    return res;
+  }
+
   ISLEntry Emplace(std::string_view key) {
     return Insert(ISLEntry::Create(key));
   }
 
-  ISLEntry Find(std::string_view str) {
+  ISLEntry Find(std::string_view str) const {
     auto it = start_;
     for (; it && it.Key() != str; it = it.Next())
       ;
@@ -140,12 +146,6 @@ class IntrusiveStringList {
     return false;
   }
 
-  void MoveNext(ISLEntry& prev) {
-    auto next = prev.Next();
-    prev.SetNext(next.Next());
-    Insert(next);
-  }
-
  private:
   ISLEntry start_;
 };
@@ -155,7 +155,10 @@ class IntrusiveStringSet {
   // TODO add TTL processing
   ISLEntry Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX) {
     if (size_ >= entries_.size()) {
-      Grow();
+      auto prev_size = entries_.size();
+      ++capacity_log_;
+      entries_.resize(Capacity());
+      Rehash(prev_size);
     }
     auto bucket_id = BucketId(Hash(str));
     auto& bucket = entries_[bucket_id];
@@ -174,7 +177,7 @@ class IntrusiveStringSet {
     return entries_[bucket_id].Erase(str);
   }
 
-  ISLEntry Find(std::string_view member) {
+  ISLEntry Find(std::string_view member) const {
     auto bucket_id = BucketId(Hash(member));
     return entries_[bucket_id].Find(member);
   }
@@ -189,16 +192,20 @@ class IntrusiveStringSet {
     return size_ == 0;
   }
 
- private:
   std::uint32_t Capacity() const {
     return 1 << capacity_log_;
   }
 
-  void Grow() {
-    ++capacity_log_;
-    entries_.resize(Capacity());
-
-    // TODO rehashing
+ private:
+  // was Grow in StringSet
+  void Rehash(size_t prev_size) {
+    for (int64_t i = prev_size - 1; i >= 0; --i) {
+      auto list = std::move(entries_[i]);
+      for (auto entry = list.Pop(); entry; entry = list.Pop()) {
+        auto bucket_id = BucketId(Hash(entry.Key()));
+        entries_[bucket_id].Insert(entry);
+      }
+    }
   }
 
   uint32_t BucketId(uint64_t hash) const {
@@ -212,7 +219,6 @@ class IntrusiveStringSet {
   }
 
  private:
-  static constexpr size_t kMinSizeShift = 2;
   std::uint32_t capacity_log_ = 1;
   std::uint32_t size_ = 0;  // number of elements in the set.
 
