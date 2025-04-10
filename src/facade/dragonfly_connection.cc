@@ -1802,9 +1802,16 @@ void Connection::SendAsync(MessageHandle msg) {
   stats_->dispatch_queue_entries++;
   stats_->dispatch_queue_bytes += used_mem;
 
+  QueueBackpressure& qbp = GetQueueBackpressure();
   msg.dispatch_ts = ProactorBase::GetMonotonicTimeNs();
+
+  if (msg.IsMonitor() && GetQueueBackpressure().IsPipelineBufferOverLimit(
+                             stats_->dispatch_queue_bytes, dispatch_q_.size())) {
+    ShutdownSelf();
+    return;
+  }
+
   if (msg.IsPubMsg()) {
-    QueueBackpressure& qbp = GetQueueBackpressure();
     qbp.subscriber_bytes.fetch_add(used_mem, memory_order_relaxed);
     stats_->dispatch_queue_subscriber_bytes += used_mem;
   }
