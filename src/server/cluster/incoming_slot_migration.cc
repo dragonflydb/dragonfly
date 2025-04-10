@@ -151,17 +151,8 @@ class ClusterShardMigration {
   atomic_bool pause_ = false;
 };
 
-IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, SlotRanges slots,
-                                             uint32_t shards_num)
-    : source_id_(std::move(source_id)),
-      service_(*se),
-      slots_(std::move(slots)),
-      state_(MigrationState::C_CONNECTING),
-      bc_(shards_num) {
-  shard_flows_.resize(shards_num);
-  for (unsigned i = 0; i < shards_num; ++i) {
-    shard_flows_[i].reset(new ClusterShardMigration(i, &service_, this, bc_));
-  }
+IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, SlotRanges slots)
+    : source_id_(std::move(source_id)), service_(*se), slots_(std::move(slots)), bc_(0) {
 }
 
 IncomingSlotMigration::~IncomingSlotMigration() {
@@ -203,7 +194,8 @@ bool IncomingSlotMigration::Join(long attempt) {
     auto wait_res = bc_->WaitFor(wait_time);
     if (is_attempt_correct) {
       if (wait_res) {
-        state_.store(MigrationState::C_FINISHED);
+        util::fb2::LockGuard lk(state_mu_);
+        state_ = MigrationState::C_FINISHED;
         keys_number_ = cluster::GetKeyCount(slots_);
       } else {
         LOG(WARNING) << "Can't join migration because of data after LSN for " << source_id_;
@@ -215,7 +207,8 @@ bool IncomingSlotMigration::Join(long attempt) {
 }
 
 void IncomingSlotMigration::Stop() {
-  string_view log_state = state_.load() == MigrationState::C_FINISHED ? "Finishing" : "Cancelling";
+  util::fb2::LockGuard lk(state_mu_);
+  string_view log_state = state_ == MigrationState::C_FINISHED ? "Finishing" : "Cancelling";
   LOG(INFO) << log_state << " incoming migration of slots " << slots_.ToString();
   cntx_.Cancel();
 
@@ -244,17 +237,31 @@ void IncomingSlotMigration::Stop() {
   }
 }
 
-void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
-  state_.store(MigrationState::C_SYNC);
+void IncomingSlotMigration::Init(uint32_t shards_num) {
+  util::fb2::LockGuard lk(state_mu_);
+  cntx_.Reset(nullptr);
+  state_ = MigrationState::C_SYNC;
 
+  bc_ = BlockingCounter(shards_num);
+  shard_flows_.resize(shards_num);
+  for (unsigned i = 0; i < shards_num; ++i) {
+    shard_flows_[i].reset(new ClusterShardMigration(i, &service_, this, bc_));
+  }
+}
+
+void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
   shard_flows_[shard]->Start(&cntx_, source);
   VLOG(1) << "Incoming flow " << shard << " finished for " << source_id_;
 }
 
 size_t IncomingSlotMigration::GetKeyCount() const {
-  if (state_.load() == MigrationState::C_FINISHED) {
-    return keys_number_;
+  {
+    util::fb2::LockGuard lk(state_mu_);
+    if (state_ == MigrationState::C_FINISHED) {
+      return keys_number_;
+    }
   }
+
   return cluster::GetKeyCount(slots_);
 }
 
