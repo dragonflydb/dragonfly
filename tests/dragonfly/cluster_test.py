@@ -3175,7 +3175,7 @@ async def test_readonly_replication(
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
-async def test_cluster_sharded_pub_sub_migration(df_factory: DflyInstanceFactory):
+async def test_cancel_blocking_cmd_during_mygration_finalization(df_factory: DflyInstanceFactory):
     # blocking commands should be canceled during migration finalization
     instances = [df_factory.create(port=next(next_port)) for i in range(2)]
     df_factory.start_all(instances)
