@@ -1006,10 +1006,17 @@ void ClusterFamily::ApplyMigrationSlotRangeToConfig(std::string_view node_id,
   auto new_config = is_incoming ? ClusterConfig::Current()->CloneWithChanges(slots, {})
                                 : ClusterConfig::Current()->CloneWithChanges({}, slots);
 
+  auto blocking_filter = [&new_config](ArgSlice keys) {
+    bool moved = any_of(keys.begin(), keys.end(), [&](auto k) { return !new_config->IsMySlot(k); });
+    return moved ? OpStatus::KEY_MOVED : OpStatus::OK;
+  };
   // we don't need to use DispatchTracker here because for IncomingMingration we don't have
   // connectionas that should be tracked and for Outgoing migration we do it under Pause
   server_family_->service().proactor_pool().AwaitFiberOnAll(
-      [&new_config](util::ProactorBase*) { ClusterConfig::SetCurrent(new_config); });
+      [this, &new_config, &blocking_filter](util::ProactorBase*) {
+        server_family_->CancelBlockingOnThread(blocking_filter);
+        ClusterConfig::SetCurrent(new_config);
+      });
   DCHECK(ClusterConfig::Current() != nullptr);
   VLOG(1) << "Config is updated for slots ranges: " << slots.ToString() << " for " << MyID()
           << " : " << node_id;

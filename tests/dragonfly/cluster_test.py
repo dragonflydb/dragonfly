@@ -3172,3 +3172,47 @@ async def test_readonly_replication(
 
     # This behavior can be changed in the future
     assert await r1_node.client.execute_command("GET Y") == None
+
+
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+async def test_cancel_blocking_cmd_during_mygration_finalization(df_factory: DflyInstanceFactory):
+    # blocking commands should be canceled during migration finalization
+    instances = [df_factory.create(port=next(next_port)) for i in range(2)]
+    df_factory.start_all(instances)
+
+    c_nodes = [instance.client() for instance in instances]
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+
+    logging.debug("Start blpop task")
+    blpop_task = asyncio.create_task(c_nodes[0].blpop("list", 0))
+
+    await asyncio.sleep(0.5)
+
+    assert not blpop_task.done()
+
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.port, [(0, 16383)], nodes[1].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+
+    await wait_for_status(nodes[0].client, nodes[1].id, "FINISHED")
+
+    with pytest.raises(aioredis.ResponseError) as e_info:
+        await blpop_task
+        assert "MOVED" in str(e_info.value)
+
+    assert await c_nodes[1].type("list") == "none"
+
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+
+    logging.debug("remove finished migrations")
+    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+
+    assert await c_nodes[1].type("list") == "none"
