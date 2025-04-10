@@ -717,8 +717,7 @@ void* DenseSet::AddOrReplaceObj(void* obj, bool has_ttl) {
 
     void* res = dptr->Raw();
     const size_t res_sz = ObjectAllocSize(res);
-    DCHECK(obj_malloc_used_ >= res_sz) << "Invalid deduction of object size " << res_sz
-                                       << " from total set size " << obj_malloc_used_;
+    DCHECK_GE(obj_malloc_used_, res_sz);
     obj_malloc_used_ -= res_sz;
     obj_malloc_used_ += ObjectAllocSize(obj);
 
