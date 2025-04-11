@@ -1362,7 +1362,7 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
       crb.SetReplyMode(ReplyMode::NONE);
       stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span);
 
-      sf_.service().InvokeCmd(cid, args_span, &crb, &local_cntx);
+      sf_.service().InvokeCmd(cid, args_span, &crb, &local_cntx, cid->name());
     }
 
     if (options.expire_ttl_range.has_value()) {
@@ -1383,7 +1383,7 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
       local_cntx.cid = cid;
       crb.SetReplyMode(ReplyMode::NONE);
       stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span);
-      sf_.service().InvokeCmd(cid, args_span, &crb, &local_cntx);
+      sf_.service().InvokeCmd(cid, args_span, &crb, &local_cntx, cid->name());
     }
   }
 
