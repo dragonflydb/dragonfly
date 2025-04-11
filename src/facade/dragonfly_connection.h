@@ -164,6 +164,10 @@ class Connection : public util::Connection {
       return std::holds_alternative<PubMessagePtr>(handle);
     }
 
+    bool IsMonitor() const {
+      return std::holds_alternative<MonitorMessage>(handle);
+    }
+
     bool IsReplying() const;  // control messges don't reply, messages carrying data do
 
     std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, MCPipelineMessagePtr,
