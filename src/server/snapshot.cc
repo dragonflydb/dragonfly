@@ -7,8 +7,7 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
-#include <mutex>
-
+#include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/heap_size.h"
@@ -27,12 +26,13 @@ using namespace std;
 using namespace util;
 using namespace chrono_literals;
 
-using facade::operator""_MB;
 using facade::operator""_KB;
 namespace {
 thread_local absl::flat_hash_set<SliceSnapshot*> tl_slice_snapshots;
 
-constexpr size_t kMinBlobSize = 32_KB;
+// Controls the chunks size for pushing serialized data. The larger the chunk the more CPU
+// it may require (especially with compression), and less responsive the server may be.
+constexpr size_t kMinBlobSize = 8_KB;
 
 }  // namespace
 
@@ -98,7 +98,8 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
-  snapshot_fb_ = fb2::Fiber("snapshot", [this, stream_journal] {
+  string fb_name = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex());
+  snapshot_fb_ = fb2::Fiber(fb_name, [this, stream_journal] {
     this->IterateBucketsFb(stream_journal);
     db_slice_->UnregisterOnChange(snapshot_version_);
     consumer_->Finalize();
@@ -114,7 +115,7 @@ void SliceSnapshot::StartIncremental(LSN start_lsn) {
 
 // Called only for replication use-case.
 void SliceSnapshot::FinalizeJournalStream(bool cancel) {
-  VLOG(1) << "Finalize Snapshot";
+  VLOG(1) << "FinalizeJournalStream";
   DCHECK(db_slice_->shard_owner()->IsMyThread());
   if (!journal_cb_id_) {  // Finalize only once.
     return;
@@ -129,7 +130,8 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
 
   journal->UnregisterOnChange(cb_id);
   if (!cancel) {
-    serializer_->SendJournalOffset(journal->GetLsn());
+    // always succeeds because serializer_ flushes to string.
+    std::ignore = serializer_->SendJournalOffset(journal->GetLsn());
     PushSerialized(true);
   }
 }
@@ -147,15 +149,12 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
 
 // Serializes all the entries with version less than snapshot_version_.
 void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
-  {
-    auto fiber_name = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex());
-    ThisFiber::SetName(std::move(fiber_name));
-  }
-
   PrimeTable::Cursor cursor;
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
     stats_.keys_total += db_slice_->DbSize(db_indx);
   }
+
+  const uint64_t kCyclesPerJiffy = base::CycleClock::Frequency() >> 16;  // ~15usec.
 
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
     if (!cntx_->IsRunning())
@@ -164,10 +163,9 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
     if (!db_array_[db_indx])
       continue;
 
-    uint64_t last_yield = 0;
     PrimeTable* pt = &db_array_[db_indx]->prime;
-
     VLOG(1) << "Start traversing " << pt->size() << " items for index " << db_indx;
+
     do {
       if (!cntx_->IsRunning()) {
         return;
@@ -176,17 +174,13 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
       PrimeTable::Cursor next = pt->TraverseBuckets(
           cursor, [this, &db_indx](auto it) { return BucketSaveCb(db_indx, it); });
       cursor = next;
-      PushSerialized(false);
 
-      if (stats_.loop_serialized >= last_yield + 100) {
-        DVLOG(2) << "Before sleep " << ThisFiber::GetName();
-        ThisFiber::Yield();
-        DVLOG(2) << "After sleep";
-
-        last_yield = stats_.loop_serialized;
-        // Push in case other fibers (writes commands that pushed previous values)
-        // filled the buffer.
-        PushSerialized(false);
+      // If we do not flush the data, and have not preempted,
+      // we may need to yield to other fibers to avoid grabbind the CPU for too long.
+      if (!PushSerialized(false)) {
+        if (ThisFiber::GetRunningTimeCycles() > kCyclesPerJiffy) {
+          ThisFiber::Yield();
+        }
       }
     } while (cursor);
 
@@ -214,7 +208,7 @@ void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
 
   // The replica sends the LSN of the next entry is wants to receive.
   while (cntx_->IsRunning() && journal->IsLSNInBuffer(lsn)) {
-    serializer_->WriteJournalEntry(journal->GetEntry(lsn));
+    std::ignore = serializer_->WriteJournalEntry(journal->GetEntry(lsn));
     PushSerialized(false);
     lsn++;
   }
@@ -231,10 +225,8 @@ void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
 
   // GetLsn() is always the next lsn that we expect to create.
   if (journal->GetLsn() == lsn) {
-    {
-      FiberAtomicGuard fg;
-      serializer_->SendFullSyncCut();
-    }
+    std::ignore = serializer_->SendFullSyncCut();
+
     auto journal_cb = [this](const journal::JournalItem& item, bool await) {
       OnJournalEntry(item, await);
     };
@@ -255,29 +247,22 @@ bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator i
 
   ++stats_.savecb_calls;
 
-  auto check = [&](uint64_t v) {
-    if (v >= snapshot_version_) {
-      // either has been already serialized or added after snapshotting started.
-      DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << " at " << v;
-      ++stats_.skipped;
-      return false;
-    }
-    return true;
-  };
-
-  if (!check(it.GetVersion())) {
+  if (it.GetVersion() >= snapshot_version_) {
+    // either has been already serialized or added after snapshotting started.
+    DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << " at " << it.GetVersion();
+    ++stats_.skipped;
     return false;
   }
 
   db_slice_->FlushChangeToEarlierCallbacks(db_index, DbSlice::Iterator::FromPrime(it),
                                            snapshot_version_);
 
-  auto* blocking_counter = db_slice_->GetLatch();
+  auto* latch = db_slice_->GetLatch();
 
   // Locking this never preempts. We merely just increment the underline counter such that
   // if SerializeBucket preempts, Heartbeat() won't run because the blocking counter is not
   // zero.
-  std::lock_guard blocking_counter_guard(*blocking_counter);
+  std::lock_guard latch_guard(*latch);
 
   stats_.loop_serialized += SerializeBucket(db_index, it);
 
@@ -324,7 +309,8 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
 
 size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
   io::StringFile sfile;
-  serializer_->FlushToSink(&sfile, flush_state);
+  error_code ec = serializer_->FlushToSink(&sfile, flush_state);
+  CHECK(!ec);  // always succeeds
 
   size_t serialized = sfile.val.size();
   if (serialized == 0)
@@ -332,6 +318,8 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
 
   uint64_t id = rec_id_++;
   DVLOG(2) << "Pushing " << id;
+
+  uint64_t running_cycles = ThisFiber::GetRunningTimeCycles();
 
   fb2::NoOpLock lk;
 
@@ -350,6 +338,12 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
   seq_cond_.notify_all();
 
   VLOG(2) << "Pushed with Serialize() " << serialized;
+
+  // FlushToSink can be quite slow for large values or due compression, therefore
+  // we counter-balance CPU over-usage by forcing sleep.
+  // We measure running_cycles before the preemption points, because they reset the counter.
+  uint64_t sleep_usec = (running_cycles * 1000'000 / base::CycleClock::Frequency()) / 2;
+  ThisFiber::SleepFor(chrono::microseconds(std::min(sleep_usec, 2000ul)));
 
   return serialized;
 }
@@ -419,19 +413,19 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 // value. This is guaranteed by the fact that OnJournalEntry runs always after OnDbChange, and
 // no database switch can be performed between those two calls, because they are part of one
 // transaction.
-void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await) {
-  // To enable journal flushing to sync after non auto journal command is executed we call
-  // TriggerJournalWriteToSink. This call uses the NOOP opcode with await=true. Since there is no
-  // additional journal change to serialize, it simply invokes PushSerialized.
+// allow_flush is controlled by Journal::SetFlushMode
+// (usually it's true unless we are in the middle of a critical section that can not preempt).
+void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool allow_flush) {
   {
-    // We should release the lock after we preempt
-    std::lock_guard guard(big_value_mu_);
+    // We grab the lock in case we are in the middle of serializing a bucket, so it serves as a
+    // barrier here for atomic serialization.
+    std::lock_guard barrier(big_value_mu_);
     if (item.opcode != journal::Op::NOOP) {
-      serializer_->WriteJournalEntry(item.data);
+      std::ignore = serializer_->WriteJournalEntry(item.data);
     }
   }
 
-  if (await) {
+  if (allow_flush) {
     // This is the only place that flushes in streaming mode
     // once the iterate buckets fiber finished.
     PushSerialized(false);
