@@ -6,6 +6,7 @@
 
 #include <absl/container/inlined_vector.h>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "facade/dragonfly_connection.h"
@@ -14,6 +15,8 @@
 #include "server/engine_shard_set.h"
 #include "server/transaction.h"
 #include "server/tx_base.h"
+
+ABSL_FLAG(size_t, throttle_squashed, 0, "");
 
 namespace dfly {
 
@@ -63,6 +66,10 @@ size_t Size(const facade::CapturingReplyBuilder::Payload& payload) {
 }  // namespace
 
 atomic_uint64_t MultiCommandSquasher::current_reply_size_ = 0;
+thread_local size_t MultiCommandSquasher::throttle_size_limit_ =
+    absl::GetFlag(FLAGS_throttle_squashed);
+
+thread_local util::fb2::EventCount MultiCommandSquasher::ec_;
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
                                            Service* service, bool verify_commands, bool error_abort)
@@ -201,6 +208,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     crb.SetReplyMode(cmd->ReplyMode());
 
     local_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args);
+
     service_->InvokeCmd(cmd->Cid(), args, &crb, &local_cntx);
 
     sinfo.replies.emplace_back(crb.Take());
@@ -221,6 +229,9 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
 
   if (order_.empty())
     return true;
+
+  MultiCommandSquasher::ec_.await(
+      []() { return !MultiCommandSquasher::IsMultiCommandSquasherOverLimit(); });
 
   unsigned num_shards = 0;
   for (auto& sd : sharded_) {
@@ -261,19 +272,23 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   uint64_t after_hop = proactor->GetMonotonicTimeNs();
   bool aborted = false;
 
+  size_t size = 0;
   for (auto idx : order_) {
     auto& replies = sharded_[idx].replies;
     CHECK(!replies.empty());
 
     aborted |= error_abort_ && CapturingReplyBuilder::TryExtractError(replies.back());
 
-    current_reply_size_.fetch_sub(Size(replies.back()), std::memory_order_relaxed);
+    size += Size(replies.back());
     CapturingReplyBuilder::Apply(std::move(replies.back()), rb);
     replies.pop_back();
 
     if (aborted)
       break;
   }
+  current_reply_size_.fetch_sub(size, std::memory_order_relaxed);
+  MultiCommandSquasher::ec_.notifyAll();
+
   uint64_t after_reply = proactor->GetMonotonicTimeNs();
   ServerState::SafeTLocal()->stats.multi_squash_exec_hop_usec += (after_hop - start) / 1000;
   ServerState::SafeTLocal()->stats.multi_squash_exec_reply_usec += (after_reply - after_hop) / 1000;

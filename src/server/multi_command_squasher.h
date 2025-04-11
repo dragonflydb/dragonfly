@@ -7,6 +7,7 @@
 #include "facade/reply_capture.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
@@ -30,6 +31,15 @@ class MultiCommandSquasher {
 
   static size_t GetRepliesMemSize() {
     return current_reply_size_.load(std::memory_order_relaxed);
+  }
+
+  static bool IsMultiCommandSquasherOverLimit() {
+    const bool over_limit =
+        throttle_size_limit_ > 0 &&
+        current_reply_size_.load(std::memory_order_relaxed) > throttle_size_limit_;
+    VLOG_IF(2, over_limit) << "MultiCommandSquasher overlimit: " << throttle_size_limit_
+                           << " current reply size " << current_reply_size_;
+    return over_limit;
   }
 
  private:
@@ -92,6 +102,9 @@ class MultiCommandSquasher {
 
   // we increase size in one thread and decrease in another
   static atomic_uint64_t current_reply_size_;
+  static thread_local size_t throttle_size_limit_;
+  // Used to throttle when memory is tight
+  static thread_local util::fb2::EventCount ec_;
 };
 
 }  // namespace dfly

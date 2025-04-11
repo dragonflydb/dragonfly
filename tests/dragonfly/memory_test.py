@@ -1,4 +1,5 @@
 import pytest
+import asyncio
 from redis import asyncio as aioredis
 from .utility import *
 import logging
@@ -222,3 +223,40 @@ async def test_cache_eviction_with_rss_deny_oom(
         )
         stats_info = await async_client.info("stats")
         logging.info(f'Current evicted: {stats_info["evicted_keys"]}. Total keys: {num_keys}.')
+
+
+@pytest.mark.asyncio
+async def test_throttle_on_commands_squashing_replies_bytes(df_factory: DflyInstanceFactory):
+    df = df_factory.create(
+        proactor_threads=2, throttle_squashed=1_000_000_000, vmodule="multi_command_squasher=2"
+    )
+    df.start()
+
+    client = df.client()
+    # 1gb
+    await client.execute_command("debug populate 1 test 10000 rand type hash elements 100000")
+
+    async def poll():
+        # At any point we should not cross this limit
+        cl = df.client()
+        await cl.execute_command("multi")
+        await cl.execute_command("hgetall test:0")
+        await cl.execute_command("exec")
+
+    # With the current approach this will overshoot
+    #    await client.execute_command("multi")
+    #    await client.execute_command("hgetall test:0")
+    #    await client.execute_command("hgetall test:0")
+    #    await client.execute_command("hgetall test:0")
+    #    await client.execute_command("hgetall test:0")
+    #    res = await client.execute_command("exec")
+    tasks = []
+    for i in range(50):
+        tasks.append(asyncio.create_task(poll()))
+
+    for task in tasks:
+        await task
+
+    df.stop()
+    found = df.find_in_logs("MultiCommandSquasher overlimit: ")
+    assert len(found) > 0
