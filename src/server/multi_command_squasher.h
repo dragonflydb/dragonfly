@@ -32,6 +32,12 @@ class MultiCommandSquasher {
     return current_reply_size_.load(std::memory_order_relaxed);
   }
 
+  static bool IsMultiCommandSquasherOverLimit() {
+    LOG(INFO) << throttle_size_limit_ << " current reply suze " << current_reply_size_;
+    return throttle_size_limit_ > 0 &&
+           current_reply_size_.load(std::memory_order_relaxed) > throttle_size_limit_;
+  }
+
  private:
   // Per-shard execution info.
   struct ShardExecInfo {
@@ -92,6 +98,7 @@ class MultiCommandSquasher {
 
   // we increase size in one thread and decrease in another
   static atomic_uint64_t current_reply_size_;
+  static thread_local size_t throttle_size_limit_;
 };
 
 }  // namespace dfly
