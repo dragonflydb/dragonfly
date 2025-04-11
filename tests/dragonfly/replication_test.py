@@ -1210,6 +1210,7 @@ take_over_cases = [
 ]
 
 
+@pytest.mark.exclude_epoll
 @pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
 async def test_take_over_counters(df_factory, master_threads, replica_threads):
     master = df_factory.create(proactor_threads=master_threads)
