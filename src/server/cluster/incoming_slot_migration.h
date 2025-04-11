@@ -19,7 +19,7 @@ class ClusterShardMigration;
 // manage migration process state and data
 class IncomingSlotMigration {
  public:
-  IncomingSlotMigration(std::string source_id, Service* se, SlotRanges slots, uint32_t shards_num);
+  IncomingSlotMigration(std::string source_id, Service* se, SlotRanges slots);
   ~IncomingSlotMigration();
 
   // process data from FDLYMIGRATE FLOW cmd
@@ -34,8 +34,12 @@ class IncomingSlotMigration {
   // Stop and join the migration, can be called even after migration is finished
   void Stop();
 
+  // Init/Reinit migration
+  void Init(uint32_t shards_num);
+
   MigrationState GetState() const {
-    return state_.load();
+    util::fb2::LockGuard lk(state_mu_);
+    return state_;
   }
 
   const SlotRanges& GetSlots() const {
@@ -70,11 +74,13 @@ class IncomingSlotMigration {
   Service& service_;
   std::vector<std::unique_ptr<ClusterShardMigration>> shard_flows_;
   SlotRanges slots_;
-  std::atomic<MigrationState> state_ = MigrationState::C_CONNECTING;
   ExecutionState cntx_;
   mutable util::fb2::Mutex error_mu_;
   dfly::GenericError last_error_ ABSL_GUARDED_BY(error_mu_);
   std::atomic<size_t> errors_count_ = 0;
+
+  mutable util::fb2::Mutex state_mu_;
+  MigrationState state_ ABSL_GUARDED_BY(state_mu_) = MigrationState::C_CONNECTING;
 
   // when migration is finished we need to store number of migrated keys
   // because new request can add or remove keys and we get incorrect statistic

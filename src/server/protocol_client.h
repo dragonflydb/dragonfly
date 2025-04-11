@@ -112,6 +112,8 @@ class ProtocolClient {
   }
 
  private:
+  std::error_code Recv(util::FiberSocketBase* input, base::IoBuf* dest);
+
   ServerContext server_context_;
 
   std::unique_ptr<facade::RedisParser> parser_;

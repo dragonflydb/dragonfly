@@ -90,7 +90,7 @@ class ClusterFamily {
   std::shared_ptr<IncomingSlotMigration> GetIncomingMigration(std::string_view source_id)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
 
-  void StartSlotMigrations(std::vector<MigrationInfo> migrations);
+  void StartNewSlotMigrations(const ClusterConfig& new_config);
 
   // must be destroyed excluded set_config_mu and migration_mu_ locks
   struct PreparedToRemoveOutgoingMigrations {
@@ -103,10 +103,6 @@ class ClusterFamily {
       std::shared_ptr<ClusterConfig> new_config, std::shared_ptr<ClusterConfig> old_config)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
   void RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations)
-      ABSL_LOCKS_EXCLUDED(migration_mu_);
-
-  // store info about migration and create unique session id
-  std::shared_ptr<OutgoingMigration> CreateOutgoingMigration(MigrationInfo info)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
 
   mutable util::fb2::Mutex migration_mu_;  // guard migrations operations
