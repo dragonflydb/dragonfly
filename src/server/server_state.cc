@@ -240,8 +240,10 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       break;
     }
 
-    uint32_t timeout = absl::GetFlag(FLAGS_timeout);
-    uint32_t send_timeout = absl::GetFlag(FLAGS_send_timeout);
+    const uint32_t timeout = absl::GetFlag(FLAGS_timeout);
+    const uint32_t send_timeout = absl::GetFlag(FLAGS_send_timeout);
+    VLOG(1) << "ConnectionsWatcherFb: timeout=" << timeout << ", send_timeout=" << send_timeout;
+
     if (timeout == 0 && send_timeout == 0) {
       continue;
     }
@@ -267,9 +269,28 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
 
       bool idle_read = timeout != 0 && !is_replica && phase == Phase::READ_SOCKET &&
                        dfly_conn->idle_time() > timeout;
-      bool stuck_sending = send_timeout != 0 && !is_replica && dfly_conn->IsSending() &&
-                           dfly_conn->idle_time() > send_timeout;
+      bool stuck_sending = false;
+
+      if (send_timeout != 0 && !is_replica && dfly_conn->IsSending()) {
+        uint64_t oldest_ts = facade::SinkReplyBuilder::GetOldestTimestamp(dfly_conn);
+        if (oldest_ts > 0) {
+          uint64_t current_time_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
+          uint64_t elapsed_ms = (current_time_ns - oldest_ts) / 1000000;
+          if (elapsed_ms > send_timeout * 1000) {
+            stuck_sending = true;
+          }
+        } else {
+          VLOG(1) << "No oldest timestamp for connection: " << dfly_conn->GetClientInfo();
+        }
+      }
+
+      VLOG(1) << "Connection check: " << dfly_conn->GetClientInfo()
+              << ", phase=" << static_cast<int>(phase) << ", idle_time=" << dfly_conn->idle_time()
+              << ", is_replica=" << is_replica << ", is_sending=" << dfly_conn->IsSending()
+              << ", idle_read=" << idle_read << ", stuck_sending=" << stuck_sending;
+
       if (idle_read || stuck_sending) {
+        VLOG(1) << "Connection will be closed due to timeout: " << dfly_conn->GetClientInfo();
         conn_refs.push_back(dfly_conn->Borrow());
       }
     };
@@ -281,6 +302,7 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       last_reference.reset();
     }
 
+    VLOG(1) << "Found " << conn_refs.size() << " connections to close due to timeout";
     for (auto& ref : conn_refs) {
       facade::Connection* conn = ref.Get();
       if (conn) {
