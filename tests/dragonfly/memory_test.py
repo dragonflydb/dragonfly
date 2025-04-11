@@ -222,3 +222,22 @@ async def test_cache_eviction_with_rss_deny_oom(
         )
         stats_info = await async_client.info("stats")
         logging.info(f'Current evicted: {stats_info["evicted_keys"]}. Total keys: {num_keys}.')
+
+
+@pytest.mark.asyncio
+async def test_throttle_on_commands_squashing_replies_bytes(df_factory: DflyInstanceFactory):
+    df = df_factory.create(proactor_threads=2, throttle_squashed=1000000000)
+    df.start()
+
+    client = df.client()
+    # 1gb
+    await client.execute_command("debug populate 1 test 10000 rand type hash elements 100000")
+
+    await client.execute_command("multi")
+    await client.execute_command("hgetall test:0")
+    await client.execute_command("hgetall test:0")
+    await client.execute_command("hgetall test:0")
+    await client.execute_command("hgetall test:0")
+    res = await client.execute_command("exec")
+    assert type(res[1]) is redis.exceptions.ResponseError
+    assert type(res[2]) is redis.exceptions.ResponseError
