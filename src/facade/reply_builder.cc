@@ -68,6 +68,7 @@ char* write_piece(string_view str, char* dest) {
 }  // namespace
 
 thread_local SinkReplyBuilder::PendingList SinkReplyBuilder::pending_list;
+thread_local SinkReplyBuilder::PendingMap SinkReplyBuilder::pending_map;
 
 SinkReplyBuilder::ReplyAggregator::~ReplyAggregator() {
   rb->batched_ = prev;
@@ -156,9 +157,16 @@ void SinkReplyBuilder::Send() {
   auto& reply_stats = tl_facade_stats->reply_stats;
 
   send_active_ = true;
-  PendingPin pin(util::fb2::ProactorBase::GetMonotonicTimeNs());
+
+  uint64_t current_time_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
+
+  PendingPin pin(current_time_ns, connection_);
 
   pending_list.push_back(pin);
+
+  if (connection_) {
+    pending_map[connection_].push_back(pin);
+  }
 
   reply_stats.io_write_cnt++;
   reply_stats.io_write_bytes += total_size_;
@@ -167,6 +175,17 @@ void SinkReplyBuilder::Send() {
     ec_ = ec;
 
   auto it = PendingList::s_iterator_to(pin);
+
+  if (connection_) {
+    auto map_it = pending_map.find(connection_);
+    if (map_it != pending_map.end()) {
+      map_it->second.remove(pin);
+    }
+    if (map_it->second.empty()) {
+      pending_map.erase(connection_);
+    }
+  }
+
   pending_list.erase(it);
 
   uint64_t after_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();

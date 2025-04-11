@@ -272,20 +272,15 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       bool stuck_sending = false;
 
       if (send_timeout != 0 && !is_replica && dfly_conn->IsSending()) {
-        // If the connection is in sending state (IsSending() == true), we check
-        // whether the timeout has elapsed since the last successful send.
-        // SinkReplyBuilder::pending_list contains connections waiting to send data,
-        // and we can check if the timeout has elapsed for them.
-        const auto& pending_list = facade::SinkReplyBuilder::pending_list;
-        if (!pending_list.empty()) {
+        uint64_t oldest_ts = facade::SinkReplyBuilder::GetOldestTimestamp(dfly_conn);
+        if (oldest_ts > 0) {
           uint64_t current_time_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
-          const auto& oldest_member = pending_list.front();
-          uint64_t elapsed_ms = (current_time_ns - oldest_member.timestamp_ns) / 1000000;
-
-          // Check if the timeout has elapsed
+          uint64_t elapsed_ms = (current_time_ns - oldest_ts) / 1000000;
           if (elapsed_ms > send_timeout * 1000) {
             stuck_sending = true;
           }
+        } else {
+          VLOG(1) << "No oldest timestamp for connection: " << dfly_conn->GetClientInfo();
         }
       }
 
