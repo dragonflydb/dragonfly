@@ -124,6 +124,8 @@ class SinkReplyBuilder {
     return std::exchange(last_error_, {});
   }
 
+  uint64_t GetLastSendTimeNs() const;
+
  protected:
   template <typename... Ts>
   void WritePieces(Ts&&... pieces);     // Copy pieces into buffer and reference buffer
@@ -151,6 +153,7 @@ class SinkReplyBuilder {
   // lifetime ends or copies refs to the buffer.
   absl::InlinedVector<iovec, 16> vecs_;
   size_t guaranteed_pieces_ = 0;  // length of prefix of vecs_ that are guaranteed to be pieces
+  uint64_t send_time_ns_ = 0;
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {

@@ -313,6 +313,8 @@ class Connection : public util::Connection {
     return time(nullptr) - last_interaction_;
   }
 
+  unsigned send_idle_time() const;
+
   Phase phase() const {
     return phase_;
   }
