@@ -822,11 +822,13 @@ void Connection::HandleRequests() {
   }
 }
 
-unsigned Connection::send_idle_time() const {
-  return reply_builder_ ? (util::fb2::ProactorBase::GetMonotonicTimeNs() -
-                           reply_builder_->GetLastSendTimeNs()) /
-                              1'000'000'000
-                        : 0;
+unsigned Connection::GetSendIdleTime() const {
+  if (reply_builder_ && reply_builder_->GetLastSendTimeNs() != 0) {
+    return (util::fb2::ProactorBase::GetMonotonicTimeNs() - reply_builder_->GetLastSendTimeNs()) /
+           1'000'000'000;
+  }
+
+  return 0;
 }
 
 void Connection::RegisterBreakHook(BreakerCb breaker_cb) {

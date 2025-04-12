@@ -270,7 +270,7 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       bool idle_read = timeout != 0 && !is_replica && phase == Phase::READ_SOCKET &&
                        dfly_conn->idle_time() > timeout;
       bool stuck_sending = send_timeout != 0 && !is_replica && dfly_conn->IsSending() &&
-                           dfly_conn->send_idle_time() > send_timeout;
+                           dfly_conn->GetSendIdleTime() > send_timeout;
 
       VLOG(1) << "Connection check: " << dfly_conn->GetClientInfo()
               << ", phase=" << static_cast<int>(phase) << ", idle_time=" << dfly_conn->idle_time()

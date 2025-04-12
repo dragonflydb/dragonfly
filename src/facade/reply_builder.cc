@@ -160,7 +160,8 @@ void SinkReplyBuilder::Send() {
   auto& reply_stats = tl_facade_stats->reply_stats;
 
   send_active_ = true;
-  PendingPin pin(util::fb2::ProactorBase::GetMonotonicTimeNs());
+  send_time_ns_ = util::fb2::ProactorBase::GetMonotonicTimeNs();
+  PendingPin pin(send_time_ns_);
 
   pending_list.push_back(pin);
 
@@ -173,9 +174,11 @@ void SinkReplyBuilder::Send() {
   auto it = PendingList::s_iterator_to(pin);
   pending_list.erase(it);
 
-  send_time_ns_ = util::fb2::ProactorBase::GetMonotonicTimeNs();
+  send_time_ns_ = 0;
+
+  uint64_t after_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
   reply_stats.send_stats.count++;
-  reply_stats.send_stats.total_duration += (send_time_ns_ - pin.timestamp_ns) / 1'000;
+  reply_stats.send_stats.total_duration += (after_ns - pin.timestamp_ns) / 1'000;
   DVLOG(2) << "Finished writing " << total_size_ << " bytes";
   send_active_ = false;
 }
