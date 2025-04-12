@@ -462,8 +462,6 @@ bool Connection::MessageHandle::IsReplying() const {
 struct Connection::AsyncOperations {
   AsyncOperations(SinkReplyBuilder* b, Connection* me)
       : stats{&tl_facade_stats->conn_stats}, builder{b}, self(me) {
-    if (b)
-      b->SetConnection(me);
   }
 
   void operator()(const PubMessage& msg);

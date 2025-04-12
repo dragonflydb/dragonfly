@@ -269,20 +269,8 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
 
       bool idle_read = timeout != 0 && !is_replica && phase == Phase::READ_SOCKET &&
                        dfly_conn->idle_time() > timeout;
-      bool stuck_sending = false;
-
-      if (send_timeout != 0 && !is_replica && dfly_conn->IsSending()) {
-        uint64_t oldest_ts = facade::SinkReplyBuilder::GetOldestTimestamp(dfly_conn);
-        if (oldest_ts > 0) {
-          uint64_t current_time_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
-          uint64_t elapsed_ms = (current_time_ns - oldest_ts) / 1000000;
-          if (elapsed_ms > send_timeout * 1000) {
-            stuck_sending = true;
-          }
-        } else {
-          VLOG(1) << "No oldest timestamp for connection: " << dfly_conn->GetClientInfo();
-        }
-      }
+      bool stuck_sending = send_timeout != 0 && !is_replica && dfly_conn->IsSending() &&
+                           dfly_conn->idle_time() > send_timeout;
 
       VLOG(1) << "Connection check: " << dfly_conn->GetClientInfo()
               << ", phase=" << static_cast<int>(phase) << ", idle_time=" << dfly_conn->idle_time()

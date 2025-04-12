@@ -9,14 +9,11 @@
 #include <optional>
 #include <string_view>
 
-#include "base/logging.h"
 #include "facade/facade_types.h"
 #include "facade/op_status.h"
 #include "io/io.h"
 
 namespace facade {
-
-class Connection;
 
 // Reply mode allows filtering replies.
 enum class ReplyMode {
@@ -42,13 +39,8 @@ class SinkReplyBuilder {
   struct PendingPin : public boost::intrusive::list_base_hook<
                           ::boost::intrusive::link_mode<::boost::intrusive::normal_link>> {
     uint64_t timestamp_ns;
-    Connection* connection;
 
-    PendingPin(uint64_t v = 0, Connection* conn = nullptr) : timestamp_ns(v), connection(conn) {
-    }
-
-    bool operator==(const PendingPin& other) const {
-      return timestamp_ns == other.timestamp_ns && connection == other.connection;
+    PendingPin(uint64_t v = 0) : timestamp_ns(v) {
     }
   };
 
@@ -56,23 +48,9 @@ class SinkReplyBuilder {
       boost::intrusive::list<PendingPin, boost::intrusive::constant_time_size<false>,
                              boost::intrusive::cache_last<false>>;
 
-  using ConnectionPendingList = std::list<PendingPin>;
-  using PendingMap = absl::flat_hash_map<Connection*, ConnectionPendingList>;
-
   static thread_local PendingList pending_list;
-  static thread_local PendingMap pending_map;
 
-  static uint64_t GetOldestTimestamp(Connection* conn) {
-    auto it = pending_map.find(conn);
-    if (it == pending_map.end())
-      return 0;
-
-    DCHECK(!it->second.empty());
-
-    return it->second.front().timestamp_ns;
-  }
-
-  explicit SinkReplyBuilder(io::Sink* sink) : sink_(sink), connection_(nullptr) {
+  explicit SinkReplyBuilder(io::Sink* sink) : sink_(sink) {
   }
 
   virtual ~SinkReplyBuilder() = default;
@@ -121,10 +99,6 @@ class SinkReplyBuilder {
 
   void CloseConnection();
 
-  void SetConnection(Connection* conn) {
-    connection_ = conn;
-  }
-
   static const ReplyStats& GetThreadLocalStats() {
     return tl_facade_stats->reply_stats;
   }
@@ -164,7 +138,6 @@ class SinkReplyBuilder {
 
  private:
   io::Sink* sink_;
-  Connection* connection_;
   std::error_code ec_;
 
   bool send_active_ = false;  // set while Send() is suspended on socket write
