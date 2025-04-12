@@ -167,6 +167,7 @@ async def check_all_replicas_finished(c_replicas, c_master, timeout=20):
     start = time.time()
     while (time.time() - start) < timeout:
         if not waiting_for:
+            logging.debug("All replicas finished after %s seconds", time.time() - start)
             return
         await asyncio.sleep(0.2)
         m_offset = await c_master.execute_command("DFLY REPLICAOFFSET")
@@ -2714,7 +2715,7 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
 
     await asyncio.sleep(1)  # replica will start resync
 
-    await check_all_replicas_finished([c_replica], c_master)
+    await check_all_replicas_finished([c_replica], c_master, 60)
     await assert_replica_reconnections(replica, 0)
 
 

@@ -176,7 +176,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
       cursor = next;
 
       // If we do not flush the data, and have not preempted,
-      // we may need to yield to other fibers to avoid grabbind the CPU for too long.
+      // we may need to yield to other fibers to avoid grabbing CPU for too long.
       if (!PushSerialized(false)) {
         if (ThisFiber::GetRunningTimeCycles() > kCyclesPerJiffy) {
           ThisFiber::Yield();
