@@ -38,10 +38,10 @@ scores = sample_attr("scores")
 eng_text = st.text(alphabet=string.ascii_letters, min_size=1)
 ints = st.integers(min_value=MIN_INT, max_value=MAX_INT)
 int_as_bytes = st.builds(lambda x: str(_default_normalize(x)).encode(), ints)
-float_as_bytes = st.builds(
-    lambda x: repr(_default_normalize(x)).encode(),
-    st.floats(width=32, allow_nan=False, allow_subnormal=False, allow_infinity=False),
+floats = st.floats(
+    width=32, allow_nan=False, allow_subnormal=False, allow_infinity=False
 )
+float_as_bytes = st.builds(lambda x: repr(_default_normalize(x)).encode(), floats)
 counts = st.integers(min_value=-3, max_value=3) | ints
 # Redis has an integer overflow bug in swapdb, so we confine the numbers to
 # a limited range (https://github.com/antirez/redis/issues/5737).
@@ -310,7 +310,7 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
                     unique=True,
                 ),
                 scores=st.lists(
-                    st.floats(width=32, allow_nan=False),
+                    floats,
                     min_size=2,
                     max_size=5,
                     unique=True,
