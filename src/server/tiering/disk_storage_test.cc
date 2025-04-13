@@ -129,8 +129,8 @@ TEST_F(DiskStorageTest, ReUse) {
 
 
 TEST_F(DiskStorageTest, FlakyDevice) {
-  if (!filesystem::exists("/mnt/tiering_flaky"))
-    GTEST_SKIP() << "Flaky device not created, use tools/faulty_io.sh";
+  //if (!filesystem::exists("/mnt/tiering_flaky"))
+  //  GTEST_SKIP() << "Flaky device not created, use tools/faulty_io.sh";
 
   pp_->at(0)->Await([this] {
     auto ec = Open("/mnt/tiering_flaky/backing");

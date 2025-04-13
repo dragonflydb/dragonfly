@@ -160,6 +160,8 @@ jobs:
 
       - name: C++ Unit Tests
         run: |
+          ${GITHUB_WORKSPACE}/tools/fauly_io.sh create
+
           cd ${GITHUB_WORKSPACE}/build
           echo Run ctest -V -L DFLY
 
@@ -195,6 +197,8 @@ jobs:
           timeout 5m ./dragonfly_test
           timeout 5m ./json_family_test --jsonpathv2=false
           timeout 5m ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
+
+          ${GITHUB_WORKSPACE}/tools/fauly_io.sh remove
 
       - name: Upload unit logs on failure
         if: failure()
