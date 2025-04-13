@@ -273,14 +273,22 @@ TEST_F(TieredStorageTest, FlushAll) {
     }
   });
 
-  ExpectConditionWithinTimeout([&] { return GetMetrics().events.hits > 2; });
+  Metrics metrics;
+  ExpectConditionWithinTimeout([&] {
+    metrics = GetMetrics();
+    return metrics.events.hits > 2;
+  });
+  LOG(INFO) << FormatMetrics(metrics);
+
   Run({"FLUSHALL"});
 
   done = true;
-  util::ThisFiber::SleepFor(50ms);
+  util::ThisFiber::SleepFor(100ms);
   reader.Join();
 
-  auto metrics = GetMetrics();
+  metrics = GetMetrics();
+  LOG(INFO) << FormatMetrics(metrics);
+
   EXPECT_EQ(metrics.db_stats.front().tiered_entries, 0u);
   EXPECT_GT(metrics.tiered_stats.total_fetches, 2u);
 }
@@ -324,6 +332,47 @@ TEST_F(TieredStorageTest, Expiry) {
   Run({"psetex", "key1", "1", val});
   auto resp = Run({"get", "key1"});
   EXPECT_EQ(resp, val);
+}
+
+TEST_F(TieredStorageTest, SetExistingExpire) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+  SetFlag(&FLAGS_tiered_experimental_cooling, false);
+
+  const int kNum = 20;
+  for (size_t i = 0; i < kNum; i++) {
+    Run({"SETEX", absl::StrCat("k", i), "100", BuildString(256)});
+  }
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.total_stashes > 1; });
+
+  for (size_t i = 0; i < kNum; i++) {
+    Run({"SETEX", absl::StrCat("k", i), "100", BuildString(256)});
+  }
+
+  for (size_t i = 0; i < kNum; i++) {
+    auto resp = Run({"TTL", absl::StrCat("k", i)});
+    EXPECT_THAT(resp, IntArg(100));
+  }
+}
+
+TEST_F(TieredStorageTest, Dump) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+
+  // we want to test without cooling to trigger disk I/O on reads.
+  SetFlag(&FLAGS_tiered_experimental_cooling, false);
+
+  const int kNum = 10;
+  for (size_t i = 0; i < kNum; i++) {
+    Run({"SET", absl::StrCat("k", i), BuildString(3000)});  // big enough to trigger offloading.
+  }
+
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.total_stashes == kNum; });
+
+  auto resp = Run({"DUMP", "k0"});
+  EXPECT_THAT(Run({"del", "k0"}), IntArg(1));
+  resp = Run({"restore", "k0", "0", facade::ToSV(resp.GetBuf())});
+  EXPECT_EQ(resp, "OK");
 }
 
 }  // namespace dfly

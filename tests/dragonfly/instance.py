@@ -380,16 +380,17 @@ class DflyInstance:
             for metric_family in text_string_to_metric_families(data)
         }
 
-    def is_in_logs(self, pattern):
+    def find_in_logs(self, pattern):
         if self.proc is not None:
             raise RuntimeError("Must close server first")
 
+        results = []
         matcher = re.compile(pattern)
         for path in self.log_files:
             for line in open(path):
                 if matcher.search(line):
-                    return True
-        return False
+                    results.append(line)
+        return results
 
     @property
     def rss(self):
@@ -416,9 +417,11 @@ class DflyInstanceFactory:
         args.setdefault("noversion_check", None)
         # MacOs does not set it automatically, so we need to set it manually
         args.setdefault("maxmemory", "8G")
-        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,proactor_pool=1,dflycmd=1,snapshot=1"
+        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,proactor_pool=1,dflycmd=1,snapshot=1,streamer=1"
         args.setdefault("vmodule", vmod)
         args.setdefault("jsonpathv2")
+        if version > 1.27:
+            args.setdefault("omit_basic_usage")
 
         # If path is not set, we assume that we are running the latest dragonfly.
         if not path:
@@ -427,6 +430,9 @@ class DflyInstanceFactory:
 
         if version >= 1.21 and "serialization_max_chunk_size" not in args:
             args.setdefault("serialization_max_chunk_size", 300000)
+
+        if version >= 1.26:
+            args.setdefault("fiber_safety_margin=4096")
 
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v
@@ -476,8 +482,10 @@ class RedisServer:
         self.port = port
         self.proc = None
 
-    def start(self, **kwargs):
-        servers = ["redis-server-6.2.11", "redis-server-7.2.2", "valkey-server-8.0.1"]
+    def start(self, redis7=None, **kwargs):
+        servers = ["redis-server-7.2.2"]
+        if not redis7:
+            servers += ["redis-server-6.2.11", "valkey-server-8.0.1"]
         command = [
             random.choice(servers),
             f"--port {self.port}",

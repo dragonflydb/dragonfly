@@ -6,7 +6,7 @@ import random
 import redis.asyncio as aioredis
 
 from . import dfly_args
-from .seeder import StaticSeeder
+from .seeder import DebugPopulateSeeder
 from .utility import info_tick_timer
 
 
@@ -21,7 +21,7 @@ async def test_basic_memory_usage(async_client: aioredis.Redis):
     Loading 1GB of mixed size strings (256b-16kb) will keep most of them on disk and thus RAM remains almost unused
     """
 
-    seeder = StaticSeeder(
+    seeder = DebugPopulateSeeder(
         key_target=200_000, data_size=2048, variance=8, samples=100, types=["STRING"]
     )
     await seeder.run(async_client)
@@ -45,6 +45,7 @@ async def test_basic_memory_usage(async_client: aioredis.Redis):
     )  # the grown table itself takes up lots of space
 
 
+@pytest.mark.exclude_epoll
 @pytest.mark.opt_only
 @dfly_args(
     {

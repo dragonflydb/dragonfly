@@ -700,6 +700,22 @@ TEST_F(ListFamilyTest, BRPopLPushSingleShardBug2857) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 }
 
+TEST_F(ListFamilyTest, BRPopLPushSingleShardBug4569) {
+  RespExpr resp;
+  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] { resp = Run({"brpop", "x", "0"}); });
+  WaitUntilLocked(0, "x");
+
+  ASSERT_TRUE(IsLocked(0, "x"));
+  Run({"lpush", "y", "val"});
+  Run({"rpoplpush", "y", "x"});
+  ASSERT_EQ(1, GetDebugInfo().shards_count);
+  fb0.Join();
+  EXPECT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("x", "val"));
+  ASSERT_EQ(0, NumWatched());
+  ASSERT_FALSE(IsLocked(0, "x"));
+}
+
 TEST_F(ListFamilyTest, BRPopLPushSingleShardBlocking) {
   RespExpr resp;
 
@@ -1084,6 +1100,269 @@ TEST_F(ListFamilyTest, ContendExpire) {
   for (auto& f : blpop_fibers) {
     f.Join();
   }
+}
+
+TEST_F(ListFamilyTest, LMPopInvalidSyntax) {
+  // Not enough arguments
+  auto resp = Run({"lmpop", "1", "a"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  // Zero keys
+  resp = Run({"lmpop", "0", "LEFT", "COUNT", "1"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Number of keys is not uint
+  resp = Run({"lmpop", "aa", "a", "LEFT"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  // Missing LEFT/RIGHT
+  resp = Run({"lmpop", "1", "a", "COUNT", "1"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Wrong number of keys
+  resp = Run({"lmpop", "1", "a", "b", "LEFT"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // COUNT without number
+  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // COUNT is not uint
+  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "boo"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  // Too many arguments
+  resp = Run({"lmpop", "1", "c", "LEFT", "COUNT", "2", "foo"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
+TEST_F(ListFamilyTest, LMPop) {
+  // All lists are empty
+  auto resp = Run({"lmpop", "1", "e", "LEFT"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  // LEFT operation
+  resp = Run({"lpush", "a", "a1", "a2"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"lmpop", "1", "a", "LEFT"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("a", RespArray(ElementsAre("a2")))));
+
+  // RIGHT operation
+  resp = Run({"lpush", "b", "b1", "b2"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"lmpop", "1", "b", "RIGHT"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("b", RespArray(ElementsAre("b1")))));
+
+  // COUNT > 1
+  resp = Run({"lpush", "c", "c1", "c2"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"lmpop", "1", "c", "RIGHT", "COUNT", "2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("c", RespArray(ElementsAre("c1", "c2")))));
+
+  resp = Run({"llen", "c"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // COUNT > number of elements in list
+  resp = Run({"lpush", "d", "d1", "d2"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"lmpop", "1", "d", "RIGHT", "COUNT", "3"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("d", RespArray(ElementsAre("d1", "d2")))));
+
+  resp = Run({"llen", "d"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // First non-empty list is not the first list
+  resp = Run({"lpush", "x", "x1"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"lpush", "y", "y1"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"lmpop", "3", "empty", "x", "y", "RIGHT"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("x", RespArray(ElementsAre("x1")))));
+
+  resp = Run({"llen", "x"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
+TEST_F(ListFamilyTest, LMPopMultipleElements) {
+  // Test removing multiple elements from left end
+  Run({"rpush", "list1", "a", "b", "c", "d", "e"});
+  auto resp = Run({"lmpop", "1", "list1", "LEFT", "COUNT", "3"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("list1", RespArray(ElementsAre("a", "b", "c")))));
+
+  resp = Run({"lrange", "list1", "0", "-1"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("d", "e"));
+
+  // Test removing multiple elements from right end
+  Run({"rpush", "list2", "v", "w", "x", "y", "z"});
+  resp = Run({"lmpop", "1", "list2", "RIGHT", "COUNT", "2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("list2", RespArray(ElementsAre("z", "y")))));
+
+  resp = Run({"lrange", "list2", "0", "-1"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("v", "w", "x"));
+}
+
+TEST_F(ListFamilyTest, LMPopMultipleLists) {
+  // Test finding first non-empty list
+  Run({"rpush", "list1", "a", "b"});
+  Run({"rpush", "list2", "c", "d"});
+  Run({"rpush", "list3", "e", "f"});
+
+  // Pop from first non-empty list
+  auto resp = Run({"lmpop", "3", "list1", "list2", "list3", "LEFT"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("list1", RespArray(ElementsAre("a")))));
+
+  // Pop from second list after first becomes empty
+  Run({"lmpop", "1", "list1", "LEFT"});  // Empty list1
+  resp = Run({"lmpop", "3", "list1", "list2", "list3", "RIGHT", "COUNT", "2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("list2", RespArray(ElementsAre("d", "c")))));
+
+  // Verify third list remains untouched
+  resp = Run({"lrange", "list3", "0", "-1"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("e", "f"));
+}
+
+TEST_F(ListFamilyTest, LMPopEdgeCases) {
+  // Test with empty list
+  Run({"rpush", "empty_list", "a"});
+  Run({"lpop", "empty_list"});
+  auto resp = Run({"lmpop", "1", "empty_list", "LEFT"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  // Test with non-existent list
+  resp = Run({"lmpop", "1", "nonexistent", "LEFT"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  // Test with wrong type key
+  Run({"set", "string_key", "value"});
+  resp = Run({"lmpop", "1", "string_key", "LEFT"});
+  EXPECT_THAT(resp, ErrArg("WRONGTYPE Operation against a key holding the wrong kind of value"));
+
+  // Test without COUNT parameter - should return 1 element by default
+  Run({"rpush", "list", "a", "b"});
+  resp = Run({"lmpop", "1", "list", "LEFT"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre(
+                  "list", RespArray(ElementsAre("a")))));  // Should return 1 element by default
+
+  // Test with COUNT = 0 - should return error
+  resp = Run({"lmpop", "1", "list", "LEFT", "COUNT", "0"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("list", RespArray(ElementsAre()))));
+
+  // Test with negative COUNT - should return error
+  resp = Run({"lmpop", "1", "list", "LEFT", "COUNT", "-1"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("list", RespArray(ElementsAre("b")))));
+}
+
+TEST_F(ListFamilyTest, LMPopDocExample) {
+  // Try to pop from non-existing lists
+  auto resp = Run({"LMPOP", "2", "non1", "non2", "LEFT", "COUNT", "10"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  // Create first list and test basic pop
+  resp = Run({"LPUSH", "mylist", "one", "two", "three", "four", "five"});
+  EXPECT_THAT(resp, IntArg(5));
+
+  resp = Run({"LMPOP", "1", "mylist", "LEFT"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("mylist", RespArray(ElementsAre("five")))));
+
+  resp = Run({"LRANGE", "mylist", "0", "-1"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("four", "three", "two", "one"));
+
+  // Test RIGHT pop with COUNT
+  resp = Run({"LMPOP", "1", "mylist", "RIGHT", "COUNT", "10"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("mylist",
+                                          RespArray(ElementsAre("one", "two", "three", "four")))));
+
+  // Create two lists and test multi-key pop
+  resp = Run({"LPUSH", "mylist", "one", "two", "three", "four", "five"});
+  EXPECT_THAT(resp, IntArg(5));
+
+  resp = Run({"LPUSH", "mylist2", "a", "b", "c", "d", "e"});
+  EXPECT_THAT(resp, IntArg(5));
+
+  resp = Run({"LMPOP", "2", "mylist", "mylist2", "RIGHT", "COUNT", "3"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre("mylist", RespArray(ElementsAre("one", "two", "three")))));
+
+  resp = Run({"LRANGE", "mylist", "0", "-1"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("five", "four"));
+
+  resp = Run({"LMPOP", "2", "mylist", "mylist2", "RIGHT", "COUNT", "5"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("mylist", RespArray(ElementsAre("four", "five")))));
+
+  resp = Run({"LMPOP", "2", "mylist", "mylist2", "RIGHT", "COUNT", "10"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre("mylist2", RespArray(ElementsAre("a", "b", "c", "d", "e")))));
+
+  // Verify both lists are now empty
+  resp = Run({"EXISTS", "mylist", "mylist2"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
+TEST_F(ListFamilyTest, LMPopWrongType) {
+  // Setup: create a list and a hash
+  Run({"lpush", "l1", "e1"});
+  Run({"hset", "foo", "k1", "v1"});
+
+  // Test: first key is wrong type
+  auto resp = Run({"lmpop", "2", "foo", "l1", "left"});
+  EXPECT_THAT(resp, ErrArg("WRONGTYPE Operation against a key holding the wrong kind of value"));
+
+  // Test: second key is wrong type but first doesn't exist
+  resp = Run({"lmpop", "2", "nonexistent", "foo", "left"});
+  EXPECT_THAT(resp, ErrArg("WRONGTYPE Operation against a key holding the wrong kind of value"));
+
+  // Test: second key is wrong type but first is a valid list
+  resp = Run({"lmpop", "2", "l1", "foo", "left"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("l1", RespArray(ElementsAre("e1")))));
+}
+
+// Reproduce a flow that trigerred a wrong DCHECK in the transaction flow.
+TEST_F(ListFamilyTest, AwakeMulti) {
+  auto f1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    for (unsigned i = 0; i < 100; ++i) {
+      Run("CONSUMER", {"blmove", "src", "dest", "LEFT", "LEFT", "0"});
+    };
+  });
+  auto f2 = pp_->at(1)->LaunchFiber([&] {
+    for (unsigned i = 0; i < 100; ++i) {
+      Run("PROD", {"lpush", "src", "a"});
+      ThisFiber::SleepFor(50us);
+    };
+  });
+
+  auto f3 = pp_->at(2)->LaunchFiber([&] {
+    for (unsigned i = 0; i < 100; ++i) {
+      Run({"multi"});
+      for (unsigned j = 0; j < 8; ++j) {
+        Run({"get", StrCat("key", j)});
+      };
+      Run({"exec"});
+    };
+  });
+
+  f1.Join();
+  f2.Join();
+  f3.Join();
+}
+
+TEST_F(ListFamilyTest, AwakeDb1) {
+  const char* kDbId = "1";
+
+  auto f1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    Run("C", {"SELECT", kDbId});
+    Run("C", {"brpoplpush", "x", "y", "0"});
+    ASSERT_EQ(GetDebugInfo("C").shards_count, 1);
+  });
+  Run({"SELECT", kDbId});
+  Run({"EVAL", "redis.call('LPUSH', KEYS[1], 'val'); return 1;", "1", "x"});
+  f1.Join();
 }
 
 #pragma GCC diagnostic pop

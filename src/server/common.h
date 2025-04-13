@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "core/compact_object.h"
+#include "core/glob_matcher.h"
 #include "facade/facade_types.h"
 #include "facade/op_status.h"
 #include "helio/io/proc_reader.h"
@@ -75,7 +76,8 @@ struct TieredStats {
   uint64_t total_registered_buf_allocs = 0;
   uint64_t total_heap_buf_allocs = 0;
 
-  // How many times the system did not perform Stash call (disjoint with total_stashes).
+  // How many times the system did not perform Stash call due to overloaded disk write queue
+  // (disjoint with total_stashes).
   uint64_t total_stash_overflows = 0;
   uint64_t total_offloading_steps = 0;
   uint64_t total_offloading_stashes = 0;
@@ -204,23 +206,6 @@ using AggregateStatus = AggregateValue<facade::OpStatus>;
 static_assert(bool(facade::OpStatus::OK) == false,
               "Default intitialization should be a falsy OK value");
 
-// Simple wrapper interface around atomic cancellation flag.
-struct Cancellation {
-  Cancellation() : flag_{false} {
-  }
-
-  void Cancel() {
-    flag_.store(true, std::memory_order_relaxed);
-  }
-
-  bool IsCancelled() const {
-    return flag_.load(std::memory_order_relaxed);
-  }
-
- protected:
-  std::atomic_bool flag_;
-};
-
 // Error wrapper, that stores error_code and optional string message.
 class GenericError {
  public:
@@ -245,44 +230,63 @@ class GenericError {
 // Thread safe utility to store the first non null generic error.
 using AggregateGenericError = AggregateValue<GenericError>;
 
-// Context is a utility for managing error reporting and cancellation for complex tasks.
+// ExecutionState is a thread-safe utility for managing error reporting and cancellation for complex
+// tasks. There are 3 states: RUN, CANCELLED, ERROR RUN and CANCELLED are just a state without any
+// actions When report an error, only the first is stored, the next ones will be ignored. Then a
+// special error handler is run, if present, and the ExecutionState is ERROR. The error handler is
+// run in a separate handler to free up the caller.
+// If the state is CANCELLED all errors are ignored
 //
-// When submitting an error with `Error`, only the first is stored (as in aggregate values).
-// Then a special error handler is run, if present, and the context is cancelled. The error handler
-// is run in a separate handler to free up the caller.
-//
-// Manual cancellation with `Cancel` is simulated by reporting an `errc::operation_canceled` error.
-// This allows running the error handler and representing this scenario as an error.
-class Context : protected Cancellation {
+// ReportCancelError() reporting an `errc::operation_canceled` error.
+class ExecutionState {
  public:
   using ErrHandler = std::function<void(const GenericError&)>;
 
-  Context() = default;
-  Context(ErrHandler err_handler) : Cancellation{}, err_{}, err_handler_{std::move(err_handler)} {
+  ExecutionState() = default;
+  ExecutionState(ErrHandler err_handler) : err_handler_{std::move(err_handler)} {
   }
 
-  ~Context();
+  ~ExecutionState();
 
-  void Cancel();  // Cancels the context by submitting an `errc::operation_canceled` error.
-  using Cancellation::IsCancelled;
-  const Cancellation* GetCancellation() const;
+  // TODO Remove. This function was created to reduce size of the code that should be refactored
+  // Cancel() method should be used instead of this function
+  // Report a cancel error the context by submitting an `errc::operation_canceled` error.
+  // If the state is CANCELLED does nothing
+  void ReportCancelError();
+
+  bool IsRunning() const {
+    return state_.load(std::memory_order_relaxed) == State::RUN;
+  }
+
+  bool IsError() const {
+    return state_.load(std::memory_order_relaxed) == State::ERROR;
+  }
+
+  bool IsCancelled() const {
+    return state_.load(std::memory_order_relaxed) == State::CANCELLED;
+  }
+
+  void Cancel() {
+    state_.store(State::CANCELLED, std::memory_order_relaxed);
+  }
 
   GenericError GetError() const;
 
   // Report an error by submitting arguments for GenericError.
   // If this is the first error that occured, then the error handler is run
-  // and the context is cancelled.
+  // and the context state set to ERROR.
+  // If the state is CANCELLED does nothing
   template <typename... T> GenericError ReportError(T... ts) {
     return ReportErrorInternal(GenericError{std::forward<T>(ts)...});
   }
 
-  // Wait for error handler to stop, reset error and cancellation flag, assign new error handler.
+  // Wait for error handler to stop, reset error and state, assign new error handler.
   void Reset(ErrHandler handler);
 
   // Atomically replace the error handler if no error is present, and return the
   // current stored error. This function can be used to transfer cleanup responsibility safely
   //
-  // Beware, never do this manually in two steps. If you check for cancellation,
+  // Beware, never do this manually in two steps. If you check the state,
   // set the error handler and initialize resources, then the new error handler
   // will never run if the context was cancelled between the first two steps.
   GenericError SwitchErrorHandler(ErrHandler handler);
@@ -291,9 +295,10 @@ class Context : protected Cancellation {
   void JoinErrorHandler();
 
  private:
-  // Report error.
   GenericError ReportErrorInternal(GenericError&& err);
 
+  enum class State { RUN, CANCELLED, ERROR };
+  std::atomic<State> state_{State::RUN};
   GenericError err_;
   ErrHandler err_handler_;
   util::fb2::Fiber err_handler_fb_;
@@ -303,10 +308,18 @@ class Context : protected Cancellation {
 };
 
 struct ScanOpts {
-  std::optional<std::string_view> pattern;
+  std::unique_ptr<GlobMatcher> matcher;
   size_t limit = 10;
   std::optional<CompactObjType> type_filter;
   unsigned bucket_id = UINT_MAX;
+  enum class Mask {
+    Volatile,   // volatile, keys that have ttl
+    Permanent,  // permanent, keys that do not have ttl
+    Accessed,   // accessed, the key has been accessed since the last load/flush event, or the last
+                // time a flag was reset.
+    Untouched,  // untouched, the key has not been accessed/touched.
+  };
+  std::optional<Mask> mask;
 
   bool Matches(std::string_view val_name) const;
   static OpResult<ScanOpts> TryFrom(CmdArgList args);
@@ -389,7 +402,9 @@ struct BorrowedInterpreter {
   bool owned_ = false;
 };
 
-class LocalBlockingCounter {
+// A single threaded latch that passes a waiter fiber if its count is 0.
+// Fibers that increase/decrease the count do not wait on the latch.
+class LocalLatch {
  public:
   void lock() {
     ++mutating_;

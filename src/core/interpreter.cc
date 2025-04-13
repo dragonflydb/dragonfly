@@ -76,8 +76,7 @@ struct StringCollectorTranslator : public ObjectExplorer {
     values.emplace_back(str);
   }
   void OnArrayStart(unsigned len) final {
-    CHECK(values.empty());
-    values.reserve(len);
+    values.reserve(values.size() + len);
   }
   void OnArrayEnd() final {
   }

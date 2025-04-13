@@ -50,7 +50,6 @@ using facade::RedisReplyBuilder;
 using facade::SinkReplyBuilder;
 
 using JsonExpression = jsonpath::jsonpath_expression<JsonType>;
-using JsonReplaceVerify = std::function<void(JsonType&)>;
 using CI = CommandId;
 
 namespace {
@@ -329,8 +328,8 @@ std::optional<JsonType> ShardJsonFromString(std::string_view input) {
   return dfly::JsonFromString(input, CompactObj::memory_resource());
 }
 
-OpResult<DbSlice::AddOrFindResult> SetJson(const OpArgs& op_args, string_view key,
-                                           string_view json_str) {
+OpResult<DbSlice::ItAndUpdater> SetJson(const OpArgs& op_args, string_view key,
+                                        string_view json_str) {
   auto& db_slice = op_args.GetDbSlice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
@@ -340,10 +339,12 @@ OpResult<DbSlice::AddOrFindResult> SetJson(const OpArgs& op_args, string_view ke
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, res.it->second);
 
+  JsonMemTracker tracker;
+
   std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
-    return OpStatus::INVALID_VALUE;
+    return OpStatus::INVALID_JSON;
   }
 
   if (JsonEnconding() == kEncodingJsonFlat) {
@@ -355,7 +356,10 @@ OpResult<DbSlice::AddOrFindResult> SetJson(const OpArgs& op_args, string_view ke
   } else {
     res.it->second.SetJson(std::move(*parsed_json));
   }
+
+  tracker.SetJsonSize(res.it->second, res.is_new);
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, res.it->second);
+
   return std::move(res);
 }
 
@@ -524,40 +528,38 @@ string ConvertToJsonPointer(string_view json_path) {
   return result;
 }
 
-std::optional<std::string> ConvertExpressionToJsonPointer(string_view json_path) {
-  if (json_path.empty()) {
-    VLOG(1) << "retrieved malformed JSON path expression: " << json_path;
+/* Converts a JSONPath to a JSONPointer.
+   E.g. $[a][b][0] -> /a/b/0.
+   V1 JSONPath is not supported. */
+std::optional<std::string> ConvertJsonPathToJsonPointer(string_view json_path) {
+  auto parsed_path = json::ParsePath(json_path);
+
+  if (!parsed_path) {
+    VLOG(2) << "Error during conversion of JSONPath to JSONPointer: " << json_path
+            << ". Invalid JSONPath.";
     return std::nullopt;
   }
 
-  // Remove prefix
-  if (json_path.front() == '$') {
-    json_path.remove_prefix(1);
-  }
-  if (json_path.front() == '.') {
-    json_path.remove_prefix(1);
-  }
-
-  DCHECK(json_path.length());
-
   std::string pointer;
-  vector<string> splitted = absl::StrSplit(json_path, '.');
-  for (auto& it : splitted) {
-    if (it.front() == '[' && it.back() == ']') {
-      std::string index = it.substr(1, it.size() - 2);
-      if (index.empty()) {
+  const auto& path = parsed_path.value();
+  for (const auto& node : path) {
+    const auto& type = node.type();
+    if (type == json::SegmentType::IDENTIFIER) {
+      pointer += '/' + node.identifier();
+    } else if (type == json::SegmentType::INDEX) {
+      const auto& index = node.index();
+
+      if (index.first != index.second) {
+        VLOG(2) << "Error during conversion of JSONPath to JSONPointer: " << json_path
+                << ". Index range is not supported.";
         return std::nullopt;
       }
 
-      for (char ch : index) {
-        if (!std::isdigit(ch)) {
-          return std::nullopt;
-        }
-      }
-
-      pointer += '/' + index;
+      pointer += '/' + std::to_string(node.index().first);
     } else {
-      pointer += '/' + it;
+      VLOG(2) << "Error during conversion of JSONPath to JSONPointer: " << json_path
+              << ". Unsupported segment type.";
+      return std::nullopt;
     }
   }
 
@@ -613,7 +615,9 @@ OpResult<JsonCallbackResult<T>> JsonEvaluateOperation(const OpArgs& op_args, std
 }
 
 struct MutateOperationOptions {
-  JsonReplaceVerify verify_op;
+  using PostMutateCallback = absl::FunctionRef<OpStatus(JsonType*)>;
+
+  std::optional<PostMutateCallback> post_mutate_cb;
   CallbackResultOptions cb_result_options = CallbackResultOptions::DefaultMutateOptions();
 };
 
@@ -638,9 +642,13 @@ OpResult<JsonCallbackResult<optional<T>>> JsonMutateOperation(const OpArgs& op_a
 
   auto mutate_res = json_path.Mutate(json_val, cb, options.cb_result_options);
 
-  // Make sure that we don't have other internal issue with the operation
-  if (mutate_res && options.verify_op) {
-    options.verify_op(*json_val);
+  // Call post mutate callback
+  if (mutate_res && options.post_mutate_cb) {
+    auto res = options.post_mutate_cb.value()(json_val);
+    // We can not return result here, because we need to update the size
+    if (res != OpStatus::OK) {
+      mutate_res = res;
+    }
   }
 
   // we need to manually run this before the PostUpdater run
@@ -648,7 +656,6 @@ OpResult<JsonCallbackResult<optional<T>>> JsonMutateOperation(const OpArgs& op_a
   it_res->post_updater.Run();
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
 
-  RETURN_ON_BAD_STATUS(mutate_res);
   return mutate_res;
 }
 
@@ -940,7 +947,6 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
     return 0;
   }
 
-  JsonMemTracker tracker;
   // FindMutable because we need to run the AutoUpdater at the end which will account
   // the deltas calculated from the MemoryTracker
   auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
@@ -951,12 +957,13 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
   PrimeValue& pv = it_res->it->second;
   JsonType* json_val = pv.GetJson();
 
+  JsonMemTracker tracker;
   absl::Cleanup update_size_on_exit([tracker, &pv]() mutable { tracker.SetJsonSize(pv, false); });
 
   if (json_path.HoldsJsonPath()) {
     const json::Path& path = json_path.AsJsonPath();
-    long deletions =
-        json::MutatePath(path, [](optional<string_view>, JsonType* val) { return true; }, json_val);
+    long deletions = json::MutatePath(
+        path, [](optional<string_view>, JsonType* val) { return true; }, json_val);
     return deletions;
   }
 
@@ -1327,10 +1334,8 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
       }
     }
 
-    JsonMemTracker mem_tracker;
-    OpResult<DbSlice::AddOrFindResult> st = SetJson(op_args, key, json_str);
+    auto st = SetJson(op_args, key, json_str);
     RETURN_ON_BAD_STATUS(st);
-    mem_tracker.SetJsonSize(st->it->second, st->is_new);
     return true;
   }
 
@@ -1345,11 +1350,12 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
-    return OpStatus::INVALID_VALUE;
+    return OpStatus::INVALID_JSON;
   }
   const JsonType& new_json = parsed_json.value();
 
-  auto cb = [&](std::optional<std::string_view>, JsonType* val) -> MutateCallbackResult<> {
+  // If the path exists, this callback will be called
+  auto mutate_cb = [&](std::optional<std::string_view>, JsonType* val) -> MutateCallbackResult<> {
     path_exists = true;
     if (!is_nx_condition) {
       operation_result = true;
@@ -1359,18 +1365,17 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
     return {};
   };
 
-  auto inserter = [&](JsonType& json) {
+  // If the path doesn't exist, this callback will be called
+  auto insert_cb = [&](JsonType* json) {
     // Set a new value if the path doesn't exist and the xx condition is not set.
     if (!path_exists && !is_xx_condition) {
-      auto pointer = ConvertExpressionToJsonPointer(path);
+      auto pointer = ConvertJsonPathToJsonPointer(json_path.Path());
       if (!pointer) {
-        VLOG(1) << "Failed to convert the following expression path to a valid JSON pointer: "
-                << path;
         return OpStatus::SYNTAX_ERR;
       }
 
-      error_code ec;
-      jsoncons::jsonpointer::add(json, pointer.value(), new_json, ec);
+      std::error_code ec;
+      jsoncons::jsonpointer::add(*json, pointer.value(), new_json, ec);
       if (ec) {
         VLOG(1) << "Failed to add a JSON value to the following path: " << path
                 << " with the error: " << ec.message();
@@ -1386,8 +1391,8 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   // JsonMutateOperation uses it's own JsonMemTracker. It will work, because updates to already
   // existing json keys use copy assign, so we don't really need to account for the memory
   // allocated by ShardJsonFromString above since it's not being moved here at all.
-  auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb),
-                                          MutateOperationOptions{std::move(inserter)});
+  auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(mutate_cb),
+                                          MutateOperationOptions{std::move(insert_cb)});
   RETURN_ON_BAD_STATUS(res);
 
   return operation_result;
@@ -1444,7 +1449,7 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
   std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
-    return OpStatus::SYNTAX_ERR;
+    return OpStatus::INVALID_JSON;
   }
 
   auto cb = [&](std::optional<std::string_view> cur_path, JsonType* val) -> MutateCallbackResult<> {
@@ -1487,7 +1492,8 @@ void JsonFamily::Set(CmdArgList args, const CommandContext& cmd_cntx) {
   if (parser.Error() || parser.HasNext())  // also clear the parser error dcheck
     return builder->SendError(kSyntaxErr);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &path = path, &json_str = json_str](Transaction* t,
+                                                                EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, path, json_path, json_str, is_nx_condition,
                  is_xx_condition);
   };

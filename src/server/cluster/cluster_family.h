@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <absl/container/btree_map.h>
-
 #include <string>
 
 #include "facade/conn_context.h"
@@ -34,9 +32,6 @@ class ClusterFamily {
 
   void Shutdown() ABSL_LOCKS_EXCLUDED(set_config_mu);
 
-  // Returns a thread-local pointer.
-  static ClusterConfig* cluster_config();
-
   void ApplyMigrationSlotRangeToConfig(std::string_view node_id, const SlotRanges& slots,
                                        bool is_outgoing);
 
@@ -45,7 +40,9 @@ class ClusterFamily {
   }
 
   // Only for debug purpose. Pause/Resume all incoming migrations
-  void PauseAllIncomingMigrations(bool pause);
+  void PauseAllIncomingMigrations(bool pause) ABSL_LOCKS_EXCLUDED(migration_mu_);
+
+  size_t MigrationsErrorsCount() const ABSL_LOCKS_EXCLUDED(migration_mu_);
 
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
@@ -93,7 +90,7 @@ class ClusterFamily {
   std::shared_ptr<IncomingSlotMigration> GetIncomingMigration(std::string_view source_id)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
 
-  void StartSlotMigrations(std::vector<MigrationInfo> migrations);
+  void StartNewSlotMigrations(const ClusterConfig& new_config);
 
   // must be destroyed excluded set_config_mu and migration_mu_ locks
   struct PreparedToRemoveOutgoingMigrations {
@@ -106,10 +103,6 @@ class ClusterFamily {
       std::shared_ptr<ClusterConfig> new_config, std::shared_ptr<ClusterConfig> old_config)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
   void RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations)
-      ABSL_LOCKS_EXCLUDED(migration_mu_);
-
-  // store info about migration and create unique session id
-  std::shared_ptr<OutgoingMigration> CreateOutgoingMigration(MigrationInfo info)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
 
   mutable util::fb2::Mutex migration_mu_;  // guard migrations operations

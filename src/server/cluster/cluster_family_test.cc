@@ -50,7 +50,8 @@ class ClusterFamilyTest : public BaseFamilyTest {
           "master": {
             "id": "$0",
             "ip": "10.0.0.1",
-            "port": 7000
+            "port": 7000,
+            "health": "online"
           },
           "replicas": []
         }
@@ -208,13 +209,15 @@ TEST_F(ClusterFamilyTest, ClusterConfigFull) {
           "master": {
             "id": "abcd1234",
             "ip": "10.0.0.1",
-            "port": 7000
+            "port": 7000,
+            "health": "online"
           },
           "replicas": [
             {
               "id": "wxyz",
               "ip": "10.0.0.10",
-              "port": 8000
+              "port": 8000,
+              "health": "online"
             }
           ]
         }
@@ -280,13 +283,15 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
           "master": {
             "id": "abcd1234",
             "ip": "10.0.0.1",
-            "port": 7000
+            "port": 7000,
+            "health": "fail"
           },
           "replicas": [
             {
               "id": "wxyz",
               "ip": "10.0.0.10",
-              "port": 8000
+              "port": 8000,
+              "health": "online"
             }
           ]
         },
@@ -300,13 +305,33 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
           "master": {
             "id": "efgh7890",
             "ip": "10.0.0.2",
-            "port": 7001
+            "port": 7001,
+            "health": "online"
           },
           "replicas": [
             {
               "id": "qwerty",
               "ip": "10.0.0.11",
-              "port": 8001
+              "port": 8001,
+              "health": "online"
+            },
+             {
+              "id": "qwerty1",
+              "ip": "10.0.0.12",
+              "port": 8002,
+              "health": "loading"
+            },
+             {
+              "id": "qwerty2",
+              "ip": "10.0.0.13",
+              "port": 8003,
+              "health": "fail"
+            },
+             {
+              "id": "qwerty3",
+              "ip": "10.0.0.14",
+              "port": 8004,
+              "health": "hidden"
             }
           ]
         }
@@ -317,7 +342,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
   EXPECT_THAT(cluster_info, HasSubstr("cluster_state:ok"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_assigned:16384"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_ok:16384"));
-  EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:4"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:7"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:2"));
 
   EXPECT_THAT(Run({"cluster", "shards"}),
@@ -333,7 +358,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
                                                 "port", IntArg(7000),                            //
                                                 "role", "master",                                //
                                                 "replication-offset", IntArg(0),                 //
-                                                "health", "online")),                            //
+                                                "health", "fail")),                              //
                                             RespArray(ElementsAre(                               //
                                                 "id", "wxyz",                                    //
                                                 "endpoint", "10.0.0.10",                         //
@@ -361,7 +386,23 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
                                                 "port", IntArg(8001),                            //
                                                 "role", "replica",                               //
                                                 "replication-offset", IntArg(0),                 //
-                                                "health", "online")))))))));
+                                                "health", "online")),                            //
+                                            RespArray(ElementsAre(                               //
+                                                "id", "qwerty1",                                 //
+                                                "endpoint", "10.0.0.12",                         //
+                                                "ip", "10.0.0.12",                               //
+                                                "port", IntArg(8002),                            //
+                                                "role", "replica",                               //
+                                                "replication-offset", IntArg(0),                 //
+                                                "health", "loading")),                           //
+                                            RespArray(ElementsAre(                               //
+                                                "id", "qwerty2",                                 //
+                                                "endpoint", "10.0.0.13",                         //
+                                                "ip", "10.0.0.13",                               //
+                                                "port", IntArg(8003),                            //
+                                                "role", "replica",                               //
+                                                "replication-offset", IntArg(0),                 //
+                                                "health", "fail")))))))));
 
   EXPECT_THAT(Run({"cluster", "slots"}),
               RespArray(ElementsAre(                            //
@@ -387,10 +428,12 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
                                             "qwerty")))))));
 
   EXPECT_THAT(Run({"cluster", "nodes"}),
-              "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-10000\n"
+              "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 disconnected 0-10000\n"
               "wxyz 10.0.0.10:8000@8000 slave abcd1234 0 0 0 connected\n"
               "efgh7890 10.0.0.2:7001@7001 master - 0 0 0 connected 10001-16383\n"
-              "qwerty 10.0.0.11:8001@8001 slave efgh7890 0 0 0 connected\n");
+              "qwerty 10.0.0.11:8001@8001 slave efgh7890 0 0 0 connected\n"
+              "qwerty1 10.0.0.12:8002@8002 slave efgh7890 0 0 0 connected\n"
+              "qwerty2 10.0.0.13:8003@8003 slave efgh7890 0 0 0 disconnected\n");
 
   absl::InsecureBitGen eng;
   while (true) {
@@ -478,6 +521,32 @@ TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
     EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
                 RespArray(ElementsAre(IntArg(i), "key_count", IntArg(0), _, _, _, _, _, _)));
   }
+}
+
+TEST_F(ClusterFamilyTest, ClusterEvalCrossslot) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  auto res = Run({"EVAL", "return redis.call('MSET', 'x1', 'x1', 'x2', 'x2', 'x3', 'x3');", "3",
+                  "x1", "x2", "x3"});
+
+  EXPECT_THAT(res, ErrArg("CROSSSLOT"));
+
+  auto sha =
+      Run({"SCRPIT", "LOAD", "return redis.call('MSET', 'x1', 'x1', 'x2', 'x2', 'x3', 'x3');", "3",
+           "x1", "x2", "x3"});
+
+  EXPECT_THAT(Run({"EVALSHA", sha.GetString(), "3", "x1", "x2", "x3"}), ErrArg("CROSSSLOT"));
+}
+
+TEST_F(ClusterFamilyTest, ClusterMultiExec) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  Run({"MULTI"});
+  Run({"SET", "X1", "X1"});
+  Run({"SET", "X2", "X2"});
+  Run({"SET", "X3", "X3"});
+
+  EXPECT_THAT(Run({"EXEC"}), ErrArg("CROSSSLOT"));
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
@@ -599,7 +668,6 @@ TEST_F(ClusterFamilyTest, ClusterModePubSubNotAllowed) {
               ErrArg("PSUBSCRIBE is not supported in cluster mode yet"));
   EXPECT_THAT(Run({"PUNSUBSCRIBE", "ch?"}),
               ErrArg("PUNSUBSCRIBE is not supported in cluster mode yet"));
-  EXPECT_THAT(Run({"PUBSUB", "CHANNELS"}), ErrArg("PUBSUB is not supported in cluster mode yet"));
 }
 
 TEST_F(ClusterFamilyTest, ClusterFirstConfigCallDropsEntriesNotOwnedByNode) {
@@ -655,7 +723,7 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
   ExpectConditionWithinTimeout([&]() {
     return RunPrivileged({"dflycluster", "flushslots", "0", "0"}) == "OK";
   });
-
+  util::ThisFiber::SleepFor(1ms);
   EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", "1"}),
               RespArray(ElementsAre(
                   RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads", _,
@@ -664,7 +732,7 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
                                         "total_writes", _, "memory_bytes", _)))));
 
   EXPECT_EQ(RunPrivileged({"dflycluster", "flushslots", "0", "1"}), "OK");
-
+  util::ThisFiber::SleepFor(1ms);
   EXPECT_THAT(
       RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", "1"}),
       RespArray(ElementsAre(RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads",

@@ -4,6 +4,8 @@
 
 #include "core/sorted_map.h"
 
+#include <absl/strings/str_cat.h>
+
 #include <cmath>
 
 extern "C" {
@@ -16,24 +18,14 @@ extern "C" {
 #include <double-conversion/double-to-string.h>
 
 #include "base/endian.h"
-#include "base/flags.h"
 #include "base/logging.h"
 
 using namespace std;
-
-ABSL_RETIRED_FLAG(bool, use_zset_tree, true, "If true use b+tree for zset implementation");
 
 namespace dfly {
 namespace detail {
 
 namespace {
-
-// We tag sds pointers to allow customizable comparison function that supports both
-// Lex and Numeric comparison. It's safe to do on linux systems because its memory address range
-// is within 56 bit space.
-constexpr uint64_t kInfTag = 1ULL << 63;
-constexpr uint64_t kIgnoreDoubleTag = 1ULL << 62;
-constexpr uint64_t kSdsMask = (1ULL << 60) - 1;
 
 double GetObjScore(const void* obj) {
   sds s = (sds)obj;
@@ -48,18 +40,12 @@ void SetObjScore(void* obj, double score) {
 }
 
 // buf must be at least 10 chars long.
-// Builds a tagged key that can be used for querying open/closed bounds.
-void* BuildScoredKey(double score, bool is_str_inf, char buf[]) {
+void* BuildScoredKey(double score, char buf[]) {
   buf[0] = SDS_TYPE_5;  // length 0.
   buf[1] = 0;
   absl::little_endian::Store64(buf + 2, absl::bit_cast<uint64_t>(score));
   void* key = buf + 1;
 
-  // to include/exclude the score we set the secondary string to +inf.
-  // +inf causes exclusion for minimum bound and causes inclusion for maximum bound.
-  if (is_str_inf) {
-    key = (void*)(uint64_t(key) | kInfTag);
-  }
   return key;
 }
 
@@ -122,7 +108,8 @@ constexpr unsigned kConvFlags = DoubleToStringConverter::UNIQUE_ZERO;
 DoubleToStringConverter score_conv(kConvFlags, "inf", "nan", 'e', -6, 21, 6, 0);
 
 // Copied from redis code but uses double_conversion to encode double values.
-unsigned char* zzlInsertAt(unsigned char* zl, unsigned char* eptr, sds ele, double score) {
+unsigned char* ZzlInsertAt(unsigned char* zl, unsigned char* eptr, std::string_view ele,
+                           double score) {
   unsigned char* sptr;
   char scorebuf[128];
   unsigned scorelen = 0;
@@ -137,15 +124,24 @@ unsigned char* zzlInsertAt(unsigned char* zl, unsigned char* eptr, sds ele, doub
     DCHECK_EQ(scorelen, strlen(scorebuf));
   }
 
+  // Argument parsing converts empty strings to default initialized string views.
+  // Such string views have a null data field, which if passed into lpAppend (via zzlInsertAt)
+  // results in the replace operation being applied on the listpack. In addition to being wrong, it
+  // also causes assertion failures. To circumvent this corner case we pass here a string view
+  // pointing to an empty string on the stack, which has a non-null data field.
+  if (ele.data() == nullptr) {
+    ele = ""sv;
+  }
+
   if (eptr == NULL) {
-    zl = lpAppend(zl, (unsigned char*)ele, sdslen(ele));
+    zl = lpAppend(zl, (const unsigned char*)(ele.data()), ele.size());
     if (score_is_long)
       zl = lpAppendInteger(zl, lscore);
     else
       zl = lpAppend(zl, (unsigned char*)scorebuf, scorelen);
   } else {
     /* Insert member before the element 'eptr'. */
-    zl = lpInsertString(zl, (unsigned char*)ele, sdslen(ele), eptr, LP_BEFORE, &sptr);
+    zl = lpInsertString(zl, (const unsigned char*)ele.data(), ele.size(), eptr, LP_BEFORE, &sptr);
 
     /* Insert score after the member. */
     if (score_is_long)
@@ -160,7 +156,7 @@ unsigned char* zzlInsertAt(unsigned char* zl, unsigned char* eptr, sds ele, doub
 
 /* Insert (element,score) pair in listpack. This function assumes the element is
  * not yet present in the list. */
-unsigned char* ZzlInsert(unsigned char* zl, sds ele, double score) {
+unsigned char* ZzlInsert(unsigned char* zl, std::string_view ele, double score) {
   unsigned char *eptr = NULL, *sptr = lpSeek(zl, -1);
   double s;
 
@@ -182,11 +178,11 @@ unsigned char* ZzlInsert(unsigned char* zl, sds ele, double score) {
       /* First element with score larger than score for element to be
        * inserted. This means we should take its spot in the list to
        * maintain ordering. */
-      return zzlInsertAt(zl, eptr, ele, score);
+      return ZzlInsertAt(zl, eptr, ele, score);
     } else if (s == score) {
       /* Ensure lexicographical ordering for elements. */
-      if (zzlCompareElements(eptr, (unsigned char*)ele, sdslen(ele)) > 0) {
-        return zzlInsertAt(zl, eptr, ele, score);
+      if (zzlCompareElements(eptr, (unsigned char*)ele.data(), ele.size()) > 0) {
+        return ZzlInsertAt(zl, eptr, ele, score);
       }
     }
 
@@ -195,7 +191,26 @@ unsigned char* ZzlInsert(unsigned char* zl, sds ele, double score) {
   }
 
   /* Push on tail of list when it was not yet inserted. */
-  return zzlInsertAt(zl, NULL, ele, score);
+  return ZzlInsertAt(zl, NULL, ele, score);
+}
+
+unsigned char* ZzlFind(unsigned char* lp, std::string_view ele, double* score) {
+  unsigned char *eptr, *sptr;
+
+  if ((eptr = lpFirst(lp)) == nullptr)
+    return nullptr;
+  eptr = lpFind(lp, eptr, (unsigned char*)ele.data(), ele.size(), 1);
+  if (eptr) {
+    sptr = lpNext(lp, eptr);
+    serverAssert(sptr != NULL);
+
+    /* Matching element, pull out score. */
+    if (score != nullptr)
+      *score = zzlGetScore(sptr);
+    return eptr;
+  }
+
+  return nullptr;
 }
 
 SortedMap::SortedMap(PMR_NS::memory_resource* mr)
@@ -207,15 +222,18 @@ SortedMap::~SortedMap() {
   delete score_map;
 }
 
-int SortedMap::ScoreSdsPolicy::KeyCompareTo::operator()(ScoreSds a, ScoreSds b) const {
-  sds sdsa = (sds)(uint64_t(a) & kSdsMask);
-  sds sdsb = (sds)(uint64_t(b) & kSdsMask);
+// Three way comparison of q and key.
+// Compares scores first and then the keys, unless q.ignore_score is set.
+// In that case only keys are compared.
+// In order to support close/open intervals, we introduce a special flag for +inf strings.
+// So, in case of score equality (or if scores are ignored), q.str_is_infinite means q > key,
+// and 1 is returned.
+int SortedMap::ScoreSdsPolicy::KeyCompareTo::operator()(Query q, ScoreSds key) const {
+  sds sdsa = (sds)q.item;
 
-  // if omit score comparison if at least one of the elements is tagged to ignore the score.
-  // These tags exist only when passing keys for query methods, tree elements are never tagged.
-  if ((uint64_t(a) & kIgnoreDoubleTag) == 0 && (uint64_t(b) & kIgnoreDoubleTag) == 0) {
+  if (!q.ignore_score) {
     double sa = GetObjScore(sdsa);
-    double sb = GetObjScore(sdsb);
+    double sb = GetObjScore(key);
 
     if (sa < sb)
       return -1;
@@ -223,31 +241,34 @@ int SortedMap::ScoreSdsPolicy::KeyCompareTo::operator()(ScoreSds a, ScoreSds b) 
       return 1;
   }
 
-  // Marks +inf.
-  if (uint64_t(a) & kInfTag)
+  // if q.str_is_infinite is set, it means q > key at this point.
+  if (q.str_is_infinite)
     return 1;
 
-  if (uint64_t(b) & kInfTag)
-    return -1;
-
-  return sdscmp(sdsa, sdsb);
+  return sdscmp(sdsa, (sds)key);
 }
 
-int SortedMap::Add(double score, sds ele, int in_flags, int* out_flags, double* newscore) {
+int SortedMap::AddElem(double score, std::string_view ele, int in_flags, int* out_flags,
+                       double* newscore) {
   // does not take ownership over ele.
   DCHECK(!isnan(score));
 
-  // TODO: to introduce AddOrFind in score_map.
-  ScoreSds obj = score_map->FindObj(ele);
+  ScoreSds obj = nullptr;
+  bool added = false;
 
-  if (obj == nullptr) {
-    // Adding a new element.
-    if (in_flags & ZADD_IN_XX) {
+  if (in_flags & ZADD_IN_XX) {
+    obj = score_map->FindObj(ele);
+    if (obj == nullptr) {
       *out_flags = ZADD_OUT_NOP;
       return 1;
     }
+  } else {
+    tie(obj, added) = score_map->AddOrSkip(ele, score);
+  }
 
-    obj = score_map->AddUnique(string_view{ele, sdslen(ele)}, score);
+  if (added) {
+    // Adding a new element.
+    DCHECK_EQ(in_flags & ZADD_IN_XX, 0);
 
     *out_flags = ZADD_OUT_ADDED;
     *newscore = score;
@@ -281,7 +302,7 @@ int SortedMap::Add(double score, sds ele, int in_flags, int* out_flags, double* 
   return 1;
 }
 
-optional<double> SortedMap::GetScore(sds ele) const {
+optional<double> SortedMap::GetScore(std::string_view ele) const {
   ScoreSds obj = score_map->FindObj(ele);
   if (obj != nullptr) {
     return GetObjScore(obj);
@@ -290,21 +311,19 @@ optional<double> SortedMap::GetScore(sds ele) const {
   return std::nullopt;
 }
 
-// Takes ownership over ele.
-bool SortedMap::Insert(double score, sds ele) {
-  DVLOG(1) << "Inserting " << ele << " with score " << score;
+bool SortedMap::InsertNew(double score, std::string_view member) {
+  DVLOG(2) << "InsertNew " << score << " " << member;
 
-  auto [newk, added] = score_map->AddOrUpdate(string_view{ele, sdslen(ele)}, score);
-  DCHECK(added);
+  auto [newk, added] = score_map->AddOrSkip(member, score);
+  if (!added)
+    return false;
 
   added = score_tree->Insert(newk);
-  DCHECK(added);
-  sdsfree(ele);
-
+  CHECK(added);
   return true;
 }
 
-optional<unsigned> SortedMap::GetRank(sds ele, bool reverse) const {
+optional<unsigned> SortedMap::GetRank(std::string_view ele, bool reverse) const {
   ScoreSds obj = score_map->FindObj(ele);
   if (obj == nullptr)
     return std::nullopt;
@@ -322,8 +341,8 @@ SortedMap::ScoredArray SortedMap::GetRange(const zrangespec& range, unsigned off
 
   char buf[16];
   if (reverse) {
-    ScoreSds key = BuildScoredKey(range.max, !range.maxex, buf);
-    auto path = score_tree->LEQ(key);
+    ScoreSds key = BuildScoredKey(range.max, buf);
+    auto path = score_tree->LEQ(Query{key, false, !range.maxex});
     if (path.Empty())
       return arr;
 
@@ -348,8 +367,8 @@ SortedMap::ScoredArray SortedMap::GetRange(const zrangespec& range, unsigned off
         break;
     }
   } else {
-    ScoreSds key = BuildScoredKey(range.min, range.minex, buf);
-    auto path = score_tree->GEQ(key);
+    ScoreSds key = BuildScoredKey(range.min, buf);
+    auto path = score_tree->GEQ(Query{key, false, range.minex});
     if (path.Empty())
       return arr;
 
@@ -395,8 +414,7 @@ SortedMap::ScoredArray SortedMap::GetLexRange(const zlexrangespec& range, unsign
 
   if (reverse) {
     if (range.max != cmaxstring) {
-      ScoreSds range_key = (ScoreSds)(uint64_t(range.max) | kIgnoreDoubleTag);
-      path = score_tree->LEQ(range_key);
+      path = score_tree->LEQ(Query{range.max, true});
       if (path.Empty())
         return {};
 
@@ -425,8 +443,7 @@ SortedMap::ScoredArray SortedMap::GetLexRange(const zlexrangespec& range, unsign
     }
   } else {
     if (range.min != cminstring) {
-      ScoreSds range_key = (ScoreSds)(uint64_t(range.min) | kIgnoreDoubleTag);
-      path = score_tree->GEQ(range_key);
+      path = score_tree->GEQ(Query{range.min, true});
       if (path.Empty())
         return {};
 
@@ -461,14 +478,15 @@ uint8_t* SortedMap::ToListPack() const {
   uint8_t* lp = lpNew(0);
 
   score_tree->Iterate(0, UINT32_MAX, [&](ScoreSds ele) {
-    lp = zzlInsertAt(lp, NULL, (sds)ele, GetObjScore(ele));
+    const std::string_view v{(sds)ele, sdslen((sds)ele)};
+    lp = ZzlInsertAt(lp, NULL, v, GetObjScore(ele));
     return true;
   });
 
   return lp;
 }
 
-bool SortedMap::Delete(sds ele) {
+bool SortedMap::Delete(std::string_view ele) const {
   ScoreSds obj = score_map->FindObj(ele);
   if (obj == nullptr)
     return false;
@@ -513,8 +531,8 @@ size_t SortedMap::DeleteRangeByScore(const zrangespec& range) {
   size_t deleted = 0;
 
   while (score_tree->Size() > 0) {
-    ScoreSds min_key = BuildScoredKey(range.min, range.minex, buf);
-    auto path = score_tree->GEQ(min_key);
+    ScoreSds min_key = BuildScoredKey(range.min, buf);
+    auto path = score_tree->GEQ(Query{min_key, false, range.minex});
     if (path.Empty())
       break;
 
@@ -545,8 +563,7 @@ size_t SortedMap::DeleteRangeByLex(const zlexrangespec& range) {
 
   uint32_t rank = 0;
   if (range.min != cminstring) {
-    ScoreSds range_key = (ScoreSds)(uint64_t(range.min) | kIgnoreDoubleTag);
-    auto path = score_tree->GEQ(range_key);
+    auto path = score_tree->GEQ(Query{range.min, true});
     if (path.Empty())
       return {};
 
@@ -631,8 +648,8 @@ size_t SortedMap::Count(const zrangespec& range) const {
   // build min key.
   char buf[16];
 
-  ScoreSds range_key = BuildScoredKey(range.min, range.minex, buf);
-  auto path = score_tree->GEQ(range_key);
+  ScoreSds range_key = BuildScoredKey(range.min, buf);
+  auto path = score_tree->GEQ(Query{range_key, false, range.minex});
   if (path.Empty())
     return 0;
 
@@ -649,9 +666,8 @@ size_t SortedMap::Count(const zrangespec& range) const {
   // Now build the max key.
   // If we need to exclude the maximum score, set the key'sstring part to empty string,
   // otherwise set it to infinity.
-  range_key = BuildScoredKey(range.max, !range.maxex, buf);
-
-  path = score_tree->GEQ(range_key);
+  range_key = BuildScoredKey(range.max, buf);
+  path = score_tree->GEQ(Query{range_key, false, !range.maxex});
   if (path.Empty()) {
     return score_tree->Size() - min_rank;
   }
@@ -676,8 +692,7 @@ size_t SortedMap::LexCount(const zlexrangespec& range) const {
   detail::BPTreePath<ScoreSds> path;
 
   if (range.min != cminstring) {
-    ScoreSds range_key = (ScoreSds)(uint64_t(range.min) | kIgnoreDoubleTag);
-    path = score_tree->GEQ(range_key);
+    path = score_tree->GEQ(Query{range.min, true});
     if (path.Empty())
       return 0;
 
@@ -691,8 +706,7 @@ size_t SortedMap::LexCount(const zlexrangespec& range) const {
 
   uint32_t max_rank = score_tree->Size() - 1;
   if (range.max != cmaxstring) {
-    ScoreSds range_key = (ScoreSds)(uint64_t(range.max) | kIgnoreDoubleTag);
-    path = score_tree->GEQ(range_key);
+    path = score_tree->GEQ(Query{range.max, true});
     if (!path.Empty()) {
       max_rank = path.Rank();
 
@@ -743,7 +757,6 @@ SortedMap* SortedMap::FromListPack(PMR_NS::memory_resource* res, const uint8_t* 
   unsigned char* vstr;
   unsigned int vlen;
   long long vlong;
-  sds ele;
 
   void* ptr = res->allocate(sizeof(SortedMap), alignof(SortedMap));
   SortedMap* zs = new (ptr) SortedMap{res};
@@ -757,12 +770,12 @@ SortedMap* SortedMap::FromListPack(PMR_NS::memory_resource* res, const uint8_t* 
   while (eptr != NULL) {
     double score = zzlGetScore(sptr);
     vstr = lpGetValue(eptr, &vlen, &vlong);
-    if (vstr == NULL)
-      ele = sdsfromlonglong(vlong);
-    else
-      ele = sdsnewlen((char*)vstr, vlen);
+    if (vstr == NULL) {
+      CHECK(zs->InsertNew(score, absl::StrCat(vlong)));
+    } else {
+      CHECK(zs->InsertNew(score, string_view{reinterpret_cast<const char*>(vstr), vlen}));
+    }
 
-    CHECK(zs->Insert(score, ele));
     zzlNext(zl, &eptr, &sptr);
   }
 
@@ -780,7 +793,8 @@ bool SortedMap::DefragIfNeeded(float ratio) {
   return reallocated;
 }
 
-std::optional<SortedMap::RankAndScore> SortedMap::GetRankAndScore(sds ele, bool reverse) const {
+std::optional<SortedMap::RankAndScore> SortedMap::GetRankAndScore(std::string_view ele,
+                                                                  bool reverse) const {
   ScoreSds obj = score_map->FindObj(ele);
   if (obj == nullptr)
     return std::nullopt;

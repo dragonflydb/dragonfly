@@ -9,6 +9,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "cluster_support.h"
+#include "common.h"
 
 using namespace std;
 
@@ -31,22 +32,15 @@ void UniqueSlotChecker::Add(SlotId slot_id) {
     return;
   }
 
-  if (!slot_id_.has_value()) {
+  if (slot_id_ == kNoSlotId) {
     slot_id_ = slot_id;
-    return;
-  }
-
-  if (*slot_id_ != slot_id) {
-    slot_id_ = kInvalidSlotId;
+  } else if (slot_id_ != slot_id) {
+    slot_id_ = kCrossSlot;
   }
 }
 
 optional<SlotId> UniqueSlotChecker::GetUniqueSlotId() const {
-  if (slot_id_.has_value() && *slot_id_ == kInvalidSlotId) {
-    return nullopt;
-  }
-
-  return slot_id_;
+  return slot_id_ > kMaxSlotNum ? optional<SlotId>() : slot_id_;
 }
 
 namespace {

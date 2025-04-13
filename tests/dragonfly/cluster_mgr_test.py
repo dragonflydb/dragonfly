@@ -21,9 +21,11 @@ async def check_cluster_data(cluster_client: redis.RedisCluster):
 def run_cluster_mgr(args):
     print(f"Running cluster_mgr.py {args}")
     result = subprocess.run(["../tools/cluster_mgr.py", *args])
+    logging.debug(result)
     return result.returncode == 0
 
 
+@pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 async def test_cluster_mgr(df_factory):
     NODES = 3
@@ -161,4 +163,4 @@ async def test_cluster_mgr(df_factory):
     for i in range(NODES):
         assert run_cluster_mgr(["--action=detach", f"--target_port={replicas[i].port}"])
     await check_cluster_data(client)
-    await client.close()
+    await client.aclose()

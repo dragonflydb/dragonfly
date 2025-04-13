@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+
 import argparse
 from argparse import RawTextHelpFormatter
 import json
 import math
+from typing import Iterable, List
 import redis
 import subprocess
 import time
@@ -27,25 +29,32 @@ class Node:
         node.id = send_command(node, ["cluster", "myid"])
         print(f"- ID {node.id}")
 
+    def __repr__(self):
+        return f"{self.host}:{self.port}/{self.id}"
 
-class Master:
+    def to_dict(self):
+        return {"id": self.id, "ip": self.host, "port": self.port}
+
+
+class Master(Node):
     def __init__(self, host, port):
-        self.node = Node(host, port)
+        Node.__init__(self, host, port)
         self.replicas = []
 
 
-def start_node(node, threads):
+def start_node(node, dragonfly_bin, threads):
     f = open(f"/tmp/dfly.cluster.node.{node.port}.log", "w")
     print(f"- Log file for node {node.port}: {f.name}")
     subprocess.Popen(
         [
-            "../build-opt/dragonfly",
+            f"{dragonfly_bin}",
             f"--port={node.port}",
             "--cluster_mode=yes",
             f"--proactor_threads={threads}",
             "--dbfilename=",
             f"--logtostderr",
             "--proactor_affinity_mode=off",
+            "--omit_basic_usage",
         ],
         stderr=f,
     )
@@ -71,34 +80,81 @@ def send_command(node, command, print_errors=True):
     return Exception()
 
 
-def build_node(node):
-    return {"id": node.id, "ip": node.host, "port": node.port}
+class SlotRange:
+    def __init__(self, start, end):
+        assert start <= end
+        self.start = start
+        self.end = end
+
+    def to_dict(self):
+        return {"start": self.start, "end": self.end}
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(d["start"], d["end"])
+
+    def __repr__(self):
+        return f"({self.start}-{self.end})"
+
+    def merge(self, other: "SlotRange"):
+        if self.end + 1 == other.start:
+            self.end = other.end
+            return True
+        elif other.end + 1 == self.start:
+            self.start = other.start
+            return True
+        return False
+
+    def contains(self, slot_id):
+        return self.start <= slot_id <= self.end
+
+    def remove(self, slot_id):
+        assert self.contains(slot_id)
+
+        if self.start < self.end:
+            if slot_id == self.start:
+                return None, SlotRange(self.start + 1, self.end)
+            elif slot_id == self.end:
+                return SlotRange(self.start, self.end - 1), None
+            elif self.start < slot_id < self.end:
+                return SlotRange(self.start, slot_id - 1), SlotRange(slot_id + 1, self.end)
+        return None, None
 
 
-def build_config_from_list(masters):
+# Custom JSON encoder to handle SlotRange objects
+class ClusterConfigEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, SlotRange) or isinstance(obj, Node):
+            return obj.to_dict()
+        return super().default(obj)
+
+
+def build_config_from_list(masters: List[Master]):
     total_slots = 16384
     slots_per_node = math.floor(total_slots / len(masters))
 
     config = []
     for i, master in enumerate(masters):
+        slot_range = SlotRange(i * slots_per_node, (i + 1) * slots_per_node - 1)
         c = {
-            "slot_ranges": [{"start": i * slots_per_node, "end": (i + 1) * slots_per_node - 1}],
-            "master": build_node(master.node),
-            "replicas": [build_node(replica) for replica in master.replicas],
+            "slot_ranges": [slot_range],
+            "master": master,
+            "replicas": master.replicas,
         }
-
         config.append(c)
 
-    config[-1]["slot_ranges"][-1]["end"] += total_slots % len(masters)
+    # Adjust the last slot range to include any remaining slots
+    config[-1]["slot_ranges"][-1].end += total_slots % len(masters)
     return config
 
 
 def get_nodes_from_config(config):
     nodes = []
     for shard in config:
-        nodes.append(Node(shard["master"]["ip"], shard["master"]["port"]))
+        nodes.append(shard["master"])
         for replica in shard["replicas"]:
-            nodes.append(Node(replica["ip"], replica["port"]))
+            nodes.append(replica)
+
     for node in nodes:
         node.update_id()
     return nodes
@@ -106,7 +162,8 @@ def get_nodes_from_config(config):
 
 def push_config(config):
     def push_to_node(node, config):
-        config_str = json.dumps(config, indent=2)
+        # Use the custom encoder to convert SlotRange objects during serialization
+        config_str = json.dumps(config, indent=2, cls=ClusterConfigEncoder)
         response = send_command(node, ["dflycluster", "config", config_str])
         print(f"- Push to {node.port}: {response}")
 
@@ -134,21 +191,22 @@ def create_locally(args):
 
     nodes = []
     for master in masters:
-        nodes.append(master.node)
+        nodes.append(master)
         for replica in master.replicas:
             nodes.append(replica)
 
     print("Starting nodes...")
     for node in nodes:
-        start_node(node, args.threads)
+        start_node(node, args.dragonfly_bin, args.threads)
     print()
+    time.sleep(0.5)
 
     if args.replicas_per_master > 0:
         print("Configuring replication...")
         for master in masters:
             for replica in master.replicas:
-                response = send_command(replica, ["replicaof", master.node.host, master.node.port])
-                print(f"- {replica.port} replicating {master.node.port}: {response}")
+                response = send_command(replica, ["replicaof", master.host, master.port])
+                print(f"- {replica.port} replicating {master.port}: {response}")
         print()
 
     print(f"Getting IDs...")
@@ -168,9 +226,9 @@ def config_single_remote(args):
     )
 
     master = Master(args.target_host, args.target_port)
-    master.node.update_id()
+    master.update_id()
 
-    test = send_command(master.node, ["get", "x"], print_errors=False)
+    test = send_command(master, ["get", "x"], print_errors=False)
     if type(test) is not Exception:
         die_with_err("Node either not found or already configured")
 
@@ -186,12 +244,14 @@ def build_config_from_existing(args):
 
     def build_node(node_list):
         d = list_to_dict(node_list)
-        return {"id": d["id"], "ip": d["endpoint"], "port": d["port"]}
+        node = Node(d["endpoint"], d["port"])
+        node.id = d["id"]
+        return node
 
     def build_slots(slot_list):
         slots = []
         for i in range(0, len(slot_list), 2):
-            slots.append({"start": slot_list[i], "end": slot_list[i + 1]})
+            slots.append(SlotRange(slot_list[i], slot_list[i + 1]))
         return slots
 
     client = redis.Redis(decode_responses=True, host=args.target_host, port=args.target_port)
@@ -214,7 +274,7 @@ def build_config_from_existing(args):
 def find_master(config, host, port, die_if_not_found=True):
     new_owner = None
     for shard in config:
-        if shard["master"]["ip"] == host and shard["master"]["port"] == port:
+        if shard["master"].host == host and shard["master"].port == port:
             new_owner = shard
             break
 
@@ -225,10 +285,10 @@ def find_master(config, host, port, die_if_not_found=True):
 
 
 def find_replica(config, host, port):
-    for master in config:
-        for replica in master["replicas"]:
-            if replica["ip"] == host and replica["port"] == port:
-                return replica, master
+    for shard in config:
+        for replica in shard["replicas"]:
+            if replica.host == host and replica.port == port:
+                return replica, shard
     die_with_err("Can't find target node")
 
 
@@ -246,20 +306,19 @@ def attach(args):
             die_with_err("Node is not a replica of target")
 
         newcomer.update_id()
-        newcomer_node = build_node(newcomer)
 
         config = build_config_from_existing(args)
         master_node = find_master(config, args.target_host, args.target_port)
 
-        master_node["replicas"].append(newcomer_node)
+        master_node["replicas"].append(newcomer)
         print(f"Pushing config:\n{config}\n")
         push_config(config)
     else:
         newcomer = Master(args.attach_host, args.attach_port)
-        replica_resp = send_command(newcomer.node, ["info", "replication"])
+        replica_resp = send_command(newcomer, ["info", "replication"])
         if replica_resp["role"] != "master":
             die_with_err("Node is not in master mode")
-        newcomer.node.update_id()
+        newcomer.update_id()
 
         newcomer_config = build_config_from_list([newcomer])
         newcomer_config[0]["slot_ranges"] = []
@@ -308,91 +367,64 @@ def move(args):
     config = build_config_from_existing(args)
     new_owner = find_master(config, args.target_host, args.target_port)
 
-    def remove_slot(slot, from_range, from_shard):
-        if from_range["start"] == slot:
-            from_range["start"] += 1
-            if from_range["start"] > from_range["end"]:
-                from_shard["slot_ranges"].remove(from_range)
-        elif from_range["end"] == slot:
-            from_range["end"] -= 1
-            if from_range["start"] > from_range["end"]:
-                from_shard["slot_ranges"].remove(from_range)
-        else:
-            assert (
-                slot > from_range["start"] and slot < from_range["end"]
-            ), f'{slot} {from_range["start"]} {from_range["end"]}'
-            from_shard["slot_ranges"].append({"start": slot + 1, "end": from_range["end"]})
-            from_range["end"] = slot - 1
+    def remove_slot(slot_id, from_range: SlotRange, slot_ranges: list):
+        slot_ranges.remove(from_range)
+        left, right = from_range.remove(slot_id)
+        if left:
+            slot_ranges.append(left)
+        if right:
+            slot_ranges.append(right)
 
     def add_slot(slot, to_shard):
-        for slot_range in to_shard["slot_ranges"]:
-            if slot == slot_range["start"] - 1:
-                slot_range["start"] -= 1
+        slot_range = SlotRange(slot, slot)
+        for existing_range in to_shard["slot_ranges"]:
+            if existing_range.merge(slot_range):
                 return
-            if slot == slot_range["end"] + 1:
-                slot_range["end"] += 1
-                return
-        to_shard["slot_ranges"].append({"start": slot, "end": slot})
+        to_shard["slot_ranges"].append(slot_range)
 
     def find_slot(slot, config):
         for shard in config:
-            if shard == new_owner:
-                continue
             for slot_range in shard["slot_ranges"]:
-                if slot >= slot_range["start"] and slot <= slot_range["end"]:
+                if slot_range.contains(slot):
                     return shard, slot_range
         return None, None
 
     def pack(slot_ranges):
-        new_range = []
-        while True:
-            changed = False
-            new_range = []
-            slot_ranges.sort(key=lambda x: x["start"])
-            for i, slot_range in enumerate(slot_ranges):
-                added = False
-                for j in range(i):
-                    prev_slot_range = slot_ranges[j]
-                    if prev_slot_range["end"] + 1 == slot_range["start"]:
-                        prev_slot_range["end"] = slot_range["end"]
-                        changed = True
-                        added = True
-                        break
-                if not added:
-                    new_range.append(slot_range)
-            slot_ranges = new_range
-            if not changed:
-                break
-        return new_range
+        slot_objects = sorted(slot_ranges, key=lambda x: x.start)
+        packed = []
+        for slot_range in slot_objects:
+            if packed and packed[-1].merge(slot_range):
+                continue
+            packed.append(slot_range)
+        return packed
 
     for slot in range(args.slot_start, args.slot_end + 1):
         shard, slot_range = find_slot(slot, config)
-        if shard == None:
+        if shard == None or shard == new_owner:
             continue
-        if shard == new_owner:
-            continue
-        remove_slot(slot, slot_range, shard)
+        remove_slot(slot, slot_range, shard["slot_ranges"])
         add_slot(slot, new_owner)
 
     for shard in config:
         shard["slot_ranges"] = pack(shard["slot_ranges"])
 
-    print(f"Pushing new config:\n{json.dumps(config, indent=2)}\n")
+    # Use the custom encoder for printing the JSON
+    print(f"Pushing new config:\n{json.dumps(config, indent=2, cls=ClusterConfigEncoder)}\n")
     push_config(config)
 
 
 def migrate(args):
     config = build_config_from_existing(args)
     target = find_master(config, args.target_host, args.target_port)
-    target_node = Node(target["master"]["ip"], target["master"]["port"])
+    target_node = target["master"]
     target_node.update_id()
 
     # Find source node
     source = None
     for node in config:
-        slots = node["slot_ranges"]
+        slots: Iterable[SlotRange] = node["slot_ranges"]
         for slot in slots:
-            if slot["start"] <= args.slot_start and slot["end"] >= args.slot_end:
+            if slot.start <= args.slot_start and slot.end >= args.slot_end:
                 source = node
                 break
     if source == None:
@@ -426,9 +458,28 @@ def migrate(args):
     move(args)
 
 
+def populate(args):
+    config = build_config_from_existing(args)
+    for shard in config:
+        master = shard["master"]
+        slot_ranges = shard["slot_ranges"]
+        for slot_range in slot_ranges:
+            cmd = [
+                "debug",
+                "populate",
+                str(args.size),
+                "key",
+                str(args.valsize),
+                "SLOTS",
+                str(slot_range.start),
+                str(slot_range.end),
+            ]
+            send_command(master, cmd)
+
+
 def print_config(args):
     config = build_config_from_existing(args)
-    print(json.dumps(config, indent=2))
+    print(json.dumps(config, indent=2, cls=ClusterConfigEncoder))
 
 
 def shutdown(args):
@@ -444,7 +495,7 @@ Dragonfly Manual Cluster Manager
 
 This tool helps managing a Dragonfly cluster manually.
 Cluster can either be local or remote:
-- Starting Dragonfly instances must be done locally, binary is assumed to be under ../build-opt
+- Starting Dragonfly instances must be done locally, binary path can be set with `--dragonfly_bin` (default: ../build-opt/dragonfly)
 - Remote Dragonflies must already be started, and initialized with `--cluster_mode=yes`
 
 Example usage:
@@ -503,7 +554,7 @@ Migrate slots 10-20 to target:
 Unlike --action=move above, this will migrate the data to the new owner.
 
 Connect to cluster and shutdown all nodes:
-  ./cluster_mgr.py --action=shutdown
+  ./cluster_mgr.py --action=shutdown --target_port=X
 WARNING: Be careful! This will close all Dragonfly servers connected to the cluster.
 """,
         formatter_class=RawTextHelpFormatter,
@@ -538,6 +589,16 @@ WARNING: Be careful! This will close all Dragonfly servers connected to the clus
     parser.add_argument(
         "--attach_as_replica", type=bool, default=False, help="Is the attached node a replica?"
     )
+    parser.add_argument(
+        "--dragonfly_bin", default="../build-opt/dragonfly", help="Dragonfly binary path"
+    )
+    parser.add_argument(
+        "--size", type=int, default=1000000, help="Number of keys to populate in each slotrange"
+    )
+    parser.add_argument(
+        "--valsize", type=int, default=16, help="Value size for each key during population"
+    )
+
     args = parser.parse_args()
 
     actions = dict(
@@ -553,6 +614,7 @@ WARNING: Be careful! This will close all Dragonfly servers connected to the clus
                 move,
                 print_config,
                 migrate,
+                populate,
             ]
         ]
     )

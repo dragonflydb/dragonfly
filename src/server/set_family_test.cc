@@ -4,15 +4,19 @@
 
 #include "server/set_family.h"
 
+#include "absl/flags/flag.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
 #include "server/command_registry.h"
 #include "server/test_utils.h"
+
 extern "C" {
 #include "redis/intset.h"
 #include "redis/zmalloc.h"
 }
+
+ABSL_DECLARE_FLAG(bool, legacy_saddex_keepttl);
 
 using namespace testing;
 using namespace std;
@@ -376,6 +380,36 @@ TEST_F(SetFamilyTest, IntSetMemcpy) {
 
   zfree(original);
   zfree(replacement);
+}
+
+TEST_F(SetFamilyTest, SAddEx) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+  EXPECT_THAT(Run({"saddex", "key", "2", "val"}), IntArg(1));
+  AdvanceTime(1500);
+  EXPECT_THAT(Run({"saddex", "key", "2", "val"}), IntArg(0));
+  AdvanceTime(1000);
+  EXPECT_EQ(1, CheckedInt({"sismember", "key", "val"}));
+
+  auto resp = Run({"saddex", "k", "one", "v"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  // KEEPTTL support. add field orig with TTL=10
+  EXPECT_THAT(Run({"saddex", "key", "10", "orig"}), IntArg(1));
+
+  // add fields new and orig with TTL=1 and KEEPTTL=true. orig ttl should be preserved
+  EXPECT_THAT(Run({"saddex", "key", "KEEPTTL", "1", "orig", "new"}), IntArg(1));
+  EXPECT_LE(CheckedInt({"fieldttl", "key", "new"}), 1);
+
+  // The expiry for orig should be unchanged, at least greater than 5 at this point given some time
+  // has passed since we set it to 10
+  EXPECT_GT(CheckedInt({"fieldttl", "key", "orig"}), 5);
+
+  // without KEEPTTL the TTL should be overwritten
+  EXPECT_THAT(Run({"saddex", "key", "2", "orig", "new"}), IntArg(0));
+  EXPECT_LE(CheckedInt({"fieldttl", "key", "orig"}), 2);
+
+  // At least one arg is expected
+  EXPECT_THAT(Run({"saddex", "key", "KEEPTTL", "2"}), ErrArg("wrong number of arguments"));
 }
 
 }  // namespace dfly

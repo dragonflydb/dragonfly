@@ -1,21 +1,64 @@
-// Copyright 2023, DragonflyDB authors.  All rights reserved.
+// Copyright 2025, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
 #include "server/acl/validator.h"
 
 #include "base/logging.h"
+#include "core/glob_matcher.h"
 #include "facade/dragonfly_connection.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
-// we need this because of stringmatchlen
-extern "C" {
-#include "redis/util.h"
-}
 
 namespace dfly::acl {
+
+namespace {
+
+bool Matches(std::string_view pattern, std::string_view target) {
+  GlobMatcher matcher(pattern, true);
+  return matcher.Matches(target);
+};
+
+bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId& id) {
+  const size_t index = id.GetFamily();
+  const uint64_t command_mask = id.GetBitIndex();
+  DCHECK_LT(index, acl_commands.size());
+
+  return (acl_commands[index] & command_mask) != 0;
+}
+
+[[nodiscard]] std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(
+    bool literal_match, const std::vector<uint64_t>& acl_commands, const AclPubSub& pub_sub,
+    CmdArgList tail_args, const CommandId& id) {
+  if (!ValidateCommand(acl_commands, id)) {
+    return {false, AclLog::Reason::COMMAND};
+  }
+
+  auto iterate_globs = [&](std::string_view target) {
+    for (auto& [glob, has_asterisk] : pub_sub.globs) {
+      if (literal_match && (glob == target)) {
+        return true;
+      }
+      if (!literal_match && Matches(glob, target)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  bool allowed = true;
+  if (!pub_sub.all_channels) {
+    for (auto channel : tail_args) {
+      allowed &= iterate_globs(facade::ToSV(channel));
+    }
+  }
+
+  return {allowed, AclLog::Reason::PUB_SUB};
+}
+
+}  // namespace
 
 [[nodiscard]] bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const CommandId& id,
                                                 ArgSlice tail_args) {
@@ -25,12 +68,12 @@ namespace dfly::acl {
 
   std::pair<bool, AclLog::Reason> auth_res;
 
-  if (id.IsPubSub()) {
+  if (id.IsPubSub() || id.IsShardedPSub()) {
     auth_res = IsPubSubCommandAuthorized(false, cntx.acl_commands, cntx.pub_sub, tail_args, id);
   } else if (id.IsPSub()) {
     auth_res = IsPubSubCommandAuthorized(true, cntx.acl_commands, cntx.pub_sub, tail_args, id);
   } else {
-    auth_res = IsUserAllowedToInvokeCommandGeneric(cntx.acl_commands, cntx.keys, tail_args, id);
+    auth_res = IsUserAllowedToInvokeCommandGeneric(cntx, id, tail_args);
   }
 
   const auto [is_authed, reason] = auth_res;
@@ -43,37 +86,34 @@ namespace dfly::acl {
   return is_authed;
 }
 
-// GCC yields a wrong warning about uninitialized optional use
-#ifdef __GNUC__
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
-#endif
-
-static bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId& id) {
-  const size_t index = id.GetFamily();
-  const uint64_t command_mask = id.GetBitIndex();
-  DCHECK_LT(index, acl_commands.size());
-
-  return (acl_commands[index] & command_mask) != 0;
-}
-
 [[nodiscard]] std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
-    const std::vector<uint64_t>& acl_commands, const AclKeys& keys, CmdArgList tail_args,
-    const CommandId& id) {
+    const ConnectionContext& cntx, const CommandId& id, CmdArgList tail_args) {
+  const size_t max = std::numeric_limits<size_t>::max();
+  // Once we support ranges this must change
+  const bool reject_move_command = cntx.acl_db_idx != max && id.name() == "MOVE";
+  const bool reject_trans_command =
+      cntx.acl_db_idx != max && cntx.acl_db_idx != cntx.db_index() && id.IsTransactional();
+  if (reject_move_command || reject_trans_command) {
+    return {false, AclLog::Reason::AUTH};
+  }
+  size_t res = 0;
+  if (tail_args.size() == 1 && id.name() == "SELECT" && absl::SimpleAtoi(tail_args[0], &res) &&
+      cntx.acl_db_idx != max && cntx.acl_db_idx != res) {
+    return {false, AclLog::Reason::AUTH};
+  }
+
+  const auto& acl_commands = cntx.acl_commands;
+  const auto& keys = cntx.keys;
   if (!ValidateCommand(acl_commands, id)) {
     return {false, AclLog::Reason::COMMAND};
   }
-
-  auto match = [](const auto& pattern, const auto& target) {
-    return stringmatchlen(pattern.data(), pattern.size(), target.data(), target.size(), 0);
-  };
 
   const bool is_read_command = id.IsReadOnly();
   const bool is_write_command = id.IsWriteOnly();
 
   auto iterate_globs = [&](auto target) {
     for (auto& [elem, op] : keys.key_globs) {
-      if (match(elem, target)) {
+      if (Matches(elem, target)) {
         if (is_read_command && (op == KeyOp::READ || op == KeyOp::READ_WRITE)) {
           return true;
         }
@@ -96,40 +136,5 @@ static bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const Com
 
   return {keys_allowed, AclLog::Reason::KEY};
 }
-
-[[nodiscard]] std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(
-    bool literal_match, const std::vector<uint64_t>& acl_commands, const AclPubSub& pub_sub,
-    CmdArgList tail_args, const CommandId& id) {
-  if (!ValidateCommand(acl_commands, id)) {
-    return {false, AclLog::Reason::COMMAND};
-  }
-
-  auto match = [](std::string_view pattern, std::string_view target) {
-    return stringmatchlen(pattern.data(), pattern.size(), target.data(), target.size(), 0);
-  };
-
-  auto iterate_globs = [&](std::string_view target) {
-    for (auto& [glob, has_asterisk] : pub_sub.globs) {
-      if (literal_match && (glob == target)) {
-        return true;
-      }
-      if (!literal_match && match(glob, target)) {
-        return true;
-      }
-    }
-    return false;
-  };
-
-  bool allowed = true;
-  if (!pub_sub.all_channels) {
-    for (auto channel : tail_args) {
-      allowed &= iterate_globs(facade::ToSV(channel));
-    }
-  }
-
-  return {allowed, AclLog::Reason::PUB_SUB};
-}
-
-#pragma GCC diagnostic pop
 
 }  // namespace dfly::acl

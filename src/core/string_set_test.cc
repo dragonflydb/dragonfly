@@ -124,7 +124,7 @@ TEST_F(StringSetTest, StandardAddErase) {
 TEST_F(StringSetTest, DisplacedBug) {
   string_view vals[] = {"imY", "OVl", "NhH", "BCe", "YDL", "lpb",
                         "nhF", "xod", "zYR", "PSa", "hce", "cTR"};
-  ss_->AddMany(absl::MakeSpan(vals), UINT32_MAX);
+  ss_->AddMany(absl::MakeSpan(vals), UINT32_MAX, false);
 
   ss_->Add("fIc");
   ss_->Erase("YDL");
@@ -529,6 +529,10 @@ TEST_F(StringSetTest, IterateEmpty) {
   }
 }
 
+size_t memUsed(StringSet& obj) {
+  return obj.ObjMallocUsed() + obj.SetMallocUsed();
+}
+
 void BM_Clone(benchmark::State& state) {
   vector<string> strs;
   mt19937 generator(0);
@@ -590,9 +594,10 @@ void BM_Add(benchmark::State& state) {
   vector<string> strs;
   mt19937 generator(0);
   StringSet ss;
-  unsigned elems = 100000;
+  unsigned elems = state.range(0);
+  unsigned keySize = state.range(1);
   for (size_t i = 0; i < elems; ++i) {
-    string str = random_string(generator, 16);
+    string str = random_string(generator, keySize);
     strs.push_back(str);
   }
   ss.Reserve(elems);
@@ -600,34 +605,93 @@ void BM_Add(benchmark::State& state) {
     for (auto& str : strs)
       ss.Add(str);
     state.PauseTiming();
+    state.counters["Memory_Used"] = memUsed(ss);
     ss.Clear();
     ss.Reserve(elems);
     state.ResumeTiming();
   }
 }
-BENCHMARK(BM_Add);
+BENCHMARK(BM_Add)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
 
 void BM_AddMany(benchmark::State& state) {
   vector<string> strs;
   mt19937 generator(0);
   StringSet ss;
-  unsigned elems = 100000;
+  unsigned elems = state.range(0);
+  unsigned keySize = state.range(1);
   for (size_t i = 0; i < elems; ++i) {
-    string str = random_string(generator, 16);
+    string str = random_string(generator, keySize);
     strs.push_back(str);
   }
   ss.Reserve(elems);
-
+  vector<string_view> svs;
+  for (const auto& str : strs) {
+    svs.push_back(str);
+  }
   while (state.KeepRunning()) {
-    ss.AddMany(absl::MakeSpan(strs), UINT32_MAX);
+    ss.AddMany(absl::MakeSpan(svs), UINT32_MAX, false);
     state.PauseTiming();
     CHECK_EQ(ss.UpperBoundSize(), elems);
+    state.counters["Memory_Used"] = memUsed(ss);
     ss.Clear();
     ss.Reserve(elems);
     state.ResumeTiming();
   }
 }
-BENCHMARK(BM_AddMany);
+BENCHMARK(BM_AddMany)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+void BM_Erase(benchmark::State& state) {
+  std::vector<std::string> strs;
+  mt19937 generator(0);
+  StringSet ss;
+  auto elems = state.range(0);
+  auto keySize = state.range(1);
+  for (long int i = 0; i < elems; ++i) {
+    std::string str = random_string(generator, keySize);
+    strs.push_back(str);
+    ss.Add(str);
+  }
+  state.counters["Memory_Before_Erase"] = memUsed(ss);
+  while (state.KeepRunning()) {
+    for (auto& str : strs) {
+      ss.Erase(str);
+    }
+    state.PauseTiming();
+    state.counters["Memory_After_Erase"] = memUsed(ss);
+    for (auto& str : strs) {
+      ss.Add(str);
+    }
+    state.ResumeTiming();
+  }
+}
+BENCHMARK(BM_Erase)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+void BM_Get(benchmark::State& state) {
+  std::vector<std::string> strs;
+  mt19937 generator(0);
+  StringSet ss;
+  auto elems = state.range(0);
+  auto keySize = state.range(1);
+  for (long int i = 0; i < elems; ++i) {
+    std::string str = random_string(generator, keySize);
+    strs.push_back(str);
+    ss.Add(str);
+  }
+  while (state.KeepRunning()) {
+    for (auto& str : strs) {
+      ss.Find(str);
+    }
+  }
+}
+BENCHMARK(BM_Get)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
 
 void BM_Grow(benchmark::State& state) {
   vector<string> strs;
@@ -656,5 +720,51 @@ void BM_Grow(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_Grow);
+
+unsigned total_wasted_memory = 0;
+
+TEST_F(StringSetTest, ReallocIfNeeded) {
+  auto build_str = [](size_t i) { return to_string(i) + string(131, 'a'); };
+
+  auto count_waste = [](const mi_heap_t* heap, const mi_heap_area_t* area, void* block,
+                        size_t block_size, void* arg) {
+    size_t used = block_size * area->used;
+    total_wasted_memory += area->committed - used;
+    return true;
+  };
+
+  for (size_t i = 0; i < 10'000; i++)
+    ss_->Add(build_str(i));
+
+  for (size_t i = 0; i < 10'000; i++) {
+    if (i % 10 == 0)
+      continue;
+    ss_->Erase(build_str(i));
+  }
+
+  mi_heap_collect(mi_heap_get_backing(), true);
+  mi_heap_visit_blocks(mi_heap_get_backing(), false, count_waste, nullptr);
+  size_t wasted_before = total_wasted_memory;
+
+  size_t underutilized = 0;
+  for (auto it = ss_->begin(); it != ss_->end(); ++it) {
+    underutilized += zmalloc_page_is_underutilized(*it, 0.9);
+    it.ReallocIfNeeded(0.9);
+  }
+  // Check there are underutilized pages
+  CHECK_GT(underutilized, 0u);
+
+  total_wasted_memory = 0;
+  mi_heap_collect(mi_heap_get_backing(), true);
+  mi_heap_visit_blocks(mi_heap_get_backing(), false, count_waste, nullptr);
+  size_t wasted_after = total_wasted_memory;
+
+  // Check we waste significanlty less now
+  EXPECT_GT(wasted_before, wasted_after * 2);
+
+  EXPECT_EQ(ss_->UpperBoundSize(), 1000);
+  for (size_t i = 0; i < 1000; i++)
+    EXPECT_EQ(*ss_->Find(build_str(i * 10)), build_str(i * 10));
+}
 
 }  // namespace dfly

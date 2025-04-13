@@ -37,7 +37,7 @@ constexpr size_t kMinBlobSize = 32_KB;
 }  // namespace
 
 SliceSnapshot::SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
-                             SnapshotDataConsumerInterface* consumer, Context* cntx)
+                             SnapshotDataConsumerInterface* consumer, ExecutionState* cntx)
     : db_slice_(slice),
       db_array_(slice->databases()),
       compression_mode_(compression_mode),
@@ -114,7 +114,7 @@ void SliceSnapshot::StartIncremental(LSN start_lsn) {
 
 // Called only for replication use-case.
 void SliceSnapshot::FinalizeJournalStream(bool cancel) {
-  DVLOG(1) << "Finalize Snapshot";
+  VLOG(1) << "Finalize Snapshot";
   DCHECK(db_slice_->shard_owner()->IsMyThread());
   if (!journal_cb_id_) {  // Finalize only once.
     return;
@@ -158,7 +158,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   }
 
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
-    if (cntx_->IsCancelled())
+    if (!cntx_->IsRunning())
       return;
 
     if (!db_array_[db_indx])
@@ -169,7 +169,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
 
     VLOG(1) << "Start traversing " << pt->size() << " items for index " << db_indx;
     do {
-      if (cntx_->IsCancelled()) {
+      if (!cntx_->IsRunning()) {
         return;
       }
 
@@ -201,8 +201,8 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   }
 
   // serialized + side_saved must be equal to the total saved.
-  VLOG(1) << "Exit SnapshotSerializer (loop_serialized/side_saved/cbcalls): "
-          << stats_.loop_serialized << "/" << stats_.side_saved << "/" << stats_.savecb_calls;
+  VLOG(1) << "Exit SnapshotSerializer loop_serialized: " << stats_.loop_serialized
+          << ", side_saved " << stats_.side_saved << ", cbcalls " << stats_.savecb_calls;
 }
 
 void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
@@ -213,7 +213,7 @@ void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
   VLOG(1) << "Starting incremental snapshot from lsn=" << lsn;
 
   // The replica sends the LSN of the next entry is wants to receive.
-  while (!cntx_->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
+  while (cntx_->IsRunning() && journal->IsLSNInBuffer(lsn)) {
     serializer_->WriteJournalEntry(journal->GetEntry(lsn));
     PushSerialized(false);
     lsn++;
@@ -255,7 +255,7 @@ bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator i
 
   ++stats_.savecb_calls;
 
-  auto check = [&](auto v) {
+  auto check = [&](uint64_t v) {
     if (v >= snapshot_version_) {
       // either has been already serialized or added after snapshotting started.
       DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << " at " << v;
@@ -272,7 +272,8 @@ bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator i
   db_slice_->FlushChangeToEarlierCallbacks(db_index, DbSlice::Iterator::FromPrime(it),
                                            snapshot_version_);
 
-  auto* blocking_counter = db_slice_->BlockingCounter();
+  auto* blocking_counter = db_slice_->GetLatch();
+
   // Locking this never preempts. We merely just increment the underline counter such that
   // if SerializeBucket preempts, Heartbeat() won't run because the blocking counter is not
   // zero.
@@ -291,11 +292,10 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
   it.SetVersion(snapshot_version_);
   unsigned result = 0;
 
-  while (!it.is_done()) {
+  for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
     ++result;
     // might preempt due to big value serialization.
     SerializeEntry(db_index, it->first, it->second);
-    ++it;
   }
   serialize_bucket_running_ = false;
   return result;
@@ -310,18 +310,11 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
     auto eit = db_array_[db_indx]->expire.Find(pk);
     expire_time = db_slice_->ExpireTime(eit);
   }
-
   uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(db_indx, pk) : 0;
 
   if (pv.IsExternal()) {
-    // We can't block, so we just schedule a tiered read and append it to the delayed entries
-    util::fb2::Future<PrimeValue> future;
-    EngineShard::tlocal()->tiered_storage()->Read(
-        db_indx, pk.ToString(), pv,
-        [future](const std::string& v) mutable { future.Resolve(PrimeValue(v)); });
-    delayed_entries_.push_back(
-        {db_indx, PrimeKey(pk.ToString()), std::move(future), expire_time, mc_flags});
-    ++type_freq_map_[RDB_TYPE_STRING];
+    // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
+    SerializeExternal(db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
   } else {
     io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
     CHECK(res);
@@ -362,7 +355,7 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
 }
 
 bool SliceSnapshot::PushSerialized(bool force) {
-  if (!force && serializer_->SerializedLen() < kMinBlobSize)
+  if (!force && serializer_->SerializedLen() < kMinBlobSize && delayed_entries_.size() < 32)
     return false;
 
   // Flush any of the leftovers to avoid interleavings
@@ -373,8 +366,16 @@ bool SliceSnapshot::PushSerialized(bool force) {
     // Because we can finally block in this function, we'll await and serialize them
     do {
       auto& entry = delayed_entries_.back();
-      serializer_->SaveEntry(entry.key, entry.value.Get(), entry.expire, entry.dbid,
-                             entry.mc_flags);
+
+      // TODO: https://github.com/dragonflydb/dragonfly/issues/4654
+      // there are a few problems with how we serialize external values.
+      // 1. We may block here too frequently, slowing down the process.
+      // 2. For small bin values, we issue multiple reads for the same page, creating
+      //    read factor amplification that can reach factor of ~60.
+      PrimeValue pv{entry.value.Get()};  // Might block until the future resolves.
+
+      // TODO: to introduce RdbSerializer::SaveString that can accept a string value directly.
+      serializer_->SaveEntry(entry.key, pv, entry.expire, entry.mc_flags, entry.dbid);
       delayed_entries_.pop_back();
     } while (!delayed_entries_.empty());
 
@@ -384,6 +385,17 @@ bool SliceSnapshot::PushSerialized(bool force) {
   return serialized > 0;
 }
 
+void SliceSnapshot::SerializeExternal(DbIndex db_index, PrimeKey key, const PrimeValue& pv,
+                                      time_t expire_time, uint32_t mc_flags) {
+  // We prefer avoid blocking, so we just schedule a tiered read and append
+  // it to the delayed entries.
+  util::fb2::Future<string> future =
+      EngineShard::tlocal()->tiered_storage()->Read(db_index, key.ToString(), pv);
+
+  delayed_entries_.push_back({db_index, std::move(key), std::move(future), expire_time, mc_flags});
+  ++type_freq_map_[RDB_TYPE_STRING];
+}
+
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
   std::lock_guard guard(big_value_mu_);
 
@@ -391,7 +403,7 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
   const PrimeTable::bucket_iterator* bit = req.update();
 
   if (bit) {
-    if (bit->GetVersion() < snapshot_version_) {
+    if (!bit->is_done() && bit->GetVersion() < snapshot_version_) {
       stats_.side_saved += SerializeBucket(db_index, *bit);
     }
   } else {
@@ -411,9 +423,12 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
   // To enable journal flushing to sync after non auto journal command is executed we call
   // TriggerJournalWriteToSink. This call uses the NOOP opcode with await=true. Since there is no
   // additional journal change to serialize, it simply invokes PushSerialized.
-  std::lock_guard guard(big_value_mu_);
-  if (item.opcode != journal::Op::NOOP) {
-    serializer_->WriteJournalEntry(item.data);
+  {
+    // We should release the lock after we preempt
+    std::lock_guard guard(big_value_mu_);
+    if (item.opcode != journal::Op::NOOP) {
+      serializer_->WriteJournalEntry(item.data);
+    }
   }
 
   if (await) {

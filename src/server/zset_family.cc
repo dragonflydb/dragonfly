@@ -23,6 +23,7 @@ extern "C" {
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
 #include "server/blocking_controller.h"
+#include "server/cluster/cluster_defs.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
@@ -101,11 +102,11 @@ bool IsListPack(const detail::RobjWrapper* robj_wrapper) {
  * taken from t_zset.c
  */
 
-int ZsetDel(detail::RobjWrapper* robj_wrapper, sds ele) {
+int ZsetDel(detail::RobjWrapper* robj_wrapper, std::string_view ele) {
   if (IsListPack(robj_wrapper)) {
     unsigned char* eptr;
     uint8_t* lp = (uint8_t*)robj_wrapper->inner_obj();
-    if ((eptr = zzlFind(lp, ele, NULL)) != NULL) {
+    if ((eptr = detail::ZzlFind(lp, ele, nullptr)) != nullptr) {
       lp = lpDeleteRangeWithEntry(lp, &eptr, 2);
       robj_wrapper->set_inner_obj(lp);
       return 1;
@@ -119,10 +120,11 @@ int ZsetDel(detail::RobjWrapper* robj_wrapper, sds ele) {
 }
 
 // taken from t_zset.c
-std::optional<double> GetZsetScore(const detail::RobjWrapper* robj_wrapper, sds member) {
+std::optional<double> GetZsetScore(const detail::RobjWrapper* robj_wrapper,
+                                   std::string_view member) {
   if (IsListPack(robj_wrapper)) {
     double score;
-    if (zzlFind((uint8_t*)robj_wrapper->inner_obj(), member, &score) == NULL)
+    if (detail::ZzlFind((uint8_t*)robj_wrapper->inner_obj(), member, &score) == NULL)
       return std::nullopt;
     return score;
   }
@@ -161,14 +163,12 @@ OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZSetFamily::ZParams& zparams,
 
   auto& it = add_res.it;
   PrimeValue& pv = it->second;
-  DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
   if (add_res.is_new || zparams.override) {
     if (member_len > server.max_map_field_len) {
       pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_SKIPLIST, CompactObj::AllocateMR<detail::SortedMap>());
     } else {
       unsigned char* lp = lpNew(0);
       pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
-      stats->listpack_blob_cnt++;
     }
   } else {
     if (it->second.ObjType() != OBJ_ZSET)
@@ -177,8 +177,6 @@ OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZSetFamily::ZParams& zparams,
 
   auto* blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (add_res.is_new && blocking_controller) {
-    string tmp;
-    string_view key = it->first.GetSlice(&tmp);
     blocking_controller->AwakeWatched(op_args.db_cntx.db_index, key);
   }
 
@@ -1087,17 +1085,31 @@ void BZPopMinMax(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
   return rb->SendNullArray();
 }
 
-vector<ScoredMap> OpFetch(EngineShard* shard, Transaction* t) {
+OpResult<vector<ScoredMap>> OpFetch(EngineShard* shard, Transaction* t, bool skip_dest_key) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
+  ShardArgs::Iterator start = keys.begin(), end = keys.end();
+
+  if (skip_dest_key) {
+    // If destkey is only found on this shard we can return
+    if (++start == end)
+      return OpStatus::OK;
+  }
+
   vector<ScoredMap> results;
-  results.reserve(keys.Size());
+  results.reserve(keys.Size() - (skip_dest_key ? 1 : 0));
 
   auto& db_slice = t->GetDbSlice(shard->shard_id());
-  for (string_view key : keys) {
-    auto it = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_ZSET);
+  for (; start != end; ++start) {
+    auto it = db_slice.FindReadOnly(t->GetDbContext(), *start, OBJ_ZSET);
+
     if (!it) {
+      // Key has wrong type so return so we can report error back
+      if (it.status() == OpStatus::WRONG_TYPE) {
+        return OpStatus::WRONG_TYPE;
+      }
+      // Key is not found so treat it as empty set
       results.push_back({});
       continue;
     }
@@ -1215,14 +1227,14 @@ OpResult<RankResult> OpRank(const OpArgs& op_args, string_view key, string_view 
   RankResult res{};
 
   if (with_score) {
-    auto rankAndScore = ss->GetRankAndScore(WrapSds(member), reverse);
+    auto rankAndScore = ss->GetRankAndScore(member, reverse);
     if (!rankAndScore) {
       return OpStatus::KEY_NOTFOUND;
     }
     res.rank = rankAndScore->first;
     res.score = rankAndScore->second;
   } else {
-    std::optional<unsigned> rank = ss->GetRank(WrapSds(member), reverse);
+    std::optional<unsigned> rank = ss->GetRank(member, reverse);
     if (!rank) {
       return OpStatus::KEY_NOTFOUND;
     }
@@ -1334,7 +1346,7 @@ OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, facade::ArgRang
   detail::RobjWrapper* robj_wrapper = res_it->it->second.GetRobjWrapper();
   unsigned deleted = 0;
   for (string_view member : members)
-    deleted += ZsetDel(robj_wrapper, WrapSds(member));
+    deleted += ZsetDel(robj_wrapper, member);
 
   auto zlen = robj_wrapper->Size();
   res_it->post_updater.Run();
@@ -1349,6 +1361,13 @@ OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, facade::ArgRang
 OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key,
                                   facade::ArgRange members) {
   auto res_it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
+
+  if (res_it.status() == OpStatus::KEY_NOTFOUND) {
+    // If the key doesn't exist return an array of NIL values
+    MScoreResponse result(members.Size(), std::nullopt);
+    return result;
+  }
+
   if (!res_it)
     return res_it.status();
 
@@ -1358,7 +1377,7 @@ OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key,
 
   size_t i = 0;
   for (string_view member : members.Range())
-    scores[i++] = GetZsetScore(robj_wrapper, WrapSds(member));
+    scores[i++] = GetZsetScore(robj_wrapper, member);
 
   return scores;
 }
@@ -1958,8 +1977,7 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
 
   for (size_t j = 0; j < members.size(); j++) {
     const auto& m = members[j];
-    int retval =
-        robj_wrapper->ZsetAdd(m.first, WrapSds(m.second), zparams.flags, &retflags, &new_score);
+    int retval = robj_wrapper->ZsetAdd(m.first, m.second, zparams.flags, &retflags, &new_score);
 
     if (zparams.flags & ZADD_IN_INCR) {
       if (retval == 0) {
@@ -1978,12 +1996,6 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
       added++;
     if (retflags & ZADD_OUT_UPDATED)
       updated++;
-  }
-
-  // if we migrated to skip_list - update listpack stats.
-  if (is_list_pack && !IsListPack(robj_wrapper)) {
-    DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
-    --stats->listpack_blob_cnt;
   }
 
   if (zparams.flags & ZADD_IN_INCR) {
@@ -2009,7 +2021,7 @@ OpResult<double> ZSetFamily::OpScore(const OpArgs& op_args, string_view key, str
 
   const PrimeValue& pv = res_it.value()->second;
   const detail::RobjWrapper* robj_wrapper = pv.GetRobjWrapper();
-  auto res = GetZsetScore(robj_wrapper, WrapSds(member));
+  auto res = GetZsetScore(robj_wrapper, member);
   if (!res) {
     return OpStatus::MEMBER_NOTFOUND;
   }
@@ -2166,31 +2178,25 @@ void ZSetFamily::ZCount(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void ZSetFamily::ZDiff(CmdArgList args, const CommandContext& cmd_cntx) {
-  vector<vector<ScoredMap>> maps(shard_set->size());
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    maps[shard->shard_id()] = OpFetch(shard, t);
-    return OpStatus::OK;
-  };
+/* Calculate difference between key set and all other sets. */
+vector<ScoredMemberView> ZDiffOp(ShardId key_sid, vector<OpResult<vector<ScoredMap>>> maps,
+                                 ScoredMap* result) {
+  auto& key_shard_map = maps[key_sid].value();
 
-  cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
-
-  const string_view key = ArgS(args, 1);
-  const ShardId sid = Shard(key, maps.size());
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  // Extract the ScoredMap of the first key
-  auto& sm = maps[sid];
-  if (sm.empty()) {
-    rb->SendEmptyArray();
-    return;
+  // Key set will be first element of shard ScoredMap vector. Scored map for shard containing key
+  // should have least one - key set. If it is empty we don't need anything and return immediately.
+  if (key_shard_map[0].empty()) {
+    return {};
   }
-  auto result = std::move(sm[0]);
-  sm.erase(sm.begin());
+
+  // Store key set values in result and remove it from vector for further calculations.
+  *result = std::move(key_shard_map[0]);
+  key_shard_map.erase(key_shard_map.begin());
 
   auto filter = [&result](const auto& key) mutable {
-    auto it = result.find(key);
-    if (it != result.end()) {
-      result.erase(it);
+    auto it = result->find(key);
+    if (it != result->end()) {
+      result->erase(it);
     }
   };
 
@@ -2198,7 +2204,7 @@ void ZSetFamily::ZDiff(CmdArgList args, const CommandContext& cmd_cntx) {
   // Iterate over the results of each shard
   for (auto& vsm : maps) {
     // Iterate over each fetched set
-    for (auto& sm : vsm) {
+    for (auto& sm : vsm.value()) {
       // Iterate over each key in the fetched set and filter
       for (auto& [key, value] : sm) {
         filter(key);
@@ -2207,21 +2213,103 @@ void ZSetFamily::ZDiff(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   vector<ScoredMemberView> smvec;
-  for (const auto& elem : result) {
+  for (const auto& elem : *result) {
     smvec.emplace_back(elem.second, elem.first);
   }
 
   // Total O(KlogK)
   std::sort(std::begin(smvec), std::end(smvec));
 
+  return smvec;
+}
+
+void ZSetFamily::ZDiff(CmdArgList args, const CommandContext& cmd_cntx) {
+  vector<OpResult<vector<ScoredMap>>> maps(shard_set->size(), OpStatus::OK);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    maps[shard->shard_id()] = OpFetch(shard, t, false /* no destination key */);
+    return OpStatus::OK;
+  };
+
+  cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+
+  // Check shard results for WRONG_TYPE returned
+  for (auto& sm_map : maps) {
+    if (sm_map.status() == OpStatus::WRONG_TYPE) {
+      rb->SendError(sm_map.status());
+      return;
+    }
+  }
+
+  const string_view key = ArgS(args, 1);
+  const ShardId sid = Shard(key, shard_set->size());
+
+  // We need to have result stored and not be destructed before function ends because
+  // we are passing string_view of result members to other functions
+  ScoredMap result;
+  // Calculate diff between sets.
+  vector<ScoredMemberView> smvec = ZDiffOp(sid, std::move(maps), &result);
+
+  // Empty result set so return
+  if (smvec.empty()) {
+    rb->SendEmptyArray();
+    return;
+  }
+
   const bool with_scores = ArgS(args, args.size() - 1) == "WITHSCORES";
-  rb->StartArray(result.size() * (with_scores ? 2 : 1));
+  rb->StartArray(smvec.size() * (with_scores ? 2 : 1));
   for (const auto& [score, key] : smvec) {
     rb->SendBulkString(key);
     if (with_scores) {
       rb->SendDouble(score);
     }
   }
+}
+
+void ZSetFamily::ZDiffStore(CmdArgList args, const CommandContext& cmd_cntx) {
+  vector<OpResult<vector<ScoredMap>>> maps(shard_set->size(), OpStatus::OK);
+  const string_view dest_key = ArgS(args, 0);
+  const ShardId dest_shard = Shard(dest_key, shard_set->size());
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    // We skip destkey if shard id matches
+    const bool skip_dest_key = shard->shard_id() == dest_shard;
+    maps[shard->shard_id()] = OpFetch(shard, t, skip_dest_key);
+    return OpStatus::OK;
+  };
+
+  cmd_cntx.tx->Execute(std::move(cb), false);
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+
+  // Check shard results for WRONG_TYPE returned
+  for (auto& sm_map : maps) {
+    if (sm_map.status() == OpStatus::WRONG_TYPE) {
+      cmd_cntx.tx->Conclude();
+      return rb->SendError(sm_map.status());
+    }
+  }
+
+  const string_view key = ArgS(args, 2);
+  const ShardId sid = Shard(key, shard_set->size());
+
+  // We need to have result stored and not be destructed before function ends because
+  // we are passing string_view of result members to other functions
+  ScoredMap result;
+  // Calculate diff between sets. We stil need to write  destination key even it is empty set
+  vector<ScoredMemberView> smvec = ZDiffOp(sid, std::move(maps), &result);
+
+  auto store_cb = [&](Transaction* t, EngineShard* shard) {
+    if (shard->shard_id() == dest_shard)
+      ZSetFamily::OpAdd(t->GetOpArgs(shard), ZSetFamily::ZParams{.override = true}, dest_key,
+                        smvec);
+    return OpStatus::OK;
+  };
+
+  cmd_cntx.tx->Execute(store_cb, true);
+  rb->SendLong(smvec.size());
 }
 
 void ZSetFamily::ZIncrBy(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2602,7 +2690,7 @@ void ZSetFamily::ZScan(CmdArgList args, const CommandContext& cmd_cntx) {
     DVLOG(1) << "Scan invalid args - return " << ops << " to the user";
     return rb->SendError(ops.status());
   }
-  ScanOpts scan_op = ops.value();
+  const ScanOpts& scan_op = ops.value();
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
@@ -2638,6 +2726,7 @@ constexpr uint32_t kBZPopMax = WRITE | SORTEDSET | FAST | BLOCKING;
 constexpr uint32_t kZCard = READ | SORTEDSET | FAST;
 constexpr uint32_t kZCount = READ | SORTEDSET | FAST;
 constexpr uint32_t kZDiff = READ | SORTEDSET | SLOW;
+constexpr uint32_t kZDiffStore = WRITE | SORTEDSET | SLOW;
 constexpr uint32_t kZIncrBy = WRITE | SORTEDSET | FAST;
 constexpr uint32_t kZInterStore = WRITE | SORTEDSET | SLOW;
 constexpr uint32_t kZInter = READ | SORTEDSET | SLOW;
@@ -2682,6 +2771,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1, acl::kZCard}.HFUNC(ZCard)
       << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1, acl::kZCount}.HFUNC(ZCount)
       << CI{"ZDIFF", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZDiff}.HFUNC(ZDiff)
+      << CI{"ZDIFFSTORE", kStoreMask, -4, 3, 3, acl::kZDiffStore}.HFUNC(ZDiffStore)
       << CI{"ZINCRBY", CO::FAST | CO::WRITE, 4, 1, 1, acl::kZIncrBy}.HFUNC(ZIncrBy)
       << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3, acl::kZInterStore}.HFUNC(ZInterStore)
       << CI{"ZINTER", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZInter}.HFUNC(ZInter)

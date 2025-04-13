@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_set.h>
 
 #include <memory>
+#include <string_view>
 
 #include "core/heap_size.h"
 #include "facade/acl_commands_def.h"
@@ -34,10 +35,14 @@ class ConnectionContext {
 
   virtual size_t UsedMemory() const;
 
+  // Noop.
+  virtual void Unsubscribe(std::string_view channel) {
+  }
+
   // connection state / properties.
   bool conn_closing : 1;
   bool req_auth : 1;
-  bool replica_conn : 1;
+  bool replica_conn : 1;  // whether it's a replica connection on the master side.
   bool authenticated : 1;
   bool async_dispatch : 1;    // whether this connection is amid an async dispatch
   bool sync_dispatch : 1;     // whether this connection is amid a sync dispatch
@@ -60,6 +65,8 @@ class ConnectionContext {
   dfly::acl::AclKeys keys{{}, true};
   // pub/sub
   dfly::acl::AclPubSub pub_sub{{}, true};
+  // db index, std::numeric_limits<size_t>::max for ALL db's
+  size_t acl_db_idx = 0;
 
  private:
   Connection* owner_;

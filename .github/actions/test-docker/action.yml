@@ -1,0 +1,25 @@
+name: Test Docker Image
+
+inputs:
+  image_id:
+    required: true
+    type: string
+  name:
+    required: true
+    type: string
+
+runs:
+  using: "composite"
+  steps:
+    - name: Test Image
+      shell: bash
+      run: |
+        echo "Testing ${{ inputs.name }} image"
+        docker pull ${{inputs.image_id}}
+        docker image inspect ${{inputs.image_id}}
+
+        # docker run with port-forwarding
+        docker run  --name test -d -p 6379:6379 ${{inputs.image_id}}
+        until [ "`docker inspect -f {{.State.Health.Status}} test`"=="healthy" ]; do
+          sleep 0.1;
+        done;

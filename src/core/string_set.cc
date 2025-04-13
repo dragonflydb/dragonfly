@@ -4,6 +4,7 @@
 
 #include "core/string_set.h"
 
+#include "absl/flags/flag.h"
 #include "core/compact_object.h"
 #include "core/sds_utils.h"
 
@@ -13,6 +14,9 @@ extern "C" {
 }
 
 #include "base/logging.h"
+
+ABSL_FLAG(bool, legacy_saddex_keepttl, false,
+          "If true SADDEX does not update TTL for existing fields");
 
 using namespace std;
 
@@ -51,7 +55,31 @@ bool StringSet::Add(string_view src, uint32_t ttl_sec) {
   return true;
 }
 
-unsigned StringSet::AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec) {
+unsigned StringSet::AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec, bool keepttl) {
+  std::string_view views[kMaxBatchLen];
+  unsigned res = 0;
+  if (BucketCount() < span.size()) {
+    Reserve(span.size());
+  }
+
+  while (span.size() >= kMaxBatchLen) {
+    for (size_t i = 0; i < kMaxBatchLen; i++)
+      views[i] = span[i];
+
+    span.remove_prefix(kMaxBatchLen);
+    res += AddBatch(absl::MakeSpan(views), ttl_sec, keepttl);
+  }
+
+  if (span.size()) {
+    for (size_t i = 0; i < span.size(); i++)
+      views[i] = span[i];
+
+    res += AddBatch(absl::MakeSpan(views, span.size()), ttl_sec, keepttl);
+  }
+  return res;
+}
+
+unsigned StringSet::AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec, bool keepttl) {
   uint64_t hash[kMaxBatchLen];
   bool has_ttl = ttl_sec != UINT32_MAX;
   unsigned count = span.size();
@@ -64,12 +92,20 @@ unsigned StringSet::AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec
     Prefetch(hash[i]);
   }
 
+  // update ttl if legacy_saddex_keepttl is off (which is default). This variable is intended for
+  // SADDEX, but this method is called from SADD as well, where ttl is set to UINT32_MAX value,
+  // which results in has_ttl being false. This means that ObjUpdateExpireTime is never called from
+  // SADD code path even when update_ttl is true.
+  const thread_local bool update_ttl = !absl::GetFlag(FLAGS_legacy_saddex_keepttl);
+
   for (unsigned i = 0; i < count; ++i) {
     void* prev = FindInternal(&span[i], hash[i], 1);
     if (prev == nullptr) {
       ++res;
       sds field = MakeSetSds(span[i], ttl_sec);
       AddUnique(field, has_ttl, hash[i]);
+    } else if (update_ttl && has_ttl && !keepttl) {
+      ObjUpdateExpireTime(prev, ttl_sec);
     }
   }
 
@@ -163,6 +199,46 @@ sds StringSet::MakeSetSds(string_view src, uint32_t ttl_sec) const {
   }
 
   return sdsnewlen(src.data(), src.size());
+}
+
+// Does not release obj. Callers must deallocate with sdsfree explicitly
+pair<sds, bool> StringSet::DuplicateEntryIfFragmented(void* obj, float ratio) {
+  sds key = (sds)obj;
+
+  if (!zmalloc_page_is_underutilized(key, ratio))
+    return {key, false};
+
+  size_t key_len = sdslen(key);
+  bool has_ttl = MayHaveTtl(key);
+
+  if (has_ttl) {
+    sds res = AllocSdsWithSpace(key_len, sizeof(uint32_t));
+    std::memcpy(res, key, key_len + sizeof(uint32_t));
+    return {res, true};
+  }
+
+  return {sdsnewlen(key, key_len), true};
+}
+
+bool StringSet::iterator::ReallocIfNeeded(float ratio) {
+  auto* ptr = curr_entry_;
+  if (ptr->IsLink()) {
+    ptr = ptr->AsLink();
+  }
+
+  DCHECK(!ptr->IsEmpty());
+  DCHECK(ptr->IsObject());
+
+  auto* obj = ptr->GetObject();
+  auto [new_obj, realloced] =
+      static_cast<StringSet*>(owner_)->DuplicateEntryIfFragmented(obj, ratio);
+
+  if (realloced) {
+    ptr->SetObject(new_obj);
+    sdsfree((sds)obj);
+  }
+
+  return realloced;
 }
 
 }  // namespace dfly

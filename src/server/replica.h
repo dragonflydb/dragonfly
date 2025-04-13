@@ -58,7 +58,8 @@ class Replica : ProtocolClient {
   // Spawns a fiber that runs until link with master is broken or the replication is stopped.
   // Returns true if initial link with master has been established or
   // false if it has failed.
-  std::error_code Start(facade::SinkReplyBuilder* builder);
+  GenericError Start();
+  void StartMainReplicationFiber();
 
   // Sets the server state to have replication enabled.
   // It is like Start(), but does not attempt to establish
@@ -70,6 +71,10 @@ class Replica : ProtocolClient {
   void Pause(bool pause);
 
   std::error_code TakeOver(std::string_view timeout, bool save_flag);
+
+  bool IsContextCancelled() const {
+    return !exec_st_.IsRunning();
+  }
 
  private: /* Main standalone mode functions */
   // Coordinate state transitions. Spawned by start.
@@ -179,21 +184,22 @@ class DflyShardReplica : public ProtocolClient {
 
   // Start replica initialized as dfly flow.
   // Sets is_full_sync when successful.
-  io::Result<bool> StartSyncFlow(util::fb2::BlockingCounter block, Context* cntx,
+  io::Result<bool> StartSyncFlow(util::fb2::BlockingCounter block, ExecutionState* cntx,
                                  std::optional<LSN>);
 
   // Transition into stable state mode as dfly flow.
-  std::error_code StartStableSyncFlow(Context* cntx);
+  std::error_code StartStableSyncFlow(ExecutionState* cntx);
 
   // Single flow full sync fiber spawned by StartFullSyncFlow.
-  void FullSyncDflyFb(std::string eof_token, util::fb2::BlockingCounter block, Context* cntx);
+  void FullSyncDflyFb(std::string eof_token, util::fb2::BlockingCounter block,
+                      ExecutionState* cntx);
 
   // Single flow stable state sync fiber spawned by StartStableSyncFlow.
-  void StableSyncDflyReadFb(Context* cntx);
+  void StableSyncDflyReadFb(ExecutionState* cntx);
 
-  void StableSyncDflyAcksFb(Context* cntx);
+  void StableSyncDflyAcksFb(ExecutionState* cntx);
 
-  void ExecuteTx(TransactionData&& tx_data, Context* cntx);
+  void ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx);
 
   uint32_t FlowId() const;
 

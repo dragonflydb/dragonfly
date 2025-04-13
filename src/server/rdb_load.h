@@ -164,7 +164,8 @@ class RdbLoaderBase {
   ::io::Result<std::string> ReadKey();
 
   std::error_code ReadObj(int rdbtype, OpaqueObj* dest);
-  std::error_code ReadStringObj(RdbVariant* rdb_variant);
+  std::error_code ReadStringObj(RdbVariant* rdb_variant, bool big_string_split = false);
+  std::error_code ReadRemainingString(RdbVariant* dest);
   ::io::Result<long long> ReadIntObj(int encoding);
   ::io::Result<LzfString> ReadLzf();
 
@@ -173,11 +174,9 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadGeneric(int rdbtype);
   ::io::Result<OpaqueObj> ReadHMap(int rdbtype);
   ::io::Result<OpaqueObj> ReadZSet(int rdbtype);
-  ::io::Result<OpaqueObj> ReadZSetZL();
   ::io::Result<OpaqueObj> ReadListQuicklist(int rdbtype);
   ::io::Result<OpaqueObj> ReadStreams(int rdbtype);
   ::io::Result<OpaqueObj> ReadRedisJson();
-  ::io::Result<OpaqueObj> ReadJson();
   ::io::Result<OpaqueObj> ReadSBF();
 
   std::error_code SkipModuleData();
@@ -311,6 +310,8 @@ class RdbLoader : protected RdbLoaderBase {
 
   void LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib);
 
+  void CreateObjectOnShard(const DbContext& db_cntx, const Item* item, DbSlice* db_slice);
+
   void LoadScriptFromAux(std::string&& value);
 
   // Load index definition from RESP string describing it in FT.CREATE format,
@@ -321,6 +322,7 @@ class RdbLoader : protected RdbLoaderBase {
   Service* service_;
   bool override_existing_keys_ = false;
   bool load_unowned_slots_ = false;
+  bool rdb_ignore_expiry_;
   ScriptMgr* script_mgr_;
   std::vector<ItemsBuf> shard_buf_;
 
@@ -329,12 +331,12 @@ class RdbLoader : protected RdbLoaderBase {
 
   DbIndex cur_db_index_ = 0;
   bool pause_ = false;
+  bool is_tiered_enabled_ = false;
   AggregateError ec_;
 
   // We use atomics here because shard threads can notify RdbLoader fiber from another thread
   // that it should stop early.
   std::atomic_bool stop_early_{false};
-  std::atomic_uint blocked_shards_{0};
 
   // Callback when receiving RDB_OPCODE_FULLSYNC_END
   std::function<void()> full_sync_cut_cb;

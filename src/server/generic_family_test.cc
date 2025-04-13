@@ -24,8 +24,6 @@ using namespace util;
 using namespace boost;
 using absl::StrCat;
 
-ABSL_DECLARE_FLAG(bool, list_rdb_encode_v2);
-
 namespace dfly {
 
 class GenericFamilyTest : public BaseFamilyTest {};
@@ -414,6 +412,49 @@ TEST_F(GenericFamilyTest, Scan) {
   EXPECT_EQ(resp, "");
 }
 
+TEST_F(GenericFamilyTest, ScanWithAttr) {
+  Run({"flushdb"});
+
+  Run({"set", "hello", "world"});
+  Run({"set", "foo", "bar"});
+
+  Run({"expire", "hello", "1000"});
+
+  auto resp = Run({"scan", "0", "attr", "v"});
+  auto vec = StrArray(resp.GetVec()[1]);
+  ASSERT_EQ(1, vec.size());
+  EXPECT_EQ(vec[0], "hello");
+
+  resp = Run({"scan", "0", "attr", "p"});
+  vec = StrArray(resp.GetVec()[1]);
+  ASSERT_EQ(1, vec.size());
+  EXPECT_EQ(vec[0], "foo");
+
+  // before run get "foo", scan with a attr should return "hello", because set "hello" expire before
+  resp = Run({"scan", "0", "attr", "a"});
+  vec = StrArray(resp.GetVec()[1]);
+  ASSERT_EQ(1, vec.size());
+  EXPECT_EQ(vec[0], "hello");
+
+  // before run get "foo", scan with a attr should return "foo"
+  resp = Run({"scan", "0", "attr", "u"});
+  vec = StrArray(resp.GetVec()[1]);
+  ASSERT_EQ(1, vec.size());
+  EXPECT_EQ(vec[0], "foo");
+
+  ASSERT_THAT(Run({"get", "foo"}), "bar");
+
+  // after run get "foo", scan with a attr should return "foo" and "hello"
+  resp = Run({"scan", "0", "attr", "a"});
+  vec = StrArray(resp.GetVec()[1]);
+  ASSERT_EQ(2, vec.size());
+
+  // after run get "foo", scan with a attr should return empty set
+  resp = Run({"scan", "0", "attr", "u"});
+  vec = StrArray(resp.GetVec()[1]);
+  ASSERT_EQ(0, vec.size());
+}
+
 TEST_F(GenericFamilyTest, Sort) {
   // Test list sort with params
   Run({"del", "list-1"});
@@ -565,17 +606,16 @@ TEST_F(GenericFamilyTest, Persist) {
 }
 
 TEST_F(GenericFamilyTest, Dump) {
-  ASSERT_THAT(RDB_SER_VERSION, 9);
-  absl::SetFlag(&FLAGS_list_rdb_encode_v2, false);
+  ASSERT_EQ(RDB_SER_VERSION, 9);
   uint8_t EXPECTED_STRING_DUMP[13] = {0x00, 0xc0, 0x13, 0x09, 0x00, 0x23, 0x13,
                                       0x6f, 0x4d, 0x68, 0xf6, 0x35, 0x6e};
   uint8_t EXPECTED_HASH_DUMP[] = {0x0d, 0x12, 0x12, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00,
                                   0x02, 0x00, 0x00, 0xfe, 0x13, 0x03, 0xc0, 0xd2, 0x04, 0xff,
                                   0x09, 0x00, 0xb1, 0x0b, 0xae, 0x6c, 0x23, 0x5d, 0x17, 0xaa};
 
-  uint8_t EXPECTED_LIST_DUMP[] = {0x0e, 0x01, 0x0e, 0x0e, 0x00, 0x00, 0x00, 0x0a, 0x00,
-                                  0x00, 0x00, 0x01, 0x00, 0x00, 0xfe, 0x14, 0xff, 0x09,
-                                  0x00, 0xba, 0x1e, 0xa9, 0x6b, 0xba, 0xfe, 0x2d, 0x3f};
+  uint8_t EXPECTED_LIST_DUMP[] = {0x12, 0x01, 0x02, '\t', '\t', 0x00, 0x00, 0x00,
+                                  0x01, 0x00, 0x14, 0x01, 0xff, '\t', 0x00, 0xfb,
+                                  0xbd, 0x36, 0xf8, 0xb4, 't',  '%',  ';'};
 
   // Check string dump
   auto resp = Run({"set", "z", "19"});
@@ -588,7 +628,7 @@ TEST_F(GenericFamilyTest, Dump) {
   EXPECT_EQ(1, CheckedInt({"rpush", "l", "20"}));
   resp = Run({"dump", "l"});
   dump = resp.GetBuf();
-  CHECK_EQ(ToSV(dump), ToSV(EXPECTED_LIST_DUMP));
+  CHECK_EQ(ToSV(dump), ToSV(EXPECTED_LIST_DUMP)) << absl::CHexEscape(resp.GetString());
 
   // Check for hash dump
   EXPECT_EQ(1, CheckedInt({"hset", "z2", "19", "1234"}));
@@ -612,9 +652,10 @@ TEST_F(GenericFamilyTest, Restore) {
                                  0x75, 0x59, 0x6d, 0x10, 0x04, 0x3f, 0x5c};
   auto resp = Run({"set", "exiting-key", "1234"});
   EXPECT_EQ(resp, "OK");
-  // try to restore into existing key - this should fail
+
+  // try to restore into existing key - this should fail. We should get BUSYKEY error
   ASSERT_THAT(Run({"restore", "exiting-key", "0", ToSV(STRING_DUMP_REDIS)}),
-              ArgType(RespExpr::ERROR));
+              ErrArg("BUSYKEY Target key name already exists."));
 
   // Try restore while setting expiration into the past
   // note that value for expiration is just some valid unix time stamp from the pass
@@ -870,6 +911,28 @@ TEST_F(GenericFamilyTest, RestoreOOM) {
   }
   ASSERT_LT(i, 10000);
   EXPECT_THAT(resp, ErrArg("Out of memory"));
+}
+
+TEST_F(GenericFamilyTest, Bug4466) {
+  auto resp = Run({"SCAN", "9223372036854775808"});  // an invalid cursor should not crash us.
+  EXPECT_THAT(resp, RespElementsAre("0", RespElementsAre()));
+}
+
+TEST_F(GenericFamilyTest, Unlink) {
+  for (unsigned i = 0; i < 1000; ++i) {
+    unsigned start = i * 10;
+    vector<string> cmd = {"SADD", "s1"};
+    for (unsigned j = 0; j < 10; ++j) {
+      cmd.push_back(absl::StrCat("f", start + j));
+    }
+    auto resp = Run(absl::MakeSpan(cmd));
+    ASSERT_THAT(resp, IntArg(10));
+    cmd[1] = "s2";
+    resp = Run(absl::MakeSpan(cmd));
+    ASSERT_THAT(resp, IntArg(10));
+  }
+  auto resp = Run({"unlink", "s1", "s2"});
+  EXPECT_THAT(resp, IntArg(2));
 }
 
 }  // namespace dfly

@@ -13,7 +13,6 @@
 #include "core/intent_lock.h"
 #include "server/conn_context.h"
 #include "server/detail/table.h"
-#include "server/top_keys.h"
 
 extern "C" {
 #include "redis/redis_aux.h"
@@ -32,6 +31,8 @@ using PrimeIterator = PrimeTable::iterator;
 using PrimeConstIterator = PrimeTable::const_iterator;
 using ExpireIterator = ExpireTable::iterator;
 using ExpireConstIterator = ExpireTable::const_iterator;
+
+class TopKeys;
 
 inline bool IsValid(PrimeIterator it) {
   return !it.is_done();
@@ -65,8 +66,6 @@ struct DbTableStats {
   // Applies for any non-inline objects.
   size_t obj_memory_usage = 0;
 
-  size_t listpack_blob_cnt = 0;
-  size_t listpack_bytes = 0;
   size_t tiered_entries = 0;
   size_t tiered_used_bytes = 0;
 
@@ -127,10 +126,12 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   mutable std::vector<std::string> expired_keys_events_;
 
   mutable DbTableStats stats;
-  std::vector<SlotStats> slots_stats;
+  std::unique_ptr<SlotStats[]> slots_stats;
   ExpireTable::Cursor expire_cursor;
 
-  TopKeys top_keys;
+  TopKeys* top_keys = nullptr;
+  uint8_t* dense_hll = nullptr;
+
   DbIndex index;
   uint32_t thread_index;
 

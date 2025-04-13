@@ -22,7 +22,7 @@ class BlockingController {
   explicit BlockingController(EngineShard* owner, Namespace* ns);
   ~BlockingController();
 
-  using Keys = std::variant<ShardArgs, ArgSlice>;
+  using Keys = ShardArgs;
 
   bool HasAwakedTransaction() const {
     return !awakened_transactions_.empty();
@@ -32,7 +32,8 @@ class BlockingController {
     return awakened_transactions_;
   }
 
-  void FinalizeWatched(Keys keys, Transaction* tx);
+  // Removes transaction from watching these keys.
+  void RemovedWatched(Keys keys, Transaction* tx);
 
   // go over potential wakened keys, verify them and activate watch queues.
   void NotifyPending();

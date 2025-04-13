@@ -17,6 +17,7 @@ import os
 import fakeredis
 from typing import Iterable, Union
 from enum import Enum
+import re
 
 
 def tmp_file_name():
@@ -425,6 +426,7 @@ class DflySeeder:
         stop_on_failure=True,
         cluster_mode=False,
         mirror_to_fake_redis=False,
+        pipeline=True,
     ):
         if cluster_mode:
             max_multikey = 1
@@ -439,6 +441,7 @@ class DflySeeder:
         self.stop_flag = False
         self.stop_on_failure = stop_on_failure
         self.fake_redis = None
+        self.use_pipeline = pipeline
 
         self.log_file = log_file
         if self.log_file is not None:
@@ -447,6 +450,7 @@ class DflySeeder:
         if mirror_to_fake_redis:
             logging.debug("Creating FakeRedis instance")
             self.fake_redis = fakeredis.FakeAsyncRedis()
+            self.use_pipeline = False
 
     async def run(self, target_ops=None, target_deviation=None):
         """
@@ -528,7 +532,7 @@ class DflySeeder:
     async def _close_client(self, client):
         if not self.cluster_mode:
             await client.connection_pool.disconnect()
-        await client.close()
+        await client.aclose()
 
     async def _capture_db(self, port, target_db, keys):
         client = self._make_client(port=port, db=target_db)
@@ -604,18 +608,19 @@ class DflySeeder:
                 break
 
             try:
-                if self.fake_redis is None:
+                if self.use_pipeline:
                     pipe = client.pipeline(transaction=tx_data[1])
                     for cmd in tx_data[0]:
                         pipe.execute_command(*cmd)
                     await pipe.execute()
                 else:
-                    # To mirror consistently to Fake Redis we must only send to it successful
-                    # commands. We can't use pipes because they might succeed partially.
                     for cmd in tx_data[0]:
                         dfly_resp = await client.execute_command(*cmd)
-                        fake_resp = await self.fake_redis.execute_command(*cmd)
-                        assert dfly_resp == fake_resp
+                        # To mirror consistently to Fake Redis we must only send to it successful
+                        # commands. We can't use pipes because they might succeed partially.
+                        if self.fake_redis is not None:
+                            fake_resp = await self.fake_redis.execute_command(*cmd)
+                            assert dfly_resp == fake_resp
             except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError) as e:
                 if self.stop_on_failure:
                     await self._close_client(client)
@@ -750,18 +755,26 @@ def skip_if_not_in_github():
 
 
 class ExpirySeeder:
-    def __init__(self):
+    def __init__(self, stop_on_failure=True, timeout=3):
         self.stop_flag = False
         self.i = 0
         self.batch_size = 200
+        self.stop_on_failure = stop_on_failure
+        self.timeout = timeout
 
     async def run(self, client):
         while not self.stop_flag:
-            pipeline = client.pipeline(transaction=True)
-            for i in range(0, self.batch_size):
-                pipeline.execute_command(f"SET tmp{self.i} bar{self.i} EX 3")
-                self.i = self.i + 1
-            await pipeline.execute()
+            try:
+                pipeline = client.pipeline(transaction=False)
+                for i in range(0, self.batch_size):
+                    pipeline.execute_command(f"SET tmp{self.i} bar{self.i} EX {self.timeout}")
+                    self.i = self.i + 1
+                await pipeline.execute()
+            except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError) as e:
+                if self.stop_on_failure:
+                    return
+                else:
+                    raise SystemExit(e)
 
     async def wait_until_n_inserts(self, count):
         while not self.i > count:
@@ -769,3 +782,9 @@ class ExpirySeeder:
 
     def stop(self):
         self.stop_flag = True
+
+
+def extract_int_after_prefix(prefix, line):
+    match = re.search(prefix + "(\\d+)", line)
+    assert match
+    return int(match.group(1))

@@ -8,7 +8,6 @@
 #include "core/string_or_view.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/op_status.h"
-#include "server/cluster/slot_set.h"
 #include "server/common.h"
 #include "server/conn_context.h"
 #include "server/table.h"
@@ -16,6 +15,11 @@
 #include "util/fibers/synchronization.h"
 
 namespace dfly {
+
+namespace cluster {
+class SlotRanges;
+class SlotSet;
+}  // namespace cluster
 
 using facade::OpResult;
 
@@ -229,7 +233,7 @@ class DbSlice {
     int32_t expire_options = 0;  // ExpireFlags
   };
 
-  DbSlice(uint32_t index, bool caching_mode, EngineShard* owner);
+  DbSlice(uint32_t index, bool cache_mode, EngineShard* owner);
   ~DbSlice();
 
   // Activates `db_ind` database if it does not exist (see ActivateDb below).
@@ -281,10 +285,7 @@ class DbSlice {
     Iterator it;
     ExpIterator exp_it;
     AutoUpdater post_updater;
-
-    bool IsValid() const {
-      return !it.is_done();
-    }
+    bool is_new = false;
   };
 
   ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
@@ -300,20 +301,11 @@ class DbSlice {
   OpResult<ConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
                                        unsigned req_obj_type) const;
 
-  struct AddOrFindResult {
-    Iterator it;
-    ExpIterator exp_it;
-    bool is_new = false;
-    AutoUpdater post_updater;
-
-    AddOrFindResult& operator=(ItAndUpdater&& o);
-  };
-
-  OpResult<AddOrFindResult> AddOrFind(const Context& cntx, std::string_view key);
+  OpResult<ItAndUpdater> AddOrFind(const Context& cntx, std::string_view key);
 
   // Same as AddOrSkip, but overwrites in case entry exists.
-  OpResult<AddOrFindResult> AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
-                                        uint64_t expire_at_ms);
+  OpResult<ItAndUpdater> AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
+                                     uint64_t expire_at_ms);
 
   // Adds a new entry. Requires: key does not exist in this slice.
   // Returns the iterator to the newly added entry.
@@ -355,7 +347,7 @@ class DbSlice {
   void FlushDb(DbIndex db_ind);
 
   // Flushes the data of given slot ranges.
-  void FlushSlots(cluster::SlotRanges slot_ranges);
+  void FlushSlots(const cluster::SlotRanges& slot_ranges);
 
   EngineShard* shard_owner() const {
     return owner_;
@@ -365,7 +357,7 @@ class DbSlice {
     return shard_id_;
   }
 
-  void OnCbFinish();
+  void OnCbFinishBlocking();
 
   bool Acquire(IntentLock::Mode m, const KeyLockArgs& lock_args);
   void Release(IntentLock::Mode m, const KeyLockArgs& lock_args);
@@ -468,7 +460,24 @@ class DbSlice {
   }
 
   void TEST_EnableCacheMode() {
-    caching_mode_ = 1;
+    cache_mode_ = 1;
+  }
+
+  bool IsCacheMode() const {
+    // During loading time we never bump elements.
+    return cache_mode_ && (load_ref_count_ == 0);
+  }
+
+  void IncrLoadInProgress() {
+    ++load_ref_count_;
+  }
+
+  void DecrLoadInProgress() {
+    --load_ref_count_;
+  }
+
+  bool IsLoadRefCountZero() const {
+    return load_ref_count_ == 0;
   }
 
   // Test hook to inspect last locked keys.
@@ -506,22 +515,34 @@ class DbSlice {
   void SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events);
 
   bool WillBlockOnJournalWrite() const {
-    return block_counter_.IsBlocked();
+    return serialization_latch_.IsBlocked();
   }
 
-  LocalBlockingCounter* BlockingCounter() {
-    return &block_counter_;
+  LocalLatch* GetLatch() {
+    return &serialization_latch_;
   }
+
+  void StartSampleTopK(DbIndex db_ind, uint32_t min_freq);
+
+  struct SamplingResult {
+    std::vector<std::pair<std::string, uint64_t>> top_keys;  // key -> frequency pairs.
+  };
+  SamplingResult StopSampleTopK(DbIndex db_ind);
+
+  void StartSampleKeys(DbIndex db_ind);
+
+  // Returns number of unique keys sampled.
+  size_t StopSampleKeys(DbIndex db_ind);
 
  private:
-  void PreUpdate(DbIndex db_ind, Iterator it, std::string_view key);
+  void PreUpdateBlocking(DbIndex db_ind, Iterator it);
   void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
 
   bool DelEmptyPrimeValue(const Context& cntx, Iterator it);
 
-  OpResult<AddOrFindResult> AddOrUpdateInternal(const Context& cntx, std::string_view key,
-                                                PrimeValue obj, uint64_t expire_at_ms,
-                                                bool force_update);
+  OpResult<ItAndUpdater> AddOrUpdateInternal(const Context& cntx, std::string_view key,
+                                             PrimeValue obj, uint64_t expire_at_ms,
+                                             bool force_update);
 
   void FlushSlotsFb(const cluster::SlotSet& slot_ids);
   void FlushDbIndexes(const std::vector<DbIndex>& indexes);
@@ -535,11 +556,11 @@ class DbSlice {
   // Clear tiered storage entries for the specified indices.
   void ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbTableArray& db_arr);
 
-  void PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* table);
-  void PerformDeletion(PrimeIterator del_it, DbTable* table);
+  void PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable* table);
 
-  // Send invalidation message to the clients that are tracking the change to a key.
-  void SendInvalidationTrackingMessage(std::string_view key);
+  // Queues invalidation message to the clients that are tracking the change to a key.
+  void QueueInvalidationTrackingMessageAtomic(std::string_view key);
+  void SendQueuedInvalidationMessages();
 
   void CreateDb(DbIndex index);
 
@@ -555,7 +576,7 @@ class DbSlice {
 
   PrimeItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
 
-  OpResult<AddOrFindResult> AddOrFindInternal(const Context& cntx, std::string_view key);
+  OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key);
 
   OpResult<PrimeItAndExp> FindInternal(const Context& cntx, std::string_view key,
                                        std::optional<unsigned> req_obj_type,
@@ -567,15 +588,15 @@ class DbSlice {
     return version_++;
   }
 
-  void CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const;
+  void CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const;
 
   // We need this because registered callbacks might yield and when they do so we want
   // to avoid Heartbeat or Flushing the db.
-  // This counter protects us against this case.
-  mutable LocalBlockingCounter block_counter_;
+  // This latch protects us against this case.
+  mutable LocalLatch serialization_latch_;
 
   ShardId shard_id_;
-  uint8_t caching_mode_ : 1;
+  uint8_t cache_mode_ : 1;
 
   EngineShard* owner_;
 
@@ -588,14 +609,21 @@ class DbSlice {
   size_t soft_budget_limit_ = 0;
   size_t table_memory_ = 0;
   uint64_t entries_count_ = 0;
+  unsigned load_ref_count_ = 0;
 
   mutable SliceEvents events_;  // we may change this even for const operations.
 
   DbTableArray db_arr_;
 
+  // key for bump up items pair contains <key hash, db_index>
+  using FetchedItemKey = std::pair<uint64_t, DbIndex>;
+
   struct FpHasher {
     size_t operator()(uint64_t val) const {
       return val;
+    }
+    size_t operator()(const FetchedItemKey& val) const {
+      return val.first;
     }
   };
 
@@ -613,7 +641,7 @@ class DbSlice {
   // for operations that preempt in the middle we have another mechanism -
   // auto laundering iterators, so in case of preemption we do not mind that fetched_items are
   // cleared or changed.
-  mutable absl::flat_hash_set<uint64_t, FpHasher> fetched_items_;
+  mutable absl::flat_hash_set<FetchedItemKey, FpHasher> fetched_items_;
 
   // Registered by shard indices on when first document index is created.
   DocDeletionCallback doc_del_cb_;
@@ -645,25 +673,9 @@ class DbSlice {
   absl::flat_hash_map<std::string, ConnectionHashSet,
                       absl::container_internal::hash_default_hash<std::string>,
                       absl::container_internal::hash_default_eq<std::string>, AllocatorType>
-      client_tracking_map_;
+      client_tracking_map_, pending_send_map_;
 
-  class PrimeBumpPolicy {
-   public:
-    PrimeBumpPolicy(absl::flat_hash_set<uint64_t, FpHasher>* items) : fetched_items_(items) {
-    }
-
-    // returns true if we can change the object location in dash table.
-    bool CanBump(const CompactObj& obj) const {
-      if (obj.IsSticky()) {
-        return false;
-      }
-      auto hc = obj.HashCode();
-      return fetched_items_->insert(hc).second;
-    }
-
-   private:
-    mutable absl::flat_hash_set<uint64_t, FpHasher>* fetched_items_;
-  };
+  class PrimeBumpPolicy;
 };
 
 inline bool IsValid(const DbSlice::Iterator& it) {

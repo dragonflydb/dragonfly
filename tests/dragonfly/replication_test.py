@@ -17,7 +17,7 @@ from .instance import DflyInstanceFactory, DflyInstance
 from .seeder import Seeder as SeederV2
 from . import dfly_args
 from .proxy import Proxy
-from .seeder import StaticSeeder
+from .seeder import DebugPopulateSeeder
 
 ADMIN_PORT = 1211
 
@@ -28,6 +28,7 @@ DISCONNECT_NORMAL_STABLE_SYNC = 2
 M_OPT = [pytest.mark.opt_only]
 M_SLOW = [pytest.mark.slow]
 M_STRESS = [pytest.mark.slow, pytest.mark.opt_only]
+M_NOT_EPOLL = [pytest.mark.exclude_epoll]
 
 
 async def wait_for_replicas_state(*clients, state="online", node_role="slave", timeout=0.05):
@@ -49,7 +50,7 @@ Test full replication pipeline. Test full sync with streaming changes and stable
         # Quick general test that replication is working
         (1, 3 * [1], dict(key_target=1_000), 500),
         # A lot of huge values
-        (2, 2 * [1], dict(key_target=1_000, huge_value_target=30), 500),
+        (2, 2 * [1], dict(key_target=5_000, huge_value_target=30), 500),
         (4, [4, 4], dict(key_target=10_000), 1_000),
         pytest.param(6, [6, 6, 6], dict(key_target=100_000), 20_000, marks=M_OPT),
         # Skewed tests with different thread ratio
@@ -260,7 +261,7 @@ async def test_disconnect_replica(
         await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
         if crash_type == 0:
             await asyncio.sleep(random.random() / 100 + 0.01)
-            await c_replica.close()
+            await c_replica.aclose()
             replica.stop(kill=True)
         else:
             await wait_available_async(c_replica)
@@ -281,7 +282,7 @@ async def test_disconnect_replica(
 
     async def stable_sync(replica, c_replica, crash_type):
         await asyncio.sleep(random.random() / 100)
-        await c_replica.close()
+        await c_replica.aclose()
         replica.stop(kill=True)
 
     await asyncio.gather(*(stable_sync(*args) for args in replicas_of_type(lambda t: t == 1)))
@@ -309,7 +310,7 @@ async def test_disconnect_replica(
     logging.debug("Check phase 3 replica survived")
     for replica, c_replica, _ in replicas_of_type(lambda t: t == 2):
         assert await c_replica.ping()
-        await c_replica.close()
+        await c_replica.aclose()
 
     logging.debug("Stop streaming")
     seeder.stop()
@@ -588,6 +589,10 @@ async def test_rewrites(df_factory):
     async def skip_cmd():
         await is_match_rsp(r".*")
 
+    async def skip_cmds(n):
+        for _ in range(n):
+            await skip_cmd()
+
     async def check(cmd, rx):
         await c_master.execute_command(cmd)
         match = await is_match_rsp(rx)
@@ -729,6 +734,21 @@ async def test_rewrites(df_factory):
             [r"DEL renamed", r"RESTORE renamekey (.*?) (.*?) REPLACE ABSTTL"],
         )
         await check_expire("renamekey")
+
+        # Test autojournaling in the multi-mode
+        await c_master.execute_command("XADD k-stream * field value")
+        await c_master.execute_command("SADD k-one-element-set value1 value2")
+        sha = await c_master.script_load(
+            "redis.call('XTRIM', KEYS[1], 'MINID', '0'); return redis.call('SPOP', KEYS[2]);"
+        )
+        await skip_cmds(3)
+        # The first call to XTRIM triggers autojournaling.
+        # The SPOP command is executed with CO::NO_AUTOJOURNALING.
+        # This test ensures that the SPOP command is still properly replicated
+        await check_list_ooo(
+            f"EVALSHA {sha} 2 k-stream k-one-element-set",
+            [r"XTRIM k-stream MINID 0", r"SREM k-one-element-set value[12]"],
+        )
 
 
 """
@@ -1102,6 +1122,7 @@ More details in https://github.com/dragonflydb/dragonfly/issues/1231
 
 
 @pytest.mark.slow
+@pytest.mark.exclude_epoll
 async def test_flushall_in_full_sync(df_factory):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=2)
@@ -1111,7 +1132,7 @@ async def test_flushall_in_full_sync(df_factory):
     c_replica = replica.client()
 
     # Fill master with test data
-    seeder = StaticSeeder(key_target=100_000)
+    seeder = DebugPopulateSeeder(key_target=100_000)
     await seeder.run(c_master)
 
     # Start replication and wait for full sync
@@ -1175,11 +1196,10 @@ async def test_readonly_script(df_factory):
 
     await c_replica.eval(READONLY_SCRIPT, 3, "A", "B", "WORKS") == "YES"
 
-    try:
+    with pytest.raises(aioredis.ResponseError) as roe:
         await c_replica.eval(WRITE_SCRIPT, 1, "A")
-        assert False
-    except aioredis.ResponseError as roe:
-        assert "READONLY " in str(roe)
+
+    assert "READONLY " in str(roe)
 
 
 take_over_cases = [
@@ -1190,6 +1210,7 @@ take_over_cases = [
 ]
 
 
+@pytest.mark.exclude_epoll
 @pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
 async def test_take_over_counters(df_factory, master_threads, replica_threads):
     master = df_factory.create(proactor_threads=master_threads)
@@ -1231,7 +1252,7 @@ async def test_take_over_counters(df_factory, master_threads, replica_threads):
         assert time.time() - start < 10
 
     async def delayed_takeover():
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(1)
         await c1.execute_command(f"REPLTAKEOVER 5")
 
     _, _, *results = await asyncio.gather(
@@ -1244,6 +1265,7 @@ async def test_take_over_counters(df_factory, master_threads, replica_threads):
         assert client_value == int(replicated_value)
 
 
+@pytest.mark.exclude_epoll
 @pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
 async def test_take_over_seeder(
     request, df_factory, df_seeder_factory, master_threads, replica_threads
@@ -1490,6 +1512,36 @@ async def test_tls_replication(
     await proxy.close(proxy_task)
 
 
+@dfly_args({"proactor_threads": 2})
+async def test_tls_replication_without_ca(
+    df_factory,
+    df_seeder_factory,
+    with_tls_server_args,
+    with_ca_tls_client_args,
+):
+    # 1. Spin up dragonfly tls enabled, debug populate
+    master = df_factory.create(tls_replication="true", **with_tls_server_args, requirepass="hi")
+    master.start()
+    # Somehow redis-py forces to verify the certificate and it fails
+    # TODO investigate why and remove with_ca_tls_clients_args
+    c_master = master.client(password="hi", **with_ca_tls_client_args)
+    await c_master.execute_command("DEBUG POPULATE 100")
+
+    # 2. Spin up a replica and initiate a REPLICAOF
+    replica = df_factory.create(
+        tls_replication="true", **with_tls_server_args, masterauth="hi", requirepass="hi"
+    )
+    replica.start()
+
+    c_replica = replica.client(password="hi", **with_ca_tls_client_args)
+
+    res = await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+    assert "OK" == res
+    await check_all_replicas_finished([c_replica], c_master)
+    assert 100 == await c_replica.execute_command("dbsize")
+
+
+@pytest.mark.exclude_epoll
 async def test_ipv6_replication(df_factory: DflyInstanceFactory):
     """Test that IPV6 addresses work for replication, ::1 is 127.0.0.1 localhost"""
     master = df_factory.create(proactor_threads=1, bind="::1", port=1111)
@@ -2280,7 +2332,9 @@ async def test_announce_ip_port(df_factory):
 
 async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
     # setting replication_timeout to a very small value to force the replica to timeout
-    master = df_factory.create(replication_timeout=100, vmodule="replica=2,dflycmd=2")
+    master = df_factory.create(
+        replication_timeout=100, vmodule="replica=2,dflycmd=2,snapshot=1,rdb_save=1,rdb_load=1"
+    )
     replica = df_factory.create()
 
     df_factory.start_all([master, replica])
@@ -2312,10 +2366,11 @@ async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory,
     seeder.stop()
     await seeder_task
 
-    await check_all_replicas_finished([c_replica], c_master, timeout=30)
+    await check_all_replicas_finished([c_replica], c_master, timeout=60)
     await assert_replica_reconnections(replica, 0)
 
 
+@pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 1})
 async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
     # disconnect after 1 second of being blocked
@@ -2454,7 +2509,7 @@ async def test_empty_hash_map_replicate_old_master(df_factory):
 
     await check_if_empty()
     assert await old_c_master.execute_command(f"EXISTS foo") == 1
-    await old_c_master.close()
+    await old_c_master.aclose()
 
     async def assert_body(client, result=1, state="online", node_role="slave"):
         async with async_timeout.timeout(10):
@@ -2478,7 +2533,7 @@ async def test_empty_hash_map_replicate_old_master(df_factory):
             await assert_body(client_b, result=0)
 
         index = index + 1
-        await client_b.close()
+        await client_b.aclose()
 
 
 # This Test was intorduced in response to a bug when replicating empty hash maps with
@@ -2664,6 +2719,48 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
     await assert_replica_reconnections(replica, 0)
 
 
+@pytest.mark.exclude_epoll
+@dfly_args({"proactor_threads": 1})
+async def test_memory_on_big_string_loading(df_factory):
+    """
+    In this test we want to make sure there is no spike in rss while loading big string value
+    1. insert 1 big value to master
+    2. replicate master
+    3. check rss peak memory on replica node
+    """
+    master = df_factory.create()
+    replica = df_factory.create()
+
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    logging.debug("Populate with one big string")
+    await c_master.execute_command("DEBUG POPULATE 1 key 200000000 RAND")
+
+    async def get_memory(client, field):
+        info = await client.info("memory")
+        return info[field]
+
+    logging.debug("Start replication and wait for full sync")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+
+    await c_replica.execute_command("memory decommit")
+    await asyncio.sleep(1)
+    replica_peak_memory = await get_memory(c_replica, "used_memory_peak_rss")
+    replica_used_memory = await get_memory(c_replica, "used_memory_rss")
+
+    logging.info(f"Replica Used memory {replica_used_memory}, peak memory {replica_peak_memory}")
+    assert replica_peak_memory < 1.1 * replica_used_memory
+
+    # Check replica data consistent
+    replica_data = await DebugPopulateSeeder.capture(c_replica)
+    master_data = await DebugPopulateSeeder.capture(c_master)
+    assert master_data == replica_data
+
+
+@pytest.mark.exclude_epoll
 @pytest.mark.parametrize(
     "element_size, elements_number",
     [(16, 30000), (30000, 16)],
@@ -2678,7 +2775,7 @@ async def test_big_containers(df_factory, element_size, elements_number):
     c_replica = replica.client()
 
     logging.debug("Fill master with test data")
-    seeder = StaticSeeder(
+    seeder = DebugPopulateSeeder(
         key_target=50,
         data_size=element_size * elements_number,
         collection_size=elements_number,
@@ -2712,9 +2809,9 @@ async def test_big_containers(df_factory, element_size, elements_number):
     logging.info(f"Replica Used memory {replica_used_memory}, peak memory {replica_peak_memory}")
     assert replica_peak_memory < 1.1 * replica_used_memory
 
-    # Check replica data consisten
-    replica_data = await StaticSeeder.capture(c_replica)
-    master_data = await StaticSeeder.capture(c_master)
+    # Check replica data consistent
+    replica_data = await DebugPopulateSeeder.capture(c_replica)
+    master_data = await DebugPopulateSeeder.capture(c_master)
     assert master_data == replica_data
 
 
@@ -2731,3 +2828,211 @@ async def test_master_too_big(df_factory):
     # We should never sync due to used memory too high during full sync
     with pytest.raises(TimeoutError):
         await wait_available_async(c_replica, timeout=10)
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_stream_approximate_trimming(df_factory):
+    master = df_factory.create()
+    replica = df_factory.create()
+
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+
+    # Step 1: Populate master with 100 streams, each containing 200 entries
+    num_streams = 100
+    entries_per_stream = 200
+
+    for i in range(num_streams):
+        stream_name = f"stream{i}"
+        for j in range(entries_per_stream):
+            await c_master.execute_command("XADD", stream_name, "*", f"field{j}", f"value{j}")
+
+    # Step 2: Trim each stream to a random size between 70 and 200
+    for i in range(num_streams):
+        stream_name = f"stream{i}"
+        trim_size = random.randint(70, entries_per_stream)
+        await c_master.execute_command("XTRIM", stream_name, "MAXLEN", "~", trim_size)
+
+    # Wait for replica sync
+    await asyncio.sleep(1)
+
+    # Check replica data consistent
+    master_data = await DebugPopulateSeeder.capture(c_master)
+    replica_data = await DebugPopulateSeeder.capture(c_replica)
+    assert master_data == replica_data
+
+    # Step 3: Trim all streams to 0
+    for i in range(num_streams):
+        stream_name = f"stream{i}"
+        await c_master.execute_command("XTRIM", stream_name, "MAXLEN", "0")
+
+    # Check replica data consistent
+    master_data = await DebugPopulateSeeder.capture(c_master)
+    replica_data = await DebugPopulateSeeder.capture(c_replica)
+    assert master_data == replica_data
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_replicaof_does_not_flush_if_it_fails_to_connect(df_factory):
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("SET foo bar")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await check_all_replicas_finished([c_replica], c_master)
+
+    res = await c_replica.execute_command("dbsize")
+    assert res == 1
+    with pytest.raises(redis.exceptions.ResponseError):
+        await c_replica.execute_command(f"REPLICAOF localhost {replica.port}")
+    res = await c_replica.execute_command("dbsize")
+    assert res == 1
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_replicaof_inside_multi(df_factory):
+    master = df_factory.create()
+    replica = df_factory.create()
+    df_factory.start_all([master, replica])
+
+    async def replicate_inside_multi():
+        try:
+            c_master = master.client()
+            p = c_master.pipeline(transaction=True)
+            for i in range(5):
+                p.execute_command("dbsize")
+            p.execute_command(f"replicaof localhost {replica.port}")
+            await p.execute()
+            return True
+        except redis.exceptions.ResponseError:
+            return False
+
+    MULTI_COMMANDS_TO_ISSUE = 30
+    replication_commands = [
+        asyncio.create_task(replicate_inside_multi()) for _ in range(MULTI_COMMANDS_TO_ISSUE)
+    ]
+
+    num_successes = 0
+    for result in asyncio.as_completed(replication_commands, timeout=80):
+        num_successes += await result
+
+    logging.info(f"succeses: {num_successes}")
+    assert MULTI_COMMANDS_TO_ISSUE > num_successes, "At least one REPLICAOF must be cancelled"
+    assert num_successes > 0, "At least one REPLICAOF must success"
+
+
+async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFactory):
+    master = df_factory.create(proactor_threads=1, serialization_max_chunk_size=100000000000)
+    replicas = [df_factory.create(proactor_threads=1) for i in range(2)]
+
+    # Start instances and connect clients
+    df_factory.start_all([master] + replicas)
+    c_master = master.client()
+    c_replicas = [replica.client() for replica in replicas]
+
+    total = 100000
+    await c_master.execute_command(f"DEBUG POPULATE {total} tmp 100 TYPE SET ELEMENTS 100")
+
+    thresehold = 50000
+    for i in range(thresehold):
+        rand = random.randint(1, 10)
+        await c_master.execute_command(f"EXPIRE tmp:{i} {rand} NX")
+
+    seeder = SeederV2(key_target=10_000)
+    fill_task = asyncio.create_task(seeder.run(master.client()))
+
+    for replica in c_replicas:
+        await replica.execute_command(f"REPLICAOF LOCALHOST {master.port}")
+
+    async with async_timeout.timeout(240):
+        await wait_for_replicas_state(*c_replicas)
+
+    await fill_task
+
+
+async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
+    """
+    This test reproduces a bug in the JSON memory tracking.
+    """
+    master = df_factory.create(proactor_threads=2, serialization_max_chunk_size=1)
+    replicas = [df_factory.create(proactor_threads=2) for i in range(2)]
+
+    # Start instances and connect clients
+    df_factory.start_all([master] + replicas)
+    c_master = master.client()
+    c_replicas = [replica.client() for replica in replicas]
+
+    total = 100000
+    await c_master.execute_command(f"DEBUG POPULATE {total} tmp 1000 TYPE SET ELEMENTS 100")
+
+    thresehold = 25000
+    for i in range(thresehold):
+        rand = random.randint(1, 4)
+        await c_master.execute_command(f"EXPIRE tmp:{i} {rand} NX")
+
+    seeder = SeederV2(key_target=50_000)
+    fill_task = asyncio.create_task(seeder.run(master.client()))
+
+    for replica in c_replicas:
+        await replica.execute_command(f"REPLICAOF LOCALHOST {master.port}")
+
+    async with async_timeout.timeout(240):
+        await wait_for_replicas_state(*c_replicas)
+
+    await fill_task
+
+
+async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyInstanceFactory):
+    proactors = 4
+    master = df_factory.create(proactor_threads=proactors, dbfilename="")
+    replica = df_factory.create(proactor_threads=proactors, dbfilename="")
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # 50% big values
+    seeder_config = dict(key_target=8_000, huge_value_target=4_000)
+    # Fill instance with test data
+    seeder = SeederV2(**seeder_config)
+    await seeder.run(c_master, target_deviation=0.01)
+
+    assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    async with async_timeout.timeout(60):
+        await wait_for_replicas_state(c_replica)
+
+    # Start data stream
+    stream_task = asyncio.create_task(seeder.run(c_master))
+    await asyncio.sleep(1)
+
+    file_name = tmp_file_name()
+    assert await c_replica.execute_command(f"SAVE DF {file_name}") == "OK"
+    await seeder.stop(c_master)
+    await stream_task
+
+    # Check that everything is in sync
+    hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master, c_replica]))
+    assert len(set(hashes)) == 1
+
+    replica.stop()
+    lines = replica.find_in_logs("Exit SnapshotSerializer")
+    assert len(lines) == (proactors - 1)
+    for line in lines:
+        # We test the serializtion path of command execution
+        side_saved = extract_int_after_prefix("side_saved ", line)
+        assert side_saved > 0
+
+    # Check that the produced rdb is loaded correctly
+    node = df_factory.create(dbfilename=file_name)
+    node.start()
+    c_node = node.client()
+    await wait_available_async(c_node)
+    assert await c_node.execute_command("dbsize") > 0
+    await c_node.execute_command("FLUSHALL")

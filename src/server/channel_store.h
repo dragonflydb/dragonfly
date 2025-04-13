@@ -14,6 +14,10 @@ namespace dfly {
 
 class ChannelStoreUpdater;
 
+namespace cluster {
+class SlotSet;
+}
+
 // ChannelStore manages PUB/SUB subscriptions.
 //
 // Updates are carried out via RCU (read-copy-update). Each thread stores a pointer to ChannelStore
@@ -61,7 +65,14 @@ class ChannelStore {
   std::vector<Subscriber> FetchSubscribers(std::string_view channel) const;
 
   std::vector<std::string> ListChannels(const std::string_view pattern) const;
+
   size_t PatternCount() const;
+
+  void UnsubscribeAfterClusterSlotMigration(const cluster::SlotSet& deleted_slots);
+
+  using ChannelsSubMap =
+      absl::flat_hash_map<std::string_view, std::vector<ChannelStore::Subscriber>>;
+  void UnsubscribeConnectionsFromDeletedSlots(const ChannelsSubMap& sub_map, uint32_t idx);
 
   // Destroy current instance and delete it.
   static void Destroy();
@@ -127,6 +138,12 @@ class ChannelStoreUpdater {
 
   void Record(std::string_view key);
   void Apply();
+
+  // Used for cluster when slots migrate. We need to:
+  // 1. Remove the channel from the copy.
+  // 2. Unsuscribe all the connections from each channel.
+  // 3. Update the control block pointer.
+  void ApplyAndUnsubscribe();
 
  private:
   using ChannelMap = ChannelStore::ChannelMap;

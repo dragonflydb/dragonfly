@@ -34,6 +34,23 @@ ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to 
 ABSL_DECLARE_FLAG(uint32_t, acllog_max_len);
 namespace dfly {
 
+namespace {
+
+// Default stack size for fibers. We decrease it by 16 bytes because some allocators
+// need additional 8-16 bytes for their internal structures, thus over reserving additional
+// memory pages if using round sizes.
+#ifdef NDEBUG
+constexpr size_t kFiberDefaultStackSize = 32_KB - 16;
+#elif defined SANITIZERS
+// Increase stack size for sanitizers builds.
+constexpr size_t kFiberDefaultStackSize = 64_KB - 16;
+#else
+// Increase stack size for debug builds.
+constexpr size_t kFiberDefaultStackSize = 50_KB - 16;
+#endif
+
+}  // namespace
+
 std::ostream& operator<<(std::ostream& os, const DbStats& stats) {
   os << "keycount: " << stats.key_count << ", tiered_size: " << stats.tiered_used_bytes
      << ", tiered_entries: " << stats.tiered_entries << "\n";
@@ -168,6 +185,12 @@ void BaseFamilyTest::SetUpTestSuite() {
 
   absl::SetFlag(&FLAGS_rss_oom_deny_ratio, -1);
   absl::SetFlag(&FLAGS_dbfilename, "");
+
+  static bool init = true;
+  if (exchange(init, false)) {
+    fb2::SetDefaultStackResource(&fb2::std_malloc_resource, kFiberDefaultStackSize);
+  }
+
   init_zmalloc_threadlocal(mi_heap_get_backing());
 
   // TODO: go over all env variables starting with FLAGS_ and make sure they are in the below list.
@@ -242,7 +265,7 @@ void BaseFamilyTest::ResetService() {
       LOG(ERROR) << "Deadlock detected!!!!";
       absl::SetFlag(&FLAGS_alsologtostderr, true);
       fb2::Mutex m;
-      shard_set->pool()->AwaitFiberOnAll([&m](unsigned index, ProactorBase* base) {
+      shard_set->pool()->AwaitFiberOnAll([&m, this](unsigned index, ProactorBase* base) {
         ThisFiber::SetName("Watchdog");
         std::unique_lock lk(m);
         LOG(ERROR) << "Proactor " << index << ":\n";
@@ -269,6 +292,14 @@ void BaseFamilyTest::ResetService() {
                                      .GetDBTable(0)
                                      ->trans_locks) {
             LOG(ERROR) << "Key " << k_v.first << " " << k_v.second;
+          }
+
+          LOG(ERROR) << "Transaction for shard " << es->shard_id();
+          for (auto& conn : connections_) {
+            auto* context = conn.second->cmd_cntx();
+            if (context->transaction && context->transaction->IsActive(es->shard_id())) {
+              LOG(ERROR) << context->transaction->DebugId(es->shard_id());
+            }
           }
         }
       });
@@ -335,6 +366,10 @@ void BaseFamilyTest::ClearMetrics() {
   shard_set->pool()->AwaitBrief([](unsigned, auto*) {
     ServerState::tlocal()->stats = ServerState::Stats(shard_set->size());
   });
+}
+
+string BaseFamilyTest::FormatMetrics(const Metrics& metrics) const {
+  return service_->server_family().FormatInfoMetrics(metrics, "ALL", true);
 }
 
 void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double timeout) {
@@ -546,7 +581,7 @@ RespVec BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   auto s_copy = s;
 
   uint32_t consumed = 0;
-  parser_.reset(new RedisParser{UINT32_MAX, false});  // Client mode.
+  parser_.reset(new RedisParser{RedisParser::Mode::CLIENT});  // Client mode.
   RespVec res;
   RedisParser::Result st = parser_->Parse(buf, &consumed, &res);
 

@@ -33,6 +33,7 @@ using absl::StrCat;
 ABSL_DECLARE_FLAG(int32, list_compress_depth);
 ABSL_DECLARE_FLAG(int32, list_max_listpack_size);
 ABSL_DECLARE_FLAG(dfly::CompressionMode, compression_mode);
+ABSL_DECLARE_FLAG(bool, rdb_ignore_expiry);
 
 namespace dfly {
 
@@ -41,14 +42,6 @@ static const auto kMatchNil = ArgType(RespExpr::NIL);
 class RdbTest : public BaseFamilyTest {
  protected:
   void SetUp();
-
-  static void SetUpTestSuite() {
-    static bool init = true;
-    if (exchange(init, false)) {
-      fb2::SetDefaultStackResource(&fb2::std_malloc_resource, 32_KB);
-    }
-    BaseFamilyTest::SetUpTestSuite();
-  }
 
   io::FileSource GetSource(string name);
 
@@ -63,9 +56,10 @@ class RdbTest : public BaseFamilyTest {
 };
 
 void RdbTest::SetUp() {
+  // Setting max_memory_limit must be before calling  InitWithDbFilename
+  max_memory_limit = 40000000;
   InitWithDbFilename();
   CHECK_EQ(zmalloc_used_memory_tl, 0);
-  max_memory_limit = 40000000;
 }
 
 inline const uint8_t* to_byte(const void* s) {
@@ -588,6 +582,8 @@ TEST_F(RdbTest, LoadHugeSet) {
 
   ASSERT_EQ(100000, CheckedInt({"scard", "test:0"}));
   ASSERT_EQ(100000, CheckedInt({"scard", "test:1"}));
+  auto metrics = GetMetrics();
+  EXPECT_GT(metrics.db_stats[0].obj_memory_usage, 24'000'000u);
 }
 
 // Tests loading a huge hmap, where the map is loaded in multiple partial
@@ -608,6 +604,8 @@ TEST_F(RdbTest, LoadHugeHMap) {
 
   ASSERT_EQ(100000, CheckedInt({"hlen", "test:0"}));
   ASSERT_EQ(100000, CheckedInt({"hlen", "test:1"}));
+  auto metrics = GetMetrics();
+  EXPECT_GT(metrics.db_stats[0].obj_memory_usage, 29'000'000u);
 }
 
 // Tests loading a huge zset, where the zset is loaded in multiple partial
@@ -628,6 +626,8 @@ TEST_F(RdbTest, LoadHugeZSet) {
 
   ASSERT_EQ(100000, CheckedInt({"zcard", "test:0"}));
   ASSERT_EQ(100000, CheckedInt({"zcard", "test:1"}));
+  auto metrics = GetMetrics();
+  EXPECT_GT(metrics.db_stats[0].obj_memory_usage, 26'000'000u);
 }
 
 // Tests loading a huge list, where the list is loaded in multiple partial
@@ -648,6 +648,8 @@ TEST_F(RdbTest, LoadHugeList) {
 
   ASSERT_EQ(100000, CheckedInt({"llen", "test:0"}));
   ASSERT_EQ(100000, CheckedInt({"llen", "test:1"}));
+  auto metrics = GetMetrics();
+  EXPECT_GT(metrics.db_stats[0].obj_memory_usage, 20'000'000u);
 }
 
 // Tests loading a huge stream, where the stream is loaded in multiple partial
@@ -728,6 +730,59 @@ TEST_F(RdbTest, SnapshotTooBig) {
   used_mem_current = 1000000;
   auto resp = Run({"debug", "reload"});
   ASSERT_THAT(resp, ErrArg("Out of memory"));
+}
+
+TEST_F(RdbTest, HugeKeyIssue4497) {
+  SetTestFlag("cache_mode", "true");
+  ResetService();
+
+  EXPECT_EQ(Run({"flushall"}), "OK");
+  EXPECT_EQ(Run({"debug", "populate", "1", "k", "1000", "rand", "type", "set", "elements", "5000"}),
+            "OK");
+  EXPECT_EQ(Run({"save", "rdb", "hugekey.rdb"}), "OK");
+  EXPECT_EQ(Run({"dfly", "load", "hugekey.rdb"}), "OK");
+  EXPECT_EQ(Run({"flushall"}), "OK");
+}
+
+TEST_F(RdbTest, HugeKeyIssue4554) {
+  SetTestFlag("cache_mode", "true");
+  // We need to stress one flow/shard such that the others finish early. Lock on hashtags allows
+  // that.
+  SetTestFlag("lock_on_hashtags", "true");
+  ResetService();
+
+  EXPECT_EQ(
+      Run({"debug", "populate", "20", "{tmp}", "20", "rand", "type", "set", "elements", "10000"}),
+      "OK");
+  EXPECT_EQ(Run({"save", "df", "hugekey"}), "OK");
+  EXPECT_EQ(Run({"dfly", "load", "hugekey-summary.dfs"}), "OK");
+  EXPECT_EQ(Run({"flushall"}), "OK");
+}
+
+// ignore_expiry.rdb contains 2 keys which are expired keys
+// this test case verifies wheather rdb_ignore_expiry flag is working as expected.
+TEST_F(RdbTest, RDBIgnoreExpiryFlag) {
+  absl::FlagSaver fs;
+
+  SetTestFlag("rdb_ignore_expiry", "true");
+  auto ec = LoadRdb("ignore_expiry.rdb");
+
+  ASSERT_FALSE(ec) << ec.message();
+
+  auto resp = Run({"scan", "0"});
+
+  ASSERT_THAT(resp, ArrLen(2));
+
+  EXPECT_THAT(StrArray(resp.GetVec()[1]), UnorderedElementsAre("test", "test2"));
+
+  EXPECT_THAT(Run({"get", "test"}), "expkey");
+  EXPECT_THAT(Run({"get", "test2"}), "expkey");
+
+  int ttl = CheckedInt({"ttl", "test"});  // should ignore expiry for key
+  EXPECT_EQ(ttl, -1);
+
+  int ttl2 = CheckedInt({"ttl", "test2"});  // should ignore expiry for key
+  EXPECT_EQ(ttl2, -1);
 }
 
 }  // namespace dfly

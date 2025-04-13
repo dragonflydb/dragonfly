@@ -125,6 +125,8 @@ struct Metrics {
   // Replica reconnect stats on the replica side. Undefined for master
   std::optional<ReplicaInfo> replica_side_info;
 
+  size_t migration_errors_total;
+
   LoadingStats loading_stats;
 };
 
@@ -156,6 +158,15 @@ struct ReplicaOffsetInfo {
   std::vector<uint64_t> flow_offsets;
 };
 
+struct SaveCmdOptions {
+  // if new_version is true, saves DF specific, non redis compatible snapshot.
+  bool new_version;
+  // cloud storage URI
+  std::string_view cloud_uri;
+  // if basename is not empty it will override dbfilename flag
+  std::string_view basename;
+};
+
 class ServerFamily {
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
@@ -178,6 +189,9 @@ class ServerFamily {
 
   Metrics GetMetrics(Namespace* ns) const;
 
+  std::string FormatInfoMetrics(const Metrics& metrics, std::string_view section,
+                                bool priveleged) const;
+
   ScriptMgr* script_mgr() {
     return script_mgr_.get();
   }
@@ -188,9 +202,7 @@ class ServerFamily {
 
   void StatsMC(std::string_view section, SinkReplyBuilder* builder);
 
-  // if new_version is true, saves DF specific, non redis compatible snapshot.
-  // if basename is not empty it will override dbfilename flag.
-  GenericError DoSave(bool new_version, std::string_view basename, Transaction* transaction,
+  GenericError DoSave(const SaveCmdOptions& save_cmd_opts, Transaction* transaction,
                       bool ignore_state = false);
 
   // Calls DoSave with a default generated transaction and with the format
@@ -254,6 +266,18 @@ class ServerFamily {
 
   void UpdateMemoryGlobalStats();
 
+  // Return true if no replicas are registered or if all replicas reached stable sync
+  // Used in debug populate to DCHECK insocsistent flows that violate transaction gurantees
+  bool AreAllReplicasInStableSync() const {
+    auto roles = dfly_cmd_->GetReplicasRoleInfo();
+    if (roles.empty()) {
+      return true;
+    }
+    auto match = SyncStateName(DflyCmd::SyncState::STABLE_SYNC);
+    return std::all_of(roles.begin(), roles.end(),
+                       [&match](auto& elem) { return elem.state == match; });
+  }
+
  private:
   bool HasPrivilegedInterface();
   void JoinSnapshotSchedule();
@@ -308,14 +332,11 @@ class ServerFamily {
 
   void SendInvalidationMessages() const;
 
-  // Helper function to retrieve version(true if format is dfs rdb), and basename from args.
-  // In case of an error an empty optional is returned.
-  using VersionBasename = std::pair<bool, std::string_view>;
-  std::optional<VersionBasename> GetVersionAndBasename(CmdArgList args, SinkReplyBuilder* builder);
+  std::optional<SaveCmdOptions> GetSaveCmdOpts(CmdArgList args, SinkReplyBuilder* builder);
 
   void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
 
-  GenericError DoSaveCheckAndStart(bool new_version, string_view basename, Transaction* trans,
+  GenericError DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts, Transaction* trans,
                                    bool ignore_state = false) ABSL_LOCKS_EXCLUDED(save_mu_);
 
   GenericError WaitUntilSaveFinished(Transaction* trans,
@@ -323,6 +344,9 @@ class ServerFamily {
   void StopAllClusterReplicas() ABSL_EXCLUSIVE_LOCKS_REQUIRED(replicaof_mu_);
 
   static bool DoAuth(ConnectionContext* cntx, std::string_view username, std::string_view password);
+
+  void ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void ClientUnPauseCmd(CmdArgList args, SinkReplyBuilder* builder);
 
   util::fb2::Fiber snapshot_schedule_fb_;
   util::fb2::Fiber load_fiber_;
@@ -358,6 +382,12 @@ class ServerFamily {
   std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
 
+  std::atomic<bool> is_c_pause_in_progress_ = false;
+  // We need this because if dragonfly shuts down during pause, ServerState will destruct
+  // before the dettached fiber Pause() causing a seg fault.
+  std::atomic<size_t> active_pauses_ = 0;
+  util::fb2::EventCount client_pause_ec_;
+
   // protected by save_mu_
   util::fb2::Fiber bg_save_fb_;
 
@@ -371,6 +401,7 @@ class ServerFamily {
 // Reusable CLIENT PAUSE implementation that blocks while polling is_pause_in_progress
 std::optional<util::fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namespace* ns,
                                       facade::Connection* conn, ClientPause pause_state,
-                                      std::function<bool()> is_pause_in_progress);
+                                      std::function<bool()> is_pause_in_progress,
+                                      std::function<void()> maybe_cleanup = {});
 
 }  // namespace dfly

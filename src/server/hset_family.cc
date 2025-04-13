@@ -166,7 +166,7 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
   param->emplace<int64_t>(new_val);
 
   return OpStatus::OK;
-};
+}
 
 OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, IncrByParam* param) {
   auto& db_slice = op_args.GetDbSlice();
@@ -177,14 +177,9 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   }
   auto& add_res = *op_res;
 
-  DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
-
-  size_t lpb = 0;
-
   PrimeValue& pv = add_res.it->second;
   if (add_res.is_new) {
     pv.InitRobj(OBJ_HASH, kEncodingListPack, lpNew(0));
-    stats->listpack_blob_cnt++;
   } else {
     if (pv.ObjType() != OBJ_HASH)
       return OpStatus::WRONG_TYPE;
@@ -193,11 +188,9 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
 
     if (pv.Encoding() == kEncodingListPack) {
       uint8_t* lp = (uint8_t*)pv.RObjPtr();
-      lpb = lpBytes(lp);
-      stats->listpack_bytes -= lpb;
+      size_t lpb = lpBytes(lp);
 
       if (lpb >= server.max_listpack_map_bytes) {
-        stats->listpack_blob_cnt--;
         StringMap* sm = HSetFamily::ConvertToStrMap(lp);
         pv.InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
       }
@@ -216,7 +209,6 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
 
     OpStatus status = IncrementValue(res, param);
     if (status != OpStatus::OK) {
-      stats->listpack_bytes += lpb;
       return status;
     }
 
@@ -232,7 +224,6 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
     }
 
     pv.SetRObjPtr(lp);
-    stats->listpack_bytes += lpBytes(lp);
   } else {
     DCHECK_EQ(enc, kEncodingStrMap2);
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
@@ -273,6 +264,62 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   return OpStatus::OK;
 }
 
+struct KeyCleanup {
+  using CleanupFuncT = std::function<void(std::string_view)>;
+  explicit KeyCleanup(CleanupFuncT func, const std::string_view key_view)
+      : f{std::move(func)}, key{key_view} {
+  }
+  ~KeyCleanup() {
+    if (armed) {
+      f(key);
+    }
+  }
+
+  void arm() {
+    armed = true;
+  }
+
+  CleanupFuncT f;
+  std::string key;
+  bool armed{false};
+};
+
+void DeleteKey(DbSlice& db_slice, const OpArgs& op_args, std::string_view key) {
+  if (auto del_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH); del_it) {
+    del_it->post_updater.Run();
+    db_slice.Del(op_args.db_cntx, del_it->it);
+    if (op_args.shard->journal()) {
+      RecordJournal(op_args, "DEL"sv, {key});
+    }
+  }
+}
+
+std::pair<OpResult<DbSlice::ConstIterator>, KeyCleanup> FindReadOnly(DbSlice& db_slice,
+                                                                     const OpArgs& op_args,
+                                                                     std::string_view key) {
+  return std::pair{db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH),
+                   KeyCleanup{[&](const auto& k) { DeleteKey(db_slice, op_args, k); }, key}};
+}
+
+// The find and contains functions perform the usual search on string maps, with the added argument
+// KeyCleanup. This object is armed if the string map becomes empty during search due to keys being
+// expired. An armed object on destruction removes the key which has just become empty.
+StringMap::iterator Find(StringMap* sm, const std::string_view field, KeyCleanup& defer_cleanup) {
+  auto it = sm->Find(field);
+  if (sm->Empty()) {
+    defer_cleanup.arm();
+  }
+  return it;
+}
+
+bool Contains(StringMap* sm, const std::string_view field, KeyCleanup& defer_cleanup) {
+  auto result = sm->Contains(field);
+  if (sm->Empty()) {
+    defer_cleanup.arm();
+  }
+  return result;
+}
+
 OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t* cursor,
                            const ScanOpts& scan_op) {
   constexpr size_t HASH_TABLE_ENTRIES_FACTOR = 2;  // return key/value
@@ -283,7 +330,8 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
    * of returning no or very few elements. (taken from redis code at db.c line 904 */
   constexpr size_t INTERATION_FACTOR = 10;
 
-  auto find_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+  DbSlice& db_slice = op_args.GetDbSlice();
+  auto [find_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
 
   if (!find_res) {
     DVLOG(1) << "ScanOp: find failed: " << find_res << ", baling out";
@@ -329,8 +377,7 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
       size_t len = sdslen(val);
       if (scan_op.Matches(string_view(val, len))) {
         res.emplace_back(val, len);
-        val += (len + 1);
-        val = (sds)absl::little_endian::Load64(val);
+        val = StringMap::GetValue(val);
         res.emplace_back(val, sdslen(val));
       }
     };
@@ -338,6 +385,10 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
     do {
       *cursor = sm->Scan(*cursor, scanCb);
     } while (*cursor && max_iterations-- && res.size() < count);
+
+    if (sm->Empty()) {
+      defer_cleanup.arm();
+    }
   }
 
   return res;
@@ -357,12 +408,10 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
 
   unsigned deleted = 0;
   bool key_remove = false;
-  DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
   unsigned enc = pv.Encoding();
 
   if (enc == kEncodingListPack) {
     uint8_t* lp = (uint8_t*)pv.RObjPtr();
-    stats->listpack_bytes -= lpBytes(lp);
     for (auto s : values) {
       auto res = LpDelete(lp, ToSV(s));
       if (res.second) {
@@ -380,13 +429,15 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
     for (auto s : values) {
-      bool res = sm->Erase(ToSV(s));
-      if (res) {
+      if (sm->Erase(ToSV(s))) {
         ++deleted;
-        if (sm->UpperBoundSize() == 0) {
-          key_remove = true;
-          break;
-        }
+      }
+
+      // Even if the previous Erase op did not erase anything, it can remove expired fields as a
+      // side effect.
+      if (sm->Empty()) {
+        key_remove = true;
+        break;
       }
     }
   }
@@ -397,12 +448,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
     op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
 
   if (key_remove) {
-    if (enc == kEncodingListPack) {
-      stats->listpack_blob_cnt--;
-    }
     db_slice.Del(op_args.db_cntx, it_res->it);
-  } else if (enc == kEncodingListPack) {
-    stats->listpack_bytes += lpBytes((uint8_t*)pv.RObjPtr());
   }
 
   return deleted;
@@ -412,7 +458,7 @@ OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, Cm
   DCHECK(!fields.empty());
 
   auto& db_slice = op_args.GetDbSlice();
-  auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+  auto [it_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
 
   if (!it_res)
     return it_res.status();
@@ -424,10 +470,10 @@ OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, Cm
   if (pv.Encoding() == kEncodingListPack) {
     uint8_t* lp = (uint8_t*)pv.RObjPtr();
 
-    absl::flat_hash_map<string_view, unsigned> reverse;
+    absl::flat_hash_map<string_view, absl::InlinedVector<size_t, 3>> reverse;
     reverse.reserve(fields.size() + 1);
     for (size_t i = 0; i < fields.size(); ++i) {
-      reverse.emplace(ArgS(fields, i), i);  // map fields to their index.
+      reverse[ArgS(fields, i)].push_back(i);  // map fields to their index.
     }
 
     size_t lplen = lpLength(lp);
@@ -447,8 +493,10 @@ OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, Cm
 
       auto it = reverse.find(key);
       if (it != reverse.end()) {
-        DCHECK_LT(it->second, result.size());
-        result[it->second].emplace(LpGetView(lp_elem, ibuf));  // populate found items.
+        for (size_t index : it->second) {
+          DCHECK_LT(index, result.size());
+          result[index].emplace(LpGetView(lp_elem, ibuf));  // populate found items.
+        }
       }
 
       lp_elem = lpNext(lp, lp_elem);  // switch to the next key
@@ -458,8 +506,7 @@ OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, Cm
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
     for (size_t i = 0; i < fields.size(); ++i) {
-      auto it = sm->Find(ToSV(fields[i]));
-      if (it != sm->end()) {
+      if (auto it = Find(sm, ToSV(fields[i]), defer_cleanup); it != sm->end()) {
         result[i].emplace(it->second, sdslen(it->second));
       }
     }
@@ -483,7 +530,7 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
 
 OpResult<int> OpExist(const OpArgs& op_args, string_view key, string_view field) {
   auto& db_slice = op_args.GetDbSlice();
-  auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+  auto [it_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
 
   if (!it_res) {
     if (it_res.status() == OpStatus::KEY_NOTFOUND)
@@ -501,13 +548,13 @@ OpResult<int> OpExist(const OpArgs& op_args, string_view key, string_view field)
 
   DCHECK_EQ(kEncodingStrMap2, pv.Encoding());
   StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-
-  return sm->Contains(field) ? 1 : 0;
+  return Contains(sm, field, defer_cleanup) ? 1 : 0;
 };
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key, string_view field) {
   auto& db_slice = op_args.GetDbSlice();
-  auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+  auto [it_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
+
   if (!it_res)
     return it_res.status();
 
@@ -525,12 +572,11 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key, string_view field
 
   DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
   StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-  auto it = sm->Find(field);
+  if (const auto it = Find(sm, field, defer_cleanup); it != sm->end()) {
+    return string(it->second, sdslen(it->second));
+  }
 
-  if (it == sm->end())
-    return OpStatus::KEY_NOTFOUND;
-
-  return string(it->second, sdslen(it->second));
+  return OpStatus::KEY_NOTFOUND;
 }
 
 OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_t mask) {
@@ -585,10 +631,7 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
   // and the enconding is guaranteed to be a DenseSet since we only support expiring
   // value with that enconding.
   if (res.empty()) {
-    // post_updater will run immediately
-    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;
-
-    db_slice.Del(op_args.db_cntx, it);
+    DeleteKey(db_slice, op_args, key);
   }
 
   return res;
@@ -596,7 +639,7 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
 
 OpResult<size_t> OpStrLen(const OpArgs& op_args, string_view key, string_view field) {
   auto& db_slice = op_args.GetDbSlice();
-  auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+  auto [it_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
 
   if (!it_res) {
     if (it_res.status() == OpStatus::KEY_NOTFOUND)
@@ -616,13 +659,14 @@ OpResult<size_t> OpStrLen(const OpArgs& op_args, string_view key, string_view fi
   DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
   StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
-  auto it = sm->Find(field);
+  auto it = Find(sm, field, defer_cleanup);
   return it != sm->end() ? sdslen(it->second) : 0;
 }
 
 struct OpSetParams {
   bool skip_if_exists = false;
   uint32_t ttl = UINT32_MAX;
+  bool keepttl = false;
 };
 
 OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList values,
@@ -635,8 +679,6 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
-  DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
-
   uint8_t* lp = nullptr;
   auto& it = add_res.it;
   PrimeValue& pv = it->second;
@@ -645,9 +687,6 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
     if (op_sp.ttl == UINT32_MAX) {
       lp = lpNew(0);
       pv.InitRobj(OBJ_HASH, kEncodingListPack, lp);
-
-      stats->listpack_blob_cnt++;
-      stats->listpack_bytes += lpBytes(lp);
     } else {
       pv.InitRobj(OBJ_HASH, kEncodingStrMap2, CompactObj::AllocateMR<StringMap>());
     }
@@ -660,10 +699,8 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
 
   if (pv.Encoding() == kEncodingListPack) {
     lp = (uint8_t*)pv.RObjPtr();
-    stats->listpack_bytes -= lpBytes(lp);
 
     if (op_sp.ttl != UINT32_MAX || !IsGoodForListpack(values, lp)) {
-      stats->listpack_blob_cnt--;
       StringMap* sm = HSetFamily::ConvertToStrMap(lp);
       pv.InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
       lp = nullptr;
@@ -684,7 +721,6 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
       created += inserted;
     }
     pv.SetRObjPtr(lp);
-    stats->listpack_bytes += lpBytes(lp);
   } else {
     DCHECK_EQ(kEncodingStrMap2, pv.Encoding());  // Dictionary
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
@@ -697,7 +733,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
       if (op_sp.skip_if_exists)
         added = sm->AddOrSkip(field, value, op_sp.ttl);
       else
-        added = sm->AddOrUpdate(field, value, op_sp.ttl);
+        added = sm->AddOrUpdate(field, value, op_sp.ttl, op_sp.keepttl);
 
       created += unsigned(added);
     }
@@ -744,19 +780,41 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
   return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, key, values, pv);
 }
 
-// HSETEX key [NX] tll_sec field value field value ...
+// HSETEX key [NX] [KEEPTTL] tll_sec field value field value ...
 void HSetEx(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser{args};
 
   string_view key = parser.Next();
+  OpSetParams op_sp;
 
-  bool skip_if_exists = static_cast<bool>(parser.Check("NX"sv));
-  string_view ttl_str = parser.Next();
+  const auto option_already_set = [&cmd_cntx] {
+    return cmd_cntx.rb->SendError(WrongNumArgsError(cmd_cntx.conn_cntx->cid->name()));
+  };
 
-  uint32_t ttl_sec;
+  while (true) {
+    if (parser.Check("NX")) {
+      if (op_sp.skip_if_exists) {
+        return option_already_set();
+      }
+      op_sp.skip_if_exists = true;
+    } else if (parser.Check("KEEPTTL")) {
+      if (op_sp.keepttl) {
+        return option_already_set();
+      }
+      op_sp.keepttl = true;
+    } else {
+      break;
+    }
+  }
+
+  op_sp.ttl = parser.Next<uint32_t>();
+
+  if (parser.HasError()) {
+    return cmd_cntx.rb->SendError(parser.Error()->MakeReply());
+  }
+
   constexpr uint32_t kMaxTtl = (1UL << 26);
-
-  if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
+  if (op_sp.ttl == 0 || op_sp.ttl > kMaxTtl) {
     return cmd_cntx.rb->SendError(kInvalidIntErr);
   }
 
@@ -766,8 +824,6 @@ void HSetEx(CmdArgList args, const CommandContext& cmd_cntx) {
     return cmd_cntx.rb->SendError(facade::WrongNumArgsError(cmd_cntx.conn_cntx->cid->name()),
                                   kSyntaxErrType);
   }
-
-  OpSetParams op_sp{skip_if_exists, ttl_sec};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, fields, op_sp);
@@ -1027,7 +1083,7 @@ void HSetFamily::HScan(CmdArgList args, const CommandContext& cmd_cntx) {
     return cmd_cntx.rb->SendError(ops.status());
   }
 
-  ScanOpts scan_op = ops.value();
+  const ScanOpts& scan_op = ops.value();
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
@@ -1347,10 +1403,6 @@ vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl
   if (pv->Encoding() == kEncodingListPack) {
     // a valid result can never be a listpack, since it doesnt keep ttl
     uint8_t* lp = (uint8_t*)pv->RObjPtr();
-    auto& db_slice = op_args.GetDbSlice();
-    DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
-    stats->listpack_bytes -= lpBytes(lp);
-    stats->listpack_blob_cnt--;
     StringMap* sm = HSetFamily::ConvertToStrMap(lp);
     pv->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
   }

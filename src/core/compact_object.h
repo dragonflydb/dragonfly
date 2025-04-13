@@ -46,6 +46,8 @@ class RobjWrapper {
   void Free(MemoryResource* mr);
 
   void SetString(std::string_view s, MemoryResource* mr);
+  void ReserveString(size_t size, MemoryResource* mr);
+  void AppendString(std::string_view s, MemoryResource* mr);
   // Used when sz_ is used to denote memory usage
   void SetSize(uint64_t size);
   void Init(unsigned type, unsigned encoding, void* inner);
@@ -73,7 +75,7 @@ class RobjWrapper {
   bool DefragIfNeeded(float ratio);
 
   // as defined in zset.h
-  int ZsetAdd(double score, char* ele, int in_flags, int* out_flags, double* newscore);
+  int ZsetAdd(double score, std::string_view ele, int in_flags, int* out_flags, double* newscore);
 
  private:
   void ReallocateString(MemoryResource* mr);
@@ -138,6 +140,10 @@ class CompactObj {
     // IO_PENDING is set when the tiered storage has issued an i/o request to save the value. It is
     // cleared when the io request finishes or is cancelled.
     IO_PENDING = 0x20,
+
+    // Applied only on keys that should be deleted asynchronously.
+    // (it can be the same value as IO_PENDING) that is applied only on values.
+    KEY_ASYNC_DELETE = 0x20,
     STICKY = 0x40,
 
     // TOUCHED used to determin which items are hot/cold.
@@ -253,6 +259,14 @@ class CompactObj {
 
   bool DefragIfNeeded(float ratio);
 
+  void SetAsyncDelete() {
+    mask_ |= KEY_ASYNC_DELETE;
+  }
+
+  bool IsAsyncDelete() const {
+    return mask_ & KEY_ASYNC_DELETE;
+  }
+
   bool HasStashPending() const {
     return mask_ & IO_PENDING;
   }
@@ -309,6 +323,9 @@ class CompactObj {
   void SetString(std::string_view str);
   void GetString(std::string* res) const;
 
+  void ReserveString(size_t size);
+  void AppendString(std::string_view str);
+
   // Will set this to hold OBJ_JSON, after that it is safe to call GetJson
   // NOTE: in order to avid copy which can be expensive in this case,
   // you need to move an object that created with the function JsonFromString
@@ -338,12 +355,22 @@ class CompactObj {
     return taglen_ == EXTERNAL_TAG;
   }
 
+  // returns true if the value is stored in the cooling storage. Cooling storage has an item both
+  // on disk and in memory.
   bool IsCool() const {
     assert(IsExternal());
     return u_.ext_ptr.is_cool;
   }
 
   void SetExternal(size_t offset, uint32_t sz);
+
+  // Switches to empty, non-external string.
+  // Preserves all the attributes.
+  void RemoveExternal() {
+    SetMeta(0, mask_);
+  }
+
+  // Assigns a cooling record to the object together with its external slice.
   void SetCool(size_t offset, uint32_t serialized_size, detail::TieredColdRecord* record);
 
   struct CoolItem {
@@ -351,6 +378,9 @@ class CompactObj {
     size_t serialized_size;
     detail::TieredColdRecord* record;
   };
+
+  // Prerequisite: IsCool() is true.
+  // Returns the external data of the object incuding its ColdRecord.
   CoolItem GetCool() const;
 
   void ImportExternal(const CompactObj& src);
@@ -511,47 +541,6 @@ inline bool CompactObj::operator==(std::string_view sv) const {
   return EqualNonInline(sv);
 }
 
-class CompactObjectView {
- public:
-  CompactObjectView(const CompactObj& src) : obj_(src.AsRef()) {
-  }
-  CompactObjectView(const CompactObjectView& o) : obj_(o.obj_.AsRef()) {
-  }
-  CompactObjectView(CompactObjectView&& o) = default;
-
-  operator CompactObj() const {
-    return obj_.AsRef();
-  }
-
-  const CompactObj* operator->() const {
-    return &obj_;
-  }
-
-  bool operator==(const CompactObjectView& o) const {
-    return obj_ == o.obj_;
-  }
-
-  uint64_t Hash() const {
-    return obj_.HashCode();
-  }
-
-  CompactObjectView& operator=(const CompactObjectView& o) {
-    obj_ = o.obj_.AsRef();
-    return *this;
-  }
-
-  bool defined() const {
-    return obj_.IsRef();
-  }
-
-  void Reset() {
-    obj_.Reset();
-  }
-
- private:
-  CompactObj obj_;
-};
-
 std::string_view ObjTypeToString(CompactObjType type);
 
 std::optional<CompactObjType> ObjTypeFromString(std::string_view sv);
@@ -570,12 +559,3 @@ static_assert(sizeof(TieredColdRecord) == 48);
 };  // namespace detail
 
 }  // namespace dfly
-
-namespace std {
-template <> struct hash<dfly::CompactObjectView> {
-  std::size_t operator()(const dfly::CompactObjectView& obj) const {
-    return obj.Hash();
-  }
-};
-
-}  // namespace std

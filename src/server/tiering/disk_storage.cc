@@ -136,10 +136,10 @@ void DiskStorage::MarkAsFree(DiskSegment segment) {
   alloc_.Free(segment.offset, segment.length);
 }
 
-std::error_code DiskStorage::Stash(io::Bytes bytes, io::Bytes footer, StashCb cb) {
+std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
   DCHECK_GT(bytes.length(), 0u);
 
-  size_t len = bytes.size() + footer.size();
+  size_t len = bytes.size();
   int64_t offset = alloc_.Malloc(len);
 
   // If we've run out of space, block and grow as much as needed
@@ -158,8 +158,6 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, io::Bytes footer, StashCb cb
 
   UringBuf buf = PrepareBuf(len);
   memcpy(buf.bytes.data(), bytes.data(), bytes.length());
-  if (!footer.empty())
-    memcpy(buf.bytes.data() + bytes.length(), footer.data(), footer.length());
 
   auto io_cb = [this, cb, offset, buf, len](int io_res) {
     if (io_res < 0) {
@@ -203,9 +201,9 @@ error_code DiskStorage::Grow(off_t grow_size) {
   DCHECK(CanGrow());
 
   if (std::exchange(grow_pending_, true)) {
-    // TODO: to introduce future like semantics where multiple flow can block on the
+    // TODO: to introduce future like semantics where multiple flows can block on the
     // ongoing Grow operation.
-    LOG(WARNING) << "Concurrent grow request detected ";
+    LOG(WARNING) << "Concurrent grow request detected from size " << alloc_.capacity();
     return make_error_code(errc::operation_in_progress);
   }
   off_t end = alloc_.capacity();

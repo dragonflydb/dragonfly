@@ -22,12 +22,6 @@ namespace {
 constexpr uint64_t kValTtlBit = 1ULL << 63;
 constexpr uint64_t kValMask = ~kValTtlBit;
 
-inline sds GetValue(sds key) {
-  char* valptr = key + sdslen(key) + 1;
-  uint64_t val = absl::little_endian::Load64(valptr);
-  return (sds)(kValMask & val);
-}
-
 // Returns key, tagged value pair
 pair<sds, uint64_t> CreateEntry(string_view field, string_view value, uint32_t time_now,
                                 uint32_t ttl_sec) {
@@ -65,13 +59,18 @@ StringMap::~StringMap() {
   Clear();
 }
 
-bool StringMap::AddOrUpdate(string_view field, string_view value, uint32_t ttl_sec) {
+bool StringMap::AddOrUpdate(std::string_view field, std::string_view value, uint32_t ttl_sec,
+                            bool keepttl) {
   // 8 additional bytes for a pointer to value.
   auto [newkey, sdsval_tag] = CreateEntry(field, value, time_now(), ttl_sec);
 
   // Replace the whole entry.
-  sds prev_entry = (sds)AddOrReplaceObj(newkey, sdsval_tag & kValTtlBit);
-  if (prev_entry) {
+  if (sds prev_entry = (sds)AddOrReplaceObj(newkey, sdsval_tag & kValTtlBit); prev_entry) {
+    const bool prev_has_ttl =
+        absl::little_endian::Load64(prev_entry + sdslen(prev_entry) + 1) & kValTtlBit;
+    if (keepttl && prev_has_ttl) {
+      SdsUpdateExpireTime(newkey, ObjExpireTime(prev_entry), 8);
+    }
     ObjDelete(prev_entry, false);
     return false;
   }
@@ -182,6 +181,12 @@ void StringMap::RandomPairs(unsigned int count, std::vector<sds>& keys, std::vec
     ++index;
     ++itr;
   }
+}
+
+sds StringMap::GetValue(sds key) {
+  char* valptr = key + sdslen(key) + 1;
+  const uint64_t val = absl::little_endian::Load64(valptr);
+  return (sds)(kValMask & val);
 }
 
 pair<sds, bool> StringMap::ReallocIfNeeded(void* obj, float ratio) {

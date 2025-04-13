@@ -18,8 +18,7 @@ except ImportError:
 class SeederBase:
     UID_COUNTER = 1  # multiple generators should not conflict on keys
     CACHED_SCRIPTS = {}
-    DEFAULT_TYPES = ["STRING", "LIST", "SET", "HASH", "ZSET", "JSON"]
-    BIG_VALUE_TYPES = ["LIST", "SET", "HASH", "ZSET"]
+    DEFAULT_TYPES = ["STRING", "LIST", "SET", "HASH", "ZSET", "JSON", "STREAM"]
 
     def __init__(self, types: typing.Optional[typing.List[str]] = None):
         self.uid = SeederBase.UID_COUNTER
@@ -71,7 +70,7 @@ class SeederBase:
         return script
 
 
-class StaticSeeder(SeederBase):
+class DebugPopulateSeeder(SeederBase):
     """Wrapper around DEBUG POPULATE with fuzzy key sizes and a balanced type mix"""
 
     def __init__(

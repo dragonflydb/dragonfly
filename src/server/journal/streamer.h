@@ -6,6 +6,7 @@
 
 #include <deque>
 
+#include "server/cluster/slot_set.h"
 #include "server/common.h"
 #include "server/db_slice.h"
 #include "server/journal/journal.h"
@@ -19,7 +20,7 @@ namespace dfly {
 // journal listener and writes them to a destination sink in a separate fiber.
 class JournalStreamer {
  public:
-  JournalStreamer(journal::Journal* journal, Context* cntx);
+  JournalStreamer(journal::Journal* journal, ExecutionState* cntx);
   virtual ~JournalStreamer();
 
   // Self referential.
@@ -47,21 +48,17 @@ class JournalStreamer {
   void ThrottleIfNeeded();
 
   virtual bool ShouldWrite(const journal::JournalItem& item) const {
-    return !IsStopped();
+    return cntx_->IsRunning();
   }
 
   void WaitForInflightToComplete();
 
   util::FiberSocketBase* dest_ = nullptr;
-  Context* cntx_;
+  ExecutionState* cntx_;
 
  private:
   void AsyncWrite();
   void OnCompletion(std::error_code ec, size_t len);
-
-  bool IsStopped() const {
-    return cntx_->IsCancelled();
-  }
 
   bool IsStalled() const;
 
@@ -79,7 +76,8 @@ class JournalStreamer {
 // Only handles relevant slots, while ignoring all others.
 class RestoreStreamer : public JournalStreamer {
  public:
-  RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal, Context* cntx);
+  RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
+                  ExecutionState* cntx);
   ~RestoreStreamer() override;
 
   void Start(util::FiberSocketBase* dest, bool send_lsn = false) override;
@@ -91,28 +89,35 @@ class RestoreStreamer : public JournalStreamer {
 
   void SendFinalize(long attempt);
 
-  bool IsSnapshotFinished() const {
-    return snapshot_finished_;
-  }
-
  private:
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
   bool ShouldWrite(const journal::JournalItem& item) const override;
   bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(SlotId slot_id) const;
 
-  // Returns whether anything was written
-  void WriteBucket(PrimeTable::bucket_iterator it);
+  // Returns true if any entry was actually written
+  bool WriteBucket(PrimeTable::bucket_iterator it);
+
   void WriteEntry(std::string_view key, const PrimeValue& pk, const PrimeValue& pv,
                   uint64_t expire_ms);
+
+  struct Stats {
+    size_t buckets_skipped = 0;
+    size_t buckets_written = 0;
+    size_t buckets_loop = 0;
+    size_t buckets_on_db_update = 0;
+    size_t keys_written = 0;
+    size_t keys_skipped = 0;
+    size_t commands = 0;
+  };
 
   DbSlice* db_slice_;
   DbTableArray db_array_;
   uint64_t snapshot_version_ = 0;
   cluster::SlotSet my_slots_;
-  bool fiber_cancelled_ = false;
-  bool snapshot_finished_ = false;
+
   ThreadLocalMutex big_value_mu_;
+  Stats stats_;
 };
 
 }  // namespace dfly

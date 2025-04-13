@@ -15,9 +15,14 @@ using namespace std;
 
 namespace {
 
+#if defined(__GNUC__) && !defined(__clang__)
+#define FAST_MATH __attribute__((optimize("fast-math")))
+#else
+#define FAST_MATH
+#endif
+
 // Euclidean vector distance: sqrt( sum: (u[i] - v[i])^2  )
-__attribute__((optimize("fast-math"))) float L2Distance(const float* u, const float* v,
-                                                        size_t dims) {
+FAST_MATH float L2Distance(const float* u, const float* v, size_t dims) {
   float sum = 0;
   for (size_t i = 0; i < dims; i++)
     sum += (u[i] - v[i]) * (u[i] - v[i]);
@@ -25,8 +30,7 @@ __attribute__((optimize("fast-math"))) float L2Distance(const float* u, const fl
 }
 
 // TODO: Normalize vectors ahead if cosine distance is used
-__attribute__((optimize("fast-math"))) float CosineDistance(const float* u, const float* v,
-                                                            size_t dims) {
+FAST_MATH float CosineDistance(const float* u, const float* v, size_t dims) {
   float sum_uv = 0, sum_uu = 0, sum_vv = 0;
   for (size_t i = 0; i < dims; i++) {
     sum_uv += u[i] * v[i];

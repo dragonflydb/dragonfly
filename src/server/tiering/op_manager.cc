@@ -28,6 +28,16 @@ OpManager::EntryId Borrowed(const OpManager::OwnedEntryId& id) {
   return std::visit([](const auto& v) -> OpManager::EntryId { return v; }, id);
 }
 
+std::ostream& operator<<(std::ostream& os, const OpManager::EntryId& id) {
+  if (const auto* i = std::get_if<unsigned>(&id); i) {
+    return os << *i;
+  } else {
+    const auto& key = std::get<OpManager::KeyRef>(id);
+    return os << "(" << key.first << ':' << key.second << ")";
+  }
+  return os;
+}
+
 }  // namespace
 
 OpManager::OpManager(size_t max_size) : storage_{max_size} {
@@ -76,7 +86,7 @@ void OpManager::DeleteOffloaded(DiskSegment segment) {
   }
 }
 
-std::error_code OpManager::Stash(EntryId id_ref, std::string_view value, io::Bytes footer) {
+std::error_code OpManager::Stash(EntryId id_ref, std::string_view value) {
   auto id = ToOwned(id_ref);
   unsigned version = pending_stash_ver_[id] = ++pending_stash_counter_;
 
@@ -86,7 +96,7 @@ std::error_code OpManager::Stash(EntryId id_ref, std::string_view value, io::Byt
   };
 
   // May block due to blocking call to Grow.
-  auto ec = storage_.Stash(buf_view, footer, std::move(io_cb));
+  auto ec = storage_.Stash(buf_view, std::move(io_cb));
   if (ec)
     pending_stash_ver_.erase(ToOwned(id_ref));
   return ec;
@@ -115,7 +125,10 @@ void OpManager::ProcessStashed(EntryId id, unsigned version,
     NotifyStashed(id, segment);
   } else if (segment) {
     // Throw away the value because it's no longer up-to-date even if no error occured
+    VLOG(1) << "Releasing segment " << *segment << ", id: " << id;
     storage_.MarkAsFree(*segment);
+  } else {
+    LOG(ERROR) << "Stash failed with error " << segment.error();
   }
 }
 

@@ -31,6 +31,14 @@ using facade::kWrongTypeErr;
 
 #define RETURN_ON_ERR(x) RETURN_ON_ERR_T(std::error_code, x)
 
+#define RETURN_ON_GENERIC_ERR(x)                                   \
+  do {                                                             \
+    if (x) {                                                       \
+      DLOG(ERROR) << "Error while calling " #x ": " << x.Format(); \
+      return x;                                                    \
+    }                                                              \
+  } while (0)
+
 #endif  // RETURN_ON_ERR
 
 #ifndef RETURN_ON_BAD_STATUS

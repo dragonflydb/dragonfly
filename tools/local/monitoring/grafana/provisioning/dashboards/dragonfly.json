@@ -114,7 +114,8 @@
           },
           "editorMode": "code",
           "exemplar": true,
-          "expr": "max(max_over_time(dragonfly_uptime_in_seconds{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__interval]))",
+          "expr":
+              "max(max_over_time(dragonfly_uptime_in_seconds{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__interval]))",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -296,7 +297,8 @@
           },
           "editorMode": "code",
           "exemplar": true,
-          "expr": "100 * (dragonfly_memory_used_bytes{namespace=\"$namespace\",pod=~\"$pod_name\"}  / dragonfly_memory_max_bytes{namespace=\"$namespace\",pod=~\"$pod_name\"} )",
+          "expr":
+              "100 * (dragonfly_memory_used_bytes{namespace=\"$namespace\",pod=~\"$pod_name\"}  / dragonfly_memory_max_bytes{namespace=\"$namespace\",pod=~\"$pod_name\"} )",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -328,7 +330,7 @@
             "axisPlacement": "auto",
             "barAlignment": 0,
             "drawStyle": "line",
-            "fillOpacity": 0,
+            "fillOpacity": 22,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -342,11 +344,11 @@
             "scaleDistribution": {
               "type": "linear"
             },
-            "showPoints": "auto",
+            "showPoints": "never",
             "spanNulls": false,
             "stacking": {
               "group": "A",
-              "mode": "none"
+              "mode": "normal"
             },
             "thresholdsStyle": {
               "mode": "off"
@@ -366,7 +368,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unit": "short"
         },
         "overrides": []
       },
@@ -399,7 +402,8 @@
           },
           "editorMode": "code",
           "exemplar": true,
-          "expr": "rate(dragonfly_commands_processed_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[1m])",
+          "expr":
+              "sum(irate(dragonfly_commands_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[1m])) by (cmd)",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -469,7 +473,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unit": "bytes"
         },
         "overrides": []
       },
@@ -565,7 +570,7 @@
             "axisPlacement": "auto",
             "barAlignment": 0,
             "drawStyle": "line",
-            "fillOpacity": 0,
+            "fillOpacity": 22,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -579,11 +584,11 @@
             "scaleDistribution": {
               "type": "linear"
             },
-            "showPoints": "auto",
+            "showPoints": "never",
             "spanNulls": false,
             "stacking": {
               "group": "A",
-              "mode": "none"
+              "mode": "normal"
             },
             "thresholdsStyle": {
               "mode": "off"
@@ -603,7 +608,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unit": "short"
         },
         "overrides": []
       },
@@ -613,7 +619,7 @@
         "x": 12,
         "y": 8
       },
-      "id": 10,
+      "id": 24,
       "options": {
         "alertThreshold": true,
         "legend": {
@@ -636,14 +642,17 @@
           },
           "editorMode": "code",
           "exemplar": true,
-          "expr": "rate(dragonfly_net_input_bytes_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[5m])",
+          "expr":
+              "irate(dragonfly_keyspace_hits_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
-          "legendFormat": "{{ pod }} input",
+          "legendFormat": "hits",
+          "metric": "A",
           "range": true,
           "refId": "A",
-          "step": 240
+          "step": 240,
+          "target": ""
         },
         {
           "datasource": {
@@ -652,17 +661,41 @@
           },
           "editorMode": "code",
           "exemplar": true,
-          "expr": "rate(dragonfly_net_output_bytes_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[5m])",
+          "expr":
+              "irate(dragonfly_keyspace_misses_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])",
           "format": "time_series",
+          "hide": false,
           "interval": "",
           "intervalFactor": 2,
-          "legendFormat": "{{ pod }} output",
+          "legendFormat": "misses",
+          "metric": "A",
           "range": true,
           "refId": "B",
-          "step": 240
+          "step": 240,
+          "target": ""
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr":
+              "irate(dragonfly_keyspace_mutations_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 2,
+          "legendFormat": "mutations",
+          "metric": "A",
+          "range": true,
+          "refId": "C",
+          "step": 240,
+          "target": ""
         }
       ],
-      "title": "Network I/O",
+      "title": "Keys Ops / sec",
       "type": "timeseries"
     },
     {
@@ -832,6 +865,247 @@
         "x": 12,
         "y": 15
       },
+      "id": 10,
+      "options": {
+        "alertThreshold": true,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.1.10",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr":
+              "irate(dragonfly_net_input_bytes_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[5m])",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 2,
+          "legendFormat": "{{ pod }} input",
+          "range": true,
+          "refId": "A",
+          "step": 240
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr":
+              "irate(dragonfly_net_output_bytes_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[5m])",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 2,
+          "legendFormat": "{{ pod }} output",
+          "range": true,
+          "refId": "B",
+          "step": 240
+        }
+      ],
+      "title": "Network I/O",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "links": [],
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "id": 8,
+      "options": {
+        "alertThreshold": true,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.1.10",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr":
+              "sum(irate(dragonfly_expired_keys_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[5m])) by (pod)",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 2,
+          "legendFormat": "expired",
+          "metric": "",
+          "range": true,
+          "refId": "A",
+          "step": 240,
+          "target": ""
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr":
+              "sum(irate(dragonfly_evicted_keys_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[5m])) by (pod)",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 2,
+          "legendFormat": "evicted",
+          "range": true,
+          "refId": "B",
+          "step": 240
+        }
+      ],
+      "title": "Expired / Evicted",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "links": [],
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
       "id": 13,
       "options": {
         "alertThreshold": true,
@@ -855,7 +1129,8 @@
           },
           "editorMode": "code",
           "exemplar": true,
-          "expr": "sum (dragonfly_db_keys{namespace=\"$namespace\",pod=~\"$pod_name\"}) - sum (dragonfly_db_keys_expiring{namespace=\"$namespace\",pod=~\"$pod_name\"}) ",
+          "expr":
+              "sum (dragonfly_db_keys{namespace=\"$namespace\",pod=~\"$pod_name\"}) - sum (dragonfly_db_keys_expiring{namespace=\"$namespace\",pod=~\"$pod_name\"}) ",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -897,13 +1172,11 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
             "barAlignment": 0,
-            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 0,
             "gradientMode": "none",
@@ -935,128 +1208,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 22
-      },
-      "id": 8,
-      "options": {
-        "alertThreshold": true,
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "10.1.10",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "editorMode": "code",
-          "exemplar": true,
-          "expr": "sum(rate(dragonfly_expired_keys_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[5m])) by (pod)",
-          "format": "time_series",
-          "hide": false,
-          "interval": "",
-          "intervalFactor": 2,
-          "legendFormat": "expired",
-          "metric": "",
-          "range": true,
-          "refId": "A",
-          "step": 240,
-          "target": ""
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "editorMode": "code",
-          "exemplar": true,
-          "expr": "sum(rate(dragonfly_evicted_keys_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[5m])) by (pod)",
-          "format": "time_series",
-          "interval": "",
-          "intervalFactor": 2,
-          "legendFormat": "evicted",
-          "range": true,
-          "refId": "B",
-          "step": 240
-        }
-      ],
-      "title": "Expired / Evicted",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "links": [],
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
+                "color": "green",
+                "value": null
               },
               {
                 "color": "red",
@@ -1071,7 +1224,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 22
+        "y": 29
       },
       "id": 16,
       "options": {
@@ -1114,7 +1267,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 29
+        "y": 36
       },
       "id": 19,
       "panels": [],
@@ -1132,13 +1285,11 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
             "barAlignment": 0,
-            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 0,
             "gradientMode": "none",
@@ -1169,7 +1320,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": null
               },
               {
                 "color": "red",
@@ -1185,7 +1337,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 30
+        "y": 37
       },
       "id": 18,
       "options": {
@@ -1209,7 +1361,8 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(dragonfly_fiber_switch_delay_seconds_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])/rate(dragonfly_fiber_switch_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])",
+          "expr":
+              "irate(dragonfly_fiber_switch_delay_seconds_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])/rate(dragonfly_fiber_switch_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])",
           "fullMetaSearch": false,
           "includeNullMetadata": false,
           "instant": false,
@@ -1224,7 +1377,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "rate(dragonfly_fiber_longrun_seconds{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])/rate(dragonfly_fiber_longrun_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])",
+          "expr":
+              "irate(dragonfly_fiber_longrun_seconds{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])/irate(dragonfly_fiber_longrun_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])",
           "hide": false,
           "instant": false,
           "legendFormat": "longrun",
@@ -1246,13 +1400,11 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
             "barAlignment": 0,
-            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 0,
             "gradientMode": "none",
@@ -1283,7 +1435,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": null
               },
               {
                 "color": "red",
@@ -1298,7 +1451,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 30
+        "y": 37
       },
       "id": 22,
       "options": {
@@ -1321,7 +1474,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "dragonfly_pipeline_queue_length{namespace=\"$namespace\",pod=~\"$pod_name\"}/dragonfly_connected_clients{namespace=\"$namespace\",pod=~\"$pod_name\"}",
+          "expr":
+              "dragonfly_pipeline_queue_length{namespace=\"$namespace\",pod=~\"$pod_name\"}/dragonfly_connected_clients{namespace=\"$namespace\",pod=~\"$pod_name\"}",
           "instant": false,
           "legendFormat": "avr_pipeline_depth",
           "range": true,
@@ -1342,13 +1496,11 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
             "barAlignment": 0,
-            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 0,
             "gradientMode": "none",
@@ -1379,7 +1531,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": null
               },
               {
                 "color": "red",
@@ -1394,7 +1547,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 38
+        "y": 45
       },
       "id": 21,
       "options": {
@@ -1417,7 +1570,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "dragonfly_replication_full_sync_bytes{namespace=\"$namespace\",pod=~\"$pod_name\"}",
+          "expr":
+              "dragonfly_replication_full_sync_bytes{namespace=\"$namespace\",pod=~\"$pod_name\"}",
           "instant": false,
           "legendFormat": "fullsync",
           "range": true,
@@ -1429,7 +1583,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "dragonfly_replication_streaming_bytes{namespace=\"$namespace\",pod=~\"$pod_name\"}",
+          "expr":
+              "dragonfly_replication_streaming_bytes{namespace=\"$namespace\",pod=~\"$pod_name\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "stable_sync",
@@ -1451,13 +1606,11 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
             "barAlignment": 0,
-            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 0,
             "gradientMode": "none",
@@ -1488,7 +1641,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": null
               },
               {
                 "color": "red",
@@ -1504,7 +1658,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 38
+        "y": 45
       },
       "id": 23,
       "options": {
@@ -1527,7 +1681,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "rate(dragonfly_pipeline_commands_duration_seconds{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])/rate(dragonfly_pipeline_commands_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])",
+          "expr":
+              "irate(dragonfly_pipeline_commands_duration_seconds{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])/irate(dragonfly_pipeline_commands_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])",
           "instant": false,
           "legendFormat": "{{pod}}",
           "range": true,
@@ -1551,7 +1706,7 @@
         "current": {
           "selected": false,
           "text": "Prometheus",
-          "value": "${DS_PROMETHEUS}"
+          "value": "PBFA97CFB590B2093"
         },
         "hide": 0,
         "includeAll": false,

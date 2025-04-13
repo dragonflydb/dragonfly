@@ -11,8 +11,10 @@ jobs:
       matrix:
         # Test of these containers
         container: ["ubuntu-dev:20"]
+        proactor: [Uring]
         build-type: [Debug, Release]
         runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
+
     runs-on: ${{ matrix.runner }}
 
     container:
@@ -31,6 +33,7 @@ jobs:
           cat /proc/cpuinfo
           ulimit -a
           env
+
       - name: Configure & Build
         run: |
           # -no-pie to disable address randomization so we could symbolize stacktraces
@@ -48,10 +51,13 @@ jobs:
           dfly-executable: dragonfly
           gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
           build-folder-name: build
-          filter: ${{ matrix.build-type == 'Release' && 'not dbg_only' || 'not opt_only' }}
+          filter: ${{ matrix.build-type == 'Release' && 'not empty' || 'not opt_only' }}
           aws-access-key-id: ${{ secrets.AWS_S3_ACCESS_KEY }}
           aws-secret-access-key: ${{ secrets.AWS_S3_ACCESS_SECRET }}
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
+          # Chain ternary oprator of the form (which can be nested)
+          # (expression == condition && <true expression> || <false expression>)
+          epoll: ${{ matrix.proactor == 'Epoll' && 'epoll' || 'iouring' }}
 
       - name: Upload logs on failure
         if: failure()

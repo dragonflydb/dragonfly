@@ -21,6 +21,9 @@ template <typename T> struct DefaultCompareTo {
 
 template <typename T> struct BPTreePolicy {
   using KeyT = T;
+
+  // The three way comparator that should accept a query ( or key) on the left, and the key
+  // on the right.
   using KeyCompareTo = DefaultCompareTo<T>;
 };
 
@@ -89,16 +92,15 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
   ///             Should return false to stop iteration.
   bool IterateReverse(uint32_t rank_start, uint32_t rank_end, std::function<bool(KeyT)> cb) const;
 
-  /// @brief Returns the path to the first item in the tree that is greater or equal to key.
+  /// @brief Returns the path to the first item in the tree for which comp(q, key) >= 0.
   /// @param item
   /// @return the path if such item exists, empty path otherwise.
-  /// @todo: to wrap the result into iterator to avoid the leakage of internal data structures.
-  detail::BPTreePath<T> GEQ(KeyT key) const;
+  template <typename Q> BPTreePath GEQ(Q&& query) const;
 
-  /// @brief Returns the path to the largest item in the tree that is less or equal to key.
+  /// @brief Returns the path to the largest item in the tree such that comp(q, key) <= 0.
   /// @param key
   /// @return the path if such item exists, empty path otherwise.
-  detail::BPTreePath<T> LEQ(KeyT key) const;
+  template <typename Q> BPTreePath LEQ(Q&& query) const;
 
   /// @brief Deletes the element pointed by path.
   /// @param path
@@ -122,10 +124,10 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
   void IncreaseSubtreeCounts(const BPTreePath& path, unsigned depth, int32_t delta);
 
   // Charts the path towards key. Returns true if key is found.
-  // In that case path->Last().first->Key(path->Last().second) == key.
+  // In that case comp(q, path->Last().first->Key(path->Last().second)) == 0.
   // Fills the tree path not including the key itself. In case key was not found,
   // returns the path to the item that is greater than the key.
-  bool Locate(KeyT key, BPTreePath* path) const;
+  template <typename Q> bool Locate(Q&& q, BPTreePath* path) const;
 
   // Sets the tree path to item at specified rank. Rank is 0-based and must be less than Size().
   // returns the index of the key in the last node of the path.
@@ -243,12 +245,15 @@ std::optional<uint32_t> BPTree<T, Policy>::GetRank(KeyT item, bool reverse) cons
 }
 
 template <typename T, typename Policy>
-bool BPTree<T, Policy>::Locate(KeyT key, BPTreePath* path) const {
+template <typename Q>
+bool BPTree<T, Policy>::Locate(Q&& q, BPTreePath* path) const {
   assert(root_);
   BPTreeNode* node = root_;
   typename Policy::KeyCompareTo cmp;
+  auto cmp_cb = [&](const KeyT& key) { return cmp(q, key); };
+
   while (true) {
-    typename BPTreeNode::SearchResult res = node->BSearch(key, cmp);
+    typename BPTreeNode::SearchResult res = node->BSearch(cmp_cb);
     path->Push(node, res.index);
     if (res.found) {
       return true;
@@ -486,19 +491,27 @@ void BPTree<T, Policy>::ToRank(uint32_t rank, BPTreePath* path) const {
 }
 
 template <typename T, typename Policy>
-detail::BPTreePath<T> BPTree<T, Policy>::GEQ(KeyT item) const {
+template <typename Q>
+auto BPTree<T, Policy>::GEQ(Q&& query) const -> BPTreePath {
   BPTreePath path;
 
-  if (!Locate(item, &path) && path.Last().second >= path.Last().first->NumItems())
-    path.Clear();
+  bool res = Locate(query, &path);
+
+  // if we did not find the item and the path does not lead to any key in the node,
+  // adjust the path to point to the next key in the tree.
+  // In case we are past all items in the tree, Next() will collapse to the empty path.
+  if (!res && path.Last().second >= path.Last().first->NumItems()) {
+    path.Next();
+  }
 
   return path;
 }
 
 template <typename T, typename Policy>
-detail::BPTreePath<T> BPTree<T, Policy>::LEQ(KeyT item) const {
+template <typename Q>
+auto BPTree<T, Policy>::LEQ(Q&& query) const -> BPTreePath {
   BPTreePath path;
-  bool res = Locate(item, &path);
+  bool res = Locate(query, &path);
 
   if (!res) {  // fix the result in case the path leads to key greater than item.
     path.Prev();

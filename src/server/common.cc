@@ -12,7 +12,6 @@
 
 extern "C" {
 #include "redis/rdb.h"
-#include "redis/util.h"
 }
 
 #include "base/flags.h"
@@ -298,7 +297,7 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
     } else if (opt == "MATCH") {
       string_view pattern = ArgS(args, i + 1);
       if (pattern != "*")
-        scan_opts.pattern = pattern;
+        scan_opts.matcher.reset(new GlobMatcher{pattern, true});
     } else if (opt == "TYPE") {
       auto obj_type = ObjTypeFromString(ArgS(args, i + 1));
       if (!obj_type) {
@@ -309,6 +308,19 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
       if (!absl::SimpleAtoi(ArgS(args, i + 1), &scan_opts.bucket_id)) {
         return facade::OpStatus::INVALID_INT;
       }
+    } else if (opt == "ATTR") {
+      string_view mask = ArgS(args, i + 1);
+      if (mask == "v") {
+        scan_opts.mask = ScanOpts::Mask::Volatile;
+      } else if (mask == "p") {
+        scan_opts.mask = ScanOpts::Mask::Permanent;
+      } else if (mask == "a") {
+        scan_opts.mask = ScanOpts::Mask::Accessed;
+      } else if (mask == "u") {
+        scan_opts.mask = ScanOpts::Mask::Untouched;
+      } else {
+        return facade::OpStatus::SYNTAX_ERR;
+      }
     } else {
       return facade::OpStatus::SYNTAX_ERR;
     }
@@ -317,9 +329,7 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
 }
 
 bool ScanOpts::Matches(std::string_view val_name) const {
-  if (!pattern)
-    return true;
-  return stringmatchlen(pattern->data(), pattern->size(), val_name.data(), val_name.size(), 0) == 1;
+  return !matcher || matcher->Matches(val_name);
 }
 
 GenericError::operator std::error_code() const {
@@ -342,37 +352,33 @@ std::string GenericError::Format() const {
     return absl::StrCat(ec_.message(), ": ", details_);
 }
 
-Context::~Context() {
+ExecutionState::~ExecutionState() {
   DCHECK(!err_handler_fb_.IsJoinable());
   err_handler_fb_.JoinIfNeeded();
 }
 
-GenericError Context::GetError() const {
+GenericError ExecutionState::GetError() const {
   std::lock_guard lk(err_mu_);
   return err_;
 }
 
-const Cancellation* Context::GetCancellation() const {
-  return this;
+void ExecutionState::ReportCancelError() {
+  ReportError(std::make_error_code(errc::operation_canceled), "ExecutionState cancelled");
 }
 
-void Context::Cancel() {
-  ReportError(std::make_error_code(errc::operation_canceled), "Context cancelled");
-}
-
-void Context::Reset(ErrHandler handler) {
+void ExecutionState::Reset(ErrHandler handler) {
   fb2::Fiber fb;
 
   unique_lock lk{err_mu_};
   err_ = {};
   err_handler_ = std::move(handler);
-  Cancellation::flag_.store(false, std::memory_order_relaxed);
+  state_.store(State::RUN, std::memory_order_relaxed);
   fb.swap(err_handler_fb_);
   lk.unlock();
   fb.JoinIfNeeded();
 }
 
-GenericError Context::SwitchErrorHandler(ErrHandler handler) {
+GenericError ExecutionState::SwitchErrorHandler(ErrHandler handler) {
   std::lock_guard lk{err_mu_};
   if (!err_) {
     // No need to check for the error handler - it can't be running
@@ -382,7 +388,7 @@ GenericError Context::SwitchErrorHandler(ErrHandler handler) {
   return err_;
 }
 
-void Context::JoinErrorHandler() {
+void ExecutionState::JoinErrorHandler() {
   fb2::Fiber fb;
   unique_lock lk{err_mu_};
   fb.swap(err_handler_fb_);
@@ -390,7 +396,11 @@ void Context::JoinErrorHandler() {
   fb.JoinIfNeeded();
 }
 
-GenericError Context::ReportErrorInternal(GenericError&& err) {
+GenericError ExecutionState::ReportErrorInternal(GenericError&& err) {
+  if (IsCancelled()) {
+    LOG_IF(INFO, err != errc::operation_canceled) << err.Format();
+    return {};
+  }
   lock_guard lk{err_mu_};
   if (err_)
     return err_;
@@ -400,12 +410,12 @@ GenericError Context::ReportErrorInternal(GenericError&& err) {
   // This context is either new or was Reset, where the handler was joined
   CHECK(!err_handler_fb_.IsJoinable());
 
-  DVLOG(1) << "ReportError: " << err_.Format();
+  LOG(WARNING) << "ReportError: " << err_.Format();
 
   // We can move err_handler_ because it should run at most once.
   if (err_handler_)
     err_handler_fb_ = fb2::Fiber("report_internal_error", std::move(err_handler_), err_);
-  Cancellation::Cancel();
+  state_.store(State::ERROR, std::memory_order_relaxed);
   return err_;
 }
 
@@ -484,15 +494,15 @@ BorrowedInterpreter::~BorrowedInterpreter() {
     ServerState::tlocal()->ReturnInterpreter(interpreter_);
 }
 
-void LocalBlockingCounter::unlock() {
-  DCHECK(mutating_ > 0);
+void LocalLatch::unlock() {
+  DCHECK_GT(mutating_, 0u);
   --mutating_;
   if (mutating_ == 0) {
     cond_var_.notify_all();
   }
 }
 
-void LocalBlockingCounter::Wait() {
+void LocalLatch::Wait() {
   util::fb2::NoOpLock noop_lk_;
   cond_var_.wait(noop_lk_, [this]() { return mutating_ == 0; });
 }

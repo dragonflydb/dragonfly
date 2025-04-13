@@ -43,18 +43,14 @@ class SortedMap {
   SortedMap(const SortedMap&) = delete;
   SortedMap& operator=(const SortedMap&) = delete;
 
-  struct ScoreSdsPolicy {
-    using KeyT = ScoreSds;
-
-    struct KeyCompareTo {
-      int operator()(KeyT a, KeyT b) const;
-    };
-  };
-
   bool Reserve(size_t sz);
-  int Add(double score, sds ele, int in_flags, int* out_flags, double* newscore);
-  bool Insert(double score, sds member);
-  bool Delete(sds ele);
+  int AddElem(double score, std::string_view ele, int in_flags, int* out_flags, double* newscore);
+
+  // Inserts a new element. Returns false if the element already exists.
+  // No score update is performed in this case.
+  bool InsertNew(double score, std::string_view member);
+
+  bool Delete(std::string_view ele) const;
 
   // Upper bound size of the set.
   // Note: Currently we do not allow member expiry in sorted sets, therefore it's exact
@@ -71,9 +67,9 @@ class SortedMap {
 
   ScoredArray PopTopScores(unsigned count, bool reverse);
 
-  std::optional<double> GetScore(sds ele) const;
-  std::optional<unsigned> GetRank(sds ele, bool reverse) const;
-  std::optional<RankAndScore> GetRankAndScore(sds ele, bool reverse) const;
+  std::optional<double> GetScore(std::string_view ele) const;
+  std::optional<unsigned> GetRank(std::string_view ele, bool reverse) const;
+  std::optional<RankAndScore> GetRankAndScore(std::string_view ele, bool reverse) const;
   ScoredArray GetRange(const zrangespec& r, unsigned offs, unsigned len, bool rev) const;
   ScoredArray GetLexRange(const zlexrangespec& r, unsigned o, unsigned l, bool rev) const;
 
@@ -93,6 +89,24 @@ class SortedMap {
   bool DefragIfNeeded(float ratio);
 
  private:
+  struct Query {
+    ScoreSds item;
+    bool ignore_score;
+    bool str_is_infinite;
+
+    Query(ScoreSds key, bool ign_score = false, int is_inf = 0)
+        : item(key), ignore_score(ign_score), str_is_infinite(is_inf != 0) {
+    }
+  };
+
+  struct ScoreSdsPolicy {
+    using KeyT = ScoreSds;
+
+    struct KeyCompareTo {
+      int operator()(Query q, ScoreSds key) const;
+    };
+  };
+
   using ScoreTree = BPTree<ScoreSds, ScoreSdsPolicy>;
 
   // hash map from fields to scores.
@@ -103,7 +117,8 @@ class SortedMap {
 };
 
 // Used by CompactObject.
-unsigned char* ZzlInsert(unsigned char* zl, sds ele, double score);
+unsigned char* ZzlInsert(unsigned char* zl, std::string_view ele, double score);
+unsigned char* ZzlFind(unsigned char* lp, std::string_view ele, double* score);
 
 }  // namespace detail
 }  // namespace dfly

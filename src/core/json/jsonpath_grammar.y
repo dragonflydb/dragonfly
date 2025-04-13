@@ -26,10 +26,6 @@
 #include "src/core/json/lexer_impl.h"
 #include "src/core/json/driver.h"
 
-// Have to disable because GCC doesn't understand `symbol_type`'s union
-// implementation
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
-
 #define yylex driver->lexer()->Lex
 
 using namespace std;

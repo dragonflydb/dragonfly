@@ -42,7 +42,7 @@ class ClusterShardMigration {
     pause_ = pause;
   }
 
-  void Start(Context* cntx, util::FiberSocketBase* source) ABSL_LOCKS_EXCLUDED(mu_) {
+  void Start(ExecutionState* cntx, util::FiberSocketBase* source) ABSL_LOCKS_EXCLUDED(mu_) {
     {
       util::fb2::LockGuard lk(mu_);
       if (is_finished_) {
@@ -59,7 +59,7 @@ class ClusterShardMigration {
     JournalReader reader{source, 0};
     TransactionReader tx_reader;
 
-    while (!cntx->IsCancelled()) {
+    while (cntx->IsRunning()) {
       if (pause_) {
         ThisFiber::SleepFor(100ms);
         continue;
@@ -67,8 +67,6 @@ class ClusterShardMigration {
 
       auto tx_data = tx_reader.NextTxData(&reader, cntx);
       if (!tx_data) {
-        in_migration_->ReportError(GenericError("No tx data"));
-        VLOG(1) << "No tx data";
         break;
       }
 
@@ -125,8 +123,8 @@ class ClusterShardMigration {
   }
 
  private:
-  void ExecuteTx(TransactionData&& tx_data, Context* cntx) {
-    if (cntx->IsCancelled()) {
+  void ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx) {
+    if (!cntx->IsRunning()) {
       return;
     }
     if (!tx_data.IsGlobalCmd()) {
@@ -153,17 +151,8 @@ class ClusterShardMigration {
   atomic_bool pause_ = false;
 };
 
-IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, SlotRanges slots,
-                                             uint32_t shards_num)
-    : source_id_(std::move(source_id)),
-      service_(*se),
-      slots_(std::move(slots)),
-      state_(MigrationState::C_CONNECTING),
-      bc_(shards_num) {
-  shard_flows_.resize(shards_num);
-  for (unsigned i = 0; i < shards_num; ++i) {
-    shard_flows_[i].reset(new ClusterShardMigration(i, &service_, this, bc_));
-  }
+IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, SlotRanges slots)
+    : source_id_(std::move(source_id)), service_(*se), slots_(std::move(slots)), bc_(0) {
 }
 
 IncomingSlotMigration::~IncomingSlotMigration() {
@@ -192,18 +181,34 @@ bool IncomingSlotMigration::Join(long attempt) {
       return false;
     }
 
-    if ((bc_->WaitFor(absl::ToInt64Milliseconds(timeout - passed) * 1ms)) &&
-        (std::all_of(shard_flows_.begin(), shard_flows_.end(),
-                     [&](const auto& flow) { return flow->GetLastAttempt() == attempt; }))) {
-      state_.store(MigrationState::C_FINISHED);
-      keys_number_ = cluster::GetKeyCount(slots_);
-      return true;
+    // if data was sent after LSN, WaitFor() always returns false so to reduce wait time
+    // we check current state and if WaitFor false but GetLastAttempt() == attempt
+    // the Join is failed and we can return false
+    const auto remaining_time = absl::ToInt64Milliseconds(timeout - passed);
+    const auto wait_time = (remaining_time > 100 ? 100 : remaining_time) * 1ms;
+
+    const auto is_attempt_correct =
+        std::all_of(shard_flows_.begin(), shard_flows_.end(),
+                    [attempt](const auto& flow) { return flow->GetLastAttempt() == attempt; });
+
+    auto wait_res = bc_->WaitFor(wait_time);
+    if (is_attempt_correct) {
+      if (wait_res) {
+        util::fb2::LockGuard lk(state_mu_);
+        state_ = MigrationState::C_FINISHED;
+        keys_number_ = cluster::GetKeyCount(slots_);
+      } else {
+        LOG(WARNING) << "Can't join migration because of data after LSN for " << source_id_;
+        ReportError(GenericError("Can't join migration in time"));
+      }
+      return wait_res;
     }
   }
 }
 
 void IncomingSlotMigration::Stop() {
-  string_view log_state = state_.load() == MigrationState::C_FINISHED ? "Finishing" : "Cancelling";
+  util::fb2::LockGuard lk(state_mu_);
+  string_view log_state = state_ == MigrationState::C_FINISHED ? "Finishing" : "Cancelling";
   LOG(INFO) << log_state << " incoming migration of slots " << slots_.ToString();
   cntx_.Cancel();
 
@@ -232,17 +237,31 @@ void IncomingSlotMigration::Stop() {
   }
 }
 
-void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
-  state_.store(MigrationState::C_SYNC);
+void IncomingSlotMigration::Init(uint32_t shards_num) {
+  util::fb2::LockGuard lk(state_mu_);
+  cntx_.Reset(nullptr);
+  state_ = MigrationState::C_SYNC;
 
+  bc_ = BlockingCounter(shards_num);
+  shard_flows_.resize(shards_num);
+  for (unsigned i = 0; i < shards_num; ++i) {
+    shard_flows_[i].reset(new ClusterShardMigration(i, &service_, this, bc_));
+  }
+}
+
+void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
   shard_flows_[shard]->Start(&cntx_, source);
   VLOG(1) << "Incoming flow " << shard << " finished for " << source_id_;
 }
 
 size_t IncomingSlotMigration::GetKeyCount() const {
-  if (state_.load() == MigrationState::C_FINISHED) {
-    return keys_number_;
+  {
+    util::fb2::LockGuard lk(state_mu_);
+    if (state_ == MigrationState::C_FINISHED) {
+      return keys_number_;
+    }
   }
+
   return cluster::GetKeyCount(slots_);
 }
 

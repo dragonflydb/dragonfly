@@ -1,10 +1,12 @@
 # syntax=docker/dockerfile:1
-FROM ghcr.io/romange/ubuntu-dev:20 as builder
+FROM ghcr.io/romange/ubuntu-dev:20 AS builder
 
 WORKDIR /build
 
 COPY ./Makefile ./CMakeLists.txt ./
 COPY src ./src
+
+COPY .git ./.git
 COPY cmake ./cmake
 COPY helio ./helio
 

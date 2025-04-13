@@ -49,12 +49,13 @@ ABSL_FLAG(dfly::CompressionMode, compression_mode, dfly::CompressionMode::MULTI_
           "set 2 for multi entry zstd compression on df snapshot and single entry on rdb snapshot,"
           "set 3 for multi entry lz4 compression on df snapshot and single entry on rdb snapshot");
 
-// TODO: to retire both flags in v1.27 (Jan 2025)
-ABSL_FLAG(bool, list_rdb_encode_v2, true,
-          "V2 rdb encoding of list uses listpack encoding format, compatible with redis 7. V1 rdb "
-          "enconding of list uses ziplist encoding compatible with redis 6");
+ABSL_RETIRED_FLAG(
+    bool, list_rdb_encode_v2, true,
+    "V2 rdb encoding of list uses listpack encoding format, compatible with redis 7. V1 rdb "
+    "enconding of list uses ziplist encoding compatible with redis 6");
 
-ABSL_FLAG(bool, stream_rdb_encode_v2, false,
+// TODO: to retire this flag in v1.31
+ABSL_FLAG(bool, stream_rdb_encode_v2, true,
           "V2 uses format, compatible with redis 7.2 and Dragonfly v1.26+, while v1 format "
           "is compatible with redis 6");
 
@@ -173,8 +174,7 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
       return RDB_TYPE_STRING;
     case OBJ_LIST:
       if (compact_enc == OBJ_ENCODING_QUICKLIST || compact_enc == kEncodingQL2) {
-        return absl::GetFlag(FLAGS_list_rdb_encode_v2) ? RDB_TYPE_LIST_QUICKLIST_2
-                                                       : RDB_TYPE_LIST_QUICKLIST;
+        return RDB_TYPE_LIST_QUICKLIST_2;
       }
       break;
     case OBJ_SET:
@@ -230,7 +230,7 @@ RdbSerializer::~RdbSerializer() {
   VLOG(2) << "compression mode: " << uint32_t(compression_mode_);
   if (compression_stats_) {
     VLOG(2) << "compression not effective: " << compression_stats_->compression_no_effective;
-    VLOG(2) << "small string none compression applied: " << compression_stats_->small_str_count;
+    VLOG(2) << "string compression skipped: " << compression_stats_->size_skip_count;
     VLOG(2) << "compression failed: " << compression_stats_->compression_failed;
     VLOG(2) << "compressed blobs:" << compression_stats_->compressed_blobs;
   }
@@ -243,7 +243,14 @@ std::error_code RdbSerializer::SaveValue(const PrimeValue& pv) {
     if (opt_int) {
       ec = SaveLongLongAsString(*opt_int);
     } else {
-      ec = SaveString(pv.GetSlice(&tmp_str_));
+      if (pv.IsExternal()) {
+        if (pv.IsCool()) {
+          return SaveValue(pv.GetCool().record->value);
+        }
+        LOG(FATAL) << "External string not supported yet";
+      } else {
+        ec = SaveString(pv.GetSlice(&tmp_str_));
+      }
     }
   } else {
     ec = SaveObject(pv);
@@ -268,7 +275,7 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
   if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
     string_view key = pk.GetSlice(&tmp_str_);
     LOG(DFATAL) << "SaveEntry skipped empty PrimeValue with key: " << key << " with tag "
-                << pv.Tag();
+                << static_cast<int>(pv.Tag());
     return 0;
   }
 
@@ -366,7 +373,7 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
   } else {
     DCHECK_EQ(pv.Encoding(), kEncodingQL2);
     QList* ql = reinterpret_cast<QList*>(pv.RObjPtr());
-    node = ql->Head();
+    node = (const quicklistNode*)ql->Head();  // We rely on common ABI for Q2 and Q1 nodes.
     len = ql->node_count();
   }
   RETURN_ON_ERR(SaveLen(len));
@@ -375,49 +382,19 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
     DVLOG(3) << "QL node (encoding/container/sz): " << node->encoding << "/" << node->container
              << "/" << node->sz;
 
-    if (absl::GetFlag(FLAGS_list_rdb_encode_v2)) {
-      // Use listpack encoding
-      SaveLen(node->container);
-      if (quicklistNodeIsCompressed(node)) {
-        void* data;
-        size_t compress_len = quicklistGetLzf(node, &data);
+    // Use listpack encoding
+    SaveLen(node->container);
+    if (quicklistNodeIsCompressed(node)) {
+      void* data;
+      size_t compress_len = quicklistGetLzf(node, &data);
 
-        RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
-      } else {
-        RETURN_ON_ERR(SaveString(node->entry, node->sz));
-        FlushState flush_state = FlushState::kFlushMidEntry;
-        if (node->next == nullptr)
-          flush_state = FlushState::kFlushEndEntry;
-        FlushIfNeeded(flush_state);
-      }
+      RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
     } else {
-      // Use ziplist encoding
-      if (QL_NODE_IS_PLAIN(node)) {
-        RETURN_ON_ERR(SavePlainNodeAsZiplist(node));
-      } else {
-        // listpack node
-        uint8_t* lp = node->entry;
-        uint8_t* decompressed = NULL;
-
-        if (quicklistNodeIsCompressed(node)) {
-          void* data;
-          size_t compress_len = quicklistGetLzf(node, &data);
-          decompressed = (uint8_t*)zmalloc(node->sz);
-
-          if (lzf_decompress(data, compress_len, decompressed, node->sz) == 0) {
-            /* Someone requested decompress, but we can't decompress.  Not good. */
-            zfree(decompressed);
-            return make_error_code(errc::illegal_byte_sequence);
-          }
-          lp = decompressed;
-        }
-
-        auto cleanup = absl::MakeCleanup([=] {
-          if (decompressed)
-            zfree(decompressed);
-        });
-        RETURN_ON_ERR(SaveListPackAsZiplist(lp));
-      }
+      RETURN_ON_ERR(SaveString(node->entry, node->sz));
+      FlushState flush_state = FlushState::kFlushMidEntry;
+      if (node->next == nullptr)
+        flush_state = FlushState::kFlushEndEntry;
+      FlushIfNeeded(flush_state);
     }
     node = node->next;
   }
@@ -497,15 +474,13 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
     RETURN_ON_ERR(SaveLen(zs->Size()));
     std::error_code ec;
 
-    /* We save the skiplist elements from the greatest to the smallest
-     * (that's trivial since the elements are already ordered in the
-     * skiplist): this improves the load process, since the next loaded
-     * element will always be the smaller, so adding to the skiplist
-     * will always immediately stop at the head, making the insertion
-     * O(1) instead of O(log(N)). */
     const size_t total = zs->Size();
     size_t count = 0;
-    zs->Iterate(0, total, true, [&](sds ele, double score) mutable {
+
+    // Iterate over the sorted map and save the key and score.
+    // The order is important (from smallest to biggest) - so that the loader
+    // will load the entries faster.
+    zs->Iterate(0, total, false, [&](sds ele, double score) mutable {
       ec = SaveString(string_view{ele, sdslen(ele)});
       if (ec)
         return false;
@@ -554,9 +529,7 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
     RETURN_ON_ERR(SaveString((uint8_t*)ri.key, ri.key_len));
     RETURN_ON_ERR(SaveString(lp, lp_bytes));
 
-    const FlushState flush_state =
-        (i + 1 < rax_size) ? FlushState::kFlushMidEntry : FlushState::kFlushEndEntry;
-    FlushIfNeeded(flush_state);
+    FlushIfNeeded(FlushState::kFlushMidEntry);
   }
 
   std::move(stop_listpacks_rax).Invoke();
@@ -624,6 +597,8 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
       RETURN_ON_ERR(SaveStreamConsumers(rdb_type >= RDB_TYPE_STREAM_LISTPACKS_3, cg));
     }
   }
+
+  FlushIfNeeded(FlushState::kFlushEndEntry);
 
   return error_code{};
 }
@@ -813,7 +788,7 @@ error_code RdbSerializer::SendJournalOffset(uint64_t journal_offset) {
 }
 
 error_code SerializerBase::SendFullSyncCut() {
-  VLOG(2) << "SendFullSyncCut";
+  VLOG(1) << "SendFullSyncCut";
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_FULLSYNC_END));
 
   // RDB_OPCODE_FULLSYNC_END followed by 8 bytes of 0.
@@ -1079,19 +1054,19 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
 
   ~Impl();
 
-  void StartSnapshotting(bool stream_journal, Context* cntx, EngineShard* shard);
-  void StartIncrementalSnapshotting(LSN start_lsn, Context* cntx, EngineShard* shard);
+  void StartSnapshotting(bool stream_journal, ExecutionState* cntx, EngineShard* shard);
+  void StartIncrementalSnapshotting(LSN start_lsn, ExecutionState* cntx, EngineShard* shard);
 
   void StopSnapshotting(EngineShard* shard);
   void WaitForSnapshottingFinish(EngineShard* shard);
 
   // Pushes snapshot data. Called from SliceSnapshot
-  void ConsumeData(std::string data, Context* cntx) override;
+  void ConsumeData(std::string data, ExecutionState* cntx) override;
   // Finalizes the snapshot writing. Called from SliceSnapshot
   void Finalize() override;
 
   // used only for legacy rdb save flows.
-  error_code ConsumeChannel(const Cancellation* cll);
+  error_code ConsumeChannel(const ExecutionState* cll);
 
   void FillFreqMap(RdbTypeFreqMap* dest) const;
 
@@ -1191,7 +1166,7 @@ error_code RdbSaver::Impl::SaveAuxFieldStrStr(string_view key, string_view val) 
   return error_code{};
 }
 
-error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
+error_code RdbSaver::Impl::ConsumeChannel(const ExecutionState* es) {
   error_code io_error;
   string record;
 
@@ -1200,11 +1175,11 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
   // we can not exit on io-error since we spawn fibers that push data.
   // TODO: we may signal them to stop processing and exit asap in case of the error.
   while (channel_->Pop(record)) {
-    if (io_error || cll->IsCancelled())
+    if (io_error || (!es->IsRunning()))
       continue;
 
     do {
-      if (cll->IsCancelled())
+      if (!es->IsRunning())
         continue;
 
       auto start = absl::GetCurrentTimeNanos();
@@ -1257,7 +1232,8 @@ error_code RdbSaver::Impl::WriteRecord(io::Bytes src) {
   return ec;
 }
 
-void RdbSaver::Impl::StartSnapshotting(bool stream_journal, Context* cntx, EngineShard* shard) {
+void RdbSaver::Impl::StartSnapshotting(bool stream_journal, ExecutionState* cntx,
+                                       EngineShard* shard) {
   auto& s = GetSnapshot(shard);
   auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
@@ -1269,7 +1245,7 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, Context* cntx, Engin
   s->Start(stream_journal, allow_flush);
 }
 
-void RdbSaver::Impl::StartIncrementalSnapshotting(LSN start_lsn, Context* cntx,
+void RdbSaver::Impl::StartIncrementalSnapshotting(LSN start_lsn, ExecutionState* cntx,
                                                   EngineShard* shard) {
   auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
   auto& s = GetSnapshot(shard);
@@ -1286,8 +1262,8 @@ void RdbSaver::Impl::WaitForSnapshottingFinish(EngineShard* shard) {
   snapshot->WaitSnapshotting();
 }
 
-void RdbSaver::Impl::ConsumeData(std::string data, Context* cntx) {
-  if (cntx->IsCancelled()) {
+void RdbSaver::Impl::ConsumeData(std::string data, ExecutionState* cntx) {
+  if (!cntx->IsRunning()) {
     return;
   }
   if (channel_) {  // Rdb write to channel
@@ -1460,11 +1436,12 @@ RdbSaver::~RdbSaver() {
   tlocal->DecommitMemory(ServerState::kAllMemory);
 }
 
-void RdbSaver::StartSnapshotInShard(bool stream_journal, Context* cntx, EngineShard* shard) {
+void RdbSaver::StartSnapshotInShard(bool stream_journal, ExecutionState* cntx, EngineShard* shard) {
   impl_->StartSnapshotting(stream_journal, cntx, shard);
 }
 
-void RdbSaver::StartIncrementalSnapshotInShard(LSN start_lsn, Context* cntx, EngineShard* shard) {
+void RdbSaver::StartIncrementalSnapshotInShard(LSN start_lsn, ExecutionState* cntx,
+                                               EngineShard* shard) {
   impl_->StartIncrementalSnapshotting(start_lsn, cntx, shard);
 }
 
@@ -1491,12 +1468,12 @@ error_code RdbSaver::SaveHeader(const GlobalData& glob_state) {
   return error_code{};
 }
 
-error_code RdbSaver::SaveBody(const Context& cntx) {
+error_code RdbSaver::SaveBody(const ExecutionState& cntx) {
   RETURN_ON_ERR(impl_->FlushSerializer());
 
   if (save_mode_ == SaveMode::RDB) {
     VLOG(1) << "SaveBody , snapshots count: " << impl_->Size();
-    error_code io_error = impl_->ConsumeChannel(cntx.GetCancellation());
+    error_code io_error = impl_->ConsumeChannel(&cntx);
     if (io_error) {
       return io_error;
     }
@@ -1600,8 +1577,9 @@ void SerializerBase::CompressBlob() {
   Bytes blob_to_compress = mem_buf_.InputBuffer();
   VLOG(2) << "CompressBlob size " << blob_to_compress.size();
   size_t blob_size = blob_to_compress.size();
-  if (blob_size < kMinStrSizeToCompress) {
-    ++compression_stats_->small_str_count;
+
+  if (blob_size < kMinStrSizeToCompress || blob_size > kMaxStrSizeToCompress) {
+    ++compression_stats_->size_skip_count;
     return;
   }
 

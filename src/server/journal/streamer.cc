@@ -21,6 +21,9 @@ ABSL_FLAG(uint32_t, replication_timeout, 30000,
 ABSL_FLAG(uint32_t, replication_stream_output_limit, 64_KB,
           "Time to wait for the replication output buffer go below the throttle limit");
 
+ABSL_FLAG(uint32_t, migration_buckets_serialization_threshold, 100,
+          "The Number of buckets to serialize on each iteration before yielding");
+
 namespace dfly {
 using namespace util;
 using namespace journal;
@@ -32,17 +35,18 @@ iovec IoVec(io::Bytes src) {
 }
 
 uint32_t replication_stream_output_limit_cached = 64_KB;
+uint32_t migration_buckets_serialization_threshold_cached = 100;
 
 }  // namespace
 
-JournalStreamer::JournalStreamer(journal::Journal* journal, Context* cntx)
+JournalStreamer::JournalStreamer(journal::Journal* journal, ExecutionState* cntx)
     : cntx_(cntx), journal_(journal) {
   // cache the flag to avoid accessing it later.
   replication_stream_output_limit_cached = absl::GetFlag(FLAGS_replication_stream_output_limit);
 }
 
 JournalStreamer::~JournalStreamer() {
-  if (!cntx_->IsCancelled()) {
+  if (!cntx_->IsError()) {
     DCHECK_EQ(in_flight_bytes_, 0u);
   }
   VLOG(1) << "~JournalStreamer";
@@ -83,7 +87,7 @@ void JournalStreamer::Cancel() {
   VLOG(1) << "JournalStreamer::Cancel";
   waker_.notifyAll();
   journal_->UnregisterOnChange(journal_cb_id_);
-  if (!cntx_->IsCancelled()) {
+  if (!cntx_->IsError()) {
     WaitForInflightToComplete();
   }
 }
@@ -134,10 +138,12 @@ void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
   DVLOG(3) << "Completing " << in_flight_bytes_;
   in_flight_bytes_ = 0;
   pending_buf_.Pop();
-  if (ec && !IsStopped()) {
-    cntx_->ReportError(ec);
-  } else if (!pending_buf_.Empty() && !IsStopped()) {
-    AsyncWrite();
+  if (cntx_->IsRunning()) {
+    if (ec) {
+      cntx_->ReportError(ec);
+    } else if (!pending_buf_.Empty()) {
+      AsyncWrite();
+    }
   }
 
   // notify ThrottleIfNeeded or WaitForInflightToComplete that waits
@@ -149,7 +155,7 @@ void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
 }
 
 void JournalStreamer::ThrottleIfNeeded() {
-  if (IsStopped() || !IsStalled())
+  if (!cntx_->IsRunning() || !IsStalled())
     return;
 
   auto next =
@@ -158,7 +164,7 @@ void JournalStreamer::ThrottleIfNeeded() {
   size_t sent_start = total_sent_;
 
   std::cv_status status =
-      waker_.await_until([this]() { return !IsStalled() || IsStopped(); }, next);
+      waker_.await_until([this]() { return !IsStalled() || !cntx_->IsRunning(); }, next);
   if (status == std::cv_status::timeout) {
     LOG(WARNING) << "Stream timed out, inflight bytes/sent start: " << inflight_start << "/"
                  << sent_start << ", end: " << in_flight_bytes_ << "/" << total_sent_;
@@ -181,14 +187,16 @@ bool JournalStreamer::IsStalled() const {
 }
 
 RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
-                                 Context* cntx)
+                                 ExecutionState* cntx)
     : JournalStreamer(journal, cntx), db_slice_(slice), my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
+  migration_buckets_serialization_threshold_cached =
+      absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);
   db_array_ = slice->databases();  // Inc ref to make sure DB isn't deleted while we use it
 }
 
 void RestoreStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
-  if (fiber_cancelled_)
+  if (!cntx_->IsRunning())
     return;
 
   VLOG(1) << "RestoreStreamer start";
@@ -206,36 +214,45 @@ void RestoreStreamer::Run() {
   PrimeTable* pt = &db_array_[0]->prime;
 
   do {
-    if (fiber_cancelled_)
+    if (!cntx_->IsRunning())
       return;
     cursor = pt->TraverseBuckets(cursor, [&](PrimeTable::bucket_iterator it) {
-      if (fiber_cancelled_)  // Could be cancelled any time as Traverse may preempt
+      if (!cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt
         return;
 
       db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
                                                DbSlice::Iterator::FromPrime(it), snapshot_version_);
 
-      if (fiber_cancelled_)  // Could have been cancelled in above call too
+      if (!cntx_->IsRunning())  // Could have been cancelled in above call too
         return;
 
       std::lock_guard guard(big_value_mu_);
 
       // Locking this never preempts. See snapshot.cc for why we need it.
-      auto* blocking_counter = db_slice_->BlockingCounter();
-      std::lock_guard blocking_counter_guard(*blocking_counter);
+      auto* blocking_counter = db_slice_->GetLatch();
+      lock_guard blocking_counter_guard(*blocking_counter);
 
-      WriteBucket(it);
+      stats_.buckets_loop += WriteBucket(it);
     });
 
-    if (++last_yield >= 100) {
+    if (++last_yield >= migration_buckets_serialization_threshold_cached) {
       ThisFiber::Yield();
       last_yield = 0;
     }
   } while (cursor);
+
+  VLOG(1) << "RestoreStreamer finished loop of " << my_slots_.ToSlotRanges().ToString()
+          << ", shard " << db_slice_->shard_id() << ". Buckets looped " << stats_.buckets_loop;
 }
 
 void RestoreStreamer::SendFinalize(long attempt) {
-  VLOG(1) << "RestoreStreamer LSN opcode for : " << db_slice_->shard_id() << " attempt " << attempt;
+  VLOG(1) << "RestoreStreamer LSN of " << my_slots_.ToSlotRanges().ToString() << ", shard "
+          << db_slice_->shard_id() << " attempt " << attempt << " with " << stats_.commands
+          << " commands. Buckets looped " << stats_.buckets_loop << ", buckets on_db_update "
+          << stats_.buckets_on_db_update << ", buckets skipped " << stats_.buckets_skipped
+          << ", buckets written " << stats_.buckets_written << ". Keys skipped "
+          << stats_.keys_skipped << ", keys written " << stats_.keys_written;
+
   journal::Entry entry(journal::Op::LSN, attempt);
 
   io::StringSink sink;
@@ -243,8 +260,7 @@ void RestoreStreamer::SendFinalize(long attempt) {
   writer.Write(entry);
   Write(std::move(sink).str());
 
-  // TODO: is the intent here to flush everything?
-  //
+  // DFLYMIGRATE ACK command has a timeout so we want to send it only when LSN is ready to be sent
   ThrottleIfNeeded();
 }
 
@@ -254,7 +270,7 @@ RestoreStreamer::~RestoreStreamer() {
 void RestoreStreamer::Cancel() {
   auto sver = snapshot_version_;
   snapshot_version_ = 0;  // to prevent double cancel in another fiber
-  fiber_cancelled_ = true;
+  cntx_->Cancel();
   if (sver != 0) {
     db_slice_->UnregisterOnChange(sver);
     JournalStreamer::Cancel();
@@ -285,14 +301,19 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 
-void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
-  if (it.GetVersion() < snapshot_version_) {
+bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
+  bool written = false;
+
+  if (!it.is_done() && it.GetVersion() < snapshot_version_) {
+    stats_.buckets_written++;
+
     it.SetVersion(snapshot_version_);
     string key_buffer;  // we can reuse it
-    for (; !it.is_done(); ++it) {
+    for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
       const auto& pv = it->second;
       string_view key = it->first.GetSlice(&key_buffer);
       if (ShouldWrite(key)) {
+        stats_.keys_written++;
         uint64_t expire = 0;
         if (pv.HasExpire()) {
           auto eit = db_slice_->databases()[0]->expire.Find(it->first);
@@ -300,10 +321,17 @@ void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
         }
 
         WriteEntry(key, it->first, pv, expire);
+        written = true;
+      } else {
+        stats_.keys_skipped++;
       }
     }
+  } else {
+    stats_.buckets_skipped++;
   }
   ThrottleIfNeeded();
+
+  return written;
 }
 
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
@@ -313,12 +341,12 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
   PrimeTable* table = db_slice_->GetTables(0).first;
 
   if (const PrimeTable::bucket_iterator* bit = req.update()) {
-    WriteBucket(*bit);
+    stats_.buckets_on_db_update += WriteBucket(*bit);
   } else {
     string_view key = get<string_view>(req.change);
     table->CVCUponInsert(snapshot_version_, key, [this](PrimeTable::bucket_iterator it) {
       DCHECK_LT(it.GetVersion(), snapshot_version_);
-      WriteBucket(it);
+      stats_.buckets_on_db_update += WriteBucket(it);
     });
   }
 }
@@ -331,7 +359,7 @@ void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const Pr
         ThrottleIfNeeded();
       },
       ServerState::tlocal()->serialization_max_chunk_size);
-  serializer.SerializeEntry(key, pk, pv, expire_ms);
+  stats_.commands += serializer.SerializeEntry(key, pk, pv, expire_ms);
 }
 
 }  // namespace dfly

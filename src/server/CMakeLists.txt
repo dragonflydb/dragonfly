@@ -18,7 +18,7 @@ if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
       tiering/external_alloc.cc)
 
     add_executable(dfly_bench dfly_bench.cc)
-    cxx_link(dfly_bench dfly_parser_lib fibers2 absl::random_random)
+    cxx_link(dfly_bench dfly_parser_lib fibers2 absl::random_random redis_lib)
     cxx_test(tiering/disk_storage_test dfly_test_lib LABELS DFLY)
     cxx_test(tiering/op_manager_test dfly_test_lib LABELS DFLY)
     cxx_test(tiering/small_bins_test dfly_test_lib LABELS DFLY)
@@ -30,7 +30,7 @@ add_library(dfly_transaction db_slice.cc blocking_controller.cc
             command_registry.cc  cluster_support.cc
             journal/cmd_serializer.cc journal/tx_executor.cc namespaces.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
-            server_state.cc table.cc  top_keys.cc transaction.cc tx_base.cc
+            server_state.cc table.cc  transaction.cc tx_base.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
             ${TX_LINUX_SRCS} acl/acl_log.cc slowlog.cc channel_store.cc)
 
@@ -56,7 +56,7 @@ add_library(dragonfly_lib bloom_family.cc
             detail/snapshot_storage.cc
             set_family.cc stream_family.cc string_family.cc
             zset_family.cc geo_family.cc version.cc bitops_family.cc container_utils.cc
-            top_keys.cc multi_command_squasher.cc hll_family.cc
+            multi_command_squasher.cc hll_family.cc
             ${DF_SEARCH_SRCS}
             ${DF_LINUX_SRCS}
             cluster/cluster_config.cc cluster/cluster_family.cc cluster/incoming_slot_migration.cc
@@ -77,8 +77,6 @@ if (WITH_ASAN OR WITH_USAN)
   target_compile_definitions(dfly_transaction PRIVATE SANITIZERS)
 endif()
 
-find_library(ZSTD_LIB NAMES libzstd.a libzstdstatic.a zstd NAMES_PER_DIR REQUIRED)
-
 if (WITH_AWS)
   SET(AWS_LIB awsv2_lib)
   add_definitions(-DWITH_AWS)
@@ -87,7 +85,7 @@ endif()
 cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float)
 cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib ${AWS_LIB} jsonpath
          strings_lib html_lib gcp_lib
-         http_client_lib absl::random_random TRDP::jsoncons ${ZSTD_LIB} TRDP::lz4
+         http_client_lib absl::random_random TRDP::jsoncons TRDP::zstd TRDP::lz4
          TRDP::croncpp TRDP::flatbuffers)
 
 if (DF_USE_SSL)
@@ -98,6 +96,9 @@ endif()
 add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)
 
+if (WITH_ASAN OR WITH_USAN)
+  target_compile_definitions(dfly_test_lib PRIVATE SANITIZERS)
+endif()
 
 cxx_test(dragonfly_test dfly_test_lib LABELS DFLY)
 cxx_test(multi_test dfly_test_lib LABELS DFLY)
@@ -112,13 +113,12 @@ cxx_test(bitops_family_test dfly_test_lib LABELS DFLY)
 cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_small.rdb
          testdata/redis6_stream.rdb testdata/hll.rdb testdata/redis7_small.rdb
          testdata/redis_json.rdb testdata/RDB_TYPE_STREAM_LISTPACKS_2.rdb
-         testdata/RDB_TYPE_STREAM_LISTPACKS_3.rdb LABELS DFLY)
+         testdata/RDB_TYPE_STREAM_LISTPACKS_3.rdb testdata/ignore_expiry.rdb LABELS DFLY)
 cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(geo_family_test dfly_test_lib LABELS DFLY)
 cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
 cxx_test(json_family_test dfly_test_lib LABELS DFLY)
 cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)
-cxx_test(top_keys_test dfly_test_lib LABELS DFLY)
 cxx_test(hll_family_test dfly_test_lib LABELS DFLY)
 cxx_test(bloom_family_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)

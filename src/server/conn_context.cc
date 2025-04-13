@@ -104,6 +104,7 @@ ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredent
     : facade::ConnectionContext(owner) {
   if (owner) {
     skip_acl_validation = owner->IsPrivileged();
+    has_main_or_memcache_listener = owner->IsMainOrMemcache();
   }
 
   keys = std::move(cred.keys);
@@ -113,6 +114,7 @@ ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredent
   } else {
     acl_commands = std::move(cred.acl_commands);
   }
+  acl_db_idx = cred.db;
 }
 
 ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction* tx)
@@ -122,7 +124,11 @@ ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction
     keys = owner->keys;
     pub_sub = owner->pub_sub;
     skip_acl_validation = owner->skip_acl_validation;
+    acl_db_idx = owner->acl_db_idx;
     ns = owner->ns;
+    if (owner->conn()) {
+      has_main_or_memcache_listener = owner->conn()->IsMainOrMemcache();
+    }
   } else {
     acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::NONE_COMMANDS);
   }
@@ -221,6 +227,18 @@ size_t ConnectionState::UsedMemory() const {
 
 size_t ConnectionContext::UsedMemory() const {
   return facade::ConnectionContext::UsedMemory() + dfly::HeapSize(conn_state);
+}
+
+void ConnectionContext::Unsubscribe(std::string_view channel) {
+  auto* sinfo = conn_state.subscribe_info.get();
+  DCHECK(sinfo);
+  auto erased = sinfo->channels.erase(channel);
+  DCHECK(erased);
+  if (sinfo->IsEmpty()) {
+    conn_state.subscribe_info.reset();
+    DCHECK_GE(subscriptions, 1u);
+    --subscriptions;
+  }
 }
 
 vector<unsigned> ConnectionContext::ChangeSubscriptions(CmdArgList channels, bool pattern,

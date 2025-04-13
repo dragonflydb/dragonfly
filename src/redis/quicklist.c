@@ -35,7 +35,6 @@
 #include "zmalloc.h"
 #include "config.h"
 #include "listpack.h"
-#include "util.h" /* for ll2string */
 #include "lzfP.h"
 
 

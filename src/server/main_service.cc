@@ -64,6 +64,7 @@ extern "C" {
 #include "util/varz.h"
 
 using namespace std;
+using facade::operator""_KB;
 using facade::ErrorReply;
 
 ABSL_FLAG(int32_t, port, 6379,
@@ -110,7 +111,7 @@ ABSL_FLAG(double, rss_oom_deny_ratio, 1.25,
           "DENYOOM will fail with OOM error and new connections to non-admin port will be "
           "rejected. Negative value disables this feature.");
 
-ABSL_FLAG(size_t, serialization_max_chunk_size, 0,
+ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
           "Maximum size of a value that may be serialized at once during snapshotting or full "
           "sync. Values bigger than this threshold will be serialized using streaming "
           "serialization. 0 - to disable streaming mode");
@@ -459,35 +460,6 @@ optional<ErrorReply> EvalValidator(CmdArgList args) {
   return nullopt;
 }
 
-void Topkeys(const http::QueryArgs& args, HttpContext* send) {
-  http::StringResponse resp = http::MakeStringResponse(h2::status::ok);
-  resp.body() = "<h1>Detected top keys</h1>\n<pre>\n";
-
-  std::atomic_bool is_enabled = false;
-  if (shard_set) {
-    vector<string> rows(shard_set->size());
-
-    shard_set->RunBriefInParallel([&](EngineShard* shard) {
-      for (const auto& db :
-           namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).databases()) {
-        if (db->top_keys.IsEnabled()) {
-          is_enabled = true;
-          for (const auto& [key, count] : db->top_keys.GetTopKeys()) {
-            absl::StrAppend(&resp.body(), key, ":\t", count, "\n");
-          }
-        }
-      }
-    });
-  }
-
-  resp.body() += "</pre>";
-
-  if (!is_enabled) {
-    resp.body() += "<i>TopKeys are disabled.</i>";
-  }
-  send->Invoke(std::move(resp));
-}
-
 void TxTable(const http::QueryArgs& args, HttpContext* send) {
   using html::SortedTable;
 
@@ -579,10 +551,10 @@ void ClusterHtmlPage(const http::QueryArgs& args, HttpContext* send,
   }
 
   if (IsClusterEnabled()) {
-    if (cluster::ClusterFamily::cluster_config() == nullptr) {
+    if (cluster::ClusterConfig::Current() == nullptr) {
       resp.body() += "<h2>Not yet configured.</h2>\n";
     } else {
-      auto config = cluster::ClusterFamily::cluster_config()->GetConfig();
+      auto config = cluster::ClusterConfig::Current()->GetConfig();
       for (const auto& shard : config) {
         resp.body() += "<div class='master'>\n";
         resp.body() += "<h3>Master</h3>\n";
@@ -649,6 +621,7 @@ Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
                                       const ScriptMgr& script_mgr) {
   // Check if script most LIKELY has global eval transactions
   bool contains_global = false;
+  bool contains_admin_cmd = false;
   Transaction::MultiMode multi_mode = Transaction::LOCK_AHEAD;
 
   if (state == ExecScriptUse::SCRIPT_RUN) {
@@ -669,6 +642,7 @@ Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
         transactional |= scmd.Cid()->IsTransactional();
       }
       contains_global |= scmd.Cid()->opt_mask() & CO::GLOBAL_TRANS;
+      contains_admin_cmd |= scmd.Cid()->opt_mask() & CO::ADMIN;
 
       // We can't run no-key-transactional commands in lock-ahead mode currently,
       // because it means we have to schedule on all shards
@@ -684,9 +658,13 @@ Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
   if (!transactional && exec_info.watched_keys.empty())
     return Transaction::NOT_DETERMINED;
 
+  if (contains_admin_cmd) {
+    multi_mode = Transaction::NON_ATOMIC;
+  }
   // Atomic modes fall back to GLOBAL if they contain global commands.
-  if (contains_global && multi_mode == Transaction::LOCK_AHEAD)
+  else if (contains_global && multi_mode == Transaction::LOCK_AHEAD) {
     multi_mode = Transaction::GLOBAL;
+  }
 
   return multi_mode;
 }
@@ -778,6 +756,7 @@ Service::~Service() {
 
 void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   InitRedisTables();
+  facade::Connection::Init(pp_.size());
 
   config_registry.RegisterSetter<MemoryBytesFlag>(
       "maxmemory", [](const MemoryBytesFlag& flag) { max_memory_limit = flag.value; });
@@ -800,12 +779,12 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   config_registry.RegisterSetter<uint32_t>("pipeline_queue_limit", [](uint32_t val) {
     shard_set->pool()->AwaitBrief(
-        [val](unsigned, auto*) { facade::Connection::SetMaxQueueLenThreadLocal(val); });
+        [val](unsigned tid, auto*) { facade::Connection::SetMaxQueueLenThreadLocal(tid, val); });
   });
 
   config_registry.RegisterSetter<size_t>("pipeline_buffer_limit", [](size_t val) {
     shard_set->pool()->AwaitBrief(
-        [val](unsigned, auto*) { facade::Connection::SetPipelineBufferLimit(val); });
+        [val](unsigned tid, auto*) { facade::Connection::SetPipelineBufferLimit(tid, val); });
   });
 
   config_registry.RegisterMutable("replica_partial_sync");
@@ -813,6 +792,8 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("migration_finalization_timeout_ms");
   config_registry.RegisterMutable("table_growth_margin");
   config_registry.RegisterMutable("tcp_keepalive");
+  config_registry.RegisterMutable("timeout");
+  config_registry.RegisterMutable("send_timeout");
   config_registry.RegisterMutable("managed_service_info");
 
   config_registry.RegisterMutable(
@@ -848,19 +829,23 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     shard_num = pp_.size();
   }
 
+  // We assume that listeners.front() is the main_listener
+  // see dfly_main RunEngine. In unit tests, listeners are empty.
+  facade::Listener* main_listener = listeners.empty() ? nullptr : listeners.front();
+
   ChannelStore* cs = new ChannelStore{};
   // Must initialize before the shard_set because EngineShard::Init references ServerState.
   pp_.AwaitBrief([&](uint32_t index, ProactorBase* pb) {
     tl_facade_stats = new FacadeStats;
-    ServerState::Init(index, shard_num, &user_registry_);
+    ServerState::Init(index, shard_num, main_listener, &user_registry_);
     ServerState::tlocal()->UpdateChannelStore(cs);
   });
 
   const auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
   // We assume that listeners.front() is the main_listener
   // see dfly_main RunEngine
-  if (!tcp_disabled && !listeners.empty()) {
-    acl_family_.Init(listeners.front(), &user_registry_);
+  if (!tcp_disabled && main_listener) {
+    acl_family_.Init(main_listener, &user_registry_);
   }
 
   // Initialize shard_set with a callback running once in a while in the shard threads.
@@ -906,10 +891,25 @@ void Service::Shutdown() {
   shard_set->Shutdown();
   Transaction::Shutdown();
 
-  pp_.Await([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
+  pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
 
   // wait for all the pending callbacks to stop.
   ThisFiber::SleepFor(10ms);
+  facade::Connection::Shutdown();
+}
+
+OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, CmdArgList args) {
+  if (!cid->IsShardedPSub()) {
+    return DetermineKeys(cid, args);
+  }
+
+  // Sharded pub sub
+  // Command form: SPUBLISH shardchannel message
+  if (cid->name() == registry_.RenamedOrOriginal("SPUBLISH")) {
+    return {KeyIndex(0, 1)};
+  }
+
+  return {KeyIndex(0, args.size())};
 }
 
 optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
@@ -919,31 +919,28 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
     return nullopt;
   }
 
-  if (cid->first_key_pos() == 0) {
+  if (cid->first_key_pos() == 0 && !cid->IsShardedPSub()) {
     return nullopt;  // No key command.
   }
 
-  OpResult<KeyIndex> key_index_res = DetermineKeys(cid, args);
+  OpResult<KeyIndex> key_index_res = FindKeys(cid, args);
+
   if (!key_index_res) {
     return ErrorReply{key_index_res.status()};
   }
 
   const auto& key_index = *key_index_res;
-  optional<SlotId> keys_slot;
-  bool cross_slot = false;
-  // Iterate keys and check to which slot they belong.
+
+  UniqueSlotChecker slot_checker;
   for (string_view key : key_index.Range(args)) {
-    if (SlotId slot = KeySlot(key); keys_slot && slot != *keys_slot) {
-      cross_slot = true;  // keys belong to different slots
-      break;
-    } else {
-      keys_slot = slot;
-    }
+    slot_checker.Add(key);
   }
 
-  if (cross_slot) {
-    return ErrorReply{"-CROSSSLOT Keys in request don't hash to the same slot"};
+  if (slot_checker.IsCrossSlot()) {
+    return ErrorReply{kCrossSlotError};
   }
+
+  optional<SlotId> keys_slot = slot_checker.GetUniqueSlotId();
 
   if (keys_slot.has_value()) {
     if (auto error = cluster::SlotOwnershipError(*keys_slot);
@@ -1238,7 +1235,13 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
 
   dfly_cntx->cid = cid;
 
-  if (!InvokeCmd(cid, args_no_cmd, builder, dfly_cntx)) {
+  // If cmd is an alias, pass it to Invoke so the stats are updated against the alias. By defaults
+  // stats will be updated for cid.name
+  std::optional<std::string_view> orig_cmd_name = std::nullopt;
+  if (registry_.IsAlias(cmd)) {
+    orig_cmd_name = cmd;
+  }
+  if (!InvokeCmd(cid, args_no_cmd, builder, dfly_cntx, orig_cmd_name)) {
     builder->SendError("Internal Error");
     builder->CloseConnection();
   }
@@ -1299,7 +1302,7 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
 }
 
 bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBuilder* builder,
-                        ConnectionContext* cntx) {
+                        ConnectionContext* cntx, std::optional<std::string_view> orig_cmd_name) {
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
@@ -1322,7 +1325,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
     DispatchMonitor(cntx, cid, tail_args);
   }
 
-  ServerState::tlocal()->RecordCmd();
+  ServerState::tlocal()->RecordCmd(cntx->has_main_or_memcache_listener);
   Transaction* tx = cntx->transaction;
   auto& info = cntx->conn_state.tracking_info_;
   const bool is_read_only = cid->opt_mask() & CO::READONLY;
@@ -1348,7 +1351,8 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
   auto last_error = builder->ConsumeLastError();
   DCHECK(last_error.empty());
   try {
-    invoke_time_usec = cid->Invoke(tail_args, CommandContext{tx, builder, cntx});
+    invoke_time_usec = cid->Invoke(tail_args, CommandContext{tx, builder, cntx},
+                                   orig_cmd_name.value_or(cid->name()));
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
@@ -1858,28 +1862,27 @@ Transaction::MultiMode DetermineMultiMode(ScriptMgr::ScriptParams params) {
     return Transaction::NON_ATOMIC;
 }
 
-// Start multi transaction for eval. Returns true if transaction was scheduled.
+// Starts multi transaction. Returns true if transaction was scheduled.
 // Skips scheduling if multi mode requires declaring keys, but no keys were declared.
-bool StartMultiEval(DbIndex dbid, CmdArgList keys, Transaction::MultiMode script_mode,
-                    ConnectionContext* cntx) {
+bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode, CmdArgList keys) {
   Transaction* tx = cntx->transaction;
   Namespace* ns = cntx->ns;
+  const DbIndex dbid = cntx->db_index();
 
-  if (keys.empty() && script_mode == Transaction::LOCK_AHEAD)
-    return false;
-
-  switch (script_mode) {
+  switch (tx_mode) {
     case Transaction::GLOBAL:
       tx->StartMultiGlobal(ns, dbid);
       return true;
     case Transaction::LOCK_AHEAD:
+      if (keys.empty())
+        return false;
       tx->StartMultiLockedAhead(ns, dbid, keys);
       return true;
     case Transaction::NON_ATOMIC:
       tx->StartMultiNonAtomic();
       return true;
     default:
-      CHECK(false) << "Invalid mode";
+      LOG(FATAL) << "Invalid mode";
   };
 
   return false;
@@ -1970,7 +1973,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     ++ServerState::tlocal()->stats.eval_shardlocal_coordination_cnt;
-    tx->PrepareMultiForScheduleSingleHop(cntx->ns, *sid, tx->GetDbIndex(), args);
+    tx->PrepareMultiForScheduleSingleHop(cntx->ns, *sid, cntx->db_index(), args);
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       boost::intrusive_ptr<Transaction> stub_tx =
           new Transaction{tx, *sid, slot_checker.GetUniqueSlotId()};
@@ -2001,7 +2004,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
         return builder->SendError(err);
       }
     } else {
-      scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, script_mode, cntx);
+      scheduled = StartMulti(cntx, script_mode, eval_args.keys);
     }
 
     ++ServerState::tlocal()->stats.eval_io_coordination_cnt;
@@ -2124,27 +2127,6 @@ CmdArgVec CollectAllKeys(ConnectionState::ExecInfo* exec_info) {
   return out;
 }
 
-// Return true if transaction was scheduled, false if scheduling was not required.
-void StartMultiExec(ConnectionContext* cntx, ConnectionState::ExecInfo* exec_info,
-                    Transaction::MultiMode multi_mode) {
-  auto* tx = cntx->transaction;
-  auto dbid = cntx->db_index();
-  switch (multi_mode) {
-    case Transaction::GLOBAL:
-      tx->StartMultiGlobal(cntx->ns, dbid);
-      break;
-    case Transaction::LOCK_AHEAD: {
-      auto vec = CollectAllKeys(exec_info);
-      tx->StartMultiLockedAhead(cntx->ns, dbid, absl::MakeSpan(vec));
-    } break;
-    case Transaction::NON_ATOMIC:
-      tx->StartMultiNonAtomic();
-      break;
-    case Transaction::NOT_DETERMINED:
-      LOG(FATAL) << "should not reach";
-  };
-}
-
 void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   auto& exec_info = cmd_cntx.conn_cntx->conn_state.exec_info;
@@ -2172,6 +2154,18 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
 
   cntx->last_command_debug.exec_body_len = exec_info.body.size();
 
+  auto keys = CollectAllKeys(&exec_info);
+  if (IsClusterEnabled()) {
+    UniqueSlotChecker slot_checker;
+    for (const auto& s : keys) {
+      slot_checker.Add(s);
+    }
+
+    if (slot_checker.IsCrossSlot()) {
+      return rb->SendError(kCrossSlotError);
+    }
+  }
+
   // The transaction can contain script load script execution, determine their presence ahead to
   // customize logic below.
   ExecScriptUse state = DetermineScriptPresense(exec_info.body);
@@ -2188,8 +2182,7 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
 
   bool scheduled = false;
   if (multi_mode != Transaction::NOT_DETERMINED) {
-    StartMultiExec(cntx, &exec_info, multi_mode);
-    scheduled = true;
+    scheduled = StartMulti(cntx, multi_mode, keys);
   }
 
   // EXEC should not run if any of the watched keys expired.
@@ -2251,8 +2244,9 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
   VLOG(2) << "Exec completed";
 }
 
-void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (IsClusterEnabled()) {
+namespace {
+void PublishImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd_cntx) {
+  if (reject_cluster && IsClusterEnabled()) {
     return cmd_cntx.rb->SendError("PUBLISH is not supported in cluster mode yet");
   }
   string_view channel = ArgS(args, 0);
@@ -2262,17 +2256,17 @@ void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
   cmd_cntx.rb->SendLong(cs->SendMessages(channel, messages));
 }
 
-void Service::Subscribe(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (IsClusterEnabled()) {
+void SubscribeImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd_cntx) {
+  if (reject_cluster && IsClusterEnabled()) {
     return cmd_cntx.rb->SendError("SUBSCRIBE is not supported in cluster mode yet");
   }
   cmd_cntx.conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, std::move(args),
                                          static_cast<RedisReplyBuilder*>(cmd_cntx.rb));
 }
 
-void Service::Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
+void UnSubscribeImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (IsClusterEnabled()) {
+  if (reject_cluster && IsClusterEnabled()) {
     return cmd_cntx.rb->SendError("UNSUBSCRIBE is not supported in cluster mode yet");
   }
 
@@ -2281,6 +2275,32 @@ void Service::Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
   } else {
     cmd_cntx.conn_cntx->ChangeSubscription(false, true, args, rb);
   }
+}
+
+}  // namespace
+
+void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
+  PublishImpl(true, args, cmd_cntx);
+}
+
+void Service::SPublish(CmdArgList args, const CommandContext& cmd_cntx) {
+  PublishImpl(false, args, cmd_cntx);
+}
+
+void Service::Subscribe(CmdArgList args, const CommandContext& cmd_cntx) {
+  SubscribeImpl(true, args, cmd_cntx);
+}
+
+void Service::SSubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
+  SubscribeImpl(false, args, cmd_cntx);
+}
+
+void Service::Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
+  UnSubscribeImpl(true, args, cmd_cntx);
+}
+
+void Service::SUnsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
+  UnSubscribeImpl(false, args, cmd_cntx);
 }
 
 void Service::PSubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2325,14 +2345,12 @@ void Service::PubsubChannels(string_view pattern, SinkReplyBuilder* builder) {
 
 void Service::PubsubPatterns(SinkReplyBuilder* builder) {
   size_t pattern_count = ServerState::tlocal()->channel_store()->PatternCount();
-
   builder->SendLong(pattern_count);
 }
 
 void Service::PubsubNumSub(CmdArgList args, SinkReplyBuilder* builder) {
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   rb->StartArray(args.size() * 2);
-
   for (string_view channel : args) {
     rb->SendBulkString(channel);
     rb->SendLong(ServerState::tlocal()->channel_store()->FetchSubscribers(channel).size());
@@ -2350,9 +2368,6 @@ void Service::Monitor(CmdArgList args, const CommandContext& cmd_cntx) {
 void Service::Pubsub(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
-  if (IsClusterEnabled()) {
-    return rb->SendError("PUBSUB is not supported in cluster mode yet");
-  }
   if (args.size() < 1) {
     rb->SendError(WrongNumArgsError(cmd_cntx.conn_cntx->cid->name()));
     return;
@@ -2370,6 +2385,12 @@ void Service::Pubsub(CmdArgList args, const CommandContext& cmd_cntx) {
         "NUMSUB [<channel> <channel...>]",
         "\tReturns the number of subscribers for the specified channels, excluding",
         "\tpattern subscriptions.",
+        "SHARDCHANNELS [pattern]",
+        "\tReturns a list of active shard channels, optionally matching the specified pattern ",
+        "(default: '*').",
+        "SHARDNUMSUB [<channel> <channel...>]",
+        "\tReturns the number of subscribers for the specified shard channels, excluding",
+        "\tpattern subscriptions.",
         "HELP",
         "\tPrints this help."};
 
@@ -2377,16 +2398,21 @@ void Service::Pubsub(CmdArgList args, const CommandContext& cmd_cntx) {
     return;
   }
 
-  if (subcmd == "CHANNELS") {
+  // Don't allow SHARD subcommands in non cluster mode
+  if (!IsClusterEnabledOrEmulated() && ((subcmd == "SHARDCHANNELS") || (subcmd == "SHARDNUMSUB"))) {
+    auto err = absl::StrCat("PUBSUB ", subcmd, " is not supported in non cluster mode");
+    return rb->SendError(err);
+  }
+
+  if (subcmd == "CHANNELS" || subcmd == "SHARDCHANNELS") {
     string_view pattern;
     if (args.size() > 1) {
       pattern = ArgS(args, 1);
     }
-
     PubsubChannels(pattern, rb);
   } else if (subcmd == "NUMPAT") {
     PubsubPatterns(rb);
-  } else if (subcmd == "NUMSUB") {
+  } else if (subcmd == "NUMSUB" || subcmd == "SHARDNUMSUB") {
     args.remove_prefix(1);
     PubsubNumSub(args, rb);
   } else {
@@ -2469,7 +2495,9 @@ void Service::Command(CmdArgList args, const CommandContext& cmd_cntx) {
 
   sufficient_args = (args.size() == 1);
   if (subcmd == "DOCS" && sufficient_args) {
-    return rb->SendOk();
+    // Returning an error here forces the interactive CLI client to fall back to static hints and
+    // tab completion
+    return rb->SendError("COMMAND DOCS Not Implemented");
   }
 
   return rb->SendError(kSyntaxErr, kSyntaxErrType);
@@ -2501,7 +2529,14 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
   VLOG(1) << "Switching state from " << from << " to " << to;
   global_state_ = to;
 
-  pp_.Await([&](ProactorBase*) { ServerState::tlocal()->set_gstate(to); });
+  pp_.Await([&](ProactorBase*) {
+    ServerState::tlocal()->set_gstate(to);
+    auto* es = EngineShard::tlocal();
+    if (es && to == GlobalState::ACTIVE) {
+      DbSlice& db = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
+      DCHECK(db.IsLoadRefCountZero());
+    }
+  });
   return to;
 }
 
@@ -2543,7 +2578,6 @@ void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privil
   }
   server_family_.ConfigureMetrics(base);
   base->RegisterCb("/txz", TxTable);
-  base->RegisterCb("/topkeys", Topkeys);
   base->RegisterCb("/clusterz", [this](const http::QueryArgs& args, HttpContext* send) {
     return ClusterHtmlPage(args, send, &cluster_family_);
   });
@@ -2641,9 +2675,13 @@ void Service::Register(CommandRegistry* registry) {
              .SetValidator(&EvalValidator)
       << CI{"EXEC", CO::LOADING | CO::NOSCRIPT, 1, 0, 0, acl::kExec}.MFUNC(Exec)
       << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, acl::kPublish}.MFUNC(Publish)
+      << CI{"SPUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, acl::kPublish}.MFUNC(SPublish)
       << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kSubscribe}.MFUNC(Subscribe)
+      << CI{"SSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kSubscribe}.MFUNC(SSubscribe)
       << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kUnsubscribe}.MFUNC(
              Unsubscribe)
+      << CI{"SUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kUnsubscribe}.MFUNC(
+             SUnsubscribe)
       << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kPSubscribe}.MFUNC(PSubscribe)
       << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kPUnsubsribe}.MFUNC(
              PUnsubscribe)

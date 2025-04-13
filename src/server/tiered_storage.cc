@@ -407,10 +407,10 @@ bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
   error_code ec;
   if (OccupiesWholePages(value->Size())) {  // large enough for own page
     id = KeyRef(dbid, key);
-    ec = op_manager_->Stash(id, raw_string.view(), {});
-  } else if (auto bin = bins_->Stash(dbid, key, raw_string.view(), {}); bin) {
+    ec = op_manager_->Stash(id, raw_string.view());
+  } else if (auto bin = bins_->Stash(dbid, key, raw_string.view()); bin) {
     id = bin->first;
-    ec = op_manager_->Stash(id, bin->second, {});
+    ec = op_manager_->Stash(id, bin->second);
   }
 
   if (ec) {
@@ -424,6 +424,8 @@ bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
 
 void TieredStorage::Delete(DbIndex dbid, PrimeValue* value) {
   DCHECK(value->IsExternal());
+  DCHECK(!value->HasStashPending());
+
   ++stats_.total_deletes;
 
   tiering::DiskSegment segment = value->GetExternalSlice();
@@ -433,7 +435,7 @@ void TieredStorage::Delete(DbIndex dbid, PrimeValue* value) {
   }
 
   // In any case we delete the offloaded segment and reset the value.
-  value->Reset();
+  value->RemoveExternal();
   op_manager_->DeleteOffloaded(dbid, segment);
 }
 

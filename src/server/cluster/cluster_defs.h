@@ -94,6 +94,16 @@ struct ClusterNodeInfo {
   }
 };
 
+enum class NodeHealth : std::uint8_t { FAIL, LOADING, ONLINE, HIDDEN };
+std::string_view ToString(NodeHealth nh);
+
+struct ClusterExtendedNodeInfo : ClusterNodeInfo {
+  NodeHealth health = NodeHealth::ONLINE;
+  bool operator==(const ClusterExtendedNodeInfo& r) const noexcept {
+    return health == r.health && ClusterNodeInfo::operator==(r);
+  }
+};
+
 struct MigrationInfo {
   SlotRanges slot_ranges;
   ClusterNodeInfo node_info;
@@ -111,8 +121,8 @@ struct MigrationInfo {
 
 struct ClusterShardInfo {
   SlotRanges slot_ranges;
-  ClusterNodeInfo master;
-  std::vector<ClusterNodeInfo> replicas;
+  ClusterExtendedNodeInfo master;
+  std::vector<ClusterExtendedNodeInfo> replicas;
   std::vector<MigrationInfo> migrations;
 
   bool operator==(const ClusterShardInfo& r) const;
@@ -151,6 +161,10 @@ class ClusterShardInfos {
 
   bool operator!=(const ClusterShardInfos& r) const noexcept {
     return infos_ != r.infos_;
+  }
+
+  auto Unwrap() const {
+    return infos_;
   }
 
  private:

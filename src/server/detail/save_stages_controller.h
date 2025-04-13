@@ -29,6 +29,7 @@ struct SaveInfo {
 
 struct SaveStagesInputs {
   bool use_dfs_format_;
+  std::string_view cloud_uri_;
   std::string_view basename_;
   Transaction* trans_;
   Service* service_;
@@ -72,7 +73,7 @@ class RdbSnapshot {
   unique_ptr<RdbSaver> saver_;
   RdbTypeFreqMap freq_map_;
 
-  Context cntx_{};
+  ExecutionState cntx_{};
 };
 
 struct SaveStagesController : public SaveStagesInputs {

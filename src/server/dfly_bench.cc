@@ -2,13 +2,20 @@
 // See LICENSE for licensing terms.
 //
 
+extern "C" {
+#include "redis/crc16.h"
+}
+
+#include <absl/container/flat_hash_set.h>
 #include <absl/random/random.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 #include <absl/strings/str_split.h>
 
+#include <boost/icl/interval_set.hpp>
 #include <queue>
+#include <tuple>
 
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
@@ -17,9 +24,11 @@
 #include "base/random.h"
 #include "base/zipf_gen.h"
 #include "facade/redis_parser.h"
+#include "io/io.h"
 #include "io/io_buf.h"
 #include "util/fibers/dns_resolve.h"
 #include "util/fibers/pool.h"
+#include "util/fibers/proactor_base.h"
 #include "util/fibers/uring_socket.h"
 
 // A load-test for DragonflyDB that fixes coordinated omission problem.
@@ -30,6 +39,7 @@ ABSL_FLAG(uint16_t, p, 6379, "Server port");
 ABSL_FLAG(uint32_t, c, 20, "Number of connections per thread");
 ABSL_FLAG(uint32_t, qps, 20, "QPS schedule at which the generator sends requests to the server");
 ABSL_FLAG(uint32_t, n, 1000, "Number of requests to send per connection");
+ABSL_FLAG(uint32_t, test_time, 0, "Testing time in seconds");
 ABSL_FLAG(uint32_t, d, 16, "Value size in bytes ");
 ABSL_FLAG(string, h, "localhost", "server hostname/ip");
 ABSL_FLAG(uint64_t, key_minimum, 0, "Min value for keys used");
@@ -43,20 +53,30 @@ ABSL_FLAG(uint64_t, key_stddev, 0,
           " a default value of (max-min)/6");
 ABSL_FLAG(uint32_t, pipeline, 1, "maximum number of pending requests per connection");
 ABSL_FLAG(string, ratio, "1:10", "Set:Get ratio");
-ABSL_FLAG(string, command, "", "custom command with __key__ placeholder for keys");
+ABSL_FLAG(string, command, "",
+          "custom command with __key__ placeholder for keys, "
+          "__data__ for values, __score__ for doubles");
 ABSL_FLAG(string, P, "", "protocol can be empty (for RESP) or memcache_text");
+
 ABSL_FLAG(bool, tcp_nodelay, false, "If true, set nodelay option on tcp socket");
+ABSL_FLAG(bool, noreply, false, "If true, does not wait for replies. Relevant only for memcached.");
+ABSL_FLAG(bool, greet, true,
+          "If true, sends a greeting command on each connection, "
+          "to make sure the connection succeeded");
+ABSL_FLAG(bool, cluster_skip_tags, true,
+          "If true, skips tags (compatible with memtier benchmark) in cluster mode, "
+          "othewise adds hash tags to keys");
+ABSL_FLAG(bool, ascii, true, "If true, use ascii characters for values");
 
 using namespace std;
 using namespace util;
 using absl::GetFlag;
 using absl::StrFormat;
 using facade::RedisParser;
+using facade::RespExpr;
 using facade::RespVec;
 using tcp = ::boost::asio::ip::tcp;
 using absl::StrCat;
-
-constexpr string_view kKeyPlaceholder = "__key__"sv;
 
 thread_local base::Xoroshiro128p bit_gen;
 
@@ -66,97 +86,277 @@ thread_local base::Xoroshiro128p bit_gen;
 
 enum Protocol { RESP, MC_TEXT } protocol;
 enum DistType { UNIFORM, NORMAL, ZIPFIAN, SEQUENTIAL } dist_type{UNIFORM};
+constexpr uint16_t kNumSlots = 16384;
+
+static string GetRandomHex(size_t len, bool ascii) {
+  std::string res(len, '\0');
+  size_t indx = 0;
+
+  for (; indx + 16 <= len; indx += 16) {  // 2 chars per byte
+    absl::numbers_internal::FastHexToBufferZeroPad16(bit_gen(), res.data() + indx);
+  }
+
+  DCHECK_LE(indx, len);
+
+  if (indx < len) {
+    char buf[24];
+    absl::numbers_internal::FastHexToBufferZeroPad16(bit_gen(), buf);
+
+    for (unsigned j = 0; indx < len;) {
+      res[indx++] = buf[j++];
+    }
+  }
+
+  if (!ascii) {
+    for (size_t i = 0; i < len; i++) {
+      res[i] += 80;
+    }
+  }
+  return res;
+}
+
+uint16_t SlotId(string_view str) {
+  return crc16(str.data(), str.size()) % kNumSlots;
+}
+
+using SlotRange = pair<uint16_t, uint16_t>;
+
+struct ShardInfo {
+  vector<SlotRange> slots;  // list of [start, end] pairs. inclusive.
+  tcp::endpoint endpoint;
+};
+
+using ClusterShards = vector<ShardInfo>;
+
+class ShardSlots {
+ private:
+  using IntervalSet = boost::icl::interval_set<uint16_t>;
+  using Interval = boost::icl::interval<uint16_t>;
+
+ public:
+  void SetClusterSlotRanges(const ClusterShards& cluster_shards) {
+    for (auto shard : cluster_shards) {
+      IntervalSet shard_slots_;
+      for (auto& slot : shard.slots) {
+        shard_slots_.insert(Interval::closed(slot.first, slot.second));
+      }
+      shards_slots_.emplace(shard.endpoint, shard_slots_);
+    }
+  }
+
+  SlotRange NextSlotRange(const tcp::endpoint& ep, size_t i) {
+    shared_lock<fb2::SharedMutex> lock(mu_);
+    const auto& shard_slot_interval = shards_slots_[ep];
+    unsigned index = i % shard_slot_interval.iterative_size();
+    const auto& interval = next(shard_slot_interval.begin(), index);
+    return SlotRange{boost::icl::first(*interval), boost::icl::last(*interval)};
+  }
+
+  bool Empty() const {
+    return shards_slots_.empty();
+  }
+
+  size_t Size() const {
+    return shards_slots_.size();
+  }
+
+  vector<tcp::endpoint> Endpoints() const {
+    vector<tcp::endpoint> endpoints;
+    for (const auto& shard : shards_slots_) {
+      endpoints.push_back(shard.first);
+    }
+    return endpoints;
+  }
+
+  void MoveSlot(const tcp::endpoint& src_ep, const tcp::endpoint& dst_ep, uint16_t slot_id) {
+    unique_lock<fb2::SharedMutex> lock(mu_);
+    // Remove slot from source ep
+    auto& src_shard_slots = shards_slots_[src_ep];
+    // If slot id doesn't exists on source ep we have moved this slot before
+    if (src_shard_slots.find(slot_id) == src_shard_slots.end()) {
+      return;
+    }
+    src_shard_slots.subtract(slot_id);
+    // Add slot to dest ep
+    auto& dst_shard_slots = shards_slots_[dst_ep];
+    dst_shard_slots.insert(slot_id);
+  }
+
+ private:
+  struct Hasher {
+    using is_transparent = void;
+    size_t operator()(const tcp::endpoint& ep) const {
+      std::size_t hash1 = std::hash<string>()(ep.address().to_string());
+      std::size_t hash2 = std::hash<unsigned short>()(ep.port());
+      return hash1 ^ (hash2 + 0x9e3779b9 + (hash1 << 6) + (hash1 >> 2));
+    }
+  };
+
+  struct Eq {
+    using is_transparent = void;
+    bool operator()(const tcp::endpoint& left, const tcp::endpoint& right) const {
+      return left == right;
+    }
+  };
+
+ private:
+  fb2::SharedMutex mu_;
+  absl::flat_hash_map<tcp::endpoint, IntervalSet, Hasher, Eq> shards_slots_;
+};
 
 class KeyGenerator {
  public:
   KeyGenerator(uint32_t min, uint32_t max);
 
-  string operator()();
+  string operator()(uint16_t from, uint16_t to) const;
+  void EnableClusterMode();
+
+  bool IsClusterEnabled() const {
+    return !hash_slots_.empty();
+  }
 
  private:
   string prefix_;
   uint64_t min_, max_, range_;
-  uint64_t seq_cursor_;
+  mutable uint64_t seq_cursor_;
   double stddev_ = 1.0 / 6;
-  optional<base::ZipfianGenerator> zipf_;
+  mutable optional<base::ZipfianGenerator> zipf_;
+  vector<string> hash_slots_;
 };
 
 class CommandGenerator {
  public:
   CommandGenerator(KeyGenerator* keygen);
 
-  string Next();
+  string Next(SlotRange range);
 
   bool might_hit() const {
     return might_hit_;
   }
 
+  bool noreply() const {
+    return noreply_;
+  }
+
  private:
-  void FillSet(string_view key);
-  void FillGet(string_view key);
+  enum TemplateType { KEY, VALUE, SCORE };
+
+  string FillSet(string_view key);
+  string FillGet(string_view key);
 
   KeyGenerator* keygen_;
   uint32_t ratio_set_ = 0, ratio_get_ = 0;
   string command_;
-  string cmd_;
-  std::vector<size_t> key_indices_;
+
+  using CmdPart = variant<string_view, TemplateType>;
+  vector<CmdPart> cmd_parts_;
+
   string value_;
   bool might_hit_ = false;
+  bool noreply_ = false;
+  bool is_ascii_ = true;
 };
 
 CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
   command_ = GetFlag(FLAGS_command);
-  value_ = string(GetFlag(FLAGS_d), 'a');
+  is_ascii_ = GetFlag(FLAGS_ascii);
+  value_ = string(GetFlag(FLAGS_d), is_ascii_ ? 'a' : char(130));
 
   if (command_.empty()) {
     pair<string, string> ratio_str = absl::StrSplit(GetFlag(FLAGS_ratio), ':');
     CHECK(absl::SimpleAtoi(ratio_str.first, &ratio_set_));
     CHECK(absl::SimpleAtoi(ratio_str.second, &ratio_get_));
-  } else {
-    for (size_t pos = 0; (pos = command_.find(kKeyPlaceholder, pos)) != string::npos;
-         pos += kKeyPlaceholder.size()) {
-      key_indices_.push_back(pos);
+    return;
+  }
+
+  vector<string_view> parts = absl::StrSplit(command_, ' ', absl::SkipEmpty());
+  for (string_view p : parts) {
+    if (p == "__key__"sv) {
+      cmd_parts_.emplace_back(KEY);
+    } else if (p == "__data__"sv) {
+      cmd_parts_.emplace_back(VALUE);
+    } else if (p == "__score__"sv) {
+      cmd_parts_.emplace_back(SCORE);
+    } else {
+      cmd_parts_.emplace_back(p);
+    }
+  }
+
+  if (!cmd_parts_.empty()) {
+    const string_view* cmd = get_if<string_view>(&cmd_parts_.front());
+    if (cmd) {
+      might_hit_ = absl::EqualsIgnoreCase(*cmd, "get") || absl::StartsWithIgnoreCase(*cmd, "mget");
     }
   }
 }
 
-string CommandGenerator::Next() {
-  cmd_.clear();
-  string key;
+string CommandGenerator::Next(SlotRange range) {
+  noreply_ = false;
+
   if (command_.empty()) {
-    key = (*keygen_)();
+    string key = (*keygen_)(range.first, range.second);
 
     if (absl::Uniform(bit_gen, 0U, ratio_get_ + ratio_set_) < ratio_set_) {
-      FillSet(key);
       might_hit_ = false;
-    } else {
-      FillGet(key);
-      might_hit_ = true;
+      return FillSet(key);
     }
-  } else {
-    size_t last_pos = 0;
-    for (size_t pos : key_indices_) {
-      key = (*keygen_)();
-      absl::StrAppend(&cmd_, command_.substr(last_pos, pos - last_pos), key);
-      last_pos = pos + kKeyPlaceholder.size();
-    }
-    absl::StrAppend(&cmd_, command_.substr(last_pos), "\r\n");
+    might_hit_ = true;
+    return FillGet(key);
   }
-  return cmd_;
+
+  // For custom commands, we select a random slot and then use it for key generation.
+  uint16_t slot_id = 0;
+
+  if (keygen_->IsClusterEnabled()) {
+    slot_id = absl::Uniform(absl::IntervalClosedClosed, bit_gen, range.first, range.second);
+  }
+
+  string str, gen_cmd;
+  absl::StrAppend(&gen_cmd, "*", cmd_parts_.size(), "\r\n");
+  for (const CmdPart& part : cmd_parts_) {
+    if (auto p = get_if<string_view>(&part)) {
+      absl::StrAppend(&gen_cmd, "$", p->size(), "\r\n", *p, "\r\n");
+    } else {
+      switch (get<TemplateType>(part)) {
+        case KEY:
+          str = (*keygen_)(slot_id, slot_id);
+          break;
+        case VALUE:
+          str = GetRandomHex(value_.size(), is_ascii_);
+          break;
+        case SCORE: {
+          uniform_real_distribution<double> uniform(0, 1);
+          str = absl::StrCat(uniform(bit_gen));
+        }
+      }
+      absl::StrAppend(&gen_cmd, "$", str.size(), "\r\n", str, "\r\n");
+    }
+  }
+
+  return gen_cmd;
 }
 
-void CommandGenerator::FillSet(string_view key) {
+string CommandGenerator::FillSet(string_view key) {
+  string res;
+
   if (protocol == RESP) {
-    absl::StrAppend(&cmd_, "set ", key, " ", value_, "\r\n");
+    absl::StrAppend(&res, "*3\r\n$3\r\nset\r\n$", key.size(), "\r\n", key);
+    absl::StrAppend(&res, "\r\n$", value_.size(), "\r\n", value_, "\r\n");
   } else {
     DCHECK_EQ(protocol, MC_TEXT);
-    absl::StrAppend(&cmd_, "set ", key, " 0 0 ", value_.size(), "\r\n");
-    absl::StrAppend(&cmd_, value_, "\r\n");
+    absl::StrAppend(&res, "set ", key, " 0 0 ", value_.size());
+    if (GetFlag(FLAGS_noreply)) {
+      absl::StrAppend(&res, " noreply");
+      noreply_ = true;
+    }
+
+    absl::StrAppend(&res, "\r\n", value_, "\r\n");
   }
+  return res;
 }
 
-void CommandGenerator::FillGet(string_view key) {
-  absl::StrAppend(&cmd_, "get ", key, "\r\n");
+string CommandGenerator::FillGet(string_view key) {
+  return absl::StrCat("get ", key, "\r\n");
 }
 
 struct ClientStats {
@@ -182,19 +382,24 @@ struct ClientStats {
 // Per connection driver.
 class Driver {
  public:
-  explicit Driver(uint32_t num_reqs, ClientStats* stats, ProactorBase* p)
-      : num_reqs_(num_reqs), stats_(*stats) {
+  explicit Driver(uint32_t num_reqs, uint32_t time_limit, ClientStats* stats, ProactorBase* p,
+                  ShardSlots* ss)
+      : num_reqs_(num_reqs), time_limit_(time_limit), shard_slots_(*ss), stats_(*stats) {
     socket_.reset(p->CreateSocket());
+    if (time_limit_ > 0)
+      num_reqs_ = UINT32_MAX;
   }
 
   Driver(const Driver&) = delete;
-  Driver(Driver&&) = default;
-  Driver& operator=(Driver&&) = default;
+  Driver(Driver&&) = delete;
+  Driver& operator=(Driver&&) = delete;
 
   void Connect(unsigned index, const tcp::endpoint& ep);
   void Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen);
 
   float done() const {
+    if (time_limit_ > 0)
+      return double(absl::GetCurrentTimeNanos() - start_ns_) / (time_limit_ * 1e9);
     return double(received_) / num_reqs_;
   }
 
@@ -213,31 +418,30 @@ class Driver {
     bool might_hit;
   };
 
-  uint32_t num_reqs_, received_ = 0;
+  uint32_t num_reqs_, time_limit_, received_ = 0;
+  int64_t start_ns_ = 0;
 
+  tcp::endpoint ep_;
+  ShardSlots& shard_slots_;
   ClientStats& stats_;
   unique_ptr<FiberSocketBase> socket_;
   fb2::Fiber receive_fb_;
   queue<Req> reqs_;
   fb2::CondVarAny cnd_;
 
-  facade::RedisParser parser_{1 << 16, false};
+  facade::RedisParser parser_{RedisParser::Mode::CLIENT, 1 << 16};
   io::IoBuf io_buf_{512};
 };
 
 // Per thread client.
 class TLocalClient {
  public:
-  explicit TLocalClient(ProactorBase* p) : p_(p) {
-    drivers_.resize(GetFlag(FLAGS_c));
-    for (auto& driver : drivers_) {
-      driver.reset(new Driver{GetFlag(FLAGS_n), &stats, p_});
-    }
+  explicit TLocalClient(ProactorBase* p, ShardSlots* ss) : p_(p), shard_slots_(ss) {
   }
 
   TLocalClient(const TLocalClient&) = delete;
 
-  void Connect(tcp::endpoint ep);
+  void Connect(tcp::endpoint ep, const vector<tcp::endpoint>& shard_endpoints);
   void Start(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns);
   void Join();
 
@@ -273,12 +477,12 @@ class TLocalClient {
 
  private:
   ProactorBase* p_;
+  ShardSlots* shard_slots_;
   vector<unique_ptr<Driver>> drivers_;
   optional<KeyGenerator> key_gen_;
   optional<CommandGenerator> cmd_gen_;
 
   vector<fb2::Fiber> driver_fbs_;
-
   uint64_t cur_cycle_ns_;
   uint64_t target_cycle_;
   int64_t start_time_;
@@ -305,32 +509,75 @@ KeyGenerator::KeyGenerator(uint32_t min, uint32_t max)
   }
 }
 
-string KeyGenerator::operator()() {
-  uint64_t key_suffix{0};
-  switch (dist_type) {
-    case UNIFORM:
-      key_suffix = absl::Uniform(bit_gen, min_, max_);
-      break;
-    case NORMAL: {
-      double val = absl::Gaussian(bit_gen, 0.5, stddev_);
-      key_suffix = min_ + uint64_t(val * range_);
-      break;
+string KeyGenerator::operator()(uint16_t from, uint16_t to) const {
+  uint64_t key_suffix = 0;
+  uint16_t slot_id = from;
+  bool skip_tags = IsClusterEnabled() && GetFlag(FLAGS_cluster_skip_tags);
+  string res;
+
+  do {
+    switch (dist_type) {
+      case UNIFORM:
+        key_suffix = absl::Uniform(bit_gen, min_, max_);
+        break;
+      case NORMAL: {
+        double val = absl::Gaussian(bit_gen, 0.5, stddev_);
+        key_suffix = min_ + uint64_t(val * range_);
+        break;
+      }
+      case ZIPFIAN:
+        key_suffix = zipf_->Next(bit_gen);
+        break;
+      case SEQUENTIAL:
+        key_suffix = seq_cursor_++;
+        if (seq_cursor_ > max_)
+          seq_cursor_ = min_;
+        break;
     }
-    case ZIPFIAN:
-      key_suffix = zipf_->Next(bit_gen);
+
+    if (!skip_tags)
       break;
-    case SEQUENTIAL:
-      key_suffix = seq_cursor_++;
-      if (seq_cursor_ > max_)
-        seq_cursor_ = min_;
-      break;
+
+    // If we skip tags, we must make sure that the key fits the slot range.
+    res = absl::StrCat(prefix_, key_suffix);
+    slot_id = SlotId(res);
+  } while (slot_id < from || slot_id > to);
+
+  // If we are in cluster mode we add the hash slot to the key to make sure it lands in the correct
+  // range.
+  if (IsClusterEnabled()) {
+    if (!skip_tags) {
+      if (to > from)
+        slot_id = absl::Uniform(absl::IntervalClosedClosed, bit_gen, from, to);
+      absl::StrAppend(&res, prefix_, "{", hash_slots_[slot_id], "}", key_suffix);
+    }
+  } else {
+    absl::StrAppend(&res, prefix_, key_suffix);
   }
 
-  return StrCat(prefix_, key_suffix);
+  return res;
+}
+
+void KeyGenerator::EnableClusterMode() {
+  hash_slots_.resize(kNumSlots);
+  uint32_t i = 0;
+  uint32_t num_slots_filled = 0;
+
+  // Precompute the hash slots for each of the slot ids so given the slot id
+  // we could generate a key that belongs to that slot.
+  while (num_slots_filled < kNumSlots) {
+    string key = absl::StrCat(i);
+    uint16_t id = SlotId(key);
+    if (hash_slots_[id].empty()) {
+      hash_slots_[id] = std::move(key);
+      num_slots_filled++;
+    }
+    ++i;
+  }
 }
 
 void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
-  VLOG(2) << "Connecting " << index;
+  VLOG(2) << "Connecting " << index << " to " << ep;
   error_code ec = socket_->Connect(ep);
   CHECK(!ec) << "Could not connect to " << ep << " " << ec;
   if (GetFlag(FLAGS_tcp_nodelay)) {
@@ -338,32 +585,41 @@ void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
     CHECK_EQ(0, setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)));
   }
 
-  // TCP Connect does not ensure that the connection was indeed accepted by the server.
-  // if server backlog is too short the connection will get stuck in the accept queue.
-  // Therefore, we send a ping command to ensure that every connection got connected.
-  ec = socket_->Write(io::Buffer("ping\r\n"));
-  CHECK(!ec);
+  if (absl::GetFlag(FLAGS_greet)) {
+    // TCP Connect does not ensure that the connection was indeed accepted by the server.
+    // if server backlog is too short the connection will get stuck in the accept queue.
+    // Therefore, we send a ping command to ensure that every connection got connected.
+    ec = socket_->Write(io::Buffer("ping\r\n"));
+    CHECK(!ec);
 
-  uint8_t buf[128];
-  auto res_sz = socket_->Recv(io::MutableBytes(buf));
-  CHECK(res_sz) << res_sz.error().message();
-  string_view resp = io::View(io::Bytes(buf, *res_sz));
-  CHECK(absl::EndsWith(resp, "\r\n")) << resp;
-
+    uint8_t buf[128];
+    auto res_sz = socket_->Recv(io::MutableBytes(buf));
+    CHECK(res_sz) << res_sz.error().message();
+    string_view resp = io::View(io::Bytes(buf, *res_sz));
+    CHECK(absl::EndsWith(resp, "\r\n")) << resp;
+  }
+  ep_ = ep;
   receive_fb_ = MakeFiber(fb2::Launch::dispatch, [this] { ReceiveFb(); });
 }
 
 void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
-  const int64_t start = absl::GetCurrentTimeNanos();
+  start_ns_ = absl::GetCurrentTimeNanos();
   unsigned pipeline = GetFlag(FLAGS_pipeline);
 
   stats_.num_clients++;
+  int64_t time_limit_ns =
+      time_limit_ > 0 ? int64_t(time_limit_) * 1'000'000'000 + start_ns_ : INT64_MAX;
+
+  SlotRange slot_range{0, kNumSlots - 1};
 
   for (unsigned i = 0; i < num_reqs_; ++i) {
     int64_t now = absl::GetCurrentTimeNanos();
 
+    if (now > time_limit_ns) {
+      break;
+    }
     if (cycle_ns) {
-      int64_t target_ts = start + i * (*cycle_ns);
+      int64_t target_ts = start_ns_ + i * (*cycle_ns);
       int64_t sleep_ns = target_ts - now;
       if (reqs_.size() > 10 && sleep_ns <= 0) {
         sleep_ns = 10'000;
@@ -385,7 +641,15 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
       fb2::NoOpLock lk;
       cnd_.wait(lk, [this, pipeline] { return reqs_.size() < pipeline; });
     }
-    string cmd = cmd_gen->Next();
+
+    // TODO: this skews the distribution if slot ranges are uneven.
+    // Ideally we would like to pick randomly a single slot from all the ranges we have
+    // and pass it to cmd_gen->Next below.
+    if (!shard_slots_.Empty()) {
+      slot_range = shard_slots_.NextSlotRange(ep_, i);
+    }
+
+    string cmd = cmd_gen->Next(slot_range);
 
     Req req;
     req.start = absl::GetCurrentTimeNanos();
@@ -400,11 +664,14 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
       break;
     }
     CHECK(!ec) << ec.message();
+    if (cmd_gen->noreply()) {
+      PopRequest();
+    }
   }
 
   int64_t finish = absl::GetCurrentTimeNanos();
   VLOG(1) << "Done queuing " << num_reqs_ << " requests, which took "
-          << StrFormat("%.1fs", double(finish - start) / 1000000000)
+          << StrFormat("%.1fs", double(finish - start_ns_) / 1000'000'000)
           << ". Waiting for server processing";
 
   // TODO: to change to a condvar or something.
@@ -412,7 +679,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
     ThisFiber::SleepFor(1ms);
   }
 
-  socket_->Shutdown(SHUT_RDWR);  // breaks the receive fiber.
+  std::ignore = socket_->Shutdown(SHUT_RDWR);  // breaks the receive fiber.
   receive_fb_.Join();
   std::ignore = socket_->Close();
   stats_.num_clients--;
@@ -446,7 +713,7 @@ void Driver::ReceiveFb() {
   while (true) {
     io_buf_.EnsureCapacity(256);
     auto buf = io_buf_.AppendBuffer();
-    VLOG(2) << "Socket read: " << reqs_.size();
+    VLOG(3) << "Socket read: " << reqs_.size();
 
     ::io::Result<size_t> recv_sz = socket_->Recv(buf);
     if (!recv_sz && FiberSocketBase::IsConnClosed(recv_sz.error())) {
@@ -474,13 +741,36 @@ void Driver::ParseRESP() {
   uint32_t consumed = 0;
   RedisParser::Result result = RedisParser::OK;
   RespVec parse_args;
+  constexpr string_view kMovedErrorKey = "MOVED"sv;
 
   do {
     result = parser_.Parse(io_buf_.InputBuffer(), &consumed, &parse_args);
     if (result == RedisParser::OK && !parse_args.empty()) {
-      if (parse_args[0].type == facade::RespExpr::ERROR) {
+      if (parse_args[0].type == RespExpr::ERROR) {
+        string_view error = parse_args[0].GetView();
+        VLOG(2) << "Error " << error;
+        if (absl::StartsWith(error, kMovedErrorKey)) {
+          error = error.substr(kMovedErrorKey.length());
+          vector<string_view> parts =
+              absl::StrSplit(absl::StripTrailingAsciiWhitespace(error), ' ', absl::SkipEmpty());
+
+          CHECK_EQ(parts.size(), 2u);
+          uint32_t slot_id;
+          CHECK(absl::SimpleAtoi(parts[0], &slot_id));
+
+          vector<string_view> addr_parts = absl::StrSplit(parts[1], ':');
+          CHECK_EQ(2u, addr_parts.size());
+
+          auto host = ::boost::asio::ip::make_address(addr_parts[0]);
+
+          uint32_t port;
+          CHECK(absl::SimpleAtoi(addr_parts[1], &port));
+          CHECK_LT(port, 65536u);
+
+          shard_slots_.MoveSlot(ep_, tcp::endpoint(host, port), slot_id);
+        }
         ++stats_.num_errors;
-      } else if (reqs_.front().might_hit && parse_args[0].type != facade::RespExpr::NIL) {
+      } else if (reqs_.front().might_hit && parse_args[0].type != RespExpr::NIL) {
         ++stats_.hit_count;
       }
       parse_args.clear();
@@ -528,14 +818,31 @@ void Driver::ParseMC() {
   }
 }
 
-void TLocalClient::Connect(tcp::endpoint ep) {
+void TLocalClient::Connect(tcp::endpoint ep, const vector<tcp::endpoint>& endpoints) {
   VLOG(2) << "Connecting client...";
+
+  unsigned conn_per_shard = GetFlag(FLAGS_c);
+  if (shard_slots_->Empty()) {
+    drivers_.resize(conn_per_shard);
+  } else {
+    drivers_.resize(shard_slots_->Size() * conn_per_shard);
+  }
+
+  for (auto& driver : drivers_) {
+    driver.reset(new Driver{GetFlag(FLAGS_n), GetFlag(FLAGS_test_time), &stats, p_, shard_slots_});
+  }
   vector<fb2::Fiber> fbs(drivers_.size());
 
   for (size_t i = 0; i < fbs.size(); ++i) {
-    fbs[i] = MakeFiber([&, i] {
+    vector<SlotRange> slots;
+    tcp::endpoint shard_ep = ep;
+    if (!shard_slots_->Empty()) {
+      size_t shard = i / conn_per_shard;
+      shard_ep = endpoints[shard];
+    }
+    fbs[i] = MakeFiber([&, shard_ep, i] {
       ThisFiber::SetName(StrCat("connect/", i));
-      drivers_[i]->Connect(i, ep);
+      drivers_[i]->Connect(i, shard_ep);
     });
   }
 
@@ -548,7 +855,9 @@ void TLocalClient::Start(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns) 
   cmd_gen_.emplace(&key_gen_.value());
 
   driver_fbs_.resize(drivers_.size());
-
+  if (!shard_slots_->Empty()) {
+    key_gen_->EnableClusterMode();
+  }
   cur_cycle_ns_ = cycle_ns;
   target_cycle_ = cycle_ns;
   start_time_ = absl::GetCurrentTimeNanos();
@@ -588,7 +897,7 @@ void TLocalClient::AdjustCycle() {
 
 thread_local unique_ptr<TLocalClient> client;
 
-void WatchFiber(atomic_bool* finish_signal, ProactorPool* pp) {
+void WatchFiber(size_t num_shards, atomic_bool* finish_signal, ProactorPool* pp) {
   fb2::Mutex mutex;
 
   int64_t start_time = absl::GetCurrentTimeNanos();
@@ -596,8 +905,9 @@ void WatchFiber(atomic_bool* finish_signal, ProactorPool* pp) {
 
   int64_t last_print = start_time;
   uint64_t num_last_resp_cnt = 0;
-
-  uint64_t resp_goal = GetFlag(FLAGS_c) * pp->size() * GetFlag(FLAGS_n);
+  num_shards = max<size_t>(num_shards, 1u);
+  uint64_t resp_goal = GetFlag(FLAGS_c) * pp->size() * GetFlag(FLAGS_n) * num_shards;
+  uint32_t time_limit = GetFlag(FLAGS_test_time);
 
   while (*finish_signal == false) {
     // we sleep with resolution of 1s but print with lower frequency to be more responsive
@@ -628,7 +938,8 @@ void WatchFiber(atomic_bool* finish_signal, ProactorPool* pp) {
     uint64_t total_ms = (now - start_time) / 1'000'000;
     uint64_t period_ms = (now - last_print) / 1'000'000;
     uint64_t period_resp_cnt = stats.num_responses - num_last_resp_cnt;
-    double done_perc = double(stats.num_responses) * 100 / resp_goal;
+    double done_perc = time_limit > 0 ? double(total_ms) / (10 * time_limit)
+                                      : double(stats.num_responses) * 100 / resp_goal;
     double hitrate = stats.hit_opportunities > 0
                          ? 100 * double(stats.hit_count) / double(stats.hit_opportunities)
                          : 0;
@@ -648,12 +959,94 @@ void WatchFiber(atomic_bool* finish_signal, ProactorPool* pp) {
   }
 }
 
+ClusterShards FetchClusterInfo(const tcp::endpoint& ep, ProactorBase* proactor) {
+  unique_ptr<FiberSocketBase> socket(proactor->CreateSocket());
+  error_code ec = socket->Connect(ep);
+  CHECK(!ec) << "Could not connect to " << ep << " " << ec;
+  ec = socket->Write(io::Buffer("cluster nodes\r\n"));
+  CHECK(!ec);
+  facade::RedisParser parser{RedisParser::CLIENT, 1024};
+  uint8_t buf[1024];
+  RespVec resp_vec;
+  while (true) {
+    io::Result<size_t> res = socket->Recv(buf);
+    CHECK(res) << res.error().message();
+    RespExpr::Buffer bytes(buf, *res);
+    uint32_t consumed = 0;
+    facade::RedisParser::Result result = parser.Parse(bytes, &consumed, &resp_vec);
+    if (result == facade::RedisParser::OK) {
+      break;
+    }
+    CHECK_EQ(result, facade::RedisParser::INPUT_PENDING);
+  }
+  CHECK_EQ(1u, resp_vec.size());
+  std::ignore = socket->Close();
+  if (resp_vec.front().type == RespExpr::ERROR) {
+    LOG(INFO) << "Cluster command failed " << resp_vec.front().GetString();
+    return {};
+  }
+  string cluster_spec = resp_vec.front().GetString();
+  LOG(INFO) << "Cluster spec: " << cluster_spec;
+  vector<string_view> lines = absl::StrSplit(cluster_spec, '\n', absl::SkipEmpty());
+  ClusterShards res;
+  for (string_view line : lines) {
+    vector<string_view> parts = absl::StrSplit(line, ' ');
+    // <id> <ip:port@cport[,hostname]> <flags> <master> <ping-sent> <pong-recv>
+    // <config-epoch> <link-state> <slot> <slot> ... <slot>
+    if (parts.size() < 9) {
+      LOG(WARNING) << "Skipping line: " << line;
+      continue;
+    }
+    ShardInfo shard;
+    vector<string_view> addr_parts = absl::StrSplit(parts[1], ':');
+    CHECK_EQ(2u, addr_parts.size());
+    string host(addr_parts[0]);
+    char ip_addr[INET6_ADDRSTRLEN];
+    std::error_code ec = fb2::DnsResolve(host, ip_addr);
+    CHECK(!ec) << "Could not resolve " << host << " " << ec;
+    auto address = ::boost::asio::ip::make_address(ip_addr);
+
+    uint32_t val;
+    vector<string_view> port_parts = absl::StrSplit(addr_parts[1], '@');
+    CHECK_EQ(2u, port_parts.size());
+    CHECK(absl::SimpleAtoi(port_parts[0], &val));
+    CHECK_LT(val, 65536u);
+
+    shard.endpoint = tcp::endpoint(address, val);
+
+    string_view flags = parts[2];
+    absl::flat_hash_set<string_view> flags_set(absl::StrSplit(flags, ','));
+    if (!flags_set.contains("master")) {
+      LOG(INFO) << "Skipping non-master node " << shard.endpoint << " " << flags;
+      continue;
+    }
+
+    for (size_t i = 8; i < parts.size(); ++i) {
+      vector<string_view> slots = absl::StrSplit(parts[i], '-');
+      if (!absl::SimpleAtoi(slots[0], &val) || val >= kNumSlots) {
+        LOG(ERROR) << "Invalid slot definition " << parts[i];
+        continue;
+      }
+      SlotRange slot_range{uint16_t(val), uint16_t(val)};
+      if (slots.size() > 1) {
+        CHECK(absl::SimpleAtoi(slots[1], &val));
+        slot_range.second = val;
+      }
+      shard.slots.push_back(slot_range);
+    }
+    res.push_back(shard);
+  }
+
+  return res;
+}
+
 int main(int argc, char* argv[]) {
   MainInitGuard guard(&argc, &argv);
 
   unique_ptr<ProactorPool> pp;
   pp.reset(fb2::Pool::IOUring(256));
   pp->Run();
+  fb2::InitDnsResolver(2000);
 
   string proto_str = GetFlag(FLAGS_P);
   if (proto_str == "memcache_text") {
@@ -687,14 +1080,31 @@ int main(int argc, char* argv[]) {
   auto address = ::boost::asio::ip::make_address(ip_addr);
   tcp::endpoint ep{address, GetFlag(FLAGS_p)};
 
-  LOG(INFO) << "Connecting threads";
+  ClusterShards shards;
+  if (protocol == RESP) {
+    shards = proactor->Await([&] { return FetchClusterInfo(ep, proactor); });
+  }
+  LOG(INFO) << "Connecting threads to "
+            << (shards.empty() ? string("single node ")
+                               : absl::StrCat(shards.size(), " shard cluster"));
+
+  if (!shards.empty() && !GetFlag(FLAGS_command).empty() && GetFlag(FLAGS_cluster_skip_tags)) {
+    // For custom commands we may need to use the same hashtag for multiple keys.
+    LOG(WARNING) << "Enforcing hash tags for custom commands";
+    absl::SetFlag(&FLAGS_cluster_skip_tags, false);
+  }
+
+  ShardSlots shard_slots;
+  shard_slots.SetClusterSlotRanges(shards);
+  std::vector<tcp::endpoint> shard_endpoints = shard_slots.Endpoints();
+
   pp->AwaitFiberOnAll([&](unsigned index, auto* p) {
     base::SplitMix64 seed_mix(GetFlag(FLAGS_seed) + index * 0x6a45554a264d72bULL);
     auto seed = seed_mix();
     VLOG(1) << "Seeding bitgen with seed " << seed;
     bit_gen.seed(seed);
-    client = make_unique<TLocalClient>(p);
-    client->Connect(ep);
+    client = make_unique<TLocalClient>(p, &shard_slots);
+    client->Connect(ep, shard_endpoints);
   });
 
   const uint32_t key_minimum = GetFlag(FLAGS_key_minimum);
@@ -703,10 +1113,11 @@ int main(int argc, char* argv[]) {
 
   uint32_t thread_key_step = 0;
   const uint32_t qps = GetFlag(FLAGS_qps);
-  const int64_t interval = qps ? 1000000000LL / qps : 0;
+  const int64_t interval = qps ? 1'000'000'000LL / qps : 0;
   uint64_t num_reqs = GetFlag(FLAGS_n);
   uint64_t total_conn_num = GetFlag(FLAGS_c) * pp->size();
   uint64_t total_requests = num_reqs * total_conn_num;
+  uint32_t time_limit = GetFlag(FLAGS_test_time);
 
   if (dist_type == SEQUENTIAL) {
     thread_key_step = std::max(1UL, (key_maximum - key_minimum + 1) / pp->size());
@@ -717,9 +1128,10 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  CONSOLE_INFO << "Running " << pp->size() << " threads, sending " << num_reqs
-               << " requests per each connection, or " << total_requests << " requests overall";
-
+  if (!time_limit) {
+    CONSOLE_INFO << "Running " << pp->size() << " threads, sending " << num_reqs
+                 << " requests per each connection, or " << total_requests << " requests overall";
+  }
   if (interval) {
     CONSOLE_INFO << "At a rate of " << GetFlag(FLAGS_qps)
                  << " rps per connection, i.e. request every " << interval / 1000 << "us";
@@ -736,7 +1148,8 @@ int main(int argc, char* argv[]) {
     client->Start(key_minimum + index * thread_key_step, key_max, interval);
   });
 
-  auto watch_fb = pp->GetNextProactor()->LaunchFiber([&] { WatchFiber(&finish, pp.get()); });
+  auto watch_fb =
+      pp->GetNextProactor()->LaunchFiber([&] { WatchFiber(shards.size(), &finish, pp.get()); });
   const absl::Time start_time = absl::Now();
 
   // The actual run.
@@ -762,7 +1175,8 @@ int main(int argc, char* argv[]) {
 
   CONSOLE_INFO << "\nTotal time: " << duration
                << ". Overall number of requests: " << summary.num_responses
-               << ", QPS: " << (dur_sec ? StrCat(summary.num_responses / dur_sec) : "nan");
+               << ", QPS: " << (dur_sec ? StrCat(summary.num_responses / dur_sec) : "nan")
+               << ", P99 lat: " << summary.hist.Percentile(99) << "us";
 
   if (summary.num_errors) {
     CONSOLE_INFO << "Got " << summary.num_errors << " error responses!";

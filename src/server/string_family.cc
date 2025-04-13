@@ -110,8 +110,8 @@ class SetCmd {
   OpStatus SetExisting(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
                        std::string_view key, std::string_view value);
 
-  void AddNew(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
-              std::string_view key, std::string_view value);
+  void AddNew(const SetParams& params, DbSlice::Iterator it, std::string_view key,
+              std::string_view value);
 
   // Called at the end of AddNew of SetExisting
   void PostEdit(const SetParams& params, std::string_view key, std::string_view value,
@@ -846,7 +846,7 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
 
     return SetExisting(params, op_res->it, op_res->exp_it, key, value);
   } else {
-    AddNew(params, op_res->it, op_res->exp_it, key, value);
+    AddNew(params, op_res->it, key, value);
     return OpStatus::OK;
   }
 }
@@ -880,6 +880,8 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
     it->first.SetSticky(true);
   }
 
+  bool has_expire = prime_value.HasExpire();
+
   // Update flags
   prime_value.SetFlag(params.memcache_flags != 0);
   db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
@@ -892,12 +894,14 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
   // overwrite existing entry.
   prime_value.SetString(value);
 
+  DCHECK_EQ(has_expire, prime_value.HasExpire());
+
   PostEdit(params, key, value, &prime_value);
   return OpStatus::OK;
 }
 
-void SetCmd::AddNew(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
-                    std::string_view key, std::string_view value) {
+void SetCmd::AddNew(const SetParams& params, DbSlice::Iterator it, std::string_view key,
+                    std::string_view value) {
   auto& db_slice = op_args_.GetDbSlice();
 
   // Adding new value.
@@ -1014,7 +1018,7 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
       if (rel_ms < 0) {
         cmnd_cntx.tx->ScheduleSingleHop([](const Transaction* tx, EngineShard* es) {
           ShardArgs args = tx->GetShardArgs(es->shard_id());
-          GenericFamily::OpDel(tx->GetOpArgs(es), args);
+          GenericFamily::OpDel(tx->GetOpArgs(es), args, false);
           return OpStatus::OK;
         });
         return builder->SendStored();
@@ -1453,7 +1457,7 @@ void StringFamily::GetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
     return cmnd_cntx.rb->SendError(err->MakeReply());
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &start = start, &end = end](Transaction* t, EngineShard* shard) {
     return OpGetRange(t->GetOpArgs(shard), key, start, end);
   };
 
@@ -1477,7 +1481,7 @@ void StringFamily::SetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
     return builder->SendError("string exceeds maximum allowed size");
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &start = start, &value = value](Transaction* t, EngineShard* shard) {
     return OpSetRange(t->GetOpArgs(shard), key, start, value);
   };
   auto res = cmnd_cntx.tx->ScheduleSingleHopT(cb);

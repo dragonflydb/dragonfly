@@ -55,6 +55,15 @@ size_t QlMAllocSize(quicklist* ql, bool slow) {
   return node_size + ql->count * 16;  // we account for each member 16 bytes.
 }
 
+size_t UpdateSize(size_t size, int64_t update) {
+  int64_t result = static_cast<int64_t>(size) + update;
+  if (result < 0) {
+    DCHECK(false) << "Can't decrease " << size << " from " << -update;
+    LOG_EVERY_N(ERROR, 30) << "Can't decrease " << size << " from " << -update;
+  }
+  return result;
+}
+
 inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
   switch (encoding) {
     case kEncodingStrMap2: {
@@ -276,6 +285,15 @@ pair<void*, bool> DefragSortedMap(detail::SortedMap* sm, float ratio) {
   return {sm, reallocated};
 }
 
+pair<void*, bool> DefragStrSet(StringSet* ss, float ratio) {
+  bool realloced = false;
+
+  for (auto it = ss->begin(); it != ss->end(); ++it)
+    realloced |= it.ReallocIfNeeded(ratio);
+
+  return {ss, realloced};
+}
+
 // Iterates over allocations of internal hash data structures and re-allocates
 // them if their pages are underutilized.
 // Returns pointer to new object ptr and whether any re-allocations happened.
@@ -304,8 +322,7 @@ pair<void*, bool> DefragSet(unsigned encoding, void* ptr, float ratio) {
     }
 
     case kEncodingStrMap2: {
-      // Still not implemented
-      return {ptr, false};
+      return DefragStrSet((StringSet*)ptr, ratio);
     }
 
     default:
@@ -548,6 +565,20 @@ void RobjWrapper::SetString(string_view s, MemoryResource* mr) {
   }
 }
 
+void RobjWrapper::ReserveString(size_t size, MemoryResource* mr) {
+  CHECK_EQ(inner_obj_, nullptr);
+  type_ = OBJ_STRING;
+  encoding_ = OBJ_ENCODING_RAW;
+  MakeInnerRoom(0, size, mr);
+}
+
+void RobjWrapper::AppendString(string_view s, MemoryResource* mr) {
+  size_t cur_cap = InnerObjMallocUsed();
+  CHECK(cur_cap >= sz_ + s.size()) << cur_cap << " " << sz_ << " " << s.size();
+  memcpy(reinterpret_cast<uint8_t*>(inner_obj_) + sz_, s.data(), s.size());
+  sz_ += s.size();
+}
+
 void RobjWrapper::SetSize(uint64_t size) {
   sz_ = size;
 }
@@ -574,14 +605,8 @@ bool RobjWrapper::DefragIfNeeded(float ratio) {
   return false;
 }
 
-int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, double* newscore) {
-  // copied from zsetAdd for listpack only.
-  /* Turn options into simple to check vars. */
-  bool incr = (in_flags & ZADD_IN_INCR) != 0;
-  bool nx = (in_flags & ZADD_IN_NX) != 0;
-  bool xx = (in_flags & ZADD_IN_XX) != 0;
-  bool gt = (in_flags & ZADD_IN_GT) != 0;
-  bool lt = (in_flags & ZADD_IN_LT) != 0;
+int RobjWrapper::ZsetAdd(double score, std::string_view ele, int in_flags, int* out_flags,
+                         double* newscore) {
   *out_flags = 0; /* We'll return our response flags. */
   double curscore;
 
@@ -593,10 +618,17 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
 
   /* Update the sorted set according to its encoding. */
   if (encoding_ == OBJ_ENCODING_LISTPACK) {
+    /* Turn options into simple to check vars. */
+    bool incr = (in_flags & ZADD_IN_INCR) != 0;
+    bool nx = (in_flags & ZADD_IN_NX) != 0;
+    bool xx = (in_flags & ZADD_IN_XX) != 0;
+    bool gt = (in_flags & ZADD_IN_GT) != 0;
+    bool lt = (in_flags & ZADD_IN_LT) != 0;
+
     unsigned char* eptr;
     uint8_t* lp = (uint8_t*)inner_obj_;
 
-    if ((eptr = zzlFind(lp, ele, &curscore)) != NULL) {
+    if ((eptr = ZzlFind(lp, ele, &curscore)) != NULL) {
       /* NX? Return, same element already exists. */
       if (nx) {
         *out_flags |= ZADD_OUT_NOP;
@@ -636,7 +668,7 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
       /* check if the element is too large or the list
        * becomes too long *before* executing zzlInsert. */
       if (zl_len >= server.zset_max_listpack_entries ||
-          sdslen(ele) > server.zset_max_listpack_value) {
+          ele.size() > server.zset_max_listpack_value) {
         inner_obj_ = SortedMap::FromListPack(tl.local_mr, lp);
         lpFree(lp);
         encoding_ = OBJ_ENCODING_SKIPLIST;
@@ -656,7 +688,7 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
 
   CHECK_EQ(encoding_, OBJ_ENCODING_SKIPLIST);
   SortedMap* ss = (SortedMap*)inner_obj_;
-  return ss->Add(score, ele, in_flags, out_flags, newscore);
+  return ss->AddElem(score, ele, in_flags, out_flags, newscore);
 }
 
 void RobjWrapper::ReallocateString(MemoryResource* mr) {
@@ -852,6 +884,8 @@ void CompactObj::InitRobj(CompactObjType type, unsigned encoding, void* obj) {
 }
 
 void CompactObj::SetInt(int64_t val) {
+  DCHECK(!IsExternal());
+
   if (INT_TAG != taglen_) {
     SetMeta(INT_TAG, mask_ & ~kEncMask);
   }
@@ -902,10 +936,7 @@ void CompactObj::SetJson(JsonType&& j) {
 void CompactObj::SetJsonSize(int64_t size) {
   if (taglen_ == JSON_TAG && JsonEnconding() == kEncodingJsonCons) {
     // JSON.SET or if mem hasn't changed from a JSON op then we just update.
-    if (size < 0) {
-      DCHECK(static_cast<int64_t>(u_.json_obj.cons.bytes_used) >= size);
-    }
-    u_.json_obj.cons.bytes_used += size;
+    u_.json_obj.cons.bytes_used = UpdateSize(u_.json_obj.cons.bytes_used, size);
   }
 }
 
@@ -966,6 +997,16 @@ void CompactObj::SetString(std::string_view str) {
   }
 
   EncodeString(str);
+}
+
+void CompactObj::ReserveString(size_t size) {
+  uint8_t mask = mask_ & ~kEncMask;
+  SetMeta(ROBJ_TAG, mask);
+  u_.r_obj.ReserveString(size, tl.local_mr);
+}
+
+void CompactObj::AppendString(std::string_view str) {
+  u_.r_obj.AppendString(str, tl.local_mr);
 }
 
 string_view CompactObj::GetSlice(string* scratch) const {

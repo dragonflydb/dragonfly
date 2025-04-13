@@ -15,60 +15,64 @@ async def test_acl_setuser(async_client):
     await async_client.execute_command("ACL SETUSER kostas")
     result = await async_client.execute_command("ACL LIST")
     assert 2 == len(result)
-    assert "user kostas off resetchannels -@all" in result
+    assert "user kostas off resetchannels -@all $all" in result
 
     await async_client.execute_command("ACL SETUSER kostas ON")
     result = await async_client.execute_command("ACL LIST")
-    assert "user kostas on resetchannels -@all" in result
+    assert "user kostas on resetchannels -@all $all" in result
 
     await async_client.execute_command("ACL SETUSER kostas +@list +@string +@admin")
     result = await async_client.execute_command("ACL LIST")
     # TODO consider printing to lowercase
-    assert "user kostas on resetchannels -@all +@list +@string +@admin" in result
+    assert "user kostas on resetchannels -@all +@list +@string +@admin $all" in result
 
     await async_client.execute_command("ACL SETUSER kostas -@list -@admin")
     result = await async_client.execute_command("ACL LIST")
-    assert "user kostas on resetchannels -@all +@string -@list -@admin" in result
+    assert "user kostas on resetchannels -@all +@string -@list -@admin $all" in result
 
     # mix and match
     await async_client.execute_command("ACL SETUSER kostas +@list -@string")
     result = await async_client.execute_command("ACL LIST")
-    assert "user kostas on resetchannels -@all -@admin +@list -@string" in result
+    assert "user kostas on resetchannels -@all -@admin +@list -@string $all" in result
 
     # mix and match interleaved
     await async_client.execute_command("ACL SETUSER kostas +@set -@set +@set")
     result = await async_client.execute_command("ACL LIST")
-    assert "user kostas on resetchannels -@all -@admin +@list -@string +@set" in result
+    assert "user kostas on resetchannels -@all -@admin +@list -@string +@set $all" in result
 
     await async_client.execute_command("ACL SETUSER kostas +@all")
     result = await async_client.execute_command("ACL LIST")
-    assert "user kostas on resetchannels -@admin +@list -@string +@set +@all" in result
+    assert "user kostas on resetchannels -@admin +@list -@string +@set +@all $all" in result
 
     # commands
     await async_client.execute_command("ACL SETUSER kostas +set +get +hset")
     result = await async_client.execute_command("ACL LIST")
     assert (
-        "user kostas on resetchannels -@admin +@list -@string +@set +@all +set +get +hset" in result
+        "user kostas on resetchannels -@admin +@list -@string +@set +@all +set +get +hset $all"
+        in result
     )
 
     await async_client.execute_command("ACL SETUSER kostas -set -get +hset")
     result = await async_client.execute_command("ACL LIST")
     assert (
-        "user kostas on resetchannels -@admin +@list -@string +@set +@all -set -get +hset" in result
+        "user kostas on resetchannels -@admin +@list -@string +@set +@all -set -get +hset $all"
+        in result
     )
 
     # interleaved
     await async_client.execute_command("ACL SETUSER kostas -hset +get -get -@all")
     result = await async_client.execute_command("ACL LIST")
     assert (
-        "user kostas on resetchannels -@admin +@list -@string +@set -set -hset -get -@all" in result
+        "user kostas on resetchannels -@admin +@list -@string +@set -set -hset -get -@all $all"
+        in result
     )
 
     # interleaved with categories
     await async_client.execute_command("ACL SETUSER kostas +@string +get -get +set")
     result = await async_client.execute_command("ACL LIST")
     assert (
-        "user kostas on resetchannels -@admin +@list +@set -hset -@all +@string -get +set" in result
+        "user kostas on resetchannels -@admin +@list +@set -hset -@all +@string -get +set $all"
+        in result
     )
 
 
@@ -157,7 +161,7 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
         await client.execute_command(f"SET x{x} {x}")
     await client.execute_command("EXEC")
 
-    await client.close()
+    await client.aclose()
     client = aioredis.Redis(port=df.port, decode_responses=True)
 
     # NOPERM while executing multi
@@ -170,7 +174,7 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
 
     with pytest.raises(redis.exceptions.NoPermissionError):
         await client.execute_command(f"SET x{x} {x}")
-    await client.close()
+    await client.aclose()
 
     # NOPERM between multi and exec
     admin_client = aioredis.Redis(port=df.port, decode_responses=True)
@@ -190,16 +194,22 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
     res = await admin_client.execute_command("ACL SETUSER kk -@string")
     assert res == "OK"
 
+    # We need to sleep because within dragonfly, we first reply to the client with
+    # "OK" and then we stream the update to proactor threads. The reason for this,
+    # are some connections might need to be evicted, so we first need to reply before
+    # we actually do that. Between those steps, there is a small window that the
+    # EXEC below might succeed.
+    await asyncio.sleep(1)
+
     res = await client.execute_command("EXEC")
     # TODO(we need to fix this, basiscally SQUASHED/MULTI transaction commands
     # return multiple errors for each command failed. Since the nature of the error
     # is the same, that a rule has changed we should squash those error messages into
     # one.
-    logging.debug(f"Result is: {res}")
     assert res[0].args[0] == "kk ACL rules changed between the MULTI and EXEC", res
 
-    await admin_client.close()
-    await client.close()
+    await admin_client.aclose()
+    await client.aclose()
 
     # Testing acl commands
     client = aioredis.Redis(port=df.port, decode_responses=True)
@@ -334,28 +344,29 @@ async def test_good_acl_file(df_factory, tmp_dir):
     result = await client.execute_command("ACL LIST")
     assert 2 == len(result)
     assert (
-        "user MrFoo on #ea71c25a7a60224 #a6864eb339b0e1f resetchannels &bar &r*nd -@all" in result
-        or "user MrFoo on #a6864eb339b0e1f #ea71c25a7a60224 resetchannels &bar &r*nd -@all"
+        "user MrFoo on #ea71c25a7a60224 #a6864eb339b0e1f resetchannels &bar &r*nd -@all $all"
+        in result
+        or "user MrFoo on #a6864eb339b0e1f #ea71c25a7a60224 resetchannels &bar &r*nd -@all $all"
         in result
     )
-    assert "user default on nopass ~* &* +@all" in result
-    await client.execute_command("ACL SETUSER MrFoo +@all")
+    assert "user default on nopass ~* &* +@all $all" in result
+    await client.execute_command("ACL SETUSER MrFoo +@all $0")
     # Check multiple passwords work
     assert "OK" == await client.execute_command("AUTH mypass")
     assert "OK" == await client.execute_command("AUTH temp")
     assert "OK" == await client.execute_command("AUTH default")
     await client.execute_command("ACL DELUSER MrFoo")
 
-    await client.execute_command("ACL SETUSER roy ON >mypass +@string +hset")
-    await client.execute_command("ACL SETUSER shahar >mypass +@set")
-    await client.execute_command("ACL SETUSER vlad ~foo ~bar* +@string")
+    await client.execute_command("ACL SETUSER roy ON >mypass +@string +hset $1")
+    await client.execute_command("ACL SETUSER shahar >mypass +@set $2")
+    await client.execute_command("ACL SETUSER vlad ~foo ~bar* +@string $3")
 
     result = await client.execute_command("ACL LIST")
     assert 4 == len(result)
-    assert "user roy on #ea71c25a7a60224 resetchannels -@all +@string +hset" in result
-    assert "user shahar off #ea71c25a7a60224 resetchannels -@all +@set" in result
-    assert "user vlad off ~foo ~bar* resetchannels -@all +@string" in result
-    assert "user default on nopass ~* &* +@all" in result
+    assert "user roy on #ea71c25a7a60224 resetchannels -@all +@string +hset $1" in result
+    assert "user shahar off #ea71c25a7a60224 resetchannels -@all +@set $2" in result
+    assert "user vlad off ~foo ~bar* resetchannels -@all +@string $3" in result
+    assert "user default on nopass ~* &* +@all $all" in result
 
     result = await client.execute_command("ACL DELUSER shahar")
     assert result == 1
@@ -366,9 +377,9 @@ async def test_good_acl_file(df_factory, tmp_dir):
 
     result = await client.execute_command("ACL LIST")
     assert 3 == len(result)
-    assert "user roy on #ea71c25a7a60224 resetchannels -@all +@string +hset" in result
-    assert "user vlad off ~foo ~bar* resetchannels -@all +@string" in result
-    assert "user default on nopass ~* &* +@all" in result
+    assert "user roy on #ea71c25a7a60224 resetchannels -@all +@string +hset $1" in result
+    assert "user vlad off ~foo ~bar* resetchannels -@all +@string $3" in result
+    assert "user default on nopass ~* &* +@all $all" in result
 
 
 @pytest.mark.asyncio
@@ -598,7 +609,7 @@ async def test_default_user_bug(df_server):
     client = df_server.client()
 
     await client.execute_command("ACL SETUSER default -@all")
-    await client.close()
+    await client.aclose()
 
     client = df_server.client()
 
@@ -616,7 +627,7 @@ async def test_auth_resp3_bug(df_factory):
     await client.execute_command("ACL SETUSER kostas +@all ON >tmp")
     res = await client.execute_command("HELLO 3 AUTH kostas tmp")
     assert res["server"] == "redis"
-    assert res["version"] == "7.2.0"
+    assert res["version"] == "7.4.0"
     assert res["proto"] == 3
     assert res["mode"] == "standalone"
     assert res["role"] == "master"
@@ -715,3 +726,21 @@ async def test_acl_revoke_pub_sub_while_subscribed(df_factory):
     await publish_worker(publisher)
     with pytest.raises(redis.exceptions.ConnectionError):
         await subscribe_task
+
+
+@pytest.mark.asyncio
+async def test_acl_select(async_client):
+    await async_client.execute_command("ACL SETUSER kostas on >tmp +@all $1 ~*")
+    assert await async_client.execute_command("AUTH kostas tmp") == "OK"
+
+    res = await async_client.execute_command("SET foo bar")
+    assert res == "OK"
+
+    with pytest.raises(redis.exceptions.NoPermissionError):
+        await async_client.execute_command("SELECT 0")
+
+    with pytest.raises(redis.exceptions.NoPermissionError):
+        await async_client.execute_command("MOVE foo 2")
+
+    res = await async_client.client_list()
+    assert res[0]["db"] == "1"

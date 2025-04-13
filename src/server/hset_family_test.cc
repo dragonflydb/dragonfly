@@ -91,6 +91,11 @@ TEST_P(HestFamilyTestProtocolVersioned, Get) {
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre("1", "3", ArgType(RespExpr::NIL)));
 
+  resp = Run({"hmget", "x", "a", "c", "d", "d", "c", "a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("1", "3", ArgType(RespExpr::NIL), ArgType(RespExpr::NIL), "3", "1"));
+
   resp = Run({"hgetall", "x"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "b", "2", "c", "3"));
@@ -364,6 +369,52 @@ TEST_F(HSetFamilyTest, HSetEx) {
   resp = Run({"HGET", "k", "field4"});
   EXPECT_THAT(resp,
               "value");  // HSETEX with NX option; old expiration time was NOT replaced by a new one
+
+  // KEEPTTL related asserts
+  EXPECT_THAT(Run({"HSETEX", "k", long_time, "kttlfield", "value"}), IntArg(1));
+  EXPECT_EQ(Run({"HGET", "k", "kttlfield"}), "value");
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k", "kttlfield"}), 100);
+
+  // KEEPTTL resets value of kttlfield, but preserves its TTL. afield is added with TTL=1
+  EXPECT_THAT(Run({"HSETEX", "k", "KEEPTTL", "1", "kttlfield", "resetvalue", "afield", "aval"}),
+              IntArg(1));
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k", "kttlfield"}), 100);
+  EXPECT_EQ(Run({"FIELDTTL", "k", "afield"}).GetInt(), 1);
+  EXPECT_EQ(Run({"HGET", "k", "afield"}), "aval");
+  // make afield expire
+  AdvanceTime(1000);
+  EXPECT_THAT(Run({"HGET", "k", "afield"}), ArgType(RespExpr::NIL));
+
+  // kttlfield is still present although with updated value
+  EXPECT_EQ(Run({"HGET", "k", "kttlfield"}), "resetvalue");
+  EXPECT_EQ(Run({"FIELDTTL", "k", "kttlfield"}).GetInt(), 99);
+
+  // If NX is supplied, with or without KEEPTTL neither expiry nor value is updated
+  EXPECT_THAT(Run({"HSETEX", "k", "NX", "KEEPTTL", "1", "kttlfield", "value"}), IntArg(0));
+
+  // No updates
+  EXPECT_EQ(Run({"HGET", "k", "kttlfield"}), "resetvalue");
+  EXPECT_EQ(Run({"FIELDTTL", "k", "kttlfield"}).GetInt(), 99);
+
+  EXPECT_THAT(Run({"HSETEX", "k", "NX", "1", "kttlfield", "value"}), IntArg(0));
+  // No updates
+  EXPECT_EQ(Run({"HGET", "k", "kttlfield"}), "resetvalue");
+  EXPECT_EQ(Run({"FIELDTTL", "k", "kttlfield"}).GetInt(), 99);
+
+  // Invalid TTL handling
+  EXPECT_THAT(Run({"HSETEX", "k", "NX", "zero", "kttlfield", "value"}),
+              ErrArg("ERR value is not an integer or out of range"));
+
+  // Exercise the code path where a field is added without TTL, but then we set a new expiration AND
+  // provide KEEPTTL. Since there was no old expiry, the new TTL should be applied.
+  EXPECT_EQ(Run({"HSET", "k", "nottl", "val"}), 1);
+  EXPECT_EQ(Run({"HSETEX", "k", "KEEPTTL", long_time, "nottl", "newval"}), 0);
+  EXPECT_EQ(Run({"FIELDTTL", "k", "nottl"}).GetInt(), 100);
+
+  EXPECT_THAT(Run({"HSETEX", "k", "NX", "KEEPTTL", "NX", "1", "v", "v2"}),
+              ErrArg("ERR wrong number of arguments for 'hsetex' command"));
+  EXPECT_THAT(Run({"HSETEX", "k", "KEEPTTL", "KEEPTTL", "1", "v", "v2"}),
+              ErrArg("ERR wrong number of arguments for 'hsetex' command"));
 }
 
 TEST_F(HSetFamilyTest, TriggerConvertToStrMap) {
@@ -454,6 +505,40 @@ TEST_F(HSetFamilyTest, EmptyHashBug) {
 
   EXPECT_THAT(Run({"HGETALL", "foo"}), RespArray(ElementsAre()));
   EXPECT_THAT(Run({"EXISTS", "foo"}), IntArg(0));
+}
+
+TEST_F(HSetFamilyTest, ScanAfterExpireSet) {
+  EXPECT_THAT(Run({"HSET", "aset", "afield", "avalue"}), IntArg(1));
+  EXPECT_THAT(Run({"HEXPIRE", "aset", "1", "FIELDS", "1", "afield"}), IntArg(1));
+
+  const auto resp = Run({"HSCAN", "aset", "0", "count", "100"});
+  EXPECT_THAT(resp, ArrLen(2));
+
+  const auto vec = StrArray(resp.GetVec()[1]);
+  EXPECT_EQ(vec.size(), 2);
+
+  EXPECT_THAT(vec, Contains("afield").Times(1));
+  EXPECT_THAT(vec, Contains("avalue").Times(1));
+}
+
+TEST_F(HSetFamilyTest, KeyRemovedWhenEmpty) {
+  auto test_cmd = [&](const std::function<void()>& f, const std::string_view tag) {
+    EXPECT_THAT(Run({"HSET", "a", "afield", "avalue"}), IntArg(1));
+    EXPECT_THAT(Run({"HEXPIRE", "a", "1", "FIELDS", "1", "afield"}), IntArg(1));
+    AdvanceTime(1000);
+
+    EXPECT_THAT(Run({"EXISTS", "a"}), IntArg(1));
+    f();
+    EXPECT_THAT(Run({"EXISTS", "a"}), IntArg(0)) << "failed when testing " << tag;
+  };
+
+  test_cmd([&] { EXPECT_THAT(Run({"HGET", "a", "afield"}), ArgType(RespExpr::NIL)); }, "HGET");
+  test_cmd([&] { EXPECT_THAT(Run({"HGETALL", "a"}), RespArray(ElementsAre())); }, "HGETALL");
+  test_cmd([&] { EXPECT_THAT(Run({"HDEL", "a", "afield"}), IntArg(0)); }, "HDEL");
+  test_cmd([&] { EXPECT_THAT(Run({"HSCAN", "a", "0"}).GetVec()[0], "0"); }, "HSCAN");
+  test_cmd([&] { EXPECT_THAT(Run({"HMGET", "a", "afield"}), ArgType(RespExpr::NIL)); }, "HMGET");
+  test_cmd([&] { EXPECT_THAT(Run({"HEXISTS", "a", "afield"}), IntArg(0)); }, "HEXISTS");
+  test_cmd([&] { EXPECT_THAT(Run({"HSTRLEN", "a", "afield"}), IntArg(0)); }, "HSTRLEN");
 }
 
 }  // namespace dfly

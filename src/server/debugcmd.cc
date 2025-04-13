@@ -3,7 +3,11 @@
 //
 #include "server/debugcmd.h"
 
+#define HUF_STATIC_LINKING_ONLY
+
 extern "C" {
+#include "huff/hist.h"
+#include "huff/huf.h"
 #include "redis/redis_aux.h"
 }
 
@@ -11,6 +15,8 @@ extern "C" {
 #include <absl/random/random.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <lz4.h>
+#include <zdict.h>
 #include <zstd.h>
 
 #include <filesystem>
@@ -50,14 +56,6 @@ using absl::StrAppend;
 using absl::StrCat;
 
 namespace {
-struct PopulateBatch {
-  DbIndex dbid;
-  uint64_t index[32];
-  uint64_t sz = 0;
-
-  PopulateBatch(DbIndex id) : dbid(id) {
-  }
-};
 
 struct ObjInfo {
   unsigned type = 0;
@@ -120,7 +118,7 @@ tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
   } else if (type == "ZSET") {
     cid = registry.Find("ZADD");
     for (size_t i = 0; i < elements; ++i) {
-      args.push_back(absl::StrCat((*gen)() % val_size));
+      args.push_back(StrCat((*gen)() % val_size));
       args.push_back(GenerateValue(val_size, random_value, gen));
     }
   } else if (type == "JSON") {
@@ -146,59 +144,12 @@ tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
   return {cid, args};
 }
 
-void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool random_value,
-                     int32_t elements, const PopulateBatch& batch, ServerFamily* sf,
-                     ConnectionContext* cntx) {
-  boost::intrusive_ptr<Transaction> local_tx =
-      new Transaction{sf->service().mutable_registry()->Find("EXEC")};
-  local_tx->StartMultiNonAtomic();
-  boost::intrusive_ptr<Transaction> stub_tx =
-      new Transaction{local_tx.get(), EngineShard::tlocal()->shard_id(), nullopt};
-
-  absl::InlinedVector<string_view, 5> args_view;
-  facade::CapturingReplyBuilder crb;
-  ConnectionContext local_cntx{cntx, stub_tx.get()};
-  absl::InsecureBitGen gen;
-  for (unsigned i = 0; i < batch.sz; ++i) {
-    string key = absl::StrCat(prefix, ":", batch.index[i]);
-    uint32_t elements_left = elements;
-
-    while (elements_left) {
-      // limit rss grow by 32K by limiting the element count in each command.
-      uint32_t max_batch_elements = std::max(32_KB / val_size, 1ULL);
-      uint32_t populate_elements = std::min(max_batch_elements, elements_left);
-      elements_left -= populate_elements;
-      auto [cid, args] =
-          GeneratePopulateCommand(type, key, val_size, random_value, populate_elements,
-                                  *sf->service().mutable_registry(), &gen);
-      if (!cid) {
-        LOG_EVERY_N(WARNING, 10'000) << "Unable to find command, was it renamed?";
-        break;
-      }
-
-      args_view.clear();
-      for (auto& arg : args) {
-        args_view.push_back(arg);
-      }
-      auto args_span = absl::MakeSpan(args_view);
-
-      stub_tx->MultiSwitchCmd(cid);
-      local_cntx.cid = cid;
-      crb.SetReplyMode(ReplyMode::NONE);
-      stub_tx->InitByArgs(cntx->ns, local_cntx.conn_state.db_index, args_span);
-
-      sf->service().InvokeCmd(cid, args_span, &crb, &local_cntx);
-    }
-  }
-
-  local_tx->UnlockMulti();
-}
-
 struct ObjHist {
   base::Histogram key_len;
-  base::Histogram val_len;    // overall size for the value.
+  base::Histogram val_len;    // overall malloc-used size of the value.
   base::Histogram card;       // for sets, hashmaps etc - it's number of entries.
   base::Histogram entry_len;  // for sets, hashmaps etc - it's the length of each entry.
+  base::Histogram listpack;   // for listpack encodings - the malloc used of the listpack.
 };
 
 // Returns number of O(1) steps executed.
@@ -230,49 +181,31 @@ unsigned AddObjHist(PrimeIterator it, ObjHist* hist) {
   } else if (pv.ObjType() == OBJ_ZSET) {
     IterateSortedSet(pv.GetRobjWrapper(),
                      [&](ContainerEntry entry, double) { return per_entry_cb(entry); });
-    if (pv.Encoding() == OBJ_ENCODING_SKIPLIST) {
-      detail::SortedMap* smap = static_cast<detail::SortedMap*>(pv.RObjPtr());
-      val_len = smap->MallocSize();
+    val_len = 0;  // reset - will be calculated below.
+    if (pv.Encoding() == OBJ_ENCODING_LISTPACK) {
+      hist->listpack.Add(pv.MallocUsed());
     }
   } else if (pv.ObjType() == OBJ_SET) {
     IterateSet(pv, per_entry_cb);
-    if (pv.Encoding() == kEncodingStrMap2) {
-      StringSet* ss = static_cast<StringSet*>(pv.RObjPtr());
-      val_len = ss->ObjMallocUsed() + ss->SetMallocUsed();
+    val_len = 0;  // reset - will be calculated below.
+    if (pv.Encoding() == kEncodingIntSet) {
+      hist->listpack.Add(pv.MallocUsed());
     }
   } else if (pv.ObjType() == OBJ_HASH) {
+    IterateMap(pv, [&](ContainerEntry key, ContainerEntry value) {
+      hist->entry_len.Add(key.length + value.length);
+      steps += 2;
+      return true;
+    });
     if (pv.Encoding() == kEncodingListPack) {
-      uint8_t intbuf[LP_INTBUF_SIZE];
-      uint8_t* lp = (uint8_t*)pv.RObjPtr();
-      uint8_t* fptr = lpFirst(lp);
-      while (fptr) {
-        size_t entry_len = 0;
-        // field
-        string_view sv = LpGetView(fptr, intbuf);
-        entry_len += sv.size();
-
-        // value
-        fptr = lpNext(lp, fptr);
-        entry_len += sv.size();
-        fptr = lpNext(lp, fptr);
-        hist->entry_len.Add(entry_len);
-        steps += 2;
-      }
-      val_len = lpBytes(lp);
-    } else {
-      StringMap* sm = static_cast<StringMap*>(pv.RObjPtr());
-      for (const auto& k_v : *sm) {
-        hist->entry_len.Add(sdslen(k_v.first) + sdslen(k_v.second) + 2);
-        ++steps;
-      }
-      val_len = sm->ObjMallocUsed() + sm->SetMallocUsed();
+      hist->listpack.Add(pv.MallocUsed());
     }
   }
   // TODO: streams
 
   if (val_len == 0) {
     // Fallback
-    val_len = pv.MallocUsed();
+    val_len = pv.MallocUsed(true);
   }
 
   hist->val_len.Add(val_len);
@@ -283,6 +216,8 @@ unsigned AddObjHist(PrimeIterator it, ObjHist* hist) {
   return steps;
 }
 
+// ObjType -> ObjHist
+//
 using ObjHistMap = absl::flat_hash_map<unsigned, unique_ptr<ObjHist>>;
 
 void MergeObjHistMap(ObjHistMap&& src, ObjHistMap* dest) {
@@ -295,6 +230,7 @@ void MergeObjHistMap(ObjHistMap&& src, ObjHistMap* dest) {
       dest_hist->val_len.Merge(src_hist->val_len);
       dest_hist->card.Merge(src_hist->card);
       dest_hist->entry_len.Merge(src_hist->entry_len);
+      dest_hist->listpack.Merge(src_hist->listpack);
     }
   }
 }
@@ -324,6 +260,85 @@ void DoBuildObjHist(EngineShard* shard, ConnectionContext* cntx, ObjHistMap* obj
       }
     } while (cursor);
   }
+}
+
+struct HufHist {
+  static constexpr unsigned kMaxSymbol = 255;
+  array<unsigned, kMaxSymbol + 1> hist;  // histogram of symbols.
+  unsigned max_symbol = 0;               // what is the max symbol of the histogram.
+
+  HufHist() {
+    hist.fill(0);
+  }
+
+  void Merge(const HufHist& other) {
+    max_symbol = std::max(max_symbol, other.max_symbol);
+    for (unsigned i = 0; i <= max_symbol; ++i) {
+      hist[i] += other.hist[i];
+    }
+  }
+};
+
+void DoComputeHist(optional<CompactObjType> type, EngineShard* shard, ConnectionContext* cntx,
+                   HufHist* dest) {
+  auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
+  DbTable* dbt = db_slice.GetDBTable(cntx->db_index());
+  CHECK(dbt);
+
+  PrimeTable::Cursor cursor;
+  unsigned steps = 0;
+  string scratch;
+  constexpr size_t kMaxLen = 512;
+  PrimeTable& table = dbt->prime;
+
+  do {
+    cursor = table.Traverse(cursor, [&](PrimeIterator it) {
+      scratch.clear();
+      if (!type) {
+        it->first.GetString(&scratch);
+      } else if (*type == OBJ_STRING && it->second.ObjType() == OBJ_STRING) {
+        it->second.GetString(&scratch);
+      } else if (*type == OBJ_ZSET && it->second.ObjType() == OBJ_ZSET) {
+        container_utils::IterateSortedSet(
+            it->second.GetRobjWrapper(), [&](container_utils::ContainerEntry entry, double) {
+              if (entry.value) {
+                HIST_add(dest->hist.data(), entry.value, entry.length);
+              }
+              return true;
+            });
+      } else if (*type == OBJ_LIST && it->second.ObjType() == OBJ_LIST) {
+        container_utils::IterateList(it->second, [&](container_utils::ContainerEntry entry) {
+          if (entry.value) {
+            HIST_add(dest->hist.data(), entry.value, entry.length);
+          }
+          return true;
+        });
+      } else if (*type == OBJ_HASH && it->second.ObjType() == OBJ_HASH) {
+        container_utils::IterateMap(it->second, [&](container_utils::ContainerEntry key,
+                                                    container_utils::ContainerEntry value) {
+          if (key.value) {
+            HIST_add(dest->hist.data(), key.value, key.length);
+          }
+          if (value.value) {
+            HIST_add(dest->hist.data(), value.value, value.length);
+          }
+          return true;
+        });
+      }
+
+      size_t len = std::min(scratch.size(), kMaxLen);
+      if (len > 16)  // filtering out values that are too small and hosted inline.
+        HIST_add(dest->hist.data(), scratch.data(), len);
+    });
+
+    if (steps >= 20000) {
+      steps = 0;
+      ThisFiber::Yield();
+    }
+  } while (cursor);
+  dest->max_symbol = HufHist::kMaxSymbol;
+  while (dest->max_symbol && dest->hist[dest->max_symbol] == 0)
+    --dest->max_symbol;
 }
 
 ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
@@ -499,7 +514,8 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    Return sync id and array of number of journal commands executed for each replica flow",
         "WATCHED",
         "    Shows the watched keys as a result of BLPOP and similar operations.",
-        "POPULATE <count> [prefix] [size] [RAND] [SLOTS start end] [TYPE type] [ELEMENTS elements]",
+        "POPULATE <count> [prefix] [size] [RAND] [SLOTS start end] [TYPE type] [ELEMENTS elements]"
+        "[EXPIRE start end]",
         "    Create <count> string keys named key:<num> with value value:<num>.",
         "    If <prefix> is specified then it is used instead of the 'key' prefix.",
         "    If <size> is specified then X character is concatenated multiple times to value:<num>",
@@ -508,19 +524,30 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    If SLOTS is specified then create keys only in given slots range.",
         "    TYPE specifies data type (must be STRING/LIST/SET/HASH/ZSET/JSON), default STRING.",
         "    ELEMENTS specifies how many sub elements if relevant (like entries in a list / set).",
+        "    EXPIRE specifies key expire ttl range.",
         "OBJHIST",
         "    Prints histogram of object sizes.",
         "STACKTRACE",
         "    Prints the stacktraces of all current fibers to the logs.",
         "SHARDS",
         "    Prints memory usage and key stats per shard, as well as min/max indicators.",
+        "TOPK ON [min_freq] | OFF [max_keys]",
+        "    Turns on or off sampling of topk keys. Provides top keys with at least <min_freq> ",
+        "    during the sampling period. The results are returned in descending order of frequency",
+        "    when calling TOPK OFF command.",
+        "KEYS ON | OFF",
+        "    Turns on/off counting of unique keys. Results are returned when calling ",
+        "    KEYS OFF command.",
         "TX",
         "    Performs transaction analysis per shard.",
         "TRAFFIC <path> | [STOP]",
-        "    Starts traffic logging to the specified path. If path is not specified,"
+        "    Starts traffic logging to the specified path. If path is not specified,",
         "    traffic logging is stopped.",
         "RECVSIZE [<tid> | ENABLE | DISABLE]",
         "    Prints the histogram of the received request sizes on the given thread",
+        "COMPRESSION [type]"
+        "    Estimate the compressibility of values of the given type. if no type is given, ",
+        "    checks compressibility of keys",
         "HELP",
         "    Prints this help.",
     };
@@ -582,6 +609,18 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
 
   if (subcmd == "RECVSIZE" && args.size() == 2) {
     return RecvSize(ArgS(args, 1), builder);
+  }
+
+  if (subcmd == "TOPK" && args.size() >= 2) {
+    return Topk(args.subspan(1), builder);
+  }
+
+  if (subcmd == "KEYS" && args.size() >= 2) {
+    return Keys(args.subspan(1), builder);
+  }
+
+  if (subcmd == "COMPRESSION") {
+    return Compression(args.subspan(1), builder);
   }
 
   string reply = UnknownSubCmd(subcmd, "DEBUG");
@@ -671,6 +710,9 @@ void DebugCmd::Migration(CmdArgList args, facade::SinkReplyBuilder* builder) {
   return builder->SendError(UnknownSubCmd("MIGRATION", "DEBUG"));
 }
 
+// Populate arguments format:
+// required: (total count) (key prefix) (val size)
+// optional: [RAND | TYPE typename | ELEMENTS element num | SLOTS (key value)+ | EXPIRE start end]
 optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
                                                                 facade::SinkReplyBuilder* builder) {
   if (args.size() < 2) {
@@ -744,7 +786,25 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
       }
       options.slot_range = cluster::SlotRange{.start = static_cast<SlotId>(start.value()),
                                               .end = static_cast<SlotId>(end.value())};
-
+    } else if (str == "EXPIRE") {
+      if (args.size() < index + 3) {
+        builder->SendError(kSyntaxErr);
+        return nullopt;
+      }
+      uint32_t start, end;
+      if (!absl::SimpleAtoi(ArgS(args, ++index), &start)) {
+        builder->SendError(kSyntaxErr);
+        return nullopt;
+      }
+      if (!absl::SimpleAtoi(ArgS(args, ++index), &end)) {
+        builder->SendError(kSyntaxErr);
+        return nullopt;
+      }
+      if (start >= end) {
+        builder->SendError(kExpiryOutOfRange);
+        return nullopt;
+      }
+      options.expire_ttl_range = std::make_pair(start, end);
     } else {
       builder->SendError(kSyntaxErr);
       return nullopt;
@@ -758,6 +818,8 @@ void DebugCmd::Populate(CmdArgList args, facade::SinkReplyBuilder* builder) {
   if (!options.has_value()) {
     return;
   }
+  DCHECK(sf_.AreAllReplicasInStableSync());
+
   ProactorPool& pp = sf_.service().proactor_pool();
   size_t runners_count = pp.size();
   vector<pair<uint64_t, uint64_t>> ranges(runners_count - 1);
@@ -783,6 +845,8 @@ void DebugCmd::Populate(CmdArgList args, facade::SinkReplyBuilder* builder) {
     fb.Join();
 
   builder->SendOk();
+
+  DCHECK(sf_.AreAllReplicasInStableSync());
 }
 
 void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
@@ -790,7 +854,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
   ThisFiber::SetName("populate_range");
   VLOG(1) << "PopulateRange: " << from << "-" << (from + num_of_keys - 1);
 
-  string key = absl::StrCat(options.prefix, ":");
+  string key = StrCat(options.prefix, ":");
   size_t prefsize = key.size();
   DbIndex db_indx = cntx_->db_index();
   EngineShardSet& ess = *shard_set;
@@ -830,8 +894,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
 
     if (shard_batch.sz == 32) {
       ess.Add(sid, [this, index, options, shard_batch] {
-        DoPopulateBatch(options.type, options.prefix, options.val_size,
-                        options.populate_random_values, options.elements, shard_batch, &sf_, cntx_);
+        DoPopulateBatch(options, shard_batch);
         if (index % 50 == 0) {
           ThisFiber::Yield();
         }
@@ -843,13 +906,12 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
   }
 
   ess.AwaitRunningOnShardQueue([&](EngineShard* shard) {
-    DoPopulateBatch(options.type, options.prefix, options.val_size, options.populate_random_values,
-                    options.elements, ps[shard->shard_id()], &sf_, cntx_);
-    // Debug populate does not use transaction framework therefore we call OnCbFinish manually
-    // after running the callback
-    // Note that running debug populate while running flushall/db can cause dcheck fail because the
-    // finish cb is executed just when we finish populating the database.
-    cntx_->ns->GetDbSlice(shard->shard_id()).OnCbFinish();
+    DoPopulateBatch(options, ps[shard->shard_id()]);
+    // Debug populate does not use transaction framework therefore we call OnCbFinishBlocking
+    // manually after running the callback Note that running debug populate while running
+    // flushall/db can cause dcheck fail because the finish cb is executed just when we finish
+    // populating the database.
+    cntx_->ns->GetDbSlice(shard->shard_id()).OnCbFinishBlocking();
   });
 }
 
@@ -995,12 +1057,7 @@ void DebugCmd::TxAnalysis(facade::SinkReplyBuilder* builder) {
   string result;
   for (unsigned i = 0; i < shard_set->size(); ++i) {
     const auto& info = shard_info[i];
-    StrAppend(&result, "shard", i, ":\n", "  tx armed ", info.tx_armed, ", total: ", info.tx_total,
-              ",global:", info.tx_global, ",runnable:", info.tx_runnable, "\n");
-    StrAppend(&result, "  locks total:", info.total_locks, ",contended:", info.contended_locks,
-              "\n");
-    StrAppend(&result, "  max contention score: ", info.max_contention_score,
-              ",lock_name:", info.max_contention_lock, "\n");
+    StrAppend(&result, "shard", i, ":\n", info.Format(), "\n");
   }
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   rb->SendVerbatimString(result);
@@ -1024,9 +1081,15 @@ void DebugCmd::ObjHist(facade::SinkReplyBuilder* builder) {
     StrAppend(&result, "OBJECT:", ObjTypeToString(obj_type), "\n");
     StrAppend(&result, "________________________________________________________________\n");
     StrAppend(&result, "Key length histogram:\n", hist_ptr->key_len.ToString(), "\n");
-    StrAppend(&result, "Value length histogram:\n", hist_ptr->val_len.ToString(), "\n");
-    StrAppend(&result, "Cardinality histogram:\n", hist_ptr->card.ToString(), "\n");
-    StrAppend(&result, "Entry length histogram:\n", hist_ptr->entry_len.ToString(), "\n");
+    StrAppend(&result, "Values - Total Memory used:\n", hist_ptr->val_len.ToString(), "\n");
+    if (hist_ptr->card.count() > 0) {
+      StrAppend(&result, "Cardinality histogram (number of elements in sets):\n",
+                hist_ptr->card.ToString(), "\n");
+    }
+    StrAppend(&result, "Items length histogram:\n", hist_ptr->entry_len.ToString(), "\n");
+    if (hist_ptr->listpack.count() > 0) {
+      StrAppend(&result, "Listpack histogram:\n", hist_ptr->listpack.ToString(), "\n");
+    }
   }
 
   absl::StrAppend(&result, "___end object histogram___\n");
@@ -1037,7 +1100,14 @@ void DebugCmd::ObjHist(facade::SinkReplyBuilder* builder) {
 void DebugCmd::Stacktrace(facade::SinkReplyBuilder* builder) {
   fb2::Mutex m;
   shard_set->pool()->AwaitFiberOnAll([&m](unsigned index, ProactorBase* base) {
+    EngineShard* es = EngineShard::tlocal();
+    string txq;
+    if (es) {
+      EngineShard::TxQueueInfo txq_info = es->AnalyzeTxQueue();
+      txq = txq_info.Format();
+    }
     std::unique_lock lk(m);
+    LOG_IF(INFO, !txq.empty()) << "Shard" << index << ": " << txq;
     fb2::detail::FiberInterface::PrintAllFiberStackTraces();
   });
   base::FlushLogs();
@@ -1123,6 +1193,201 @@ void DebugCmd::RecvSize(string_view param, facade::SinkReplyBuilder* builder) {
   shard_set->pool()->at(tid)->AwaitBrief(
       [&]() { facade::Connection::GetRequestSizeHistogramThreadLocal(&hist); });
   rb->SendVerbatimString(hist);
+}
+
+void DebugCmd::Topk(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  DCHECK_GE(args.size(), 1u);
+
+  string_view subcmd = ArgS(args, 0);
+  if (absl::EqualsIgnoreCase(subcmd, "ON")) {
+    uint32_t min_freq = 100;
+    if (args.size() > 1) {
+      if (!absl::SimpleAtoi(ArgS(args, 1), &min_freq))
+        return rb->SendError(kUintErr);
+    }
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      cntx_->ns->GetDbSlice(es->shard_id()).StartSampleTopK(cntx_->db_index(), min_freq);
+    });
+    return rb->SendOk();
+  }
+
+  if (absl::EqualsIgnoreCase(subcmd, "OFF")) {
+    vector<DbSlice::SamplingResult> results(shard_set->size());
+    uint32_t max_keys = 50;
+
+    if (args.size() > 1) {
+      if (!absl::SimpleAtoi(ArgS(args, 1), &max_keys))
+        return rb->SendError(kUintErr);
+    }
+
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      results[es->shard_id()] =
+          cntx_->ns->GetDbSlice(es->shard_id()).StopSampleTopK(cntx_->db_index());
+    });
+
+    vector<pair<uint64_t, string>> items;
+
+    for (const auto& res : results) {
+      for (const auto& k_v : res.top_keys) {
+        items.emplace_back(k_v.second, k_v.first);
+        push_heap(items.begin(), items.end(), std::greater<>());
+        if (items.size() > max_keys) {
+          pop_heap(items.begin(), items.end(), std::greater<>());
+          items.pop_back();
+        }
+      }
+    }
+
+    rb->StartArray(items.size());
+    for (const auto& k_v : items) {
+      rb->SendBulkString(StrCat(k_v.second, ":", k_v.first));
+    }
+    return;
+  }
+
+  return rb->SendError(kSyntaxErr);
+}
+
+void DebugCmd::Keys(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  string_view subcmd = ArgS(args, 0);
+
+  if (absl::EqualsIgnoreCase(subcmd, "ON")) {
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      cntx_->ns->GetDbSlice(es->shard_id()).StartSampleKeys(cntx_->db_index());
+    });
+    return builder->SendOk();
+  }
+
+  if (absl::EqualsIgnoreCase(subcmd, "OFF")) {
+    atomic_uint64_t total_keys = 0;
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      size_t res = cntx_->ns->GetDbSlice(es->shard_id()).StopSampleKeys(cntx_->db_index());
+      total_keys.fetch_add(res, memory_order_relaxed);
+    });
+
+    return builder->SendLong(total_keys.load());
+  }
+
+  return builder->SendError(kSyntaxErr);
+}
+
+void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  optional<CompactObjType> type;
+  if (args.size() > 0) {
+    string_view type_str = ArgS(args, 0);
+    type = ObjTypeFromString(type_str);
+    if (!type) {
+      return builder->SendError(kSyntaxErr);
+    }
+  }
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+
+  fb2::Mutex mu;
+  HufHist hist;
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    HufHist local;
+    DoComputeHist(type, shard, cntx_, &local);
+    std::unique_lock lk(mu);
+    hist.Merge(local);
+  });
+
+  HUF_CREATE_STATIC_CTABLE(huf_ctable, HufHist::kMaxSymbol);
+
+  size_t num_bits = 0, compressed_size = 0, raw_size = 0;
+
+  if (hist.max_symbol) {
+    unique_ptr<uint32_t[]> wrkspace(new uint32_t[HUF_CTABLE_WORKSPACE_SIZE_U32]);
+    constexpr size_t kWspSize = HUF_CTABLE_WORKSPACE_SIZE;
+    num_bits = HUF_buildCTable_wksp(huf_ctable, hist.hist.data(), hist.max_symbol, 0,
+                                    wrkspace.get(), kWspSize);
+
+    compressed_size = HUF_estimateCompressedSize(huf_ctable, hist.hist.data(), hist.max_symbol);
+    raw_size = 0;
+    for (unsigned i = 0; i < hist.max_symbol; i++) {
+      raw_size += hist.hist[i];
+    }
+  }
+
+  rb->StartCollection(5, RedisReplyBuilder::CollectionType::MAP);
+  rb->SendSimpleString("max_symbol");
+  rb->SendLong(hist.max_symbol);
+  rb->SendSimpleString("max_bits");
+  rb->SendLong(num_bits);
+  rb->SendSimpleString("raw_size");
+  rb->SendLong(raw_size);
+  rb->SendSimpleString("compressed_size");
+  rb->SendLong(compressed_size);
+  rb->SendSimpleString("ratio");
+  double ratio = raw_size > 0 ? static_cast<double>(compressed_size) / raw_size : 0;
+  rb->SendDouble(ratio);
+}
+
+void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBatch& batch) {
+  boost::intrusive_ptr<Transaction> local_tx =
+      new Transaction{sf_.service().mutable_registry()->Find("EXEC")};
+  local_tx->StartMultiNonAtomic();
+  boost::intrusive_ptr<Transaction> stub_tx =
+      new Transaction{local_tx.get(), EngineShard::tlocal()->shard_id(), nullopt};
+
+  absl::InlinedVector<string_view, 5> args_view;
+  facade::CapturingReplyBuilder crb;
+  ConnectionContext local_cntx{cntx_, stub_tx.get()};
+  absl::InsecureBitGen gen;
+  for (unsigned i = 0; i < batch.sz; ++i) {
+    string key = StrCat(options.prefix, ":", batch.index[i]);
+    uint32_t elements_left = options.elements;
+
+    while (elements_left) {
+      // limit rss grow by 32K by limiting the element count in each command.
+      uint32_t max_batch_elements = std::max(32_KB / options.val_size, 1ULL);
+      uint32_t populate_elements = std::min(max_batch_elements, elements_left);
+      elements_left -= populate_elements;
+      auto [cid, args] = GeneratePopulateCommand(options.type, key, options.val_size,
+                                                 options.populate_random_values, populate_elements,
+                                                 *sf_.service().mutable_registry(), &gen);
+      if (!cid) {
+        LOG_EVERY_N(WARNING, 10'000) << "Unable to find command, was it renamed?";
+        break;
+      }
+
+      args_view.clear();
+      for (auto& arg : args) {
+        args_view.push_back(arg);
+      }
+      auto args_span = absl::MakeSpan(args_view);
+
+      stub_tx->MultiSwitchCmd(cid);
+      local_cntx.cid = cid;
+      crb.SetReplyMode(ReplyMode::NONE);
+      stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span);
+
+      sf_.service().InvokeCmd(cid, args_span, &crb, &local_cntx);
+    }
+
+    if (options.expire_ttl_range.has_value()) {
+      uint32_t start = options.expire_ttl_range->first;
+      uint32_t end = options.expire_ttl_range->second;
+      uint32_t expire_ttl = rand() % (end - start) + start;
+      VLOG(1) << "set key " << key << " expire ttl as " << expire_ttl;
+      auto cid = sf_.service().mutable_registry()->Find("EXPIRE");
+      absl::InlinedVector<string, 5> args;
+      args.push_back(std::move(key));
+      args.push_back(to_string(expire_ttl));
+      args_view.clear();
+      for (auto& arg : args) {
+        args_view.push_back(arg);
+      }
+      auto args_span = absl::MakeSpan(args_view);
+      stub_tx->MultiSwitchCmd(cid);
+      local_cntx.cid = cid;
+      crb.SetReplyMode(ReplyMode::NONE);
+      stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span);
+      sf_.service().InvokeCmd(cid, args_span, &crb, &local_cntx);
+    }
+  }
+
+  local_tx->UnlockMulti();
 }
 
 }  // namespace dfly

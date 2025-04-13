@@ -85,6 +85,8 @@ ABSL_FLAG(uint16_t, uring_recv_buffer_cnt, 0,
           "How many socket recv buffers of size 256 to allocate per thread."
           "Relevant only for modern kernels with io_uring enabled");
 
+ABSL_FLAG(bool, omit_basic_usage, false, "Omit printing basic usage info.");
+
 using namespace util;
 using namespace facade;
 using namespace io;
@@ -649,6 +651,22 @@ void sigill_hdlr(int signo) {
 }
 
 void PrintBasicUsageInfo() {
+  std::cout << "                   .--::--.                   \n";
+  std::cout << "   :+*=:          =@@@@@@@@=          :+*+:   \n";
+  std::cout << "  %@@@@@@%*=.     =@@@@@@@@-     .=*%@@@@@@#  \n";
+  std::cout << "  @@@@@@@@@@@@#+-. .%@@@@#. .-+#@@@@@@@@@@@%  \n";
+  std::cout << "  -@@@@@@@@@@@@@@@@*:#@@#:*@@@@@@@@@@@@@@@@-  \n";
+  std::cout << "    :+*********####-%@%%@%-####********++.    \n";
+  std::cout << "   .%@@@@@@@@@@@@@%:@@@@@@:@@@@@@@@@@@@@@%    \n";
+  std::cout << "   .@@@@@@@@%*+-:   =@@@@=  .:-+*%@@@@@@@%.   \n";
+  std::cout << "     =*+-:           ###*          .:-+*=     \n";
+  std::cout << "                     %@@%                     \n";
+  std::cout << "                     *@@*                     \n";
+  std::cout << "                     +@@=                     \n";
+  std::cout << "                     :##:                     \n";
+  std::cout << "                     :@@:                     \n";
+  std::cout << "                      @@                      \n";
+  std::cout << "                      ..                      \n";
   std::cout << "* Logs will be written to the first available of the following paths:\n";
   for (const auto& dir : google::GetLoggingDirectories()) {
     const string_view maybe_slash = absl::EndsWith(dir, "/") ? "" : "/";
@@ -724,7 +742,10 @@ Usage: dragonfly [FLAGS]
 
   ParseFlagsFromEnv();
 
-  PrintBasicUsageInfo();
+  if (!GetFlag(FLAGS_omit_basic_usage)) {
+    PrintBasicUsageInfo();
+  }
+
   LOG(INFO) << "Starting dragonfly " << GetVersion() << "-" << kGitSha;
 
   struct sigaction act;

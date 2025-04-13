@@ -103,27 +103,19 @@ class DflyCmd {
   // Stores information related to a single replica.
   struct ABSL_LOCKABLE ReplicaInfo {
     ReplicaInfo(unsigned flow_count, std::string address, uint32_t listening_port,
-                Context::ErrHandler err_handler)
+                ExecutionState::ErrHandler err_handler)
         : replica_state{SyncState::PREPARATION},
-          cntx{std::move(err_handler)},
+          exec_st{std::move(err_handler)},
           address{std::move(address)},
           listening_port(listening_port),
           flows{flow_count} {
-    }
-
-    [[nodiscard]] auto GetExclusiveLock() ABSL_EXCLUSIVE_LOCK_FUNCTION() {
-      return util::fb2::LockGuard{shared_mu};
-    }
-
-    [[nodiscard]] auto GetSharedLock() ABSL_EXCLUSIVE_LOCK_FUNCTION() {
-      return dfly::SharedLock{shared_mu};
     }
 
     // Transition into cancelled state, run cleanup.
     void Cancel();
 
     SyncState replica_state;  // always guarded by shared_mu
-    Context cntx;
+    ExecutionState exec_st;
 
     std::string id;
     std::string address;
@@ -151,7 +143,7 @@ class DflyCmd {
   // Create new sync session. Returns (session_id, number of flows)
   std::pair<uint32_t, unsigned> CreateSyncSession(ConnectionState* state) ABSL_LOCKS_EXCLUDED(mu_);
 
-  // Master side acces method to replication info of that connection.
+  // Master side access method to replication info of that connection.
   std::shared_ptr<ReplicaInfo> GetReplicaInfoFromConnection(ConnectionState* state);
 
   // Master-side command. Provides Replica info.
@@ -206,13 +198,13 @@ class DflyCmd {
   void Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
 
   // Start full sync in thread. Start FullSyncFb. Called for each flow.
-  facade::OpStatus StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);
+  facade::OpStatus StartFullSyncInThread(FlowInfo* flow, ExecutionState* cntx, EngineShard* shard);
 
   // Stop full sync in thread. Run state switch cleanup.
-  facade::OpStatus StopFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);
+  facade::OpStatus StopFullSyncInThread(FlowInfo* flow, ExecutionState* cntx, EngineShard* shard);
 
   // Start stable sync in thread. Called for each flow.
-  void StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);
+  void StartStableSyncInThread(FlowInfo* flow, ExecutionState* cntx, EngineShard* shard);
 
   // Get ReplicaInfo by sync_id.
   std::shared_ptr<ReplicaInfo> GetReplicaInfo(uint32_t sync_id) ABSL_LOCKS_EXCLUDED(mu_);
@@ -242,5 +234,7 @@ class DflyCmd {
 
   mutable util::fb2::Mutex mu_;  // Guard global operations. See header top for locking levels.
 };
+
+std::string_view SyncStateName(DflyCmd::SyncState sync_state);
 
 }  // namespace dfly

@@ -4,6 +4,7 @@
 
 #include "core/sorted_map.h"
 
+#include <absl/strings/str_cat.h>
 #include <gmock/gmock.h>
 #include <mimalloc.h>
 
@@ -19,6 +20,7 @@ using namespace std;
 using testing::ElementsAre;
 using testing::Pair;
 using testing::StrEq;
+using absl::StrCat;
 
 namespace dfly {
 using detail::SortedMap;
@@ -46,26 +48,27 @@ TEST_F(SortedMapTest, Add) {
   int out_flags;
   double new_score;
 
-  sds ele = sdsnew("a");
-  int res = sm_.Add(1.0, ele, 0, &out_flags, &new_score);
+  int res = sm_.AddElem(1.0, "a", 0, &out_flags, &new_score);
   EXPECT_EQ(1, res);
   EXPECT_EQ(ZADD_OUT_ADDED, out_flags);
   EXPECT_EQ(1, new_score);
 
-  res = sm_.Add(2.0, ele, ZADD_IN_NX, &out_flags, &new_score);
+  res = sm_.AddElem(2.0, "a", ZADD_IN_NX, &out_flags, &new_score);
   EXPECT_EQ(1, res);
   EXPECT_EQ(ZADD_OUT_NOP, out_flags);
 
-  res = sm_.Add(2.0, ele, ZADD_IN_INCR, &out_flags, &new_score);
+  res = sm_.AddElem(2.0, "a", ZADD_IN_INCR, &out_flags, &new_score);
   EXPECT_EQ(1, res);
   EXPECT_EQ(ZADD_OUT_UPDATED, out_flags);
   EXPECT_EQ(3, new_score);
+  sds ele = sdsnew("a");
   EXPECT_EQ(3, sm_.GetScore(ele));
+  sdsfree(ele);
 }
 
 TEST_F(SortedMapTest, Scan) {
   for (unsigned i = 0; i < 972; ++i) {
-    sm_.Insert(i, sdsfromlonglong(i));
+    sm_.InsertNew(i, StrCat(i));
   }
   uint64_t cursor = 0;
 
@@ -78,10 +81,7 @@ TEST_F(SortedMapTest, Scan) {
 
 TEST_F(SortedMapTest, InsertPop) {
   for (unsigned i = 0; i < 256; ++i) {
-    sds s = sdsempty();
-
-    s = sdscatfmt(s, "a%u", i);
-    ASSERT_TRUE(sm_.Insert(1000, s));
+    ASSERT_TRUE(sm_.InsertNew(1000, StrCat("a", i)));
   }
 
   vector<sds> vec;
@@ -107,10 +107,7 @@ TEST_F(SortedMapTest, InsertPop) {
 
 TEST_F(SortedMapTest, LexRanges) {
   for (unsigned i = 0; i < 100; ++i) {
-    sds s = sdsempty();
-
-    s = sdscatfmt(s, "a%u", i);
-    ASSERT_TRUE(sm_.Insert(1, s));
+    ASSERT_TRUE(sm_.InsertNew(1, StrCat("a", i)));
   }
 
   zlexrangespec range;
@@ -157,17 +154,11 @@ TEST_F(SortedMapTest, LexRanges) {
 
 TEST_F(SortedMapTest, ScoreRanges) {
   for (unsigned i = 0; i < 10; ++i) {
-    sds s = sdsempty();
-
-    s = sdscatfmt(s, "a%u", i);
-    ASSERT_TRUE(sm_.Insert(1, s));
+    ASSERT_TRUE(sm_.InsertNew(1, StrCat("a", i)));
   }
 
   for (unsigned i = 0; i < 10; ++i) {
-    sds s = sdsempty();
-
-    s = sdscatfmt(s, "b%u", i);
-    ASSERT_TRUE(sm_.Insert(2, s));
+    ASSERT_TRUE(sm_.InsertNew(2, StrCat("b", i)));
   }
 
   zrangespec range;
@@ -207,10 +198,7 @@ TEST_F(SortedMapTest, ScoreRanges) {
 
 TEST_F(SortedMapTest, DeleteRange) {
   for (unsigned i = 0; i <= 100; ++i) {
-    sds s = sdsempty();
-
-    s = sdscatfmt(s, "a%u", i);
-    ASSERT_TRUE(sm_.Insert(i * 2, s));
+    ASSERT_TRUE(sm_.InsertNew(i * 2, StrCat("a", i)));
   }
 
   zrangespec range;
@@ -244,6 +232,23 @@ TEST_F(SortedMapTest, DeleteRange) {
   lex_range.min = cminstring;
   lex_range.max = cmaxstring;
   EXPECT_EQ(96, sm_.DeleteRangeByLex(lex_range));
+}
+
+TEST_F(SortedMapTest, RangeBug) {
+  constexpr size_t kArrLen = 80;
+  for (unsigned i = 0; i < kArrLen; i++) {
+    ASSERT_TRUE(sm_.InsertNew(i, StrCat("score", i)));
+  }
+
+  for (unsigned i = 0; i < kArrLen; i++) {
+    zrangespec range;
+    range.max = HUGE_VAL;
+    range.min = i;
+    range.minex = 0;
+    range.maxex = 0;
+    auto arr = sm_.GetRange(range, 0, 5, false);
+    ASSERT_GT(arr.size(), 0) << i;
+  }
 }
 
 // not a real test, just to see how much memory is used by zskiplist.
@@ -281,9 +286,7 @@ TEST_F(SortedMapTest, ReallocIfNeeded) {
     int out_flags;
     double new_val;
     auto str = build_str(i);
-    sds ele = sdsnew(str.c_str());
-    sm_.Add(i, ele, 0, &out_flags, &new_val);
-    sdsfree(ele);
+    sm_.AddElem(i, str, 0, &out_flags, &new_val);
   }
 
   for (size_t i = 0; i < 10'000; i++) {

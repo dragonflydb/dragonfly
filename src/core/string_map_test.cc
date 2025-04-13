@@ -230,4 +230,18 @@ TEST_F(StringMapTest, ReallocIfNeeded) {
     EXPECT_EQ(sm_->Find(build_str(i * 10))->second, build_str(i * 10 + 1));
 }
 
+TEST_F(StringMapTest, ExpiryChangesSize) {
+  sm_->AddOrUpdate("field", "value");
+  const size_t old_size = sm_->ObjMallocUsed();
+
+  auto it = sm_->Find("field");
+  it.SetExpiryTime(1);
+
+  const size_t new_size = sm_->ObjMallocUsed();
+  EXPECT_LT(old_size, new_size);
+
+  sm_->AddOrUpdate("field", "value", 1);
+  EXPECT_EQ(new_size, sm_->ObjMallocUsed());
+}
+
 }  // namespace dfly

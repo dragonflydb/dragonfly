@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -57,7 +58,7 @@ type FileWorker struct {
 	clients   uint64
 }
 
-func (c *ClientWorker) Run(worker *FileWorker) {
+func (c *ClientWorker) Run(pace bool, worker *FileWorker) {
 	for msg := range c.incoming {
 		if c.processed == 0 && msg.DbIndex != 0 {
 			// There is no easy way to switch, we rely on connection pool consisting only of one connection
@@ -68,7 +69,10 @@ func (c *ClientWorker) Run(worker *FileWorker) {
 		if lag < 0 {
 			atomic.AddUint64(&worker.delayed, 1)
 		}
-		time.Sleep(lag)
+
+		if pace {
+			time.Sleep(lag)
+		}
 
 		c.pipe.Do(context.Background(), msg.values...).Result()
 		atomic.AddUint64(&worker.processed, 1)
@@ -88,7 +92,7 @@ func (c *ClientWorker) Run(worker *FileWorker) {
 	worker.clientGroup.Done()
 }
 
-func NewClient(w *FileWorker) *ClientWorker {
+func NewClient(w *FileWorker, pace bool) *ClientWorker {
 	client := &ClientWorker{
 		redis:    redis.NewClient(&redis.Options{Addr: *fHost, PoolSize: 1, DisableIndentity: true}),
 		incoming: make(chan Record, *fClientBuffer),
@@ -97,20 +101,25 @@ func NewClient(w *FileWorker) *ClientWorker {
 
 	atomic.AddUint64(&w.clients, 1)
 	w.clientGroup.Add(1)
-	go client.Run(w)
+	go client.Run(pace, w)
 	return client
 }
 
 func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
 	clients := make(map[uint32]*ClientWorker, 0)
+	recordId := uint64(0)
 	err := parseRecords(file, func(r Record) bool {
 		client, ok := clients[r.Client]
 		if !ok {
-			client = NewClient(w)
+			client = NewClient(w, *fPace)
 			clients[r.Client] = client
 		}
+		cmdName := strings.ToLower(r.values[0].(string))
+		recordId += 1
+		if cmdName != "eval" && recordId < uint64(*fSkip) {
+			return true
+		}
 		atomic.AddUint64(&w.parsed, 1)
-
 		client.incoming <- r
 		return true
 	})

@@ -7,6 +7,7 @@
 #include <absl/strings/match.h>
 
 #include "absl/strings/str_cat.h"
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -16,6 +17,8 @@ using namespace testing;
 using namespace std;
 using namespace util;
 using namespace boost;
+
+ABSL_DECLARE_FLAG(string, cluster_mode);
 
 namespace dfly {
 
@@ -441,11 +444,9 @@ TEST_F(ServerFamilyTest, ClientTrackingUpdateKey) {
   std::vector<std::string_view> keys_invalidated;
   for (unsigned int i = 2; i < 6; ++i)
     keys_invalidated.push_back(GetInvalidationMessage("IO0", i).key);
-  ASSERT_THAT(keys_invalidated, ElementsAre("X1", "Y3", "Z2", "Z4"));
+  ASSERT_THAT(keys_invalidated, UnorderedElementsAre("X1", "Y3", "Z2", "Z4"));
 
-  // The following doesn't work correctly as we currently can't mock listener.
-  // flushdb command
-  // Run({"FLUSHDB"});
+  Run({"FLUSHDB"});
 }
 
 TEST_F(ServerFamilyTest, ClientTrackingDeleteKey) {
@@ -546,7 +547,20 @@ TEST_F(ServerFamilyTest, ConfigNormalization) {
 }
 
 TEST_F(ServerFamilyTest, CommandDocsOk) {
-  EXPECT_THAT(Run({"command", "docs"}), "OK");
+  EXPECT_THAT(Run({"command", "docs"}), ErrArg("COMMAND DOCS Not Implemented"));
+}
+
+TEST_F(ServerFamilyTest, PubSubCommandErr) {
+  // Check conditions only in non cluster mode
+  if (auto cluster_mode = absl::GetFlag(FLAGS_cluster_mode); cluster_mode == "") {
+    EXPECT_THAT(Run({"PUBSUB", "SHARDCHANNELS"}),
+                ErrArg("PUBSUB SHARDCHANNELS is not supported in non cluster mode"));
+    EXPECT_THAT(Run({"PUBSUB", "SHARDNUMSUB"}),
+                ErrArg("PUBSUB SHARDNUMSUB is not supported in non cluster mode"));
+  }
+  EXPECT_THAT(Run({"PUBSUB", "INVALIDSUBCOMMAND"}),
+              ErrArg("Unknown subcommand or wrong number of arguments for 'INVALIDSUBCOMMAND'. Try "
+                     "PUBSUB HELP."));
 }
 
 }  // namespace dfly

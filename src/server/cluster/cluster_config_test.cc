@@ -95,41 +95,47 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidEmpty) {
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidMissingSlots) {
-  EXPECT_EQ(ClusterConfig::CreateFromConfig(
-                kMyId, {{.slot_ranges = SlotRanges({{.start = 0, .end = 16000}}),
-                         .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
-                         .replicas = {},
-                         .migrations = {}}}),
-            nullptr);
+  EXPECT_EQ(
+      ClusterConfig::CreateFromConfig(
+          kMyId,
+          {{.slot_ranges = SlotRanges({{.start = 0, .end = 16000}}),
+            .master = {{.id = "other", .ip = "192.168.0.100", .port = 7000}, NodeHealth::ONLINE},
+            .replicas = {},
+            .migrations = {}}}),
+      nullptr);
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidDoubleBookedSlot) {
   EXPECT_EQ(ClusterConfig::CreateFromConfig(
-                kMyId,
-                ClusterShardInfos({{.slot_ranges = SlotRanges({{.start = 0, .end = 0x3FFF}}),
-                                    .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
-                                    .replicas = {},
-                                    .migrations = {}},
-                                   {.slot_ranges = SlotRanges({{.start = 0, .end = 0}}),
-                                    .master = {.id = "other2", .ip = "192.168.0.101", .port = 7001},
-                                    .replicas = {},
-                                    .migrations = {}}})),
+                kMyId, ClusterShardInfos(
+                           {{.slot_ranges = SlotRanges({{.start = 0, .end = 0x3FFF}}),
+                             .master = {{.id = "other", .ip = "192.168.0.100", .port = 7000},
+                                        NodeHealth::ONLINE},
+                             .replicas = {},
+                             .migrations = {}},
+                            {.slot_ranges = SlotRanges({{.start = 0, .end = 0}}),
+                             .master = {{.id = "other2", .ip = "192.168.0.101", .port = 7001},
+                                        NodeHealth::ONLINE},
+                             .replicas = {},
+                             .migrations = {}}})),
             nullptr);
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidSlotId) {
-  EXPECT_EQ(ClusterConfig::CreateFromConfig(
-                kMyId, {{.slot_ranges = SlotRanges({{.start = 0, .end = 0x3FFF + 1}}),
-                         .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
-                         .replicas = {},
-                         .migrations = {}}}),
-            nullptr);
+  EXPECT_EQ(
+      ClusterConfig::CreateFromConfig(
+          kMyId,
+          {{.slot_ranges = SlotRanges({{.start = 0, .end = 0x3FFF + 1}}),
+            .master = {{.id = "other", .ip = "192.168.0.100", .port = 7000}, NodeHealth::ONLINE},
+            .replicas = {},
+            .migrations = {}}}),
+      nullptr);
 }
 
 TEST_F(ClusterConfigTest, ConfigSetOk) {
   auto config = ClusterConfig::CreateFromConfig(
       kMyId, {{.slot_ranges = SlotRanges({{.start = 0, .end = 0x3FFF}}),
-               .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
+               .master = {{.id = "other", .ip = "192.168.0.100", .port = 7000}, NodeHealth::ONLINE},
                .replicas = {},
                .migrations = {}}});
   EXPECT_NE(config, nullptr);
@@ -140,10 +146,12 @@ TEST_F(ClusterConfigTest, ConfigSetOk) {
 
 TEST_F(ClusterConfigTest, ConfigSetOkWithReplica) {
   auto config = ClusterConfig::CreateFromConfig(
-      kMyId, {{.slot_ranges = SlotRanges({{.start = 0, .end = 0x3FFF}}),
-               .master = {.id = "other-master", .ip = "192.168.0.100", .port = 7000},
-               .replicas = {{.id = "other-replica", .ip = "192.168.0.101", .port = 7001}},
-               .migrations = {}}});
+      kMyId,
+      {{.slot_ranges = SlotRanges({{.start = 0, .end = 0x3FFF}}),
+        .master = {{.id = "other-master", .ip = "192.168.0.100", .port = 7000}, NodeHealth::ONLINE},
+        .replicas = {{{.id = "other-replica", .ip = "192.168.0.101", .port = 7001},
+                      NodeHealth::ONLINE}},
+        .migrations = {}}});
   EXPECT_NE(config, nullptr);
   EXPECT_THAT(config->GetMasterNodeForSlot(0),
               NodeMatches(Node{.id = "other-master", .ip = "192.168.0.100", .port = 7000}));
@@ -151,19 +159,25 @@ TEST_F(ClusterConfigTest, ConfigSetOkWithReplica) {
 
 TEST_F(ClusterConfigTest, ConfigSetMultipleInstances) {
   auto config = ClusterConfig::CreateFromConfig(
-      kMyId, ClusterShardInfos(
-                 {{.slot_ranges = SlotRanges({{.start = 0, .end = 5'000}}),
-                   .master = {.id = "other-master", .ip = "192.168.0.100", .port = 7000},
-                   .replicas = {{.id = "other-replica", .ip = "192.168.0.101", .port = 7001}},
-                   .migrations = {}},
-                  {.slot_ranges = SlotRanges({{.start = 5'001, .end = 10'000}}),
-                   .master = {.id = kMyId, .ip = "192.168.0.102", .port = 7002},
-                   .replicas = {{.id = "other-replica2", .ip = "192.168.0.103", .port = 7003}},
-                   .migrations = {}},
-                  {.slot_ranges = SlotRanges({{.start = 10'001, .end = 0x3FFF}}),
-                   .master = {.id = "other-master3", .ip = "192.168.0.104", .port = 7004},
-                   .replicas = {{.id = "other-replica3", .ip = "192.168.0.105", .port = 7005}},
-                   .migrations = {}}}));
+      kMyId,
+      ClusterShardInfos(
+          {{.slot_ranges = SlotRanges({{.start = 0, .end = 5'000}}),
+            .master = {{.id = "other-master", .ip = "192.168.0.100", .port = 7000},
+                       NodeHealth::ONLINE},
+            .replicas = {{{.id = "other-replica", .ip = "192.168.0.101", .port = 7001},
+                          NodeHealth::ONLINE}},
+            .migrations = {}},
+           {.slot_ranges = SlotRanges({{.start = 5'001, .end = 10'000}}),
+            .master = {{.id = kMyId, .ip = "192.168.0.102", .port = 7002}, NodeHealth::ONLINE},
+            .replicas = {{{.id = "other-replica2", .ip = "192.168.0.103", .port = 7003},
+                          NodeHealth::ONLINE}},
+            .migrations = {}},
+           {.slot_ranges = SlotRanges({{.start = 10'001, .end = 0x3FFF}}),
+            .master = {{.id = "other-master3", .ip = "192.168.0.104", .port = 7004},
+                       NodeHealth::ONLINE},
+            .replicas = {{{.id = "other-replica3", .ip = "192.168.0.105", .port = 7005},
+                          NodeHealth::ONLINE}},
+            .migrations = {}}}));
   EXPECT_NE(config, nullptr);
   SlotSet owned_slots = config->GetOwnedSlots();
   EXPECT_EQ(owned_slots.ToSlotRanges().Size(), 1);
@@ -703,6 +717,25 @@ TEST_F(ClusterConfigTest, ConfigComparison) {
   EXPECT_NE(config3->GetConfig(), config5->GetConfig());
   EXPECT_NE(config4->GetConfig(), config5->GetConfig());
   EXPECT_EQ(config5->GetConfig(), config5->GetConfig());
+}
+
+TEST_F(ClusterConfigTest, NodesHealth) {
+  auto config1 = ClusterConfig::CreateFromConfig("id0", R"json(
+  [
+    {
+      "slot_ranges": [ { "start": 0, "end": 16383 } ],
+      "master": { "id": "id0", "ip": "localhost", "port": 3000, "health" : "online" },
+      "replicas": [{ "id": "id1", "ip": "localhost", "port": 3001, "health" : "loading" },
+                   { "id": "id2", "ip": "localhost", "port": 3002, "health" : "fail" }],
+      "migrations": [{ "slot_ranges": [ { "start": 7000, "end": 8000 } ]
+                     , "ip": "127.0.0.1", "port" : 9001, "node_id": "id1" }]
+    }
+
+  ])json");
+
+  EXPECT_EQ(config1->GetConfig().begin()->master.health, NodeHealth::ONLINE);
+  EXPECT_EQ(config1->GetConfig().begin()->replicas.front().health, NodeHealth::LOADING);
+  EXPECT_EQ(config1->GetConfig().begin()->replicas.back().health, NodeHealth::FAIL);
 }
 
 }  // namespace dfly::cluster

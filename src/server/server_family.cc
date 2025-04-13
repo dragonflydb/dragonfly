@@ -230,7 +230,7 @@ using strings::HumanReadableNumBytes;
 
 namespace {
 
-const auto kRedisVersion = "7.2.0";
+const auto kRedisVersion = "7.4.0";
 
 using EngineFunc = void (ServerFamily::*)(CmdArgList args, const CommandContext&);
 
@@ -251,12 +251,29 @@ string UnknownCmd(string cmd, CmdArgList args) {
                       absl::StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
 }
 
-bool IsS3Path(string_view path) {
-  return absl::StartsWith(path, detail::kS3Prefix);
-}
-
-bool IsGCSPath(string_view path) {
-  return absl::StartsWith(path, detail::kGCSPrefix);
+std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_view uri) {
+  if (detail::IsS3Path(uri)) {
+#ifdef WITH_AWS
+    shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
+    return std::make_shared<detail::AwsS3SnapshotStorage>(
+        absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_use_https),
+        absl::GetFlag(FLAGS_s3_ec2_metadata), absl::GetFlag(FLAGS_s3_sign_payload));
+#else
+    LOG(ERROR) << "Compiled without AWS support";
+    exit(1);
+#endif
+  } else if (detail::IsGCSPath(uri)) {
+    auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
+    auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return gcs->Init(3000); });
+    if (ec) {
+      LOG(ERROR) << "Failed to initialize GCS snapshot storage: " << ec.message();
+      exit(1);
+    }
+    return gcs;
+  } else {
+    LOG(ERROR) << "Uknown cloud storage " << uri;
+    exit(1);
+  }
 }
 
 // Check that if TLS is used at least one form of client authentication is
@@ -359,35 +376,6 @@ void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkRe
   result.append("\n");
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   return rb->SendVerbatimString(result);
-}
-
-void ClientPauseCmd(CmdArgList args, vector<facade::Listener*> listeners, SinkReplyBuilder* builder,
-                    ConnectionContext* cntx) {
-  CmdArgParser parser(args);
-
-  auto timeout = parser.Next<uint64_t>();
-  ClientPause pause_state = ClientPause::ALL;
-  if (parser.HasNext()) {
-    pause_state = parser.MapNext("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
-  }
-  if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
-  }
-
-  const auto timeout_ms = timeout * 1ms;
-  auto is_pause_in_progress = [end_time = chrono::steady_clock::now() + timeout_ms] {
-    return ServerState::tlocal()->gstate() != GlobalState::SHUTTING_DOWN &&
-           chrono::steady_clock::now() < end_time;
-  };
-
-  if (auto pause_fb_opt =
-          Pause(listeners, cntx->ns, cntx->conn(), pause_state, std::move(is_pause_in_progress));
-      pause_fb_opt) {
-    pause_fb_opt->Detach();
-    builder->SendOk();
-  } else {
-    builder->SendError("Failed to pause all running clients");
-  }
 }
 
 void ClientTracking(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx) {
@@ -728,7 +716,8 @@ void SlowLogGet(dfly::CmdArgList args, std::string_view sub_cmd, util::ProactorP
 
 std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namespace* ns,
                                 facade::Connection* conn, ClientPause pause_state,
-                                std::function<bool()> is_pause_in_progress) {
+                                std::function<bool()> is_pause_in_progress,
+                                std::function<void()> maybe_cleanup) {
   // Track connections and set pause state to be able to wait untill all running transactions read
   // the new pause state. Exlude already paused commands from the busy count. Exlude tracking
   // blocked connections because: a) If the connection is blocked it is puased. b) We read pause
@@ -758,23 +747,28 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
   shard_set->RunBriefInParallel(
       [ns](EngineShard* shard) { ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(false); });
 
-  return fb2::Fiber("client_pause", [is_pause_in_progress, pause_state, ns]() mutable {
-    // On server shutdown we sleep 10ms to make sure all running task finish, therefore 10ms steps
-    // ensure this fiber will not left hanging .
-    constexpr auto step = 10ms;
-    while (is_pause_in_progress()) {
-      ThisFiber::SleepFor(step);
-    }
+  return fb2::Fiber("client_pause",
+                    [is_pause_in_progress, pause_state, ns, maybe_cleanup]() mutable {
+                      // On server shutdown we sleep 10ms to make sure all running task finish,
+                      // therefore 10ms steps ensure this fiber will not left hanging .
+                      constexpr auto step = 10ms;
+                      while (is_pause_in_progress()) {
+                        ThisFiber::SleepFor(step);
+                      }
 
-    ServerState& etl = *ServerState::tlocal();
-    if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
-      shard_set->pool()->AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
-        ServerState::tlocal()->SetPauseState(pause_state, false);
-      });
-      shard_set->RunBriefInParallel(
-          [ns](EngineShard* shard) { ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(true); });
-    }
-  });
+                      ServerState& etl = *ServerState::tlocal();
+                      if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
+                        shard_set->pool()->AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
+                          ServerState::tlocal()->SetPauseState(pause_state, false);
+                        });
+                        shard_set->RunBriefInParallel([ns](EngineShard* shard) {
+                          ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
+                        });
+                      }
+                      if (maybe_cleanup) {
+                        maybe_cleanup();
+                      }
+                    });
 }
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
@@ -870,7 +864,6 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   config_registry.RegisterMutable("tls_ca_cert_dir");
   config_registry.RegisterMutable("replica_priority");
   config_registry.RegisterMutable("lua_undeclared_keys_shas");
-  config_registry.RegisterMutable("list_rdb_encode_v2");
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
@@ -878,24 +871,9 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   }
 
   string flag_dir = GetFlag(FLAGS_dir);
-  if (IsS3Path(flag_dir)) {
-#ifdef WITH_AWS
-    shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
-    snapshot_storage_ = std::make_shared<detail::AwsS3SnapshotStorage>(
-        absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_use_https),
-        absl::GetFlag(FLAGS_s3_ec2_metadata), absl::GetFlag(FLAGS_s3_sign_payload));
-#else
-    LOG(ERROR) << "Compiled without AWS support";
-    exit(1);
-#endif
-  } else if (IsGCSPath(flag_dir)) {
-    auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
-    auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return gcs->Init(3000); });
-    if (ec) {
-      LOG(ERROR) << "Failed to initialize GCS snapshot storage: " << ec.message();
-      exit(1);
-    }
-    snapshot_storage_ = std::move(gcs);
+
+  if (detail::IsCloudPath(flag_dir)) {
+    snapshot_storage_ = CreateCloudSnapshotStorage(flag_dir);
   } else if (fq_threadpool_) {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {
@@ -949,9 +927,11 @@ void ServerFamily::LoadFromSnapshot() {
     if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
       LOG(WARNING) << "Load snapshot: No snapshot found";
     } else {
-      util::fb2::LockGuard lk{loading_stats_mu_};
+      loading_stats_mu_.lock();
       loading_stats_.failed_restore_count++;
-      LOG(ERROR) << "Failed to load snapshot: " << load_path_result.error().Format();
+      loading_stats_mu_.unlock();
+      LOG(ERROR) << "Failed to load snapshot with error: " << load_path_result.error().Format();
+      exit(1);
     }
   }
 }
@@ -984,6 +964,8 @@ void ServerFamily::Shutdown() {
       }
     });
   }
+
+  client_pause_ec_.await([this] { return active_pauses_.load() == 0; });
 
   pb_task_->Await([this] {
     auto ec = journal_->Close();
@@ -1200,9 +1182,15 @@ io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
   VLOG(1) << "Loading data from " << rdb_file;
   CHECK(fb2::ProactorBase::IsProactorThread()) << "must be called from proactor thread";
 
-  error_code ec;
-  io::ReadonlyFileOrError res = snapshot_storage_->OpenReadFile(rdb_file);
-  if (res) {
+  io::Result<size_t> result;
+  ProactorBase* proactor = fb2::ProactorBase::me();
+  auto fb = proactor->LaunchFiber([&] {
+    io::ReadonlyFileOrError res = snapshot_storage_->OpenReadFile(rdb_file);
+    if (!res) {
+      result = nonstd::make_unexpected(res.error());
+      return;
+    }
+
     io::FileSource fs(*res);
 
     RdbLoader loader{&service_};
@@ -1210,16 +1198,18 @@ io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
       loader.SetOverrideExistingKeys(true);
     }
 
-    ec = loader.Load(&fs);
-    if (!ec) {
+    auto ec = loader.Load(&fs);
+    if (ec) {
+      result = nonstd::make_unexpected(ec);
+    } else {
       VLOG(1) << "Done loading RDB from " << rdb_file << ", keys loaded: " << loader.keys_loaded();
       VLOG(1) << "Loading finished after " << strings::HumanReadableElapsedTime(loader.load_time());
-      return loader.keys_loaded();
+      result = loader.keys_loaded();
     }
-  } else {
-    ec = res.error();
-  }
-  return nonstd::make_unexpected(ec);
+  });
+
+  fb.Join();
+  return result;
 }
 
 enum MetricType { COUNTER, GAUGE, SUMMARY, HISTOGRAM };
@@ -1295,8 +1285,11 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   const auto& conn_stats = m.facade_stats.conn_stats;
   AppendMetricWithoutLabels("max_clients", "Maximal number of clients", GetFlag(FLAGS_maxclients),
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("connected_clients", "", conn_stats.num_conns, MetricType::GAUGE,
-                            &resp->body());
+  AppendMetricHeader("connected_clients", "", MetricType::GAUGE, &resp->body());
+  AppendMetricValue("connected_clients", conn_stats.num_conns_main, {"listener"}, {"main"},
+                    &resp->body());
+  AppendMetricValue("connected_clients", conn_stats.num_conns_other, {"listener"}, {"other"},
+                    &resp->body());
   AppendMetricWithoutLabels("client_read_buffer_bytes", "", conn_stats.read_buf_capacity,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("blocked_clients", "", conn_stats.num_blocked_clients,
@@ -1393,8 +1386,11 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("connections_received_total", "", conn_stats.conn_received_cnt,
                             MetricType::COUNTER, &resp->body());
 
-  AppendMetricWithoutLabels("commands_processed_total", "", conn_stats.command_cnt,
-                            MetricType::COUNTER, &resp->body());
+  AppendMetricHeader("commands_processed_total", "", MetricType::COUNTER, &resp->body());
+  AppendMetricValue("commands_processed_total", conn_stats.command_cnt_main, {"listener"}, {"main"},
+                    &resp->body());
+  AppendMetricValue("commands_processed_total", conn_stats.command_cnt_other, {"listener"},
+                    {"other"}, &resp->body());
   AppendMetricWithoutLabels("keyspace_hits_total", "", m.events.hits, MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("keyspace_misses_total", "", m.events.misses, MetricType::COUNTER,
@@ -1448,15 +1444,21 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   if (!m.cmd_stats_map.empty()) {
     string command_metrics;
 
-    AppendMetricHeader("commands", "Metrics for all commands ran", MetricType::COUNTER,
+    AppendMetricHeader("commands_total", "Total number of commands executed", MetricType::COUNTER,
                        &command_metrics);
     for (const auto& [name, stat] : m.cmd_stats_map) {
       const auto calls = stat.first;
-      const double duration_seconds = stat.second * 1e-6;
       AppendMetricValue("commands_total", calls, {"cmd"}, {name}, &command_metrics);
+    }
+
+    AppendMetricHeader("commands_duration_seconds", "Duration of commands in seconds",
+                       MetricType::HISTOGRAM, &command_metrics);
+    for (const auto& [name, stat] : m.cmd_stats_map) {
+      const double duration_seconds = stat.second * 1e-6;
       AppendMetricValue("commands_duration_seconds", duration_seconds, {"cmd"}, {name},
                         &command_metrics);
     }
+
     absl::StrAppend(&resp->body(), command_metrics);
   }
 
@@ -1517,6 +1519,26 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     }
     if (added)
       absl::StrAppend(&resp->body(), str);
+  }
+
+  if (IsClusterEnabled()) {
+    string migration_errors_str;
+    AppendMetricHeader("migration_errors_total", "Total error numbers of current migrations",
+                       MetricType::GAUGE, &migration_errors_str);
+    AppendMetricValue("migration_errors_total", m.migration_errors_total, {"num"},
+                      {"migration errors"}, &migration_errors_str);
+    absl::StrAppend(&resp->body(), migration_errors_str);
+
+    string moved_errors_str;
+    uint64_t moved_total_errors = 0;
+    if (m.facade_stats.reply_stats.err_count.contains("MOVED")) {
+      moved_total_errors = m.facade_stats.reply_stats.err_count.at("MOVED");
+    }
+    AppendMetricHeader("moved_errors_total", "Total number of moved slot errors",
+                       MetricType::COUNTER, &moved_errors_str);
+    AppendMetricValue("moved_errors_total", moved_total_errors, {"num"}, {"moved errors"},
+                      &moved_errors_str);
+    absl::StrAppend(&resp->body(), moved_errors_str);
   }
 
   string db_key_metrics;
@@ -1625,6 +1647,8 @@ void ServerFamily::StatsMC(std::string_view section, SinkReplyBuilder* builder) 
   Metrics m = GetMetrics(&namespaces->GetDefaultNamespace());
   uint64_t uptime = time(NULL) - start_time_;
 
+  const uint32_t total_conns =
+      m.facade_stats.conn_stats.num_conns_main + m.facade_stats.conn_stats.num_conns_other;
   ADD_LINE(pid, getpid());
   ADD_LINE(uptime, uptime);
   ADD_LINE(time, now);
@@ -1634,7 +1658,7 @@ void ServerFamily::StatsMC(std::string_view section, SinkReplyBuilder* builder) 
   ADD_LINE(rusage_user, utime);
   ADD_LINE(rusage_system, systime);
   ADD_LINE(max_connections, -1);
-  ADD_LINE(curr_connections, m.facade_stats.conn_stats.num_conns);
+  ADD_LINE(curr_connections, total_conns);
   ADD_LINE(total_connections, -1);
   ADD_LINE(rejected_connections, -1);
   ADD_LINE(bytes_read, m.facade_stats.conn_stats.io_read_bytes);
@@ -1654,10 +1678,11 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
   CHECK_NOTNULL(cid);
   boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
   trans->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
-  return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, trans.get(), ignore_state);
+  return DoSave(SaveCmdOptions{absl::GetFlag(FLAGS_df_snapshot_format), {}, {}}, trans.get(),
+                ignore_state);
 }
 
-GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view basename,
+GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts,
                                                Transaction* trans, bool ignore_state) {
   auto state = ServerState::tlocal()->gstate();
 
@@ -1673,10 +1698,13 @@ GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view bas
                           "SAVING - can not save database"};
     }
 
-    VLOG(1) << "Saving snapshot to " << basename;
+    auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
+                                ? snapshot_storage_
+                                : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
 
     save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
-        new_version, basename, trans, &service_, fq_threadpool_.get(), snapshot_storage_});
+        save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
+        &service_, fq_threadpool_.get(), snapshot_storage});
 
     auto res = save_controller_->InitResourcesAndStart();
 
@@ -1713,9 +1741,9 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   return save_info.error;
 }
 
-GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
+GenericError ServerFamily::DoSave(const SaveCmdOptions& save_cmd_opts, Transaction* trans,
                                   bool ignore_state) {
-  if (auto ec = DoSaveCheckAndStart(new_version, basename, trans, ignore_state); ec) {
+  if (auto ec = DoSaveCheckAndStart(save_cmd_opts, trans, ignore_state); ec) {
     return ec;
   }
 
@@ -1843,6 +1871,18 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
     cntx->pub_sub = std::move(cred.pub_sub);
     cntx->ns = &namespaces->GetOrInsert(cred.ns);
     cntx->authenticated = true;
+    cntx->acl_db_idx = cred.db;
+    if (cred.db == std::numeric_limits<size_t>::max()) {
+      cntx->conn_state.db_index = 0;
+    } else {
+      auto cb = [ns = cntx->ns, index = cred.db](EngineShard* shard) {
+        auto& db_slice = ns->GetDbSlice(shard->shard_id());
+        db_slice.ActivateDb(index);
+        return OpStatus::OK;
+      };
+      shard_set->RunBriefInParallel(std::move(cb));
+      cntx->conn_state.db_index = cred.db;
+    }
   }
   return is_authorized;
 }
@@ -1883,6 +1923,54 @@ void ServerFamily::Auth(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
+void ServerFamily::ClientUnPauseCmd(CmdArgList args, SinkReplyBuilder* builder) {
+  if (!args.empty()) {
+    builder->SendError(facade::kSyntaxErr);
+    return;
+  }
+  is_c_pause_in_progress_.store(false, std::memory_order_relaxed);
+  builder->SendOk();
+}
+
+void ClientHelp(SinkReplyBuilder* builder) {
+  string_view help_arr[] = {
+      "CLIENT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+      "CACHING (YES|NO)",
+      "    Enable/disable tracking of the keys for next command in OPTIN/OPTOUT modes.",
+      "GETNAME",
+      "    Return the name of the current connection.",
+      "ID",
+      "    Return the ID of the current connection.",
+      "KILL <ip:port>",
+      "    Kill connection made from <ip:port>.",
+      "KILL <option> <value> [<option> <value> [...]]",
+      "    Kill connections. Options are:",
+      "    * ADDR (<ip:port>|<unixsocket>:0)",
+      "      Kill connections made from the specified address",
+      "    * LADDR (<ip:port>|<unixsocket>:0)",
+      "      Kill connections made to specified local address",
+      "    * ID <client-id>",
+      "      Kill connections by client id.",
+      "LIST",
+      "    Return information about client connections.",
+      "UNPAUSE",
+      "    Stop the current client pause, resuming traffic.",
+      "PAUSE <timeout> [WRITE|ALL]",
+      "    Suspend all, or just write, clients for <timeout> milliseconds.",
+      "SETNAME <name>",
+      "    Assign the name <name> to the current connection.",
+      "SETINFO <option> <value>",
+      "Set client meta attr. Options are:",
+      "    * LIB-NAME: the client lib name.",
+      "    * LIB-VER: the client lib version.",
+      "TRACKING (ON|OFF) [OPTIN] [OPTOUT] [NOLOOP]",
+      "    Control server assisted client side caching.",
+      "HELP",
+      "    Print this help."};
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  return rb->SendSimpleStrArr(help_arr);
+}
+
 void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
   CmdArgList sub_args = args.subspan(1);
@@ -1896,7 +1984,9 @@ void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
   } else if (sub_cmd == "LIST") {
     return ClientList(sub_args, absl::MakeSpan(listeners_), builder, cntx);
   } else if (sub_cmd == "PAUSE") {
-    return ClientPauseCmd(sub_args, GetNonPriviligedListeners(), builder, cntx);
+    return ClientPauseCmd(sub_args, builder, cntx);
+  } else if (sub_cmd == "UNPAUSE") {
+    return ClientUnPauseCmd(sub_args, builder);
   } else if (sub_cmd == "TRACKING") {
     return ClientTracking(sub_args, builder, cntx);
   } else if (sub_cmd == "KILL") {
@@ -1907,9 +1997,10 @@ void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
     return ClientSetInfo(sub_args, builder, cntx);
   } else if (sub_cmd == "ID") {
     return ClientId(sub_args, builder, cntx);
+  } else if (sub_cmd == "HELP") {
+    return ClientHelp(builder);
   }
 
-  LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
   return builder->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
 }
 
@@ -2013,46 +2104,61 @@ void ServerFamily::BgSaveFb(boost::intrusive_ptr<Transaction> trans) {
   }
 }
 
-std::optional<ServerFamily::VersionBasename> ServerFamily::GetVersionAndBasename(
-    CmdArgList args, SinkReplyBuilder* builder) {
-  if (args.size() > 2) {
+std::optional<SaveCmdOptions> ServerFamily::GetSaveCmdOpts(CmdArgList args,
+                                                           SinkReplyBuilder* builder) {
+  if (args.size() > 3) {
     builder->SendError(kSyntaxErr);
     return {};
   }
 
-  bool new_version = absl::GetFlag(FLAGS_df_snapshot_format);
+  SaveCmdOptions save_cmd_opts;
+  save_cmd_opts.new_version = absl::GetFlag(FLAGS_df_snapshot_format);
 
   if (args.size() >= 1) {
     string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
     if (sub_cmd == "DF") {
-      new_version = true;
+      save_cmd_opts.new_version = true;
     } else if (sub_cmd == "RDB") {
-      new_version = false;
+      save_cmd_opts.new_version = false;
     } else {
       builder->SendError(UnknownSubCmd(sub_cmd, "SAVE"), kSyntaxErrType);
       return {};
     }
   }
 
-  string_view basename;
-  if (args.size() == 2) {
-    basename = ArgS(args, 1);
+  if (args.size() >= 2) {
+    if (detail::IsS3Path(ArgS(args, 1))) {
+#ifdef WITH_AWS
+      save_cmd_opts.cloud_uri = ArgS(args, 1);
+#else
+      LOG(ERROR) << "Compiled without AWS support";
+      exit(1);
+#endif
+    } else if (detail::IsGCSPath(ArgS(args, 1))) {
+      save_cmd_opts.cloud_uri = ArgS(args, 1);
+    } else {
+      // no cloud_uri get basename and return
+      save_cmd_opts.basename = ArgS(args, 1);
+      return save_cmd_opts;
+    }
+    // cloud_uri is set so get basename if provided
+    if (args.size() == 3) {
+      save_cmd_opts.basename = ArgS(args, 2);
+    }
   }
 
-  return ServerFamily::VersionBasename{new_version, basename};
+  return save_cmd_opts;
 }
 
-// BGSAVE [DF|RDB] [basename]
+// SAVE [DF|RDB] [CLOUD_URI] [BASENAME]
 // TODO add missing [SCHEDULE]
 void ServerFamily::BgSave(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto maybe_res = GetVersionAndBasename(args, cmd_cntx.rb);
+  auto maybe_res = GetSaveCmdOpts(args, cmd_cntx.rb);
   if (!maybe_res) {
     return;
   }
 
-  const auto [version, basename] = *maybe_res;
-
-  if (auto ec = DoSaveCheckAndStart(version, basename, cmd_cntx.tx); ec) {
+  if (auto ec = DoSaveCheckAndStart(*maybe_res, cmd_cntx.tx); ec) {
     cmd_cntx.rb->SendError(ec.Format());
     return;
   }
@@ -2062,18 +2168,16 @@ void ServerFamily::BgSave(CmdArgList args, const CommandContext& cmd_cntx) {
   cmd_cntx.rb->SendOk();
 }
 
-// SAVE [DF|RDB] [basename]
+// SAVE [DF|RDB] [CLOUD_URI] [BASENAME]
 // Allows saving the snapshot of the dataset on disk, potentially overriding the format
 // and the snapshot name.
 void ServerFamily::Save(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto maybe_res = GetVersionAndBasename(args, cmd_cntx.rb);
+  auto maybe_res = GetSaveCmdOpts(args, cmd_cntx.rb);
   if (!maybe_res) {
     return;
   }
 
-  const auto [version, basename] = *maybe_res;
-
-  GenericError ec = DoSave(version, basename, cmd_cntx.tx);
+  GenericError ec = DoSave(*maybe_res, cmd_cntx.tx);
   if (ec) {
     cmd_cntx.rb->SendError(ec.Format());
   } else {
@@ -2108,7 +2212,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   uint64_t start = absl::GetCurrentTimeNanos();
 
-  auto cmd_stat_cb = [&dest = result.cmd_stats_map](string_view name, const CmdCallStats& stat) {
+  auto cmd_stat_cb = [&dest = result.cmd_stats_map](string_view name,
+                                                    const CmdCallStats::mapped_type& stat) {
     auto& [calls, sum] = dest[absl::AsciiStrToLower(name)];
     calls += stat.first;
     sum += stat.second;
@@ -2202,6 +2307,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
     result.loading_stats = loading_stats_;
   }
 
+  result.migration_errors_total = service_.cluster_family().MigrationsErrorsCount();
+
   // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
   // update peak_stats_ from it.
   util::fb2::LockGuard lk{peak_stats_mu_};
@@ -2220,18 +2327,13 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   return result;
 }
 
-void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (args.size() > 1) {
-    return cmd_cntx.rb->SendError(kSyntaxErr);
-  }
-
-  string section;
-
-  if (args.size() == 1) {
-    section = absl::AsciiStrToUpper(ArgS(args, 0));
-  }
-
+string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view section,
+                                       bool priveleged) const {
   string info;
+  DbStats total;
+
+  for (const auto& db_stats : m.db_stats)
+    total += db_stats;
 
   auto should_enter = [&](string_view name, bool hidden = false) {
     if ((!hidden && section.empty()) || section == "ALL" || section == name) {
@@ -2242,17 +2344,20 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     return false;
   };
 
-  auto append = [&info](absl::AlphaNum a1, absl::AlphaNum a2) {
+  auto append = [&info](const absl::AlphaNum& a1, const absl::AlphaNum& a2) {
     absl::StrAppend(&info, a1, ":", a2, "\r\n");
   };
 
-  ServerState* ss = ServerState::tlocal();
+  bool show_managed_info = priveleged || !absl::GetFlag(FLAGS_managed_service_info);
 
-  bool show_managed_info =
-      !absl::GetFlag(FLAGS_managed_service_info) || cmd_cntx.conn_cntx->conn()->IsPrivileged();
+  // For some reason on some distributions (like Fedora and OpenSuse) each call to append
+  // increase the stack usage of this function. So we use the lambda trick to avoid this.
+  // Also, it's more readable.
+  auto add_server_info = [&] {
+    ProactorBase* proactor = ProactorBase::me();
 
-  if (should_enter("SERVER")) {
-    auto kind = ProactorBase::me()->GetKind();
+    // proactor might be null in tests.
+    auto kind = proactor ? ProactorBase::me()->GetKind() : ProactorBase::EPOLL;
     const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
 
     append("redis_version", kRedisVersion);
@@ -2270,29 +2375,21 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     uint64_t uptime = time(NULL) - start_time_;
     append("uptime_in_seconds", uptime);
     append("uptime_in_days", uptime / (3600 * 24));
-  }
+  };
 
-  Metrics m;
-  // Save time by not calculating metrics if we don't need them.
-  if (!(section == "SERVER" || section == "REPLICATION")) {
-    m = GetMetrics(cmd_cntx.conn_cntx->ns);
-  }
-
-  DbStats total;
-  for (const auto& db_stats : m.db_stats)
-    total += db_stats;
-
-  if (should_enter("CLIENTS")) {
-    append("connected_clients", m.facade_stats.conn_stats.num_conns);
+  auto add_clients_info = [&] {
+    append("connected_clients",
+           m.facade_stats.conn_stats.num_conns_main + m.facade_stats.conn_stats.num_conns_other);
     append("max_clients", GetFlag(FLAGS_maxclients));
     append("client_read_buffer_bytes", m.facade_stats.conn_stats.read_buf_capacity);
     append("blocked_clients", m.facade_stats.conn_stats.num_blocked_clients);
     append("pipeline_queue_length", m.facade_stats.conn_stats.dispatch_queue_entries);
 
     append("send_delay_ms", GetDelayMs(m.oldest_pending_send_ts));
-  }
+    append("timeout_disconnects", m.coordinator_stats.conn_timeout_events);
+  };
 
-  if (should_enter("MEMORY")) {
+  auto add_mem_info = [&] {
     append("used_memory", m.heap_used_bytes);
     append("used_memory_human", HumanReadableNumBytes(m.heap_used_bytes));
     const auto ump = used_mem_peak.load(memory_order_relaxed);
@@ -2329,8 +2426,6 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("num_buckets", total.bucket_count);
     append("num_entries", total.key_count);
     append("inline_keys", total.inline_keys);
-    append("listpack_blobs", total.listpack_blob_cnt);
-    append("listpack_bytes", total.listpack_bytes);
     append("small_string_bytes", m.small_string_bytes);
     append("pipeline_cache_bytes", m.facade_stats.conn_stats.pipeline_cmd_cache_bytes);
     append("dispatch_queue_bytes", m.facade_stats.conn_stats.dispatch_queue_bytes);
@@ -2365,14 +2460,14 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
         append("save_buffer_bytes", save_controller_->GetSaveBuffersSize());
       }
     }
-  }
+  };
 
-  if (should_enter("STATS")) {
+  auto add_stats_info = [&] {
     auto& conn_stats = m.facade_stats.conn_stats;
     auto& reply_stats = m.facade_stats.reply_stats;
 
     append("total_connections_received", conn_stats.conn_received_cnt);
-    append("total_commands_processed", conn_stats.command_cnt);
+    append("total_commands_processed", conn_stats.command_cnt_main + conn_stats.command_cnt_other);
     append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
     append("total_pipelined_squashed_commands", m.coordinator_stats.squashed_commands);
@@ -2380,6 +2475,7 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("pipelined_latency_usec", conn_stats.pipelined_cmd_latency);
     append("total_net_input_bytes", conn_stats.io_read_bytes);
     append("connection_migrations", conn_stats.num_migrations);
+    append("connection_recv_provided_calls", conn_stats.num_recv_provided_calls);
     append("total_net_output_bytes", reply_stats.io_write_bytes);
     append("rdb_save_usec", m.coordinator_stats.rdb_save_usec);
     append("rdb_save_count", m.coordinator_stats.rdb_save_count);
@@ -2415,9 +2511,9 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
 
     // Total number of events of when a connection was blocked on grabbing interpreter.
     append("lua_blocked_total", m.lua_stats.blocked_cnt);
-  }
+  };
 
-  if (should_enter("TIERED", true)) {
+  auto add_tiered_info = [&] {
     append("tiered_entries", total.tiered_entries);
     append("tiered_entries_bytes", total.tiered_used_bytes);
 
@@ -2445,9 +2541,9 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("tiered_ram_hits", m.events.ram_hits);
     append("tiered_ram_cool_hits", m.events.ram_cool_hits);
     append("tiered_ram_misses", m.events.ram_misses);
-  }
+  };
 
-  if (should_enter("PERSISTENCE", true)) {
+  auto add_persistence_info = [&] {
     size_t current_snap_keys = 0;
     size_t total_snap_keys = 0;
     double perc = 0;
@@ -2477,7 +2573,10 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("last_saved_file", save_info.file_name);
     append("last_success_save_duration_sec", save_info.success_duration_sec);
 
-    unsigned is_loading = (ss->gstate() == GlobalState::LOADING);
+    ServerState* ss = ServerState::tlocal();
+
+    // ss can be null in tests.
+    unsigned is_loading = ss && (ss->gstate() == GlobalState::LOADING);
     append("loading", is_loading);
     append("saving", is_saving);
     append("current_save_duration_sec", curent_durration_sec);
@@ -2491,9 +2590,9 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("last_failed_save", save_info.last_error_time);
     append("last_error", save_info.last_error.Format());
     append("last_failed_save_duration_sec", save_info.failed_duration_sec);
-  }
+  };
 
-  if (should_enter("TRANSACTION", true)) {
+  auto add_tx_info = [&] {
     append("tx_shard_polls", m.shard_stats.poll_execution_total);
     append("tx_shard_optimistic_total", m.shard_stats.tx_optimistic_total);
     append("tx_shard_ooo_total", m.shard_stats.tx_ooo_total);
@@ -2513,9 +2612,9 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("multi_squash_execution_total", m.coordinator_stats.multi_squash_executions);
     append("multi_squash_execution_hop_usec", m.coordinator_stats.multi_squash_exec_hop_usec);
     append("multi_squash_execution_reply_usec", m.coordinator_stats.multi_squash_exec_reply_usec);
-  }
+  };
 
-  if (should_enter("REPLICATION")) {
+  auto add_repl_info = [&] {
     bool is_master = true;
     // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
     // ensuring eventual consistency of is_master. When determining if the server is a replica and
@@ -2566,9 +2665,9 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
         replication_info_cb(replica->GetSummary());
       }
     }
-  }
+  };
 
-  if (should_enter("COMMANDSTATS", true)) {
+  auto add_cmdstats = [&] {
     auto append_sorted = [&append](string_view prefix, auto display) {
       sort(display.begin(), display.end());
       for (const auto& k_v : display) {
@@ -2590,6 +2689,42 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append_sorted("cmdstat_", std::move(commands));
     append_sorted("unknown_",
                   vector<pair<string_view, uint64_t>>(unknown_cmd.cbegin(), unknown_cmd.cend()));
+  };
+
+  if (should_enter("SERVER")) {
+    add_server_info();
+  }
+
+  if (should_enter("CLIENTS")) {
+    add_clients_info();
+  }
+
+  if (should_enter("MEMORY")) {
+    add_mem_info();
+  }
+
+  if (should_enter("STATS")) {
+    add_stats_info();
+  }
+
+  if (should_enter("TIERED", true)) {
+    add_tiered_info();
+  }
+
+  if (should_enter("PERSISTENCE", true)) {
+    add_persistence_info();
+  }
+
+  if (should_enter("TRANSACTION", true)) {
+    add_tx_info();
+  }
+
+  if (should_enter("REPLICATION")) {
+    add_repl_info();
+  }
+
+  if (should_enter("COMMANDSTATS", true)) {
+    add_cmdstats();
   }
 
   if (should_enter("MODULES")) {
@@ -2642,7 +2777,32 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
 
   if (should_enter("CLUSTER")) {
     append("cluster_enabled", IsClusterEnabledOrEmulated());
+    append("migration_errors_total", service_.cluster_family().MigrationsErrorsCount());
   }
+
+  return info;
+}
+
+void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
+  if (args.size() > 1) {
+    return cmd_cntx.rb->SendError(kSyntaxErr);
+  }
+
+  string section;
+
+  if (args.size() == 1) {
+    section = absl::AsciiStrToUpper(ArgS(args, 0));
+  }
+
+  Metrics metrics;
+
+  // Save time by not calculating metrics if we don't need them.
+  if (!(section == "SERVER" || section == "REPLICATION")) {
+    metrics = GetMetrics(cmd_cntx.conn_cntx->ns);
+  }
+
+  string info = FormatInfoMetrics(metrics, section, cmd_cntx.conn_cntx->conn()->IsPrivileged());
+
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   rb->SendVerbatimString(info);
 }
@@ -2749,10 +2909,14 @@ void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx)
 
   auto add_replica = make_unique<Replica>(replicaof_args->host, replicaof_args->port, &service_,
                                           master_replid(), replicaof_args->slot_range);
-  error_code ec = add_replica->Start(cmd_cntx.rb);
-  if (!ec) {
-    cluster_replicas_.push_back(std::move(add_replica));
+  GenericError ec = add_replica->Start();
+  if (ec) {
+    cmd_cntx.rb->SendError(ec.Format());
+    return;
   }
+  add_replica->StartMainReplicationFiber();
+  cluster_replicas_.push_back(std::move(add_replica));
+  cmd_cntx.rb->SendOk();
 }
 
 void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
@@ -2806,13 +2970,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
       return;
     }
 
-    // If we are called by "Replicate", tx will be null but we do not need
-    // to flush anything.
-    if (tx) {
-      Drakarys(tx, DbSlice::kDbAll);
-    }
-
-    // Create a new replica and assing it
+    // Create a new replica and assign it
     new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
                                        master_replid(), replicaof_args->slot_range);
 
@@ -2825,12 +2983,12 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
   // We proceed connecting below without the lock to allow interrupting the replica immediately.
   // From this point and onward, it should be highly responsive.
 
-  error_code ec{};
+  GenericError ec{};
   switch (on_err) {
     case ActionOnConnectionFail::kReturnOnError:
-      ec = new_replica->Start(builder);
+      ec = new_replica->Start();
       break;
-    case ActionOnConnectionFail::kContinueReplication:  // set DF to replicate, and forget about it
+    case ActionOnConnectionFail::kContinueReplication:
       new_replica->EnableReplication(builder);
       break;
   };
@@ -2838,11 +2996,29 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
   // If the replication attempt failed, clean up global state. The replica should have stopped
   // internally.
   util::fb2::LockGuard lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
-  if (ec && replica_ == new_replica) {
-    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    SetMasterFlagOnAllThreads(true);
-    replica_.reset();
+
+  // If there was an error above during Start we must not start the main replication fiber.
+  // However, it could be the case that Start() above connected succefully and by the time
+  // we acquire the lock, the context got cancelled because another ReplicaOf command
+  // executed and acquired the replicaof_mu_ before us.
+  const bool cancelled = new_replica->IsContextCancelled();
+  if (ec || cancelled) {
+    if (replica_ == new_replica) {
+      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+      SetMasterFlagOnAllThreads(true);
+      replica_.reset();
+    }
+    builder->SendError(ec ? ec.Format() : "replication cancelled");
+    return;
   }
+  // Successfully connected now we flush
+  // If we are called by "Replicate", tx will be null but we do not need
+  // to flush anything.
+  if (on_err == ActionOnConnectionFail::kReturnOnError) {
+    Drakarys(tx, DbSlice::kDbAll);
+    new_replica->StartMainReplicationFiber();
+  }
+  builder->SendOk();
 }
 
 void ServerFamily::StopAllClusterReplicas() {
@@ -3077,8 +3253,7 @@ void ServerFamily::Latency(CmdArgList args, const CommandContext& cmd_cntx) {
     return rb->SendEmptyArray();
   }
 
-  LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
-  rb->SendError(kSyntaxErr);
+  return rb->SendError(UnknownSubCmd(sub_cmd, "LATENCY"), kSyntaxErrType);
 }
 
 void ServerFamily::ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -3173,6 +3348,43 @@ void ServerFamily::Module(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendSimpleString("search");
   rb->SendSimpleString("ver");
   rb->SendLong(20'000);  // we target v2
+}
+
+void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,
+                                  ConnectionContext* cntx) {
+  CmdArgParser parser(args);
+  auto listeners = GetNonPriviligedListeners();
+
+  auto timeout = parser.Next<uint64_t>();
+  ClientPause pause_state = ClientPause::ALL;
+  if (parser.HasNext()) {
+    pause_state = parser.MapNext("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
+  }
+  if (auto err = parser.Error(); err) {
+    return builder->SendError(err->MakeReply());
+  }
+
+  const auto timeout_ms = timeout * 1ms;
+  auto is_pause_in_progress = [this, end_time = chrono::steady_clock::now() + timeout_ms] {
+    return ServerState::tlocal()->gstate() != GlobalState::SHUTTING_DOWN &&
+           chrono::steady_clock::now() < end_time && is_c_pause_in_progress_.load();
+  };
+
+  auto cleanup = [this] {
+    active_pauses_.fetch_sub(1);
+    client_pause_ec_.notify();
+  };
+
+  if (auto pause_fb_opt = Pause(listeners, cntx->ns, cntx->conn(), pause_state,
+                                std::move(is_pause_in_progress), cleanup);
+      pause_fb_opt) {
+    is_c_pause_in_progress_.store(true);
+    active_pauses_.fetch_add(1);
+    pause_fb_opt->Detach();
+    builder->SendOk();
+  } else {
+    builder->SendError("Failed to pause all running clients");
+  }
 }
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))

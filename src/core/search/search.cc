@@ -280,14 +280,26 @@ struct BasicSearch {
 
   // "term": access field's text index or unify results from all text indices if no field is set
   IndexResult Search(const AstTermNode& node, string_view active_field) {
+    std::string term = node.term;
+    bool strip_whitespace = true;
+
+    if (auto synonyms = indices_->GetSynonyms(); synonyms) {
+      if (auto group_id = synonyms->GetGroupToken(term); group_id) {
+        term = *group_id;
+        strip_whitespace = false;
+      }
+    }
+
     if (!active_field.empty()) {
       if (auto* index = GetIndex<TextIndex>(active_field); index)
-        return index->Matching(node.term);
+        return index->Matching(term, strip_whitespace);
       return IndexResult{};
     }
 
     vector<TextIndex*> selected_indices = indices_->GetAllTextIndices();
-    auto mapping = [&node](TextIndex* index) { return index->Matching(node.term); };
+    auto mapping = [&term, strip_whitespace](TextIndex* index) {
+      return index->Matching(term, strip_whitespace);
+    };
 
     return UnifyResults(GetSubResults(selected_indices, mapping), LogicOp::OR);
   }
@@ -517,8 +529,8 @@ IndicesOptions::IndicesOptions() {
 }
 
 FieldIndices::FieldIndices(const Schema& schema, const IndicesOptions& options,
-                           PMR_NS::memory_resource* mr)
-    : schema_{schema}, options_{options} {
+                           PMR_NS::memory_resource* mr, const Synonyms* synonyms)
+    : schema_{schema}, options_{options}, synonyms_{synonyms} {
   CreateIndices(mr);
   CreateSortIndices(mr);
 }
@@ -530,7 +542,7 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
 
     switch (field_info.type) {
       case SchemaField::TEXT:
-        indices_[field_ident] = make_unique<TextIndex>(mr, &options_.stopwords);
+        indices_[field_ident] = make_unique<TextIndex>(mr, &options_.stopwords, synonyms_);
         break;
       case SchemaField::NUMERIC:
         indices_[field_ident] = make_unique<NumericIndex>(mr);
@@ -658,6 +670,10 @@ SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view field_
   return it->second->Lookup(doc);
 }
 
+const Synonyms* FieldIndices::GetSynonyms() const {
+  return synonyms_;
+}
+
 SearchAlgorithm::SearchAlgorithm() = default;
 SearchAlgorithm::~SearchAlgorithm() = default;
 
@@ -668,12 +684,14 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params, const S
     LOG(INFO) << "Failed to parse query \"" << query << "\":" << se.what();
     return false;
   } catch (...) {
-    LOG(INFO) << "Unexpected query parser error";
+    LOG_EVERY_T(INFO, 10) << "Unexpected query parser error \"" << query << "\"";
     return false;
   }
 
-  if (holds_alternative<monostate>(*query_))
+  if (holds_alternative<monostate>(*query_)) {
+    LOG_EVERY_T(INFO, 10) << "Empty result after parsing query \"" << query << "\"";
     return false;
+  }
 
   if (sort != nullptr)
     query_ = make_unique<AstNode>(AstSortNode{std::move(query_), sort->field, sort->descending});
@@ -688,18 +706,21 @@ SearchResult SearchAlgorithm::Search(const FieldIndices* index, size_t limit) co
   return bs.Search(*query_);
 }
 
-optional<AggregationInfo> SearchAlgorithm::HasAggregation() const {
+optional<AggregationInfo> SearchAlgorithm::GetAggregationInfo() const {
   DCHECK(query_);
-  if (auto* knn = get_if<AstKnnNode>(query_.get()); knn)
-    return AggregationInfo{knn->limit, string_view{knn->score_alias}, false};
 
+  // KNN query
+  if (auto* knn = get_if<AstKnnNode>(query_.get()); knn)
+    return AggregationInfo{string_view{knn->score_alias}, false, knn->limit};
+
+  // SEARCH query with SORTBY option
   if (auto* sort = get_if<AstSortNode>(query_.get()); sort) {
     string_view alias = "";
     if (auto* knn = get_if<AstKnnNode>(&sort->filter->Variant());
         knn && knn->score_alias == sort->field)
       alias = knn->score_alias;
 
-    return AggregationInfo{nullopt, alias, sort->descending};
+    return AggregationInfo{alias, sort->descending};
   }
 
   return nullopt;

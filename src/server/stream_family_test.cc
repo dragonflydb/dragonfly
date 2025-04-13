@@ -93,6 +93,21 @@ TEST_F(StreamFamilyTest, AddExtended) {
   EXPECT_THAT(Run({"xlen", "key4"}), IntArg(601));
 }
 
+TEST_F(StreamFamilyTest, XrangeRangeAutocomplete) {
+  Run({"xadd", "mystream", "1609459200000-0", "0", "0"});
+  Run({"xadd", "mystream", "1609459200001-0", "1", "1"});
+  Run({"xadd", "mystream", "1609459200001-1", "2", "2"});
+  Run({"xadd", "mystream", "1609459200002-0", "3", "3"});
+  auto resp = Run({"xrange", "mystream", "1609459200000", "1609459200001"});
+  EXPECT_THAT(resp, RespElementsAre(RespElementsAre("1609459200000-0", RespElementsAre("0", "0")),
+                                    RespElementsAre("1609459200001-0", RespElementsAre("1", "1")),
+                                    RespElementsAre("1609459200001-1", RespElementsAre("2", "2"))));
+  resp = Run({"xrange", "mystream", "1609459200000", "(1609459200001"});
+  EXPECT_THAT(resp, RespElementsAre(RespElementsAre("1609459200000-0", RespElementsAre("0", "0")),
+                                    RespElementsAre("1609459200001-0", RespElementsAre("1", "1")),
+                                    RespElementsAre("1609459200001-1", RespElementsAre("2", "2"))));
+}
+
 TEST_F(StreamFamilyTest, Range) {
   Run({"xadd", "key", "1-*", "f1", "v1"});
   Run({"xadd", "key", "1-*", "f2", "v2"});
@@ -385,6 +400,25 @@ TEST_F(StreamFamilyTest, XReadGroupBlock) {
   EXPECT_THAT(resp0, ErrArg("consumer group this client was blocked on no longer exists"));
 }
 
+TEST_F(StreamFamilyTest, XReadGroupBlockDelconsumer) {
+  Run({"XGROUP", "CREATE", "foo", "group", "0", "MKSTREAM"});
+
+  RespExpr resp0;
+  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    resp0 = Run({"XREADGROUP", "GROUP", "group", "alice", "BLOCK", "0", "streams", "foo", ">"});
+  });
+  ThisFiber::SleepFor(50us);
+
+  // Del consumer while it's blocked
+  RespExpr resp_del_consumer = Run({"XGROUP", "DELCONSUMER", "foo", "group", "alice"});
+
+  pp_->at(1)->Await([&] { return Run("xadd", {"XADD", "foo", "1-0", "k1", "v1"}); });
+  fb0.Join();
+
+  EXPECT_THAT(resp0.GetVec(), ElementsAre("foo", ArrLen(1)));
+  EXPECT_THAT(resp_del_consumer, IntArg(0));
+}
+
 TEST_F(StreamFamilyTest, XReadInvalidArgs) {
   // Invalid COUNT value.
   auto resp = Run({"xread", "count", "invalid", "streams", "s1", "s2", "0", "0"});
@@ -659,7 +693,7 @@ TEST_F(StreamFamilyTest, XTrimInvalidArgs) {
 
   // Invalid limit.
   resp = Run({"xtrim", "foo", "maxlen", "~", "2", "limit", "nan"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
 }
 TEST_F(StreamFamilyTest, XPending) {
   Run({"xadd", "foo", "1-0", "k1", "v1"});

@@ -143,8 +143,9 @@ template <typename T> class BPTreeNode {
   };
 
   // Searches for key in the node using binary search.
-  // Returns SearchResult with index of the key if found.
-  template <typename Comp> SearchResult BSearch(KeyT key, Comp&& comp) const;
+  // Returns SearchResult with index of the smallest key for which comp(key) >=0.
+  // comp: is a three way comparator.
+  template <typename Comp> SearchResult BSearch(Comp&& comp) const;
 
   void Split(BPTreeNode* right, KeyT* median);
 
@@ -367,13 +368,13 @@ template <typename T> class BPTreePath {
 // if all items are smaller than key, returns num_items_.
 template <typename T>
 template <typename Comp>
-auto BPTreeNode<T>::BSearch(KeyT key, Comp&& cmp_op) const -> SearchResult {
+auto BPTreeNode<T>::BSearch(Comp&& cmp_op) const -> SearchResult {
   uint16_t lo = 0;
   uint16_t hi = num_items_;
   assert(hi > 0);
 
   // optimization: check the last item first.
-  int cmp_res = cmp_op(key, Key(hi - 1));
+  int cmp_res = cmp_op(Key(hi - 1));
   if (cmp_res >= 0) {
     return cmp_res > 0 ? SearchResult{.index = hi, .found = false}
                        : SearchResult{.index = uint16_t(hi - 1), .found = true};
@@ -388,7 +389,7 @@ auto BPTreeNode<T>::BSearch(KeyT key, Comp&& cmp_op) const -> SearchResult {
 
     KeyT item = Key(mid);
 
-    int cmp_res = cmp_op(key, item);
+    int cmp_res = cmp_op(item);
     if (cmp_res == 0) {
       return SearchResult{.index = mid, .found = true};
     }

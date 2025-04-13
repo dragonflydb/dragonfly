@@ -49,10 +49,6 @@ ABSL_FLAG(
     int, replica_priority, 100,
     "Published by info command for sentinel to pick replica based on score during a failover");
 
-// TODO: Remove this flag on release >= 1.22
-ABSL_FLAG(bool, replica_reconnect_on_master_restart, false,
-          "Deprecated - please use --break_replication_on_master_restart.");
-
 namespace dfly {
 
 using namespace std;
@@ -90,37 +86,36 @@ Replica::~Replica() {
 
 static const char kConnErr[] = "could not connect to master: ";
 
-error_code Replica::Start(facade::SinkReplyBuilder* builder) {
-  VLOG(1) << "Starting replication";
+GenericError Replica::Start() {
+  VLOG(1) << "Starting replication " << this;
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
 
-  auto check_connection_error = [this, builder](error_code ec, const char* msg) -> error_code {
-    if (cntx_.IsCancelled()) {
-      builder->SendError("replication cancelled");
-      return std::make_error_code(errc::operation_canceled);
+  auto check_connection_error = [this](error_code ec, const char* msg) -> GenericError {
+    if (!exec_st_.IsRunning()) {
+      return {"replication cancelled"};
     }
     if (ec) {
-      builder->SendError(absl::StrCat(msg, ec.message()));
-      cntx_.Cancel();
+      exec_st_.ReportCancelError();
+      return {absl::StrCat(msg, ec.message())};
     }
     return ec;
   };
 
   // 0. Set basic error handler that is reponsible for cleaning up on errors.
   // Can return an error only if replication was cancelled immediately.
-  auto err = cntx_.SwitchErrorHandler([this](const auto& ge) { this->DefaultErrorHandler(ge); });
-  RETURN_ON_ERR(check_connection_error(err, "replication cancelled"));
+  auto err = exec_st_.SwitchErrorHandler([this](const auto& ge) { this->DefaultErrorHandler(ge); });
+  RETURN_ON_GENERIC_ERR(check_connection_error(err, "replication cancelled"));
 
   // 1. Resolve dns.
   VLOG(1) << "Resolving master DNS";
   error_code ec = ResolveHostDns();
-  RETURN_ON_ERR(check_connection_error(ec, "could not resolve master dns"));
+  RETURN_ON_GENERIC_ERR(check_connection_error(ec, "could not resolve master dns"));
 
   // 2. Connect socket.
   VLOG(1) << "Connecting to master";
-  ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &cntx_);
-  RETURN_ON_ERR(check_connection_error(ec, kConnErr));
+  ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &exec_st_);
+  RETURN_ON_GENERIC_ERR(check_connection_error(ec, kConnErr));
 
   // 3. Greet.
   VLOG(1) << "Greeting";
@@ -128,11 +123,11 @@ error_code Replica::Start(facade::SinkReplyBuilder* builder) {
   ec = Greet();
   RETURN_ON_ERR(check_connection_error(ec, "could not greet master "));
 
-  // 4. Spawn main coordination fiber.
-  sync_fb_ = fb2::Fiber("main_replication", &Replica::MainReplicationFb, this);
-
-  builder->SendOk();
   return {};
+}
+
+void Replica::StartMainReplicationFiber() {
+  sync_fb_ = fb2::Fiber("main_replication", &Replica::MainReplicationFb, this);
 }
 
 void Replica::EnableReplication(facade::SinkReplyBuilder* builder) {
@@ -140,22 +135,21 @@ void Replica::EnableReplication(facade::SinkReplyBuilder* builder) {
 
   state_mask_.store(R_ENABLED);                             // set replica state to enabled
   sync_fb_ = MakeFiber(&Replica::MainReplicationFb, this);  // call replication fiber
-
-  builder->SendOk();
 }
 
 void Replica::Stop() {
-  VLOG(1) << "Stopping replication";
+  VLOG(1) << "Stopping replication " << this;
   // Stops the loop in MainReplicationFb.
 
   proactor_->Await([this] {
-    state_mask_.store(0);  // Specifically ~R_ENABLED.
-    cntx_.Cancel();        // Context is fully resposible for cleanup.
+    state_mask_.store(0);          // Specifically ~R_ENABLED.
+    exec_st_.ReportCancelError();  // Context is fully resposible for cleanup.
   });
 
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
   sync_fb_.JoinIfNeeded();
+  DVLOG(1) << "MainReplicationFb stopped " << this;
   acks_fb_.JoinIfNeeded();
   for (auto& flow : shard_flows_) {
     flow.reset();
@@ -190,14 +184,14 @@ std::error_code Replica::TakeOver(std::string_view timeout, bool save_flag) {
 }
 
 void Replica::MainReplicationFb() {
-  VLOG(1) << "Main replication fiber started";
+  VLOG(1) << "Main replication fiber started " << this;
   // Switch shard states to replication.
   SetShardStates(true);
 
   error_code ec;
   while (state_mask_.load() & R_ENABLED) {
     // Discard all previous errors and set default error handler.
-    cntx_.Reset([this](const GenericError& ge) { this->DefaultErrorHandler(ge); });
+    exec_st_.Reset([this](const GenericError& ge) { this->DefaultErrorHandler(ge); });
     // 1. Connect socket.
     if ((state_mask_.load() & R_TCP_CONNECTED) == 0) {
       ThisFiber::SleepFor(500ms);
@@ -212,7 +206,7 @@ void Replica::MainReplicationFb() {
 
       // Give a lower timeout for connect, because we're
       reconnect_count_++;
-      ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_reconnect_timeout_ms) * 1ms, &cntx_);
+      ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_reconnect_timeout_ms) * 1ms, &exec_st_);
       if (ec) {
         LOG(WARNING) << "Error connecting to " << server().Description() << " " << ec;
         continue;
@@ -268,7 +262,7 @@ void Replica::MainReplicationFb() {
   }
 
   // Wait for unblocking cleanup to finish.
-  cntx_.JoinErrorHandler();
+  exec_st_.JoinErrorHandler();
 
   // Revert shard states to normal state.
   SetShardStates(false);
@@ -277,7 +271,7 @@ void Replica::MainReplicationFb() {
 }
 
 error_code Replica::Greet() {
-  ResetParser(false);
+  ResetParser(RedisParser::Mode::CLIENT);
   VLOG(1) << "greeting message handling";
   // Corresponds to server.repl_state == REPL_STATE_CONNECTING state in redis
   RETURN_ON_ERR(SendCommandAndReadResponse("PING"));  // optional.
@@ -339,8 +333,7 @@ std::error_code Replica::HandleCapaDflyResp() {
   // If we're syncing a different replication ID, drop the saved LSNs.
   string_view master_repl_id = ToSV(LastResponseArgs()[0].GetBuf());
   if (master_context_.master_repl_id != master_repl_id) {
-    if ((absl::GetFlag(FLAGS_replica_reconnect_on_master_restart) ||
-         absl::GetFlag(FLAGS_break_replication_on_master_restart)) &&
+    if (absl::GetFlag(FLAGS_break_replication_on_master_restart) &&
         !master_context_.master_repl_id.empty()) {
       LOG(ERROR) << "Encountered different master repl id (" << master_repl_id << " vs "
                  << master_context_.master_repl_id << ")";
@@ -418,8 +411,8 @@ error_code Replica::InitiatePSync() {
 
     // Set LOADING state.
     if (!service_.RequestLoadingState()) {
-      return cntx_.ReportError(std::make_error_code(errc::state_not_recoverable),
-                               "Failed to enter LOADING state");
+      return exec_st_.ReportError(std::make_error_code(errc::state_not_recoverable),
+                                  "Failed to enter LOADING state");
     }
 
     absl::Cleanup cleanup = [this]() { service_.RemoveLoadingState(); };
@@ -507,12 +500,12 @@ error_code Replica::InitiateDflySync() {
       flow->Cancel();
   };
 
-  RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
+  RETURN_ON_ERR(exec_st_.SwitchErrorHandler(std::move(err_handler)));
 
   // Make sure we're in LOADING state.
   if (!service_.RequestLoadingState()) {
-    return cntx_.ReportError(std::make_error_code(errc::state_not_recoverable),
-                             "Failed to enter LOADING state");
+    return exec_st_.ReportError(std::make_error_code(errc::state_not_recoverable),
+                                "Failed to enter LOADING state");
   }
 
   // Start full sync flows.
@@ -534,44 +527,48 @@ error_code Replica::InitiateDflySync() {
     DCHECK(!last_journal_LSNs_ || last_journal_LSNs_->size() == num_df_flows);
     auto shard_cb = [&](unsigned index, auto*) {
       for (auto id : thread_flow_map_[index]) {
-        auto ec = shard_flows_[id]->StartSyncFlow(sync_block, &cntx_,
+        auto ec = shard_flows_[id]->StartSyncFlow(sync_block, &exec_st_,
                                                   last_journal_LSNs_.has_value()
                                                       ? std::optional((*last_journal_LSNs_)[id])
                                                       : std::nullopt);
         if (ec.has_value())
           is_full_sync[id] = ec.value();
         else
-          cntx_.ReportError(ec.error());
+          exec_st_.ReportError(ec.error());
       }
     };
     // Lock to prevent the error handler from running instantly
     // while the flows are in a mixed state.
     lock_guard lk{flows_op_mu_};
+
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
 
     size_t num_full_flows =
         std::accumulate(is_full_sync.get(), is_full_sync.get() + num_df_flows, 0);
 
     if (num_full_flows == num_df_flows) {
+      DVLOG(1) << "Calling Flush on all slots " << this;
+
       if (slot_range_.has_value()) {
         JournalExecutor{&service_}.FlushSlots(slot_range_.value());
       } else {
         JournalExecutor{&service_}.FlushAll();
       }
+      DVLOG(1) << "Flush on all slots ended " << this;
     } else if (num_full_flows == 0) {
       sync_type = "partial";
     } else {
       last_journal_LSNs_.reset();
-      cntx_.ReportError(std::make_error_code(errc::state_not_recoverable),
-                        "Won't do a partial sync: some flows must fully resync");
+      exec_st_.ReportError(std::make_error_code(errc::state_not_recoverable),
+                           "Won't do a partial sync: some flows must fully resync");
     }
   }
 
-  RETURN_ON_ERR(cntx_.GetError());
+  RETURN_ON_ERR(exec_st_.GetError());
 
   // Send DFLY SYNC.
   if (auto ec = SendNextPhaseRequest("SYNC"); ec) {
-    return cntx_.ReportError(ec);
+    return exec_st_.ReportError(ec);
   }
 
   LOG(INFO) << "Started " << sync_type << " sync with " << server().Description();
@@ -582,21 +579,21 @@ error_code Replica::InitiateDflySync() {
   sync_block->Wait();
 
   // Check if we woke up due to cancellation.
-  if (cntx_.IsCancelled())
-    return cntx_.GetError();
+  if (!exec_st_.IsRunning())
+    return exec_st_.GetError();
 
   RdbLoader::PerformPostLoad(&service_);
 
   // Send DFLY STARTSTABLE.
   if (auto ec = SendNextPhaseRequest("STARTSTABLE"); ec) {
-    return cntx_.ReportError(ec);
+    return exec_st_.ReportError(ec);
   }
 
   // Joining flows and resetting state is done by cleanup.
   double seconds = double(absl::ToInt64Milliseconds(absl::Now() - start_time)) / 1000;
   LOG(INFO) << sync_type << " sync finished in " << strings::HumanReadableElapsedTime(seconds);
 
-  return cntx_.GetError();
+  return exec_st_.GetError();
 }
 
 error_code Replica::ConsumeRedisStream() {
@@ -609,7 +606,7 @@ error_code Replica::ConsumeRedisStream() {
 
   // we never reply back on the commands.
   facade::CapturingReplyBuilder null_builder{facade::ReplyMode::NONE};
-  ResetParser(true);
+  ResetParser(RedisParser::Mode::SERVER);
 
   // Master waits for this command in order to start sending replication stream.
   RETURN_ON_ERR(SendCommand("REPLCONF ACK 0"));
@@ -629,7 +626,7 @@ error_code Replica::ConsumeRedisStream() {
     replica_waker_.notifyAll();
     DefaultErrorHandler(ge);
   };
-  RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
+  RETURN_ON_ERR(exec_st_.SwitchErrorHandler(std::move(err_handler)));
 
   facade::CmdArgVec args_vector;
 
@@ -639,7 +636,7 @@ error_code Replica::ConsumeRedisStream() {
     auto response = ReadRespReply(&io_buf, /*copy_msg=*/false);
     if (!response.has_value()) {
       VLOG(1) << "ConsumeRedisStream finished";
-      cntx_.ReportError(response.error());
+      exec_st_.ReportError(response.error());
       acks_fb_.JoinIfNeeded();
       return response.error();
     }
@@ -682,7 +679,7 @@ error_code Replica::ConsumeDflyStream() {
     }
     multi_shard_exe_->CancelAllBlockingEntities();
   };
-  RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
+  RETURN_ON_ERR(exec_st_.SwitchErrorHandler(std::move(err_handler)));
 
   LOG(INFO) << "Transitioned into stable sync";
   // Transition flows into stable sync.
@@ -690,9 +687,9 @@ error_code Replica::ConsumeDflyStream() {
     auto shard_cb = [&](unsigned index, auto*) {
       const auto& local_ids = thread_flow_map_[index];
       for (unsigned id : local_ids) {
-        auto ec = shard_flows_[id]->StartStableSyncFlow(&cntx_);
+        auto ec = shard_flows_[id]->StartStableSyncFlow(&exec_st_);
         if (ec)
-          cntx_.ReportError(ec);
+          exec_st_.ReportError(ec);
       }
     };
 
@@ -710,9 +707,9 @@ error_code Replica::ConsumeDflyStream() {
 
   LOG(INFO) << "Exit stable sync";
   // The only option to unblock is to cancel the context.
-  CHECK(cntx_.GetError());
+  CHECK(exec_st_.GetError());
 
-  return cntx_.GetError();
+  return exec_st_.GetError();
 }
 
 void Replica::JoinDflyFlows() {
@@ -737,14 +734,14 @@ error_code Replica::SendNextPhaseRequest(string_view kind) {
   return std::error_code{};
 }
 
-io::Result<bool> DflyShardReplica::StartSyncFlow(BlockingCounter sb, Context* cntx,
+io::Result<bool> DflyShardReplica::StartSyncFlow(BlockingCounter sb, ExecutionState* cntx,
                                                  std::optional<LSN> lsn) {
   using nonstd::make_unexpected;
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
   proactor_index_ = ProactorBase::me()->GetPoolIndex();
 
   RETURN_ON_ERR_T(make_unexpected,
-                  ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &cntx_));
+                  ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &exec_st_));
 
   VLOG(1) << "Sending on flow " << master_context_.master_repl_id << " "
           << master_context_.dfly_session_id << " " << flow_id_;
@@ -757,7 +754,7 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(BlockingCounter sb, Context* cn
     absl::StrAppend(&cmd, " ", *lsn);
   }
 
-  ResetParser(/*server_mode=*/false);
+  ResetParser(RedisParser::Mode::CLIENT);
   leftover_buf_.emplace(128);
   RETURN_ON_ERR_T(make_unexpected, SendCommand(cmd));
   auto read_resp = ReadRespReply(&*leftover_buf_);
@@ -786,7 +783,7 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(BlockingCounter sb, Context* cn
   return is_full_sync;
 }
 
-error_code DflyShardReplica::StartStableSyncFlow(Context* cntx) {
+error_code DflyShardReplica::StartStableSyncFlow(ExecutionState* cntx) {
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
@@ -801,7 +798,8 @@ error_code DflyShardReplica::StartStableSyncFlow(Context* cntx) {
   return std::error_code{};
 }
 
-void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc, Context* cntx) {
+void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
+                                      ExecutionState* cntx) {
   DCHECK(leftover_buf_);
   io::PrefixSource ps{leftover_buf_->InputBuffer(), Sock()};
 
@@ -851,7 +849,7 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
   VLOG(1) << "FullSyncDflyFb finished after reading " << rdb_loader_->bytes_read() << " bytes";
 }
 
-void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
+void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
   DCHECK_EQ(proactor_index_, ProactorBase::me()->GetPoolIndex());
 
   // Check leftover from full sync.
@@ -868,11 +866,8 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
 
   acks_fb_ = fb2::Fiber("shard_acks", &DflyShardReplica::StableSyncDflyAcksFb, this, cntx);
 
-  while (!cntx->IsCancelled()) {
-    auto tx_data = tx_reader.NextTxData(&reader, cntx);
-    if (!tx_data)
-      break;
-
+  std::optional<TransactionData> tx_data;
+  while ((tx_data = tx_reader.NextTxData(&reader, cntx))) {
     DVLOG(3) << "Lsn: " << tx_data->lsn;
 
     last_io_time_ = Proactor()->GetMonotonicTimeNs();
@@ -896,23 +891,23 @@ void Replica::RedisStreamAcksFb() {
   std::string ack_cmd;
   auto next_ack_tp = std::chrono::steady_clock::now();
 
-  while (!cntx_.IsCancelled()) {
+  while (exec_st_.IsRunning()) {
     VLOG(2) << "Sending an ACK with offset=" << repl_offs_;
     ack_cmd = absl::StrCat("REPLCONF ACK ", repl_offs_);
     next_ack_tp = std::chrono::steady_clock::now() + ack_time_max_interval;
     if (auto ec = SendCommand(ack_cmd); ec) {
-      cntx_.ReportError(ec);
+      exec_st_.ReportError(ec);
       break;
     }
     ack_offs_ = repl_offs_;
 
     replica_waker_.await_until(
-        [&]() { return repl_offs_ > ack_offs_ + kAckRecordMaxInterval || cntx_.IsCancelled(); },
+        [&]() { return repl_offs_ > ack_offs_ + kAckRecordMaxInterval || (!exec_st_.IsRunning()); },
         next_ack_tp);
   }
 }
 
-void DflyShardReplica::StableSyncDflyAcksFb(Context* cntx) {
+void DflyShardReplica::StableSyncDflyAcksFb(ExecutionState* cntx) {
   DCHECK_EQ(proactor_index_, ProactorBase::me()->GetPoolIndex());
 
   constexpr size_t kAckRecordMaxInterval = 1024;
@@ -922,7 +917,7 @@ void DflyShardReplica::StableSyncDflyAcksFb(Context* cntx) {
   auto next_ack_tp = std::chrono::steady_clock::now();
 
   uint64_t current_offset;
-  while (!cntx->IsCancelled()) {
+  while (cntx->IsRunning()) {
     // Handle ACKs with the master. PING opcodes from the master mean we should immediately
     // answer.
     current_offset = journal_rec_executed_.load(std::memory_order_relaxed);
@@ -940,7 +935,7 @@ void DflyShardReplica::StableSyncDflyAcksFb(Context* cntx) {
         [&]() {
           return journal_rec_executed_.load(std::memory_order_relaxed) >
                      ack_offs_ + kAckRecordMaxInterval ||
-                 force_ping_ || cntx->IsCancelled();
+                 force_ping_ || (!cntx->IsRunning());
         },
         next_ack_tp);
   }
@@ -963,8 +958,8 @@ DflyShardReplica::~DflyShardReplica() {
   JoinFlow();
 }
 
-void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, Context* cntx) {
-  if (cntx->IsCancelled()) {
+void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx) {
+  if (!cntx->IsRunning()) {
     return;
   }
 
@@ -985,7 +980,7 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, Context* cntx) {
   // and replica recieved all the commands from all shards.
   multi_shard_data.block->Wait();
   // Check if we woke up due to cancellation.
-  if (cntx_.IsCancelled())
+  if (!exec_st_.IsRunning())
     return;
   VLOG(2) << "Execute txid: " << tx_data.txid << " block wait finished";
 
@@ -993,7 +988,7 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, Context* cntx) {
   // Wait until all shards flows get to execution step of this transaction.
   multi_shard_data.barrier.Wait();
   // Check if we woke up due to cancellation.
-  if (cntx_.IsCancelled())
+  if (!exec_st_.IsRunning())
     return;
   // Global command will be executed only from one flow fiber. This ensure corectness of data in
   // replica.
@@ -1004,7 +999,7 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, Context* cntx) {
   // executed.
   multi_shard_data.barrier.Wait();
   // Check if we woke up due to cancellation.
-  if (cntx_.IsCancelled())
+  if (!exec_st_.IsRunning())
     return;
 
   // Erase from map can be done only after all flow fibers executed the transaction commands.
@@ -1111,7 +1106,17 @@ auto Replica::GetSummary() const -> Summary {
     res.master_link_established = (state_mask_.load() & R_TCP_CONNECTED);
     res.full_sync_in_progress = (state_mask_.load() & R_SYNCING);
     res.full_sync_done = (state_mask_.load() & R_SYNC_OK);
-    res.master_last_io_sec = (ProactorBase::GetMonotonicTimeNs() - last_io_time) / 1000000000UL;
+
+    uint64_t current_time = ProactorBase::GetMonotonicTimeNs();
+    // last_io_time is derived above by reading last_io_time_ from all the flows,
+    // by accessing them from a foreign thread, see the loop above. As a result some
+    // threads may have last_io_time_ bigger than our current time, so we fix it here.
+    if (last_io_time > current_time) {
+      res.master_last_io_sec = 0;
+    } else {
+      res.master_last_io_sec = (current_time - last_io_time) / 1000000000UL;
+    }
+
     res.master_id = master_context_.master_repl_id;
     res.reconnect_count = reconnect_count_;
     res.repl_offset_sum = 0;

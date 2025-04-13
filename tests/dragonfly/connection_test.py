@@ -9,7 +9,12 @@ from threading import Thread
 import random
 import ssl
 from redis import asyncio as aioredis
-from redis.exceptions import ConnectionError as redis_conn_error, ResponseError
+import redis as base_redis
+import hiredis
+from redis.cache import CacheConfig
+
+from redis.exceptions import ConnectionError, ResponseError
+
 import async_timeout
 from dataclasses import dataclass
 from aiohttp import ClientSession
@@ -436,7 +441,7 @@ async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_co
         client = aioredis.Redis(connection_pool=async_pool)
         for i in range(0, 2000):
             await client.publish("channel", f"message-{i}")
-        await client.close()
+        await client.aclose()
 
     async def channel_reader(channel: aioredis.client.PubSub):
         for i in range(0, 150):
@@ -500,7 +505,7 @@ async def test_keyspace_events(async_client: aioredis.Redis):
 
 async def test_keyspace_events_config_set(async_client: aioredis.Redis):
     # nonsense does not make sense as argument, we only accept ex or empty string
-    with pytest.raises((ResponseError)):
+    with pytest.raises(ResponseError):
         await async_client.config_set("notify_keyspace_events", "nonsense")
 
     await async_client.config_set("notify_keyspace_events", "ex")
@@ -515,14 +520,12 @@ async def test_keyspace_events_config_set(async_client: aioredis.Redis):
 
     keys = await produce_expiring_keys(async_client)
     await async_client.config_set("notify_keyspace_events", "")
-    try:
+    with pytest.raises(asyncio.TimeoutError):
         async with async_timeout.timeout(1):
             await collect_expiring_events(pclient, keys)
-        assert False
-    except:
-        pass
 
 
+@pytest.mark.exclude_epoll
 async def test_reply_count(async_client: aioredis.Redis):
     """Make sure reply aggregations reduce reply counts for common cases"""
 
@@ -615,15 +618,24 @@ async def test_send_delay_metric(df_server: DflyInstance):
 
     await client.config_set("pipeline_queue_limit", 100)
     reader, writer = await asyncio.open_connection("localhost", df_server.port)
-    for j in range(1000000):
-        writer.write(f"GET key-{j % 10}\n".encode())
+
+    async def send_data_noread():
+        for j in range(500000):
+            writer.write(f"GET key-{j % 10}\n".encode())
+            await writer.drain()
+
+    t1 = asyncio.create_task(send_data_noread())
 
     @assert_eventually
     async def wait_for_large_delay():
         info = await client.info("clients")
         assert int(info["send_delay_ms"]) > 100
 
+    # Check that the delay metric indeed increases as we have a connection
+    # that is not reading the data.
     await wait_for_large_delay()
+    t1.cancel()
+    writer.close()
 
 
 async def test_match_http(df_server: DflyInstance):
@@ -772,9 +784,9 @@ async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_factor
     server.start()
 
     client = server.client(password="XXX")
-    with pytest.raises((ResponseError)):
+    with pytest.raises(ResponseError):
         await client.dbsize()
-    await client.close()
+    await client.aclose()
 
     client = server.admin_client(password="XXX")
     assert await client.dbsize() == 0
@@ -804,10 +816,10 @@ async def test_tls_reject(
 
     client = server.client(**with_tls_client_args, ssl_cert_reqs=None)
     await client.ping()
-    await client.close()
+    await client.aclose()
 
     client = server.client(**with_tls_client_args)
-    with pytest.raises(redis_conn_error):
+    with pytest.raises(ConnectionError):
         await client.ping()
 
 
@@ -1038,3 +1050,226 @@ async def test_lib_name_ver(async_client: aioredis.Redis):
     assert len(list) == 1
     assert list[0]["lib-name"] == "dragonfly"
     assert list[0]["lib-ver"] == "1.2.3.4"
+
+
+async def test_hiredis(df_factory):
+    server = df_factory.create(proactor_threads=1)
+    server.start()
+    client = base_redis.Redis(port=server.port, protocol=3, cache_config=CacheConfig())
+    client.ping()
+
+
+@assert_eventually(times=500)
+async def wait_for_conn_drop(async_client):
+    clients = await async_client.client_list()
+    logging.info("wait_for_conn_drop clients: %s", clients)
+    assert len(clients) <= 1
+
+
+@dfly_args({"timeout": 1})
+async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
+    another_client = df_server.client()
+    await another_client.ping()
+    clients = await async_client.client_list()
+    assert len(clients) == 2
+
+    await asyncio.sleep(2)
+
+    await wait_for_conn_drop(async_client)
+    info = await async_client.info("clients")
+    assert int(info["timeout_disconnects"]) >= 1
+
+
+@dfly_args({"send_timeout": 3})
+async def test_send_timeout(df_server, async_client: aioredis.Redis):
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+    writer.write(f"client setname writer_test\n".encode())
+    await writer.drain()
+    assert "OK" in (await reader.readline()).decode()
+    clients = await async_client.client_list()
+    assert len(clients) == 2
+    size = 1024 * 1024
+    writer.write(f"SET a {'v'*size}\n".encode())
+    await writer.drain()
+
+    async def get_task():
+        while True:
+            writer.write(f"GET a\n".encode())
+            await writer.drain()
+            await asyncio.sleep(0.1)
+
+    get = asyncio.create_task(get_task())
+
+    @assert_eventually(times=600)
+    async def wait_for_stuck_on_send():
+        clients = await async_client.client_list()
+        logging.info("wait_for_stuck_on_send clients: %s", clients)
+        phase = next(
+            (client["phase"] for client in clients if client["name"] == "writer_test"), None
+        )
+        assert phase == "send"
+
+    await wait_for_stuck_on_send()
+    await wait_for_conn_drop(async_client)
+    info = await async_client.info("clients")
+    assert int(info["timeout_disconnects"]) >= 1
+    logging.info("finished disconnect")
+    get.cancel()
+
+
+# Test that the cache pipeline does not grow or shrink under constant pipeline load.
+@dfly_args({"proactor_threads": 1, "pipeline_squash": 9})
+async def test_pipeline_cache_only_async_squashed_dispatches(df_factory):
+    server = df_factory.create()
+    server.start()
+
+    client = server.client()
+
+    async def push_pipeline(size=1):
+        p = client.pipeline(transaction=True)
+        for i in range(size):
+            p.info()
+        res = await p.execute()
+        return res
+
+    # Dispatch only async command/pipelines and force squashing. pipeline_cache_bytes,
+    # should be zero because:
+    # We always dispatch the items that will be squashed, so when `INFO` gets called
+    # the cache is empty because the pipeline consumed it throughout its execution
+    for i in range(0, 30):
+        # it's actually 11 commands. 8 INFO + 2 from the MULTI/EXEC block that is injected
+        # by the client. Connection fiber yields to dispatch/async fiber when
+        # ++async_streak_len_ >= 10. The minimum to squash is 9 so it will squash the pipeline
+        # and INFO ALL should return zero for all the squashed commands in the pipeline
+        res = await push_pipeline(8)
+        for i in range(1):
+            assert res[i]["pipeline_cache_bytes"] == 0
+
+    # Non zero because we reclaimed/recycled the messages back to the cache
+    info = await client.info()
+    assert info["pipeline_cache_bytes"] > 0
+
+
+# Test that the pipeline cache size shrinks on workloads that storm the datastore with
+# pipeline commands and then "back off" by gradually reducing the pipeline load such that
+# the cache becomes progressively underutilized. At that stage, the pipeline should slowly
+# shrink (because it's underutilized).
+@dfly_args({"proactor_threads": 1})
+async def test_pipeline_cache_size(df_factory):
+    server = df_factory.create(proactor_threads=1)
+    server.start()
+
+    # Start 1 client.
+    good_client = server.client()
+    bad_actor_client = server.client()
+
+    async def push_pipeline(bad_actor_client, size=1):
+        # Fill cache.
+        p = bad_actor_client.pipeline(transaction=True)
+        for i in range(size):
+            p.lpush(str(i), "V")
+        await p.execute()
+
+    # Establish a baseline for the cache size. We dispatch async here.
+    await push_pipeline(bad_actor_client, 32)
+    info = await good_client.info()
+
+    old_pipeline_cache_bytes = info["pipeline_cache_bytes"]
+    assert old_pipeline_cache_bytes > 0
+    assert info["dispatch_queue_bytes"] == 0
+
+    for i in range(30):
+        await push_pipeline(bad_actor_client)
+        await good_client.execute_command(f"set foo{i} bar")
+
+    info = await good_client.info()
+
+    # Gradually release pipeline.
+    assert old_pipeline_cache_bytes > info["pipeline_cache_bytes"]
+    assert info["dispatch_queue_bytes"] == 0
+
+    # Now drain the full cache.
+    async with async_timeout.timeout(5):
+        while info["pipeline_cache_bytes"] != 0:
+            await good_client.execute_command(f"set foo{i} bar")
+            info = await good_client.info()
+
+    assert info["dispatch_queue_bytes"] == 0
+
+
+@dfly_args({"proactor_threads": 4, "pipeline_queue_limit": 10})
+async def test_pipeline_overlimit(df_factory: DflyInstanceFactory):
+    server = df_factory.create()
+    server.start()
+
+    client = server.client()
+
+    await client.set("x", "a" * 1024 * 5)
+
+    async def pipe_overlimit():
+        c = server.client()
+        pipe = c.pipeline()
+        for i in range(1000):
+            pipe.get("x")
+        logging.debug("Executing...")
+        res = await pipe.execute()
+        logging.debug(f"Executed.")
+
+    pipeline_tasks = [asyncio.create_task(pipe_overlimit()) for _ in range(20)]
+
+    await asyncio.sleep(2)
+    await client.config_set("pipeline_queue_limit", 10000)
+    for task in pipeline_tasks:
+        await task
+
+
+async def test_client_unpause(df_factory):
+    server = df_factory.create()
+    server.start()
+
+    async_client = server.client()
+    await async_client.client_pause(3000, all=False)
+
+    async def set_foo():
+        client = server.client()
+        async with async_timeout.timeout(2):
+            await client.execute_command("SET", "foo", "bar")
+
+    p1 = asyncio.create_task(set_foo())
+
+    await asyncio.sleep(0.5)
+    assert not p1.done()
+
+    async with async_timeout.timeout(0.5):
+        await async_client.client_unpause()
+
+    async with async_timeout.timeout(0.5):
+        await p1
+        assert p1.done()
+
+    await async_client.client_pause(1, all=False)
+    await asyncio.sleep(2)
+    server.stop()
+
+
+async def test_client_pause_b2b(async_client):
+    async with async_timeout.timeout(1):
+        await async_client.client_pause(2000, all=False)
+        await async_client.client_pause(2000, all=False)
+
+
+async def test_client_unpause_after_pause_all(async_client):
+    await async_client.client_pause(2000, all=True)
+    # Blocks and waits
+    res = await async_client.client_unpause()
+    assert res == "OK"
+    await async_client.client_pause(2000, all=False)
+    res = await async_client.client_unpause()
+
+
+async def test_client_detached_crash(df_factory):
+    server = df_factory.create(proactor_threads=1)
+    server.start()
+    async_client = server.client()
+    await async_client.client_pause(2, all=False)
+    server.stop()

@@ -20,7 +20,7 @@ constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   // To break this code deliberately if we add/remove a field to this struct.
-  static_assert(kSizeConnStats == 112u);
+  static_assert(kSizeConnStats == 136u);
 
   ADD(read_buf_capacity);
   ADD(dispatch_queue_entries);
@@ -29,13 +29,16 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(pipeline_cmd_cache_bytes);
   ADD(io_read_cnt);
   ADD(io_read_bytes);
-  ADD(command_cnt);
+  ADD(command_cnt_main);
+  ADD(command_cnt_other);
   ADD(pipelined_cmd_cnt);
   ADD(pipelined_cmd_latency);
   ADD(conn_received_cnt);
-  ADD(num_conns);
+  ADD(num_conns_main);
+  ADD(num_conns_other);
   ADD(num_blocked_clients);
   ADD(num_migrations);
+  ADD(num_recv_provided_calls);
   ADD(pipeline_throttle_count);
 
   return *this;
@@ -97,6 +100,8 @@ const char kLoadingErr[] = "-LOADING Dragonfly is loading the dataset in memory"
 const char kUndeclaredKeyErr[] = "script tried accessing undeclared key";
 const char kInvalidDumpValueErr[] = "DUMP payload version or checksum are wrong";
 const char kInvalidJsonPathErr[] = "invalid JSON path";
+const char kJsonParseError[] = "failed to parse JSON";
+const char kCrossSlotError[] = "-CROSSSLOT Keys in request don't hash to the same slot";
 
 const char kSyntaxErrType[] = "syntax_error";
 const char kScriptErrType[] = "script_error";
@@ -136,7 +141,9 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
   if (name_ == "PUBLISH" || name_ == "SUBSCRIBE" || name_ == "UNSUBSCRIBE") {
     is_pub_sub_ = true;
   } else if (name_ == "PSUBSCRIBE" || name_ == "PUNSUBSCRIBE") {
-    is_p_sub_ = true;
+    is_p_pub_sub_ = true;
+  } else if (name_ == "SPUBLISH" || name_ == "SSUBSCRIBE" || name_ == "SUNSUBSCRIBE") {
+    is_sharded_pub_sub_ = true;
   }
 }
 

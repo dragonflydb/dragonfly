@@ -4,8 +4,11 @@
 
 #include "server/search/search_family.h"
 
+#include <absl/flags/flag.h>
+
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "facade/error.h"
 #include "facade/facade_test.h"
 #include "server/command_registry.h"
 #include "server/test_utils.h"
@@ -13,6 +16,9 @@
 using namespace testing;
 using namespace std;
 using namespace util;
+using namespace facade;
+
+ABSL_DECLARE_FLAG(bool, search_reject_legacy_field);
 
 namespace dfly {
 
@@ -93,9 +99,7 @@ template <typename... Args> auto IsUnordArray(Args... args) {
 template <typename Expected, size_t... Is>
 void BuildKvMatchers(std::vector<Matcher<std::pair<std::string, RespExpr>>>& kv_matchers,
                      const Expected& expected, std::index_sequence<Is...>) {
-  std::initializer_list<int>{
-      (kv_matchers.emplace_back(Pair(std::get<Is * 2>(expected), std::get<Is * 2 + 1>(expected))),
-       0)...};
+  (kv_matchers.emplace_back(Pair(std::get<Is * 2>(expected), std::get<Is * 2 + 1>(expected))), ...);
 }
 
 MATCHER_P(IsMapMatcher, expected, "") {
@@ -541,6 +545,16 @@ TEST_F(SearchFamilyTest, TagNumbers) {
   EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|hello|2}"}), AreDocIds("d:1", "d:2"));
 }
 
+TEST_F(SearchFamilyTest, TagEscapeCharacters) {
+  EXPECT_EQ(Run({"ft.create", "item_idx", "ON", "JSON", "PREFIX", "1", "p", "SCHEMA", "$.name",
+                 "AS", "name", "TAG"}),
+            "OK");
+  EXPECT_EQ(Run({"json.set", "p:1", "$", "{\"name\":\"escape-error\"}"}), "OK");
+
+  auto resp = Run({"ft.search", "item_idx", "@name:{escape\\-err*}"});
+  EXPECT_THAT(resp, AreDocIds("p:1"));
+}
+
 TEST_F(SearchFamilyTest, Numbers) {
   for (unsigned i = 0; i <= 10; i++) {
     for (unsigned j = 0; j <= 10; j++) {
@@ -630,10 +644,10 @@ TEST_F(SearchFamilyTest, TestReturn) {
 
   // Check no fields are returned
   resp = Run({"ft.search", "i1", "@justA:0", "return", "0"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), "k0")));
+  EXPECT_THAT(resp, IsArray(IntArg(1), "k0"));
 
   resp = Run({"ft.search", "i1", "@justA:0", "nocontent"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), "k0")));
+  EXPECT_THAT(resp, IsArray(IntArg(1), "k0"));
 
   // Check only one field is returned (and with original identifier)
   resp = Run({"ft.search", "i1", "@justA:0", "return", "1", "longA"});
@@ -852,13 +866,12 @@ TEST_F(SearchFamilyTest, FtProfileInvalidQuery) {
 
 TEST_F(SearchFamilyTest, FtProfileErrorReply) {
   Run({"ft.create", "i1", "schema", "name", "text"});
-  ;
 
   auto resp = Run({"ft.profile", "i1", "not_search", "query", "(a | b) c d"});
   EXPECT_THAT(resp, ErrArg("no `SEARCH` or `AGGREGATE` provided"));
 
   resp = Run({"ft.profile", "i1", "search", "not_query", "(a | b) c d"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
 
   resp = Run({"ft.profile", "non_existent_key", "search", "query", "(a | b) c d"});
   EXPECT_THAT(resp, ErrArg("non_existent_key: no such index"));
@@ -990,6 +1003,7 @@ TEST_F(SearchFamilyTest, JsonAggregateGroupBy) {
 }
 
 TEST_F(SearchFamilyTest, JsonAggregateGroupByWithoutAtSign) {
+  absl::FlagSaver fs;
   Run({"HSET", "h1", "group", "first", "value", "1"});
   Run({"HSET", "h2", "group", "second", "value", "2"});
   Run({"HSET", "h3", "group", "first", "value", "3"});
@@ -998,11 +1012,15 @@ TEST_F(SearchFamilyTest, JsonAggregateGroupByWithoutAtSign) {
       Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "group", "TAG", "value", "NUMERIC"});
   EXPECT_EQ(resp, "OK");
 
-  // TODO: Throw an error when no '@' is provided in the GROUPBY option
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   resp = Run({"FT.AGGREGATE", "index", "*", "GROUPBY", "1", "group", "REDUCE", "COUNT", "0", "AS",
               "count"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("count", "2", "group", "first"),
                                          IsMap("group", "second", "count", "1")));
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
+  resp = Run({"FT.AGGREGATE", "index", "*", "GROUPBY", "1", "group", "REDUCE", "COUNT", "0", "AS",
+              "count"});
+  EXPECT_THAT(resp, ErrArg("bad arguments: Field name should start with '@'"));
 }
 
 TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
@@ -1012,6 +1030,8 @@ TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
   }
   Run({"ft.create", "i1", "schema", "even", "tag", "sortable", "value", "numeric", "sortable"});
 
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   // clang-format off
   auto resp = Run({"ft.aggregate", "i1", "*",
                   "GROUPBY", "1", "@even",
@@ -1028,6 +1048,19 @@ TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
                                          "distinct_vals", "50", "max_val", "99", "min_val", "1"),
                                    IsMap("even", "true", "count", "51", "distinct_tags", "1",
                                          "distinct_vals", "51", "max_val", "100", "min_val", "0")));
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
+  // clang-format off
+  resp = Run({"ft.aggregate", "i1", "*",
+                  "GROUPBY", "1", "@even",
+                      "REDUCE", "count", "0", "as", "count",
+                      "REDUCE", "count_distinct", "1", "even", "as", "distinct_tags",
+                      "REDUCE", "count_distinct", "1", "value", "as", "distinct_vals",
+                      "REDUCE", "max", "1", "value", "as", "max_val",
+                      "REDUCE", "min", "1", "value", "as", "min_val",
+                  "SORTBY", "1", "count"});
+  // clang-format on
+
+  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
 }
 
 TEST_F(SearchFamilyTest, AggregateLoadGroupBy) {
@@ -1238,12 +1271,19 @@ TEST_F(SearchFamilyTest, WrongFieldTypeJson) {
       resp, IsMapWithSize("j2", IsMap("$", R"({"value":1})"), "j4",
                           IsMap("$", R"({"another_value":2,"value":2})", "$.another_value", "2")));
 
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   resp = Run({"FT.AGGREGATE", "i2", "*", "LOAD", "2", "$.value", "$.another_value", "GROUPBY", "2",
               "$.value", "$.another_value", "REDUCE", "COUNT", "0", "AS", "count"});
   EXPECT_THAT(resp,
               IsUnordArrayWithSize(
                   IsMap("$.value", "1", "$.another_value", ArgType(RespExpr::NIL), "count", "1"),
                   IsMap("$.value", "2", "$.another_value", "2", "count", "1")));
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
+
+  resp = Run({"FT.AGGREGATE", "i2", "*", "LOAD", "2", "$.value", "$.another_value", "GROUPBY", "2",
+              "$.value", "$.another_value", "REDUCE", "COUNT", "0", "AS", "count"});
+  EXPECT_THAT(resp, ErrArg("bad arguments: Field name should start with '@'"));
 
   // Test multiple field values
   Run({"JSON.SET", "j5", ".", R"({"arr":[{"id":1},{"id":"two"}]})"});
@@ -1654,19 +1694,33 @@ TEST_F(SearchFamilyTest, AggregateResultFields) {
   resp = Run({"FT.AGGREGATE", "i1", "*"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap(), IsMap(), IsMap()));
 
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("a", "1"), IsMap("a", "4"), IsMap("a", "7")));
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
+  resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a"});
+  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
 
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "@b", "SORTBY", "1", "a"});
   EXPECT_THAT(resp,
               IsUnordArrayWithSize(IsMap("b", "\"2\"", "a", "1"), IsMap("b", "\"5\"", "a", "4"),
                                    IsMap("b", "\"8\"", "a", "7")));
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
+  resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "@b", "SORTBY", "1", "a"});
+  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
 
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a", "GROUPBY", "2", "@b", "@a", "REDUCE",
               "COUNT", "0", "AS", "count"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("b", "\"8\"", "a", "7", "count", "1"),
                                          IsMap("b", "\"2\"", "a", "1", "count", "1"),
                                          IsMap("b", "\"5\"", "a", "4", "count", "1")));
+  absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
+  resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a", "GROUPBY", "2", "@b", "@a", "REDUCE",
+              "COUNT", "0", "AS", "count"});
+  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
 
   Run({"JSON.SET", "j4", ".", R"({"id":1, "number":4})"});
   Run({"JSON.SET", "j5", ".", R"({"id":2})"});
@@ -1805,15 +1859,15 @@ TEST_F(SearchFamilyTest, AggregateSortByParsingErrors) {
 
   // Test SORTBY with negative argument count
   resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "-3", "@name", "@number", "DESC"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
 
   // Test MAX with invalid value
   resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@name", "MAX", "-10"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
 
   // Test MAX without a value
   resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@name", "MAX"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
 
   // Test SORTBY with a non-existing field
   /* Temporary unsupported
@@ -1822,7 +1876,368 @@ TEST_F(SearchFamilyTest, AggregateSortByParsingErrors) {
 
   // Test SORTBY with an invalid value
   resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "notvalue", "@name"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+}
+
+TEST_F(SearchFamilyTest, InvalidSearchOptions) {
+  Run({"JSON.SET", "j1", ".", R"({"field1":"first","field2":"second"})"});
+  Run({"FT.CREATE", "idx", "ON", "JSON", "SCHEMA", "$.field1", "AS", "field1", "TEXT", "$.field2",
+       "AS", "field2", "TEXT"});
+
+  /* Test with an empty query and LOAD. TODO: Add separate test for query syntax
+  auto resp = Run({"FT.SEARCH", "idx", "", "LOAD", "1", "@field1"});
+  EXPECT_THAT(resp, IsMapWithSize()); */
+
+  // Test with LIMIT missing arguments
+  auto resp = Run({"FT.SEARCH", "idx", "*", "LIMIT", "0"});
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
+
+  // Test with LIMIT exceeding the maximum allowed value
+  resp = Run({"FT.SEARCH", "idx", "*", "LIMIT", "0", "100000000000000000000"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test with LIMIT and negative arguments
+  resp = Run({"FT.SEARCH", "idx", "*", "LIMIT", "-1", "10"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test with LIMIT and invalid argument types
+  resp = Run({"FT.SEARCH", "idx", "*", "LIMIT", "start", "count"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test with invalid LOAD arguments
+  resp = Run({"FT.SEARCH", "idx", "*", "LOAD", "@field1", "@field2"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test with duplicate fields in LOAD
+  resp = Run({"FT.SEARCH", "idx", "*", "LOAD", "4", "@field1", "@field1", "@field2", "@field2"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("field1", "\"first\"", "field2", "\"second\"", "$",
+                                              R"({"field1":"first","field2":"second"})")));
+
+  // Test with LOAD exceeding maximum allowed count
+  resp = Run({"FT.SEARCH", "idx", "*", "LOAD", "100000000000000000000", "@field1", "@field2"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test with invalid RETURN syntax (missing count)
+  resp = Run({"FT.SEARCH", "idx", "*", "RETURN", "@field1", "@field2"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test with RETURN having duplicate fields
+  resp = Run({"FT.SEARCH", "idx", "*", "RETURN", "4", "field1", "field1", "field2", "field2"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("field1", "\"first\"", "field2", "\"second\"")));
+
+  // Test with RETURN exceeding maximum allowed count
+  resp = Run({"FT.SEARCH", "idx", "*", "RETURN", "100000000000000000000", "@field1", "@field2"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test with NOCONTENT and LOAD
+  resp = Run({"FT.SEARCH", "idx", "*", "NOCONTENT", "LOAD", "2", "@field1", "@field2"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "j1"));
+
+  // Test with NOCONTENT and RETURN
+  resp = Run({"FT.SEARCH", "idx", "*", "NOCONTENT", "RETURN", "2", "@field1", "@field2"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "j1"));
+}
+
+TEST_F(SearchFamilyTest, KnnSearchOptions) {
+  Run({"JSON.SET", "doc:1", ".", R"({"vector": [0.1, 0.2, 0.3, 0.4]})"});
+  Run({"JSON.SET", "doc:2", ".", R"({"vector": [0.5, 0.6, 0.7, 0.8]})"});
+  Run({"JSON.SET", "doc:3", ".", R"({"vector": [0.9, 0.1, 0.4, 0.3]})"});
+
+  auto resp = Run({"FT.CREATE", "my_index", "ON",  "JSON",   "PREFIX",          "1",     "doc:",
+                   "SCHEMA",    "$.vector", "AS",  "vector", "VECTOR",          "FLAT",  "6",
+                   "TYPE",      "FLOAT32",  "DIM", "4",      "DISTANCE_METRIC", "COSINE"});
+  EXPECT_EQ(resp, "OK");
+
+  std::string query_vector("\x00\x00\x00\x3f\x00\x00\x00\x40\x00\x00\x00\x41\x00\x00\x80\x42", 16);
+
+  // KNN 2
+  resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 2 @vector $query_vector]", "PARAMS", "2",
+              "query_vector", query_vector});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
+
+  // KNN 11929939
+  resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 11929939 @vector $query_vector]", "PARAMS", "2",
+              "query_vector", query_vector});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3"));
+
+  // KNN 11929939, LIMIT 4 2
+  resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 11929939 @vector $query_vector]", "PARAMS", "2",
+              "query_vector", query_vector, "LIMIT", "4", "2"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  // KNN 11929939, LIMIT 0 10
+  resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 11929939 @vector $query_vector]", "PARAMS", "2",
+              "query_vector", query_vector, "LIMIT", "0", "10"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3"));
+
+  // KNN 1, LIMIT 0 2
+  resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 1 @vector $query_vector]", "PARAMS", "2",
+              "query_vector", query_vector, "LIMIT", "0", "2"});
+  EXPECT_THAT(resp, AreDocIds("doc:1"));
+}
+
+TEST_F(SearchFamilyTest, InvalidAggregateOptions) {
+  Run({"JSON.SET", "j1", ".", R"({"field1":"first","field2":"second"})"});
+  Run({"FT.CREATE", "idx", "ON", "JSON", "SCHEMA", "$.field1", "AS", "field1", "TEXT", "$.field2",
+       "AS", "field2", "TEXT"});
+
+  // Test GROUPBY with no arguments
+  auto resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY"});
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
+
+  // Test GROUPBY with invalid count
+  resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "-1", "@field1"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp =
+      Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "100000000000000000000", "@field1", "@field2"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test REDUCE with no REDUCE function
+  resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "1", "@field1", "REDUCE"});
+  EXPECT_THAT(resp, ErrArg("reducer function  not found"));
+
+  /* // Test REDUCE with COUNT function
+  resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "1", "@field1", "REDUCE", "COUNT", "0"});
+  EXPECT_THAT(resp, IsMapWithSize("__generated_aliascount", "1", "field1", "first")); */
+
+  // Test REDUCE with invalid function
+  resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "1", "@field1", "REDUCE", "INVALIDFUNC", "0",
+              "AS", "result"});
+  EXPECT_THAT(resp, ErrArg("reducer function INVALIDFUNC not found"));
+
+  // Test SORTBY with no arguments
+  resp = Run({"FT.AGGREGATE", "idx", "*", "SORTBY"});
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
+
+  // Test SORTBY with invalid count
+  resp = Run({"FT.AGGREGATE", "idx", "*", "SORTBY", "-1", "@field1"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp = Run({"FT.AGGREGATE", "idx", "*", "SORTBY", "100000000000000000000", "@field1"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test LIMIT with invalid arguments
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LIMIT", "0"});
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
+
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LIMIT", "-1", "10"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LIMIT", "0", "100000000000000000000"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test LOAD with invalid arguments
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD", "@field1", "@field2"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD", "-1", "@field1"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD", "100000000000000000000", "@field1", "@field2"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+}
+
+TEST_F(SearchFamilyTest, InvalidCreateOptions) {
+  // Test with a duplicate field in the schema
+  auto resp = Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "title", "TEXT", "title", "TEXT"});
+  EXPECT_THAT(resp, ErrArg("Duplicate field in schema - title"));
+
+  // Test with no fields in the schema
+  resp = Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA"});
+  EXPECT_THAT(resp, ErrArg("Fields arguments are missing"));
+
+  // Test with an invalid field type
+  resp = Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "title", "UNKNOWN_TYPE"});
+  EXPECT_THAT(resp, ErrArg("Field type UNKNOWN_TYPE is not supported"));
+
+  // Test with an invalid STOPWORDS argument
+  resp = Run({"FT.CREATE", "index", "ON", "HASH", "STOPWORDS", "10", "the", "and", "of", "SCHEMA",
+              "title", "TEXT"});
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
+
+  resp = Run({"FT.CREATE", "index", "ON", "HASH", "STOPWORDS", "99999999999999999999", "the", "and",
+              "of", "SCHEMA", "title", "TEXT"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp = Run({"FT.CREATE", "index", "ON", "HASH", "STOPWORDS", "-1", "the", "and", "of", "SCHEMA",
+              "title", "TEXT"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp = Run({"FT.CREATE", "index", "ON", "HASH", "STOPWORDS", "not_a_number", "the", "and", "of",
+              "SCHEMA", "title", "TEXT"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+}
+
+TEST_F(SearchFamilyTest, SynonymManagement) {
+  // Create index with prefix
+  EXPECT_EQ(
+      Run({"FT.CREATE", "my_idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT"}),
+      "OK");
+
+  // Add first group of synonyms
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "my_idx", "1", "cat", "feline", "kitty"}), "OK");
+
+  // Add second group of synonyms
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "my_idx", "2", "kitty", "cute", "adorable"}), "OK");
+
+  // Add third group of synonyms
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "my_idx", "3", "kitty", "tiger", "cub"}), "OK");
+
+  // Check the dump output
+  auto resp = Run({"FT.SYNDUMP", "my_idx"});
+  EXPECT_THAT(resp, IsUnordArray("cub", IsArray("3"), "cute", IsArray("2"), "adorable",
+                                 IsArray("2"), "kitty", IsArray("1", "2", "3"), "feline",
+                                 IsArray("1"), "tiger", IsArray("3"), "cat", IsArray("1")));
+}
+
+TEST_F(SearchFamilyTest, SynonymsSearch) {
+  // Create search index
+  auto resp =
+      Run({"FT.CREATE", "myIndex", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  // Add documents
+  EXPECT_THAT(Run({"HSET", "doc:1", "title", "car"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:2", "title", "automobile"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:3", "title", "vehicle"}), IntArg(1));
+
+  // Add synonyms "car" and "automobile" to group 1
+  resp = Run({"FT.SYNUPDATE", "myIndex", "1", "car", "automobile"});
+  EXPECT_EQ(resp, "OK");
+
+  // Check synonyms list
+  resp = Run({"FT.SYNDUMP", "myIndex"});
+  ASSERT_THAT(resp, ArrLen(4));
+
+  // Search for "car" (should find both "car" and "automobile")
+  resp = Run({"FT.SEARCH", "myIndex", "car"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
+
+  // Search for "automobile" (should find both "car" and "automobile")
+  resp = Run({"FT.SEARCH", "myIndex", "automobile"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
+
+  // Add "vehicle" to the synonym group
+  resp = Run({"FT.SYNUPDATE", "myIndex", "1", "vehicle"});
+  EXPECT_EQ(resp, "OK");
+
+  // Search for "vehicle" (should find all three documents)
+  resp = Run({"FT.SEARCH", "myIndex", "vehicle"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3"));
+}
+
+// Test for case-insensitive synonyms
+TEST_F(SearchFamilyTest, CaseInsensitiveSynonyms) {
+  // Create an index
+  EXPECT_EQ(Run({"FT.CREATE", "case_idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title",
+                 "TEXT"}),
+            "OK");
+
+  // Add documents with different case words
+  EXPECT_THAT(Run({"HSET", "doc:1", "title", "The cat is sleeping"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:2", "title", "A feline hunter"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:3", "title", "The dog is barking"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:4", "title", "A Canine friend"}), IntArg(1));
+
+  // Add synonym groups with text IDs
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "case_idx", "my_synonyms_group0", "cat", "feline"}), "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "case_idx", "my_synonyms_group1", "dog", "canine"}), "OK");
+
+  // Check synonym output
+  auto resp = Run({"FT.SYNDUMP", "case_idx"});
+  EXPECT_THAT(resp, ArrLen(8));  // 4 terms, each with a list of groups
+
+  // Synonym search is case-insensitive
+  // Search for "cat" should find "cat" and "feline"
+  resp = Run({"FT.SEARCH", "case_idx", "cat"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
+
+  // Search for "feline" should find "feline" and "cat"
+  resp = Run({"FT.SEARCH", "case_idx", "feline"});
+  EXPECT_THAT(resp, AreDocIds("doc:2", "doc:1"));
+
+  // Search for "dog" should find "dog" and "canine"
+  resp = Run({"FT.SEARCH", "case_idx", "dog"});
+  EXPECT_THAT(resp, AreDocIds("doc:3", "doc:4"));
+
+  // Search for "canine" should find "canine" and "dog"
+  resp = Run({"FT.SEARCH", "case_idx", "canine"});
+  EXPECT_THAT(resp, AreDocIds("doc:4", "doc:3"));
+
+  // Search with different case
+  // Search for "Cat" (uppercase) should find "cat" and "feline"
+  resp = Run({"FT.SEARCH", "case_idx", "Cat"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
+
+  // Search for "FELINE" (uppercase) should find "feline" and "cat"
+  resp = Run({"FT.SEARCH", "case_idx", "FELINE"});
+  EXPECT_THAT(resp, AreDocIds("doc:2", "doc:1"));
+
+  // Search for "DoG" (mixed case) should find "dog" and "canine"
+  resp = Run({"FT.SEARCH", "case_idx", "DoG"});
+  EXPECT_THAT(resp, AreDocIds("doc:3", "doc:4"));
+
+  // Search for "cAnInE" (mixed case) should find "canine" and "dog"
+  resp = Run({"FT.SEARCH", "case_idx", "cAnInE"});
+  EXPECT_THAT(resp, AreDocIds("doc:4", "doc:3"));
+}
+
+TEST_F(SearchFamilyTest, SynonymsWithSpaces) {
+  EXPECT_EQ(Run({"FT.CREATE", "my_index", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "field",
+                 "TEXT"}),
+            "OK");
+
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "my_index", "syn_group", "word1", "word2"}), "OK");
+
+  EXPECT_THAT(Run({"HSET", "doc:1", "field", " syn_group"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:2", "field", "syn_group"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:3", "field", "word1"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:4", "field", "word2"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:5", "field", R"(\ syn_group)"}), IntArg(1));
+
+  auto resp = Run({"FT.SEARCH", "my_index", "word1"});
+  EXPECT_THAT(resp, AreDocIds("doc:3", "doc:4"));
+
+  resp = Run({"FT.SEARCH", "my_index", "word2"});
+  EXPECT_THAT(resp, AreDocIds("doc:4", "doc:3"));
+
+  resp = Run({"FT.SEARCH", "my_index", "syn_group"});
+  EXPECT_THAT(resp, AreDocIds("doc:2", "doc:1", "doc:5"));
+
+  // FT.SEARCH my_index "\ syn_group"
+  // FT.SEARCH my_index " syn_group"
+  // The both transform to " syn_group" after syntax analysis
+  // " syn_group" passes to query_str in FtSearch
+  resp = Run({"FT.SEARCH", "my_index", " syn_group"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:5"));
+}
+
+TEST_F(SearchFamilyTest, SynonymsWithLeadingSpaces) {
+  EXPECT_EQ(Run({"FT.CREATE", "my_index", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title",
+                 "TEXT"}),
+            "OK");
+
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "my_index", "group1", "word", "    several_spaces_synonym"}),
+            "OK");
+
+  auto resp = Run({"FT.SYNDUMP", "my_index"});
+  EXPECT_THAT(resp, IsUnordArray("    several_spaces_synonym", IsArray("group1"), "word",
+                                 IsArray("group1")));
+
+  EXPECT_THAT(Run({"HSET", "doc:1", "title", "word"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:2", "title", "several_spaces_synonym"}), IntArg(1));
+
+  resp = Run({"FT.SEARCH", "my_index", "word"});
+  EXPECT_THAT(resp, AreDocIds("doc:1"));
+
+  resp = Run({"FT.SEARCH", "my_index", "several_spaces_synonym"});
+  EXPECT_THAT(resp, AreDocIds("doc:2"));
+
+  EXPECT_THAT(Run({"HSET", "doc:3", "title", "    several_spaces_synonym"}), IntArg(1));
+
+  resp = Run({"FT.SEARCH", "my_index", "word"});
+  EXPECT_THAT(resp, AreDocIds("doc:1"));
 }
 
 }  // namespace dfly

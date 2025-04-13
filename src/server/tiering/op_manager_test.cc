@@ -54,8 +54,10 @@ struct OpManagerTest : PoolTestBase, OpManager {
   }
 
   void NotifyStashed(EntryId id, const io::Result<DiskSegment>& segment) override {
+    VLOG(1) << std::get<0>(id) << " stashed";
     ASSERT_TRUE(segment);
-    stashed_[id] = *segment;
+    auto [it, inserted] = stashed_.emplace(id, *segment);
+    ASSERT_TRUE(inserted);
   }
 
   bool NotifyFetched(EntryId id, std::string_view value, DiskSegment segment,
@@ -77,9 +79,9 @@ TEST_F(OpManagerTest, SimpleStashesWithReads) {
     Open();
 
     for (unsigned i = 0; i < 100; i++) {
-      EXPECT_FALSE(Stash(i, absl::StrCat("VALUE", i, "cancelled"), {}));
-      EXPECT_FALSE(Stash(i, absl::StrCat("VALUE", i, "cancelled"), {}));
-      EXPECT_FALSE(Stash(i, absl::StrCat("VALUE", i, "real"), {}));
+      EXPECT_FALSE(Stash(i, absl::StrCat("VALUE", i, "cancelled")));
+      EXPECT_FALSE(Stash(i, absl::StrCat("VALUE", i, "cancelled")));
+      EXPECT_FALSE(Stash(i, absl::StrCat("VALUE", i, "real")));
     }
 
     EXPECT_EQ(GetStats().pending_stash_cnt, 100);
@@ -104,7 +106,7 @@ TEST_F(OpManagerTest, DeleteAfterReads) {
   pp_->at(0)->Await([this] {
     Open();
 
-    EXPECT_FALSE(Stash(0u, absl::StrCat("DATA"), {}));
+    EXPECT_FALSE(Stash(0u, absl::StrCat("DATA")));
     while (stashed_.empty())
       util::ThisFiber::SleepFor(1ms);
 
@@ -133,7 +135,7 @@ TEST_F(OpManagerTest, ReadSamePageDifferentOffsets) {
       numbers += number;
     }
 
-    EXPECT_FALSE(Stash(0u, numbers, {}));
+    EXPECT_FALSE(Stash(0u, numbers));
     while (stashed_.empty())
       util::ThisFiber::SleepFor(1ms);
 
@@ -155,7 +157,7 @@ TEST_F(OpManagerTest, Modify) {
   pp_->at(0)->Await([this] {
     Open();
 
-    Stash(0u, "D", {});
+    Stash(0u, "D");
     while (stashed_.empty())
       util::ThisFiber::SleepFor(1ms);
 

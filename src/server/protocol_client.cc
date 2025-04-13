@@ -3,7 +3,7 @@
 //
 #include "server/protocol_client.h"
 
-#include "facade/tls_error.h"
+#include "facade/tls_helpers.h"
 
 extern "C" {
 #include "redis/rdb.h"
@@ -52,60 +52,19 @@ using namespace facade;
 using absl::GetFlag;
 using absl::StrCat;
 
-namespace {
-
-#ifdef DFLY_USE_SSL
-
-static ProtocolClient::SSL_CTX* CreateSslClientCntx() {
-  ProtocolClient::SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
-  const auto& tls_key_file = GetFlag(FLAGS_tls_key_file);
-  unsigned mask = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
-
-  // Load client certificate if given.
-  if (!tls_key_file.empty()) {
-    DFLY_SSL_CHECK(1 == SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
-    // We checked that the flag is non empty in ValidateClientTlsFlags.
-    const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
-
-    DFLY_SSL_CHECK(1 == SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
-  }
-
-  // Load custom certificate validation if given.
-  const auto& tls_ca_cert_file = GetFlag(FLAGS_tls_ca_cert_file);
-  const auto& tls_ca_cert_dir = GetFlag(FLAGS_tls_ca_cert_dir);
-
-  const auto* file = tls_ca_cert_file.empty() ? nullptr : tls_ca_cert_file.data();
-  const auto* dir = tls_ca_cert_dir.empty() ? nullptr : tls_ca_cert_dir.data();
-  if (file || dir) {
-    DFLY_SSL_CHECK(1 == SSL_CTX_load_verify_locations(ctx, file, dir));
-  } else {
-    DFLY_SSL_CHECK(1 == SSL_CTX_set_default_verify_paths(ctx));
-  }
-
-  DFLY_SSL_CHECK(1 == SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
-  SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
-
-  SSL_CTX_set_options(ctx, SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS);
-
-  SSL_CTX_set_verify(ctx, mask, NULL);
-
-  DFLY_SSL_CHECK(1 == SSL_CTX_set_dh_auto(ctx, 1));
-  return ctx;
-}
-#endif
-
-error_code Recv(FiberSocketBase* input, base::IoBuf* dest) {
+error_code ProtocolClient::Recv(FiberSocketBase* input, base::IoBuf* dest) {
   auto buf = dest->AppendBuffer();
   io::Result<size_t> exp_size = input->Recv(buf);
-  if (!exp_size)
+  if (!exp_size) {
+    LOG(WARNING) << "Socket error " << exp_size.error();
     return exp_size.error();
+  }
+
+  TouchIoTime();
 
   dest->CommitWrite(*exp_size);
-
   return error_code{};
 }
-
-}  // namespace
 
 std::string ProtocolClient::ServerContext::Description() const {
   return absl::StrCat(host, ":", port);
@@ -136,9 +95,11 @@ void ValidateClientTlsFlags() {
 }
 
 void ProtocolClient::MaybeInitSslCtx() {
+#ifdef DFLY_USE_SSL
   if (absl::GetFlag(FLAGS_tls_replication)) {
-    ssl_ctx_ = CreateSslClientCntx();
+    ssl_ctx_ = CreateSslCntx(facade::TlsContextRole::CLIENT);
   }
+#endif
 }
 
 ProtocolClient::ProtocolClient(string host, uint16_t port) {
@@ -155,7 +116,7 @@ ProtocolClient::ProtocolClient(ServerContext context) : server_context_(std::mov
 }
 
 ProtocolClient::~ProtocolClient() {
-  cntx_.JoinErrorHandler();
+  exec_st_.JoinErrorHandler();
 
   // FIXME: We should close the socket explictly outside of the destructor. This currently
   // breaks test_cancel_replication_immediately.
@@ -173,7 +134,17 @@ ProtocolClient::~ProtocolClient() {
 
 error_code ProtocolClient::ResolveHostDns() {
   char ip_addr[INET6_ADDRSTRLEN];
-  auto ec = util::fb2::DnsResolve(server_context_.host, 0, ip_addr, ProactorBase::me());
+
+  // IPv6 address can be enclosed in square brackets.
+  // https://www.rfc-editor.org/rfc/rfc2732#section-2
+  // We need to remove the brackets before resolving the DNS.
+  // Enclosed IPv6 addresses can't be resolved by the DNS resolver.
+  std::string host = server_context_.host;
+  if (!host.empty() && host.front() == '[' && host.back() == ']') {
+    host = host.substr(1, host.size() - 2);
+  }
+
+  auto ec = util::fb2::DnsResolve(host, 0, ip_addr, ProactorBase::me());
   if (ec) {
     LOG(ERROR) << "Dns error " << ec << ", host: " << server_context_.host;
     return make_error_code(errc::host_unreachable);
@@ -188,7 +159,7 @@ error_code ProtocolClient::ResolveHostDns() {
 }
 
 error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms,
-                                          Context* cntx) {
+                                          ExecutionState* cntx) {
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
   {
@@ -196,7 +167,7 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
     // The context closes sock_. So if the context error handler has already
     // run we must not create a new socket. sock_mu_ syncs between the two
     // functions.
-    if (!cntx->IsCancelled()) {
+    if (cntx->IsRunning()) {
       if (sock_) {
         LOG_IF(WARNING, sock_->Close()) << "Error closing socket";
         sock_.reset(nullptr);
@@ -239,7 +210,7 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
   */
   auto masterauth = absl::GetFlag(FLAGS_masterauth);
   auto masteruser = absl::GetFlag(FLAGS_masteruser);
-  ResetParser(false);
+  ResetParser(RedisParser::Mode::CLIENT);
   if (!masterauth.empty()) {
     auto cmd = masteruser.empty() ? StrCat("AUTH ", masterauth)
                                   : StrCat("AUTH ", masteruser, " ", masterauth);
@@ -284,17 +255,11 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(base::IoBu
     uint32_t consumed;
     if (buffer->InputLen() == 0 || result == RedisParser::INPUT_PENDING) {
       DCHECK_GT(buffer->AppendLen(), 0u);
-      io::MutableBytes buf = buffer->AppendBuffer();
-      io::Result<size_t> size_res = sock_->Recv(buf);
-      if (!size_res) {
-        LOG(ERROR) << "Socket error " << size_res.error();
-        return nonstd::make_unexpected(size_res.error());
+
+      ec = Recv(sock_.get(), buffer);
+      if (ec) {
+        return nonstd::make_unexpected(ec);
       }
-
-      VLOG(2) << "Read master response of " << *size_res << " bytes";
-
-      TouchIoTime();
-      buffer->CommitWrite(*size_res);
     }
 
     result = parser_->Parse(buffer->InputBuffer(), &consumed, &resp_args_);
@@ -343,6 +308,7 @@ error_code ProtocolClient::ReadLine(base::IoBuf* io_buf, string_view* line) {
     input_str = ToSV(io_buf->InputBuffer());
     if (!input_str.empty())
       break;
+
     RETURN_ON_ERR(Recv(sock_.get(), io_buf));
     input_str = ToSV(io_buf->InputBuffer());
   };
@@ -385,6 +351,7 @@ bool ProtocolClient::CheckRespFirstTypes(initializer_list<RespExpr::Type> types)
 
 error_code ProtocolClient::SendCommand(string_view command) {
   string formatted_command = RedisReplyBuilderBase::SerializeCommand(command);
+  DCHECK(sock_->proactor() == ProactorBase::me());
   auto ec = sock_->Write(io::Buffer(formatted_command));
   if (!ec)
     TouchIoTime();
@@ -399,9 +366,9 @@ error_code ProtocolClient::SendCommandAndReadResponse(string_view command) {
   return response_res.has_value() ? error_code{} : response_res.error();
 }
 
-void ProtocolClient::ResetParser(bool server_mode) {
+void ProtocolClient::ResetParser(RedisParser::Mode mode) {
   // We accept any length for the parser because it has been approved by the master.
-  parser_.reset(new RedisParser(UINT32_MAX, server_mode));
+  parser_.reset(new RedisParser(mode));
 }
 
 uint64_t ProtocolClient::LastIoTime() const {

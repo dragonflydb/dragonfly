@@ -8,17 +8,15 @@ extern "C" {
 }
 
 #include <absl/strings/ascii.h>
-#include <absl/strings/charconv.h>
 #include <absl/strings/str_join.h>
-#include <absl/strings/strip.h>
-#include <fast_float/fast_float.h>
+#include <absl/strings/str_split.h>
 #include <gmock/gmock.h>
+#include <reflex/matcher.h>
 
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
-#include "server/conn_context.h"
 #include "server/main_service.h"
 #include "server/test_utils.h"
 
@@ -26,6 +24,7 @@ ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
 ABSL_DECLARE_FLAG(float, mem_defrag_waste_threshold);
 ABSL_DECLARE_FLAG(uint32_t, mem_defrag_check_sec_interval);
 ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
+ABSL_DECLARE_FLAG(std::vector<std::string>, command_alias);
 ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
 ABSL_DECLARE_FLAG(double, eviction_memory_budget_threshold);
 
@@ -38,8 +37,11 @@ using absl::StrCat;
 using fb2::Fiber;
 using ::io::Result;
 using testing::AnyOf;
+using testing::Contains;
 using testing::ElementsAre;
 using testing::HasSubstr;
+using testing::Key;
+using testing::Pair;
 
 namespace {
 
@@ -110,17 +112,13 @@ TEST_F(DflyEngineTest, Sds) {
 
 class DflyRenameCommandTest : public DflyEngineTest {
  protected:
-  DflyRenameCommandTest() : DflyEngineTest() {
+  DflyRenameCommandTest() {
     // rename flushall to myflushall, flushdb command will not be able to execute
     absl::SetFlag(
         &FLAGS_rename_command,
         std::vector<std::string>({"flushall=myflushall", "flushdb=", "ping=abcdefghijklmnop"}));
   }
-
-  void TearDown() {
-    absl::SetFlag(&FLAGS_rename_command, std::vector<std::string>({""}));
-    DflyEngineTest::TearDown();
-  }
+  absl::FlagSaver saver_;
 };
 
 TEST_F(DflyRenameCommandTest, RenameCommand) {
@@ -305,7 +303,7 @@ TEST_F(DflyEngineTestWithRegistry, Hello) {
 
   EXPECT_THAT(
       resp.GetVec(),
-      ElementsAre("server", "redis", "version", "7.2.0", "dragonfly_version",
+      ElementsAre("server", "redis", "version", "7.4.0", "dragonfly_version",
                   ArgType(RespExpr::STRING), "proto", IntArg(2), "id", ArgType(RespExpr::INT64),
                   "mode", testing::AnyOf("standalone", "cluster"), "role", "master"));
 
@@ -313,7 +311,7 @@ TEST_F(DflyEngineTestWithRegistry, Hello) {
   ASSERT_THAT(resp, ArrLen(14));
   EXPECT_THAT(
       resp.GetVec(),
-      ElementsAre("server", "redis", "version", "7.2.0", "dragonfly_version",
+      ElementsAre("server", "redis", "version", "7.4.0", "dragonfly_version",
                   ArgType(RespExpr::STRING), "proto", IntArg(3), "id", ArgType(RespExpr::INT64),
                   "mode", testing::AnyOf("standalone", "cluster"), "role", "master"));
 
@@ -498,9 +496,11 @@ TEST_F(DflyEngineTest, StickyEviction) {
   string tmp_val(100, '.');
 
   ssize_t failed = -1;
-  for (ssize_t i = 0; i < 5000; ++i) {
+
+  for (ssize_t i = 0; i < 4500; ++i) {
     string key = StrCat("volatile", i);
     ASSERT_EQ("OK", Run({"set", key, tmp_val}));
+    usleep(1);
   }
 
   bool done = false;
@@ -774,7 +774,7 @@ TEST_F(DflyEngineTest, MemoryUsage) {
   }
 
   for (unsigned i = 0; i < 1000; ++i) {
-    Run({"rpush", "l2", StrCat(string('a', 200), i)});
+    Run({"rpush", "l2", StrCat(string(200, 'a'), i)});
   }
   auto resp = Run({"memory", "usage", "l1"});
   EXPECT_GT(*resp.GetInt(), 8000);
@@ -833,37 +833,47 @@ TEST_F(DflyEngineTest, ReplicaofRejectOnLoad) {
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.
 
-// Parse Double benchmarks
-static void BM_ParseFastFloat(benchmark::State& state) {
-  std::vector<std::string> args(100);
-  std::random_device rd;
+TEST_F(DflyEngineTest, CommandMetricLabels) {
+  EXPECT_EQ(Run({"SET", "foo", "bar"}), "OK");
+  EXPECT_EQ(Run({"GET", "foo"}), "bar");
+  const Metrics metrics = GetMetrics();
 
-  for (auto& arg : args) {
-    arg = std::to_string(std::uniform_real_distribution<double>(0, 1e5)(rd));
-  }
-  double res;
-  while (state.KeepRunning()) {
-    for (const auto& arg : args) {
-      fast_float::from_chars(arg.data(), arg.data() + arg.size(), res);
-    }
-  }
+  // The test connection counts as other
+  EXPECT_EQ(metrics.facade_stats.conn_stats.command_cnt_other, 2);
+  EXPECT_EQ(metrics.facade_stats.conn_stats.command_cnt_main, 0);
+  EXPECT_EQ(metrics.facade_stats.conn_stats.num_conns_main, 0);
+  EXPECT_EQ(metrics.facade_stats.conn_stats.num_conns_other, 0);
 }
-BENCHMARK(BM_ParseFastFloat);
 
-static void BM_ParseDoubleAbsl(benchmark::State& state) {
-  std::vector<std::string> args(100);
-  std::random_device rd;
-  for (auto& arg : args) {
-    arg = std::to_string(std::uniform_real_distribution<double>(0, 1e5)(rd));
+class DflyCommandAliasTest : public DflyEngineTest {
+ protected:
+  DflyCommandAliasTest() {
+    // Test an interaction of rename and alias, where we rename and then add an alias on the rename
+    absl::SetFlag(&FLAGS_rename_command, {"ping=gnip"});
+    absl::SetFlag(&FLAGS_command_alias, {"___set=set", "___ping=gnip"});
   }
 
-  double res;
-  while (state.KeepRunning()) {
-    for (const auto& arg : args) {
-      absl::from_chars(arg.data(), arg.data() + arg.size(), res);
-    }
-  }
+  absl::FlagSaver saver_;
+};
+
+TEST_F(DflyCommandAliasTest, Aliasing) {
+  EXPECT_EQ(Run({"SET", "foo", "bar"}), "OK");
+  EXPECT_EQ(Run({"___SET", "a", "b"}), "OK");
+  EXPECT_EQ(Run({"GET", "foo"}), "bar");
+  EXPECT_EQ(Run({"GET", "a"}), "b");
+  // test the alias
+  EXPECT_EQ(Run({"___ping"}), "PONG");
+  // test the rename
+  EXPECT_EQ(Run({"gnip"}), "PONG");
+  // the original command is not accessible
+  EXPECT_THAT(Run({"PING"}), ErrArg("unknown command `PING`"));
+
+  const Metrics metrics = GetMetrics();
+  const auto& stats = metrics.cmd_stats_map;
+  EXPECT_THAT(stats, Contains(Pair("___set", Key(1))));
+  EXPECT_THAT(stats, Contains(Pair("set", Key(1))));
+  EXPECT_THAT(stats, Contains(Pair("___ping", Key(1))));
+  EXPECT_THAT(stats, Contains(Pair("get", Key(2))));
 }
-BENCHMARK(BM_ParseDoubleAbsl);
 
 }  // namespace dfly

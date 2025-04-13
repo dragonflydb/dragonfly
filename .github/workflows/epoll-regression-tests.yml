@@ -1,0 +1,83 @@
+name: Epoll Regression Tests
+
+on:
+  schedule:
+    - cron: "0 0/3 * * *"
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        # Test of these containers
+        container: ["ubuntu-dev:20"]
+        proactor: [Epoll]
+        build-type: [Debug]
+        runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
+
+    runs-on: ${{ matrix.runner }}
+
+    container:
+      image: ghcr.io/romange/${{ matrix.container }}
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      volumes:
+        - /var/crash:/var/crash
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Print environment info
+        run: |
+          cat /proc/cpuinfo
+          ulimit -a
+          env
+
+      - name: Configure & Build
+        run: |
+          # -no-pie to disable address randomization so we could symbolize stacktraces
+          cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
+                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPRINT_STACKTRACES_ON_SIGNAL=ON \
+                -DCMAKE_CXX_FLAGS=-no-pie -DHELIO_STACK_CHECK:STRING=4096
+
+          cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly
+          pwd
+          ls -l ..
+
+      - name: Run regression tests action
+        uses: ./.github/actions/regression-tests
+        with:
+          dfly-executable: dragonfly
+          gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
+          build-folder-name: build
+          filter: ${{ matrix.build-type == 'Release' && 'not empty' || 'not opt_only' }}
+          aws-access-key-id: ${{ secrets.AWS_S3_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_S3_ACCESS_SECRET }}
+          s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
+          # Chain ternary oprator of the form (which can be nested)
+          # (expression == condition && <true expression> || <false expression>)
+          epoll: ${{ matrix.proactor == 'Epoll' && 'epoll' || 'iouring' }}
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: /tmp/failed/*
+
+      - name: Copy binary on a self hosted runner
+        if: failure()
+        run: |
+          # We must use sh syntax.
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
+            cd ${GITHUB_WORKSPACE}/build
+            timestamp=$(date +%Y-%m-%d_%H:%M:%S)
+            mv ./dragonfly /var/crash/dragonfy_${timestamp}
+          fi
+
+  lint-test-chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/lint-test-chart

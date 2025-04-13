@@ -54,13 +54,13 @@ class SliceSnapshot {
     virtual ~SnapshotDataConsumerInterface() = default;
 
     // Receives a chunk of snapshot data for processing
-    virtual void ConsumeData(std::string data, Context* cntx) = 0;
+    virtual void ConsumeData(std::string data, ExecutionState* cntx) = 0;
     // Finalizes the snapshot writing
     virtual void Finalize() = 0;
   };
 
   SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
-                SnapshotDataConsumerInterface* consumer, Context* cntx);
+                SnapshotDataConsumerInterface* consumer, ExecutionState* cntx);
   ~SliceSnapshot();
 
   static size_t GetThreadLocalMemoryUsage();
@@ -89,6 +89,20 @@ class SliceSnapshot {
     snapshot_fb_.JoinIfNeeded();
   }
 
+  uint64_t snapshot_version() const {
+    return snapshot_version_;
+  }
+
+  const RdbTypeFreqMap& freq_map() const {
+    return type_freq_map_;
+  }
+
+  // Get different sizes, in bytes. All disjoint.
+  size_t GetBufferCapacity() const;
+  size_t GetTempBuffersSize() const;
+
+  RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
+
  private:
   // Main snapshotting fiber that iterates over all buckets in the db slice
   // and submits them to SerializeBucket.
@@ -111,39 +125,25 @@ class SliceSnapshot {
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
 
   // Journal listener
-  void OnJournalEntry(const journal::JournalItem& item, bool unused_await_arg);
+  void OnJournalEntry(const journal::JournalItem& item, bool allow_await);
 
   // Push serializer's internal buffer.
   // Push regardless of buffer size if force is true.
   // Return true if pushed. Can block. Is called from the snapshot thread.
   bool PushSerialized(bool force);
+  void SerializeExternal(DbIndex db_index, PrimeKey key, const PrimeValue& pv, time_t expire_time,
+                         uint32_t mc_flags);
 
   // Helper function that flushes the serialized items into the RecordStream.
   // Can block.
   using FlushState = SerializerBase::FlushState;
   size_t FlushSerialized(FlushState flush_state);
 
- public:
-  uint64_t snapshot_version() const {
-    return snapshot_version_;
-  }
-
-  const RdbTypeFreqMap& freq_map() const {
-    return type_freq_map_;
-  }
-
-  // Get different sizes, in bytes. All disjoint.
-  size_t GetBufferCapacity() const;
-  size_t GetTempBuffersSize() const;
-
-  RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
-
- private:
   // An entry whose value must be awaited
   struct DelayedEntry {
     DbIndex dbid;
-    CompactObj key;
-    util::fb2::Future<PrimeValue> value;
+    PrimeKey key;
+    util::fb2::Future<string> value;
     time_t expire;
     uint32_t mc_flags;
   };
@@ -178,7 +178,7 @@ class SliceSnapshot {
   ThreadLocalMutex big_value_mu_;
 
   SnapshotDataConsumerInterface* consumer_;
-  Context* cntx_;
+  ExecutionState* cntx_;
 };
 
 }  // namespace dfly

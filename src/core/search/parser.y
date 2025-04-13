@@ -27,10 +27,6 @@
 #include "core/search/query_driver.h"
 #include "core/search/vector_utils.h"
 
-// Have to disable because GCC doesn't understand `symbol_type`'s union
-// implementation
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
-
 #define yylex driver->scanner()->Lex
 
 using namespace std;
@@ -60,6 +56,7 @@ double toDouble(string_view src);
   LCURLBR     "{"
   RCURLBR     "}"
   OR_OP       "|"
+  COMMA       ","
   KNN         "KNN"
   AS          "AS"
   EF_RUNTIME  "EF_RUNTIME"
@@ -145,7 +142,8 @@ field_cond:
   | LCURLBR tag_list RCURLBR                            { $$ = std::move($2); }
 
 numeric_filter_expr:
-opt_lparen generic_number opt_lparen generic_number { $$ = AstRangeNode($2, $1, $4, $3); }
+  opt_lparen generic_number opt_lparen generic_number { $$ = AstRangeNode($2, $1, $4, $3); }
+  | opt_lparen generic_number COMMA opt_lparen generic_number { $$ = AstRangeNode($2, $1, $5, $4); }
 
 generic_number:
   DOUBLE { $$ = toDouble($1); }
@@ -196,12 +194,12 @@ dfly::search::Parser::error(const location_type& l, const string& m)
 
 std::uint32_t toUint32(string_view str) {
   uint32_t val = 0;
-  absl::SimpleAtoi(str, &val); // no need to check the result because str is parsed by regex
+  std::ignore = absl::SimpleAtoi(str, &val); // no need to check the result because str is parsed by regex
   return val;
 }
 
 double toDouble(string_view str) {
   double val = 0;
-  absl::SimpleAtod(str, &val); // no need to check the result because str is parsed by regex
+  std::ignore = absl::SimpleAtod(str, &val); // no need to check the result because str is parsed by regex
   return val;
 }

@@ -60,7 +60,8 @@ class ProtocolClient {
 
   std::error_code ResolveHostDns();
   // Connect to master and authenticate if needed.
-  std::error_code ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms, Context* cntx);
+  std::error_code ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms,
+                                 ExecutionState* cntx);
 
   void DefaultErrorHandler(const GenericError& err);
 
@@ -96,7 +97,7 @@ class ProtocolClient {
     return server_context_;
   }
 
-  void ResetParser(bool server_mode);
+  void ResetParser(facade::RedisParser::Mode mode);
 
   auto& LastResponseArgs() {
     return resp_args_;
@@ -111,6 +112,8 @@ class ProtocolClient {
   }
 
  private:
+  std::error_code Recv(util::FiberSocketBase* input, base::IoBuf* dest);
+
   ServerContext server_context_;
 
   std::unique_ptr<facade::RedisParser> parser_;
@@ -121,7 +124,7 @@ class ProtocolClient {
   util::fb2::Mutex sock_mu_;
 
  protected:
-  Context cntx_;  // context for tasks in replica.
+  ExecutionState exec_st_;  // context for tasks in replica.
 
   std::string last_cmd_;
   std::string last_resp_;

@@ -24,7 +24,7 @@ class TaskQueue {
 
   template <typename F> bool Add(F&& f) {
     if (queue_.TryAdd(std::forward<F>(f)))
-      return true;
+      return false;
 
     ++blocked_submitters_;
     auto res = queue_.Add(std::forward<F>(f));
@@ -66,7 +66,6 @@ class TaskQueue {
  private:
   util::fb2::FiberQueue queue_;
   std::vector<util::fb2::Fiber> consumer_fibers_;
-  unsigned pool_max_size_;
 
   static __thread unsigned blocked_submitters_;
 };

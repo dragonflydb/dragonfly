@@ -120,6 +120,7 @@ class BaseFamilyTest : public ::testing::Test {
   }
 
   void ClearMetrics();
+  std::string FormatMetrics(const Metrics& metrics) const;
 
   void AdvanceTime(int64_t ms) {
     TEST_current_time_ms += ms;

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 
 #include <memory>
 #include <optional>
@@ -15,6 +16,7 @@
 #include "base/pmr/memory_resource.h"
 #include "core/mi_memory_resource.h"
 #include "core/search/search.h"
+#include "core/search/synonyms.h"
 #include "server/common.h"
 #include "server/search/aggregator.h"
 #include "server/table.h"
@@ -22,6 +24,7 @@
 namespace dfly {
 
 using SearchDocData = absl::flat_hash_map<std::string /*field*/, search::SortableValue /*value*/>;
+using Synonyms = search::Synonyms;
 
 std::string_view SearchFieldTypeToString(search::SchemaField::FieldType);
 
@@ -148,6 +151,7 @@ struct SearchParams {
     Only one of load_fields and return_fields should be set.
   */
   std::optional<SearchFieldsList> load_fields;
+  bool no_content = false;
 
   std::optional<search::SortOption> sort_option;
   search::QueryParams query_params;
@@ -157,7 +161,7 @@ struct SearchParams {
   }
 
   bool IdsOnly() const {
-    return return_fields && return_fields->empty();
+    return no_content || (return_fields && return_fields->empty());
   }
 
   bool ShouldReturnField(std::string_view alias) const;
@@ -240,6 +244,19 @@ class ShardDocIndex {
 
   io::Result<StringVec, facade::ErrorReply> GetTagVals(std::string_view field) const;
 
+  // Get synonym manager for this shard
+  const Synonyms& GetSynonyms() const {
+    return synonyms_;
+  }
+
+  Synonyms& GetSynonyms() {
+    return synonyms_;
+  }
+
+  // Rebuild indices only for documents containing terms from the updated synonym group
+  void RebuildForGroup(const OpArgs& op_args, const std::string_view& group_id,
+                       const std::vector<std::string_view>& terms);
+
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
@@ -248,6 +265,7 @@ class ShardDocIndex {
   std::shared_ptr<const DocIndex> base_;
   std::optional<search::FieldIndices> indices_;
   DocKeyIndex key_index_;
+  Synonyms synonyms_;
 };
 
 // Stores shard doc indices by name on a specific shard.

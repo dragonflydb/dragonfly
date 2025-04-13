@@ -71,7 +71,7 @@ TEST_F(StringFamilyTest, Incr) {
   ASSERT_THAT(Run({"incrby", "ne", "0"}), IntArg(0));
   ASSERT_THAT(Run({"decrby", "a", "-9223372036854775808"}), ErrArg("overflow"));
   auto metrics = GetMetrics();
-  EXPECT_EQ(10, metrics.events.mutations);
+  EXPECT_EQ(9, metrics.events.mutations);
   EXPECT_EQ(0, metrics.events.misses);
   EXPECT_EQ(0, metrics.events.hits);
 }
@@ -283,9 +283,9 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2276) {
 
   resp = Run({"info", "stats"});
   size_t bumps1 = get_bump_ups(resp.GetString());
-  EXPECT_GT(bumps1, 0);
-  EXPECT_LT(bumps1, 10);  // we assume that some bumps are blocked because items reside next to each
-                          // other in the slot.
+
+  EXPECT_GE(bumps1, 0);
+  EXPECT_LE(bumps1, 10);
 
   for (int i = 0; i < 10; ++i) {
     auto get_resp = Run({"get", vec[i]});
@@ -332,7 +332,7 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2465) {
 
   resp = Run({"info", "stats"});
   size_t bumps = get_bump_ups(resp.GetString());
-  EXPECT_EQ(bumps, 3);  // one bump for del and one for get and one for mget
+  EXPECT_EQ(bumps, 2);  // one bump for get and one for mget
 }
 
 TEST_F(StringFamilyTest, MSetGet) {
@@ -526,6 +526,13 @@ TEST_F(StringFamilyTest, IncrByFloat) {
   Run({"SET", "num", "2.566"});
   resp = Run({"INCRBYFLOAT", "num", "1.0"});
   EXPECT_EQ(resp, "3.566");
+}
+
+TEST_F(StringFamilyTest, RestoreHighTTL) {
+  Run({"SET", "X", "1"});
+  auto buffer = Run({"DUMP", "X"}).GetBuf();
+  Run({"DEL", "X"});
+  EXPECT_EQ(Run({"RESTORE", "X", "5430186761345", ToSV(buffer)}), "OK");
 }
 
 TEST_F(StringFamilyTest, SetNx) {

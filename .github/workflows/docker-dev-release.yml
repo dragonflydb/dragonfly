@@ -1,0 +1,145 @@
+name: Development Docker Build
+
+on:
+  schedule:
+    - cron: '15 0 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  image: ghcr.io/dragonflydb/dragonfly-dev
+  GCS_IMAGE: us-central1-docker.pkg.dev/dragonflydb-public/dragonfly-registry/dragonfly-dev
+
+jobs:
+  build_and_tag:
+    name: Build and Push ${{matrix.flavor}} ${{ matrix.os.arch }} image
+    strategy:
+      matrix:
+        flavor: [alpine,ubuntu]
+        os:
+          - image: ubuntu-24.04
+            arch: amd64
+          - image: ubuntu-24.04-arm
+            arch: arm64
+
+    runs-on: ${{ matrix.os.image }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Registries
+        uses: ./.github/actions/multi-registry-docker-login
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Get Build Information
+        id: build_info
+        run: |
+          echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Docker meta
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.image }}
+            ${{ env.GCS_IMAGE }}
+          tags: |
+            type=sha,enable=true,prefix=${{ matrix.flavor}}-,suffix=-${{ matrix.os.arch }},format=short
+          labels: |
+            org.opencontainers.image.vendor=DragonflyDB LTD
+            org.opencontainers.image.title=Dragonfly Development Image
+            org.opencontainers.image.description=The fastest in-memory store
+      - name: Build image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          provenance: false  # Prevent pushing a docker manifest
+          tags: |
+            ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          file: tools/packaging/Dockerfile.${{ matrix.flavor }}-dev
+          cache-from: type=gha,scope=tagged${{ matrix.flavor }}
+          cache-to: type=gha,scope=tagged${{ matrix.flavor }},mode=max
+          load: true  # Load the build images into the local docker.
+      - name: Test Image
+        run: |
+          echo ${{ steps.build.outputs.digest }}
+          image_tags=(${{ steps.metadata.outputs.tags }})
+
+          # install redis-tools
+          sudo apt-get install redis-tools -y
+
+          for image_tag in "${image_tags[@]}"; do
+            echo "Testing image: ${image_tag}"
+            docker image inspect ${image_tag}
+            echo "Testing ${{ matrix.flavor }} image"
+
+            # docker run with port-forwarding
+            docker run -d -p 6379:6379 ${image_tag}
+            sleep 5
+            redis-cli -h localhost ping | grep -q "PONG" || exit 1
+            docker stop $(docker ps -q --filter ancestor=${image_tag})
+          done
+
+    outputs:
+      # matrix jobs outputs override each other, but we use the same sha
+      # for all images, so we can use the same output name.
+      sha: ${{ steps.build_info.outputs.short_sha }}
+
+  merge_manifest:
+    needs: [build_and_tag]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        flavor: [alpine,ubuntu]
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: Login to Registries
+        uses: ./.github/actions/multi-registry-docker-login
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Merge and Push
+        run: |
+            # Function to create and push manifests for a given registry
+            create_and_push_manifests() {
+              local registry=$1
+              local flavor=$2
+              local sha=$3
+
+              # Create and push the manifest like dragonfly-dev:alpine-<sha>
+              local sha_tag="${registry}:${flavor}-${sha}"
+              docker manifest create ${sha_tag} --amend ${sha_tag}-amd64 --amend ${sha_tag}-arm64
+              docker manifest push ${sha_tag}
+
+              # Create and push the manifest like dragonfly-dev:alpine
+              local flavor_tag="${registry}:${flavor}"
+              docker manifest create ${flavor_tag} --amend ${sha_tag}-amd64 --amend ${sha_tag}-arm64
+              docker manifest push ${flavor_tag}
+            }
+
+            # GitHub Container Registry manifests
+            create_and_push_manifests "${{ env.image }}" "${{ matrix.flavor }}" "${{ needs.build_and_tag.outputs.sha }}"
+
+            # Google Artifact Registry manifests
+            create_and_push_manifests "${{ env.GCS_IMAGE }}" "${{ matrix.flavor }}" "${{ needs.build_and_tag.outputs.sha }}"

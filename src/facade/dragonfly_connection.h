@@ -54,9 +54,11 @@ class SinkReplyBuilder;
 // For pipelined requests, monitor and pubsub messages it uses
 // a separate dispatch queue that is processed on a separate fiber.
 class Connection : public util::Connection {
-  struct QueueBackpressure;
-
  public:
+  static void Init(unsigned io_threads);
+  static void Shutdown();
+  static void ShutdownThreadLocal();
+
   Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
              ServiceInterface* service);
   ~Connection();
@@ -73,6 +75,7 @@ class Connection : public util::Connection {
     std::string pattern{};              // non-empty for pattern subscriber
     std::shared_ptr<char[]> buf;        // stores channel name and message
     std::string_view channel, message;  // channel and message parts from buf
+    bool should_unsubscribe = false;    // unsubscribe from channel after sending the message
   };
 
   // Pipeline message, accumulated Redis command to be executed.
@@ -113,6 +116,7 @@ class Connection : public util::Connection {
     std::vector<uint64_t> commands;
     dfly::acl::AclKeys keys;
     dfly::acl::AclPubSub pub_sub;
+    size_t db_indx;
   };
 
   // Migration request message, the async fiber stops to give way for thread migration.
@@ -195,21 +199,16 @@ class Connection : public util::Connection {
     // Returns client id.Thread-safe.
     uint32_t GetClientId() const;
 
-    // Ensure owner thread's memory budget. If expired, skips and returns false. Thread-safe.
-    bool EnsureMemoryBudget() const;
-
     bool operator<(const WeakRef& other);
     bool operator==(const WeakRef& other) const;
 
    private:
     friend class Connection;
 
-    WeakRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure, unsigned thread,
-            uint32_t client_id);
+    WeakRef(std::shared_ptr<Connection> ptr, unsigned thread_id, uint32_t client_id);
 
     std::weak_ptr<Connection> ptr_;
-    QueueBackpressure* backpressure_;
-    unsigned thread_;
+    unsigned thread_id_;
     uint32_t client_id_;
   };
 
@@ -231,10 +230,6 @@ class Connection : public util::Connection {
   // Add InvalidationMessage to dispatch queue.
   virtual void SendInvalidationMessageAsync(InvalidationMessage);
 
-  // Must be called before sending pubsub messages to ensure the threads pipeline queue limit is not
-  // reached. Blocks until free space is available. Controlled with `pipeline_queue_limit` flag.
-  void EnsureAsyncMemoryBudget();
-
   // Register hook that is executen when the connection breaks.
   void RegisterBreakHook(BreakerCb breaker_cb);
 
@@ -248,8 +243,6 @@ class Connection : public util::Connection {
 
   // Borrow weak reference to connection. Can be called from any thread.
   WeakRef Borrow();
-
-  static void ShutdownThreadLocal();
 
   bool IsCurrentlyDispatching() const;
 
@@ -267,6 +260,10 @@ class Connection : public util::Connection {
   virtual bool IsPrivileged() const;  // virtual because overwritten in test_utils
 
   bool IsMain() const;
+
+  // In addition to the listener role being main, also returns true if the protocol is Memcached.
+  // This method returns true for customer facing listeners.
+  bool IsMainOrMemcache() const;
 
   void SetName(std::string name);
 
@@ -306,10 +303,21 @@ class Connection : public util::Connection {
   bool IsHttp() const;
 
   // Sets max queue length locally in the calling thread.
-  static void SetMaxQueueLenThreadLocal(uint32_t val);
-  static void SetPipelineBufferLimit(size_t val);
+  static void SetMaxQueueLenThreadLocal(unsigned tid, uint32_t val);
+  static void SetPipelineBufferLimit(unsigned tid, size_t val);
   static void GetRequestSizeHistogramThreadLocal(std::string* hist);
   static void TrackRequestSize(bool enable);
+  static void EnsureMemoryBudget(unsigned tid);
+
+  unsigned idle_time() const {
+    return time(nullptr) - last_interaction_;
+  }
+
+  Phase phase() const {
+    return phase_;
+  }
+
+  bool IsSending() const;
 
  protected:
   void OnShutdown() override;
@@ -382,6 +390,32 @@ class Connection : public util::Connection {
   void DecreaseStatsOnClose();
   void BreakOnce(uint32_t ev_mask);
 
+  void ConfigureProvidedBuffer();
+
+  // The read buffer with read data that needs to be parsed and processed.
+  // For io_uring bundles we may have available_bytes larger than slice.size()
+  // which means that there are more buffers available to read.
+  struct ReadBuffer {
+    size_t available_bytes;
+    io::Bytes slice;
+
+    bool ShouldAdvance() const {
+      return slice.empty();
+    }
+
+    void Consume(size_t len) {
+      available_bytes -= len;
+      slice.remove_prefix(len);
+    }
+  };
+
+  ReadBuffer GetReadBuffer();
+  io::Bytes NextBundleBuffer(size_t total_len);
+  void MarkReadBufferConsumed();
+
+  void IncrNumConns();
+  void DecrNumConns();
+
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
   util::fb2::Fiber async_fb_;             // async fiber (if started)
@@ -391,6 +425,7 @@ class Connection : public util::Connection {
   // how many bytes of the current request have been consumed
   size_t request_consumed_bytes_ = 0;
 
+  util::FiberSocketBase::ProvidedBuffer recv_buf_;
   io::IoBuf io_buf_;  // used in io loop and parsers
   std::unique_ptr<RedisParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
@@ -427,18 +462,11 @@ class Connection : public util::Connection {
   // Used to keep track of borrowed references. Does not really own itself
   std::shared_ptr<Connection> self_;
 
-  // Pointer to corresponding queue backpressure struct.
-  // Needed for access from different threads by EnsureAsyncMemoryBudget().
-  QueueBackpressure* queue_backpressure_ = nullptr;
-
   util::fb2::ProactorBase* migration_request_ = nullptr;
 
   // Pooled pipeline messages per-thread
   // Aggregated while handling pipelines, gradually released while handling regular commands.
   static thread_local std::vector<PipelineMessagePtr> pipeline_req_pool_;
-
-  // Per-thread queue backpressure structs.
-  static thread_local QueueBackpressure tl_queue_backpressure_;
 
   union {
     uint16_t flags_;
@@ -452,6 +480,8 @@ class Connection : public util::Connection {
       bool migration_in_process_ : 1;
       bool is_http_ : 1;
       bool is_tls_ : 1;
+      bool recv_provided_ : 1;
+      bool is_main_ : 1;
     };
   };
 };

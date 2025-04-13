@@ -27,6 +27,7 @@ class DebugCmd {
     uint32_t elements = 1;
 
     std::optional<cluster::SlotRange> slot_range;
+    std::optional<std::pair<uint32_t, uint32_t>> expire_ttl_range;
   };
 
  public:
@@ -55,6 +56,20 @@ class DebugCmd {
   void Shards(facade::SinkReplyBuilder* builder);
   void LogTraffic(CmdArgList, facade::SinkReplyBuilder* builder);
   void RecvSize(std::string_view param, facade::SinkReplyBuilder* builder);
+  void Topk(CmdArgList args, facade::SinkReplyBuilder* builder);
+  void Keys(CmdArgList args, facade::SinkReplyBuilder* builder);
+  void Compression(CmdArgList args, facade::SinkReplyBuilder* builder);
+
+  struct PopulateBatch {
+    DbIndex dbid;
+    uint64_t index[32];
+    uint64_t sz = 0;
+
+    PopulateBatch(DbIndex id) : dbid(id) {
+    }
+  };
+
+  void DoPopulateBatch(const PopulateOptions& options, const PopulateBatch& batch);
 
   ServerFamily& sf_;
   cluster::ClusterFamily& cf_;

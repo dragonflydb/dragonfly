@@ -32,7 +32,7 @@ jobs:
           path: ~/.cache/pre-commit
           key: pre-commit|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
       - name: Run pre-commit checks
-        run:
+        run: |
           source venv/bin/activate
           pre-commit run --show-diff-on-failure --color=always --from-ref HEAD^ --to-ref HEAD
         shell: bash
@@ -44,11 +44,19 @@ jobs:
         build-type: [Debug, Release]
         compiler: [{ cxx: g++, c: gcc }]
         cxx_flags: ["-Werror"]
+        sanitizers: ["NoSanitizers"]
         include:
           - container: "alpine-dev:latest"
             build-type: Debug
             compiler: { cxx: clang++, c: clang }
             cxx_flags: ""
+            sanitizers: "NoSanitizers"
+          - container: "ubuntu-dev:24"
+            build-type: Debug
+            compiler: { cxx: clang++, c: clang }
+            # https://maskray.me/blog/2023-08-25-clang-wunused-command-line-argument (search for compiler-rt)
+            cxx_flags: "-Wno-error=unused-command-line-argument"
+            sanitizers: "Sanitizers"
 
     runs-on: ubuntu-latest
     env:
@@ -72,6 +80,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+
       - name: Prepare Environment
         run: |
           uname -a
@@ -89,6 +98,7 @@ jobs:
           df -h
           touch /mnt/foo
           ls -la /mnt/foo
+
       - name: Run sccache-cache
         uses: mozilla-actions/sccache-action@v0.0.7
 
@@ -103,6 +113,22 @@ jobs:
         # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
         # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
         run: |
+          echo "ulimit is"
+          ulimit -s
+          echo "-----------------------------"
+          echo "disk space is:"
+          df -h
+          echo "-----------------------------"
+
+          export ASAN="OFF"
+          export USAN="OFF"
+
+          if [ '${{matrix.sanitizers}}' = 'Sanitizers' ]; then
+            echo "ASAN/USAN"
+            export ASAN="ON"
+            export USAN="ON"
+          fi
+
           # -no-pie to disable address randomization so we could symbolize stacktraces
           cmake -B ${GITHUB_WORKSPACE}/build \
             -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
@@ -111,8 +137,10 @@ jobs:
             -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}} -no-pie" -DWITH_AWS:BOOL=OFF \
-            -DHELIO_STACK_CHECK:STRING=4096 \
+            -DWITH_ASAN="${ASAN}" \
+            -DWITH_USAN="${USAN}" \
             -L
+
           cd ${GITHUB_WORKSPACE}/build && pwd
           du -hcs _deps/
 
@@ -134,8 +162,12 @@ jobs:
         run: |
           cd ${GITHUB_WORKSPACE}/build
           echo Run ctest -V -L DFLY
-          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 \
-          FLAGS_list_experimental_v2=true timeout 20m ctest -V -L DFLY
+
+          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1,op_manager=1,op_manager_test=1 \
+          FLAGS_fiber_safety_margin=4096 FLAGS_list_experimental_v2=true timeout 20m ctest -V -L DFLY -E allocation_tracker_test
+
+          # Run allocation tracker test separately without alsologtostderr because it generates a TON of logs.
+          FLAGS_fiber_safety_margin=4096 timeout 5m ./allocation_tracker_test
 
           echo "Running tests with --force_epoll"
 
@@ -148,19 +180,22 @@ jobs:
           EOF
 
           gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
-          FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 timeout 20m ctest -V -L DFLY
+          FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 timeout 20m ctest -V -L DFLY -E allocation_tracker_test
+
+          FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true timeout 5m ./allocation_tracker_test
 
           echo "Finished running tests with --force_epoll"
 
           echo "Running tests with --cluster_mode=emulated"
-          FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY
+          FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY
 
           echo "Running tests with both --cluster_mode=emulated & --lock_on_hashtags"
-          FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY
+          FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY
 
           timeout 5m ./dragonfly_test
           timeout 5m ./json_family_test --jsonpathv2=false
           timeout 5m ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
+
       - name: Upload unit logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -175,7 +210,9 @@ jobs:
           dfly-executable: dragonfly
           run-only-on-ubuntu-latest: true
           build-folder-name: build
-          filter: ${{ matrix.build-type == 'Release' && '(not slow) and (not dbg_only)' || '(not slow) and (not opt_only)' }}
+          # Non-release build will not run tests marked as slow or opt_only
+          # "not empty" string is needed for release build because pytest command can not get empty string for filter
+          filter: ${{ matrix.build-type == 'Release' && 'not empty' || '(not slow) and (not opt_only)' }}
 
       - name: Upload regression logs on failure
         if: failure()

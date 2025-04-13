@@ -1,5 +1,11 @@
 version: '3.8'
 
+# To run redis exporter, run: docker compose --profile redis up
+# To run memcached and its exporter: docker compose --profile memcached up
+#
+# Note you may still need to disable/change scraping job configs
+# in prometheus.yml
+#
 volumes:
   prometheus_data:
   grafana_data:
@@ -97,6 +103,17 @@ services:
     profiles: [memcached]
     depends_on:
       - memcached
+
+  redis-exporter:
+    image: quay.io/oliver006/redis_exporter
+    profiles: [redis]
+    ports:
+      - 9121:9121
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: always
+    environment:
+      - REDIS_ADDR=host.docker.internal:6379
 
   renderer:
     image: grafana/grafana-image-renderer:latest

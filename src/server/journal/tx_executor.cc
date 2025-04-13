@@ -55,7 +55,6 @@ void TransactionData::AddEntry(journal::ParsedEntry&& entry) {
       lsn = entry.lsn;
       return;
     case journal::Op::PING:
-    case journal::Op::FIN:
       return;
     case journal::Op::EXPIRED:
     case journal::Op::COMMAND:
@@ -90,7 +89,11 @@ TransactionData TransactionData::FromEntry(journal::ParsedEntry&& entry) {
   return data;
 }
 
-std::optional<TransactionData> TransactionReader::NextTxData(JournalReader* reader, Context* cntx) {
+std::optional<TransactionData> TransactionReader::NextTxData(JournalReader* reader,
+                                                             ExecutionState* cntx) {
+  if (!cntx->IsRunning()) {
+    return std::nullopt;
+  }
   io::Result<journal::ParsedEntry> res;
   if (res = reader->ReadEntry(); !res) {
     cntx->ReportError(res.error());

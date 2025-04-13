@@ -181,6 +181,8 @@ class EngineShard {
 
     // We can use a vector to hold debug info for all items in the txqueue
     TxQueueItem head;
+
+    std::string Format() const;
   };
 
   TxQueueInfo AnalyzeTxQueue() const;
@@ -191,6 +193,8 @@ class EngineShard {
   // The estimate is based on memory usage crossing tiering redline and the write depth being at
   // least 50% of allowed max, providing at least some guarantee of progress.
   bool ShouldThrottleForTiering() const;
+
+  void FinalizeMulti(Transaction* tx);
 
  private:
   struct DefragTaskState {

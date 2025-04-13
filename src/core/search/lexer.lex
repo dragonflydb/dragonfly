@@ -27,16 +27,16 @@
   using namespace std;
 
   Parser::symbol_type make_StringLit(string_view src, const Parser::location_type& loc);
-  Parser::symbol_type make_TagVal(string_view src, const Parser::location_type& loc);
+  Parser::symbol_type make_TagVal(string_view src, bool is_prefix, const Parser::location_type& loc);
 %}
 
-blank [ \t\r]
 dq    \"
 sq    \'
 esc_chars ['"\?\\abfnrtv]
 esc_seq \\{esc_chars}
-term_char [_]|\w
+term_char \w
 tag_val_char {term_char}|\\[,.<>{}\[\]\\\"\':;!@#$%^&*()\-+=~\/ ]
+asterisk_char \*
 
 
 %{
@@ -62,6 +62,7 @@ tag_val_char {term_char}|\\[,.<>{}\[\]\\\"\':;!@#$%^&*()\-+=~\/ ]
 "{"            return Parser::make_LCURLBR (loc());
 "}"            return Parser::make_RCURLBR (loc());
 "|"            return Parser::make_OR_OP (loc());
+","            return Parser::make_COMMA (loc());
 "KNN"          return Parser::make_KNN (loc());
 "AS"           return Parser::make_AS (loc());
 "EF_RUNTIME"   return Parser::make_EF_RUNTIME (loc());
@@ -69,15 +70,16 @@ tag_val_char {term_char}|\\[,.<>{}\[\]\\\"\':;!@#$%^&*()\-+=~\/ ]
 [0-9]{1,9}                     return Parser::make_UINT32(str(), loc());
 [+-]?(([0-9]*[.])?[0-9]+|inf)  return Parser::make_DOUBLE(str(), loc());
 
-{dq}([^"]|{esc_seq})*{dq}  return make_StringLit(matched_view(1, 1), loc());
-{sq}([^']|{esc_seq})*{sq}  return make_StringLit(matched_view(1, 1), loc());
+{dq}([^"]|{esc_seq})*{dq}      return make_StringLit(matched_view(1, 1), loc());
+{sq}([^']|{esc_seq})*{sq}      return make_StringLit(matched_view(1, 1), loc());
 
-"$"{term_char}+ return ParseParam(str(), loc());
-"@"{term_char}+ return Parser::make_FIELD(str(), loc());
-{term_char}+"*" return Parser::make_PREFIX(str(), loc());
+"$"{term_char}+                return ParseParam(str(), loc());
+"@"{term_char}+                return Parser::make_FIELD(str(), loc());
+{term_char}+{asterisk_char}    return Parser::make_PREFIX(str(), loc());
 
-{term_char}+ return Parser::make_TERM(str(), loc());
-{tag_val_char}+   return make_TagVal(str(), loc());
+{term_char}+                   return Parser::make_TERM(str(), loc());
+{tag_val_char}+{asterisk_char} return make_TagVal(str(), true, loc());
+{tag_val_char}+                return make_TagVal(str(), false, loc());
 
 <<EOF>>    return Parser::make_YYEOF(loc());
 %%
@@ -90,12 +92,14 @@ Parser::symbol_type make_StringLit(string_view src, const Parser::location_type&
   return Parser::make_TERM(res, loc);
 }
 
-Parser::symbol_type make_TagVal(string_view src, const Parser::location_type& loc) {
+Parser::symbol_type make_TagVal(string_view src, bool is_prefix, const Parser::location_type& loc) {
   string res;
   res.reserve(src.size());
 
   bool escaped = false;
-  for (size_t i = 0; i < src.size(); ++i) {
+  size_t len = is_prefix ? src.size() - 1 : src.size(); // Exclude the '*' at the end for prefix
+
+  for (size_t i = 0; i < len; ++i) {
     if (escaped) {
       escaped = false;
     } else if (src[i] == '\\') {
@@ -103,7 +107,12 @@ Parser::symbol_type make_TagVal(string_view src, const Parser::location_type& lo
       continue;
     }
     res.push_back(src[i]);
+  }
 
+  // Add '*' back for prefix
+  if (is_prefix) {
+    res.push_back('*');
+    return Parser::make_PREFIX(res, loc);
   }
 
   return Parser::make_TAG_VAL(res, loc);

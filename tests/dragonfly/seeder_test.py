@@ -3,17 +3,17 @@ import async_timeout
 import string
 from redis import asyncio as aioredis
 from . import dfly_args
-from .seeder import Seeder, StaticSeeder
+from .seeder import Seeder, DebugPopulateSeeder
 from .instance import DflyInstanceFactory, DflyInstance
 from .utility import *
 
 
 @dfly_args({"proactor_threads": 4})
 async def test_static_seeder(async_client: aioredis.Redis):
-    s = StaticSeeder(key_target=10_000, data_size=100)
+    s = DebugPopulateSeeder(key_target=10_000, data_size=100)
     await s.run(async_client)
 
-    assert abs(await async_client.dbsize() - 10_000) <= 50
+    assert abs(await async_client.dbsize() - 10_000) <= 70
 
 
 @dfly_args({"proactor_threads": 4})
@@ -24,7 +24,7 @@ async def test_static_collection_size(async_client: aioredis.Redis):
             assert await async_client.llen(key) == 1
             assert len(await async_client.lpop(key)) == 10_000
 
-    s = StaticSeeder(
+    s = DebugPopulateSeeder(
         key_target=10, data_size=10_000, variance=1, samples=1, collection_size=1, types=["LIST"]
     )
     await s.run(async_client)

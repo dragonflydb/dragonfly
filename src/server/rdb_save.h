@@ -91,10 +91,10 @@ class RdbSaver {
 
   // Initiates the serialization in the shard's thread.
   // cll allows breaking in the middle.
-  void StartSnapshotInShard(bool stream_journal, Context* cntx, EngineShard* shard);
+  void StartSnapshotInShard(bool stream_journal, ExecutionState* cntx, EngineShard* shard);
 
   // Send only the incremental snapshot since start_lsn.
-  void StartIncrementalSnapshotInShard(LSN start_lsn, Context* cntx, EngineShard* shard);
+  void StartIncrementalSnapshotInShard(LSN start_lsn, ExecutionState* cntx, EngineShard* shard);
 
   // Stops full-sync serialization for replication in the shard's thread.
   std::error_code StopFullSyncInShard(EngineShard* shard);
@@ -107,7 +107,7 @@ class RdbSaver {
 
   // Writes the RDB file into sink. Waits for the serialization to finish.
   // Called only for save rdb flow and save df on summary file.
-  std::error_code SaveBody(const Context& cntx);
+  std::error_code SaveBody(const ExecutionState& cntx);
 
   // Fills freq_map with the histogram of rdb types.
   void FillFreqMap(RdbTypeFreqMap* freq_map);
@@ -199,10 +199,11 @@ class SerializerBase {
   std::unique_ptr<detail::CompressorImpl> compressor_impl_;
 
   static constexpr size_t kMinStrSizeToCompress = 256;
+  static constexpr size_t kMaxStrSizeToCompress = 1 * 1024 * 1024;
   static constexpr double kMinCompressionReductionPrecentage = 0.95;
   struct CompressionStats {
     uint32_t compression_no_effective = 0;
-    uint32_t small_str_count = 0;
+    uint32_t size_skip_count = 0;
     uint32_t compression_failed = 0;
     uint32_t compressed_blobs = 0;
   };

@@ -304,6 +304,8 @@ class ConnectionContext : public facade::ConnectionContext {
 
   size_t UsedMemory() const override;
 
+  virtual void Unsubscribe(std::string_view channel) override;
+
   // Whether this connection is a connection from a replica to its master.
   // This flag is true only on replica side, where we need to setup a special ConnectionContext
   // instance that helps applying commands coming from master.
@@ -314,6 +316,9 @@ class ConnectionContext : public facade::ConnectionContext {
 
   // Reference to a FlowInfo for this connection if from a master to a replica.
   FlowInfo* replication_flow = nullptr;
+
+  // The related connection is bound to main listener or serves the memcached protocol
+  bool has_main_or_memcache_listener = false;
 
  private:
   void EnableMonitoring(bool enable) {
