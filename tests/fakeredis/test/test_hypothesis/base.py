@@ -40,7 +40,7 @@ ints = st.integers(min_value=MIN_INT, max_value=MAX_INT)
 int_as_bytes = st.builds(lambda x: str(_default_normalize(x)).encode(), ints)
 float_as_bytes = st.builds(
     lambda x: repr(_default_normalize(x)).encode(),
-    st.floats(width=32, allow_nan=False, allow_subnormal=False),
+    st.floats(width=32, allow_nan=False, allow_subnormal=False, allow_infinity=False),
 )
 counts = st.integers(min_value=-3, max_value=3) | ints
 # Redis has an integer overflow bug in swapdb, so we confine the numbers to
@@ -162,7 +162,7 @@ class Command:
     def testable(self) -> bool:
         """Whether this command is suitable for a test.
 
-        The fuzzer can create commands with behaviour that is non-deterministic, not supported, or which hits redis bugs.
+        The fuzzer can create commands with behavior that is non-deterministic, not supported, or which hits redis bugs.
         """
         N = len(self.args)
         if N == 0:
@@ -202,22 +202,6 @@ common_commands = (
     #  away the sort entirely with normalize. This also prevents us
     #  using LIMIT.
     | commands(st.just("sort"), keys, *zero_or_more("asc", "desc", "alpha"))
-)
-
-attrs = st.fixed_dictionaries(
-    {
-        "keys": st.lists(eng_text, min_size=2, max_size=5, unique=True),
-        "fields": st.lists(st.text(min_size=1), min_size=2, max_size=5, unique=True),
-        "values": st.lists(
-            eng_text | int_as_bytes | float_as_bytes,
-            min_size=2,
-            max_size=5,
-            unique=True,
-        ),
-        "scores": st.lists(
-            st.floats(width=32, allow_nan=False), min_size=2, max_size=5, unique=True
-        ),
-    }
 )
 
 
@@ -312,7 +296,28 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
         ):
             self.transaction_normalize = []
 
-    @initialize(attrs=attrs)
+    @initialize(
+        attrs=st.fixed_dictionaries(
+            dict(
+                keys=st.lists(eng_text, min_size=2, max_size=5, unique=True),
+                fields=st.lists(
+                    st.text(min_size=1), min_size=2, max_size=5, unique=True
+                ),
+                values=st.lists(
+                    eng_text | int_as_bytes | float_as_bytes,
+                    min_size=2,
+                    max_size=5,
+                    unique=True,
+                ),
+                scores=st.lists(
+                    st.floats(width=32, allow_nan=False),
+                    min_size=2,
+                    max_size=5,
+                    unique=True,
+                ),
+            )
+        )
+    )
     def init_attrs(self, attrs):
         for key, value in attrs.items():
             setattr(self, key, value)
