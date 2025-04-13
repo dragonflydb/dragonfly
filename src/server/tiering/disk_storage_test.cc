@@ -39,8 +39,9 @@ struct DiskStorageTest : public PoolTestBase {
     pending_ops_++;
     auto buf = make_shared<string>(value);
     storage_->Stash(io::Buffer(*buf), [this, index, buf](io::Result<DiskSegment> segment) {
-      if (segment.has_value())
+      if (segment.has_value()) {
         EXPECT_GT(segment->length, 0u);
+      }
       segments_[index] = segment;
       pending_ops_--;
     });
@@ -49,8 +50,8 @@ struct DiskStorageTest : public PoolTestBase {
   void Read(size_t index) {
     pending_ops_++;
     storage_->Read(*segments_[index], [this, index](io::Result<string_view> value) {
-      last_reads_[index] = value.has_value() ? 
-        io::Result<string>(*value) : nonstd::make_unexpected(value.error());
+      last_reads_[index] =
+          value.has_value() ? io::Result<string>(*value) : nonstd::make_unexpected(value.error());
       pending_ops_--;
     });
   }
@@ -127,10 +128,9 @@ TEST_F(DiskStorageTest, ReUse) {
   });
 }
 
-
 TEST_F(DiskStorageTest, FlakyDevice) {
-  //if (!filesystem::exists("/mnt/tiering_flaky"))
-  //  GTEST_SKIP() << "Flaky device not created, use tools/faulty_io.sh";
+  // if (!filesystem::exists("/mnt/tiering_flaky"))
+  //   GTEST_SKIP() << "Flaky device not created, use tools/faulty_io.sh";
 
   pp_->at(0)->Await([this] {
     auto ec = Open("/mnt/tiering_flaky/backing");
@@ -150,7 +150,7 @@ TEST_F(DiskStorageTest, FlakyDevice) {
       errors += (!segments_[i].has_value());
     EXPECT_GT(errors, 0);
     EXPECT_LT(errors, kEntries);
-    
+
     Close();
   });
 }

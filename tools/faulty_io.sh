@@ -3,7 +3,7 @@
 # Utility script for creating block devices with fault injection to test tiering
 #
 if [[ $EUID -ne 0 ]]; then
-   echo "This script must be run as root" 
+   echo "This script must be run as root"
    exit 1
 fi
 
@@ -38,9 +38,9 @@ then
     dmsetup remove_all
     losetup -a | grep tiering | awk -F ':' '{print $1}'| xargs losetup --detach
     rm ./tiering_backing
-else    
+else
     echo """Devices created by this script:
-    1. /mnt/tiering_flaky_1 - flaky device with 1:1 second success/error intervals    
+    1. /mnt/tiering_flaky_1 - flaky device with 1:1 second success/error intervals
 
 use with either create/remove arguments"""
 fi
