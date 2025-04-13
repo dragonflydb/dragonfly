@@ -80,7 +80,7 @@ error_code DiskStorage::Open(string_view path) {
   backing_file_ = std::move(res.value());
 
   int fd = backing_file_->fd();
-  RETURN_ON_ERR(DoFiberCall(&SubmitEntry::PrepFallocate, fd, 0, 0L, kInitialSize));
+  DoFiberCall(&SubmitEntry::PrepFallocate, fd, 0, 0L, kInitialSize);
   RETURN_ON_ERR(DoFiberCall(&SubmitEntry::PrepFadvise, fd, 0L, 0L, POSIX_FADV_RANDOM));
 
   alloc_.AddStorage(0, kInitialSize);

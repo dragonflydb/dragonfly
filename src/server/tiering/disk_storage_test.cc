@@ -23,39 +23,40 @@ struct DiskStorageTest : public PoolTestBase {
     EXPECT_EQ(pending_ops_, 0);
   }
 
-  void Open() {
+  error_code Open(string filename = "disk_storage_test_backing") {
+    filename_ = filename;
     storage_ = make_unique<DiskStorage>(256_MB);
-    storage_->Open("disk_storage_test_backing");
+    return storage_->Open(filename_);
   }
 
   void Close() {
     storage_->Close();
     storage_.reset();
-    unlink("disk_storage_test_backing");
+    unlink(filename_.c_str());
   }
 
   void Stash(size_t index, string value) {
     pending_ops_++;
     auto buf = make_shared<string>(value);
     storage_->Stash(io::Buffer(*buf), [this, index, buf](io::Result<DiskSegment> segment) {
-      EXPECT_TRUE(segment);
-      EXPECT_GT(segment->length, 0u);
-      segments_[index] = *segment;
+      if (segment.has_value())
+        EXPECT_GT(segment->length, 0u);
+      segments_[index] = segment;
       pending_ops_--;
     });
   }
 
   void Read(size_t index) {
     pending_ops_++;
-    storage_->Read(segments_[index], [this, index](io::Result<string_view> value) {
-      EXPECT_TRUE(value);
-      last_reads_[index] = *value;
+    storage_->Read(*segments_[index], [this, index](io::Result<string_view> value) {
+      last_reads_[index] = value.has_value() ? 
+        io::Result<string>(*value) : nonstd::make_unexpected(value.error());
       pending_ops_--;
     });
   }
 
   void Delete(size_t index) {
-    storage_->MarkAsFree(segments_[index]);
+    storage_->MarkAsFree(*segments_[index]);
     segments_.erase(index);
     last_reads_.erase(index);
   }
@@ -73,8 +74,9 @@ struct DiskStorageTest : public PoolTestBase {
  protected:
   int pending_ops_ = 0;
 
-  std::unordered_map<size_t, string> last_reads_;
-  std::unordered_map<size_t, DiskSegment> segments_;
+  std::string filename_;
+  std::unordered_map<size_t, io::Result<std::string>> last_reads_;
+  std::unordered_map<size_t, io::Result<DiskSegment>> segments_;
   std::unique_ptr<DiskStorage> storage_;
 };
 
@@ -96,7 +98,7 @@ TEST_F(DiskStorageTest, Basic) {
 
     // Expect them to be equal to written
     for (size_t i = 0; i < 100; i++)
-      EXPECT_EQ(last_reads_[i], absl::StrCat("value", i));
+      EXPECT_EQ(*last_reads_[i], absl::StrCat("value", i));
 
     // Delete all values
     for (size_t i = 0; i < 100; i++)
@@ -113,14 +115,42 @@ TEST_F(DiskStorageTest, ReUse) {
 
     Stash(0, "value1");
     Wait();
-    EXPECT_EQ(segments_[0].offset, 0u);
+    EXPECT_EQ(segments_[0]->offset, 0u);
 
     Delete(0);
 
     Stash(1, "value2");
     Wait();
-    EXPECT_EQ(segments_[1].offset, 0u);
+    EXPECT_EQ(segments_[1]->offset, 0u);
 
+    Close();
+  });
+}
+
+
+TEST_F(DiskStorageTest, FlakyDevice) {
+  if (!filesystem::exists("/mnt/tiering_flaky"))
+    GTEST_SKIP() << "Flaky device not created, use tools/faulty_io.sh";
+
+  pp_->at(0)->Await([this] {
+    auto ec = Open("/mnt/tiering_flaky/backing");
+    EXPECT_FALSE(ec) << ec.message();
+
+    // Create stash sequence lasting two seconds
+    const int kEntries = 200;
+    for (int i = 0; i < kEntries; i++) {
+      util::ThisFiber::SleepFor(10ms);
+      Stash(i, "value");
+    }
+    Wait();
+
+    // Make sure we saw at least some errors
+    int errors = 0;
+    for (int i = 0; i < kEntries; i++)
+      errors += (!segments_[i].has_value());
+    EXPECT_GT(errors, 0);
+    EXPECT_LT(errors, kEntries);
+    
     Close();
   });
 }
