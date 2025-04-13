@@ -7,7 +7,7 @@ from .base import (
     keys,
     values,
 )
-from test.test_hypothesis.test_string import string_commands
+from .test_string import string_commands
 
 
 class TestServer(BaseTest):
