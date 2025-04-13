@@ -69,7 +69,7 @@ jobs:
       - name: Run tests
         working-directory: tests/fakeredis
         run: |
-          poetry run pytest test/ \
+          poetry run pytest -s test/ \
             --ignore test/test_hypothesis/test_hash.py  \
             --ignore test/test_hypothesis/test_set.py  \
             --ignore test/test_hypothesis/test_zset.py  \
