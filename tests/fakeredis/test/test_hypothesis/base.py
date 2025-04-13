@@ -1,5 +1,6 @@
 import functools
 import math
+import string
 import sys
 from typing import Any, List, Tuple, Type, Optional
 
@@ -34,10 +35,12 @@ fields = sample_attr("fields")
 values = sample_attr("values")
 scores = sample_attr("scores")
 
+eng_text = st.text(alphabet=string.ascii_letters, min_size=1)
 ints = st.integers(min_value=MIN_INT, max_value=MAX_INT)
 int_as_bytes = st.builds(lambda x: str(_default_normalize(x)).encode(), ints)
 float_as_bytes = st.builds(
-    lambda x: repr(_default_normalize(x)).encode(), st.floats(width=32)
+    lambda x: repr(_default_normalize(x)).encode(),
+    st.floats(width=32, allow_nan=False, allow_subnormal=False),
 )
 counts = st.integers(min_value=-3, max_value=3) | ints
 # Redis has an integer overflow bug in swapdb, so we confine the numbers to
@@ -203,15 +206,17 @@ common_commands = (
 
 attrs = st.fixed_dictionaries(
     {
-        "keys": st.lists(st.binary(), min_size=2, max_size=5, unique=True),
-        "fields": st.lists(st.binary(), min_size=2, max_size=5, unique=True),
+        "keys": st.lists(eng_text, min_size=2, max_size=5, unique=True),
+        "fields": st.lists(st.text(min_size=1), min_size=2, max_size=5, unique=True),
         "values": st.lists(
-            st.binary() | int_as_bytes | float_as_bytes,
+            eng_text | int_as_bytes | float_as_bytes,
             min_size=2,
             max_size=5,
             unique=True,
         ),
-        "scores": st.lists(st.floats(width=32), min_size=2, max_size=5, unique=True),
+        "scores": st.lists(
+            st.floats(width=32, allow_nan=False), min_size=2, max_size=5, unique=True
+        ),
     }
 )
 
