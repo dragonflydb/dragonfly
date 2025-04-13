@@ -723,66 +723,29 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
   PopulateOptions options;
 
   options.total_count = parser.Next<uint64_t>();
-  if (parser.HasError()) {
-    builder->SendError("Invalid total count");
-    parser.Error();
-    return nullopt;
-  }
-
   options.prefix = parser.NextOrDefault<string_view>("");
   options.val_size = parser.NextOrDefault<uint32_t>(100);
-
-  if (parser.HasError()) {
-    builder->SendError("Invalid value size");
-    parser.Error();
-    return nullopt;
-  }
 
   while (parser.HasNext()) {
     PopulateFlag flag = parser.MapNext("RAND", FLAG_RAND, "TYPE", FLAG_TYPE, "ELEMENTS",
                                        FLAG_ELEMENTS, "SLOT", FLAG_SLOT, "EXPIRE", FLAG_EXPIRE);
-    if (parser.HasError()) {
-      builder->SendError("Unknown or invalid flag");
-      parser.Error();
-      return nullopt;
-    }
     switch (flag) {
       case FLAG_RAND:
         options.populate_random_values = true;
         break;
       case FLAG_TYPE:
         options.type = absl::AsciiStrToUpper(parser.Next<string_view>());
-        if (parser.HasError()) {
-          builder->SendError("Invalid type name");
-          parser.Error();
-          return nullopt;
-        }
         break;
       case FLAG_ELEMENTS:
         options.elements = parser.Next<uint32_t>();
-        if (parser.HasError()) {
-          builder->SendError("Invalid elements count");
-          parser.Error();
-          return nullopt;
-        }
         break;
       case FLAG_SLOT: {
         auto [start, end] = parser.Next<FInt<0, 16383>, FInt<0, 16383>>();
-        if (parser.HasError()) {
-          builder->SendError("Invalid slot range");
-          parser.Error();
-          return nullopt;
-        }
         options.slot_range = cluster::SlotRange{start, end};
         break;
       }
       case FLAG_EXPIRE: {
         auto [min_ttl, max_ttl] = parser.Next<uint32_t, uint32_t>();
-        if (parser.HasError()) {
-          builder->SendError("Invalid expire range");
-          parser.Error();
-          return nullopt;
-        }
         if (min_ttl >= max_ttl) {
           builder->SendError(kExpiryOutOfRange);
           parser.Error();
@@ -792,14 +755,13 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
         break;
       }
       default:
+        LOG(ERROR) << "Error flag value in Populate arguments";
         builder->SendError(kSyntaxErr);
-        parser.Error();
         return nullopt;
     }
   }
   if (parser.HasError()) {
-    builder->SendError(kSyntaxErr);
-    parser.Error();
+    builder->SendError(parser.Error()->MakeReply());
     return nullopt;
   }
   return options;
