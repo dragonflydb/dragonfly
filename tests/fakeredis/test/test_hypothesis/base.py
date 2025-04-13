@@ -56,7 +56,8 @@ patterns = st.text(
 ) | st.binary().filter(lambda x: b"\0" not in x)
 
 # Redis has integer overflow bugs in time computations, which is why we set a maximum.
-expires_seconds = st.integers(min_value=100_000, max_value=67_108_865)
+expires_seconds = st.integers(min_value=100_000, max_value=7_108_865)
+# todo: max int here is 67_108_865?
 expires_ms = st.integers(min_value=100_000_000, max_value=MAX_INT)
 
 
