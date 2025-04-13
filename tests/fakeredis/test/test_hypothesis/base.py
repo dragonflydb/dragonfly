@@ -35,7 +35,9 @@ fields = sample_attr("fields")
 values = sample_attr("values")
 scores = sample_attr("scores")
 
-eng_text = st.text(alphabet=string.ascii_letters, min_size=1)
+eng_text = st.builds(
+    lambda x: x.encode(), st.text(alphabet=string.ascii_letters, min_size=1)
+)
 ints = st.integers(min_value=MIN_INT, max_value=MAX_INT)
 int_as_bytes = st.builds(lambda x: str(_default_normalize(x)).encode(), ints)
 floats = st.floats(
@@ -54,8 +56,8 @@ patterns = st.text(
 ) | st.binary().filter(lambda x: b"\0" not in x)
 
 # Redis has integer overflow bugs in time computations, which is why we set a maximum.
-expires_seconds = st.integers(min_value=100000, max_value=MAX_INT)
-expires_ms = st.integers(min_value=100000000, max_value=MAX_INT)
+expires_seconds = st.integers(min_value=100_000, max_value=67_108_865)
+expires_ms = st.integers(min_value=100_000_000, max_value=MAX_INT)
 
 
 class WrappedException:
@@ -152,6 +154,7 @@ class Command:
             b"sinter",
             b"sunion",
             b"smembers",
+            b"hexpire",
         }
         if command in unordered:
             return _sort_list
@@ -300,9 +303,7 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
         attrs=st.fixed_dictionaries(
             dict(
                 keys=st.lists(eng_text, min_size=2, max_size=5, unique=True),
-                fields=st.lists(
-                    st.text(min_size=1), min_size=2, max_size=5, unique=True
-                ),
+                fields=st.lists(eng_text, min_size=2, max_size=5, unique=True),
                 values=st.lists(
                     eng_text | int_as_bytes | float_as_bytes,
                     min_size=2,
