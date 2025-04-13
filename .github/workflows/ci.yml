@@ -160,6 +160,7 @@ jobs:
 
       - name: C++ Unit Tests
         run: |
+          sudo apt install dmsetup
           ${GITHUB_WORKSPACE}/tools/faulty_io.sh create
 
           cd ${GITHUB_WORKSPACE}/build
