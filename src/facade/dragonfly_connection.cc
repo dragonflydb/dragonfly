@@ -822,6 +822,15 @@ void Connection::HandleRequests() {
   }
 }
 
+unsigned Connection::GetSendWaitTimeSec() const {
+  if (reply_builder_ && reply_builder_->IsSendActive()) {
+    return (util::fb2::ProactorBase::GetMonotonicTimeNs() - reply_builder_->GetLastSendTimeNs()) /
+           1'000'000'000;
+  }
+
+  return 0;
+}
+
 void Connection::RegisterBreakHook(BreakerCb breaker_cb) {
   breaker_cb_ = breaker_cb;
 }
@@ -880,6 +889,10 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
     absl::StrAppend(&after, " ", cc_info);
   }
   absl::StrAppend(&after, " phase=", phase_name);
+
+  if (IsSending()) {
+    absl::StrAppend(&before, " send-wait-time=", GetSendWaitTimeSec());
+  }
 
   return {std::move(before), std::move(after)};
 }
