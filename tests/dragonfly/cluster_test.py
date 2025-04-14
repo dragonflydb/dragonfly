@@ -2745,7 +2745,8 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     await asyncio.sleep(random.randint(0, 50) / 100)
-    await wait_for_migration_start(nodes[1].admin_client, nodes[0].id)
+    # to pause migration we need to be in sync state
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "SYNC", 1000)
 
     logging.debug("debug migration pause")
     await nodes[1].client.execute_command("debug migration pause")
