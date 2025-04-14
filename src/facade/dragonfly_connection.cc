@@ -838,10 +838,7 @@ void Connection::RegisterBreakHook(BreakerCb breaker_cb) {
 pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   if (!socket_) {
     LOG(DFATAL) << "unexpected null socket_ "
-                << " phase " << unsigned(phase_) << ", is_http: " << unsigned(is_http_)
-                << (IsSending()
-                        ? " send wait time in seconds: " + std::to_string(GetSendWaitTimeSec())
-                        : "");
+                << " phase " << unsigned(phase_) << ", is_http: " << unsigned(is_http_);
     return {};
   }
 
@@ -892,6 +889,10 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
     absl::StrAppend(&after, " ", cc_info);
   }
   absl::StrAppend(&after, " phase=", phase_name);
+
+  if (IsSending()) {
+    absl::StrAppend(&before, " send-wait-time=", GetSendWaitTimeSec());
+  }
 
   return {std::move(before), std::move(after)};
 }
