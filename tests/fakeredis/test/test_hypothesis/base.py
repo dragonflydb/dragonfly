@@ -104,7 +104,7 @@ def _sort_list(lst):
 
 def _normalize_if_number(x):
     if isinstance(x, list):
-        return x
+        return [_normalize_if_number(i) for i in x]
     try:
         res = float(x)
         return x if math.isnan(res) else res
@@ -285,6 +285,16 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
             for n, r, f in zip(self.transaction_normalize, real_result, fake_result):
                 assert n(f) == n(r)
             self.transaction_normalize = []
+        elif isinstance(fake_result, list):
+            assert len(fake_result) == len(real_result), (
+                f"Discrepancy when running command {command}, fake({fake_result}) != real({real_result})",
+            )
+            for i in range(len(fake_result)):
+                assert fake_result[i] == real_result[i] or (
+                    type(fake_result[i]) is float
+                    and fake_result[i] == pytest.approx(real_result[i])
+                ), f"Discrepancy when running command {command}, fake({fake_result}) != real({real_result})"
+
         else:
             assert fake_result == real_result or (
                 type(fake_result) is float and fake_result == pytest.approx(real_result)
