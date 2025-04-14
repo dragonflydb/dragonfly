@@ -22,14 +22,15 @@ using namespace std;
 ABSL_FLAG(vector<string>, rename_command, {},
           "Change the name of commands, format is: <cmd1_name>=<cmd1_new_name>, "
           "<cmd2_name>=<cmd2_new_name>");
-ABSL_FLAG(vector<string>, command_alias, {},
-          "Add an alias for given commands, format is: <alias>=<original>, "
-          "<alias>=<original>");
 ABSL_FLAG(vector<string>, restricted_commands, {},
           "Commands restricted to connections on the admin port");
 
 ABSL_FLAG(vector<string>, oom_deny_commands, {},
           "Additinal commands that will be marked as denyoom");
+
+ABSL_FLAG(vector<string>, command_alias, {},
+          "Add an alias for given command(s), format is: <alias>=<original>, <alias>=<original>");
+
 namespace dfly {
 
 using namespace facade;
@@ -82,9 +83,9 @@ absl::flat_hash_map<std::string, std::string> ParseCmdlineArgMap(
   parsed_mappings.reserve(mappings.size());
 
   for (const std::string& mapping : mappings) {
-    std::vector<std::string_view> kv = absl::StrSplit(mapping, '=');
+    absl::InlinedVector<std::string_view, 2> kv = absl::StrSplit(mapping, '=');
     if (kv.size() != 2) {
-      LOG(ERROR) << "Malformed command " << mapping << " for " << flag.Name()
+      LOG(ERROR) << "Malformed command '" << mapping << "' for " << flag.Name()
                  << ", expected key=value";
       exit(1);
     }
@@ -115,6 +116,19 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
   implicit_acl_ = !acl_categories.has_value();
 }
 
+CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
+                     int8_t last_key, uint32_t acl_categories, bool implicit_acl)
+    : facade::CommandId(name, mask, arity, first_key, last_key, acl_categories),
+      implicit_acl_(implicit_acl) {
+}
+
+CommandId CommandId::Clone(const std::string_view name) const {
+  CommandId cloned = CommandId{name.data(), opt_mask_ | CO::HIDDEN, arity_,       first_key_,
+                               last_key_,   acl_categories_,        implicit_acl_};
+  cloned.handler_ = handler_;
+  return cloned;
+}
+
 bool CommandId::IsTransactional() const {
   if (first_key_ > 0 || (opt_mask_ & CO::GLOBAL_TRANS) || (opt_mask_ & CO::NO_KEY_TRANSACTIONAL))
     return true;
@@ -130,8 +144,7 @@ bool CommandId::IsMultiTransactional() const {
   return CO::IsTransKind(name()) || CO::IsEvalKind(name());
 }
 
-uint64_t CommandId::Invoke(CmdArgList args, const CommandContext& cmd_cntx,
-                           std::string_view orig_cmd_name) const {
+uint64_t CommandId::Invoke(CmdArgList args, const CommandContext& cmd_cntx) const {
   int64_t before = absl::GetCurrentTimeNanos();
   handler_(args, cmd_cntx);
   int64_t after = absl::GetCurrentTimeNanos();
@@ -139,7 +152,7 @@ uint64_t CommandId::Invoke(CmdArgList args, const CommandContext& cmd_cntx,
   ServerState* ss = ServerState::tlocal();  // Might have migrated thread, read after invocation
   int64_t execution_time_usec = (after - before) / 1000;
 
-  auto& ent = command_stats_[ss->thread_index()][orig_cmd_name];
+  auto& ent = command_stats_[ss->thread_index()];
 
   ++ent.first;
   ent.second += execution_time_usec;
@@ -169,7 +182,7 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
 
 CommandRegistry::CommandRegistry() {
   cmd_rename_map_ = ParseCmdlineArgMap(FLAGS_rename_command);
-  cmd_aliases_ = ParseCmdlineArgMap(FLAGS_command_alias, true);
+  alias_map_ = ParseCmdlineArgMap(FLAGS_command_alias, true);
 
   for (string name : GetFlag(FLAGS_restricted_commands)) {
     restricted_cmds_.emplace(AsciiStrToUpper(name));
@@ -191,35 +204,66 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
 
   absl::InlinedVector<std::string_view, 2> maybe_subcommand = StrSplit(cmd.name(), " ");
   const bool is_sub_command = maybe_subcommand.size() == 2;
-  if (const auto it = cmd_rename_map_.find(maybe_subcommand.front()); it != cmd_rename_map_.end()) {
+  auto it = cmd_rename_map_.find(maybe_subcommand.front());
+  if (it != cmd_rename_map_.end()) {
     if (it->second.empty()) {
       return *this;  // Incase of empty string we want to remove the command from registry.
     }
     k = is_sub_command ? absl::StrCat(it->second, " ", maybe_subcommand[1]) : it->second;
   }
 
+  std::optional<CommandId> cloned = std::nullopt;
+  for (const auto& [alias, target] : alias_map_) {
+    if (target == k) {
+      cloned.emplace(cmd.Clone(alias));
+      alias_map_.erase(alias);
+      break;
+    }
+  }
+
   if (restricted_cmds_.find(k) != restricted_cmds_.end()) {
     cmd.SetRestricted(true);
+    if (cloned.has_value()) {
+      cloned->SetRestricted(true);
+    }
   }
 
   if (oomdeny_cmds_.find(k) != oomdeny_cmds_.end()) {
     cmd.SetFlag(CO::DENYOOM);
+    if (cloned.has_value()) {
+      cloned->SetFlag(CO::DENYOOM);
+    }
   }
 
   cmd.SetFamily(family_of_commands_.size() - 1);
-  if (acl_category_)
+  if (cloned.has_value()) {
+    cloned->SetFamily(cmd.GetFamily());
+  }
+  if (acl_category_) {
     cmd.SetAclCategory(*acl_category_);
+    if (cloned.has_value()) {
+      cloned->SetAclCategory(*acl_category_);
+    }
+  }
 
   if (!is_sub_command || absl::StartsWith(cmd.name(), "ACL")) {
     cmd.SetBitIndex(1ULL << bit_index_);
-    family_of_commands_.back().push_back(std::string(k));
+    family_of_commands_.back().emplace_back(k);
     ++bit_index_;
+
+    if (cloned) {
+      cloned->SetBitIndex(1ULL << bit_index_);
+      family_of_commands_.back().emplace_back(cloned->name());
+      ++bit_index_;
+    }
   } else {
     DCHECK(absl::StartsWith(k, family_of_commands_.back().back()));
     cmd.SetBitIndex(1ULL << (bit_index_ - 1));
   }
   CHECK(cmd_map_.emplace(k, std::move(cmd)).second) << k;
-
+  if (cloned.has_value()) {
+    CHECK(cmd_map_.emplace(cloned->name(), std::move(cloned.value())).second) << cloned->name();
+  }
   return *this;
 }
 
@@ -264,10 +308,6 @@ std::pair<const CommandId*, ArgSlice> CommandRegistry::FindExtended(string_view 
     }
   }
   return {res, tail_args};
-}
-
-bool CommandRegistry::IsAlias(std::string_view cmd) const {
-  return cmd_aliases_.contains(cmd);
 }
 
 namespace CO {

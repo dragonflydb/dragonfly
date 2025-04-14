@@ -71,9 +71,8 @@ static_assert(!IsEvalKind(""));
 
 };  // namespace CO
 
-// Per thread vector of command stats. Each entry is:
-// command invocation string -> {cmd_calls, cmd_latency_agg in usec}.
-using CmdCallStats = absl::flat_hash_map<std::string, std::pair<uint64_t, uint64_t>>;
+// Per thread vector of command stats. Each entry is {cmd_calls, cmd_latency_agg in usec}.
+using CmdCallStats = std::pair<uint64_t, uint64_t>;
 
 struct CommandContext {
   CommandContext(Transaction* _tx, facade::SinkReplyBuilder* _rb, ConnectionContext* cntx)
@@ -92,7 +91,12 @@ class CommandId : public facade::CommandId {
   CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
             std::optional<uint32_t> acl_categories = std::nullopt);
 
+  CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
+            uint32_t acl_categories, bool implicit_acl);
+
   CommandId(CommandId&&) = default;
+
+  CommandId Clone(std::string_view name) const;
 
   void Init(unsigned thread_count) {
     command_stats_ = std::make_unique<CmdCallStats[]>(thread_count);
@@ -103,10 +107,8 @@ class CommandId : public facade::CommandId {
   using ArgValidator = fu2::function_base<true, true, fu2::capacity_default, false, false,
                                           std::optional<facade::ErrorReply>(CmdArgList) const>;
 
-  // Invokes the command handler. Returns the invoke time in usec. The invoked_by parameter is set
-  // to the string passed in by user, if available. If not set, defaults to command name.
-  uint64_t Invoke(CmdArgList args, const CommandContext& cmd_cntx,
-                  std::string_view orig_cmd_name) const;
+  // Returns the invoke time in usec.
+  uint64_t Invoke(CmdArgList args, const CommandContext& cmd_cntx) const;
 
   // Returns error if validation failed, otherwise nullopt
   std::optional<facade::ErrorReply> Validate(CmdArgList tail_args) const;
@@ -144,7 +146,7 @@ class CommandId : public facade::CommandId {
   }
 
   void ResetStats(unsigned thread_index) {
-    command_stats_[thread_index].clear();
+    command_stats_[thread_index] = {0, 0};
   }
 
   CmdCallStats GetStats(unsigned thread_index) const {
@@ -172,16 +174,8 @@ class CommandRegistry {
   CommandRegistry& operator<<(CommandId cmd);
 
   const CommandId* Find(std::string_view cmd) const {
-    if (const auto it = cmd_map_.find(cmd); it != cmd_map_.end()) {
-      return &it->second;
-    }
-
-    if (const auto it = cmd_aliases_.find(cmd); it != cmd_aliases_.end()) {
-      if (const auto alias_lookup = cmd_map_.find(it->second); alias_lookup != cmd_map_.end()) {
-        return &alias_lookup->second;
-      }
-    }
-    return nullptr;
+    auto it = cmd_map_.find(cmd);
+    return it == cmd_map_.end() ? nullptr : &it->second;
   }
 
   CommandId* Find(std::string_view cmd) {
@@ -203,17 +197,13 @@ class CommandRegistry {
     }
   }
 
-  void MergeCallStats(
-      unsigned thread_index,
-      std::function<void(std::string_view, const CmdCallStats::mapped_type&)> cb) const {
-    for (const auto& [_, cmd_id] : cmd_map_) {
-      for (const auto& [cmd_name, call_stats] : cmd_id.GetStats(thread_index)) {
-        if (call_stats.first == 0) {
-          continue;
-        }
-
-        cb(cmd_name, call_stats);
-      }
+  void MergeCallStats(unsigned thread_index,
+                      std::function<void(std::string_view, const CmdCallStats&)> cb) const {
+    for (const auto& k_v : cmd_map_) {
+      auto src = k_v.second.GetStats(thread_index);
+      if (src.first == 0)
+        continue;
+      cb(k_v.second.name(), src);
     }
   }
 
@@ -227,16 +217,10 @@ class CommandRegistry {
   std::pair<const CommandId*, facade::ArgSlice> FindExtended(std::string_view cmd,
                                                              facade::ArgSlice tail_args) const;
 
-  bool IsAlias(std::string_view cmd) const;
-
  private:
   absl::flat_hash_map<std::string, CommandId> cmd_map_;
   absl::flat_hash_map<std::string, std::string> cmd_rename_map_;
-  // Stores a mapping from alias to original command. During the find operation, the first lookup is
-  // done in the cmd_map_, then in the alias map. This results in two lookups but only for commands
-  // which are not in original map, ie either typos or aliases. While it would be faster, we cannot
-  // store iterators into cmd_map_ here as they may be invalidated on rehashing.
-  absl::flat_hash_map<std::string, std::string> cmd_aliases_;
+  absl::flat_hash_map<std::string, std::string> alias_map_;
   absl::flat_hash_set<std::string> restricted_cmds_;
   absl::flat_hash_set<std::string> oomdeny_cmds_;
 
