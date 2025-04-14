@@ -741,7 +741,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
         break;
       case FLAG_SLOT: {
         auto [start, end] = parser.Next<FInt<0, 16383>, FInt<0, 16383>>();
-        options.slot_range = cluster::SlotRange{start, end};
+        options.slot_range = cluster::SlotRange{SlotId(start), SlotId(end)};
         break;
       }
       case FLAG_EXPIRE: {
