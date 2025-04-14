@@ -510,6 +510,8 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "      existing RDB file.",
         "REPLICA PAUSE/RESUME",
         "    Stops replica from reconnecting to master, or resumes",
+        "MIGRATION PAUSE/RESUME",
+        "    Stops/resumes incoming migration process only in the SYNC state",
         "REPLICA OFFSET",
         "    Return sync id and array of number of journal commands executed for each replica flow",
         "WATCHED",
