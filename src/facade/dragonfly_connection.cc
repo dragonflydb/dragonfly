@@ -1798,19 +1798,20 @@ void Connection::SendAsync(MessageHandle msg) {
 
   DCHECK_NE(phase_, PRECLOSE);  // No more messages are processed after this point
 
-  size_t used_mem = msg.UsedMemory();
-  stats_->dispatch_queue_entries++;
-  stats_->dispatch_queue_bytes += used_mem;
-
   QueueBackpressure& qbp = GetQueueBackpressure();
-  msg.dispatch_ts = ProactorBase::GetMonotonicTimeNs();
 
-  if (msg.IsMonitor() && GetQueueBackpressure().IsPipelineBufferOverLimit(
-                             stats_->dispatch_queue_bytes, dispatch_q_.size())) {
+  // Close MONITOR connection if we overflow pipeline limits
+  if (msg.IsMonitor() &&
+      qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, dispatch_q_.size())) {
     ShutdownSelf();
     return;
   }
 
+  size_t used_mem = msg.UsedMemory();
+  stats_->dispatch_queue_entries++;
+  stats_->dispatch_queue_bytes += used_mem;
+
+  msg.dispatch_ts = ProactorBase::GetMonotonicTimeNs();
   if (msg.IsPubMsg()) {
     qbp.subscriber_bytes.fetch_add(used_mem, memory_order_relaxed);
     stats_->dispatch_queue_subscriber_bytes += used_mem;
