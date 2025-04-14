@@ -848,8 +848,10 @@ TEST_F(GenericFamilyTest, JsonType) {
 
 TEST_F(GenericFamilyTest, FieldExpireSet) {
   Run({"SADD", "key", "a", "b", "c"});
+  AdvanceTime(2'000);
   EXPECT_THAT(Run({"FIELDEXPIRE", "key", "10", "a", "b", "c"}),
               RespArray(ElementsAre(IntArg(1), IntArg(1), IntArg(1))));
+  EXPECT_EQ(10, CheckedInt({"fieldttl", "key", "a"}));
   AdvanceTime(10'000);
   EXPECT_THAT(Run({"SMEMBERS", "key"}), RespArray(ElementsAre()));
 }
@@ -858,8 +860,10 @@ TEST_F(GenericFamilyTest, FieldExpireHset) {
   for (int i = 0; i < 3; ++i) {
     EXPECT_EQ(CheckedInt({"HSET", "key", absl::StrCat("k", i), "v"}), 1);
   }
+  AdvanceTime(2'000);
   EXPECT_THAT(Run({"FIELDEXPIRE", "key", "10", "k0", "k1", "k2"}),
               RespArray(ElementsAre(IntArg(1), IntArg(1), IntArg(1))));
+  EXPECT_EQ(10, CheckedInt({"fieldttl", "key", "k0"}));
   AdvanceTime(10'000);
   EXPECT_THAT(Run({"HGETALL", "key"}), RespArray(ElementsAre()));
 }

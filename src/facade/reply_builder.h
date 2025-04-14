@@ -90,7 +90,7 @@ class SinkReplyBuilder {
   }
 
   bool IsSendActive() const {
-    return send_active_;
+    return send_time_ns_ > 0;
   }
 
   void SetBatchMode(bool b) {
@@ -124,6 +124,8 @@ class SinkReplyBuilder {
     return std::exchange(last_error_, {});
   }
 
+  uint64_t GetLastSendTimeNs() const;
+
  protected:
   template <typename... Ts>
   void WritePieces(Ts&&... pieces);     // Copy pieces into buffer and reference buffer
@@ -140,7 +142,6 @@ class SinkReplyBuilder {
   io::Sink* sink_;
   std::error_code ec_;
 
-  bool send_active_ = false;  // set while Send() is suspended on socket write
   bool scoped_ = false, batched_ = false;
 
   size_t total_size_ = 0;  // sum of vec_ lengths
@@ -151,6 +152,7 @@ class SinkReplyBuilder {
   // lifetime ends or copies refs to the buffer.
   absl::InlinedVector<iovec, 16> vecs_;
   size_t guaranteed_pieces_ = 0;  // length of prefix of vecs_ that are guaranteed to be pieces
+  uint64_t send_time_ns_ = 0;
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {
