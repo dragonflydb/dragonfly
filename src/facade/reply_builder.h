@@ -90,7 +90,7 @@ class SinkReplyBuilder {
   }
 
   bool IsSendActive() const {
-    return send_active_;
+    return send_time_ns_ > 0;
   }
 
   void SetBatchMode(bool b) {
@@ -142,7 +142,6 @@ class SinkReplyBuilder {
   io::Sink* sink_;
   std::error_code ec_;
 
-  bool send_active_ = false;  // set while Send() is suspended on socket write
   bool scoped_ = false, batched_ = false;
 
   size_t total_size_ = 0;  // sum of vec_ lengths

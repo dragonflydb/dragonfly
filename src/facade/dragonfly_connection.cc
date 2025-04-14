@@ -823,7 +823,7 @@ void Connection::HandleRequests() {
 }
 
 unsigned Connection::GetSendIdleTime() const {
-  if (reply_builder_ && reply_builder_->GetLastSendTimeNs() != 0) {
+  if (reply_builder_ && reply_builder_->IsSendActive()) {
     return (util::fb2::ProactorBase::GetMonotonicTimeNs() - reply_builder_->GetLastSendTimeNs()) /
            1'000'000'000;
   }

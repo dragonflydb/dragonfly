@@ -159,7 +159,6 @@ void SinkReplyBuilder::Send() {
   DCHECK(!vecs_.empty());
   auto& reply_stats = tl_facade_stats->reply_stats;
 
-  send_active_ = true;
   send_time_ns_ = util::fb2::ProactorBase::GetMonotonicTimeNs();
   PendingPin pin(send_time_ns_);
 
@@ -180,7 +179,6 @@ void SinkReplyBuilder::Send() {
   reply_stats.send_stats.count++;
   reply_stats.send_stats.total_duration += (after_ns - pin.timestamp_ns) / 1'000;
   DVLOG(2) << "Finished writing " << total_size_ << " bytes";
-  send_active_ = false;
 }
 
 void SinkReplyBuilder::FinishScope() {
