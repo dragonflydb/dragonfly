@@ -822,7 +822,7 @@ void Connection::HandleRequests() {
   }
 }
 
-unsigned Connection::GetSendIdleTime() const {
+unsigned Connection::GetSendWaitTimeSec() const {
   if (reply_builder_ && reply_builder_->IsSendActive()) {
     return (util::fb2::ProactorBase::GetMonotonicTimeNs() - reply_builder_->GetLastSendTimeNs()) /
            1'000'000'000;
@@ -838,7 +838,10 @@ void Connection::RegisterBreakHook(BreakerCb breaker_cb) {
 pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   if (!socket_) {
     LOG(DFATAL) << "unexpected null socket_ "
-                << " phase " << unsigned(phase_) << ", is_http: " << unsigned(is_http_);
+                << " phase " << unsigned(phase_) << ", is_http: " << unsigned(is_http_)
+                << (IsSending()
+                        ? " send wait time in seconds: " + std::to_string(GetSendWaitTimeSec())
+                        : "");
     return {};
   }
 

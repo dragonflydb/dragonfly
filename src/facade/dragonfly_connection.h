@@ -313,8 +313,7 @@ class Connection : public util::Connection {
     return time(nullptr) - last_interaction_;
   }
 
-  // Returns the idle time of the connection in seconds for the send phase.
-  unsigned GetSendIdleTime() const;
+  unsigned GetSendWaitTimeSec() const;
 
   Phase phase() const {
     return phase_;
