@@ -2477,6 +2477,9 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
           return OpStatus::OK;
         }
 
+        /* We should track memory here in case the consumer hasn’t been used before this XREAD
+         * command — in that case, a new consumer will be created during the FindOrAddConsumer
+         * method. That means that allocation will occur. */
         mem_tracker.UpdateStreamSize(res_it->it->second);
       }
 
@@ -3226,8 +3229,10 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
     return false;
   }
 
+  /* We should enable memory tracking because this operation can add a consumer during the
+   * FindOrAddConsumer command if the consumer hasn't been used before — which means memory
+   * allocation can occur. */
   StreamMemTracker mem_tracker;
-
   absl::Cleanup update_size_cb([&]() { mem_tracker.UpdateStreamSize(res_it->it->second); });
 
   const CompactObj& cobj = res_it->it->second;
@@ -3250,6 +3255,7 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
       return facade::ErrorReply{
           NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option")};
 
+    // Can allocate memory if the consumer is not existing
     consumer = FindOrAddConsumer(opts->consumer_name, group, op_args.db_cntx.time_now_ms);
 
     requested_sitem.group = group;
