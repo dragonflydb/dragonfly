@@ -377,8 +377,10 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
     } else if (parser->Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
       params.query_params = ParseQueryParams(parser);
     } else if (parser->Check("SORTBY")) {
-      params.sort_option =
-          search::SortOption{parser->Next<std::string>(), bool(parser->Check("DESC"))};
+      auto parsed_field = ParseField(parser);
+      StringOrView field = StringOrView::FromString(std::string{parsed_field});
+      params.sort_option = SearchParams::SortOption{
+          SearchField{std::move(field)}, parser->Check("DESC") ? SortOrder::DESC : SortOrder::ASC};
     } else {
       // Unsupported parameters are ignored for now
       parser->Skip(1);
@@ -389,8 +391,6 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
 }
 
 std::optional<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* parser) {
-  using SortOrder = aggregate::SortParams::SortOrder;
-
   size_t strings_num = parser->Next<size_t>();
 
   aggregate::SortParams sort_params;
@@ -537,7 +537,8 @@ void SendSerializedDoc(const SerializedSearchDoc& doc, SinkReplyBuilder* builder
   }
 }
 
-void SearchReply(const SearchParams& params, std::optional<search::AggregationInfo> agg_info,
+void SearchReply(const SearchParams& params,
+                 std::optional<search::KnnScoreSortOption> knn_sort_option,
                  absl::Span<SearchResult> results, SinkReplyBuilder* builder) {
   size_t total_hits = 0;
   absl::InlinedVector<SerializedSearchDoc*, 5> docs;
@@ -552,17 +553,14 @@ void SearchReply(const SearchParams& params, std::optional<search::AggregationIn
   size_t size = docs.size();
   bool should_add_score_field = false;
 
-  if (agg_info) {
-    size = std::min(size, agg_info->limit);
-    total_hits = std::min(total_hits, agg_info->limit);
-    should_add_score_field = params.ShouldReturnField(agg_info->alias);
+  if (knn_sort_option) {
+    size = std::min(size, knn_sort_option->limit);
+    total_hits = std::min(total_hits, knn_sort_option->limit);
+    should_add_score_field = params.ShouldReturnField(knn_sort_option->score_field_alias);
 
-    using Comparator = bool (*)(const SerializedSearchDoc*, const SerializedSearchDoc*);
-    auto comparator =
-        !agg_info->descending
-            ? static_cast<Comparator>([](const SerializedSearchDoc* l,
-                                         const SerializedSearchDoc* r) { return *l < *r; })
-            : [](const SerializedSearchDoc* l, const SerializedSearchDoc* r) { return *r < *l; };
+    auto comparator = [](const SerializedSearchDoc* l, const SerializedSearchDoc* r) {
+      return *l < *r;
+    };
 
     const size_t prefix_size_to_sort = std::min(params.limit_offset + params.limit_total, size);
     if (prefix_size_to_sort == docs.size()) {
@@ -575,6 +573,38 @@ void SearchReply(const SearchParams& params, std::optional<search::AggregationIn
 
   const size_t offset = std::min(params.limit_offset, size);
   const size_t limit = std::min(size - offset, params.limit_total);
+  const size_t end = offset + limit;
+  DCHECK(end <= docs.size());
+
+  if (params.sort_option) {
+    auto field_alias = params.sort_option->field.NameView();
+
+    auto comparator = [&](const SerializedSearchDoc* l_doc, const SerializedSearchDoc* r_doc) {
+      auto& l = l_doc->values;
+      auto& r = r_doc->values;
+
+      auto l_it = l.find(field_alias);
+      auto r_it = r.find(field_alias);
+
+      // If some of the values is not present
+      if (l_it == l.end() || r_it == r.end()) {
+        return l_it != l.end();
+      }
+
+      const auto& lv = l_it->second;
+      const auto& rv = r_it->second;
+      return params.sort_option->order == SortOrder::ASC ? lv < rv : lv > rv;
+    };
+
+    auto sort_begin = docs.begin();
+    auto sort_end = docs.end();
+    // If we first sorted by knn, we need to sort only the result of knn
+    if (knn_sort_option) {
+      sort_begin = docs.begin() + offset;
+      sort_end = docs.begin() + end;
+    }
+    std::sort(sort_begin, sort_end, std::move(comparator));
+  }
 
   const bool reply_with_ids_only = params.IdsOnly();
   const size_t reply_size = reply_with_ids_only ? (limit + 1) : (limit * 2 + 1);
@@ -585,7 +615,6 @@ void SearchReply(const SearchParams& params, std::optional<search::AggregationIn
   rb->StartArray(reply_size);
   rb->SendLong(total_hits);
 
-  const size_t end = offset + limit;
   for (size_t i = offset; i < end; i++) {
     if (reply_with_ids_only) {
       rb->SendBulkString(docs[i]->key);
@@ -593,7 +622,8 @@ void SearchReply(const SearchParams& params, std::optional<search::AggregationIn
     }
 
     if (should_add_score_field && holds_alternative<float>(docs[i]->score))
-      docs[i]->values[agg_info->alias] = absl::StrCat(get<float>(docs[i]->score));
+      docs[i]->values[knn_sort_option->score_field_alias] =
+          absl::StrCat(get<float>(docs[i]->score));
 
     SendSerializedDoc(*docs[i], builder);
   }
@@ -811,8 +841,7 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
     return;
 
   search::SearchAlgorithm search_algo;
-  search::SortOption* sort_opt = params->sort_option.has_value() ? &*params->sort_option : nullptr;
-  if (!search_algo.Init(query_str, &params->query_params, sort_opt))
+  if (!search_algo.Init(query_str, &params->query_params))
     return builder->SendError("Query syntax error");
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
@@ -835,7 +864,7 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
       return builder->SendError(*res.error);
   }
 
-  SearchReply(*params, search_algo.GetAggregationInfo(), absl::MakeSpan(docs), builder);
+  SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(docs), builder);
 }
 
 void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -858,8 +887,7 @@ void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {
     return;
 
   search::SearchAlgorithm search_algo;
-  search::SortOption* sort_opt = params->sort_option.has_value() ? &*params->sort_option : nullptr;
-  if (!search_algo.Init(query_str, &params->query_params, sort_opt))
+  if (!search_algo.Init(query_str, &params->query_params))
     return rb->SendError("query syntax error");
 
   search_algo.EnableProfiling();
@@ -911,7 +939,7 @@ void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {
 
   // Result of the search command
   if (!result_is_empty) {
-    SearchReply(*params, search_algo.GetAggregationInfo(), absl::MakeSpan(search_results), rb);
+    SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(search_results), rb);
   } else {
     rb->StartArray(1);
     rb->SendLong(0);
@@ -1010,7 +1038,7 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
     return;
 
   search::SearchAlgorithm search_algo;
-  if (!search_algo.Init(params->query, &params->params, nullptr))
+  if (!search_algo.Init(params->query, &params->params))
     return builder->SendError("Query syntax error");
 
   using ResultContainer = decltype(declval<ShardDocIndex>().SearchForAggregator(

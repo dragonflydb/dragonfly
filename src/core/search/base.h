@@ -37,11 +37,6 @@ struct QueryParams {
   absl::flat_hash_map<std::string, std::string> params;
 };
 
-struct SortOption {
-  std::string field;
-  bool descending = false;
-};
-
 // Comparable string stored as char[]. Used to reduce size of std::variant with strings.
 struct WrappedStrPtr {
   // Intentionally implicit and const std::string& for use in templates
