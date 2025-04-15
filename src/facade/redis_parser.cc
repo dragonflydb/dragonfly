@@ -316,6 +316,7 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> ResultConsumed {
   if (server_mode_ && (parse_stack_.size() > 0 || !cached_expr_->empty()))
     return {BAD_STRING, res.second};
 
+  LOG(INFO) << "ConsumeArrayLen parsed len is: " << len;
   if (len <= 0) {
     if (len < 0) {
       cached_expr_->emplace_back(RespExpr::NIL_ARRAY);
