@@ -201,13 +201,10 @@ template <typename T> void Send(const std::optional<T>& opt, RedisReplyBuilder* 
 template <typename I> void Send(I begin, I end, RedisReplyBuilder* rb) {
   if (begin == end) {
     rb->SendEmptyArray();
-    LOG(INFO) << "send empty array";
   } else {
     if constexpr (is_same_v<decltype(*begin), const string>) {
-      LOG(INFO) << "send array SendBulkStrArr: " << (end - begin);
       rb->SendBulkStrArr(facade::OwnedArgSlice{begin, end});
     } else {
-      LOG(INFO) << "send array length: " << (end - begin);
       rb->StartArray(end - begin);
       for (auto i = begin; i != end; ++i) {
         Send(*i, rb);
