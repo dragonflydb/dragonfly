@@ -169,7 +169,7 @@ field_or_expr:
 
 field_unary_expr:
   LPAREN field_cond_expr RPAREN                  { $$ = std::move($2); }
-  | NOT_OP field_unary_expr                      { $$ = AstNegateNode(std::move($2)); };
+  | NOT_OP field_unary_expr                      { $$ = AstNegateNode(std::move($2)); }
   | TERM                                         { $$ = AstTermNode(std::move($1)); }
   | UINT32                                       { $$ = AstTermNode(std::move($1)); }
 
