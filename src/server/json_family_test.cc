@@ -2547,6 +2547,10 @@ TEST_F(JsonFamilyTest, MGetLegacy) {
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   EXPECT_THAT(resp.GetVec(), ElementsAre(R"("Israel")", R"("Germany")", ArgType(RespExpr::NIL)));
 
+  resp = Run({"JSON.MGET", "json1", "json2", ".[0]"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL)));
+
   resp = Run({"JSON.SET", "json3", ".", json[2]});
   ASSERT_THAT(resp, "OK");
 
