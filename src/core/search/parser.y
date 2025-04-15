@@ -136,6 +136,7 @@ search_unary_expr:
 field_cond:
   TERM                                                  { $$ = AstTermNode(std::move($1)); }
   | UINT32                                              { $$ = AstTermNode(std::move($1)); }
+  | STAR                                                { $$ = AstStarFieldNode(); }
   | NOT_OP field_cond                                   { $$ = AstNegateNode(std::move($2)); }
   | LPAREN field_cond_expr RPAREN                       { $$ = std::move($2); }
   | LBRACKET numeric_filter_expr RBRACKET               { $$ = std::move($2); }

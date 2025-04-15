@@ -805,6 +805,45 @@ static void BM_VectorSearch(benchmark::State& state) {
 
 BENCHMARK(BM_VectorSearch)->Args({120, 10'000});
 
+TEST_F(SearchTest, MatchNonNullField) {
+  PrepareSchema({{"text_field", SchemaField::TEXT},
+                 {"tag_field", SchemaField::TAG},
+                 {"num_field", SchemaField::NUMERIC}});
+
+  {
+    PrepareQuery("@text_field:*");
+
+    ExpectAll(Map{{"text_field", "any value"}}, Map{{"text_field", "another value"}},
+              Map{{"text_field", "third"}, {"tag_field", "tag1"}});
+
+    ExpectNone(Map{{"tag_field", "wrong field"}}, Map{{"num_field", "123"}}, Map{});
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
+
+  {
+    PrepareQuery("@tag_field:*");
+
+    ExpectAll(Map{{"tag_field", "tag1"}}, Map{{"tag_field", "tag2"}},
+              Map{{"text_field", "value"}, {"tag_field", "tag3"}});
+
+    ExpectNone(Map{{"text_field", "wrong field"}}, Map{{"num_field", "456"}}, Map{});
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
+
+  {
+    PrepareQuery("@num_field:*");
+
+    ExpectAll(Map{{"num_field", "123"}}, Map{{"num_field", "456"}},
+              Map{{"text_field", "value"}, {"num_field", "789"}});
+
+    ExpectNone(Map{{"text_field", "wrong field"}}, Map{{"tag_field", "tag1"}}, Map{});
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
+}
+
 }  // namespace search
 
 }  // namespace dfly

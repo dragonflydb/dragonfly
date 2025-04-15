@@ -22,6 +22,9 @@ struct AstNode;
 // Matches all documents
 struct AstStarNode {};
 
+// Matches all fields in a document (like "*" in field context)
+struct AstStarFieldNode {};
+
 // Matches terms in text fields
 struct AstTermNode {
   explicit AstTermNode(std::string term);
@@ -114,9 +117,9 @@ struct AstSortNode {
   bool descending = false;
 };
 
-using NodeVariants =
-    std::variant<std::monostate, AstStarNode, AstTermNode, AstPrefixNode, AstRangeNode,
-                 AstNegateNode, AstLogicalNode, AstFieldNode, AstTagsNode, AstKnnNode, AstSortNode>;
+using NodeVariants = std::variant<std::monostate, AstStarNode, AstStarFieldNode, AstTermNode,
+                                  AstPrefixNode, AstRangeNode, AstNegateNode, AstLogicalNode,
+                                  AstFieldNode, AstTagsNode, AstKnnNode, AstSortNode>;
 
 struct AstNode : public NodeVariants {
   using variant::variant;

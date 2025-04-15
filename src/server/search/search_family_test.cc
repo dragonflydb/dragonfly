@@ -2278,4 +2278,40 @@ TEST_F(SearchFamilyTest, PrefixSearchWithSynonyms) {
   EXPECT_THAT(resp, AreDocIds("doc:6"));  // Should only find macintosh
 }
 
+TEST_F(SearchFamilyTest, SearchNonNullFields) {
+  EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "tags", "tag", "score", "numeric"}),
+            "OK");
+
+  Run({"hset", "d:1", "title", "Document with title and tags", "tags", "tag1,tag2"});
+  Run({"hset", "d:2", "title", "Document with title and score", "score", "75"});
+  Run({"hset", "d:3", "title", "Document with all fields", "tags", "tag2,tag3", "score", "100"});
+  Run({"hset", "d:4", "tags", "Document with only tags", "score", "50"});
+
+  EXPECT_THAT(Run({"ft.search", "i1", "@title:*"}), AreDocIds("d:1", "d:2", "d:3"));
+
+  EXPECT_THAT(Run({"ft.search", "i1", "@tags:*"}), AreDocIds("d:1", "d:3", "d:4"));
+
+  EXPECT_THAT(Run({"ft.search", "i1", "@score:*"}), AreDocIds("d:2", "d:3", "d:4"));
+
+  EXPECT_THAT(Run({"ft.search", "i1", "@title:* @tags:*"}), AreDocIds("d:1", "d:3"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@title:* @score:*"}), AreDocIds("d:2", "d:3"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@tags:* @score:*"}), AreDocIds("d:3", "d:4"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@title:* @tags:* @score:*"}), AreDocIds("d:3"));
+
+  Run({"json.set", "j:1", ".",
+       R"({"title": "JSON document", "meta": {"tags": ["tag1", "tag2"]}})"});
+  Run({"json.set", "j:2", ".", R"({"meta": {"score": 100}})"});
+  Run({"json.set", "j:3", ".",
+       R"({"title": "Full JSON", "meta": {"tags": ["tag3"], "score": 80}})"});
+
+  EXPECT_EQ(Run({"ft.create", "i2", "on", "json", "schema", "$.title", "as", "title", "text",
+                 "$.meta.tags", "as", "tags", "tag", "$.meta.score", "as", "score", "numeric"}),
+            "OK");
+
+  EXPECT_THAT(Run({"ft.search", "i2", "@title:*"}), AreDocIds("j:1", "j:3"));
+  EXPECT_THAT(Run({"ft.search", "i2", "@tags:*"}), AreDocIds("j:1", "j:3"));
+  EXPECT_THAT(Run({"ft.search", "i2", "@score:*"}), AreDocIds("j:2", "j:3"));
+  EXPECT_THAT(Run({"ft.search", "i2", "@title:* @tags:* @score:*"}), AreDocIds("j:3"));
+}
+
 }  // namespace dfly

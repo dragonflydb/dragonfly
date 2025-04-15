@@ -143,6 +143,7 @@ struct ProfileBuilder {
         [](const AstKnnNode& n) { return absl::StrCat("KNN{l=", n.limit, "}"); },
         [](const AstNegateNode& n) { return absl::StrCat("Negate{}"); },
         [](const AstStarNode& n) { return absl::StrCat("Star{}"); },
+        [](const AstStarFieldNode& n) { return absl::StrCat("StarField{}"); },
         [](const AstSortNode& n) { return absl::StrCat("Sort{f", n.field, "}"); },
     };
     return visit(node_info, node.Variant());
@@ -302,6 +303,44 @@ struct BasicSearch {
     };
 
     return UnifyResults(GetSubResults(selected_indices, mapping), LogicOp::OR);
+  }
+
+  IndexResult Search(const AstStarFieldNode& node, string_view active_field) {
+    BaseIndex* base_index = indices_->GetIndex(active_field);
+    if (!base_index) {
+      error_ = absl::StrCat("Invalid field: ", active_field);
+      return IndexResult{};
+    }
+
+    if (auto* text_index = dynamic_cast<TextIndex*>(base_index)) {
+      vector<IndexResult> sub_results;
+      sub_results.reserve(text_index->GetTerms().size());
+
+      for (const auto& term : text_index->GetTerms()) {
+        if (auto* docs = text_index->Matching(term); docs) {
+          sub_results.push_back(IndexResult{docs});
+        }
+      }
+
+      return UnifyResults(std::move(sub_results), LogicOp::OR);
+    } else if (auto* tag_index = dynamic_cast<TagIndex*>(base_index)) {
+      vector<IndexResult> sub_results;
+      sub_results.reserve(tag_index->GetTerms().size());
+
+      for (const auto& tag : tag_index->GetTerms()) {
+        if (auto* docs = tag_index->Matching(tag); docs) {
+          sub_results.push_back(IndexResult{docs});
+        }
+      }
+
+      return UnifyResults(std::move(sub_results), LogicOp::OR);
+    } else if (auto* numeric_index = dynamic_cast<NumericIndex*>(base_index)) {
+      return numeric_index->Range(-std::numeric_limits<double>::infinity(),
+                                  std::numeric_limits<double>::infinity());
+    }
+
+    error_ = absl::StrCat("Wrong access type for field: ", active_field);
+    return IndexResult{};
   }
 
   IndexResult Search(const AstPrefixNode& node, string_view active_field) {
