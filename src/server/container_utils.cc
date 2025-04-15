@@ -217,6 +217,9 @@ bool IterateSortedSet(const detail::RobjWrapper* robj_wrapper, const IterateSort
   if (end < 0 || unsigned(end) >= llen)
     end = llen - 1;
 
+  if (start > end || unsigned(start) >= llen)
+    return true;
+
   unsigned rangelen = unsigned(end - start) + 1;
 
   if (robj_wrapper->encoding() == OBJ_ENCODING_LISTPACK) {

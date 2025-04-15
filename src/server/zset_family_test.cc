@@ -1206,4 +1206,10 @@ TEST_F(ZSetFamilyTest, RangeStore) {
   EXPECT_THAT(resp, ArrLen(0));
 }
 
+TEST_F(ZSetFamilyTest, ZRangeZeroElements) {
+  Run({"zadd", "myzset", "1", "one"});
+  auto resp = Run({"ZRANGE", "myzset", "0", "-1", "LIMIT", "2", "10"});
+  ASSERT_THAT(resp, ArrLen(0));
+}
+
 }  // namespace dfly
