@@ -10,6 +10,7 @@
 %define api.value.type variant
 %define api.parser.class {Parser}
 %define parse.assert
+%define api.value.automove true
 
 // Added to header file before parser declaration.
 %code requires {
