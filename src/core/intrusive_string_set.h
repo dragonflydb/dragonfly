@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <absl/numeric/bits.h>
+#include <absl/types/span.h>
+
 #include <cassert>
 #include <cstring>
 #include <memory>
@@ -159,13 +162,10 @@ class IntrusiveStringSet {
 
   // TODO add TTL processing
   ISLEntry Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX) {
-    if (size_ >= entries_.size()) {
-      auto prev_size = entries_.size();
-      ++capacity_log_;
-      entries_.resize(Capacity());
-      Rehash(prev_size);
+    if (entries_.empty() || size_ >= entries_.size()) {
+      Resize(Capacity() * 2);
     }
-    auto bucket_id = BucketId(Hash(str));
+    const auto bucket_id = BucketId(Hash(str));
     auto& bucket = entries_[bucket_id];
 
     if (auto existed_item = bucket.Find(str); existed_item) {
@@ -173,16 +173,51 @@ class IntrusiveStringSet {
       return ISLEntry();
     }
 
+    return AddUnique(str, bucket, ttl_sec);
+  }
+
+  void Resize(size_t sz) {
+    sz = absl::bit_ceil(sz);
+    if (sz > entries_.size()) {
+      size_t prev_size = entries_.size();
+      capacity_log_ = absl::bit_width(sz) - 1;
+      entries_.resize(sz);
+      Rehash(prev_size);
+    }
+  }
+
+  ISLEntry AddUnique(std::string_view str, IntrusiveStringList& bucket,
+                     uint32_t ttl_sec = UINT32_MAX) {
     ++size_;
     return bucket.Emplace(str);
   }
 
+  unsigned AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec, bool keepttl) {
+    Resize(span.size());
+    unsigned res = 0;
+    for (auto& s : span) {
+      const auto bucket_id = BucketId(Hash(s));
+      auto& bucket = entries_[bucket_id];
+      if (auto existed_item = bucket.Find(s); existed_item) {
+        // TODO update TTL
+      } else {
+        ++res;
+        AddUnique(s, bucket, ttl_sec);
+      }
+    }
+    return res;
+  }
+
   bool Erase(std::string_view str) {
+    if (entries_.empty())
+      return false;
     auto bucket_id = BucketId(Hash(str));
     return entries_[bucket_id].Erase(str);
   }
 
   ISLEntry Find(std::string_view member) const {
+    if (entries_.empty())
+      return {};
     auto bucket_id = BucketId(Hash(member));
     return entries_[bucket_id].Find(member);
   }
