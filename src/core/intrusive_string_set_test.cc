@@ -155,57 +155,57 @@ TEST_F(IntrusiveStringSetTest, StandardAddErase) {
   EXPECT_TRUE(ss_->Erase("AAAAAAAAAAAAAAA@"));
 }
 
-// TEST_F(IntrusiveStringSetTest, DisplacedBug) {
-//   string_view vals[] = {"imY", "OVl", "NhH", "BCe", "YDL", "lpb",
-//                         "nhF", "xod", "zYR", "PSa", "hce", "cTR"};
-//   ss_->AddMany(absl::MakeSpan(vals), UINT32_MAX, false);
+TEST_F(IntrusiveStringSetTest, DisplacedBug) {
+  string_view vals[] = {"imY", "OVl", "NhH", "BCe", "YDL", "lpb",
+                        "nhF", "xod", "zYR", "PSa", "hce", "cTR"};
+  ss_->AddMany(absl::MakeSpan(vals), UINT32_MAX, false);
 
-//   ss_->Add("fIc");
-//   ss_->Erase("YDL");
-//   ss_->Add("fYs");
-//   ss_->Erase("hce");
-//   ss_->Erase("nhF");
-//   ss_->Add("dye");
-//   ss_->Add("xZT");
-//   ss_->Add("LVK");
-//   ss_->Erase("zYR");
-//   ss_->Erase("fYs");
-//   ss_->Add("ueB");
-//   ss_->Erase("PSa");
-//   ss_->Erase("OVl");
-//   ss_->Add("cga");
-//   ss_->Add("too");
-//   ss_->Erase("ueB");
-//   ss_->Add("HZe");
-//   ss_->Add("oQn");
-//   ss_->Erase("too");
-//   ss_->Erase("HZe");
-//   ss_->Erase("xZT");
-//   ss_->Erase("cga");
-//   ss_->Erase("cTR");
-//   ss_->Erase("BCe");
-//   ss_->Add("eua");
-//   ss_->Erase("lpb");
-//   ss_->Add("OXK");
-//   ss_->Add("QmO");
-//   ss_->Add("SzV");
-//   ss_->Erase("QmO");
-//   ss_->Add("jbe");
-//   ss_->Add("BPN");
-//   ss_->Add("OfH");
-//   ss_->Add("Muf");
-//   ss_->Add("CwP");
-//   ss_->Erase("Muf");
-//   ss_->Erase("xod");
-//   ss_->Add("Cis");
-//   ss_->Add("Xvd");
-//   ss_->Erase("SzV");
-//   ss_->Erase("eua");
-//   ss_->Add("DGb");
-//   ss_->Add("leD");
-//   ss_->Add("MVX");
-//   ss_->Add("HPq");
-// }
+  ss_->Add("fIc");
+  ss_->Erase("YDL");
+  ss_->Add("fYs");
+  ss_->Erase("hce");
+  ss_->Erase("nhF");
+  ss_->Add("dye");
+  ss_->Add("xZT");
+  ss_->Add("LVK");
+  ss_->Erase("zYR");
+  ss_->Erase("fYs");
+  ss_->Add("ueB");
+  ss_->Erase("PSa");
+  ss_->Erase("OVl");
+  ss_->Add("cga");
+  ss_->Add("too");
+  ss_->Erase("ueB");
+  ss_->Add("HZe");
+  ss_->Add("oQn");
+  ss_->Erase("too");
+  ss_->Erase("HZe");
+  ss_->Erase("xZT");
+  ss_->Erase("cga");
+  ss_->Erase("cTR");
+  ss_->Erase("BCe");
+  ss_->Add("eua");
+  ss_->Erase("lpb");
+  ss_->Add("OXK");
+  ss_->Add("QmO");
+  ss_->Add("SzV");
+  ss_->Erase("QmO");
+  ss_->Add("jbe");
+  ss_->Add("BPN");
+  ss_->Add("OfH");
+  ss_->Add("Muf");
+  ss_->Add("CwP");
+  ss_->Erase("Muf");
+  ss_->Erase("xod");
+  ss_->Add("Cis");
+  ss_->Add("Xvd");
+  ss_->Erase("SzV");
+  ss_->Erase("eua");
+  ss_->Add("DGb");
+  ss_->Add("leD");
+  ss_->Add("MVX");
+  ss_->Add("HPq");
+}
 
 // static string random_string(mt19937& rand, unsigned len) {
 //   const string_view alpanum = "1234567890abcdefghijklmnopqrstuvwxyz";
