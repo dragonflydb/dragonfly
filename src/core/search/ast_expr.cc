@@ -20,7 +20,12 @@ AstTermNode::AstTermNode(string term) : term{std::move(term)} {
 }
 
 AstPrefixNode::AstPrefixNode(string prefix) : prefix{std::move(prefix)} {
-  this->prefix.pop_back();
+}
+
+AstSuffixNode::AstSuffixNode(string suffix) : suffix{std::move(suffix)} {
+}
+
+AstInfixNode::AstInfixNode(string infix) : infix{std::move(infix)} {
 }
 
 AstRangeNode::AstRangeNode(double lo, bool lo_excl, double hi, bool hi_excl)
