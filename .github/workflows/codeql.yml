@@ -1,0 +1,65 @@
+name: "CodeQL"
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+   branches: ["main"]
+  schedule:
+    - cron: "0 0 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ["cpp","python"]
+       
+
+    steps:
+
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with: 
+          submodules: true
+
+      # Initializes the CodeQL tools for scanning.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+
+      - name: Autobuild python
+        if: ${{matrix.language == 'python'}}
+        uses: github/codeql-action/autobuild@v3
+
+      # ℹ️ Command-line programs to run using the OS shell.
+      # 📚 See https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idstepsrun
+
+      #   If the Autobuild fails above, remove it and uncomment the following three lines.
+      #   modify them (or add more) to build your code if your project, please refer to the EXAMPLE below for guidance.
+
+      - name: Autobuild cpp
+        if: ${{matrix.language == 'cpp'}}
+        run: |
+         sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
+         autoconf-archive libtool cmake g++ libzstd-dev bison libxml2-dev zlib1g-dev
+         ./helio/blaze.sh -release
+         cd build-opt && ninja dragonfly
+
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{matrix.language}}"
