@@ -383,7 +383,7 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
              << "/" << node->sz;
 
     // Use listpack encoding
-    SaveLen(node->container);
+    RETURN_ON_ERR(SaveLen(node->container));
     if (quicklistNodeIsCompressed(node)) {
       void* data;
       size_t compress_len = quicklistGetLzf(node, &data);
@@ -910,7 +910,7 @@ size_t SerializerBase::SerializedLen() const {
 io::Bytes SerializerBase::PrepareFlush(SerializerBase::FlushState flush_state) {
   size_t sz = mem_buf_.InputLen();
   if (sz == 0)
-    return mem_buf_.InputBuffer();
+    return {};
 
   bool is_last_chunk = flush_state == FlushState::kFlushEndEntry;
   VLOG(2) << "PrepareFlush:" << is_last_chunk << " " << number_of_chunks_;
