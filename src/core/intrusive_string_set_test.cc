@@ -207,46 +207,46 @@ TEST_F(IntrusiveStringSetTest, DisplacedBug) {
   ss_->Add("HPq");
 }
 
-// static string random_string(mt19937& rand, unsigned len) {
-//   const string_view alpanum = "1234567890abcdefghijklmnopqrstuvwxyz";
-//   string ret;
-//   ret.reserve(len);
+static string random_string(mt19937& rand, unsigned len) {
+  const string_view alpanum = "1234567890abcdefghijklmnopqrstuvwxyz";
+  string ret;
+  ret.reserve(len);
 
-//   for (size_t i = 0; i < len; ++i) {
-//     ret += alpanum[rand() % alpanum.size()];
-//   }
+  for (size_t i = 0; i < len; ++i) {
+    ret += alpanum[rand() % alpanum.size()];
+  }
 
-//   return ret;
-// }
+  return ret;
+}
 
-// TEST_F(IntrusiveStringSetTest, Resizing) {
-//   constexpr size_t num_strs = 4096;
-//   unordered_set<string> strs;
-//   while (strs.size() != num_strs) {
-//     auto str = random_string(generator_, 10);
-//     strs.insert(str);
-//   }
+TEST_F(IntrusiveStringSetTest, Resizing) {
+  constexpr size_t num_strs = 4096;
+  unordered_set<string> strs;
+  while (strs.size() != num_strs) {
+    auto str = random_string(generator_, 10);
+    strs.insert(str);
+  }
 
-//   unsigned size = 0;
-//   for (auto it = strs.begin(); it != strs.end(); ++it) {
-//     const auto& str = *it;
-//     EXPECT_TRUE(ss_->Add(str, 1));
-//     EXPECT_EQ(ss_->UpperBoundSize(), size + 1);
+  unsigned size = 0;
+  for (auto it = strs.begin(); it != strs.end(); ++it) {
+    const auto& str = *it;
+    EXPECT_TRUE(ss_->Add(str, 1));
+    EXPECT_EQ(ss_->UpperBoundSize(), size + 1);
 
-//     // make sure we haven't lost any items after a grow
-//     // which happens every power of 2
-//     if ((size & (size - 1)) == 0) {
-//       for (auto j = strs.begin(); j != it; ++j) {
-//         const auto& str = *j;
-//         auto it = ss_->Find(str);
-//         ASSERT_TRUE(it != ss_->end());
-//         EXPECT_TRUE(it.HasExpiry());
-//         EXPECT_EQ(it.ExpiryTime(), ss_->time_now() + 1);
-//       }
-//     }
-//     ++size;
-//   }
-// }
+    // make sure we haven't lost any items after a grow
+    // which happens every power of 2
+    if ((size & (size - 1)) == 0) {
+      for (auto j = strs.begin(); j != it; ++j) {
+        const auto& str = *j;
+        auto it = ss_->Find(str);
+        ASSERT_TRUE(it);
+        EXPECT_TRUE(it.HasExpiry());
+        EXPECT_EQ(it.ExpiryTime(), ss_->time_now() + 1);
+      }
+    }
+    ++size;
+  }
+}
 
 // TEST_F(IntrusiveStringSetTest, SimpleScan) {
 //   unordered_set<string_view> info = {"foo", "bar"};
