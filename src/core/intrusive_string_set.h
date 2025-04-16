@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "base/hash.h"
+#include "base/pmr/memory_resource.h"
 
 namespace dfly {
 
@@ -152,6 +153,10 @@ class IntrusiveStringList {
 
 class IntrusiveStringSet {
  public:
+  explicit IntrusiveStringSet(PMR_NS::memory_resource* mr = PMR_NS::get_default_resource())
+      : entries_(mr) {
+  }
+
   // TODO add TTL processing
   ISLEntry Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX) {
     if (size_ >= entries_.size()) {
@@ -180,6 +185,10 @@ class IntrusiveStringSet {
   ISLEntry Find(std::string_view member) const {
     auto bucket_id = BucketId(Hash(member));
     return entries_[bucket_id].Find(member);
+  }
+
+  bool Contains(std::string_view member) const {
+    return Find(member);
   }
 
   // Returns the number of elements in the map. Note that it might be that some of these elements
@@ -224,7 +233,7 @@ class IntrusiveStringSet {
 
   static_assert(sizeof(IntrusiveStringList) == sizeof(void*),
                 "IntrusiveStringList should be just a pointer");
-  std::vector<IntrusiveStringList> entries_;
+  std::vector<IntrusiveStringList, PMR_NS::polymorphic_allocator<IntrusiveStringList>> entries_;
 };
 
 }  // namespace dfly
