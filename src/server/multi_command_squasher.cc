@@ -246,7 +246,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     fb2::BlockingCounter bc(num_shards);
     DVLOG(1) << "Squashing " << num_shards << " " << tx->DebugId();
 
-    auto cb = [this, tx, bc, rb]() mutable {
+    auto cb = [this, bc, rb]() mutable {
       this->SquashedHopCb(EngineShard::tlocal(), rb->GetRespVersion());
       bc->Dec();
     };
