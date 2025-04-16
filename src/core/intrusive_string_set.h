@@ -21,6 +21,13 @@ namespace dfly {
 class ISLEntry {
   friend class IntrusiveStringList;
 
+  // we can assume that high 12 bits of user address space
+  // can be used for tagging. At most 52 bits of address are reserved for
+  // some configurations, and usually it's 48 bits.
+  // https://docs.kernel.org/arch/arm64/memory.html
+  static constexpr size_t kTtlBit = 1ULL << 55;
+  static constexpr size_t kTagMask = 4095ULL << 52;  // we reserve 12 high bits.
+
  public:
   ISLEntry() = default;
 
@@ -36,48 +43,93 @@ class ISLEntry {
     return {GetKeyData(), GetKeySize()};
   }
 
+  bool HasExpiry() const {
+    return HasTtl();
+  }
+
+  // returns the expiry time of the current entry or UINT32_MAX if no ttl is set.
+  uint32_t ExpiryTime() const {
+    std::uint32_t res = UINT32_MAX;
+    if (HasTtl()) {
+      std::memcpy(&res, Raw() + sizeof(ISLEntry*), sizeof(res));
+    }
+    return res;
+  }
+
  private:
-  static ISLEntry Create(std::string_view key) {
+  static ISLEntry Create(std::string_view key, uint32_t ttl_sec = UINT32_MAX) {
     char* next = nullptr;
     uint32_t key_size = key.size();
 
-    auto size = sizeof(next) + sizeof(key_size) + key_size;
+    bool has_ttl = ttl_sec != UINT32_MAX;
+
+    auto size = sizeof(next) + sizeof(key_size) + key_size + has_ttl * sizeof(ttl_sec);
 
     char* data = (char*)malloc(size);
+    ISLEntry res(data);
 
     std::memcpy(data, &next, sizeof(next));
 
-    auto* key_size_pos = data + sizeof(next);
+    auto* ttl_pos = data + sizeof(next);
+    if (has_ttl) {
+      res.SetTtlBit(true);
+      std::memcpy(ttl_pos, &ttl_sec, sizeof(ttl_sec));
+    }
+
+    auto* key_size_pos = ttl_pos + res.GetTtlSize();
     std::memcpy(key_size_pos, &key_size, sizeof(key_size));
 
     auto* key_pos = key_size_pos + sizeof(key_size);
     std::memcpy(key_pos, key.data(), key_size);
 
-    return ISLEntry(data);
+    return res;
   }
 
   static void Destroy(ISLEntry entry) {
-    free(entry.data_);
+    free(entry.Raw());
   }
 
   ISLEntry Next() const {
     ISLEntry next;
-    std::memcpy(&next.data_, data_, sizeof(next));
+    std::memcpy(&next.data_, Raw(), sizeof(next));
     return next;
   }
 
   void SetNext(ISLEntry next) {
-    std::memcpy(data_, &next, sizeof(next));
+    std::memcpy(Raw(), &next, sizeof(next));
   }
 
   const char* GetKeyData() const {
-    return data_ + sizeof(ISLEntry*) + sizeof(uint32_t);
+    return Raw() + sizeof(ISLEntry*) + sizeof(uint32_t) + GetTtlSize();
   }
 
   uint32_t GetKeySize() const {
     uint32_t size = 0;
-    std::memcpy(&size, data_ + sizeof(ISLEntry*), sizeof(size));
+    std::memcpy(&size, Raw() + sizeof(ISLEntry*) + GetTtlSize(), sizeof(size));
     return size;
+  }
+
+  uint64_t uptr() const {
+    return uint64_t(data_);
+  }
+
+  char* Raw() const {
+    return (char*)(uptr() & ~kTagMask);
+  }
+
+  void SetTtlBit(bool b) {
+    if (b)
+      data_ = (char*)(uptr() | kTtlBit);
+    else
+      data_ = (char*)(uptr() & (~kTtlBit));
+  }
+
+  bool HasTtl() const {
+    return (uptr() & kTtlBit) != 0;
+  }
+
+  std::uint32_t GetTtlSize() const {
+    return HasTtl() ? sizeof(std::uint32_t) : 0;
   }
 
   // TODO consider use SDS strings or other approach
@@ -117,8 +169,8 @@ class IntrusiveStringList {
     return res;
   }
 
-  ISLEntry Emplace(std::string_view key) {
-    return Insert(ISLEntry::Create(key));
+  ISLEntry Emplace(std::string_view key, uint32_t ttl_sec = UINT32_MAX) {
+    return Insert(ISLEntry::Create(key, ttl_sec));
   }
 
   ISLEntry Find(std::string_view str) const {
@@ -189,7 +241,7 @@ class IntrusiveStringSet {
   ISLEntry AddUnique(std::string_view str, IntrusiveStringList& bucket,
                      uint32_t ttl_sec = UINT32_MAX) {
     ++size_;
-    return bucket.Emplace(str);
+    return bucket.Emplace(str, ttl_sec);
   }
 
   unsigned AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec, bool keepttl) {
@@ -219,7 +271,12 @@ class IntrusiveStringSet {
     if (entries_.empty())
       return {};
     auto bucket_id = BucketId(Hash(member));
-    return entries_[bucket_id].Find(member);
+    auto res = entries_[bucket_id].Find(member);
+    if (!res) {
+      bucket_id = BucketId(Hash(member));
+      res = entries_[bucket_id].Find(member);
+    }
+    return res;
   }
 
   bool Contains(std::string_view member) const {
@@ -238,6 +295,15 @@ class IntrusiveStringSet {
 
   std::uint32_t Capacity() const {
     return 1 << capacity_log_;
+  }
+
+  // set an abstract time that allows expiry.
+  void set_time(uint32_t val) {
+    time_now_ = val;
+  }
+
+  uint32_t time_now() const {
+    return time_now_;
   }
 
  private:
@@ -265,6 +331,7 @@ class IntrusiveStringSet {
  private:
   std::uint32_t capacity_log_ = 1;
   std::uint32_t size_ = 0;  // number of elements in the set.
+  std::uint32_t time_now_ = 0;
 
   static_assert(sizeof(IntrusiveStringList) == sizeof(void*),
                 "IntrusiveStringList should be just a pointer");
