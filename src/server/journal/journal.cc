@@ -14,7 +14,6 @@
 namespace dfly {
 namespace journal {
 
-namespace fs = std::filesystem;
 using namespace std;
 using namespace util;
 
