@@ -2486,9 +2486,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("rejected_connections", -1);
     append("expired_keys", m.events.expired_keys);
     append("evicted_keys", m.events.evicted_keys);
-    append("total_expired_keys_in_heartbeat", m.shard_stats.heartbeat_expired_total);
-    append("total_expired_bytes_in_heartbeat", m.shard_stats.heartbeat_expired_total_in_bytes);
-    append("expire_flow_calls_in_heartbeat", m.shard_stats.heartbeat_expire_flow_calls);
+    append("total_heartbeat_expired_keys", m.shard_stats.total_heartbeat_expired_keys);
+    append("total_heartbeat_expired_bytes", m.shard_stats.total_heartbeat_expired_bytes);
+    append("total_heartbeat_expired_calls", m.shard_stats.total_heartbeat_expired_calls);
     append("hard_evictions", m.events.hard_evictions);
     append("garbage_checked", m.events.garbage_checked);
     append("garbage_collected", m.events.garbage_collected);
