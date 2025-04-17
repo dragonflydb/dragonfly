@@ -2604,4 +2604,43 @@ TEST_F(SearchFamilyTest, VectorIndexOperations) {
   EXPECT_THAT(vec_field_search, AreDocIds("vec:1", "vec:2", "vec:3", "vec:4", "vec:5"));
 }
 
+// Test to verify that @field:* syntax works with sortable fields
+TEST_F(SearchFamilyTest, SortIndexGetAllResults) {
+  // Create an index with a numeric field that is SORTABLE but not indexed as a regular field
+  EXPECT_EQ(Run({"ft.create", "sort_only_idx", "SCHEMA", "sort_field", "NUMERIC", "SORTABLE"}),
+            "OK");
+
+  // Add documents with and without the sortable field
+  Run({"hset", "doc:1", "sort_field", "10", "other_field", "value1"});
+  Run({"hset", "doc:2", "sort_field", "20", "other_field", "value2"});
+  Run({"hset", "doc:3", "sort_field", "30", "other_field", "value3"});
+  Run({"hset", "doc:4", "other_field", "value4"});  // no sort_field
+  Run({"hset", "doc:5", "other_field", "value5"});  // no sort_field
+
+  // Test that all documents are indexed
+  EXPECT_THAT(Run({"ft.search", "sort_only_idx", "*"}),
+              AreDocIds("doc:1", "doc:2", "doc:3", "doc:4", "doc:5"));
+
+  // Test that @field:* search works for sortable field
+  // This should only return documents that have the sort_field
+  EXPECT_THAT(Run({"ft.search", "sort_only_idx", "@sort_field:*"}),
+              AreDocIds("doc:1", "doc:2", "doc:3"));
+
+  // Test sorting with @field:* query
+  auto sort_result =
+      Run({"ft.search", "sort_only_idx", "@sort_field:*", "SORTBY", "sort_field", "DESC"});
+
+  // Collect document IDs in order
+  std::vector<std::string> sorted_ids;
+  for (size_t i = 1; i < sort_result.GetVec().size(); i += 2) {
+    sorted_ids.push_back(sort_result.GetVec()[i].GetString());
+  }
+
+  // Verify correct order
+  ASSERT_EQ(sorted_ids.size(), 3);
+  EXPECT_EQ(sorted_ids[0], "doc:3");  // 30
+  EXPECT_EQ(sorted_ids[1], "doc:2");  // 20
+  EXPECT_EQ(sorted_ids[2], "doc:1");  // 10
+}
+
 }  // namespace dfly

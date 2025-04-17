@@ -304,17 +304,28 @@ struct BasicSearch {
   }
 
   IndexResult Search(const AstStarFieldNode& node, string_view active_field) {
+    // Try to get a sort index first, as `@field:*` might imply wanting sortable behavior
+    BaseSortIndex* sort_index = indices_->GetSortIndex(active_field);
+    if (sort_index) {
+      if (auto result = sort_index->GetAllResults()) {
+        return std::move(*result);
+      }
+    }
+
+    // If sort index doesn't exist or doesn't support GetAllResults, try regular index
     BaseIndex* base_index = indices_->GetIndex(active_field);
-    if (!base_index) {
+    if (base_index) {
+      if (auto result = base_index->GetAllResults()) {
+        return std::move(*result);
+      }
+    }
+
+    // If we get here, neither index could handle the request
+    if (!base_index && !sort_index) {
       error_ = absl::StrCat("Invalid field: ", active_field);
-      return IndexResult{};
+    } else {
+      error_ = absl::StrCat("Wrong access type for field: ", active_field);
     }
-
-    if (auto result = base_index->GetAllResults()) {
-      return std::move(*result);
-    }
-
-    error_ = absl::StrCat("Wrong access type for field: ", active_field);
     return IndexResult{};
   }
 
