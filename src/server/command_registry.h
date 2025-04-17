@@ -91,9 +91,6 @@ class CommandId : public facade::CommandId {
   CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
             std::optional<uint32_t> acl_categories = std::nullopt);
 
-  CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
-            uint32_t acl_categories, bool implicit_acl);
-
   CommandId(CommandId&&) = default;
 
   CommandId Clone(std::string_view name) const;

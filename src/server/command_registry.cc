@@ -135,16 +135,13 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
   implicit_acl_ = !acl_categories.has_value();
 }
 
-CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
-                     int8_t last_key, uint32_t acl_categories, bool implicit_acl)
-    : facade::CommandId(name, mask, arity, first_key, last_key, acl_categories),
-      implicit_acl_(implicit_acl) {
-}
-
 CommandId CommandId::Clone(const std::string_view name) const {
-  CommandId cloned = CommandId{name.data(), opt_mask_ | CO::HIDDEN, arity_,       first_key_,
-                               last_key_,   acl_categories_,        implicit_acl_};
+  CommandId cloned =
+      CommandId{name.data(), opt_mask_, arity_, first_key_, last_key_, acl_categories_};
   cloned.handler_ = handler_;
+  cloned.opt_mask_ = opt_mask_ | CO::HIDDEN;
+  cloned.acl_categories_ = acl_categories_;
+  cloned.implicit_acl_ = implicit_acl_;
   return cloned;
 }
 
