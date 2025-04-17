@@ -1602,7 +1602,7 @@ auto DbSlice::StopSampleTopK(DbIndex db_ind) -> SamplingResult {
   SamplingResult result;
   result.top_keys.reserve(fmap.size());
   for (auto& [key, count] : fmap) {
-    result.top_keys.emplace_back(move(key), count);
+    result.top_keys.emplace_back(std::move(key), count);
   }
   return result;
 }
