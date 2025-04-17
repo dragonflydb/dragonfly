@@ -169,6 +169,10 @@ class IntrusiveStringList {
     return res;
   }
 
+  bool Empty() {
+    return start_;
+  }
+
   ISLEntry Emplace(std::string_view key, uint32_t ttl_sec = UINT32_MAX) {
     return Insert(ISLEntry::Create(key, ttl_sec));
   }
@@ -181,25 +185,49 @@ class IntrusiveStringList {
   }
 
   bool Erase(std::string_view str) {
+    auto cond = [str](const ISLEntry e) { return str == e.Key(); };
+    return Erase(cond);
+  }
+
+  template <class T, std::enable_if_t<std::is_invocable_v<T, ISLEntry>>* = nullptr>
+  bool Erase(const T& cond) {
     if (!start_) {
       return false;
     }
-    auto it = start_;
-    if (it.Key() == str) {
+
+    if (auto it = start_; cond(it)) {
       start_ = it.Next();
       ISLEntry::Destroy(it);
       return true;
     }
 
-    auto prev = it;
-    for (it = it.Next(); it; prev = it, it = it.Next()) {
-      if (it.Key() == str) {
+    for (auto prev = start_, it = start_.Next(); it; prev = it, it = it.Next()) {
+      if (cond(it)) {
         prev.SetNext(it.Next());
         ISLEntry::Destroy(it);
         return true;
       }
     }
     return false;
+  }
+
+  template <class T, std::enable_if_t<std::is_invocable_v<T, std::string_view>>* = nullptr>
+  bool Scan(const T& cb, uint32_t curr_time) {
+    for (auto it = start_; it && it.ExpiryTime() < curr_time; it = start_) {
+      start_ = it.Next();
+      ISLEntry::Destroy(it);
+    }
+
+    for (auto curr = start_, next = start_; curr; curr = next) {
+      cb(curr.Key());
+      next = curr.Next();
+      for (auto tmp = next; tmp && tmp.ExpiryTime() < curr_time; tmp = next) {
+        next = next.Next();
+        ISLEntry::Destroy(tmp);
+      }
+      curr.SetNext(next);
+    }
+    return start_;
   }
 
  private:
@@ -258,6 +286,40 @@ class IntrusiveStringSet {
       }
     }
     return res;
+  }
+
+  /**
+   * stable scanning api. has the same guarantees as redis scan command.
+   * we avoid doing bit-reverse by using a different function to derive a bucket id
+   * from hash values. By using msb part of hash we make it "stable" with respect to
+   * rehashes. For example, with table log size 4 (size 16), entries in bucket id
+   * 1110 come from hashes 1110XXXXX.... When a table grows to log size 5,
+   * these entries can move either to 11100 or 11101. So if we traversed with our cursor
+   * range [0000-1110], it's guaranteed that in grown table we do not need to cover again
+   * [00000-11100]. Similarly with shrinkage, if a table is shrunk to log size 3,
+   * keys from 1110 and 1111 will move to bucket 111. Again, it's guaranteed that we
+   * covered the range [000-111] (all keys in that case).
+   * Returns: next cursor or 0 if reached the end of scan.
+   * cursor = 0 - initiates a new scan.
+   */
+
+  using ItemCb = std::function<void(std::string_view)>;
+
+  uint32_t Scan(uint32_t cursor, const ItemCb& cb) {
+    uint32_t entries_idx = cursor >> (32 - capacity_log_);
+
+    // First find the bucket to scan, skip empty buckets.
+    for (; entries_idx < entries_.size(); ++entries_idx) {
+      if (entries_[entries_idx].Scan(cb, time_now_)) {
+        break;
+      }
+    }
+
+    if (++entries_idx >= entries_.size()) {
+      return 0;
+    }
+
+    return entries_idx << (32 - capacity_log_);
   }
 
   bool Erase(std::string_view str) {
@@ -329,7 +391,7 @@ class IntrusiveStringSet {
   }
 
  private:
-  std::uint32_t capacity_log_ = 1;
+  std::uint32_t capacity_log_ = 0;
   std::uint32_t size_ = 0;  // number of elements in the set.
   std::uint32_t time_now_ = 0;
 

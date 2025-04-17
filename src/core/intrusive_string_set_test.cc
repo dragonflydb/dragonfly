@@ -248,167 +248,162 @@ TEST_F(IntrusiveStringSetTest, Resizing) {
   }
 }
 
-// TEST_F(IntrusiveStringSetTest, SimpleScan) {
-//   unordered_set<string_view> info = {"foo", "bar"};
-//   unordered_set<string_view> seen;
+TEST_F(IntrusiveStringSetTest, SimpleScan) {
+  unordered_set<string_view> info = {"foo", "bar"};
+  unordered_set<string_view> seen;
 
-//   for (auto str : info) {
-//     EXPECT_TRUE(ss_->Add(str));
-//   }
+  for (auto str : info) {
+    EXPECT_TRUE(ss_->Add(str));
+  }
 
-//   uint32_t cursor = 0;
-//   do {
-//     cursor = ss_->Scan(cursor, [&](const sds ptr) {
-//       sds s = (sds)ptr;
-//       string_view str{s, sdslen(s)};
-//       EXPECT_TRUE(info.count(str));
-//       seen.insert(str);
-//     });
-//   } while (cursor != 0);
+  uint32_t cursor = 0;
+  do {
+    cursor = ss_->Scan(cursor, [&](std::string_view str) {
+      EXPECT_TRUE(info.count(str));
+      seen.insert(str);
+    });
+  } while (cursor != 0);
 
-//   EXPECT_TRUE(seen.size() == info.size() && equal(seen.begin(), seen.end(), info.begin()));
-// }
+  EXPECT_EQ(seen.size(), info.size());
+  EXPECT_TRUE(equal(seen.begin(), seen.end(), info.begin()));
+}
 
-// // Ensure REDIS scan guarantees are met
-// TEST_F(IntrusiveStringSetTest, ScanGuarantees) {
-//   unordered_set<string_view> to_be_seen = {"foo", "bar"};
-//   unordered_set<string_view> not_be_seen = {"AAA", "BBB"};
-//   unordered_set<string_view> maybe_seen = {"AA@@@@@@@@@@@@@@", "AAA@@@@@@@@@@@@@",
-//                                            "AAAAAAAAA@@@@@@@", "AAAAAAAAAA@@@@@@"};
-//   unordered_set<string_view> seen;
+// Ensure REDIS scan guarantees are met
+TEST_F(IntrusiveStringSetTest, ScanGuarantees) {
+  unordered_set<string_view> to_be_seen = {"foo", "bar"};
+  unordered_set<string_view> not_be_seen = {"AAA", "BBB"};
+  unordered_set<string_view> maybe_seen = {"AA@@@@@@@@@@@@@@", "AAA@@@@@@@@@@@@@",
+                                           "AAAAAAAAA@@@@@@@", "AAAAAAAAAA@@@@@@"};
+  unordered_set<string_view> seen;
 
-//   auto scan_callback = [&](const sds ptr) {
-//     sds s = (sds)ptr;
-//     string_view str{s, sdslen(s)};
-//     EXPECT_TRUE(to_be_seen.count(str) || maybe_seen.count(str));
-//     EXPECT_FALSE(not_be_seen.count(str));
-//     if (to_be_seen.count(str)) {
-//       seen.insert(str);
-//     }
-//   };
+  auto scan_callback = [&](std::string_view str) {
+    EXPECT_TRUE(to_be_seen.count(str) || maybe_seen.count(str));
+    EXPECT_FALSE(not_be_seen.count(str));
+    if (to_be_seen.count(str)) {
+      seen.insert(str);
+    }
+  };
 
-//   EXPECT_EQ(ss_->Scan(0, scan_callback), 0);
+  EXPECT_EQ(ss_->Scan(0, scan_callback), 0);
 
-//   for (auto str : not_be_seen) {
-//     EXPECT_TRUE(ss_->Add(str));
-//   }
+  for (auto str : not_be_seen) {
+    EXPECT_TRUE(ss_->Add(str));
+  }
 
-//   for (auto str : not_be_seen) {
-//     EXPECT_TRUE(ss_->Erase(str));
-//   }
+  for (auto str : not_be_seen) {
+    EXPECT_TRUE(ss_->Erase(str));
+  }
 
-//   for (auto str : to_be_seen) {
-//     EXPECT_TRUE(ss_->Add(str));
-//   }
+  for (auto str : to_be_seen) {
+    EXPECT_TRUE(ss_->Add(str));
+  }
 
-//   // should reach at least the first item in the set
-//   uint32_t cursor = ss_->Scan(0, scan_callback);
+  // should reach at least the first item in the set
+  uint32_t cursor = ss_->Scan(0, scan_callback);
 
-//   for (auto str : maybe_seen) {
-//     EXPECT_TRUE(ss_->Add(str));
-//   }
+  for (auto str : maybe_seen) {
+    EXPECT_TRUE(ss_->Add(str));
+  }
 
-//   while (cursor != 0) {
-//     cursor = ss_->Scan(cursor, scan_callback);
-//   }
+  while (cursor != 0) {
+    cursor = ss_->Scan(cursor, scan_callback);
+  }
 
-//   EXPECT_TRUE(seen.size() == to_be_seen.size());
-// }
+  EXPECT_TRUE(seen.size() == to_be_seen.size());
+}
 
-// TEST_F(IntrusiveStringSetTest, IntOnly) {
-//   constexpr size_t num_ints = 8192;
-//   unordered_set<unsigned int> numbers;
-//   for (size_t i = 0; i < num_ints; ++i) {
-//     numbers.insert(i);
-//     EXPECT_TRUE(ss_->Add(to_string(i)));
-//   }
+TEST_F(IntrusiveStringSetTest, IntOnly) {
+  constexpr size_t num_ints = 8192;
+  unordered_set<unsigned int> numbers;
+  for (size_t i = 0; i < num_ints; ++i) {
+    numbers.insert(i);
+    EXPECT_TRUE(ss_->Add(to_string(i)));
+  }
 
-//   for (size_t i = 0; i < num_ints; ++i) {
-//     ASSERT_FALSE(ss_->Add(to_string(i)));
-//   }
+  for (size_t i = 0; i < num_ints; ++i) {
+    ASSERT_FALSE(ss_->Add(to_string(i)));
+  }
 
-//   size_t num_remove = generator_() % 4096;
-//   unordered_set<string> removed;
+  size_t num_remove = generator_() % 4096;
+  unordered_set<string> removed;
 
-//   for (size_t i = 0; i < num_remove; ++i) {
-//     auto remove_int = generator_() % num_ints;
-//     auto remove = to_string(remove_int);
-//     if (numbers.count(remove_int)) {
-//       ASSERT_TRUE(ss_->Contains(remove)) << remove_int;
-//       EXPECT_TRUE(ss_->Erase(remove));
-//       numbers.erase(remove_int);
-//     } else {
-//       EXPECT_FALSE(ss_->Erase(remove));
-//     }
+  for (size_t i = 0; i < num_remove; ++i) {
+    auto remove_int = generator_() % num_ints;
+    auto remove = to_string(remove_int);
+    if (numbers.count(remove_int)) {
+      ASSERT_TRUE(ss_->Contains(remove)) << remove_int;
+      EXPECT_TRUE(ss_->Erase(remove));
+      numbers.erase(remove_int);
+    } else {
+      EXPECT_FALSE(ss_->Erase(remove));
+    }
 
-//     EXPECT_FALSE(ss_->Contains(remove));
-//     removed.insert(remove);
-//   }
+    EXPECT_FALSE(ss_->Contains(remove));
+    removed.insert(remove);
+  }
 
-//   size_t expected_seen = 0;
-//   auto scan_callback = [&](const sds ptr) {
-//     string str{ptr, sdslen(ptr)};
-//     EXPECT_FALSE(removed.count(str));
+  size_t expected_seen = 0;
+  auto scan_callback = [&](std::string_view str_v) {
+    std::string str(str_v);
+    EXPECT_FALSE(removed.count(str));
 
-//     if (numbers.count(atoi(str.data()))) {
-//       ++expected_seen;
-//     }
-//   };
+    if (numbers.count(std::atoi(str.data()))) {
+      ++expected_seen;
+    }
+  };
 
-//   uint32_t cursor = 0;
-//   do {
-//     cursor = ss_->Scan(cursor, scan_callback);
-//     // randomly throw in some new numbers
-//     uint32_t val = generator_();
-//     VLOG(1) << "Val " << val;
-//     ss_->Add(to_string(val));
-//   } while (cursor != 0);
+  uint32_t cursor = 0;
+  do {
+    cursor = ss_->Scan(cursor, scan_callback);
+    // randomly throw in some new numbers
+    uint32_t val = generator_();
+    ss_->Add(to_string(val));
+  } while (cursor != 0);
 
-//   EXPECT_GE(expected_seen + removed.size(), num_ints);
-// }
+  EXPECT_GE(expected_seen + removed.size(), num_ints);
+}
 
-// TEST_F(IntrusiveStringSetTest, XtremeScanGrow) {
-//   unordered_set<string> to_see, force_grow, seen;
+TEST_F(IntrusiveStringSetTest, XtremeScanGrow) {
+  unordered_set<string> to_see, force_grow, seen;
 
-//   while (to_see.size() != 8) {
-//     to_see.insert(random_string(generator_, 10));
-//   }
+  while (to_see.size() != 8) {
+    to_see.insert(random_string(generator_, 10));
+  }
 
-//   while (force_grow.size() != 8192) {
-//     string str = random_string(generator_, 10);
+  while (force_grow.size() != 8192) {
+    string str = random_string(generator_, 10);
 
-//     if (to_see.count(str)) {
-//       continue;
-//     }
+    if (to_see.count(str)) {
+      continue;
+    }
 
-//     force_grow.insert(random_string(generator_, 10));
-//   }
+    force_grow.insert(random_string(generator_, 10));
+  }
 
-//   for (auto& str : to_see) {
-//     EXPECT_TRUE(ss_->Add(str));
-//   }
+  for (auto& str : to_see) {
+    EXPECT_TRUE(ss_->Add(str));
+  }
 
-//   auto scan_callback = [&](const sds ptr) {
-//     sds s = (sds)ptr;
-//     string_view str{s, sdslen(s)};
-//     if (to_see.count(string(str))) {
-//       seen.insert(string(str));
-//     }
-//   };
+  auto scan_callback = [&](string_view strv) {
+    std::string str(strv);
+    if (to_see.count(str)) {
+      seen.insert(str);
+    }
+  };
 
-//   uint32_t cursor = ss_->Scan(0, scan_callback);
+  uint32_t cursor = ss_->Scan(0, scan_callback);
 
-//   // force approx 10 grows
-//   for (auto& s : force_grow) {
-//     EXPECT_TRUE(ss_->Add(s));
-//   }
+  // force approx 10 grows
+  for (auto& s : force_grow) {
+    EXPECT_TRUE(ss_->Add(s));
+  }
 
-//   while (cursor != 0) {
-//     cursor = ss_->Scan(cursor, scan_callback);
-//   }
+  while (cursor != 0) {
+    cursor = ss_->Scan(cursor, scan_callback);
+  }
 
-//   EXPECT_EQ(seen.size(), to_see.size());
-// }
+  EXPECT_EQ(seen.size(), to_see.size());
+}
 
 // TEST_F(IntrusiveStringSetTest, Pop) {
 //   constexpr size_t num_items = 8;
