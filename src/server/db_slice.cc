@@ -317,13 +317,14 @@ inline void TouchHllIfNeeded(string_view key, uint8_t* hll) {
 
 DbStats& DbStats::operator+=(const DbStats& o) {
   constexpr size_t kDbSz = sizeof(DbStats) - sizeof(DbTableStats);
-  static_assert(kDbSz == 32);
+  static_assert(kDbSz == 40);
 
   DbTableStats::operator+=(o);
 
   ADD(key_count);
   ADD(expire_count);
-  ADD(bucket_count);
+  ADD(prime_capacity);
+  ADD(expire_capacity);
   ADD(table_mem_usage);
 
   return *this;
@@ -403,7 +404,8 @@ auto DbSlice::GetStats() const -> Stats {
     DbStats& stats = s.db_stats[i];
     stats = db_wrap.stats;
     stats.key_count = db_wrap.prime.size();
-    stats.bucket_count = db_wrap.prime.bucket_count();
+    stats.prime_capacity = db_wrap.prime.capacity();
+    stats.expire_capacity = db_wrap.expire.capacity();
     stats.expire_count = db_wrap.expire.size();
     stats.table_mem_usage = db_wrap.table_memory();
   }

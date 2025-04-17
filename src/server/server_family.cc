@@ -1545,12 +1545,19 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   string db_key_expire_metrics;
 
   AppendMetricHeader("db_keys", "Total number of keys by DB", MetricType::GAUGE, &db_key_metrics);
+  AppendMetricHeader("db_capacity", "Table capacity by DB", MetricType::GAUGE, &db_key_metrics);
+
   AppendMetricHeader("db_keys_expiring", "Total number of expiring keys by DB", MetricType::GAUGE,
                      &db_key_expire_metrics);
 
   for (size_t i = 0; i < m.db_stats.size(); ++i) {
     AppendMetricValue("db_keys", m.db_stats[i].key_count, {"db"}, {StrCat("db", i)},
                       &db_key_metrics);
+    AppendMetricValue("db_capacity", m.db_stats[i].prime_capacity, {"db", "type"},
+                      {StrCat("db", i), "prime"}, &db_key_metrics);
+    AppendMetricValue("db_capacity", m.db_stats[i].expire_capacity, {"db", "type"},
+                      {StrCat("db", i), "expire"}, &db_key_metrics);
+
     AppendMetricValue("db_keys_expiring", m.db_stats[i].expire_count, {"db"}, {StrCat("db", i)},
                       &db_key_expire_metrics);
   }
@@ -2423,7 +2430,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       }
     }
     append("table_used_memory", total.table_mem_usage);
-    append("num_buckets", total.bucket_count);
+    append("prime_capacity", total.prime_capacity);
+    append("expire_capacity", total.expire_capacity);
     append("num_entries", total.key_count);
     append("inline_keys", total.inline_keys);
     append("small_string_bytes", m.small_string_bytes);

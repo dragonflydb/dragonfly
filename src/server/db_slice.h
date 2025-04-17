@@ -30,8 +30,11 @@ struct DbStats : public DbTableStats {
   // number of keys that have expiry deadline.
   size_t expire_count = 0;
 
-  // number of buckets in dictionary (key capacity)
-  size_t bucket_count = 0;
+  // total number of slots in prime dictionary (key capacity).
+  size_t prime_capacity = 0;
+
+  // total number of slots in prime dictionary (key capacity).
+  size_t expire_capacity = 0;
 
   // Memory used by dictionaries.
   size_t table_mem_usage = 0;
