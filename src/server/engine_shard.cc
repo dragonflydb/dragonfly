@@ -297,7 +297,7 @@ string EngineShard::TxQueueInfo::Format() const {
 }
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
-  static_assert(sizeof(Stats) == 64);
+  static_assert(sizeof(Stats) == 80);
 
 #define ADD(x) x += o.x
 
@@ -309,6 +309,8 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
   ADD(tx_optimistic_total);
   ADD(tx_batch_schedule_calls_total);
   ADD(tx_batch_scheduled_items_total);
+  ADD(heartbeat_evictions_total);
+  ADD(heartbeat_evictions_total_in_bytes);
 
 #undef ADD
   return *this;
@@ -805,12 +807,16 @@ void EngineShard::RetireExpiredAndEvict() {
 
     db_cntx.db_index = i;
     auto [pt, expt] = db_slice.GetTables(i);
-    if (expt->size() > pt->size() / 4) {
+    if (expt->size() > 0) {
       DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
 
       eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
       counter_[TTL_TRAVERSE].IncBy(stats.traversed);
       counter_[TTL_DELETE].IncBy(stats.deleted);
+      stats_.heartbeat_evictions_total += stats.deleted;
+      stats_.heartbeat_evictions_total_in_bytes += stats.deleted_bytes;
+      VLOG(1) << "Heartbeat evicted " << stats.deleted << " keys with total bytes "
+              << stats.deleted_bytes;
     }
 
     if (eviction_goal) {
