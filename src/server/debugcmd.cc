@@ -728,7 +728,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
 
   while (parser.HasNext()) {
     PopulateFlag flag = parser.MapNext("RAND", FLAG_RAND, "TYPE", FLAG_TYPE, "ELEMENTS",
-                                       FLAG_ELEMENTS, "SLOT", FLAG_SLOT, "EXPIRE", FLAG_EXPIRE);
+                                       FLAG_ELEMENTS, "SLOTS", FLAG_SLOT, "EXPIRE", FLAG_EXPIRE);
     switch (flag) {
       case FLAG_RAND:
         options.populate_random_values = true;
@@ -748,16 +748,15 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
         auto [min_ttl, max_ttl] = parser.Next<uint32_t, uint32_t>();
         if (min_ttl >= max_ttl) {
           builder->SendError(kExpiryOutOfRange);
-          parser.Error();
+          (void)parser.Error();
           return nullopt;
         }
         options.expire_ttl_range = std::make_pair(min_ttl, max_ttl);
         break;
       }
       default:
-        LOG(ERROR) << "Error flag value in Populate arguments";
-        builder->SendError(kSyntaxErr);
-        return nullopt;
+        LOG(FATAL) << "Unexpected flag in PopulateArgs. Args: " << args;
+        break;
     }
   }
   if (parser.HasError()) {
