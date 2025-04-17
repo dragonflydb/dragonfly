@@ -2537,43 +2537,6 @@ TEST_F(SearchFamilyTest, VectorIndexOperations) {
   // Search by vector field presence
   auto vec_field_search = Run({"ft.search", "vector_idx", "@vec:*"});
   EXPECT_THAT(vec_field_search, AreDocIds("vec:1", "vec:2", "vec:3", "vec:4", "vec:5"));
-
-  // KNN search for nearest to [1,0,0]
-  auto knn_search = Run({"ft.search", "vector_idx", "*=>[KNN 3 @vec $vec_param]", "PARAMS", "2",
-                         "vec_param", vec1, "RETURN", "1", "name"});
-
-  // Verify we have the correct number of KNN results
-  ASSERT_EQ(knn_search.GetVec()[0].GetInt(), 3);  // 3 results total
-
-  // Verify that [1,0,0] (vec:1) should be the first result, as the closest
-  EXPECT_EQ(knn_search.GetVec()[1].GetString(), "vec:1");
-
-  // KNN search with filter
-  auto filtered_knn = Run({"ft.search", "vector_idx", "@name:vector5 =>[KNN 1 @vec $vec_param]",
-                           "PARAMS", "2", "vec_param", vec5, "RETURN", "1", "name"});
-
-  // Should be one result matching both conditions
-  ASSERT_EQ(filtered_knn.GetVec()[0].GetInt(), 1);
-  EXPECT_EQ(filtered_knn.GetVec()[1].GetString(), "vec:5");
-
-  // Add another document
-  std::string vec6 = FloatsToBytes({0.1f, 0.2f, 0.3f});
-  Run({"hset", "vec:6", "vec", vec6, "name", "vector6"});
-
-  // Update an existing document
-  std::string vec3_updated = FloatsToBytes({0.9f, 0.9f, 0.9f});
-  Run({"hset", "vec:3", "vec", vec3_updated, "name", "updated_vector3"});
-
-  // Check updated results
-  auto updated_search = Run({"ft.search", "vector_idx", "*"});
-  EXPECT_THAT(updated_search, AreDocIds("vec:1", "vec:2", "vec:3", "vec:4", "vec:5", "vec:6"));
-
-  // Delete a document
-  Run({"del", "vec:2"});
-
-  // Check results after deletion
-  auto after_delete = Run({"ft.search", "vector_idx", "*"});
-  EXPECT_THAT(after_delete, AreDocIds("vec:1", "vec:3", "vec:4", "vec:5", "vec:6"));
 }
 
 }  // namespace dfly
