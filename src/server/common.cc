@@ -118,6 +118,7 @@ atomic_uint64_t rss_mem_peak(0);
 
 unsigned kernel_version = 0;
 size_t max_memory_limit = 0;
+size_t total_host_memory = 0;
 Namespaces* namespaces = nullptr;
 
 size_t FetchRssMemory(io::StatusData sdata) {

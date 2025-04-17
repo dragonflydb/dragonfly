@@ -786,6 +786,7 @@ Usage: dragonfly [FLAGS]
     LOG(WARNING) << "SWAP is enabled. Consider disabling it when running Dragonfly.";
 
   dfly::max_memory_limit = dfly::GetMaxMemoryFlag();
+  dfly::total_host_memory = mem_info.mem_total;
 
   if (dfly::max_memory_limit == 0) {
     LOG(INFO) << "maxmemory has not been specified. Deciding myself....";
