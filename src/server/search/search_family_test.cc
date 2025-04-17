@@ -2539,4 +2539,69 @@ TEST_F(SearchFamilyTest, PrefixSearchWithSynonyms) {
   EXPECT_THAT(resp, AreDocIds("doc:6"));  // Should only find macintosh
 }
 
+TEST_F(SearchFamilyTest, SearchSortByOptionNonSortableFieldJson) {
+  Run({"JSON.SET", "json1", "$", R"({"text":"2"})"});
+  Run({"JSON.SET", "json2", "$", R"({"text":"1"})"});
+
+  auto resp = Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.text", "AS", "text", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  auto expect_expr = [](std::string_view text_field) {
+    return IsArray(2, "json2", IsMap(text_field, "\"1\"", "$", R"({"text":"1"})"), "json1",
+                   IsMap(text_field, "\"2\"", "$", R"({"text":"2"})"));
+  };
+
+  resp = Run({"FT.SEARCH", "index", "*", "SORTBY", "text"});
+  EXPECT_THAT(resp, expect_expr("text"sv));
+
+  resp = Run({"FT.SEARCH", "index", "*", "SORTBY", "@text"});
+  EXPECT_THAT(resp, expect_expr("text"sv));
+
+  resp = Run({"FT.SEARCH", "index", "*", "SORTBY", "$.text"});
+  EXPECT_THAT(resp, expect_expr("$.text"sv));
+}
+
+TEST_F(SearchFamilyTest, SearchSortByOptionNonSortableFieldHash) {
+  Run({"HSET", "h1", "text", "2"});
+  Run({"HSET", "h2", "text", "1"});
+
+  auto resp = Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "text", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  auto expected_expr = IsArray(2, "h2", IsMap("text", "1"), "h1", IsMap("text", "2"));
+
+  resp = Run({"FT.SEARCH", "index", "*", "SORTBY", "text"});
+  EXPECT_THAT(resp, expected_expr);
+
+  resp = Run({"FT.SEARCH", "index", "*", "SORTBY", "@text"});
+  EXPECT_THAT(resp, expected_expr);
+}
+
+TEST_F(SearchFamilyTest, KnnSearchWithSortby) {
+  auto to_vector = [](const char* value) { return std::string(value, 16); };
+
+  Run({"HSET", "doc:1", "timestamp", "1713100000", "embedding",
+       to_vector("\x3d\xcc\xcc\x3d\x00\x00\x80\x3f\xcd\xcc\x4c\x3e\x9a\x99\x19\x3f")});
+  Run({"HSET", "doc:2", "timestamp", "1713200000", "embedding",
+       to_vector("\x9a\x99\x19\x3f\xcd\xcc\x4c\x3e\x00\x00\x80\x3f\x3d\xcc\xcc\x3d")});
+  Run({"HSET", "doc:3", "timestamp", "1713300000", "embedding",
+       to_vector("\x00\x00\x80\x3f\x3d\xcc\xcc\x3d\xcd\xcc\x4c\x3e\x9a\x99\x19\x3f")});
+
+  Run({"FT.CREATE", "my_index", "ON", "HASH", "SCHEMA", "timestamp", "NUMERIC", "SORTABLE",
+       "embedding", "VECTOR", "FLAT", "6", "TYPE", "FLOAT32", "DIM", "4", "DISTANCE_METRIC",
+       "COSINE"});
+
+  auto search_vector =
+      to_vector("\x3d\xcc\xcc\x3d\x00\x00\x80\x3f\xcd\xcc\x4c\x3e\x9a\x99\x19\x3f");
+
+  auto resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 2 @embedding $vec]", "PARAMS", "2", "vec",
+                   search_vector, "NOCONTENT"});
+  EXPECT_THAT(resp, IsArray(2, "doc:1", "doc:3"));
+
+  // FT.SEARCH with KNN + SORTBY
+  resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 2 @embedding $vec]", "PARAMS", "2", "vec",
+              search_vector, "SORTBY", "timestamp", "DESC", "NOCONTENT"});
+  EXPECT_THAT(resp, IsArray(2, "doc:3", "doc:1"));
+}
+
 }  // namespace dfly
