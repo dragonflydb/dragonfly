@@ -108,15 +108,9 @@ struct AstKnnNode {
   std::optional<float> ef_runtime;
 };
 
-struct AstSortNode {
-  std::unique_ptr<AstNode> filter;
-  std::string field;
-  bool descending = false;
-};
-
 using NodeVariants =
     std::variant<std::monostate, AstStarNode, AstTermNode, AstPrefixNode, AstRangeNode,
-                 AstNegateNode, AstLogicalNode, AstFieldNode, AstTagsNode, AstKnnNode, AstSortNode>;
+                 AstNegateNode, AstLogicalNode, AstFieldNode, AstTagsNode, AstKnnNode>;
 
 struct AstNode : public NodeVariants {
   using variant::variant;
