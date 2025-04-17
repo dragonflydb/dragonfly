@@ -745,4 +745,5 @@ optional<AggregationInfo> SearchAlgorithm::GetAggregationInfo() const {
 void SearchAlgorithm::EnableProfiling() {
   profiling_enabled_ = true;
 }
+
 }  // namespace dfly::search

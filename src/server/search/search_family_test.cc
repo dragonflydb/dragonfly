@@ -2323,7 +2323,6 @@ TEST_F(SearchFamilyTest, SearchNonNullFields) {
   EXPECT_THAT(Run({"ft.search", "i2", "@score:*"}), AreDocIds("j:2", "j:3"));
   EXPECT_THAT(Run({"ft.search", "i2", "@title:* @tags:* @score:*"}), AreDocIds("j:3"));
 
-  // Test with different data types including vectors
   // Testing text indices with star query
   Run({"hset", "text:1", "content", "apple banana"});
   Run({"hset", "text:2", "content", "cherry date"});
