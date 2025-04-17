@@ -297,7 +297,7 @@ string EngineShard::TxQueueInfo::Format() const {
 }
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
-  static_assert(sizeof(Stats) == 80);
+  static_assert(sizeof(Stats) == 88);
 
 #define ADD(x) x += o.x
 
@@ -309,8 +309,9 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
   ADD(tx_optimistic_total);
   ADD(tx_batch_schedule_calls_total);
   ADD(tx_batch_scheduled_items_total);
-  ADD(heartbeat_evictions_total);
-  ADD(heartbeat_evictions_total_in_bytes);
+  ADD(heartbeat_expired_total);
+  ADD(heartbeat_expired_total_in_bytes);
+  ADD(heartbeat_expire_flow_calls);
 
 #undef ADD
   return *this;
@@ -813,10 +814,12 @@ void EngineShard::RetireExpiredAndEvict() {
       eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
       counter_[TTL_TRAVERSE].IncBy(stats.traversed);
       counter_[TTL_DELETE].IncBy(stats.deleted);
-      stats_.heartbeat_evictions_total += stats.deleted;
-      stats_.heartbeat_evictions_total_in_bytes += stats.deleted_bytes;
-      VLOG(1) << "Heartbeat evicted " << stats.deleted << " keys with total bytes "
-              << stats.deleted_bytes;
+      stats_.heartbeat_expired_total += stats.deleted;
+      stats_.heartbeat_expired_total_in_bytes += stats.deleted_bytes;
+      ++stats_.heartbeat_expire_flow_calls;
+      VLOG(1) << "Heartbeat expired " << stats.deleted << " keys with total bytes "
+              << stats.deleted_bytes << " with total expire flow calls "
+              << stats_.heartbeat_expire_flow_calls;
     }
 
     if (eviction_goal) {
