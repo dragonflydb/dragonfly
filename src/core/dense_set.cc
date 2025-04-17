@@ -633,6 +633,8 @@ void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
 
       DenseLinkKey* plink = prev->AsLink();
       DensePtr tmp = DensePtr::From(plink);
+      // Transfer TTL flag
+      tmp.SetTtl(prev->HasTtl());
       DCHECK(ObjectAllocSize(tmp.GetObject()));
 
       FreeLink(plink);
