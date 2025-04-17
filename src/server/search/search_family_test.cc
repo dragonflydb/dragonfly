@@ -2240,44 +2240,6 @@ TEST_F(SearchFamilyTest, SynonymsWithLeadingSpaces) {
   EXPECT_THAT(resp, AreDocIds("doc:1"));
 }
 
-// Test to verify prefix search works correctly with synonyms
-TEST_F(SearchFamilyTest, PrefixSearchWithSynonyms) {
-  // Create search index
-  EXPECT_EQ(Run({"FT.CREATE", "prefix_index", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA",
-                 "title", "TEXT"}),
-            "OK");
-
-  // Add documents with words that start with the same prefix
-  EXPECT_THAT(Run({"HSET", "doc:1", "title", "apple"}), IntArg(1));
-  EXPECT_THAT(Run({"HSET", "doc:2", "title", "application"}), IntArg(1));
-  EXPECT_THAT(Run({"HSET", "doc:3", "title", "banana"}), IntArg(1));
-  EXPECT_THAT(Run({"HSET", "doc:4", "title", "appetizer"}), IntArg(1));
-  EXPECT_THAT(Run({"HSET", "doc:5", "title", "pineapple"}), IntArg(1));
-  EXPECT_THAT(Run({"HSET", "doc:6", "title", "macintosh"}), IntArg(1));
-
-  // Check prefix search before adding synonyms
-  auto resp = Run({"FT.SEARCH", "prefix_index", "app*"});
-  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:4"));
-
-  // Add synonym: apple <-> macintosh
-  EXPECT_EQ(Run({"FT.SYNUPDATE", "prefix_index", "1", "apple", "macintosh"}), "OK");
-
-  // Verify prefix search still works after adding synonyms
-  resp = Run({"FT.SEARCH", "prefix_index", "app*"});
-  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:4"));
-
-  // Check exact term search for terms that are now synonyms
-  resp = Run({"FT.SEARCH", "prefix_index", "apple"});
-  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:6"));  // Should find both apple and macintosh
-
-  resp = Run({"FT.SEARCH", "prefix_index", "macintosh"});
-  EXPECT_THAT(resp, AreDocIds("doc:6", "doc:1"));  // Should find both macintosh and apple
-
-  // Check that prefix search for mac* only finds macintosh, not apple
-  resp = Run({"FT.SEARCH", "prefix_index", "mac*"});
-  EXPECT_THAT(resp, AreDocIds("doc:6"));  // Should only find macintosh
-}
-
 TEST_F(SearchFamilyTest, SearchNonNullFields) {
   // Basic schema with text, tag, and numeric fields
   EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "tags", "tag", "score", "numeric",
@@ -2537,6 +2499,44 @@ TEST_F(SearchFamilyTest, VectorIndexOperations) {
   // Search by vector field presence
   auto vec_field_search = Run({"ft.search", "vector_idx", "@vec:*"});
   EXPECT_THAT(vec_field_search, AreDocIds("vec:1", "vec:2", "vec:3", "vec:4", "vec:5"));
+}
+
+// Test to verify prefix search works correctly with synonyms
+TEST_F(SearchFamilyTest, PrefixSearchWithSynonyms) {
+  // Create search index
+  EXPECT_EQ(Run({"FT.CREATE", "prefix_index", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA",
+                 "title", "TEXT"}),
+            "OK");
+
+  // Add documents with words that start with the same prefix
+  EXPECT_THAT(Run({"HSET", "doc:1", "title", "apple"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:2", "title", "application"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:3", "title", "banana"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:4", "title", "appetizer"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:5", "title", "pineapple"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "doc:6", "title", "macintosh"}), IntArg(1));
+
+  // Check prefix search before adding synonyms
+  auto resp = Run({"FT.SEARCH", "prefix_index", "app*"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:4"));
+
+  // Add synonym: apple <-> macintosh
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "prefix_index", "1", "apple", "macintosh"}), "OK");
+
+  // Verify prefix search still works after adding synonyms
+  resp = Run({"FT.SEARCH", "prefix_index", "app*"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:4"));
+
+  // Check exact term search for terms that are now synonyms
+  resp = Run({"FT.SEARCH", "prefix_index", "apple"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:6"));  // Should find both apple and macintosh
+
+  resp = Run({"FT.SEARCH", "prefix_index", "macintosh"});
+  EXPECT_THAT(resp, AreDocIds("doc:6", "doc:1"));  // Should find both macintosh and apple
+
+  // Check that prefix search for mac* only finds macintosh, not apple
+  resp = Run({"FT.SEARCH", "prefix_index", "mac*"});
+  EXPECT_THAT(resp, AreDocIds("doc:6"));  // Should only find macintosh
 }
 
 }  // namespace dfly
