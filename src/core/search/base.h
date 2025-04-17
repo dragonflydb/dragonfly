@@ -95,6 +95,11 @@ struct BaseIndex {
   // Returns true if the document was added / indexed
   virtual bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) = 0;
   virtual void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) = 0;
+
+  // Returns all documents matching the star query (all documents in the index)
+  virtual std::optional<std::vector<DocId>> GetAllResults() const {
+    return std::nullopt;
+  }
 };
 
 // Base class for type-specific sorting indices.

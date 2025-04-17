@@ -35,6 +35,10 @@ struct NumericIndex : public BaseIndex {
 
   std::vector<DocId> Range(double l, double r) const;
 
+  std::optional<std::vector<DocId>> GetAllResults() const override {
+    return Range(-std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity());
+  }
+
  private:
   using Entry = std::pair<double, DocId>;
   absl::btree_set<Entry, std::less<Entry>, PMR_NS::polymorphic_allocator<Entry>> entries_;
@@ -83,6 +87,20 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
       : BaseStringIndex(mr, false), stopwords_{stopwords}, synonyms_{synonyms} {
   }
 
+  std::optional<std::vector<DocId>> GetAllResults() const override {
+    std::vector<DocId> result;
+    std::vector<DocId> temp;
+    for (const auto& term : GetTerms()) {
+      if (auto* docs = Matching(term)) {
+        temp.assign(docs->begin(), docs->end());
+        result.insert(result.end(), temp.begin(), temp.end());
+      }
+    }
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+  }
+
  protected:
   std::optional<StringList> GetStrings(const DocumentAccessor& doc,
                                        std::string_view field) const override;
@@ -98,6 +116,20 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
 struct TagIndex : public BaseStringIndex<SortedVector> {
   TagIndex(PMR_NS::memory_resource* mr, SchemaField::TagParams params)
       : BaseStringIndex(mr, params.case_sensitive), separator_{params.separator} {
+  }
+
+  std::optional<std::vector<DocId>> GetAllResults() const override {
+    std::vector<DocId> result;
+    std::vector<DocId> temp;
+    for (const auto& tag : GetTerms()) {
+      if (auto* docs = Matching(tag)) {
+        temp.assign(docs->begin(), docs->end());
+        result.insert(result.end(), temp.begin(), temp.end());
+      }
+    }
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
   }
 
  protected:
@@ -132,6 +164,32 @@ struct FlatVectorIndex : public BaseVectorIndex {
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
 
   const float* Get(DocId doc) const;
+
+  // Return all documents that have vectors in this index
+  std::optional<std::vector<DocId>> GetAllResults() const override {
+    std::vector<DocId> result;
+    size_t num_vectors = entries_.size() / dim_;
+    result.reserve(num_vectors);
+
+    for (DocId id = 0; id < num_vectors; ++id) {
+      // Check if the vector is not zero (all elements are 0)
+      const float* vec = Get(id);
+      bool is_zero_vector = true;
+
+      for (size_t i = 0; i < dim_; ++i) {
+        if (vec[i] != 0.0f) {
+          is_zero_vector = false;
+          break;
+        }
+      }
+
+      if (!is_zero_vector) {
+        result.push_back(id);
+      }
+    }
+
+    return result;
+  }
 
  protected:
   void AddVector(DocId id, const VectorPtr& vector) override;

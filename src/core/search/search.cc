@@ -312,31 +312,8 @@ struct BasicSearch {
       return IndexResult{};
     }
 
-    if (auto* text_index = dynamic_cast<TextIndex*>(base_index)) {
-      vector<IndexResult> sub_results;
-      sub_results.reserve(text_index->GetTerms().size());
-
-      for (const auto& term : text_index->GetTerms()) {
-        if (auto* docs = text_index->Matching(term); docs) {
-          sub_results.push_back(IndexResult{docs});
-        }
-      }
-
-      return UnifyResults(std::move(sub_results), LogicOp::OR);
-    } else if (auto* tag_index = dynamic_cast<TagIndex*>(base_index)) {
-      vector<IndexResult> sub_results;
-      sub_results.reserve(tag_index->GetTerms().size());
-
-      for (const auto& tag : tag_index->GetTerms()) {
-        if (auto* docs = tag_index->Matching(tag); docs) {
-          sub_results.push_back(IndexResult{docs});
-        }
-      }
-
-      return UnifyResults(std::move(sub_results), LogicOp::OR);
-    } else if (auto* numeric_index = dynamic_cast<NumericIndex*>(base_index)) {
-      return numeric_index->Range(-std::numeric_limits<double>::infinity(),
-                                  std::numeric_limits<double>::infinity());
+    if (auto result = base_index->GetAllResults()) {
+      return std::move(*result);
     }
 
     error_ = absl::StrCat("Wrong access type for field: ", active_field);
@@ -768,5 +745,4 @@ optional<AggregationInfo> SearchAlgorithm::GetAggregationInfo() const {
 void SearchAlgorithm::EnableProfiling() {
   profiling_enabled_ = true;
 }
-
 }  // namespace dfly::search
