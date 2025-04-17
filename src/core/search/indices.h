@@ -62,6 +62,21 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // Returns all the terms that appear as keys in the reverse index.
   std::vector<std::string> GetTerms() const;
 
+  std::optional<std::vector<DocId>> GetAllResults() const override {
+    std::vector<DocId> result;
+    std::vector<DocId> temp;
+    for (const auto& term : GetTerms()) {
+      if (auto* docs = Matching(term)) {
+        temp.assign(docs->begin(), docs->end());
+        result.insert(result.end(), temp.begin(), temp.end());
+      }
+    }
+
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+  }
+
  protected:
   using StringList = DocumentAccessor::StringList;
 
@@ -87,20 +102,6 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
       : BaseStringIndex(mr, false), stopwords_{stopwords}, synonyms_{synonyms} {
   }
 
-  std::optional<std::vector<DocId>> GetAllResults() const override {
-    std::vector<DocId> result;
-    std::vector<DocId> temp;
-    for (const auto& term : GetTerms()) {
-      if (auto* docs = Matching(term)) {
-        temp.assign(docs->begin(), docs->end());
-        result.insert(result.end(), temp.begin(), temp.end());
-      }
-    }
-    std::sort(result.begin(), result.end());
-    result.erase(std::unique(result.begin(), result.end()), result.end());
-    return result;
-  }
-
  protected:
   std::optional<StringList> GetStrings(const DocumentAccessor& doc,
                                        std::string_view field) const override;
@@ -116,20 +117,6 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
 struct TagIndex : public BaseStringIndex<SortedVector> {
   TagIndex(PMR_NS::memory_resource* mr, SchemaField::TagParams params)
       : BaseStringIndex(mr, params.case_sensitive), separator_{params.separator} {
-  }
-
-  std::optional<std::vector<DocId>> GetAllResults() const override {
-    std::vector<DocId> result;
-    std::vector<DocId> temp;
-    for (const auto& tag : GetTerms()) {
-      if (auto* docs = Matching(tag)) {
-        temp.assign(docs->begin(), docs->end());
-        result.insert(result.end(), temp.begin(), temp.end());
-      }
-    }
-    std::sort(result.begin(), result.end());
-    result.erase(std::unique(result.begin(), result.end()), result.end());
-    return result;
   }
 
  protected:
@@ -200,6 +187,10 @@ struct FlatVectorIndex : public BaseVectorIndex {
 
 struct HnswlibAdapter;
 
+// This index does't have GetAllResults method
+// because it's not possible to get all vectors from the index
+// It depends on the Hnswlib implementation
+// TODO: Consider adding GetAllResults method in the future
 struct HnswVectorIndex : public BaseVectorIndex {
   HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
   ~HnswVectorIndex();
