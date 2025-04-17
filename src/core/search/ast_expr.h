@@ -111,9 +111,9 @@ struct AstKnnNode {
   std::optional<float> ef_runtime;
 };
 
-using NodeVariants =
-    std::variant<std::monostate, AstStarNode, AstStarFieldNode, AstTermNode, AstPrefixNode,
-                 AstRangeNode, AstNegateNode, AstLogicalNode, AstFieldNode, AstTagsNode, AstKnnNode>;
+using NodeVariants = std::variant<std::monostate, AstStarNode, AstStarFieldNode, AstTermNode,
+                                  AstPrefixNode, AstRangeNode, AstNegateNode, AstLogicalNode,
+                                  AstFieldNode, AstTagsNode, AstKnnNode>;
 
 struct AstNode : public NodeVariants {
   using variant::variant;
