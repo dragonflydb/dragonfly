@@ -220,7 +220,6 @@ class CommandRegistry {
  private:
   absl::flat_hash_map<std::string, CommandId> cmd_map_;
   absl::flat_hash_map<std::string, std::string> cmd_rename_map_;
-  absl::flat_hash_map<std::string, std::string> alias_map_;
   absl::flat_hash_set<std::string> restricted_cmds_;
   absl::flat_hash_set<std::string> oomdeny_cmds_;
 
@@ -228,5 +227,7 @@ class CommandRegistry {
   size_t bit_index_;
   std::optional<uint32_t> acl_category_;  // category of family currently being built
 };
+
+void TestResetAliasMap();
 
 }  // namespace dfly

@@ -76,10 +76,11 @@ uint32_t ImplicitAclCategories(uint32_t mask) {
   return out;
 }
 
-absl::flat_hash_map<std::string, std::string> ParseCmdlineArgMap(
-    const absl::Flag<std::vector<std::string>>& flag, const bool allow_duplicates = false) {
+using CmdLineMapping = absl::flat_hash_map<std::string, std::string>;
+
+CmdLineMapping ParseCmdlineArgMap(const absl::Flag<std::vector<std::string>>& flag) {
   const auto& mappings = absl::GetFlag(flag);
-  absl::flat_hash_map<std::string, std::string> parsed_mappings;
+  CmdLineMapping parsed_mappings;
   parsed_mappings.reserve(mappings.size());
 
   for (const std::string& mapping : mappings) {
@@ -98,8 +99,7 @@ absl::flat_hash_map<std::string, std::string> ParseCmdlineArgMap(
       exit(1);
     }
 
-    const bool inserted = parsed_mappings.emplace(std::move(key), std::move(value)).second;
-    if (!allow_duplicates && !inserted) {
+    if (!parsed_mappings.emplace(std::move(key), std::move(value)).second) {
       LOG(ERROR) << "Duplicate insert to " << flag.Name() << " not allowed";
       exit(1);
     }
@@ -107,7 +107,26 @@ absl::flat_hash_map<std::string, std::string> ParseCmdlineArgMap(
   return parsed_mappings;
 }
 
+std::unique_ptr<CmdLineMapping> alias_map;
+
+const CmdLineMapping& AliasMap() {
+  if (!alias_map) {
+    alias_map = std::make_unique<CmdLineMapping>();
+    CmdLineMapping orig_map = ParseCmdlineArgMap(FLAGS_command_alias);
+    alias_map->reserve(orig_map.size());
+    std::for_each(
+        std::make_move_iterator(orig_map.begin()), std::make_move_iterator(orig_map.end()),
+        [](auto&& pair) { alias_map->emplace(std::move(pair.second), std::move(pair.first)); });
+  }
+
+  return *alias_map;
+}
+
 }  // namespace
+
+void TestResetAliasMap() {
+  alias_map.reset();
+}
 
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
                      int8_t last_key, std::optional<uint32_t> acl_categories)
@@ -182,7 +201,6 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
 
 CommandRegistry::CommandRegistry() {
   cmd_rename_map_ = ParseCmdlineArgMap(FLAGS_rename_command);
-  alias_map_ = ParseCmdlineArgMap(FLAGS_command_alias, true);
 
   for (string name : GetFlag(FLAGS_restricted_commands)) {
     restricted_cmds_.emplace(AsciiStrToUpper(name));
@@ -213,12 +231,9 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   }
 
   std::optional<CommandId> cloned = std::nullopt;
-  for (const auto& [alias, target] : alias_map_) {
-    if (target == k) {
-      cloned.emplace(cmd.Clone(alias));
-      alias_map_.erase(alias);
-      break;
-    }
+  const CmdLineMapping& alias_map = AliasMap();
+  if (auto alias_it = alias_map.find(k); alias_it != alias_map.end()) {
+    cloned.emplace(cmd.Clone(alias_it->second));
   }
 
   if (restricted_cmds_.find(k) != restricted_cmds_.end()) {
