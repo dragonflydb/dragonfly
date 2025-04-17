@@ -767,4 +767,16 @@ TEST_F(StringSetTest, ReallocIfNeeded) {
     EXPECT_EQ(*ss_->Find(build_str(i * 10)), build_str(i * 10));
 }
 
+TEST_F(StringSetTest, TransferTTLFlagLinkToObjectOnDelete) {
+  for (size_t i = 0; i < 10; i++) {
+    EXPECT_TRUE(ss_->Add(absl::StrCat(i), 1));
+  }
+  for (size_t i = 0; i < 9; i++) {
+    EXPECT_TRUE(ss_->Erase(absl::StrCat(i)));
+  }
+  auto it = ss_->Find("9"sv);
+  EXPECT_TRUE(it.HasExpiry());
+  EXPECT_EQ(1u, it.ExpiryTime());
+}
+
 }  // namespace dfly
