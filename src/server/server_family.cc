@@ -2423,6 +2423,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       }
     }
     append("table_used_memory", total.table_mem_usage);
+    append("total_system_memory", total_host_memory);
+    append("total_system_memory_human", HumanReadableNumBytes(total_host_memory));
     append("num_buckets", total.bucket_count);
     append("num_entries", total.key_count);
     append("inline_keys", total.inline_keys);
