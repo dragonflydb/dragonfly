@@ -65,11 +65,9 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   std::optional<std::vector<DocId>> GetAllResults() const override {
     absl::flat_hash_set<DocId> unique_docs;
 
-    for (const auto& term : GetTerms()) {
-      if (auto* docs = Matching(term)) {
-        for (const DocId& id : *docs) {
-          unique_docs.insert(id);
-        }
+    for (const auto& [term, container] : entries_) {
+      for (const DocId& id : container) {
+        unique_docs.insert(id);
       }
     }
 
@@ -161,6 +159,7 @@ struct FlatVectorIndex : public BaseVectorIndex {
 
     for (DocId id = 0; id < num_vectors; ++id) {
       // Check if the vector is not zero (all elements are 0)
+      // TODO: Valid vector can contain 0s, we should use a better approach
       const float* vec = Get(id);
       bool is_zero_vector = true;
 

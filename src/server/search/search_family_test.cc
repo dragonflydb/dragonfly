@@ -2643,4 +2643,60 @@ TEST_F(SearchFamilyTest, SortIndexGetAllResults) {
   EXPECT_EQ(sorted_ids[2], "doc:1");  // 10
 }
 
+TEST_F(SearchFamilyTest, JsonWithNullFields) {
+  // Create JSON documents with null values in different field types
+  Run({"JSON.SET", "doc:1", ".",
+       R"({"text_field": "sample text", "tag_field": "tag1,tag2", "num_field": 100})"});
+  Run({"JSON.SET", "doc:2", ".", R"({"text_field": null, "tag_field": "tag3", "num_field": 200})"});
+  Run({"JSON.SET", "doc:3", ".",
+       R"({"text_field": "another text", "tag_field": null, "num_field": 300})"});
+  Run({"JSON.SET", "doc:4", ".",
+       R"({"text_field": "more text", "tag_field": "tag4,tag5", "num_field": null})"});
+  Run({"JSON.SET", "doc:5", ".", R"({"text_field": null, "tag_field": null, "num_field": null})"});
+  Run({"JSON.SET", "doc:6", ".", R"({"other_field": "not indexed field"})"});
+
+  // Create indices for text, tag, and numeric fields (non-sortable)
+  EXPECT_EQ(Run({"FT.CREATE", "idx:regular", "ON", "JSON", "SCHEMA", "$.text_field", "AS",
+                 "text_field", "TEXT", "$.tag_field", "AS", "tag_field", "TAG", "$.num_field", "AS",
+                 "num_field", "NUMERIC"}),
+            "OK");
+
+  // Create indices for text, tag, and numeric fields (sortable)
+  EXPECT_EQ(Run({"FT.CREATE",    "idx:sortable", "ON",         "JSON",    "SCHEMA",
+                 "$.text_field", "AS",           "text_field", "TEXT",    "SORTABLE",
+                 "$.tag_field",  "AS",           "tag_field",  "TAG",     "SORTABLE",
+                 "$.num_field",  "AS",           "num_field",  "NUMERIC", "SORTABLE"}),
+            "OK");
+
+  // Test @field:* searches on non-sortable index
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:regular", "@text_field:*"}),
+              AreDocIds("doc:1", "doc:3", "doc:4"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:regular", "@tag_field:*"}),
+              AreDocIds("doc:1", "doc:2", "doc:4"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:regular", "@num_field:*"}),
+              AreDocIds("doc:1", "doc:2", "doc:3"));
+
+  // Test @field:* searches on sortable index
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:sortable", "@text_field:*"}),
+              AreDocIds("doc:1", "doc:3", "doc:4"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:sortable", "@tag_field:*"}),
+              AreDocIds("doc:1", "doc:2", "doc:4"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:sortable", "@num_field:*"}),
+              AreDocIds("doc:1", "doc:2", "doc:3"));
+
+  // Test search for documents with non-null values for all fields
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:regular", "@text_field:* @tag_field:* @num_field:*"}),
+              AreDocIds("doc:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:sortable", "@text_field:* @tag_field:* @num_field:*"}),
+              AreDocIds("doc:1"));
+
+  // Test combined queries
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:regular", "@text_field:* @tag_field:*"}),
+              AreDocIds("doc:1", "doc:4"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:regular", "@text_field:* @num_field:*"}),
+              AreDocIds("doc:1", "doc:3"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:regular", "@tag_field:* @num_field:*"}),
+              AreDocIds("doc:1", "doc:2"));
+}
+
 }  // namespace dfly
