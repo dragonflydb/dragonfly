@@ -390,16 +390,19 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
   return params;
 }
 
-std::optional<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* parser) {
+ParseResult<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* parser) {
   size_t strings_num = parser->Next<size_t>();
 
   aggregate::SortParams sort_params;
   sort_params.fields.reserve(strings_num / 2);
 
   while (parser->HasNext() && strings_num > 0) {
+    std::string_view potential_field =
+        parser->Peek();  // Peek to get the field name for potential error message
     std::optional<std::string_view> parsed_field = ParseFieldWithAtSign(parser);
     if (!parsed_field) {
-      return std::nullopt;
+      return CreateSyntaxError(
+          absl::StrCat("SORTBY field name '", potential_field, "' must start with '@'"));
     }
     strings_num--;
 
@@ -416,7 +419,7 @@ std::optional<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* par
   }
 
   if (strings_num) {
-    return std::nullopt;
+    return CreateSyntaxError("bad arguments for SORTBY: specified invalid number of strings"sv);
   }
 
   if (parser->Check("MAX")) {
@@ -487,7 +490,7 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
     if (parser->Check("SORTBY")) {
       auto sort_params = ParseAggregatorSortParams(parser);
       if (!sort_params) {
-        return CreateSyntaxError("bad arguments for SORTBY: specified invalid number of strings"sv);
+        return make_unexpected(sort_params.error());  // Propagate the specific error
       }
 
       params.steps.push_back(aggregate::MakeSortStep(std::move(sort_params).value()));
