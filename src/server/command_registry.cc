@@ -107,26 +107,19 @@ CmdLineMapping ParseCmdlineArgMap(const absl::Flag<std::vector<std::string>>& fl
   return parsed_mappings;
 }
 
-std::unique_ptr<CmdLineMapping> alias_map;
+CmdLineMapping AliasMap() {
+  CmdLineMapping alias_map;
+  CmdLineMapping orig_map = ParseCmdlineArgMap(FLAGS_command_alias);
+  alias_map.reserve(orig_map.size());
+  std::for_each(std::make_move_iterator(orig_map.begin()), std::make_move_iterator(orig_map.end()),
+                [&alias_map](auto&& pair) {
+                  alias_map.emplace(std::move(pair.second), std::move(pair.first));
+                });
 
-const CmdLineMapping& AliasMap() {
-  if (!alias_map) {
-    alias_map = std::make_unique<CmdLineMapping>();
-    CmdLineMapping orig_map = ParseCmdlineArgMap(FLAGS_command_alias);
-    alias_map->reserve(orig_map.size());
-    std::for_each(
-        std::make_move_iterator(orig_map.begin()), std::make_move_iterator(orig_map.end()),
-        [](auto&& pair) { alias_map->emplace(std::move(pair.second), std::move(pair.first)); });
-  }
-
-  return *alias_map;
+  return alias_map;
 }
 
 }  // namespace
-
-void TestResetAliasMap() {
-  alias_map.reset();
-}
 
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
                      int8_t last_key, std::optional<uint32_t> acl_categories)
@@ -142,6 +135,7 @@ CommandId CommandId::Clone(const std::string_view name) const {
   cloned.opt_mask_ = opt_mask_ | CO::HIDDEN;
   cloned.acl_categories_ = acl_categories_;
   cloned.implicit_acl_ = implicit_acl_;
+  cloned.is_alias_ = true;
   return cloned;
 }
 
@@ -209,9 +203,19 @@ CommandRegistry::CommandRegistry() {
 }
 
 void CommandRegistry::Init(unsigned int thread_count) {
+  const auto alias_mappings = AliasMap();
+  absl::flat_hash_map<std::string, CommandId> alias_cmds;
+  alias_cmds.reserve(alias_mappings.size());
   for (auto& [_, cmd] : cmd_map_) {
     cmd.Init(thread_count);
+    if (auto it = alias_mappings.find(cmd.name()); it != alias_mappings.end()) {
+      auto alias_cmd = cmd.Clone(it->second);
+      alias_cmd.Init(thread_count);
+      alias_cmds.insert({it->second, std::move(alias_cmd)});
+    }
   }
+  std::copy(std::make_move_iterator(alias_cmds.begin()), std::make_move_iterator(alias_cmds.end()),
+            std::inserter(cmd_map_, cmd_map_.end()));
 }
 
 CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
@@ -227,55 +231,28 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
     k = is_sub_command ? absl::StrCat(it->second, " ", maybe_subcommand[1]) : it->second;
   }
 
-  std::optional<CommandId> cloned = std::nullopt;
-  const CmdLineMapping& alias_map = AliasMap();
-  if (auto alias_it = alias_map.find(k); alias_it != alias_map.end()) {
-    cloned.emplace(cmd.Clone(alias_it->second));
-  }
-
   if (restricted_cmds_.find(k) != restricted_cmds_.end()) {
     cmd.SetRestricted(true);
-    if (cloned.has_value()) {
-      cloned->SetRestricted(true);
-    }
   }
 
   if (oomdeny_cmds_.find(k) != oomdeny_cmds_.end()) {
     cmd.SetFlag(CO::DENYOOM);
-    if (cloned.has_value()) {
-      cloned->SetFlag(CO::DENYOOM);
-    }
   }
 
   cmd.SetFamily(family_of_commands_.size() - 1);
-  if (cloned.has_value()) {
-    cloned->SetFamily(cmd.GetFamily());
-  }
   if (acl_category_) {
     cmd.SetAclCategory(*acl_category_);
-    if (cloned.has_value()) {
-      cloned->SetAclCategory(*acl_category_);
-    }
   }
 
   if (!is_sub_command || absl::StartsWith(cmd.name(), "ACL")) {
     cmd.SetBitIndex(1ULL << bit_index_);
     family_of_commands_.back().emplace_back(k);
     ++bit_index_;
-
-    if (cloned) {
-      cloned->SetBitIndex(1ULL << bit_index_);
-      family_of_commands_.back().emplace_back(cloned->name());
-      ++bit_index_;
-    }
   } else {
     DCHECK(absl::StartsWith(k, family_of_commands_.back().back()));
     cmd.SetBitIndex(1ULL << (bit_index_ - 1));
   }
   CHECK(cmd_map_.emplace(k, std::move(cmd)).second) << k;
-  if (cloned.has_value()) {
-    CHECK(cmd_map_.emplace(cloned->name(), std::move(cloned.value())).second) << cloned->name();
-  }
   return *this;
 }
 

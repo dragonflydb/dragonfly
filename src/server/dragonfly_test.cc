@@ -850,7 +850,6 @@ TEST_F(DflyEngineTest, CommandMetricLabels) {
 class DflyCommandAliasTest : public DflyEngineTest {
  protected:
   DflyCommandAliasTest() {
-    dfly::TestResetAliasMap();
     absl::SetFlag(&FLAGS_rename_command, {"ping=gnip"});
     absl::SetFlag(&FLAGS_command_alias, {"___set=set", "___ping=gnip"});
   }

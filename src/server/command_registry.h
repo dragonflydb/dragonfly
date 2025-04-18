@@ -93,7 +93,7 @@ class CommandId : public facade::CommandId {
 
   CommandId(CommandId&&) = default;
 
-  CommandId Clone(std::string_view name) const;
+  [[nodiscard]] CommandId Clone(std::string_view name) const;
 
   void Init(unsigned thread_count) {
     command_stats_ = std::make_unique<CmdCallStats[]>(thread_count);
@@ -155,11 +155,16 @@ class CommandId : public facade::CommandId {
       acl_categories_ |= mask;
   }
 
+  bool IsAlias() const {
+    return is_alias_;
+  }
+
  private:
   bool implicit_acl_;
   std::unique_ptr<CmdCallStats[]> command_stats_;
   Handler3 handler_;
   ArgValidator validator_;
+  bool is_alias_{false};
 };
 
 class CommandRegistry {
