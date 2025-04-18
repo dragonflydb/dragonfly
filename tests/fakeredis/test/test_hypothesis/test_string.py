@@ -1,6 +1,6 @@
 import hypothesis.strategies as st
 
-from test.test_hypothesis.base import (
+from .base import (
     BaseTest,
     commands,
     values,

@@ -24,16 +24,6 @@ jobs:
     permissions:
       pull-requests: write
       checks: read
-    # services:
-    #   redis:
-    #     image: docker.dragonflydb.io/dragonflydb/dragonfly:${{ matrix.DRAGONFLY_VERSION }}
-    #     ports:
-    #       - 6380:6379
-    #     options: >-
-    #       --health-cmd "redis-cli ping"
-    #       --health-interval 10s
-    #       --health-timeout 5s
-    #       --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -69,14 +59,8 @@ jobs:
       - name: Run tests
         working-directory: tests/fakeredis
         run: |
-          poetry run pytest test/ \
-            --ignore test/test_hypothesis/test_hash.py  \
-            --ignore test/test_hypothesis/test_set.py  \
-            --ignore test/test_hypothesis/test_zset.py  \
-            --ignore test/test_hypothesis/test_joint.py  \
-            --ignore test/test_hypothesis/test_transaction.py  \
-            --ignore test/test_mixins/test_bitmap_commands.py \
-            --junit-xml=results-tests.xml  --html=report-tests.html -v
+          poetry run pytest -s test/ \
+          --junit-xml=results-tests.xml  --html=report-tests.html -v
         continue-on-error: true  # For now to mark the flow as successful
 
       - name: Show Dragonfly stats
