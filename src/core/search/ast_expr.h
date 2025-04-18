@@ -22,6 +22,9 @@ struct AstNode;
 // Matches all documents
 struct AstStarNode {};
 
+// Matches all documents where this field has a non-null value
+struct AstStarFieldNode {};
+
 // Matches terms in text fields
 struct AstTermNode {
   explicit AstTermNode(std::string term);
@@ -108,9 +111,9 @@ struct AstKnnNode {
   std::optional<float> ef_runtime;
 };
 
-using NodeVariants =
-    std::variant<std::monostate, AstStarNode, AstTermNode, AstPrefixNode, AstRangeNode,
-                 AstNegateNode, AstLogicalNode, AstFieldNode, AstTagsNode, AstKnnNode>;
+using NodeVariants = std::variant<std::monostate, AstStarNode, AstStarFieldNode, AstTermNode,
+                                  AstPrefixNode, AstRangeNode, AstNegateNode, AstLogicalNode,
+                                  AstFieldNode, AstTagsNode, AstKnnNode>;
 
 struct AstNode : public NodeVariants {
   using variant::variant;
