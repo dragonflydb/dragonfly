@@ -223,8 +223,7 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
 
   absl::InlinedVector<std::string_view, 2> maybe_subcommand = StrSplit(cmd.name(), " ");
   const bool is_sub_command = maybe_subcommand.size() == 2;
-  auto it = cmd_rename_map_.find(maybe_subcommand.front());
-  if (it != cmd_rename_map_.end()) {
+  if (const auto it = cmd_rename_map_.find(maybe_subcommand.front()); it != cmd_rename_map_.end()) {
     if (it->second.empty()) {
       return *this;  // Incase of empty string we want to remove the command from registry.
     }
@@ -240,9 +239,8 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   }
 
   cmd.SetFamily(family_of_commands_.size() - 1);
-  if (acl_category_) {
+  if (acl_category_)
     cmd.SetAclCategory(*acl_category_);
-  }
 
   if (!is_sub_command || absl::StartsWith(cmd.name(), "ACL")) {
     cmd.SetBitIndex(1ULL << bit_index_);
@@ -253,6 +251,7 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
     cmd.SetBitIndex(1ULL << (bit_index_ - 1));
   }
   CHECK(cmd_map_.emplace(k, std::move(cmd)).second) << k;
+
   return *this;
 }
 

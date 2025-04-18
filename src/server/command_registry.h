@@ -230,6 +230,4 @@ class CommandRegistry {
   std::optional<uint32_t> acl_category_;  // category of family currently being built
 };
 
-void TestResetAliasMap();
-
 }  // namespace dfly
