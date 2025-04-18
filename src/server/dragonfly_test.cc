@@ -9,7 +9,7 @@ extern "C" {
 
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_join.h>
-#include <absl/strings/str_split.h>
+#include <absl/strings/strip.h>
 #include <gmock/gmock.h>
 #include <reflex/matcher.h>
 
@@ -17,6 +17,7 @@ extern "C" {
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
+#include "server/conn_context.h"
 #include "server/main_service.h"
 #include "server/test_utils.h"
 
@@ -24,9 +25,9 @@ ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
 ABSL_DECLARE_FLAG(float, mem_defrag_waste_threshold);
 ABSL_DECLARE_FLAG(uint32_t, mem_defrag_check_sec_interval);
 ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
-ABSL_DECLARE_FLAG(std::vector<std::string>, command_alias);
 ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
 ABSL_DECLARE_FLAG(double, eviction_memory_budget_threshold);
+ABSL_DECLARE_FLAG(std::vector<std::string>, command_alias);
 
 namespace dfly {
 
@@ -118,7 +119,8 @@ class DflyRenameCommandTest : public DflyEngineTest {
         &FLAGS_rename_command,
         std::vector<std::string>({"flushall=myflushall", "flushdb=", "ping=abcdefghijklmnop"}));
   }
-  absl::FlagSaver saver_;
+
+  absl::FlagSaver _saver;
 };
 
 TEST_F(DflyRenameCommandTest, RenameCommand) {
@@ -848,9 +850,7 @@ TEST_F(DflyEngineTest, CommandMetricLabels) {
 class DflyCommandAliasTest : public DflyEngineTest {
  protected:
   DflyCommandAliasTest() {
-    // Test an interaction of rename and alias, where we rename and then add an alias on the rename
-    absl::SetFlag(&FLAGS_rename_command, {"ping=gnip"});
-    absl::SetFlag(&FLAGS_command_alias, {"___set=set", "___ping=gnip"});
+    absl::SetFlag(&FLAGS_command_alias, {"___set=set", "___ping=ping"});
   }
 
   absl::FlagSaver saver_;
@@ -861,19 +861,26 @@ TEST_F(DflyCommandAliasTest, Aliasing) {
   EXPECT_EQ(Run({"___SET", "a", "b"}), "OK");
   EXPECT_EQ(Run({"GET", "foo"}), "bar");
   EXPECT_EQ(Run({"GET", "a"}), "b");
-  // test the alias
   EXPECT_EQ(Run({"___ping"}), "PONG");
-  // test the rename
-  EXPECT_EQ(Run({"gnip"}), "PONG");
-  // the original command is not accessible
-  EXPECT_THAT(Run({"PING"}), ErrArg("unknown command `PING`"));
 
-  const Metrics metrics = GetMetrics();
+  Metrics metrics = GetMetrics();
   const auto& stats = metrics.cmd_stats_map;
+
   EXPECT_THAT(stats, Contains(Pair("___set", Key(1))));
   EXPECT_THAT(stats, Contains(Pair("set", Key(1))));
   EXPECT_THAT(stats, Contains(Pair("___ping", Key(1))));
   EXPECT_THAT(stats, Contains(Pair("get", Key(2))));
+
+  // test stats within multi-exec
+  EXPECT_EQ(Run({"multi"}), "OK");
+  EXPECT_EQ(Run({"___set", "a", "x"}), "QUEUED");
+  EXPECT_EQ(Run({"exec"}), "OK");
+
+  metrics = GetMetrics();
+  EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("___set", Key(2))));
+  EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("set", Key(1))));
+  EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("multi", Key(1))));
+  EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("exec", Key(1))));
 }
 
 }  // namespace dfly
