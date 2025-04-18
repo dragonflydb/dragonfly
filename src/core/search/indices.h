@@ -63,17 +63,18 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   std::vector<std::string> GetTerms() const;
 
   std::optional<std::vector<DocId>> GetAllResults() const override {
-    std::vector<DocId> result;
-    std::vector<DocId> temp;
+    absl::flat_hash_set<DocId> unique_docs;
+
     for (const auto& term : GetTerms()) {
       if (auto* docs = Matching(term)) {
-        temp.assign(docs->begin(), docs->end());
-        result.insert(result.end(), temp.begin(), temp.end());
+        for (const DocId& id : *docs) {
+          unique_docs.insert(id);
+        }
       }
     }
 
+    auto result = std::vector<DocId>(unique_docs.begin(), unique_docs.end());
     std::sort(result.begin(), result.end());
-    result.erase(std::unique(result.begin(), result.end()), result.end());
     return result;
   }
 

@@ -22,7 +22,7 @@ struct AstNode;
 // Matches all documents
 struct AstStarNode {};
 
-// Matches all fields in a document (like "*" in field context)
+// Matches all documents where this field has a non-null value
 struct AstStarFieldNode {};
 
 // Matches terms in text fields
