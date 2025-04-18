@@ -1060,7 +1060,7 @@ TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
                   "SORTBY", "1", "count"});
   // clang-format on
 
-  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
+  EXPECT_THAT(resp, ErrArg("SORTBY field name 'count' must start with '@'"));
 }
 
 TEST_F(SearchFamilyTest, AggregateLoadGroupBy) {
@@ -1700,7 +1700,7 @@ TEST_F(SearchFamilyTest, AggregateResultFields) {
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("a", "1"), IsMap("a", "4"), IsMap("a", "7")));
   absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
   resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a"});
-  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
+  EXPECT_THAT(resp, ErrArg("SORTBY field name 'a' must start with '@'"));
 
   absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "@b", "SORTBY", "1", "a"});
@@ -1709,7 +1709,7 @@ TEST_F(SearchFamilyTest, AggregateResultFields) {
                                    IsMap("b", "\"8\"", "a", "7")));
   absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
   resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "@b", "SORTBY", "1", "a"});
-  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
+  EXPECT_THAT(resp, ErrArg("SORTBY field name 'a' must start with '@'"));
 
   absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a", "GROUPBY", "2", "@b", "@a", "REDUCE",
@@ -1720,7 +1720,7 @@ TEST_F(SearchFamilyTest, AggregateResultFields) {
   absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
   resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a", "GROUPBY", "2", "@b", "@a", "REDUCE",
               "COUNT", "0", "AS", "count"});
-  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
+  EXPECT_THAT(resp, ErrArg("SORTBY field name 'a' must start with '@'"));
 
   Run({"JSON.SET", "j4", ".", R"({"id":1, "number":4})"});
   Run({"JSON.SET", "j5", ".", R"({"id":2})"});
@@ -1877,6 +1877,29 @@ TEST_F(SearchFamilyTest, AggregateSortByParsingErrors) {
   // Test SORTBY with an invalid value
   resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "notvalue", "@name"});
   EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+}
+
+TEST_F(SearchFamilyTest, AggregateSortByParsingErrorsWithoutAt) {
+  Run({"JSON.SET", "j1", "$", R"({"name": "first", "number": 1200, "group": "first"})"});
+
+  Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT", "$.number",
+       "AS", "number", "NUMERIC", "$.group", "AS", "group", "TAG"});
+
+  // Test SORTBY with field name without '@'
+  auto resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "name"});
+  EXPECT_THAT(resp, ErrArg("SORTBY field name 'name' must start with '@'"));
+
+  // Test SORTBY with field name without '@' and multiple sort fields
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "3", "name", "@number", "DESC"});
+  EXPECT_THAT(resp, ErrArg("SORTBY field name 'name' must start with '@'"));
+
+  // Test SORTBY with field name without '@' and MAX option
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "name", "MAX", "1"});
+  EXPECT_THAT(resp, ErrArg("SORTBY field name 'name' must start with '@'"));
+
+  // Check that the old error still works for wrong number of args
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "2", "@name"});
+  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
 }
 
 TEST_F(SearchFamilyTest, InvalidSearchOptions) {

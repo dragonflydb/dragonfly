@@ -2514,7 +2514,7 @@ VarzValue::Map Service::GetVarzStats() {
 
   res.emplace_back("keys", VarzValue::FromInt(db_stats.key_count));
   res.emplace_back("obj_mem_usage", VarzValue::FromInt(db_stats.obj_memory_usage));
-  double load = double(db_stats.key_count) / (1 + db_stats.bucket_count);
+  double load = double(db_stats.key_count) / (1 + db_stats.prime_capacity);
   res.emplace_back("table_load_factor", VarzValue::FromDouble(load));
 
   return res;

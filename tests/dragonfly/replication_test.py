@@ -131,10 +131,10 @@ async def test_replication_all(
 
     info = await c_master.info()
     preemptions = info["big_value_preemptions"]
-    total_buckets = info["num_buckets"]
+    key_capacity = info["prime_capacity"]
     compressed_blobs = info["compressed_blobs"]
     logging.debug(
-        f"Compressed blobs {compressed_blobs} .Buckets {total_buckets}. Preemptions {preemptions}"
+        f"Compressed blobs {compressed_blobs} .Capacity {key_capacity}. Preemptions {preemptions}"
     )
 
     assert preemptions >= seeder.huge_value_target * 0.5
@@ -143,11 +143,11 @@ async def test_replication_all(
     # per bucket.
     if seeder.data_size < 1000:
         # We care that we preempt less times than the total buckets such that we can be
-        # sure that we test both flows (with and without preemptions). Preemptions on 30%
+        # sure that we test both flows (with and without preemptions). Preemptions on 3%
         # of buckets seems like a big number but that depends on a few parameters like
         # the size of the hug value and the serialization max chunk size. For the test cases here,
-        # it's usually close to 10% but there are some that are close to 30.
-        assert preemptions <= (total_buckets * 0.3)
+        # it's usually close to 1% but there are some that are close to 3.
+        assert preemptions <= (key_capacity * 0.03)
 
 
 async def check_replica_finished_exec(c_replica: aioredis.Redis, m_offset):
