@@ -91,7 +91,7 @@ struct BaseIndex {
   virtual bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) = 0;
   virtual void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) = 0;
 
-  // Returns all documents matching the star query (all documents in the index)
+  // Returns documents that have non-null values for this field (used for @field:* queries)
   virtual std::optional<std::vector<DocId>> GetAllResults() const {
     return std::nullopt;
   }
