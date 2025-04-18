@@ -141,9 +141,22 @@ class ValueType(Enum):
 class CommandGenerator:
     """Class for generating complex command sequences"""
 
-    def __init__(self, target_keys, val_size, batch_size, max_multikey, unsupported_types=[]):
+    def __init__(
+        self,
+        target_keys,
+        val_size,
+        huge_val_min_size,
+        huge_val_max_size,
+        huge_val_probability,
+        batch_size,
+        max_multikey,
+        unsupported_types=[],
+    ):
         self.key_cnt_target = target_keys
         self.val_size = val_size
+        self.huge_val_min_size = huge_val_min_size
+        self.huge_val_max_size = huge_val_max_size
+        self.huge_val_probability = huge_val_probability
         self.batch_size = min(batch_size, target_keys)
         self.max_multikey = max_multikey
         self.unsupported_types = unsupported_types
@@ -208,13 +221,15 @@ class CommandGenerator:
     def generate_val(self, t: ValueType):
         """Generate filler value of configured size for type t"""
 
-        def rand_str(k=3, s=""):
-            # Use small k value to reduce mem usage and increase number of ops
-            return s.join(random.choices(string.ascii_letters, k=k))
+        def rand_str():
+            val_size = random.randint(3, self.val_size)
+            if random.random() < self.huge_val_probability:
+                val_size = random.randint(self.huge_val_min_size, self.huge_val_max_size)
+            return "".join(random.choices(string.ascii_letters, k=val_size))
 
         if t == ValueType.STRING:
             # Random string for MSET
-            return (rand_str(self.val_size),)
+            return (rand_str(),)
         elif t == ValueType.LIST:
             # Random sequence k-letter elements for LPUSH
             return tuple(rand_str() for _ in range(self.val_size // 4))
@@ -417,6 +432,9 @@ class DflySeeder:
         port=6379,
         keys=1000,
         val_size=50,
+        huge_val_min_size=50_000,
+        huge_val_max_size=500_000,
+        huge_val_probability=0.1,
         batch_size=100,
         max_multikey=5,
         dbcount=1,
@@ -434,7 +452,16 @@ class DflySeeder:
             unsupported_types.append(ValueType.JSON)  # Cluster aio client doesn't support JSON
 
         self.cluster_mode = cluster_mode
-        self.gen = CommandGenerator(keys, val_size, batch_size, max_multikey, unsupported_types)
+        self.gen = CommandGenerator(
+            keys,
+            val_size,
+            huge_val_min_size,
+            huge_val_max_size,
+            huge_val_probability,
+            batch_size,
+            max_multikey,
+            unsupported_types,
+        )
         self.port = port
         self.dbcount = dbcount
         self.multi_transaction_probability = multi_transaction_probability
