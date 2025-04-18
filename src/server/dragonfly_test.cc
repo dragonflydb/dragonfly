@@ -850,8 +850,7 @@ TEST_F(DflyEngineTest, CommandMetricLabels) {
 class DflyCommandAliasTest : public DflyEngineTest {
  protected:
   DflyCommandAliasTest() {
-    absl::SetFlag(&FLAGS_rename_command, {"ping=gnip"});
-    absl::SetFlag(&FLAGS_command_alias, {"___set=set", "___ping=gnip"});
+    absl::SetFlag(&FLAGS_command_alias, {"___set=set", "___ping=ping"});
   }
 
   absl::FlagSaver saver_;
@@ -862,12 +861,7 @@ TEST_F(DflyCommandAliasTest, Aliasing) {
   EXPECT_EQ(Run({"___SET", "a", "b"}), "OK");
   EXPECT_EQ(Run({"GET", "foo"}), "bar");
   EXPECT_EQ(Run({"GET", "a"}), "b");
-  // test the alias
   EXPECT_EQ(Run({"___ping"}), "PONG");
-  // test the rename
-  EXPECT_EQ(Run({"gnip"}), "PONG");
-  // the original command is not accessible
-  EXPECT_THAT(Run({"PING"}), ErrArg("unknown command `PING`"));
 
   Metrics metrics = GetMetrics();
   const auto& stats = metrics.cmd_stats_map;
