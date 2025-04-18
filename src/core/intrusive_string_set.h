@@ -35,6 +35,10 @@ class ISLEntry {
     data_ = data;
   }
 
+  static void Destroy(ISLEntry entry) {
+    free(entry.Raw());
+  }
+
   operator bool() const {
     return data_;
   }
@@ -54,6 +58,17 @@ class ISLEntry {
       std::memcpy(&res, Raw() + sizeof(ISLEntry*), sizeof(res));
     }
     return res;
+  }
+
+  void SetExpiryTime(uint32_t ttl_sec) {
+    if (HasExpiry()) {
+      auto* ttl_pos = Raw() + sizeof(char*);
+      std::memcpy(ttl_pos, &ttl_sec, sizeof(ttl_sec));
+    } else {
+      ISLEntry new_entry = Create(Key(), ttl_sec);
+      std::swap(data_, new_entry.data_);
+      Destroy(new_entry);
+    }
   }
 
  private:
@@ -83,10 +98,6 @@ class ISLEntry {
     std::memcpy(key_pos, key.data(), key_size);
 
     return res;
-  }
-
-  static void Destroy(ISLEntry entry) {
-    free(entry.Raw());
   }
 
   ISLEntry Next() const {
@@ -160,7 +171,12 @@ class IntrusiveStringList {
     return start_;
   }
 
-  ISLEntry Pop() {
+  // TODO rewrite, because it's dangerous operations, ISLEntry shouldn't returned without owner
+  [[nodiscard]] ISLEntry Pop(uint32_t curr_time) {
+    for (auto it = start_; it && it.ExpiryTime() < curr_time; it = start_) {
+      start_ = it.Next();
+      ISLEntry::Destroy(it);
+    }
     auto res = start_;
     if (start_) {
       start_ = start_.Next();
@@ -173,10 +189,12 @@ class IntrusiveStringList {
     return start_;
   }
 
+  // TODO consider to wrap ISLEntry to prevent usage out of the list
   ISLEntry Emplace(std::string_view key, uint32_t ttl_sec = UINT32_MAX) {
     return Insert(ISLEntry::Create(key, ttl_sec));
   }
 
+  // TODO consider to wrap ISLEntry to prevent usage out of the list
   ISLEntry Find(std::string_view str) const {
     auto it = start_;
     for (; it && it.Key() != str; it = it.Next())
@@ -240,10 +258,9 @@ class IntrusiveStringSet {
       : entries_(mr) {
   }
 
-  // TODO add TTL processing
   ISLEntry Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX) {
     if (entries_.empty() || size_ >= entries_.size()) {
-      Resize(Capacity() * 2);
+      Reserve(Capacity() * 2);
     }
     const auto bucket_id = BucketId(Hash(str));
     auto& bucket = entries_[bucket_id];
@@ -256,7 +273,7 @@ class IntrusiveStringSet {
     return AddUnique(str, bucket, ttl_sec);
   }
 
-  void Resize(size_t sz) {
+  void Reserve(size_t sz) {
     sz = absl::bit_ceil(sz);
     if (sz > entries_.size()) {
       size_t prev_size = entries_.size();
@@ -266,6 +283,11 @@ class IntrusiveStringSet {
     }
   }
 
+  void Clear() {
+    capacity_log_ = 0;
+    entries_.resize(0);
+  }
+
   ISLEntry AddUnique(std::string_view str, IntrusiveStringList& bucket,
                      uint32_t ttl_sec = UINT32_MAX) {
     ++size_;
@@ -273,7 +295,7 @@ class IntrusiveStringSet {
   }
 
   unsigned AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec, bool keepttl) {
-    Resize(span.size());
+    Reserve(span.size());
     unsigned res = 0;
     for (auto& s : span) {
       const auto bucket_id = BucketId(Hash(s));
@@ -320,6 +342,17 @@ class IntrusiveStringSet {
     }
 
     return entries_idx << (32 - capacity_log_);
+  }
+
+  // return unowned ISLEntry, so it should be destroyed manually
+  [[nodiscard]] ISLEntry Pop() {
+    for (auto& bucket : entries_) {
+      if (auto res = bucket.Pop(time_now_); res) {
+        --size_;
+        return res;
+      }
+    }
+    return {};
   }
 
   bool Erase(std::string_view str) {
@@ -373,7 +406,7 @@ class IntrusiveStringSet {
   void Rehash(size_t prev_size) {
     for (int64_t i = prev_size - 1; i >= 0; --i) {
       auto list = std::move(entries_[i]);
-      for (auto entry = list.Pop(); entry; entry = list.Pop()) {
+      for (auto entry = list.Pop(time_now_); entry; entry = list.Pop(time_now_)) {
         auto bucket_id = BucketId(Hash(entry.Key()));
         entries_[bucket_id].Insert(entry);
       }
