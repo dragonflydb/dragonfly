@@ -22,10 +22,15 @@ namespace dfly {
 // contains a non-atomic multi transaction to execute squashed commands.
 class MultiCommandSquasher {
  public:
+  struct Opts {
+    bool verify_commands = false;   // Whether commands need to be verified before execution
+    bool error_abort = false;       // Abort upon receiving error
+    unsigned max_squash_size = 32;  // How many commands to squash at once
+  };
+
   static size_t Execute(absl::Span<StoredCmd> cmds, facade::RedisReplyBuilder* rb,
-                        ConnectionContext* cntx, Service* service, bool verify_commands = false,
-                        bool error_abort = false) {
-    return MultiCommandSquasher{cmds, cntx, service, verify_commands, error_abort}.Run(rb);
+                        ConnectionContext* cntx, Service* service, const Opts& opts) {
+    return MultiCommandSquasher{cmds, cntx, service, opts}.Run(rb);
   }
 
   static size_t GetRepliesMemSize() {
@@ -45,11 +50,9 @@ class MultiCommandSquasher {
 
   enum class SquashResult { SQUASHED, SQUASHED_FULL, NOT_SQUASHED, ERROR };
 
-  static constexpr int kMaxSquashing = 32;
-
  private:
   MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx, Service* Service,
-                       bool verify_commands, bool error_abort);
+                       const Opts& opts);
 
   // Lazy initialize shard info.
   ShardExecInfo& PrepareShardInfo(ShardId sid);
@@ -79,8 +82,7 @@ class MultiCommandSquasher {
   bool atomic_;                // Whether working in any of the atomic modes
   const CommandId* base_cid_;  // underlying cid (exec or eval) for executing batch hops
 
-  bool verify_commands_ = false;  // Whether commands need to be verified before execution
-  bool error_abort_ = false;      // Abort upon receiving error
+  Opts opts_;
 
   std::vector<ShardExecInfo> sharded_;
   std::vector<ShardId> order_;  // reply order for squashed cmds
