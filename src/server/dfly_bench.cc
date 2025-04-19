@@ -37,7 +37,12 @@ using std::string;
 
 ABSL_FLAG(uint16_t, p, 6379, "Server port");
 ABSL_FLAG(uint32_t, c, 20, "Number of connections per thread");
-ABSL_FLAG(uint32_t, qps, 20, "QPS schedule at which the generator sends requests to the server");
+ABSL_FLAG(int32_t, qps, 20,
+          "QPS schedule at which the generator sends requests to the server "
+          "per single connection. 0 means - coordinated omission, and positive value will throttle "
+          "the actual qps if server is slower than the target qps. "
+          "negative value means - hard target, without throttling.");
+
 ABSL_FLAG(uint32_t, n, 1000, "Number of requests to send per connection");
 ABSL_FLAG(uint32_t, test_time, 0, "Testing time in seconds");
 ABSL_FLAG(uint32_t, d, 16, "Value size in bytes ");
@@ -605,6 +610,7 @@ void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
 void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
   start_ns_ = absl::GetCurrentTimeNanos();
   unsigned pipeline = GetFlag(FLAGS_pipeline);
+  bool should_throttle = GetFlag(FLAGS_qps) > 0;
 
   stats_.num_clients++;
   int64_t time_limit_ns =
@@ -621,7 +627,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
     if (cycle_ns) {
       int64_t target_ts = start_ns_ + i * (*cycle_ns);
       int64_t sleep_ns = target_ts - now;
-      if (reqs_.size() > 10 && sleep_ns <= 0) {
+      if (reqs_.size() > 10 && should_throttle && sleep_ns <= 0) {
         sleep_ns = 10'000;
       }
 
@@ -630,7 +636,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
         // There is no point in sending more requests if they are piled up in the server.
         do {
           ThisFiber::SleepFor(chrono::nanoseconds(sleep_ns));
-        } while (reqs_.size() > 10);
+        } while (should_throttle && reqs_.size() > 10);
       } else if (i % 256 == 255) {
         ThisFiber::Yield();
         VLOG(5) << "Behind QPS schedule";
@@ -908,12 +914,15 @@ void WatchFiber(size_t num_shards, atomic_bool* finish_signal, ProactorPool* pp)
   num_shards = max<size_t>(num_shards, 1u);
   uint64_t resp_goal = GetFlag(FLAGS_c) * pp->size() * GetFlag(FLAGS_n) * num_shards;
   uint32_t time_limit = GetFlag(FLAGS_test_time);
+  bool should_throttle = GetFlag(FLAGS_qps) > 0;
 
   while (*finish_signal == false) {
     // we sleep with resolution of 1s but print with lower frequency to be more responsive
     // when benchmark finishes.
     ThisFiber::SleepFor(1s);
-    pp->AwaitBrief([](auto, auto*) { client->AdjustCycle(); });
+    if (should_throttle) {
+      pp->AwaitBrief([](auto, auto*) { client->AdjustCycle(); });
+    }
 
     int64_t now = absl::GetCurrentTimeNanos();
     if (now - last_print < 5000'000'000LL)  // 5s
@@ -1084,9 +1093,9 @@ int main(int argc, char* argv[]) {
   if (protocol == RESP) {
     shards = proactor->Await([&] { return FetchClusterInfo(ep, proactor); });
   }
-  LOG(INFO) << "Connecting threads to "
-            << (shards.empty() ? string("single node ")
-                               : absl::StrCat(shards.size(), " shard cluster"));
+  CONSOLE_INFO << "Connecting to "
+               << (shards.empty() ? string("single node ")
+                                  : absl::StrCat(shards.size(), " shard cluster"));
 
   if (!shards.empty() && !GetFlag(FLAGS_command).empty() && GetFlag(FLAGS_cluster_skip_tags)) {
     // For custom commands we may need to use the same hashtag for multiple keys.
@@ -1112,7 +1121,8 @@ int main(int argc, char* argv[]) {
   CHECK_LE(key_minimum, key_maximum);
 
   uint32_t thread_key_step = 0;
-  const uint32_t qps = GetFlag(FLAGS_qps);
+  uint32_t qps = abs(GetFlag(FLAGS_qps));
+  bool throttle = GetFlag(FLAGS_qps) > 0;
   const int64_t interval = qps ? 1'000'000'000LL / qps : 0;
   uint64_t num_reqs = GetFlag(FLAGS_n);
   uint64_t total_conn_num = GetFlag(FLAGS_c) * pp->size();
@@ -1130,11 +1140,12 @@ int main(int argc, char* argv[]) {
 
   if (!time_limit) {
     CONSOLE_INFO << "Running " << pp->size() << " threads, sending " << num_reqs
-                 << " requests per each connection, or " << total_requests << " requests overall";
+                 << " requests per each connection, or " << total_requests << " requests overall "
+                 << (throttle ? "with" : "without") << " throttling";
   }
   if (interval) {
-    CONSOLE_INFO << "At a rate of " << GetFlag(FLAGS_qps)
-                 << " rps per connection, i.e. request every " << interval / 1000 << "us";
+    CONSOLE_INFO << "At a rate of " << qps << " rps per connection, i.e. request every "
+                 << interval / 1000 << "us";
     CONSOLE_INFO << "Overall scheduled RPS: " << qps * total_conn_num;
   } else {
     CONSOLE_INFO << "Coordinated omission mode - the rate is determined by the server";
