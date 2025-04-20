@@ -794,8 +794,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
         [val](unsigned tid, auto*) { facade::Connection::SetPipelineBufferLimit(tid, val); });
   });
 
-  SetMaxSquashedCmdNum(absl::GetFlag(FLAGS_max_squashed_cmd_num));
-
   config_registry.RegisterSetter<uint32_t>("max_squashed_cmd_num",
                                            [](uint32_t val) { SetMaxSquashedCmdNum(val); });
 
@@ -869,6 +867,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   SetRssOomDenyRatioOnAllThreads(absl::GetFlag(FLAGS_rss_oom_deny_ratio));
   SetSerializationMaxChunkSize(absl::GetFlag(FLAGS_serialization_max_chunk_size));
+  SetMaxSquashedCmdNum(absl::GetFlag(FLAGS_max_squashed_cmd_num));
 
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.
