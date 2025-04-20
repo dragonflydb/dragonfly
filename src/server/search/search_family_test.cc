@@ -1060,7 +1060,7 @@ TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
                   "SORTBY", "1", "count"});
   // clang-format on
 
-  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
+  EXPECT_THAT(resp, ErrArg("SORTBY field name 'count' must start with '@'"));
 }
 
 TEST_F(SearchFamilyTest, AggregateLoadGroupBy) {
@@ -1700,7 +1700,7 @@ TEST_F(SearchFamilyTest, AggregateResultFields) {
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("a", "1"), IsMap("a", "4"), IsMap("a", "7")));
   absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
   resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a"});
-  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
+  EXPECT_THAT(resp, ErrArg("SORTBY field name 'a' must start with '@'"));
 
   absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "@b", "SORTBY", "1", "a"});
@@ -1709,7 +1709,7 @@ TEST_F(SearchFamilyTest, AggregateResultFields) {
                                    IsMap("b", "\"8\"", "a", "7")));
   absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
   resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "@b", "SORTBY", "1", "a"});
-  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
+  EXPECT_THAT(resp, ErrArg("SORTBY field name 'a' must start with '@'"));
 
   absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a", "GROUPBY", "2", "@b", "@a", "REDUCE",
@@ -1720,7 +1720,7 @@ TEST_F(SearchFamilyTest, AggregateResultFields) {
   absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
   resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a", "GROUPBY", "2", "@b", "@a", "REDUCE",
               "COUNT", "0", "AS", "count"});
-  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
+  EXPECT_THAT(resp, ErrArg("SORTBY field name 'a' must start with '@'"));
 
   Run({"JSON.SET", "j4", ".", R"({"id":1, "number":4})"});
   Run({"JSON.SET", "j5", ".", R"({"id":2})"});
@@ -1877,6 +1877,29 @@ TEST_F(SearchFamilyTest, AggregateSortByParsingErrors) {
   // Test SORTBY with an invalid value
   resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "notvalue", "@name"});
   EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+}
+
+TEST_F(SearchFamilyTest, AggregateSortByParsingErrorsWithoutAt) {
+  Run({"JSON.SET", "j1", "$", R"({"name": "first", "number": 1200, "group": "first"})"});
+
+  Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT", "$.number",
+       "AS", "number", "NUMERIC", "$.group", "AS", "group", "TAG"});
+
+  // Test SORTBY with field name without '@'
+  auto resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "name"});
+  EXPECT_THAT(resp, ErrArg("SORTBY field name 'name' must start with '@'"));
+
+  // Test SORTBY with field name without '@' and multiple sort fields
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "3", "name", "@number", "DESC"});
+  EXPECT_THAT(resp, ErrArg("SORTBY field name 'name' must start with '@'"));
+
+  // Test SORTBY with field name without '@' and MAX option
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "name", "MAX", "1"});
+  EXPECT_THAT(resp, ErrArg("SORTBY field name 'name' must start with '@'"));
+
+  // Check that the old error still works for wrong number of args
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "2", "@name"});
+  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
 }
 
 TEST_F(SearchFamilyTest, InvalidSearchOptions) {
@@ -2341,6 +2364,362 @@ TEST_F(SearchFamilyTest, KnnSearchWithSortby) {
   resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 2 @embedding $vec]", "PARAMS", "2", "vec",
               search_vector, "SORTBY", "timestamp", "DESC", "NOCONTENT"});
   EXPECT_THAT(resp, IsArray(2, "doc:3", "doc:1"));
+}
+
+TEST_F(SearchFamilyTest, SearchNonNullFields) {
+  // Basic schema with text, tag, and numeric fields
+  EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "tags", "tag", "score", "numeric",
+                 "sortable"}),
+            "OK");
+
+  Run({"hset", "d:1", "title", "Document with title and tags", "tags", "tag1,tag2"});
+  Run({"hset", "d:2", "title", "Document with title and score", "score", "75"});
+  Run({"hset", "d:3", "title", "Document with all fields", "tags", "tag2,tag3", "score", "100"});
+  Run({"hset", "d:4", "tags", "Document with only tags", "score", "50"});
+
+  // Testing non-null field searches with @field:* syntax
+  EXPECT_THAT(Run({"ft.search", "i1", "@title:*"}), AreDocIds("d:1", "d:2", "d:3"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@tags:*"}), AreDocIds("d:1", "d:3", "d:4"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@score:*"}), AreDocIds("d:2", "d:3", "d:4"));
+
+  // Testing combinations of non-null field searches
+  EXPECT_THAT(Run({"ft.search", "i1", "@title:* @tags:*"}), AreDocIds("d:1", "d:3"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@title:* @score:*"}), AreDocIds("d:2", "d:3"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@tags:* @score:*"}), AreDocIds("d:3", "d:4"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@title:* @tags:* @score:*"}), AreDocIds("d:3"));
+
+  // Testing non-null field searches with sorting
+  auto result = Run({"ft.search", "i1", "@score:*", "SORTBY", "score", "DESC"});
+  ASSERT_EQ(result.GetVec().size(), 7);
+  EXPECT_EQ(result.GetVec()[1].GetString(), "d:3");  // Highest score (100) first
+  EXPECT_EQ(result.GetVec()[3].GetString(), "d:2");  // Middle score (75)
+  EXPECT_EQ(result.GetVec()[5].GetString(), "d:4");  // Lowest score (50) last
+
+  // Testing non-null field searches with JSON
+  Run({"json.set", "j:1", ".",
+       R"({"title": "JSON document", "meta": {"tags": ["tag1", "tag2"]}})"});
+  Run({"json.set", "j:2", ".", R"({"meta": {"score": 100}})"});
+  Run({"json.set", "j:3", ".",
+       R"({"title": "Full JSON", "meta": {"tags": ["tag3"], "score": 80}})"});
+
+  EXPECT_EQ(Run({"ft.create", "i2", "on", "json", "schema", "$.title", "as", "title", "text",
+                 "$.meta.tags", "as", "tags", "tag", "$.meta.score", "as", "score", "numeric"}),
+            "OK");
+
+  EXPECT_THAT(Run({"ft.search", "i2", "@title:*"}), AreDocIds("j:1", "j:3"));
+  EXPECT_THAT(Run({"ft.search", "i2", "@tags:*"}), AreDocIds("j:1", "j:3"));
+  EXPECT_THAT(Run({"ft.search", "i2", "@score:*"}), AreDocIds("j:2", "j:3"));
+  EXPECT_THAT(Run({"ft.search", "i2", "@title:* @tags:* @score:*"}), AreDocIds("j:3"));
+
+  // Testing text indices with star query
+  Run({"hset", "text:1", "content", "apple banana"});
+  Run({"hset", "text:2", "content", "cherry date"});
+  Run({"hset", "text:3", "content", "elephant fig"});
+
+  EXPECT_EQ(Run({"ft.create", "text_idx", "ON", "HASH", "PREFIX", "1", "text:", "SCHEMA", "content",
+                 "TEXT"}),
+            "OK");
+
+  EXPECT_THAT(Run({"ft.search", "text_idx", "*"}), AreDocIds("text:1", "text:2", "text:3"));
+
+  // Testing tag indices with star query
+  Run({"hset", "tag:1", "categories", "fruit,food"});
+  Run({"hset", "tag:2", "categories", "drink,beverage"});
+  Run({"hset", "tag:3", "categories", "tech,gadget"});
+
+  EXPECT_EQ(Run({"ft.create", "tag_idx", "ON", "HASH", "PREFIX", "1", "tag:", "SCHEMA",
+                 "categories", "TAG", "SEPARATOR", ","}),
+            "OK");
+
+  EXPECT_THAT(Run({"ft.search", "tag_idx", "*"}), AreDocIds("tag:1", "tag:2", "tag:3"));
+
+  // Testing numeric indices with star query
+  Run({"hset", "num:1", "price", "10.5"});
+  Run({"hset", "num:2", "price", "20.75"});
+  Run({"hset", "num:3", "price", "30.99"});
+
+  EXPECT_EQ(Run({"ft.create", "num_idx", "ON", "HASH", "PREFIX", "1", "num:", "SCHEMA", "price",
+                 "NUMERIC", "SORTABLE"}),
+            "OK");
+
+  EXPECT_THAT(Run({"ft.search", "num_idx", "*"}), AreDocIds("num:1", "num:2", "num:3"));
+
+  // Testing vector indices with star query
+  string vector1 = "\\x00\\x00\\x80\\x3f\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00";  // [1,0,0]
+  string vector2 = "\\x00\\x00\\x00\\x00\\x00\\x00\\x80\\x3f\\x00\\x00\\x00\\x00";  // [0,1,0]
+  string vector3 = "\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x80\\x3f";  // [0,0,1]
+
+  Run({"hset", "vec:1", "embedding", vector1});
+  Run({"hset", "vec:2", "embedding", vector2});
+  Run({"hset", "vec:3", "embedding", vector3});
+
+  // Testing star query with result limit
+  auto limit_result = Run({"ft.search", "text_idx", "*", "LIMIT", "0", "2"});
+  ASSERT_GE(limit_result.GetVec().size(), 5);                 // Total count + 2 docs with fields
+  EXPECT_EQ(limit_result.GetVec()[0].GetInt(), 3);            // Total count is 3 (all matches)
+  EXPECT_EQ(limit_result.GetVec()[1].GetString(), "text:1");  // First doc
+  EXPECT_EQ(limit_result.GetVec()[3].GetString(), "text:2");  // Second doc
+
+  // Testing star query with sorting
+  auto price_desc_result = Run({"ft.search", "num_idx", "*", "SORTBY", "price", "DESC"});
+  ASSERT_EQ(price_desc_result.GetVec().size(), 7);
+  EXPECT_EQ(price_desc_result.GetVec()[1].GetString(), "num:3");  // Most expensive item first
+  EXPECT_EQ(price_desc_result.GetVec()[3].GetString(), "num:2");
+  EXPECT_EQ(price_desc_result.GetVec()[5].GetString(), "num:1");  // Cheapest item last
+
+  auto price_asc_result = Run({"ft.search", "num_idx", "*", "SORTBY", "price", "ASC"});
+  ASSERT_EQ(price_asc_result.GetVec().size(), 7);
+  EXPECT_EQ(price_asc_result.GetVec()[1].GetString(), "num:1");  // Cheapest item first
+  EXPECT_EQ(price_asc_result.GetVec()[3].GetString(), "num:2");
+  EXPECT_EQ(price_asc_result.GetVec()[5].GetString(), "num:3");  // Most expensive item last
+}
+
+TEST_F(SearchFamilyTest, SortIndexBasicOperations) {
+  // Create an index with a numeric field and a text field, both SORTABLE
+  EXPECT_EQ(Run({"ft.create", "sort_idx", "SCHEMA", "num_field", "NUMERIC", "SORTABLE", "str_field",
+                 "TEXT", "SORTABLE"}),
+            "OK");
+
+  // Add documents with different field values - only with both fields for test simplification
+  Run({"hset", "doc:1", "num_field", "10", "str_field", "apple"});
+  Run({"hset", "doc:2", "num_field", "20", "str_field", "banana"});
+  Run({"hset", "doc:3", "num_field", "5", "str_field", "cherry"});
+  Run({"hset", "doc:4", "num_field", "15", "str_field", "date"});
+
+  // Test search with star (* - all documents)
+  EXPECT_THAT(Run({"ft.search", "sort_idx", "*"}), AreDocIds("doc:1", "doc:2", "doc:3", "doc:4"));
+
+  // Test search by field presence
+  EXPECT_THAT(Run({"ft.search", "sort_idx", "@num_field:*"}),
+              AreDocIds("doc:1", "doc:2", "doc:3", "doc:4"));
+  EXPECT_THAT(Run({"ft.search", "sort_idx", "@str_field:*"}),
+              AreDocIds("doc:1", "doc:2", "doc:3", "doc:4"));
+
+  // Test sorting by numeric field (ascending)
+  auto num_asc_result = Run({"ft.search", "sort_idx", "*", "SORTBY", "num_field", "ASC"});
+
+  // Check the overall order, not specific indices
+  ASSERT_GE(num_asc_result.GetVec().size(), 9);  // 4 documents * 2 + 1
+
+  // Collect document IDs in the order they appear in the result
+  std::vector<std::string> sorted_ids;
+  for (size_t i = 1; i < num_asc_result.GetVec().size(); i += 2) {
+    sorted_ids.push_back(num_asc_result.GetVec()[i].GetString());
+  }
+
+  // Verify that the numeric field sorting order is correct
+  ASSERT_EQ(sorted_ids.size(), 4);
+  EXPECT_EQ(sorted_ids[0], "doc:3");  // 5
+  EXPECT_EQ(sorted_ids[1], "doc:1");  // 10
+  EXPECT_EQ(sorted_ids[2], "doc:4");  // 15
+  EXPECT_EQ(sorted_ids[3], "doc:2");  // 20
+
+  // Sorting by text field (descending)
+  auto str_desc_result = Run({"ft.search", "sort_idx", "*", "SORTBY", "str_field", "DESC"});
+
+  // Check the overall order of text sorting
+  sorted_ids.clear();
+  for (size_t i = 1; i < str_desc_result.GetVec().size(); i += 2) {
+    sorted_ids.push_back(str_desc_result.GetVec()[i].GetString());
+  }
+
+  ASSERT_EQ(sorted_ids.size(), 4);
+  EXPECT_EQ(sorted_ids[0], "doc:4");  // date
+  EXPECT_EQ(sorted_ids[1], "doc:3");  // cherry
+  EXPECT_EQ(sorted_ids[2], "doc:2");  // banana
+  EXPECT_EQ(sorted_ids[3], "doc:1");  // apple
+
+  // Update a document
+  Run({"hset", "doc:3", "num_field", "30"});  // 5 -> 30
+
+  // Check the updated sorting
+  auto updated_result = Run({"ft.search", "sort_idx", "*", "SORTBY", "num_field", "ASC"});
+  sorted_ids.clear();
+  for (size_t i = 1; i < updated_result.GetVec().size(); i += 2) {
+    sorted_ids.push_back(updated_result.GetVec()[i].GetString());
+  }
+
+  ASSERT_EQ(sorted_ids.size(), 4);
+  EXPECT_EQ(sorted_ids[0], "doc:1");  // 10
+  EXPECT_EQ(sorted_ids[1], "doc:4");  // 15
+  EXPECT_EQ(sorted_ids[2], "doc:2");  // 20
+  EXPECT_EQ(sorted_ids[3], "doc:3");  // 30
+
+  // Test document deletion
+  Run({"del", "doc:2"});
+  auto after_delete_result = Run({"ft.search", "sort_idx", "*"});
+  EXPECT_THAT(after_delete_result, AreDocIds("doc:1", "doc:3", "doc:4"));
+}
+
+// Separate test for documents with missing fields during sorting
+TEST_F(SearchFamilyTest, SortIndexWithNullFields) {
+  EXPECT_EQ(Run({"ft.create", "null_sort_idx", "SCHEMA", "num_field", "NUMERIC", "SORTABLE"}),
+            "OK");
+
+  // Documents with and without numeric field
+  Run({"hset", "doc:1", "num_field", "10"});
+  Run({"hset", "doc:2", "num_field", "20"});
+  Run({"hset", "doc:3", "other_field", "value"});  // no numeric field
+
+  // Verify that all documents are indexed
+  EXPECT_THAT(Run({"ft.search", "null_sort_idx", "*"}), AreDocIds("doc:1", "doc:2", "doc:3"));
+
+  // Verify that only documents with numeric field are found by @num_field:* query
+  EXPECT_THAT(Run({"ft.search", "null_sort_idx", "@num_field:*"}), AreDocIds("doc:1", "doc:2"));
+
+  // When sorting, documents without the field should be at the end (but exact order may vary)
+  auto sort_result = Run({"ft.search", "null_sort_idx", "*", "SORTBY", "num_field", "ASC"});
+
+  // Collect results
+  std::vector<std::string> sorted_ids;
+  for (size_t i = 1; i < sort_result.GetVec().size(); i += 2) {
+    sorted_ids.push_back(sort_result.GetVec()[i].GetString());
+  }
+
+  // Verify that documents with numeric fields are in the correct order,
+  // and the document without a numeric field is either at the end or not included (depends on
+  // implementation)
+  ASSERT_GE(sorted_ids.size(), 2);
+
+  // Check only documents with known field values
+  auto doc1_pos = std::find(sorted_ids.begin(), sorted_ids.end(), "doc:1");
+  auto doc2_pos = std::find(sorted_ids.begin(), sorted_ids.end(), "doc:2");
+
+  ASSERT_NE(doc1_pos, sorted_ids.end());
+  ASSERT_NE(doc2_pos, sorted_ids.end());
+
+  // doc:1 (10) should be before doc:2 (20) in ascending sort
+  EXPECT_LT(std::distance(sorted_ids.begin(), doc1_pos),
+            std::distance(sorted_ids.begin(), doc2_pos));
+}
+
+TEST_F(SearchFamilyTest, VectorIndexOperations) {
+  // Create an index with a vector field
+  EXPECT_EQ(Run({"ft.create", "vector_idx", "SCHEMA", "vec", "VECTOR", "FLAT", "6", "TYPE",
+                 "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2", "name", "TEXT"}),
+            "OK");
+
+  // Function to convert float vectors to binary representation
+  auto FloatsToBytes = [](const std::vector<float>& floats) -> std::string {
+    return std::string(reinterpret_cast<const char*>(floats.data()), floats.size() * sizeof(float));
+  };
+
+  // Prepare vector data in binary format
+  std::string vec1 = FloatsToBytes({1.0f, 0.0f, 0.0f});
+  std::string vec2 = FloatsToBytes({0.0f, 1.0f, 0.0f});
+  std::string vec3 = FloatsToBytes({0.0f, 0.0f, 1.0f});
+  std::string vec4 = FloatsToBytes({0.5f, 0.5f, 0.0f});
+  std::string vec5 = FloatsToBytes({0.3f, 0.3f, 0.3f});
+
+  // Add documents with vector data in binary format
+  Run({"hset", "vec:1", "vec", vec1, "name", "vector1"});
+  Run({"hset", "vec:2", "vec", vec2, "name", "vector2"});
+  Run({"hset", "vec:3", "vec", vec3, "name", "vector3"});
+  Run({"hset", "vec:4", "vec", vec4, "name", "vector4"});
+  Run({"hset", "vec:5", "vec", vec5, "name", "vector5"});
+
+  // Basic star search
+  auto star_search = Run({"ft.search", "vector_idx", "*"});
+  EXPECT_THAT(star_search, AreDocIds("vec:1", "vec:2", "vec:3", "vec:4", "vec:5"));
+
+  // Search by vector field presence
+  auto vec_field_search = Run({"ft.search", "vector_idx", "@vec:*"});
+  EXPECT_THAT(vec_field_search, AreDocIds("vec:1", "vec:2", "vec:3", "vec:4", "vec:5"));
+}
+
+// Test to verify that @field:* syntax works with sortable fields
+TEST_F(SearchFamilyTest, SortIndexGetAllResults) {
+  // Create an index with a numeric field that is SORTABLE but not indexed as a regular field
+  EXPECT_EQ(Run({"ft.create", "sort_only_idx", "SCHEMA", "sort_field", "NUMERIC", "SORTABLE"}),
+            "OK");
+
+  // Add documents with and without the sortable field
+  Run({"hset", "doc:1", "sort_field", "10", "other_field", "value1"});
+  Run({"hset", "doc:2", "sort_field", "20", "other_field", "value2"});
+  Run({"hset", "doc:3", "sort_field", "30", "other_field", "value3"});
+  Run({"hset", "doc:4", "other_field", "value4"});  // no sort_field
+  Run({"hset", "doc:5", "other_field", "value5"});  // no sort_field
+
+  // Test that all documents are indexed
+  EXPECT_THAT(Run({"ft.search", "sort_only_idx", "*"}),
+              AreDocIds("doc:1", "doc:2", "doc:3", "doc:4", "doc:5"));
+
+  // Test that @field:* search works for sortable field
+  // This should only return documents that have the sort_field
+  EXPECT_THAT(Run({"ft.search", "sort_only_idx", "@sort_field:*"}),
+              AreDocIds("doc:1", "doc:2", "doc:3"));
+
+  // Test sorting with @field:* query
+  auto sort_result =
+      Run({"ft.search", "sort_only_idx", "@sort_field:*", "SORTBY", "sort_field", "DESC"});
+
+  // Collect document IDs in order
+  std::vector<std::string> sorted_ids;
+  for (size_t i = 1; i < sort_result.GetVec().size(); i += 2) {
+    sorted_ids.push_back(sort_result.GetVec()[i].GetString());
+  }
+
+  // Verify correct order
+  ASSERT_EQ(sorted_ids.size(), 3);
+  EXPECT_EQ(sorted_ids[0], "doc:3");  // 30
+  EXPECT_EQ(sorted_ids[1], "doc:2");  // 20
+  EXPECT_EQ(sorted_ids[2], "doc:1");  // 10
+}
+
+TEST_F(SearchFamilyTest, JsonWithNullFields) {
+  // Create JSON documents with null values in different field types
+  Run({"JSON.SET", "doc:1", ".",
+       R"({"text_field": "sample text", "tag_field": "tag1,tag2", "num_field": 100})"});
+  Run({"JSON.SET", "doc:2", ".", R"({"text_field": null, "tag_field": "tag3", "num_field": 200})"});
+  Run({"JSON.SET", "doc:3", ".",
+       R"({"text_field": "another text", "tag_field": null, "num_field": 300})"});
+  Run({"JSON.SET", "doc:4", ".",
+       R"({"text_field": "more text", "tag_field": "tag4,tag5", "num_field": null})"});
+  Run({"JSON.SET", "doc:5", ".", R"({"text_field": null, "tag_field": null, "num_field": null})"});
+  Run({"JSON.SET", "doc:6", ".", R"({"other_field": "not indexed field"})"});
+
+  // Create indices for text, tag, and numeric fields (non-sortable)
+  EXPECT_EQ(Run({"FT.CREATE", "idx:regular", "ON", "JSON", "SCHEMA", "$.text_field", "AS",
+                 "text_field", "TEXT", "$.tag_field", "AS", "tag_field", "TAG", "$.num_field", "AS",
+                 "num_field", "NUMERIC"}),
+            "OK");
+
+  // Create indices for text, tag, and numeric fields (sortable)
+  EXPECT_EQ(Run({"FT.CREATE",    "idx:sortable", "ON",         "JSON",    "SCHEMA",
+                 "$.text_field", "AS",           "text_field", "TEXT",    "SORTABLE",
+                 "$.tag_field",  "AS",           "tag_field",  "TAG",     "SORTABLE",
+                 "$.num_field",  "AS",           "num_field",  "NUMERIC", "SORTABLE"}),
+            "OK");
+
+  // Test @field:* searches on non-sortable index
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:regular", "@text_field:*"}),
+              AreDocIds("doc:1", "doc:3", "doc:4"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:regular", "@tag_field:*"}),
+              AreDocIds("doc:1", "doc:2", "doc:4"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:regular", "@num_field:*"}),
+              AreDocIds("doc:1", "doc:2", "doc:3"));
+
+  // Test @field:* searches on sortable index
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:sortable", "@text_field:*"}),
+              AreDocIds("doc:1", "doc:3", "doc:4"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:sortable", "@tag_field:*"}),
+              AreDocIds("doc:1", "doc:2", "doc:4"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:sortable", "@num_field:*"}),
+              AreDocIds("doc:1", "doc:2", "doc:3"));
+
+  // Test search for documents with non-null values for all fields
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:regular", "@text_field:* @tag_field:* @num_field:*"}),
+              AreDocIds("doc:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:sortable", "@text_field:* @tag_field:* @num_field:*"}),
+              AreDocIds("doc:1"));
+
+  // Test combined queries
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:regular", "@text_field:* @tag_field:*"}),
+              AreDocIds("doc:1", "doc:4"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:regular", "@text_field:* @num_field:*"}),
+              AreDocIds("doc:1", "doc:3"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx:regular", "@tag_field:* @num_field:*"}),
+              AreDocIds("doc:1", "doc:2"));
 }
 
 }  // namespace dfly

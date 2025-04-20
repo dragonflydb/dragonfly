@@ -1431,7 +1431,7 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
     dfly_cntx->transaction = dist_trans.get();
     size_t squashed_num = MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
                                                         static_cast<RedisReplyBuilder*>(builder),
-                                                        dfly_cntx, this, true, false);
+                                                        dfly_cntx, this, {.verify_commands = true});
     dfly_cntx->transaction = nullptr;
 
     dispatched += stored_cmds.size();
@@ -1732,7 +1732,10 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   tx->MultiSwitchCmd(eval_cid);
 
   CapturingReplyBuilder crb{ReplyMode::ONLY_ERR};
-  MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), &crb, cntx, this, true, true);
+  MultiCommandSquasher::Opts opts;
+  opts.verify_commands = true;
+  opts.error_abort = true;
+  MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), &crb, cntx, this, opts);
 
   info->async_cmds_heap_mem = 0;
   info->async_cmds.clear();
@@ -2206,7 +2209,7 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
 
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state != ExecScriptUse::SCRIPT_RUN &&
         !cntx->conn_state.tracking_info_.IsTrackingOn()) {
-      MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), rb, cntx, this);
+      MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), rb, cntx, this, {});
     } else {
       CmdArgVec arg_vec;
       for (auto& scmd : exec_info.body) {
@@ -2514,7 +2517,7 @@ VarzValue::Map Service::GetVarzStats() {
 
   res.emplace_back("keys", VarzValue::FromInt(db_stats.key_count));
   res.emplace_back("obj_mem_usage", VarzValue::FromInt(db_stats.obj_memory_usage));
-  double load = double(db_stats.key_count) / (1 + db_stats.bucket_count);
+  double load = double(db_stats.key_count) / (1 + db_stats.prime_capacity);
   res.emplace_back("table_load_factor", VarzValue::FromDouble(load));
 
   return res;
