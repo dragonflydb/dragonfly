@@ -129,8 +129,6 @@ ABSL_FLAG(bool, info_replication_valkey_compatible, true,
 
 ABSL_FLAG(bool, managed_service_info, false,
           "Hides some implementation details from users when true (i.e. in managed service env)");
-ABSL_FLAG(int32_t, max_squashed_cmd_num, 32,
-          "Max number of commands quashed in command squash optimizaiton");
 
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -822,12 +820,6 @@ void SetSlowLogThreshold(util::ProactorPool& pool, int32_t val) {
   });
 }
 
-void SetMaxSquashedCmdNum(util::ProactorPool& pool, int32_t val) {
-  pool.AwaitFiberOnAll([val](auto index, auto* context) {
-    ServerState::tlocal()->max_squash_cmd_num = uint32_t(val);
-  });
-}
-
 void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
@@ -840,14 +832,6 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   config_registry.RegisterSetter<uint32_t>(
       "maxclients", [this](uint32_t val) { SetMaxClients(listeners_, val); });
 
-  SetMaxSquashedCmdNum(service_.proactor_pool(), absl::GetFlag(FLAGS_max_squashed_cmd_num));
-  config_registry.RegisterMutable("max_squashed_cmd_num",
-                                  [this](const absl::CommandLineFlag& flag) {
-                                    auto res = flag.TryGet<int32_t>();
-                                    if (res.has_value())
-                                      SetMaxSquashedCmdNum(service_.proactor_pool(), res.value());
-                                    return res.has_value();
-                                  });
   SetSlowLogThreshold(service_.proactor_pool(), absl::GetFlag(FLAGS_slowlog_log_slower_than));
   config_registry.RegisterMutable("slowlog_log_slower_than",
                                   [this](const absl::CommandLineFlag& flag) {

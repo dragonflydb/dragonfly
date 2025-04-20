@@ -115,6 +115,8 @@ ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
           "Maximum size of a value that may be serialized at once during snapshotting or full "
           "sync. Values bigger than this threshold will be serialized using streaming "
           "serialization. 0 - to disable streaming mode");
+ABSL_FLAG(uint32_t, max_squashed_cmd_num, 32,
+          "Max number of commands squashed in command squash optimizaiton");
 
 namespace dfly {
 
@@ -708,6 +710,11 @@ void SetSerializationMaxChunkSize(size_t val) {
   shard_set->pool()->AwaitBrief(cb);
 }
 
+void SetMaxSquashedCmdNum(int32_t val) {
+  auto cb = [val](unsigned, auto*) { ServerState::tlocal()->max_squash_cmd_num = val; };
+  shard_set->pool()->AwaitBrief(cb);
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -786,6 +793,11 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     shard_set->pool()->AwaitBrief(
         [val](unsigned tid, auto*) { facade::Connection::SetPipelineBufferLimit(tid, val); });
   });
+
+  SetMaxSquashedCmdNum(absl::GetFlag(FLAGS_max_squashed_cmd_num));
+
+  config_registry.RegisterSetter<uint32_t>("max_squashed_cmd_num",
+                                           [](uint32_t val) { SetMaxSquashedCmdNum(val); });
 
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("replication_timeout");
