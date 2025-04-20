@@ -609,25 +609,56 @@ void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
 
 void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
   start_ns_ = absl::GetCurrentTimeNanos();
-  unsigned pipeline = GetFlag(FLAGS_pipeline);
+  uint32_t pipeline = std::max<uint32_t>(GetFlag(FLAGS_pipeline), 1u);
   bool should_throttle = GetFlag(FLAGS_qps) > 0;
 
   stats_.num_clients++;
   int64_t time_limit_ns =
       time_limit_ > 0 ? int64_t(time_limit_) * 1'000'000'000 + start_ns_ : INT64_MAX;
-
+  int64_t now = start_ns_;
   SlotRange slot_range{0, kNumSlots - 1};
+  CHECK_GT(num_reqs_, 0u);
 
-  for (unsigned i = 0; i < num_reqs_; ++i) {
-    int64_t now = absl::GetCurrentTimeNanos();
+  uint32_t num_batches = ((num_reqs_ - 1) / pipeline) + 1;
 
-    if (now > time_limit_ns) {
-      break;
+  for (unsigned i = 0; i < num_batches && now < time_limit_ns; ++i) {
+    if (i == num_batches - 1) {  // last batch
+      pipeline = num_reqs_ - i * pipeline;
     }
+
+    for (unsigned j = 0; j < pipeline; ++j) {
+      // TODO: this skews the distribution if slot ranges are uneven.
+      // Ideally we would like to pick randomly a single slot from all the ranges we have
+      // and pass it to cmd_gen->Next below.
+      if (!shard_slots_.Empty()) {
+        slot_range = shard_slots_.NextSlotRange(ep_, i);
+      }
+
+      string cmd = cmd_gen->Next(slot_range);
+
+      Req req;
+      req.start = absl::GetCurrentTimeNanos();
+      req.might_hit = cmd_gen->might_hit();
+
+      reqs_.push(req);
+
+      error_code ec = socket_->Write(io::Buffer(cmd));
+      if (ec && FiberSocketBase::IsConnClosed(ec)) {
+        // TODO: report failure
+        VLOG(1) << "Connection closed";
+        break;
+      }
+      CHECK(!ec) << ec.message();
+      if (cmd_gen->noreply()) {
+        PopRequest();
+      }
+    }
+
+    now = absl::GetCurrentTimeNanos();
     if (cycle_ns) {
       int64_t target_ts = start_ns_ + i * (*cycle_ns);
       int64_t sleep_ns = target_ts - now;
-      if (reqs_.size() > 10 && should_throttle && sleep_ns <= 0) {
+      if (reqs_.size() > pipeline * 2 && should_throttle && sleep_ns <= 0) {
         sleep_ns = 10'000;
       }
 
@@ -636,7 +667,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
         // There is no point in sending more requests if they are piled up in the server.
         do {
           ThisFiber::SleepFor(chrono::nanoseconds(sleep_ns));
-        } while (should_throttle && reqs_.size() > 10);
+        } while (should_throttle && reqs_.size() > pipeline * 2);
       } else if (i % 256 == 255) {
         ThisFiber::Yield();
         VLOG(5) << "Behind QPS schedule";
@@ -645,33 +676,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
       // Coordinated omission.
 
       fb2::NoOpLock lk;
-      cnd_.wait(lk, [this, pipeline] { return reqs_.size() < pipeline; });
-    }
-
-    // TODO: this skews the distribution if slot ranges are uneven.
-    // Ideally we would like to pick randomly a single slot from all the ranges we have
-    // and pass it to cmd_gen->Next below.
-    if (!shard_slots_.Empty()) {
-      slot_range = shard_slots_.NextSlotRange(ep_, i);
-    }
-
-    string cmd = cmd_gen->Next(slot_range);
-
-    Req req;
-    req.start = absl::GetCurrentTimeNanos();
-    req.might_hit = cmd_gen->might_hit();
-
-    reqs_.push(req);
-
-    error_code ec = socket_->Write(io::Buffer(cmd));
-    if (ec && FiberSocketBase::IsConnClosed(ec)) {
-      // TODO: report failure
-      VLOG(1) << "Connection closed";
-      break;
-    }
-    CHECK(!ec) << ec.message();
-    if (cmd_gen->noreply()) {
-      PopRequest();
+      cnd_.wait(lk, [this] { return reqs_.empty(); });
     }
   }
 
@@ -1125,6 +1130,7 @@ int main(int argc, char* argv[]) {
   bool throttle = GetFlag(FLAGS_qps) > 0;
   const int64_t interval = qps ? 1'000'000'000LL / qps : 0;
   uint64_t num_reqs = GetFlag(FLAGS_n);
+
   uint64_t total_conn_num = GetFlag(FLAGS_c) * pp->size();
   uint64_t total_requests = num_reqs * total_conn_num;
   uint32_t time_limit = GetFlag(FLAGS_test_time);
