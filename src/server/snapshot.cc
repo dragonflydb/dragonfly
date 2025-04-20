@@ -343,7 +343,7 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
   // we counter-balance CPU over-usage by forcing sleep.
   // We measure running_cycles before the preemption points, because they reset the counter.
   uint64_t sleep_usec = (running_cycles * 1000'000 / base::CycleClock::Frequency()) / 2;
-  ThisFiber::SleepFor(chrono::microseconds(std::min(sleep_usec, 2000ul)));
+  ThisFiber::SleepFor(chrono::microseconds(std::min<uint64_t>(sleep_usec, 2000ul)));
 
   return serialized;
 }
