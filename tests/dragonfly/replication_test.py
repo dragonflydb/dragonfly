@@ -2982,6 +2982,7 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
 
     seeder = SeederV2(key_target=50_000)
     fill_task = asyncio.create_task(seeder.run(master.client()))
+    await asyncio.sleep(0.2)
 
     for replica in c_replicas:
         await replica.execute_command(f"REPLICAOF LOCALHOST {master.port}")
