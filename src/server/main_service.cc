@@ -115,6 +115,8 @@ ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
           "Maximum size of a value that may be serialized at once during snapshotting or full "
           "sync. Values bigger than this threshold will be serialized using streaming "
           "serialization. 0 - to disable streaming mode");
+ABSL_FLAG(uint32_t, max_squashed_cmd_num, 32,
+          "Max number of commands squashed in command squash optimizaiton");
 
 namespace dfly {
 
@@ -708,6 +710,11 @@ void SetSerializationMaxChunkSize(size_t val) {
   shard_set->pool()->AwaitBrief(cb);
 }
 
+void SetMaxSquashedCmdNum(int32_t val) {
+  auto cb = [val](unsigned, auto*) { ServerState::tlocal()->max_squash_cmd_num = val; };
+  shard_set->pool()->AwaitBrief(cb);
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -787,6 +794,9 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
         [val](unsigned tid, auto*) { facade::Connection::SetPipelineBufferLimit(tid, val); });
   });
 
+  config_registry.RegisterSetter<uint32_t>("max_squashed_cmd_num",
+                                           [](uint32_t val) { SetMaxSquashedCmdNum(val); });
+
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("replication_timeout");
   config_registry.RegisterMutable("migration_finalization_timeout_ms");
@@ -857,6 +867,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   SetRssOomDenyRatioOnAllThreads(absl::GetFlag(FLAGS_rss_oom_deny_ratio));
   SetSerializationMaxChunkSize(absl::GetFlag(FLAGS_serialization_max_chunk_size));
+  SetMaxSquashedCmdNum(absl::GetFlag(FLAGS_max_squashed_cmd_num));
 
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.
@@ -1429,9 +1440,13 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
     }
 
     dfly_cntx->transaction = dist_trans.get();
+    MultiCommandSquasher::Opts opts;
+    opts.verify_commands = true;
+    opts.max_squash_size = ss->max_squash_cmd_num;
+
     size_t squashed_num = MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
                                                         static_cast<RedisReplyBuilder*>(builder),
-                                                        dfly_cntx, this, {.verify_commands = true});
+                                                        dfly_cntx, this, opts);
     dfly_cntx->transaction = nullptr;
 
     dispatched += stored_cmds.size();
@@ -1735,6 +1750,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   MultiCommandSquasher::Opts opts;
   opts.verify_commands = true;
   opts.error_abort = true;
+  opts.max_squash_size = ServerState::tlocal()->max_squash_cmd_num;
   MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), &crb, cntx, this, opts);
 
   info->async_cmds_heap_mem = 0;
@@ -2209,7 +2225,9 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
 
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state != ExecScriptUse::SCRIPT_RUN &&
         !cntx->conn_state.tracking_info_.IsTrackingOn()) {
-      MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), rb, cntx, this, {});
+      MultiCommandSquasher::Opts opts;
+      opts.max_squash_size = ServerState::tlocal()->max_squash_cmd_num;
+      MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), rb, cntx, this, opts);
     } else {
       CmdArgVec arg_vec;
       for (auto& scmd : exec_info.body) {
