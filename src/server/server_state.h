@@ -274,6 +274,7 @@ class ServerState {  // public struct - to allow initialization.
 
   bool is_master = true;
   uint32_t log_slower_than_usec = UINT32_MAX;
+  uint32_t max_squash_cmd_num = 32;
 
   acl::UserRegistry* user_registry;
 
