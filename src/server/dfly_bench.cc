@@ -37,7 +37,12 @@ using std::string;
 
 ABSL_FLAG(uint16_t, p, 6379, "Server port");
 ABSL_FLAG(uint32_t, c, 20, "Number of connections per thread");
-ABSL_FLAG(uint32_t, qps, 20, "QPS schedule at which the generator sends requests to the server");
+ABSL_FLAG(int32_t, qps, 20,
+          "QPS schedule at which the generator sends requests to the server "
+          "per single connection. 0 means - coordinated omission, and positive value will throttle "
+          "the actual qps if server is slower than the target qps. "
+          "negative value means - hard target, without throttling.");
+
 ABSL_FLAG(uint32_t, n, 1000, "Number of requests to send per connection");
 ABSL_FLAG(uint32_t, test_time, 0, "Testing time in seconds");
 ABSL_FLAG(uint32_t, d, 16, "Value size in bytes ");
@@ -604,24 +609,56 @@ void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
 
 void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
   start_ns_ = absl::GetCurrentTimeNanos();
-  unsigned pipeline = GetFlag(FLAGS_pipeline);
+  uint32_t pipeline = std::max<uint32_t>(GetFlag(FLAGS_pipeline), 1u);
+  bool should_throttle = GetFlag(FLAGS_qps) > 0;
 
   stats_.num_clients++;
   int64_t time_limit_ns =
       time_limit_ > 0 ? int64_t(time_limit_) * 1'000'000'000 + start_ns_ : INT64_MAX;
-
+  int64_t now = start_ns_;
   SlotRange slot_range{0, kNumSlots - 1};
+  CHECK_GT(num_reqs_, 0u);
 
-  for (unsigned i = 0; i < num_reqs_; ++i) {
-    int64_t now = absl::GetCurrentTimeNanos();
+  uint32_t num_batches = ((num_reqs_ - 1) / pipeline) + 1;
 
-    if (now > time_limit_ns) {
-      break;
+  for (unsigned i = 0; i < num_batches && now < time_limit_ns; ++i) {
+    if (i == num_batches - 1) {  // last batch
+      pipeline = num_reqs_ - i * pipeline;
     }
+
+    for (unsigned j = 0; j < pipeline; ++j) {
+      // TODO: this skews the distribution if slot ranges are uneven.
+      // Ideally we would like to pick randomly a single slot from all the ranges we have
+      // and pass it to cmd_gen->Next below.
+      if (!shard_slots_.Empty()) {
+        slot_range = shard_slots_.NextSlotRange(ep_, i);
+      }
+
+      string cmd = cmd_gen->Next(slot_range);
+
+      Req req;
+      req.start = absl::GetCurrentTimeNanos();
+      req.might_hit = cmd_gen->might_hit();
+
+      reqs_.push(req);
+
+      error_code ec = socket_->Write(io::Buffer(cmd));
+      if (ec && FiberSocketBase::IsConnClosed(ec)) {
+        // TODO: report failure
+        VLOG(1) << "Connection closed";
+        break;
+      }
+      CHECK(!ec) << ec.message();
+      if (cmd_gen->noreply()) {
+        PopRequest();
+      }
+    }
+
+    now = absl::GetCurrentTimeNanos();
     if (cycle_ns) {
       int64_t target_ts = start_ns_ + i * (*cycle_ns);
       int64_t sleep_ns = target_ts - now;
-      if (reqs_.size() > 10 && sleep_ns <= 0) {
+      if (reqs_.size() > pipeline * 2 && should_throttle && sleep_ns <= 0) {
         sleep_ns = 10'000;
       }
 
@@ -630,7 +667,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
         // There is no point in sending more requests if they are piled up in the server.
         do {
           ThisFiber::SleepFor(chrono::nanoseconds(sleep_ns));
-        } while (reqs_.size() > 10);
+        } while (should_throttle && reqs_.size() > pipeline * 2);
       } else if (i % 256 == 255) {
         ThisFiber::Yield();
         VLOG(5) << "Behind QPS schedule";
@@ -639,33 +676,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
       // Coordinated omission.
 
       fb2::NoOpLock lk;
-      cnd_.wait(lk, [this, pipeline] { return reqs_.size() < pipeline; });
-    }
-
-    // TODO: this skews the distribution if slot ranges are uneven.
-    // Ideally we would like to pick randomly a single slot from all the ranges we have
-    // and pass it to cmd_gen->Next below.
-    if (!shard_slots_.Empty()) {
-      slot_range = shard_slots_.NextSlotRange(ep_, i);
-    }
-
-    string cmd = cmd_gen->Next(slot_range);
-
-    Req req;
-    req.start = absl::GetCurrentTimeNanos();
-    req.might_hit = cmd_gen->might_hit();
-
-    reqs_.push(req);
-
-    error_code ec = socket_->Write(io::Buffer(cmd));
-    if (ec && FiberSocketBase::IsConnClosed(ec)) {
-      // TODO: report failure
-      VLOG(1) << "Connection closed";
-      break;
-    }
-    CHECK(!ec) << ec.message();
-    if (cmd_gen->noreply()) {
-      PopRequest();
+      cnd_.wait(lk, [this] { return reqs_.empty(); });
     }
   }
 
@@ -908,12 +919,15 @@ void WatchFiber(size_t num_shards, atomic_bool* finish_signal, ProactorPool* pp)
   num_shards = max<size_t>(num_shards, 1u);
   uint64_t resp_goal = GetFlag(FLAGS_c) * pp->size() * GetFlag(FLAGS_n) * num_shards;
   uint32_t time_limit = GetFlag(FLAGS_test_time);
+  bool should_throttle = GetFlag(FLAGS_qps) > 0;
 
   while (*finish_signal == false) {
     // we sleep with resolution of 1s but print with lower frequency to be more responsive
     // when benchmark finishes.
     ThisFiber::SleepFor(1s);
-    pp->AwaitBrief([](auto, auto*) { client->AdjustCycle(); });
+    if (should_throttle) {
+      pp->AwaitBrief([](auto, auto*) { client->AdjustCycle(); });
+    }
 
     int64_t now = absl::GetCurrentTimeNanos();
     if (now - last_print < 5000'000'000LL)  // 5s
@@ -1084,9 +1098,9 @@ int main(int argc, char* argv[]) {
   if (protocol == RESP) {
     shards = proactor->Await([&] { return FetchClusterInfo(ep, proactor); });
   }
-  LOG(INFO) << "Connecting threads to "
-            << (shards.empty() ? string("single node ")
-                               : absl::StrCat(shards.size(), " shard cluster"));
+  CONSOLE_INFO << "Connecting to "
+               << (shards.empty() ? string("single node ")
+                                  : absl::StrCat(shards.size(), " shard cluster"));
 
   if (!shards.empty() && !GetFlag(FLAGS_command).empty() && GetFlag(FLAGS_cluster_skip_tags)) {
     // For custom commands we may need to use the same hashtag for multiple keys.
@@ -1112,9 +1126,11 @@ int main(int argc, char* argv[]) {
   CHECK_LE(key_minimum, key_maximum);
 
   uint32_t thread_key_step = 0;
-  const uint32_t qps = GetFlag(FLAGS_qps);
+  uint32_t qps = abs(GetFlag(FLAGS_qps));
+  bool throttle = GetFlag(FLAGS_qps) > 0;
   const int64_t interval = qps ? 1'000'000'000LL / qps : 0;
   uint64_t num_reqs = GetFlag(FLAGS_n);
+
   uint64_t total_conn_num = GetFlag(FLAGS_c) * pp->size();
   uint64_t total_requests = num_reqs * total_conn_num;
   uint32_t time_limit = GetFlag(FLAGS_test_time);
@@ -1130,11 +1146,12 @@ int main(int argc, char* argv[]) {
 
   if (!time_limit) {
     CONSOLE_INFO << "Running " << pp->size() << " threads, sending " << num_reqs
-                 << " requests per each connection, or " << total_requests << " requests overall";
+                 << " requests per each connection, or " << total_requests << " requests overall "
+                 << (throttle ? "with" : "without") << " throttling";
   }
   if (interval) {
-    CONSOLE_INFO << "At a rate of " << GetFlag(FLAGS_qps)
-                 << " rps per connection, i.e. request every " << interval / 1000 << "us";
+    CONSOLE_INFO << "At a rate of " << qps << " rps per connection, i.e. request every "
+                 << interval / 1000 << "us";
     CONSOLE_INFO << "Overall scheduled RPS: " << qps * total_conn_num;
   } else {
     CONSOLE_INFO << "Coordinated omission mode - the rate is determined by the server";

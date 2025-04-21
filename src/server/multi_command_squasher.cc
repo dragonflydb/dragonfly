@@ -114,7 +114,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
   if (keys->NumArgs() == 0)
     return SquashResult::NOT_SQUASHED;
 
-  // Check if all commands belong to one shard
+  // Check if all command keys belong to one shard
   ShardId last_sid = kInvalidSid;
 
   for (string_view key : keys->Range(args)) {
