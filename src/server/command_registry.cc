@@ -29,7 +29,8 @@ ABSL_FLAG(vector<string>, oom_deny_commands, {},
           "Additinal commands that will be marked as denyoom");
 
 ABSL_FLAG(vector<string>, command_alias, {},
-          "Add an alias for given command(s), format is: <alias>=<original>, <alias>=<original>");
+          "Add an alias for given command(s), format is: <alias>=<original>, <alias>=<original>. "
+          "Aliases must be set identically on replicas, if applicable");
 
 namespace dfly {
 
@@ -107,16 +108,17 @@ CmdLineMapping ParseCmdlineArgMap(const absl::Flag<std::vector<std::string>>& fl
   return parsed_mappings;
 }
 
-CmdLineMapping AliasMap() {
-  CmdLineMapping alias_map;
-  CmdLineMapping orig_map = ParseCmdlineArgMap(FLAGS_command_alias);
-  alias_map.reserve(orig_map.size());
-  std::for_each(std::make_move_iterator(orig_map.begin()), std::make_move_iterator(orig_map.end()),
-                [&alias_map](auto&& pair) {
-                  alias_map.emplace(std::move(pair.second), std::move(pair.first));
+CmdLineMapping OriginalToAliasMap() {
+  CmdLineMapping original_to_alias;
+  CmdLineMapping alias_to_original = ParseCmdlineArgMap(FLAGS_command_alias);
+  original_to_alias.reserve(alias_to_original.size());
+  std::for_each(std::make_move_iterator(alias_to_original.begin()),
+                std::make_move_iterator(alias_to_original.end()),
+                [&original_to_alias](auto&& pair) {
+                  original_to_alias.emplace(std::move(pair.second), std::move(pair.first));
                 });
 
-  return alias_map;
+  return original_to_alias;
 }
 
 }  // namespace
@@ -203,18 +205,19 @@ CommandRegistry::CommandRegistry() {
 }
 
 void CommandRegistry::Init(unsigned int thread_count) {
-  const auto alias_mappings = AliasMap();
-  absl::flat_hash_map<std::string, CommandId> alias_cmds;
-  alias_cmds.reserve(alias_mappings.size());
+  const CmdLineMapping original_to_alias = OriginalToAliasMap();
+  absl::flat_hash_map<std::string, CommandId> alias_to_command_id;
+  alias_to_command_id.reserve(original_to_alias.size());
   for (auto& [_, cmd] : cmd_map_) {
     cmd.Init(thread_count);
-    if (auto it = alias_mappings.find(cmd.name()); it != alias_mappings.end()) {
+    if (auto it = original_to_alias.find(cmd.name()); it != original_to_alias.end()) {
       auto alias_cmd = cmd.Clone(it->second);
       alias_cmd.Init(thread_count);
-      alias_cmds.insert({it->second, std::move(alias_cmd)});
+      alias_to_command_id.insert({it->second, std::move(alias_cmd)});
     }
   }
-  std::copy(std::make_move_iterator(alias_cmds.begin()), std::make_move_iterator(alias_cmds.end()),
+  std::copy(std::make_move_iterator(alias_to_command_id.begin()),
+            std::make_move_iterator(alias_to_command_id.end()),
             std::inserter(cmd_map_, cmd_map_.end()));
 }
 
