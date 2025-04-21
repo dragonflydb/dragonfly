@@ -4,6 +4,7 @@
 
 #include "server/main_service.h"
 
+#include "absl/strings/str_split.h"
 #include "facade/resp_expr.h"
 #include "util/fibers/synchronization.h"
 
@@ -1246,13 +1247,7 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
 
   dfly_cntx->cid = cid;
 
-  // If cmd is an alias, pass it to Invoke so the stats are updated against the alias. By defaults
-  // stats will be updated for cid.name
-  std::optional<std::string_view> orig_cmd_name = std::nullopt;
-  if (registry_.IsAlias(cmd)) {
-    orig_cmd_name = cmd;
-  }
-  if (!InvokeCmd(cid, args_no_cmd, builder, dfly_cntx, orig_cmd_name)) {
+  if (!InvokeCmd(cid, args_no_cmd, builder, dfly_cntx)) {
     builder->SendError("Internal Error");
     builder->CloseConnection();
   }
@@ -1313,7 +1308,7 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
 }
 
 bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBuilder* builder,
-                        ConnectionContext* cntx, std::optional<std::string_view> orig_cmd_name) {
+                        ConnectionContext* cntx) {
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
@@ -1362,8 +1357,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
   auto last_error = builder->ConsumeLastError();
   DCHECK(last_error.empty());
   try {
-    invoke_time_usec = cid->Invoke(tail_args, CommandContext{tx, builder, cntx},
-                                   orig_cmd_name.value_or(cid->name()));
+    invoke_time_usec = cid->Invoke(tail_args, CommandContext{tx, builder, cntx});
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
