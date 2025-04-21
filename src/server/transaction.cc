@@ -149,18 +149,20 @@ cv_status Transaction::BatonBarrier::Wait(time_point tp) {
 
 Transaction::Guard::Guard(Transaction* tx) : tx(tx) {
   DCHECK(tx->cid_->opt_mask() & CO::GLOBAL_TRANS);
-  tx->Execute([](auto*, auto*) { return OpStatus::OK; }, false);
-  shard_set->RunBriefInParallel([](EngineShard* shard) {
+  auto cb = [&](Transaction* t, EngineShard* shard) {
     namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(false);
-  });
+    return OpStatus::OK;
+  };
+  tx->Execute(cb, false);
 }
 
 Transaction::Guard::~Guard() {
-  tx->Conclude();
-  tx->Refurbish();
-  shard_set->RunBriefInParallel([](EngineShard* shard) {
+  auto cb = [&](Transaction* t, EngineShard* shard) {
     namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
-  });
+    return OpStatus::OK;
+  };
+  tx->Execute(cb, true);
+  tx->Refurbish();
 }
 
 void Transaction::Init(unsigned num_shards) {

@@ -131,6 +131,7 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
   journal->UnregisterOnChange(cb_id);
   if (!cancel) {
     // always succeeds because serializer_ flushes to string.
+    VLOG(1) << "FinalizeJournalStream lsn: " << journal->GetLsn();
     std::ignore = serializer_->SendJournalOffset(journal->GetLsn());
     PushSerialized(true);
   }

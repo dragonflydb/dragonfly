@@ -2964,7 +2964,11 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     """
     This test reproduces a bug in the JSON memory tracking.
     """
-    master = df_factory.create(proactor_threads=2, serialization_max_chunk_size=1)
+    master = df_factory.create(
+        proactor_threads=2,
+        serialization_max_chunk_size=1,
+        vmodule="replica=2,dflycmd=2,snapshot=1,rdb_save=1,rdb_load=1,journal_slice=2",
+    )
     replicas = [df_factory.create(proactor_threads=2) for i in range(2)]
 
     # Start instances and connect clients
