@@ -68,6 +68,7 @@ class JournalStreamer {
 
   size_t in_flight_bytes_ = 0, total_sent_ = 0;
   time_t last_lsn_time_ = 0;
+  LSN last_lsn_writen_ = 0;
   util::fb2::EventCount waker_;
   uint32_t journal_cb_id_{0};
 };

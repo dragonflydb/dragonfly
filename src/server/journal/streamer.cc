@@ -69,9 +69,10 @@ void JournalStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
           return;
         }
 
+        DCHECK_GT(item.lsn, last_lsn_writen_);
         Write(item.data);
         time_t now = time(nullptr);
-
+        last_lsn_writen_ = item.lsn;
         // TODO: to chain it to the previous Write call.
         if (send_lsn && now - last_lsn_time_ > 3) {
           last_lsn_time_ = now;
