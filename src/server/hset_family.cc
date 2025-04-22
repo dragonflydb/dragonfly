@@ -1271,10 +1271,12 @@ void HSetFamily::HRandField(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   OpResult<StringVec> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    if ((result->size() == 1) && (args.size() == 1))
+    if (result->size() == 1 && args.size() == 1)
       rb->SendBulkString(result->front());
+    else if (with_values)
+      rb->SendBulkStrArrAsPairs(*result);
     else
-      rb->SendBulkStrArr(*result, facade::RedisReplyBuilder::ARRAY);
+      rb->SendBulkStrArr(*result, RedisReplyBuilder::ARRAY);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     if (args.size() == 1)
       rb->SendNull();

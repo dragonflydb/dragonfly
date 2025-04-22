@@ -296,6 +296,8 @@ class RedisReplyBuilder : public RedisReplyBuilderBase {
 
   void StartArray(unsigned len);
   void SendEmptyArray();
+
+  void SendBulkStrArrAsPairs(const ArgRange& strs);
 };
 
 }  // namespace facade
