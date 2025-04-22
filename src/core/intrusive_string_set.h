@@ -16,6 +16,10 @@
 #include "base/hash.h"
 #include "base/pmr/memory_resource.h"
 
+extern "C" {
+#include "redis/zmalloc.h"
+}
+
 namespace dfly {
 
 class ISLEntry {
@@ -36,7 +40,7 @@ class ISLEntry {
   }
 
   static void Destroy(ISLEntry entry) {
-    free(entry.Raw());
+    zfree(entry.Raw());
   }
 
   operator bool() const {
@@ -80,7 +84,7 @@ class ISLEntry {
 
     auto size = sizeof(next) + sizeof(key_size) + key_size + has_ttl * sizeof(ttl_sec);
 
-    char* data = (char*)malloc(size);
+    char* data = (char*)zmalloc(size);
     ISLEntry res(data);
 
     std::memcpy(data, &next, sizeof(next));
@@ -286,6 +290,7 @@ class IntrusiveStringSet {
   void Clear() {
     capacity_log_ = 0;
     entries_.resize(0);
+    size_ = 0;
   }
 
   ISLEntry AddUnique(std::string_view str, IntrusiveStringList& bucket,
