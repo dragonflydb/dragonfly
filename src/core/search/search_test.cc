@@ -844,6 +844,34 @@ TEST_F(SearchTest, MatchNonNullField) {
   }
 }
 
+TEST_F(SearchTest, InvalidVectorParameter) {
+  search::Schema schema;
+  schema.fields["v"] = search::SchemaField{
+      search::SchemaField::VECTOR,
+      0,   // flags
+      "v"  // short_name
+  };
+
+  search::SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = 2;
+  params.sim = search::VectorSimilarity::L2;
+  params.capacity = 10;
+  params.hnsw_m = 16;
+  params.hnsw_ef_construction = 200;
+  schema.fields["v"].special_params = params;
+
+  search::IndicesOptions options;
+  search::FieldIndices indices{schema, options, PMR_NS::get_default_resource(), nullptr};
+
+  search::SearchAlgorithm algo;
+  search::QueryParams query_params;
+
+  query_params["b"] = "abcdefg";
+
+  ASSERT_FALSE(algo.Init("*=>[KNN 2 @v $b]", &query_params));
+}
+
 }  // namespace search
 
 }  // namespace dfly
