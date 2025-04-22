@@ -130,6 +130,9 @@ ABSL_FLAG(bool, info_replication_valkey_compatible, true,
 ABSL_FLAG(bool, managed_service_info, false,
           "Hides some implementation details from users when true (i.e. in managed service env)");
 
+ABSL_FLAG(string, availability_zone, "",
+          "server availability zone, used by clients to read from local-zone replicas");
+
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(uint32_t, hz);
@@ -2378,6 +2381,12 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("multiplexing_api", multiplex_api);
     append("tcp_port", GetFlag(FLAGS_port));
 
+    // Add availability_zone if it's not empty
+    const auto& az = GetFlag(FLAGS_availability_zone);
+    if (!az.empty()) {
+      append("availability_zone", az);
+    }
+
     uint64_t uptime = time(NULL) - start_time_;
     append("uptime_in_seconds", uptime);
     append("uptime_in_days", uptime / (3600 * 24));
@@ -2882,8 +2891,12 @@ void ServerFamily::Hello(CmdArgList args, const CommandContext& cmd_cntx) {
     rb->SetRespVersion(RespVersion::kResp2);
   }
 
+  // Define number of fields in the response - add availability_zone if flag is not empty
+  const auto& az = GetFlag(FLAGS_availability_zone);
+  const int fields_count = az.empty() ? 7 : 8;
+
   SinkReplyBuilder::ReplyAggregator agg(rb);
-  rb->StartCollection(7, RedisReplyBuilder::MAP);
+  rb->StartCollection(fields_count, RedisReplyBuilder::MAP);
   rb->SendBulkString("server");
   rb->SendBulkString("redis");
   rb->SendBulkString("version");
@@ -2898,6 +2911,12 @@ void ServerFamily::Hello(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendBulkString(GetRedisMode());
   rb->SendBulkString("role");
   rb->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
+
+  // Add availability_zone to the response if flag is explicitly set and not empty
+  if (!az.empty()) {
+    rb->SendBulkString("availability_zone");
+    rb->SendBulkString(az);
+  }
 }
 
 void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx) {
