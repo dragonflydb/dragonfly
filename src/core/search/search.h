@@ -140,9 +140,8 @@ struct SearchResult {
   std::string error;
 };
 
-struct AggregationInfo {
-  std::string_view alias;
-  bool descending;
+struct KnnScoreSortOption {
+  std::string_view score_field_alias;
   size_t limit = std::numeric_limits<size_t>::max();
 };
 
@@ -153,13 +152,12 @@ class SearchAlgorithm {
   ~SearchAlgorithm();
 
   // Init with query and return true if successful.
-  bool Init(std::string_view query, const QueryParams* params, const SortOption* sort = nullptr);
+  bool Init(std::string_view query, const QueryParams* params);
 
-  SearchResult Search(const FieldIndices* index,
-                      size_t limit = std::numeric_limits<size_t>::max()) const;
+  SearchResult Search(const FieldIndices* index) const;
 
   // if enabled, return limit & alias for knn query
-  std::optional<AggregationInfo> GetAggregationInfo() const;
+  std::optional<KnnScoreSortOption> GetKnnScoreSortOption() const;
 
   void EnableProfiling();
 

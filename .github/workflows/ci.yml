@@ -19,6 +19,9 @@ jobs:
         with:
           fetch-depth: 2
       - uses: actions/setup-python@v5
+        with:
+            python-version: '3.x'
+            check-latest: true
       - name: Install dependencies
         run: |
           python -m venv venv
@@ -27,10 +30,6 @@ jobs:
           lsblk -l
           echo "sda rotational = $(cat /sys/block/sda/queue/rotational)"
           echo "sdb rotational = $(cat /sys/block/sdb/queue/rotational)"
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cache/pre-commit
-          key: pre-commit|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
       - name: Run pre-commit checks
         run: |
           source venv/bin/activate
@@ -43,7 +42,8 @@ jobs:
         container: ["ubuntu-dev:20", "alpine-dev:latest"]
         build-type: [Debug, Release]
         compiler: [{ cxx: g++, c: gcc }]
-        cxx_flags: ["-Werror"]
+        # -no-pie to disable address randomization so we could symbolize stacktraces
+        cxx_flags: ["-Werror -no-pie"]
         sanitizers: ["NoSanitizers"]
         include:
           - container: "alpine-dev:latest"
@@ -59,12 +59,6 @@ jobs:
             sanitizers: "Sanitizers"
 
     runs-on: ubuntu-latest
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_CACHE_SIZE: 6G
-      SCCACHE_ERROR_LOG: /tmp/sccache_log.txt
-      # SCCACHE_LOG: debug
-
     container:
       image: ghcr.io/romange/${{ matrix.container }}
       # Seems that docker by default prohibits running iouring syscalls
@@ -99,16 +93,6 @@ jobs:
           touch /mnt/foo
           ls -la /mnt/foo
 
-      - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.7
-
-      - name: Configure Cache Env
-        uses: actions/github-script@v7
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')
-
       - name: Configure CMake
         # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
         # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
@@ -129,14 +113,12 @@ jobs:
             export USAN="ON"
           fi
 
-          # -no-pie to disable address randomization so we could symbolize stacktraces
           cmake -B ${GITHUB_WORKSPACE}/build \
             -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
             -GNinja \
             -DCMAKE_C_COMPILER="${{matrix.compiler.c}}" \
             -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}} -no-pie" -DWITH_AWS:BOOL=OFF \
+            -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}}" -DWITH_AWS:BOOL=OFF \
             -DWITH_ASAN="${ASAN}" \
             -DWITH_USAN="${USAN}" \
             -L

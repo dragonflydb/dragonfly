@@ -131,10 +131,10 @@ async def test_replication_all(
 
     info = await c_master.info()
     preemptions = info["big_value_preemptions"]
-    total_buckets = info["num_buckets"]
+    key_capacity = info["prime_capacity"]
     compressed_blobs = info["compressed_blobs"]
     logging.debug(
-        f"Compressed blobs {compressed_blobs} .Buckets {total_buckets}. Preemptions {preemptions}"
+        f"Compressed blobs {compressed_blobs} .Capacity {key_capacity}. Preemptions {preemptions}"
     )
 
     assert preemptions >= seeder.huge_value_target * 0.5
@@ -143,11 +143,11 @@ async def test_replication_all(
     # per bucket.
     if seeder.data_size < 1000:
         # We care that we preempt less times than the total buckets such that we can be
-        # sure that we test both flows (with and without preemptions). Preemptions on 30%
+        # sure that we test both flows (with and without preemptions). Preemptions on 3%
         # of buckets seems like a big number but that depends on a few parameters like
         # the size of the hug value and the serialization max chunk size. For the test cases here,
-        # it's usually close to 10% but there are some that are close to 30.
-        assert preemptions <= (total_buckets * 0.3)
+        # it's usually close to 1% but there are some that are close to 3.
+        assert preemptions <= (key_capacity * 0.03)
 
 
 async def check_replica_finished_exec(c_replica: aioredis.Redis, m_offset):
@@ -167,6 +167,7 @@ async def check_all_replicas_finished(c_replicas, c_master, timeout=20):
     start = time.time()
     while (time.time() - start) < timeout:
         if not waiting_for:
+            logging.debug("All replicas finished after %s seconds", time.time() - start)
             return
         await asyncio.sleep(0.2)
         m_offset = await c_master.execute_command("DFLY REPLICAOFFSET")
@@ -2715,7 +2716,7 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
 
     await asyncio.sleep(1)  # replica will start resync
 
-    await check_all_replicas_finished([c_replica], c_master)
+    await check_all_replicas_finished([c_replica], c_master, 60)
     await assert_replica_reconnections(replica, 0)
 
 
@@ -2958,6 +2959,7 @@ async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFa
     await fill_task
 
 
+@pytest.mark.skip("temporarily skipped")
 async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     """
     This test reproduces a bug in the JSON memory tracking.

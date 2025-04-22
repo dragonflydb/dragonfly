@@ -240,8 +240,10 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       break;
     }
 
-    uint32_t timeout = absl::GetFlag(FLAGS_timeout);
-    uint32_t send_timeout = absl::GetFlag(FLAGS_send_timeout);
+    const uint32_t timeout = absl::GetFlag(FLAGS_timeout);
+    const uint32_t send_timeout = absl::GetFlag(FLAGS_send_timeout);
+    VLOG(1) << "ConnectionsWatcherFb: timeout=" << timeout << ", send_timeout=" << send_timeout;
+
     if (timeout == 0 && send_timeout == 0) {
       continue;
     }
@@ -268,7 +270,13 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       bool idle_read = timeout != 0 && !is_replica && phase == Phase::READ_SOCKET &&
                        dfly_conn->idle_time() > timeout;
       bool stuck_sending = send_timeout != 0 && !is_replica && dfly_conn->IsSending() &&
-                           dfly_conn->idle_time() > send_timeout;
+                           dfly_conn->GetSendWaitTimeSec() > send_timeout;
+
+      VLOG(2) << "Connection check: " << dfly_conn->GetClientInfo()
+              << ", phase=" << static_cast<int>(phase) << ", idle_time=" << dfly_conn->idle_time()
+              << ", is_replica=" << is_replica << ", is_sending=" << dfly_conn->IsSending()
+              << ", idle_read=" << idle_read << ", stuck_sending=" << stuck_sending;
+
       if (idle_read || stuck_sending) {
         conn_refs.push_back(dfly_conn->Borrow());
       }
@@ -281,6 +289,7 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       last_reference.reset();
     }
 
+    VLOG(1) << "Found " << conn_refs.size() << " connections to close due to timeout";
     for (auto& ref : conn_refs) {
       facade::Connection* conn = ref.Get();
       if (conn) {

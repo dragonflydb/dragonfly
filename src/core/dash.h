@@ -208,17 +208,19 @@ class DashTable : public detail::DashTableBase {
     return segment_.capacity() * sizeof(void*) + sizeof(SegmentType) * unique_segments_;
   }
 
+  // Returns the total number of buckets in the table, in contrast to capacity() which
+  // returns the total number of slots.
   size_t bucket_count() const {
     return unique_segments_ * SegmentType::kTotalBuckets;
   }
 
-  // Overall capacity of the table (including stash buckets).
+  // Overall capacity of the table (including stash buckets) in number of keys.
   size_t capacity() const {
     return unique_segments_ * SegmentType::capacity();
   }
 
   double load_factor() const {
-    return double(size()) / (SegmentType::capacity() * unique_segments());
+    return double(size()) / capacity();
   }
 
   // Gets a random cursor based on the available segments and buckets.

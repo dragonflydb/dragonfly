@@ -2745,7 +2745,8 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     await asyncio.sleep(random.randint(0, 50) / 100)
-    await wait_for_migration_start(nodes[1].admin_client, nodes[0].id)
+    # to pause migration we need to be in sync state
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "SYNC", 1000)
 
     logging.debug("debug migration pause")
     await nodes[1].client.execute_command("debug migration pause")
@@ -3162,7 +3163,7 @@ async def test_readonly_replication(
     await m1_node.client.execute_command("SET X 1")
 
     logging.debug("start replication")
-    await r1_node.admin_client.execute_command(f"replicaof localhost {m1_node.instance.port}")
+    await r1_node.admin_client.execute_command(f"replicaof localhost {m1_node.instance.admin_port}")
 
     await wait_available_async(r1_node.admin_client)
 
@@ -3172,6 +3173,23 @@ async def test_readonly_replication(
 
     # This behavior can be changed in the future
     assert await r1_node.client.execute_command("GET Y") == None
+
+    m1_node.replicas = []
+
+    logging.debug("Push config without replica")
+    await push_config(
+        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
+    )
+
+    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+        await r1_node.client.execute_command("GET X")
+
+    assert str(moved_error.value) == f"MOVED 7165 127.0.0.1:{instances[0].port}"
+
+    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+        await r1_node.client.execute_command("GET Y")
+
+    assert str(moved_error.value) == f"MOVED 3036 127.0.0.1:{instances[0].port}"
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})

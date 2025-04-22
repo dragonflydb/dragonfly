@@ -865,9 +865,8 @@
         "x": 12,
         "y": 15
       },
-      "id": 10,
+      "id": 25,
       "options": {
-        "alertThreshold": true,
         "legend": {
           "calcs": [],
           "displayMode": "list",
@@ -889,34 +888,18 @@
           "editorMode": "code",
           "exemplar": true,
           "expr":
-              "irate(dragonfly_net_input_bytes_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[5m])",
+              "dragonfly_db_keys{namespace=\"$namespace\",pod=~\"$pod_name\"}/ on(namespace, pod, db) dragonfly_db_capacity{namespace=\"$namespace\",pod=~\"$pod_name\", type=\"prime\"}",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
-          "legendFormat": "{{ pod }} input",
+          "legendFormat": "{{ db }} ",
           "range": true,
           "refId": "A",
-          "step": 240
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "editorMode": "code",
-          "exemplar": true,
-          "expr":
-              "irate(dragonfly_net_output_bytes_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[5m])",
-          "format": "time_series",
-          "interval": "",
-          "intervalFactor": 2,
-          "legendFormat": "{{ pod }} output",
-          "range": true,
-          "refId": "B",
-          "step": 240
+          "step": 240,
+          "target": ""
         }
       ],
-      "title": "Network I/O",
+      "title": "Table Load per DB",
       "type": "timeseries"
     },
     {
@@ -1106,6 +1089,228 @@
         "x": 12,
         "y": 22
       },
+      "id": 10,
+      "options": {
+        "alertThreshold": true,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.1.10",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr":
+              "irate(dragonfly_net_input_bytes_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[5m])",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 2,
+          "legendFormat": "{{ pod }} input",
+          "range": true,
+          "refId": "A",
+          "step": 240
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr":
+              "irate(dragonfly_net_output_bytes_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[5m])",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 2,
+          "legendFormat": "{{ pod }} output",
+          "range": true,
+          "refId": "B",
+          "step": 240
+        }
+      ],
+      "title": "Network I/O",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "links": [],
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 29
+      },
+      "id": 26,
+      "options": {
+        "alertThreshold": true,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.1.10",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr":
+              "irate(dragonfly_reply_duration_seconds{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__interval]) / irate(dragonfly_reply_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__interval])",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 2,
+          "legendFormat": "{{ pod }} input",
+          "range": true,
+          "refId": "A",
+          "step": 240
+        }
+      ],
+      "title": "Reply Latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "links": [],
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 29
+      },
       "id": 13,
       "options": {
         "alertThreshold": true,
@@ -1224,7 +1429,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 29
+        "y": 36
       },
       "id": 16,
       "options": {
@@ -1267,7 +1472,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 36
+        "y": 43
       },
       "id": 19,
       "panels": [],
@@ -1337,7 +1542,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 37
+        "y": 44
       },
       "id": 18,
       "options": {
@@ -1451,7 +1656,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 37
+        "y": 44
       },
       "id": 22,
       "options": {
@@ -1474,8 +1679,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr":
-              "dragonfly_pipeline_queue_length{namespace=\"$namespace\",pod=~\"$pod_name\"}/dragonfly_connected_clients{namespace=\"$namespace\",pod=~\"$pod_name\"}",
+          "expr": "dragonfly_pipeline_queue_length{namespace=\"$namespace\",pod=~\"$pod_name\"}",
           "instant": false,
           "legendFormat": "avr_pipeline_depth",
           "range": true,
@@ -1547,7 +1751,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 45
+        "y": 52
       },
       "id": 21,
       "options": {
@@ -1658,7 +1862,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 45
+        "y": 52
       },
       "id": 23,
       "options": {

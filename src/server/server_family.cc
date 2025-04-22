@@ -1545,12 +1545,19 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   string db_key_expire_metrics;
 
   AppendMetricHeader("db_keys", "Total number of keys by DB", MetricType::GAUGE, &db_key_metrics);
+  AppendMetricHeader("db_capacity", "Table capacity by DB", MetricType::GAUGE, &db_key_metrics);
+
   AppendMetricHeader("db_keys_expiring", "Total number of expiring keys by DB", MetricType::GAUGE,
                      &db_key_expire_metrics);
 
   for (size_t i = 0; i < m.db_stats.size(); ++i) {
     AppendMetricValue("db_keys", m.db_stats[i].key_count, {"db"}, {StrCat("db", i)},
                       &db_key_metrics);
+    AppendMetricValue("db_capacity", m.db_stats[i].prime_capacity, {"db", "type"},
+                      {StrCat("db", i), "prime"}, &db_key_metrics);
+    AppendMetricValue("db_capacity", m.db_stats[i].expire_capacity, {"db", "type"},
+                      {StrCat("db", i), "expire"}, &db_key_metrics);
+
     AppendMetricValue("db_keys_expiring", m.db_stats[i].expire_count, {"db"}, {StrCat("db", i)},
                       &db_key_expire_metrics);
   }
@@ -2212,8 +2219,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   uint64_t start = absl::GetCurrentTimeNanos();
 
-  auto cmd_stat_cb = [&dest = result.cmd_stats_map](string_view name,
-                                                    const CmdCallStats::mapped_type& stat) {
+  auto cmd_stat_cb = [&dest = result.cmd_stats_map](string_view name, const CmdCallStats& stat) {
     auto& [calls, sum] = dest[absl::AsciiStrToLower(name)];
     calls += stat.first;
     sum += stat.second;
@@ -2423,7 +2429,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       }
     }
     append("table_used_memory", total.table_mem_usage);
-    append("num_buckets", total.bucket_count);
+    append("prime_capacity", total.prime_capacity);
+    append("expire_capacity", total.expire_capacity);
     append("num_entries", total.key_count);
     append("inline_keys", total.inline_keys);
     append("small_string_bytes", m.small_string_bytes);
@@ -2486,6 +2493,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("rejected_connections", -1);
     append("expired_keys", m.events.expired_keys);
     append("evicted_keys", m.events.evicted_keys);
+    append("total_heartbeat_expired_keys", m.shard_stats.total_heartbeat_expired_keys);
+    append("total_heartbeat_expired_bytes", m.shard_stats.total_heartbeat_expired_bytes);
+    append("total_heartbeat_expired_calls", m.shard_stats.total_heartbeat_expired_calls);
     append("hard_evictions", m.events.hard_evictions);
     append("garbage_checked", m.events.garbage_checked);
     append("garbage_collected", m.events.garbage_collected);

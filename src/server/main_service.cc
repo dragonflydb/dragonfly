@@ -4,6 +4,7 @@
 
 #include "server/main_service.h"
 
+#include "absl/strings/str_split.h"
 #include "facade/resp_expr.h"
 #include "util/fibers/synchronization.h"
 
@@ -115,6 +116,8 @@ ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
           "Maximum size of a value that may be serialized at once during snapshotting or full "
           "sync. Values bigger than this threshold will be serialized using streaming "
           "serialization. 0 - to disable streaming mode");
+ABSL_FLAG(uint32_t, max_squashed_cmd_num, 32,
+          "Max number of commands squashed in command squash optimizaiton");
 
 namespace dfly {
 
@@ -708,6 +711,11 @@ void SetSerializationMaxChunkSize(size_t val) {
   shard_set->pool()->AwaitBrief(cb);
 }
 
+void SetMaxSquashedCmdNum(int32_t val) {
+  auto cb = [val](unsigned, auto*) { ServerState::tlocal()->max_squash_cmd_num = val; };
+  shard_set->pool()->AwaitBrief(cb);
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -787,6 +795,9 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
         [val](unsigned tid, auto*) { facade::Connection::SetPipelineBufferLimit(tid, val); });
   });
 
+  config_registry.RegisterSetter<uint32_t>("max_squashed_cmd_num",
+                                           [](uint32_t val) { SetMaxSquashedCmdNum(val); });
+
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("replication_timeout");
   config_registry.RegisterMutable("migration_finalization_timeout_ms");
@@ -857,6 +868,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   SetRssOomDenyRatioOnAllThreads(absl::GetFlag(FLAGS_rss_oom_deny_ratio));
   SetSerializationMaxChunkSize(absl::GetFlag(FLAGS_serialization_max_chunk_size));
+  SetMaxSquashedCmdNum(absl::GetFlag(FLAGS_max_squashed_cmd_num));
 
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.
@@ -1235,13 +1247,7 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
 
   dfly_cntx->cid = cid;
 
-  // If cmd is an alias, pass it to Invoke so the stats are updated against the alias. By defaults
-  // stats will be updated for cid.name
-  std::optional<std::string_view> orig_cmd_name = std::nullopt;
-  if (registry_.IsAlias(cmd)) {
-    orig_cmd_name = cmd;
-  }
-  if (!InvokeCmd(cid, args_no_cmd, builder, dfly_cntx, orig_cmd_name)) {
+  if (!InvokeCmd(cid, args_no_cmd, builder, dfly_cntx)) {
     builder->SendError("Internal Error");
     builder->CloseConnection();
   }
@@ -1302,7 +1308,7 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
 }
 
 bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBuilder* builder,
-                        ConnectionContext* cntx, std::optional<std::string_view> orig_cmd_name) {
+                        ConnectionContext* cntx) {
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
@@ -1351,8 +1357,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
   auto last_error = builder->ConsumeLastError();
   DCHECK(last_error.empty());
   try {
-    invoke_time_usec = cid->Invoke(tail_args, CommandContext{tx, builder, cntx},
-                                   orig_cmd_name.value_or(cid->name()));
+    invoke_time_usec = cid->Invoke(tail_args, CommandContext{tx, builder, cntx});
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
@@ -1429,9 +1434,13 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
     }
 
     dfly_cntx->transaction = dist_trans.get();
+    MultiCommandSquasher::Opts opts;
+    opts.verify_commands = true;
+    opts.max_squash_size = ss->max_squash_cmd_num;
+
     size_t squashed_num = MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
                                                         static_cast<RedisReplyBuilder*>(builder),
-                                                        dfly_cntx, this, true, false);
+                                                        dfly_cntx, this, opts);
     dfly_cntx->transaction = nullptr;
 
     dispatched += stored_cmds.size();
@@ -1732,7 +1741,11 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   tx->MultiSwitchCmd(eval_cid);
 
   CapturingReplyBuilder crb{ReplyMode::ONLY_ERR};
-  MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), &crb, cntx, this, true, true);
+  MultiCommandSquasher::Opts opts;
+  opts.verify_commands = true;
+  opts.error_abort = true;
+  opts.max_squash_size = ServerState::tlocal()->max_squash_cmd_num;
+  MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), &crb, cntx, this, opts);
 
   info->async_cmds_heap_mem = 0;
   info->async_cmds.clear();
@@ -2206,7 +2219,9 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
 
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state != ExecScriptUse::SCRIPT_RUN &&
         !cntx->conn_state.tracking_info_.IsTrackingOn()) {
-      MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), rb, cntx, this);
+      MultiCommandSquasher::Opts opts;
+      opts.max_squash_size = ServerState::tlocal()->max_squash_cmd_num;
+      MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), rb, cntx, this, opts);
     } else {
       CmdArgVec arg_vec;
       for (auto& scmd : exec_info.body) {
@@ -2514,7 +2529,7 @@ VarzValue::Map Service::GetVarzStats() {
 
   res.emplace_back("keys", VarzValue::FromInt(db_stats.key_count));
   res.emplace_back("obj_mem_usage", VarzValue::FromInt(db_stats.obj_memory_usage));
-  double load = double(db_stats.key_count) / (1 + db_stats.bucket_count);
+  double load = double(db_stats.key_count) / (1 + db_stats.prime_capacity);
   res.emplace_back("table_load_factor", VarzValue::FromDouble(load));
 
   return res;

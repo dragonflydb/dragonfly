@@ -4,6 +4,7 @@
 
 #include "server/json_family.h"
 
+#include <absl/flags/flag.h>
 #include <absl/strings/str_replace.h>
 
 #include "base/gtest.h"
@@ -15,6 +16,8 @@
 using namespace testing;
 using namespace std;
 using namespace util;
+
+ABSL_DECLARE_FLAG(bool, jsonpathv2);
 
 namespace dfly {
 
@@ -2546,6 +2549,14 @@ TEST_F(JsonFamilyTest, MGetLegacy) {
   resp = Run({"JSON.MGET", "json1", "json2", "json3", ".address.country"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   EXPECT_THAT(resp.GetVec(), ElementsAre(R"("Israel")", R"("Germany")", ArgType(RespExpr::NIL)));
+
+  resp = Run({"JSON.MGET", "json1", "json2", ".[0]"});
+  if (auto jsonpathv2 = absl::GetFlag(FLAGS_jsonpathv2); jsonpathv2) {
+    ASSERT_EQ(RespExpr::ARRAY, resp.type);
+    EXPECT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL)));
+  } else {
+    EXPECT_THAT(resp, ErrArg("ERR syntax error"));
+  }
 
   resp = Run({"JSON.SET", "json3", ".", json[2]});
   ASSERT_THAT(resp, "OK");

@@ -5,6 +5,7 @@
 #include "server/search/aggregator.h"
 
 #include "base/logging.h"
+#include "server/search/doc_index.h"
 
 namespace dfly::aggregate {
 
@@ -97,7 +98,7 @@ void Aggregator::DoSort(const SortParams& sort_params) {
       if (lv == rv) {
         continue;
       }
-      return order == SortParams::SortOrder::ASC ? lv < rv : lv > rv;
+      return order == SortOrder::ASC ? lv < rv : lv > rv;
     }
     return false;
   };
