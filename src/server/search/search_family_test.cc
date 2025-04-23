@@ -2722,7 +2722,7 @@ TEST_F(SearchFamilyTest, JsonWithNullFields) {
               AreDocIds("doc:1", "doc:2"));
 }
 
-TEST_F(SearchFamilyTest, TestTwoHsetDocumentCreationCrashes) {
+TEST_F(SearchFamilyTest, TestHsetDeleteDocumentHnswSchemaCrash) {
   EXPECT_EQ(Run({"FT.CREATE", "idx", "SCHEMA", "n", "NUMERIC", "v", "VECTOR", "HNSW", "8", "TYPE",
                  "FLOAT16", "DIM", "4", "DISTANCE_METRIC", "L2", "M", "65536"}),
             "OK");
@@ -2730,8 +2730,8 @@ TEST_F(SearchFamilyTest, TestTwoHsetDocumentCreationCrashes) {
   auto res = Run({"HSET", "doc", "n", "0"});
   EXPECT_EQ(res, 1);
 
-  res = Run({"HSET", "doc", "n", "1"});
-  EXPECT_EQ(res, 0);
+  res = Run({"DEL", "doc"});
+  EXPECT_EQ(res, 1);
 }
 
 }  // namespace dfly
