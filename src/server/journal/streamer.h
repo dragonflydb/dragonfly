@@ -48,7 +48,7 @@ class JournalStreamer {
   void ThrottleIfNeeded();
 
   virtual bool ShouldWrite(const journal::JournalItem& item) const {
-    return cntx_->IsRunning();
+    return cntx_->IsRunning() && item.opcode != journal::Op::NOOP;
   }
 
   void WaitForInflightToComplete();

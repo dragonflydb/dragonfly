@@ -57,14 +57,6 @@ void JournalStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
   dest_ = dest;
   journal_cb_id_ =
       journal_->RegisterOnChange([this, send_lsn](const JournalItem& item, bool allow_await) {
-        if (allow_await) {
-          ThrottleIfNeeded();
-          // No record to write, just await if data was written so consumer will read the data.
-          // TODO: shouldnt we trigger async write in noop??
-          if (item.opcode == Op::NOOP)
-            return;
-        }
-
         if (!ShouldWrite(item)) {
           return;
         }
@@ -80,6 +72,10 @@ void JournalStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
           JournalWriter writer(&sink);
           writer.Write(Entry{journal::Op::LSN, item.lsn});
           Write(std::move(sink).str());
+        }
+
+        if (allow_await) {
+          ThrottleIfNeeded();
         }
       });
 }
