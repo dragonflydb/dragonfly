@@ -723,8 +723,8 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
   PopulateOptions options;
 
   options.total_count = parser.Next<uint64_t>();
-  options.prefix = parser.NextOrDefault<string_view>("");
-  options.val_size = parser.NextOrDefault<uint32_t>(100);
+  options.prefix = parser.NextOrDefault<string_view>("key");
+  options.val_size = parser.NextOrDefault<uint32_t>(16);
 
   while (parser.HasNext()) {
     PopulateFlag flag = parser.MapNext("RAND", FLAG_RAND, "TYPE", FLAG_TYPE, "ELEMENTS",
