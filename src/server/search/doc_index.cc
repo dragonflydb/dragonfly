@@ -322,10 +322,14 @@ void ShardDocIndex::RemoveDoc(string_view key, const DbContext& db_cntx, const P
   if (!indices_)
     return;
 
-  auto accessor = GetAccessor(db_cntx, pv);
-  auto id = key_index_.Remove(key);
-  if (id) {
-    indices_->Remove(id.value(), *accessor);
+  try {
+    auto accessor = GetAccessor(db_cntx, pv);
+    auto id = key_index_.Remove(key);
+    if (id) {
+      indices_->Remove(id.value(), *accessor);
+    }
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "Exception while removing document " << key << ": " << e.what();
   }
 }
 
