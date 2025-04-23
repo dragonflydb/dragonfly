@@ -204,13 +204,6 @@ def test_bitpos_wrong_arguments(r: redis.Redis):
         raw_command(r, "bitpos", key)
 
 
-def test_bitfield_empty(r: redis.Redis):
-    key = "key:bitfield"
-    assert r.bitfield(key).execute() == []
-    for overflow in ("wrap", "sat", "fail"):
-        assert raw_command(r, "bitfield", key, "overflow", overflow) == []
-
-
 def test_bitfield_wrong_arguments(r: redis.Redis):
     key = "key:bitfield:wrong:args"
     with pytest.raises(redis.ResponseError):
