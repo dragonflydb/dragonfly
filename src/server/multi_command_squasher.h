@@ -104,9 +104,10 @@ class MultiCommandSquasher {
 
   // we increase size in one thread and decrease in another
   static atomic_uint64_t current_reply_size_;
-  static thread_local size_t throttle_size_limit_;
   // Used to throttle when memory is tight
-  static thread_local util::fb2::EventCount ec_;
+  static util::fb2::EventCount ec_;
+
+  static thread_local size_t throttle_size_limit_;
 };
 
 }  // namespace dfly

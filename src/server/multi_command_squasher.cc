@@ -67,9 +67,8 @@ size_t Size(const facade::CapturingReplyBuilder::Payload& payload) {
 
 atomic_uint64_t MultiCommandSquasher::current_reply_size_ = 0;
 thread_local size_t MultiCommandSquasher::throttle_size_limit_ =
-    absl::GetFlag(FLAGS_throttle_squashed);
-
-thread_local util::fb2::EventCount MultiCommandSquasher::ec_;
+    absl::GetFlag(FLAGS_throttle_squashed) * ServerState::tlocal()->GetTotalShards();
+util::fb2::EventCount MultiCommandSquasher::ec_;
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
                                            Service* service, const Opts& opts)

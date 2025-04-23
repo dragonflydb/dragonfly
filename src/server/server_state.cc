@@ -127,6 +127,7 @@ void ServerState::Init(uint32_t thread_index, uint32_t num_shards,
         util::fb2::Launch::post, "ConnectionsWatcher",
         [state = state_, main_listener] { state->ConnectionsWatcherFb(main_listener); });
   }
+  state_->total_shards_ = num_shards;
 }
 
 void ServerState::Destroy() {
