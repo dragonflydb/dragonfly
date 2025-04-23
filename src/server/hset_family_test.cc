@@ -553,8 +553,9 @@ TEST_F(HSetFamilyTest, HRandFieldRespFormat) {
   EXPECT_THAT(resp, ArrLen(3));
   for (const auto& v : resp.GetVec()) {
     EXPECT_THAT(v, ArrLen(2));
-    EXPECT_THAT(v.GetVec()[0], AnyOf("a", "b", "c"));
-    EXPECT_THAT(v.GetVec()[1], expected[v.GetVec()[0].GetView()]);
+    const auto& kv = v.GetVec();
+    EXPECT_THAT(kv[0], AnyOf("a", "b", "c"));
+    EXPECT_THAT(kv[1], expected[kv[0].GetView()]);
   }
 
   Run({"HELLO", "2"});
