@@ -591,7 +591,7 @@ void AclFamily::DryRun(CmdArgList args, const CommandContext& cmd_cntx) {
 
   string command = absl::AsciiStrToUpper(ArgS(args, 1));
   auto* cid = cmd_registry_->Find(command);
-  if (!cid) {
+  if (!cid || cid->IsAlias()) {
     auto error = absl::StrCat("Command '", command, "' not found");
     rb->SendError(error);
     return;
@@ -1062,7 +1062,7 @@ std::pair<AclFamily::OptCommand, bool> AclFamily::MaybeParseAclCommand(
     std::string_view command) const {
   if (absl::StartsWith(command, "+")) {
     auto res = cmd_registry_->Find(command.substr(1));
-    if (!res) {
+    if (!res || res->IsAlias()) {
       return {};
     }
     std::pair<size_t, uint64_t> cmd{res->GetFamily(), res->GetBitIndex()};
@@ -1071,7 +1071,7 @@ std::pair<AclFamily::OptCommand, bool> AclFamily::MaybeParseAclCommand(
 
   if (absl::StartsWith(command, "-")) {
     auto res = cmd_registry_->Find(command.substr(1));
-    if (!res) {
+    if (!res || res->IsAlias()) {
       return {};
     }
     std::pair<size_t, uint64_t> cmd{res->GetFamily(), res->GetBitIndex()};

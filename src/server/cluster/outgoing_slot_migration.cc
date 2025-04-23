@@ -309,7 +309,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
   auto pause_fb_opt =
       dfly::Pause(server_family_->GetNonPriviligedListeners(), &namespaces->GetDefaultNamespace(),
-                  nullptr, ClientPause::WRITE, is_pause_in_progress);
+                  nullptr, ClientPause::ALL, is_pause_in_progress);
 
   if (!pause_fb_opt) {
     auto err = absl::StrCat("Migration finalization time out ", cf_->MyID(), " : ",

@@ -412,4 +412,17 @@ TEST_F(SetFamilyTest, SAddEx) {
   EXPECT_THAT(Run({"saddex", "key", "KEEPTTL", "2"}), ErrArg("wrong number of arguments"));
 }
 
+TEST_F(SetFamilyTest, CheckSetLinkExpiryTransfer) {
+  for (int i = 0; i < 10; i++) {
+    EXPECT_THAT(Run({"SADDEX", "key", "5", absl::StrCat(i)}), IntArg(1));
+  }
+  for (int i = 0; i < 9; i++) {
+    Run({"SREM", "key", absl::StrCat(i)});
+  }
+  EXPECT_THAT(Run({"SCARD", "key"}), IntArg(1));
+  AdvanceTime(6000);
+  Run({"SMEMBERS", "key"});
+  EXPECT_THAT(Run({"SCARD", "key"}), IntArg(0));
+}
+
 }  // namespace dfly

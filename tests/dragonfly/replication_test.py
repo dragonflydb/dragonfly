@@ -17,7 +17,7 @@ from .instance import DflyInstanceFactory, DflyInstance
 from .seeder import Seeder as SeederV2
 from . import dfly_args
 from .proxy import Proxy
-from .seeder import StaticSeeder
+from .seeder import DebugPopulateSeeder
 
 ADMIN_PORT = 1211
 
@@ -131,10 +131,10 @@ async def test_replication_all(
 
     info = await c_master.info()
     preemptions = info["big_value_preemptions"]
-    total_buckets = info["num_buckets"]
+    key_capacity = info["prime_capacity"]
     compressed_blobs = info["compressed_blobs"]
     logging.debug(
-        f"Compressed blobs {compressed_blobs} .Buckets {total_buckets}. Preemptions {preemptions}"
+        f"Compressed blobs {compressed_blobs} .Capacity {key_capacity}. Preemptions {preemptions}"
     )
 
     assert preemptions >= seeder.huge_value_target * 0.5
@@ -143,11 +143,11 @@ async def test_replication_all(
     # per bucket.
     if seeder.data_size < 1000:
         # We care that we preempt less times than the total buckets such that we can be
-        # sure that we test both flows (with and without preemptions). Preemptions on 30%
+        # sure that we test both flows (with and without preemptions). Preemptions on 3%
         # of buckets seems like a big number but that depends on a few parameters like
         # the size of the hug value and the serialization max chunk size. For the test cases here,
-        # it's usually close to 10% but there are some that are close to 30.
-        assert preemptions <= (total_buckets * 0.3)
+        # it's usually close to 1% but there are some that are close to 3.
+        assert preemptions <= (key_capacity * 0.03)
 
 
 async def check_replica_finished_exec(c_replica: aioredis.Redis, m_offset):
@@ -167,6 +167,7 @@ async def check_all_replicas_finished(c_replicas, c_master, timeout=20):
     start = time.time()
     while (time.time() - start) < timeout:
         if not waiting_for:
+            logging.debug("All replicas finished after %s seconds", time.time() - start)
             return
         await asyncio.sleep(0.2)
         m_offset = await c_master.execute_command("DFLY REPLICAOFFSET")
@@ -1132,7 +1133,7 @@ async def test_flushall_in_full_sync(df_factory):
     c_replica = replica.client()
 
     # Fill master with test data
-    seeder = StaticSeeder(key_target=100_000)
+    seeder = DebugPopulateSeeder(key_target=100_000)
     await seeder.run(c_master)
 
     # Start replication and wait for full sync
@@ -1210,6 +1211,7 @@ take_over_cases = [
 ]
 
 
+@pytest.mark.exclude_epoll
 @pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
 async def test_take_over_counters(df_factory, master_threads, replica_threads):
     master = df_factory.create(proactor_threads=master_threads)
@@ -1251,7 +1253,7 @@ async def test_take_over_counters(df_factory, master_threads, replica_threads):
         assert time.time() - start < 10
 
     async def delayed_takeover():
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(1)
         await c1.execute_command(f"REPLTAKEOVER 5")
 
     _, _, *results = await asyncio.gather(
@@ -2714,7 +2716,7 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
 
     await asyncio.sleep(1)  # replica will start resync
 
-    await check_all_replicas_finished([c_replica], c_master)
+    await check_all_replicas_finished([c_replica], c_master, 60)
     await assert_replica_reconnections(replica, 0)
 
 
@@ -2754,8 +2756,8 @@ async def test_memory_on_big_string_loading(df_factory):
     assert replica_peak_memory < 1.1 * replica_used_memory
 
     # Check replica data consistent
-    replica_data = await StaticSeeder.capture(c_replica)
-    master_data = await StaticSeeder.capture(c_master)
+    replica_data = await DebugPopulateSeeder.capture(c_replica)
+    master_data = await DebugPopulateSeeder.capture(c_master)
     assert master_data == replica_data
 
 
@@ -2774,7 +2776,7 @@ async def test_big_containers(df_factory, element_size, elements_number):
     c_replica = replica.client()
 
     logging.debug("Fill master with test data")
-    seeder = StaticSeeder(
+    seeder = DebugPopulateSeeder(
         key_target=50,
         data_size=element_size * elements_number,
         collection_size=elements_number,
@@ -2809,8 +2811,8 @@ async def test_big_containers(df_factory, element_size, elements_number):
     assert replica_peak_memory < 1.1 * replica_used_memory
 
     # Check replica data consistent
-    replica_data = await StaticSeeder.capture(c_replica)
-    master_data = await StaticSeeder.capture(c_master)
+    replica_data = await DebugPopulateSeeder.capture(c_replica)
+    master_data = await DebugPopulateSeeder.capture(c_master)
     assert master_data == replica_data
 
 
@@ -2860,8 +2862,8 @@ async def test_stream_approximate_trimming(df_factory):
     await asyncio.sleep(1)
 
     # Check replica data consistent
-    master_data = await StaticSeeder.capture(c_master)
-    replica_data = await StaticSeeder.capture(c_replica)
+    master_data = await DebugPopulateSeeder.capture(c_master)
+    replica_data = await DebugPopulateSeeder.capture(c_replica)
     assert master_data == replica_data
 
     # Step 3: Trim all streams to 0
@@ -2870,8 +2872,8 @@ async def test_stream_approximate_trimming(df_factory):
         await c_master.execute_command("XTRIM", stream_name, "MAXLEN", "0")
 
     # Check replica data consistent
-    master_data = await StaticSeeder.capture(c_master)
-    replica_data = await StaticSeeder.capture(c_replica)
+    master_data = await DebugPopulateSeeder.capture(c_master)
+    replica_data = await DebugPopulateSeeder.capture(c_replica)
     assert master_data == replica_data
 
 
@@ -2945,7 +2947,7 @@ async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFa
         rand = random.randint(1, 10)
         await c_master.execute_command(f"EXPIRE tmp:{i} {rand} NX")
 
-    seeder = StaticSeeder(key_target=10000)
+    seeder = SeederV2(key_target=10_000)
     fill_task = asyncio.create_task(seeder.run(master.client()))
 
     for replica in c_replicas:
@@ -2957,7 +2959,7 @@ async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFa
     await fill_task
 
 
-@pytest.mark.skip(reason="Temporary skip it. We have a bug around memory tracking")
+@pytest.mark.skip("temporarily skipped")
 async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     """
     This test reproduces a bug in the JSON memory tracking.
@@ -2978,7 +2980,7 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
         rand = random.randint(1, 4)
         await c_master.execute_command(f"EXPIRE tmp:{i} {rand} NX")
 
-    seeder = StaticSeeder(key_target=100_000)
+    seeder = SeederV2(key_target=50_000)
     fill_task = asyncio.create_task(seeder.run(master.client()))
 
     for replica in c_replicas:
@@ -2988,3 +2990,51 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
         await wait_for_replicas_state(*c_replicas)
 
     await fill_task
+
+
+async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyInstanceFactory):
+    proactors = 4
+    master = df_factory.create(proactor_threads=proactors, dbfilename="")
+    replica = df_factory.create(proactor_threads=proactors, dbfilename="")
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # 50% big values
+    seeder_config = dict(key_target=8_000, huge_value_target=4_000)
+    # Fill instance with test data
+    seeder = SeederV2(**seeder_config)
+    await seeder.run(c_master, target_deviation=0.01)
+
+    assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    async with async_timeout.timeout(60):
+        await wait_for_replicas_state(c_replica)
+
+    # Start data stream
+    stream_task = asyncio.create_task(seeder.run(c_master))
+    await asyncio.sleep(1)
+
+    file_name = tmp_file_name()
+    assert await c_replica.execute_command(f"SAVE DF {file_name}") == "OK"
+    await seeder.stop(c_master)
+    await stream_task
+
+    # Check that everything is in sync
+    hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master, c_replica]))
+    assert len(set(hashes)) == 1
+
+    replica.stop()
+    lines = replica.find_in_logs("Exit SnapshotSerializer")
+    assert len(lines) == (proactors - 1)
+    for line in lines:
+        # We test the serializtion path of command execution
+        side_saved = extract_int_after_prefix("side_saved ", line)
+        assert side_saved > 0
+
+    # Check that the produced rdb is loaded correctly
+    node = df_factory.create(dbfilename=file_name)
+    node.start()
+    c_node = node.client()
+    await wait_available_async(c_node)
+    assert await c_node.execute_command("dbsize") > 0
+    await c_node.execute_command("FLUSHALL")

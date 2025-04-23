@@ -35,6 +35,10 @@ struct NumericIndex : public BaseIndex {
 
   std::vector<DocId> Range(double l, double r) const;
 
+  std::optional<std::vector<DocId>> GetAllResults() const override {
+    return Range(-std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity());
+  }
+
  private:
   using Entry = std::pair<double, DocId>;
   absl::btree_set<Entry, std::less<Entry>, PMR_NS::polymorphic_allocator<Entry>> entries_;
@@ -57,6 +61,20 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
 
   // Returns all the terms that appear as keys in the reverse index.
   std::vector<std::string> GetTerms() const;
+
+  std::optional<std::vector<DocId>> GetAllResults() const override {
+    absl::flat_hash_set<DocId> unique_docs;
+
+    for (const auto& [term, container] : entries_) {
+      for (const DocId& id : container) {
+        unique_docs.insert(id);
+      }
+    }
+
+    auto result = std::vector<DocId>(unique_docs.begin(), unique_docs.end());
+    std::sort(result.begin(), result.end());
+    return result;
+  }
 
  protected:
   using StringList = DocumentAccessor::StringList;
@@ -133,6 +151,33 @@ struct FlatVectorIndex : public BaseVectorIndex {
 
   const float* Get(DocId doc) const;
 
+  // Return all documents that have vectors in this index
+  std::optional<std::vector<DocId>> GetAllResults() const override {
+    std::vector<DocId> result;
+    size_t num_vectors = entries_.size() / dim_;
+    result.reserve(num_vectors);
+
+    for (DocId id = 0; id < num_vectors; ++id) {
+      // Check if the vector is not zero (all elements are 0)
+      // TODO: Valid vector can contain 0s, we should use a better approach
+      const float* vec = Get(id);
+      bool is_zero_vector = true;
+
+      for (size_t i = 0; i < dim_; ++i) {
+        if (vec[i] != 0.0f) {
+          is_zero_vector = false;
+          break;
+        }
+      }
+
+      if (!is_zero_vector) {
+        result.push_back(id);
+      }
+    }
+
+    return result;
+  }
+
  protected:
   void AddVector(DocId id, const VectorPtr& vector) override;
 
@@ -142,6 +187,10 @@ struct FlatVectorIndex : public BaseVectorIndex {
 
 struct HnswlibAdapter;
 
+// This index does't have GetAllResults method
+// because it's not possible to get all vectors from the index
+// It depends on the Hnswlib implementation
+// TODO: Consider adding GetAllResults method in the future
 struct HnswVectorIndex : public BaseVectorIndex {
   HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
   ~HnswVectorIndex();

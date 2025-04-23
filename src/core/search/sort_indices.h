@@ -41,6 +41,23 @@ template <typename T> struct SimpleValueSortIndex : public BaseSortIndex {
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
 
+  // Override GetAllResults to return all documents with non-null values
+  std::optional<std::vector<DocId>> GetAllResults() const override {
+    std::vector<DocId> result;
+
+    for (DocId id = 0; id < values_.size(); ++id) {
+      // Check if id is not present in null_values_
+      // Also need to handle deleted elements - in them T should be empty
+      // Different types of T have different "empty" values, but we can check
+      // if this value is the default for the given type
+      if (!null_values_.contains(id) && !(values_[id] == T{})) {
+        result.push_back(id);
+      }
+    }
+
+    return result;
+  }
+
  protected:
   virtual ParsedSortValue Get(const DocumentAccessor& doc, std::string_view field_value) = 0;
 

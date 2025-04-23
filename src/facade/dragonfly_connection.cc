@@ -822,6 +822,15 @@ void Connection::HandleRequests() {
   }
 }
 
+unsigned Connection::GetSendWaitTimeSec() const {
+  if (reply_builder_ && reply_builder_->IsSendActive()) {
+    return (util::fb2::ProactorBase::GetMonotonicTimeNs() - reply_builder_->GetLastSendTimeNs()) /
+           1'000'000'000;
+  }
+
+  return 0;
+}
+
 void Connection::RegisterBreakHook(BreakerCb breaker_cb) {
   breaker_cb_ = breaker_cb;
 }
@@ -880,6 +889,10 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
     absl::StrAppend(&after, " ", cc_info);
   }
   absl::StrAppend(&after, " phase=", phase_name);
+
+  if (IsSending()) {
+    absl::StrAppend(&before, " send-wait-time=", GetSendWaitTimeSec());
+  }
 
   return {std::move(before), std::move(after)};
 }
@@ -1798,13 +1811,21 @@ void Connection::SendAsync(MessageHandle msg) {
 
   DCHECK_NE(phase_, PRECLOSE);  // No more messages are processed after this point
 
+  QueueBackpressure& qbp = GetQueueBackpressure();
+
+  // Close MONITOR connection if we overflow pipeline limits
+  if (msg.IsMonitor() &&
+      qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, dispatch_q_.size())) {
+    ShutdownSelf();
+    return;
+  }
+
   size_t used_mem = msg.UsedMemory();
   stats_->dispatch_queue_entries++;
   stats_->dispatch_queue_bytes += used_mem;
 
   msg.dispatch_ts = ProactorBase::GetMonotonicTimeNs();
   if (msg.IsPubMsg()) {
-    QueueBackpressure& qbp = GetQueueBackpressure();
     qbp.subscriber_bytes.fetch_add(used_mem, memory_order_relaxed);
     stats_->dispatch_queue_subscriber_bytes += used_mem;
   }

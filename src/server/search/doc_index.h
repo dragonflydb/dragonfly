@@ -6,6 +6,7 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
+#include <absl/strings/match.h>
 
 #include <memory>
 #include <optional>
@@ -71,6 +72,10 @@ class SearchField {
  public:
   SearchField() = default;
 
+  explicit SearchField(StringOrView name) : name_(std::move(name)) {
+    is_short_name_ = !IsJsonPath(NameView());
+  }
+
   SearchField(StringOrView name, bool is_short_name)
       : name_(std::move(name)), is_short_name_(is_short_name) {
   }
@@ -111,13 +116,13 @@ class SearchField {
     return SearchField{StringOrView::FromView(NameView()), is_short_name_};
   }
 
+  std::string_view NameView() const {
+    return name_.view();
+  }
+
  private:
   bool HasNewAlias() const {
     return !new_alias_.empty();
-  }
-
-  std::string_view NameView() const {
-    return name_.view();
   }
 
   std::string_view AliasView() const {
@@ -132,7 +137,14 @@ class SearchField {
 
 using SearchFieldsList = std::vector<SearchField>;
 
+enum class SortOrder { ASC, DESC };
+
 struct SearchParams {
+  struct SortOption {
+    SearchField field;
+    SortOrder order = SortOrder::ASC;
+  };
+
   // Parameters for "LIMIT offset total": select total amount documents with a specific offset from
   // the whole result set
   size_t limit_offset = 0;
@@ -153,7 +165,7 @@ struct SearchParams {
   std::optional<SearchFieldsList> load_fields;
   bool no_content = false;
 
-  std::optional<search::SortOption> sort_option;
+  std::optional<SortOption> sort_option;
   search::QueryParams query_params;
 
   bool ShouldReturnAllFields() const {

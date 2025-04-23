@@ -65,13 +65,8 @@ size_t Size(const facade::CapturingReplyBuilder::Payload& payload) {
 atomic_uint64_t MultiCommandSquasher::current_reply_size_ = 0;
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
-                                           Service* service, bool verify_commands, bool error_abort)
-    : cmds_{cmds},
-      cntx_{cntx},
-      service_{service},
-      base_cid_{nullptr},
-      verify_commands_{verify_commands},
-      error_abort_{error_abort} {
+                                           Service* service, const Opts& opts)
+    : cmds_{cmds}, cntx_{cntx}, service_{service}, base_cid_{nullptr}, opts_{opts} {
   auto mode = cntx->transaction->GetMultiMode();
   base_cid_ = cntx->transaction->GetCId();
   atomic_ = mode != Transaction::NON_ATOMIC;
@@ -119,7 +114,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
   if (keys->NumArgs() == 0)
     return SquashResult::NOT_SQUASHED;
 
-  // Check if all commands belong to one shard
+  // Check if all command keys belong to one shard
   ShardId last_sid = kInvalidSid;
 
   for (string_view key : keys->Range(args)) {
@@ -137,9 +132,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
 
   num_squashed_++;
 
-  // Because the squashed hop is currently blocking, we cannot add more than the max channel size,
-  // otherwise a deadlock occurs.
-  bool need_flush = sinfo.cmds.size() >= kMaxSquashing - 1;
+  bool need_flush = sinfo.cmds.size() >= opts_.max_squash_size;
   return need_flush ? SquashResult::SQUASHED_FULL : SquashResult::SQUASHED;
 }
 
@@ -149,11 +142,11 @@ bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, Stor
   cmd->Fill(&tmp_keylist_);
   auto args = absl::MakeSpan(tmp_keylist_);
 
-  if (verify_commands_) {
+  if (opts_.verify_commands) {
     if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
       rb->SendError(std::move(*err));
       rb->ConsumeLastError();
-      return !error_abort_;
+      return !opts_.error_abort;
     }
   }
 
@@ -168,8 +161,7 @@ bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, Stor
   return true;
 }
 
-OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard* es,
-                                             RespVersion resp_v) {
+OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v) {
   auto& sinfo = sharded_[es->shard_id()];
   DCHECK(!sinfo.cmds.empty());
 
@@ -186,7 +178,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
     auto args = absl::MakeSpan(arg_vec);
     cmd->Fill(args);
 
-    if (verify_commands_) {
+    if (opts_.verify_commands) {
       // The shared context is used for state verification, the local one is only for replies
       if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
         crb.SendError(std::move(*err));
@@ -242,14 +234,13 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     auto cb = [this](ShardId sid) { return !sharded_[sid].cmds.empty(); };
     tx->PrepareSquashedMultiHop(base_cid_, cb);
     tx->ScheduleSingleHop(
-        [this, rb](auto* tx, auto* es) { return SquashedHopCb(tx, es, rb->GetRespVersion()); });
+        [this, rb](auto* tx, auto* es) { return SquashedHopCb(es, rb->GetRespVersion()); });
   } else {
-#if 1
     fb2::BlockingCounter bc(num_shards);
     DVLOG(1) << "Squashing " << num_shards << " " << tx->DebugId();
 
-    auto cb = [this, tx, bc, rb]() mutable {
-      this->SquashedHopCb(tx, EngineShard::tlocal(), rb->GetRespVersion());
+    auto cb = [this, bc, rb]() mutable {
+      this->SquashedHopCb(EngineShard::tlocal(), rb->GetRespVersion());
       bc->Dec();
     };
 
@@ -258,11 +249,6 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
         shard_set->AddL2(i, cb);
     }
     bc->Wait();
-#else
-    shard_set->RunBlockingInParallel(
-        [this, tx, rb](auto* es) { SquashedHopCb(tx, es, rb->GetRespVersion()); },
-        [this](auto sid) { return !sharded_[sid].cmds.empty(); });
-#endif
   }
 
   uint64_t after_hop = proactor->GetMonotonicTimeNs();
@@ -272,7 +258,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     auto& replies = sharded_[idx].replies;
     CHECK(!replies.empty());
 
-    aborted |= error_abort_ && CapturingReplyBuilder::TryExtractError(replies.back());
+    aborted |= opts_.error_abort && CapturingReplyBuilder::TryExtractError(replies.back());
 
     current_reply_size_.fetch_sub(Size(replies.back()), std::memory_order_relaxed);
     CapturingReplyBuilder::Apply(std::move(replies.back()), rb);

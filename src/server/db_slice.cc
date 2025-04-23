@@ -317,13 +317,14 @@ inline void TouchHllIfNeeded(string_view key, uint8_t* hll) {
 
 DbStats& DbStats::operator+=(const DbStats& o) {
   constexpr size_t kDbSz = sizeof(DbStats) - sizeof(DbTableStats);
-  static_assert(kDbSz == 32);
+  static_assert(kDbSz == 40);
 
   DbTableStats::operator+=(o);
 
   ADD(key_count);
   ADD(expire_count);
-  ADD(bucket_count);
+  ADD(prime_capacity);
+  ADD(expire_capacity);
   ADD(table_mem_usage);
 
   return *this;
@@ -355,20 +356,9 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
 
 class DbSlice::PrimeBumpPolicy {
  public:
-  PrimeBumpPolicy(absl::flat_hash_set<uint64_t, FpHasher>* items) : fetched_items_(items) {
-  }
-
-  // returns true if we can change the object location in dash table.
   bool CanBump(const CompactObj& obj) const {
-    if (obj.IsSticky()) {
-      return false;
-    }
-    auto hc = obj.HashCode();
-    return fetched_items_->insert(hc).second;
+    return !obj.IsSticky();
   }
-
- private:
-  mutable absl::flat_hash_set<uint64_t, FpHasher>* fetched_items_;
 };
 
 DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
@@ -414,7 +404,8 @@ auto DbSlice::GetStats() const -> Stats {
     DbStats& stats = s.db_stats[i];
     stats = db_wrap.stats;
     stats.key_count = db_wrap.prime.size();
-    stats.bucket_count = db_wrap.prime.bucket_count();
+    stats.prime_capacity = db_wrap.prime.capacity();
+    stats.expire_capacity = db_wrap.expire.capacity();
     stats.expire_count = db_wrap.expire.size();
     stats.table_mem_usage = db_wrap.table_memory();
   }
@@ -500,7 +491,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
 
   auto it = Iterator(res->it, StringOrView::FromView(key));
   auto exp_it = ExpIterator(res->exp_it, StringOrView::FromView(key));
-  PreUpdateBlocking(cntx.db_index, it, key);
+  PreUpdateBlocking(cntx.db_index, it);
   // PreUpdate() might have caused a deletion of `it`
   if (res->it.IsOccupied()) {
     DCHECK_GE(db_arr_[cntx.db_index]->stats.obj_memory_usage, res->it->second.MallocUsed());
@@ -565,21 +556,9 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   }
 
   DCHECK(IsValid(res.it));
-  if (IsCacheMode()) {
-    if (!change_cb_.empty()) {
-      auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
-        CallChangeCallbacks(cntx.db_index, key, bit);
-      };
-      db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
-    }
 
-    // We must not change the bucket's internal order during serialization
-    serialization_latch_.Wait();
-    auto bump_it = db.prime.BumpUp(res.it, PrimeBumpPolicy{&fetched_items_});
-    if (bump_it != res.it) {  // the item was bumped
-      res.it = bump_it;
-      ++events_.bumpups;
-    }
+  if (IsCacheMode()) {
+    fetched_items_.insert({res.it->first.HashCode(), cntx.db_index});
   }
 
   switch (stats_mode) {
@@ -636,7 +615,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   if (res.ok()) {
     Iterator it(res->it, StringOrView::FromView(key));
     ExpIterator exp_it(res->exp_it, StringOrView::FromView(key));
-    PreUpdateBlocking(cntx.db_index, it, key);
+    PreUpdateBlocking(cntx.db_index, it);
 
     // PreUpdate() might have caused a deletion of `it`
     if (res->it.IsOccupied()) {
@@ -657,7 +636,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
   // It's a new entry.
-  CallChangeCallbacks(cntx.db_index, key, {key});
+  CallChangeCallbacks(cntx.db_index, {key});
 
   ssize_t memory_offset = -key.size();
   size_t reclaimed = 0;
@@ -1143,8 +1122,8 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const 
   return true;
 }
 
-void DbSlice::PreUpdateBlocking(DbIndex db_ind, Iterator it, std::string_view key) {
-  CallChangeCallbacks(db_ind, key, ChangeReq{it.GetInnerIt()});
+void DbSlice::PreUpdateBlocking(DbIndex db_ind, Iterator it) {
+  CallChangeCallbacks(db_ind, ChangeReq{it.GetInnerIt()});
   it.GetInnerIt().SetVersion(NextVersion());
 }
 
@@ -1616,7 +1595,7 @@ auto DbSlice::StopSampleTopK(DbIndex db_ind) -> SamplingResult {
   SamplingResult result;
   result.top_keys.reserve(fmap.size());
   for (auto& [key, count] : fmap) {
-    result.top_keys.emplace_back(move(key), count);
+    result.top_keys.emplace_back(std::move(key), count);
   }
   return result;
 }
@@ -1728,23 +1707,48 @@ void DbSlice::PerformDeletion(Iterator del_it, DbTable* table) {
   PerformDeletionAtomic(del_it, exp_it, table);
 }
 
-void DbSlice::OnCbFinish() {
-  // TBD update bumpups logic we can not clear now after cb finish as cb can preempt
-  // btw what do we do with inline?
-  fetched_items_.clear();
+void DbSlice::OnCbFinishBlocking() {
+  if (IsCacheMode()) {
+    // move fetched items to local variable
+    auto fetched_items = std::move(fetched_items_);
+    for (const auto& [key_hash, db_index] : fetched_items) {
+      auto& db = *db_arr_[db_index];
+
+      // We intentionally don't do extra key checking on this callback to speedup
+      // fetching. Probability of having hash collision is quite low and for bumpup
+      // purposes it should be fine if different key (with same hash) is returned.
+      auto predicate = [](const PrimeKey&) { return true; };
+
+      PrimeIterator it = db.prime.FindFirst(key_hash, predicate);
+
+      if (!IsValid(it)) {
+        continue;
+      }
+
+      if (!change_cb_.empty()) {
+        auto bump_cb = [&](PrimeTable::bucket_iterator bit) { CallChangeCallbacks(db_index, bit); };
+        db.prime.CVCUponBump(change_cb_.back().first, it, bump_cb);
+      }
+
+      // We must not change the bucket's internal order during serialization
+      serialization_latch_.Wait();
+      auto bump_it = db.prime.BumpUp(it, PrimeBumpPolicy{});
+      if (bump_it != it) {  // the item was bumped
+        ++events_.bumpups;
+      }
+    }
+  }
 
   // Sends only if !pending_send_map_.empty()
   SendQueuedInvalidationMessages();
 }
 
-void DbSlice::CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const {
+void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
   if (change_cb_.empty())
     return;
 
   // does not preempt, just increments the counter.
   unique_lock<LocalLatch> lk(serialization_latch_);
-
-  DVLOG(2) << "Running callbacks for key " << key << " in dbid " << id;
 
   const size_t limit = change_cb_.size();
   auto ccb = change_cb_.begin();

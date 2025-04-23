@@ -164,6 +164,10 @@ class Connection : public util::Connection {
       return std::holds_alternative<PubMessagePtr>(handle);
     }
 
+    bool IsMonitor() const {
+      return std::holds_alternative<MonitorMessage>(handle);
+    }
+
     bool IsReplying() const;  // control messges don't reply, messages carrying data do
 
     std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, MCPipelineMessagePtr,
@@ -312,6 +316,8 @@ class Connection : public util::Connection {
   unsigned idle_time() const {
     return time(nullptr) - last_interaction_;
   }
+
+  unsigned GetSendWaitTimeSec() const;
 
   Phase phase() const {
     return phase_;

@@ -30,8 +30,11 @@ struct DbStats : public DbTableStats {
   // number of keys that have expiry deadline.
   size_t expire_count = 0;
 
-  // number of buckets in dictionary (key capacity)
-  size_t bucket_count = 0;
+  // total number of slots in prime dictionary (key capacity).
+  size_t prime_capacity = 0;
+
+  // total number of slots in prime dictionary (key capacity).
+  size_t expire_capacity = 0;
 
   // Memory used by dictionaries.
   size_t table_mem_usage = 0;
@@ -357,7 +360,7 @@ class DbSlice {
     return shard_id_;
   }
 
-  void OnCbFinish();
+  void OnCbFinishBlocking();
 
   bool Acquire(IntentLock::Mode m, const KeyLockArgs& lock_args);
   void Release(IntentLock::Mode m, const KeyLockArgs& lock_args);
@@ -536,7 +539,7 @@ class DbSlice {
   size_t StopSampleKeys(DbIndex db_ind);
 
  private:
-  void PreUpdateBlocking(DbIndex db_ind, Iterator it, std::string_view key);
+  void PreUpdateBlocking(DbIndex db_ind, Iterator it);
   void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
 
   bool DelEmptyPrimeValue(const Context& cntx, Iterator it);
@@ -590,7 +593,7 @@ class DbSlice {
     return version_++;
   }
 
-  void CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const;
+  void CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const;
 
   // We need this because registered callbacks might yield and when they do so we want
   // to avoid Heartbeat or Flushing the db.
@@ -617,9 +620,15 @@ class DbSlice {
 
   DbTableArray db_arr_;
 
+  // key for bump up items pair contains <key hash, db_index>
+  using FetchedItemKey = std::pair<uint64_t, DbIndex>;
+
   struct FpHasher {
     size_t operator()(uint64_t val) const {
       return val;
+    }
+    size_t operator()(const FetchedItemKey& val) const {
+      return val.first;
     }
   };
 
@@ -637,7 +646,7 @@ class DbSlice {
   // for operations that preempt in the middle we have another mechanism -
   // auto laundering iterators, so in case of preemption we do not mind that fetched_items are
   // cleared or changed.
-  mutable absl::flat_hash_set<uint64_t, FpHasher> fetched_items_;
+  mutable absl::flat_hash_set<FetchedItemKey, FpHasher> fetched_items_;
 
   // Registered by shard indices on when first document index is created.
   DocDeletionCallback doc_del_cb_;

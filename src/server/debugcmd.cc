@@ -279,7 +279,8 @@ struct HufHist {
   }
 };
 
-void DoComputeHist(EngineShard* shard, ConnectionContext* cntx, HufHist* dest) {
+void DoComputeHist(optional<CompactObjType> type, EngineShard* shard, ConnectionContext* cntx,
+                   HufHist* dest) {
   auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
   DbTable* dbt = db_slice.GetDBTable(cntx->db_index());
   CHECK(dbt);
@@ -292,9 +293,42 @@ void DoComputeHist(EngineShard* shard, ConnectionContext* cntx, HufHist* dest) {
 
   do {
     cursor = table.Traverse(cursor, [&](PrimeIterator it) {
-      it->first.GetString(&scratch);
+      scratch.clear();
+      if (!type) {
+        it->first.GetString(&scratch);
+      } else if (*type == OBJ_STRING && it->second.ObjType() == OBJ_STRING) {
+        it->second.GetString(&scratch);
+      } else if (*type == OBJ_ZSET && it->second.ObjType() == OBJ_ZSET) {
+        container_utils::IterateSortedSet(
+            it->second.GetRobjWrapper(), [&](container_utils::ContainerEntry entry, double) {
+              if (entry.value) {
+                HIST_add(dest->hist.data(), entry.value, entry.length);
+              }
+              return true;
+            });
+      } else if (*type == OBJ_LIST && it->second.ObjType() == OBJ_LIST) {
+        container_utils::IterateList(it->second, [&](container_utils::ContainerEntry entry) {
+          if (entry.value) {
+            HIST_add(dest->hist.data(), entry.value, entry.length);
+          }
+          return true;
+        });
+      } else if (*type == OBJ_HASH && it->second.ObjType() == OBJ_HASH) {
+        container_utils::IterateMap(it->second, [&](container_utils::ContainerEntry key,
+                                                    container_utils::ContainerEntry value) {
+          if (key.value) {
+            HIST_add(dest->hist.data(), key.value, key.length);
+          }
+          if (value.value) {
+            HIST_add(dest->hist.data(), value.value, value.length);
+          }
+          return true;
+        });
+      }
+
       size_t len = std::min(scratch.size(), kMaxLen);
-      HIST_add(dest->hist.data(), scratch.data(), len);
+      if (len > 16)  // filtering out values that are too small and hosted inline.
+        HIST_add(dest->hist.data(), scratch.data(), len);
     });
 
     if (steps >= 20000) {
@@ -476,6 +510,8 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "      existing RDB file.",
         "REPLICA PAUSE/RESUME",
         "    Stops replica from reconnecting to master, or resumes",
+        "MIGRATION PAUSE/RESUME",
+        "    Stops/resumes incoming migration process only in the SYNC state",
         "REPLICA OFFSET",
         "    Return sync id and array of number of journal commands executed for each replica flow",
         "WATCHED",
@@ -511,8 +547,9 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    traffic logging is stopped.",
         "RECVSIZE [<tid> | ENABLE | DISABLE]",
         "    Prints the histogram of the received request sizes on the given thread",
-        "COMPRESSION"
-        "    Estimate the compressability of values of the given type",
+        "COMPRESSION [type]"
+        "    Estimate the compressibility of values of the given type. if no type is given, ",
+        "    checks compressibility of keys",
         "HELP",
         "    Prints this help.",
     };
@@ -585,7 +622,7 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
   }
 
   if (subcmd == "COMPRESSION") {
-    return Compression(builder);
+    return Compression(args.subspan(1), builder);
   }
 
   string reply = UnknownSubCmd(subcmd, "DEBUG");
@@ -783,6 +820,8 @@ void DebugCmd::Populate(CmdArgList args, facade::SinkReplyBuilder* builder) {
   if (!options.has_value()) {
     return;
   }
+  DCHECK(sf_.AreAllReplicasInStableSync());
+
   ProactorPool& pp = sf_.service().proactor_pool();
   size_t runners_count = pp.size();
   vector<pair<uint64_t, uint64_t>> ranges(runners_count - 1);
@@ -808,6 +847,8 @@ void DebugCmd::Populate(CmdArgList args, facade::SinkReplyBuilder* builder) {
     fb.Join();
 
   builder->SendOk();
+
+  DCHECK(sf_.AreAllReplicasInStableSync());
 }
 
 void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
@@ -868,11 +909,11 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
 
   ess.AwaitRunningOnShardQueue([&](EngineShard* shard) {
     DoPopulateBatch(options, ps[shard->shard_id()]);
-    // Debug populate does not use transaction framework therefore we call OnCbFinish manually
-    // after running the callback
-    // Note that running debug populate while running flushall/db can cause dcheck fail because the
-    // finish cb is executed just when we finish populating the database.
-    cntx_->ns->GetDbSlice(shard->shard_id()).OnCbFinish();
+    // Debug populate does not use transaction framework therefore we call OnCbFinishBlocking
+    // manually after running the callback Note that running debug populate while running
+    // flushall/db can cause dcheck fail because the finish cb is executed just when we finish
+    // populating the database.
+    cntx_->ns->GetDbSlice(shard->shard_id()).OnCbFinishBlocking();
   });
 }
 
@@ -1233,14 +1274,22 @@ void DebugCmd::Keys(CmdArgList args, facade::SinkReplyBuilder* builder) {
   return builder->SendError(kSyntaxErr);
 }
 
-void DebugCmd::Compression(facade::SinkReplyBuilder* builder) {
+void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  optional<CompactObjType> type;
+  if (args.size() > 0) {
+    string_view type_str = ArgS(args, 0);
+    type = ObjTypeFromString(type_str);
+    if (!type) {
+      return builder->SendError(kSyntaxErr);
+    }
+  }
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
 
   fb2::Mutex mu;
   HufHist hist;
   shard_set->RunBlockingInParallel([&](EngineShard* shard) {
     HufHist local;
-    DoComputeHist(shard, cntx_, &local);
+    DoComputeHist(type, shard, cntx_, &local);
     std::unique_lock lk(mu);
     hist.Merge(local);
   });

@@ -14,7 +14,7 @@ from .replication_test import check_all_replicas_finished
 from redis.cluster import RedisCluster
 from redis.cluster import ClusterNode
 from .proxy import Proxy
-from .seeder import Seeder, SeederBase, StaticSeeder
+from .seeder import Seeder, SeederBase, DebugPopulateSeeder
 
 from . import dfly_args
 
@@ -225,12 +225,6 @@ def stop_and_get_restore_log(instance):
     line = lines[0]
     logging.debug(f"Streamer log line: {line}")
     return line
-
-
-def extract_int_after_prefix(prefix, line):
-    match = re.search(prefix + "(\\d+)", line)
-    assert match
-    return int(match.group(1))
 
 
 @dfly_args({})
@@ -1485,8 +1479,8 @@ async def test_network_disconnect_during_migration(df_factory):
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    await StaticSeeder(key_target=100000).run(nodes[0].client)
-    start_capture = await StaticSeeder.capture(nodes[0].client)
+    await DebugPopulateSeeder(key_target=100000).run(nodes[0].client)
+    start_capture = await DebugPopulateSeeder.capture(nodes[0].client)
 
     proxy = Proxy("127.0.0.1", next(next_port), "127.0.0.1", nodes[1].instance.admin_port)
     await proxy.start()
@@ -1519,7 +1513,7 @@ async def test_network_disconnect_during_migration(df_factory):
         logging.debug("remove finished migrations")
         await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-        assert (await StaticSeeder.capture(nodes[1].client)) == start_capture
+        assert (await DebugPopulateSeeder.capture(nodes[1].client)) == start_capture
     finally:
         await proxy.close(task)
 
@@ -1902,7 +1896,7 @@ async def test_keys_expiration_during_migration(df_factory: DflyInstanceFactory)
     logging.debug("Start seeder")
     await nodes[0].client.execute_command("debug", "populate", "100", "foo", "100", "RAND")
 
-    capture_before = await StaticSeeder.capture(nodes[0].client)
+    capture_before = await DebugPopulateSeeder.capture(nodes[0].client)
 
     seeder = ExpirySeeder(timeout=4)
     seeder_task = asyncio.create_task(seeder.run(nodes[0].client))
@@ -1928,7 +1922,7 @@ async def test_keys_expiration_during_migration(df_factory: DflyInstanceFactory)
     # wait to expire all keys
     await asyncio.sleep(5)
 
-    assert await StaticSeeder.capture(nodes[1].client) == capture_before
+    assert await DebugPopulateSeeder.capture(nodes[1].client) == capture_before
 
     stats = await nodes[1].client.info("STATS")
     assert stats["expired_keys"] > 0
@@ -2020,7 +2014,7 @@ async def test_snapshoting_during_migration(
     )
 
     # TODO: We can't compare the post-loaded data as is, because it might have changed by now.
-    # We can try to use FakeRedis with the StaticSeeder comparison here.
+    # We can try to use FakeRedis with the DebugPopulateSeeder comparison here.
 
 
 @pytest.mark.exclude_epoll
@@ -2103,7 +2097,7 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     logging.debug("Generating huge containers")
-    seeder = StaticSeeder(
+    seeder = DebugPopulateSeeder(
         key_target=100,
         data_size=10_000_000,
         collection_size=10_000,
@@ -2112,7 +2106,7 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
         types=["LIST", "HASH", "SET", "ZSET", "STRING"],
     )
     await seeder.run(nodes[0].client)
-    source_data = await StaticSeeder.capture(nodes[0].client)
+    source_data = await DebugPopulateSeeder.capture(nodes[0].client)
 
     mem_before = await get_memory(nodes[0].client, "used_memory_rss")
 
@@ -2125,7 +2119,7 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
     logging.debug("Waiting for migration to finish")
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", timeout=300)
 
-    target_data = await StaticSeeder.capture(nodes[1].client)
+    target_data = await DebugPopulateSeeder.capture(nodes[1].client)
     assert source_data == target_data
 
     # Get peak memory, because migration removes the data
@@ -2147,7 +2141,7 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
 
 
 @dfly_args(
-    {"proactor_threads": 2, "cluster_mode": "yes", "migration_buckets_serialization_threshold": 3}
+    {"proactor_threads": 2, "cluster_mode": "yes", "migration_buckets_serialization_threshold": 1}
 )
 @pytest.mark.parametrize("chunk_size", [1_000_000, 30])
 @pytest.mark.asyncio
@@ -2174,7 +2168,7 @@ async def test_cluster_migration_while_seeding(
 
     logging.debug("Seeding cluster")
     seeder = df_seeder_factory.create(
-        keys=10_000, port=instances[0].port, cluster_mode=True, mirror_to_fake_redis=True
+        keys=20_000, port=instances[0].port, cluster_mode=True, mirror_to_fake_redis=True
     )
     await seeder.run(target_deviation=0.1)
 
@@ -2213,7 +2207,8 @@ async def test_cluster_migration_while_seeding(
     line = stop_and_get_restore_log(nodes[0].instance)
     assert extract_int_after_prefix("Keys skipped ", line) == 0
     assert extract_int_after_prefix("buckets skipped ", line) > 0
-    assert extract_int_after_prefix("keys written ", line) >= 9_000
+    assert extract_int_after_prefix("keys written ", line) >= 15_000
+    # buckets on_db_update can be 0 once in a while because we can not predict keys distribution during migration
     assert extract_int_after_prefix("buckets on_db_update ", line) > 0
 
 
@@ -2725,7 +2720,7 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
             port=next(next_port),
             admin_port=next(next_port),
             replication_timeout=3000,
-            vmodule="outgoing_slot_migration=2,cluster_family=2,incoming_slot_migration=2,main_service=2",
+            vmodule="outgoing_slot_migration=2,cluster_family=2,incoming_slot_migration=2",
         )
         for i in range(2)
     ]
@@ -2740,8 +2735,8 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
 
     logging.debug("source node DEBUG POPULATE")
 
-    await StaticSeeder(key_target=300000, data_size=1000).run(nodes[0].client)
-    start_capture = await StaticSeeder.capture(nodes[0].client)
+    await DebugPopulateSeeder(key_target=300000, data_size=1000).run(nodes[0].client)
+    start_capture = await DebugPopulateSeeder.capture(nodes[0].client)
 
     logging.debug("Start migration")
     nodes[0].migrations.append(
@@ -2750,7 +2745,8 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     await asyncio.sleep(random.randint(0, 50) / 100)
-    await wait_for_migration_start(nodes[1].admin_client, nodes[0].id)
+    # to pause migration we need to be in sync state
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "SYNC", 1000)
 
     logging.debug("debug migration pause")
     await nodes[1].client.execute_command("debug migration pause")
@@ -2775,7 +2771,7 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    assert (await StaticSeeder.capture(nodes[1].client)) == start_capture
+    assert (await DebugPopulateSeeder.capture(nodes[1].client)) == start_capture
 
 
 """
@@ -2807,7 +2803,7 @@ async def test_migration_one_after_another(df_factory: DflyInstanceFactory, df_s
 
     logging.debug("DEBUG POPULATE first node")
     key_num = 100000
-    await StaticSeeder(key_target=key_num, data_size=100).run(nodes[0].client)
+    await DebugPopulateSeeder(key_target=key_num, data_size=100).run(nodes[0].client)
     dbsize_node0 = await nodes[0].client.dbsize()
     assert dbsize_node0 > (key_num * 0.95)
 
@@ -2900,7 +2896,7 @@ async def test_migration_rebalance_node(df_factory: DflyInstanceFactory, df_seed
 
     key_num = 100000
     logging.debug(f"DEBUG POPULATE first node with number of keys: {key_num}")
-    await StaticSeeder(key_target=key_num, data_size=100).run(nodes[0].client)
+    await DebugPopulateSeeder(key_target=key_num, data_size=100).run(nodes[0].client)
     dbsize_node0 = await nodes[0].client.dbsize()
     assert dbsize_node0 > (key_num * 0.95)
 
@@ -2955,6 +2951,7 @@ async def test_migration_rebalance_node(df_factory: DflyInstanceFactory, df_seed
     logging.debug("stop seeding")
     seeder.stop()
     await seed
+    await asyncio.sleep(0.5)  # wait untill all keys with ttl are expired
     capture = await seeder.capture_fake_redis()
     assert await seeder.compare(capture, nodes[1].instance.port)
 
@@ -3166,7 +3163,7 @@ async def test_readonly_replication(
     await m1_node.client.execute_command("SET X 1")
 
     logging.debug("start replication")
-    await r1_node.admin_client.execute_command(f"replicaof localhost {m1_node.instance.port}")
+    await r1_node.admin_client.execute_command(f"replicaof localhost {m1_node.instance.admin_port}")
 
     await wait_available_async(r1_node.admin_client)
 
@@ -3176,3 +3173,64 @@ async def test_readonly_replication(
 
     # This behavior can be changed in the future
     assert await r1_node.client.execute_command("GET Y") == None
+
+    m1_node.replicas = []
+
+    logging.debug("Push config without replica")
+    await push_config(
+        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
+    )
+
+    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+        await r1_node.client.execute_command("GET X")
+
+    assert str(moved_error.value) == f"MOVED 7165 127.0.0.1:{instances[0].port}"
+
+    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+        await r1_node.client.execute_command("GET Y")
+
+    assert str(moved_error.value) == f"MOVED 3036 127.0.0.1:{instances[0].port}"
+
+
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+async def test_cancel_blocking_cmd_during_mygration_finalization(df_factory: DflyInstanceFactory):
+    # blocking commands should be canceled during migration finalization
+    instances = [df_factory.create(port=next(next_port)) for i in range(2)]
+    df_factory.start_all(instances)
+
+    c_nodes = [instance.client() for instance in instances]
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+
+    logging.debug("Start blpop task")
+    blpop_task = asyncio.create_task(c_nodes[0].blpop("list", 0))
+
+    await asyncio.sleep(0.5)
+
+    assert not blpop_task.done()
+
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.port, [(0, 16383)], nodes[1].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+
+    await wait_for_status(nodes[0].client, nodes[1].id, "FINISHED")
+
+    with pytest.raises(aioredis.ResponseError) as e_info:
+        await blpop_task
+        assert "MOVED" in str(e_info.value)
+
+    assert await c_nodes[1].type("list") == "none"
+
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+
+    logging.debug("remove finished migrations")
+    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+
+    assert await c_nodes[1].type("list") == "none"
