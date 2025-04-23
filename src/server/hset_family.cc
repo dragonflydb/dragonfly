@@ -1273,9 +1273,20 @@ void HSetFamily::HRandField(CmdArgList args, const CommandContext& cmd_cntx) {
   if (result) {
     if (result->size() == 1 && args.size() == 1)
       rb->SendBulkString(result->front());
-    else if (with_values)
-      rb->SendBulkStrArrAsPairs(*result);
-    else
+    else if (with_values) {
+      const auto result_size = result->size();
+      DCHECK(result_size % 2 == 0)
+          << "unexpected size of strings " << result_size << ", expected pairs";
+      SinkReplyBuilder::ReplyScope scope{rb};
+      const bool is_resp3 = rb->IsResp3();
+      rb->StartArray(is_resp3 ? result_size / 2 : result_size);
+      for (size_t i = 0; i < result_size; i += 2) {
+        if (is_resp3)
+          rb->StartArray(2);
+        rb->SendBulkString((*result)[i]);
+        rb->SendBulkString((*result)[i + 1]);
+      }
+    } else
       rb->SendBulkStrArr(*result, RedisReplyBuilder::ARRAY);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     if (args.size() == 1)

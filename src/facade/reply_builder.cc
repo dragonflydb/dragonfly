@@ -458,18 +458,4 @@ void RedisReplyBuilder::SendEmptyArray() {
   StartArray(0);
 }
 
-void RedisReplyBuilder::SendBulkStrArrAsPairs(const ArgRange& strs) {
-  const size_t strs_size = strs.Size();
-  DCHECK(strs_size % 2 == 0) << "unexpected size of strings " << strs_size << ", expected pairs";
-  ReplyScope scope{this};
-  const bool is_resp3 = IsResp3();
-  StartArray(is_resp3 ? strs_size / 2 : strs_size);
-  for (size_t i = 0; i < strs_size; i += 2) {
-    if (is_resp3)
-      StartArray(2);
-    SendBulkString(strs[i]);
-    SendBulkString(strs[i + 1]);
-  }
-}
-
 }  // namespace facade
