@@ -2722,21 +2722,16 @@ TEST_F(SearchFamilyTest, JsonWithNullFields) {
               AreDocIds("doc:1", "doc:2"));
 }
 
-TEST_F(SearchFamilyTest, TestVectorIndexPtrValidity) {
-  const uint32_t MY_UINT16_MAX = 65535;
-  const uint32_t M = MY_UINT16_MAX + 1;
-  const uint32_t dim = 4;
-
-  EXPECT_EQ(
-      Run({"FT.CREATE", "idx", "SCHEMA", "n", "NUMERIC", "v", "VECTOR", "HNSW", "8", "TYPE",
-           "FLOAT16", "DIM", absl::StrCat(dim), "DISTANCE_METRIC", "L2", "M", absl::StrCat(M)}),
-      "OK");
+TEST_F(SearchFamilyTest, TestTwoHsetDocumentCreationCrashes) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "SCHEMA", "n", "NUMERIC", "v", "VECTOR", "HNSW", "8", "TYPE",
+                 "FLOAT16", "DIM", "4", "DISTANCE_METRIC", "L2", "M", "65536"}),
+            "OK");
 
   auto res = Run({"HSET", "doc", "n", "0"});
-  EXPECT_EQ(res, "1");
+  EXPECT_EQ(res, 1);
 
   res = Run({"HSET", "doc", "n", "1"});
-  EXPECT_EQ(res, "0");
+  EXPECT_EQ(res, 0);
 }
 
 }  // namespace dfly
