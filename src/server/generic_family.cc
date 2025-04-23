@@ -646,7 +646,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
 
   const auto start = absl::Now();
   // Don't allow it to monopolize cpu time.
-  const absl::Duration timeout = absl::Milliseconds(200);
+  const absl::Duration timeout = absl::Milliseconds(10);
 
   do {
     cur = prime_table->Traverse(
