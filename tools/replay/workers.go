@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/influxdata/tdigest"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -56,6 +57,9 @@ type FileWorker struct {
 	delayed   uint64
 	parsed    uint64
 	clients   uint64
+
+	latencyDigest *tdigest.TDigest
+	latencyMu     sync.Mutex
 }
 
 func (c *ClientWorker) Run(pace bool, worker *FileWorker) {
@@ -74,7 +78,13 @@ func (c *ClientWorker) Run(pace bool, worker *FileWorker) {
 			time.Sleep(lag)
 		}
 
+		start := time.Now()
 		c.pipe.Do(context.Background(), msg.values...).Result()
+		latency := float64(time.Since(start).Microseconds())
+		worker.latencyMu.Lock()
+		worker.latencyDigest.Add(latency, 1)
+		worker.latencyMu.Unlock()
+
 		atomic.AddUint64(&worker.processed, 1)
 
 		if msg.HasMore == 0 {
@@ -106,6 +116,7 @@ func NewClient(w *FileWorker, pace bool) *ClientWorker {
 }
 
 func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
+	w.latencyDigest = tdigest.NewWithCompression(1000)
 	clients := make(map[uint32]*ClientWorker, 0)
 	recordId := uint64(0)
 	err := parseRecords(file, func(r Record) bool {

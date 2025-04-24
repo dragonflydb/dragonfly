@@ -19,14 +19,24 @@ var fPace = flag.Bool("pace", true, "whether to pace the traffic according to th
 var fSkip = flag.Uint("skip", 0, "skip N records")
 
 func RenderTable(area *pterm.AreaPrinter, files []string, workers []FileWorker) {
-	tableData := pterm.TableData{{"file", "parsed", "processed", "delayed", "clients"}}
+	tableData := pterm.TableData{{"file", "parsed", "processed", "delayed", "clients", "p50(us)", "p75(us)", "p90(us)", "p99(us)"}}
 	for i := range workers {
+		workers[i].latencyMu.Lock()
+		p50 := workers[i].latencyDigest.Quantile(0.5)
+		p75 := workers[i].latencyDigest.Quantile(0.75)
+		p90 := workers[i].latencyDigest.Quantile(0.9)
+		p99 := workers[i].latencyDigest.Quantile(0.99)
+		workers[i].latencyMu.Unlock()
 		tableData = append(tableData, []string{
 			files[i],
 			fmt.Sprint(atomic.LoadUint64(&workers[i].parsed)),
 			fmt.Sprint(atomic.LoadUint64(&workers[i].processed)),
 			fmt.Sprint(atomic.LoadUint64(&workers[i].delayed)),
 			fmt.Sprint(atomic.LoadUint64(&workers[i].clients)),
+			fmt.Sprintf("%.0f", p50),
+			fmt.Sprintf("%.0f", p75),
+			fmt.Sprintf("%.0f", p90),
+			fmt.Sprintf("%.0f", p99),
 		})
 	}
 	content, _ := pterm.DefaultTable.WithHasHeader().WithBoxed().WithData(tableData).Srender()
