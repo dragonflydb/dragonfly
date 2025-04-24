@@ -726,9 +726,10 @@ ResultType Get::ApplyTo(Overflow ov, const string* bitfield) {
   const auto& bytes = *bitfield;
   const int32_t total_bytes = static_cast<int32_t>(bytes.size());
   const size_t offset = attr_.offset;
-  uint32_t lsb = attr_.offset + attr_.encoding_bit_size - 1;
+  auto last_byte_offset = GetByteIndex(attr_.offset + attr_.encoding_bit_size - 1);
 
-  if (GetByteIndex(lsb) >= total_bytes || GetByteIndex(offset) >= total_bytes) {
+  uint32_t lsb = attr_.offset + attr_.encoding_bit_size - 1;
+  if (last_byte_offset > total_bytes) {
     return {};
   }
 
