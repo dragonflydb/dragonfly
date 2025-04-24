@@ -60,6 +60,9 @@ type FileWorker struct {
 
 	latencyDigest *tdigest.TDigest
 	latencyMu     sync.Mutex
+
+	latencySum   float64 // sum of all batch latencies (microseconds)
+	latencyCount uint64  // number of batches
 }
 
 func (c *ClientWorker) Run(pace bool, worker *FileWorker) {
@@ -88,6 +91,8 @@ func (c *ClientWorker) Run(pace bool, worker *FileWorker) {
 			batchLatency := float64(time.Since(start).Microseconds())
 			worker.latencyMu.Lock()
 			worker.latencyDigest.Add(batchLatency, 1)
+			worker.latencySum += batchLatency
+			worker.latencyCount++
 			worker.latencyMu.Unlock()
 			c.processed += uint(size)
 		}
@@ -99,6 +104,8 @@ func (c *ClientWorker) Run(pace bool, worker *FileWorker) {
 		batchLatency := float64(time.Since(start).Microseconds())
 		worker.latencyMu.Lock()
 		worker.latencyDigest.Add(batchLatency, 1)
+		worker.latencySum += batchLatency
+		worker.latencyCount++
 		worker.latencyMu.Unlock()
 		c.processed += uint(size)
 	}
