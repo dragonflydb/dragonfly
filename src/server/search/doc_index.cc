@@ -191,7 +191,10 @@ string DocIndexInfo::BuildRestoreCommand() const {
 }
 
 ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::Add(string_view key) {
-  DCHECK_EQ(ids_.count(key), 0u);
+  auto it = ids_.find(key);
+  if (it != ids_.end()) {
+    return it->second;
+  }
 
   DocId id;
   if (!free_ids_.empty()) {
