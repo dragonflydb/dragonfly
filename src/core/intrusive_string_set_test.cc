@@ -87,15 +87,15 @@ TEST_F(IntrusiveStringSetTest, IntrusiveStringListTest) {
 
   test = isl.Emplace("23456789");
 
-  EXPECT_EQ(isl.Find("0123456789").Key(), "0123456789"sv);
-  EXPECT_EQ(isl.Find("23456789").Key(), "23456789"sv);
-  EXPECT_EQ(isl.Find("123456789").Key(), "123456789"sv);
-  EXPECT_EQ(isl.Find("test"), ISLEntry());
+  EXPECT_EQ(isl.Find("0123456789")->Key(), "0123456789"sv);
+  EXPECT_EQ(isl.Find("23456789")->Key(), "23456789"sv);
+  EXPECT_EQ(isl.Find("123456789")->Key(), "123456789"sv);
+  EXPECT_FALSE(isl.Find("test"));
 
   EXPECT_TRUE(isl.Erase("23456789"));
-  EXPECT_EQ(isl.Find("23456789"), ISLEntry());
+  EXPECT_FALSE(isl.Find("23456789"));
   EXPECT_FALSE(isl.Erase("test"));
-  EXPECT_EQ(isl.Find("test"), ISLEntry());
+  EXPECT_FALSE(isl.Find("test"));
 }
 
 TEST_F(IntrusiveStringSetTest, IntrusiveStringSetAddFindTest) {
@@ -113,7 +113,7 @@ TEST_F(IntrusiveStringSetTest, IntrusiveStringSetAddFindTest) {
 
   for (const auto& s : test_set) {
     auto e = ss.Find(s);
-    EXPECT_EQ(e.Key(), s);
+    EXPECT_EQ(e->Key(), s);
   }
 
   EXPECT_EQ(ss.Capacity(), 16384);
@@ -240,9 +240,9 @@ TEST_F(IntrusiveStringSetTest, Resizing) {
       for (auto j = strs.begin(); j != it; ++j) {
         const auto& str = *j;
         auto it = ss_->Find(str);
-        ASSERT_TRUE(it);
-        EXPECT_TRUE(it.HasExpiry());
-        EXPECT_EQ(it.ExpiryTime(), ss_->time_now() + 1);
+        ASSERT_NE(it, ss_->end());
+        EXPECT_TRUE(it->HasExpiry());
+        EXPECT_EQ(it->ExpiryTime(), ss_->time_now() + 1);
       }
     }
     ++size;
@@ -465,21 +465,21 @@ TEST_F(IntrusiveStringSetTest, Pop) {
 TEST_F(IntrusiveStringSetTest, SetFieldExpireHasExpiry) {
   EXPECT_TRUE(ss_->Add("k1", 100));
   auto k = ss_->Find("k1");
-  EXPECT_TRUE(k.HasExpiry());
-  EXPECT_EQ(k.ExpiryTime(), 100);
+  EXPECT_TRUE(k->HasExpiry());
+  EXPECT_EQ(k->ExpiryTime(), 100);
   k.SetExpiryTime(1);
-  EXPECT_TRUE(k.HasExpiry());
-  EXPECT_EQ(k.ExpiryTime(), 1);
+  EXPECT_TRUE(k->HasExpiry());
+  EXPECT_EQ(k->ExpiryTime(), 1);
 }
 
-// TEST_F(IntrusiveStringSetTest, SetFieldExpireNoHasExpiry) {
-//   EXPECT_TRUE(ss_->Add("k1"));
-//   auto k = ss_->Find("k1");
-//   EXPECT_FALSE(k.HasExpiry());
-//   k.SetExpiryTime(10);
-//   EXPECT_TRUE(k.HasExpiry());
-//   EXPECT_EQ(k.ExpiryTime(), 10);
-// }
+TEST_F(IntrusiveStringSetTest, SetFieldExpireNoHasExpiry) {
+  EXPECT_TRUE(ss_->Add("k1"));
+  auto k = ss_->Find("k1");
+  EXPECT_FALSE(k->HasExpiry());
+  k.SetExpiryTime(10);
+  EXPECT_TRUE(k->HasExpiry());
+  EXPECT_EQ(k->ExpiryTime(), 10);
+}
 
 // TEST_F(IntrusiveStringSetTest, Ttl) {
 //   EXPECT_TRUE(ss_->Add("bla"sv, 1));
