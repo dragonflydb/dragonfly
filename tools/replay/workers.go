@@ -48,6 +48,18 @@ type ClientWorker struct {
 	pipe      redis.Pipeliner
 }
 
+// Pipeline length ranges for summary
+var pipelineRanges = []struct {
+	label string
+	min   int
+	max   int // inclusive, except last
+}{
+	{"0-29", 0, 29},
+	{"30-79", 30, 79},
+	{"80-199", 80, 199},
+	{"200+", 200, 1 << 30},
+}
+
 // Handles a single file and distributes messages to clients
 type FileWorker struct {
 	clientGroup sync.WaitGroup
@@ -63,6 +75,27 @@ type FileWorker struct {
 
 	latencySum   float64 // sum of all batch latencies (microseconds)
 	latencyCount uint64  // number of batches
+
+	// per-pipeline-range latency digests
+	perRange map[string]*tdigest.TDigest
+}
+
+// Helper function to track latency and update digests
+func trackLatency(worker *FileWorker, batchLatency float64, size int) {
+	worker.latencyMu.Lock()
+	defer worker.latencyMu.Unlock()
+	worker.latencyDigest.Add(batchLatency, 1)
+	worker.latencySum += batchLatency
+	worker.latencyCount++
+	// Add to per-range digest
+	if worker.perRange != nil {
+		for _, rng := range pipelineRanges {
+			if size >= rng.min && size <= rng.max {
+				worker.perRange[rng.label].Add(batchLatency, 1)
+				break
+			}
+		}
+	}
 }
 
 func (c *ClientWorker) Run(pace bool, worker *FileWorker) {
@@ -89,11 +122,7 @@ func (c *ClientWorker) Run(pace bool, worker *FileWorker) {
 			start := time.Now()
 			c.pipe.Exec(context.Background())
 			batchLatency := float64(time.Since(start).Microseconds())
-			worker.latencyMu.Lock()
-			worker.latencyDigest.Add(batchLatency, 1)
-			worker.latencySum += batchLatency
-			worker.latencyCount++
-			worker.latencyMu.Unlock()
+			trackLatency(worker, batchLatency, size)
 			c.processed += uint(size)
 		}
 	}
@@ -102,11 +131,7 @@ func (c *ClientWorker) Run(pace bool, worker *FileWorker) {
 		start := time.Now()
 		c.pipe.Exec(context.Background())
 		batchLatency := float64(time.Since(start).Microseconds())
-		worker.latencyMu.Lock()
-		worker.latencyDigest.Add(batchLatency, 1)
-		worker.latencySum += batchLatency
-		worker.latencyCount++
-		worker.latencyMu.Unlock()
+		trackLatency(worker, batchLatency, size)
 		c.processed += uint(size)
 	}
 
@@ -128,6 +153,10 @@ func NewClient(w *FileWorker, pace bool) *ClientWorker {
 
 func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
 	w.latencyDigest = tdigest.NewWithCompression(1000)
+	w.perRange = make(map[string]*tdigest.TDigest)
+	for _, rng := range pipelineRanges {
+		w.perRange[rng.label] = tdigest.NewWithCompression(500)
+	}
 	clients := make(map[uint32]*ClientWorker, 0)
 	recordId := uint64(0)
 	err := parseRecords(file, func(r Record) bool {
