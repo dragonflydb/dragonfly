@@ -2723,6 +2723,8 @@ TEST_F(SearchFamilyTest, JsonWithNullFields) {
 }
 
 TEST_F(SearchFamilyTest, RenameDocumentBetweenIndices) {
+  std::string original_mode = GetTestFlag("cluster_mode");
+
   SetTestFlag("cluster_mode", "emulated");
   ResetService();
 
@@ -2737,6 +2739,9 @@ TEST_F(SearchFamilyTest, RenameDocumentBetweenIndices) {
 
   EXPECT_EQ(Run({"rename", "idx1:{doc}1", "idx2:{doc}1"}), "OK");
   EXPECT_EQ(Run({"rename", "idx2:{doc}1", "idx1:{doc}1"}), "OK");
+
+  SetTestFlag("cluster_mode", original_mode);
+  ResetService();
 }
 
 }  // namespace dfly

@@ -153,6 +153,7 @@ class BaseFamilyTest : public ::testing::Test {
   static unsigned NumLocked();
 
   static void SetTestFlag(std::string_view flag_name, std::string_view new_value);
+  static std::string GetTestFlag(std::string_view flag_name);
 
   const acl::AclFamily* TestInitAclFam();
 
