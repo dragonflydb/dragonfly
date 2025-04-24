@@ -812,10 +812,10 @@ TEST_F(BitOpsFamilyTest, BitFieldLargeOffset) {
        "4294967295"});
 
   auto resp = Run({"bitfield", "foo", "get", "u32", "4294967295"});
-  EXPECT_EQ(resp, 825276672);
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
   resp = Run({"bitfield", "foo", "get", "u32", "8589934590"});
-  EXPECT_EQ(resp, 412638336);
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
 }  // end of namespace dfly

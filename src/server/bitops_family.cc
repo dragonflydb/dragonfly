@@ -138,11 +138,7 @@ constexpr int32_t GetByteIndex(uint32_t offset) noexcept {
 }
 
 uint8_t GetByteValue(string_view str, uint32_t offset) {
-  int32_t byte_index = GetByteIndex(offset);
-  if (byte_index >= static_cast<int32_t>(str.size())) {
-    return 0;
-  }
-  return static_cast<uint8_t>(str[byte_index]);
+  return static_cast<uint8_t>(str[GetByteIndex(offset)]);
 }
 
 constexpr bool CheckBitStatus(uint8_t byte, uint32_t offset) {
@@ -733,7 +729,12 @@ ResultType Get::ApplyTo(Overflow ov, const string* bitfield) {
   auto last_byte_offset = GetByteIndex(attr_.offset + attr_.encoding_bit_size - 1);
 
   uint32_t lsb = attr_.offset + attr_.encoding_bit_size - 1;
-  if (last_byte_offset > total_bytes) {
+  if (last_byte_offset >= total_bytes) {
+    return {};
+  }
+
+  int32_t byte_index = GetByteIndex(offset);
+  if (byte_index >= total_bytes) {
     return {};
   }
 
@@ -742,6 +743,11 @@ ResultType Get::ApplyTo(Overflow ov, const string* bitfield) {
 
   int64_t result = 0;
   for (size_t i = 0; i < attr_.encoding_bit_size; ++i) {
+    int32_t lsb_byte_index = GetByteIndex(lsb);
+    if (lsb_byte_index >= total_bytes) {
+      return {};
+    }
+
     uint8_t byte{GetByteValue(bytes, lsb)};
     int32_t index = GetNormalizedBitIndex(lsb);
     int64_t old_bit = CheckBitStatus(byte, index);
