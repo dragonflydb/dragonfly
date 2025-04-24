@@ -20,7 +20,7 @@ class IntrusiveStringSet {
       std::vector<IntrusiveStringList, PMR_NS::polymorphic_allocator<IntrusiveStringList>>;
 
  public:
-  class Iterator {
+  class iterator {
    public:
     using iterator_category = std::forward_iterator_tag;
     using difference_type = std::ptrdiff_t;
@@ -28,14 +28,18 @@ class IntrusiveStringSet {
     using pointer = std::string_view*;
     using reference = std::string_view&;
 
-    Iterator(Buckets::iterator it, ISLEntry prev) : buckets_it_(it), prev_(prev) {
+    iterator(Buckets::iterator it,
+             IntrusiveStringList::Iterator entry = IntrusiveStringList::Iterator())
+        : buckets_it_(it), entry_(entry) {
     }
 
     // uint32_t ExpiryTime() const {
     //   return prev.Next()->ExpiryTime();
     // }
 
-    // void SetExpiryTime(uint32_t ttl_sec);
+    void SetExpiryTime(uint32_t ttl_sec) {
+      entry_.SetExpiryTime(ttl_sec);
+    }
 
     // bool HasExpiry() const {
     //   return curr_entry_.HasExpiry();
@@ -43,10 +47,30 @@ class IntrusiveStringSet {
 
     // void Advance();
 
+    bool operator==(const iterator& r) const {
+      return buckets_it_ == r.buckets_it_;
+    }
+
+    bool operator!=(const iterator& r) const {
+      return !operator==(r);
+    }
+
+    IntrusiveStringList::Iterator::value_type operator*() {
+      return *entry_;
+    }
+
+    IntrusiveStringList::Iterator operator->() {
+      return entry_;
+    }
+
    private:
     Buckets::iterator buckets_it_;
-    ISLEntry prev_;
+    IntrusiveStringList::Iterator entry_;
   };
+
+  iterator end() {
+    return iterator(entries_.end());
+  }
 
   explicit IntrusiveStringSet(PMR_NS::memory_resource* mr = PMR_NS::get_default_resource())
       : entries_(mr) {
@@ -139,8 +163,7 @@ class IntrusiveStringSet {
     return entries_idx << (32 - capacity_log_);
   }
 
-  // return unowned ISLEntry, so it should be destroyed manually
-  [[nodiscard]] ISLEntry Pop() {
+  UniqueISLEntry Pop() {
     for (auto& bucket : entries_) {
       if (auto res = bucket.Pop(time_now_); res) {
         --size_;
@@ -157,20 +180,17 @@ class IntrusiveStringSet {
     return entries_[bucket_id].Erase(str);
   }
 
-  ISLEntry Find(std::string_view member) const {
+  iterator Find(std::string_view member) {
     if (entries_.empty())
-      return {};
+      return iterator(entries_.end());
     auto bucket_id = BucketId(Hash(member));
-    auto res = entries_[bucket_id].Find(member);
-    if (!res) {
-      bucket_id = BucketId(Hash(member));
-      res = entries_[bucket_id].Find(member);
-    }
-    return res;
+    auto entry_it = entries_.begin() + bucket_id;
+    auto res = entry_it->Find(member);
+    return iterator(res ? entry_it : entries_.end(), res);
   }
 
-  bool Contains(std::string_view member) const {
-    return Find(member);
+  bool Contains(std::string_view member) {
+    return Find(member) != end();
   }
 
   // Returns the number of elements in the map. Note that it might be that some of these elements
@@ -203,7 +223,7 @@ class IntrusiveStringSet {
       auto list = std::move(entries_[i]);
       for (auto entry = list.Pop(time_now_); entry; entry = list.Pop(time_now_)) {
         auto bucket_id = BucketId(Hash(entry.Key()));
-        entries_[bucket_id].Insert(entry);
+        entries_[bucket_id].Insert(entry.Release());
       }
     }
   }
