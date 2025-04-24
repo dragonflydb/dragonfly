@@ -138,7 +138,11 @@ constexpr int32_t GetByteIndex(uint32_t offset) noexcept {
 }
 
 uint8_t GetByteValue(string_view str, uint32_t offset) {
-  return static_cast<uint8_t>(str[GetByteIndex(offset)]);
+  int32_t byte_index = GetByteIndex(offset);
+  if (byte_index >= static_cast<int32_t>(str.size())) {
+    return 0;
+  }
+  return static_cast<uint8_t>(str[byte_index]);
 }
 
 constexpr bool CheckBitStatus(uint8_t byte, uint32_t offset) {
