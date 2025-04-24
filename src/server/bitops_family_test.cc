@@ -808,14 +808,18 @@ TEST_F(BitOpsFamilyTest, BitFieldOperations) {
 TEST_F(BitOpsFamilyTest, BitFieldLargeOffset) {
   Run({"set", "foo", "bar"});
 
-  Run({"bitfield", "foo", "get", "u32", "0", "overflow", "fail", "incrby", "u32", "0",
-       "4294967295"});
+  auto resp = Run({"bitfield", "foo", "get", "u32", "0", "overflow", "fail", "incrby", "u32", "0",
+                   "4294967295"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1650553344), ArgType(RespExpr::NIL))));
 
-  auto resp = Run({"bitfield", "foo", "get", "u32", "4294967295"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  resp = Run({"strlen", "foo"});
+  EXPECT_THAT(resp, 4);
 
-  resp = Run({"bitfield", "foo", "get", "u32", "8589934590"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  resp = Run({"get", "foo"});
+  EXPECT_THAT(ToSV(resp.GetBuf()), Eq(std::string_view("bar\0", 4)));
+
+  resp = Run({"bitfield", "foo", "get", "u32", "4294967295"});
+  EXPECT_THAT(resp, 0);
 }
 
 }  // end of namespace dfly
