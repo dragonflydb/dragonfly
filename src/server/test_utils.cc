@@ -754,12 +754,6 @@ void BaseFamilyTest::SetTestFlag(string_view flag_name, string_view new_value) {
   CHECK(flag->ParseFrom(new_value, &error)) << "Error: " << error;
 }
 
-std::string BaseFamilyTest::GetTestFlag(string_view flag_name) {
-  auto* flag = absl::FindCommandLineFlag(flag_name);
-  CHECK_NE(flag, nullptr);
-  return flag->CurrentValue();
-}
-
 const acl::AclFamily* BaseFamilyTest::TestInitAclFam() {
   absl::SetFlag(&FLAGS_acllog_max_len, 0);
   return service_->TestInit();
