@@ -7,6 +7,15 @@ from . import dfly_args
 from .instance import DflyInstance, DflyInstanceFactory
 
 
+def extract_fragmentation_waste(memory_arena):
+    """
+    Extracts the fragmentation waste from the memory arena info.
+    """
+    match = re.search(r"fragmentation waste:\s*([0-9.]+)%", memory_arena)
+    assert match.group(1) is not None
+    return float(match.group(1))
+
+
 @pytest.mark.slow
 @pytest.mark.opt_only
 @pytest.mark.parametrize(
@@ -186,52 +195,221 @@ async def test_eval_with_oom(df_factory: DflyInstanceFactory):
     assert rss_before_eval * 1.01 > info["used_memory_rss"]
 
 
-@pytest.mark.skip("rss eviction disabled")
 @pytest.mark.asyncio
-@dfly_args(
-    {
-        "proactor_threads": 1,
-        "cache_mode": "true",
-        "maxmemory": "5gb",
-        "rss_oom_deny_ratio": 0.8,
-        "max_eviction_per_heartbeat": 100,
-    }
+@pytest.mark.parametrize(
+    "proactor_threads_param, maxmemory_param",
+    [(1, 6 * (1024**3)), (4, 6 * (1024**3))],
 )
-async def test_cache_eviction_with_rss_deny_oom(
-    async_client: aioredis.Redis,
+async def test_cache_eviction_with_rss_deny_oom_simple_case(
+    df_factory: DflyInstanceFactory,
+    proactor_threads_param,
+    maxmemory_param,
 ):
     """
     Test to verify that cache eviction is triggered even if used memory is small but rss memory is above limit
     """
+    df_server = df_factory.create(
+        proactor_threads=proactor_threads_param,
+        cache_mode="true",
+        maxmemory=maxmemory_param,
+        rss_oom_deny_ratio=0.8,
+    )
+    df_server.start()
 
-    max_memory = 5 * 1024 * 1024 * 1024  # 5G
-    rss_max_memory = int(max_memory * 0.8)
+    async_client = df_server.client()
 
-    data_fill_size = int(0.9 * rss_max_memory)  # 95% of rss_max_memory
+    max_memory = maxmemory_param
+    rss_oom_deny_ratio = 0.8
+    eviction_memory_budget_threshold = 0.1  # 10% of max_memory
+
+    rss_eviction_threshold = max_memory * (rss_oom_deny_ratio - eviction_memory_budget_threshold)
+
+    data_fill_size = int((rss_oom_deny_ratio + 0.05) * max_memory)  # 85% of max_memory
 
     val_size = 1024 * 5  # 5 kb
     num_keys = data_fill_size // val_size
 
     await async_client.execute_command("DEBUG", "POPULATE", num_keys, "key", val_size)
-    # Test that used memory is less than 90% of max memory
+
+    # Test that used memory is less than 90% of max memory to not to start eviction based on used_memory
     memory_info = await async_client.info("memory")
     assert (
         memory_info["used_memory"] < max_memory * 0.9
-    ), "Used memory should be less than 90% of max memory."
+    ), "Used memory should be less than 90% of max memory to not to start eviction based on used_memory."
     assert (
-        memory_info["used_memory_rss"] > rss_max_memory * 0.9
-    ), "RSS memory should be less than 90% of rss max memory (max_memory * rss_oom_deny_ratio)."
+        memory_info["used_memory_rss"] > max_memory * rss_oom_deny_ratio
+    ), "Used RSS memory should be more than 80% of rss max memory (max_memory * rss_oom_deny_ratio) to start eviction based on rss memory usage."
 
-    # Get RSS memory after creating new connections
     memory_info = await async_client.info("memory")
-    while memory_info["used_memory_rss"] > rss_max_memory * 0.9:
+    prev_evicted_keys = 0
+    evicted_keys_repeat_count = 0
+    while True:
+        # Wait for some time
         await asyncio.sleep(1)
+
         memory_info = await async_client.info("memory")
         logging.info(
-            f'Current rss: {memory_info["used_memory_rss"]}. rss eviction threshold: {rss_max_memory * 0.9}.'
+            f'Current used memory: {memory_info["used_memory"]}, current used rss: {memory_info["used_memory_rss"]}, rss eviction threshold: {rss_eviction_threshold}.'
         )
+
         stats_info = await async_client.info("stats")
         logging.info(f'Current evicted: {stats_info["evicted_keys"]}. Total keys: {num_keys}.')
+
+        # Check if evicted keys are not increasing
+        if prev_evicted_keys == stats_info["evicted_keys"]:
+            evicted_keys_repeat_count += 1
+        else:
+            prev_evicted_keys = stats_info["evicted_keys"]
+            evicted_keys_repeat_count = 1
+
+        if evicted_keys_repeat_count > 2:
+            break
+
+    # Wait for some time
+    await asyncio.sleep(2)
+
+    memory_arena = await async_client.execute_command("MEMORY", "ARENA")
+    fragmentation_waste = extract_fragmentation_waste(memory_arena)
+    logging.info(f"Memory fragmentation waste: {fragmentation_waste}")
+    assert fragmentation_waste < 12.0, "Memory fragmentation waste should be less than 12%."
+
+    # Assert that no more keys are evicted
+    memory_info = await async_client.info("memory")
+    stats_info = await async_client.info("stats")
+
+    assert memory_info["used_memory"] > max_memory * (
+        rss_oom_deny_ratio - eviction_memory_budget_threshold - 0.05
+    ), "We should not evict all items."
+    assert memory_info["used_memory"] < max_memory * (
+        rss_oom_deny_ratio - eviction_memory_budget_threshold
+    ), "Used memory should be smaller than threshold."
+    assert memory_info["used_memory_rss"] > max_memory * (
+        rss_oom_deny_ratio - eviction_memory_budget_threshold - 0.05
+    ), "We should not evict all items."
+
+    evicted_keys = stats_info["evicted_keys"]
+    # We may evict slightly more than prev_evicted_keys due to gaps in RSS memory usage
+    assert (
+        evicted_keys > 0
+        and evicted_keys >= prev_evicted_keys
+        and evicted_keys <= prev_evicted_keys * 1.0015
+    ), "We should not evict more items."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "proactor_threads_param, maxmemory_param",
+    [(1, 6 * (1024**3)), (4, 6 * (1024**3))],
+)
+async def test_cache_eviction_with_rss_deny_oom_two_waves(
+    df_factory: DflyInstanceFactory, proactor_threads_param, maxmemory_param
+):
+    """
+    Test to verify that cache eviction is triggered even if used memory is small but rss memory is above limit
+    It is similar to the test_cache_eviction_with_rss_deny_oom_simple_case but here we have two waves of data filling:
+    1. First wave fills the instance to 85% of max memory, which is above rss_oom_deny_ratio.
+    2. Then we wait for eviction to happen based on rss memory usage. After eviction we should have 70% of max memory used.
+    3. Second wave fills the instance to 90% of max memory, which is above rss_oom_deny_ratio.
+    4. Second time eviction should happen
+    """
+    df_server = df_factory.create(
+        proactor_threads=proactor_threads_param,
+        cache_mode="true",
+        maxmemory=maxmemory_param,
+        rss_oom_deny_ratio=0.8,
+    )
+    df_server.start()
+
+    async_client = df_server.client()
+
+    max_memory = maxmemory_param
+    rss_oom_deny_ratio = 0.8
+    eviction_memory_budget_threshold = 0.1  # 10% of max_memory
+
+    rss_eviction_threshold = max_memory * (rss_oom_deny_ratio - eviction_memory_budget_threshold)
+
+    # first wave fills 85% of max memory
+    # second wave fills 20% of max memory
+    data_fill_size = [
+        int((rss_oom_deny_ratio + 0.05) * max_memory),
+        int((1 - rss_oom_deny_ratio) * max_memory),
+    ]
+
+    val_size = 1024 * 5  # 5 kb
+
+    for i in range(2):
+        if i > 0:
+            await asyncio.sleep(2)
+
+        num_keys = data_fill_size[i] // val_size
+        logging.info(
+            f"Populating data for wave {i}. Data fill size: {data_fill_size[i]}. Number of keys: {num_keys}."
+        )
+        await async_client.execute_command("DEBUG", "POPULATE", num_keys, f"key{i}", val_size)
+
+        # Test that used memory is less than 90% of max memory to not to start eviction based on used_memory
+        memory_info = await async_client.info("memory")
+        assert (
+            memory_info["used_memory"] < max_memory * 0.9
+        ), "Used memory should be less than 90% of max memory to not to start eviction based on used_memory."
+        assert (
+            memory_info["used_memory_rss"] > max_memory * rss_oom_deny_ratio
+        ), "Used RSS memory should be more than 80% of rss max memory (max_memory * rss_oom_deny_ratio) to start eviction based on rss memory usage."
+
+        memory_info = await async_client.info("memory")
+        prev_evicted_keys = 0
+        evicted_keys_repeat_count = 0
+        while True:
+            # Wait for some time
+            await asyncio.sleep(1)
+
+            memory_info = await async_client.info("memory")
+            logging.info(
+                f'Current used memory: {memory_info["used_memory"]}, current used rss: {memory_info["used_memory_rss"]}, rss eviction threshold: {rss_eviction_threshold}.'
+            )
+
+            stats_info = await async_client.info("stats")
+            logging.info(f'Current evicted: {stats_info["evicted_keys"]}. Total keys: {num_keys}.')
+
+            # Check if evicted keys are not increasing
+            if prev_evicted_keys == stats_info["evicted_keys"]:
+                evicted_keys_repeat_count += 1
+            else:
+                prev_evicted_keys = stats_info["evicted_keys"]
+                evicted_keys_repeat_count = 1
+
+            if evicted_keys_repeat_count > 2:
+                break
+
+        # Wait for some time
+        await asyncio.sleep(2)
+
+        memory_arena = await async_client.execute_command("MEMORY", "ARENA")
+        fragmentation_waste = extract_fragmentation_waste(memory_arena)
+        logging.info(f"Memory fragmentation waste: {fragmentation_waste}")
+        assert fragmentation_waste < 12.0, "Memory fragmentation waste should be less than 12%."
+
+        # Assert that no more keys are evicted
+        memory_info = await async_client.info("memory")
+        stats_info = await async_client.info("stats")
+
+        assert memory_info["used_memory"] > max_memory * (
+            rss_oom_deny_ratio - eviction_memory_budget_threshold - 0.05
+        ), "We should not evict all items."
+        assert memory_info["used_memory"] < max_memory * (
+            rss_oom_deny_ratio - eviction_memory_budget_threshold + 0.05
+        ), "Used memory should be smaller than threshold."
+        assert memory_info["used_memory_rss"] > max_memory * (
+            rss_oom_deny_ratio - eviction_memory_budget_threshold - 0.05
+        ), "We should not evict all items."
+
+        evicted_keys = stats_info["evicted_keys"]
+        # We may evict slightly more than prev_evicted_keys due to gaps in RSS memory usage
+        assert (
+            evicted_keys > 0
+            and evicted_keys >= prev_evicted_keys
+            and evicted_keys <= prev_evicted_keys * 1.0015
+        ), "We should not evict more items."
 
 
 @pytest.mark.asyncio
