@@ -105,8 +105,9 @@ func Run(files []string) {
 		}
 	}
 
-	RenderTable(area, files, workers)               // to show last stats
-	RenderPipelineRangesTable(area, files, workers) // to render per pipeline-range latency digests
+	RenderTable(area, files, workers) // to show last stats
+	areaPipelineRanges, _ := pterm.DefaultArea.WithCenter().Start()
+	RenderPipelineRangesTable(areaPipelineRanges, files, workers) // to render per pipeline-range latency digests
 }
 
 func Print(files []string) {
