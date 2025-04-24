@@ -4,16 +4,18 @@
 
 #pragma once
 
-#include <cassert>
+// #include <cassert>
 #include <cstring>
 #include <string_view>
+
+#include "base/logging.h"
 
 extern "C" {
 #include "redis/zmalloc.h"
 }
 
 namespace dfly {
-
+// doesn't possess memory, it should be created and release manually
 class ISLEntry {
   friend class IntrusiveStringList;
 
@@ -31,8 +33,17 @@ class ISLEntry {
     data_ = data;
   }
 
-  static void Destroy(ISLEntry entry) {
-    zfree(entry.Raw());
+  ISLEntry(const ISLEntry& e) = default;
+  ISLEntry(ISLEntry&& e) {
+    data_ = e.data_;
+    e.data_ = nullptr;
+  }
+
+  ISLEntry& operator=(const ISLEntry& e) = default;
+  ISLEntry& operator=(ISLEntry&& e) {
+    data_ = e.data_;
+    e.data_ = nullptr;
+    return *this;
   }
 
   operator bool() const {
@@ -56,20 +67,14 @@ class ISLEntry {
     return res;
   }
 
-  void SetExpiryTime(uint32_t ttl_sec) {
-    if (HasExpiry()) {
-      auto* ttl_pos = Raw() + sizeof(char*);
-      std::memcpy(ttl_pos, &ttl_sec, sizeof(ttl_sec));
-    } else {
-      ISLEntry new_entry = Create(Key(), ttl_sec);
-      std::swap(data_, new_entry.data_);
-      Destroy(new_entry);
-    }
+  // TODO consider another option to implement iterator
+  ISLEntry* operator->() {
+    return this;
   }
 
- private:
-  static ISLEntry Create(std::string_view key, uint32_t ttl_sec = UINT32_MAX) {
-    char* next = nullptr;
+ protected:
+  static ISLEntry Create(std::string_view key, char* next = nullptr,
+                         uint32_t ttl_sec = UINT32_MAX) {
     uint32_t key_size = key.size();
 
     bool has_ttl = ttl_sec != UINT32_MAX;
@@ -96,10 +101,18 @@ class ISLEntry {
     return res;
   }
 
+  static void Destroy(ISLEntry& entry) {
+    zfree(entry.Raw());
+  }
+
   ISLEntry Next() const {
     ISLEntry next;
     std::memcpy(&next.data_, Raw(), sizeof(next));
     return next;
+  }
+
+  ISLEntry FakePrev() {
+    return ISLEntry(reinterpret_cast<char*>(&data_));
   }
 
   void SetNext(ISLEntry next) {
@@ -135,6 +148,15 @@ class ISLEntry {
     return (uptr() & kTtlBit) != 0;
   }
 
+  [[nodiscard]] bool UpdateTtl(uint32_t ttl_sec) {
+    if (HasTtl()) {
+      auto* ttl_pos = Raw() + sizeof(char*);
+      std::memcpy(ttl_pos, &ttl_sec, sizeof(ttl_sec));
+      return true;
+    }
+    return false;
+  }
+
   std::uint32_t GetTtlSize() const {
     return HasTtl() ? sizeof(std::uint32_t) : 0;
   }
@@ -145,8 +167,87 @@ class ISLEntry {
   char* data_ = nullptr;
 };
 
+class UniqueISLEntry : private ISLEntry {
+ public:
+  ~UniqueISLEntry() {
+    Destroy(*this);
+  }
+
+  UniqueISLEntry() = default;
+  UniqueISLEntry(ISLEntry e) : ISLEntry(e) {
+  }
+  UniqueISLEntry(UniqueISLEntry&& e) = default;
+  UniqueISLEntry& operator=(UniqueISLEntry&& e) = default;
+
+  using ISLEntry::ExpiryTime;
+  using ISLEntry::HasExpiry;
+  using ISLEntry::Key;
+  using ISLEntry::operator bool;
+
+  ISLEntry Release() {
+    ISLEntry res = *this;
+    data_ = nullptr;
+    return res;
+  }
+
+ private:
+  UniqueISLEntry(const UniqueISLEntry&) = delete;
+};
+
 class IntrusiveStringList {
  public:
+  class Iterator {
+   public:
+    using iterator_category = std::forward_iterator_tag;
+    using difference_type = std::ptrdiff_t;
+    using value_type = ISLEntry;
+    using pointer = ISLEntry*;
+    using reference = ISLEntry&;
+
+    Iterator(ISLEntry prev = end_.FakePrev()) : prev_(prev) {
+      DCHECK(prev);
+    }
+
+    uint32_t ExpiryTime() const {
+      return prev_.Next().ExpiryTime();
+    }
+
+    void SetExpiryTime(uint32_t ttl_sec) {
+      auto entry = prev_.Next();
+
+      if (!entry.UpdateTtl(ttl_sec)) {
+        ISLEntry new_entry = ISLEntry::Create(entry.Key(), entry.Next().data_, ttl_sec);
+        ISLEntry::Destroy(entry);
+        prev_.SetNext(new_entry);
+      }
+    }
+
+    bool HasExpiry() const {
+      return prev_.Next().HasExpiry();
+    }
+
+    Iterator& operator++() {
+      prev_ = prev_.Next();
+      return *this;
+    }
+
+    operator bool() const {
+      return prev_.Next();
+    }
+
+    value_type operator*() {
+      return prev_.Next();
+    }
+
+    value_type operator->() {
+      return prev_.Next();
+    }
+
+   private:
+    ISLEntry prev_;
+    static ISLEntry end_;
+  };
+
   ~IntrusiveStringList() {
     while (start_) {
       auto next = start_.Next();
@@ -161,14 +262,17 @@ class IntrusiveStringList {
     r.start_ = {};
   }
 
+  Iterator begin() {
+    return start_.FakePrev();
+  }
+
   ISLEntry Insert(ISLEntry e) {
     e.SetNext(start_);
     start_ = e;
     return start_;
   }
 
-  // TODO rewrite, because it's dangerous operations, ISLEntry shouldn't returned without owner
-  [[nodiscard]] ISLEntry Pop(uint32_t curr_time) {
+  UniqueISLEntry Pop(uint32_t curr_time) {
     for (auto it = start_; it && it.ExpiryTime() < curr_time; it = start_) {
       start_ = it.Next();
       ISLEntry::Destroy(it);
@@ -187,13 +291,13 @@ class IntrusiveStringList {
 
   // TODO consider to wrap ISLEntry to prevent usage out of the list
   ISLEntry Emplace(std::string_view key, uint32_t ttl_sec = UINT32_MAX) {
-    return Insert(ISLEntry::Create(key, ttl_sec));
+    return Insert(ISLEntry::Create(key, nullptr, ttl_sec));
   }
 
   // TODO consider to wrap ISLEntry to prevent usage out of the list
-  ISLEntry Find(std::string_view str) const {
-    auto it = start_;
-    for (; it && it.Key() != str; it = it.Next())
+  IntrusiveStringList::Iterator Find(std::string_view str) {
+    auto it = begin();
+    for (; it && it->Key() != str; ++it)
       ;
     return it;
   }
