@@ -172,12 +172,7 @@ class ClusterShardInfos {
 };
 
 // MigrationState constants are ordered in state changing order
-enum class MigrationState : uint8_t {
-  C_CONNECTING,
-  C_SYNC,
-  C_ERROR,
-  C_FINISHED,
-};
+enum class MigrationState : uint8_t { C_CONNECTING, C_SYNC, C_ERROR, C_FINISHED, C_FATAL };
 
 // return error message if slot doesn't belong to this node
 facade::ErrorReply SlotOwnershipError(SlotId slot_id);

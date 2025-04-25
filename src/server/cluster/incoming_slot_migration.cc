@@ -7,6 +7,8 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 
+#include <utility>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "cluster_utility.h"
@@ -76,6 +78,20 @@ class ClusterShardMigration {
         break;
       }
 
+      auto oom_check = [&]() -> bool {
+        auto used_mem = used_mem_current.load(memory_order_relaxed);
+        if ((used_mem + tx_data->command.cmd_len) > max_memory_limit) {
+          cntx->ReportError(IncomingSlotMigration::kMigrationOOM);
+          in_migration_->ReportFatalError(GenericError(IncomingSlotMigration::kMigrationOOM));
+          return true;
+        }
+        return false;
+      };
+
+      if (oom_check()) {
+        break;
+      }
+
       while (tx_data->opcode == journal::Op::LSN) {
         VLOG(2) << "Attempt to finalize flow " << source_shard_id_ << " attempt " << tx_data->lsn;
         last_attempt_.store(tx_data->lsn);
@@ -83,6 +99,11 @@ class ClusterShardMigration {
         // if we get new data, attempt is failed
         if (tx_data = tx_reader.NextTxData(&reader, cntx); !tx_data) {
           VLOG(1) << "Finalized flow " << source_shard_id_;
+          return;
+        }
+        if (oom_check()) {
+          VLOG(2) << "Flow finalization " << source_shard_id_
+                  << " canceled due memory limit reached";
           return;
         }
         if (!tx_data->command.cmd_args.empty()) {
@@ -190,6 +211,11 @@ bool IncomingSlotMigration::Join(long attempt) {
       return false;
     }
 
+    // If any of migration shards reported ERROR (OOM) we can return error
+    if (GetState() == MigrationState::C_FATAL) {
+      return false;
+    }
+
     // if data was sent after LSN, WaitFor() always returns false so to reduce wait time
     // we check current state and if WaitFor false but GetLastAttempt() == attempt
     // the Join is failed and we can return false
@@ -260,7 +286,9 @@ void IncomingSlotMigration::Init(uint32_t shards_num) {
 
 void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
   shard_flows_[shard]->Start(&cntx_, source);
-  VLOG(1) << "Incoming flow " << shard << " finished for " << source_id_;
+  VLOG(1) << "Incoming flow " << shard
+          << (GetState() == MigrationState::C_FINISHED ? " finished " : " cancelled ") << "for "
+          << source_id_;
 }
 
 size_t IncomingSlotMigration::GetKeyCount() const {
