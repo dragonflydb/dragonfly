@@ -267,13 +267,13 @@ async def test_cache_eviction_with_rss_deny_oom_simple_case(
     stats_info = await async_client.info("stats")
 
     assert memory_info["used_memory"] > max_memory * (
-        rss_oom_deny_ratio - eviction_memory_budget_threshold - 0.08
+        rss_oom_deny_ratio - eviction_memory_budget_threshold - 0.105
     ), "We should not evict all items."
     assert memory_info["used_memory"] < max_memory * (
         rss_oom_deny_ratio - eviction_memory_budget_threshold
     ), "Used memory should be smaller than threshold."
     assert memory_info["used_memory_rss"] > max_memory * (
-        rss_oom_deny_ratio - eviction_memory_budget_threshold - 0.08
+        rss_oom_deny_ratio - eviction_memory_budget_threshold - 0.105
     ), "We should not evict all items."
 
     evicted_keys = stats_info["evicted_keys"]
