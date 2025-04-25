@@ -548,6 +548,23 @@ TEST_F(DflyEngineTest, PSubscribe) {
   EXPECT_EQ("a*", msg.pattern);
 }
 
+TEST_F(DflyEngineTest, PSubscribeMatchOnlyStar) {
+  single_response_ = false;
+  auto resp = pp_->at(1)->Await([&] { return Run({"psubscribe", "*"}); });
+  EXPECT_THAT(resp, ArrLen(3));
+  resp = pp_->at(0)->Await([&] { return Run({"PUBLISH", "1234567890123456", "abc"}); });
+  EXPECT_THAT(resp, IntArg(1));
+
+  pp_->AwaitFiberOnAll([](ProactorBase* pb) {});
+
+  ASSERT_EQ(1, SubscriberMessagesLen("IO1"));
+
+  const auto& msg = GetPublishedMessage("IO1", 0);
+  EXPECT_EQ("abc", msg.message);
+  EXPECT_EQ("1234567890123456", msg.channel);
+  EXPECT_EQ("*", msg.pattern);
+}
+
 TEST_F(DflyEngineTest, Unsubscribe) {
   auto resp = Run({"unsubscribe", "a"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("unsubscribe", "a", IntArg(0)));
