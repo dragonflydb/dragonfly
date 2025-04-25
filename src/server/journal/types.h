@@ -73,6 +73,7 @@ struct ParsedEntry : public EntryBase {
   struct CmdData {
     std::unique_ptr<uint8_t[]> command_buf;
     CmdArgVec cmd_args;  // represents the parsed command.
+    size_t cmd_len{0};
   };
   CmdData cmd;
 
