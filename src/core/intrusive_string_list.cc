@@ -5,6 +5,6 @@
 #include "intrusive_string_list.h"
 
 namespace dfly {
-ISLEntry IntrusiveStringList::Iterator::end_;
+ISLEntry IntrusiveStringList::end_;
 
 }  // namespace dfly
