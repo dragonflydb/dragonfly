@@ -196,7 +196,7 @@ class UniqueISLEntry : private ISLEntry {
 
 class IntrusiveStringList {
  public:
-  class Iterator {
+  class iterator {
    public:
     using iterator_category = std::forward_iterator_tag;
     using difference_type = std::ptrdiff_t;
@@ -204,7 +204,7 @@ class IntrusiveStringList {
     using pointer = ISLEntry*;
     using reference = ISLEntry&;
 
-    Iterator(ISLEntry prev = end_.FakePrev()) : prev_(prev) {
+    iterator(ISLEntry prev = end_.FakePrev()) : prev_(prev) {
       DCHECK(prev);
     }
 
@@ -226,7 +226,7 @@ class IntrusiveStringList {
       return prev_.Next().HasExpiry();
     }
 
-    Iterator& operator++() {
+    iterator& operator++() {
       prev_ = prev_.Next();
       return *this;
     }
@@ -243,9 +243,16 @@ class IntrusiveStringList {
       return prev_.Next();
     }
 
+    bool operator==(const iterator& r) {
+      return prev_.Next() == r.prev_.Next();
+    }
+
+    bool operator!=(const iterator& r) {
+      return !operator==(r);
+    }
+
    private:
     ISLEntry prev_;
-    static ISLEntry end_;
   };
 
   ~IntrusiveStringList() {
@@ -262,8 +269,12 @@ class IntrusiveStringList {
     r.start_ = {};
   }
 
-  Iterator begin() {
+  iterator begin() {
     return start_.FakePrev();
+  }
+
+  static iterator end() {
+    return end_.FakePrev();
   }
 
   ISLEntry Insert(ISLEntry e) {
@@ -286,7 +297,7 @@ class IntrusiveStringList {
   }
 
   bool Empty() {
-    return start_;
+    return !start_;
   }
 
   // TODO consider to wrap ISLEntry to prevent usage out of the list
@@ -295,7 +306,7 @@ class IntrusiveStringList {
   }
 
   // TODO consider to wrap ISLEntry to prevent usage out of the list
-  IntrusiveStringList::Iterator Find(std::string_view str) {
+  IntrusiveStringList::iterator Find(std::string_view str) {
     auto it = begin();
     for (; it && it->Key() != str; ++it)
       ;
@@ -350,6 +361,7 @@ class IntrusiveStringList {
 
  private:
   ISLEntry start_;
+  static ISLEntry end_;
 };
 
 }  // namespace dfly

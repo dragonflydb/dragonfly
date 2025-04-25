@@ -24,13 +24,16 @@ class IntrusiveStringSet {
    public:
     using iterator_category = std::forward_iterator_tag;
     using difference_type = std::ptrdiff_t;
-    using value_type = std::string_view;
-    using pointer = std::string_view*;
-    using reference = std::string_view&;
+    using value_type = ISLEntry;
+    using pointer = ISLEntry*;
+    using reference = ISLEntry&;
 
-    iterator(Buckets::iterator it,
-             IntrusiveStringList::Iterator entry = IntrusiveStringList::Iterator())
-        : buckets_it_(it), entry_(entry) {
+    iterator(Buckets::iterator it, Buckets::iterator end, IntrusiveStringList::iterator entry)
+        : buckets_it_(it), end_(end), entry_(entry) {
+    }
+
+    iterator(Buckets::iterator it, Buckets::iterator end) : buckets_it_(it), end_(end) {
+      SetEntryIt();
     }
 
     // uint32_t ExpiryTime() const {
@@ -47,29 +50,56 @@ class IntrusiveStringSet {
 
     // void Advance();
 
+    iterator& operator++() {
+      // TODO add expiration logic
+      if (entry_)
+        ++entry_;
+      if (!entry_) {
+        ++buckets_it_;
+        SetEntryIt();
+      }
+      return *this;
+    }
+
     bool operator==(const iterator& r) const {
-      return buckets_it_ == r.buckets_it_;
+      return buckets_it_ == r.buckets_it_ && entry_ == r.entry_;
     }
 
     bool operator!=(const iterator& r) const {
       return !operator==(r);
     }
 
-    IntrusiveStringList::Iterator::value_type operator*() {
+    IntrusiveStringList::iterator::value_type operator*() {
       return *entry_;
     }
 
-    IntrusiveStringList::Iterator operator->() {
+    IntrusiveStringList::iterator operator->() {
       return entry_;
     }
 
    private:
+    // find valid entry_ iterator starting from buckets_it_ and set it
+    void SetEntryIt() {
+      for (; buckets_it_ != end_; ++buckets_it_) {
+        if (!buckets_it_->Empty()) {
+          entry_ = buckets_it_->begin();
+          break;
+        }
+      }
+    }
+
+   private:
     Buckets::iterator buckets_it_;
-    IntrusiveStringList::Iterator entry_;
+    Buckets::iterator end_;
+    IntrusiveStringList::iterator entry_;
   };
 
+  iterator begin() {
+    return iterator(entries_.begin(), entries_.end());
+  }
+
   iterator end() {
-    return iterator(entries_.end());
+    return iterator(entries_.end(), entries_.end());
   }
 
   explicit IntrusiveStringSet(PMR_NS::memory_resource* mr = PMR_NS::get_default_resource())
@@ -182,11 +212,11 @@ class IntrusiveStringSet {
 
   iterator Find(std::string_view member) {
     if (entries_.empty())
-      return iterator(entries_.end());
+      return end();
     auto bucket_id = BucketId(Hash(member));
     auto entry_it = entries_.begin() + bucket_id;
     auto res = entry_it->Find(member);
-    return iterator(res ? entry_it : entries_.end(), res);
+    return iterator(res ? entry_it : entries_.end(), entries_.end(), res);
   }
 
   bool Contains(std::string_view member) {

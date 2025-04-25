@@ -75,6 +75,18 @@ class IntrusiveStringSetTest : public ::testing::Test {
   mt19937 generator_;
 };
 
+static string random_string(mt19937& rand, unsigned len) {
+  const string_view alpanum = "1234567890abcdefghijklmnopqrstuvwxyz";
+  string ret;
+  ret.reserve(len);
+
+  for (size_t i = 0; i < len; ++i) {
+    ret += alpanum[rand() % alpanum.size()];
+  }
+
+  return ret;
+}
+
 TEST_F(IntrusiveStringSetTest, IntrusiveStringListTest) {
   IntrusiveStringList isl;
   ISLEntry test = isl.Emplace("0123456789");
@@ -206,18 +218,6 @@ TEST_F(IntrusiveStringSetTest, DisplacedBug) {
   ss_->Add("leD");
   ss_->Add("MVX");
   ss_->Add("HPq");
-}
-
-static string random_string(mt19937& rand, unsigned len) {
-  const string_view alpanum = "1234567890abcdefghijklmnopqrstuvwxyz";
-  string ret;
-  ret.reserve(len);
-
-  for (size_t i = 0; i < len; ++i) {
-    ret += alpanum[rand() % alpanum.size()];
-  }
-
-  return ret;
 }
 
 TEST_F(IntrusiveStringSetTest, Resizing) {
@@ -434,33 +434,33 @@ TEST_F(IntrusiveStringSetTest, Pop) {
   DCHECK(to_insert.empty());
 }
 
-// TEST_F(IntrusiveStringSetTest, Iteration) {
-//   ss_->Add("foo");
-//   for (const sds ptr : *ss_) {
-//     LOG(INFO) << ptr;
-//   }
-//   ss_->Clear();
-//   constexpr size_t num_items = 8192;
-//   unordered_set<string> to_insert;
+TEST_F(IntrusiveStringSetTest, Iteration) {
+  ss_->Add("foo");
+  for (const auto& ptr : *ss_) {
+    LOG(INFO) << ptr;
+  }
+  ss_->Clear();
+  constexpr size_t num_items = 8192;
+  unordered_set<string> to_insert;
 
-//   while (to_insert.size() != num_items) {
-//     auto str = random_string(generator_, 10);
-//     if (to_insert.count(str)) {
-//       continue;
-//     }
+  while (to_insert.size() != num_items) {
+    auto str = random_string(generator_, 10);
+    if (to_insert.count(str)) {
+      continue;
+    }
 
-//     to_insert.insert(str);
-//     EXPECT_TRUE(ss_->Add(str));
-//   }
+    to_insert.insert(str);
+    EXPECT_TRUE(ss_->Add(str));
+  }
 
-//   for (const sds ptr : *ss_) {
-//     string str{ptr, sdslen(ptr)};
-//     EXPECT_TRUE(to_insert.count(str));
-//     to_insert.erase(str);
-//   }
+  for (const auto& ptr : *ss_) {
+    std::string str(ptr.Key());
+    EXPECT_TRUE(to_insert.count(str));
+    to_insert.erase(str);
+  }
 
-//   EXPECT_EQ(to_insert.size(), 0);
-// }
+  EXPECT_EQ(to_insert.size(), 0);
+}
 
 TEST_F(IntrusiveStringSetTest, SetFieldExpireHasExpiry) {
   EXPECT_TRUE(ss_->Add("k1", 100));
