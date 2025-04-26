@@ -10,6 +10,20 @@
 
 namespace dfly {
 
+namespace detail {
+
+enum class ClusterMode {
+  kUninitialized,
+  kNoCluster,
+  kEmulatedCluster,
+  kRealCluster,
+};
+
+extern ClusterMode cluster_mode;
+extern bool cluster_shard_by_slot;
+
+};  // namespace detail
+
 using SlotId = std::uint16_t;
 constexpr SlotId kMaxSlotNum = 0x3FFF;
 
@@ -42,9 +56,23 @@ class UniqueSlotChecker {
 SlotId KeySlot(std::string_view key);
 
 void InitializeCluster();
-bool IsClusterEnabled();
-bool IsClusterEmulated();
-bool IsClusterEnabledOrEmulated();
+
+inline bool IsClusterEnabled() {
+  return detail::cluster_mode == detail::ClusterMode::kRealCluster;
+}
+
+inline bool IsClusterEmulated() {
+  return detail::cluster_mode == detail::ClusterMode::kEmulatedCluster;
+}
+
+inline bool IsClusterEnabledOrEmulated() {
+  return IsClusterEnabled() || IsClusterEmulated();
+}
+
+inline bool IsClusterShardedBySlot() {
+  return detail::cluster_shard_by_slot;
+}
+
 bool IsClusterShardedByTag();
 
 }  // namespace dfly
