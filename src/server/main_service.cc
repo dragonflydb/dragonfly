@@ -2227,8 +2227,7 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
       for (auto& scmd : exec_info.body) {
         VLOG(2) << "TX CMD " << scmd.Cid()->name() << " " << scmd.NumArgs();
 
-        cmd_cntx.tx->MultiSwitchCmd(scmd.Cid());
-        cntx->cid = scmd.Cid();
+        cntx->SwitchTxCmd(scmd.Cid());
 
         arg_vec.resize(scmd.NumArgs());
         scmd.Fill(&arg_vec);
