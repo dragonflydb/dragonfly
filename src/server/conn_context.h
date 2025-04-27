@@ -8,6 +8,7 @@
 #include <absl/container/flat_hash_set.h>
 
 #include "acl/acl_commands_def.h"
+#include "core/overloaded.h"
 #include "facade/acl_commands_def.h"
 #include "facade/conn_context.h"
 #include "facade/reply_capture.h"
@@ -27,25 +28,20 @@ struct FlowInfo;
 // Used for storing MULTI/EXEC commands.
 class StoredCmd {
  public:
-  StoredCmd(const CommandId* cid, ArgSlice args, facade::ReplyMode mode = facade::ReplyMode::FULL);
+  StoredCmd(const CommandId* cid, bool own_args, CmdArgList args);
 
   // Create on top of already filled tightly-packed buffer.
-  StoredCmd(std::string&& buffer, const CommandId* cid, ArgSlice args,
-            facade::ReplyMode mode = facade::ReplyMode::FULL);
+  StoredCmd(std::string&& buffer, const CommandId* cid, CmdArgList args, facade::ReplyMode mode);
 
-  size_t NumArgs() const;
-
-  size_t UsedMemory() const;
-
-  // Fill the arg list with stored arguments, it should be at least of size NumArgs().
-  // Between filling and invocation, cmd should NOT be moved.
-  void Fill(absl::Span<std::string_view> args);
-
-  void Fill(CmdArgVec* dest) {
-    dest->resize(sizes_.size());
-    Fill(absl::MakeSpan(*dest));
+  size_t NumArgs() const {
+    return std::visit(Overloaded{//
+                                 [](const OwnStorage& s) { return s.sizes.size(); },
+                                 [](const CmdArgList& s) { return s.size(); }},
+                      args_);
   }
 
+  size_t UsedMemory() const;
+  facade::CmdArgList ArgList(CmdArgVec* scratch) const;
   std::string FirstArg() const;
 
   const CommandId* Cid() const;
@@ -53,10 +49,16 @@ class StoredCmd {
   facade::ReplyMode ReplyMode() const;
 
  private:
-  const CommandId* cid_;                 // underlying command
-  std::string buffer_;                   // underlying buffer
-  absl::FixedArray<uint32_t, 4> sizes_;  // sizes of arg part
-  facade::ReplyMode reply_mode_;         // reply mode
+  const CommandId* cid_;  // underlying command
+  struct OwnStorage {
+    std::string buffer;                   // underlying buffer
+    absl::FixedArray<uint32_t, 4> sizes;  // sizes of arg part
+    explicit OwnStorage(size_t sz) : sizes(sz) {
+    }
+  };
+
+  std::variant<OwnStorage, CmdArgList> args_;  // args storage
+  facade::ReplyMode reply_mode_;               // reply mode
 };
 
 struct ConnectionState {

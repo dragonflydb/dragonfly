@@ -637,9 +637,8 @@ Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
       // We can only tell if eval is transactional based on they keycount
       if (absl::StartsWith(scmd.Cid()->name(), "EVAL")) {
         CmdArgVec arg_vec{};
-        StoredCmd cmd = scmd;
-        cmd.Fill(&arg_vec);
-        auto keys = DetermineKeys(scmd.Cid(), absl::MakeSpan(arg_vec));
+        auto args = scmd.ArgList(&arg_vec);
+        auto keys = DetermineKeys(scmd.Cid(), args);
         transactional |= (keys && keys.value().NumArgs() > 0);
       } else {
         transactional |= scmd.Cid()->IsTransactional();
@@ -1203,9 +1202,8 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
   bool is_trans_cmd = CO::IsTransKind(cid->name());
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
     // TODO: protect against aggregating huge transactions.
-    StoredCmd stored_cmd{cid, args_no_cmd};
-    dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
-    if (stored_cmd.Cid()->IsWriteOnly()) {
+    dfly_cntx->conn_state.exec_info.body.emplace_back(cid, true, args_no_cmd);
+    if (cid->IsWriteOnly()) {
       dfly_cntx->conn_state.exec_info.is_write = true;
     }
     return builder->SendSimpleString("QUEUED");
@@ -1415,11 +1413,14 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
   DCHECK_EQ(builder->GetProtocol(), Protocol::REDIS);
 
+  auto* ss = dfly::ServerState::tlocal();
+  // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
+  if (ss->IsPaused())
+    return 0;
+
   vector<StoredCmd> stored_cmds;
   intrusive_ptr<Transaction> dist_trans;
-
   size_t dispatched = 0;
-  auto* ss = dfly::ServerState::tlocal();
 
   auto perform_squash = [&] {
     if (stored_cmds.empty())
@@ -1448,10 +1449,6 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
     stored_cmds.clear();
   };
 
-  // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
-  if (ss->IsPaused())
-    return 0;
-
   for (auto args : args_list) {
     string cmd = absl::AsciiStrToUpper(ArgS(args, 0));
     const auto [cid, tail_args] = registry_.FindExtended(cmd, args.subspan(1));
@@ -1471,7 +1468,7 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
 
     if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
       stored_cmds.reserve(args_list.size());
-      stored_cmds.emplace_back(cid, tail_args);
+      stored_cmds.emplace_back(cid, false /* do not deep-copy commands*/, tail_args);
       continue;
     }
 
@@ -2110,19 +2107,18 @@ bool IsWatchingOtherDbs(DbIndex db_indx, const ConnectionState::ExecInfo& exec_i
   return false;
 }
 
-template <typename F> void IterateAllKeys(ConnectionState::ExecInfo* exec_info, F&& f) {
+template <typename F> void IterateAllKeys(const ConnectionState::ExecInfo* exec_info, F&& f) {
   for (auto& [dbid, key] : exec_info->watched_keys)
     f(MutableSlice{key.data(), key.size()});
 
   CmdArgVec arg_vec{};
 
-  for (auto& scmd : exec_info->body) {
+  for (const auto& scmd : exec_info->body) {
     if (!scmd.Cid()->IsTransactional())
       continue;
 
-    scmd.Fill(&arg_vec);
-
-    auto key_res = DetermineKeys(scmd.Cid(), absl::MakeSpan(arg_vec));
+    auto args = scmd.ArgList(&arg_vec);
+    auto key_res = DetermineKeys(scmd.Cid(), args);
     if (!key_res.ok())
       continue;
 
@@ -2224,16 +2220,13 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), rb, cntx, this, opts);
     } else {
       CmdArgVec arg_vec;
-      for (auto& scmd : exec_info.body) {
+      for (const auto& scmd : exec_info.body) {
         VLOG(2) << "TX CMD " << scmd.Cid()->name() << " " << scmd.NumArgs();
 
         cmd_cntx.tx->MultiSwitchCmd(scmd.Cid());
         cntx->cid = scmd.Cid();
 
-        arg_vec.resize(scmd.NumArgs());
-        scmd.Fill(&arg_vec);
-
-        CmdArgList args = absl::MakeSpan(arg_vec);
+        CmdArgList args = scmd.ArgList(&arg_vec);
 
         if (scmd.Cid()->IsTransactional()) {
           OpStatus st = cmd_cntx.tx->InitByArgs(cntx->ns, cntx->conn_state.db_index, args);
