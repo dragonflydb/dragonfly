@@ -870,6 +870,9 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     is_prior_list = (to_res.it->second.ObjType() == OBJ_LIST);
   }
 
+  // Delete the document from the search index before deleting from the database
+  op_args.shard->search_indices()->RemoveDoc(from_key, op_args.db_cntx, from_res.it->second);
+
   bool sticky = from_res.it->first.IsSticky();
   uint64_t exp_ts = db_slice.ExpireTime(from_res.exp_it);
 
