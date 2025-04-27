@@ -116,8 +116,8 @@ ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
           "Maximum size of a value that may be serialized at once during snapshotting or full "
           "sync. Values bigger than this threshold will be serialized using streaming "
           "serialization. 0 - to disable streaming mode");
-ABSL_FLAG(uint32_t, max_squashed_cmd_num, 32,
-          "Max number of commands squashed in command squash optimizaiton");
+ABSL_FLAG(uint32_t, max_squashed_cmd_num, 100,
+          "Max number of commands squashed in a single shard during squash optimizaiton");
 
 namespace dfly {
 

@@ -367,7 +367,7 @@ class Connection : public util::Connection {
   // Create new pipeline request, re-use from pool when possible.
   PipelineMessagePtr FromArgs(RespVec args, mi_heap_t* heap);
 
-  ParserStatus ParseRedis();
+  ParserStatus ParseRedis(unsigned max_busy_cycles);
   ParserStatus ParseMemcache();
 
   void OnBreakCb(int32_t mask);
@@ -427,6 +427,7 @@ class Connection : public util::Connection {
   util::fb2::Fiber async_fb_;             // async fiber (if started)
 
   uint64_t pending_pipeline_cmd_cnt_ = 0;  // how many queued Redis async commands in dispatch_q
+  size_t pending_pipeline_bytes_ = 0;      // how many bytes of the queued Redis async commands
 
   // how many bytes of the current request have been consumed
   size_t request_consumed_bytes_ = 0;
@@ -454,10 +455,6 @@ class Connection : public util::Connection {
   std::string lib_ver_;
 
   unsigned parser_error_ = 0;
-
-  // amount of times we enqued requests asynchronously during the same async_fiber_epoch_.
-  unsigned async_streak_len_ = 0;
-  uint64_t async_fiber_epoch_ = 0;
 
   BreakerCb breaker_cb_;
 
