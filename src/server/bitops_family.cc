@@ -728,7 +728,7 @@ ResultType Get::ApplyTo(Overflow ov, const string* bitfield) {
   const size_t offset = attr_.offset;
   auto last_byte_offset = GetByteIndex(attr_.offset + attr_.encoding_bit_size - 1);
 
-  if (GetByteIndex(offset) >= total_bytes && attr_.encoding_bit_size > 0) {
+  if (GetByteIndex(offset) >= total_bytes) {
     return 0;
   }
 
