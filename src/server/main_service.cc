@@ -287,10 +287,10 @@ void DispatchMonitor(ConnectionContext* cntx, const CommandId* cid, CmdArgList t
 
 class InterpreterReplier : public RedisReplyBuilder {
  public:
-  InterpreterReplier(ObjectExplorer* explr) : RedisReplyBuilder(nullptr), explr_(explr) {
+  explicit InterpreterReplier(ObjectExplorer* explr) : RedisReplyBuilder(nullptr), explr_(explr) {
   }
 
-  void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
+  void SendError(std::string_view str, std::string_view type) final;
 
   void SendBulkString(std::string_view str) final;
   void SendSimpleString(std::string_view str) final;
@@ -313,7 +313,7 @@ class InterpreterReplier : public RedisReplyBuilder {
 // Serialized result of script invocation to Redis protocol
 class EvalSerializer : public ObjectExplorer {
  public:
-  EvalSerializer(RedisReplyBuilder* rb) : rb_(rb) {
+  explicit EvalSerializer(RedisReplyBuilder* rb) : rb_(rb) {
   }
 
   void OnBool(bool b) final {
@@ -443,11 +443,8 @@ void InterpreterReplier::StartCollection(unsigned len, CollectionType type) {
 }
 
 bool IsSHA(string_view str) {
-  for (auto c : str) {
-    if (!absl::ascii_isxdigit(c))
-      return false;
-  }
-  return true;
+  return std::all_of(str.begin(), str.end(),
+                     [](unsigned char c) { return absl::ascii_isxdigit(c); });
 }
 
 optional<ErrorReply> EvalValidator(CmdArgList args) {
@@ -2102,12 +2099,8 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandId* exists_cid,
 
 // Check if exec_info watches keys on dbs other than db_indx.
 bool IsWatchingOtherDbs(DbIndex db_indx, const ConnectionState::ExecInfo& exec_info) {
-  for (const auto& [key_db, _] : exec_info.watched_keys) {
-    if (key_db != db_indx) {
-      return true;
-    }
-  }
-  return false;
+  return std::any_of(exec_info.watched_keys.begin(), exec_info.watched_keys.end(),
+                     [db_indx](const auto& pair) { return pair.first != db_indx; });
 }
 
 template <typename F> void IterateAllKeys(ConnectionState::ExecInfo* exec_info, F&& f) {
@@ -2275,7 +2268,7 @@ void SubscribeImpl(bool reject_cluster, CmdArgList args, const CommandContext& c
   if (reject_cluster && IsClusterEnabled()) {
     return cmd_cntx.rb->SendError("SUBSCRIBE is not supported in cluster mode yet");
   }
-  cmd_cntx.conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, std::move(args),
+  cmd_cntx.conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, args,
                                          static_cast<RedisReplyBuilder*>(cmd_cntx.rb));
 }
 
