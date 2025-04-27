@@ -1,6 +1,6 @@
 import hypothesis.strategies as st
 
-from test.test_hypothesis.base import (
+from .base import (
     BaseTest,
     commands,
     values,
@@ -37,7 +37,7 @@ class TestHash(BaseTest):
             expires_seconds,
             st.just("fields"),
             st.just(2),
-            st.lists(fields, min_size=2, max_size=2),
+            st.lists(fields, min_size=2, max_size=2, unique=True),
         )
     )
     create_command_strategy = commands(

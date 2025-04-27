@@ -1,13 +1,13 @@
 import hypothesis.strategies as st
 
-from test.test_hypothesis.base import (
+from .base import (
     BaseTest,
     commands,
     common_commands,
     keys,
     values,
 )
-from test.test_hypothesis.test_string import string_commands
+from .test_string import string_commands
 
 
 class TestServer(BaseTest):

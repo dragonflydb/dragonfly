@@ -1,6 +1,6 @@
 import hypothesis.strategies as st
 
-from test.test_hypothesis.base import BaseTest, commands, values, common_commands
+from .base import BaseTest, commands, values, common_commands
 
 
 class TestConnection(BaseTest):
