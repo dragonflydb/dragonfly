@@ -13,6 +13,7 @@
 #include <numeric>
 #include <variant>
 
+#include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/histogram.h"
 #include "base/io_buf.h"
@@ -23,7 +24,9 @@
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
+#include "glog/logging.h"
 #include "io/file.h"
+#include "util/fibers/fibers.h"
 #include "util/fibers/proactor_base.h"
 
 #ifdef DFLY_USE_SSL
@@ -93,6 +96,10 @@ ABSL_FLAG(bool, migrate_connections, true,
           "they operate. Currently this is only supported for Lua script invocations, and can "
           "happen at most once per connection.");
 
+ABSL_FLAG(uint32_t, max_busy_read_usec, 100,
+          "Maximum time we read and parse from "
+          "a socket without yielding. In microseconds.");
+
 using namespace util;
 using namespace std;
 using absl::GetFlag;
@@ -146,7 +153,7 @@ struct TrafficLogger {
 
 void TrafficLogger::ResetLocked() {
   if (log_file) {
-    log_file->Close();
+    std::ignore = log_file->Close();
     log_file.reset();
   }
 }
@@ -196,7 +203,7 @@ void OpenTrafficLogger(string_view base_path) {
 
   // Write version, incremental numbering :)
   uint8_t version[1] = {2};
-  tl_traffic_logger.log_file->Write(version);
+  std::ignore = tl_traffic_logger.log_file->Write(version);
 }
 
 void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp,
@@ -876,6 +883,7 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
   if (dispatch_q_.size()) {
     absl::StrAppend(&after, " pipeline=", dispatch_q_.size());
+    absl::StrAppend(&after, " pbuf=", pending_pipeline_bytes_);
   }
   absl::StrAppend(&after, " age=", now - creation_time_, " idle=", now - last_interaction_);
   string_view phase_name = PHASE_NAMES[phase_];
@@ -1028,7 +1036,7 @@ void Connection::ConnectionFlow() {
   if (io_buf_.InputLen() > 0) {
     phase_ = PROCESS;
     if (redis_parser_) {
-      parse_status = ParseRedis();
+      parse_status = ParseRedis(10000);
     } else {
       DCHECK(memcache_parser_);
       parse_status = ParseMemcache();
@@ -1136,19 +1144,6 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   // Dispatch async if we're handling a pipeline or if we can't dispatch sync.
   if (optimize_for_async || !can_dispatch_sync) {
     SendAsync(cmd_msg_cb());
-
-    auto epoch = fb2::FiberSwitchEpoch();
-
-    if (async_fiber_epoch_ == epoch) {
-      // If we pushed too many items without context switching - yield
-      if (++async_streak_len_ >= 10 && !cc_->async_dispatch) {
-        async_streak_len_ = 0;
-        ThisFiber::Yield();
-      }
-    } else {
-      async_streak_len_ = 0;
-      async_fiber_epoch_ = epoch;
-    }
   } else {
     ShrinkPipelinePool();  // Gradually release pipeline request pool.
     {
@@ -1164,20 +1159,17 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   }
 }
 
-Connection::ParserStatus Connection::ParseRedis() {
+Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
   uint32_t consumed = 0;
   RedisParser::Result result = RedisParser::OK;
 
-  // Re-use connection local resources to reduce allocations
-  RespVec& parse_args = tmp_parse_args_;
-  CmdArgVec& cmd_vec = tmp_cmd_vec_;
-
-  auto dispatch_sync = [this, &parse_args, &cmd_vec] {
-    RespExpr::VecToArgList(parse_args, &cmd_vec);
-    service_->DispatchCommand(absl::MakeSpan(cmd_vec), reply_builder_.get(), cc_.get());
+  auto dispatch_sync = [this] {
+    RespExpr::VecToArgList(tmp_parse_args_, &tmp_cmd_vec_);
+    service_->DispatchCommand(absl::MakeSpan(tmp_cmd_vec_), reply_builder_.get(), cc_.get());
   };
-  auto dispatch_async = [this, &parse_args, tlh = mi_heap_get_backing()]() -> MessageHandle {
-    return {FromArgs(std::move(parse_args), tlh)};
+
+  auto dispatch_async = [this, tlh = mi_heap_get_backing()]() -> MessageHandle {
+    return {FromArgs(std::move(tmp_parse_args_), tlh)};
   };
 
   ReadBuffer read_buffer = GetReadBuffer();
@@ -1186,10 +1178,10 @@ Connection::ParserStatus Connection::ParseRedis() {
     if (read_buffer.ShouldAdvance()) {  // can happen only with io_uring/bundles
       read_buffer.slice = NextBundleBuffer(read_buffer.available_bytes);
     }
-    result = redis_parser_->Parse(read_buffer.slice, &consumed, &parse_args);
+    result = redis_parser_->Parse(read_buffer.slice, &consumed, &tmp_parse_args_);
     request_consumed_bytes_ += consumed;
-    if (result == RedisParser::OK && !parse_args.empty()) {
-      if (RespExpr& first = parse_args.front(); first.type == RespExpr::STRING)
+    if (result == RedisParser::OK && !tmp_parse_args_.empty()) {
+      if (RespExpr& first = tmp_parse_args_.front(); first.type == RespExpr::STRING)
         DVLOG(2) << "Got Args with first token " << ToSV(first.GetBuf());
 
       if (io_req_size_hist)
@@ -1198,12 +1190,20 @@ Connection::ParserStatus Connection::ParseRedis() {
       bool has_more = consumed < read_buffer.available_bytes;
 
       if (tl_traffic_logger.log_file && IsMain() /* log only on the main interface */) {
-        LogTraffic(id_, has_more, absl::MakeSpan(parse_args), service_->GetContextInfo(cc_.get()));
+        LogTraffic(id_, has_more, absl::MakeSpan(tmp_parse_args_),
+                   service_->GetContextInfo(cc_.get()));
       }
 
       DispatchSingle(has_more, dispatch_sync, dispatch_async);
     }
     read_buffer.Consume(consumed);
+
+    // We must yield from time to time to allow other fibers to run.
+    // Specifically, if a client sends a huge chunk of data resulting in a very long pipeline,
+    // we want to yield to allow AsyncFiber to actually execute on the pending pipeline.
+    if (ThisFiber::GetRunningTimeCycles() > max_busy_cycles) {
+      ThisFiber::Yield();
+    }
   } while (RedisParser::OK == result && read_buffer.available_bytes > 0 &&
            !reply_builder_->GetError());
 
@@ -1390,6 +1390,9 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
   ParserStatus parse_status = OK;
 
   size_t max_iobfuf_len = GetFlag(FLAGS_max_client_iobuf_len);
+  unsigned max_busy_read_cycles =
+      (base::CycleClock::Frequency() * GetFlag(FLAGS_max_busy_read_usec)) / 1000000U;
+
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
 
@@ -1404,10 +1407,14 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
 
     if (redis_parser_) {
-      parse_status = ParseRedis();
+      parse_status = ParseRedis(max_busy_read_cycles);
     } else {
       DCHECK(memcache_parser_);
       parse_status = ParseMemcache();
+    }
+
+    if (reply_builder_->GetError()) {
+      return reply_builder_->GetError();
     }
 
     if (parse_status == NEED_MORE) {
@@ -1429,11 +1436,9 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
                               [&]() { io_buf_.Reserve(std::min(max_iobfuf_len, parser_hint)); });
         }
 
-        // If we got a partial request and we couldn't parse the length, just
-        // double the capacity.
         // If we got a partial request because iobuf was full, grow it up to
         // a reasonable limit to save on Recv() calls.
-        if (io_buf_.AppendLen() < 64u || (is_iobuf_full && capacity < 4096)) {
+        if (is_iobuf_full && capacity < max_iobfuf_len / 2) {
           // Last io used most of the io_buf to the end.
           UpdateIoBufCapacity(io_buf_, stats_, [&]() {
             io_buf_.Reserve(capacity * 2);  // Valid growth range.
@@ -1441,21 +1446,11 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
         }
 
         DCHECK_GT(io_buf_.AppendLen(), 0U);
-      } else if (io_buf_.AppendLen() == 0) {
-        // We have a full buffer and we can not progress with parsing.
-        // This means that we have request too large.
-        LOG(ERROR) << "Request is too large, closing connection";
-        parse_status = ERROR;
-        break;
       }
     } else if (parse_status != OK) {
       break;
     }
-    ec = reply_builder_->GetError();
-  } while (peer->IsOpen() && !ec);
-
-  if (ec)
-    return ec;
+  } while (peer->IsOpen());
 
   return parse_status;
 }
@@ -1833,6 +1828,7 @@ void Connection::SendAsync(MessageHandle msg) {
   // Squashing is only applied to redis commands
   if (std::holds_alternative<PipelineMessagePtr>(msg.handle)) {
     pending_pipeline_cmd_cnt_++;
+    pending_pipeline_bytes_ += used_mem;
   }
 
   if (msg.IsControl()) {
@@ -1869,7 +1865,10 @@ void Connection::RecycleMessage(MessageHandle msg) {
 
   // Retain pipeline message in pool.
   if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
+    DCHECK_GE(pending_pipeline_bytes_, used_mem);
+    DCHECK_GE(pending_pipeline_cmd_cnt_, 1u);
     pending_pipeline_cmd_cnt_--;
+    pending_pipeline_bytes_ -= used_mem;
     if (stats_->pipeline_cmd_cache_bytes < qbp.pipeline_cache_limit) {
       stats_->pipeline_cmd_cache_bytes += (*pipe)->StorageCapacity();
       pipeline_req_pool_.push_back(std::move(*pipe));
