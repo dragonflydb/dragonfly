@@ -102,6 +102,19 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
   return true;
 }
 
+bool IsLSNDiffBellowThreshold(const std::vector<LSN>& lsn_vec1, const std::vector<LSN>& lsn_vec2) {
+  uint32_t allow_diff = absl::GetFlag(FLAGS_allow_partial_sync_with_lsn_diff);
+  for (size_t i = 0; i < lsn_vec1.size(); ++i) {
+    uint32_t diff =
+        lsn_vec1[i] > lsn_vec2[i] ? lsn_vec1[i] - lsn_vec2[i] : lsn_vec2[i] - lsn_vec1[i];
+    if (diff > allow_diff) {
+      VLOG(1) << "No partial sync due to diff: " << diff << " allow_diff is: " << allow_diff;
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 void DflyCmd::ReplicaInfo::Cancel() {
@@ -323,22 +336,7 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
         lsn_vec.push_back(value);
       }
 
-      bool partial = true;
-      uint32_t allow_diff = absl::GetFlag(FLAGS_allow_partial_sync_with_lsn_diff);
-      for (size_t i = 0; i < lsn_vec.size(); ++i) {
-        uint32_t diff = lsn_vec[i] > data.value().last_journal_LSNs[i]
-                            ? lsn_vec[i] - data.value().last_journal_LSNs[i]
-                            : data.value().last_journal_LSNs[i] - lsn_vec[i];
-        VLOG(1) << "diff is: " << diff;
-        if (diff > allow_diff) {
-          VLOG(1) << "No partial sync due to diff: " << diff
-                  << " replica_lsn_vec:" << last_master_lsn.value()
-                  << " my lsn vec: " << absl::StrJoin(data.value().last_journal_LSNs, " ");
-          partial = false;
-          break;
-        }
-      }
-      if (partial) {
+      if (IsLSNDiffBellowThreshold(data.value().last_journal_LSNs, lsn_vec)) {
         sync_type = "PARTIAL";
         flow.start_partial_sync_at = sf_->journal()->GetLsn();
         VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
