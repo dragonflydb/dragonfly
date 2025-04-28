@@ -140,7 +140,7 @@ void DflyCmd::Run(CmdArgList args, Transaction* tx, facade::RedisReplyBuilder* r
     return Thread(args, rb, cntx);
   }
 
-  if (sub_cmd == "FLOW" && (args.size() == 4 || args.size() == 5)) {
+  if (sub_cmd == "FLOW" && (args.size() == 4 || args.size() == 5 || args.size() == 6)) {
     return Flow(args, rb, cntx);
   }
 
@@ -233,11 +233,16 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
   string_view flow_id_str = ArgS(args, 3);
 
   std::optional<LSN> seqid;
+  std::optional<string> last_master_id;
+  std::optional<string> last_master_lsn;
   if (args.size() == 5) {
     seqid.emplace();
     if (!absl::SimpleAtoi(ArgS(args, 4), &seqid.value())) {
       return rb->SendError(facade::kInvalidIntErr);
     }
+  } else if (args.size() == 6) {
+    last_master_id = ArgS(args, 4);
+    last_master_lsn = ArgS(args, 5);
   }
 
   VLOG(1) << "Got DFLY FLOW master_id: " << master_id << " sync_id: " << sync_id_str
@@ -257,6 +262,7 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     return;
 
   string eof_token;
+  std::string_view sync_type{"FULL"};
   {
     util::fb2::LockGuard lk{replica_ptr->shared_mu};
 
@@ -276,17 +282,6 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     flow.conn = cntx->conn();
     flow.eof_token = eof_token;
     flow.version = replica_ptr->version;
-  }
-  if (!cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
-    // Listener::PreShutdown() triggered
-    if (cntx->conn()->socket()->IsOpen()) {
-      return rb->SendError(kInvalidState);
-    }
-    return;
-  }
-  sf_->journal()->StartInThread();
-
-  std::string_view sync_type{"FULL"};
 
 #if 0  // Partial synchronization is disabled
   if (seqid.has_value()) {
@@ -306,6 +301,27 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     }
   }
 #endif
+
+    std::optional<Replica::LastMasterSyncData> data = sf_->GetLastMasterData();
+    if (last_master_id.has_value() && data.has_value()) {
+      string last_master_lsn_str = absl::StrJoin(data.value().last_journal_LSNs, "-");
+      if (data.value().id == last_master_id.value() && last_master_lsn_str == last_master_lsn) {
+        sync_type = "PARTIAL";
+        flow.start_partial_sync_at = sf_->journal()->GetLsn();
+        VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
+                << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
+      }
+    }
+  }
+
+  if (!cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
+    // Listener::PreShutdown() triggered
+    if (cntx->conn()->socket()->IsOpen()) {
+      return rb->SendError(kInvalidState);
+    }
+    return;
+  }
+  sf_->journal()->StartInThread();
 
   rb->StartArray(2);
   rb->SendSimpleString(sync_type);

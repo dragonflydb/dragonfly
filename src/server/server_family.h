@@ -242,6 +242,10 @@ class ServerFamily {
     return dfly_cmd_.get();
   }
 
+  std::optional<Replica::LastMasterSyncData> GetLastMasterData() const {
+    return last_master_data_;
+  }
+
   absl::Span<facade::Listener* const> GetListeners() const {
     return listeners_;
   }
@@ -368,6 +372,7 @@ class ServerFamily {
   std::unique_ptr<DflyCmd> dfly_cmd_;
 
   std::string master_replid_;
+  std::optional<Replica::LastMasterSyncData> last_master_data_;
 
   time_t start_time_ = 0;  // in seconds, epoch time.
 
