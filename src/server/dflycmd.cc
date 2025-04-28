@@ -156,7 +156,7 @@ void DflyCmd::Run(CmdArgList args, Transaction* tx, facade::RedisReplyBuilder* r
     return Thread(args, rb, cntx);
   }
 
-  if (sub_cmd == "FLOW" && (args.size() == 4 || args.size() == 5 || args.size() == 6)) {
+  if (sub_cmd == "FLOW" && (args.size() >= 4 && args.size() <= 6)) {
     return Flow(args, rb, cntx);
   }
 
