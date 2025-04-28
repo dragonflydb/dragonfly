@@ -103,6 +103,7 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
 }
 
 bool IsLSNDiffBellowThreshold(const std::vector<LSN>& lsn_vec1, const std::vector<LSN>& lsn_vec2) {
+  DCHECK_EQ(lsn_vec1.size(), lsn_vec2.size());
   uint32_t allow_diff = absl::GetFlag(FLAGS_allow_partial_sync_with_lsn_diff);
   for (size_t i = 0; i < lsn_vec1.size(); ++i) {
     uint32_t diff =

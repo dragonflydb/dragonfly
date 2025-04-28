@@ -61,7 +61,7 @@ class Replica : ProtocolClient {
   GenericError Start();
   struct LastMasterSyncData {
     std::string id;
-    std::vector<LSN> last_journal_LSNs;
+    std::vector<LSN> last_journal_LSNs;  // lsn for each master shard.
   };
   void StartMainReplicationFiber(std::optional<LastMasterSyncData> data);
 
