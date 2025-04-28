@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  image: ghcr.io/dragonflydb/dragonfly-dev
+  image: ghcr.io/abhra303/dragonfly-dev
   GCS_IMAGE: us-central1-docker.pkg.dev/dragonflydb-public/dragonfly-registry/dragonfly-dev
 
 jobs:
