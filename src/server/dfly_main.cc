@@ -1,4 +1,3 @@
-
 // Copyright 2023, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
@@ -649,30 +648,35 @@ void sigill_hdlr(int signo) {
 }
 
 void PrintBasicUsageInfo() {
-  std::cout << "                   .--::--.                   \n";
-  std::cout << "   :+*=:          =@@@@@@@@=          :+*+:   \n";
-  std::cout << "  %@@@@@@%*=.     =@@@@@@@@-     .=*%@@@@@@#  \n";
-  std::cout << "  @@@@@@@@@@@@#+-. .%@@@@#. .-+#@@@@@@@@@@@%  \n";
-  std::cout << "  -@@@@@@@@@@@@@@@@*:#@@#:*@@@@@@@@@@@@@@@@-  \n";
-  std::cout << "    :+*********####-%@%%@%-####********++.    \n";
-  std::cout << "   .%@@@@@@@@@@@@@%:@@@@@@:@@@@@@@@@@@@@@%    \n";
-  std::cout << "   .@@@@@@@@%*+-:   =@@@@=  .:-+*%@@@@@@@%.   \n";
-  std::cout << "     =*+-:           ###*          .:-+*=     \n";
-  std::cout << "                     %@@%                     \n";
-  std::cout << "                     *@@*                     \n";
-  std::cout << "                     +@@=                     \n";
-  std::cout << "                     :##:                     \n";
-  std::cout << "                     :@@:                     \n";
-  std::cout << "                      @@                      \n";
-  std::cout << "                      ..                      \n";
-  std::cout << "* Logs will be written to the first available of the following paths:\n";
+  std::string output =
+      "                   .--::--.                   \n"
+      "   :+*=:          =@@@@@@@@=          :+*+:   \n"
+      "  %@@@@@@%*=.     =@@@@@@@@-     .=*%@@@@@@#  \n"
+      "  @@@@@@@@@@@@#+-. .%@@@@#. .-+#@@@@@@@@@@@%  \n"
+      "  -@@@@@@@@@@@@@@@@*:#@@#:*@@@@@@@@@@@@@@@@-  \n"
+      "    :+*********####-%@%%@%-####********++.    \n"
+      "   .%@@@@@@@@@@@@@%:@@@@@@:@@@@@@@@@@@@@@%    \n"
+      "   .@@@@@@@@%*+-:   =@@@@=  .:-+*%@@@@@@@%.   \n"
+      "     =*+-:           ###*          .:-+*=     \n"
+      "                     %@@%                     \n"
+      "                     *@@*                     \n"
+      "                     +@@=                     \n"
+      "                     :##:                     \n"
+      "                     :@@:                     \n"
+      "                      @@                      \n"
+      "                      ..                      \n"
+      "* Logs will be written to the first available of the following paths:\n";
+
   for (const auto& dir : google::GetLoggingDirectories()) {
     const string_view maybe_slash = absl::EndsWith(dir, "/") ? "" : "/";
-    std::cout << dir << maybe_slash << "dragonfly.*\n";
+    output += std::string(dir) + std::string(maybe_slash) + "dragonfly.*\n";
   }
-  std::cout << "* For the available flags type dragonfly [--help | --helpfull]\n";
-  std::cout << "* Documentation can be found at: https://www.dragonflydb.io/docs";
-  std::cout << endl;
+
+  output +=
+      "* For the available flags type dragonfly [--help | --helpfull]\n"
+      "* Documentation can be found at: https://www.dragonflydb.io/docs\n";
+
+  std::cout << output;
 }
 
 void ParseFlagsFromEnv() {
