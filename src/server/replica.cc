@@ -240,8 +240,7 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> data) {
     // 3. Initiate full sync
     if ((state_mask_.load() & R_SYNC_OK) == 0) {
       if (HasDflyMaster()) {
-        ec = InitiateDflySync(data);
-        data = nullopt;  // use old master data only once.
+        ec = InitiateDflySync(std::exchange(data, nullopt));
       } else
         ec = InitiatePSync();
 
@@ -763,7 +762,7 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(
       absl::GetFlag(FLAGS_replica_partial_sync)) {
     absl::StrAppend(&cmd, " ", *lsn);
   }
-  if (last_master_data.has_value() && master_context_.version >= DflyVersion::VER5 &&
+  if (last_master_data && master_context_.version >= DflyVersion::VER5 &&
       absl::GetFlag(FLAGS_replica_partial_sync)) {
     string lsn_str = absl::StrJoin(last_master_data.value().last_journal_LSNs, "-");
     absl::StrAppend(&cmd, " ", last_master_data.value().id, " ", lsn_str);

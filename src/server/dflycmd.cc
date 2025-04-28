@@ -5,6 +5,7 @@
 
 #include <absl/random/random.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_split.h>
 #include <absl/strings/strip.h>
 
 #include <limits>
@@ -33,6 +34,8 @@
 #include "util/fibers/synchronization.h"
 using namespace std;
 
+ABSL_FLAG(uint32_t, allow_partial_sync_with_lsn_diff, 0,
+          "do partial sync incase lsn diff is less then given threshold");
 ABSL_DECLARE_FLAG(bool, info_replication_valkey_compatible);
 ABSL_DECLARE_FLAG(uint32_t, replication_timeout);
 
@@ -303,9 +306,39 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
 #endif
 
     std::optional<Replica::LastMasterSyncData> data = sf_->GetLastMasterData();
-    if (last_master_id.has_value() && data.has_value()) {
-      string last_master_lsn_str = absl::StrJoin(data.value().last_journal_LSNs, "-");
-      if (data.value().id == last_master_id.value() && last_master_lsn_str == last_master_lsn) {
+    // In this flow the master and the registered replica where synced from the same master.
+    if (last_master_id && data && data.value().id == last_master_id.value()) {
+      std::vector<std::string_view> lsn_str_vec = absl::StrSplit(last_master_lsn.value(), '-');
+      if (lsn_str_vec.size() != data.value().last_journal_LSNs.size()) {
+        return rb->SendError(facade::kSyntaxErr);  // Unexpected flow. LSN vector of same master
+                                                   // should be the same size on all replicas.
+      }
+      std::vector<LSN> lsn_vec;
+      lsn_vec.reserve(lsn_str_vec.size());
+      for (string_view lsn_str : lsn_str_vec) {
+        int64_t value;
+        if (!absl::SimpleAtoi(lsn_str, &value)) {
+          return rb->SendError(facade::kInvalidIntErr);
+        }
+        lsn_vec.push_back(value);
+      }
+
+      bool partial = true;
+      uint32_t allow_diff = absl::GetFlag(FLAGS_allow_partial_sync_with_lsn_diff);
+      for (size_t i = 0; i < lsn_vec.size(); ++i) {
+        uint32_t diff = lsn_vec[i] > data.value().last_journal_LSNs[i]
+                            ? lsn_vec[i] - data.value().last_journal_LSNs[i]
+                            : data.value().last_journal_LSNs[i] - lsn_vec[i];
+        VLOG(1) << "diff is: " << diff;
+        if (diff > allow_diff) {
+          VLOG(1) << "No partial sync due to diff: " << diff
+                  << " replica_lsn_vec:" << last_master_lsn.value()
+                  << " my lsn vec: " << absl::StrJoin(data.value().last_journal_LSNs, " ");
+          partial = false;
+          break;
+        }
+      }
+      if (partial) {
         sync_type = "PARTIAL";
         flow.start_partial_sync_at = sf_->journal()->GetLsn();
         VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
