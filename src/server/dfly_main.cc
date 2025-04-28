@@ -669,14 +669,15 @@ void PrintBasicUsageInfo() {
 
   for (const auto& dir : google::GetLoggingDirectories()) {
     const string_view maybe_slash = absl::EndsWith(dir, "/") ? "" : "/";
-    output += std::string(dir) + std::string(maybe_slash) + "dragonfly.*\n";
+    absl::StrAppend(&output, dir, maybe_slash, "dragonfly.*\n");
   }
 
-  output +=
-      "* For the available flags type dragonfly [--help | --helpfull]\n"
-      "* Documentation can be found at: https://www.dragonflydb.io/docs\n";
+  absl::StrAppend(&output,
+                  "* For the available flags type dragonfly [--help | --helpfull]\n"
+                  "* Documentation can be found at: https://www.dragonflydb.io/docs\n");
 
   std::cout << output;
+  std::cout.flush();
 }
 
 void ParseFlagsFromEnv() {
