@@ -3068,7 +3068,7 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
     seeder = SeederV2(key_target=8_000)
     await seeder.run(c_master, target_deviation=0.01)
 
-    # Wait for all journal changes propaget to replicas
+    # Wait for all journal changes propagate to replicas
     await check_all_replicas_finished([c_replica1, c_replica2], c_master)
 
     if use_takeover:
