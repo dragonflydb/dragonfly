@@ -141,7 +141,6 @@ std::optional<Replica::LastMasterSyncData> Replica::Stop() {
   VLOG(1) << "Stopping replication " << this;
   // Stops the loop in MainReplicationFb.
 
-  // bool is_stable_sync = state_mask_.load() & R_SYNC_OK;
   proactor_->Await([this] {
     state_mask_.store(0);          // Specifically ~R_ENABLED.
     exec_st_.ReportCancelError();  // Context is fully resposible for cleanup.
@@ -155,6 +154,7 @@ std::optional<Replica::LastMasterSyncData> Replica::Stop() {
   for (auto& flow : shard_flows_) {
     flow.reset();
   }
+
   if (last_journal_LSNs_.has_value()) {
     LastMasterSyncData data;
     data.id = master_context_.master_repl_id;
