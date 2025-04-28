@@ -156,10 +156,7 @@ std::optional<Replica::LastMasterSyncData> Replica::Stop() {
   }
 
   if (last_journal_LSNs_.has_value()) {
-    LastMasterSyncData data;
-    data.id = master_context_.master_repl_id;
-    data.last_journal_LSNs = last_journal_LSNs_.value();
-    return data;
+    return LastMasterSyncData{master_context_.master_repl_id, last_journal_LSNs_.value()};
   }
   return nullopt;
 }
