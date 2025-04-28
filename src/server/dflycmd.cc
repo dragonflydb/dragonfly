@@ -35,7 +35,7 @@
 using namespace std;
 
 ABSL_FLAG(uint32_t, allow_partial_sync_with_lsn_diff, 0,
-          "do partial sync incase lsn diff is less then given threshold");
+          "Do partial sync in case lsn diff is less than the given threshold");
 ABSL_DECLARE_FLAG(bool, info_replication_valkey_compatible);
 ABSL_DECLARE_FLAG(uint32_t, replication_timeout);
 
