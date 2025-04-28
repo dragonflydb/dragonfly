@@ -92,7 +92,7 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
   return sinfo;
 }
 
-MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cmd) {
+MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(const StoredCmd* cmd) {
   DCHECK(cmd->Cid());
 
   if (!cmd->Cid()->IsTransactional() || (cmd->Cid()->opt_mask() & CO::BLOCKING) ||
@@ -103,8 +103,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
     return SquashResult::NOT_SQUASHED;
   }
 
-  cmd->Fill(&tmp_keylist_);
-  auto args = absl::MakeSpan(tmp_keylist_);
+  auto args = cmd->ArgList(&tmp_keylist_);
   if (args.empty())
     return SquashResult::NOT_SQUASHED;
 
@@ -136,11 +135,10 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
   return need_flush ? SquashResult::SQUASHED_FULL : SquashResult::SQUASHED;
 }
 
-bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, StoredCmd* cmd) {
+bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, const StoredCmd* cmd) {
   DCHECK(order_.empty());  // check no squashed chain is interrupted
 
-  cmd->Fill(&tmp_keylist_);
-  auto args = absl::MakeSpan(tmp_keylist_);
+  auto args = cmd->ArgList(&tmp_keylist_);
 
   if (opts_.verify_commands) {
     if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
@@ -170,13 +168,11 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
   if (cntx_->conn()) {
     local_cntx.skip_acl_validation = cntx_->conn()->IsPrivileged();
   }
-  absl::InlinedVector<MutableSlice, 4> arg_vec;
 
-  for (auto* cmd : sinfo.cmds) {
-    arg_vec.resize(cmd->NumArgs());
-    auto args = absl::MakeSpan(arg_vec);
-    cmd->Fill(args);
+  CmdArgVec arg_vec;
 
+  for (const auto* cmd : sinfo.cmds) {
+    auto args = cmd->ArgList(&arg_vec);
     if (opts_.verify_commands) {
       // The shared context is used for state verification, the local one is only for replies
       if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
