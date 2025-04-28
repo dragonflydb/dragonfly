@@ -3094,8 +3094,11 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
         )
         assert hash1 == hash2
 
-    replica2.stop()
+    # Check we can takeover to the second replica
+    await c_replica2.execute_command(f"REPLTAKEOVER 5")
+
     replica1.stop()
+    replica2.stop()
     if use_takeover or (allowed_diff > 0 and not use_takeover):
         # Check logs for partial replication
         lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
