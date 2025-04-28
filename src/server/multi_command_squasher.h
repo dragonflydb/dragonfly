@@ -28,6 +28,7 @@ class MultiCommandSquasher {
     unsigned max_squash_size = 32;  // How many commands to squash at once
   };
 
+  // Returns number of processed commands.
   static size_t Execute(absl::Span<StoredCmd> cmds, facade::RedisReplyBuilder* rb,
                         ConnectionContext* cntx, Service* service, const Opts& opts) {
     return MultiCommandSquasher{cmds, cntx, service, opts}.Run(rb);
@@ -40,17 +41,17 @@ class MultiCommandSquasher {
  private:
   // Per-shard execution info.
   struct ShardExecInfo {
-    ShardExecInfo() : cmds{}, replies{}, local_tx{nullptr} {
+    ShardExecInfo() : local_tx{nullptr} {
     }
 
-    std::vector<StoredCmd*> cmds;  // accumulated commands
+    std::vector<const StoredCmd*> cmds;  // accumulated commands
     std::vector<facade::CapturingReplyBuilder::Payload> replies;
+    unsigned reply_id = 0;
     boost::intrusive_ptr<Transaction> local_tx;  // stub-mode tx for use inside shard
   };
 
   enum class SquashResult { SQUASHED, SQUASHED_FULL, NOT_SQUASHED, ERROR };
 
- private:
   MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx, Service* Service,
                        const Opts& opts);
 
@@ -58,10 +59,10 @@ class MultiCommandSquasher {
   ShardExecInfo& PrepareShardInfo(ShardId sid);
 
   // Retrun squash flags
-  SquashResult TrySquash(StoredCmd* cmd);
+  SquashResult TrySquash(const StoredCmd* cmd);
 
   // Execute separate non-squashed cmd. Return false if aborting on error.
-  bool ExecuteStandalone(facade::RedisReplyBuilder* rb, StoredCmd* cmd);
+  bool ExecuteStandalone(facade::RedisReplyBuilder* rb, const StoredCmd* cmd);
 
   // Callback that runs on shards during squashed hop.
   facade::OpStatus SquashedHopCb(EngineShard* es, facade::RespVersion resp_v);
@@ -69,12 +70,11 @@ class MultiCommandSquasher {
   // Execute all currently squashed commands. Return false if aborting on error.
   bool ExecuteSquashed(facade::RedisReplyBuilder* rb);
 
-  // Run all commands until completion. Returns number of squashed commands.
+  // Run all commands until completion. Returns number of processed commands.
   size_t Run(facade::RedisReplyBuilder* rb);
 
   bool IsAtomic() const;
 
- private:
   absl::Span<StoredCmd> cmds_;  // Input range of stored commands
   ConnectionContext* cntx_;     // Underlying context
   Service* service_;

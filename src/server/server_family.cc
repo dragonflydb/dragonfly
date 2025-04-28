@@ -1314,6 +1314,20 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
                             conn_stats.pipelined_cmd_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
+
+  AppendMetricWithoutLabels("cmd_squash_hop_total", "", m.coordinator_stats.multi_squash_executions,
+                            MetricType::COUNTER, &resp->body());
+
+  AppendMetricWithoutLabels("cmd_squash_commands_total", "", m.coordinator_stats.squashed_commands,
+                            MetricType::COUNTER, &resp->body());
+
+  AppendMetricWithoutLabels("cmd_squash_hop_duration_seconds", "",
+                            m.coordinator_stats.multi_squash_exec_hop_usec * 1e-6,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("cmd_squash_hop_reply_seconds", "",
+                            m.coordinator_stats.multi_squash_exec_reply_usec * 1e-6,
+                            MetricType::COUNTER, &resp->body());
+
   AppendMetricWithoutLabels("commands_squashing_replies_bytes", "",
                             MultiCommandSquasher::GetRepliesMemSize(), MetricType::GAUGE,
                             &resp->body());
@@ -2210,7 +2224,10 @@ void ServerFamily::ResetStat(Namespace* ns) {
   shard_set->pool()->AwaitBrief(
       [registry = service_.mutable_registry(), ns](unsigned index, auto*) {
         registry->ResetCallStats(index);
-        ns->GetCurrentDbSlice().ResetEvents();
+        EngineShard* shard = EngineShard::tlocal();
+        if (shard) {
+          ns->GetDbSlice(shard->shard_id()).ResetEvents();
+        }
         facade::ResetStats();
         ServerState::tlocal()->exec_freq_count.clear();
       });
@@ -2486,7 +2503,6 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("total_commands_processed", conn_stats.command_cnt_main + conn_stats.command_cnt_other);
     append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
-    append("total_pipelined_squashed_commands", m.coordinator_stats.squashed_commands);
     append("pipeline_throttle_total", conn_stats.pipeline_throttle_count);
     append("pipelined_latency_usec", conn_stats.pipelined_cmd_latency);
     append("total_net_input_bytes", conn_stats.io_read_bytes);
@@ -2628,9 +2644,6 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("eval_shardlocal_coordination_total",
            m.coordinator_stats.eval_shardlocal_coordination_cnt);
     append("eval_squashed_flushes", m.coordinator_stats.eval_squashed_flushes);
-    append("multi_squash_execution_total", m.coordinator_stats.multi_squash_executions);
-    append("multi_squash_execution_hop_usec", m.coordinator_stats.multi_squash_exec_hop_usec);
-    append("multi_squash_execution_reply_usec", m.coordinator_stats.multi_squash_exec_reply_usec);
   };
 
   auto add_repl_info = [&] {

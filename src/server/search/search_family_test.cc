@@ -2734,4 +2734,23 @@ TEST_F(SearchFamilyTest, TestHsetDeleteDocumentHnswSchemaCrash) {
   EXPECT_EQ(res, 1);
 }
 
+TEST_F(SearchFamilyTest, RenameDocumentBetweenIndices) {
+  absl::FlagSaver fs;
+
+  SetTestFlag("cluster_mode", "emulated");
+  ResetService();
+
+  EXPECT_EQ(Run({"ft.create", "idx1", "prefix", "1", "idx1", "filter", "@index==\"yes\"", "schema",
+                 "t", "text"}),
+            "OK");
+  EXPECT_EQ(Run({"ft.create", "idx2", "prefix", "1", "idx2", "filter", "@index==\"yes\"", "schema",
+                 "t", "text"}),
+            "OK");
+
+  Run({"hset", "idx1:{doc}1", "t", "foo1", "index", "yes"});
+
+  EXPECT_EQ(Run({"rename", "idx1:{doc}1", "idx2:{doc}1"}), "OK");
+  EXPECT_EQ(Run({"rename", "idx2:{doc}1", "idx1:{doc}1"}), "OK");
+}
+
 }  // namespace dfly

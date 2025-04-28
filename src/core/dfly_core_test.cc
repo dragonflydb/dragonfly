@@ -155,6 +155,7 @@ TEST_F(StringMatchTest, Basic) {
 
   // Wildcards
   EXPECT_EQ(MatchLen("*", "hello", 0), 1);
+  EXPECT_EQ(MatchLen("*", "1234567890123456", 0), 1);
   EXPECT_EQ(MatchLen("h*", "hello", 0), 1);
   EXPECT_EQ(MatchLen("h*", "abc", 0), 0);
   EXPECT_EQ(MatchLen("h*o", "hello", 0), 1);
