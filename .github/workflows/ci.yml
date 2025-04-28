@@ -154,8 +154,8 @@ jobs:
           #timeout 5m ./dragonfly_test
           #timeout 5m ./json_family_test --jsonpathv2=false
           #timeout 5m ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
-          FLAGS_cluster_mode=emulated ./multi_test
-          FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true ./multi_Test
+          FLAGS_cluster_mode=emulated ./multi_test --alsologtostderr
+          FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true ./multi_test --alsologtostderr
 
 
           #      - name: C++ Unit Tests - Epoll
