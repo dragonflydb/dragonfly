@@ -24,10 +24,11 @@ SlotRanges::SlotRanges(std::vector<SlotRange> ranges) : ranges_(std::move(ranges
 }
 
 void SlotRanges::Merge(const SlotRanges& sr) {
-  // TODO rewrite it
-  SlotSet slots(*this);
-  slots.Set(sr, true);
-  ranges_ = std::move(slots.ToSlotRanges().ranges_);
+  ranges_.reserve(ranges_.size() + sr.Size());
+  for (const auto& r : sr) {
+    ranges_.push_back(r);
+  }
+  std::sort(ranges_.begin(), ranges_.end());
 }
 
 std::string SlotRanges::ToString() const {

@@ -4,6 +4,7 @@
 
 #include "server/main_service.h"
 
+#include "absl/strings/str_split.h"
 #include "facade/resp_expr.h"
 #include "util/fibers/synchronization.h"
 
@@ -115,6 +116,8 @@ ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
           "Maximum size of a value that may be serialized at once during snapshotting or full "
           "sync. Values bigger than this threshold will be serialized using streaming "
           "serialization. 0 - to disable streaming mode");
+ABSL_FLAG(uint32_t, max_squashed_cmd_num, 100,
+          "Max number of commands squashed in a single shard during squash optimizaiton");
 
 namespace dfly {
 
@@ -284,10 +287,10 @@ void DispatchMonitor(ConnectionContext* cntx, const CommandId* cid, CmdArgList t
 
 class InterpreterReplier : public RedisReplyBuilder {
  public:
-  InterpreterReplier(ObjectExplorer* explr) : RedisReplyBuilder(nullptr), explr_(explr) {
+  explicit InterpreterReplier(ObjectExplorer* explr) : RedisReplyBuilder(nullptr), explr_(explr) {
   }
 
-  void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
+  void SendError(std::string_view str, std::string_view type) final;
 
   void SendBulkString(std::string_view str) final;
   void SendSimpleString(std::string_view str) final;
@@ -310,7 +313,7 @@ class InterpreterReplier : public RedisReplyBuilder {
 // Serialized result of script invocation to Redis protocol
 class EvalSerializer : public ObjectExplorer {
  public:
-  EvalSerializer(RedisReplyBuilder* rb) : rb_(rb) {
+  explicit EvalSerializer(RedisReplyBuilder* rb) : rb_(rb) {
   }
 
   void OnBool(bool b) final {
@@ -440,11 +443,8 @@ void InterpreterReplier::StartCollection(unsigned len, CollectionType type) {
 }
 
 bool IsSHA(string_view str) {
-  for (auto c : str) {
-    if (!absl::ascii_isxdigit(c))
-      return false;
-  }
-  return true;
+  return std::all_of(str.begin(), str.end(),
+                     [](unsigned char c) { return absl::ascii_isxdigit(c); });
 }
 
 optional<ErrorReply> EvalValidator(CmdArgList args) {
@@ -634,9 +634,8 @@ Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
       // We can only tell if eval is transactional based on they keycount
       if (absl::StartsWith(scmd.Cid()->name(), "EVAL")) {
         CmdArgVec arg_vec{};
-        StoredCmd cmd = scmd;
-        cmd.Fill(&arg_vec);
-        auto keys = DetermineKeys(scmd.Cid(), absl::MakeSpan(arg_vec));
+        auto args = scmd.ArgList(&arg_vec);
+        auto keys = DetermineKeys(scmd.Cid(), args);
         transactional |= (keys && keys.value().NumArgs() > 0);
       } else {
         transactional |= scmd.Cid()->IsTransactional();
@@ -705,6 +704,11 @@ void SetRssOomDenyRatioOnAllThreads(double ratio) {
 
 void SetSerializationMaxChunkSize(size_t val) {
   auto cb = [val](unsigned, auto*) { ServerState::tlocal()->serialization_max_chunk_size = val; };
+  shard_set->pool()->AwaitBrief(cb);
+}
+
+void SetMaxSquashedCmdNum(int32_t val) {
+  auto cb = [val](unsigned, auto*) { ServerState::tlocal()->max_squash_cmd_num = val; };
   shard_set->pool()->AwaitBrief(cb);
 }
 
@@ -787,6 +791,9 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
         [val](unsigned tid, auto*) { facade::Connection::SetPipelineBufferLimit(tid, val); });
   });
 
+  config_registry.RegisterSetter<uint32_t>("max_squashed_cmd_num",
+                                           [](uint32_t val) { SetMaxSquashedCmdNum(val); });
+
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("replication_timeout");
   config_registry.RegisterMutable("migration_finalization_timeout_ms");
@@ -857,6 +864,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   SetRssOomDenyRatioOnAllThreads(absl::GetFlag(FLAGS_rss_oom_deny_ratio));
   SetSerializationMaxChunkSize(absl::GetFlag(FLAGS_serialization_max_chunk_size));
+  SetMaxSquashedCmdNum(absl::GetFlag(FLAGS_max_squashed_cmd_num));
 
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.
@@ -1191,9 +1199,8 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
   bool is_trans_cmd = CO::IsTransKind(cid->name());
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
     // TODO: protect against aggregating huge transactions.
-    StoredCmd stored_cmd{cid, args_no_cmd};
-    dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
-    if (stored_cmd.Cid()->IsWriteOnly()) {
+    dfly_cntx->conn_state.exec_info.body.emplace_back(cid, true, args_no_cmd);
+    if (cid->IsWriteOnly()) {
       dfly_cntx->conn_state.exec_info.is_write = true;
     }
     return builder->SendSimpleString("QUEUED");
@@ -1235,13 +1242,7 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
 
   dfly_cntx->cid = cid;
 
-  // If cmd is an alias, pass it to Invoke so the stats are updated against the alias. By defaults
-  // stats will be updated for cid.name
-  std::optional<std::string_view> orig_cmd_name = std::nullopt;
-  if (registry_.IsAlias(cmd)) {
-    orig_cmd_name = cmd;
-  }
-  if (!InvokeCmd(cid, args_no_cmd, builder, dfly_cntx, orig_cmd_name)) {
+  if (!InvokeCmd(cid, args_no_cmd, builder, dfly_cntx)) {
     builder->SendError("Internal Error");
     builder->CloseConnection();
   }
@@ -1302,7 +1303,7 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
 }
 
 bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBuilder* builder,
-                        ConnectionContext* cntx, std::optional<std::string_view> orig_cmd_name) {
+                        ConnectionContext* cntx) {
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
@@ -1351,8 +1352,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
   auto last_error = builder->ConsumeLastError();
   DCHECK(last_error.empty());
   try {
-    invoke_time_usec = cid->Invoke(tail_args, CommandContext{tx, builder, cntx},
-                                   orig_cmd_name.value_or(cid->name()));
+    invoke_time_usec = cid->Invoke(tail_args, CommandContext{tx, builder, cntx});
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
@@ -1410,11 +1410,14 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
   DCHECK_EQ(builder->GetProtocol(), Protocol::REDIS);
 
+  auto* ss = dfly::ServerState::tlocal();
+  // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
+  if (ss->IsPaused())
+    return 0;
+
   vector<StoredCmd> stored_cmds;
   intrusive_ptr<Transaction> dist_trans;
-
   size_t dispatched = 0;
-  auto* ss = dfly::ServerState::tlocal();
 
   auto perform_squash = [&] {
     if (stored_cmds.empty())
@@ -1429,19 +1432,19 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
     }
 
     dfly_cntx->transaction = dist_trans.get();
+    MultiCommandSquasher::Opts opts;
+    opts.verify_commands = true;
+    opts.max_squash_size = ss->max_squash_cmd_num;
+
     size_t squashed_num = MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
                                                         static_cast<RedisReplyBuilder*>(builder),
-                                                        dfly_cntx, this, true, false);
+                                                        dfly_cntx, this, opts);
     dfly_cntx->transaction = nullptr;
 
     dispatched += stored_cmds.size();
     ss->stats.squashed_commands += squashed_num;
     stored_cmds.clear();
   };
-
-  // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
-  if (ss->IsPaused())
-    return 0;
 
   for (auto args : args_list) {
     string cmd = absl::AsciiStrToUpper(ArgS(args, 0));
@@ -1462,7 +1465,7 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
 
     if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
       stored_cmds.reserve(args_list.size());
-      stored_cmds.emplace_back(cid, tail_args);
+      stored_cmds.emplace_back(cid, false /* do not deep-copy commands*/, tail_args);
       continue;
     }
 
@@ -1732,7 +1735,11 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   tx->MultiSwitchCmd(eval_cid);
 
   CapturingReplyBuilder crb{ReplyMode::ONLY_ERR};
-  MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), &crb, cntx, this, true, true);
+  MultiCommandSquasher::Opts opts;
+  opts.verify_commands = true;
+  opts.error_abort = true;
+  opts.max_squash_size = ServerState::tlocal()->max_squash_cmd_num;
+  MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), &crb, cntx, this, opts);
 
   info->async_cmds_heap_mem = 0;
   info->async_cmds.clear();
@@ -2089,27 +2096,22 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandId* exists_cid,
 
 // Check if exec_info watches keys on dbs other than db_indx.
 bool IsWatchingOtherDbs(DbIndex db_indx, const ConnectionState::ExecInfo& exec_info) {
-  for (const auto& [key_db, _] : exec_info.watched_keys) {
-    if (key_db != db_indx) {
-      return true;
-    }
-  }
-  return false;
+  return std::any_of(exec_info.watched_keys.begin(), exec_info.watched_keys.end(),
+                     [db_indx](const auto& pair) { return pair.first != db_indx; });
 }
 
-template <typename F> void IterateAllKeys(ConnectionState::ExecInfo* exec_info, F&& f) {
+template <typename F> void IterateAllKeys(const ConnectionState::ExecInfo* exec_info, F&& f) {
   for (auto& [dbid, key] : exec_info->watched_keys)
     f(MutableSlice{key.data(), key.size()});
 
   CmdArgVec arg_vec{};
 
-  for (auto& scmd : exec_info->body) {
+  for (const auto& scmd : exec_info->body) {
     if (!scmd.Cid()->IsTransactional())
       continue;
 
-    scmd.Fill(&arg_vec);
-
-    auto key_res = DetermineKeys(scmd.Cid(), absl::MakeSpan(arg_vec));
+    auto args = scmd.ArgList(&arg_vec);
+    auto key_res = DetermineKeys(scmd.Cid(), args);
     if (!key_res.ok())
       continue;
 
@@ -2206,19 +2208,17 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
 
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state != ExecScriptUse::SCRIPT_RUN &&
         !cntx->conn_state.tracking_info_.IsTrackingOn()) {
-      MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), rb, cntx, this);
+      MultiCommandSquasher::Opts opts;
+      opts.max_squash_size = ServerState::tlocal()->max_squash_cmd_num;
+      MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), rb, cntx, this, opts);
     } else {
       CmdArgVec arg_vec;
-      for (auto& scmd : exec_info.body) {
+      for (const auto& scmd : exec_info.body) {
         VLOG(2) << "TX CMD " << scmd.Cid()->name() << " " << scmd.NumArgs();
 
-        cmd_cntx.tx->MultiSwitchCmd(scmd.Cid());
-        cntx->cid = scmd.Cid();
+        cntx->SwitchTxCmd(scmd.Cid());
 
-        arg_vec.resize(scmd.NumArgs());
-        scmd.Fill(&arg_vec);
-
-        CmdArgList args = absl::MakeSpan(arg_vec);
+        CmdArgList args = scmd.ArgList(&arg_vec);
 
         if (scmd.Cid()->IsTransactional()) {
           OpStatus st = cmd_cntx.tx->InitByArgs(cntx->ns, cntx->conn_state.db_index, args);
@@ -2260,7 +2260,7 @@ void SubscribeImpl(bool reject_cluster, CmdArgList args, const CommandContext& c
   if (reject_cluster && IsClusterEnabled()) {
     return cmd_cntx.rb->SendError("SUBSCRIBE is not supported in cluster mode yet");
   }
-  cmd_cntx.conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, std::move(args),
+  cmd_cntx.conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, args,
                                          static_cast<RedisReplyBuilder*>(cmd_cntx.rb));
 }
 
@@ -2514,7 +2514,7 @@ VarzValue::Map Service::GetVarzStats() {
 
   res.emplace_back("keys", VarzValue::FromInt(db_stats.key_count));
   res.emplace_back("obj_mem_usage", VarzValue::FromInt(db_stats.obj_memory_usage));
-  double load = double(db_stats.key_count) / (1 + db_stats.bucket_count);
+  double load = double(db_stats.key_count) / (1 + db_stats.prime_capacity);
   res.emplace_back("table_load_factor", VarzValue::FromDouble(load));
 
   return res;

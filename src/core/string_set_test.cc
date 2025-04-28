@@ -529,6 +529,10 @@ TEST_F(StringSetTest, IterateEmpty) {
   }
 }
 
+size_t memUsed(StringSet& obj) {
+  return obj.ObjMallocUsed() + obj.SetMallocUsed();
+}
+
 void BM_Clone(benchmark::State& state) {
   vector<string> strs;
   mt19937 generator(0);
@@ -590,9 +594,10 @@ void BM_Add(benchmark::State& state) {
   vector<string> strs;
   mt19937 generator(0);
   StringSet ss;
-  unsigned elems = 100000;
+  unsigned elems = state.range(0);
+  unsigned keySize = state.range(1);
   for (size_t i = 0; i < elems; ++i) {
-    string str = random_string(generator, 16);
+    string str = random_string(generator, keySize);
     strs.push_back(str);
   }
   ss.Reserve(elems);
@@ -600,20 +605,24 @@ void BM_Add(benchmark::State& state) {
     for (auto& str : strs)
       ss.Add(str);
     state.PauseTiming();
+    state.counters["Memory_Used"] = memUsed(ss);
     ss.Clear();
     ss.Reserve(elems);
     state.ResumeTiming();
   }
 }
-BENCHMARK(BM_Add);
+BENCHMARK(BM_Add)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
 
 void BM_AddMany(benchmark::State& state) {
   vector<string> strs;
   mt19937 generator(0);
   StringSet ss;
-  unsigned elems = 100000;
+  unsigned elems = state.range(0);
+  unsigned keySize = state.range(1);
   for (size_t i = 0; i < elems; ++i) {
-    string str = random_string(generator, 16);
+    string str = random_string(generator, keySize);
     strs.push_back(str);
   }
   ss.Reserve(elems);
@@ -625,12 +634,64 @@ void BM_AddMany(benchmark::State& state) {
     ss.AddMany(absl::MakeSpan(svs), UINT32_MAX, false);
     state.PauseTiming();
     CHECK_EQ(ss.UpperBoundSize(), elems);
+    state.counters["Memory_Used"] = memUsed(ss);
     ss.Clear();
     ss.Reserve(elems);
     state.ResumeTiming();
   }
 }
-BENCHMARK(BM_AddMany);
+BENCHMARK(BM_AddMany)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+void BM_Erase(benchmark::State& state) {
+  std::vector<std::string> strs;
+  mt19937 generator(0);
+  StringSet ss;
+  auto elems = state.range(0);
+  auto keySize = state.range(1);
+  for (long int i = 0; i < elems; ++i) {
+    std::string str = random_string(generator, keySize);
+    strs.push_back(str);
+    ss.Add(str);
+  }
+  state.counters["Memory_Before_Erase"] = memUsed(ss);
+  while (state.KeepRunning()) {
+    for (auto& str : strs) {
+      ss.Erase(str);
+    }
+    state.PauseTiming();
+    state.counters["Memory_After_Erase"] = memUsed(ss);
+    for (auto& str : strs) {
+      ss.Add(str);
+    }
+    state.ResumeTiming();
+  }
+}
+BENCHMARK(BM_Erase)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+void BM_Get(benchmark::State& state) {
+  std::vector<std::string> strs;
+  mt19937 generator(0);
+  StringSet ss;
+  auto elems = state.range(0);
+  auto keySize = state.range(1);
+  for (long int i = 0; i < elems; ++i) {
+    std::string str = random_string(generator, keySize);
+    strs.push_back(str);
+    ss.Add(str);
+  }
+  while (state.KeepRunning()) {
+    for (auto& str : strs) {
+      ss.Find(str);
+    }
+  }
+}
+BENCHMARK(BM_Get)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
 
 void BM_Grow(benchmark::State& state) {
   vector<string> strs;
@@ -704,6 +765,18 @@ TEST_F(StringSetTest, ReallocIfNeeded) {
   EXPECT_EQ(ss_->UpperBoundSize(), 1000);
   for (size_t i = 0; i < 1000; i++)
     EXPECT_EQ(*ss_->Find(build_str(i * 10)), build_str(i * 10));
+}
+
+TEST_F(StringSetTest, TransferTTLFlagLinkToObjectOnDelete) {
+  for (size_t i = 0; i < 10; i++) {
+    EXPECT_TRUE(ss_->Add(absl::StrCat(i), 1));
+  }
+  for (size_t i = 0; i < 9; i++) {
+    EXPECT_TRUE(ss_->Erase(absl::StrCat(i)));
+  }
+  auto it = ss_->Find("9"sv);
+  EXPECT_TRUE(it.HasExpiry());
+  EXPECT_EQ(1u, it.ExpiryTime());
 }
 
 }  // namespace dfly

@@ -65,13 +65,8 @@ size_t Size(const facade::CapturingReplyBuilder::Payload& payload) {
 atomic_uint64_t MultiCommandSquasher::current_reply_size_ = 0;
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
-                                           Service* service, bool verify_commands, bool error_abort)
-    : cmds_{cmds},
-      cntx_{cntx},
-      service_{service},
-      base_cid_{nullptr},
-      verify_commands_{verify_commands},
-      error_abort_{error_abort} {
+                                           Service* service, const Opts& opts)
+    : cmds_{cmds}, cntx_{cntx}, service_{service}, base_cid_{nullptr}, opts_{opts} {
   auto mode = cntx->transaction->GetMultiMode();
   base_cid_ = cntx->transaction->GetCId();
   atomic_ = mode != Transaction::NON_ATOMIC;
@@ -97,7 +92,7 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
   return sinfo;
 }
 
-MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cmd) {
+MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(const StoredCmd* cmd) {
   DCHECK(cmd->Cid());
 
   if (!cmd->Cid()->IsTransactional() || (cmd->Cid()->opt_mask() & CO::BLOCKING) ||
@@ -108,8 +103,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
     return SquashResult::NOT_SQUASHED;
   }
 
-  cmd->Fill(&tmp_keylist_);
-  auto args = absl::MakeSpan(tmp_keylist_);
+  auto args = cmd->ArgList(&tmp_keylist_);
   if (args.empty())
     return SquashResult::NOT_SQUASHED;
 
@@ -119,7 +113,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
   if (keys->NumArgs() == 0)
     return SquashResult::NOT_SQUASHED;
 
-  // Check if all commands belong to one shard
+  // Check if all command keys belong to one shard
   ShardId last_sid = kInvalidSid;
 
   for (string_view key : keys->Range(args)) {
@@ -137,29 +131,25 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
 
   num_squashed_++;
 
-  // Because the squashed hop is currently blocking, we cannot add more than the max channel size,
-  // otherwise a deadlock occurs.
-  bool need_flush = sinfo.cmds.size() >= kMaxSquashing - 1;
+  bool need_flush = sinfo.cmds.size() >= opts_.max_squash_size;
   return need_flush ? SquashResult::SQUASHED_FULL : SquashResult::SQUASHED;
 }
 
-bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, StoredCmd* cmd) {
+bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, const StoredCmd* cmd) {
   DCHECK(order_.empty());  // check no squashed chain is interrupted
 
-  cmd->Fill(&tmp_keylist_);
-  auto args = absl::MakeSpan(tmp_keylist_);
+  auto args = cmd->ArgList(&tmp_keylist_);
 
-  if (verify_commands_) {
+  if (opts_.verify_commands) {
     if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
       rb->SendError(std::move(*err));
       rb->ConsumeLastError();
-      return !error_abort_;
+      return !opts_.error_abort;
     }
   }
 
   auto* tx = cntx_->transaction;
-  tx->MultiSwitchCmd(cmd->Cid());
-  cntx_->cid = cmd->Cid();
+  cntx_->SwitchTxCmd(cmd->Cid());
 
   if (cmd->Cid()->IsTransactional())
     tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
@@ -178,14 +168,12 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
   if (cntx_->conn()) {
     local_cntx.skip_acl_validation = cntx_->conn()->IsPrivileged();
   }
-  absl::InlinedVector<MutableSlice, 4> arg_vec;
 
-  for (auto* cmd : sinfo.cmds) {
-    arg_vec.resize(cmd->NumArgs());
-    auto args = absl::MakeSpan(arg_vec);
-    cmd->Fill(args);
+  CmdArgVec arg_vec;
 
-    if (verify_commands_) {
+  for (const auto* cmd : sinfo.cmds) {
+    auto args = cmd->ArgList(&arg_vec);
+    if (opts_.verify_commands) {
       // The shared context is used for state verification, the local one is only for replies
       if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
         crb.SendError(std::move(*err));
@@ -196,8 +184,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       }
     }
 
-    local_tx->MultiSwitchCmd(cmd->Cid());
-    local_cntx.cid = cmd->Cid();
+    local_cntx.SwitchTxCmd(cmd->Cid());
     crb.SetReplyMode(cmd->ReplyMode());
 
     local_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args);
@@ -212,7 +199,6 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     CheckConnStateClean(local_state);
   }
 
-  reverse(sinfo.replies.begin(), sinfo.replies.end());
   return OpStatus::OK;
 }
 
@@ -246,7 +232,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     fb2::BlockingCounter bc(num_shards);
     DVLOG(1) << "Squashing " << num_shards << " " << tx->DebugId();
 
-    auto cb = [this, tx, bc, rb]() mutable {
+    auto cb = [this, bc, rb]() mutable {
       this->SquashedHopCb(EngineShard::tlocal(), rb->GetRespVersion());
       bc->Dec();
     };
@@ -262,15 +248,15 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   bool aborted = false;
 
   for (auto idx : order_) {
-    auto& replies = sharded_[idx].replies;
-    CHECK(!replies.empty());
+    auto& sinfo = sharded_[idx];
+    auto& replies = sinfo.replies;
+    DCHECK_LT(sinfo.reply_id, replies.size());
 
-    aborted |= error_abort_ && CapturingReplyBuilder::TryExtractError(replies.back());
+    auto& reply = replies[sinfo.reply_id++];
+    aborted |= opts_.error_abort && CapturingReplyBuilder::TryExtractError(reply);
 
-    current_reply_size_.fetch_sub(Size(replies.back()), std::memory_order_relaxed);
-    CapturingReplyBuilder::Apply(std::move(replies.back()), rb);
-    replies.pop_back();
-
+    current_reply_size_.fetch_sub(Size(reply), std::memory_order_relaxed);
+    CapturingReplyBuilder::Apply(std::move(reply), rb);
     if (aborted)
       break;
   }
@@ -278,8 +264,11 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   ServerState::SafeTLocal()->stats.multi_squash_exec_hop_usec += (after_hop - start) / 1000;
   ServerState::SafeTLocal()->stats.multi_squash_exec_reply_usec += (after_reply - after_hop) / 1000;
 
-  for (auto& sinfo : sharded_)
+  for (auto& sinfo : sharded_) {
     sinfo.cmds.clear();
+    sinfo.replies.clear();
+    sinfo.reply_id = 0;
+  }
 
   order_.clear();
   return !aborted;

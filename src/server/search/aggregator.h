@@ -15,6 +15,10 @@
 #include "facade/reply_builder.h"
 #include "io/io.h"
 
+namespace dfly {
+enum class SortOrder;
+}
+
 namespace dfly::aggregate {
 
 struct Reducer;
@@ -34,8 +38,6 @@ struct AggregationResult {
 };
 
 struct SortParams {
-  enum class SortOrder { ASC, DESC };
-
   constexpr static int64_t kSortAll = -1;
 
   bool SortAll() const {

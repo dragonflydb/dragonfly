@@ -17,6 +17,10 @@ ABSL_FLAG(string, cluster_mode, "",
           "Cluster mode supported. Possible values are "
           "'emulated', 'yes' or ''");
 
+ABSL_FLAG(bool, experimental_cluster_shard_by_slot, false,
+          "If true, cluster mode is enabled and sharding is done by slot. "
+          "Otherwise, sharding is done by hash tag.");
+
 namespace dfly {
 
 void UniqueSlotChecker::Add(std::string_view key) {
@@ -43,16 +47,13 @@ optional<SlotId> UniqueSlotChecker::GetUniqueSlotId() const {
   return slot_id_ > kMaxSlotNum ? optional<SlotId>() : slot_id_;
 }
 
-namespace {
-enum class ClusterMode {
-  kUninitialized,
-  kNoCluster,
-  kEmulatedCluster,
-  kRealCluster,
-};
-
+namespace detail {
 ClusterMode cluster_mode = ClusterMode::kUninitialized;
-}  // namespace
+bool cluster_shard_by_slot = false;
+
+}  // namespace detail
+
+using namespace detail;
 
 void InitializeCluster() {
   string cluster_mode_str = absl::GetFlag(FLAGS_cluster_mode);
@@ -67,23 +68,15 @@ void InitializeCluster() {
     LOG(ERROR) << "Invalid value for flag --cluster_mode. Exiting...";
     exit(1);
   }
-}
 
-bool IsClusterEnabled() {
-  return cluster_mode == ClusterMode::kRealCluster;
-}
-
-bool IsClusterEmulated() {
-  return cluster_mode == ClusterMode::kEmulatedCluster;
+  if (cluster_mode != ClusterMode::kNoCluster) {
+    cluster_shard_by_slot = absl::GetFlag(FLAGS_experimental_cluster_shard_by_slot);
+  }
 }
 
 SlotId KeySlot(std::string_view key) {
   string_view tag = LockTagOptions::instance().Tag(key);
   return crc16(tag.data(), tag.length()) & kMaxSlotNum;
-}
-
-bool IsClusterEnabledOrEmulated() {
-  return IsClusterEnabled() || IsClusterEmulated();
 }
 
 bool IsClusterShardedByTag() {

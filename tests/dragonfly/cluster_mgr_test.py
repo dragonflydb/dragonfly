@@ -21,6 +21,7 @@ async def check_cluster_data(cluster_client: redis.RedisCluster):
 def run_cluster_mgr(args):
     print(f"Running cluster_mgr.py {args}")
     result = subprocess.run(["../tools/cluster_mgr.py", *args])
+    logging.debug(result)
     return result.returncode == 0
 
 

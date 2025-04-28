@@ -22,8 +22,8 @@ cd build-dbg && ninja dragonfly
 cd dragonfly   # project root
 
 # Make sure you have 'pre-commit', 'clang-format' and black is installed
-pip install pre-commit clang-format
-pip install pre-commit black
+pipx install pre-commit clang-format
+pipx install pre-commit black
 
 # IMPORTANT! Enable our pre-commit message hooks
 # This will ensure your commits match our formatting requirements

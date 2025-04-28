@@ -1274,6 +1274,8 @@ std::vector<std::optional<std::string>> OpJsonMGet(const WrappedJsonPath& json_p
           json_val, std::move(cb), CallbackResultOptions::DefaultEvaluateOptions());
 
       if (eval_result.IsV1()) {
+        if (eval_result.Empty())
+          return nullopt;
         return eval_result.AsV1();
       }
 

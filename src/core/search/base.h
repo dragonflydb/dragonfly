@@ -37,11 +37,6 @@ struct QueryParams {
   absl::flat_hash_map<std::string, std::string> params;
 };
 
-struct SortOption {
-  std::string field;
-  bool descending = false;
-};
-
 // Comparable string stored as char[]. Used to reduce size of std::variant with strings.
 struct WrappedStrPtr {
   // Intentionally implicit and const std::string& for use in templates
@@ -95,6 +90,11 @@ struct BaseIndex {
   // Returns true if the document was added / indexed
   virtual bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) = 0;
   virtual void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) = 0;
+
+  // Returns documents that have non-null values for this field (used for @field:* queries)
+  virtual std::optional<std::vector<DocId>> GetAllResults() const {
+    return std::nullopt;
+  }
 };
 
 // Base class for type-specific sorting indices.

@@ -2745,7 +2745,8 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     await asyncio.sleep(random.randint(0, 50) / 100)
-    await wait_for_migration_start(nodes[1].admin_client, nodes[0].id)
+    # to pause migration we need to be in sync state
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "SYNC", 1000)
 
     logging.debug("debug migration pause")
     await nodes[1].client.execute_command("debug migration pause")
@@ -3162,7 +3163,7 @@ async def test_readonly_replication(
     await m1_node.client.execute_command("SET X 1")
 
     logging.debug("start replication")
-    await r1_node.admin_client.execute_command(f"replicaof localhost {m1_node.instance.port}")
+    await r1_node.admin_client.execute_command(f"replicaof localhost {m1_node.instance.admin_port}")
 
     await wait_available_async(r1_node.admin_client)
 
@@ -3172,3 +3173,64 @@ async def test_readonly_replication(
 
     # This behavior can be changed in the future
     assert await r1_node.client.execute_command("GET Y") == None
+
+    m1_node.replicas = []
+
+    logging.debug("Push config without replica")
+    await push_config(
+        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
+    )
+
+    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+        await r1_node.client.execute_command("GET X")
+
+    assert str(moved_error.value) == f"MOVED 7165 127.0.0.1:{instances[0].port}"
+
+    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+        await r1_node.client.execute_command("GET Y")
+
+    assert str(moved_error.value) == f"MOVED 3036 127.0.0.1:{instances[0].port}"
+
+
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+async def test_cancel_blocking_cmd_during_mygration_finalization(df_factory: DflyInstanceFactory):
+    # blocking commands should be canceled during migration finalization
+    instances = [df_factory.create(port=next(next_port)) for i in range(2)]
+    df_factory.start_all(instances)
+
+    c_nodes = [instance.client() for instance in instances]
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+
+    logging.debug("Start blpop task")
+    blpop_task = asyncio.create_task(c_nodes[0].blpop("list", 0))
+
+    await asyncio.sleep(0.5)
+
+    assert not blpop_task.done()
+
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.port, [(0, 16383)], nodes[1].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+
+    await wait_for_status(nodes[0].client, nodes[1].id, "FINISHED")
+
+    with pytest.raises(aioredis.ResponseError) as e_info:
+        await blpop_task
+        assert "MOVED" in str(e_info.value)
+
+    assert await c_nodes[1].type("list") == "none"
+
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+
+    logging.debug("remove finished migrations")
+    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+
+    assert await c_nodes[1].type("list") == "none"

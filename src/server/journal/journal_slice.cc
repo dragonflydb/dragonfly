@@ -23,38 +23,11 @@ namespace dfly {
 namespace journal {
 using namespace std;
 using namespace util;
-namespace fs = std::filesystem;
-
-namespace {
-
-/*
-string ShardName(std::string_view base, unsigned index) {
-  return absl::StrCat(base, "-", absl::Dec(index, absl::kZeroPad4), ".log");
-}
-
-uint32_t NextPowerOf2(uint32_t x) {
-  if (x < 2) {
-    return 1;
-  }
-  int log = 32 - __builtin_clz(x - 1);
-  return 1 << log;
-}
-
-*/
-
-}  // namespace
-
-#define CHECK_EC(x)                                                                 \
-  do {                                                                              \
-    auto __ec$ = (x);                                                               \
-    CHECK(!__ec$) << "Error: " << __ec$ << " " << __ec$.message() << " for " << #x; \
-  } while (false)
 
 JournalSlice::JournalSlice() {
 }
 
 JournalSlice::~JournalSlice() {
-  // CHECK(!shard_file_);
 }
 
 void JournalSlice::Init(unsigned index) {
@@ -175,14 +148,6 @@ void JournalSlice::AddLogRecord(const Entry& entry) {
     VLOG(2) << "Writing item [" << item.lsn << "]: " << entry.ToString();
   }
 
-#if 0
-    if (shard_file_) {
-      string line = absl::StrCat(item.lsn, " ", entry.txid, " ", entry.opcode, "\n");
-      error_code ec = shard_file_->Write(io::Buffer(line), file_offset_, 0);
-      CHECK_EC(ec);
-      file_offset_ += line.size();
-    }
-#endif
   CallOnChange(item);
 }
 

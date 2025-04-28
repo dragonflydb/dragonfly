@@ -10,6 +10,7 @@
 %define api.value.type variant
 %define api.parser.class {Parser}
 %define parse.assert
+%define api.value.automove true
 
 // Added to header file before parser declaration.
 %code requires {
@@ -98,7 +99,14 @@ final_query:
 
 knn_query:
   LBRACKET KNN UINT32 FIELD TERM opt_knn_alias opt_ef_runtime RBRACKET
-    { $$ = AstKnnNode(toUint32($3), $4, BytesToFtVector($5), $6, $7); }
+    {
+      auto vec_result = BytesToFtVectorSafe($5);
+      if (!vec_result) {
+        error(@5, "Invalid vector format");
+        YYERROR;
+      }
+      $$ = AstKnnNode(toUint32($3), $4, std::move(*vec_result), $6, $7);
+    }
 
 opt_knn_alias:
   AS TERM { $$ = std::move($2); }
@@ -136,6 +144,7 @@ search_unary_expr:
 field_cond:
   TERM                                                  { $$ = AstTermNode(std::move($1)); }
   | UINT32                                              { $$ = AstTermNode(std::move($1)); }
+  | STAR                                                { $$ = AstStarFieldNode(); }
   | NOT_OP field_cond                                   { $$ = AstNegateNode(std::move($2)); }
   | LPAREN field_cond_expr RPAREN                       { $$ = std::move($2); }
   | LBRACKET numeric_filter_expr RBRACKET               { $$ = std::move($2); }
@@ -168,7 +177,7 @@ field_or_expr:
 
 field_unary_expr:
   LPAREN field_cond_expr RPAREN                  { $$ = std::move($2); }
-  | NOT_OP field_unary_expr                      { $$ = AstNegateNode(std::move($2)); };
+  | NOT_OP field_unary_expr                      { $$ = AstNegateNode(std::move($2)); }
   | TERM                                         { $$ = AstTermNode(std::move($1)); }
   | UINT32                                       { $$ = AstTermNode(std::move($1)); }
 

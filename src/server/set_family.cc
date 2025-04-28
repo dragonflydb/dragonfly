@@ -1567,7 +1567,9 @@ vector<long> SetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_
     pv->InitRobj(OBJ_SET, kEncodingStrMap2, ss);
   }
 
-  return ExpireElements((StringSet*)pv->RObjPtr(), values, ttl_sec);
+  auto ss = static_cast<StringSet*>(pv->RObjPtr());
+  ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
+  return ExpireElements(ss, values, ttl_sec);
 }
 
 }  // namespace dfly

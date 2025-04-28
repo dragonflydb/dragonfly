@@ -85,7 +85,7 @@ Dragonfly는 유휴 상태에서 Redis보다 메모리 효율이 30% 더 좋았�
 
 Dragonfly는 스냅샷 단계를 몇 초안에 더 빨리 마쳤습니다.
 
-Dragonfly의 메모리 효율에 대한 정보가 더 필요하시다면, 저희의 [Dastable 문서](/docs/dashtable.md)를 참고하시기 바랍니다.
+Dragonfly의 메모리 효율에 대한 정보가 더 필요하시다면, 저희의 [Dashtable 문서](/docs/dashtable.md)를 참고하시기 바랍니다.
 
 
 ## <a name="configuration"><a/>설정

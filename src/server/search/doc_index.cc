@@ -50,6 +50,68 @@ void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
   } while (cursor);
 }
 
+bool IsSortableField(std::string_view field_identifier, const search::Schema& schema) {
+  auto it = schema.fields.find(field_identifier);
+  return it != schema.fields.end() && (it->second.flags & search::SchemaField::SORTABLE);
+}
+
+SearchFieldsList ToSV(const search::Schema& schema, const std::optional<SearchFieldsList>& fields) {
+  SearchFieldsList sv_fields;
+  if (fields) {
+    sv_fields.reserve(fields->size());
+    for (const auto& field : fields.value()) {
+      sv_fields.push_back(field.View());
+    }
+  }
+  return sv_fields;
+}
+
+using SortIndiciesFieldsList =
+    std::vector<std::pair<string_view /*identifier*/, string_view /*alias*/>>;
+
+std::pair<SearchFieldsList, SortIndiciesFieldsList> PreprocessAggregateFields(
+    const search::Schema& schema, const AggregateParams& params,
+    const std::optional<SearchFieldsList>& load_fields) {
+  absl::flat_hash_map<std::string_view, SearchField> fields_by_identifier;
+  absl::flat_hash_map<std::string_view, std::string_view> sort_indicies_aliases;
+  fields_by_identifier.reserve(schema.field_names.size());
+  sort_indicies_aliases.reserve(schema.field_names.size());
+
+  for (const auto& [fname, fident] : schema.field_names) {
+    if (!IsSortableField(fident, schema)) {
+      fields_by_identifier[fident] = {StringOrView::FromView(fident), true,
+                                      StringOrView::FromView(fname)};
+    } else {
+      sort_indicies_aliases[fident] = fname;
+    }
+  }
+
+  if (load_fields) {
+    for (const auto& field : load_fields.value()) {
+      const auto& fident = field.GetIdentifier(schema, false);
+      if (!IsSortableField(fident, schema)) {
+        fields_by_identifier[fident] = field.View();
+      } else {
+        sort_indicies_aliases[fident] = field.GetShortName();
+      }
+    }
+  }
+
+  SearchFieldsList fields;
+  fields.reserve(fields_by_identifier.size());
+  for (auto& [_, field] : fields_by_identifier) {
+    fields.emplace_back(std::move(field));
+  }
+
+  SortIndiciesFieldsList sort_fields;
+  sort_fields.reserve(sort_indicies_aliases.size());
+  for (auto& [fident, fname] : sort_indicies_aliases) {
+    sort_fields.emplace_back(fident, fname);
+  }
+
+  return {std::move(fields), std::move(sort_fields)};
+}
+
 }  // namespace
 
 bool SerializedSearchDoc::operator<(const SerializedSearchDoc& other) const {
@@ -271,21 +333,10 @@ bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
   return base_->Matches(key, obj_code);
 }
 
-SearchFieldsList ToSV(const search::Schema& schema, const std::optional<SearchFieldsList>& fields) {
-  SearchFieldsList sv_fields;
-  if (fields) {
-    sv_fields.reserve(fields->size());
-    for (const auto& field : fields.value()) {
-      sv_fields.push_back(field.View());
-    }
-  }
-  return sv_fields;
-}
-
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
                                    search::SearchAlgorithm* search_algo) const {
   auto& db_slice = op_args.GetDbSlice();
-  auto search_results = search_algo->Search(&*indices_, params.limit_offset + params.limit_total);
+  auto search_results = search_algo->Search(&*indices_);
 
   if (!search_results.error.empty())
     return SearchResult{facade::ErrorReply{std::move(search_results.error)}};
@@ -298,7 +349,8 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
   size_t expired_count = 0;
   for (size_t i = 0; i < search_results.ids.size(); i++) {
-    auto key = key_index_.Get(search_results.ids[i]);
+    const DocId doc = search_results.ids[i];
+    auto key = key_index_.Get(doc);
     auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
 
     if (!it || !IsValid(*it)) {  // Item must have expired
@@ -315,13 +367,24 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
       For JSON indexes it would be {"$", <the whole document as string>}
       */
       doc_data = accessor->SerializeDocument(base_->schema);
+    }
 
-      SearchDocData loaded_fields = accessor->Serialize(base_->schema, fields_to_load);
-      doc_data.insert(std::make_move_iterator(loaded_fields.begin()),
-                      std::make_move_iterator(loaded_fields.end()));
-    } else {
-      /* Load only specific fields */
-      doc_data = accessor->Serialize(base_->schema, fields_to_load);
+    SearchDocData loaded_fields = accessor->Serialize(base_->schema, fields_to_load);
+    doc_data.insert(std::make_move_iterator(loaded_fields.begin()),
+                    std::make_move_iterator(loaded_fields.end()));
+
+    if (params.sort_option) {
+      auto& field = params.sort_option->field;
+      auto fident = field.GetIdentifier(base_->schema, false);
+      if (IsSortableField(fident, base_->schema)) {
+        doc_data[field.NameView()] = indices_->GetSortIndexValue(doc, fident);
+      } else {
+        SearchDocData sort_field_data = accessor->Serialize(base_->schema, {field});
+        DCHECK_LE(sort_field_data.size(), 1u);
+        if (!sort_field_data.empty()) {
+          doc_data[field.NameView()] = sort_field_data.begin()->second;
+        }
+      }
     }
 
     auto score = search_results.scores.empty() ? monostate{} : std::move(search_results.scores[i]);
@@ -330,57 +393,6 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
   return SearchResult{search_results.total - expired_count, std::move(out),
                       std::move(search_results.profile)};
-}
-
-using SortIndiciesFieldsList =
-    std::vector<std::pair<string_view /*identifier*/, string_view /*alias*/>>;
-
-std::pair<SearchFieldsList, SortIndiciesFieldsList> PreprocessAggregateFields(
-    const search::Schema& schema, const AggregateParams& params,
-    const std::optional<SearchFieldsList>& load_fields) {
-  auto is_sortable = [&schema](std::string_view fident) {
-    auto it = schema.fields.find(fident);
-    return it != schema.fields.end() && (it->second.flags & search::SchemaField::SORTABLE);
-  };
-
-  absl::flat_hash_map<std::string_view, SearchField> fields_by_identifier;
-  absl::flat_hash_map<std::string_view, std::string_view> sort_indicies_aliases;
-  fields_by_identifier.reserve(schema.field_names.size());
-  sort_indicies_aliases.reserve(schema.field_names.size());
-
-  for (const auto& [fname, fident] : schema.field_names) {
-    if (!is_sortable(fident)) {
-      fields_by_identifier[fident] = {StringOrView::FromView(fident), true,
-                                      StringOrView::FromView(fname)};
-    } else {
-      sort_indicies_aliases[fident] = fname;
-    }
-  }
-
-  if (load_fields) {
-    for (const auto& field : load_fields.value()) {
-      const auto& fident = field.GetIdentifier(schema, false);
-      if (!is_sortable(fident)) {
-        fields_by_identifier[fident] = field.View();
-      } else {
-        sort_indicies_aliases[fident] = field.GetShortName();
-      }
-    }
-  }
-
-  SearchFieldsList fields;
-  fields.reserve(fields_by_identifier.size());
-  for (auto& [_, field] : fields_by_identifier) {
-    fields.emplace_back(std::move(field));
-  }
-
-  SortIndiciesFieldsList sort_fields;
-  sort_fields.reserve(sort_indicies_aliases.size());
-  for (auto& [fident, fname] : sort_indicies_aliases) {
-    sort_fields.emplace_back(fident, fname);
-  }
-
-  return {std::move(fields), std::move(sort_fields)};
 }
 
 vector<SearchDocData> ShardDocIndex::SearchForAggregator(

@@ -5,6 +5,7 @@
 #include "server/search/aggregator.h"
 
 #include "base/gtest.h"
+#include "server/search/doc_index.h"
 
 namespace dfly::aggregate {
 
@@ -20,7 +21,7 @@ TEST(AggregatorTest, Sort) {
   };
 
   SortParams params;
-  params.fields.emplace_back("a", SortParams::SortOrder::ASC);
+  params.fields.emplace_back("a", SortOrder::ASC);
   StepsList steps = {MakeSortStep(std::move(params))};
 
   auto result = Process(values, {"a"}, steps);

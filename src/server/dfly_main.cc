@@ -108,8 +108,6 @@ constexpr size_t kFiberDefaultStackSize = 32_KB - 16;
 constexpr size_t kFiberDefaultStackSize = 40_KB - 16;
 #endif
 
-using util::http::TlsClient;
-
 enum class TermColor { kDefault, kRed, kGreen, kYellow };
 // Returns the ANSI color code for the given color. TermColor::kDefault is
 // an invalid input.
@@ -170,7 +168,7 @@ string NormalizePaths(std::string_view path) {
 }
 
 template <typename... Args> unique_ptr<Listener> MakeListener(Args&&... args) {
-  auto res = make_unique<Listener>(forward<Args>(args)...);
+  auto res = make_unique<Listener>(std::forward<Args>(args)...);
   res->SetConnFiberStackSize(kFiberDefaultStackSize);
   return res;
 }

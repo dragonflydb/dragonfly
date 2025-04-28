@@ -541,4 +541,31 @@ TEST_F(HSetFamilyTest, KeyRemovedWhenEmpty) {
   test_cmd([&] { EXPECT_THAT(Run({"HSTRLEN", "a", "afield"}), IntArg(0)); }, "HSTRLEN");
 }
 
+TEST_F(HSetFamilyTest, HRandFieldRespFormat) {
+  absl::flat_hash_map<std::string, std::string> expected{
+      {"a", "1"},
+      {"b", "2"},
+      {"c", "3"},
+  };
+  Run({"HELLO", "3"});
+  EXPECT_THAT(Run({"HSET", "key", "a", "1", "b", "2", "c", "3"}), IntArg(3));
+  auto resp = Run({"HRANDFIELD", "key", "3", "WITHVALUES"});
+  EXPECT_THAT(resp, ArrLen(3));
+  for (const auto& v : resp.GetVec()) {
+    EXPECT_THAT(v, ArrLen(2));
+    const auto& kv = v.GetVec();
+    EXPECT_THAT(kv[0], AnyOf("a", "b", "c"));
+    EXPECT_THAT(kv[1], expected[kv[0].GetView()]);
+  }
+
+  Run({"HELLO", "2"});
+  resp = Run({"HRANDFIELD", "key", "3", "WITHVALUES"});
+  EXPECT_THAT(resp, ArrLen(6));
+  const auto& vec = resp.GetVec();
+  for (size_t i = 0; i < vec.size(); i += 2) {
+    EXPECT_THAT(vec[i], AnyOf("a", "b", "c"));
+    EXPECT_THAT(vec[i + 1], expected[vec[i].GetView()]);
+  }
+}
+
 }  // namespace dfly

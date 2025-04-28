@@ -44,6 +44,10 @@ class EngineShard {
     // Number of transactions scheduled via ScheduleBatchInShard.
     uint64_t tx_batch_scheduled_items_total = 0;
 
+    uint64_t total_heartbeat_expired_keys = 0;
+    uint64_t total_heartbeat_expired_bytes = 0;
+    uint64_t total_heartbeat_expired_calls = 0;
+
     Stats& operator+=(const Stats&);
   };
 

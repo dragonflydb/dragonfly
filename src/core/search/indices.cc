@@ -48,7 +48,6 @@ absl::flat_hash_set<std::string> TokenizeWords(std::string_view text,
       if (synonyms) {
         if (auto group_id = synonyms->GetGroupToken(word_lc); group_id) {
           words.insert(*group_id);
-          continue;
         }
       }
 

@@ -324,7 +324,7 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
 }
 
 OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
-                          bool skip_notexist, facade::ArgRange vals, bool journal_rewrite) {
+                          bool skip_notexist, const facade::ArgRange& vals, bool journal_rewrite) {
   EngineShard* es = op_args.shard;
   DbSlice::ItAndUpdater res;
 
@@ -666,7 +666,7 @@ OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot
     QList* ql = GetQLV2(pv);
     QList::InsertOpt insert_opt = (insert_param == INSERT_BEFORE) ? QList::BEFORE : QList::AFTER;
     if (ql->Insert(pivot, elem, insert_opt)) {
-      res = ql->Size();
+      res = int(ql->Size());
     }
   } else {
     quicklist* ql = GetQL(pv);
@@ -688,7 +688,7 @@ OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot
         DCHECK_EQ(INSERT_BEFORE, insert_param);
         quicklistInsertBefore(qiter, &entry, elem.data(), elem.size());
       }
-      res = quicklistCount(ql);
+      res = int(quicklistCount(ql));
     }
     quicklistReleaseIterator(qiter);
   }
@@ -809,7 +809,7 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
 
   auto it = it_res->it;
 
-  long llen = it->second.Size();
+  long llen = long(it->second.Size());
 
   /* convert negative indexes */
   if (start < 0)
@@ -1324,27 +1324,27 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void ListFamily::LPush(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PushGeneric(ListDir::LEFT, false, std::move(args), cmd_cntx.tx, cmd_cntx.rb);
+  return PushGeneric(ListDir::LEFT, false, args, cmd_cntx.tx, cmd_cntx.rb);
 }
 
 void ListFamily::LPushX(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PushGeneric(ListDir::LEFT, true, std::move(args), cmd_cntx.tx, cmd_cntx.rb);
+  return PushGeneric(ListDir::LEFT, true, args, cmd_cntx.tx, cmd_cntx.rb);
 }
 
 void ListFamily::LPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PopGeneric(ListDir::LEFT, std::move(args), cmd_cntx.tx, cmd_cntx.rb);
+  return PopGeneric(ListDir::LEFT, args, cmd_cntx.tx, cmd_cntx.rb);
 }
 
 void ListFamily::RPush(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PushGeneric(ListDir::RIGHT, false, std::move(args), cmd_cntx.tx, cmd_cntx.rb);
+  return PushGeneric(ListDir::RIGHT, false, args, cmd_cntx.tx, cmd_cntx.rb);
 }
 
 void ListFamily::RPushX(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PushGeneric(ListDir::RIGHT, true, std::move(args), cmd_cntx.tx, cmd_cntx.rb);
+  return PushGeneric(ListDir::RIGHT, true, args, cmd_cntx.tx, cmd_cntx.rb);
 }
 
 void ListFamily::RPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PopGeneric(ListDir::RIGHT, std::move(args), cmd_cntx.tx, cmd_cntx.rb);
+  return PopGeneric(ListDir::RIGHT, args, cmd_cntx.tx, cmd_cntx.rb);
 }
 
 void ListFamily::LLen(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -1563,11 +1563,11 @@ void ListFamily::LSet(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void ListFamily::BLPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  BPopGeneric(ListDir::LEFT, std::move(args), cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx);
+  BPopGeneric(ListDir::LEFT, args, cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx);
 }
 
 void ListFamily::BRPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  BPopGeneric(ListDir::RIGHT, std::move(args), cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx);
+  BPopGeneric(ListDir::RIGHT, args, cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx);
 }
 
 void ListFamily::LMove(CmdArgList args, const CommandContext& cmd_cntx) {

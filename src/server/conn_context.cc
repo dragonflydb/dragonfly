@@ -32,51 +32,62 @@ static void SendSubscriptionChangedResponse(string_view action, std::optional<st
   rb->SendLong(count);
 }
 
-StoredCmd::StoredCmd(const CommandId* cid, ArgSlice args, facade::ReplyMode mode)
-    : cid_{cid}, buffer_{}, sizes_(args.size()), reply_mode_{mode} {
+StoredCmd::StoredCmd(const CommandId* cid, bool own_args, ArgSlice args)
+    : cid_{cid}, args_{args}, reply_mode_{facade::ReplyMode::FULL} {
+  if (!own_args)
+    return;
+
+  auto& own_storage = args_.emplace<OwnStorage>(args.size());
   size_t total_size = 0;
   for (auto args : args) {
     total_size += args.size();
   }
-
-  buffer_.resize(total_size);
-  char* next = buffer_.data();
+  own_storage.buffer.resize(total_size);
+  char* next = own_storage.buffer.data();
   for (unsigned i = 0; i < args.size(); i++) {
     if (args[i].size() > 0)
       memcpy(next, args[i].data(), args[i].size());
     next += args[i].size();
-    sizes_[i] = args[i].size();
+    own_storage.sizes[i] = args[i].size();
   }
 }
 
 StoredCmd::StoredCmd(string&& buffer, const CommandId* cid, ArgSlice args, facade::ReplyMode mode)
-    : cid_{cid}, buffer_{std::move(buffer)}, sizes_(args.size()), reply_mode_{mode} {
+    : cid_{cid}, args_{OwnStorage{args.size()}}, reply_mode_{mode} {
+  OwnStorage& own_storage = std::get<OwnStorage>(args_);
+  own_storage.buffer = std::move(buffer);
+
   for (unsigned i = 0; i < args.size(); i++) {
     // Assume tightly packed list.
     DCHECK(i + 1 == args.size() || args[i].data() + args[i].size() == args[i + 1].data());
-    sizes_[i] = args[i].size();
+    own_storage.sizes[i] = args[i].size();
   }
 }
 
-void StoredCmd::Fill(absl::Span<std::string_view> args) {
-  DCHECK_GE(args.size(), sizes_.size());
-
-  unsigned offset = 0;
-  for (unsigned i = 0; i < sizes_.size(); i++) {
-    args[i] = MutableSlice{buffer_.data() + offset, sizes_[i]};
-    offset += sizes_[i];
-  }
-}
-
-size_t StoredCmd::NumArgs() const {
-  return sizes_.size();
+CmdArgList StoredCmd::ArgList(CmdArgVec* scratch) const {
+  return std::visit(
+      Overloaded{[&](const OwnStorage& s) {
+                   unsigned offset = 0;
+                   scratch->resize(s.sizes.size());
+                   for (unsigned i = 0; i < s.sizes.size(); i++) {
+                     (*scratch)[i] = string_view{s.buffer.data() + offset, s.sizes[i]};
+                     offset += s.sizes[i];
+                   }
+                   return CmdArgList{*scratch};
+                 },
+                 [&](const CmdArgList& s) { return s; }},
+      args_);
 }
 
 std::string StoredCmd::FirstArg() const {
-  if (sizes_.size() == 0) {
+  if (NumArgs() == 0) {
     return {};
   }
-  return buffer_.substr(0, sizes_[0]);
+  return std::visit(Overloaded{[&](const OwnStorage& s) { return s.buffer.substr(0, s.sizes[0]); },
+                               [&](const ArgSlice& s) {
+                                 return std::string{s[0].data(), s[0].size()};
+                               }},
+                    args_);
 }
 
 facade::ReplyMode StoredCmd::ReplyMode() const {
@@ -91,9 +102,14 @@ template <typename C> size_t IsStoredInlined(const C& c) {
 }
 
 size_t StoredCmd::UsedMemory() const {
-  size_t buffer_size = IsStoredInlined(buffer_) ? 0 : buffer_.size();
-  size_t sz_size = IsStoredInlined(sizes_) ? 0 : sizes_.size() * sizeof(uint32_t);
-  return buffer_size + sz_size;
+  return std::visit(Overloaded{[&](const OwnStorage& s) {
+                                 size_t buffer_size =
+                                     IsStoredInlined(s.buffer) ? 0 : s.buffer.capacity();
+                                 size_t sz_size = IsStoredInlined(s.sizes) ? 0 : s.sizes.memsize();
+                                 return buffer_size + sz_size;
+                               },
+                               [&](const ArgSlice&) -> size_t { return 0U; }},
+                    args_);
 }
 
 const CommandId* StoredCmd::Cid() const {
@@ -155,6 +171,11 @@ void ConnectionContext::ChangeMonitor(bool start) {
   shard_set->pool()->AwaitBrief(
       [start](unsigned, auto*) { ServerState::tlocal()->Monitors().NotifyChangeCount(start); });
   EnableMonitoring(start);
+}
+
+void ConnectionContext::SwitchTxCmd(const CommandId* cid) {
+  transaction->MultiSwitchCmd(cid);
+  this->cid = cid;
 }
 
 void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgList args,

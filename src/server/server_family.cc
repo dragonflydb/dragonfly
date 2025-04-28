@@ -130,6 +130,9 @@ ABSL_FLAG(bool, info_replication_valkey_compatible, true,
 ABSL_FLAG(bool, managed_service_info, false,
           "Hides some implementation details from users when true (i.e. in managed service env)");
 
+ABSL_FLAG(string, availability_zone, "",
+          "server availability zone, used by clients to read from local-zone replicas");
+
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(uint32_t, hz);
@@ -1311,6 +1314,20 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
                             conn_stats.pipelined_cmd_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
+
+  AppendMetricWithoutLabels("cmd_squash_hop_total", "", m.coordinator_stats.multi_squash_executions,
+                            MetricType::COUNTER, &resp->body());
+
+  AppendMetricWithoutLabels("cmd_squash_commands_total", "", m.coordinator_stats.squashed_commands,
+                            MetricType::COUNTER, &resp->body());
+
+  AppendMetricWithoutLabels("cmd_squash_hop_duration_seconds", "",
+                            m.coordinator_stats.multi_squash_exec_hop_usec * 1e-6,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("cmd_squash_hop_reply_seconds", "",
+                            m.coordinator_stats.multi_squash_exec_reply_usec * 1e-6,
+                            MetricType::COUNTER, &resp->body());
+
   AppendMetricWithoutLabels("commands_squashing_replies_bytes", "",
                             MultiCommandSquasher::GetRepliesMemSize(), MetricType::GAUGE,
                             &resp->body());
@@ -1545,12 +1562,19 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   string db_key_expire_metrics;
 
   AppendMetricHeader("db_keys", "Total number of keys by DB", MetricType::GAUGE, &db_key_metrics);
+  AppendMetricHeader("db_capacity", "Table capacity by DB", MetricType::GAUGE, &db_key_metrics);
+
   AppendMetricHeader("db_keys_expiring", "Total number of expiring keys by DB", MetricType::GAUGE,
                      &db_key_expire_metrics);
 
   for (size_t i = 0; i < m.db_stats.size(); ++i) {
     AppendMetricValue("db_keys", m.db_stats[i].key_count, {"db"}, {StrCat("db", i)},
                       &db_key_metrics);
+    AppendMetricValue("db_capacity", m.db_stats[i].prime_capacity, {"db", "type"},
+                      {StrCat("db", i), "prime"}, &db_key_metrics);
+    AppendMetricValue("db_capacity", m.db_stats[i].expire_capacity, {"db", "type"},
+                      {StrCat("db", i), "expire"}, &db_key_metrics);
+
     AppendMetricValue("db_keys_expiring", m.db_stats[i].expire_count, {"db"}, {StrCat("db", i)},
                       &db_key_expire_metrics);
   }
@@ -2200,7 +2224,10 @@ void ServerFamily::ResetStat(Namespace* ns) {
   shard_set->pool()->AwaitBrief(
       [registry = service_.mutable_registry(), ns](unsigned index, auto*) {
         registry->ResetCallStats(index);
-        ns->GetCurrentDbSlice().ResetEvents();
+        EngineShard* shard = EngineShard::tlocal();
+        if (shard) {
+          ns->GetDbSlice(shard->shard_id()).ResetEvents();
+        }
         facade::ResetStats();
         ServerState::tlocal()->exec_freq_count.clear();
       });
@@ -2212,8 +2239,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   uint64_t start = absl::GetCurrentTimeNanos();
 
-  auto cmd_stat_cb = [&dest = result.cmd_stats_map](string_view name,
-                                                    const CmdCallStats::mapped_type& stat) {
+  auto cmd_stat_cb = [&dest = result.cmd_stats_map](string_view name, const CmdCallStats& stat) {
     auto& [calls, sum] = dest[absl::AsciiStrToLower(name)];
     calls += stat.first;
     sum += stat.second;
@@ -2372,6 +2398,12 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("multiplexing_api", multiplex_api);
     append("tcp_port", GetFlag(FLAGS_port));
 
+    // Add availability_zone if it's not empty
+    const auto& az = GetFlag(FLAGS_availability_zone);
+    if (!az.empty()) {
+      append("availability_zone", az);
+    }
+
     uint64_t uptime = time(NULL) - start_time_;
     append("uptime_in_seconds", uptime);
     append("uptime_in_days", uptime / (3600 * 24));
@@ -2423,7 +2455,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       }
     }
     append("table_used_memory", total.table_mem_usage);
-    append("num_buckets", total.bucket_count);
+    append("prime_capacity", total.prime_capacity);
+    append("expire_capacity", total.expire_capacity);
     append("num_entries", total.key_count);
     append("inline_keys", total.inline_keys);
     append("small_string_bytes", m.small_string_bytes);
@@ -2470,7 +2503,6 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("total_commands_processed", conn_stats.command_cnt_main + conn_stats.command_cnt_other);
     append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
-    append("total_pipelined_squashed_commands", m.coordinator_stats.squashed_commands);
     append("pipeline_throttle_total", conn_stats.pipeline_throttle_count);
     append("pipelined_latency_usec", conn_stats.pipelined_cmd_latency);
     append("total_net_input_bytes", conn_stats.io_read_bytes);
@@ -2486,6 +2518,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("rejected_connections", -1);
     append("expired_keys", m.events.expired_keys);
     append("evicted_keys", m.events.evicted_keys);
+    append("total_heartbeat_expired_keys", m.shard_stats.total_heartbeat_expired_keys);
+    append("total_heartbeat_expired_bytes", m.shard_stats.total_heartbeat_expired_bytes);
+    append("total_heartbeat_expired_calls", m.shard_stats.total_heartbeat_expired_calls);
     append("hard_evictions", m.events.hard_evictions);
     append("garbage_checked", m.events.garbage_checked);
     append("garbage_collected", m.events.garbage_collected);
@@ -2609,9 +2644,6 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("eval_shardlocal_coordination_total",
            m.coordinator_stats.eval_shardlocal_coordination_cnt);
     append("eval_squashed_flushes", m.coordinator_stats.eval_squashed_flushes);
-    append("multi_squash_execution_total", m.coordinator_stats.multi_squash_executions);
-    append("multi_squash_execution_hop_usec", m.coordinator_stats.multi_squash_exec_hop_usec);
-    append("multi_squash_execution_reply_usec", m.coordinator_stats.multi_squash_exec_reply_usec);
   };
 
   auto add_repl_info = [&] {
@@ -2872,8 +2904,12 @@ void ServerFamily::Hello(CmdArgList args, const CommandContext& cmd_cntx) {
     rb->SetRespVersion(RespVersion::kResp2);
   }
 
+  // Define number of fields in the response - add availability_zone if flag is not empty
+  const auto& az = GetFlag(FLAGS_availability_zone);
+  const int fields_count = az.empty() ? 7 : 8;
+
   SinkReplyBuilder::ReplyAggregator agg(rb);
-  rb->StartCollection(7, RedisReplyBuilder::MAP);
+  rb->StartCollection(fields_count, RedisReplyBuilder::MAP);
   rb->SendBulkString("server");
   rb->SendBulkString("redis");
   rb->SendBulkString("version");
@@ -2888,6 +2924,12 @@ void ServerFamily::Hello(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendBulkString(GetRedisMode());
   rb->SendBulkString("role");
   rb->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
+
+  // Add availability_zone to the response if flag is explicitly set and not empty
+  if (!az.empty()) {
+    rb->SendBulkString("availability_zone");
+    rb->SendBulkString(az);
+  }
 }
 
 void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx) {

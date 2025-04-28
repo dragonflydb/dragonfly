@@ -1,5 +1,6 @@
 import functools
 import math
+import string
 import sys
 from typing import Any, List, Tuple, Type, Optional
 
@@ -34,11 +35,15 @@ fields = sample_attr("fields")
 values = sample_attr("values")
 scores = sample_attr("scores")
 
+eng_text = st.builds(
+    lambda x: x.encode(), st.text(alphabet=string.ascii_letters, min_size=1)
+)
 ints = st.integers(min_value=MIN_INT, max_value=MAX_INT)
 int_as_bytes = st.builds(lambda x: str(_default_normalize(x)).encode(), ints)
-float_as_bytes = st.builds(
-    lambda x: repr(_default_normalize(x)).encode(), st.floats(width=32)
+floats = st.floats(
+    width=32, allow_nan=False, allow_subnormal=False, allow_infinity=False
 )
+float_as_bytes = st.builds(lambda x: repr(_default_normalize(x)).encode(), floats)
 counts = st.integers(min_value=-3, max_value=3) | ints
 # Redis has an integer overflow bug in swapdb, so we confine the numbers to
 # a limited range (https://github.com/antirez/redis/issues/5737).
@@ -51,8 +56,8 @@ patterns = st.text(
 ) | st.binary().filter(lambda x: b"\0" not in x)
 
 # Redis has integer overflow bugs in time computations, which is why we set a maximum.
-expires_seconds = st.integers(min_value=100000, max_value=MAX_INT)
-expires_ms = st.integers(min_value=100000000, max_value=MAX_INT)
+expires_seconds = st.integers(min_value=5, max_value=1_000)
+expires_ms = st.integers(min_value=5_000, max_value=50_000)
 
 
 class WrappedException:
@@ -98,6 +103,8 @@ def _sort_list(lst):
 
 
 def _normalize_if_number(x):
+    if isinstance(x, list):
+        return [_normalize_if_number(i) for i in x]
     try:
         res = float(x)
         return x if math.isnan(res) else res
@@ -149,6 +156,7 @@ class Command:
             b"sinter",
             b"sunion",
             b"smembers",
+            b"hexpire",
         }
         if command in unordered:
             return _sort_list
@@ -159,7 +167,7 @@ class Command:
     def testable(self) -> bool:
         """Whether this command is suitable for a test.
 
-        The fuzzer can create commands with behaviour that is non-deterministic, not supported, or which hits redis bugs.
+        The fuzzer can create commands with behavior that is non-deterministic, not supported, or which hits redis bugs.
         """
         N = len(self.args)
         if N == 0:
@@ -199,20 +207,6 @@ common_commands = (
     #  away the sort entirely with normalize. This also prevents us
     #  using LIMIT.
     | commands(st.just("sort"), keys, *zero_or_more("asc", "desc", "alpha"))
-)
-
-attrs = st.fixed_dictionaries(
-    {
-        "keys": st.lists(st.binary(), min_size=2, max_size=5, unique=True),
-        "fields": st.lists(st.binary(), min_size=2, max_size=5, unique=True),
-        "values": st.lists(
-            st.binary() | int_as_bytes | float_as_bytes,
-            min_size=2,
-            max_size=5,
-            unique=True,
-        ),
-        "scores": st.lists(st.floats(width=32), min_size=2, max_size=5, unique=True),
-    }
 )
 
 
@@ -291,6 +285,16 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
             for n, r, f in zip(self.transaction_normalize, real_result, fake_result):
                 assert n(f) == n(r)
             self.transaction_normalize = []
+        elif isinstance(fake_result, list):
+            assert len(fake_result) == len(real_result), (
+                f"Discrepancy when running command {command}, fake({fake_result}) != real({real_result})",
+            )
+            for i in range(len(fake_result)):
+                assert fake_result[i] == real_result[i] or (
+                    type(fake_result[i]) is float
+                    and fake_result[i] == pytest.approx(real_result[i])
+                ), f"Discrepancy when running command {command}, fake({fake_result}) != real({real_result})"
+
         else:
             assert fake_result == real_result or (
                 type(fake_result) is float and fake_result == pytest.approx(real_result)
@@ -307,7 +311,26 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
         ):
             self.transaction_normalize = []
 
-    @initialize(attrs=attrs)
+    @initialize(
+        attrs=st.fixed_dictionaries(
+            dict(
+                keys=st.lists(eng_text, min_size=2, max_size=5, unique=True),
+                fields=st.lists(eng_text, min_size=2, max_size=5, unique=True),
+                values=st.lists(
+                    eng_text | int_as_bytes | float_as_bytes,
+                    min_size=2,
+                    max_size=5,
+                    unique=True,
+                ),
+                scores=st.lists(
+                    floats,
+                    min_size=2,
+                    max_size=5,
+                    unique=True,
+                ),
+            )
+        )
+    )
     def init_attrs(self, attrs):
         for key, value in attrs.items():
             setattr(self, key, value)

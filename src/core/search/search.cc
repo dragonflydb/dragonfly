@@ -143,7 +143,7 @@ struct ProfileBuilder {
         [](const AstKnnNode& n) { return absl::StrCat("KNN{l=", n.limit, "}"); },
         [](const AstNegateNode& n) { return absl::StrCat("Negate{}"); },
         [](const AstStarNode& n) { return absl::StrCat("Star{}"); },
-        [](const AstSortNode& n) { return absl::StrCat("Sort{f", n.field, "}"); },
+        [](const AstStarFieldNode& n) { return absl::StrCat("StarField{}"); },
     };
     return visit(node_info, node.Variant());
   }
@@ -177,8 +177,7 @@ struct ProfileBuilder {
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
 
-  BasicSearch(const FieldIndices* indices, size_t limit)
-      : indices_{indices}, limit_{limit}, tmp_vec_{} {
+  BasicSearch(const FieldIndices* indices) : indices_{indices}, tmp_vec_{} {
   }
 
   void EnableProfiling() {
@@ -304,6 +303,32 @@ struct BasicSearch {
     return UnifyResults(GetSubResults(selected_indices, mapping), LogicOp::OR);
   }
 
+  IndexResult Search(const AstStarFieldNode& node, string_view active_field) {
+    // Try to get a sort index first, as `@field:*` might imply wanting sortable behavior
+    BaseSortIndex* sort_index = indices_->GetSortIndex(active_field);
+    if (sort_index) {
+      if (auto result = sort_index->GetAllResults()) {
+        return std::move(*result);
+      }
+    }
+
+    // If sort index doesn't exist or doesn't support GetAllResults, try regular index
+    BaseIndex* base_index = indices_->GetIndex(active_field);
+    if (base_index) {
+      if (auto result = base_index->GetAllResults()) {
+        return std::move(*result);
+      }
+    }
+
+    // If we get here, neither index could handle the request
+    if (!base_index && !sort_index) {
+      error_ = absl::StrCat("Invalid field: ", active_field);
+    } else {
+      error_ = absl::StrCat("Wrong access type for field: ", active_field);
+    }
+    return IndexResult{};
+  }
+
   IndexResult Search(const AstPrefixNode& node, string_view active_field) {
     vector<TextIndex*> indices;
     if (!active_field.empty()) {
@@ -370,27 +395,6 @@ struct BasicSearch {
                   }};
     auto mapping = [ov](const auto& tag) { return visit(ov, tag); };
     return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
-  }
-
-  // SORTBY field [DESC]: Sort by field. Part of params and not "core query".
-  IndexResult Search(const AstSortNode& node, string_view active_field) {
-    auto sub_results = SearchGeneric(*node.filter, active_field);
-
-    // Skip sorting again for KNN queries, reverse if needed will be applied on aggregation
-    if (auto knn = get_if<AstKnnNode>(&node.filter->Variant());
-        knn && (knn->score_alias == node.field || "__vector_score" == node.field)) {
-      return sub_results;
-    }
-
-    preagg_total_ = sub_results.Size();
-
-    if (auto* sort_index = GetSortIndex(node.field); sort_index) {
-      auto ids_vec = sub_results.Take();
-      scores_ = sort_index->Sort(&ids_vec, limit_, node.descending);
-      return ids_vec;
-    }
-
-    return IndexResult{};
   }
 
   void SearchKnnFlat(FlatVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {
@@ -482,14 +486,13 @@ struct BasicSearch {
     size_t total = result.Size();
     return SearchResult{total,
                         max(total, preagg_total_),
-                        result.Take(limit_),
+                        result.Take(),
                         std::move(scores_),
                         std::move(profile),
                         std::move(error_)};
   }
 
   const FieldIndices* indices_;
-  size_t limit_;
 
   size_t preagg_total_ = 0;
   string error_;
@@ -677,7 +680,7 @@ const Synonyms* FieldIndices::GetSynonyms() const {
 SearchAlgorithm::SearchAlgorithm() = default;
 SearchAlgorithm::~SearchAlgorithm() = default;
 
-bool SearchAlgorithm::Init(string_view query, const QueryParams* params, const SortOption* sort) {
+bool SearchAlgorithm::Init(string_view query, const QueryParams* params) {
   try {
     query_ = make_unique<AstExpr>(ParseQuery(query, params));
   } catch (const Parser::syntax_error& se) {
@@ -693,35 +696,22 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params, const S
     return false;
   }
 
-  if (sort != nullptr)
-    query_ = make_unique<AstNode>(AstSortNode{std::move(query_), sort->field, sort->descending});
-
   return true;
 }
 
-SearchResult SearchAlgorithm::Search(const FieldIndices* index, size_t limit) const {
-  auto bs = BasicSearch{index, limit};
+SearchResult SearchAlgorithm::Search(const FieldIndices* index) const {
+  auto bs = BasicSearch{index};
   if (profiling_enabled_)
     bs.EnableProfiling();
   return bs.Search(*query_);
 }
 
-optional<AggregationInfo> SearchAlgorithm::GetAggregationInfo() const {
+optional<KnnScoreSortOption> SearchAlgorithm::GetKnnScoreSortOption() const {
   DCHECK(query_);
 
   // KNN query
   if (auto* knn = get_if<AstKnnNode>(query_.get()); knn)
-    return AggregationInfo{string_view{knn->score_alias}, false, knn->limit};
-
-  // SEARCH query with SORTBY option
-  if (auto* sort = get_if<AstSortNode>(query_.get()); sort) {
-    string_view alias = "";
-    if (auto* knn = get_if<AstKnnNode>(&sort->filter->Variant());
-        knn && knn->score_alias == sort->field)
-      alias = knn->score_alias;
-
-    return AggregationInfo{alias, sort->descending};
-  }
+    return KnnScoreSortOption{string_view{knn->score_alias}, knn->limit};
 
   return nullopt;
 }

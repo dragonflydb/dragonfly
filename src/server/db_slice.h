@@ -30,8 +30,11 @@ struct DbStats : public DbTableStats {
   // number of keys that have expiry deadline.
   size_t expire_count = 0;
 
-  // number of buckets in dictionary (key capacity)
-  size_t bucket_count = 0;
+  // total number of slots in prime dictionary (key capacity).
+  size_t prime_capacity = 0;
+
+  // total number of slots in prime dictionary (key capacity).
+  size_t expire_capacity = 0;
 
   // Memory used by dictionaries.
   size_t table_mem_usage = 0;
@@ -535,7 +538,7 @@ class DbSlice {
   size_t StopSampleKeys(DbIndex db_ind);
 
  private:
-  void PreUpdateBlocking(DbIndex db_ind, Iterator it, std::string_view key);
+  void PreUpdateBlocking(DbIndex db_ind, Iterator it);
   void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
 
   bool DelEmptyPrimeValue(const Context& cntx, Iterator it);
@@ -588,7 +591,7 @@ class DbSlice {
     return version_++;
   }
 
-  void CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const;
+  void CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const;
 
   // We need this because registered callbacks might yield and when they do so we want
   // to avoid Heartbeat or Flushing the db.

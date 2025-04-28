@@ -236,7 +236,11 @@ GlobMatcher::GlobMatcher(string_view pattern, bool case_sensitive)
     regex.push_back('i');
   }
   regex.push_back(')');
-  regex.append(Glob2Regex(pattern));
+  if (pattern.empty()) {
+    regex.append(Glob2Regex("*"));
+  } else {
+    regex.append(Glob2Regex(pattern));
+  }
   matcher_.pattern(regex);
 #elif USE_PCRE2
   string regex("(?s");  // dotall mode

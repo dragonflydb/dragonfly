@@ -66,6 +66,10 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
     return true;
   }
 
+  if (id.IsAlias()) {
+    return false;
+  }
+
   std::pair<bool, AclLog::Reason> auth_res;
 
   if (id.IsPubSub() || id.IsShardedPSub()) {

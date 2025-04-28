@@ -644,13 +644,14 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   PrimeTable::Cursor cur = *cursor;
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
 
-  size_t buckets_iterated = 0;
-  // 10k Traverses
-  const size_t limit = 10000;
+  const auto start = absl::Now();
+  // Don't allow it to monopolize cpu time.
+  const absl::Duration timeout = absl::Milliseconds(10);
+
   do {
     cur = prime_table->Traverse(
         cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, vec); });
-  } while (cur && cnt < scan_opts.limit && buckets_iterated++ < limit);
+  } while (cur && cnt < scan_opts.limit && (absl::Now() - start) < timeout);
 
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();
   *cursor = cur.value();
@@ -868,6 +869,9 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     op_args.shard->search_indices()->RemoveDoc(to_key, op_args.db_cntx, to_res.it->second);
     is_prior_list = (to_res.it->second.ObjType() == OBJ_LIST);
   }
+
+  // Delete the "from" document from the search index before deleting from the database
+  op_args.shard->search_indices()->RemoveDoc(from_key, op_args.db_cntx, from_res.it->second);
 
   bool sticky = from_res.it->first.IsSticky();
   uint64_t exp_ts = db_slice.ExpireTime(from_res.exp_it);

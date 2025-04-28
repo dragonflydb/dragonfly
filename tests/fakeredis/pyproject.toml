@@ -25,7 +25,7 @@ pytest = "^8.3"
 pytest-timeout = "^2.3.1"
 pytest-asyncio = "^0.24"
 pytest-cov = "^5.0"
-pytest-mock =  "^3.14"
+pytest-mock = "^3.14"
 pytest-html = "^4.1"
 
 [tool.pytest.ini_options]
@@ -45,4 +45,5 @@ generate_report_on_test = true
 render_collapsed = "failed,error"
 addopts = [
     "--self-contained-html",
+    "--import-mode=importlib",
 ]

@@ -1,6 +1,6 @@
 import hypothesis.strategies as st
 
-from test.test_hypothesis.base import (
+from .base import (
     BaseTest,
     commands,
     values,
@@ -12,7 +12,7 @@ from test.test_hypothesis.base import (
     expires_seconds,
     expires_ms,
 )
-from test.test_hypothesis.test_string import TestString
+from .test_string import TestString
 
 
 class TestTransaction(BaseTest):

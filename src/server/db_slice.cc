@@ -317,13 +317,14 @@ inline void TouchHllIfNeeded(string_view key, uint8_t* hll) {
 
 DbStats& DbStats::operator+=(const DbStats& o) {
   constexpr size_t kDbSz = sizeof(DbStats) - sizeof(DbTableStats);
-  static_assert(kDbSz == 32);
+  static_assert(kDbSz == 40);
 
   DbTableStats::operator+=(o);
 
   ADD(key_count);
   ADD(expire_count);
-  ADD(bucket_count);
+  ADD(prime_capacity);
+  ADD(expire_capacity);
   ADD(table_mem_usage);
 
   return *this;
@@ -403,7 +404,8 @@ auto DbSlice::GetStats() const -> Stats {
     DbStats& stats = s.db_stats[i];
     stats = db_wrap.stats;
     stats.key_count = db_wrap.prime.size();
-    stats.bucket_count = db_wrap.prime.bucket_count();
+    stats.prime_capacity = db_wrap.prime.capacity();
+    stats.expire_capacity = db_wrap.expire.capacity();
     stats.expire_count = db_wrap.expire.size();
     stats.table_mem_usage = db_wrap.table_memory();
   }
@@ -489,7 +491,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
 
   auto it = Iterator(res->it, StringOrView::FromView(key));
   auto exp_it = ExpIterator(res->exp_it, StringOrView::FromView(key));
-  PreUpdateBlocking(cntx.db_index, it, key);
+  PreUpdateBlocking(cntx.db_index, it);
   // PreUpdate() might have caused a deletion of `it`
   if (res->it.IsOccupied()) {
     DCHECK_GE(db_arr_[cntx.db_index]->stats.obj_memory_usage, res->it->second.MallocUsed());
@@ -613,7 +615,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   if (res.ok()) {
     Iterator it(res->it, StringOrView::FromView(key));
     ExpIterator exp_it(res->exp_it, StringOrView::FromView(key));
-    PreUpdateBlocking(cntx.db_index, it, key);
+    PreUpdateBlocking(cntx.db_index, it);
 
     // PreUpdate() might have caused a deletion of `it`
     if (res->it.IsOccupied()) {
@@ -634,7 +636,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
   // It's a new entry.
-  CallChangeCallbacks(cntx.db_index, key, {key});
+  CallChangeCallbacks(cntx.db_index, {key});
 
   ssize_t memory_offset = -key.size();
   size_t reclaimed = 0;
@@ -1120,8 +1122,8 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const 
   return true;
 }
 
-void DbSlice::PreUpdateBlocking(DbIndex db_ind, Iterator it, std::string_view key) {
-  CallChangeCallbacks(db_ind, key, ChangeReq{it.GetInnerIt()});
+void DbSlice::PreUpdateBlocking(DbIndex db_ind, Iterator it) {
+  CallChangeCallbacks(db_ind, ChangeReq{it.GetInnerIt()});
   it.GetInnerIt().SetVersion(NextVersion());
 }
 
@@ -1579,7 +1581,7 @@ auto DbSlice::StopSampleTopK(DbIndex db_ind) -> SamplingResult {
   SamplingResult result;
   result.top_keys.reserve(fmap.size());
   for (auto& [key, count] : fmap) {
-    result.top_keys.emplace_back(move(key), count);
+    result.top_keys.emplace_back(std::move(key), count);
   }
   return result;
 }
@@ -1710,10 +1712,7 @@ void DbSlice::OnCbFinishBlocking() {
       }
 
       if (!change_cb_.empty()) {
-        auto key = it->first.ToString();
-        auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
-          CallChangeCallbacks(db_index, key, bit);
-        };
+        auto bump_cb = [&](PrimeTable::bucket_iterator bit) { CallChangeCallbacks(db_index, bit); };
         db.prime.CVCUponBump(change_cb_.back().first, it, bump_cb);
       }
 
@@ -1731,14 +1730,12 @@ void DbSlice::OnCbFinishBlocking() {
   }
 }
 
-void DbSlice::CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const {
+void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
   if (change_cb_.empty())
     return;
 
   // does not preempt, just increments the counter.
   unique_lock<LocalLatch> lk(serialization_latch_);
-
-  DVLOG(2) << "Running callbacks for key " << key << " in dbid " << id;
 
   const size_t limit = change_cb_.size();
   auto ccb = change_cb_.begin();
