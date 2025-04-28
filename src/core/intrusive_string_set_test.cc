@@ -4,6 +4,8 @@
 
 #include "core/intrusive_string_set.h"
 
+#include <absl/strings/match.h>
+#include <absl/strings/str_cat.h>
 #include <mimalloc.h>
 
 #include <random>
@@ -481,48 +483,48 @@ TEST_F(IntrusiveStringSetTest, SetFieldExpireNoHasExpiry) {
   EXPECT_EQ(k->ExpiryTime(), 10);
 }
 
-// TEST_F(IntrusiveStringSetTest, Ttl) {
-//   EXPECT_TRUE(ss_->Add("bla"sv, 1));
-//   EXPECT_FALSE(ss_->Add("bla"sv, 1));
-//   auto it = ss_->Find("bla"sv);
-//   EXPECT_EQ(1u, it.ExpiryTime());
+TEST_F(IntrusiveStringSetTest, Ttl) {
+  EXPECT_TRUE(ss_->Add("bla"sv, 1));
+  EXPECT_FALSE(ss_->Add("bla"sv, 1));
+  auto it = ss_->Find("bla"sv);
+  EXPECT_EQ(1u, it->ExpiryTime());
 
-//   ss_->set_time(1);
-//   EXPECT_TRUE(ss_->Add("bla"sv, 1));
-//   EXPECT_EQ(1u, ss_->UpperBoundSize());
+  ss_->set_time(1);
+  EXPECT_TRUE(ss_->Add("bla"sv, 1));
+  EXPECT_EQ(1u, ss_->UpperBoundSize());
 
-//   for (unsigned i = 0; i < 100; ++i) {
-//     EXPECT_TRUE(ss_->Add(StrCat("foo", i), 1));
-//   }
-//   EXPECT_EQ(101u, ss_->UpperBoundSize());
-//   it = ss_->Find("foo50");
-//   EXPECT_STREQ("foo50", *it);
-//   EXPECT_EQ(2u, it.ExpiryTime());
+  for (unsigned i = 0; i < 100; ++i) {
+    EXPECT_TRUE(ss_->Add(absl::StrCat("foo", i), 1));
+  }
+  EXPECT_EQ(101u, ss_->UpperBoundSize());
+  it = ss_->Find("foo50");
+  EXPECT_EQ("foo50"sv, it->Key());
+  EXPECT_EQ(2u, it->ExpiryTime());
 
-//   ss_->set_time(2);
-//   for (unsigned i = 0; i < 100; ++i) {
-//     EXPECT_TRUE(ss_->Add(StrCat("bar", i)));
-//   }
-//   it = ss_->Find("bar50");
-//   EXPECT_FALSE(it.HasExpiry());
+  ss_->set_time(2);
+  for (unsigned i = 0; i < 100; ++i) {
+    EXPECT_TRUE(ss_->Add(absl::StrCat("bar", i)));
+  }
+  it = ss_->Find("bar50");
+  EXPECT_FALSE(it->HasExpiry());
 
-//   for (auto it = ss_->begin(); it != ss_->end(); ++it) {
-//     ASSERT_TRUE(absl::StartsWith(*it, "bar")) << *it;
-//     string str = *it;
-//     VLOG(1) << *it;
-//   }
-// }
+  for (auto it = ss_->begin(); it != ss_->end(); ++it) {
+    ASSERT_TRUE(absl::StartsWith(it->Key(), "bar")) << it->Key();
+    string str(it->Key());
+    VLOG(1) << *it;
+  }
+}
 
-// TEST_F(IntrusiveStringSetTest, Grow) {
-//   for (size_t j = 0; j < 10; ++j) {
-//     for (size_t i = 0; i < 4098; ++i) {
-//       ss_->Reserve(generator_() % 256);
-//       auto str = random_string(generator_, 3);
-//       ss_->Add(str);
-//     }
-//     ss_->Clear();
-//   }
-// }
+TEST_F(IntrusiveStringSetTest, Grow) {
+  for (size_t j = 0; j < 10; ++j) {
+    for (size_t i = 0; i < 4098; ++i) {
+      ss_->Reserve(generator_() % 256);
+      auto str = random_string(generator_, 3);
+      ss_->Add(str);
+    }
+    ss_->Clear();
+  }
+}
 
 // TEST_F(IntrusiveStringSetTest, Reserve) {
 //   vector<string> strs;
