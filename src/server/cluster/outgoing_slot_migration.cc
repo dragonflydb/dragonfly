@@ -311,6 +311,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
       dfly::Pause(server_family_->GetNonPriviligedListeners(), &namespaces->GetDefaultNamespace(),
                   nullptr, ClientPause::ALL, is_pause_in_progress);
 
+  DCHECK(pause_fb_opt);
   if (!pause_fb_opt) {
     auto err = absl::StrCat("Migration finalization time out ", cf_->MyID(), " : ",
                             migration_info_.node_info.id, " attempt ", attempt);
