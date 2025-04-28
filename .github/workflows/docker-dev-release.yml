@@ -98,6 +98,36 @@ jobs:
             docker stop $(docker ps -q --filter ancestor=${image_tag})
           done
 
+      - name: Extract and Upload Binaries
+        if: matrix.flavor == 'ubuntu'  # Only run once per flavor
+        run: |
+          # Get the image tag
+          image_tags=(${{ steps.metadata.outputs.tags }})
+          image_tag=${image_tags[0]}
+
+          # Extract version from the image
+          echo "Extracting version from image..."
+          VERSION=$(docker run --rm ${image_tag} dragonfly --version | head -n1 | cut -d' ' -f2)
+          echo "Dragonfly version: $VERSION"
+
+          echo "Extracting binary from ${image_tag} for ${{ matrix.os.arch }}"
+
+          # Create a temporary container and copy the binary
+          container_id=$(docker create ${image_tag})
+          docker cp ${container_id}:/usr/local/bin/dragonfly ./dragonfly
+          docker rm ${container_id}
+
+          # Create a tar archive
+          tar_name="dragonfly-${{ matrix.os.arch }}-dbgsym.tar.gz"
+          tar czf ${tar_name} dragonfly
+
+          # Upload to GCS
+          echo "Uploading ${tar_name} to GCS"
+          gcloud storage cp ${tar_name} gs://${{ secrets.ARTIFACT_BUCKET }}/dragonfly/$VERSION --recursive
+
+          # Cleanup
+          rm -f dragonfly ${tar_name}
+
     outputs:
       # matrix jobs outputs override each other, but we use the same sha
       # for all images, so we can use the same output name.
