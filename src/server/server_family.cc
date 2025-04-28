@@ -2224,7 +2224,10 @@ void ServerFamily::ResetStat(Namespace* ns) {
   shard_set->pool()->AwaitBrief(
       [registry = service_.mutable_registry(), ns](unsigned index, auto*) {
         registry->ResetCallStats(index);
-        ns->GetCurrentDbSlice().ResetEvents();
+        EngineShard* shard = EngineShard::tlocal();
+        if (shard) {
+          ns->GetDbSlice(shard->shard_id()).ResetEvents();
+        }
         facade::ResetStats();
         ServerState::tlocal()->exec_freq_count.clear();
       });
