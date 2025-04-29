@@ -238,26 +238,26 @@ class CommandGenerator:
         elif t == ValueType.LIST:
             # Random sequence k-letter elements for LPUSH
             list_size = self.val_size // 4
-            huge_val_element = random.randint(0, list_size - 1) if generate_huge_val else -1
-            return tuple(
-                rand_str(self.huge_val_size if i == huge_val_element else 3)
-                for i in range(list_size)
+            element_size = (
+                self.huge_val_size / list_size if generate_huge_val else self.val_size / list_size
             )
+            return tuple(rand_str(element_size) for i in range(list_size))
         elif t == ValueType.SET:
             # Random sequence of k-letter elements for SADD
             set_size = self.val_size // 4
-            huge_val_element = random.randint(0, set_size - 1) if generate_huge_val else -1
-            return tuple(
-                rand_str(self.huge_val_size if i == huge_val_element else 3)
-                for i in range(set_size)
+            element_size = (
+                self.huge_val_size / set_size if generate_huge_val else self.val_size / set_size
             )
+            return tuple(rand_str(element_size) for i in range(set_size))
         elif t == ValueType.HSET:
             # Random sequence of k-letter keys + int and two start values for HSET
             hset_size = self.val_size // 5
-            huge_val_element = random.randint(0, hset_size - 1) if generate_huge_val else -1
+            element_size = (
+                self.huge_val_size / hset_size if generate_huge_val else self.val_size / hset_size
+            )
             elements = (
                 (
-                    rand_str(self.huge_val_size if i == huge_val_element else 3),
+                    rand_str(element_size),
                     random.randint(0, self.val_size),
                 )
                 for i in range(hset_size)
@@ -269,14 +269,16 @@ class CommandGenerator:
             # This ensures that we test both the ZSET implementation with listpack and the our custom BPtree.
             value_sizes = [self.val_size // 4, 130]
             probabilities = [8, 1]
-            value_size = random.choices(value_sizes, probabilities)[0]
-            huge_val_element = random.randint(0, value_size - 1) if generate_huge_val else -1
+            zset_size = random.choices(value_sizes, probabilities)[0]
+            element_size = (
+                self.huge_val_size / zset_size if generate_huge_val else self.val_size / zset_size
+            )
             elements = (
                 (
                     random.randint(0, self.val_size),
-                    rand_str(self.huge_val_size if i == huge_val_element else 3),
+                    rand_str(element_size),
                 )
-                for i in range(value_size)
+                for i in range(zset_size)
             )
             return tuple(itertools.chain(*elements))
         elif t == ValueType.JSON:
@@ -285,12 +287,11 @@ class CommandGenerator:
             # - ints (array of objects {i:random integer})
             # - i (random integer)
             json_size = self.val_size // 6
-            huge_val_element = random.randint(json_size - 1) if generate_huge_val else -1
+            element_size = (
+                self.huge_val_size / json_size if generate_huge_val else self.val_size / json_size
+            )
             ints = [{"i": random.randint(0, 100)} for i in range(json_size)]
-            strs = [
-                rand_str(self.huge_val_size if i == huge_val_element else 3)
-                for i in range(json_size)
-            ]
+            strs = [rand_str(element_size) for i in range(json_size)]
             return "$", json.dumps({"arr": strs, "ints": ints, "i": random.randint(0, 100)})
         else:
             assert False, "Invalid ValueType"
