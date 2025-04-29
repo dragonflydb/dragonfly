@@ -774,7 +774,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
 
 OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeOpts& opts) {
   auto& db_slice = op_args.GetDbSlice();
-  auto res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
+  auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
@@ -783,11 +783,19 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
   if (opts.count == 0)
     return result;
 
+  CompactObj& cobj = res_it->it->second;
+  stream* s = (stream*)cobj.RObjPtr();
+
+  StreamMemTracker mem_tracker;
+
   streamIterator si;
+  absl::Cleanup cleanup = [&]() {
+    streamIteratorStop(&si);
+    mem_tracker.UpdateStreamSize(cobj);
+  };
+
   int64_t numfields;
   streamID id;
-  const CompactObj& cobj = (*res_it)->second;
-  stream* s = (stream*)cobj.RObjPtr();
   streamID sstart = opts.start.val, send = opts.end.val;
 
   streamIteratorStart(&si, s, &sstart, &send, opts.is_rev);
@@ -860,8 +868,6 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
     if (opts.count == result.size())
       break;
   }
-
-  streamIteratorStop(&si);
 
   return result;
 }
@@ -1174,7 +1180,7 @@ OpResult<vector<ConsumerInfo>> OpConsumers(const DbContext& db_cntx, EngineShard
   vector<ConsumerInfo> result;
   const CompactObj& cobj = (*res_it)->second;
   stream* s = GetReadOnlyStream(cobj);
-  streamCG* cg = streamLookupCG(s, WrapSds(group_name));
+  streamCG* cg = streamLookupCG(s, SdsWrapper(group_name));
   if (cg == NULL) {
     return OpStatus::INVALID_VALUE;
   }
@@ -1201,12 +1207,10 @@ OpResult<vector<ConsumerInfo>> OpConsumers(const DbContext& db_cntx, EngineShard
   return result;
 }
 
-constexpr uint8_t kCreateOptMkstream = 1 << 0;
-
 struct CreateOpts {
   string_view gname;
   string_view id;
-  uint8_t flags = 0;
+  bool create_stream = false;
 };
 
 OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts) {
@@ -1216,7 +1220,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
 
   StreamMemTracker mem_tracker;
   if (!res_it) {
-    if (opts.flags & kCreateOptMkstream) {
+    if (opts.create_stream) {
       // MKSTREAM is enabled, so create the stream
       res_it = db_slice.AddNew(op_args.db_cntx, key, PrimeValue{}, 0);
       if (!res_it)
@@ -1266,7 +1270,7 @@ OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, stri
 
   CompactObj& cobj = res_it->it->second;
   auto* s = static_cast<stream*>(cobj.RObjPtr());
-  auto* cg = streamLookupCG(s, WrapSds(gname));
+  auto* cg = streamLookupCG(s, SdsWrapper(gname));
   if (skip_group && !cg)
     return OpStatus::SKIPPED;
 
@@ -1276,8 +1280,7 @@ OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, stri
 // Try to get the consumer. If not found, create a new one.
 streamConsumer* FindOrAddConsumer(string_view name, streamCG* cg, uint64_t now_ms) {
   // Try to get the consumer. If not found, create a new one.
-  auto cname = WrapSds(name);
-  streamConsumer* consumer = streamLookupConsumer(cg, cname);
+  streamConsumer* consumer = streamLookupConsumer(cg, SdsWrapper(name));
   if (consumer)
     consumer->seen_time = now_ms;
   else  // TODO: notify xgroup-createconsumer event once we support stream events.
@@ -1482,7 +1485,7 @@ OpResult<uint32_t> OpDelConsumer(const OpArgs& op_args, string_view key, string_
   StreamMemTracker mem_tracker;
 
   long long pending = 0;
-  streamConsumer* consumer = streamLookupConsumer(cgroup_res->cg, WrapSds(consumer_name));
+  streamConsumer* consumer = streamLookupConsumer(cgroup_res->cg, SdsWrapper(consumer_name));
   if (consumer) {
     pending = raxSize(consumer->pel);
     streamDelConsumer(cgroup_res->cg, consumer);
@@ -1857,7 +1860,7 @@ OpResult<PendingResult> OpPending(const OpArgs& op_args, string_view key, const 
 
   streamConsumer* consumer = nullptr;
   if (!opts.consumer_name.empty()) {
-    consumer = streamLookupConsumer(cgroup_res->cg, WrapSds(opts.consumer_name));
+    consumer = streamLookupConsumer(cgroup_res->cg, SdsWrapper(opts.consumer_name));
   }
 
   PendingResult result;
@@ -1878,9 +1881,7 @@ void CreateGroup(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder
 
   CreateOpts opts;
   std::tie(opts.gname, opts.id) = parser->Next<string_view, string_view>();
-  if (parser->Check("MKSTREAM")) {
-    opts.flags |= kCreateOptMkstream;
-  }
+  opts.create_stream = parser->Check("MKSTREAM");
 
   if (auto err = parser->Error(); err)
     return builder->SendError(err->MakeReply());
@@ -2413,7 +2414,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
 
     // Update group pointer and check it's validity
     if (opts->read_group) {
-      sitem.group = streamLookupCG(s, WrapSds(opts->group_name));
+      sitem.group = streamLookupCG(s, SdsWrapper(opts->group_name));
       if (!sitem.group)
         return true;  // abort
     }
@@ -3235,8 +3236,8 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
   StreamMemTracker mem_tracker;
   absl::Cleanup update_size_cb([&]() { mem_tracker.UpdateStreamSize(res_it->it->second); });
 
-  const CompactObj& cobj = res_it->it->second;
-  stream* s = GetReadOnlyStream(cobj);
+  CompactObj& cobj = res_it->it->second;
+  stream* s = (stream*)cobj.RObjPtr();
 
   // Fetch last id
   streamID last_id = s->last_id;
@@ -3250,7 +3251,7 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
   streamCG* group = nullptr;
   streamConsumer* consumer = nullptr;
   if (opts->read_group) {
-    group = streamLookupCG(s, WrapSds(opts->group_name));
+    group = streamLookupCG(s, SdsWrapper(opts->group_name));
     if (!group)
       return facade::ErrorReply{
           NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option")};
