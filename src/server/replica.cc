@@ -126,18 +126,19 @@ GenericError Replica::Start() {
   return {};
 }
 
-void Replica::StartMainReplicationFiber() {
-  sync_fb_ = fb2::Fiber("main_replication", &Replica::MainReplicationFb, this);
+void Replica::StartMainReplicationFiber(std::optional<LastMasterSyncData> last_master_sync_data) {
+  sync_fb_ = fb2::Fiber("main_replication", &Replica::MainReplicationFb, this,
+                        std::move(last_master_sync_data));
 }
 
 void Replica::EnableReplication(facade::SinkReplyBuilder* builder) {
   VLOG(1) << "Enabling replication";
 
-  state_mask_.store(R_ENABLED);                             // set replica state to enabled
-  sync_fb_ = MakeFiber(&Replica::MainReplicationFb, this);  // call replication fiber
+  state_mask_.store(R_ENABLED);                                      // set replica state to enabled
+  sync_fb_ = MakeFiber(&Replica::MainReplicationFb, this, nullopt);  // call replication fiber
 }
 
-void Replica::Stop() {
+std::optional<Replica::LastMasterSyncData> Replica::Stop() {
   VLOG(1) << "Stopping replication " << this;
   // Stops the loop in MainReplicationFb.
 
@@ -154,6 +155,11 @@ void Replica::Stop() {
   for (auto& flow : shard_flows_) {
     flow.reset();
   }
+
+  if (last_journal_LSNs_.has_value()) {
+    return LastMasterSyncData{master_context_.master_repl_id, last_journal_LSNs_.value()};
+  }
+  return nullopt;
 }
 
 void Replica::Pause(bool pause) {
@@ -183,7 +189,7 @@ std::error_code Replica::TakeOver(std::string_view timeout, bool save_flag) {
   return ec;
 }
 
-void Replica::MainReplicationFb() {
+void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sync_data) {
   VLOG(1) << "Main replication fiber started " << this;
   // Switch shard states to replication.
   SetShardStates(true);
@@ -231,9 +237,9 @@ void Replica::MainReplicationFb() {
 
     // 3. Initiate full sync
     if ((state_mask_.load() & R_SYNC_OK) == 0) {
-      if (HasDflyMaster())
-        ec = InitiateDflySync();
-      else
+      if (HasDflyMaster()) {
+        ec = InitiateDflySync(std::exchange(last_master_sync_data, nullopt));
+      } else
         ec = InitiatePSync();
 
       if (ec) {
@@ -468,7 +474,7 @@ error_code Replica::InitiatePSync() {
 }
 
 // Initialize and start sub-replica for each flow.
-error_code Replica::InitiateDflySync() {
+error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_master_sync_data) {
   auto start_time = absl::Now();
 
   // Initialize MultiShardExecution.
@@ -530,7 +536,8 @@ error_code Replica::InitiateDflySync() {
         auto ec = shard_flows_[id]->StartSyncFlow(sync_block, &exec_st_,
                                                   last_journal_LSNs_.has_value()
                                                       ? std::optional((*last_journal_LSNs_)[id])
-                                                      : std::nullopt);
+                                                      : std::nullopt,
+                                                  last_master_sync_data);
         if (ec.has_value())
           is_full_sync[id] = ec.value();
         else
@@ -542,7 +549,7 @@ error_code Replica::InitiateDflySync() {
     lock_guard lk{flows_op_mu_};
 
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
-
+    last_journal_LSNs_.reset();
     size_t num_full_flows =
         std::accumulate(is_full_sync.get(), is_full_sync.get() + num_df_flows, 0);
 
@@ -558,7 +565,6 @@ error_code Replica::InitiateDflySync() {
     } else if (num_full_flows == 0) {
       sync_type = "partial";
     } else {
-      last_journal_LSNs_.reset();
       exec_st_.ReportError(std::make_error_code(errc::state_not_recoverable),
                            "Won't do a partial sync: some flows must fully resync");
     }
@@ -734,8 +740,9 @@ error_code Replica::SendNextPhaseRequest(string_view kind) {
   return std::error_code{};
 }
 
-io::Result<bool> DflyShardReplica::StartSyncFlow(BlockingCounter sb, ExecutionState* cntx,
-                                                 std::optional<LSN> lsn) {
+io::Result<bool> DflyShardReplica::StartSyncFlow(
+    BlockingCounter sb, ExecutionState* cntx, std::optional<LSN> lsn,
+    std::optional<Replica::LastMasterSyncData> last_master_data) {
   using nonstd::make_unexpected;
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
   proactor_index_ = ProactorBase::me()->GetPoolIndex();
@@ -746,12 +753,19 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(BlockingCounter sb, ExecutionSt
   VLOG(1) << "Sending on flow " << master_context_.master_repl_id << " "
           << master_context_.dfly_session_id << " " << flow_id_;
 
+  // DFLY FLOW <master_id> <session_id> <flow_id> [lsn] [last_master_id lsn-vec]
   std::string cmd = StrCat("DFLY FLOW ", master_context_.master_repl_id, " ",
                            master_context_.dfly_session_id, " ", flow_id_);
   // Try to negotiate a partial sync if possible.
   if (lsn.has_value() && master_context_.version > DflyVersion::VER1 &&
       absl::GetFlag(FLAGS_replica_partial_sync)) {
     absl::StrAppend(&cmd, " ", *lsn);
+  }
+  if (last_master_data && master_context_.version >= DflyVersion::VER5 &&
+      absl::GetFlag(FLAGS_replica_partial_sync)) {
+    string lsn_str = absl::StrJoin(last_master_data.value().last_journal_LSNs, "-");
+    absl::StrAppend(&cmd, " ", last_master_data.value().id, " ", lsn_str);
+    VLOG(1) << "Sending last master sync flow " << last_master_data.value().id << " " << lsn_str;
   }
 
   ResetParser(RedisParser::Mode::CLIENT);
