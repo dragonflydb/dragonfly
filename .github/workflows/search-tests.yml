@@ -64,7 +64,7 @@ jobs:
       - name: Run tests with standard mode
         run: |
           # Run Dragonfly in standard mode
-          ./build/dragonfly 1> /tmp/dragonfly_standard.log 2>&1 &
+          ./build/dragonfly --dbfilename= --logtostderr 1> /tmp/dragonfly_standard.log 2>&1 &
           sleep 5  # Give time for Dragonfly to start
 
           # Check if Dragonfly started
@@ -80,7 +80,7 @@ jobs:
       - name: Run tests with cluster mode
         run: |
           # Run Dragonfly in cluster mode
-          ./build/dragonfly --cluster_mode=emulated 1> /tmp/dragonfly_cluster.log 2>&1 &
+          ./build/dragonfly --dbfilename= --logtostderr --cluster_mode=emulated 1> /tmp/dragonfly_cluster.log 2>&1 &
           sleep 5  # Give time for Dragonfly to start
 
           # Check if Dragonfly started
