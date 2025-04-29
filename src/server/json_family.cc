@@ -1794,6 +1794,10 @@ void JsonFamily::ArrPop(CmdArgList args, const CommandContext& cmd_cntx) {
   int index = parser.NextOrDefault<int>(-1);
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  if (auto err = parser.Error(); err) {
+    return builder->SendError(err->MakeReply());
+  }
+
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
