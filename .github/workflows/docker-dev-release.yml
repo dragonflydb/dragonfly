@@ -128,7 +128,8 @@ jobs:
 
           # Upload to GCS
           echo "Uploading ${tar_name} to GCS"
-          gcloud storage cp ${tar_name} gs://${{ secrets.ARTIFACT_BUCKET }}/dragonfly/$VERSION/
+          destination="gs://${{ secrets.ARTIFACT_BUCKET }}/dragonfly/${VERSION}"
+          gcloud storage cp ${tar_name} ${destination}
 
           # Cleanup
           rm -f dragonfly ${tar_name}
