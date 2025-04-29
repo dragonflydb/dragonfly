@@ -2,7 +2,9 @@
 name: Test Dragonfly/Search
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - bobik/search_tests_github_action
 
 permissions:
   contents: read
