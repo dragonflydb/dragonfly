@@ -1,0 +1,110 @@
+---
+name: Test Dragonfly/Search
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: search-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/romange/ubuntu-dev:22
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+    strategy:
+      fail-fast: false
+    name: "Run Search tests with Dragonfly"
+    permissions:
+      pull-requests: write
+      checks: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          pip install -r .github/search-test/requirements.txt
+
+      - name: Configure CMake
+        run: |
+          cmake -B ${GITHUB_WORKSPACE}/build \
+            -DCMAKE_BUILD_TYPE=Debug -DWITH_AWS:BOOL=OFF \
+            -GNinja -L
+          cd ${GITHUB_WORKSPACE}/build && pwd
+
+      - name: Build Dragonfly
+        run: |
+          cd ${GITHUB_WORKSPACE}/build
+          ninja dragonfly
+          echo "-----------------------------"
+
+      - name: Clone RediSearch repository
+        run: |
+          git clone https://github.com/RediSearch/RediSearch.git
+          cd RediSearch
+          git checkout c1a282c3325eb212bb1966c087f6ec213e89282e
+
+      - name: Apply patch to RediSearch
+        run: |
+          cd RediSearch
+          git apply ../.github/search-test/changes.patch
+
+      - name: Run tests with standard mode
+        run: |
+          # Run Dragonfly in standard mode
+          ./build/dragonfly --dbfilename= --logtostderr 1> /tmp/dragonfly_standard.log 2>&1 &
+          sleep 5  # Give time for Dragonfly to start
+
+          # Check if Dragonfly started
+          redis-cli ping || exit 1
+
+          # Run tests
+          cd RediSearch/tests/pytests
+          RLTest --no-progress --env existing-env --existing-env-addr 127.0.0.1:6379
+
+          # Stop Dragonfly
+          pkill -f dragonfly
+
+      - name: Run tests with cluster mode
+        run: |
+          # Run Dragonfly in cluster mode
+          ./build/dragonfly --dbfilename= --logtostderr --cluster_mode=emulated 1> /tmp/dragonfly_cluster.log 2>&1 &
+          sleep 5  # Give time for Dragonfly to start
+
+          # Check if Dragonfly started
+          redis-cli ping || exit 1
+
+          # Run tests
+          cd RediSearch/tests/pytests
+          RLTest --no-progress --env existing-env --existing-env-addr 127.0.0.1:6379
+
+          # Stop Dragonfly
+          pkill -f dragonfly
+
+      - name: Show Dragonfly stats (standard mode)
+        if: always()
+        run: |
+          cat /tmp/dragonfly_standard.log
+
+      - name: Show Dragonfly stats (cluster mode)
+        if: always()
+        run: |
+          cat /tmp/dragonfly_cluster.log
+
+      - name: Upload Dragonfly logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dragonfly-logs
+          path: |
+            /tmp/dragonfly_standard.log
+            /tmp/dragonfly_cluster.log
