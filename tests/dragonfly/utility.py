@@ -218,8 +218,15 @@ class CommandGenerator:
 
         return k, t
 
-    def generate_val(self, t: ValueType, generate_huge_val):
+    def generate_val(self, t: ValueType, idx):
         """Generate filler value of configured size for type t"""
+
+        # If current key count matches huge val sample than we will create one element with huge val size.
+        generate_huge_val = False
+        if len(self.huge_val_sample) and self.huge_val_sample[0] == (self.key_cnt + idx):
+            generate_huge_val = True
+            # Remove this sample from list
+            self.huge_val_sample.pop(0)
 
         def rand_str(k=3, s=""):
             # Use small k value to reduce mem usage and increase number of ops
@@ -352,16 +359,9 @@ class CommandGenerator:
         else:
             count = 1
 
-        # If current key count matches huge val sample than we will create one element with huge val size.
-        generate_huge_val = False
-        if len(self.huge_val_sample) and self.huge_val_sample[0] == self.key_cnt:
-            generate_huge_val = True
-            # Remove this sample from list
-            self.huge_val_sample.pop(0)
-
         keys = (self.add_key(t) for _ in range(count))
         payload = itertools.chain(
-            *((f"k{k}",) + self.generate_val(t, generate_huge_val) for k in keys)
+            *((f"k{k}",) + self.generate_val(t, idx) for idx, k in enumerate(keys))
         )
         filtered_payload = filter(lambda p: p is not None, payload)
 
