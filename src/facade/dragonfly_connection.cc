@@ -1500,6 +1500,11 @@ void Connection::SquashPipeline() {
   size_t dispatched =
       service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), reply_builder_.get(), cc_.get());
 
+  // async_dispatch is a guard to prevent concurrent writes into reply_builder_, hence
+  // it must guard the Flush() as well.
+  //
+  // TODO: to investigate if always flushing will improve P99 latency because otherwise we
+  // wait for the next batch to finish before fully flushing the current response.
   if (pending_pipeline_cmd_cnt_ == squash_cmds.size()) {  // Flush if no new commands appeared
     reply_builder_->Flush();
     reply_builder_->SetBatchMode(false);  // in case the next dispatch is sync
