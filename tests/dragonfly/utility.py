@@ -158,7 +158,7 @@ class CommandGenerator:
         self.unsupported_types = unsupported_types
 
         # Generate sorted list of random samples in target_keys range
-        self.huge_val_sample = sorted(random.sample(range(0, target_keys), huge_val_count))
+        self.huge_val_sample = sorted(random.sample(range(target_keys), huge_val_count))
         self.huge_val_size = huge_val_size
 
         # Key management
@@ -239,21 +239,21 @@ class CommandGenerator:
             # Random sequence k-letter elements for LPUSH
             list_size = self.val_size // 4
             element_size = (
-                self.huge_val_size / list_size if generate_huge_val else self.val_size / list_size
+                self.huge_val_size // list_size if generate_huge_val else self.val_size // list_size
             )
             return tuple(rand_str(element_size) for i in range(list_size))
         elif t == ValueType.SET:
             # Random sequence of k-letter elements for SADD
             set_size = self.val_size // 4
             element_size = (
-                self.huge_val_size / set_size if generate_huge_val else self.val_size / set_size
+                self.huge_val_size // set_size if generate_huge_val else self.val_size // set_size
             )
             return tuple(rand_str(element_size) for i in range(set_size))
         elif t == ValueType.HSET:
             # Random sequence of k-letter keys + int and two start values for HSET
             hset_size = self.val_size // 5
             element_size = (
-                self.huge_val_size / hset_size if generate_huge_val else self.val_size / hset_size
+                self.huge_val_size // hset_size if generate_huge_val else self.val_size // hset_size
             )
             elements = (
                 (
@@ -271,7 +271,7 @@ class CommandGenerator:
             probabilities = [8, 1]
             zset_size = random.choices(value_sizes, probabilities)[0]
             element_size = (
-                self.huge_val_size / zset_size if generate_huge_val else self.val_size / zset_size
+                self.huge_val_size // zset_size if generate_huge_val else self.val_size // zset_size
             )
             elements = (
                 (
@@ -288,7 +288,7 @@ class CommandGenerator:
             # - i (random integer)
             json_size = self.val_size // 6
             element_size = (
-                self.huge_val_size / json_size if generate_huge_val else self.val_size / json_size
+                self.huge_val_size // json_size if generate_huge_val else self.val_size // json_size
             )
             ints = [{"i": random.randint(0, 100)} for i in range(json_size)]
             strs = [rand_str(element_size) for i in range(json_size)]
