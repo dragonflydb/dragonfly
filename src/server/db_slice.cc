@@ -1364,23 +1364,6 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind,
   bool record_keys = owner_->journal() != nullptr || expired_keys_events_recording_;
   vector<string> keys_to_journal;
 
-  auto finalize = [&]() {
-    // send the deletion to the replicas.
-    for (string_view key : keys_to_journal) {
-      if (auto journal = owner_->journal(); journal)
-        RecordExpiryBlocking(db_ind, key);
-
-      if (expired_keys_events_recording_)
-        db_table->expired_keys_events_.emplace_back(key);
-    }
-
-    SendQueuedInvalidationMessagesAsync();
-    auto time_finish = absl::GetCurrentTimeNanos();
-    events_.evicted_keys += evicted_items;
-    DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
-    return pair<uint64_t, size_t>{evicted_items, evicted_bytes};
-  };
-
   for (int32_t slot_id = num_slots - 1; slot_id >= 0; --slot_id) {
     for (int32_t bucket_id = num_buckets - 1; bucket_id >= 0; --bucket_id) {
       // pick a random segment to start with in each eviction,
@@ -1389,10 +1372,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind,
       for (size_t num_seg_visited = 0; num_seg_visited < max_segment_to_consider;
            ++num_seg_visited, segment_id = GetNextSegmentForEviction(segment_id, db_ind)) {
         const auto& bucket = db_table->prime.GetSegment(segment_id)->GetBucket(bucket_id);
-        if (bucket.IsEmpty())
-          continue;
-
-        if (!bucket.IsBusy(slot_id))
+        if (bucket.IsEmpty() || !bucket.IsBusy(slot_id))
           continue;
 
         auto evict_it = db_table->prime.GetIterator(segment_id, bucket_id, slot_id);
@@ -1414,12 +1394,29 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind,
 
         // returns when whichever condition is met first
         if ((evicted_items == max_eviction_per_hb) || (evicted_bytes >= increase_goal_bytes))
-          return finalize();
+          goto finish;
       }
     }
   }
 
-  return finalize();
+finish:
+  // send the deletion to the replicas.
+  for (string_view key : keys_to_journal) {
+    if (auto journal = owner_->journal(); journal)
+      // Won't block because we disabled journal flushing. See first line of this function.
+      RecordExpiryBlocking(db_ind, key);
+
+    if (expired_keys_events_recording_)
+      db_table->expired_keys_events_.emplace_back(key);
+  }
+
+  // This might not always be atomic on exceptional cases -- see comments on the function
+  // declaration.
+  SendQueuedInvalidationMessagesAsync();
+  auto time_finish = absl::GetCurrentTimeNanos();
+  events_.evicted_keys += evicted_items;
+  DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
+  return pair<uint64_t, size_t>{evicted_items, evicted_bytes};
 }
 
 void DbSlice::CreateDb(DbIndex db_ind) {
@@ -1561,7 +1558,12 @@ void DbSlice::SendQueuedInvalidationMessages() {
   }
 }
 
+// This function might preempt if the task queue within DispatchBrief is full and we can't
+// enqueue the callback. Although a rare case, this code might not be atomic.
 void DbSlice::SendQueuedInvalidationMessagesAsync() {
+  if (pending_send_map_.empty()) {
+    return;
+  }
   // DispatchBrief will copy local_map
   auto cb = [lm = std::move(pending_send_map_), this](unsigned idx, util::ProactorBase*) {
     SendQueuedInvalidationMessagesCb(lm, idx);
