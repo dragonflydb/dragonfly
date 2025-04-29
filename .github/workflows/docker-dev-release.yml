@@ -112,7 +112,7 @@ jobs:
 
           # Extract version from the image
           echo "Extracting version from image..."
-          VERSION=$(docker run --rm ${image_tag} dragonfly --version | head -n1 | cut -d' ' -f2)
+          VERSION=$(docker run --rm ${image_tag} dragonfly --version | head -n1 | cut -d' ' -f2 | cut -d'-' -f1)
           echo "Dragonfly version: $VERSION"
 
           echo "Extracting binary from ${image_tag} for ${{ matrix.os.arch }}"
@@ -128,7 +128,7 @@ jobs:
 
           # Upload to GCS
           echo "Uploading ${tar_name} to GCS"
-          gcloud storage cp ${tar_name} gs://stagingv2-data-plane-dragonfly-artifacts/dragonfly/$VERSION --recursive
+          gcloud storage cp ${tar_name} gs://${{ secrets.ARTIFACT_BUCKET }}/dragonfly/$VERSION --recursive
 
           # Cleanup
           rm -f dragonfly ${tar_name}
