@@ -34,6 +34,7 @@ jobs:
       - name: Install dependencies
         shell: bash
         run: |
+          pip uninstall -y RLTest || true
           pip install -r .github/search-test/requirements.txt
 
       - name: Configure CMake
@@ -58,7 +59,7 @@ jobs:
       - name: Apply patch to RediSearch
         run: |
           cd RediSearch
-          git apply ../.github/search-test/changes.patch
+          patch -p1 < ../.github/search-test/changes.patch
 
       - name: Run tests with standard mode
         run: |
