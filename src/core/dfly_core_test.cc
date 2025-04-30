@@ -223,6 +223,21 @@ static void BM_ParseDoubleAbsl(benchmark::State& state) {
 }
 BENCHMARK(BM_ParseDoubleAbsl);
 
+template <clockid_t cid> void BM_ClockType(benchmark::State& state) {
+  timespec ts;
+  while (state.KeepRunning()) {
+    DoNotOptimize(clock_gettime(cid, &ts));
+  }
+}
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_REALTIME);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_REALTIME_COARSE);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_MONOTONIC);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_MONOTONIC_COARSE);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_BOOTTIME);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_PROCESS_CPUTIME_ID);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_THREAD_CPUTIME_ID);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_BOOTTIME_ALARM);
+
 static void BM_MatchGlob(benchmark::State& state) {
   string random_val = GetRandomHex(state.range(0));
   GlobMatcher matcher("*foobar*", true);
