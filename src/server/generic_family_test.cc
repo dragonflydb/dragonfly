@@ -939,4 +939,86 @@ TEST_F(GenericFamilyTest, Unlink) {
   EXPECT_THAT(resp, IntArg(2));
 }
 
+TEST_F(GenericFamilyTest, Copy) {
+  RespExpr resp;
+  string b_val(32, 'b');
+  string x_val(32, 'x');
+
+  resp = Run({"mset", "x", x_val, "b", b_val});
+  ASSERT_EQ(resp, "OK");
+  ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
+
+  resp = Run({"COPY", "z", "b"});
+  ASSERT_THAT(resp, ErrArg("no such key"));
+
+  resp = Run({"COPY", "b", "c"});
+  ASSERT_EQ(resp, "OK");
+  ASSERT_EQ(b_val, Run({"get", "c"}));
+
+  resp = Run({"COPY", "x", "b", "REPLACE"});
+  ASSERT_EQ(resp, "OK");
+
+  ASSERT_EQ(x_val, Run({"get", "x"}));
+  ASSERT_EQ(x_val, Run({"get", "b"}));
+  EXPECT_EQ(CheckedInt({"exists", "x", "b"}), 2);
+
+  const char* keys[2] = {"b", "x"};
+  auto ren_fb = pp_->at(0)->LaunchFiber([&] {
+    for (size_t i = 0; i < 200; ++i) {
+      int j = i % 2;
+      auto resp = Run({"COPY", keys[j], keys[1 - j], "REPLACE"});
+      ASSERT_EQ(resp, "OK");
+    }
+  });
+
+  auto exist_fb = pp_->at(2)->LaunchFiber([&] {
+    for (size_t i = 0; i < 300; ++i) {
+      int64_t resp = CheckedInt({"exists", "x", "b"});
+      ASSERT_EQ(2, resp);
+    }
+  });
+
+  exist_fb.Join();
+  ren_fb.Join();
+}
+
+TEST_F(GenericFamilyTest, CopyNonString) {
+  EXPECT_EQ(1, CheckedInt({"lpush", "x", "elem"}));
+  auto resp = Run({"COPY", "x", "b"});
+  ASSERT_EQ(resp, "OK");
+  ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
+
+  EXPECT_EQ(1, CheckedInt({"del", "x"}));
+  EXPECT_EQ(1, CheckedInt({"del", "b"}));
+}
+
+TEST_F(GenericFamilyTest, CopyBinary) {
+  const char kKey1[] = "\x01\x02\x03\x04";
+  const char kKey2[] = "\x05\x06\x07\x08";
+
+  Run({"set", kKey1, "bar"});
+  Run({"COPY", kKey1, kKey2});
+  EXPECT_EQ(Run({"get", kKey1}), "bar");
+  EXPECT_EQ(Run({"get", kKey2}), "bar");
+}
+
+TEST_F(GenericFamilyTest, CopyTTL) {
+  Run({"setex", "k1", "10", "bar"});
+
+  ASSERT_EQ(Run({"COPY", "k1", "k2"}), "OK");
+  EXPECT_THAT(Run({"ttl", "k2"}), 10);
+}
+
+TEST_F(GenericFamilyTest, CopySameName) {
+  ASSERT_THAT(Run({"COPY", "k1", "k1"}), ErrArg("source and destination objects are the same"));
+
+  ASSERT_EQ(Run({"set", "k1", "v"}), "OK");
+  ASSERT_THAT(Run({"COPY", "k1", "k1"}), ErrArg("source and destination objects are the same"));
+}
+
+TEST_F(GenericFamilyTest, CopyToDB) {
+  // we don't support DB arg for now
+  ASSERT_THAT(Run({"COPY", "k1", "k1", "DB", "SOME_DB"}), ErrArg("syntax error"));
+}
+
 }  // namespace dfly
