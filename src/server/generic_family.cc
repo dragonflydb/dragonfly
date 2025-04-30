@@ -300,12 +300,14 @@ OpStatus OpPersist(const OpArgs& op_args, string_view key);
 
 class Renamer {
  public:
-  Renamer(Transaction* t, std::string_view src_key, std::string_view dest_key, unsigned shard_count)
+  Renamer(Transaction* t, std::string_view src_key, std::string_view dest_key, unsigned shard_count,
+          bool do_copy = false)
       : transaction_(t),
         src_key_(src_key),
         dest_key_(dest_key),
         src_sid_(Shard(src_key, shard_count)),
-        dest_sid_(Shard(dest_key, shard_count)) {
+        dest_sid_(Shard(dest_key, shard_count)),
+        do_copy_(do_copy) {
   }
 
   ErrorReply Rename(bool destination_should_not_exist);
@@ -337,6 +339,7 @@ class Renamer {
 
   bool src_found_ = false;
   bool dest_found_ = false;
+  bool do_copy_ = false;
 
   SerializedValue serialized_value_;
 };
@@ -366,7 +369,7 @@ ErrorReply Renamer::Rename(bool destination_should_not_exist) {
 void Renamer::FetchData() {
   auto cb = [this](Transaction* t, EngineShard* shard) {
     auto args = t->GetShardArgs(shard->shard_id());
-    DCHECK_EQ(1u, args.Size());
+    DCHECK(1 == args.Size() || do_copy_);
 
     const ShardId shard_id = shard->shard_id();
 
@@ -388,7 +391,7 @@ void Renamer::FinalizeRename() {
   auto cb = [this](Transaction* t, EngineShard* shard) {
     const ShardId shard_id = shard->shard_id();
 
-    if (shard_id == src_sid_) {
+    if (!do_copy_ && shard_id == src_sid_) {
       return DelSrc(t, shard);
     }
 
@@ -1654,6 +1657,20 @@ void GenericFamily::RenameNx(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
+void GenericFamily::Copy(CmdArgList args, const CommandContext& cmd_cntx) {
+  CmdArgParser parser(args);
+  auto [k1, k2] = parser.Next<std::string_view, std::string_view>();
+  bool replace = parser.Check("REPLACE");
+
+  if (k1 == k2) {
+    cmd_cntx.rb->SendError("source and destination objects are the same");
+    return;
+  }
+
+  Renamer renamer(cmd_cntx.tx, k1, k2, shard_set->size(), true);
+  cmd_cntx.rb->SendError(renamer.Rename(!replace));
+}
+
 void GenericFamily::ExpireTime(CmdArgList args, const CommandContext& cmd_cntx) {
   ExpireTimeGeneric(args, TimeUnit::SEC, cmd_cntx.tx, cmd_cntx.rb);
 }
@@ -1869,6 +1886,7 @@ constexpr uint32_t kKeys = KEYSPACE | READ | SLOW | DANGEROUS;
 constexpr uint32_t kPExpireAt = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kPExpire = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kRename = KEYSPACE | WRITE | SLOW;
+constexpr uint32_t kCopy = KEYSPACE | WRITE | SLOW;
 constexpr uint32_t kRenamNX = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kSelect = FAST | CONNECTION;
 constexpr uint32_t kScan = KEYSPACE | READ | SLOW;
@@ -1914,6 +1932,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"FIELDEXPIRE", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kFieldExpire}.HFUNC(
              FieldExpire)
       << CI{"RENAME", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRename}.HFUNC(Rename)
+      << CI{"COPY", CO::WRITE | CO::NO_AUTOJOURNAL, -3, 1, 2, acl::kCopy}.HFUNC(Copy)
       << CI{"RENAMENX", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRenamNX}.HFUNC(RenameNx)
       << CI{"SELECT", kSelectOpts, 2, 0, 0, acl::kSelect}.HFUNC(Select)
       << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, acl::kScan}.HFUNC(Scan)
