@@ -145,6 +145,218 @@ TEST_F(GenericFamilyTest, ExpireOptions) {
   EXPECT_THAT(resp.GetInt(), 101);
 }
 
+TEST_F(GenericFamilyTest, ExpireAtOptions) {
+  auto test_time_ms = TEST_current_time_ms;
+  auto time_s = (test_time_ms + 500) / 1000;
+  auto test_time_s = time_s;
+
+  Run({"set", "key", "val"});
+  // NX and XX are mutually exclusive
+  auto resp = Run({"expireat", "key", "3600", "NX", "XX"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // NX and GT are mutually exclusive
+  resp = Run({"expireat", "key", "3600", "NX", "GT"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // NX and LT are mutually exclusive
+  resp = Run({"expireat", "key", "3600", "NX", "LT"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // GT and LT are mutually exclusive
+  resp = Run({"expireat", "key", "3600", "GT", "LT"});
+  ASSERT_THAT(resp, ErrArg("GT and LT options at the same time are not compatible"));
+
+  // NX option should be added since there is no expiry
+  test_time_s = time_s + 5;
+  resp = Run({"expireat", "key", absl::StrCat(test_time_s), "NX"});
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(test_time_s, CheckedInt({"EXPIRETIME", "key"}));
+
+  // running again with NX option, should not change expiry
+  test_time_s = time_s + 9;
+  resp = Run({"expireat", "key", absl::StrCat(test_time_s), "NX"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // given a key with no expiry
+  Run({"set", "key2", "val"});
+  test_time_s = time_s + 9;
+  resp = Run({"expireat", "key2", absl::StrCat(test_time_s), "XX"});
+  // XX does not apply expiry since key has no existing expiry
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"ttl", "key2"});
+  EXPECT_THAT(resp.GetInt(), -1);
+
+  // set expiry to 101
+  test_time_s = time_s + 101;
+  resp = Run({"expireat", "key", absl::StrCat(test_time_s)});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // GT should not apply expiry since new is not greater than the current one
+  auto less_test_time_s = time_s + 99;
+  resp = Run({"expireat", "key", absl::StrCat(less_test_time_s), "GT"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_EQ(test_time_s, CheckedInt({"EXPIRETIME", "key"}));
+
+  // GT should apply expiry since new is greater than the current one
+  test_time_s = time_s + 105;
+  resp = Run({"expireat", "key", absl::StrCat(test_time_s), "GT"});
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(test_time_s, CheckedInt({"EXPIRETIME", "key"}));
+
+  // LT should apply new expiry is smaller than current
+  test_time_s = time_s + 101;
+  resp = Run({"expireat", "key", absl::StrCat(test_time_s), "LT"});
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(test_time_s, CheckedInt({"EXPIRETIME", "key"}));
+
+  // LT should not apply expiry since new is not lesser than the current one
+  auto gt_test_time_s = time_s + 102;
+  resp = Run({"expireat", "key", absl::StrCat(gt_test_time_s), "LT"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_EQ(test_time_s, CheckedInt({"EXPIRETIME", "key"}));
+}
+
+TEST_F(GenericFamilyTest, PExpireOptions) {
+  // NX and XX are mutually exclusive
+  Run({"set", "key", "val"});
+  auto resp = Run({"pexpire", "key", "3600", "NX", "XX"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // NX and GT are mutually exclusive
+  resp = Run({"pexpire", "key", "3600", "NX", "GT"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // NX and LT are mutually exclusive
+  resp = Run({"pexpire", "key", "3600", "NX", "LT"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // GT and LT are mutually exclusive
+  resp = Run({"pexpire", "key", "3600", "GT", "LT"});
+  ASSERT_THAT(resp, ErrArg("GT and LT options at the same time are not compatible"));
+
+  // NX option should be added since there is no expiry
+  resp = Run({"pexpire", "key", "3600000", "NX"});
+  EXPECT_THAT(resp, IntArg(1));
+  resp = Run({"pttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 3600000);
+
+  // running again with NX option, should not change expiry
+  resp = Run({"pexpire", "key", "42", "NX"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // given a key with no expiry
+  Run({"set", "key2", "val"});
+  resp = Run({"pexpire", "key2", "404", "XX"});
+  // XX does not apply expiry since key has no existing expiry
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"pttl", "key2"});
+  EXPECT_THAT(resp.GetInt(), -1);
+
+  // set expiry to 101
+  resp = Run({"pexpire", "key", "101000"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // GT should not apply expiry since new is not greater than the current one
+  resp = Run({"pexpire", "key", "100000", "GT"});
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"pttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 101000);
+
+  // GT should apply expiry since new is greater than the current one
+  resp = Run({"pexpire", "key", "102000", "GT"});
+  EXPECT_THAT(resp, IntArg(1));
+  resp = Run({"pttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 102000);
+
+  // GT should not apply since expiry is smaller than current
+  resp = Run({"pexpire", "key", "101000", "GT"});
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"pttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 102000);
+
+  // LT should apply new expiry is smaller than current
+  resp = Run({"pexpire", "key", "101000", "LT"});
+  EXPECT_THAT(resp, IntArg(1));
+  resp = Run({"pttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 101000);
+
+  // LT should not apply since expiry is greater than current
+  resp = Run({"pexpire", "key", "102000", "LT"});
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"pttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 101000);
+}
+
+TEST_F(GenericFamilyTest, PExpireAtOptions) {
+  auto test_time_ms = TEST_current_time_ms;
+  Run({"set", "key", "val"});
+  // NX and XX are mutually exclusive
+  auto resp = Run({"pexpireat", "key", "3600", "NX", "XX"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // NX and GT are mutually exclusive
+  resp = Run({"pexpireat", "key", "3600", "NX", "GT"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // NX and LT are mutually exclusive
+  resp = Run({"pexpireat", "key", "3600", "NX", "LT"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // GT and LT are mutually exclusive
+  resp = Run({"pexpireat", "key", "3600", "GT", "LT"});
+  ASSERT_THAT(resp, ErrArg("GT and LT options at the same time are not compatible"));
+
+  // NX option should be added since there is no expiry
+  test_time_ms = TEST_current_time_ms + 3600;
+  resp = Run({"pexpireat", "key", absl::StrCat(test_time_ms), "NX"});
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(test_time_ms, CheckedInt({"PEXPIRETIME", "key"}));
+
+  // running again with NX option, should not change expiry
+  test_time_ms = TEST_current_time_ms + 42000;
+  resp = Run({"pexpireat", "key", absl::StrCat(test_time_ms), "NX"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // given a key with no expiry
+  Run({"set", "key2", "val"});
+  test_time_ms = TEST_current_time_ms + 404;
+  resp = Run({"pexpireat", "key2", absl::StrCat(test_time_ms), "XX"});
+  // XX does not apply expiry since key has no existing expiry
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"ttl", "key2"});
+  EXPECT_THAT(resp.GetInt(), -1);
+
+  // set expiry to 101
+  test_time_ms = TEST_current_time_ms + 101;
+  resp = Run({"pexpireat", "key", absl::StrCat(test_time_ms)});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // GT should not apply expiry since new is not greater than the current one
+  auto less_test_time_ms = TEST_current_time_ms + 100;
+  resp = Run({"pexpireat", "key", absl::StrCat(less_test_time_ms), "GT"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_EQ(test_time_ms, CheckedInt({"PEXPIRETIME", "key"}));
+
+  // GT should apply expiry since new is greater than the current one
+  test_time_ms = TEST_current_time_ms + 105;
+  resp = Run({"pexpireat", "key", absl::StrCat(test_time_ms), "GT"});
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(test_time_ms, CheckedInt({"PEXPIRETIME", "key"}));
+
+  // LT should apply new expiry is smaller than current
+  test_time_ms = TEST_current_time_ms + 101;
+  resp = Run({"pexpireat", "key", absl::StrCat(test_time_ms), "LT"});
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(test_time_ms, CheckedInt({"PEXPIRETIME", "key"}));
+
+  // LT should not apply expiry since new is not lesser than the current one
+  auto gt_test_time_ms = TEST_current_time_ms + 102;
+  resp = Run({"pexpireat", "key", absl::StrCat(gt_test_time_ms), "LT"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_EQ(test_time_ms, CheckedInt({"PEXPIRETIME", "key"}));
+}
+
 TEST_F(GenericFamilyTest, Del) {
   for (size_t i = 0; i < 1000; ++i) {
     Run({"set", StrCat("foo", i), "1"});

@@ -1925,13 +1925,13 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"TOUCH", CO::READONLY | CO::FAST, -2, 1, -1, acl::kTouch}.HFUNC(Exists)
       << CI{"EXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -3, 1, 1, acl::kExpire}.HFUNC(
              Expire)
-      << CI{"EXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kExpireAt}.HFUNC(
+      << CI{"EXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -3, 1, 1, acl::kExpireAt}.HFUNC(
              ExpireAt)
       << CI{"PERSIST", CO::WRITE | CO::FAST, 2, 1, 1, acl::kPersist}.HFUNC(Persist)
       << CI{"KEYS", CO::READONLY, 2, 0, 0, acl::kKeys}.HFUNC(Keys)
-      << CI{"PEXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kPExpireAt}.HFUNC(
-             PexpireAt)
-      << CI{"PEXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kPExpire}.HFUNC(
+      << CI{"PEXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -3, 1, 1, acl::kPExpireAt}
+             .HFUNC(PexpireAt)
+      << CI{"PEXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -3, 1, 1, acl::kPExpire}.HFUNC(
              Pexpire)
       << CI{"FIELDEXPIRE", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kFieldExpire}.HFUNC(
              FieldExpire)
