@@ -1445,7 +1445,12 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
           });
         }
 
-        DCHECK_GT(io_buf_.AppendLen(), 0U);
+        if (io_buf_.AppendLen() == 0U) {
+          // it can happen with memcached but not for RedisParser, because RedisParser fully
+          // consumes the passed buffer
+          LOG_EVERY_T(WARNING, 10)
+              << "Maximum io_buf length reached, consider to increase max_client_iobuf_len flag";
+        }
       }
     } else if (parse_status != OK) {
       break;
