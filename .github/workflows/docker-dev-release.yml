@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  image: ghcr.io/abhra303/dragonfly-dev
+  image: ghcr.io/dragonflydb/dragonfly-dev
   GCS_IMAGE: us-central1-docker.pkg.dev/dragonflydb-public/dragonfly-registry/dragonfly-dev
 
 jobs:
@@ -128,7 +128,7 @@ jobs:
 
           # Upload to GCS
           echo "Uploading ${tar_name} to GCS"
-          gcloud storage cp "$tar_name" "gs:${{ secrets.ARTIFACT_BUCKET }}/dragonfly/$VERSION/"
+          gcloud storage cp "$tar_name" "gs://${{ secrets.ARTIFACT_BUCKET }}/dragonfly/$VERSION/$tar_name"
 
           # Cleanup
           rm -f dragonfly ${tar_name}
