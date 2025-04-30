@@ -1016,4 +1016,9 @@ TEST_F(GenericFamilyTest, CopySameName) {
   ASSERT_THAT(Run({"COPY", "k1", "k1"}), ErrArg("source and destination objects are the same"));
 }
 
+TEST_F(GenericFamilyTest, CopyToDB) {
+  // we don't support DB arg for now
+  ASSERT_THAT(Run({"COPY", "k1", "k1", "DB", "SOME_DB"}), ErrArg("syntax error"));
+}
+
 }  // namespace dfly

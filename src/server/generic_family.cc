@@ -1662,6 +1662,10 @@ void GenericFamily::Copy(CmdArgList args, const CommandContext& cmd_cntx) {
   auto [k1, k2] = parser.Next<std::string_view, std::string_view>();
   bool replace = parser.Check("REPLACE");
 
+  if (!parser.Finalize()) {
+    return cmd_cntx.rb->SendError(parser.Error()->MakeReply());
+  }
+
   if (k1 == k2) {
     cmd_cntx.rb->SendError("source and destination objects are the same");
     return;
