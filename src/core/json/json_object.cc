@@ -19,6 +19,11 @@ optional<JsonType> JsonFromString(string_view input, PMR_NS::memory_resource* mr
   };
 
   // The maximum allowed JSON nesting depth is 64.
+  // The limit was reduced from 256 to 64. This change is reasonable, as most documents contain
+  // no more than 20-30 levels of nesting. In the test case, over 128 levels were used, causing
+  // the parser to enter a long stall due to excessive resource consumption. Even a limit of 128
+  // does not mitigate the issue. A limit of 64 is a sensible compromise.
+  // See https://github.com/dragonflydb/dragonfly/issues/5028
   const uint32_t json_nesting_depth_limit = 64;
 
   /* The maximum possible JSON nesting depth is either the specified json_nesting_depth_limit or
