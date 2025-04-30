@@ -18,8 +18,8 @@ optional<JsonType> JsonFromString(string_view input, PMR_NS::memory_resource* mr
     return false;
   };
 
-  // The maximum allowed JSON nesting depth is 256.
-  const uint32_t json_nesting_depth_limit = 256;
+  // The maximum allowed JSON nesting depth is 64.
+  const uint32_t json_nesting_depth_limit = 64;
 
   /* The maximum possible JSON nesting depth is either the specified json_nesting_depth_limit or
      half of the input size. Since nesting a JSON object requires at least 2 characters. */
