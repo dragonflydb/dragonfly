@@ -3074,4 +3074,9 @@ TEST_F(JsonFamilyTest, SetNestedFields) {
   EXPECT_EQ(resp, R"({"-field2":2,"field1":1})");
 }
 
+TEST_F(JsonFamilyTest, ArrPopWithFormatParameter) {
+  auto resp = Run({"JSON.ARRPOP", "test_resp3", "FORMAT", "EXPAND", "$.a"});
+  ASSERT_THAT(resp, ErrArg("value is not an integer or out of range"));
+}
+
 }  // namespace dfly
