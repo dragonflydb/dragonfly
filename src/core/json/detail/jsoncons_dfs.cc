@@ -8,6 +8,8 @@
 
 #include "core/json/detail/jsoncons_dfs.h"
 
+#include <absl/container/flat_hash_set.h>
+
 namespace dfly::json::detail {
 
 using namespace std;
@@ -82,6 +84,10 @@ Dfs Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callba
     return dfs;
   }
 
+  // Use vector to maintain order and set to check uniqueness
+  std::vector<JsonType*> nodes_to_mutate;
+  absl::flat_hash_set<JsonType*> seen_nodes;
+
   using Item = detail::JsonconsDfsItem<false>;
   vector<Item> stack;
   stack.emplace_back(json);
@@ -103,13 +109,34 @@ Dfs Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callba
         if (next_seg_id + 1 < path.size()) {
           stack.emplace_back(next, next_seg_id);
         } else {
-          dfs.MutateStep(path[next_seg_id], callback, next);
+          // Terminal step: collect node for mutation if not seen before
+          if (seen_nodes.find(next) == seen_nodes.end()) {
+            nodes_to_mutate.push_back(next);
+            seen_nodes.insert(next);
+          }
         }
       }
     } else {
+      // If Advance failed (e.g., MISMATCH or OUT_OF_BOUNDS), check if the current node
+      // itself is a terminal target for mutation due to a previous DESCENT segment.
+      // This handles cases like $.a..b where 'a' itself might match the 'b' after descent.
+      if (!res && segment_index > 0 && path[segment_index - 1].type() == SegmentType::DESCENT &&
+          stack.back().get_segment_step() == 0) {
+        if (segment_index + 1 == path.size()) {
+          // Attempt to apply the final mutation step directly to the current node.
+          // We apply it directly here because this node won't be added to the stack again.
+          dfs.MutateStep(path_segment, callback, stack.back().obj_ptr());
+        }
+      }
       stack.pop_back();
     }
   } while (!stack.empty());
+
+  // Apply mutations after DFS traversal is complete
+  const PathSegment& terminal_segment = path.back();
+  for (JsonType* node : nodes_to_mutate) {
+    dfs.MutateStep(terminal_segment, callback, node);
+  }
 
   return dfs;
 }
