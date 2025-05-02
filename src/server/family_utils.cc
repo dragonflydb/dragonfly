@@ -16,6 +16,21 @@ sds WrapSds(std::string_view s) {
   return tmp_sds = sdscpylen(tmp_sds, s.data(), s.length());
 }
 
+SdsWrapper::SdsWrapper(std::string_view str) {
+  sds_ = sdsempty();
+  sds_ = sdscpylen(sds_, str.data(), str.length());
+}
+
+SdsWrapper::~SdsWrapper() {
+  if (sds_) {
+    sdsfree(sds_);
+  }
+}
+
+SdsWrapper::operator sds() {
+  return sds_;
+}
+
 NonUniquePicksGenerator::NonUniquePicksGenerator(RandomPick max_range) : max_range_(max_range) {
   CHECK_GT(max_range, RandomPick(0));
 }
