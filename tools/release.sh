@@ -17,8 +17,6 @@ pwd
 
 make release
 
-make dfly_bench
-
 if ! [ -f ${APP_PATH} ]; then
    echo "ERROR"
    echo "Failed to generate new dragonfly binary."
