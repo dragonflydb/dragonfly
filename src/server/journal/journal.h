@@ -50,11 +50,13 @@ class JournalFlushGuard {
       journal_->SetFlushMode(false);
     }
     util::fb2::detail::EnterFiberAtomicSection();
+    ++counter_;
   }
 
   ~JournalFlushGuard() {
     util::fb2::detail::LeaveFiberAtomicSection();
-    if (journal_) {
+    --counter_;
+    if (journal_ && counter_ == 0) {
       journal_->SetFlushMode(true);  // Restore the state on destruction
     }
   }
@@ -64,6 +66,7 @@ class JournalFlushGuard {
 
  private:
   Journal* journal_;
+  static size_t thread_local counter_;
 };
 
 }  // namespace journal
