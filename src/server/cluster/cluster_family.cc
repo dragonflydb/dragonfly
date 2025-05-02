@@ -462,12 +462,6 @@ void ClusterFamily::DflyCluster(CmdArgList args, const CommandContext& cmd_cntx)
     return builder->SendError("Cluster is disabled. Use --cluster_mode=yes to enable.");
   }
 
-  if (cntx->conn()) {
-    VLOG(2) << "Got DFLYCLUSTER command (" << cntx->conn()->GetClientId() << "): " << args;
-  } else {
-    VLOG(2) << "Got DFLYCLUSTER command (NO_CLIENT_ID): " << args;
-  }
-
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
   args.remove_prefix(1);  // remove subcommand name
   if (sub_cmd == "GETSLOTINFO") {
@@ -684,6 +678,8 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, SinkReplyBuilder* bu
 }
 
 void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, SinkReplyBuilder* builder) {
+  LOG(INFO) << "Got DFLYCLUSTER FLUSHSLOTS " << args;
+
   std::vector<SlotRange> slot_ranges;
 
   CmdArgParser parser(args);
