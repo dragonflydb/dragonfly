@@ -146,6 +146,7 @@ void SinkReplyBuilder::Flush(size_t expected_buffer_cap) {
   guaranteed_pieces_ = 0;
 
   DCHECK_LE(expected_buffer_cap, kMaxBufferSize);  // big strings should be enqueued as iovecs
+
   if (expected_buffer_cap > buffer_.Capacity())
     buffer_.Reserve(expected_buffer_cap);
 }
@@ -368,10 +369,21 @@ void RedisReplyBuilderBase::SendError(std::string_view str, std::string_view typ
   tl_facade_stats->reply_stats.err_count[type]++;
   last_error_ = str;
 
-  if (str[0] != '-')
-    WritePieces("-ERR ", str, kCRLF);
-  else
-    WritePieces(str, kCRLF);
+  if (str[0] != '-') {
+    if (str.size() <= kMaxInlineSize) {
+      WritePieces("-ERR ", str);
+    } else {
+      WritePieces("-ERR ");
+      WriteRef(str);
+    }
+  } else {
+    if (str.size() <= kMaxInlineSize) {
+      WritePieces(str);
+    } else {
+      WriteRef(str);
+    }
+  }
+  WritePieces(kCRLF);
 }
 
 void RedisReplyBuilderBase::SendProtocolError(std::string_view str) {
