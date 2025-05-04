@@ -593,16 +593,16 @@ size_t CountJsonFields(const JsonType& j) {
   return res;
 }
 
-struct EvaluateOperationOptions {
+struct ReadOnlyOperationOptions {
   bool return_nil_if_key_not_found = false;
-  CallbackResultOptions cb_result_options = CallbackResultOptions::DefaultEvaluateOptions();
+  CallbackResultOptions cb_result_options = CallbackResultOptions::DefaultReadOnlyOptions();
 };
 
 template <typename T>
-OpResult<JsonCallbackResult<T>> JsonEvaluateOperation(const OpArgs& op_args, std::string_view key,
+OpResult<JsonCallbackResult<T>> JsonReadOnlyOperation(const OpArgs& op_args, std::string_view key,
                                                       const WrappedJsonPath& json_path,
-                                                      JsonPathEvaluateCallback<T> cb,
-                                                      EvaluateOperationOptions options = {}) {
+                                                      JsonPathReadOnlyCallback<T> cb,
+                                                      ReadOnlyOperationOptions options = {}) {
   OpResult<JsonType*> result = GetJson(op_args, key);
   if (options.return_nil_if_key_not_found && result == OpStatus::KEY_NOTFOUND) {
     return JsonCallbackResult<T>{
@@ -611,7 +611,7 @@ OpResult<JsonCallbackResult<T>> JsonEvaluateOperation(const OpArgs& op_args, std
   }
 
   RETURN_ON_BAD_STATUS(result);
-  return json_path.Evaluate<T>(*result, cb, options.cb_result_options);
+  return json_path.ExecuteReadOnlyCallback<T>(*result, cb, options.cb_result_options);
 }
 
 struct MutateOperationOptions {
@@ -640,7 +640,7 @@ OpResult<JsonCallbackResult<optional<T>>> JsonMutateOperation(const OpArgs& op_a
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
 
-  auto mutate_res = json_path.Mutate(json_val, cb, options.cb_result_options);
+  auto mutate_res = json_path.ExecuteMutateCallback(json_val, cb, options.cb_result_options);
 
   // Call post mutate callback
   if (mutate_res && options.post_mutate_cb) {
@@ -719,11 +719,11 @@ OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
   auto cb = [](std::string_view, const JsonType& val) { return val; };
 
   const bool legacy_mode_is_enabled = LegacyModeIsEnabled(paths);
-  CallbackResultOptions cb_options = CallbackResultOptions::DefaultEvaluateOptions();
+  CallbackResultOptions cb_options = CallbackResultOptions::DefaultReadOnlyOptions();
   cb_options.path_type = legacy_mode_is_enabled ? JsonPathType::kLegacy : JsonPathType::kV2;
 
   auto eval_wrapped = [&](const WrappedJsonPath& json_path) -> std::optional<JsonType> {
-    auto eval_result = json_path.Evaluate<JsonType>(&json_entry, cb, cb_options);
+    auto eval_result = json_path.ExecuteReadOnlyCallback<JsonType>(&json_entry, cb, cb_options);
 
     DCHECK(legacy_mode_is_enabled == eval_result.IsV1());
 
@@ -764,7 +764,7 @@ auto OpType(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_
   auto cb = [](const string_view&, const JsonType& val) -> std::string {
     return JsonTypeToName(val);
   };
-  return JsonEvaluateOperation<std::string>(op_args, key, json_path, std::move(cb), {true});
+  return JsonReadOnlyOperation<std::string>(op_args, key, json_path, std::move(cb), {true});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpStrLen(const OpArgs& op_args, string_view key,
@@ -776,9 +776,9 @@ OpResult<JsonCallbackResult<OptSize>> OpStrLen(const OpArgs& op_args, string_vie
       return nullopt;
     }
   };
-  return JsonEvaluateOperation<OptSize>(
+  return JsonReadOnlyOperation<OptSize>(
       op_args, key, json_path, std::move(cb),
-      {true, CallbackResultOptions::DefaultEvaluateOptions(SavingOrder::kSaveFirst)});
+      {true, CallbackResultOptions::DefaultReadOnlyOptions(SavingOrder::kSaveFirst)});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpObjLen(const OpArgs& op_args, string_view key,
@@ -790,10 +790,10 @@ OpResult<JsonCallbackResult<OptSize>> OpObjLen(const OpArgs& op_args, string_vie
       return nullopt;
     }
   };
-  return JsonEvaluateOperation<OptSize>(
+  return JsonReadOnlyOperation<OptSize>(
       op_args, key, json_path, std::move(cb),
       {json_path.IsLegacyModePath(),
-       CallbackResultOptions::DefaultEvaluateOptions(SavingOrder::kSaveFirst)});
+       CallbackResultOptions::DefaultReadOnlyOptions(SavingOrder::kSaveFirst)});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpArrLen(const OpArgs& op_args, string_view key,
@@ -805,9 +805,9 @@ OpResult<JsonCallbackResult<OptSize>> OpArrLen(const OpArgs& op_args, string_vie
       return std::nullopt;
     }
   };
-  return JsonEvaluateOperation<OptSize>(
+  return JsonReadOnlyOperation<OptSize>(
       op_args, key, json_path, std::move(cb),
-      {true, CallbackResultOptions::DefaultEvaluateOptions(SavingOrder::kSaveFirst)});
+      {true, CallbackResultOptions::DefaultReadOnlyOptions(SavingOrder::kSaveFirst)});
 }
 
 template <typename T>
@@ -973,8 +973,8 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
     return {};
   };
 
-  auto res = json_path.Mutate<Nothing>(json_val, std::move(cb),
-                                       CallbackResultOptions::DefaultMutateOptions());
+  auto res = json_path.ExecuteMutateCallback<Nothing>(
+      json_val, std::move(cb), CallbackResultOptions::DefaultMutateOptions());
   RETURN_ON_BAD_STATUS(res);
 
   if (deletion_items.empty()) {
@@ -1017,10 +1017,10 @@ auto OpObjKeys(const OpArgs& op_args, string_view key, const WrappedJsonPath& js
     }
     return vec;
   };
-  return JsonEvaluateOperation<StringVec>(
+  return JsonReadOnlyOperation<StringVec>(
       op_args, key, json_path, std::move(cb),
       {json_path.IsLegacyModePath(),
-       CallbackResultOptions::DefaultEvaluateOptions(SavingOrder::kSaveFirst)});
+       CallbackResultOptions::DefaultReadOnlyOptions(SavingOrder::kSaveFirst)});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpStrAppend(const OpArgs& op_args, string_view key,
@@ -1243,7 +1243,7 @@ auto OpArrIndex(const OpArgs& op_args, string_view key, const WrappedJsonPath& j
     return pos;
   };
 
-  return JsonEvaluateOperation<std::optional<long>>(
+  return JsonReadOnlyOperation<std::optional<long>>(
       op_args, key, json_path, std::move(cb),
       {false, CallbackResultOptions{CallbackResultOptions::OnEmpty::kSendWrongType}});
 }
@@ -1270,8 +1270,8 @@ std::vector<std::optional<std::string>> OpJsonMGet(const WrappedJsonPath& json_p
 
     auto eval_wrapped = [&json_val,
                          &cb](const WrappedJsonPath& json_path) -> std::optional<JsonType> {
-      auto eval_result = json_path.Evaluate<JsonType>(
-          json_val, std::move(cb), CallbackResultOptions::DefaultEvaluateOptions());
+      auto eval_result = json_path.ExecuteReadOnlyCallback<JsonType>(
+          json_val, std::move(cb), CallbackResultOptions::DefaultReadOnlyOptions());
 
       if (eval_result.IsV1()) {
         if (eval_result.Empty())
@@ -1306,13 +1306,13 @@ auto OpFields(const OpArgs& op_args, string_view key, const WrappedJsonPath& jso
   auto cb = [](const string_view&, const JsonType& val) -> std::optional<std::size_t> {
     return CountJsonFields(val);
   };
-  return JsonEvaluateOperation<std::optional<std::size_t>>(op_args, key, json_path, std::move(cb));
+  return JsonReadOnlyOperation<std::optional<std::size_t>>(op_args, key, json_path, std::move(cb));
 }
 
 // Returns json vector that represents the result of the json query.
 auto OpResp(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_path) {
   auto cb = [](const string_view&, const JsonType& val) { return val; };
-  return JsonEvaluateOperation<JsonType>(op_args, key, json_path, std::move(cb));
+  return JsonReadOnlyOperation<JsonType>(op_args, key, json_path, std::move(cb));
 }
 
 // Returns boolean that represents the result of the operation.

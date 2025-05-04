@@ -22,7 +22,7 @@ using Nothing = std::monostate;
 using JsonExpression = jsoncons::jsonpath::jsonpath_expression<JsonType>;
 
 template <typename T>
-using JsonPathEvaluateCallback = absl::FunctionRef<T(std::string_view, const JsonType&)>;
+using JsonPathReadOnlyCallback = absl::FunctionRef<T(std::string_view, const JsonType&)>;
 
 template <typename T = Nothing> struct MutateCallbackResult {
   MutateCallbackResult() {
@@ -65,35 +65,23 @@ struct CallbackResultOptions {
   enum class SavingOrder { kSaveFirst, kSaveLast };
   enum class OnEmpty { kSendNil, kSendWrongType };
 
-  // Default options for WrappedJsonPath::Evaluate
-  static CallbackResultOptions DefaultEvaluateOptions() {
-    return CallbackResultOptions{OnEmpty::kSendNil};
-  }
+  // Default options for WrappedJsonPath::ExecuteReadOnlyCallback
+  static CallbackResultOptions DefaultReadOnlyOptions();
+  static CallbackResultOptions DefaultReadOnlyOptions(SavingOrder saving_order);
 
-  static CallbackResultOptions DefaultEvaluateOptions(SavingOrder saving_order) {
-    return {saving_order, OnEmpty::kSendNil};
-  }
+  // Default options for WrappedJsonPath::ExecuteMutateCallback
+  static CallbackResultOptions DefaultMutateOptions();
 
-  // Default options for WrappedJsonPath::Mutate
-  static CallbackResultOptions DefaultMutateOptions() {
-    return CallbackResultOptions{OnEmpty::kSendWrongType};
-  }
+  explicit CallbackResultOptions(OnEmpty on_empty_);
 
-  explicit CallbackResultOptions(OnEmpty on_empty_) : on_empty(on_empty_) {
-  }
-
-  CallbackResultOptions(JsonPathType path_type_, SavingOrder saving_order_, OnEmpty on_empty_)
-      : path_type(path_type_), saving_order(saving_order_), on_empty(on_empty_) {
-  }
+  CallbackResultOptions(JsonPathType path_type_, SavingOrder saving_order_, OnEmpty on_empty_);
 
   std::optional<JsonPathType> path_type;
   SavingOrder saving_order{SavingOrder::kSaveLast};
   OnEmpty on_empty;
 
  private:
-  CallbackResultOptions(SavingOrder saving_order_, OnEmpty on_empty_)
-      : saving_order(saving_order_), on_empty(on_empty_) {
-  }
+  CallbackResultOptions(SavingOrder saving_order_, OnEmpty on_empty_);
 };
 
 template <typename T> class JsonCallbackResult {
@@ -164,21 +152,18 @@ class WrappedJsonPath {
   static constexpr std::string_view kV1PathRootElement = ".";
   static constexpr std::string_view kV2PathRootElement = "$";
 
-  WrappedJsonPath(json::Path json_path, StringOrView path, JsonPathType path_type)
-      : parsed_path_(std::move(json_path)), path_(std::move(path)), path_type_(path_type) {
-  }
+  WrappedJsonPath(json::Path json_path, StringOrView path, JsonPathType path_type);
 
-  WrappedJsonPath(JsonExpression expression, StringOrView path, JsonPathType path_type)
-      : parsed_path_(std::move(expression)), path_(std::move(path)), path_type_(path_type) {
-  }
+  WrappedJsonPath(JsonExpression expression, StringOrView path, JsonPathType path_type);
 
   template <typename T>
-  JsonCallbackResult<T> Evaluate(const JsonType* json_entry, JsonPathEvaluateCallback<T> cb,
-                                 CallbackResultOptions options) const {
-    JsonCallbackResult<T> eval_result{InitializePathType(options)};
+  JsonCallbackResult<T> ExecuteReadOnlyCallback(const JsonType* json_entry,
+                                                JsonPathReadOnlyCallback<T> cb,
+                                                CallbackResultOptions options) const {
+    JsonCallbackResult<T> read_result{InitializePathType(options)};
 
-    auto eval_callback = [&cb, &eval_result](std::string_view path, const JsonType& val) {
-      eval_result.AddValue(cb(path, val));
+    auto eval_callback = [&cb, &read_result](std::string_view path, const JsonType& val) {
+      read_result.AddValue(cb(path, val));
     };
 
     if (HoldsJsonPath()) {
@@ -193,13 +178,12 @@ class WrappedJsonPath {
       json_expression.evaluate(*json_entry, eval_callback);
     }
 
-    return eval_result;
+    return read_result;
   }
 
   template <typename T>
-  OpResult<JsonCallbackResult<std::optional<T>>> Mutate(JsonType* json_entry,
-                                                        JsonPathMutateCallback<T> cb,
-                                                        CallbackResultOptions options) const {
+  OpResult<JsonCallbackResult<std::optional<T>>> ExecuteMutateCallback(
+      JsonType* json_entry, JsonPathMutateCallback<T> cb, CallbackResultOptions options) const {
     JsonCallbackResult<std::optional<T>> mutate_result{InitializePathType(options)};
 
     auto mutate_callback = [&cb, &mutate_result](std::optional<std::string_view> path,
@@ -248,38 +232,23 @@ class WrappedJsonPath {
     return mutate_result;
   }
 
-  bool IsLegacyModePath() const {
-    return path_type_ == JsonPathType::kLegacy;
-  }
+  bool IsLegacyModePath() const;
 
-  bool RefersToRootElement() const {
-    auto path = path_.view();
-    return path.empty() || path == kV1PathRootElement || path == kV2PathRootElement;
-  }
+  bool RefersToRootElement() const;
 
-  bool HoldsJsonPath() const {
-    return std::holds_alternative<json::Path>(parsed_path_);
-  }
+  // Returns true if this is first implementation of json path
+  bool HoldsJsonPath() const;
 
-  const json::Path& AsJsonPath() const {
-    return std::get<json::Path>(parsed_path_);
-  }
+  // Main implementation of json path
+  const json::Path& AsJsonPath() const;
+  // Alternative implementation of json path
+  const JsonExpression& AsJsonExpression() const;
 
-  const JsonExpression& AsJsonExpression() const {
-    return std::get<JsonExpression>(parsed_path_);
-  }
-
-  std::string_view Path() const {
-    return path_.view();
-  }
+  // Returns the path as a string_view.
+  std::string_view Path() const;
 
  private:
-  CallbackResultOptions InitializePathType(CallbackResultOptions options) const {
-    if (!options.path_type) {
-      options.path_type = path_type_;
-    }
-    return options;
-  }
+  CallbackResultOptions InitializePathType(CallbackResultOptions options) const;
 
  private:
   std::variant<json::Path, JsonExpression> parsed_path_;
