@@ -605,9 +605,9 @@ OpResult<JsonCallbackResult<T>> JsonReadOnlyOperation(const OpArgs& op_args, std
                                                       ReadOnlyOperationOptions options = {}) {
   OpResult<JsonType*> result = GetJson(op_args, key);
   if (options.return_nil_if_key_not_found && result == OpStatus::KEY_NOTFOUND) {
-    return JsonCallbackResult<T>{
-        {JsonPathType::kLegacy, options.cb_result_options.saving_order,
-         CallbackResultOptions::OnEmpty::kSendNil}};  // set legacy mode to return nil
+    return JsonCallbackResult<T>{{CallbackResultOptions::OnEmpty::kSendNil,
+                                  options.cb_result_options.saving_order,
+                                  JsonPathType::kLegacy}};  // set legacy mode to return nil
   }
 
   RETURN_ON_BAD_STATUS(result);
