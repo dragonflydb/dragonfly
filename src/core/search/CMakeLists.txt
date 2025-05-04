@@ -3,6 +3,8 @@ gen_bison(parser)
 
 cur_gen_dir(gen_dir)
 
+set_source_files_properties(${gen_dir}/parser.cc PROPERTIES
+                            COMPILE_FLAGS "-Wno-maybe-uninitialized")
 add_library(query_parser base.cc ast_expr.cc query_driver.cc search.cc indices.cc
             sort_indices.cc vector_utils.cc compressed_sorted_set.cc block_list.cc
             synonyms.cc ${gen_dir}/parser.cc ${gen_dir}/lexer.cc)

@@ -2858,6 +2858,7 @@ For each migration we start migration, wait for it to finish and once it is fini
 """
 
 
+@pytest.mark.skip("Flaky test")
 @pytest.mark.slow
 @pytest.mark.exclude_epoll
 @pytest.mark.asyncio

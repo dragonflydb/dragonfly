@@ -281,7 +281,10 @@ struct HnswlibAdapter {
   }
 
   void Remove(DocId id) {
-    world_.markDelete(id);
+    try {
+      world_.markDelete(id);
+    } catch (const std::exception& e) {
+    }
   }
 
   vector<pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {

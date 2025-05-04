@@ -91,5 +91,7 @@ void Journal::SetFlushMode(bool allow_flush) {
   journal_slice.SetFlushMode(allow_flush);
 }
 
+size_t thread_local JournalFlushGuard::counter_ = 0;
+
 }  // namespace journal
 }  // namespace dfly

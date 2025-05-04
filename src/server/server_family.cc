@@ -2956,7 +2956,7 @@ void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx)
     cmd_cntx.rb->SendError(ec.Format());
     return;
   }
-  add_replica->StartMainReplicationFiber();
+  add_replica->StartMainReplicationFiber(nullopt);
   cluster_replicas_.push_back(std::move(add_replica));
   cmd_cntx.rb->SendOk();
 }
@@ -2964,6 +2964,7 @@ void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx)
 void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                                      ActionOnConnectionFail on_err) {
   std::shared_ptr<Replica> new_replica;
+  std::optional<Replica::LastMasterSyncData> last_master_data;
   {
     util::fb2::LockGuard lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
 
@@ -2987,7 +2988,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
         CHECK(replica_);
 
         SetMasterFlagOnAllThreads(true);  // Flip flag before clearing replica
-        replica_->Stop();
+        last_master_data_ = replica_->Stop();
         replica_.reset();
 
         StopAllClusterReplicas();
@@ -3000,8 +3001,9 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
     }
 
     // If any replication is in progress, stop it, cancellation should kick in immediately
+
     if (replica_)
-      replica_->Stop();
+      last_master_data = replica_->Stop();
     StopAllClusterReplicas();
 
     // First, switch into the loading state
@@ -3057,8 +3059,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
   // If we are called by "Replicate", tx will be null but we do not need
   // to flush anything.
   if (on_err == ActionOnConnectionFail::kReturnOnError) {
-    Drakarys(tx, DbSlice::kDbAll);
-    new_replica->StartMainReplicationFiber();
+    new_replica->StartMainReplicationFiber(last_master_data);
   }
   builder->SendOk();
 }
@@ -3131,7 +3132,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
 
   LOG(INFO) << "Takeover successful, promoting this instance to master.";
   SetMasterFlagOnAllThreads(true);
-  replica_->Stop();
+  last_master_data_ = replica_->Stop();
   replica_.reset();
   return builder->SendOk();
 }

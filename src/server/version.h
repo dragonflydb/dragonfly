@@ -33,8 +33,11 @@ enum class DflyVersion {
   // - Periodic lag checks from master to replica
   VER4,
 
+  // - Support partial sync from different master
+  VER5,
+
   // Always points to the latest version
-  CURRENT_VER = VER4,
+  CURRENT_VER = VER5,
 };
 
 }  // namespace dfly

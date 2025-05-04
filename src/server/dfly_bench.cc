@@ -365,7 +365,7 @@ string CommandGenerator::FillGet(string_view key) {
 }
 
 struct ClientStats {
-  base::Histogram hist;
+  base::Histogram total_hist, online_hist;
 
   uint64_t num_responses = 0;
   uint64_t hit_count = 0;
@@ -374,7 +374,9 @@ struct ClientStats {
   unsigned num_clients = 0;
 
   ClientStats& operator+=(const ClientStats& o) {
-    hist.Merge(o.hist);
+    total_hist.Merge(o.total_hist);
+    online_hist.Merge(o.online_hist);
+
     num_responses += o.num_responses;
     hit_count += o.hit_count;
     hit_opportunities += o.hit_opportunities;
@@ -710,7 +712,8 @@ static string_view FindLine(io::Bytes buf) {
 void Driver::PopRequest() {
   uint64_t now = absl::GetCurrentTimeNanos();
   uint64_t usec = (now - reqs_.front().start) / 1000;
-  stats_.hist.Add(usec);
+  stats_.online_hist.Add(usec);
+  stats_.total_hist.Add(usec);
   stats_.hit_opportunities += reqs_.front().might_hit;
   ++received_;
   reqs_.pop();
@@ -947,6 +950,7 @@ void WatchFiber(size_t num_shards, atomic_bool* finish_signal, ProactorPool* pp)
       done_max = max(done_max, maxd);
       done_min = min(done_min, mind);
       max_pending = max(max_pending, max_pend);
+      client->stats.online_hist.Clear();
     });
 
     uint64_t total_ms = (now - start_time) / 1'000'000;
@@ -957,7 +961,7 @@ void WatchFiber(size_t num_shards, atomic_bool* finish_signal, ProactorPool* pp)
     double hitrate = stats.hit_opportunities > 0
                          ? 100 * double(stats.hit_count) / double(stats.hit_opportunities)
                          : 0;
-    unsigned latency = stats.hist.Percentile(99);
+    unsigned latency = stats.online_hist.Percentile(99);
 
     CONSOLE_INFO << total_ms / 1000 << "s: " << StrFormat("%.1f", done_perc)
                  << "% done, RPS(now/agg): " << period_resp_cnt * 1000 / period_ms << "/"
@@ -1193,13 +1197,13 @@ int main(int argc, char* argv[]) {
   CONSOLE_INFO << "\nTotal time: " << duration
                << ". Overall number of requests: " << summary.num_responses
                << ", QPS: " << (dur_sec ? StrCat(summary.num_responses / dur_sec) : "nan")
-               << ", P99 lat: " << summary.hist.Percentile(99) << "us";
+               << ", P99 lat: " << summary.total_hist.Percentile(99) << "us";
 
   if (summary.num_errors) {
     CONSOLE_INFO << "Got " << summary.num_errors << " error responses!";
   }
 
-  CONSOLE_INFO << "Latency summary, all times are in usec:\n" << summary.hist.ToString();
+  CONSOLE_INFO << "Latency summary, all times are in usec:\n" << summary.total_hist.ToString();
   if (summary.hit_opportunities) {
     CONSOLE_INFO << "----------------------------------\nHit rate: "
                  << 100 * double(summary.hit_count) / double(summary.hit_opportunities) << "%\n";

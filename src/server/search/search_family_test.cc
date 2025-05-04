@@ -2722,6 +2722,18 @@ TEST_F(SearchFamilyTest, JsonWithNullFields) {
               AreDocIds("doc:1", "doc:2"));
 }
 
+TEST_F(SearchFamilyTest, TestHsetDeleteDocumentHnswSchemaCrash) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "SCHEMA", "n", "NUMERIC", "v", "VECTOR", "HNSW", "8", "TYPE",
+                 "FLOAT16", "DIM", "4", "DISTANCE_METRIC", "L2", "M", "65536"}),
+            "OK");
+
+  auto res = Run({"HSET", "doc", "n", "0"});
+  EXPECT_EQ(res, 1);
+
+  res = Run({"DEL", "doc"});
+  EXPECT_EQ(res, 1);
+}
+
 TEST_F(SearchFamilyTest, RenameDocumentBetweenIndices) {
   absl::FlagSaver fs;
 

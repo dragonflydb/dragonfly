@@ -35,6 +35,8 @@
 #include "server/transaction.h"
 #include "util/fibers/future.h"
 
+ABSL_FLAG(bool, mget_dedup_keys, false, "If true, MGET will deduplicate keys");
+
 namespace dfly {
 
 namespace {
@@ -51,10 +53,12 @@ constexpr uint32_t kMaxStrLen = 1 << 28;
 
 // Stores a string, the pending result of a tiered read or nothing
 struct StringValue {
-  StringValue() : v_{} {
+  StringValue() : v_{std::monostate{}} {
   }
+
   StringValue(std::string s) : v_{std::move(s)} {
   }
+
   StringValue(fb2::Future<std::string> f) : v_{std::move(f)} {
   }
 
@@ -547,23 +551,25 @@ MGetResponse OpMGet(fb2::BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
 
   absl::InlinedVector<Item, 32> items(keys.Size());
 
-  // We can not make it thread-local because we may preempt during the Find loop due to
-  // serialization with the bumpup calls.
-
-  // TODO: consider separating BumpUps from finds because it becomes too complicated
-  // to reason about.
-  absl::flat_hash_map<string_view, unsigned> key_index;
-
   // First, fetch all iterators and count total size ahead
   size_t total_size = 0;
   unsigned index = 0;
-  key_index.reserve(keys.Size());
+  static bool mget_dedup_keys = absl::GetFlag(FLAGS_mget_dedup_keys);
+
+  // We can not make it thread-local because we may preempt during the Find loop due to
+  // replication of expiry events.
+  absl::flat_hash_map<string_view, unsigned> key_index;
+  if (mget_dedup_keys) {
+    key_index.reserve(keys.Size());
+  }
 
   for (string_view key : keys) {
-    auto [it, inserted] = key_index.try_emplace(key, index);
-    if (!inserted) {  // duplicate -> point to the first occurrence.
-      items[index++].source_index = it->second;
-      continue;
+    if (mget_dedup_keys) {
+      auto [it, inserted] = key_index.try_emplace(key, index);
+      if (!inserted) {  // duplicate -> point to the first occurrence.
+        items[index++].source_index = it->second;
+        continue;
+      }
     }
 
     auto it_res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
@@ -1074,11 +1080,11 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
 }
 
 void StringFamily::SetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
-  SetExGeneric(true, std::move(args), cmnd_cntx.conn_cntx->cid, cmnd_cntx.tx, cmnd_cntx.rb);
+  SetExGeneric(true, args, cmnd_cntx.conn_cntx->cid, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
 void StringFamily::PSetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
-  SetExGeneric(false, std::move(args), cmnd_cntx.conn_cntx->cid, cmnd_cntx.tx, cmnd_cntx.rb);
+  SetExGeneric(false, args, cmnd_cntx.conn_cntx->cid, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
 void StringFamily::SetNx(CmdArgList args, const CommandContext& cmnd_cntx) {

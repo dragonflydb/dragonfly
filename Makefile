@@ -34,7 +34,7 @@ configure:
 
 build:
 	cd $(RELEASE_DIR); \
-	ninja dragonfly && ldd dragonfly
+	ninja dfly_bench dragonfly && ldd dragonfly
 
 package:
 	cd $(RELEASE_DIR); \
