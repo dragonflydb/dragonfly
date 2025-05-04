@@ -34,10 +34,6 @@ class MultiCommandSquasher {
     return MultiCommandSquasher{cmds, cntx, service, opts}.Run(rb);
   }
 
-  static size_t GetRepliesMemSize() {
-    return current_reply_size_.load(std::memory_order_relaxed);
-  }
-
  private:
   // Per-shard execution info.
   struct ShardExecInfo {
@@ -50,6 +46,7 @@ class MultiCommandSquasher {
     };
     std::vector<Command> dispatched;  // Dispatched commands
     unsigned reply_id = 0;
+    size_t total_reply_size = 0;                 // Total size of replies
     boost::intrusive_ptr<Transaction> local_tx;  // stub-mode tx for use inside shard
   };
 
@@ -94,9 +91,6 @@ class MultiCommandSquasher {
   size_t num_shards_ = 0;
 
   std::vector<MutableSlice> tmp_keylist_;
-
-  // we increase size in one thread and decrease in another
-  static atomic_uint64_t current_reply_size_;
 };
 
 }  // namespace dfly
