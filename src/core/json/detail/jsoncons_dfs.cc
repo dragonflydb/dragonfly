@@ -8,8 +8,6 @@
 
 #include "core/json/detail/jsoncons_dfs.h"
 
-#include <absl/container/flat_hash_set.h>
-
 namespace dfly::json::detail {
 
 using namespace std;
@@ -84,9 +82,8 @@ Dfs Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callba
     return dfs;
   }
 
-  // Use vector to maintain order and set to check uniqueness
+  // Use vector to maintain order
   std::vector<JsonType*> nodes_to_mutate;
-  absl::flat_hash_set<JsonType*> seen_nodes;
 
   using Item = detail::JsonconsDfsItem<false>;
   vector<Item> stack;
@@ -110,10 +107,7 @@ Dfs Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callba
           stack.emplace_back(next, next_seg_id);
         } else {
           // Terminal step: collect node for mutation if not seen before
-          if (seen_nodes.find(next) == seen_nodes.end()) {
-            nodes_to_mutate.push_back(next);
-            seen_nodes.insert(next);
-          }
+          nodes_to_mutate.push_back(next);
         }
       }
     } else {
