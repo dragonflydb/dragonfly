@@ -475,15 +475,8 @@ TEST_F(DflyEngineTest, Bug207) {
     ASSERT_EQ(resp, "OK");
   }
 
-  auto evicted_count = [](const string& str) -> size_t {
-    const string matcher = "evicted_keys:";
-    const auto pos = str.find(matcher) + matcher.size();
-    const auto sub = str.substr(pos, 1);
-    return atoi(sub.c_str());
-  };
-
-  resp = Run({"info", "stats"});
-  EXPECT_GT(evicted_count(resp.GetString()), 0);
+  auto metrics = GetMetrics();
+  EXPECT_GT(metrics.events.evicted_keys, 0) << FormatMetrics(metrics);
 
   for (; i > 0; --i) {
     resp = Run({"setex", StrCat("key", i), "30", "bar"});
