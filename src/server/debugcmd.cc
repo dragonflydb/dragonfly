@@ -484,6 +484,55 @@ const char* EncodingName(unsigned obj_type, unsigned encoding) {
   return "unknown";
 }
 
+struct IOStat {
+  uint64_t conn_received = 0;
+  uint64_t curr_conn_count = 0;
+  uint64_t cmd_total = 0, pipelined_cmd_total = 0;
+  size_t io_read_bytes = 0;
+  uint64_t io_reads_total = 0;
+
+  void From(const facade::FacadeStats& fs);
+  void Print(RedisReplyBuilder* rb) const;
+
+  IOStat& operator-=(const IOStat& other);
+};
+
+void IOStat::From(const facade::FacadeStats& fs) {
+  conn_received = fs.conn_stats.conn_received_cnt;
+  curr_conn_count = fs.conn_stats.num_conns_main;
+  cmd_total = fs.conn_stats.command_cnt_main;
+  pipelined_cmd_total = fs.conn_stats.pipelined_cmd_cnt;
+  io_read_bytes = fs.conn_stats.io_read_bytes;
+  io_reads_total = fs.conn_stats.io_read_cnt;
+}
+
+void IOStat::Print(RedisReplyBuilder* rb) const {
+  rb->StartCollection(6, RedisReplyBuilder::CollectionType::MAP);
+  rb->SendSimpleString("connections_received");
+  rb->SendLong(conn_received);
+  rb->SendSimpleString("current_conn_count");
+  rb->SendLong(curr_conn_count);
+  rb->SendSimpleString("commands_total");
+  rb->SendLong(cmd_total);
+  rb->SendSimpleString("pipelined_commands_total");
+  rb->SendLong(pipelined_cmd_total);
+  rb->SendSimpleString("io_read_bytes");
+  rb->SendLong(io_read_bytes);
+  rb->SendSimpleString("io_reads_total");
+  rb->SendLong(io_reads_total);
+}
+
+IOStat& IOStat::operator-=(const IOStat& other) {
+  conn_received -= other.conn_received;
+  curr_conn_count -= other.curr_conn_count;
+  cmd_total -= other.cmd_total;
+  pipelined_cmd_total -= other.pipelined_cmd_total;
+  io_read_bytes -= other.io_read_bytes;
+  io_reads_total -= other.io_reads_total;
+
+  return *this;
+}
+
 }  // namespace
 
 DebugCmd::DebugCmd(ServerFamily* owner, cluster::ClusterFamily* cf, ConnectionContext* cntx)
@@ -550,6 +599,9 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "COMPRESSION [type]"
         "    Estimate the compressibility of values of the given type. if no type is given, ",
         "    checks compressibility of keys",
+        "IOSTATS [PS]",
+        "    Prints IO stats per thread. If PS is specified, prints thread-level stats ",
+        "    per second.",
         "HELP",
         "    Prints this help.",
     };
@@ -625,6 +677,9 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
     return Compression(args.subspan(1), builder);
   }
 
+  if (subcmd == "IOSTATS") {
+    return IOStats(args.subspan(1), builder);
+  }
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return builder->SendError(reply, kSyntaxErrType);
 }
@@ -1274,6 +1329,33 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
   rb->SendSimpleString("ratio");
   double ratio = raw_size > 0 ? static_cast<double>(compressed_size) / raw_size : 0;
   rb->SendDouble(ratio);
+}
+
+void DebugCmd::IOStats(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+
+  bool per_second = args.size() > 0 && absl::EqualsIgnoreCase(args[0], "PS");
+  vector<IOStat> stats(shard_set->pool()->size());
+
+  shard_set->pool()->AwaitBrief(
+      [&](unsigned index, ProactorBase*) { stats[index].From(*facade::tl_facade_stats); });
+
+  if (per_second) {
+    ThisFiber::SleepFor(1s);
+    vector<IOStat> stats2(shard_set->pool()->size());
+    shard_set->pool()->AwaitBrief(
+        [&](unsigned index, ProactorBase*) { stats2[index].From(*facade::tl_facade_stats); });
+
+    for (size_t i = 0; i < stats.size(); ++i) {
+      stats2[i] -= stats[i];
+    }
+    stats = std::move(stats2);
+  }
+
+  rb->StartArray(stats.size());
+  for (const auto& stat : stats) {
+    stat.Print(rb);
+  }
 }
 
 void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBatch& batch) {
