@@ -249,6 +249,16 @@ TEST_F(RedisReplyBuilderTest, SimpleError) {
   EXPECT_THAT(parsing.args, ElementsAre("OK"));
 }
 
+TEST_F(RedisReplyBuilderTest, VeryLongError) {
+  std::string long_error(10 * 1024, 'X');  // 10KB error
+  std::string_view empty_type;
+
+  builder_->SendError(long_error, empty_type);
+
+  ASSERT_TRUE(absl::StartsWith(str(), kErrorStart));
+  ASSERT_TRUE(absl::EndsWith(str(), kCRLF));
+}
+
 TEST_F(RedisReplyBuilderTest, ErrorBuiltInMessage) {
   OpStatus error_codes[] = {
       OpStatus::KEY_NOTFOUND,  OpStatus::OUT_OF_RANGE,  OpStatus::WRONG_TYPE,
