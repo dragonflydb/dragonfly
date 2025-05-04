@@ -370,20 +370,14 @@ void RedisReplyBuilderBase::SendError(std::string_view str, std::string_view typ
   last_error_ = str;
 
   if (str[0] != '-') {
-    if (str.size() <= kMaxInlineSize) {
-      WritePieces("-ERR ", str);
-    } else {
-      WritePieces("-ERR ");
-      WriteRef(str);
-    }
+    WritePieces("-ERR ");
+  } 
+  if (str.size() <= kMaxInlineSize) {
+    WritePieces(str, kCRLF);
   } else {
-    if (str.size() <= kMaxInlineSize) {
-      WritePieces(str);
-    } else {
-      WriteRef(str);
-    }
+    WriteRef(str);
+    WritePieces(kCRLF);
   }
-  WritePieces(kCRLF);
 }
 
 void RedisReplyBuilderBase::SendProtocolError(std::string_view str) {
