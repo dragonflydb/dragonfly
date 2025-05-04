@@ -371,7 +371,7 @@ void RedisReplyBuilderBase::SendError(std::string_view str, std::string_view typ
 
   if (str[0] != '-') {
     WritePieces("-ERR ");
-  } 
+  }
   if (str.size() <= kMaxInlineSize) {
     WritePieces(str, kCRLF);
   } else {
