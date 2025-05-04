@@ -624,8 +624,8 @@ struct MutateOperationOptions {
 template <typename T>
 OpResult<JsonCallbackResult<optional<T>>> JsonMutateOperation(const OpArgs& op_args,
                                                               std::string_view key,
-                                                              const WrappedJsonPath& json_path,
                                                               JsonPathMutateCallback<T> cb,
+                                                              WrappedJsonPath* json_path,
                                                               MutateOperationOptions options = {}) {
   auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
   RETURN_ON_BAD_STATUS(it_res);
@@ -640,7 +640,7 @@ OpResult<JsonCallbackResult<optional<T>>> JsonMutateOperation(const OpArgs& op_a
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
 
-  auto mutate_res = json_path.ExecuteMutateCallback(json_val, cb, options.cb_result_options);
+  auto mutate_res = json_path->ExecuteMutateCallback(json_val, cb, options.cb_result_options);
 
   // Call post mutate callback
   if (mutate_res && options.post_mutate_cb) {
@@ -812,7 +812,7 @@ OpResult<JsonCallbackResult<OptSize>> OpArrLen(const OpArgs& op_args, string_vie
 
 template <typename T>
 auto OpToggle(const OpArgs& op_args, string_view key,
-              const WrappedJsonPath& json_path) {  // TODO(change the output type for enhanced path)
+              WrappedJsonPath* json_path) {  // TODO(change the output type for enhanced path)
   auto cb = [](std::optional<std::string_view>,
                JsonType* val) -> MutateCallbackResult<std::optional<T>> {
     if (val->is_bool()) {
@@ -822,11 +822,11 @@ auto OpToggle(const OpArgs& op_args, string_view key,
     }
     return {};
   };
-  return JsonMutateOperation<std::optional<T>>(op_args, key, json_path, std::move(cb));
+  return JsonMutateOperation<std::optional<T>>(op_args, key, std::move(cb), json_path);
 }
 
 template <typename T>
-auto ExecuteToggle(string_view key, const WrappedJsonPath& json_path, Transaction* tx,
+auto ExecuteToggle(string_view key, WrappedJsonPath* json_path, Transaction* tx,
                    SinkReplyBuilder* builder) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpToggle<T>(t->GetOpArgs(shard), key, json_path);
@@ -892,9 +892,8 @@ struct DoubleArithmeticCallbackResult {
   bool legacy_mode_is_enabled;
 };
 
-OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key,
-                                    const WrappedJsonPath& json_path, string_view num,
-                                    ArithmeticOpType op_type) {
+OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key, string_view num,
+                                    ArithmeticOpType op_type, WrappedJsonPath* json_path) {
   bool has_fractional_part = num.find('.') != string::npos;
   double double_value = 0;
 
@@ -905,7 +904,7 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key,
 
   bool is_result_overflow = false;
 
-  DoubleArithmeticCallbackResult result{json_path.IsLegacyModePath()};
+  DoubleArithmeticCallbackResult result{json_path->IsLegacyModePath()};
   auto cb = [&](std::optional<std::string_view>, JsonType* val) -> MutateCallbackResult<> {
     if (val->is_number()) {
       bool res = false;
@@ -921,7 +920,7 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key,
     return {};
   };
 
-  auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb));
+  auto res = JsonMutateOperation<Nothing>(op_args, key, std::move(cb), json_path);
 
   if (is_result_overflow)
     return OpStatus::INVALID_NUMERIC_RESULT;
@@ -936,8 +935,8 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key,
 
 // Deletes items specified by the expression/path.
 OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
-                     const WrappedJsonPath& json_path) {
-  if (json_path.RefersToRootElement()) {
+                     WrappedJsonPath* json_path) {
+  if (json_path->RefersToRootElement()) {
     auto& db_slice = op_args.GetDbSlice();
     auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
     if (IsValid(it)) {
@@ -960,8 +959,8 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
   JsonMemTracker tracker;
   absl::Cleanup update_size_on_exit([tracker, &pv]() mutable { tracker.SetJsonSize(pv, false); });
 
-  if (json_path.HoldsJsonPath()) {
-    const json::Path& path = json_path.AsJsonPath();
+  if (json_path->HoldsJsonPath()) {
+    const json::Path& path = json_path->AsJsonPath();
     long deletions = json::MutatePath(
         path, [](optional<string_view>, JsonType* val) { return true; }, json_val);
     return deletions;
@@ -973,7 +972,7 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
     return {};
   };
 
-  auto res = json_path.ExecuteMutateCallback<Nothing>(
+  auto res = json_path->ExecuteMutateCallback<Nothing>(
       json_val, std::move(cb), CallbackResultOptions::DefaultMutateOptions());
   RETURN_ON_BAD_STATUS(res);
 
@@ -1024,22 +1023,22 @@ auto OpObjKeys(const OpArgs& op_args, string_view key, const WrappedJsonPath& js
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpStrAppend(const OpArgs& op_args, string_view key,
-                                                  const WrappedJsonPath& path, string_view value) {
+                                                  string_view value, WrappedJsonPath* json_path) {
   auto cb = [&](optional<string_view>, JsonType* val) -> MutateCallbackResult<size_t> {
     if (!val->is_string())
       return {};
 
     string new_val = absl::StrCat(val->as_string_view(), value);
     size_t len = new_val.size();
-    *val = std::move(new_val);
-    return {false, len};  // do not delete, new value len
+    *val = std::move(new_val);  // todo: fix std::move
+    return {false, len};        // do not delete, new value len
   };
-  return JsonMutateOperation<size_t>(op_args, key, path, std::move(cb));
+  return JsonMutateOperation<size_t>(op_args, key, std::move(cb), json_path);
 }
 
 // Returns the numbers of values cleared.
 // Clears containers(arrays or objects) and zeroing numbers.
-OpResult<long> OpClear(const OpArgs& op_args, string_view key, const WrappedJsonPath& path) {
+OpResult<long> OpClear(const OpArgs& op_args, string_view key, WrappedJsonPath* json_path) {
   long clear_items = 0;
 
   auto cb = [&clear_items](std::optional<std::string_view>,
@@ -1060,13 +1059,13 @@ OpResult<long> OpClear(const OpArgs& op_args, string_view key, const WrappedJson
     return {};
   };
 
-  auto res = JsonMutateOperation<Nothing>(op_args, key, path, std::move(cb));
+  auto res = JsonMutateOperation<Nothing>(op_args, key, std::move(cb), json_path);
   RETURN_ON_BAD_STATUS(res);
   return clear_items;
 }
 
 // Returns string vector that represents the pop out values.
-auto OpArrPop(const OpArgs& op_args, string_view key, WrappedJsonPath& path, int index) {
+auto OpArrPop(const OpArgs& op_args, string_view key, int index, WrappedJsonPath* json_path) {
   auto cb = [index](std::optional<std::string_view>,
                     JsonType* val) -> MutateCallbackResult<std::string> {
     if (!val->is_array() || val->empty()) {
@@ -1088,13 +1087,13 @@ auto OpArrPop(const OpArgs& op_args, string_view key, WrappedJsonPath& path, int
     val->erase(it);
     return {false, std::move(str)};
   };
-  return JsonMutateOperation<std::string>(op_args, key, path, std::move(cb),
+  return JsonMutateOperation<std::string>(op_args, key, std::move(cb), json_path,
                                           {{}, CallbackResultOptions{OnEmpty::kSendNil}});
 }
 
 // Returns numeric vector that represents the new length of the array at each path.
-auto OpArrTrim(const OpArgs& op_args, string_view key, const WrappedJsonPath& path, int start_index,
-               int stop_index) {
+auto OpArrTrim(const OpArgs& op_args, string_view key, int start_index, int stop_index,
+               WrappedJsonPath* json_path) {
   auto cb = [&](optional<string_view>, JsonType* val) -> MutateCallbackResult<size_t> {
     if (!val->is_array()) {
       return {};
@@ -1125,13 +1124,13 @@ auto OpArrTrim(const OpArgs& op_args, string_view key, const WrappedJsonPath& pa
     *val = jsoncons::json_array<JsonType>(trim_start_it, trim_end_it);
     return {false, val->size()};
   };
-  return JsonMutateOperation<size_t>(op_args, key, path, std::move(cb));
+  return JsonMutateOperation<size_t>(op_args, key, std::move(cb), json_path);
 }
 
 // Returns numeric vector that represents the new length of the array at each path.
-OpResult<JsonCallbackResult<OptSize>> OpArrInsert(const OpArgs& op_args, string_view key,
-                                                  const WrappedJsonPath& json_path, int index,
-                                                  const vector<JsonType>& new_values) {
+OpResult<JsonCallbackResult<OptSize>> OpArrInsert(const OpArgs& op_args, string_view key, int index,
+                                                  const vector<JsonType>& new_values,
+                                                  WrappedJsonPath* json_path) {
   bool out_of_boundaries_encountered = false;
 
   // Insert user-supplied value into the supplied index that should be valid.
@@ -1167,15 +1166,15 @@ OpResult<JsonCallbackResult<OptSize>> OpArrInsert(const OpArgs& op_args, string_
     return {false, val->size()};
   };
 
-  auto res = JsonMutateOperation<size_t>(op_args, key, json_path, std::move(cb));
+  auto res = JsonMutateOperation<size_t>(op_args, key, std::move(cb), json_path);
   if (out_of_boundaries_encountered) {
     return OpStatus::OUT_OF_RANGE;
   }
   return res;
 }
 
-auto OpArrAppend(const OpArgs& op_args, string_view key, const WrappedJsonPath& path,
-                 const vector<JsonType>& append_values) {
+auto OpArrAppend(const OpArgs& op_args, string_view key, const vector<JsonType>& append_values,
+                 WrappedJsonPath* json_path) {
   auto cb = [&](std::optional<std::string_view>,
                 JsonType* val) -> MutateCallbackResult<std::optional<std::size_t>> {
     if (!val->is_array()) {
@@ -1186,7 +1185,7 @@ auto OpArrAppend(const OpArgs& op_args, string_view key, const WrappedJsonPath& 
     }
     return {false, val->size()};
   };
-  return JsonMutateOperation<std::optional<std::size_t>>(op_args, key, path, std::move(cb));
+  return JsonMutateOperation<std::optional<std::size_t>>(op_args, key, std::move(cb), json_path);
 }
 
 // Returns a numeric vector representing each JSON value first index of the JSON scalar.
@@ -1317,13 +1316,13 @@ auto OpResp(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_
 
 // Returns boolean that represents the result of the operation.
 OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
-                     const WrappedJsonPath& json_path, std::string_view json_str,
-                     bool is_nx_condition, bool is_xx_condition) {
+                     std::string_view json_str, bool is_nx_condition, bool is_xx_condition,
+                     WrappedJsonPath* json_path) {
   // The whole key should be replaced.
   // NOTE: unlike in Redis, we are overriding the value when the path is "$"
   // this is regardless of the current key type. In redis if the key exists
   // and its not JSON, it would return an error.
-  if (json_path.RefersToRootElement()) {
+  if (json_path->RefersToRootElement()) {
     if (is_nx_condition || is_xx_condition) {
       auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
       bool key_exists = (it_res.status() != OpStatus::KEY_NOTFOUND);
@@ -1371,7 +1370,7 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   auto insert_cb = [&](JsonType* json) {
     // Set a new value if the path doesn't exist and the xx condition is not set.
     if (!path_exists && !is_xx_condition) {
-      auto pointer = ConvertJsonPathToJsonPointer(json_path.Path());
+      auto pointer = ConvertJsonPathToJsonPointer(json_path->Path());
       if (!pointer) {
         return OpStatus::SYNTAX_ERR;
       }
@@ -1393,7 +1392,7 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   // JsonMutateOperation uses it's own JsonMemTracker. It will work, because updates to already
   // existing json keys use copy assign, so we don't really need to account for the memory
   // allocated by ShardJsonFromString above since it's not being moved here at all.
-  auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(mutate_cb),
+  auto res = JsonMutateOperation<Nothing>(op_args, key, std::move(mutate_cb), json_path,
                                           MutateOperationOptions{std::move(insert_cb)});
   RETURN_ON_BAD_STATUS(res);
 
@@ -1406,8 +1405,8 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   if (!res_json_path) {
     return OpStatus::SYNTAX_ERR;  // TODO(Return initial error)
   }
-  return OpSet(op_args, key, path, res_json_path.value(), json_str, is_nx_condition,
-               is_xx_condition);
+  return OpSet(op_args, key, path, json_str, is_nx_condition, is_xx_condition,
+               &res_json_path.value());
 }
 
 OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
@@ -1447,7 +1446,7 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
 // Note that currently OpMerge works only with jsoncons and json::Path support has not been
 // implemented yet.
 OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
-                 const WrappedJsonPath& json_path, std::string_view json_str) {
+                 std::string_view json_str, WrappedJsonPath* json_path) {
   std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
@@ -1469,13 +1468,13 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
     return {};
   };
 
-  auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb));
+  auto res = JsonMutateOperation<Nothing>(op_args, key, std::move(cb), json_path);
 
   if (res.status() != OpStatus::KEY_NOTFOUND)
     return res.status();
 
-  if (json_path.RefersToRootElement()) {
-    return OpSet(op_args, key, path, json_path, json_str, false, false).status();
+  if (json_path->RefersToRootElement()) {
+    return OpSet(op_args, key, path, json_str, false, false, json_path).status();
   }
   return OpStatus::SYNTAX_ERR;
 }
@@ -1496,8 +1495,8 @@ void JsonFamily::Set(CmdArgList args, const CommandContext& cmd_cntx) {
 
   auto cb = [&, &key = key, &path = path, &json_str = json_str](Transaction* t,
                                                                 EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, path, json_path, json_str, is_nx_condition,
-                 is_xx_condition);
+    return OpSet(t->GetOpArgs(shard), key, path, json_str, is_nx_condition, is_xx_condition,
+                 &json_path);
   };
 
   OpResult<bool> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
@@ -1550,7 +1549,7 @@ void JsonFamily::Merge(CmdArgList args, const CommandContext& cmd_cntx) {
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpMerge(t->GetOpArgs(shard), key, path, json_path, value);
+    return OpMerge(t->GetOpArgs(shard), key, path, value, &json_path);
   };
 
   OpStatus status = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
@@ -1720,7 +1719,7 @@ void JsonFamily::ArrInsert(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpArrInsert(t->GetOpArgs(shard), key, json_path, index, new_values);
+    return OpArrInsert(t->GetOpArgs(shard), key, index, new_values, &json_path);
   };
 
   auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
@@ -1749,7 +1748,7 @@ void JsonFamily::ArrAppend(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpArrAppend(t->GetOpArgs(shard), key, json_path, append_values);
+    return OpArrAppend(t->GetOpArgs(shard), key, append_values, &json_path);
   };
 
   auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
@@ -1779,7 +1778,7 @@ void JsonFamily::ArrTrim(CmdArgList args, const CommandContext& cmd_cntx) {
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpArrTrim(t->GetOpArgs(shard), key, json_path, start_index, stop_index);
+    return OpArrTrim(t->GetOpArgs(shard), key, start_index, stop_index, &json_path);
   };
 
   auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
@@ -1801,7 +1800,7 @@ void JsonFamily::ArrPop(CmdArgList args, const CommandContext& cmd_cntx) {
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpArrPop(t->GetOpArgs(shard), key, json_path, index);
+    return OpArrPop(t->GetOpArgs(shard), key, index, &json_path);
   };
 
   auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
@@ -1818,7 +1817,7 @@ void JsonFamily::Clear(CmdArgList args, const CommandContext& cmd_cntx) {
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpClear(t->GetOpArgs(shard), key, json_path);
+    return OpClear(t->GetOpArgs(shard), key, &json_path);
   };
 
   OpResult<long> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
@@ -1842,7 +1841,7 @@ void JsonFamily::StrAppend(CmdArgList args, const CommandContext& cmd_cntx) {
 
   string_view json_string = parsed_json->as_string_view();
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpStrAppend(t->GetOpArgs(shard), key, json_path, json_string);
+    return OpStrAppend(t->GetOpArgs(shard), key, json_string, &json_path);
   };
 
   auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
@@ -1876,7 +1875,7 @@ void JsonFamily::Del(CmdArgList args, const CommandContext& cmd_cntx) {
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpDel(t->GetOpArgs(shard), key, path, json_path);
+    return OpDel(t->GetOpArgs(shard), key, path, &json_path);
   };
 
   OpResult<long> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
@@ -1893,7 +1892,7 @@ void JsonFamily::NumIncrBy(CmdArgList args, const CommandContext& cmd_cntx) {
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, num, OP_ADD);
+    return OpDoubleArithmetic(t->GetOpArgs(shard), key, num, OP_ADD, &json_path);
   };
 
   OpResult<string> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
@@ -1910,7 +1909,7 @@ void JsonFamily::NumMultBy(CmdArgList args, const CommandContext& cmd_cntx) {
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, num, OP_MULTIPLY);
+    return OpDoubleArithmetic(t->GetOpArgs(shard), key, num, OP_MULTIPLY, &json_path);
   };
 
   OpResult<string> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
@@ -1927,9 +1926,9 @@ void JsonFamily::Toggle(CmdArgList args, const CommandContext& cmd_cntx) {
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   if (json_path.IsLegacyModePath()) {
-    ExecuteToggle<bool>(key, json_path, cmd_cntx.tx, builder);
+    ExecuteToggle<bool>(key, &json_path, cmd_cntx.tx, builder);
   } else {
-    ExecuteToggle<long>(key, json_path, cmd_cntx.tx, builder);
+    ExecuteToggle<long>(key, &json_path, cmd_cntx.tx, builder);
   }
 }
 

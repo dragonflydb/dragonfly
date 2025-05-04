@@ -183,7 +183,7 @@ class WrappedJsonPath {
 
   template <typename T>
   OpResult<JsonCallbackResult<std::optional<T>>> ExecuteMutateCallback(
-      JsonType* json_entry, JsonPathMutateCallback<T> cb, CallbackResultOptions options) const {
+      JsonType* json_entry, JsonPathMutateCallback<T> cb, CallbackResultOptions options) {
     JsonCallbackResult<std::optional<T>> mutate_result{InitializePathType(options)};
 
     auto mutate_callback = [&cb, &mutate_result](std::optional<std::string_view> path,
