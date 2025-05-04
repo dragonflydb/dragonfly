@@ -404,17 +404,6 @@ string JsonTypeToName(const JsonType& val) {
   return std::string{};
 }
 
-OpResult<JsonType*> GetJson(const OpArgs& op_args, string_view key) {
-  auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
-  if (!it_res.ok())
-    return it_res.status();
-
-  JsonType* json_val = it_res.value()->second.GetJson();
-  DCHECK(json_val) << "should have a valid JSON object for key " << key;
-
-  return json_val;
-}
-
 // Returns the index of the next right bracket
 OptSize GetNextIndex(string_view str) {
   size_t current_idx = 0;
@@ -603,15 +592,21 @@ OpResult<JsonCallbackResult<T>> JsonReadOnlyOperation(const OpArgs& op_args, std
                                                       const WrappedJsonPath& json_path,
                                                       JsonPathReadOnlyCallback<T> cb,
                                                       ReadOnlyOperationOptions options = {}) {
-  OpResult<JsonType*> result = GetJson(op_args, key);
-  if (options.return_nil_if_key_not_found && result == OpStatus::KEY_NOTFOUND) {
-    return JsonCallbackResult<T>{{CallbackResultOptions::OnEmpty::kSendNil,
-                                  options.cb_result_options.saving_order,
-                                  JsonPathType::kLegacy}};  // set legacy mode to return nil
+  auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
+
+  if (!it_res) {
+    if (options.return_nil_if_key_not_found && it_res == OpStatus::KEY_NOTFOUND) {
+      return JsonCallbackResult<T>{{CallbackResultOptions::OnEmpty::kSendNil,
+                                    options.cb_result_options.saving_order,
+                                    JsonPathType::kLegacy}};  // set legacy mode to return nil
+    }
+    return it_res.status();
   }
 
-  RETURN_ON_BAD_STATUS(result);
-  return json_path.ExecuteReadOnlyCallback<T>(*result, cb, options.cb_result_options);
+  JsonType* json_val = it_res.value()->second.GetJson();
+  DCHECK(json_val) << "should have a valid JSON object for key " << key;
+
+  return json_path.ExecuteReadOnlyCallback<T>(json_val, cb, options.cb_result_options);
 }
 
 struct MutateOperationOptions {
