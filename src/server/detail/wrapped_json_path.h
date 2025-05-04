@@ -236,12 +236,13 @@ class WrappedJsonPath {
 
   bool RefersToRootElement() const;
 
-  // Returns true if this is first implementation of json path
+  // Returns true if this is internal implementation of json path
+  // Check AsJsonPath
   bool HoldsJsonPath() const;
 
-  // Main implementation of json path
+  // Internal implementation of json path
   const json::Path& AsJsonPath() const;
-  // Alternative implementation of json path
+  // Jsoncons implementation of json path
   const JsonExpression& AsJsonExpression() const;
 
   // Returns the path as a string_view.
