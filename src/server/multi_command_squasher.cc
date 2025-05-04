@@ -62,8 +62,6 @@ size_t Size(const facade::CapturingReplyBuilder::Payload& payload) {
 
 }  // namespace
 
-atomic_uint64_t MultiCommandSquasher::current_reply_size_ = 0;
-
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
                                            Service* service, const Opts& opts)
     : cmds_{cmds}, cntx_{cntx}, service_{service}, base_cid_{nullptr}, opts_{opts} {
@@ -178,8 +176,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       if (auto err = service_->VerifyCommandState(dispatched.cmd->Cid(), args, *cntx_); err) {
         crb.SendError(std::move(*err));
         dispatched.reply = crb.Take();
-        current_reply_size_.fetch_add(Size(dispatched.reply), std::memory_order_relaxed);
-
+        sinfo.total_reply_size += Size(dispatched.reply);
         continue;
       }
     }
@@ -192,7 +189,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
                         CommandContext{local_cntx.transaction, &crb, &local_cntx});
 
     dispatched.reply = crb.Take();
-    current_reply_size_.fetch_add(Size(dispatched.reply), std::memory_order_relaxed);
+    sinfo.total_reply_size += Size(dispatched.reply);
 
     // Assert commands made no persistent state changes to stub context state
     const auto& local_state = local_cntx.conn_state;
@@ -247,6 +244,13 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   uint64_t after_hop = proactor->GetMonotonicTimeNs();
   bool aborted = false;
 
+  ServerState* fresh_ss = ServerState::SafeTLocal();
+
+  size_t total_reply_size = 0;
+  for (auto& sinfo : sharded_) {
+    total_reply_size += sinfo.total_reply_size;
+  }
+  fresh_ss->stats.current_reply_size += total_reply_size;
   for (auto idx : order_) {
     auto& sinfo = sharded_[idx];
     DCHECK_LT(sinfo.reply_id, sinfo.dispatched.size());
@@ -254,14 +258,14 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     auto& reply = sinfo.dispatched[sinfo.reply_id++].reply;
     aborted |= opts_.error_abort && CapturingReplyBuilder::TryExtractError(reply);
 
-    current_reply_size_.fetch_sub(Size(reply), std::memory_order_relaxed);
     CapturingReplyBuilder::Apply(std::move(reply), rb);
     if (aborted)
       break;
   }
   uint64_t after_reply = proactor->GetMonotonicTimeNs();
-  ServerState::SafeTLocal()->stats.multi_squash_exec_hop_usec += (after_hop - start) / 1000;
-  ServerState::SafeTLocal()->stats.multi_squash_exec_reply_usec += (after_reply - after_hop) / 1000;
+  fresh_ss->stats.multi_squash_exec_hop_usec += (after_hop - start) / 1000;
+  fresh_ss->stats.multi_squash_exec_reply_usec += (after_reply - after_hop) / 1000;
+  fresh_ss->stats.current_reply_size -= total_reply_size;
 
   for (auto& sinfo : sharded_) {
     sinfo.dispatched.clear();
