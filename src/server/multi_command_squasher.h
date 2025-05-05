@@ -46,7 +46,9 @@ class MultiCommandSquasher {
     };
     std::vector<Command> dispatched;  // Dispatched commands
     unsigned reply_id = 0;
-    size_t total_reply_size = 0;                 // Total size of replies
+
+    std::atomic<size_t>* reply_size_total_ptr;   // Total size of replies on the IO thread
+    size_t reply_size_delta = 0;                 // Size of replies for this shard
     boost::intrusive_ptr<Transaction> local_tx;  // stub-mode tx for use inside shard
   };
 

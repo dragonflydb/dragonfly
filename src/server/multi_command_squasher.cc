@@ -30,8 +30,8 @@ void CheckConnStateClean(const ConnectionState& state) {
   DCHECK(!state.subscribe_info);
 }
 
-size_t Size(const facade::CapturingReplyBuilder::Payload& payload) {
-  size_t payload_size = sizeof(facade::CapturingReplyBuilder::Payload);
+size_t Size(const CapturingReplyBuilder::Payload& payload) {
+  size_t payload_size = sizeof(CapturingReplyBuilder::Payload);
   return visit(
       Overloaded{
           [&](monostate) { return payload_size; },
@@ -71,8 +71,12 @@ MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, Connectio
 }
 
 MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(ShardId sid) {
-  if (sharded_.empty())
+  if (sharded_.empty()) {
     sharded_.resize(shard_set->size());
+    for (size_t i = 0; i < sharded_.size(); i++) {
+      sharded_[i].reply_size_total_ptr = &tl_facade_stats->reply_stats.squashing_current_reply_size;
+    }
+  }
 
   auto& sinfo = sharded_[sid];
   if (!sinfo.local_tx) {
@@ -133,7 +137,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(const StoredC
   return need_flush ? SquashResult::SQUASHED_FULL : SquashResult::SQUASHED;
 }
 
-bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, const StoredCmd* cmd) {
+bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const StoredCmd* cmd) {
   DCHECK(order_.empty());  // check no squashed chain is interrupted
 
   auto args = cmd->ArgList(&tmp_keylist_);
@@ -161,7 +165,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
   DCHECK(!sinfo.dispatched.empty());
 
   auto* local_tx = sinfo.local_tx.get();
-  facade::CapturingReplyBuilder crb(ReplyMode::FULL, resp_v);
+  CapturingReplyBuilder crb(ReplyMode::FULL, resp_v);
   ConnectionContext local_cntx{cntx_, local_tx};
   if (cntx_->conn()) {
     local_cntx.skip_acl_validation = cntx_->conn()->IsPrivileged();
@@ -169,14 +173,21 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
 
   CmdArgVec arg_vec;
 
+  auto move_reply = [&sinfo](CapturingReplyBuilder::Payload&& src,
+                             CapturingReplyBuilder::Payload* dst) {
+    *dst = std::move(src);
+    size_t sz = Size(*dst);
+    sinfo.reply_size_delta += sz;
+    sinfo.reply_size_total_ptr->fetch_add(sz, std::memory_order_relaxed);
+  };
+
   for (auto& dispatched : sinfo.dispatched) {
     auto args = dispatched.cmd->ArgList(&arg_vec);
     if (opts_.verify_commands) {
       // The shared context is used for state verification, the local one is only for replies
       if (auto err = service_->VerifyCommandState(dispatched.cmd->Cid(), args, *cntx_); err) {
         crb.SendError(std::move(*err));
-        dispatched.reply = crb.Take();
-        sinfo.total_reply_size += Size(dispatched.reply);
+        move_reply(crb.Take(), &dispatched.reply);
         continue;
       }
     }
@@ -188,8 +199,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     service_->InvokeCmd(dispatched.cmd->Cid(), args,
                         CommandContext{local_cntx.transaction, &crb, &local_cntx});
 
-    dispatched.reply = crb.Take();
-    sinfo.total_reply_size += Size(dispatched.reply);
+    move_reply(crb.Take(), &dispatched.reply);
 
     // Assert commands made no persistent state changes to stub context state
     const auto& local_state = local_cntx.conn_state;
@@ -248,9 +258,9 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
 
   size_t total_reply_size = 0;
   for (auto& sinfo : sharded_) {
-    total_reply_size += sinfo.total_reply_size;
+    total_reply_size += sinfo.reply_size_delta;
   }
-  fresh_ss->stats.current_reply_size += total_reply_size;
+
   for (auto idx : order_) {
     auto& sinfo = sharded_[idx];
     DCHECK_LT(sinfo.reply_id, sinfo.dispatched.size());
@@ -265,7 +275,9 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   uint64_t after_reply = proactor->GetMonotonicTimeNs();
   fresh_ss->stats.multi_squash_exec_hop_usec += (after_hop - start) / 1000;
   fresh_ss->stats.multi_squash_exec_reply_usec += (after_reply - after_hop) / 1000;
-  fresh_ss->stats.current_reply_size -= total_reply_size;
+
+  tl_facade_stats->reply_stats.squashing_current_reply_size.fetch_sub(total_reply_size,
+                                                                      std::memory_order_release);
 
   for (auto& sinfo : sharded_) {
     sinfo.dispatched.clear();
