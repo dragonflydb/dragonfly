@@ -45,6 +45,8 @@ class JsonFamily {
   static void Set(CmdArgList args, const CommandContext& cmd_cntx);
   static void MSet(CmdArgList args, const CommandContext& cmd_cntx);
   static void Merge(CmdArgList args, const CommandContext& cmd_cntx);
+
+  static void TEST_GetMemoryUsage(CmdArgList args, const CommandContext& cmd_cntx);
 };
 
 }  // namespace dfly

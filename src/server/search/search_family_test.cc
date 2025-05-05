@@ -2753,4 +2753,33 @@ TEST_F(SearchFamilyTest, RenameDocumentBetweenIndices) {
   EXPECT_EQ(Run({"rename", "idx2:{doc}1", "idx1:{doc}1"}), "OK");
 }
 
+TEST_F(SearchFamilyTest, JsonDelIndexesBug) {
+  auto resp = Run({"JSON.SET", "j1", "$", R"({"text":"some text"})"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run(
+      {"FT.CREATE", "index", "ON", "json", "SCHEMA", "$.text", "AS", "text", "TEXT", "SORTABLE"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.DEL", "j1", "$.text"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"FT.AGGREGATE", "index", "*", "GROUPBY", "1", "@text"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("text", ArgType(RespExpr::NIL))));
+}
+
+TEST_F(SearchFamilyTest, JsonSetIndexesBug) {
+  auto resp = Run({"JSON.SET", "j1", "$", R"({"text":"some text"})"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run(
+      {"FT.CREATE", "index", "ON", "json", "SCHEMA", "$.text", "AS", "text", "TEXT", "SORTABLE"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "j1", "$", R"({"asd}"})"});
+  EXPECT_THAT(resp, ErrArg("ERR failed to parse JSON"));
+
+  resp = Run({"FT.AGGREGATE", "index", "*", "GROUPBY", "1", "@text"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("text", "some text")));
+}
 }  // namespace dfly
