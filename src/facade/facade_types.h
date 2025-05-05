@@ -140,7 +140,13 @@ struct ReplyStats {
   absl::flat_hash_map<std::string, uint64_t> err_count;
   size_t script_error_count = 0;
 
+  // This variable can be updated directly from shard threads when they allocate memory for replies.
+  std::atomic<size_t> squashing_current_reply_size{0};
+
+  ReplyStats() = default;
+  ReplyStats(ReplyStats&& other) noexcept;
   ReplyStats& operator+=(const ReplyStats& other);
+  ReplyStats& operator=(const ReplyStats& other);
 };
 
 struct FacadeStats {
