@@ -166,6 +166,7 @@ class DbSlice {
     // Wrap members in a struct to auto generate operator=
     struct Fields {
       DestructorAction action = DestructorAction::kDoNothing;
+      SlotId slot = 0;
 
       DbSlice* db_slice = nullptr;
       DbIndex db_ind = 0;
@@ -338,8 +339,8 @@ class DbSlice {
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
 
-  // Delete a key referred by its iterator.
-  void PerformDeletion(Iterator del_it, DbTable* table);
+  // Delete a key referred by its iterator. If slot is nullopt it will be calculated automatically
+  void PerformDeletion(Iterator del_it, DbTable* table, std::optional<SlotId> slot = std::nullopt);
 
   // Deletes the iterator. The iterator must be valid.
   void Del(Context cntx, Iterator it);
@@ -540,7 +541,7 @@ class DbSlice {
 
  private:
   void PreUpdateBlocking(DbIndex db_ind, Iterator it);
-  void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
+  void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size, SlotId slot);
 
   bool DelEmptyPrimeValue(const Context& cntx, Iterator it);
 
@@ -560,7 +561,8 @@ class DbSlice {
   // Clear tiered storage entries for the specified indices.
   void ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbTableArray& db_arr);
 
-  void PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable* table);
+  void PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable* table,
+                             std::optional<SlotId> slot = std::nullopt);
 
   // Queues invalidation message to the clients that are tracking the change to a key.
   void QueueInvalidationTrackingMessageAtomic(std::string_view key);
@@ -585,7 +587,7 @@ class DbSlice {
 
   OpResult<PrimeItAndExp> FindInternal(const Context& cntx, std::string_view key,
                                        std::optional<unsigned> req_obj_type,
-                                       UpdateStatsMode stats_mode) const;
+                                       UpdateStatsMode stats_mode, SlotId slot) const;
   OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,
                                              std::optional<unsigned> req_obj_type);
 

@@ -79,6 +79,10 @@ SlotId KeySlot(std::string_view key) {
   return crc16(tag.data(), tag.length()) & kMaxSlotNum;
 }
 
+SlotId KeySlotOr(std::string_view key, SlotId default_value) {
+  return IsClusterEnabledOrEmulated() ? KeySlot(key) : default_value;
+}
+
 bool IsClusterShardedByTag() {
   return IsClusterEnabledOrEmulated() || LockTagOptions::instance().enabled;
 }

@@ -83,9 +83,9 @@ DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
       expire(0, detail::ExpireTablePolicy{}, mr),
       mcflag(0, detail::ExpireTablePolicy{}, mr),
       index(db_index) {
-  if (IsClusterEnabled()) {
-    slots_stats.reset(new SlotStats[kMaxSlotNum + 1]);
-  }
+  // if cluster is not enabled we assume that we have only one slot to make code simpler
+  auto slots_stats_size = IsClusterEnabled() ? kMaxSlotNum + 1 : 1;
+  slots_stats_.reset(new SlotStats[slots_stats_size]);
   thread_index = ServerState::tlocal()->thread_index();
 }
 
@@ -108,6 +108,10 @@ PrimeIterator DbTable::Launder(PrimeIterator it, string_view key) {
     it = prime.Find(key);
   }
   return it;
+}
+
+SlotStats& DbTable::GetSlotStats(SlotId slot) {
+  return IsClusterEnabled() ? slots_stats_[slot] : slots_stats_[0];
 }
 
 }  // namespace dfly

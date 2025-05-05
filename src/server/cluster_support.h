@@ -55,6 +55,9 @@ class UniqueSlotChecker {
 
 SlotId KeySlot(std::string_view key);
 
+// if !IsClusterEnabled() returns default_value
+SlotId KeySlotOr(std::string_view key, SlotId default_value);
+
 void InitializeCluster();
 
 inline bool IsClusterEnabled() {
