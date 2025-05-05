@@ -18,9 +18,10 @@ namespace dfly {
 
 // Buffered single-shard journal streamer that listens for journal changes with a
 // journal listener and writes them to a destination sink in a separate fiber.
-class JournalStreamer {
+class JournalStreamer : public journal::JournalConsumerInterface {
  public:
-  JournalStreamer(journal::Journal* journal, ExecutionState* cntx);
+  enum class SendLsn { NO = 0, YES = 1 };
+  JournalStreamer(journal::Journal* journal, ExecutionState* cntx, SendLsn send_lsn);
   virtual ~JournalStreamer();
 
   // Self referential.
@@ -28,7 +29,9 @@ class JournalStreamer {
   JournalStreamer(JournalStreamer&& other) = delete;
 
   // Register journal listener and start writer in fiber.
-  virtual void Start(util::FiberSocketBase* dest, bool send_lsn);
+  virtual void Start(util::FiberSocketBase* dest);
+
+  void ConsumeJournalChange(const journal::JournalItem& item);
 
   // Must be called on context cancellation for unblocking
   // and manual cleanup.
@@ -48,7 +51,7 @@ class JournalStreamer {
   void ThrottleIfNeeded();
 
   virtual bool ShouldWrite(const journal::JournalItem& item) const {
-    return cntx_->IsRunning();
+    return cntx_->IsRunning() && item.opcode != journal::Op::NOOP;
   }
 
   void WaitForInflightToComplete();
@@ -68,8 +71,10 @@ class JournalStreamer {
 
   size_t in_flight_bytes_ = 0, total_sent_ = 0;
   time_t last_lsn_time_ = 0;
+  LSN last_lsn_writen_ = 0;
   util::fb2::EventCount waker_;
   uint32_t journal_cb_id_{0};
+  SendLsn send_lsn_;
 };
 
 // Serializes existing DB as RESTORE commands, and sends updates as regular commands.
@@ -80,7 +85,7 @@ class RestoreStreamer : public JournalStreamer {
                   ExecutionState* cntx);
   ~RestoreStreamer() override;
 
-  void Start(util::FiberSocketBase* dest, bool send_lsn = false) override;
+  void Start(util::FiberSocketBase* dest) override;
 
   void Run();
 

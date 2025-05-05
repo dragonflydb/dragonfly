@@ -2959,12 +2959,15 @@ async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFa
     await fill_task
 
 
-@pytest.mark.skip("temporarily skipped")
 async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     """
     This test reproduces a bug in the JSON memory tracking.
     """
-    master = df_factory.create(proactor_threads=2, serialization_max_chunk_size=1)
+    master = df_factory.create(
+        proactor_threads=2,
+        serialization_max_chunk_size=1,
+        vmodule="replica=2,dflycmd=2,snapshot=1,rdb_save=1,rdb_load=1,journal_slice=2",
+    )
     replicas = [df_factory.create(proactor_threads=2) for i in range(2)]
 
     # Start instances and connect clients
@@ -2982,6 +2985,7 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
 
     seeder = SeederV2(key_target=50_000)
     fill_task = asyncio.create_task(seeder.run(master.client()))
+    await asyncio.sleep(0.2)
 
     for replica in c_replicas:
         await replica.execute_command(f"REPLICAOF LOCALHOST {master.port}")
