@@ -363,7 +363,16 @@ GenericError ExecutionState::GetError() const {
 }
 
 void ExecutionState::ReportCancelError() {
-  ReportError(std::make_error_code(errc::operation_canceled), "ExecutionState cancelled");
+  std::string cancel_reason = "ExecutionState cancelled";
+
+  // Add additional information about the reason for cancellation, if possible
+  // Possible to extract from system errors or context
+  std::error_code sys_err = std::error_code(errno, std::system_category());
+  if (sys_err && sys_err != std::errc::operation_canceled) {
+    absl::StrAppend(&cancel_reason, " due to system error: ", sys_err.message());
+  }
+
+  ReportError(std::make_error_code(errc::operation_canceled), cancel_reason);
 }
 
 void ExecutionState::Reset(ErrHandler handler) {

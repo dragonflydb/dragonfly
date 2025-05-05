@@ -22,6 +22,7 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/redis_parser.h"
+#include "facade/socket_utils.h"
 #include "server/error.h"
 #include "server/journal/executor.h"
 #include "server/journal/serializer.h"
@@ -234,6 +235,8 @@ void ProtocolClient::CloseSocket() {
 }
 
 void ProtocolClient::DefaultErrorHandler(const GenericError& err) {
+  LOG(WARNING) << "Socket error: " << err.Format() << " in " << server_context_.Description()
+               << ", socket info: " << GetSocketInfo(sock_->native_handle());
   CloseSocket();
 }
 
