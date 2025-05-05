@@ -156,18 +156,12 @@ void JournalSlice::CallOnChange(const JournalItem& item) {
   // Hence this lock prevents the UnregisterOnChange to start running in the middle of CallOnChange.
   // CallOnChange is atomic iff JournalSlice::SetFlushMode(false) is called before.
   std::shared_lock lk(cb_mu_);
-
-  const size_t size = journal_consumers_arr_.size();
-  auto k_v = journal_consumers_arr_.begin();
-  for (size_t i = 0; i < size; ++i) {
-    k_v->second->ConsumeJournalChange(item);
-    ++k_v;
+  for (auto k_v : journal_consumers_arr_) {
+    k_v.second->ConsumeJournalChange(item);
   }
-  k_v = journal_consumers_arr_.begin();
   if (enable_journal_flush_) {
-    for (size_t i = 0; i < size; ++i) {
-      k_v->second->ThrottleIfNeeded();
-      ++k_v;
+    for (auto k_v : journal_consumers_arr_) {
+      k_v.second->ThrottleIfNeeded();
     }
   }
 }

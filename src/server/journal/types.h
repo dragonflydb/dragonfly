@@ -90,7 +90,9 @@ struct JournalItem {
 struct JournalConsumerInterface {
   virtual ~JournalConsumerInterface() = default;
 
+  // Receives a journal change for serializing
   virtual void ConsumeJournalChange(const JournalItem& item) = 0;
+  // Waits for writing the serialized data
   virtual void ThrottleIfNeeded() = 0;
 };
 
