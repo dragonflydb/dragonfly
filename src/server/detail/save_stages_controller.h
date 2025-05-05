@@ -77,7 +77,7 @@ class RdbSnapshot {
 };
 
 struct SaveStagesController : public SaveStagesInputs {
-  SaveStagesController(SaveStagesInputs&& input);
+  SaveStagesController(SaveStagesInputs&& input, bool is_bg_save = false);
   // Objects of this class are used concurrently. Call this function
   // in a mutually exlusive context to avoid data races.
   // Also call this function before any call to `WaitAllSnapshots`
@@ -96,6 +96,10 @@ struct SaveStagesController : public SaveStagesInputs {
   size_t GetSaveBuffersSize();
   uint32_t GetCurrentSaveDuration();
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
+
+  bool IsBgSave() const {
+    return is_bg_save_;
+  }
 
  private:
   // In the new version (.dfs) we store a file for every shard and one more summary file.
@@ -126,7 +130,6 @@ struct SaveStagesController : public SaveStagesInputs {
 
   void RunStage(void (SaveStagesController::*cb)(unsigned));
 
- private:
   time_t start_time_;
   std::filesystem::path full_path_;
 
@@ -135,6 +138,7 @@ struct SaveStagesController : public SaveStagesInputs {
 
   absl::flat_hash_map<string_view, size_t> rdb_name_map_;
   util::fb2::Mutex rdb_name_map_mu_;
+  bool is_bg_save_ = false;
 };
 
 GenericError ValidateFilename(const std::filesystem::path& filename, bool new_version);

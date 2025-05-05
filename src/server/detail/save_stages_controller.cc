@@ -164,9 +164,10 @@ void RdbSnapshot::StartInShard(EngineShard* shard) {
   started_shards_.fetch_add(1, memory_order_relaxed);
 }
 
-SaveStagesController::SaveStagesController(SaveStagesInputs&& inputs)
+SaveStagesController::SaveStagesController(SaveStagesInputs&& inputs, bool is_bg_save)
     : SaveStagesInputs{std::move(inputs)} {
   start_time_ = time(NULL);
+  is_bg_save_ = is_bg_save;
 }
 
 SaveStagesController::~SaveStagesController() {

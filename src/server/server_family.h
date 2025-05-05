@@ -341,7 +341,8 @@ class ServerFamily {
   void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
 
   GenericError DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts, Transaction* trans,
-                                   bool ignore_state = false) ABSL_LOCKS_EXCLUDED(save_mu_);
+                                   bool ignore_state = false, bool bg_save = false)
+      ABSL_LOCKS_EXCLUDED(save_mu_);
 
   GenericError WaitUntilSaveFinished(Transaction* trans,
                                      bool ignore_state = false) ABSL_NO_THREAD_SAFETY_ANALYSIS;
@@ -395,6 +396,9 @@ class ServerFamily {
 
   // protected by save_mu_
   util::fb2::Fiber bg_save_fb_;
+  // false if last attempt failed
+  bool last_bgsave_status_ = true;
+  bool bgsave_in_progress_ = false;
 
   mutable util::fb2::Mutex peak_stats_mu_;
   mutable PeakStats peak_stats_;

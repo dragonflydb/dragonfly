@@ -1707,7 +1707,8 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
 }
 
 GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts,
-                                               Transaction* trans, bool ignore_state) {
+                                               Transaction* trans, bool ignore_state,
+                                               bool bg_save) {
   auto state = ServerState::tlocal()->gstate();
 
   // In some cases we want to create a snapshot even if server is not active, f.e in takeover
@@ -1726,9 +1727,11 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
                                 ? snapshot_storage_
                                 : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
 
-    save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
-        save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
-        &service_, fq_threadpool_.get(), snapshot_storage});
+    save_controller_ = make_unique<SaveStagesController>(
+        detail::SaveStagesInputs{save_cmd_opts.new_version, save_cmd_opts.cloud_uri,
+                                 save_cmd_opts.basename, trans, &service_, fq_threadpool_.get(),
+                                 snapshot_storage},
+        true);
 
     auto res = save_controller_->InitResourcesAndStart();
 
@@ -1736,7 +1739,14 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
       DCHECK_EQ(res->error, true);
       last_save_info_.SetLastSaveError(*res);
       save_controller_.reset();
+      if (bg_save) {
+        last_bgsave_status_ = false;
+      }
       return res->error;
+    }
+
+    if (bg_save) {
+      bgsave_in_progress_ = true;
     }
   }
   return {};
@@ -1750,6 +1760,11 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   {
     util::fb2::LockGuard lk(save_mu_);
     save_info = save_controller_->Finalize();
+
+    if (save_controller_->IsBgSave()) {
+      bgsave_in_progress_ = false;
+      last_bgsave_status_ = save_info.error ? false : true;
+    }
 
     if (save_info.error) {
       last_save_info_.SetLastSaveError(save_info);
@@ -2182,7 +2197,7 @@ void ServerFamily::BgSave(CmdArgList args, const CommandContext& cmd_cntx) {
     return;
   }
 
-  if (auto ec = DoSaveCheckAndStart(*maybe_res, cmd_cntx.tx); ec) {
+  if (auto ec = DoSaveCheckAndStart(*maybe_res, cmd_cntx.tx, false, true); ec) {
     cmd_cntx.rb->SendError(ec.Format());
     return;
   }
@@ -2620,6 +2635,13 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       append(StrCat("rdb_", k_v.first), k_v.second);
     }
     append("rdb_changes_since_last_success_save", m.events.update);
+
+    {
+      util::fb2::LockGuard lk{save_mu_};
+      append("rdb_bgsave_in_progress", bgsave_in_progress_ == true ? 1 : 0);
+      std::string val = last_bgsave_status_ == true ? "ok" : "err";
+      append("rdb_last_bgsave_status", val);
+    }
 
     // when last failed save
     append("last_failed_save", save_info.last_error_time);
