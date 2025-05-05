@@ -8,7 +8,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "server/cluster/cluster_defs.h"
+#include "server/engine_shard.h"
 #include "server/journal/cmd_serializer.h"
 #include "server/server_state.h"
 #include "util/fibers/synchronization.h"
@@ -302,6 +302,7 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
 }
 
 bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
+  auto& shard_stats = EngineShard::tlocal()->stats();
   bool written = false;
 
   if (!it.is_done() && it.GetVersion() < snapshot_version_) {
@@ -313,7 +314,8 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
       const auto& pv = it->second;
       string_view key = it->first.GetSlice(&key_buffer);
       if (ShouldWrite(key)) {
-        stats_.keys_written++;
+        ++stats_.keys_written;
+        ++shard_stats.total_migrated_keys;
         uint64_t expire = 0;
         if (pv.HasExpire()) {
           auto eit = db_slice_->databases()[0]->expire.Find(it->first);

@@ -2810,6 +2810,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
   if (should_enter("CLUSTER")) {
     append("cluster_enabled", IsClusterEnabledOrEmulated());
     append("migration_errors_total", service_.cluster_family().MigrationsErrorsCount());
+    append("total_migrated_keys", m.shard_stats.total_migrated_keys);
   }
 
   return info;
