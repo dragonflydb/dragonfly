@@ -75,10 +75,7 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   if (stream_journal) {
     auto* journal = db_slice_->shard_owner()->journal();
     DCHECK(journal);
-    auto journal_cb = [this](const journal::JournalItem& item, bool await) {
-      OnJournalEntry(item, await);
-    };
-    journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
+    journal_cb_id_ = journal->RegisterOnChange(this);
   }
 
   const auto flush_threshold = ServerState::tlocal()->serialization_max_chunk_size;
@@ -228,10 +225,7 @@ void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
   if (journal->GetLsn() == lsn) {
     std::ignore = serializer_->SendFullSyncCut();
 
-    auto journal_cb = [this](const journal::JournalItem& item, bool await) {
-      OnJournalEntry(item, await);
-    };
-    journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
+    journal_cb_id_ = journal->RegisterOnChange(this);
     PushSerialized(true);
   } else {
     // We stopped but we didn't manage to send the whole stream.
@@ -416,7 +410,7 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 // transaction.
 // allow_flush is controlled by Journal::SetFlushMode
 // (usually it's true unless we are in the middle of a critical section that can not preempt).
-void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool allow_flush) {
+void SliceSnapshot::ConsumeJournalChange(const journal::JournalItem& item) {
   {
     // We grab the lock in case we are in the middle of serializing a bucket, so it serves as a
     // barrier here for atomic serialization.
@@ -425,12 +419,10 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool allow_
       std::ignore = serializer_->WriteJournalEntry(item.data);
     }
   }
+}
 
-  if (allow_flush) {
-    // This is the only place that flushes in streaming mode
-    // once the iterate buckets fiber finished.
-    PushSerialized(false);
-  }
+void SliceSnapshot::ThrottleIfNeeded() {
+  PushSerialized(false);
 }
 
 size_t SliceSnapshot::GetBufferCapacity() const {

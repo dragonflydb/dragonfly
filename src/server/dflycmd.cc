@@ -617,9 +617,8 @@ void DflyCmd::StartStableSyncInThread(FlowInfo* flow, ExecutionState* exec_st, E
   DCHECK(shard);
   DCHECK(flow->conn);
 
-  flow->streamer.reset(new JournalStreamer(sf_->journal(), exec_st));
-  bool send_lsn = flow->version >= DflyVersion::VER4;
-  flow->streamer->Start(flow->conn->socket(), send_lsn);
+  flow->streamer.reset(new JournalStreamer(sf_->journal(), exec_st, JournalStreamer::SendLsn::YES));
+  flow->streamer->Start(flow->conn->socket());
 
   // Register cleanup.
   flow->cleanup = [flow]() {

@@ -87,7 +87,12 @@ struct JournalItem {
   std::optional<SlotId> slot;
 };
 
-using ChangeCallback = std::function<void(const JournalItem&, bool await)>;
+struct JournalConsumerInterface {
+  virtual ~JournalConsumerInterface() = default;
+
+  virtual void ConsumeJournalChange(const JournalItem& item) = 0;
+  virtual void ThrottleIfNeeded() = 0;
+};
 
 }  // namespace journal
 }  // namespace dfly

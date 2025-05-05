@@ -157,28 +157,35 @@ void JournalSlice::CallOnChange(const JournalItem& item) {
   // CallOnChange is atomic iff JournalSlice::SetFlushMode(false) is called before.
   std::shared_lock lk(cb_mu_);
 
-  const size_t size = change_cb_arr_.size();
-  auto k_v = change_cb_arr_.begin();
+  const size_t size = journal_consumers_arr_.size();
+  auto k_v = journal_consumers_arr_.begin();
   for (size_t i = 0; i < size; ++i) {
-    k_v->second(item, enable_journal_flush_);
+    k_v->second->ConsumeJournalChange(item);
     ++k_v;
+  }
+  k_v = journal_consumers_arr_.begin();
+  if (enable_journal_flush_) {
+    for (size_t i = 0; i < size; ++i) {
+      k_v->second->ThrottleIfNeeded();
+      ++k_v;
+    }
   }
 }
 
-uint32_t JournalSlice::RegisterOnChange(ChangeCallback cb) {
+uint32_t JournalSlice::RegisterOnChange(JournalConsumerInterface* consumer) {
   // mutex lock isn't needed due to iterators are not invalidated
   uint32_t id = next_cb_id_++;
-  change_cb_arr_.emplace_back(id, std::move(cb));
+  journal_consumers_arr_.emplace_back(id, std::move(consumer));
   return id;
 }
 
 void JournalSlice::UnregisterOnChange(uint32_t id) {
   // we need to wait until callback is finished before remove it
   lock_guard lk(cb_mu_);
-  auto it = find_if(change_cb_arr_.begin(), change_cb_arr_.end(),
+  auto it = find_if(journal_consumers_arr_.begin(), journal_consumers_arr_.end(),
                     [id](const auto& e) { return e.first == id; });
-  CHECK(it != change_cb_arr_.end());
-  change_cb_arr_.erase(it);
+  CHECK(it != journal_consumers_arr_.end());
+  journal_consumers_arr_.erase(it);
 }
 
 }  // namespace journal
