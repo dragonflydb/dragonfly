@@ -47,7 +47,7 @@ struct Entry;
 // and submitting all values to an output sink.
 // In journal streaming mode, the snapshot continues submitting changes
 // over the sink until explicitly stopped.
-class SliceSnapshot {
+class SliceSnapshot : public journal::JournalConsumerInterface {
  public:
   // Represents a target for receiving snapshot data.
   struct SnapshotDataConsumerInterface {
@@ -102,6 +102,10 @@ class SliceSnapshot {
   size_t GetTempBuffersSize() const;
 
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
+
+  // Journal listener
+  void ConsumeJournalChange(const journal::JournalItem& item);
+  void ThrottleIfNeeded();
 
  private:
   // Main snapshotting fiber that iterates over all buckets in the db slice

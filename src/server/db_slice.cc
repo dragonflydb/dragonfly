@@ -1167,7 +1167,6 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
   }
 
   auto& db = db_arr_[cntx.db_index];
-
   auto expire_it = db->expire.Find(it->first);
 
   if (IsValid(expire_it)) {
@@ -1183,6 +1182,9 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
                 << ", expire table size: " << db->expire.size()
                 << ", prime table size: " << db->prime.size() << util::fb2::GetStacktrace();
   }
+
+  DCHECK(shard_owner()->shard_lock()->Check(IntentLock::Mode::EXCLUSIVE))
+      << util::fb2::GetStacktrace();
 
   string scratch;
   string_view key = it->first.GetSlice(&scratch);

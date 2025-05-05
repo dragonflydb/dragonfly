@@ -43,11 +43,11 @@ class JournalSlice {
   // added to the journal.
   // The callback receives the entry and a boolean that indicates whether
   // awaiting (to apply backpressure) is allowed.
-  uint32_t RegisterOnChange(ChangeCallback cb);
+  uint32_t RegisterOnChange(JournalConsumerInterface* consumer);
   void UnregisterOnChange(uint32_t);
 
   bool HasRegisteredCallbacks() const {
-    return !change_cb_arr_.empty();
+    return !journal_consumers_arr_.empty();
   }
 
   /// Returns whether the journal entry with this LSN is available
@@ -70,7 +70,7 @@ class JournalSlice {
   base::IoBuf ring_serialize_buf_;
 
   mutable util::fb2::SharedMutex cb_mu_;  // to prevent removing callback during call
-  std::list<std::pair<uint32_t, ChangeCallback>> change_cb_arr_;
+  std::list<std::pair<uint32_t, JournalConsumerInterface*>> journal_consumers_arr_;
 
   LSN lsn_ = 1;
 

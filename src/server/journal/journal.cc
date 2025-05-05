@@ -58,8 +58,8 @@ error_code Journal::Close() {
   return {};
 }
 
-uint32_t Journal::RegisterOnChange(ChangeCallback cb) {
-  return journal_slice.RegisterOnChange(cb);
+uint32_t Journal::RegisterOnChange(JournalConsumerInterface* consumer) {
+  return journal_slice.RegisterOnChange(consumer);
 }
 
 void Journal::UnregisterOnChange(uint32_t id) {
