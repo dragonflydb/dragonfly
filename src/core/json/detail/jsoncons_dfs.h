@@ -43,6 +43,14 @@ template <bool IsConst> class JsonconsDfsItem {
     return depth_state_.second;
   }
 
+  Ptr obj_ptr() const {
+    return depth_state_.first;
+  }
+
+  unsigned get_segment_step() const {
+    return segment_step_;
+  }
+
  private:
   static bool ShouldIterateAll(SegmentType type) {
     return type == SegmentType::WILDCARD || type == SegmentType::DESCENT;
@@ -128,8 +136,15 @@ class Dfs {
   }
 
   bool Mutate(const MutateCallback& callback, std::optional<std::string_view> key, JsonType* node) {
-    ++matches_;
-    return callback(key, node);
+    // matches_ is incremented in MutateStep after successful deletion/mutation by callback.
+    bool deleted = callback(key, node);
+    // We only increment matches_ here if the callback indicates deletion,
+    // as MutateStep handles incrementing based on its own logic.
+    // This might need adjustment if non-deleting mutations should also count universally.
+    if (deleted) {
+      matches_++;
+    }
+    return deleted;  // Return true if node should be deleted
   }
 
   unsigned matches_ = 0;

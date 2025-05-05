@@ -1,0 +1,100 @@
+name: Mastodon ruby tests
+on:
+  schedule:
+    - cron: '0 6 * * *' # run at 6 AM UTC
+  workflow_dispatch:
+
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    name: Build and run tests
+
+    services:
+      postgres:
+        image: postgres:14-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10ms
+          --health-timeout 3s
+          --health-retries 50
+        ports:
+          - 5432:5432
+
+      redis:
+        image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10ms
+          --health-timeout 3s
+          --health-retries 50
+        ports:
+          - 6379:6379
+
+    env:
+      DB_HOST: localhost
+      DB_USER: postgres
+      DB_PASS: postgres
+      RAILS_ENV: test
+      ALLOW_NOPAM: true
+      PAM_ENABLED: true
+      PAM_DEFAULT_SERVICE: pam_test
+      PAM_CONTROLLED_SERVICE: pam_test_controlled
+      OIDC_ENABLED: true
+      OIDC_SCOPE: read
+      SAML_ENABLED: true
+      CAS_ENABLED: true
+      BUNDLE_WITH: 'pam_authentication test'
+      GITHUB_RSPEC: false
+
+    steps:
+      - name: Checkout mastodon
+        uses: actions/checkout@v4
+        with:
+          repository: mastodon/mastodon
+      - name: Install pre-requisites
+        run: |
+          sudo apt update
+          sudo apt install -y libicu-dev libidn11-dev libvips42 ffmpeg imagemagick libpam-dev
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.4
+          bundler-cache: true
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+      - name: Enable corepack
+        shell: bash
+        run: corepack enable
+      - name: Install all production yarn packages
+        shell: bash
+        run: yarn workspaces focus --production
+      - name: Precompile assets
+        run: |-
+          bin/rails assets:precompile
+      - name: Load database schema
+        run: |
+          bin/rails db:setup
+          bin/flatware fan bin/rails db:test:prepare
+      - name: Run tests
+        env:
+          SPEC_OPTS: '--exclude-pattern "**/self_destruct_scheduler_spec.rb"'
+        run: |
+          unset COVERAGE
+          bin/flatware rspec -r ./spec/flatware_helper.rb
+      - name: Notify on failures
+        if: failure()
+        shell: bash
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="Mastodon ruby tests failed.\\n The commit is: ${{github.sha}}.\\n Job Link: ${job_link}\\n"
+          curl -s \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+            -d '{"text": "'"${message}"'"}'

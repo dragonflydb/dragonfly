@@ -130,6 +130,9 @@ ABSL_FLAG(bool, info_replication_valkey_compatible, true,
 ABSL_FLAG(bool, managed_service_info, false,
           "Hides some implementation details from users when true (i.e. in managed service env)");
 
+ABSL_FLAG(string, availability_zone, "",
+          "server availability zone, used by clients to read from local-zone replicas");
+
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(uint32_t, hz);
@@ -1311,6 +1314,20 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
                             conn_stats.pipelined_cmd_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
+
+  AppendMetricWithoutLabels("cmd_squash_hop_total", "", m.coordinator_stats.multi_squash_executions,
+                            MetricType::COUNTER, &resp->body());
+
+  AppendMetricWithoutLabels("cmd_squash_commands_total", "", m.coordinator_stats.squashed_commands,
+                            MetricType::COUNTER, &resp->body());
+
+  AppendMetricWithoutLabels("cmd_squash_hop_duration_seconds", "",
+                            m.coordinator_stats.multi_squash_exec_hop_usec * 1e-6,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("cmd_squash_hop_reply_seconds", "",
+                            m.coordinator_stats.multi_squash_exec_reply_usec * 1e-6,
+                            MetricType::COUNTER, &resp->body());
+
   AppendMetricWithoutLabels("commands_squashing_replies_bytes", "",
                             MultiCommandSquasher::GetRepliesMemSize(), MetricType::GAUGE,
                             &resp->body());
@@ -2207,7 +2224,10 @@ void ServerFamily::ResetStat(Namespace* ns) {
   shard_set->pool()->AwaitBrief(
       [registry = service_.mutable_registry(), ns](unsigned index, auto*) {
         registry->ResetCallStats(index);
-        ns->GetCurrentDbSlice().ResetEvents();
+        EngineShard* shard = EngineShard::tlocal();
+        if (shard) {
+          ns->GetDbSlice(shard->shard_id()).ResetEvents();
+        }
         facade::ResetStats();
         ServerState::tlocal()->exec_freq_count.clear();
       });
@@ -2378,6 +2398,12 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("multiplexing_api", multiplex_api);
     append("tcp_port", GetFlag(FLAGS_port));
 
+    // Add availability_zone if it's not empty
+    const auto& az = GetFlag(FLAGS_availability_zone);
+    if (!az.empty()) {
+      append("availability_zone", az);
+    }
+
     uint64_t uptime = time(NULL) - start_time_;
     append("uptime_in_seconds", uptime);
     append("uptime_in_days", uptime / (3600 * 24));
@@ -2477,7 +2503,6 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("total_commands_processed", conn_stats.command_cnt_main + conn_stats.command_cnt_other);
     append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
-    append("total_pipelined_squashed_commands", m.coordinator_stats.squashed_commands);
     append("pipeline_throttle_total", conn_stats.pipeline_throttle_count);
     append("pipelined_latency_usec", conn_stats.pipelined_cmd_latency);
     append("total_net_input_bytes", conn_stats.io_read_bytes);
@@ -2619,9 +2644,6 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("eval_shardlocal_coordination_total",
            m.coordinator_stats.eval_shardlocal_coordination_cnt);
     append("eval_squashed_flushes", m.coordinator_stats.eval_squashed_flushes);
-    append("multi_squash_execution_total", m.coordinator_stats.multi_squash_executions);
-    append("multi_squash_execution_hop_usec", m.coordinator_stats.multi_squash_exec_hop_usec);
-    append("multi_squash_execution_reply_usec", m.coordinator_stats.multi_squash_exec_reply_usec);
   };
 
   auto add_repl_info = [&] {
@@ -2882,8 +2904,12 @@ void ServerFamily::Hello(CmdArgList args, const CommandContext& cmd_cntx) {
     rb->SetRespVersion(RespVersion::kResp2);
   }
 
+  // Define number of fields in the response - add availability_zone if flag is not empty
+  const auto& az = GetFlag(FLAGS_availability_zone);
+  const int fields_count = az.empty() ? 7 : 8;
+
   SinkReplyBuilder::ReplyAggregator agg(rb);
-  rb->StartCollection(7, RedisReplyBuilder::MAP);
+  rb->StartCollection(fields_count, RedisReplyBuilder::MAP);
   rb->SendBulkString("server");
   rb->SendBulkString("redis");
   rb->SendBulkString("version");
@@ -2898,6 +2924,12 @@ void ServerFamily::Hello(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendBulkString(GetRedisMode());
   rb->SendBulkString("role");
   rb->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
+
+  // Add availability_zone to the response if flag is explicitly set and not empty
+  if (!az.empty()) {
+    rb->SendBulkString("availability_zone");
+    rb->SendBulkString(az);
+  }
 }
 
 void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2924,7 +2956,7 @@ void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx)
     cmd_cntx.rb->SendError(ec.Format());
     return;
   }
-  add_replica->StartMainReplicationFiber();
+  add_replica->StartMainReplicationFiber(nullopt);
   cluster_replicas_.push_back(std::move(add_replica));
   cmd_cntx.rb->SendOk();
 }
@@ -2932,6 +2964,7 @@ void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx)
 void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                                      ActionOnConnectionFail on_err) {
   std::shared_ptr<Replica> new_replica;
+  std::optional<Replica::LastMasterSyncData> last_master_data;
   {
     util::fb2::LockGuard lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
 
@@ -2955,7 +2988,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
         CHECK(replica_);
 
         SetMasterFlagOnAllThreads(true);  // Flip flag before clearing replica
-        replica_->Stop();
+        last_master_data_ = replica_->Stop();
         replica_.reset();
 
         StopAllClusterReplicas();
@@ -2968,8 +3001,9 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
     }
 
     // If any replication is in progress, stop it, cancellation should kick in immediately
+
     if (replica_)
-      replica_->Stop();
+      last_master_data = replica_->Stop();
     StopAllClusterReplicas();
 
     // First, switch into the loading state
@@ -3025,8 +3059,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
   // If we are called by "Replicate", tx will be null but we do not need
   // to flush anything.
   if (on_err == ActionOnConnectionFail::kReturnOnError) {
-    Drakarys(tx, DbSlice::kDbAll);
-    new_replica->StartMainReplicationFiber();
+    new_replica->StartMainReplicationFiber(last_master_data);
   }
   builder->SendOk();
 }
@@ -3099,7 +3132,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
 
   LOG(INFO) << "Takeover successful, promoting this instance to master.";
   SetMasterFlagOnAllThreads(true);
-  replica_->Stop();
+  last_master_data_ = replica_->Stop();
   replica_.reset();
   return builder->SendOk();
 }

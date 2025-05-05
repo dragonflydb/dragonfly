@@ -300,12 +300,14 @@ OpStatus OpPersist(const OpArgs& op_args, string_view key);
 
 class Renamer {
  public:
-  Renamer(Transaction* t, std::string_view src_key, std::string_view dest_key, unsigned shard_count)
+  Renamer(Transaction* t, std::string_view src_key, std::string_view dest_key, unsigned shard_count,
+          bool do_copy = false)
       : transaction_(t),
         src_key_(src_key),
         dest_key_(dest_key),
         src_sid_(Shard(src_key, shard_count)),
-        dest_sid_(Shard(dest_key, shard_count)) {
+        dest_sid_(Shard(dest_key, shard_count)),
+        do_copy_(do_copy) {
   }
 
   ErrorReply Rename(bool destination_should_not_exist);
@@ -337,6 +339,7 @@ class Renamer {
 
   bool src_found_ = false;
   bool dest_found_ = false;
+  bool do_copy_ = false;
 
   SerializedValue serialized_value_;
 };
@@ -366,7 +369,7 @@ ErrorReply Renamer::Rename(bool destination_should_not_exist) {
 void Renamer::FetchData() {
   auto cb = [this](Transaction* t, EngineShard* shard) {
     auto args = t->GetShardArgs(shard->shard_id());
-    DCHECK_EQ(1u, args.Size());
+    DCHECK(1 == args.Size() || do_copy_);
 
     const ShardId shard_id = shard->shard_id();
 
@@ -388,7 +391,7 @@ void Renamer::FinalizeRename() {
   auto cb = [this](Transaction* t, EngineShard* shard) {
     const ShardId shard_id = shard->shard_id();
 
-    if (shard_id == src_sid_) {
+    if (!do_copy_ && shard_id == src_sid_) {
       return DelSrc(t, shard);
     }
 
@@ -644,13 +647,14 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   PrimeTable::Cursor cur = *cursor;
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
 
-  size_t buckets_iterated = 0;
-  // 10k Traverses
-  const size_t limit = 10000;
+  const auto start = absl::Now();
+  // Don't allow it to monopolize cpu time.
+  const absl::Duration timeout = absl::Milliseconds(10);
+
   do {
     cur = prime_table->Traverse(
         cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, vec); });
-  } while (cur && cnt < scan_opts.limit && buckets_iterated++ < limit);
+  } while (cur && cnt < scan_opts.limit && (absl::Now() - start) < timeout);
 
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();
   *cursor = cur.value();
@@ -868,6 +872,9 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     op_args.shard->search_indices()->RemoveDoc(to_key, op_args.db_cntx, to_res.it->second);
     is_prior_list = (to_res.it->second.ObjType() == OBJ_LIST);
   }
+
+  // Delete the "from" document from the search index before deleting from the database
+  op_args.shard->search_indices()->RemoveDoc(from_key, op_args.db_cntx, from_res.it->second);
 
   bool sticky = from_res.it->first.IsSticky();
   uint64_t exp_ts = db_slice.ExpireTime(from_res.exp_it);
@@ -1650,6 +1657,24 @@ void GenericFamily::RenameNx(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
+void GenericFamily::Copy(CmdArgList args, const CommandContext& cmd_cntx) {
+  CmdArgParser parser(args);
+  auto [k1, k2] = parser.Next<std::string_view, std::string_view>();
+  bool replace = parser.Check("REPLACE");
+
+  if (!parser.Finalize()) {
+    return cmd_cntx.rb->SendError(parser.Error()->MakeReply());
+  }
+
+  if (k1 == k2) {
+    cmd_cntx.rb->SendError("source and destination objects are the same");
+    return;
+  }
+
+  Renamer renamer(cmd_cntx.tx, k1, k2, shard_set->size(), true);
+  cmd_cntx.rb->SendError(renamer.Rename(!replace));
+}
+
 void GenericFamily::ExpireTime(CmdArgList args, const CommandContext& cmd_cntx) {
   ExpireTimeGeneric(args, TimeUnit::SEC, cmd_cntx.tx, cmd_cntx.rb);
 }
@@ -1865,6 +1890,7 @@ constexpr uint32_t kKeys = KEYSPACE | READ | SLOW | DANGEROUS;
 constexpr uint32_t kPExpireAt = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kPExpire = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kRename = KEYSPACE | WRITE | SLOW;
+constexpr uint32_t kCopy = KEYSPACE | WRITE | SLOW;
 constexpr uint32_t kRenamNX = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kSelect = FAST | CONNECTION;
 constexpr uint32_t kScan = KEYSPACE | READ | SLOW;
@@ -1899,17 +1925,18 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"TOUCH", CO::READONLY | CO::FAST, -2, 1, -1, acl::kTouch}.HFUNC(Exists)
       << CI{"EXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -3, 1, 1, acl::kExpire}.HFUNC(
              Expire)
-      << CI{"EXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kExpireAt}.HFUNC(
+      << CI{"EXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -3, 1, 1, acl::kExpireAt}.HFUNC(
              ExpireAt)
       << CI{"PERSIST", CO::WRITE | CO::FAST, 2, 1, 1, acl::kPersist}.HFUNC(Persist)
       << CI{"KEYS", CO::READONLY, 2, 0, 0, acl::kKeys}.HFUNC(Keys)
-      << CI{"PEXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kPExpireAt}.HFUNC(
-             PexpireAt)
-      << CI{"PEXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kPExpire}.HFUNC(
+      << CI{"PEXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -3, 1, 1, acl::kPExpireAt}
+             .HFUNC(PexpireAt)
+      << CI{"PEXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -3, 1, 1, acl::kPExpire}.HFUNC(
              Pexpire)
       << CI{"FIELDEXPIRE", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kFieldExpire}.HFUNC(
              FieldExpire)
       << CI{"RENAME", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRename}.HFUNC(Rename)
+      << CI{"COPY", CO::WRITE | CO::NO_AUTOJOURNAL, -3, 1, 2, acl::kCopy}.HFUNC(Copy)
       << CI{"RENAMENX", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRenamNX}.HFUNC(RenameNx)
       << CI{"SELECT", kSelectOpts, 2, 0, 0, acl::kSelect}.HFUNC(Select)
       << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, acl::kScan}.HFUNC(Scan)

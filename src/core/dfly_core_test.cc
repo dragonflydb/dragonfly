@@ -155,6 +155,7 @@ TEST_F(StringMatchTest, Basic) {
 
   // Wildcards
   EXPECT_EQ(MatchLen("*", "hello", 0), 1);
+  EXPECT_EQ(MatchLen("*", "1234567890123456", 0), 1);
   EXPECT_EQ(MatchLen("h*", "hello", 0), 1);
   EXPECT_EQ(MatchLen("h*", "abc", 0), 0);
   EXPECT_EQ(MatchLen("h*o", "hello", 0), 1);
@@ -221,6 +222,26 @@ static void BM_ParseDoubleAbsl(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_ParseDoubleAbsl);
+
+template <clockid_t cid> void BM_ClockType(benchmark::State& state) {
+  timespec ts;
+  while (state.KeepRunning()) {
+    DoNotOptimize(clock_gettime(cid, &ts));
+  }
+}
+
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_REALTIME);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_MONOTONIC);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_PROCESS_CPUTIME_ID);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_THREAD_CPUTIME_ID);
+
+// These clocks are not available on apple platform
+#if !defined(__APPLE__)
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_REALTIME_COARSE);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_MONOTONIC_COARSE);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_BOOTTIME);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_BOOTTIME_ALARM);
+#endif
 
 static void BM_MatchGlob(benchmark::State& state) {
   string random_val = GetRandomHex(state.range(0));

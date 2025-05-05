@@ -12,6 +12,7 @@ Checks: >
   performance*,
   cert*,
   -cert-err58-cpp,
+  -cert-dcl58-cpp,  # Ignore std changes
   # Doesn't work with abseil flags
   clang-analyzer*,
   google-*,
@@ -81,4 +82,9 @@ Checks: >
 # modernize-use-nullptr,
 # modernize-use-equals-default,
 # readability-qualified-auto,
-cppcoreguidelines-narrowing-conversions.WarnOnIntegerNarrowingConversion: 'false'
+
+CheckOptions:
+  - key: bugprone-narrowing-conversions.WarnOnIntegerNarrowingConversion
+    value: false
+  - key: bugprone-narrowing-conversions.WarnOnEquivalentBitWidth
+    value: false

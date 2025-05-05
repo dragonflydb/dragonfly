@@ -28,6 +28,7 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
+#include "facade/cmd_arg_parser.h"
 #include "server/blocking_controller.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
@@ -38,7 +39,6 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
-
 using namespace std;
 
 ABSL_DECLARE_FLAG(string, dir);
@@ -484,6 +484,55 @@ const char* EncodingName(unsigned obj_type, unsigned encoding) {
   return "unknown";
 }
 
+struct IOStat {
+  uint64_t conn_received = 0;
+  uint64_t curr_conn_count = 0;
+  uint64_t cmd_total = 0, pipelined_cmd_total = 0;
+  size_t io_read_bytes = 0;
+  uint64_t io_reads_total = 0;
+
+  void From(const facade::FacadeStats& fs);
+  void Print(RedisReplyBuilder* rb) const;
+
+  IOStat& operator-=(const IOStat& other);
+};
+
+void IOStat::From(const facade::FacadeStats& fs) {
+  conn_received = fs.conn_stats.conn_received_cnt;
+  curr_conn_count = fs.conn_stats.num_conns_main;
+  cmd_total = fs.conn_stats.command_cnt_main;
+  pipelined_cmd_total = fs.conn_stats.pipelined_cmd_cnt;
+  io_read_bytes = fs.conn_stats.io_read_bytes;
+  io_reads_total = fs.conn_stats.io_read_cnt;
+}
+
+void IOStat::Print(RedisReplyBuilder* rb) const {
+  rb->StartCollection(6, RedisReplyBuilder::CollectionType::MAP);
+  rb->SendSimpleString("connections_received");
+  rb->SendLong(conn_received);
+  rb->SendSimpleString("current_conn_count");
+  rb->SendLong(curr_conn_count);
+  rb->SendSimpleString("commands_total");
+  rb->SendLong(cmd_total);
+  rb->SendSimpleString("pipelined_commands_total");
+  rb->SendLong(pipelined_cmd_total);
+  rb->SendSimpleString("io_read_bytes");
+  rb->SendLong(io_read_bytes);
+  rb->SendSimpleString("io_reads_total");
+  rb->SendLong(io_reads_total);
+}
+
+IOStat& IOStat::operator-=(const IOStat& other) {
+  conn_received -= other.conn_received;
+  curr_conn_count -= other.curr_conn_count;
+  cmd_total -= other.cmd_total;
+  pipelined_cmd_total -= other.pipelined_cmd_total;
+  io_read_bytes -= other.io_read_bytes;
+  io_reads_total -= other.io_reads_total;
+
+  return *this;
+}
+
 }  // namespace
 
 DebugCmd::DebugCmd(ServerFamily* owner, cluster::ClusterFamily* cf, ConnectionContext* cntx)
@@ -550,6 +599,9 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "COMPRESSION [type]"
         "    Estimate the compressibility of values of the given type. if no type is given, ",
         "    checks compressibility of keys",
+        "IOSTATS [PS]",
+        "    Prints IO stats per thread. If PS is specified, prints thread-level stats ",
+        "    per second.",
         "HELP",
         "    Prints this help.",
     };
@@ -625,6 +677,9 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
     return Compression(args.subspan(1), builder);
   }
 
+  if (subcmd == "IOSTATS") {
+    return IOStats(args.subspan(1), builder);
+  }
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return builder->SendError(reply, kSyntaxErrType);
 }
@@ -712,105 +767,56 @@ void DebugCmd::Migration(CmdArgList args, facade::SinkReplyBuilder* builder) {
   return builder->SendError(UnknownSubCmd("MIGRATION", "DEBUG"));
 }
 
+enum PopulateFlag { FLAG_RAND, FLAG_TYPE, FLAG_ELEMENTS, FLAG_SLOT, FLAG_EXPIRE, FLAG_UNKNOWN };
+
 // Populate arguments format:
 // required: (total count) (key prefix) (val size)
 // optional: [RAND | TYPE typename | ELEMENTS element num | SLOTS (key value)+ | EXPIRE start end]
 optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
                                                                 facade::SinkReplyBuilder* builder) {
-  if (args.size() < 2) {
-    builder->SendError(UnknownSubCmd("populate", "DEBUG"));
-    return nullopt;
-  }
-
+  CmdArgParser parser(args.subspan(1));
   PopulateOptions options;
-  if (!absl::SimpleAtoi(ArgS(args, 1), &options.total_count)) {
-    builder->SendError(kUintErr);
+
+  options.total_count = parser.Next<uint64_t>();
+  options.prefix = parser.NextOrDefault<string_view>("key");
+  options.val_size = parser.NextOrDefault<uint32_t>(16);
+
+  while (parser.HasNext()) {
+    PopulateFlag flag = parser.MapNext("RAND", FLAG_RAND, "TYPE", FLAG_TYPE, "ELEMENTS",
+                                       FLAG_ELEMENTS, "SLOTS", FLAG_SLOT, "EXPIRE", FLAG_EXPIRE);
+    switch (flag) {
+      case FLAG_RAND:
+        options.populate_random_values = true;
+        break;
+      case FLAG_TYPE:
+        options.type = absl::AsciiStrToUpper(parser.Next<string_view>());
+        break;
+      case FLAG_ELEMENTS:
+        options.elements = parser.Next<uint32_t>();
+        break;
+      case FLAG_SLOT: {
+        auto [start, end] = parser.Next<FInt<0, 16383>, FInt<0, 16383>>();
+        options.slot_range = cluster::SlotRange{SlotId(start), SlotId(end)};
+        break;
+      }
+      case FLAG_EXPIRE: {
+        auto [min_ttl, max_ttl] = parser.Next<uint32_t, uint32_t>();
+        if (min_ttl >= max_ttl) {
+          builder->SendError(kExpiryOutOfRange);
+          (void)parser.Error();
+          return nullopt;
+        }
+        options.expire_ttl_range = std::make_pair(min_ttl, max_ttl);
+        break;
+      }
+      default:
+        LOG(FATAL) << "Unexpected flag in PopulateArgs. Args: " << args;
+        break;
+    }
+  }
+  if (parser.HasError()) {
+    builder->SendError(parser.Error()->MakeReply());
     return nullopt;
-  }
-
-  if (args.size() > 2) {
-    options.prefix = ArgS(args, 2);
-  }
-
-  if (args.size() > 3) {
-    if (!absl::SimpleAtoi(ArgS(args, 3), &options.val_size)) {
-      builder->SendError(kUintErr);
-      return nullopt;
-    }
-  }
-
-  for (size_t index = 4; args.size() > index; ++index) {
-    string str = absl::AsciiStrToUpper(ArgS(args, index));
-    if (str == "RAND") {
-      options.populate_random_values = true;
-    } else if (str == "TYPE") {
-      if (args.size() < index + 2) {
-        builder->SendError(kSyntaxErr);
-        return nullopt;
-      }
-      ++index;
-      options.type = absl::AsciiStrToUpper(ArgS(args, index));
-    } else if (str == "ELEMENTS") {
-      if (args.size() < index + 2) {
-        builder->SendError(kSyntaxErr);
-        return nullopt;
-      }
-      if (!absl::SimpleAtoi(ArgS(args, ++index), &options.elements)) {
-        builder->SendError(kSyntaxErr);
-        return nullopt;
-      }
-    } else if (str == "SLOTS") {
-      if (args.size() < index + 3) {
-        builder->SendError(kSyntaxErr);
-        return nullopt;
-      }
-
-      auto parse_slot = [](string_view slot_str) -> OpResult<uint32_t> {
-        uint32_t slot_id;
-        if (!absl::SimpleAtoi(slot_str, &slot_id)) {
-          return facade::OpStatus::INVALID_INT;
-        }
-        if (slot_id > kMaxSlotNum) {
-          return facade::OpStatus::INVALID_VALUE;
-        }
-        return slot_id;
-      };
-
-      auto start = parse_slot(ArgS(args, ++index));
-      if (start.status() != facade::OpStatus::OK) {
-        builder->SendError(start.status());
-        return nullopt;
-      }
-      auto end = parse_slot(ArgS(args, ++index));
-      if (end.status() != facade::OpStatus::OK) {
-        builder->SendError(end.status());
-        return nullopt;
-      }
-      options.slot_range = cluster::SlotRange{.start = static_cast<SlotId>(start.value()),
-                                              .end = static_cast<SlotId>(end.value())};
-    } else if (str == "EXPIRE") {
-      if (args.size() < index + 3) {
-        builder->SendError(kSyntaxErr);
-        return nullopt;
-      }
-      uint32_t start, end;
-      if (!absl::SimpleAtoi(ArgS(args, ++index), &start)) {
-        builder->SendError(kSyntaxErr);
-        return nullopt;
-      }
-      if (!absl::SimpleAtoi(ArgS(args, ++index), &end)) {
-        builder->SendError(kSyntaxErr);
-        return nullopt;
-      }
-      if (start >= end) {
-        builder->SendError(kExpiryOutOfRange);
-        return nullopt;
-      }
-      options.expire_ttl_range = std::make_pair(start, end);
-    } else {
-      builder->SendError(kSyntaxErr);
-      return nullopt;
-    }
   }
   return options;
 }
@@ -1325,6 +1331,33 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
   rb->SendDouble(ratio);
 }
 
+void DebugCmd::IOStats(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+
+  bool per_second = args.size() > 0 && absl::EqualsIgnoreCase(args[0], "PS");
+  vector<IOStat> stats(shard_set->pool()->size());
+
+  shard_set->pool()->AwaitBrief(
+      [&](unsigned index, ProactorBase*) { stats[index].From(*facade::tl_facade_stats); });
+
+  if (per_second) {
+    ThisFiber::SleepFor(1s);
+    vector<IOStat> stats2(shard_set->pool()->size());
+    shard_set->pool()->AwaitBrief(
+        [&](unsigned index, ProactorBase*) { stats2[index].From(*facade::tl_facade_stats); });
+
+    for (size_t i = 0; i < stats.size(); ++i) {
+      stats2[i] -= stats[i];
+    }
+    stats = std::move(stats2);
+  }
+
+  rb->StartArray(stats.size());
+  for (const auto& stat : stats) {
+    stat.Print(rb);
+  }
+}
+
 void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBatch& batch) {
   boost::intrusive_ptr<Transaction> local_tx =
       new Transaction{sf_.service().mutable_registry()->Find("EXEC")};
@@ -1358,9 +1391,7 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
         args_view.push_back(arg);
       }
       auto args_span = absl::MakeSpan(args_view);
-
-      stub_tx->MultiSwitchCmd(cid);
-      local_cntx.cid = cid;
+      local_cntx.SwitchTxCmd(cid);
       crb.SetReplyMode(ReplyMode::NONE);
       stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span);
 
@@ -1381,8 +1412,7 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
         args_view.push_back(arg);
       }
       auto args_span = absl::MakeSpan(args_view);
-      stub_tx->MultiSwitchCmd(cid);
-      local_cntx.cid = cid;
+      local_cntx.SwitchTxCmd(cid);
       crb.SetReplyMode(ReplyMode::NONE);
       stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span);
       sf_.service().InvokeCmd(cid, args_span, &crb, &local_cntx);

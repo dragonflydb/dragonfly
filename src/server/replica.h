@@ -59,14 +59,18 @@ class Replica : ProtocolClient {
   // Returns true if initial link with master has been established or
   // false if it has failed.
   GenericError Start();
-  void StartMainReplicationFiber();
+  struct LastMasterSyncData {
+    std::string id;
+    std::vector<LSN> last_journal_LSNs;  // lsn for each master shard.
+  };
+  void StartMainReplicationFiber(std::optional<LastMasterSyncData> data);
 
   // Sets the server state to have replication enabled.
   // It is like Start(), but does not attempt to establish
   // a connection right-away, but instead lets MainReplicationFb do the work.
   void EnableReplication(facade::SinkReplyBuilder* builder);
 
-  void Stop();  // thread-safe
+  std::optional<LastMasterSyncData> Stop();  // thread-safe
 
   void Pause(bool pause);
 
@@ -78,15 +82,15 @@ class Replica : ProtocolClient {
 
  private: /* Main standalone mode functions */
   // Coordinate state transitions. Spawned by start.
-  void MainReplicationFb();
+  void MainReplicationFb(std::optional<LastMasterSyncData> data);
 
   std::error_code Greet();  // Send PING and REPLCONF.
 
   std::error_code HandleCapaDflyResp();
   std::error_code ConfigureDflyMaster();
 
-  std::error_code InitiatePSync();     // Redis full sync.
-  std::error_code InitiateDflySync();  // Dragonfly full sync.
+  std::error_code InitiatePSync();                                           // Redis full sync.
+  std::error_code InitiateDflySync(std::optional<LastMasterSyncData> data);  // Dragonfly full sync.
 
   std::error_code ConsumeRedisStream();  // Redis stable state.
   std::error_code ConsumeDflyStream();   // Dragonfly stable state.
@@ -185,7 +189,8 @@ class DflyShardReplica : public ProtocolClient {
   // Start replica initialized as dfly flow.
   // Sets is_full_sync when successful.
   io::Result<bool> StartSyncFlow(util::fb2::BlockingCounter block, ExecutionState* cntx,
-                                 std::optional<LSN>);
+                                 std::optional<LSN>,
+                                 std::optional<Replica::LastMasterSyncData> data);
 
   // Transition into stable state mode as dfly flow.
   std::error_code StartStableSyncFlow(ExecutionState* cntx);

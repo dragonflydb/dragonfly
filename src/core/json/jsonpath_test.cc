@@ -521,6 +521,30 @@ TYPED_TEST(JsonPathTest, Mutate) {
   }
 }
 
+TYPED_TEST(JsonPathTest, MutateRecursiveDescentKey) {
+  ASSERT_EQ(0, this->Parse("$..value"));
+  Path path = this->driver_.TakePath();
+
+  JsonType json = ValidJson<JsonType>(R"({"data":{"value":10,"subdata":{"value":20}}})");
+  JsonType replacement = ValidJson<JsonType>(R"({"value": 30})");
+
+  auto cb = [&](optional<string_view> key, JsonType* val) {
+    if (key && key.value() == "value" && (val->is_int64() || val->is_double())) {
+      *val = replacement;
+      return false;
+    }
+    return false;
+  };
+
+  unsigned reported_matches = MutatePath(path, cb, &json);
+
+  JsonType expected =
+      ValidJson<JsonType>(R"({"data":{"subdata":{"value":{"value":30}},"value":{"value":30}}})");
+
+  EXPECT_EQ(expected, json);
+  EXPECT_EQ(0, reported_matches);
+}
+
 TYPED_TEST(JsonPathTest, SubRange) {
   TypeParam json = ValidJson<TypeParam>(R"({"arr": [1, 2, 3, 4, 5]})");
   ASSERT_EQ(0, this->Parse("$.arr[1:2]"));

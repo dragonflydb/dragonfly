@@ -63,7 +63,8 @@ struct ArgRange {
   ArgRange(ArgRange& range) : ArgRange((const ArgRange&)range) {
   }
 
-  template <typename T> ArgRange(T&& span) : span(std::forward<T>(span)) {
+  template <typename T, std::enable_if_t<!std::is_same_v<ArgRange, T>, bool> = true>
+  ArgRange(T&& span) : span(std::forward<T>(span)) {  // NOLINT google-explicit-constructor)
   }
 
   size_t Size() const {
@@ -163,7 +164,9 @@ struct ErrorReply {
                       std::string_view kind = {})  // to resolve ambiguity of constructors above
       : message{std::string_view{msg}}, kind{kind} {
   }
-  ErrorReply(OpStatus status) : message{}, kind{}, status{status} {
+
+  ErrorReply(OpStatus status)  // NOLINT google-explicit-constructor)
+      : status{status} {
   }
 
   std::string_view ToSv() const {

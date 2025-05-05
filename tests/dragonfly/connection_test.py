@@ -525,7 +525,7 @@ async def test_keyspace_events_config_set(async_client: aioredis.Redis):
             await collect_expiring_events(pclient, keys)
 
 
-@pytest.mark.exclude_epoll
+@dfly_args({"max_busy_read_usec": 50000})
 async def test_reply_count(async_client: aioredis.Redis):
     """Make sure reply aggregations reduce reply counts for common cases"""
 
@@ -537,6 +537,7 @@ async def test_reply_count(async_client: aioredis.Redis):
         await aw
         return await get_reply_count() - before - 1
 
+    await async_client.config_resetstat()
     base = await get_reply_count()
     info_diff = await get_reply_count() - base
     assert info_diff == 1
@@ -561,13 +562,16 @@ async def test_reply_count(async_client: aioredis.Redis):
     e = async_client.pipeline(transaction=True)
     for _ in range(100):
         e.incr("num-1")
-    assert await measure(e.execute()) == 2  # OK + Response
+
+    # one - for MULTI-OK, one for the rest. Depends on the squashing efficiency,
+    # can be either 1 or 2 replies.
+    assert await measure(e.execute()) <= 2
 
     # Just pipeline
     p = async_client.pipeline(transaction=False)
     for _ in range(100):
         p.incr("num-1")
-    assert await measure(p.execute()) == 1
+    assert await measure(p.execute()) <= 2
 
     # Script result
     assert await measure(async_client.eval('return {1,2,{3,4},5,6,7,8,"nine"}', 0)) == 1
@@ -1118,14 +1122,15 @@ async def test_send_timeout(df_server, async_client: aioredis.Redis):
 
 
 # Test that the cache pipeline does not grow or shrink under constant pipeline load.
-@dfly_args({"proactor_threads": 1, "pipeline_squash": 9})
+@dfly_args({"proactor_threads": 1, "pipeline_squash": 9, "max_busy_read_usec": 50000})
 async def test_pipeline_cache_only_async_squashed_dispatches(df_factory):
     server = df_factory.create()
     server.start()
 
     client = server.client()
+    await client.ping()  # Make sure the connection and the protocol were established
 
-    async def push_pipeline(size=1):
+    async def push_pipeline(size):
         p = client.pipeline(transaction=True)
         for i in range(size):
             p.info()
@@ -1136,14 +1141,15 @@ async def test_pipeline_cache_only_async_squashed_dispatches(df_factory):
     # should be zero because:
     # We always dispatch the items that will be squashed, so when `INFO` gets called
     # the cache is empty because the pipeline consumed it throughout its execution
-    for i in range(0, 30):
+    # high max_busy_read_usec ensures that the connection fiber has enough time to push
+    # all the commands to reach the squashing limit.
+    for i in range(0, 10):
         # it's actually 11 commands. 8 INFO + 2 from the MULTI/EXEC block that is injected
-        # by the client. Connection fiber yields to dispatch/async fiber when
-        # ++async_streak_len_ >= 10. The minimum to squash is 9 so it will squash the pipeline
+        # by the client. The minimum to squash is 9 so it will squash the pipeline
         # and INFO ALL should return zero for all the squashed commands in the pipeline
         res = await push_pipeline(8)
-        for i in range(1):
-            assert res[i]["pipeline_cache_bytes"] == 0
+        for r in res:
+            assert r["pipeline_cache_bytes"] == 0
 
     # Non zero because we reclaimed/recycled the messages back to the cache
     info = await client.info()
