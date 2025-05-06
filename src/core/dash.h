@@ -12,22 +12,6 @@
 namespace dfly {
 
 // DASH: Dynamic And Scalable Hashing.
-// TODO: We could name it DACHE: Dynamic and Adaptive caCHE.
-// After all, we added additional improvements we added as part of the dragonfly project,
-// that probably justify a right to choose our own name for this data structure.
-struct BasicDashPolicy {
-  enum { kSlotNum = 12, kBucketNum = 64 };
-  static constexpr bool kUseVersion = false;
-
-  template <typename U> static void DestroyValue(const U&) {
-  }
-  template <typename U> static void DestroyKey(const U&) {
-  }
-
-  template <typename U, typename V> static bool Equal(U&& u, V&& v) {
-    return u == v;
-  }
-};
 
 template <typename _Key, typename _Value, typename Policy>
 class DashTable : public detail::DashTableBase {
@@ -245,8 +229,6 @@ class DashTable : public detail::DashTableBase {
   // that existed at the beginning of traversal.
   template <typename Cb> Cursor TraverseBuckets(Cursor curs, Cb&& cb);
 
-  Cursor AdvanceCursorBucketOrder(Cursor cursor);
-
   // Traverses over a single bucket in table and calls cb(iterator). The traverse order will be
   // segment by segment over physical backets.
   // traverse by segment order does not guarantees coverage if the table grows/shrinks, it is useful
@@ -315,6 +297,9 @@ class DashTable : public detail::DashTableBase {
     kInsertIfNotFound,
     kForceInsert,
   };
+
+  Cursor AdvanceCursorBucketOrder(Cursor cursor);
+
   template <typename U, typename V, typename EvictionPolicy>
   std::pair<iterator, bool> InsertInternal(U&& key, V&& value, EvictionPolicy& policy,
                                            InsertMode mode);
@@ -344,16 +329,16 @@ class DashTable<_Key, _Value, Policy>::Iterator {
 
   Owner* owner_;
   uint32_t seg_id_;
-  uint8_t bucket_id_;
+  detail::PhysicalBid bucket_id_;
   uint8_t slot_id_;
 
   friend class DashTable;
 
-  Iterator(Owner* me, uint32_t seg_id, uint8_t bid, uint8_t sid)
+  Iterator(Owner* me, uint32_t seg_id, detail::PhysicalBid bid, uint8_t sid)
       : owner_(me), seg_id_(seg_id), bucket_id_(bid), slot_id_(sid) {
   }
 
-  Iterator(Owner* me, uint32_t seg_id, uint8_t bid)
+  Iterator(Owner* me, uint32_t seg_id, detail::PhysicalBid bid)
       : owner_(me), seg_id_(seg_id), bucket_id_(bid), slot_id_(0) {
     Seek2Occupied();
   }
@@ -442,12 +427,6 @@ class DashTable<_Key, _Value, Policy>::Iterator {
     return owner_->segment_[seg_id_]->GetVersion(bucket_id_);
   }
 
-  // Returns the minimum version of the physical bucket that this iterator points to.
-  // Note: In an ideal world I would introduce a bucket iterator...
-  /*template <bool B = Policy::kUseVersion> std::enable_if_t<B, uint64_t> MinVersion() const {
-    return owner_->segment_[seg_id_]->MinVersion(bucket_id_);
-  }*/
-
   template <bool B = Policy::kUseVersion> std::enable_if_t<B> SetVersion(uint64_t v) {
     return owner_->segment_[seg_id_]->SetVersion(bucket_id_, v);
   }
@@ -470,7 +449,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
     return detail::DashCursor(owner_->global_depth_, seg_id_, bucket_id_);
   }
 
-  unsigned bucket_id() const {
+  detail::PhysicalBid bucket_id() const {
     return bucket_id_;
   }
 
@@ -573,7 +552,7 @@ void DashTable<_Key, _Value, Policy>::CVCUponInsert(uint64_t ver_threshold, cons
     return;
   }
 
-  static_assert(SegmentType::kTotalBuckets < 0xFF, "");
+  static_assert(SegmentType::kTotalBuckets < 0xFF);
 
   // Segment is full, we need to return the whole segment, because it can be split
   // and its entries can be reshuffled into different buckets.

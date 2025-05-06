@@ -76,6 +76,19 @@ struct Buf24 {
   }
 };
 
+struct BasicDashPolicy {
+  enum { kSlotNum = 12, kBucketNum = 64, kStashBucketNum = 2 };
+  static constexpr bool kUseVersion = false;
+
+  template <typename U> static void DestroyValue(const U&) {
+  }
+  template <typename U> static void DestroyKey(const U&) {
+  }
+
+  template <typename U, typename V> static bool Equal(U&& u, V&& v) {
+    return u == v;
+  }
+};
 struct UInt64Policy : public BasicDashPolicy {
   static uint64_t HashFn(uint64_t v) {
     return XXH3_64bits(&v, sizeof(v));
