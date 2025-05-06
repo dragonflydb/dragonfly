@@ -8,6 +8,7 @@
 #include "core/string_or_view.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/op_status.h"
+#include "server/cluster_support.h"
 #include "server/common.h"
 #include "server/conn_context.h"
 #include "server/table.h"
@@ -339,8 +340,8 @@ class DbSlice {
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
 
-  // Delete a key referred by its iterator. If slot is nullopt it will be calculated automatically
-  void PerformDeletion(Iterator del_it, DbTable* table, std::optional<SlotId> slot = std::nullopt);
+  // Delete a key referred by its iterator.
+  void PerformDeletion(Iterator del_it, DbTable* table, SlotId slot_hint = kNoSlotId);
 
   // Deletes the iterator. The iterator must be valid.
   void Del(Context cntx, Iterator it);
@@ -562,7 +563,7 @@ class DbSlice {
   void ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbTableArray& db_arr);
 
   void PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable* table,
-                             std::optional<SlotId> slot = std::nullopt);
+                             SlotId slot_hint = kNoSlotId);
 
   // Queues invalidation message to the clients that are tracking the change to a key.
   void QueueInvalidationTrackingMessageAtomic(std::string_view key);
@@ -587,7 +588,8 @@ class DbSlice {
 
   OpResult<PrimeItAndExp> FindInternal(const Context& cntx, std::string_view key,
                                        std::optional<unsigned> req_obj_type,
-                                       UpdateStatsMode stats_mode, SlotId slot) const;
+                                       UpdateStatsMode stats_mode,
+                                       SlotId slot_hint = kNoSlotId) const;
   OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,
                                              std::optional<unsigned> req_obj_type);
 

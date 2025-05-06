@@ -483,7 +483,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx, string_view key,
                                                              std::optional<unsigned> req_obj_type) {
-  SlotId key_slot = KeySlotOr(key, 0);
+  SlotId key_slot = KeySlot(key);
   auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kMutableStats, key_slot);
   if (!res.ok()) {
     return res.status();
@@ -509,14 +509,14 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
 }
 
 DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) const {
-  auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kReadStats, KeySlotOr(key, 0));
+  auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kReadStats);
   return {ConstIterator(res->it, StringOrView::FromView(key)),
           ExpConstIterator(res->exp_it, StringOrView::FromView(key))};
 }
 
 OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
                                                        unsigned req_obj_type) const {
-  auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kReadStats, KeySlotOr(key, 0));
+  auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kReadStats);
   if (res.ok()) {
     return ConstIterator(res->it, StringOrView::FromView(key));
   }
@@ -569,7 +569,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
       break;
     case UpdateStatsMode::kReadStats:
       events_.hits++;
-      db.GetSlotStats(slot).total_reads++;
+      db.GetSlotStats(KeySlotIfNoSlotId(key, slot)).total_reads++;
       if (res.it->second.IsExternal()) {
         if (res.it->second.IsCool())
           events_.ram_cool_hits++;
@@ -611,7 +611,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
   DbTable& db = *db_arr_[cntx.db_index];
 
-  SlotId key_slot = KeySlotOr(key, 0);
+  SlotId key_slot = KeySlot(key);
   auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kMutableStats, key_slot);
 
   if (res.ok()) {
@@ -1638,7 +1638,7 @@ size_t DbSlice::StopSampleKeys(DbIndex db_ind) {
 }
 
 void DbSlice::PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable* table,
-                                    optional<SlotId> slot) {
+                                    SlotId slot) {
   FiberAtomicGuard guard;
   size_t table_before = table->table_memory();
   if (!exp_it.is_done()) {
@@ -1666,9 +1666,9 @@ void DbSlice::PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable
   ssize_t value_heap_size = pv.MallocUsed(), key_size_used = del_it->first.MallocUsed();
   stats.inline_keys -= del_it->first.IsInline();
 
-  slot = slot ? slot : KeySlotOr(del_it.key(), 0);
-  AccountObjectMemory(*slot, del_it->first.ObjType(), -key_size_used, table);  // Key
-  AccountObjectMemory(*slot, pv.ObjType(), -value_heap_size, table);           // Value
+  slot = KeySlotIfNoSlotId(del_it.key(), slot);
+  AccountObjectMemory(slot, del_it->first.ObjType(), -key_size_used, table);  // Key
+  AccountObjectMemory(slot, pv.ObjType(), -value_heap_size, table);           // Value
 
   if (del_it->first.IsAsyncDelete() && pv.ObjType() == OBJ_SET &&
       pv.Encoding() == kEncodingStrMap2) {
@@ -1684,7 +1684,7 @@ void DbSlice::PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable
     }
   }  // del_it->first.IsAsyncDelete()
 
-  table->GetSlotStats(*slot).key_count--;
+  table->GetSlotStats(slot).key_count--;
 
   table->prime.Erase(del_it.GetInnerIt());
 
@@ -1701,7 +1701,7 @@ void DbSlice::PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable
   }
 }
 
-void DbSlice::PerformDeletion(Iterator del_it, DbTable* table, optional<SlotId> slot) {
+void DbSlice::PerformDeletion(Iterator del_it, DbTable* table, SlotId slot) {
   ExpIterator exp_it;
   if (del_it->second.HasExpire()) {
     exp_it = ExpIterator::FromPrime(table->expire.Find(del_it->first));

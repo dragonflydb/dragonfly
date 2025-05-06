@@ -26,6 +26,8 @@ extern bool cluster_shard_by_slot;
 
 using SlotId = std::uint16_t;
 constexpr SlotId kMaxSlotNum = 0x3FFF;
+// kNoSlotId - if slot wasn't set at all
+constexpr SlotId kNoSlotId = kMaxSlotNum + 1;
 
 // A simple utility class that "aggregates" SlotId-s and can tell whether all inputs were the same.
 // Only works when cluster is enabled.
@@ -45,8 +47,6 @@ class UniqueSlotChecker {
   }
 
  private:
-  // kNoSlotId - if slot wasn't set at all
-  static constexpr SlotId kNoSlotId = kMaxSlotNum + 1;
   // kCrossSlot - if several different slots were set
   static constexpr SlotId kCrossSlot = kNoSlotId + 1;
 
@@ -55,8 +55,8 @@ class UniqueSlotChecker {
 
 SlotId KeySlot(std::string_view key);
 
-// if !IsClusterEnabled() returns default_value
-SlotId KeySlotOr(std::string_view key, SlotId default_value);
+// calculate slot if slot == kNoSlotId
+SlotId KeySlotIfNoSlotId(std::string_view key, SlotId slot);
 
 void InitializeCluster();
 
