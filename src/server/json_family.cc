@@ -54,34 +54,6 @@ using CI = CommandId;
 
 namespace {
 
-class JsonMemTracker {
- public:
-  JsonMemTracker() {
-    start_size_ = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
-  }
-
-  void SetJsonSize(PrimeValue& pv, bool is_op_set) {
-    const size_t current = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
-    int64_t diff = static_cast<int64_t>(current) - static_cast<int64_t>(start_size_);
-    // If the diff is 0 it means the object use the same memory as before. No action needed.
-    if (diff == 0) {
-      return;
-    }
-    // If op_set_ it means we JSON.SET or JSON.MSET was called. This is a blind update,
-    // and because the operation sets the size to 0 we also need to include the size of
-    // the pointer.
-    if (is_op_set) {
-      diff += static_cast<int64_t>(mi_usable_size(pv.GetJson()));
-    }
-    pv.SetJsonSize(diff);
-    // Under any flow we must not end up with this special value.
-    DCHECK(pv.MallocUsed() != 0);
-  }
-
- private:
-  size_t start_size_{0};
-};
-
 /* Helper class which must be initialized before any mutate operations on json.
   It will track the memory usage of the json object and update the size in the CompactObj.
   It also contains indexes updates, post update operations on the iterator. */
@@ -106,6 +78,8 @@ class JsonAutoUpdater {
 
   void SetJsonSize() {
     set_size_was_called_ = true;
+
+    ShrinkJsonIfNeeded();
 
     const size_t current = GetMemoryUsage();
     int64_t diff = static_cast<int64_t>(current) - static_cast<int64_t>(start_size_);
@@ -143,6 +117,16 @@ class JsonAutoUpdater {
  private:
   size_t GetMemoryUsage() const {
     return static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
+  }
+
+  /* Shrinks the json object to fit its current size.
+     Sometimes after mutating the json object, it may have more capacity than needed.
+     This method will reduce the capacity to fit the current size. */
+  void ShrinkJsonIfNeeded() {
+    auto json = GetJson();
+    if (json->size() * 2 < json->capacity()) {
+      json->shrink_to_fit();
+    }
   }
 
  private:
@@ -1060,29 +1044,24 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
     return 0;
   }
 
-  PrimeValue& pv = it_res->it->second;
-  JsonType* json_val = pv.GetJson();
-
-  JsonMemTracker tracker;
-  absl::Cleanup update_size_on_exit([tracker, &pv]() mutable { tracker.SetJsonSize(pv, false); });
-
   if (json_path.HoldsJsonPath()) {
+    JsonAutoUpdater updater(op_args, key, *std::move(it_res), true);
     const json::Path& path = json_path.AsJsonPath();
     long deletions = json::MutatePath(
-        path, [](optional<string_view>, JsonType* val) { return true; }, json_val);
+        path, [](optional<string_view>, JsonType* val) { return true; }, updater.GetJson());
     return deletions;
   }
 
+  // Allocates memory for the deletion_items.
+  // So we need to initialize JsonAutoUpdater after this callback
   vector<string> deletion_items;
-  auto cb = [&](std::optional<std::string_view> path, JsonType* val) -> MutateCallbackResult<> {
-    deletion_items.emplace_back(*path);
+  auto cb = [&deletion_items](string_view path, const JsonType& val) -> Nothing {
+    deletion_items.emplace_back(path);
     return {};
   };
 
-  auto res = json_path.ExecuteMutateCallback<Nothing>(
-      json_val, std::move(cb), CallbackResultOptions::DefaultMutateOptions());
-  RETURN_ON_BAD_STATUS(res);
-
+  auto res = json_path.ExecuteReadOnlyCallback<Nothing>(
+      it_res->it->second.GetJson(), cb, CallbackResultOptions::DefaultReadOnlyOptions());
   if (deletion_items.empty()) {
     return 0;
   }
@@ -1097,12 +1076,16 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
     patch.emplace_back(patch_item);
   }
 
+  JsonAutoUpdater updater(op_args, key, *std::move(it_res));
+
   std::error_code ec;
-  jsoncons::jsonpatch::apply_patch(*json_val, patch, ec);
+  jsoncons::jsonpatch::apply_patch(*updater.GetJson(), patch, ec);
   if (ec) {
     VLOG(1) << "Failed to apply patch on json with error: " << ec.message();
     return 0;
   }
+
+  updater.SetJsonSize();
 
   // SetString(op_args, key, j.as_string());
   return total_deletions;
