@@ -409,7 +409,7 @@ std::optional<std::string> ConvertJsonPathToJsonPointer(string_view json_path) {
   for (const auto& node : path) {
     const auto& type = node.type();
     if (type == json::SegmentType::IDENTIFIER) {
-      pointer += '/' + node.identifier();
+      absl::StrAppend(&pointer, "/"sv, node.identifier());
     } else if (type == json::SegmentType::INDEX) {
       const auto& index = node.index();
 
@@ -419,7 +419,7 @@ std::optional<std::string> ConvertJsonPathToJsonPointer(string_view json_path) {
         return std::nullopt;
       }
 
-      pointer += '/' + std::to_string(node.index().first);
+      absl::StrAppend(&pointer, "/"sv, node.index().first);
     } else {
       VLOG(2) << "Error during conversion of JSONPath to JSONPointer: " << json_path
               << ". Unsupported segment type.";
