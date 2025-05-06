@@ -24,11 +24,12 @@ namespace dfly {
 class MultiCommandSquasher {
  public:
   struct Opts {
-    bool verify_commands = false;   // Whether commands need to be verified before execution
-    bool error_abort = false;       // Abort upon receiving error
+    bool verify_commands = false;  // Whether commands need to be verified before execution
+    bool error_abort = false;      // Abort upon receiving error
+    // If MultiCommandSquasher was used from a pipeline and not from multi/exec block
+    bool is_mult_non_atomic = false;
     unsigned max_squash_size = 32;  // How many commands to squash at once
   };
-
   // Returns number of processed commands.
   static size_t Execute(absl::Span<StoredCmd> cmds, facade::RedisReplyBuilder* rb,
                         ConnectionContext* cntx, Service* service, const Opts& opts) {
@@ -39,11 +40,10 @@ class MultiCommandSquasher {
     return current_reply_size_.load(std::memory_order_relaxed);
   }
 
-  static bool IsMultiCommandSquasherOverLimit() {
-    const bool over_limit =
-        throttle_size_limit_ > 0 &&
-        current_reply_size_.load(std::memory_order_relaxed) > throttle_size_limit_;
-    VLOG_IF(2, over_limit) << "MultiCommandSquasher overlimit: " << throttle_size_limit_
+  static bool IsReplySizeOverLimit() {
+    const bool over_limit = reply_size_limit_ > 0 &&
+                            current_reply_size_.load(std::memory_order_relaxed) > reply_size_limit_;
+    VLOG_IF(2, over_limit) << "MultiCommandSquasher overlimit: " << reply_size_limit_
                            << " current reply size " << current_reply_size_;
     return over_limit;
   }
@@ -110,7 +110,7 @@ class MultiCommandSquasher {
   // Used to throttle when memory is tight
   static util::fb2::EventCount ec_;
 
-  static thread_local size_t throttle_size_limit_;
+  static thread_local size_t reply_size_limit_;
 };
 
 }  // namespace dfly

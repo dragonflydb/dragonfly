@@ -270,10 +270,6 @@ class ServerState {  // public struct - to allow initialization.
 
   bool ShouldLogSlowCmd(unsigned latency_usec) const;
 
-  size_t GetTotalShards() const {
-    return total_shards_;
-  }
-
   Stats stats;
 
   bool is_master = true;
@@ -355,7 +351,6 @@ class ServerState {  // public struct - to allow initialization.
 
   uint64_t used_mem_last_update_ = 0;
   MemoryUsageStats memory_stats_cached_;  // thread local cache of used and rss memory current
-  size_t total_shards_;
 
   static __thread ServerState* state_;
 };

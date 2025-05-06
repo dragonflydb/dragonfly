@@ -16,7 +16,9 @@
 #include "server/transaction.h"
 #include "server/tx_base.h"
 
-ABSL_FLAG(size_t, throttle_squashed, 0, "");
+ABSL_FLAG(size_t, squashed_reply_size_limit, 0,
+          "Max bytes allowed for squashing_current_reply_size. If this limit is reached, "
+          "connections dispatching via pipelines will block until this value is decremented.");
 
 namespace dfly {
 
@@ -66,8 +68,8 @@ size_t Size(const facade::CapturingReplyBuilder::Payload& payload) {
 }  // namespace
 
 atomic_uint64_t MultiCommandSquasher::current_reply_size_ = 0;
-thread_local size_t MultiCommandSquasher::throttle_size_limit_ =
-    absl::GetFlag(FLAGS_throttle_squashed) * ServerState::tlocal()->GetTotalShards();
+thread_local size_t MultiCommandSquasher::reply_size_limit_ =
+    absl::GetFlag(FLAGS_squashed_reply_size_limit);
 util::fb2::EventCount MultiCommandSquasher::ec_;
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
@@ -214,8 +216,14 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   if (order_.empty())
     return true;
 
-  MultiCommandSquasher::ec_.await(
-      []() { return !MultiCommandSquasher::IsMultiCommandSquasherOverLimit(); });
+  // Multi non atomic does not lock ahead. So it's safe to preempt while we haven't
+  // really started the transaction.
+  // This is not true for `multi/exec` which uses `Execute()` but locks ahead before it
+  // calls `ScheduleSingleHop` below.
+  // TODO Investigate what are the side effects for allowing it `lock ahead` mode.
+  if (opts_.is_mult_non_atomic) {
+    MultiCommandSquasher::ec_.await([]() { return !MultiCommandSquasher::IsReplySizeOverLimit(); });
+  }
 
   unsigned num_shards = 0;
   for (auto& sd : sharded_) {

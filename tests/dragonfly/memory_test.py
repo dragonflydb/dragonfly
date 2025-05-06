@@ -228,29 +228,26 @@ async def test_cache_eviction_with_rss_deny_oom(
 @pytest.mark.asyncio
 async def test_throttle_on_commands_squashing_replies_bytes(df_factory: DflyInstanceFactory):
     df = df_factory.create(
-        proactor_threads=2, throttle_squashed=500_000_000, vmodule="multi_command_squasher=2"
+        proactor_threads=2,
+        squashed_reply_size_limit=500_000_000,
+        vmodule="multi_command_squasher=2",
     )
     df.start()
 
     client = df.client()
     # 0.5gb
-    await client.execute_command("debug populate 1 test 10000 rand type hash elements 50000")
+    await client.execute_command("debug populate 64 test 3125 rand type hash elements 500")
 
     async def poll():
         # At any point we should not cross this limit
         assert df.rss < 1_500_000_000
         cl = df.client()
-        await cl.execute_command("multi")
-        await cl.execute_command("hgetall test:0")
-        await cl.execute_command("exec")
+        pipe = cl.pipeline(transaction=False)
+        for i in range(64):
+            pipe.execute_command(f"hgetall test:{i}")
 
-    # With the current approach this will overshoot
-    #    await client.execute_command("multi")
-    #    await client.execute_command("hgetall test:0")
-    #    await client.execute_command("hgetall test:0")
-    #    await client.execute_command("hgetall test:0")
-    #    await client.execute_command("hgetall test:0")
-    #    res = await client.execute_command("exec")
+        await pipe.execute()
+
     tasks = []
     for i in range(20):
         tasks.append(asyncio.create_task(poll()))
