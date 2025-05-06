@@ -299,8 +299,8 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
       if (pattern != "*")
         scan_opts.matcher.reset(new GlobMatcher{pattern, true});
     } else if (opt == "TYPE") {
-      auto obj_type = ObjTypeFromString(ArgS(args, i + 1));
-      if (!obj_type) {
+      CompactObjType obj_type = ObjTypeFromString(ArgS(args, i + 1));
+      if (obj_type == kInvalidCompactObjType) {
         return facade::OpStatus::SYNTAX_ERR;
       }
       scan_opts.type_filter = obj_type;

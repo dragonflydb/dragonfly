@@ -1524,13 +1524,13 @@ std::string_view ObjTypeToString(CompactObjType type) {
   return "Invalid type"sv;
 }
 
-std::optional<CompactObjType> ObjTypeFromString(std::string_view sv) {
+CompactObjType ObjTypeFromString(std::string_view sv) {
   for (auto& p : kObjTypeToString) {
     if (absl::EqualsIgnoreCase(sv, p.second)) {
       return p.first;
     }
   }
-  return std::nullopt;
+  return kInvalidCompactObjType;
 }
 
 }  // namespace dfly

@@ -543,7 +543,8 @@ inline bool CompactObj::operator==(std::string_view sv) const {
 
 std::string_view ObjTypeToString(CompactObjType type);
 
-std::optional<CompactObjType> ObjTypeFromString(std::string_view sv);
+// Returns kInvalidCompactObjType if sv is not a valid type.
+CompactObjType ObjTypeFromString(std::string_view sv);
 
 namespace detail {
 
