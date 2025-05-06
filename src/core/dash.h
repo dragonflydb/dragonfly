@@ -16,7 +16,7 @@ namespace dfly {
 // After all, we added additional improvements we added as part of the dragonfly project,
 // that probably justify a right to choose our own name for this data structure.
 struct BasicDashPolicy {
-  enum { kSlotNum = 12, kBucketNum = 64, kStashBucketNum = 2 };
+  enum { kSlotNum = 12, kBucketNum = 64 };
   static constexpr bool kUseVersion = false;
 
   template <typename U> static void DestroyValue(const U&) {
@@ -62,11 +62,11 @@ class DashTable : public detail::DashTableBase {
 
   struct HotspotBuckets {
     static constexpr size_t kRegularBuckets = 4;
-    static constexpr size_t kNumBuckets = kRegularBuckets + Policy::kStashBucketNum;
+    static constexpr size_t kNumBuckets = kRegularBuckets + SegmentType::kStashBucketNum;
 
     struct ByType {
       bucket_iterator regular_buckets[kRegularBuckets];
-      bucket_iterator stash_buckets[Policy::kStashBucketNum];
+      bucket_iterator stash_buckets[SegmentType::kStashBucketNum];
     };
 
     union Probes {
@@ -822,7 +822,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
         hotspot.probes.by_type.regular_buckets[j] = bucket_iterator{this, target_seg_id, bid[j]};
       }
 
-      for (unsigned i = 0; i < Policy::kStashBucketNum; ++i) {
+      for (unsigned i = 0; i < SegmentType::kStashBucketNum; ++i) {
         hotspot.probes.by_type.stash_buckets[i] =
             bucket_iterator{this, target_seg_id, uint8_t(Policy::kBucketNum + i), 0};
       }
