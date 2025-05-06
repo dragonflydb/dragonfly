@@ -118,6 +118,7 @@ cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(geo_family_test dfly_test_lib LABELS DFLY)
 cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
 cxx_test(json_family_test dfly_test_lib LABELS DFLY)
+cxx_test(json_family_memory_test dfly_test_lib LABELS DFLY)
 cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)
 cxx_test(hll_family_test dfly_test_lib LABELS DFLY)
 cxx_test(bloom_family_test dfly_test_lib LABELS DFLY)
@@ -131,6 +132,7 @@ if (WITH_ASAN OR WITH_USAN)
   target_compile_definitions(multi_test PRIVATE SANITIZERS)
   target_compile_definitions(search_family_test PRIVATE SANITIZERS)
   target_compile_definitions(json_family_test PRIVATE SANITIZERS)
+  target_compile_definitions(json_family_memory_test PRIVATE SANITIZERS)
   target_compile_definitions(dragonfly_test PRIVATE SANITIZERS)
 endif()
 cxx_test(search/aggregator_test dfly_test_lib LABELS DFLY)
@@ -142,4 +144,5 @@ add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  generic_family_test memcache_parser_test rdb_test journal_test
                  redis_parser_test stream_family_test string_family_test
                  bitops_family_test set_family_test zset_family_test geo_family_test
-                 hll_family_test cluster_config_test cluster_family_test acl_family_test)
+                 hll_family_test cluster_config_test cluster_family_test acl_family_test
+                 json_family_memory_test)
