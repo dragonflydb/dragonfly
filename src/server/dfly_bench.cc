@@ -72,6 +72,9 @@ ABSL_FLAG(bool, cluster_skip_tags, true,
           "If true, skips tags (compatible with memtier benchmark) in cluster mode, "
           "othewise adds hash tags to keys");
 ABSL_FLAG(bool, ascii, true, "If true, use ascii characters for values");
+ABSL_FLAG(bool, connect_only, false,
+          "If true, will only connect to the server, without sending "
+          "loadtest commands");
 
 using namespace std;
 using namespace util;
@@ -231,7 +234,7 @@ class KeyGenerator {
 
 class CommandGenerator {
  public:
-  CommandGenerator(KeyGenerator* keygen);
+  explicit CommandGenerator(KeyGenerator* keygen);
 
   string Next(SlotRange range);
 
@@ -403,6 +406,7 @@ class Driver {
 
   void Connect(unsigned index, const tcp::endpoint& ep);
   void Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen);
+  void Shutdown();
 
   float done() const {
     if (time_limit_ > 0)
@@ -448,7 +452,9 @@ class TLocalClient {
 
   TLocalClient(const TLocalClient&) = delete;
 
-  void Connect(tcp::endpoint ep, const vector<tcp::endpoint>& shard_endpoints);
+  void Connect(const tcp::endpoint& ep, const vector<tcp::endpoint>& shard_endpoints);
+  void Disconnect();
+
   void Start(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns);
   void Join();
 
@@ -691,7 +697,10 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
   while (!reqs_.empty()) {
     ThisFiber::SleepFor(1ms);
   }
+  Shutdown();
+}
 
+void Driver::Shutdown() {
   std::ignore = socket_->Shutdown(SHUT_RDWR);  // breaks the receive fiber.
   receive_fb_.Join();
   std::ignore = socket_->Close();
@@ -832,8 +841,8 @@ void Driver::ParseMC() {
   }
 }
 
-void TLocalClient::Connect(tcp::endpoint ep, const vector<tcp::endpoint>& endpoints) {
-  VLOG(2) << "Connecting client...";
+void TLocalClient::Connect(const tcp::endpoint& ep, const vector<tcp::endpoint>& endpoints) {
+  VLOG(2) << "Connecting client..." << ep;
 
   unsigned conn_per_shard = GetFlag(FLAGS_c);
   if (shard_slots_->Empty()) {
@@ -854,14 +863,18 @@ void TLocalClient::Connect(tcp::endpoint ep, const vector<tcp::endpoint>& endpoi
       size_t shard = i / conn_per_shard;
       shard_ep = endpoints[shard];
     }
-    fbs[i] = MakeFiber([&, shard_ep, i] {
-      ThisFiber::SetName(StrCat("connect/", i));
-      drivers_[i]->Connect(i, shard_ep);
-    });
+    fbs[i] =
+        fb2::Fiber(StrCat("connect/", i), [&, shard_ep, i] { drivers_[i]->Connect(i, shard_ep); });
   }
 
   for (auto& fb : fbs)
     fb.Join();
+}
+
+void TLocalClient::Disconnect() {
+  for (size_t i = 0; i < drivers_.size(); ++i) {
+    drivers_[i]->Shutdown();
+  }
 }
 
 void TLocalClient::Start(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns) {
@@ -1115,70 +1128,77 @@ int main(int argc, char* argv[]) {
   ShardSlots shard_slots;
   shard_slots.SetClusterSlotRanges(shards);
   std::vector<tcp::endpoint> shard_endpoints = shard_slots.Endpoints();
-
-  pp->AwaitFiberOnAll([&](unsigned index, auto* p) {
+  pp->AwaitBrief([&](unsigned index, auto* p) {
     base::SplitMix64 seed_mix(GetFlag(FLAGS_seed) + index * 0x6a45554a264d72bULL);
     auto seed = seed_mix();
     VLOG(1) << "Seeding bitgen with seed " << seed;
     bit_gen.seed(seed);
+  });
+
+  pp->AwaitFiberOnAll([&](unsigned index, auto* p) {
     client = make_unique<TLocalClient>(p, &shard_slots);
     client->Connect(ep, shard_endpoints);
   });
 
-  const uint32_t key_minimum = GetFlag(FLAGS_key_minimum);
-  const uint32_t key_maximum = GetFlag(FLAGS_key_maximum);
-  CHECK_LE(key_minimum, key_maximum);
-
-  uint32_t thread_key_step = 0;
-  uint32_t qps = abs(GetFlag(FLAGS_qps));
-  bool throttle = GetFlag(FLAGS_qps) > 0;
-  const int64_t interval = qps ? 1'000'000'000LL / qps : 0;
-  uint64_t num_reqs = GetFlag(FLAGS_n);
-
-  uint64_t total_conn_num = GetFlag(FLAGS_c) * pp->size();
-  uint64_t total_requests = num_reqs * total_conn_num;
-  uint32_t time_limit = GetFlag(FLAGS_test_time);
-
-  if (dist_type == SEQUENTIAL) {
-    thread_key_step = std::max(1UL, (key_maximum - key_minimum + 1) / pp->size());
-    if (total_requests > (key_maximum - key_minimum)) {
-      CONSOLE_INFO << "Warning: only " << key_maximum - key_minimum
-                   << " unique entries will be accessed with " << total_requests
-                   << " total requests";
-    }
-  }
-
-  if (!time_limit) {
-    CONSOLE_INFO << "Running " << pp->size() << " threads, sending " << num_reqs
-                 << " requests per each connection, or " << total_requests << " requests overall "
-                 << (throttle ? "with" : "without") << " throttling";
-  }
-  if (interval) {
-    CONSOLE_INFO << "At a rate of " << qps << " rps per connection, i.e. request every "
-                 << interval / 1000 << "us";
-    CONSOLE_INFO << "Overall scheduled RPS: " << qps * total_conn_num;
+  absl::Duration duration;
+  if (absl::GetFlag(FLAGS_connect_only)) {
+    pp->AwaitFiberOnAll([&](unsigned index, auto* p) { client->Disconnect(); });
   } else {
-    CONSOLE_INFO << "Coordinated omission mode - the rate is determined by the server";
+    const uint32_t key_minimum = GetFlag(FLAGS_key_minimum);
+    const uint32_t key_maximum = GetFlag(FLAGS_key_maximum);
+    CHECK_LE(key_minimum, key_maximum);
+
+    uint32_t thread_key_step = 0;
+    uint32_t qps = abs(GetFlag(FLAGS_qps));
+    bool throttle = GetFlag(FLAGS_qps) > 0;
+    const int64_t interval = qps ? 1'000'000'000LL / qps : 0;
+    uint64_t num_reqs = GetFlag(FLAGS_n);
+
+    uint64_t total_conn_num = GetFlag(FLAGS_c) * pp->size();
+    uint64_t total_requests = num_reqs * total_conn_num;
+    uint32_t time_limit = GetFlag(FLAGS_test_time);
+
+    if (dist_type == SEQUENTIAL) {
+      thread_key_step = std::max(1UL, (key_maximum - key_minimum + 1) / pp->size());
+      if (total_requests > (key_maximum - key_minimum)) {
+        CONSOLE_INFO << "Warning: only " << key_maximum - key_minimum
+                     << " unique entries will be accessed with " << total_requests
+                     << " total requests";
+      }
+    }
+
+    if (!time_limit) {
+      CONSOLE_INFO << "Running " << pp->size() << " threads, sending " << num_reqs
+                   << " requests per each connection, or " << total_requests << " requests overall "
+                   << (throttle ? "with" : "without") << " throttling";
+    }
+    if (interval) {
+      CONSOLE_INFO << "At a rate of " << qps << " rps per connection, i.e. request every "
+                   << interval / 1000 << "us";
+      CONSOLE_INFO << "Overall scheduled RPS: " << qps * total_conn_num;
+    } else {
+      CONSOLE_INFO << "Coordinated omission mode - the rate is determined by the server";
+    }
+
+    atomic_bool finish{false};
+    pp->AwaitBrief([&](unsigned index, auto* p) {
+      uint32_t key_max = (thread_key_step > 0 && index + 1 < pp->size())
+                             ? key_minimum + (index + 1) * thread_key_step - 1
+                             : key_maximum;
+      client->Start(key_minimum + index * thread_key_step, key_max, interval);
+    });
+
+    auto watch_fb =
+        pp->GetNextProactor()->LaunchFiber([&] { WatchFiber(shards.size(), &finish, pp.get()); });
+    const absl::Time start_time = absl::Now();
+
+    // The actual run.
+    pp->AwaitFiberOnAll([&](unsigned index, auto* p) { client->Join(); });
+
+    duration = absl::Now() - start_time;
+    finish.store(true);
+    watch_fb.Join();
   }
-
-  atomic_bool finish{false};
-  pp->AwaitBrief([&](unsigned index, auto* p) {
-    uint32_t key_max = (thread_key_step > 0 && index + 1 < pp->size())
-                           ? key_minimum + (index + 1) * thread_key_step - 1
-                           : key_maximum;
-    client->Start(key_minimum + index * thread_key_step, key_max, interval);
-  });
-
-  auto watch_fb =
-      pp->GetNextProactor()->LaunchFiber([&] { WatchFiber(shards.size(), &finish, pp.get()); });
-  const absl::Time start_time = absl::Now();
-
-  // The actual run.
-  pp->AwaitFiberOnAll([&](unsigned index, auto* p) { client->Join(); });
-
-  absl::Duration duration = absl::Now() - start_time;
-  finish.store(true);
-  watch_fb.Join();
 
   fb2::Mutex mutex;
 
