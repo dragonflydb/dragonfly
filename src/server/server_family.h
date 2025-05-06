@@ -343,9 +343,13 @@ class ServerFamily {
 
   void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
 
+  struct DoSaveCheckAndStartOpts {
+    bool ignore_state = false;
+    bool bg_save = false;
+  };
+
   GenericError DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts, Transaction* trans,
-                                   bool ignore_state = false, bool bg_save = false)
-      ABSL_LOCKS_EXCLUDED(save_mu_);
+                                   DoSaveCheckAndStartOpts opts) ABSL_LOCKS_EXCLUDED(save_mu_);
 
   GenericError WaitUntilSaveFinished(Transaction* trans,
                                      bool ignore_state = false) ABSL_NO_THREAD_SAFETY_ANALYSIS;

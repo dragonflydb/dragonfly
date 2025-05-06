@@ -35,6 +35,8 @@ struct SaveStagesInputs {
   Service* service_;
   util::fb2::FiberQueueThreadPool* fq_threadpool_;
   std::shared_ptr<SnapshotStorage> snapshot_storage_;
+  // true if the command that triggered this flow is bgsave. false otherwise.
+  bool is_bg_save_;
 };
 
 class RdbSnapshot {
@@ -77,7 +79,7 @@ class RdbSnapshot {
 };
 
 struct SaveStagesController : public SaveStagesInputs {
-  SaveStagesController(SaveStagesInputs&& input, bool is_bg_save = false);
+  explicit SaveStagesController(SaveStagesInputs&& input);
   // Objects of this class are used concurrently. Call this function
   // in a mutually exlusive context to avoid data races.
   // Also call this function before any call to `WaitAllSnapshots`

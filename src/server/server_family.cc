@@ -1707,8 +1707,8 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
 }
 
 GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts,
-                                               Transaction* trans, bool ignore_state,
-                                               bool bg_save) {
+                                               Transaction* trans, DoSaveCheckAndStartOpts opts) {
+  auto [ignore_state, bg_save] = opts;
   auto state = ServerState::tlocal()->gstate();
 
   // In some cases we want to create a snapshot even if server is not active, f.e in takeover
@@ -1727,11 +1727,9 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
                                 ? snapshot_storage_
                                 : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
 
-    save_controller_ = make_unique<SaveStagesController>(
-        detail::SaveStagesInputs{save_cmd_opts.new_version, save_cmd_opts.cloud_uri,
-                                 save_cmd_opts.basename, trans, &service_, fq_threadpool_.get(),
-                                 snapshot_storage},
-        true);
+    save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
+        save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
+        &service_, fq_threadpool_.get(), snapshot_storage, opts.bg_save});
 
     auto res = save_controller_->InitResourcesAndStart();
 
@@ -1780,7 +1778,8 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
 
 GenericError ServerFamily::DoSave(const SaveCmdOptions& save_cmd_opts, Transaction* trans,
                                   bool ignore_state) {
-  if (auto ec = DoSaveCheckAndStart(save_cmd_opts, trans, ignore_state); ec) {
+  DoSaveCheckAndStartOpts opts{.ignore_state = ignore_state};
+  if (auto ec = DoSaveCheckAndStart(save_cmd_opts, trans, opts); ec) {
     return ec;
   }
 
@@ -2195,7 +2194,8 @@ void ServerFamily::BgSave(CmdArgList args, const CommandContext& cmd_cntx) {
     return;
   }
 
-  if (auto ec = DoSaveCheckAndStart(*maybe_res, cmd_cntx.tx, false, true); ec) {
+  DoSaveCheckAndStartOpts opts{.bg_save = true};
+  if (auto ec = DoSaveCheckAndStart(*maybe_res, cmd_cntx.tx, opts); ec) {
     cmd_cntx.rb->SendError(ec.Format());
     return;
   }
