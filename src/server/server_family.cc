@@ -1740,14 +1740,12 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
       last_save_info_.SetLastSaveError(*res);
       save_controller_.reset();
       if (bg_save) {
-        last_bgsave_status_ = false;
+        last_save_info_.last_bgsave_status = false;
       }
       return res->error;
     }
 
-    if (bg_save) {
-      bgsave_in_progress_ = true;
-    }
+    last_save_info_.bgsave_in_progress = bg_save;
   }
   return {};
 }
@@ -1762,8 +1760,8 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
     save_info = save_controller_->Finalize();
 
     if (save_controller_->IsBgSave()) {
-      bgsave_in_progress_ = false;
-      last_bgsave_status_ = save_info.error ? false : true;
+      last_save_info_.bgsave_in_progress = false;
+      last_save_info_.last_bgsave_status = !save_info.error;
     }
 
     if (save_info.error) {
@@ -2636,12 +2634,10 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     }
     append("rdb_changes_since_last_success_save", m.events.update);
 
-    {
-      util::fb2::LockGuard lk{save_mu_};
-      append("rdb_bgsave_in_progress", bgsave_in_progress_ == true ? 1 : 0);
-      std::string val = last_bgsave_status_ == true ? "ok" : "err";
-      append("rdb_last_bgsave_status", val);
-    }
+    auto save = GetLastSaveInfo();
+    append("rdb_bgsave_in_progress", static_cast<int>(save.bgsave_in_progress));
+    std::string val = save.last_bgsave_status ? "ok" : "err";
+    append("rdb_last_bgsave_status", val);
 
     // when last failed save
     append("last_failed_save", save_info.last_error_time);

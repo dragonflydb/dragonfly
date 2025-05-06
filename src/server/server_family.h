@@ -146,6 +146,9 @@ struct LastSaveInfo {
   GenericError last_error;
   time_t last_error_time = 0;      // epoch time in seconds.
   time_t failed_duration_sec = 0;  // epoch time in seconds.
+  // false if last attempt failed
+  bool last_bgsave_status = true;
+  bool bgsave_in_progress = false;
 };
 
 struct SnapshotSpec {
@@ -396,9 +399,6 @@ class ServerFamily {
 
   // protected by save_mu_
   util::fb2::Fiber bg_save_fb_;
-  // false if last attempt failed
-  bool last_bgsave_status_ = true;
-  bool bgsave_in_progress_ = false;
 
   mutable util::fb2::Mutex peak_stats_mu_;
   mutable PeakStats peak_stats_;
