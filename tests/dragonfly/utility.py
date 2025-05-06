@@ -141,12 +141,25 @@ class ValueType(Enum):
 class CommandGenerator:
     """Class for generating complex command sequences"""
 
-    def __init__(self, target_keys, val_size, batch_size, max_multikey, unsupported_types=[]):
+    def __init__(
+        self,
+        target_keys,
+        val_size,
+        huge_val_count,
+        huge_val_size,
+        batch_size,
+        max_multikey,
+        unsupported_types=[],
+    ):
         self.key_cnt_target = target_keys
         self.val_size = val_size
         self.batch_size = min(batch_size, target_keys)
         self.max_multikey = max_multikey
         self.unsupported_types = unsupported_types
+
+        # Generate sorted list of random samples in target_keys range
+        self.huge_val_sample = sorted(random.sample(range(target_keys), huge_val_count))
+        self.huge_val_size = huge_val_size
 
         # Key management
         self.key_sets = [set() for _ in ValueType]
@@ -205,8 +218,15 @@ class CommandGenerator:
 
         return k, t
 
-    def generate_val(self, t: ValueType):
+    def generate_val(self, t: ValueType, idx):
         """Generate filler value of configured size for type t"""
+
+        # If current key count matches huge val sample than we will create one element with huge val size.
+        generate_huge_val = False
+        if len(self.huge_val_sample) and self.huge_val_sample[0] == (self.key_cnt + idx):
+            generate_huge_val = True
+            # Remove this sample from list
+            self.huge_val_sample.pop(0)
 
         def rand_str(k=3, s=""):
             # Use small k value to reduce mem usage and increase number of ops
@@ -214,17 +234,33 @@ class CommandGenerator:
 
         if t == ValueType.STRING:
             # Random string for MSET
-            return (rand_str(self.val_size),)
+            return (rand_str(self.huge_val_size if generate_huge_val else self.val_size),)
         elif t == ValueType.LIST:
             # Random sequence k-letter elements for LPUSH
-            return tuple(rand_str() for _ in range(self.val_size // 4))
+            list_size = self.val_size // 4
+            element_size = (
+                self.huge_val_size // list_size if generate_huge_val else self.val_size // list_size
+            )
+            return tuple(rand_str(element_size) for i in range(list_size))
         elif t == ValueType.SET:
             # Random sequence of k-letter elements for SADD
-            return tuple(rand_str() for _ in range(self.val_size // 4))
+            set_size = self.val_size // 4
+            element_size = (
+                self.huge_val_size // set_size if generate_huge_val else self.val_size // set_size
+            )
+            return tuple(rand_str(element_size) for i in range(set_size))
         elif t == ValueType.HSET:
             # Random sequence of k-letter keys + int and two start values for HSET
+            hset_size = self.val_size // 5
+            element_size = (
+                self.huge_val_size // hset_size if generate_huge_val else self.val_size // hset_size
+            )
             elements = (
-                (rand_str(), random.randint(0, self.val_size)) for _ in range(self.val_size // 5)
+                (
+                    rand_str(element_size),
+                    random.randint(0, self.val_size),
+                )
+                for i in range(hset_size)
             )
             return ("v0", 0, "v1", 0) + tuple(itertools.chain(*elements))
         elif t == ValueType.ZSET:
@@ -233,17 +269,29 @@ class CommandGenerator:
             # This ensures that we test both the ZSET implementation with listpack and the our custom BPtree.
             value_sizes = [self.val_size // 4, 130]
             probabilities = [8, 1]
-            value_size = random.choices(value_sizes, probabilities)[0]
-            elements = ((random.randint(0, self.val_size), rand_str()) for _ in range(value_size))
+            zset_size = random.choices(value_sizes, probabilities)[0]
+            element_size = (
+                self.huge_val_size // zset_size if generate_huge_val else self.val_size // zset_size
+            )
+            elements = (
+                (
+                    random.randint(0, self.val_size),
+                    rand_str(element_size),
+                )
+                for i in range(zset_size)
+            )
             return tuple(itertools.chain(*elements))
-
         elif t == ValueType.JSON:
             # Json object with keys:
             # - arr (array of random strings)
             # - ints (array of objects {i:random integer})
             # - i (random integer)
-            ints = [{"i": random.randint(0, 100)} for i in range(self.val_size // 6)]
-            strs = [rand_str() for _ in range(self.val_size // 6)]
+            json_size = self.val_size // 6
+            element_size = (
+                self.huge_val_size // json_size if generate_huge_val else self.val_size // json_size
+            )
+            ints = [{"i": random.randint(0, 100)} for i in range(json_size)]
+            strs = [rand_str(element_size) for i in range(json_size)]
             return "$", json.dumps({"arr": strs, "ints": ints, "i": random.randint(0, 100)})
         else:
             assert False, "Invalid ValueType"
@@ -313,7 +361,9 @@ class CommandGenerator:
             count = 1
 
         keys = (self.add_key(t) for _ in range(count))
-        payload = itertools.chain(*((f"k{k}",) + self.generate_val(t) for k in keys))
+        payload = itertools.chain(
+            *((f"k{k}",) + self.generate_val(t, idx) for idx, k in enumerate(keys))
+        )
         filtered_payload = filter(lambda p: p is not None, payload)
 
         return (self.GROW_ACTINONS[t],) + tuple(filtered_payload), count
@@ -417,6 +467,8 @@ class DflySeeder:
         port=6379,
         keys=1000,
         val_size=50,
+        huge_value_count=5,
+        huge_value_size=100000,
         batch_size=100,
         max_multikey=5,
         dbcount=1,
@@ -434,7 +486,15 @@ class DflySeeder:
             unsupported_types.append(ValueType.JSON)  # Cluster aio client doesn't support JSON
 
         self.cluster_mode = cluster_mode
-        self.gen = CommandGenerator(keys, val_size, batch_size, max_multikey, unsupported_types)
+        self.gen = CommandGenerator(
+            keys,
+            val_size,
+            huge_value_count,
+            huge_value_size,
+            batch_size,
+            max_multikey,
+            unsupported_types,
+        )
         self.port = port
         self.dbcount = dbcount
         self.multi_transaction_probability = multi_transaction_probability

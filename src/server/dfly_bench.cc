@@ -72,6 +72,9 @@ ABSL_FLAG(bool, cluster_skip_tags, true,
           "If true, skips tags (compatible with memtier benchmark) in cluster mode, "
           "othewise adds hash tags to keys");
 ABSL_FLAG(bool, ascii, true, "If true, use ascii characters for values");
+ABSL_FLAG(bool, connect_only, false,
+          "If true, will only connect to the server, without sending "
+          "loadtest commands");
 
 using namespace std;
 using namespace util;
@@ -231,7 +234,7 @@ class KeyGenerator {
 
 class CommandGenerator {
  public:
-  CommandGenerator(KeyGenerator* keygen);
+  explicit CommandGenerator(KeyGenerator* keygen);
 
   string Next(SlotRange range);
 
@@ -365,7 +368,7 @@ string CommandGenerator::FillGet(string_view key) {
 }
 
 struct ClientStats {
-  base::Histogram hist;
+  base::Histogram total_hist, online_hist;
 
   uint64_t num_responses = 0;
   uint64_t hit_count = 0;
@@ -374,7 +377,9 @@ struct ClientStats {
   unsigned num_clients = 0;
 
   ClientStats& operator+=(const ClientStats& o) {
-    hist.Merge(o.hist);
+    total_hist.Merge(o.total_hist);
+    online_hist.Merge(o.online_hist);
+
     num_responses += o.num_responses;
     hit_count += o.hit_count;
     hit_opportunities += o.hit_opportunities;
@@ -401,6 +406,7 @@ class Driver {
 
   void Connect(unsigned index, const tcp::endpoint& ep);
   void Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen);
+  void Shutdown();
 
   float done() const {
     if (time_limit_ > 0)
@@ -446,7 +452,9 @@ class TLocalClient {
 
   TLocalClient(const TLocalClient&) = delete;
 
-  void Connect(tcp::endpoint ep, const vector<tcp::endpoint>& shard_endpoints);
+  void Connect(const tcp::endpoint& ep, const vector<tcp::endpoint>& shard_endpoints);
+  void Disconnect();
+
   void Start(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns);
   void Join();
 
@@ -689,7 +697,10 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
   while (!reqs_.empty()) {
     ThisFiber::SleepFor(1ms);
   }
+  Shutdown();
+}
 
+void Driver::Shutdown() {
   std::ignore = socket_->Shutdown(SHUT_RDWR);  // breaks the receive fiber.
   receive_fb_.Join();
   std::ignore = socket_->Close();
@@ -710,7 +721,8 @@ static string_view FindLine(io::Bytes buf) {
 void Driver::PopRequest() {
   uint64_t now = absl::GetCurrentTimeNanos();
   uint64_t usec = (now - reqs_.front().start) / 1000;
-  stats_.hist.Add(usec);
+  stats_.online_hist.Add(usec);
+  stats_.total_hist.Add(usec);
   stats_.hit_opportunities += reqs_.front().might_hit;
   ++received_;
   reqs_.pop();
@@ -829,8 +841,8 @@ void Driver::ParseMC() {
   }
 }
 
-void TLocalClient::Connect(tcp::endpoint ep, const vector<tcp::endpoint>& endpoints) {
-  VLOG(2) << "Connecting client...";
+void TLocalClient::Connect(const tcp::endpoint& ep, const vector<tcp::endpoint>& endpoints) {
+  VLOG(2) << "Connecting client..." << ep;
 
   unsigned conn_per_shard = GetFlag(FLAGS_c);
   if (shard_slots_->Empty()) {
@@ -851,14 +863,18 @@ void TLocalClient::Connect(tcp::endpoint ep, const vector<tcp::endpoint>& endpoi
       size_t shard = i / conn_per_shard;
       shard_ep = endpoints[shard];
     }
-    fbs[i] = MakeFiber([&, shard_ep, i] {
-      ThisFiber::SetName(StrCat("connect/", i));
-      drivers_[i]->Connect(i, shard_ep);
-    });
+    fbs[i] =
+        fb2::Fiber(StrCat("connect/", i), [&, shard_ep, i] { drivers_[i]->Connect(i, shard_ep); });
   }
 
   for (auto& fb : fbs)
     fb.Join();
+}
+
+void TLocalClient::Disconnect() {
+  for (size_t i = 0; i < drivers_.size(); ++i) {
+    drivers_[i]->Shutdown();
+  }
 }
 
 void TLocalClient::Start(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns) {
@@ -947,6 +963,7 @@ void WatchFiber(size_t num_shards, atomic_bool* finish_signal, ProactorPool* pp)
       done_max = max(done_max, maxd);
       done_min = min(done_min, mind);
       max_pending = max(max_pending, max_pend);
+      client->stats.online_hist.Clear();
     });
 
     uint64_t total_ms = (now - start_time) / 1'000'000;
@@ -957,7 +974,7 @@ void WatchFiber(size_t num_shards, atomic_bool* finish_signal, ProactorPool* pp)
     double hitrate = stats.hit_opportunities > 0
                          ? 100 * double(stats.hit_count) / double(stats.hit_opportunities)
                          : 0;
-    unsigned latency = stats.hist.Percentile(99);
+    unsigned latency = stats.online_hist.Percentile(99);
 
     CONSOLE_INFO << total_ms / 1000 << "s: " << StrFormat("%.1f", done_perc)
                  << "% done, RPS(now/agg): " << period_resp_cnt * 1000 / period_ms << "/"
@@ -1111,70 +1128,77 @@ int main(int argc, char* argv[]) {
   ShardSlots shard_slots;
   shard_slots.SetClusterSlotRanges(shards);
   std::vector<tcp::endpoint> shard_endpoints = shard_slots.Endpoints();
-
-  pp->AwaitFiberOnAll([&](unsigned index, auto* p) {
+  pp->AwaitBrief([&](unsigned index, auto* p) {
     base::SplitMix64 seed_mix(GetFlag(FLAGS_seed) + index * 0x6a45554a264d72bULL);
     auto seed = seed_mix();
     VLOG(1) << "Seeding bitgen with seed " << seed;
     bit_gen.seed(seed);
+  });
+
+  pp->AwaitFiberOnAll([&](unsigned index, auto* p) {
     client = make_unique<TLocalClient>(p, &shard_slots);
     client->Connect(ep, shard_endpoints);
   });
 
-  const uint32_t key_minimum = GetFlag(FLAGS_key_minimum);
-  const uint32_t key_maximum = GetFlag(FLAGS_key_maximum);
-  CHECK_LE(key_minimum, key_maximum);
-
-  uint32_t thread_key_step = 0;
-  uint32_t qps = abs(GetFlag(FLAGS_qps));
-  bool throttle = GetFlag(FLAGS_qps) > 0;
-  const int64_t interval = qps ? 1'000'000'000LL / qps : 0;
-  uint64_t num_reqs = GetFlag(FLAGS_n);
-
-  uint64_t total_conn_num = GetFlag(FLAGS_c) * pp->size();
-  uint64_t total_requests = num_reqs * total_conn_num;
-  uint32_t time_limit = GetFlag(FLAGS_test_time);
-
-  if (dist_type == SEQUENTIAL) {
-    thread_key_step = std::max(1UL, (key_maximum - key_minimum + 1) / pp->size());
-    if (total_requests > (key_maximum - key_minimum)) {
-      CONSOLE_INFO << "Warning: only " << key_maximum - key_minimum
-                   << " unique entries will be accessed with " << total_requests
-                   << " total requests";
-    }
-  }
-
-  if (!time_limit) {
-    CONSOLE_INFO << "Running " << pp->size() << " threads, sending " << num_reqs
-                 << " requests per each connection, or " << total_requests << " requests overall "
-                 << (throttle ? "with" : "without") << " throttling";
-  }
-  if (interval) {
-    CONSOLE_INFO << "At a rate of " << qps << " rps per connection, i.e. request every "
-                 << interval / 1000 << "us";
-    CONSOLE_INFO << "Overall scheduled RPS: " << qps * total_conn_num;
+  absl::Duration duration;
+  if (absl::GetFlag(FLAGS_connect_only)) {
+    pp->AwaitFiberOnAll([&](unsigned index, auto* p) { client->Disconnect(); });
   } else {
-    CONSOLE_INFO << "Coordinated omission mode - the rate is determined by the server";
+    const uint32_t key_minimum = GetFlag(FLAGS_key_minimum);
+    const uint32_t key_maximum = GetFlag(FLAGS_key_maximum);
+    CHECK_LE(key_minimum, key_maximum);
+
+    uint32_t thread_key_step = 0;
+    uint32_t qps = abs(GetFlag(FLAGS_qps));
+    bool throttle = GetFlag(FLAGS_qps) > 0;
+    const int64_t interval = qps ? 1'000'000'000LL / qps : 0;
+    uint64_t num_reqs = GetFlag(FLAGS_n);
+
+    uint64_t total_conn_num = GetFlag(FLAGS_c) * pp->size();
+    uint64_t total_requests = num_reqs * total_conn_num;
+    uint32_t time_limit = GetFlag(FLAGS_test_time);
+
+    if (dist_type == SEQUENTIAL) {
+      thread_key_step = std::max(1UL, (key_maximum - key_minimum + 1) / pp->size());
+      if (total_requests > (key_maximum - key_minimum)) {
+        CONSOLE_INFO << "Warning: only " << key_maximum - key_minimum
+                     << " unique entries will be accessed with " << total_requests
+                     << " total requests";
+      }
+    }
+
+    if (!time_limit) {
+      CONSOLE_INFO << "Running " << pp->size() << " threads, sending " << num_reqs
+                   << " requests per each connection, or " << total_requests << " requests overall "
+                   << (throttle ? "with" : "without") << " throttling";
+    }
+    if (interval) {
+      CONSOLE_INFO << "At a rate of " << qps << " rps per connection, i.e. request every "
+                   << interval / 1000 << "us";
+      CONSOLE_INFO << "Overall scheduled RPS: " << qps * total_conn_num;
+    } else {
+      CONSOLE_INFO << "Coordinated omission mode - the rate is determined by the server";
+    }
+
+    atomic_bool finish{false};
+    pp->AwaitBrief([&](unsigned index, auto* p) {
+      uint32_t key_max = (thread_key_step > 0 && index + 1 < pp->size())
+                             ? key_minimum + (index + 1) * thread_key_step - 1
+                             : key_maximum;
+      client->Start(key_minimum + index * thread_key_step, key_max, interval);
+    });
+
+    auto watch_fb =
+        pp->GetNextProactor()->LaunchFiber([&] { WatchFiber(shards.size(), &finish, pp.get()); });
+    const absl::Time start_time = absl::Now();
+
+    // The actual run.
+    pp->AwaitFiberOnAll([&](unsigned index, auto* p) { client->Join(); });
+
+    duration = absl::Now() - start_time;
+    finish.store(true);
+    watch_fb.Join();
   }
-
-  atomic_bool finish{false};
-  pp->AwaitBrief([&](unsigned index, auto* p) {
-    uint32_t key_max = (thread_key_step > 0 && index + 1 < pp->size())
-                           ? key_minimum + (index + 1) * thread_key_step - 1
-                           : key_maximum;
-    client->Start(key_minimum + index * thread_key_step, key_max, interval);
-  });
-
-  auto watch_fb =
-      pp->GetNextProactor()->LaunchFiber([&] { WatchFiber(shards.size(), &finish, pp.get()); });
-  const absl::Time start_time = absl::Now();
-
-  // The actual run.
-  pp->AwaitFiberOnAll([&](unsigned index, auto* p) { client->Join(); });
-
-  absl::Duration duration = absl::Now() - start_time;
-  finish.store(true);
-  watch_fb.Join();
 
   fb2::Mutex mutex;
 
@@ -1193,13 +1217,13 @@ int main(int argc, char* argv[]) {
   CONSOLE_INFO << "\nTotal time: " << duration
                << ". Overall number of requests: " << summary.num_responses
                << ", QPS: " << (dur_sec ? StrCat(summary.num_responses / dur_sec) : "nan")
-               << ", P99 lat: " << summary.hist.Percentile(99) << "us";
+               << ", P99 lat: " << summary.total_hist.Percentile(99) << "us";
 
   if (summary.num_errors) {
     CONSOLE_INFO << "Got " << summary.num_errors << " error responses!";
   }
 
-  CONSOLE_INFO << "Latency summary, all times are in usec:\n" << summary.hist.ToString();
+  CONSOLE_INFO << "Latency summary, all times are in usec:\n" << summary.total_hist.ToString();
   if (summary.hit_opportunities) {
     CONSOLE_INFO << "----------------------------------\nHit rate: "
                  << 100 * double(summary.hit_count) / double(summary.hit_opportunities) << "%\n";

@@ -3074,4 +3074,17 @@ TEST_F(JsonFamilyTest, SetNestedFields) {
   EXPECT_EQ(resp, R"({"-field2":2,"field1":1})");
 }
 
+TEST_F(JsonFamilyTest, ArrPopWithFormatParameter) {
+  auto resp = Run({"JSON.ARRPOP", "test_resp3", "FORMAT", "EXPAND", "$.a"});
+  ASSERT_THAT(resp, ErrArg("value is not an integer or out of range"));
+}
+
+TEST_F(JsonFamilyTest, DepthLimitExceeded) {
+  string deep_json =
+      R"({"jdiqr":{"nro":{"uzuf":{"bq":{"yc":{"zodmw":{"zbbq":{"sf":{"oule":{"j":{"mjsss":{"tap":{"bh":{"f":{"zlwgu":{"s":{"kt":{"fnmo":{"hub":{"xj":{"jo":{"ofara":{"kx":{"uw":{"z":{"mwvk":{"jo":{"qqz":{"b":{"tbp":{"esx":{"g":{"p":{"tpzk":{"i":{"azq":{"ttcd":{"wl":{"zo":{"l":{"nsq":{"tulso":{"uk":{"imfzw":{"vlub":{"k":{"ypml":{"voack":{"sosd":{"f":{"x":{"usv":{"hnw":{"ax":{"e":{"ozi":{"doi":{"k":{"bz":{"vxhp":{"e":{"vnpv":{"rhs":{"j":{"esp":{"f":{"ykyvy":{"xvmhg":{"eks":{"oijy":{"sjk":{"a":{"sejgy":{"msd":{"acyo":{"yxss":{"slbf":{"ssuns":{"c":{"kv":{"i":{"y":{"ubqz":{"uam":{"igaq":{"jl":{"vy":{"zlu":{"gscx":{"mb":{"idca":{"k":{"twx":{"ngjs":{"k":{"xcx":{"sxc":{"ye":{"fty":{"pho":{"lrn":{"wmv":{"h":{"sfuk":{"ilwzy":{"nlofv":{"mpcms":{"bg":{"jykgm":{"x":{"nbe":{"ixbyh":{"tmus":{"nqulr":{"cqxdw":{"wwpi":{"kj":{"udb":{"oct":{"tqkv":{"r":{"zev":{"rsu":{"gs":{"pyzm":{"au":{"__leaf":42}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}})";
+
+  auto resp = Run({"JSON.SET", "test", "$", deep_json});
+  ASSERT_THAT(resp, ErrArg("ERR failed to parse JSON"));
+}
+
 }  // namespace dfly

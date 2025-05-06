@@ -59,13 +59,13 @@ class DebugCmd {
   void Topk(CmdArgList args, facade::SinkReplyBuilder* builder);
   void Keys(CmdArgList args, facade::SinkReplyBuilder* builder);
   void Compression(CmdArgList args, facade::SinkReplyBuilder* builder);
-
+  void IOStats(CmdArgList args, facade::SinkReplyBuilder* builder);
   struct PopulateBatch {
     DbIndex dbid;
     uint64_t index[32];
     uint64_t sz = 0;
 
-    PopulateBatch(DbIndex id) : dbid(id) {
+    explicit PopulateBatch(DbIndex id) : dbid(id) {
     }
   };
 

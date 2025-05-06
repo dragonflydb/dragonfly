@@ -255,14 +255,14 @@ OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder
     if (result.ok()) {
       hlls[sid] = std::move(result.value());
     } else {
-      success = false;
+      success.store(false, memory_order_relaxed);
     }
-    return result.status();
+    return OpStatus::OK;
   };
 
   tx->Execute(std::move(cb), false);
 
-  if (!success) {
+  if (!success.load(memory_order_relaxed)) {
     tx->Conclude();
     return OpStatus::INVALID_VALUE;
   }

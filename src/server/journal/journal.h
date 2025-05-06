@@ -25,7 +25,7 @@ class Journal {
 
   //******* The following functions must be called in the context of the owning shard *********//
 
-  uint32_t RegisterOnChange(ChangeCallback cb);
+  uint32_t RegisterOnChange(JournalConsumerInterface* consumer);
   void UnregisterOnChange(uint32_t id);
   bool HasRegisteredCallbacks() const;
 
@@ -50,11 +50,13 @@ class JournalFlushGuard {
       journal_->SetFlushMode(false);
     }
     util::fb2::detail::EnterFiberAtomicSection();
+    ++counter_;
   }
 
   ~JournalFlushGuard() {
     util::fb2::detail::LeaveFiberAtomicSection();
-    if (journal_) {
+    --counter_;
+    if (journal_ && counter_ == 0) {
       journal_->SetFlushMode(true);  // Restore the state on destruction
     }
   }
@@ -64,6 +66,7 @@ class JournalFlushGuard {
 
  private:
   Journal* journal_;
+  static size_t thread_local counter_;
 };
 
 }  // namespace journal

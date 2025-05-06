@@ -475,15 +475,8 @@ TEST_F(DflyEngineTest, Bug207) {
     ASSERT_EQ(resp, "OK");
   }
 
-  auto evicted_count = [](const string& str) -> size_t {
-    const string matcher = "evicted_keys:";
-    const auto pos = str.find(matcher) + matcher.size();
-    const auto sub = str.substr(pos, 1);
-    return atoi(sub.c_str());
-  };
-
-  resp = Run({"info", "stats"});
-  EXPECT_GT(evicted_count(resp.GetString()), 0);
+  auto metrics = GetMetrics();
+  EXPECT_GT(metrics.events.evicted_keys, 0) << FormatMetrics(metrics);
 
   for (; i > 0; --i) {
     resp = Run({"setex", StrCat("key", i), "30", "bar"});
@@ -546,6 +539,23 @@ TEST_F(DflyEngineTest, PSubscribe) {
   EXPECT_EQ("foo", msg.message);
   EXPECT_EQ("ab", msg.channel);
   EXPECT_EQ("a*", msg.pattern);
+}
+
+TEST_F(DflyEngineTest, PSubscribeMatchOnlyStar) {
+  single_response_ = false;
+  auto resp = pp_->at(1)->Await([&] { return Run({"psubscribe", "*"}); });
+  EXPECT_THAT(resp, ArrLen(3));
+  resp = pp_->at(0)->Await([&] { return Run({"PUBLISH", "1234567890123456", "abc"}); });
+  EXPECT_THAT(resp, IntArg(1));
+
+  pp_->AwaitFiberOnAll([](ProactorBase* pb) {});
+
+  ASSERT_EQ(1, SubscriberMessagesLen("IO1"));
+
+  const auto& msg = GetPublishedMessage("IO1", 0);
+  EXPECT_EQ("abc", msg.message);
+  EXPECT_EQ("1234567890123456", msg.channel);
+  EXPECT_EQ("*", msg.pattern);
 }
 
 TEST_F(DflyEngineTest, Unsubscribe) {

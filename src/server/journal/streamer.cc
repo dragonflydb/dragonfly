@@ -39,8 +39,8 @@ uint32_t migration_buckets_serialization_threshold_cached = 100;
 
 }  // namespace
 
-JournalStreamer::JournalStreamer(journal::Journal* journal, ExecutionState* cntx)
-    : cntx_(cntx), journal_(journal) {
+JournalStreamer::JournalStreamer(journal::Journal* journal, ExecutionState* cntx, SendLsn send_lsn)
+    : cntx_(cntx), journal_(journal), send_lsn_(send_lsn) {
   // cache the flag to avoid accessing it later.
   replication_stream_output_limit_cached = absl::GetFlag(FLAGS_replication_stream_output_limit);
 }
@@ -52,35 +52,29 @@ JournalStreamer::~JournalStreamer() {
   VLOG(1) << "~JournalStreamer";
 }
 
-void JournalStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
+void JournalStreamer::ConsumeJournalChange(const JournalItem& item) {
+  if (!ShouldWrite(item)) {
+    return;
+  }
+
+  DCHECK_GT(item.lsn, last_lsn_writen_);
+  Write(item.data);
+  time_t now = time(nullptr);
+  last_lsn_writen_ = item.lsn;
+  // TODO: to chain it to the previous Write call.
+  if (send_lsn_ == SendLsn::YES && now - last_lsn_time_ > 3) {
+    last_lsn_time_ = now;
+    io::StringSink sink;
+    JournalWriter writer(&sink);
+    writer.Write(Entry{journal::Op::LSN, item.lsn});
+    Write(std::move(sink).str());
+  }
+}
+
+void JournalStreamer::Start(util::FiberSocketBase* dest) {
   CHECK(dest_ == nullptr && dest != nullptr);
   dest_ = dest;
-  journal_cb_id_ =
-      journal_->RegisterOnChange([this, send_lsn](const JournalItem& item, bool allow_await) {
-        if (allow_await) {
-          ThrottleIfNeeded();
-          // No record to write, just await if data was written so consumer will read the data.
-          // TODO: shouldnt we trigger async write in noop??
-          if (item.opcode == Op::NOOP)
-            return;
-        }
-
-        if (!ShouldWrite(item)) {
-          return;
-        }
-
-        Write(item.data);
-        time_t now = time(nullptr);
-
-        // TODO: to chain it to the previous Write call.
-        if (send_lsn && now - last_lsn_time_ > 3) {
-          last_lsn_time_ = now;
-          io::StringSink sink;
-          JournalWriter writer(&sink);
-          writer.Write(Entry{journal::Op::LSN, item.lsn});
-          Write(std::move(sink).str());
-        }
-      });
+  journal_cb_id_ = journal_->RegisterOnChange(this);
 }
 
 void JournalStreamer::Cancel() {
@@ -188,14 +182,16 @@ bool JournalStreamer::IsStalled() const {
 
 RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
                                  ExecutionState* cntx)
-    : JournalStreamer(journal, cntx), db_slice_(slice), my_slots_(std::move(slots)) {
+    : JournalStreamer(journal, cntx, JournalStreamer::SendLsn::NO),
+      db_slice_(slice),
+      my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
   migration_buckets_serialization_threshold_cached =
       absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);
   db_array_ = slice->databases();  // Inc ref to make sure DB isn't deleted while we use it
 }
 
-void RestoreStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
+void RestoreStreamer::Start(util::FiberSocketBase* dest) {
   if (!cntx_->IsRunning())
     return;
 
@@ -203,7 +199,7 @@ void RestoreStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
   auto db_cb = absl::bind_front(&RestoreStreamer::OnDbChange, this);
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
 
-  JournalStreamer::Start(dest, send_lsn);
+  JournalStreamer::Start(dest);
 }
 
 void RestoreStreamer::Run() {

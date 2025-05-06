@@ -261,6 +261,17 @@ __thread EngineShard* EngineShard::shard_ = nullptr;
 uint64_t TEST_current_time_ms = 0;
 
 ShardId Shard(string_view v, ShardId shard_num) {
+  // This cluster sharding is not necessary and may degrade keys distribution among shard threads.
+  // For example, if we have 3 shards, then no single-char keys will be assigned to shard 2 and
+  // 32 single char keys in range ['_' - '~'] will be assigned to shard 0.
+  // Yes, SlotId function does not have great distribution properties.
+  // On the other side, slot based sharding may help with pipeline squashing optimizations,
+  // because they rely on commands being single-sharded.
+  // TODO: once we improve our squashing logic, we can remove this.
+  if (IsClusterShardedBySlot()) {
+    return KeySlot(v) % shard_num;
+  }
+
   if (IsClusterShardedByTag()) {
     v = LockTagOptions::instance().Tag(v);
   }
@@ -825,7 +836,7 @@ void EngineShard::RetireExpiredAndEvict() {
     if (eviction_goal) {
       uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
       auto [evicted_items, evicted_bytes] =
-          db_slice.FreeMemWithEvictionStep(i, starting_segment_id, eviction_goal);
+          db_slice.FreeMemWithEvictionStepAtomic(i, starting_segment_id, eviction_goal);
 
       DVLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
                << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes

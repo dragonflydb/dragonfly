@@ -2959,12 +2959,16 @@ async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFa
     await fill_task
 
 
-@pytest.mark.skip("temporarily skipped")
+@pytest.mark.skip("Flaky test")
 async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     """
     This test reproduces a bug in the JSON memory tracking.
     """
-    master = df_factory.create(proactor_threads=2, serialization_max_chunk_size=1)
+    master = df_factory.create(
+        proactor_threads=2,
+        serialization_max_chunk_size=1,
+        vmodule="replica=2,dflycmd=2,snapshot=1,rdb_save=1,rdb_load=1,journal_slice=2",
+    )
     replicas = [df_factory.create(proactor_threads=2) for i in range(2)]
 
     # Start instances and connect clients
@@ -2982,6 +2986,7 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
 
     seeder = SeederV2(key_target=50_000)
     fill_task = asyncio.create_task(seeder.run(master.client()))
+    await asyncio.sleep(0.2)
 
     for replica in c_replicas:
         await replica.execute_command(f"REPLICAOF LOCALHOST {master.port}")
@@ -3038,3 +3043,75 @@ async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyIn
     await wait_available_async(c_node)
     assert await c_node.execute_command("dbsize") > 0
     await c_node.execute_command("FLUSHALL")
+
+
+@pytest.mark.parametrize(
+    "use_takeover, allowed_diff",
+    [(False, 2), (False, 0), (True, 0)],
+)
+async def test_partial_replication_on_same_source_master(df_factory, use_takeover, allowed_diff):
+    master = df_factory.create()
+    replica1 = df_factory.create(allow_partial_sync_with_lsn_diff=allowed_diff)
+    replica2 = df_factory.create()
+
+    df_factory.start_all([master, replica1, replica2])
+    c_master = master.client()
+    c_replica1 = replica1.client()
+    c_replica2 = replica2.client()
+
+    logging.debug("Fill master with test data")
+    seeder = DebugPopulateSeeder(key_target=50)
+    await seeder.run(c_master)
+
+    logging.debug("Start replication and wait for full sync")
+    await c_replica1.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica1)
+    await c_replica2.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica2)
+
+    # Send some traffic
+    seeder = SeederV2(key_target=8_000)
+    await seeder.run(c_master, target_deviation=0.01)
+
+    # Wait for all journal changes propagate to replicas
+    await check_all_replicas_finished([c_replica1, c_replica2], c_master)
+
+    if use_takeover:
+        # Promote first replica to master
+        await c_replica1.execute_command(f"REPLTAKEOVER 5")
+    else:
+        # Promote first replica to master
+        await c_replica1.execute_command(f"REPLICAOF NO ONE")
+        # Send 2 more commands to be propagated to second replica
+        # Sending 2 more commands will result in partial sync if allow_partial_sync_with_lsn_diff is equal or higher
+        await c_master.set("x", "y")
+        await c_master.set("x", "y")
+        await check_all_replicas_finished([c_replica2], c_master)
+
+    # Start replication with new master
+    await c_replica2.execute_command(f"REPLICAOF localhost {replica1.port}")
+
+    await check_all_replicas_finished([c_replica2], c_replica1)
+    # Validate data
+    if use_takeover:
+        hash1, hash2 = await asyncio.gather(
+            *(SeederV2.capture(c) for c in (c_replica1, c_replica2))
+        )
+        assert hash1 == hash2
+
+    # Check we can takeover to the second replica
+    await c_replica2.execute_command(f"REPLTAKEOVER 5")
+
+    replica1.stop()
+    replica2.stop()
+    if use_takeover or (allowed_diff > 0 and not use_takeover):
+        # Check logs for partial replication
+        lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
+        assert len(lines) == 1
+        # Check no full sync logs
+        lines = replica2.find_in_logs(f"Started full with localhost:{replica1.port}")
+        assert len(lines) == 0
+    else:
+        lines = replica2.find_in_logs(f"Started full with localhost:{replica1.port}")
+        assert len(lines) == 0
+        assert len(replica1.find_in_logs("No partial sync due to diff")) > 0

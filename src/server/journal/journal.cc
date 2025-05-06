@@ -58,8 +58,8 @@ error_code Journal::Close() {
   return {};
 }
 
-uint32_t Journal::RegisterOnChange(ChangeCallback cb) {
-  return journal_slice.RegisterOnChange(cb);
+uint32_t Journal::RegisterOnChange(JournalConsumerInterface* consumer) {
+  return journal_slice.RegisterOnChange(consumer);
 }
 
 void Journal::UnregisterOnChange(uint32_t id) {
@@ -90,6 +90,8 @@ void Journal::RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt
 void Journal::SetFlushMode(bool allow_flush) {
   journal_slice.SetFlushMode(allow_flush);
 }
+
+size_t thread_local JournalFlushGuard::counter_ = 0;
 
 }  // namespace journal
 }  // namespace dfly

@@ -288,11 +288,16 @@ unsigned MutatePath(const Path& path, MutateCallback callback, FlatJson json,
                     flexbuffers::Builder* fbb) {
   JsonType mut_json = FromFlat(json);
   unsigned res = MutatePath(path, std::move(callback), &mut_json);
-  if (res) {
-    FromJsonType(mut_json, fbb);
-    fbb->Finish();
-  }
 
+  // Populate the output builder 'fbb' with the resulting JSON state
+  // (mutated or original if res == 0) and finalize it.
+  // The builder MUST be finished before returning so that the caller
+  // can safely access the resulting flatbuffer data (e.g., via GetBuffer()).
+  // Skipping Finish() would leave the builder in an invalid, unusable state.
+  FromJsonType(mut_json, fbb);  // Always convert (changed or not) JSON
+  fbb->Finish();                // Always finish the builder
+
+  // Return the number of actual mutations that occurred.
   return res;
 }
 

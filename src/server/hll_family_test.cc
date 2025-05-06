@@ -194,9 +194,12 @@ TEST_F(HllFamilyTest, MergeOverlapping) {
 }
 
 TEST_F(HllFamilyTest, MergeInvalid) {
+  Run({"exists", "key1", "key4"});
+  ASSERT_EQ(GetDebugInfo().shards_count, 2);  // ensure 2 shards
+
   EXPECT_EQ(CheckedInt({"pfadd", "key1", "1", "2", "3"}), 1);
-  EXPECT_EQ(Run({"set", "key2", "..."}), "OK");
-  EXPECT_THAT(Run({"pfmerge", "key1", "key2"}), ErrArg(HllFamily::kInvalidHllErr));
+  EXPECT_EQ(Run({"set", "key4", "..."}), "OK");
+  EXPECT_THAT(Run({"pfmerge", "key1", "key4"}), ErrArg(HllFamily::kInvalidHllErr));
   EXPECT_EQ(CheckedInt({"pfcount", "key1"}), 3);
 }
 

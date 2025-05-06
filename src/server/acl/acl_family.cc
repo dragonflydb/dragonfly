@@ -1189,16 +1189,16 @@ void AclFamily::BuildIndexers(RevCommandsIndexStore families) {
   acl::NumberOfFamilies(families.size());
   CommandsRevIndexer(std::move(families));
   CategoryToCommandsIndexStore index;
-  cmd_registry_->Traverse([&](std::string_view name, auto& cid) {
-    auto cat = cid.acl_categories();
+  cmd_registry_->Traverse([&](std::string_view, auto& cid) {
+    const uint32_t cat = cid.acl_categories();
+    const size_t family = cid.GetFamily();
+    const uint64_t bit_index = cid.GetBitIndex();
     for (size_t i = 0; i < 32; ++i) {
-      if (cat & (1 << i)) {
+      if (cat & 1 << i) {
         std::string_view cat_name = reverse_cat_table_[i];
         if (index[cat_name].empty()) {
           index[cat_name].resize(CommandsRevIndexer().size());
         }
-        auto family = cid.GetFamily();
-        auto bit_index = cid.GetBitIndex();
         index[cat_name][family] |= bit_index;
       }
     }
