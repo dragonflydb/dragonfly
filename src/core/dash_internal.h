@@ -101,19 +101,17 @@ template <unsigned NUM_SLOTS> class SlotBitmap {
   Unaligned val_[kLen];
 };  // SlotBitmap
 
-template <unsigned NUM_SLOTS, unsigned NUM_STASH_FPS> class BucketBase {
+template <unsigned NUM_SLOTS> class BucketBase {
   // We can not allow more than 4 stash fps because we hold stash positions in single byte
   // stash_pos_ variable that uses 2 bits per stash bucket to point which bucket holds that fp.
   // Hence we can point at most from 4 fps to 4 stash buckets.
   // If any of those limits need to be raised we should increase stash_pos_ similarly to how we did
   // with SlotBitmap.
-  static_assert(NUM_STASH_FPS <= 4, "Can only hold at most 4 fp slots");
-
-  static constexpr unsigned kStashFpLen = NUM_STASH_FPS;
+  static constexpr unsigned kStashFpLen = 4;
   static constexpr unsigned kStashPresentBit = 1 << 4;
 
   using FpArray = std::array<uint8_t, NUM_SLOTS>;
-  using StashFpArray = std::array<uint8_t, NUM_STASH_FPS>;
+  using StashFpArray = std::array<uint8_t, kStashFpLen>;
 
  public:
   using SlotId = uint8_t;
@@ -233,9 +231,9 @@ template <unsigned NUM_SLOTS, unsigned NUM_STASH_FPS> class BucketBase {
   uint8_t overflow_count_ = 0;
 };  // BucketBase
 
-static_assert(sizeof(BucketBase<12, 4>) == 24, "");
-static_assert(alignof(BucketBase<14, 4>) == 1, "");
-static_assert(alignof(BucketBase<12, 4>) == 1, "");
+static_assert(sizeof(BucketBase<12>) == 24);
+static_assert(alignof(BucketBase<14>) == 1);
+static_assert(alignof(BucketBase<12>) == 1);
 
 // Optional version support as part of DashTable.
 // This works like this: each slot has 2 bytes for version and a bucket has another 6.
@@ -243,9 +241,8 @@ static_assert(alignof(BucketBase<12, 4>) == 1, "");
 // In order to achieve this we store high6(max{version(entry)}) for every entry.
 // Hence our version control may have false positives, i.e. signal that an entry has changed
 // when in practice its neighbour incremented the high6 part of its bucket.
-template <unsigned NUM_SLOTS, unsigned NUM_STASH_FPS>
-class VersionedBB : public BucketBase<NUM_SLOTS, NUM_STASH_FPS> {
-  using Base = BucketBase<NUM_SLOTS, NUM_STASH_FPS>;
+template <unsigned NUM_SLOTS> class VersionedBB : public BucketBase<NUM_SLOTS> {
+  using Base = BucketBase<NUM_SLOTS>;
 
  public:
   // one common version per bucket.
@@ -286,15 +283,14 @@ class VersionedBB : public BucketBase<NUM_SLOTS, NUM_STASH_FPS> {
   // std::array<uint8_t, NUM_SLOTS> low_ = {0};
 };
 
-static_assert(alignof(VersionedBB<14, 4>) == 1, "");
-static_assert(sizeof(VersionedBB<12, 4>) == 12 * 2 + 8, "");
-static_assert(sizeof(VersionedBB<14, 4>) <= 14 * 2 + 8, "");
+static_assert(alignof(VersionedBB<14>) == 1);
+static_assert(sizeof(VersionedBB<12>) == 12 * 2 + 8);
+static_assert(sizeof(VersionedBB<14>) <= 14 * 2 + 8);
 
 // Segment - static-hashtable of size kSlotNum*(kBucketNum + kStashBucketNum).
 struct DefaultSegmentPolicy {
   static constexpr unsigned kSlotNum = 12;
   static constexpr unsigned kBucketNum = 64;
-  static constexpr unsigned kStashBucketNum = 2;
   static constexpr bool kUseVersion = true;
 };
 
@@ -302,15 +298,14 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
  public:
   static constexpr unsigned kSlotNum = Policy::kSlotNum;
   static constexpr unsigned kBucketNum = Policy::kBucketNum;
-  static constexpr unsigned kStashBucketNum = Policy::kStashBucketNum;
+  static constexpr unsigned kStashBucketNum = 4;
   static constexpr bool kUseVersion = Policy::kUseVersion;
 
  private:
   static_assert(kBucketNum + kStashBucketNum < 255);
   static constexpr unsigned kFingerBits = 8;
 
-  using BucketType =
-      std::conditional_t<kUseVersion, VersionedBB<kSlotNum, 4>, BucketBase<kSlotNum, 4>>;
+  using BucketType = std::conditional_t<kUseVersion, VersionedBB<kSlotNum>, BucketBase<kSlotNum>>;
 
   struct Bucket : public BucketType {
     using BucketType::kNanSlot;
@@ -613,13 +608,13 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 };  // Segment
 
 class DashTableBase {
-  DashTableBase(const DashTableBase&) = delete;
-  DashTableBase& operator=(const DashTableBase&) = delete;
-
  public:
   explicit DashTableBase(uint32_t gd)
       : unique_segments_(1 << gd), initial_depth_(gd), global_depth_(gd) {
   }
+
+  DashTableBase(const DashTableBase&) = delete;
+  DashTableBase& operator=(const DashTableBase&) = delete;
 
   uint32_t unique_segments() const {
     return unique_segments_;
@@ -810,8 +805,8 @@ ___  _  _ ____ _  _ ____ ___    ___  ____ ____ ____
 
 */
 
-template <unsigned NUM_SLOTS, unsigned NUM_OVR>
-bool BucketBase<NUM_SLOTS, NUM_OVR>::ClearStash(uint8_t fp, unsigned stash_pos, bool probe) {
+template <unsigned NUM_SLOTS>
+bool BucketBase<NUM_SLOTS>::ClearStash(uint8_t fp, unsigned stash_pos, bool probe) {
   auto cb = [stash_pos, this](unsigned i, unsigned pos) -> SlotId {
     if (pos == stash_pos) {
       stash_busy_ &= (~(1u << i));
@@ -828,16 +823,16 @@ bool BucketBase<NUM_SLOTS, NUM_OVR>::ClearStash(uint8_t fp, unsigned stash_pos, 
   return res.second != kNanSlot;
 }
 
-template <unsigned NUM_SLOTS, unsigned NUM_OVR>
-void BucketBase<NUM_SLOTS, NUM_OVR>::SetHash(unsigned slot_id, uint8_t meta_hash, bool probe) {
+template <unsigned NUM_SLOTS>
+void BucketBase<NUM_SLOTS>::SetHash(unsigned slot_id, uint8_t meta_hash, bool probe) {
   assert(slot_id < finger_arr_.size());
 
   finger_arr_[slot_id] = meta_hash;
   slotb_.SetSlot(slot_id, probe);
 }
 
-template <unsigned NUM_SLOTS, unsigned NUM_OVR>
-bool BucketBase<NUM_SLOTS, NUM_OVR>::SetStash(uint8_t fp, unsigned stash_pos, bool probe) {
+template <unsigned NUM_SLOTS>
+bool BucketBase<NUM_SLOTS>::SetStash(uint8_t fp, unsigned stash_pos, bool probe) {
   // stash_busy_ is never 0xFFFFF so it's safe to run __builtin_ctz below.
   unsigned free_slot = __builtin_ctz(~stash_busy_);
   if (free_slot >= kStashFpLen)
@@ -856,9 +851,8 @@ bool BucketBase<NUM_SLOTS, NUM_OVR>::SetStash(uint8_t fp, unsigned stash_pos, bo
   return true;
 }
 
-template <unsigned NUM_SLOTS, unsigned NUM_OVR>
-void BucketBase<NUM_SLOTS, NUM_OVR>::SetStashPtr(unsigned stash_pos, uint8_t meta_hash,
-                                                 BucketBase* next) {
+template <unsigned NUM_SLOTS>
+void BucketBase<NUM_SLOTS>::SetStashPtr(unsigned stash_pos, uint8_t meta_hash, BucketBase* next) {
   assert(stash_pos < 4);
 
   // we use only kStashFpLen fp slots for handling stash buckets,
@@ -874,9 +868,9 @@ void BucketBase<NUM_SLOTS, NUM_OVR>::SetStashPtr(unsigned stash_pos, uint8_t met
   stash_busy_ |= kStashPresentBit;
 }
 
-template <unsigned NUM_SLOTS, unsigned NUM_OVR>
-unsigned BucketBase<NUM_SLOTS, NUM_OVR>::UnsetStashPtr(uint8_t fp_hash, unsigned stash_pos,
-                                                       BucketBase* next) {
+template <unsigned NUM_SLOTS>
+unsigned BucketBase<NUM_SLOTS>::UnsetStashPtr(uint8_t fp_hash, unsigned stash_pos,
+                                              BucketBase* next) {
   /*also needs to ensure that this meta_hash must belongs to other bucket*/
   bool clear_success = ClearStash(fp_hash, stash_pos, false);
   unsigned res = 0;
@@ -907,8 +901,7 @@ unsigned BucketBase<NUM_SLOTS, NUM_OVR>::UnsetStashPtr(uint8_t fp_hash, unsigned
 }
 
 #ifdef __s390x__
-template <unsigned NUM_SLOTS, unsigned NUM_OVR>
-uint32_t BucketBase<NUM_SLOTS, NUM_OVR>::CompareFP(uint8_t fp) const {
+template <unsigned NUM_SLOTS> uint32_t BucketBase<NUM_SLOTS>::CompareFP(uint8_t fp) const {
   static_assert(FpArray{}.size() <= 16);
   vector unsigned char v1;
 
@@ -934,8 +927,7 @@ uint32_t BucketBase<NUM_SLOTS, NUM_OVR>::CompareFP(uint8_t fp) const {
   return mask;
 }
 #else
-template <unsigned NUM_SLOTS, unsigned NUM_OVR>
-uint32_t BucketBase<NUM_SLOTS, NUM_OVR>::CompareFP(uint8_t fp) const {
+template <unsigned NUM_SLOTS> uint32_t BucketBase<NUM_SLOTS>::CompareFP(uint8_t fp) const {
   static_assert(FpArray{}.size() <= 16);
 
   // Replicate 16 times fp to key_data.
@@ -958,7 +950,7 @@ uint32_t BucketBase<NUM_SLOTS, NUM_OVR>::CompareFP(uint8_t fp) const {
 // Bucket slot array goes from left to right: [x, x, ...]
 // Shift right vacates the first slot on the left by shifting all the elements right and
 // possibly deleting the last one on the right.
-template <unsigned NUM_SLOTS, unsigned NUM_OVR> bool BucketBase<NUM_SLOTS, NUM_OVR>::ShiftRight() {
+template <unsigned NUM_SLOTS> bool BucketBase<NUM_SLOTS>::ShiftRight() {
   for (int i = NUM_SLOTS - 1; i > 0; --i) {
     finger_arr_[i] = finger_arr_[i - 1];
   }
@@ -970,9 +962,9 @@ template <unsigned NUM_SLOTS, unsigned NUM_OVR> bool BucketBase<NUM_SLOTS, NUM_O
   return res;
 }
 
-template <unsigned NUM_SLOTS, unsigned NUM_OVR>
+template <unsigned NUM_SLOTS>
 template <typename F>
-auto BucketBase<NUM_SLOTS, NUM_OVR>::IterateStash(uint8_t fp, bool is_probe, F&& func) const
+auto BucketBase<NUM_SLOTS>::IterateStash(uint8_t fp, bool is_probe, F&& func) const
     -> ::std::pair<unsigned, SlotId> {
   unsigned om = is_probe ? stash_probe_mask_ : ~stash_probe_mask_;
   unsigned ob = stash_busy_;
@@ -991,14 +983,13 @@ auto BucketBase<NUM_SLOTS, NUM_OVR>::IterateStash(uint8_t fp, bool is_probe, F&&
   return std::pair<unsigned, SlotId>(0, BucketBase::kNanSlot);
 }
 
-template <unsigned NUM_SLOTS, unsigned NUM_STASH_FPS>
-void VersionedBB<NUM_SLOTS, NUM_STASH_FPS>::SetVersion(uint64_t version) {
+template <unsigned NUM_SLOTS> void VersionedBB<NUM_SLOTS>::SetVersion(uint64_t version) {
   absl::little_endian::Store64(version_, version);
 }
 
 #if 0
-template <unsigned NUM_SLOTS, unsigned NUM_STASH_FPS>
-uint64_t VersionedBB<NUM_SLOTS, NUM_STASH_FPS>::MinVersion() const {
+template <unsigned NUM_SLOTS>
+uint64_t VersionedBB<NUM_SLOTS>::MinVersion() const {
   uint32_t mask = this->GetBusy();
   if (mask == 0)
     return 0;
