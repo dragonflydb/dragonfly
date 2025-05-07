@@ -9,7 +9,6 @@
 #include <string>
 
 #include "absl/cleanup/cleanup.h"
-#include "absl/strings/str_cat.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/cmd_arg_parser.h"
@@ -17,9 +16,6 @@
 #include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/channel_store.h"
-#include "server/cluster/cluster_defs.h"
-#include "server/cluster/incoming_slot_migration.h"
-#include "server/cluster/outgoing_slot_migration.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/dflycmd.h"
@@ -839,7 +835,7 @@ ClusterFamily::TakeOutOutgoingMigrations(shared_ptr<ClusterConfig> new_config,
     removed_slots.Merge(slots);
     LOG(INFO) << "Outgoing migration cancelled: slots " << slots.ToString() << " to "
               << migration.GetHostIp() << ":" << migration.GetPort();
-    migration.Finish(MigrationState::C_FINISHED);
+    migration.Finish();
     res.migrations.push_back(std::move(*it));
     outgoing_migration_jobs_.erase(it);
   }
@@ -930,7 +926,7 @@ void ClusterFamily::InitMigration(CmdArgList args, SinkReplyBuilder* builder) {
 
   if (!migration) {
     VLOG(1) << "Unrecognized incoming migration from " << source_id;
-    return builder->SendSimpleString(OutgoingMigration::kUnknownMigration);
+    return builder->SendSimpleString(kUnknownMigration);
   }
 
   if (migration->GetState() != MigrationState::C_CONNECTING) {
@@ -942,7 +938,7 @@ void ClusterFamily::InitMigration(CmdArgList args, SinkReplyBuilder* builder) {
   }
 
   if (migration->GetState() == MigrationState::C_FATAL) {
-    return builder->SendError(absl::StrCat("-", IncomingSlotMigration::kMigrationOOM));
+    return builder->SendError(absl::StrCat("-", kIncomingMigrationOOM));
   }
 
   migration->Init(flows_num);
@@ -969,10 +965,6 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, SinkReplyBuilder* builder,
     return builder->SendError(kIdNotFound);
   }
 
-  if (migration->GetState() == MigrationState::C_FATAL) {
-    return builder->SendError(absl::StrCat("-", IncomingSlotMigration::kMigrationOOM));
-  }
-
   DCHECK(cntx->sync_dispatch);
   // we do this to be ignored by the dispatch tracker
   // TODO provide a more clear approach
@@ -981,10 +973,6 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, SinkReplyBuilder* builder,
   builder->SendOk();
 
   migration->StartFlow(shard_id, cntx->conn()->socket());
-
-  if (migration->GetState() == MigrationState::C_FATAL) {
-    migration->Stop();
-  }
 }
 
 void ClusterFamily::ApplyMigrationSlotRangeToConfig(std::string_view node_id,
@@ -1051,7 +1039,7 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, SinkReplyBuilder* builder) {
                    [source_id = source_id](const auto& m) { return m.node_info.id == source_id; });
   if (m_it == in_migrations.end()) {
     LOG(WARNING) << "migration isn't in config";
-    return builder->SendError(OutgoingMigration::kUnknownMigration);
+    return builder->SendError(kUnknownMigration);
   }
 
   auto migration = GetIncomingMigration(source_id);
@@ -1060,7 +1048,7 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, SinkReplyBuilder* builder) {
 
   if (!migration->Join(attempt)) {
     if (migration->GetState() == MigrationState::C_FATAL) {
-      return builder->SendError(absl::StrCat("-", IncomingSlotMigration::kMigrationOOM));
+      return builder->SendError(absl::StrCat("-", kIncomingMigrationOOM));
     } else {
       return builder->SendError("Join timeout happened");
     }

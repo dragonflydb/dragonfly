@@ -3,9 +3,6 @@
 //
 #pragma once
 
-#include <string>
-
-#include "absl/base/thread_annotations.h"
 #include "helio/util/fiber_socket_base.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/common.h"
@@ -81,8 +78,6 @@ class IncomingSlotMigration {
   size_t GetKeyCount() const;
 
   void Pause(bool pause);
-
-  static constexpr char kMigrationOOM[] = "INCOMING_MIGRATION_OOM";
 
  private:
   std::string source_id_;

@@ -174,6 +174,10 @@ class ClusterShardInfos {
 // MigrationState constants are ordered in state changing order
 enum class MigrationState : uint8_t { C_CONNECTING, C_SYNC, C_ERROR, C_FINISHED, C_FATAL };
 
+// Errors during slot migration
+static constexpr std::string_view kUnknownMigration = "UNKNOWN_MIGRATION";
+static constexpr std::string_view kIncomingMigrationOOM = "INCOMING_MIGRATION_OOM";
+
 // return error message if slot doesn't belong to this node
 facade::ErrorReply SlotOwnershipError(SlotId slot_id);
 

@@ -7,8 +7,6 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 
-#include <utility>
-
 #include "base/flags.h"
 #include "base/logging.h"
 #include "cluster_utility.h"
@@ -78,17 +76,11 @@ class ClusterShardMigration {
         break;
       }
 
-      auto oom_check = [&]() -> bool {
-        auto used_mem = used_mem_current.load(memory_order_relaxed);
-        if ((used_mem + tx_data->command.cmd_len) > max_memory_limit) {
-          cntx->ReportError(IncomingSlotMigration::kMigrationOOM);
-          in_migration_->ReportFatalError(GenericError(IncomingSlotMigration::kMigrationOOM));
-          return true;
-        }
-        return false;
-      };
-
-      if (oom_check()) {
+      auto used_mem = used_mem_current.load(memory_order_relaxed);
+      // If aplying transaction data will reach 90% of max_memory_limit we end migration.
+      if ((used_mem + tx_data->command.cmd_len) > (0.9 * max_memory_limit)) {
+        cntx->ReportError(std::string{kIncomingMigrationOOM});
+        in_migration_->ReportFatalError(std::string{kIncomingMigrationOOM});
         break;
       }
 
@@ -101,8 +93,8 @@ class ClusterShardMigration {
           VLOG(1) << "Finalized flow " << source_shard_id_;
           return;
         }
-        if (oom_check()) {
-          VLOG(2) << "Flow finalization " << source_shard_id_
+        if (in_migration_->GetState() == MigrationState::C_FATAL) {
+          VLOG(1) << "Flow finalization " << source_shard_id_
                   << " canceled due memory limit reached";
           return;
         }
@@ -253,6 +245,11 @@ void IncomingSlotMigration::Stop() {
     }
   }
 
+  // Don't wait if we reached FATAL state
+  if (state_ == MigrationState::C_FATAL) {
+    return;
+  }
+
   // we need to Join the migration process to prevent data corruption
   const absl::Time start = absl::Now();
   const absl::Duration timeout =
@@ -289,6 +286,9 @@ void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* sou
   VLOG(1) << "Incoming flow " << shard
           << (GetState() == MigrationState::C_FINISHED ? " finished " : " cancelled ") << "for "
           << source_id_;
+  if (GetState() == MigrationState::C_FATAL) {
+    Stop();
+  }
 }
 
 size_t IncomingSlotMigration::GetKeyCount() const {
