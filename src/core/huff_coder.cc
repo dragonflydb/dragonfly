@@ -78,6 +78,11 @@ bool HuffmanEncoder::Encode(std::string_view data, uint8_t* dest, uint32_t* dest
   return true;
 }
 
+unsigned HuffmanEncoder::GetNBits(uint8_t symbol) const {
+  DCHECK(huf_ctable_);
+  return HUF_getNbBitsFromCTable(huf_ctable_.get(), symbol);
+}
+
 unsigned HuffmanEncoder::BitCount(uint8_t symbol) const {
   DCHECK(huf_ctable_);
   return HUF_getNbBitsFromCTable(huf_ctable_.get(), symbol);
@@ -105,6 +110,41 @@ string HuffmanEncoder::Export() const {
   CHECK(!HUF_isError(size));
   res.resize(size);
   return res;
+}
+
+bool HuffmanDecoder::Load(std::string_view binary_data, std::string* error_msg) {
+  DCHECK(!huf_dtable_);
+  huf_dtable_.reset(new HUF_DTable[HUF_DTABLE_SIZE(HUF_TABLELOG_MAX)]);
+  huf_dtable_[0] = (HUF_TABLELOG_MAX - 1) * 0x01000001;  // some sort of magic number
+
+  constexpr size_t kWspSize = HUF_DECOMPRESS_WORKSPACE_SIZE;
+  unique_ptr<uint8_t[]> wrksp(new uint8_t[kWspSize]);
+
+  size_t res = HUF_readDTableX1_wksp(huf_dtable_.get(), binary_data.data(), binary_data.size(),
+                                     wrksp.get(), kWspSize, 0);
+  if (HUF_isError(res)) {
+    *error_msg = HUF_getErrorName(res);
+    huf_dtable_.reset();
+    return false;
+  }
+  if (res != binary_data.size()) {
+    *error_msg = "Corrupted data";
+    huf_dtable_.reset();
+    return false;
+  }
+  return true;
+}
+
+bool HuffmanDecoder::Decode(std::string_view src, size_t dest_size, char* dest) const {
+  DCHECK(huf_dtable_);
+  size_t res =
+      HUF_decompress1X_usingDTable(dest, dest_size, src.data(), src.size(), huf_dtable_.get(), 1);
+
+  if (HUF_isError(res)) {
+    LOG(FATAL) << "Failed to decompress: " << HUF_getErrorName(res);
+    return false;
+  }
+  return true;
 }
 
 }  // namespace dfly
