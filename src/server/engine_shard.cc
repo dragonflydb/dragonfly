@@ -308,7 +308,7 @@ string EngineShard::TxQueueInfo::Format() const {
 }
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
-  static_assert(sizeof(Stats) == 88);
+  static_assert(sizeof(Stats) == 96);
 
 #define ADD(x) x += o.x
 
@@ -323,6 +323,7 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
   ADD(total_heartbeat_expired_keys);
   ADD(total_heartbeat_expired_bytes);
   ADD(total_heartbeat_expired_calls);
+  ADD(total_migrated_keys);
 
 #undef ADD
   return *this;

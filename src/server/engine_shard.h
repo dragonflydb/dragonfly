@@ -48,6 +48,9 @@ class EngineShard {
     uint64_t total_heartbeat_expired_bytes = 0;
     uint64_t total_heartbeat_expired_calls = 0;
 
+    // cluster stats
+    uint64_t total_migrated_keys = 0;
+
     Stats& operator+=(const Stats&);
   };
 
