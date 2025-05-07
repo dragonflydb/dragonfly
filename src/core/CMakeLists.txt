@@ -21,7 +21,7 @@ add_subdirectory(json)
 set(SEARCH_LIB query_parser)
 
 add_library(dfly_core allocation_tracker.cc bloom.cc compact_object.cc dense_set.cc
-    dragonfly_core.cc extent_tree.cc
+    dragonfly_core.cc extent_tree.cc huff_coder.cc
     interpreter.cc glob_matcher.cc mi_memory_resource.cc qlist.cc sds_utils.cc
     segment_allocator.cc score_map.cc small_string.cc sorted_map.cc task_queue.cc
     tx_queue.cc string_set.cc string_map.cc top_keys.cc detail/bitpacking.cc)

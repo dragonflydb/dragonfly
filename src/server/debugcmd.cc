@@ -13,6 +13,7 @@ extern "C" {
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>
+#include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <lz4.h>
@@ -24,6 +25,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
+#include "core/huff_coder.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -1318,71 +1320,47 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
   });
 
   size_t num_bits = 0, compressed_size = 0, raw_size = 0;
-  unsigned table_max_symbol = 255;
 
   if (hist.max_symbol) {
-    HUF_CREATE_STATIC_CTABLE(huf_ctable, HufHist::kMaxSymbol);
+    HuffmanEncoder huff_enc;
+    string err_msg;
 
-    unique_ptr<uint32_t[]> wrkspace(new uint32_t[HUF_CTABLE_WORKSPACE_SIZE_U32]);
-    constexpr size_t kWspSize = HUF_CTABLE_WORKSPACE_SIZE;
+    raw_size = 0;
+    for (unsigned i = 0; i <= HufHist::kMaxSymbol; i++) {
+      raw_size += hist.hist[i];
+
+      // force non-zero weights for all symbols.
+      if (hist.hist[i] == 0)
+        hist.hist[i] = 1;
+    }
 
     if (bintable.empty()) {
-      table_max_symbol = hist.max_symbol;
-      num_bits = HUF_buildCTable_wksp(huf_ctable, hist.hist.data(), table_max_symbol, 0,
-                                      wrkspace.get(), kWspSize);
-      if (HUF_isError(num_bits)) {
-        return rb->SendError(StrCat("Internal error: ", HUF_getErrorName(num_bits)));
+      if (!huff_enc.Build(hist.hist.data(), HufHist::kMaxSymbol, &err_msg)) {
+        return rb->SendError(StrCat("Internal error: ", err_msg));
       }
     } else {
       // Try to read the bintable and create a ctable from it.
-      unsigned has_zero_weights = 1;
-
-      size_t read_size = HUF_readCTable(huf_ctable, &table_max_symbol, bintable.data(),
-                                        bintable.size(), &has_zero_weights);
-      if (HUF_isError(read_size)) {
-        return rb->SendError(StrCat("Internal error: ", HUF_getErrorName(read_size)));
-      }
-      if (read_size != bintable.size()) {
-        return rb->SendError("Invalid bintable");
+      if (!huff_enc.Load(bintable, &err_msg)) {
+        return rb->SendError(StrCat("Internal error: ", err_msg));
       }
     }
-
-    compressed_size = HUF_estimateCompressedSize(huf_ctable, hist.hist.data(), table_max_symbol);
-    for (unsigned i = table_max_symbol + 1; i <= hist.max_symbol; i++) {
-      compressed_size += hist.hist[i];
-    }
-    raw_size = 0;
-    for (unsigned i = 0; i <= hist.max_symbol; i++) {
-      raw_size += hist.hist[i];
-    }
+    num_bits = huff_enc.num_bits();
+    compressed_size = huff_enc.EstimateCompressedSize(hist.hist.data(), HufHist::kMaxSymbol);
 
     if (print_bintable) {
-      // Reverse engineered: (maxSymbolValue + 1) / 2 + 1.
-      constexpr unsigned kMaxTableSize = 130;
-      bintable.resize(kMaxTableSize);
-
-      // Seems we can reuse the same workspace, its capacity is enough.
-      size_t res = HUF_writeCTable_wksp(bintable.data(), kMaxTableSize, huf_ctable,
-                                        table_max_symbol, num_bits, wrkspace.get(), kWspSize);
-      if (HUF_isError(res)) {
-        return rb->SendError(StrCat("Internal error: ", HUF_getErrorName(res)));
-      }
-      bintable.resize(res);
+      bintable = huff_enc.Export();
+      VLOG(1) << "bintable: " << absl::CHexEscape(bintable);
     } else {
       bintable.clear();
     }
   }
 
-  unsigned map_len = print_bintable ? 7 : 6;
+  unsigned map_len = print_bintable ? 6 : 5;
 
   rb->StartCollection(map_len, RedisReplyBuilder::CollectionType::MAP);
   rb->SendSimpleString("max_symbol");
   rb->SendLong(hist.max_symbol);
 
-  // in case we load a bintable, table_max_symbol may be different from max_symbol.
-  // if it's smaller, it means our table can not encode all symbols.
-  rb->SendSimpleString("table_max_symbol");
-  rb->SendLong(table_max_symbol);
   rb->SendSimpleString("max_bits");
   rb->SendLong(num_bits);
   rb->SendSimpleString("raw_size");
