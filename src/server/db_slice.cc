@@ -54,7 +54,7 @@ constexpr auto kPrimeSegmentSize = PrimeTable::kSegBytes;
 constexpr auto kExpireSegmentSize = ExpireTable::kSegBytes;
 
 // mi_malloc good size is 32768. i.e. we have malloc waste of 1.5%.
-static_assert(kPrimeSegmentSize == 32288);
+static_assert(kPrimeSegmentSize <= 32288);
 
 // 20480 is the next goodsize so we are loosing ~300 bytes or 1.5%.
 // 24576
