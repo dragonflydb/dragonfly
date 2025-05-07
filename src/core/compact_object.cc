@@ -1008,23 +1008,16 @@ void CompactObj::AppendString(std::string_view str) {
   u_.r_obj.AppendString(str, tl.local_mr);
 }
 
-// TODO: to simplify this code using GetString(char*) variant.
 string_view CompactObj::GetSlice(string* scratch) const {
   CHECK(!IsExternal());
 
+  if (mask_bits_.encoding) {
+    scratch->resize(Size());
+    GetString(scratch->data());
+    return *scratch;
+  }
+
   if (IsInline()) {
-    if (mask_bits_.encoding) {
-      size_t decoded_len = taglen_ + 2;
-
-      // must be this because we either shortened 17 or 18.
-      DCHECK_EQ(mask_bits_.encoding, ASCII2_ENC);
-      DCHECK_EQ(decoded_len, ascii_len(taglen_));
-
-      scratch->resize(decoded_len);
-      detail::ascii_unpack(to_byte(u_.inline_str), decoded_len, scratch->data());
-      return *scratch;
-    }
-
     return string_view{u_.inline_str, taglen_};
   }
 
@@ -1032,33 +1025,6 @@ string_view CompactObj::GetSlice(string* scratch) const {
     absl::AlphaNum an(u_.ival);
     scratch->assign(an.Piece());
 
-    return *scratch;
-  }
-
-  if (mask_bits_.encoding) {
-    if (taglen_ == ROBJ_TAG) {
-      CHECK_EQ(OBJ_STRING, u_.r_obj.type());
-      DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-      size_t decoded_len = DecodedLen(u_.r_obj.Size());
-      scratch->resize(decoded_len);
-      detail::ascii_unpack_simd(to_byte(u_.r_obj.inner_obj()), decoded_len, scratch->data());
-    } else if (taglen_ == SMALL_TAG) {
-      size_t decoded_len = DecodedLen(u_.small_str.size());
-      scratch->resize(decoded_len);
-      string_view slices[2];
-
-      unsigned num = u_.small_str.GetV(slices);
-      DCHECK_EQ(2u, num);
-      std::string tmp(decoded_len, ' ');
-      char* next = tmp.data();
-      memcpy(next, slices[0].data(), slices[0].size());
-      next += slices[0].size();
-      memcpy(next, slices[1].data(), slices[1].size());
-      detail::ascii_unpack_simd(reinterpret_cast<uint8_t*>(tmp.data()), decoded_len,
-                                scratch->data());
-    } else {
-      LOG(FATAL) << "Unsupported tag " << int(taglen_);
-    }
     return *scratch;
   }
 
