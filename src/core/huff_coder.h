@@ -40,11 +40,30 @@ class HuffmanEncoder {
     return table_max_symbol_;
   }
 
+  unsigned GetNBits(uint8_t symbol) const;
+
  private:
   using HUF_CElt = size_t;
   std::unique_ptr<HUF_CElt[]> huf_ctable_;
   unsigned table_max_symbol_ = 0;
   uint8_t num_bits_ = 0;
+};
+
+class HuffmanDecoder {
+ public:
+  bool Load(std::string_view binary_data, std::string* error_msg);
+  bool valid() const {
+    return bool(huf_dtable_);
+  }
+
+  // decoded_size should be the *precise* size of the decoded data, otherwise the function will
+  // fail. dest should point to a buffer of at least decoded_size bytes.
+  // Returns true if decompression was successful, false if the data is corrupted.
+  bool Decode(std::string_view src, size_t decoded_size, char* dest) const;
+
+ private:
+  using HUF_DTable = uint32_t;
+  std::unique_ptr<HUF_DTable[]> huf_dtable_;
 };
 
 }  // namespace dfly
