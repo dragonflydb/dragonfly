@@ -12,7 +12,7 @@
 #include "base/logging.h"
 #include "cluster_family.h"
 #include "cluster_utility.h"
-#include "facade/socket_utils.h"
+#include "server/cluster/cluster_defs.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -37,8 +37,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   SliceSlotMigration(DbSlice* slice, ServerContext server_context, SlotSet slots,
                      journal::Journal* journal, OutgoingMigration* om)
       : ProtocolClient(server_context), streamer_(slice, std::move(slots), journal, &exec_st_) {
-    exec_st_.SwitchErrorHandler(
-        [om](auto ge) { om->Finish(MigrationState::C_ERROR, std::move(ge)); });
+    exec_st_.SwitchErrorHandler([om](auto ge) { om->Finish(std::move(ge)); });
   }
 
   ~SliceSlotMigration() {
@@ -143,8 +142,14 @@ void OutgoingMigration::OnAllShards(
   });
 }
 
-void OutgoingMigration::Finish(MigrationState next_state, GenericError error) {
+void OutgoingMigration::Finish(GenericError error) {
+  auto next_state = MigrationState::C_FINISHED;
   if (error) {
+    if (error.Format() == kIncomingMigrationOOM) {
+      next_state = MigrationState::C_FATAL;
+    } else {
+      next_state = MigrationState::C_ERROR;
+    }
     LOG(WARNING) << "Finish outgoing migration for " << cf_->MyID() << ": "
                  << migration_info_.node_info.id << " with error: " << error.Format();
     exec_st_.ReportError(std::move(error));
@@ -229,6 +234,15 @@ void OutgoingMigration::SyncFb() {
       continue;
     }
 
+    // Break outgoing migration if INIT from incoming node responded with OOM. Usually this will
+    // happen on second iteration after first failed with OOM. Sending second INIT is required to
+    // cleanup slots on incoming slot migration node.
+    if (CheckRespFirstTypes({RespExpr::ERROR}) &&
+        facade::ToSV(LastResponseArgs().front().GetBuf()) == kIncomingMigrationOOM) {
+      ChangeState(MigrationState::C_FATAL);
+      break;
+    }
+
     if (!CheckRespIsSimpleReply("OK")) {
       if (CheckRespIsSimpleReply(kUnknownMigration)) {
         const absl::Duration passed = absl::Now() - start_time;
@@ -279,20 +293,16 @@ void OutgoingMigration::SyncFb() {
     }
 
     long attempt = 0;
-    bool fatal_state = false;
     while (GetState() != MigrationState::C_FINISHED && !FinalizeMigration(++attempt)) {
-      // Don't sleep if we ended up in FATAL state
+      // Break loop and don't sleep in case of C_FATAL
       if (GetState() == MigrationState::C_FATAL) {
-        fatal_state = true;
         break;
-      } else {
-        // Process commands that were on pause and try again
-        VLOG(1) << "Waiting for migration to finalize...";
-        ThisFiber::SleepFor(500ms);
       }
+      // Process commands that were on pause and try again
+      VLOG(1) << "Waiting for migration to finalize...";
+      ThisFiber::SleepFor(500ms);
     }
-    // End outgoing slot migration if we are FINISHED or are in FATAL state
-    if (!exec_st_.IsRunning() && !fatal_state) {
+    if (!exec_st_.IsRunning()) {
       continue;
     }
     break;
@@ -377,16 +387,11 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
 
     if (CheckRespFirstTypes({RespExpr::ERROR})) {
       auto error = facade::ToSV(LastResponseArgs().front().GetBuf());
-      LOG(WARNING) << "Error response for " << cf_->MyID() << " : " << migration_info_.node_info.id
-                   << " attempt " << attempt << " msg: " << error;
-      auto next_state = MigrationState::C_ERROR;
-      // Check if there is OOM response from incoming slot migration
-      if (error == IncomingSlotMigration::kMigrationOOM) {
-        SetLastError(GenericError(IncomingSlotMigration::kMigrationOOM));
-        next_state = MigrationState::C_FATAL;
+      // Check if returned incoming slot OOM and finish migration
+      if (error == kIncomingMigrationOOM) {
+        Finish(std::string(error));
+        return false;
       }
-      Finish(next_state, std::string(error));
-      return false;
     }
 
     if (!CheckRespFirstTypes({RespExpr::INT64})) {
@@ -405,7 +410,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   }
 
   if (!exec_st_.GetError()) {
-    Finish(MigrationState::C_FINISHED);
+    Finish();
     keys_number_ = cluster::GetKeyCount(migration_info_.slot_ranges);
     cf_->ApplyMigrationSlotRangeToConfig(migration_info_.node_info.id, migration_info_.slot_ranges,
                                          false);
