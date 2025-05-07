@@ -30,7 +30,7 @@ class OutgoingMigration : private ProtocolClient {
   // if is_error = false mark migration as FINISHED and cancel migration if it's not finished yet
   // can be called from any thread, but only after Start()
   // if is_error = true and migration is in progress it will be restarted otherwise nothing happens
-  void Finish(MigrationState next_state, GenericError error = {}) ABSL_LOCKS_EXCLUDED(state_mu_);
+  void Finish(GenericError error = {}) ABSL_LOCKS_EXCLUDED(state_mu_);
 
   MigrationState GetState() const ABSL_LOCKS_EXCLUDED(state_mu_);
 
@@ -75,8 +75,6 @@ class OutgoingMigration : private ProtocolClient {
   }
 
   size_t GetKeyCount() const ABSL_LOCKS_EXCLUDED(state_mu_);
-
-  static constexpr std::string_view kUnknownMigration = "UNKNOWN_MIGRATION";
 
  private:
   // should be run for all shards
