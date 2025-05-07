@@ -146,6 +146,9 @@ struct LastSaveInfo {
   GenericError last_error;
   time_t last_error_time = 0;      // epoch time in seconds.
   time_t failed_duration_sec = 0;  // epoch time in seconds.
+  // false if last attempt failed
+  bool last_bgsave_status = true;
+  bool bgsave_in_progress = false;
 };
 
 struct SnapshotSpec {
@@ -340,8 +343,13 @@ class ServerFamily {
 
   void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
 
+  struct DoSaveCheckAndStartOpts {
+    bool ignore_state = false;
+    bool bg_save = false;
+  };
+
   GenericError DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts, Transaction* trans,
-                                   bool ignore_state = false) ABSL_LOCKS_EXCLUDED(save_mu_);
+                                   DoSaveCheckAndStartOpts opts) ABSL_LOCKS_EXCLUDED(save_mu_);
 
   GenericError WaitUntilSaveFinished(Transaction* trans,
                                      bool ignore_state = false) ABSL_NO_THREAD_SAFETY_ANALYSIS;
