@@ -23,6 +23,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/glob_matcher.h"
+#include "core/huff_coder.h"
 #include "core/intent_lock.h"
 #include "core/tx_queue.h"
 
@@ -186,6 +187,43 @@ TEST_F(StringMatchTest, Special) {
   EXPECT_TRUE(MatchLen("[$?^]a", "?a", 0));
   EXPECT_TRUE(MatchLen("abc[\\d]e", "abcde", 0));
   EXPECT_TRUE(MatchLen("foo\\", "foo\\", 0));
+}
+
+class HuffCoderTest : public ::testing::Test {
+ protected:
+  HuffmanEncoder encoder_;
+  string error_msg_;
+  const string_view good_table_{
+      "\x1b\x10\xd8\n\n\x19\xc6\x0c\xc3\x30\x0c\x43\x1e\x93\xe4\x11roB\xf6\xde\xbb\x18V\xc2Zk\x03"sv};
+};
+
+TEST_F(HuffCoderTest, Load) {
+  string data("bad");
+
+  ASSERT_FALSE(encoder_.Load(data, &error_msg_));
+
+  data = good_table_;
+  ASSERT_TRUE(encoder_.Load(data, &error_msg_)) << error_msg_;
+
+  data.append("foo");
+  encoder_.Reset();
+  ASSERT_FALSE(encoder_.Load(data, &error_msg_));
+}
+
+TEST_F(HuffCoderTest, Encode) {
+  ASSERT_TRUE(encoder_.Load(good_table_, &error_msg_)) << error_msg_;
+
+  EXPECT_EQ(1, encoder_.BitCount('x'));
+  EXPECT_EQ(3, encoder_.BitCount(':'));
+  EXPECT_EQ(5, encoder_.BitCount('2'));
+  EXPECT_EQ(5, encoder_.BitCount('3'));
+
+  string data("x:23xx");
+
+  uint8_t dest[100];
+  uint32_t dest_size = sizeof(dest);
+  ASSERT_TRUE(encoder_.Encode(data, dest, &dest_size, &error_msg_));
+  ASSERT_EQ(3, dest_size);
 }
 
 using benchmark::DoNotOptimize;
