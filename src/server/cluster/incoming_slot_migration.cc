@@ -10,7 +10,6 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "cluster_utility.h"
-#include "server/cluster/cluster_defs.h"
 #include "server/error.h"
 #include "server/journal/executor.h"
 #include "server/journal/tx_executor.h"
