@@ -614,9 +614,7 @@ void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
   if (!password.empty()) {
     auto command = absl::StrCat("AUTH ", password, "\r\n");
     RunCommandAndCheckResultIs(command, "+OK\r\n");
-  }
-
-  if (absl::GetFlag(FLAGS_greet) && password.empty()) {
+  } else if (absl::GetFlag(FLAGS_greet)) {
     // TCP Connect does not ensure that the connection was indeed accepted by the server.
     // if server backlog is too short the connection will get stuck in the accept queue.
     // Therefore, we send a ping command to ensure that every connection got connected.
