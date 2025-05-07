@@ -835,7 +835,7 @@ ClusterFamily::TakeOutOutgoingMigrations(shared_ptr<ClusterConfig> new_config,
     removed_slots.Merge(slots);
     LOG(INFO) << "Outgoing migration cancelled: slots " << slots.ToString() << " to "
               << migration.GetHostIp() << ":" << migration.GetPort();
-    migration.Finish();
+    migration.Finish(MigrationState::C_FINISHED);
     res.migrations.push_back(std::move(*it));
     outgoing_migration_jobs_.erase(it);
   }
