@@ -12,7 +12,6 @@
 #include "base/logging.h"
 #include "cluster_family.h"
 #include "cluster_utility.h"
-#include "server/cluster/cluster_defs.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -37,7 +36,8 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   SliceSlotMigration(DbSlice* slice, ServerContext server_context, SlotSet slots,
                      journal::Journal* journal, OutgoingMigration* om)
       : ProtocolClient(server_context), streamer_(slice, std::move(slots), journal, &exec_st_) {
-    exec_st_.SwitchErrorHandler([om](auto ge) { om->Finish(std::move(ge)); });
+    exec_st_.SwitchErrorHandler(
+        [om](auto ge) { om->Finish(MigrationState::C_ERROR, std::move(ge)); });
   }
 
   ~SliceSlotMigration() {
@@ -142,14 +142,8 @@ void OutgoingMigration::OnAllShards(
   });
 }
 
-void OutgoingMigration::Finish(GenericError error) {
-  auto next_state = MigrationState::C_FINISHED;
+void OutgoingMigration::Finish(MigrationState next_state, GenericError error) {
   if (error) {
-    if (error.Format() == kIncomingMigrationOOM) {
-      next_state = MigrationState::C_FATAL;
-    } else {
-      next_state = MigrationState::C_ERROR;
-    }
     LOG(WARNING) << "Finish outgoing migration for " << cf_->MyID() << ": "
                  << migration_info_.node_info.id << " with error: " << error.Format();
     exec_st_.ReportError(std::move(error));
@@ -237,8 +231,7 @@ void OutgoingMigration::SyncFb() {
     // Break outgoing migration if INIT from incoming node responded with OOM. Usually this will
     // happen on second iteration after first failed with OOM. Sending second INIT is required to
     // cleanup slots on incoming slot migration node.
-    if (CheckRespFirstTypes({RespExpr::ERROR}) &&
-        facade::ToSV(LastResponseArgs().front().GetBuf()) == kIncomingMigrationOOM) {
+    if (CheckRespSimpleError(kIncomingMigrationOOM)) {
       ChangeState(MigrationState::C_FATAL);
       break;
     }
@@ -385,13 +378,10 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
       return false;
     }
 
-    if (CheckRespFirstTypes({RespExpr::ERROR})) {
-      auto error = facade::ToSV(LastResponseArgs().front().GetBuf());
-      // Check if returned incoming slot OOM and finish migration
-      if (error == kIncomingMigrationOOM) {
-        Finish(std::string(error));
-        return false;
-      }
+    // Check OOM from incoming slot migration on ACK request
+    if (CheckRespSimpleError(kIncomingMigrationOOM)) {
+      Finish(MigrationState::C_FATAL, std::string(kIncomingMigrationOOM));
+      return false;
     }
 
     if (!CheckRespFirstTypes({RespExpr::INT64})) {
@@ -410,7 +400,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   }
 
   if (!exec_st_.GetError()) {
-    Finish();
+    Finish(MigrationState::C_FINISHED);
     keys_number_ = cluster::GetKeyCount(migration_info_.slot_ranges);
     cf_->ApplyMigrationSlotRangeToConfig(migration_info_.node_info.id, migration_info_.slot_ranges,
                                          false);
