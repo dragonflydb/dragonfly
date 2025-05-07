@@ -607,6 +607,7 @@ TEST_F(CompactObjectTest, RawInterface) {
 
   str.assign(50, char(200));  // non ascii
   cobj_.SetString(str);
+  ASSERT_EQ(str, cobj_.GetSlice(&tmp));
 
   {
     auto raw_blob = cobj_.GetRawString();
