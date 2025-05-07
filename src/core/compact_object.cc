@@ -1012,8 +1012,7 @@ string_view CompactObj::GetSlice(string* scratch) const {
   CHECK(!IsExternal());
 
   if (mask_bits_.encoding) {
-    scratch->resize(Size());
-    GetString(scratch->data());
+    GetString(&scratch);
     return *scratch;
   }
 
