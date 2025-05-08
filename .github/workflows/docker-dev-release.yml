@@ -129,7 +129,12 @@ jobs:
           docker rm ${container_id}
 
           # Create a tar archive
-          tar_name="dragonfly-${{ matrix.os.arch }}-dbgsym.tar.gz"
+          if [[ "${{ matrix.os.arch }}" == "arm64" ]]; then
+            arch_name="aarch64"
+          else
+            arch_name="x86_64"
+          fi
+          tar_name="dragonfly-${arch_name}-dbgsym.tar.gz"
           tar czf ${tar_name} dragonfly
 
           # Upload to GCS
