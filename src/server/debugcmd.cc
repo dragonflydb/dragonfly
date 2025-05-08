@@ -52,8 +52,6 @@ namespace dfly {
 using namespace util;
 using boost::intrusive_ptr;
 using namespace facade;
-namespace fs = std::filesystem;
-using absl::GetFlag;
 using absl::StrAppend;
 using absl::StrCat;
 
@@ -297,9 +295,13 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
     cursor = table.Traverse(cursor, [&](PrimeIterator it) {
       scratch.clear();
       if (type == kInvalidCompactObjType) {  // KEYSPACE
-        it->first.GetString(&scratch);
+        if (it->first.MallocUsed() > 0) {
+          it->first.GetString(&scratch);
+        }
       } else if (type == OBJ_STRING && it->second.ObjType() == OBJ_STRING) {
-        it->second.GetString(&scratch);
+        if (it->first.MallocUsed() > 0) {
+          it->second.GetString(&scratch);
+        }
       } else if (type == OBJ_ZSET && it->second.ObjType() == OBJ_ZSET) {
         container_utils::IterateSortedSet(
             it->second.GetRobjWrapper(), [&](container_utils::ContainerEntry entry, double) {
@@ -328,9 +330,10 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
         });
       }
 
-      size_t len = std::min(scratch.size(), kMaxLen);
-      if (len > 16)  // filtering out values that are too small and hosted inline.
+      if (scratch.size() > 0) {
+        size_t len = std::min(scratch.size(), kMaxLen);
         HIST_add(dest->hist.data(), scratch.data(), len);
+      }
     });
 
     if (steps >= 20000) {
@@ -598,7 +601,7 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    traffic logging is stopped.",
         "RECVSIZE [<tid> | ENABLE | DISABLE]",
         "    Prints the histogram of the received request sizes on the given thread",
-        "COMPRESSION [IMPORT <bintable> | EXPORT] [type]",
+        "COMPRESSION [IMPORT <bintable> | EXPORT | SET <bintable>] [type]",
         "    Estimate the compressibility of values of the given type. if no type is given, ",
         "    checks compressibility of keys. If IN is specified, then the provided ",
         "    bintable is used to check compressibility. If OUT is specified, then ",
@@ -1289,6 +1292,16 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
   CmdArgParser parser(args);
   string bintable;
   bool print_bintable = false;
+
+  if (parser.Check("SET", &bintable)) {
+    atomic_bool succeed = true;
+    shard_set->RunBriefInParallel([&](EngineShard* shard) {
+      if (!CompactObj::InitHuffmanThreadLocal(bintable)) {
+        succeed = false;
+      }
+    });
+    return succeed ? builder->SendOk() : builder->SendError("Failed to set bintable");
+  }
 
   if (parser.Check("EXPORT")) {
     print_bintable = true;

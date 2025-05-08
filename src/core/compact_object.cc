@@ -759,7 +759,7 @@ bool CompactObj::InitHuffmanThreadLocal(std::string_view hufftable) {
     return false;
   }
 
-  if (tl.huff_decoder.Load(hufftable, &err_msg)) {
+  if (!tl.huff_decoder.Load(hufftable, &err_msg)) {
     LOG(DFATAL) << "Failed to load huffman table: " << err_msg;
     return false;
   }
@@ -1105,18 +1105,20 @@ void CompactObj::GetString(char* dest) const {
   CHECK(!IsExternal());
 
   if (IsInline()) {
-    if (mask_bits_.encoding) {
-      size_t decoded_len = taglen_ + 2;
-
-      // must be this because we either shortened 17 or 18.
-      DCHECK_EQ(mask_bits_.encoding, ASCII2_ENC);
-      DCHECK_EQ(decoded_len, ascii_len(taglen_));
-
-      detail::ascii_unpack(to_byte(u_.inline_str), decoded_len, dest);
-    } else {
-      memcpy(dest, u_.inline_str, taglen_);
+    switch (mask_bits_.encoding) {
+      case ASCII2_ENC:
+        DCHECK_EQ(taglen_ + 2u, ascii_len(taglen_));
+        detail::ascii_unpack(to_byte(u_.inline_str), taglen_ + 2, dest);
+        break;
+      case HUFFMAN_ENC:
+        tl.huff_decoder.Decode(u_.inline_str, taglen_, dest);
+        break;
+      case NONE_ENC:
+        memcpy(dest, u_.inline_str, taglen_);
+        break;
+      default:
+        DLOG(FATAL) << "should not reach " << int(mask_bits_.encoding);
     }
-
     return;
   }
 
@@ -1135,15 +1137,17 @@ void CompactObj::GetString(char* dest) const {
     } else if (taglen_ == SMALL_TAG) {
       size_t decoded_len = DecodedLen(u_.small_str.size());
 
+      // we left some space on the left to allow inplace ascii unpacking.
+      size_t space_left = decoded_len - u_.small_str.size();
+
       string_view slices[2];
       unsigned num = u_.small_str.GetV(slices);
       DCHECK_EQ(2u, num);
-      std::string tmp(decoded_len, ' ');
-      char* next = tmp.data();
+      char* next = dest + space_left;
       memcpy(next, slices[0].data(), slices[0].size());
       next += slices[0].size();
       memcpy(next, slices[1].data(), slices[1].size());
-      detail::ascii_unpack_simd(reinterpret_cast<uint8_t*>(tmp.data()), decoded_len, dest);
+      detail::ascii_unpack_simd(reinterpret_cast<uint8_t*>(dest + space_left), decoded_len, dest);
     } else {
       LOG(FATAL) << "Unsupported tag " << int(taglen_);
     }
