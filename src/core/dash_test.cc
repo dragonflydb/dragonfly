@@ -76,6 +76,19 @@ struct Buf24 {
   }
 };
 
+struct BasicDashPolicy {
+  enum { kSlotNum = 12, kBucketNum = 64, kStashBucketNum = 2 };
+  static constexpr bool kUseVersion = false;
+
+  template <typename U> static void DestroyValue(const U&) {
+  }
+  template <typename U> static void DestroyKey(const U&) {
+  }
+
+  template <typename U, typename V> static bool Equal(U&& u, V&& v) {
+    return u == v;
+  }
+};
 struct UInt64Policy : public BasicDashPolicy {
   static uint64_t HashFn(uint64_t v) {
     return XXH3_64bits(&v, sizeof(v));
@@ -240,8 +253,8 @@ TEST_F(DashTest, Segment) {
   for (size_t i = 2; i < Segment::kBucketNum; ++i) {
     EXPECT_EQ(0, segment_.GetBucket(i).Size());
   }
-  EXPECT_EQ(4 * Segment::kSlotNum, keys.size());
-  EXPECT_EQ(4 * Segment::kSlotNum, segment_.SlowSize());
+  EXPECT_EQ(6 * Segment::kSlotNum, keys.size());
+  EXPECT_EQ(6 * Segment::kSlotNum, segment_.SlowSize());
 
   auto hfun = &UInt64Policy::HashFn;
   unsigned has_called = 0;
@@ -268,7 +281,7 @@ TEST_F(DashTest, Segment) {
     ASSERT_TRUE(it.found());
     segment_.Delete(it, hash);
   }
-  EXPECT_EQ(2 * Segment::kSlotNum, segment_.SlowSize());
+  EXPECT_EQ(4 * Segment::kSlotNum, segment_.SlowSize());
   ASSERT_FALSE(Contains(arr.front()));
 }
 
@@ -331,7 +344,7 @@ TEST_F(DashTest, Split) {
   ASSERT_EQ(segment_.SlowSize(), sum[0]);
   EXPECT_EQ(s2.SlowSize(), sum[1]);
   EXPECT_EQ(keys.size(), sum[0] + sum[1]);
-  EXPECT_EQ(4 * Segment::kSlotNum, keys.size());
+  EXPECT_EQ(6 * Segment::kSlotNum, keys.size());
 }
 
 TEST_F(DashTest, Merge) {
@@ -456,12 +469,12 @@ struct Item {
 
 constexpr size_t ItemAlign = alignof(Item);
 
-struct MyBucket : public detail::BucketBase<16, 4> {
+struct MyBucket : public detail::BucketBase<16> {
   Item key[14];
 };
 
 constexpr size_t kMySz = sizeof(MyBucket);
-constexpr size_t kBBSz = sizeof(detail::BucketBase<16, 4>);
+constexpr size_t kBBSz = sizeof(detail::BucketBase<16>);
 
 TEST_F(DashTest, Custom) {
   using ItemSegment = detail::Segment<Item, uint64_t>;
@@ -659,7 +672,7 @@ struct TestEvictionPolicy {
 };
 
 TEST_F(DashTest, Eviction) {
-  TestEvictionPolicy ev(1500);
+  TestEvictionPolicy ev(1540);
 
   size_t num = 0;
   auto loop = [&] {

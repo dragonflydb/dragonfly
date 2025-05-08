@@ -804,14 +804,13 @@ size_t CompactObj::Size() const {
         LOG(DFATAL) << "Should not reach " << int(taglen_);
     }
   }
-  uint8_t encoded = (mask_ & kEncMask);
-  return encoded ? DecodedLen(raw_size) : raw_size;
+  return mask_bits_.encoding ? DecodedLen(raw_size) : raw_size;
 }
 
 uint64_t CompactObj::HashCode() const {
   DCHECK(taglen_ != JSON_TAG) << "JSON type cannot be used for keys!";
 
-  uint8_t encoded = (mask_ & kEncMask);
+  uint8_t encoded = mask_bits_.encoding;
   if (IsInline()) {
     if (encoded) {
       char buf[kInlineLen * 2];
@@ -887,7 +886,8 @@ void CompactObj::SetInt(int64_t val) {
   DCHECK(!IsExternal());
 
   if (INT_TAG != taglen_) {
-    SetMeta(INT_TAG, mask_ & ~kEncMask);
+    SetMeta(INT_TAG, mask_);
+    mask_bits_.encoding = NONE_ENC;
   }
 
   u_.ival = val;
@@ -970,8 +970,9 @@ SBF* CompactObj::GetSBF() const {
 }
 
 void CompactObj::SetString(std::string_view str) {
-  uint8_t mask = mask_ & ~kEncMask;
   CHECK(!IsExternal());
+  mask_bits_.encoding = NONE_ENC;
+
   // Trying auto-detection heuristics first.
   if (str.size() <= 20) {
     long long ival;
@@ -979,14 +980,14 @@ void CompactObj::SetString(std::string_view str) {
 
     // We use redis string2ll to be compatible with Redis.
     if (string2ll(str.data(), str.size(), &ival)) {
-      SetMeta(INT_TAG, mask);
+      SetMeta(INT_TAG, mask_);
       u_.ival = ival;
 
       return;
     }
 
     if (str.size() <= kInlineLen) {
-      SetMeta(str.size(), mask);
+      SetMeta(str.size(), mask_);
       if (!str.empty())
         memcpy(u_.inline_str, str.data(), str.size());
       return;
@@ -997,8 +998,9 @@ void CompactObj::SetString(std::string_view str) {
 }
 
 void CompactObj::ReserveString(size_t size) {
-  uint8_t mask = mask_ & ~kEncMask;
-  SetMeta(ROBJ_TAG, mask);
+  mask_bits_.encoding = NONE_ENC;
+  SetMeta(ROBJ_TAG, mask_);
+
   u_.r_obj.ReserveString(size, tl.local_mr);
 }
 
@@ -1008,21 +1010,13 @@ void CompactObj::AppendString(std::string_view str) {
 
 string_view CompactObj::GetSlice(string* scratch) const {
   CHECK(!IsExternal());
-  uint8_t is_encoded = mask_ & kEncMask;
+
+  if (mask_bits_.encoding) {
+    GetString(scratch);
+    return *scratch;
+  }
 
   if (IsInline()) {
-    if (is_encoded) {
-      size_t decoded_len = taglen_ + 2;
-
-      // must be this because we either shortened 17 or 18.
-      DCHECK_EQ(is_encoded, ASCII2_ENC_BIT);
-      DCHECK_EQ(decoded_len, ascii_len(taglen_));
-
-      scratch->resize(decoded_len);
-      detail::ascii_unpack(to_byte(u_.inline_str), decoded_len, scratch->data());
-      return *scratch;
-    }
-
     return string_view{u_.inline_str, taglen_};
   }
 
@@ -1030,33 +1024,6 @@ string_view CompactObj::GetSlice(string* scratch) const {
     absl::AlphaNum an(u_.ival);
     scratch->assign(an.Piece());
 
-    return *scratch;
-  }
-
-  if (is_encoded) {
-    if (taglen_ == ROBJ_TAG) {
-      CHECK_EQ(OBJ_STRING, u_.r_obj.type());
-      DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-      size_t decoded_len = DecodedLen(u_.r_obj.Size());
-      scratch->resize(decoded_len);
-      detail::ascii_unpack_simd(to_byte(u_.r_obj.inner_obj()), decoded_len, scratch->data());
-    } else if (taglen_ == SMALL_TAG) {
-      size_t decoded_len = DecodedLen(u_.small_str.size());
-      scratch->resize(decoded_len);
-      string_view slices[2];
-
-      unsigned num = u_.small_str.GetV(slices);
-      DCHECK_EQ(2u, num);
-      std::string tmp(decoded_len, ' ');
-      char* next = tmp.data();
-      memcpy(next, slices[0].data(), slices[0].size());
-      next += slices[0].size();
-      memcpy(next, slices[1].data(), slices[1].size());
-      detail::ascii_unpack_simd(reinterpret_cast<uint8_t*>(tmp.data()), decoded_len,
-                                scratch->data());
-    } else {
-      LOG(FATAL) << "Unsupported tag " << int(taglen_);
-    }
     return *scratch;
   }
 
@@ -1120,14 +1087,13 @@ void __attribute__((noinline)) CompactObj::GetString(string* res) const {
 
 void CompactObj::GetString(char* dest) const {
   CHECK(!IsExternal());
-  uint8_t is_encoded = mask_ & kEncMask;
 
   if (IsInline()) {
-    if (is_encoded) {
+    if (mask_bits_.encoding) {
       size_t decoded_len = taglen_ + 2;
 
       // must be this because we either shortened 17 or 18.
-      DCHECK_EQ(is_encoded, ASCII2_ENC_BIT);
+      DCHECK_EQ(mask_bits_.encoding, ASCII2_ENC);
       DCHECK_EQ(decoded_len, ascii_len(taglen_));
 
       detail::ascii_unpack(to_byte(u_.inline_str), decoded_len, dest);
@@ -1144,7 +1110,7 @@ void CompactObj::GetString(char* dest) const {
     return;
   }
 
-  if (is_encoded) {
+  if (mask_bits_.encoding) {
     if (taglen_ == ROBJ_TAG) {
       CHECK_EQ(OBJ_STRING, u_.r_obj.type());
       DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
@@ -1220,7 +1186,9 @@ auto CompactObj::GetCool() const -> CoolItem {
 
 void CompactObj::ImportExternal(const CompactObj& src) {
   DCHECK(src.IsExternal());
-  SetMeta(EXTERNAL_TAG, src.mask_ & kEncMask);
+  uint8_t encoding = src.mask_bits_.encoding;
+  SetMeta(EXTERNAL_TAG, 0);
+  mask_bits_.encoding = encoding;
   u_.ext_ptr = src.u_.ext_ptr;
 }
 
@@ -1238,13 +1206,11 @@ void CompactObj::Materialize(std::string_view blob, bool is_raw) {
   DCHECK_GT(blob.size(), kInlineLen);
 
   if (is_raw) {
-    uint8_t mask = mask_;
-
     if (kUseSmallStrings && SmallString::CanAllocate(blob.size())) {
-      SetMeta(SMALL_TAG, mask);
+      SetMeta(SMALL_TAG, mask_);
       tl.small_str_bytes += u_.small_str.Assign(blob);
     } else {
-      SetMeta(ROBJ_TAG, mask);
+      SetMeta(ROBJ_TAG, mask_);
       u_.r_obj.SetString(blob, tl.local_mr);
     }
   } else {
@@ -1317,8 +1283,8 @@ size_t CompactObj::MallocUsed(bool slow) const {
 bool CompactObj::operator==(const CompactObj& o) const {
   DCHECK(taglen_ != JSON_TAG && o.taglen_ != JSON_TAG) << "cannot use JSON type to check equal";
 
-  uint8_t m1 = mask_ & kEncMask;
-  uint8_t m2 = o.mask_ & kEncMask;
+  uint8_t m1 = mask_bits_.encoding;
+  uint8_t m2 = o.mask_bits_.encoding;
   if (m1 != m2)
     return false;
 
@@ -1433,8 +1399,8 @@ bool CompactObj::CmpEncoded(string_view sv) const {
 
 void CompactObj::EncodeString(string_view str) {
   DCHECK_GT(str.size(), kInlineLen);
+  DCHECK_EQ(NONE_ENC, mask_bits_.encoding);
 
-  uint8_t mask = mask_ & ~kEncMask;
   string_view encoded = str;
   bool is_ascii = kUseAsciiEncoding && detail::validate_ascii_fast(str.data(), str.size());
 
@@ -1443,11 +1409,10 @@ void CompactObj::EncodeString(string_view str) {
     size_t rev_len = ascii_len(encode_len);
 
     if (rev_len == str.size()) {
-      mask |= ASCII2_ENC_BIT;  // str hits its highest bound.
+      mask_bits_.encoding = ASCII2_ENC;  // str hits its highest bound.
     } else {
       CHECK_EQ(str.size(), rev_len - 1) << "Bad ascii encoding for len " << str.size();
-
-      mask |= ASCII1_ENC_BIT;
+      mask_bits_.encoding = ASCII1_ENC;  // str is shorter than its highest bound.
     }
 
     tl.tmp_buf.resize(encode_len);
@@ -1455,7 +1420,7 @@ void CompactObj::EncodeString(string_view str) {
     encoded = string_view{reinterpret_cast<char*>(tl.tmp_buf.data()), encode_len};
 
     if (encoded.size() <= kInlineLen) {
-      SetMeta(encoded.size(), mask);
+      SetMeta(encoded.size(), mask_);
       detail::ascii_pack(str.data(), str.size(), reinterpret_cast<uint8_t*>(u_.inline_str));
 
       return;
@@ -1464,20 +1429,19 @@ void CompactObj::EncodeString(string_view str) {
 
   if (kUseSmallStrings && SmallString::CanAllocate(encoded.size())) {
     if (taglen_ == 0) {
-      SetMeta(SMALL_TAG, mask);
+      SetMeta(SMALL_TAG, mask_);
       tl.small_str_bytes += u_.small_str.Assign(encoded);
       return;
     }
 
     if (taglen_ == SMALL_TAG && encoded.size() <= u_.small_str.size()) {
-      mask_ = mask;
       tl.small_str_bytes -= u_.small_str.MallocUsed();
       tl.small_str_bytes += u_.small_str.Assign(encoded);
       return;
     }
   }
 
-  SetMeta(ROBJ_TAG, mask);
+  SetMeta(ROBJ_TAG, mask_);
   u_.r_obj.SetString(encoded, tl.local_mr);
 }
 
@@ -1501,7 +1465,8 @@ StringOrView CompactObj::GetRawString() const {
 }
 
 size_t CompactObj::DecodedLen(size_t sz) const {
-  return ascii_len(sz) - ((mask_ & ASCII1_ENC_BIT) ? 1 : 0);
+  unsigned delta = (mask_bits_.encoding == ASCII1_ENC ? 1 : 0);
+  return ascii_len(sz) - delta;
 }
 
 MemoryResource* CompactObj::memory_resource() {
@@ -1524,13 +1489,13 @@ std::string_view ObjTypeToString(CompactObjType type) {
   return "Invalid type"sv;
 }
 
-std::optional<CompactObjType> ObjTypeFromString(std::string_view sv) {
+CompactObjType ObjTypeFromString(std::string_view sv) {
   for (auto& p : kObjTypeToString) {
     if (absl::EqualsIgnoreCase(sv, p.second)) {
       return p.first;
     }
   }
-  return std::nullopt;
+  return kInvalidCompactObjType;
 }
 
 }  // namespace dfly

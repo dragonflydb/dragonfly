@@ -1492,8 +1492,9 @@ async def test_network_disconnect_during_migration(df_factory):
         await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
         for _ in range(10):
-            await asyncio.sleep(random.randint(0, 10) / 100)
-            logging.debug("drop connections")
+            await asyncio.sleep(random.randint(0, 50) / 100)
+            info = await nodes[0].admin_client.info("CLUSTER")
+            logging.debug("drop connection: %s", info)
             proxy.drop_connection()
             logging.debug(
                 await nodes[0].admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")

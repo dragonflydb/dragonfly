@@ -20,7 +20,7 @@ class MemoryCmd {
   void Stats();
   void MallocStats();
   void ArenaStats(CmdArgList args);
-  void Usage(std::string_view key);
+  void Usage(std::string_view key, bool account_key_memory_usage);
   void Track(CmdArgList args);
 
   ConnectionContext* cntx_;

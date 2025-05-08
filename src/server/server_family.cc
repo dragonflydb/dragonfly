@@ -1707,7 +1707,8 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
 }
 
 GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts,
-                                               Transaction* trans, bool ignore_state) {
+                                               Transaction* trans, DoSaveCheckAndStartOpts opts) {
+  auto [ignore_state, bg_save] = opts;
   auto state = ServerState::tlocal()->gstate();
 
   // In some cases we want to create a snapshot even if server is not active, f.e in takeover
@@ -1728,7 +1729,7 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
 
     save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
         save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
-        &service_, fq_threadpool_.get(), snapshot_storage});
+        &service_, fq_threadpool_.get(), snapshot_storage, opts.bg_save});
 
     auto res = save_controller_->InitResourcesAndStart();
 
@@ -1736,8 +1737,13 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
       DCHECK_EQ(res->error, true);
       last_save_info_.SetLastSaveError(*res);
       save_controller_.reset();
+      if (bg_save) {
+        last_save_info_.last_bgsave_status = false;
+      }
       return res->error;
     }
+
+    last_save_info_.bgsave_in_progress = bg_save;
   }
   return {};
 }
@@ -1750,6 +1756,11 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   {
     util::fb2::LockGuard lk(save_mu_);
     save_info = save_controller_->Finalize();
+
+    if (save_controller_->IsBgSave()) {
+      last_save_info_.bgsave_in_progress = false;
+      last_save_info_.last_bgsave_status = !save_info.error;
+    }
 
     if (save_info.error) {
       last_save_info_.SetLastSaveError(save_info);
@@ -1767,7 +1778,8 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
 
 GenericError ServerFamily::DoSave(const SaveCmdOptions& save_cmd_opts, Transaction* trans,
                                   bool ignore_state) {
-  if (auto ec = DoSaveCheckAndStart(save_cmd_opts, trans, ignore_state); ec) {
+  DoSaveCheckAndStartOpts opts{.ignore_state = ignore_state};
+  if (auto ec = DoSaveCheckAndStart(save_cmd_opts, trans, opts); ec) {
     return ec;
   }
 
@@ -2182,7 +2194,8 @@ void ServerFamily::BgSave(CmdArgList args, const CommandContext& cmd_cntx) {
     return;
   }
 
-  if (auto ec = DoSaveCheckAndStart(*maybe_res, cmd_cntx.tx); ec) {
+  DoSaveCheckAndStartOpts opts{.bg_save = true};
+  if (auto ec = DoSaveCheckAndStart(*maybe_res, cmd_cntx.tx, opts); ec) {
     cmd_cntx.rb->SendError(ec.Format());
     return;
   }
@@ -2621,6 +2634,11 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     }
     append("rdb_changes_since_last_success_save", m.events.update);
 
+    auto save = GetLastSaveInfo();
+    append("rdb_bgsave_in_progress", static_cast<int>(save.bgsave_in_progress));
+    std::string val = save.last_bgsave_status ? "ok" : "err";
+    append("rdb_last_bgsave_status", val);
+
     // when last failed save
     append("last_failed_save", save_info.last_error_time);
     append("last_error", save_info.last_error.Format());
@@ -2810,6 +2828,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
   if (should_enter("CLUSTER")) {
     append("cluster_enabled", IsClusterEnabledOrEmulated());
     append("migration_errors_total", service_.cluster_family().MigrationsErrorsCount());
+    append("total_migrated_keys", m.shard_stats.total_migrated_keys);
   }
 
   return info;
