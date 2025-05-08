@@ -16,8 +16,13 @@
 
 namespace dfly {
 
+#if defined(__clang__)
+__attribute__((no_sanitize_address))
+#endif
+
 #ifndef __s390x__
-inline __m128i mm_loadu_si128(const __m128i* ptr) {
+inline __m128i
+mm_loadu_si128(const __m128i* ptr) {
 #if defined(__aarch64__)
   __m128i res;
   memcpy(&res, ptr, sizeof(res));

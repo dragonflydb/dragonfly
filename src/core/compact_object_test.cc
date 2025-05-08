@@ -622,6 +622,12 @@ TEST_F(CompactObjectTest, RawInterface) {
   }
 }
 
+TEST_F(CompactObjectTest, AsanTriggerReadOverflow) {
+  cobj_.SetString(string(32, 'a'));
+  auto dest = make_unique<char[]>(32);
+  cobj_.GetString(dest.get());
+}
+
 TEST_F(CompactObjectTest, lpGetInteger) {
   int64_t val = -1;
   uint8_t* lp = lpNew(0);
