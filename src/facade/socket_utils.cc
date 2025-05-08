@@ -15,6 +15,21 @@
 
 #endif
 
+namespace {
+
+int get_socket_family(int fd) {
+  struct sockaddr_storage ss;
+  socklen_t len = sizeof(ss);
+
+  if (getsockname(fd, (struct sockaddr*)&ss, &len) == -1) {
+    return -1;  // Indicate an error
+  }
+
+  return ss.ss_family;
+}
+
+}  // namespace
+
 namespace dfly {
 
 // Returns information about the TCP socket state by its descriptor
@@ -28,13 +43,18 @@ std::string GetSocketInfo(int socket_fd) {
     return "could not stat socket";
   }
 
-  auto tcp_info = io::ReadTcpInfo(sock_stat.st_ino);
+  io::Result<io::TcpInfo> tcp_info;
+  int family = get_socket_family(socket_fd);
+  if (family == AF_INET) {
+    tcp_info = io::ReadTcpInfo(sock_stat.st_ino);
+  } else if (family == AF_INET6) {
+    tcp_info = io::ReadTcp6Info(sock_stat.st_ino);
+  } else {
+    return "unsupported socket family";
+  }
+
   if (!tcp_info) {
-    auto tcp6_info = io::ReadTcp6Info(sock_stat.st_ino);
-    if (!tcp6_info) {
-      return "socket not found in /proc/net/tcp or /proc/net/tcp6";
-    }
-    tcp_info = std::move(tcp6_info);
+    return "socket not found in /proc/net/tcp or /proc/net/tcp6";
   }
 
   std::string state_str = io::TcpStateToString(tcp_info->state);
