@@ -113,6 +113,12 @@ jobs:
           # Extract version from the image
           echo "Extracting version from image..."
           VERSION=$(docker run --rm ${image_tag} dragonfly --version | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,2})?)?[mGK]//g" | head -n1 | cut -d' ' -f2 | cut -d'-' -f1)
+          # Check if version starts with a release version (v*.*.*)
+          if [[ ! $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            # Get the latest release version to use as prefix
+            LATEST_RELEASE=$(curl -s https://api.github.com/repos/dragonflydb/dragonfly/releases/latest | jq -r .tag_name)
+            VERSION="${LATEST_RELEASE}+${VERSION}"
+          fi
           echo "Dragonfly version: $VERSION"
 
           echo "Extracting binary from ${image_tag} for ${{ matrix.os.arch }}"
