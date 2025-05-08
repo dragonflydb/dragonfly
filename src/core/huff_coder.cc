@@ -36,6 +36,9 @@ bool HuffmanEncoder::Load(std::string_view binary_data, std::string* error_msg) 
     huf_ctable_.reset();
     return false;
   }
+  HUF_CTableHeader header = HUF_readCTableHeader(huf_ctable_.get());
+  num_bits_ = header.tableLog;
+  table_max_symbol_ = header.maxSymbolValue;
 
   return true;
 }
@@ -83,11 +86,6 @@ unsigned HuffmanEncoder::GetNBits(uint8_t symbol) const {
   return HUF_getNbBitsFromCTable(huf_ctable_.get(), symbol);
 }
 
-unsigned HuffmanEncoder::BitCount(uint8_t symbol) const {
-  DCHECK(huf_ctable_);
-  return HUF_getNbBitsFromCTable(huf_ctable_.get(), symbol);
-}
-
 size_t HuffmanEncoder::EstimateCompressedSize(const unsigned hist[], unsigned max_symbol) const {
   DCHECK(huf_ctable_);
   size_t res = HUF_estimateCompressedSize(huf_ctable_.get(), hist, max_symbol);
@@ -110,6 +108,11 @@ string HuffmanEncoder::Export() const {
   CHECK(!HUF_isError(size));
   res.resize(size);
   return res;
+}
+
+// Copied from HUF_tightCompressBound.
+size_t HuffmanEncoder::CompressedBound(size_t src_size) const {
+  return ((src_size * num_bits_) >> 3) + 8;
 }
 
 bool HuffmanDecoder::Load(std::string_view binary_data, std::string* error_msg) {

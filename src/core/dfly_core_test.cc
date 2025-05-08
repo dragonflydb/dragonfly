@@ -214,10 +214,10 @@ TEST_F(HuffCoderTest, Load) {
 TEST_F(HuffCoderTest, Encode) {
   ASSERT_TRUE(encoder_.Load(good_table_, &error_msg_)) << error_msg_;
 
-  EXPECT_EQ(1, encoder_.BitCount('x'));
-  EXPECT_EQ(3, encoder_.BitCount(':'));
-  EXPECT_EQ(5, encoder_.BitCount('2'));
-  EXPECT_EQ(5, encoder_.BitCount('3'));
+  EXPECT_EQ(1, encoder_.GetNBits('x'));
+  EXPECT_EQ(3, encoder_.GetNBits(':'));
+  EXPECT_EQ(5, encoder_.GetNBits('2'));
+  EXPECT_EQ(5, encoder_.GetNBits('3'));
 
   string data("x:23xx");
 
@@ -225,6 +225,15 @@ TEST_F(HuffCoderTest, Encode) {
   uint32_t dest_size = dest.size();
   ASSERT_TRUE(encoder_.Encode(data, dest.data(), &dest_size, &error_msg_));
   ASSERT_EQ(3, dest_size);
+
+  // testing small destination buffer.
+  data = "3333333333333333333";
+  dest_size = 16;
+  EXPECT_TRUE(encoder_.Encode(data, dest.data(), &dest_size, &error_msg_));
+
+  // destination too small
+  ASSERT_EQ(0, dest_size);
+  ASSERT_EQ("", error_msg_);
 }
 
 TEST_F(HuffCoderTest, Decode) {
