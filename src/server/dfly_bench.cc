@@ -65,6 +65,10 @@ ABSL_FLAG(string, P, "", "protocol can be empty (for RESP) or memcache_text");
 
 ABSL_FLAG(bool, tcp_nodelay, false, "If true, set nodelay option on tcp socket");
 ABSL_FLAG(bool, noreply, false, "If true, does not wait for replies. Relevant only for memcached.");
+
+ABSL_FLAG(bool, probe_cluster, true,
+          "If false, skips cluster-mode probing and works only in single node mode");
+
 ABSL_FLAG(bool, greet, true,
           "If true, sends a greeting command on each connection, "
           "to make sure the connection succeeded");
@@ -1121,7 +1125,7 @@ int main(int argc, char* argv[]) {
   tcp::endpoint ep{address, GetFlag(FLAGS_p)};
 
   ClusterShards shards;
-  if (protocol == RESP) {
+  if (protocol == RESP && GetFlag(FLAGS_probe_cluster)) {
     shards = proactor->Await([&] { return FetchClusterInfo(ep, proactor); });
   }
   CONSOLE_INFO << "Connecting to "
