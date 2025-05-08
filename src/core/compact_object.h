@@ -116,7 +116,7 @@ class CompactObj {
   CompactObj(const CompactObj&) = delete;
 
   // 0-16 is reserved for inline lengths of string type.
-  enum TagEnum {
+  enum TagEnum : uint8_t {
     INT_TAG = 17,
     SMALL_TAG = 18,
     ROBJ_TAG = 19,
@@ -125,6 +125,11 @@ class CompactObj {
     SBF_TAG = 22,
   };
 
+  // String encoding types.
+  // With ascii compression it compresses 8 bytes to 7 but also 7 to 7.
+  // Therefore, in order to know the original length we introduce 2 states that
+  // correct the length upon decoding. ASCII1_ENC rounds down the decoded length,
+  // while ASCII2_ENC rounds it up. See DecodedLen implementation for more info.
   enum Encoding : uint8_t {
     NONE_ENC = 0,
     ASCII1_ENC = 1,
@@ -373,6 +378,7 @@ class CompactObj {
   static Stats GetStats();
 
   static void InitThreadLocal(MemoryResource* mr);
+  static bool InitHuffmanThreadLocal(std::string_view hufftable);
   static MemoryResource* memory_resource();  // thread-local.
 
   template <typename T, typename... Args> static T* AllocateMR(Args&&... args) {
@@ -490,10 +496,7 @@ class CompactObj {
       uint8_t expire : 1;
       uint8_t mc_flag : 1;  // Marks keys that have memcache flags assigned.
 
-      // ascii encoding is not an injective function. it compresses 8 bytes to 7 but also 7 to 7.
-      // therefore, in order to know the original length we introduce 2 flags that
-      // correct the length upon decoding. ASCII1_ENC_BIT rounds down the decoded length,
-      // while ASCII2_ENC_BIT rounds it up. See DecodedLen implementation for more info.
+      // See the Encoding enum for the meaning of these bits.
       uint8_t encoding : 2;
 
       // IO_PENDING is set when the tiered storage has issued an i/o request to save the value.

@@ -16,7 +16,6 @@ class HuffmanEncoder {
 
   bool Encode(std::string_view data, uint8_t* dest, uint32_t* dest_size,
               std::string* error_msg) const;
-  unsigned BitCount(uint8_t symbol) const;
 
   size_t EstimateCompressedSize(const unsigned hist[], unsigned max_symbol) const;
 
@@ -41,6 +40,10 @@ class HuffmanEncoder {
   }
 
   unsigned GetNBits(uint8_t symbol) const;
+
+  // Estimation of the size of the destination buffer needed to store the compressed data.
+  // destination of this size must be passed to Encode().
+  size_t CompressedBound(size_t src_size) const;
 
  private:
   using HUF_CElt = size_t;
