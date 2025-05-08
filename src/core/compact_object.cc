@@ -1420,7 +1420,7 @@ void CompactObj::EncodeString(string_view str) {
   string_view encoded = str;
   bool huff_encoded = false;
 
-  // We chose such length that we can store the decoded lendth delta into 1 byte.
+  // We chose such length that we can store the decoded length delta into 1 byte.
   // The maximum huffman compression is 1/8, so 288 / 8 = 36.
   // 288 - 36 = 252, which is smaller than 256.
   constexpr unsigned kMaxHuffLen = 288;
