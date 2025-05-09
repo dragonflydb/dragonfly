@@ -1536,6 +1536,8 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       strcpy(cmd_name, "PREPEND");
       break;
     case MemcacheParser::GET:
+      [[fallthrough]];
+    case MemcacheParser::GETS:
       strcpy(cmd_name, "MGET");
       break;
     case MemcacheParser::FLUSHALL:
@@ -1588,6 +1590,9 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     for (auto s : cmd.keys_ext) {
       char* key = const_cast<char*>(s.data());
       args.emplace_back(key, s.size());
+    }
+    if (cmd.type == MemcacheParser::GETS) {
+      dfly_cntx->conn_state.memcache_flag |= ConnectionState::FETCH_CAS_VER;
     }
   } else {  // write commands.
     if (store_opt[0]) {

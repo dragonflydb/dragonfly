@@ -1366,7 +1366,7 @@ void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
     DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);
     for (const auto& entry : res) {
       if (entry) {
-        rb->SendValue(entry->key, entry->value, entry->mc_ver, entry->mc_flag);
+        rb->SendValue(entry->key, entry->value, 0, entry->mc_flag, fetch_mask & FETCH_MCVER);
       } else {
         rb->SendMiss();
       }
