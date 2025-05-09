@@ -107,11 +107,11 @@ jobs:
           if [ -f /etc/debian_version ]; then
             mv ${{ env.RELEASE_DIR }}/dragonfly-*tar.gz results-artifacts
             mv dragonfly_*.deb results-artifacts
+            mv ${{ env.RELEASE_DIR }}/dfly_bench-*tar.gz results-artifacts
           else
             ls -l *.rpm
             mv ./*.rpm ./results-artifacts/
           fi
-          mv ${{ env.RELEASE_DIR }}/dfly_bench-*tar.gz results-artifacts
 
     - name: Upload
       uses: actions/upload-artifact@v4
