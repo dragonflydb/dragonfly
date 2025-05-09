@@ -38,6 +38,18 @@ struct AstPrefixNode {
   std::string prefix;
 };
 
+struct AstSuffixNode {
+  explicit AstSuffixNode(std::string suffix);
+
+  std::string suffix;
+};
+
+struct AstInfixNode {
+  explicit AstInfixNode(std::string infix);
+
+  std::string infix;
+};
+
 // Matches numeric range
 struct AstRangeNode {
   AstRangeNode(double lo, bool lo_excl, double hi, bool hi_excl);
@@ -73,7 +85,7 @@ struct AstFieldNode {
 
 // Stores a list of tags for a tag query
 struct AstTagsNode {
-  using TagValue = std::variant<AstTermNode, AstPrefixNode>;
+  using TagValue = std::variant<AstTermNode, AstPrefixNode, AstSuffixNode, AstInfixNode>;
 
   struct TagValueProxy
       : public AstTagsNode::TagValue {  // bison needs it to be default constructible
@@ -82,6 +94,10 @@ struct AstTagsNode {
     TagValueProxy(AstPrefixNode tv) : AstTagsNode::TagValue(std::move(tv)) {
     }
     TagValueProxy(AstTermNode tv) : AstTagsNode::TagValue(std::move(tv)) {
+    }
+    TagValueProxy(AstSuffixNode tv) : AstTagsNode::TagValue(std::move(tv)) {
+    }
+    TagValueProxy(AstInfixNode tv) : AstTagsNode::TagValue(std::move(tv)) {
     }
   };
 
@@ -111,9 +127,10 @@ struct AstKnnNode {
   std::optional<float> ef_runtime;
 };
 
-using NodeVariants = std::variant<std::monostate, AstStarNode, AstStarFieldNode, AstTermNode,
-                                  AstPrefixNode, AstRangeNode, AstNegateNode, AstLogicalNode,
-                                  AstFieldNode, AstTagsNode, AstKnnNode>;
+using NodeVariants =
+    std::variant<std::monostate, AstStarNode, AstStarFieldNode, AstTermNode, AstPrefixNode,
+                 AstSuffixNode, AstInfixNode, AstRangeNode, AstNegateNode, AstLogicalNode,
+                 AstFieldNode, AstTagsNode, AstKnnNode>;
 
 struct AstNode : public NodeVariants {
   using variant::variant;

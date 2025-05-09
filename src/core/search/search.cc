@@ -120,6 +120,12 @@ struct ProfileBuilder {
       void operator()(std::string* out, const AstPrefixNode& node) const {
         out->append(node.prefix);
       }
+      void operator()(std::string* out, const AstSuffixNode& node) const {
+        out->append(node.suffix);
+      }
+      void operator()(std::string* out, const AstInfixNode& node) const {
+        out->append(node.infix);
+      }
       void operator()(std::string* out, const AstTermNode& node) const {
         out->append(node.term);
       }
@@ -131,6 +137,8 @@ struct ProfileBuilder {
         [](monostate) -> string { return ""s; },
         [](const AstTermNode& n) { return absl::StrCat("Term{", n.term, "}"); },
         [](const AstPrefixNode& n) { return absl::StrCat("Prefix{", n.prefix, "}"); },
+        [](const AstSuffixNode& n) { return absl::StrCat("Suffix{", n.suffix, "}"); },
+        [](const AstInfixNode& n) { return absl::StrCat("Infix{", n.infix, "}"); },
         [](const AstRangeNode& n) { return absl::StrCat("Range{", n.lo, "<>", n.hi, "}"); },
         [](const AstLogicalNode& n) {
           auto op = n.op == AstLogicalNode::AND ? "and" : "or";
@@ -268,6 +276,18 @@ struct BasicSearch {
     return result;
   }
 
+  template <typename C>
+  IndexResult CollectSuffixMatches(BaseStringIndex<C>* index, std::string_view suffix) {
+    // TODO: Implement full text search for suffix
+    return IndexResult{};
+  }
+
+  template <typename C>
+  IndexResult CollectInfixMatches(BaseStringIndex<C>* index, std::string_view infix) {
+    // TODO: Implement full text search for infix
+    return IndexResult{};
+  }
+
   IndexResult Search(monostate, string_view) {
     return vector<DocId>{};
   }
@@ -346,6 +366,16 @@ struct BasicSearch {
     return UnifyResults(GetSubResults(indices, mapping), LogicOp::OR);
   }
 
+  IndexResult Search(const AstSuffixNode& node, string_view active_field) {
+    // TODO: Implement full text search for suffix
+    return IndexResult{};
+  }
+
+  IndexResult Search(const AstInfixNode& node, string_view active_field) {
+    // TODO: Implement full text search for infix
+    return IndexResult{};
+  }
+
   // [range]: access field's numeric index
   IndexResult Search(const AstRangeNode& node, string_view active_field) {
     DCHECK(!active_field.empty());
@@ -392,6 +422,12 @@ struct BasicSearch {
                   },
                   [tag_index, this](const AstPrefixNode& prefix) {
                     return CollectPrefixMatches(tag_index, prefix.prefix);
+                  },
+                  [tag_index, this](const AstSuffixNode& suffix) {
+                    return CollectSuffixMatches(tag_index, suffix.suffix);
+                  },
+                  [tag_index, this](const AstInfixNode& infix) {
+                    return CollectInfixMatches(tag_index, infix.infix);
                   }};
     auto mapping = [ov](const auto& tag) { return visit(ov, tag); };
     return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
