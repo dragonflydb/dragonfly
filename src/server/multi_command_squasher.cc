@@ -6,6 +6,7 @@
 
 #include <absl/container/inlined_vector.h>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "facade/dragonfly_connection.h"
@@ -14,6 +15,10 @@
 #include "server/engine_shard_set.h"
 #include "server/transaction.h"
 #include "server/tx_base.h"
+
+ABSL_FLAG(size_t, squashed_reply_size_limit, 0,
+          "Max bytes allowed for squashing_current_reply_size. If this limit is reached, "
+          "connections dispatching via pipelines will block until this value is decremented.");
 
 namespace dfly {
 
@@ -63,6 +68,9 @@ size_t Size(const facade::CapturingReplyBuilder::Payload& payload) {
 }  // namespace
 
 atomic_uint64_t MultiCommandSquasher::current_reply_size_ = 0;
+thread_local size_t MultiCommandSquasher::reply_size_limit_ =
+    absl::GetFlag(FLAGS_squashed_reply_size_limit);
+util::fb2::EventCount MultiCommandSquasher::ec_;
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
                                            Service* service, const Opts& opts)
@@ -208,6 +216,15 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   if (order_.empty())
     return true;
 
+  // Multi non atomic does not lock ahead. So it's safe to preempt while we haven't
+  // really started the transaction.
+  // This is not true for `multi/exec` which uses `Execute()` but locks ahead before it
+  // calls `ScheduleSingleHop` below.
+  // TODO Investigate what are the side effects for allowing it `lock ahead` mode.
+  if (opts_.is_mult_non_atomic) {
+    MultiCommandSquasher::ec_.await([]() { return !MultiCommandSquasher::IsReplySizeOverLimit(); });
+  }
+
   unsigned num_shards = 0;
   for (auto& sd : sharded_) {
     if (!sd.dispatched.empty())
@@ -246,6 +263,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   uint64_t after_hop = proactor->GetMonotonicTimeNs();
   bool aborted = false;
 
+  size_t size = 0;
   for (auto idx : order_) {
     auto& sinfo = sharded_[idx];
     DCHECK_LT(sinfo.reply_id, sinfo.dispatched.size());
@@ -258,6 +276,9 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     if (aborted)
       break;
   }
+  current_reply_size_.fetch_sub(size, std::memory_order_relaxed);
+  MultiCommandSquasher::ec_.notifyAll();
+
   uint64_t after_reply = proactor->GetMonotonicTimeNs();
   ServerState::SafeTLocal()->stats.multi_squash_exec_hop_usec += (after_hop - start) / 1000;
   ServerState::SafeTLocal()->stats.multi_squash_exec_reply_usec += (after_reply - after_hop) / 1000;

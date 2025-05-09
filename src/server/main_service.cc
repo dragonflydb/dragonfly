@@ -1435,6 +1435,7 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
     MultiCommandSquasher::Opts opts;
     opts.verify_commands = true;
     opts.max_squash_size = ss->max_squash_cmd_num;
+    opts.is_mult_non_atomic = true;
 
     size_t squashed_num = MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
                                                         static_cast<RedisReplyBuilder*>(builder),
