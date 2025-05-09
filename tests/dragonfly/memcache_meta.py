@@ -6,7 +6,7 @@ from meta_memcache import (
     CacheClient,
     connection_pool_factory_builder,
 )
-from meta_memcache.protocol import RequestFlags, Miss, Value, Success
+from meta_memcache.protocol import RequestFlags, Success
 
 DEFAULT_ARGS = {"memcached_port": 11211, "proactor_threads": 4}
 
@@ -30,3 +30,12 @@ def test_basic(df_server: DflyInstance):
     assert pool.get("key2") is None
     assert pool.delete("key1")
     assert pool.delete("key1") is False
+
+    assert pool.set("cask", "v", 100)
+    value, cas_token = pool.get_cas("cask")
+    assert value == "v" and cas_token == 0
+
+    k = Key("cask")
+    response = pool.meta_multiget([k], RequestFlags(return_cas_token=True, return_value=True))
+    assert k in response
+    assert response[k].flags.cas_token == 0 and response[k].value == "v"

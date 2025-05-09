@@ -1,16 +1,16 @@
 import logging
-import pytest
-from pymemcache.client.base import Client as MCClient
-from redis import Redis
-import socket
 import random
-import time
+import socket
 import ssl
+import time
+
+from pymemcache.client.base import Client as MCClient
 
 from . import dfly_args
 from .instance import DflyInstance
 
 DEFAULT_ARGS = {"memcached_port": 11211, "proactor_threads": 4}
+
 
 # Generic basic tests
 
@@ -32,7 +32,7 @@ def test_basic(memcached_client: MCClient):
     # delete
     assert memcached_client.delete("key1")
     assert not memcached_client.delete("key3")
-    assert memcached_client.get("key1") == None
+    assert memcached_client.get("key1") is None
 
     # prepend append
     assert memcached_client.set("key4", "B")
@@ -45,6 +45,8 @@ def test_basic(memcached_client: MCClient):
     assert memcached_client.incr("key5", 1) == 1
     assert memcached_client.incr("key5", 1) == 2
     assert memcached_client.decr("key5", 1) == 1
+
+    assert memcached_client.gets("key5") == (b"1", b"0")
 
 
 # Noreply (and pipeline) tests
