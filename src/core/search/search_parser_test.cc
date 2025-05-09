@@ -237,9 +237,8 @@ TEST_F(SearchParserTest, Parse) {
   EXPECT_EQ(1, Parse(" @foo:@bar "));
   EXPECT_EQ(1, Parse(" @foo: "));
 
-  // We don't support suffix/any other position for now
-  EXPECT_EQ(1, Parse("*pre"));
-  EXPECT_EQ(1, Parse("*pre*"));
+  EXPECT_EQ(0, Parse("*suffix"));
+  EXPECT_EQ(0, Parse("*infix"));
 
   EXPECT_EQ(1, Parse("pre***"));
 }

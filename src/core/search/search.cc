@@ -279,12 +279,14 @@ struct BasicSearch {
   template <typename C>
   IndexResult CollectSuffixMatches(BaseStringIndex<C>* index, std::string_view suffix) {
     // TODO: Implement full text search for suffix
+    error_ = "Not implemented";
     return IndexResult{};
   }
 
   template <typename C>
   IndexResult CollectInfixMatches(BaseStringIndex<C>* index, std::string_view infix) {
     // TODO: Implement full text search for infix
+    error_ = "Not implemented";
     return IndexResult{};
   }
 
@@ -368,11 +370,13 @@ struct BasicSearch {
 
   IndexResult Search(const AstSuffixNode& node, string_view active_field) {
     // TODO: Implement full text search for suffix
+    error_ = "Not implemented";
     return IndexResult{};
   }
 
   IndexResult Search(const AstInfixNode& node, string_view active_field) {
     // TODO: Implement full text search for infix
+    error_ = "Not implemented";
     return IndexResult{};
   }
 
