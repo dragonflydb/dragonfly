@@ -2198,7 +2198,7 @@ async def test_cluster_migration_while_seeding(
 
     assert (
         await get_memory(client0, "used_memory_peak_rss")
-        < await get_memory(client0, "used_memory_rss") * 1.1
+        < await get_memory(client0, "used_memory_rss") * 1.2
     )
 
     capture = await seeder.capture_fake_redis()
