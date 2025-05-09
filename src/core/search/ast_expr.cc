@@ -16,18 +16,6 @@ using namespace std;
 
 namespace dfly::search {
 
-AstTermNode::AstTermNode(string term) : term{std::move(term)} {
-}
-
-AstPrefixNode::AstPrefixNode(string prefix) : prefix{std::move(prefix)} {
-}
-
-AstSuffixNode::AstSuffixNode(string suffix) : suffix{std::move(suffix)} {
-}
-
-AstInfixNode::AstInfixNode(string infix) : infix{std::move(infix)} {
-}
-
 AstRangeNode::AstRangeNode(double lo, bool lo_excl, double hi, bool hi_excl)
     : lo{lo_excl ? nextafter(lo, hi) : lo}, hi{hi_excl ? nextafter(hi, lo) : hi} {
 }

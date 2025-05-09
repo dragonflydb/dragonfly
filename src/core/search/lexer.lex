@@ -1,6 +1,7 @@
 %top{
   // Our lexer need to know about Parser::symbol_type
   #include "core/search/parser.hh"
+  #include "core/search/tag_types.h" // Include TagType enum
 }
 
 %{
@@ -25,8 +26,7 @@
   // A number symbol corresponding to the value in S.
   using dfly::search::Parser;
   using namespace std;
-
-  enum class TagType { PREFIX, SUFFIX, INFIX, REGULAR };
+  using dfly::search::TagType;
 
   Parser::symbol_type make_StringLit(string_view src, const Parser::location_type& loc);
   Parser::symbol_type make_Tag(string_view src, TagType type, const Parser::location_type& loc);

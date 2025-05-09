@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "core/search/base.h"
+#include "core/search/tag_types.h"
 
 namespace dfly {
 
@@ -25,30 +26,17 @@ struct AstStarNode {};
 // Matches all documents where this field has a non-null value
 struct AstStarFieldNode {};
 
-// Matches terms in text fields
-struct AstTermNode {
-  explicit AstTermNode(std::string term);
+template <TagType T> struct AstAffixNode {
+  explicit AstAffixNode(std::string affix) : affix{std::move(affix)} {
+  }
 
-  std::string term;
+  std::string affix;
 };
 
-struct AstPrefixNode {
-  explicit AstPrefixNode(std::string prefix);
-
-  std::string prefix;
-};
-
-struct AstSuffixNode {
-  explicit AstSuffixNode(std::string suffix);
-
-  std::string suffix;
-};
-
-struct AstInfixNode {
-  explicit AstInfixNode(std::string infix);
-
-  std::string infix;
-};
+using AstTermNode = AstAffixNode<TagType::REGULAR>;
+using AstPrefixNode = AstAffixNode<TagType::PREFIX>;
+using AstSuffixNode = AstAffixNode<TagType::SUFFIX>;
+using AstInfixNode = AstAffixNode<TagType::INFIX>;
 
 // Matches numeric range
 struct AstRangeNode {
