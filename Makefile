@@ -45,7 +45,9 @@ package:
 		--compress-debug-sections \
 		dragonfly \
 		$(RELEASE_NAME); \
-	tar cvfz $(RELEASE_NAME).tar.gz $(RELEASE_NAME) ../LICENSE.md
+	tar cvfz $(RELEASE_NAME).tar.gz $(RELEASE_NAME) ../LICENSE.md \
+	mv dfly_bench dfly_bench-$(BUILD_ARCH) \
+	tar cvfz dfly_bench-$(BUILD_ARCH).tar.gz dfly_bench-$(BUILD_ARCH)
 
 release: configure build
 
