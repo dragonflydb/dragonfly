@@ -51,7 +51,7 @@ jobs:
         path: |
           ${{ env.RELEASE_DIR }}/dragonfly-*tar.gz
           ${{ env.RELEASE_DIR }}/dragonfly_*.deb
-          ${{ env.RELEASE_DIR }}/dfly_bench
+          ${{ env.RELEASE_DIR }}/dfly_bench-*tar.gz
 
   build-native:
     runs-on: ubuntu-latest
@@ -107,11 +107,11 @@ jobs:
           if [ -f /etc/debian_version ]; then
             mv ${{ env.RELEASE_DIR }}/dragonfly-*tar.gz results-artifacts
             mv dragonfly_*.deb results-artifacts
+            mv ${{ env.RELEASE_DIR }}/dfly_bench-*tar.gz results-artifacts
           else
             ls -l *.rpm
             mv ./*.rpm ./results-artifacts/
           fi
-          mv ${{ env.RELEASE_DIR }}/dfly_bench results-artifacts
 
     - name: Upload
       uses: actions/upload-artifact@v4
