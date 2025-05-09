@@ -50,6 +50,10 @@ class SmallString {
 
   bool DefragIfNeeded(float ratio);
 
+  uint8_t first_byte() const {
+    return prefix_[0];
+  }
+
  private:
   // prefix of the string that is broken down into 2 parts.
   char prefix_[kPrefLen];
