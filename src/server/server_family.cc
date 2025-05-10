@@ -141,7 +141,6 @@ ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
 ABSL_DECLARE_FLAG(int, replica_priority);
 ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
-ABSL_DECLARE_FLAG(uint32_t, memcached_port);
 
 bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
 #define RETURN_ON_ERROR(cond, m)                                           \
@@ -297,12 +296,6 @@ bool ValidateServerTlsFlags() {
 
   if (!(absl::GetFlag(FLAGS_tls_ca_cert_file).empty() &&
         absl::GetFlag(FLAGS_tls_ca_cert_dir).empty())) {
-    has_auth = true;
-  }
-
-  // Allow TLS without authentication for memcached protocol
-  // We check if memcached_port is enabled, as this is a static check during startup
-  if (GetFlag(FLAGS_memcached_port) > 0) {
     has_auth = true;
   }
 

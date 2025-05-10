@@ -1629,7 +1629,13 @@ facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
   } else if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
     res->req_auth = !GetPassword().empty();
   } else if (!owner->IsPrivileged()) {
-    res->req_auth = !user_registry_.AuthUser("default", "");
+    // Memcached protocol doesn't support authentication, so we don't require it
+    if (owner->GetProtocol() == Protocol::MEMCACHE) {
+      res->req_auth = false;
+      res->authenticated = true;  // Automatically authenticated for Memcached protocol
+    } else {
+      res->req_auth = !user_registry_.AuthUser("default", "");
+    }
   }
 
   // a bit of a hack. I set up breaker callback here for the owner.
