@@ -50,10 +50,20 @@ class IncomingSlotMigration {
     return source_id_;
   }
 
+  // Switch to  FATAL state and store error message
+  void ReportFatalError(dfly::GenericError err) ABSL_LOCKS_EXCLUDED(state_mu_, error_mu_) {
+    errors_count_.fetch_add(1, std::memory_order_relaxed);
+    util::fb2::LockGuard lk_state(state_mu_);
+    util::fb2::LockGuard lk_error(error_mu_);
+    state_ = MigrationState::C_FATAL;
+    last_error_ = std::move(err);
+  }
+
   void ReportError(dfly::GenericError err) ABSL_LOCKS_EXCLUDED(error_mu_) {
     errors_count_.fetch_add(1, std::memory_order_relaxed);
     util::fb2::LockGuard lk(error_mu_);
-    last_error_ = std::move(err);
+    if (GetState() != MigrationState::C_FATAL)
+      last_error_ = std::move(err);
   }
 
   std::string GetErrorStr() const ABSL_LOCKS_EXCLUDED(error_mu_) {
@@ -75,6 +85,7 @@ class IncomingSlotMigration {
   std::vector<std::unique_ptr<ClusterShardMigration>> shard_flows_;
   SlotRanges slots_;
   ExecutionState cntx_;
+
   mutable util::fb2::Mutex error_mu_;
   dfly::GenericError last_error_ ABSL_GUARDED_BY(error_mu_);
   std::atomic<size_t> errors_count_ = 0;
