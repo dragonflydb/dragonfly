@@ -1326,14 +1326,14 @@ TEST_F(ListFamilyTest, LMPopWrongType) {
 // Reproduce a flow that trigerred a wrong DCHECK in the transaction flow.
 TEST_F(ListFamilyTest, AwakeMulti) {
   auto f1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
-    for (unsigned i = 0; i < 100; ++i) {
+    for (unsigned i = 0; i < 200; ++i) {
       Run("CONSUMER", {"blmove", "src", "dest", "LEFT", "LEFT", "0"});
     };
   });
   auto f2 = pp_->at(1)->LaunchFiber([&] {
-    for (unsigned i = 0; i < 100; ++i) {
+    for (unsigned i = 0; i < 200; ++i) {
       Run("PROD", {"lpush", "src", "a"});
-      ThisFiber::SleepFor(50us);
+      ThisFiber::SleepFor(10us);
     };
   });
 
