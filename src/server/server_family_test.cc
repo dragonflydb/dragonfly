@@ -11,6 +11,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
+#include "facade/socket_utils.h"
 #include "server/test_utils.h"
 
 using namespace testing;
@@ -25,6 +26,82 @@ namespace dfly {
 class ServerFamilyTest : public BaseFamilyTest {
  protected:
 };
+
+#ifdef __linux__
+TEST_F(ServerFamilyTest, ReadTcpInfo) {
+  // Create a TCP socket
+  int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GT(sockfd, 0) << "Failed to create socket";
+
+  // We'll create a socket in LISTEN state
+  struct sockaddr_in server_addr;
+  memset(&server_addr, 0, sizeof(server_addr));
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_addr.s_addr = INADDR_ANY;
+  server_addr.sin_port = 0;  // Let the system choose a free port
+
+  // Bind to the port
+  ASSERT_EQ(bind(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)), 0)
+      << "Failed to bind socket: " << strerror(errno);
+
+  // Start listening
+  ASSERT_EQ(listen(sockfd, 1), 0) << "Failed to listen on socket: " << strerror(errno);
+
+  // Get socket info
+  std::string socket_info = GetSocketInfo(sockfd);
+  std::cout << "Socket info for valid socket: " << socket_info << std::endl;
+  EXPECT_FALSE(socket_info.empty()) << "Socket info should not be empty";
+
+  // The socket info should contain some recognizable patterns
+  // For a listening socket, it should contain information about the local address
+  EXPECT_NE(socket_info.find("State: LISTEN"), std::string::npos)
+      << "Socket info doesn't contain expected local address pattern";
+
+  // Close the socket
+  close(sockfd);
+
+  // Test invalid socket
+  socket_info = GetSocketInfo(-1);
+  EXPECT_EQ(socket_info, "invalid socket");
+}
+
+TEST_F(ServerFamilyTest, GetTcpSocketInfoIPv6) {
+  // Create an IPv6 TCP socket
+  int sockfd = socket(AF_INET6, SOCK_STREAM, 0);
+  ASSERT_GT(sockfd, 0) << "Failed to create IPv6 socket";
+
+  // We'll create a socket in LISTEN state
+  struct sockaddr_in6 server_addr;
+  memset(&server_addr, 0, sizeof(server_addr));
+  server_addr.sin6_family = AF_INET6;
+  server_addr.sin6_addr = in6addr_any;
+  server_addr.sin6_port = 0;  // Let the system choose a free port
+
+  // Bind to the port
+  ASSERT_EQ(bind(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)), 0)
+      << "Failed to bind IPv6 socket: " << strerror(errno);
+
+  // Start listening
+  ASSERT_EQ(listen(sockfd, 1), 0) << "Failed to listen on IPv6 socket: " << strerror(errno);
+
+  // Get socket info
+  std::string socket_info = GetSocketInfo(sockfd);
+  std::cout << "Socket info for valid IPv6 socket: " << socket_info << std::endl;
+  EXPECT_FALSE(socket_info.empty()) << "IPv6 socket info should not be empty";
+
+  // The socket info should contain some recognizable patterns
+  // For a listening IPv6 socket, it should contain information about the local address
+  EXPECT_NE(socket_info.find("State: LISTEN"), std::string::npos)
+      << "IPv6 socket info doesn't contain expected LISTEN state";
+
+  // If IPv6 support works correctly, the socket info should indicate an IPv6 address format
+  EXPECT_NE(socket_info.find("Local: ["), std::string::npos)
+      << "IPv6 socket info doesn't use IPv6 address format";
+
+  // Close the socket
+  close(sockfd);
+}
+#endif
 
 TEST_F(ServerFamilyTest, SlowLogArgsCountTruncation) {
   auto resp = Run({"config", "set", "slowlog_max_len", "3"});
