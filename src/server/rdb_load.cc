@@ -482,11 +482,12 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
       }
     });
     std::string key;
+    std::string val;
     for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
       // ToSV may reference an internal buffer, therefore we can use only before the
       // next call to ToSV. To workaround, copy the key locally.
       key = ToSV(ltrace->arr[i].rdb_var);
-      string_view val = ToSV(ltrace->arr[i + 1].rdb_var);
+      val = ToSV(ltrace->arr[i + 1].rdb_var);
 
       if (ec_)
         return;
