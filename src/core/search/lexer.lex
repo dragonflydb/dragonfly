@@ -77,9 +77,9 @@ astrsk_ch  \*
 
 "$"{term_ch}+                       return ParseParam(str(), loc());
 "@"{term_ch}+                       return Parser::make_FIELD(str(), loc());
+{astrsk_ch}{term_ch}+{astrsk_ch}    return Parser::make_INFIX(string{matched_view(1, 1)}, loc());
 {term_ch}+{astrsk_ch}               return Parser::make_PREFIX(string{matched_view(0, 1)}, loc());
 {astrsk_ch}{term_ch}+               return Parser::make_SUFFIX(string{matched_view(1, 0)}, loc());
-{astrsk_ch}{term_ch}+{astrsk_ch}    return Parser::make_INFIX(string{matched_view(1, 1)}, loc());
 
 {term_ch}+                          return Parser::make_TERM(str(), loc());
 {tag_val_ch}+{astrsk_ch}            return make_Tag(str(), TagType::PREFIX, loc());

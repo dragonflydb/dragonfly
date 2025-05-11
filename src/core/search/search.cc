@@ -115,24 +115,16 @@ struct IndexResult {
 };
 
 struct ProfileBuilder {
+  struct NodeFormatter {
+    template <TagType T> void operator()(std::string* out, const AstAffixNode<T>& node) const {
+      out->append(node.affix);
+    }
+    void operator()(std::string* out, const AstTagsNode::TagValue& value) const {
+      visit([this, out](const auto& n) { this->operator()(out, n); }, value);
+    }
+  };
+
   string GetNodeInfo(const AstNode& node) {
-    struct NodeFormatter {
-      void operator()(std::string* out, const AstPrefixNode& node) const {
-        out->append(node.affix);
-      }
-      void operator()(std::string* out, const AstSuffixNode& node) const {
-        out->append(node.affix);
-      }
-      void operator()(std::string* out, const AstInfixNode& node) const {
-        out->append(node.affix);
-      }
-      void operator()(std::string* out, const AstTermNode& node) const {
-        out->append(node.affix);
-      }
-      void operator()(std::string* out, const AstTagsNode::TagValue& value) const {
-        visit([this, out](const auto& n) { this->operator()(out, n); }, value);
-      }
-    };
     Overloaded node_info{
         [](monostate) -> string { return ""s; },
         [](const AstTermNode& n) { return absl::StrCat("Term{", n.affix, "}"); },

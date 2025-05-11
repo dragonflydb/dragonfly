@@ -79,13 +79,7 @@ struct AstTagsNode {
       : public AstTagsNode::TagValue {  // bison needs it to be default constructible
     TagValueProxy() : AstTagsNode::TagValue(AstTermNode("")) {
     }
-    TagValueProxy(AstPrefixNode tv) : AstTagsNode::TagValue(std::move(tv)) {
-    }
-    TagValueProxy(AstTermNode tv) : AstTagsNode::TagValue(std::move(tv)) {
-    }
-    TagValueProxy(AstSuffixNode tv) : AstTagsNode::TagValue(std::move(tv)) {
-    }
-    TagValueProxy(AstInfixNode tv) : AstTagsNode::TagValue(std::move(tv)) {
+    template <TagType T> TagValueProxy(AstAffixNode<T> tv) : AstTagsNode::TagValue(std::move(tv)) {
     }
   };
 

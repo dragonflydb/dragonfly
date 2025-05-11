@@ -238,7 +238,7 @@ TEST_F(SearchParserTest, Parse) {
   EXPECT_EQ(1, Parse(" @foo: "));
 
   EXPECT_EQ(0, Parse("*suffix"));
-  EXPECT_EQ(0, Parse("*infix"));
+  EXPECT_EQ(0, Parse("*infix*"));
 
   EXPECT_EQ(1, Parse("pre***"));
 }
