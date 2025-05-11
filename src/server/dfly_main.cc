@@ -296,18 +296,12 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   if (mc_port > 0 && !tcp_disabled) {
     auto listener = MakeListener(Protocol::MEMCACHE, &service);
-
-    if (mc_port == static_cast<uint32_t>(port)) {
-      LOG(ERROR) << "Memcached port " << mc_port
-                 << " conflicts with Redis port. Please use a different port for Memcached.";
-    } else {
-      error_code ec = acceptor->AddListener(bind_addr, mc_port, listener.get());
-      if (ec) {
-        LOG(ERROR) << "Could not open memcached port " << mc_port << ", error: " << ec.message();
-      } else {
-        listeners.push_back(listener.release());
-      }
+    error_code ec = acceptor->AddListener(nullptr, mc_port, listener.get());
+    if (ec) {
+      LOG(ERROR) << "Could not open memcached port " << mc_port << ", error: " << ec.message();
+      exit(1);
     }
+    listeners.push_back(listener.release());
   }
 
   service.Init(acceptor, listeners);
