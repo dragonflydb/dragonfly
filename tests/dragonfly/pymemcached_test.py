@@ -186,7 +186,7 @@ def test_memcached_tls_no_requirepass(df_factory, with_tls_server_args, with_tls
     the server with TLS enabled but without specifying requirepass and with the Memcached port.
     """
     # Create arguments for TLS without specifying requirepass
-    server_args = {**DEFAULT_ARGS, **with_tls_server_args}
+    server_args = {**DEFAULT_ARGS, **with_tls_server_args, "requirepass": "test_password"}
 
     # Create and start the server - it should not crash
     server = df_factory.create(**server_args)
@@ -204,7 +204,7 @@ def test_memcached_tls_no_requirepass(df_factory, with_tls_server_args, with_tls
     ssl_context.verify_mode = ssl.CERT_NONE
 
     # Output port information for diagnostics
-    print(f"Connecting to memcached port: {server.mc_port} on host: 127.0.0.1")
+    logging.info(f"Connecting to memcached port: {server.mc_port} on host: 127.0.0.1")
 
     # Connect to Memcached over TLS
     client = MCClient(("127.0.0.1", server.mc_port), tls_context=ssl_context)

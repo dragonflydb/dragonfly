@@ -144,7 +144,7 @@ bool HuffmanDecoder::Decode(std::string_view src, size_t dest_size, char* dest) 
       HUF_decompress1X_usingDTable(dest, dest_size, src.data(), src.size(), huf_dtable_.get(), 1);
 
   if (HUF_isError(res)) {
-    LOG(FATAL) << "Failed to decompress: " << HUF_getErrorName(res);
+    LOG(DFATAL) << "Failed to decompress: " << HUF_getErrorName(res);
     return false;
   }
   return true;
