@@ -872,6 +872,32 @@ TEST_F(SearchTest, InvalidVectorParameter) {
   ASSERT_FALSE(algo.Init("*=>[KNN 2 @v $b]", &query_params));
 }
 
+TEST_F(SearchTest, NotImplementedSearchTypes) {
+  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  // Add a document for testing
+  MockedDocument doc{Map{{"title", "text for search"}}};
+  indices.Add(0, doc);
+
+  // Test suffix search (words ending with "search")
+  algo.Init("*search", &params);
+  auto suffix_result = algo.Search(&indices);
+  EXPECT_TRUE(suffix_result.ids.empty()) << "Suffix search should return empty result";
+  EXPECT_THAT(suffix_result.error, testing::HasSubstr("Not implemented"))
+      << "Suffix search should return a not implemented error";
+
+  // Test infix search (words containing "for")
+  algo.Init("*for*", &params);
+  auto infix_result = algo.Search(&indices);
+  EXPECT_TRUE(infix_result.ids.empty()) << "Infix search should return empty result";
+  EXPECT_THAT(infix_result.error, testing::HasSubstr("Not implemented"))
+      << "Infix search should return a not implemented error";
+}
+
 }  // namespace search
 
 }  // namespace dfly

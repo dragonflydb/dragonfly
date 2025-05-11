@@ -155,7 +155,7 @@ TEST_F(SearchParserTest, Scanner) {
 
   // Prefix simple
   SetInput("pre*");
-  NEXT_EQ(TOK_PREFIX, string, "pre*");
+  NEXT_EQ(TOK_PREFIX, string, "pre");
 
   // TODO: uncomment when we support escaped terms
   // Prefix escaped (redis doesn't support quoted prefix matches)
@@ -167,7 +167,7 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_EQ(TOK_FIELD, string, "@color");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_PREFIX, string, "prefix*");
+  NEXT_EQ(TOK_PREFIX, string, "prefix");
   NEXT_TOK(TOK_RCURLBR);
 
   // Prefix escaped star
@@ -196,28 +196,28 @@ TEST_F(SearchParserTest, EscapedTagPrefixes) {
   NEXT_EQ(TOK_FIELD, string, "@name");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_PREFIX, string, "escape-err*");
+  NEXT_EQ(TOK_PREFIX, string, "escape-err");
   NEXT_TOK(TOK_RCURLBR);
 
   SetInput("@name:{escape\\+pre*}");
   NEXT_EQ(TOK_FIELD, string, "@name");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_PREFIX, string, "escape+pre*");
+  NEXT_EQ(TOK_PREFIX, string, "escape+pre");
   NEXT_TOK(TOK_RCURLBR);
 
   SetInput("@name:{escape\\.pre*}");
   NEXT_EQ(TOK_FIELD, string, "@name");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_PREFIX, string, "escape.pre*");
+  NEXT_EQ(TOK_PREFIX, string, "escape.pre");
   NEXT_TOK(TOK_RCURLBR);
 
   SetInput("@name:{complex\\-escape\\+with\\.many\\*chars*}");
   NEXT_EQ(TOK_FIELD, string, "@name");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_PREFIX, string, "complex-escape+with.many*chars*");
+  NEXT_EQ(TOK_PREFIX, string, "complex-escape+with.many*chars");
   NEXT_TOK(TOK_RCURLBR);
 }
 
@@ -237,9 +237,8 @@ TEST_F(SearchParserTest, Parse) {
   EXPECT_EQ(1, Parse(" @foo:@bar "));
   EXPECT_EQ(1, Parse(" @foo: "));
 
-  // We don't support suffix/any other position for now
-  EXPECT_EQ(1, Parse("*pre"));
-  EXPECT_EQ(1, Parse("*pre*"));
+  EXPECT_EQ(0, Parse("*suffix"));
+  EXPECT_EQ(0, Parse("*infix*"));
 
   EXPECT_EQ(1, Parse("pre***"));
 }
