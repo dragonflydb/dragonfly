@@ -85,7 +85,6 @@ struct JournalItem {
   std::string data;
   std::string_view cmd;
   std::optional<SlotId> slot;
-  uint64_t bucket_version;
 };
 
 struct JournalConsumerInterface {
