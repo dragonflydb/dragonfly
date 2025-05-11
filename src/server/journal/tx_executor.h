@@ -49,7 +49,7 @@ struct TransactionData {
   DbIndex dbid{0};
   journal::ParsedEntry::CmdData command;
 
-  journal::Op opcode = journal::Op::NOOP;
+  journal::Op opcode;
   uint64_t lsn = 0;
 };
 

@@ -119,12 +119,13 @@ void JournalSlice::SetFlushMode(bool allow_flush) {
   DCHECK(allow_flush != enable_journal_flush_);
   enable_journal_flush_ = allow_flush;
   if (allow_flush) {
-    JournalItem item;
-    item.lsn = -1;
-    item.opcode = Op::NOOP;
-    item.data = "";
-    item.slot = {};
-    CallOnChange(item);
+    // This lock is never blocking because it contends with UnregisterOnChange, which is cpu only.
+    // Hence this lock prevents the UnregisterOnChange to start running in the middle of
+    // SetFlushMode.
+    std::shared_lock lk(cb_mu_);
+    for (auto k_v : journal_consumers_arr_) {
+      k_v.second->ThrottleIfNeeded();
+    }
   }
 }
 
@@ -154,7 +155,7 @@ void JournalSlice::AddLogRecord(const Entry& entry) {
 void JournalSlice::CallOnChange(const JournalItem& item) {
   // This lock is never blocking because it contends with UnregisterOnChange, which is cpu only.
   // Hence this lock prevents the UnregisterOnChange to start running in the middle of CallOnChange.
-  // CallOnChange is atomic iff JournalSlice::SetFlushMode(false) is called before.
+  // CallOnChange is atomic if JournalSlice::SetFlushMode(false) is called before.
   std::shared_lock lk(cb_mu_);
   for (auto k_v : journal_consumers_arr_) {
     k_v.second->ConsumeJournalChange(item);

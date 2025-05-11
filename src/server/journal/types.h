@@ -13,7 +13,7 @@
 namespace dfly {
 namespace journal {
 
-enum class Op : uint8_t { NOOP = 0, SELECT = 6, EXPIRED = 9, COMMAND = 10, PING = 13, LSN = 15 };
+enum class Op : uint8_t { SELECT = 6, EXPIRED = 9, COMMAND = 10, PING = 13, LSN = 15 };
 
 struct EntryBase {
   TxId txid;
@@ -85,6 +85,7 @@ struct JournalItem {
   std::string data;
   std::string_view cmd;
   std::optional<SlotId> slot;
+  uint64_t bucket_version;
 };
 
 struct JournalConsumerInterface {
