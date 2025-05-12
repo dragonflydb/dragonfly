@@ -281,6 +281,11 @@ class Connection : public util::Connection {
     return name_;
   }
 
+  // Returns protocol type of this connection
+  Protocol GetProtocol() const {
+    return protocol_;
+  }
+
   struct MemoryUsage {
     size_t mem = 0;
     io::IoBuf::MemoryUsage buf_mem;

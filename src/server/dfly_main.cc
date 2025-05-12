@@ -296,7 +296,11 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   if (mc_port > 0 && !tcp_disabled) {
     auto listener = MakeListener(Protocol::MEMCACHE, &service);
-    acceptor->AddListener(mc_port, listener.get());
+    error_code ec = acceptor->AddListener(nullptr, mc_port, listener.get());
+    if (ec) {
+      LOG(ERROR) << "Could not open memcached port " << mc_port << ", error: " << ec.message();
+      exit(1);
+    }
     listeners.push_back(listener.release());
   }
 

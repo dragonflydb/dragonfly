@@ -46,6 +46,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
 
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
       - name: Get Build Information
         id: build_info
         run: |
@@ -97,6 +102,47 @@ jobs:
             redis-cli -h localhost ping | grep -q "PONG" || exit 1
             docker stop $(docker ps -q --filter ancestor=${image_tag})
           done
+
+      - name: Extract and Upload Binaries
+        if: matrix.flavor == 'ubuntu'  # Only run once per flavor
+        run: |
+          # Get the image tag
+          image_tags=(${{ steps.metadata.outputs.tags }})
+          image_tag=${image_tags[0]}
+
+          # Extract version from the image
+          echo "Extracting version from image..."
+          VERSION=$(docker run --rm ${image_tag} dragonfly --version | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,2})?)?[mGK]//g" | head -n1 | cut -d' ' -f2 | cut -d'-' -f1)
+          # Check if version starts with a release version (v*.*.*)
+          if [[ ! $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            # Get the latest release version to use as prefix
+            LATEST_RELEASE=$(curl -s https://api.github.com/repos/dragonflydb/dragonfly/releases/latest | jq -r .tag_name)
+            VERSION="${LATEST_RELEASE}+${VERSION}"
+          fi
+          echo "Dragonfly version: $VERSION"
+
+          echo "Extracting binary from ${image_tag} for ${{ matrix.os.arch }}"
+
+          # Create a temporary container and copy the binary
+          container_id=$(docker create ${image_tag})
+          docker cp ${container_id}:/usr/local/bin/dragonfly ./dragonfly
+          docker rm ${container_id}
+
+          # Create a tar archive
+          if [[ "${{ matrix.os.arch }}" == "arm64" ]]; then
+            arch_name="aarch64"
+          else
+            arch_name="x86_64"
+          fi
+          tar_name="dragonfly-${arch_name}-dbgsym.tar.gz"
+          tar czf ${tar_name} dragonfly
+
+          # Upload to GCS
+          echo "Uploading ${tar_name} to GCS"
+          gcloud storage cp "$tar_name" "gs://${{ secrets.ARTIFACT_BUCKET }}/dragonfly/$VERSION/$tar_name"
+
+          # Cleanup
+          rm -f dragonfly ${tar_name}
 
     outputs:
       # matrix jobs outputs override each other, but we use the same sha

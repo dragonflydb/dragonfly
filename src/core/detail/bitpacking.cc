@@ -269,6 +269,11 @@ void ascii_unpack(const uint8_t* bin, size_t ascii_len, char* ascii) {
   }
 }
 
+// In some cases we may read 2 bytes more than "allowed" (16 bytes during mm_loadu_si128
+// instead of 14 bytes that we actually need). Since we ignore these two bytes, there is no harm.
+// See CompactObjectTest.AsanTriggerReadOverflow for more details.
+// __attribute__((no_sanitize_address)) does not work here for some reason, so I had
+// to put it in sse_port.h.
 void ascii_unpack_simd(const uint8_t* bin, size_t ascii_len, char* ascii) {
 #ifdef __SSSE3__
 

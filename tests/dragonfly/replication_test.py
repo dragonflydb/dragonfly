@@ -1,23 +1,18 @@
-import random
-
-from itertools import chain, repeat
-import re
-import pytest
-import asyncio
-import async_timeout
 import platform
-import pymemcache
-import logging
+import shutil
 import tarfile
 import urllib.request
-import shutil
-from redis import asyncio as aioredis
-from .utility import *
-from .instance import DflyInstanceFactory, DflyInstance
-from .seeder import Seeder as SeederV2
+from itertools import chain, repeat
+
+import async_timeout
+import pymemcache
+
 from . import dfly_args
+from .instance import DflyInstanceFactory, DflyInstance
 from .proxy import Proxy
 from .seeder import DebugPopulateSeeder
+from .seeder import Seeder as SeederV2
+from .utility import *
 
 ADMIN_PORT = 1211
 
@@ -3115,3 +3110,23 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
         lines = replica2.find_in_logs(f"Started full with localhost:{replica1.port}")
         assert len(lines) == 0
         assert len(replica1.find_in_logs("No partial sync due to diff")) > 0
+
+
+async def test_replicate_hset_with_expiry(df_factory: DflyInstanceFactory):
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+
+    master.start()
+    replica.start()
+
+    cm = master.client()
+    await cm.execute_command("HSETEX key 86400 name 1234")
+
+    cr = replica.client()
+    await cr.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(cr)
+
+    result = await cr.hgetall("key")
+
+    assert "name" in result
+    assert result["name"] == "1234"

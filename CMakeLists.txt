@@ -57,7 +57,7 @@ if (SUPPORT_USAN AND WITH_USAN)
 endif()
 
 if(SANITIZERS)
-  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -rtlib=compiler-rt")
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
 endif()
 
 include(third_party)

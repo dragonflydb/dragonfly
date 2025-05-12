@@ -341,6 +341,9 @@ TEST_F(DflyEngineTest, Memcache) {
   auto resp = RunMC(MP::SET, "key", "bar", 1);
   EXPECT_THAT(resp, ElementsAre("STORED"));
 
+  resp = RunMC(MP::GETS, "key");
+  EXPECT_THAT(resp, ElementsAre("VALUE key 1 3 0", "bar", "END"));
+
   resp = RunMC(MP::GET, "key");
   EXPECT_THAT(resp, ElementsAre("VALUE key 1 3", "bar", "END"));
 
@@ -366,6 +369,9 @@ TEST_F(DflyEngineTest, Memcache) {
 
   resp = RunMC(MP::GET, "unkn");
   EXPECT_THAT(resp, ElementsAre("END"));
+
+  resp = GetMC(MP::GETS, {"key", "key2", "unknown"});
+  EXPECT_THAT(resp, ElementsAre("VALUE key 1 3 0", "bar", "VALUE key2 2 8 0", "bar2val2", "END"));
 }
 
 TEST_F(DflyEngineTest, MemcacheFlags) {

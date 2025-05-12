@@ -1536,6 +1536,8 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       strcpy(cmd_name, "PREPEND");
       break;
     case MemcacheParser::GET:
+      [[fallthrough]];
+    case MemcacheParser::GETS:
       strcpy(cmd_name, "MGET");
       break;
     case MemcacheParser::FLUSHALL:
@@ -1589,6 +1591,9 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       char* key = const_cast<char*>(s.data());
       args.emplace_back(key, s.size());
     }
+    if (cmd.type == MemcacheParser::GETS) {
+      dfly_cntx->conn_state.memcache_flag |= ConnectionState::FETCH_CAS_VER;
+    }
   } else {  // write commands.
     if (store_opt[0]) {
       args.emplace_back(store_opt, strlen(store_opt));
@@ -1624,7 +1629,13 @@ facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
   } else if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
     res->req_auth = !GetPassword().empty();
   } else if (!owner->IsPrivileged()) {
-    res->req_auth = !user_registry_.AuthUser("default", "");
+    // Memcached protocol doesn't support authentication, so we don't require it
+    if (owner->GetProtocol() == Protocol::MEMCACHE) {
+      res->req_auth = false;
+      res->authenticated = true;  // Automatically authenticated for Memcached protocol
+    } else {
+      res->req_auth = !user_registry_.AuthUser("default", "");
+    }
   }
 
   // a bit of a hack. I set up breaker callback here for the owner.

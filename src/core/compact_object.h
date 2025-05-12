@@ -410,7 +410,7 @@ class CompactObj {
 
  private:
   void EncodeString(std::string_view str);
-  size_t DecodedLen(size_t sz) const;
+  size_t DecodedLen(size_t sz, uint8_t firstb) const;
 
   bool EqualNonInline(std::string_view sv) const;
 

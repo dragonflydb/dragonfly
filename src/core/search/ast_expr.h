@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "core/search/base.h"
+#include "core/search/tag_types.h"
 
 namespace dfly {
 
@@ -25,18 +26,17 @@ struct AstStarNode {};
 // Matches all documents where this field has a non-null value
 struct AstStarFieldNode {};
 
-// Matches terms in text fields
-struct AstTermNode {
-  explicit AstTermNode(std::string term);
+template <TagType T> struct AstAffixNode {
+  explicit AstAffixNode(std::string affix) : affix{std::move(affix)} {
+  }
 
-  std::string term;
+  std::string affix;
 };
 
-struct AstPrefixNode {
-  explicit AstPrefixNode(std::string prefix);
-
-  std::string prefix;
-};
+using AstTermNode = AstAffixNode<TagType::REGULAR>;
+using AstPrefixNode = AstAffixNode<TagType::PREFIX>;
+using AstSuffixNode = AstAffixNode<TagType::SUFFIX>;
+using AstInfixNode = AstAffixNode<TagType::INFIX>;
 
 // Matches numeric range
 struct AstRangeNode {
@@ -73,15 +73,13 @@ struct AstFieldNode {
 
 // Stores a list of tags for a tag query
 struct AstTagsNode {
-  using TagValue = std::variant<AstTermNode, AstPrefixNode>;
+  using TagValue = std::variant<AstTermNode, AstPrefixNode, AstSuffixNode, AstInfixNode>;
 
   struct TagValueProxy
       : public AstTagsNode::TagValue {  // bison needs it to be default constructible
     TagValueProxy() : AstTagsNode::TagValue(AstTermNode("")) {
     }
-    TagValueProxy(AstPrefixNode tv) : AstTagsNode::TagValue(std::move(tv)) {
-    }
-    TagValueProxy(AstTermNode tv) : AstTagsNode::TagValue(std::move(tv)) {
+    template <TagType T> TagValueProxy(AstAffixNode<T> tv) : AstTagsNode::TagValue(std::move(tv)) {
     }
   };
 
@@ -111,9 +109,10 @@ struct AstKnnNode {
   std::optional<float> ef_runtime;
 };
 
-using NodeVariants = std::variant<std::monostate, AstStarNode, AstStarFieldNode, AstTermNode,
-                                  AstPrefixNode, AstRangeNode, AstNegateNode, AstLogicalNode,
-                                  AstFieldNode, AstTagsNode, AstKnnNode>;
+using NodeVariants =
+    std::variant<std::monostate, AstStarNode, AstStarFieldNode, AstTermNode, AstPrefixNode,
+                 AstSuffixNode, AstInfixNode, AstRangeNode, AstNegateNode, AstLogicalNode,
+                 AstFieldNode, AstTagsNode, AstKnnNode>;
 
 struct AstNode : public NodeVariants {
   using variant::variant;

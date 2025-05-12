@@ -4,6 +4,7 @@
 #include "core/compact_object.h"
 
 #include <absl/strings/str_cat.h>
+#include <gtest/gtest.h>
 #include <mimalloc.h>
 #include <xxhash.h>
 
@@ -13,6 +14,7 @@
 #include "base/logging.h"
 #include "core/detail/bitpacking.h"
 #include "core/flat_set.h"
+#include "core/huff_coder.h"
 #include "core/mi_memory_resource.h"
 #include "core/string_set.h"
 
@@ -622,6 +624,12 @@ TEST_F(CompactObjectTest, RawInterface) {
   }
 }
 
+TEST_F(CompactObjectTest, AsanTriggerReadOverflow) {
+  cobj_.SetString(string(32, 'a'));
+  auto dest = make_unique<char[]>(32);
+  cobj_.GetString(dest.get());
+}
+
 TEST_F(CompactObjectTest, lpGetInteger) {
   int64_t val = -1;
   uint8_t* lp = lpNew(0);
@@ -648,6 +656,30 @@ TEST_F(CompactObjectTest, lpGetInteger) {
     ptr = lpNext(lp, ptr);
   }
   lpFree(lp);
+}
+
+TEST_F(CompactObjectTest, HuffMan) {
+  array<unsigned, 256> hist;
+  hist.fill(1);
+  hist['a'] = 100;
+  hist['b'] = 50;
+  HuffmanEncoder encoder;
+  ASSERT_TRUE(encoder.Build(hist.data(), hist.size() - 1, nullptr));
+  string bindata = encoder.Export();
+  ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(bindata));
+  for (unsigned i = 30; i < 2048; i += 10) {
+    string data(i, 'a');
+    cobj_.SetString(data);
+    bool malloc_used = i >= 60;
+    ASSERT_EQ(malloc_used, cobj_.MallocUsed() > 0) << i;
+    ASSERT_EQ(data.size(), cobj_.Size());
+    ASSERT_EQ(CompactObj::HashCode(data), cobj_.HashCode());
+
+    string actual;
+    cobj_.GetString(&actual);
+    EXPECT_EQ(data, actual);
+    EXPECT_EQ(cobj_, data);
+  }
 }
 
 static void ascii_pack_naive(const char* ascii, size_t len, uint8_t* bin) {
