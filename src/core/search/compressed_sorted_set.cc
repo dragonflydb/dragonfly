@@ -13,7 +13,7 @@ using namespace std;
 
 namespace {
 
-using VarintBuffer = array<uint8_t, sizeof(CompressedSortedSet::IntType) * 2>;
+using VarintBuffer = array<uint8_t, sizeof(CompressedSortedSet::IntType) * 3>;
 
 }  // namespace
 
@@ -241,8 +241,10 @@ std::pair<CompressedSortedSet::IntType, size_t> CompressedSortedSet::ReadVarLen(
     absl::Span<const uint8_t> source) {
   uint64_t out = 0;
   size_t read = 0;
-  // We need this because ParseT reads 8 bytes but source can be less than that
-  // due to the encoding and we end up accessing an invalid memory location
+
+  // We need this because ParseT may read 8 bytes even if source can be less than that
+  // due to the encoding and we end up accessing an invalid memory location.
+  // (not really a bug because ParseT ignores the extra bytes it reads).
   if (source.size() < 8) {
     VarintBuffer ranged_source{0};
     memcpy(&ranged_source, source.data(), source.size());
