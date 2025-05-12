@@ -110,23 +110,24 @@ class IntrusiveStringSet {
     if (entries_.empty() || size_ >= entries_.size()) {
       Reserve(Capacity() * 2);
     }
-    const auto bucket_id = BucketId(Hash(str));
+    uint64_t hash = Hash(str);
+    const auto bucket_id = BucketId(hash);
     auto& bucket = entries_[bucket_id];
 
-    if (auto existed_item = bucket.Find(str); existed_item) {
+    if (auto existed_item = bucket.Find(str, hash, capacity_log_); existed_item) {
       // TODO consider common implementation for key value pair
       return ISLEntry();
     }
 
-    return AddUnique(str, bucket, ttl_sec);
+    return AddUnique(str, bucket, hash, ttl_sec);
   }
 
   void Reserve(size_t sz) {
     sz = absl::bit_ceil(sz);
     if (sz > entries_.size()) {
       size_t prev_size = entries_.size();
-      capacity_log_ = absl::bit_width(sz) - 1;
-      entries_.resize(sz);
+      capacity_log_ = std::max(kMinCapacityLog, uint32_t(absl::bit_width(sz) - 1));
+      entries_.resize(Capacity());
       Rehash(prev_size);
     }
   }
@@ -137,23 +138,27 @@ class IntrusiveStringSet {
     size_ = 0;
   }
 
-  ISLEntry AddUnique(std::string_view str, IntrusiveStringList& bucket,
+  ISLEntry AddUnique(std::string_view str, IntrusiveStringList& bucket, uint64_t hash,
                      uint32_t ttl_sec = UINT32_MAX) {
     ++size_;
-    return bucket.Emplace(str, ttl_sec);
+    auto& entry = bucket.Emplace(str, ttl_sec);
+    entry.SetCurrentHash(hash, capacity_log_);
+    entry.SetExtendedHash(hash, capacity_log_);
+    return entry;
   }
 
   unsigned AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec, bool keepttl) {
     Reserve(span.size());
     unsigned res = 0;
     for (auto& s : span) {
-      const auto bucket_id = BucketId(Hash(s));
+      uint64_t hash = Hash(s);
+      const auto bucket_id = BucketId(hash);
       auto& bucket = entries_[bucket_id];
-      if (auto existed_item = bucket.Find(s); existed_item) {
+      if (auto existed_item = bucket.Find(s, hash, capacity_log_); existed_item) {
         // TODO update TTL
       } else {
         ++res;
-        AddUnique(s, bucket, ttl_sec);
+        AddUnique(s, bucket, hash, ttl_sec);
       }
     }
     return res;
@@ -213,9 +218,11 @@ class IntrusiveStringSet {
   iterator Find(std::string_view member) {
     if (entries_.empty())
       return end();
-    auto bucket_id = BucketId(Hash(member));
+
+    uint64_t hash = Hash(member);
+    auto bucket_id = BucketId(hash);
     auto entry_it = entries_.begin() + bucket_id;
-    auto res = entry_it->Find(member);
+    auto res = entry_it->Find(member, hash, capacity_log_);
     return iterator(res ? entry_it : entries_.end(), entries_.end(), res);
   }
 
@@ -252,8 +259,11 @@ class IntrusiveStringSet {
     for (int64_t i = prev_size - 1; i >= 0; --i) {
       auto list = std::move(entries_[i]);
       for (auto entry = list.Pop(time_now_); entry; entry = list.Pop(time_now_)) {
-        auto bucket_id = BucketId(Hash(entry.Key()));
-        entries_[bucket_id].Insert(entry.Release());
+        uint64_t hash = Hash(entry.Key());
+        auto bucket_id = BucketId(hash);
+        auto& inserted_entry = entries_[bucket_id].Insert(entry.Release());
+        inserted_entry.SetCurrentHash(hash, capacity_log_);
+        inserted_entry.SetExtendedHash(hash, capacity_log_);
       }
     }
   }
@@ -269,6 +279,7 @@ class IntrusiveStringSet {
   }
 
  private:
+  static constexpr std::uint32_t kMinCapacityLog = 3;
   std::uint32_t capacity_log_ = 0;
   std::uint32_t size_ = 0;  // number of elements in the set.
   std::uint32_t time_now_ = 0;
