@@ -28,6 +28,7 @@ namespace fs = std::filesystem;
 
 constexpr std::string_view kS3Prefix = "s3://";
 constexpr std::string_view kGCSPrefix = "gs://";
+constexpr std::string_view kAzurePrefix = "gs://";
 
 const size_t kBucketConnectMs = 2000;
 
@@ -83,7 +84,7 @@ class SnapshotStorage {
 
 class FileSnapshotStorage : public SnapshotStorage {
  public:
-  FileSnapshotStorage(util::fb2::FiberQueueThreadPool* fq_threadpool);
+  explicit FileSnapshotStorage(util::fb2::FiberQueueThreadPool* fq_threadpool);
 
   io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenWriteFile(
       const std::string& path) override;
@@ -124,6 +125,34 @@ class GcsSnapshotStorage : public SnapshotStorage {
   std::error_code CheckPath(const std::string& path) final;
 
   util::cloud::GCPCredsProvider creds_provider_;
+  SSL_CTX* ctx_ = NULL;
+};
+
+class AzureSnapshotStorage : public SnapshotStorage {
+ public:
+  AzureSnapshotStorage();
+  ~AzureSnapshotStorage();
+
+  std::error_code Init(unsigned connect_ms);
+
+  io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenWriteFile(
+      const std::string& path) override;
+
+  io::ReadonlyFileOrError OpenReadFile(const std::string& path) override;
+
+  io::Result<std::string, GenericError> LoadPath(std::string_view dir,
+                                                 std::string_view dbfilename) override;
+
+  bool IsCloud() const final {
+    return true;
+  }
+
+ private:
+  io::Result<std::vector<std::string>, GenericError> ExpandFromPath(const std::string& path) final;
+
+  std::error_code CheckPath(const std::string& path) final;
+
+  std::unique_ptr<util::cloud::CredentialsProvider> creds_provider_;
   SSL_CTX* ctx_ = NULL;
 };
 
@@ -196,8 +225,12 @@ inline bool IsGCSPath(std::string_view path) {
   return absl::StartsWith(path, detail::kGCSPrefix);
 }
 
+inline bool IsAzurePath(std::string_view path) {
+  return absl::StartsWith(path, detail::kAzurePrefix);
+}
+
 inline bool IsCloudPath(std::string_view path) {
-  return IsS3Path(path) || IsGCSPath(path);
+  return IsS3Path(path) || IsGCSPath(path) || IsAzurePath(path);
 }
 
 }  // namespace detail
