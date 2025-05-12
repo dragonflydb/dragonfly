@@ -1,0 +1,8 @@
+SET key1 value1
+GET key1
+HSET hash1 field1 value1
+LPUSH list1 element1
+SADD set1 member1
+ZADD zset1 1.0 member1
+PING
+INFO
