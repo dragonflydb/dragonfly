@@ -321,6 +321,10 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
       } else {
         return facade::OpStatus::SYNTAX_ERR;
       }
+    } else if (opt == "MINMSZ") {
+      if (!absl::SimpleAtoi(ArgS(args, i + 1), &scan_opts.min_malloc_size)) {
+        return facade::OpStatus::INVALID_INT;
+      }
     } else {
       return facade::OpStatus::SYNTAX_ERR;
     }
