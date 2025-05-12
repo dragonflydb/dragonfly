@@ -70,7 +70,9 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
     OnDbChange(db_index, req);
   };
 
-  snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
+  if (!stream_journal) {
+    snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
+  }
 
   if (stream_journal) {
     auto* journal = db_slice_->shard_owner()->journal();
@@ -93,12 +95,15 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   }
   serializer_ = std::make_unique<RdbSerializer>(compression_mode_, flush_fun);
 
-  VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
+  VLOG(1) << "DbSaver::Start - saving entries with version less than "
+          << snapshot_version_.value_or(0);
 
   string fb_name = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex());
   snapshot_fb_ = fb2::Fiber(fb_name, [this, stream_journal] {
     this->IterateBucketsFb(stream_journal);
-    db_slice_->UnregisterOnChange(snapshot_version_);
+    if (!stream_journal) {
+      db_slice_->UnregisterOnChange(snapshot_version_.value());
+    }
     consumer_->Finalize();
   });
 }
@@ -198,7 +203,8 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
 
   // serialized + side_saved must be equal to the total saved.
   VLOG(1) << "Exit SnapshotSerializer loop_serialized: " << stats_.loop_serialized
-          << ", side_saved " << stats_.side_saved << ", cbcalls " << stats_.savecb_calls;
+          << ", side_saved " << stats_.side_saved << ", cbcalls " << stats_.savecb_calls
+          << ", journal_saved " << stats_.jounal_changes;
 }
 
 void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
@@ -245,15 +251,18 @@ bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator i
 
   ++stats_.savecb_calls;
 
-  if (it.GetVersion() >= snapshot_version_) {
-    // either has been already serialized or added after snapshotting started.
-    DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << " at " << it.GetVersion();
-    ++stats_.skipped;
-    return false;
-  }
+  if (snapshot_version_) {
+    if (it.GetVersion() >= *snapshot_version_) {
+      // either has been already serialized or added after snapshotting started.
+      DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << " at "
+               << it.GetVersion();
+      ++stats_.skipped;
+      return false;
+    }
 
-  db_slice_->FlushChangeToEarlierCallbacks(db_index, DbSlice::Iterator::FromPrime(it),
-                                           snapshot_version_);
+    db_slice_->FlushChangeToEarlierCallbacks(db_index, DbSlice::Iterator::FromPrime(it),
+                                             *snapshot_version_);
+  }
 
   auto* latch = db_slice_->GetLatch();
 
@@ -268,11 +277,14 @@ bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator i
 }
 
 unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it) {
-  DCHECK_LT(it.GetVersion(), snapshot_version_);
+  if (snapshot_version_) {
+    DCHECK_LT(it.GetVersion(), *snapshot_version_);
+    it.SetVersion(*snapshot_version_);
+  }
 
   // traverse physical bucket and write it into string file.
   serialize_bucket_running_ = true;
-  it.SetVersion(snapshot_version_);
+
   unsigned result = 0;
 
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
@@ -395,14 +407,15 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
   PrimeTable* table = db_slice_->GetTables(db_index).first;
   const PrimeTable::bucket_iterator* bit = req.update();
 
+  DCHECK(snapshot_version_.has_value());
   if (bit) {
-    if (!bit->is_done() && bit->GetVersion() < snapshot_version_) {
+    if (!bit->is_done() && bit->GetVersion() < *snapshot_version_) {
       stats_.side_saved += SerializeBucket(db_index, *bit);
     }
   } else {
     string_view key = get<string_view>(req.change);
-    table->CVCUponInsert(snapshot_version_, key, [this, db_index](PrimeTable::bucket_iterator it) {
-      DCHECK_LT(it.GetVersion(), snapshot_version_);
+    table->CVCUponInsert(*snapshot_version_, key, [this, db_index](PrimeTable::bucket_iterator it) {
+      DCHECK_LT(it.GetVersion(), *snapshot_version_);
       stats_.side_saved += SerializeBucket(db_index, it);
     });
   }
@@ -413,12 +426,11 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 // no database switch can be performed between those two calls, because they are part of one
 // transaction.
 void SliceSnapshot::ConsumeJournalChange(const journal::JournalItem& item) {
-  {
-    // We grab the lock in case we are in the middle of serializing a bucket, so it serves as a
-    // barrier here for atomic serialization.
-    std::lock_guard barrier(big_value_mu_);
-    std::ignore = serializer_->WriteJournalEntry(item.data);
-  }
+  // We grab the lock in case we are in the middle of serializing a bucket, so it serves as a
+  // barrier here for atomic serialization.
+  std::lock_guard barrier(big_value_mu_);
+  std::ignore = serializer_->WriteJournalEntry(item.data);
+  ++stats_.jounal_changes;
 }
 
 void SliceSnapshot::ThrottleIfNeeded() {

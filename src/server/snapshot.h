@@ -89,10 +89,6 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
     snapshot_fb_.JoinIfNeeded();
   }
 
-  uint64_t snapshot_version() const {
-    return snapshot_version_;
-  }
-
   const RdbTypeFreqMap& freq_map() const {
     return type_freq_map_;
   }
@@ -166,7 +162,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   RdbTypeFreqMap type_freq_map_;
 
   // version upper bound for entries that should be saved (not included).
-  uint64_t snapshot_version_ = 0;
+  std::optional<uint64_t> snapshot_version_;
   uint32_t journal_cb_id_ = 0;
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
@@ -177,6 +173,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
     size_t side_saved = 0;
     size_t savecb_calls = 0;
     size_t keys_total = 0;
+    size_t jounal_changes = 0;
   } stats_;
 
   ThreadLocalMutex big_value_mu_;

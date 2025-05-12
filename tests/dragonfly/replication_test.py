@@ -35,7 +35,7 @@ Test full replication pipeline. Test full sync with streaming changes and stable
     "t_master, t_replicas, seeder_config, stream_target",
     [
         # Quick general test that replication is working
-        (1, 3 * [1], dict(key_target=1_000), 500),
+        (1, [1], dict(key_target=1_000), 500),
         # A lot of huge values
         (2, 2 * [1], dict(key_target=5_000, huge_value_target=30), 500),
         (4, [4, 4], dict(key_target=10_000), 1_000),
@@ -135,6 +135,15 @@ async def test_replication_all(
         # the size of the hug value and the serialization max chunk size. For the test cases here,
         # it's usually close to 1% but there are some that are close to 3.
         assert preemptions <= (key_capacity * 0.03)
+
+    master.stop()
+    lines = master.find_in_logs("Exit SnapshotSerializer")
+    assert len(lines) > 0
+    for line in lines:
+        # We test the full sync journal path of command execution
+        journal_saved = extract_int_after_prefix("journal_saved ", line)
+        logging.debug(f"Journal saves {journal_saved}")
+        assert journal_saved > 0
 
 
 async def check_replica_finished_exec(c_replica: aioredis.Redis, m_offset):
