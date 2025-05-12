@@ -594,15 +594,21 @@ void KeyGenerator::EnableClusterMode() {
     ++i;
   }
 }
-void Driver::RunCommandAndCheckResultIs(std::string_view cmd, std::string_view expected_res) {
-  auto ec = socket_->Write(io::Buffer(cmd));
+
+void RunCommandAndCheckResultIs(std::string_view cmd, std::string_view expected,
+                                FiberSocketBase* socket) {
+  auto ec = socket->Write(io::Buffer(cmd));
   CHECK(!ec);
 
   uint8_t buf[128];
-  auto res_sz = socket_->Recv(io::MutableBytes(buf));
+  auto res_sz = socket->Recv(io::MutableBytes(buf));
   CHECK(res_sz) << res_sz.error().message();
   string_view resp = io::View(io::Bytes(buf, *res_sz));
-  CHECK_EQ(resp, expected_res) << resp;
+  CHECK_EQ(resp, expected) << resp;
+}
+
+void Driver::RunCommandAndCheckResultIs(std::string_view cmd, std::string_view expected_res) {
+  ::RunCommandAndCheckResultIs(cmd, expected_res, socket_.get());
 }
 
 void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
@@ -1007,6 +1013,11 @@ ClusterShards FetchClusterInfo(const tcp::endpoint& ep, ProactorBase* proactor) 
   unique_ptr<FiberSocketBase> socket(proactor->CreateSocket());
   error_code ec = socket->Connect(ep);
   CHECK(!ec) << "Could not connect to " << ep << " " << ec;
+
+  if (const auto password = GetFlag(FLAGS_password); !password.empty()) {
+    RunCommandAndCheckResultIs(StrFormat("AUTH %s\r\n", password), "+OK\r\n", socket.get());
+  }
+
   ec = socket->Write(io::Buffer("cluster nodes\r\n"));
   CHECK(!ec);
   facade::RedisParser parser{RedisParser::CLIENT, 1024};
