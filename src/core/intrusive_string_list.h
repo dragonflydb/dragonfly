@@ -23,7 +23,17 @@ class ISLEntry {
   // can be used for tagging. At most 52 bits of address are reserved for
   // some configurations, and usually it's 48 bits.
   // https://docs.kernel.org/arch/arm64/memory.html
-  static constexpr size_t kTtlBit = 1ULL << 55;
+  static constexpr size_t kTtlBit = 1ULL << 52;
+  // current hash allows us to identify which bucket the element belongs to
+  static constexpr size_t kCurrHashShift = 53;
+  static constexpr size_t kCurrHashMask = 0x7ULL;
+  static constexpr size_t kCurrHashShiftedMask = kCurrHashMask << kCurrHashShift;
+  // extended hash allows us to reduce keys comparisons
+  static constexpr size_t kExtHashShift = 56;
+  static constexpr uint32_t ext_hash_bit_size = 8;
+  static constexpr size_t kExtHashMask = 0xFFULL;
+  static constexpr size_t kExtHashShiftedMask = kExtHashMask << kExtHashShift;
+
   static constexpr size_t kTagMask = 4095ULL << 52;  // we reserve 12 high bits.
 
  public:
@@ -70,6 +80,38 @@ class ISLEntry {
   // TODO consider another option to implement iterator
   ISLEntry* operator->() {
     return this;
+  }
+
+  uint64_t GetCurrentHash() const {
+    return (uptr() & kCurrHashShiftedMask) >> kCurrHashShift;
+  }
+
+  uint64_t GetExtendedHash() const {
+    return (uptr() & kExtHashShiftedMask) >> kExtHashShift;
+  }
+
+  bool CheckCurrentHash(uint64_t hash, uint32_t capacity_log) const {
+    uint32_t curr_hash_shift = 64 - capacity_log;
+    uint64_t curr_hash = (hash >> curr_hash_shift) & kCurrHashMask;
+    return GetCurrentHash() == curr_hash;
+  }
+
+  bool CheckExtendedHash(uint64_t hash, uint32_t capacity_log) const {
+    uint32_t ext_hash_shift = 64 - capacity_log - ext_hash_bit_size;
+    uint64_t ext_hash = (hash >> ext_hash_shift) & kExtHashMask;
+    return GetExtendedHash() == ext_hash;
+  }
+
+  void SetCurrentHash(uint64_t hash, uint32_t capacity_log) {
+    uint32_t curr_hash_shift = 64 - capacity_log;
+    uint64_t curr_hash = ((hash >> curr_hash_shift) << kCurrHashShift) & kCurrHashShiftedMask;
+    data_ = (char*)((uptr() & ~kCurrHashShiftedMask) | curr_hash);
+  }
+
+  void SetExtendedHash(uint64_t hash, uint32_t capacity_log) {
+    uint32_t ext_hash_shift = 64 - capacity_log - ext_hash_bit_size;
+    uint64_t ext_hash = ((hash >> ext_hash_shift) << kExtHashShift) & kExtHashShiftedMask;
+    data_ = (char*)((uptr() & ~kExtHashShiftedMask) | ext_hash);
   }
 
  protected:
@@ -277,7 +319,7 @@ class IntrusiveStringList {
     return end_.FakePrev();
   }
 
-  ISLEntry Insert(ISLEntry e) {
+  ISLEntry& Insert(ISLEntry e) {
     e.SetNext(start_);
     start_ = e;
     return start_;
@@ -301,7 +343,7 @@ class IntrusiveStringList {
   }
 
   // TODO consider to wrap ISLEntry to prevent usage out of the list
-  ISLEntry Emplace(std::string_view key, uint32_t ttl_sec = UINT32_MAX) {
+  ISLEntry& Emplace(std::string_view key, uint32_t ttl_sec = UINT32_MAX) {
     return Insert(ISLEntry::Create(key, nullptr, ttl_sec));
   }
 
@@ -311,6 +353,16 @@ class IntrusiveStringList {
     for (; it && it->Key() != str; ++it)
       ;
     return it;
+  }
+
+  // TODO consider to wrap ISLEntry to prevent usage out of the list
+  IntrusiveStringList::iterator Find(std::string_view str, uint64_t hash, uint32_t capacity_log) {
+    auto entry = begin();
+    for (; entry; ++entry) {
+      if (entry->CheckExtendedHash(hash, capacity_log) && entry->Key() == str)
+        break;
+    }
+    return entry;
   }
 
   bool Erase(std::string_view str) {
