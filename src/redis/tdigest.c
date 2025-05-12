@@ -36,13 +36,13 @@ static inline double weighted_average(double x1, double w1, double x2, double w2
     }
 }
 
-static void inline swap(double *arr, int i, int j) {
+inline static void swap(double *arr, int i, int j) {
     const double temp = arr[i];
     arr[i] = arr[j];
     arr[j] = temp;
 }
 
-static void inline swap_l(long long *arr, int i, int j) {
+inline static void swap_l(long long *arr, int i, int j) {
     const long long temp = arr[i];
     arr[i] = arr[j];
     arr[j] = temp;

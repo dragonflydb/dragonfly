@@ -13,6 +13,7 @@ extern "C" {
 #include "redis/quicklist.h"
 #include "redis/redis_aux.h"
 #include "redis/stream.h"
+#include "redis/tdigest.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"  // for non-string objects.
 #include "redis/zset.h"
@@ -477,9 +478,15 @@ size_t RobjWrapper::Size() const {
     case OBJ_STREAM:
       // Size mean malloc bytes for streams
       return sz_;
+    case OBJ_TDIGEST:
+      return 0;
     default:;
   }
   return 0;
+}
+
+inline void FreeObjTDigest(void* ptr) {
+  td_free((td_histogram*)ptr);
 }
 
 void RobjWrapper::Free(MemoryResource* mr) {
@@ -510,6 +517,9 @@ void RobjWrapper::Free(MemoryResource* mr) {
       break;
     case OBJ_STREAM:
       FreeObjStream(inner_obj_);
+      break;
+    case OBJ_TDIGEST:
+      FreeObjTDigest(inner_obj_);
       break;
     default:
       LOG(FATAL) << "Unknown object type";
@@ -603,6 +613,9 @@ bool RobjWrapper::DefragIfNeeded(float ratio) {
     return do_defrag(DefragSet);
   } else if (type() == OBJ_ZSET) {
     return do_defrag(DefragZSet);
+  } else if (type() == OBJ_TDIGEST) {
+    // TODO implement this
+    return false;
   }
   return false;
 }
@@ -825,6 +838,10 @@ size_t CompactObj::Size() const {
       case SBF_TAG:
         DCHECK_EQ(mask_bits_.encoding, NONE_ENC);
         raw_size = u_.sbf->current_size();
+        break;
+      case TDIGEST_TAG:
+        // TODO implement this
+        raw_size = 0;
         break;
       default:
         LOG(DFATAL) << "Should not reach " << int(taglen_);
