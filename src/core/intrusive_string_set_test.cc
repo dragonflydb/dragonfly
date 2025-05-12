@@ -112,6 +112,38 @@ TEST_F(IntrusiveStringSetTest, IntrusiveStringListTest) {
   EXPECT_FALSE(isl.Find("test"));
 }
 
+TEST_F(IntrusiveStringSetTest, HashCheckTest) {
+  constexpr uint64_t hash = 0xFEDCBA9876543210ULL;
+
+  IntrusiveStringList isl;
+  {
+    ISLEntry& test = isl.Emplace("0123456789");
+    test.SetExtendedHash(hash, 3);
+  }
+  {
+    ISLEntry& test = isl.Emplace("123456789");
+    test.SetExtendedHash(hash, 3);
+  }
+  {
+    ISLEntry& test = isl.Emplace("23456789");
+    test.SetExtendedHash(hash, 3);
+  }
+  {
+    ISLEntry& test = isl.Emplace("3456789");
+    test.SetExtendedHash(hash, 3);
+  }
+  {
+    ISLEntry& test = isl.Emplace("456789");
+    test.SetExtendedHash(hash, 3);
+  }
+
+  EXPECT_TRUE(isl.Find("0123456789", 0xFEDCBA9876543210ULL, 3));
+  EXPECT_TRUE(isl.Find("123456789", 0xFEDCBA9876543210ULL, 3));
+  EXPECT_TRUE(isl.Find("23456789", 0xFEDCBA9876543210ULL, 3));
+  EXPECT_TRUE(isl.Find("3456789", 0xFEDCBA9876543210ULL, 3));
+  EXPECT_TRUE(isl.Find("456789", 0xFEDCBA9876543210ULL, 3));
+}
+
 TEST_F(IntrusiveStringSetTest, IntrusiveStringSetAddFindTest) {
   IntrusiveStringSet ss;
   std::set<std::string> test_set;
