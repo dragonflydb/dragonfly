@@ -123,7 +123,6 @@ class CompactObj {
     EXTERNAL_TAG = 20,
     JSON_TAG = 21,
     SBF_TAG = 22,
-    TDIGEST_TAG = 23
   };
 
   // String encoding types.

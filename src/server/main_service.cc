@@ -57,6 +57,7 @@ extern "C" {
 #include "server/set_family.h"
 #include "server/stream_family.h"
 #include "server/string_family.h"
+#include "server/tdigest_family.h"
 #include "server/transaction.h"
 #include "server/version.h"
 #include "server/zset_family.h"
@@ -2719,6 +2720,7 @@ void Service::RegisterCommands() {
   BloomFamily::Register(&registry_);
   server_family_.Register(&registry_);
   cluster_family_.Register(&registry_);
+  TDigestFamily::Register(&registry_);
 
   // AclFamily should always be registered last
   // If we add a new familly, register that first above and *not* below

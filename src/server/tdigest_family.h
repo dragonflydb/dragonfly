@@ -17,19 +17,20 @@ class TDigestFamily {
 
  private:
   static void Create(CmdArgList args, const CommandContext& cmd_cntx);
-  static void Del(CmdArgList args, const CommandContext& cmd_cntx);
-  static void CreateRule(CmdArgList args, const CommandContext& cmd_cntx);
-  static void DeleteRule(CmdArgList args, const CommandContext& cmd_cntx);
-  static void Alter(CmdArgList args, const CommandContext& cmd_cntx);
-  static void MCreate(CmdArgList args, const CommandContext& cmd_cntx);
   static void Add(CmdArgList args, const CommandContext& cmd_cntx);
-  static void Get(CmdArgList args, const CommandContext& cmd_cntx);
-  static void Range(CmdArgList args, const CommandContext& cmd_cntx);
-  static void MAdd(CmdArgList args, const CommandContext& cmd_cntx);
-  static void MGet(CmdArgList args, const CommandContext& cmd_cntx);
-  static void MRange(CmdArgList args, const CommandContext& cmd_cntx);
-  static void MQueryIndex(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Rank(CmdArgList args, const CommandContext& cmd_cntx);
+  static void RevRank(CmdArgList args, const CommandContext& cmd_cntx);
+  static void ByRank(CmdArgList args, const CommandContext& cmd_cntx);
+  static void ByRevRank(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Reset(CmdArgList args, const CommandContext& cmd_cntx);
   static void Info(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Max(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Min(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Cdf(CmdArgList args, const CommandContext& cmd_cntx);
+  // TODO
+  // static void Quantile(CmdArgList args, const CommandContext& cmd_cntx);
+  // static void TrimmedMean(CmdArgList args, const CommandContext& cmd_cntx);
+  // static void Merge(CmdArgList args, const CommandContext& cmd_cntx);
 };
 
 }  // namespace dfly
