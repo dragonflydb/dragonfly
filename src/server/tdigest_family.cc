@@ -10,6 +10,7 @@
 #include "server/command_registry.h"
 #include "server/db_slice.h"
 #include "server/engine_shard.h"
+#include "server/engine_shard_set.h"
 #include "server/transaction.h"
 
 extern "C" {
@@ -76,7 +77,6 @@ void TDigestFamily::Add(CmdArgList args, const CommandContext& cmd_cntx) {
       return it.status();
     }
     auto* wrapper = it->it->second.GetRobjWrapper();
-    ;
     auto* td = (td_histogram_t*)wrapper->inner_obj();
     for (auto value : values) {
       if (td_add(td, value, 1) != 0) {
@@ -276,7 +276,6 @@ void TDigestFamily::Reset(CmdArgList args, const CommandContext& cmd_cntx) {
       return it.status();
     }
     auto* wrapper = it->it->second.GetRobjWrapper();
-    ;
     auto* td = (td_histogram_t*)wrapper->inner_obj();
     td_reset(td);
     return OpStatus::OK;
@@ -288,13 +287,17 @@ void TDigestFamily::Reset(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 double HalfRoundDown(double f) {
-  double int_part;
-  double frac_part = modf(f, &int_part);
+  double round;
+  double frac = modf(f, &round);
 
-  if (fabs(frac_part) <= 0.5)
-    return int_part;
+  if (fabs(frac) <= 0.5)
+    return round;
 
-  return int_part >= 0.0 ? int_part + 1.0 : int_part - 1.0;
+  if (round >= 0.0) {
+    return round + 1.0;
+  }
+
+  return round - 1.0;
 }
 
 void RankImpl(CmdArgList args, const CommandContext& cmd_cntx, bool reverse) {
@@ -320,7 +323,6 @@ void RankImpl(CmdArgList args, const CommandContext& cmd_cntx, bool reverse) {
       return it.status();
     }
     auto* wrapper = it->it->second.GetRobjWrapper();
-    ;
     auto* td = (td_histogram_t*)wrapper->inner_obj();
     const double size = (double)td_size(td);
     const double min = td_min(td);
@@ -383,7 +385,6 @@ void TDigestFamily::Cdf(CmdArgList args, const CommandContext& cmd_cntx) {
       return it.status();
     }
     auto* wrapper = it->it->second.GetRobjWrapper();
-    ;
     auto* td = (td_histogram_t*)wrapper->inner_obj();
     Result result;
     for (auto val : values) {
@@ -395,6 +396,203 @@ void TDigestFamily::Cdf(CmdArgList args, const CommandContext& cmd_cntx) {
   auto res = cmd_cntx.tx->ScheduleSingleHopT(cb);
   // SendError covers ok
   return cmd_cntx.rb->SendError(res.status());
+}
+
+void TDigestFamily::Quantile(CmdArgList args, const CommandContext& cmd_cntx) {
+  facade::CmdArgParser parser{args};
+
+  auto key = parser.Next<std::string_view>();
+  std::vector<double> quantiles;
+  while (parser.HasNext()) {
+    double val = parser.Next<double>();
+    if (val < 0 || val > 1.0) {
+      cmd_cntx.rb->SendError("quantile should be in [0,1]");
+    }
+    quantiles.push_back(val);
+  }
+
+  if (parser.HasError()) {
+    cmd_cntx.rb->SendError(parser.Error()->MakeReply());
+  }
+
+  using Result = std::vector<double>;
+  auto cb = [key, &quantiles](Transaction* tx, EngineShard* es) -> OpResult<Result> {
+    auto& db_slice = tx->GetDbSlice(es->shard_id());
+    auto db_cntx = tx->GetDbContext();
+    auto it = db_slice.FindMutable(db_cntx, key, OBJ_TDIGEST);
+    if (!it) {
+      return it.status();
+    }
+    auto* wrapper = it->it->second.GetRobjWrapper();
+    auto* td = (td_histogram_t*)wrapper->inner_obj();
+    Result result;
+    result.resize(quantiles.size());
+    auto total = quantiles.size();
+    for (size_t i = 0; i < total; ++i) {
+      int start = i;
+      while (i < total - 1 && quantiles[i] <= quantiles[i + 1]) {
+        ++i;
+      }
+      td_quantiles(td, quantiles.data() + start, result.data() + start, i - start + 1);
+    }
+    return result;
+  };
+
+  auto res = cmd_cntx.tx->ScheduleSingleHopT(cb);
+  // SendError covers ok
+  return cmd_cntx.rb->SendError(res.status());
+}
+
+void TDigestFamily::TrimmedMean(CmdArgList args, const CommandContext& cmd_cntx) {
+  facade::CmdArgParser parser{args};
+
+  auto key = parser.Next<std::string_view>();
+  auto low_cut = parser.Next<double>();
+  auto high_cut = parser.Next<double>();
+  auto out_of_range = [](auto e) { return e < 0 || e > 1.0; };
+
+  if (out_of_range(low_cut) || out_of_range(high_cut)) {
+    cmd_cntx.rb->SendError("cut value should be in [0,1]");
+  }
+
+  if (parser.Error()) {
+    cmd_cntx.rb->SendError(parser.Error()->MakeReply());
+  }
+
+  auto cb = [key, high_cut, low_cut](Transaction* tx, EngineShard* es) -> OpResult<double> {
+    auto& db_slice = tx->GetDbSlice(es->shard_id());
+    auto db_cntx = tx->GetDbContext();
+    auto it = db_slice.FindMutable(db_cntx, key, OBJ_TDIGEST);
+    if (!it) {
+      return it.status();
+    }
+    auto* wrapper = it->it->second.GetRobjWrapper();
+    auto* td = (td_histogram_t*)wrapper->inner_obj();
+    const double value = td_trimmed_mean(td, low_cut, high_cut);
+    return value;
+  };
+
+  auto res = cmd_cntx.tx->ScheduleSingleHopT(cb);
+  // SendError covers ok
+  return cmd_cntx.rb->SendError(res.status());
+}
+
+struct MergeInput {
+  bool has_compression_defined = false;
+  size_t compression = 0;
+  bool override = false;
+};
+
+void TDigestFamily::Merge(CmdArgList args, const CommandContext& cmd_cntx) {
+  facade::CmdArgParser parser{args};
+
+  auto dest_key = parser.Next<std::string_view>();
+  auto total_keys = parser.Next<size_t>();
+  MergeInput input;
+  std::vector<std::string_view> source_keys;
+  for (size_t i = 0; i < total_keys; ++i) {
+    source_keys.push_back(parser.Next<std::string_view>());
+  }
+
+  if (parser.HasNext()) {
+    if (!parser.Check("COMPRESSION", &input.compression)) {
+      return cmd_cntx.rb->SendError(facade::kSyntaxErr);
+    }
+    input.has_compression_defined = true;
+  }
+
+  if (parser.HasNext()) {
+    if (!parser.Check("OVERRIDE")) {
+      return cmd_cntx.rb->SendError(facade::kSyntaxErr);
+    }
+    input.override = true;
+  }
+
+  if (parser.Error()) {
+    cmd_cntx.rb->SendError(parser.Error()->MakeReply());
+    return;
+  }
+
+  using PerThread = std::vector<td_histogram_t*>;
+  std::vector<bool> errors(shard_set->size(), false);
+  std::vector<PerThread> sources(shard_set->size());
+
+  auto cb = [&errors, &sources, input, dest_key](Transaction* t, EngineShard* es) {
+    auto id = es->shard_id();
+    ShardArgs keys = t->GetShardArgs(id);
+    auto& db_slice = t->GetDbSlice(id);
+    auto db_cntx = t->GetDbContext();
+    for (auto key : keys) {
+      auto it = db_slice.FindMutable(db_cntx, key, OBJ_TDIGEST);
+      if (key == dest_key && it.status() != OpStatus::WRONG_TYPE) {
+        continue;
+      }
+      if (!it) {
+        errors[id] = true;
+        return OpStatus::OK;
+      }
+      auto* wrapper = it->it->second.GetRobjWrapper();
+      auto* td = (td_histogram_t*)wrapper->inner_obj();
+      sources[id].push_back(td);
+    }
+    return OpStatus::OK;
+  };
+
+  cmd_cntx.tx->Execute(std::move(cb), false);
+
+  for (auto error : errors) {
+    if (error) {
+      cmd_cntx.rb->SendError(facade::kKeyNotFoundErr);
+      cmd_cntx.tx->Conclude();
+      return;
+    }
+  }
+
+  auto dest_shard = Shard(dest_key, sources.size());
+
+  auto hop_cb = [&sources, dest_key, input, dest_shard](Transaction* tx, EngineShard* es) {
+    if (es->shard_id() != dest_shard) {
+      return OpStatus::OK;
+    }
+    auto& db_slice = tx->GetDbSlice(es->shard_id());
+    auto db_cntx = tx->GetDbContext();
+    auto res = db_slice.AddOrFind(db_cntx, dest_key);
+
+    double compression = 100;
+    if (input.has_compression_defined) {
+      compression = input.compression;
+    } else if (input.override) {
+      for (auto& t : sources) {
+        for (auto* hist : t) {
+          compression = std::max(compression, hist->compression);
+        }
+      }
+    }
+
+    td_histogram_t* td_dst = nullptr;
+    td_histogram_t* td_result = nullptr;
+
+    td_init(compression, &td_result);
+    if (!res->is_new && !input.override) {
+      auto* wrapper = res->it->second.GetRobjWrapper();
+      td_dst = (td_histogram_t*)wrapper->inner_obj();
+      td_merge(td_result, td_dst);
+    }
+
+    for (auto& t : sources) {
+      for (auto* hist : t) {
+        td_merge(td_result, hist);
+      }
+    }
+
+    res->it->second.Reset();
+    res->it->second.InitRobj(OBJ_TDIGEST, 0, td_result);
+
+    return OpStatus::OK;
+  };
+
+  cmd_cntx.tx->Execute(std::move(hop_cb), true);
+  cmd_cntx.rb->SendOk();
 }
 
 using CI = CommandId;
@@ -414,7 +612,11 @@ void TDigestFamily::Register(CommandRegistry* registry) {
             << CI{"TDIGEST.BYREVRANK", CO::READONLY, -2, 1, 1, acl::TDIGEST}.HFUNC(ByRevRank)
             << CI{"TDIGEST.INFO", CO::READONLY, 2, 1, 1, acl::TDIGEST}.HFUNC(Info)
             << CI{"TDIGEST.MAX", CO::READONLY, 2, 1, 1, acl::TDIGEST}.HFUNC(Max)
-            << CI{"TDIGEST.MIN", CO::READONLY, 2, 1, 1, acl::TDIGEST}.HFUNC(Min);
+            << CI{"TDIGEST.MIN", CO::READONLY, 2, 1, 1, acl::TDIGEST}.HFUNC(Min)
+            << CI{"TDIGEST.TRIMMED_MEAN", CO::READONLY, 3, 1, 1, acl::TDIGEST}.HFUNC(TrimmedMean)
+            << CI{"TDIGEST.MERGE", CO::WRITE | CO::VARIADIC_KEYS, -3, 3, 3, acl::TDIGEST}.HFUNC(
+                   Merge)
+            << CI{"TDIGEST.QUANTILE", CO::READONLY, -2, 1, 1, acl::TDIGEST}.HFUNC(Quantile);
 };
 
 }  // namespace dfly
