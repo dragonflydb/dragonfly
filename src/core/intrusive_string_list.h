@@ -24,10 +24,10 @@ class ISLEntry {
   // some configurations, and usually it's 48 bits.
   // https://docs.kernel.org/arch/arm64/memory.html
   static constexpr size_t kTtlBit = 1ULL << 52;
-  // current hash allows us to identify which bucket the element belongs to
-  static constexpr size_t kCurrHashShift = 53;
-  static constexpr size_t kCurrHashMask = 0x7ULL;
-  static constexpr size_t kCurrHashShiftedMask = kCurrHashMask << kCurrHashShift;
+
+  // if bit is set the string length field is 1 byte instead of 4
+  static constexpr size_t kSsoBit = 1ULL << 53;
+
   // extended hash allows us to reduce keys comparisons
   static constexpr size_t kExtHashShift = 56;
   static constexpr uint32_t ext_hash_bit_size = 8;
@@ -82,30 +82,14 @@ class ISLEntry {
     return this;
   }
 
-  uint64_t GetCurrentHash() const {
-    return (uptr() & kCurrHashShiftedMask) >> kCurrHashShift;
-  }
-
   uint64_t GetExtendedHash() const {
     return (uptr() & kExtHashShiftedMask) >> kExtHashShift;
-  }
-
-  bool CheckCurrentHash(uint64_t hash, uint32_t capacity_log) const {
-    uint32_t curr_hash_shift = 64 - capacity_log;
-    uint64_t curr_hash = (hash >> curr_hash_shift) & kCurrHashMask;
-    return GetCurrentHash() == curr_hash;
   }
 
   bool CheckExtendedHash(uint64_t hash, uint32_t capacity_log) const {
     uint32_t ext_hash_shift = 64 - capacity_log - ext_hash_bit_size;
     uint64_t ext_hash = (hash >> ext_hash_shift) & kExtHashMask;
     return GetExtendedHash() == ext_hash;
-  }
-
-  void SetCurrentHash(uint64_t hash, uint32_t capacity_log) {
-    uint32_t curr_hash_shift = 64 - capacity_log;
-    uint64_t curr_hash = ((hash >> curr_hash_shift) << kCurrHashShift) & kCurrHashShiftedMask;
-    data_ = (char*)((uptr() & ~kCurrHashShiftedMask) | curr_hash);
   }
 
   void SetExtendedHash(uint64_t hash, uint32_t capacity_log) {
@@ -121,7 +105,9 @@ class ISLEntry {
 
     bool has_ttl = ttl_sec != UINT32_MAX;
 
-    auto size = sizeof(next) + sizeof(key_size) + key_size + has_ttl * sizeof(ttl_sec);
+    uint32_t key_len_field_size = key_size <= std::numeric_limits<uint8_t>::max() ? 1 : 4;
+
+    auto size = sizeof(next) + key_len_field_size + key_size + has_ttl * sizeof(ttl_sec);
 
     char* data = (char*)zmalloc(size);
     ISLEntry res(data);
@@ -135,9 +121,15 @@ class ISLEntry {
     }
 
     auto* key_size_pos = ttl_pos + res.GetTtlSize();
-    std::memcpy(key_size_pos, &key_size, sizeof(key_size));
+    if (key_len_field_size == 1) {
+      res.SetSsoBit();
+      uint8_t sso_key_size = key_size;
+      std::memcpy(key_size_pos, &sso_key_size, key_len_field_size);
+    } else {
+      std::memcpy(key_size_pos, &key_size, key_len_field_size);
+    }
 
-    auto* key_pos = key_size_pos + sizeof(key_size);
+    auto* key_pos = key_size_pos + key_len_field_size;
     std::memcpy(key_pos, key.data(), key_size);
 
     return res;
@@ -162,10 +154,16 @@ class ISLEntry {
   }
 
   const char* GetKeyData() const {
-    return Raw() + sizeof(ISLEntry*) + sizeof(uint32_t) + GetTtlSize();
+    uint32_t key_field_size = HasSso() ? 1 : 4;
+    return Raw() + sizeof(ISLEntry*) + GetTtlSize() + key_field_size;
   }
 
   uint32_t GetKeySize() const {
+    if (HasSso()) {
+      uint8_t size = 0;
+      std::memcpy(&size, Raw() + sizeof(ISLEntry*) + GetTtlSize(), sizeof(size));
+      return size;
+    }
     uint32_t size = 0;
     std::memcpy(&size, Raw() + sizeof(ISLEntry*) + GetTtlSize(), sizeof(size));
     return size;
@@ -184,6 +182,14 @@ class ISLEntry {
       data_ = (char*)(uptr() | kTtlBit);
     else
       data_ = (char*)(uptr() & (~kTtlBit));
+  }
+
+  void SetSsoBit() {
+    data_ = (char*)(uptr() | kSsoBit);
+  }
+
+  bool HasSso() const {
+    return (uptr() & kSsoBit) != 0;
   }
 
   bool HasTtl() const {
@@ -205,7 +211,7 @@ class ISLEntry {
 
   // TODO consider use SDS strings or other approach
   // TODO add optimization for big keys
-  // memory daya layout [ISLEntry*, key_size, key]
+  // memory daya layout [ISLEntry*, TTL, key_size, key]
   char* data_ = nullptr;
 };
 
