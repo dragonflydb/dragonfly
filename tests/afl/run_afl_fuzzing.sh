@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
 
 # Parameters
 REDIS_HOST=${REDIS_HOST:-"127.0.0.1"}

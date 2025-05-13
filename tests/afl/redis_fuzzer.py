@@ -17,7 +17,6 @@ from redis_commands import (
     DICT_MIX_RATIO,
     DICT_FILE,
     COMMANDS_LOG_FILE,
-    CRASH_LOG_FILE,
     load_input_dict,
     enhance_data_types,
 )
@@ -348,7 +347,6 @@ class AFLFuzzer:
             "successful_executions": 0,
             "error_executions": 0,
             "timeouts": 0,
-            "crashes": 0,
         }
 
         print(f"AFLFuzzer initialized with target: {REDIS_HOST}:{REDIS_PORT}")
@@ -472,17 +470,17 @@ class AFLFuzzer:
         # Verify connection works before proceeding
         if not redis_client.sock:
             print(f"ERROR: Failed to connect to Redis server at {REDIS_HOST}:{REDIS_PORT}")
-            # Try a simple PING to confirm it's actually unreachable
+            # Try a simple INFO to confirm it's actually unreachable
             try:
                 test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 test_sock.settimeout(5)
                 test_sock.connect((REDIS_HOST, REDIS_PORT))
-                test_sock.sendall(b"*1\r\n$4\r\nPING\r\n")
+                test_sock.sendall(b"*1\r\n$4\r\nINFO\r\n")
                 response = test_sock.recv(1024)
-                print(f"Manual PING test response: {response}")
+                print(f"Manual INFO test response: {response}")
                 test_sock.close()
             except Exception as e:
-                print(f"Manual connection test failed: {e}")
+                print(f"Manual INFO test failed: {e}")
 
             # Give up on executing tests
             self.stats["error_executions"] += len(self.test_cases)
@@ -504,7 +502,6 @@ class AFLFuzzer:
 
         # Execute all commands
         current_test_commands = []
-        crash_detected = False
 
         for idx, (command, args) in enumerate(self.test_cases):
             # Add current command to test sequence
@@ -525,25 +522,6 @@ class AFLFuzzer:
                 self.results.append({"command": command, "args": args, "error": str(e)})
                 self.stats["error_executions"] += 1
                 print(f"Command error: {command} - {str(e)}")
-
-                # Check for possible crash
-                error_msg = str(e).lower()
-                if (
-                    "connection" in error_msg
-                    or "broken pipe" in error_msg
-                    or "reset by peer" in error_msg
-                ):
-                    crash_detected = True
-                    self.stats["crashes"] += 1
-                    print(f"Crash detected with command: {command}")
-                    # Record the command sequence that caused the crash
-                    with open(CRASH_LOG_FILE, "a") as crash_file:
-                        crash_file.write(f"# --- CRASH SEQUENCE START ---\n")
-                        for cmd, arg in current_test_commands:
-                            cmd_str = self.format_command_for_cli(cmd, arg)
-                            crash_file.write(f"{cmd_str}\n")
-                        crash_file.write(f"# --- CRASH SEQUENCE END ---\n\n")
-                    break
 
             self.stats["total_executions"] += 1
 
@@ -602,7 +580,6 @@ class AFLFuzzer:
         print(f"Successful executions: {self.stats['successful_executions']}")
         print(f"Errors: {self.stats['error_executions']}")
         print(f"Timeouts: {self.stats['timeouts']}")
-        print(f"Crashes: {self.stats['crashes']}")
 
         print("\nDetailed results:")
         for idx, result in enumerate(self.results):
@@ -641,23 +618,6 @@ def main():
 
     print(f"Starting fuzzer with target: {REDIS_HOST}:{REDIS_PORT}")
 
-    # Quick connection test
-    print(f"Testing connection to Redis server at {REDIS_HOST}:{REDIS_PORT}...")
-    try:
-        test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        test_sock.settimeout(5)
-        test_sock.connect((REDIS_HOST, REDIS_PORT))
-        test_sock.sendall(b"*1\r\n$4\r\nPING\r\n")
-        response = test_sock.recv(1024)
-        print(f"Connection test successful! Response: {response}")
-        test_sock.close()
-    except Exception as e:
-        print(f"WARNING: Connection test failed: {e}")
-        print(f"Please verify that Redis server is running at {REDIS_HOST}:{REDIS_PORT}")
-        if input("Continue anyway? (y/n): ").lower() != "y":
-            print("Exiting...")
-            sys.exit(1)
-
     # Always reload dictionary values for each run
     global DICT_VALUES, INPUT_VALUES
     DICT_VALUES = []
@@ -675,9 +635,8 @@ def main():
     INPUT_VALUES = load_input_dict()
 
     # Create directory for log files if needed
-    for log_file in [COMMANDS_LOG_FILE, CRASH_LOG_FILE]:
-        log_dir = os.path.dirname(log_file)
-        os.makedirs(log_dir, exist_ok=True)
+    log_dir = os.path.dirname(COMMANDS_LOG_FILE)
+    os.makedirs(log_dir, exist_ok=True)
 
     # Running fuzzing with mixed strategy always enabled
     fuzzer = AFLFuzzer()

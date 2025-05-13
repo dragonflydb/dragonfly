@@ -79,6 +79,11 @@ REDIS_COMMANDS = {
     "LINDEX": {"args": ["key", "index"], "optional_args": []},
     "LSET": {"args": ["key", "index", "element"], "optional_args": []},
     "LTRIM": {"args": ["key", "start", "stop"], "optional_args": []},
+    # Commenting out blocking list commands
+    # "BLPOP": {"args": ["key", "timeout"], "optional_args": ["key ..."]},
+    # "BRPOP": {"args": ["key", "timeout"], "optional_args": ["key ..."]},
+    # "BLMOVE": {"args": ["source", "destination", "LEFT|RIGHT", "LEFT|RIGHT", "timeout"], "optional_args": []},
+    # "BRPOPLPUSH": {"args": ["source", "destination", "timeout"], "optional_args": []},
     # Hash operations commands
     "HSET": {"args": ["key", "field", "value"], "optional_args": ["field value ..."]},
     "HSETNX": {"args": ["key", "field", "value"], "optional_args": []},
@@ -170,10 +175,11 @@ REDIS_COMMANDS = {
     },
     # Pub/Sub commands
     "PUBLISH": {"args": ["channel", "message"], "optional_args": []},
-    "SUBSCRIBE": {"args": ["channel"], "optional_args": ["channel ..."]},
-    "UNSUBSCRIBE": {"args": ["channel"], "optional_args": ["channel ..."]},
-    "PSUBSCRIBE": {"args": ["pattern"], "optional_args": ["pattern ..."]},
-    "PUNSUBSCRIBE": {"args": ["pattern"], "optional_args": ["pattern ..."]},
+    # Commenting out blocking subscription commands
+    # "SUBSCRIBE": {"args": ["channel"], "optional_args": ["channel ..."]},
+    # "UNSUBSCRIBE": {"args": ["channel"], "optional_args": ["channel ..."]},
+    # "PSUBSCRIBE": {"args": ["pattern"], "optional_args": ["pattern ..."]},
+    # "PUNSUBSCRIBE": {"args": ["pattern"], "optional_args": ["pattern ..."]},
     "PUBSUB": {"args": ["subcommand"], "optional_args": ["argument ..."]},
     # Transaction commands
     "MULTI": {"args": [], "optional_args": []},
@@ -194,7 +200,8 @@ REDIS_COMMANDS = {
     "FLUSHALL": {"args": [], "optional_args": ["ASYNC", "SYNC"]},
     "DBSIZE": {"args": [], "optional_args": []},
     "CONFIG": {"args": ["GET", "pattern"], "optional_args": []},
-    "MONITOR": {"args": [], "optional_args": []},
+    # Commenting out blocking monitor command
+    # "MONITOR": {"args": [], "optional_args": []},
     "DEBUG": {"args": ["subcommand"], "optional_args": ["arg", "arg ..."]},
     # Bitmap operations
     "BITCOUNT": {"args": ["key"], "optional_args": ["start", "end", "BYTE|BIT"]},
@@ -234,10 +241,11 @@ REDIS_COMMANDS = {
     "XRANGE": {"args": ["key", "start", "end"], "optional_args": ["COUNT", "count"]},
     "XREVRANGE": {"args": ["key", "end", "start"], "optional_args": ["COUNT", "count"]},
     "XLEN": {"args": ["key"], "optional_args": []},
-    "XREAD": {
-        "args": ["STREAMS", "key", "id"],
-        "optional_args": ["key id ...", "COUNT", "count", "BLOCK", "milliseconds"],
-    },
+    # Commenting out XREAD which can be blocking with BLOCK parameter
+    # "XREAD": {
+    #     "args": ["STREAMS", "key", "id"],
+    #     "optional_args": ["key id ...", "COUNT", "count", "BLOCK", "milliseconds"],
+    # },
     # Stream commands
     "XACK": {"args": ["key", "group", "ID"], "optional_args": ["ID ..."]},
     "XAUTOCLAIM": {
@@ -268,10 +276,11 @@ REDIS_COMMANDS = {
     "XINFO GROUPS": {"args": ["key"], "optional_args": []},
     "XINFO STREAM": {"args": ["key"], "optional_args": ["FULL", "COUNT", "count"]},
     "XPENDING": {"args": ["key", "group"], "optional_args": ["start", "end", "count", "consumer"]},
-    "XREADGROUP": {
-        "args": ["GROUP", "group", "consumer", "STREAMS", "key", "ID"],
-        "optional_args": ["key ID ...", "COUNT", "count", "BLOCK", "milliseconds", "NOACK"],
-    },
+    # Commenting out XREADGROUP which can be blocking with BLOCK parameter
+    # "XREADGROUP": {
+    #     "args": ["GROUP", "group", "consumer", "STREAMS", "key", "ID"],
+    #     "optional_args": ["key ID ...", "COUNT", "count", "BLOCK", "milliseconds", "NOACK"],
+    # },
     "XSETID": {"args": ["key", "last-id"], "optional_args": []},
     "XTRIM": {
         "args": ["key", "MAXLEN", "count"],
@@ -718,8 +727,9 @@ REDIS_COMMANDS = {
         ],
     },
     "SPUBLISH": {"args": ["shardchannel", "message"], "optional_args": []},
-    "SSUBSCRIBE": {"args": ["shardchannel"], "optional_args": ["shardchannel ..."]},
-    "SUNSUBSCRIBE": {"args": ["shardchannel"], "optional_args": ["shardchannel ..."]},
+    # Commenting out shardings subscription commands
+    # "SSUBSCRIBE": {"args": ["shardchannel"], "optional_args": ["shardchannel ..."]},
+    # "SUNSUBSCRIBE": {"args": ["shardchannel"], "optional_args": ["shardchannel ..."]},
     # Add cluster commands from Valkey
     "CLUSTER": {"args": [], "optional_args": []},
     "CLUSTER ADDSLOTS": {"args": ["slot"], "optional_args": ["slot ..."]},
