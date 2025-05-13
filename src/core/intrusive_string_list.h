@@ -270,6 +270,18 @@ class IntrusiveStringList {
       }
     }
 
+    bool ExpireIfNeeded(uint32_t time_now) {
+      auto entry = prev_.Next();
+
+      if (auto entry_time = entry.ExpiryTime();
+          entry_time != UINT32_MAX && time_now >= entry_time) {
+        prev_.SetNext(prev_.Next().Next());
+        ISLEntry::Destroy(entry);
+        return true;
+      }
+      return false;
+    }
+
     bool HasExpiry() const {
       return prev_.Next().HasExpiry();
     }
@@ -280,7 +292,7 @@ class IntrusiveStringList {
     }
 
     operator bool() const {
-      return prev_.Next();
+      return prev_.data_ && prev_.Next();
     }
 
     value_type operator*() {
@@ -354,17 +366,32 @@ class IntrusiveStringList {
   }
 
   // TODO consider to wrap ISLEntry to prevent usage out of the list
-  IntrusiveStringList::iterator Find(std::string_view str) {
+  IntrusiveStringList::iterator Find(std::string_view str, uint32_t* expired_fields,
+                                     uint32_t time_now = UINT32_MAX) {
     auto it = begin();
-    for (; it && it->Key() != str; ++it)
-      ;
+
+    for (; it; ++it) {
+      if (it.ExpireIfNeeded(time_now)) {
+        (*expired_fields)++;
+        continue;
+      }
+      if (it->Key() == str) {
+        break;
+      }
+    }
+
     return it;
   }
 
   // TODO consider to wrap ISLEntry to prevent usage out of the list
-  IntrusiveStringList::iterator Find(std::string_view str, uint64_t hash, uint32_t capacity_log) {
+  IntrusiveStringList::iterator Find(std::string_view str, uint64_t hash, uint32_t capacity_log,
+                                     uint32_t* expired_fields, uint32_t time_now = UINT32_MAX) {
     auto entry = begin();
     for (; entry; ++entry) {
+      if (entry.ExpireIfNeeded(time_now)) {
+        (*expired_fields)++;
+        continue;
+      }
       if (entry->CheckExtendedHash(hash, capacity_log) && entry->Key() == str)
         break;
     }
@@ -399,16 +426,18 @@ class IntrusiveStringList {
   }
 
   template <class T, std::enable_if_t<std::is_invocable_v<T, std::string_view>>* = nullptr>
-  bool Scan(const T& cb, uint32_t curr_time) {
-    for (auto it = start_; it && it.ExpiryTime() < curr_time; it = start_) {
+  bool Scan(const T& cb, uint32_t* expired_fields, uint32_t curr_time) {
+    for (auto it = start_; it && it.ExpiryTime() <= curr_time; it = start_) {
       start_ = it.Next();
       ISLEntry::Destroy(it);
+      (*expired_fields)++;
     }
 
     for (auto curr = start_, next = start_; curr; curr = next) {
       cb(curr.Key());
       next = curr.Next();
-      for (auto tmp = next; tmp && tmp.ExpiryTime() < curr_time; tmp = next) {
+      for (auto tmp = next; tmp && tmp.ExpiryTime() <= curr_time; tmp = next) {
+        (*expired_fields)++;
         next = next.Next();
         ISLEntry::Destroy(tmp);
       }
