@@ -29,8 +29,7 @@ class TDigestFamily {
   static void Cdf(CmdArgList args, const CommandContext& cmd_cntx);
   static void Quantile(CmdArgList args, const CommandContext& cmd_cntx);
   static void TrimmedMean(CmdArgList args, const CommandContext& cmd_cntx);
-  // TODO
-  // static void Merge(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Merge(CmdArgList args, const CommandContext& cmd_cntx);
 };
 
 }  // namespace dfly
