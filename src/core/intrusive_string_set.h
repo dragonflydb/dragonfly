@@ -40,8 +40,8 @@ class IntrusiveStringSet {
     //   return prev.Next()->ExpiryTime();
     // }
 
-    void SetExpiryTime(uint32_t ttl_sec) {
-      entry_.SetExpiryTime(ttl_sec);
+    void SetExpiryTime(uint32_t ttl_sec, size_t* obj_malloc_used) {
+      entry_.SetExpiryTime(ttl_sec, obj_malloc_used);
     }
 
     // bool HasExpiry() const {
@@ -275,6 +275,18 @@ class IntrusiveStringSet {
     return time_now_;
   }
 
+  size_t ObjMallocUsed() const {
+    size_t bucket_obj_memory = 0;
+    for (const auto& bucket : entries_) {
+      bucket_obj_memory += bucket.ObjMallocUsed();
+    }
+    return bucket_obj_memory;
+  }
+
+  size_t SetMallocUsed() const {
+    return entries_.capacity() * sizeof(IntrusiveStringList);
+  }
+
  private:
   // was Grow in StringSet
   void Rehash(size_t prev_size) {
@@ -309,8 +321,9 @@ class IntrusiveStringSet {
   std::uint32_t size_ = 0;  // number of elements in the set.
   std::uint32_t time_now_ = 0;
 
-  static_assert(sizeof(IntrusiveStringList) == sizeof(void*),
-                "IntrusiveStringList should be just a pointer");
+  // TODO: fix obj memory management
+  static_assert(sizeof(IntrusiveStringList) == (sizeof(void*) + sizeof(size_t)),
+                "IntrusiveStringList should be pointer + memory track");
   Buckets entries_;
 };
 
