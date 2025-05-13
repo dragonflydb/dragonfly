@@ -4,10 +4,8 @@
 import random
 import socket
 import sys
-import time
 import os
 import json
-import threading
 import signal
 import argparse
 from redis_commands import (
@@ -20,10 +18,6 @@ from redis_commands import (
     DICT_FILE,
     COMMANDS_LOG_FILE,
     CRASH_LOG_FILE,
-    INPUT_DIR,
-    SPECIAL_CHARS,
-    ESCAPED_CHARS,
-    COMMAND_SOURCES,
     load_input_dict,
     enhance_data_types,
 )

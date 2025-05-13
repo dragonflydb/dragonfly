@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 
 import re
-import os
 import argparse
 from redis_commands import (
     DICT_FILE,
