@@ -10,55 +10,31 @@ import json
 import threading
 import signal
 import argparse
-import re
-import string
-from typing import List, Dict, Tuple, Any, Optional
+from redis_commands import (
+    REDIS_HOST,
+    REDIS_PORT,
+    REDIS_COMMANDS,
+    DATA_TYPES,
+    ARG_TYPE_MAP,
+    DICT_MIX_RATIO,
+    DICT_FILE,
+    COMMANDS_LOG_FILE,
+    CRASH_LOG_FILE,
+    INPUT_DIR,
+    SPECIAL_CHARS,
+    ESCAPED_CHARS,
+    COMMAND_SOURCES,
+    load_input_dict,
+    enhance_data_types,
+)
 
 # Constants
 AFL_PERSISTENT = os.getenv("AFL_PERSISTENT", "0") == "1"
 AFL_INST_LIBS = os.getenv("AFL_INST_LIBS", "0") == "1"
-REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 MAX_COMMANDS_PER_TEST = 20  # Maximum number of commands in one test
 MAX_PARALLEL_TESTS = 10  # Maximum number of parallel tests
 MAX_COMMAND_LEN = 1024  # Maximum command length
 TIMEOUT_SECONDS = 5  # Timeout for command execution
-INPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "input")
-DICT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "redis.dict")
-COMMANDS_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "commands.log")
-CRASH_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crash_commands.log")
-
-# Command sources
-COMMAND_SOURCES = ["REDIS", "VALKEY", "DRAGONFLY"]
-
-# Special characters to include in fuzzing
-SPECIAL_CHARS = "!@#$%^&*()-_=+[]{}|;:'\",.<>/?\\"
-ESCAPED_CHARS = [r"\\", r"\n", r"\r", r"\t", r"\"", r"\'", r"\0", r"\a", r"\b", r"\f", r"\v"]
-
-# Mix ratio between dictionary values and generated values (0-1)
-# 0: only generated values, 1: only dictionary values when available
-DICT_MIX_RATIO = 0.7
-
-
-# Function to load previous input cases as dictionary values
-def load_input_dict():
-    """Load all input files as dictionary values"""
-    input_values = []
-    if os.path.exists(INPUT_DIR):
-        for filename in os.listdir(INPUT_DIR):
-            if filename.endswith(".txt"):
-                try:
-                    with open(os.path.join(INPUT_DIR, filename), "r") as f:
-                        for line in f:
-                            line = line.strip()
-                            if line:
-                                parts = line.split(" ", 1)
-                                if len(parts) > 1:
-                                    input_values.append(parts[1])
-                except Exception as e:
-                    print(f"Error loading input file {filename}: {e}")
-    return input_values
-
 
 # Load input values
 INPUT_VALUES = load_input_dict()
@@ -75,361 +51,8 @@ if os.path.exists(DICT_FILE):
     except Exception as e:
         print(f"Error loading dictionary file: {e}")
 
-# List of supported Redis commands with parameters
-REDIS_COMMANDS = {
-    # General commands
-    "PING": {"args": [], "optional_args": []},
-    "ECHO": {"args": ["message"], "optional_args": []},
-    "INFO": {"args": [], "optional_args": ["section"]},
-    "TIME": {"args": [], "optional_args": []},
-    "QUIT": {"args": [], "optional_args": []},
-    # Key operations commands
-    "DEL": {"args": ["key"], "optional_args": ["key ..."]},
-    "EXISTS": {"args": ["key"], "optional_args": ["key ..."]},
-    "EXPIRE": {"args": ["key", "seconds"], "optional_args": ["NX|XX|GT|LT"]},
-    "TTL": {"args": ["key"], "optional_args": []},
-    "PERSIST": {"args": ["key"], "optional_args": []},
-    "TYPE": {"args": ["key"], "optional_args": []},
-    "RENAME": {"args": ["key", "newkey"], "optional_args": []},
-    "RENAMENX": {"args": ["key", "newkey"], "optional_args": []},
-    "KEYS": {"args": ["pattern"], "optional_args": []},
-    "SCAN": {"args": ["cursor"], "optional_args": ["MATCH pattern", "COUNT count"]},
-    # String operations commands
-    "SET": {"args": ["key", "value"], "optional_args": ["EX seconds", "PX milliseconds", "NX|XX"]},
-    "GET": {"args": ["key"], "optional_args": []},
-    "MGET": {"args": ["key"], "optional_args": ["key ..."]},
-    "MSET": {"args": ["key value"], "optional_args": ["key value ..."]},
-    "INCR": {"args": ["key"], "optional_args": []},
-    "INCRBY": {"args": ["key", "increment"], "optional_args": []},
-    "DECR": {"args": ["key"], "optional_args": []},
-    "DECRBY": {"args": ["key", "decrement"], "optional_args": []},
-    "APPEND": {"args": ["key", "value"], "optional_args": []},
-    "STRLEN": {"args": ["key"], "optional_args": []},
-    "GETRANGE": {"args": ["key", "start", "end"], "optional_args": []},
-    "SETRANGE": {"args": ["key", "offset", "value"], "optional_args": []},
-    # List operations commands
-    "LPUSH": {"args": ["key", "element"], "optional_args": ["element ..."]},
-    "RPUSH": {"args": ["key", "element"], "optional_args": ["element ..."]},
-    "LPOP": {"args": ["key"], "optional_args": ["count"]},
-    "RPOP": {"args": ["key"], "optional_args": ["count"]},
-    "LLEN": {"args": ["key"], "optional_args": []},
-    "LRANGE": {"args": ["key", "start", "stop"], "optional_args": []},
-    "LINDEX": {"args": ["key", "index"], "optional_args": []},
-    "LSET": {"args": ["key", "index", "element"], "optional_args": []},
-    "LTRIM": {"args": ["key", "start", "stop"], "optional_args": []},
-    # Hash operations commands
-    "HSET": {"args": ["key", "field", "value"], "optional_args": ["field value ..."]},
-    "HSETNX": {"args": ["key", "field", "value"], "optional_args": []},
-    "HGET": {"args": ["key", "field"], "optional_args": []},
-    "HMGET": {"args": ["key", "field"], "optional_args": ["field ..."]},
-    "HGETALL": {"args": ["key"], "optional_args": []},
-    "HDEL": {"args": ["key", "field"], "optional_args": ["field ..."]},
-    "HEXISTS": {"args": ["key", "field"], "optional_args": []},
-    "HLEN": {"args": ["key"], "optional_args": []},
-    "HKEYS": {"args": ["key"], "optional_args": []},
-    "HVALS": {"args": ["key"], "optional_args": []},
-    "HINCRBY": {"args": ["key", "field", "increment"], "optional_args": []},
-    "HSCAN": {"args": ["key", "cursor"], "optional_args": ["MATCH pattern", "COUNT count"]},
-    # Set operations commands
-    "SADD": {"args": ["key", "member"], "optional_args": ["member ..."]},
-    "SREM": {"args": ["key", "member"], "optional_args": ["member ..."]},
-    "SISMEMBER": {"args": ["key", "member"], "optional_args": []},
-    "SMEMBERS": {"args": ["key"], "optional_args": []},
-    "SCARD": {"args": ["key"], "optional_args": []},
-    "SPOP": {"args": ["key"], "optional_args": ["count"]},
-    "SRANDMEMBER": {"args": ["key"], "optional_args": ["count"]},
-    "SINTER": {"args": ["key"], "optional_args": ["key ..."]},
-    "SUNION": {"args": ["key"], "optional_args": ["key ..."]},
-    "SDIFF": {"args": ["key"], "optional_args": ["key ..."]},
-    "SSCAN": {"args": ["key", "cursor"], "optional_args": ["MATCH pattern", "COUNT count"]},
-    # Sorted set operations commands
-    "ZADD": {"args": ["key", "score", "member"], "optional_args": ["NX|XX", "score member ..."]},
-    "ZREM": {"args": ["key", "member"], "optional_args": ["member ..."]},
-    "ZRANGE": {
-        "args": ["key", "start", "stop"],
-        "optional_args": ["WITHSCORES", "REV", "BYSCORE", "BYLEX", "LIMIT offset count"],
-    },
-    "ZCARD": {"args": ["key"], "optional_args": []},
-    "ZSCORE": {"args": ["key", "member"], "optional_args": []},
-    "ZRANK": {"args": ["key", "member"], "optional_args": []},
-    "ZINCRBY": {"args": ["key", "increment", "member"], "optional_args": []},
-    "ZCOUNT": {"args": ["key", "min", "max"], "optional_args": []},
-    "ZSCAN": {"args": ["key", "cursor"], "optional_args": ["MATCH pattern", "COUNT count"]},
-    # Pub/Sub commands
-    "PUBLISH": {"args": ["channel", "message"], "optional_args": []},
-    "SUBSCRIBE": {"args": ["channel"], "optional_args": ["channel ..."]},
-    "UNSUBSCRIBE": {"args": ["channel"], "optional_args": ["channel ..."]},
-    "PSUBSCRIBE": {"args": ["pattern"], "optional_args": ["pattern ..."]},
-    "PUNSUBSCRIBE": {"args": ["pattern"], "optional_args": ["pattern ..."]},
-    "PUBSUB": {"args": ["subcommand"], "optional_args": ["argument ..."]},
-}
-
-# Additional Valkey/Redis commands based on their documentation
-ADDITIONAL_COMMANDS = {
-    # Transaction commands
-    "MULTI": {"args": [], "optional_args": []},
-    "EXEC": {"args": [], "optional_args": []},
-    "DISCARD": {"args": [], "optional_args": []},
-    "WATCH": {"args": ["key"], "optional_args": ["key ..."]},
-    "UNWATCH": {"args": [], "optional_args": []},
-    # Scripting
-    "EVAL": {"args": ["script", "numkeys", "key"], "optional_args": ["key ...", "arg", "arg ..."]},
-    "EVALSHA": {"args": ["sha1", "numkeys", "key"], "optional_args": ["key ...", "arg", "arg ..."]},
-    "SCRIPT": {"args": ["subcommand"], "optional_args": ["arg", "arg ..."]},
-    # Connection
-    "AUTH": {"args": ["password"], "optional_args": ["username"]},
-    "SELECT": {"args": ["index"], "optional_args": []},
-    "CLIENT": {"args": ["subcommand"], "optional_args": ["arg", "arg ..."]},
-    # Server
-    "FLUSHDB": {"args": [], "optional_args": ["ASYNC", "SYNC"]},
-    "FLUSHALL": {"args": [], "optional_args": ["ASYNC", "SYNC"]},
-    "DBSIZE": {"args": [], "optional_args": []},
-    "CONFIG": {"args": ["GET", "pattern"], "optional_args": []},
-    "MONITOR": {"args": [], "optional_args": []},
-    "DEBUG": {"args": ["subcommand"], "optional_args": ["arg", "arg ..."]},
-    # Bitmap operations
-    "BITCOUNT": {"args": ["key"], "optional_args": ["start", "end", "BYTE|BIT"]},
-    "BITOP": {"args": ["operation", "destkey", "key"], "optional_args": ["key ..."]},
-    "BITPOS": {"args": ["key", "bit"], "optional_args": ["start", "end", "BYTE|BIT"]},
-    "GETBIT": {"args": ["key", "offset"], "optional_args": []},
-    "SETBIT": {"args": ["key", "offset", "value"], "optional_args": []},
-    # HyperLogLog
-    "PFADD": {"args": ["key", "element"], "optional_args": ["element ..."]},
-    "PFCOUNT": {"args": ["key"], "optional_args": ["key ..."]},
-    "PFMERGE": {"args": ["destkey", "sourcekey"], "optional_args": ["sourcekey ..."]},
-    # GEO commands
-    "GEOADD": {
-        "args": ["key", "longitude", "latitude", "member"],
-        "optional_args": ["longitude latitude member ..."],
-    },
-    "GEODIST": {"args": ["key", "member1", "member2"], "optional_args": ["unit"]},
-    "GEOHASH": {"args": ["key", "member"], "optional_args": ["member ..."]},
-    "GEOPOS": {"args": ["key", "member"], "optional_args": ["member ..."]},
-    "GEORADIUS": {
-        "args": ["key", "longitude", "latitude", "radius", "unit"],
-        "optional_args": [
-            "WITHDIST",
-            "WITHCOORD",
-            "WITHHASH",
-            "COUNT",
-            "count",
-            "ASC|DESC",
-            "STORE",
-            "key",
-            "STOREDIST",
-            "key",
-        ],
-    },
-    # Streams
-    "XADD": {"args": ["key", "ID", "field", "value"], "optional_args": ["field value ..."]},
-    "XRANGE": {"args": ["key", "start", "end"], "optional_args": ["COUNT", "count"]},
-    "XREVRANGE": {"args": ["key", "end", "start"], "optional_args": ["COUNT", "count"]},
-    "XLEN": {"args": ["key"], "optional_args": []},
-    "XREAD": {
-        "args": ["STREAMS", "key", "id"],
-        "optional_args": ["key id ...", "COUNT", "count", "BLOCK", "milliseconds"],
-    },
-    # DragonFly specific commands
-    "DF.STATS": {"args": [], "optional_args": []},
-    "DF.INFO": {"args": [], "optional_args": []},
-    "MEMORY": {"args": ["USAGE", "key"], "optional_args": ["SAMPLES", "count"]},
-    "CAS": {"args": ["key", "oldval", "newval"], "optional_args": []},
-}
-
-# Merge commands
-REDIS_COMMANDS.update(ADDITIONAL_COMMANDS)
-
-# Data types for random value generation
-DATA_TYPES = {
-    "string": lambda: "".join(
-        random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
-        for _ in range(random.randint(1, 20))
-    ),
-    "integer": lambda: str(random.randint(-1000000, 1000000)),
-    "float": lambda: str(random.uniform(-1000000, 1000000)),
-    "key": lambda: "key:"
-    + "".join(
-        random.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(random.randint(1, 10))
-    ),
-    "field": lambda: "field:"
-    + "".join(
-        random.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(random.randint(1, 10))
-    ),
-    "member": lambda: "member:"
-    + "".join(
-        random.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(random.randint(1, 10))
-    ),
-    "channel": lambda: "channel:"
-    + "".join(
-        random.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(random.randint(1, 10))
-    ),
-    "pattern": lambda: "*:"
-    + "".join(
-        random.choice("abcdefghijklmnopqrstuvwxyz0123456789*?[]")
-        for _ in range(random.randint(1, 10))
-    ),
-    "score": lambda: str(random.uniform(-1000, 1000)),
-    "index": lambda: str(random.randint(-100, 100)),
-    "count": lambda: str(random.randint(1, 100)),
-    "cursor": lambda: str(random.randint(0, 10000)),
-    "increment": lambda: str(random.randint(-100, 100)),
-    "decrement": lambda: str(random.randint(-100, 100)),
-    "seconds": lambda: str(random.randint(1, 3600)),
-    "milliseconds": lambda: str(random.randint(1, 3600000)),
-    "offset": lambda: str(random.randint(0, 100)),
-    "start": lambda: str(random.randint(-100, 100)),
-    "end": lambda: str(random.randint(-100, 100)),
-    "stop": lambda: str(random.randint(-100, 100)),
-    "min": lambda: str(random.randint(-1000, 1000)),
-    "max": lambda: str(random.randint(-1000, 1000)),
-    "subcommand": lambda: random.choice(["CHANNELS", "NUMPAT", "NUMSUB"]),
-    "section": lambda: random.choice(
-        [
-            "SERVER",
-            "CLIENTS",
-            "MEMORY",
-            "PERSISTENCE",
-            "STATS",
-            "REPLICATION",
-            "CPU",
-            "COMMANDSTATS",
-            "CLUSTER",
-            "KEYSPACE",
-        ]
-    ),
-    "message": lambda: "".join(
-        random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
-        for _ in range(random.randint(1, 50))
-    ),
-    "value": lambda: "".join(
-        random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
-        for _ in range(random.randint(1, 50))
-    ),
-    "element": lambda: "".join(
-        random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
-        for _ in range(random.randint(1, 50))
-    ),
-    "script": lambda: "return {KEYS[1],ARGV[1]}",
-    "numkeys": lambda: str(random.randint(0, 3)),
-    "sha1": lambda: "".join(random.choice("0123456789abcdef") for _ in range(40)),
-    "password": lambda: "".join(
-        random.choice(string.ascii_letters + string.digits) for _ in range(random.randint(4, 12))
-    ),
-    "username": lambda: "".join(
-        random.choice(string.ascii_letters) for _ in range(random.randint(3, 8))
-    ),
-    "longitude": lambda: str(random.uniform(-180, 180)),
-    "latitude": lambda: str(random.uniform(-90, 90)),
-    "radius": lambda: str(random.uniform(0, 100)),
-    "unit": lambda: random.choice(["m", "km", "ft", "mi"]),
-    "ID": lambda: f"{random.randint(0, 1000)}-{random.randint(0, 1000)}",
-    "operation": lambda: random.choice(["AND", "OR", "XOR", "NOT"]),
-    "destkey": lambda: "key",
-    "sourcekey": lambda: "key",
-    "arg": lambda: "string",
-    "bit": lambda: random.choice(["0", "1"]),
-}
-
-
-# Enhanced DATA_TYPES with special characters and escaped sequences
-def enhance_data_types():
-    global DATA_TYPES
-
-    # Add functions to generate special characters and escaped strings
-    DATA_TYPES.update(
-        {
-            "special_string": lambda: "".join(
-                random.choice(string.ascii_letters + string.digits + SPECIAL_CHARS)
-                for _ in range(random.randint(1, 20))
-            ),
-            "escaped_string": lambda: random.choice(ESCAPED_CHARS)
-            + "".join(
-                random.choice(string.ascii_letters + string.digits)
-                for _ in range(random.randint(1, 10))
-            ),
-            "mixed_string": lambda: "".join(
-                random.choice(
-                    [
-                        lambda: random.choice(string.ascii_letters + string.digits),
-                        lambda: random.choice(SPECIAL_CHARS),
-                        lambda: random.choice(ESCAPED_CHARS),
-                    ]
-                )()
-                for _ in range(random.randint(5, 20))
-            ),
-            "binary_string": lambda: "\\x"
-            + "".join(format(random.randint(0, 255), "02x") for _ in range(random.randint(1, 10))),
-        }
-    )
-
-    # Create enhanced versions of existing types
-    enhanced_types = {}
-    for key, func in DATA_TYPES.items():
-        if key.endswith("string") or key in [
-            "value",
-            "message",
-            "element",
-            "key",
-            "field",
-            "member",
-            "pattern",
-        ]:
-            enhanced_types[f"special_{key}"] = lambda k=key: DATA_TYPES[k]() + random.choice(
-                SPECIAL_CHARS
-            )
-            enhanced_types[f"escaped_{key}"] = lambda k=key: DATA_TYPES[k]() + random.choice(
-                ESCAPED_CHARS
-            )
-
-    DATA_TYPES.update(enhanced_types)
-
-
-# Enhance data types with special characters
+# Initialize enhanced data types
 enhance_data_types()
-
-# Mapping arguments to data types
-ARG_TYPE_MAP = {
-    "key": "key",
-    "newkey": "key",
-    "field": "field",
-    "member": "member",
-    "channel": "channel",
-    "pattern": "pattern",
-    "value": "value",
-    "element": "element",
-    "score": "score",
-    "index": "index",
-    "count": "count",
-    "cursor": "cursor",
-    "increment": "increment",
-    "decrement": "decrement",
-    "seconds": "seconds",
-    "milliseconds": "milliseconds",
-    "offset": "offset",
-    "start": "start",
-    "end": "end",
-    "stop": "stop",
-    "min": "min",
-    "max": "max",
-    "subcommand": "subcommand",
-    "section": "section",
-    "message": "message",
-    "script": "script",
-    "numkeys": "numkeys",
-    "sha1": "sha1",
-    "password": "password",
-    "username": "username",
-    "longitude": "longitude",
-    "latitude": "latitude",
-    "radius": "radius",
-    "unit": "unit",
-    "ID": "ID",
-    "operation": "operation",
-    "destkey": "key",
-    "sourcekey": "key",
-    "arg": "string",
-    "bit": lambda: random.choice(["0", "1"]),
-}
 
 
 # Functions for working with Redis RESP protocol
@@ -529,6 +152,7 @@ class RedisClient:
         self.port = port
         self.timeout = timeout
         self.sock = None
+        print(f"Initializing connection to Redis at {self.host}:{self.port}")
         self.connect()
 
     def connect(self):
@@ -537,9 +161,10 @@ class RedisClient:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.settimeout(self.timeout)
             self.sock.connect((self.host, self.port))
+            print(f"Successfully connected to Redis at {self.host}:{self.port}")
             return True
         except (socket.error, socket.timeout) as e:
-            print(f"Connection error to Redis: {e}")
+            print(f"Connection error to Redis at {self.host}:{self.port}: {e}")
             return False
 
     def close(self):
@@ -554,7 +179,7 @@ class RedisClient:
     def execute_command(self, command, *args):
         """Executing Redis command"""
         if not self.sock and not self.connect():
-            return {"error": "No connection to Redis"}
+            return {"error": f"No connection to Redis at {self.host}:{self.port}"}
 
         try:
             # Forming RESP command
@@ -732,6 +357,8 @@ class AFLFuzzer:
             "crashes": 0,
         }
 
+        print(f"AFLFuzzer initialized with target: {REDIS_HOST}:{REDIS_PORT}")
+
         # Setting up signals for interaction with AFL++
         if AFL_PERSISTENT:
             signal.signal(signal.SIGTERM, self.handle_sigterm)
@@ -749,6 +376,7 @@ class AFLFuzzer:
         """Reads input data from AFL++"""
         try:
             self.afl_input = sys.stdin.buffer.read()
+            print(f"Read {len(self.afl_input)} bytes from AFL++ input")
             return True
         except Exception as e:
             print(f"Error reading input data from AFL++: {e}")
@@ -757,6 +385,7 @@ class AFLFuzzer:
     def parse_afl_input(self):
         """Parses input data from AFL++ into Redis commands"""
         if not self.afl_input:
+            print("No input data available")
             return False
 
         try:
@@ -779,6 +408,8 @@ class AFLFuzzer:
                 # Checking if there's such a command
                 if command in REDIS_COMMANDS:
                     parsed_commands.append((command, args))
+
+            print(f"Parsed {len(parsed_commands)} commands from input")
 
             # Always generate a mix of parsed and random commands
             test_case_seed = (
@@ -808,12 +439,14 @@ class AFLFuzzer:
             # Shuffle the commands
             random.shuffle(self.test_cases)
 
+            print(f"Generated {len(self.test_cases)} total commands for testing")
             return True
         except Exception as e:
             print(f"Error parsing input data from AFL++: {e}")
             # In case of error, generate random commands
             test_case = TestCase()
             self.test_cases = test_case.generate_test_case()
+            print(f"Falling back to {len(self.test_cases)} random commands")
             return True
 
     def format_command_for_cli(self, command, args):
@@ -839,7 +472,31 @@ class AFLFuzzer:
 
     def execute_tests(self, skip_logging=False):
         """Executes tests on Redis server"""
+        print(f"Attempting to connect to Redis server at {REDIS_HOST}:{REDIS_PORT}")
         redis_client = RedisClient()
+
+        # Verify connection works before proceeding
+        if not redis_client.sock:
+            print(f"ERROR: Failed to connect to Redis server at {REDIS_HOST}:{REDIS_PORT}")
+            # Try a simple PING to confirm it's actually unreachable
+            try:
+                test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                test_sock.settimeout(5)
+                test_sock.connect((REDIS_HOST, REDIS_PORT))
+                test_sock.sendall(b"*1\r\n$4\r\nPING\r\n")
+                response = test_sock.recv(1024)
+                print(f"Manual PING test response: {response}")
+                test_sock.close()
+            except Exception as e:
+                print(f"Manual connection test failed: {e}")
+
+            # Give up on executing tests
+            self.stats["error_executions"] += len(self.test_cases)
+            return []
+
+        print(
+            f"Executing {len(self.test_cases)} commands on Redis server at {REDIS_HOST}:{REDIS_PORT}"
+        )
 
         # Open commands log file in append mode if not skipping logging
         if not skip_logging:
@@ -849,26 +506,31 @@ class AFLFuzzer:
                     cli_formatted_command = self.format_command_for_cli(command, args)
                     log_file.write(f"{cli_formatted_command}\n")
                     log_file.flush()  # Ensure command is written immediately
+                    print(f"Logged command: {cli_formatted_command}")
 
         # Execute all commands
         current_test_commands = []
         crash_detected = False
 
-        for command, args in self.test_cases:
+        for idx, (command, args) in enumerate(self.test_cases):
             # Add current command to test sequence
             current_test_commands.append((command, args))
 
+            print(f"Executing command {idx+1}/{len(self.test_cases)}: {command} {args}")
             try:
                 # Execute command
                 result = redis_client.execute_command(command, *args)
                 self.results.append({"command": command, "args": args, "result": result})
                 self.stats["successful_executions"] += 1
+                print(f"Command succeeded: {command}")
             except socket.timeout:
                 self.results.append({"command": command, "args": args, "error": "Timeout"})
                 self.stats["timeouts"] += 1
+                print(f"Command timeout: {command}")
             except Exception as e:
                 self.results.append({"command": command, "args": args, "error": str(e)})
                 self.stats["error_executions"] += 1
+                print(f"Command error: {command} - {str(e)}")
 
                 # Check for possible crash
                 error_msg = str(e).lower()
@@ -879,6 +541,7 @@ class AFLFuzzer:
                 ):
                     crash_detected = True
                     self.stats["crashes"] += 1
+                    print(f"Crash detected with command: {command}")
                     # Record the command sequence that caused the crash
                     with open(CRASH_LOG_FILE, "a") as crash_file:
                         crash_file.write(f"# --- CRASH SEQUENCE START ---\n")
@@ -891,6 +554,9 @@ class AFLFuzzer:
             self.stats["total_executions"] += 1
 
         redis_client.close()
+        print(
+            f"Test execution complete. Total: {self.stats['total_executions']}, Successful: {self.stats['successful_executions']}, Errors: {self.stats['error_executions']}"
+        )
         return self.results
 
     def run(self):
@@ -978,6 +644,25 @@ def main():
     REDIS_HOST = args.host
     REDIS_PORT = args.port
     MAX_COMMANDS_PER_TEST = args.commands
+
+    print(f"Starting fuzzer with target: {REDIS_HOST}:{REDIS_PORT}")
+
+    # Quick connection test
+    print(f"Testing connection to Redis server at {REDIS_HOST}:{REDIS_PORT}...")
+    try:
+        test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        test_sock.settimeout(5)
+        test_sock.connect((REDIS_HOST, REDIS_PORT))
+        test_sock.sendall(b"*1\r\n$4\r\nPING\r\n")
+        response = test_sock.recv(1024)
+        print(f"Connection test successful! Response: {response}")
+        test_sock.close()
+    except Exception as e:
+        print(f"WARNING: Connection test failed: {e}")
+        print(f"Please verify that Redis server is running at {REDIS_HOST}:{REDIS_PORT}")
+        if input("Continue anyway? (y/n): ").lower() != "y":
+            print("Exiting...")
+            sys.exit(1)
 
     # Always reload dictionary values for each run
     global DICT_VALUES, INPUT_VALUES
