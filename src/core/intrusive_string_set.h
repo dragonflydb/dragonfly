@@ -169,6 +169,18 @@ class IntrusiveStringSet {
     return res;
   }
 
+  // TODO: Consider using chunks for this as string set
+  void Fill(IntrusiveStringSet* other) {
+    DCHECK(other->entries_.empty());
+    other->Reserve(UpperBoundSize());
+    other->set_time(time_now());
+    for (uint32_t bucket_id = 0; bucket_id < entries_.size(); ++bucket_id) {
+      for (auto it = entries_[bucket_id].begin(); it != entries_[bucket_id].end(); ++it) {
+        other->Add(it->Key(), it.HasExpiry() ? it->ExpiryTime() : UINT32_MAX);
+      }
+    }
+  }
+
   /**
    * stable scanning api. has the same guarantees as redis scan command.
    * we avoid doing bit-reverse by using a different function to derive a bucket id
