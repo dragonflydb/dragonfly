@@ -196,6 +196,12 @@ class ISLEntry {
     return (uptr() & kTtlBit) != 0;
   }
 
+  size_t Size() {
+    size_t key_field_size = HasSso() ? 1 : 4;
+    size_t ttl_field_size = HasTtl() ? 4 : 0;
+    return (sizeof(char*) + ttl_field_size + key_field_size + GetKeySize());
+  }
+
   [[nodiscard]] bool UpdateTtl(uint32_t ttl_sec) {
     if (HasTtl()) {
       auto* ttl_pos = Raw() + sizeof(char*);
@@ -260,22 +266,25 @@ class IntrusiveStringList {
       return prev_.Next().ExpiryTime();
     }
 
-    void SetExpiryTime(uint32_t ttl_sec) {
+    void SetExpiryTime(uint32_t ttl_sec, size_t* obj_malloc_used) {
       auto entry = prev_.Next();
 
       if (!entry.UpdateTtl(ttl_sec)) {
         ISLEntry new_entry = ISLEntry::Create(entry.Key(), entry.Next().data_, ttl_sec);
+        (*obj_malloc_used) += sizeof(new_entry) + new_entry.Size();
+        (*obj_malloc_used) -= sizeof(entry) + entry.Size();
         ISLEntry::Destroy(entry);
         prev_.SetNext(new_entry);
       }
     }
 
-    bool ExpireIfNeeded(uint32_t time_now) {
+    bool ExpireIfNeeded(uint32_t time_now, size_t* obj_malloc_used) {
       auto entry = prev_.Next();
 
       if (auto entry_time = entry.ExpiryTime();
           entry_time != UINT32_MAX && time_now >= entry_time) {
         prev_.SetNext(prev_.Next().Next());
+        (*obj_malloc_used) -= sizeof(entry) + entry.Size();
         ISLEntry::Destroy(entry);
         return true;
       }
@@ -340,12 +349,14 @@ class IntrusiveStringList {
   ISLEntry& Insert(ISLEntry e) {
     e.SetNext(start_);
     start_ = e;
+    obj_malloc_used_ += sizeof(e) + e.Size();
     return start_;
   }
 
   UniqueISLEntry Pop(uint32_t curr_time) {
     for (auto it = start_; it && it.ExpiryTime() < curr_time; it = start_) {
       start_ = it.Next();
+      obj_malloc_used_ -= sizeof(it) + it.Size();
       ISLEntry::Destroy(it);
     }
     auto res = start_;
@@ -371,7 +382,7 @@ class IntrusiveStringList {
     auto it = begin();
 
     for (; it; ++it) {
-      if (it.ExpireIfNeeded(time_now)) {
+      if (it.ExpireIfNeeded(time_now, &obj_malloc_used_)) {
         (*expired_fields)++;
         continue;
       }
@@ -388,7 +399,7 @@ class IntrusiveStringList {
                                      uint32_t* expired_fields, uint32_t time_now = UINT32_MAX) {
     auto entry = begin();
     for (; entry; ++entry) {
-      if (entry.ExpireIfNeeded(time_now)) {
+      if (entry.ExpireIfNeeded(time_now, &obj_malloc_used_)) {
         (*expired_fields)++;
         continue;
       }
@@ -446,7 +457,12 @@ class IntrusiveStringList {
     return start_;
   }
 
+  size_t ObjMallocUsed() const {
+    return obj_malloc_used_;
+  };
+
  private:
+  size_t obj_malloc_used_;
   ISLEntry start_;
   static ISLEntry end_;
 };
