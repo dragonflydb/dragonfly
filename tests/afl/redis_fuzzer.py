@@ -25,6 +25,8 @@ MAX_COMMAND_LEN = 1024  # Maximum command length
 TIMEOUT_SECONDS = 5  # Timeout for command execution
 INPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "input")
 DICT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "redis.dict")
+COMMANDS_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "commands.log")
+CRASH_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crash_commands.log")
 
 # Command sources
 COMMAND_SOURCES = ["REDIS", "VALKEY", "DRAGONFLY"]
@@ -355,9 +357,8 @@ def enhance_data_types():
                 )()
                 for _ in range(random.randint(5, 20))
             ),
-            "binary_string": lambda: "".join(
-                chr(random.randint(0, 255)) for _ in range(random.randint(1, 20))
-            ),
+            "binary_string": lambda: "\\x"
+            + "".join(format(random.randint(0, 255), "02x") for _ in range(random.randint(1, 10))),
         }
     )
 
@@ -815,12 +816,50 @@ class AFLFuzzer:
             self.test_cases = test_case.generate_test_case()
             return True
 
-    def execute_tests(self):
+    def format_command_for_cli(self, command, args):
+        """Format command for redis-cli input"""
+        formatted_args = []
+        for arg in args:
+            arg_str = str(arg)
+
+            # Check for binary data and special characters
+            try:
+                # Try to decode as UTF-8 if it's bytes
+                if isinstance(arg, bytes):
+                    arg_str = arg.decode("utf-8", errors="backslashreplace")
+            except:
+                # If there's a decoding error, use character representation with escaping
+                arg_str = repr(arg)[1:-1]  # Remove quotes from repr
+
+            # Always use quotes for safety
+            escaped_arg = arg_str.replace('"', '\\"')
+            formatted_args.append('"' + escaped_arg + '"')
+
+        return f"{command} {' '.join(formatted_args)}"
+
+    def execute_tests(self, skip_logging=False):
         """Executes tests on Redis server"""
         redis_client = RedisClient()
 
+        # Open commands log file in append mode if not skipping logging
+        if not skip_logging:
+            with open(COMMANDS_LOG_FILE, "a") as log_file:
+                for command, args in self.test_cases:
+                    # Log command to file in redis-cli compatible format
+                    cli_formatted_command = self.format_command_for_cli(command, args)
+                    log_file.write(f"{cli_formatted_command}\n")
+                    log_file.flush()  # Ensure command is written immediately
+
+        # Execute all commands
+        current_test_commands = []
+        crash_detected = False
+
         for command, args in self.test_cases:
+            # Add current command to test sequence
+            current_test_commands.append((command, args))
+
             try:
+                # Execute command
                 result = redis_client.execute_command(command, *args)
                 self.results.append({"command": command, "args": args, "result": result})
                 self.stats["successful_executions"] += 1
@@ -830,6 +869,24 @@ class AFLFuzzer:
             except Exception as e:
                 self.results.append({"command": command, "args": args, "error": str(e)})
                 self.stats["error_executions"] += 1
+
+                # Check for possible crash
+                error_msg = str(e).lower()
+                if (
+                    "connection" in error_msg
+                    or "broken pipe" in error_msg
+                    or "reset by peer" in error_msg
+                ):
+                    crash_detected = True
+                    self.stats["crashes"] += 1
+                    # Record the command sequence that caused the crash
+                    with open(CRASH_LOG_FILE, "a") as crash_file:
+                        crash_file.write(f"# --- CRASH SEQUENCE START ---\n")
+                        for cmd, arg in current_test_commands:
+                            cmd_str = self.format_command_for_cli(cmd, arg)
+                            crash_file.write(f"{cmd_str}\n")
+                        crash_file.write(f"# --- CRASH SEQUENCE END ---\n\n")
+                    break
 
             self.stats["total_executions"] += 1
 
@@ -876,14 +933,8 @@ class AFLFuzzer:
 
     def analyze_results(self):
         """Analyzes test results"""
-        for result in self.results:
-            if "error" in result:
-                # Checking for presence of critical errors
-                if (
-                    "connection" in result["error"].lower()
-                    or "broken pipe" in result["error"].lower()
-                ):
-                    self.stats["crashes"] += 1
+        # Verification is already performed in execute_tests, this method remains for compatibility
+        pass
 
     def print_results(self):
         """Displays test results"""
@@ -954,44 +1005,20 @@ def create_afl_dictionary():
     return dict_path
 
 
-def reproduce_test(input_data=None):
-    """Reproduces test from input data"""
-    fuzzer = AFLFuzzer()
-
-    if input_data:
-        fuzzer.afl_input = input_data
-    else:
-        fuzzer.read_afl_input()
-
-    fuzzer.parse_afl_input()
-    fuzzer.execute_tests()
-    fuzzer.print_results()
-
-
 def parse_args():
     """Parsing command line arguments"""
     parser = argparse.ArgumentParser(description="Redis fuzzer for testing Dragonfly using AFL++")
     parser.add_argument("--create-dict", action="store_true", help="Create dictionary for AFL++")
-    parser.add_argument("--reproduce", action="store_true", help="Reproduce test from stdin")
-    parser.add_argument("--file", help="Read test from file")
     parser.add_argument("--host", default=REDIS_HOST, help=f"Redis host (default: {REDIS_HOST})")
     parser.add_argument(
         "--port", type=int, default=REDIS_PORT, help=f"Redis port (default: {REDIS_PORT})"
     )
-    parser.add_argument("--seed", type=int, help="Seed for random number generator")
     parser.add_argument(
         "--commands",
         type=int,
         default=MAX_COMMANDS_PER_TEST,
         help=f"Number of commands in test (default: {MAX_COMMANDS_PER_TEST})",
     )
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=TIMEOUT_SECONDS,
-        help=f"Timeout for commands (default: {TIMEOUT_SECONDS})",
-    )
-
     return parser.parse_args()
 
 
@@ -999,14 +1026,10 @@ def main():
     args = parse_args()
 
     # Setting global variables from arguments
-    global REDIS_HOST, REDIS_PORT, MAX_COMMANDS_PER_TEST, TIMEOUT_SECONDS
+    global REDIS_HOST, REDIS_PORT, MAX_COMMANDS_PER_TEST
     REDIS_HOST = args.host
     REDIS_PORT = args.port
     MAX_COMMANDS_PER_TEST = args.commands
-    TIMEOUT_SECONDS = args.timeout
-
-    if args.seed:
-        random.seed(args.seed)
 
     # Always ensure we have a dictionary file for consistent operation
     if not os.path.exists(DICT_FILE) or args.create_dict:
@@ -1028,17 +1051,13 @@ def main():
     # Always reload input values
     INPUT_VALUES = load_input_dict()
 
+    # Create directory for log files if needed
+    for log_file in [COMMANDS_LOG_FILE, CRASH_LOG_FILE]:
+        log_dir = os.path.dirname(log_file)
+        os.makedirs(log_dir, exist_ok=True)
+
     # Skip further execution if just creating dictionary
     if args.create_dict:
-        return
-
-    if args.reproduce:
-        reproduce_test()
-        return
-
-    if args.file:
-        with open(args.file, "rb") as f:
-            reproduce_test(f.read())
         return
 
     # Running fuzzing with mixed strategy always enabled
