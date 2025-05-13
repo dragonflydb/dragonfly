@@ -282,6 +282,138 @@ REDIS_COMMANDS = {
     "DF.INFO": {"args": [], "optional_args": []},
     "MEMORY": {"args": ["USAGE", "key"], "optional_args": ["SAMPLES", "count"]},
     "CAS": {"args": ["key", "oldval", "newval"], "optional_args": []},
+    # Dragonfly hash-specific commands
+    "HEXPIRE": {"args": ["key", "seconds"], "optional_args": []},
+    "HSETEX": {
+        "args": ["key", "seconds", "field", "value"],
+        "optional_args": ["field", "value ..."],
+    },
+    # Rate Limiter commands from Dragonfly
+    "CL.THROTTLE": {
+        "args": ["key", "max_burst", "count_per_period", "period"],
+        "optional_args": ["quantity"],
+    },
+    # Search commands from Dragonfly
+    "FT._LIST": {"args": [], "optional_args": []},
+    "FT.CREATE": {
+        "args": ["index", "SCHEMA"],
+        "optional_args": [
+            "ON",
+            "HASH|JSON",
+            "PREFIX",
+            "count",
+            "prefix",
+            "prefix ...",
+            "FILTER",
+            "filter",
+            "LANGUAGE",
+            "default_lang",
+            "LANGUAGE_FIELD",
+            "lang_field",
+            "SCORE",
+            "default_score",
+            "SCORE_FIELD",
+            "score_field",
+            "MAXTEXTFIELDS",
+            "TEMPORARY",
+            "seconds",
+            "NOOFFSETS",
+            "NOHL",
+            "NOFIELDS",
+            "NOFREQS",
+            "STOPWORDS",
+            "count",
+            "stopword",
+            "stopword ...",
+        ],
+    },
+    "FT.DROPINDEX": {"args": ["index"], "optional_args": ["DD"]},
+    "FT.INFO": {"args": ["index"], "optional_args": []},
+    "FT.PROFILE": {
+        "args": ["index", "SEARCH", "query"],
+        "optional_args": ["NOCONTENT", "LIMIT", "offset", "num"],
+    },
+    "FT.SEARCH": {
+        "args": ["index", "query"],
+        "optional_args": [
+            "NOCONTENT",
+            "VERBATIM",
+            "NOSTOPWORDS",
+            "WITHSCORES",
+            "WITHPAYLOADS",
+            "WITHSORTKEYS",
+            "FILTER",
+            "numeric_field",
+            "min",
+            "max",
+            "GEOFILTER",
+            "geo_field",
+            "lon",
+            "lat",
+            "radius",
+            "m|km|mi|ft",
+            "INKEYS",
+            "count",
+            "key",
+            "key ...",
+            "INFIELDS",
+            "count",
+            "field",
+            "field ...",
+            "RETURN",
+            "count",
+            "identifier",
+            "AS",
+            "property",
+            "identifier",
+            "AS",
+            "property ...",
+            "SUMMARIZE",
+            "FIELDS",
+            "count",
+            "field",
+            "field ...",
+            "FRAGS",
+            "num",
+            "LEN",
+            "fragsize",
+            "SEPARATOR",
+            "separator",
+            "HIGHLIGHT",
+            "FIELDS",
+            "count",
+            "field",
+            "field ...",
+            "TAGS",
+            "open",
+            "close",
+            "SLOP",
+            "slop",
+            "TIMEOUT",
+            "timeout",
+            "INORDER",
+            "LANGUAGE",
+            "language",
+            "EXPANDER",
+            "expander",
+            "SCORER",
+            "scorer",
+            "EXPLAINSCORE",
+            "PAYLOAD",
+            "payload",
+            "SORTBY",
+            "sort_field",
+            "ASC|DESC",
+            "LIMIT",
+            "offset",
+            "num",
+        ],
+    },
+    "FT.SYNDUMP": {"args": ["index"], "optional_args": []},
+    "FT.SYNUPDATE": {
+        "args": ["index", "synonym_group_id", "term", "term ..."],
+        "optional_args": ["SKIPINITIALSCAN"],
+    },
     # Bloom filter commands
     "BF.ADD": {"args": ["key", "item"], "optional_args": []},
     "BF.CARD": {"args": ["key"], "optional_args": []},
@@ -466,6 +598,161 @@ REDIS_COMMANDS = {
     "WAIT": {"args": ["numreplicas", "timeout"], "optional_args": []},
     "WAITAOF": {"args": ["numlocal", "numreplicas", "timeout"], "optional_args": []},
     "RESET": {"args": [], "optional_args": []},
+    # Add commands from Valkey
+    "COMMANDLOG": {"args": [], "optional_args": []},
+    "COMMANDLOG GET": {"args": [], "optional_args": ["count"]},
+    "COMMANDLOG HELP": {"args": [], "optional_args": []},
+    "COMMANDLOG LEN": {"args": [], "optional_args": []},
+    "COMMANDLOG RESET": {"args": [], "optional_args": []},
+    "EVALSHA_RO": {
+        "args": ["sha1", "numkeys", "key"],
+        "optional_args": ["key ...", "arg", "arg ..."],
+    },
+    "EVAL_RO": {
+        "args": ["script", "numkeys", "key"],
+        "optional_args": ["key ...", "arg", "arg ..."],
+    },
+    "FCALL": {
+        "args": ["function", "numkeys", "key"],
+        "optional_args": ["key ...", "arg", "arg ..."],
+    },
+    "FCALL_RO": {
+        "args": ["function", "numkeys", "key"],
+        "optional_args": ["key ...", "arg", "arg ..."],
+    },
+    "FUNCTION": {"args": ["subcommand"], "optional_args": ["arg", "arg ..."]},
+    "FUNCTION DELETE": {"args": ["library"], "optional_args": []},
+    "FUNCTION DUMP": {"args": [], "optional_args": []},
+    "FUNCTION FLUSH": {"args": [], "optional_args": ["ASYNC", "SYNC"]},
+    "FUNCTION HELP": {"args": [], "optional_args": []},
+    "FUNCTION KILL": {"args": [], "optional_args": []},
+    "FUNCTION LIST": {"args": [], "optional_args": ["LIBRARYNAME", "pattern"]},
+    "FUNCTION LOAD": {"args": ["code"], "optional_args": ["REPLACE"]},
+    "FUNCTION RESTORE": {"args": ["payload"], "optional_args": ["FLUSH", "APPEND", "REPLACE"]},
+    "FUNCTION STATS": {"args": [], "optional_args": []},
+    "GEORADIUSBYMEMBER_RO": {
+        "args": ["key", "member", "radius", "unit"],
+        "optional_args": ["WITHDIST", "WITHCOORD", "WITHHASH", "COUNT", "count", "ASC|DESC"],
+    },
+    "GEORADIUS_RO": {
+        "args": ["key", "longitude", "latitude", "radius", "unit"],
+        "optional_args": ["WITHDIST", "WITHCOORD", "WITHHASH", "COUNT", "count", "ASC|DESC"],
+    },
+    "GEOSEARCH": {
+        "args": [
+            "key",
+            "FROMLONLAT|FROMMEMBER",
+            "longitude latitude|member",
+            "BYRADIUS|BYBOX",
+            "radius|width",
+            "unit",
+        ],
+        "optional_args": ["WITHDIST", "WITHCOORD", "WITHHASH", "COUNT", "count", "ASC|DESC"],
+    },
+    "GEOSEARCHSTORE": {
+        "args": [
+            "destination",
+            "source",
+            "FROMLONLAT|FROMMEMBER",
+            "longitude latitude|member",
+            "BYRADIUS|BYBOX",
+            "radius|width",
+            "unit",
+        ],
+        "optional_args": [
+            "WITHDIST",
+            "WITHCOORD",
+            "WITHHASH",
+            "COUNT",
+            "count",
+            "ASC|DESC",
+            "STOREDIST",
+        ],
+    },
+    "JSON.MSET": {"args": ["key", "path", "value"], "optional_args": ["key path value ..."]},
+    "LATENCY": {"args": ["subcommand"], "optional_args": ["arg", "arg ..."]},
+    "LATENCY DOCTOR": {"args": [], "optional_args": []},
+    "LATENCY GRAPH": {"args": ["event"], "optional_args": []},
+    "LATENCY HELP": {"args": [], "optional_args": []},
+    "LATENCY HISTOGRAM": {"args": ["event"], "optional_args": ["event ..."]},
+    "LATENCY HISTORY": {"args": ["event"], "optional_args": []},
+    "LATENCY LATEST": {"args": [], "optional_args": []},
+    "LATENCY RESET": {"args": [], "optional_args": ["event", "event ..."]},
+    "LCS": {
+        "args": ["key1", "key2"],
+        "optional_args": ["LEN", "IDX", "MINMATCHLEN", "len", "WITHMATCHLEN"],
+    },
+    "MEMORY DOCTOR": {"args": [], "optional_args": []},
+    "MEMORY HELP": {"args": [], "optional_args": []},
+    "MEMORY MALLOC-STATS": {"args": [], "optional_args": []},
+    "MEMORY PURGE": {"args": [], "optional_args": []},
+    "MEMORY STATS": {"args": [], "optional_args": []},
+    "MODULE": {"args": ["subcommand"], "optional_args": ["arg", "arg ..."]},
+    "MODULE HELP": {"args": [], "optional_args": []},
+    "MODULE LIST": {"args": [], "optional_args": []},
+    "MODULE LOAD": {"args": ["path"], "optional_args": ["arg", "arg ..."]},
+    "MODULE LOADEX": {"args": ["path"], "optional_args": ["CONFIG", "name", "value"]},
+    "MODULE UNLOAD": {"args": ["name"], "optional_args": []},
+    "PFDEBUG": {"args": ["key"], "optional_args": []},
+    "PFSELFTEST": {"args": [], "optional_args": []},
+    "PUBSUB SHARDCHANNELS": {"args": [], "optional_args": ["pattern"]},
+    "PUBSUB SHARDNUMSUB": {"args": [], "optional_args": ["shardchannel", "shardchannel ..."]},
+    "REPLCONF": {"args": ["option", "value"], "optional_args": []},
+    "RESTORE-ASKING": {
+        "args": ["key", "ttl", "serialized-value"],
+        "optional_args": ["REPLACE", "ABSTTL", "IDLETIME", "seconds", "FREQ", "frequency"],
+    },
+    "SCRIPT SHOW": {"args": [], "optional_args": []},
+    "SORT_RO": {
+        "args": ["key"],
+        "optional_args": [
+            "BY",
+            "pattern",
+            "LIMIT",
+            "offset",
+            "count",
+            "GET",
+            "pattern",
+            "ASC|DESC",
+            "ALPHA",
+        ],
+    },
+    "SPUBLISH": {"args": ["shardchannel", "message"], "optional_args": []},
+    "SSUBSCRIBE": {"args": ["shardchannel"], "optional_args": ["shardchannel ..."]},
+    "SUNSUBSCRIBE": {"args": ["shardchannel"], "optional_args": ["shardchannel ..."]},
+    # Add cluster commands from Valkey
+    "CLUSTER": {"args": [], "optional_args": []},
+    "CLUSTER ADDSLOTS": {"args": ["slot"], "optional_args": ["slot ..."]},
+    "CLUSTER ADDSLOTSRANGE": {"args": ["start", "end"], "optional_args": ["start end ..."]},
+    "CLUSTER BUMPEPOCH": {"args": [], "optional_args": []},
+    "CLUSTER COUNT-FAILURE-REPORTS": {"args": ["node-id"], "optional_args": []},
+    "CLUSTER COUNTKEYSINSLOT": {"args": ["slot"], "optional_args": []},
+    "CLUSTER DELSLOTS": {"args": ["slot"], "optional_args": ["slot ..."]},
+    "CLUSTER DELSLOTSRANGE": {"args": ["start", "end"], "optional_args": ["start end ..."]},
+    "CLUSTER FAILOVER": {"args": [], "optional_args": ["FORCE", "TAKEOVER"]},
+    "CLUSTER FLUSHSLOTS": {"args": [], "optional_args": []},
+    "CLUSTER FORGET": {"args": ["node-id"], "optional_args": []},
+    "CLUSTER GETKEYSINSLOT": {"args": ["slot", "count"], "optional_args": []},
+    "CLUSTER HELP": {"args": [], "optional_args": []},
+    "CLUSTER INFO": {"args": [], "optional_args": []},
+    "CLUSTER KEYSLOT": {"args": ["key"], "optional_args": []},
+    "CLUSTER LINKS": {"args": [], "optional_args": []},
+    "CLUSTER MEET": {"args": ["ip", "port"], "optional_args": ["cluster-bus-port"]},
+    "CLUSTER MYID": {"args": [], "optional_args": []},
+    "CLUSTER MYSHARDID": {"args": [], "optional_args": []},
+    "CLUSTER NODES": {"args": [], "optional_args": []},
+    "CLUSTER REPLICAS": {"args": ["node-id"], "optional_args": []},
+    "CLUSTER REPLICATE": {"args": ["node-id"], "optional_args": []},
+    "CLUSTER RESET": {"args": [], "optional_args": ["HARD", "SOFT"]},
+    "CLUSTER SAVECONFIG": {"args": [], "optional_args": []},
+    "CLUSTER SET-CONFIG-EPOCH": {"args": ["epoch"], "optional_args": []},
+    "CLUSTER SETSLOT": {"args": ["slot", "subcommand"], "optional_args": ["node-id"]},
+    "CLUSTER SHARDS": {"args": [], "optional_args": []},
+    "CLUSTER SLAVES": {"args": ["node-id"], "optional_args": []},
+    "CLUSTER SLOT-STATS": {"args": [], "optional_args": []},
+    "CLUSTER SLOTS": {"args": [], "optional_args": []},
+    "READONLY": {"args": [], "optional_args": []},
+    "READWRITE": {"args": [], "optional_args": []},
 }
 
 # Data types for random value generation
@@ -653,6 +940,73 @@ DATA_TYPES = {
     "timeout": lambda: str(random.randint(100, 10000)),
     "group": lambda: "group:"
     + "".join(random.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(random.randint(3, 8))),
+    # New data types
+    "slot": lambda: str(random.randint(0, 16383)),
+    "node-id": lambda: "".join(random.choice("0123456789abcdef") for _ in range(40)),
+    "epoch": lambda: str(random.randint(1, 10000)),
+    "subcommand": lambda: random.choice(["IMPORTING", "MIGRATING", "NODE", "STABLE"]),
+    "cluster-bus-port": lambda: str(random.randint(10000, 30000)),
+    "event": lambda: random.choice(
+        [
+            "command",
+            "fast-command",
+            "fork",
+            "aof-fsync-always",
+            "aof-write",
+            "expire-cycle",
+            "eviction",
+        ]
+    ),
+    "library": lambda: "lib:"
+    + "".join(random.choice(string.ascii_lowercase) for _ in range(random.randint(3, 10))),
+    "function": lambda: "myfunc",
+    "code": lambda: "redis.register_function('myfunc', function() return 'hello' end)",
+    "payload": lambda: "".join(
+        random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+        for _ in range(random.randint(20, 100))
+    ),
+    "shardchannel": lambda: "shard:"
+    + "".join(
+        random.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(random.randint(3, 8))
+    ),
+    "option": lambda: random.choice(["ACK", "GETACK", "CAPA", "LISTENING-PORT"]),
+    "key1": lambda: "key1:"
+    + "".join(
+        random.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(random.randint(1, 10))
+    ),
+    "key2": lambda: "key2:"
+    + "".join(
+        random.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(random.randint(1, 10))
+    ),
+    "len": lambda: str(random.randint(1, 10)),
+    "path": lambda: random.choice(["/path/to/module.so", "./module.so"]),
+    "name": lambda: "".join(
+        random.choice(string.ascii_lowercase) for _ in range(random.randint(3, 10))
+    ),
+    "ip": lambda: ".".join(str(random.randint(0, 255)) for _ in range(4)),
+    "frequency": lambda: str(random.randint(1, 100)),
+    "serialized-value": lambda: "".join(
+        random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+        for _ in range(random.randint(20, 100))
+    ),
+    # Rate Limiter parameters
+    "index": lambda: "idx:"
+    + "".join(random.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(random.randint(3, 8))),
+    "filter": lambda: "@field:{tag}",
+    "default_lang": lambda: random.choice(
+        ["english", "spanish", "french", "chinese", "japanese", "arabic"]
+    ),
+    "lang_field": lambda: "language",
+    "default_score": lambda: str(random.uniform(0.1, 10.0)),
+    "score_field": lambda: "score",
+    "stopword": lambda: random.choice(["a", "an", "the", "and", "or", "but", "in", "on", "at"]),
+    "query": lambda: random.choice(["@title:hello", "*", "@tags:{important}", "@num:[0 100]"]),
+    "synonym_group_id": lambda: "group" + str(random.randint(1, 1000)),
+    "term": lambda: random.choice(["word", "term", "phrase", "concept"]),
+    "max_burst": lambda: str(random.randint(0, 30)),
+    "count_per_period": lambda: str(random.randint(10, 1000)),
+    "period": lambda: str(random.randint(1, 3600)),
+    "quantity": lambda: str(random.randint(1, 10)),
 }
 
 # Mapping arguments to data types
@@ -789,6 +1143,73 @@ ARG_TYPE_MAP = {
     "index2": lambda: str(random.randint(0, 15)),
     "timeout": lambda: str(random.randint(100, 10000)),
     "group": "groupname",
+    # New data types
+    "slot": lambda: str(random.randint(0, 16383)),
+    "node-id": lambda: "".join(random.choice("0123456789abcdef") for _ in range(40)),
+    "epoch": lambda: str(random.randint(1, 10000)),
+    "subcommand": lambda: random.choice(["IMPORTING", "MIGRATING", "NODE", "STABLE"]),
+    "cluster-bus-port": lambda: str(random.randint(10000, 30000)),
+    "event": lambda: random.choice(
+        [
+            "command",
+            "fast-command",
+            "fork",
+            "aof-fsync-always",
+            "aof-write",
+            "expire-cycle",
+            "eviction",
+        ]
+    ),
+    "library": lambda: "lib:"
+    + "".join(random.choice(string.ascii_lowercase) for _ in range(random.randint(3, 10))),
+    "function": lambda: "myfunc",
+    "code": lambda: "redis.register_function('myfunc', function() return 'hello' end)",
+    "payload": lambda: "".join(
+        random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+        for _ in range(random.randint(20, 100))
+    ),
+    "shardchannel": lambda: "shard:"
+    + "".join(
+        random.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(random.randint(3, 8))
+    ),
+    "option": lambda: random.choice(["ACK", "GETACK", "CAPA", "LISTENING-PORT"]),
+    "key1": lambda: "key1:"
+    + "".join(
+        random.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(random.randint(1, 10))
+    ),
+    "key2": lambda: "key2:"
+    + "".join(
+        random.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(random.randint(1, 10))
+    ),
+    "len": lambda: str(random.randint(1, 10)),
+    "path": lambda: random.choice(["/path/to/module.so", "./module.so"]),
+    "name": lambda: "".join(
+        random.choice(string.ascii_lowercase) for _ in range(random.randint(3, 10))
+    ),
+    "ip": lambda: ".".join(str(random.randint(0, 255)) for _ in range(4)),
+    "frequency": lambda: str(random.randint(1, 100)),
+    "serialized-value": lambda: "".join(
+        random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+        for _ in range(random.randint(20, 100))
+    ),
+    # Rate Limiter parameters
+    "index": lambda: "idx:"
+    + "".join(random.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(random.randint(3, 8))),
+    "filter": lambda: "@field:{tag}",
+    "default_lang": lambda: random.choice(
+        ["english", "spanish", "french", "chinese", "japanese", "arabic"]
+    ),
+    "lang_field": lambda: "language",
+    "default_score": lambda: str(random.uniform(0.1, 10.0)),
+    "score_field": lambda: "score",
+    "stopword": lambda: random.choice(["a", "an", "the", "and", "or", "but", "in", "on", "at"]),
+    "query": lambda: random.choice(["@title:hello", "*", "@tags:{important}", "@num:[0 100]"]),
+    "synonym_group_id": lambda: "group" + str(random.randint(1, 1000)),
+    "term": lambda: random.choice(["word", "term", "phrase", "concept"]),
+    "max_burst": lambda: str(random.randint(0, 30)),
+    "count_per_period": lambda: str(random.randint(10, 1000)),
+    "period": lambda: str(random.randint(1, 3600)),
+    "quantity": lambda: str(random.randint(1, 10)),
 }
 
 
