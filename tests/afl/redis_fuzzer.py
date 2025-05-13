@@ -458,7 +458,7 @@ class AFLFuzzer:
                 arg_str = repr(arg)[1:-1]  # Remove quotes from repr
 
             # Always use quotes for safety
-            escaped_arg = arg_str.replace('"', '\\"')
+            escaped_arg = arg_str.replace('"', '\\"').replace("\\\\", "\\")
             formatted_args.append('"' + escaped_arg + '"')
 
         return f"{command} {' '.join(formatted_args)}"
