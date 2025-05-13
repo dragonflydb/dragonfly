@@ -3328,10 +3328,10 @@ void StreamFamily::XTrim(CmdArgList args, const CommandContext& cmd_cntx) {
 
   std::string_view key = parser.Next();
 
-  if (!parser.HasNext() || (!absl::EqualsIgnoreCase(parser.Peek(), "MAXLEN") &&
-                            !absl::EqualsIgnoreCase(parser.Peek(), "MINID") &&
-                            !absl::EqualsIgnoreCase(parser.Peek(), "~") &&
-                            !absl::EqualsIgnoreCase(parser.Peek(), "="))) {
+  auto next_arg = parser.Peek();
+  if (!parser.HasNext() ||
+      (!absl::EqualsIgnoreCase(next_arg, "MAXLEN") && !absl::EqualsIgnoreCase(next_arg, "MINID") &&
+       next_arg != "~" && next_arg != "=")) {
     rb->SendError(kSyntaxErr);
     return;
   }
