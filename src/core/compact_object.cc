@@ -399,6 +399,12 @@ static_assert(sizeof(CompactObj) == 18);
 
 namespace detail {
 
+size_t MallocUsedTDigest(const td_histogram_t* tdigest) {
+  size_t size = sizeof(tdigest);
+  size += (2 * (tdigest->cap * sizeof(double)));
+  return size;
+}
+
 size_t RobjWrapper::MallocUsed(bool slow) const {
   if (!inner_obj_)
     return 0;
@@ -419,6 +425,8 @@ size_t RobjWrapper::MallocUsed(bool slow) const {
       return MallocUsedZSet(encoding_, inner_obj_);
     case OBJ_STREAM:
       return slow ? MallocUsedStream((stream*)inner_obj_) : sz_;
+    case OBJ_TDIGEST:
+      return MallocUsedTDigest((td_histogram_t*)inner_obj_);
 
     default:
       LOG(FATAL) << "Not supported " << type_;
@@ -838,10 +846,6 @@ size_t CompactObj::Size() const {
       case SBF_TAG:
         DCHECK_EQ(mask_bits_.encoding, NONE_ENC);
         raw_size = u_.sbf->current_size();
-        break;
-      case TDIGEST_TAG:
-        // TODO implement this
-        raw_size = 0;
         break;
       default:
         LOG(DFATAL) << "Should not reach " << int(taglen_);
