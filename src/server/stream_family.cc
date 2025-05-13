@@ -3328,6 +3328,14 @@ void StreamFamily::XTrim(CmdArgList args, const CommandContext& cmd_cntx) {
 
   std::string_view key = parser.Next();
 
+  if (!parser.HasNext() || (!absl::EqualsIgnoreCase(parser.Peek(), "MAXLEN") &&
+                            !absl::EqualsIgnoreCase(parser.Peek(), "MINID") &&
+                            !absl::EqualsIgnoreCase(parser.Peek(), "~") &&
+                            !absl::EqualsIgnoreCase(parser.Peek(), "="))) {
+    rb->SendError(kSyntaxErr);
+    return;
+  }
+
   auto parsed_trim_opts = ParseTrimOpts(&parser);
   if (!parsed_trim_opts || !parser.Finalize()) {
     rb->SendError(!parsed_trim_opts ? parsed_trim_opts.error() : parser.Error()->MakeReply());
