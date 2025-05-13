@@ -13,7 +13,7 @@ MAX_COMMANDS=${MAX_COMMANDS:-30}
 rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"
 
-rm -f "$OUTPUT_DIR/commands.log"
+rm -f "$SCRIPT_DIR/commands.log"
 
 # Always create or update dictionary using the separate dictionary generator
 echo "Generating command dictionary..."
