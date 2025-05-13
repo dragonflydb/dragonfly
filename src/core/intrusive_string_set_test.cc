@@ -101,15 +101,17 @@ TEST_F(IntrusiveStringSetTest, IntrusiveStringListTest) {
 
   test = isl.Emplace("23456789");
 
-  EXPECT_EQ(isl.Find("0123456789")->Key(), "0123456789"sv);
-  EXPECT_EQ(isl.Find("23456789")->Key(), "23456789"sv);
-  EXPECT_EQ(isl.Find("123456789")->Key(), "123456789"sv);
-  EXPECT_FALSE(isl.Find("test"));
+  uint32_t num_expired_fields = 0;
+
+  EXPECT_EQ(isl.Find("0123456789", &num_expired_fields)->Key(), "0123456789"sv);
+  EXPECT_EQ(isl.Find("23456789", &num_expired_fields)->Key(), "23456789"sv);
+  EXPECT_EQ(isl.Find("123456789", &num_expired_fields)->Key(), "123456789"sv);
+  EXPECT_FALSE(isl.Find("test", &num_expired_fields));
 
   EXPECT_TRUE(isl.Erase("23456789"));
-  EXPECT_FALSE(isl.Find("23456789"));
+  EXPECT_FALSE(isl.Find("23456789", &num_expired_fields));
   EXPECT_FALSE(isl.Erase("test"));
-  EXPECT_FALSE(isl.Find("test"));
+  EXPECT_FALSE(isl.Find("test", &num_expired_fields));
 }
 
 TEST_F(IntrusiveStringSetTest, HashCheckTest) {
@@ -137,11 +139,13 @@ TEST_F(IntrusiveStringSetTest, HashCheckTest) {
     test.SetExtendedHash(hash, 3);
   }
 
-  EXPECT_TRUE(isl.Find("0123456789", 0xFEDCBA9876543210ULL, 3));
-  EXPECT_TRUE(isl.Find("123456789", 0xFEDCBA9876543210ULL, 3));
-  EXPECT_TRUE(isl.Find("23456789", 0xFEDCBA9876543210ULL, 3));
-  EXPECT_TRUE(isl.Find("3456789", 0xFEDCBA9876543210ULL, 3));
-  EXPECT_TRUE(isl.Find("456789", 0xFEDCBA9876543210ULL, 3));
+  uint32_t num_expired_fields = 0;
+
+  EXPECT_TRUE(isl.Find("0123456789", 0xFEDCBA9876543210ULL, 3, &num_expired_fields));
+  EXPECT_TRUE(isl.Find("123456789", 0xFEDCBA9876543210ULL, 3, &num_expired_fields));
+  EXPECT_TRUE(isl.Find("23456789", 0xFEDCBA9876543210ULL, 3, &num_expired_fields));
+  EXPECT_TRUE(isl.Find("3456789", 0xFEDCBA9876543210ULL, 3, &num_expired_fields));
+  EXPECT_TRUE(isl.Find("456789", 0xFEDCBA9876543210ULL, 3, &num_expired_fields));
 }
 
 TEST_F(IntrusiveStringSetTest, IntrusiveStringSetAddFindTest) {
@@ -534,9 +538,16 @@ TEST_F(IntrusiveStringSetTest, Ttl) {
   EXPECT_EQ(2u, it->ExpiryTime());
 
   ss_->set_time(2);
+  // Cleanup all `foo` entries
+  uint32_t cursor = 0;
+  do {
+    cursor = ss_->Scan(cursor, [&](std::string_view) {});
+  } while (cursor != 0);
+
   for (unsigned i = 0; i < 100; ++i) {
     EXPECT_TRUE(ss_->Add(absl::StrCat("bar", i)));
   }
+  EXPECT_EQ(100u, ss_->UpperBoundSize());
   it = ss_->Find("bar50");
   EXPECT_FALSE(it->HasExpiry());
 

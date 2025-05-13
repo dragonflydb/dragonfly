@@ -114,12 +114,15 @@ class IntrusiveStringSet {
     const auto bucket_id = BucketId(hash);
     auto& bucket = entries_[bucket_id];
 
-    if (auto existed_item = bucket.Find(str, hash, capacity_log_); existed_item) {
+    uint32_t expired_fields = 0;
+    if (auto existed_item = bucket.Find(str, hash, capacity_log_, &expired_fields, time_now_);
+        existed_item) {
+      size_ -= expired_fields;
       // TODO consider common implementation for key value pair
-      return ISLEntry();
+      return {};
     }
-
-    return AddUnique(str, bucket, hash, ttl_sec);
+    size_ -= expired_fields;
+    return AddUnique(str, bucket, hash, EntryTTL(ttl_sec));
   }
 
   void Reserve(size_t sz) {
@@ -153,12 +156,15 @@ class IntrusiveStringSet {
       uint64_t hash = Hash(s);
       const auto bucket_id = BucketId(hash);
       auto& bucket = entries_[bucket_id];
-      if (auto existed_item = bucket.Find(s, hash, capacity_log_); existed_item) {
+      uint32_t expired_fields = 0;
+      if (auto existed_item = bucket.Find(s, hash, capacity_log_, &expired_fields, time_now_);
+          existed_item) {
         // TODO update TTL
       } else {
         ++res;
-        AddUnique(s, bucket, hash, ttl_sec);
+        AddUnique(s, bucket, hash, EntryTTL(ttl_sec));
       }
+      size_ -= expired_fields;
     }
     return res;
   }
@@ -185,9 +191,12 @@ class IntrusiveStringSet {
 
     // First find the bucket to scan, skip empty buckets.
     for (; entries_idx < entries_.size(); ++entries_idx) {
-      if (entries_[entries_idx].Scan(cb, time_now_)) {
+      uint32_t expired_fields = 0;
+      if (entries_[entries_idx].Scan(cb, &expired_fields, time_now_)) {
+        size_ -= expired_fields;
         break;
       }
+      size_ -= expired_fields;
     }
 
     if (++entries_idx >= entries_.size()) {
@@ -221,8 +230,10 @@ class IntrusiveStringSet {
     uint64_t hash = Hash(member);
     auto bucket_id = BucketId(hash);
     auto entry_it = entries_.begin() + bucket_id;
-    auto res = entry_it->Find(member, hash, capacity_log_);
-    return iterator(res ? entry_it : entries_.end(), entries_.end(), res);
+    uint32_t expired_fields = 0;
+    auto res = entry_it->Find(member, hash, capacity_log_, &expired_fields, time_now_);
+    size_ -= expired_fields;
+    return {res ? entry_it : entries_.end(), entries_.end(), res};
   }
 
   bool Contains(std::string_view member) {
@@ -274,6 +285,10 @@ class IntrusiveStringSet {
   uint64_t Hash(std::string_view str) const {
     constexpr XXH64_hash_t kHashSeed = 24061983;
     return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
+  }
+
+  uint32_t EntryTTL(uint32_t ttl_sec) const {
+    return ttl_sec == UINT32_MAX ? ttl_sec : time_now_ + ttl_sec;
   }
 
  private:
