@@ -954,61 +954,9 @@ class AFLFuzzer:
             print()
 
 
-def create_afl_dictionary():
-    """Creates AFL++ dictionary with Redis commands"""
-    dictionary = []
-
-    # Adding all commands
-    for command in REDIS_COMMANDS:
-        dictionary.append(f'"{command}"')
-
-    # Adding typical arguments
-    for data_type, generator in DATA_TYPES.items():
-        # Skip enhanced data types that are just variations of base types
-        if data_type.startswith("special_") or data_type.startswith("escaped_"):
-            continue
-
-        for _ in range(10):  # Adding 10 examples of each type
-            try:
-                value = generator()
-                # Escape special characters for dictionary
-                value = re.sub(r'([\\"])', r"\\\1", str(value))
-                dictionary.append(f'"{value}"')
-            except Exception as e:
-                print(f"Error generating value for {data_type}: {e}")
-
-    # Add special characters as standalone entries
-    for char in SPECIAL_CHARS:
-        # Escape special characters
-        escaped_char = re.sub(r'([\\"])', r"\\\1", char)
-        dictionary.append(f'"{escaped_char}"')
-
-    # Add escaped sequences
-    for esc in ESCAPED_CHARS:
-        dictionary.append(f'"{esc}"')
-
-    # Add some complex mixed values
-    for _ in range(20):
-        try:
-            value = DATA_TYPES["mixed_string"]()
-            value = re.sub(r'([\\"])', r"\\\1", value)
-            dictionary.append(f'"{value}"')
-        except:
-            pass
-
-    # Writing dictionary to file
-    dict_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "redis.dict")
-    with open(dict_path, "w") as f:
-        f.write("\n".join(dictionary))
-
-    print(f"Dictionary created: {dict_path}")
-    return dict_path
-
-
 def parse_args():
     """Parsing command line arguments"""
     parser = argparse.ArgumentParser(description="Redis fuzzer for testing Dragonfly using AFL++")
-    parser.add_argument("--create-dict", action="store_true", help="Create dictionary for AFL++")
     parser.add_argument("--host", default=REDIS_HOST, help=f"Redis host (default: {REDIS_HOST})")
     parser.add_argument(
         "--port", type=int, default=REDIS_PORT, help=f"Redis port (default: {REDIS_PORT})"
@@ -1031,10 +979,6 @@ def main():
     REDIS_PORT = args.port
     MAX_COMMANDS_PER_TEST = args.commands
 
-    # Always ensure we have a dictionary file for consistent operation
-    if not os.path.exists(DICT_FILE) or args.create_dict:
-        create_afl_dictionary()
-
     # Always reload dictionary values for each run
     global DICT_VALUES, INPUT_VALUES
     DICT_VALUES = []
@@ -1055,10 +999,6 @@ def main():
     for log_file in [COMMANDS_LOG_FILE, CRASH_LOG_FILE]:
         log_dir = os.path.dirname(log_file)
         os.makedirs(log_dir, exist_ok=True)
-
-    # Skip further execution if just creating dictionary
-    if args.create_dict:
-        return
 
     # Running fuzzing with mixed strategy always enabled
     fuzzer = AFLFuzzer()

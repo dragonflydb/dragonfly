@@ -13,9 +13,9 @@ MAX_COMMANDS=${MAX_COMMANDS:-30}
 rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"
 
-# Always create or update dictionary
+# Always create or update dictionary using the separate dictionary generator
 echo "Generating command dictionary..."
-cd "$SCRIPT_DIR" && python3 redis_fuzzer.py --create-dict && cd - > /dev/null
+python3 "$SCRIPT_DIR/redis_dict_generator.py" --output "$DICT_FILE"
 
 # Ignore core dump and instrumentation errors for AFL++
 export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
@@ -26,4 +26,4 @@ echo "Starting AFL++ fuzzing with comprehensive command testing..."
 
 # Run AFL++
 afl-fuzz -i "$INPUT_DIR" -o "$OUTPUT_DIR" -n -m none -x "$DICT_FILE" -t 5000 \
-    -- python3 $SCRIPT_DIR/redis_fuzzer.py --host "$REDIS_HOST" --port "$REDIS_PORT" --commands "$MAX_COMMANDS"
+    -- python3 "$SCRIPT_DIR/redis_fuzzer.py" --host "$REDIS_HOST" --port "$REDIS_PORT" --commands "$MAX_COMMANDS"
