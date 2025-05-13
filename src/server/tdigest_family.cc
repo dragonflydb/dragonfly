@@ -52,6 +52,9 @@ void TDigestFamily::Create(CmdArgList args, const CommandContext& cmd_cntx) {
 
   auto res = cmd_cntx.tx->ScheduleSingleHopT(cb);
   // SendError covers ok
+  if (res.status() == OpStatus::KEY_EXISTS) {
+    return cmd_cntx.rb->SendError("key already exists");
+  }
   return cmd_cntx.rb->SendError(res.status());
 }
 
@@ -142,7 +145,15 @@ void ByRankImpl(CmdArgList args, const CommandContext& cmd_cntx, bool reverse) {
 
   auto res = cmd_cntx.tx->ScheduleSingleHopT(cb);
   // SendError covers ok
-  return cmd_cntx.rb->SendError(res.status());
+  if (!res) {
+    return cmd_cntx.rb->SendError(res.status());
+  }
+
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
+  rb->StartArray(res->size());
+  for (auto res : *res) {
+    rb->SendDouble(res);
+  }
 }
 
 void TDigestFamily::ByRank(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -351,7 +362,14 @@ void RankImpl(CmdArgList args, const CommandContext& cmd_cntx, bool reverse) {
 
   auto res = cmd_cntx.tx->ScheduleSingleHopT(cb);
   // SendError covers ok
-  return cmd_cntx.rb->SendError(res.status());
+  if (!res) {
+    return cmd_cntx.rb->SendError(res.status());
+  }
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
+  rb->StartArray(res->size());
+  for (auto res : *res) {
+    rb->SendDouble(res);
+  }
 }
 
 void TDigestFamily::Rank(CmdArgList args, const CommandContext& cmd_cntx) {
