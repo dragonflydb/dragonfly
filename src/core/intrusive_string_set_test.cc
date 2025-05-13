@@ -505,7 +505,8 @@ TEST_F(IntrusiveStringSetTest, SetFieldExpireHasExpiry) {
   auto k = ss_->Find("k1");
   EXPECT_TRUE(k->HasExpiry());
   EXPECT_EQ(k->ExpiryTime(), 100);
-  k.SetExpiryTime(1);
+  size_t obj_malloc_used;
+  k.SetExpiryTime(1, &obj_malloc_used);
   EXPECT_TRUE(k->HasExpiry());
   EXPECT_EQ(k->ExpiryTime(), 1);
 }
@@ -514,7 +515,8 @@ TEST_F(IntrusiveStringSetTest, SetFieldExpireNoHasExpiry) {
   EXPECT_TRUE(ss_->Add("k1"));
   auto k = ss_->Find("k1");
   EXPECT_FALSE(k->HasExpiry());
-  k.SetExpiryTime(10);
+  size_t obj_malloc_used;
+  k.SetExpiryTime(10, &obj_malloc_used);
   EXPECT_TRUE(k->HasExpiry());
   EXPECT_EQ(k->ExpiryTime(), 10);
 }
@@ -604,66 +606,66 @@ TEST_F(IntrusiveStringSetTest, IterateEmpty) {
   }
 }
 
-// size_t memUsed(IntrusiveStringSet& obj) {
-//   return obj.ObjMallocUsed() + obj.SetMallocUsed();
-// }
+size_t memUsed(IntrusiveStringSet& obj) {
+  return obj.ObjMallocUsed() + obj.SetMallocUsed();
+}
 
-// void BM_Clone(benchmark::State& state) {
-//   vector<string> strs;
-//   mt19937 generator(0);
-//   IntrusiveStringSet ss1, ss2;
-//   unsigned elems = state.range(0);
-//   for (size_t i = 0; i < elems; ++i) {
-//     string str = random_string(generator, 10);
-//     ss1.Add(str);
-//   }
-//   ss2.Reserve(ss1.UpperBoundSize());
-//   while (state.KeepRunning()) {
-//     for (auto src : ss1) {
-//       ss2.Add(src);
-//     }
-//     state.PauseTiming();
-//     ss2.Clear();
-//     ss2.Reserve(ss1.UpperBoundSize());
-//     state.ResumeTiming();
-//   }
-// }
-// BENCHMARK(BM_Clone)->ArgName("elements")->Arg(32000);
+void BM_Clone(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  IntrusiveStringSet ss1, ss2;
+  unsigned elems = state.range(0);
+  for (size_t i = 0; i < elems; ++i) {
+    string str = random_string(generator, 10);
+    ss1.Add(str);
+  }
+  ss2.Reserve(ss1.UpperBoundSize());
+  while (state.KeepRunning()) {
+    for (auto src : ss1) {
+      ss2.Add(src.Key());
+    }
+    state.PauseTiming();
+    ss2.Clear();
+    ss2.Reserve(ss1.UpperBoundSize());
+    state.ResumeTiming();
+  }
+}
+BENCHMARK(BM_Clone)->ArgName("elements")->Arg(32000);
 
-// void BM_Fill(benchmark::State& state) {
-//   unsigned elems = state.range(0);
-//   vector<string> strs;
-//   mt19937 generator(0);
-//   IntrusiveStringSet ss1, ss2;
-//   for (size_t i = 0; i < elems; ++i) {
-//     string str = random_string(generator, 10);
-//     ss1.Add(str);
-//   }
+void BM_Fill(benchmark::State& state) {
+  unsigned elems = state.range(0);
+  vector<string> strs;
+  mt19937 generator(0);
+  IntrusiveStringSet ss1, ss2;
+  for (size_t i = 0; i < elems; ++i) {
+    string str = random_string(generator, 10);
+    ss1.Add(str);
+  }
 
-//   while (state.KeepRunning()) {
-//     ss1.Fill(&ss2);
-//     state.PauseTiming();
-//     ss2.Clear();
-//     state.ResumeTiming();
-//   }
-// }
-// BENCHMARK(BM_Fill)->ArgName("elements")->Arg(32000);
+  while (state.KeepRunning()) {
+    ss1.Fill(&ss2);
+    state.PauseTiming();
+    ss2.Clear();
+    state.ResumeTiming();
+  }
+}
+BENCHMARK(BM_Fill)->ArgName("elements")->Arg(32000);
 
-// void BM_Clear(benchmark::State& state) {
-//   unsigned elems = state.range(0);
-//   mt19937 generator(0);
-//   StringSet ss;
-//   while (state.KeepRunning()) {
-//     state.PauseTiming();
-//     for (size_t i = 0; i < elems; ++i) {
-//       string str = random_string(generator, 16);
-//       ss.Add(str);
-//     }
-//     state.ResumeTiming();
-//     ss.Clear();
-//   }
-// }
-// BENCHMARK(BM_Clear)->ArgName("elements")->Arg(32000);
+void BM_Clear(benchmark::State& state) {
+  unsigned elems = state.range(0);
+  mt19937 generator(0);
+  IntrusiveStringSet ss;
+  while (state.KeepRunning()) {
+    state.PauseTiming();
+    for (size_t i = 0; i < elems; ++i) {
+      string str = random_string(generator, 16);
+      ss.Add(str);
+    }
+    state.ResumeTiming();
+    ss.Clear();
+  }
+}
+BENCHMARK(BM_Clear)->ArgName("elements")->Arg(32000);
 
 void BM_Add(benchmark::State& state) {
   vector<string> strs;
@@ -680,7 +682,7 @@ void BM_Add(benchmark::State& state) {
     for (auto& str : strs)
       ss.Add(str);
     state.PauseTiming();
-    // state.counters["Memory_Used"] = memUsed(ss);
+    state.counters["Memory_Used"] = memUsed(ss);
     ss.Clear();
     ss.Reserve(elems);
     state.ResumeTiming();
@@ -690,111 +692,111 @@ BENCHMARK(BM_Add)
     ->ArgNames({"elements", "Key Size"})
     ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
 
-// void BM_AddMany(benchmark::State& state) {
-//   vector<string> strs;
-//   mt19937 generator(0);
-//   StringSet ss;
-//   unsigned elems = state.range(0);
-//   unsigned keySize = state.range(1);
-//   for (size_t i = 0; i < elems; ++i) {
-//     string str = random_string(generator, keySize);
-//     strs.push_back(str);
-//   }
-//   ss.Reserve(elems);
-//   vector<string_view> svs;
-//   for (const auto& str : strs) {
-//     svs.push_back(str);
-//   }
-//   while (state.KeepRunning()) {
-//     ss.AddMany(absl::MakeSpan(svs), UINT32_MAX, false);
-//     state.PauseTiming();
-//     CHECK_EQ(ss.UpperBoundSize(), elems);
-//     state.counters["Memory_Used"] = memUsed(ss);
-//     ss.Clear();
-//     ss.Reserve(elems);
-//     state.ResumeTiming();
-//   }
-// }
-// BENCHMARK(BM_AddMany)
-//     ->ArgNames({"elements", "Key Size"})
-//     ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+void BM_AddMany(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  IntrusiveStringSet ss;
+  unsigned elems = state.range(0);
+  unsigned keySize = state.range(1);
+  for (size_t i = 0; i < elems; ++i) {
+    string str = random_string(generator, keySize);
+    strs.push_back(str);
+  }
+  ss.Reserve(elems);
+  vector<string_view> svs;
+  for (const auto& str : strs) {
+    svs.push_back(str);
+  }
+  while (state.KeepRunning()) {
+    ss.AddMany(absl::MakeSpan(svs), UINT32_MAX, false);
+    state.PauseTiming();
+    CHECK_EQ(ss.UpperBoundSize(), elems);
+    state.counters["Memory_Used"] = memUsed(ss);
+    ss.Clear();
+    ss.Reserve(elems);
+    state.ResumeTiming();
+  }
+}
+BENCHMARK(BM_AddMany)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
 
-// void BM_Erase(benchmark::State& state) {
-//   std::vector<std::string> strs;
-//   mt19937 generator(0);
-//   StringSet ss;
-//   auto elems = state.range(0);
-//   auto keySize = state.range(1);
-//   for (long int i = 0; i < elems; ++i) {
-//     std::string str = random_string(generator, keySize);
-//     strs.push_back(str);
-//     ss.Add(str);
-//   }
-//   state.counters["Memory_Before_Erase"] = memUsed(ss);
-//   while (state.KeepRunning()) {
-//     for (auto& str : strs) {
-//       ss.Erase(str);
-//     }
-//     state.PauseTiming();
-//     state.counters["Memory_After_Erase"] = memUsed(ss);
-//     for (auto& str : strs) {
-//       ss.Add(str);
-//     }
-//     state.ResumeTiming();
-//   }
-// }
-// BENCHMARK(BM_Erase)
-//     ->ArgNames({"elements", "Key Size"})
-//     ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+void BM_Erase(benchmark::State& state) {
+  std::vector<std::string> strs;
+  mt19937 generator(0);
+  IntrusiveStringSet ss;
+  auto elems = state.range(0);
+  auto keySize = state.range(1);
+  for (long int i = 0; i < elems; ++i) {
+    std::string str = random_string(generator, keySize);
+    strs.push_back(str);
+    ss.Add(str);
+  }
+  state.counters["Memory_Before_Erase"] = memUsed(ss);
+  while (state.KeepRunning()) {
+    for (auto& str : strs) {
+      ss.Erase(str);
+    }
+    state.PauseTiming();
+    state.counters["Memory_After_Erase"] = memUsed(ss);
+    for (auto& str : strs) {
+      ss.Add(str);
+    }
+    state.ResumeTiming();
+  }
+}
+BENCHMARK(BM_Erase)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
 
-// void BM_Get(benchmark::State& state) {
-//   std::vector<std::string> strs;
-//   mt19937 generator(0);
-//   StringSet ss;
-//   auto elems = state.range(0);
-//   auto keySize = state.range(1);
-//   for (long int i = 0; i < elems; ++i) {
-//     std::string str = random_string(generator, keySize);
-//     strs.push_back(str);
-//     ss.Add(str);
-//   }
-//   while (state.KeepRunning()) {
-//     for (auto& str : strs) {
-//       ss.Find(str);
-//     }
-//   }
-// }
-// BENCHMARK(BM_Get)
-//     ->ArgNames({"elements", "Key Size"})
-//     ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+void BM_Get(benchmark::State& state) {
+  std::vector<std::string> strs;
+  mt19937 generator(0);
+  IntrusiveStringSet ss;
+  auto elems = state.range(0);
+  auto keySize = state.range(1);
+  for (long int i = 0; i < elems; ++i) {
+    std::string str = random_string(generator, keySize);
+    strs.push_back(str);
+    ss.Add(str);
+  }
+  while (state.KeepRunning()) {
+    for (auto& str : strs) {
+      ss.Find(str);
+    }
+  }
+}
+BENCHMARK(BM_Get)
+    ->ArgNames({"elements", "Key Size"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
 
-// void BM_Grow(benchmark::State& state) {
-//   vector<string> strs;
-//   mt19937 generator(0);
-//   StringSet src;
-//   unsigned elems = 1 << 18;
-//   for (size_t i = 0; i < elems; ++i) {
-//     src.Add(random_string(generator, 16), UINT32_MAX);
-//     strs.push_back(random_string(generator, 16));
-//   }
+void BM_Grow(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  IntrusiveStringSet src;
+  unsigned elems = 1 << 18;
+  for (size_t i = 0; i < elems; ++i) {
+    src.Add(random_string(generator, 16), UINT32_MAX);
+    strs.push_back(random_string(generator, 16));
+  }
 
-//   while (state.KeepRunning()) {
-//     state.PauseTiming();
-//     StringSet tmp;
-//     src.Fill(&tmp);
-//     CHECK_EQ(tmp.BucketCount(), elems);
-//     state.ResumeTiming();
-//     for (const auto& str : strs) {
-//       tmp.Add(str);
-//       if (tmp.BucketCount() > elems) {
-//         break;  // we grew
-//       }
-//     }
+  while (state.KeepRunning()) {
+    state.PauseTiming();
+    IntrusiveStringSet tmp;
+    src.Fill(&tmp);
+    CHECK_EQ(tmp.Capacity(), elems);
+    state.ResumeTiming();
+    for (const auto& str : strs) {
+      tmp.Add(str);
+      if (tmp.Capacity() > elems) {
+        break;  // we grew
+      }
+    }
 
-//     CHECK_GT(tmp.BucketCount(), elems);
-//   }
-// }
-// BENCHMARK(BM_Grow);
+    CHECK_GT(tmp.Capacity(), elems);
+  }
+}
+BENCHMARK(BM_Grow);
 
 // unsigned total_wasted_memory = 0;
 
