@@ -2079,30 +2079,15 @@ OpResult<int64_t> OpTrim(const OpArgs& op_args, std::string_view key, const Trim
 ParseResult<TrimOpts> ParseTrimOpts(bool max_len, CmdArgParser* parser) {
   TrimOpts opts;
   opts.approx = parser->Check("~");
-  if (auto err = parser->Error()) {
-    return make_unexpected(err->MakeReply());
-  }
-
   if (!opts.approx) {
     parser->Check("=");
-    if (auto err = parser->Error()) {
-      return make_unexpected(err->MakeReply());
-    }
   }
 
   if (max_len) {
     opts.length_or_id = parser->Next<uint32_t>();
-    if (auto err = parser->Error()) {
-      return make_unexpected(err->MakeReply());
-    }
   } else {
     ParsedStreamId parsed_id;
-    std::string_view id_str = parser->Next();
-    if (auto err = parser->Error()) {
-      return make_unexpected(err->MakeReply());
-    }
-
-    if (!ParseID(id_str, false, 0, &parsed_id)) {
+    if (!ParseID(parser->Next(), false, 0, &parsed_id)) {
       return CreateSyntaxError(kSyntaxErr);
     }
 
@@ -2110,18 +2095,11 @@ ParseResult<TrimOpts> ParseTrimOpts(bool max_len, CmdArgParser* parser) {
   }
 
   if (parser->Check("LIMIT")) {
-    if (auto err = parser->Error()) {
-      return make_unexpected(err->MakeReply());
-    }
-
     if (!opts.approx) {
       return CreateSyntaxError(kSyntaxErr);
     }
 
     opts.limit = parser->Next<uint32_t>();
-    if (auto err = parser->Error()) {
-      return make_unexpected(err->MakeReply());
-    }
   }
 
   return opts;
@@ -2129,26 +2107,13 @@ ParseResult<TrimOpts> ParseTrimOpts(bool max_len, CmdArgParser* parser) {
 
 ParseResult<TrimOpts> ParseTrimOpts(CmdArgParser* parser) {
   bool max_len = parser->Check("MAXLEN");
-  if (auto err = parser->Error()) {
-    return make_unexpected(err->MakeReply());
-  }
-
   if (!max_len) {
     parser->ExpectTag("MINID");
-    if (auto err = parser->Error()) {
-      return make_unexpected(err->MakeReply());
-    }
   }
 
   auto res = ParseTrimOpts(max_len, parser);
-  if (!res) {
-    return res;
-  }
 
   if (parser->Check("MAXLEN") || parser->Check("MINID")) {
-    if (auto err = parser->Error()) {
-      return make_unexpected(err->MakeReply());
-    }
     return CreateSyntaxError(kTrimOptionConflictErr);
   }
 
@@ -3362,18 +3327,15 @@ void StreamFamily::XTrim(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
   std::string_view key = parser.Next();
-  if (auto err = parser.Error()) {
-    return rb->SendError(err->MakeReply());
-  }
 
   auto parsed_trim_opts = ParseTrimOpts(&parser);
-  if (!parsed_trim_opts) {
-    return rb->SendError(parsed_trim_opts.error());
-  }
-
-  if (!parser.Finalize()) {
-    auto err = parser.Error();
-    return rb->SendError(err->MakeReply());
+  if (!parser.Finalize() || !parsed_trim_opts) {
+    if (parser.HasError()) {
+      rb->SendError(parser.Error()->MakeReply());
+    } else {
+      rb->SendError(parsed_trim_opts.error());
+    }
+    return;
   }
 
   auto& trim_opts = parsed_trim_opts.value();
