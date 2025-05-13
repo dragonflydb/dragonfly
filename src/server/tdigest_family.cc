@@ -276,7 +276,6 @@ void TDigestFamily::Reset(CmdArgList args, const CommandContext& cmd_cntx) {
       return it.status();
     }
     auto* wrapper = it->it->second.GetRobjWrapper();
-    ;
     auto* td = (td_histogram_t*)wrapper->inner_obj();
     td_reset(td);
     return OpStatus::OK;
@@ -320,7 +319,6 @@ void RankImpl(CmdArgList args, const CommandContext& cmd_cntx, bool reverse) {
       return it.status();
     }
     auto* wrapper = it->it->second.GetRobjWrapper();
-    ;
     auto* td = (td_histogram_t*)wrapper->inner_obj();
     const double size = (double)td_size(td);
     const double min = td_min(td);
@@ -383,13 +381,91 @@ void TDigestFamily::Cdf(CmdArgList args, const CommandContext& cmd_cntx) {
       return it.status();
     }
     auto* wrapper = it->it->second.GetRobjWrapper();
-    ;
     auto* td = (td_histogram_t*)wrapper->inner_obj();
     Result result;
     for (auto val : values) {
       result.push_back(td_cdf(td, val));
     }
     return result;
+  };
+
+  auto res = cmd_cntx.tx->ScheduleSingleHopT(cb);
+  // SendError covers ok
+  return cmd_cntx.rb->SendError(res.status());
+}
+
+void TDigestFamily::Quantile(CmdArgList args, const CommandContext& cmd_cntx) {
+  facade::CmdArgParser parser{args};
+
+  auto key = parser.Next<std::string_view>();
+  std::vector<double> quantiles;
+  while (parser.HasNext()) {
+    double val = parser.Next<double>();
+    if (val < 0 || val > 1.0) {
+      cmd_cntx.rb->SendError("quantile should be in [0,1]");
+    }
+    quantiles.push_back(val);
+  }
+
+  if (parser.HasError()) {
+    cmd_cntx.rb->SendError(parser.Error()->MakeReply());
+  }
+
+  using Result = std::vector<double>;
+  auto cb = [key, &quantiles](Transaction* tx, EngineShard* es) -> OpResult<Result> {
+    auto& db_slice = tx->GetDbSlice(es->shard_id());
+    auto db_cntx = tx->GetDbContext();
+    auto it = db_slice.FindMutable(db_cntx, key, OBJ_TDIGEST);
+    if (!it) {
+      return it.status();
+    }
+    auto* wrapper = it->it->second.GetRobjWrapper();
+    auto* td = (td_histogram_t*)wrapper->inner_obj();
+    Result result;
+    result.resize(quantiles.size());
+    auto total = quantiles.size();
+    for (size_t i = 0; i < total; ++i) {
+      int start = i;
+      while (i < total - 1 && quantiles[i] <= quantiles[i + 1]) {
+        ++i;
+      }
+      td_quantiles(td, quantiles.data() + start, result.data() + start, i - start + 1);
+    }
+    return result;
+  };
+
+  auto res = cmd_cntx.tx->ScheduleSingleHopT(cb);
+  // SendError covers ok
+  return cmd_cntx.rb->SendError(res.status());
+}
+
+void TDigestFamily::TrimmedMean(CmdArgList args, const CommandContext& cmd_cntx) {
+  facade::CmdArgParser parser{args};
+
+  auto key = parser.Next<std::string_view>();
+  auto low_cut = parser.Next<double>();
+  auto high_cut = parser.Next<double>();
+  auto out_of_range = [](auto e) { return e < 0 || e > 1.0; };
+
+  if (out_of_range(low_cut) || out_of_range(high_cut)) {
+    cmd_cntx.rb->SendError("cut value should be in [0,1]");
+  }
+
+  if (parser.Error()) {
+    cmd_cntx.rb->SendError(parser.Error()->MakeReply());
+  }
+
+  auto cb = [key, high_cut, low_cut](Transaction* tx, EngineShard* es) -> OpResult<double> {
+    auto& db_slice = tx->GetDbSlice(es->shard_id());
+    auto db_cntx = tx->GetDbContext();
+    auto it = db_slice.FindMutable(db_cntx, key, OBJ_TDIGEST);
+    if (!it) {
+      return it.status();
+    }
+    auto* wrapper = it->it->second.GetRobjWrapper();
+    auto* td = (td_histogram_t*)wrapper->inner_obj();
+    const double value = td_trimmed_mean(td, low_cut, high_cut);
+    return value;
   };
 
   auto res = cmd_cntx.tx->ScheduleSingleHopT(cb);
@@ -414,7 +490,9 @@ void TDigestFamily::Register(CommandRegistry* registry) {
             << CI{"TDIGEST.BYREVRANK", CO::READONLY, -2, 1, 1, acl::TDIGEST}.HFUNC(ByRevRank)
             << CI{"TDIGEST.INFO", CO::READONLY, 2, 1, 1, acl::TDIGEST}.HFUNC(Info)
             << CI{"TDIGEST.MAX", CO::READONLY, 2, 1, 1, acl::TDIGEST}.HFUNC(Max)
-            << CI{"TDIGEST.MIN", CO::READONLY, 2, 1, 1, acl::TDIGEST}.HFUNC(Min);
+            << CI{"TDIGEST.MIN", CO::READONLY, 2, 1, 1, acl::TDIGEST}.HFUNC(Min)
+            << CI{"TDIGEST.TRIMMED_MEAN", CO::READONLY, 3, 1, 1, acl::TDIGEST}.HFUNC(TrimmedMean)
+            << CI{"TDIGEST.QUANTILE", CO::READONLY, -2, 1, 1, acl::TDIGEST}.HFUNC(Quantile);
 };
 
 }  // namespace dfly
