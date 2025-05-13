@@ -604,8 +604,8 @@ REDIS_COMMANDS = {
     # "REPLICAOF": {"args": ["host", "port"], "optional_args": []},
     "SWAPDB": {"args": ["index1", "index2"], "optional_args": []},
     "SYNC": {"args": [], "optional_args": []},
-    "WAIT": {"args": ["numreplicas", "timeout"], "optional_args": []},
-    "WAITAOF": {"args": ["numlocal", "numreplicas", "timeout"], "optional_args": []},
+    # "WAIT": {"args": ["numreplicas", "timeout"], "optional_args": []},
+    # "WAITAOF": {"args": ["numlocal", "numreplicas", "timeout"], "optional_args": []},
     "RESET": {"args": [], "optional_args": []},
     # Add commands from Valkey
     "COMMANDLOG": {"args": [], "optional_args": []},
@@ -706,7 +706,7 @@ REDIS_COMMANDS = {
     "PFSELFTEST": {"args": [], "optional_args": []},
     "PUBSUB SHARDCHANNELS": {"args": [], "optional_args": ["pattern"]},
     "PUBSUB SHARDNUMSUB": {"args": [], "optional_args": ["shardchannel", "shardchannel ..."]},
-    "REPLCONF": {"args": ["option", "value"], "optional_args": []},
+    # "REPLCONF": {"args": ["option", "value"], "optional_args": []},
     "RESTORE-ASKING": {
         "args": ["key", "ttl", "serialized-value"],
         "optional_args": ["REPLACE", "ABSTTL", "IDLETIME", "seconds", "FREQ", "frequency"],
