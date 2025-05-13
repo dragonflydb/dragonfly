@@ -142,7 +142,6 @@ class IntrusiveStringSet {
                      uint32_t ttl_sec = UINT32_MAX) {
     ++size_;
     auto& entry = bucket.Emplace(str, ttl_sec);
-    entry.SetCurrentHash(hash, capacity_log_);
     entry.SetExtendedHash(hash, capacity_log_);
     return entry;
   }
@@ -262,7 +261,6 @@ class IntrusiveStringSet {
         uint64_t hash = Hash(entry.Key());
         auto bucket_id = BucketId(hash);
         auto& inserted_entry = entries_[bucket_id].Insert(entry.Release());
-        inserted_entry.SetCurrentHash(hash, capacity_log_);
         inserted_entry.SetExtendedHash(hash, capacity_log_);
       }
     }
