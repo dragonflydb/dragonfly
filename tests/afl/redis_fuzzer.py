@@ -8,6 +8,7 @@ import os
 import json
 import signal
 import argparse
+import subprocess
 from redis_commands import (
     REDIS_HOST,
     REDIS_PORT,
@@ -615,6 +616,25 @@ def main():
     REDIS_HOST = args.host
     REDIS_PORT = args.port
     MAX_COMMANDS_PER_TEST = args.commands
+
+    # Checking if dragonfly process is running
+    print(f"Checking if dragonfly process is running...")
+    try:
+        result = subprocess.run(["pgrep", "dragonfly"], capture_output=True, text=True, check=False)
+        if result.returncode != 0 or not result.stdout.strip():
+            print("ERROR: Dragonfly process not found!")
+            print("Terminating afl-fuzz process...")
+            subprocess.run(["pkill", "-9", "afl-fuzz"], check=False)
+            print("Exiting...")
+            sys.exit(1)
+        else:
+            print(f"Dragonfly process found with PID: {result.stdout.strip()}")
+    except Exception as e:
+        print(f"Error checking for dragonfly process: {e}")
+        print("Terminating afl-fuzz process...")
+        subprocess.run(["pkill", "-9", "afl-fuzz"], check=False)
+        print("Exiting...")
+        sys.exit(1)
 
     print(f"Starting fuzzer with target: {REDIS_HOST}:{REDIS_PORT}")
 
