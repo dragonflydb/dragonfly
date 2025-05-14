@@ -771,48 +771,48 @@ TEST_F(GenericFamilyTest, SortStore) {
   Run({"lpush", "list-1", "3.5", "1.2", "10.1", "2.20", "200"});
   // numeric
   auto resp = Run({"sort", "list-1", "store", "list-2"});
-  EXPECT_EQ(5, resp);
+  EXPECT_EQ(5, resp.GetInt());
   ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(),
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
 
   // string
   resp = Run({"sort", "list-1", "ALPHA", "store", "list-2"});
-  EXPECT_EQ(5, resp);
+  EXPECT_EQ(5, resp.GetInt());
   ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(),
               ElementsAre("1.2", "10.1", "2.20", "200", "3.5"));
 
   // desc numeric
   resp = Run({"sort", "list-1", "DESC", "store", "list-2"});
-  EXPECT_EQ(5, resp);
+  EXPECT_EQ(5, resp.GetInt());
   ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(),
               ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
 
   // desc string
   resp = Run({"sort", "list-1", "ALPHA", "DESC", "store", "list-2"});
-  EXPECT_EQ(5, resp);
+  EXPECT_EQ(5, resp.GetInt());
   ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(),
               ElementsAre("3.5", "200", "2.20", "10.1", "1.2"));
 
   // limits
   resp = Run({"sort", "list-1", "LIMIT", "0", "5", "store", "list-2"});
-  EXPECT_EQ(5, resp);
+  EXPECT_EQ(5, resp.GetInt());
   ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(),
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
   resp = Run({"sort", "list-1", "LIMIT", "0", "10", "store", "list-2"});
-  EXPECT_EQ(5, resp);
+  EXPECT_EQ(5, resp.GetInt());
   ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(),
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
   resp = Run({"sort", "list-1", "LIMIT", "2", "2", "store", "list-2"});
-  EXPECT_EQ(2, resp);
+  EXPECT_EQ(2, resp.GetInt());
   ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(), ElementsAre("3.5", "10.1"));
   resp = Run({"sort", "list-1", "LIMIT", "1", "1", "store", "list-2"});
-  EXPECT_EQ(1, resp);
+  EXPECT_EQ(1, resp.GetInt());
   ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), "2.20");
   resp = Run({"sort", "list-1", "LIMIT", "4", "2", "store", "list-2"});
-  EXPECT_EQ(1, resp);
+  EXPECT_EQ(1, resp.GetInt());
   ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), "200");
   resp = Run({"sort", "list-1", "LIMIT", "5", "2", "store", "list-2"});
-  EXPECT_EQ(0, resp);
+  EXPECT_EQ(0, resp.GetInt());
   ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), ArrLen(0));
 
   // Test set sort
@@ -820,7 +820,7 @@ TEST_F(GenericFamilyTest, SortStore) {
   Run({"del", "list-3"});
   Run({"sadd", "set-1", "5.3", "4.4", "60", "99.9", "100", "9"});
   resp = Run({"sort", "set-1", "store", "list-3"});
-  EXPECT_EQ(6, resp);
+  EXPECT_EQ(6, resp.GetInt());
   ASSERT_THAT(Run({"lrange", "list-3", "0", "-1"}).GetVec(),
               ElementsAre("4.4", "5.3", "9", "60", "99.9", "100"));
 
@@ -829,7 +829,7 @@ TEST_F(GenericFamilyTest, SortStore) {
   Run({"del", "list-4"});
   Run({"zadd", "zset-1", "0", "3.3", "0", "30.1", "0", "8.2"});
   resp = Run({"sort", "zset-1", "store", "list-4"});
-  EXPECT_EQ(3, resp);
+  EXPECT_EQ(3, resp.GetInt());
   ASSERT_THAT(Run({"lrange", "list-4", "0", "-1"}).GetVec(), ElementsAre("3.3", "8.2", "30.1"));
 
   // Same key overwrite.
@@ -837,7 +837,7 @@ TEST_F(GenericFamilyTest, SortStore) {
   Run({"del", "list-2"});
   Run({"lpush", "list-1", "3.5", "1.2", "10.1", "2.20", "200"});
   resp = Run({"sort", "list-1", "store", "list-1"});
-  EXPECT_EQ(5, resp);
+  EXPECT_EQ(5, resp.GetInt());
   ASSERT_THAT(Run({"lrange", "list-1", "0", "-1"}).GetVec(),
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
 }
