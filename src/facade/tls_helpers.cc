@@ -21,6 +21,10 @@ ABSL_FLAG(std::string, tls_ca_cert_file, "", "ca signed certificate to validate 
 ABSL_FLAG(std::string, tls_ca_cert_dir, "",
           "ca signed certificates directory. Use c_rehash before, read description in "
           "https://www.openssl.org/docs/man3.0/man1/c_rehash.html");
+ABSL_FLAG(std::string, tls_ciphers, "DEFAULT:!MEDIUM", "TLS ciphers configuration for tls1.2");
+ABSL_FLAG(std::string, tls_cipher_suites, "", "TLS ciphers configuration for tls1.3");
+ABSL_FLAG(bool, tls_prefer_server_ciphers, false,
+          "If true, prefer server ciphers over client ciphers");
 
 namespace facade {
 
@@ -72,7 +76,14 @@ SSL_CTX* CreateSslCntx(TlsContextRole role) {
     mask = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
   }
 
-  DFLY_SSL_CHECK(1 == SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
+  if (!GetFlag(FLAGS_tls_ciphers).empty()) {
+    DFLY_SSL_CHECK(1 == SSL_CTX_set_cipher_list(ctx, GetFlag(FLAGS_tls_ciphers).c_str()));
+  }
+
+  // Relevant only for TLS 1.3 connections.
+  if (!GetFlag(FLAGS_tls_cipher_suites).empty()) {
+    SSL_CTX_set_ciphersuites(ctx, GetFlag(FLAGS_tls_cipher_suites).c_str());
+  }
 
   SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
 
@@ -82,6 +93,9 @@ SSL_CTX* CreateSslCntx(TlsContextRole role) {
 
   DFLY_SSL_CHECK(1 == SSL_CTX_set_dh_auto(ctx, 1));
 
+  if (GetFlag(FLAGS_tls_prefer_server_ciphers)) {
+    SSL_CTX_set_options(ctx, SSL_OP_CIPHER_SERVER_PREFERENCE);
+  }
   return ctx;
 }
 

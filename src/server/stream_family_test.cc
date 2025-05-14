@@ -695,6 +695,13 @@ TEST_F(StreamFamilyTest, XTrimInvalidArgs) {
   resp = Run({"xtrim", "foo", "maxlen", "~", "2", "limit", "nan"});
   EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
 }
+
+TEST_F(StreamFamilyTest, XTrimWrongSyntax) {
+  auto resp = Run({"xtrim", "-992", "k1 \"v1\" k2 \"v2 with spaces\" \"k3 with spaces\" \"v3\"",
+                   "list1 element1"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
 TEST_F(StreamFamilyTest, XPending) {
   Run({"xadd", "foo", "1-0", "k1", "v1"});
   Run({"xadd", "foo", "1-1", "k2", "v2"});

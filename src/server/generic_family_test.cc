@@ -625,8 +625,6 @@ TEST_F(GenericFamilyTest, Scan) {
 }
 
 TEST_F(GenericFamilyTest, ScanWithAttr) {
-  Run({"flushdb"});
-
   Run({"set", "hello", "world"});
   Run({"set", "foo", "bar"});
 
@@ -665,6 +663,17 @@ TEST_F(GenericFamilyTest, ScanWithAttr) {
   resp = Run({"scan", "0", "attr", "u"});
   vec = StrArray(resp.GetVec()[1]);
   ASSERT_EQ(0, vec.size());
+}
+
+TEST_F(GenericFamilyTest, ScanMallocSize) {
+  Run({"set", "k1", string(1000, 'a')});
+  Run({"set", "k2", string(500, 'b')});
+  Run({"set", "k3", string(15, 'c')});
+
+  auto resp = Run({"scan", "0", "MINMSZ", "15"});
+  EXPECT_THAT(resp.GetVec()[1], RespArray(UnorderedElementsAre("k1", "k2")));
+  resp = Run({"scan", "0", "MINMSZ", "500"});
+  EXPECT_THAT(resp.GetVec()[1], RespArray(UnorderedElementsAre("k1")));
 }
 
 TEST_F(GenericFamilyTest, Sort) {

@@ -616,6 +616,10 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
   if (!matches)
     return false;
 
+  if (opts.min_malloc_size > 0 && it->second.MallocUsed() < opts.min_malloc_size) {
+    return false;
+  }
+
   if (opts.bucket_id != UINT_MAX && opts.bucket_id != it.GetInnerIt().bucket_id()) {
     return false;
   }
@@ -623,7 +627,7 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
   if (!opts.Matches(it.key())) {
     return false;
   }
-  res->push_back(string(it.key()));
+  res->emplace_back(it.key());
 
   return true;
 }
@@ -1782,12 +1786,25 @@ void GenericFamily::Echo(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 // SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [BUCKET <bucket_id>]
-// [ATTR <mask>]
+// [ATTR <mask>] [MLCGE <len>]
 void GenericFamily::Scan(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view token = ArgS(args, 0);
   uint64_t cursor = 0;
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   if (!absl::SimpleAtoi(token, &cursor)) {
+    if (absl::EqualsIgnoreCase(token, "HELP")) {
+      string_view help_arr[] = {
+          "SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [ATTR <mask>] [MINMSZ <len>]",
+          "    MATCH <glob> - pattern to match keys against",
+          "    TYPE <type> - type of values to match",
+          "    COUNT <count> - number of keys to return",
+          "    ATTR <v|p|a|u> - filter by attributes: v - volatile (ttl), ",
+          "    p - persistent (no ttl), a - accessed since creation, u - untouched",
+          "    MINMSZ <len> - keeps keys with values, whose allocated size is greater or equal to",
+          "        the specified length",
+      };
+      return builder->SendSimpleStrArr(help_arr);
+    }
     return builder->SendError("invalid cursor");
   }
 

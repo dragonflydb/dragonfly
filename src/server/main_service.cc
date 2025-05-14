@@ -1242,7 +1242,7 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
 
   dfly_cntx->cid = cid;
 
-  if (!InvokeCmd(cid, args_no_cmd, builder, dfly_cntx)) {
+  if (!InvokeCmd(cid, args_no_cmd, CommandContext{dfly_cntx->transaction, builder, dfly_cntx})) {
     builder->SendError("Internal Error");
     builder->CloseConnection();
   }
@@ -1302,10 +1302,15 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
   return OpStatus::OK;
 }
 
-bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBuilder* builder,
-                        ConnectionContext* cntx) {
+bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
+                        const CommandContext& cmd_cntx) {
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
+
+  ConnectionContext* cntx = cmd_cntx.conn_cntx;
+  auto* builder = cmd_cntx.rb;
+  DCHECK(builder);
+  DCHECK(cntx);
 
   if (auto err = VerifyCommandExecution(cid, cntx, tail_args); err) {
     // We need to skip this because ACK's should not be replied to
@@ -1327,9 +1332,9 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
   }
 
   ServerState::tlocal()->RecordCmd(cntx->has_main_or_memcache_listener);
-  Transaction* tx = cntx->transaction;
   auto& info = cntx->conn_state.tracking_info_;
   const bool is_read_only = cid->opt_mask() & CO::READONLY;
+  Transaction* tx = cmd_cntx.tx;
   if (tx) {
     // Reset it, because in multi/exec the transaction pointer is the same and
     // we will end up triggerring the callback on the following commands. To avoid this
@@ -1352,7 +1357,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
   auto last_error = builder->ConsumeLastError();
   DCHECK(last_error.empty());
   try {
-    invoke_time_usec = cid->Invoke(tail_args, CommandContext{tx, builder, cntx});
+    invoke_time_usec = cid->Invoke(tail_args, cmd_cntx);
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
@@ -2239,7 +2244,7 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
           }
         }
 
-        bool ok = InvokeCmd(scmd.Cid(), args, rb, cmd_cntx.conn_cntx);
+        bool ok = InvokeCmd(scmd.Cid(), args, cmd_cntx);
         if (!ok || rb->GetError())  // checks for i/o error, not logical error.
           break;
       }

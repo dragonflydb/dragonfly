@@ -320,7 +320,7 @@ struct ScanOpts {
     Untouched,  // untouched, the key has not been accessed/touched.
   };
   std::optional<Mask> mask;
-
+  size_t min_malloc_size = 0;
   bool Matches(std::string_view val_name) const;
   static OpResult<ScanOpts> TryFrom(CmdArgList args);
 };

@@ -44,8 +44,7 @@ class Service : public facade::ServiceInterface {
                               facade::ConnectionContext* cntx) final;
 
   // Check VerifyCommandExecution and invoke command with args
-  bool InvokeCmd(const CommandId* cid, CmdArgList tail_args, facade::SinkReplyBuilder* builder,
-                 ConnectionContext* reply_cntx);
+  bool InvokeCmd(const CommandId* cid, CmdArgList tail_args, const CommandContext& cmd_cntx);
 
   // Verify command can be executed now (check out of memory), always called immediately before
   // execution

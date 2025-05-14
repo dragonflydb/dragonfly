@@ -103,6 +103,10 @@ TEST_F(RdbTest, LoadEmpty) {
 }
 
 TEST_F(RdbTest, LoadSmall6) {
+  // The rdb file contians keys that already expired, we want to continue loading them in this test.
+  absl::FlagSaver fs;
+  SetTestFlag("rdb_ignore_expiry", "true");
+
   auto ec = LoadRdb("redis6_small.rdb");
 
   ASSERT_FALSE(ec) << ec.message();
