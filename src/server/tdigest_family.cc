@@ -103,7 +103,7 @@ void ByRankImpl(CmdArgList args, const CommandContext& cmd_cntx, bool reverse) {
   facade::CmdArgParser parser{args};
 
   auto key = parser.Next<std::string_view>();
-  std::vector<size_t> ranks;
+  std::vector<double> ranks;
   while (parser.HasNext()) {
     double val = parser.Next<double>();
     ranks.push_back(val);
@@ -122,9 +122,8 @@ void ByRankImpl(CmdArgList args, const CommandContext& cmd_cntx, bool reverse) {
       return it.status();
     }
     auto* wrapper = it->it->second.GetRobjWrapper();
-    ;
     auto* td = (td_histogram_t*)wrapper->inner_obj();
-    const double size = (double)td_size(td);
+    const size_t size = td_size(td);
     const double min = td_min(td);
     const double max = td_max(td);
 
@@ -144,7 +143,6 @@ void ByRankImpl(CmdArgList args, const CommandContext& cmd_cntx, bool reverse) {
   };
 
   auto res = cmd_cntx.tx->ScheduleSingleHopT(cb);
-  // SendError covers ok
   if (!res) {
     return cmd_cntx.rb->SendError(res.status());
   }
@@ -263,7 +261,7 @@ void TDigestFamily::Max(CmdArgList args, const CommandContext& cmd_cntx) {
     return cmd_cntx.rb->SendError(res.status());
   }
   auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
-  rb->SendDouble(res->min);
+  rb->SendDouble(res->max);
 }
 
 void TDigestFamily::Min(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -315,7 +313,7 @@ void RankImpl(CmdArgList args, const CommandContext& cmd_cntx, bool reverse) {
   facade::CmdArgParser parser{args};
 
   auto key = parser.Next<std::string_view>();
-  std::vector<size_t> ranks;
+  std::vector<double> ranks;
   while (parser.HasNext()) {
     double val = parser.Next<double>();
     ranks.push_back(val);
@@ -325,7 +323,7 @@ void RankImpl(CmdArgList args, const CommandContext& cmd_cntx, bool reverse) {
     cmd_cntx.rb->SendError(parser.Error()->MakeReply());
   }
 
-  using RankResult = std::vector<double>;
+  using RankResult = std::vector<long>;
   auto cb = [key, reverse, &ranks](Transaction* tx, EngineShard* es) -> OpResult<RankResult> {
     auto& db_slice = tx->GetDbSlice(es->shard_id());
     auto db_cntx = tx->GetDbContext();
@@ -335,7 +333,7 @@ void RankImpl(CmdArgList args, const CommandContext& cmd_cntx, bool reverse) {
     }
     auto* wrapper = it->it->second.GetRobjWrapper();
     auto* td = (td_histogram_t*)wrapper->inner_obj();
-    const double size = (double)td_size(td);
+    const size_t size = td_size(td);
     const double min = td_min(td);
     const double max = td_max(td);
 
@@ -351,9 +349,9 @@ void RankImpl(CmdArgList args, const CommandContext& cmd_cntx, bool reverse) {
       } else {
         const double cdf_val = td_cdf(td, rnk);
         const double cdf_val_prior_round = cdf_val * size;
-        const double cdf_to_absolute =
+        const size_t cdf_to_absolute =
             reverse ? round(cdf_val_prior_round) : HalfRoundDown(cdf_val_prior_round);
-        const double res = reverse ? round(size - cdf_to_absolute) : cdf_to_absolute;
+        const size_t res = reverse ? round(size - cdf_to_absolute) : cdf_to_absolute;
         result.push_back(res);
       }
     }
@@ -368,7 +366,7 @@ void RankImpl(CmdArgList args, const CommandContext& cmd_cntx, bool reverse) {
   auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
   rb->StartArray(res->size());
   for (auto res : *res) {
-    rb->SendDouble(res);
+    rb->SendLong(res);
   }
 }
 
@@ -412,8 +410,15 @@ void TDigestFamily::Cdf(CmdArgList args, const CommandContext& cmd_cntx) {
   };
 
   auto res = cmd_cntx.tx->ScheduleSingleHopT(cb);
-  // SendError covers ok
-  return cmd_cntx.rb->SendError(res.status());
+  if (!res) {
+    return cmd_cntx.rb->SendError(res.status());
+  }
+
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
+  rb->StartArray(res->size());
+  for (auto res : *res) {
+    rb->SendDouble(res);
+  }
 }
 
 void TDigestFamily::Quantile(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -457,8 +462,15 @@ void TDigestFamily::Quantile(CmdArgList args, const CommandContext& cmd_cntx) {
   };
 
   auto res = cmd_cntx.tx->ScheduleSingleHopT(cb);
-  // SendError covers ok
-  return cmd_cntx.rb->SendError(res.status());
+  if (!res) {
+    return cmd_cntx.rb->SendError(res.status());
+  }
+
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
+  rb->StartArray(res->size());
+  for (auto res : *res) {
+    rb->SendDouble(res);
+  }
 }
 
 void TDigestFamily::TrimmedMean(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -491,8 +503,12 @@ void TDigestFamily::TrimmedMean(CmdArgList args, const CommandContext& cmd_cntx)
   };
 
   auto res = cmd_cntx.tx->ScheduleSingleHopT(cb);
-  // SendError covers ok
-  return cmd_cntx.rb->SendError(res.status());
+  if (!res) {
+    return cmd_cntx.rb->SendError(res.status());
+  }
+
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
+  rb->SendDouble(*res);
 }
 
 struct MergeInput {
@@ -623,18 +639,18 @@ void TDigestFamily::Register(CommandRegistry* registry) {
   *registry << CI{"TDIGEST.CREATE", CO::WRITE | CO::DENYOOM, -1, 1, 1, acl::TDIGEST}.HFUNC(Create)
             << CI{"TDIGEST.ADD", CO::WRITE | CO::DENYOOM, -2, 1, 1, acl::TDIGEST}.HFUNC(Add)
             << CI{"TDIGEST.RESET", CO::WRITE, 2, 1, 1, acl::TDIGEST}.HFUNC(Reset)
-            << CI{"TDIGEST.CDF", CO::READONLY, -2, 1, 1, acl::TDIGEST}.HFUNC(Cdf)
-            << CI{"TDIGEST.RANK", CO::READONLY, -2, 1, 1, acl::TDIGEST}.HFUNC(Rank)
-            << CI{"TDIGEST.REVRANK", CO::READONLY, -2, 1, 1, acl::TDIGEST}.HFUNC(RevRank)
-            << CI{"TDIGEST.BYRANK", CO::READONLY, -2, 1, 1, acl::TDIGEST}.HFUNC(ByRank)
-            << CI{"TDIGEST.BYREVRANK", CO::READONLY, -2, 1, 1, acl::TDIGEST}.HFUNC(ByRevRank)
+            << CI{"TDIGEST.CDF", CO::READONLY, -3, 1, 1, acl::TDIGEST}.HFUNC(Cdf)
+            << CI{"TDIGEST.RANK", CO::READONLY, -3, 1, 1, acl::TDIGEST}.HFUNC(Rank)
+            << CI{"TDIGEST.REVRANK", CO::READONLY, -3, 1, 1, acl::TDIGEST}.HFUNC(RevRank)
+            << CI{"TDIGEST.BYRANK", CO::READONLY, -3, 1, 1, acl::TDIGEST}.HFUNC(ByRank)
+            << CI{"TDIGEST.BYREVRANK", CO::READONLY, -3, 1, 1, acl::TDIGEST}.HFUNC(ByRevRank)
             << CI{"TDIGEST.INFO", CO::READONLY, 2, 1, 1, acl::TDIGEST}.HFUNC(Info)
             << CI{"TDIGEST.MAX", CO::READONLY, 2, 1, 1, acl::TDIGEST}.HFUNC(Max)
             << CI{"TDIGEST.MIN", CO::READONLY, 2, 1, 1, acl::TDIGEST}.HFUNC(Min)
-            << CI{"TDIGEST.TRIMMED_MEAN", CO::READONLY, 3, 1, 1, acl::TDIGEST}.HFUNC(TrimmedMean)
+            << CI{"TDIGEST.TRIMMED_MEAN", CO::READONLY, 4, 1, 1, acl::TDIGEST}.HFUNC(TrimmedMean)
             << CI{"TDIGEST.MERGE", CO::WRITE | CO::VARIADIC_KEYS, -3, 3, 3, acl::TDIGEST}.HFUNC(
                    Merge)
-            << CI{"TDIGEST.QUANTILE", CO::READONLY, -2, 1, 1, acl::TDIGEST}.HFUNC(Quantile);
+            << CI{"TDIGEST.QUANTILE", CO::READONLY, -3, 1, 1, acl::TDIGEST}.HFUNC(Quantile);
 };
 
 }  // namespace dfly
