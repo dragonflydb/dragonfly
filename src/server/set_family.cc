@@ -15,6 +15,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
+#include "core/intrusive_string_set.h"
 #include "core/string_set.h"
 #include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
@@ -25,6 +26,14 @@ extern "C" {
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/transaction.h"
+
+// TODO set false when merge to MAIN
+// TODO set false when merge to MAIN
+// TODO set false when merge to MAIN
+// TODO set false when merge to MAIN
+// TODO set false when merge to MAIN
+ABSL_FLAG(bool, stringset_experimental, true,
+          "Enables dragonfly specific implementation of StringSet");
 
 namespace dfly {
 
@@ -51,6 +60,10 @@ constexpr uint32_t kMaxIntSetEntries = 256;
 
 bool IsDenseEncoding(const CompactObj& co) {
   return co.Encoding() == kEncodingStrMap2;
+}
+
+bool IsIntrusiveEncoding(const CompactObj& co) {
+  return co.Encoding() == kEncodingIntrusiveSet;
 }
 
 intset* IntsetAddSafe(string_view val, intset* is, bool* success, bool* added) {
@@ -150,6 +163,83 @@ struct StringSetWrapper {
   StringSet* const ss;
 };
 
+struct IntrusiveStringSetWrapper {
+  IntrusiveStringSetWrapper(const CompactObj& obj, const DbContext& db_cntx)
+      : IntrusiveStringSetWrapper(obj.RObjPtr(), db_cntx.time_now_ms) {
+    DCHECK(IsIntrusiveEncoding(obj));
+  }
+
+  IntrusiveStringSetWrapper(const SetType& st, const DbContext& db_cntx)
+      : IntrusiveStringSetWrapper(st.first, db_cntx.time_now_ms) {
+    DCHECK_EQ(st.second, kEncodingStrMap2);
+  }
+
+  static void Init(CompactObj* obj) {
+    obj->InitRobj(OBJ_SET, kEncodingStrMap2, CompactObj::AllocateMR<IntrusiveStringSet>());
+  }
+
+  unsigned Add(const NewEntries& entries, uint32_t ttl_sec, bool keepttl) const {
+    unsigned res = 0;
+    string_view members[IntrusiveStringSet::kMaxBatchLen];
+    size_t entries_len = std::visit([](const auto& e) { return e.size(); }, entries);
+    unsigned len = 0;
+    if (ss->BucketCount() < entries_len) {
+      ss->Reserve(entries_len);
+    }
+    for (string_view member : EntriesRange(entries)) {
+      members[len++] = member;
+      if (len == IntrusiveStringSet::kMaxBatchLen) {
+        res += ss->AddMany(absl::MakeSpan(members, IntrusiveStringSet::kMaxBatchLen), ttl_sec,
+                           keepttl);
+        len = 0;
+      }
+    }
+
+    if (len) {
+      res += ss->AddMany(absl::MakeSpan(members, len), ttl_sec, keepttl);
+    }
+
+    return res;
+  }
+
+  pair<unsigned, bool> Remove(const facade::ArgRange& entries) const {
+    unsigned removed = 0;
+    for (string_view member : entries)
+      removed += ss->Erase(member);
+    return {removed, ss->Empty()};
+  }
+
+  uint64_t Scan(uint64_t curs, const ScanOpts& scan_op, StringVec* res) const {
+    uint32_t count = scan_op.limit;
+    long maxiterations = count * 10;
+
+    do {
+      auto scan_callback = [&](string_view str) {
+        if (scan_op.Matches(str))
+          res->emplace_back(str);
+      };
+      curs = ss->Scan(curs, scan_callback);
+    } while (curs && maxiterations-- && res->size() < count);
+    return curs;
+  }
+
+  IntrusiveStringSet* operator->() const {
+    return ss;
+  }
+
+  auto Range() const {
+    return base::it::Range(ss->begin(), ss->end());
+  }
+
+ private:
+  IntrusiveStringSetWrapper(void* robj_ptr, uint64_t now_ms)
+      : ss(static_cast<IntrusiveStringSet*>(robj_ptr)) {
+    ss->set_time(MemberTimeSeconds(now_ms));
+  }
+
+  IntrusiveStringSet* const ss;
+};
+
 // returns (removed, isempty)
 pair<unsigned, bool> RemoveSet(const DbContext& db_context, facade::ArgRange vals,
                                CompactObj* set) {
@@ -170,8 +260,10 @@ pair<unsigned, bool> RemoveSet(const DbContext& db_context, facade::ArgRange val
     set->SetRObjPtr(is);
 
     return {removed, intsetLen(is) == 0};
-  } else {
+  } else if (set->Encoding() == kEncodingStrMap2) {
     return StringSetWrapper{*set, db_context}.Remove(vals);
+  } else {
+    return IntrusiveStringSetWrapper{*set, db_context}.Remove(vals);
   }
 }
 
@@ -189,16 +281,20 @@ void InitSet(const NewEntries& vals, CompactObj* set) {
   if (int_set) {
     intset* is = intsetNew();
     set->InitRobj(OBJ_SET, kEncodingIntSet, is);
-  } else {
+  } else if (!absl::GetFlag(FLAGS_stringset_experimental)) {
     StringSetWrapper::Init(set);
+  } else {
+    IntrusiveStringSetWrapper::Init(set);
   }
 }
 
 uint32_t SetTypeLen(const DbContext& db_context, const SetType& set) {
   if (set.second == kEncodingIntSet) {
     return intsetLen((const intset*)set.first);
-  } else {
+  } else if (set.second == kEncodingStrMap2) {
     return StringSetWrapper(set, db_context)->UpperBoundSize();
+  } else {
+    return IntrusiveStringSetWrapper(set, db_context)->UpperBoundSize();
   }
 }
 
@@ -210,7 +306,11 @@ bool IsInSet(const DbContext& db_context, const SetType& st, int64_t val) {
   char* next = absl::numbers_internal::FastIntToBuffer(val, buf);
   string_view str{buf, size_t(next - buf)};
 
-  return StringSetWrapper(st, db_context)->Contains(str);
+  if (st.second == kEncodingStrMap2) {
+    return StringSetWrapper(st, db_context)->Contains(str);
+  } else {
+    return IntrusiveStringSetWrapper(st, db_context)->Contains(str);
+  }
 }
 
 bool IsInSet(const DbContext& db_context, const SetType& st, string_view member) {
@@ -220,8 +320,10 @@ bool IsInSet(const DbContext& db_context, const SetType& st, string_view member)
       return false;
 
     return intsetFind((intset*)st.first, llval);
-  } else {
+  } else if (st.second == kEncodingStrMap2) {
     return StringSetWrapper(st, db_context)->Contains(member);
+  } else {
+    return IntrusiveStringSetWrapper(st, db_context)->Contains(member);
   }
 }
 
@@ -233,42 +335,67 @@ int32_t GetExpiry(const DbContext& db_context, const SetType& st, string_view me
       return -3;
 
     return -1;
-  } else {
+  } else if (st.second == kEncodingStrMap2) {
     StringSetWrapper ss{st, db_context};
     auto it = ss->Find(member);
     if (it == ss->end())
       return -3;
 
     return it.HasExpiry() ? it.ExpiryTime() : -1;
+  } else {
+    IntrusiveStringSetWrapper ss{st, db_context};
+    auto it = ss->Find(member);
+    if (it == ss->end())
+      return -3;
+
+    return it->HasExpiry() ? it->ExpiryTime() : -1;
   }
 }
 
 // Removes arg from result.
 void DiffStrSet(const DbContext& db_context, const SetType& st,
                 absl::flat_hash_set<string>* result) {
-  for (string_view entry : StringSetWrapper{st, db_context}.Range())
-    result->erase(entry);
+  if (!absl::GetFlag(FLAGS_stringset_experimental)) {
+    for (string_view entry : StringSetWrapper{st, db_context}.Range())
+      result->erase(entry);
+  } else {
+    for (auto entry : IntrusiveStringSetWrapper{st, db_context}.Range())
+      result->erase(entry.Key());
+  }
 }
 
 void InterStrSet(const DbContext& db_context, const vector<SetType>& vec, StringVec* result) {
-  for (string_view str : StringSetWrapper{vec.front(), db_context}.Range()) {
-    size_t j = 1;
-    for (j = 1; j < vec.size(); ++j) {
-      if (vec[j].first != vec.front().first && !IsInSet(db_context, vec[j], str)) {
-        break;
+  if (!absl::GetFlag(FLAGS_stringset_experimental)) {
+    for (string_view str : StringSetWrapper{vec.front(), db_context}.Range()) {
+      size_t j = 1;
+      for (j = 1; j < vec.size(); ++j) {
+        if (vec[j].first != vec.front().first && !IsInSet(db_context, vec[j], str)) {
+          break;
+        }
+      }
+
+      if (j == vec.size()) {
+        result->emplace_back(str);
       }
     }
+  } else {
+    for (auto entry : IntrusiveStringSetWrapper{vec.front(), db_context}.Range()) {
+      size_t j = 1;
+      for (j = 1; j < vec.size(); ++j) {
+        if (vec[j].first != vec.front().first && !IsInSet(db_context, vec[j], entry.Key())) {
+          break;
+        }
+      }
 
-    if (j == vec.size()) {
-      result->emplace_back(str);
+      if (j == vec.size()) {
+        result->emplace_back(entry.Key());
+      }
     }
   }
 }
 
 StringVec RandMemberStrSet(const DbContext& db_context, const CompactObj& co,
                            PicksGenerator& generator, std::size_t picks_count) {
-  CHECK(IsDenseEncoding(co));
-
   std::unordered_map<RandomPick, std::uint32_t> times_index_is_picked;
   for (std::size_t i = 0; i < picks_count; i++) {
     times_index_is_picked[generator.Generate()]++;
@@ -278,11 +405,23 @@ StringVec RandMemberStrSet(const DbContext& db_context, const CompactObj& co,
   result.reserve(picks_count);
 
   std::uint32_t ss_entry_index = 0;
-  for (string_view str : StringSetWrapper{co, db_context}.Range()) {
-    auto it = times_index_is_picked.find(ss_entry_index++);
-    if (it != times_index_is_picked.end()) {
-      while (it->second--)
-        result.emplace_back(str);
+  if (!absl::GetFlag(FLAGS_stringset_experimental)) {
+    CHECK(IsDenseEncoding(co));
+    for (string_view str : StringSetWrapper{co, db_context}.Range()) {
+      auto it = times_index_is_picked.find(ss_entry_index++);
+      if (it != times_index_is_picked.end()) {
+        while (it->second--)
+          result.emplace_back(str);
+      }
+    }
+  } else {
+    CHECK(IsIntrusiveEncoding(co));
+    for (auto entry : IntrusiveStringSetWrapper{co, db_context}.Range()) {
+      auto it = times_index_is_picked.find(ss_entry_index++);
+      if (it != times_index_is_picked.end()) {
+        while (it->second--)
+          result.emplace_back(entry.Key());
+      }
     }
   }
   /* Equal elements in the result are always successive. So, it is necessary to shuffle them */
@@ -484,13 +623,24 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
       if (!success) {
         co.SetRObjPtr(is);
 
-        StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
-        if (!ss) {
-          return OpStatus::OUT_OF_MEMORY;
+        if (!absl::GetFlag(FLAGS_stringset_experimental)) {
+          StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
+          if (!ss) {
+            return OpStatus::OUT_OF_MEMORY;
+          }
+
+          // frees 'is' on a way.
+          co.InitRobj(OBJ_SET, kEncodingStrMap2, ss);
+        } else {
+          IntrusiveStringSet* ss = SetFamily::ConvertToIntrStrSet(is, intsetLen(is));
+          if (!ss) {
+            return OpStatus::OUT_OF_MEMORY;
+          }
+
+          // frees 'is' on a way.
+          co.InitRobj(OBJ_SET, kEncodingIntrusiveSet, ss);
         }
 
-        // frees 'is' on a way.
-        co.InitRobj(OBJ_SET, kEncodingStrMap2, ss);
         break;
       }
     }
@@ -499,8 +649,10 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
       co.SetRObjPtr(is);
   }
 
-  if (co.Encoding() != kEncodingIntSet) {
+  if (co.Encoding() == kEncodingStrMap2) {
     res = StringSetWrapper{co, op_args.db_cntx}.Add(vals, UINT32_MAX, false);
+  } else if (co.Encoding() == kEncodingIntrusiveSet) {
+    res = IntrusiveStringSetWrapper{co, op_args.db_cntx}.Add(vals, UINT32_MAX, false);
   }
 
   if (journal_update && op_args.shard->journal()) {
@@ -527,26 +679,48 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
   CompactObj& co = add_res.it->second;
 
   if (add_res.is_new) {
-    StringSetWrapper::Init(&co);
+    if (!absl::GetFlag(FLAGS_stringset_experimental)) {
+      StringSetWrapper::Init(&co);
+    } else {
+      IntrusiveStringSetWrapper::Init(&co);
+    }
   } else {
     // for non-overwrite case it must be set.
     if (co.ObjType() != OBJ_SET)
       return OpStatus::WRONG_TYPE;
 
-    // Update stats and trigger any handle the old value if needed.
-    if (co.Encoding() == kEncodingIntSet) {
-      intset* is = (intset*)co.RObjPtr();
-      StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
-      if (!ss) {
-        return OpStatus::OUT_OF_MEMORY;
+    if (!absl::GetFlag(FLAGS_stringset_experimental)) {
+      // Update stats and trigger any handle the old value if needed.
+      if (co.Encoding() == kEncodingIntSet) {
+        intset* is = (intset*)co.RObjPtr();
+        StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
+        if (!ss) {
+          return OpStatus::OUT_OF_MEMORY;
+        }
+        co.InitRobj(OBJ_SET, kEncodingStrMap2, ss);
       }
-      co.InitRobj(OBJ_SET, kEncodingStrMap2, ss);
-    }
 
-    CHECK(IsDenseEncoding(co));
+      CHECK(IsDenseEncoding(co));
+    } else {
+      // Update stats and trigger any handle the old value if needed.
+      if (co.Encoding() == kEncodingIntSet) {
+        intset* is = (intset*)co.RObjPtr();
+        IntrusiveStringSet* ss = SetFamily::ConvertToIntrStrSet(is, intsetLen(is));
+        if (!ss) {
+          return OpStatus::OUT_OF_MEMORY;
+        }
+        co.InitRobj(OBJ_SET, kEncodingIntrusiveSet, ss);
+      }
+
+      CHECK(IsIntrusiveEncoding(co));
+    }
   }
 
-  return StringSetWrapper{co, op_args.db_cntx}.Add(vals, ttl_sec, keepttl);
+  if (!absl::GetFlag(FLAGS_stringset_experimental)) {
+    return StringSetWrapper{co, op_args.db_cntx}.Add(vals, ttl_sec, keepttl);
+  } else {
+    return IntrusiveStringSetWrapper{co, op_args.db_cntx}.Add(vals, ttl_sec, keepttl);
+  }
 }
 
 OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, facade::ArgRange vals,
@@ -679,6 +853,9 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ShardArgs::Iterator start,
       if (IsDenseEncoding(pv)) {
         StringSet* ss = (StringSet*)pv.RObjPtr();
         ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
+      } else if (IsIntrusiveEncoding(pv)) {
+        IntrusiveStringSet* ss = (IntrusiveStringSet*)pv.RObjPtr();
+        ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
       }
       container_utils::IterateSet(pv, [&uniques](container_utils::ContainerEntry ce) {
         uniques.emplace(ce.ToString());
@@ -711,6 +888,9 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
   const PrimeValue& pv = find_res.value()->second;
   if (IsDenseEncoding(pv)) {
     StringSet* ss = (StringSet*)pv.RObjPtr();
+    ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
+  } else if (IsIntrusiveEncoding(pv)) {
+    IntrusiveStringSet* ss = (IntrusiveStringSet*)pv.RObjPtr();
     ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
   }
 
@@ -768,6 +948,9 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
     const PrimeValue& pv = find_res.value()->second;
     if (IsDenseEncoding(pv)) {
       StringSet* ss = (StringSet*)pv.RObjPtr();
+      ss->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
+    } else if (IsIntrusiveEncoding(pv)) {
+      IntrusiveStringSet* ss = (IntrusiveStringSet*)pv.RObjPtr();
       ss->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
     }
 
@@ -876,6 +1059,9 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     if (IsDenseEncoding(co)) {
       StringSet* ss = (StringSet*)co.RObjPtr();
       ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
+    } else if (IsIntrusiveEncoding(co)) {
+      IntrusiveStringSet* ss = (IntrusiveStringSet*)co.RObjPtr();
+      ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
     }
 
     StringVec result;
@@ -943,8 +1129,10 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cur
       }
     }
     *cursor = 0;
-  } else {
+  } else if (it->second.Encoding() == kEncodingStrMap2) {
     *cursor = StringSetWrapper{it->second, op_args.db_cntx}.Scan(*cursor, scan_op, &res);
+  } else {
+    *cursor = IntrusiveStringSetWrapper{it->second, op_args.db_cntx}.Scan(*cursor, scan_op, &res);
   }
 
   return res;
@@ -1487,6 +1675,25 @@ StringSet* SetFamily::ConvertToStrSet(const intset* is, size_t expected_len) {
   return ss;
 }
 
+IntrusiveStringSet* SetFamily::ConvertToIntrStrSet(const intset* is, size_t expected_len) {
+  int64_t intele;
+  char buf[32];
+  int ii = 0;
+
+  IntrusiveStringSet* ss = CompactObj::AllocateMR<IntrusiveStringSet>();
+  if (expected_len) {
+    ss->Reserve(expected_len);
+  }
+
+  while (intsetGet(const_cast<intset*>(is), ii++, &intele)) {
+    char* next = absl::numbers_internal::FastIntToBuffer(intele, buf);
+    string_view str{buf, size_t(next - buf)};
+    CHECK(ss->Add(str));
+  }
+
+  return ss;
+}
+
 using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&x)
@@ -1556,20 +1763,37 @@ vector<long> SetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_
                                             CmdArgList values, PrimeValue* pv) {
   DCHECK_EQ(OBJ_SET, pv->ObjType());
 
-  if (pv->Encoding() == kEncodingIntSet) {
-    // a valid result can never be a intset, since it doesnt keep ttl
-    intset* is = (intset*)pv->RObjPtr();
-    StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
-    if (!ss) {
-      std::vector<long> out(values.size(), -2);
-      return out;
+  if (!absl::GetFlag(FLAGS_stringset_experimental)) {
+    if (pv->Encoding() == kEncodingIntSet) {
+      // a valid result can never be a intset, since it doesnt keep ttl
+      intset* is = (intset*)pv->RObjPtr();
+      StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
+      if (!ss) {
+        std::vector<long> out(values.size(), -2);
+        return out;
+      }
+      pv->InitRobj(OBJ_SET, kEncodingStrMap2, ss);
     }
-    pv->InitRobj(OBJ_SET, kEncodingStrMap2, ss);
-  }
 
-  auto ss = static_cast<StringSet*>(pv->RObjPtr());
-  ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
-  return ExpireElements(ss, values, ttl_sec);
+    auto ss = static_cast<StringSet*>(pv->RObjPtr());
+    ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
+    return ExpireElements(ss, values, ttl_sec);
+  } else {
+    if (pv->Encoding() == kEncodingIntSet) {
+      // a valid result can never be a intset, since it doesnt keep ttl
+      intset* is = (intset*)pv->RObjPtr();
+      IntrusiveStringSet* ss = SetFamily::ConvertToIntrStrSet(is, intsetLen(is));
+      if (!ss) {
+        std::vector<long> out(values.size(), -2);
+        return out;
+      }
+      pv->InitRobj(OBJ_SET, kEncodingIntrusiveSet, ss);
+    }
+
+    auto ss = static_cast<StringSet*>(pv->RObjPtr());
+    ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
+    return ExpireElements(ss, values, ttl_sec);
+  }
 }
 
 }  // namespace dfly

@@ -26,6 +26,7 @@ extern "C" {
 #include "core/bloom.h"
 #include "core/detail/bitpacking.h"
 #include "core/huff_coder.h"
+#include "core/intrusive_string_set.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -66,11 +67,12 @@ size_t UpdateSize(size_t size, int64_t update) {
 
 inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
   switch (encoding) {
-    case kEncodingStrMap2: {
+    case kEncodingStrMap2:
       CompactObj::DeleteMR<StringSet>(ptr);
       break;
-    }
-
+    case kEncodingIntrusiveSet:
+      CompactObj::DeleteMR<IntrusiveStringSet>(ptr);
+      break;
     case kEncodingIntSet:
       zfree((void*)ptr);
       break;
@@ -96,6 +98,10 @@ size_t MallocUsedSet(unsigned encoding, void* ptr) {
   switch (encoding) {
     case kEncodingStrMap2: {
       StringSet* ss = (StringSet*)ptr;
+      return ss->ObjMallocUsed() + ss->SetMallocUsed() + zmalloc_usable_size(ptr);
+    }
+    case kEncodingIntrusiveSet: {
+      IntrusiveStringSet* ss = (IntrusiveStringSet*)ptr;
       return ss->ObjMallocUsed() + ss->SetMallocUsed() + zmalloc_usable_size(ptr);
     }
     case kEncodingIntSet:
@@ -324,6 +330,10 @@ pair<void*, bool> DefragSet(unsigned encoding, void* ptr, float ratio) {
     case kEncodingStrMap2: {
       return DefragStrSet((StringSet*)ptr, ratio);
     }
+    case kEncodingIntrusiveSet:
+      // TODO add defrag logic
+      LOG(WARNING) << "DefragSet for IntrusiveSet isn't implemented";
+      return {ptr, false};
 
     default:
       ABSL_UNREACHABLE();
@@ -455,6 +465,10 @@ size_t RobjWrapper::Size() const {
         }
         case kEncodingStrMap2: {
           StringSet* ss = (StringSet*)inner_obj_;
+          return ss->UpperBoundSize();
+        }
+        case kEncodingIntrusiveSet: {
+          auto* ss = (IntrusiveStringSet*)inner_obj_;
           return ss->UpperBoundSize();
         }
         default:
