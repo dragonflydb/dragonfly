@@ -119,7 +119,7 @@ GenericError Replica::Start() {
 
   // 3. Greet.
   VLOG(1) << "Greeting";
-  state_mask_.store(R_ENABLED | R_TCP_CONNECTED);
+  state_mask_ = R_ENABLED | R_TCP_CONNECTED;
   ec = Greet();
   RETURN_ON_ERR(check_connection_error(ec, "could not greet master "));
 
@@ -131,10 +131,10 @@ void Replica::StartMainReplicationFiber(std::optional<LastMasterSyncData> last_m
                         std::move(last_master_sync_data));
 }
 
-void Replica::EnableReplication(facade::SinkReplyBuilder* builder) {
+void Replica::EnableReplication() {
   VLOG(1) << "Enabling replication";
 
-  state_mask_.store(R_ENABLED);                                      // set replica state to enabled
+  state_mask_ = R_ENABLED;                                           // set replica state to enabled
   sync_fb_ = MakeFiber(&Replica::MainReplicationFb, this, nullopt);  // call replication fiber
 }
 
@@ -143,7 +143,7 @@ std::optional<Replica::LastMasterSyncData> Replica::Stop() {
   // Stops the loop in MainReplicationFb.
 
   proactor_->Await([this] {
-    state_mask_.store(0);          // Specifically ~R_ENABLED.
+    state_mask_ = 0;               // Specifically ~R_ENABLED.
     exec_st_.ReportCancelError();  // Context is fully resposible for cleanup.
   });
 
@@ -195,11 +195,11 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
   SetShardStates(true);
 
   error_code ec;
-  while (state_mask_.load() & R_ENABLED) {
+  while (state_mask_ & R_ENABLED) {
     // Discard all previous errors and set default error handler.
     exec_st_.Reset([this](const GenericError& ge) { this->DefaultErrorHandler(ge); });
     // 1. Connect socket.
-    if ((state_mask_.load() & R_TCP_CONNECTED) == 0) {
+    if ((state_mask_ & R_TCP_CONNECTED) == 0) {
       ThisFiber::SleepFor(500ms);
       if (is_paused_)
         continue;
@@ -218,25 +218,27 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
         continue;
       }
       VLOG(1) << "Replica socket connected";
-      state_mask_.fetch_or(R_TCP_CONNECTED);
+      state_mask_ |= R_TCP_CONNECTED;
       continue;
     }
 
+    DCHECK(Proactor() == proactor_);
+
     // 2. Greet.
-    if ((state_mask_.load() & R_GREETED) == 0) {
+    if ((state_mask_ & R_GREETED) == 0) {
       ec = Greet();
       if (ec) {
         LOG(INFO) << "Error greeting " << server().Description() << " " << ec << " "
                   << ec.message();
-        state_mask_.fetch_and(R_ENABLED);
+        state_mask_ &= R_ENABLED;
         continue;
       }
-      state_mask_.fetch_or(R_GREETED);
+      state_mask_ |= R_GREETED;
       continue;
     }
 
     // 3. Initiate full sync
-    if ((state_mask_.load() & R_SYNC_OK) == 0) {
+    if ((state_mask_ & R_SYNC_OK) == 0) {
       if (HasDflyMaster()) {
         ec = InitiateDflySync(std::exchange(last_master_sync_data, nullopt));
       } else
@@ -245,22 +247,22 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
       if (ec) {
         LOG(WARNING) << "Error syncing with " << server().Description() << " " << ec << " "
                      << ec.message();
-        state_mask_.fetch_and(R_ENABLED);  // reset all flags besides R_ENABLED
+        state_mask_ &= R_ENABLED;  // reset all flags besides R_ENABLED
         continue;
       }
-      state_mask_.fetch_or(R_SYNC_OK);
+      state_mask_ |= R_SYNC_OK;
       continue;
     }
 
     // 4. Start stable state sync.
-    DCHECK(state_mask_.load() & R_SYNC_OK);
+    DCHECK(state_mask_ & R_SYNC_OK);
 
     if (HasDflyMaster())
       ec = ConsumeDflyStream();
     else
       ec = ConsumeRedisStream();
 
-    auto state = state_mask_.fetch_and(R_ENABLED);
+    auto state = state_mask_ &= R_ENABLED;
     if (state & R_ENABLED) {  // replication was not stopped.
       LOG(WARNING) << "Error stable sync with " << server().Description() << " " << ec << " "
                    << ec.message();
@@ -317,7 +319,7 @@ error_code Replica::Greet() {
     PC_RETURN_ON_BAD_RESPONSE(false);
   }
 
-  state_mask_.fetch_or(R_GREETED);
+  state_mask_ |= R_GREETED;
   return error_code{};
 }
 
@@ -336,6 +338,8 @@ std::error_code Replica::HandleCapaDflyResp() {
     return make_error_code(errc::bad_message);
   }
 
+  DCHECK(proactor_ == Proactor());
+
   // If we're syncing a different replication ID, drop the saved LSNs.
   string_view master_repl_id = ToSV(LastResponseArgs()[0].GetBuf());
   if (master_context_.master_repl_id != master_repl_id) {
@@ -343,7 +347,7 @@ std::error_code Replica::HandleCapaDflyResp() {
         !master_context_.master_repl_id.empty()) {
       LOG(ERROR) << "Encountered different master repl id (" << master_repl_id << " vs "
                  << master_context_.master_repl_id << ")";
-      state_mask_.store(0);
+      state_mask_ = 0;
       return make_error_code(errc::connection_aborted);
     }
     last_journal_LSNs_.reset();
@@ -411,7 +415,7 @@ error_code Replica::InitiatePSync() {
   if (snapshot_size || token != nullptr) {
     LOG(INFO) << "Starting full sync with Redis master";
 
-    state_mask_.fetch_or(R_SYNCING);
+    state_mask_ |= R_SYNCING;
 
     io::PrefixSource ps{io_buf.InputBuffer(), Sock()};
 
@@ -462,8 +466,8 @@ error_code Replica::InitiatePSync() {
     LOG(INFO) << "Re-established sync with Redis master with ID=" << id;
   }
 
-  state_mask_.fetch_and(~R_SYNCING);
-  state_mask_.fetch_or(R_SYNC_OK);
+  state_mask_ &= ~R_SYNCING;
+  state_mask_ |= R_SYNC_OK;
 
   // There is a data race condition in Redis-master code, where "ACK 0" handler may be
   // triggered before Redis is ready to transition to the streaming state and it silenty ignores
@@ -515,13 +519,13 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
   }
 
   // Start full sync flows.
-  state_mask_.fetch_or(R_SYNCING);
+  state_mask_ |= R_SYNCING;
 
   absl::Cleanup cleanup = [this]() {
     // We do the following operations regardless of outcome.
     JoinDflyFlows();
     service_.RemoveLoadingState();
-    state_mask_.fetch_and(~R_SYNCING);
+    state_mask_ &= ~R_SYNCING;
     last_journal_LSNs_.reset();
   };
 
@@ -1117,9 +1121,9 @@ auto Replica::GetSummary() const -> Summary {
     Summary res;
     res.host = server().host;
     res.port = server().port;
-    res.master_link_established = (state_mask_.load() & R_TCP_CONNECTED);
-    res.full_sync_in_progress = (state_mask_.load() & R_SYNCING);
-    res.full_sync_done = (state_mask_.load() & R_SYNC_OK);
+    res.master_link_established = (state_mask_ & R_TCP_CONNECTED);
+    res.full_sync_in_progress = (state_mask_ & R_SYNCING);
+    res.full_sync_done = (state_mask_ & R_SYNC_OK);
 
     uint64_t current_time = ProactorBase::GetMonotonicTimeNs();
     // last_io_time is derived above by reading last_io_time_ from all the flows,

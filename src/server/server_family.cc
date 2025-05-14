@@ -3052,7 +3052,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
       ec = new_replica->Start();
       break;
     case ActionOnConnectionFail::kContinueReplication:
-      new_replica->EnableReplication(builder);
+      new_replica->EnableReplication();
       break;
   };
 
