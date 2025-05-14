@@ -1513,7 +1513,7 @@ void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
     if (shard_id == source_sid) {
       fetch_result = OpFetchSortEntries(t->GetOpArgs(shard), key, alpha);
     }
-    return fetch_result.status();
+    return OpStatus::OK;
   };
 
   if (store_key) {
@@ -1527,18 +1527,24 @@ void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
   //       return OpFetchSortEntries(t->GetOpArgs(shard), key, alpha);
   //     });
 
-  if (fetch_result == OpStatus::WRONG_TYPE)
+  if (fetch_result == OpStatus::WRONG_TYPE) {
+    cmd_cntx.tx->Conclude();
     return builder->SendError(fetch_result.status());
+  }
 
-  if (fetch_result.status() == OpStatus::INVALID_NUMERIC_RESULT)
+  if (fetch_result.status() == OpStatus::INVALID_NUMERIC_RESULT) {
+    cmd_cntx.tx->Conclude();
     return builder->SendError("One or more scores can't be converted into double");
+  }
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  if (!fetch_result.ok())
+  if (!fetch_result.ok()) {
+    cmd_cntx.tx->Conclude();
     return rb->SendEmptyArray();
+  }
 
   auto result_type = fetch_result.type();
-  auto sort_call = [builder, bounds, reversed, result_type, store_key, cmd_cntx](auto& entries) {
+  auto sort_call = [builder, bounds, reversed, result_type, &store_key, &cmd_cntx](auto& entries) {
     using value_t = typename std::decay_t<decltype(entries)>::value_type;
     auto cmp = reversed ? &value_t::greater : &value_t::less;
     if (bounds) {
@@ -1565,7 +1571,7 @@ void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
         if (shard_id == dest_sid) {
           store_len = OpStore(t->GetOpArgs(shard), store_key.value(), start_it, end_it);
         }
-        return store_len.status();
+        return OpStatus::OK;
       };
       cmd_cntx.tx->Execute(std::move(store_callback), true);
       if (store_len) {
