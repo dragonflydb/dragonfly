@@ -45,9 +45,9 @@ class Replica : ProtocolClient {
   enum State : unsigned {
     R_ENABLED = 1,  // Replication mode is enabled. Serves for signaling shutdown.
     R_TCP_CONNECTED = 2,
-    R_GREETED = 4,
-    R_SYNCING = 8,
-    R_SYNC_OK = 0x10,
+    R_GREETED = 4,     // Initial handshake with the master is done.
+    R_SYNCING = 8,     // In process of full sync with the master.
+    R_SYNC_OK = 0x10,  // Signals successful ending of full-sync state, exclusive with R_SYNCING.
   };
 
  public:
@@ -68,7 +68,7 @@ class Replica : ProtocolClient {
   // Sets the server state to have replication enabled.
   // It is like Start(), but does not attempt to establish
   // a connection right-away, but instead lets MainReplicationFb do the work.
-  void EnableReplication(facade::SinkReplyBuilder* builder);
+  void EnableReplication();
 
   std::optional<LastMasterSyncData> Stop();  // thread-safe
 
@@ -164,7 +164,7 @@ class Replica : ProtocolClient {
   // repl_offs - till what offset we've already read from the master.
   // ack_offs_ last acknowledged offset.
   size_t repl_offs_ = 0, ack_offs_ = 0;
-  std::atomic<unsigned> state_mask_ = 0;
+  unsigned state_mask_ = 0;  // see State enum above.
 
   bool is_paused_ = false;
   std::string id_;
