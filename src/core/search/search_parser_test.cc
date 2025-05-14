@@ -277,7 +277,7 @@ TEST_F(SearchParserTest, KNN) {
 }
 
 TEST_F(SearchParserTest, KNNfull) {
-  SetInput("*=>[KNN 1 @vector field_vec AS vec_sort EF_RUNTIME 15]");
+  SetInput("*=>[Knn 1 @vector field_vec EF_Runtime 15 as vec_sort]");
   NEXT_TOK(TOK_STAR);
   NEXT_TOK(TOK_ARROW);
   NEXT_TOK(TOK_LBRACKET);
@@ -287,11 +287,11 @@ TEST_F(SearchParserTest, KNNfull) {
   NEXT_TOK(TOK_FIELD);
   NEXT_TOK(TOK_TERM);
 
-  NEXT_TOK(TOK_AS);
-  NEXT_EQ(TOK_TERM, string, "vec_sort");
-
   NEXT_TOK(TOK_EF_RUNTIME);
   NEXT_EQ(TOK_UINT32, string, "15");
+
+  NEXT_TOK(TOK_AS);
+  NEXT_EQ(TOK_TERM, string, "vec_sort");
 
   NEXT_TOK(TOK_RBRACKET);
 }

@@ -591,6 +591,15 @@ TEST_P(KnnTest, Simple1D) {
     algo.Init("* =>[KNN 2 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(70, 71));
   }
+
+  // Two closest to 70.5
+  {
+    params["vec"] = ToBytes({70.5});
+    algo.Init("* =>[KNN 2 @pos $vec as vector_distance]", &params);
+    EXPECT_EQ("vector_distance", algo.GetKnnScoreSortOption()->score_field_alias);
+    SearchResult result = algo.Search(&indices);
+    EXPECT_THAT(result.ids, testing::UnorderedElementsAre(70, 71));
+  }
 }
 
 TEST_P(KnnTest, Simple2D) {
