@@ -6,6 +6,7 @@
 /* redis.h auxiliary definitions */
 /* the last one in object.h is OBJ_STREAM and it is 6,
  * this will add enough place for Redis types to grow */
+#define OBJ_TOPK  13U
 #define OBJ_TDIGEST  14U
 #define OBJ_JSON 15U
 #define OBJ_SBF  16U
