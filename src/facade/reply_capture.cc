@@ -81,24 +81,24 @@ void CapturingReplyBuilder::SendDirect(Payload&& val) {
   }
 }
 
-void CapturingReplyBuilder::Capture(Payload val, bool collapse_if_needed) {
+void CapturingReplyBuilder::Capture(Payload val) {
   if (!stack_.empty()) {
-    auto& last = stack_.top();
-    last.first->arr.push_back(std::move(val));
-    if (collapse_if_needed && last.second-- == 1) {
-      CollapseFilledCollections();
-    }
+    stack_.top().first->arr.push_back(std::move(val));
+    stack_.top().second--;
   } else {
     DCHECK_EQ(current_.index(), 0u);
     current_ = std::move(val);
   }
+
+  // Check if we filled up a collection.
+  CollapseFilledCollections();
 }
 
 void CapturingReplyBuilder::CollapseFilledCollections() {
   while (!stack_.empty() && stack_.top().second == 0) {
     auto pl = std::move(stack_.top());
     stack_.pop();
-    Capture(std::move(pl.first), false);
+    Capture(std::move(pl.first));
   }
 }
 

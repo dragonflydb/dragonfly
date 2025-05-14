@@ -79,7 +79,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   void SendDirect(Payload&& val);
 
   // Capture value and store eiter in current topmost collection or as a standalone value.
-  void Capture(Payload val, bool collapse_if_needed = true);
+  void Capture(Payload val);
 
   // While topmost collection in stack is full, finalize it and add it as a regular value.
   void CollapseFilledCollections();
