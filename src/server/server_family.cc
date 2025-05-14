@@ -3409,14 +3409,14 @@ void ServerFamily::Module(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendSimpleString("name");
   rb->SendSimpleString("ReJSON");
   rb->SendSimpleString("ver");
-  rb->SendLong(20'000);
+  rb->SendLong(20'808);
 
   // Search
   rb->StartCollection(2, RedisReplyBuilder::MAP);
   rb->SendSimpleString("name");
   rb->SendSimpleString("search");
   rb->SendSimpleString("ver");
-  rb->SendLong(20'000);  // we target v2
+  rb->SendLong(21'015);  // we target v2
 }
 
 void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,
