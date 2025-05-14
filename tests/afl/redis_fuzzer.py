@@ -457,10 +457,14 @@ class AFLFuzzer:
                 # If there's a decoding error, use character representation with escaping
                 arg_str = repr(arg)[1:-1]  # Remove quotes from repr
 
-            # Always use quotes for safety
-            escaped_arg = arg_str.replace('"', '\\"').replace("\\\\", "\\")
+            # Always use quotes for safety, but preserve original escape sequences
+            # We replace the quotes with \" but don't modify any escape sequences
+            escaped_arg = arg_str.replace('"', '\\"')
+
+            # Store the argument in quotes
             formatted_args.append('"' + escaped_arg + '"')
 
+        # The command format must be preserved exactly for proper reproduction
         return f"{command} {' '.join(formatted_args)}"
 
     def execute_tests(self, skip_logging=False):
