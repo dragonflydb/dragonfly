@@ -648,7 +648,6 @@ error_code Replica::ConsumeRedisStream() {
   while (true) {
     auto response = ReadRespReply(&io_buf, /*copy_msg=*/false);
     if (!response.has_value()) {
-      VLOG(1) << "ConsumeRedisStream finished";
       LOG(ERROR) << "Error in Redis Stream at phase " << GetCurrentPhase() << " with "
                  << server().Description() << ", error: " << response.error()
                  << ", socket state: " + GetSocketInfo(Sock()->native_handle());

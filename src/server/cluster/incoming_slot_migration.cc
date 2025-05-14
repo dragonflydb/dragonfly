@@ -68,9 +68,9 @@ class ClusterShardMigration {
 
       auto tx_data = tx_reader.NextTxData(&reader, cntx);
       if (!tx_data) {
-        if (cntx->GetError()) {
+        if (auto err = cntx->GetError(); err) {
           LOG(WARNING) << "Error reading from migration socket for shard " << source_shard_id_
-                       << ": " << cntx->GetError().Format()
+                       << ": " << err.Format()
                        << ", socket state: " << GetSocketInfo(source->native_handle());
         }
         break;
@@ -112,10 +112,8 @@ class ClusterShardMigration {
       return socket_->proactor()->Await([s = socket_]() {
         if (s->IsOpen()) {
           auto ec = s->Shutdown(SHUT_RDWR);  // Does not Close(), only forbids further I/O.
-          if (ec) {
-            LOG(WARNING) << "Error shutting down socket for shard migration: " << ec.message()
-                         << ", socket state: " << GetSocketInfo(s->native_handle());
-          }
+          LOG_IF(WARNING, ec) << "Error shutting down socket for shard migration: " << ec.message()
+                              << ", socket state: " << GetSocketInfo(s->native_handle());
           return ec;
         }
         return std::error_code();

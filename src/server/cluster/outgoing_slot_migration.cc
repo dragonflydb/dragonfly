@@ -207,7 +207,6 @@ void OutgoingMigration::SyncFb() {
     VLOG(1) << "Connecting to target node";
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
     if (auto ec = ConnectAndAuth(timeout, &exec_st_); ec) {
-      std::string socket_info;
       LOG(WARNING) << "Can't connect to target node " << server().Description()
                    << " for migration: " << ec.message()
                    << ", socket state: " + GetSocketInfo(Sock()->native_handle());
@@ -223,7 +222,6 @@ void OutgoingMigration::SyncFb() {
     }
 
     if (auto ec = SendCommandAndReadResponse(cmd); ec) {
-      std::string socket_info;
       LOG(WARNING) << "Could not send INIT command to " << server().Description()
                    << " for migration: " << ec.message()
                    << ", socket state: " + GetSocketInfo(Sock()->native_handle());
