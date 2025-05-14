@@ -119,14 +119,11 @@ class IntrusiveStringSet {
     const auto bucket_id = BucketId(hash);
     auto& bucket = entries_[bucket_id];
 
-    uint32_t expired_fields = 0;
-    if (auto existed_item = bucket.Find(str, hash, capacity_log_, &expired_fields, time_now_);
+    if (auto existed_item = bucket.Find(str, hash, capacity_log_, &size_, time_now_);
         existed_item) {
-      size_ -= expired_fields;
       // TODO consider common implementation for key value pair
       return {};
     }
-    size_ -= expired_fields;
     return AddUnique(str, bucket, hash, EntryTTL(ttl_sec));
   }
 
@@ -161,15 +158,13 @@ class IntrusiveStringSet {
       uint64_t hash = Hash(s);
       const auto bucket_id = BucketId(hash);
       auto& bucket = entries_[bucket_id];
-      uint32_t expired_fields = 0;
-      if (auto existed_item = bucket.Find(s, hash, capacity_log_, &expired_fields, time_now_);
+      if (auto existed_item = bucket.Find(s, hash, capacity_log_, &size_, time_now_);
           existed_item) {
         // TODO update TTL
       } else {
         ++res;
         AddUnique(s, bucket, hash, EntryTTL(ttl_sec));
       }
-      size_ -= expired_fields;
     }
     return res;
   }
@@ -208,12 +203,9 @@ class IntrusiveStringSet {
 
     // First find the bucket to scan, skip empty buckets.
     for (; entries_idx < entries_.size(); ++entries_idx) {
-      uint32_t expired_fields = 0;
-      if (entries_[entries_idx].Scan(cb, &expired_fields, time_now_)) {
-        size_ -= expired_fields;
+      if (entries_[entries_idx].Scan(cb, &size_, time_now_)) {
         break;
       }
-      size_ -= expired_fields;
     }
 
     if (++entries_idx >= entries_.size()) {
@@ -247,9 +239,7 @@ class IntrusiveStringSet {
     uint64_t hash = Hash(member);
     auto bucket_id = BucketId(hash);
     auto entry_it = entries_.begin() + bucket_id;
-    uint32_t expired_fields = 0;
-    auto res = entry_it->Find(member, hash, capacity_log_, &expired_fields, time_now_);
-    size_ -= expired_fields;
+    auto res = entry_it->Find(member, hash, capacity_log_, &size_, time_now_);
     return {res ? entry_it : entries_.end(), entries_.end(), res};
   }
 

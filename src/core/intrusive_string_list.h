@@ -377,13 +377,13 @@ class IntrusiveStringList {
   }
 
   // TODO consider to wrap ISLEntry to prevent usage out of the list
-  IntrusiveStringList::iterator Find(std::string_view str, uint32_t* expired_fields,
+  IntrusiveStringList::iterator Find(std::string_view str, uint32_t* set_size,
                                      uint32_t time_now = UINT32_MAX) {
     auto it = begin();
 
     for (; it; ++it) {
       if (it.ExpireIfNeeded(time_now, &obj_malloc_used_)) {
-        (*expired_fields)++;
+        (*set_size)--;
         continue;
       }
       if (it->Key() == str) {
@@ -396,11 +396,11 @@ class IntrusiveStringList {
 
   // TODO consider to wrap ISLEntry to prevent usage out of the list
   IntrusiveStringList::iterator Find(std::string_view str, uint64_t hash, uint32_t capacity_log,
-                                     uint32_t* expired_fields, uint32_t time_now = UINT32_MAX) {
+                                     uint32_t* set_size, uint32_t time_now = UINT32_MAX) {
     auto entry = begin();
     for (; entry; ++entry) {
       if (entry.ExpireIfNeeded(time_now, &obj_malloc_used_)) {
-        (*expired_fields)++;
+        (*set_size)--;
         continue;
       }
       if (entry->CheckExtendedHash(hash, capacity_log) && entry->Key() == str)
@@ -437,18 +437,18 @@ class IntrusiveStringList {
   }
 
   template <class T, std::enable_if_t<std::is_invocable_v<T, std::string_view>>* = nullptr>
-  bool Scan(const T& cb, uint32_t* expired_fields, uint32_t curr_time) {
+  bool Scan(const T& cb, uint32_t* set_size, uint32_t curr_time) {
     for (auto it = start_; it && it.ExpiryTime() <= curr_time; it = start_) {
       start_ = it.Next();
       ISLEntry::Destroy(it);
-      (*expired_fields)++;
+      (*set_size)--;
     }
 
     for (auto curr = start_, next = start_; curr; curr = next) {
       cb(curr.Key());
       next = curr.Next();
       for (auto tmp = next; tmp && tmp.ExpiryTime() <= curr_time; tmp = next) {
-        (*expired_fields)++;
+        (*set_size)--;
         next = next.Next();
         ISLEntry::Destroy(tmp);
       }
