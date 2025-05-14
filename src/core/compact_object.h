@@ -373,10 +373,10 @@ class CompactObj {
 
   struct Stats {
     size_t small_string_bytes = 0;
+    uint64_t huff_encode_total = 0, huff_encode_success = 0;
   };
 
-  static Stats GetStats();
-
+  static Stats GetStatsThreadLocal();
   static void InitThreadLocal(MemoryResource* mr);
   static bool InitHuffmanThreadLocal(std::string_view hufftable);
   static MemoryResource* memory_resource();  // thread-local.

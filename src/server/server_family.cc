@@ -2547,6 +2547,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("keyspace_mutations", m.events.mutations);
     append("total_reads_processed", conn_stats.io_read_cnt);
     append("total_writes_processed", reply_stats.io_write_cnt);
+    append("huffenc_attempt_total", m.events.huff_encode_total);
+    append("huffenc_success_total", m.events.huff_encode_success);
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);

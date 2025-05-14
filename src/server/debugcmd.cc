@@ -170,7 +170,7 @@ unsigned AddObjHist(PrimeIterator it, ObjHist* hist) {
     return true;
   };
 
-  hist->key_len.Add(it->first.Size());
+  hist->key_len.Add(it->first.MallocUsed());
 
   if (pv.ObjType() == OBJ_LIST) {
     IterateList(pv, per_entry_cb, 0, -1);
@@ -1095,7 +1095,7 @@ void DebugCmd::ObjHist(facade::SinkReplyBuilder* builder) {
   for (auto& [obj_type, hist_ptr] : obj_hist_map_arr[0]) {
     StrAppend(&result, "OBJECT:", ObjTypeToString(obj_type), "\n");
     StrAppend(&result, "________________________________________________________________\n");
-    StrAppend(&result, "Key length histogram:\n", hist_ptr->key_len.ToString(), "\n");
+    StrAppend(&result, "Key memory used:\n", hist_ptr->key_len.ToString(), "\n");
     StrAppend(&result, "Values - Total Memory used:\n", hist_ptr->val_len.ToString(), "\n");
     if (hist_ptr->card.count() > 0) {
       StrAppend(&result, "Cardinality histogram (number of elements in sets):\n",
