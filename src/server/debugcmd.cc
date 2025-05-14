@@ -954,6 +954,10 @@ void DebugCmd::Exec(facade::SinkReplyBuilder* builder) {
 
 void DebugCmd::LogTraffic(CmdArgList args, facade::SinkReplyBuilder* builder) {
   optional<string> path;
+  if (ProactorBase::me()->GetKind() != ProactorBase::IOURING) {
+    return builder->SendError("Traffic recording supported only on iouring");
+  }
+
   if (args.size() == 1 && absl::AsciiStrToUpper(facade::ToSV(args.front())) != "STOP"sv) {
     path = ArgS(args, 0);
     LOG(INFO) << "Logging to traffic to " << *path << "*.bin";
