@@ -3330,11 +3330,8 @@ void StreamFamily::XTrim(CmdArgList args, const CommandContext& cmd_cntx) {
 
   auto parsed_trim_opts = ParseTrimOpts(&parser);
   if (!parser.Finalize() || !parsed_trim_opts) {
-    if (parser.HasError()) {
-      rb->SendError(parser.Error()->MakeReply());
-    } else {
-      rb->SendError(parsed_trim_opts.error());
-    }
+    auto err = parser.Error();
+    rb->SendError(!parsed_trim_opts ? parsed_trim_opts.error() : err->MakeReply());
     return;
   }
 

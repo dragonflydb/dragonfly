@@ -687,9 +687,9 @@ TEST_F(StreamFamilyTest, XTrimInvalidArgs) {
 
   // Include both maxlen and minid.
   resp = Run({"xtrim", "foo", "maxlen", "2", "minid", "1-1"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg("MAXLEN and MINID options at the same time are not compatible"));
   resp = Run({"xtrim", "foo", "minid", "1-1", "maxlen", "2"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg("MAXLEN and MINID options at the same time are not compatible"));
 
   // Invalid limit.
   resp = Run({"xtrim", "foo", "maxlen", "~", "2", "limit", "nan"});
