@@ -690,7 +690,7 @@ error_code Replica::ConsumeDflyStream() {
     // Make sure the flows are not in a state transition
     lock_guard lk{flows_op_mu_};
 
-    LOG(ERROR) << "DflyStream error in phase " << GetCurrentPhase() << " with "
+    LOG(ERROR) << "Replication error in phase " << GetCurrentPhase() << " with "
                << server().Description() << ", error: " << ge.Format()
                << ", socket state: " + GetSocketInfo(Sock()->native_handle());
 
