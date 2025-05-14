@@ -98,14 +98,14 @@ final_query:
       { driver->Set(AstKnnNode(std::move($1), std::move($3))); }
 
 knn_query:
-  LBRACKET KNN UINT32 FIELD TERM opt_knn_alias opt_ef_runtime RBRACKET
+  LBRACKET KNN UINT32 FIELD TERM opt_ef_runtime opt_knn_alias RBRACKET
     {
       auto vec_result = BytesToFtVectorSafe($5);
       if (!vec_result) {
         error(@5, "Invalid vector format");
         YYERROR;
       }
-      $$ = AstKnnNode(toUint32($3), $4, std::move(*vec_result), $6, $7);
+      $$ = AstKnnNode(toUint32($3), $4, std::move(*vec_result), $7, $6);
     }
 
 opt_knn_alias:
