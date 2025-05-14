@@ -3329,8 +3329,9 @@ void StreamFamily::XTrim(CmdArgList args, const CommandContext& cmd_cntx) {
   std::string_view key = parser.Next();
 
   auto parsed_trim_opts = ParseTrimOpts(&parser);
-  if (!parsed_trim_opts || !parser.Finalize()) {
-    rb->SendError(!parsed_trim_opts ? parsed_trim_opts.error() : parser.Error()->MakeReply());
+  if (!parser.Finalize() || !parsed_trim_opts) {
+    auto err = parser.Error();
+    rb->SendError(!parsed_trim_opts ? parsed_trim_opts.error() : err->MakeReply());
     return;
   }
 

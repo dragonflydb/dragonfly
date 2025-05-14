@@ -25,6 +25,8 @@ using namespace std;
 ABSL_FLAG(uint32_t, conn_io_threads, 0, "Number of threads used for handing server connections");
 ABSL_FLAG(uint32_t, conn_io_thread_start, 0, "Starting thread id for handling server connections");
 ABSL_FLAG(bool, tls, false, "");
+ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin port");
+
 ABSL_FLAG(bool, conn_use_incoming_cpu, false,
           "If true uses incoming cpu of a socket in order to distribute"
           " incoming connections");
@@ -130,7 +132,7 @@ void OverriddenSSLFree(void* addr, const char* file, int line) {
 }  // namespace
 
 Listener::Listener(Protocol protocol, ServiceInterface* si, Role role)
-    : service_(si), protocol_(protocol) {
+    : service_(si), role_(role), protocol_(protocol) {
 #ifdef DFLY_USE_SSL
   if (ssl_init_refcount.fetch_add(1) == 0) {
     CRYPTO_set_mem_functions(&OverriddenSSLMalloc, &OverriddenSSLRealloc, &OverriddenSSLFree);
@@ -142,7 +144,7 @@ Listener::Listener(Protocol protocol, ServiceInterface* si, Role role)
     exit(-1);
   }
 #endif
-  role_ = role;
+
   // We only set the HTTP interface for:
   // 1. Privileged users (on privileged listener)
   // 2. Main listener (if enabled)
@@ -203,7 +205,9 @@ error_code Listener::ConfigureServerSocket(int fd) {
 
 bool Listener::ReconfigureTLS() {
   SSL_CTX* prev_ctx = ctx_;
-  if (GetFlag(FLAGS_tls)) {
+  const bool tls_on_privileged_port = !GetFlag(FLAGS_no_tls_on_admin_port);
+
+  if (GetFlag(FLAGS_tls) && (!IsPrivilegedInterface() || tls_on_privileged_port)) {
     SSL_CTX* ctx = CreateSslCntx(facade::TlsContextRole::SERVER);
     if (!ctx) {
       return false;

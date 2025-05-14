@@ -487,6 +487,9 @@ class Connection : public util::Connection {
       bool migration_enabled_ : 1;
       bool migration_in_process_ : 1;
       bool is_http_ : 1;
+
+      // whether the connection is TLS. We can be sure our socket is TlsSocket
+      // if the flag is set.
       bool is_tls_ : 1;
       bool recv_provided_ : 1;
       bool is_main_ : 1;

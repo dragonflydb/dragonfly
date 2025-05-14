@@ -75,8 +75,6 @@ ABSL_FLAG(uint32_t, pipeline_queue_limit, 10000,
 ABSL_FLAG(uint64_t, publish_buffer_limit, 128_MB,
           "Amount of memory to use for storing pub commands in bytes - per IO thread");
 
-ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin port");
-
 ABSL_FLAG(uint32_t, pipeline_squash, 10,
           "Number of queued pipelined commands above which squashing is enabled, 0 means disabled");
 
@@ -734,42 +732,39 @@ void Connection::HandleRequests() {
 
 #ifdef DFLY_USE_SSL
   if (ssl_ctx_) {
-    const bool no_tls_on_admin_port = GetFlag(FLAGS_no_tls_on_admin_port);
-    if (!(IsPrivileged() && no_tls_on_admin_port)) {
-      // Must be done atomically before the premption point in Accept so that at any
-      // point in time, the socket_ is defined.
-      uint8_t buf[2];
-      auto read_sz = socket_->Read(io::MutableBytes(buf));
-      if (!read_sz || *read_sz < sizeof(buf)) {
-        VLOG(1) << "Error reading from peer " << remote_ep << " " << read_sz.error().message()
-                << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
-        return;
-      }
-      if (buf[0] != 0x16 || buf[1] != 0x03) {
-        VLOG(1) << "Bad TLS header "
-                << absl::StrCat(absl::Hex(buf[0], absl::kZeroPad2),
-                                absl::Hex(buf[1], absl::kZeroPad2));
-        socket_->Write(
-            io::Buffer("-ERR Bad TLS header, double check "
-                       "if you enabled TLS for your client.\r\n"));
-      }
-
-      {
-        FiberAtomicGuard fg;
-        unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
-        tls_sock->InitSSL(ssl_ctx_, buf);
-        SetSocket(tls_sock.release());
-      }
-      FiberSocketBase::AcceptResult aresult = socket_->Accept();
-
-      if (!aresult) {
-        LOG(INFO) << "Error handshaking " << aresult.error().message()
-                  << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
-        return;
-      }
-      is_tls_ = 1;
-      VLOG(1) << "TLS handshake succeeded";
+    // Must be done atomically before the premption point in Accept so that at any
+    // point in time, the socket_ is defined.
+    uint8_t buf[2];
+    auto read_sz = socket_->Read(io::MutableBytes(buf));
+    if (!read_sz || *read_sz < sizeof(buf)) {
+      VLOG(1) << "Error reading from peer " << remote_ep << " " << read_sz.error().message()
+              << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+      return;
     }
+    if (buf[0] != 0x16 || buf[1] != 0x03) {
+      VLOG(1) << "Bad TLS header "
+              << absl::StrCat(absl::Hex(buf[0], absl::kZeroPad2),
+                              absl::Hex(buf[1], absl::kZeroPad2));
+      std::ignore =
+          socket_->Write(io::Buffer("-ERR Bad TLS header, double check "
+                                    "if you enabled TLS for your client.\r\n"));
+    }
+
+    {
+      FiberAtomicGuard fg;
+      unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
+      tls_sock->InitSSL(ssl_ctx_, buf);
+      SetSocket(tls_sock.release());
+    }
+    FiberSocketBase::AcceptResult aresult = socket_->Accept();
+
+    if (!aresult) {
+      LOG(INFO) << "Error handshaking " << aresult.error().message()
+                << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+      return;
+    }
+    is_tls_ = 1;
+    VLOG(1) << "TLS handshake succeeded";
   }
 #endif
 
@@ -881,7 +876,12 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   } else {
     absl::StrAppend(&before, " name=", name_);
   }
-
+  if (is_tls_) {
+    tls::TlsSocket* tls_sock = static_cast<tls::TlsSocket*>(socket_.get());
+    string_view proto_version = SSL_get_version(tls_sock->ssl_handle());
+    const SSL_CIPHER* cipher = SSL_get_current_cipher(tls_sock->ssl_handle());
+    absl::StrAppend(&before, " tls=", proto_version, "|", SSL_CIPHER_get_name(cipher));
+  }
   string after;
   absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
   if (dispatch_q_.size()) {
