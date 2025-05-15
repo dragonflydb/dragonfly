@@ -847,6 +847,10 @@ size_t CompactObj::Size() const {
         DCHECK_EQ(mask_bits_.encoding, NONE_ENC);
         raw_size = u_.sbf->current_size();
         break;
+      case TOPK_TAG:
+        DCHECK_EQ(mask_bits_.encoding, NONE_ENC);
+        raw_size = 0;
+        break;
       default:
         LOG(DFATAL) << "Should not reach " << int(taglen_);
     }
@@ -911,6 +915,10 @@ CompactObjType CompactObj::ObjType() const {
 
   if (taglen_ == SBF_TAG) {
     return OBJ_SBF;
+  }
+
+  if (taglen_ == TOPK_TAG) {
+    return OBJ_TOPK;
   }
 
   LOG(FATAL) << "TBD " << int(taglen_);
@@ -1016,9 +1024,24 @@ void CompactObj::SetSBF(uint64_t initial_capacity, double fp_prob, double grow_f
   }
 }
 
+void CompactObj::SetTopK(size_t topk, size_t width, size_t depth, double decay) {
+  TopKeys::Options opts;
+  opts.buckets = width;
+  opts.depth = depth;
+  opts.decay_base = decay;
+  opts.min_key_count_to_record = 0;
+  SetMeta(TOPK_TAG);
+  u_.topk = AllocateMR<TopKeys>(opts);
+}
+
 SBF* CompactObj::GetSBF() const {
   DCHECK_EQ(SBF_TAG, taglen_);
   return u_.sbf;
+}
+
+TopKeys* CompactObj::GetTopK() const {
+  DCHECK_EQ(TOPK_TAG, taglen_);
+  return u_.topk;
 }
 
 void CompactObj::SetString(std::string_view str) {
@@ -1122,7 +1145,8 @@ bool CompactObj::HasAllocated() const {
       (taglen_ == ROBJ_TAG && u_.r_obj.inner_obj() == nullptr))
     return false;
 
-  DCHECK(taglen_ == ROBJ_TAG || taglen_ == SMALL_TAG || taglen_ == JSON_TAG || taglen_ == SBF_TAG);
+  DCHECK(taglen_ == ROBJ_TAG || taglen_ == SMALL_TAG || taglen_ == JSON_TAG || taglen_ == SBF_TAG ||
+         taglen_ == TOPK_TAG);
   return true;
 }
 
@@ -1316,6 +1340,8 @@ void CompactObj::Free() {
     }
   } else if (taglen_ == SBF_TAG) {
     DeleteMR<SBF>(u_.sbf);
+  } else if (taglen_ == TOPK_TAG) {
+    DeleteMR<TopKeys>(u_.topk);
   } else {
     LOG(FATAL) << "Unsupported tag " << int(taglen_);
   }
@@ -1347,6 +1373,9 @@ size_t CompactObj::MallocUsed(bool slow) const {
 
   if (taglen_ == SBF_TAG) {
     return u_.sbf->MallocUsed();
+  }
+  if (taglen_ == TOPK_TAG) {
+    return 0;
   }
   LOG(DFATAL) << "should not reach";
   return 0;

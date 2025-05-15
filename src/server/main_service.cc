@@ -58,6 +58,7 @@ extern "C" {
 #include "server/stream_family.h"
 #include "server/string_family.h"
 #include "server/tdigest_family.h"
+#include "server/topk_family.h"
 #include "server/transaction.h"
 #include "server/version.h"
 #include "server/zset_family.h"
@@ -2721,6 +2722,7 @@ void Service::RegisterCommands() {
   server_family_.Register(&registry_);
   cluster_family_.Register(&registry_);
   TDigestFamily::Register(&registry_);
+  TopKeysFamily::Register(&registry_);
 
   // AclFamily should always be registered last
   // If we add a new familly, register that first above and *not* below
