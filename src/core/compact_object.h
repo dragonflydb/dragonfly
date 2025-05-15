@@ -19,6 +19,7 @@
 namespace dfly {
 
 constexpr unsigned kEncodingIntSet = 0;
+constexpr unsigned kEncodingIntrusiveSet = 1;
 constexpr unsigned kEncodingStrMap2 = 2;  // for set/map encodings of strings using DenseSet
 constexpr unsigned kEncodingQL2 = 1;
 constexpr unsigned kEncodingListPack = 3;

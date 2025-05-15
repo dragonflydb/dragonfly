@@ -15,6 +15,9 @@
 
 namespace dfly {
 
+// NOTE: do not change the ABI of ISLEntry struct as long as we support
+// --stringset_experimental=false
+
 class IntrusiveStringSet {
   using Buckets =
       std::vector<IntrusiveStringList, PMR_NS::polymorphic_allocator<IntrusiveStringList>>;
@@ -105,6 +108,8 @@ class IntrusiveStringSet {
   explicit IntrusiveStringSet(PMR_NS::memory_resource* mr = PMR_NS::get_default_resource())
       : entries_(mr) {
   }
+
+  static constexpr uint32_t kMaxBatchLen = 32;
 
   ISLEntry Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX) {
     if (entries_.empty() || size_ >= entries_.size()) {
@@ -260,6 +265,10 @@ class IntrusiveStringSet {
 
   bool Empty() const {
     return size_ == 0;
+  }
+
+  std::uint32_t BucketCount() const {
+    return entries_.size();  // the same as Capacity()
   }
 
   std::uint32_t Capacity() const {

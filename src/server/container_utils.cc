@@ -5,6 +5,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/intrusive_string_set.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -199,9 +200,16 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func) {
     while (success && intsetGet(is, ii++, &ival)) {
       success = func(ContainerEntry{ival});
     }
-  } else {
+  } else if (pv.Encoding() == kEncodingStrMap2) {
     for (sds ptr : *static_cast<StringSet*>(pv.RObjPtr())) {
       if (!func(ContainerEntry{ptr, sdslen(ptr)})) {
+        success = false;
+        break;
+      }
+    }
+  } else if (pv.Encoding() == kEncodingIntrusiveSet) {
+    for (auto ptr : *static_cast<IntrusiveStringSet*>(pv.RObjPtr())) {
+      if (!func(ContainerEntry{ptr.Key().data(), ptr.Key().size()})) {
         success = false;
         break;
       }
