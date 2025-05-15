@@ -155,16 +155,8 @@ class IntrusiveStringSet {
     Reserve(span.size());
     unsigned res = 0;
     for (auto& s : span) {
-      uint64_t hash = Hash(s);
-      const auto bucket_id = BucketId(hash);
-      auto& bucket = entries_[bucket_id];
-      if (auto existed_item = bucket.Find(s, hash, capacity_log_, &size_, time_now_);
-          existed_item) {
-        // TODO update TTL
-      } else {
-        ++res;
-        AddUnique(s, bucket, hash, EntryTTL(ttl_sec));
-      }
+      res++;
+      Add(s, ttl_sec);
     }
     return res;
   }
