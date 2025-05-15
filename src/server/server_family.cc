@@ -3172,7 +3172,7 @@ void ServerFamily::ReplConf(CmdArgList args, const CommandContext& cmd_cntx) {
     builder->SendError(kSyntaxErr);
   };
 
-  if (args.size() % 2 == 1)
+  if ((args.size() & 1) == 1)
     return err_cb();
 
   auto* cntx = cmd_cntx.conn_cntx;

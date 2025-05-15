@@ -695,7 +695,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
         do {
           ThisFiber::SleepFor(chrono::nanoseconds(sleep_ns));
         } while (should_throttle && reqs_.size() > pipeline * 2);
-      } else if (i % 256 == 255) {
+      } else if ((i & 255) == 255) {
         ThisFiber::Yield();
         VLOG(5) << "Behind QPS schedule";
       }

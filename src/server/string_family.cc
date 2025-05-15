@@ -379,7 +379,7 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
 
 // Returns true if keys were set, false otherwise.
 OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
-  DCHECK(!args.Empty() && args.Size() % 2 == 0);
+  DCHECK(!args.Empty() && (args.Size() & 1) == 0);
 
   SetCmd::SetParams params;
   SetCmd sg(op_args, false);

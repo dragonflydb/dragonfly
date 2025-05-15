@@ -2062,7 +2062,7 @@ void ZSetFamily::ZAdd(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   auto* builder = cmd_cntx.rb;
-  if ((args.size() - i) % 2 != 0) {
+  if (((args.size() - i) & 1) != 0) {
     builder->SendError(kSyntaxErr);
     return;
   }

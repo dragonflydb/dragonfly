@@ -674,7 +674,7 @@ bool JournalAsMinId(const TrimOpts& opts) {
 
 OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& opts,
                          CmdArgList args, AddArgsJournaler journaler) {
-  DCHECK(!args.empty() && args.size() % 2 == 0);
+  DCHECK(!args.empty() && (args.size() & 1) == 0);
 
   auto& db_slice = op_args.GetDbSlice();
 
@@ -2247,7 +2247,7 @@ std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
       opts.streams_arg = id_indx + 1;
 
       size_t pair_count = args.size() - opts.streams_arg;
-      if ((pair_count % 2) != 0) {
+      if ((pair_count & 1) != 0) {
         const char* cmd_name = read_group ? "xreadgroup" : "xread";
         const char* symbol = read_group ? ">" : "$";
         const auto msg = absl::StrCat("Unbalanced '", cmd_name,
@@ -2709,7 +2709,7 @@ void StreamFamily::XAdd(CmdArgList args, const CommandContext& cmd_cntx) {
   AddArgsJournaler journaler{{args.begin(), args.end()}, stream_id_index_in_args};
 
   CmdArgList fields = parser.Tail();
-  if (fields.empty() || fields.size() % 2 != 0) {
+  if (fields.empty() || (fields.size() & 1) != 0) {
     return rb->SendError(WrongNumArgsError("XADD"), kSyntaxErrType);
   }
 

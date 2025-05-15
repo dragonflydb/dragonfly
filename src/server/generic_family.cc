@@ -666,7 +666,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
 
 uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys,
                      ConnectionContext* cntx) {
-  ShardId sid = cursor % 1024;
+  ShardId sid = cursor & 1023;
 
   EngineShardSet* ess = shard_set;
   unsigned shard_count = ess->size();

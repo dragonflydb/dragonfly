@@ -95,7 +95,7 @@ pair<uint8_t*, bool> LpInsert(uint8_t* lp, string_view field, string_view val, b
 
       /* Replace value */
       lp = lpReplace(lp, &vptr, vsrc, val.size());
-      DCHECK_EQ(0u, lpLength(lp) % 2);
+      DCHECK_EQ(0u, lpLength(lp) & 1);
     }
   }
 
@@ -477,7 +477,7 @@ OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, Cm
     }
 
     size_t lplen = lpLength(lp);
-    DCHECK(lplen > 0 && lplen % 2 == 0);
+    DCHECK(lplen > 0 && (lplen & 1) == 0);
 
     uint8_t ibuf[32];
     string_view key;
@@ -671,7 +671,7 @@ struct OpSetParams {
 
 OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList values,
                          const OpSetParams& op_sp = OpSetParams{}) {
-  DCHECK(!values.empty() && 0 == values.size() % 2);
+  DCHECK(!values.empty() && 0 == (values.size() & 1));
   VLOG(2) << "OpSet(" << key << ")";
 
   auto& db_slice = op_args.GetDbSlice();
@@ -820,7 +820,7 @@ void HSetEx(CmdArgList args, const CommandContext& cmd_cntx) {
 
   CmdArgList fields = parser.Tail();
 
-  if (fields.size() % 2 != 0) {
+  if ((fields.size() & 1) != 0) {
     return cmd_cntx.rb->SendError(facade::WrongNumArgsError(cmd_cntx.conn_cntx->cid->name()),
                                   kSyntaxErrType);
   }
@@ -1108,7 +1108,7 @@ void HSetFamily::HSet(CmdArgList args, const CommandContext& cmd_cntx) {
 
   string_view cmd{cmd_cntx.conn_cntx->cid->name()};
 
-  if (args.size() % 2 != 1) {
+  if ((args.size() & 1) != 1) {
     return cmd_cntx.rb->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
   }
 
@@ -1234,7 +1234,7 @@ void HSetFamily::HRandField(CmdArgList args, const CommandContext& cmd_cntx) {
     } else if (pv.Encoding() == kEncodingListPack) {
       uint8_t* lp = (uint8_t*)pv.RObjPtr();
       size_t lplen = lpLength(lp);
-      CHECK(lplen > 0 && lplen % 2 == 0);
+      CHECK(lplen > 0 && (lplen & 1) == 0);
       size_t hlen = lplen / 2;
       if (args.size() == 1) {
         listpackEntry key;
@@ -1275,7 +1275,7 @@ void HSetFamily::HRandField(CmdArgList args, const CommandContext& cmd_cntx) {
       rb->SendBulkString(result->front());
     else if (with_values) {
       const auto result_size = result->size();
-      DCHECK(result_size % 2 == 0)
+      DCHECK((result_size & 1) == 0)
           << "unexpected size of strings " << result_size << ", expected pairs";
       SinkReplyBuilder::ReplyScope scope{rb};
       const bool is_resp3 = rb->IsResp3();

@@ -1215,7 +1215,7 @@ void CompactObj::SetExternal(size_t offset, uint32_t sz) {
   SetMeta(EXTERNAL_TAG, mask_);
 
   u_.ext_ptr.is_cool = 0;
-  u_.ext_ptr.page_offset = offset % 4096;
+  u_.ext_ptr.page_offset = offset & 4095;
   u_.ext_ptr.serialized_size = sz;
   u_.ext_ptr.offload.page_index = offset / 4096;
 }
@@ -1225,7 +1225,7 @@ void CompactObj::SetCool(size_t offset, uint32_t sz, detail::TieredColdRecord* r
   SetMeta(EXTERNAL_TAG, record->value.mask_);
 
   u_.ext_ptr.is_cool = 1;
-  u_.ext_ptr.page_offset = offset % 4096;
+  u_.ext_ptr.page_offset = offset & 4095;
   u_.ext_ptr.serialized_size = sz;
   u_.ext_ptr.cool_record = record;
 }

@@ -442,7 +442,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
   if (keep_lp) {
     uint8_t* lp = lpNew(lp_size);
 
-    CHECK(ltrace->arr.size() % 2 == 0);
+    CHECK((ltrace->arr.size() & 1) == 0);
     for (size_t i = 0; i < ltrace->arr.size(); i += 2) {
       /* Add pair to listpack */
       string_view sv = ToSV(ltrace->arr[i].rdb_var);
