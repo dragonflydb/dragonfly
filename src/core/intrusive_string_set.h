@@ -117,16 +117,18 @@ class IntrusiveStringSet {
     }
     uint64_t hash = Hash(str);
     const auto bucket_id = BucketId(hash);
-    auto& bucket = entries_[bucket_id];
 
-    uint32_t expired_fields = 0;
-    if (auto existed_item = bucket.Find(str, hash, capacity_log_, &expired_fields, time_now_);
-        existed_item) {
-      size_ -= expired_fields;
-      // TODO consider common implementation for key value pair
+    if (auto item = FindInternal(bucket_id, str, hash); item.first != IntrusiveStringList::end()) {
       return {};
     }
-    size_ -= expired_fields;
+
+    auto bucket = FindEmptyAround(bucket_id);
+
+    if (bucket == entries_.end()) {
+      // NO empty bucket around bucket_id + allowed displacement
+      bucket = entries_.begin() + bucket_id;
+    }
+
     return AddUnique(str, bucket, hash, EntryTTL(ttl_sec));
   }
 
@@ -146,10 +148,10 @@ class IntrusiveStringSet {
     size_ = 0;
   }
 
-  ISLEntry AddUnique(std::string_view str, IntrusiveStringList& bucket, uint64_t hash,
+  ISLEntry AddUnique(std::string_view str, Buckets::iterator bucket, uint64_t hash,
                      uint32_t ttl_sec = UINT32_MAX) {
     ++size_;
-    auto& entry = bucket.Emplace(str, ttl_sec);
+    auto& entry = bucket->Emplace(str, ttl_sec);
     entry.SetExtendedHash(hash, capacity_log_);
     return entry;
   }
@@ -158,18 +160,8 @@ class IntrusiveStringSet {
     Reserve(span.size());
     unsigned res = 0;
     for (auto& s : span) {
-      uint64_t hash = Hash(s);
-      const auto bucket_id = BucketId(hash);
-      auto& bucket = entries_[bucket_id];
-      uint32_t expired_fields = 0;
-      if (auto existed_item = bucket.Find(s, hash, capacity_log_, &expired_fields, time_now_);
-          existed_item) {
-        // TODO update TTL
-      } else {
-        ++res;
-        AddUnique(s, bucket, hash, EntryTTL(ttl_sec));
-      }
-      size_ -= expired_fields;
+      res++;
+      Add(s, ttl_sec);
     }
     return res;
   }
@@ -208,12 +200,9 @@ class IntrusiveStringSet {
 
     // First find the bucket to scan, skip empty buckets.
     for (; entries_idx < entries_.size(); ++entries_idx) {
-      uint32_t expired_fields = 0;
-      if (entries_[entries_idx].Scan(cb, &expired_fields, time_now_)) {
-        size_ -= expired_fields;
+      if (entries_[entries_idx].Scan(cb, &size_, time_now_)) {
         break;
       }
-      size_ -= expired_fields;
     }
 
     if (++entries_idx >= entries_.size()) {
@@ -236,8 +225,10 @@ class IntrusiveStringSet {
   bool Erase(std::string_view str) {
     if (entries_.empty())
       return false;
-    auto bucket_id = BucketId(Hash(str));
-    return entries_[bucket_id].Erase(str);
+    uint64_t hash = Hash(str);
+    auto bucket_id = BucketId(hash);
+    auto item = FindInternal(bucket_id, str, hash);
+    return entries_[item.second].Erase(str);
   }
 
   iterator Find(std::string_view member) {
@@ -246,11 +237,8 @@ class IntrusiveStringSet {
 
     uint64_t hash = Hash(member);
     auto bucket_id = BucketId(hash);
-    auto entry_it = entries_.begin() + bucket_id;
-    uint32_t expired_fields = 0;
-    auto res = entry_it->Find(member, hash, capacity_log_, &expired_fields, time_now_);
-    size_ -= expired_fields;
-    return {res ? entry_it : entries_.end(), entries_.end(), res};
+    auto res = FindInternal(bucket_id, member, hash);
+    return {res.first ? entries_.begin() + res.second : entries_.end(), entries_.end(), res.first};
   }
 
   bool Contains(std::string_view member) {
@@ -337,15 +325,49 @@ class IntrusiveStringSet {
     return ttl_sec == UINT32_MAX ? ttl_sec : time_now_ + ttl_sec;
   }
 
+  Buckets::iterator FindEmptyAround(uint32_t bid) {
+    if (entries_[bid].Empty()) {
+      return entries_.begin() + bid;
+    }
+    uint32_t displacement = std::min(kDisplacementSize, BucketCount() - 1);
+    for (uint32_t i = 0; i < displacement; i++) {
+      auto it = entries_.begin() + ((bid + i) & (Capacity() - 1));
+      // Expire top element or whole bucket ?!
+      it->ExpireIfNeeded(time_now_, &size_);
+      if (it->Empty()) {
+        return it;
+      }
+    }
+
+    return entries_.end();
+  }
+
+  std::pair<IntrusiveStringList::iterator, uint32_t> FindInternal(uint32_t bid,
+                                                                  std::string_view str,
+                                                                  uint64_t hash) {
+    uint32_t displacement = std::min(kDisplacementSize, BucketCount() - 1);
+    for (uint32_t i = 0; i < displacement; i++) {
+      uint32_t bucket_id = (bid + i) & (Capacity() - 1);
+      auto it = entries_.begin() + bucket_id;
+      if (it->Empty()) {
+        continue;
+      }
+      auto res = it->Find(str, hash, capacity_log_, &size_, time_now_);
+      if (res) {
+        return {res, bucket_id};
+      }
+    }
+
+    return {IntrusiveStringList::end(), bid};
+  }
+
  private:
   static constexpr std::uint32_t kMinCapacityLog = 3;
+  static constexpr std::uint32_t kDisplacementSize = 16;
   std::uint32_t capacity_log_ = 0;
   std::uint32_t size_ = 0;  // number of elements in the set.
   std::uint32_t time_now_ = 0;
 
-  // TODO: fix obj memory management
-  static_assert(sizeof(IntrusiveStringList) == (sizeof(void*) + sizeof(size_t)),
-                "IntrusiveStringList should be pointer + memory track");
   Buckets entries_;
 };
 
