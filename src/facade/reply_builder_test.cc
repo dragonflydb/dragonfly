@@ -807,8 +807,6 @@ TEST_F(RedisReplyBuilderTest, SendLabeledScoredArray) {
 }
 
 TEST_F(RedisReplyBuilderTest, BasicCapture) {
-  GTEST_SKIP() << "Unmark when CaptuingReplyBuilder is updated";
-
   using namespace std;
   string_view kTestSws[] = {"a1"sv, "a2"sv, "a3"sv, "a4"sv};
 
@@ -868,8 +866,8 @@ TEST_F(RedisReplyBuilderTest, BasicCapture) {
   for (auto& f : funcs) {
     f(builder_.get());
     auto expected = TakePayload();
-    // f(&crb);
-    // CapturingReplyBuilder::Apply(crb.Take(), builder_.get());
+    f(&crb);
+    CapturingReplyBuilder::Apply(crb.Take(), builder_.get());
     auto actual = TakePayload();
     EXPECT_EQ(expected, actual);
   }
