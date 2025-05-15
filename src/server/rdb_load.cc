@@ -2592,7 +2592,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   }
 
   if (!override_existing_keys_ && !res.is_new) {
-    LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
+    // LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
   }
 
   if (auto* ts = db_slice->shard_owner()->tiered_storage(); ts)
