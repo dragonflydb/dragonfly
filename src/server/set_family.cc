@@ -171,11 +171,11 @@ struct IntrusiveStringSetWrapper {
 
   IntrusiveStringSetWrapper(const SetType& st, const DbContext& db_cntx)
       : IntrusiveStringSetWrapper(st.first, db_cntx.time_now_ms) {
-    DCHECK_EQ(st.second, kEncodingStrMap2);
+    DCHECK_EQ(st.second, kEncodingIntrusiveSet);
   }
 
   static void Init(CompactObj* obj) {
-    obj->InitRobj(OBJ_SET, kEncodingStrMap2, CompactObj::AllocateMR<IntrusiveStringSet>());
+    obj->InitRobj(OBJ_SET, kEncodingIntrusiveSet, CompactObj::AllocateMR<IntrusiveStringSet>());
   }
 
   unsigned Add(const NewEntries& entries, uint32_t ttl_sec, bool keepttl) const {
