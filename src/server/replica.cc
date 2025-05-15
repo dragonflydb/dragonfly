@@ -1190,17 +1190,15 @@ std::string Replica::GetSyncId() const {
 }
 
 std::string Replica::GetCurrentPhase() const {
-  uint32_t state = state_mask_.load();
-
-  if (!(state & R_ENABLED))
+  if (!(state_mask_ & R_ENABLED))
     return "DISABLED";
-  if (!(state & R_TCP_CONNECTED))
+  if (!(state_mask_ & R_TCP_CONNECTED))
     return "TCP_CONNECTING";
-  if (!(state & R_GREETED))
+  if (!(state_mask_ & R_GREETED))
     return "GREETING";
-  if (!(state & R_SYNC_OK))
+  if (!(state_mask_ & R_SYNC_OK))
     return "INITIAL_SYNC";
-  if (state & R_SYNCING)
+  if (state_mask_ & R_SYNCING)
     return "FULL_SYNC_IN_PROGRESS";
 
   return "STABLE_SYNC";
