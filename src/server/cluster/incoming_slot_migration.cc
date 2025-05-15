@@ -10,6 +10,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "cluster_utility.h"
+#include "facade/socket_utils.h"
 #include "server/error.h"
 #include "server/journal/executor.h"
 #include "server/journal/tx_executor.h"
@@ -67,6 +68,11 @@ class ClusterShardMigration {
 
       auto tx_data = tx_reader.NextTxData(&reader, cntx);
       if (!tx_data) {
+        if (auto err = cntx->GetError(); err) {
+          LOG(WARNING) << "Error reading from migration socket for shard " << source_shard_id_
+                       << ": " << err.Format()
+                       << ", socket state: " << GetSocketInfo(source->native_handle());
+        }
         break;
       }
 
@@ -105,7 +111,10 @@ class ClusterShardMigration {
     if (socket_ != nullptr) {
       return socket_->proactor()->Await([s = socket_]() {
         if (s->IsOpen()) {
-          return s->Shutdown(SHUT_RDWR);  // Does not Close(), only forbids further I/O.
+          auto ec = s->Shutdown(SHUT_RDWR);  // Does not Close(), only forbids further I/O.
+          LOG_IF(WARNING, ec) << "Error shutting down socket for shard migration: " << ec.message()
+                              << ", socket state: " << GetSocketInfo(s->native_handle());
+          return ec;
         }
         return std::error_code();
       });

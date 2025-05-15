@@ -24,6 +24,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "facade/redis_parser.h"
+#include "facade/socket_utils.h"
 #include "server/error.h"
 #include "server/journal/executor.h"
 #include "server/journal/serializer.h"
@@ -206,7 +207,8 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
 
       ec = ResolveHostDns();
       if (ec) {
-        LOG(ERROR) << "Error resolving dns to " << server().host << " " << ec;
+        LOG(ERROR) << "Error resolving dns to " << server().host << " (phase: " << GetCurrentPhase()
+                   << "): " << ec;
         continue;
       }
 
@@ -214,7 +216,9 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
       reconnect_count_++;
       ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_reconnect_timeout_ms) * 1ms, &exec_st_);
       if (ec) {
-        LOG(WARNING) << "Error connecting to " << server().Description() << " " << ec;
+        LOG(WARNING) << "Error connecting to " << server().Description()
+                     << " (phase: " << GetCurrentPhase() << "): " << ec
+                     << ", reason: " << ec.message();
         continue;
       }
       VLOG(1) << "Replica socket connected";
@@ -228,8 +232,9 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
     if ((state_mask_ & R_GREETED) == 0) {
       ec = Greet();
       if (ec) {
-        LOG(INFO) << "Error greeting " << server().Description() << " " << ec << " "
-                  << ec.message();
+        LOG(WARNING) << "Error greeting " << server().Description()
+                     << " (phase: " << GetCurrentPhase() << "): " << ec << " " << ec.message()
+                     << ", socket state: " + GetSocketInfo(Sock()->native_handle());
         state_mask_ &= R_ENABLED;
         continue;
       }
@@ -245,8 +250,9 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
         ec = InitiatePSync();
 
       if (ec) {
-        LOG(WARNING) << "Error syncing with " << server().Description() << " " << ec << " "
-                     << ec.message();
+        LOG(WARNING) << "Error syncing with " << server().Description()
+                     << " (phase: " << GetCurrentPhase() << "): " << ec << " " << ec.message()
+                     << ", socket state: " + GetSocketInfo(Sock()->native_handle());
         state_mask_ &= R_ENABLED;  // reset all flags besides R_ENABLED
         continue;
       }
@@ -264,8 +270,9 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
 
     auto state = state_mask_ &= R_ENABLED;
     if (state & R_ENABLED) {  // replication was not stopped.
-      LOG(WARNING) << "Error stable sync with " << server().Description() << " " << ec << " "
-                   << ec.message();
+      LOG(WARNING) << "Error stable sync with " << server().Description()
+                   << " (phase: " << GetCurrentPhase() << "): " << ec << " " << ec.message()
+                   << ", socket state: " + GetSocketInfo(Sock()->native_handle());
     }
   }
 
@@ -645,7 +652,9 @@ error_code Replica::ConsumeRedisStream() {
   while (true) {
     auto response = ReadRespReply(&io_buf, /*copy_msg=*/false);
     if (!response.has_value()) {
-      VLOG(1) << "ConsumeRedisStream finished";
+      LOG(ERROR) << "Error in Redis Stream at phase " << GetCurrentPhase() << " with "
+                 << server().Description() << ", error: " << response.error()
+                 << ", socket state: " + GetSocketInfo(Sock()->native_handle());
       exec_st_.ReportError(response.error());
       acks_fb_.JoinIfNeeded();
       return response.error();
@@ -683,6 +692,11 @@ error_code Replica::ConsumeDflyStream() {
   auto err_handler = [this](const auto& ge) {
     // Make sure the flows are not in a state transition
     lock_guard lk{flows_op_mu_};
+
+    LOG(ERROR) << "Replication error in phase " << GetCurrentPhase() << " with "
+               << server().Description() << ", error: " << ge.Format()
+               << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_) {
       flow->Cancel();
@@ -1173,6 +1187,21 @@ std::vector<uint64_t> Replica::GetReplicaOffset() const {
 
 std::string Replica::GetSyncId() const {
   return master_context_.dfly_session_id;
+}
+
+std::string Replica::GetCurrentPhase() const {
+  if (!(state_mask_ & R_ENABLED))
+    return "DISABLED";
+  if (!(state_mask_ & R_TCP_CONNECTED))
+    return "TCP_CONNECTING";
+  if (!(state_mask_ & R_GREETED))
+    return "GREETING";
+  if (!(state_mask_ & R_SYNC_OK))
+    return "INITIAL_SYNC";
+  if (state_mask_ & R_SYNCING)
+    return "FULL_SYNC_IN_PROGRESS";
+
+  return "STABLE_SYNC";
 }
 
 uint32_t DflyShardReplica::FlowId() const {

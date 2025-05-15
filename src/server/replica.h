@@ -140,6 +140,9 @@ class Replica : ProtocolClient {
   std::vector<uint64_t> GetReplicaOffset() const;
   std::string GetSyncId() const;
 
+  // Get the current replication phase based on state_mask_
+  std::string GetCurrentPhase() const;
+
  private:
   util::fb2::ProactorBase* proactor_ = nullptr;
   Service& service_;

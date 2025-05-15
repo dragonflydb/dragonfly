@@ -12,6 +12,7 @@
 #include "base/logging.h"
 #include "cluster_family.h"
 #include "cluster_utility.h"
+#include "facade/socket_utils.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -51,6 +52,9 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     VLOG(1) << "Connecting to source node_id " << node_id << " shard_id " << shard_id;
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
     if (auto ec = ConnectAndAuth(timeout, &exec_st_); ec) {
+      LOG(WARNING) << "Couldn't connect to source node_id " << node_id << " shard_id " << shard_id
+                   << ": " << ec.message()
+                   << ", socket state: " + GetSocketInfo(Sock()->native_handle());
       exec_st_.ReportError(GenericError(ec, "Couldn't connect to source."));
       return;
     }
@@ -203,7 +207,9 @@ void OutgoingMigration::SyncFb() {
     VLOG(1) << "Connecting to target node";
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
     if (auto ec = ConnectAndAuth(timeout, &exec_st_); ec) {
-      LOG(WARNING) << "Can't connect to target node";
+      LOG(WARNING) << "Can't connect to target node " << server().Description()
+                   << " for migration: " << ec.message()
+                   << ", socket state: " + GetSocketInfo(Sock()->native_handle());
       exec_st_.ReportError(GenericError(ec, "Couldn't connect to source."));
       continue;
     }
@@ -216,7 +222,9 @@ void OutgoingMigration::SyncFb() {
     }
 
     if (auto ec = SendCommandAndReadResponse(cmd); ec) {
-      LOG(WARNING) << "Can't connect to target node";
+      LOG(WARNING) << "Could not send INIT command to " << server().Description()
+                   << " for migration: " << ec.message()
+                   << ", socket state: " + GetSocketInfo(Sock()->native_handle());
       exec_st_.ReportError(GenericError(ec, "Could not send INIT command."));
       continue;
     }
@@ -296,8 +304,9 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     }
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
     if (auto ec = ConnectAndAuth(timeout, &exec_st_); ec) {
-      LOG(WARNING) << "Couldn't connect " << cf_->MyID() << " : " << migration_info_.node_info.id
-                   << " attempt " << attempt;
+      LOG(WARNING) << "Couldn't connect to " << cf_->MyID() << " : " << migration_info_.node_info.id
+                   << " attempt " << attempt << ": " << ec.message()
+                   << ", socket state: " + GetSocketInfo(Sock()->native_handle());
       return false;
     }
   }
@@ -334,7 +343,8 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   VLOG(1) << "send " << cmd;
 
   if (auto err = SendCommand(cmd); err) {
-    LOG(WARNING) << "Error during sending DFLYMIGRATE ACK: " << err.message();
+    LOG(WARNING) << "Error during sending DFLYMIGRATE ACK to " << server().Description() << ": "
+                 << err.message() << ", socket state: " + GetSocketInfo(Sock()->native_handle());
     return false;
   }
 
@@ -351,7 +361,9 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     }
 
     if (auto resp = ReadRespReply(absl::ToInt64Milliseconds(passed - timeout)); !resp) {
-      LOG(WARNING) << resp.error();
+      LOG(WARNING) << "Error reading response to ACK command from " << server().Description()
+                   << ": " << resp.error()
+                   << ", socket state: " + GetSocketInfo(Sock()->native_handle());
       return false;
     }
 
@@ -382,6 +394,8 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
 void OutgoingMigration::Start() {
   VLOG(1) << "Resolving host DNS for outgoing migration";
   if (error_code ec = ResolveHostDns(); ec) {
+    LOG(WARNING) << "Could not resolve host DNS for outgoing migration to "
+                 << server().Description() << ": " << ec.message();
     exec_st_.ReportError(GenericError(ec, "Could not resolve host dns."));
     return;
   }
