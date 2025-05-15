@@ -336,8 +336,10 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
     if (inner_obj) {
       if (is_intset) {
         zfree(inner_obj);
-      } else {
+      } else if (!absl::GetFlag(FLAGS_stringset_experimental)) {
         CompactObj::DeleteMR<StringSet>(inner_obj);
+      } else {
+        CompactObj::DeleteMR<IntrusiveStringSet>(inner_obj);
       }
     }
   });
@@ -357,7 +359,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       }
       return true;
     });
-  } else {
+  } else if (!absl::GetFlag(FLAGS_stringset_experimental)) {
     StringSet* set;
     if (config_.append) {
       // Note we always use StringSet when the object is being streamed.
@@ -367,6 +369,55 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       set = static_cast<StringSet*>(pv_->RObjPtr());
     } else {
       set = CompactObj::AllocateMR<StringSet>();
+      set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+      inner_obj = set;
+
+      // Expand the set up front to avoid rehashing.
+      set->Reserve((config_.reserve > len) ? config_.reserve : len);
+    }
+
+    size_t increment = 1;
+    if (rdb_type_ == RDB_TYPE_SET_WITH_EXPIRY) {
+      increment = 2;
+    }
+
+    for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
+      string_view element = ToSV(ltrace->arr[i].rdb_var);
+
+      uint32_t ttl_sec = UINT32_MAX;
+      if (increment == 2) {
+        int64_t ttl_time = -1;
+        string_view ttl_str = ToSV(ltrace->arr[i + 1].rdb_var);
+        if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
+          LOG(ERROR) << "Can't parse set TTL " << ttl_str;
+          ec_ = RdbError(errc::rdb_file_corrupted);
+          return;
+        }
+
+        if (ttl_time != -1) {
+          if (ttl_time < set->time_now()) {
+            continue;
+          }
+
+          ttl_sec = ttl_time - set->time_now();
+        }
+      }
+      if (!set->Add(element, ttl_sec)) {
+        LOG(ERROR) << "Duplicate set members detected";
+        ec_ = RdbError(errc::duplicate_key);
+        return;
+      }
+    }
+  } else {
+    IntrusiveStringSet* set;
+    if (config_.append) {
+      // Note we always use StringSet when the object is being streamed.
+      if (!EnsureObjEncoding(OBJ_SET, kEncodingIntrusiveSet)) {
+        return;
+      }
+      set = static_cast<IntrusiveStringSet*>(pv_->RObjPtr());
+    } else {
+      set = CompactObj::AllocateMR<IntrusiveStringSet>();
       set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
       inner_obj = set;
 
