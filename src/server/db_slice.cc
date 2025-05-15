@@ -12,6 +12,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/intrusive_string_set.h"
 #include "core/top_keys.h"
 #include "search/doc_index.h"
 #include "server/channel_store.h"
@@ -1671,19 +1672,27 @@ void DbSlice::PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable
                       table);                                                // Key
   AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
 
-  if (del_it->first.IsAsyncDelete() && pv.ObjType() == OBJ_SET &&
-      pv.Encoding() == kEncodingStrMap2) {
-    DenseSet* ds = (DenseSet*)pv.RObjPtr();
-    pv.SetRObjPtr(nullptr);
-    const size_t kClearStepSize = 512;
+  if (del_it->first.IsAsyncDelete() && pv.ObjType() == OBJ_SET) {
+    if (pv.Encoding() == kEncodingStrMap2) {
+      DenseSet* ds = (DenseSet*)pv.RObjPtr();
+      pv.SetRObjPtr(nullptr);
+      const size_t kClearStepSize = 512;
 
-    uint32_t next = ds->ClearStep(0, kClearStepSize);
-    if (next < ds->BucketCount()) {
-      AsyncDeleter::EnqueDeletion(next, ds);
-    } else {
+      uint32_t next = ds->ClearStep(0, kClearStepSize);
+      if (next < ds->BucketCount()) {
+        AsyncDeleter::EnqueDeletion(next, ds);
+      } else {
+        CompactObj::DeleteMR<DenseSet>(ds);
+      }
+    }  // del_it->first.IsAsyncDelete()
+    else if (pv.Encoding() == kEncodingIntrusiveSet) {
+      IntrusiveStringSet* ds = (IntrusiveStringSet*)pv.RObjPtr();
+      pv.SetRObjPtr(nullptr);
+
       CompactObj::DeleteMR<DenseSet>(ds);
+      LOG(WARNING) << "Implement async deletion for IntrusiveStringSet";
     }
-  }  // del_it->first.IsAsyncDelete()
+  }
 
   if (table->slots_stats) {
     SlotId sid = KeySlot(del_it.key());

@@ -465,6 +465,8 @@ const char* EncodingName(unsigned obj_type, unsigned encoding) {
       switch (encoding) {
         case kEncodingIntSet:
           return "intset";
+        case kEncodingIntrusiveSet:
+          return "intrusive_set";
         case kEncodingStrMap2:
           return "dense_set";
         case OBJ_ENCODING_SKIPLIST:  // we kept the old enum for zset
