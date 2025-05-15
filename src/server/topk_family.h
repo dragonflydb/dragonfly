@@ -19,6 +19,11 @@ class TopKeysFamily {
   static void Reserve(CmdArgList args, const CommandContext& cmd_cntx);
   static void Add(CmdArgList args, const CommandContext& cmd_cntx);
   static void List(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Query(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Info(CmdArgList args, const CommandContext& cmd_cntx);
+  static void IncrBy(CmdArgList args, const CommandContext& cmd_cntx);
+  // The following are deprecated
+  // static void Count(CmdArgList args, const CommandContext& cmd_cntx);
 };
 
 }  // namespace dfly
