@@ -26,6 +26,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/bloom.h"
+#include "core/intrusive_string_set.h"
 #include "core/json/json_object.h"
 #include "core/qlist.h"
 #include "core/size_tracking_channel.h"
@@ -183,7 +184,10 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
       else if (compact_enc == kEncodingStrMap2) {
         if (((StringSet*)pv.RObjPtr())->ExpirationUsed())
           return RDB_TYPE_SET_WITH_EXPIRY;
-        else
+        else if (compact_enc == kEncodingIntrusiveSet) {
+          if (((IntrusiveStringSet*)pv.RObjPtr())->ExpirationUsed())
+            return RDB_TYPE_SET_WITH_EXPIRY;
+        } else
           return RDB_TYPE_SET;
       }
       break;
@@ -412,6 +416,24 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
         int64_t expiry = -1;
         if (it.HasExpiry())
           expiry = it.ExpiryTime();
+        RETURN_ON_ERR(SaveLongLongAsString(expiry));
+      }
+      ++it;
+      FlushState flush_state = FlushState::kFlushMidEntry;
+      if (it == set->end())
+        flush_state = FlushState::kFlushEndEntry;
+      FlushIfNeeded(flush_state);
+    }
+  } else if (obj.Encoding() == kEncodingIntrusiveSet) {
+    IntrusiveStringSet* set = (IntrusiveStringSet*)obj.RObjPtr();
+
+    RETURN_ON_ERR(SaveLen(set->SizeSlow()));
+    for (auto it = set->begin(); it != set->end();) {
+      RETURN_ON_ERR(SaveString(it->Key()));
+      if (set->ExpirationUsed()) {
+        int64_t expiry = -1;
+        if (it->HasExpiry())
+          expiry = it->ExpiryTime();
         RETURN_ON_ERR(SaveLongLongAsString(expiry));
       }
       ++it;
