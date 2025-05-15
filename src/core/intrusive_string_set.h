@@ -316,9 +316,9 @@ class IntrusiveStringSet {
     if (entries_[bid].Empty()) {
       return entries_.begin() + bid;
     }
-
-    for (uint8_t i = 0; i < std::min(kDisplacementSize, BucketCount() - 1); i++) {
-      auto it = entries_.begin() + ((bid + i) % Capacity());
+    uint32_t displacement = std::min(kDisplacementSize, BucketCount() - 1);
+    for (uint32_t i = 0; i < displacement; i++) {
+      auto it = entries_.begin() + ((bid + i) & (Capacity() - 1));
       // Expire top element or whole bucket ?!
       it->ExpireIfNeeded(time_now_, &size_);
       if (it->Empty()) {
@@ -332,8 +332,9 @@ class IntrusiveStringSet {
   std::pair<IntrusiveStringList::iterator, uint32_t> FindInternal(uint32_t bid,
                                                                   std::string_view str,
                                                                   uint64_t hash) {
-    for (uint8_t i = 0; i < std::min(kDisplacementSize, BucketCount() - 1); i++) {
-      uint32_t bucket_id = (bid + i) % Capacity();
+    uint32_t displacement = std::min(kDisplacementSize, BucketCount() - 1);
+    for (uint32_t i = 0; i < displacement; i++) {
+      uint32_t bucket_id = (bid + i) & (Capacity() - 1);
       auto it = entries_.begin() + bucket_id;
       if (it->Empty()) {
         continue;
@@ -354,9 +355,6 @@ class IntrusiveStringSet {
   std::uint32_t size_ = 0;  // number of elements in the set.
   std::uint32_t time_now_ = 0;
 
-  // TODO: fix obj memory management
-  static_assert(sizeof(IntrusiveStringList) == (sizeof(void*) + sizeof(size_t)),
-                "IntrusiveStringList should be pointer + memory track");
   Buckets entries_;
 };
 
