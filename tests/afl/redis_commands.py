@@ -9,8 +9,6 @@ import string
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DICT_FILE = os.path.join(SCRIPT_DIR, "redis.dict")
 INPUT_DIR = os.path.join(SCRIPT_DIR, "input")
-COMMANDS_LOG_FILE = os.path.join(SCRIPT_DIR, "commands.log")
-CRASH_LOG_FILE = os.path.join(SCRIPT_DIR, "crash_commands.log")
 
 # Redis connection defaults (from environment variables)
 REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")

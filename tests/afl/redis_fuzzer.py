@@ -17,14 +17,11 @@ from redis_commands import (
     ARG_TYPE_MAP,
     DICT_MIX_RATIO,
     DICT_FILE,
-    COMMANDS_LOG_FILE,
     load_input_dict,
     enhance_data_types,
 )
 
 # Constants
-AFL_PERSISTENT = os.getenv("AFL_PERSISTENT", "0") == "1"
-AFL_INST_LIBS = os.getenv("AFL_INST_LIBS", "0") == "1"
 MAX_COMMANDS_PER_TEST = 20  # Maximum number of commands in one test
 MAX_PARALLEL_TESTS = 10  # Maximum number of parallel tests
 MAX_COMMAND_LEN = 1024  # Maximum command length
@@ -352,11 +349,6 @@ class AFLFuzzer:
 
         print(f"AFLFuzzer initialized with target: {REDIS_HOST}:{REDIS_PORT}")
 
-        # Setting up signals for interaction with AFL++
-        if AFL_PERSISTENT:
-            signal.signal(signal.SIGTERM, self.handle_sigterm)
-            signal.signal(signal.SIGINT, self.handle_sigint)
-
     def handle_sigterm(self, signum, frame):
         """Handling SIGTERM signal from AFL++"""
         sys.exit(0)
@@ -442,32 +434,7 @@ class AFLFuzzer:
             print(f"Falling back to {len(self.test_cases)} random commands")
             return True
 
-    def format_command_for_cli(self, command, args):
-        """Format command for redis-cli input"""
-        formatted_args = []
-        for arg in args:
-            arg_str = str(arg)
-
-            # Check for binary data and special characters
-            try:
-                # Try to decode as UTF-8 if it's bytes
-                if isinstance(arg, bytes):
-                    arg_str = arg.decode("utf-8", errors="backslashreplace")
-            except:
-                # If there's a decoding error, use character representation with escaping
-                arg_str = repr(arg)[1:-1]  # Remove quotes from repr
-
-            # Always use quotes for safety, but preserve original escape sequences
-            # We replace the quotes with \" but don't modify any escape sequences
-            escaped_arg = arg_str.replace('"', '\\"')
-
-            # Store the argument in quotes
-            formatted_args.append('"' + escaped_arg + '"')
-
-        # The command format must be preserved exactly for proper reproduction
-        return f"{command} {' '.join(formatted_args)}"
-
-    def execute_tests(self, skip_logging=False):
+    def execute_tests(self):
         """Executes tests on Redis server"""
         print(f"Attempting to connect to Redis server at {REDIS_HOST}:{REDIS_PORT}")
         redis_client = RedisClient()
@@ -494,16 +461,6 @@ class AFLFuzzer:
         print(
             f"Executing {len(self.test_cases)} commands on Redis server at {REDIS_HOST}:{REDIS_PORT}"
         )
-
-        # Open commands log file in append mode if not skipping logging
-        if not skip_logging:
-            with open(COMMANDS_LOG_FILE, "a") as log_file:
-                for command, args in self.test_cases:
-                    # Log command to file in redis-cli compatible format
-                    cli_formatted_command = self.format_command_for_cli(command, args)
-                    log_file.write(f"{cli_formatted_command}\n")
-                    log_file.flush()  # Ensure command is written immediately
-                    print(f"Logged command: {cli_formatted_command}")
 
         # Execute all commands
         current_test_commands = []
@@ -538,62 +495,14 @@ class AFLFuzzer:
 
     def run(self):
         """Main method for running fuzzing"""
-        if AFL_PERSISTENT:
-            while True:
-                # Clearing state
-                self.afl_input = None
-                self.test_cases = []
-                self.results = []
+        # For running outside AFL++
+        if not self.read_afl_input() or not self.parse_afl_input():
+            # If no input data, generate random commands
+            test_case = TestCase()
+            self.test_cases = test_case.generate_test_case()
 
-                # Reading and processing input data from AFL++
-                if not self.read_afl_input() or not self.parse_afl_input():
-                    sys.exit(1)
-
-                # Executing tests
-                self.execute_tests()
-
-                # Analyzing results
-                self.analyze_results()
-
-                # Notifying AFL++ about iteration completion
-                print("DONE")
-                sys.stdout.flush()
-        else:
-            # For running outside AFL++
-            if not self.read_afl_input() or not self.parse_afl_input():
-                # If no input data, generate random commands
-                test_case = TestCase()
-                self.test_cases = test_case.generate_test_case()
-
-            # Executing tests
-            self.execute_tests()
-
-            # Analyzing results
-            self.analyze_results()
-
-            # Displaying results
-            self.print_results()
-
-    def analyze_results(self):
-        """Analyzes test results"""
-        # Verification is already performed in execute_tests, this method remains for compatibility
-        pass
-
-    def print_results(self):
-        """Displays test results"""
-        print(f"Executed tests: {self.stats['total_executions']}")
-        print(f"Successful executions: {self.stats['successful_executions']}")
-        print(f"Errors: {self.stats['error_executions']}")
-        print(f"Timeouts: {self.stats['timeouts']}")
-
-        print("\nDetailed results:")
-        for idx, result in enumerate(self.results):
-            print(f"{idx+1}. Command: {result['command']} {' '.join(result['args'])}")
-            if "error" in result:
-                print(f"   Error: {result['error']}")
-            else:
-                print(f"   Result: {result['result']}")
-            print()
+        # Executing tests
+        self.execute_tests()
 
 
 def parse_args():
@@ -657,10 +566,6 @@ def main():
 
     # Always reload input values
     INPUT_VALUES = load_input_dict()
-
-    # Create directory for log files if needed
-    log_dir = os.path.dirname(COMMANDS_LOG_FILE)
-    os.makedirs(log_dir, exist_ok=True)
 
     # Running fuzzing with mixed strategy always enabled
     fuzzer = AFLFuzzer()

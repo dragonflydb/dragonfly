@@ -21,5 +21,4 @@ releases
 .secrets
 cmake-build-debug
 tests/afl/output/
-tests/afl/commands.log
 tests/afl/redis.dict
