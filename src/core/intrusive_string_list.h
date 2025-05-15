@@ -461,6 +461,24 @@ class IntrusiveStringList {
     return obj_malloc_used_;
   };
 
+  bool ExpireIfNeeded(uint32_t time_now, uint32_t* set_size) {
+    if (!start_) {
+      return false;
+    }
+
+    auto it = begin();
+
+    if (it->HasTtl()) {
+      if (it.ExpireIfNeeded(time_now, &obj_malloc_used_)) {
+        (*set_size)--;
+        return true;
+      }
+      return false;
+    }
+
+    return false;
+  }
+
  private:
   size_t obj_malloc_used_;
   ISLEntry start_;
