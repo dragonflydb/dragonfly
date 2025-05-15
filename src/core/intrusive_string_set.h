@@ -296,6 +296,19 @@ class IntrusiveStringSet {
     return entries_.capacity() * sizeof(IntrusiveStringList);
   }
 
+  bool ExpirationUsed() const {
+    // TODO
+    LOG(FATAL) << "ExpirationUsed() isn't implemented";
+    return true;
+  }
+
+  size_t SizeSlow() {
+    // TODO
+    LOG(FATAL) << "SizeSlow() isn't implemented";
+    // CollectExpired();
+    return size_;
+  }
+
  private:
   // was Grow in StringSet
   void Rehash(size_t prev_size) {
