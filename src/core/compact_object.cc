@@ -1026,9 +1026,17 @@ void CompactObj::SetSBF(uint64_t initial_capacity, double fp_prob, double grow_f
 
 void CompactObj::SetTopK(size_t topk, size_t width, size_t depth, double decay) {
   TopKeys::Options opts;
-  opts.buckets = width;
-  opts.depth = depth;
+  size_t total_buckets = 4;
+  // Heuristic
+  if (topk > 4) {
+    total_buckets = topk / 4;
+  }
+  opts.buckets = total_buckets;
+  opts.depth = 4;
+  // fingerprints = buckets * depth = topk
   opts.decay_base = decay;
+  // We need this so we can set the key. The problem with this is upon cell reset,
+  // we don't set the key and a query for TopK won't return that key because we never set it.
   opts.min_key_count_to_record = 0;
   SetMeta(TOPK_TAG);
   u_.topk = AllocateMR<TopKeys>(opts);
