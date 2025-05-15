@@ -331,7 +331,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 120, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 136, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(hard_evictions);
@@ -348,7 +348,8 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
   ADD(ram_hits);
   ADD(ram_cool_hits);
   ADD(ram_misses);
-
+  ADD(huff_encode_total);
+  ADD(huff_encode_success);
   return *this;
 }
 
@@ -409,7 +410,10 @@ auto DbSlice::GetStats() const -> Stats {
     stats.expire_count = db_wrap.expire.size();
     stats.table_mem_usage = db_wrap.table_memory();
   }
-  s.small_string_bytes = CompactObj::GetStats().small_string_bytes;
+  auto co_stats = CompactObj::GetStatsThreadLocal();
+  s.small_string_bytes = co_stats.small_string_bytes;
+  s.events.huff_encode_total = co_stats.huff_encode_total;
+  s.events.huff_encode_success = co_stats.huff_encode_success;
 
   return s;
 }
@@ -636,7 +640,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
   // It's a new entry.
-  CallChangeCallbacks(cntx.db_index, {key});
+  CallChangeCallbacks(cntx.db_index, ChangeReq{key});
 
   ssize_t memory_offset = -key.size();
   size_t reclaimed = 0;
@@ -1730,7 +1734,9 @@ void DbSlice::OnCbFinishBlocking() {
       }
 
       if (!change_cb_.empty()) {
-        auto bump_cb = [&](PrimeTable::bucket_iterator bit) { CallChangeCallbacks(db_index, bit); };
+        auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
+          CallChangeCallbacks(db_index, ChangeReq{bit});
+        };
         db.prime.CVCUponBump(change_cb_.back().first, it, bump_cb);
       }
 

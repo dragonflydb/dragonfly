@@ -85,7 +85,7 @@ void CapturingReplyBuilder::Capture(Payload val, bool collapse_if_needed) {
   if (!stack_.empty()) {
     auto& last = stack_.top();
     last.first->arr.push_back(std::move(val));
-    if (collapse_if_needed && last.second-- == 1) {
+    if (last.second-- == 1 && collapse_if_needed) {
       CollapseFilledCollections();
     }
   } else {

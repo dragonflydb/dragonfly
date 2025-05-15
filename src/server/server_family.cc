@@ -2547,6 +2547,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("keyspace_mutations", m.events.mutations);
     append("total_reads_processed", conn_stats.io_read_cnt);
     append("total_writes_processed", reply_stats.io_write_cnt);
+    append("huffenc_attempt_total", m.events.huff_encode_total);
+    append("huffenc_success_total", m.events.huff_encode_success);
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
@@ -3052,7 +3054,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
       ec = new_replica->Start();
       break;
     case ActionOnConnectionFail::kContinueReplication:
-      new_replica->EnableReplication(builder);
+      new_replica->EnableReplication();
       break;
   };
 
@@ -3402,14 +3404,14 @@ void ServerFamily::Module(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendSimpleString("name");
   rb->SendSimpleString("ReJSON");
   rb->SendSimpleString("ver");
-  rb->SendLong(20'000);
+  rb->SendLong(20'808);
 
   // Search
   rb->StartCollection(2, RedisReplyBuilder::MAP);
   rb->SendSimpleString("name");
   rb->SendSimpleString("search");
   rb->SendSimpleString("ver");
-  rb->SendLong(20'000);  // we target v2
+  rb->SendLong(21'015);  // we target v2
 }
 
 void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,

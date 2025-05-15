@@ -377,19 +377,17 @@ static_assert(ascii_len(17) == 19);
 
 struct TL {
   MemoryResource* local_mr = PMR_NS::get_default_resource();
-  size_t small_str_bytes;
   base::PODArray<uint8_t> tmp_buf;
   string tmp_str;
   HuffmanEncoder huff_encoder;
   HuffmanDecoder huff_decoder;
+  size_t small_str_bytes;
+  uint64_t huff_encode_total = 0, huff_encode_success = 0;  // success/total metrics.
 };
 
 thread_local TL tl;
 
 constexpr bool kUseSmallStrings = true;
-
-/// TODO: Ascii encoding becomes slow for large blobs. We should factor it out into a separate
-/// file and implement with SIMD instructions.
 constexpr bool kUseAsciiEncoding = true;
 
 }  // namespace
@@ -740,10 +738,11 @@ uint32_t JsonEnconding() {
 
 using namespace std;
 
-auto CompactObj::GetStats() -> Stats {
+auto CompactObj::GetStatsThreadLocal() -> Stats {
   Stats res;
   res.small_string_bytes = tl.small_str_bytes;
-
+  res.huff_encode_total = tl.huff_encode_total;
+  res.huff_encode_success = tl.huff_encode_success;
   return res;
 }
 
@@ -754,6 +753,12 @@ void CompactObj::InitThreadLocal(MemoryResource* mr) {
 
 bool CompactObj::InitHuffmanThreadLocal(std::string_view hufftable) {
   string err_msg;
+
+  // We do not allow overriding the existing huffman table once it is set.
+  if (tl.huff_encoder.valid()) {
+    return false;
+  }
+
   if (!tl.huff_encoder.Load(hufftable, &err_msg)) {
     LOG(DFATAL) << "Failed to load huffman table: " << err_msg;
     return false;
@@ -1477,14 +1482,18 @@ void CompactObj::EncodeString(string_view str) {
   // 288 - 36 = 252, which is smaller than 256.
   constexpr unsigned kMaxHuffLen = 288;
 
-  // TODO: for sizes 17, 18 we would like to test ascii encoding first as it's more efficient.
-  // And if it succeeds we can squash into the inline buffer. Starting from 19,
-  // we can prioritize huffman encoding.
-  if (str.size() <= kMaxHuffLen && tl.huff_encoder.valid()) {
+  // For sizes 17, 18 we would like to test ascii encoding first as it's more efficient.
+  // And if it succeeds we can squash into the inline buffer.
+  bool is_ascii =
+      kUseAsciiEncoding && str.size() < 19 && detail::validate_ascii_fast(str.data(), str.size());
+
+  // if !is_ascii, we try huffman encoding next.
+  if (!is_ascii && str.size() <= kMaxHuffLen && tl.huff_encoder.valid()) {
     unsigned dest_len = tl.huff_encoder.CompressedBound(str.size());
     // 1 byte for storing the size delta.
     tl.tmp_buf.resize(1 + dest_len);
     string err_msg;
+    ++tl.huff_encode_total;
     bool res = tl.huff_encoder.Encode(str, tl.tmp_buf.data() + 1, &dest_len, &err_msg);
     if (res) {
       // we accept huffman encoding only if it is:
@@ -1492,6 +1501,7 @@ void CompactObj::EncodeString(string_view str) {
       // 2. allows us to store the encoded string in the inline buffer
       if (dest_len && (dest_len < kInlineLen || (dest_len + dest_len / 5) < str.size())) {
         huff_encoded = true;
+        tl.huff_encode_success++;
         encoded = string_view{reinterpret_cast<char*>(tl.tmp_buf.data()), dest_len + 1};
         unsigned delta = str.size() - dest_len;
         DCHECK_LT(delta, 256u);
@@ -1509,8 +1519,10 @@ void CompactObj::EncodeString(string_view str) {
     }
   }
 
-  bool is_ascii =
-      kUseAsciiEncoding && !huff_encoded && detail::validate_ascii_fast(str.data(), str.size());
+  // Finally we try ascii encoding for longer strings if we have not encoded them with huffman.
+  if (kUseAsciiEncoding && !is_ascii && str.size() >= 19 && !huff_encoded) {
+    is_ascii = detail::validate_ascii_fast(str.data(), str.size());
+  }
 
   if (is_ascii) {
     size_t encode_len = binpacked_len(str.size());
@@ -1534,6 +1546,8 @@ void CompactObj::EncodeString(string_view str) {
       return;
     }
   }
+
+  DCHECK_GT(encoded.size(), kInlineLen);
 
   if (kUseSmallStrings && SmallString::CanAllocate(encoded.size())) {
     if (taglen_ == 0) {

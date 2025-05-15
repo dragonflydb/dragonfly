@@ -73,6 +73,8 @@ struct SliceEvents {
   // how many updates and insertions of keys between snapshot intervals
   size_t update = 0;
 
+  uint64_t huff_encode_total = 0, huff_encode_success = 0;
+
   SliceEvents& operator+=(const SliceEvents& o);
 };
 
@@ -198,9 +200,9 @@ class DbSlice {
     // Otherwise (string_view is set) then it's a new key that is going to be added to the table.
     std::variant<PrimeTable::bucket_iterator, std::string_view> change;
 
-    ChangeReq(PrimeTable::bucket_iterator it) : change(it) {
+    explicit ChangeReq(PrimeTable::bucket_iterator it) : change(it) {
     }
-    ChangeReq(std::string_view key) : change(key) {
+    explicit ChangeReq(std::string_view key) : change(key) {
     }
 
     const PrimeTable::bucket_iterator* update() const {

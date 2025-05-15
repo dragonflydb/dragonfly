@@ -18,7 +18,7 @@
 %o bison-cc-namespace="dfly.search" bison-cc-parser="Parser"
 %o namespace="dfly.search"
 %o class="Scanner" lex="Lex"
-%o nodefault batch
+%o nodefault batch case-insensitive
 /* %o debug */
 
 /* Declarations before lexer implementation.  */
