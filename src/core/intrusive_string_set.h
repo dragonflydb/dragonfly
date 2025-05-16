@@ -9,7 +9,6 @@
 
 #include <vector>
 
-#include "base/hash.h"
 #include "base/pmr/memory_resource.h"
 #include "intrusive_string_list.h"
 
@@ -315,11 +314,6 @@ class IntrusiveStringSet {
   uint32_t BucketId(uint64_t hash) const {
     assert(capacity_log_ > 0);
     return hash >> (64 - capacity_log_);
-  }
-
-  uint64_t Hash(std::string_view str) const {
-    constexpr XXH64_hash_t kHashSeed = 24061983;
-    return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
   }
 
   uint32_t EntryTTL(uint32_t ttl_sec) const {

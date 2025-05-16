@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string_view>
 
+#include "base/hash.h"
 #include "base/logging.h"
 
 extern "C" {
@@ -15,6 +16,11 @@ extern "C" {
 }
 
 namespace dfly {
+
+static uint64_t Hash(std::string_view str) {
+  constexpr XXH64_hash_t kHashSeed = 24061983;
+  return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
+}
 // doesn't possess memory, it should be created and release manually
 class ISLEntry {
   friend class IntrusiveStringList;
@@ -86,28 +92,38 @@ class ISLEntry {
     return (uptr() & kExtHashShiftedMask) >> kExtHashShift;
   }
 
-  bool CheckBucketAffiliation(uint32_t bucket_id, uint32_t capacity_log, uint32_t shift_log) const {
+  bool CheckBucketAffiliation(uint32_t bucket_id, uint32_t capacity_log, uint32_t shift_log) {
     uint32_t bucket_id_hash_part = capacity_log > shift_log ? shift_log : capacity_log;
     uint32_t bucket_mask = (1 << bucket_id_hash_part) - 1;
     bucket_id &= bucket_mask;
-    uint32_t stored_bucket_id = GetExtendedHash() >> (ext_hash_bit_size - bucket_id_hash_part);
+    auto stored_hash = GetExtendedHash();
+    if (!stored_hash) {
+      stored_hash = SetExtendedHash(Hash(Key()), capacity_log, shift_log);
+    }
+    uint32_t stored_bucket_id = stored_hash >> (ext_hash_bit_size - bucket_id_hash_part);
     return bucket_id == stored_bucket_id;
   }
 
-  bool CheckExtendedHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) const {
-    uint32_t start_hash_bit = capacity_log > shift_log ? capacity_log - shift_log : 0;
-    uint32_t ext_hash_shift = 64 - start_hash_bit - ext_hash_bit_size;
-    uint64_t ext_hash = (hash >> ext_hash_shift) & kExtHashMask;
-    return GetExtendedHash() == ext_hash;
+  bool CheckExtendedHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) {
+    const uint32_t start_hash_bit = capacity_log > shift_log ? capacity_log - shift_log : 0;
+    const uint32_t ext_hash_shift = 64 - start_hash_bit - ext_hash_bit_size;
+    const uint64_t ext_hash = (hash >> ext_hash_shift) & kExtHashMask;
+    auto stored_hash = GetExtendedHash();
+    if (!stored_hash) {
+      stored_hash = SetExtendedHash(Hash(Key()), capacity_log, shift_log);
+    }
+    return stored_hash == ext_hash;
   }
 
   // TODO rename to SetHash
   // shift_log identify which bucket the element belongs to
-  void SetExtendedHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) {
-    uint32_t start_hash_bit = capacity_log > shift_log ? capacity_log - shift_log : 0;
-    uint32_t ext_hash_shift = 64 - start_hash_bit - ext_hash_bit_size;
-    uint64_t ext_hash = ((hash >> ext_hash_shift) << kExtHashShift) & kExtHashShiftedMask;
+  uint64_t SetExtendedHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) {
+    const uint32_t start_hash_bit = capacity_log > shift_log ? capacity_log - shift_log : 0;
+    const uint32_t ext_hash_shift = 64 - start_hash_bit - ext_hash_bit_size;
+    const uint64_t result_hash = (hash >> ext_hash_shift) & kExtHashMask;
+    const uint64_t ext_hash = result_hash << kExtHashShift;
     data_ = (char*)((uptr() & ~kExtHashShiftedMask) | ext_hash);
+    return result_hash;
   }
 
  protected:
