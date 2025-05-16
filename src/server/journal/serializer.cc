@@ -162,6 +162,7 @@ std::error_code JournalReader::ReadCommand(journal::ParsedEntry::CmdData* data) 
 
   size_t cmd_size = 0;
   SET_OR_RETURN(ReadUInt<uint64_t>(), cmd_size);
+  data->cmd_len = cmd_size;
 
   // Read all strings consecutively.
   data->command_buf = make_unique<uint8_t[]>(cmd_size);
@@ -174,6 +175,9 @@ std::error_code JournalReader::ReadCommand(journal::ParsedEntry::CmdData* data) 
     ptr += size;
     cmd_size -= size;
   }
+
+  data->cmd_len -= cmd_size;
+
   return {};
 }
 
