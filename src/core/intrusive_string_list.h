@@ -86,14 +86,26 @@ class ISLEntry {
     return (uptr() & kExtHashShiftedMask) >> kExtHashShift;
   }
 
-  bool CheckExtendedHash(uint64_t hash, uint32_t capacity_log) const {
-    uint32_t ext_hash_shift = 64 - capacity_log - ext_hash_bit_size;
+  bool CheckBucketAffiliation(uint32_t bucket_id, uint32_t capacity_log, uint32_t shift_log) const {
+    uint32_t bucket_id_hash_part = capacity_log > shift_log ? shift_log : capacity_log;
+    uint32_t bucket_mask = (1 << bucket_id_hash_part) - 1;
+    bucket_id &= bucket_mask;
+    uint32_t stored_bucket_id = GetExtendedHash() >> (ext_hash_bit_size - bucket_id_hash_part);
+    return bucket_id == stored_bucket_id;
+  }
+
+  bool CheckExtendedHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) const {
+    uint32_t start_hash_bit = capacity_log > shift_log ? capacity_log - shift_log : 0;
+    uint32_t ext_hash_shift = 64 - start_hash_bit - ext_hash_bit_size;
     uint64_t ext_hash = (hash >> ext_hash_shift) & kExtHashMask;
     return GetExtendedHash() == ext_hash;
   }
 
-  void SetExtendedHash(uint64_t hash, uint32_t capacity_log) {
-    uint32_t ext_hash_shift = 64 - capacity_log - ext_hash_bit_size;
+  // TODO rename to SetHash
+  // shift_log identify which bucket the element belongs to
+  void SetExtendedHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) {
+    uint32_t start_hash_bit = capacity_log > shift_log ? capacity_log - shift_log : 0;
+    uint32_t ext_hash_shift = 64 - start_hash_bit - ext_hash_bit_size;
     uint64_t ext_hash = ((hash >> ext_hash_shift) << kExtHashShift) & kExtHashShiftedMask;
     data_ = (char*)((uptr() & ~kExtHashShiftedMask) | ext_hash);
   }
@@ -396,14 +408,15 @@ class IntrusiveStringList {
 
   // TODO consider to wrap ISLEntry to prevent usage out of the list
   IntrusiveStringList::iterator Find(std::string_view str, uint64_t hash, uint32_t capacity_log,
-                                     uint32_t* set_size, uint32_t time_now = UINT32_MAX) {
+                                     uint32_t shift_log, uint32_t* set_size,
+                                     uint32_t time_now = UINT32_MAX) {
     auto entry = begin();
     for (; entry; ++entry) {
       if (entry.ExpireIfNeeded(time_now, &obj_malloc_used_)) {
         (*set_size)--;
         continue;
       }
-      if (entry->CheckExtendedHash(hash, capacity_log) && entry->Key() == str)
+      if (entry->CheckExtendedHash(hash, capacity_log, shift_log) && entry->Key() == str)
         break;
     }
     return entry;
