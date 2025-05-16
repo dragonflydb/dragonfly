@@ -120,32 +120,36 @@ TEST_F(IntrusiveStringSetTest, HashCheckTest) {
   IntrusiveStringList isl;
   {
     ISLEntry& test = isl.Emplace("0123456789");
-    test.SetExtendedHash(hash, 3);
+    test.SetExtendedHash(hash, 3, 4);
+    EXPECT_TRUE(test.CheckBucketAffiliation(7, 3, 4));
+    EXPECT_FALSE(test.CheckBucketAffiliation(6, 3, 4));
+    EXPECT_TRUE(test.CheckBucketAffiliation(7, 4, 3));
+    EXPECT_FALSE(test.CheckBucketAffiliation(6, 4, 3));
   }
   {
     ISLEntry& test = isl.Emplace("123456789");
-    test.SetExtendedHash(hash, 3);
+    test.SetExtendedHash(hash, 3, 4);
   }
   {
     ISLEntry& test = isl.Emplace("23456789");
-    test.SetExtendedHash(hash, 3);
+    test.SetExtendedHash(hash, 3, 4);
   }
   {
     ISLEntry& test = isl.Emplace("3456789");
-    test.SetExtendedHash(hash, 3);
+    test.SetExtendedHash(hash, 3, 4);
   }
   {
     ISLEntry& test = isl.Emplace("456789");
-    test.SetExtendedHash(hash, 3);
+    test.SetExtendedHash(hash, 3, 4);
   }
 
   uint32_t num_expired_fields = 0;
 
-  EXPECT_TRUE(isl.Find("0123456789", 0xFEDCBA9876543210ULL, 3, &num_expired_fields));
-  EXPECT_TRUE(isl.Find("123456789", 0xFEDCBA9876543210ULL, 3, &num_expired_fields));
-  EXPECT_TRUE(isl.Find("23456789", 0xFEDCBA9876543210ULL, 3, &num_expired_fields));
-  EXPECT_TRUE(isl.Find("3456789", 0xFEDCBA9876543210ULL, 3, &num_expired_fields));
-  EXPECT_TRUE(isl.Find("456789", 0xFEDCBA9876543210ULL, 3, &num_expired_fields));
+  EXPECT_TRUE(isl.Find("0123456789", 0xFEDCBA9876543210ULL, 3, 4, &num_expired_fields));
+  EXPECT_TRUE(isl.Find("123456789", 0xFEDCBA9876543210ULL, 3, 4, &num_expired_fields));
+  EXPECT_TRUE(isl.Find("23456789", 0xFEDCBA9876543210ULL, 3, 4, &num_expired_fields));
+  EXPECT_TRUE(isl.Find("3456789", 0xFEDCBA9876543210ULL, 3, 4, &num_expired_fields));
+  EXPECT_TRUE(isl.Find("456789", 0xFEDCBA9876543210ULL, 3, 4, &num_expired_fields));
 }
 
 TEST_F(IntrusiveStringSetTest, IntrusiveStringSetAddFindTest) {

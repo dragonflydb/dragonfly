@@ -152,7 +152,7 @@ class IntrusiveStringSet {
                      uint32_t ttl_sec = UINT32_MAX) {
     ++size_;
     auto& entry = bucket->Emplace(str, ttl_sec);
-    entry.SetExtendedHash(hash, capacity_log_);
+    entry.SetExtendedHash(hash, capacity_log_, kShiftLog);
     return entry;
   }
 
@@ -195,6 +195,7 @@ class IntrusiveStringSet {
 
   using ItemCb = std::function<void(std::string_view)>;
 
+  // TODO fix with CheckExtendedHash
   uint32_t Scan(uint32_t cursor, const ItemCb& cb) {
     uint32_t entries_idx = cursor >> (32 - capacity_log_);
 
@@ -306,7 +307,7 @@ class IntrusiveStringSet {
         uint64_t hash = Hash(entry.Key());
         auto bucket_id = BucketId(hash);
         auto& inserted_entry = entries_[bucket_id].Insert(entry.Release());
-        inserted_entry.SetExtendedHash(hash, capacity_log_);
+        inserted_entry.SetExtendedHash(hash, capacity_log_, kShiftLog);
       }
     }
   }
@@ -352,7 +353,7 @@ class IntrusiveStringSet {
       if (it->Empty()) {
         continue;
       }
-      auto res = it->Find(str, hash, capacity_log_, &size_, time_now_);
+      auto res = it->Find(str, hash, capacity_log_, kShiftLog, &size_, time_now_);
       if (res) {
         return {res, bucket_id};
       }
@@ -362,8 +363,9 @@ class IntrusiveStringSet {
   }
 
  private:
-  static constexpr std::uint32_t kMinCapacityLog = 3;
-  static constexpr std::uint32_t kDisplacementSize = 16;
+  static constexpr std::uint32_t kMinCapacityLog = 3;  // TODO make template
+  static constexpr std::uint32_t kShiftLog = 4;        // TODO make template
+  static constexpr std::uint32_t kDisplacementSize = 1 << kShiftLog;
   std::uint32_t capacity_log_ = 0;
   std::uint32_t size_ = 0;  // number of elements in the set.
   std::uint32_t time_now_ = 0;
