@@ -35,7 +35,9 @@ class IntrusiveStringSet {
         : buckets_it_(it), end_(end), entry_(entry) {
     }
 
-    iterator(Buckets::iterator it, Buckets::iterator end) : buckets_it_(it), end_(end) {
+    iterator(Buckets::iterator it, Buckets::iterator end, std::uint32_t time_now,
+             std::uint32_t* set_size)
+        : buckets_it_(it), end_(end), time_now_(time_now), set_size_(set_size) {
       SetEntryIt();
     }
 
@@ -54,9 +56,11 @@ class IntrusiveStringSet {
     // void Advance();
 
     iterator& operator++() {
-      // TODO add expiration logic
-      if (entry_)
+      if (entry_) {
+        if (entry_.ExpireIfNeeded(time_now_, &buckets_it_->obj_malloc_used_))
+          (*set_size_)--;
         ++entry_;
+      }
       if (!entry_) {
         ++buckets_it_;
         SetEntryIt();
@@ -95,14 +99,16 @@ class IntrusiveStringSet {
     Buckets::iterator buckets_it_;
     Buckets::iterator end_;
     IntrusiveStringList::iterator entry_;
+    std::uint32_t time_now_;
+    std::uint32_t* set_size_;
   };
 
   iterator begin() {
-    return iterator(entries_.begin(), entries_.end());
+    return iterator(entries_.begin(), entries_.end(), time_now_, &size_);
   }
 
   iterator end() {
-    return iterator(entries_.end(), entries_.end());
+    return iterator(entries_.end(), entries_.end(), time_now_, &size_);
   }
 
   explicit IntrusiveStringSet(PMR_NS::memory_resource* mr = PMR_NS::get_default_resource())
@@ -111,7 +117,7 @@ class IntrusiveStringSet {
 
   static constexpr uint32_t kMaxBatchLen = 32;
 
-  ISLEntry Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX) {
+  ISLEntry Add(std::string_view str, bool keepttl = true, uint32_t ttl_sec = UINT32_MAX) {
     if (entries_.empty() || size_ >= entries_.size()) {
       Reserve(Capacity() * 2);
     }
@@ -119,6 +125,10 @@ class IntrusiveStringSet {
     const auto bucket_id = BucketId(hash);
 
     if (auto item = FindInternal(bucket_id, str, hash); item.first != IntrusiveStringList::end()) {
+      // Update ttl if found
+      if (!keepttl) {
+        item.first.SetExpiryTime(EntryTTL(ttl_sec), &entries_[item.second].obj_malloc_used_);
+      }
       return {};
     }
 
@@ -160,8 +170,9 @@ class IntrusiveStringSet {
     Reserve(span.size());
     unsigned res = 0;
     for (auto& s : span) {
-      res++;
-      Add(s, ttl_sec);
+      if (Add(s, keepttl, ttl_sec)) {
+        res++;
+      }
     }
     return res;
   }
@@ -173,7 +184,7 @@ class IntrusiveStringSet {
     other->set_time(time_now());
     for (uint32_t bucket_id = 0; bucket_id < entries_.size(); ++bucket_id) {
       for (auto it = entries_[bucket_id].begin(); it != entries_[bucket_id].end(); ++it) {
-        other->Add(it->Key(), it.HasExpiry() ? it->ExpiryTime() : UINT32_MAX);
+        other->Add(it->Key(), true, it.HasExpiry() ? it->ExpiryTime() : UINT32_MAX);
       }
     }
   }
@@ -229,7 +240,7 @@ class IntrusiveStringSet {
     uint64_t hash = Hash(str);
     auto bucket_id = BucketId(hash);
     auto item = FindInternal(bucket_id, str, hash);
-    return entries_[item.second].Erase(str);
+    return entries_[item.second].Erase(str, &size_);
   }
 
   iterator Find(std::string_view member) {
@@ -239,7 +250,11 @@ class IntrusiveStringSet {
     uint64_t hash = Hash(member);
     auto bucket_id = BucketId(hash);
     auto res = FindInternal(bucket_id, member, hash);
-    return {res.first ? entries_.begin() + res.second : entries_.end(), entries_.end(), res.first};
+    return {
+        res.first ? entries_.begin() + res.second : entries_.end(),
+        entries_.end(),
+        res.first,
+    };
   }
 
   bool Contains(std::string_view member) {
@@ -369,7 +384,6 @@ class IntrusiveStringSet {
   std::uint32_t capacity_log_ = 0;
   std::uint32_t size_ = 0;  // number of elements in the set.
   std::uint32_t time_now_ = 0;
-
   Buckets entries_;
 };
 
