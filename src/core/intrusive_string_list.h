@@ -262,6 +262,7 @@ class UniqueISLEntry : private ISLEntry {
 
 class IntrusiveStringList {
  public:
+  size_t obj_malloc_used_;  // TODO: think how we can keep track of size
   class iterator {
    public:
     using iterator_category = std::forward_iterator_tag;
@@ -422,18 +423,19 @@ class IntrusiveStringList {
     return entry;
   }
 
-  bool Erase(std::string_view str) {
+  bool Erase(std::string_view str, uint32_t* set_size) {
     auto cond = [str](const ISLEntry e) { return str == e.Key(); };
-    return Erase(cond);
+    return Erase(cond, set_size);
   }
 
   template <class T, std::enable_if_t<std::is_invocable_v<T, ISLEntry>>* = nullptr>
-  bool Erase(const T& cond) {
+  bool Erase(const T& cond, uint32_t* set_size) {
     if (!start_) {
       return false;
     }
 
     if (auto it = start_; cond(it)) {
+      (*set_size)--;
       start_ = it.Next();
       ISLEntry::Destroy(it);
       return true;
@@ -441,6 +443,7 @@ class IntrusiveStringList {
 
     for (auto prev = start_, it = start_.Next(); it; prev = it, it = it.Next()) {
       if (cond(it)) {
+        (*set_size)--;
         prev.SetNext(it.Next());
         ISLEntry::Destroy(it);
         return true;
@@ -493,7 +496,6 @@ class IntrusiveStringList {
   }
 
  private:
-  size_t obj_malloc_used_;
   ISLEntry start_;
   static ISLEntry end_;
 };

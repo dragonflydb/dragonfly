@@ -108,9 +108,9 @@ TEST_F(IntrusiveStringSetTest, IntrusiveStringListTest) {
   EXPECT_EQ(isl.Find("123456789", &num_expired_fields)->Key(), "123456789"sv);
   EXPECT_FALSE(isl.Find("test", &num_expired_fields));
 
-  EXPECT_TRUE(isl.Erase("23456789"));
+  EXPECT_TRUE(isl.Erase("23456789", &num_expired_fields));
   EXPECT_FALSE(isl.Find("23456789", &num_expired_fields));
-  EXPECT_FALSE(isl.Erase("test"));
+  EXPECT_FALSE(isl.Erase("test", &num_expired_fields));
   EXPECT_FALSE(isl.Find("test", &num_expired_fields));
 }
 
@@ -273,7 +273,7 @@ TEST_F(IntrusiveStringSetTest, Resizing) {
   unsigned size = 0;
   for (auto it = strs.begin(); it != strs.end(); ++it) {
     const auto& str = *it;
-    EXPECT_TRUE(ss_->Add(str, 1));
+    EXPECT_TRUE(ss_->Add(str, true, 1));
     EXPECT_EQ(ss_->UpperBoundSize(), size + 1);
 
     // make sure we haven't lost any items after a grow
@@ -505,7 +505,7 @@ TEST_F(IntrusiveStringSetTest, Iteration) {
 }
 
 TEST_F(IntrusiveStringSetTest, SetFieldExpireHasExpiry) {
-  EXPECT_TRUE(ss_->Add("k1", 100));
+  EXPECT_TRUE(ss_->Add("k1", true, 100));
   auto k = ss_->Find("k1");
   EXPECT_TRUE(k->HasExpiry());
   EXPECT_EQ(k->ExpiryTime(), 100);
@@ -526,17 +526,17 @@ TEST_F(IntrusiveStringSetTest, SetFieldExpireNoHasExpiry) {
 }
 
 TEST_F(IntrusiveStringSetTest, Ttl) {
-  EXPECT_TRUE(ss_->Add("bla"sv, 1));
-  EXPECT_FALSE(ss_->Add("bla"sv, 1));
+  EXPECT_TRUE(ss_->Add("bla"sv, true, 1));
+  EXPECT_FALSE(ss_->Add("bla"sv, true, 1));
   auto it = ss_->Find("bla"sv);
   EXPECT_EQ(1u, it->ExpiryTime());
 
   ss_->set_time(1);
-  EXPECT_TRUE(ss_->Add("bla"sv, 1));
+  EXPECT_TRUE(ss_->Add("bla"sv, true, 1));
   EXPECT_EQ(1u, ss_->UpperBoundSize());
 
   for (unsigned i = 0; i < 100; ++i) {
-    EXPECT_TRUE(ss_->Add(absl::StrCat("foo", i), 1));
+    EXPECT_TRUE(ss_->Add(absl::StrCat("foo", i), true, 1));
   }
   EXPECT_EQ(101u, ss_->UpperBoundSize());
   it = ss_->Find("foo50");
