@@ -23,3 +23,6 @@ cxx_test(cmd_arg_parser_test facade_test LABELS DFLY)
 
 add_executable(ok_backend ok_main.cc)
 cxx_link(ok_backend dfly_facade)
+
+add_executable(resp_validator resp_validator.cc)
+cxx_link(resp_validator dfly_parser_lib)
