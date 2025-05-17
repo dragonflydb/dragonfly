@@ -9,7 +9,6 @@
 
 #include <vector>
 
-#include "base/hash.h"
 #include "base/pmr/memory_resource.h"
 #include "intrusive_string_list.h"
 
@@ -122,7 +121,7 @@ class IntrusiveStringSet {
       Reserve(Capacity() * 2);
     }
     uint64_t hash = Hash(str);
-    const auto bucket_id = BucketId(hash);
+    const auto bucket_id = BucketId(hash, capacity_log_);
 
     if (auto item = FindInternal(bucket_id, str, hash); item.first != IntrusiveStringList::end()) {
       // Update ttl if found
@@ -145,10 +144,10 @@ class IntrusiveStringSet {
   void Reserve(size_t sz) {
     sz = absl::bit_ceil(sz);
     if (sz > entries_.size()) {
-      size_t prev_size = entries_.size();
+      auto prev_capacity_log = capacity_log_;
       capacity_log_ = std::max(kMinCapacityLog, uint32_t(absl::bit_width(sz) - 1));
       entries_.resize(Capacity());
-      Rehash(prev_size);
+      Rehash(prev_capacity_log);
     }
   }
 
@@ -238,7 +237,7 @@ class IntrusiveStringSet {
     if (entries_.empty())
       return false;
     uint64_t hash = Hash(str);
-    auto bucket_id = BucketId(hash);
+    auto bucket_id = BucketId(hash, capacity_log_);
     auto item = FindInternal(bucket_id, str, hash);
     return entries_[item.second].Erase(str, &size_);
   }
@@ -248,7 +247,7 @@ class IntrusiveStringSet {
       return end();
 
     uint64_t hash = Hash(member);
-    auto bucket_id = BucketId(hash);
+    auto bucket_id = BucketId(hash, capacity_log_);
     auto res = FindInternal(bucket_id, member, hash);
     return {
         res.first ? entries_.begin() + res.second : entries_.end(),
@@ -315,26 +314,15 @@ class IntrusiveStringSet {
 
  private:
   // was Grow in StringSet
-  void Rehash(size_t prev_size) {
+  void Rehash(uint32_t prev_capacity_log) {
+    auto prev_size = 1 << prev_capacity_log;
     for (int64_t i = prev_size - 1; i >= 0; --i) {
       auto list = std::move(entries_[i]);
       for (auto entry = list.Pop(time_now_); entry; entry = list.Pop(time_now_)) {
-        uint64_t hash = Hash(entry.Key());
-        auto bucket_id = BucketId(hash);
-        auto& inserted_entry = entries_[bucket_id].Insert(entry.Release());
-        inserted_entry.SetExtendedHash(hash, capacity_log_, kShiftLog);
+        auto bucket_id = entry.Rehash(i, prev_capacity_log, capacity_log_, kShiftLog);
+        entries_[bucket_id].Insert(entry.Release());
       }
     }
-  }
-
-  uint32_t BucketId(uint64_t hash) const {
-    assert(capacity_log_ > 0);
-    return hash >> (64 - capacity_log_);
-  }
-
-  uint64_t Hash(std::string_view str) const {
-    constexpr XXH64_hash_t kHashSeed = 24061983;
-    return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
   }
 
   uint32_t EntryTTL(uint32_t ttl_sec) const {
@@ -380,7 +368,7 @@ class IntrusiveStringSet {
  private:
   static constexpr std::uint32_t kMinCapacityLog = 3;  // TODO make template
   static constexpr std::uint32_t kShiftLog = 4;        // TODO make template
-  static constexpr std::uint32_t kDisplacementSize = 1 << kShiftLog;
+  static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog) - 1;
   std::uint32_t capacity_log_ = 0;
   std::uint32_t size_ = 0;  // number of elements in the set.
   std::uint32_t time_now_ = 0;
