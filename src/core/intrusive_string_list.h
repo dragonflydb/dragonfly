@@ -4,10 +4,11 @@
 
 #pragma once
 
-// #include <cassert>
+#include <cassert>
 #include <cstring>
 #include <string_view>
 
+#include "base/hash.h"
 #include "base/logging.h"
 
 extern "C" {
@@ -15,6 +16,16 @@ extern "C" {
 }
 
 namespace dfly {
+
+static uint64_t Hash(std::string_view str) {
+  constexpr XXH64_hash_t kHashSeed = 24061983;
+  return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
+}
+
+static uint32_t BucketId(uint64_t hash, uint32_t capacity_log) {
+  assert(capacity_log > 0);
+  return hash >> (64 - capacity_log);
+}
 // doesn't possess memory, it should be created and release manually
 class ISLEntry {
   friend class IntrusiveStringList;
@@ -30,7 +41,7 @@ class ISLEntry {
 
   // extended hash allows us to reduce keys comparisons
   static constexpr size_t kExtHashShift = 56;
-  static constexpr uint32_t ext_hash_bit_size = 8;
+  static constexpr uint32_t kExtHashSize = 8;
   static constexpr size_t kExtHashMask = 0xFFULL;
   static constexpr size_t kExtHashShiftedMask = kExtHashMask << kExtHashShift;
 
@@ -86,28 +97,74 @@ class ISLEntry {
     return (uptr() & kExtHashShiftedMask) >> kExtHashShift;
   }
 
-  bool CheckBucketAffiliation(uint32_t bucket_id, uint32_t capacity_log, uint32_t shift_log) const {
+  bool CheckBucketAffiliation(uint32_t bucket_id, uint32_t capacity_log, uint32_t shift_log) {
     uint32_t bucket_id_hash_part = capacity_log > shift_log ? shift_log : capacity_log;
     uint32_t bucket_mask = (1 << bucket_id_hash_part) - 1;
     bucket_id &= bucket_mask;
-    uint32_t stored_bucket_id = GetExtendedHash() >> (ext_hash_bit_size - bucket_id_hash_part);
+    auto stored_hash = GetExtendedHash();
+    if (!stored_hash) {
+      stored_hash = SetExtendedHash(Hash(Key()), capacity_log, shift_log);
+    }
+    uint32_t stored_bucket_id = stored_hash >> (kExtHashSize - bucket_id_hash_part);
     return bucket_id == stored_bucket_id;
   }
 
-  bool CheckExtendedHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) const {
-    uint32_t start_hash_bit = capacity_log > shift_log ? capacity_log - shift_log : 0;
-    uint32_t ext_hash_shift = 64 - start_hash_bit - ext_hash_bit_size;
-    uint64_t ext_hash = (hash >> ext_hash_shift) & kExtHashMask;
-    return GetExtendedHash() == ext_hash;
+  bool CheckExtendedHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) {
+    const uint32_t start_hash_bit = capacity_log > shift_log ? capacity_log - shift_log : 0;
+    const uint32_t ext_hash_shift = 64 - start_hash_bit - kExtHashSize;
+    const uint64_t ext_hash = (hash >> ext_hash_shift) & kExtHashMask;
+    auto stored_hash = GetExtendedHash();
+    if (!stored_hash) {
+      stored_hash = SetExtendedHash(Hash(Key()), capacity_log, shift_log);
+    }
+    return stored_hash == ext_hash;
   }
 
   // TODO rename to SetHash
   // shift_log identify which bucket the element belongs to
-  void SetExtendedHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) {
-    uint32_t start_hash_bit = capacity_log > shift_log ? capacity_log - shift_log : 0;
-    uint32_t ext_hash_shift = 64 - start_hash_bit - ext_hash_bit_size;
-    uint64_t ext_hash = ((hash >> ext_hash_shift) << kExtHashShift) & kExtHashShiftedMask;
+  uint64_t SetExtendedHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) {
+    const uint32_t start_hash_bit = capacity_log > shift_log ? capacity_log - shift_log : 0;
+    const uint32_t ext_hash_shift = 64 - start_hash_bit - kExtHashSize;
+    const uint64_t result_hash = (hash >> ext_hash_shift) & kExtHashMask;
+    const uint64_t ext_hash = result_hash << kExtHashShift;
     data_ = (char*)((uptr() & ~kExtHashShiftedMask) | ext_hash);
+    return result_hash;
+  }
+
+  void ClearHash() {
+    data_ = (char*)((uptr() & ~kExtHashShiftedMask));
+  }
+
+  // return new bucket_id
+  uint32_t Rehash(uint32_t current_bucket_id, uint32_t prev_capacity_log, uint32_t new_capacity_log,
+                  uint32_t shift_log) {
+    auto stored_hash = GetExtendedHash();
+
+    const uint32_t logs_diff = new_capacity_log - prev_capacity_log;
+    const uint32_t prev_significant_bits =
+        prev_capacity_log > shift_log ? shift_log : prev_capacity_log;
+    const uint32_t needed_hash_bits = prev_significant_bits + logs_diff;
+
+    if (!stored_hash || needed_hash_bits > kExtHashSize) {
+      auto hash = Hash(Key());
+      SetExtendedHash(hash, new_capacity_log, shift_log);
+      return BucketId(hash, new_capacity_log);
+    }
+
+    const uint32_t real_bucket_end = stored_hash >> (kExtHashSize - prev_significant_bits);
+    const uint32_t prev_shift_mask = (1 << prev_significant_bits) - 1;
+    const uint32_t curr_shift = (current_bucket_id - real_bucket_end) & prev_shift_mask;
+    const uint32_t prev_bucket_mask = (1 << prev_capacity_log) - 1;
+    const uint32_t base_bucket_id = (current_bucket_id - curr_shift) & prev_bucket_mask;
+
+    const uint32_t last_bits_mask = (1 << logs_diff) - 1;
+    const uint32_t stored_hash_shift = kExtHashSize - needed_hash_bits;
+    const uint32_t last_bits = (stored_hash >> stored_hash_shift) & last_bits_mask;
+    const uint32_t new_bucket_id = (base_bucket_id << logs_diff) | last_bits;
+
+    ClearHash();  // the cache is invalid after rehash operation
+
+    return new_bucket_id;
   }
 
  protected:
@@ -227,7 +284,6 @@ class ISLEntry {
     return HasTtl() ? sizeof(std::uint32_t) : 0;
   }
 
-  // TODO consider use SDS strings or other approach
   // TODO add optimization for big keys
   // memory daya layout [ISLEntry*, TTL, key_size, key]
   char* data_ = nullptr;
@@ -248,6 +304,7 @@ class UniqueISLEntry : private ISLEntry {
   using ISLEntry::ExpiryTime;
   using ISLEntry::HasExpiry;
   using ISLEntry::Key;
+  using ISLEntry::Rehash;
   using ISLEntry::operator bool;
 
   ISLEntry Release() {
@@ -302,6 +359,14 @@ class IntrusiveStringList {
         return true;
       }
       return false;
+    }
+
+    uint32_t Rehash(uint32_t current_bucket_id, uint32_t prev_capacity_log,
+                    uint32_t new_capacity_log, uint32_t shift_log) {
+      auto entry = prev_.Next();
+      auto res = entry->Rehash(current_bucket_id, prev_capacity_log, new_capacity_log, shift_log);
+      prev_.SetNext(entry);
+      return res;
     }
 
     bool HasExpiry() const {
