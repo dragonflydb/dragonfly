@@ -657,7 +657,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
 
   do {
     cur = prime_table->Traverse(
-        cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, vec); });
+        cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, vec); }, true);
   } while (cur && cnt < scan_opts.limit && (absl::Now() - start) < timeout);
 
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();
