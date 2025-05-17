@@ -150,6 +150,11 @@ TEST_F(IntrusiveStringSetTest, HashCheckTest) {
   EXPECT_TRUE(isl.Find("23456789", 0xFEDCBA9876543210ULL, 3, 4, &num_expired_fields));
   EXPECT_TRUE(isl.Find("3456789", 0xFEDCBA9876543210ULL, 3, 4, &num_expired_fields));
   EXPECT_TRUE(isl.Find("456789", 0xFEDCBA9876543210ULL, 3, 4, &num_expired_fields));
+
+  auto entry = isl.Find("456789", 0xFEDCBA9876543210ULL, 3, 4, &num_expired_fields);
+  auto new_pos = entry.Rehash(7, 3, 4, 4);
+  EXPECT_EQ(new_pos, 15);
+  EXPECT_FALSE(entry->GetExtendedHash());
 }
 
 TEST_F(IntrusiveStringSetTest, IntrusiveStringSetAddFindTest) {
