@@ -33,6 +33,7 @@ extern "C" {
 #include "server/set_family.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "util/fibers/fibers.h"
 #include "util/fibers/future.h"
 #include "util/varz.h"
 
@@ -653,11 +654,11 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
 
   const auto start = absl::Now();
   // Don't allow it to monopolize cpu time.
-  const absl::Duration timeout = absl::Milliseconds(10);
+  const absl::Duration timeout = absl::Milliseconds(5);
 
   do {
     cur = prime_table->Traverse(
-        cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, vec); }, true);
+        cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, vec); });
   } while (cur && cnt < scan_opts.limit && (absl::Now() - start) < timeout);
 
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();
@@ -670,7 +671,7 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
 
   EngineShardSet* ess = shard_set;
   unsigned shard_count = ess->size();
-  constexpr uint64_t kMaxScanTimeMs = 100;
+  constexpr uint64_t kMaxScanTimeMs = 50;
 
   // Dash table returns a cursor with its right byte empty. We will use it
   // for encoding shard index. For now scan has a limitation of 255 shards.
@@ -690,10 +691,12 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
     };
 
     // Avoid deadlocking, if called from shard queue script
-    if (EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == sid)
+    if (EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == sid) {
       cb();
-    else
+      util::ThisFiber::Yield();
+    } else {
       ess->Await(sid, cb);
+    }
 
     if (cursor == 0) {
       ++sid;

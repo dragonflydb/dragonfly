@@ -219,7 +219,7 @@ class DashTable : public detail::DashTableBase {
   // mutations. It guarantees that if key exists (1)at the beginning of traversal, (2) stays in the
   // table during the traversal, then Traverse() will eventually reach it even when the table
   // shrinks or grows. Returns: cursor that is guaranteed to be less than 2^40.
-  template <typename Cb> Cursor Traverse(Cursor curs, Cb&& cb, bool one_segment_processing = false);
+  template <typename Cb> Cursor Traverse(Cursor curs, Cb&& cb);
 
   // Traverses over physical buckets. It calls cb once for each bucket by passing a bucket iterator.
   // if cursor=0 starts traversing from the beginning, otherwise continues from where
@@ -934,8 +934,7 @@ auto DashTable<_Key, _Value, Policy>::GetRandomCursor(absl::BitGen* bitgen) -> C
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
-auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb, bool one_segment_processing)
-    -> Cursor {
+auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
   uint32_t sid = curs.segment_id(global_depth_);
   uint8_t bid = curs.bucket_id();
 
@@ -955,26 +954,14 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb, bool one_se
     auto dt_cb = [&](const SegmentIterator& it) { cb(iterator{this, sid, it.index, it.slot}); };
 
     fetched = s->TraverseLogicalBucket(bid, hash_fun, std::move(dt_cb));
+    sid = NextSeg(sid);
+    if (sid >= segment_.size()) {
+      sid = 0;
+      ++bid;
 
-    uint32_t next_sid = NextSeg(sid);
-    uint8_t next_bid = bid;
-
-    if (next_sid >= segment_.size()) {
-      next_sid = 0;
-      next_bid++;
-
-      if (next_bid >= Policy::kBucketNum) {
+      if (bid >= Policy::kBucketNum)
         return 0;  // "End of traversal" cursor.
-      }
     }
-
-    if (fetched || one_segment_processing) {
-      return Cursor{global_depth_, next_sid, next_bid};
-    }
-
-    sid = next_sid;
-    bid = next_bid;
-
   } while (!fetched);
 
   return Cursor{global_depth_, sid, bid};
