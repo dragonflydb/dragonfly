@@ -22,9 +22,9 @@ class CommandId {
    *
    * @param name
    * @param mask
-   * @param arity -     positive if command has fixed number of required arguments
-   *                    negative if command has minimum number of required arguments, but may have
-   * more.
+   * @param arity -     positive if command has fixed number of required arguments including
+   *                    the command, negative if command has minimum number of required arguments,
+   *                    but may have more.
    * @param first_key - position of first key in argument list
    * @param last_key  - position of last key in argument list,
    *                    -1 means the last key index is (arg_length - 1), -2 means that the last key

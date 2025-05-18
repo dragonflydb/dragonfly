@@ -35,17 +35,16 @@ namespace {
 
 using CI = CommandId;
 
-static const char kNxXxErr[] = "XX and NX options at the same time are not compatible";
-static const char kFromMemberLonglatErr[] =
+const char kNxXxErr[] = "XX and NX options at the same time are not compatible";
+const char kFromMemberLonglatErr[] =
     "FROMMEMBER and FROMLONLAT options at the same time are not compatible";
-static const char kByRadiusBoxErr[] =
-    "BYRADIUS and BYBOX options at the same time are not compatible";
-static const char kAscDescErr[] = "ASC and DESC options at the same time are not compatible";
-static const char kStoreTypeErr[] =
-    "STORE and STOREDIST options at the same time are not compatible";
-static const char kStoreCompatErr[] =
+const char kByRadiusBoxErr[] = "BYRADIUS and BYBOX options at the same time are not compatible";
+const char kAscDescErr[] = "ASC and DESC options at the same time are not compatible";
+const char kStoreTypeErr[] = "STORE and STOREDIST options at the same time are not compatible";
+const char kStoreCompatErr[] =
     "STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORDS options";
-static const char kMemberNotFound[] = "could not decode requested zset member";
+const char kMemberNotFound[] = "could not decode requested zset member";
+const char kInvalidUnit[] = "unsupported unit provided. please use M, KM, FT, MI";
 constexpr string_view kGeoAlphabet = "0123456789bcdefghjkmnpqrstuvwxyz"sv;
 
 using MScoreResponse = std::vector<std::optional<double>>;
@@ -281,7 +280,7 @@ void GeoFamily::GeoDist(CmdArgList args, const CommandContext& cmd_cntx) {
     distance_multiplier = ExtractUnit(unit);
     args.remove_suffix(1);
     if (distance_multiplier < 0) {
-      return rb->SendError("unsupported unit provided. please use M, KM, FT, MI");
+      return rb->SendError(kInvalidUnit);
     }
   } else if (args.size() != 3) {
     return rb->SendError(kSyntaxErr);
@@ -511,7 +510,8 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
     DCHECK(geo_ops.store == GeoStoreType::kStoreDist || geo_ops.store == GeoStoreType::kStoreHash);
     ShardId dest_shard = Shard(geo_ops.store_key, shard_set->size());
     DVLOG(1) << "store shard:" << dest_shard << ", key " << geo_ops.store_key;
-    ZSetFamily::AddResult add_result;
+
+    OpResult<ZSetFamily::AddResult> add_result;
     vector<ScoredMemberView> smvec;
     for (const auto& p : ga) {
       if (geo_ops.store == GeoStoreType::kStoreDist) {
@@ -532,11 +532,13 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
       }
       return OpStatus::OK;
     };
+
     tx->Execute(std::move(store_cb), true);
 
     rb->SendLong(smvec.size());
   }
 }
+
 }  // namespace
 
 void GeoFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -765,6 +767,10 @@ void GeoFamily::GeoRadiusByMember(CmdArgList args, const CommandContext& cmd_cnt
   GeoSearchStoreGeneric(cmd_cntx.tx, builder, shape, key, member, geo_ops);
 }
 
+void GeoFamily::GeoRadius(CmdArgList args, const CommandContext& cmd_cntx) {
+  cmd_cntx.rb->SendError("GEORADIUS is not implemented yet");
+}
+
 #define HFUNC(x) SetHandler(&GeoFamily::x)
 
 namespace acl {
@@ -774,6 +780,7 @@ constexpr uint32_t kGeoPos = READ | GEO | SLOW;
 constexpr uint32_t kGeoDist = READ | GEO | SLOW;
 constexpr uint32_t kGeoSearch = READ | GEO | SLOW;
 constexpr uint32_t kGeoRadiusByMember = WRITE | GEO | SLOW;
+constexpr uint32_t kGeoRadius = WRITE | GEO | SLOW;
 }  // namespace acl
 
 void GeoFamily::Register(CommandRegistry* registry) {
@@ -783,10 +790,12 @@ void GeoFamily::Register(CommandRegistry* registry) {
             << CI{"GEOHASH", CO::FAST | CO::READONLY, -2, 1, 1, acl::kGeoHash}.HFUNC(GeoHash)
             << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, acl::kGeoPos}.HFUNC(GeoPos)
             << CI{"GEODIST", CO::READONLY, -4, 1, 1, acl::kGeoDist}.HFUNC(GeoDist)
-            << CI{"GEOSEARCH", CO::READONLY, -4, 1, 1, acl::kGeoSearch}.HFUNC(GeoSearch)
-            << CI{"GEORADIUSBYMEMBER",    CO::WRITE | CO::STORE_LAST_KEY, -4, 1, 1,
+            << CI{"GEOSEARCH", CO::READONLY, -7, 1, 1, acl::kGeoSearch}.HFUNC(GeoSearch)
+            << CI{"GEORADIUSBYMEMBER",    CO::WRITE | CO::STORE_LAST_KEY, -5, 1, 1,
                   acl::kGeoRadiusByMember}
-                   .HFUNC(GeoRadiusByMember);
+                   .HFUNC(GeoRadiusByMember)
+            << CI{"GEORADIUS", CO::WRITE | CO::STORE_LAST_KEY, -6, 1, 1, acl::kGeoRadius}.HFUNC(
+                   GeoRadius);
 }
 
 }  // namespace dfly
