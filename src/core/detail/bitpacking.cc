@@ -28,7 +28,7 @@ static inline uint64_t Compress8x7bit(uint64_t x) {
   return x;
 }
 
-#ifdef __SSE3__
+#if defined(__SSE3__) || defined(__aarch64__)
 static inline pair<const char*, uint8_t*> simd_variant1_pack(const char* ascii, const char* end,
                                                              uint8_t* bin) {
   __m128i val, rpart, lpart;
@@ -204,7 +204,7 @@ void ascii_pack2(const char* ascii, size_t len, uint8_t* bin) {
 
 // The algo - do in parallel what ascii_pack does on two uint64_t integers
 void ascii_pack_simd(const char* ascii, size_t len, uint8_t* bin) {
-#ifdef __SSE3__
+#if defined(__SSE3__) || defined(__aarch64__)
   // I leave out 16 bytes in addition to 16 that we load in the loop
   // because we store into bin full 16 bytes instead of 14. To prevent data
   // overwrite we finish loop one iteration earlier.
@@ -221,7 +221,7 @@ void ascii_pack_simd(const char* ascii, size_t len, uint8_t* bin) {
 }
 
 void ascii_pack_simd2(const char* ascii, size_t len, uint8_t* bin) {
-#ifdef __SSE3__
+#if defined(__SSE3__) || defined(__aarch64__)
   // I leave out 16 bytes in addition to 16 that we load in the loop
   // because we store into bin full 16 bytes instead of 14. To prevent data
   // overwrite we finish loop one iteration earlier.
@@ -248,32 +248,31 @@ void ascii_pack_simd2(const char* ascii, size_t len, uint8_t* bin) {
 // however, if binary data is positioned on the right of the ascii buffer with empty space on the
 // left than we can unpack inplace.
 void ascii_unpack(const uint8_t* bin, size_t ascii_len, char* ascii) {
-  uint64_t val;
+  constexpr uint8_t kM = 0x7F;
+  uint8_t p = 0;
+  unsigned i = 0;
 
-  // we read 7 bytes from bin for every 8 bytes in ascii len.
-  size_t loop_len = (ascii_len / 8) * 8;
-  const char* end = ascii + loop_len;
-  while (ascii < end) {
-    // note: we assume here little endian architectures which is the case for x86 and arm.
-    memcpy(&val, bin, 7);  // read 7 bytes from bin and one byte is ignored.
+  while (ascii_len >= 8) {
+    for (i = 0; i < 7; ++i) {
+      uint8_t src = *bin;  // keep on stack in case we unpack inplace.
+      *ascii++ = (p >> (8 - i)) | ((src << i) & kM);
+      p = src;
+      ++bin;
+    }
 
-    val = ((val & 0x00FFFFFFF0000000) << 4) | (val & 0x000000000FFFFFFF);
-    val = ((val & 0xFFFFC000FFFFC000) << 2) | (val & 0x00003FFF00003FFF);
-    val = ((val & 0x7F807F807F807F80) << 1) | (val & 0x007F007F007F007F);
-    memcpy(ascii, &val, 8);
-
-    ascii += 8;
-    bin += 7;
+    ascii_len -= 8;
+    *ascii++ = p >> 1;
   }
 
-  for (; loop_len < ascii_len; ++loop_len) {
+  DCHECK_LT(ascii_len, 8u);
+  for (i = 0; i < ascii_len; ++i) {
     *ascii++ = *bin++;
   }
 }
 
 // See CompactObjectTest.AsanTriggerReadOverflow for more details.
 void ascii_unpack_simd(const uint8_t* bin, size_t ascii_len, char* ascii) {
-#ifdef __SSSE3__
+#if defined(__SSE3__) || defined(__aarch64__)
 
   if (ascii_len < 18) {  // ascii_len >=18 means bin length >=16.
     ascii_unpack(bin, ascii_len, ascii);
