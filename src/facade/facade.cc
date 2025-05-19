@@ -44,8 +44,12 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   return *this;
 }
 
+ReplyStats::ReplyStats(ReplyStats&& other) noexcept {
+  *this = other;
+}
+
 ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
-  static_assert(sizeof(ReplyStats) == 72u + kSanitizerOverhead);
+  static_assert(sizeof(ReplyStats) == 80u + kSanitizerOverhead);
   ADD(io_write_cnt);
   ADD(io_write_bytes);
 
@@ -56,11 +60,29 @@ ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
   ADD(script_error_count);
 
   send_stats += o.send_stats;
-
+  squashing_current_reply_size.fetch_add(o.squashing_current_reply_size.load(memory_order_relaxed),
+                                         memory_order_relaxed);
   return *this;
 }
 
 #undef ADD
+
+ReplyStats& ReplyStats::operator=(const ReplyStats& o) {
+  static_assert(sizeof(ReplyStats) == 80u + kSanitizerOverhead);
+
+  if (this == &o) {
+    return *this;
+  }
+
+  send_stats = o.send_stats;
+  io_write_cnt = o.io_write_cnt;
+  io_write_bytes = o.io_write_bytes;
+  err_count = o.err_count;
+  script_error_count = o.script_error_count;
+  squashing_current_reply_size.store(o.squashing_current_reply_size.load(memory_order_relaxed),
+                                     memory_order_relaxed);
+  return *this;
+}
 
 string WrongNumArgsError(string_view cmd) {
   return absl::StrCat("wrong number of arguments for '", absl::AsciiStrToLower(cmd), "' command");
