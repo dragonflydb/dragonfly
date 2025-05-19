@@ -41,7 +41,7 @@ struct CmdArgParser {
     INVALID_CASES,
     INVALID_NEXT,
     UNPROCESSED,
-    CUSTOM_ERROR
+    CUSTOM_ERROR  // should be the last one
   };
 
   struct ErrorInfo {

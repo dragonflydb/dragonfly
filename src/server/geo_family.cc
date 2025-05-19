@@ -96,11 +96,11 @@ bool ValidateLongLat(double longitude, double latitude) {
            latitude > GEO_LAT_MAX);
 }
 
-void ParseLongLat(CmdArgParser& parser, double* longitude, double* latitude) {
-  std::tie(*longitude, *latitude) = parser.Next<double, double>();
+void ParseLongLat(CmdArgParser* parser, double lonlat[2]) {
+  std::tie(lonlat[0], lonlat[1]) = parser->Next<double, double>();
 
-  if (!ValidateLongLat(*longitude, *latitude)) {
-    parser.Report(Errors::INVALID_LONG_LAT);
+  if (!ValidateLongLat(lonlat[0], lonlat[1])) {
+    parser->Report(Errors::INVALID_LONG_LAT);
   }
 }
 
@@ -164,10 +164,10 @@ bool ToAsciiGeoHash(const std::optional<double>& val, array<char, 12>* buf) {
   return true;
 }
 
-double ExtractUnit(CmdArgParser& parser) {
-  auto unit = parser.TryMapNext("M", 1.0, "KM", 1000.0, "FT", 0.3048, "MI", 1609.34);
+double ExtractUnit(CmdArgParser* parser) {
+  auto unit = parser->TryMapNext("M", 1.0, "KM", 1000.0, "FT", 0.3048, "MI", 1609.34);
   if (!unit)
-    parser.Report(Errors::INVALID_UNIT);
+    parser->Report(Errors::INVALID_UNIT);
   return unit.value_or(-1);
 }
 
@@ -603,20 +603,20 @@ void GeoFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
         break;
       case Type::FROMLONLAT: {
         ++from_set;
-        ParseLongLat(parser, &shape.xy[0], &shape.xy[1]);
+        ParseLongLat(&parser, shape.xy);
         break;
       }
       case Type::BYRADIUS:
         ++by_set;
         shape.t.radius = parser.Next<double>();
-        shape.conversion = ExtractUnit(parser);
+        shape.conversion = ExtractUnit(&parser);
         geo_ops.conversion = shape.conversion;
         shape.type = CIRCULAR_TYPE;
         break;
       case Type::BYBOX: {
         ++by_set;
         std::tie(shape.t.r.width, shape.t.r.height) = parser.Next<double, double>();
-        shape.conversion = ExtractUnit(parser);
+        shape.conversion = ExtractUnit(&parser);
         geo_ops.conversion = shape.conversion;
         shape.type = RECTANGLE_TYPE;
         break;
