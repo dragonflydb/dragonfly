@@ -840,6 +840,15 @@ TEST_F(GenericFamilyTest, SortStore) {
   EXPECT_EQ(5, resp.GetInt());
   ASSERT_THAT(Run({"lrange", "list-1", "0", "-1"}).GetVec(),
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
+
+  // Check that the keys should not expire after some time.
+  Run({"del", "list-1"});
+  Run({"del", "list-2"});
+  Run({"lpush", "list-1", "3.5", "1.2", "10.1", "2.20", "200"});
+  Run({"sort", "list-1", "store", "list-2"});
+  AdvanceTime(5000);
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(),
+              ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
 }
 
 TEST_F(GenericFamilyTest, TimeNoKeys) {

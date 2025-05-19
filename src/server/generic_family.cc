@@ -1461,8 +1461,7 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
   pv.InitRobj(OBJ_LIST, kEncodingQL2, ql_v2);
 
   // This would overwrite existing value if any with new list.
-  // Set the expiry at 300 seconds.
-  auto op_res = op_args.GetDbSlice().AddOrUpdate(op_args.db_cntx, key, std::move(pv), 300000);
+  auto op_res = op_args.GetDbSlice().AddOrUpdate(op_args.db_cntx, key, std::move(pv), 0);
   RETURN_ON_BAD_STATUS(op_res);
 
   return len;
