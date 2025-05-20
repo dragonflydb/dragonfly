@@ -22,6 +22,7 @@ class GeoFamily {
   static void GeoDist(CmdArgList args, const CommandContext& cmd_cntx);
   static void GeoSearch(CmdArgList args, const CommandContext& cmd_cntx);
   static void GeoRadiusByMember(CmdArgList args, const CommandContext& cmd_cntx);
+  static void GeoRadius(CmdArgList args, const CommandContext& cmd_cntx);
 };
 
 }  // namespace dfly

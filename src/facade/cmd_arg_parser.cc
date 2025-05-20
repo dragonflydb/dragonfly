@@ -28,6 +28,8 @@ ErrorReply CmdArgParser::ErrorInfo::MakeReply() const {
   switch (type) {
     case INVALID_INT:
       return ErrorReply{kInvalidIntErr};
+    case INVALID_FLOAT:
+      return ErrorReply{kInvalidFloatErr};
     default:
       return ErrorReply{kSyntaxErr};
   };

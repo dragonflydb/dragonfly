@@ -250,9 +250,12 @@ void ascii_pack_simd2(const char* ascii, size_t len, uint8_t* bin) {
 void ascii_unpack(const uint8_t* bin, size_t ascii_len, char* ascii) {
   uint64_t val;
 
-  const char* end = ascii + ascii_len - 8;
-  while (ascii <= end) {
-    memcpy(&val, bin, 8);
+  // we read 7 bytes from bin for every 8 bytes in ascii len.
+  size_t loop_len = (ascii_len / 8) * 8;
+  const char* end = ascii + loop_len;
+  while (ascii < end) {
+    // note: we assume here little endian architectures which is the case for x86 and arm.
+    memcpy(&val, bin, 7);  // read 7 bytes from bin and one byte is ignored.
 
     val = ((val & 0x00FFFFFFF0000000) << 4) | (val & 0x000000000FFFFFFF);
     val = ((val & 0xFFFFC000FFFFC000) << 2) | (val & 0x00003FFF00003FFF);
@@ -263,24 +266,28 @@ void ascii_unpack(const uint8_t* bin, size_t ascii_len, char* ascii) {
     bin += 7;
   }
 
-  end += 8;
-  while (ascii < end) {
+  for (; loop_len < ascii_len; ++loop_len) {
     *ascii++ = *bin++;
   }
 }
 
-// In some cases we may read 2 bytes more than "allowed" (16 bytes during mm_loadu_si128
-// instead of 14 bytes that we actually need). Since we ignore these two bytes, there is no harm.
 // See CompactObjectTest.AsanTriggerReadOverflow for more details.
-// __attribute__((no_sanitize_address)) does not work here for some reason, so I had
-// to put it in sse_port.h.
 void ascii_unpack_simd(const uint8_t* bin, size_t ascii_len, char* ascii) {
 #ifdef __SSSE3__
 
+  if (ascii_len < 18) {  // ascii_len >=18 means bin length >=16.
+    ascii_unpack(bin, ascii_len, ascii);
+    return;
+  }
+
   __m128i val, rpart, lpart;
 
-  size_t round_down_len = (ascii_len & ~size_t(0x0F));
-  const char* end = ascii + round_down_len;
+  // we read 16 bytes from bin even when we need only 14 bytes.
+  // So for last iteration we may access 2 bytes outside of the bin buffer.
+  // To prevent this we need to round down the length of the bin buffer but since we
+  // limit by ascii_len we reduce the ascii_len by two before computing number of iterations.
+  size_t simd_len = ((ascii_len - 2) / 16) * 16;
+  const char* end = ascii + simd_len;
 
   // shifts the second 7-byte blob to the left.
   const __m128i control = _mm_set_epi8(14, 13, 12, 11, 10, 9, 8, 7, -1, 6, 5, 4, 3, 2, 1, 0);
@@ -306,7 +313,7 @@ void ascii_unpack_simd(const uint8_t* bin, size_t ascii_len, char* ascii) {
     bin += 14;
   }
 
-  ascii_len -= round_down_len;
+  ascii_len -= simd_len;
   if (ascii_len)
     ascii_unpack(bin, ascii_len, ascii);
 #else
