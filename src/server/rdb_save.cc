@@ -278,6 +278,9 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
   if (pv.ObjType() == OBJ_TOPK) {
     return 0;
   }
+  if (pv.ObjType() == OBJ_CUCKOO_FILTER) {
+    return 0;
+  }
   if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
     string_view key = pk.GetSlice(&tmp_str_);
     LOG(DFATAL) << "SaveEntry skipped empty PrimeValue with key: " << key << " with tag "

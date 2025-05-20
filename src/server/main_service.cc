@@ -51,6 +51,7 @@ extern "C" {
 #include "server/list_family.h"
 #include "server/multi_command_squasher.h"
 #include "server/namespaces.h"
+#include "server/prob/cuckoo_filter_family.h"
 #include "server/script_mgr.h"
 #include "server/search/search_family.h"
 #include "server/server_state.h"
@@ -2723,6 +2724,7 @@ void Service::RegisterCommands() {
   cluster_family_.Register(&registry_);
   TDigestFamily::Register(&registry_);
   TopKeysFamily::Register(&registry_);
+  CuckooFilterFamily::Register(&registry_);
 
   // AclFamily should always be registered last
   // If we add a new familly, register that first above and *not* below

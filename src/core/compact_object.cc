@@ -27,6 +27,7 @@ extern "C" {
 #include "core/bloom.h"
 #include "core/detail/bitpacking.h"
 #include "core/huff_coder.h"
+#include "core/prob/cuckoo_filter.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -851,6 +852,10 @@ size_t CompactObj::Size() const {
         DCHECK_EQ(mask_bits_.encoding, NONE_ENC);
         raw_size = 0;
         break;
+      case CUCKOO_FILTER_TAG:
+        DCHECK_EQ(mask_bits_.encoding, NONE_ENC);
+        raw_size = GetCuckooFilter()->NumItems();
+        break;
       default:
         LOG(DFATAL) << "Should not reach " << int(taglen_);
     }
@@ -919,6 +924,10 @@ CompactObjType CompactObj::ObjType() const {
 
   if (taglen_ == TOPK_TAG) {
     return OBJ_TOPK;
+  }
+
+  if (taglen_ == CUCKOO_FILTER_TAG) {
+    return OBJ_CUCKOO_FILTER;
   }
 
   LOG(FATAL) << "TBD " << int(taglen_);
@@ -1042,6 +1051,21 @@ void CompactObj::SetTopK(size_t topk, size_t width, size_t depth, double decay) 
   u_.topk = AllocateMR<TopKeys>(opts);
 }
 
+void CompactObj::SetCuckooFilter(prob::CuckooFilter filter) {
+  SetMeta(CUCKOO_FILTER_TAG);
+  u_.cuckoo_filter = AllocateMR<prob::CuckooFilter>(std::move(filter));
+}
+
+prob::CuckooFilter* CompactObj::GetCuckooFilter() {
+  DCHECK(taglen_ == CUCKOO_FILTER_TAG);
+  return u_.cuckoo_filter;
+}
+
+const prob::CuckooFilter* CompactObj::GetCuckooFilter() const {
+  DCHECK(taglen_ == CUCKOO_FILTER_TAG);
+  return u_.cuckoo_filter;
+}
+
 SBF* CompactObj::GetSBF() const {
   DCHECK_EQ(SBF_TAG, taglen_);
   return u_.sbf;
@@ -1142,6 +1166,9 @@ bool CompactObj::DefragIfNeeded(float ratio) {
       return false;
     case EXTERNAL_TAG:
       return false;
+    case CUCKOO_FILTER_TAG:
+      // TODO: implement this
+      return false;
     default:
       // This is the case when the object is at inline_str
       return false;
@@ -1154,7 +1181,7 @@ bool CompactObj::HasAllocated() const {
     return false;
 
   DCHECK(taglen_ == ROBJ_TAG || taglen_ == SMALL_TAG || taglen_ == JSON_TAG || taglen_ == SBF_TAG ||
-         taglen_ == TOPK_TAG);
+         taglen_ == TOPK_TAG || taglen_ == CUCKOO_FILTER_TAG);
   return true;
 }
 
@@ -1350,6 +1377,8 @@ void CompactObj::Free() {
     DeleteMR<SBF>(u_.sbf);
   } else if (taglen_ == TOPK_TAG) {
     DeleteMR<TopKeys>(u_.topk);
+  } else if (taglen_ == CUCKOO_FILTER_TAG) {
+    DeleteMR<prob::CuckooFilter>(u_.cuckoo_filter);
   } else {
     LOG(FATAL) << "Unsupported tag " << int(taglen_);
   }
@@ -1384,6 +1413,9 @@ size_t CompactObj::MallocUsed(bool slow) const {
   }
   if (taglen_ == TOPK_TAG) {
     return 0;
+  }
+  if (taglen_ == CUCKOO_FILTER_TAG) {
+    return GetCuckooFilter()->UsedBytes();
   }
   LOG(DFATAL) << "should not reach";
   return 0;

@@ -28,6 +28,11 @@ constexpr unsigned kEncodingJsonFlat = 1;
 
 class SBF;
 
+namespace prob {
+class CuckooFilter;
+class CuckooReserveParams;
+}  // namespace prob
+
 namespace detail {
 
 // redis objects or blobs of upto 4GB size.
@@ -125,6 +130,7 @@ class CompactObj {
     JSON_TAG = 21,
     SBF_TAG = 22,
     TOPK_TAG = 23,
+    CUCKOO_FILTER_TAG = 24,
   };
 
   // String encoding types.
@@ -316,6 +322,10 @@ class CompactObj {
   void SetTopK(size_t topk, size_t width, size_t depth, double decay);
   TopKeys* GetTopK() const;
 
+  void SetCuckooFilter(prob::CuckooFilter filter);
+  prob::CuckooFilter* GetCuckooFilter();
+  const prob::CuckooFilter* GetCuckooFilter() const;
+
   // dest must have at least Size() bytes available
   void GetString(char* dest) const;
 
@@ -485,6 +495,7 @@ class CompactObj {
     JsonWrapper json_obj __attribute__((packed));
     SBF* sbf __attribute__((packed));
     TopKeys* topk __attribute__((packed));
+    prob::CuckooFilter* cuckoo_filter __attribute__((packed));
     int64_t ival __attribute__((packed));
     ExternalPtr ext_ptr;
 
