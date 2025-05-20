@@ -53,6 +53,22 @@ const char kMemberNotFound[] = "could not decode requested zset member";
 const char kInvalidUnit[] = "unsupported unit provided. please use M, KM, FT, MI";
 constexpr string_view kGeoAlphabet = "0123456789bcdefghjkmnpqrstuvwxyz"sv;
 
+enum class Type {
+  FROMMEMBER,
+  FROMLONLAT,
+  BYRADIUS,
+  BYBOX,
+  ASC,
+  DESC,
+  COUNT,
+  WITHCOORD,
+  WITHDIST,
+  WITHHASH,
+
+  STORE,
+  STOREDIST
+};
+
 using MScoreResponse = std::vector<std::optional<double>>;
 
 using ScoredMember = std::pair<std::string, double>;
@@ -74,7 +90,7 @@ struct GeoPoint {
 using GeoArray = std::vector<GeoPoint>;
 
 enum class Sorting { kUnsorted, kAsc, kDesc, kError };
-enum class GeoStoreType { kNoStore, kStoreHash, kStoreDist };
+enum class GeoStoreType { kNoStore, kStoreHash, kStoreDist, kError };
 struct GeoSearchOpts {
   double conversion = 0;
   uint64_t count = 0;
@@ -564,22 +580,6 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
 }  // namespace
 
 void GeoFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
-  CmdArgParser parser(args);
-  // parse arguments
-  string_view key = parser.Next();
-  enum class Type {
-    FROMMEMBER,
-    FROMLONLAT,
-    BYRADIUS,
-    BYBOX,
-    ASC,
-    DESC,
-    COUNT,
-    WITHCOORD,
-    WITHDIST,
-    WITHHASH
-  };
-
   GeoShape shape = {};
   GeoSearchOpts geo_ops;
   string_view member;
@@ -589,6 +589,9 @@ void GeoFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   // BYRADIUS or BYBOX is set
   int by_set = 0;
   auto* builder = cmd_cntx.rb;
+
+  CmdArgParser parser(args);
+  string_view key = parser.Next();
 
   while (parser.HasNext()) {
     auto type = parser.MapNext(
@@ -640,6 +643,8 @@ void GeoFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
       case Type::WITHHASH:
         geo_ops.withhash = true;
         break;
+      default:
+        return builder->SendError(kSyntaxErr);
     }
   }
 
@@ -769,7 +774,84 @@ void GeoFamily::GeoRadiusByMember(CmdArgList args, const CommandContext& cmd_cnt
 }
 
 void GeoFamily::GeoRadius(CmdArgList args, const CommandContext& cmd_cntx) {
-  cmd_cntx.rb->SendError("GEORADIUS is not implemented yet");
+  GeoShape shape = {};
+  GeoSearchOpts geo_ops;
+
+  auto* builder = cmd_cntx.rb;
+
+  CmdArgParser parser(args);
+
+  string_view key = parser.Next();
+  ParseLongLat(&parser, shape.xy);
+  shape.t.radius = parser.Next<double>();
+  shape.conversion = ExtractUnit(&parser);
+  geo_ops.conversion = shape.conversion;
+  shape.type = CIRCULAR_TYPE;
+
+  while (parser.HasNext()) {
+    auto type =
+        parser.MapNext("STORE", Type::STORE, "STOREDIST", Type::STOREDIST, "ASC", Type::ASC, "DESC",
+                       Type::DESC, "COUNT", Type::COUNT, "WITHCOORD", Type::WITHCOORD, "WITHDIST",
+                       Type::WITHDIST, "WITHHASH", Type::WITHHASH);
+
+    switch (type) {
+      case Type::STORE:
+        geo_ops.store_key = parser.Next();
+        geo_ops.store = geo_ops.store == GeoStoreType::kNoStore ? GeoStoreType::kStoreHash
+                                                                : GeoStoreType::kError;
+        break;
+      case Type::STOREDIST:
+        geo_ops.store_key = parser.Next();
+        geo_ops.store = geo_ops.store == GeoStoreType::kNoStore ? GeoStoreType::kStoreDist
+                                                                : GeoStoreType::kError;
+        break;
+      case Type::ASC:
+        geo_ops.sorting = geo_ops.sorting == Sorting::kUnsorted ? Sorting::kAsc : Sorting::kError;
+        break;
+      case Type::DESC:
+        geo_ops.sorting = geo_ops.sorting == Sorting::kUnsorted ? Sorting::kDesc : Sorting::kError;
+        break;
+      case Type::COUNT:
+        geo_ops.count = parser.Next<uint64_t>();
+        geo_ops.any = parser.Check("ANY");
+        break;
+      case Type::WITHCOORD:
+        geo_ops.withcoord = true;
+        break;
+      case Type::WITHDIST:
+        geo_ops.withdist = true;
+        break;
+      case Type::WITHHASH:
+        geo_ops.withhash = true;
+        break;
+      default:
+        return builder->SendError(kSyntaxErr);
+    }
+  }
+
+  if (!parser.Finalize()) {
+    auto error = parser.Error();
+    switch (error->type) {
+      case Errors::INVALID_LONG_LAT: {
+        string err =
+            absl::StrCat("-ERR invalid longitude,latitude pair ", shape.xy[0], ",", shape.xy[1]);
+        return builder->SendError(err, kSyntaxErrType);
+      }
+      case Errors::INVALID_UNIT:
+        return builder->SendError("Unsupported unit provided. please use M, KM, FT, MI",
+                                  kSyntaxErrType);
+      default:
+        return builder->SendError(error->MakeReply());
+    }
+  }
+
+  if (geo_ops.sorting == Sorting::kError) {
+    return builder->SendError(kAscDescErr);
+  } else if (geo_ops.store == GeoStoreType::kError) {
+    return builder->SendError(kStoreTypeErr);
+  }
+
+  GeoSearchStoreGeneric(cmd_cntx.tx, builder, shape, key, "", geo_ops);
 }
 
 #define HFUNC(x) SetHandler(&GeoFamily::x)
