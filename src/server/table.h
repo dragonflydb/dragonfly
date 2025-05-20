@@ -126,7 +126,7 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   mutable std::vector<std::string> expired_keys_events_;
 
   mutable DbTableStats stats;
-  std::unique_ptr<SlotStats[]> slots_stats;
+
   ExpireTable::Cursor expire_cursor;
 
   TopKeys* top_keys = nullptr;
@@ -144,6 +144,13 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   size_t table_memory() const {
     return expire.mem_usage() + prime.mem_usage();
   }
+
+  // implement null-object pattern approach
+  SlotStats& GetSlotStats(SlotId slot);
+
+ private:
+  // without cluster we assume that we have only one slot
+  std::unique_ptr<SlotStats[]> slots_stats_;
 };
 
 // We use reference counting semantics of DbTable when doing snapshotting.

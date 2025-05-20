@@ -75,8 +75,15 @@ void InitializeCluster() {
 }
 
 SlotId KeySlot(std::string_view key) {
+  if (!IsClusterEnabledOrEmulated())
+    return kNoSlotId;
+
   string_view tag = LockTagOptions::instance().Tag(key);
   return crc16(tag.data(), tag.length()) & kMaxSlotNum;
+}
+
+SlotId KeySlotIfNoSlotId(std::string_view key, SlotId slot) {
+  return slot == kNoSlotId ? KeySlot(key) : slot;
 }
 
 bool IsClusterShardedByTag() {
