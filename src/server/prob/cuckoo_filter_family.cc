@@ -243,12 +243,20 @@ void CuckooFilterFamily::Reserve(CmdArgList args, const CommandContext& cmd_cntx
   std::string_view key = parser.Next();
 
   prob::CuckooReserveParams params{.capacity = parser.Next<uint64_t>()};
-  parser.Check("BUCKETSIZE", &params.bucket_size);
-  parser.Check("MAXITERATIONS", &params.max_iterations);
-  parser.Check("EXPANSION", &params.expansion);
+  while (parser.HasNext()) {
+    if (parser.Check("BUCKETSIZE")) {
+      params.bucket_size = parser.Next<uint8_t>();
+    } else if (parser.Check("MAXITERATIONS")) {
+      params.max_iterations = parser.Next<uint16_t>();
+    } else if (parser.Check("EXPANSION")) {
+      params.expansion = parser.Next<uint16_t>();
+    } else {
+      break;
+    }
+  }
 
   if (!parser.Finalize()) {
-    return cmd_cntx.rb->SendError(kSyntaxErr);
+    return cmd_cntx.rb->SendError(parser.Error()->MakeReply());
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -333,8 +341,8 @@ void CuckooFilterFamily::Register(CommandRegistry* registry) {
       << CI{"CF.RESERVE", CO::WRITE | CO::DENYOOM, -3, 1, 1, acl::CUCKOO_FILTER}.HFUNC(Reserve)
       << CI{"CF.ADD", CO::WRITE | CO::DENYOOM, 3, 1, 1, acl::CUCKOO_FILTER}.HFUNC(Add)
       << CI{"CF.ADDNX", CO::WRITE | CO::DENYOOM, 3, 1, 1, acl::CUCKOO_FILTER}.HFUNC(AddNx)
-      << CI{"CF.INSERT", CO::WRITE | CO::DENYOOM, -7, 1, 1, acl::CUCKOO_FILTER}.HFUNC(Insert)
-      << CI{"CF.INSERTNX", CO::WRITE | CO::DENYOOM, -7, 1, 1, acl::CUCKOO_FILTER}.HFUNC(InsertNx)
+      << CI{"CF.INSERT", CO::WRITE | CO::DENYOOM, -4, 1, 1, acl::CUCKOO_FILTER}.HFUNC(Insert)
+      << CI{"CF.INSERTNX", CO::WRITE | CO::DENYOOM, -4, 1, 1, acl::CUCKOO_FILTER}.HFUNC(InsertNx)
       << CI{"CF.EXISTS", CO::READONLY | CO::FAST, 3, 1, 1, acl::CUCKOO_FILTER}.HFUNC(Exists)
       << CI{"CF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1, acl::CUCKOO_FILTER}.HFUNC(MExists)
       << CI{"CF.DEL", CO::WRITE, 3, 1, 1, acl::CUCKOO_FILTER}.HFUNC(Del)
