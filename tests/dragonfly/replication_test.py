@@ -2279,6 +2279,9 @@ async def test_replica_reconnect(df_factory, break_conn):
     # kill existing master, create master with different repl_id but same port
     master_port = master.port
     master.stop()
+
+    await asyncio.sleep(1)
+
     repl_info = await c_replica.info("REPLICATION")
     assert repl_info["master_link_status"] == "down", str(repl_info)
 
