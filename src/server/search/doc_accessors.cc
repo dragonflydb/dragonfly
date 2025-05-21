@@ -364,6 +364,9 @@ JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) c
   }
 
   if (!ptr) {
+    // This can occur for fields that are not actual JSON paths but are computed aliases
+    // (e.g., 'vector_distance' from a KNN search clause in FT.SEARCH RETURN).
+    // Such fields are valid for return but won't be found as paths in the document.
     VLOG(1) << "Invalid Json path: " << field << ' ' << ec_msg;
     return nullptr;
   }
