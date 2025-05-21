@@ -674,29 +674,6 @@ static void ascii_pack_naive(const char* ascii, size_t len, uint8_t* bin) {
   }
 }
 
-static void ascii_unpack_naive(const uint8_t* bin, size_t ascii_len, char* ascii) {
-  constexpr uint8_t kM = 0x7F;
-  uint8_t p = 0;
-  unsigned i = 0;
-
-  while (ascii_len >= 8) {
-    for (i = 0; i < 7; ++i) {
-      uint8_t src = *bin;  // keep on stack in case we unpack inplace.
-      *ascii++ = (p >> (8 - i)) | ((src << i) & kM);
-      p = src;
-      ++bin;
-    }
-
-    ascii_len -= 8;
-    *ascii++ = p >> 1;
-  }
-
-  DCHECK_LT(ascii_len, 8u);
-  for (i = 0; i < ascii_len; ++i) {
-    *ascii++ = *bin++;
-  }
-}
-
 static void BM_PackNaive(benchmark::State& state) {
   string val(1024, 'a');
   uint8_t buf[1024];
@@ -717,16 +694,6 @@ static void BM_Pack(benchmark::State& state) {
 }
 BENCHMARK(BM_Pack);
 
-static void BM_Pack2(benchmark::State& state) {
-  string val(1024, 'a');
-  uint8_t buf[1024];
-
-  while (state.KeepRunning()) {
-    detail::ascii_pack(val.data(), val.size(), buf);
-  }
-}
-BENCHMARK(BM_Pack2);
-
 static void BM_PackSimd(benchmark::State& state) {
   string val(1024, 'a');
   uint8_t buf[1024];
@@ -746,18 +713,6 @@ static void BM_PackSimd2(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_PackSimd2);
-
-static void BM_UnpackNaive(benchmark::State& state) {
-  string val(1024, 'a');
-  uint8_t buf[1024];
-
-  detail::ascii_pack(val.data(), val.size(), buf);
-
-  while (state.KeepRunning()) {
-    ascii_unpack_naive(buf, val.size(), val.data());
-  }
-}
-BENCHMARK(BM_UnpackNaive);
 
 static void BM_Unpack(benchmark::State& state) {
   string val(1024, 'a');
