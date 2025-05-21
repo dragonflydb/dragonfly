@@ -168,6 +168,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // version upper bound for entries that should be saved (not included).
   uint64_t snapshot_version_ = 0;
   uint32_t journal_cb_id_ = 0;
+  bool journal_id_was_set_{false};
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 

@@ -10,7 +10,6 @@
 #include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
-#include "core/heap_size.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
@@ -49,6 +48,10 @@ SliceSnapshot::SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
 SliceSnapshot::~SliceSnapshot() {
   DCHECK(db_slice_->shard_owner()->IsMyThread());
   tl_slice_snapshots.erase(this);
+  if (snapshot_fb_.IsJoinable()) {
+    LOG(WARNING) << "the snapshot fb is still not joined on shard " << db_slice_->shard_id();
+    fb2::detail::FiberInterface::PrintAllFiberStackTraces();
+  }
 }
 
 size_t SliceSnapshot::GetThreadLocalMemoryUsage() {
@@ -76,6 +79,7 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
     auto* journal = db_slice_->shard_owner()->journal();
     DCHECK(journal);
     journal_cb_id_ = journal->RegisterOnChange(this);
+    journal_id_was_set_ = true;
   }
 
   const auto flush_threshold = ServerState::tlocal()->serialization_max_chunk_size;
@@ -113,15 +117,23 @@ void SliceSnapshot::StartIncremental(LSN start_lsn) {
 // Called only for replication use-case.
 void SliceSnapshot::FinalizeJournalStream(bool cancel) {
   VLOG(1) << "FinalizeJournalStream";
-  DCHECK(db_slice_->shard_owner()->IsMyThread());
+  CHECK(db_slice_->shard_owner()->IsMyThread());
+  LOG(WARNING) << "FinalizeJournalStream: journal id: " << journal_cb_id_
+               << ", is fiber joinable: " << snapshot_fb_.IsJoinable();
   if (!journal_cb_id_) {  // Finalize only once.
+    if (!journal_id_was_set_) {
+      LOG(WARNING) << "journal id was never set! Joining snapshot fiber";
+      snapshot_fb_.JoinIfNeeded();
+    }
     return;
   }
   uint32_t cb_id = journal_cb_id_;
   journal_cb_id_ = 0;
 
   // Wait for serialization to finish in any case.
+  LOG(WARNING) << "Waiting for snapshot fb to join on shard: " << db_slice_->shard_id();
   snapshot_fb_.JoinIfNeeded();
+  LOG(WARNING) << "Snapshot fb joined on shard " << db_slice_->shard_id();
 
   auto* journal = db_slice_->shard_owner()->journal();
 
@@ -211,7 +223,10 @@ void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
     lsn++;
   }
 
-  VLOG(1) << "Last LSN sent in incremental snapshot was " << (lsn - 1);
+  VLOG(1) << "Last LSN sent in incremental snapshot was " << (lsn - 1)
+          << " the context is running? " << cntx_->IsRunning() << " is cancelled? "
+          << cntx_->IsCancelled() << " is error? " << cntx_->IsError() << " shard id "
+          << db_slice_->shard_id();
 
   // This check is safe, but it is not trivially safe.
   // We rely here on the fact that JournalSlice::AddLogRecord can
@@ -226,14 +241,15 @@ void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
     std::ignore = serializer_->SendFullSyncCut();
 
     journal_cb_id_ = journal->RegisterOnChange(this);
+    journal_id_was_set_ = true;
     PushSerialized(true);
   } else {
     // We stopped but we didn't manage to send the whole stream.
-    cntx_->ReportError(
-        std::make_error_code(errc::state_not_recoverable),
-        absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
-                     " was dropped from the buffer. Current lsn=", journal->GetLsn()));
-    FinalizeJournalStream(true);
+    cntx_->ReportError(std::make_error_code(errc::state_not_recoverable),
+                       absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
+                                    " was dropped from the buffer. Current lsn=", journal->GetLsn(),
+                                    " current journal id=", journal_cb_id_,
+                                    " current shard id=", db_slice_->shard_id()));
   }
 }
 
