@@ -40,19 +40,9 @@ class IntrusiveStringSet {
       SetEntryIt();
     }
 
-    // uint32_t ExpiryTime() const {
-    //   return prev.Next()->ExpiryTime();
-    // }
-
     void SetExpiryTime(uint32_t ttl_sec, size_t* obj_malloc_used) {
       entry_.SetExpiryTime(ttl_sec, obj_malloc_used);
     }
-
-    // bool HasExpiry() const {
-    //   return curr_entry_.HasExpiry();
-    // }
-
-    // void Advance();
 
     iterator& operator++() {
       if (entry_) {
@@ -132,11 +122,6 @@ class IntrusiveStringSet {
     }
 
     auto bucket = FindEmptyAround(bucket_id);
-
-    if (bucket == entries_.end()) {
-      // NO empty bucket around bucket_id + allowed displacement
-      bucket = entries_.begin() + bucket_id;
-    }
 
     return AddUnique(str, bucket, hash, EntryTTL(ttl_sec));
   }
@@ -320,7 +305,8 @@ class IntrusiveStringSet {
       auto list = std::move(entries_[i]);
       for (auto entry = list.Pop(time_now_); entry; entry = list.Pop(time_now_)) {
         auto bucket_id = entry.Rehash(i, prev_capacity_log, capacity_log_, kShiftLog);
-        entries_[bucket_id].Insert(entry.Release());
+        auto bucket = FindEmptyAround(bucket_id);
+        bucket->Insert(entry.Release());
       }
     }
   }
@@ -330,29 +316,34 @@ class IntrusiveStringSet {
   }
 
   Buckets::iterator FindEmptyAround(uint32_t bid) {
-    if (entries_[bid].Empty()) {
-      return entries_.begin() + bid;
-    }
-    uint32_t displacement = std::min(kDisplacementSize, BucketCount() - 1);
-    for (uint32_t i = 0; i < displacement; i++) {
-      auto it = entries_.begin() + ((bid + i) & (Capacity() - 1));
-      // Expire top element or whole bucket ?!
+    auto begin_it = entries_.begin();
+    const uint32_t displacement_size = std::min(kDisplacementSize, BucketCount());
+    const uint32_t capacity_mask = Capacity() - 1;
+    for (uint32_t i = 0; i < displacement_size; i++) {
+      const uint32_t bucket_id = (bid + i) & capacity_mask;
+      auto it = begin_it + bucket_id;
       it->ExpireIfNeeded(time_now_, &size_);
       if (it->Empty()) {
         return it;
       }
     }
 
-    return entries_.end();
+    DCHECK(Capacity() >= kDisplacementSize);
+    uint32_t extension_point_shift = displacement_size - 1;
+    bid |= extension_point_shift;
+    DCHECK(bid < Capacity());
+    return begin_it + bid;
   }
 
   std::pair<IntrusiveStringList::iterator, uint32_t> FindInternal(uint32_t bid,
                                                                   std::string_view str,
                                                                   uint64_t hash) {
-    uint32_t displacement = std::min(kDisplacementSize, BucketCount() - 1);
-    for (uint32_t i = 0; i < displacement; i++) {
-      uint32_t bucket_id = (bid + i) & (Capacity() - 1);
-      auto it = entries_.begin() + bucket_id;
+    const uint32_t displacement_size = std::min(kDisplacementSize, BucketCount());
+    auto begin_it = entries_.begin();
+    const uint32_t capacity_mask = Capacity() - 1;
+    for (uint32_t i = 0; i < displacement_size; i++) {
+      const uint32_t bucket_id = (bid + i) & capacity_mask;
+      auto it = begin_it + bucket_id;
       if (it->Empty()) {
         continue;
       }
@@ -366,9 +357,9 @@ class IntrusiveStringSet {
   }
 
  private:
-  static constexpr std::uint32_t kMinCapacityLog = 3;  // TODO make template
-  static constexpr std::uint32_t kShiftLog = 4;        // TODO make template
-  static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog) - 1;
+  static constexpr std::uint32_t kMinCapacityLog = 3;                   // TODO make template
+  static constexpr std::uint32_t kShiftLog = 4;                         // TODO make template
+  static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog);  // TODO check
   std::uint32_t capacity_log_ = 0;
   std::uint32_t size_ = 0;  // number of elements in the set.
   std::uint32_t time_now_ = 0;
