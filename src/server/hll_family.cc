@@ -208,7 +208,7 @@ OpResult<int64_t> PFCountMulti(CmdArgList args, const CommandContext& cmd_cntx) 
   vector<vector<string>> hlls;
   hlls.resize(shard_set->size());
 
-  OpStatus status = OpStatus::OK;
+  atomic_bool success = true;
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
     ShardArgs shard_args = t->GetShardArgs(shard->shard_id());
@@ -216,16 +216,18 @@ OpResult<int64_t> PFCountMulti(CmdArgList args, const CommandContext& cmd_cntx) 
     if (result.ok()) {
       hlls[sid] = std::move(result.value());
     } else {
-      status = result.status();
+      success.store(false, memory_order_relaxed);
     }
     return OpStatus::OK;
   };
 
   OpStatus cb_status = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  if (cb_status != OpStatus::OK) {
+    return cb_status;
+  }
 
-  // If there was an error in the execution of ReadValues, return it
-  if (cb_status != OpStatus::OK || status != OpStatus::OK) {
-    return status != OpStatus::OK ? status : cb_status;
+  if (!success.load(memory_order_relaxed)) {
+    return OpStatus::INVALID_VALUE;
   }
 
   vector<HllBufferPtr> ptrs = ConvertShardVector(hlls);
