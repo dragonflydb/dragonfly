@@ -285,6 +285,12 @@ TEST_F(GeoFamilyTest, GeoRadius) {
   resp = Run({"ZRANGE", "store_dist_key", "0", "-1", "WITHSCORES"});
   EXPECT_THAT(resp,
               RespArray(ElementsAre("Madrid", DoubleArg(0), "Lisbon", DoubleArg(502.207694))));
+
+  // Test with STORE and other options
+  resp = Run({"GEORADIUS", "key:poq6moq\\r", "111.38360132204588", "-71.17374967857494",
+              "69.77510489600115", "ft", "key", "WITHDIST", "COUNT", "key", "WITHCOORD", "count",
+              "WITHHASH", "STORE"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
 }  // namespace dfly
