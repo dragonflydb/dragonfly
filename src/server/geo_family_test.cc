@@ -234,4 +234,63 @@ TEST_F(GeoFamilyTest, GeoRadiusByMember) {
                            "WITHHASH and WITHCOORDS options"));
 }
 
+TEST_F(GeoFamilyTest, GeoRadius) {
+  EXPECT_EQ(10, CheckedInt({"geoadd",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
+                            "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",
+                            "48.8566", "Paris",     "16.3738", "48.2082", "Vienna",   "4.8952",
+                            "52.3702", "Amsterdam", "10.7522", "59.9139", "Oslo",     "23.7275",
+                            "37.9838", "Athens",    "19.0402", "47.4979", "Budapest", "6.2603",
+                            "53.3498", "Dublin"}));
+
+  auto resp = Run({"GEORADIUS", "invalid_key", "16.3738", "48.2082", "900", "KM"});
+  EXPECT_THAT(resp.GetVec().empty(), true);
+
+  resp = Run({"GEORADIUS", "America", "13.4050", "52.5200", "500", "KM", "WITHCOORD", "WITHDIST"});
+  EXPECT_THAT(resp.GetVec().empty(), true);
+
+  resp = Run({"GEORADIUS", "Europe", "130.4050", "52.5200", "10", "KM", "WITHCOORD", "WITHDIST"});
+  EXPECT_THAT(resp.GetVec().empty(), true);
+
+  resp = Run({"GEORADIUS", "Europe", "13.4050", "52.5200", "500", "KM", "COUNT", "3", "WITHCOORD",
+              "WITHDIST"});
+  EXPECT_THAT(
+      resp,
+      RespArray(ElementsAre(
+          RespArray(ElementsAre("Berlin", DoubleArg(0.00017343178521311378),
+                                RespArray(ElementsAre(DoubleArg(13.4050), DoubleArg(52.5200))))),
+          RespArray(ElementsAre("Dublin", DoubleArg(487.5619030644293),
+                                RespArray(ElementsAre(DoubleArg(6.2603), DoubleArg(53.3498))))))));
+
+  resp = Run(
+      {"GEORADIUS", "Europe", "13.4050", "52.5200", "500", "KM", "DESC", "WITHCOORD", "WITHDIST"});
+  EXPECT_THAT(
+      resp,
+      RespArray(ElementsAre(
+          RespArray(ElementsAre("Dublin", DoubleArg(487.5619030644293),
+                                RespArray(ElementsAre(DoubleArg(6.2603), DoubleArg(53.3498))))),
+          RespArray(ElementsAre("Berlin", DoubleArg(0.00017343178521311378),
+                                RespArray(ElementsAre(DoubleArg(13.4050), DoubleArg(52.5200))))))));
+
+  EXPECT_EQ(2, CheckedInt({"GEORADIUS", "Europe", "3.7038", "40.4168", "700", "KM", "STORE",
+                           "store_key"}));
+  resp = Run({"ZRANGE", "store_key", "0", "-1"});
+
+  EXPECT_THAT(resp, RespArray(ElementsAre("Madrid", "Lisbon")));
+  resp = Run({"ZRANGE", "store_key", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre("Madrid", "3471766229222696", "Lisbon", "3473121093062745")));
+
+  EXPECT_EQ(2, CheckedInt({"GEORADIUS", "Europe", "3.7038", "40.4168", "700", "KM", "STOREDIST",
+                           "store_dist_key"}));
+  resp = Run({"ZRANGE", "store_dist_key", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre("Madrid", DoubleArg(0), "Lisbon", DoubleArg(502.207694))));
+
+  // Test with STORE and other options
+  resp = Run({"GEORADIUS", "key:poq6moq\\r", "111.38360132204588", "-71.17374967857494",
+              "69.77510489600115", "ft", "key", "WITHDIST", "COUNT", "key", "WITHCOORD", "count",
+              "WITHHASH", "STORE"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
 }  // namespace dfly
