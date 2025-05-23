@@ -2,9 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
+#include <cstdint>
 #define ENABLE_DASH_STATS
-
-#include "core/dash.h"
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/str_cat.h>
@@ -17,6 +16,7 @@
 #include "base/hash.h"
 #include "base/logging.h"
 #include "base/zipf_gen.h"
+#include "core/dash.h"
 #include "io/file.h"
 #include "io/line_reader.h"
 
@@ -286,7 +286,7 @@ TEST_F(DashTest, Segment) {
 }
 
 TEST_F(DashTest, SegmentFull) {
-  std::equal_to<Segment::Key_t> eq;
+  std::equal_to<> eq;
 
   for (Segment::Key_t key = 8000; key < 15000u; ++key) {
     uint64_t hash = dt_.DoHash(key);
@@ -321,6 +321,33 @@ TEST_F(DashTest, SegmentFull) {
   for (unsigned i = 0; i < 12; ++i) {
     ASSERT_EQ(keys[i], segment_.Key(0, i));
   }
+}
+
+TEST_F(DashTest, FirstStash) {
+  constexpr unsigned kRegularCapacity = Segment::kBucketNum * Segment::kSlotNum;
+
+  unsigned less_seventy = 0;
+  for (unsigned j = 0; j < 100; ++j) {
+    unsigned num_items = 0;
+    for (unsigned i = 0; i < 1000; ++i) {
+      uint64_t key = i + j * 2000;
+      uint64_t hash = dt_.DoHash(key);
+      auto [it, inserted] = segment_.Insert(key, 0, hash, equal_to<>{});
+      ASSERT_TRUE(inserted);
+      if (it.index > Segment::kBucketNum) {  // stash iterator
+        break;
+      }
+      ++num_items;
+    }
+    segment_.Clear();
+
+    // With high probability, we can expect 66% of the keys added without stashes.
+    ASSERT_GT(num_items, kRegularCapacity * 0.66);
+    if (num_items < kRegularCapacity * 0.7) {
+      ++less_seventy;
+    }
+  }
+  LOG(INFO) << "Less than 70% of keys in regular buckets: " << less_seventy;
 }
 
 TEST_F(DashTest, Split) {

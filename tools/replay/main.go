@@ -17,6 +17,7 @@ var fHost = flag.String("host", "127.0.0.1:6379", "Redis host")
 var fClientBuffer = flag.Int("buffer", 100, "How many records to buffer per client")
 var fPace = flag.Bool("pace", true, "whether to pace the traffic according to the original timings.false - to pace as fast as possible")
 var fSkip = flag.Uint("skip", 0, "skip N records")
+var fIgnoreParseErrors = flag.Bool("ignore-parse-errors", false, "ignore parsing errors")
 
 func RenderTable(area *pterm.AreaPrinter, files []string, workers []FileWorker) {
 	tableData := pterm.TableData{{"file", "parsed", "processed", "delayed", "clients", "avg(us)", "p50(us)", "p75(us)", "p90(us)", "p99(us)"}}
@@ -127,7 +128,7 @@ func Print(files []string) {
 			parseRecords(file, func(r Record) bool {
 				ch <- r
 				return true
-			})
+			}, *fIgnoreParseErrors)
 			close(ch)
 			wg.Done()
 		}(tops[i].ch, file)
@@ -181,7 +182,7 @@ func Analyze(files []string) {
 			cmdCounts[r.values[0].(string)] += 1
 
 			return true
-		})
+		}, *fIgnoreParseErrors)
 
 		clients += len(fileClients)
 	}

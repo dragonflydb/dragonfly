@@ -35,7 +35,7 @@ func DetermineBaseTime(files []string) time.Time {
 				minTime = r.Time
 			}
 			return false
-		})
+		}, *fIgnoreParseErrors)
 	}
 	return time.Unix(0, int64(minTime))
 }
@@ -173,7 +173,7 @@ func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
 		atomic.AddUint64(&w.parsed, 1)
 		client.incoming <- r
 		return true
-	})
+	}, *fIgnoreParseErrors)
 
 	if err != nil {
 		log.Fatalf("Could not parse records for file %s: %v", file, err)
