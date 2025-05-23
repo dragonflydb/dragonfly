@@ -20,7 +20,21 @@ ESCAPED_CHARS = [r"\\", r"\n", r"\r", r"\t", r"\"", r"\'", r"\0", r"\a", r"\b", 
 
 # Mix ratio between dictionary values and generated values (0-1)
 # 0: only generated values, 1: only dictionary values when available
-DICT_MIX_RATIO = 0.9
+DICT_MIX_RATIO = 0.9  # Default value
+_dict_mix_ratio_env = os.getenv("DICT_MIX_RATIO")
+if _dict_mix_ratio_env is not None:
+    try:
+        _parsed_ratio = float(_dict_mix_ratio_env)
+        if 0.0 <= _parsed_ratio <= 1.0:
+            DICT_MIX_RATIO = _parsed_ratio
+        else:
+            print(
+                f"Warning: DICT_MIX_RATIO environment variable value '{_dict_mix_ratio_env}' is out of range [0.0, 1.0]. Using default {DICT_MIX_RATIO}."
+            )
+    except ValueError:
+        print(
+            f"Warning: Invalid DICT_MIX_RATIO environment variable value '{_dict_mix_ratio_env}'. Must be a float. Using default {DICT_MIX_RATIO}."
+        )
 
 # List of supported Redis commands with parameters
 REDIS_COMMANDS = {
