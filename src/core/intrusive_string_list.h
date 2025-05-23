@@ -28,8 +28,6 @@ static uint32_t BucketId(uint64_t hash, uint32_t capacity_log) {
 }
 // doesn't possess memory, it should be created and release manually
 class ISLEntry {
-  friend class IntrusiveStringList;
-
   // we can assume that high 12 bits of user address space
   // can be used for tagging. At most 52 bits of address are reserved for
   // some configurations, and usually it's 48 bits.
@@ -38,6 +36,7 @@ class ISLEntry {
 
   // if bit is set the string length field is 1 byte instead of 4
   static constexpr size_t kSsoBit = 1ULL << 53;
+  static constexpr size_t kVectorBit = 1ULL << 54;
 
   // extended hash allows us to reduce keys comparisons
   static constexpr size_t kExtHashShift = 56;
@@ -50,28 +49,76 @@ class ISLEntry {
  public:
   ISLEntry() = default;
 
-  ISLEntry(char* data) {
-    data_ = data;
+  ISLEntry(std::string_view key, uint32_t ttl_sec = UINT32_MAX) {
+    uint32_t key_size = key.size();
+
+    uint32_t ttl_size = (ttl_sec != UINT32_MAX) * sizeof(ttl_sec);
+
+    uint32_t key_len_field_size = key_size <= std::numeric_limits<uint8_t>::max() ? 1 : 4;
+
+    auto size = key_len_field_size + key_size + ttl_size;
+
+    data_ = (char*)zmalloc(size);
+
+    auto* ttl_pos = data_;
+    if (ttl_size) {
+      SetTtlBit(true);
+      std::memcpy(ttl_pos, &ttl_sec, sizeof(ttl_sec));
+    }
+
+    auto* key_size_pos = ttl_pos + ttl_size;
+    if (key_len_field_size == 1) {
+      SetSsoBit();
+      uint8_t sso_key_size = key_size;
+      std::memcpy(key_size_pos, &sso_key_size, key_len_field_size);
+    } else {
+      std::memcpy(key_size_pos, &key_size, key_len_field_size);
+    }
+
+    auto* key_pos = key_size_pos + key_len_field_size;
+    std::memcpy(key_pos, key.data(), key_size);
   }
 
-  ISLEntry(const ISLEntry& e) = default;
+  // TODO add initializer list constructor
+  ISLEntry(size_t vector_size) {
+    // TODO rewrite to simple array
+    data_ = reinterpret_cast<char*>(new std::vector<ISLEntry>(vector_size));
+    SetVectorBit();
+  }
+
+  ISLEntry(const ISLEntry& e) = delete;
   ISLEntry(ISLEntry&& e) {
-    data_ = e.data_;
-    e.data_ = nullptr;
+    std::swap(data_, e.data_);
   }
 
-  ISLEntry& operator=(const ISLEntry& e) = default;
+  ~ISLEntry() {
+    Clear();
+  }
+
+  ISLEntry& operator=(const ISLEntry& e) = delete;
   ISLEntry& operator=(ISLEntry&& e) {
-    data_ = e.data_;
-    e.data_ = nullptr;
+    std::swap(data_, e.data_);
     return *this;
   }
 
+  bool Empty() const {
+    return !data_;
+  }
+
   operator bool() const {
-    return data_;
+    return !Empty();
+  }
+
+  bool IsVector() const {
+    return (uptr() & kVectorBit) != 0;
+  }
+
+  std::vector<ISLEntry>& AsVector() {
+    return *reinterpret_cast<std::vector<ISLEntry>*>(Raw());
   }
 
   std::string_view Key() const {
+    DCHECK(!IsVector());
     return {GetKeyData(), GetKeySize()};
   }
 
@@ -83,6 +130,7 @@ class ISLEntry {
   uint32_t ExpiryTime() const {
     std::uint32_t res = UINT32_MAX;
     if (HasTtl()) {
+      DCHECK(!IsVector());
       std::memcpy(&res, Raw() + sizeof(ISLEntry*), sizeof(res));
     }
     return res;
@@ -98,6 +146,7 @@ class ISLEntry {
   }
 
   bool CheckBucketAffiliation(uint32_t bucket_id, uint32_t capacity_log, uint32_t shift_log) {
+    DCHECK(!IsVector());
     uint32_t bucket_id_hash_part = capacity_log > shift_log ? shift_log : capacity_log;
     uint32_t bucket_mask = (1 << bucket_id_hash_part) - 1;
     bucket_id &= bucket_mask;
@@ -110,11 +159,13 @@ class ISLEntry {
   }
 
   bool CheckExtendedHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) {
+    if (Empty())
+      return false;
     const uint32_t start_hash_bit = capacity_log > shift_log ? capacity_log - shift_log : 0;
     const uint32_t ext_hash_shift = 64 - start_hash_bit - kExtHashSize;
     const uint64_t ext_hash = (hash >> ext_hash_shift) & kExtHashMask;
     auto stored_hash = GetExtendedHash();
-    if (!stored_hash) {
+    if (!stored_hash && !IsVector()) {
       stored_hash = SetExtendedHash(Hash(Key()), capacity_log, shift_log);
     }
     return stored_hash == ext_hash;
@@ -123,6 +174,7 @@ class ISLEntry {
   // TODO rename to SetHash
   // shift_log identify which bucket the element belongs to
   uint64_t SetExtendedHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) {
+    DCHECK(!IsVector());
     const uint32_t start_hash_bit = capacity_log > shift_log ? capacity_log - shift_log : 0;
     const uint32_t ext_hash_shift = 64 - start_hash_bit - kExtHashSize;
     const uint64_t result_hash = (hash >> ext_hash_shift) & kExtHashMask;
@@ -138,6 +190,7 @@ class ISLEntry {
   // return new bucket_id
   uint32_t Rehash(uint32_t current_bucket_id, uint32_t prev_capacity_log, uint32_t new_capacity_log,
                   uint32_t shift_log) {
+    DCHECK(!IsVector());
     auto stored_hash = GetExtendedHash();
 
     const uint32_t logs_diff = new_capacity_log - prev_capacity_log;
@@ -164,77 +217,135 @@ class ISLEntry {
 
     ClearHash();  // the cache is invalid after rehash operation
 
+    DCHECK_EQ(BucketId(Hash(Key()), new_capacity_log), new_bucket_id);
+
     return new_bucket_id;
   }
 
- protected:
-  static ISLEntry Create(std::string_view key, char* next = nullptr,
-                         uint32_t ttl_sec = UINT32_MAX) {
-    uint32_t key_size = key.size();
-
-    bool has_ttl = ttl_sec != UINT32_MAX;
-
-    uint32_t key_len_field_size = key_size <= std::numeric_limits<uint8_t>::max() ? 1 : 4;
-
-    auto size = sizeof(next) + key_len_field_size + key_size + has_ttl * sizeof(ttl_sec);
-
-    char* data = (char*)zmalloc(size);
-    ISLEntry res(data);
-
-    std::memcpy(data, &next, sizeof(next));
-
-    auto* ttl_pos = data + sizeof(next);
-    if (has_ttl) {
-      res.SetTtlBit(true);
+  void SetExpiryTime(uint32_t ttl_sec) {
+    DCHECK(!IsVector());
+    if (HasTtl()) {
+      auto* ttl_pos = Raw() + sizeof(char*);
       std::memcpy(ttl_pos, &ttl_sec, sizeof(ttl_sec));
-    }
-
-    auto* key_size_pos = ttl_pos + res.GetTtlSize();
-    if (key_len_field_size == 1) {
-      res.SetSsoBit();
-      uint8_t sso_key_size = key_size;
-      std::memcpy(key_size_pos, &sso_key_size, key_len_field_size);
     } else {
-      std::memcpy(key_size_pos, &key_size, key_len_field_size);
+      *this = ISLEntry(ttl_sec);
     }
-
-    auto* key_pos = key_size_pos + key_len_field_size;
-    std::memcpy(key_pos, key.data(), key_size);
-
-    return res;
   }
 
-  static void Destroy(ISLEntry& entry) {
-    zfree(entry.Raw());
+  // TODO refactor, because it's inefficient
+  std::optional<uint32_t> Find(std::string_view str, uint64_t hash, uint32_t capacity_log,
+                               uint32_t shift_log, uint32_t* set_size,
+                               uint32_t time_now = UINT32_MAX) {
+    if (Empty())
+      return std::nullopt;
+    if (!IsVector()) {
+      return CheckExtendedHash(hash, capacity_log, shift_log) && Key() == str
+                 ? 0
+                 : std::optional<uint32_t>();
+    }
+    auto& vec = AsVector();
+    for (size_t i = 0, size = vec.size(); i < size; ++i) {
+      if (vec[i].CheckExtendedHash(hash, capacity_log, shift_log) && vec[i].Key() == str) {
+        return i;
+      }
+    }
+    return std::nullopt;
   }
 
-  ISLEntry Next() const {
-    ISLEntry next;
-    std::memcpy(&next.data_, Raw(), sizeof(next));
-    return next;
+  // TODO refactor, because it's inefficient
+  uint32_t Insert(ISLEntry&& e) {
+    if (Empty()) {
+      *this = std::move(e);
+      return 0;
+    } else if (!IsVector()) {
+      ISLEntry tmp(2);
+      auto& arr = tmp.AsVector();
+      arr[0] = std::move(*this);
+      arr[1] = std::move(e);
+      *this = std::move(tmp);
+      return 1;
+    } else {
+      auto& arr = AsVector();
+      size_t i = 0;
+      for (; i < arr.size(); ++i) {
+        if (!arr[i]) {
+          arr[i] = std::move(e);
+        }
+      }
+      arr.push_back(std::move(e));
+      return arr.size() - 1;
+    }
   }
 
-  ISLEntry FakePrev() {
-    return ISLEntry(reinterpret_cast<char*>(&data_));
+  uint32_t ElementsNum() {
+    if (Empty()) {
+      return 0;
+    } else if (!IsVector()) {
+      return 1;
+    }
+    return AsVector().size();
   }
 
-  void SetNext(ISLEntry next) {
-    std::memcpy(Raw(), &next, sizeof(next));
+  ISLEntry& operator[](uint32_t pos) {
+    DCHECK(!Empty());
+    if (!IsVector()) {
+      DCHECK(pos == 0);
+      return *this;
+    } else {
+      auto& arr = AsVector();
+      DCHECK(pos < arr.size());
+      return arr[pos];
+    }
+  }
+
+  ISLEntry Remove(uint32_t pos) {
+    if (Empty()) {
+      // I'm not sure that this scenario should be check at all
+      DCHECK(pos == 0);
+      return ISLEntry();
+    } else if (!IsVector()) {
+      DCHECK(pos == 0);
+      return std::move(*this);
+    } else {
+      auto& arr = AsVector();
+      DCHECK(pos < arr.size());
+      return std::move(arr[pos]);
+    }
+  }
+
+  ISLEntry Pop() {
+    if (IsVector()) {
+      auto& arr = AsVector();
+      for (auto& e : arr) {
+        if (e)
+          return std::move(e);
+      }
+    }
+    return std::move(*this);
+  }
+
+ protected:
+  void Clear() {
+    if (IsVector()) {
+      delete &AsVector();
+    } else {
+      zfree(Raw());
+    }
   }
 
   const char* GetKeyData() const {
     uint32_t key_field_size = HasSso() ? 1 : 4;
-    return Raw() + sizeof(ISLEntry*) + GetTtlSize() + key_field_size;
+    return Raw() + GetTtlSize() + key_field_size;
   }
 
   uint32_t GetKeySize() const {
     if (HasSso()) {
       uint8_t size = 0;
-      std::memcpy(&size, Raw() + sizeof(ISLEntry*) + GetTtlSize(), sizeof(size));
+      std::memcpy(&size, Raw() + GetTtlSize(), sizeof(size));
       return size;
     }
     uint32_t size = 0;
-    std::memcpy(&size, Raw() + sizeof(ISLEntry*) + GetTtlSize(), sizeof(size));
+    std::memcpy(&size, Raw() + GetTtlSize(), sizeof(size));
     return size;
   }
 
@@ -253,6 +364,10 @@ class ISLEntry {
       data_ = (char*)(uptr() & (~kTtlBit));
   }
 
+  void SetVectorBit() {
+    data_ = (char*)(uptr() | kVectorBit);
+  }
+
   void SetSsoBit() {
     data_ = (char*)(uptr() | kSsoBit);
   }
@@ -268,301 +383,40 @@ class ISLEntry {
   size_t Size() {
     size_t key_field_size = HasSso() ? 1 : 4;
     size_t ttl_field_size = HasTtl() ? 4 : 0;
-    return (sizeof(char*) + ttl_field_size + key_field_size + GetKeySize());
+    return ttl_field_size + key_field_size + GetKeySize();
   }
-
-  [[nodiscard]] bool UpdateTtl(uint32_t ttl_sec) {
-    if (HasTtl()) {
-      auto* ttl_pos = Raw() + sizeof(char*);
-      std::memcpy(ttl_pos, &ttl_sec, sizeof(ttl_sec));
-      return true;
-    }
-    return false;
-  }
-
   std::uint32_t GetTtlSize() const {
     return HasTtl() ? sizeof(std::uint32_t) : 0;
   }
 
   // TODO add optimization for big keys
-  // memory daya layout [ISLEntry*, TTL, key_size, key]
+  // memory daya layout [TTL, key_size, key]
   char* data_ = nullptr;
 };
 
-class UniqueISLEntry : private ISLEntry {
- public:
-  ~UniqueISLEntry() {
-    Destroy(*this);
-  }
+// template <class T, std::enable_if_t<std::is_invocable_v<T, std::string_view>>* = nullptr>
+// bool Scan(const T& cb, uint32_t* set_size, uint32_t curr_time) {
+//   for (auto it = start_; it && it.ExpiryTime() <= curr_time; it = start_) {
+//     start_ = it.Next();
+//     ISLEntry::Destroy(it);
+//     (*set_size)--;
+//   }
 
-  UniqueISLEntry() = default;
-  UniqueISLEntry(ISLEntry e) : ISLEntry(e) {
-  }
-  UniqueISLEntry(UniqueISLEntry&& e) = default;
-  UniqueISLEntry& operator=(UniqueISLEntry&& e) = default;
+//   for (auto curr = start_, next = start_; curr; curr = next) {
+//     cb(curr.Key());
+//     next = curr.Next();
+//     for (auto tmp = next; tmp && tmp.ExpiryTime() <= curr_time; tmp = next) {
+//       (*set_size)--;
+//       next = next.Next();
+//       ISLEntry::Destroy(tmp);
+//     }
+//     curr.SetNext(next);
+//   }
+//   return start_;
+// }
 
-  using ISLEntry::ExpiryTime;
-  using ISLEntry::HasExpiry;
-  using ISLEntry::Key;
-  using ISLEntry::Rehash;
-  using ISLEntry::operator bool;
-
-  ISLEntry Release() {
-    ISLEntry res = *this;
-    data_ = nullptr;
-    return res;
-  }
-
- private:
-  UniqueISLEntry(const UniqueISLEntry&) = delete;
-};
-
-class IntrusiveStringList {
- public:
-  size_t obj_malloc_used_;  // TODO: think how we can keep track of size
-  class iterator {
-   public:
-    using iterator_category = std::forward_iterator_tag;
-    using difference_type = std::ptrdiff_t;
-    using value_type = ISLEntry;
-    using pointer = ISLEntry*;
-    using reference = ISLEntry&;
-
-    iterator(ISLEntry prev = end_.FakePrev()) : prev_(prev) {
-      DCHECK(prev);
-    }
-
-    uint32_t ExpiryTime() const {
-      return prev_.Next().ExpiryTime();
-    }
-
-    void SetExpiryTime(uint32_t ttl_sec, size_t* obj_malloc_used) {
-      auto entry = prev_.Next();
-
-      if (!entry.UpdateTtl(ttl_sec)) {
-        ISLEntry new_entry = ISLEntry::Create(entry.Key(), entry.Next().data_, ttl_sec);
-        (*obj_malloc_used) += sizeof(new_entry) + new_entry.Size();
-        (*obj_malloc_used) -= sizeof(entry) + entry.Size();
-        ISLEntry::Destroy(entry);
-        prev_.SetNext(new_entry);
-      }
-    }
-
-    bool ExpireIfNeeded(uint32_t time_now, size_t* obj_malloc_used) {
-      auto entry = prev_.Next();
-
-      if (auto entry_time = entry.ExpiryTime();
-          entry_time != UINT32_MAX && time_now >= entry_time) {
-        prev_.SetNext(prev_.Next().Next());
-        (*obj_malloc_used) -= sizeof(entry) + entry.Size();
-        ISLEntry::Destroy(entry);
-        return true;
-      }
-      return false;
-    }
-
-    uint32_t Rehash(uint32_t current_bucket_id, uint32_t prev_capacity_log,
-                    uint32_t new_capacity_log, uint32_t shift_log) {
-      auto entry = prev_.Next();
-      auto res = entry->Rehash(current_bucket_id, prev_capacity_log, new_capacity_log, shift_log);
-      prev_.SetNext(entry);
-      return res;
-    }
-
-    bool HasExpiry() const {
-      return prev_.Next().HasExpiry();
-    }
-
-    iterator& operator++() {
-      prev_ = prev_.Next();
-      return *this;
-    }
-
-    operator bool() const {
-      return prev_.data_ && prev_.Next();
-    }
-
-    value_type operator*() {
-      return prev_.Next();
-    }
-
-    value_type operator->() {
-      return prev_.Next();
-    }
-
-    bool operator==(const iterator& r) {
-      return prev_.Next() == r.prev_.Next();
-    }
-
-    bool operator!=(const iterator& r) {
-      return !operator==(r);
-    }
-
-   private:
-    ISLEntry prev_;
-  };
-
-  ~IntrusiveStringList() {
-    while (start_) {
-      auto next = start_.Next();
-      ISLEntry::Destroy(start_);
-      start_ = next;
-    }
-  }
-
-  IntrusiveStringList() = default;
-  IntrusiveStringList(IntrusiveStringList&& r) {
-    start_ = r.start_;
-    r.start_ = {};
-  }
-
-  iterator begin() {
-    return start_.FakePrev();
-  }
-
-  static iterator end() {
-    return end_.FakePrev();
-  }
-
-  ISLEntry& Insert(ISLEntry e) {
-    e.SetNext(start_);
-    start_ = e;
-    obj_malloc_used_ += sizeof(e) + e.Size();
-    return start_;
-  }
-
-  UniqueISLEntry Pop(uint32_t curr_time) {
-    for (auto it = start_; it && it.ExpiryTime() < curr_time; it = start_) {
-      start_ = it.Next();
-      obj_malloc_used_ -= sizeof(it) + it.Size();
-      ISLEntry::Destroy(it);
-    }
-    auto res = start_;
-    if (start_) {
-      start_ = start_.Next();
-      // TODO consider to res.SetNext(nullptr); for now it looks superfluous
-    }
-    return res;
-  }
-
-  bool Empty() {
-    return !start_;
-  }
-
-  // TODO consider to wrap ISLEntry to prevent usage out of the list
-  ISLEntry& Emplace(std::string_view key, uint32_t ttl_sec = UINT32_MAX) {
-    return Insert(ISLEntry::Create(key, nullptr, ttl_sec));
-  }
-
-  // TODO consider to wrap ISLEntry to prevent usage out of the list
-  IntrusiveStringList::iterator Find(std::string_view str, uint32_t* set_size,
-                                     uint32_t time_now = UINT32_MAX) {
-    auto it = begin();
-
-    for (; it; ++it) {
-      if (it.ExpireIfNeeded(time_now, &obj_malloc_used_)) {
-        (*set_size)--;
-        continue;
-      }
-      if (it->Key() == str) {
-        break;
-      }
-    }
-
-    return it;
-  }
-
-  // TODO consider to wrap ISLEntry to prevent usage out of the list
-  IntrusiveStringList::iterator Find(std::string_view str, uint64_t hash, uint32_t capacity_log,
-                                     uint32_t shift_log, uint32_t* set_size,
-                                     uint32_t time_now = UINT32_MAX) {
-    auto entry = begin();
-    for (; entry; ++entry) {
-      if (entry.ExpireIfNeeded(time_now, &obj_malloc_used_)) {
-        (*set_size)--;
-        continue;
-      }
-      if (entry->CheckExtendedHash(hash, capacity_log, shift_log) && entry->Key() == str)
-        break;
-    }
-    return entry;
-  }
-
-  bool Erase(std::string_view str, uint32_t* set_size) {
-    auto cond = [str](const ISLEntry e) { return str == e.Key(); };
-    return Erase(cond, set_size);
-  }
-
-  template <class T, std::enable_if_t<std::is_invocable_v<T, ISLEntry>>* = nullptr>
-  bool Erase(const T& cond, uint32_t* set_size) {
-    if (!start_) {
-      return false;
-    }
-
-    if (auto it = start_; cond(it)) {
-      (*set_size)--;
-      start_ = it.Next();
-      ISLEntry::Destroy(it);
-      return true;
-    }
-
-    for (auto prev = start_, it = start_.Next(); it; prev = it, it = it.Next()) {
-      if (cond(it)) {
-        (*set_size)--;
-        prev.SetNext(it.Next());
-        ISLEntry::Destroy(it);
-        return true;
-      }
-    }
-    return false;
-  }
-
-  template <class T, std::enable_if_t<std::is_invocable_v<T, std::string_view>>* = nullptr>
-  bool Scan(const T& cb, uint32_t* set_size, uint32_t curr_time) {
-    for (auto it = start_; it && it.ExpiryTime() <= curr_time; it = start_) {
-      start_ = it.Next();
-      ISLEntry::Destroy(it);
-      (*set_size)--;
-    }
-
-    for (auto curr = start_, next = start_; curr; curr = next) {
-      cb(curr.Key());
-      next = curr.Next();
-      for (auto tmp = next; tmp && tmp.ExpiryTime() <= curr_time; tmp = next) {
-        (*set_size)--;
-        next = next.Next();
-        ISLEntry::Destroy(tmp);
-      }
-      curr.SetNext(next);
-    }
-    return start_;
-  }
-
-  size_t ObjMallocUsed() const {
-    return obj_malloc_used_;
-  };
-
-  bool ExpireIfNeeded(uint32_t time_now, uint32_t* set_size) {
-    if (!start_) {
-      return false;
-    }
-
-    auto it = begin();
-
-    if (it->HasTtl()) {
-      if (it.ExpireIfNeeded(time_now, &obj_malloc_used_)) {
-        (*set_size)--;
-        return true;
-      }
-      return false;
-    }
-
-    return false;
-  }
-
- private:
-  ISLEntry start_;
-  static ISLEntry end_;
-};
+// size_t ObjMallocUsed() const {
+//   return obj_malloc_used_;
+// };
 
 }  // namespace dfly
