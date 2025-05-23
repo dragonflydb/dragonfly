@@ -60,19 +60,19 @@ class IntrusiveStringSetTest : public ::testing::Test {
   }
 
   void SetUp() override {
-    // ss_ = new IntrusiveStringSet(&alloc_);
+    ss_ = new IntrusiveStringSet(&alloc_);
     generator_.seed(0);
   }
 
   void TearDown() override {
-    // delete ss_;
+    delete ss_;
 
     // ensure there are no memory leaks after every test
     EXPECT_TRUE(alloc_.all_freed());
     EXPECT_EQ(zmalloc_used_memory_tl, 0);
   }
 
-  // IntrusiveStringSet* ss_;
+  IntrusiveStringSet* ss_;
   ISSAllocator alloc_;
   mt19937 generator_;
 };
@@ -90,9 +90,10 @@ static string random_string(mt19937& rand, unsigned len) {
 }
 
 TEST_F(IntrusiveStringSetTest, ISLEntryTest) {
-  ISLEntry test("0123456789");
+  ISLEntry test("0123456789", 1);
 
   EXPECT_EQ(test.Key(), "0123456789"sv);
+  EXPECT_EQ(test.GetTtl(), 1);
 
   ISLEntry first("123456789");
   first.SetExtendedHash(Hash(first.Key()), 4, 4);
@@ -172,123 +173,125 @@ TEST_F(IntrusiveStringSetTest, IntrusiveStringSetAddFindTest) {
   EXPECT_EQ(ss.Capacity(), 16384);
 }
 
-// TEST_F(IntrusiveStringSetTest, Basic) {
-//   EXPECT_TRUE(ss_->Add("foo"sv));
-//   EXPECT_TRUE(ss_->Add("bar"sv));
-//   EXPECT_FALSE(ss_->Add("foo"sv));
-//   EXPECT_FALSE(ss_->Add("bar"sv));
-//   EXPECT_TRUE(ss_->Contains("foo"sv));
-//   EXPECT_TRUE(ss_->Contains("bar"sv));
-//   EXPECT_EQ(2, ss_->UpperBoundSize());
-// }
+TEST_F(IntrusiveStringSetTest, Basic) {
+  EXPECT_TRUE(ss_->Add("foo"sv) != ss_->end());
+  EXPECT_TRUE(ss_->Add("bar"sv) != ss_->end());
+  uint32_t size = ss_->UpperBoundSize();
+  EXPECT_TRUE(ss_->Add("foo"sv) != ss_->end());
+  EXPECT_TRUE(ss_->Add("bar"sv) != ss_->end());
+  EXPECT_EQ(ss_->UpperBoundSize(), size);
+  EXPECT_TRUE(ss_->Contains("foo"sv));
+  EXPECT_TRUE(ss_->Contains("bar"sv));
+  EXPECT_EQ(2, ss_->UpperBoundSize());
+}
 
-// TEST_F(IntrusiveStringSetTest, StandardAddErase) {
-//   EXPECT_TRUE(ss_->Add("@@@@@@@@@@@@@@@@"));
-//   EXPECT_TRUE(ss_->Add("A@@@@@@@@@@@@@@@"));
-//   EXPECT_TRUE(ss_->Add("AA@@@@@@@@@@@@@@"));
-//   EXPECT_TRUE(ss_->Add("AAA@@@@@@@@@@@@@"));
-//   EXPECT_TRUE(ss_->Add("AAAAAAAAA@@@@@@@"));
-//   EXPECT_TRUE(ss_->Add("AAAAAAAAAA@@@@@@"));
-//   EXPECT_TRUE(ss_->Add("AAAAAAAAAAAAAAA@"));
-//   EXPECT_TRUE(ss_->Add("AAAAAAAAAAAAAAAA"));
-//   EXPECT_TRUE(ss_->Add("AAAAAAAAAAAAAAAD"));
-//   EXPECT_TRUE(ss_->Add("BBBBBAAAAAAAAAAA"));
-//   EXPECT_TRUE(ss_->Add("BBBBBBBBAAAAAAAA"));
-//   EXPECT_TRUE(ss_->Add("CCCCCBBBBBBBBBBB"));
+TEST_F(IntrusiveStringSetTest, StandardAddErase) {
+  EXPECT_TRUE(ss_->Add("@@@@@@@@@@@@@@@@") != ss_->end());
+  EXPECT_TRUE(ss_->Add("A@@@@@@@@@@@@@@@") != ss_->end());
+  EXPECT_TRUE(ss_->Add("AA@@@@@@@@@@@@@@") != ss_->end());
+  EXPECT_TRUE(ss_->Add("AAA@@@@@@@@@@@@@") != ss_->end());
+  EXPECT_TRUE(ss_->Add("AAAAAAAAA@@@@@@@") != ss_->end());
+  EXPECT_TRUE(ss_->Add("AAAAAAAAAA@@@@@@") != ss_->end());
+  EXPECT_TRUE(ss_->Add("AAAAAAAAAAAAAAA@") != ss_->end());
+  EXPECT_TRUE(ss_->Add("AAAAAAAAAAAAAAAA") != ss_->end());
+  EXPECT_TRUE(ss_->Add("AAAAAAAAAAAAAAAD") != ss_->end());
+  EXPECT_TRUE(ss_->Add("BBBBBAAAAAAAAAAA") != ss_->end());
+  EXPECT_TRUE(ss_->Add("BBBBBBBBAAAAAAAA") != ss_->end());
+  EXPECT_TRUE(ss_->Add("CCCCCBBBBBBBBBBB") != ss_->end());
 
-//   // Remove link in the middle of chain
-//   EXPECT_TRUE(ss_->Erase("BBBBBBBBAAAAAAAA"));
-//   // Remove start of a chain
-//   EXPECT_TRUE(ss_->Erase("CCCCCBBBBBBBBBBB"));
-//   // Remove end of link
-//   EXPECT_TRUE(ss_->Erase("AAA@@@@@@@@@@@@@"));
-//   // Remove only item in chain
-//   EXPECT_TRUE(ss_->Erase("AA@@@@@@@@@@@@@@"));
-//   EXPECT_TRUE(ss_->Erase("AAAAAAAAA@@@@@@@"));
-//   EXPECT_TRUE(ss_->Erase("AAAAAAAAAA@@@@@@"));
-//   EXPECT_TRUE(ss_->Erase("AAAAAAAAAAAAAAA@"));
-// }
+  // Remove link in the middle of chain
+  EXPECT_TRUE(ss_->Erase("BBBBBBBBAAAAAAAA"));
+  // Remove start of a chain
+  EXPECT_TRUE(ss_->Erase("CCCCCBBBBBBBBBBB"));
+  // Remove end of link
+  EXPECT_TRUE(ss_->Erase("AAA@@@@@@@@@@@@@"));
+  // Remove only item in chain
+  EXPECT_TRUE(ss_->Erase("AA@@@@@@@@@@@@@@"));
+  EXPECT_TRUE(ss_->Erase("AAAAAAAAA@@@@@@@"));
+  EXPECT_TRUE(ss_->Erase("AAAAAAAAAA@@@@@@"));
+  EXPECT_TRUE(ss_->Erase("AAAAAAAAAAAAAAA@"));
+}
 
-// TEST_F(IntrusiveStringSetTest, DisplacedBug) {
-//   string_view vals[] = {"imY", "OVl", "NhH", "BCe", "YDL", "lpb",
-//                         "nhF", "xod", "zYR", "PSa", "hce", "cTR"};
-//   ss_->AddMany(absl::MakeSpan(vals), UINT32_MAX, false);
+TEST_F(IntrusiveStringSetTest, DisplacedBug) {
+  string_view vals[] = {"imY", "OVl", "NhH", "BCe", "YDL", "lpb",
+                        "nhF", "xod", "zYR", "PSa", "hce", "cTR"};
+  ss_->AddMany(absl::MakeSpan(vals), UINT32_MAX);
 
-//   ss_->Add("fIc");
-//   ss_->Erase("YDL");
-//   ss_->Add("fYs");
-//   ss_->Erase("hce");
-//   ss_->Erase("nhF");
-//   ss_->Add("dye");
-//   ss_->Add("xZT");
-//   ss_->Add("LVK");
-//   ss_->Erase("zYR");
-//   ss_->Erase("fYs");
-//   ss_->Add("ueB");
-//   ss_->Erase("PSa");
-//   ss_->Erase("OVl");
-//   ss_->Add("cga");
-//   ss_->Add("too");
-//   ss_->Erase("ueB");
-//   ss_->Add("HZe");
-//   ss_->Add("oQn");
-//   ss_->Erase("too");
-//   ss_->Erase("HZe");
-//   ss_->Erase("xZT");
-//   ss_->Erase("cga");
-//   ss_->Erase("cTR");
-//   ss_->Erase("BCe");
-//   ss_->Add("eua");
-//   ss_->Erase("lpb");
-//   ss_->Add("OXK");
-//   ss_->Add("QmO");
-//   ss_->Add("SzV");
-//   ss_->Erase("QmO");
-//   ss_->Add("jbe");
-//   ss_->Add("BPN");
-//   ss_->Add("OfH");
-//   ss_->Add("Muf");
-//   ss_->Add("CwP");
-//   ss_->Erase("Muf");
-//   ss_->Erase("xod");
-//   ss_->Add("Cis");
-//   ss_->Add("Xvd");
-//   ss_->Erase("SzV");
-//   ss_->Erase("eua");
-//   ss_->Add("DGb");
-//   ss_->Add("leD");
-//   ss_->Add("MVX");
-//   ss_->Add("HPq");
-// }
+  ss_->Add("fIc");
+  ss_->Erase("YDL");
+  ss_->Add("fYs");
+  ss_->Erase("hce");
+  ss_->Erase("nhF");
+  ss_->Add("dye");
+  ss_->Add("xZT");
+  ss_->Add("LVK");
+  ss_->Erase("zYR");
+  ss_->Erase("fYs");
+  ss_->Add("ueB");
+  ss_->Erase("PSa");
+  ss_->Erase("OVl");
+  ss_->Add("cga");
+  ss_->Add("too");
+  ss_->Erase("ueB");
+  ss_->Add("HZe");
+  ss_->Add("oQn");
+  ss_->Erase("too");
+  ss_->Erase("HZe");
+  ss_->Erase("xZT");
+  ss_->Erase("cga");
+  ss_->Erase("cTR");
+  ss_->Erase("BCe");
+  ss_->Add("eua");
+  ss_->Erase("lpb");
+  ss_->Add("OXK");
+  ss_->Add("QmO");
+  ss_->Add("SzV");
+  ss_->Erase("QmO");
+  ss_->Add("jbe");
+  ss_->Add("BPN");
+  ss_->Add("OfH");
+  ss_->Add("Muf");
+  ss_->Add("CwP");
+  ss_->Erase("Muf");
+  ss_->Erase("xod");
+  ss_->Add("Cis");
+  ss_->Add("Xvd");
+  ss_->Erase("SzV");
+  ss_->Erase("eua");
+  ss_->Add("DGb");
+  ss_->Add("leD");
+  ss_->Add("MVX");
+  ss_->Add("HPq");
+}
 
-// TEST_F(IntrusiveStringSetTest, Resizing) {
-//   constexpr size_t num_strs = 4096;
-//   unordered_set<string> strs;
-//   while (strs.size() != num_strs) {
-//     auto str = random_string(generator_, 10);
-//     strs.insert(str);
-//   }
+TEST_F(IntrusiveStringSetTest, Resizing) {
+  constexpr size_t num_strs = 4096;
+  unordered_set<string> strs;
+  while (strs.size() != num_strs) {
+    auto str = random_string(generator_, 10);
+    strs.insert(str);
+  }
 
-//   unsigned size = 0;
-//   for (auto it = strs.begin(); it != strs.end(); ++it) {
-//     const auto& str = *it;
-//     EXPECT_TRUE(ss_->Add(str, true, 1));
-//     EXPECT_EQ(ss_->UpperBoundSize(), size + 1);
+  unsigned size = 0;
+  for (auto it = strs.begin(); it != strs.end(); ++it) {
+    const auto& str = *it;
+    EXPECT_TRUE(ss_->Add(str, 1));
+    EXPECT_EQ(ss_->UpperBoundSize(), size + 1);
 
-//     // make sure we haven't lost any items after a grow
-//     // which happens every power of 2
-//     if ((size & (size - 1)) == 0) {
-//       for (auto j = strs.begin(); j != it; ++j) {
-//         const auto& str = *j;
-//         auto it = ss_->Find(str);
-//         ASSERT_NE(it, ss_->end());
-//         EXPECT_TRUE(it->HasExpiry());
-//         EXPECT_EQ(it->ExpiryTime(), ss_->time_now() + 1);
-//       }
-//     }
-//     ++size;
-//   }
-// }
+    // make sure we haven't lost any items after a grow
+    // which happens every power of 2
+    if ((size & (size - 1)) == 0) {
+      for (auto j = strs.begin(); j != it; ++j) {
+        const auto& str = *j;
+        auto it = ss_->Find(str);
+        ASSERT_NE(it, ss_->end());
+        EXPECT_TRUE(it.HasExpiry());
+        EXPECT_EQ(it.ExpiryTime(), ss_->time_now() + 1);
+      }
+    }
+    ++size;
+  }
+}
 
 // TEST_F(IntrusiveStringSetTest, SimpleScan) {
 //   unordered_set<string_view> info = {"foo", "bar"};
