@@ -197,10 +197,11 @@ void *ztrycalloc_usable(size_t size, size_t *usable) {
 }
 
 /* Allocate memory and zero it or panic */
-void *zcalloc(size_t size) {
-    void *ptr = ztrycalloc_usable(size, NULL);
+void *zcalloc(size_t num, size_t size) {
+    size_t bytes = num * size;
+    void *ptr = ztrycalloc_usable(bytes, NULL);
 
-    if (!ptr) zmalloc_oom_handler(size);
+    if (!ptr) zmalloc_oom_handler(bytes);
     return ptr;
 }
 

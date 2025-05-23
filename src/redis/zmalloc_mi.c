@@ -28,6 +28,20 @@ void* zmalloc(size_t size) {
   return res;
 }
 
+void *zcalloc(size_t num, size_t size) {
+  assert(zmalloc_heap);
+  void* res = mi_heap_calloc(zmalloc_heap, num, size);
+  size_t usable = mi_usable_size(res);
+
+  // assertion does not hold. Basically mi_good_size is not a good function for
+  // doing accounting.
+  // assert(usable == mi_good_size(size));
+  zmalloc_used_memory_tl += usable;
+
+  return res;
+
+}
+
 void* ztrymalloc_usable(size_t size, size_t* usable) {
   return zmalloc_usable(size, usable);
 }
@@ -48,16 +62,6 @@ void zfree(void* ptr) {
 void* zrealloc(void* ptr, size_t size) {
   size_t usable;
   return zrealloc_usable(ptr, size, &usable);
-}
-
-void* zcalloc(size_t size) {
-  // mi_good_size(size) is not working. try for example, size=690557.
-
-  void* res = mi_heap_calloc(zmalloc_heap, 1, size);
-  size_t usable = mi_usable_size(res);
-  zmalloc_used_memory_tl += usable;
-
-  return res;
 }
 
 void* zmalloc_usable(size_t size, size_t* usable) {

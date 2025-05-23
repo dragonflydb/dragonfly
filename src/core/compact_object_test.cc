@@ -22,6 +22,8 @@ extern "C" {
 #include "redis/intset.h"
 #include "redis/redis_aux.h"
 #include "redis/stream.h"
+#include "redis/td_malloc.h"
+#include "redis/tdigest.h"
 #include "redis/zmalloc.h"
 }
 
@@ -680,6 +682,24 @@ TEST_F(CompactObjectTest, HuffMan) {
     EXPECT_EQ(data, actual);
     EXPECT_EQ(cobj_, data);
   }
+}
+
+TEST_F(CompactObjectTest, TDigst) {
+  // Allocators
+  ASSERT_EQ(zmalloc, __td_malloc);
+  ASSERT_EQ(zcalloc, __td_calloc);
+  ASSERT_EQ(zrealloc, __td_realloc);
+  ASSERT_EQ(zfree, __td_free);
+
+  // Basic usage
+  td_histogram_t* hist = td_new(10);
+  cobj_.InitRobj(OBJ_TDIGEST, 0, hist);
+  ASSERT_EQ(cobj_.GetRobjWrapper()->type(), OBJ_TDIGEST);
+  ASSERT_EQ(cobj_.RObjPtr(), hist);
+  ASSERT_EQ(0, hist->unmerged_weight);
+  ASSERT_EQ(0, hist->merged_weight);
+  ASSERT_EQ(td_add(hist, 0.0, 1), 0);
+  cobj_.Reset();
 }
 
 static void ascii_pack_naive(const char* ascii, size_t len, uint8_t* bin) {
