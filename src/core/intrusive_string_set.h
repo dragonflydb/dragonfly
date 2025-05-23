@@ -18,8 +18,7 @@ namespace dfly {
 // --stringset_experimental=false
 
 class IntrusiveStringSet {
-  using Buckets =
-      std::vector<IntrusiveStringList, PMR_NS::polymorphic_allocator<IntrusiveStringList>>;
+  using Buckets = std::vector<ISLEntry, PMR_NS::polymorphic_allocator<ISLEntry>>;
 
  public:
   class iterator {
@@ -30,74 +29,69 @@ class IntrusiveStringSet {
     using pointer = ISLEntry*;
     using reference = ISLEntry&;
 
-    iterator(Buckets::iterator it, Buckets::iterator end, IntrusiveStringList::iterator entry)
-        : buckets_it_(it), end_(end), entry_(entry) {
-    }
-
-    iterator(Buckets::iterator it, Buckets::iterator end, std::uint32_t time_now,
-             std::uint32_t* set_size)
-        : buckets_it_(it), end_(end), time_now_(time_now), set_size_(set_size) {
+    iterator(IntrusiveStringSet* owner, uint32_t bucket_id, uint32_t pos_in_bucket)
+        : owner_(owner), bucket_(bucket_id), pos_(pos_in_bucket) {
+      // TODO rewrite, it's inefficient
       SetEntryIt();
     }
 
     void SetExpiryTime(uint32_t ttl_sec, size_t* obj_malloc_used) {
-      entry_.SetExpiryTime(ttl_sec, obj_malloc_used);
+      // entry_.SetExpiryTime(ttl_sec, obj_malloc_used);
     }
 
     iterator& operator++() {
-      if (entry_) {
-        if (entry_.ExpireIfNeeded(time_now_, &buckets_it_->obj_malloc_used_))
-          (*set_size_)--;
-        ++entry_;
-      }
-      if (!entry_) {
-        ++buckets_it_;
-        SetEntryIt();
-      }
+      ++pos_;
+      SetEntryIt();
       return *this;
     }
 
     bool operator==(const iterator& r) const {
-      return buckets_it_ == r.buckets_it_ && entry_ == r.entry_;
+      if (owner_ == nullptr || r.owner_ == nullptr) {
+        return owner_ == r.owner_;
+      }
+      DCHECK(owner_ == r.owner_);
+      return bucket_ == r.bucket_ && pos_ == r.pos_;
     }
 
     bool operator!=(const iterator& r) const {
       return !operator==(r);
     }
 
-    IntrusiveStringList::iterator::value_type operator*() {
-      return *entry_;
+    reference operator*() {
+      return owner_->entries_[bucket_][pos_];
     }
 
-    IntrusiveStringList::iterator operator->() {
-      return entry_;
+    reference operator->() {
+      return owner_->entries_[bucket_][pos_];
     }
 
    private:
     // find valid entry_ iterator starting from buckets_it_ and set it
     void SetEntryIt() {
-      for (; buckets_it_ != end_; ++buckets_it_) {
-        if (!buckets_it_->Empty()) {
-          entry_ = buckets_it_->begin();
-          break;
+      if (!owner_)
+        return;
+      for (auto size = owner_->entries_.size(); bucket_ < size; ++bucket_) {
+        auto& bucket = owner_->entries_[bucket_];
+        for (uint32_t bucket_size = bucket.ElementsNum(); pos_ < bucket_size; ++pos_) {
+          if (bucket[pos_])
+            return;
         }
       }
+      owner_ = nullptr;
     }
 
    private:
-    Buckets::iterator buckets_it_;
-    Buckets::iterator end_;
-    IntrusiveStringList::iterator entry_;
-    std::uint32_t time_now_;
-    std::uint32_t* set_size_;
+    IntrusiveStringSet* owner_;
+    uint32_t bucket_;
+    uint32_t pos_;
   };
 
   iterator begin() {
-    return iterator(entries_.begin(), entries_.end(), time_now_, &size_);
+    return iterator(this, 0, 0);
   }
 
   iterator end() {
-    return iterator(entries_.end(), entries_.end(), time_now_, &size_);
+    return iterator(nullptr, 0, 0);
   }
 
   explicit IntrusiveStringSet(PMR_NS::memory_resource* mr = PMR_NS::get_default_resource())
@@ -106,22 +100,25 @@ class IntrusiveStringSet {
 
   static constexpr uint32_t kMaxBatchLen = 32;
 
-  ISLEntry Add(std::string_view str, bool keepttl = true, uint32_t ttl_sec = UINT32_MAX) {
+  iterator Add(std::string_view str, bool keepttl = true, uint32_t ttl_sec = UINT32_MAX) {
     if (entries_.empty() || size_ >= entries_.size()) {
       Reserve(Capacity() * 2);
     }
     uint64_t hash = Hash(str);
     const auto bucket_id = BucketId(hash, capacity_log_);
 
-    if (auto item = FindInternal(bucket_id, str, hash); item.first != IntrusiveStringList::end()) {
+    // TODO FindInternal and FindEmptyAround can be one function to get better performance
+    if (auto item = FindInternal(bucket_id, str, hash); item != end()) {
       // Update ttl if found
       if (!keepttl) {
-        item.first.SetExpiryTime(EntryTTL(ttl_sec), &entries_[item.second].obj_malloc_used_);
+        item->SetExpiryTime(EntryTTL(ttl_sec) /*, &entries_[item.second].obj_malloc_used_*/);
       }
-      return {};
+      return item;
     }
 
-    auto bucket = FindEmptyAround(bucket_id);
+    uint32_t bucket = FindEmptyAround(bucket_id);
+
+    DCHECK(bucket_id + kDisplacementSize > bucket);
 
     return AddUnique(str, bucket, hash, EntryTTL(ttl_sec));
   }
@@ -142,19 +139,19 @@ class IntrusiveStringSet {
     size_ = 0;
   }
 
-  ISLEntry AddUnique(std::string_view str, Buckets::iterator bucket, uint64_t hash,
+  iterator AddUnique(std::string_view str, uint32_t bucket, uint64_t hash,
                      uint32_t ttl_sec = UINT32_MAX) {
     ++size_;
-    auto& entry = bucket->Emplace(str, ttl_sec);
-    entry.SetExtendedHash(hash, capacity_log_, kShiftLog);
-    return entry;
+    uint32_t pos = entries_[bucket].Insert(ISLEntry(str, ttl_sec));
+    entries_[bucket][pos].SetExtendedHash(hash, capacity_log_, kShiftLog);
+    return iterator(this, bucket, pos);
   }
 
   unsigned AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec, bool keepttl) {
     Reserve(span.size());
     unsigned res = 0;
     for (auto& s : span) {
-      if (Add(s, keepttl, ttl_sec)) {
+      if (Add(s, keepttl, ttl_sec) != end()) {
         res++;
       }
     }
@@ -163,14 +160,14 @@ class IntrusiveStringSet {
 
   // TODO: Consider using chunks for this as string set
   void Fill(IntrusiveStringSet* other) {
-    DCHECK(other->entries_.empty());
-    other->Reserve(UpperBoundSize());
-    other->set_time(time_now());
-    for (uint32_t bucket_id = 0; bucket_id < entries_.size(); ++bucket_id) {
-      for (auto it = entries_[bucket_id].begin(); it != entries_[bucket_id].end(); ++it) {
-        other->Add(it->Key(), true, it.HasExpiry() ? it->ExpiryTime() : UINT32_MAX);
-      }
-    }
+    // DCHECK(other->entries_.empty());
+    // other->Reserve(UpperBoundSize());
+    // other->set_time(time_now());
+    // for (uint32_t bucket_id = 0; bucket_id < entries_.size(); ++bucket_id) {
+    //   for (auto it = entries_[bucket_id].begin(); it != entries_[bucket_id].end(); ++it) {
+    //     other->Add(it->Key(), true, it.HasExpiry() ? it->ExpiryTime() : UINT32_MAX);
+    //   }
+    // }
   }
 
   /**
@@ -195,11 +192,11 @@ class IntrusiveStringSet {
     uint32_t entries_idx = cursor >> (32 - capacity_log_);
 
     // First find the bucket to scan, skip empty buckets.
-    for (; entries_idx < entries_.size(); ++entries_idx) {
-      if (entries_[entries_idx].Scan(cb, &size_, time_now_)) {
-        break;
-      }
-    }
+    // for (; entries_idx < entries_.size(); ++entries_idx) {
+    //   if (entries_[entries_idx].Scan(cb, &size_, time_now_)) {
+    //     break;
+    //   }
+    // }
 
     if (++entries_idx >= entries_.size()) {
       return 0;
@@ -208,23 +205,23 @@ class IntrusiveStringSet {
     return entries_idx << (32 - capacity_log_);
   }
 
-  UniqueISLEntry Pop() {
-    for (auto& bucket : entries_) {
-      if (auto res = bucket.Pop(time_now_); res) {
-        --size_;
-        return res;
-      }
-    }
+  ISLEntry Pop() {
+    // for (auto& bucket : entries_) {
+    //   if (auto res = bucket.Pop(time_now_); res) {
+    //     --size_;
+    //     return res;
+    //   }
+    // }
     return {};
   }
 
   bool Erase(std::string_view str) {
-    if (entries_.empty())
-      return false;
-    uint64_t hash = Hash(str);
-    auto bucket_id = BucketId(hash, capacity_log_);
-    auto item = FindInternal(bucket_id, str, hash);
-    return entries_[item.second].Erase(str, &size_);
+    // if (entries_.empty())
+    return false;
+    // uint64_t hash = Hash(str);
+    // auto bucket_id = BucketId(hash, capacity_log_);
+    // auto item = FindInternal(bucket_id, str, hash);
+    // return entries_[item.second].Erase(str, &size_);
   }
 
   iterator Find(std::string_view member) {
@@ -234,11 +231,7 @@ class IntrusiveStringSet {
     uint64_t hash = Hash(member);
     auto bucket_id = BucketId(hash, capacity_log_);
     auto res = FindInternal(bucket_id, member, hash);
-    return {
-        res.first ? entries_.begin() + res.second : entries_.end(),
-        entries_.end(),
-        res.first,
-    };
+    return res;
   }
 
   bool Contains(std::string_view member) {
@@ -274,14 +267,15 @@ class IntrusiveStringSet {
 
   size_t ObjMallocUsed() const {
     size_t bucket_obj_memory = 0;
-    for (const auto& bucket : entries_) {
-      bucket_obj_memory += bucket.ObjMallocUsed();
-    }
+    // for (const auto& bucket : entries_) {
+    //   bucket_obj_memory += bucket.ObjMallocUsed();
+    // }
     return bucket_obj_memory;
   }
 
   size_t SetMallocUsed() const {
-    return entries_.capacity() * sizeof(IntrusiveStringList);
+    // return entries_.capacity() * sizeof(ISLEntry);
+    return 0;
   }
 
   bool ExpirationUsed() const {
@@ -301,12 +295,20 @@ class IntrusiveStringSet {
   // was Grow in StringSet
   void Rehash(uint32_t prev_capacity_log) {
     auto prev_size = 1 << prev_capacity_log;
-    for (int64_t i = prev_size - 1; i >= 0; --i) {
-      auto list = std::move(entries_[i]);
-      for (auto entry = list.Pop(time_now_); entry; entry = list.Pop(time_now_)) {
-        auto bucket_id = entry.Rehash(i, prev_capacity_log, capacity_log_, kShiftLog);
-        auto bucket = FindEmptyAround(bucket_id);
-        bucket->Insert(entry.Release());
+    for (int64_t bucket_id = prev_size - 1; bucket_id >= 0; --bucket_id) {
+      auto bucket = std::move(entries_[bucket_id]);
+      for (uint32_t pos = 0, size = bucket.ElementsNum(); pos < size; ++pos) {
+        if (bucket[pos]) {
+          auto new_bucket_id =
+              bucket[pos].Rehash(bucket_id, prev_capacity_log, capacity_log_, kShiftLog);
+          // TODO remove
+          // auto real_bucket_id = BucketId(Hash(bucket[i].Key()), capacity_log_);
+          // DCHECK(real_bucket_id == bucket_id);
+
+          new_bucket_id = FindEmptyAround(new_bucket_id);
+
+          entries_[new_bucket_id]->Insert(std::move(bucket[pos]));
+        }
       }
     }
   }
@@ -315,45 +317,38 @@ class IntrusiveStringSet {
     return ttl_sec == UINT32_MAX ? ttl_sec : time_now_ + ttl_sec;
   }
 
-  Buckets::iterator FindEmptyAround(uint32_t bid) {
-    auto begin_it = entries_.begin();
+  uint32_t FindEmptyAround(uint32_t bid) {
     const uint32_t displacement_size = std::min(kDisplacementSize, BucketCount());
     const uint32_t capacity_mask = Capacity() - 1;
     for (uint32_t i = 0; i < displacement_size; i++) {
       const uint32_t bucket_id = (bid + i) & capacity_mask;
-      auto it = begin_it + bucket_id;
-      it->ExpireIfNeeded(time_now_, &size_);
-      if (it->Empty()) {
-        return it;
-      }
+      if (entries_[bucket_id].Empty())
+        return bucket_id;
+      // it->ExpireIfNeeded(time_now_, &size_);
+      // if (it->Empty()) {
+      //   return it;
+      // }
     }
 
-    DCHECK(Capacity() >= kDisplacementSize);
+    DCHECK(Capacity() > kDisplacementSize);
     uint32_t extension_point_shift = displacement_size - 1;
     bid |= extension_point_shift;
     DCHECK(bid < Capacity());
-    return begin_it + bid;
+    return bid;
   }
 
-  std::pair<IntrusiveStringList::iterator, uint32_t> FindInternal(uint32_t bid,
-                                                                  std::string_view str,
-                                                                  uint64_t hash) {
+  // return bucket_id and position otherwise max
+  iterator FindInternal(uint32_t bid, std::string_view str, uint64_t hash) {
     const uint32_t displacement_size = std::min(kDisplacementSize, BucketCount());
-    auto begin_it = entries_.begin();
     const uint32_t capacity_mask = Capacity() - 1;
     for (uint32_t i = 0; i < displacement_size; i++) {
       const uint32_t bucket_id = (bid + i) & capacity_mask;
-      auto it = begin_it + bucket_id;
-      if (it->Empty()) {
-        continue;
-      }
-      auto res = it->Find(str, hash, capacity_log_, kShiftLog, &size_, time_now_);
-      if (res) {
-        return {res, bucket_id};
+      auto pos = entries_[bucket_id].Find(str, hash, capacity_log_, kShiftLog, &size_, time_now_);
+      if (pos) {
+        return iterator{this, bucket_id, *pos};
       }
     }
-
-    return {IntrusiveStringList::end(), bid};
+    return end();
   }
 
  private:
