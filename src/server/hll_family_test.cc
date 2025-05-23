@@ -156,6 +156,15 @@ TEST_F(HllFamilyTest, CountMultiple) {
   EXPECT_EQ(CheckedInt({"pfcount", "key1", "key4"}), 5);
 }
 
+TEST_F(HllFamilyTest, CountMultipleWithWrongType) {
+  EXPECT_EQ(Run({"set", "key1", "value1"}), "OK");
+  EXPECT_EQ(CheckedInt({"pfadd", "key", "value"}), 1);
+  EXPECT_EQ(CheckedInt({"pfadd", "list1 element1", "data"}), 1);
+
+  EXPECT_THAT(Run({"pfcount", "key1", "key", "list1 element1"}),
+              ErrArg("Key is not a valid HyperLogLog string value."));
+}
+
 TEST_F(HllFamilyTest, MergeToNew) {
   EXPECT_EQ(CheckedInt({"pfadd", "key1", "1", "2", "3"}), 1);
   EXPECT_EQ(CheckedInt({"pfadd", "key2", "4", "5"}), 1);
