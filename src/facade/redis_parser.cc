@@ -424,11 +424,18 @@ auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
 
   // TODO: in client mode we still may not consume everything (see INPUT_PENDING below).
   // It's not a problem, because we need consume all the input only in server mode.
-
   if (arg_c_ == '+' || arg_c_ == '-') {  // Simple string or error.
     DCHECK(!server_mode_);
     if (!eol) {
-      Result r = str.size() < 256 ? INPUT_PENDING : BAD_STRING;
+      // if eol is not found we should still read input as bulk string
+      cached_expr_->emplace_back(RespExpr::STRING);
+      cached_expr_->back().u = Buffer{};
+      bulk_len_ = str.length();
+      // eol is not found but if '\r' is present decrease bulk_len
+      if (s[bulk_len_ - 1] == '\r')
+        bulk_len_--;
+      state_ = BULK_STR_S;
+      Result r = str.size() < 256 ? OK : BAD_STRING;
       return {r, 0};
     }
 
@@ -479,12 +486,21 @@ auto RedisParser::ConsumeBulk(Buffer str) -> ResultConsumed {
   uint32_t consumed = 0;
   auto& bulk_str = get<Buffer>(cached_expr_->back().u);
 
+  bool append_bulk_str = false;
+  if (!server_mode_ && (arg_c_ == '+' || arg_c_ == '-') && !bulk_len_) {
+    // Search first '\r', if found, in next partial message which indicate end of previous bulk str
+    const char* s = reinterpret_cast<const char*>(str.data());
+    const char* pos = reinterpret_cast<const char*>(memchr(s, '\r', str.size()));
+    bulk_len_ = pos ? pos - s : str.size();
+    append_bulk_str = true;
+  }
+
   if (str.size() >= bulk_len_) {
     consumed = bulk_len_;
     if (bulk_len_) {
       // is_broken_token_ can be false, if we just parsed the bulk length but have
       // not parsed the token itself.
-      if (is_broken_token_) {
+      if (is_broken_token_ || append_bulk_str) {
         memcpy(const_cast<uint8_t*>(bulk_str.end()), str.data(), bulk_len_);
         bulk_str = Buffer{bulk_str.data(), bulk_str.size() + bulk_len_};
       } else {
