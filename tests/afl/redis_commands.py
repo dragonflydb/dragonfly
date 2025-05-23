@@ -134,7 +134,7 @@ REDIS_COMMANDS = {
     "ZINCRBY": {"args": ["key", "increment", "member"], "optional_args": []},
     "ZCOUNT": {"args": ["key", "min", "max"], "optional_args": []},
     "ZSCAN": {"args": ["key", "cursor"], "optional_args": ["MATCH pattern", "COUNT count"]},
-    # Додаткові команди для Sorted Sets
+    # Additional commands for Sorted Sets
     "ZDIFF": {"args": ["numkeys", "key"], "optional_args": ["key ...", "WITHSCORES"]},
     "ZDIFFSTORE": {"args": ["destination", "numkeys", "key"], "optional_args": ["key ..."]},
     "ZINTER": {
