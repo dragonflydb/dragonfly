@@ -777,6 +777,26 @@ REDIS_COMMANDS = {
     "READWRITE": {"args": [], "optional_args": []},
 }
 
+# Focus command logic
+_RAW_FOCUS_COMMAND_ENV = os.getenv("REDIS_FOCUS_COMMAND", "").strip()
+FOCUS_COMMAND = None  # Will be None if the command is not set or invalid
+
+if _RAW_FOCUS_COMMAND_ENV:
+    _potential_focus_command_upper = _RAW_FOCUS_COMMAND_ENV.upper()
+    if _potential_focus_command_upper in REDIS_COMMANDS:
+        FOCUS_COMMAND = _potential_focus_command_upper
+        print(
+            f"Info: Focus command enabled: '{FOCUS_COMMAND}' (from environment variable REDIS_FOCUS_COMMAND='{_RAW_FOCUS_COMMAND_ENV}')"
+        )
+    else:
+        print(
+            f"Warning: Value '{_RAW_FOCUS_COMMAND_ENV}' from environment variable REDIS_FOCUS_COMMAND is not a valid command key in REDIS_COMMANDS. Focus command will be disabled."
+        )
+else:
+    print(
+        "Info: Environment variable REDIS_FOCUS_COMMAND is not set or empty. Focus command will be disabled."
+    )
+
 # Data types for random value generation
 DATA_TYPES = {
     "string": lambda: "".join(

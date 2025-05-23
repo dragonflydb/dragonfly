@@ -19,6 +19,7 @@ from redis_commands import (
     DICT_FILE,
     load_input_dict,
     enhance_data_types,
+    FOCUS_COMMAND,
 )
 
 # Constants
@@ -246,7 +247,13 @@ class RedisCommandGenerator:
     @staticmethod
     def generate_random_command():
         """Generates a random Redis command with arguments"""
-        command = random.choice(list(REDIS_COMMANDS.keys()))
+        # With a probability of 30% we select FOCUS_COMMAND if it is set
+        if FOCUS_COMMAND and random.random() < 0.30:
+            command = FOCUS_COMMAND
+            # print(f"Info: (generate_random_command) Used FOCUS_COMMAND: {command}") # For debugging
+        else:
+            command = random.choice(list(REDIS_COMMANDS.keys()))
+
         command_info = REDIS_COMMANDS[command]
 
         args = []

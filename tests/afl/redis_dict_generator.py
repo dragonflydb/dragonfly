@@ -10,6 +10,7 @@ from redis_commands import (
     SPECIAL_CHARS,
     ESCAPED_CHARS,
     enhance_data_types,
+    FOCUS_COMMAND,
 )
 
 
@@ -23,6 +24,15 @@ def create_afl_dictionary(output_file=DICT_FILE):
     # Adding all commands
     for command in REDIS_COMMANDS:
         dictionary.append(f'"{command}"')
+
+    # We must add FOCUS_COMMAND if it is set and valid
+    if FOCUS_COMMAND:
+        # Make sure the command is not already in the dictionary to avoid duplicates
+        # (although the previous logic of adding all commands already does this, but this is for safety)
+        focus_command_str = f'"{FOCUS_COMMAND}"'
+        if focus_command_str not in dictionary:
+            dictionary.append(focus_command_str)
+            print(f"Info: Focus command '{FOCUS_COMMAND}' added to dictionary.")
 
     # Adding typical arguments
     for data_type, generator in DATA_TYPES.items():
