@@ -122,16 +122,16 @@ class ISLEntry {
     return {GetKeyData(), GetKeySize()};
   }
 
-  bool HasExpiry() const {
-    return HasTtl();
+  bool HasTtl() const {
+    return (uptr() & kTtlBit) != 0;
   }
 
   // returns the expiry time of the current entry or UINT32_MAX if no ttl is set.
-  uint32_t ExpiryTime() const {
+  uint32_t GetTtl() const {
     std::uint32_t res = UINT32_MAX;
     if (HasTtl()) {
       DCHECK(!IsVector());
-      std::memcpy(&res, Raw() + sizeof(ISLEntry*), sizeof(res));
+      std::memcpy(&res, Raw(), sizeof(res));
     }
     return res;
   }
@@ -222,7 +222,7 @@ class ISLEntry {
     return new_bucket_id;
   }
 
-  void SetExpiryTime(uint32_t ttl_sec) {
+  void SetTtl(uint32_t ttl_sec) {
     DCHECK(!IsVector());
     if (HasTtl()) {
       auto* ttl_pos = Raw() + sizeof(char*);
@@ -374,10 +374,6 @@ class ISLEntry {
 
   bool HasSso() const {
     return (uptr() & kSsoBit) != 0;
-  }
-
-  bool HasTtl() const {
-    return (uptr() & kTtlBit) != 0;
   }
 
   size_t Size() {
