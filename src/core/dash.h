@@ -30,6 +30,11 @@ class DashTable : public detail::DashTableBase {
   //! Total number of buckets in a segment (including stash).
   static constexpr double kTaxAmount = SegmentType::kTaxSize;
   static constexpr size_t kSegBytes = sizeof(SegmentType);
+
+  // How many bytes the non-stash part is taking.
+  static constexpr size_t kSegRegularBytes =
+      kSegBytes - (SegmentType::kStashBucketNum * SegmentType::kBucketSz);
+
   static constexpr size_t kSegCapacity = SegmentType::capacity();
   static constexpr size_t kSlotNum = SegmentType::kSlotNum;
   static constexpr size_t kBucketNum = SegmentType::kBucketNum;
