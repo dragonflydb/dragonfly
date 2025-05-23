@@ -52,13 +52,14 @@ namespace {
 
 constexpr auto kPrimeSegmentSize = PrimeTable::kSegBytes;
 constexpr auto kExpireSegmentSize = ExpireTable::kSegBytes;
-
+constexpr auto kExpireRegularSize = ExpireTable::kSegRegularBytes;
 // mi_malloc good size is 32768. i.e. we have malloc waste of 1.5%.
 static_assert(kPrimeSegmentSize <= 32288);
 
 // 20480 is the next goodsize so we are loosing ~300 bytes or 1.5%.
 // 24576
 static_assert(kExpireSegmentSize == 23528);
+static_assert(double(kExpireRegularSize) / kExpireSegmentSize > 0.9);
 
 void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* db) {
   DCHECK_NE(db, nullptr);
