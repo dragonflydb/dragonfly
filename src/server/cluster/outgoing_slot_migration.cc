@@ -12,6 +12,7 @@
 #include "base/logging.h"
 #include "cluster_family.h"
 #include "cluster_utility.h"
+#include "facade/socket_utils.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -228,15 +229,14 @@ void OutgoingMigration::SyncFb() {
       continue;
     }
 
-    // Break outgoing migration if INIT from incoming node responded with OOM. Usually this will
-    // happen on second iteration after first failed with OOM. Sending second INIT is required to
-    // cleanup slots on incoming slot migration node.
-    if (CheckRespSimpleError(kIncomingMigrationOOM)) {
-      ChangeState(MigrationState::C_FATAL);
-      break;
-    }
-
     if (!CheckRespIsSimpleReply("OK")) {
+      // Break outgoing migration if INIT from incoming node responded with OOM. Usually this will
+      // happen on second iteration after first failed with OOM. Sending second INIT is required to
+      // cleanup slots on incoming slot migration node.
+      if (CheckRespSimpleError(kIncomingMigrationOOM)) {
+        ChangeState(MigrationState::C_FATAL);
+        break;
+      }
       if (CheckRespIsSimpleReply(kUnknownMigration)) {
         const absl::Duration passed = absl::Now() - start_time;
         // we provide 30 seconds to distribute the config to all nodes to avoid extra errors
