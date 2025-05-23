@@ -84,7 +84,7 @@ runs:
         AWS_REGION: us-east-1
 
     - name: Send notification on failure
-      if: failure() && github.ref == 'refs/heads/main'
+      if: failure()
       shell: bash
       run: |
         get_failed_tests() {
