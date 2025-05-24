@@ -33,7 +33,7 @@ template <typename... Ts> journal::ParsedEntry::CmdData BuildFromParts(Ts... par
     start += part.size();
   }
 
-  return {std::move(buf), std::move(slice_parts)};
+  return {std::move(buf), std::move(slice_parts), cmd_str.size()};
 }
 }  // namespace
 

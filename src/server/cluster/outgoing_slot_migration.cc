@@ -37,7 +37,8 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   SliceSlotMigration(DbSlice* slice, ServerContext server_context, SlotSet slots,
                      journal::Journal* journal, OutgoingMigration* om)
       : ProtocolClient(server_context), streamer_(slice, std::move(slots), journal, &exec_st_) {
-    exec_st_.SwitchErrorHandler([om](auto ge) { om->Finish(std::move(ge)); });
+    exec_st_.SwitchErrorHandler(
+        [om](auto ge) { om->Finish(MigrationState::C_ERROR, std::move(ge)); });
   }
 
   ~SliceSlotMigration() {
@@ -142,10 +143,8 @@ void OutgoingMigration::OnAllShards(
   });
 }
 
-void OutgoingMigration::Finish(GenericError error) {
-  auto next_state = MigrationState::C_FINISHED;
+void OutgoingMigration::Finish(MigrationState next_state, GenericError error) {
   if (error) {
-    next_state = MigrationState::C_ERROR;
     LOG(WARNING) << "Finish outgoing migration for " << cf_->MyID() << ": "
                  << migration_info_.node_info.id << " with error: " << error.Format();
     exec_st_.ReportError(std::move(error));
@@ -168,6 +167,7 @@ void OutgoingMigration::Finish(GenericError error) {
 
       case MigrationState::C_SYNC:
       case MigrationState::C_ERROR:
+      case MigrationState::C_FATAL:
         should_cancel_flows = true;
         break;
     }
@@ -230,6 +230,13 @@ void OutgoingMigration::SyncFb() {
     }
 
     if (!CheckRespIsSimpleReply("OK")) {
+      // Break outgoing migration if INIT from incoming node responded with OOM. Usually this will
+      // happen on second iteration after first failed with OOM. Sending second INIT is required to
+      // cleanup slots on incoming slot migration node.
+      if (CheckRespSimpleError(kIncomingMigrationOOM)) {
+        ChangeState(MigrationState::C_FATAL);
+        break;
+      }
       if (CheckRespIsSimpleReply(kUnknownMigration)) {
         const absl::Duration passed = absl::Now() - start_time;
         // we provide 30 seconds to distribute the config to all nodes to avoid extra errors
@@ -280,7 +287,11 @@ void OutgoingMigration::SyncFb() {
 
     long attempt = 0;
     while (GetState() != MigrationState::C_FINISHED && !FinalizeMigration(++attempt)) {
-      // process commands that were on pause and try again
+      // Break loop and don't sleep in case of C_FATAL
+      if (GetState() == MigrationState::C_FATAL) {
+        break;
+      }
+      // Process commands that were on pause and try again
       VLOG(1) << "Waiting for migration to finalize...";
       ThisFiber::SleepFor(500ms);
     }
@@ -367,6 +378,12 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
       return false;
     }
 
+    // Check OOM from incoming slot migration on ACK request
+    if (CheckRespSimpleError(kIncomingMigrationOOM)) {
+      Finish(MigrationState::C_FATAL, std::string(kIncomingMigrationOOM));
+      return false;
+    }
+
     if (!CheckRespFirstTypes({RespExpr::INT64})) {
       LOG(WARNING) << "Incorrect response type for " << cf_->MyID() << " : "
                    << migration_info_.node_info.id << " attempt " << attempt
@@ -383,7 +400,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   }
 
   if (!exec_st_.GetError()) {
-    Finish();
+    Finish(MigrationState::C_FINISHED);
     keys_number_ = cluster::GetKeyCount(migration_info_.slot_ranges);
     cf_->ApplyMigrationSlotRangeToConfig(migration_info_.node_info.id, migration_info_.slot_ranges,
                                          false);

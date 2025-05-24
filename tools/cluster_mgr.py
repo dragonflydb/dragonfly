@@ -449,6 +449,8 @@ def migrate(args):
             continue
         if len(sync_status) != 1:
             die_with_err(f"Unexpected number of migrations {len(sync_status)}: {sync_status}")
+        if "FATAL" in sync_status[0]:
+            die_with_err(f"Error in migration {len(sync_status)}: {sync_status}")
         if "FINISHED" in sync_status[0]:
             print(f"Migration finished: {sync_status[0]}")
             break
