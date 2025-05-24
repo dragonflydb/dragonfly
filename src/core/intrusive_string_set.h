@@ -112,7 +112,7 @@ class IntrusiveStringSet {
 
   static constexpr uint32_t kMaxBatchLen = 32;
 
-  iterator Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX) {
+  bool Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX) {
     if (entries_.empty() || size_ >= entries_.size()) {
       Reserve(Capacity() * 2);
     }
@@ -125,14 +125,15 @@ class IntrusiveStringSet {
       // if (!keepttl) {
       //   item->SetExpiryTime(EntryTTL(ttl_sec) /*, &entries_[item.second].obj_malloc_used_*/);
       // }
-      return item;
+      return false;
     }
 
     uint32_t bucket = FindEmptyAround(bucket_id);
 
     DCHECK(bucket_id + kDisplacementSize > bucket);
 
-    return AddUnique(str, bucket, hash, ttl_sec);
+    AddUnique(str, bucket, hash, ttl_sec);
+    return true;
   }
 
   void Reserve(size_t sz) {
@@ -201,20 +202,26 @@ class IntrusiveStringSet {
 
   // TODO fix with CheckExtendedHash
   uint32_t Scan(uint32_t cursor, const ItemCb& cb) {
-    uint32_t entries_idx = cursor >> (32 - capacity_log_);
+    const uint32_t capacity_mask = Capacity() - 1;
+    uint32_t bucket_id = cursor >> (32 - capacity_log_);
+    const uint32_t displacement_size = std::min(kDisplacementSize, BucketCount());
 
     // First find the bucket to scan, skip empty buckets.
-    // for (; entries_idx < entries_.size(); ++entries_idx) {
-    //   if (entries_[entries_idx].Scan(cb, &size_, time_now_)) {
-    //     break;
-    //   }
-    // }
+    for (; bucket_id < entries_.size(); ++bucket_id) {
+      bool res = false;
+      for (uint32_t i = 0; i < displacement_size; i++) {
+        const uint32_t shifted_bid = (bucket_id + i) & capacity_mask;
+        res |= entries_[shifted_bid].Scan(cb, bucket_id, capacity_log_, kShiftLog);
+      }
+      if (res)
+        break;
+    }
 
-    if (++entries_idx >= entries_.size()) {
+    if (++bucket_id >= entries_.size()) {
       return 0;
     }
 
-    return entries_idx << (32 - capacity_log_);
+    return bucket_id << (32 - capacity_log_);
   }
 
   ISLEntry Pop() {
