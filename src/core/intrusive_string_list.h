@@ -102,7 +102,7 @@ class ISLEntry {
   }
 
   bool Empty() const {
-    return !data_;
+    return !Raw();
   }
 
   operator bool() const {
@@ -147,6 +147,8 @@ class ISLEntry {
 
   bool CheckBucketAffiliation(uint32_t bucket_id, uint32_t capacity_log, uint32_t shift_log) {
     DCHECK(!IsVector());
+    if (Empty())
+      return false;
     uint32_t bucket_id_hash_part = capacity_log > shift_log ? shift_log : capacity_log;
     uint32_t bucket_mask = (1 << bucket_id_hash_part) - 1;
     bucket_id &= bucket_mask;
@@ -322,6 +324,27 @@ class ISLEntry {
       }
     }
     return std::move(*this);
+  }
+
+  template <class T, std::enable_if_t<std::is_invocable_v<T, std::string_view>>* = nullptr>
+  bool Scan(const T& cb, uint32_t bucket_id, uint32_t capacity_log, uint32_t shift_log) {
+    if (!IsVector()) {
+      if (CheckBucketAffiliation(bucket_id, capacity_log, shift_log)) {
+        cb(Key());
+        return true;
+      }
+    } else {
+      auto& arr = AsVector();
+      bool result = false;
+      for (auto& el : arr) {
+        if (el.CheckBucketAffiliation(bucket_id, capacity_log, shift_log)) {
+          cb(el.Key());
+          result = true;
+        }
+      }
+      return result;
+    }
+    return false;
   }
 
  protected:
