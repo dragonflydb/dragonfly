@@ -143,11 +143,11 @@ constexpr size_t kSegSize = sizeof(Segment);
 
 class DashTest : public testing::Test {
  protected:
-  static void SetUpTestCase() {
+  static void SetUpTestSuite() {
     init_zmalloc_threadlocal(mi_heap_get_backing());
   }
 
-  DashTest() : segment_(1) {
+  DashTest() : segment_(1, nullptr) {
   }
 
   bool Find(Segment::Key_t key, Segment::Value_t* val) const {
@@ -240,7 +240,7 @@ TEST_F(DashTest, Basic) {
 }
 
 TEST_F(DashTest, Segment) {
-  std::unique_ptr<Segment> seg(new Segment(1));
+  std::unique_ptr<Segment> seg(new Segment(1, nullptr));
 
 #ifndef __APPLE__
   LOG(INFO) << "Segment size " << sizeof(Segment)
@@ -354,7 +354,7 @@ TEST_F(DashTest, Split) {
   // fills segment with maximum keys that must reside in bucket id 0.
   set<Segment::Key_t> keys = FillSegment(0);
   Segment::Value_t val;
-  Segment s2{2};  // segment with local depth 2.
+  Segment s2{2, nullptr};  // segment with local depth 2.
 
   segment_.Split(&UInt64Policy::HashFn, &s2);
   unsigned sum[2] = {0};
@@ -376,7 +376,7 @@ TEST_F(DashTest, Split) {
 
 TEST_F(DashTest, Merge) {
   set<Segment::Key_t> keys = FillSegment(0);
-  Segment s2{2};  // segment with local depth 2.
+  Segment s2{2, nullptr};  // segment with local depth 2.
 
   segment_.Split(&UInt64Policy::HashFn, &s2);
   ASSERT_EQ(segment_.SlowSize() + s2.SlowSize(), keys.size());
@@ -514,7 +514,7 @@ TEST_F(DashTest, Custom) {
   (void)kSegSize;
   (void)kBuckSz;
 
-  ItemSegment seg{2};
+  ItemSegment seg{2, nullptr};
 
   auto eq = [v = Item{1, 1}](auto u) { return v.buf[0] == u.buf[0] && v.buf[1] == u.buf[1]; };
   auto it = seg.FindIt(42, eq);
@@ -525,7 +525,7 @@ TEST_F(DashTest, FindByValue) {
   using ItemSegment = detail::Segment<Item, uint64_t>;
 
   // Insert three different values with the same hash
-  ItemSegment segment{2};
+  ItemSegment segment{2, nullptr};
   segment.Insert(Item{1}, 1, 42, [](const auto& pred) { return pred.buf[0] == 1; });
   segment.Insert(Item{2}, 2, 42, [](const auto& pred) { return pred.buf[0] == 2; });
   segment.Insert(Item{3}, 3, 42, [](const auto& pred) { return pred.buf[0] == 3; });
@@ -679,7 +679,7 @@ struct TestEvictionPolicy {
   void RecordSplit(Dash64::Segment_t*) {
   }
 
-  unsigned Evict(const Dash64::HotspotBuckets& hotb, Dash64* me) const {
+  unsigned Evict(const Dash64::HotBuckets& hotb, Dash64* me) const {
     if (!evict_enabled)
       return 0;
 
@@ -847,7 +847,7 @@ struct A {
   }
 
   A& operator=(const A&) = delete;
-  A& operator=(A&& o) {
+  A& operator=(A&& o) noexcept {
     o.moved = o.moved + 1;
     a = o.a;
     o.a = -1;
@@ -995,8 +995,8 @@ struct SimpleEvictPolicy {
   // Required interface in case can_gc is true
   // returns number of items evicted from the table.
   // 0 means - nothing has been evicted.
-  unsigned Evict(const U64Dash::HotspotBuckets& hotb, U64Dash* me) {
-    constexpr unsigned kBucketNum = U64Dash::HotspotBuckets::kNumBuckets;
+  unsigned Evict(const U64Dash::HotBuckets& hotb, U64Dash* me) {
+    constexpr unsigned kBucketNum = U64Dash::HotBuckets::kNumBuckets;
 
     uint32_t bid = hotb.key_hash % kBucketNum;
 
@@ -1037,7 +1037,7 @@ struct ShiftRightPolicy {
   void RecordSplit(U64Dash::Segment_t* segment) {
   }
 
-  unsigned Evict(const U64Dash::HotspotBuckets& hotb, U64Dash* me) {
+  unsigned Evict(const U64Dash::HotBuckets& hotb, U64Dash* me) {
     constexpr unsigned kNumStashBuckets = ABSL_ARRAYSIZE(hotb.probes.by_type.stash_buckets);
 
     unsigned stash_pos = hotb.key_hash % kNumStashBuckets;

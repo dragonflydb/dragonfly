@@ -13,6 +13,7 @@
 #include <cstring>
 #include <type_traits>
 
+#include "base/pmr/memory_resource.h"
 #include "core/sse_port.h"
 
 namespace dfly {
@@ -390,7 +391,7 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   using Key_t = _Key;
   using Hash_t = uint64_t;
 
-  explicit Segment(size_t depth) : local_depth_(depth) {
+  explicit Segment(size_t depth, PMR_NS::memory_resource* mr) : local_depth_(depth), mr_(mr) {
   }
 
   // Returns (iterator, true) if insert succeeds,
@@ -594,6 +595,8 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
   Bucket bucket_[kTotalBuckets];
   uint8_t local_depth_;
+  Bucket* extension_ = nullptr;
+  PMR_NS::memory_resource* mr_ = nullptr;
 
  public:
   static constexpr size_t kBucketSz = sizeof(Bucket);
