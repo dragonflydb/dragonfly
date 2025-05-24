@@ -11,6 +11,20 @@
 
 namespace dfly {
 
+namespace detail {
+
+// --- Helper for checking existence of T::use_extensions ---
+template <typename T, typename = void>
+struct has_use_extensions_impl : std::false_type {};  // Primary template: default to false
+template <typename T>
+struct has_use_extensions_impl<T, std::void_t<decltype(T::use_extensions)>> : std::true_type {};
+
+// Partial specialization:
+// If decltype(T::use_extensions) is well-formed, this specialization is chosen.
+template <typename T> constexpr bool has_use_extensions = has_use_extensions_impl<T>::value;
+
+}  // namespace detail
+
 // DASH: Dynamic And Scalable Hashing.
 
 template <typename _Key, typename _Value, typename Policy>
@@ -49,7 +63,7 @@ class DashTable : public detail::DashTableBase {
   using bucket_iterator = Iterator<false, true>;
   using Cursor = detail::DashCursor;
 
-  struct HotspotBuckets {
+  struct HotBuckets {
     static constexpr size_t kRegularBuckets = 4;
     static constexpr size_t kNumBuckets = kRegularBuckets + SegmentType::kStashBucketNum;
 
@@ -320,6 +334,20 @@ class DashTable : public detail::DashTableBase {
     return [p = &policy_, &key](const auto& probe) -> bool { return p->Equal(probe, key); };
   }
 
+  SegmentType* ConstructSegment(uint8_t depth) {
+    auto* mr = segment_.get_allocator().resource();
+    PMR_NS::polymorphic_allocator<SegmentType> pa(mr);
+    SegmentType* res = pa.allocate(1);
+    if constexpr (detail::has_use_extensions<Policy>) {
+      if (!policy_.use_extensions)
+        mr = nullptr;
+    } else {
+      mr = nullptr;
+    }
+    pa.construct(res, depth, mr);  //   new SegmentType(depth);
+    return res;
+  }
+
   Policy policy_;
   std::vector<SegmentType*, PMR_NS::polymorphic_allocator<SegmentType*>> segment_;
 
@@ -517,12 +545,10 @@ DashTable<_Key, _Value, Policy>::DashTable(size_t capacity_log, const Policy& po
                                            PMR_NS::memory_resource* mr)
     : Base(capacity_log), policy_(policy), segment_(mr) {
   segment_.resize(unique_segments_);
-  PMR_NS::polymorphic_allocator<SegmentType> pa(mr);
 
   // I assume we have enough memory to create the initial table and do not check allocations.
   for (auto& ptr : segment_) {
-    ptr = pa.allocate(1);
-    pa.construct(ptr, global_depth_);  //   new SegmentType(global_depth_);
+    ptr = ConstructSegment(global_depth_);  //   new SegmentType(global_depth_);
   }
 }
 
@@ -797,12 +823,12 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
     // try garbage collect or evict.
     if constexpr (EvictionPolicy::can_evict || EvictionPolicy::can_gc) {
       // Try gc.
-      uint8_t bid[HotspotBuckets::kRegularBuckets];
+      uint8_t bid[HotBuckets::kRegularBuckets];
       SegmentType::FillProbeArray(key_hash, bid);
-      HotspotBuckets hotspot;
+      HotBuckets hotspot;
       hotspot.key_hash = key_hash;
 
-      for (unsigned j = 0; j < HotspotBuckets::kRegularBuckets; ++j) {
+      for (unsigned j = 0; j < HotBuckets::kRegularBuckets; ++j) {
         hotspot.probes.by_type.regular_buckets[j] = bucket_iterator{this, target_seg_id, bid[j]};
       }
 
@@ -810,7 +836,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
         hotspot.probes.by_type.stash_buckets[i] =
             bucket_iterator{this, target_seg_id, uint8_t(Policy::kBucketNum + i), 0};
       }
-      hotspot.num_buckets = HotspotBuckets::kNumBuckets;
+      hotspot.num_buckets = HotBuckets::kNumBuckets;
 
       // The difference between gc and eviction is that gc can be applied even if
       // the table can grow since we throw away logically deleted items.
@@ -821,8 +847,8 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
         if (res) {
           // We succeeded to gc. Lets continue with the momentum.
           // In terms of API abuse it's an awful hack, just to see if it works.
-          /*unsigned start = (bid[HotspotBuckets::kNumBuckets - 1] + 1) % kLogicalBucketNum;
-          for (unsigned i = 0; i < HotspotBuckets::kNumBuckets; ++i) {
+          /*unsigned start = (bid[HotBuckets::kNumBuckets - 1] + 1) % kLogicalBucketNum;
+          for (unsigned i = 0; i < HotBuckets::kNumBuckets; ++i) {
             uint8_t id = (start + i) % kLogicalBucketNum;
             buckets.probes.arr[i] = bucket_iterator{this, target_seg_id, id};
           }
@@ -891,9 +917,7 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id) {
   size_t chunk_size = 1u << (global_depth_ - source->local_depth());
   size_t start_idx = seg_id & (~(chunk_size - 1));
   assert(segment_[start_idx] == source && segment_[start_idx + chunk_size - 1] == source);
-  PMR_NS::polymorphic_allocator<SegmentType> alloc(segment_.get_allocator().resource());
-  SegmentType* target = alloc.allocate(1);
-  alloc.construct(target, source->local_depth() + 1);
+  SegmentType* target = ConstructSegment(source->local_depth() + 1);
 
   auto hash_fn = [this](const auto& k) { return policy_.HashFn(k); };
 
