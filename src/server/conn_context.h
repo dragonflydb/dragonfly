@@ -291,6 +291,9 @@ class ConnectionContext : public facade::ConnectionContext {
 
   ConnectionState conn_state;
 
+  // Time of command reception (in nanoseconds)
+  uint64_t receive_time_ns = 0;
+
   DbIndex db_index() const {
     return conn_state.db_index;
   }

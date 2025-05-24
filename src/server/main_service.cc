@@ -1157,6 +1157,9 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
   }
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
+  // Save the receive time in the context
+  dfly_cntx->receive_time_ns = absl::GetCurrentTimeNanos();
+
   bool under_script = bool(dfly_cntx->conn_state.script_info);
   bool under_exec = dfly_cntx->conn_state.exec_info.IsRunning();
   bool dispatching_in_multi = under_script || under_exec;
@@ -1311,6 +1314,20 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
   auto* builder = cmd_cntx.rb;
   DCHECK(builder);
   DCHECK(cntx);
+
+  // Calculate the start time of command execution
+  uint64_t execution_start_ns = absl::GetCurrentTimeNanos();
+
+  // If there is a receive time in the context, calculate and log the delay
+  if (cntx->receive_time_ns > 0) {
+    uint64_t delay_ns = execution_start_ns - cntx->receive_time_ns;
+    if (delay_ns > 50000) {
+      LOG(INFO) << "Command " << cid->name() << " execution delay: " << delay_ns / 1000 << " us ("
+                << delay_ns << " ns)";
+    }
+    // Reset the receive time
+    cntx->receive_time_ns = 0;
+  }
 
   if (auto err = VerifyCommandExecution(cid, cntx, tail_args); err) {
     // We need to skip this because ACK's should not be replied to
