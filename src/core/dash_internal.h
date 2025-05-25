@@ -381,9 +381,6 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
     size_t stash_overflow_probes = 0;
   };
 
-  /* number of normal buckets in one segment*/
-  static constexpr PhysicalBid kTotalBuckets = kBucketNum + kStashBucketNum;
-
   static constexpr size_t kFpMask = (1 << kFingerBits) - 1;
 
   using Value_t = _Value;
@@ -400,14 +397,6 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
   template <typename HashFn> void Split(HashFn&& hfunc, Segment* dest);
 
-  // Moves all the entries from 'src' segment to this segment.
-  // The calling code must ensure first that we actually can move all the key and we do not
-  // have hot, overfilled buckets that will prevent us from moving all the keys.
-  // If MoveFrom fails, the dashtable will abort, assert and will be left in an inconsistent state.
-  // If MoveFrom succeeds, the src segment will be left empty but with inconsistent metadata, so
-  // should it should be deallocated or reinitialized.
-  template <typename HashFn> void MoveFrom(HashFn&& hfunc, Segment* src);
-
   void Delete(const Iterator& it, Hash_t key_hash);
 
   void Clear();  // clears the segment.
@@ -416,6 +405,10 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
   static constexpr size_t capacity() {
     return kMaxSize;
+  }
+
+  static constexpr bool OutOfRange(PhysicalBid bid) {
+    return bid >= kBucketNum + kStashBucketNum;
   }
 
   size_t local_depth() const {
@@ -549,6 +542,10 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   // buckets.
   template <typename HFunc> unsigned UnloadStash(HFunc&& hfunc);
 
+  unsigned num_buckets() const {
+    return kBucketNum + kStashBucketNum;
+  }
+
  private:
   static_assert(sizeof(Iterator) == 2);
 
@@ -592,12 +589,15 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   // returns a valid iterator if succeeded.
   Iterator TryMoveFromStash(unsigned stash_id, unsigned stash_slot_id, Hash_t key_hash);
 
+  const static unsigned kTotalBuckets = kBucketNum + kStashBucketNum;
+  static_assert(kTotalBuckets < 0xFF);
+
   Bucket bucket_[kTotalBuckets];
   uint8_t local_depth_;
 
  public:
   static constexpr size_t kBucketSz = sizeof(Bucket);
-  static constexpr size_t kMaxSize = kTotalBuckets * kSlotNum;
+  static constexpr size_t kMaxSize = (kBucketNum + kStashBucketNum) * kSlotNum;
   static constexpr double kTaxSize =
       (double(sizeof(Segment)) / kMaxSize) - sizeof(Key_t) - sizeof(Value_t);
 
@@ -637,7 +637,7 @@ class DashTableBase {
   }
 
   size_t size_ = 0;
-  uint32_t unique_segments_;
+  uint32_t unique_segments_ = 0, bucket_count_ = 0;
   uint8_t initial_depth_;
   uint8_t global_depth_;
 };  // DashTableBase
@@ -1300,37 +1300,6 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
 }
 
 template <typename Key, typename Value, typename Policy>
-template <typename HFunc>
-void Segment<Key, Value, Policy>::MoveFrom(HFunc&& hfunc, Segment* src) {
-  for (unsigned bid = 0; bid < kTotalBuckets; ++bid) {
-    Bucket& src_bucket = src->bucket_[bid];
-    bool success = true;
-    auto cb = [&, hfunc = std::move(hfunc)](Bucket* bucket, unsigned slot, bool probe) {
-      auto& key = bucket->key[slot];
-      Hash_t hash = hfunc(key);
-
-      auto it = this->InsertUniq(std::forward<Key_t>(key),
-                                 std::forward<Value_t>(bucket->value[slot]), hash, false);
-      (void)it;
-      assert(it.index != kNanBid);
-      if (it.index == kNanBid) {
-        success = false;
-        return;
-      }
-
-      if constexpr (kUseVersion) {
-        // Update the version in the destination bucket.
-        this->bucket_[it.index].UpdateVersion(bucket->GetVersion());
-      }
-    };
-
-    src_bucket.ForEachSlot(std::move(cb));
-    if (!success)
-      break;
-  }
-}
-
-template <typename Key, typename Value, typename Policy>
 int Segment<Key, Value, Policy>::MoveToOther(bool own_items, unsigned from_bid, unsigned to_bid) {
   auto& src = bucket_[from_bid];
   uint32_t mask = src.GetProbe(!own_items);
@@ -1603,18 +1572,14 @@ size_t Segment<Key, Value, Policy>::SlowSize() const {
 template <typename Key, typename Value, typename Policy>
 auto Segment<Key, Value, Policy>::FindValidStartingFrom(PhysicalBid bid, unsigned slot) const
     -> Iterator {
-  uint32_t mask = bucket_[bid].GetBusy();
-  mask >>= slot;
-  if (mask)
-    return Iterator(bid, slot + __builtin_ctz(mask));
-
-  ++bid;
   while (bid < kTotalBuckets) {
     uint32_t mask = bucket_[bid].GetBusy();
+    mask >>= slot;
     if (mask) {
-      return Iterator(bid, __builtin_ctz(mask));
+      return Iterator(bid, slot + __builtin_ctz(mask));
     }
     ++bid;
+    slot = 0;
   }
   return Iterator{};
 }

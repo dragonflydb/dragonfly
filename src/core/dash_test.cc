@@ -77,7 +77,7 @@ struct Buf24 {
 };
 
 struct BasicDashPolicy {
-  enum { kSlotNum = 12, kBucketNum = 64, kStashBucketNum = 2 };
+  enum { kSlotNum = 12, kBucketNum = 64 };
   static constexpr bool kUseVersion = false;
 
   template <typename U> static void DestroyValue(const U&) {
@@ -372,16 +372,6 @@ TEST_F(DashTest, Split) {
   EXPECT_EQ(s2.SlowSize(), sum[1]);
   EXPECT_EQ(keys.size(), sum[0] + sum[1]);
   EXPECT_EQ(6 * Segment::kSlotNum, keys.size());
-}
-
-TEST_F(DashTest, Merge) {
-  set<Segment::Key_t> keys = FillSegment(0);
-  Segment s2{2};  // segment with local depth 2.
-
-  segment_.Split(&UInt64Policy::HashFn, &s2);
-  ASSERT_EQ(segment_.SlowSize() + s2.SlowSize(), keys.size());
-  segment_.MoveFrom(&UInt64Policy::HashFn, &s2);
-  EXPECT_EQ(segment_.SlowSize(), keys.size());
 }
 
 TEST_F(DashTest, BumpUp) {
@@ -786,6 +776,9 @@ TEST_F(DashTest, Version) {
   EXPECT_EQ(5, it.GetVersion());
 
   dt.Clear();
+  ASSERT_EQ(0, dt.size());
+  ASSERT_EQ(2, dt.unique_segments());
+  ASSERT_EQ(136, dt.bucket_count());
   constexpr int kNum = 68000;
   for (int i = 0; i < kNum; ++i) {
     auto it = dt.Insert(i, 0).first;
