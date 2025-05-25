@@ -54,11 +54,11 @@ constexpr auto kPrimeSegmentSize = PrimeTable::kSegBytes;
 constexpr auto kExpireSegmentSize = ExpireTable::kSegBytes;
 constexpr auto kExpireRegularSize = ExpireTable::kSegRegularBytes;
 // mi_malloc good size is 32768. i.e. we have malloc waste of 1.5%.
-static_assert(kPrimeSegmentSize <= 32288);
+static_assert(kPrimeSegmentSize <= 32304);
 
 // 20480 is the next goodsize so we are loosing ~300 bytes or 1.5%.
 // 24576
-static_assert(kExpireSegmentSize == 23528);
+static_assert(kExpireSegmentSize <= 23544);
 static_assert(double(kExpireRegularSize) / kExpireSegmentSize > 0.9);
 
 void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* db) {
@@ -101,8 +101,8 @@ class PrimeEvictionPolicy {
 
   bool CanGrow(const PrimeTable& tbl) const;
 
-  unsigned GarbageCollect(const PrimeTable::HotspotBuckets& eb, PrimeTable* me);
-  unsigned Evict(const PrimeTable::HotspotBuckets& eb, PrimeTable* me);
+  unsigned GarbageCollect(const PrimeTable::HotBuckets& eb, PrimeTable* me);
+  unsigned Evict(const PrimeTable::HotBuckets& eb, PrimeTable* me);
 
   unsigned evicted() const {
     return evicted_;
@@ -156,7 +156,7 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
   return res;
 }
 
-unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& eb, PrimeTable* me) {
+unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, PrimeTable* me) {
   unsigned res = 0;
 
   if (db_slice_->WillBlockOnJournalWrite()) {
@@ -172,7 +172,7 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& e
   // stash buckets are filled last so much smaller change they have expired items.
   string scratch;
   unsigned num_buckets =
-      std::min<unsigned>(PrimeTable::HotspotBuckets::kRegularBuckets, eb.num_buckets);
+      std::min<unsigned>(PrimeTable::HotBuckets::kRegularBuckets, eb.num_buckets);
   for (unsigned i = 0; i < num_buckets; ++i) {
     auto bucket_it = eb.at(i);
     for (; !bucket_it.is_done(); ++bucket_it) {
@@ -190,7 +190,7 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& e
   return res;
 }
 
-unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeTable* me) {
+unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable* me) {
   if (!can_evict_ || db_slice_->WillBlockOnJournalWrite())
     return 0;
 

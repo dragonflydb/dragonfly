@@ -143,7 +143,7 @@ constexpr size_t kSegSize = sizeof(Segment);
 
 class DashTest : public testing::Test {
  protected:
-  static void SetUpTestCase() {
+  static void SetUpTestSuite() {
     init_zmalloc_threadlocal(mi_heap_get_backing());
   }
 
@@ -669,7 +669,7 @@ struct TestEvictionPolicy {
   void RecordSplit(Dash64::Segment_t*) {
   }
 
-  unsigned Evict(const Dash64::HotspotBuckets& hotb, Dash64* me) const {
+  unsigned Evict(const Dash64::HotBuckets& hotb, Dash64* me) const {
     if (!evict_enabled)
       return 0;
 
@@ -840,7 +840,7 @@ struct A {
   }
 
   A& operator=(const A&) = delete;
-  A& operator=(A&& o) {
+  A& operator=(A&& o) noexcept {
     o.moved = o.moved + 1;
     a = o.a;
     o.a = -1;
@@ -988,8 +988,8 @@ struct SimpleEvictPolicy {
   // Required interface in case can_gc is true
   // returns number of items evicted from the table.
   // 0 means - nothing has been evicted.
-  unsigned Evict(const U64Dash::HotspotBuckets& hotb, U64Dash* me) {
-    constexpr unsigned kBucketNum = U64Dash::HotspotBuckets::kNumBuckets;
+  unsigned Evict(const U64Dash::HotBuckets& hotb, U64Dash* me) {
+    constexpr unsigned kBucketNum = U64Dash::HotBuckets::kNumBuckets;
 
     uint32_t bid = hotb.key_hash % kBucketNum;
 
@@ -1030,7 +1030,7 @@ struct ShiftRightPolicy {
   void RecordSplit(U64Dash::Segment_t* segment) {
   }
 
-  unsigned Evict(const U64Dash::HotspotBuckets& hotb, U64Dash* me) {
+  unsigned Evict(const U64Dash::HotBuckets& hotb, U64Dash* me) {
     constexpr unsigned kNumStashBuckets = ABSL_ARRAYSIZE(hotb.probes.by_type.stash_buckets);
 
     unsigned stash_pos = hotb.key_hash % kNumStashBuckets;
