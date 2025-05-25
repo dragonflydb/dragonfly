@@ -1328,9 +1328,10 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             m.coordinator_stats.multi_squash_exec_reply_usec * 1e-6,
                             MetricType::COUNTER, &resp->body());
 
-  AppendMetricWithoutLabels("commands_squashing_replies_bytes", "",
-                            MultiCommandSquasher::GetRepliesMemSize(), MetricType::GAUGE,
-                            &resp->body());
+  AppendMetricWithoutLabels(
+      "commands_squashing_replies_bytes", "",
+      m.facade_stats.reply_stats.squashing_current_reply_size.load(memory_order_relaxed),
+      MetricType::GAUGE, &resp->body());
   string connections_libs;
   AppendMetricHeader("connections_libs", "Total number of connections by libname:ver",
                      MetricType::GAUGE, &connections_libs);
@@ -2481,7 +2482,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("client_read_buffer_peak_bytes", m.peak_stats.conn_read_buf_capacity);
     append("tls_bytes", m.tls_bytes);
     append("snapshot_serialization_bytes", m.serialization_bytes);
-    append("commands_squashing_replies_bytes", MultiCommandSquasher::GetRepliesMemSize());
+    append("commands_squashing_replies_bytes",
+           m.facade_stats.reply_stats.squashing_current_reply_size.load(memory_order_relaxed));
 
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
