@@ -200,16 +200,20 @@ class DashTable : public detail::DashTableBase {
   // Returns the total number of buckets in the table, in contrast to capacity() which
   // returns the total number of slots.
   size_t bucket_count() const {
-    return unique_segments_ * SegmentType::kTotalBuckets;
+    return bucket_count_;
   }
 
   // Overall capacity of the table (including stash buckets) in number of keys.
   size_t capacity() const {
-    return unique_segments_ * SegmentType::capacity();
+    return bucket_count() * kSlotNum;
   }
 
   double load_factor() const {
     return double(size()) / capacity();
+  }
+
+  static constexpr unsigned LargestBucketId() {
+    return SegmentType::kBucketNum + SegmentType::kStashBucketNum - 1;
   }
 
   // Gets a random cursor based on the available segments and buckets.
@@ -318,6 +322,15 @@ class DashTable : public detail::DashTableBase {
 
   template <typename K> auto EqPred(const K& key) const {
     return [p = &policy_, &key](const auto& probe) -> bool { return p->Equal(probe, key); };
+  }
+
+  SegmentType* ConstructSegment(uint8_t depth) {
+    auto* mr = segment_.get_allocator().resource();
+    PMR_NS::polymorphic_allocator<SegmentType> pa(mr);
+    SegmentType* res = pa.allocate(1);
+    pa.construct(res, depth);  //   new SegmentType(depth);
+    bucket_count_ += res->num_buckets();
+    return res;
   }
 
   Policy policy_;
@@ -517,12 +530,10 @@ DashTable<_Key, _Value, Policy>::DashTable(size_t capacity_log, const Policy& po
                                            PMR_NS::memory_resource* mr)
     : Base(capacity_log), policy_(policy), segment_(mr) {
   segment_.resize(unique_segments_);
-  PMR_NS::polymorphic_allocator<SegmentType> pa(mr);
 
   // I assume we have enough memory to create the initial table and do not check allocations.
   for (auto& ptr : segment_) {
-    ptr = pa.allocate(1);
-    pa.construct(ptr, global_depth_);  //   new SegmentType(global_depth_);
+    ptr = ConstructSegment(global_depth_);  //   new SegmentType(global_depth_);
   }
 }
 
@@ -557,11 +568,9 @@ void DashTable<_Key, _Value, Policy>::CVCUponInsert(uint64_t ver_threshold, cons
     return;
   }
 
-  static_assert(SegmentType::kTotalBuckets < 0xFF);
-
   // Segment is full, we need to return the whole segment, because it can be split
   // and its entries can be reshuffled into different buckets.
-  for (uint8_t i = 0; i < SegmentType::kTotalBuckets; ++i) {
+  for (uint8_t i = 0; i < target->num_buckets(); ++i) {
     if (target->GetVersion(i) < ver_threshold && !target->GetBucket(i).IsEmpty()) {
       cb(bucket_iterator{this, seg_id, i});
     }
@@ -619,12 +628,13 @@ void DashTable<_Key, _Value, Policy>::Clear() {
 
     size_t dest = 0, src = 0;
     size_t new_size = (1 << initial_depth_);
-
+    bucket_count_ = 0;
     while (src < segment_.size()) {
       auto* seg = segment_[src];
       size_t next_src = NextSeg(src);  // must do before because NextSeg is dependent on seg.
       if (dest < new_size) {
         seg->set_local_depth(initial_depth_);
+        bucket_count_ += seg->num_buckets();
         segment_[dest++] = seg;
       } else {
         alloc_traits::destroy(pa, seg);
@@ -891,9 +901,7 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id) {
   size_t chunk_size = 1u << (global_depth_ - source->local_depth());
   size_t start_idx = seg_id & (~(chunk_size - 1));
   assert(segment_[start_idx] == source && segment_[start_idx + chunk_size - 1] == source);
-  PMR_NS::polymorphic_allocator<SegmentType> alloc(segment_.get_allocator().resource());
-  SegmentType* target = alloc.allocate(1);
-  alloc.construct(target, source->local_depth() + 1);
+  SegmentType* target = ConstructSegment(source->local_depth() + 1);
 
   auto hash_fn = [this](const auto& k) { return policy_.HashFn(k); };
 
@@ -918,7 +926,7 @@ auto DashTable<_Key, _Value, Policy>::TraverseBySegmentOrder(Cursor curs, Cb&& c
   s->TraverseBucket(bid, std::move(dt_cb));
 
   ++bid;
-  if (bid == SegmentType::kTotalBuckets) {
+  if (SegmentType::OutOfRange(bid)) {
     sid = NextSeg(sid);
     bid = 0;
     if (sid >= segment_.size()) {
@@ -982,7 +990,7 @@ auto DashTable<_Key, _Value, Policy>::AdvanceCursorBucketOrder(Cursor cursor) ->
     sid = 0;
     ++bid;
 
-    if (bid >= SegmentType::kTotalBuckets)
+    if (SegmentType::OutOfRange(bid))
       return 0;  // "End of traversal" cursor.
   }
   return Cursor{global_depth_, sid, bid};
@@ -991,7 +999,7 @@ auto DashTable<_Key, _Value, Policy>::AdvanceCursorBucketOrder(Cursor cursor) ->
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
 auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor cursor, Cb&& cb) -> Cursor {
-  if (cursor.bucket_id() >= SegmentType::kTotalBuckets)  // sanity.
+  if (SegmentType::OutOfRange(cursor.bucket_id()))  // sanity.
     return 0;
 
   constexpr uint32_t kMaxIterations = 8;

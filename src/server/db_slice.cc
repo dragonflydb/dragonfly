@@ -1363,7 +1363,6 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind,
 
   auto time_start = absl::GetCurrentTimeNanos();
   auto& db_table = db_arr_[db_ind];
-  constexpr int32_t num_buckets = PrimeTable::Segment_t::kTotalBuckets;
   constexpr int32_t num_slots = PrimeTable::Segment_t::kSlotNum;
 
   string tmp;
@@ -1372,13 +1371,16 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind,
   vector<string> keys_to_journal;
 
   for (int32_t slot_id = num_slots - 1; slot_id >= 0; --slot_id) {
-    for (int32_t bucket_id = num_buckets - 1; bucket_id >= 0; --bucket_id) {
+    for (int32_t bucket_id = PrimeTable::LargestBucketId(); bucket_id >= 0; --bucket_id) {
       // pick a random segment to start with in each eviction,
       // as segment_id does not imply any recency, and random selection should be fair enough
       int32_t segment_id = starting_segment_id;
       for (size_t num_seg_visited = 0; num_seg_visited < max_segment_to_consider;
            ++num_seg_visited, segment_id = GetNextSegmentForEviction(segment_id, db_ind)) {
-        const auto& bucket = db_table->prime.GetSegment(segment_id)->GetBucket(bucket_id);
+        const auto& segment = db_table->prime.GetSegment(segment_id);
+        if (unsigned(bucket_id) >= segment->num_buckets())
+          bucket_id = segment->num_buckets() - 1;
+        const auto& bucket = segment->GetBucket(bucket_id);
         if (bucket.IsEmpty() || !bucket.IsBusy(slot_id))
           continue;
 
