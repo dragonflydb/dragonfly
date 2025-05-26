@@ -1627,7 +1627,8 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     if (cid->opt_mask() & CO::STORE_LAST_KEY) {
       string_view name{cid->name()};
 
-      if (name == "GEORADIUSBYMEMBER" && args.size() >= 5) {
+      if ((name == "GEORADIUSBYMEMBER" && args.size() >= 5) ||
+          (name == "GEORADIUS" && args.size() >= 6)) {
         // key member radius .. STORE destkey
         string_view opt = ArgS(args, args.size() - 2);
         if (absl::EqualsIgnoreCase(opt, "STORE") || absl::EqualsIgnoreCase(opt, "STOREDIST")) {

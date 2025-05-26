@@ -2,9 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
+#include <cstdint>
 #define ENABLE_DASH_STATS
-
-#include "core/dash.h"
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/str_cat.h>
@@ -17,6 +16,7 @@
 #include "base/hash.h"
 #include "base/logging.h"
 #include "base/zipf_gen.h"
+#include "core/dash.h"
 #include "io/file.h"
 #include "io/line_reader.h"
 
@@ -77,7 +77,7 @@ struct Buf24 {
 };
 
 struct BasicDashPolicy {
-  enum { kSlotNum = 12, kBucketNum = 64, kStashBucketNum = 2 };
+  enum { kSlotNum = 12, kBucketNum = 64 };
   static constexpr bool kUseVersion = false;
 
   template <typename U> static void DestroyValue(const U&) {
@@ -143,7 +143,7 @@ constexpr size_t kSegSize = sizeof(Segment);
 
 class DashTest : public testing::Test {
  protected:
-  static void SetUpTestCase() {
+  static void SetUpTestSuite() {
     init_zmalloc_threadlocal(mi_heap_get_backing());
   }
 
@@ -286,7 +286,7 @@ TEST_F(DashTest, Segment) {
 }
 
 TEST_F(DashTest, SegmentFull) {
-  std::equal_to<Segment::Key_t> eq;
+  std::equal_to<> eq;
 
   for (Segment::Key_t key = 8000; key < 15000u; ++key) {
     uint64_t hash = dt_.DoHash(key);
@@ -323,6 +323,33 @@ TEST_F(DashTest, SegmentFull) {
   }
 }
 
+TEST_F(DashTest, FirstStash) {
+  constexpr unsigned kRegularCapacity = Segment::kBucketNum * Segment::kSlotNum;
+
+  unsigned less_seventy = 0;
+  for (unsigned j = 0; j < 100; ++j) {
+    unsigned num_items = 0;
+    for (unsigned i = 0; i < 1000; ++i) {
+      uint64_t key = i + j * 2000;
+      uint64_t hash = dt_.DoHash(key);
+      auto [it, inserted] = segment_.Insert(key, 0, hash, equal_to<>{});
+      ASSERT_TRUE(inserted);
+      if (it.index > Segment::kBucketNum) {  // stash iterator
+        break;
+      }
+      ++num_items;
+    }
+    segment_.Clear();
+
+    // With high probability, we can expect 66% of the keys added without stashes.
+    ASSERT_GT(num_items, kRegularCapacity * 0.66);
+    if (num_items < kRegularCapacity * 0.7) {
+      ++less_seventy;
+    }
+  }
+  LOG(INFO) << "Less than 70% of keys in regular buckets: " << less_seventy;
+}
+
 TEST_F(DashTest, Split) {
   // fills segment with maximum keys that must reside in bucket id 0.
   set<Segment::Key_t> keys = FillSegment(0);
@@ -345,16 +372,6 @@ TEST_F(DashTest, Split) {
   EXPECT_EQ(s2.SlowSize(), sum[1]);
   EXPECT_EQ(keys.size(), sum[0] + sum[1]);
   EXPECT_EQ(6 * Segment::kSlotNum, keys.size());
-}
-
-TEST_F(DashTest, Merge) {
-  set<Segment::Key_t> keys = FillSegment(0);
-  Segment s2{2};  // segment with local depth 2.
-
-  segment_.Split(&UInt64Policy::HashFn, &s2);
-  ASSERT_EQ(segment_.SlowSize() + s2.SlowSize(), keys.size());
-  segment_.MoveFrom(&UInt64Policy::HashFn, &s2);
-  EXPECT_EQ(segment_.SlowSize(), keys.size());
 }
 
 TEST_F(DashTest, BumpUp) {
@@ -652,7 +669,7 @@ struct TestEvictionPolicy {
   void RecordSplit(Dash64::Segment_t*) {
   }
 
-  unsigned Evict(const Dash64::HotspotBuckets& hotb, Dash64* me) const {
+  unsigned Evict(const Dash64::HotBuckets& hotb, Dash64* me) const {
     if (!evict_enabled)
       return 0;
 
@@ -759,6 +776,9 @@ TEST_F(DashTest, Version) {
   EXPECT_EQ(5, it.GetVersion());
 
   dt.Clear();
+  ASSERT_EQ(0, dt.size());
+  ASSERT_EQ(2, dt.unique_segments());
+  ASSERT_EQ(136, dt.bucket_count());
   constexpr int kNum = 68000;
   for (int i = 0; i < kNum; ++i) {
     auto it = dt.Insert(i, 0).first;
@@ -820,7 +840,7 @@ struct A {
   }
 
   A& operator=(const A&) = delete;
-  A& operator=(A&& o) {
+  A& operator=(A&& o) noexcept {
     o.moved = o.moved + 1;
     a = o.a;
     o.a = -1;
@@ -968,8 +988,8 @@ struct SimpleEvictPolicy {
   // Required interface in case can_gc is true
   // returns number of items evicted from the table.
   // 0 means - nothing has been evicted.
-  unsigned Evict(const U64Dash::HotspotBuckets& hotb, U64Dash* me) {
-    constexpr unsigned kBucketNum = U64Dash::HotspotBuckets::kNumBuckets;
+  unsigned Evict(const U64Dash::HotBuckets& hotb, U64Dash* me) {
+    constexpr unsigned kBucketNum = U64Dash::HotBuckets::kNumBuckets;
 
     uint32_t bid = hotb.key_hash % kBucketNum;
 
@@ -1010,7 +1030,7 @@ struct ShiftRightPolicy {
   void RecordSplit(U64Dash::Segment_t* segment) {
   }
 
-  unsigned Evict(const U64Dash::HotspotBuckets& hotb, U64Dash* me) {
+  unsigned Evict(const U64Dash::HotBuckets& hotb, U64Dash* me) {
     constexpr unsigned kNumStashBuckets = ABSL_ARRAYSIZE(hotb.probes.by_type.stash_buckets);
 
     unsigned stash_pos = hotb.key_hash % kNumStashBuckets;

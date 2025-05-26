@@ -92,7 +92,13 @@ auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> R
     }
 
     if (resultc.first == INPUT_PENDING) {
-      DCHECK(str.empty());
+      if (!str.empty()) {
+        LOG(DFATAL) << "Did not consume all input: "
+                    << absl::CHexEscape({reinterpret_cast<const char*>(str.data()), str.size()})
+                    << ", state: " << int(state_) << " smallbuf: "
+                    << absl::CHexEscape(
+                           {reinterpret_cast<const char*>(small_buf_.data()), small_len_});
+      }
       StashState(res);
     }
     return resultc.first;
@@ -281,7 +287,7 @@ auto RedisParser::ParseLen(Buffer str, int64_t* res) -> ResultConsumed {
     return {BAD_ARRAYLEN, consumed};
   }
 
-  // Skip the first character and 2 last ones (\r\n).
+  // Skip 2 last characters (\r\n).
   string_view len_token{s, size_t(pos - 1 - s)};
   bool success = absl::SimpleAtoi(len_token, res);
 
@@ -289,7 +295,9 @@ auto RedisParser::ParseLen(Buffer str, int64_t* res) -> ResultConsumed {
     return ResultConsumed{OK, consumed};
   }
 
-  LOG(WARNING) << "Failed to parse len " << len_token;
+  LOG(ERROR) << "Failed to parse len " << absl::CHexEscape(len_token) << " "
+             << absl::CHexEscape(string_view{reinterpret_cast<const char*>(str.data()), str.size()})
+             << " " << consumed << " " << int(s == small_buf_.data());
   return ResultConsumed{BAD_ARRAYLEN, consumed};
 }
 

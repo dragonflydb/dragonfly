@@ -40,7 +40,7 @@ func parseStrings(file io.Reader) (out []interface{}, err error) {
 	return
 }
 
-func parseRecords(filename string, cb func(Record) bool) error {
+func parseRecords(filename string, cb func(Record) bool, ignoreErrors bool) error {
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
@@ -69,7 +69,12 @@ func parseRecords(filename string, cb func(Record) bool) error {
 		rec.values, err = parseStrings(reader)
 		if err != nil {
 			log.Printf("Could not parse %vth record", recordNum)
-			return err
+			if !ignoreErrors {
+				return err
+			}
+			log.Printf("Ignoring parse error and continuing")
+			recordNum++
+			continue
 		}
 
 		if !cb(rec) {

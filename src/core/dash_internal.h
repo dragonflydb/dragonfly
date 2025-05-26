@@ -13,6 +13,7 @@
 #include <cstring>
 #include <type_traits>
 
+#include "base/pmr/memory_resource.h"
 #include "core/sse_port.h"
 
 namespace dfly {
@@ -127,15 +128,6 @@ template <unsigned NUM_SLOTS> class BucketBase {
 
   unsigned Size() const {
     return slotb_.Size();
-  }
-
-  // Returns -1 if no free slots found or smallest slot index
-  int FindEmptySlot() const {
-    if (IsFull()) {
-      return -1;
-    }
-
-    return slotb_.FindEmptySlot();
   }
 
   void Delete(SlotId sid) {
@@ -322,6 +314,19 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
       this->SetHash(slot, meta_hash, probe);
     }
 
+    // Returns slot id if insertion is successful, -1 if no free slots are found.
+    template <typename U, typename V>
+    int TryInsertToBucket(U&& key, V&& value, uint8_t meta_hash, bool probe) {
+      if (this->IsFull()) {
+        return -1;  // no free space in the bucket.
+      }
+
+      int slot = this->slotb_.FindEmptySlot();
+      assert(slot >= 0);
+      Insert(slot, std::forward<U>(key), std::forward<V>(value), meta_hash, probe);
+      return slot;
+    }
+
     template <typename Pred> SlotId FindByFp(uint8_t fp_hash, bool probe, Pred&& pred) const;
 
     bool ShiftRight();
@@ -381,16 +386,14 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
     size_t stash_overflow_probes = 0;
   };
 
-  /* number of normal buckets in one segment*/
-  static constexpr PhysicalBid kTotalBuckets = kBucketNum + kStashBucketNum;
-
   static constexpr size_t kFpMask = (1 << kFingerBits) - 1;
 
   using Value_t = _Value;
   using Key_t = _Key;
   using Hash_t = uint64_t;
 
-  explicit Segment(size_t depth) : local_depth_(depth) {
+  explicit Segment(size_t depth, PMR_NS::memory_resource* mr = nullptr)
+      : local_depth_(depth), mr_(mr) {
   }
 
   // Returns (iterator, true) if insert succeeds,
@@ -400,14 +403,6 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
   template <typename HashFn> void Split(HashFn&& hfunc, Segment* dest);
 
-  // Moves all the entries from 'src' segment to this segment.
-  // The calling code must ensure first that we actually can move all the key and we do not
-  // have hot, overfilled buckets that will prevent us from moving all the keys.
-  // If MoveFrom fails, the dashtable will abort, assert and will be left in an inconsistent state.
-  // If MoveFrom succeeds, the src segment will be left empty but with inconsistent metadata, so
-  // should it should be deallocated or reinitialized.
-  template <typename HashFn> void MoveFrom(HashFn&& hfunc, Segment* src);
-
   void Delete(const Iterator& it, Hash_t key_hash);
 
   void Clear();  // clears the segment.
@@ -416,6 +411,10 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
   static constexpr size_t capacity() {
     return kMaxSize;
+  }
+
+  static constexpr bool OutOfRange(PhysicalBid bid) {
+    return bid >= kBucketNum + kStashBucketNum;
   }
 
   size_t local_depth() const {
@@ -549,6 +548,10 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   // buckets.
   template <typename HFunc> unsigned UnloadStash(HFunc&& hfunc);
 
+  unsigned num_buckets() const {
+    return kBucketNum + kStashBucketNum;
+  }
+
  private:
   static_assert(sizeof(Iterator) == 2);
 
@@ -574,30 +577,19 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   /*both clear this bucket and its neighbor bucket*/
   void RemoveStashReference(unsigned stash_pos, Hash_t key_hash);
 
-  // Returns slot id if insertion is successful, -1 if no free slots are found.
-  template <typename U, typename V>
-  int TryInsertToBucket(unsigned bidx, U&& key, V&& value, uint8_t meta_hash, bool probe) {
-    auto& b = bucket_[bidx];
-    auto slot = b.FindEmptySlot();
-    assert(slot < int(kSlotNum));
-    if (slot < 0) {
-      return -1;
-    }
-
-    b.Insert(slot, std::forward<U>(key), std::forward<V>(value), meta_hash, probe);
-
-    return slot;
-  }
-
   // returns a valid iterator if succeeded.
   Iterator TryMoveFromStash(unsigned stash_id, unsigned stash_slot_id, Hash_t key_hash);
 
+  const static unsigned kTotalBuckets = kBucketNum + kStashBucketNum;
+  static_assert(kTotalBuckets < 0xFF);
+
   Bucket bucket_[kTotalBuckets];
   uint8_t local_depth_;
+  PMR_NS::memory_resource* mr_ = nullptr;
 
  public:
   static constexpr size_t kBucketSz = sizeof(Bucket);
-  static constexpr size_t kMaxSize = kTotalBuckets * kSlotNum;
+  static constexpr size_t kMaxSize = (kBucketNum + kStashBucketNum) * kSlotNum;
   static constexpr double kTaxSize =
       (double(sizeof(Segment)) / kMaxSize) - sizeof(Key_t) - sizeof(Value_t);
 
@@ -637,7 +629,7 @@ class DashTableBase {
   }
 
   size_t size_ = 0;
-  uint32_t unique_segments_;
+  uint32_t unique_segments_ = 0, bucket_count_ = 0;
   uint8_t initial_depth_;
   uint8_t global_depth_;
 };  // DashTableBase
@@ -1052,12 +1044,13 @@ auto Segment<Key, Value, Policy>::TryMoveFromStash(unsigned stash_id, unsigned s
   auto& key = Key(stash_bid, stash_slot_id);
   auto& value = Value(stash_bid, stash_slot_id);
 
-  int reg_slot = TryInsertToBucket(bid, std::forward<Key_t>(key), std::forward<Value_t>(value),
-                                   hash_fp, false);
+  int reg_slot = bucket_[bid].TryInsertToBucket(std::forward<Key_t>(key),
+                                                std::forward<Value_t>(value), hash_fp, false);
+
   if (reg_slot < 0) {
     bid = NextBid(bid);
-    reg_slot = TryInsertToBucket(bid, std::forward<Key_t>(key), std::forward<Value_t>(value),
-                                 hash_fp, true);
+    reg_slot = bucket_[bid].TryInsertToBucket(std::forward<Key_t>(key),
+                                              std::forward<Value_t>(value), hash_fp, true);
   }
 
   if (reg_slot >= 0) {
@@ -1300,37 +1293,6 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
 }
 
 template <typename Key, typename Value, typename Policy>
-template <typename HFunc>
-void Segment<Key, Value, Policy>::MoveFrom(HFunc&& hfunc, Segment* src) {
-  for (unsigned bid = 0; bid < kTotalBuckets; ++bid) {
-    Bucket& src_bucket = src->bucket_[bid];
-    bool success = true;
-    auto cb = [&, hfunc = std::move(hfunc)](Bucket* bucket, unsigned slot, bool probe) {
-      auto& key = bucket->key[slot];
-      Hash_t hash = hfunc(key);
-
-      auto it = this->InsertUniq(std::forward<Key_t>(key),
-                                 std::forward<Value_t>(bucket->value[slot]), hash, false);
-      (void)it;
-      assert(it.index != kNanBid);
-      if (it.index == kNanBid) {
-        success = false;
-        return;
-      }
-
-      if constexpr (kUseVersion) {
-        // Update the version in the destination bucket.
-        this->bucket_[it.index].UpdateVersion(bucket->GetVersion());
-      }
-    };
-
-    src_bucket.ForEachSlot(std::move(cb));
-    if (!success)
-      break;
-  }
-}
-
-template <typename Key, typename Value, typename Policy>
 int Segment<Key, Value, Policy>::MoveToOther(bool own_items, unsigned from_bid, unsigned to_bid) {
   auto& src = bucket_[from_bid];
   uint32_t mask = src.GetProbe(!own_items);
@@ -1339,9 +1301,9 @@ int Segment<Key, Value, Policy>::MoveToOther(bool own_items, unsigned from_bid, 
   }
 
   int src_slot = __builtin_ctz(mask);
-  int dst_slot =
-      TryInsertToBucket(to_bid, std::forward<Key_t>(src.key[src_slot]),
-                        std::forward<Value_t>(src.value[src_slot]), src.Fp(src_slot), own_items);
+  int dst_slot = bucket_[to_bid].TryInsertToBucket(std::forward<Key_t>(src.key[src_slot]),
+                                                   std::forward<Value_t>(src.value[src_slot]),
+                                                   src.Fp(src_slot), own_items);
   if (dst_slot < 0)
     return -1;
 
@@ -1389,17 +1351,17 @@ auto Segment<Key, Value, Policy>::InsertUniq(U&& key, V&& value, Hash_t key_hash
     probe = true;
   }
 
-  int slot = insert_first->FindEmptySlot();
-  if (slot >= 0) {
-    insert_first->Insert(slot, std::forward<U>(key), std::forward<V>(value), meta_hash, probe);
+  int slot = insert_first->TryInsertToBucket(std::forward<U>(key), std::forward<V>(value),
+                                             meta_hash, probe);
 
+  if (slot >= 0) {
     return Iterator{PhysicalBid(insert_first - bucket_), uint8_t(slot)};
   }
 
   if (!spread) {
-    int slot = neighbor.FindEmptySlot();
+    int slot =
+        neighbor.TryInsertToBucket(std::forward<U>(key), std::forward<V>(value), meta_hash, true);
     if (slot >= 0) {
-      neighbor.Insert(slot, std::forward<U>(key), std::forward<V>(value), meta_hash, true);
       return Iterator{nid, uint8_t(slot)};
     }
   }
@@ -1420,8 +1382,9 @@ auto Segment<Key, Value, Policy>::InsertUniq(U&& key, V&& value, Hash_t key_hash
   // we balance stash fill rate  by starting from y % STASH_BUCKET_NUM.
   for (unsigned i = 0; i < kStashBucketNum; ++i) {
     unsigned stash_pos = (bid + i) % kStashBucketNum;
-    int stash_slot = TryInsertToBucket(kBucketNum + stash_pos, std::forward<U>(key),
-                                       std::forward<V>(value), meta_hash, false);
+
+    int stash_slot = bucket_[kBucketNum + stash_pos].TryInsertToBucket(
+        std::forward<U>(key), std::forward<V>(value), meta_hash, false);
     if (stash_slot >= 0) {
       target.SetStashPtr(stash_pos, meta_hash, &neighbor);
       return Iterator{PhysicalBid(kBucketNum + stash_pos), uint8_t(stash_slot)};
@@ -1603,18 +1566,14 @@ size_t Segment<Key, Value, Policy>::SlowSize() const {
 template <typename Key, typename Value, typename Policy>
 auto Segment<Key, Value, Policy>::FindValidStartingFrom(PhysicalBid bid, unsigned slot) const
     -> Iterator {
-  uint32_t mask = bucket_[bid].GetBusy();
-  mask >>= slot;
-  if (mask)
-    return Iterator(bid, slot + __builtin_ctz(mask));
-
-  ++bid;
   while (bid < kTotalBuckets) {
     uint32_t mask = bucket_[bid].GetBusy();
+    mask >>= slot;
     if (mask) {
-      return Iterator(bid, __builtin_ctz(mask));
+      return Iterator(bid, slot + __builtin_ctz(mask));
     }
     ++bid;
+    slot = 0;
   }
   return Iterator{};
 }
