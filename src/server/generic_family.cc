@@ -33,6 +33,7 @@ extern "C" {
 #include "server/set_family.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "util/fibers/fibers.h"
 #include "util/fibers/future.h"
 #include "util/varz.h"
 
@@ -653,7 +654,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
 
   const auto start = absl::Now();
   // Don't allow it to monopolize cpu time.
-  const absl::Duration timeout = absl::Milliseconds(10);
+  const absl::Duration timeout = absl::Milliseconds(2);
 
   do {
     cur = prime_table->Traverse(
@@ -670,7 +671,7 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
 
   EngineShardSet* ess = shard_set;
   unsigned shard_count = ess->size();
-  constexpr uint64_t kMaxScanTimeMs = 100;
+  constexpr uint64_t kMaxScanTimeMs = 25;
 
   // Dash table returns a cursor with its right byte empty. We will use it
   // for encoding shard index. For now scan has a limitation of 255 shards.
@@ -683,10 +684,6 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
   cursor >>= 10;
   DbContext db_cntx{cntx->ns, cntx->conn_state.db_index, GetCurrentTimeMs()};
 
-  bool should_process_local = false;
-  std::optional<ShardId> deferred_local_shard_id_opt;
-  uint64_t deferred_local_shard_internal_cursor = 0;
-
   do {
     auto cb = [&] {
       OpArgs op_args{EngineShard::tlocal(), nullptr, db_cntx};
@@ -694,37 +691,17 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
     };
 
     // Avoid deadlocking, if called from shard queue script
-    EngineShard* const current_thread_shard_context = EngineShard::tlocal();
-    if (current_thread_shard_context && current_thread_shard_context->shard_id() == sid) {
-      if (!should_process_local) {  // Defer only once
-        should_process_local = true;
-        deferred_local_shard_id_opt = sid;
-        deferred_local_shard_internal_cursor =
-            cursor;  // Save current internal cursor for this local shard
-        cursor = 0;  // Set to 0 to ensure 'if (cursor == 0)' check passes and sid increments
-      }
-      // If already should_process_local, it means we've deferred it. This iteration effectively
-      // skips it. The cursor = 0 from the first deferral ensures sid would have incremented.
+    if (EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == sid) {
+      cb();
+      util::ThisFiber::Yield();
     } else {
       ess->Await(sid, cb);
     }
 
     if (cursor == 0) {
       ++sid;
-      if (unsigned(sid) ==
-          shard_count) {  // All non-local shards (or all if no local context) processed in the loop
-        if (should_process_local && deferred_local_shard_id_opt.has_value()) {
-          // Time to process the deferred local shard
-          cursor = deferred_local_shard_internal_cursor;  // Restore the correct internal cursor
-          // cb() will use EngineShard::tlocal() which is the correct local shard context,
-          // and the now-restored 'cursor'.
-          cb();
-          // After cb(), 'cursor' is updated by the local OpScan.
-          // Set 'sid' to the actual local shard's ID for correct return value construction.
-          sid = deferred_local_shard_id_opt.value();
-        }
+      if (unsigned(sid) == shard_count)
         break;
-      }
     }
 
     // Break after kMaxScanTimeMs.
