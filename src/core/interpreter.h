@@ -116,6 +116,8 @@ class Interpreter {
 
   void RunGC();
 
+  void UpdateGCParameters();
+
   // fp must point to buffer with at least 41 chars.
   // fp[40] will be set to '\0'.
   static void FuncSha1(std::string_view body, char* fp);
@@ -160,6 +162,9 @@ class InterpreterManager {
     uint64_t used_bytes = 0;
     uint64_t interpreter_cnt = 0;
     uint64_t blocked_cnt = 0;
+    uint64_t force_gc_calls = 0;
+    uint64_t gc_work_time_ns = 0;
+    uint64_t interpreter_return = 0;
   };
 
  public:

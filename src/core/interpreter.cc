@@ -7,6 +7,7 @@
 #include <absl/base/casts.h>
 #include <absl/container/fixed_array.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_split.h>
 #include <absl/time/clock.h>
 #include <mimalloc.h>
 #include <openssl/evp.h>
@@ -17,6 +18,7 @@
 #include <regex>
 #include <set>
 
+#include "base/flags.h"
 #include "core/interpreter_polyfill.h"
 
 extern "C" {
@@ -33,6 +35,83 @@ LUALIB_API int(luaopen_bit)(lua_State* L);
 #include <absl/strings/str_format.h>
 
 #include "base/logging.h"
+
+struct LuaGcFlag {
+  struct GenArgs {
+    int minormul = 20;
+    int majormul = 100;
+  };
+  struct IncArgs {
+    int pause = 200;
+    int stepmul = 100;
+    int stepsize = 13;
+  };
+
+  LuaGcFlag() : LuaGcFlag(GenArgs()) {
+  }
+
+  LuaGcFlag(GenArgs gen_args) : type(Gen) {
+    args.gen = gen_args;
+  }
+
+  LuaGcFlag(IncArgs inc_args) : type(Inc) {
+    args.inc = inc_args;
+  }
+
+  enum { Gen, Inc } type = Gen;
+
+  union Args {
+    GenArgs gen;
+    IncArgs inc;
+    Args() {
+      gen = {};
+    }
+  } args;
+};
+
+ABSL_FLAG(LuaGcFlag, luagc, LuaGcFlag{},
+          "Specifies Lua garabage collector preferences. "
+          "Format should be 'inc/200/100/13' or 'gen/20/100' where 'inc' and 'gen' are types of "
+          "GC, numbers are parameters."
+          "For more information check https://www.lua.org/manual/5.4/manual.html#2.5");
+
+ABSL_FLAG(uint64_t, lua_mem_usage_force_gc, 10000000,
+          "Specifies Lua interpreter's per thread memory limit in bytes after which the GC will be "
+          "called forcefully.");
+
+static bool AbslParseFlag(std::string_view in, LuaGcFlag* flag, std::string* err) {
+  std::vector<std::string_view> parts = absl::StrSplit(in, '/');
+  if (parts.size() == 3) {
+    if (parts[0] == "gen") {
+      LuaGcFlag::GenArgs args;
+      if (absl::SimpleAtoi(parts[1], &args.minormul) &&
+          absl::SimpleAtoi(parts[2], &args.majormul)) {
+        *flag = LuaGcFlag(args);
+        return true;
+      }
+    }
+  } else if (parts.size() == 4) {
+    if (parts[0] == "inc") {
+      LuaGcFlag::IncArgs args;
+      if (absl::SimpleAtoi(parts[1], &args.pause) && absl::SimpleAtoi(parts[2], &args.stepmul) &&
+          absl::SimpleAtoi(parts[3], &args.stepsize)) {
+        *flag = LuaGcFlag(args);
+        return true;
+      }
+    }
+  }
+  *err = absl::StrCat("Invalid luagc flag parameters");
+  return false;
+}
+
+static std::string AbslUnparseFlag(const LuaGcFlag& flag) {
+  if (flag.type == LuaGcFlag::Gen) {
+    return absl::StrCat("gen", "/", flag.args.gen.minormul, "/", flag.args.gen.majormul);
+  } else {
+    return absl::StrCat("inc", "/", flag.args.inc.pause, "/", flag.args.inc.stepmul, "/",
+                        flag.args.inc.stepsize);
+  }
+}
 
 namespace dfly {
 using namespace std;
@@ -584,6 +663,8 @@ Interpreter::Interpreter() {
   /* Finally set the table as 'redis' global var. */
   lua_setglobal(lua_, "redis");
   CHECK(lua_checkstack(lua_, 64));
+
+  UpdateGCParameters();
 }
 
 Interpreter::~Interpreter() {
@@ -905,6 +986,15 @@ void Interpreter::RunGC() {
   lua_gc(lua_, LUA_GCCOLLECT);
 }
 
+void Interpreter::UpdateGCParameters() {
+  auto gc = absl::GetFlag(FLAGS_luagc);
+  if (gc.type == LuaGcFlag::Gen) {
+    lua_gc(lua_, LUA_GCGEN, gc.args.gen.minormul, gc.args.gen.majormul);
+  } else {
+    lua_gc(lua_, LUA_GCINC, gc.args.inc.pause, gc.args.inc.stepmul, gc.args.inc.stepsize);
+  }
+}
+
 std::optional<absl::FixedArray<std::string_view, 4>> Interpreter::PrepareArgs() {
   int argc = lua_gettop(lua_);
   /* Require at least one argument */
@@ -1085,6 +1175,10 @@ InterpreterManager::Stats& InterpreterManager::Stats::operator+=(const Stats& ot
   this->interpreter_cnt += other.interpreter_cnt;
   this->blocked_cnt += other.blocked_cnt;
 
+  this->force_gc_calls += other.force_gc_calls;
+  this->gc_work_time_ns += other.gc_work_time_ns;
+  this->interpreter_return += other.interpreter_return;
+
   return *this;
 }
 
@@ -1109,6 +1203,16 @@ Interpreter* InterpreterManager::Get() {
 }
 
 void InterpreterManager::Return(Interpreter* ir) {
+  static const uint64_t max_memory_usage = absl::GetFlag(FLAGS_lua_mem_usage_force_gc);
+  using namespace chrono;
+  ++tl_stats().interpreter_return;
+  if (tl_stats().used_bytes > max_memory_usage) {
+    ++tl_stats().force_gc_calls;
+    auto before = steady_clock::now();
+    ir->RunGC();
+    auto after = steady_clock::now();
+    tl_stats().gc_work_time_ns += duration_cast<nanoseconds>(after - before).count();
+  }
   if (ir >= storage_.data() && ir < storage_.data() + storage_.size()) {
     available_.push_back(ir);
     waker_.notify();
