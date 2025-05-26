@@ -3134,3 +3134,79 @@ async def test_replicate_hset_with_expiry(df_factory: DflyInstanceFactory):
 
     assert "name" in result
     assert result["name"] == "1234"
+
+
+async def test_partial_sync_error_handler(df_factory: DflyInstanceFactory):
+    master = df_factory.create()
+    replica_a = df_factory.create()
+    replica_b = df_factory.create()
+
+    df_factory.start_all([replica_a, replica_b])
+
+    master.start()
+
+    ca = await replica_a.client()
+    await ca.execute_command(f"REPLICAOF localhost {master.port}")
+    cb = await replica_b.client()
+    await cb.execute_command(f"REPLICAOF localhost {master.port}")
+
+    cm = await master.client()
+    await check_all_replicas_finished([ca, cb], cm)
+
+    client_map = {master: cm, replica_a: ca, replica_b: cb}
+
+    async def select_replica(current_master):
+        max_offset = -1
+        winner = loser = None
+        for instance, cl in client_map.items():
+            if instance == current_master:
+                continue
+            _, offsets = await cl.execute_command("DEBUG REPLICA OFFSET")
+            total_offset = sum(int(o) for o in offsets)
+            if total_offset > max_offset:
+                if winner:
+                    loser = winner
+                winner = instance
+                max_offset = total_offset
+        if not loser:
+            loser = next(
+                instance
+                for instance in client_map.keys()
+                if instance not in {current_master, winner}
+            )
+        return winner, loser
+
+    curr = master
+    for n in range(20):
+        logging.debug(f"begin iteration {n}")
+        to_promote, lagging = await select_replica(curr)
+
+        assert to_promote is not None, "unable to select replica to promote"
+        assert lagging is not None, "unable to select second replica to follow new master"
+
+        old, curr = curr, to_promote
+
+        promoted_cl = client_map[curr]
+        lagging_cl = client_map[lagging]
+
+        await promoted_cl.execute_command("REPLICAOF NO ONE")
+        await lagging_cl.execute_command(f"REPLICAOF localhost {curr.port}")
+
+        for x in range(100):
+            await promoted_cl.set(f"key-{x}", f"value-{x}")
+
+        old_client = client_map[old]
+        await old_client.execute_command(f"REPLICAOF localhost {curr.port}")
+        await check_all_replicas_finished([old_client, lagging_cl], promoted_cl)
+
+    replica_a.stop()
+    matches_a = replica_a.find_in_logs(
+        "ReportError: State not recoverable: Partial sync was unsuccessful"
+    )
+
+    master.stop()
+    matches_b = master.find_in_logs(
+        "ReportError: State not recoverable: Partial sync was unsuccessful"
+    )
+
+    assert matches_a or matches_b
