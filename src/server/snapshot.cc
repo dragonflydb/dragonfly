@@ -115,9 +115,6 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
   VLOG(1) << "FinalizeJournalStream";
   DCHECK(db_slice_->shard_owner()->IsMyThread());
   if (!journal_cb_id_) {  // Finalize only once.
-    // In case of incremental snapshotting in StartIncremental, if an error is encountered,
-    // journal_cb_id_ may not be set, but the snapshot fiber is still running.
-    snapshot_fb_.JoinIfNeeded();
     return;
   }
   uint32_t cb_id = journal_cb_id_;
@@ -236,7 +233,6 @@ void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
         std::make_error_code(errc::state_not_recoverable),
         absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
                      " was dropped from the buffer. Current lsn=", journal->GetLsn()));
-    FinalizeJournalStream(true);
   }
 }
 
