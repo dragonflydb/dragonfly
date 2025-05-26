@@ -92,7 +92,9 @@ auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> R
     }
 
     if (resultc.first == INPUT_PENDING) {
-      if (!str.empty()) {
+      // TODO: we still need to handle ':' and ',' cases for client mode
+      // to consume them completely.
+      if (server_mode_ && !str.empty()) {
         LOG(DFATAL) << "Did not consume all input: "
                     << absl::CHexEscape({reinterpret_cast<const char*>(str.data()), str.size()})
                     << ", state: " << int(state_) << " smallbuf: "
@@ -466,7 +468,7 @@ auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
     std::string_view tok{s, size_t((eol - s) - 1)};
 
     if (eol[-1] != '\r' || !absl::SimpleAtod(tok, &dval))
-      return {BAD_INT, 0};
+      return {BAD_DOUBLE, 0};
 
     cached_expr_->emplace_back(RespExpr::DOUBLE);
     cached_expr_->back().u = dval;
