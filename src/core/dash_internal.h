@@ -13,6 +13,7 @@
 #include <cstring>
 #include <type_traits>
 
+#include "base/pmr/memory_resource.h"
 #include "core/sse_port.h"
 
 namespace dfly {
@@ -127,15 +128,6 @@ template <unsigned NUM_SLOTS> class BucketBase {
 
   unsigned Size() const {
     return slotb_.Size();
-  }
-
-  // Returns -1 if no free slots found or smallest slot index
-  int FindEmptySlot() const {
-    if (IsFull()) {
-      return -1;
-    }
-
-    return slotb_.FindEmptySlot();
   }
 
   void Delete(SlotId sid) {
@@ -322,6 +314,19 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
       this->SetHash(slot, meta_hash, probe);
     }
 
+    // Returns slot id if insertion is successful, -1 if no free slots are found.
+    template <typename U, typename V>
+    int TryInsertToBucket(U&& key, V&& value, uint8_t meta_hash, bool probe) {
+      if (this->IsFull()) {
+        return -1;  // no free space in the bucket.
+      }
+
+      int slot = this->slotb_.FindEmptySlot();
+      assert(slot >= 0);
+      Insert(slot, std::forward<U>(key), std::forward<V>(value), meta_hash, probe);
+      return slot;
+    }
+
     template <typename Pred> SlotId FindByFp(uint8_t fp_hash, bool probe, Pred&& pred) const;
 
     bool ShiftRight();
@@ -387,7 +392,8 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   using Key_t = _Key;
   using Hash_t = uint64_t;
 
-  explicit Segment(size_t depth) : local_depth_(depth) {
+  explicit Segment(size_t depth, PMR_NS::memory_resource* mr = nullptr)
+      : local_depth_(depth), mr_(mr) {
   }
 
   // Returns (iterator, true) if insert succeeds,
@@ -571,21 +577,6 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   /*both clear this bucket and its neighbor bucket*/
   void RemoveStashReference(unsigned stash_pos, Hash_t key_hash);
 
-  // Returns slot id if insertion is successful, -1 if no free slots are found.
-  template <typename U, typename V>
-  int TryInsertToBucket(unsigned bidx, U&& key, V&& value, uint8_t meta_hash, bool probe) {
-    auto& b = bucket_[bidx];
-    auto slot = b.FindEmptySlot();
-    assert(slot < int(kSlotNum));
-    if (slot < 0) {
-      return -1;
-    }
-
-    b.Insert(slot, std::forward<U>(key), std::forward<V>(value), meta_hash, probe);
-
-    return slot;
-  }
-
   // returns a valid iterator if succeeded.
   Iterator TryMoveFromStash(unsigned stash_id, unsigned stash_slot_id, Hash_t key_hash);
 
@@ -594,6 +585,7 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
   Bucket bucket_[kTotalBuckets];
   uint8_t local_depth_;
+  PMR_NS::memory_resource* mr_ = nullptr;
 
  public:
   static constexpr size_t kBucketSz = sizeof(Bucket);
@@ -1052,12 +1044,13 @@ auto Segment<Key, Value, Policy>::TryMoveFromStash(unsigned stash_id, unsigned s
   auto& key = Key(stash_bid, stash_slot_id);
   auto& value = Value(stash_bid, stash_slot_id);
 
-  int reg_slot = TryInsertToBucket(bid, std::forward<Key_t>(key), std::forward<Value_t>(value),
-                                   hash_fp, false);
+  int reg_slot = bucket_[bid].TryInsertToBucket(std::forward<Key_t>(key),
+                                                std::forward<Value_t>(value), hash_fp, false);
+
   if (reg_slot < 0) {
     bid = NextBid(bid);
-    reg_slot = TryInsertToBucket(bid, std::forward<Key_t>(key), std::forward<Value_t>(value),
-                                 hash_fp, true);
+    reg_slot = bucket_[bid].TryInsertToBucket(std::forward<Key_t>(key),
+                                              std::forward<Value_t>(value), hash_fp, true);
   }
 
   if (reg_slot >= 0) {
@@ -1308,9 +1301,9 @@ int Segment<Key, Value, Policy>::MoveToOther(bool own_items, unsigned from_bid, 
   }
 
   int src_slot = __builtin_ctz(mask);
-  int dst_slot =
-      TryInsertToBucket(to_bid, std::forward<Key_t>(src.key[src_slot]),
-                        std::forward<Value_t>(src.value[src_slot]), src.Fp(src_slot), own_items);
+  int dst_slot = bucket_[to_bid].TryInsertToBucket(std::forward<Key_t>(src.key[src_slot]),
+                                                   std::forward<Value_t>(src.value[src_slot]),
+                                                   src.Fp(src_slot), own_items);
   if (dst_slot < 0)
     return -1;
 
@@ -1358,17 +1351,17 @@ auto Segment<Key, Value, Policy>::InsertUniq(U&& key, V&& value, Hash_t key_hash
     probe = true;
   }
 
-  int slot = insert_first->FindEmptySlot();
-  if (slot >= 0) {
-    insert_first->Insert(slot, std::forward<U>(key), std::forward<V>(value), meta_hash, probe);
+  int slot = insert_first->TryInsertToBucket(std::forward<U>(key), std::forward<V>(value),
+                                             meta_hash, probe);
 
+  if (slot >= 0) {
     return Iterator{PhysicalBid(insert_first - bucket_), uint8_t(slot)};
   }
 
   if (!spread) {
-    int slot = neighbor.FindEmptySlot();
+    int slot =
+        neighbor.TryInsertToBucket(std::forward<U>(key), std::forward<V>(value), meta_hash, true);
     if (slot >= 0) {
-      neighbor.Insert(slot, std::forward<U>(key), std::forward<V>(value), meta_hash, true);
       return Iterator{nid, uint8_t(slot)};
     }
   }
@@ -1389,8 +1382,9 @@ auto Segment<Key, Value, Policy>::InsertUniq(U&& key, V&& value, Hash_t key_hash
   // we balance stash fill rate  by starting from y % STASH_BUCKET_NUM.
   for (unsigned i = 0; i < kStashBucketNum; ++i) {
     unsigned stash_pos = (bid + i) % kStashBucketNum;
-    int stash_slot = TryInsertToBucket(kBucketNum + stash_pos, std::forward<U>(key),
-                                       std::forward<V>(value), meta_hash, false);
+
+    int stash_slot = bucket_[kBucketNum + stash_pos].TryInsertToBucket(
+        std::forward<U>(key), std::forward<V>(value), meta_hash, false);
     if (stash_slot >= 0) {
       target.SetStashPtr(stash_pos, meta_hash, &neighbor);
       return Iterator{PhysicalBid(kBucketNum + stash_pos), uint8_t(stash_slot)};
