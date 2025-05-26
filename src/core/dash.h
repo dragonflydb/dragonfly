@@ -49,7 +49,7 @@ class DashTable : public detail::DashTableBase {
   using bucket_iterator = Iterator<false, true>;
   using Cursor = detail::DashCursor;
 
-  struct HotspotBuckets {
+  struct HotBuckets {
     static constexpr size_t kRegularBuckets = 4;
     static constexpr size_t kNumBuckets = kRegularBuckets + SegmentType::kStashBucketNum;
 
@@ -807,12 +807,12 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
     // try garbage collect or evict.
     if constexpr (EvictionPolicy::can_evict || EvictionPolicy::can_gc) {
       // Try gc.
-      uint8_t bid[HotspotBuckets::kRegularBuckets];
+      uint8_t bid[HotBuckets::kRegularBuckets];
       SegmentType::FillProbeArray(key_hash, bid);
-      HotspotBuckets hotspot;
+      HotBuckets hotspot;
       hotspot.key_hash = key_hash;
 
-      for (unsigned j = 0; j < HotspotBuckets::kRegularBuckets; ++j) {
+      for (unsigned j = 0; j < HotBuckets::kRegularBuckets; ++j) {
         hotspot.probes.by_type.regular_buckets[j] = bucket_iterator{this, target_seg_id, bid[j]};
       }
 
@@ -820,7 +820,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
         hotspot.probes.by_type.stash_buckets[i] =
             bucket_iterator{this, target_seg_id, uint8_t(Policy::kBucketNum + i), 0};
       }
-      hotspot.num_buckets = HotspotBuckets::kNumBuckets;
+      hotspot.num_buckets = HotBuckets::kNumBuckets;
 
       // The difference between gc and eviction is that gc can be applied even if
       // the table can grow since we throw away logically deleted items.
@@ -831,8 +831,8 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
         if (res) {
           // We succeeded to gc. Lets continue with the momentum.
           // In terms of API abuse it's an awful hack, just to see if it works.
-          /*unsigned start = (bid[HotspotBuckets::kNumBuckets - 1] + 1) % kLogicalBucketNum;
-          for (unsigned i = 0; i < HotspotBuckets::kNumBuckets; ++i) {
+          /*unsigned start = (bid[HotBuckets::kNumBuckets - 1] + 1) % kLogicalBucketNum;
+          for (unsigned i = 0; i < HotBuckets::kNumBuckets; ++i) {
             uint8_t id = (start + i) % kLogicalBucketNum;
             buckets.probes.arr[i] = bucket_iterator{this, target_seg_id, id};
           }
