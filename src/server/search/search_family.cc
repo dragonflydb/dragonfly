@@ -64,8 +64,6 @@ bool SendErrorIfOccurred(const ParseResult<T>& result, CmdArgParser* parser,
   return false;
 }
 
-static const set<string_view> kIgnoredOptions = {"WEIGHT", "SEPARATOR"};
-
 bool IsValidJsonPath(string_view path) {
   error_code ec;
   MakeJsonPathExpr(path, ec);
@@ -191,6 +189,11 @@ ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
   return true;
 }
 
+constexpr std::array<const std::string_view, 6> kIgnoredOptions = {
+    "UNF"sv, "NOSTEM"sv, "CASESENSITIVE"sv, "WITHSUFFIXTRIE"sv, "INDEXMISSING"sv, "INDEXEMPTY"sv};
+constexpr std::array<const std::string_view, 3> kIgnoredOptionsWithArg = {"WEIGHT"sv, "SEPARATOR"sv,
+                                                                          "PHONETIC"sv};
+
 // SCHEMA field [AS alias] type [flags...]
 ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
   auto& schema = index->schema;
@@ -237,15 +240,27 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
       auto flag = parser->TryMapNext("NOINDEX", search::SchemaField::NOINDEX, "SORTABLE",
                                      search::SchemaField::SORTABLE);
       if (!flag) {
+        std::string_view option = parser->Peek();
+        if (std::find(kIgnoredOptions.begin(), kIgnoredOptions.end(), option) !=
+            kIgnoredOptions.end()) {
+          LOG_IF(WARNING, option != "INDEXMISSING"sv && option != "INDEXEMPTY"sv)
+              << "Ignoring unsupported field option in FT.CREATE: " << option;
+          // Ignore these options
+          parser->Skip(1);
+          continue;
+        }
+        if (std::find(kIgnoredOptionsWithArg.begin(), kIgnoredOptionsWithArg.end(), option) !=
+            kIgnoredOptionsWithArg.end()) {
+          LOG(WARNING) << "Ignoring unsupported field option in FT.CREATE: " << option;
+          // Ignore these options with argument
+          parser->Skip(2);
+          continue;
+        }
         break;
       }
 
       flags |= *flag;
     }
-
-    // Skip all trailing ignored parameters
-    while (kIgnoredOptions.count(parser->Peek()) > 0)
-      parser->Skip(2);
 
     schema.fields[field] = {field_type, flags, string{field_alias}, params};
     schema.field_names[field_alias] = field;
