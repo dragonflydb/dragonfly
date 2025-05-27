@@ -2767,4 +2767,38 @@ TEST_F(SearchFamilyTest, JsonSetIndexesBug) {
   resp = Run({"FT.AGGREGATE", "index", "*", "GROUPBY", "1", "@text"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("text", "some text")));
 }
+
+TEST_F(SearchFamilyTest, IgnoredOptionsInFtCreate) {
+  Run({"HSET", "doc:1", "title", "Test Document"});
+
+  // Create an index with various options, some of which should be ignored
+  // INDEXMISSING and INDEXEMPTY are supported by default
+  auto resp = Run({"FT.CREATE",
+                   "idx",
+                   "ON",
+                   "HASH",
+                   "SCHEMA",
+                   "title",
+                   "TEXT",
+                   "UNF",
+                   "NOSTEM",
+                   "CASESENSITIVE",
+                   "WITHSUFFIXTRIE",
+                   "INDEXMISSING",
+                   "INDEXEMPTY",
+                   "WEIGHT",
+                   "1",
+                   "SEPARATOR",
+                   "|",
+                   "PHONETIC",
+                   "dm:en",
+                   "SORTABLE"});
+
+  // Check that the response is OK, indicating the index was created successfully
+  EXPECT_THAT(resp, "OK");
+
+  // Verify that the index was created correctly
+  resp = Run({"FT.SEARCH", "idx", "*"});
+  EXPECT_THAT(resp, AreDocIds("doc:1"));
+}
 }  // namespace dfly
