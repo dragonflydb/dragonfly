@@ -25,7 +25,7 @@ ConnectionContext::ConnectionContext(Connection* owner) : owner_(owner) {
   journal_emulated = false;
   paused = false;
   blocked = false;
-
+  subscriber = false;
   subscriptions = 0;
 }
 

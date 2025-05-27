@@ -14,6 +14,7 @@
 #include "core/heap_size.h"
 #include "facade/error.h"
 #include "util/fibers/proactor_base.h"
+#include "util/fibers/stacktrace.h"
 
 #ifdef __APPLE__
 #ifndef UIO_MAXIOV
@@ -99,6 +100,7 @@ void SinkReplyBuilder::CloseConnection() {
 }
 
 template <typename... Ts> void SinkReplyBuilder::WritePieces(Ts&&... pieces) {
+  CHECK_EQ(0u, send_time_ns_);
   if (size_t required = (piece_size(pieces) + ...); buffer_.AppendLen() <= required)
     Flush(required);
 
@@ -115,11 +117,12 @@ template <typename... Ts> void SinkReplyBuilder::WritePieces(Ts&&... pieces) {
     vecs_.push_back(iovec{dest, 0});
   }
 
-  DCHECK(iovec_end(vecs_.back()) == dest);
+  CHECK(iovec_end(vecs_.back()) == dest);
   char* ptr = dest;
   ([&]() { ptr = write_piece(pieces, ptr); }(), ...);
 
   size_t written = ptr - dest;
+  CHECK_LE(written, buffer_.AppendLen());
   buffer_.CommitWrite(written);
   vecs_.back().iov_len += written;
   total_size_ += written;
@@ -133,6 +136,7 @@ void SinkReplyBuilder::WriteRef(std::string_view str) {
 }
 
 void SinkReplyBuilder::Flush(size_t expected_buffer_cap) {
+  CHECK_EQ(0u, send_time_ns_);
   if (!vecs_.empty())
     Send();
 
@@ -167,6 +171,25 @@ void SinkReplyBuilder::Send() {
 
   reply_stats.io_write_cnt++;
   reply_stats.io_write_bytes += total_size_;
+
+  // char needle[32] = {0};
+  size_t total = 0;
+  for (unsigned j = 0; j < vecs_.size(); j++) {
+    auto& v = vecs_[j];
+    total += v.iov_len;
+#if 0
+    void* found = memmem(v.iov_base, v.iov_len, needle, sizeof(needle));
+    if (found) {
+      size_t offset = reinterpret_cast<char*>(found) - reinterpret_cast<char*>(v.iov_base);
+      LOG(ERROR) << "Found zero in iovec " << j << " of size " << v.iov_len << " at offset "
+                 << offset << ":\n " << util::fb2::GetStacktrace() << "\n:"
+                 << absl::CHexEscape(
+                        {reinterpret_cast<char*>(v.iov_base), offset + sizeof(needle)});
+    }
+#endif
+  }
+  CHECK_EQ(total, total_size_);
+
   DVLOG(2) << "Writing " << total_size_ << " bytes";
   if (auto ec = sink_->Write(vecs_.data(), vecs_.size()); ec)
     ec_ = ec;
