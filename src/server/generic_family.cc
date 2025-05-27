@@ -14,6 +14,7 @@ extern "C" {
 #include "redis/crc64.h"
 }
 
+#include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "redis/rdb.h"
@@ -652,14 +653,16 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   PrimeTable::Cursor cur = *cursor;
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
 
-  const auto start = absl::Now();
+  const auto start_cycles = base::CycleClock::Now();
   // Don't allow it to monopolize cpu time.
-  const absl::Duration timeout = absl::Milliseconds(2);
+  // Approximately 15 microseconds.
+  const uint64_t timeout_cycles = base::CycleClock::Frequency() >> 16;
 
   do {
     cur = prime_table->Traverse(
         cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, vec); });
-  } while (cur && cnt < scan_opts.limit && (absl::Now() - start) < timeout);
+  } while (cur && cnt < scan_opts.limit &&
+           (base::CycleClock::Now() - start_cycles) < timeout_cycles);
 
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();
   *cursor = cur.value();
