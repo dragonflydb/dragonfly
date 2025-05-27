@@ -243,14 +243,14 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
         std::string_view option = parser->Peek();
         if (std::find(kIgnoredOptions.begin(), kIgnoredOptions.end(), option) !=
             kIgnoredOptions.end()) {
-          if (option != "INDEXMISSING"sv && option != "INDEXEMPTY"sv) {
-            LOG(WARNING) << "Ignoring unsupported field option in FT.CREATE: " << option;
-          }
+          LOG_IF(WARNING, option != "INDEXMISSING"sv && option != "INDEXEMPTY"sv)
+              << "Ignoring unsupported field option in FT.CREATE: " << option;
           // Ignore these options
           parser->Skip(1);
           continue;
-        } else if (std::find(kIgnoredOptionsWithArg.begin(), kIgnoredOptionsWithArg.end(),
-                             option) != kIgnoredOptionsWithArg.end()) {
+        }
+        if (std::find(kIgnoredOptionsWithArg.begin(), kIgnoredOptionsWithArg.end(), option) !=
+            kIgnoredOptionsWithArg.end()) {
           LOG(WARNING) << "Ignoring unsupported field option in FT.CREATE: " << option;
           // Ignore these options with argument
           parser->Skip(2);
