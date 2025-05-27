@@ -236,7 +236,6 @@ void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
         std::make_error_code(errc::state_not_recoverable),
         absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
                      " was dropped from the buffer. Current lsn=", journal->GetLsn()));
-    FinalizeJournalStream(true);
   }
 }
 

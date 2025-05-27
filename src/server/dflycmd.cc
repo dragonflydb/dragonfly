@@ -300,6 +300,14 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     flow.eof_token = eof_token;
     flow.version = replica_ptr->version;
 
+    if (!cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
+      // Listener::PreShutdown() triggered
+      if (cntx->conn()->socket()->IsOpen()) {
+        return rb->SendError(kInvalidState);
+      }
+      return;
+    }
+
 #if 0  // Partial synchronization is disabled
   if (seqid.has_value()) {
     if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
@@ -346,13 +354,6 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     }
   }
 
-  if (!cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
-    // Listener::PreShutdown() triggered
-    if (cntx->conn()->socket()->IsOpen()) {
-      return rb->SendError(kInvalidState);
-    }
-    return;
-  }
   sf_->journal()->StartInThread();
 
   rb->StartArray(2);
