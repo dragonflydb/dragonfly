@@ -804,6 +804,7 @@ void Transaction::ScheduleInternal() {
       break;
     }
 
+    LOG(FATAL) << "Reproduce reschedule";
     VLOG(2) << "Cancelling " << DebugId();
     ServerState::tlocal()->stats.tx_schedule_cancel_cnt += 1;
 
