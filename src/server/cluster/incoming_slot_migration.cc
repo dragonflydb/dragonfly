@@ -76,14 +76,6 @@ class ClusterShardMigration {
         break;
       }
 
-      auto used_mem = used_mem_current.load(memory_order_relaxed);
-      // If aplying transaction data will reach 90% of max_memory_limit we end migration.
-      if ((used_mem + tx_data->command.cmd_len) > (0.9 * max_memory_limit)) {
-        cntx->ReportError(std::string{kIncomingMigrationOOM});
-        in_migration_->ReportFatalError(std::string{kIncomingMigrationOOM});
-        break;
-      }
-
       while (tx_data->opcode == journal::Op::LSN) {
         VLOG(2) << "Attempt to finalize flow " << source_shard_id_ << " attempt " << tx_data->lsn;
         last_attempt_.store(tx_data->lsn);
@@ -112,6 +104,12 @@ class ClusterShardMigration {
         // TODO check about ping logic
       } else {
         ExecuteTx(std::move(*tx_data), cntx);
+        // Break incoming slot migration if command reported OOM
+        if (executor_.connection_context()->IsOOM()) {
+          cntx->ReportError(std::string{kIncomingMigrationOOM});
+          in_migration_->ReportFatalError(std::string{kIncomingMigrationOOM});
+          break;
+        }
       }
     }
 

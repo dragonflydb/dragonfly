@@ -1039,7 +1039,7 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, SinkReplyBuilder* builder) {
                    [source_id = source_id](const auto& m) { return m.node_info.id == source_id; });
   if (m_it == in_migrations.end()) {
     LOG(WARNING) << "migration isn't in config";
-    return builder->SendError(kUnknownMigration);
+    return builder->SendSimpleString(kUnknownMigration);
   }
 
   auto migration = GetIncomingMigration(source_id);
