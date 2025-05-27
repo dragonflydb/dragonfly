@@ -14,6 +14,7 @@ extern "C" {
 #include "redis/crc64.h"
 }
 
+#include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "redis/rdb.h"
@@ -33,6 +34,7 @@ extern "C" {
 #include "server/set_family.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "util/fibers/fibers.h"
 #include "util/fibers/future.h"
 #include "util/varz.h"
 
@@ -651,14 +653,16 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   PrimeTable::Cursor cur = *cursor;
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
 
-  const auto start = absl::Now();
+  const auto start_cycles = base::CycleClock::Now();
   // Don't allow it to monopolize cpu time.
-  const absl::Duration timeout = absl::Milliseconds(10);
+  // Approximately 15 microseconds.
+  const uint64_t timeout_cycles = base::CycleClock::Frequency() >> 16;
 
   do {
     cur = prime_table->Traverse(
         cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, vec); });
-  } while (cur && cnt < scan_opts.limit && (absl::Now() - start) < timeout);
+  } while (cur && cnt < scan_opts.limit &&
+           (base::CycleClock::Now() - start_cycles) < timeout_cycles);
 
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();
   *cursor = cur.value();
@@ -670,7 +674,7 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
 
   EngineShardSet* ess = shard_set;
   unsigned shard_count = ess->size();
-  constexpr uint64_t kMaxScanTimeMs = 100;
+  constexpr uint64_t kMaxScanTimeMs = 25;
 
   // Dash table returns a cursor with its right byte empty. We will use it
   // for encoding shard index. For now scan has a limitation of 255 shards.
@@ -690,10 +694,12 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
     };
 
     // Avoid deadlocking, if called from shard queue script
-    if (EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == sid)
+    if (EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == sid) {
       cb();
-    else
+      util::ThisFiber::Yield();
+    } else {
       ess->Await(sid, cb);
+    }
 
     if (cursor == 0) {
       ++sid;
