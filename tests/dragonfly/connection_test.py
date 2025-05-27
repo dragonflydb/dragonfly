@@ -1279,3 +1279,46 @@ async def test_client_detached_crash(df_factory):
     async_client = server.client()
     await async_client.client_pause(2, all=False)
     server.stop()
+
+
+async def subscriber_task(pubsub, stop_flag: asyncio.Event):
+    """Handles receiving messages from the subscribed channel."""
+    while not stop_flag.is_set():
+        message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1)
+        if message:
+            logging.info(f"Received message: {message}")
+        await asyncio.sleep(0.1)  # Small delay to prevent busy-waiting
+
+
+async def ping_task(client: aioredis.Redis, stop_flag: asyncio.Event):
+    while not stop_flag.is_set():
+        pipe = client.pipeline()
+        pipe.ping()
+        pipe.ping()
+        pipe.ping()
+        await pipe.execute()
+        await asyncio.sleep(0.1)
+
+
+async def publish_task(client: aioredis.Redis, stop_flag: asyncio.Event):
+    while not stop_flag.is_set():
+        pipe = client.pipeline()
+        for i in range(10):
+            pipe.publish("channel1", "x" * 575 + f"{i}")
+        await pipe.execute()
+        await asyncio.sleep(0.1)
+
+
+async def test_client_pubsub(df_server: DflyInstance, async_client: aioredis.Redis):
+    pubsub = async_client.pubsub()
+
+    stop_flag = asyncio.Event()
+    await pubsub.subscribe("channel1")
+    task1 = asyncio.create_task(ping_task(async_client, stop_flag))
+    task2 = asyncio.create_task(subscriber_task(pubsub, stop_flag))
+    publish_client = df_server.client()
+    task3 = asyncio.create_task(publish_task(publish_client, stop_flag))
+    await asyncio.sleep(5)  # Let the tasks run for a while
+    stop_flag.set()  # Signal the tasks to stop
+    await asyncio.gather(task1, task2, task3)
+    await pubsub.unsubscribe("channel1")
