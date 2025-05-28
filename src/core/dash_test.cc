@@ -147,7 +147,7 @@ class DashTest : public testing::Test {
     init_zmalloc_threadlocal(mi_heap_get_backing());
   }
 
-  DashTest() : segment_(1) {
+  DashTest() : segment_(1, PMR_NS::get_default_resource()) {
   }
 
   bool Find(Segment::Key_t key, Segment::Value_t* val) const {
@@ -240,7 +240,7 @@ TEST_F(DashTest, Basic) {
 }
 
 TEST_F(DashTest, Segment) {
-  std::unique_ptr<Segment> seg(new Segment(1));
+  std::unique_ptr<Segment> seg(new Segment(1, PMR_NS::get_default_resource()));
 
 #ifndef __APPLE__
   LOG(INFO) << "Segment size " << sizeof(Segment)
@@ -334,7 +334,7 @@ TEST_F(DashTest, FirstStash) {
       uint64_t hash = dt_.DoHash(key);
       auto [it, inserted] = segment_.Insert(key, 0, hash, equal_to<>{});
       ASSERT_TRUE(inserted);
-      if (it.index > Segment::kBucketNum) {  // stash iterator
+      if (it.index >= Segment::kBucketNum) {  // stash iterator
         break;
       }
       ++num_items;
@@ -354,7 +354,7 @@ TEST_F(DashTest, Split) {
   // fills segment with maximum keys that must reside in bucket id 0.
   set<Segment::Key_t> keys = FillSegment(0);
   Segment::Value_t val;
-  Segment s2{2};  // segment with local depth 2.
+  Segment s2{2, PMR_NS::get_default_resource()};  // segment with local depth 2.
 
   segment_.Split(&UInt64Policy::HashFn, &s2);
   unsigned sum[2] = {0};
@@ -504,7 +504,7 @@ TEST_F(DashTest, Custom) {
   (void)kSegSize;
   (void)kBuckSz;
 
-  ItemSegment seg{2};
+  ItemSegment seg{2, PMR_NS::get_default_resource()};
 
   auto eq = [v = Item{1, 1}](auto u) { return v.buf[0] == u.buf[0] && v.buf[1] == u.buf[1]; };
   auto it = seg.FindIt(42, eq);
@@ -515,7 +515,7 @@ TEST_F(DashTest, FindByValue) {
   using ItemSegment = detail::Segment<Item, uint64_t>;
 
   // Insert three different values with the same hash
-  ItemSegment segment{2};
+  ItemSegment segment{2, PMR_NS::get_default_resource()};
   segment.Insert(Item{1}, 1, 42, [](const auto& pred) { return pred.buf[0] == 1; });
   segment.Insert(Item{2}, 2, 42, [](const auto& pred) { return pred.buf[0] == 2; });
   segment.Insert(Item{3}, 3, 42, [](const auto& pred) { return pred.buf[0] == 3; });

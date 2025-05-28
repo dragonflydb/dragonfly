@@ -174,6 +174,13 @@ template <unsigned NUM_SLOTS> class BucketBase {
     slotb_.Clear();
   }
 
+  void ClearStashPtrs() {
+    stash_busy_ = 0;
+    stash_pos_ = 0;
+    stash_probe_mask_ = 0;
+    overflow_count_ = 0;
+  }
+
   bool HasStash() const {
     return stash_busy_ & kStashPresentBit;
   }
@@ -284,7 +291,8 @@ struct DefaultSegmentPolicy {
 using PhysicalBid = uint8_t;
 using LogicalBid = uint8_t;
 
-template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy> class Segment {
+template <typename KeyType, typename ValueType, typename Policy = DefaultSegmentPolicy>
+class Segment {
  public:
   static constexpr unsigned kSlotNum = Policy::kSlotNum;
   static constexpr unsigned kBucketNum = Policy::kBucketNum;
@@ -301,8 +309,8 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
     using BucketType::kNanSlot;
     using typename BucketType::SlotId;
 
-    _Key key[kSlotNum];
-    _Value value[kSlotNum];
+    KeyType key[kSlotNum];
+    ValueType value[kSlotNum];
 
     template <typename U, typename V>
     void Insert(uint8_t slot, U&& u, V&& v, uint8_t meta_hash, bool probe) {
@@ -388,12 +396,11 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
   static constexpr size_t kFpMask = (1 << kFingerBits) - 1;
 
-  using Value_t = _Value;
-  using Key_t = _Key;
+  using Value_t = ValueType;
+  using Key_t = KeyType;
   using Hash_t = uint64_t;
 
-  explicit Segment(size_t depth, PMR_NS::memory_resource* mr = nullptr)
-      : local_depth_(depth), mr_(mr) {
+  explicit Segment(size_t depth, PMR_NS::memory_resource* mr) : local_depth_(depth), mr_(mr) {
   }
 
   // Returns (iterator, true) if insert succeeds,
@@ -461,27 +468,31 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
     return bucket_[i];
   }
 
+  Bucket& GetBucket(PhysicalBid i) {
+    return bucket_[i];
+  }
+
   bool IsBusy(PhysicalBid bid, unsigned slot) const {
     return GetBucket(bid).GetBusy() & (1U << slot);
   }
 
   Key_t& Key(PhysicalBid bid, unsigned slot) {
-    assert(GetBucket(bid).GetBusy() & (1U << slot));
-    return bucket_[bid].key[slot];
+    assert(IsBusy(bid, slot));
+    return GetBucket(bid).key[slot];
   }
 
   const Key_t& Key(PhysicalBid bid, unsigned slot) const {
-    assert(GetBucket(bid).GetBusy() & (1U << slot));
+    assert(IsBusy(bid, slot));
     return GetBucket(bid).key[slot];
   }
 
   Value_t& Value(PhysicalBid bid, unsigned slot) {
-    assert(GetBucket(bid).GetBusy() & (1U << slot));
-    return bucket_[bid].value[slot];
+    assert(IsBusy(bid, slot));
+    return GetBucket(bid).value[slot];
   }
 
   const Value_t& Value(PhysicalBid bid, unsigned slot) const {
-    assert(GetBucket(bid).GetBusy() & (1U << slot));
+    assert(IsBusy(bid, slot));
     return GetBucket(bid).value[slot];
   }
 
@@ -634,9 +645,9 @@ class DashTableBase {
   uint8_t global_depth_;
 };  // DashTableBase
 
-template <typename _Key, typename _Value> class IteratorPair {
+template <typename KeyType, typename ValueType> class IteratorPair {
  public:
-  IteratorPair(_Key& k, _Value& v) : first(k), second(v) {
+  IteratorPair(KeyType& k, ValueType& v) : first(k), second(v) {
   }
 
   IteratorPair* operator->() {
@@ -647,8 +658,8 @@ template <typename _Key, typename _Value> class IteratorPair {
     return this;
   }
 
-  _Key& first;
-  _Value& second;
+  KeyType& first;
+  ValueType& second;
 };
 
 // Represents a cursor that points to a bucket in dash table.
@@ -677,7 +688,7 @@ class DashCursor {
   // By using depth we take most significant bits of segment_id if depth has decreased
   // since the cursor has been created, or extend the least significant bits with zeros,
   // if depth was increased.
-  uint32_t segment_id(uint8_t depth) {
+  uint32_t segment_id(uint8_t depth) const {
     return val_ >> (40 - depth);
   }
 
@@ -1174,6 +1185,7 @@ void Segment<Key, Value, Policy>::TraverseAll(Cb&& cb) const {
 template <typename Key, typename Value, typename Policy> void Segment<Key, Value, Policy>::Clear() {
   for (unsigned i = 0; i < kTotalBuckets; ++i) {
     bucket_[i].Clear();
+    bucket_[i].ClearStashPtrs();
   }
 }
 
@@ -1202,6 +1214,15 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
   // we need to setup rules on how we do that
   // do_versioning();
   auto is_mine = [this](Hash_t hash) { return (hash >> (64 - local_depth_) & 1) == 0; };
+
+  auto update_version = [dest_right](const Bucket& src, PhysicalBid dest_id) {
+    (void)dest_id;
+    if constexpr (kUseVersion) {
+      // Maintaining consistent versioning.
+      uint64_t ver = src.GetVersion();
+      dest_right->bucket_[dest_id].UpdateVersion(ver);
+    }
+  };
 
   for (unsigned i = 0; i < kBucketNum; ++i) {
     uint32_t invalid_mask = 0;
@@ -1239,13 +1260,7 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
       // for our dash hash function, thus avoiding the case where someone, on purpose or due to
       // selective bias will be able to hit our dashtable with items with the same bucket id.
       assert(it.found());
-      (void)it;
-
-      if constexpr (kUseVersion) {
-        // Maintaining consistent versioning.
-        uint64_t ver = bucket->GetVersion();
-        dest_right->bucket_[it.index].UpdateVersion(ver);
-      }
+      update_version(*bucket, it.index);
     };
 
     bucket_[i].ForEachSlot(std::move(cb));
@@ -1276,14 +1291,9 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
                                        std::forward<Value_t>(bucket->value[slot]), hash, false);
       (void)it;
       assert(it.index != kNanBid);
+      update_version(*bucket, it.index);
 
-      if constexpr (kUseVersion) {
-        // Update the version in the destination bucket.
-        uint64_t ver = bucket->GetVersion();
-        dest_right->bucket_[it.index].UpdateVersion(ver);
-      }
-
-      // Remove stash reference pointing to stach bucket i.
+      // Remove stash reference pointing to stash bucket i.
       RemoveStashReference(i, hash);
     };
 
@@ -1582,16 +1592,12 @@ template <typename Key, typename Value, typename Policy>
 template <typename BumpPolicy>
 auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_hash,
                                          const BumpPolicy& bp) -> Iterator {
-  auto& from = bucket_[bid];
-
-  uint8_t target_bid = HomeIndex(key_hash);
-  uint8_t nid = NextBid(target_bid);
-  uint8_t fp_hash = key_hash & kFpMask;
-  assert(fp_hash == from.Fp(slot));
+  auto& from = GetBucket(bid);
 
   if (!bp.CanBump(from.key[slot])) {
     return Iterator{bid, slot};
   }
+
   if (bid < kBucketNum) {
     // non stash case.
     if (slot > 0 && bp.CanBump(from.key[slot - 1])) {
@@ -1612,6 +1618,11 @@ auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_ha
     from.Delete(slot);
     return it;
   }
+
+  uint8_t target_bid = HomeIndex(key_hash);
+  uint8_t nid = NextBid(target_bid);
+  uint8_t fp_hash = key_hash & kFpMask;
+  assert(fp_hash == from.Fp(slot));
 
   // determine which bucket one we gonna swap.
   // we swap with the bucket the references the stash entry, not necessary its owning
