@@ -1179,6 +1179,7 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
                 << " not found in expire table, db_index: " << cntx.db_index
                 << ", expire table size: " << db->expire.size()
                 << ", prime table size: " << db->prime.size() << util::fb2::GetStacktrace();
+    return {it, ExpireIterator{}};
   }
 
   // TODO: to employ multi-generation update of expire-base and the underlying values.
