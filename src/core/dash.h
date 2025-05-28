@@ -328,7 +328,7 @@ class DashTable : public detail::DashTableBase {
     auto* mr = segment_.get_allocator().resource();
     PMR_NS::polymorphic_allocator<SegmentType> pa(mr);
     SegmentType* res = pa.allocate(1);
-    pa.construct(res, depth);  //   new SegmentType(depth);
+    pa.construct(res, depth, mr);  //   new SegmentType(depth);
     bucket_count_ += res->num_buckets();
     return res;
   }
@@ -1010,13 +1010,13 @@ auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor cursor, Cb&& cb) ->
     uint8_t bid = cursor.bucket_id();
     SegmentType* s = segment_[sid];
     assert(s);
-
-    const auto& bucket = s->GetBucket(bid);
-    if (bucket.GetBusy()) {  // Invoke callback only if bucket has elements.
-      cb(BucketIt(sid, bid));
-      invoked = true;
+    if (bid < s->num_buckets()) {
+      const auto& bucket = s->GetBucket(bid);
+      if (bucket.GetBusy()) {  // Invoke callback only if bucket has elements.
+        cb(BucketIt(sid, bid));
+        invoked = true;
+      }
     }
-
     cursor = AdvanceCursorBucketOrder(cursor);
     if (invoked || !cursor)  // Break end of traversal or callback invoked.
       return cursor;
