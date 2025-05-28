@@ -119,6 +119,11 @@ ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
 ABSL_FLAG(uint32_t, max_squashed_cmd_num, 100,
           "Max number of commands squashed in a single shard during squash optimizaiton");
 
+ABSL_FLAG(string, huffman_table, "",
+          "a comma separated map: domain1:code1,domain2:code2,... where "
+          "domain can currently be only KEYS, code is base64 encoded huffman table exported via "
+          "DEBUG COMPRESSION EXPORT. if empty no huffman compression is appplied.");
+
 namespace dfly {
 
 #if defined(__linux__)
@@ -712,6 +717,41 @@ void SetMaxSquashedCmdNum(int32_t val) {
   shard_set->pool()->AwaitBrief(cb);
 }
 
+void SetHuffmanTable(const std::string& huffman_table) {
+  if (huffman_table.empty())
+    return;
+  vector<string_view> parts = absl::StrSplit(huffman_table, ',');
+  for (const auto& part : parts) {
+    vector<string_view> kv = absl::StrSplit(part, ':');
+    if (kv.size() != 2 || kv[0].empty() || kv[1].empty()) {
+      LOG(ERROR) << "Invalid huffman table entry" << part;
+      continue;
+    }
+    string domain_str = absl::AsciiStrToUpper(kv[0]);
+    optional<CompactObj::HuffmanDomain> domain;
+    if (domain_str == "KEYS") {
+      domain = CompactObj::HUFF_KEYS;
+    } else {
+      LOG(ERROR) << "Unknown huffman domain: " << kv[0];
+      continue;
+    }
+    string unescaped;
+    if (!absl::Base64Unescape(kv[1], &unescaped)) {
+      LOG(ERROR) << "Failed to decode base64 huffman table for domain " << kv[0] << " with value "
+                 << kv[1];
+      continue;
+    }
+    atomic_bool success = true;
+    shard_set->RunBriefInParallel([&](auto* shard) {
+      if (!CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_KEYS, unescaped)) {
+        success = false;
+      }
+    });
+    LOG_IF(ERROR, !success) << "Failed to set huffman table for domain " << kv[0] << " with value "
+                            << kv[1];
+  }
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -865,6 +905,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   SetRssOomDenyRatioOnAllThreads(absl::GetFlag(FLAGS_rss_oom_deny_ratio));
   SetSerializationMaxChunkSize(absl::GetFlag(FLAGS_serialization_max_chunk_size));
   SetMaxSquashedCmdNum(absl::GetFlag(FLAGS_max_squashed_cmd_num));
+  SetHuffmanTable(absl::GetFlag(FLAGS_huffman_table));
 
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.
