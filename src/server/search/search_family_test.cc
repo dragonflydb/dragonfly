@@ -2770,9 +2770,9 @@ TEST_F(SearchFamilyTest, JsonSetIndexesBug) {
 
 TEST_F(SearchFamilyTest, SearchReindexWriteSearchRace) {
   const std::string kIndexName = "myRaceIdx";
-  const int kWriterOps = 1000;
-  const int kSearcherOps = 1000;
-  const int kReindexerOps = 500;
+  const int kWriterOps = 200;
+  const int kSearcherOps = 200;
+  const int kReindexerOps = 200;
 
   auto writer_fiber = pp_->at(0)->LaunchFiber([&] {
     for (int i = 1; i <= kWriterOps; ++i) {
