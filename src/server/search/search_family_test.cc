@@ -2786,11 +2786,8 @@ TEST_F(SearchFamilyTest, SearchReindexWriteSearchRace) {
       std::string content = absl::StrCat("text data item ", i, " for race condition test");
       std::string tags_val = absl::StrCat("tagA,tagB,", (i % 10));
       std::string numeric_field_val = std::to_string(i);
-      try {
-        Run({"hset", doc_key, "content", content, "tags", tags_val, "numeric_field",
-             numeric_field_val});
-      } catch (const std::exception& e) {
-      }
+      Run({"hset", doc_key, "content", content, "tags", tags_val, "numeric_field",
+           numeric_field_val});
       if (i % 100 == 0)
         ThisFiber::SleepFor(std::chrono::microseconds(100));  // Brief yield
     }
@@ -2807,12 +2804,9 @@ TEST_F(SearchFamilyTest, SearchReindexWriteSearchRace) {
       std::string query_tags = absl::StrCat("@tags:{tagA|tagB|tag", random_tag_val, "}");
       std::string query_numeric = absl::StrCat("@numeric_field:[", random_val_numeric, " ",
                                                (random_val_numeric + 100), "]");
-      try {
-        Run({"ft.search", kIndexName, query_content});
-        Run({"ft.search", kIndexName, query_tags});
-        Run({"ft.search", kIndexName, query_numeric});
-      } catch (const std::exception& e) {
-      }
+      Run({"ft.search", kIndexName, query_content});
+      Run({"ft.search", kIndexName, query_tags});
+      Run({"ft.search", kIndexName, query_numeric});
       if (i % 50 == 0)
         ThisFiber::SleepFor(std::chrono::microseconds(200 * (1 + i % 2)));
     }
@@ -2821,17 +2815,10 @@ TEST_F(SearchFamilyTest, SearchReindexWriteSearchRace) {
   // 4. reindexer_fiber
   auto reindexer_fiber = pp_->at(2)->LaunchFiber([&] {
     for (int i = 1; i <= kReindexerOps; ++i) {
-      try {
-        Run({"ft.create", kIndexName, "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "content",
-             "TEXT", "SORTABLE", "tags", "TAG", "SORTABLE", "numeric_field", "NUMERIC",
-             "SORTABLE"});
-      } catch (const std::exception& e) {
-      }
+      Run({"ft.create", kIndexName, "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "content",
+           "TEXT", "SORTABLE", "tags", "TAG", "SORTABLE", "numeric_field", "NUMERIC", "SORTABLE"});
       ThisFiber::SleepFor(std::chrono::milliseconds(10 + (i % 5 * 5)));
-      try {
-        Run({"ft.dropindex", kIndexName});
-      } catch (const std::exception& e) {
-      }
+      Run({"ft.dropindex", kIndexName});
       ThisFiber::SleepFor(std::chrono::microseconds(500 * (1 + i % 2)));
     }
   });
