@@ -1246,12 +1246,10 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
   } else {
     auto lock_args = GetLockArgs(shard->shard_id());
 
-    if (lock_args.fps.empty()) {
-      // For NO_KEY_TRANSACTIONAL commands, we don't need to release locks
-      // because we don't acquire locks for them.
-      DCHECK(cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL);
-    } else {
+    if ((cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0) {
+      auto lock_args = GetLockArgs(shard->shard_id());
       DCHECK(sd.local_mask & KEYLOCK_ACQUIRED);
+      DCHECK(!lock_args.fps.empty());
       GetDbSlice(shard->shard_id()).Release(LockMode(), lock_args);
     }
 
