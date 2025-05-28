@@ -31,26 +31,33 @@ JournalSlice::~JournalSlice() {
 }
 
 void JournalSlice::Init() {
-  if (ring_buffer_)  // calling this function multiple times is allowed and it's a no-op.
+  // calling this function multiple times is allowed and it's a no-op.
+  if (ring_buffer_.capacity() > 0)
     return;
 
-  ring_buffer_.emplace(2);
+  ring_buffer_.set_capacity(absl::GetFlag(FLAGS_shard_repl_backlog_len));
 }
 
 bool JournalSlice::IsLSNInBuffer(LSN lsn) const {
-  DCHECK(ring_buffer_);
+  DCHECK(ring_buffer_.capacity() > 0);
 
-  if (ring_buffer_->empty()) {
+  if (ring_buffer_.empty()) {
     return false;
   }
-  return (*ring_buffer_)[0].lsn <= lsn && lsn <= ((*ring_buffer_)[ring_buffer_->size() - 1].lsn);
+
+  if (ring_buffer_.size() == 1) {
+    return ring_buffer_.front().lsn == lsn;
+  }
+
+  return ring_buffer_.front().lsn <= lsn && lsn <= ring_buffer_.back().lsn;
 }
 
 std::string_view JournalSlice::GetEntry(LSN lsn) const {
-  DCHECK(ring_buffer_ && IsLSNInBuffer(lsn));
-  auto start = (*ring_buffer_)[0].lsn;
-  DCHECK((*ring_buffer_)[lsn - start].lsn == lsn);
-  return (*ring_buffer_)[lsn - start].data;
+  DCHECK(ring_buffer_.capacity() > 0 && IsLSNInBuffer(lsn));
+
+  auto start = ring_buffer_.front().lsn;
+  DCHECK(ring_buffer_[lsn - start].lsn == lsn);
+  return ring_buffer_[lsn - start].data;
 }
 
 void JournalSlice::SetFlushMode(bool allow_flush) {
@@ -68,13 +75,16 @@ void JournalSlice::SetFlushMode(bool allow_flush) {
 }
 
 void JournalSlice::AddLogRecord(const Entry& entry) {
-  DCHECK(ring_buffer_);
+  DCHECK(ring_buffer_.capacity() > 0);
 
-  JournalItem item;
+  ring_buffer_.push_back(JournalItem());
+  JournalItem& item = ring_buffer_.back();
+
   {
     FiberAtomicGuard fg;
     item.opcode = entry.opcode;
     item.lsn = lsn_++;
+    // This is a string view. It will dangle afterwords. We don't use it somewhere though.
     item.cmd = entry.payload.cmd;
     item.slot = entry.slot;
 
@@ -82,6 +92,7 @@ void JournalSlice::AddLogRecord(const Entry& entry) {
     JournalWriter writer{&buf_sink};
     writer.Write(entry);
 
+    // Deep copy here
     item.data = io::View(ring_serialize_buf_.InputBuffer());
     ring_serialize_buf_.Clear();
     VLOG(2) << "Writing item [" << item.lsn << "]: " << entry.ToString();
