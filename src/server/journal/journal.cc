@@ -28,7 +28,7 @@ Journal::Journal() {
 }
 
 void Journal::StartInThread() {
-  journal_slice.Init(unsigned(ProactorBase::me()->GetPoolIndex()));
+  journal_slice.Init();
 
   ServerState::tlocal()->set_journal(this);
   EngineShard* shard = EngineShard::tlocal();
@@ -39,10 +39,6 @@ void Journal::StartInThread() {
 
 error_code Journal::Close() {
   VLOG(1) << "Journal::Close";
-
-  if (!journal_slice.IsOpen()) {
-    return {};
-  }
 
   lock_guard lk(state_mu_);
   auto close_cb = [&](auto*) {

@@ -21,7 +21,7 @@ class JournalSlice {
   JournalSlice();
   ~JournalSlice();
 
-  void Init(unsigned index);
+  void Init();
 
   // This is always the LSN of the *next* journal entry.
   LSN cur_lsn() const {
@@ -30,11 +30,6 @@ class JournalSlice {
 
   std::error_code status() const {
     return status_ec_;
-  }
-
-  // Whether the journaling is open.
-  bool IsOpen() const {
-    return slice_index_ != UINT32_MAX;
   }
 
   void AddLogRecord(const Entry& entry);
@@ -74,7 +69,6 @@ class JournalSlice {
 
   LSN lsn_ = 1;
 
-  uint32_t slice_index_ = UINT32_MAX;
   uint32_t next_cb_id_ = 1;
   std::error_code status_ec_;
   bool enable_journal_flush_ = true;

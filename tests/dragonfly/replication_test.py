@@ -1840,7 +1840,9 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
             await proxy.close(task)
 
     # Partial replication is currently not implemented so the following does not work
-    # assert master.is_in_logs("Partial sync requested from stale LSN")
+    master.stop()
+    lines = master.find_in_logs("Partial sync requested from stale LSN")
+    assert len(lines) > 0
 
 
 async def test_replica_reconnections_after_network_disconnect(df_factory, df_seeder_factory):

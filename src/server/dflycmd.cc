@@ -280,6 +280,7 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
 
   string eof_token;
   std::string_view sync_type{"FULL"};
+  bool partial_sync = false;
   {
     util::fb2::LockGuard lk{replica_ptr->shared_mu};
 
@@ -299,25 +300,6 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     flow.conn = cntx->conn();
     flow.eof_token = eof_token;
     flow.version = replica_ptr->version;
-
-#if 0  // Partial synchronization is disabled
-  if (seqid.has_value()) {
-    if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
-      // This does not guarantee the lsn will still be present when DFLY SYNC runs,
-      // replication will be retried if it gets evicted by then.
-      flow.start_partial_sync_at = *seqid;
-      VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
-              << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
-      sync_type = "PARTIAL";
-    } else {
-      LOG(INFO) << "Partial sync requested from stale LSN=" << *seqid
-                << " that the replication buffer doesn't contain this anymore (current_lsn="
-                << sf_->journal()->GetLsn() << "). Will perform a full sync of the data.";
-      LOG(INFO) << "If this happens often you can control the replication buffer's size with the "
-                   "--shard_repl_backlog_len option";
-    }
-  }
-#endif
 
     std::optional<Replica::LastMasterSyncData> data = sf_->GetLastMasterData();
     // In this flow the master and the registered replica where synced from the same master.
@@ -339,6 +321,7 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
 
       if (IsLSNDiffBellowThreshold(data.value().last_journal_LSNs, lsn_vec)) {
         sync_type = "PARTIAL";
+        partial_sync = true;
         flow.start_partial_sync_at = sf_->journal()->GetLsn();
         VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
                 << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
@@ -353,7 +336,27 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     }
     return;
   }
+
   sf_->journal()->StartInThread();
+
+  if (!partial_sync && seqid.has_value()) {
+    if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
+      // This does not guarantee the lsn will still be present when DFLY SYNC runs,
+      // replication will be retried if it gets evicted by then.
+      util::fb2::LockGuard lk{replica_ptr->shared_mu};
+      auto& flow = replica_ptr->flows[flow_id];
+      flow.start_partial_sync_at = *seqid;
+      VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
+              << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
+      sync_type = "PARTIAL";
+    } else {
+      LOG(INFO) << "Partial sync requested from stale LSN=" << *seqid
+                << " that the replication buffer doesn't contain this anymore (current_lsn="
+                << sf_->journal()->GetLsn() << "). Will perform a full sync of the data.";
+      LOG(INFO) << "If this happens often you can control the replication buffer's size with the "
+                   "--shard_repl_backlog_len option";
+    }
+  }
 
   rb->StartArray(2);
   rb->SendSimpleString(sync_type);
