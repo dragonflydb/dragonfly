@@ -1247,25 +1247,13 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
     auto lock_args = GetLockArgs(shard->shard_id());
     DCHECK(sd.local_mask & KEYLOCK_ACQUIRED);
 
-    // In multi-transactions, especially with search indexing operations like
-    // FT.CREATE/FT.DROPINDEX, kv_fp_ can be cleared during MultiSwitchCmd, resulting in empty
-    // fingerprints.
-    //
-    // Example race condition scenario:
-    // 1. FT.CREATE/FT.DROPINDEX use CO::GLOBAL_TRANS flag, triggering multi-transaction mode
-    // 2. During concurrent operations (multiple redis-cli scripts running FT.DROPINDEX + HSET +
-    // FT.SEARCH)
-    // 3. MultiSwitchCmd is called via ConnectionContext::SwitchTxCmd() or MultiCommandSquasher
-    // 4. MultiSwitchCmd calls kv_fp_.clear()
-    // 5. Later, CancelShardCb tries to release locks but GetLockArgs returns empty fps
-    //
-    // This is a valid state in multi-transactions and we should skip lock release in such cases.
-    if (!lock_args.fps.empty()) {
-      GetDbSlice(shard->shard_id()).Release(LockMode(), lock_args);
-    } else {
-      VLOG(1) << "Skipping lock release for transaction " << DebugId()
-              << " due to empty fingerprints";
-    }
+    // if (!lock_args.fps.empty()) {
+    DCHECK(!lock_args.fps.empty());
+    GetDbSlice(shard->shard_id()).Release(LockMode(), lock_args);
+    //} else {
+    //  VLOG(1) << "Skipping lock release for transaction " << DebugId()
+    //          << " due to empty fingerprints";
+    //}
 
     sd.local_mask &= ~KEYLOCK_ACQUIRED;
   }

@@ -2767,4 +2767,81 @@ TEST_F(SearchFamilyTest, JsonSetIndexesBug) {
   resp = Run({"FT.AGGREGATE", "index", "*", "GROUPBY", "1", "@text"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("text", "some text")));
 }
+
+TEST_F(SearchFamilyTest, SearchReindexWriteSearchRace) {
+  const std::string kIndexName = "myRaceIdx";
+  const int kWriterOps = 2000;    // Number of documents to write
+  const int kSearcherOps = 1500;  // Number of search operations
+  const int kReindexerOps = 25;   // Number of times to drop/recreate the index
+
+  // 1. Initial FT.CREATE for the index
+  // Schema from the issue: content TEXT SORTABLE, tags TAG SORTABLE, numeric_field NUMERIC SORTABLE
+  Run({"ft.create", kIndexName, "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "content", "TEXT",
+       "SORTABLE", "tags", "TAG", "SORTABLE", "numeric_field", "NUMERIC", "SORTABLE"});
+
+  // 2. writer_fiber
+  auto writer_fiber = pp_->at(0)->LaunchFiber([&] {
+    for (int i = 1; i <= kWriterOps; ++i) {
+      std::string doc_key = absl::StrCat("doc:", i);
+      std::string content = absl::StrCat("text data item ", i, " for race condition test");
+      std::string tags_val = absl::StrCat("tagA,tagB,", (i % 10));
+      std::string numeric_field_val = std::to_string(i);
+      try {
+        Run({"hset", doc_key, "content", content, "tags", tags_val, "numeric_field",
+             numeric_field_val});
+      } catch (const std::exception& e) {
+      }
+      if (i % 100 == 0)
+        ThisFiber::SleepFor(std::chrono::microseconds(100));  // Brief yield
+    }
+  });
+
+  // 3. searcher_fiber
+  auto searcher_fiber = pp_->at(1)->LaunchFiber([&] {
+    for (int i = 1; i <= kSearcherOps; ++i) {
+      int random_val_content = 1 + (i % kWriterOps);
+      int random_tag_val = i % 10;
+      int random_val_numeric = 1 + (i % kWriterOps);
+
+      std::string query_content = absl::StrCat("@content:item", random_val_content);
+      std::string query_tags = absl::StrCat("@tags:{tagA|tagB|tag", random_tag_val, "}");
+      std::string query_numeric = absl::StrCat("@numeric_field:[", random_val_numeric, " ",
+                                               (random_val_numeric + 100), "]");
+      try {
+        Run({"ft.search", kIndexName, query_content});
+        Run({"ft.search", kIndexName, query_tags});
+        Run({"ft.search", kIndexName, query_numeric});
+      } catch (const std::exception& e) {
+      }
+      if (i % 50 == 0)
+        ThisFiber::SleepFor(std::chrono::microseconds(200 * (1 + i % 2)));
+    }
+  });
+
+  // 4. reindexer_fiber
+  auto reindexer_fiber = pp_->at(2)->LaunchFiber([&] {
+    for (int i = 1; i <= kReindexerOps; ++i) {
+      try {
+        Run({"ft.create", kIndexName, "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "content",
+             "TEXT", "SORTABLE", "tags", "TAG", "SORTABLE", "numeric_field", "NUMERIC",
+             "SORTABLE"});
+      } catch (const std::exception& e) {
+      }
+      ThisFiber::SleepFor(std::chrono::milliseconds(10 + (i % 5 * 5)));
+      try {
+        Run({"ft.dropindex", kIndexName});
+      } catch (const std::exception& e) {
+      }
+      ThisFiber::SleepFor(std::chrono::microseconds(500 * (1 + i % 2)));
+    }
+  });
+
+  // Join fibers
+  writer_fiber.Join();
+  searcher_fiber.Join();
+  reindexer_fiber.Join();
+
+  ASSERT_FALSE(service_->IsShardSetLocked());
+}
+
 }  // namespace dfly
