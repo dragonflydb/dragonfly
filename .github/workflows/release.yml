@@ -88,6 +88,8 @@ jobs:
           if [ -f /etc/debian_version ]; then
             ./tools/packaging/generate_debian_package.sh ${{ env.RELEASE_DIR }}/dragonfly-x86_64
           else
+            # remove this so we don't upload it twice
+            rm dfly_bench-*tar.gz
             echo "Creating package for ${{github.ref_name}}"
             ./tools/packaging/rpm/build_rpm.sh ${{ env.RELEASE_DIR }}/dragonfly-x86_64.tar.gz ${{github.ref_name}}
           fi
