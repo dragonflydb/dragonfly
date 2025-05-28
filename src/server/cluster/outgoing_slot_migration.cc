@@ -37,8 +37,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   SliceSlotMigration(DbSlice* slice, ServerContext server_context, SlotSet slots,
                      journal::Journal* journal, OutgoingMigration* om)
       : ProtocolClient(server_context), streamer_(slice, std::move(slots), journal, &exec_st_) {
-    exec_st_.SwitchErrorHandler(
-        [om](auto ge) { om->Finish(MigrationState::C_ERROR, std::move(ge)); });
+    exec_st_.SwitchErrorHandler([om](auto ge) { om->Finish(std::move(ge)); });
   }
 
   ~SliceSlotMigration() {
@@ -143,8 +142,15 @@ void OutgoingMigration::OnAllShards(
   });
 }
 
-void OutgoingMigration::Finish(MigrationState next_state, GenericError error) {
+void OutgoingMigration::Finish(GenericError error) {
+  auto next_state = MigrationState::C_FINISHED;
   if (error) {
+    // If OOM error move to FATAL, non-recoverable  state
+    if (error == errc::not_enough_memory) {
+      next_state = MigrationState::C_FATAL;
+    } else {
+      next_state = MigrationState::C_ERROR;
+    }
     LOG(WARNING) << "Finish outgoing migration for " << cf_->MyID() << ": "
                  << migration_info_.node_info.id << " with error: " << error.Format();
     exec_st_.ReportError(std::move(error));
@@ -380,7 +386,8 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
 
     // Check OOM from incoming slot migration on ACK request
     if (CheckRespSimpleError(kIncomingMigrationOOM)) {
-      Finish(MigrationState::C_FATAL, std::string(kIncomingMigrationOOM));
+      Finish(GenericError{std::make_error_code(errc::not_enough_memory),
+                          std::string(kIncomingMigrationOOM)});
       return false;
     }
 
@@ -400,7 +407,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   }
 
   if (!exec_st_.GetError()) {
-    Finish(MigrationState::C_FINISHED);
+    Finish();
     keys_number_ = cluster::GetKeyCount(migration_info_.slot_ranges);
     cf_->ApplyMigrationSlotRangeToConfig(migration_info_.node_info.id, migration_info_.slot_ranges,
                                          false);

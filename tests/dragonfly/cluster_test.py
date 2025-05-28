@@ -3283,7 +3283,7 @@ async def test_slot_migration_oom(df_factory):
     # Direction
     assert status[0][0] == "out"
     # Error message
-    assert status[0][4] == "INCOMING_MIGRATION_OOM"
+    assert status[0][4] == "Cannot allocate memory: INCOMING_MIGRATION_OOM"
 
     # Node_1 slot-migration-status
     status = await nodes[1].admin_client.execute_command(
