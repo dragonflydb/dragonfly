@@ -378,7 +378,13 @@ class CompactObj {
 
   static Stats GetStatsThreadLocal();
   static void InitThreadLocal(MemoryResource* mr);
-  static bool InitHuffmanThreadLocal(std::string_view hufftable);
+
+  enum HuffmanDomain : uint8_t {
+    HUFF_KEYS = 0,
+    // TODO: add more domains.
+  };
+
+  static bool InitHuffmanThreadLocal(HuffmanDomain domain, std::string_view hufftable);
   static MemoryResource* memory_resource();  // thread-local.
 
   template <typename T, typename... Args> static T* AllocateMR(Args&&... args) {
