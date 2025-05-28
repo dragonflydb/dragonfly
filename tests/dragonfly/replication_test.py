@@ -1839,7 +1839,6 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
         finally:
             await proxy.close(task)
 
-    # Partial replication is currently not implemented so the following does not work
     master.stop()
     lines = master.find_in_logs("Partial sync requested from stale LSN")
     assert len(lines) > 0
@@ -3136,3 +3135,60 @@ async def test_replicate_hset_with_expiry(df_factory: DflyInstanceFactory):
 
     assert "name" in result
     assert result["name"] == "1234"
+
+
+@pytest.mark.parametrize("backlog_len", [1, 256, 1024, 1300])
+async def test_partial_sync(df_factory, df_seeder_factory, backlog_len):
+    master = df_factory.create(proactor_threads=1, shard_repl_backlog_len=backlog_len)
+    replica = df_factory.create(proactor_threads=1)
+
+    df_factory.start_all([replica, master])
+    seeder = df_seeder_factory.create(keys=1000, port=master.port)
+    await seeder.run(target_deviation=0.01)
+
+    async with replica.client() as c_replica, master.client() as c_master:
+        proxy = Proxy("127.0.0.1", 1113, "127.0.0.1", master.port)
+        await proxy.start()
+        task = asyncio.create_task(proxy.serve())
+
+        try:
+            await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
+            # Reach stable sync
+            await wait_for_replicas_state(c_replica)
+            # Stream some elements
+            for i in range(0, backlog_len):
+                await c_master.execute_command(f"SET foo{i} bar{i}")
+
+            proxy.drop_connection()
+
+            # Give time to detect dropped connection and reconnect
+            await asyncio.sleep(1.0)
+            # Partial synced here
+            await wait_available_async(c_replica)
+
+            capture = await seeder.capture()
+            assert await seeder.compare(capture, replica.port)
+
+            await proxy.close()
+
+            # Whoops we moved too much, no partial sync here
+            for i in range(0, backlog_len + 10):
+                await c_master.execute_command(f"SET foo{i} bar{i}")
+
+            await proxy.start()
+            await asyncio.sleep(1.0)
+            await wait_for_replicas_state(c_replica)
+
+            capture = await seeder.capture()
+            assert await seeder.compare(capture, replica.port)
+        finally:
+            await proxy.close(task)
+
+    master.stop()
+    replica.stop()
+    # Partial sync worked
+    lines = master.find_in_logs("Partial sync requested from LSN")
+    assert len(lines) == 1
+    # Second partial sync failed because of stale LSN
+    lines = master.find_in_logs("Partial sync requested from stale LSN")
+    assert len(lines) == 1

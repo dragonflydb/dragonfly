@@ -4,11 +4,11 @@
 
 #pragma once
 
+#include <boost/circular_buffer.hpp>
 #include <optional>
 #include <shared_mutex>
 #include <string_view>
 
-#include "base/ring_buffer.h"
 #include "server/common.h"
 #include "server/journal/types.h"
 
@@ -59,9 +59,7 @@ class JournalSlice {
 
  private:
   void CallOnChange(const JournalItem& item);
-  // std::string shard_path_;
-  // std::unique_ptr<LinuxFile> shard_file_;
-  std::optional<base::RingBuffer<JournalItem>> ring_buffer_;
+  boost::circular_buffer<JournalItem> ring_buffer_;
   base::IoBuf ring_serialize_buf_;
 
   mutable util::fb2::SharedMutex cb_mu_;  // to prevent removing callback during call
