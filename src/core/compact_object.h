@@ -15,6 +15,7 @@
 #include "core/mi_memory_resource.h"
 #include "core/small_string.h"
 #include "core/string_or_view.h"
+#include "core/top_keys.h"
 
 namespace dfly {
 
@@ -123,6 +124,7 @@ class CompactObj {
     EXTERNAL_TAG = 20,
     JSON_TAG = 21,
     SBF_TAG = 22,
+    TOPK_TAG = 23,
   };
 
   // String encoding types.
@@ -311,6 +313,9 @@ class CompactObj {
   void SetSBF(uint64_t initial_capacity, double fp_prob, double grow_factor);
   SBF* GetSBF() const;
 
+  void SetTopK(size_t topk, size_t width, size_t depth, double decay);
+  TopKeys* GetTopK() const;
+
   // dest must have at least Size() bytes available
   void GetString(char* dest) const;
 
@@ -485,6 +490,7 @@ class CompactObj {
     // using 'packed' to reduce alignement of U to 1.
     JsonWrapper json_obj __attribute__((packed));
     SBF* sbf __attribute__((packed));
+    TopKeys* topk __attribute__((packed));
     int64_t ival __attribute__((packed));
     ExternalPtr ext_ptr;
 

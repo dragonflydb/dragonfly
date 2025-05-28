@@ -57,6 +57,10 @@ class RespExpr {
                                               : std::nullopt;
   }
 
+  double GetDouble() const {
+    return std::get<double>(u);
+  }
+
   size_t UsedMemory() const {
     return 0;
   }
