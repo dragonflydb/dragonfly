@@ -3112,6 +3112,41 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
         assert len(replica1.find_in_logs("No partial sync due to diff")) > 0
 
 
+async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df_factory):
+    server1 = df_factory.create()
+    server2 = df_factory.create()
+    server3 = df_factory.create()
+    server4 = df_factory.create()
+
+    df_factory.start_all([server1, server2, server3, server4])
+    c_s2 = server2.client()
+    c_s3 = server3.client()
+    c_s4 = server4.client()
+
+    logging.debug("Start replication and wait for full sync")
+    await c_s2.execute_command(f"REPLICAOF localhost {server1.port}")
+    await wait_for_replicas_state(c_s2)
+    await c_s3.execute_command(f"REPLICAOF localhost {server1.port}")
+    await wait_for_replicas_state(c_s3)
+
+    # Promote server 2 to master
+    await c_s2.execute_command(f"REPLICAOF NO ONE")
+    # Make server 4 replica of server 2
+    await c_s4.execute_command(f"REPLICAOF localhost {server2.port}")
+    # Send some write command for lsn inc
+    for i in range(100):
+        await c_s2.set(i, "val")
+    # Make server 3 replica of server 2
+    await c_s3.execute_command(f"REPLICAOF localhost {server2.port}")
+    await check_all_replicas_finished([c_s3], c_s2)
+    await check_all_replicas_finished([c_s4], c_s2)
+
+    server3.stop()
+    # Check logs for partial replication
+    lines = server3.find_in_logs(f"Started partial sync with localhost:{server2.port}")
+    assert len(lines) == 1
+
+
 async def test_replicate_hset_with_expiry(df_factory: DflyInstanceFactory):
     master = df_factory.create(proactor_threads=2)
     replica = df_factory.create(proactor_threads=2)
