@@ -1187,7 +1187,7 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
 
   // Never do expiration on replica or if expiration is disabled or global lock was taken.
   if (time_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_ ||
-      shard_owner()->shard_lock()->Check(IntentLock::Mode::EXCLUSIVE)) {
+      !shard_owner()->shard_lock()->Check(IntentLock::Mode::EXCLUSIVE)) {
     return {it, expire_it};
   }
 
