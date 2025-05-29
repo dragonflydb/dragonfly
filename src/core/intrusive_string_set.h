@@ -36,7 +36,7 @@ class IntrusiveStringSet {
     }
 
     void SetExpiryTime(uint32_t ttl_sec, size_t* obj_malloc_used) {
-      // entry_.SetExpiryTime(ttl_sec, obj_malloc_used);
+      owner_->entries_[bucket_][pos_].SetTtl(ttl_sec);
     }
 
     iterator& operator++() {

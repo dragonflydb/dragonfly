@@ -507,26 +507,26 @@ TEST_F(IntrusiveStringSetTest, Iteration) {
   EXPECT_EQ(to_insert.size(), 0);
 }
 
-// TEST_F(IntrusiveStringSetTest, SetFieldExpireHasExpiry) {
-//   EXPECT_TRUE(ss_->Add("k1", true, 100));
-//   auto k = ss_->Find("k1");
-//   EXPECT_TRUE(k->HasExpiry());
-//   EXPECT_EQ(k->ExpiryTime(), 100);
-//   size_t obj_malloc_used;
-//   k.SetExpiryTime(1, &obj_malloc_used);
-//   EXPECT_TRUE(k->HasExpiry());
-//   EXPECT_EQ(k->ExpiryTime(), 1);
-// }
+TEST_F(IntrusiveStringSetTest, SetFieldExpireHasExpiry) {
+  EXPECT_TRUE(ss_->Add("k1", 100));
+  auto k = ss_->Find("k1");
+  EXPECT_TRUE(k.HasExpiry());
+  EXPECT_EQ(k.ExpiryTime(), 100);
+  size_t obj_malloc_used;
+  k.SetExpiryTime(1, &obj_malloc_used);
+  EXPECT_TRUE(k.HasExpiry());
+  EXPECT_EQ(k.ExpiryTime(), 1);
+}
 
-// TEST_F(IntrusiveStringSetTest, SetFieldExpireNoHasExpiry) {
-//   EXPECT_TRUE(ss_->Add("k1"));
-//   auto k = ss_->Find("k1");
-//   EXPECT_FALSE(k->HasExpiry());
-//   size_t obj_malloc_used;
-//   k.SetExpiryTime(10, &obj_malloc_used);
-//   EXPECT_TRUE(k->HasExpiry());
-//   EXPECT_EQ(k->ExpiryTime(), 10);
-// }
+TEST_F(IntrusiveStringSetTest, SetFieldExpireNoHasExpiry) {
+  EXPECT_TRUE(ss_->Add("k1"));
+  auto k = ss_->Find("k1");
+  EXPECT_FALSE(k.HasExpiry());
+  size_t obj_malloc_used;
+  k.SetExpiryTime(10, &obj_malloc_used);
+  EXPECT_TRUE(k.HasExpiry());
+  EXPECT_EQ(k.ExpiryTime(), 10);
+}
 
 // TEST_F(IntrusiveStringSetTest, Ttl) {
 //   EXPECT_TRUE(ss_->Add("bla"sv, true, 1));
