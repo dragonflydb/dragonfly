@@ -2768,6 +2768,47 @@ TEST_F(SearchFamilyTest, JsonSetIndexesBug) {
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("text", "some text")));
 }
 
+TEST_F(SearchFamilyTest, SearchReindexWriteSearchRace) {
+  const std::string kIndexName = "myRaceIdx";
+  const int kWriterOps = 200;
+  const int kSearcherOps = 200;
+  const int kReindexerOps = 200;
+
+  auto writer_fiber = pp_->at(0)->LaunchFiber([&] {
+    for (int i = 1; i <= kWriterOps; ++i) {
+      std::string doc_key = absl::StrCat("doc:", i);
+      std::string content = absl::StrCat("text data item ", i, " for race condition test");
+      std::string tags_val = absl::StrCat("tagA,tagB,", (i % 10));
+      std::string numeric_field_val = std::to_string(i);
+      Run({"hset", doc_key, "content", content, "tags", tags_val, "numeric_field",
+           numeric_field_val});
+    }
+  });
+
+  auto searcher_fiber = pp_->at(1)->LaunchFiber([&] {
+    for (int i = 1; i <= kSearcherOps; ++i) {
+      int random_val_content = 1 + (i % kWriterOps);
+      std::string query_content = absl::StrCat("@content:item", random_val_content);
+      Run({"ft.search", kIndexName, query_content});
+    }
+  });
+
+  auto reindexer_fiber = pp_->at(2)->LaunchFiber([&] {
+    for (int i = 1; i <= kReindexerOps; ++i) {
+      Run({"ft.create", kIndexName, "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "content",
+           "TEXT", "SORTABLE", "tags", "TAG", "SORTABLE", "numeric_field", "NUMERIC", "SORTABLE"});
+      Run({"ft.dropindex", kIndexName});
+    }
+  });
+
+  // Join fibers
+  writer_fiber.Join();
+  searcher_fiber.Join();
+  reindexer_fiber.Join();
+
+  ASSERT_FALSE(service_->IsShardSetLocked());
+}
+
 TEST_F(SearchFamilyTest, IgnoredOptionsInFtCreate) {
   Run({"HSET", "doc:1", "title", "Test Document"});
 

@@ -1244,10 +1244,13 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
   if (IsGlobal()) {
     shard->shard_lock()->Release(LockMode());
   } else {
-    auto lock_args = GetLockArgs(shard->shard_id());
-    DCHECK(sd.local_mask & KEYLOCK_ACQUIRED);
-    DCHECK(!lock_args.fps.empty());
-    GetDbSlice(shard->shard_id()).Release(LockMode(), lock_args);
+    if ((cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0) {
+      auto lock_args = GetLockArgs(shard->shard_id());
+      DCHECK(sd.local_mask & KEYLOCK_ACQUIRED);
+      DCHECK(!lock_args.fps.empty());
+      GetDbSlice(shard->shard_id()).Release(LockMode(), lock_args);
+    }
+
     sd.local_mask &= ~KEYLOCK_ACQUIRED;
   }
 
