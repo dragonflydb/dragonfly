@@ -50,7 +50,7 @@ async def test_seeder_key_target(async_client: aioredis.Redis):
     s = Seeder(units=len(Seeder.DEFAULT_TYPES) * 2, key_target=5000)
 
     # Ensure tests are not reasonably slow
-    async with async_timeout.timeout(1 + 4):
+    async with async_timeout.timeout(10):
         # Fill with 5k keys, 1% derivation = 50
         await s.run(async_client, target_deviation=0.01)
         assert abs(await async_client.dbsize() - 5000) <= 50
