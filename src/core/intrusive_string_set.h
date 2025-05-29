@@ -88,6 +88,7 @@ class IntrusiveStringSet {
           if (bucket[pos_])
             return;
         }
+        pos_ = 0;
       }
       owner_ = nullptr;
     }
@@ -225,12 +226,12 @@ class IntrusiveStringSet {
   }
 
   ISLEntry Pop() {
-    // for (auto& bucket : entries_) {
-    //   if (auto res = bucket.Pop(time_now_); res) {
-    //     --size_;
-    //     return res;
-    //   }
-    // }
+    for (auto& bucket : entries_) {
+      if (auto res = bucket.Pop(); !res.Empty()) {
+        --size_;
+        return res;
+      }
+    }
     return {};
   }
 
