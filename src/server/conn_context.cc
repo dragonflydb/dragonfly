@@ -259,6 +259,7 @@ void ConnectionContext::Unsubscribe(std::string_view channel) {
     conn_state.subscribe_info.reset();
     DCHECK_GE(subscriptions, 1u);
     --subscriptions;
+    subscriber = false;  // If we have no subscriptions, we are not a subscriber.
   }
 }
 
@@ -273,10 +274,11 @@ vector<unsigned> ConnectionContext::ChangeSubscriptions(CmdArgList channels, boo
     DCHECK(to_add);
 
     conn_state.subscribe_info.reset(new ConnectionState::SubscribeInfo);
+    subscriber = true;
     subscriptions++;
   }
 
-  auto& sinfo = *conn_state.subscribe_info.get();
+  auto& sinfo = *conn_state.subscribe_info;
   auto& local_store = pattern ? sinfo.patterns : sinfo.channels;
 
   int32_t tid = util::ProactorBase::me()->GetPoolIndex();
