@@ -47,7 +47,7 @@ struct LuaGcFlag {
     int stepsize = 13;
   };
 
-  LuaGcFlag() : LuaGcFlag(GenArgs()) {
+  LuaGcFlag() : type(Default) {
   }
 
   LuaGcFlag(GenArgs gen_args) : type(Gen) {
@@ -58,7 +58,7 @@ struct LuaGcFlag {
     args.inc = inc_args;
   }
 
-  enum { Gen, Inc } type = Gen;
+  enum { Gen, Inc, Default } type = Default;
 
   union Args {
     GenArgs gen;
@@ -69,8 +69,8 @@ struct LuaGcFlag {
   } args;
 };
 
-ABSL_FLAG(LuaGcFlag, luagc, LuaGcFlag(LuaGcFlag::GenArgs{20, 100}),
-          "Specifies Lua garabage collector preferences. "
+ABSL_FLAG(LuaGcFlag, luagc, LuaGcFlag{},
+          "Specifies Lua garabage collector preferences. By default used default lua GC parameters."
           "Format should be 'inc/200/100/13' or 'gen/20/100' where 'inc' and 'gen' are types of "
           "GC, numbers are parameters."
           "For more information check https://www.lua.org/manual/5.4/manual.html#2.5");
@@ -988,10 +988,16 @@ void Interpreter::RunGC() {
 
 void Interpreter::UpdateGCParameters() {
   auto gc = absl::GetFlag(FLAGS_luagc);
-  if (gc.type == LuaGcFlag::Gen) {
-    lua_gc(lua_, LUA_GCGEN, gc.args.gen.minormul, gc.args.gen.majormul);
-  } else {
-    lua_gc(lua_, LUA_GCINC, gc.args.inc.pause, gc.args.inc.stepmul, gc.args.inc.stepsize);
+
+  switch (gc.type) {
+    case LuaGcFlag::Default:
+      return;
+    case LuaGcFlag::Gen:
+      lua_gc(lua_, LUA_GCGEN, gc.args.gen.minormul, gc.args.gen.majormul);
+      return;
+    case LuaGcFlag::Inc:
+      lua_gc(lua_, LUA_GCINC, gc.args.inc.pause, gc.args.inc.stepmul, gc.args.inc.stepsize);
+      return;
   }
 }
 
