@@ -69,7 +69,7 @@ struct LuaGcFlag {
   } args;
 };
 
-ABSL_FLAG(LuaGcFlag, luagc, LuaGcFlag{},
+ABSL_FLAG(LuaGcFlag, luagc, LuaGcFlag(LuaGcFlag::GenArgs{20, 100}),
           "Specifies Lua garabage collector preferences. "
           "Format should be 'inc/200/100/13' or 'gen/20/100' where 'inc' and 'gen' are types of "
           "GC, numbers are parameters."
