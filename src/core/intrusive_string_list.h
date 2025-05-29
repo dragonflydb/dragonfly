@@ -228,7 +228,7 @@ class ISLEntry {
   void SetTtl(uint32_t ttl_sec) {
     DCHECK(!IsVector());
     if (HasTtl()) {
-      auto* ttl_pos = Raw() + sizeof(char*);
+      auto* ttl_pos = Raw();
       std::memcpy(ttl_pos, &ttl_sec, sizeof(ttl_sec));
     } else {
       *this = ISLEntry(ttl_sec);
