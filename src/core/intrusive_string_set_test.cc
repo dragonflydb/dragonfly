@@ -451,61 +451,61 @@ TEST_F(IntrusiveStringSetTest, XtremeScanGrow) {
   EXPECT_EQ(seen.size(), to_see.size());
 }
 
-// TEST_F(IntrusiveStringSetTest, Pop) {
-//   constexpr size_t num_items = 8;
-//   unordered_set<string> to_insert;
+TEST_F(IntrusiveStringSetTest, Pop) {
+  constexpr size_t num_items = 8;
+  unordered_set<string> to_insert;
 
-//   while (to_insert.size() != num_items) {
-//     auto str = random_string(generator_, 10);
-//     if (to_insert.count(str)) {
-//       continue;
-//     }
+  while (to_insert.size() != num_items) {
+    auto str = random_string(generator_, 10);
+    if (to_insert.count(str)) {
+      continue;
+    }
 
-//     to_insert.insert(str);
-//     EXPECT_TRUE(ss_->Add(str));
-//   }
+    to_insert.insert(str);
+    EXPECT_TRUE(ss_->Add(str));
+  }
 
-//   while (!ss_->Empty()) {
-//     size_t size = ss_->UpperBoundSize();
-//     auto str = ss_->Pop();
-//     DCHECK(ss_->UpperBoundSize() == to_insert.size() - 1);
-//     DCHECK(str);
-//     DCHECK(to_insert.count(std::string(str.Key())));
-//     DCHECK_EQ(ss_->UpperBoundSize(), size - 1);
-//     to_insert.erase(std::string(str.Key()));
-//   }
+  while (!ss_->Empty()) {
+    size_t size = ss_->UpperBoundSize();
+    auto str = ss_->Pop();
+    DCHECK(ss_->UpperBoundSize() == to_insert.size() - 1);
+    DCHECK(str);
+    DCHECK(to_insert.count(std::string(str.Key())));
+    DCHECK_EQ(ss_->UpperBoundSize(), size - 1);
+    to_insert.erase(std::string(str.Key()));
+  }
 
-//   DCHECK(ss_->Empty());
-//   DCHECK(to_insert.empty());
-// }
+  DCHECK(ss_->Empty());
+  DCHECK(to_insert.empty());
+}
 
-// TEST_F(IntrusiveStringSetTest, Iteration) {
-//   ss_->Add("foo");
-//   for (const auto& ptr : *ss_) {
-//     LOG(INFO) << ptr;
-//   }
-//   ss_->Clear();
-//   constexpr size_t num_items = 8192;
-//   unordered_set<string> to_insert;
+TEST_F(IntrusiveStringSetTest, Iteration) {
+  ss_->Add("foo");
+  for (const auto& ptr : *ss_) {
+    LOG(INFO) << ptr;
+  }
+  ss_->Clear();
+  constexpr size_t num_items = 8192;
+  unordered_set<string> to_insert;
 
-//   while (to_insert.size() != num_items) {
-//     auto str = random_string(generator_, 10);
-//     if (to_insert.count(str)) {
-//       continue;
-//     }
+  while (to_insert.size() != num_items) {
+    auto str = random_string(generator_, 10);
+    if (to_insert.count(str)) {
+      continue;
+    }
 
-//     to_insert.insert(str);
-//     EXPECT_TRUE(ss_->Add(str));
-//   }
+    to_insert.insert(str);
+    EXPECT_TRUE(ss_->Add(str));
+  }
 
-//   for (const auto& ptr : *ss_) {
-//     std::string str(ptr.Key());
-//     EXPECT_TRUE(to_insert.count(str));
-//     to_insert.erase(str);
-//   }
+  for (const auto& ptr : *ss_) {
+    std::string str(ptr.Key());
+    EXPECT_TRUE(to_insert.count(str));
+    to_insert.erase(str);
+  }
 
-//   EXPECT_EQ(to_insert.size(), 0);
-// }
+  EXPECT_EQ(to_insert.size(), 0);
+}
 
 // TEST_F(IntrusiveStringSetTest, SetFieldExpireHasExpiry) {
 //   EXPECT_TRUE(ss_->Add("k1", true, 100));

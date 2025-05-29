@@ -88,7 +88,8 @@ class ISLEntry {
 
   ISLEntry(const ISLEntry& e) = delete;
   ISLEntry(ISLEntry&& e) {
-    std::swap(data_, e.data_);
+    data_ = e.data_;
+    e.data_ = nullptr;
   }
 
   ~ISLEntry() {
