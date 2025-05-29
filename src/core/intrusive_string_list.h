@@ -231,7 +231,7 @@ class ISLEntry {
       auto* ttl_pos = Raw();
       std::memcpy(ttl_pos, &ttl_sec, sizeof(ttl_sec));
     } else {
-      *this = ISLEntry(ttl_sec);
+      *this = ISLEntry(Key(), ttl_sec);
     }
   }
 
