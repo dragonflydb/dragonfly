@@ -85,6 +85,11 @@ class ClusterShardMigration {
           VLOG(1) << "Finalized flow " << source_shard_id_;
           return;
         }
+        if (in_migration_->GetState() == MigrationState::C_FATAL) {
+          VLOG(1) << "Flow finalization " << source_shard_id_
+                  << " canceled due memory limit reached";
+          return;
+        }
         if (!tx_data->command.cmd_args.empty()) {
           VLOG(1) << "Flow finalization failed " << source_shard_id_ << " by "
                   << tx_data->command.cmd_args[0];
@@ -99,6 +104,12 @@ class ClusterShardMigration {
         // TODO check about ping logic
       } else {
         ExecuteTx(std::move(*tx_data), cntx);
+        // Break incoming slot migration if command reported OOM
+        if (executor_.connection_context()->IsOOM()) {
+          cntx->ReportError(std::string{kIncomingMigrationOOM});
+          in_migration_->ReportFatalError(std::string{kIncomingMigrationOOM});
+          break;
+        }
       }
     }
 
@@ -190,6 +201,11 @@ bool IncomingSlotMigration::Join(long attempt) {
       return false;
     }
 
+    // If any of migration shards reported ERROR (OOM) we can return error
+    if (GetState() == MigrationState::C_FATAL) {
+      return false;
+    }
+
     // if data was sent after LSN, WaitFor() always returns false so to reduce wait time
     // we check current state and if WaitFor false but GetLastAttempt() == attempt
     // the Join is failed and we can return false
@@ -227,6 +243,11 @@ void IncomingSlotMigration::Stop() {
     }
   }
 
+  // Don't wait if we reached FATAL state
+  if (state_ == MigrationState::C_FATAL) {
+    return;
+  }
+
   // we need to Join the migration process to prevent data corruption
   const absl::Time start = absl::Now();
   const absl::Duration timeout =
@@ -260,7 +281,12 @@ void IncomingSlotMigration::Init(uint32_t shards_num) {
 
 void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
   shard_flows_[shard]->Start(&cntx_, source);
-  VLOG(1) << "Incoming flow " << shard << " finished for " << source_id_;
+  VLOG(1) << "Incoming flow " << shard
+          << (GetState() == MigrationState::C_FINISHED ? " finished " : " cancelled ") << "for "
+          << source_id_;
+  if (GetState() == MigrationState::C_FATAL) {
+    Stop();
+  }
 }
 
 size_t IncomingSlotMigration::GetKeyCount() const {

@@ -1405,6 +1405,10 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
   }
 
   if (std::string reason = builder->ConsumeLastError(); !reason.empty()) {
+    // Set flag if OOM reported
+    if (reason == kOutOfMemory) {
+      cmd_cntx.conn_cntx->is_oom_ = true;
+    }
     VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
     LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
   }

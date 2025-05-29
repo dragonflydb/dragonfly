@@ -342,6 +342,11 @@ bool ProtocolClient::CheckRespIsSimpleReply(string_view reply) const {
          ToSV(resp_args_.front().GetBuf()) == reply;
 }
 
+bool ProtocolClient::CheckRespSimpleError(string_view error) const {
+  return resp_args_.size() == 1 && resp_args_.front().type == RespExpr::ERROR &&
+         ToSV(resp_args_.front().GetBuf()) == error;
+}
+
 bool ProtocolClient::CheckRespFirstTypes(initializer_list<RespExpr::Type> types) const {
   unsigned i = 0;
   for (RespExpr::Type type : types) {

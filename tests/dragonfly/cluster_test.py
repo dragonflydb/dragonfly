@@ -3236,3 +3236,60 @@ async def test_cancel_blocking_cmd_during_mygration_finalization(df_factory: Dfl
     await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
 
     assert await c_nodes[1].type("list") == "none"
+
+
+@dfly_args({"cluster_mode": "yes"})
+async def test_slot_migration_oom(df_factory):
+    instances = [
+        df_factory.create(
+            port=next(next_port),
+            admin_port=next(next_port),
+            proactor_threads=4,
+            maxmemory="1024MB",
+        ),
+        df_factory.create(
+            port=next(next_port),
+            admin_port=next(next_port),
+            proactor_threads=2,
+            maxmemory="512MB",
+        ),
+    ]
+
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await nodes[0].client.execute_command("DEBUG POPULATE 100 test 10000000")
+
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 16383)], nodes[1].id)
+    )
+
+    logging.info("Start migration")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    # Wait for FATAL status
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FATAL", 300)
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "FATAL")
+
+    # Node_0 slot-migration-status
+    status = await nodes[0].admin_client.execute_command(
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[1].id
+    )
+    # Direction
+    assert status[0][0] == "out"
+    # Error message
+    assert status[0][4] == "Cannot allocate memory: INCOMING_MIGRATION_OOM"
+
+    # Node_1 slot-migration-status
+    status = await nodes[1].admin_client.execute_command(
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
+    )
+    # Direction
+    assert status[0][0] == "in"
+    # Error message
+    assert status[0][4] == "INCOMING_MIGRATION_OOM"
