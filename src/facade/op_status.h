@@ -16,6 +16,7 @@ enum class OpStatus : uint16_t {
   KEY_MOVED,
   SKIPPED,
   INVALID_VALUE,
+  CORRUPTED_HLL,
   OUT_OF_RANGE,
   WRONG_TYPE,
   WRONG_JSON_TYPE,

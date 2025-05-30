@@ -26,6 +26,8 @@ std::string_view StatusToMsg(OpStatus status) {
       return kSyntaxErr;
     case OpStatus::OUT_OF_MEMORY:
       return kOutOfMemory;
+    case OpStatus::CORRUPTED_HLL:
+      return "-INVALIDOBJ Corrupted HLL object detected.";
     case OpStatus::BUSY_GROUP:
       return "-BUSYGROUP Consumer Group name already exists";
     case OpStatus::INVALID_NUMERIC_RESULT:
