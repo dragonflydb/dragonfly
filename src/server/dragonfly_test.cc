@@ -374,6 +374,25 @@ TEST_F(DflyEngineTest, Memcache) {
   EXPECT_THAT(resp, ElementsAre("VALUE key 1 3 0", "bar", "VALUE key2 2 8 0", "bar2val2", "END"));
 }
 
+TEST_F(DflyEngineTest, MemcacheGat) {
+  using m = MemcacheParser;
+
+  EXPECT_THAT(GetMC(m::GAT, {"1000", "foo", "bar"}), ElementsAre("END"));
+  EXPECT_THAT(RunMC(m::SET, "exp-key", "exp-val"), ElementsAre("STORED"));
+  EXPECT_THAT(GetMC(m::GAT, {"1", "exp-key"}), ElementsAre("VALUE exp-key 0 7", "exp-val", "END"));
+
+  AdvanceTime(2 * 1000);
+  EXPECT_THAT(RunMC(m::GET, "exp-key"), ElementsAre("END"));
+
+  EXPECT_THAT(RunMC(m::SET, "a", "a-val"), ElementsAre("STORED"));
+  EXPECT_THAT(RunMC(m::SET, "x", "x-val"), ElementsAre("STORED"));
+  EXPECT_THAT(GetMC(m::GAT, {"3", "a", "x", "z", "foo"}),
+              ElementsAre("VALUE a 0 5", "a-val", "VALUE x 0 5", "x-val", "END"));
+
+  AdvanceTime(2 * 1000);
+  EXPECT_THAT(GetMC(m::GAT, {"3", "a", "x", "z", "foo"}), ElementsAre("END"));
+}
+
 TEST_F(DflyEngineTest, MemcacheFlags) {
   using MP = MemcacheParser;
 
