@@ -321,16 +321,17 @@ class IntrusiveStringSet {
     auto prev_size = 1 << prev_capacity_log;
     for (int64_t bucket_id = prev_size - 1; bucket_id >= 0; --bucket_id) {
       auto bucket = std::move(entries_[bucket_id]);
+      // TODO add optimization for package processing
       for (uint32_t pos = 0, size = bucket.ElementsNum(); pos < size; ++pos) {
+        // TODO operator [] is inefficient and it is better to avoid it
         if (bucket[pos]) {
           auto new_bucket_id =
               bucket[pos].Rehash(bucket_id, prev_capacity_log, capacity_log_, kShiftLog);
-          // TODO remove
-          // auto real_bucket_id = BucketId(Hash(bucket[i].Key()), capacity_log_);
-          // DCHECK(real_bucket_id == bucket_id);
 
+          // TODO add optimization for package processing
           new_bucket_id = FindEmptyAround(new_bucket_id);
 
+          // insert method is inefficient
           entries_[new_bucket_id]->Insert(std::move(bucket[pos]));
         }
       }

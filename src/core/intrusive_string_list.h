@@ -92,7 +92,8 @@ class ISLEntry {
     e.data_ = nullptr;
   }
 
-  ~ISLEntry() {
+  // consider manual removing, we waste a lot of time to check nullptr
+  inline ~ISLEntry() {
     Clear();
   }
 
@@ -102,33 +103,33 @@ class ISLEntry {
     return *this;
   }
 
-  bool Empty() const {
+  inline bool Empty() const {
     return !Raw();
   }
 
-  operator bool() const {
+  inline operator bool() const {
     return !Empty();
   }
 
-  bool IsVector() const {
+  inline bool IsVector() const {
     return (uptr() & kVectorBit) != 0;
   }
 
-  std::vector<ISLEntry>& AsVector() {
+  inline std::vector<ISLEntry>& AsVector() {
     return *reinterpret_cast<std::vector<ISLEntry>*>(Raw());
   }
 
-  std::string_view Key() const {
+  inline std::string_view Key() const {
     DCHECK(!IsVector());
     return {GetKeyData(), GetKeySize()};
   }
 
-  bool HasExpiry() const {
+  inline bool HasExpiry() const {
     return (uptr() & kExpiryBit) != 0;
   }
 
   // returns the expiry time of the current entry or UINT32_MAX if no expiry is set.
-  uint32_t GetExpiry() const {
+  inline uint32_t GetExpiry() const {
     std::uint32_t res = UINT32_MAX;
     if (HasExpiry()) {
       DCHECK(!IsVector());
@@ -142,7 +143,7 @@ class ISLEntry {
     return this;
   }
 
-  uint64_t GetExtendedHash() const {
+  inline uint64_t GetExtendedHash() const {
     return (uptr() & kExtHashShiftedMask) >> kExtHashShift;
   }
 
@@ -265,7 +266,7 @@ class ISLEntry {
   }
 
   // TODO refactor, because it's inefficient
-  uint32_t Insert(ISLEntry&& e) {
+  inline uint32_t Insert(ISLEntry&& e) {
     if (Empty()) {
       *this = std::move(e);
       return 0;
@@ -298,7 +299,8 @@ class ISLEntry {
     return AsVector().size();
   }
 
-  ISLEntry& operator[](uint32_t pos) {
+  // TODO remove, it is inefficient
+  inline ISLEntry& operator[](uint32_t pos) {
     DCHECK(!Empty());
     if (!IsVector()) {
       DCHECK(pos == 0);
@@ -358,7 +360,11 @@ class ISLEntry {
   }
 
  protected:
-  void Clear() {
+  inline void Clear() {
+    // TODO add optimization to avoid destructor calls during vector allocator
+    if (!data_)
+      return;
+
     if (IsVector()) {
       delete &AsVector();
     } else {
@@ -383,70 +389,45 @@ class ISLEntry {
     return size;
   }
 
-  uint64_t uptr() const {
+  inline uint64_t uptr() const {
     return uint64_t(data_);
   }
 
-  char* Raw() const {
+  inline char* Raw() const {
     return (char*)(uptr() & ~kTagMask);
   }
 
-  void SetExpiryBit(bool b) {
+  inline void SetExpiryBit(bool b) {
     if (b)
       data_ = (char*)(uptr() | kExpiryBit);
     else
       data_ = (char*)(uptr() & (~kExpiryBit));
   }
 
-  void SetVectorBit() {
+  inline void SetVectorBit() {
     data_ = (char*)(uptr() | kVectorBit);
   }
 
-  void SetSsoBit() {
+  inline void SetSsoBit() {
     data_ = (char*)(uptr() | kSsoBit);
   }
 
-  bool HasSso() const {
+  inline bool HasSso() const {
     return (uptr() & kSsoBit) != 0;
   }
 
-  size_t Size() {
+  inline size_t Size() {
     size_t key_field_size = HasSso() ? 1 : 4;
     size_t expiry_field_size = HasExpiry() ? 4 : 0;
     return expiry_field_size + key_field_size + GetKeySize();
   }
-  std::uint32_t GetExpirySize() const {
+
+  inline std::uint32_t GetExpirySize() const {
     return HasExpiry() ? sizeof(std::uint32_t) : 0;
   }
 
-  // TODO add optimization for big keys
   // memory daya layout [Expiry, key_size, key]
   char* data_ = nullptr;
 };
-
-// template <class T, std::enable_if_t<std::is_invocable_v<T, std::string_view>>* = nullptr>
-// bool Scan(const T& cb, uint32_t* set_size, uint32_t curr_time) {
-//   for (auto it = start_; it && it.ExpiryTime() <= curr_time; it = start_) {
-//     start_ = it.Next();
-//     ISLEntry::Destroy(it);
-//     (*set_size)--;
-//   }
-
-//   for (auto curr = start_, next = start_; curr; curr = next) {
-//     cb(curr.Key());
-//     next = curr.Next();
-//     for (auto tmp = next; tmp && tmp.ExpiryTime() <= curr_time; tmp = next) {
-//       (*set_size)--;
-//       next = next.Next();
-//       ISLEntry::Destroy(tmp);
-//     }
-//     curr.SetNext(next);
-//   }
-//   return start_;
-// }
-
-// size_t ObjMallocUsed() const {
-//   return obj_malloc_used_;
-// };
 
 }  // namespace dfly
