@@ -212,4 +212,20 @@ TEST_F(HllFamilyTest, MergeInvalid) {
   EXPECT_EQ(CheckedInt({"pfcount", "key1"}), 3);
 }
 
+TEST_F(HllFamilyTest, MergeWithInvalidHllFormat) {
+  EXPECT_EQ(CheckedInt({"pfadd", "complex@key \"weird!field\" \"value\\nwith\\tescape sequences\"",
+                        "some_element"}),
+            1);
+  EXPECT_EQ(CheckedInt({"append", "complex@key \"weird!field\" \"value\\nwith\\tescape sequences\"",
+                        "corrupt_data"}),
+            33);
+  EXPECT_EQ(CheckedInt({"pfadd", "\"key with \\\"quotes\\\"\" \"value with \\\\backslashes\\\\\"",
+                        "element1"}),
+            1);
+  EXPECT_THAT(Run({"pfmerge", "result_key",
+                   "complex@key \"weird!field\" \"value\\nwith\\tescape sequences\"",
+                   "\"key with \\\"quotes\\\"\" \"value with \\\\backslashes\\\\\""}),
+              ErrArg(HllFamily::kInvalidHllErr));
+}
+
 }  // namespace dfly

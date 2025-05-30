@@ -57,14 +57,18 @@ HllBufferPtr StringToHllPtr(string_view hll) {
   return {.hll = (unsigned char*)hll.data(), .size = hll.size()};
 }
 
-void ConvertToDenseIfNeeded(string* hll) {
+bool ConvertToDenseIfNeeded(string* hll) {
   if (isValidHLL(StringToHllPtr(*hll)) == HLL_VALID_SPARSE) {
     string new_hll;
     new_hll.resize(getDenseHllSize());
     int result = convertSparseToDenseHll(StringToHllPtr(*hll), StringToHllPtr(new_hll));
-    DCHECK_EQ(result, 0);
+    if (result != 0) {
+      // Conversion failed - HLL data is corrupted
+      return false;
+    }
     *hll = std::move(new_hll);
   }
+  return true;
 }
 
 OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values) {
@@ -152,7 +156,9 @@ OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
         // Even in the case of a read - we still want to convert the hll to dense format, as it
         // could originate in Redis (like in replication or rdb load).
         hll = hll_view;
-        ConvertToDenseIfNeeded(&hll);
+        if (!ConvertToDenseIfNeeded(&hll)) {
+          return OpStatus::INVALID_VALUE;
+        }
         hll_view = hll;
         break;
       case HLL_INVALID:
@@ -177,7 +183,9 @@ OpResult<vector<string>> ReadValues(const OpArgs& op_args, const ShardArgs& keys
       if (it.ok()) {
         string hll;
         it.value()->second.GetString(&hll);
-        ConvertToDenseIfNeeded(&hll);
+        if (!ConvertToDenseIfNeeded(&hll)) {
+          return OpStatus::INVALID_VALUE;
+        }
         if (isValidHLL(StringToHllPtr(hll)) != HLL_VALID_DENSE) {
           return OpStatus::INVALID_VALUE;
         } else {
