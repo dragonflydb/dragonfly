@@ -175,14 +175,12 @@ class IntrusiveStringSet {
 
   // TODO: Consider using chunks for this as string set
   void Fill(IntrusiveStringSet* other) {
-    // DCHECK(other->entries_.empty());
-    // other->Reserve(UpperBoundSize());
-    // other->set_time(time_now());
-    // for (uint32_t bucket_id = 0; bucket_id < entries_.size(); ++bucket_id) {
-    //   for (auto it = entries_[bucket_id].begin(); it != entries_[bucket_id].end(); ++it) {
-    //     other->Add(it->Key(), true, it.HasExpiry() ? it->ExpiryTime() : UINT32_MAX);
-    //   }
-    // }
+    DCHECK(other->entries_.empty());
+    other->Reserve(UpperBoundSize());
+    other->set_time(time_now());
+    for (auto it = begin(), it_end = end(); it != it_end; ++it) {
+      other->Add(it->Key(), it.HasExpiry() ? it.ExpiryTime() - time_now() : UINT32_MAX);
+    }
   }
 
   /**

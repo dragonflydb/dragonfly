@@ -568,44 +568,44 @@ TEST_F(IntrusiveStringSetTest, Ttl) {
   }
 }
 
-// TEST_F(IntrusiveStringSetTest, Grow) {
-//   for (size_t j = 0; j < 10; ++j) {
-//     for (size_t i = 0; i < 4098; ++i) {
-//       ss_->Reserve(generator_() % 256);
-//       auto str = random_string(generator_, 3);
-//       ss_->Add(str);
-//     }
-//     ss_->Clear();
-//   }
-// }
+TEST_F(IntrusiveStringSetTest, Grow) {
+  for (size_t j = 0; j < 10; ++j) {
+    for (size_t i = 0; i < 4098; ++i) {
+      ss_->Reserve(generator_() % 256);
+      auto str = random_string(generator_, 3);
+      ss_->Add(str);
+    }
+    ss_->Clear();
+  }
+}
 
-// TEST_F(IntrusiveStringSetTest, Reserve) {
-//   vector<string> strs;
+TEST_F(IntrusiveStringSetTest, Reserve) {
+  vector<string> strs;
 
-//   for (size_t i = 0; i < 10; ++i) {
-//     strs.push_back(random_string(generator_, 10));
-//     ss_->Add(strs.back());
-//   }
+  for (size_t i = 0; i < 10; ++i) {
+    strs.push_back(random_string(generator_, 10));
+    ss_->Add(strs.back());
+  }
 
-//   for (size_t j = 2; j < 20; j += 3) {
-//     ss_->Reserve(j * 20);
-//     for (size_t i = 0; i < 10; ++i) {
-//       ASSERT_TRUE(ss_->Contains(strs[i]));
-//     }
-//   }
-// }
+  for (size_t j = 2; j < 20; j += 3) {
+    ss_->Reserve(j * 20);
+    for (size_t i = 0; i < 10; ++i) {
+      ASSERT_TRUE(ss_->Contains(strs[i]));
+    }
+  }
+}
 
-// TEST_F(IntrusiveStringSetTest, Fill) {
-//   for (size_t i = 0; i < 100; ++i) {
-//     ss_->Add(random_string(generator_, 10));
-//   }
-//   IntrusiveStringSet s2;
-//   ss_->Fill(&s2);
-//   EXPECT_EQ(s2.UpperBoundSize(), ss_->UpperBoundSize());
-//   for (const auto& s : *ss_) {
-//     EXPECT_TRUE(s2.Contains(s.Key()));
-//   }
-// }
+TEST_F(IntrusiveStringSetTest, Fill) {
+  for (size_t i = 0; i < 100; ++i) {
+    ss_->Add(random_string(generator_, 10));
+  }
+  IntrusiveStringSet s2;
+  ss_->Fill(&s2);
+  EXPECT_EQ(s2.UpperBoundSize(), ss_->UpperBoundSize());
+  for (const auto& s : *ss_) {
+    EXPECT_TRUE(s2.Contains(s.Key()));
+  }
+}
 
 // TEST_F(IntrusiveStringSetTest, IterateEmpty) {
 //   for (const auto& s : *ss_) {
