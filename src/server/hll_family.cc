@@ -58,7 +58,8 @@ HllBufferPtr StringToHllPtr(string_view hll) {
 }
 
 bool ConvertToDenseIfNeeded(string* hll) {
-  if (isValidHLL(StringToHllPtr(*hll)) == HLL_VALID_SPARSE) {
+  int hll_validity = isValidHLL(StringToHllPtr(*hll));
+  if (hll_validity == HLL_VALID_SPARSE) {
     string new_hll;
     new_hll.resize(getDenseHllSize());
     int result = convertSparseToDenseHll(StringToHllPtr(*hll), StringToHllPtr(new_hll));
@@ -67,8 +68,14 @@ bool ConvertToDenseIfNeeded(string* hll) {
       return false;
     }
     *hll = std::move(new_hll);
+    return true;
+  } else if (hll_validity == HLL_VALID_DENSE) {
+    // Already dense, nothing to do
+    return true;
+  } else {
+    // HLL_INVALID
+    return false;
   }
-  return true;
 }
 
 OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values) {
@@ -186,11 +193,7 @@ OpResult<vector<string>> ReadValues(const OpArgs& op_args, const ShardArgs& keys
         if (!ConvertToDenseIfNeeded(&hll)) {
           return OpStatus::INVALID_VALUE;
         }
-        if (isValidHLL(StringToHllPtr(hll)) != HLL_VALID_DENSE) {
-          return OpStatus::INVALID_VALUE;
-        } else {
-          values.push_back(std::move(hll));
-        }
+        values.push_back(std::move(hll));
       } else if (it.status() == OpStatus::WRONG_TYPE) {
         return OpStatus::WRONG_TYPE;
       }
