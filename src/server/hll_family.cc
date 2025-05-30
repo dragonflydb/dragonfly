@@ -72,7 +72,7 @@ bool ConvertToDenseIfNeeded(string* hll) {
     }
     *hll = std::move(new_hll);
     return true;
-  } 
+  }
   return hll_validity == HLL_VALID_DENSE;
 }
 
