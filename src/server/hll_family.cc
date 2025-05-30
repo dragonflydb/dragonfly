@@ -46,6 +46,9 @@ void HandleOpValueResult(const OpResult<T>& result, SinkReplyBuilder* builder) {
       case OpStatus::INVALID_VALUE:
         builder->SendError(HllFamily::kInvalidHllErr);
         break;
+      case OpStatus::CORRUPTED_HLL:
+        builder->SendError(facade::StatusToMsg(OpStatus::CORRUPTED_HLL));
+        break;
       default:
         builder->SendLong(0);  // in case we don't have the value we should just send 0
         break;
@@ -164,7 +167,7 @@ OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
         // could originate in Redis (like in replication or rdb load).
         hll = hll_view;
         if (!ConvertToDenseIfNeeded(&hll)) {
-          return OpStatus::INVALID_VALUE;
+          return OpStatus::CORRUPTED_HLL;
         }
         hll_view = hll;
         break;
@@ -191,7 +194,7 @@ OpResult<vector<string>> ReadValues(const OpArgs& op_args, const ShardArgs& keys
         string hll;
         it.value()->second.GetString(&hll);
         if (!ConvertToDenseIfNeeded(&hll)) {
-          return OpStatus::INVALID_VALUE;
+          return OpStatus::CORRUPTED_HLL;
         }
         values.push_back(std::move(hll));
       } else if (it.status() == OpStatus::WRONG_TYPE) {
@@ -219,7 +222,7 @@ OpResult<int64_t> PFCountMulti(CmdArgList args, const CommandContext& cmd_cntx) 
   vector<vector<string>> hlls;
   hlls.resize(shard_set->size());
 
-  atomic_bool success = true;
+  atomic<OpStatus> error_status{OpStatus::OK};
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
     ShardArgs shard_args = t->GetShardArgs(shard->shard_id());
@@ -227,7 +230,7 @@ OpResult<int64_t> PFCountMulti(CmdArgList args, const CommandContext& cmd_cntx) 
     if (result.ok()) {
       hlls[sid] = std::move(result.value());
     } else {
-      success.store(false, memory_order_relaxed);
+      error_status.store(result.status(), memory_order_relaxed);
     }
     return OpStatus::OK;
   };
@@ -237,8 +240,9 @@ OpResult<int64_t> PFCountMulti(CmdArgList args, const CommandContext& cmd_cntx) 
     return cb_status;
   }
 
-  if (!success.load(memory_order_relaxed)) {
-    return OpStatus::INVALID_VALUE;
+  OpStatus stored_error = error_status.load(memory_order_relaxed);
+  if (stored_error != OpStatus::OK) {
+    return stored_error;
   }
 
   vector<HllBufferPtr> ptrs = ConvertShardVector(hlls);
@@ -268,7 +272,7 @@ OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder
   vector<vector<string>> hlls;
   hlls.resize(shard_set->size());
 
-  atomic_bool success = true;
+  atomic<OpStatus> error_status{OpStatus::OK};
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
     ShardArgs shard_args = t->GetShardArgs(shard->shard_id());
@@ -276,16 +280,17 @@ OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder
     if (result.ok()) {
       hlls[sid] = std::move(result.value());
     } else {
-      success.store(false, memory_order_relaxed);
+      error_status.store(result.status(), memory_order_relaxed);
     }
     return OpStatus::OK;
   };
 
   tx->Execute(std::move(cb), false);
 
-  if (!success.load(memory_order_relaxed)) {
+  OpStatus stored_error = error_status.load(memory_order_relaxed);
+  if (stored_error != OpStatus::OK) {
     tx->Conclude();
-    return OpStatus::INVALID_VALUE;
+    return stored_error;
   }
 
   vector<HllBufferPtr> ptrs = ConvertShardVector(hlls);
