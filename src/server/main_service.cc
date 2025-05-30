@@ -1596,6 +1596,9 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     case MemcacheParser::QUIT:
       strcpy(cmd_name, "QUIT");
       break;
+    case MemcacheParser::GAT:
+      strcpy(cmd_name, "GAT");
+      break;
     case MemcacheParser::STATS:
       server_family_.StatsMC(cmd.key, mc_builder);
       return;
@@ -1616,6 +1619,13 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
 
+  // if expire_ts is greater than month it's a unix timestamp
+  // https://github.com/memcached/memcached/blob/master/doc/protocol.txt#L139
+  constexpr uint32_t kExpireLimit = 60 * 60 * 24 * 30;
+  const uint64_t expire_ts = cmd.expire_ts && cmd.expire_ts <= kExpireLimit
+                                 ? cmd.expire_ts + time(nullptr)
+                                 : cmd.expire_ts;
+
   if (MemcacheParser::IsStoreCmd(cmd.type)) {
     char* v = const_cast<char*>(value.data());
     args.emplace_back(v, value.size());
@@ -1624,12 +1634,6 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       args.emplace_back(store_opt, strlen(store_opt));
     }
 
-    // if expire_ts is greater than month it's a unix timestamp
-    // https://github.com/memcached/memcached/blob/master/doc/protocol.txt#L139
-    constexpr uint32_t kExpireLimit = 60 * 60 * 24 * 30;
-    const uint64_t expire_ts = cmd.expire_ts && cmd.expire_ts <= kExpireLimit
-                                   ? cmd.expire_ts + time(nullptr)
-                                   : cmd.expire_ts;
     if (expire_ts && memcmp(cmd_name, "SET", 3) == 0) {
       char* next = absl::numbers_internal::FastIntToBuffer(expire_ts, ttl);
       args.emplace_back(ttl_op, 4);
@@ -1640,6 +1644,11 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     for (auto s : cmd.keys_ext) {
       char* key = const_cast<char*>(s.data());
       args.emplace_back(key, s.size());
+    }
+
+    if (cmd.type == MemcacheParser::GAT) {
+      dfly_cntx->conn_state.memcache_flag |= ConnectionState::SET_EXPIRY;
+      dfly_cntx->conn_state.memcache_flag |= expire_ts << 2;
     }
     if (cmd.type == MemcacheParser::GETS) {
       dfly_cntx->conn_state.memcache_flag |= ConnectionState::FETCH_CAS_VER;

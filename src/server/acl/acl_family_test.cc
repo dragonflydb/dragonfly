@@ -329,7 +329,7 @@ TEST_F(AclFamilyTest, TestCat) {
               UnorderedElementsAre("GETSET", "GETRANGE", "INCRBYFLOAT", "GETDEL", "DECRBY",
                                    "PREPEND", "SETEX", "MSET", "SET", "PSETEX", "SUBSTR", "DECR",
                                    "STRLEN", "INCR", "INCRBY", "MGET", "GET", "SETNX", "GETEX",
-                                   "APPEND", "MSETNX", "SETRANGE"));
+                                   "APPEND", "MSETNX", "SETRANGE", "GAT"));
 }
 
 TEST_F(AclFamilyTest, TestGetUser) {

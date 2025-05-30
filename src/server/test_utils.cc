@@ -513,6 +513,9 @@ auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::stri
   MP::Command cmd;
   cmd.type = cmd_type;
   auto src = list.begin();
+  if (cmd.type == MP::GAT || cmd.type == MP::GATS) {
+    CHECK(absl::SimpleAtoi(*src++, &cmd.expire_ts)) << "invalid expire seconds for " << cmd.type;
+  }
   cmd.key = *src++;
   for (; src != list.end(); ++src) {
     cmd.keys_ext.push_back(*src);

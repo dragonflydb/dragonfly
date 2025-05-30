@@ -533,65 +533,163 @@ struct MGetResponse {
   absl::InlinedVector<std::optional<GetResp>, 2> resp_arr;
 };
 
-// fetch_mask values
-constexpr uint8_t FETCH_MCFLAG = 0x1;
-constexpr uint8_t FETCH_MCVER = 0x2;
-MGetResponse OpMGet(fb2::BlockingCounter wait_bc, uint8_t fetch_mask, const Transaction* t,
-                    EngineShard* shard) {
-  ShardArgs keys = t->GetShardArgs(shard->shard_id());
-  DCHECK(!keys.Empty());
+struct FoundIterator {
+  std::variant<DbSlice::ConstIterator, DbSlice::Iterator> it;
+  int source_index = -1;  // in case of duplicate keys, points to the first occurrence.
 
-  auto& db_slice = t->GetDbSlice(shard->shard_id());
+  bool Done() const {
+    return std::visit([](auto& i) { return i.is_done(); }, it);
+  }
 
-  MGetResponse response(keys.Size());
-  struct Item {
-    DbSlice::ConstIterator it;
-    int source_index = -1;  // in case of duplicate keys, points to the first occurrence.
-  };
+  const PrimeKey& Key() const {
+    return std::visit([](auto& i) -> const CompactObj& { return i->first; }, it);
+  }
 
-  absl::InlinedVector<Item, 32> items(keys.Size());
+  const PrimeValue& Value() const {
+    return std::visit([](auto& i) -> const CompactObj& { return i->second; }, it);
+  }
 
-  // First, fetch all iterators and count total size ahead
-  size_t total_size = 0;
-  unsigned index = 0;
-  static bool mget_dedup_keys = absl::GetFlag(FLAGS_mget_dedup_keys);
+  uint64_t Version() const {
+    return std::visit([](auto& i) { return i.GetVersion(); }, it);
+  }
 
-  // We can not make it thread-local because we may preempt during the Find loop due to
-  // replication of expiry events.
+  std::string_view KeyView() const {
+    return std::visit([](auto& i) { return i.key(); }, it);
+  }
+};
+
+struct FindResult {
+  absl::InlinedVector<FoundIterator, 32> found_iters;
   absl::flat_hash_map<string_view, unsigned> key_index;
+  size_t total_size;
+};
+
+OpResult<DbSlice::Iterator> ExpireKey(EngineShard* shard, DbSlice& db_slice,
+                                      const DbSlice::ExpireParams& expire_params,
+                                      const string_view key, const OpArgs& op_args,
+                                      const DbContext& ctx) {
+  if (auto it = db_slice.FindMutable(ctx, key, OBJ_STRING); IsValid(it->it)) {
+    it->post_updater.Run();
+    if (auto update = db_slice.UpdateExpire(ctx, it->it, it->exp_it, expire_params); update.ok()) {
+      const int64_t value = update.value();
+      if (shard->journal()) {
+        if (value == -1) {
+          RecordJournal(op_args, "DEL"sv, ArgSlice{key});
+        } else {
+          RecordJournal(op_args, "PEXPIREAT"sv, ArgSlice{key, (absl::StrCat(value))});
+        }
+      }
+
+      if (value != -1) {
+        return it->it;
+      }
+    }
+  }
+  return OpStatus::KEY_NOTFOUND;
+}
+
+FindResult FindAndMaybeExpireKeys(const Transaction* t, EngineShard* shard, const ShardArgs& keys,
+                                  DbSlice& db_slice,
+                                  std::optional<DbSlice::ExpireParams> expire_params) {
+  static bool mget_dedup_keys = absl::GetFlag(FLAGS_mget_dedup_keys);
+  absl::flat_hash_map<string_view, unsigned> key_index;
+
   if (mget_dedup_keys) {
     key_index.reserve(keys.Size());
   }
+
+  unsigned index = 0;
+  size_t total_size = 0;
+  absl::InlinedVector<FoundIterator, 32> iters(keys.Size());
+
+  const OpArgs op_args = t->GetOpArgs(shard);
+  const DbContext ctx = t->GetDbContext();
+
+  auto store_it = [](auto& dest, auto&& it) -> size_t {
+    if (!it.ok())
+      return 0;
+    dest.it = *it;
+    return (*it)->second.Size();
+  };
 
   for (string_view key : keys) {
     if (mget_dedup_keys) {
       auto [it, inserted] = key_index.try_emplace(key, index);
       if (!inserted) {  // duplicate -> point to the first occurrence.
-        items[index++].source_index = it->second;
+        iters[index++].source_index = it->second;
         continue;
       }
     }
 
-    auto it_res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
-    auto& dest = items[index++];
-    if (it_res) {
-      dest.it = *it_res;
-      total_size += (*it_res)->second.Size();
+    auto& dest = iters[index++];
+    if (expire_params) {
+      total_size += store_it(dest, ExpireKey(shard, db_slice, *expire_params, key, op_args, ctx));
+    } else {
+      total_size += store_it(dest, db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING));
     }
   }
+
+  return {.found_iters = iters, .key_index = key_index, .total_size = total_size};
+}
+
+struct MemcacheMGetParams {
+  MemcacheMGetParams(const Protocol protocol, const uint64_t mc_flag) {
+    using CS = ConnectionState;
+    if (protocol == Protocol::MEMCACHE) {
+      fetch_mask_ |= FETCH_MCFLAG;
+      if (mc_flag & CS::FETCH_CAS_VER)
+        fetch_mask_ |= FETCH_MCVER;
+      if (mc_flag & CS::SET_EXPIRY) {
+        const int64_t expire = mc_flag >> 2;
+        expire_params_ =
+            DbSlice::ExpireParams{.value = expire, .absolute = true, .persist = expire == 0};
+      }
+    }
+  }
+
+  bool fetch_flag() const {
+    return fetch_mask_ & FETCH_MCFLAG;
+  }
+
+  bool fetch_version() const {
+    return fetch_mask_ & FETCH_MCVER;
+  }
+
+  std::optional<DbSlice::ExpireParams> expire_params() const {
+    return expire_params_;
+  }
+
+ private:
+  // fetch_mask values
+  static constexpr uint8_t FETCH_MCFLAG = 0x1;
+  static constexpr uint8_t FETCH_MCVER = 0x2;
+
+  uint8_t fetch_mask_{0};
+  std::optional<DbSlice::ExpireParams> expire_params_{std::nullopt};
+};
+
+MGetResponse OpMGet(BlockingCounter wait_bc, const Transaction* t, EngineShard* shard,
+                    const MemcacheMGetParams& mc_params) {
+  const ShardArgs keys = t->GetShardArgs(shard->shard_id());
+  DCHECK(!keys.Empty());
+
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
+
+  MGetResponse response(keys.Size());
+
+  auto [items, key_index, total_size] =
+      FindAndMaybeExpireKeys(t, shard, keys, db_slice, mc_params.expire_params());
 
   VLOG_IF(1, total_size > 10000000) << "OpMGet: allocating " << total_size << " bytes";
 
   // Allocate enough for all values
   response.storage = make_unique<char[]>(total_size);
   char* next = response.storage.get();
-  bool fetch_mcflag = fetch_mask & FETCH_MCFLAG;
-  bool fetch_mcver = fetch_mask & FETCH_MCVER;
   for (size_t i = 0; i < items.size(); ++i) {
-    auto it = items[i].it;
-    if (it.is_done()) {
-      if (items[i].source_index >= 0) {
-        response.resp_arr[i] = response.resp_arr[items[i].source_index];
+    const auto& item = items[i];
+    if (item.Done()) {
+      if (item.source_index >= 0) {
+        response.resp_arr[i] = response.resp_arr[item.source_index];
       }
       continue;
     }
@@ -599,28 +697,29 @@ MGetResponse OpMGet(fb2::BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
 
     // Copy to buffer or trigger tiered read that will eventually write to
     // buffer
-    if (it->second.IsExternal()) {
+    const PrimeValue& value = item.Value();
+    if (value.IsExternal()) {
       wait_bc->Add(1);
       auto cb = [next, wait_bc](const string& v) mutable {
         memcpy(next, v.data(), v.size());
         wait_bc->Dec();
       };
-      shard->tiered_storage()->Read(t->GetDbIndex(), it.key(), it->second, std::move(cb));
+      shard->tiered_storage()->Read(t->GetDbIndex(), item.KeyView(), value, std::move(cb));
     } else {
-      CopyValueToBuffer(it->second, next);
+      CopyValueToBuffer(value, next);
     }
 
-    size_t size = it->second.Size();
+    const size_t size = value.Size();
     resp.value = string_view(next, size);
     next += size;
 
-    if (fetch_mcflag) {
-      if (it->second.HasFlag()) {
-        resp.mc_flag = db_slice.GetMCFlag(t->GetDbIndex(), it->first);
+    if (mc_params.fetch_flag()) {
+      if (value.HasFlag()) {
+        resp.mc_flag = db_slice.GetMCFlag(t->GetDbIndex(), item.Key());
       }
 
-      if (fetch_mcver) {
-        resp.mc_ver = it.GetVersion();
+      if (mc_params.fetch_version()) {
+        resp.mc_ver = item.Version();
       }
     }
   }
@@ -1297,19 +1396,15 @@ void StringFamily::DecrBy(CmdArgList args, const CommandContext& cmnd_cntx) {
 void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
   DCHECK_GE(args.size(), 1U);
 
-  uint8_t fetch_mask = 0;
   auto* builder = cmnd_cntx.rb;
-  if (builder->GetProtocol() == Protocol::MEMCACHE) {
-    fetch_mask |= FETCH_MCFLAG;
-    if (cmnd_cntx.conn_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
-      fetch_mask |= FETCH_MCVER;
-  }
+  const auto mc_params =
+      MemcacheMGetParams(builder->GetProtocol(), cmnd_cntx.conn_cntx->conn_state.memcache_flag);
 
   // Count of pending tiered reads
   fb2::BlockingCounter tiering_bc{0};
   std::vector<MGetResponse> mget_resp(shard_set->size());
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    mget_resp[shard->shard_id()] = OpMGet(tiering_bc, fetch_mask, t, shard);
+    mget_resp[shard->shard_id()] = OpMGet(tiering_bc, t, shard, mc_params);
     return OpStatus::OK;
   };
 
@@ -1366,7 +1461,7 @@ void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
     DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);
     for (const auto& entry : res) {
       if (entry) {
-        rb->SendValue(entry->key, entry->value, 0, entry->mc_flag, fetch_mask & FETCH_MCVER);
+        rb->SendValue(entry->key, entry->value, 0, entry->mc_flag, mc_params.fetch_version());
       } else {
         rb->SendMiss();
       }
@@ -1637,7 +1732,8 @@ void StringFamily::Register(CommandRegistry* registry) {
             << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)  // Alias for GetRange
             << CI{"SETRANGE", CO::WRITE | CO::DENYOOM, 4, 1, 1}.HFUNC(SetRange)
             << CI{"CL.THROTTLE", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
-                   ClThrottle);
+                   ClThrottle)
+            << CI{"GAT", CO::WRITE | CO::HIDDEN | CO::DENYOOM, -2, 1, -1}.HFUNC(MGet);
 }
 
 }  // namespace dfly
