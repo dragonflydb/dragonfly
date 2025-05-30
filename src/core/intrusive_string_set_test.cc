@@ -90,17 +90,18 @@ static string random_string(mt19937& rand, unsigned len) {
 }
 
 TEST_F(IntrusiveStringSetTest, ISLEntryTest) {
-  ISLEntry test("0123456789", 1);
+  ISLEntry test("0123456789", 2);
 
   EXPECT_EQ(test.Key(), "0123456789"sv);
-  EXPECT_EQ(test.GetTtl(), 1);
+  EXPECT_EQ(test.GetExpiry(), 2);
 
   ISLEntry first("123456789");
   first.SetExtendedHash(Hash(first.Key()), 4, 4);
 
   test.Insert(std::move(first));
 
-  EXPECT_EQ(test.Find("123456789", Hash("123456789"), 4, 4, nullptr), 1);
+  uint32_t set_size = 4;
+  EXPECT_EQ(test.Find("123456789", Hash("123456789"), 4, 4, &set_size), 1);
 
   test.Insert(ISLEntry("23456789"));
 
@@ -528,44 +529,44 @@ TEST_F(IntrusiveStringSetTest, SetFieldExpireNoHasExpiry) {
   EXPECT_EQ(k.ExpiryTime(), 10);
 }
 
-// TEST_F(IntrusiveStringSetTest, Ttl) {
-//   EXPECT_TRUE(ss_->Add("bla"sv, true, 1));
-//   EXPECT_FALSE(ss_->Add("bla"sv, true, 1));
-//   auto it = ss_->Find("bla"sv);
-//   EXPECT_EQ(1u, it->ExpiryTime());
+TEST_F(IntrusiveStringSetTest, Ttl) {
+  EXPECT_TRUE(ss_->Add("bla"sv, 1));
+  EXPECT_FALSE(ss_->Add("bla"sv, 1));
+  auto it = ss_->Find("bla"sv);
+  EXPECT_EQ(1u, it.ExpiryTime());
 
-//   ss_->set_time(1);
-//   EXPECT_TRUE(ss_->Add("bla"sv, true, 1));
-//   EXPECT_EQ(1u, ss_->UpperBoundSize());
+  ss_->set_time(1);
+  EXPECT_TRUE(ss_->Add("bla"sv, 1));
+  EXPECT_EQ(1u, ss_->UpperBoundSize());
 
-//   for (unsigned i = 0; i < 100; ++i) {
-//     EXPECT_TRUE(ss_->Add(absl::StrCat("foo", i), true, 1));
-//   }
-//   EXPECT_EQ(101u, ss_->UpperBoundSize());
-//   it = ss_->Find("foo50");
-//   EXPECT_EQ("foo50"sv, it->Key());
-//   EXPECT_EQ(2u, it->ExpiryTime());
+  for (unsigned i = 0; i < 100; ++i) {
+    EXPECT_TRUE(ss_->Add(absl::StrCat("foo", i), 1));
+  }
+  EXPECT_EQ(101u, ss_->UpperBoundSize());
+  it = ss_->Find("foo50");
+  EXPECT_EQ("foo50"sv, it->Key());
+  EXPECT_EQ(2u, it.ExpiryTime());
 
-//   ss_->set_time(2);
-//   // Cleanup all `foo` entries
-//   uint32_t cursor = 0;
-//   do {
-//     cursor = ss_->Scan(cursor, [&](std::string_view) {});
-//   } while (cursor != 0);
+  ss_->set_time(2);
+  // Cleanup all `foo` entries
+  uint32_t cursor = 0;
+  do {
+    cursor = ss_->Scan(cursor, [&](std::string_view) {});
+  } while (cursor != 0);
 
-//   for (unsigned i = 0; i < 100; ++i) {
-//     EXPECT_TRUE(ss_->Add(absl::StrCat("bar", i)));
-//   }
-//   EXPECT_EQ(100u, ss_->UpperBoundSize());
-//   it = ss_->Find("bar50");
-//   EXPECT_FALSE(it->HasExpiry());
+  for (unsigned i = 0; i < 100; ++i) {
+    EXPECT_TRUE(ss_->Add(absl::StrCat("bar", i)));
+  }
+  EXPECT_EQ(100u, ss_->UpperBoundSize());
+  it = ss_->Find("bar50");
+  EXPECT_FALSE(it.HasExpiry());
 
-//   for (auto it = ss_->begin(); it != ss_->end(); ++it) {
-//     ASSERT_TRUE(absl::StartsWith(it->Key(), "bar")) << it->Key();
-//     string str(it->Key());
-//     VLOG(1) << *it;
-//   }
-// }
+  for (auto it = ss_->begin(); it != ss_->end(); ++it) {
+    ASSERT_TRUE(absl::StartsWith(it->Key(), "bar")) << it->Key();
+    string str(it->Key());
+    VLOG(1) << *it;
+  }
+}
 
 // TEST_F(IntrusiveStringSetTest, Grow) {
 //   for (size_t j = 0; j < 10; ++j) {

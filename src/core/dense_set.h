@@ -46,7 +46,7 @@ class DenseSet {
   static constexpr size_t kLinkBit = 1ULL << 52;
   static constexpr size_t kDisplaceBit = 1ULL << 53;
   static constexpr size_t kDisplaceDirectionBit = 1ULL << 54;
-  static constexpr size_t kTtlBit = 1ULL << 55;
+  static constexpr size_t kExpiryBit = 1ULL << 55;
   static constexpr size_t kTagMask = 4095ULL << 52;  // we reserve 12 high bits.
 
   class DensePtr {
@@ -74,7 +74,7 @@ class DenseSet {
     }
 
     bool HasTtl() const {
-      return (uptr() & kTtlBit) != 0;
+      return (uptr() & kExpiryBit) != 0;
     }
 
     bool IsEmpty() const {
@@ -111,9 +111,9 @@ class DenseSet {
 
     void SetTtl(bool b) {
       if (b)
-        ptr_ = (void*)(uptr() | kTtlBit);
+        ptr_ = (void*)(uptr() | kExpiryBit);
       else
-        ptr_ = (void*)(uptr() & (~kTtlBit));
+        ptr_ = (void*)(uptr() & (~kExpiryBit));
     }
 
     void Reset() {
