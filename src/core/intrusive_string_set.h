@@ -36,7 +36,7 @@ class IntrusiveStringSet {
     }
 
     void SetExpiryTime(uint32_t ttl_sec, size_t* obj_malloc_used) {
-      owner_->entries_[bucket_][pos_].SetTtl(ttl_sec);
+      owner_->entries_[bucket_][pos_].SetExpiry(owner_->EntryTTL(ttl_sec));
     }
 
     iterator& operator++() {
@@ -66,11 +66,11 @@ class IntrusiveStringSet {
     }
 
     bool HasExpiry() {
-      return owner_->entries_[bucket_][pos_].HasTtl();
+      return owner_->entries_[bucket_][pos_].HasExpiry();
     }
 
     uint32_t ExpiryTime() {
-      return owner_->entries_[bucket_][pos_].GetTtl() + owner_->time_now();
+      return owner_->entries_[bucket_][pos_].GetExpiry();
     }
 
     operator bool() const {
@@ -156,7 +156,8 @@ class IntrusiveStringSet {
   iterator AddUnique(std::string_view str, uint32_t bucket, uint64_t hash,
                      uint32_t ttl_sec = UINT32_MAX) {
     ++size_;
-    uint32_t pos = entries_[bucket].Insert(ISLEntry(str, ttl_sec));
+    uint32_t at = EntryTTL(ttl_sec);
+    uint32_t pos = entries_[bucket].Insert(ISLEntry(str, at));
     entries_[bucket][pos].SetExtendedHash(hash, capacity_log_, kShiftLog);
     return iterator(this, bucket, pos);
   }

@@ -32,7 +32,7 @@ class ISLEntry {
   // can be used for tagging. At most 52 bits of address are reserved for
   // some configurations, and usually it's 48 bits.
   // https://docs.kernel.org/arch/arm64/memory.html
-  static constexpr size_t kTtlBit = 1ULL << 52;
+  static constexpr size_t kExpiryBit = 1ULL << 52;
 
   // if bit is set the string length field is 1 byte instead of 4
   static constexpr size_t kSsoBit = 1ULL << 53;
@@ -49,24 +49,24 @@ class ISLEntry {
  public:
   ISLEntry() = default;
 
-  ISLEntry(std::string_view key, uint32_t ttl_sec = UINT32_MAX) {
+  ISLEntry(std::string_view key, uint32_t expiry = UINT32_MAX) {
     uint32_t key_size = key.size();
 
-    uint32_t ttl_size = (ttl_sec != UINT32_MAX) * sizeof(ttl_sec);
+    uint32_t expiry_size = (expiry != UINT32_MAX) * sizeof(expiry);
 
     uint32_t key_len_field_size = key_size <= std::numeric_limits<uint8_t>::max() ? 1 : 4;
 
-    auto size = key_len_field_size + key_size + ttl_size;
+    auto size = key_len_field_size + key_size + expiry_size;
 
     data_ = (char*)zmalloc(size);
 
-    auto* ttl_pos = data_;
-    if (ttl_size) {
-      SetTtlBit(true);
-      std::memcpy(ttl_pos, &ttl_sec, sizeof(ttl_sec));
+    auto* expiry_pos = data_;
+    if (expiry_size) {
+      SetExpiryBit(true);
+      std::memcpy(expiry_pos, &expiry, sizeof(expiry));
     }
 
-    auto* key_size_pos = ttl_pos + ttl_size;
+    auto* key_size_pos = expiry_pos + expiry_size;
     if (key_len_field_size == 1) {
       SetSsoBit();
       uint8_t sso_key_size = key_size;
@@ -123,14 +123,14 @@ class ISLEntry {
     return {GetKeyData(), GetKeySize()};
   }
 
-  bool HasTtl() const {
-    return (uptr() & kTtlBit) != 0;
+  bool HasExpiry() const {
+    return (uptr() & kExpiryBit) != 0;
   }
 
-  // returns the expiry time of the current entry or UINT32_MAX if no ttl is set.
-  uint32_t GetTtl() const {
+  // returns the expiry time of the current entry or UINT32_MAX if no expiry is set.
+  uint32_t GetExpiry() const {
     std::uint32_t res = UINT32_MAX;
-    if (HasTtl()) {
+    if (HasExpiry()) {
       DCHECK(!IsVector());
       std::memcpy(&res, Raw(), sizeof(res));
     }
@@ -225,34 +225,43 @@ class ISLEntry {
     return new_bucket_id;
   }
 
-  void SetTtl(uint32_t ttl_sec) {
+  void SetExpiry(uint32_t at_sec) {
     DCHECK(!IsVector());
-    if (HasTtl()) {
-      auto* ttl_pos = Raw();
-      std::memcpy(ttl_pos, &ttl_sec, sizeof(ttl_sec));
+    if (HasExpiry()) {
+      auto* expiry_pos = Raw();
+      std::memcpy(expiry_pos, &at_sec, sizeof(at_sec));
     } else {
-      *this = ISLEntry(Key(), ttl_sec);
+      *this = ISLEntry(Key(), at_sec);
     }
   }
 
   // TODO refactor, because it's inefficient
   std::optional<uint32_t> Find(std::string_view str, uint64_t hash, uint32_t capacity_log,
-                               uint32_t shift_log, uint32_t* set_size,
-                               uint32_t time_now = UINT32_MAX) {
+                               uint32_t shift_log, uint32_t* set_size, uint32_t time_now = 0) {
     if (Empty())
       return std::nullopt;
     if (!IsVector()) {
+      ExpireIfNeeded(time_now, set_size);
       return CheckExtendedHash(hash, capacity_log, shift_log) && Key() == str
                  ? 0
                  : std::optional<uint32_t>();
     }
     auto& vec = AsVector();
     for (size_t i = 0, size = vec.size(); i < size; ++i) {
+      vec[i].ExpireIfNeeded(time_now, set_size);
       if (vec[i].CheckExtendedHash(hash, capacity_log, shift_log) && vec[i].Key() == str) {
         return i;
       }
     }
     return std::nullopt;
+  }
+
+  void ExpireIfNeeded(uint32_t time_now, uint32_t* set_size) {
+    DCHECK(!IsVector());
+    if (GetExpiry() <= time_now) {
+      Clear();
+      --*set_size;
+    }
   }
 
   // TODO refactor, because it's inefficient
@@ -355,21 +364,22 @@ class ISLEntry {
     } else {
       zfree(Raw());
     }
+    data_ = nullptr;
   }
 
   const char* GetKeyData() const {
     uint32_t key_field_size = HasSso() ? 1 : 4;
-    return Raw() + GetTtlSize() + key_field_size;
+    return Raw() + GetExpirySize() + key_field_size;
   }
 
   uint32_t GetKeySize() const {
     if (HasSso()) {
       uint8_t size = 0;
-      std::memcpy(&size, Raw() + GetTtlSize(), sizeof(size));
+      std::memcpy(&size, Raw() + GetExpirySize(), sizeof(size));
       return size;
     }
     uint32_t size = 0;
-    std::memcpy(&size, Raw() + GetTtlSize(), sizeof(size));
+    std::memcpy(&size, Raw() + GetExpirySize(), sizeof(size));
     return size;
   }
 
@@ -381,11 +391,11 @@ class ISLEntry {
     return (char*)(uptr() & ~kTagMask);
   }
 
-  void SetTtlBit(bool b) {
+  void SetExpiryBit(bool b) {
     if (b)
-      data_ = (char*)(uptr() | kTtlBit);
+      data_ = (char*)(uptr() | kExpiryBit);
     else
-      data_ = (char*)(uptr() & (~kTtlBit));
+      data_ = (char*)(uptr() & (~kExpiryBit));
   }
 
   void SetVectorBit() {
@@ -402,15 +412,15 @@ class ISLEntry {
 
   size_t Size() {
     size_t key_field_size = HasSso() ? 1 : 4;
-    size_t ttl_field_size = HasTtl() ? 4 : 0;
-    return ttl_field_size + key_field_size + GetKeySize();
+    size_t expiry_field_size = HasExpiry() ? 4 : 0;
+    return expiry_field_size + key_field_size + GetKeySize();
   }
-  std::uint32_t GetTtlSize() const {
-    return HasTtl() ? sizeof(std::uint32_t) : 0;
+  std::uint32_t GetExpirySize() const {
+    return HasExpiry() ? sizeof(std::uint32_t) : 0;
   }
 
   // TODO add optimization for big keys
-  // memory daya layout [TTL, key_size, key]
+  // memory daya layout [Expiry, key_size, key]
   char* data_ = nullptr;
 };
 
