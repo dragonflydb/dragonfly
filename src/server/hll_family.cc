@@ -72,13 +72,8 @@ bool ConvertToDenseIfNeeded(string* hll) {
     }
     *hll = std::move(new_hll);
     return true;
-  } else if (hll_validity == HLL_VALID_DENSE) {
-    // Already dense, nothing to do
-    return true;
-  } else {
-    // HLL_INVALID
-    return false;
-  }
+  } 
+  return hll_validity == HLL_VALID_DENSE;
 }
 
 OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values) {
