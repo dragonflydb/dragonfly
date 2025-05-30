@@ -607,12 +607,12 @@ TEST_F(IntrusiveStringSetTest, Fill) {
   }
 }
 
-// TEST_F(IntrusiveStringSetTest, IterateEmpty) {
-//   for (const auto& s : *ss_) {
-//     // We're iterating to make sure there is no crash. However, if we got here, it's a bug
-//     CHECK(false) << "Found entry " << s << " in empty set";
-//   }
-// }
+TEST_F(IntrusiveStringSetTest, IterateEmpty) {
+  for (const auto& s : *ss_) {
+    // We're iterating to make sure there is no crash. However, if we got here, it's a bug
+    CHECK(false) << "Found entry " << s << " in empty set";
+  }
+}
 
 // size_t memUsed(IntrusiveStringSet& obj) {
 //   return obj.ObjMallocUsed() + obj.SetMallocUsed();
@@ -778,33 +778,33 @@ TEST_F(IntrusiveStringSetTest, Fill) {
 //     ->ArgNames({"elements", "Key Size"})
 //     ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
 
-// void BM_Grow(benchmark::State& state) {
-//   vector<string> strs;
-//   mt19937 generator(0);
-//   IntrusiveStringSet src;
-//   unsigned elems = 1 << 18;
-//   for (size_t i = 0; i < elems; ++i) {
-//     src.Add(random_string(generator, 16), UINT32_MAX);
-//     strs.push_back(random_string(generator, 16));
-//   }
+void BM_Grow(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  IntrusiveStringSet src;
+  unsigned elems = 1 << 18;
+  for (size_t i = 0; i < elems; ++i) {
+    src.Add(random_string(generator, 16), UINT32_MAX);
+    strs.push_back(random_string(generator, 16));
+  }
 
-//   while (state.KeepRunning()) {
-//     state.PauseTiming();
-//     IntrusiveStringSet tmp;
-//     src.Fill(&tmp);
-//     CHECK_EQ(tmp.Capacity(), elems);
-//     state.ResumeTiming();
-//     for (const auto& str : strs) {
-//       tmp.Add(str);
-//       if (tmp.Capacity() > elems) {
-//         break;  // we grew
-//       }
-//     }
+  while (state.KeepRunning()) {
+    state.PauseTiming();
+    IntrusiveStringSet tmp;
+    src.Fill(&tmp);
+    CHECK_EQ(tmp.Capacity(), elems);
+    state.ResumeTiming();
+    for (const auto& str : strs) {
+      tmp.Add(str);
+      if (tmp.Capacity() > elems) {
+        break;  // we grew
+      }
+    }
 
-//     CHECK_GT(tmp.Capacity(), elems);
-//   }
-// }
-// BENCHMARK(BM_Grow);
+    CHECK_GT(tmp.Capacity(), elems);
+  }
+}
+BENCHMARK(BM_Grow);
 
 // unsigned total_wasted_memory = 0;
 
