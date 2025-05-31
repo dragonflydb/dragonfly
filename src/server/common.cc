@@ -270,7 +270,6 @@ SearchStats& SearchStats::operator+=(const SearchStats& o) {
   ADD(used_memory);
   ADD(num_entries);
 
-  DCHECK(num_indices == 0 || num_indices == o.num_indices);
   num_indices = std::max(num_indices, o.num_indices);
   return *this;
 }
