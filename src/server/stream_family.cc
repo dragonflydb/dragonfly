@@ -40,8 +40,6 @@ void StreamMemTracker::UpdateStreamSize(PrimeValue& pv) const {
   const size_t current = zmalloc_used_memory_tl;
   int64_t diff = static_cast<int64_t>(current) - static_cast<int64_t>(start_size_);
   pv.AddStreamSize(diff);
-  // Under any flow we must not end up with this special value.
-  DCHECK(pv.MallocUsed() != 0);
 }
 
 namespace {
