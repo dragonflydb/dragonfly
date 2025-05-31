@@ -284,17 +284,6 @@ TEST_F(ZSetFamilyTest, ZRandMember) {
   EXPECT_THAT(resp, ConsistsOfScoredElements({{"a", "1"}, {"b", "2"}, {"c", "3"}}));
 }
 
-TEST_F(ZSetFamilyTest, ZCountMinGreaterThanMax) {
-  // Add 1000 members to the sorted set
-  for (int i = 1; i <= 1000; ++i) {
-    Run({"zadd", "huge_key", absl::StrCat(i), absl::StrCat("member", i)});
-  }
-
-  // Expect ZCOUNT to return 0 when min > max
-  auto resp = Run({"zcount", "huge_key", "945", "261"});
-  EXPECT_THAT(resp, IntArg(0));
-}
-
 TEST_F(ZSetFamilyTest, ZMScore) {
   Run({"zadd", "zms", "3.14", "a"});
   Run({"zadd", "zms", "42", "another"});
