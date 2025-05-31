@@ -342,7 +342,7 @@ async def test_migrate_close_connection(async_client: aioredis.Redis, df_server:
 
 
 @pytest.mark.opt_only
-@dfly_args({"proactor_threads": 4, "interpreter_per_thread": 4})
+@dfly_args({"proactor_threads": 4, "interpreter_per_thread": 4, "lua_mem_usage_force_gc": 60000000})
 async def test_fill_memory_gc(async_client: aioredis.Redis):
     SCRIPT = """
         local res = {{}}
@@ -362,3 +362,25 @@ async def test_fill_memory_gc(async_client: aioredis.Redis):
     await async_client.execute_command("SCRIPT GC")
     info = await async_client.info("memory")
     assert info["used_memory_lua"] < 10 * 1e6
+
+
+@dfly_args({"proactor_threads": 4, "interpreter_per_thread": 4, "lua_mem_usage_force_gc": 1000000})
+async def test_gc_force_flag(async_client: aioredis.Redis):
+    SCRIPT = """
+        local res = {{}}
+        for j = 1, 10 do
+          for i = 1, 1000 do
+            table.insert(res, tostring(i) .. 'data')
+          end
+        end
+    """
+    for i in range(0, 1000):
+        await asyncio.gather(*(async_client.eval(SCRIPT, 0) for _ in range(5)))
+
+    info = await async_client.info("memory")
+    assert info["used_memory_lua"] < 10 * 1e6
+
+    stats = await async_client.info("stats")
+    assert stats["lua_interpreter_return"] == 5000
+    assert stats["lua_force_gc_calls"] > 0
+    assert stats["lua_gc_work_time"] > 0
