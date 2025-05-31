@@ -1287,4 +1287,14 @@ TEST_F(StreamFamilyTest, SeenActiveTime) {
                                          IntArg(1100), "pel-count", IntArg(1), "pending", _));
 }
 
+TEST_F(StreamFamilyTest, XDelCrash) {
+  string key_name = "k1";
+
+  auto resp_xadd = Run({"xadd", key_name, "0", "set1", "member1"});
+  EXPECT_THAT(resp_xadd, ErrArg("The ID specified in XADD is equal or smaller"));
+
+  auto resp_xdel = Run({"xdel", key_name, "46-867"});
+  EXPECT_THAT(resp_xdel, IntArg(0));
+}
+
 }  // namespace dfly
