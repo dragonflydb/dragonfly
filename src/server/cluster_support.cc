@@ -71,6 +71,7 @@ void InitializeCluster() {
 
   if (cluster_mode != ClusterMode::kNoCluster) {
     cluster_shard_by_slot = absl::GetFlag(FLAGS_experimental_cluster_shard_by_slot);
+    LOG(INFO) << "FLAG IS " << cluster_shard_by_slot;
   }
 }
 
