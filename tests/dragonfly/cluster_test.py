@@ -3276,6 +3276,10 @@ async def test_slot_migration_oom(df_factory):
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FATAL", 300)
     await wait_for_status(nodes[1].admin_client, nodes[0].id, "FATAL")
 
+    # There's a rare timing issue if we don't wait here. Status can be set to FATAL
+    # but error message is not still set for slot migration.
+    await asyncio.sleep(1)
+
     # Node_0 slot-migration-status
     status = await nodes[0].admin_client.execute_command(
         "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[1].id
