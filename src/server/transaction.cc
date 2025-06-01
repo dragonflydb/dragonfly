@@ -446,6 +446,9 @@ void Transaction::PrepareSquashedMultiHop(const CommandId* cid,
     }
     shard_data_[i].slice_start = 0;
     shard_data_[i].slice_count = 0;
+
+    shard_data_[i].fp_start = 0;
+    shard_data_[i].fp_count = 0;
   }
 
   MultiBecomeSquasher();
@@ -970,6 +973,7 @@ void Transaction::Refurbish() {
   txid_ = 0;
   coordinator_state_ = 0;
   cb_ptr_ = nullptr;
+  shard_data_.clear();
 }
 
 const absl::flat_hash_set<std::pair<ShardId, LockFp>>& Transaction::GetMultiFps() const {
@@ -996,15 +1000,23 @@ void Transaction::EnableShard(ShardId sid) {
   unique_shard_cnt_ = 1;
   unique_shard_id_ = sid;
   shard_data_.resize(IsActiveMulti() ? shard_set->size() : 1);
-  shard_data_.front().local_mask |= ACTIVE;
+  auto& sd = shard_data_.front();
+  sd.local_mask |= ACTIVE;
+
+  sd.fp_start = 0;
+  sd.fp_count = 0;
 }
 
 void Transaction::EnableAllShards() {
   unique_shard_cnt_ = shard_set->size();
   unique_shard_id_ = unique_shard_cnt_ == 1 ? 0 : kInvalidSid;
   shard_data_.resize(shard_set->size());
-  for (auto& sd : shard_data_)
+  for (auto& sd : shard_data_) {
     sd.local_mask |= ACTIVE;
+
+    sd.fp_start = 0;
+    sd.fp_count = 0;
+  }
 }
 
 // runs in coordinator thread.
