@@ -2857,4 +2857,27 @@ TEST_F(SearchFamilyTest, JsonDelIndexesBug) {
   resp = Run({"FT.AGGREGATE", "index", "*", "GROUPBY", "1", "@text"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("text", ArgType(RespExpr::NIL))));
 }
+
+TEST_F(SearchFamilyTest, SearchStatsInfoRace) {
+  auto index_ops_fiber = pp_->at(0)->LaunchFiber([&] {
+    for (int i = 1; i <= 5; ++i) {
+      std::string idx_name = absl::StrCat("idx", i);
+      std::string prefix = absl::StrCat("prefix", i, ":");
+      Run({"FT.CREATE", idx_name, "ON", "HASH", "PREFIX", "1", prefix});
+      Run({"FT.DROPINDEX", idx_name});
+    }
+  });
+
+  auto info_ops_fiber = pp_->at(1)->LaunchFiber([&] {
+    for (int i = 1; i <= 10; ++i) {
+      Run({"INFO"});
+    }
+  });
+
+  index_ops_fiber.Join();
+  info_ops_fiber.Join();
+
+  ASSERT_FALSE(service_->IsShardSetLocked());
+}
+
 }  // namespace dfly
