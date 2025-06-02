@@ -2,6 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
+#include <gtest/gtest.h>
+
 #include <cstdint>
 #define ENABLE_DASH_STATS
 
@@ -695,11 +697,13 @@ TEST_F(DashTest, Eviction) {
   auto loop = [&] {
     for (; num < 5000; ++num) {
       dt_.Insert(num, 0, ev);
+      LOG(INFO) << "BC: " << dt_.bucket_count();
     }
   };
 
   ASSERT_THROW(loop(), bad_alloc);
   ASSERT_LT(num, 5000);
+  ASSERT_EQ(2, dt_.unique_segments());
   EXPECT_LT(dt_.size(), ev.max_capacity);
   LOG(INFO) << "size is " << dt_.size();
 
@@ -778,7 +782,7 @@ TEST_F(DashTest, Version) {
   dt.Clear();
   ASSERT_EQ(0, dt.size());
   ASSERT_EQ(2, dt.unique_segments());
-  ASSERT_EQ(136, dt.bucket_count());
+  ASSERT_EQ(128, dt.bucket_count());
   constexpr int kNum = 68000;
   for (int i = 0; i < kNum; ++i) {
     auto it = dt.Insert(i, 0).first;
