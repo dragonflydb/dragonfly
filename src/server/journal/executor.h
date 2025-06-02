@@ -23,7 +23,7 @@ class JournalExecutor {
   JournalExecutor(JournalExecutor&&) = delete;
 
   void Execute(DbIndex dbid, absl::Span<journal::ParsedEntry::CmdData> cmds);
-  void Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd);
+  std::error_code Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd);
 
   void FlushAll();  // Execute FLUSHALL.
   void FlushSlots(const cluster::SlotRange& slot_range);
@@ -33,7 +33,7 @@ class JournalExecutor {
   }
 
  private:
-  void Execute(journal::ParsedEntry::CmdData& cmd);
+  std::error_code Execute(journal::ParsedEntry::CmdData& cmd);
 
   // Select database. Ensure it exists if accessed for first time.
   void SelectDb(DbIndex dbid);

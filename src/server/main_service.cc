@@ -1184,49 +1184,58 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 
 void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
                               facade::ConnectionContext* cntx) {
+  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
+  CommandContext cmd_cntx{dfly_cntx->transaction, builder, dfly_cntx};
+  DispatchCommand(args, &cmd_cntx);
+}
+
+void Service::DispatchCommand(ArgSlice args, CommandContext* cmd_cntx) {
   DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
-  absl::Cleanup clear_last_error([builder]() { builder->ConsumeLastError(); });
+  absl::Cleanup clear_last_error([cmd_cntx]() { cmd_cntx->rb->ConsumeLastError(); });
   ServerState& etl = *ServerState::tlocal();
 
   string cmd = absl::AsciiStrToUpper(args[0]);
   const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.subspan(1));
 
+  auto* builder = cmd_cntx->rb;
+  auto* conn_cntx = cmd_cntx->conn_cntx;
   if (cid == nullptr) {
     return builder->SendError(ReportUnknownCmd(cmd));
   }
 
-  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
-  bool under_script = bool(dfly_cntx->conn_state.script_info);
-  bool under_exec = dfly_cntx->conn_state.exec_info.IsRunning();
+  bool under_script = static_cast<bool>(conn_cntx->conn_state.script_info);
+  bool under_exec = conn_cntx->conn_state.exec_info.IsRunning();
   bool dispatching_in_multi = under_script || under_exec;
 
-  if (VLOG_IS_ON(2) && cntx->conn() /* no owner in replica context */) {
-    LOG(INFO) << "Got (" << cntx->conn()->GetClientId() << "): " << (under_script ? "LUA " : "")
-              << args << " in dbid=" << dfly_cntx->conn_state.db_index;
+  if (VLOG_IS_ON(2) && conn_cntx->conn() /* no owner in replica context */) {
+    LOG(INFO) << "Got (" << conn_cntx->conn()->GetClientId()
+              << "): " << (under_script ? "LUA " : "") << args
+              << " in dbid=" << conn_cntx->conn_state.db_index;
   }
 
   // Don't interrupt running multi commands or admin connections.
-  if (etl.IsPaused() && !dispatching_in_multi && cntx->conn() && !cntx->conn()->IsPrivileged()) {
+  if (etl.IsPaused() && !dispatching_in_multi && conn_cntx->conn() &&
+      !conn_cntx->conn()->IsPrivileged()) {
     bool is_write = cid->IsWriteOnly();
     is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
-    is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
+    is_write |= cid->name() == "EXEC" && conn_cntx->conn_state.exec_info.is_write;
 
-    cntx->paused = true;
+    conn_cntx->paused = true;
     etl.AwaitPauseState(is_write);
-    cntx->paused = false;
+    conn_cntx->paused = false;
   }
 
-  if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {
-    if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
+  if (auto err = VerifyCommandState(cid, args_no_cmd, *conn_cntx); err) {
+    if (auto& exec_info = conn_cntx->conn_state.exec_info; exec_info.IsCollecting())
       exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
 
     // We need to skip this because ACK's should not be replied to
     // Bonus points because this allows to continue replication with ACL users who got
     // their access revoked and reinstated
     if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(args_no_cmd, 0), "ACK")) {
-      server_family_.GetDflyCmd()->OnClose(dfly_cntx->conn_state.replication_info.repl_session_id);
+      server_family_.GetDflyCmd()->OnClose(conn_cntx->conn_state.replication_info.repl_session_id);
       return;
     }
     builder->SendError(std::move(*err));
@@ -1235,14 +1244,14 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
 
   VLOG_IF(1, cid->opt_mask() & CO::CommandOpt::DANGEROUS)
       << "Executing dangerous command " << cid->name() << " "
-      << ConnectionLogContext(dfly_cntx->conn());
+      << ConnectionLogContext(conn_cntx->conn());
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
-  if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
+  if (conn_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
     // TODO: protect against aggregating huge transactions.
-    dfly_cntx->conn_state.exec_info.body.emplace_back(cid, true, args_no_cmd);
+    conn_cntx->conn_state.exec_info.body.emplace_back(cid, true, args_no_cmd);
     if (cid->IsWriteOnly()) {
-      dfly_cntx->conn_state.exec_info.is_write = true;
+      conn_cntx->conn_state.exec_info.is_write = true;
     }
     return builder->SendSimpleString("QUEUED");
   }
@@ -1251,45 +1260,48 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
   intrusive_ptr<Transaction> dist_trans;
 
   if (dispatching_in_multi) {
-    DCHECK(dfly_cntx->transaction);
+    DCHECK(conn_cntx->transaction);
     if (cid->IsTransactional()) {
-      dfly_cntx->transaction->MultiSwitchCmd(cid);
-      OpStatus status = dfly_cntx->transaction->InitByArgs(
-          dfly_cntx->ns, dfly_cntx->conn_state.db_index, args_no_cmd);
+      conn_cntx->transaction->MultiSwitchCmd(cid);
+      OpStatus status = conn_cntx->transaction->InitByArgs(
+          conn_cntx->ns, conn_cntx->conn_state.db_index, args_no_cmd);
 
       if (status != OpStatus::OK)
         return builder->SendError(status);
     }
   } else {
-    DCHECK(dfly_cntx->transaction == nullptr);
+    DCHECK(conn_cntx->transaction == nullptr);
 
     if (cid->IsTransactional()) {
       dist_trans.reset(new Transaction{cid});
 
       if (!dist_trans->IsMulti()) {  // Multi command initialize themself based on their mode.
-        CHECK(dfly_cntx->ns != nullptr);
+        CHECK(conn_cntx->ns != nullptr);
         if (auto st =
-                dist_trans->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, args_no_cmd);
+                dist_trans->InitByArgs(conn_cntx->ns, conn_cntx->conn_state.db_index, args_no_cmd);
             st != OpStatus::OK)
           return builder->SendError(st);
       }
 
-      dfly_cntx->transaction = dist_trans.get();
-      dfly_cntx->last_command_debug.shards_count = dfly_cntx->transaction->GetUniqueShardCnt();
+      conn_cntx->transaction = dist_trans.get();
+      cmd_cntx->tx = conn_cntx->transaction;
+      conn_cntx->last_command_debug.shards_count = conn_cntx->transaction->GetUniqueShardCnt();
     } else {
-      dfly_cntx->transaction = nullptr;
+      conn_cntx->transaction = nullptr;
+      cmd_cntx->tx = nullptr;
     }
   }
 
-  dfly_cntx->cid = cid;
+  conn_cntx->cid = cid;
 
-  if (!InvokeCmd(cid, args_no_cmd, CommandContext{dfly_cntx->transaction, builder, dfly_cntx})) {
+  if (!InvokeCmd(cid, args_no_cmd, cmd_cntx)) {
     builder->SendError("Internal Error");
     builder->CloseConnection();
   }
 
   if (!dispatching_in_multi) {
-    dfly_cntx->transaction = nullptr;
+    conn_cntx->transaction = nullptr;
+    cmd_cntx->tx = nullptr;
   }
 }
 
@@ -1343,13 +1355,12 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
   return OpStatus::OK;
 }
 
-bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
-                        const CommandContext& cmd_cntx) {
+bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, CommandContext* cmd_cntx) {
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
-  ConnectionContext* cntx = cmd_cntx.conn_cntx;
-  auto* builder = cmd_cntx.rb;
+  ConnectionContext* cntx = cmd_cntx->conn_cntx;
+  auto* builder = cmd_cntx->rb;
   DCHECK(builder);
   DCHECK(cntx);
 
@@ -1375,7 +1386,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
   ServerState::tlocal()->RecordCmd(cntx->has_main_or_memcache_listener);
   auto& info = cntx->conn_state.tracking_info_;
   const bool is_read_only = cid->opt_mask() & CO::READONLY;
-  Transaction* tx = cmd_cntx.tx;
+  Transaction* tx = cmd_cntx->tx;
   if (tx) {
     // Reset it, because in multi/exec the transaction pointer is the same and
     // we will end up triggerring the callback on the following commands. To avoid this
@@ -1398,7 +1409,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
   auto last_error = builder->ConsumeLastError();
   DCHECK(last_error.empty());
   try {
-    invoke_time_usec = cid->Invoke(tail_args, cmd_cntx);
+    invoke_time_usec = cid->Invoke(tail_args, *cmd_cntx);
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
@@ -1407,7 +1418,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
   if (std::string reason = builder->ConsumeLastError(); !reason.empty()) {
     // Set flag if OOM reported
     if (reason == kOutOfMemory) {
-      cmd_cntx.conn_cntx->is_oom_ = true;
+      cmd_cntx->is_oom = true;
     }
     VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
     LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
@@ -2289,7 +2300,8 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
           }
         }
 
-        bool ok = InvokeCmd(scmd.Cid(), args, cmd_cntx);
+        CommandContext internal_cmd_cntx = cmd_cntx;
+        bool ok = InvokeCmd(scmd.Cid(), args, &internal_cmd_cntx);
         if (!ok || rb->GetError())  // checks for i/o error, not logical error.
           break;
       }

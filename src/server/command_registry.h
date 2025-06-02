@@ -82,6 +82,7 @@ struct CommandContext {
   Transaction* tx;
   facade::SinkReplyBuilder* rb;
   ConnectionContext* conn_cntx;
+  bool is_oom = false;
 };
 
 class CommandId : public facade::CommandId {

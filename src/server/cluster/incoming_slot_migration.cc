@@ -103,9 +103,9 @@ class ClusterShardMigration {
       if (tx_data->opcode == journal::Op::PING) {
         // TODO check about ping logic
       } else {
-        ExecuteTx(std::move(*tx_data), cntx);
+        auto err = ExecuteTx(std::move(*tx_data), cntx);
         // Break incoming slot migration if command reported OOM
-        if (executor_.connection_context()->IsOOM()) {
+        if (err == std::errc::not_enough_memory) {
           cntx->ReportError(std::string{kIncomingMigrationOOM});
           in_migration_->ReportFatalError(std::string{kIncomingMigrationOOM});
           break;
@@ -143,21 +143,21 @@ class ClusterShardMigration {
   }
 
  private:
-  void ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx) {
-    if (!cntx->IsRunning()) {
-      return;
+  std::error_code ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx) {
+    if (cntx->IsRunning()) {
+      if (!tx_data.IsGlobalCmd()) {
+        return executor_.Execute(tx_data.dbid, tx_data.command);
+      } else {
+        // TODO check which global commands should be supported
+        std::string error =
+            absl::StrCat("We don't support command: ", ToSV(tx_data.command.cmd_args[0]),
+                         " in cluster migration process.");
+        LOG(ERROR) << error;
+        cntx->ReportError(error);
+        in_migration_->ReportError(error);
+      }
     }
-    if (!tx_data.IsGlobalCmd()) {
-      executor_.Execute(tx_data.dbid, tx_data.command);
-    } else {
-      // TODO check which global commands should be supported
-      std::string error =
-          absl::StrCat("We don't support command: ", ToSV(tx_data.command.cmd_args[0]),
-                       " in cluster migration process.");
-      LOG(ERROR) << error;
-      cntx->ReportError(error);
-      in_migration_->ReportError(error);
-    }
+    return {};
   }
 
   uint32_t source_shard_id_;
