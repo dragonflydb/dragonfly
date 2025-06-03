@@ -225,7 +225,7 @@ class Transaction {
 
   // Cancel all blocking watches. Set COORD_CANCELLED.
   // Must be called from coordinator thread.
-  void CancelBlocking(std::function<OpStatus(ArgSlice)>);
+  void CancelBlocking(const std::function<OpStatus(ArgSlice)>&);
 
   // Prepare a squashed hop on given shards.
   // Only compatible with multi modes that acquire all locks ahead - global and lock_ahead.
