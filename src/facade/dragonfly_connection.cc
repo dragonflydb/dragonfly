@@ -1809,8 +1809,9 @@ void Connection::SendAsync(MessageHandle msg) {
   DCHECK_EQ(ProactorBase::me(), socket_->proactor());
 
   // "Closing" connections might be still processing commands, as we don't interrupt them.
-  // So we still want to deliver control messages to them (like checkpoints).
-  if (cc_->conn_closing && !msg.IsControl())
+  // So we still want to deliver control messages to them (like checkpoints) if
+  // async_fb_ is running (joinable).
+  if (cc_->conn_closing && (!msg.IsControl() || !async_fb_.IsJoinable()))
     return;
 
   // If we launch while closing, it won't be awaited. Control messages will be processed on cleanup.
