@@ -131,11 +131,7 @@ end
 
 function LG_funcs.mod_hash(key, keys)
     local idx = math.random(LG_funcs.csize)
-    if idx % 2 == 1 then
-        redis.apcall('HINCRBY', key, tostring(idx), 1)
-    else
-      redis.apcall('HSET', key, tostring(idx), randstr())
-    end
+    redis.apcall('HSET', key, tostring(idx), randstr())
 end
 
 -- sorted sets
