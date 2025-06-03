@@ -38,6 +38,16 @@ extern const char kInvalidDumpValueErr[];
 extern const char kInvalidJsonPathErr[];
 extern const char kJsonParseError[];
 extern const char kCrossSlotError[];
+extern const char kKeyExistsErr[];
+extern const char kKeyMovedErr[];
+extern const char kSkippedErr[];
+extern const char kInvalidValueErr[];
+extern const char kTimedOutErr[];
+extern const char kStreamIdSmallErr[];
+extern const char kOperationCancelledErr[];
+extern const char kCorruptedHllErr[];
+extern const char kBusyGroupErr[];
+extern const char kAtLeastOneKeyErr[];
 
 extern const char kSyntaxErrType[];
 extern const char kScriptErrType[];
