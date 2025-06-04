@@ -1,4 +1,5 @@
 import aiohttp
+import json
 from . import dfly_args
 from .instance import DflyInstance
 
@@ -127,3 +128,58 @@ async def test_password_on_http_api(df_server: DflyInstance):
     async with get_http_session("default", "XXX") as session:
         resp = await session.post(f"http://localhost:{df_server.port}/api", json=["ping"])
         assert resp.status == 200
+
+
+def get_json_object(json_str):
+    try:
+        json_obj = json.loads(json_str)
+        return json_obj
+    except ValueError:
+        return None
+
+
+@dfly_args({"proactor_threads": "1", "expose_http_api": "true", "slowlog_log_slower_than": 0})
+async def test_http_api_json_response(df_server: DflyInstance):
+    client = df_server.client()
+    async with get_http_session() as session:
+        body = '["set", "foo","bar"]'
+        async with session.post(f"http://localhost:{df_server.port}/api", data=body) as resp:
+            assert resp.status == 200
+            text = await resp.text()
+            json_object = get_json_object(text)
+            assert json_object != None
+            assert json_object == {"result": "OK"}
+
+        body = '["get", "foo"]'
+        async with session.post(f"http://localhost:{df_server.port}/api", data=body) as resp:
+            assert resp.status == 200
+            text = await resp.text()
+            json_object = get_json_object(text)
+            assert json_object != None
+            assert json_object == {"result": "bar"}
+
+        body = '["slowlog", "get"]'
+        async with session.post(f"http://localhost:{df_server.port}/api", data=body) as resp:
+            assert resp.status == 200
+            text = await resp.text()
+            json_object = get_json_object(text)
+            assert json_object != None
+            # Compare commands
+            assert json_object["result"][0][3] == ["GET", "foo"]
+            assert json_object["result"][1][3] == ["SET", "foo", "bar"]
+
+        body = '["hset", "myhash", "k1", "1", "k2", "2"]'
+        async with session.post(f"http://localhost:{df_server.port}/api", data=body) as resp:
+            assert resp.status == 200
+            text = await resp.text()
+            json_object = get_json_object(text)
+            assert json_object != None
+            assert json_object == {"result": 2}
+
+        body = '["hkeys", "myhash"]'
+        async with session.post(f"http://localhost:{df_server.port}/api", data=body) as resp:
+            assert resp.status == 200
+            text = await resp.text()
+            json_object = get_json_object(text)
+            assert json_object != None
+            assert json_object["result"] == ["k1", "k2"]
