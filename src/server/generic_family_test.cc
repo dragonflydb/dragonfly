@@ -1170,14 +1170,14 @@ TEST_F(GenericFamilyTest, Copy) {
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
 
   resp = Run({"COPY", "z", "b"});
-  ASSERT_THAT(resp, ErrArg("no such key"));
+  ASSERT_THAT(resp, IntArg(0));
 
   resp = Run({"COPY", "b", "c"});
-  ASSERT_EQ(resp, "OK");
+  ASSERT_THAT(resp, IntArg(1));
   ASSERT_EQ(b_val, Run({"get", "c"}));
 
   resp = Run({"COPY", "x", "b", "REPLACE"});
-  ASSERT_EQ(resp, "OK");
+  ASSERT_THAT(resp, IntArg(1));
 
   ASSERT_EQ(x_val, Run({"get", "x"}));
   ASSERT_EQ(x_val, Run({"get", "b"}));
@@ -1188,7 +1188,7 @@ TEST_F(GenericFamilyTest, Copy) {
     for (size_t i = 0; i < 200; ++i) {
       int j = i % 2;
       auto resp = Run({"COPY", keys[j], keys[1 - j], "REPLACE"});
-      ASSERT_EQ(resp, "OK");
+      ASSERT_THAT(resp, IntArg(1));
     }
   });
 
@@ -1206,7 +1206,7 @@ TEST_F(GenericFamilyTest, Copy) {
 TEST_F(GenericFamilyTest, CopyNonString) {
   EXPECT_EQ(1, CheckedInt({"lpush", "x", "elem"}));
   auto resp = Run({"COPY", "x", "b"});
-  ASSERT_EQ(resp, "OK");
+  ASSERT_THAT(resp, IntArg(1));
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
 
   EXPECT_EQ(1, CheckedInt({"del", "x"}));
@@ -1226,7 +1226,7 @@ TEST_F(GenericFamilyTest, CopyBinary) {
 TEST_F(GenericFamilyTest, CopyTTL) {
   Run({"setex", "k1", "10", "bar"});
 
-  ASSERT_EQ(Run({"COPY", "k1", "k2"}), "OK");
+  ASSERT_THAT(Run({"COPY", "k1", "k2"}), IntArg(1));
   EXPECT_THAT(Run({"ttl", "k2"}), 10);
 }
 
@@ -1240,6 +1240,19 @@ TEST_F(GenericFamilyTest, CopySameName) {
 TEST_F(GenericFamilyTest, CopyToDB) {
   // we don't support DB arg for now
   ASSERT_THAT(Run({"COPY", "k1", "k1", "DB", "SOME_DB"}), ErrArg("syntax error"));
+}
+
+TEST_F(GenericFamilyTest, CopyKeyExists) {
+  Run({"set", "source", "value1"});
+  Run({"set", "destination", "value2"});
+
+  ASSERT_THAT(Run({"COPY", "source", "destination"}), IntArg(0));
+
+  EXPECT_EQ(Run({"get", "destination"}), "value2");
+  EXPECT_EQ(Run({"get", "source"}), "value1");
+
+  ASSERT_THAT(Run({"COPY", "source", "destination", "REPLACE"}), IntArg(1));
+  EXPECT_EQ(Run({"get", "destination"}), "value1");
 }
 
 }  // namespace dfly
