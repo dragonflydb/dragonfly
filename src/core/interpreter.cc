@@ -976,8 +976,8 @@ int64_t Interpreter::RunGC() {
   int64_t before_kb = lua_gc(lua_, LUA_GCCOUNT);
   lua_gc(lua_, LUA_GCCOLLECT);
   int64_t after_kb = lua_gc(lua_, LUA_GCCOUNT);
-  LOG_IF(DFATAL, after_kb > before_kb)
-      << "LUA_GCCOLLECT increase memory consumption from " << before_kb << " to " << after_kb;
+  LOG_IF(DFATAL, after_kb > before_kb) << "LUA_GCCOLLECT increase memory consumption from "
+                                       << before_kb << "kB to " << after_kb << "kB";
   int64_t res = (before_kb - after_kb) * 1024;
   return std::max(int64_t(0), res);
 }
