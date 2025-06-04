@@ -990,16 +990,15 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
 
 template <typename _Key, typename _Value, typename Policy>
 auto DashTable<_Key, _Value, Policy>::AdvanceCursorBucketOrder(Cursor cursor) -> Cursor {
-  // We fix bid and go over all segments. Once we reach the end we increase bid and repeat.
+  // We fix bid and go over all segments. Once we reach the end we decrease bid and repeat.
   uint32_t sid = cursor.segment_id(global_depth_);
   uint8_t bid = cursor.bucket_id();
   sid = NextSeg(sid);
   if (sid >= segment_.size()) {
+    if (bid == 0)
+      return Cursor{global_depth_, 0, LargestBucketId()};  // "End of traversal" cursor.
     sid = 0;
-    ++bid;
-
-    if (SegmentType::OutOfRange(bid))
-      return Cursor::end();
+    --bid;
   }
   return Cursor{global_depth_, sid, bid};
 }
@@ -1009,6 +1008,16 @@ template <typename Cb>
 auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor cursor, Cb&& cb) -> Cursor {
   if (SegmentType::OutOfRange(cursor.bucket_id()))  // sanity.
     return Cursor::end();
+
+  // Caller thinks 0 is the first cursor and also the last one to finish traverse.
+  // In this function we want to traverse from the last bucket to the first therefore we need
+  // to switch curser 0 with first_and_last
+  Cursor first_and_last{global_depth_, 0, LargestBucketId()};
+  if (cursor == Cursor::end()) {
+    cursor = first_and_last;  // start from last bucket
+  } else if (cursor == first_and_last) {
+    cursor = Cursor::end();
+  }
 
   constexpr uint32_t kMaxIterations = 8;
   bool invoked = false;
@@ -1026,8 +1035,13 @@ auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor cursor, Cb&& cb) ->
       }
     }
     cursor = AdvanceCursorBucketOrder(cursor);
-    if (invoked || !cursor)  // Break end of traversal or callback invoked.
-      return cursor;
+    if (invoked || first_and_last == cursor)  // Break end of traversal or callback invoked.
+      break;
+  }
+  if (cursor == Cursor::end()) {
+    cursor = first_and_last;
+  } else if (cursor == first_and_last) {
+    cursor = Cursor::end();
   }
   return cursor;
 }
