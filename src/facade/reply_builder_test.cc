@@ -312,6 +312,7 @@ TEST_F(RedisReplyBuilderTest, ErrorNoneBuiltInMessage) {
   // All these op codes creating the same error message
   OpStatus none_unique_codes[] = {OpStatus::SKIPPED, OpStatus::KEY_EXISTS, OpStatus::INVALID_VALUE,
                                   OpStatus::TIMED_OUT, OpStatus::STREAM_ID_SMALL};
+  uint64_t error_count = 0;
   for (const auto& err : none_unique_codes) {
     const std::string_view error_name = StatusToMsg(err);
     const std::string_view error_type = GetErrorType(error_name);
@@ -321,7 +322,8 @@ TEST_F(RedisReplyBuilderTest, ErrorNoneBuiltInMessage) {
     ASSERT_TRUE(absl::StartsWith(str(), kErrorStart)) << " invalid start char for " << err;
     ASSERT_TRUE(absl::EndsWith(str(), kCRLF));
     auto current_error_count = GetError(error_type);
-    ASSERT_EQ(current_error_count, 1u) << " number of error count is invalid for " << err;
+    error_count++;
+    ASSERT_EQ(current_error_count, error_count) << " number of error count is invalid for " << err;
     auto parsing_output = Parse();
     ASSERT_TRUE(parsing_output.Verify(SinkSize()))
         << " verify for the result is invalid for " << err;

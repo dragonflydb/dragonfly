@@ -124,16 +124,6 @@ const char kInvalidDumpValueErr[] = "DUMP payload version or checksum are wrong"
 const char kInvalidJsonPathErr[] = "invalid JSON path";
 const char kJsonParseError[] = "failed to parse JSON";
 const char kCrossSlotError[] = "-CROSSSLOT Keys in request don't hash to the same slot";
-const char kKeyExistsErr[] = "key already exists";
-const char kKeyMovedErr[] = "MOVED";
-const char kSkippedErr[] = "skipped";
-const char kInvalidValueErr[] = "invalid value";
-const char kTimedOutErr[] = "timeout";
-const char kStreamIdSmallErr[] = "stream ID must be greater than last entry";
-const char kOperationCancelledErr[] = "operation cancelled";
-const char kCorruptedHllErr[] = "-INVALIDOBJ Corrupted HLL object detected.";
-const char kBusyGroupErr[] = "-BUSYGROUP Consumer Group name already exists";
-const char kAtLeastOneKeyErr[] = "at least 1 input key is needed for this command";
 
 const char kSyntaxErrType[] = "syntax_error";
 const char kScriptErrType[] = "script_error";
