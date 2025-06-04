@@ -114,7 +114,7 @@ class Interpreter {
 
   void ResetStack();
 
-  void RunGC();
+  int64_t RunGC();
 
   void UpdateGCParameters();
 
@@ -165,6 +165,7 @@ class InterpreterManager {
     uint64_t force_gc_calls = 0;
     uint64_t gc_work_time_ns = 0;
     uint64_t interpreter_return = 0;
+    int64_t gc_freed_memory = 0;
   };
 
  public:
