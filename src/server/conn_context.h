@@ -149,6 +149,7 @@ struct ConnectionState {
 
   enum MCGetMask {
     FETCH_CAS_VER = 1,
+    SET_EXPIRY = 2,
   };
 
   size_t UsedMemory() const;
@@ -257,8 +258,10 @@ struct ConnectionState {
 
   // used for memcache set/get commands.
   // For set op - it's the flag value we are storing along with the value.
-  // For get op - we use it as a mask of MCGetMask values.
-  uint32_t memcache_flag = 0;
+  // For get op - we use it as a mask of MCGetMask values stored in the highest two bits
+  // For GAT and GATS - the expiry in seconds supplied is stored in the top 62 bits along with the
+  // MCGetMask values in the lower two bits
+  uint64_t memcache_flag = 0;
 
   ExecInfo exec_info;
   ReplicationInfo replication_info;
