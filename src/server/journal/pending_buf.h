@@ -8,61 +8,83 @@
 
 #include <deque>
 #include <numeric>
+#include <string_view>
 
 namespace dfly {
 
 class PendingBuf {
  public:
   struct Buf {
-    size_t mem_size = 0;
-    absl::InlinedVector<std::string, 8> buf;
-
 #ifdef UIO_MAXIOV
     static constexpr size_t kMaxBufSize = UIO_MAXIOV;
 #else
     static constexpr size_t kMaxBufSize = 1024;
 #endif
+    size_t buf_size_ = 0;
+    absl::InlinedVector<uint8_t, kMaxBufSize> buf_;
   };
 
-  PendingBuf() : bufs_(1) {
-  }
-
   bool Empty() const {
-    return std::all_of(bufs_.begin(), bufs_.end(), [](const auto& b) { return b.buf.empty(); });
+    return bufs_.empty();
   }
 
   void Push(std::string str) {
-    DCHECK(!bufs_.empty());
-    if (bufs_.back().buf.size() == Buf::kMaxBufSize) {
-      bufs_.emplace_back();
+    if (str.size() > Buf::kMaxBufSize) {
+      // Doesn't fit into single buf container so we need to split it into mulitple chunkss
+      PushHuge(str);
+    } else {
+      if (bufs_.empty() || (bufs_.back().buf_size_ + str.size() >= Buf::kMaxBufSize)) {
+        bufs_.emplace_back();
+      }
+      auto& back_buf = bufs_.back();
+      memcpy(back_buf.buf_.data() + back_buf.buf_size_, str.data(), str.size());
+      back_buf.buf_size_ += str.size();
     }
-    auto& fron_buf = bufs_.back();
-
-    fron_buf.mem_size += str.size();
-    fron_buf.buf.push_back(std::move(str));
+    size_ += str.size();
   }
 
   // should be called to get the next buffer for sending
   const Buf& PrepareSendingBuf() {
+    LOG(INFO) << "bufs_.size() " << bufs_.size();
+    DCHECK(bufs_.size() >= 1);
     // Adding to the buffer ensures that future `Push()`es will not modify the in-flight buffer
-    if (bufs_.size() == 1) {
-      bufs_.emplace_back();
-    }
     return bufs_.front();
   }
 
   // should be called when the buf from PrepareSendingBuf() method was sent
   void Pop() {
-    DCHECK(bufs_.size() >= 2);
+    DCHECK(bufs_.size() >= 1);
+    size_ -= bufs_.front().buf_size_;
     bufs_.pop_front();
   }
 
   size_t Size() const {
-    return std::accumulate(bufs_.begin(), bufs_.end(), 0,
-                           [](size_t s, const auto& b) { return s + b.mem_size; });
+    return size_;
   }
 
  private:
+  void PushHuge(std::string_view sv) {
+    size_t iterations = (sv.size() / Buf::kMaxBufSize);
+    size_t bytes_left = (sv.size() & (Buf::kMaxBufSize - 1));
+    size_t i = 0;
+    for (; i < iterations; ++i) {
+      bufs_.emplace_back();
+      auto& back_buf = bufs_.back();
+      size_t start = i * Buf::kMaxBufSize;
+      size_t end = (i + 1) * Buf::kMaxBufSize;
+      memcpy(back_buf.buf_.data(), sv.substr(start, end).data(), Buf::kMaxBufSize);
+      back_buf.buf_size_ = Buf::kMaxBufSize;
+    }
+    if (bytes_left) {
+      bufs_.emplace_back();
+      auto& back_buf = bufs_.back();
+      size_t start = i * Buf::kMaxBufSize;
+      memcpy(back_buf.buf_.data(), sv.substr(start).data(), bytes_left);
+      back_buf.buf_size_ = bytes_left;
+    }
+  }
+
+  size_t size_ = 0;
   std::deque<Buf> bufs_;
 };
 

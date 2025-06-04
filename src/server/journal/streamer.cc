@@ -10,6 +10,7 @@
 #include "base/logging.h"
 #include "server/engine_shard.h"
 #include "server/journal/cmd_serializer.h"
+#include "server/journal/pending_buf.h"
 #include "server/server_state.h"
 #include "util/fibers/synchronization.h"
 
@@ -36,6 +37,7 @@ iovec IoVec(io::Bytes src) {
 
 uint32_t replication_stream_output_limit_cached = 64_KB;
 uint32_t migration_buckets_serialization_threshold_cached = 100;
+uint32_t periodic_writer_base_period_us = 10000;
 
 }  // namespace
 
@@ -49,6 +51,7 @@ JournalStreamer::~JournalStreamer() {
   if (!cntx_->IsError()) {
     DCHECK_EQ(in_flight_bytes_, 0u);
   }
+  WaitForPeriodicWriterToComplete();
   VLOG(1) << "~JournalStreamer";
 }
 
@@ -75,68 +78,90 @@ void JournalStreamer::Start(util::FiberSocketBase* dest) {
   CHECK(dest_ == nullptr && dest != nullptr);
   dest_ = dest;
   journal_cb_id_ = journal_->RegisterOnChange(this);
+  RunPeriodicWriterFiber();
 }
 
 void JournalStreamer::Cancel() {
   VLOG(1) << "JournalStreamer::Cancel";
   waker_.notifyAll();
   journal_->UnregisterOnChange(journal_cb_id_);
-  if (!cntx_->IsError()) {
-    WaitForInflightToComplete();
-  }
+  WaitForPeriodicWriterToComplete();
 }
 
 size_t JournalStreamer::UsedBytes() const {
   return pending_buf_.Size();
 }
 
-void JournalStreamer::AsyncWrite() {
-  DCHECK(!pending_buf_.Empty());
-
-  if (in_flight_bytes_ > 0) {
-    // We can not flush data while there are in flight requests because AsyncWrite
-    // is not atomic. Therefore, we just aggregate.
-    return;
-  }
-
-  const auto& cur_buf = pending_buf_.PrepareSendingBuf();
-
-  in_flight_bytes_ = cur_buf.mem_size;
-  total_sent_ += in_flight_bytes_;
-
-  const auto v_size = cur_buf.buf.size();
-  absl::InlinedVector<iovec, 8> v(v_size);
-
-  for (size_t i = 0; i < v_size; ++i) {
-    const auto* uptr = reinterpret_cast<const uint8_t*>(cur_buf.buf[i].data());
-    v[i] = IoVec(io::Bytes(uptr, cur_buf.buf[i].size()));
-  }
-
-  dest_->AsyncWrite(v.data(), v.size(), [this, len = in_flight_bytes_](std::error_code ec) {
-    OnCompletion(std::move(ec), len);
-  });
-}
-
 void JournalStreamer::Write(std::string str) {
   DCHECK(!str.empty());
   DVLOG(3) << "Writing " << str.size() << " bytes";
-
   pending_buf_.Push(std::move(str));
-
-  AsyncWrite();
 }
 
-void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
+void JournalStreamer::RunPeriodicWriterFiber() {
+  if (!periodic_writer_.IsJoinable()) {
+    auto pb = fb2::ProactorBase::me();
+    std::chrono::microseconds period_us(periodic_writer_base_period_us);
+    periodic_writer_ = MakeFiber([this, index = pb->GetPoolIndex(), period_us]() mutable {
+      ThisFiber::SetName(absl::StrCat("fiber_periodic_journal_writer_", index));
+      this->PeriodicWriterFiber(period_us, &periodic_writer_done_);
+    });
+  }
+}
+
+void JournalStreamer::PeriodicWriterFiber(std::chrono::microseconds base_period_us,
+                                          util::fb2::Done* waiter) {
+  bool writer_done = false;
+  std::chrono::microseconds period_us = base_period_us;
+
+  while (!writer_done) {
+    if (waiter->WaitFor(period_us)) {
+      writer_done = true;
+    }
+
+    if (!pending_buf_.Size() || in_flight_bytes_ > 0) {
+      continue;
+    }
+
+    if (pending_buf_.Size() > replication_stream_output_limit_cached / 2) {
+      // Increase frequency
+      auto next_period_ms = period_us.count() / 2;
+      period_us = std::chrono::microseconds(next_period_ms ? next_period_ms : 100);
+    } else {
+      period_us = base_period_us;
+    }
+
+    SendAsync(writer_done);
+  }
+
+  // Wait until we dispatch all queue items
+  auto next = chrono::steady_clock::now() + 1ms;
+  waker_.await_until([this] { return !pending_buf_.Empty(); }, next);
+}
+
+void JournalStreamer::SendAsync(bool writer_done) {
+  const auto& cur_data = pending_buf_.PrepareSendingBuf();
+  iovec io_vec = IoVec(io::Bytes(cur_data.buf_.data(), cur_data.buf_size_));
+
+  dest_->AsyncWrite(&io_vec, 1, [this, len = in_flight_bytes_, writer_done](std::error_code ec) {
+    OnCompletion(ec, len, writer_done);
+  });
+}
+
+void JournalStreamer::OnCompletion(std::error_code ec, size_t len, bool writer_done) {
   DCHECK_EQ(in_flight_bytes_, len);
 
   DVLOG(3) << "Completing " << in_flight_bytes_;
+
   in_flight_bytes_ = 0;
   pending_buf_.Pop();
+
   if (cntx_->IsRunning()) {
     if (ec) {
       cntx_->ReportError(ec);
-    } else if (!pending_buf_.Empty()) {
-      AsyncWrite();
+    } else if (writer_done && !pending_buf_.Empty()) {
+      // Writer is done so we need to send all remaining journal items
+      SendAsync(writer_done);
     }
   }
 
@@ -166,13 +191,12 @@ void JournalStreamer::ThrottleIfNeeded() {
   }
 }
 
-void JournalStreamer::WaitForInflightToComplete() {
-  while (in_flight_bytes_) {
-    auto next = chrono::steady_clock::now() + 1s;
-    std::cv_status status =
-        waker_.await_until([this] { return this->in_flight_bytes_ == 0; }, next);
-    LOG_IF(WARNING, status == std::cv_status::timeout)
-        << "Waiting for inflight bytes " << in_flight_bytes_;
+void JournalStreamer::WaitForPeriodicWriterToComplete() {
+  if (periodic_writer_.IsJoinable()) {
+    periodic_writer_done_.Notify();
+    if (periodic_writer_.IsJoinable()) {
+      periodic_writer_.Join();
+    }
   }
 }
 

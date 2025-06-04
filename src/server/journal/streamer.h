@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <deque>
-
 #include "server/cluster/slot_set.h"
 #include "server/common.h"
 #include "server/db_slice.h"
@@ -54,18 +52,22 @@ class JournalStreamer : public journal::JournalConsumerInterface {
     return cntx_->IsRunning();
   }
 
-  void WaitForInflightToComplete();
+  void WaitForPeriodicWriterToComplete();
 
   util::FiberSocketBase* dest_ = nullptr;
   ExecutionState* cntx_;
 
  private:
-  void AsyncWrite();
-  void OnCompletion(std::error_code ec, size_t len);
-
   bool IsStalled() const;
 
   journal::Journal* journal_;
+
+  util::fb2::Fiber periodic_writer_;
+  util::fb2::Done periodic_writer_done_;
+  void RunPeriodicWriterFiber();
+  void PeriodicWriterFiber(std::chrono::microseconds period_ms, util::fb2::Done* waiter);
+  void SendAsync(bool writer_done);
+  void OnCompletion(std::error_code ec, size_t len, bool writer_done);
 
   PendingBuf pending_buf_;
 
