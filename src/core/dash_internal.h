@@ -434,11 +434,11 @@ class Segment {
 
   template <bool UV = kUseVersion>
   std::enable_if_t<UV, uint64_t> GetVersion(PhysicalBid bid) const {
-    return bucket_[bid].GetVersion();
+    return GetBucket(bid).GetVersion();
   }
 
   template <bool UV = kUseVersion> std::enable_if_t<UV> SetVersion(PhysicalBid bid, uint64_t v) {
-    return bucket_[bid].SetVersion(v);
+    return GetBucket(bid).SetVersion(v);
   }
 
   // Traverses over Segment's bucket bid and calls cb(const Iterator& it) 0 or more times
@@ -1300,6 +1300,7 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
 
 template <typename Key, typename Value, typename Policy>
 int Segment<Key, Value, Policy>::MoveToOther(bool own_items, unsigned from_bid, unsigned to_bid) {
+  assert(from_bid < kBucketNum && to_bid < kBucketNum);
   auto& src = bucket_[from_bid];
   uint32_t mask = src.GetProbe(!own_items);
   if (mask == 0) {
@@ -1515,7 +1516,8 @@ void Segment<Key, Value, Policy>::TraverseBucket(PhysicalBid bid, Cb&& cb) {
 
 template <typename Key, typename Value, typename Policy>
 template <typename Cb, typename HashFn>
-bool Segment<Key, Value, Policy>::TraverseLogicalBucket(uint8_t bid, HashFn&& hfun, Cb&& cb) const {
+bool Segment<Key, Value, Policy>::TraverseLogicalBucket(LogicalBid bid, HashFn&& hfun,
+                                                        Cb&& cb) const {
   assert(bid < kBucketNum);
 
   const Bucket& b = bucket_[bid];
@@ -1669,12 +1671,12 @@ auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_ha
 
   // update ptr for swapped items
   if (is_probing) {
-    unsigned prev_bid = PrevBid(swap_bid);
+    LogicalBid prev_bid = PrevBid(swap_bid);
     auto& prevb = bucket_[prev_bid];
     prevb.SetStashPtr(stash_pos, swap_fp, &swapb);
   } else {
     // stash_ptr resides in the current or the next bucket.
-    unsigned next_bid = NextBid(swap_bid);
+    LogicalBid next_bid = NextBid(swap_bid);
     swapb.SetStashPtr(stash_pos, swap_fp, bucket_ + next_bid);
   }
 
