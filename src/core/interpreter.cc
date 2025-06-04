@@ -975,7 +975,7 @@ void Interpreter::ResetStack() {
 int64_t Interpreter::RunGC() {
   int64_t before = lua_gc(lua_, LUA_GCCOUNT);
   lua_gc(lua_, LUA_GCCOLLECT);
-  return before - lua_gc(lua_, LUA_GCCOUNT);
+  return (before - lua_gc(lua_, LUA_GCCOUNT)) * 1024;
 }
 
 void Interpreter::UpdateGCParameters() {

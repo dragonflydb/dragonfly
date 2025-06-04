@@ -388,7 +388,10 @@ async def test_gc_force_flag(async_client: aioredis.Redis):
 
     await async_client.execute_command("SCRIPT", "GC")
 
-    await async_client.execute_command("CONFIG", "SET", "lua_mem_gc_threshold", "1000000")
+    info = await async_client.info("memory")
+    assert info["used_memory_lua"] < 4 * 1e6
+
+    await async_client.execute_command("CONFIG", "SET", "lua_mem_gc_threshold", "1000")
 
     for i in range(0, 1000):
         await asyncio.gather(*(async_client.eval(SCRIPT, 0) for _ in range(5)))

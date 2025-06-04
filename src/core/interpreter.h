@@ -114,6 +114,7 @@ class Interpreter {
 
   void ResetStack();
 
+  // run gc and returns size of freed memory in bytes
   int64_t RunGC();
 
   void UpdateGCParameters();
