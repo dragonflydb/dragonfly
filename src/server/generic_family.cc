@@ -1646,7 +1646,17 @@ void GenericFamily::Move(CmdArgList args, const CommandContext& cmd_cntx) {
 
 void GenericFamily::Rename(CmdArgList args, const CommandContext& cmd_cntx) {
   auto reply = RenameGeneric(args, false, cmd_cntx.tx);
-  cmd_cntx.rb->SendError(reply);
+
+  if (!reply.status) {
+    return cmd_cntx.rb->SendError(reply);
+  }
+
+  OpStatus st = reply.status.value();
+  if (st == OpStatus::OK) {
+    cmd_cntx.rb->SendOk();
+  } else {
+    cmd_cntx.rb->SendError(reply);
+  }
 }
 
 void GenericFamily::RenameNx(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -1682,7 +1692,22 @@ void GenericFamily::Copy(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   Renamer renamer(cmd_cntx.tx, k1, k2, shard_set->size(), true);
-  cmd_cntx.rb->SendError(renamer.Rename(!replace));
+  auto reply = renamer.Rename(!replace);
+
+  if (!reply.status) {
+    return cmd_cntx.rb->SendError(reply);
+  }
+
+  OpStatus st = reply.status.value();
+  if (st == OpStatus::OK) {
+    cmd_cntx.rb->SendLong(1);
+  } else if (st == OpStatus::KEY_EXISTS) {
+    cmd_cntx.rb->SendLong(0);
+  } else if (st == OpStatus::KEY_NOTFOUND) {
+    cmd_cntx.rb->SendLong(0);
+  } else {
+    cmd_cntx.rb->SendError(reply);
+  }
 }
 
 void GenericFamily::ExpireTime(CmdArgList args, const CommandContext& cmd_cntx) {
