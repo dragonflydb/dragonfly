@@ -383,7 +383,7 @@ async def test_gc_force_flag(async_client: aioredis.Redis):
     stats = await async_client.info("stats")
     assert stats["lua_interpreter_return"] == 5000
     assert stats["lua_force_gc_calls"] == 0
-    assert stats["lua_gc_work_time"] == 0
+    assert stats["lua_gc_duration_total_sec"] == 0
     assert stats["lua_gc_freed_memory"] == 0
 
     await async_client.execute_command("SCRIPT", "GC")
@@ -402,5 +402,5 @@ async def test_gc_force_flag(async_client: aioredis.Redis):
     stats = await async_client.info("stats")
     assert stats["lua_interpreter_return"] >= 10000
     assert stats["lua_force_gc_calls"] > 0
-    assert stats["lua_gc_work_time"] > 0
+    assert stats["lua_gc_duration_total_sec"] > 0
     assert stats["lua_gc_freed_memory"] > 0

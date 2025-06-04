@@ -164,7 +164,7 @@ class InterpreterManager {
     uint64_t interpreter_cnt = 0;
     uint64_t blocked_cnt = 0;
     uint64_t force_gc_calls = 0;
-    uint64_t gc_work_time_ns = 0;
+    uint64_t gc_duration_ns = 0;
     uint64_t interpreter_return = 0;
     int64_t gc_freed_memory = 0;
   };

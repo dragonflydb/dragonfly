@@ -973,9 +973,13 @@ void Interpreter::ResetStack() {
 }
 
 int64_t Interpreter::RunGC() {
-  int64_t before = lua_gc(lua_, LUA_GCCOUNT);
+  int64_t before_kb = lua_gc(lua_, LUA_GCCOUNT);
   lua_gc(lua_, LUA_GCCOLLECT);
-  return (before - lua_gc(lua_, LUA_GCCOUNT)) * 1024;
+  int64_t after_kb = lua_gc(lua_, LUA_GCCOUNT);
+  LOG_IF(DFATAL, after_kb > before_kb)
+      << "LUA_GCCOLLECT increase memory consumption from " << before_kb << " to " << after_kb;
+  int64_t res = (before_kb - after_kb) * 1024;
+  return std::max(int64_t(0), res);
 }
 
 void Interpreter::UpdateGCParameters() {
@@ -1172,7 +1176,7 @@ InterpreterManager::Stats& InterpreterManager::Stats::operator+=(const Stats& ot
   this->blocked_cnt += other.blocked_cnt;
 
   this->force_gc_calls += other.force_gc_calls;
-  this->gc_work_time_ns += other.gc_work_time_ns;
+  this->gc_duration_ns += other.gc_duration_ns;
   this->interpreter_return += other.interpreter_return;
   this->gc_freed_memory += other.gc_freed_memory;
 
@@ -1208,7 +1212,7 @@ void InterpreterManager::Return(Interpreter* ir) {
     auto before = steady_clock::now();
     tl_stats().gc_freed_memory += ir->RunGC();
     auto after = steady_clock::now();
-    tl_stats().gc_work_time_ns += duration_cast<nanoseconds>(after - before).count();
+    tl_stats().gc_duration_ns += duration_cast<nanoseconds>(after - before).count();
   }
   if (ir >= storage_.data() && ir < storage_.data() + storage_.size()) {
     available_.push_back(ir);
