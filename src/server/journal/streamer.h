@@ -4,13 +4,12 @@
 
 #pragma once
 
-#include <deque>
-
 #include "server/cluster/slot_set.h"
 #include "server/common.h"
 #include "server/db_slice.h"
 #include "server/journal/journal.h"
 #include "server/journal/pending_buf.h"
+#include "server/journal/readwriterqueue/readerwriterqueue.h"
 #include "server/journal/serializer.h"
 #include "server/rdb_save.h"
 
@@ -60,14 +59,25 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   ExecutionState* cntx_;
 
  private:
-  void AsyncWrite();
-  void OnCompletion(std::error_code ec, size_t len);
-
   bool IsStalled() const;
 
   journal::Journal* journal_;
 
-  PendingBuf pending_buf_;
+  util::fb2::Fiber periodic_writer_;
+  util::fb2::Done periodic_writer_done_;
+  void PeriodicWriterFiber(std::chrono::microseconds period_ms, util::fb2::Done* waiter);
+  void SendAsync(bool writer_done);
+  void OnCompletion(std::error_code ec, size_t len, bool writer_done);
+
+  using JournalStreamerItem = struct JournalStreamerItem {
+    size_t size;
+    std::string data;
+  };
+
+  static constexpr uint32_t in_flight_data_size_limit = 1024;
+  moodycamel::ReaderWriterQueue<JournalStreamerItem> queue_;
+  std::atomic<size_t> queue_total_bytes_ = 0;
+  absl::InlinedVector<uint8_t, in_flight_data_size_limit> in_flight_data_;
 
   size_t in_flight_bytes_ = 0, total_sent_ = 0;
   time_t last_lsn_time_ = 0;
