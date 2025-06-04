@@ -1064,7 +1064,7 @@ optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid,
                                                      const ConnectionContext* cntx,
                                                      CmdArgList tail_args) {
   if (ShouldDenyOnOOM(cid)) {
-    return facade::ErrorReply{kOutOfMemory};
+    return facade::ErrorReply{OpStatus::OUT_OF_MEMORY};
   }
 
   return VerifyConnectionAclStatus(cid, cntx, "ACL rules changed between the MULTI and EXEC",
@@ -1365,6 +1365,9 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, CommandConte
   DCHECK(cntx);
 
   if (auto err = VerifyCommandExecution(cid, cntx, tail_args); err) {
+    if (err->status == OpStatus::OUT_OF_MEMORY) {
+      cmd_cntx->is_oom = true;
+    }
     // We need to skip this because ACK's should not be replied to
     // Bonus points because this allows to continue replication with ACL users who got
     // their access revoked and reinstated

@@ -144,19 +144,22 @@ class ClusterShardMigration {
 
  private:
   std::error_code ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx) {
-    if (cntx->IsRunning()) {
-      if (!tx_data.IsGlobalCmd()) {
-        return executor_.Execute(tx_data.dbid, tx_data.command);
-      } else {
-        // TODO check which global commands should be supported
-        std::string error =
-            absl::StrCat("We don't support command: ", ToSV(tx_data.command.cmd_args[0]),
-                         " in cluster migration process.");
-        LOG(ERROR) << error;
-        cntx->ReportError(error);
-        in_migration_->ReportError(error);
-      }
+    if (!cntx->IsRunning()) {
+      return {};
     }
+
+    if (!tx_data.IsGlobalCmd()) {
+      return executor_.Execute(tx_data.dbid, tx_data.command);
+    } else {
+      // TODO check which global commands should be supported
+      std::string error =
+          absl::StrCat("We don't support command: ", ToSV(tx_data.command.cmd_args[0]),
+                       " in cluster migration process.");
+      LOG(ERROR) << error;
+      cntx->ReportError(error);
+      in_migration_->ReportError(error);
+    }
+
     return {};
   }
 
