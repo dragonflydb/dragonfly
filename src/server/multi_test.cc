@@ -998,6 +998,13 @@ TEST_F(MultiTest, NoKeyTransactional) {
   Run({"exec"});
 }
 
+TEST_F(MultiTest, NoKeyTransactionalMany) {
+  vector<vector<string>> cmds;
+  cmds.push_back({"rename", "x", "z"});
+  cmds.push_back({"ft._list"});
+  RunMany(cmds);
+}
+
 class MultiEvalTest : public BaseFamilyTest {
  protected:
   MultiEvalTest() : BaseFamilyTest() {

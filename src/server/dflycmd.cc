@@ -301,6 +301,14 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     flow.eof_token = eof_token;
     flow.version = replica_ptr->version;
 
+    if (!cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
+      // Listener::PreShutdown() triggered
+      if (cntx->conn()->socket()->IsOpen()) {
+        return rb->SendError(kInvalidState);
+      }
+      return;
+    }
+
     std::optional<Replica::LastMasterSyncData> data = sf_->GetLastMasterData();
     // In this flow the master and the registered replica where synced from the same master.
     if (last_master_id && data && data.value().id == last_master_id.value()) {
@@ -327,14 +335,6 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
                 << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
       }
     }
-  }
-
-  if (!cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
-    // Listener::PreShutdown() triggered
-    if (cntx->conn()->socket()->IsOpen()) {
-      return rb->SendError(kInvalidState);
-    }
-    return;
   }
 
   sf_->journal()->StartInThread();
