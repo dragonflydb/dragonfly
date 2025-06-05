@@ -3172,16 +3172,29 @@ async def test_replicate_hset_with_expiry(df_factory: DflyInstanceFactory):
     assert result["name"] == "1234"
 
 
+@pytest.mark.parametrize("proactors", [1, 4, 6])
 @pytest.mark.parametrize("backlog_len", [1, 256, 1024, 1300])
-async def test_partial_sync(df_factory, df_seeder_factory, backlog_len):
-    master = df_factory.create(proactor_threads=1, shard_repl_backlog_len=backlog_len)
-    replica = df_factory.create(proactor_threads=1)
+async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_len):
+    keys = 5_000
+    if proactors > 1:
+        keys = 10_000
+
+    master = df_factory.create(
+        proactor_threads=proactors, shard_repl_backlog_len=backlog_len, lock_on_hashtags=True
+    )
+    replica = df_factory.create(proactor_threads=proactors)
 
     df_factory.start_all([replica, master])
-    seeder = df_seeder_factory.create(keys=1000, port=master.port)
-    await seeder.run(target_deviation=0.01)
+
+    async def stream(client, total):
+        for i in range(0, total):
+            prefix = "{prefix}"
+            await client.execute_command(f"SET {prefix}foo{i} bar{i}")
 
     async with replica.client() as c_replica, master.client() as c_master:
+        seeder = SeederV2(key_target=keys)
+        await seeder.run(c_master, target_deviation=0.01)
+
         proxy = Proxy("127.0.0.1", 1113, "127.0.0.1", master.port)
         await proxy.start()
         task = asyncio.create_task(proxy.serve())
@@ -3191,31 +3204,30 @@ async def test_partial_sync(df_factory, df_seeder_factory, backlog_len):
             # Reach stable sync
             await wait_for_replicas_state(c_replica)
             # Stream some elements
-            for i in range(0, backlog_len):
-                await c_master.execute_command(f"SET foo{i} bar{i}")
+            await stream(c_master, backlog_len)
 
             proxy.drop_connection()
-
             # Give time to detect dropped connection and reconnect
             await asyncio.sleep(1.0)
             # Partial synced here
-            await wait_available_async(c_replica)
-
-            capture = await seeder.capture()
-            assert await seeder.compare(capture, replica.port)
+            await check_all_replicas_finished([c_replica], c_master)
+            hash1, hash2 = await asyncio.gather(
+                *(SeederV2.capture(c) for c in (c_master, c_replica))
+            )
+            assert hash1 == hash2
 
             await proxy.close()
-
             # Whoops we moved too much, no partial sync here
-            for i in range(0, backlog_len + 10):
-                await c_master.execute_command(f"SET foo{i} bar{i}")
-
+            await stream(c_master, backlog_len + 10)
             await proxy.start()
             await asyncio.sleep(1.0)
-            await wait_for_replicas_state(c_replica)
 
-            capture = await seeder.capture()
-            assert await seeder.compare(capture, replica.port)
+            await check_all_replicas_finished([c_replica], c_master)
+
+            hash1, hash2 = await asyncio.gather(
+                *(SeederV2.capture(c) for c in (c_master, c_replica))
+            )
+            assert hash1 == hash2
         finally:
             await proxy.close(task)
 
@@ -3223,7 +3235,11 @@ async def test_partial_sync(df_factory, df_seeder_factory, backlog_len):
     replica.stop()
     # Partial sync worked
     lines = master.find_in_logs("Partial sync requested from LSN")
-    assert len(lines) == 1
+    # Because we run with num_shards = proactors - 1
+    total_attempts = 1
+    if proactors > 1:
+        total_attempts = proactors - 1 + proactors - 2
+    assert len(lines) == total_attempts
     # Second partial sync failed because of stale LSN
     lines = master.find_in_logs("Partial sync requested from stale LSN")
     assert len(lines) == 1

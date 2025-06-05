@@ -280,7 +280,6 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
 
   string eof_token;
   std::string_view sync_type{"FULL"};
-  bool partial_sync = false;
   {
     util::fb2::LockGuard lk{replica_ptr->shared_mu};
 
@@ -331,7 +330,6 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
 
       if (IsLSNDiffBellowThreshold(data.value().last_journal_LSNs, lsn_vec)) {
         sync_type = "PARTIAL";
-        partial_sync = true;
         flow.start_partial_sync_at = sf_->journal()->GetLsn();
         VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
                 << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";

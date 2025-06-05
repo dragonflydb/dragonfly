@@ -541,6 +541,11 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     unsigned num_df_flows = shard_flows_.size();
     // Going out of the way to avoid using std::vector<bool>...
     auto is_full_sync = std::make_unique<bool[]>(num_df_flows);
+    // If master has less flows than the replica we will never
+    // initialize some of the elements. Same when we call exec_st_.ReportError()
+    // within the shard_cb. Both cases will end up calling std::accumulate which will
+    // try to sum whatever junk that memory cell contain. Do not remove the memset below.
+    std::memset(is_full_sync.get(), 0, num_df_flows);
     DCHECK(!last_journal_LSNs_ || last_journal_LSNs_->size() == num_df_flows);
     auto shard_cb = [&](unsigned index, auto*) {
       for (auto id : thread_flow_map_[index]) {
