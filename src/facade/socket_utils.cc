@@ -4,9 +4,10 @@
 
 #include "socket_utils.h"
 
-#ifdef __linux__
 #include <arpa/inet.h>
 #include <sys/socket.h>
+
+#ifdef __linux__
 #include <sys/stat.h>
 #include <unistd.h>
 
