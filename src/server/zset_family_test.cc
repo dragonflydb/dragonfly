@@ -1218,4 +1218,15 @@ TEST_F(ZSetFamilyTest, ZRangeZeroElements) {
   ASSERT_THAT(resp, ArrLen(0));
 }
 
+TEST_F(ZSetFamilyTest, ZCountMinGreaterThanMaxCrash) {
+  // Add 1000 members to the sorted set
+  for (int i = 1; i <= 1000; ++i) {
+    Run({"zadd", "huge_key", absl::StrCat(i), absl::StrCat("member", i)});
+  }
+
+  // Expect ZCOUNT to return 0 when min > max
+  auto resp = Run({"zcount", "huge_key", "945", "261"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
 }  // namespace dfly

@@ -1174,22 +1174,22 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
   auto& db = db_arr_[cntx.db_index];
   auto expire_it = db->expire.Find(it->first);
 
-  if (IsValid(expire_it)) {
-    // TODO: to employ multi-generation update of expire-base and the underlying values.
-    time_t expire_time = ExpireTime(expire_it);
-
-    // Never do expiration on replica or if expiration is disabled.
-    if (time_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_)
-      return {it, expire_it};
-  } else {
+  if (!IsValid(expire_it)) {
     LOG(DFATAL) << "Internal error, entry " << it->first.ToString()
                 << " not found in expire table, db_index: " << cntx.db_index
                 << ", expire table size: " << db->expire.size()
                 << ", prime table size: " << db->prime.size() << util::fb2::GetStacktrace();
+    return {it, ExpireIterator{}};
   }
 
-  DCHECK(shard_owner()->shard_lock()->Check(IntentLock::Mode::EXCLUSIVE))
-      << util::fb2::GetStacktrace();
+  // TODO: to employ multi-generation update of expire-base and the underlying values.
+  time_t expire_time = ExpireTime(expire_it);
+
+  // Never do expiration on replica or if expiration is disabled or global lock was taken.
+  if (time_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_ ||
+      !shard_owner()->shard_lock()->Check(IntentLock::Mode::EXCLUSIVE)) {
+    return {it, expire_it};
+  }
 
   string scratch;
   string_view key = it->first.GetSlice(&scratch);

@@ -1419,8 +1419,16 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("used_memory_lua", "", m.lua_stats.used_bytes, MetricType::GAUGE,
                             &resp->body());
+  AppendMetricWithoutLabels("freed_memory_lua", "", m.lua_stats.gc_freed_memory,
+                            MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("lua_blocked_total", "", m.lua_stats.blocked_cnt, MetricType::COUNTER,
                             &resp->body());
+  AppendMetricWithoutLabels("lua_gc_interpreter_return", "", m.lua_stats.interpreter_return,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("lua_force_gc_calls", "", m.lua_stats.force_gc_calls,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("lua_gc_duration_total_sec", "", m.lua_stats.gc_duration_ns * 1e-9,
+                            MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("backups_total", "", m.loading_stats.backup_count, MetricType::COUNTER,
                             &resp->body());
@@ -2563,6 +2571,11 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 
     // Total number of events of when a connection was blocked on grabbing interpreter.
     append("lua_blocked_total", m.lua_stats.blocked_cnt);
+
+    append("lua_interpreter_return", m.lua_stats.interpreter_return);
+    append("lua_force_gc_calls", m.lua_stats.force_gc_calls);
+    append("lua_gc_freed_memory_total", m.lua_stats.gc_freed_memory);
+    append("lua_gc_duration_total_sec", m.lua_stats.gc_duration_ns * 1e-9);
   };
 
   auto add_tiered_info = [&] {

@@ -375,13 +375,17 @@ static_assert(ascii_len(15) == 17);
 static_assert(ascii_len(16) == 18);
 static_assert(ascii_len(17) == 19);
 
+struct Huffman {
+  HuffmanEncoder encoder;
+  HuffmanDecoder decoder;
+};
+
 struct TL {
   MemoryResource* local_mr = PMR_NS::get_default_resource();
   base::PODArray<uint8_t> tmp_buf;
   string tmp_str;
-  HuffmanEncoder huff_encoder;
-  HuffmanDecoder huff_decoder;
   size_t small_str_bytes;
+  Huffman huff_keys;
   uint64_t huff_encode_total = 0, huff_encode_success = 0;  // success/total metrics.
 };
 
@@ -751,20 +755,27 @@ void CompactObj::InitThreadLocal(MemoryResource* mr) {
   tl.tmp_buf = base::PODArray<uint8_t>{mr};
 }
 
-bool CompactObj::InitHuffmanThreadLocal(std::string_view hufftable) {
+bool CompactObj::InitHuffmanThreadLocal(HuffmanDomain domain, std::string_view hufftable) {
   string err_msg;
 
+  Huffman* huffman = nullptr;
+  switch (domain) {
+    case HUFF_KEYS:
+      huffman = &tl.huff_keys;
+      break;
+  }
+
   // We do not allow overriding the existing huffman table once it is set.
-  if (tl.huff_encoder.valid()) {
+  if (huffman->encoder.valid()) {
     return false;
   }
 
-  if (!tl.huff_encoder.Load(hufftable, &err_msg)) {
+  if (!huffman->encoder.Load(hufftable, &err_msg)) {
     LOG(DFATAL) << "Failed to load huffman table: " << err_msg;
     return false;
   }
 
-  if (!tl.huff_decoder.Load(hufftable, &err_msg)) {
+  if (!huffman->decoder.Load(hufftable, &err_msg)) {
     LOG(DFATAL) << "Failed to load huffman table: " << err_msg;
     return false;
   }
@@ -865,7 +876,7 @@ uint64_t CompactObj::HashCode() const {
     size_t decoded_len = DecodedLen(taglen_, u_.inline_str[0]);
     if (mask_bits_.encoding == HUFFMAN_ENC) {
       if (decoded_len <= sizeof(buf) &&
-          tl.huff_decoder.Decode({u_.inline_str + 1, size_t(taglen_ - 1)}, decoded_len, buf)) {
+          tl.huff_keys.decoder.Decode({u_.inline_str + 1, size_t(taglen_ - 1)}, decoded_len, buf)) {
         return XXH3_64bits_withSeed(buf, decoded_len, kHashSeed);
       }
     } else {
@@ -1131,8 +1142,8 @@ void CompactObj::GetString(char* dest) const {
         detail::ascii_unpack(to_byte(u_.inline_str), taglen_ + 2, dest);
         break;
       case HUFFMAN_ENC:
-        tl.huff_decoder.Decode({u_.inline_str + 1, size_t(taglen_ - 1)},
-                               u_.inline_str[0] + taglen_ - 1, dest);
+        tl.huff_keys.decoder.Decode({u_.inline_str + 1, size_t(taglen_ - 1)},
+                                    u_.inline_str[0] + taglen_ - 1, dest);
         break;
       case NONE_ENC:
         memcpy(dest, u_.inline_str, taglen_);
@@ -1155,8 +1166,8 @@ void CompactObj::GetString(char* dest) const {
       DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
       size_t decoded_len = DecodedLen(u_.r_obj.Size(), *(const uint8_t*)u_.r_obj.inner_obj());
       if (mask_bits_.encoding == HUFFMAN_ENC) {
-        CHECK(tl.huff_decoder.Decode({(const char*)u_.r_obj.inner_obj() + 1, u_.r_obj.Size() - 1},
-                                     decoded_len, dest));
+        CHECK(tl.huff_keys.decoder.Decode(
+            {(const char*)u_.r_obj.inner_obj() + 1, u_.r_obj.Size() - 1}, decoded_len, dest));
         return;
       }
       detail::ascii_unpack_simd(to_byte(u_.r_obj.inner_obj()), decoded_len, dest);
@@ -1174,7 +1185,7 @@ void CompactObj::GetString(char* dest) const {
         next += slices[0].size() - 1;
         memcpy(next, slices[1].data(), slices[1].size());
         string_view src(reinterpret_cast<const char*>(tl.tmp_buf.data()), tl.tmp_buf.size());
-        CHECK(tl.huff_decoder.Decode(src, decoded_len, dest));
+        CHECK(tl.huff_keys.decoder.Decode(src, decoded_len, dest));
         return;
       }
 
@@ -1388,7 +1399,7 @@ bool CompactObj::CmpEncoded(string_view sv) const {
       constexpr size_t kMaxHuffLen = kInlineLen * 3;
       if (sz <= kMaxHuffLen) {
         char buf[kMaxHuffLen];
-        CHECK(tl.huff_decoder.Decode({u_.inline_str + 1, size_t(taglen_ - 1)}, sz, buf));
+        CHECK(tl.huff_keys.decoder.Decode({u_.inline_str + 1, size_t(taglen_ - 1)}, sz, buf));
         return sv == string_view(buf, sz);
       }
     }
@@ -1488,13 +1499,13 @@ void CompactObj::EncodeString(string_view str) {
       kUseAsciiEncoding && str.size() < 19 && detail::validate_ascii_fast(str.data(), str.size());
 
   // if !is_ascii, we try huffman encoding next.
-  if (!is_ascii && str.size() <= kMaxHuffLen && tl.huff_encoder.valid()) {
-    unsigned dest_len = tl.huff_encoder.CompressedBound(str.size());
+  if (!is_ascii && str.size() <= kMaxHuffLen && tl.huff_keys.encoder.valid()) {
+    unsigned dest_len = tl.huff_keys.encoder.CompressedBound(str.size());
     // 1 byte for storing the size delta.
     tl.tmp_buf.resize(1 + dest_len);
     string err_msg;
     ++tl.huff_encode_total;
-    bool res = tl.huff_encoder.Encode(str, tl.tmp_buf.data() + 1, &dest_len, &err_msg);
+    bool res = tl.huff_keys.encoder.Encode(str, tl.tmp_buf.data() + 1, &dest_len, &err_msg);
     if (res) {
       // we accept huffman encoding only if it is:
       // 1. smaller than the original string by 20%

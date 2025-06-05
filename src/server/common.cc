@@ -270,7 +270,9 @@ SearchStats& SearchStats::operator+=(const SearchStats& o) {
   ADD(used_memory);
   ADD(num_entries);
 
-  DCHECK(num_indices == 0 || num_indices == o.num_indices);
+  // Different shards could have inconsistent num_indices values during concurrent operations.
+  // This can happen on concurrent index creation.
+  // We use max to ensure that the total num_indices is the maximum of all shards.
   num_indices = std::max(num_indices, o.num_indices);
   return *this;
 }

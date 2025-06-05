@@ -512,6 +512,7 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
 
   for (auto& sd : shard_data_) {
     sd.slice_count = sd.slice_start = 0;
+    sd.fp_start = sd.fp_count = 0;  // Reset fingerprints span as kv_fp_ was cleared above.
 
     if (multi_->mode == NON_ATOMIC) {
       sd.local_mask = 0;  // Non atomic transactions schedule each time, so remove all flags
@@ -1244,10 +1245,13 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
   if (IsGlobal()) {
     shard->shard_lock()->Release(LockMode());
   } else {
-    auto lock_args = GetLockArgs(shard->shard_id());
-    DCHECK(sd.local_mask & KEYLOCK_ACQUIRED);
-    DCHECK(!lock_args.fps.empty());
-    GetDbSlice(shard->shard_id()).Release(LockMode(), lock_args);
+    if ((cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0) {
+      auto lock_args = GetLockArgs(shard->shard_id());
+      DCHECK(sd.local_mask & KEYLOCK_ACQUIRED);
+      DCHECK(!lock_args.fps.empty());
+      GetDbSlice(shard->shard_id()).Release(LockMode(), lock_args);
+    }
+
     sd.local_mask &= ~KEYLOCK_ACQUIRED;
   }
 
@@ -1322,7 +1326,7 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
 
   // If we don't follow up with an "action" hop, we must clean up manually on all shards.
   if (result != OpStatus::OK)
-    ExpireBlocking(std::move(wkeys));
+    ExpireBlocking(wkeys);
 
   return result;
 }
@@ -1512,7 +1516,7 @@ void Transaction::ReviveAutoJournal() {
   re_enabled_auto_journal_ = true;
 }
 
-void Transaction::CancelBlocking(std::function<OpStatus(ArgSlice)> status_cb) {
+void Transaction::CancelBlocking(const std::function<OpStatus(ArgSlice)>& status_cb) {
   // We're on the owning thread of this transaction, so we can safely access it's data below.
   // First, check if it makes sense to proceed.
   if (blocking_barrier_.IsClaimed() || cid_ == nullptr || (cid_->opt_mask() & CO::BLOCKING) == 0)
@@ -1607,7 +1611,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
 
   if (cid->first_key_pos() > 0) {
     start = cid->first_key_pos() - 1;
-    int last = cid->last_key_pos();
+    int8_t last = cid->last_key_pos();
 
     if (num_custom_keys >= 0) {
       end = start + num_custom_keys;

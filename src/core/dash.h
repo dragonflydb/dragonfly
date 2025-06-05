@@ -328,7 +328,7 @@ class DashTable : public detail::DashTableBase {
     auto* mr = segment_.get_allocator().resource();
     PMR_NS::polymorphic_allocator<SegmentType> pa(mr);
     SegmentType* res = pa.allocate(1);
-    pa.construct(res, depth);  //   new SegmentType(depth);
+    pa.construct(res, depth, mr);  //   new SegmentType(depth);
     bucket_count_ += res->num_buckets();
     return res;
   }
@@ -785,6 +785,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
 
     typename SegmentType::Iterator it;
     bool res = true;
+    unsigned num_buckets = target->num_buckets();
     if (mode == InsertMode::kForceInsert) {
       it = target->InsertUniq(std::forward<U>(key), std::forward<V>(value), key_hash, true);
       res = it.found();
@@ -794,6 +795,8 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
     }
 
     if (res) {  // success
+      // in case segment bucket count changed, we need to update total bucket count.
+      bucket_count_ += (target->num_buckets() - num_buckets);
       ++size_;
       return std::make_pair(iterator{this, target_seg_id, it.index, it.slot}, true);
     }
@@ -905,7 +908,12 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id) {
 
   auto hash_fn = [this](const auto& k) { return policy_.HashFn(k); };
 
+  // remove current segment bucket count.
+  bucket_count_ -= (source->num_buckets() + target->num_buckets());
   source->Split(std::move(hash_fn), target);  // increases the depth.
+
+  // add back the updated bucket count.
+  bucket_count_ += (target->num_buckets() + source->num_buckets());
   ++unique_segments_;
 
   for (size_t i = start_idx + chunk_size / 2; i < start_idx + chunk_size; ++i) {
@@ -928,10 +936,10 @@ auto DashTable<_Key, _Value, Policy>::TraverseBySegmentOrder(Cursor curs, Cb&& c
   ++bid;
   if (SegmentType::OutOfRange(bid)) {
     sid = NextSeg(sid);
-    bid = 0;
     if (sid >= segment_.size()) {
-      return 0;  // "End of traversal" cursor.
+      return Cursor::end();
     }
+    bid = 0;
   }
 
   return Cursor{global_depth_, sid, bid};
@@ -953,7 +961,7 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
 
   // Test validity of the cursor.
   if (bid >= Policy::kBucketNum || sid >= segment_.size())
-    return 0;
+    return Cursor::end();
 
   auto hash_fun = [this](const auto& k) { return policy_.HashFn(k); };
 
@@ -973,7 +981,7 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
       ++bid;
 
       if (bid >= Policy::kBucketNum)
-        return 0;  // "End of traversal" cursor.
+        return Cursor::end();
     }
   } while (!fetched);
 
@@ -991,7 +999,7 @@ auto DashTable<_Key, _Value, Policy>::AdvanceCursorBucketOrder(Cursor cursor) ->
     ++bid;
 
     if (SegmentType::OutOfRange(bid))
-      return 0;  // "End of traversal" cursor.
+      return Cursor::end();
   }
   return Cursor{global_depth_, sid, bid};
 }
@@ -1000,7 +1008,7 @@ template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
 auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor cursor, Cb&& cb) -> Cursor {
   if (SegmentType::OutOfRange(cursor.bucket_id()))  // sanity.
-    return 0;
+    return Cursor::end();
 
   constexpr uint32_t kMaxIterations = 8;
   bool invoked = false;
@@ -1010,13 +1018,13 @@ auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor cursor, Cb&& cb) ->
     uint8_t bid = cursor.bucket_id();
     SegmentType* s = segment_[sid];
     assert(s);
-
-    const auto& bucket = s->GetBucket(bid);
-    if (bucket.GetBusy()) {  // Invoke callback only if bucket has elements.
-      cb(BucketIt(sid, bid));
-      invoked = true;
+    if (bid < s->num_buckets()) {
+      const auto& bucket = s->GetBucket(bid);
+      if (bucket.GetBusy()) {  // Invoke callback only if bucket has elements.
+        cb(BucketIt(sid, bid));
+        invoked = true;
+      }
     }
-
     cursor = AdvanceCursorBucketOrder(cursor);
     if (invoked || !cursor)  // Break end of traversal or callback invoked.
       return cursor;

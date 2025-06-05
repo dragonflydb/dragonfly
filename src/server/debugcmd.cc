@@ -1298,19 +1298,26 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
   bool print_bintable = false;
 
   if (parser.Check("SET", &bintable)) {
-    atomic_bool succeed = true;
-    shard_set->RunBriefInParallel([&](EngineShard* shard) {
-      if (!CompactObj::InitHuffmanThreadLocal(bintable)) {
-        succeed = false;
-      }
-    });
+    string raw;
+    atomic_bool succeed = absl::Base64Unescape(bintable, &raw);
+    if (succeed) {
+      shard_set->RunBriefInParallel([&](EngineShard* shard) {
+        if (!CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_KEYS, raw)) {
+          succeed = false;
+        }
+      });
+    }
     return succeed ? builder->SendOk() : builder->SendError("Failed to set bintable");
   }
 
   if (parser.Check("EXPORT")) {
     print_bintable = true;
-  } else {
-    parser.Check("IMPORT", &bintable);
+  } else if (parser.Check("IMPORT", &bintable)) {
+    string raw;
+    bool succeed = absl::Base64Unescape(bintable, &raw);
+    if (succeed) {
+      bintable = raw;
+    }
   }
 
   if (parser.HasNext()) {
@@ -1366,7 +1373,6 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
 
     if (print_bintable) {
       bintable = huff_enc.Export();
-      VLOG(1) << "bintable: " << absl::CHexEscape(bintable);
     } else {
       bintable.clear();
     }
@@ -1389,7 +1395,7 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
   rb->SendDouble(ratio);
   if (print_bintable) {
     rb->SendSimpleString("bintable");
-    rb->SendBulkString(bintable);
+    rb->SendBulkString(absl::Base64Escape(bintable));
   }
 }
 

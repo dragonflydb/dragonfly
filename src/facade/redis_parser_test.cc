@@ -159,6 +159,44 @@ TEST_F(RedisParserTest, ClientMode) {
 
   ASSERT_EQ(RedisParser::OK, Parse("*3\r\n+OK\r\n$1\r\n1\r\n*2\r\n$1\r\n1\r\n$-1\r\n"));
   ASSERT_THAT(args_, ElementsAre("OK", "1", ArrLen(2)));
+
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("+O"));
+  EXPECT_EQ(2, consumed_);
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("K\r"));
+  EXPECT_EQ(2, consumed_);
+  ASSERT_EQ(RedisParser::OK, Parse("\n"));
+  ASSERT_THAT(args_, ElementsAre("OK"));
+  EXPECT_EQ(1, consumed_);
+
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("+OK\r"));
+  EXPECT_EQ(4, consumed_);
+  ASSERT_EQ(RedisParser::OK, Parse("\n"));
+  ASSERT_THAT(args_, ElementsAre("OK"));
+  EXPECT_EQ(1, consumed_);
+
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("+"));
+  EXPECT_EQ(1, consumed_);
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("O"));
+  EXPECT_EQ(1, consumed_);
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("K"));
+  EXPECT_EQ(1, consumed_);
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("\r"));
+  EXPECT_EQ(1, consumed_);
+  ASSERT_EQ(RedisParser::OK, Parse("\n"));
+  EXPECT_EQ(1, consumed_);
+  ASSERT_THAT(args_, ElementsAre("OK"));
+
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("-"));
+  EXPECT_EQ(1, consumed_);
+  ASSERT_EQ(RedisParser::OK, Parse("ERR\r\n"));
+  EXPECT_EQ(5, consumed_);
+  ASSERT_THAT(args_, ElementsAre(ErrArg("ERR")));
+
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("-ERR foo"));
+  EXPECT_EQ(8, consumed_);
+  ASSERT_EQ(RedisParser::OK, Parse("\r\n"));
+  EXPECT_EQ(2, consumed_);
+  ASSERT_THAT(args_, ElementsAre("ERR foo"));
 }
 
 TEST_F(RedisParserTest, Hierarchy) {

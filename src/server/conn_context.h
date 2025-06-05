@@ -149,6 +149,7 @@ struct ConnectionState {
 
   enum MCGetMask {
     FETCH_CAS_VER = 1,
+    SET_EXPIRY = 2,
   };
 
   size_t UsedMemory() const;
@@ -258,7 +259,9 @@ struct ConnectionState {
   // used for memcache set/get commands.
   // For set op - it's the flag value we are storing along with the value.
   // For get op - we use it as a mask of MCGetMask values.
-  uint32_t memcache_flag = 0;
+  // For GAT the lowest two bits are used to store MCGetMask values, the top 62 bits are used to
+  // store expiration timestamp in seconds.
+  uint64_t memcache_flag = 0;
 
   ExecInfo exec_info;
   ReplicationInfo replication_info;
@@ -295,6 +298,10 @@ class ConnectionContext : public facade::ConnectionContext {
     return conn_state.db_index;
   }
 
+  bool IsOOM() {
+    return std::exchange(is_oom_, false);
+  }
+
   void ChangeSubscription(bool to_add, bool to_reply, CmdArgList args,
                           facade::RedisReplyBuilder* rb);
 
@@ -322,6 +329,9 @@ class ConnectionContext : public facade::ConnectionContext {
 
   // The related connection is bound to main listener or serves the memcached protocol
   bool has_main_or_memcache_listener = false;
+
+  // OOM reported while executing
+  bool is_oom_ = false;
 
  private:
   void EnableMonitoring(bool enable) {

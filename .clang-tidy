@@ -8,11 +8,13 @@ Checks: >
   -bugprone-easily-swappable-parameters,
   -bugprone-branch-clone,
   -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-too-small-loop-variable,
+  -bugprone-reserved-identifier,
   boost-use-to-string,
   performance*,
-  cert*,
   -cert-err58-cpp,
   -cert-dcl58-cpp,  # Ignore std changes
+  -cert-dcl51-cpp,  # bugprone-reserved-identifier
   # Doesn't work with abseil flags
   clang-analyzer*,
   google-*,

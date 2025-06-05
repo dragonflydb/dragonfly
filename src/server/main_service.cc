@@ -119,6 +119,11 @@ ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
 ABSL_FLAG(uint32_t, max_squashed_cmd_num, 100,
           "Max number of commands squashed in a single shard during squash optimizaiton");
 
+ABSL_FLAG(string, huffman_table, "",
+          "a comma separated map: domain1:code1,domain2:code2,... where "
+          "domain can currently be only KEYS, code is base64 encoded huffman table exported via "
+          "DEBUG COMPRESSION EXPORT. if empty no huffman compression is appplied.");
+
 namespace dfly {
 
 #if defined(__linux__)
@@ -712,6 +717,41 @@ void SetMaxSquashedCmdNum(int32_t val) {
   shard_set->pool()->AwaitBrief(cb);
 }
 
+void SetHuffmanTable(const std::string& huffman_table) {
+  if (huffman_table.empty())
+    return;
+  vector<string_view> parts = absl::StrSplit(huffman_table, ',');
+  for (const auto& part : parts) {
+    vector<string_view> kv = absl::StrSplit(part, ':');
+    if (kv.size() != 2 || kv[0].empty() || kv[1].empty()) {
+      LOG(ERROR) << "Invalid huffman table entry" << part;
+      continue;
+    }
+    string domain_str = absl::AsciiStrToUpper(kv[0]);
+    optional<CompactObj::HuffmanDomain> domain;
+    if (domain_str == "KEYS") {
+      domain = CompactObj::HUFF_KEYS;
+    } else {
+      LOG(ERROR) << "Unknown huffman domain: " << kv[0];
+      continue;
+    }
+    string unescaped;
+    if (!absl::Base64Unescape(kv[1], &unescaped)) {
+      LOG(ERROR) << "Failed to decode base64 huffman table for domain " << kv[0] << " with value "
+                 << kv[1];
+      continue;
+    }
+    atomic_bool success = true;
+    shard_set->RunBriefInParallel([&](auto* shard) {
+      if (!CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_KEYS, unescaped)) {
+        success = false;
+      }
+    });
+    LOG_IF(ERROR, !success) << "Failed to set huffman table for domain " << kv[0] << " with value "
+                            << kv[1];
+  }
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -780,6 +820,8 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
                                          [](size_t val) { SetSerializationMaxChunkSize(val); });
 
   config_registry.RegisterMutable("pipeline_squash");
+
+  config_registry.RegisterMutable("lua_mem_gc_threshold");
 
   config_registry.RegisterSetter<uint32_t>("pipeline_queue_limit", [](uint32_t val) {
     shard_set->pool()->AwaitBrief(
@@ -865,6 +907,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   SetRssOomDenyRatioOnAllThreads(absl::GetFlag(FLAGS_rss_oom_deny_ratio));
   SetSerializationMaxChunkSize(absl::GetFlag(FLAGS_serialization_max_chunk_size));
   SetMaxSquashedCmdNum(absl::GetFlag(FLAGS_max_squashed_cmd_num));
+  SetHuffmanTable(absl::GetFlag(FLAGS_huffman_table));
 
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.
@@ -1364,6 +1407,10 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
   }
 
   if (std::string reason = builder->ConsumeLastError(); !reason.empty()) {
+    // Set flag if OOM reported
+    if (reason == kOutOfMemory) {
+      cmd_cntx.conn_cntx->is_oom_ = true;
+    }
     VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
     LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
   }
@@ -1540,6 +1587,8 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     case MemcacheParser::PREPEND:
       strcpy(cmd_name, "PREPEND");
       break;
+    case MemcacheParser::GAT:
+      [[fallthrough]];
     case MemcacheParser::GET:
       [[fallthrough]];
     case MemcacheParser::GETS:
@@ -1570,6 +1619,12 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
   }
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
+  // if expire_ts is greater than month it's a unix timestamp
+  // https://github.com/memcached/memcached/blob/master/doc/protocol.txt#L139
+  constexpr uint32_t kExpireLimit = 60 * 60 * 24 * 30;
+  const uint64_t expire_ts = cmd.expire_ts && cmd.expire_ts <= kExpireLimit
+                                 ? cmd.expire_ts + time(nullptr)
+                                 : cmd.expire_ts;
 
   if (MemcacheParser::IsStoreCmd(cmd.type)) {
     char* v = const_cast<char*>(value.data());
@@ -1579,12 +1634,6 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       args.emplace_back(store_opt, strlen(store_opt));
     }
 
-    // if expire_ts is greater than month it's a unix timestamp
-    // https://github.com/memcached/memcached/blob/master/doc/protocol.txt#L139
-    constexpr uint32_t kExpireLimit = 60 * 60 * 24 * 30;
-    const uint64_t expire_ts = cmd.expire_ts && cmd.expire_ts <= kExpireLimit
-                                   ? cmd.expire_ts + time(nullptr)
-                                   : cmd.expire_ts;
     if (expire_ts && memcmp(cmd_name, "SET", 3) == 0) {
       char* next = absl::numbers_internal::FastIntToBuffer(expire_ts, ttl);
       args.emplace_back(ttl_op, 4);
@@ -1598,6 +1647,10 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     }
     if (cmd.type == MemcacheParser::GETS) {
       dfly_cntx->conn_state.memcache_flag |= ConnectionState::FETCH_CAS_VER;
+    }
+
+    if (cmd.type == MemcacheParser::GAT) {
+      dfly_cntx->conn_state.memcache_flag |= ConnectionState::SET_EXPIRY | expire_ts << 2;
     }
   } else {  // write commands.
     if (store_opt[0]) {

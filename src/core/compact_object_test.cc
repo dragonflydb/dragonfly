@@ -666,7 +666,7 @@ TEST_F(CompactObjectTest, HuffMan) {
   HuffmanEncoder encoder;
   ASSERT_TRUE(encoder.Build(hist.data(), hist.size() - 1, nullptr));
   string bindata = encoder.Export();
-  ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(bindata));
+  ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_KEYS, bindata));
   for (unsigned i = 30; i < 2048; i += 10) {
     string data(i, 'a');
     cobj_.SetString(data);

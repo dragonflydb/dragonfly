@@ -114,7 +114,10 @@ class Interpreter {
 
   void ResetStack();
 
-  void RunGC();
+  // run gc and returns size of freed memory in bytes
+  int64_t RunGC();
+
+  void UpdateGCParameters();
 
   // fp must point to buffer with at least 41 chars.
   // fp[40] will be set to '\0'.
@@ -160,6 +163,10 @@ class InterpreterManager {
     uint64_t used_bytes = 0;
     uint64_t interpreter_cnt = 0;
     uint64_t blocked_cnt = 0;
+    uint64_t force_gc_calls = 0;
+    uint64_t gc_duration_ns = 0;
+    uint64_t interpreter_return = 0;
+    int64_t gc_freed_memory = 0;
   };
 
  public:
