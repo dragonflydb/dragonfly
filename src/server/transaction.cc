@@ -565,8 +565,7 @@ string Transaction::DebugId(std::optional<ShardId> sid) const {
   if (sid) {
     absl::StrAppend(&res, ",mask[", *sid, "]=", int(shard_data_[SidToId(*sid)].local_mask),
                     ",is_armed=", DEBUG_IsArmedInShard(*sid),
-                    ",txqpos[]=", shard_data_[SidToId(*sid)].pq_pos,
-                    ",fail_state_print=", DEBUG_PrintFailState(*sid));
+                    ",txqpos[]=", shard_data_[SidToId(*sid)].pq_pos);
   }
   absl::StrAppend(&res, "}");
   return res;
@@ -978,6 +977,7 @@ const absl::flat_hash_set<std::pair<ShardId, LockFp>>& Transaction::GetMultiFps(
   return multi_->tag_fps;
 }
 
+#if 0
 string Transaction::DEBUG_PrintFailState(ShardId sid) const {
   auto res = StrCat(
       "usc: ", unique_shard_cnt_, ", name:", GetCId()->name(),
@@ -992,6 +992,7 @@ string Transaction::DEBUG_PrintFailState(ShardId sid) const {
   }
   return res;
 }
+#endif
 
 void Transaction::EnableShard(ShardId sid) {
   unique_shard_cnt_ = 1;

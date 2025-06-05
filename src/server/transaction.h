@@ -352,9 +352,6 @@ class Transaction {
   // Get keys multi transaction was initialized with, normalized and unique
   const absl::flat_hash_set<std::pair<ShardId, LockFp>>& GetMultiFps() const;
 
-  // Print in-dept failure state for debugging.
-  std::string DEBUG_PrintFailState(ShardId sid) const;
-
   uint32_t DEBUG_GetTxqPosInShard(ShardId sid) const {
     return shard_data_[SidToId(sid)].pq_pos;
   }
