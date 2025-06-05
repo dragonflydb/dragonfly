@@ -2958,6 +2958,65 @@ async def test_migration_rebalance_node(df_factory: DflyInstanceFactory, df_seed
     assert await seeder.compare(capture, nodes[1].instance.port)
 
 
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_migration_restart(df_factory: DflyInstanceFactory, df_seeder_factory):
+    # 1. Start migration, and than restart it with another slots set
+    instances = [
+        df_factory.create(
+            port=next(next_port),
+            admin_port=next(next_port),
+            vmodule="outgoing_slot_migration=2,cluster_family=2,incoming_slot_migration=2",
+        )
+        for i in range(2)
+    ]
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug("Start seeder")
+    seeder = df_seeder_factory.create(
+        keys=50_000,
+        port=instances[0].port,
+        cluster_mode=True,
+    )
+    await seeder.run(target_deviation=0.1)
+    capture = await seeder.capture()
+
+    logging.debug(f"Start migration")
+    nodes[0].migrations.append(
+        MigrationInfo(
+            "127.0.0.1",
+            nodes[1].instance.admin_port,
+            [(random.randint(1, 8000), random.randint(8001, 16383))],
+            nodes[1].id,
+        )
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await asyncio.sleep(random.randint(1, 10) / 5)
+    logging.debug(f"Restart migration")
+    final_migration_range = (random.randint(1, 8000), random.randint(8001, 16382))
+    nodes[0].migrations[0] = MigrationInfo(
+        "127.0.0.1", nodes[1].instance.admin_port, [final_migration_range], nodes[1].id
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug(f"wait migration to finish")
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", timeout=50)
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED", timeout=50)
+
+    nodes[0].migrations = []
+    nodes[0].slots = [(0, final_migration_range[0] - 1), (final_migration_range[1] + 1, 16383)]
+    nodes[1].slots = [final_migration_range]
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    assert await seeder.compare(capture, nodes[0].instance.port)
+
+
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 async def test_cluster_sharded_pub_sub(df_factory: DflyInstanceFactory):
     nodes = [df_factory.create(port=next(next_port)) for i in range(2)]
