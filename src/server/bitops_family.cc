@@ -557,7 +557,7 @@ void BitPos(CmdArgList args, const CommandContext& cmd_cntx) {
     }
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<int64_t> {
     return FindFirstBitWithValue(t->GetOpArgs(shard), key, value, start, end, as_bit);
   };
   OpResult<int64_t> res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
@@ -573,7 +573,7 @@ void BitCount(CmdArgList args, const CommandContext& cmd_cntx) {
   auto key = parser.Next<string_view>();
 
   auto [start, end] = parser.HasNext()
-                          ? parser.Next<int64_t, int64_t>()
+                          ? std::pair<int64_t, int64_t>(parser.Next<int64_t, int64_t>())
                           : std::pair<int64_t, int64_t>{0, std::numeric_limits<int64_t>::max()};
 
   bool as_bit = parser.HasNext() ? parser.MapNext("BYTE", false, "BIT", true) : false;
@@ -581,7 +581,8 @@ void BitCount(CmdArgList args, const CommandContext& cmd_cntx) {
   if (!parser.Finalize()) {
     return builder->SendError(parser.Error()->MakeReply());
   }
-  auto cb = [&, &start = start, &end = end](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &start = start, &end = end](Transaction* t,
+                                            EngineShard* shard) -> OpResult<std::size_t> {
     return CountBitsForValue(t->GetOpArgs(shard), key, start, end, as_bit);
   };
   OpResult<std::size_t> res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
