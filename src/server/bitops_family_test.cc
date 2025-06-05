@@ -30,7 +30,7 @@ using absl::StrCat;
 namespace dfly {
 
 class Bytes {
-  using char_t = char;
+  using char_t = std::uint8_t;
   using string_type = std::basic_string<char_t>;
 
  public:
@@ -54,6 +54,9 @@ class Bytes {
   }
 
   Bytes(const char_t* ch, std::size_t len) : data_(ch, len) {
+  }
+
+  Bytes(const char* ch, std::size_t len) : Bytes(reinterpret_cast<const char_t*>(ch), len) {
   }
 
   explicit Bytes(std::string_view from) : Bytes(from.data(), from.size()) {
@@ -102,7 +105,7 @@ Bytes Bytes::From(RespExpr&& r) {
 std::ostream& Bytes::Print(std::ostream& os) const {
   if (state_ == GOOD) {
     for (auto c : data_) {
-      std::bitset<8> b{static_cast<unsigned char>(c)};
+      std::bitset<8> b{c};
       os << b << ":";
     }
   } else {
