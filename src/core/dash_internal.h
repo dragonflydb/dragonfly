@@ -671,11 +671,15 @@ template <typename KeyType, typename ValueType> class IteratorPair {
 // to billions.
 class DashCursor {
  public:
-  DashCursor(uint64_t val = 0) : val_(val) {
+  explicit DashCursor(uint64_t token = 0) : val_(token) {
   }
 
   DashCursor(uint8_t depth, uint32_t seg_id, PhysicalBid bid)
       : val_((uint64_t(seg_id) << (40 - depth)) | bid) {
+  }
+
+  static DashCursor end() {
+    return DashCursor{};
   }
 
   PhysicalBid bucket_id() const {
@@ -692,20 +696,12 @@ class DashCursor {
     return val_ >> (40 - depth);
   }
 
-  uint64_t value() const {
+  uint64_t token() const {
     return val_;
   }
 
   explicit operator bool() const {
     return val_ != 0;
-  }
-
-  bool operator==(const DashCursor& other) const {
-    return val_ == other.val_;
-  }
-
-  bool operator!=(const DashCursor& other) const {
-    return !(val_ == other.val_);
   }
 
  private:

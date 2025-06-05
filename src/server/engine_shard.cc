@@ -414,7 +414,7 @@ bool EngineShard::DoDefrag() {
 
   DCHECK(slice.IsDbValid(defrag_state_.dbid));
   auto [prime_table, expire_table] = slice.GetTables(defrag_state_.dbid);
-  PrimeTable::Cursor cur = defrag_state_.cursor;
+  PrimeTable::Cursor cur{defrag_state_.cursor};
   uint64_t reallocations = 0;
   unsigned traverses_count = 0;
   uint64_t attempts = 0;
@@ -432,7 +432,7 @@ bool EngineShard::DoDefrag() {
     traverses_count++;
   } while (traverses_count < kMaxTraverses && cur && namespaces);
 
-  defrag_state_.UpdateScanState(cur.value());
+  defrag_state_.UpdateScanState(cur.token());
 
   if (reallocations > 0) {
     VLOG(1) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations

@@ -650,7 +650,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   VLOG(1) << "PrimeTable " << db_slice.shard_id() << "/" << op_args.db_cntx.db_index << " has "
           << db_slice.DbSize(op_args.db_cntx.db_index);
 
-  PrimeTable::Cursor cur = *cursor;
+  PrimeTable::Cursor cur{*cursor};
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
 
   const auto start_cycles = base::CycleClock::Now();
@@ -664,8 +664,8 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   } while (cur && cnt < scan_opts.limit &&
            (base::CycleClock::Now() - start_cycles) < timeout_cycles);
 
-  VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();
-  *cursor = cur.value();
+  VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.token();
+  *cursor = cur.token();
 }
 
 uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys,
@@ -1897,7 +1897,7 @@ void GenericFamily::RandomKey(CmdArgList args, const CommandContext& cmd_cntx) {
           }
           uint64_t cursor = 0;  // scans from the start of the shard after reaching kMaxAttemps
           if (i < kMaxAttempts) {
-            cursor = prime_table->GetRandomCursor(&bitgen).value();
+            cursor = prime_table->GetRandomCursor(&bitgen).token();
           }
           OpScan({shard, 0u, db_cntx}, scan_opts, &cursor, candidates);
         }
