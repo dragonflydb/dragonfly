@@ -336,9 +336,6 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
       }
     } else if (seqid.has_value()) {
       if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
-        // This does not guarantee the lsn will still be present when DFLY SYNC runs,
-        // replication will be retried if it gets evicted by then.
-        util::fb2::LockGuard lk{replica_ptr->shared_mu};
         auto& flow = replica_ptr->flows[flow_id];
         flow.start_partial_sync_at = *seqid;
         VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
