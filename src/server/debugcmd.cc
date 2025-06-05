@@ -1439,6 +1439,7 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
   absl::InsecureBitGen gen;
   for (unsigned i = 0; i < batch.sz; ++i) {
     string key = StrCat(options.prefix, ":", batch.index[i]);
+    auto key_slot = IsClusterEnabledOrEmulated() ? KeySlot(key) : std::optional<SlotId>();
     uint32_t elements_left = options.elements;
 
     while (elements_left) {
@@ -1461,7 +1462,7 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
       auto args_span = absl::MakeSpan(args_view);
       local_cntx.SwitchTxCmd(cid);
       crb.SetReplyMode(ReplyMode::NONE);
-      stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span);
+      stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span, key_slot);
 
       sf_.service().InvokeCmd(cid, args_span,
                               CommandContext{local_cntx.transaction, &crb, &local_cntx});
@@ -1483,7 +1484,7 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
       auto args_span = absl::MakeSpan(args_view);
       local_cntx.SwitchTxCmd(cid);
       crb.SetReplyMode(ReplyMode::NONE);
-      stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span);
+      stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span, key_slot);
       sf_.service().InvokeCmd(cid, args_span,
                               CommandContext{local_cntx.transaction, &crb, &local_cntx});
     }

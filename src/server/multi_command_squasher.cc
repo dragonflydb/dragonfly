@@ -142,19 +142,21 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const Stored
 
   auto args = cmd->ArgList(&tmp_keylist_);
 
+  auto* tx = cntx_->transaction;
+  CommandContext cmd_cntx{tx, rb, cntx_};
   if (opts_.verify_commands) {
-    if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
+    if (auto err = service_->VerifyCommandState(cmd->Cid(), args, &cmd_cntx); err) {
       rb->SendError(std::move(*err));
       rb->ConsumeLastError();
       return !opts_.error_abort;
     }
   }
 
-  auto* tx = cntx_->transaction;
   cntx_->SwitchTxCmd(cmd->Cid());
 
   if (cmd->Cid()->IsTransactional())
-    tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
+    tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args, cmd_cntx.slot_id);
+
   service_->InvokeCmd(cmd->Cid(), args, CommandContext{tx, rb, cntx_});
 
   return true;
@@ -183,9 +185,11 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
 
   for (auto& dispatched : sinfo.dispatched) {
     auto args = dispatched.cmd->ArgList(&arg_vec);
+    CommandContext cmd_cntx{nullptr, &crb, cntx_};
+
     if (opts_.verify_commands) {
       // The shared context is used for state verification, the local one is only for replies
-      if (auto err = service_->VerifyCommandState(dispatched.cmd->Cid(), args, *cntx_); err) {
+      if (auto err = service_->VerifyCommandState(dispatched.cmd->Cid(), args, &cmd_cntx); err) {
         crb.SendError(std::move(*err));
         move_reply(crb.Take(), &dispatched.reply);
         continue;
@@ -195,9 +199,10 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     local_cntx.SwitchTxCmd(dispatched.cmd->Cid());
     crb.SetReplyMode(dispatched.cmd->ReplyMode());
 
-    local_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args);
-    service_->InvokeCmd(dispatched.cmd->Cid(), args,
-                        CommandContext{local_cntx.transaction, &crb, &local_cntx});
+    local_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args, cmd_cntx.slot_id);
+    service_->InvokeCmd(
+        dispatched.cmd->Cid(), args,
+        CommandContext{local_cntx.transaction, &crb, &local_cntx, cmd_cntx.slot_id});
 
     move_reply(crb.Take(), &dispatched.reply);
 

@@ -964,8 +964,8 @@ OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, CmdArgList args) {
 }
 
 optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
-                                                 const ConnectionContext& dfly_cntx) {
-  if (dfly_cntx.is_replicating) {
+                                                 CommandContext* cmd_cntx) {
+  if (cmd_cntx->conn_cntx->is_replicating) {
     // Always allow commands on the replication port, as it might be for future-owned keys.
     return nullopt;
   }
@@ -994,6 +994,7 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
   optional<SlotId> keys_slot = slot_checker.GetUniqueSlotId();
 
   if (keys_slot.has_value()) {
+    cmd_cntx->slot_id = *keys_slot;
     if (auto error = cluster::SlotOwnershipError(*keys_slot);
         !error.status.has_value() || error.status.value() != facade::OpStatus::OK) {
       return ErrorReply{std::move(error)};
@@ -1074,10 +1075,12 @@ optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid,
 }
 
 std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdArgList tail_args,
-                                                      const ConnectionContext& dfly_cntx) {
+                                                      CommandContext* cmd_cntx) {
   DCHECK(cid);
 
   ServerState& etl = *ServerState::tlocal();
+
+  const auto& dfly_cntx = *cmd_cntx->conn_cntx;
 
   // If there is no connection owner, it means the command it being called
   // from another command or used internally, therefore is always permitted.
@@ -1150,7 +1153,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   }
 
   if (IsClusterEnabled()) {
-    if (auto err = CheckKeysOwnership(cid, tail_args, dfly_cntx); err)
+    if (auto err = CheckKeysOwnership(cid, tail_args, cmd_cntx); err)
       return err;
   }
 
@@ -1220,7 +1223,8 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
     cntx->paused = false;
   }
 
-  if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {
+  CommandContext cmd_cntx{dfly_cntx->transaction, builder, dfly_cntx};
+  if (auto err = VerifyCommandState(cid, args_no_cmd, &cmd_cntx); err) {
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
       exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
 
@@ -1257,7 +1261,7 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
     if (cid->IsTransactional()) {
       dfly_cntx->transaction->MultiSwitchCmd(cid);
       OpStatus status = dfly_cntx->transaction->InitByArgs(
-          dfly_cntx->ns, dfly_cntx->conn_state.db_index, args_no_cmd);
+          dfly_cntx->ns, dfly_cntx->conn_state.db_index, args_no_cmd, cmd_cntx.slot_id);
 
       if (status != OpStatus::OK)
         return builder->SendError(status);
@@ -1270,8 +1274,8 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
 
       if (!dist_trans->IsMulti()) {  // Multi command initialize themself based on their mode.
         CHECK(dfly_cntx->ns != nullptr);
-        if (auto st =
-                dist_trans->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, args_no_cmd);
+        if (auto st = dist_trans->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index,
+                                             args_no_cmd, cmd_cntx.slot_id);
             st != OpStatus::OK)
           return builder->SendError(st);
       }
@@ -1285,7 +1289,8 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
 
   dfly_cntx->cid = cid;
 
-  if (!InvokeCmd(cid, args_no_cmd, CommandContext{dfly_cntx->transaction, builder, dfly_cntx})) {
+  cmd_cntx.tx = dfly_cntx->transaction;
+  if (!InvokeCmd(cid, args_no_cmd, cmd_cntx)) {
     builder->SendError("Internal Error");
     builder->CloseConnection();
   }
@@ -1952,7 +1957,7 @@ bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode, CmdArgL
     case Transaction::LOCK_AHEAD:
       if (keys.empty())
         return false;
-      tx->StartMultiLockedAhead(ns, dbid, keys);
+      tx->StartMultiLockedAhead(ns, dbid, keys, std::nullopt);  // TODO provide slot_id
       return true;
     case Transaction::NON_ATOMIC:
       tx->StartMultiNonAtomic();
@@ -2129,10 +2134,10 @@ void Service::Discard(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 // Return true if non of the connections watched keys expired.
-bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandId* exists_cid,
+bool CheckWatchedKeyExpiry(const CommandContext& cntx, const CommandId* exists_cid,
                            const CommandId* exec_cid) {
-  auto& exec_info = cntx->conn_state.exec_info;
-  auto* tx = cntx->transaction;
+  auto& exec_info = cntx.conn_cntx->conn_state.exec_info;
+  auto* tx = cntx.conn_cntx->transaction;
 
   CmdArgVec str_list(exec_info.watched_keys.size());
   for (size_t i = 0; i < str_list.size(); i++) {
@@ -2150,7 +2155,8 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandId* exists_cid,
   };
 
   tx->MultiSwitchCmd(exists_cid);
-  tx->InitByArgs(cntx->ns, cntx->conn_state.db_index, CmdArgList{str_list});
+  tx->InitByArgs(cntx.conn_cntx->ns, cntx.conn_cntx->conn_state.db_index, CmdArgList{str_list},
+                 cntx.slot_id);
   OpStatus status = tx->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
 
@@ -2226,10 +2232,16 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
   cntx->last_command_debug.exec_body_len = exec_info.body.size();
 
   auto keys = CollectAllKeys(&exec_info);
+
+  // TODO remove next block after refactoring with slot_id calculation is finished
   if (IsClusterEnabled()) {
     UniqueSlotChecker slot_checker;
     for (const auto& s : keys) {
       slot_checker.Add(s);
+    }
+    if (auto slot_id = slot_checker.GetUniqueSlotId(); slot_id.has_value()) {
+      DCHECK(cmd_cntx.slot_id == *slot_id);
+      const_cast<CommandContext&>(cmd_cntx).slot_id = *slot_id;
     }
 
     if (slot_checker.IsCrossSlot()) {
@@ -2258,7 +2270,7 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
 
   // EXEC should not run if any of the watched keys expired.
   if (!exec_info.watched_keys.empty() &&
-      !CheckWatchedKeyExpiry(cntx, registry_.Find("EXISTS"), exec_cid_)) {
+      !CheckWatchedKeyExpiry(cmd_cntx, registry_.Find("EXISTS"), exec_cid_)) {
     cmd_cntx.tx->UnlockMulti();
     return rb->SendNull();
   }
@@ -2290,7 +2302,8 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
         CmdArgList args = scmd.ArgList(&arg_vec);
 
         if (scmd.Cid()->IsTransactional()) {
-          OpStatus st = cmd_cntx.tx->InitByArgs(cntx->ns, cntx->conn_state.db_index, args);
+          OpStatus st =
+              cmd_cntx.tx->InitByArgs(cntx->ns, cntx->conn_state.db_index, args, cmd_cntx.slot_id);
           if (st != OpStatus::OK) {
             rb->SendError(st);
             break;

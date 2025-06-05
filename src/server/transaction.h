@@ -189,7 +189,7 @@ class Transaction {
   explicit Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot_id);
 
   // Initialize from command (args) on specific db.
-  OpStatus InitByArgs(Namespace* ns, DbIndex index, CmdArgList args);
+  OpStatus InitByArgs(Namespace* ns, DbIndex index, CmdArgList args, std::optional<SlotId> slot_id);
 
   // Get command arguments for specific shard. Called from shard thread.
   ShardArgs GetShardArgs(ShardId sid) const;
@@ -236,7 +236,7 @@ class Transaction {
 
   // Start multi in LOCK_AHEAD mode with given keys.
   void StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList keys,
-                             bool skip_scheduling = false);
+                             std::optional<SlotId> slot_id, bool skip_scheduling = false);
 
   // Start multi in NON_ATOMIC mode.
   void StartMultiNonAtomic();
@@ -492,7 +492,7 @@ class Transaction {
   void InitGlobal();
 
   // Init with a set of keys.
-  void InitByKeys(const KeyIndex& keys);
+  void InitByKeys(const KeyIndex& keys, std::optional<SlotId> slot_id);
 
   void EnableShard(ShardId sid);
   void EnableAllShards();

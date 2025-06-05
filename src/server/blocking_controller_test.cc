@@ -62,7 +62,8 @@ void BlockingControllerTest::SetUp() {
     arg_vec_.emplace_back(s);
   }
 
-  trans_->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {arg_vec_.data(), arg_vec_.size()});
+  trans_->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {arg_vec_.data(), arg_vec_.size()},
+                     std::nullopt);
   CHECK_EQ(0u, Shard("x", shard_set->size()));
   CHECK_EQ(2u, Shard("z", shard_set->size()));
 

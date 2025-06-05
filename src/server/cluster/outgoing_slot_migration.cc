@@ -111,7 +111,7 @@ OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, Serv
       server_family_(sf),
       cf_(cf),
       tx_(new Transaction{sf->service().FindCmd("DFLYCLUSTER")}) {
-  tx_->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
+  tx_->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {}, std::nullopt);
 }
 
 OutgoingMigration::~OutgoingMigration() {
