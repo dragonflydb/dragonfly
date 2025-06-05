@@ -928,10 +928,10 @@ auto DashTable<_Key, _Value, Policy>::TraverseBySegmentOrder(Cursor curs, Cb&& c
   ++bid;
   if (SegmentType::OutOfRange(bid)) {
     sid = NextSeg(sid);
-    bid = 0;
     if (sid >= segment_.size()) {
-      return 0;  // "End of traversal" cursor.
+      return Cursor::end();
     }
+    bid = 0;
   }
 
   return Cursor{global_depth_, sid, bid};
@@ -953,7 +953,7 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
 
   // Test validity of the cursor.
   if (bid >= Policy::kBucketNum || sid >= segment_.size())
-    return 0;
+    return Cursor::end();
 
   auto hash_fun = [this](const auto& k) { return policy_.HashFn(k); };
 
@@ -973,7 +973,7 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
       ++bid;
 
       if (bid >= Policy::kBucketNum)
-        return 0;  // "End of traversal" cursor.
+        return Cursor::end();
     }
   } while (!fetched);
 
@@ -991,7 +991,7 @@ auto DashTable<_Key, _Value, Policy>::AdvanceCursorBucketOrder(Cursor cursor) ->
     ++bid;
 
     if (SegmentType::OutOfRange(bid))
-      return 0;  // "End of traversal" cursor.
+      return Cursor::end();
   }
   return Cursor{global_depth_, sid, bid};
 }
@@ -1000,7 +1000,7 @@ template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
 auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor cursor, Cb&& cb) -> Cursor {
   if (SegmentType::OutOfRange(cursor.bucket_id()))  // sanity.
-    return 0;
+    return Cursor::end();
 
   constexpr uint32_t kMaxIterations = 8;
   bool invoked = false;
