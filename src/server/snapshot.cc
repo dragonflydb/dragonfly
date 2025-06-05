@@ -232,6 +232,8 @@ void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
     PushSerialized(true);
   } else {
     // We stopped but we didn't manage to send the whole stream.
+    // ReportError eventually cancels this snapshot operation by triggering the ReplicaInfo error
+    // handler.
     cntx_->ReportError(
         std::make_error_code(errc::state_not_recoverable),
         absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
