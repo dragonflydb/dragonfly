@@ -30,74 +30,12 @@ JournalSlice::JournalSlice() {
 JournalSlice::~JournalSlice() {
 }
 
-void JournalSlice::Init(unsigned index) {
+void JournalSlice::Init() {
   if (ring_buffer_)  // calling this function multiple times is allowed and it's a no-op.
     return;
 
-  slice_index_ = index;
   ring_buffer_.emplace(2);
 }
-
-#if 0
-std::error_code JournalSlice::Open(std::string_view dir) {
-  CHECK(!shard_file_);
-  DCHECK_NE(slice_index_, UINT32_MAX);
-
-  fs::path dir_path;
-
-  if (dir.empty()) {
-  } else {
-    dir_path = dir;
-    error_code ec;
-
-    fs::file_status dir_status = fs::status(dir_path, ec);
-    if (ec) {
-      if (ec == errc::no_such_file_or_directory) {
-        fs::create_directory(dir_path, ec);
-        dir_status = fs::status(dir_path, ec);
-      }
-      if (ec)
-        return ec;
-    }
-    // LOG(INFO) << int(dir_status.type());
-  }
-
-  dir_path.append(ShardName("journal", slice_index_));
-  shard_path_ = dir_path;
-
-  // For file integrity guidelines see:
-  // https://lwn.net/Articles/457667/
-  // https://www.evanjones.ca/durability-filesystem.html
-  // NOTE: O_DSYNC is omitted.
-  constexpr auto kJournalFlags = O_CLOEXEC | O_CREAT | O_TRUNC | O_RDWR;
-  io::Result<unique_ptr<LinuxFile>> res = OpenLinux(shard_path_, kJournalFlags, 0666);
-  if (!res) {
-    return res.error();
-  }
-  DVLOG(1) << "Opened journal " << shard_path_;
-
-  shard_file_ = std::move(res).value();
-  file_offset_ = 0;
-  status_ec_.clear();
-
-  return error_code{};
-}
-
-error_code JournalSlice::Close() {
-  VLOG(1) << "JournalSlice::Close";
-
-  CHECK(shard_file_);
-  lameduck_ = true;
-
-  auto ec = shard_file_->Close();
-
-  DVLOG(1) << "Closing " << shard_path_;
-  LOG_IF(ERROR, ec) << "Error closing journal file " << ec;
-  shard_file_.reset();
-
-  return ec;
-}
-#endif
 
 bool JournalSlice::IsLSNInBuffer(LSN lsn) const {
   DCHECK(ring_buffer_);
@@ -170,7 +108,7 @@ void JournalSlice::CallOnChange(const JournalItem& item) {
 uint32_t JournalSlice::RegisterOnChange(JournalConsumerInterface* consumer) {
   // mutex lock isn't needed due to iterators are not invalidated
   uint32_t id = next_cb_id_++;
-  journal_consumers_arr_.emplace_back(id, std::move(consumer));
+  journal_consumers_arr_.emplace_back(id, consumer);
   return id;
 }
 
