@@ -785,6 +785,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
 
     typename SegmentType::Iterator it;
     bool res = true;
+    unsigned num_buckets = target->num_buckets();
     if (mode == InsertMode::kForceInsert) {
       it = target->InsertUniq(std::forward<U>(key), std::forward<V>(value), key_hash, true);
       res = it.found();
@@ -794,6 +795,8 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
     }
 
     if (res) {  // success
+      // in case segment bucket count changed, we need to update total bucket count.
+      bucket_count_ += (target->num_buckets() - num_buckets);
       ++size_;
       return std::make_pair(iterator{this, target_seg_id, it.index, it.slot}, true);
     }
@@ -905,7 +908,12 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id) {
 
   auto hash_fn = [this](const auto& k) { return policy_.HashFn(k); };
 
+  // remove current segment bucket count.
+  bucket_count_ -= (source->num_buckets() + target->num_buckets());
   source->Split(std::move(hash_fn), target);  // increases the depth.
+
+  // add back the updated bucket count.
+  bucket_count_ += (target->num_buckets() + source->num_buckets());
   ++unique_segments_;
 
   for (size_t i = start_idx + chunk_size / 2; i < start_idx + chunk_size; ++i) {

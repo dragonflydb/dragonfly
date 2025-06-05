@@ -700,6 +700,7 @@ TEST_F(DashTest, Eviction) {
 
   ASSERT_THROW(loop(), bad_alloc);
   ASSERT_LT(num, 5000);
+  ASSERT_EQ(2, dt_.unique_segments());
   EXPECT_LT(dt_.size(), ev.max_capacity);
   LOG(INFO) << "size is " << dt_.size();
 
