@@ -56,7 +56,7 @@ class Service : public facade::ServiceInterface {
   // It's usually called before command execution. Only for multi/exec transactions it's checked
   // when the command is queued for execution, not before the execution itself.
   std::optional<facade::ErrorReply> VerifyCommandState(const CommandId* cid, ArgSlice tail_args,
-                                                       const ConnectionContext& cntx);
+                                                       CommandContext* cntx);
 
   void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
                   facade::MCReplyBuilder* builder, facade::ConnectionContext* cntx) final;
@@ -158,7 +158,7 @@ class Service : public facade::ServiceInterface {
 
   // Return error if not all keys are owned by the server when running in cluster mode
   std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId* cid, CmdArgList args,
-                                                       const ConnectionContext& dfly_cntx);
+                                                       CommandContext* dfly_cntx);
 
   void EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
                     SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only);

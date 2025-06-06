@@ -1044,7 +1044,7 @@ struct AggregateLoadResult {
 void ServerFamily::FlushAll(Namespace* ns) {
   const CommandId* cid = service_.FindCmd("FLUSHALL");
   boost::intrusive_ptr<Transaction> flush_trans(new Transaction{cid});
-  flush_trans->InitByArgs(ns, 0, {});
+  flush_trans->InitByArgs(ns, 0, {}, std::nullopt);
   VLOG(1) << "Performing flush";
   error_code ec = Drakarys(flush_trans.get(), DbSlice::kDbAll);
   if (ec) {
@@ -1710,7 +1710,7 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
   const CommandId* cid = service().FindCmd("SAVE");
   CHECK_NOTNULL(cid);
   boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
-  trans->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
+  trans->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {}, std::nullopt);
   return DoSave(SaveCmdOptions{absl::GetFlag(FLAGS_df_snapshot_format), {}, {}}, trans.get(),
                 ignore_state);
 }

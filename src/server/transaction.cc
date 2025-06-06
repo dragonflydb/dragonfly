@@ -317,7 +317,7 @@ void Transaction::StoreKeysInArgs(const KeyIndex& key_index) {
     kv_fp_.push_back(LockTag(key).Fingerprint());
 }
 
-void Transaction::InitByKeys(const KeyIndex& key_index) {
+void Transaction::InitByKeys(const KeyIndex& key_index, std::optional<SlotId> slot_id) {
   if (key_index.start == full_args_.size()) {  // eval with 0 keys.
     CHECK(absl::StartsWith(cid_->name(), "EVAL")) << cid_->name();
     return;
@@ -341,6 +341,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
       DCHECK_EQ(unique_shard_id_, Shard(akey, shard_set->size()));
     else {
       unique_slot_checker_.Add(akey);
+      DCHECK(!slot_id || (unique_slot_checker_.GetUniqueSlotId() == slot_id));
       unique_shard_id_ = Shard(akey, shard_set->size());
     }
 
@@ -394,7 +395,8 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   }
 }
 
-OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, CmdArgList args) {
+OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, CmdArgList args,
+                                 std::optional<SlotId> slot_id) {
   InitBase(ns, index, args);
 
   if ((cid_->opt_mask() & CO::GLOBAL_TRANS) > 0) {
@@ -420,7 +422,7 @@ OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, CmdArgList args) 
   if (!key_index)
     return key_index.status();
 
-  InitByKeys(*key_index);
+  InitByKeys(*key_index, slot_id);
   return OpStatus::OK;
 }
 
@@ -464,7 +466,7 @@ void Transaction::StartMultiGlobal(Namespace* ns, DbIndex dbid) {
 }
 
 void Transaction::StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList keys,
-                                        bool skip_scheduling) {
+                                        std::optional<SlotId> slot_id, bool skip_scheduling) {
   DVLOG(1) << "StartMultiLockedAhead on " << keys.size() << " keys";
 
   DCHECK(multi_);
@@ -476,7 +478,7 @@ void Transaction::StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList 
   PrepareMultiFps(keys);
 
   InitBase(ns, dbid, keys);
-  InitByKeys(KeyIndex(0, keys.size()));
+  InitByKeys(KeyIndex(0, keys.size()), slot_id);
 
   if (!skip_scheduling)
     ScheduleInternal();
