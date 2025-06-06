@@ -21,10 +21,10 @@ TopKeys::TopKeys(Options options)
   }
 }
 
-void TopKeys::Touch(std::string_view key) {
-  auto ResetCell = [&](Cell& cell, uint64_t fingerprint) {
+void TopKeys::Touch(std::string_view key, size_t incr) {
+  auto ResetCell = [&](Cell& cell, uint64_t fingerprint, size_t size = 1) {
     cell.fingerprint = fingerprint;
-    cell.count = 1;
+    cell.count = size;
     cell.key.clear();
   };
 
@@ -36,13 +36,16 @@ void TopKeys::Touch(std::string_view key) {
     Cell& cell = GetCell(id, bucket);
     if (cell.count == 0) {
       // No fingerprint in cell.
-      ResetCell(cell, fingerprint);
+      ResetCell(cell, fingerprint, incr);
+      if (incr > 1) {
+        cell.key = key;
+      }
     } else if (cell.fingerprint == fingerprint) {
       // Same fingerprint, simply increment count.
 
       // We could make sure that, if !cell.key.empty(), then key == cell.key.empty() here. However,
       // what do we do in case they are different?
-      ++cell.count;
+      cell.count += incr;
 
       if (cell.count >= options_.min_key_count_to_record && cell.key.empty()) {
         cell.key = key;
@@ -51,7 +54,12 @@ void TopKeys::Touch(std::string_view key) {
       // Different fingerprint, apply exponential decay.
       const double rand = absl::Uniform(bitgen_, 0, 1.0);
       if (rand < std::pow(options_.decay_base, -static_cast<double>(cell.count))) {
-        --cell.count;
+        if (incr != 1 && cell.count < incr) {
+          incr -= cell.count;
+          cell.count = 0;
+        } else {
+          cell.count -= incr;
+        }
         if (cell.count == 0) {
           ResetCell(cell, fingerprint);
         }
@@ -86,6 +94,17 @@ const TopKeys::Cell& TopKeys::GetCell(uint32_t d, uint32_t bucket) const {
   DCHECK(d < options_.depth);
   DCHECK(bucket < options_.buckets);
   return fingerprints_[d * options_.buckets + bucket];
+}
+
+void TopKeys::Query(absl::flat_hash_map<std::string_view, bool>* keys) {
+  for (unsigned array = 0; array < options_.depth; ++array) {
+    for (unsigned bucket = 0; bucket < options_.buckets; ++bucket) {
+      const Cell& cell = GetCell(array, bucket);
+      if (!cell.key.empty() && keys->contains(cell.key)) {
+        keys->find(cell.key)->second = true;
+      }
+    }
+  }
 }
 
 }  // end of namespace dfly
