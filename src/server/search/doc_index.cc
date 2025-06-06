@@ -192,16 +192,19 @@ string DocIndexInfo::BuildRestoreCommand() const {
 
 ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::Add(string_view key) {
   DCHECK_EQ(ids_.count(key), 0u);
+  DCHECK(!key.empty());
 
   DocId id;
   if (!free_ids_.empty()) {
     id = free_ids_.back();
     free_ids_.pop_back();
     keys_[id] = key;
+    LOG(INFO) << "Reusing id: " << id << " for key: " << key << " " << this;
   } else {
     id = last_id_++;
     DCHECK_EQ(keys_.size(), id);
     keys_.emplace_back(key);
+    LOG(INFO) << "New id: " << id << " for key: " << key << " " << this;
   }
 
   ids_[key] = id;
@@ -216,6 +219,7 @@ std::optional<ShardDocIndex::DocId> ShardDocIndex::DocKeyIndex::Remove(string_vi
 
   const DocId id = it.mapped();
   keys_[id] = "";
+  LOG(INFO) << "Removing key: " << key << " with id: " << id << " from index: " << this;
   free_ids_.push_back(id);
 
   return id;
