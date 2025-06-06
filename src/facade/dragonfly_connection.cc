@@ -506,15 +506,20 @@ void Connection::AsyncOperations::operator()(const AclUpdateMessage& msg) {
 
 void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
+  facade::ConnectionContext* cntx = self->cntx();
 
   if (pub_msg.should_unsubscribe) {
     rbuilder->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
     rbuilder->SendBulkString("unsubscribe");
     rbuilder->SendBulkString(pub_msg.channel);
     rbuilder->SendLong(0);
-    auto* cntx = self->cntx();
+
     cntx->Unsubscribe(pub_msg.channel);
     return;
+  }
+
+  if (!cntx->subscriber) {
+    LOG(DFATAL) << "PubMessage received on non-subscriber connection: " << self->DebugInfo();
   }
 
   unsigned i = 0;
