@@ -3172,6 +3172,30 @@ async def test_replicate_hset_with_expiry(df_factory: DflyInstanceFactory):
     assert result["name"] == "1234"
 
 
+async def test_bug_5221(df_factory):
+    master = df_factory.create(
+        proactor_threads=1,
+        cache_mode="true",
+        maxmemory="256mb",
+        enable_heartbeat_eviction="true",
+        eviction_memory_budget_threshold=0.9,
+    )
+    replica = df_factory.create(proactor_threads=4)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+    await c_replica.execute_command(f"replicaof localhost {master.port}")
+
+    # Fill master with test data
+    seeder = SeederV2(key_target=22000, data_size=1000)
+    await seeder.run(c_master, target_deviation=0.01)
+    await asyncio.sleep(1)
+    await seeder.run(c_master, target_deviation=0.01)
+    res = await c_master.execute_command("dbsize")
+    assert res > 0
+
+
 @pytest.mark.parametrize("proactors", [1, 4, 6])
 @pytest.mark.parametrize("backlog_len", [1, 256, 1024, 1300])
 async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_len):

@@ -649,6 +649,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   }
 
   bool update_stats = false;
+  ++poll_concurrent_factor_;
 
   auto run = [this, &update_stats](Transaction* tx, bool allow_removal) -> bool /* concluding */ {
     update_stats = true;
@@ -664,6 +665,9 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     if ((is_self && disarmed) || continuation_trans_->DisarmInShard(sid)) {
       if (bool concludes = run(continuation_trans_, true); concludes) {
         continuation_trans_ = nullptr;
+        continuation_debug_id_.clear();
+      } else {
+        continuation_debug_id_ = continuation_trans_->DebugId(sid);
       }
     }
   }
@@ -704,6 +708,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     if (bool concludes = run(head, true); !concludes) {
       DCHECK_EQ(head->DEBUG_GetTxqPosInShard(sid), TxQueue::kEnd) << head->DebugId(sid);
       continuation_trans_ = head;
+      continuation_debug_id_ = head->DebugId(sid);
     }
   }
 
@@ -729,6 +734,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       LOG_IF(DFATAL, trans->DEBUG_GetTxqPosInShard(sid) == TxQueue::kEnd);
     }
   }
+  --poll_concurrent_factor_;
   if (update_stats) {
     CacheStats();
   }
@@ -737,6 +743,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 void EngineShard::RemoveContTx(Transaction* tx) {
   if (continuation_trans_ == tx) {
     continuation_trans_ = nullptr;
+    continuation_debug_id_.clear();
   }
 }
 
@@ -757,7 +764,9 @@ void EngineShard::Heartbeat() {
   if (db_slice.WillBlockOnJournalWrite() || !can_acquire_global_lock) {
     const auto elapsed = std::chrono::system_clock::now() - start;
     if (elapsed > std::chrono::seconds(1)) {
-      LOG_EVERY_T(WARNING, 5) << "Stalled heartbeat() fiber for " << elapsed.count() << " seconds";
+      const auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed);
+      LOG_EVERY_T(WARNING, 5) << "Stalled heartbeat() fiber for " << elapsed_seconds.count()
+                              << " seconds";
     }
     return;
   }

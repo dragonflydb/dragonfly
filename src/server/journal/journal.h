@@ -46,7 +46,7 @@ class Journal {
 class JournalFlushGuard {
  public:
   explicit JournalFlushGuard(Journal* journal) : journal_(journal) {
-    if (journal_) {
+    if (journal_ && counter_ == 0) {
       journal_->SetFlushMode(false);
     }
     util::fb2::detail::EnterFiberAtomicSection();
