@@ -57,8 +57,10 @@ class JournalSlice {
   // with allow_flush=false and the subsequent call with allow_flush=true.
   void SetFlushMode(bool allow_flush);
 
+  size_t GetRingBufferSize() const;
+
  private:
-  void CallOnChange(const JournalItem& item);
+  void CallOnChange(JournalItem* item);
   boost::circular_buffer<JournalItem> ring_buffer_;
   base::IoBuf ring_serialize_buf_;
 
