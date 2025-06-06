@@ -822,4 +822,37 @@ TEST_F(BitOpsFamilyTest, BitFieldLargeOffset) {
   EXPECT_THAT(resp, 0);
 }
 
+TEST_F(BitOpsFamilyTest, BitFieldIssue5237_SetOverflowSat) {
+  Run({"set", "key:bitfield_set", "\xff\xf0\x00"});
+  auto resp = Run({"bitfield", "key:bitfield_set", "overflow", "sat", "set", "i4", "0", "8", "set",
+                   "i4", "4", "7"});
+
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(-1), IntArg(-1))));
+}
+
+TEST_F(BitOpsFamilyTest, BitFieldIssue5237_IncrbyCorrectness) {
+  Run({"set", "key:bitfield_incr", "\xff\xf0\x00"});
+  auto resp = Run(
+      {"bitfield", "key:bitfield_incr", "incrby", "u8", "0", "85", "incrby", "u8", "16", "170"});
+
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(84), IntArg(170))));
+}
+
+TEST_F(BitOpsFamilyTest, BitFieldIssue5237_InvalidTypeUppercase_Set) {
+  auto expected_error = ErrArg(
+      "ERR invalid bitfield type. use something like i16 u8. note that u64 is not supported but "
+      "i64 is.");
+
+  ASSERT_THAT(Run({"bitfield", "key:bitfield_set:wrong:args", "set", "I8", "0", "0"}),
+              expected_error);
+}
+
+TEST_F(BitOpsFamilyTest, BitFieldIssue5237_InvalidTypeUppercase_Get) {
+  auto expected_error = ErrArg(
+      "ERR invalid bitfield type. use something like i16 u8. note that u64 is not supported but "
+      "i64 is.");
+
+  ASSERT_THAT(Run({"bitfield", "key:bitfield_get:wrong:args", "get", "I8", "0"}), expected_error);
+}
+
 }  // end of namespace dfly

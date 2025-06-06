@@ -635,7 +635,7 @@ bool Overflow::UIntOverflow(int64_t incr, size_t total_bits, int64_t* value) con
     switch (type) {
       case Overflow::WRAP:
         // safe to do, won't overflow, both incr and value are <= than 2^63 - 1
-        *value = (incr_value + *value) % max;
+        *value = (incr_value + *value) & max;
         break;
       case Overflow::SAT:
         *value = max;
@@ -790,17 +790,19 @@ ResultType Set::ApplyTo(Overflow ov, string* bitfield) {
     return {};
   }
 
+  // First, extract the old value properly using the Get method
+  Get get(attr_);
+  auto old_value_result = get.ApplyTo(ov, &bytes);
+  int64_t old_value = old_value_result ? *old_value_result : 0;
+
   uint32_t lsb = attr_.offset + attr_.encoding_bit_size - 1;
-  int64_t old_value = 0;
 
   for (size_t i = 0; i < attr_.encoding_bit_size; ++i) {
     bool bit_value = (set_value_ >> i) & 0x01;
     uint8_t byte{GetByteValue(bytes, lsb)};
     int32_t index = GetNormalizedBitIndex(lsb);
-    int64_t old_bit = CheckBitStatus(byte, index);
     byte = bit_value ? TurnBitOn(byte, index) : TurnBitOff(byte, index);
     bytes[GetByteIndex(lsb)] = byte;
-    old_value |= old_bit << i;
     --lsb;
   }
 
@@ -964,12 +966,14 @@ nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser)
   if (encoding.empty()) {
     return make_unexpected(kSyntaxErr);
   }
-  if (encoding[0] == 'U' || encoding[0] == 'u') {
+  if (encoding[0] == 'u') {
     parsed.type = EncodingType::UINT;
-  } else if (encoding[0] == 'I' || encoding[0] == 'i') {
+  } else if (encoding[0] == 'i') {
     parsed.type = EncodingType::INT;
   } else {
-    return make_unexpected(kSyntaxErr);
+    return make_unexpected(
+        "invalid bitfield type. use something like i16 u8. note that u64 is not supported but i64 "
+        "is.");
   }
 
   string_view bits = encoding.substr(1);
