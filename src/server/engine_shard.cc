@@ -764,7 +764,8 @@ void EngineShard::Heartbeat() {
   if (db_slice.WillBlockOnJournalWrite() || !can_acquire_global_lock) {
     const auto elapsed = std::chrono::system_clock::now() - start;
     if (elapsed > std::chrono::seconds(1)) {
-      LOG_EVERY_T(WARNING, 5) << "Stalled heartbeat() fiber for " << elapsed.count() << " seconds";
+      LOG_EVERY_T(WARNING, 5) << "Stalled heartbeat() fiber for " << elapsed.count()
+                              << " nanoseconds";
     }
     return;
   }
