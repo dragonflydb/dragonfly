@@ -155,7 +155,9 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const Stored
 
   if (cmd->Cid()->IsTransactional())
     tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
-  service_->InvokeCmd(cmd->Cid(), args, CommandContext{tx, rb, cntx_});
+
+  CommandContext cmd_cntx{tx, rb, cntx_};
+  service_->InvokeCmd(cmd->Cid(), args, &cmd_cntx);
 
   return true;
 }
@@ -196,8 +198,8 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     crb.SetReplyMode(dispatched.cmd->ReplyMode());
 
     local_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args);
-    service_->InvokeCmd(dispatched.cmd->Cid(), args,
-                        CommandContext{local_cntx.transaction, &crb, &local_cntx});
+    CommandContext cmd_cntx{local_cntx.transaction, &crb, &local_cntx};
+    service_->InvokeCmd(dispatched.cmd->Cid(), args, &cmd_cntx);
 
     move_reply(crb.Take(), &dispatched.reply);
 

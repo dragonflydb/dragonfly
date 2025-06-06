@@ -39,12 +39,14 @@ class Service : public facade::ServiceInterface {
   void DispatchCommand(ArgSlice args, facade::SinkReplyBuilder* builder,
                        facade::ConnectionContext* cntx) final;
 
+  void DispatchCommand(ArgSlice args, CommandContext* cmd_cntx);
+
   // Execute multiple consecutive commands, possibly in parallel by squashing
   size_t DispatchManyCommands(absl::Span<ArgSlice> args_list, facade::SinkReplyBuilder* builder,
                               facade::ConnectionContext* cntx) final;
 
   // Check VerifyCommandExecution and invoke command with args
-  bool InvokeCmd(const CommandId* cid, CmdArgList tail_args, const CommandContext& cmd_cntx);
+  bool InvokeCmd(const CommandId* cid, CmdArgList tail_args, CommandContext* cmd_cntx);
 
   // Verify command can be executed now (check out of memory), always called immediately before
   // execution
