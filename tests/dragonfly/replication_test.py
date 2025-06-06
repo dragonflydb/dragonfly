@@ -3179,6 +3179,8 @@ async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_le
     if proactors > 1:
         keys = 10_000
 
+    # We use lock_on_hashtag because we want to seed enough elements to one flow/journal such that
+    # the partial sync stales.
     master = df_factory.create(
         proactor_threads=proactors, shard_repl_backlog_len=backlog_len, lock_on_hashtags=True
     )
@@ -3189,6 +3191,7 @@ async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_le
     async def stream(client, total):
         for i in range(0, total):
             prefix = "{prefix}"
+            # Seed to one shard only. This will eventually cause one of the flows to become stale.
             await client.execute_command(f"SET {prefix}foo{i} bar{i}")
 
     async with replica.client() as c_replica, master.client() as c_master:
