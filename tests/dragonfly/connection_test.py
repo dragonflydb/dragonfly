@@ -503,16 +503,13 @@ async def test_pubsub_unsubscribe(df_server: DflyInstance):
 
     # No messages should be received after we've read unsubscribe reply
     had_unsub = False
-    i = 0
     while True:
         reply = await conn.read_response(timeout=0.1)
         if reply is None:
             break
 
-        i += 1
         if reply[0] == "unsubscribe":
-            print("UNSUB POS ", i)
-            assert reply[2] == 0
+            assert reply[2] == 0  # zero subscriptions left
             had_unsub = True
         else:
             assert not had_unsub, "found message even after all subscriptions were removed"
