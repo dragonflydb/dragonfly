@@ -472,16 +472,21 @@ async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_co
 # Low publish_buffer_limit makes publishers block on memory backpressure
 
 
-@dfly_args({"publish_buffer_limit": 100, "proactor_threads": 4})
+@dfly_args({"publish_buffer_limit": 100, "proactor_threads": 2})
 async def test_pubsub_unsubscribe(df_server: DflyInstance):
     long_message = "a" * 100_000
-    first_event = asyncio.Event()
+    pub_sent = 0
+    pub_ready_ev = asyncio.Event()
 
     async def publisher():
+        nonlocal pub_sent
         async with df_server.client(single_connection_client=True) as c:
-            for _ in range(16):
+            for _ in range(32):
                 await c.execute_command("PUBLISH", "chan", long_message)
-                first_event.set()
+                # Unblock subscriber after a sufficient amount of publish requests accumulated
+                pub_sent += 1
+                if pub_sent >= 16:
+                    pub_ready_ev.set()
 
     # Get raw connection from the client and subscribe to chan
     cl = df_server.client(single_connection_client=True)
@@ -493,17 +498,20 @@ async def test_pubsub_unsubscribe(df_server: DflyInstance):
     tasks = [asyncio.create_task(publisher()) for _ in range(16)]
 
     # Unsubscribe in the process
-    await first_event.wait()
+    await pub_ready_ev.wait()
     await conn.send_command("UNSUBSCRIBE")
 
     # No messages should be received after we've read unsubscribe reply
     had_unsub = False
+    i = 0
     while True:
-        reply = await conn.read_response(timeout=1)
+        reply = await conn.read_response(timeout=0.1)
         if reply is None:
             break
 
+        i += 1
         if reply[0] == "unsubscribe":
+            print("UNSUB POS ", i)
             assert reply[2] == 0
             had_unsub = True
         else:
