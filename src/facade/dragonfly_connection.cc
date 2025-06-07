@@ -507,6 +507,14 @@ void Connection::AsyncOperations::operator()(const AclUpdateMessage& msg) {
 void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
 
+  // Discard stale messages to not break the protocol after exiting "pubsub" mode.
+  // Even after removing all subscriptions, we still can receive messages delayed
+  // by inter-thread dispatches or backpressure.
+  // TODO: filter messages from channels the client unsubscribed from
+  // if (self->cntx()->subscriptions == 0 &&
+  //    !base::_in(pub_msg.channel, {"unsubscribe", "punsubscribe"}))
+  //  return;
+
   if (pub_msg.should_unsubscribe) {
     rbuilder->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
     rbuilder->SendBulkString("unsubscribe");
