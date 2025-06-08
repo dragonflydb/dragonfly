@@ -786,14 +786,15 @@ ResultType Set::ApplyTo(Overflow ov, string* bitfield) {
     bytes.resize(last_byte_offset, 0);
   }
 
-  if (!HandleOverflow(ov)) {
-    return {};
-  }
-
   // First, extract the old value properly using the Get method
   Get get(attr_);
   auto old_value_result = get.ApplyTo(ov, &bytes);
   int64_t old_value = old_value_result ? *old_value_result : 0;
+
+  // Apply overflow handling to the new value
+  if (!HandleOverflow(ov)) {
+    return {};
+  }
 
   uint32_t lsb = attr_.offset + attr_.encoding_bit_size - 1;
 
@@ -966,6 +967,8 @@ nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser)
   if (encoding.empty()) {
     return make_unexpected(kSyntaxErr);
   }
+
+  // Check case-sensitivity - only lowercase 'u' and 'i' are allowed
   if (encoding[0] == 'u') {
     parsed.type = EncodingType::UINT;
   } else if (encoding[0] == 'i') {
@@ -977,6 +980,16 @@ nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser)
   }
 
   string_view bits = encoding.substr(1);
+
+  // Additional validation: check if bits part contains any invalid characters
+  for (char c : bits) {
+    if (!std::isdigit(c)) {
+      return make_unexpected(
+          "invalid bitfield type. use something like i16 u8. note that u64 is not supported but "
+          "i64 "
+          "is.");
+    }
+  }
 
   if (!absl::SimpleAtoi(bits, &parsed.encoding_bit_size)) {
     return make_unexpected(kSyntaxErr);
