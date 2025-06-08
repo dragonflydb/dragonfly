@@ -467,6 +467,58 @@ async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_co
     await async_pool.disconnect()
 
 
+# This test ensures that no messages are sent after a successful
+# acknowledgement of a unsubscribe.
+# Low publish_buffer_limit makes publishers block on memory backpressure
+
+
+@dfly_args({"publish_buffer_limit": 100, "proactor_threads": 2})
+async def test_pubsub_unsubscribe(df_server: DflyInstance):
+    long_message = "a" * 100_000
+    pub_sent = 0
+    pub_ready_ev = asyncio.Event()
+
+    async def publisher():
+        nonlocal pub_sent
+        async with df_server.client(single_connection_client=True) as c:
+            for _ in range(32):
+                await c.execute_command("PUBLISH", "chan", long_message)
+                # Unblock subscriber after a sufficient amount of publish requests accumulated
+                pub_sent += 1
+                if pub_sent >= 16:
+                    pub_ready_ev.set()
+
+    # Get raw connection from the client and subscribe to chan
+    cl = df_server.client(single_connection_client=True)
+    await cl.ping()
+    conn = cl.connection
+    await conn.send_command("SUBSCRIBE chan")
+
+    # Flood our only subscriber with large messages to make publishers stop
+    tasks = [asyncio.create_task(publisher()) for _ in range(16)]
+
+    # Unsubscribe in the process
+    await pub_ready_ev.wait()
+    await conn.send_command("UNSUBSCRIBE")
+
+    # No messages should be received after we've read unsubscribe reply
+    had_unsub = False
+    while True:
+        reply = await conn.read_response(timeout=0.1)
+        if reply is None:
+            break
+
+        if reply[0] == "unsubscribe":
+            assert reply[2] == 0  # zero subscriptions left
+            had_unsub = True
+        else:
+            assert not had_unsub, "found message even after all subscriptions were removed"
+
+    assert had_unsub
+    await asyncio.gather(*tasks)
+    await cl.aclose()
+
+
 async def produce_expiring_keys(async_client: aioredis.Redis):
     keys = []
     for i in range(10, 50):
