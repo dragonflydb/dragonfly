@@ -958,6 +958,9 @@ OpResult<vector<ResultType>> StateExecutor::Execute(const CommandList& commands)
   return results;
 }
 
+const char kInvalidBitfieldTypeErr[] =
+    "invalid bitfield type. use something like i16 u8. note that u64 is not supported but i64 is.";
+
 nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser) {
   CommonAttributes parsed;
   using nonstd::make_unexpected;
@@ -974,9 +977,7 @@ nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser)
   } else if (encoding[0] == 'i') {
     parsed.type = EncodingType::INT;
   } else {
-    return make_unexpected(
-        "invalid bitfield type. use something like i16 u8. note that u64 is not supported but i64 "
-        "is.");
+    return make_unexpected(kInvalidBitfieldTypeErr);
   }
 
   string_view bits = encoding.substr(1);
@@ -984,10 +985,7 @@ nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser)
   // Additional validation: check if bits part contains any invalid characters
   for (char c : bits) {
     if (!std::isdigit(c)) {
-      return make_unexpected(
-          "invalid bitfield type. use something like i16 u8. note that u64 is not supported but "
-          "i64 "
-          "is.");
+      return make_unexpected(kInvalidBitfieldTypeErr);
     }
   }
 
@@ -996,15 +994,11 @@ nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser)
   }
 
   if (parsed.encoding_bit_size <= 0 || parsed.encoding_bit_size > 64) {
-    return make_unexpected(
-        "invalid bitfield type. use something like i16 u8. note that u64 is not supported but i64 "
-        "is.");
+    return make_unexpected(kInvalidBitfieldTypeErr);
   }
 
   if (parsed.encoding_bit_size == 64 && parsed.type == EncodingType::UINT) {
-    return make_unexpected(
-        "invalid bitfield type. use something like i16 u8. note that u64 is not supported but i64 "
-        "is.");
+    return make_unexpected(kInvalidBitfieldTypeErr);
   }
 
   bool is_proxy = false;
