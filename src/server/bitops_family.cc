@@ -808,6 +808,10 @@ ResultType Set::ApplyTo(Overflow ov, string* bitfield) {
   }
 
   if (is_negative && attr_.type == EncodingType::INT && old_value > 0) {
+    // Sign extension for negative signed integers.
+    // Is creates a mask that sets all upper bits to 1
+    // and converts positive old_value (15) to correct negative value (-1)
+    // Example: 4-bit field 1111 should be -1, not 15.
     old_value |= -1L ^ ((1L << attr_.encoding_bit_size) - 1);
   }
 
