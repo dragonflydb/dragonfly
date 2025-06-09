@@ -993,21 +993,30 @@ void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {
       const auto& event = events[i];
 
       size_t children = 0;
+      size_t children_micros = 0;
       for (size_t j = i + 1; j < events.size(); j++) {
         if (events[j].depth == event.depth)
           break;
-        if (events[j].depth == event.depth + 1)
+        if (events[j].depth == event.depth + 1) {
           children++;
+          children_micros += events[j].micros;
+        }
       }
 
-      if (children > 0)
-        rb->StartArray(2);
+      rb->StartCollection(4 + (children > 0), RedisReplyBuilder::MAP);
+      rb->SendSimpleString("total_time");
+      rb->SendLong(event.micros);
+      rb->SendSimpleString("operation");
+      rb->SendSimpleString(event.descr);
+      rb->SendSimpleString("self_time");
+      rb->SendLong(event.micros - children_micros);
+      rb->SendSimpleString("procecssed");
+      rb->SendLong(event.num_processed);
 
-      rb->SendSimpleString(
-          absl::StrFormat("t=%-10u n=%-10u %s", event.micros, event.num_processed, event.descr));
-
-      if (children > 0)
+      if (children > 0) {
+        rb->SendSimpleString("children");
         rb->StartArray(children);
+      }
     }
   }
 }

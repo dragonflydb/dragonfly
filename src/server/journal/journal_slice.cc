@@ -87,6 +87,7 @@ void JournalSlice::AddLogRecord(const Entry& entry) {
     FiberAtomicGuard fg;
     item.opcode = entry.opcode;
     item.lsn = lsn_++;
+    // This is a string view. It will dangle afterwords. We don't use it somewhere though.
     item.cmd = entry.payload.cmd;
     item.slot = entry.slot;
 

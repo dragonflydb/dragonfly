@@ -458,7 +458,7 @@ void AclFamily::Cat(CmdArgList args, const CommandContext& cmd_cntx) {
     string category = absl::AsciiStrToUpper(ArgS(args, 0));
 
     if (!cat_table_.contains(category)) {
-      auto error = absl::StrCat("Unkown category: ", category);
+      auto error = absl::StrCat("Unknown category: ", category);
       rb->SendError(error);
       return;
     }
