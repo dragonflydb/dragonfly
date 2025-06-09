@@ -1587,7 +1587,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
       return OpStatus::SYNTAX_ERR;
     }
 
-    if (absl::EndsWith(name, "STORE"))
+    if (absl::EndsWith(name, "STORE") || absl::EqualsIgnoreCase(name, "TDIGEST.MERGE"))
       bonus = 0;  // Z<xxx>STORE <key> commands
 
     unsigned num_keys_index;
@@ -1602,7 +1602,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
 
     if (num_custom_keys == 0 &&
         (absl::StartsWith(name, "ZDIFF") || absl::StartsWith(name, "ZUNION") ||
-         absl::StartsWith(name, "ZINTER"))) {
+         absl::StartsWith(name, "ZINTER") || absl::EqualsIgnoreCase(name, "TDIGEST.MERGE"))) {
       return OpStatus::AT_LEAST_ONE_KEY;
     }
 

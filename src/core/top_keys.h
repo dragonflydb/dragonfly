@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
 #include "base/random.h"
 
 namespace dfly {
@@ -32,6 +33,7 @@ namespace dfly {
 class TopKeys {
   TopKeys(const TopKeys&) = delete;
   TopKeys& operator=(const TopKeys&) = delete;
+
  public:
   struct Options {
     // HeavyKeeper options
@@ -49,8 +51,16 @@ class TopKeys {
 
   explicit TopKeys(Options options);
 
-  void Touch(std::string_view key);
+  void Touch(std::string_view key, size_t incr = 1);
   absl::flat_hash_map<std::string, uint64_t> GetTopKeys() const;
+
+  // Checks whether each item in the list exists in the current set of TopKeys
+  // If a key in keys exists in TopKeys, we set its bool to True
+  void Query(absl::flat_hash_map<std::string_view, bool>* keys);
+
+  Options GetOptions() const {
+    return options_;
+  };
 
  private:
   // Each cell consists of a key-fingerprint, a count, and potentially the key itself, when it's
@@ -66,7 +76,7 @@ class TopKeys {
   Options options_;
   base::Xoroshiro128p bitgen_;
 
-  // fingerprints_'s size is options_.buckets * options_.arrays. Always access fields via GetCell().
+  // fingerprints_'s size is options_.buckets * options_.depth. Always access fields via GetCell().
   std::vector<Cell> fingerprints_;
 };
 

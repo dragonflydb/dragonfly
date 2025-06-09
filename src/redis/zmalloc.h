@@ -32,6 +32,8 @@
 #define __ZMALLOC_H
 
 #include <stdint.h>
+#include <stdio.h>
+#include <sys/types.h>
 
 /* Double expansion needed for stringification of macro values. */
 #define __xstr(s) __zm_str(s)
@@ -88,7 +90,7 @@
 #endif
 
 void *zmalloc(size_t size);
-void *zcalloc(size_t size);
+void *zcalloc(size_t num, size_t size);
 void *zrealloc(void *ptr, size_t size);
 void *ztrymalloc(size_t size);
 void *ztrycalloc(size_t size);

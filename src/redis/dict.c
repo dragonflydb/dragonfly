@@ -169,7 +169,7 @@ int _dictExpand(dict *d, unsigned long size, int* malloc_failed)
         if (*malloc_failed)
             return DICT_ERR;
     } else
-        new_ht_table = zcalloc(newsize*sizeof(dictEntry*));
+        new_ht_table = zcalloc(newsize, sizeof(dictEntry*));
 
     new_ht_used = 0;
 

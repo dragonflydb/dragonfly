@@ -41,6 +41,8 @@ enum AclCat {
   SCRIPTING = 1ULL << 20,
 
   // Extensions
+  TOPK = 1ULL << 27,
+  TDIGEST = 1ULL << 27,
   BLOOM = 1ULL << 28,
   FT_SEARCH = 1ULL << 29,
   THROTTLE = 1ULL << 30,
