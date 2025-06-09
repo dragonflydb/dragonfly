@@ -635,7 +635,7 @@ bool Overflow::UIntOverflow(int64_t incr, size_t total_bits, int64_t* value) con
     switch (type) {
       case Overflow::WRAP:
         // safe to do, won't overflow, both incr and value are <= than 2^63 - 1
-        *value = (incr_value + *value) % max;
+        *value = (incr_value + *value) & max;
         break;
       case Overflow::SAT:
         *value = max;
@@ -782,6 +782,7 @@ ResultType Set::ApplyTo(Overflow ov, string* bitfield) {
   string& bytes = *bitfield;
   const int32_t total_bytes = static_cast<int32_t>(bytes.size());
   auto last_byte_offset = GetByteIndex(attr_.offset + attr_.encoding_bit_size - 1) + 1;
+  const size_t offset = attr_.offset;
   if (last_byte_offset > total_bytes) {
     bytes.resize(last_byte_offset, 0);
   }
@@ -793,6 +794,8 @@ ResultType Set::ApplyTo(Overflow ov, string* bitfield) {
   uint32_t lsb = attr_.offset + attr_.encoding_bit_size - 1;
   int64_t old_value = 0;
 
+  const bool is_negative =
+      CheckBitStatus(GetByteValue(*bitfield, offset), GetNormalizedBitIndex(offset));
   for (size_t i = 0; i < attr_.encoding_bit_size; ++i) {
     bool bit_value = (set_value_ >> i) & 0x01;
     uint8_t byte{GetByteValue(bytes, lsb)};
@@ -802,6 +805,14 @@ ResultType Set::ApplyTo(Overflow ov, string* bitfield) {
     bytes[GetByteIndex(lsb)] = byte;
     old_value |= old_bit << i;
     --lsb;
+  }
+
+  if (is_negative && attr_.type == EncodingType::INT && old_value > 0) {
+    // Sign extension for negative signed integers.
+    // Is creates a mask that sets all upper bits to 1
+    // and converts positive old_value (15) to correct negative value (-1)
+    // Example: 4-bit field 1111 should be -1, not 15.
+    old_value |= -1L ^ ((1L << attr_.encoding_bit_size) - 1);
   }
 
   return old_value;
@@ -955,6 +966,9 @@ OpResult<vector<ResultType>> StateExecutor::Execute(const CommandList& commands)
   return results;
 }
 
+const char kInvalidBitfieldTypeErr[] =
+    "invalid bitfield type. use something like i16 u8. note that u64 is not supported but i64 is.";
+
 nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser) {
   CommonAttributes parsed;
   using nonstd::make_unexpected;
@@ -964,30 +978,35 @@ nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser)
   if (encoding.empty()) {
     return make_unexpected(kSyntaxErr);
   }
-  if (encoding[0] == 'U' || encoding[0] == 'u') {
+
+  // Check case-sensitivity - only lowercase 'u' and 'i' are allowed
+  if (encoding[0] == 'u') {
     parsed.type = EncodingType::UINT;
-  } else if (encoding[0] == 'I' || encoding[0] == 'i') {
+  } else if (encoding[0] == 'i') {
     parsed.type = EncodingType::INT;
   } else {
-    return make_unexpected(kSyntaxErr);
+    return make_unexpected(kInvalidBitfieldTypeErr);
   }
 
   string_view bits = encoding.substr(1);
+
+  // Additional validation: check if bits part contains any invalid characters
+  for (char c : bits) {
+    if (!std::isdigit(c)) {
+      return make_unexpected(kInvalidBitfieldTypeErr);
+    }
+  }
 
   if (!absl::SimpleAtoi(bits, &parsed.encoding_bit_size)) {
     return make_unexpected(kSyntaxErr);
   }
 
   if (parsed.encoding_bit_size <= 0 || parsed.encoding_bit_size > 64) {
-    return make_unexpected(
-        "invalid bitfield type. use something like i16 u8. note that u64 is not supported but i64 "
-        "is.");
+    return make_unexpected(kInvalidBitfieldTypeErr);
   }
 
   if (parsed.encoding_bit_size == 64 && parsed.type == EncodingType::UINT) {
-    return make_unexpected(
-        "invalid bitfield type. use something like i16 u8. note that u64 is not supported but i64 "
-        "is.");
+    return make_unexpected(kInvalidBitfieldTypeErr);
   }
 
   bool is_proxy = false;
