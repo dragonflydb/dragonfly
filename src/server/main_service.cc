@@ -1351,6 +1351,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
   DCHECK(!cid->Validate(tail_args));
 
   ConnectionContext* cntx = cmd_cntx.conn_cntx;
+  cntx->cid = cid;
   auto* builder = cmd_cntx.rb;
   DCHECK(builder);
   DCHECK(cntx);
@@ -2283,13 +2284,10 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
     } else {
       CmdArgVec arg_vec;
       for (const auto& scmd : exec_info.body) {
-        VLOG(2) << "TX CMD " << scmd.Cid()->name() << " " << scmd.NumArgs();
-
-        cntx->SwitchTxCmd(scmd.Cid());
-
         CmdArgList args = scmd.ArgList(&arg_vec);
 
         if (scmd.Cid()->IsTransactional()) {
+          cmd_cntx.tx->MultiSwitchCmd(scmd.Cid());
           OpStatus st = cmd_cntx.tx->InitByArgs(cntx->ns, cntx->conn_state.db_index, args);
           if (st != OpStatus::OK) {
             rb->SendError(st);

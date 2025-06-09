@@ -115,6 +115,8 @@ TEST_F(SetFamilyTest, SInter) {
   EXPECT_THAT(resp, ErrArg("WRONGTYPE Operation against a key"));
   resp = Run({"sinterstore", "none1", "none2"});
   EXPECT_THAT(resp, IntArg(0));
+
+  EXPECT_THAT(Run({"sinter"}), ErrArg("wrong number of arguments"));
 }
 
 TEST_F(SetFamilyTest, SInterCard) {

@@ -310,6 +310,26 @@ TEST_F(MultiTest, MultiRename) {
   EXPECT_FALSE(service_->IsShardSetLocked());
 }
 
+// Run multi without transactional commands
+TEST_F(MultiTest, MultiWithoutTx) {
+  Run({"multi"});
+  Run({"ping"});
+  auto resp = Run({"exec"});
+  EXPECT_EQ(resp, "PONG");
+
+  // EVAL without keys and default script flags should be non-transactional
+  Run({"multi"});
+  Run({"eval", "return 'OK1'", "0"});
+  Run({"ping"});
+  Run({"eval", "return 'OK2'", "0", "not-a-key"});
+  Run({"ping"});
+  Run({"eval", "return 'OK3'", "0", "not-a-key", "as-well"});
+  Run({"ping"});
+  resp = Run({"exec"});
+  EXPECT_EQ(resp.GetVec()[2], "OK2");
+  EXPECT_EQ(resp.GetVec()[4], "OK3");
+}
+
 TEST_F(MultiTest, MultiHop) {
   Run({"set", kKey1, "1"});
 

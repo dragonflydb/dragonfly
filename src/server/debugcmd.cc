@@ -1459,7 +1459,7 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
         args_view.push_back(arg);
       }
       auto args_span = absl::MakeSpan(args_view);
-      local_cntx.SwitchTxCmd(cid);
+      stub_tx->MultiSwitchCmd(cid);
       crb.SetReplyMode(ReplyMode::NONE);
       stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span);
 
@@ -1481,8 +1481,8 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
         args_view.push_back(arg);
       }
       auto args_span = absl::MakeSpan(args_view);
-      local_cntx.SwitchTxCmd(cid);
       crb.SetReplyMode(ReplyMode::NONE);
+      stub_tx->MultiSwitchCmd(cid);
       stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span);
       sf_.service().InvokeCmd(cid, args_span,
                               CommandContext{local_cntx.transaction, &crb, &local_cntx});
