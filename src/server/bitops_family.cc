@@ -779,66 +779,35 @@ class Set {
 };
 
 ResultType Set::ApplyTo(Overflow ov, string* bitfield) {
+  string& bytes = *bitfield;
+  const int32_t total_bytes = static_cast<int32_t>(bytes.size());
+  auto last_byte_offset = GetByteIndex(attr_.offset + attr_.encoding_bit_size - 1) + 1;
+  const size_t offset = attr_.offset;
+  if (last_byte_offset > total_bytes) {
+    bytes.resize(last_byte_offset, 0);
+  }
+
   if (!HandleOverflow(ov)) {
     return {};
   }
 
-  string& bytes = *bitfield;
-  const size_t start_byte = GetByteIndex(attr_.offset);
-  const size_t end_byte = GetByteIndex(attr_.offset + attr_.encoding_bit_size - 1);
-  const size_t initial_byte_size = bytes.size();
-
-  // Buffer to hold original bytes.
-  std::vector<uint8_t> old_bytes_buf;
-  if (start_byte < initial_byte_size) {
-    const size_t end_read = std::min(initial_byte_size, end_byte + 1);
-    const uint8_t* start_ptr = reinterpret_cast<const uint8_t*>(bytes.data()) + start_byte;
-    const uint8_t* end_ptr = reinterpret_cast<const uint8_t*>(bytes.data()) + end_read;
-    old_bytes_buf.assign(start_ptr, end_ptr);
-  }
-
-  auto get_old_byte = [&](const size_t index) -> uint8_t {
-    if (index < start_byte || index > end_byte)
-      return 0;  // Should not happen with correct usage
-    const size_t i = index - start_byte;
-    return i < old_bytes_buf.size() ? old_bytes_buf[i] : 0;
-  };
-
-  const size_t needed_byte_size = end_byte + 1;
-  if (needed_byte_size > bytes.size()) {
-    bytes.resize(needed_byte_size, 0);
-  }
-
-  int64_t old_value = 0;
-  bool was_negative = false;
-  if (attr_.type == EncodingType::INT) {
-    uint8_t msb_byte = get_old_byte(start_byte);
-    was_negative = CheckBitStatus(msb_byte, GetNormalizedBitIndex(attr_.offset));
-  }
-
   uint32_t lsb = attr_.offset + attr_.encoding_bit_size - 1;
+  int64_t old_value = 0;
+
+  const bool is_negative =
+      CheckBitStatus(GetByteValue(*bitfield, offset), GetNormalizedBitIndex(offset));
   for (size_t i = 0; i < attr_.encoding_bit_size; ++i) {
-    size_t current_byte_index = GetByteIndex(lsb);
-    int32_t bit_index_in_byte = GetNormalizedBitIndex(lsb);
-
-    uint8_t old_byte_val = get_old_byte(current_byte_index);
-    if (CheckBitStatus(old_byte_val, bit_index_in_byte)) {
-      old_value |= (1LL << i);
-    }
-
-    // Set new bit.
-    bool new_bit_value = (set_value_ >> i) & 1;
-    uint8_t& byte_to_modify = (uint8_t&)bytes[current_byte_index];
-    if (new_bit_value) {
-      byte_to_modify = TurnBitOn(byte_to_modify, bit_index_in_byte);
-    } else {
-      byte_to_modify = TurnBitOff(byte_to_modify, bit_index_in_byte);
-    }
-
+    bool bit_value = (set_value_ >> i) & 0x01;
+    uint8_t byte{GetByteValue(bytes, lsb)};
+    int32_t index = GetNormalizedBitIndex(lsb);
+    int64_t old_bit = CheckBitStatus(byte, index);
+    byte = bit_value ? TurnBitOn(byte, index) : TurnBitOff(byte, index);
+    bytes[GetByteIndex(lsb)] = byte;
+    old_value |= old_bit << i;
     --lsb;
   }
 
-  if (was_negative && old_value > 0) {
+  if (is_negative && attr_.type == EncodingType::INT && old_value > 0) {
     old_value |= -1L ^ ((1L << attr_.encoding_bit_size) - 1);
   }
 
