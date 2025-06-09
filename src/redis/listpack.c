@@ -113,6 +113,25 @@
     (p)[3] = ((v)>>24)&0xff; \
 } while(0)
 
+/* TODO: delete this function once corruption in the stream code is identified */
+static void lpSetTotalBytesChecked(unsigned char *p, uint32_t v) {
+    uint32_t current = lpGetTotalBytes(p);
+    if (current == 0) {
+      fprintf(stderr, "Error: corrupted listpack size.");
+      abort();
+    } else if (current > 4194304) { /* 4 MiB */
+      /* suspicous size, lets check its validity*/  
+      size_t block_size = zmalloc_size(p);
+      if (block_size < current) {
+        fprintf(stderr, "Error: listpack size (%u) is larger than allocated "
+                "block size (%lu).", current, block_size);
+        abort();
+      }
+    }
+
+    lpSetTotalBytes(p, v);
+}
+
 #define lpSetNumElements(p, v)                                                                                         \
     do {                                                                                                               \
     (p)[4] = (v)&0xff; \
@@ -947,7 +966,7 @@ unsigned char *lpInsert(unsigned char *lp, const unsigned char *elestr, unsigned
                 lpSetNumElements(lp,num_elements-1);
         }
     }
-    lpSetTotalBytes(lp,new_listpack_bytes);
+    lpSetTotalBytesChecked(lp,new_listpack_bytes);
 
 #if 0
     /* This code path is normally disabled: what it does is to force listpack
@@ -1067,7 +1086,7 @@ unsigned char *lpDeleteRangeWithEntry(unsigned char *lp, unsigned char **p, unsi
 
     /* Move tail to the front of the listpack */
     memmove(first, tail, eofptr - tail + 1);
-    lpSetTotalBytes(lp, bytes - (tail - first));
+    lpSetTotalBytesChecked(lp, bytes - (tail - first));
     uint32_t numele = lpGetNumElements(lp);
     if (numele != LP_HDR_NUMELE_UNKNOWN) lpSetNumElements(lp, numele - deleted);
     lp = lpShrinkToFit(lp);
@@ -1097,7 +1116,7 @@ unsigned char *lpDeleteRange(unsigned char *lp, long index, unsigned long num) {
     if (numele != LP_HDR_NUMELE_UNKNOWN && index < 0) index = (long)numele + index;
     if (numele != LP_HDR_NUMELE_UNKNOWN && (numele - (unsigned long)index) <= num) {
         p[0] = LP_EOF;
-        lpSetTotalBytes(lp, p - lp + 1);
+        lpSetTotalBytesChecked(lp, p - lp + 1);
         lpSetNumElements(lp, index);
         lp = lpShrinkToFit(lp);
     } else {
@@ -1182,7 +1201,7 @@ unsigned char *lpMerge(unsigned char **first, unsigned char **second) {
     }
 
     lpSetNumElements(target, lplength);
-    lpSetTotalBytes(target, lpbytes);
+    lpSetTotalBytesChecked(target, lpbytes);
 
     /* Now free and NULL out what we didn't realloc */
     if (append) {
