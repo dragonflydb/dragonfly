@@ -814,7 +814,7 @@ TEST_F(ZSetFamilyTest, ZMPopInvalidSyntax) {
 
   // Zero keys.
   resp = Run({"zmpop", "0", "MIN", "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
 
   // Number of keys not uint.
   resp = Run({"zmpop", "aa", "a", "MIN"});
