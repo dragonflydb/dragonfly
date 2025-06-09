@@ -262,13 +262,16 @@ void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp,
   }
 
   for (auto part : resp) {
-    blobs[index++] = iovec{.iov_base = const_cast<char*>(part.GetView().data()),
-                           .iov_len = part.GetView().size()};
-    if (index >= blobs.size()) {
-      if (!tl_traffic_logger.Write(blobs.data(), blobs.size())) {
-        return;
+    if (auto blob_len = part.GetView().size(); blob_len > 0) {
+      blobs[index++] =
+          iovec{.iov_base = const_cast<char*>(part.GetView().data()), .iov_len = blob_len};
+
+      if (index >= blobs.size()) {
+        if (!tl_traffic_logger.Write(blobs.data(), blobs.size())) {
+          return;
+        }
+        index = 0;
       }
-      index = 0;
     }
   }
 
