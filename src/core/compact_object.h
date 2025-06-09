@@ -15,6 +15,7 @@
 #include "core/mi_memory_resource.h"
 #include "core/small_string.h"
 #include "core/string_or_view.h"
+#include "core/top_keys.h"
 
 namespace dfly {
 
@@ -26,6 +27,11 @@ constexpr unsigned kEncodingJsonCons = 0;
 constexpr unsigned kEncodingJsonFlat = 1;
 
 class SBF;
+
+namespace prob {
+class CuckooFilter;
+class CuckooReserveParams;
+}  // namespace prob
 
 namespace detail {
 
@@ -123,6 +129,8 @@ class CompactObj {
     EXTERNAL_TAG = 20,
     JSON_TAG = 21,
     SBF_TAG = 22,
+    TOPK_TAG = 23,
+    CUCKOO_FILTER_TAG = 24,
   };
 
   // String encoding types.
@@ -311,6 +319,13 @@ class CompactObj {
   void SetSBF(uint64_t initial_capacity, double fp_prob, double grow_factor);
   SBF* GetSBF() const;
 
+  void SetTopK(size_t topk, size_t width, size_t depth, double decay);
+  TopKeys* GetTopK() const;
+
+  void SetCuckooFilter(prob::CuckooFilter filter);
+  prob::CuckooFilter* GetCuckooFilter();
+  const prob::CuckooFilter* GetCuckooFilter() const;
+
   // dest must have at least Size() bytes available
   void GetString(char* dest) const;
 
@@ -485,6 +500,8 @@ class CompactObj {
     // using 'packed' to reduce alignement of U to 1.
     JsonWrapper json_obj __attribute__((packed));
     SBF* sbf __attribute__((packed));
+    TopKeys* topk __attribute__((packed));
+    prob::CuckooFilter* cuckoo_filter __attribute__((packed));
     int64_t ival __attribute__((packed));
     ExternalPtr ext_ptr;
 
