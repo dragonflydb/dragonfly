@@ -504,7 +504,7 @@ async def test_pubsub_unsubscribe(df_server: DflyInstance):
     # No messages should be received after we've read unsubscribe reply
     had_unsub = False
     while True:
-        reply = await conn.read_response(timeout=0.1)
+        reply = await conn.read_response(timeout=0.2)
         if reply is None:
             break
 
