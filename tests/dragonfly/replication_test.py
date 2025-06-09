@@ -1839,7 +1839,6 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
         finally:
             await proxy.close(task)
 
-    # Partial replication is currently not implemented so the following does not work
     master.stop()
     lines = master.find_in_logs("Partial sync requested from stale LSN")
     assert len(lines) > 0
@@ -3195,3 +3194,79 @@ async def test_bug_5221(df_factory):
     await seeder.run(c_master, target_deviation=0.01)
     res = await c_master.execute_command("dbsize")
     assert res > 0
+
+
+@pytest.mark.parametrize("proactors", [1, 4, 6])
+@pytest.mark.parametrize("backlog_len", [1, 256, 1024, 1300])
+async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_len):
+    keys = 5_000
+    if proactors > 1:
+        keys = 10_000
+
+    # We use lock_on_hashtag because we want to seed enough elements to one flow/journal such that
+    # the partial sync stales.
+    master = df_factory.create(
+        proactor_threads=proactors, shard_repl_backlog_len=backlog_len, lock_on_hashtags=True
+    )
+    replica = df_factory.create(proactor_threads=proactors)
+
+    df_factory.start_all([replica, master])
+
+    async def stream(client, total):
+        for i in range(0, total):
+            prefix = "{prefix}"
+            # Seed to one shard only. This will eventually cause one of the flows to become stale.
+            await client.execute_command(f"SET {prefix}foo{i} bar{i}")
+
+    async with replica.client() as c_replica, master.client() as c_master:
+        seeder = SeederV2(key_target=keys)
+        await seeder.run(c_master, target_deviation=0.01)
+
+        proxy = Proxy("127.0.0.1", 1113, "127.0.0.1", master.port)
+        await proxy.start()
+        task = asyncio.create_task(proxy.serve())
+
+        try:
+            await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
+            # Reach stable sync
+            await wait_for_replicas_state(c_replica)
+            # Stream some elements
+            await stream(c_master, backlog_len)
+
+            proxy.drop_connection()
+            # Give time to detect dropped connection and reconnect
+            await asyncio.sleep(1.0)
+            # Partial synced here
+            await check_all_replicas_finished([c_replica], c_master)
+            hash1, hash2 = await asyncio.gather(
+                *(SeederV2.capture(c) for c in (c_master, c_replica))
+            )
+            assert hash1 == hash2
+
+            await proxy.close()
+            # Whoops we moved too much, no partial sync here
+            await stream(c_master, backlog_len + 10)
+            await proxy.start()
+            await asyncio.sleep(1.0)
+
+            await check_all_replicas_finished([c_replica], c_master)
+
+            hash1, hash2 = await asyncio.gather(
+                *(SeederV2.capture(c) for c in (c_master, c_replica))
+            )
+            assert hash1 == hash2
+        finally:
+            await proxy.close(task)
+
+    master.stop()
+    replica.stop()
+    # Partial sync worked
+    lines = master.find_in_logs("Partial sync requested from LSN")
+    # Because we run with num_shards = proactors - 1
+    total_attempts = 1
+    if proactors > 1:
+        total_attempts = proactors - 1 + proactors - 2
+    assert len(lines) == total_attempts
+    # Second partial sync failed because of stale LSN
+    lines = master.find_in_logs("Partial sync requested from stale LSN")
+    assert len(lines) == 1
