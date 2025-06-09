@@ -2311,6 +2311,11 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
     result.lua_stats += InterpreterManager::tl_stats();
 
+    if (ss->journal()) {
+      result.lsn_buffer_size += ss->journal()->LsnBufferSize();
+      result.lsn_buffer_bytes += ss->journal()->LsnBufferBytes();
+    }
+
     auto connections_lib_name_ver_map = facade::Connection::GetLibStatsTL();
     for (auto& [k, v] : connections_lib_name_ver_map) {
       result.connections_lib_name_ver_map[k] += v;
@@ -2492,6 +2497,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("snapshot_serialization_bytes", m.serialization_bytes);
     append("commands_squashing_replies_bytes",
            m.facade_stats.reply_stats.squashing_current_reply_size.load(memory_order_relaxed));
+    append("lsn_buffer_size_sum", m.lsn_buffer_size);
+    append("lsn_buffer_bytes_sum", m.lsn_buffer_bytes);
 
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");

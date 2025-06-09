@@ -74,10 +74,6 @@ void JournalSlice::SetFlushMode(bool allow_flush) {
   }
 }
 
-size_t JournalSlice::GetRingBufferSize() const {
-  return ring_buffer_.size();
-}
-
 void JournalSlice::AddLogRecord(const Entry& entry) {
   DCHECK(ring_buffer_.capacity() > 0);
 
@@ -87,7 +83,6 @@ void JournalSlice::AddLogRecord(const Entry& entry) {
     FiberAtomicGuard fg;
     item.opcode = entry.opcode;
     item.lsn = lsn_++;
-    // This is a string view. It will dangle afterwords. We don't use it somewhere though.
     item.cmd = entry.payload.cmd;
     item.slot = entry.slot;
 
@@ -114,7 +109,13 @@ void JournalSlice::CallOnChange(JournalItem* item) {
   }
   item->cmd = {};
   // We preserve order here. After ConsumeJournalChange there can reordering
+  if (ring_buffer_.size() == ring_buffer_.capacity()) {
+    const size_t bytes_removed = ring_buffer_.front().data.size() + sizeof(*item);
+    ring_buffer_bytes -= bytes_removed;
+  }
   ring_buffer_.push_back(std::move(*item));
+  ring_buffer_bytes += sizeof(*item) + ring_buffer_.back().data.size();
+
   if (enable_journal_flush_) {
     for (auto k_v : journal_consumers_arr_) {
       k_v.second->ThrottleIfNeeded();
@@ -136,6 +137,18 @@ void JournalSlice::UnregisterOnChange(uint32_t id) {
                     [id](const auto& e) { return e.first == id; });
   CHECK(it != journal_consumers_arr_.end());
   journal_consumers_arr_.erase(it);
+}
+
+size_t JournalSlice::GetRingBufferSize() const {
+  return ring_buffer_.size();
+}
+
+size_t JournalSlice::GetRingBufferBytes() const {
+  return ring_buffer_bytes;
+}
+
+void JournalSlice::ResetRingBuffer() {
+  ring_buffer_.clear();
 }
 
 }  // namespace journal

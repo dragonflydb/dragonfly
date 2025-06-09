@@ -58,6 +58,8 @@ class JournalSlice {
   void SetFlushMode(bool allow_flush);
 
   size_t GetRingBufferSize() const;
+  size_t GetRingBufferBytes() const;
+  void ResetRingBuffer();
 
  private:
   void CallOnChange(JournalItem* item);
@@ -72,6 +74,8 @@ class JournalSlice {
   uint32_t next_cb_id_ = 1;
   std::error_code status_ec_;
   bool enable_journal_flush_ = true;
+
+  size_t ring_buffer_bytes = 0;
 };
 
 }  // namespace journal
