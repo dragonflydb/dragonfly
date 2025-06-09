@@ -840,8 +840,9 @@ TEST_F(SearchFamilyTest, FtProfile) {
     EXPECT_THAT(shard_resp, ElementsAre("took", _, "tree", _));
 
     const auto& tree = shard_resp[3].GetVec();
-    EXPECT_THAT(tree[0].GetString(), HasSubstr("Logical{n=3,o=and}"sv));
-    EXPECT_EQ(tree[1].GetVec().size(), 3);
+    EXPECT_EQ(tree[3].GetString() /* operation */, "Logical{n=3,o=and}"s);
+    EXPECT_GT(tree[1].GetInt() /* total time*/, tree[5].GetInt() /* self time */);
+    EXPECT_EQ(tree[7].GetInt() /* processed */, 0);
   }
 
   // Test LIMITED throws no errors
