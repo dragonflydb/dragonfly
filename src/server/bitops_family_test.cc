@@ -855,4 +855,29 @@ TEST_F(BitOpsFamilyTest, BitFieldIssue5237_InvalidTypeUppercase_Get) {
   ASSERT_THAT(Run({"bitfield", "key:bitfield_get:wrong:args", "get", "I8", "0"}), expected_error);
 }
 
+TEST_F(BitOpsFamilyTest, BitFieldAdditionalWrongArguments) {
+  // Additional tests to match Python test coverage
+  const auto syntax_error = ErrArg("ERR syntax error");
+  auto expected_error = ErrArg(
+      "ERR invalid bitfield type. use something like i16 u8. note that u64 is not supported but "
+      "i64 is.");
+
+  // Additional invalid encoding types (from Python tests)
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i-42", "0"}), expected_error);
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i5?", "0"}), expected_error);
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i0", "0"}), expected_error);
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "i-42", "0", "0"}), expected_error);
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "i5?", "0", "0"}), expected_error);
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "i0", "0", "0"}), expected_error);
+
+  // Test negative offsets (should be syntax error)
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i16", "-1"}), syntax_error);
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "i16", "-1", "0"}), syntax_error);
+  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i16", "-1", "1"}), syntax_error);
+
+  // Test invalid values for SET and INCRBY (generates syntax error during parsing)
+  ASSERT_THAT(Run({"bitfield", "foo", "set", "i16", "0", "foo"}), syntax_error);
+  ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i16", "0", "bar"}), syntax_error);
+}
+
 }  // end of namespace dfly
