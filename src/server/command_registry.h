@@ -76,15 +76,13 @@ using CmdCallStats = std::pair<uint64_t, uint64_t>;
 using SlotId = std::uint16_t;
 
 struct CommandContext {
-  CommandContext(Transaction* _tx, facade::SinkReplyBuilder* _rb, ConnectionContext* cntx,
-                 std::optional<SlotId> slot = std::nullopt)
-      : tx(_tx), rb(_rb), conn_cntx(cntx), slot_id(slot) {
+  CommandContext(Transaction* _tx, facade::SinkReplyBuilder* _rb, ConnectionContext* cntx)
+      : tx(_tx), rb(_rb), conn_cntx(cntx) {
   }
 
   Transaction* tx;
   facade::SinkReplyBuilder* rb;
   ConnectionContext* conn_cntx;
-  std::optional<SlotId> slot_id;
 };
 
 class CommandId : public facade::CommandId {

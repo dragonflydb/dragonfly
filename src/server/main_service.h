@@ -158,7 +158,7 @@ class Service : public facade::ServiceInterface {
 
   // Return error if not all keys are owned by the server when running in cluster mode
   std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId* cid, CmdArgList args,
-                                                       CommandContext* dfly_cntx);
+                                                       const ConnectionContext& dfly_cntx);
 
   void EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
                     SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only);

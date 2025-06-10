@@ -189,7 +189,7 @@ class Transaction {
   explicit Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot_id);
 
   // Initialize from command (args) on specific db.
-  OpStatus InitByArgs(Namespace* ns, DbIndex index, CmdArgList args, std::optional<SlotId> slot_id);
+  OpStatus InitByArgs(Namespace* ns, DbIndex index, CmdArgList args);
 
   // Get command arguments for specific shard. Called from shard thread.
   ShardArgs GetShardArgs(ShardId sid) const;
@@ -290,6 +290,8 @@ class Transaction {
   ShardId GetUniqueShard() const;
 
   std::optional<SlotId> GetUniqueSlotId() const;
+
+  void SetUniqueSlotId(SlotId slot);
 
   bool IsMulti() const {
     return bool(multi_);
@@ -492,7 +494,7 @@ class Transaction {
   void InitGlobal();
 
   // Init with a set of keys.
-  void InitByKeys(const KeyIndex& keys, std::optional<SlotId> slot_id);
+  void InitByKeys(const KeyIndex& keys);
 
   void EnableShard(ShardId sid);
   void EnableAllShards();

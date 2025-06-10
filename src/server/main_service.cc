@@ -964,8 +964,8 @@ OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, CmdArgList args) {
 }
 
 optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
-                                                 CommandContext* cmd_cntx) {
-  if (cmd_cntx->conn_cntx->is_replicating) {
+                                                 const ConnectionContext& dfly_cntx) {
+  if (dfly_cntx.is_replicating) {
     // Always allow commands on the replication port, as it might be for future-owned keys.
     return nullopt;
   }
@@ -994,7 +994,7 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
   optional<SlotId> keys_slot = slot_checker.GetUniqueSlotId();
 
   if (keys_slot.has_value()) {
-    cmd_cntx->slot_id = *keys_slot;
+    dfly_cntx.transaction->SetUniqueSlotId(*keys_slot);
     if (auto error = cluster::SlotOwnershipError(*keys_slot);
         !error.status.has_value() || error.status.value() != facade::OpStatus::OK) {
       return ErrorReply{std::move(error)};
@@ -1153,7 +1153,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   }
 
   if (IsClusterEnabled()) {
-    if (auto err = CheckKeysOwnership(cid, tail_args, cmd_cntx); err)
+    if (auto err = CheckKeysOwnership(cid, tail_args, dfly_cntx); err)
       return err;
   }
 
@@ -1261,7 +1261,7 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
     if (cid->IsTransactional()) {
       dfly_cntx->transaction->MultiSwitchCmd(cid);
       OpStatus status = dfly_cntx->transaction->InitByArgs(
-          dfly_cntx->ns, dfly_cntx->conn_state.db_index, args_no_cmd, cmd_cntx.slot_id);
+          dfly_cntx->ns, dfly_cntx->conn_state.db_index, args_no_cmd);
 
       if (status != OpStatus::OK)
         return builder->SendError(status);
@@ -1274,8 +1274,8 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
 
       if (!dist_trans->IsMulti()) {  // Multi command initialize themself based on their mode.
         CHECK(dfly_cntx->ns != nullptr);
-        if (auto st = dist_trans->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index,
-                                             args_no_cmd, cmd_cntx.slot_id);
+        if (auto st =
+                dist_trans->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, args_no_cmd);
             st != OpStatus::OK)
           return builder->SendError(st);
       }
@@ -2155,8 +2155,7 @@ bool CheckWatchedKeyExpiry(const CommandContext& cntx, const CommandId* exists_c
   };
 
   tx->MultiSwitchCmd(exists_cid);
-  tx->InitByArgs(cntx.conn_cntx->ns, cntx.conn_cntx->conn_state.db_index, CmdArgList{str_list},
-                 cntx.slot_id);
+  tx->InitByArgs(cntx.conn_cntx->ns, cntx.conn_cntx->conn_state.db_index, CmdArgList{str_list});
   OpStatus status = tx->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
 
@@ -2240,8 +2239,7 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
       slot_checker.Add(s);
     }
     if (auto slot_id = slot_checker.GetUniqueSlotId(); slot_id.has_value()) {
-      DCHECK(cmd_cntx.slot_id == *slot_id);
-      const_cast<CommandContext&>(cmd_cntx).slot_id = *slot_id;
+      DCHECK(cntx->transaction->GetUniqueSlotId() == *slot_id);
     }
 
     if (slot_checker.IsCrossSlot()) {
@@ -2302,8 +2300,7 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
         CmdArgList args = scmd.ArgList(&arg_vec);
 
         if (scmd.Cid()->IsTransactional()) {
-          OpStatus st =
-              cmd_cntx.tx->InitByArgs(cntx->ns, cntx->conn_state.db_index, args, cmd_cntx.slot_id);
+          OpStatus st = cmd_cntx.tx->InitByArgs(cntx->ns, cntx->conn_state.db_index, args);
           if (st != OpStatus::OK) {
             rb->SendError(st);
             break;

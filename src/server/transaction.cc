@@ -317,7 +317,7 @@ void Transaction::StoreKeysInArgs(const KeyIndex& key_index) {
     kv_fp_.push_back(LockTag(key).Fingerprint());
 }
 
-void Transaction::InitByKeys(const KeyIndex& key_index, std::optional<SlotId> slot_id) {
+void Transaction::InitByKeys(const KeyIndex& key_index) {
   if (key_index.start == full_args_.size()) {  // eval with 0 keys.
     CHECK(absl::StartsWith(cid_->name(), "EVAL")) << cid_->name();
     return;
@@ -341,7 +341,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index, std::optional<SlotId> sl
       DCHECK_EQ(unique_shard_id_, Shard(akey, shard_set->size()));
     else {
       unique_slot_checker_.Add(akey);
-      DCHECK(!slot_id || (unique_slot_checker_.GetUniqueSlotId() == slot_id));
+      DCHECK(!unique_slot_checker_.IsCrossSlot());
       unique_shard_id_ = Shard(akey, shard_set->size());
     }
 
@@ -395,8 +395,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index, std::optional<SlotId> sl
   }
 }
 
-OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, CmdArgList args,
-                                 std::optional<SlotId> slot_id) {
+OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, CmdArgList args) {
   InitBase(ns, index, args);
 
   if ((cid_->opt_mask() & CO::GLOBAL_TRANS) > 0) {
@@ -422,7 +421,7 @@ OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, CmdArgList args,
   if (!key_index)
     return key_index.status();
 
-  InitByKeys(*key_index, slot_id);
+  InitByKeys(*key_index);
   return OpStatus::OK;
 }
 
@@ -478,7 +477,7 @@ void Transaction::StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList 
   PrepareMultiFps(keys);
 
   InitBase(ns, dbid, keys);
-  InitByKeys(KeyIndex(0, keys.size()), slot_id);
+  InitByKeys(KeyIndex(0, keys.size()));
 
   if (!skip_scheduling)
     ScheduleInternal();
@@ -1044,6 +1043,11 @@ ShardId Transaction::GetUniqueShard() const {
 
 optional<SlotId> Transaction::GetUniqueSlotId() const {
   return unique_slot_checker_.GetUniqueSlotId();
+}
+
+void Transaction::SetUniqueSlotId(SlotId slot) {
+  DCHECK(!unique_slot_checker_.IsCrossSlot() && !unique_slot_checker_.GetUniqueSlotId());
+  unique_slot_checker_.Add(slot);
 }
 
 KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {

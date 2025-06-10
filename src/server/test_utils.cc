@@ -99,7 +99,7 @@ void TransactionSuspension::Start() {
 
   transaction_ = new dfly::Transaction{&cid};
 
-  auto st = transaction_->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {}, std::nullopt);
+  auto st = transaction_->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
   CHECK_EQ(st, OpStatus::OK);
 
   transaction_->Execute([](Transaction* t, EngineShard* shard) { return OpStatus::OK; }, false);
