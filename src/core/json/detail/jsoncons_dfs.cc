@@ -71,8 +71,8 @@ Dfs Dfs::Traverse(absl::Span<const PathSegment> path, const JsonType& root, cons
   return dfs;
 }
 
-Dfs Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callback,
-                JsonType* json) {
+Dfs Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callback, JsonType* json,
+                bool reverse_traversal) {
   DCHECK(!path.empty());
 
   Dfs dfs;
@@ -126,11 +126,17 @@ Dfs Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callba
     }
   } while (!stack.empty());
 
-  // Apply mutations after DFS traversal is complete in reverse order
-  // This ensures that deeper mutations don't affect shallower ones
+  // Apply mutations after DFS traversal is complete
   const PathSegment& terminal_segment = path.back();
-  for (auto it = nodes_to_mutate.rbegin(); it != nodes_to_mutate.rend(); ++it) {
-    dfs.MutateStep(terminal_segment, callback, *it);
+  if (reverse_traversal) {
+    // This ensures that deeper mutations don't affect shallower ones by iterating in reverse
+    for (auto it = nodes_to_mutate.rbegin(); it != nodes_to_mutate.rend(); ++it) {
+      dfs.MutateStep(terminal_segment, callback, *it);
+    }
+  } else {
+    for (auto it = nodes_to_mutate.begin(); it != nodes_to_mutate.end(); ++it) {
+      dfs.MutateStep(terminal_segment, callback, *it);
+    }
   }
 
   return dfs;
