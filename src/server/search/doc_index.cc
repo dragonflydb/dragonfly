@@ -223,7 +223,8 @@ std::optional<ShardDocIndex::DocId> ShardDocIndex::DocKeyIndex::Remove(string_vi
 
 string_view ShardDocIndex::DocKeyIndex::Get(DocId id) const {
   DCHECK_LT(id, keys_.size());
-  DCHECK_GT(keys_[id].size(), 0u);
+  // Check that this id was not removed
+  DCHECK(id < last_id_ && std::find(free_ids_.begin(), free_ids_.end(), id) == free_ids_.end());
 
   return keys_[id];
 }
