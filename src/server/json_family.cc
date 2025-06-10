@@ -429,7 +429,7 @@ std::optional<JsonType> ShardJsonFromString(std::string_view input) {
 }
 
 OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_str) {
-  auto it_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key);
+  auto it_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key, OBJ_JSON);
   RETURN_ON_BAD_STATUS(it_res);
 
   JsonAutoUpdater updater(op_args, key, *std::move(it_res));
@@ -756,6 +756,8 @@ bool LegacyModeIsEnabled(const std::vector<std::pair<std::string_view, WrappedJs
 
 OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
                                 const JsonGetParams& params) {
+  // We don't use OBJ_JSON here because we want to support both JSON and STRING types.
+  // If the key is not OBJ_JSON and not OBJ_STRING, we return WRONG_TYPE.
   auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
@@ -1029,9 +1031,12 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
                      const WrappedJsonPath& json_path) {
   if (json_path.RefersToRootElement()) {
     auto& db_slice = op_args.GetDbSlice();
-    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
-    if (IsValid(it)) {
-      db_slice.Del(op_args.db_cntx, it);
+    auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_JSON);
+    RETURN_ON_BAD_STATUS(res_it);
+
+    if (IsValid(res_it->it)) {
+      res_it->post_updater.Run();
+      db_slice.Del(op_args.db_cntx, res_it->it);
       return 1;
     }
     return 0;
