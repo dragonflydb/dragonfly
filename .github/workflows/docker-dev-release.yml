@@ -145,11 +145,11 @@ jobs:
 
           # Upload to GCS
           echo "Uploading ${tar_name} to GCS"
-          gcloud storage cp "$tar_name" "gs://${{ secrets.ARTIFACT_BUCKET }}/dragonfly/$VERSION/$tar_name"
+          gcloud storage cp "$tar_name" "gs://${{ secrets.STAGING_BINARY_BUCKET }}/dragonfly/$VERSION/$tar_name"
 
           # Upload to AWS
           echo "Uploading ${tar_name} to AWS"
-          aws s3 cp "$tar_name" "s3://${{ secrets.ARTIFACT_BUCKET }}/dragonfly/$VERSION/$tar_name"
+          aws s3 cp "$tar_name" "s3://${{ secrets.STAGING_BINARY_BUCKET }}/dragonfly/$VERSION/$tar_name"
 
           # Cleanup
           rm -f dragonfly ${tar_name}
