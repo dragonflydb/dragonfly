@@ -916,7 +916,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
   } else if (rdb_type_ == RDB_TYPE_HASH_ZIPLIST || rdb_type_ == RDB_TYPE_HASH_LISTPACK) {
     unsigned char* lp = lpNew(blob.size());
     switch (rdb_type_) {
-      case RDB_TYPE_HASH_ZIPLIST:
+      case RDB_TYPE_HASH_ZIPLIST:  // legacy format
         if (!ziplistPairsConvertAndValidateIntegrity((const uint8_t*)blob.data(), blob.size(),
                                                      &lp)) {
           LOG(ERROR) << "Zset ziplist integrity check failed.";
@@ -951,7 +951,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       pv_->InitRobj(OBJ_HASH, kEncodingListPack, lp);
     }
     return;
-  } else if (rdb_type_ == RDB_TYPE_ZSET_ZIPLIST) {
+  } else if (rdb_type_ == RDB_TYPE_ZSET_ZIPLIST) {  // legacy format
     unsigned char* lp = lpNew(blob.size());
     if (!ziplistPairsConvertAndValidateIntegrity((uint8_t*)blob.data(), blob.size(), &lp)) {
       LOG(ERROR) << "Zset ziplist integrity check failed.";
