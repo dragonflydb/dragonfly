@@ -306,9 +306,8 @@ class DbSlice {
   OpResult<ConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
                                        unsigned req_obj_type) const;
 
-  OpResult<ItAndUpdater> AddOrFind(const Context& cntx, std::string_view key);
   OpResult<ItAndUpdater> AddOrFind(const Context& cntx, std::string_view key,
-                                   unsigned req_obj_type);
+                                   std::optional<unsigned> req_obj_type = std::nullopt);
 
   // Same as AddOrSkip, but overwrites in case entry exists.
   OpResult<ItAndUpdater> AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,

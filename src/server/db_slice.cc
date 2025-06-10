@@ -607,12 +607,8 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   return res;
 }
 
-OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_view key) {
-  return AddOrFindInternal(cntx, key, std::nullopt);
-}
-
 OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_view key,
-                                                   unsigned req_obj_type) {
+                                                   std::optional<unsigned> req_obj_type) {
   return AddOrFindInternal(cntx, key, req_obj_type);
 }
 
