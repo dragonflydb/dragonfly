@@ -106,7 +106,7 @@ Dfs Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callba
         if (next_seg_id + 1 < path.size()) {
           stack.emplace_back(next, next_seg_id);
         } else {
-          // Terminal step: collect node for mutation if not seen before
+          // Terminal step: collect node for mutation
           nodes_to_mutate.push_back(next);
         }
       }
@@ -126,10 +126,11 @@ Dfs Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callba
     }
   } while (!stack.empty());
 
-  // Apply mutations after DFS traversal is complete
+  // Apply mutations after DFS traversal is complete in reverse order
+  // This ensures that deeper mutations don't affect shallower ones
   const PathSegment& terminal_segment = path.back();
-  for (JsonType* node : nodes_to_mutate) {
-    dfs.MutateStep(terminal_segment, callback, node);
+  for (auto it = nodes_to_mutate.rbegin(); it != nodes_to_mutate.rend(); ++it) {
+    dfs.MutateStep(terminal_segment, callback, *it);
   }
 
   return dfs;
