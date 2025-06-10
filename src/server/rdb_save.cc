@@ -18,7 +18,6 @@ extern "C" {
 #include "redis/rdb.h"
 #include "redis/stream.h"
 #include "redis/util.h"
-#include "redis/ziplist.h"
 #include "redis/zmalloc.h"
 #include "redis/zset.h"
 }
@@ -49,15 +48,9 @@ ABSL_FLAG(dfly::CompressionMode, compression_mode, dfly::CompressionMode::MULTI_
           "set 2 for multi entry zstd compression on df snapshot and single entry on rdb snapshot,"
           "set 3 for multi entry lz4 compression on df snapshot and single entry on rdb snapshot");
 
-ABSL_RETIRED_FLAG(
-    bool, list_rdb_encode_v2, true,
-    "V2 rdb encoding of list uses listpack encoding format, compatible with redis 7. V1 rdb "
-    "enconding of list uses ziplist encoding compatible with redis 6");
-
 // TODO: to retire this flag in v1.31
-ABSL_FLAG(bool, stream_rdb_encode_v2, true,
-          "V2 uses format, compatible with redis 7.2 and Dragonfly v1.26+, while v1 format "
-          "is compatible with redis 6");
+ABSL_RETIRED_FLAG(bool, stream_rdb_encode_v2, true,
+                  "Retired. Uses format, compatible with redis 7.2 and Dragonfly v1.26+");
 
 namespace dfly {
 
@@ -189,13 +182,13 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
       break;
     case OBJ_ZSET:
       if (compact_enc == OBJ_ENCODING_LISTPACK)
-        return RDB_TYPE_ZSET_ZIPLIST;  // we save using the old ziplist encoding.
+        return RDB_TYPE_ZSET_LISTPACK;
       else if (compact_enc == OBJ_ENCODING_SKIPLIST)
         return RDB_TYPE_ZSET_2;
       break;
     case OBJ_HASH:
       if (compact_enc == kEncodingListPack)
-        return RDB_TYPE_HASH_ZIPLIST;
+        return RDB_TYPE_HASH_LISTPACK;
       else if (compact_enc == kEncodingStrMap2) {
         if (((StringMap*)pv.RObjPtr())->ExpirationUsed())
           return RDB_TYPE_HASH_WITH_EXPIRY;  // Incompatible with Redis
@@ -204,8 +197,7 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
       }
       break;
     case OBJ_STREAM:
-      return absl::GetFlag(FLAGS_stream_rdb_encode_v2) ? RDB_TYPE_STREAM_LISTPACKS_3
-                                                       : RDB_TYPE_STREAM_LISTPACKS;
+      return RDB_TYPE_STREAM_LISTPACKS_3;
     case OBJ_MODULE:
       return RDB_TYPE_MODULE_2;
     case OBJ_JSON:
@@ -459,7 +451,8 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
     CHECK_EQ(kEncodingListPack, pv.Encoding());
 
     uint8_t* lp = (uint8_t*)pv.RObjPtr();
-    RETURN_ON_ERR(SaveListPackAsZiplist(lp));
+    size_t lp_bytes = lpBytes(lp);
+    RETURN_ON_ERR(SaveString((uint8_t*)lp, lp_bytes));
   }
 
   return error_code{};
@@ -496,9 +489,11 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
       return true;
     });
   } else {
-    CHECK_EQ(pv.Encoding(), unsigned(OBJ_ENCODING_LISTPACK)) << "Unknown zset encoding";
+    CHECK_EQ(pv.Encoding(), unsigned(OBJ_ENCODING_LISTPACK));
     uint8_t* lp = (uint8_t*)robj_wrapper->inner_obj();
-    RETURN_ON_ERR(SaveListPackAsZiplist(lp));
+    size_t lp_bytes = lpBytes(lp);
+
+    RETURN_ON_ERR(SaveString((uint8_t*)lp, lp_bytes));
   }
 
   return error_code{};
@@ -663,36 +658,6 @@ error_code RdbSerializer::SaveBinaryDouble(double val) {
   absl::little_endian::Store64(buf, *src);
 
   return WriteRaw(Bytes{buf, sizeof(buf)});
-}
-
-error_code RdbSerializer::SaveListPackAsZiplist(uint8_t* lp) {
-  uint8_t* lpfield = lpFirst(lp);
-  int64_t entry_len;
-  uint8_t* entry;
-  uint8_t buf[32];
-  uint8_t* zl = ziplistNew();
-
-  while (lpfield) {
-    entry = lpGet(lpfield, &entry_len, buf);
-    zl = ziplistPush(zl, entry, entry_len, ZIPLIST_TAIL);
-    lpfield = lpNext(lp, lpfield);
-  }
-  size_t ziplen = ziplistBlobLen(zl);
-  error_code ec = SaveString(string_view{reinterpret_cast<char*>(zl), ziplen});
-  zfree(zl);
-
-  return ec;
-}
-
-error_code RdbSerializer::SavePlainNodeAsZiplist(const quicklistNode* node) {
-  uint8_t* zl = ziplistNew();
-  zl = ziplistPush(zl, node->entry, node->sz, ZIPLIST_TAIL);
-
-  size_t ziplen = ziplistBlobLen(zl);
-  error_code ec = SaveString(string_view{reinterpret_cast<char*>(zl), ziplen});
-  zfree(zl);
-
-  return ec;
 }
 
 error_code RdbSerializer::SaveStreamPEL(rax* pel, bool nacks) {

@@ -15,8 +15,6 @@ using namespace testing;
 using namespace std;
 using namespace util;
 
-ABSL_DECLARE_FLAG(bool, stream_rdb_encode_v2);
-
 namespace dfly {
 
 const auto kMatchNil = ArgType(RespExpr::NIL);
@@ -1275,7 +1273,6 @@ TEST_F(StreamFamilyTest, SeenActiveTime) {
   EXPECT_THAT(consumers, RespElementsAre("name", "Alice", "seen-time", IntArg(1250), "active-time",
                                          IntArg(1100), "pel-count", IntArg(1), "pending", _));
 
-  absl::SetFlag(&FLAGS_stream_rdb_encode_v2, true);
   resp = Run({"DUMP", "mystream"});
   Run({"del", "mystream"});
   resp = Run({"RESTORE", "mystream", "0", resp.GetString()});
