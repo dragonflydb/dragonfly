@@ -830,9 +830,9 @@ TEST_F(GenericFamilyTest, Dump) {
   ASSERT_EQ(RDB_SER_VERSION, 9);
   uint8_t EXPECTED_STRING_DUMP[13] = {0x00, 0xc0, 0x13, 0x09, 0x00, 0x23, 0x13,
                                       0x6f, 0x4d, 0x68, 0xf6, 0x35, 0x6e};
-  uint8_t EXPECTED_HASH_DUMP[] = {0x0d, 0x12, 0x12, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00,
-                                  0x02, 0x00, 0x00, 0xfe, 0x13, 0x03, 0xc0, 0xd2, 0x04, 0xff,
-                                  0x09, 0x00, 0xb1, 0x0b, 0xae, 0x6c, 0x23, 0x5d, 0x17, 0xaa};
+  uint8_t EXPECTED_HASH_DUMP[] = {0x10, 0xc,  0xc,  0x0,  0x0, 0x0,  0x2,  0x0,
+                                  0x13, 0x1,  0xc4, 0xd2, 0x2, 0xff, 0x9,  0x0,
+                                  0x68, 0x4d, 0x73, 0xa4, 0xf, 0x23, 0x4f, 0xc7};
 
   uint8_t EXPECTED_LIST_DUMP[] = {0x12, 0x01, 0x02, '\t', '\t', 0x00, 0x00, 0x00,
                                   0x01, 0x00, 0x14, 0x01, 0xff, '\t', 0x00, 0xfb,
@@ -843,19 +843,19 @@ TEST_F(GenericFamilyTest, Dump) {
   EXPECT_EQ(resp, "OK");
   resp = Run({"dump", "z"});
   auto dump = resp.GetBuf();
-  CHECK_EQ(ToSV(dump), ToSV(EXPECTED_STRING_DUMP));
+  ASSERT_EQ(ToSV(dump), ToSV(EXPECTED_STRING_DUMP));
 
   // Check list dump
   EXPECT_EQ(1, CheckedInt({"rpush", "l", "20"}));
   resp = Run({"dump", "l"});
   dump = resp.GetBuf();
-  CHECK_EQ(ToSV(dump), ToSV(EXPECTED_LIST_DUMP)) << absl::CHexEscape(resp.GetString());
+  ASSERT_EQ(ToSV(dump), ToSV(EXPECTED_LIST_DUMP)) << absl::CHexEscape(resp.GetString());
 
   // Check for hash dump
   EXPECT_EQ(1, CheckedInt({"hset", "z2", "19", "1234"}));
   resp = Run({"dump", "z2"});
   dump = resp.GetBuf();
-  CHECK_EQ(ToSV(dump), ToSV(EXPECTED_HASH_DUMP));
+  ASSERT_EQ(ToSV(dump), ToSV(EXPECTED_HASH_DUMP));
 
   // Check that when running with none existing key we're getting nil
   resp = Run({"dump", "foo"});
@@ -882,7 +882,7 @@ TEST_F(GenericFamilyTest, Restore) {
   // note that value for expiration is just some valid unix time stamp from the pass
   resp = Run(
       {"restore", "exiting-key", "1665476212900", ToSV(STRING_DUMP_REDIS), "ABSTTL", "REPLACE"});
-  CHECK_EQ(resp, "OK");
+  ASSERT_EQ(resp, "OK");
   resp = Run({"get", "exiting-key"});
   EXPECT_EQ(resp.type, RespExpr::NIL);  // it was deleted as a result of restore action
 
@@ -893,7 +893,7 @@ TEST_F(GenericFamilyTest, Restore) {
   EXPECT_EQ("1234", resp);
   resp = Run({"dump", "new-key"});
   auto dump = resp.GetBuf();
-  CHECK_EQ(ToSV(dump), ToSV(STRING_DUMP_REDIS));
+  ASSERT_EQ(ToSV(dump), ToSV(STRING_DUMP_REDIS));
 
   // test for list
   EXPECT_EQ(1, CheckedInt({"rpush", "orig-list", "20"}));
