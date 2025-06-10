@@ -51,6 +51,12 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IMAGE_ROLE }}
+          aws-region: us-east-1
+
       - name: Get Build Information
         id: build_info
         run: |
@@ -140,6 +146,10 @@ jobs:
           # Upload to GCS
           echo "Uploading ${tar_name} to GCS"
           gcloud storage cp "$tar_name" "gs://${{ secrets.ARTIFACT_BUCKET }}/dragonfly/$VERSION/$tar_name"
+
+          # Upload to AWS
+          echo "Uploading ${tar_name} to AWS"
+          aws s3 cp "$tar_name" "s3://${{ secrets.ARTIFACT_BUCKET }}/dragonfly/$VERSION/$tar_name"
 
           # Cleanup
           rm -f dragonfly ${tar_name}
