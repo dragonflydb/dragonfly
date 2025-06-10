@@ -1109,7 +1109,7 @@ TEST_F(ListFamilyTest, LMPopInvalidSyntax) {
 
   // Zero keys
   resp = Run({"lmpop", "0", "LEFT", "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
 
   // Number of keys is not uint
   resp = Run({"lmpop", "aa", "a", "LEFT"});
@@ -1256,7 +1256,7 @@ TEST_F(ListFamilyTest, LMPopEdgeCases) {
 
   // Test with negative COUNT - should return error
   resp = Run({"lmpop", "1", "list", "LEFT", "COUNT", "-1"});
-  EXPECT_THAT(resp, RespArray(ElementsAre("list", RespArray(ElementsAre("b")))));
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
 }
 
 TEST_F(ListFamilyTest, LMPopDocExample) {

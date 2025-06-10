@@ -145,6 +145,7 @@ struct CmdArgParser {
     return *this;
   }
 
+  // Expect no more arguments and return if no error has occured
   bool Finalize() {
     if (HasNext()) {
       Report(UNPROCESSED, cur_i_);
