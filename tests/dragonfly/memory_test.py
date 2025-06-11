@@ -186,6 +186,7 @@ async def test_eval_with_oom(df_factory: DflyInstanceFactory):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("repeat", range(4))
 @pytest.mark.parametrize(
     "proactor_threads_param, maxmemory_param",
     [(1, 6 * (1024**3)), (4, 6 * (1024**3))],
@@ -194,6 +195,7 @@ async def test_cache_eviction_with_rss_deny_oom_simple_case(
     df_factory: DflyInstanceFactory,
     proactor_threads_param,
     maxmemory_param,
+    repeat,
 ):
     """
     Test to verify that cache eviction is triggered even if used memory is small but rss memory is above limit
@@ -287,12 +289,13 @@ async def test_cache_eviction_with_rss_deny_oom_simple_case(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("repeat", range(4))
 @pytest.mark.parametrize(
     "proactor_threads_param, maxmemory_param",
     [(1, 6 * (1024**3)), (4, 6 * (1024**3))],
 )
 async def test_cache_eviction_with_rss_deny_oom_two_waves(
-    df_factory: DflyInstanceFactory, proactor_threads_param, maxmemory_param
+    df_factory: DflyInstanceFactory, proactor_threads_param, maxmemory_param, repeat
 ):
     """
     Test to verify that cache eviction is triggered even if used memory is small but rss memory is above limit
@@ -319,10 +322,10 @@ async def test_cache_eviction_with_rss_deny_oom_two_waves(
     rss_eviction_threshold = max_memory * (rss_oom_deny_ratio - eviction_memory_budget_threshold)
 
     # first wave fills 85% of max memory
-    # second wave fills 20% of max memory
+    # second wave fills 25% of max memory
     data_fill_size = [
         int((rss_oom_deny_ratio + 0.05) * max_memory),
-        int((1 - rss_oom_deny_ratio) * max_memory),
+        int((1 - rss_oom_deny_ratio + 0.05) * max_memory),
     ]
 
     val_size = 1024 * 5  # 5 kb
@@ -372,7 +375,7 @@ async def test_cache_eviction_with_rss_deny_oom_two_waves(
                 break
 
         # Wait for some time
-        await asyncio.sleep(6)
+        await asyncio.sleep(3)
 
         memory_arena = await async_client.execute_command("MEMORY", "ARENA")
         fragmentation_waste = extract_fragmentation_waste(memory_arena)
