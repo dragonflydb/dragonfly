@@ -9,7 +9,7 @@
 
 > Antes de continuar, considere deixar uma estrela no nosso repositório ⭐️. Obrigado!
 
-Outros idiomas: [简体中文](README.zh-CN.md) [日本語](README.ja-JP.md) [한국어](README.ko-KR.md)
+Outros idiomas: [简体中文](README.zh-CN.md) [日本語](README.ja-JP.md) [한국어](README.ko-KR.md) [English](README.md)
 
 [Site oficial](https://www.dragonflydb.io/) • [Documentação](https://dragonflydb.io/docs) • [Guia Rápido](https://www.dragonflydb.io/docs/getting-started) • [Discord da Comunidade](https://discord.gg/HsPjXGVH85) • [Fórum Dragonfly](https://dragonfly.discourse.group/) • [Participe da Comunidade](https://www.dragonflydb.io/community)
 
