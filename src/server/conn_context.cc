@@ -184,12 +184,6 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
       rb->SendBulkString(action[to_add]);
       rb->SendBulkString(ArgS(args, i));
       rb->SendLong(result[i]);
-      // We are manually flushing reply builder here. It can happen that we are subscribed to
-      // channel and `UNSUBSCRIBE` is executed while we are receiving messages
-      // we can end up in `batched_` mode when dispatch_q_.size() > 1. In batch mode we
-      // are not sending back replay until condition is met - SinkReplyBuilder::FinishScope().
-      // If `UNSUBSCRIBE` is blocking call from client side this can lead to hang - ticket #5139.
-      rb->Flush();
     }
   }
 }
