@@ -55,9 +55,9 @@ void JournalExecutor::Execute(DbIndex dbid, absl::Span<journal::ParsedEntry::Cmd
   }
 }
 
-void JournalExecutor::Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd) {
+std::error_code JournalExecutor::Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd) {
   SelectDb(dbid);
-  Execute(cmd);
+  return Execute(cmd);
 }
 
 void JournalExecutor::FlushAll() {
@@ -70,9 +70,11 @@ void JournalExecutor::FlushSlots(const cluster::SlotRange& slot_range) {
   Execute(cmd);
 }
 
-void JournalExecutor::Execute(journal::ParsedEntry::CmdData& cmd) {
+std::error_code JournalExecutor::Execute(journal::ParsedEntry::CmdData& cmd) {
   auto span = CmdArgList{cmd.cmd_args.data(), cmd.cmd_args.size()};
-  service_->DispatchCommand(span, &reply_builder_, &conn_context_);
+  auto res = service_->DispatchCommand(span, &reply_builder_, &conn_context_);
+  return res == facade::DispatchResult::OOM ? make_error_code(errc::not_enough_memory)
+                                            : error_code();
 }
 
 void JournalExecutor::SelectDb(DbIndex dbid) {
