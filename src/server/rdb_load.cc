@@ -29,7 +29,6 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/bloom.h"
-#include "core/intrusive_string_set.h"
 #include "core/json/json_object.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
@@ -58,7 +57,6 @@ ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_DECLARE_FLAG(bool, list_experimental_v2);
-ABSL_DECLARE_FLAG(bool, stringset_experimental);
 ABSL_FLAG(bool, rdb_load_dry_run, false, "Dry run RDB load without applying changes");
 ABSL_FLAG(bool, rdb_ignore_expiry, false, "Ignore Key Expiry when loding from RDB snapshot");
 
@@ -336,10 +334,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
     if (inner_obj) {
       if (is_intset) {
         zfree(inner_obj);
-      } else if (!absl::GetFlag(FLAGS_stringset_experimental)) {
-        CompactObj::DeleteMR<StringSet>(inner_obj);
       } else {
-        CompactObj::DeleteMR<IntrusiveStringSet>(inner_obj);
+        CompactObj::DeleteMR<StringSet>(inner_obj);
       }
     }
   });
@@ -359,7 +355,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       }
       return true;
     });
-  } else if (!absl::GetFlag(FLAGS_stringset_experimental)) {
+  } else {
     StringSet* set;
     if (config_.append) {
       // Note we always use StringSet when the object is being streamed.
@@ -408,64 +404,13 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
         return;
       }
     }
-  } else {
-    IntrusiveStringSet* set;
-    if (config_.append) {
-      // Note we always use StringSet when the object is being streamed.
-      if (!EnsureObjEncoding(OBJ_SET, kEncodingIntrusiveSet)) {
-        return;
-      }
-      set = static_cast<IntrusiveStringSet*>(pv_->RObjPtr());
-    } else {
-      set = CompactObj::AllocateMR<IntrusiveStringSet>();
-      set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
-      inner_obj = set;
-
-      // Expand the set up front to avoid rehashing.
-      set->Reserve((config_.reserve > len) ? config_.reserve : len);
-    }
-
-    size_t increment = 1;
-    if (rdb_type_ == RDB_TYPE_SET_WITH_EXPIRY) {
-      increment = 2;
-    }
-
-    for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
-      string_view element = ToSV(ltrace->arr[i].rdb_var);
-
-      uint32_t ttl_sec = UINT32_MAX;
-      if (increment == 2) {
-        int64_t ttl_time = -1;
-        string_view ttl_str = ToSV(ltrace->arr[i + 1].rdb_var);
-        if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
-          LOG(ERROR) << "Can't parse set TTL " << ttl_str;
-          ec_ = RdbError(errc::rdb_file_corrupted);
-          return;
-        }
-
-        if (ttl_time != -1) {
-          if (ttl_time < set->time_now()) {
-            continue;
-          }
-
-          ttl_sec = ttl_time - set->time_now();
-        }
-      }
-      if (!set->Add(element, ttl_sec)) {
-        LOG(ERROR) << "Duplicate set members detected";
-        ec_ = RdbError(errc::duplicate_key);
-        return;
-      }
-    }
   }
 
   if (ec_)
     return;
 
   if (!config_.append) {
-    int str_set_encoding =
-        absl::GetFlag(FLAGS_stringset_experimental) ? kEncodingIntrusiveSet : kEncodingStrMap2;
-    pv_->InitRobj(OBJ_SET, is_intset ? kEncodingIntSet : str_set_encoding, inner_obj);
+    pv_->InitRobj(OBJ_SET, is_intset ? kEncodingIntSet : kEncodingStrMap2, inner_obj);
   }
   std::move(cleanup).Cancel();
 }
@@ -932,26 +877,14 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     unsigned len = intsetLen(is);
 
     if (len > SetFamily::MaxIntsetEntries()) {
-      if (!absl::GetFlag(FLAGS_stringset_experimental)) {
-        StringSet* set = SetFamily::ConvertToStrSet(is, len);
+      StringSet* set = SetFamily::ConvertToStrSet(is, len);
 
-        if (!set) {
-          LOG(ERROR) << "OOM in ConvertToStrSet " << len;
-          ec_ = RdbError(errc::out_of_memory);
-          return;
-        }
-        pv_->InitRobj(OBJ_SET, kEncodingStrMap2, set);
-      } else {
-        IntrusiveStringSet* set = SetFamily::ConvertToIntrStrSet(is, len);
-
-        if (!set) {
-          LOG(ERROR) << "OOM in ConvertToStrSet " << len;
-          ec_ = RdbError(errc::out_of_memory);
-          return;
-        }
-        pv_->InitRobj(OBJ_SET, kEncodingIntrusiveSet, set);
+      if (!set) {
+        LOG(ERROR) << "OOM in ConvertToStrSet " << len;
+        ec_ = RdbError(errc::out_of_memory);
+        return;
       }
-
+      pv_->InitRobj(OBJ_SET, kEncodingStrMap2, set);
     } else {
       intset* mine = (intset*)zmalloc(blob.size());
       ::memcpy(mine, blob.data(), blob.size());
@@ -965,39 +898,21 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     }
 
     unsigned char* lp = (unsigned char*)blob.data();
-    if (!absl::GetFlag(FLAGS_stringset_experimental)) {
-      StringSet* set = CompactObj::AllocateMR<StringSet>();
-      for (unsigned char* cur = lpFirst(lp); cur != nullptr; cur = lpNext(lp, cur)) {
-        unsigned char field_buf[LP_INTBUF_SIZE];
-        string_view elem = container_utils::LpGetView(cur, field_buf);
-        if (!set->Add(elem)) {
-          LOG(ERROR) << "Duplicate member " << elem;
-          ec_ = RdbError(errc::duplicate_key);
-          break;
-        }
+    StringSet* set = CompactObj::AllocateMR<StringSet>();
+    for (unsigned char* cur = lpFirst(lp); cur != nullptr; cur = lpNext(lp, cur)) {
+      unsigned char field_buf[LP_INTBUF_SIZE];
+      string_view elem = container_utils::LpGetView(cur, field_buf);
+      if (!set->Add(elem)) {
+        LOG(ERROR) << "Duplicate member " << elem;
+        ec_ = RdbError(errc::duplicate_key);
+        break;
       }
-      if (ec_) {
-        CompactObj::DeleteMR<StringSet>(set);
-        return;
-      }
-      pv_->InitRobj(OBJ_SET, kEncodingStrMap2, set);
-    } else {
-      IntrusiveStringSet* set = CompactObj::AllocateMR<IntrusiveStringSet>();
-      for (unsigned char* cur = lpFirst(lp); cur != nullptr; cur = lpNext(lp, cur)) {
-        unsigned char field_buf[LP_INTBUF_SIZE];
-        string_view elem = container_utils::LpGetView(cur, field_buf);
-        if (!set->Add(elem)) {
-          LOG(ERROR) << "Duplicate member " << elem;
-          ec_ = RdbError(errc::duplicate_key);
-          break;
-        }
-      }
-      if (ec_) {
-        CompactObj::DeleteMR<IntrusiveStringSet>(set);
-        return;
-      }
-      pv_->InitRobj(OBJ_SET, kEncodingIntrusiveSet, set);
     }
+    if (ec_) {
+      CompactObj::DeleteMR<StringSet>(set);
+      return;
+    }
+    pv_->InitRobj(OBJ_SET, kEncodingStrMap2, set);
   } else if (rdb_type_ == RDB_TYPE_HASH_ZIPLIST || rdb_type_ == RDB_TYPE_HASH_LISTPACK) {
     unsigned char* lp = lpNew(blob.size());
     switch (rdb_type_) {

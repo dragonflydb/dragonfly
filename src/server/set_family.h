@@ -16,7 +16,6 @@ using facade::OpResult;
 
 class CommandRegistry;
 class StringSet;
-class IntrusiveStringSet;
 
 class SetFamily {
  public:
@@ -26,8 +25,6 @@ class SetFamily {
 
   // Returns nullptr on OOM.
   static StringSet* ConvertToStrSet(const intset* is, size_t expected_len);
-
-  static IntrusiveStringSet* ConvertToIntrStrSet(const intset* is, size_t expected_len);
 
   // returns expiry time in seconds since kMemberExpiryBase date.
   // returns -3 if field was not found, -1 if no ttl is associated with the item.
