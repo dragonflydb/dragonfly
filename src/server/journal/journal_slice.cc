@@ -77,14 +77,12 @@ void JournalSlice::SetFlushMode(bool allow_flush) {
 void JournalSlice::AddLogRecord(const Entry& entry) {
   DCHECK(ring_buffer_.capacity() > 0);
 
-  ring_buffer_.push_back(JournalItem());
-  JournalItem& item = ring_buffer_.back();
+  JournalItem item;
 
   {
     FiberAtomicGuard fg;
     item.opcode = entry.opcode;
     item.lsn = lsn_++;
-    // This is a string view. It will dangle afterwords. We don't use it somewhere though.
     item.cmd = entry.payload.cmd;
     item.slot = entry.slot;
 
@@ -98,17 +96,30 @@ void JournalSlice::AddLogRecord(const Entry& entry) {
     VLOG(2) << "Writing item [" << item.lsn << "]: " << entry.ToString();
   }
 
-  CallOnChange(item);
+  CallOnChange(&item);
 }
 
-void JournalSlice::CallOnChange(const JournalItem& item) {
+void JournalSlice::CallOnChange(JournalItem* item) {
   // This lock is never blocking because it contends with UnregisterOnChange, which is cpu only.
   // Hence this lock prevents the UnregisterOnChange to start running in the middle of CallOnChange.
   // CallOnChange is atomic if JournalSlice::SetFlushMode(false) is called before.
   std::shared_lock lk(cb_mu_);
   for (auto k_v : journal_consumers_arr_) {
-    k_v.second->ConsumeJournalChange(item);
+    k_v.second->ConsumeJournalChange(*item);
   }
+  item->cmd = {};
+  // We preserve order here. After ConsumeJournalChange there can reordering
+  if (ring_buffer_.size() == ring_buffer_.capacity()) {
+    const size_t bytes_removed = ring_buffer_.front().data.size() + sizeof(*item);
+    DCHECK_GE(ring_buffer_bytes, bytes_removed);
+    ring_buffer_bytes -= bytes_removed;
+  }
+  if (!ring_buffer_.empty()) {
+    DCHECK(item->lsn == ring_buffer_.back().lsn + 1);
+  }
+  ring_buffer_.push_back(std::move(*item));
+  ring_buffer_bytes += sizeof(*item) + ring_buffer_.back().data.size();
+
   if (enable_journal_flush_) {
     for (auto k_v : journal_consumers_arr_) {
       k_v.second->ThrottleIfNeeded();
@@ -130,6 +141,18 @@ void JournalSlice::UnregisterOnChange(uint32_t id) {
                     [id](const auto& e) { return e.first == id; });
   CHECK(it != journal_consumers_arr_.end());
   journal_consumers_arr_.erase(it);
+}
+
+size_t JournalSlice::GetRingBufferSize() const {
+  return ring_buffer_.size();
+}
+
+size_t JournalSlice::GetRingBufferBytes() const {
+  return ring_buffer_bytes;
+}
+
+void JournalSlice::ResetRingBuffer() {
+  ring_buffer_.clear();
 }
 
 }  // namespace journal
