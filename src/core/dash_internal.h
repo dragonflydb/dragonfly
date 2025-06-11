@@ -403,6 +403,13 @@ class Segment {
   explicit Segment(size_t depth, PMR_NS::memory_resource* mr) : local_depth_(depth), mr_(mr) {
   }
 
+  ~Segment() {
+    Clear();
+  }
+
+  Segment(const Segment&) = delete;
+  Segment& operator=(const Segment&) = delete;
+
   // Returns (iterator, true) if insert succeeds,
   // (iterator, false) for duplicate and (invalid-iterator, false) if it's full
   template <typename K, typename V, typename Pred>
@@ -1412,10 +1419,10 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnInsert(uint64_t
   const Bucket& target = GetBucket(bid);
   const Bucket& neighbor = GetBucket(nid);
   uint8_t first = target.Size() > neighbor.Size() ? nid : bid;
-  unsigned cnt = 0;
 
   const Bucket& bfirst = bucket_[first];
   if (!bfirst.IsFull()) {
+    unsigned cnt = 0;
     if (!bfirst.IsEmpty() && bfirst.GetVersion() < ver_threshold) {
       bid_res[cnt++] = first;
     }
@@ -1425,7 +1432,8 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnInsert(uint64_t
   // both nid and bid are full.
   const LogicalBid after_next = NextBid(nid);
 
-  auto do_fun = [this, ver_threshold, &cnt, &bid_res](auto bid, auto nid) {
+  auto do_fun = [this, ver_threshold, &bid_res](auto bid, auto nid) {
+    unsigned cnt = 0;
     // We could tighten the checks here and below because
     // if nid is less than ver_threshold, than nid won't be affected and won't cross
     // ver_threshold as well.
@@ -1434,17 +1442,16 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnInsert(uint64_t
 
     if (!GetBucket(nid).IsEmpty() && GetBucket(nid).GetVersion() < ver_threshold)
       bid_res[cnt++] = nid;
+    return cnt;
   };
 
   if (CheckIfMovesToOther(true, nid, after_next)) {
-    do_fun(nid, after_next);
-    return cnt;
+    return do_fun(nid, after_next);
   }
 
   const uint8_t prev_bid = PrevBid(bid);
   if (CheckIfMovesToOther(false, bid, prev_bid)) {
-    do_fun(bid, prev_bid);
-    return cnt;
+    return do_fun(bid, prev_bid);
   }
 
   // Important to repeat exactly the insertion logic of InsertUnique.
@@ -1452,6 +1459,7 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnInsert(uint64_t
     PhysicalBid stash_bid = kBucketNum + ((bid + i) % kStashBucketNum);
     const Bucket& stash = GetBucket(stash_bid);
     if (!stash.IsFull()) {
+      unsigned cnt = 0;
       if (!stash.IsEmpty() && stash.GetVersion() < ver_threshold)
         bid_res[cnt++] = stash_bid;
 
@@ -1470,14 +1478,14 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnBump(uint64_t v
                                                                       uint8_t result_bid[3]) const {
   if (bid < kBucketNum) {
     // Right now we do not migrate entries from nid to bid, only from stash to normal buckets.
-    // The reason for this is that CVCBumpUp implementation swaps the slots of the same bucket
+    // The reason for this is that CVCOnBump implementation swaps the slots of the same bucket
     // so there is no further action needed.
     return 0;
   }
 
   // Stash case.
   // There are three actors (interesting buckets). The stash bucket, the target bucket and its
-  // adjacent bucket (probe). To understand the code below consider the cases in CVCBumpUp:
+  // adjacent bucket (probe). To understand the code below consider the cases in CVCOnBump:
   // 1. If the bid is not a stash bucket, then just swap the slots of the target.
   // 2. If there is empty space in target or probe bucket insert the slot there and remove
   //    it from the stash bucket.
@@ -1485,7 +1493,7 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnBump(uint64_t v
   //    bucket. Furthermore, if the target or the probe have one of their stash bits reference the
   //    stash, then the stash bit entry is cleared. In total 2 buckets are modified.
   // Case 1 is handled by the if statement above and cases 2 and 3 below. We should return via
-  // result_bid all the buckets(with version less than threshold) that CVCBumpUp will modify.
+  // result_bid all the buckets(with version less than threshold) that CVCOnBump will modify.
   // Note, that for case 2 & 3 we might return an extra bucket id even though this bucket was not
   // changed. An example of that is TryMoveFromStash which will first try to insert on the target
   // bucket and if that fails it will retry with the probe bucket. Since we don't really know

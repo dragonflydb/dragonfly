@@ -829,6 +829,16 @@ TEST_F(DashTest, CVCUponInsert) {
   dt.CVCUponInsert(1, i, cb);
 }
 
+TEST_F(DashTest, CVCUponInsertStress) {
+  VersionDT dt;
+  for (int i = 0; i < 5000; ++i) {
+    dt.CVCUponInsert(1, i, [](VersionDT::bucket_iterator) {
+      // empty callback
+    });
+    dt.Insert(i, 0);
+  }
+}
+
 struct A {
   int a = 0;
   unsigned moved = 0;
@@ -1039,7 +1049,7 @@ struct ShiftRightPolicy {
     stash_it += (U64Dash::kSlotNum - 1);  // go to the last slot.
 
     uint64_t k = stash_it->first;
-    DVLOG(1) << "Deleting key " << k << " from " << stash_it.bucket_id() << "/"
+    DVLOG(1) << "Deleting key " << k << " from " << unsigned(stash_it.bucket_id()) << "/"
              << stash_it.slot_id();
     evicted[k]++;
 

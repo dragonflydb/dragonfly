@@ -2446,9 +2446,9 @@ TEST_F(SearchFamilyTest, SearchNonNullFields) {
   EXPECT_THAT(Run({"ft.search", "num_idx", "*"}), AreDocIds("num:1", "num:2", "num:3"));
 
   // Testing vector indices with star query
-  string vector1 = "\\x00\\x00\\x80\\x3f\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00";  // [1,0,0]
-  string vector2 = "\\x00\\x00\\x00\\x00\\x00\\x00\\x80\\x3f\\x00\\x00\\x00\\x00";  // [0,1,0]
-  string vector3 = "\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x80\\x3f";  // [0,0,1]
+  string vector1 = R"(\x00\x00\x80\x3f\x00\x00\x00\x00\x00\x00\x00\x00)";  // [1,0,0]
+  string vector2 = R"(\x00\x00\x00\x00\x00\x00\x80\x3f\x00\x00\x00\x00)";  // [0,1,0]
+  string vector3 = R"(\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x3f)";  // [0,0,1]
 
   Run({"hset", "vec:1", "embedding", vector1});
   Run({"hset", "vec:2", "embedding", vector2});
@@ -2456,10 +2456,9 @@ TEST_F(SearchFamilyTest, SearchNonNullFields) {
 
   // Testing star query with result limit
   auto limit_result = Run({"ft.search", "text_idx", "*", "LIMIT", "0", "2"});
-  ASSERT_GE(limit_result.GetVec().size(), 5);                 // Total count + 2 docs with fields
-  EXPECT_EQ(limit_result.GetVec()[0].GetInt(), 3);            // Total count is 3 (all matches)
-  EXPECT_EQ(limit_result.GetVec()[1].GetString(), "text:1");  // First doc
-  EXPECT_EQ(limit_result.GetVec()[3].GetString(), "text:2");  // Second doc
+
+  // No sorting, so results returned are in random order (implementation-dependent).
+  EXPECT_THAT(limit_result, RespElementsAre(IntArg(3), _, _, _, _));
 
   // Testing star query with sorting
   auto price_desc_result = Run({"ft.search", "num_idx", "*", "SORTBY", "price", "DESC"});
