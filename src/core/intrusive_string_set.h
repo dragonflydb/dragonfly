@@ -162,7 +162,7 @@ class IntrusiveStringSet {
     return iterator(this, bucket, pos);
   }
 
-  unsigned AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec) {
+  unsigned AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec = UINT32_MAX) {
     Reserve(span.size());
     unsigned res = 0;
     for (auto& s : span) {
