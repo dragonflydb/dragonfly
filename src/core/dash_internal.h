@@ -413,10 +413,11 @@ class Segment {
 
   // Returns (iterator, true) if insert succeeds,
   // (iterator, false) for duplicate and (invalid-iterator, false) if it's full
-  template <typename K, typename V, typename Pred>
-  std::pair<Iterator, bool> Insert(K&& key, V&& value, Hash_t key_hash, Pred&& pred);
+  template <typename K, typename V, typename Pred, typename OnMoveCb>
+  std::pair<Iterator, bool> Insert(K&& key, V&& value, Hash_t key_hash, Pred&& pred, OnMoveCb& cb);
 
-  template <typename HashFn> void Split(HashFn&& hfunc, Segment* dest);
+  template <typename HashFn, typename OnMoveCb>
+  void Split(HashFn&& hfunc, Segment* dest, OnMoveCb& cb);
 
   void Delete(const Iterator& it, Hash_t key_hash);
 
@@ -523,8 +524,8 @@ class Segment {
   // otherwise chooses home bucket first.
   // TODO: I am actually not sure if spread optimization is helpful. Worth checking
   // whether we get higher occupancy rates when using it.
-  template <typename U, typename V>
-  Iterator InsertUniq(U&& key, V&& value, Hash_t key_hash, bool spread);
+  template <typename U, typename V, typename OnMoveCb>
+  Iterator InsertUniq(U&& key, V&& value, Hash_t key_hash, bool spread, OnMoveCb& cb);
 
   // capture version change in case of insert.
   // Returns ids of buckets whose version would cross ver_threshold upon insertion of key_hash
@@ -558,14 +559,15 @@ class Segment {
   }
 
   // Bumps up this entry making it more "important" for the eviction policy.
-  template <typename BumpPolicy>
-  Iterator BumpUp(PhysicalBid bid, SlotId slot, Hash_t key_hash, const BumpPolicy& ev);
+  template <typename BumpPolicy, typename OnMoveCb>
+  Iterator BumpUp(PhysicalBid bid, SlotId slot, Hash_t key_hash, const BumpPolicy& ev,
+                  OnMoveCb& cb);
 
   // Tries to move stash entries back to their normal buckets (exact or neighbour).
   // Returns number of entries that succeeded to unload.
   // Important! Affects versions of the moved items and the items in the destination
   // buckets.
-  template <typename HFunc> unsigned UnloadStash(HFunc&& hfunc);
+  template <typename HFunc, typename OnMoveCb> unsigned UnloadStash(HFunc&& hfunc, OnMoveCb& cb);
 
   unsigned num_buckets() const {
     return kBucketNum + kStashBucketNum;
@@ -1084,15 +1086,15 @@ auto Segment<Key, Value, Policy>::TryMoveFromStash(unsigned stash_id, unsigned s
 }
 
 template <typename Key, typename Value, typename Policy>
-template <typename U, typename V, typename Pred>
-auto Segment<Key, Value, Policy>::Insert(U&& key, V&& value, Hash_t key_hash, Pred&& pred)
-    -> std::pair<Iterator, bool> {
+template <typename U, typename V, typename Pred, typename OnMoveCb>
+auto Segment<Key, Value, Policy>::Insert(U&& key, V&& value, Hash_t key_hash, Pred&& pred,
+                                         OnMoveCb& on_move_cb) -> std::pair<Iterator, bool> {
   Iterator it = FindIt(key_hash, pred);
   if (it.found()) {
     return std::make_pair(it, false); /* duplicate insert*/
   }
 
-  it = InsertUniq(std::forward<U>(key), std::forward<V>(value), key_hash, true);
+  it = InsertUniq(std::forward<U>(key), std::forward<V>(value), key_hash, true, on_move_cb);
 
   return std::make_pair(it, it.found());
 }
@@ -1210,8 +1212,8 @@ void Segment<Key, Value, Policy>::Delete(const Iterator& it, Hash_t key_hash) {
 // Split items from the left segment to the right during the growth phase.
 // right segment will have all the items with lsb at local_depth ==1 .
 template <typename Key, typename Value, typename Policy>
-template <typename HFunc>
-void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
+template <typename HFunc, typename MoveCb>
+void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right, MoveCb& move_cb) {
   ++local_depth_;
   dest_right->local_depth_ = local_depth_;
 
@@ -1242,9 +1244,10 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
         return;  // keep this key in the source
 
       invalid_mask |= (1u << slot);
-
-      Iterator it = dest_right->InsertUniq(std::forward<Key_t>(bucket->key[slot]),
-                                           std::forward<Value_t>(bucket->value[slot]), hash, false);
+      move_cb.SetMoveInDest();
+      Iterator it =
+          dest_right->InsertUniq(std::forward<Key_t>(bucket->key[slot]),
+                                 std::forward<Value_t>(bucket->value[slot]), hash, false, move_cb);
 
       // we move items residing in a regular bucket to a new segment.
       // Note 1: in case we are somehow attacked with items that after the split
@@ -1266,6 +1269,8 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
       // selective bias will be able to hit our dashtable with items with the same bucket id.
       assert(it.found());
       update_version(*bucket, it.index);
+      move_cb.SetMoveBeweenSegments();
+      move_cb(i, it.index);
     };
 
     bucket_[i].ForEachSlot(std::move(cb));
@@ -1286,17 +1291,23 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
         Iterator it = TryMoveFromStash(i, slot, hash);
         if (it.found()) {
           invalid_mask |= (1u << slot);
+          move_cb.SetMoveInSource();
+          move_cb(i, it.index);
         }
 
         return;
       }
 
       invalid_mask |= (1u << slot);
-      auto it = dest_right->InsertUniq(std::forward<Key_t>(bucket->key[slot]),
-                                       std::forward<Value_t>(bucket->value[slot]), hash, false);
+      move_cb.SetMoveInDest();
+      auto it =
+          dest_right->InsertUniq(std::forward<Key_t>(bucket->key[slot]),
+                                 std::forward<Value_t>(bucket->value[slot]), hash, false, move_cb);
       (void)it;
       assert(it.index != kNanBid);
       update_version(*bucket, it.index);
+      move_cb.SetMoveBeweenSegments();
+      move_cb(i, it.index);
 
       // Remove stash reference pointing to stash bucket i.
       RemoveStashReference(i, hash);
@@ -1348,9 +1359,9 @@ bool Segment<Key, Value, Policy>::CheckIfMovesToOther(bool own_items, unsigned f
 }
 
 template <typename Key, typename Value, typename Policy>
-template <typename U, typename V>
-auto Segment<Key, Value, Policy>::InsertUniq(U&& key, V&& value, Hash_t key_hash, bool spread)
-    -> Iterator {
+template <typename U, typename V, typename OnMoveCb>
+auto Segment<Key, Value, Policy>::InsertUniq(U&& key, V&& value, Hash_t key_hash, bool spread,
+                                             OnMoveCb& on_move_cb) -> Iterator {
   const uint8_t bid = HomeIndex(key_hash);
   const uint8_t nid = NextBid(bid);
 
@@ -1385,6 +1396,7 @@ auto Segment<Key, Value, Policy>::InsertUniq(U&& key, V&& value, Hash_t key_hash
   int displace_index = MoveToOther(true, nid, NextBid(nid));
   if (displace_index >= 0) {
     neighbor.Insert(displace_index, std::forward<U>(key), std::forward<V>(value), meta_hash, true);
+    on_move_cb(nid, NextBid(nid));
     return Iterator{nid, uint8_t(displace_index)};
   }
 
@@ -1392,6 +1404,7 @@ auto Segment<Key, Value, Policy>::InsertUniq(U&& key, V&& value, Hash_t key_hash
   displace_index = MoveToOther(false, bid, prev_idx);
   if (displace_index >= 0) {
     target.Insert(displace_index, std::forward<U>(key), std::forward<V>(value), meta_hash, false);
+    on_move_cb(bid, prev_idx);
     return Iterator{bid, uint8_t(displace_index)};
   }
 
@@ -1597,9 +1610,9 @@ auto Segment<Key, Value, Policy>::FindValidStartingFrom(PhysicalBid bid, unsigne
 }
 
 template <typename Key, typename Value, typename Policy>
-template <typename BumpPolicy>
+template <typename BumpPolicy, typename OnMoveCb>
 auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_hash,
-                                         const BumpPolicy& bp) -> Iterator {
+                                         const BumpPolicy& bp, OnMoveCb& on_move_cb) -> Iterator {
   auto& from = GetBucket(bid);
 
   if (!bp.CanBump(from.key[slot])) {
@@ -1624,6 +1637,7 @@ auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_ha
   if (Iterator it = TryMoveFromStash(stash_pos, slot, key_hash); it.found()) {
     // TryMoveFromStash handles versions internally.
     from.Delete(slot);
+    on_move_cb(bid, it.index);
     return it;
   }
 
@@ -1690,12 +1704,14 @@ auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_ha
     swapb.SetStashPtr(stash_pos, swap_fp, bucket_ + next_bid);
   }
 
+  on_move_cb(bid, swap_bid);
+  on_move_cb(swap_bid, bid);
   return Iterator{swap_bid, kLastSlot};
 }
 
 template <typename Key, typename Value, typename Policy>
-template <typename HFunc>
-unsigned Segment<Key, Value, Policy>::UnloadStash(HFunc&& hfunc) {
+template <typename HFunc, typename OnMoveCb>
+unsigned Segment<Key, Value, Policy>::UnloadStash(HFunc&& hfunc, OnMoveCb& move_cb) {
   unsigned moved = 0;
 
   for (unsigned i = 0; i < kStashBucketNum; ++i) {
@@ -1710,6 +1726,7 @@ unsigned Segment<Key, Value, Policy>::UnloadStash(HFunc&& hfunc) {
       if (res.found()) {
         ++moved;
         invalid_mask |= (1u << slot);
+        move_cb(i, res.index);
       }
     };
 

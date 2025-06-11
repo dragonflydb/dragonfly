@@ -11,6 +11,74 @@
 
 namespace dfly {
 
+template <typename EvictionPolicy> class MoveCallback {
+ public:
+  // Constructor with 2 segments (source and destination), used in split flow
+  MoveCallback(EvictionPolicy& ev, uint8_t global_depth, uint32_t src_seg_id, uint32_t dest_seg_id)
+      : ev_(ev), global_depth_(global_depth), src_seg_id_(src_seg_id), dest_seg_id_(dest_seg_id) {
+  }
+
+  // Constructor for single segment (intra-segment move)
+  MoveCallback(EvictionPolicy& ev, uint8_t global_depth, uint32_t seg_id)
+      : ev_(ev), global_depth_(global_depth), src_seg_id_(seg_id), dest_seg_id_(seg_id) {
+  }
+
+  enum class MoveOpt {
+    kMoveInSourceSegment,
+    kMoveInDestSegment,
+    kMoveBetweenSegments,
+    kIntraSegment
+  };
+
+  void SetMoveInDest() {
+    move_opt_ = MoveOpt::kMoveInDestSegment;
+  }
+  void SetMoveInSource() {
+    move_opt_ = MoveOpt::kMoveInSourceSegment;
+  }
+  void SetMoveBeweenSegments() {
+    move_opt_ = MoveOpt::kMoveBetweenSegments;
+  }
+
+  using Cursor = detail::DashCursor;
+  void operator()(uint8_t src_bid, uint8_t dest_bid) const {
+    Cursor src_cursor{global_depth_, GetSrcSegId(), src_bid};
+    Cursor dest_cursor{global_depth_, GetDestSegId(), dest_bid};
+    ev_.OnMove(src_cursor, dest_cursor);
+  }
+
+ private:
+  EvictionPolicy& ev_;
+  uint8_t global_depth_;
+  uint32_t src_seg_id_;
+  uint32_t dest_seg_id_;
+  MoveOpt move_opt_ = MoveOpt::kIntraSegment;
+
+  uint32_t GetSrcSegId() const {
+    switch (move_opt_) {
+      case MoveOpt::kMoveInDestSegment:
+        return dest_seg_id_;
+      case MoveOpt::kIntraSegment:
+      case MoveOpt::kMoveInSourceSegment:
+      case MoveOpt::kMoveBetweenSegments:
+      default:
+        return src_seg_id_;
+    }
+  }
+
+  uint32_t GetDestSegId() const {
+    switch (move_opt_) {
+      case MoveOpt::kMoveInSourceSegment:
+        return src_seg_id_;
+      case MoveOpt::kIntraSegment:
+      case MoveOpt::kMoveInDestSegment:
+      case MoveOpt::kMoveBetweenSegments:
+      default:
+        return dest_seg_id_;
+    }
+  }
+};
+
 // DASH: Dynamic And Scalable Hashing.
 
 template <typename _Key, typename _Value, typename Policy>
@@ -83,6 +151,9 @@ class DashTable : public detail::DashTableBase {
 
     bool CanGrow(const DashTable&) {
       return true;
+    }
+
+    void OnMove(Cursor source, Cursor dest) {
     }
 
     void RecordSplit(SegmentType* segment) {
@@ -286,9 +357,10 @@ class DashTable : public detail::DashTableBase {
   // Returns true if an element was deleted i.e the rightmost slot was busy.
   bool ShiftRight(bucket_iterator it);
 
-  template <typename BumpPolicy> iterator BumpUp(iterator it, const BumpPolicy& bp) {
+  template <typename BumpPolicy> iterator BumpUp(iterator it, BumpPolicy& bp) {
+    MoveCallback move_cb(bp, global_depth_, it.seg_id_);
     SegmentIterator seg_it =
-        segment_[it.seg_id_]->BumpUp(it.bucket_id_, it.slot_id_, DoHash(it->first), bp);
+        segment_[it.seg_id_]->BumpUp(it.bucket_id_, it.slot_id_, DoHash(it->first), bp, move_cb);
 
     return iterator{this, it.seg_id_, seg_it.index, seg_it.slot};
   }
@@ -314,7 +386,7 @@ class DashTable : public detail::DashTableBase {
                                            InsertMode mode);
 
   void IncreaseDepth(unsigned new_depth);
-  void Split(uint32_t seg_id);
+  template <typename EvictionPolicy> void Split(uint32_t seg_id, EvictionPolicy& ev);
 
   // Segment directory contains multiple segment pointers, some of them pointing to
   // the same object. IterateDistinct goes over all distinct segments in the table.
@@ -786,12 +858,15 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
     typename SegmentType::Iterator it;
     bool res = true;
     unsigned num_buckets = target->num_buckets();
+
+    MoveCallback move_cb(ev, global_depth_, target_seg_id);
     if (mode == InsertMode::kForceInsert) {
-      it = target->InsertUniq(std::forward<U>(key), std::forward<V>(value), key_hash, true);
+      it =
+          target->InsertUniq(std::forward<U>(key), std::forward<V>(value), key_hash, true, move_cb);
       res = it.found();
     } else {
-      std::tie(it, res) =
-          target->Insert(std::forward<U>(key), std::forward<V>(value), key_hash, EqPred(key));
+      std::tie(it, res) = target->Insert(std::forward<U>(key), std::forward<V>(value), key_hash,
+                                         EqPred(key), move_cb);
     }
 
     if (res) {  // success
@@ -846,7 +921,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       }
 
       auto hash_fn = [this](const auto& k) { return policy_.HashFn(k); };
-      unsigned moved = target->UnloadStash(hash_fn);
+      unsigned moved = target->UnloadStash(hash_fn, move_cb);
       if (moved > 0) {
         stash_unloaded_ += moved;
         continue;
@@ -876,7 +951,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
     }
 
     ev.RecordSplit(target);
-    Split(target_seg_id);
+    Split(target_seg_id, ev);
   }
 
   return std::make_pair(iterator{}, false);
@@ -898,7 +973,8 @@ void DashTable<_Key, _Value, Policy>::IncreaseDepth(unsigned new_depth) {
 }
 
 template <typename _Key, typename _Value, typename Policy>
-void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id) {
+template <typename EvictionPolicy>
+void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id, EvictionPolicy& ev) {
   SegmentType* source = segment_[seg_id];
 
   uint32_t chunk_size = 1u << (global_depth_ - source->local_depth());
@@ -911,7 +987,9 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id) {
 
   // remove current segment bucket count.
   bucket_count_ -= (source->num_buckets() + target->num_buckets());
-  source->Split(std::move(hash_fn), target);  // increases the depth.
+
+  MoveCallback move_cb(ev, global_depth_, start_idx, start_idx + chunk_size / 2);
+  source->Split(std::move(hash_fn), target, move_cb);  // increases the depth.
 
   // add back the updated bucket count.
   bucket_count_ += (target->num_buckets() + source->num_buckets());
