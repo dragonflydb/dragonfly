@@ -111,15 +111,15 @@ Dfs Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callba
         }
       }
     } else {
-      // If Advance failed (e.g., MISMATCH or OUT_OF_BOUNDS), check if the current node
-      // itself is a terminal target for mutation due to a previous DESCENT segment.
-      // This handles cases like $.a..b where 'a' itself might match the 'b' after descent.
+      // If Advance failed (e.g., MISMATCH or OUT_OF_BOUNDS), the current node itself
+      // might still be a terminal match because of the previous DESCENT segment.
+      // Instead of mutating immediately (which could break ordering guarantees),
+      // collect the node and defer mutation until after traversal.
       if (!res && segment_index > 0 && path[segment_index - 1].type() == SegmentType::DESCENT &&
           stack.back().get_segment_step() == 0) {
         if (segment_index + 1 == path.size()) {
-          // Attempt to apply the final mutation step directly to the current node.
-          // We apply it directly here because this node won't be added to the stack again.
-          dfs.MutateStep(path_segment, callback, stack.back().obj_ptr());
+          // Terminal node discovered via DESCENT – store for later processing.
+          nodes_to_mutate.push_back(stack.back().obj_ptr());
         }
       }
       stack.pop_back();
