@@ -21,6 +21,7 @@ ABSL_DECLARE_FLAG(bool, lua_auto_async);
 ABSL_DECLARE_FLAG(bool, lua_allow_undeclared_auto_correct);
 ABSL_DECLARE_FLAG(std::string, default_lua_flags);
 ABSL_DECLARE_FLAG(std::vector<std::string>, lua_force_atomicity_shas);
+ABSL_DECLARE_FLAG(bool, experimental_cluster_shard_by_slot);
 
 namespace dfly {
 
@@ -910,6 +911,8 @@ TEST_F(MultiTest, MultiLeavesTxQueue) {
   // tx (mget) after it that runs and tests for atomicity.
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_multi_exec_squash, false);
+  absl::SetFlag(&FLAGS_experimental_cluster_shard_by_slot, true);
+  InitializeCluster();
 
   for (unsigned i = 0; i < 20; ++i) {
     string key = StrCat("x", i);
@@ -917,7 +920,7 @@ TEST_F(MultiTest, MultiLeavesTxQueue) {
   }
 
   Run({"mget", "x5", "x8", "x9", "x13", "x16", "x17"});
-  ASSERT_EQ(1, GetDebugInfo().shards_count);
+  ASSERT_EQ(3, GetDebugInfo().shards_count);
 
   auto fb1 = pp_->at(1)->LaunchFiber(Launch::post, [&] {
     // Runs multi on shard0 1000 times.
