@@ -1331,3 +1331,42 @@ async def test_client_detached_crash(df_factory):
     async_client = server.client()
     await async_client.client_pause(2, all=False)
     server.stop()
+
+
+async def test_tls_client_kill_preemption(
+    with_ca_tls_server_args, with_ca_tls_client_args, df_factory
+):
+    server = df_factory.create(proactor_threads=4, port=BASE_PORT, **with_ca_tls_server_args)
+    server.start()
+
+    client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
+    assert await client.dbsize() == 0
+
+    # Get the list of clients
+    clients_info = await client.client_list()
+    assert len(clients_info) == 1
+
+    kill_id = clients_info[0]["id"]
+
+    async def seed():
+        with pytest.raises(aioredis.ConnectionError) as roe:
+            while True:
+                p = client.pipeline(transaction=True)
+                expected = []
+                for i in range(100):
+                    p.lpush(str(i), "V")
+                    expected.append(f"LPUSH {i} V")
+
+                await p.execute()
+
+    task = asyncio.create_task(seed())
+
+    await asyncio.sleep(0.1)
+
+    cl = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
+    await cl.execute_command(f"CLIENT KILL ID {kill_id}")
+
+    await task
+    server.stop()
+    lines = server.find_in_logs("Preempting inside of atomic section, fiber")
+    assert len(lines) == 0
