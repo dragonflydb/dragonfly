@@ -318,10 +318,9 @@ void Transaction::StoreKeysInArgs(const KeyIndex& key_index) {
 }
 
 void Transaction::InitByKeys(const KeyIndex& key_index) {
-  if (key_index.start == full_args_.size()) {  // eval with 0 keys.
-    CHECK(absl::StartsWith(cid_->name(), "EVAL")) << cid_->name();
+  // Skip initialization for key-dependent transactions without keys
+  if ((key_index.end - key_index.start) + int(bool(key_index.bonus)) == 0)
     return;
-  }
 
   DCHECK_LT(key_index.start, full_args_.size());
 
@@ -1602,7 +1601,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
 
     if (num_custom_keys == 0 &&
         (absl::StartsWith(name, "ZDIFF") || absl::StartsWith(name, "ZUNION") ||
-         absl::StartsWith(name, "ZINTER"))) {
+         absl::StartsWith(name, "ZINTER") || absl::EndsWith(name, "MPOP"))) {
       return OpStatus::AT_LEAST_ONE_KEY;
     }
 

@@ -2881,4 +2881,14 @@ TEST_F(SearchFamilyTest, SearchStatsInfoRace) {
   ASSERT_FALSE(service_->IsShardSetLocked());
 }
 
+TEST_F(SearchFamilyTest, EmptyKeyBug) {
+  auto resp = Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "field", "TEXT"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"HSET", "", "field", "value"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"FT.SEARCH", "index", "*"});
+  EXPECT_THAT(resp, AreDocIds(""));
+}
 }  // namespace dfly

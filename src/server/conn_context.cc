@@ -173,11 +173,6 @@ void ConnectionContext::ChangeMonitor(bool start) {
   EnableMonitoring(start);
 }
 
-void ConnectionContext::SwitchTxCmd(const CommandId* cid) {
-  transaction->MultiSwitchCmd(cid);
-  this->cid = cid;
-}
-
 void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgList args,
                                            facade::RedisReplyBuilder* rb) {
   vector<unsigned> result = ChangeSubscriptions(args, false, to_add, to_reply);
