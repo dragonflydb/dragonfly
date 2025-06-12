@@ -239,6 +239,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "\nExamples:")
 		fmt.Fprintf(os.Stderr, "   %s -host 192.168.1.10:6379 -buffer 50 run *.bin\n", binaryName)
 		fmt.Fprintf(os.Stderr, "   %s -skip-time-min 5 run *.bin\n", binaryName)
+		fmt.Fprintf(os.Stderr, "   %s -skip-time-sec 30 run *.bin\n", binaryName)
 		fmt.Fprintf(os.Stderr, "  %s print *.bin\n", binaryName)
 	}
 
