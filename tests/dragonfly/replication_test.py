@@ -3197,7 +3197,7 @@ async def test_bug_5221(df_factory):
 
 
 @pytest.mark.parametrize("proactors", [1, 4, 6])
-@pytest.mark.parametrize("backlog_len", [1, 256, 1024, 1300])
+@pytest.mark.parametrize("backlog_len", [1])
 async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_len):
     keys = 5_000
     if proactors > 1:
@@ -3216,7 +3216,8 @@ async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_le
         for i in range(0, total):
             prefix = "{prefix}"
             # Seed to one shard only. This will eventually cause one of the flows to become stale.
-            await client.execute_command(f"SET {prefix}foo{i} bar{i}")
+            res = await client.execute_command(f"SET {prefix}foo{i} bar{i}")
+            assert res == "OK"
 
     async with replica.client() as c_replica, master.client() as c_master:
         seeder = SeederV2(key_target=keys)

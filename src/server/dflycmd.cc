@@ -336,7 +336,6 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
       }
     } else if (seqid.has_value()) {
       if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
-        auto& flow = replica_ptr->flows[flow_id];
         flow.start_partial_sync_at = *seqid;
         VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
                 << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";

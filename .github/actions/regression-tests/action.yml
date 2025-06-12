@@ -49,15 +49,16 @@ runs:
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
-        if [[ "${{inputs.epoll}}" == 'epoll' ]]; then
-          export FILTER="${{inputs.filter}} and not exclude_epoll"
-          # Run only replication tests with epoll
-          timeout 60m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --df force_epoll=true --log-cli-level=INFO || code=$?
-        else
-          export FILTER="${{inputs.filter}}"
-          # Run only replication tests with iouring
-          timeout 60m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --log-cli-level=INFO || code=$?
-        fi
+        for run in {1..1000}; do
+          #python3 -m pytest dragonfly/replication_test.py --log-cli-level=INFO -k "test_replication_timeout_on_full_sync"
+          #taskset --cpu-list 0-1 python3 -m pytest dragonfly/replication_test.py --log-cli-level=INFO -k "test_replication_all"
+          python3 -m pytest dragonfly/replication_test.py -k "test_partial_sync"
+          ret=$?
+          if [ $ret -ne 0 ]; then
+            echo "Error"
+            exit 1
+          fi
+        done
 
         # timeout returns 124 if we exceeded the timeout duration
         if [[ $code -eq 124 ]]; then

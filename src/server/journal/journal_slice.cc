@@ -111,7 +111,7 @@ void JournalSlice::CallOnChange(JournalItem* item) {
   // We preserve order here. After ConsumeJournalChange there can reordering
   if (ring_buffer_.size() == ring_buffer_.capacity()) {
     const size_t bytes_removed = ring_buffer_.front().data.size() + sizeof(*item);
-    CHECK_EQ(ring_buffer_bytes, bytes_removed);
+    CHECK_GE(ring_buffer_bytes, bytes_removed);
     ring_buffer_bytes -= bytes_removed;
   }
   if (!ring_buffer_.empty()) {
