@@ -18,6 +18,7 @@ var fClientBuffer = flag.Int("buffer", 100, "How many records to buffer per clie
 var fPace = flag.Bool("pace", true, "whether to pace the traffic according to the original timings.false - to pace as fast as possible")
 var fSkip = flag.Uint("skip", 0, "skip N records")
 var fSkipTimeMin = flag.Int("skip-time-min", 0, "skip records in the first N minutes of the recording")
+var fSkipTimeSec = flag.Int("skip-time-sec", 0, "skip records in the first N seconds of the recording")
 var fIgnoreParseErrors = flag.Bool("ignore-parse-errors", false, "ignore parsing errors")
 
 func RenderTable(area *pterm.AreaPrinter, files []string, workers []FileWorker) {
@@ -82,8 +83,11 @@ func Run(files []string) {
 
 	var skipUntil uint64
 	effectiveBaseTime := baseTime
-	if *fSkipTimeMin > 0 {
+	if *fSkipTimeMin > 0 || *fSkipTimeSec > 0 {
 		skipDuration := time.Duration(*fSkipTimeMin) * time.Minute
+		if *fSkipTimeSec > 0 {
+			skipDuration += time.Duration(*fSkipTimeSec) * time.Second
+		}
 		skipUntil = uint64(baseTime.Add(skipDuration).UnixNano())
 		effectiveBaseTime = baseTime.Add(skipDuration)
 	}
