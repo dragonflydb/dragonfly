@@ -18,6 +18,7 @@
 #include "core/mi_memory_resource.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
+#include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/common.h"
@@ -257,6 +258,8 @@ template <typename T> void Send(const std::optional<T>& opt, RedisReplyBuilder* 
 }
 
 template <typename I> void Send(I begin, I end, RedisReplyBuilder* rb) {
+  // TODO: does iterating iterator keep lifetimes?
+  // RedisReplyBuilder::ReplyScope scope{rb};
   if (begin == end) {
     rb->SendEmptyArray();
   } else {
@@ -291,6 +294,7 @@ template <typename T> void Send(const JsonCallbackResult<T>& result, RedisReplyB
 }
 
 template <typename T> void Send(const OpResult<T>& result, RedisReplyBuilder* rb) {
+  RedisReplyBuilder::ReplyScope scope{rb};
   if (result) {
     Send(result.value(), rb);
   } else {

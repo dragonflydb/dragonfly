@@ -185,7 +185,7 @@ void SinkReplyBuilder::Send() {
 void SinkReplyBuilder::FinishScope() {
   replies_recorded_++;
 
-  if (!batched_ || total_size_ * 2 >= kMaxBufferSize)
+  if (!batched_ || total_size_ * 2 >= kMaxBufferSize /* copying isn't worth it */)
     return Flush();
 
   // Check if we have enough space to copy all refs to buffer
@@ -446,6 +446,13 @@ void RedisReplyBuilder::SendLabeledScoredArray(std::string_view arr_label, Score
     SendBulkString(str);
     SendDouble(score);
   }
+}
+
+void RedisReplyBuilder::SendLongArr(absl::Span<const long> longs) {
+  ReplyScope scope(this);
+  StartArray(longs.size());
+  for (auto v : longs)
+    SendLong(v);
 }
 
 void RedisReplyBuilder::SendStored() {

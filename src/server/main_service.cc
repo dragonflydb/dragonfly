@@ -2109,6 +2109,8 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   CHECK(result == Interpreter::RUN_OK);
 
+  // TODO(vlad): Investigate if using ReplyScope here is possible with a different serialization
+  // strategy due to currently SerializeResult destructuring a value while serializing
   SinkReplyBuilder::ReplyAggregator agg(builder);
   EvalSerializer ser{static_cast<RedisReplyBuilder*>(builder)};
   if (!interpreter->IsResultSafe()) {

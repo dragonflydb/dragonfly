@@ -161,7 +161,7 @@ void BloomFamily::MAdd(CmdArgList args, const CommandContext& cmd_cntx) {
   }
   const AddResult& add_res = *res;
 
-  rb->StartArray(add_res.size());
+  RedisReplyBuilder::ArrayScope scope{rb, add_res.size()};
   for (const OpResult<bool>& val : add_res) {
     if (val) {
       rb->SendLong(*val);
@@ -179,10 +179,10 @@ void BloomFamily::MExists(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpExists(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  auto res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
 
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  rb->StartArray(args.size());
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  RedisReplyBuilder::ArrayScope scope{rb, args.size()};
   for (size_t i = 0; i < args.size(); ++i) {
     rb->SendLong(res ? res->at(i) : 0);
   }
