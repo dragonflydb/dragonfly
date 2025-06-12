@@ -196,6 +196,21 @@ extern __thread FacadeStats* tl_facade_stats;
 
 void ResetStats();
 
+// TODO: move this flag to helio (base/flags.h)
+struct MemoryBytesFlag {
+  size_t value = 0;
+
+  MemoryBytesFlag(size_t s = 0) : value(s) {  // NOLINT
+  }
+
+  operator size_t() const {  // NOLINT
+    return value;
+  }
+};
+
+bool AbslParseFlag(std::string_view in, MemoryBytesFlag* flag, std::string* err);
+std::string AbslUnparseFlag(const MemoryBytesFlag& flag);
+
 // Constants for socket bufring.
 constexpr uint16_t kRecvSockGid = 0;
 
