@@ -3242,6 +3242,18 @@ async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_le
             hash1, hash2 = await asyncio.gather(
                 *(SeederV2.capture(c) for c in (c_master, c_replica))
             )
+            if hash1 != hash2:
+                res1 = await c_master.execute_command("dbsize")
+                res2 = await c_replica.execute_command("dbsize")
+                logging.info(f"master dbsize is {res1}")
+                logging.info(f"replica dbsize is {res2}")
+                for i in range(0, backlog_len):
+                    prefix = "{prefix}"
+                    res3 = await c_master.execute_command(f"GET {prefix}foo{i}")
+                    res4 = await c_replica.execute_command(f"GET {prefix}foo{i}")
+                    logging.info(f"called GET of {i} with value: {res3}")
+                    logging.info(f"called GET of {i} with value: {res4}")
+
             assert hash1 == hash2
 
             await proxy.close()
