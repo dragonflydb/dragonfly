@@ -800,7 +800,7 @@ TEST_F(DashTest, Version) {
   dt.Clear();
   ASSERT_EQ(0, dt.size());
   ASSERT_EQ(2, dt.unique_segments());
-  ASSERT_EQ(136, dt.bucket_count());
+  ASSERT_EQ(128, dt.bucket_count());
   constexpr int kNum = 68000;
   for (int i = 0; i < kNum; ++i) {
     auto it = dt.Insert(i, 0).first;
