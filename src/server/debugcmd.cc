@@ -451,11 +451,7 @@ const char* EncodingName(unsigned obj_type, unsigned encoding) {
     case OBJ_STRING:
       return "raw";
     case OBJ_LIST:
-      switch (encoding) {
-        case kEncodingQL2:
-        case OBJ_ENCODING_QUICKLIST:
-          return "quicklist";
-      }
+      return "quicklist";
       break;
     case OBJ_SET:
       ABSL_FALLTHROUGH_INTENDED;
