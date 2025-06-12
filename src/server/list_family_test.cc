@@ -1334,14 +1334,14 @@ TEST_F(ListFamilyTest, AwakeMulti) {
   std::random_device rd_dev;
 
   auto f1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
-    for (unsigned i = 0; i < 1000; ++i) {
+    for (unsigned i = 0; i < 2000; ++i) {
       Run("CONSUMER", {"blmove", "src", "dest", "LEFT", "LEFT", "0"});
     };
   });
+
   auto f2 = pp_->at(1)->LaunchFiber([&] {
     std::mt19937 rd_gen(rd_dev());
-
-    for (unsigned i = 0; i < 1000; ++i) {
+    for (unsigned i = 0; i < 2000; ++i) {
       Run("PROD", {"lpush", "src", "a"});
       ThisFiber::SleepFor((2 + rd_gen() % 10) * 1us);
     };
@@ -1349,8 +1349,7 @@ TEST_F(ListFamilyTest, AwakeMulti) {
 
   auto f3 = pp_->at(2)->LaunchFiber([&] {
     std::mt19937 rd_gen(rd_dev());
-
-    for (unsigned i = 0; i < 100; ++i) {
+    for (unsigned i = 0; i < 500; ++i) {
       Run({"multi"});
       unsigned cmdnum = 3 + rd_gen() % 10;
       for (unsigned j = 0; j < cmdnum; ++j) {
