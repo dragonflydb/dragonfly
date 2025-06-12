@@ -599,4 +599,50 @@ TYPED_TEST(JsonPathTest, SubRange) {
   arr.clear();
 }
 
+TYPED_TEST(JsonPathTest, MutateDeleteNestedWithSameKey) {
+  // Test for deleting nested elements with the same key using "$..a"
+  // Corresponds to command: JSON.DEL doc1 "$..a"
+  ASSERT_EQ(0, this->Parse("$..a"));
+  Path path = this->driver_.TakePath();
+
+  TypeParam json = ValidJson<TypeParam>(R"({"a": 1, "nested": {"a": 2, "b": 3}})");
+
+  unsigned deleted_count = 0;
+  auto delete_cb = [&](optional<string_view> key, JsonType* val) {
+    // Delete all elements with key "a"
+    if (key && key.value() == "a") {
+      deleted_count++;
+      return true;  // delete element
+    }
+    return false;  // keep element
+  };
+
+  if constexpr (std::is_same_v<TypeParam, JsonType>) {
+    unsigned reported_matches = MutatePath(path, delete_cb, &json, true /* reverse_traversal */);
+
+    // Verify that exactly 2 elements were deleted
+    EXPECT_EQ(2, deleted_count);
+    // Verify that MutatePath reports 2 matches
+    EXPECT_EQ(2, reported_matches);
+
+    // Verify result after deletion: {"nested": {"b": 3}}
+    auto expected = ValidJson<JsonType>(R"({"nested": {"b": 3}})");
+    EXPECT_EQ(expected, json);
+  } else {
+    flexbuffers::Builder fbb;
+    unsigned reported_matches =
+        MutatePath(path, delete_cb, json, &fbb, true /* reverse_traversal */);
+
+    // Verify that exactly 2 elements were deleted
+    EXPECT_EQ(2, deleted_count);
+    // Verify that MutatePath reports 2 matches
+    EXPECT_EQ(2, reported_matches);
+
+    // Verify result after deletion
+    FlatJson result = flexbuffers::GetRoot(fbb.GetBuffer());
+    auto expected = ValidJson<JsonType>(R"({"nested": {"b": 3}})");
+    EXPECT_EQ(expected, FromFlat(result));
+  }
+}
+
 }  // namespace dfly::json

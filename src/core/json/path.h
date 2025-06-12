@@ -134,9 +134,10 @@ void EvaluatePath(const Path& path, const JsonType& json, PathCallback callback)
 void EvaluatePath(const Path& path, FlatJson json, PathFlatCallback callback);
 
 // returns number of matches found with the given path.
-unsigned MutatePath(const Path& path, MutateCallback callback, JsonType* json);
+unsigned MutatePath(const Path& path, MutateCallback callback, JsonType* json,
+                    bool reverse_traversal = false);
 unsigned MutatePath(const Path& path, MutateCallback callback, FlatJson json,
-                    flexbuffers::Builder* fbb);
+                    flexbuffers::Builder* fbb, bool reverse_traversal = false);
 
 // utility function to parse a jsonpath. Returns an error message if a parse error was
 // encountered.
