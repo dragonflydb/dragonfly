@@ -20,7 +20,7 @@ ABSL_FLAG(bool, cache_mode, false,
           "If true, the backend behaves like a cache, "
           "by evicting entries when getting close to maxmemory limit");
 
-ABSL_FLAG(dfly::MemoryBytesFlag, tiered_max_file_size, dfly::MemoryBytesFlag{},
+ABSL_FLAG(facade::MemoryBytesFlag, tiered_max_file_size, facade::MemoryBytesFlag{},
           "Limit on maximum file size that is used by the database for tiered storage. "
           "0 - means the program will automatically determine its maximum file size. "
           "default: 0");

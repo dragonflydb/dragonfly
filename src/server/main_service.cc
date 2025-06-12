@@ -97,7 +97,7 @@ ABSL_FLAG(bool, admin_nopass, false,
 ABSL_FLAG(bool, expose_http_api, false,
           "If set, will expose a POST /api handler for sending redis commands as json array.");
 
-ABSL_FLAG(dfly::MemoryBytesFlag, maxmemory, dfly::MemoryBytesFlag{},
+ABSL_FLAG(facade::MemoryBytesFlag, maxmemory, facade::MemoryBytesFlag{},
           "Limit on maximum-memory that is used by the database. "
           "0 - means the program will automatically determine its maximum memory usage. "
           "default: 0");
