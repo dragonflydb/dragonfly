@@ -9,6 +9,7 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "facade/error.h"
 #include "facade/facade_test.h"
 #include "server/command_registry.h"
 #include "server/test_utils.h"
@@ -3085,6 +3086,28 @@ TEST_F(JsonFamilyTest, DepthLimitExceeded) {
 
   auto resp = Run({"JSON.SET", "test", "$", deep_json});
   ASSERT_THAT(resp, ErrArg("ERR failed to parse JSON"));
+}
+
+TEST_F(JsonFamilyTest, JsonCommandsWorkingWithOtherTypesBug) {
+  std::string_view wrong_type_err{kWrongTypeErr};
+  wrong_type_err.remove_prefix(1);  // Remove the leading - character
+
+  auto resp = Run({"HSET", "k1", "field", "value"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // First bug: JSON.SET should return an error
+  resp = Run({"JSON.SET", "k1", "$", R"({"a":"b"})"});
+  ASSERT_THAT(resp, ErrArg(wrong_type_err));
+
+  // Second bug: JSON.DEL should not delete the hash
+  resp = Run({"HSET", "k2", "field", "value"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.DEL", "k2"});
+  ASSERT_THAT(resp, ErrArg(wrong_type_err));
+
+  resp = Run({"HGET", "k2", "field"});
+  EXPECT_THAT(resp, "value");
 }
 
 }  // namespace dfly
