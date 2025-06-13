@@ -1664,10 +1664,6 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     if (cmd.type == MemcacheParser::GETS) {
       dfly_cntx->conn_state.memcache_flag |= ConnectionState::FETCH_CAS_VER;
     }
-
-    if (cmd.type == MemcacheParser::GAT) {
-      dfly_cntx->conn_state.memcache_flag |= ConnectionState::SET_EXPIRY | expire_ts << 2;
-    }
   } else {  // write commands.
     if (store_opt[0]) {
       args.emplace_back(store_opt, strlen(store_opt));
