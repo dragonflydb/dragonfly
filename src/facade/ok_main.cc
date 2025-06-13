@@ -22,8 +22,10 @@ namespace {
 
 class OkService : public ServiceInterface {
  public:
-  void DispatchCommand(ArgSlice args, SinkReplyBuilder* builder, ConnectionContext* cntx) final {
+  DispatchResult DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
+                                 ConnectionContext* cntx) final {
     builder->SendOk();
+    return DispatchResult::OK;
   }
 
   size_t DispatchManyCommands(absl::Span<ArgSlice> args_lists, SinkReplyBuilder* builder,
@@ -47,9 +49,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   OkService service;
 
   Connection::Init(pool->size());
-  pool->Await([](auto*) {
-    tl_facade_stats = new FacadeStats;
-  });
+  pool->Await([](auto*) { tl_facade_stats = new FacadeStats; });
 
   acceptor->AddListener(GetFlag(FLAGS_port), new Listener{Protocol::REDIS, &service});
 
