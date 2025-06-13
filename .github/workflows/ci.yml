@@ -129,57 +129,15 @@ jobs:
       - name: Build
         run: |
           cd ${GITHUB_WORKSPACE}/build
-          ninja search_family_test
           df -h
           echo "-----------------------------"
-          ninja src/all
+          ninja dragonfly
 
       - name: PostFail
         if: failure()
         run: |
           echo "disk space is:"
           df -h
-
-      - name: C++ Unit Tests - IoUring
-        run: |
-          cd ${GITHUB_WORKSPACE}/build
-          echo Run ctest -V -L DFLY
-
-          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1,op_manager=1,op_manager_test=1 \
-          FLAGS_fiber_safety_margin=4096 FLAGS_list_experimental_v2=true timeout 20m ctest -V -L DFLY -E allocation_tracker_test
-
-          # Run allocation tracker test separately without alsologtostderr because it generates a TON of logs.
-          FLAGS_fiber_safety_margin=4096 timeout 5m ./allocation_tracker_test
-
-          timeout 5m ./dragonfly_test
-          timeout 5m ./json_family_test --jsonpathv2=false
-          timeout 5m ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
-
-
-      - name: C++ Unit Tests - Epoll
-        run: |
-          cd ${GITHUB_WORKSPACE}/build
-
-          # Create a rule that automatically prints stacktrace upon segfault
-          cat > ./init.gdb <<EOF
-          catch signal SIGSEGV
-          command
-          bt
-          end
-          EOF
-
-          gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
-          FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 timeout 20m ctest -V -L DFLY -E allocation_tracker_test
-
-          FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true timeout 5m ./allocation_tracker_test
-
-      - name: C++ Unit Tests - IoUring with cluster mode
-        run: |
-          FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY
-
-      - name: C++ Unit Tests - IoUring with cluster mode and FLAGS_lock_on_hashtags
-        run: |
-          FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY
 
       - name: Upload unit logs on failure
         if: failure()

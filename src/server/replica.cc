@@ -912,6 +912,7 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
     } else if (tx_data->opcode == journal::Op::PING) {
       force_ping_ = true;
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
+      LOG(INFO) << "PING";
     } else {
       ExecuteTx(std::move(*tx_data), cntx);
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
@@ -996,14 +997,16 @@ DflyShardReplica::~DflyShardReplica() {
 
 void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx) {
   if (!cntx->IsRunning()) {
+    LOG(INFO) << "ExecuteTx became NO-OP";
     return;
   }
 
   if (!tx_data.IsGlobalCmd()) {
-    VLOG(3) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
+    LOG(INFO) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
     executor_->Execute(tx_data.dbid, tx_data.command);
     return;
   }
+  LOG(INFO) << "GLOBAL";
 
   bool inserted_by_me =
       multi_shard_exe_->InsertTxToSharedMap(tx_data.txid, master_context_.num_flows);

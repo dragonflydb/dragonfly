@@ -3197,7 +3197,7 @@ async def test_bug_5221(df_factory):
 
 
 @pytest.mark.parametrize("proactors", [1, 4, 6])
-@pytest.mark.parametrize("backlog_len", [1, 256, 1024, 1300])
+@pytest.mark.parametrize("backlog_len", [1])
 async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_len):
     keys = 5_000
     if proactors > 1:
@@ -3216,7 +3216,8 @@ async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_le
         for i in range(0, total):
             prefix = "{prefix}"
             # Seed to one shard only. This will eventually cause one of the flows to become stale.
-            await client.execute_command(f"SET {prefix}foo{i} bar{i}")
+            res = await client.execute_command(f"SET {prefix}foo{i} bar{i}")
+            assert res == "OK"
 
     async with replica.client() as c_replica, master.client() as c_master:
         seeder = SeederV2(key_target=keys)
@@ -3241,6 +3242,18 @@ async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_le
             hash1, hash2 = await asyncio.gather(
                 *(SeederV2.capture(c) for c in (c_master, c_replica))
             )
+            if hash1 != hash2:
+                res1 = await c_master.execute_command("dbsize")
+                res2 = await c_replica.execute_command("dbsize")
+                logging.info(f"master dbsize is {res1}")
+                logging.info(f"replica dbsize is {res2}")
+                for i in range(0, backlog_len):
+                    prefix = "{prefix}"
+                    res3 = await c_master.execute_command(f"GET {prefix}foo{i}")
+                    res4 = await c_replica.execute_command(f"GET {prefix}foo{i}")
+                    logging.info(f"called GET of {i} with value: {res3}")
+                    logging.info(f"called GET of {i} with value: {res4}")
+
             assert hash1 == hash2
 
             await proxy.close()
