@@ -30,7 +30,6 @@ class QList {
    * attempted_compress: 1 bit, boolean, used for verifying during testing.
    * dont_compress: 1 bit, boolean, used for preventing compression of entry.
    * extra: 9 bits, free for future use; pads out the remainder of 32 bits
-   * NOTE: do not change the ABI of this struct as long as we support --list_experimental_v2=false
    * */
 
   typedef struct Node {
