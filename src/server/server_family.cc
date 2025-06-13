@@ -499,7 +499,7 @@ void ClientId(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cnt
 }
 
 void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkReplyBuilder* builder,
-                ConnectionContext* cntx) {
+                ConnectionContext* cntx, util::ProactorPool* pp) {
   std::function<bool(facade::Connection * conn)> evaluator;
 
   if (args.size() == 1) {
@@ -535,14 +535,39 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkRe
 
   const bool is_admin_request = cntx->conn()->IsPrivileged();
 
+  std::vector<util::fb2::Fiber> fibers(pp->size() * listeners.size());
+  std::vector<std::deque<facade::Connection::WeakRef>> consumers(fibers.size());
+
   atomic<uint32_t> killed_connections = 0;
   atomic<uint32_t> kill_errors = 0;
-  auto cb = [&](unsigned thread_index, util::Connection* conn) {
+
+  size_t round = 0;
+
+  auto client_kill_fb_body = [&consumers, &killed_connections](unsigned idx) {
+    auto& kill_list = consumers[idx];
+    while (!kill_list.empty()) {
+      facade::Connection::WeakRef ref = std::move(kill_list.front());
+      kill_list.pop_front();
+      facade::Connection* conn = ref.Get();
+      // TODO think how to handle migration for eval. See RequestAsyncMigration
+      // DCHECK(socket_->proactor()->GetPoolIndex() == conn.thread())
+      if (conn) {
+        conn->ShutdownSelf();
+        killed_connections.fetch_add(1);
+      }
+    }
+  };
+
+  auto cb = [&](unsigned thread_index, util::Connection* conn) mutable {
     facade::Connection* dconn = static_cast<facade::Connection*>(conn);
+    size_t idx = round + thread_index;
+    auto& fb = fibers[idx];
     if (evaluator(dconn)) {
       if (is_admin_request || !dconn->IsPrivileged()) {
-        dconn->ShutdownSelf();
-        killed_connections.fetch_add(1);
+        if (!fb.IsJoinable()) {
+          fb = [client_kill_fb_body, idx]() mutable { client_kill_fb_body(idx); };
+        }
+        consumers[idx].push_back(dconn->Borrow());
       } else {
         kill_errors.fetch_add(1);
       }
@@ -551,6 +576,11 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkRe
 
   for (auto* listener : listeners) {
     listener->TraverseConnections(cb);
+    round += pp->size();
+  }
+
+  for (auto& fb : fibers) {
+    fb.JoinIfNeeded();
   }
 
   if (kill_errors.load() == 0) {
@@ -2035,7 +2065,8 @@ void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
   } else if (sub_cmd == "TRACKING") {
     return ClientTracking(sub_args, builder, cntx);
   } else if (sub_cmd == "KILL") {
-    return ClientKill(sub_args, absl::MakeSpan(listeners_), builder, cntx);
+    return ClientKill(sub_args, absl::MakeSpan(listeners_), builder, cntx,
+                      &service_.proactor_pool());
   } else if (sub_cmd == "CACHING") {
     return ClientCaching(sub_args, builder, cmd_cntx.tx, cntx);
   } else if (sub_cmd == "SETINFO") {
