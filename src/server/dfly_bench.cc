@@ -92,6 +92,7 @@ using tcp = ::boost::asio::ip::tcp;
 using absl::StrCat;
 
 thread_local base::Xoroshiro128p bit_gen;
+atomic_bool terminate_requested = false;
 
 #if __INTELLISENSE__
 #pragma diag_suppress 144
@@ -648,7 +649,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
 
   uint32_t num_batches = ((num_reqs_ - 1) / pipeline) + 1;
 
-  for (unsigned i = 0; i < num_batches && now < time_limit_ns; ++i) {
+  for (unsigned i = 0; i < num_batches && now < time_limit_ns && !terminate_requested; ++i) {
     if (i == num_batches - 1) {  // last batch
       pipeline = num_reqs_ - i * pipeline;
     }
@@ -1102,6 +1103,11 @@ int main(int argc, char* argv[]) {
   pp.reset(fb2::Pool::IOUring(256));
   pp->Run();
   fb2::InitDnsResolver(2000);
+
+  ProactorBase::RegisterSignal({SIGTERM}, pp->GetNextProactor(), [](int) {
+    CONSOLE_INFO << "terminate requested";
+    terminate_requested = true;
+  });
 
   string proto_str = GetFlag(FLAGS_P);
   if (proto_str == "memcache_text") {

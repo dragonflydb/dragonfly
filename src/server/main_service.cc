@@ -97,7 +97,7 @@ ABSL_FLAG(bool, admin_nopass, false,
 ABSL_FLAG(bool, expose_http_api, false,
           "If set, will expose a POST /api handler for sending redis commands as json array.");
 
-ABSL_FLAG(dfly::MemoryBytesFlag, maxmemory, dfly::MemoryBytesFlag{},
+ABSL_FLAG(facade::MemoryBytesFlag, maxmemory, facade::MemoryBytesFlag{},
           "Limit on maximum-memory that is used by the database. "
           "0 - means the program will automatically determine its maximum memory usage. "
           "default: 0");
@@ -1066,7 +1066,7 @@ optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid,
                                                      const ConnectionContext* cntx,
                                                      CmdArgList tail_args) {
   if (ShouldDenyOnOOM(cid)) {
-    return facade::ErrorReply{kOutOfMemory};
+    return facade::ErrorReply{OpStatus::OUT_OF_MEMORY};
   }
 
   return VerifyConnectionAclStatus(cid, cntx, "ACL rules changed between the MULTI and EXEC",
@@ -1184,8 +1184,8 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
-void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
-                              facade::ConnectionContext* cntx) {
+DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
+                                        facade::ConnectionContext* cntx) {
   DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
@@ -1196,7 +1196,8 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
   const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.subspan(1));
 
   if (cid == nullptr) {
-    return builder->SendError(ReportUnknownCmd(cmd));
+    builder->SendError(ReportUnknownCmd(cmd));
+    return DispatchResult::ERROR;
   }
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
@@ -1229,10 +1230,10 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
     // their access revoked and reinstated
     if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(args_no_cmd, 0), "ACK")) {
       server_family_.GetDflyCmd()->OnClose(dfly_cntx->conn_state.replication_info.repl_session_id);
-      return;
+      return DispatchResult::ERROR;
     }
     builder->SendError(std::move(*err));
-    return;
+    return DispatchResult::ERROR;
   }
 
   VLOG_IF(1, cid->opt_mask() & CO::CommandOpt::DANGEROUS)
@@ -1246,7 +1247,8 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
     if (cid->IsWriteOnly()) {
       dfly_cntx->conn_state.exec_info.is_write = true;
     }
-    return builder->SendSimpleString("QUEUED");
+    builder->SendSimpleString("QUEUED");
+    return DispatchResult::OK;
   }
 
   // Create command transaction
@@ -1259,8 +1261,10 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
       OpStatus status = dfly_cntx->transaction->InitByArgs(
           dfly_cntx->ns, dfly_cntx->conn_state.db_index, args_no_cmd);
 
-      if (status != OpStatus::OK)
-        return builder->SendError(status);
+      if (status != OpStatus::OK) {
+        builder->SendError(status);
+        return DispatchResult::ERROR;
+      }
     }
   } else {
     DCHECK(dfly_cntx->transaction == nullptr);
@@ -1272,8 +1276,10 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
         CHECK(dfly_cntx->ns != nullptr);
         if (auto st =
                 dist_trans->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, args_no_cmd);
-            st != OpStatus::OK)
-          return builder->SendError(st);
+            st != OpStatus::OK) {
+          builder->SendError(st);
+          return DispatchResult::ERROR;
+        }
       }
 
       dfly_cntx->transaction = dist_trans.get();
@@ -1285,7 +1291,9 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
 
   dfly_cntx->cid = cid;
 
-  if (!InvokeCmd(cid, args_no_cmd, CommandContext{dfly_cntx->transaction, builder, dfly_cntx})) {
+  auto res =
+      InvokeCmd(cid, args_no_cmd, CommandContext{dfly_cntx->transaction, builder, dfly_cntx});
+  if ((res != DispatchResult::OK) && (res != DispatchResult::OOM)) {
     builder->SendError("Internal Error");
     builder->CloseConnection();
   }
@@ -1293,6 +1301,7 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
   if (!dispatching_in_multi) {
     dfly_cntx->transaction = nullptr;
   }
+  return res;
 }
 
 class ReplyGuard {
@@ -1345,8 +1354,8 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
   return OpStatus::OK;
 }
 
-bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
-                        const CommandContext& cmd_cntx) {
+DispatchResult Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
+                                  const CommandContext& cmd_cntx) {
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
@@ -1361,11 +1370,16 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
     // Bonus points because this allows to continue replication with ACL users who got
     // their access revoked and reinstated
     if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(tail_args, 0), "ACK")) {
-      return true;
+      return DispatchResult::OK;
     }
+    auto res = err->status;
     builder->SendError(std::move(*err));
     builder->ConsumeLastError();
-    return true;  // return false only for internal error aborts
+    if (res == OpStatus::OUT_OF_MEMORY) {
+      return DispatchResult::OOM;
+    }
+
+    return DispatchResult::OK;  // return ERROR only for internal error aborts
   }
 
   // We are not sending any admin command in the monitor, and we do not want to
@@ -1404,13 +1418,14 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
     invoke_time_usec = cid->Invoke(tail_args, cmd_cntx);
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
-    return false;
+    return DispatchResult::ERROR;
   }
 
+  DispatchResult res = DispatchResult::OK;
   if (std::string reason = builder->ConsumeLastError(); !reason.empty()) {
     // Set flag if OOM reported
     if (reason == kOutOfMemory) {
-      cmd_cntx.conn_cntx->is_oom_ = true;
+      res = DispatchResult::OOM;
     }
     VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
     LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
@@ -1454,7 +1469,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
     cntx->last_command_debug.clock = tx->txid();
   }
 
-  return true;
+  return res;
 }
 
 size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReplyBuilder* builder,
@@ -2295,8 +2310,9 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
           }
         }
 
-        bool ok = InvokeCmd(scmd.Cid(), args, cmd_cntx);
-        if (!ok || rb->GetError())  // checks for i/o error, not logical error.
+        auto invoke_res = InvokeCmd(scmd.Cid(), args, cmd_cntx);
+        if ((invoke_res != DispatchResult::OK) ||
+            rb->GetError())  // checks for i/o error, not logical error.
           break;
       }
     }

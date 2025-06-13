@@ -148,13 +148,14 @@ nonstd::expected<json::Path, string> ParsePath(string_view path) {
   return driver.TakePath();
 }
 
-unsigned MutatePath(const Path& path, MutateCallback callback, JsonType* json) {
+unsigned MutatePath(const Path& path, MutateCallback callback, JsonType* json,
+                    bool reverse_traversal) {
   if (path.empty()) {
     callback(nullopt, json);
     return 1;
   }
 
-  Dfs dfs = Dfs::Mutate(path, callback, json);
+  Dfs dfs = Dfs::Mutate(path, callback, json, reverse_traversal);
   return dfs.matches();
 }
 
@@ -285,9 +286,9 @@ void FromJsonType(const JsonType& src, flexbuffers::Builder* fbb) {
 }
 
 unsigned MutatePath(const Path& path, MutateCallback callback, FlatJson json,
-                    flexbuffers::Builder* fbb) {
+                    flexbuffers::Builder* fbb, bool reverse_traversal) {
   JsonType mut_json = FromFlat(json);
-  unsigned res = MutatePath(path, std::move(callback), &mut_json);
+  unsigned res = MutatePath(path, std::move(callback), &mut_json, reverse_traversal);
 
   // Populate the output builder 'fbb' with the resulting JSON state
   // (mutated or original if res == 0) and finalize it.

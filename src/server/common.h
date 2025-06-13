@@ -332,13 +332,6 @@ inline uint32_t MemberTimeSeconds(uint64_t now_ms) {
   return (now_ms / 1000) - kMemberExpiryBase;
 }
 
-struct MemoryBytesFlag {
-  uint64_t value = 0;
-};
-
-bool AbslParseFlag(std::string_view in, dfly::MemoryBytesFlag* flag, std::string* err);
-std::string AbslUnparseFlag(const dfly::MemoryBytesFlag& flag);
-
 // Helper class used to guarantee atomicity between serialization of buckets
 class ABSL_LOCKABLE ThreadLocalMutex {
  public:

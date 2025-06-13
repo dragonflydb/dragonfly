@@ -113,7 +113,7 @@ class Dfs {
   // TODO: for some operations we need to know the type of mismatches.
   static Dfs Traverse(absl::Span<const PathSegment> path, const JsonType& json, const Cb& callback);
   static Dfs Mutate(absl::Span<const PathSegment> path, const MutateCallback& callback,
-                    JsonType* json);
+                    JsonType* json, bool reverse_traversal);
 
   unsigned matches() const {
     return matches_;
