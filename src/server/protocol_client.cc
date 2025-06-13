@@ -236,7 +236,7 @@ void ProtocolClient::CloseSocket() {
 
 void ProtocolClient::DefaultErrorHandler(const GenericError& err) {
   LOG(WARNING) << "Socket error: " << err.Format() << " in " << server_context_.Description()
-               << ", socket info: " << GetSocketInfo(sock_->native_handle());
+               << ", socket info: " << GetSocketInfo(sock_ ? sock_->native_handle() : -1);
   CloseSocket();
 }
 
