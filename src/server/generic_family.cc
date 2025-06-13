@@ -1509,37 +1509,23 @@ void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
   OpResultTyped<SortEntryList> fetch_result;
   auto fetch_cb = [&](Transaction* t, EngineShard* shard) {
     ShardId shard_id = shard->shard_id();
+    // in case of SORT option, we fetch only on the source shard
     if (shard_id == source_sid) {
       fetch_result = OpFetchSortEntries(t->GetOpArgs(shard), key, alpha);
     }
     return OpStatus::OK;
   };
 
-  if (store_key) {
-    cmd_cntx.tx->Execute(std::move(fetch_cb), false);
-  } else {
-    cmd_cntx.tx->Execute(std::move(fetch_cb), true);
-  }
-
-  // OpResultTyped<SortEntryList> fetch_result =
-  //     cmd_cntx.tx->ScheduleSingleHopT([&](Transaction* t, EngineShard* shard) {
-  //       return OpFetchSortEntries(t->GetOpArgs(shard), key, alpha);
-  //     });
-
-  if (fetch_result == OpStatus::WRONG_TYPE) {
-    cmd_cntx.tx->Conclude();
-    return builder->SendError(fetch_result.status());
-  }
-
-  if (fetch_result.status() == OpStatus::INVALID_NUMERIC_RESULT) {
-    cmd_cntx.tx->Conclude();
-    return builder->SendError("One or more scores can't be converted into double");
-  }
-
+  cmd_cntx.tx->Execute(std::move(fetch_cb), !bool(store_key));
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (!fetch_result.ok()) {
     cmd_cntx.tx->Conclude();
-    return rb->SendEmptyArray();
+    if (fetch_result == OpStatus::WRONG_TYPE)
+      return builder->SendError(fetch_result.status());
+    else if (fetch_result.status() == OpStatus::INVALID_NUMERIC_RESULT)
+      return builder->SendError("One or more scores can't be converted into double");
+    else
+      return rb->SendEmptyArray();
   }
 
   auto result_type = fetch_result.type();
