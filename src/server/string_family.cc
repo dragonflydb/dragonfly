@@ -614,23 +614,24 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
 
     // Copy to buffer or trigger tiered read that will eventually write to
     // buffer
-    if (it->second.IsExternal()) {
+    const PrimeValue& value = it->second;
+    if (value.IsExternal()) {
       wait_bc->Add(1);
       auto cb = [next, wait_bc](const string& v) mutable {
         memcpy(next, v.data(), v.size());
         wait_bc->Dec();
       };
-      shard->tiered_storage()->Read(t->GetDbIndex(), it.key(), it->second, std::move(cb));
+      shard->tiered_storage()->Read(t->GetDbIndex(), it.key(), value, std::move(cb));
     } else {
-      CopyValueToBuffer(it->second, next);
+      CopyValueToBuffer(value, next);
     }
 
-    size_t size = it->second.Size();
+    size_t size = value.Size();
     resp.value = string_view(next, size);
     next += size;
 
     if (fetch_mcflag) {
-      if (it->second.HasFlag()) {
+      if (value.HasFlag()) {
         resp.mc_flag = db_slice.GetMCFlag(t->GetDbIndex(), it->first);
       }
 
