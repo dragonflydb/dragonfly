@@ -1,3 +1,4 @@
+import asyncio
 import platform
 import shutil
 import tarfile
@@ -3270,3 +3271,58 @@ async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_le
     # Second partial sync failed because of stale LSN
     lines = master.find_in_logs("Partial sync requested from stale LSN")
     assert len(lines) == 1
+
+
+async def test_mc_gat_replication(df_factory):
+    master = df_factory.create(memcached_port=11211, proactor_threads=1)
+    replica = df_factory.create(memcached_port=11212, proactor_threads=1)
+    df_factory.start_all([master, replica])
+
+    cm = pymemcache.Client(f"127.0.0.1:{master.mc_port}", default_noreply=False)
+
+    assert cm.set("foo", "bar", noreply=True)
+
+    cr = replica.client()
+    await cr.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(cr)
+
+    async def wait_for_result(state_f, pred_f):
+        start = time.time()
+        while time.time() - start < 10:
+            if pred_f(state_f()):
+                return True
+            await asyncio.sleep(1)
+        return False
+
+    cr = pymemcache.Client(f"127.0.0.1:{replica.mc_port}", default_noreply=False)
+    assert await wait_for_result(lambda: cr.get("foo"), lambda r: r == b"bar")
+
+    # Force the key to be removed by setting expiry in the past. Memcache treats expiry > 1 month as absolute from
+    # epoch, so 1 month + 1 second expires the key
+    month_plus_one = 60 * 60 * 24 * 30 + 1
+    assert cm._fetch_cmd(b"gat", [str(month_plus_one), "foo"], expect_cas=False) == {}
+
+    # The replica should eventually sync the delete operation
+    assert await wait_for_result(lambda: cr.get("foo", b"NOTFOUND"), lambda r: r == b"NOTFOUND")
+
+    assert cm.set("a", "b", noreply=True)
+    # expiry is set as now + 1000 seconds, which ensures the key will remain
+    assert cm._fetch_cmd(b"gat", [str(1000), "a"], expect_cas=False) == {"a": b"b"}
+
+    # once the value is synced to the replica, assert that it remains stable
+    # and is not removed by setting expiry
+    start = time.time()
+    synced = False
+    value = None
+    while time.time() - start < 5:
+        value = cr.get("a", b"NOTFOUND")
+        if value == b"b":
+            synced = True
+        if value == b"NOTFOUND" and synced:
+            assert False, "key unexpectedly removed after sync"
+        await asyncio.sleep(1)
+    assert synced and value == b"b"
+
+    result = cm._fetch_cmd(b"gats", [str(1000), "a"], expect_cas=True)
+    assert len(result) == 1 and "a" in result, f"missing expected key: {result=}"
+    assert result["a"] == (b"b", b"0"), f"unexpected result for key: {result=}"
