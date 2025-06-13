@@ -51,7 +51,7 @@ O Dragonfly mostra desempenho comparável:
 
 O benchmark mostra que a camada algorítmica do DF, que permite escalabilidade vertical, não gera sobrecarga significativa em execução single-thread.
 
-Com uma instância mais forte (m5.xlarge), a diferença entre DF e Redis cresce.  
+Com uma instância mais forte (m5.xlarge), a diferença entre DF e Redis cresce.
 (`memtier_benchmark  -c 20 --test-time 100 -t 6 -d 256 --distinct-client-seed`):
 
 1. SETs (`--ratio 1:0`):
