@@ -372,6 +372,27 @@ TEST_F(DflyEngineTest, Memcache) {
 
   resp = GetMC(MP::GETS, {"key", "key2", "unknown"});
   EXPECT_THAT(resp, ElementsAre("VALUE key 1 3 0", "bar", "VALUE key2 2 8 0", "bar2val2", "END"));
+
+  EXPECT_THAT(RunMC(MP::SET, "foo", "bar"), ElementsAre("STORED"));
+  // The value here is 1 month + 1 second, memcache treats an expiry of greater than 1 month as
+  // absolute value. GAT expiry seconds are counted from epoch, setting expiry in the past results
+  // in the key being removed.
+  constexpr uint32_t short_expiry = 60 * 60 * 24 * 30 + 1;
+  EXPECT_THAT(GetMC(MP::GAT, {StrCat(short_expiry), "foo"}), ElementsAre("END"));
+
+  EXPECT_THAT(RunMC(MP::SET, "foo", "bar"), ElementsAre("STORED"));
+
+  // 30 seconds into the future
+  EXPECT_THAT(GetMC(MP::GAT, {"30", "foo", "abc", "def", "ghi"}),
+              ElementsAre("VALUE foo 0 3", "bar", "END"));
+
+  EXPECT_THAT(GetMC(MP::GAT, {"1000"}),
+              ElementsAre("SERVER_ERROR wrong number of arguments for 'gat' command"));
+
+  EXPECT_THAT(RunMC(MP::SET, "persisted-key", "bar"), ElementsAre("STORED"));
+  // expiry of 0 removes the key expiry
+  EXPECT_THAT(GetMC(MP::GAT, {"0", "persisted-key"}),
+              ElementsAre("VALUE persisted-key 0 3", "bar", "END"));
 }
 
 TEST_F(DflyEngineTest, MemcacheFlags) {
