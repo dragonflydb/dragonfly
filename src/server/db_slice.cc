@@ -98,6 +98,8 @@ class PrimeEvictionPolicy {
   void RecordSplit(PrimeTable::Segment_t* segment) {
     DVLOG(2) << "split: " << segment->SlowSize() << "/" << segment->capacity();
   }
+  void OnMove(PrimeTable::Cursor source, PrimeTable::Cursor dest) {
+  }
 
   bool CanGrow(const PrimeTable& tbl) const;
 
@@ -360,6 +362,8 @@ class DbSlice::PrimeBumpPolicy {
  public:
   bool CanBump(const CompactObj& obj) const {
     return !obj.IsSticky();
+  }
+  void OnMove(PrimeTable::Cursor source, PrimeTable::Cursor dest) {
   }
 };
 
@@ -1745,7 +1749,8 @@ void DbSlice::OnCbFinishBlocking() {
 
       // We must not change the bucket's internal order during serialization
       serialization_latch_.Wait();
-      auto bump_it = db.prime.BumpUp(it, PrimeBumpPolicy{});
+      PrimeBumpPolicy policy;
+      auto bump_it = db.prime.BumpUp(it, policy);
       if (bump_it != it) {  // the item was bumped
         ++events_.bumpups;
       }
