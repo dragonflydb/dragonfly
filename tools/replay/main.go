@@ -17,7 +17,6 @@ var fHost = flag.String("host", "127.0.0.1:6379", "Redis host")
 var fClientBuffer = flag.Int("buffer", 100, "How many records to buffer per client")
 var fPace = flag.Bool("pace", true, "whether to pace the traffic according to the original timings.false - to pace as fast as possible")
 var fSkip = flag.Uint("skip", 0, "skip N records")
-var fSkipTimeMin = flag.Int("skip-time-min", 0, "skip records in the first N minutes of the recording")
 var fSkipTimeSec = flag.Int("skip-time-sec", 0, "skip records in the first N seconds of the recording")
 var fIgnoreParseErrors = flag.Bool("ignore-parse-errors", false, "ignore parsing errors")
 
@@ -83,11 +82,8 @@ func Run(files []string) {
 
 	var skipUntil uint64
 	effectiveBaseTime := baseTime
-	if *fSkipTimeMin > 0 || *fSkipTimeSec > 0 {
-		skipDuration := time.Duration(*fSkipTimeMin) * time.Minute
-		if *fSkipTimeSec > 0 {
-			skipDuration += time.Duration(*fSkipTimeSec) * time.Second
-		}
+	if  *fSkipTimeSec > 0 {
+		skipDuration := time.Duration(*fSkipTimeSec) * time.Second
 		skipUntil = uint64(baseTime.Add(skipDuration).UnixNano())
 		effectiveBaseTime = baseTime.Add(skipDuration)
 	}
@@ -238,7 +234,6 @@ func main() {
 
 		fmt.Fprintln(os.Stderr, "\nExamples:")
 		fmt.Fprintf(os.Stderr, "   %s -host 192.168.1.10:6379 -buffer 50 run *.bin\n", binaryName)
-		fmt.Fprintf(os.Stderr, "   %s -skip-time-min 5 run *.bin\n", binaryName)
 		fmt.Fprintf(os.Stderr, "   %s -skip-time-sec 30 run *.bin\n", binaryName)
 		fmt.Fprintf(os.Stderr, "  %s print *.bin\n", binaryName)
 	}
