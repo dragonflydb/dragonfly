@@ -400,7 +400,8 @@ class Segment {
   using Key_t = KeyType;
   using Hash_t = uint64_t;
 
-  explicit Segment(size_t depth, PMR_NS::memory_resource* mr) : local_depth_(depth), mr_(mr) {
+  explicit Segment(size_t depth, uint32_t id, PMR_NS::memory_resource* mr)
+      : local_depth_(depth), segment_id_(id), mr_(mr) {
   }
 
   ~Segment() {
@@ -603,6 +604,7 @@ class Segment {
 
   Bucket bucket_[kTotalBuckets];
   uint8_t local_depth_;
+  uint32_t segment_id_;  // segment id in the table.
   PMR_NS::memory_resource* mr_ = nullptr;
 
  public:
