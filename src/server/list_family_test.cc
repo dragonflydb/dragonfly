@@ -1331,28 +1331,23 @@ TEST_F(ListFamilyTest, AwakeMulti) {
   GTEST_SKIP() << "Requires release build to reproduce";
 #endif
 
-  std::random_device rd_dev;
-
   auto f1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
-    for (unsigned i = 0; i < 2000; ++i) {
+    for (unsigned i = 0; i < 3000; ++i) {
       Run("CONSUMER", {"blmove", "src", "dest", "LEFT", "LEFT", "0"});
     };
   });
 
   auto f2 = pp_->at(1)->LaunchFiber([&] {
-    std::mt19937 rd_gen(rd_dev());
-    for (unsigned i = 0; i < 2000; ++i) {
+    for (unsigned i = 0; i < 3000; ++i) {
       Run("PROD", {"lpush", "src", "a"});
-      ThisFiber::SleepFor((2 + rd_gen() % 10) * 1us);
+      ThisFiber::SleepFor(1us);
     };
   });
 
   auto f3 = pp_->at(2)->LaunchFiber([&] {
-    std::mt19937 rd_gen(rd_dev());
-    for (unsigned i = 0; i < 500; ++i) {
+    for (unsigned i = 0; i < 100; ++i) {
       Run({"multi"});
-      unsigned cmdnum = 3 + rd_gen() % 10;
-      for (unsigned j = 0; j < cmdnum; ++j) {
+      for (unsigned j = 0; j < 10; ++j) {
         Run({"get", StrCat("key", j)});
       };
       Run({"exec"});
