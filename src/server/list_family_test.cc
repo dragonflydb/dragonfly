@@ -1326,6 +1326,35 @@ TEST_F(ListFamilyTest, LMPopWrongType) {
   EXPECT_THAT(resp, RespArray(ElementsAre("l1", RespArray(ElementsAre("e1")))));
 }
 
+// Blocking command wakeup is complicated by running multi transaction at the same time
+TEST_F(ListFamilyTest, AwakeMulti) {
+  auto f1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    for (unsigned i = 0; i < 100; ++i) {
+      Run("CONSUMER", {"blmove", "src", "dest", "LEFT", "LEFT", "0"});
+    };
+  });
+  auto f2 = pp_->at(1)->LaunchFiber([&] {
+    for (unsigned i = 0; i < 100; ++i) {
+      Run("PROD", {"lpush", "src", "a"});
+      ThisFiber::SleepFor(50us);
+    };
+  });
+
+  auto f3 = pp_->at(2)->LaunchFiber([&] {
+    for (unsigned i = 0; i < 100; ++i) {
+      Run({"multi"});
+      for (unsigned j = 0; j < 8; ++j) {
+        Run({"get", StrCat("key", j)});
+      };
+      Run({"exec"});
+    };
+  });
+
+  f1.Join();
+  f2.Join();
+  f3.Join();
+}
+
 TEST_F(ListFamilyTest, PressureBLMove) {
 #ifndef NDEBUG
   GTEST_SKIP() << "Requires release build to reproduce";
