@@ -18,6 +18,7 @@
 #include "server/string_family.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
+#include "util/fibers/fibers.h"
 
 using namespace testing;
 using namespace std;
@@ -1325,38 +1326,30 @@ TEST_F(ListFamilyTest, LMPopWrongType) {
   EXPECT_THAT(resp, RespArray(ElementsAre("l1", RespArray(ElementsAre("e1")))));
 }
 
-// Reproduce a flow that trigerred a wrong DCHECK in the transaction flow.
-TEST_F(ListFamilyTest, AwakeMulti) {
+TEST_F(ListFamilyTest, PressureBLMove) {
 #ifndef NDEBUG
   GTEST_SKIP() << "Requires release build to reproduce";
 #endif
 
-  auto f1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
-    for (unsigned i = 0; i < 3000; ++i) {
-      Run("CONSUMER", {"blmove", "src", "dest", "LEFT", "LEFT", "0"});
+  auto consumer = [this](string_view id, string_view src, string_view dest) {
+    for (unsigned i = 0; i < 1000; ++i) {
+      Run(id, {"blmove", src, dest, "LEFT", "LEFT", "0"});
     };
-  });
+  };
+  auto producer = [this](string_view id, size_t delay, string_view src) {
+    for (unsigned i = 0; i < 1000; ++i) {
+      Run(id, {"lpush", src, "a"});
+      ThisFiber::SleepFor(1us * delay);
+    }
+  };
 
-  auto f2 = pp_->at(1)->LaunchFiber([&] {
-    for (unsigned i = 0; i < 3000; ++i) {
-      Run("PROD", {"lpush", "src", "a"});
-      ThisFiber::SleepFor(1us);
-    };
-  });
+  for (size_t delay : {1, 15, 35, 50}) {
+    auto f1 = pp_->at(1)->LaunchFiber([=] { consumer("c1", "src", "dest"); });
+    auto f2 = pp_->at(1)->LaunchFiber([=] { producer("p1", delay, "src"); });
 
-  auto f3 = pp_->at(2)->LaunchFiber([&] {
-    for (unsigned i = 0; i < 100; ++i) {
-      Run({"multi"});
-      for (unsigned j = 0; j < 10; ++j) {
-        Run({"get", StrCat("key", j)});
-      };
-      Run({"exec"});
-    };
-  });
-
-  f1.Join();
-  f2.Join();
-  f3.Join();
+    f1.Join();
+    f2.Join();
+  }
 }
 
 TEST_F(ListFamilyTest, AwakeDb1) {
