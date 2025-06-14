@@ -207,7 +207,7 @@ class DflyShardReplica : public ProtocolClient {
 
   void StableSyncDflyAcksFb(ExecutionState* cntx);
 
-  void ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx);
+  bool ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx);
 
   uint32_t FlowId() const;
 
