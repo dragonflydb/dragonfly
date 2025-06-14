@@ -324,11 +324,11 @@ class DashTable : public detail::DashTableBase {
     return [p = &policy_, &key](const auto& probe) -> bool { return p->Equal(probe, key); };
   }
 
-  SegmentType* ConstructSegment(uint8_t depth) {
+  SegmentType* ConstructSegment(uint8_t depth, uint32_t id) {
     auto* mr = segment_.get_allocator().resource();
     PMR_NS::polymorphic_allocator<SegmentType> pa(mr);
     SegmentType* res = pa.allocate(1);
-    pa.construct(res, depth, mr);  //   new SegmentType(depth);
+    pa.construct(res, depth, id, mr);  //   new SegmentType(depth);
     bucket_count_ += res->num_buckets();
     return res;
   }
@@ -532,8 +532,8 @@ DashTable<_Key, _Value, Policy>::DashTable(size_t capacity_log, const Policy& po
   segment_.resize(unique_segments_);
 
   // I assume we have enough memory to create the initial table and do not check allocations.
-  for (auto& ptr : segment_) {
-    ptr = ConstructSegment(global_depth_);  //   new SegmentType(global_depth_);
+  for (uint32_t i = 0; i < segment_.size(); ++i) {
+    segment_[i] = ConstructSegment(global_depth_, i);  //   new SegmentType(global_depth_);
   }
 }
 
@@ -901,10 +901,11 @@ template <typename _Key, typename _Value, typename Policy>
 void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id) {
   SegmentType* source = segment_[seg_id];
 
-  size_t chunk_size = 1u << (global_depth_ - source->local_depth());
-  size_t start_idx = seg_id & (~(chunk_size - 1));
+  uint32_t chunk_size = 1u << (global_depth_ - source->local_depth());
+  uint32_t start_idx = seg_id & (~(chunk_size - 1));
   assert(segment_[start_idx] == source && segment_[start_idx + chunk_size - 1] == source);
-  SegmentType* target = ConstructSegment(source->local_depth() + 1);
+  uint32_t target_id = start_idx + chunk_size / 2;
+  SegmentType* target = ConstructSegment(source->local_depth() + 1, target_id);
 
   auto hash_fn = [this](const auto& k) { return policy_.HashFn(k); };
 
@@ -916,7 +917,7 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id) {
   bucket_count_ += (target->num_buckets() + source->num_buckets());
   ++unique_segments_;
 
-  for (size_t i = start_idx + chunk_size / 2; i < start_idx + chunk_size; ++i) {
+  for (size_t i = target_id; i < start_idx + chunk_size; ++i) {
     segment_[i] = target;
   }
 }
