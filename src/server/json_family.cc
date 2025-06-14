@@ -258,8 +258,7 @@ template <typename T> void Send(const std::optional<T>& opt, RedisReplyBuilder* 
 }
 
 template <typename I> void Send(I begin, I end, RedisReplyBuilder* rb) {
-  // TODO: does iterating iterator keep lifetimes?
-  // RedisReplyBuilder::ReplyScope scope{rb};
+  RedisReplyBuilder::ReplyScope scope{rb};
   if (begin == end) {
     rb->SendEmptyArray();
   } else {

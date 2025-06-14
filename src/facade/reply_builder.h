@@ -288,6 +288,7 @@ class RedisReplyBuilder : public RedisReplyBuilderBase {
 
   ~RedisReplyBuilder() override = default;
 
+  // One-liner for ReplyScope + StartArray
   struct ArrayScope : ReplyScope {
     ArrayScope(RedisReplyBuilder* rb, size_t len) : ReplyScope(rb) {
       rb->StartArray(len);

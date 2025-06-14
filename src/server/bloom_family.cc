@@ -179,7 +179,7 @@ void BloomFamily::MExists(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpExists(t->GetOpArgs(shard), key, args);
   };
 
-  auto res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   RedisReplyBuilder::ArrayScope scope{rb, args.size()};
