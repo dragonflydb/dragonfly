@@ -1284,4 +1284,19 @@ TEST_F(StreamFamilyTest, SeenActiveTime) {
                                          IntArg(1100), "pel-count", IntArg(1), "pending", _));
 }
 
+TEST_F(StreamFamilyTest, XClaimWithNonExistentGroup) {
+  Run({"xadd", "mystream", "1-0", "field1", "value1"});
+  Run({"xadd", "mystream", "1-1", "field2", "value2"});
+
+  auto resp = Run({"xclaim", "mystream", "nonexistent-group", "consumer1", "0", "1-0"});
+
+  EXPECT_THAT(resp, ArrLen(0));
+
+  resp = Run({"xclaim", "mystream", "nonexistent-group", "consumer1", "0", "1-0", "1-1"});
+  EXPECT_THAT(resp, ArrLen(0));
+
+  resp = Run({"xclaim", "mystream", "nonexistent-group", "consumer1", "0", "1-0", "justid"});
+  EXPECT_THAT(resp, ArrLen(0));
+}
+
 }  // namespace dfly

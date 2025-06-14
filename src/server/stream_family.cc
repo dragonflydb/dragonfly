@@ -2833,6 +2833,11 @@ void StreamFamily::XClaim(CmdArgList args, const CommandContext& cmd_cntx) {
   };
   OpResult<ClaimInfo> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   if (!result) {
+    if (result.status() == OpStatus::SKIPPED) {
+      // Return empty result when operation is skipped
+      StreamReplies{cmd_cntx.rb}.SendClaimInfo(ClaimInfo{});
+      return;
+    }
     cmd_cntx.rb->SendError(result.status());
     return;
   }
