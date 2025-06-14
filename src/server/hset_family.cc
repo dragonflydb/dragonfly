@@ -915,13 +915,8 @@ void HSetFamily::HExpire(CmdArgList args, const CommandContext& cmd_cntx) {
   };
 
   OpResult<vector<long>> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   if (result) {
-    rb->StartArray(result->size());
-    const auto& array = result.value();
-    for (const auto& v : array) {
-      rb->SendLong(v);
-    }
+    static_cast<RedisReplyBuilder*>(cmd_cntx.rb)->SendLongArr(result.value());
   } else {
     cmd_cntx.rb->SendError(result.status());
   }
@@ -939,8 +934,7 @@ void HSetFamily::HMGet(CmdArgList args, const CommandContext& cmd_cntx) {
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   if (result) {
-    SinkReplyBuilder::ReplyAggregator agg(rb);
-    rb->StartArray(result->size());
+    RedisReplyBuilder::ArrayScope scope{rb, result->size()};
     for (const auto& val : *result) {
       if (val) {
         rb->SendBulkString(*val);
@@ -949,9 +943,7 @@ void HSetFamily::HMGet(CmdArgList args, const CommandContext& cmd_cntx) {
       }
     }
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    SinkReplyBuilder::ReplyAggregator agg(rb);
-
-    rb->StartArray(args.size());
+    RedisReplyBuilder::ArrayScope scope{rb, args.size()};
     for (unsigned i = 0; i < args.size(); ++i) {
       rb->SendNull();
     }
@@ -1089,18 +1081,14 @@ void HSetFamily::HScan(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   OpResult<StringVec> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  if (result.status() != OpStatus::WRONG_TYPE) {
-    rb->StartArray(2);
-    rb->SendBulkString(absl::StrCat(cursor));
-    rb->StartArray(result->size());  // Within scan the page type is array
-    for (const auto& k : *result) {
-      rb->SendBulkString(k);
-    }
-  } else {
-    cmd_cntx.rb->SendError(result.status());
-  }
+  if (result.status() == OpStatus::WRONG_TYPE)
+    return cmd_cntx.rb->SendError(result.status());
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  RedisReplyBuilder::ArrayScope scope{rb, 2};
+  rb->SendBulkString(absl::StrCat(cursor));
+  rb->SendBulkStrArr(*result);
 }
 
 void HSetFamily::HSet(CmdArgList args, const CommandContext& cmd_cntx) {

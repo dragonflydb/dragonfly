@@ -272,11 +272,9 @@ void GeoFamily::GeoHash(CmdArgList args, const CommandContext& cmd_cntx) {
     return rb->SendError(kWrongTypeErr);
   }
 
-  rb->StartArray(result->size());  // Array return type.
-  const MScoreResponse& arr = result.value();
-
+  RedisReplyBuilder::ArrayScope scope{rb, result->size()};
   array<char, 12> buf;
-  for (const auto& p : arr) {
+  for (const auto& p : result.value()) {
     if (ToAsciiGeoHash(p, &buf)) {
       rb->SendBulkString(string_view{buf.data(), buf.size() - 1});
     } else {
@@ -294,11 +292,9 @@ void GeoFamily::GeoPos(CmdArgList args, const CommandContext& cmd_cntx) {
     return rb->SendError(result.status());
   }
 
-  rb->StartArray(result->size());  // Array return type.
-  const MScoreResponse& arr = result.value();
-
+  RedisReplyBuilder::ArrayScope scope{rb, result->size()};
   double xy[2];
-  for (const auto& p : arr) {
+  for (const auto& p : result.value()) {
     if (ScoreToLongLat(p, xy)) {
       rb->StartArray(2);
       rb->SendDouble(xy[0]);
@@ -524,7 +520,8 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
     if (geo_ops.withcoord) {
       record_size++;
     }
-    rb->StartArray(ga.size());
+
+    RedisReplyBuilder::ArrayScope scope{rb, ga.size()};
     for (const auto& p : ga) {
       // [member, dist, x, y, hash]
       if (geo_ops.HasWithStatement()) {

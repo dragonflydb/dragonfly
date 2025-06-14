@@ -576,8 +576,8 @@ OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index
   return str;
 }
 
-OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, string_view key, string_view element,
-                                 int rank, uint32_t count, uint32_t max_len) {
+OpResult<vector<long>> OpPos(const OpArgs& op_args, string_view key, string_view element, int rank,
+                             uint32_t count, uint32_t max_len) {
   DCHECK(key.data() && element.data());
   DCHECK_NE(rank, 0);
 
@@ -586,7 +586,7 @@ OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, string_view key, string_
     return it_res.status();
 
   const PrimeValue& pv = (*it_res)->second;
-  vector<uint32_t> matches;
+  vector<long> matches;
 
   if (pv.Encoding() == kEncodingQL2) {
     QList* ql = GetQLV2(pv);
@@ -1112,10 +1112,7 @@ void PopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder*
   }
 
   if (return_arr) {
-    rb->StartArray(result->size());
-    for (const auto& k : *result) {
-      rb->SendBulkString(k);
-    }
+    rb->SendBulkStrArr(*result);
   } else {
     DCHECK_EQ(1u, result->size());
     rb->SendBulkString(result->front());
@@ -1276,10 +1273,7 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   if (result) {
     response_builder->StartArray(2);
     response_builder->SendBulkString(*key_to_pop);
-    response_builder->StartArray(result->size());
-    for (const auto& val : *result) {
-      response_builder->SendBulkString(val);
-    }
+    response_builder->SendBulkStrArr(*result);
   } else {
     response_builder->SendNull();
   }
@@ -1363,7 +1357,7 @@ void ListFamily::LPos(CmdArgList args, const CommandContext& cmd_cntx) {
   };
 
   Transaction* trans = cmd_cntx.tx;
-  OpResult<vector<uint32_t>> result = trans->ScheduleSingleHopT(std::move(cb));
+  auto result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::WRONG_TYPE) {
     return rb->SendError(result.status());
@@ -1378,12 +1372,7 @@ void ListFamily::LPos(CmdArgList args, const CommandContext& cmd_cntx) {
       rb->SendLong((*result)[0]);
     }
   } else {
-    SinkReplyBuilder::ReplyAggregator agg(rb);
-    rb->StartArray(result->size());
-    const auto& array = result.value();
-    for (const auto& v : array) {
-      rb->SendLong(v);
-    }
+    rb->SendLongArr(result.value());
   }
 }
 

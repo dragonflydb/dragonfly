@@ -11,6 +11,7 @@
 #include "base/logging.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
+#include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/common.h"
@@ -1098,14 +1099,12 @@ void SendResults(const vector<ResultType>& results, SinkReplyBuilder* builder) {
     return;
   }
 
-  rb->StartArray(total);
+  RedisReplyBuilder::ArrayScope scope{rb, results.size()};
   for (const auto& elem : results) {
-    if (elem) {
+    if (elem)
       rb->SendLong(*elem);
-      continue;
-    }
-
-    rb->SendNull();
+    else
+      rb->SendNull();
   }
 }
 
