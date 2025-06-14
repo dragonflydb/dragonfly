@@ -1217,8 +1217,7 @@ void Transaction::ScheduleBatchInShard() {
     // We do this to avoid the situation where we have a data race, where
     // a transaction is added to the queue, we've checked that sq.armed is true and skipped
     // adding the callback that fetches the transaction.
-    sq.armed.store(false, memory_order_release);
-    // sq.armed.exchange(false, memory_order_acq_rel);
+    sq.armed.exchange(false, memory_order_acq_rel);
   }
 }
 
