@@ -576,8 +576,8 @@ OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index
   return str;
 }
 
-OpResult<vector<long>> OpPos(const OpArgs& op_args, string_view key, string_view element, int rank,
-                             uint32_t count, uint32_t max_len) {
+OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, string_view key, string_view element,
+                                 int rank, uint32_t count, uint32_t max_len) {
   DCHECK(key.data() && element.data());
   DCHECK_NE(rank, 0);
 
@@ -586,7 +586,7 @@ OpResult<vector<long>> OpPos(const OpArgs& op_args, string_view key, string_view
     return it_res.status();
 
   const PrimeValue& pv = (*it_res)->second;
-  vector<long> matches;
+  vector<uint32_t> matches;
 
   if (pv.Encoding() == kEncodingQL2) {
     QList* ql = GetQLV2(pv);
@@ -1372,7 +1372,7 @@ void ListFamily::LPos(CmdArgList args, const CommandContext& cmd_cntx) {
       rb->SendLong((*result)[0]);
     }
   } else {
-    rb->SendLongArr(result.value());
+    rb->SendLongArr(absl::MakeConstSpan(result.value()));
   }
 }
 

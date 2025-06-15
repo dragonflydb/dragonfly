@@ -1042,7 +1042,7 @@ void SMIsMember(CmdArgList args, const CommandContext& cmd_cntx) {
 
   OpResult<void> result = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
   if (result || result == OpStatus::KEY_NOTFOUND)
-    static_cast<RedisReplyBuilder*>(cmd_cntx.rb)->SendLongArr(memberships);
+    static_cast<RedisReplyBuilder*>(cmd_cntx.rb)->SendLongArr(absl::MakeConstSpan(memberships));
   else
     cmd_cntx.rb->SendError(result.status());
 }

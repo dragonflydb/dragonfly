@@ -916,7 +916,7 @@ void HSetFamily::HExpire(CmdArgList args, const CommandContext& cmd_cntx) {
 
   OpResult<vector<long>> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    static_cast<RedisReplyBuilder*>(cmd_cntx.rb)->SendLongArr(result.value());
+    static_cast<RedisReplyBuilder*>(cmd_cntx.rb)->SendLongArr(absl::MakeConstSpan(result.value()));
   } else {
     cmd_cntx.rb->SendError(result.status());
   }

@@ -1573,7 +1573,7 @@ void GenericFamily::FieldExpire(CmdArgList args, const CommandContext& cmd_cntx)
   OpResult<vector<long>> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    rb->SendLongArr(result.value());
+    rb->SendLongArr(absl::MakeConstSpan(result.value()));
   } else {
     rb->SendError(result.status());
   }
