@@ -7,7 +7,7 @@
 
 [![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml) [![Twitter URL](https://img.shields.io/twitter/follow/dragonflydbio?style=social)](https://twitter.com/dragonflydbio)
 
-その他の言語:  [English](README.md) [简体中文](README.zh-CN.md) [한국어](README.ko-KR.md)
+その他の言語:  [English](README.md) [简体中文](README.zh-CN.md) [한국어](README.ko-KR.md) [Português](README.pt-BR.md)
 
 [Web サイト](https://www.dragonflydb.io/) • [ドキュメント](https://dragonflydb.io/docs) • [クイックスタート](https://www.dragonflydb.io/docs/getting-started) • [コミュニティ Discord](https://discord.gg/HsPjXGVH85) • [Dragonfly Forum](https://dragonfly.discourse.group/) • [Join the Dragonfly Community](https://www.dragonflydb.io/community)
 
@@ -179,5 +179,4 @@ Dragonfly は、インメモリデータストアを 2022 年に設計したら�
 Dragonfly の基盤を構築し、[そのパフォーマンスに満足したら](#ベンチマーク)、Redis と Memcached の機能を実装していきました。現在までに 185 個の Redis コマンド（Redis 5.0 API とほぼ同等）と 13 個の Memcached コマンドを実装しました。
 
 そして最後に、<br>
-<em>私たちの使命は、最新のハードウェアの進歩を活用した、クラウドワークロード向けの、優れた設計、超高速、コスト効率の良いインメモリデータストアを構築することです。現在のソリューションの API と提案を維持しながら、その問題点を解決するつもりです。
-</em>
+<em>私たちの使命は、最新のハードウェアの進歩を活用した、クラウドワークロード向けの、優れた設計、超高速、コスト効率の良いインメモリデータストアを構築することです。現在のソリューションの API と提案を維持しながら、その問題点を解決するつもりです。</em>
