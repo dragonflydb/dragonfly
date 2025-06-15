@@ -43,26 +43,6 @@ static std::vector<long> ExpireElements(DenseSet* owner, const facade::CmdArgLis
 // Copy str to thread local sds instance. Valid until next WrapSds call on thread
 sds WrapSds(std::string_view str);
 
-// Clears sds on destruction
-// This is a wrapper around sds to avoid using sdsfree() directly
-class SdsWrapper {
- public:
-  explicit SdsWrapper(std::string_view str);
-
-  SdsWrapper(const SdsWrapper&) = delete;
-  SdsWrapper(SdsWrapper&&) = delete;
-
-  SdsWrapper& operator=(SdsWrapper&&) = delete;
-  SdsWrapper& operator=(const SdsWrapper&) = delete;
-
-  ~SdsWrapper();
-
-  operator sds();
-
- private:
-  sds sds_{nullptr};
-};
-
 using RandomPick = uint32_t;
 
 class PicksGenerator {
