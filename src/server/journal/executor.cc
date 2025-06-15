@@ -11,6 +11,7 @@
 #include <memory>
 
 #include "base/logging.h"
+#include "facade/service_interface.h"
 #include "server/main_service.h"
 
 using namespace std;
@@ -48,33 +49,24 @@ JournalExecutor::JournalExecutor(Service* service)
 JournalExecutor::~JournalExecutor() {
 }
 
-void JournalExecutor::Execute(DbIndex dbid, absl::Span<journal::ParsedEntry::CmdData> cmds) {
-  SelectDb(dbid);
-  for (auto& cmd : cmds) {
-    Execute(cmd);
-  }
-}
-
-std::error_code JournalExecutor::Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd) {
+facade::DispatchResult JournalExecutor::Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd) {
   SelectDb(dbid);
   return Execute(cmd);
 }
 
 void JournalExecutor::FlushAll() {
   auto cmd = BuildFromParts("FLUSHALL");
-  Execute(cmd);
+  std::ignore = Execute(cmd);
 }
 
 void JournalExecutor::FlushSlots(const cluster::SlotRange& slot_range) {
   auto cmd = BuildFromParts("DFLYCLUSTER", "FLUSHSLOTS", slot_range.start, slot_range.end);
-  Execute(cmd);
+  std::ignore = Execute(cmd);
 }
 
-std::error_code JournalExecutor::Execute(journal::ParsedEntry::CmdData& cmd) {
+facade::DispatchResult JournalExecutor::Execute(journal::ParsedEntry::CmdData& cmd) {
   auto span = CmdArgList{cmd.cmd_args.data(), cmd.cmd_args.size()};
-  auto res = service_->DispatchCommand(span, &reply_builder_, &conn_context_);
-  return res == facade::DispatchResult::OOM ? make_error_code(errc::not_enough_memory)
-                                            : error_code();
+  return service_->DispatchCommand(span, &reply_builder_, &conn_context_);
 }
 
 void JournalExecutor::SelectDb(DbIndex dbid) {
@@ -83,7 +75,7 @@ void JournalExecutor::SelectDb(DbIndex dbid) {
 
   if (!ensured_dbs_[dbid]) {
     auto cmd = BuildFromParts("SELECT", dbid);
-    Execute(cmd);
+    std::ignore = Execute(cmd);
     ensured_dbs_[dbid] = true;
 
     // TODO: This is a temporary fix for #4146.
