@@ -311,9 +311,9 @@ void Transaction::StoreKeysInArgs(const KeyIndex& key_index) {
   DCHECK(args_slices_.empty());
 
   // even for a single key we may have multiple arguments per key (MSET).
-  args_slices_.emplace_back(key_index.start, key_index.end);
   if (key_index.bonus)
     args_slices_.emplace_back(*key_index.bonus, *key_index.bonus + 1);
+  args_slices_.emplace_back(key_index.start, key_index.end);
 
   for (string_view key : key_index.Range(full_args_))
     kv_fp_.push_back(LockTag(key).Fingerprint());
