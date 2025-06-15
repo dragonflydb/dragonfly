@@ -67,9 +67,6 @@ ABSL_FLAG(double, eviction_memory_budget_threshold, 0.1,
           "Eviction starts when the free memory (including RSS memory) drops below "
           "eviction_memory_budget_threshold * max_memory_limit.");
 
-ABSL_FLAG(uint64_t, force_decommit_threshold, 8_MB,
-          "The threshold of memory to force decommit when memory is under pressure.");
-
 ABSL_DECLARE_FLAG(uint32_t, max_eviction_per_heartbeat);
 
 namespace dfly {
@@ -325,41 +322,55 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     return false;
   }
 
-  std::optional<ShardMemUsage> shard_mem_usage;
+  /*
+   If the eviction is enabled, we want to run the defrag task more frequently and more aggressively.
+   For global threshold rss we use the rss memory minus the eviction budget threshold and minus 3%
+    - For example if rss_deny_oom_ratio is 0.8 and eviction_memory_budget_threshold is 0.1,
+      we will start eviction when rss memory is above 0.8 - 0.1 = 0.7. And defragmentation
+      should still working if used rss memory is above 0.7 - 0.03 = 0.67.
+   For defrag interval we use the EvictionTaskState::kMemDefragCheckSecInterval
+   For waste threshold we use the EvictionTaskState::kEvictionWasteThreshold
+  */
+  const bool is_eviction_enabled = GetFlag(FLAGS_enable_heartbeat_eviction);
 
-  if (GetFlag(FLAGS_enable_heartbeat_eviction)) {
-    shard_mem_usage = ReadShardMemUsage(GetFlag(FLAGS_mem_defrag_page_utilization_threshold));
-    const static double eviction_waste_threshold = 0.05;
-    if (shard_mem_usage->wasted_mem >
-        (uint64_t(shard_mem_usage->commited * eviction_waste_threshold))) {
-      VLOG(1) << "memory issue found for memory " << shard_mem_usage.value();
-      return true;
-    }
-  }
+  const double mem_defrag_threshold_flag = GetFlag(FLAGS_mem_defrag_threshold);
+  const double defrag_threshold =
+      !is_eviction_enabled ? mem_defrag_threshold_flag
+                           : std::min(mem_defrag_threshold_flag,
+                                      ServerState::tlocal()->rss_oom_deny_ratio -
+                                          GetFlag(FLAGS_eviction_memory_budget_threshold) -
+                                          EvictionTaskState::kDefragRssMemoryDelta);
 
-  const std::size_t global_threshold = max_memory_limit * GetFlag(FLAGS_mem_defrag_threshold);
+  const std::size_t global_threshold = max_memory_limit * defrag_threshold;
   if (global_threshold > rss_mem_current.load(memory_order_relaxed)) {
     return false;
   }
 
   const auto now = time(nullptr);
   const auto seconds_from_prev_check = now - last_check_time;
-  const auto mem_defrag_interval = GetFlag(FLAGS_mem_defrag_check_sec_interval);
+
+  const uint32_t check_sec_interval_flag = GetFlag(FLAGS_mem_defrag_check_sec_interval);
+  const auto mem_defrag_interval =
+      !is_eviction_enabled
+          ? check_sec_interval_flag
+          : std::min(check_sec_interval_flag, EvictionTaskState::kDefragCheckSecInterval);
 
   if (seconds_from_prev_check < mem_defrag_interval) {
     return false;
   }
+
   last_check_time = now;
 
-  if (!shard_mem_usage) {
-    shard_mem_usage = ReadShardMemUsage(GetFlag(FLAGS_mem_defrag_page_utilization_threshold));
-  }
+  ShardMemUsage shard_mem_usage =
+      ReadShardMemUsage(GetFlag(FLAGS_mem_defrag_page_utilization_threshold));
 
-  DCHECK(shard_mem_usage.has_value());
-
-  const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
-  if (shard_mem_usage->wasted_mem > (uint64_t(shard_mem_usage->commited * waste_threshold))) {
-    VLOG(1) << "memory issue found for memory " << shard_mem_usage.value();
+  const float waste_threshold_flag = GetFlag(FLAGS_mem_defrag_waste_threshold);
+  const double waste_threshold =
+      !is_eviction_enabled
+          ? waste_threshold_flag
+          : std::min(waste_threshold_flag, EvictionTaskState::kDefragWasteThreshold);
+  if (shard_mem_usage.wasted_mem > (uint64_t(shard_mem_usage.commited * waste_threshold))) {
+    VLOG(1) << "memory issue found for memory " << shard_mem_usage;
     return true;
   }
 
@@ -858,7 +869,7 @@ size_t EngineShard::CalculateEvictionBytes() {
   size_t goal_bytes = CalculateHowManyBytesToEvictOnShard(max_memory_limit, global_used_memory,
                                                           shard_memory_budget_threshold);
 
-  LOG_IF_EVERY_N(INFO, goal_bytes > 0, 50)
+  VLOG_IF_EVERY_N(1, goal_bytes > 0, 50)
       << "Memory goal bytes: " << goal_bytes << ", used memory: " << global_used_memory
       << ", memory limit: " << max_memory_limit;
 
@@ -889,7 +900,7 @@ size_t EngineShard::CalculateEvictionBytes() {
         max_rss_memory, global_used_rss_memory - deleted_bytes_before_rss_update * shards_count,
         shard_rss_memory_budget_threshold);
 
-    LOG_IF_EVERY_N(INFO, rss_goal_bytes > 0, 50)
+    VLOG_IF_EVERY_N(1, rss_goal_bytes > 0, 50)
         << "Rss memory goal bytes: " << rss_goal_bytes
         << ", rss used memory: " << global_used_rss_memory
         << ", rss memory limit: " << max_rss_memory
