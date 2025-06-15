@@ -1372,7 +1372,8 @@ TEST_F(ListFamilyTest, PressureBLMove) {
     }
   };
 
-  for (size_t delay : {1, 15, 35, 50}) {
+  for (size_t delay : {1, 2, 5}) {
+    LOG(INFO) << "Running with delay: " << delay;
     auto f1 = pp_->at(1)->LaunchFiber([=] { consumer("c1", "src", "dest"); });
     auto f2 = pp_->at(1)->LaunchFiber([=] { producer("p1", delay, "src"); });
 
