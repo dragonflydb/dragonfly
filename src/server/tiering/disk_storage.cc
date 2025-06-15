@@ -80,7 +80,10 @@ error_code DiskStorage::Open(string_view path) {
   backing_file_ = std::move(res.value());
 
   int fd = backing_file_->fd();
-  RETURN_ON_ERR(DoFiberCall(&SubmitEntry::PrepFallocate, fd, 0, 0L, kInitialSize));
+
+  auto ec = DoFiberCall(&SubmitEntry::PrepFallocate, fd, 0, 0L, kInitialSize);
+  VLOG_IF(1, ec) << "Fallocate not supported";
+
   RETURN_ON_ERR(DoFiberCall(&SubmitEntry::PrepFadvise, fd, 0L, 0L, POSIX_FADV_RANDOM));
 
   alloc_.AddStorage(0, kInitialSize);
