@@ -60,12 +60,7 @@ ABSL_FLAG(bool, enable_heartbeat_eviction, true,
 ABSL_FLAG(double, eviction_memory_budget_threshold, 0.1,
           "Eviction starts when the free memory (including RSS memory) drops below "
           "eviction_memory_budget_threshold * max_memory_limit.");
-
 ABSL_FLAG(bool, background_heartbeat, false, "Whether to run heartbeat as a background fiber");
-
-ABSL_FLAG(uint64_t, force_decommit_threshold, 8_MB,
-          "The threshold of memory to force decommit when memory is under pressure.");
-
 ABSL_DECLARE_FLAG(uint32_t, max_eviction_per_heartbeat);
 
 namespace dfly {
@@ -722,7 +717,7 @@ size_t EngineShard::CalculateEvictionBytes() {
   size_t goal_bytes = CalculateHowManyBytesToEvictOnShard(max_memory_limit, global_used_memory,
                                                           shard_memory_budget_threshold);
 
-  LOG_IF_EVERY_N(INFO, goal_bytes > 0, 50)
+  VLOG_IF_EVERY_N(1, goal_bytes > 0, 50)
       << "Memory goal bytes: " << goal_bytes << ", used memory: " << global_used_memory
       << ", memory limit: " << max_memory_limit;
 
@@ -753,7 +748,7 @@ size_t EngineShard::CalculateEvictionBytes() {
         max_rss_memory, global_used_rss_memory - deleted_bytes_before_rss_update * shards_count,
         shard_rss_memory_budget_threshold);
 
-    LOG_IF_EVERY_N(INFO, rss_goal_bytes > 0, 50)
+    VLOG_IF_EVERY_N(1, rss_goal_bytes > 0, 50)
         << "Rss memory goal bytes: " << rss_goal_bytes
         << ", rss used memory: " << global_used_rss_memory
         << ", rss memory limit: " << max_rss_memory

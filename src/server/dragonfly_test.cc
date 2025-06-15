@@ -26,6 +26,7 @@ ABSL_DECLARE_FLAG(float, mem_defrag_waste_threshold);
 ABSL_DECLARE_FLAG(uint32_t, mem_defrag_check_sec_interval);
 ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
 ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
+ABSL_DECLARE_FLAG(bool, enable_heartbeat_eviction);
 ABSL_DECLARE_FLAG(double, eviction_memory_budget_threshold);
 ABSL_DECLARE_FLAG(std::vector<std::string>, command_alias);
 ABSL_DECLARE_FLAG(bool, latency_tracking);
@@ -762,6 +763,8 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
   absl::SetFlag(&FLAGS_mem_defrag_threshold, 0.0);
   absl::SetFlag(&FLAGS_mem_defrag_check_sec_interval, 0);
   absl::SetFlag(&FLAGS_mem_defrag_waste_threshold, 0.1);
+  // We need to disable heartbeat eviction because it enfluences the defragmentation
+  absl::SetFlag(&FLAGS_enable_heartbeat_eviction, false);
 
   //  Fill data into dragonfly and then check if we have
   //  any location in memory to defrag. See issue #448 for details about this.

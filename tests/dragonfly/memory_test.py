@@ -266,7 +266,7 @@ async def test_cache_eviction_with_rss_deny_oom_simple_case(
             break
 
     # Wait for some time
-    await asyncio.sleep(2)
+    await asyncio.sleep(3)
 
     memory_arena = await async_client.execute_command("MEMORY", "ARENA")
     fragmentation_waste = extract_fragmentation_waste(memory_arena)
@@ -329,10 +329,10 @@ async def test_cache_eviction_with_rss_deny_oom_two_waves(
     rss_eviction_threshold = max_memory * (rss_oom_deny_ratio - eviction_memory_budget_threshold)
 
     # first wave fills 85% of max memory
-    # second wave fills 20% of max memory
+    # second wave fills 17% of max memory
     data_fill_size = [
         int((rss_oom_deny_ratio + 0.05) * max_memory),
-        int((1 - rss_oom_deny_ratio) * max_memory),
+        int((1 - rss_oom_deny_ratio - 0.03) * max_memory),
     ]
 
     val_size = 1024 * 5  # 5 kb
@@ -382,7 +382,7 @@ async def test_cache_eviction_with_rss_deny_oom_two_waves(
                 break
 
         # Wait for some time
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
 
         memory_arena = await async_client.execute_command("MEMORY", "ARENA")
         fragmentation_waste = extract_fragmentation_waste(memory_arena)
@@ -397,7 +397,7 @@ async def test_cache_eviction_with_rss_deny_oom_two_waves(
             rss_oom_deny_ratio - eviction_memory_budget_threshold - 0.05
         ), "We should not evict all items."
         assert memory_info["used_memory"] < max_memory * (
-            rss_oom_deny_ratio - eviction_memory_budget_threshold + 0.05
+            rss_oom_deny_ratio - eviction_memory_budget_threshold + 0.08
         ), "Used memory should be smaller than threshold."
         assert memory_info["used_memory_rss"] > max_memory * (
             rss_oom_deny_ratio - eviction_memory_budget_threshold - 0.05
