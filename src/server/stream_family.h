@@ -22,8 +22,6 @@ class StreamMemTracker {
  public:
   StreamMemTracker();
 
-  void UpdateStartSize();
-
   void UpdateStreamSize(PrimeValue& pv) const;
 
  private:

@@ -988,11 +988,14 @@ void CompactObj::SetJsonSize(int64_t size) {
 }
 
 void CompactObj::AddStreamSize(int64_t size) {
-  // We might have a negative size. For example, if we remove a consumer,
-  // the tracker will report a negative net (since we deallocated),
-  // so the object now consumes less memory than it did before. This DCHECK
-  // is for fanity and to catch any potential issues with our tracking approach.
-  u_.r_obj.SetSize(UpdateSize(u_.r_obj.Size(), size));
+  if (size < 0) {
+    // We might have a negative size. For example, if we remove a consumer,
+    // the tracker will report a negative net (since we deallocated),
+    // so the object now consumes less memory than it did before. This DCHECK
+    // is for fanity and to catch any potential issues with our tracking approach.
+    DCHECK(static_cast<int64_t>(u_.r_obj.Size()) >= size);
+  }
+  u_.r_obj.SetSize((u_.r_obj.Size() + size));
 }
 
 void CompactObj::SetJson(const uint8_t* buf, size_t len) {
