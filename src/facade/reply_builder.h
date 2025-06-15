@@ -288,8 +288,17 @@ class RedisReplyBuilder : public RedisReplyBuilderBase {
 
   ~RedisReplyBuilder() override = default;
 
+  // One-liner for ReplyScope + StartArray
+  struct ArrayScope : ReplyScope {
+    ArrayScope(RedisReplyBuilder* rb, size_t len) : ReplyScope(rb) {
+      rb->StartArray(len);
+    }
+  };
+
   void SendSimpleStrArr(const facade::ArgRange& strs);
   void SendBulkStrArr(const facade::ArgRange& strs, CollectionType ct = ARRAY);
+  template <typename I> void SendLongArr(absl::Span<const I> longs);
+
   void SendScoredArray(ScoredArray arr, bool with_scores);
   void SendLabeledScoredArray(std::string_view arr_label, ScoredArray arr);
   void SendStored() final;
