@@ -404,7 +404,11 @@ OpStatus Renamer::FinalizeRename() {
 
   transaction_->Execute(std::move(cb), true);
 
-  DCHECK(del_status == OpStatus::OK);
+  LOG_IF(DFATAL,
+         (deserialize_status != OpStatus::OK && deserialize_status != OpStatus::OUT_OF_MEMORY) ||
+             del_status != OpStatus::OK)
+      << "Error during rename command, deserialize_status: " << deserialize_status
+      << " del_status: " << del_status;
   return deserialize_status != OpStatus::OK ? deserialize_status : del_status;
 }
 
