@@ -317,7 +317,7 @@ class Renamer {
 
  private:
   void FetchData();
-  void FinalizeRename();
+  facade::OpStatus FinalizeRename();
 
   bool KeyExists(Transaction* t, EngineShard* shard, std::string_view key) const;
   void SerializeSrc(Transaction* t, EngineShard* shard);
@@ -365,8 +365,7 @@ ErrorReply Renamer::Rename(bool destination_should_not_exist) {
     return OpStatus::KEY_EXISTS;
   }
 
-  FinalizeRename();
-  return OpStatus::OK;
+  return FinalizeRename();
 }
 
 void Renamer::FetchData() {
@@ -390,22 +389,28 @@ void Renamer::FetchData() {
   transaction_->Execute(std::move(cb), false);
 }
 
-void Renamer::FinalizeRename() {
-  auto cb = [this](Transaction* t, EngineShard* shard) {
+OpStatus Renamer::FinalizeRename() {
+  OpStatus del_status = OpStatus::OK;
+  OpStatus deserialize_status = OpStatus::OK;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
     const ShardId shard_id = shard->shard_id();
 
     if (!do_copy_ && shard_id == src_sid_) {
-      return DelSrc(t, shard);
+      del_status = DelSrc(t, shard);
+    } else if (shard_id == dest_sid_) {
+      deserialize_status = DeserializeDest(t, shard);
     }
-
-    if (shard_id == dest_sid_) {
-      return DeserializeDest(t, shard);
-    }
-
     return OpStatus::OK;
   };
 
   transaction_->Execute(std::move(cb), true);
+
+  LOG_IF(DFATAL,
+         (deserialize_status != OpStatus::OK && deserialize_status != OpStatus::OUT_OF_MEMORY) ||
+             del_status != OpStatus::OK)
+      << "Error during rename command, deserialize_status: " << deserialize_status
+      << " del_status: " << del_status;
+  return deserialize_status != OpStatus::OK ? deserialize_status : del_status;
 }
 
 bool Renamer::KeyExists(Transaction* t, EngineShard* shard, std::string_view key) const {
