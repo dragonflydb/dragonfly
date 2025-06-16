@@ -30,6 +30,7 @@
 #include "server/error.h"
 #include "server/generic_family.h"
 #include "server/journal/journal.h"
+#include "server/search/doc_index.h"
 #include "server/table.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
@@ -891,6 +892,9 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
   // Update flags
   prime_value.SetFlag(params.memcache_flags != 0);
   db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
+
+  // We need to remove the key from search indices, because we are overwriting it to OBJ_STRING
+  shard->search_indices()->RemoveDoc(key, op_args_.db_cntx, prime_value);
 
   // If value is external, mark it as deleted
   if (prime_value.IsExternal()) {

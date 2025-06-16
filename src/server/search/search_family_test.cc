@@ -2890,4 +2890,30 @@ TEST_F(SearchFamilyTest, EmptyKeyBug) {
   resp = Run({"FT.SEARCH", "index", "*"});
   EXPECT_THAT(resp, AreDocIds(""));
 }
+
+TEST_F(SearchFamilyTest, SetDoesNotUpdateIndexesBug) {
+  auto resp = Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "field", "TEXT"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"HSET", "k1", "field", "value"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // Here we are changing the type of k1 from HASH to STRING.
+  // This should affect the index, the hset value should not be indexed anymore.
+  resp = Run({"SET", "k1", "anothervalue"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"RENAME", "k1", "anotherkey"});
+  EXPECT_EQ(resp, "OK");
+
+  /* Here we should see that the value is indexed again.
+     We have checks in indexes that prove that the key was not present in the index.
+     The bug was, that this check was failing for this operation because it was not removed from the
+     index during the SET operation */
+  resp = Run({"HSET", "k1", "field", "value"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"FT.SEARCH", "index", "*"});
+  EXPECT_THAT(resp, AreDocIds("k1"));
+}
 }  // namespace dfly
