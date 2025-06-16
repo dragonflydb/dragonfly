@@ -625,19 +625,19 @@ TEST_F(DflyEngineTest, Bug496) {
         db.RegisterOnChange([&cb_hits](DbIndex, const DbSlice::ChangeReq&) { cb_hits++; });
 
     {
-      auto res = *db.AddOrFind({}, "key-1");
+      auto res = *db.AddOrFind({}, "key-1", std::nullopt);
       EXPECT_TRUE(res.is_new);
       EXPECT_EQ(cb_hits, 1);
     }
 
     {
-      auto res = *db.AddOrFind({}, "key-1");
+      auto res = *db.AddOrFind({}, "key-1", std::nullopt);
       EXPECT_FALSE(res.is_new);
       EXPECT_EQ(cb_hits, 2);
     }
 
     {
-      auto res = *db.AddOrFind({}, "key-2");
+      auto res = *db.AddOrFind({}, "key-2", std::nullopt);
       EXPECT_TRUE(res.is_new);
       EXPECT_EQ(cb_hits, 3);
     }

@@ -194,7 +194,7 @@ OpResult<TResult<size_t>> OpSetRange(const OpArgs& op_args, string_view key, siz
     return OpStrLen(op_args, key);
   }
 
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_STRING);
   RETURN_ON_BAD_STATUS(op_res);
   auto& res = *op_res;
 
@@ -206,8 +206,6 @@ OpResult<TResult<size_t>> OpSetRange(const OpArgs& op_args, string_view key, siz
         })};
   } else {
     string value;
-    if (!res.is_new && res.it->second.ObjType() != OBJ_STRING)
-      return OpStatus::WRONG_TYPE;
 
     if (!res.is_new)
       value = GetString(res.it->second);
@@ -294,7 +292,7 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
 OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val) {
   auto& db_slice = op_args.GetDbSlice();
 
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_STRING);
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
@@ -306,9 +304,6 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
 
     return val;
   }
-
-  if (add_res.it->second.ObjType() != OBJ_STRING)
-    return OpStatus::WRONG_TYPE;
 
   if (add_res.it->second.Size() == 0)
     return OpStatus::INVALID_FLOAT;
@@ -634,16 +629,13 @@ MGetResponse OpMGet(fb2::BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
 OpResult<TResult<size_t>> OpExtend(const OpArgs& op_args, std::string_view key,
                                    std::string_view value, bool prepend) {
   auto* shard = op_args.shard;
-  auto it_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key);
+  auto it_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key, OBJ_STRING);
   RETURN_ON_BAD_STATUS(it_res);
 
   if (it_res->is_new) {
     it_res->it->second.SetString(value);
     return {it_res->it->second.Size()};
   }
-
-  if (it_res->it->second.ObjType() != OBJ_STRING)
-    return OpStatus::WRONG_TYPE;
 
   if (const PrimeValue& pv = it_res->it->second; pv.IsExternal()) {
     auto modf = [value = string{value}, prepend](std::string* v) {
@@ -843,7 +835,8 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
     }
   }
 
-  auto op_res = db_slice.AddOrFind(op_args_.db_cntx, key);
+  // We can use std::nullopt here because SET command can change the key type to string
+  auto op_res = db_slice.AddOrFind(op_args_.db_cntx, key, std::nullopt);
   RETURN_ON_BAD_STATUS(op_res);
 
   if (!op_res->is_new) {

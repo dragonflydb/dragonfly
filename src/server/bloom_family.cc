@@ -10,6 +10,7 @@
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
+#include "server/error.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -36,9 +37,9 @@ using ExistsResult = absl::InlinedVector<bool, 4>;
 
 OpStatus OpReserve(const SbfParams& params, const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.GetDbSlice();
-  OpResult op_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  if (!op_res)
-    return op_res.status();
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_SBF);
+  RETURN_ON_BAD_STATUS(op_res);
+
   if (!op_res->is_new)
     return OpStatus::KEY_EXISTS;
 
@@ -52,16 +53,13 @@ OpStatus OpReserve(const SbfParams& params, const OpArgs& op_args, string_view k
 OpResult<AddResult> OpAdd(const OpArgs& op_args, string_view key, CmdArgList items) {
   auto& db_slice = op_args.GetDbSlice();
 
-  OpResult op_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  if (!op_res)
-    return op_res.status();
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_SBF);
+  RETURN_ON_BAD_STATUS(op_res);
+
   PrimeValue& pv = op_res->it->second;
 
   if (op_res->is_new) {
     pv.SetSBF(0, kDefaultFpProb, kDefaultGrowFactor);
-  } else {
-    if (op_res->it->second.ObjType() != OBJ_SBF)
-      return OpStatus::WRONG_TYPE;
   }
 
   SBF* sbf = pv.GetSBF();

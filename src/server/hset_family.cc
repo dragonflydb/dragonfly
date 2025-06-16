@@ -170,7 +170,7 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
 
 OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, IncrByParam* param) {
   auto& db_slice = op_args.GetDbSlice();
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_HASH);
   RETURN_ON_BAD_STATUS(op_res);
   if (!op_res) {
     return op_res.status();
@@ -181,9 +181,6 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   if (add_res.is_new) {
     pv.InitRobj(OBJ_HASH, kEncodingListPack, lpNew(0));
   } else {
-    if (pv.ObjType() != OBJ_HASH)
-      return OpStatus::WRONG_TYPE;
-
     op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, add_res.it->second);
 
     if (pv.Encoding() == kEncodingListPack) {
@@ -675,7 +672,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   VLOG(2) << "OpSet(" << key << ")";
 
   auto& db_slice = op_args.GetDbSlice();
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_HASH);
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
@@ -691,9 +688,6 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
       pv.InitRobj(OBJ_HASH, kEncodingStrMap2, CompactObj::AllocateMR<StringMap>());
     }
   } else {
-    if (pv.ObjType() != OBJ_HASH)
-      return OpStatus::WRONG_TYPE;
-
     op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it->second);
   }
 

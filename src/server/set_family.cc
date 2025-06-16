@@ -452,7 +452,9 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
     return 0;
   }
 
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  // We can use std::nullopt here because we check the type later.
+  // If the overwrite is true, we will call InitSet that calles SetMeta
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, std::nullopt);
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
@@ -520,7 +522,7 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
                            const NewEntries& vals, bool keepttl) {
   auto& db_slice = op_args.GetDbSlice();
 
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_SET);
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
@@ -529,10 +531,6 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
   if (add_res.is_new) {
     StringSetWrapper::Init(&co);
   } else {
-    // for non-overwrite case it must be set.
-    if (co.ObjType() != OBJ_SET)
-      return OpStatus::WRONG_TYPE;
-
     // Update stats and trigger any handle the old value if needed.
     if (co.Encoding() == kEncodingIntSet) {
       intset* is = (intset*)co.RObjPtr();

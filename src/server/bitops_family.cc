@@ -254,6 +254,7 @@ bool SetBitValue(uint32_t offset, bool bit_value, string* entry) {
 // ------------------------------------------------------------------------- //
 
 class ElementAccess {
+ private:
   bool added_ = false;
   DbSlice::Iterator element_iter_;
   string_view key_;
@@ -262,6 +263,8 @@ class ElementAccess {
   mutable DbSlice::AutoUpdater post_updater_;
 
   void SetFields(EngineShard* shard, DbSlice::ItAndUpdater res);
+
+  OpStatus FindInternal(EngineShard* shard, bool allow_wrong_type);
 
  public:
   ElementAccess(string_view key, const OpArgs& args) : key_{key}, context_{args.db_cntx} {
@@ -305,26 +308,25 @@ void ElementAccess::SetFields(EngineShard* shard, DbSlice::ItAndUpdater res) {
   post_updater_ = std::move(res.post_updater);
 }
 
-OpStatus ElementAccess::Find(EngineShard* shard) {
-  auto op_res = context_.GetDbSlice(shard->shard_id()).AddOrFind(context_, key_);
+OpStatus ElementAccess::FindInternal(EngineShard* shard, bool allow_wrong_type) {
+  // If we allow wrong type, we use nullopt to indicate that we don't care about the type.
+  auto op_res =
+      context_.GetDbSlice(shard->shard_id())
+          .AddOrFind(context_, key_,
+                     !allow_wrong_type ? std::optional<unsigned>{OBJ_STRING} : std::nullopt);
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
-
-  if (!add_res.is_new && add_res.it->second.ObjType() != OBJ_STRING) {
-    return OpStatus::WRONG_TYPE;
-  }
 
   SetFields(shard, std::move(add_res));
   return OpStatus::OK;
 }
 
-OpStatus ElementAccess::FindAllowWrongType(EngineShard* shard) {
-  auto op_res = context_.GetDbSlice(shard->shard_id()).AddOrFind(context_, key_);
-  RETURN_ON_BAD_STATUS(op_res);
-  auto& add_res = *op_res;
+OpStatus ElementAccess::Find(EngineShard* shard) {
+  return FindInternal(shard, false);
+}
 
-  SetFields(shard, std::move(add_res));
-  return OpStatus::OK;
+OpStatus ElementAccess::FindAllowWrongType(EngineShard* shard) {
+  return FindInternal(shard, true);
 }
 
 string ElementAccess::Value() const {
