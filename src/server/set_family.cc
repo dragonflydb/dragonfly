@@ -1025,7 +1025,7 @@ void SMIsMember(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto members = args.subspan(1);
 
-  vector<long> memberships(members.size());
+  vector<int32_t> memberships(members.size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     DbContext db_cntx = t->GetDbContext();
