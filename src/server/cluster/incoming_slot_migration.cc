@@ -10,6 +10,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "cluster_utility.h"
+#include "facade/service_interface.h"
 #include "facade/socket_utils.h"
 #include "server/error.h"
 #include "server/journal/executor.h"
@@ -149,7 +150,7 @@ class ClusterShardMigration {
     }
 
     if (!tx_data.IsGlobalCmd()) {
-      auto res = executor_.Execute(tx_data.dbid, tx_data.command);
+      facade::DispatchResult res = executor_.Execute(tx_data.dbid, tx_data.command);
       return res == facade::DispatchResult::OOM ? make_error_code(errc::not_enough_memory)
                                                 : error_code();
     } else {
