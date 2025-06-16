@@ -72,7 +72,7 @@ Dfs Dfs::Traverse(absl::Span<const PathSegment> path, const JsonType& root, cons
 }
 
 Dfs Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callback, JsonType* json,
-                bool reverse_traversal) {
+                bool deletion_mode) {
   DCHECK(!path.empty());
 
   Dfs dfs;
@@ -128,7 +128,41 @@ Dfs Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callba
 
   // Apply mutations after DFS traversal is complete
   const PathSegment& terminal_segment = path.back();
-  if (reverse_traversal) {
+
+  // For deletion operations with DESCENT and IDENTIFIER, remove direct parent-child duplicates
+  // where deleting the parent would automatically delete the child with the same key name
+  if (deletion_mode && path.size() > 1 &&
+      std::any_of(path.begin(), path.end() - 1,
+                  [](const PathSegment& seg) { return seg.type() == SegmentType::DESCENT; }) &&
+      terminal_segment.type() == SegmentType::IDENTIFIER && nodes_to_mutate.size() > 1) {
+    const std::string& target_key = terminal_segment.identifier();
+    std::vector<JsonType*> filtered_nodes;
+
+    for (JsonType* candidate : nodes_to_mutate) {
+      bool is_direct_child_of_another = false;
+
+      for (JsonType* potential_parent : nodes_to_mutate) {
+        if (candidate != potential_parent && potential_parent->is_object()) {
+          // Check if potential_parent directly contains candidate as value of target_key
+          auto it = potential_parent->find(target_key);
+          if (it != potential_parent->object_range().end() && &(it->value()) == candidate) {
+            is_direct_child_of_another = true;
+            break;
+          }
+        }
+      }
+
+      if (!is_direct_child_of_another) {
+        filtered_nodes.push_back(candidate);
+      }
+    }
+
+    if (!filtered_nodes.empty()) {
+      nodes_to_mutate = std::move(filtered_nodes);
+    }
+  }
+
+  if (deletion_mode) {
     // This ensures that deeper mutations don't affect shallower ones by iterating in reverse
     for (auto it = nodes_to_mutate.rbegin(); it != nodes_to_mutate.rend(); ++it) {
       dfs.MutateStep(terminal_segment, callback, *it);

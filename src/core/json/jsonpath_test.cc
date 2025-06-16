@@ -618,7 +618,7 @@ TYPED_TEST(JsonPathTest, MutateDeleteNestedWithSameKey) {
   };
 
   if constexpr (std::is_same_v<TypeParam, JsonType>) {
-    unsigned reported_matches = MutatePath(path, delete_cb, &json, true /* reverse_traversal */);
+    unsigned reported_matches = MutatePath(path, delete_cb, &json, true /* deletion_mode */);
 
     // Verify that exactly 2 elements were deleted
     EXPECT_EQ(2, deleted_count);
@@ -630,8 +630,7 @@ TYPED_TEST(JsonPathTest, MutateDeleteNestedWithSameKey) {
     EXPECT_EQ(expected, json);
   } else {
     flexbuffers::Builder fbb;
-    unsigned reported_matches =
-        MutatePath(path, delete_cb, json, &fbb, true /* reverse_traversal */);
+    unsigned reported_matches = MutatePath(path, delete_cb, json, &fbb, true /* deletion_mode */);
 
     // Verify that exactly 2 elements were deleted
     EXPECT_EQ(2, deleted_count);
