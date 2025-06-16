@@ -1254,6 +1254,10 @@ OpResult<unsigned> OpCount(const OpArgs& op_args, std::string_view key,
   zrangespec range = GetZrangeSpec(false, interval);
   unsigned count = 0;
 
+  if (range.min > range.max) {
+    return 0;
+  }
+
   if (IsListPack(robj_wrapper)) {
     uint8_t* zl = (uint8_t*)robj_wrapper->inner_obj();
     uint8_t *eptr, *sptr;

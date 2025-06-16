@@ -281,6 +281,11 @@ class Connection : public util::Connection {
     return name_;
   }
 
+  // Returns protocol type of this connection
+  Protocol GetProtocol() const {
+    return protocol_;
+  }
+
   struct MemoryUsage {
     size_t mem = 0;
     io::IoBuf::MemoryUsage buf_mem;
@@ -482,6 +487,9 @@ class Connection : public util::Connection {
       bool migration_enabled_ : 1;
       bool migration_in_process_ : 1;
       bool is_http_ : 1;
+
+      // whether the connection is TLS. We can be sure our socket is TlsSocket
+      // if the flag is set.
       bool is_tls_ : 1;
       bool recv_provided_ : 1;
       bool is_main_ : 1;

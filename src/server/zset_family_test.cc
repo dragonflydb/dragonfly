@@ -814,7 +814,7 @@ TEST_F(ZSetFamilyTest, ZMPopInvalidSyntax) {
 
   // Zero keys.
   resp = Run({"zmpop", "0", "MIN", "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
 
   // Number of keys not uint.
   resp = Run({"zmpop", "aa", "a", "MIN"});
@@ -1216,6 +1216,17 @@ TEST_F(ZSetFamilyTest, ZRangeZeroElements) {
   Run({"zadd", "myzset", "1", "one"});
   auto resp = Run({"ZRANGE", "myzset", "0", "-1", "LIMIT", "2", "10"});
   ASSERT_THAT(resp, ArrLen(0));
+}
+
+TEST_F(ZSetFamilyTest, ZCountMinGreaterThanMaxCrash) {
+  // Add 1000 members to the sorted set
+  for (int i = 1; i <= 1000; ++i) {
+    Run({"zadd", "huge_key", absl::StrCat(i), absl::StrCat("member", i)});
+  }
+
+  // Expect ZCOUNT to return 0 when min > max
+  auto resp = Run({"zcount", "huge_key", "945", "261"});
+  EXPECT_THAT(resp, IntArg(0));
 }
 
 }  // namespace dfly

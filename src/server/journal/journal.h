@@ -39,6 +39,9 @@ class Journal {
 
   void SetFlushMode(bool allow_flush);
 
+  size_t LsnBufferSize() const;
+  size_t LsnBufferBytes() const;
+
  private:
   mutable util::fb2::Mutex state_mu_;
 };
@@ -46,7 +49,7 @@ class Journal {
 class JournalFlushGuard {
  public:
   explicit JournalFlushGuard(Journal* journal) : journal_(journal) {
-    if (journal_) {
+    if (journal_ && counter_ == 0) {
       journal_->SetFlushMode(false);
     }
     util::fb2::detail::EnterFiberAtomicSection();

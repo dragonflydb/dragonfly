@@ -21,13 +21,15 @@ class Connection;
 class SinkReplyBuilder;
 class MCReplyBuilder;
 
+enum class DispatchResult { OK, OOM, ERROR };
+
 class ServiceInterface {
  public:
   virtual ~ServiceInterface() {
   }
 
-  virtual void DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
-                               ConnectionContext* cntx) = 0;
+  virtual DispatchResult DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
+                                         ConnectionContext* cntx) = 0;
 
   // Returns number of processed commands
   virtual size_t DispatchManyCommands(absl::Span<ArgSlice> args_list, SinkReplyBuilder* builder,

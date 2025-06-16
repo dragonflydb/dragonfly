@@ -300,24 +300,15 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     flow.eof_token = eof_token;
     flow.version = replica_ptr->version;
 
-#if 0  // Partial synchronization is disabled
-  if (seqid.has_value()) {
-    if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
-      // This does not guarantee the lsn will still be present when DFLY SYNC runs,
-      // replication will be retried if it gets evicted by then.
-      flow.start_partial_sync_at = *seqid;
-      VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
-              << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
-      sync_type = "PARTIAL";
-    } else {
-      LOG(INFO) << "Partial sync requested from stale LSN=" << *seqid
-                << " that the replication buffer doesn't contain this anymore (current_lsn="
-                << sf_->journal()->GetLsn() << "). Will perform a full sync of the data.";
-      LOG(INFO) << "If this happens often you can control the replication buffer's size with the "
-                   "--shard_repl_backlog_len option";
+    if (!cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
+      // Listener::PreShutdown() triggered
+      if (cntx->conn()->socket()->IsOpen()) {
+        return rb->SendError(kInvalidState);
+      }
+      return;
     }
-  }
-#endif
+
+    sf_->journal()->StartInThread();
 
     std::optional<Replica::LastMasterSyncData> data = sf_->GetLastMasterData();
     // In this flow the master and the registered replica where synced from the same master.
@@ -343,17 +334,22 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
         VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
                 << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
       }
+    } else if (seqid.has_value()) {
+      if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
+        auto& flow = replica_ptr->flows[flow_id];
+        flow.start_partial_sync_at = *seqid;
+        VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
+                << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
+        sync_type = "PARTIAL";
+      } else {
+        LOG(INFO) << "Partial sync requested from stale LSN=" << *seqid
+                  << " that the replication buffer doesn't contain this anymore (current_lsn="
+                  << sf_->journal()->GetLsn() << "). Will perform a full sync of the data.";
+        LOG(INFO) << "If this happens often you can control the replication buffer's size with the "
+                     "--shard_repl_backlog_len option";
+      }
     }
   }
-
-  if (!cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
-    // Listener::PreShutdown() triggered
-    if (cntx->conn()->socket()->IsOpen()) {
-      return rb->SendError(kInvalidState);
-    }
-    return;
-  }
-  sf_->journal()->StartInThread();
 
   rb->StartArray(2);
   rb->SendSimpleString(sync_type);

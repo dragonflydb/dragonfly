@@ -23,6 +23,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/glob_matcher.h"
+#include "core/huff_coder.h"
 #include "core/intent_lock.h"
 #include "core/tx_queue.h"
 
@@ -186,6 +187,80 @@ TEST_F(StringMatchTest, Special) {
   EXPECT_TRUE(MatchLen("[$?^]a", "?a", 0));
   EXPECT_TRUE(MatchLen("abc[\\d]e", "abcde", 0));
   EXPECT_TRUE(MatchLen("foo\\", "foo\\", 0));
+}
+
+class HuffCoderTest : public ::testing::Test {
+ protected:
+  HuffmanEncoder encoder_;
+  HuffmanDecoder decoder_;
+  string error_msg_;
+  const string_view good_table_{
+      "\x1b\x10\xd8\n\n\x19\xc6\x0c\xc3\x30\x0c\x43\x1e\x93\xe4\x11roB\xf6\xde\xbb\x18V\xc2Zk\x03"sv};
+};
+
+TEST_F(HuffCoderTest, Load) {
+  string data("bad");
+
+  ASSERT_FALSE(encoder_.Load(data, &error_msg_));
+
+  data = good_table_;
+  ASSERT_TRUE(encoder_.Load(data, &error_msg_)) << error_msg_;
+
+  data.append("foo");
+  encoder_.Reset();
+  ASSERT_FALSE(encoder_.Load(data, &error_msg_));
+}
+
+TEST_F(HuffCoderTest, Encode) {
+  ASSERT_TRUE(encoder_.Load(good_table_, &error_msg_)) << error_msg_;
+
+  EXPECT_EQ(1, encoder_.GetNBits('x'));
+  EXPECT_EQ(3, encoder_.GetNBits(':'));
+  EXPECT_EQ(5, encoder_.GetNBits('2'));
+  EXPECT_EQ(5, encoder_.GetNBits('3'));
+
+  string data("x:23xx");
+
+  array<uint8_t, 100> dest;
+  uint32_t dest_size = dest.size();
+  ASSERT_TRUE(encoder_.Encode(data, dest.data(), &dest_size, &error_msg_));
+  ASSERT_EQ(3, dest_size);
+
+  // testing small destination buffer.
+  data = "3333333333333333333";
+  dest_size = 16;
+  EXPECT_TRUE(encoder_.Encode(data, dest.data(), &dest_size, &error_msg_));
+
+  // destination too small
+  ASSERT_EQ(0, dest_size);
+  ASSERT_EQ("", error_msg_);
+}
+
+TEST_F(HuffCoderTest, Decode) {
+  array<unsigned, 256> hist;
+  hist.fill(1);
+  hist['a'] = 100;
+  hist['b'] = 50;
+
+  ASSERT_TRUE(encoder_.Build(hist.data(), hist.size() - 1, &error_msg_));
+  string data("aab");
+
+  array<uint8_t, 100> encoded{0};
+  uint32_t encoded_size = encoded.size();
+  ASSERT_TRUE(encoder_.Encode(data, encoded.data(), &encoded_size, &error_msg_));
+  ASSERT_EQ(1, encoded_size);
+
+  EXPECT_EQ(2, encoder_.GetNBits('a'));
+  EXPECT_EQ(3, encoder_.GetNBits('b'));
+
+  string bindata = encoder_.Export();
+  ASSERT_TRUE(decoder_.Load(bindata, &error_msg_)) << error_msg_;
+
+  const char* src_ptr = reinterpret_cast<const char*>(encoded.data());
+  array<char, 100> decode_dest{0};
+  size_t decoded_size = data.size();
+  ASSERT_TRUE(decoder_.Decode({src_ptr, encoded_size}, decoded_size, decode_dest.data()));
+  ASSERT_EQ("aab", string_view(decode_dest.data(), decoded_size));
 }
 
 using benchmark::DoNotOptimize;

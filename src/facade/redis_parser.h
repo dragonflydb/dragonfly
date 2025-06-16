@@ -85,6 +85,7 @@ class RedisParser {
 
   void HandleFinishArg();
   void ExtendLastString(Buffer str);
+  void ExtendBulkString(Buffer str);
 
   enum State : uint8_t {
     INLINE_S,

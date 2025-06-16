@@ -225,7 +225,7 @@ class Transaction {
 
   // Cancel all blocking watches. Set COORD_CANCELLED.
   // Must be called from coordinator thread.
-  void CancelBlocking(std::function<OpStatus(ArgSlice)>);
+  void CancelBlocking(const std::function<OpStatus(ArgSlice)>&);
 
   // Prepare a squashed hop on given shards.
   // Only compatible with multi modes that acquire all locks ahead - global and lock_ahead.
@@ -351,9 +351,6 @@ class Transaction {
 
   // Get keys multi transaction was initialized with, normalized and unique
   const absl::flat_hash_set<std::pair<ShardId, LockFp>>& GetMultiFps() const;
-
-  // Print in-dept failure state for debugging.
-  std::string DEBUG_PrintFailState(ShardId sid) const;
 
   uint32_t DEBUG_GetTxqPosInShard(ShardId sid) const {
     return shard_data_[SidToId(sid)].pq_pos;

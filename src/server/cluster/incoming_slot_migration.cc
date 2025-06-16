@@ -10,6 +10,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "cluster_utility.h"
+#include "facade/socket_utils.h"
 #include "server/error.h"
 #include "server/journal/executor.h"
 #include "server/journal/tx_executor.h"
@@ -67,6 +68,11 @@ class ClusterShardMigration {
 
       auto tx_data = tx_reader.NextTxData(&reader, cntx);
       if (!tx_data) {
+        if (auto err = cntx->GetError(); err) {
+          LOG(WARNING) << "Error reading from migration socket for shard " << source_shard_id_
+                       << ": " << err.Format()
+                       << ", socket state: " << GetSocketInfo(source->native_handle());
+        }
         break;
       }
 
@@ -77,6 +83,11 @@ class ClusterShardMigration {
         // if we get new data, attempt is failed
         if (tx_data = tx_reader.NextTxData(&reader, cntx); !tx_data) {
           VLOG(1) << "Finalized flow " << source_shard_id_;
+          return;
+        }
+        if (in_migration_->GetState() == MigrationState::C_FATAL) {
+          VLOG(1) << "Flow finalization " << source_shard_id_
+                  << " canceled due memory limit reached";
           return;
         }
         if (!tx_data->command.cmd_args.empty()) {
@@ -92,7 +103,13 @@ class ClusterShardMigration {
       if (tx_data->opcode == journal::Op::PING) {
         // TODO check about ping logic
       } else {
-        ExecuteTx(std::move(*tx_data), cntx);
+        auto err = ExecuteTx(std::move(*tx_data), cntx);
+        // Break incoming slot migration if command reported OOM
+        if (err == std::errc::not_enough_memory) {
+          cntx->ReportError(std::string{kIncomingMigrationOOM});
+          in_migration_->ReportFatalError(std::string{kIncomingMigrationOOM});
+          break;
+        }
       }
     }
 
@@ -105,7 +122,10 @@ class ClusterShardMigration {
     if (socket_ != nullptr) {
       return socket_->proactor()->Await([s = socket_]() {
         if (s->IsOpen()) {
-          return s->Shutdown(SHUT_RDWR);  // Does not Close(), only forbids further I/O.
+          auto ec = s->Shutdown(SHUT_RDWR);  // Does not Close(), only forbids further I/O.
+          LOG_IF(WARNING, ec) << "Error shutting down socket for shard migration: " << ec.message()
+                              << ", socket state: " << GetSocketInfo(s->native_handle());
+          return ec;
         }
         return std::error_code();
       });
@@ -123,12 +143,13 @@ class ClusterShardMigration {
   }
 
  private:
-  void ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx) {
+  std::error_code ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx) {
     if (!cntx->IsRunning()) {
-      return;
+      return {};
     }
+
     if (!tx_data.IsGlobalCmd()) {
-      executor_.Execute(tx_data.dbid, tx_data.command);
+      return executor_.Execute(tx_data.dbid, tx_data.command);
     } else {
       // TODO check which global commands should be supported
       std::string error =
@@ -138,6 +159,8 @@ class ClusterShardMigration {
       cntx->ReportError(error);
       in_migration_->ReportError(error);
     }
+
+    return {};
   }
 
   uint32_t source_shard_id_;
@@ -181,6 +204,11 @@ bool IncomingSlotMigration::Join(long attempt) {
       return false;
     }
 
+    // If any of migration shards reported ERROR (OOM) we can return error
+    if (GetState() == MigrationState::C_FATAL) {
+      return false;
+    }
+
     // if data was sent after LSN, WaitFor() always returns false so to reduce wait time
     // we check current state and if WaitFor false but GetLastAttempt() == attempt
     // the Join is failed and we can return false
@@ -218,6 +246,11 @@ void IncomingSlotMigration::Stop() {
     }
   }
 
+  // Don't wait if we reached FATAL state
+  if (state_ == MigrationState::C_FATAL) {
+    return;
+  }
+
   // we need to Join the migration process to prevent data corruption
   const absl::Time start = absl::Now();
   const absl::Duration timeout =
@@ -251,7 +284,12 @@ void IncomingSlotMigration::Init(uint32_t shards_num) {
 
 void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
   shard_flows_[shard]->Start(&cntx_, source);
-  VLOG(1) << "Incoming flow " << shard << " finished for " << source_id_;
+  VLOG(1) << "Incoming flow " << shard
+          << (GetState() == MigrationState::C_FINISHED ? " finished " : " cancelled ") << "for "
+          << source_id_;
+  if (GetState() == MigrationState::C_FATAL) {
+    Stop();
+  }
 }
 
 size_t IncomingSlotMigration::GetKeyCount() const {

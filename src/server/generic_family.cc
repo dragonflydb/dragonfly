@@ -14,6 +14,7 @@ extern "C" {
 #include "redis/crc64.h"
 }
 
+#include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "redis/rdb.h"
@@ -33,6 +34,7 @@ extern "C" {
 #include "server/set_family.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "util/fibers/fibers.h"
 #include "util/fibers/future.h"
 #include "util/varz.h"
 
@@ -616,6 +618,10 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
   if (!matches)
     return false;
 
+  if (opts.min_malloc_size > 0 && it->second.MallocUsed() < opts.min_malloc_size) {
+    return false;
+  }
+
   if (opts.bucket_id != UINT_MAX && opts.bucket_id != it.GetInnerIt().bucket_id()) {
     return false;
   }
@@ -623,7 +629,7 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
   if (!opts.Matches(it.key())) {
     return false;
   }
-  res->push_back(string(it.key()));
+  res->emplace_back(it.key());
 
   return true;
 }
@@ -644,20 +650,22 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   VLOG(1) << "PrimeTable " << db_slice.shard_id() << "/" << op_args.db_cntx.db_index << " has "
           << db_slice.DbSize(op_args.db_cntx.db_index);
 
-  PrimeTable::Cursor cur = *cursor;
+  PrimeTable::Cursor cur{*cursor};
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
 
-  const auto start = absl::Now();
+  const auto start_cycles = base::CycleClock::Now();
   // Don't allow it to monopolize cpu time.
-  const absl::Duration timeout = absl::Milliseconds(10);
+  // Approximately 15 microseconds.
+  const uint64_t timeout_cycles = base::CycleClock::Frequency() >> 16;
 
   do {
     cur = prime_table->Traverse(
         cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, vec); });
-  } while (cur && cnt < scan_opts.limit && (absl::Now() - start) < timeout);
+  } while (cur && cnt < scan_opts.limit &&
+           (base::CycleClock::Now() - start_cycles) < timeout_cycles);
 
-  VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();
-  *cursor = cur.value();
+  VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.token();
+  *cursor = cur.token();
 }
 
 uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys,
@@ -666,7 +674,7 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
 
   EngineShardSet* ess = shard_set;
   unsigned shard_count = ess->size();
-  constexpr uint64_t kMaxScanTimeMs = 100;
+  constexpr uint64_t kMaxScanTimeMs = 25;
 
   // Dash table returns a cursor with its right byte empty. We will use it
   // for encoding shard index. For now scan has a limitation of 255 shards.
@@ -686,10 +694,12 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
     };
 
     // Avoid deadlocking, if called from shard queue script
-    if (EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == sid)
+    if (EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == sid) {
       cb();
-    else
+      util::ThisFiber::Yield();
+    } else {
       ess->Await(sid, cb);
+    }
 
     if (cursor == 0) {
       ++sid;
@@ -1636,7 +1646,17 @@ void GenericFamily::Move(CmdArgList args, const CommandContext& cmd_cntx) {
 
 void GenericFamily::Rename(CmdArgList args, const CommandContext& cmd_cntx) {
   auto reply = RenameGeneric(args, false, cmd_cntx.tx);
-  cmd_cntx.rb->SendError(reply);
+
+  if (!reply.status) {
+    return cmd_cntx.rb->SendError(reply);
+  }
+
+  OpStatus st = reply.status.value();
+  if (st == OpStatus::OK) {
+    cmd_cntx.rb->SendOk();
+  } else {
+    cmd_cntx.rb->SendError(reply);
+  }
 }
 
 void GenericFamily::RenameNx(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -1672,7 +1692,22 @@ void GenericFamily::Copy(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   Renamer renamer(cmd_cntx.tx, k1, k2, shard_set->size(), true);
-  cmd_cntx.rb->SendError(renamer.Rename(!replace));
+  auto reply = renamer.Rename(!replace);
+
+  if (!reply.status) {
+    return cmd_cntx.rb->SendError(reply);
+  }
+
+  OpStatus st = reply.status.value();
+  if (st == OpStatus::OK) {
+    cmd_cntx.rb->SendLong(1);
+  } else if (st == OpStatus::KEY_EXISTS) {
+    cmd_cntx.rb->SendLong(0);
+  } else if (st == OpStatus::KEY_NOTFOUND) {
+    cmd_cntx.rb->SendLong(0);
+  } else {
+    cmd_cntx.rb->SendError(reply);
+  }
 }
 
 void GenericFamily::ExpireTime(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -1782,12 +1817,25 @@ void GenericFamily::Echo(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 // SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [BUCKET <bucket_id>]
-// [ATTR <mask>]
+// [ATTR <mask>] [MLCGE <len>]
 void GenericFamily::Scan(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view token = ArgS(args, 0);
   uint64_t cursor = 0;
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   if (!absl::SimpleAtoi(token, &cursor)) {
+    if (absl::EqualsIgnoreCase(token, "HELP")) {
+      string_view help_arr[] = {
+          "SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [ATTR <mask>] [MINMSZ <len>]",
+          "    MATCH <glob> - pattern to match keys against",
+          "    TYPE <type> - type of values to match",
+          "    COUNT <count> - number of keys to return",
+          "    ATTR <v|p|a|u> - filter by attributes: v - volatile (ttl), ",
+          "    p - persistent (no ttl), a - accessed since creation, u - untouched",
+          "    MINMSZ <len> - keeps keys with values, whose allocated size is greater or equal to",
+          "        the specified length",
+      };
+      return builder->SendSimpleStrArr(help_arr);
+    }
     return builder->SendError("invalid cursor");
   }
 
@@ -1849,7 +1897,7 @@ void GenericFamily::RandomKey(CmdArgList args, const CommandContext& cmd_cntx) {
           }
           uint64_t cursor = 0;  // scans from the start of the shard after reaching kMaxAttemps
           if (i < kMaxAttempts) {
-            cursor = prime_table->GetRandomCursor(&bitgen).value();
+            cursor = prime_table->GetRandomCursor(&bitgen).token();
           }
           OpScan({shard, 0u, db_cntx}, scan_opts, &cursor, candidates);
         }

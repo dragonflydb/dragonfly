@@ -115,22 +115,22 @@ struct IndexResult {
 };
 
 struct ProfileBuilder {
+  struct NodeFormatter {
+    template <TagType T> void operator()(std::string* out, const AstAffixNode<T>& node) const {
+      out->append(node.affix);
+    }
+    void operator()(std::string* out, const AstTagsNode::TagValue& value) const {
+      visit([this, out](const auto& n) { this->operator()(out, n); }, value);
+    }
+  };
+
   string GetNodeInfo(const AstNode& node) {
-    struct NodeFormatter {
-      void operator()(std::string* out, const AstPrefixNode& node) const {
-        out->append(node.prefix);
-      }
-      void operator()(std::string* out, const AstTermNode& node) const {
-        out->append(node.term);
-      }
-      void operator()(std::string* out, const AstTagsNode::TagValue& value) const {
-        visit([this, out](const auto& n) { this->operator()(out, n); }, value);
-      }
-    };
     Overloaded node_info{
         [](monostate) -> string { return ""s; },
-        [](const AstTermNode& n) { return absl::StrCat("Term{", n.term, "}"); },
-        [](const AstPrefixNode& n) { return absl::StrCat("Prefix{", n.prefix, "}"); },
+        [](const AstTermNode& n) { return absl::StrCat("Term{", n.affix, "}"); },
+        [](const AstPrefixNode& n) { return absl::StrCat("Prefix{", n.affix, "}"); },
+        [](const AstSuffixNode& n) { return absl::StrCat("Suffix{", n.affix, "}"); },
+        [](const AstInfixNode& n) { return absl::StrCat("Infix{", n.affix, "}"); },
         [](const AstRangeNode& n) { return absl::StrCat("Range{", n.lo, "<>", n.hi, "}"); },
         [](const AstLogicalNode& n) {
           auto op = n.op == AstLogicalNode::AND ? "and" : "or";
@@ -268,6 +268,20 @@ struct BasicSearch {
     return result;
   }
 
+  template <typename C>
+  IndexResult CollectSuffixMatches(BaseStringIndex<C>* index, std::string_view suffix) {
+    // TODO: Implement full text search for suffix
+    error_ = "Not implemented";
+    return IndexResult{};
+  }
+
+  template <typename C>
+  IndexResult CollectInfixMatches(BaseStringIndex<C>* index, std::string_view infix) {
+    // TODO: Implement full text search for infix
+    error_ = "Not implemented";
+    return IndexResult{};
+  }
+
   IndexResult Search(monostate, string_view) {
     return vector<DocId>{};
   }
@@ -279,7 +293,7 @@ struct BasicSearch {
 
   // "term": access field's text index or unify results from all text indices if no field is set
   IndexResult Search(const AstTermNode& node, string_view active_field) {
-    std::string term = node.term;
+    std::string term = node.affix;
     bool strip_whitespace = true;
 
     if (auto synonyms = indices_->GetSynonyms(); synonyms) {
@@ -341,9 +355,21 @@ struct BasicSearch {
     }
 
     auto mapping = [&node, this](TextIndex* index) {
-      return CollectPrefixMatches(index, node.prefix);
+      return CollectPrefixMatches(index, node.affix);
     };
     return UnifyResults(GetSubResults(indices, mapping), LogicOp::OR);
+  }
+
+  IndexResult Search(const AstSuffixNode& node, string_view active_field) {
+    // TODO: Implement full text search for suffix
+    error_ = "Not implemented";
+    return IndexResult{};
+  }
+
+  IndexResult Search(const AstInfixNode& node, string_view active_field) {
+    // TODO: Implement full text search for infix
+    error_ = "Not implemented";
+    return IndexResult{};
   }
 
   // [range]: access field's numeric index
@@ -388,10 +414,16 @@ struct BasicSearch {
       return IndexResult{};
 
     Overloaded ov{[tag_index](const AstTermNode& term) -> IndexResult {
-                    return tag_index->Matching(term.term);
+                    return tag_index->Matching(term.affix);
                   },
                   [tag_index, this](const AstPrefixNode& prefix) {
-                    return CollectPrefixMatches(tag_index, prefix.prefix);
+                    return CollectPrefixMatches(tag_index, prefix.affix);
+                  },
+                  [tag_index, this](const AstSuffixNode& suffix) {
+                    return CollectSuffixMatches(tag_index, suffix.affix);
+                  },
+                  [tag_index, this](const AstInfixNode& infix) {
+                    return CollectInfixMatches(tag_index, infix.affix);
                   }};
     auto mapping = [ov](const auto& tag) { return visit(ov, tag); };
     return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);

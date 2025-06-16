@@ -1328,9 +1328,10 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             m.coordinator_stats.multi_squash_exec_reply_usec * 1e-6,
                             MetricType::COUNTER, &resp->body());
 
-  AppendMetricWithoutLabels("commands_squashing_replies_bytes", "",
-                            MultiCommandSquasher::GetRepliesMemSize(), MetricType::GAUGE,
-                            &resp->body());
+  AppendMetricWithoutLabels(
+      "commands_squashing_replies_bytes", "",
+      m.facade_stats.reply_stats.squashing_current_reply_size.load(memory_order_relaxed),
+      MetricType::GAUGE, &resp->body());
   string connections_libs;
   AppendMetricHeader("connections_libs", "Total number of connections by libname:ver",
                      MetricType::GAUGE, &connections_libs);
@@ -1418,8 +1419,16 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("used_memory_lua", "", m.lua_stats.used_bytes, MetricType::GAUGE,
                             &resp->body());
+  AppendMetricWithoutLabels("freed_memory_lua", "", m.lua_stats.gc_freed_memory,
+                            MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("lua_blocked_total", "", m.lua_stats.blocked_cnt, MetricType::COUNTER,
                             &resp->body());
+  AppendMetricWithoutLabels("lua_gc_interpreter_return", "", m.lua_stats.interpreter_return,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("lua_force_gc_calls", "", m.lua_stats.force_gc_calls,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("lua_gc_duration_total_sec", "", m.lua_stats.gc_duration_ns * 1e-9,
+                            MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("backups_total", "", m.loading_stats.backup_count, MetricType::COUNTER,
                             &resp->body());
@@ -1707,7 +1716,8 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
 }
 
 GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts,
-                                               Transaction* trans, bool ignore_state) {
+                                               Transaction* trans, DoSaveCheckAndStartOpts opts) {
+  auto [ignore_state, bg_save] = opts;
   auto state = ServerState::tlocal()->gstate();
 
   // In some cases we want to create a snapshot even if server is not active, f.e in takeover
@@ -1728,7 +1738,7 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
 
     save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
         save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
-        &service_, fq_threadpool_.get(), snapshot_storage});
+        &service_, fq_threadpool_.get(), snapshot_storage, opts.bg_save});
 
     auto res = save_controller_->InitResourcesAndStart();
 
@@ -1736,8 +1746,13 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
       DCHECK_EQ(res->error, true);
       last_save_info_.SetLastSaveError(*res);
       save_controller_.reset();
+      if (bg_save) {
+        last_save_info_.last_bgsave_status = false;
+      }
       return res->error;
     }
+
+    last_save_info_.bgsave_in_progress = bg_save;
   }
   return {};
 }
@@ -1750,6 +1765,11 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   {
     util::fb2::LockGuard lk(save_mu_);
     save_info = save_controller_->Finalize();
+
+    if (save_controller_->IsBgSave()) {
+      last_save_info_.bgsave_in_progress = false;
+      last_save_info_.last_bgsave_status = !save_info.error;
+    }
 
     if (save_info.error) {
       last_save_info_.SetLastSaveError(save_info);
@@ -1767,7 +1787,8 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
 
 GenericError ServerFamily::DoSave(const SaveCmdOptions& save_cmd_opts, Transaction* trans,
                                   bool ignore_state) {
-  if (auto ec = DoSaveCheckAndStart(save_cmd_opts, trans, ignore_state); ec) {
+  DoSaveCheckAndStartOpts opts{.ignore_state = ignore_state};
+  if (auto ec = DoSaveCheckAndStart(save_cmd_opts, trans, opts); ec) {
     return ec;
   }
 
@@ -2182,7 +2203,8 @@ void ServerFamily::BgSave(CmdArgList args, const CommandContext& cmd_cntx) {
     return;
   }
 
-  if (auto ec = DoSaveCheckAndStart(*maybe_res, cmd_cntx.tx); ec) {
+  DoSaveCheckAndStartOpts opts{.bg_save = true};
+  if (auto ec = DoSaveCheckAndStart(*maybe_res, cmd_cntx.tx, opts); ec) {
     cmd_cntx.rb->SendError(ec.Format());
     return;
   }
@@ -2288,6 +2310,11 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
     result.refused_conn_max_clients_reached_count += Listener::RefusedConnectionMaxClientsCount();
 
     result.lua_stats += InterpreterManager::tl_stats();
+
+    if (ss->journal()) {
+      result.lsn_buffer_size += ss->journal()->LsnBufferSize();
+      result.lsn_buffer_bytes += ss->journal()->LsnBufferBytes();
+    }
 
     auto connections_lib_name_ver_map = facade::Connection::GetLibStatsTL();
     for (auto& [k, v] : connections_lib_name_ver_map) {
@@ -2468,7 +2495,10 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("client_read_buffer_peak_bytes", m.peak_stats.conn_read_buf_capacity);
     append("tls_bytes", m.tls_bytes);
     append("snapshot_serialization_bytes", m.serialization_bytes);
-    append("commands_squashing_replies_bytes", MultiCommandSquasher::GetRepliesMemSize());
+    append("commands_squashing_replies_bytes",
+           m.facade_stats.reply_stats.squashing_current_reply_size.load(memory_order_relaxed));
+    append("lsn_buffer_size_sum", m.lsn_buffer_size);
+    append("lsn_buffer_bytes_sum", m.lsn_buffer_bytes);
 
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
@@ -2534,6 +2564,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("keyspace_mutations", m.events.mutations);
     append("total_reads_processed", conn_stats.io_read_cnt);
     append("total_writes_processed", reply_stats.io_write_cnt);
+    append("huffenc_attempt_total", m.events.huff_encode_total);
+    append("huffenc_success_total", m.events.huff_encode_success);
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
@@ -2546,6 +2578,11 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 
     // Total number of events of when a connection was blocked on grabbing interpreter.
     append("lua_blocked_total", m.lua_stats.blocked_cnt);
+
+    append("lua_interpreter_return", m.lua_stats.interpreter_return);
+    append("lua_force_gc_calls", m.lua_stats.force_gc_calls);
+    append("lua_gc_freed_memory_total", m.lua_stats.gc_freed_memory);
+    append("lua_gc_duration_total_sec", m.lua_stats.gc_duration_ns * 1e-9);
   };
 
   auto add_tiered_info = [&] {
@@ -2620,6 +2657,11 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       append(StrCat("rdb_", k_v.first), k_v.second);
     }
     append("rdb_changes_since_last_success_save", m.events.update);
+
+    auto save = GetLastSaveInfo();
+    append("rdb_bgsave_in_progress", static_cast<int>(save.bgsave_in_progress));
+    std::string val = save.last_bgsave_status ? "ok" : "err";
+    append("rdb_last_bgsave_status", val);
 
     // when last failed save
     append("last_failed_save", save_info.last_error_time);
@@ -2810,6 +2852,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
   if (should_enter("CLUSTER")) {
     append("cluster_enabled", IsClusterEnabledOrEmulated());
     append("migration_errors_total", service_.cluster_family().MigrationsErrorsCount());
+    append("total_migrated_keys", m.shard_stats.total_migrated_keys);
   }
 
   return info;
@@ -3033,7 +3076,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
       ec = new_replica->Start();
       break;
     case ActionOnConnectionFail::kContinueReplication:
-      new_replica->EnableReplication(builder);
+      new_replica->EnableReplication();
       break;
   };
 
@@ -3383,14 +3426,14 @@ void ServerFamily::Module(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendSimpleString("name");
   rb->SendSimpleString("ReJSON");
   rb->SendSimpleString("ver");
-  rb->SendLong(20'000);
+  rb->SendLong(20'808);
 
   // Search
   rb->StartCollection(2, RedisReplyBuilder::MAP);
   rb->SendSimpleString("name");
   rb->SendSimpleString("search");
   rb->SendSimpleString("ver");
-  rb->SendLong(20'000);  // we target v2
+  rb->SendLong(21'015);  // we target v2
 }
 
 void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,

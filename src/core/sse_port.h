@@ -4,6 +4,7 @@
 
 #pragma once
 #if defined(__aarch64__)
+#define SSE2NEON_SUPPRESS_WARNINGS
 #include "base/sse2neon.h"
 #elif defined(__riscv) || defined(__riscv__)
 #include "base/sse2rvv.h"

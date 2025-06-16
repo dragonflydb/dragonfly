@@ -52,13 +52,14 @@ namespace {
 
 constexpr auto kPrimeSegmentSize = PrimeTable::kSegBytes;
 constexpr auto kExpireSegmentSize = ExpireTable::kSegBytes;
-
+constexpr auto kExpireRegularSize = ExpireTable::kSegRegularBytes;
 // mi_malloc good size is 32768. i.e. we have malloc waste of 1.5%.
-static_assert(kPrimeSegmentSize == 32288);
+static_assert(kPrimeSegmentSize <= 32304);
 
 // 20480 is the next goodsize so we are loosing ~300 bytes or 1.5%.
 // 24576
-static_assert(kExpireSegmentSize == 23528);
+static_assert(kExpireSegmentSize <= 23544);
+static_assert(double(kExpireRegularSize) / kExpireSegmentSize > 0.9);
 
 void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* db) {
   DCHECK_NE(db, nullptr);
@@ -100,8 +101,8 @@ class PrimeEvictionPolicy {
 
   bool CanGrow(const PrimeTable& tbl) const;
 
-  unsigned GarbageCollect(const PrimeTable::HotspotBuckets& eb, PrimeTable* me);
-  unsigned Evict(const PrimeTable::HotspotBuckets& eb, PrimeTable* me);
+  unsigned GarbageCollect(const PrimeTable::HotBuckets& eb, PrimeTable* me);
+  unsigned Evict(const PrimeTable::HotBuckets& eb, PrimeTable* me);
 
   unsigned evicted() const {
     return evicted_;
@@ -155,7 +156,7 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
   return res;
 }
 
-unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& eb, PrimeTable* me) {
+unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, PrimeTable* me) {
   unsigned res = 0;
 
   if (db_slice_->WillBlockOnJournalWrite()) {
@@ -171,7 +172,7 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& e
   // stash buckets are filled last so much smaller change they have expired items.
   string scratch;
   unsigned num_buckets =
-      std::min<unsigned>(PrimeTable::HotspotBuckets::kRegularBuckets, eb.num_buckets);
+      std::min<unsigned>(PrimeTable::HotBuckets::kRegularBuckets, eb.num_buckets);
   for (unsigned i = 0; i < num_buckets; ++i) {
     auto bucket_it = eb.at(i);
     for (; !bucket_it.is_done(); ++bucket_it) {
@@ -189,7 +190,7 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& e
   return res;
 }
 
-unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeTable* me) {
+unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable* me) {
   if (!can_evict_ || db_slice_->WillBlockOnJournalWrite())
     return 0;
 
@@ -331,7 +332,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 120, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 136, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(hard_evictions);
@@ -348,7 +349,8 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
   ADD(ram_hits);
   ADD(ram_cool_hits);
   ADD(ram_misses);
-
+  ADD(huff_encode_total);
+  ADD(huff_encode_success);
   return *this;
 }
 
@@ -409,7 +411,10 @@ auto DbSlice::GetStats() const -> Stats {
     stats.expire_count = db_wrap.expire.size();
     stats.table_mem_usage = db_wrap.table_memory();
   }
-  s.small_string_bytes = CompactObj::GetStats().small_string_bytes;
+  auto co_stats = CompactObj::GetStatsThreadLocal();
+  s.small_string_bytes = co_stats.small_string_bytes;
+  s.events.huff_encode_total = co_stats.huff_encode_total;
+  s.events.huff_encode_success = co_stats.huff_encode_success;
 
   return s;
 }
@@ -636,7 +641,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
   // It's a new entry.
-  CallChangeCallbacks(cntx.db_index, {key});
+  CallChangeCallbacks(cntx.db_index, ChangeReq{key});
 
   ssize_t memory_offset = -key.size();
   size_t reclaimed = 0;
@@ -1169,22 +1174,22 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
   auto& db = db_arr_[cntx.db_index];
   auto expire_it = db->expire.Find(it->first);
 
-  if (IsValid(expire_it)) {
-    // TODO: to employ multi-generation update of expire-base and the underlying values.
-    time_t expire_time = ExpireTime(expire_it);
-
-    // Never do expiration on replica or if expiration is disabled.
-    if (time_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_)
-      return {it, expire_it};
-  } else {
+  if (!IsValid(expire_it)) {
     LOG(DFATAL) << "Internal error, entry " << it->first.ToString()
                 << " not found in expire table, db_index: " << cntx.db_index
                 << ", expire table size: " << db->expire.size()
                 << ", prime table size: " << db->prime.size() << util::fb2::GetStacktrace();
+    return {it, ExpireIterator{}};
   }
 
-  DCHECK(shard_owner()->shard_lock()->Check(IntentLock::Mode::EXCLUSIVE))
-      << util::fb2::GetStacktrace();
+  // TODO: to employ multi-generation update of expire-base and the underlying values.
+  time_t expire_time = ExpireTime(expire_it);
+
+  // Never do expiration on replica or if expiration is disabled or global lock was taken.
+  if (time_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_ ||
+      !shard_owner()->shard_lock()->Check(IntentLock::Mode::EXCLUSIVE)) {
+    return {it, expire_it};
+  }
 
   string scratch;
   string_view key = it->first.GetSlice(&scratch);
@@ -1358,7 +1363,6 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind,
 
   auto time_start = absl::GetCurrentTimeNanos();
   auto& db_table = db_arr_[db_ind];
-  constexpr int32_t num_buckets = PrimeTable::Segment_t::kTotalBuckets;
   constexpr int32_t num_slots = PrimeTable::Segment_t::kSlotNum;
 
   string tmp;
@@ -1367,13 +1371,16 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind,
   vector<string> keys_to_journal;
 
   for (int32_t slot_id = num_slots - 1; slot_id >= 0; --slot_id) {
-    for (int32_t bucket_id = num_buckets - 1; bucket_id >= 0; --bucket_id) {
+    for (int32_t bucket_id = PrimeTable::LargestBucketId(); bucket_id >= 0; --bucket_id) {
       // pick a random segment to start with in each eviction,
       // as segment_id does not imply any recency, and random selection should be fair enough
       int32_t segment_id = starting_segment_id;
       for (size_t num_seg_visited = 0; num_seg_visited < max_segment_to_consider;
            ++num_seg_visited, segment_id = GetNextSegmentForEviction(segment_id, db_ind)) {
-        const auto& bucket = db_table->prime.GetSegment(segment_id)->GetBucket(bucket_id);
+        const auto& segment = db_table->prime.GetSegment(segment_id);
+        if (unsigned(bucket_id) >= segment->num_buckets())
+          bucket_id = segment->num_buckets() - 1;
+        const auto& bucket = segment->GetBucket(bucket_id);
         if (bucket.IsEmpty() || !bucket.IsBusy(slot_id))
           continue;
 
@@ -1730,7 +1737,9 @@ void DbSlice::OnCbFinishBlocking() {
       }
 
       if (!change_cb_.empty()) {
-        auto bump_cb = [&](PrimeTable::bucket_iterator bit) { CallChangeCallbacks(db_index, bit); };
+        auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
+          CallChangeCallbacks(db_index, ChangeReq{bit});
+        };
         db.prime.CVCUponBump(change_cb_.back().first, it, bump_cb);
       }
 

@@ -15,8 +15,6 @@ using namespace testing;
 using namespace std;
 using namespace util;
 
-ABSL_DECLARE_FLAG(bool, stream_rdb_encode_v2);
-
 namespace dfly {
 
 const auto kMatchNil = ArgType(RespExpr::NIL);
@@ -695,6 +693,13 @@ TEST_F(StreamFamilyTest, XTrimInvalidArgs) {
   resp = Run({"xtrim", "foo", "maxlen", "~", "2", "limit", "nan"});
   EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
 }
+
+TEST_F(StreamFamilyTest, XTrimWrongSyntax) {
+  auto resp = Run({"xtrim", "-992", "k1 \"v1\" k2 \"v2 with spaces\" \"k3 with spaces\" \"v3\"",
+                   "list1 element1"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
 TEST_F(StreamFamilyTest, XPending) {
   Run({"xadd", "foo", "1-0", "k1", "v1"});
   Run({"xadd", "foo", "1-1", "k2", "v2"});
@@ -1268,7 +1273,6 @@ TEST_F(StreamFamilyTest, SeenActiveTime) {
   EXPECT_THAT(consumers, RespElementsAre("name", "Alice", "seen-time", IntArg(1250), "active-time",
                                          IntArg(1100), "pel-count", IntArg(1), "pending", _));
 
-  absl::SetFlag(&FLAGS_stream_rdb_encode_v2, true);
   resp = Run({"DUMP", "mystream"});
   Run({"del", "mystream"});
   resp = Run({"RESTORE", "mystream", "0", resp.GetString()});
@@ -1278,6 +1282,21 @@ TEST_F(StreamFamilyTest, SeenActiveTime) {
   consumers = groups.GetVec()[0].GetVec()[13].GetVec()[0];
   EXPECT_THAT(consumers, RespElementsAre("name", "Alice", "seen-time", IntArg(1250), "active-time",
                                          IntArg(1100), "pel-count", IntArg(1), "pending", _));
+}
+
+TEST_F(StreamFamilyTest, XClaimWithNonExistentGroup) {
+  Run({"xadd", "mystream", "1-0", "field1", "value1"});
+  Run({"xadd", "mystream", "1-1", "field2", "value2"});
+
+  auto resp = Run({"xclaim", "mystream", "nonexistent-group", "consumer1", "0", "1-0"});
+
+  EXPECT_THAT(resp, ArrLen(0));
+
+  resp = Run({"xclaim", "mystream", "nonexistent-group", "consumer1", "0", "1-0", "1-1"});
+  EXPECT_THAT(resp, ArrLen(0));
+
+  resp = Run({"xclaim", "mystream", "nonexistent-group", "consumer1", "0", "1-0", "justid"});
+  EXPECT_THAT(resp, ArrLen(0));
 }
 
 }  // namespace dfly

@@ -517,7 +517,6 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   };
 
   PrimeTable& table = op_manager_->db_slice_.GetDBTable(dbid)->prime;
-  PrimeTable::Cursor start_cursor{};
 
   // Loop while we haven't traversed all entries or reached our stash io device limit.
   // Keep number of iterations below resonable limit to keep datastore always responsive
@@ -526,7 +525,7 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
     if (op_manager_->GetStats().pending_stash_cnt >= write_depth_limit_)
       break;
     offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
-  } while (offloading_cursor_ != start_cursor && iterations++ < kMaxIterations);
+  } while (offloading_cursor_ && iterations++ < kMaxIterations);
 }
 
 size_t TieredStorage::ReclaimMemory(size_t goal) {

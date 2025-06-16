@@ -2,10 +2,9 @@
 // See LICENSE for licensing terms.
 //
 
-#include <mimalloc.h>
-
 #include <absl/base/internal/cycleclock.h>
 #include <absl/container/flat_hash_map.h>
+#include <mimalloc.h>
 
 #include "base/hash.h"
 #include "base/histogram.h"
@@ -51,9 +50,21 @@ static dictType SdsDict = {
     NULL,
 };
 
-struct UInt64Policy : public BasicDashPolicy {
+struct UInt64Policy {
+  enum { kSlotNum = 12, kBucketNum = 64, kStashBucketNum = 2 };
+  static constexpr bool kUseVersion = false;
+
   static uint64_t HashFn(uint64_t v) {
     return XXH3_64bits(&v, sizeof(v));
+  }
+
+  template <typename U> static void DestroyValue(const U&) {
+  }
+  template <typename U> static void DestroyKey(const U&) {
+  }
+
+  template <typename U, typename V> static bool Equal(U&& u, V&& v) {
+    return u == v;
   }
 };
 
@@ -101,17 +112,17 @@ base::Histogram hist;
 #define USE_TIME 1
 
 int64_t GetNow() {
-  #if USE_TIME
-    return absl::GetCurrentTimeNanos();
+#if USE_TIME
+  return absl::GetCurrentTimeNanos();
 #else
-    return absl::base_internal::CycleClock::Now();
+  return absl::base_internal::CycleClock::Now();
 #endif
 }
 
 #if defined(__i386__) || defined(__amd64__)
-  #define LFENCE __asm__ __volatile__("lfence")
+#define LFENCE __asm__ __volatile__("lfence")
 #else
-  #define LFENCE __asm__ __volatile__("ISB")
+#define LFENCE __asm__ __volatile__("ISB")
 #endif
 
 absl::flat_hash_map<uint64_t, uint64_t> mymap;

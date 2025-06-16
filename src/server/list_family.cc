@@ -1170,47 +1170,6 @@ void BPopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder
   return rb->SendNullArray();
 }
 
-struct LMPopParams {
-  uint32_t num_keys;
-  ListDir dir;
-  int pop_count;
-};
-
-facade::ErrorReply ParseLMPop(CmdArgList args, LMPopParams* params) {
-  CmdArgParser parser{args};
-
-  if (!SimpleAtoi(parser.Next(), &params->num_keys)) {
-    return facade::ErrorReply(kUintErr);
-  }
-
-  if (params->num_keys <= 0 || !parser.HasAtLeast(params->num_keys + 1)) {
-    return facade::ErrorReply(kSyntaxErr);
-  }
-
-  parser.Skip(params->num_keys);
-
-  if (parser.Check("LEFT")) {
-    params->dir = ListDir::LEFT;
-  } else if (parser.Check("RIGHT")) {
-    params->dir = ListDir::RIGHT;
-  } else {
-    return facade::ErrorReply(kSyntaxErr);
-  }
-
-  params->pop_count = 1;
-  if (parser.HasNext()) {
-    if (!parser.Check("COUNT", &params->pop_count)) {
-      return facade::ErrorReply(kSyntaxErr);
-    }
-  }
-
-  if (!parser.Finalize()) {
-    return facade::ErrorReply(parser.Error()->MakeReply());
-  }
-
-  return facade::ErrorReply(OpStatus::OK);
-}
-
 // Returns the first non-empty key found in the shard arguments along with its type validity.
 // Returns a pair of (key, is_valid_type) where is_valid_type is true if the key exists
 // and has the correct type (LIST). If a wrong type is found, returns that key with false.
@@ -1244,13 +1203,16 @@ optional<pair<string_view, bool>> GetFirstNonEmptyKeyFound(EngineShard* shard, T
 void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
-  LMPopParams params;
-  facade::ErrorReply parse_result = ParseLMPop(args, &params);
+  CmdArgParser parser{args};
+  parser.Skip(parser.Next<size_t>());  // skip numkeys and keys
 
-  if (parse_result.status != OpStatus::OK) {
-    response_builder->SendError(parse_result);
-    return;
-  }
+  ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
+  size_t pop_count = 1;
+  if (parser.Check("COUNT"))
+    pop_count = parser.Next<size_t>();
+
+  if (!parser.Finalize())
+    return response_builder->SendError(parser.Error()->MakeReply());
 
   // Create a vector to store first found key for each shard
   vector<optional<pair<string_view, bool>>> found_keys_per_shard(shard_set->size());
@@ -1301,10 +1263,10 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   optional<ShardId> key_shard = Shard(*key_to_pop, shard_set->size());
   OpResult<StringVec> result;
 
-  auto cb_pop = [&params, key_shard, &result, key = *key_to_pop](Transaction* t,
-                                                                 EngineShard* shard) {
+  auto cb_pop = [dir, pop_count, key_shard, &result, key = *key_to_pop](Transaction* t,
+                                                                        EngineShard* shard) {
     if (*key_shard == shard->shard_id()) {
-      result = OpPop(t->GetOpArgs(shard), key, params.dir, params.pop_count, true, false);
+      result = OpPop(t->GetOpArgs(shard), key, dir, pop_count, true, false);
     }
     return OpStatus::OK;
   };

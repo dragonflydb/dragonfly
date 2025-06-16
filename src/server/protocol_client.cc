@@ -22,6 +22,7 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/redis_parser.h"
+#include "facade/socket_utils.h"
 #include "server/error.h"
 #include "server/journal/executor.h"
 #include "server/journal/serializer.h"
@@ -234,6 +235,8 @@ void ProtocolClient::CloseSocket() {
 }
 
 void ProtocolClient::DefaultErrorHandler(const GenericError& err) {
+  LOG(WARNING) << "Socket error: " << err.Format() << " in " << server_context_.Description()
+               << ", socket info: " << GetSocketInfo(sock_ ? sock_->native_handle() : -1);
   CloseSocket();
 }
 
@@ -337,6 +340,11 @@ error_code ProtocolClient::ReadLine(base::IoBuf* io_buf, string_view* line) {
 bool ProtocolClient::CheckRespIsSimpleReply(string_view reply) const {
   return resp_args_.size() == 1 && resp_args_.front().type == RespExpr::STRING &&
          ToSV(resp_args_.front().GetBuf()) == reply;
+}
+
+bool ProtocolClient::CheckRespSimpleError(string_view error) const {
+  return resp_args_.size() == 1 && resp_args_.front().type == RespExpr::ERROR &&
+         ToSV(resp_args_.front().GetBuf()) == error;
 }
 
 bool ProtocolClient::CheckRespFirstTypes(initializer_list<RespExpr::Type> types) const {

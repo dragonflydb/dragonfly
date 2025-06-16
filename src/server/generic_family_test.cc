@@ -625,8 +625,6 @@ TEST_F(GenericFamilyTest, Scan) {
 }
 
 TEST_F(GenericFamilyTest, ScanWithAttr) {
-  Run({"flushdb"});
-
   Run({"set", "hello", "world"});
   Run({"set", "foo", "bar"});
 
@@ -665,6 +663,17 @@ TEST_F(GenericFamilyTest, ScanWithAttr) {
   resp = Run({"scan", "0", "attr", "u"});
   vec = StrArray(resp.GetVec()[1]);
   ASSERT_EQ(0, vec.size());
+}
+
+TEST_F(GenericFamilyTest, ScanMallocSize) {
+  Run({"set", "k1", string(1000, 'a')});
+  Run({"set", "k2", string(500, 'b')});
+  Run({"set", "k3", string(15, 'c')});
+
+  auto resp = Run({"scan", "0", "MINMSZ", "15"});
+  EXPECT_THAT(resp.GetVec()[1], RespArray(UnorderedElementsAre("k1", "k2")));
+  resp = Run({"scan", "0", "MINMSZ", "500"});
+  EXPECT_THAT(resp.GetVec()[1], RespArray(UnorderedElementsAre("k1")));
 }
 
 TEST_F(GenericFamilyTest, Sort) {
@@ -821,9 +830,9 @@ TEST_F(GenericFamilyTest, Dump) {
   ASSERT_EQ(RDB_SER_VERSION, 9);
   uint8_t EXPECTED_STRING_DUMP[13] = {0x00, 0xc0, 0x13, 0x09, 0x00, 0x23, 0x13,
                                       0x6f, 0x4d, 0x68, 0xf6, 0x35, 0x6e};
-  uint8_t EXPECTED_HASH_DUMP[] = {0x0d, 0x12, 0x12, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00,
-                                  0x02, 0x00, 0x00, 0xfe, 0x13, 0x03, 0xc0, 0xd2, 0x04, 0xff,
-                                  0x09, 0x00, 0xb1, 0x0b, 0xae, 0x6c, 0x23, 0x5d, 0x17, 0xaa};
+  uint8_t EXPECTED_HASH_DUMP[] = {0x10, 0xc,  0xc,  0x0,  0x0, 0x0,  0x2,  0x0,
+                                  0x13, 0x1,  0xc4, 0xd2, 0x2, 0xff, 0x9,  0x0,
+                                  0x68, 0x4d, 0x73, 0xa4, 0xf, 0x23, 0x4f, 0xc7};
 
   uint8_t EXPECTED_LIST_DUMP[] = {0x12, 0x01, 0x02, '\t', '\t', 0x00, 0x00, 0x00,
                                   0x01, 0x00, 0x14, 0x01, 0xff, '\t', 0x00, 0xfb,
@@ -834,19 +843,19 @@ TEST_F(GenericFamilyTest, Dump) {
   EXPECT_EQ(resp, "OK");
   resp = Run({"dump", "z"});
   auto dump = resp.GetBuf();
-  CHECK_EQ(ToSV(dump), ToSV(EXPECTED_STRING_DUMP));
+  ASSERT_EQ(ToSV(dump), ToSV(EXPECTED_STRING_DUMP));
 
   // Check list dump
   EXPECT_EQ(1, CheckedInt({"rpush", "l", "20"}));
   resp = Run({"dump", "l"});
   dump = resp.GetBuf();
-  CHECK_EQ(ToSV(dump), ToSV(EXPECTED_LIST_DUMP)) << absl::CHexEscape(resp.GetString());
+  ASSERT_EQ(ToSV(dump), ToSV(EXPECTED_LIST_DUMP)) << absl::CHexEscape(resp.GetString());
 
   // Check for hash dump
   EXPECT_EQ(1, CheckedInt({"hset", "z2", "19", "1234"}));
   resp = Run({"dump", "z2"});
   dump = resp.GetBuf();
-  CHECK_EQ(ToSV(dump), ToSV(EXPECTED_HASH_DUMP));
+  ASSERT_EQ(ToSV(dump), ToSV(EXPECTED_HASH_DUMP));
 
   // Check that when running with none existing key we're getting nil
   resp = Run({"dump", "foo"});
@@ -873,7 +882,7 @@ TEST_F(GenericFamilyTest, Restore) {
   // note that value for expiration is just some valid unix time stamp from the pass
   resp = Run(
       {"restore", "exiting-key", "1665476212900", ToSV(STRING_DUMP_REDIS), "ABSTTL", "REPLACE"});
-  CHECK_EQ(resp, "OK");
+  ASSERT_EQ(resp, "OK");
   resp = Run({"get", "exiting-key"});
   EXPECT_EQ(resp.type, RespExpr::NIL);  // it was deleted as a result of restore action
 
@@ -884,7 +893,7 @@ TEST_F(GenericFamilyTest, Restore) {
   EXPECT_EQ("1234", resp);
   resp = Run({"dump", "new-key"});
   auto dump = resp.GetBuf();
-  CHECK_EQ(ToSV(dump), ToSV(STRING_DUMP_REDIS));
+  ASSERT_EQ(ToSV(dump), ToSV(STRING_DUMP_REDIS));
 
   // test for list
   EXPECT_EQ(1, CheckedInt({"rpush", "orig-list", "20"}));
@@ -1161,14 +1170,14 @@ TEST_F(GenericFamilyTest, Copy) {
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
 
   resp = Run({"COPY", "z", "b"});
-  ASSERT_THAT(resp, ErrArg("no such key"));
+  ASSERT_THAT(resp, IntArg(0));
 
   resp = Run({"COPY", "b", "c"});
-  ASSERT_EQ(resp, "OK");
+  ASSERT_THAT(resp, IntArg(1));
   ASSERT_EQ(b_val, Run({"get", "c"}));
 
   resp = Run({"COPY", "x", "b", "REPLACE"});
-  ASSERT_EQ(resp, "OK");
+  ASSERT_THAT(resp, IntArg(1));
 
   ASSERT_EQ(x_val, Run({"get", "x"}));
   ASSERT_EQ(x_val, Run({"get", "b"}));
@@ -1179,7 +1188,7 @@ TEST_F(GenericFamilyTest, Copy) {
     for (size_t i = 0; i < 200; ++i) {
       int j = i % 2;
       auto resp = Run({"COPY", keys[j], keys[1 - j], "REPLACE"});
-      ASSERT_EQ(resp, "OK");
+      ASSERT_THAT(resp, IntArg(1));
     }
   });
 
@@ -1197,7 +1206,7 @@ TEST_F(GenericFamilyTest, Copy) {
 TEST_F(GenericFamilyTest, CopyNonString) {
   EXPECT_EQ(1, CheckedInt({"lpush", "x", "elem"}));
   auto resp = Run({"COPY", "x", "b"});
-  ASSERT_EQ(resp, "OK");
+  ASSERT_THAT(resp, IntArg(1));
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
 
   EXPECT_EQ(1, CheckedInt({"del", "x"}));
@@ -1217,7 +1226,7 @@ TEST_F(GenericFamilyTest, CopyBinary) {
 TEST_F(GenericFamilyTest, CopyTTL) {
   Run({"setex", "k1", "10", "bar"});
 
-  ASSERT_EQ(Run({"COPY", "k1", "k2"}), "OK");
+  ASSERT_THAT(Run({"COPY", "k1", "k2"}), IntArg(1));
   EXPECT_THAT(Run({"ttl", "k2"}), 10);
 }
 
@@ -1231,6 +1240,19 @@ TEST_F(GenericFamilyTest, CopySameName) {
 TEST_F(GenericFamilyTest, CopyToDB) {
   // we don't support DB arg for now
   ASSERT_THAT(Run({"COPY", "k1", "k1", "DB", "SOME_DB"}), ErrArg("syntax error"));
+}
+
+TEST_F(GenericFamilyTest, CopyKeyExists) {
+  Run({"set", "source", "value1"});
+  Run({"set", "destination", "value2"});
+
+  ASSERT_THAT(Run({"COPY", "source", "destination"}), IntArg(0));
+
+  EXPECT_EQ(Run({"get", "destination"}), "value2");
+  EXPECT_EQ(Run({"get", "source"}), "value1");
+
+  ASSERT_THAT(Run({"COPY", "source", "destination", "REPLACE"}), IntArg(1));
+  EXPECT_EQ(Run({"get", "destination"}), "value1");
 }
 
 }  // namespace dfly

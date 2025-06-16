@@ -24,7 +24,6 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
-#include "strings/human_readable.h"
 
 // We've generalized "hashtags" so that users can specify custom delimiter and closures, see below.
 // If I had a time machine, I'd rename this to lock_on_tags.
@@ -156,68 +155,6 @@ const char* RdbTypeName(unsigned type) {
   return "other";
 }
 
-bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
-  if (str.empty())
-    return false;
-
-  const char* cstr = str.data();
-  bool neg = (*cstr == '-');
-  if (neg) {
-    cstr++;
-  }
-  char* end;
-  double d = strtod(cstr, &end);
-
-  if (end == cstr)  // did not succeed to advance
-    return false;
-
-  int64 scale = 1;
-  switch (*end) {
-    // Considers just the first character after the number
-    // so it matches: 1G, 1GB, 1GiB and 1Gigabytes
-    // NB: an int64 can only go up to <8 EB.
-    case 'E':
-    case 'e':
-      scale <<= 10;  // Fall through...
-      ABSL_FALLTHROUGH_INTENDED;
-    case 'P':
-    case 'p':
-      scale <<= 10;
-      ABSL_FALLTHROUGH_INTENDED;
-    case 'T':
-    case 't':
-      scale <<= 10;
-      ABSL_FALLTHROUGH_INTENDED;
-    case 'G':
-    case 'g':
-      scale <<= 10;
-      ABSL_FALLTHROUGH_INTENDED;
-    case 'M':
-    case 'm':
-      scale <<= 10;
-      ABSL_FALLTHROUGH_INTENDED;
-    case 'K':
-    case 'k':
-      scale <<= 10;
-      ABSL_FALLTHROUGH_INTENDED;
-    case 'B':
-    case 'b':
-    case '\0':
-      break;  // To here.
-    default:
-      return false;
-  }
-  d *= scale;
-  if (int64_t(d) > kint64max || d < 0)
-    return false;
-
-  *num_bytes = static_cast<int64>(d + 0.5);
-  if (neg) {
-    *num_bytes = -*num_bytes;
-  }
-  return true;
-}
-
 bool ParseDouble(string_view src, double* value) {
   if (src.empty())
     return false;
@@ -270,7 +207,9 @@ SearchStats& SearchStats::operator+=(const SearchStats& o) {
   ADD(used_memory);
   ADD(num_entries);
 
-  DCHECK(num_indices == 0 || num_indices == o.num_indices);
+  // Different shards could have inconsistent num_indices values during concurrent operations.
+  // This can happen on concurrent index creation.
+  // We use max to ensure that the total num_indices is the maximum of all shards.
   num_indices = std::max(num_indices, o.num_indices);
   return *this;
 }
@@ -320,6 +259,10 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
         scan_opts.mask = ScanOpts::Mask::Untouched;
       } else {
         return facade::OpStatus::SYNTAX_ERR;
+      }
+    } else if (opt == "MINMSZ") {
+      if (!absl::SimpleAtoi(ArgS(args, i + 1), &scan_opts.min_malloc_size)) {
+        return facade::OpStatus::INVALID_INT;
       }
     } else {
       return facade::OpStatus::SYNTAX_ERR;
@@ -417,21 +360,6 @@ GenericError ExecutionState::ReportErrorInternal(GenericError&& err) {
     err_handler_fb_ = fb2::Fiber("report_internal_error", std::move(err_handler_), err_);
   state_.store(State::ERROR, std::memory_order_relaxed);
   return err_;
-}
-
-bool AbslParseFlag(std::string_view in, dfly::MemoryBytesFlag* flag, std::string* err) {
-  int64_t val;
-  if (dfly::ParseHumanReadableBytes(in, &val) && val >= 0) {
-    flag->value = val;
-    return true;
-  }
-
-  *err = "Use human-readable format, eg.: 500MB, 1G, 1TB";
-  return false;
-}
-
-std::string AbslUnparseFlag(const dfly::MemoryBytesFlag& flag) {
-  return strings::HumanReadableNumBytes(flag.value);
 }
 
 std::ostream& operator<<(std::ostream& os, const GlobalState& state) {

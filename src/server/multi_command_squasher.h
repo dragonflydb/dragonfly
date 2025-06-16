@@ -36,17 +36,9 @@ class MultiCommandSquasher {
     return MultiCommandSquasher{cmds, cntx, service, opts}.Run(rb);
   }
 
-  static size_t GetRepliesMemSize() {
-    return current_reply_size_.load(std::memory_order_relaxed);
-  }
+  static size_t GetRepliesMemSize();
 
-  static bool IsReplySizeOverLimit() {
-    const bool over_limit = reply_size_limit_ > 0 &&
-                            current_reply_size_.load(std::memory_order_relaxed) > reply_size_limit_;
-    VLOG_IF(2, over_limit) << "MultiCommandSquasher overlimit: " << reply_size_limit_
-                           << " current reply size " << current_reply_size_;
-    return over_limit;
-  }
+  static bool IsReplySizeOverLimit();
 
  private:
   // Per-shard execution info.
@@ -60,6 +52,9 @@ class MultiCommandSquasher {
     };
     std::vector<Command> dispatched;  // Dispatched commands
     unsigned reply_id = 0;
+
+    std::atomic<size_t>* reply_size_total_ptr;   // Total size of replies on the IO thread
+    size_t reply_size_delta = 0;                 // Size of replies for this shard
     boost::intrusive_ptr<Transaction> local_tx;  // stub-mode tx for use inside shard
   };
 
@@ -104,11 +99,8 @@ class MultiCommandSquasher {
   size_t num_shards_ = 0;
 
   std::vector<MutableSlice> tmp_keylist_;
-
-  // we increase size in one thread and decrease in another
-  static atomic_uint64_t current_reply_size_;
   // Used to throttle when memory is tight
-  static util::fb2::EventCount ec_;
+  static thread_local util::fb2::EventCount ec_;
 
   static thread_local size_t reply_size_limit_;
 };

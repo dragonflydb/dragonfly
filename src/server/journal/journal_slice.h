@@ -4,11 +4,11 @@
 
 #pragma once
 
+#include <boost/circular_buffer.hpp>
 #include <optional>
 #include <shared_mutex>
 #include <string_view>
 
-#include "base/ring_buffer.h"
 #include "server/common.h"
 #include "server/journal/types.h"
 
@@ -21,7 +21,7 @@ class JournalSlice {
   JournalSlice();
   ~JournalSlice();
 
-  void Init(unsigned index);
+  void Init();
 
   // This is always the LSN of the *next* journal entry.
   LSN cur_lsn() const {
@@ -30,11 +30,6 @@ class JournalSlice {
 
   std::error_code status() const {
     return status_ec_;
-  }
-
-  // Whether the journaling is open.
-  bool IsOpen() const {
-    return slice_index_ != UINT32_MAX;
   }
 
   void AddLogRecord(const Entry& entry);
@@ -62,11 +57,13 @@ class JournalSlice {
   // with allow_flush=false and the subsequent call with allow_flush=true.
   void SetFlushMode(bool allow_flush);
 
+  size_t GetRingBufferSize() const;
+  size_t GetRingBufferBytes() const;
+  void ResetRingBuffer();
+
  private:
-  void CallOnChange(const JournalItem& item);
-  // std::string shard_path_;
-  // std::unique_ptr<LinuxFile> shard_file_;
-  std::optional<base::RingBuffer<JournalItem>> ring_buffer_;
+  void CallOnChange(JournalItem* item);
+  boost::circular_buffer<JournalItem> ring_buffer_;
   base::IoBuf ring_serialize_buf_;
 
   mutable util::fb2::SharedMutex cb_mu_;  // to prevent removing callback during call
@@ -74,10 +71,11 @@ class JournalSlice {
 
   LSN lsn_ = 1;
 
-  uint32_t slice_index_ = UINT32_MAX;
   uint32_t next_cb_id_ = 1;
   std::error_code status_ec_;
   bool enable_journal_flush_ = true;
+
+  size_t ring_buffer_bytes = 0;
 };
 
 }  // namespace journal

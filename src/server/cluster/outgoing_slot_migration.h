@@ -76,8 +76,6 @@ class OutgoingMigration : private ProtocolClient {
 
   size_t GetKeyCount() const ABSL_LOCKS_EXCLUDED(state_mu_);
 
-  static constexpr std::string_view kUnknownMigration = "UNKNOWN_MIGRATION";
-
  private:
   // should be run for all shards
   void StartFlow(journal::Journal* journal, io::Sink* dest);

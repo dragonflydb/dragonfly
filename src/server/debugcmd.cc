@@ -13,6 +13,7 @@ extern "C" {
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>
+#include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <lz4.h>
@@ -24,6 +25,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
+#include "core/huff_coder.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -50,8 +52,6 @@ namespace dfly {
 using namespace util;
 using boost::intrusive_ptr;
 using namespace facade;
-namespace fs = std::filesystem;
-using absl::GetFlag;
 using absl::StrAppend;
 using absl::StrCat;
 
@@ -170,7 +170,7 @@ unsigned AddObjHist(PrimeIterator it, ObjHist* hist) {
     return true;
   };
 
-  hist->key_len.Add(it->first.Size());
+  hist->key_len.Add(it->first.MallocUsed());
 
   if (pv.ObjType() == OBJ_LIST) {
     IterateList(pv, per_entry_cb, 0, -1);
@@ -295,9 +295,13 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
     cursor = table.Traverse(cursor, [&](PrimeIterator it) {
       scratch.clear();
       if (type == kInvalidCompactObjType) {  // KEYSPACE
-        it->first.GetString(&scratch);
+        if (it->first.MallocUsed() > 0) {
+          it->first.GetString(&scratch);
+        }
       } else if (type == OBJ_STRING && it->second.ObjType() == OBJ_STRING) {
-        it->second.GetString(&scratch);
+        if (it->first.MallocUsed() > 0) {
+          it->second.GetString(&scratch);
+        }
       } else if (type == OBJ_ZSET && it->second.ObjType() == OBJ_ZSET) {
         container_utils::IterateSortedSet(
             it->second.GetRobjWrapper(), [&](container_utils::ContainerEntry entry, double) {
@@ -326,9 +330,10 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
         });
       }
 
-      size_t len = std::min(scratch.size(), kMaxLen);
-      if (len > 16)  // filtering out values that are too small and hosted inline.
+      if (scratch.size() > 0) {
+        size_t len = std::min(scratch.size(), kMaxLen);
         HIST_add(dest->hist.data(), scratch.data(), len);
+      }
     });
 
     if (steps >= 20000) {
@@ -596,7 +601,7 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    traffic logging is stopped.",
         "RECVSIZE [<tid> | ENABLE | DISABLE]",
         "    Prints the histogram of the received request sizes on the given thread",
-        "COMPRESSION [IMPORT <bintable> | EXPORT] [type]",
+        "COMPRESSION [IMPORT <bintable> | EXPORT | SET <bintable>] [type]",
         "    Estimate the compressibility of values of the given type. if no type is given, ",
         "    checks compressibility of keys. If IN is specified, then the provided ",
         "    bintable is used to check compressibility. If OUT is specified, then ",
@@ -949,6 +954,10 @@ void DebugCmd::Exec(facade::SinkReplyBuilder* builder) {
 
 void DebugCmd::LogTraffic(CmdArgList args, facade::SinkReplyBuilder* builder) {
   optional<string> path;
+  if (ProactorBase::me()->GetKind() != ProactorBase::IOURING) {
+    return builder->SendError("Traffic recording supported only on iouring");
+  }
+
   if (args.size() == 1 && absl::AsciiStrToUpper(facade::ToSV(args.front())) != "STOP"sv) {
     path = ArgS(args, 0);
     LOG(INFO) << "Logging to traffic to " << *path << "*.bin";
@@ -1090,7 +1099,7 @@ void DebugCmd::ObjHist(facade::SinkReplyBuilder* builder) {
   for (auto& [obj_type, hist_ptr] : obj_hist_map_arr[0]) {
     StrAppend(&result, "OBJECT:", ObjTypeToString(obj_type), "\n");
     StrAppend(&result, "________________________________________________________________\n");
-    StrAppend(&result, "Key length histogram:\n", hist_ptr->key_len.ToString(), "\n");
+    StrAppend(&result, "Key memory used:\n", hist_ptr->key_len.ToString(), "\n");
     StrAppend(&result, "Values - Total Memory used:\n", hist_ptr->val_len.ToString(), "\n");
     if (hist_ptr->card.count() > 0) {
       StrAppend(&result, "Cardinality histogram (number of elements in sets):\n",
@@ -1288,10 +1297,27 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
   string bintable;
   bool print_bintable = false;
 
+  if (parser.Check("SET", &bintable)) {
+    string raw;
+    atomic_bool succeed = absl::Base64Unescape(bintable, &raw);
+    if (succeed) {
+      shard_set->RunBriefInParallel([&](EngineShard* shard) {
+        if (!CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_KEYS, raw)) {
+          succeed = false;
+        }
+      });
+    }
+    return succeed ? builder->SendOk() : builder->SendError("Failed to set bintable");
+  }
+
   if (parser.Check("EXPORT")) {
     print_bintable = true;
-  } else {
-    parser.Check("IMPORT", &bintable);
+  } else if (parser.Check("IMPORT", &bintable)) {
+    string raw;
+    bool succeed = absl::Base64Unescape(bintable, &raw);
+    if (succeed) {
+      bintable = raw;
+    }
   }
 
   if (parser.HasNext()) {
@@ -1318,71 +1344,46 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
   });
 
   size_t num_bits = 0, compressed_size = 0, raw_size = 0;
-  unsigned table_max_symbol = 255;
 
   if (hist.max_symbol) {
-    HUF_CREATE_STATIC_CTABLE(huf_ctable, HufHist::kMaxSymbol);
+    HuffmanEncoder huff_enc;
+    string err_msg;
 
-    unique_ptr<uint32_t[]> wrkspace(new uint32_t[HUF_CTABLE_WORKSPACE_SIZE_U32]);
-    constexpr size_t kWspSize = HUF_CTABLE_WORKSPACE_SIZE;
+    raw_size = 0;
+    for (unsigned i = 0; i <= HufHist::kMaxSymbol; i++) {
+      raw_size += hist.hist[i];
+
+      // force non-zero weights for all symbols.
+      if (hist.hist[i] == 0)
+        hist.hist[i] = 1;
+    }
 
     if (bintable.empty()) {
-      table_max_symbol = hist.max_symbol;
-      num_bits = HUF_buildCTable_wksp(huf_ctable, hist.hist.data(), table_max_symbol, 0,
-                                      wrkspace.get(), kWspSize);
-      if (HUF_isError(num_bits)) {
-        return rb->SendError(StrCat("Internal error: ", HUF_getErrorName(num_bits)));
+      if (!huff_enc.Build(hist.hist.data(), HufHist::kMaxSymbol, &err_msg)) {
+        return rb->SendError(StrCat("Internal error: ", err_msg));
       }
     } else {
       // Try to read the bintable and create a ctable from it.
-      unsigned has_zero_weights = 1;
-
-      size_t read_size = HUF_readCTable(huf_ctable, &table_max_symbol, bintable.data(),
-                                        bintable.size(), &has_zero_weights);
-      if (HUF_isError(read_size)) {
-        return rb->SendError(StrCat("Internal error: ", HUF_getErrorName(read_size)));
-      }
-      if (read_size != bintable.size()) {
-        return rb->SendError("Invalid bintable");
+      if (!huff_enc.Load(bintable, &err_msg)) {
+        return rb->SendError(StrCat("Internal error: ", err_msg));
       }
     }
-
-    compressed_size = HUF_estimateCompressedSize(huf_ctable, hist.hist.data(), table_max_symbol);
-    for (unsigned i = table_max_symbol + 1; i <= hist.max_symbol; i++) {
-      compressed_size += hist.hist[i];
-    }
-    raw_size = 0;
-    for (unsigned i = 0; i <= hist.max_symbol; i++) {
-      raw_size += hist.hist[i];
-    }
+    num_bits = huff_enc.num_bits();
+    compressed_size = huff_enc.EstimateCompressedSize(hist.hist.data(), HufHist::kMaxSymbol);
 
     if (print_bintable) {
-      // Reverse engineered: (maxSymbolValue + 1) / 2 + 1.
-      constexpr unsigned kMaxTableSize = 130;
-      bintable.resize(kMaxTableSize);
-
-      // Seems we can reuse the same workspace, its capacity is enough.
-      size_t res = HUF_writeCTable_wksp(bintable.data(), kMaxTableSize, huf_ctable,
-                                        table_max_symbol, num_bits, wrkspace.get(), kWspSize);
-      if (HUF_isError(res)) {
-        return rb->SendError(StrCat("Internal error: ", HUF_getErrorName(res)));
-      }
-      bintable.resize(res);
+      bintable = huff_enc.Export();
     } else {
       bintable.clear();
     }
   }
 
-  unsigned map_len = print_bintable ? 7 : 6;
+  unsigned map_len = print_bintable ? 6 : 5;
 
   rb->StartCollection(map_len, RedisReplyBuilder::CollectionType::MAP);
   rb->SendSimpleString("max_symbol");
   rb->SendLong(hist.max_symbol);
 
-  // in case we load a bintable, table_max_symbol may be different from max_symbol.
-  // if it's smaller, it means our table can not encode all symbols.
-  rb->SendSimpleString("table_max_symbol");
-  rb->SendLong(table_max_symbol);
   rb->SendSimpleString("max_bits");
   rb->SendLong(num_bits);
   rb->SendSimpleString("raw_size");
@@ -1394,7 +1395,7 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
   rb->SendDouble(ratio);
   if (print_bintable) {
     rb->SendSimpleString("bintable");
-    rb->SendBulkString(bintable);
+    rb->SendBulkString(absl::Base64Escape(bintable));
   }
 }
 
@@ -1458,11 +1459,12 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
         args_view.push_back(arg);
       }
       auto args_span = absl::MakeSpan(args_view);
-      local_cntx.SwitchTxCmd(cid);
+      stub_tx->MultiSwitchCmd(cid);
       crb.SetReplyMode(ReplyMode::NONE);
       stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span);
 
-      sf_.service().InvokeCmd(cid, args_span, &crb, &local_cntx);
+      sf_.service().InvokeCmd(cid, args_span,
+                              CommandContext{local_cntx.transaction, &crb, &local_cntx});
     }
 
     if (options.expire_ttl_range.has_value()) {
@@ -1479,10 +1481,11 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
         args_view.push_back(arg);
       }
       auto args_span = absl::MakeSpan(args_view);
-      local_cntx.SwitchTxCmd(cid);
       crb.SetReplyMode(ReplyMode::NONE);
+      stub_tx->MultiSwitchCmd(cid);
       stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span);
-      sf_.service().InvokeCmd(cid, args_span, &crb, &local_cntx);
+      sf_.service().InvokeCmd(cid, args_span,
+                              CommandContext{local_cntx.transaction, &crb, &local_cntx});
     }
   }
 

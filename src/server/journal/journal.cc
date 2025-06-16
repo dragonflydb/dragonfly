@@ -28,7 +28,7 @@ Journal::Journal() {
 }
 
 void Journal::StartInThread() {
-  journal_slice.Init(unsigned(ProactorBase::me()->GetPoolIndex()));
+  journal_slice.Init();
 
   ServerState::tlocal()->set_journal(this);
   EngineShard* shard = EngineShard::tlocal();
@@ -40,12 +40,11 @@ void Journal::StartInThread() {
 error_code Journal::Close() {
   VLOG(1) << "Journal::Close";
 
-  if (!journal_slice.IsOpen()) {
-    return {};
-  }
-
   lock_guard lk(state_mu_);
+
+  journal_slice.ResetRingBuffer();
   auto close_cb = [&](auto*) {
+    journal_slice.ResetRingBuffer();
     ServerState::tlocal()->set_journal(nullptr);
     EngineShard* shard = EngineShard::tlocal();
     if (shard) {
@@ -89,6 +88,14 @@ void Journal::RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt
 
 void Journal::SetFlushMode(bool allow_flush) {
   journal_slice.SetFlushMode(allow_flush);
+}
+
+size_t Journal::LsnBufferSize() const {
+  return journal_slice.GetRingBufferSize();
+}
+
+size_t Journal::LsnBufferBytes() const {
+  return journal_slice.GetRingBufferBytes();
 }
 
 size_t thread_local JournalFlushGuard::counter_ = 0;

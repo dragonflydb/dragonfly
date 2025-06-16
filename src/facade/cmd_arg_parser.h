@@ -37,13 +37,15 @@ struct CmdArgParser {
     OUT_OF_BOUNDS,
     SHORT_OPT_TAIL,
     INVALID_INT,
+    INVALID_FLOAT,
     INVALID_CASES,
     INVALID_NEXT,
-    UNPROCESSED
+    UNPROCESSED,
+    CUSTOM_ERROR  // should be the last one
   };
 
   struct ErrorInfo {
-    ErrorType type;
+    int type;
     size_t index;
 
     ErrorReply MakeReply() const;
@@ -143,6 +145,7 @@ struct CmdArgParser {
     return *this;
   }
 
+  // Expect no more arguments and return if no error has occured
   bool Finalize() {
     if (HasNext()) {
       Report(UNPROCESSED, cur_i_);
@@ -178,7 +181,21 @@ struct CmdArgParser {
     return cur_i_;
   }
 
+  // Custom error_type should start from CUSTOM_ERROR
+  void Report(int error_type) {
+    // we use previous index, because the check was done outside and it's done after element is
+    // processed
+    Report(error_type, cur_i_ - 1);
+  }
+
  private:
+  void Report(int error_type, size_t idx) {
+    if (!error_) {
+      error_ = {error_type, idx};
+      cur_i_ = args_.size();
+    }
+  }
+
   template <class T, class... Cases>
   std::optional<std::decay_t<T>> MapImpl(std::string_view arg, std::string_view tag, T&& value,
                                          Cases&&... cases) {
@@ -226,13 +243,6 @@ struct CmdArgParser {
     return args_[i].empty() ? ""sv : ToSV(args_[i]);
   }
 
-  void Report(ErrorType type, size_t idx) {
-    if (!error_) {
-      error_ = {type, idx};
-      cur_i_ = args_.size();
-    }
-  }
-
   template <typename T> T Num(size_t idx) {
     auto arg = SafeSV(idx);
     T out;
@@ -254,7 +264,11 @@ struct CmdArgParser {
       }
     }
 
-    Report(INVALID_INT, idx);
+    if constexpr (std::is_floating_point_v<T>) {
+      Report(INVALID_FLOAT, idx);
+    } else {
+      Report(INVALID_INT, idx);
+    }
     return {};
   }
 

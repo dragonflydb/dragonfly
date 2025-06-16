@@ -318,10 +318,9 @@ void Transaction::StoreKeysInArgs(const KeyIndex& key_index) {
 }
 
 void Transaction::InitByKeys(const KeyIndex& key_index) {
-  if (key_index.start == full_args_.size()) {  // eval with 0 keys.
-    CHECK(absl::StartsWith(cid_->name(), "EVAL")) << cid_->name();
+  // Skip initialization for key-dependent transactions without keys
+  if ((key_index.end - key_index.start) + int(bool(key_index.bonus)) == 0)
     return;
-  }
 
   DCHECK_LT(key_index.start, full_args_.size());
 
@@ -512,6 +511,7 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
 
   for (auto& sd : shard_data_) {
     sd.slice_count = sd.slice_start = 0;
+    sd.fp_start = sd.fp_count = 0;  // Reset fingerprints span as kv_fp_ was cleared above.
 
     if (multi_->mode == NON_ATOMIC) {
       sd.local_mask = 0;  // Non atomic transactions schedule each time, so remove all flags
@@ -564,8 +564,7 @@ string Transaction::DebugId(std::optional<ShardId> sid) const {
   if (sid) {
     absl::StrAppend(&res, ",mask[", *sid, "]=", int(shard_data_[SidToId(*sid)].local_mask),
                     ",is_armed=", DEBUG_IsArmedInShard(*sid),
-                    ",txqpos[]=", shard_data_[SidToId(*sid)].pq_pos,
-                    ",fail_state_print=", DEBUG_PrintFailState(*sid));
+                    ",txqpos[]=", shard_data_[SidToId(*sid)].pq_pos);
   }
   absl::StrAppend(&res, "}");
   return res;
@@ -977,6 +976,7 @@ const absl::flat_hash_set<std::pair<ShardId, LockFp>>& Transaction::GetMultiFps(
   return multi_->tag_fps;
 }
 
+#if 0
 string Transaction::DEBUG_PrintFailState(ShardId sid) const {
   auto res = StrCat(
       "usc: ", unique_shard_cnt_, ", name:", GetCId()->name(),
@@ -991,6 +991,7 @@ string Transaction::DEBUG_PrintFailState(ShardId sid) const {
   }
   return res;
 }
+#endif
 
 void Transaction::EnableShard(ShardId sid) {
   unique_shard_cnt_ = 1;
@@ -1244,10 +1245,13 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
   if (IsGlobal()) {
     shard->shard_lock()->Release(LockMode());
   } else {
-    auto lock_args = GetLockArgs(shard->shard_id());
-    DCHECK(sd.local_mask & KEYLOCK_ACQUIRED);
-    DCHECK(!lock_args.fps.empty());
-    GetDbSlice(shard->shard_id()).Release(LockMode(), lock_args);
+    if ((cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0) {
+      auto lock_args = GetLockArgs(shard->shard_id());
+      DCHECK(sd.local_mask & KEYLOCK_ACQUIRED);
+      DCHECK(!lock_args.fps.empty());
+      GetDbSlice(shard->shard_id()).Release(LockMode(), lock_args);
+    }
+
     sd.local_mask &= ~KEYLOCK_ACQUIRED;
   }
 
@@ -1322,7 +1326,7 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
 
   // If we don't follow up with an "action" hop, we must clean up manually on all shards.
   if (result != OpStatus::OK)
-    ExpireBlocking(std::move(wkeys));
+    ExpireBlocking(wkeys);
 
   return result;
 }
@@ -1512,7 +1516,7 @@ void Transaction::ReviveAutoJournal() {
   re_enabled_auto_journal_ = true;
 }
 
-void Transaction::CancelBlocking(std::function<OpStatus(ArgSlice)> status_cb) {
+void Transaction::CancelBlocking(const std::function<OpStatus(ArgSlice)>& status_cb) {
   // We're on the owning thread of this transaction, so we can safely access it's data below.
   // First, check if it makes sense to proceed.
   if (blocking_barrier_.IsClaimed() || cid_ == nullptr || (cid_->opt_mask() & CO::BLOCKING) == 0)
@@ -1597,7 +1601,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
 
     if (num_custom_keys == 0 &&
         (absl::StartsWith(name, "ZDIFF") || absl::StartsWith(name, "ZUNION") ||
-         absl::StartsWith(name, "ZINTER"))) {
+         absl::StartsWith(name, "ZINTER") || absl::EndsWith(name, "MPOP"))) {
       return OpStatus::AT_LEAST_ONE_KEY;
     }
 
@@ -1607,7 +1611,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
 
   if (cid->first_key_pos() > 0) {
     start = cid->first_key_pos() - 1;
-    int last = cid->last_key_pos();
+    int8_t last = cid->last_key_pos();
 
     if (num_custom_keys >= 0) {
       end = start + num_custom_keys;
@@ -1627,7 +1631,8 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     if (cid->opt_mask() & CO::STORE_LAST_KEY) {
       string_view name{cid->name()};
 
-      if (name == "GEORADIUSBYMEMBER" && args.size() >= 5) {
+      if ((name == "GEORADIUSBYMEMBER" && args.size() >= 5) ||
+          (name == "GEORADIUS" && args.size() >= 6)) {
         // key member radius .. STORE destkey
         string_view opt = ArgS(args, args.size() - 2);
         if (absl::EqualsIgnoreCase(opt, "STORE") || absl::EqualsIgnoreCase(opt, "STOREDIST")) {

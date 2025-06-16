@@ -3,7 +3,7 @@ cxx_link(dfly_parser_lib base strings_lib)
 
 add_library(dfly_facade conn_context.cc dragonfly_listener.cc dragonfly_connection.cc facade.cc
             memcache_parser.cc reply_builder.cc op_status.cc service_interface.cc
-            reply_capture.cc cmd_arg_parser.cc tls_helpers.cc)
+            reply_capture.cc cmd_arg_parser.cc tls_helpers.cc socket_utils.cc)
 
 if (DF_USE_SSL)
   set(TLS_LIB tls_lib)
@@ -23,3 +23,6 @@ cxx_test(cmd_arg_parser_test facade_test LABELS DFLY)
 
 add_executable(ok_backend ok_main.cc)
 cxx_link(ok_backend dfly_facade)
+
+add_executable(resp_validator resp_validator.cc)
+cxx_link(resp_validator dfly_parser_lib)

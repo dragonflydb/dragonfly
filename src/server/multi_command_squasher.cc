@@ -15,6 +15,7 @@
 #include "server/engine_shard_set.h"
 #include "server/transaction.h"
 #include "server/tx_base.h"
+#include "util/fibers/synchronization.h"
 
 ABSL_FLAG(size_t, squashed_reply_size_limit, 0,
           "Max bytes allowed for squashing_current_reply_size. If this limit is reached, "
@@ -35,8 +36,8 @@ void CheckConnStateClean(const ConnectionState& state) {
   DCHECK(!state.subscribe_info);
 }
 
-size_t Size(const facade::CapturingReplyBuilder::Payload& payload) {
-  size_t payload_size = sizeof(facade::CapturingReplyBuilder::Payload);
+size_t Size(const CapturingReplyBuilder::Payload& payload) {
+  size_t payload_size = sizeof(CapturingReplyBuilder::Payload);
   return visit(
       Overloaded{
           [&](monostate) { return payload_size; },
@@ -67,11 +68,6 @@ size_t Size(const facade::CapturingReplyBuilder::Payload& payload) {
 
 }  // namespace
 
-atomic_uint64_t MultiCommandSquasher::current_reply_size_ = 0;
-thread_local size_t MultiCommandSquasher::reply_size_limit_ =
-    absl::GetFlag(FLAGS_squashed_reply_size_limit);
-util::fb2::EventCount MultiCommandSquasher::ec_;
-
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
                                            Service* service, const Opts& opts)
     : cmds_{cmds}, cntx_{cntx}, service_{service}, base_cid_{nullptr}, opts_{opts} {
@@ -81,8 +77,12 @@ MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, Connectio
 }
 
 MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(ShardId sid) {
-  if (sharded_.empty())
+  if (sharded_.empty()) {
     sharded_.resize(shard_set->size());
+    for (size_t i = 0; i < sharded_.size(); i++) {
+      sharded_[i].reply_size_total_ptr = &tl_facade_stats->reply_stats.squashing_current_reply_size;
+    }
+  }
 
   auto& sinfo = sharded_[sid];
   if (!sinfo.local_tx) {
@@ -143,7 +143,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(const StoredC
   return need_flush ? SquashResult::SQUASHED_FULL : SquashResult::SQUASHED;
 }
 
-bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, const StoredCmd* cmd) {
+bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const StoredCmd* cmd) {
   DCHECK(order_.empty());  // check no squashed chain is interrupted
 
   auto args = cmd->ArgList(&tmp_keylist_);
@@ -157,11 +157,11 @@ bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, cons
   }
 
   auto* tx = cntx_->transaction;
-  cntx_->SwitchTxCmd(cmd->Cid());
-
-  if (cmd->Cid()->IsTransactional())
+  if (cmd->Cid()->IsTransactional()) {
+    tx->MultiSwitchCmd(cmd->Cid());
     tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
-  service_->InvokeCmd(cmd->Cid(), args, rb, cntx_);
+  }
+  service_->InvokeCmd(cmd->Cid(), args, CommandContext{tx, rb, cntx_});
 
   return true;
 }
@@ -171,7 +171,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
   DCHECK(!sinfo.dispatched.empty());
 
   auto* local_tx = sinfo.local_tx.get();
-  facade::CapturingReplyBuilder crb(ReplyMode::FULL, resp_v);
+  CapturingReplyBuilder crb(ReplyMode::FULL, resp_v);
   ConnectionContext local_cntx{cntx_, local_tx};
   if (cntx_->conn()) {
     local_cntx.skip_acl_validation = cntx_->conn()->IsPrivileged();
@@ -179,27 +179,33 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
 
   CmdArgVec arg_vec;
 
+  auto move_reply = [&sinfo](CapturingReplyBuilder::Payload&& src,
+                             CapturingReplyBuilder::Payload* dst) {
+    *dst = std::move(src);
+    size_t sz = Size(*dst);
+    sinfo.reply_size_delta += sz;
+    sinfo.reply_size_total_ptr->fetch_add(sz, std::memory_order_relaxed);
+  };
+
   for (auto& dispatched : sinfo.dispatched) {
     auto args = dispatched.cmd->ArgList(&arg_vec);
     if (opts_.verify_commands) {
       // The shared context is used for state verification, the local one is only for replies
       if (auto err = service_->VerifyCommandState(dispatched.cmd->Cid(), args, *cntx_); err) {
         crb.SendError(std::move(*err));
-        dispatched.reply = crb.Take();
-        current_reply_size_.fetch_add(Size(dispatched.reply), std::memory_order_relaxed);
-
+        move_reply(crb.Take(), &dispatched.reply);
         continue;
       }
     }
 
-    local_cntx.SwitchTxCmd(dispatched.cmd->Cid());
     crb.SetReplyMode(dispatched.cmd->ReplyMode());
 
+    local_tx->MultiSwitchCmd(dispatched.cmd->Cid());
     local_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args);
-    service_->InvokeCmd(dispatched.cmd->Cid(), args, &crb, &local_cntx);
+    service_->InvokeCmd(dispatched.cmd->Cid(), args,
+                        CommandContext{local_cntx.transaction, &crb, &local_cntx});
 
-    dispatched.reply = crb.Take();
-    current_reply_size_.fetch_add(Size(dispatched.reply), std::memory_order_relaxed);
+    move_reply(crb.Take(), &dispatched.reply);
 
     // Assert commands made no persistent state changes to stub context state
     const auto& local_state = local_cntx.conn_state;
@@ -263,7 +269,13 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   uint64_t after_hop = proactor->GetMonotonicTimeNs();
   bool aborted = false;
 
-  size_t size = 0;
+  ServerState* fresh_ss = ServerState::SafeTLocal();
+
+  size_t total_reply_size = 0;
+  for (auto& sinfo : sharded_) {
+    total_reply_size += sinfo.reply_size_delta;
+  }
+
   for (auto idx : order_) {
     auto& sinfo = sharded_[idx];
     DCHECK_LT(sinfo.reply_id, sinfo.dispatched.size());
@@ -271,17 +283,18 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     auto& reply = sinfo.dispatched[sinfo.reply_id++].reply;
     aborted |= opts_.error_abort && CapturingReplyBuilder::TryExtractError(reply);
 
-    current_reply_size_.fetch_sub(Size(reply), std::memory_order_relaxed);
     CapturingReplyBuilder::Apply(std::move(reply), rb);
     if (aborted)
       break;
   }
-  current_reply_size_.fetch_sub(size, std::memory_order_relaxed);
-  MultiCommandSquasher::ec_.notifyAll();
 
   uint64_t after_reply = proactor->GetMonotonicTimeNs();
-  ServerState::SafeTLocal()->stats.multi_squash_exec_hop_usec += (after_hop - start) / 1000;
-  ServerState::SafeTLocal()->stats.multi_squash_exec_reply_usec += (after_reply - after_hop) / 1000;
+  fresh_ss->stats.multi_squash_exec_hop_usec += (after_hop - start) / 1000;
+  fresh_ss->stats.multi_squash_exec_reply_usec += (after_reply - after_hop) / 1000;
+
+  tl_facade_stats->reply_stats.squashing_current_reply_size.fetch_sub(total_reply_size,
+                                                                      std::memory_order_release);
+  MultiCommandSquasher::ec_.notifyAll();
 
   for (auto& sinfo : sharded_) {
     sinfo.dispatched.clear();
@@ -336,5 +349,22 @@ size_t MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
 bool MultiCommandSquasher::IsAtomic() const {
   return atomic_;
 }
+
+size_t MultiCommandSquasher::GetRepliesMemSize() {
+  std::atomic<size_t>& reply_sz = tl_facade_stats->reply_stats.squashing_current_reply_size;
+  return reply_sz.load(std::memory_order_relaxed);
+}
+
+bool MultiCommandSquasher::IsReplySizeOverLimit() {
+  std::atomic<size_t>& reply_sz = tl_facade_stats->reply_stats.squashing_current_reply_size;
+  size_t current = reply_sz.load(std::memory_order_relaxed);
+  const bool over_limit = current > 0 && current > reply_size_limit_;
+  VLOG_IF(2, over_limit) << "MultiCommandSquasher overlimit: " << reply_sz << " current reply size "
+                         << reply_size_limit_;
+  return over_limit;
+}
+
+thread_local util::fb2::EventCount MultiCommandSquasher::ec_;
+thread_local size_t MultiCommandSquasher::reply_size_limit_ = 0;
 
 }  // namespace dfly

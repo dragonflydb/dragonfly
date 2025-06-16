@@ -65,6 +65,10 @@ ABSL_FLAG(string, P, "", "protocol can be empty (for RESP) or memcache_text");
 
 ABSL_FLAG(bool, tcp_nodelay, false, "If true, set nodelay option on tcp socket");
 ABSL_FLAG(bool, noreply, false, "If true, does not wait for replies. Relevant only for memcached.");
+
+ABSL_FLAG(bool, probe_cluster, true,
+          "If false, skips cluster-mode probing and works only in single node mode");
+
 ABSL_FLAG(bool, greet, true,
           "If true, sends a greeting command on each connection, "
           "to make sure the connection succeeded");
@@ -75,6 +79,7 @@ ABSL_FLAG(bool, ascii, true, "If true, use ascii characters for values");
 ABSL_FLAG(bool, connect_only, false,
           "If true, will only connect to the server, without sending "
           "loadtest commands");
+ABSL_FLAG(string, password, "", "password to authenticate the client");
 
 using namespace std;
 using namespace util;
@@ -87,6 +92,7 @@ using tcp = ::boost::asio::ip::tcp;
 using absl::StrCat;
 
 thread_local base::Xoroshiro128p bit_gen;
+atomic_bool terminate_requested = false;
 
 #if __INTELLISENSE__
 #pragma diag_suppress 144
@@ -423,6 +429,7 @@ class Driver {
   void ReceiveFb();
   void ParseRESP();
   void ParseMC();
+  void RunCommandAndCheckResultIs(std::string_view cmd, std::string_view expected_res);
 
   struct Req {
     uint64_t start;
@@ -589,6 +596,22 @@ void KeyGenerator::EnableClusterMode() {
   }
 }
 
+void RunCommandAndCheckResultIs(std::string_view cmd, std::string_view expected,
+                                FiberSocketBase* socket) {
+  auto ec = socket->Write(io::Buffer(cmd));
+  CHECK(!ec);
+
+  uint8_t buf[128];
+  auto res_sz = socket->Recv(io::MutableBytes(buf));
+  CHECK(res_sz) << res_sz.error().message();
+  string_view resp = io::View(io::Bytes(buf, *res_sz));
+  CHECK_EQ(resp, expected) << resp;
+}
+
+void Driver::RunCommandAndCheckResultIs(std::string_view cmd, std::string_view expected_res) {
+  ::RunCommandAndCheckResultIs(cmd, expected_res, socket_.get());
+}
+
 void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
   VLOG(2) << "Connecting " << index << " to " << ep;
   error_code ec = socket_->Connect(ep);
@@ -598,18 +621,15 @@ void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
     CHECK_EQ(0, setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)));
   }
 
-  if (absl::GetFlag(FLAGS_greet)) {
+  auto password = absl::GetFlag(FLAGS_password);
+  if (!password.empty()) {
+    auto command = absl::StrCat("AUTH ", password, "\r\n");
+    RunCommandAndCheckResultIs(command, "+OK\r\n");
+  } else if (absl::GetFlag(FLAGS_greet)) {
     // TCP Connect does not ensure that the connection was indeed accepted by the server.
     // if server backlog is too short the connection will get stuck in the accept queue.
     // Therefore, we send a ping command to ensure that every connection got connected.
-    ec = socket_->Write(io::Buffer("ping\r\n"));
-    CHECK(!ec);
-
-    uint8_t buf[128];
-    auto res_sz = socket_->Recv(io::MutableBytes(buf));
-    CHECK(res_sz) << res_sz.error().message();
-    string_view resp = io::View(io::Bytes(buf, *res_sz));
-    CHECK(absl::EndsWith(resp, "\r\n")) << resp;
+    RunCommandAndCheckResultIs("PING\r\n", "+PONG\r\n");
   }
   ep_ = ep;
   receive_fb_ = MakeFiber(fb2::Launch::dispatch, [this] { ReceiveFb(); });
@@ -629,7 +649,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
 
   uint32_t num_batches = ((num_reqs_ - 1) / pipeline) + 1;
 
-  for (unsigned i = 0; i < num_batches && now < time_limit_ns; ++i) {
+  for (unsigned i = 0; i < num_batches && now < time_limit_ns && !terminate_requested; ++i) {
     if (i == num_batches - 1) {  // last batch
       pipeline = num_reqs_ - i * pipeline;
     }
@@ -994,6 +1014,11 @@ ClusterShards FetchClusterInfo(const tcp::endpoint& ep, ProactorBase* proactor) 
   unique_ptr<FiberSocketBase> socket(proactor->CreateSocket());
   error_code ec = socket->Connect(ep);
   CHECK(!ec) << "Could not connect to " << ep << " " << ec;
+
+  if (const auto password = GetFlag(FLAGS_password); !password.empty()) {
+    RunCommandAndCheckResultIs(StrFormat("AUTH %s\r\n", password), "+OK\r\n", socket.get());
+  }
+
   ec = socket->Write(io::Buffer("cluster nodes\r\n"));
   CHECK(!ec);
   facade::RedisParser parser{RedisParser::CLIENT, 1024};
@@ -1079,6 +1104,11 @@ int main(int argc, char* argv[]) {
   pp->Run();
   fb2::InitDnsResolver(2000);
 
+  ProactorBase::RegisterSignal({SIGTERM}, pp->GetNextProactor(), [](int) {
+    CONSOLE_INFO << "terminate requested";
+    terminate_requested = true;
+  });
+
   string proto_str = GetFlag(FLAGS_P);
   if (proto_str == "memcache_text") {
     protocol = MC_TEXT;
@@ -1112,7 +1142,7 @@ int main(int argc, char* argv[]) {
   tcp::endpoint ep{address, GetFlag(FLAGS_p)};
 
   ClusterShards shards;
-  if (protocol == RESP) {
+  if (protocol == RESP && GetFlag(FLAGS_probe_cluster)) {
     shards = proactor->Await([&] { return FetchClusterInfo(ep, proactor); });
   }
   CONSOLE_INFO << "Connecting to "

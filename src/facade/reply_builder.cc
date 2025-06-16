@@ -212,7 +212,7 @@ MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), all_(
 }
 
 void MCReplyBuilder::SendValue(std::string_view key, std::string_view value, uint64_t mc_ver,
-                               uint32_t mc_flag) {
+                               uint32_t mc_flag, bool send_cas_token) {
   ReplyScope scope(this);
   if (flag_.meta) {
     string flags;
@@ -227,7 +227,7 @@ void MCReplyBuilder::SendValue(std::string_view key, std::string_view value, uin
     }
   } else {
     WritePieces("VALUE ", key, " ", mc_flag, " ", value.size());
-    if (mc_ver)
+    if (send_cas_token)
       WritePieces(" ", mc_ver);
 
     if (value.size() <= kMaxInlineSize) {

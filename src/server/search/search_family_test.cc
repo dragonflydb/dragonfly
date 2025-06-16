@@ -840,8 +840,9 @@ TEST_F(SearchFamilyTest, FtProfile) {
     EXPECT_THAT(shard_resp, ElementsAre("took", _, "tree", _));
 
     const auto& tree = shard_resp[3].GetVec();
-    EXPECT_THAT(tree[0].GetString(), HasSubstr("Logical{n=3,o=and}"sv));
-    EXPECT_EQ(tree[1].GetVec().size(), 3);
+    EXPECT_EQ(tree[3].GetString() /* operation */, "Logical{n=3,o=and}"s);
+    EXPECT_GT(tree[1].GetInt() /* total time*/, tree[5].GetInt() /* self time */);
+    EXPECT_EQ(tree[7].GetInt() /* processed */, 0);
   }
 
   // Test LIMITED throws no errors
@@ -2445,9 +2446,9 @@ TEST_F(SearchFamilyTest, SearchNonNullFields) {
   EXPECT_THAT(Run({"ft.search", "num_idx", "*"}), AreDocIds("num:1", "num:2", "num:3"));
 
   // Testing vector indices with star query
-  string vector1 = "\\x00\\x00\\x80\\x3f\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00";  // [1,0,0]
-  string vector2 = "\\x00\\x00\\x00\\x00\\x00\\x00\\x80\\x3f\\x00\\x00\\x00\\x00";  // [0,1,0]
-  string vector3 = "\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x80\\x3f";  // [0,0,1]
+  string vector1 = R"(\x00\x00\x80\x3f\x00\x00\x00\x00\x00\x00\x00\x00)";  // [1,0,0]
+  string vector2 = R"(\x00\x00\x00\x00\x00\x00\x80\x3f\x00\x00\x00\x00)";  // [0,1,0]
+  string vector3 = R"(\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x3f)";  // [0,0,1]
 
   Run({"hset", "vec:1", "embedding", vector1});
   Run({"hset", "vec:2", "embedding", vector2});
@@ -2455,10 +2456,9 @@ TEST_F(SearchFamilyTest, SearchNonNullFields) {
 
   // Testing star query with result limit
   auto limit_result = Run({"ft.search", "text_idx", "*", "LIMIT", "0", "2"});
-  ASSERT_GE(limit_result.GetVec().size(), 5);                 // Total count + 2 docs with fields
-  EXPECT_EQ(limit_result.GetVec()[0].GetInt(), 3);            // Total count is 3 (all matches)
-  EXPECT_EQ(limit_result.GetVec()[1].GetString(), "text:1");  // First doc
-  EXPECT_EQ(limit_result.GetVec()[3].GetString(), "text:2");  // Second doc
+
+  // No sorting, so results returned are in random order (implementation-dependent).
+  EXPECT_THAT(limit_result, RespElementsAre(IntArg(3), _, _, _, _));
 
   // Testing star query with sorting
   auto price_desc_result = Run({"ft.search", "num_idx", "*", "SORTBY", "price", "DESC"});
@@ -2753,4 +2753,141 @@ TEST_F(SearchFamilyTest, RenameDocumentBetweenIndices) {
   EXPECT_EQ(Run({"rename", "idx2:{doc}1", "idx1:{doc}1"}), "OK");
 }
 
+TEST_F(SearchFamilyTest, JsonSetIndexesBug) {
+  auto resp = Run({"JSON.SET", "j1", "$", R"({"text":"some text"})"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run(
+      {"FT.CREATE", "index", "ON", "json", "SCHEMA", "$.text", "AS", "text", "TEXT", "SORTABLE"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "j1", "$", R"({"asd}"})"});
+  EXPECT_THAT(resp, ErrArg("ERR failed to parse JSON"));
+
+  resp = Run({"FT.AGGREGATE", "index", "*", "GROUPBY", "1", "@text"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("text", "some text")));
+}
+
+TEST_F(SearchFamilyTest, SearchReindexWriteSearchRace) {
+  const std::string kIndexName = "myRaceIdx";
+  const int kWriterOps = 200;
+  const int kSearcherOps = 200;
+  const int kReindexerOps = 200;
+
+  auto writer_fiber = pp_->at(0)->LaunchFiber([&] {
+    for (int i = 1; i <= kWriterOps; ++i) {
+      std::string doc_key = absl::StrCat("doc:", i);
+      std::string content = absl::StrCat("text data item ", i, " for race condition test");
+      std::string tags_val = absl::StrCat("tagA,tagB,", (i % 10));
+      std::string numeric_field_val = std::to_string(i);
+      Run({"hset", doc_key, "content", content, "tags", tags_val, "numeric_field",
+           numeric_field_val});
+    }
+  });
+
+  auto searcher_fiber = pp_->at(1)->LaunchFiber([&] {
+    for (int i = 1; i <= kSearcherOps; ++i) {
+      int random_val_content = 1 + (i % kWriterOps);
+      std::string query_content = absl::StrCat("@content:item", random_val_content);
+      Run({"ft.search", kIndexName, query_content});
+    }
+  });
+
+  auto reindexer_fiber = pp_->at(2)->LaunchFiber([&] {
+    for (int i = 1; i <= kReindexerOps; ++i) {
+      Run({"ft.create", kIndexName, "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "content",
+           "TEXT", "SORTABLE", "tags", "TAG", "SORTABLE", "numeric_field", "NUMERIC", "SORTABLE"});
+      Run({"ft.dropindex", kIndexName});
+    }
+  });
+
+  // Join fibers
+  writer_fiber.Join();
+  searcher_fiber.Join();
+  reindexer_fiber.Join();
+
+  ASSERT_FALSE(service_->IsShardSetLocked());
+}
+
+TEST_F(SearchFamilyTest, IgnoredOptionsInFtCreate) {
+  Run({"HSET", "doc:1", "title", "Test Document"});
+
+  // Create an index with various options, some of which should be ignored
+  // INDEXMISSING and INDEXEMPTY are supported by default
+  auto resp = Run({"FT.CREATE",
+                   "idx",
+                   "ON",
+                   "HASH",
+                   "SCHEMA",
+                   "title",
+                   "TEXT",
+                   "UNF",
+                   "NOSTEM",
+                   "CASESENSITIVE",
+                   "WITHSUFFIXTRIE",
+                   "INDEXMISSING",
+                   "INDEXEMPTY",
+                   "WEIGHT",
+                   "1",
+                   "SEPARATOR",
+                   "|",
+                   "PHONETIC",
+                   "dm:en",
+                   "SORTABLE"});
+
+  // Check that the response is OK, indicating the index was created successfully
+  EXPECT_THAT(resp, "OK");
+
+  // Verify that the index was created correctly
+  resp = Run({"FT.SEARCH", "idx", "*"});
+  EXPECT_THAT(resp, AreDocIds("doc:1"));
+}
+
+TEST_F(SearchFamilyTest, JsonDelIndexesBug) {
+  auto resp = Run({"JSON.SET", "j1", "$", R"({"text":"some text"})"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run(
+      {"FT.CREATE", "index", "ON", "json", "SCHEMA", "$.text", "AS", "text", "TEXT", "SORTABLE"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.DEL", "j1", "$.text"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"FT.AGGREGATE", "index", "*", "GROUPBY", "1", "@text"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("text", ArgType(RespExpr::NIL))));
+}
+
+TEST_F(SearchFamilyTest, SearchStatsInfoRace) {
+  auto index_ops_fiber = pp_->at(0)->LaunchFiber([&] {
+    for (int i = 1; i <= 5; ++i) {
+      std::string idx_name = absl::StrCat("idx", i);
+      std::string prefix = absl::StrCat("prefix", i, ":");
+      Run({"FT.CREATE", idx_name, "ON", "HASH", "PREFIX", "1", prefix});
+      Run({"FT.DROPINDEX", idx_name});
+    }
+  });
+
+  auto info_ops_fiber = pp_->at(1)->LaunchFiber([&] {
+    for (int i = 1; i <= 10; ++i) {
+      Run({"INFO"});
+    }
+  });
+
+  index_ops_fiber.Join();
+  info_ops_fiber.Join();
+
+  ASSERT_FALSE(service_->IsShardSetLocked());
+}
+
+TEST_F(SearchFamilyTest, EmptyKeyBug) {
+  auto resp = Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "field", "TEXT"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"HSET", "", "field", "value"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"FT.SEARCH", "index", "*"});
+  EXPECT_THAT(resp, AreDocIds(""));
+}
 }  // namespace dfly

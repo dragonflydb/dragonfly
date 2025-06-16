@@ -30,108 +30,55 @@ JournalSlice::JournalSlice() {
 JournalSlice::~JournalSlice() {
 }
 
-void JournalSlice::Init(unsigned index) {
-  if (ring_buffer_)  // calling this function multiple times is allowed and it's a no-op.
+void JournalSlice::Init() {
+  // calling this function multiple times is allowed and it's a no-op.
+  if (ring_buffer_.capacity() > 0)
     return;
 
-  slice_index_ = index;
-  ring_buffer_.emplace(2);
+  ring_buffer_.set_capacity(absl::GetFlag(FLAGS_shard_repl_backlog_len));
 }
-
-#if 0
-std::error_code JournalSlice::Open(std::string_view dir) {
-  CHECK(!shard_file_);
-  DCHECK_NE(slice_index_, UINT32_MAX);
-
-  fs::path dir_path;
-
-  if (dir.empty()) {
-  } else {
-    dir_path = dir;
-    error_code ec;
-
-    fs::file_status dir_status = fs::status(dir_path, ec);
-    if (ec) {
-      if (ec == errc::no_such_file_or_directory) {
-        fs::create_directory(dir_path, ec);
-        dir_status = fs::status(dir_path, ec);
-      }
-      if (ec)
-        return ec;
-    }
-    // LOG(INFO) << int(dir_status.type());
-  }
-
-  dir_path.append(ShardName("journal", slice_index_));
-  shard_path_ = dir_path;
-
-  // For file integrity guidelines see:
-  // https://lwn.net/Articles/457667/
-  // https://www.evanjones.ca/durability-filesystem.html
-  // NOTE: O_DSYNC is omitted.
-  constexpr auto kJournalFlags = O_CLOEXEC | O_CREAT | O_TRUNC | O_RDWR;
-  io::Result<unique_ptr<LinuxFile>> res = OpenLinux(shard_path_, kJournalFlags, 0666);
-  if (!res) {
-    return res.error();
-  }
-  DVLOG(1) << "Opened journal " << shard_path_;
-
-  shard_file_ = std::move(res).value();
-  file_offset_ = 0;
-  status_ec_.clear();
-
-  return error_code{};
-}
-
-error_code JournalSlice::Close() {
-  VLOG(1) << "JournalSlice::Close";
-
-  CHECK(shard_file_);
-  lameduck_ = true;
-
-  auto ec = shard_file_->Close();
-
-  DVLOG(1) << "Closing " << shard_path_;
-  LOG_IF(ERROR, ec) << "Error closing journal file " << ec;
-  shard_file_.reset();
-
-  return ec;
-}
-#endif
 
 bool JournalSlice::IsLSNInBuffer(LSN lsn) const {
-  DCHECK(ring_buffer_);
+  DCHECK(ring_buffer_.capacity() > 0);
 
-  if (ring_buffer_->empty()) {
+  if (ring_buffer_.empty()) {
     return false;
   }
-  return (*ring_buffer_)[0].lsn <= lsn && lsn <= ((*ring_buffer_)[ring_buffer_->size() - 1].lsn);
+
+  if (ring_buffer_.size() == 1) {
+    return ring_buffer_.front().lsn == lsn;
+  }
+
+  return ring_buffer_.front().lsn <= lsn && lsn <= ring_buffer_.back().lsn;
 }
 
 std::string_view JournalSlice::GetEntry(LSN lsn) const {
-  DCHECK(ring_buffer_ && IsLSNInBuffer(lsn));
-  auto start = (*ring_buffer_)[0].lsn;
-  DCHECK((*ring_buffer_)[lsn - start].lsn == lsn);
-  return (*ring_buffer_)[lsn - start].data;
+  DCHECK(ring_buffer_.capacity() > 0 && IsLSNInBuffer(lsn));
+
+  auto start = ring_buffer_.front().lsn;
+  DCHECK(ring_buffer_[lsn - start].lsn == lsn);
+  return ring_buffer_[lsn - start].data;
 }
 
 void JournalSlice::SetFlushMode(bool allow_flush) {
   DCHECK(allow_flush != enable_journal_flush_);
   enable_journal_flush_ = allow_flush;
   if (allow_flush) {
-    JournalItem item;
-    item.lsn = -1;
-    item.opcode = Op::NOOP;
-    item.data = "";
-    item.slot = {};
-    CallOnChange(item);
+    // This lock is never blocking because it contends with UnregisterOnChange, which is cpu only.
+    // Hence this lock prevents the UnregisterOnChange to start running in the middle of
+    // SetFlushMode.
+    std::shared_lock lk(cb_mu_);
+    for (auto k_v : journal_consumers_arr_) {
+      k_v.second->ThrottleIfNeeded();
+    }
   }
 }
 
 void JournalSlice::AddLogRecord(const Entry& entry) {
-  DCHECK(ring_buffer_);
+  DCHECK(ring_buffer_.capacity() > 0);
 
   JournalItem item;
+
   {
     FiberAtomicGuard fg;
     item.opcode = entry.opcode;
@@ -143,22 +90,36 @@ void JournalSlice::AddLogRecord(const Entry& entry) {
     JournalWriter writer{&buf_sink};
     writer.Write(entry);
 
+    // Deep copy here
     item.data = io::View(ring_serialize_buf_.InputBuffer());
     ring_serialize_buf_.Clear();
     VLOG(2) << "Writing item [" << item.lsn << "]: " << entry.ToString();
   }
 
-  CallOnChange(item);
+  CallOnChange(&item);
 }
 
-void JournalSlice::CallOnChange(const JournalItem& item) {
+void JournalSlice::CallOnChange(JournalItem* item) {
   // This lock is never blocking because it contends with UnregisterOnChange, which is cpu only.
   // Hence this lock prevents the UnregisterOnChange to start running in the middle of CallOnChange.
-  // CallOnChange is atomic iff JournalSlice::SetFlushMode(false) is called before.
+  // CallOnChange is atomic if JournalSlice::SetFlushMode(false) is called before.
   std::shared_lock lk(cb_mu_);
   for (auto k_v : journal_consumers_arr_) {
-    k_v.second->ConsumeJournalChange(item);
+    k_v.second->ConsumeJournalChange(*item);
   }
+  item->cmd = {};
+  // We preserve order here. After ConsumeJournalChange there can reordering
+  if (ring_buffer_.size() == ring_buffer_.capacity()) {
+    const size_t bytes_removed = ring_buffer_.front().data.size() + sizeof(*item);
+    DCHECK_GE(ring_buffer_bytes, bytes_removed);
+    ring_buffer_bytes -= bytes_removed;
+  }
+  if (!ring_buffer_.empty()) {
+    DCHECK(item->lsn == ring_buffer_.back().lsn + 1);
+  }
+  ring_buffer_.push_back(std::move(*item));
+  ring_buffer_bytes += sizeof(*item) + ring_buffer_.back().data.size();
+
   if (enable_journal_flush_) {
     for (auto k_v : journal_consumers_arr_) {
       k_v.second->ThrottleIfNeeded();
@@ -169,7 +130,7 @@ void JournalSlice::CallOnChange(const JournalItem& item) {
 uint32_t JournalSlice::RegisterOnChange(JournalConsumerInterface* consumer) {
   // mutex lock isn't needed due to iterators are not invalidated
   uint32_t id = next_cb_id_++;
-  journal_consumers_arr_.emplace_back(id, std::move(consumer));
+  journal_consumers_arr_.emplace_back(id, consumer);
   return id;
 }
 
@@ -180,6 +141,18 @@ void JournalSlice::UnregisterOnChange(uint32_t id) {
                     [id](const auto& e) { return e.first == id; });
   CHECK(it != journal_consumers_arr_.end());
   journal_consumers_arr_.erase(it);
+}
+
+size_t JournalSlice::GetRingBufferSize() const {
+  return ring_buffer_.size();
+}
+
+size_t JournalSlice::GetRingBufferBytes() const {
+  return ring_buffer_bytes;
+}
+
+void JournalSlice::ResetRingBuffer() {
+  ring_buffer_.clear();
 }
 
 }  // namespace journal

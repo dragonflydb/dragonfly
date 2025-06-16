@@ -591,6 +591,15 @@ TEST_P(KnnTest, Simple1D) {
     algo.Init("* =>[KNN 2 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(70, 71));
   }
+
+  // Two closest to 70.5
+  {
+    params["vec"] = ToBytes({70.5});
+    algo.Init("* =>[KNN 2 @pos $vec as vector_distance]", &params);
+    EXPECT_EQ("vector_distance", algo.GetKnnScoreSortOption()->score_field_alias);
+    SearchResult result = algo.Search(&indices);
+    EXPECT_THAT(result.ids, testing::UnorderedElementsAre(70, 71));
+  }
 }
 
 TEST_P(KnnTest, Simple2D) {
@@ -870,6 +879,32 @@ TEST_F(SearchTest, InvalidVectorParameter) {
   query_params["b"] = "abcdefg";
 
   ASSERT_FALSE(algo.Init("*=>[KNN 2 @v $b]", &query_params));
+}
+
+TEST_F(SearchTest, NotImplementedSearchTypes) {
+  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  // Add a document for testing
+  MockedDocument doc{Map{{"title", "text for search"}}};
+  indices.Add(0, doc);
+
+  // Test suffix search (words ending with "search")
+  algo.Init("*search", &params);
+  auto suffix_result = algo.Search(&indices);
+  EXPECT_TRUE(suffix_result.ids.empty()) << "Suffix search should return empty result";
+  EXPECT_THAT(suffix_result.error, testing::HasSubstr("Not implemented"))
+      << "Suffix search should return a not implemented error";
+
+  // Test infix search (words containing "for")
+  algo.Init("*for*", &params);
+  auto infix_result = algo.Search(&indices);
+  EXPECT_TRUE(infix_result.ids.empty()) << "Infix search should return empty result";
+  EXPECT_THAT(infix_result.error, testing::HasSubstr("Not implemented"))
+      << "Infix search should return a not implemented error";
 }
 
 }  // namespace search
