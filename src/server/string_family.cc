@@ -552,7 +552,7 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
   DCHECK(!keys.Empty());
 
   if constexpr (std::is_same_v<Iter, DbSlice::Iterator>) {
-    const auto cid = t->GetCId();
+    const CommandId* cid = t->GetCId();
     DCHECK(!cid->IsReadOnly()) << "mutable iterator used with read-only command " << cid->name();
   }
 
