@@ -152,7 +152,7 @@ class DbSlice {
     AutoUpdater();
     AutoUpdater(const AutoUpdater& o) = delete;
     AutoUpdater& operator=(const AutoUpdater& o) = delete;
-    AutoUpdater(AutoUpdater&& o);
+    AutoUpdater(AutoUpdater&& o) noexcept;
     AutoUpdater& operator=(AutoUpdater&& o);
     ~AutoUpdater();
 
@@ -160,7 +160,7 @@ class DbSlice {
     void Cancel();
 
    private:
-    enum class DestructorAction {
+    enum class DestructorAction : uint8_t {
       kDoNothing,
       kRun,
     };
@@ -171,6 +171,8 @@ class DbSlice {
 
       DbSlice* db_slice = nullptr;
       DbIndex db_ind = 0;
+
+      // TODO: remove `it` from ItAndUpdater as it's redundant with respect to this iterator.
       Iterator it;
       std::string_view key;
 
@@ -178,7 +180,7 @@ class DbSlice {
       size_t orig_heap_size = 0;
     };
 
-    AutoUpdater(const Fields& fields);
+    AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it, DbSlice* db_slice);
 
     friend class DbSlice;
 
@@ -542,7 +544,7 @@ class DbSlice {
 
  private:
   void PreUpdateBlocking(DbIndex db_ind, Iterator it);
-  void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
+  void PostUpdate(DbIndex db_ind, std::string_view key);
 
   bool DelEmptyPrimeValue(const Context& cntx, Iterator it);
 
