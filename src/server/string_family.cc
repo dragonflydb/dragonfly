@@ -551,10 +551,9 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
-  if constexpr (constexpr bool is_mut_iter = std::is_same_v<Iter, DbSlice::Iterator>) {
+  if constexpr (std::is_same_v<Iter, DbSlice::Iterator>) {
     const auto cid = t->GetCId();
-    DCHECK(!(cid->IsReadOnly() && is_mut_iter))
-        << "mutable iterator used with read-only command " << cid->name();
+    DCHECK(!cid->IsReadOnly()) << "mutable iterator used with read-only command " << cid->name();
   }
 
   MGetResponse response(keys.Size());
