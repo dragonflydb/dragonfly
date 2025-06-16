@@ -914,8 +914,8 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
       force_ping_ = true;
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
     } else {
-      auto exe_res = ExecuteTx(std::move(*tx_data), cntx);
-      if (exe_res) {
+      const bool is_successful = ExecuteTx(std::move(*tx_data), cntx);
+      if (is_successful) {
         // We only increment upon successful execution of the transaction.
         // The reason for this is that during partial sync we sent this
         // number as the lsn number to resume from. However, if for example
@@ -1037,7 +1037,7 @@ bool DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx
     return false;
   // Global command will be executed only from one flow fiber. This ensure corectness of data in
   // replica.
-  bool execution_res = false;
+  bool execution_res = true;
   if (inserted_by_me) {
     execution_res = executor_->Execute(tx_data.dbid, tx_data.command) == facade::DispatchResult::OK;
   }
@@ -1056,7 +1056,7 @@ bool DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx
   if (val == 1) {
     multi_shard_exe_->Erase(tx_data.txid);
   }
-  return inserted_by_me ? execution_res : true;
+  return execution_res;
 }
 
 error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* dest) {
