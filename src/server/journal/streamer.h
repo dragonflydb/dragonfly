@@ -54,8 +54,6 @@ class JournalStreamer : public journal::JournalConsumerInterface {
     return cntx_->IsRunning();
   }
 
-  void WaitForInflightToComplete();
-
   util::FiberSocketBase* dest_ = nullptr;
   ExecutionState* cntx_;
 
@@ -66,6 +64,12 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   bool IsStalled() const;
 
   journal::Journal* journal_;
+
+  util::fb2::Fiber periodic_writer_;
+  util::fb2::Done periodic_writer_done_;
+  void RunPeriodicWriterFiber();
+  void EndPeriodicWriterFiber();
+  void PeriodicWriterFiber(std::chrono::microseconds period_ms, util::fb2::Done* waiter);
 
   PendingBuf pending_buf_;
 
