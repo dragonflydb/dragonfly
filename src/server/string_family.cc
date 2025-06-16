@@ -30,6 +30,7 @@
 #include "server/error.h"
 #include "server/generic_family.h"
 #include "server/journal/journal.h"
+#include "server/search/doc_index.h"
 #include "server/table.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
@@ -111,8 +112,8 @@ class SetCmd {
   OpStatus Set(const SetParams& params, std::string_view key, std::string_view value);
 
  private:
-  OpStatus SetExisting(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
-                       std::string_view key, std::string_view value);
+  OpStatus SetExisting(const SetParams& params, const DbContext& db_cntx, DbSlice::Iterator it,
+                       DbSlice::ExpIterator e_it, std::string_view key, std::string_view value);
 
   void AddNew(const SetParams& params, DbSlice::Iterator it, std::string_view key,
               std::string_view value);
@@ -831,7 +832,7 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
 
     if (params.flags & SET_IF_EXISTS) {
       if (IsValid(find_res.it)) {
-        return SetExisting(params, find_res.it, find_res.exp_it, key, value);
+        return SetExisting(params, op_args_.db_cntx, find_res.it, find_res.exp_it, key, value);
       } else {
         return OpStatus::SKIPPED;
       }
@@ -850,15 +851,16 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
     if (auto status = CachePrevIfNeeded(params, op_res->it); status != OpStatus::OK)
       return status;
 
-    return SetExisting(params, op_res->it, op_res->exp_it, key, value);
+    return SetExisting(params, op_args_.db_cntx, op_res->it, op_res->exp_it, key, value);
   } else {
     AddNew(params, op_res->it, key, value);
     return OpStatus::OK;
   }
 }
 
-OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
-                             DbSlice::ExpIterator e_it, string_view key, string_view value) {
+OpStatus SetCmd::SetExisting(const SetParams& params, const DbContext& db_cntx,
+                             DbSlice::Iterator it, DbSlice::ExpIterator e_it, string_view key,
+                             string_view value) {
   DCHECK_EQ(params.flags & SET_IF_NOTEXIST, 0);
 
   PrimeValue& prime_value = it->second;
@@ -891,6 +893,9 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
   // Update flags
   prime_value.SetFlag(params.memcache_flags != 0);
   db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
+
+  // We need to remove the key from search indices, because we are overwriting it to OBJ_STRING
+  shard->search_indices()->RemoveDoc(key, db_cntx, prime_value);
 
   // If value is external, mark it as deleted
   if (prime_value.IsExternal()) {
