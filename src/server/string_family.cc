@@ -1320,8 +1320,8 @@ void StringFamily::DecrBy(CmdArgList args, const CommandContext& cmnd_cntx) {
 }
 
 void ReorderShardResults(const std::vector<MGetResponse>& mget_resp, const Transaction* t,
-                         absl::FixedArray<optional<GetResp>, 8>* dest,
-                         const bool is_memcache_protocol) {
+                         const bool is_memcache_protocol,
+                         absl::FixedArray<optional<GetResp>, 8>* dest) {
   for (ShardId sid = 0; sid < mget_resp.size(); ++sid) {
     if (!t->IsActive(sid))
       continue;
@@ -1373,7 +1373,7 @@ void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
 
   // reorder shard results back according to argument order
   absl::FixedArray<optional<GetResp>, 8> res(args.size());
-  ReorderShardResults(mget_resp, cmnd_cntx.tx, &res, is_memcache);
+  ReorderShardResults(mget_resp, cmnd_cntx.tx, is_memcache, &res);
 
   // The code below is safe in the context of squashing (uses CapturingReplyBuilder).
   // Specifically:
