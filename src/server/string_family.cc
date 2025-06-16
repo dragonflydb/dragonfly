@@ -551,12 +551,11 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
-  auto& db_slice = t->GetDbSlice(shard->shard_id());
-
-  const auto cid = t->GetCId();
-  constexpr bool is_mut_iter = std::is_same_v<Iter, DbSlice::Iterator>;
-  DCHECK(!(cid->IsReadOnly() && is_mut_iter))
-      << "mutable iterator used with read-only command " << cid->name();
+  if constexpr (constexpr bool is_mut_iter = std::is_same_v<Iter, DbSlice::Iterator>) {
+    const auto cid = t->GetCId();
+    DCHECK(!(cid->IsReadOnly() && is_mut_iter))
+        << "mutable iterator used with read-only command " << cid->name();
+  }
 
   MGetResponse response(keys.Size());
   struct Item {
@@ -602,6 +601,7 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
   char* next = response.storage.get();
   bool fetch_mcflag = fetch_mask & FETCH_MCFLAG;
   bool fetch_mcver = fetch_mask & FETCH_MCVER;
+  const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
   for (size_t i = 0; i < items.size(); ++i) {
     auto it = items[i].it;
     if (it.is_done()) {
@@ -1319,11 +1319,9 @@ void StringFamily::DecrBy(CmdArgList args, const CommandContext& cmnd_cntx) {
   return IncrByGeneric(key, -val, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
-absl::FixedArray<optional<GetResp>, 8> ReorderShardResults(
-    const std::vector<MGetResponse>& mget_resp, const Transaction* t, const size_t arg_size,
-    const bool is_memcache_protocol) {
-  absl::FixedArray<optional<GetResp>, 8> res(arg_size);
-
+void ReorderShardResults(const std::vector<MGetResponse>& mget_resp, const Transaction* t,
+                         absl::FixedArray<optional<GetResp>, 8>* dest,
+                         const bool is_memcache_protocol) {
   for (ShardId sid = 0; sid < mget_resp.size(); ++sid) {
     if (!t->IsActive(sid))
       continue;
@@ -1336,14 +1334,14 @@ absl::FixedArray<optional<GetResp>, 8> ReorderShardResults(
         continue;
 
       uint32_t indx = it.index();
+      auto& item = (*dest)[indx];
 
-      res[indx] = std::move(src.resp_arr[src_indx]);
+      item = std::move(src.resp_arr[src_indx]);
       if (is_memcache_protocol) {
-        res[indx]->key = *it;
+        item->key = *it;
       }
     }
   }
-  return res;
 }
 
 void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
@@ -1374,7 +1372,8 @@ void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
   tiering_bc->Wait();
 
   // reorder shard results back according to argument order
-  auto res = ReorderShardResults(mget_resp, cmnd_cntx.tx, args.size(), is_memcache);
+  absl::FixedArray<optional<GetResp>, 8> res(args.size());
+  ReorderShardResults(mget_resp, cmnd_cntx.tx, &res, is_memcache);
 
   // The code below is safe in the context of squashing (uses CapturingReplyBuilder).
   // Specifically:
