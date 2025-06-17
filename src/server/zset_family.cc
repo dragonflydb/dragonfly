@@ -1938,8 +1938,7 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
 
   if (zparams.override && members.empty()) {
     auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
-    RETURN_ON_BAD_STATUS(res_it);
-    if (IsValid(res_it->it)) {
+    if (res_it && IsValid(res_it->it)) {
       res_it->post_updater.Run();
       db_slice.Del(op_args.db_cntx, res_it->it);
     }
