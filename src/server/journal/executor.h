@@ -23,7 +23,7 @@ class JournalExecutor {
 
   JournalExecutor(JournalExecutor&&) = delete;
 
-  // Return true if the command executed successfully and false otherwise.
+  // Returns the result of Service::DispatchCommand
   facade::DispatchResult Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd);
 
   void FlushAll();  // Execute FLUSHALL.
