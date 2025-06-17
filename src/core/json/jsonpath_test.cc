@@ -644,4 +644,48 @@ TYPED_TEST(JsonPathTest, MutateDeleteNestedWithSameKey) {
   }
 }
 
+TYPED_TEST(JsonPathTest, MutateDeleteRecursiveWithKeysAndArrayValues) {
+  ASSERT_EQ(0, this->Parse("$..a"));
+  Path path = this->driver_.TakePath();
+
+  TypeParam json = ValidJson<TypeParam>(
+      R"({"a": {"a": 2, "b": 3}, "b": ["a", "b"], "nested": {"b": [true, "a", "b"]}})");
+
+  unsigned deleted_count = 0;
+  auto delete_cb = [&](optional<string_view> key, JsonType* val) {
+    // Delete all elements with key "a" (but not string values "a" in arrays)
+    if (key && key.value() == "a") {
+      deleted_count++;
+      return true;  // delete element
+    }
+    return false;  // keep element
+  };
+
+  if constexpr (std::is_same_v<TypeParam, JsonType>) {
+    unsigned reported_matches = MutatePath(path, delete_cb, &json, true /* deletion_mode */);
+
+    // Verify that exactly 1 element was deleted (the root-level "a" key)
+    EXPECT_EQ(1, deleted_count);
+    // Verify that MutatePath reports 1 match
+    EXPECT_EQ(1, reported_matches);
+
+    // Verify result after deletion: keys "a" removed but string values "a" in arrays preserved
+    auto expected = ValidJson<JsonType>(R"({"b": ["a", "b"], "nested": {"b": [true, "a", "b"]}})");
+    EXPECT_EQ(expected, json);
+  } else {
+    flexbuffers::Builder fbb;
+    unsigned reported_matches = MutatePath(path, delete_cb, json, &fbb, true /* deletion_mode */);
+
+    // Verify that exactly 1 element was deleted
+    EXPECT_EQ(1, deleted_count);
+    // Verify that MutatePath reports 1 match
+    EXPECT_EQ(1, reported_matches);
+
+    // Verify result after deletion
+    FlatJson result = flexbuffers::GetRoot(fbb.GetBuffer());
+    auto expected = ValidJson<JsonType>(R"({"b": ["a", "b"], "nested": {"b": [true, "a", "b"]}})");
+    EXPECT_EQ(expected, FromFlat(result));
+  }
+}
+
 }  // namespace dfly::json
