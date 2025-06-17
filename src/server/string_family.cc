@@ -537,16 +537,29 @@ struct MGetResponse {
 // fetch_mask values
 constexpr uint8_t FETCH_MCFLAG = 0x1;
 constexpr uint8_t FETCH_MCVER = 0x2;
-MGetResponse OpMGet(fb2::BlockingCounter wait_bc, uint8_t fetch_mask, const Transaction* t,
-                    EngineShard* shard) {
+
+template <typename Iter> using SearchKey = std::function<OpResult<Iter>(string_view)>;
+
+// A find operation which can mutate, for commands which can write, eg GAT
+using SearchMut = SearchKey<DbSlice::Iterator>;
+
+// Const find operation, for read-only commands, eg MGet
+using SearchConst = SearchKey<DbSlice::ConstIterator>;
+
+template <typename Iter>
+MGetResponse CollectKeys(BlockingCounter wait_bc, uint8_t fetch_mask, const Transaction* t,
+                         EngineShard* shard, SearchKey<Iter> find_op) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
-  auto& db_slice = t->GetDbSlice(shard->shard_id());
+  if constexpr (std::is_same_v<Iter, DbSlice::Iterator>) {
+    const CommandId* cid = t->GetCId();
+    DCHECK(!cid->IsReadOnly()) << "mutable iterator used with read-only command " << cid->name();
+  }
 
   MGetResponse response(keys.Size());
   struct Item {
-    DbSlice::ConstIterator it;
+    Iter it;
     int source_index = -1;  // in case of duplicate keys, points to the first occurrence.
   };
 
@@ -573,7 +586,7 @@ MGetResponse OpMGet(fb2::BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
       }
     }
 
-    auto it_res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
+    auto it_res = find_op(key);
     auto& dest = items[index++];
     if (it_res) {
       dest.it = *it_res;
@@ -588,6 +601,7 @@ MGetResponse OpMGet(fb2::BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
   char* next = response.storage.get();
   bool fetch_mcflag = fetch_mask & FETCH_MCFLAG;
   bool fetch_mcver = fetch_mask & FETCH_MCVER;
+  const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
   for (size_t i = 0; i < items.size(); ++i) {
     auto it = items[i].it;
     if (it.is_done()) {
@@ -600,23 +614,24 @@ MGetResponse OpMGet(fb2::BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
 
     // Copy to buffer or trigger tiered read that will eventually write to
     // buffer
-    if (it->second.IsExternal()) {
+    const PrimeValue& value = it->second;
+    if (value.IsExternal()) {
       wait_bc->Add(1);
       auto cb = [next, wait_bc](const string& v) mutable {
         memcpy(next, v.data(), v.size());
         wait_bc->Dec();
       };
-      shard->tiered_storage()->Read(t->GetDbIndex(), it.key(), it->second, std::move(cb));
+      shard->tiered_storage()->Read(t->GetDbIndex(), it.key(), value, std::move(cb));
     } else {
-      CopyValueToBuffer(it->second, next);
+      CopyValueToBuffer(value, next);
     }
 
-    size_t size = it->second.Size();
+    size_t size = value.Size();
     resp.value = string_view(next, size);
     next += size;
 
     if (fetch_mcflag) {
-      if (it->second.HasFlag()) {
+      if (value.HasFlag()) {
         resp.mc_flag = db_slice.GetMCFlag(t->GetDbIndex(), it->first);
       }
 
@@ -628,6 +643,15 @@ MGetResponse OpMGet(fb2::BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
   key_index.clear();
 
   return response;
+}
+
+MGetResponse OpMGet(BlockingCounter wait_bc, uint8_t fetch_mask, const Transaction* t,
+                    EngineShard* shard) {
+  SearchConst find_op = [&](string_view key) {
+    const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
+    return db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
+  };
+  return CollectKeys(wait_bc, fetch_mask, t, shard, std::move(find_op));
 }
 
 // Extend key with value, either prepend or append. Return size of stored string
@@ -1298,12 +1322,39 @@ void StringFamily::DecrBy(CmdArgList args, const CommandContext& cmnd_cntx) {
   return IncrByGeneric(key, -val, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
+void ReorderShardResults(const std::vector<MGetResponse>& mget_resp, const Transaction* t,
+                         const bool is_memcache_protocol,
+                         absl::FixedArray<optional<GetResp>, 8>* dest) {
+  for (ShardId sid = 0; sid < mget_resp.size(); ++sid) {
+    if (!t->IsActive(sid))
+      continue;
+
+    auto& src = mget_resp[sid];
+    ShardArgs shard_args = t->GetShardArgs(sid);
+    unsigned src_indx = 0;
+    for (auto it = shard_args.begin(); it != shard_args.end(); ++it, ++src_indx) {
+      if (!src.resp_arr[src_indx])
+        continue;
+
+      uint32_t indx = it.index();
+      auto& item = (*dest)[indx];
+
+      item = std::move(src.resp_arr[src_indx]);
+      if (is_memcache_protocol) {
+        item->key = *it;
+      }
+    }
+  }
+}
+
 void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
   DCHECK_GE(args.size(), 1U);
 
   uint8_t fetch_mask = 0;
   auto* builder = cmnd_cntx.rb;
-  if (builder->GetProtocol() == Protocol::MEMCACHE) {
+  const bool is_memcache = builder->GetProtocol() == Protocol::MEMCACHE;
+
+  if (is_memcache) {
     fetch_mask |= FETCH_MCFLAG;
     if (cmnd_cntx.conn_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
       fetch_mask |= FETCH_MCVER;
@@ -1325,26 +1376,7 @@ void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
 
   // reorder shard results back according to argument order
   absl::FixedArray<optional<GetResp>, 8> res(args.size());
-
-  for (ShardId sid = 0; sid < mget_resp.size(); ++sid) {
-    if (!cmnd_cntx.tx->IsActive(sid))
-      continue;
-
-    auto& src = mget_resp[sid];
-    ShardArgs shard_args = cmnd_cntx.tx->GetShardArgs(sid);
-    unsigned src_indx = 0;
-    for (auto it = shard_args.begin(); it != shard_args.end(); ++it, ++src_indx) {
-      if (!src.resp_arr[src_indx])
-        continue;
-
-      uint32_t indx = it.index();
-
-      res[indx] = std::move(src.resp_arr[src_indx]);
-      if (builder->GetProtocol() == Protocol::MEMCACHE) {
-        res[indx]->key = *it;
-      }
-    }
-  }
+  ReorderShardResults(mget_resp, cmnd_cntx.tx, is_memcache, &res);
 
   // The code below is safe in the context of squashing (uses CapturingReplyBuilder).
   // Specifically:
@@ -1365,7 +1397,7 @@ void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
   // for CapturingReplyBuilder the internal vec is empty and therefore we should skip the call
   // to Send because sink_ is nullptr and there is no payload to Send since it was captured.
   SinkReplyBuilder::ReplyScope scope(builder);
-  if (builder->GetProtocol() == Protocol::MEMCACHE) {
+  if (is_memcache) {
     auto* rb = static_cast<MCReplyBuilder*>(builder);
     DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);
     for (const auto& entry : res) {
