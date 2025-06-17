@@ -18,6 +18,7 @@
 #include "core/mi_memory_resource.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
+#include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/common.h"
@@ -257,6 +258,7 @@ template <typename T> void Send(const std::optional<T>& opt, RedisReplyBuilder* 
 }
 
 template <typename I> void Send(I begin, I end, RedisReplyBuilder* rb) {
+  RedisReplyBuilder::ReplyScope scope{rb};
   if (begin == end) {
     rb->SendEmptyArray();
   } else {
@@ -291,6 +293,7 @@ template <typename T> void Send(const JsonCallbackResult<T>& result, RedisReplyB
 }
 
 template <typename T> void Send(const OpResult<T>& result, RedisReplyBuilder* rb) {
+  RedisReplyBuilder::ReplyScope scope{rb};
   if (result) {
     Send(result.value(), rb);
   } else {
@@ -429,8 +432,15 @@ std::optional<JsonType> ShardJsonFromString(std::string_view input) {
 }
 
 OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_str) {
-  auto it_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key);
+  // We check the type of the object later, because we allow here OBJ_JSON and OBJ_STRING
+  auto it_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key, std::nullopt);
   RETURN_ON_BAD_STATUS(it_res);
+
+  auto type = it_res->it->second.ObjType();
+  if (type != OBJ_JSON && type != OBJ_STRING) {
+    // The object is not a JSON object and not a string, so we cannot set a full JSON value
+    return OpStatus::WRONG_TYPE;
+  }
 
   JsonAutoUpdater updater(op_args, key, *std::move(it_res));
 
@@ -756,6 +766,8 @@ bool LegacyModeIsEnabled(const std::vector<std::pair<std::string_view, WrappedJs
 
 OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
                                 const JsonGetParams& params) {
+  // We don't use OBJ_JSON here because we want to support both JSON and STRING types.
+  // If the key is not OBJ_JSON and not OBJ_STRING, we return WRONG_TYPE.
   auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
@@ -1029,9 +1041,12 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
                      const WrappedJsonPath& json_path) {
   if (json_path.RefersToRootElement()) {
     auto& db_slice = op_args.GetDbSlice();
-    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
-    if (IsValid(it)) {
-      db_slice.Del(op_args.db_cntx, it);
+    auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_JSON);
+    RETURN_ON_BAD_STATUS(res_it);
+
+    if (IsValid(res_it->it)) {
+      res_it->post_updater.Run();
+      db_slice.Del(op_args.db_cntx, res_it->it);
       return 1;
     }
     return 0;

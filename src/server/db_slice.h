@@ -152,25 +152,24 @@ class DbSlice {
     AutoUpdater();
     AutoUpdater(const AutoUpdater& o) = delete;
     AutoUpdater& operator=(const AutoUpdater& o) = delete;
-    AutoUpdater(AutoUpdater&& o);
+    AutoUpdater(AutoUpdater&& o) noexcept;
     AutoUpdater& operator=(AutoUpdater&& o);
     ~AutoUpdater();
+
+    // Removes the memory usage attributed to the iterator and resets orig_heap_size.
+    // Used when the existing object is overridden by a new one.
+    void ReduceHeapUsage();
 
     void Run();
     void Cancel();
 
    private:
-    enum class DestructorAction {
-      kDoNothing,
-      kRun,
-    };
-
     // Wrap members in a struct to auto generate operator=
     struct Fields {
-      DestructorAction action = DestructorAction::kDoNothing;
-
       DbSlice* db_slice = nullptr;
       DbIndex db_ind = 0;
+
+      // TODO: remove `it` from ItAndUpdater as it's redundant with respect to this iterator.
       Iterator it;
       std::string_view key;
 
@@ -178,7 +177,7 @@ class DbSlice {
       size_t orig_heap_size = 0;
     };
 
-    AutoUpdater(const Fields& fields);
+    AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it, DbSlice* db_slice);
 
     friend class DbSlice;
 
@@ -306,7 +305,16 @@ class DbSlice {
   OpResult<ConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
                                        unsigned req_obj_type) const;
 
-  OpResult<ItAndUpdater> AddOrFind(const Context& cntx, std::string_view key);
+  // Consider using req_obj_type to specify the type of object you expect.
+  // Because it can evaluate to bugs like this:
+  // - We already have a key but with another type you expect.
+  // - During FindMutable we will not use req_obj_type, so the object type will not be checked.
+  // - AddOrFind will return the object with this key but with a different type.
+  // - Then you will update this object with a different type, which will lead to an error.
+  // If you proved the key type on your own, please add a comment there why don't specify
+  // req_obj_type
+  OpResult<ItAndUpdater> AddOrFind(const Context& cntx, std::string_view key,
+                                   std::optional<unsigned> req_obj_type);
 
   // Same as AddOrSkip, but overwrites in case entry exists.
   OpResult<ItAndUpdater> AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
@@ -542,7 +550,7 @@ class DbSlice {
 
  private:
   void PreUpdateBlocking(DbIndex db_ind, Iterator it);
-  void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
+  void PostUpdate(DbIndex db_ind, std::string_view key);
 
   bool DelEmptyPrimeValue(const Context& cntx, Iterator it);
 
@@ -583,7 +591,8 @@ class DbSlice {
 
   PrimeItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
 
-  OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key);
+  OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key,
+                                           std::optional<unsigned> req_obj_type);
 
   OpResult<PrimeItAndExp> FindInternal(const Context& cntx, std::string_view key,
                                        std::optional<unsigned> req_obj_type,

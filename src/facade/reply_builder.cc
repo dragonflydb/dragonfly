@@ -9,7 +9,10 @@
 #include <absl/strings/str_cat.h>
 #include <double-conversion/double-to-string.h>
 
+#include <limits>
+
 #include "absl/strings/escaping.h"
+#include "absl/types/span.h"
 #include "base/logging.h"
 #include "core/heap_size.h"
 #include "facade/error.h"
@@ -185,7 +188,7 @@ void SinkReplyBuilder::Send() {
 void SinkReplyBuilder::FinishScope() {
   replies_recorded_++;
 
-  if (!batched_ || total_size_ * 2 >= kMaxBufferSize)
+  if (!batched_ || total_size_ * 2 >= kMaxBufferSize /* copying isn't worth it */)
     return Flush();
 
   // Check if we have enough space to copy all refs to buffer
@@ -447,6 +450,22 @@ void RedisReplyBuilder::SendLabeledScoredArray(std::string_view arr_label, Score
     SendDouble(score);
   }
 }
+
+template <typename I> void RedisReplyBuilder::SendLongArr(absl::Span<const I> longs) {
+  static_assert(std::is_integral_v<I>, "Must use integral type");
+  ReplyScope scope(this);
+  StartArray(longs.size());
+  for (auto v : longs) {
+    if constexpr (std::is_unsigned_v<I>)
+      DCHECK_LE(uint64_t(v), uint64_t(std::numeric_limits<long>::max()));
+    SendLong(v);
+  }
+}
+
+template void RedisReplyBuilder::SendLongArr<long>(absl::Span<const long>);
+template void RedisReplyBuilder::SendLongArr<int32_t>(absl::Span<const int32_t>);
+template void RedisReplyBuilder::SendLongArr<uint32_t>(absl::Span<const uint32_t>);
+template void RedisReplyBuilder::SendLongArr<uint64_t>(absl::Span<const uint64_t>);
 
 void RedisReplyBuilder::SendStored() {
   SendSimpleString("OK");
