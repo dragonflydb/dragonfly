@@ -907,172 +907,56 @@ TEST_F(SearchTest, NotImplementedSearchTypes) {
       << "Infix search should return a not implemented error";
 }
 
-// Benchmarks for different search types
-static void BM_PrefixSearch(benchmark::State& state) {
+// Enumeration for different search types
+enum class SearchType { PREFIX = 0, SUFFIX = 1, INFIX = 2 };
+
+// Unified benchmark for all search types
+static void BM_SearchByType(benchmark::State& state) {
   size_t num_docs = state.range(0);
-  size_t prefix_len = state.range(1);
+  size_t pattern_len = state.range(1);
+  SearchType search_type = static_cast<SearchType>(state.range(2));
 
   auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
-  // Generate test data with known prefixes
-  std::string prefix = std::string(prefix_len, 'p');
+  // Generate pattern based on search type
+  std::string pattern;
+  std::string search_type_name;
+
+  switch (search_type) {
+    case SearchType::PREFIX:
+      pattern = std::string(pattern_len, 'p');
+      search_type_name = "prefix";
+      break;
+    case SearchType::SUFFIX:
+      pattern = std::string(pattern_len, 's');
+      search_type_name = "suffix";
+      break;
+    case SearchType::INFIX:
+      pattern = std::string(pattern_len, 'i');
+      search_type_name = "infix";
+      break;
+  }
+
+  // Generate test data based on search type
   for (size_t i = 0; i < num_docs; i++) {
     std::string content;
     if (i < num_docs / 2) {
-      // Half documents have the prefix
-      content = prefix + std::to_string(i) + " some additional text";
+      // Half documents have the pattern in appropriate position
+      switch (search_type) {
+        case SearchType::PREFIX:
+          content = pattern + std::to_string(i) + " some additional text";
+          break;
+        case SearchType::SUFFIX:
+          content = "some text content " + std::to_string(i) + pattern;
+          break;
+        case SearchType::INFIX:
+          content = "prefix " + std::to_string(i) + " " + pattern + " suffix text";
+          break;
+      }
     } else {
-      // Half don't have the prefix
+      // Half don't have the pattern
       content = "other" + std::to_string(i) + " different text content";
-    }
-    MockedDocument doc{Map{{"title", content}}};
-    indices.Add(i, doc);
-  }
-
-  SearchAlgorithm algo{};
-  QueryParams params;
-  std::string query = prefix + "*";
-
-  if (!algo.Init(query, &params)) {
-    state.SkipWithError("Failed to initialize search algorithm");
-    return;
-  }
-
-  while (state.KeepRunning()) {
-    auto result = algo.Search(&indices);
-    benchmark::DoNotOptimize(result);
-  }
-
-  // Set counters for analysis
-  state.counters["docs_total"] = num_docs;
-  state.counters["prefix_length"] = prefix_len;
-}
-
-static void BM_SuffixSearch(benchmark::State& state) {
-  size_t num_docs = state.range(0);
-  size_t suffix_len = state.range(1);
-
-  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
-
-  // Generate test data with known suffixes
-  std::string suffix = std::string(suffix_len, 's');
-  for (size_t i = 0; i < num_docs; i++) {
-    std::string content;
-    if (i < num_docs / 2) {
-      // Half documents have the suffix
-      content = "some text content " + std::to_string(i) + suffix;
-    } else {
-      // Half don't have the suffix
-      content = "different content " + std::to_string(i) + " other";
-    }
-    MockedDocument doc{Map{{"title", content}}};
-    indices.Add(i, doc);
-  }
-
-  SearchAlgorithm algo{};
-  QueryParams params;
-  std::string query = "*" + suffix;
-
-  if (!algo.Init(query, &params)) {
-    // Expected to fail since suffix search is not implemented yet
-    state.SkipWithError("Suffix search not implemented yet");
-    return;
-  }
-
-  while (state.KeepRunning()) {
-    auto result = algo.Search(&indices);
-    benchmark::DoNotOptimize(result);
-
-    // If result has error, skip the benchmark
-    if (!result.error.empty()) {
-      state.SkipWithError("Suffix search returned error: " + result.error);
-      return;
-    }
-  }
-
-  state.counters["docs_total"] = num_docs;
-  state.counters["suffix_length"] = suffix_len;
-}
-
-static void BM_InfixSearch(benchmark::State& state) {
-  size_t num_docs = state.range(0);
-  size_t infix_len = state.range(1);
-
-  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
-
-  // Generate test data with known infixes
-  std::string infix = std::string(infix_len, 'i');
-  for (size_t i = 0; i < num_docs; i++) {
-    std::string content;
-    if (i < num_docs / 2) {
-      // Half documents have the infix
-      content = "prefix " + std::to_string(i) + " " + infix + " suffix text";
-    } else {
-      // Half don't have the infix
-      content = "different " + std::to_string(i) + " text without pattern";
-    }
-    MockedDocument doc{Map{{"title", content}}};
-    indices.Add(i, doc);
-  }
-
-  SearchAlgorithm algo{};
-  QueryParams params;
-  std::string query = "*" + infix + "*";
-
-  if (!algo.Init(query, &params)) {
-    // Expected to fail since infix search is not implemented yet
-    state.SkipWithError("Infix search not implemented yet");
-    return;
-  }
-
-  while (state.KeepRunning()) {
-    auto result = algo.Search(&indices);
-    benchmark::DoNotOptimize(result);
-
-    // If result has error, skip the benchmark
-    if (!result.error.empty()) {
-      state.SkipWithError("Infix search returned error: " + result.error);
-      return;
-    }
-  }
-
-  state.counters["docs_total"] = num_docs;
-  state.counters["infix_length"] = infix_len;
-}
-
-// Benchmark to compare all search types with the same data
-static void BM_SearchComparison(benchmark::State& state) {
-  size_t num_docs = state.range(0);
-  std::string search_type = "prefix";  // Will be determined by range(1)
-
-  if (state.range(1) == 0)
-    search_type = "prefix";
-  else if (state.range(1) == 1)
-    search_type = "suffix";
-  else if (state.range(1) == 2)
-    search_type = "infix";
-
-  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
-
-  // Common pattern to search for
-  std::string pattern = "pattern";
-
-  // Generate test data
-  for (size_t i = 0; i < num_docs; i++) {
-    std::string content;
-    if (i < num_docs / 3) {
-      // Documents that should match all search types
-      content = pattern + std::to_string(i) + pattern;
-    } else if (i < 2 * num_docs / 3) {
-      // Documents with pattern at start (prefix match only)
-      content = pattern + std::to_string(i) + " other text";
-    } else {
-      // Documents with pattern at end (suffix match only)
-      content = "some text " + std::to_string(i) + pattern;
     }
     MockedDocument doc{Map{{"title", content}}};
     indices.Add(i, doc);
@@ -1082,16 +966,21 @@ static void BM_SearchComparison(benchmark::State& state) {
   QueryParams params;
   std::string query;
 
-  if (search_type == "prefix") {
-    query = pattern + "*";
-  } else if (search_type == "suffix") {
-    query = "*" + pattern;
-  } else if (search_type == "infix") {
-    query = "*" + pattern + "*";
+  // Generate query based on search type
+  switch (search_type) {
+    case SearchType::PREFIX:
+      query = pattern + "*";
+      break;
+    case SearchType::SUFFIX:
+      query = "*" + pattern;
+      break;
+    case SearchType::INFIX:
+      query = "*" + pattern + "*";
+      break;
   }
 
   if (!algo.Init(query, &params)) {
-    state.SkipWithError("Failed to initialize " + search_type + " search");
+    state.SkipWithError("Failed to initialize " + search_type_name + " search");
     return;
   }
 
@@ -1099,50 +988,40 @@ static void BM_SearchComparison(benchmark::State& state) {
     auto result = algo.Search(&indices);
     benchmark::DoNotOptimize(result);
 
+    // If result has error, skip the benchmark
     if (!result.error.empty()) {
-      state.SkipWithError(search_type + " search error: " + result.error);
+      state.SkipWithError(search_type_name + " search returned error: " + result.error);
       return;
     }
   }
 
+  // Set counters for analysis
   state.counters["docs_total"] = num_docs;
-  state.SetLabel(search_type);
+  state.counters["pattern_length"] = pattern_len;
+  state.SetLabel(search_type_name);
 }
 
-// Register benchmarks with different configurations
-BENCHMARK(BM_PrefixSearch)
-    ->Args({1000, 3})    // 1K docs, 3-char prefix
-    ->Args({1000, 5})    // 1K docs, 5-char prefix
-    ->Args({10000, 3})   // 10K docs, 3-char prefix
-    ->Args({10000, 5})   // 10K docs, 5-char prefix
-    ->Args({100000, 3})  // 100K docs, 3-char prefix
-    ->Args({100000, 5})  // 100K docs, 5-char prefix
-    ->Unit(benchmark::kMicrosecond);
-
-BENCHMARK(BM_SuffixSearch)
-    ->Args({1000, 3})    // 1K docs, 3-char suffix
-    ->Args({1000, 5})    // 1K docs, 5-char suffix
-    ->Args({10000, 3})   // 10K docs, 3-char suffix
-    ->Args({10000, 5})   // 10K docs, 5-char suffix
-    ->Args({100000, 3})  // 100K docs, 3-char suffix
-    ->Args({100000, 5})  // 100K docs, 5-char suffix
-    ->Unit(benchmark::kMicrosecond);
-
-BENCHMARK(BM_InfixSearch)
-    ->Args({1000, 3})    // 1K docs, 3-char infix
-    ->Args({1000, 5})    // 1K docs, 5-char infix
-    ->Args({10000, 3})   // 10K docs, 3-char infix
-    ->Args({10000, 5})   // 10K docs, 5-char infix
-    ->Args({100000, 3})  // 100K docs, 3-char infix
-    ->Args({100000, 5})  // 100K docs, 5-char infix
-    ->Unit(benchmark::kMicrosecond);
-
-// Comparison benchmark - same data set, different search types
-BENCHMARK(BM_SearchComparison)
-    ->Args({10000, 0})  // 10K docs, prefix search
-    ->Args({10000, 1})  // 10K docs, suffix search (when implemented)
-    ->Args({10000, 2})  // 10K docs, infix search (when implemented)
-    ->ArgNames({"docs", "search_type"})
+// Benchmark to compare all search types with the same data
+BENCHMARK(BM_SearchByType)
+    ->Args({1000, 3, static_cast<int>(SearchType::PREFIX)})
+    ->Args({1000, 5, static_cast<int>(SearchType::PREFIX)})
+    ->Args({10000, 3, static_cast<int>(SearchType::PREFIX)})
+    ->Args({10000, 5, static_cast<int>(SearchType::PREFIX)})
+    ->Args({100000, 3, static_cast<int>(SearchType::PREFIX)})
+    ->Args({100000, 5, static_cast<int>(SearchType::PREFIX)})
+    ->Args({1000, 3, static_cast<int>(SearchType::SUFFIX)})
+    ->Args({1000, 5, static_cast<int>(SearchType::SUFFIX)})
+    ->Args({10000, 3, static_cast<int>(SearchType::SUFFIX)})
+    ->Args({10000, 5, static_cast<int>(SearchType::SUFFIX)})
+    ->Args({100000, 3, static_cast<int>(SearchType::SUFFIX)})
+    ->Args({100000, 5, static_cast<int>(SearchType::SUFFIX)})
+    ->Args({1000, 3, static_cast<int>(SearchType::INFIX)})
+    ->Args({1000, 5, static_cast<int>(SearchType::INFIX)})
+    ->Args({10000, 3, static_cast<int>(SearchType::INFIX)})
+    ->Args({10000, 5, static_cast<int>(SearchType::INFIX)})
+    ->Args({100000, 3, static_cast<int>(SearchType::INFIX)})
+    ->Args({100000, 5, static_cast<int>(SearchType::INFIX)})
+    ->ArgNames({"docs", "pattern_len", "search_type"})
     ->Unit(benchmark::kMicrosecond);
 
 }  // namespace search
