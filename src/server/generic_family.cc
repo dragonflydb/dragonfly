@@ -894,6 +894,7 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
 
   bool sticky = from_res.it->first.IsSticky();
   uint64_t exp_ts = db_slice.ExpireTime(from_res.exp_it);
+  from_res.post_updater.ReduceHeapUsage();
 
   // we keep the value we want to move.
   PrimeValue from_obj = std::move(from_res.it->second);
@@ -902,6 +903,7 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
   from_res.it->second.SetExpire(IsValid(from_res.exp_it));
 
   if (IsValid(to_res.it)) {
+    to_res.post_updater.ReduceHeapUsage();
     to_res.it->second = std::move(from_obj);
     to_res.it->second.SetExpire(IsValid(to_res.exp_it));  // keep the expire flag on 'to'.
 

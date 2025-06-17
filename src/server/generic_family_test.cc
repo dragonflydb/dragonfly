@@ -21,7 +21,6 @@ extern "C" {
 using namespace testing;
 using namespace std;
 using namespace util;
-using namespace boost;
 using absl::StrCat;
 
 namespace dfly {
@@ -453,14 +452,33 @@ TEST_F(GenericFamilyTest, Rename) {
   ren_fb.Join();
 }
 
-TEST_F(GenericFamilyTest, RenameNonString) {
-  EXPECT_EQ(1, CheckedInt({"lpush", "x", "elem"}));
-  auto resp = Run({"rename", "x", "b"});
-  ASSERT_EQ(resp, "OK");
-  ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
+TEST_F(GenericFamilyTest, RenameList) {
+  for (string_view dest : {"b", "y", "z"}) {
+    EXPECT_EQ(1, CheckedInt({"lpush", "x", "elem"}));
+    Metrics metrics = GetMetrics();
 
-  EXPECT_EQ(0, CheckedInt({"del", "x"}));
-  EXPECT_EQ(1, CheckedInt({"del", "b"}));
+    size_t list_usage = metrics.db_stats[0].memory_usage_by_type[OBJ_LIST];
+    size_t string_usage = metrics.db_stats[0].memory_usage_by_type[OBJ_STRING];
+    ASSERT_GT(list_usage, 0);
+    ASSERT_EQ(string_usage, 0);
+
+    auto resp = Run({"rename", "x", dest});
+    ASSERT_EQ(resp, "OK");
+    if (dest == "b") {
+      ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
+    } else {
+      ASSERT_EQ(1, last_cmd_dbg_info_.shards_count);
+    }
+
+    metrics = GetMetrics();
+    size_t list_usage_after = metrics.db_stats[0].memory_usage_by_type[OBJ_LIST];
+    string_usage = metrics.db_stats[0].memory_usage_by_type[OBJ_STRING];
+    ASSERT_EQ(list_usage_after, list_usage);
+    ASSERT_EQ(string_usage, 0);
+
+    EXPECT_EQ(0, CheckedInt({"del", "x"}));
+    EXPECT_EQ(1, CheckedInt({"del", dest}));
+  }
 }
 
 TEST_F(GenericFamilyTest, RenameBinary) {
