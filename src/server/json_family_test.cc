@@ -3108,6 +3108,13 @@ TEST_F(JsonFamilyTest, JsonCommandsWorkingWithOtherTypesBug) {
 
   resp = Run({"HGET", "k2", "field"});
   EXPECT_THAT(resp, "value");
+
+  // Third bug: JSON.SET should not change the type of the string key
+  resp = Run({"SET", "k3", "value"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.SET", "k3", "$", R"({"a":"b"})"});
+  ASSERT_THAT(resp, ErrArg(wrong_type_err));
 }
 
 }  // namespace dfly

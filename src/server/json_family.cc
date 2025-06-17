@@ -432,15 +432,8 @@ std::optional<JsonType> ShardJsonFromString(std::string_view input) {
 }
 
 OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_str) {
-  // We check the type of the object later, because we allow here OBJ_JSON and OBJ_STRING
-  auto it_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key, std::nullopt);
+  auto it_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key, OBJ_JSON);
   RETURN_ON_BAD_STATUS(it_res);
-
-  auto type = it_res->it->second.ObjType();
-  if (type != OBJ_JSON && type != OBJ_STRING) {
-    // The object is not a JSON object and not a string, so we cannot set a full JSON value
-    return OpStatus::WRONG_TYPE;
-  }
 
   JsonAutoUpdater updater(op_args, key, *std::move(it_res));
 
