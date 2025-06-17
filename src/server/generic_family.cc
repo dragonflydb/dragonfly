@@ -227,7 +227,7 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
   auto res = db_slice->AddOrUpdate(cntx, key, std::move(pv), args.ExpirationTime());
   if (res) {
     res->it->first.SetSticky(args.Sticky());
-    db_slice->shard_owner()->search_indices()->AddDoc(key, cntx, res->it->second);
+    db_slice->shard_owner()->search_indices()->AddGenericDoc(key, cntx, res->it->second);
   }
   return res;
 }
@@ -885,12 +885,12 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     if (destination_should_not_exist)
       return OpStatus::KEY_EXISTS;
 
-    op_args.shard->search_indices()->RemoveDoc(to_key, op_args.db_cntx, to_res.it->second);
+    op_args.shard->search_indices()->RemoveGenericDoc(to_key, op_args.db_cntx, to_res.it->second);
     is_prior_list = (to_res.it->second.ObjType() == OBJ_LIST);
   }
 
   // Delete the "from" document from the search index before deleting from the database
-  op_args.shard->search_indices()->RemoveDoc(from_key, op_args.db_cntx, from_res.it->second);
+  op_args.shard->search_indices()->RemoveGenericDoc(from_key, op_args.db_cntx, from_res.it->second);
 
   bool sticky = from_res.it->first.IsSticky();
   uint64_t exp_ts = db_slice.ExpireTime(from_res.exp_it);
@@ -928,7 +928,7 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     to_res.it->first.SetSticky(sticky);
   }
 
-  op_args.shard->search_indices()->AddDoc(to_key, op_args.db_cntx, to_res.it->second);
+  op_args.shard->search_indices()->AddGenericDoc(to_key, op_args.db_cntx, to_res.it->second);
 
   auto bc = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
   if (!is_prior_list && to_res.it->second.ObjType() == OBJ_LIST && bc) {

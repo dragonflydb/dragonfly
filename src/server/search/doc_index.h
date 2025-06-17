@@ -304,8 +304,13 @@ class ShardDocIndices {
 
   std::vector<std::string> GetIndexNames() const;
 
+  /* Use AddDoc and RemoveDoc only if pv object type is json or hset */
   void AddDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
   void RemoveDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
+
+  /* Same as AddDoc and RemoveDoc but works for all object types*/
+  void AddGenericDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
+  void RemoveGenericDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
 
   size_t GetUsedMemory() const;
   SearchStats GetStats() const;  // combines stats for all indices

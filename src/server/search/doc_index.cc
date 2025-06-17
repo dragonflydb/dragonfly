@@ -24,6 +24,10 @@ using nonstd::make_unexpected;
 
 namespace {
 
+bool IsIndexedDocumentType(const PrimeValue& pv) {
+  return pv.ObjType() == OBJ_JSON || pv.ObjType() == OBJ_HASH;
+}
+
 template <typename F>
 void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
   auto& db_slice = op_args.GetDbSlice();
@@ -514,6 +518,7 @@ vector<string> ShardDocIndices::GetIndexNames() const {
 }
 
 void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
+  DCHECK(IsIndexedDocumentType(pv));
   for (auto& [_, index] : indices_) {
     if (index->Matches(key, pv.ObjType()))
       index->AddDoc(key, db_cntx, pv);
@@ -521,9 +526,24 @@ void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, const Pr
 }
 
 void ShardDocIndices::RemoveDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
+  DCHECK(IsIndexedDocumentType(pv));
   for (auto& [_, index] : indices_) {
     if (index->Matches(key, pv.ObjType()))
       index->RemoveDoc(key, db_cntx, pv);
+  }
+}
+
+void ShardDocIndices::AddGenericDoc(string_view key, const DbContext& db_cntx,
+                                    const PrimeValue& pv) {
+  if (IsIndexedDocumentType(pv)) {
+    return AddDoc(key, db_cntx, pv);
+  }
+}
+
+void ShardDocIndices::RemoveGenericDoc(string_view key, const DbContext& db_cntx,
+                                       const PrimeValue& pv) {
+  if (IsIndexedDocumentType(pv)) {
+    return RemoveDoc(key, db_cntx, pv);
   }
 }
 

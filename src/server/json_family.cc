@@ -55,15 +55,25 @@ using CI = CommandId;
 
 namespace {
 
+struct JsonAutoUpdaterOptions {
+  bool is_new_key = false;  // If true, the key is new and we should not remove it from indices
+  bool update_on_delete = false;  // If true, SetJsonSize will be called on destruction
+};
+
 /* Helper class which must be initialized before any mutate operations on json.
   It will track the memory usage of the json object and update the size in the CompactObj.
   It also contains indexes updates, post update operations on the iterator. */
 class JsonAutoUpdater {
  public:
   JsonAutoUpdater(const OpArgs& op_args, string_view key, DbSlice::ItAndUpdater it,
-                  bool update_on_delete = false)
-      : op_args_(op_args), key_(key), it_(std::move(it)), update_on_delete_(update_on_delete) {
-    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it.it->second);
+                  JsonAutoUpdaterOptions options = {})
+      : op_args_(op_args),
+        key_(key),
+        it_(std::move(it)),
+        update_on_delete_(options.update_on_delete) {
+    if (!options.is_new_key) {
+      op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it.it->second);
+    }
 
     /* We need to initialize start memory usage after RemoveDoc because internally RemoveDoc has
     static cache that can allocate/deallocate memory. Because of this, we will
@@ -442,7 +452,8 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
     return OpStatus::WRONG_TYPE;
   }
 
-  JsonAutoUpdater updater(op_args, key, *std::move(it_res));
+  JsonAutoUpdater updater(op_args, key, *std::move(it_res),
+                          {.is_new_key = it_res->is_new, .update_on_delete = false});
 
   std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
@@ -1060,7 +1071,8 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
   }
 
   if (json_path.HoldsJsonPath()) {
-    JsonAutoUpdater updater(op_args, key, *std::move(it_res), true);
+    JsonAutoUpdater updater(op_args, key, *std::move(it_res),
+                            {.is_new_key = false, .update_on_delete = true});
     const json::Path& path = json_path.AsJsonPath();
     long deletions = json::MutatePath(
         path, [](optional<string_view>, JsonType* val) { return true; }, updater.GetJson(),
