@@ -679,7 +679,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
     RETURN_ON_BAD_STATUS(res_it);
     add_res = std::move(*res_it);
   } else {
-    auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+    auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_STREAM);
     RETURN_ON_BAD_STATUS(op_res);
     add_res = std::move(*op_res);
   }
@@ -691,8 +691,6 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
   if (add_res.is_new) {
     stream* s = streamNew();
     it->second.InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, s);
-  } else if (it->second.ObjType() != OBJ_STREAM) {
-    return OpStatus::WRONG_TYPE;
   }
 
   stream* stream_inst = (stream*)it->second.RObjPtr();

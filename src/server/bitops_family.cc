@@ -255,6 +255,7 @@ bool SetBitValue(uint32_t offset, bool bit_value, string* entry) {
 // ------------------------------------------------------------------------- //
 
 class ElementAccess {
+ private:
   bool added_ = false;
   DbSlice::Iterator element_iter_;
   string_view key_;
@@ -268,10 +269,9 @@ class ElementAccess {
   ElementAccess(string_view key, const OpArgs& args) : key_{key}, context_{args.db_cntx} {
   }
 
-  OpStatus Find(EngineShard* shard);
-  // Still finds the element even if it's WRONG_TYPE. This is used for blind updates.
-  // See BITOP operation.
-  OpStatus FindAllowWrongType(EngineShard* shard);
+  /* If allow_wrong_type = true - it still finds the element even if it's WRONG_TYPE. This is used
+     for blind updates. See BITOP operation. */
+  OpStatus Find(EngineShard* shard, bool allow_wrong_type);
 
   bool IsNewEntry() const {
     CHECK_NOTNULL(shard_);
@@ -306,21 +306,12 @@ void ElementAccess::SetFields(EngineShard* shard, DbSlice::ItAndUpdater res) {
   post_updater_ = std::move(res.post_updater);
 }
 
-OpStatus ElementAccess::Find(EngineShard* shard) {
-  auto op_res = context_.GetDbSlice(shard->shard_id()).AddOrFind(context_, key_);
-  RETURN_ON_BAD_STATUS(op_res);
-  auto& add_res = *op_res;
-
-  if (!add_res.is_new && add_res.it->second.ObjType() != OBJ_STRING) {
-    return OpStatus::WRONG_TYPE;
-  }
-
-  SetFields(shard, std::move(add_res));
-  return OpStatus::OK;
-}
-
-OpStatus ElementAccess::FindAllowWrongType(EngineShard* shard) {
-  auto op_res = context_.GetDbSlice(shard->shard_id()).AddOrFind(context_, key_);
+OpStatus ElementAccess::Find(EngineShard* shard, bool allow_wrong_type) {
+  // If we allow wrong type, we use nullopt to indicate that we don't care about the type.
+  auto op_res =
+      context_.GetDbSlice(shard->shard_id())
+          .AddOrFind(context_, key_,
+                     allow_wrong_type ? std::nullopt : std::optional<unsigned>{OBJ_STRING});
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
@@ -364,7 +355,7 @@ OpResult<bool> BitNewValue(const OpArgs& args, string_view key, uint32_t offset,
   DCHECK(db_slice.IsDbValid(element_access.Index()));
   bool old_value = false;
 
-  auto find_res = element_access.Find(shard);
+  auto find_res = element_access.Find(shard, false);
 
   if (find_res != OpStatus::OK) {
     return find_res;
@@ -946,7 +937,7 @@ OpResult<vector<ResultType>> StateExecutor::Execute(const CommandList& commands)
   }
   string value;
   if (*res) {
-    access_.Find(shard_);
+    access_.Find(shard_, false);
     value = access_.Value();
   }
 
@@ -960,7 +951,7 @@ OpResult<vector<ResultType>> StateExecutor::Execute(const CommandList& commands)
   }
 
   if (visitor.ShouldCommit()) {
-    access_.Find(shard_);
+    access_.Find(shard_, false);
     access_.Commit(visitor.Bitfield());
   }
 
@@ -1196,7 +1187,7 @@ void BitOp(CmdArgList args, const CommandContext& cmd_cntx) {
     auto store_cb = [&](Transaction* t, EngineShard* shard) {
       if (shard->shard_id() == dest_shard) {
         ElementAccess operation{dest_key, t->GetOpArgs(shard)};
-        auto find_res = operation.FindAllowWrongType(shard);
+        auto find_res = operation.Find(shard, true);
 
         // BITOP command acts as a blind update. If the key existed and its type
         // was not a string we still want to Commit with the new value.

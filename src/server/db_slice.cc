@@ -615,15 +615,17 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   return res;
 }
 
-OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_view key) {
-  return AddOrFindInternal(cntx, key);
+OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_view key,
+                                                   std::optional<unsigned> req_obj_type) {
+  return AddOrFindInternal(cntx, key, req_obj_type);
 }
 
-OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, string_view key) {
+OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, string_view key,
+                                                           std::optional<unsigned> req_obj_type) {
   DCHECK(IsDbValid(cntx.db_index));
 
   DbTable& db = *db_arr_[cntx.db_index];
-  auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kMutableStats);
+  auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kMutableStats);
 
   if (res.ok()) {
     Iterator it(res->it, StringOrView::FromView(key));
@@ -637,7 +639,10 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
     } else {
       res = OpStatus::KEY_NOTFOUND;
     }
+  } else if (res == OpStatus::WRONG_TYPE) {
+    return OpStatus::WRONG_TYPE;
   }
+
   auto status = res.status();
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
@@ -1025,7 +1030,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx
                                                              bool force_update) {
   DCHECK(!obj.IsRef());
 
-  auto op_result = AddOrFind(cntx, key);
+  auto op_result = AddOrFind(cntx, key, std::nullopt);
   RETURN_ON_BAD_STATUS(op_result);
 
   auto& res = *op_result;

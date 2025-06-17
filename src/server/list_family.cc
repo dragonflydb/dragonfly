@@ -232,7 +232,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
 
   src_res->post_updater.Run();
 
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, dest);
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, dest, OBJ_LIST);
   RETURN_ON_BAD_STATUS(op_res);
   auto& dest_res = *op_res;
 
@@ -255,15 +255,11 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
     if (blocking_controller) {
       blocking_controller->AwakeWatched(op_args.db_cntx.db_index, dest);
     }
+  } else if (dest_res.it->second.Encoding() == kEncodingQL2) {
+    destql_v2 = GetQLV2(dest_res.it->second);
   } else {
-    if (dest_res.it->second.ObjType() != OBJ_LIST)
-      return OpStatus::WRONG_TYPE;
-    if (dest_res.it->second.Encoding() == kEncodingQL2) {
-      destql_v2 = GetQLV2(dest_res.it->second);
-    } else {
-      DCHECK_EQ(dest_res.it->second.Encoding(), OBJ_ENCODING_QUICKLIST);
-      dest_ql = GetQL(dest_res.it->second);
-    }
+    DCHECK_EQ(dest_res.it->second.Encoding(), OBJ_ENCODING_QUICKLIST);
+    dest_ql = GetQL(dest_res.it->second);
   }
 
   if (src_ql) {
@@ -335,7 +331,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
     RETURN_ON_BAD_STATUS(tmp_res);
     res = std::move(*tmp_res);
   } else {
-    auto op_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key);
+    auto op_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key, OBJ_LIST);
     RETURN_ON_BAD_STATUS(op_res);
     res = std::move(*op_res);
   }
@@ -356,14 +352,10 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
                           GetFlag(FLAGS_list_compress_depth));
       res.it->second.InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, ql);
     }
+  } else if (res.it->second.Encoding() == kEncodingQL2) {
+    ql_v2 = GetQLV2(res.it->second);
   } else {
-    if (res.it->second.ObjType() != OBJ_LIST)
-      return OpStatus::WRONG_TYPE;
-    if (res.it->second.Encoding() == kEncodingQL2) {
-      ql_v2 = GetQLV2(res.it->second);
-    } else {
-      ql = GetQL(res.it->second);
-    }
+    ql = GetQL(res.it->second);
   }
 
   if (ql) {
