@@ -7,6 +7,7 @@
 #include <absl/types/span.h>
 
 #include "facade/reply_capture.h"
+#include "facade/service_interface.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/journal/types.h"
 
@@ -22,8 +23,8 @@ class JournalExecutor {
 
   JournalExecutor(JournalExecutor&&) = delete;
 
-  void Execute(DbIndex dbid, absl::Span<journal::ParsedEntry::CmdData> cmds);
-  std::error_code Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd);
+  // Returns the result of Service::DispatchCommand
+  facade::DispatchResult Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd);
 
   void FlushAll();  // Execute FLUSHALL.
   void FlushSlots(const cluster::SlotRange& slot_range);
@@ -33,7 +34,7 @@ class JournalExecutor {
   }
 
  private:
-  std::error_code Execute(journal::ParsedEntry::CmdData& cmd);
+  facade::DispatchResult Execute(journal::ParsedEntry::CmdData& cmd);
 
   // Select database. Ensure it exists if accessed for first time.
   void SelectDb(DbIndex dbid);
