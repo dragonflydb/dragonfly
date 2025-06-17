@@ -405,6 +405,30 @@ static void BM_MatchRedisGlob2(benchmark::State& state) {
 }
 BENCHMARK(BM_MatchRedisGlob2)->Arg(32)->Arg(1000)->Arg(10000);
 
+static void BM_MatchData(benchmark::State& state) {
+  vector<string> keys(5000);
+  for (unsigned i = 0; i < keys.size(); ++i) {
+    keys[i] = GetRandomHex(80);
+  }
+  string_view pattern =
+      "*2addb1c3-eae5-5265-ac8e-9fc9106dda8d*77de68daecd823babbb58edb1c8e14d7106e83bb"sv;
+  if (state.range(0) == 1) {
+    GlobMatcher matcher(pattern, true);
+    while (state.KeepRunning()) {
+      for (const auto& key : keys) {
+        DoNotOptimize(matcher.Matches(key));
+      }
+    }
+  } else {
+    while (state.KeepRunning()) {
+      for (const auto& key : keys) {
+        DoNotOptimize(stringmatchlen(pattern.data(), pattern.size(), key.c_str(), key.size(), 0));
+      }
+    }
+  }
+}
+BENCHMARK(BM_MatchData)->ArgName("algo")->Arg(0)->Arg(1);
+
 #ifdef USE_RE2
 static void BM_MatchRe2(benchmark::State& state) {
   string random_val = GetRandomHex(state.range(0));
