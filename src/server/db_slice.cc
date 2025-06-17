@@ -451,8 +451,14 @@ DbSlice::AutoUpdater::~AutoUpdater() {
   Run();
 }
 
+void DbSlice::AutoUpdater::ReduceHeapUsage() {
+  AccountObjectMemory(fields_.key, fields_.it->second.ObjType(), -fields_.orig_heap_size,
+                      fields_.db_slice->GetDBTable(fields_.db_ind));
+  fields_.orig_heap_size = 0;  // Reset to avoid double accounting.
+}
+
 void DbSlice::AutoUpdater::Run() {
-  if (fields_.action == DestructorAction::kDoNothing) {
+  if (fields_.db_slice == nullptr) {
     return;
   }
 
@@ -461,7 +467,6 @@ void DbSlice::AutoUpdater::Run() {
   // updater in scope. You'll probably want to call Run() (or Cancel() - but be careful).
   DCHECK(IsValid(fields_.db_slice->db_arr_[fields_.db_ind]->prime.Find(fields_.key)));
 
-  DCHECK(fields_.action == DestructorAction::kRun);
   CHECK_NE(fields_.db_slice, nullptr);
 
   ssize_t delta = static_cast<int64_t>(fields_.it->second.MallocUsed()) -
@@ -478,8 +483,7 @@ void DbSlice::AutoUpdater::Cancel() {
 
 DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it,
                                   DbSlice* db_slice)
-    : fields_{.action = DestructorAction::kRun,
-              .db_slice = db_slice,
+    : fields_{.db_slice = db_slice,
               .db_ind = db_ind,
               .it = it,
               .key = key,

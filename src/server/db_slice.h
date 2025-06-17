@@ -156,19 +156,16 @@ class DbSlice {
     AutoUpdater& operator=(AutoUpdater&& o);
     ~AutoUpdater();
 
+    // Removes the memory usage attributed to the iterator and resets orig_heap_size.
+    // Used when the existing object is overridden by a new one.
+    void ReduceHeapUsage();
+
     void Run();
     void Cancel();
 
    private:
-    enum class DestructorAction : uint8_t {
-      kDoNothing,
-      kRun,
-    };
-
     // Wrap members in a struct to auto generate operator=
     struct Fields {
-      DestructorAction action = DestructorAction::kDoNothing;
-
       DbSlice* db_slice = nullptr;
       DbIndex db_ind = 0;
 

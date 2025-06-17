@@ -112,10 +112,10 @@ class SetCmd {
   OpStatus Set(const SetParams& params, std::string_view key, std::string_view value);
 
  private:
-  OpStatus SetExisting(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
-                       std::string_view key, std::string_view value);
+  OpStatus SetExisting(const SetParams& params, std::string_view value,
+                       DbSlice::ItAndUpdater* it_upd);
 
-  void AddNew(const SetParams& params, DbSlice::Iterator it, std::string_view key,
+  void AddNew(const SetParams& params, const DbSlice::Iterator& it, std::string_view key,
               std::string_view value);
 
   // Called at the end of AddNew of SetExisting
@@ -832,7 +832,7 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
 
     if (params.flags & SET_IF_EXISTS) {
       if (IsValid(find_res.it)) {
-        return SetExisting(params, find_res.it, find_res.exp_it, key, value);
+        return SetExisting(params, value, &find_res);
       } else {
         return OpStatus::SKIPPED;
       }
@@ -851,18 +851,19 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
     if (auto status = CachePrevIfNeeded(params, op_res->it); status != OpStatus::OK)
       return status;
 
-    return SetExisting(params, op_res->it, op_res->exp_it, key, value);
+    return SetExisting(params, value, &(*op_res));
   } else {
     AddNew(params, op_res->it, key, value);
     return OpStatus::OK;
   }
 }
 
-OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
-                             DbSlice::ExpIterator e_it, string_view key, string_view value) {
+OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
+                             DbSlice::ItAndUpdater* it_upd) {
   DCHECK_EQ(params.flags & SET_IF_NOTEXIST, 0);
 
-  PrimeValue& prime_value = it->second;
+  PrimeKey& key = it_upd->it->first;
+  PrimeValue& prime_value = it_upd->it->second;
   EngineShard* shard = op_args_.shard;
 
   auto& db_slice = op_args_.GetDbSlice();
@@ -871,30 +872,32 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
 
   if (!(params.flags & SET_KEEP_EXPIRE)) {
     if (at_ms) {  // Command has an expiry paramater.
-      if (IsValid(e_it)) {
+      if (IsValid(it_upd->exp_it)) {
         // Updated existing expiry information.
-        e_it->second = db_slice.FromAbsoluteTime(at_ms);
+        it_upd->exp_it->second = db_slice.FromAbsoluteTime(at_ms);
       } else {
         // Add new expiry information.
-        db_slice.AddExpire(op_args_.db_cntx.db_index, it, at_ms);
+        db_slice.AddExpire(op_args_.db_cntx.db_index, it_upd->it, at_ms);
       }
     } else {
-      db_slice.RemoveExpire(op_args_.db_cntx.db_index, it);
+      db_slice.RemoveExpire(op_args_.db_cntx.db_index, it_upd->it);
     }
   }
 
   if (params.flags & SET_STICK) {
-    it->first.SetSticky(true);
+    key.SetSticky(true);
   }
 
   bool has_expire = prime_value.HasExpire();
 
+  it_upd->post_updater.ReduceHeapUsage();
+
   // Update flags
   prime_value.SetFlag(params.memcache_flags != 0);
-  db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
+  db_slice.SetMCFlag(op_args_.db_cntx.db_index, key.AsRef(), params.memcache_flags);
 
   // We need to remove the key from search indices, because we are overwriting it to OBJ_STRING
-  shard->search_indices()->RemoveDoc(key, op_args_.db_cntx, prime_value);
+  shard->search_indices()->RemoveDoc(it_upd->it.key(), op_args_.db_cntx, prime_value);
 
   // If value is external, mark it as deleted
   if (prime_value.IsExternal()) {
@@ -906,11 +909,11 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
 
   DCHECK_EQ(has_expire, prime_value.HasExpire());
 
-  PostEdit(params, key, value, &prime_value);
+  PostEdit(params, it_upd->it.key(), value, &prime_value);
   return OpStatus::OK;
 }
 
-void SetCmd::AddNew(const SetParams& params, DbSlice::Iterator it, std::string_view key,
+void SetCmd::AddNew(const SetParams& params, const DbSlice::Iterator& it, std::string_view key,
                     std::string_view value) {
   auto& db_slice = op_args_.GetDbSlice();
 
