@@ -625,14 +625,11 @@ void SearchReply(const SearchParams& params,
   }
 
   const bool reply_with_ids_only = params.IdsOnly();
-  const size_t reply_size = reply_with_ids_only ? (limit + 1) : (limit * 2 + 1);
-
-  facade::SinkReplyBuilder::ReplyAggregator agg{builder};
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  rb->StartArray(reply_size);
-  rb->SendLong(total_hits);
+  RedisReplyBuilder::ArrayScope scope{rb, reply_with_ids_only ? (limit + 1) : (limit * 2 + 1)};
 
+  rb->SendLong(total_hits);
   for (size_t i = offset; i < end; i++) {
     if (reply_with_ids_only) {
       rb->SendBulkString(docs[i]->key);
@@ -1108,7 +1105,7 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
   auto sortable_value_sender = SortableValueSender(rb);
 
   const size_t result_size = agg_results.values.size();
-  rb->StartArray(result_size + 1);
+  RedisReplyBuilder::ArrayScope scope{rb, result_size + 1};
   rb->SendLong(result_size);
 
   for (const auto& value : agg_results.values) {

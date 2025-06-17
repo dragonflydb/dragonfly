@@ -549,16 +549,13 @@ void DflyCmd::Expire(CmdArgList args, Transaction* tx, RedisReplyBuilder* rb) {
 }
 
 void DflyCmd::ReplicaOffset(CmdArgList args, RedisReplyBuilder* rb) {
-  rb->StartArray(shard_set->size());
   std::vector<LSN> lsns(shard_set->size());
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
     auto* journal = shard->journal();
     lsns[shard->shard_id()] = journal ? journal->GetLsn() : 0;
   });
 
-  for (size_t shard_id = 0; shard_id < shard_set->size(); ++shard_id) {
-    rb->SendLong(lsns[shard_id]);
-  }
+  rb->SendLongArr(absl::MakeConstSpan(lsns));
 }
 
 void DflyCmd::Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx) {

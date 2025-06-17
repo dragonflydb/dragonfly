@@ -1240,11 +1240,7 @@ void GenericFamily::Keys(CmdArgList args, const CommandContext& cmd_cntx) {
     cursor = ScanGeneric(cursor, scan_opts, &keys, cmd_cntx.conn_cntx);
   } while (cursor != 0 && keys.size() < output_limit);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  rb->StartArray(keys.size());
-  for (const auto& k : keys) {
-    rb->SendBulkString(k);
-  }
+  static_cast<RedisReplyBuilder*>(cmd_cntx.rb)->SendBulkStrArr(keys);
 }
 
 void GenericFamily::PexpireAt(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -1640,11 +1636,7 @@ void GenericFamily::FieldExpire(CmdArgList args, const CommandContext& cmd_cntx)
   OpResult<vector<long>> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    rb->StartArray(result->size());
-    const auto& array = result.value();
-    for (const auto& v : array) {
-      rb->SendLong(v);
-    }
+    rb->SendLongArr(absl::MakeConstSpan(result.value()));
   } else {
     rb->SendError(result.status());
   }
@@ -1913,12 +1905,9 @@ void GenericFamily::Scan(CmdArgList args, const CommandContext& cmd_cntx) {
   StringVec keys;
   cursor = ScanGeneric(cursor, scan_op, &keys, cmd_cntx.conn_cntx);
 
-  builder->StartArray(2);
+  RedisReplyBuilder::ArrayScope scope{builder, 2};
   builder->SendBulkString(absl::StrCat(cursor));
-  builder->StartArray(keys.size());
-  for (const auto& k : keys) {
-    builder->SendBulkString(k);
-  }
+  builder->SendBulkStrArr(keys);
 }
 
 OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, const ShardArgs& keys) {
