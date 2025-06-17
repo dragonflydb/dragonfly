@@ -1567,11 +1567,11 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     absl::StrAppend(&resp->body(), moved_errors_str);
   }
 
-  string db_key_metrics;
-  string db_key_expire_metrics;
+  string db_key_metrics, db_key_expire_metrics, db_capacity_metrics;
 
   AppendMetricHeader("db_keys", "Total number of keys by DB", MetricType::GAUGE, &db_key_metrics);
-  AppendMetricHeader("db_capacity", "Table capacity by DB", MetricType::GAUGE, &db_key_metrics);
+  AppendMetricHeader("db_capacity", "Table capacity by DB", MetricType::GAUGE,
+                     &db_capacity_metrics);
 
   AppendMetricHeader("db_keys_expiring", "Total number of expiring keys by DB", MetricType::GAUGE,
                      &db_key_expire_metrics);
@@ -1580,16 +1580,15 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     AppendMetricValue("db_keys", m.db_stats[i].key_count, {"db"}, {StrCat("db", i)},
                       &db_key_metrics);
     AppendMetricValue("db_capacity", m.db_stats[i].prime_capacity, {"db", "type"},
-                      {StrCat("db", i), "prime"}, &db_key_metrics);
+                      {StrCat("db", i), "prime"}, &db_capacity_metrics);
     AppendMetricValue("db_capacity", m.db_stats[i].expire_capacity, {"db", "type"},
-                      {StrCat("db", i), "expire"}, &db_key_metrics);
+                      {StrCat("db", i), "expire"}, &db_capacity_metrics);
 
     AppendMetricValue("db_keys_expiring", m.db_stats[i].expire_count, {"db"}, {StrCat("db", i)},
                       &db_key_expire_metrics);
   }
 
-  absl::StrAppend(&resp->body(), db_key_metrics);
-  absl::StrAppend(&resp->body(), db_key_expire_metrics);
+  absl::StrAppend(&resp->body(), db_key_metrics, db_key_expire_metrics, db_capacity_metrics);
 }
 
 void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
