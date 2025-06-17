@@ -814,6 +814,99 @@ static void BM_VectorSearch(benchmark::State& state) {
 
 BENCHMARK(BM_VectorSearch)->Args({120, 10'000});
 
+TEST_F(SearchTest, MatchNonNullField) {
+  PrepareSchema({{"text_field", SchemaField::TEXT},
+                 {"tag_field", SchemaField::TAG},
+                 {"num_field", SchemaField::NUMERIC}});
+
+  {
+    PrepareQuery("@text_field:*");
+
+    ExpectAll(Map{{"text_field", "any value"}}, Map{{"text_field", "another value"}},
+              Map{{"text_field", "third"}, {"tag_field", "tag1"}});
+
+    ExpectNone(Map{{"tag_field", "wrong field"}}, Map{{"num_field", "123"}}, Map{});
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
+
+  {
+    PrepareQuery("@tag_field:*");
+
+    ExpectAll(Map{{"tag_field", "tag1"}}, Map{{"tag_field", "tag2"}},
+              Map{{"text_field", "value"}, {"tag_field", "tag3"}});
+
+    ExpectNone(Map{{"text_field", "wrong field"}}, Map{{"num_field", "456"}}, Map{});
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
+
+  {
+    PrepareQuery("@num_field:*");
+
+    ExpectAll(Map{{"num_field", "123"}}, Map{{"num_field", "456"}},
+              Map{{"text_field", "value"}, {"num_field", "789"}});
+
+    ExpectNone(Map{{"text_field", "wrong field"}}, Map{{"tag_field", "tag1"}}, Map{});
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
+}
+
+TEST_F(SearchTest, InvalidVectorParameter) {
+  search::Schema schema;
+  schema.fields["v"] = search::SchemaField{
+      search::SchemaField::VECTOR,
+      0,   // flags
+      "v"  // short_name
+  };
+
+  search::SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = 2;
+  params.sim = search::VectorSimilarity::L2;
+  params.capacity = 10;
+  params.hnsw_m = 16;
+  params.hnsw_ef_construction = 200;
+  schema.fields["v"].special_params = params;
+
+  search::IndicesOptions options;
+  search::FieldIndices indices{schema, options, PMR_NS::get_default_resource(), nullptr};
+
+  search::SearchAlgorithm algo;
+  search::QueryParams query_params;
+
+  query_params["b"] = "abcdefg";
+
+  ASSERT_FALSE(algo.Init("*=>[KNN 2 @v $b]", &query_params));
+}
+
+TEST_F(SearchTest, NotImplementedSearchTypes) {
+  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  // Add a document for testing
+  MockedDocument doc{Map{{"title", "text for search"}}};
+  indices.Add(0, doc);
+
+  // Test suffix search (words ending with "search")
+  algo.Init("*search", &params);
+  auto suffix_result = algo.Search(&indices);
+  EXPECT_TRUE(suffix_result.ids.empty()) << "Suffix search should return empty result";
+  EXPECT_THAT(suffix_result.error, testing::HasSubstr("Not implemented"))
+      << "Suffix search should return a not implemented error";
+
+  // Test infix search (words containing "for")
+  algo.Init("*for*", &params);
+  auto infix_result = algo.Search(&indices);
+  EXPECT_TRUE(infix_result.ids.empty()) << "Infix search should return empty result";
+  EXPECT_THAT(infix_result.error, testing::HasSubstr("Not implemented"))
+      << "Infix search should return a not implemented error";
+}
+
 // Benchmarks for different search types
 static void BM_PrefixSearch(benchmark::State& state) {
   size_t num_docs = state.range(0);
@@ -1051,99 +1144,6 @@ BENCHMARK(BM_SearchComparison)
     ->Args({10000, 2})  // 10K docs, infix search (when implemented)
     ->ArgNames({"docs", "search_type"})
     ->Unit(benchmark::kMicrosecond);
-
-TEST_F(SearchTest, MatchNonNullField) {
-  PrepareSchema({{"text_field", SchemaField::TEXT},
-                 {"tag_field", SchemaField::TAG},
-                 {"num_field", SchemaField::NUMERIC}});
-
-  {
-    PrepareQuery("@text_field:*");
-
-    ExpectAll(Map{{"text_field", "any value"}}, Map{{"text_field", "another value"}},
-              Map{{"text_field", "third"}, {"tag_field", "tag1"}});
-
-    ExpectNone(Map{{"tag_field", "wrong field"}}, Map{{"num_field", "123"}}, Map{});
-
-    EXPECT_TRUE(Check()) << GetError();
-  }
-
-  {
-    PrepareQuery("@tag_field:*");
-
-    ExpectAll(Map{{"tag_field", "tag1"}}, Map{{"tag_field", "tag2"}},
-              Map{{"text_field", "value"}, {"tag_field", "tag3"}});
-
-    ExpectNone(Map{{"text_field", "wrong field"}}, Map{{"num_field", "456"}}, Map{});
-
-    EXPECT_TRUE(Check()) << GetError();
-  }
-
-  {
-    PrepareQuery("@num_field:*");
-
-    ExpectAll(Map{{"num_field", "123"}}, Map{{"num_field", "456"}},
-              Map{{"text_field", "value"}, {"num_field", "789"}});
-
-    ExpectNone(Map{{"text_field", "wrong field"}}, Map{{"tag_field", "tag1"}}, Map{});
-
-    EXPECT_TRUE(Check()) << GetError();
-  }
-}
-
-TEST_F(SearchTest, InvalidVectorParameter) {
-  search::Schema schema;
-  schema.fields["v"] = search::SchemaField{
-      search::SchemaField::VECTOR,
-      0,   // flags
-      "v"  // short_name
-  };
-
-  search::SchemaField::VectorParams params;
-  params.use_hnsw = true;
-  params.dim = 2;
-  params.sim = search::VectorSimilarity::L2;
-  params.capacity = 10;
-  params.hnsw_m = 16;
-  params.hnsw_ef_construction = 200;
-  schema.fields["v"].special_params = params;
-
-  search::IndicesOptions options;
-  search::FieldIndices indices{schema, options, PMR_NS::get_default_resource(), nullptr};
-
-  search::SearchAlgorithm algo;
-  search::QueryParams query_params;
-
-  query_params["b"] = "abcdefg";
-
-  ASSERT_FALSE(algo.Init("*=>[KNN 2 @v $b]", &query_params));
-}
-
-TEST_F(SearchTest, NotImplementedSearchTypes) {
-  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
-
-  SearchAlgorithm algo{};
-  QueryParams params;
-
-  // Add a document for testing
-  MockedDocument doc{Map{{"title", "text for search"}}};
-  indices.Add(0, doc);
-
-  // Test suffix search (words ending with "search")
-  algo.Init("*search", &params);
-  auto suffix_result = algo.Search(&indices);
-  EXPECT_TRUE(suffix_result.ids.empty()) << "Suffix search should return empty result";
-  EXPECT_THAT(suffix_result.error, testing::HasSubstr("Not implemented"))
-      << "Suffix search should return a not implemented error";
-
-  // Test infix search (words containing "for")
-  algo.Init("*for*", &params);
-  auto infix_result = algo.Search(&indices);
-  EXPECT_TRUE(infix_result.ids.empty()) << "Infix search should return empty result";
-  EXPECT_THAT(infix_result.error, testing::HasSubstr("Not implemented"))
-      << "Infix search should return a not implemented error";
-}
 
 }  // namespace search
 
