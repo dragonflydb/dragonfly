@@ -28,6 +28,7 @@
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/family_utils.h"
 #include "server/generic_family.h"
 #include "server/journal/journal.h"
 #include "server/search/doc_index.h"
@@ -966,7 +967,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   db_slice.SetMCFlag(op_args_.db_cntx.db_index, key.AsRef(), params.memcache_flags);
 
   // We need to remove the key from search indices, because we are overwriting it to OBJ_STRING
-  shard->search_indices()->RemoveDoc(it_upd->it.key(), op_args_.db_cntx, prime_value);
+  RemoveKeyFromIndexesIfNeeded(it_upd->it.key(), op_args_.db_cntx, prime_value, shard);
 
   // If value is external, mark it as deleted
   if (prime_value.IsExternal()) {
