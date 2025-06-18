@@ -537,21 +537,35 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkRe
 
   atomic<uint32_t> killed_connections = 0;
   atomic<uint32_t> kill_errors = 0;
-  auto cb = [&](unsigned thread_index, util::Connection* conn) {
-    facade::Connection* dconn = static_cast<facade::Connection*>(conn);
-    if (evaluator(dconn)) {
-      if (is_admin_request || !dconn->IsPrivileged()) {
-        dconn->ShutdownSelf();
+
+  auto cb = [&](unsigned idx, ProactorBase* p) mutable {
+    // Step 1 aggregate the per thread connections from all listeners
+    std::vector<facade::Connection::WeakRef> connections;
+    auto traverse_cb = [&](unsigned idx, util::Connection* conn) {
+      facade::Connection* dconn = static_cast<facade::Connection*>(conn);
+      if (evaluator(dconn)) {
+        if (is_admin_request || !dconn->IsPrivileged()) {
+          connections.push_back(dconn->Borrow());
+        } else {
+          kill_errors.fetch_add(1);
+        }
+      }
+    };
+    for (auto* listener : listeners) {
+      listener->TraverseConnectionsOnThread(traverse_cb, UINT32_MAX, nullptr);
+    }
+
+    // Step 2 kill the clients
+    for (auto& tcon : connections) {
+      facade::Connection* conn = tcon.Get();
+      if (conn && conn->socket()->proactor()->GetPoolIndex() == p->GetPoolIndex()) {
+        conn->ShutdownSelf();
         killed_connections.fetch_add(1);
-      } else {
-        kill_errors.fetch_add(1);
       }
     }
   };
 
-  for (auto* listener : listeners) {
-    listener->TraverseConnections(cb);
-  }
+  shard_set->pool()->AwaitFiberOnAll(cb);
 
   if (kill_errors.load() == 0) {
     return builder->SendLong(killed_connections.load());
