@@ -67,11 +67,8 @@ class JsonAutoUpdater {
  public:
   JsonAutoUpdater(const OpArgs& op_args, string_view key, DbSlice::ItAndUpdater it,
                   JsonAutoUpdaterOptions options = {})
-      : op_args_(op_args),
-        key_(key),
-        it_(std::move(it)),
-        update_on_delete_(options.update_on_delete) {
-    if (!options.is_new_key) {
+      : op_args_(op_args), key_(key), it_(std::move(it)), options_(options) {
+    if (!options_.is_new_key) {
       op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it.it->second);
     }
 
@@ -101,8 +98,12 @@ class JsonAutoUpdater {
     DCHECK(GetPrimeValue().MallocUsed() != 0);
   }
 
+  void AddDocToIndexes() {
+    op_args_.shard->search_indices()->AddDoc(key_, op_args_.db_cntx, GetPrimeValue());
+  }
+
   ~JsonAutoUpdater() {
-    if (update_on_delete_ && !set_size_was_called_) {
+    if (options_.update_on_delete && !set_size_was_called_) {
       SetJsonSize();
     } else if (!set_size_was_called_) {
       LOG(WARNING) << "JsonAutoUpdater destructor called without SetJsonSize() being called. This "
@@ -114,7 +115,10 @@ class JsonAutoUpdater {
     /* We need to call AddDoc after SetJsonSize because internally AddDoc has static cache that can
     allocate/deallocate memory. Because of this, we will overestimate/underestimate memory usage for
     json object. */
-    op_args_.shard->search_indices()->AddDoc(key_, op_args_.db_cntx, GetPrimeValue());
+    if (!options_.is_new_key) {
+      /* For new keys we manually run AddDoc command. Check SetFullJson method */
+      AddDocToIndexes();
+    }
   }
 
   PrimeValue& GetPrimeValue() {
@@ -144,11 +148,11 @@ class JsonAutoUpdater {
   const OpArgs& op_args_;
   string_view key_;
   DbSlice::ItAndUpdater it_;
+  JsonAutoUpdaterOptions options_;
 
   // Used to track the memory usage of the json object
   size_t start_size_{0};
   bool set_size_was_called_{false};
-  bool update_on_delete_;
 };
 
 template <typename T> using ParseResult = io::Result<T, std::string>;
@@ -452,8 +456,9 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
     return OpStatus::WRONG_TYPE;
   }
 
+  const bool is_new_key = it_res->is_new;
   JsonAutoUpdater updater(op_args, key, *std::move(it_res),
-                          {.is_new_key = it_res->is_new, .update_on_delete = false});
+                          {.is_new_key = is_new_key, .update_on_delete = false});
 
   std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
@@ -475,6 +480,11 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
   // std::optional still holds the value and it will be deallocated
   parsed_json.reset();
   updater.SetJsonSize();
+
+  // We need to manually run add document here
+  if (is_new_key) {
+    updater.AddDocToIndexes();
+  }
 
   return OpStatus::OK;
 }
