@@ -71,8 +71,8 @@ Dfs Dfs::Traverse(absl::Span<const PathSegment> path, const JsonType& root, cons
   return dfs;
 }
 
-Dfs Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callback, JsonType* json,
-                bool deletion_mode) {
+Dfs Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callback,
+                JsonType* json) {
   DCHECK(!path.empty());
 
   Dfs dfs;
@@ -129,19 +129,75 @@ Dfs Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callba
   // Apply mutations after DFS traversal is complete
   const PathSegment& terminal_segment = path.back();
 
+  for (auto it = nodes_to_mutate.begin(); it != nodes_to_mutate.end(); ++it) {
+    dfs.MutateStep(terminal_segment, callback, *it);
+  }
+
+  return dfs;
+}
+
+Dfs Dfs::Delete(absl::Span<const PathSegment> path, JsonType* json) {
+  DCHECK(!path.empty());
+
+  Dfs dfs;
+
+  if (path.size() == 1) {
+    dfs.DeleteStep(path[0], json);
+    return dfs;
+  }
+
+  using Item = detail::JsonconsDfsItem<false>;
+  vector<Item> stack;
+  stack.emplace_back(json);
+
+  // Collect nodes to delete - but simplified without complex filtering
+  std::vector<JsonType*> nodes_to_delete;
+
+  do {
+    unsigned segment_index = stack.back().segment_idx();
+    const auto& path_segment = path[segment_index];
+
+    Item::AdvanceResult res = stack.back().Advance(path_segment);
+    if (res && res->first != nullptr) {
+      JsonType* next = res->first;
+
+      if (IsRecursive(next->type())) {
+        unsigned next_seg_id = res->second;
+
+        if (next_seg_id + 1 < path.size()) {
+          stack.emplace_back(next, next_seg_id);
+        } else {
+          // Terminal step: collect node for deletion
+          nodes_to_delete.push_back(next);
+        }
+      }
+    } else {
+      if (!res && segment_index > 0 && path[segment_index - 1].type() == SegmentType::DESCENT &&
+          stack.back().get_segment_step() == 0) {
+        if (segment_index + 1 == path.size()) {
+          nodes_to_delete.push_back(stack.back().obj_ptr());
+        }
+      }
+      stack.pop_back();
+    }
+  } while (!stack.empty());
+
+  // Apply deletions with filtering for recursive descent to avoid parent-child duplication
+  const PathSegment& terminal_segment = path.back();
+
   // For deletion operations with DESCENT and IDENTIFIER, remove direct parent-child duplicates
   // where deleting the parent would automatically delete the child with the same key name
-  if (deletion_mode && path.size() > 1 &&
+  if (path.size() > 1 &&
       std::any_of(path.begin(), path.end() - 1,
                   [](const PathSegment& seg) { return seg.type() == SegmentType::DESCENT; }) &&
-      terminal_segment.type() == SegmentType::IDENTIFIER && nodes_to_mutate.size() > 1) {
+      terminal_segment.type() == SegmentType::IDENTIFIER && nodes_to_delete.size() > 1) {
     const std::string& target_key = terminal_segment.identifier();
     std::vector<JsonType*> filtered_nodes;
 
-    for (JsonType* candidate : nodes_to_mutate) {
+    for (JsonType* candidate : nodes_to_delete) {
       bool is_direct_child_of_another = false;
 
-      for (JsonType* potential_parent : nodes_to_mutate) {
+      for (JsonType* potential_parent : nodes_to_delete) {
         if (candidate != potential_parent && potential_parent->is_object()) {
           // Check if potential_parent directly contains candidate as value of target_key
           auto it = potential_parent->find(target_key);
@@ -158,19 +214,12 @@ Dfs Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callba
     }
 
     if (!filtered_nodes.empty()) {
-      nodes_to_mutate = std::move(filtered_nodes);
+      nodes_to_delete = std::move(filtered_nodes);
     }
   }
 
-  if (deletion_mode) {
-    // This ensures that deeper mutations don't affect shallower ones by iterating in reverse
-    for (auto it = nodes_to_mutate.rbegin(); it != nodes_to_mutate.rend(); ++it) {
-      dfs.MutateStep(terminal_segment, callback, *it);
-    }
-  } else {
-    for (auto it = nodes_to_mutate.begin(); it != nodes_to_mutate.end(); ++it) {
-      dfs.MutateStep(terminal_segment, callback, *it);
-    }
+  for (auto it = nodes_to_delete.rbegin(); it != nodes_to_delete.rend(); ++it) {
+    dfs.DeleteStep(terminal_segment, *it);
   }
 
   return dfs;
@@ -227,9 +276,7 @@ auto Dfs::MutateStep(const PathSegment& segment, const MutateCallback& cb, JsonT
 
       auto it = node->find(segment.identifier());
       if (it != node->object_range().end()) {
-        if (Mutate(cb, it->key(), &it->value())) {
-          node->erase(it);
-        }
+        cb(it->key(), &it->value());
       }
     } break;
     case SegmentType::INDEX: {
@@ -242,12 +289,8 @@ auto Dfs::MutateStep(const PathSegment& segment, const MutateCallback& cb, JsonT
 
       while (index.first <= index.second) {
         auto it = node->array_range().begin() + index.first;
-        if (Mutate(cb, nullopt, &*it)) {
-          node->erase(it);
-          --index.second;
-        } else {
-          ++index.first;
-        }
+        cb(nullopt, &*it);
+        ++index.first;
       }
     } break;
 
@@ -256,17 +299,67 @@ auto Dfs::MutateStep(const PathSegment& segment, const MutateCallback& cb, JsonT
       if (node->is_object()) {
         auto it = node->object_range().begin();
         while (it != node->object_range().end()) {
-          it = Mutate(cb, it->key(), &it->value()) ? node->erase(it) : it + 1;
+          cb(it->key(), &it->value());
+          ++it;
         }
       } else if (node->is_array()) {
         auto it = node->array_range().begin();
         while (it != node->array_range().end()) {
-          it = Mutate(cb, nullopt, &*it) ? node->erase(it) : it + 1;
+          cb(nullopt, &*it);
+          ++it;
         }
       }
     } break;
     case SegmentType::FUNCTION:
       LOG(DFATAL) << "Function segment is not supported for mutation";
+      break;
+  }
+  return {};
+}
+
+auto Dfs::DeleteStep(const PathSegment& segment, JsonType* node)
+    -> nonstd::expected<void, MatchStatus> {
+  switch (segment.type()) {
+    case SegmentType::IDENTIFIER: {
+      if (!node->is_object())
+        return make_unexpected(MISMATCH);
+
+      auto it = node->find(segment.identifier());
+      if (it != node->object_range().end()) {
+        node->erase(it);
+        ++matches_;
+      }
+    } break;
+    case SegmentType::INDEX: {
+      if (!node->is_array())
+        return make_unexpected(MISMATCH);
+      IndexExpr index = segment.index().Normalize(node->size());
+      if (index.Empty()) {
+        return make_unexpected(OUT_OF_BOUNDS);
+      }
+
+      // Delete from end to beginning to maintain indices
+      for (int i = index.second; i >= index.first; --i) {
+        auto it = node->array_range().begin() + i;
+        node->erase(it);
+        ++matches_;
+      }
+    } break;
+
+    case SegmentType::DESCENT:
+    case SegmentType::WILDCARD: {
+      if (node->is_object()) {
+        size_t initial_size = node->size();
+        node->erase(node->object_range().begin(), node->object_range().end());
+        matches_ += initial_size;
+      } else if (node->is_array()) {
+        size_t initial_size = node->size();
+        node->erase(node->array_range().begin(), node->array_range().end());
+        matches_ += initial_size;
+      }
+    } break;
+    case SegmentType::FUNCTION:
+      LOG(DFATAL) << "Function segment is not supported for deletion";
       break;
   }
   return {};

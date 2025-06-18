@@ -468,7 +468,6 @@ TYPED_TEST(JsonPathTest, Mutate) {
   auto cb = [](optional<string_view>, JsonType* val) {
     int intval = val->as<int>();
     *val = intval + 1;
-    return false;
   };
 
   vector<int> arr;
@@ -499,16 +498,13 @@ TYPED_TEST(JsonPathTest, Mutate) {
   auto cb2 = [](optional<string_view> key, JsonType* val) {
     if (val->is_int64() && !key) {  // array element
       *val = 42;
-      return false;
     }
     if (val->is_bool()) {
       *val = false;
-      return false;
     }
-    return true;
   };
 
-  auto expected = ValidJson<JsonType>(R"({"a":[42],"inner":{"a":{"bool":false}}})");
+  auto expected = ValidJson<JsonType>(R"({"a":[42],"inner":{"a":{"bool":false,"c":42}}})");
   if constexpr (std::is_same_v<TypeParam, JsonType>) {
     MutatePath(path, cb2, &json);
 
@@ -531,9 +527,7 @@ TYPED_TEST(JsonPathTest, MutateRecursiveDescentKey) {
   auto cb = [&](optional<string_view> key, JsonType* val) {
     if (key && key.value() == "value" && (val->is_int64() || val->is_double())) {
       *val = replacement;
-      return false;
     }
-    return false;
   };
 
   unsigned reported_matches = MutatePath(path, cb, &json);
@@ -599,7 +593,7 @@ TYPED_TEST(JsonPathTest, SubRange) {
   arr.clear();
 }
 
-TYPED_TEST(JsonPathTest, MutateDeleteNestedWithSameKey) {
+TYPED_TEST(JsonPathTest, DeleteNestedWithSameKey) {
   // Test for deleting nested elements with the same key using "$..a"
   // Corresponds to command: JSON.DEL doc1 "$..a"
   ASSERT_EQ(0, this->Parse("$..a"));
@@ -607,81 +601,42 @@ TYPED_TEST(JsonPathTest, MutateDeleteNestedWithSameKey) {
 
   TypeParam json = ValidJson<TypeParam>(R"({"a": 1, "nested": {"a": 2, "b": 3}})");
 
-  unsigned deleted_count = 0;
-  auto delete_cb = [&](optional<string_view> key, JsonType* val) {
-    // Delete all elements with key "a"
-    if (key && key.value() == "a") {
-      deleted_count++;
-      return true;  // delete element
-    }
-    return false;  // keep element
-  };
-
   if constexpr (std::is_same_v<TypeParam, JsonType>) {
-    unsigned reported_matches = MutatePath(path, delete_cb, &json, true /* deletion_mode */);
-
-    // Verify that exactly 2 elements were deleted
-    EXPECT_EQ(2, deleted_count);
-    // Verify that MutatePath reports 2 matches
+    unsigned reported_matches = DeletePath(path, &json);
     EXPECT_EQ(2, reported_matches);
 
-    // Verify result after deletion: {"nested": {"b": 3}}
     auto expected = ValidJson<JsonType>(R"({"nested": {"b": 3}})");
     EXPECT_EQ(expected, json);
   } else {
     flexbuffers::Builder fbb;
-    unsigned reported_matches = MutatePath(path, delete_cb, json, &fbb, true /* deletion_mode */);
+    unsigned reported_matches = DeletePath(path, json, &fbb);
 
-    // Verify that exactly 2 elements were deleted
-    EXPECT_EQ(2, deleted_count);
-    // Verify that MutatePath reports 2 matches
     EXPECT_EQ(2, reported_matches);
 
-    // Verify result after deletion
     FlatJson result = flexbuffers::GetRoot(fbb.GetBuffer());
     auto expected = ValidJson<JsonType>(R"({"nested": {"b": 3}})");
     EXPECT_EQ(expected, FromFlat(result));
   }
 }
 
-TYPED_TEST(JsonPathTest, MutateDeleteRecursiveWithKeysAndArrayValues) {
+TYPED_TEST(JsonPathTest, DeleteRecursiveWithKeysAndArrayValues) {
   ASSERT_EQ(0, this->Parse("$..a"));
   Path path = this->driver_.TakePath();
 
   TypeParam json = ValidJson<TypeParam>(
       R"({"a": {"a": 2, "b": 3}, "b": ["a", "b"], "nested": {"b": [true, "a", "b"]}})");
 
-  unsigned deleted_count = 0;
-  auto delete_cb = [&](optional<string_view> key, JsonType* val) {
-    // Delete all elements with key "a" (but not string values "a" in arrays)
-    if (key && key.value() == "a") {
-      deleted_count++;
-      return true;  // delete element
-    }
-    return false;  // keep element
-  };
-
   if constexpr (std::is_same_v<TypeParam, JsonType>) {
-    unsigned reported_matches = MutatePath(path, delete_cb, &json, true /* deletion_mode */);
-
-    // Verify that exactly 1 element was deleted (the root-level "a" key)
-    EXPECT_EQ(1, deleted_count);
-    // Verify that MutatePath reports 1 match
+    unsigned reported_matches = DeletePath(path, &json);
     EXPECT_EQ(1, reported_matches);
 
-    // Verify result after deletion: keys "a" removed but string values "a" in arrays preserved
     auto expected = ValidJson<JsonType>(R"({"b": ["a", "b"], "nested": {"b": [true, "a", "b"]}})");
     EXPECT_EQ(expected, json);
   } else {
     flexbuffers::Builder fbb;
-    unsigned reported_matches = MutatePath(path, delete_cb, json, &fbb, true /* deletion_mode */);
-
-    // Verify that exactly 1 element was deleted
-    EXPECT_EQ(1, deleted_count);
-    // Verify that MutatePath reports 1 match
+    unsigned reported_matches = DeletePath(path, json, &fbb);
     EXPECT_EQ(1, reported_matches);
 
-    // Verify result after deletion
     FlatJson result = flexbuffers::GetRoot(fbb.GetBuffer());
     auto expected = ValidJson<JsonType>(R"({"b": ["a", "b"], "nested": {"b": [true, "a", "b"]}})");
     EXPECT_EQ(expected, FromFlat(result));
