@@ -47,6 +47,7 @@ class StringFamily {
   static void PSetEx(CmdArgList args, const CommandContext& cmnd_cntx);
 
   static void ClThrottle(CmdArgList args, const CommandContext& cmnd_cntx);
+  static void GAT(CmdArgList args, const CommandContext& cmnd_cntx);
 };
 
 }  // namespace dfly

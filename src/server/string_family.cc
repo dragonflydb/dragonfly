@@ -814,6 +814,58 @@ void IncrByGeneric(string_view key, int64_t val, Transaction* tx, SinkReplyBuild
   }
 }
 
+struct GetAndTouchParams {
+  const Transaction* t;
+  EngineShard* shard;
+  const DbSlice::ExpireParams& expire_params;
+  const string_view key;
+};
+
+OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params) {
+  const DbContext& ctx = params.t->GetDbContext();
+  DbSlice& db_slice = params.t->GetDbSlice(params.shard->shard_id());
+  auto find_res = db_slice.FindMutable(ctx, params.key, OBJ_STRING);
+  if (!IsValid(find_res->it)) {
+    return OpStatus::KEY_NOTFOUND;
+  }
+
+  find_res->post_updater.Run();
+
+  auto update = db_slice.UpdateExpire(ctx, find_res->it, find_res->exp_it, params.expire_params);
+  if (!update.ok()) {
+    return update.status();
+  }
+
+  const int64_t value = update.value();
+  const bool expired = value == -1;
+  if (params.shard->journal()) {
+    const OpArgs& op_args = params.t->GetOpArgs(params.shard);
+    if (expired) {
+      RecordJournal(op_args, "DEL"sv, ArgSlice{(params.key)});
+    } else {
+      RecordJournal(op_args, "PEXPIREAT"sv, ArgSlice{(params.key), (absl::StrCat(value))});
+    }
+  }
+
+  if (expired) {
+    return OpStatus::KEY_NOTFOUND;
+  }
+  return find_res->it;
+}
+
+MGetResponse OpGAT(BlockingCounter wait_bc, uint8_t fetch_mask, const Transaction* t,
+                   EngineShard* shard, const DbSlice::ExpireParams& expire_params) {
+  SearchMut find_op = [&](string_view key) {
+    return FindKeyAndSetExpiry(GetAndTouchParams{
+        .t = t,
+        .shard = shard,
+        .expire_params = expire_params,
+        .key = key,
+    });
+  };
+  return CollectKeys(wait_bc, fetch_mask, t, shard, std::move(find_op));
+}
+
 }  // namespace
 
 StringValue StringValue::Read(DbIndex dbid, string_view key, const PrimeValue& pv,
@@ -1638,6 +1690,54 @@ void StringFamily::ClThrottle(CmdArgList args, const CommandContext& cmnd_cntx) 
   }
 }
 
+// Implements the memcache GAT command. The expected input is
+// GAT <expiry-in-seconds> key [keys...]
+void StringFamily::GAT(CmdArgList args, const CommandContext& cmnd_cntx) {
+  DCHECK_GE(args.size(), 1U);
+
+  auto* builder = cmnd_cntx.rb;
+  const Protocol protocol = builder->GetProtocol();
+  DCHECK(protocol == Protocol::MEMCACHE);
+
+  uint8_t fetch_mask = FETCH_MCFLAG;
+  if (cmnd_cntx.conn_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
+    fetch_mask |= FETCH_MCVER;
+
+  SinkReplyBuilder::ReplyScope scope(builder);
+  auto* rb = static_cast<MCReplyBuilder*>(builder);
+  DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);
+
+  CmdArgParser parser{args};
+  const int64_t expire_ts = parser.Next<uint64_t>();
+  if (parser.HasError()) {
+    return builder->SendError(parser.Error()->MakeReply());
+  }
+
+  BlockingCounter tiering_bc{0};
+  std::vector<MGetResponse> mget_resp(shard_set->size());
+  const DbSlice::ExpireParams expire_params{
+      .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    mget_resp[shard->shard_id()] = OpGAT(tiering_bc, fetch_mask, t, shard, expire_params);
+    return OpStatus::OK;
+  };
+
+  const OpStatus result = cmnd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  CHECK_EQ(OpStatus::OK, result);
+  tiering_bc->Wait();
+
+  absl::FixedArray<optional<GetResp>, 8> ordered_by_shard{args.size()};
+  ReorderShardResults(mget_resp, cmnd_cntx.tx, true, &ordered_by_shard);
+  for (const auto& entry : ordered_by_shard) {
+    if (entry) {
+      rb->SendValue(entry->key, entry->value, 0, entry->mc_flag, fetch_mask & FETCH_MCVER);
+    } else {
+      rb->SendMiss();
+    }
+  }
+  rb->SendGetEnd();
+}
+
 #define HFUNC(x) SetHandler(&StringFamily::x)
 
 void StringFamily::Register(CommandRegistry* registry) {
@@ -1645,31 +1745,32 @@ void StringFamily::Register(CommandRegistry* registry) {
       CO::WRITE | CO::DENYOOM | CO::INTERLEAVED_KEYS | CO::NO_AUTOJOURNAL;
 
   registry->StartFamily(acl::STRING);
-  *registry << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.HFUNC(Set)
-            << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetEx)
-            << CI{"PSETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(PSetEx)
-            << CI{"SETNX", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(SetNx)
-            << CI{"APPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Append)
-            << CI{"PREPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Prepend)
-            << CI{"INCR", CO::WRITE | CO::FAST, 2, 1, 1}.HFUNC(Incr)
-            << CI{"DECR", CO::WRITE | CO::FAST, 2, 1, 1}.HFUNC(Decr)
-            << CI{"INCRBY", CO::WRITE | CO::FAST, 3, 1, 1}.HFUNC(IncrBy)
-            << CI{"INCRBYFLOAT", CO::WRITE | CO::FAST, 3, 1, 1}.HFUNC(IncrByFloat)
-            << CI{"DECRBY", CO::WRITE | CO::FAST, 3, 1, 1}.HFUNC(DecrBy)
-            << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Get)
-            << CI{"GETDEL", CO::WRITE | CO::FAST, 2, 1, 1}.HFUNC(GetDel)
-            << CI{"GETEX", CO::WRITE | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(
-                   GetEx)
-            << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(GetSet)
-            << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1}.HFUNC(MGet)
-            << CI{"MSET", kMSetMask, -3, 1, -1}.HFUNC(MSet)
-            << CI{"MSETNX", kMSetMask, -3, 1, -1}.HFUNC(MSetNx)
-            << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(StrLen)
-            << CI{"GETRANGE", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)
-            << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)  // Alias for GetRange
-            << CI{"SETRANGE", CO::WRITE | CO::DENYOOM, 4, 1, 1}.HFUNC(SetRange)
-            << CI{"CL.THROTTLE", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
-                   ClThrottle);
+  *registry
+      << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.HFUNC(Set)
+      << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetEx)
+      << CI{"PSETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(PSetEx)
+      << CI{"SETNX", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(SetNx)
+      << CI{"APPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Append)
+      << CI{"PREPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Prepend)
+      << CI{"INCR", CO::WRITE | CO::FAST, 2, 1, 1}.HFUNC(Incr)
+      << CI{"DECR", CO::WRITE | CO::FAST, 2, 1, 1}.HFUNC(Decr)
+      << CI{"INCRBY", CO::WRITE | CO::FAST, 3, 1, 1}.HFUNC(IncrBy)
+      << CI{"INCRBYFLOAT", CO::WRITE | CO::FAST, 3, 1, 1}.HFUNC(IncrByFloat)
+      << CI{"DECRBY", CO::WRITE | CO::FAST, 3, 1, 1}.HFUNC(DecrBy)
+      << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Get)
+      << CI{"GETDEL", CO::WRITE | CO::FAST, 2, 1, 1}.HFUNC(GetDel)
+      << CI{"GETEX", CO::WRITE | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(GetEx)
+      << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(GetSet)
+      << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1}.HFUNC(MGet)
+      << CI{"MSET", kMSetMask, -3, 1, -1}.HFUNC(MSet)
+      << CI{"MSETNX", kMSetMask, -3, 1, -1}.HFUNC(MSetNx)
+      << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(StrLen)
+      << CI{"GETRANGE", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)
+      << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)  // Alias for GetRange
+      << CI{"SETRANGE", CO::WRITE | CO::DENYOOM, 4, 1, 1}.HFUNC(SetRange)
+      << CI{"CL.THROTTLE", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
+             ClThrottle)
+      << CI{"GAT", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -3, 2, -1}.HFUNC(GAT);
 }
 
 }  // namespace dfly
