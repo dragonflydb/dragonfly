@@ -11,9 +11,13 @@
 namespace dfly {
 using namespace std;
 
-/* Glob-style pattern matching taken from Redis. */
+/* Glob-style pattern matching taken from Valkey. */
 static int stringmatchlen_impl(const char* pattern, int patternLen, const char* string,
-                               int stringLen, int nocase, int* skipLongerMatches) {
+                               int stringLen, int nocase, int* skipLongerMatches, int nesting) {
+  /* Protection against abusive patterns. */
+  if (nesting > 1000)
+    return 0;
+
   while (patternLen && stringLen) {
     switch (pattern[0]) {
       case '*':
@@ -25,14 +29,13 @@ static int stringmatchlen_impl(const char* pattern, int patternLen, const char* 
           return 1; /* match */
         while (stringLen) {
           if (stringmatchlen_impl(pattern + 1, patternLen - 1, string, stringLen, nocase,
-                                  skipLongerMatches))
+                                  skipLongerMatches, nesting + 1))
             return 1; /* match */
           if (*skipLongerMatches)
             return 0; /* no match */
           string++;
           stringLen--;
         }
-
         /* There was no match for the rest of the pattern starting
          * from anywhere in the rest of the string. If there were
          * any '*' earlier in the pattern, we can terminate the
@@ -51,27 +54,27 @@ static int stringmatchlen_impl(const char* pattern, int patternLen, const char* 
         stringLen--;
         break;
       case '[': {
-        int neg, match;
+        int not_op, match;
 
         pattern++;
         patternLen--;
-        neg = pattern[0] == '^';
-        if (neg) {
+        not_op = patternLen && pattern[0] == '^';
+        if (not_op) {
           pattern++;
           patternLen--;
         }
         match = 0;
         while (1) {
-          if (pattern[0] == '\\' && patternLen >= 2) {
+          if (patternLen >= 2 && pattern[0] == '\\') {
             pattern++;
             patternLen--;
             if (pattern[0] == string[0])
               match = 1;
-          } else if (pattern[0] == ']') {
-            break;
           } else if (patternLen == 0) {
             pattern--;
             patternLen++;
+            break;
+          } else if (pattern[0] == ']') {
             break;
           } else if (patternLen >= 3 && pattern[1] == '-') {
             int start = pattern[0];
@@ -103,7 +106,7 @@ static int stringmatchlen_impl(const char* pattern, int patternLen, const char* 
           pattern++;
           patternLen--;
         }
-        if (neg)
+        if (not_op)
           match = !match;
         if (!match)
           return 0; /* no match */
@@ -132,7 +135,7 @@ static int stringmatchlen_impl(const char* pattern, int patternLen, const char* 
     pattern++;
     patternLen--;
     if (stringLen == 0) {
-      while (*pattern == '*') {
+      while (patternLen && *pattern == '*') {
         pattern++;
         patternLen--;
       }
@@ -147,7 +150,7 @@ static int stringmatchlen_impl(const char* pattern, int patternLen, const char* 
 int stringmatchlen(const char* pattern, int patternLen, const char* string, int stringLen,
                    int nocase) {
   int skipLongerMatches = 0;
-  return stringmatchlen_impl(pattern, patternLen, string, stringLen, nocase, &skipLongerMatches);
+  return stringmatchlen_impl(pattern, patternLen, string, stringLen, nocase, &skipLongerMatches, 0);
 }
 
 string GlobMatcher::Glob2Regex(string_view glob) {
@@ -171,7 +174,12 @@ string GlobMatcher::Glob2Regex(string_view glob) {
       }
       regex.push_back(c);
       if (c == '\\') {
-        regex.push_back(c);  // escape it.
+        if (i + 1 < glob.size() && glob[i + 1] == ']') {
+          ++i;
+          regex.push_back(']');
+        } else {
+          regex.push_back('\\');  // escape the backslash
+        }
       }
       continue;
     }
@@ -226,7 +234,8 @@ GlobMatcher::GlobMatcher(string_view pattern, bool case_sensitive)
     pattern.remove_prefix(starts_with_star_);
 
     if (!pattern.empty()) {
-      ends_with_star_ = pattern.back() == '*';
+      ends_with_star_ =
+          (pattern.back() == '*') && (pattern.size() == 1 || pattern[pattern.size() - 2] != '\\');
       pattern.remove_suffix(ends_with_star_);
     }
   }
