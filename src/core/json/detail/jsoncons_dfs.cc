@@ -348,15 +348,9 @@ auto Dfs::DeleteStep(const PathSegment& segment, JsonType* node)
 
     case SegmentType::DESCENT:
     case SegmentType::WILDCARD: {
-      if (node->is_object()) {
-        size_t initial_size = node->size();
-        node->erase(node->object_range().begin(), node->object_range().end());
-        matches_ += initial_size;
-      } else if (node->is_array()) {
-        size_t initial_size = node->size();
-        node->erase(node->array_range().begin(), node->array_range().end());
-        matches_ += initial_size;
-      }
+      size_t initial_size = node->size();
+      node->clear();
+      matches_ += initial_size;
     } break;
     case SegmentType::FUNCTION:
       LOG(DFATAL) << "Function segment is not supported for deletion";
