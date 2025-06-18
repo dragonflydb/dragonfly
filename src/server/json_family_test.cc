@@ -1261,6 +1261,24 @@ TEST_F(JsonFamilyTest, Del) {
 
   resp = Run({"JSON.GET", "json"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  if (absl::GetFlag(FLAGS_jsonpathv2)) {
+    // Test recursive delete with $..a path
+    resp = Run({"JSON.SET", "doc2", "$",
+                R"({"a": {"a": 2, "b": 3}, "b": ["a", "b"], "nested": {"b": [true, "a", "b"]}})"});
+    ASSERT_THAT(resp, "OK");
+
+    resp = Run({"JSON.GET", "doc2"});
+    EXPECT_EQ(resp, R"({"a":{"a":2,"b":3},"b":["a","b"],"nested":{"b":[true,"a","b"]}})");
+
+    // JSON.DEL with $..a should find and delete the key "a" at root level
+    // but not string values "a" inside arrays
+    resp = Run({"JSON.DEL", "doc2", "$..a"});
+    EXPECT_THAT(resp, IntArg(1));
+
+    resp = Run({"JSON.GET", "doc2"});
+    EXPECT_EQ(resp, R"({"b":["a","b"],"nested":{"b":[true,"a","b"]}})");
+  }
 }
 
 TEST_F(JsonFamilyTest, DelLegacy) {

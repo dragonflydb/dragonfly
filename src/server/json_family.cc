@@ -1062,9 +1062,7 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
   if (json_path.HoldsJsonPath()) {
     JsonAutoUpdater updater(op_args, key, *std::move(it_res), true);
     const json::Path& path = json_path.AsJsonPath();
-    long deletions = json::MutatePath(
-        path, [](optional<string_view>, JsonType* val) { return true; }, updater.GetJson(),
-        true /* reverse_traversal */);
+    long deletions = json::DeletePath(path, updater.GetJson());
     return deletions;
   }
 
