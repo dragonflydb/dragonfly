@@ -10,6 +10,9 @@
 #include <cstdint>
 
 #include "facade/facade_types.h"
+#include "server/engine_shard.h"
+#include "server/search/doc_index.h"
+#include "server/table.h"
 
 extern "C" {
 #include "redis/sds.h"
@@ -21,24 +24,7 @@ typedef struct streamCG streamCG;
 namespace dfly {
 
 template <typename DenseSet>
-static std::vector<long> ExpireElements(DenseSet* owner, const facade::CmdArgList values,
-                                        uint32_t ttl_sec) {
-  std::vector<long> res;
-  res.reserve(values.size());
-
-  for (size_t i = 0; i < values.size(); i++) {
-    std::string_view field = facade::ToSV(values[i]);
-    auto it = owner->Find(field);
-    if (it != owner->end()) {
-      it.SetExpiryTime(ttl_sec);
-      res.emplace_back(ttl_sec == 0 ? 0 : 1);
-    } else {
-      res.emplace_back(-2);
-    }
-  }
-
-  return res;
-}
+std::vector<long> ExpireElements(DenseSet* owner, facade::CmdArgList values, uint32_t ttl_sec);
 
 // Copy str to thread local sds instance. Valid until next WrapSds call on thread
 sds WrapSds(std::string_view str);
@@ -88,5 +74,56 @@ class UniquePicksGenerator : public PicksGenerator {
 
 streamConsumer* StreamCreateConsumer(streamCG* cg, std::string_view name, uint64_t now_ms,
                                      int flags);
+
+/* Use these methods to add or remove documents from the indexes for generic commands when the key
+ * being modified could potentially be of type HSET or JSON. */
+void AddKeyToIndexesIfNeeded(std::string_view key, const DbContext& db_cntx, const PrimeValue& pv,
+                             EngineShard* shard);
+void RemoveKeyFromIndexesIfNeeded(std::string_view key, const DbContext& db_cntx,
+                                  const PrimeValue& pv, EngineShard* shard);
+
+// Returns true if this key type could potentially be indexed.
+// Or in other words, if the key is of type HSET or JSON.
+bool IsIndexedKeyType(const PrimeValue& pv);
+
+// Implementation
+/******************************************************************/
+template <typename DenseSet>
+inline std::vector<long> ExpireElements(DenseSet* owner, facade::CmdArgList values,
+                                        uint32_t ttl_sec) {
+  std::vector<long> res;
+  res.reserve(values.size());
+
+  for (size_t i = 0; i < values.size(); i++) {
+    std::string_view field = facade::ToSV(values[i]);
+    auto it = owner->Find(field);
+    if (it != owner->end()) {
+      it.SetExpiryTime(ttl_sec);
+      res.emplace_back(ttl_sec == 0 ? 0 : 1);
+    } else {
+      res.emplace_back(-2);
+    }
+  }
+
+  return res;
+}
+
+inline void AddKeyToIndexesIfNeeded(std::string_view key, const DbContext& db_cntx,
+                                    const PrimeValue& pv, EngineShard* shard) {
+  if (IsIndexedKeyType(pv)) {
+    shard->search_indices()->AddDoc(key, db_cntx, pv);
+  }
+}
+
+inline void RemoveKeyFromIndexesIfNeeded(std::string_view key, const DbContext& db_cntx,
+                                         const PrimeValue& pv, EngineShard* shard) {
+  if (IsIndexedKeyType(pv)) {
+    shard->search_indices()->RemoveDoc(key, db_cntx, pv);
+  }
+}
+
+inline bool IsIndexedKeyType(const PrimeValue& pv) {
+  return pv.ObjType() == OBJ_HASH || pv.ObjType() == OBJ_JSON;
+}
 
 }  // namespace dfly
