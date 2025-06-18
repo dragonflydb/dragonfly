@@ -964,7 +964,7 @@ static std::string GeneratePattern(SearchType search_type, size_t pattern_len,
 }
 
 // Template function for benchmark implementations
-template <bool UseDiversePattern> static void BM_SearchByTypeImpl(benchmark::State& state) {
+static void BM_SearchByTypeImpl(benchmark::State& state, bool use_diverse_pattern) {
   size_t num_docs = state.range(0);
   size_t pattern_len = state.range(1);
   SearchType search_type = static_cast<SearchType>(state.range(2));
@@ -973,7 +973,7 @@ template <bool UseDiversePattern> static void BM_SearchByTypeImpl(benchmark::Sta
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   // Generate pattern
-  std::string pattern = GeneratePattern(search_type, pattern_len, !UseDiversePattern);
+  std::string pattern = GeneratePattern(search_type, pattern_len, !use_diverse_pattern);
   std::string search_type_name = (search_type == SearchType::PREFIX)   ? "prefix"
                                  : (search_type == SearchType::SUFFIX) ? "suffix"
                                                                        : "infix";
@@ -1042,17 +1042,17 @@ template <bool UseDiversePattern> static void BM_SearchByTypeImpl(benchmark::Sta
   // Set counters for analysis
   state.counters["docs_total"] = num_docs;
   state.counters["pattern_length"] = pattern_len;
-  state.counters["diverse_pattern"] = UseDiversePattern ? 1 : 0;
-  state.SetLabel(search_type_name + (UseDiversePattern ? "_diverse" : "_uniform"));
+  state.counters["diverse_pattern"] = use_diverse_pattern ? 1 : 0;
+  state.SetLabel(search_type_name + (use_diverse_pattern ? "_diverse" : "_uniform"));
 }
 
 // Instantiate template functions
 static void BM_SearchByType_Uniform(benchmark::State& state) {
-  BM_SearchByTypeImpl<false>(state);
+  BM_SearchByTypeImpl(state, false);
 }
 
 static void BM_SearchByType_Diverse(benchmark::State& state) {
-  BM_SearchByTypeImpl<true>(state);
+  BM_SearchByTypeImpl(state, true);
 }
 
 // Benchmark to compare all search types - removed 100K docs per romange's suggestion
