@@ -125,6 +125,7 @@ class StringMatchTest : public ::testing::Test {
 TEST_F(StringMatchTest, Glob2Regex) {
   EXPECT_EQ(GlobMatcher::Glob2Regex(""), "");
   EXPECT_EQ(GlobMatcher::Glob2Regex("*"), ".*");
+  EXPECT_EQ(GlobMatcher::Glob2Regex("\\*"), "\\*");
   EXPECT_EQ(GlobMatcher::Glob2Regex("\\?"), "\\?");
   EXPECT_EQ(GlobMatcher::Glob2Regex("[abc]"), "[abc]");
   EXPECT_EQ(GlobMatcher::Glob2Regex("[^abc]"), "[^abc]");
@@ -135,7 +136,7 @@ TEST_F(StringMatchTest, Glob2Regex) {
   EXPECT_EQ(GlobMatcher::Glob2Regex("\\d"), "d");
   EXPECT_EQ(GlobMatcher::Glob2Regex("[\\d]"), "[\\\\d]");
   EXPECT_EQ(GlobMatcher::Glob2Regex("abc\\"), "abc\\\\");
-
+  EXPECT_EQ(GlobMatcher::Glob2Regex("[\\]]"), "[\\]]");
   reflex::Matcher matcher("abc[\\\\d]e");
   matcher.input("abcde");
   ASSERT_TRUE(matcher.find());
@@ -181,12 +182,113 @@ TEST_F(StringMatchTest, Basic) {
   EXPECT_EQ(MatchLen("abc?", "abc\n", 0), 1);
 }
 
+#define TEST_STRINGMATCH(pattern, str, case_res, nocase_res) \
+  {                                                          \
+    EXPECT_EQ(int(MatchLen(pattern, str, 0)), case_res);     \
+    EXPECT_EQ(int(MatchLen(pattern, str, 1)), nocase_res);   \
+  }
+
 TEST_F(StringMatchTest, Special) {
   EXPECT_TRUE(MatchLen("h\\[^|", "h[^|", 0));
   EXPECT_FALSE(MatchLen("[^", "[^", 0));
   EXPECT_TRUE(MatchLen("[$?^]a", "?a", 0));
   EXPECT_TRUE(MatchLen("abc[\\d]e", "abcde", 0));
   EXPECT_TRUE(MatchLen("foo\\", "foo\\", 0));
+
+  /* Case sensitivity: */
+  TEST_STRINGMATCH("a", "a", 1, 1);
+  TEST_STRINGMATCH("a", "A", 0, 1);
+  TEST_STRINGMATCH("A", "A", 1, 1);
+  TEST_STRINGMATCH("A", "a", 0, 1);
+  TEST_STRINGMATCH("\\a", "a", 1, 1);
+  TEST_STRINGMATCH("\\a", "A", 0, 1);
+  TEST_STRINGMATCH("\\A", "A", 1, 1);
+  TEST_STRINGMATCH("\\A", "a", 0, 1);
+  TEST_STRINGMATCH("[\\a]", "a", 1, 1);
+
+  // TODO: to fix this: TEST_STRINGMATCH("[\\a]", "A", 0, 1);
+  TEST_STRINGMATCH("[\\A]", "A", 1, 1);
+  // TODO: to fix this: TEST_STRINGMATCH("[\\A]", "a", 0, 1);
+
+  /* Escaped metacharacters: */
+  TEST_STRINGMATCH("\\*", "*", 1, 1);
+  TEST_STRINGMATCH("\\?", "?", 1, 1);
+  TEST_STRINGMATCH("\\\\", "\\", 1, 1);
+  TEST_STRINGMATCH("\\[", "[", 1, 1);
+  TEST_STRINGMATCH("\\]", "]", 1, 1);
+  TEST_STRINGMATCH("\\^", "^", 1, 1);
+  TEST_STRINGMATCH("\\-", "-", 1, 1);
+  TEST_STRINGMATCH("[\\*]", "*", 1, 1);
+  TEST_STRINGMATCH("[\\?]", "?", 1, 1);
+  TEST_STRINGMATCH("[\\\\]", "\\", 1, 1);
+  TEST_STRINGMATCH("[\\[]", "[", 1, 1);
+  TEST_STRINGMATCH("[\\]]", "]", 1, 1);
+  TEST_STRINGMATCH("[\\^]", "^", 1, 1);
+  TEST_STRINGMATCH("[\\-]", "-", 1, 1);
+
+  /* Not special outside character classes: */
+  TEST_STRINGMATCH("]", "]", 1, 1);
+  TEST_STRINGMATCH("^", "^", 1, 1);
+  TEST_STRINGMATCH("-", "-", 1, 1);
+  /* Not special inside character classes: */
+  TEST_STRINGMATCH("[*]", "*", 1, 1);
+  TEST_STRINGMATCH("[?]", "?", 1, 1);
+  TEST_STRINGMATCH("[[]", "[", 1, 1);
+  /* Not special as the first character in a character class: */
+  TEST_STRINGMATCH("[-]", "-", 1, 1);
+
+  /* Not special as range end (undocumented): */
+  TEST_STRINGMATCH("[+-]]", "*", 0, 0); /*   but not * (below) */
+  TEST_STRINGMATCH("[+-]]", "^", 0, 0); /*   or ^ (above) */
+  TEST_STRINGMATCH("[+--]", ",", 1, 1); /* ASCII range + to - includes , */
+  TEST_STRINGMATCH("[+--]", "*", 0, 0); /*   but not * (below) */
+  TEST_STRINGMATCH("[+--]", ".", 0, 0); /*   or . (above) */
+
+  /* And the same, but unclosed: */
+  TEST_STRINGMATCH("[+-]", "*", 0, 0);
+  TEST_STRINGMATCH("[+-]", "^", 0, 0);
+  TEST_STRINGMATCH("[+--", ",", 1, 1);
+  TEST_STRINGMATCH("[+--", "*", 0, 0);
+  TEST_STRINGMATCH("[+--", ".", 0, 0);
+
+  /* Escaped ] alone is literal: */
+  TEST_STRINGMATCH("[\\]a]", "]", 1, 1);
+  TEST_STRINGMATCH("[\\]a]", "a", 1, 1);
+
+  /* Escapes at range end: */
+  TEST_STRINGMATCH("[+-\\\\]", ",", 1, 1); /* ASCII range + to \ includes , */
+  TEST_STRINGMATCH("[+-\\\\]", "*", 0, 0); /*   but not * (below) */
+  TEST_STRINGMATCH("[+-\\]]", "*", 0, 0);  /*   but not * (below) */
+  TEST_STRINGMATCH("[+-\\]]", "^", 0, 0);  /*   or ^ (above) */
+
+  /* Unclosed is the same: */
+  TEST_STRINGMATCH("[+-\\\\", ",", 1, 1);
+  TEST_STRINGMATCH("[+-\\\\", "*", 0, 0);
+  TEST_STRINGMATCH("[+-\\\\", "]", 0, 0);
+  TEST_STRINGMATCH("[+-\\]", ",", 1, 1);
+  TEST_STRINGMATCH("[+-\\]", "*", 0, 0);
+  TEST_STRINGMATCH("[+-\\]", "^", 0, 0);
+  /* An incomplete escape is treated as literal backslash: */
+  TEST_STRINGMATCH("[+-\\", ",", 1, 1);
+  TEST_STRINGMATCH("[+-\\", "*", 0, 0);
+  TEST_STRINGMATCH("[+-\\", "]", 0, 0);
+
+  /* Empty character class matches nothing: */
+  TEST_STRINGMATCH("[]", "", 0, 0);
+  TEST_STRINGMATCH("[]", "a", 0, 0);
+  TEST_STRINGMATCH("[", "", 0, 0); /* Unclosed is the same */
+  TEST_STRINGMATCH("[", "a", 0, 0);
+
+  /* Empty negated character class is equivalent to pattern "?": */
+  TEST_STRINGMATCH("[^]", "", 0, 0);
+  TEST_STRINGMATCH("[^]", "a", 1, 1);
+  TEST_STRINGMATCH("[^]", "ab", 0, 0);
+  TEST_STRINGMATCH("[^", "", 0, 0); /* Unclosed is the same */
+  TEST_STRINGMATCH("[^", "a", 1, 1);
+  TEST_STRINGMATCH("[^", "ab", 0, 0);
+
+  /* Unclosed character classes are not an error (undocumented): */
+  TEST_STRINGMATCH("[A-", "B", 0, 0);
 }
 
 class HuffCoderTest : public ::testing::Test {
