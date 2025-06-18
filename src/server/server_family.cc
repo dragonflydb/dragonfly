@@ -535,53 +535,40 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkRe
 
   const bool is_admin_request = cntx->conn()->IsPrivileged();
 
-  std::vector<util::fb2::Fiber> fibers(pp->size() * listeners.size());
-  std::vector<std::deque<facade::Connection::WeakRef>> consumers(fibers.size());
+  std::vector<std::vector<facade::Connection::WeakRef>> thread_connections(pp->size());
 
   atomic<uint32_t> killed_connections = 0;
   atomic<uint32_t> kill_errors = 0;
 
-  size_t round = 0;
-
-  auto client_kill_fb_body = [&consumers, &killed_connections](unsigned idx) {
-    auto& kill_list = consumers[idx];
-    while (!kill_list.empty()) {
-      facade::Connection::WeakRef ref = std::move(kill_list.front());
-      kill_list.pop_front();
-      facade::Connection* conn = ref.Get();
-      // TODO think how to handle migration for eval. See RequestAsyncMigration
-      // DCHECK(socket_->proactor()->GetPoolIndex() == conn.thread())
-      if (conn) {
-        conn->ShutdownSelf();
-        killed_connections.fetch_add(1);
-      }
-    }
-  };
-
-  auto cb = [&](unsigned thread_index, util::Connection* conn) mutable {
+  auto traverse_cb = [&](unsigned idx, util::Connection* conn) {
     facade::Connection* dconn = static_cast<facade::Connection*>(conn);
-    size_t idx = round + thread_index;
-    auto& fb = fibers[idx];
     if (evaluator(dconn)) {
       if (is_admin_request || !dconn->IsPrivileged()) {
-        if (!fb.IsJoinable()) {
-          fb = [client_kill_fb_body, idx]() mutable { client_kill_fb_body(idx); };
-        }
-        consumers[idx].push_back(dconn->Borrow());
+        thread_connections[idx].push_back(dconn->Borrow());
       } else {
         kill_errors.fetch_add(1);
       }
     }
   };
 
-  for (auto* listener : listeners) {
-    listener->TraverseConnections(cb);
-    round += pp->size();
-  }
+  auto cb = [&](unsigned idx, ProactorBase* p) mutable {
+    // Step 1 aggregate the per thread connections from all listeners
+    std::vector<facade::Connection::WeakRef> connections;
+    for (auto* listener : listeners) {
+      listener->TraverseConnectionsOnThread(traverse_cb, UINT32_MAX, nullptr);
+    }
 
-  for (auto& fb : fibers) {
-    fb.JoinIfNeeded();
-  }
+    // Step 2 kill the clients
+    for (auto& tcon : thread_connections[idx]) {
+      facade::Connection* conn = tcon.Get();
+      if (conn && conn->socket()->proactor()->GetPoolIndex() == p->GetPoolIndex()) {
+        conn->ShutdownSelf();
+        killed_connections.fetch_add(1);
+      }
+    }
+  };
+
+  shard_set->pool()->AwaitFiberOnAll(cb);
 
   if (kill_errors.load() == 0) {
     return builder->SendLong(killed_connections.load());
