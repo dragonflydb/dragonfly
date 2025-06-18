@@ -3128,4 +3128,31 @@ TEST_F(JsonFamilyTest, JsonCommandsWorkingWithOtherTypesBug) {
   EXPECT_THAT(resp, "value");
 }
 
+TEST_F(JsonFamilyTest, ResetStringKeyWithSetGet) {
+  auto resp = Run({"JSON.SET", "key", "$", R"({"a":"b"})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "key"});
+  EXPECT_THAT(resp, R"({"a":"b"})");
+
+  // Resetting the key with a string value
+  resp = Run({"SET", "key", R"({"a":"b"})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"GET", "key"});
+  EXPECT_THAT(resp, R"({"a":"b"})");
+
+  // JSON.GET should still work after resetting the key with a string value
+  resp = Run({"JSON.GET", "key"});
+  EXPECT_THAT(resp, R"({"a":"b"})");
+
+  // Resetting the key again with JSON.SET
+  // This should not cause any issues
+  resp = Run({"JSON.SET", "key", "$", R"({"a":"b"})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "key"});
+  EXPECT_THAT(resp, R"({"a":"b"})");
+}
+
 }  // namespace dfly
