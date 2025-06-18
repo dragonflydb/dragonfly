@@ -499,7 +499,7 @@ void ClientId(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cnt
 }
 
 void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkReplyBuilder* builder,
-                ConnectionContext* cntx, util::ProactorPool* pp) {
+                ConnectionContext* cntx) {
   std::function<bool(facade::Connection * conn)> evaluator;
 
   if (args.size() == 1) {
@@ -535,7 +535,8 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkRe
 
   const bool is_admin_request = cntx->conn()->IsPrivileged();
 
-  std::vector<std::vector<facade::Connection::WeakRef>> thread_connections(pp->size());
+  std::vector<std::vector<facade::Connection::WeakRef>> thread_connections(
+      shard_set->pool()->size());
 
   atomic<uint32_t> killed_connections = 0;
   atomic<uint32_t> kill_errors = 0;
@@ -2052,8 +2053,7 @@ void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
   } else if (sub_cmd == "TRACKING") {
     return ClientTracking(sub_args, builder, cntx);
   } else if (sub_cmd == "KILL") {
-    return ClientKill(sub_args, absl::MakeSpan(listeners_), builder, cntx,
-                      &service_.proactor_pool());
+    return ClientKill(sub_args, absl::MakeSpan(listeners_), builder, cntx);
   } else if (sub_cmd == "CACHING") {
     return ClientCaching(sub_args, builder, cmd_cntx.tx, cntx);
   } else if (sub_cmd == "SETINFO") {
