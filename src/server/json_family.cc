@@ -56,7 +56,7 @@ using CI = CommandId;
 namespace {
 
 struct JsonAutoUpdaterOptions {
-  bool is_new_key = false;  // If true, the key is new and we should not remove it from indices
+  bool disable_indexing = false;  // If true, the key will not be removed or added to the indexes
   bool update_on_delete = false;  // If true, SetJsonSize will be called on destruction
 };
 
@@ -68,7 +68,7 @@ class JsonAutoUpdater {
   JsonAutoUpdater(const OpArgs& op_args, string_view key, DbSlice::ItAndUpdater it,
                   JsonAutoUpdaterOptions options = {})
       : op_args_(op_args), key_(key), it_(std::move(it)), options_(options) {
-    if (!options_.is_new_key) {
+    if (!options_.disable_indexing) {
       op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it.it->second);
     }
 
@@ -115,8 +115,7 @@ class JsonAutoUpdater {
     /* We need to call AddDoc after SetJsonSize because internally AddDoc has static cache that can
     allocate/deallocate memory. Because of this, we will overestimate/underestimate memory usage for
     json object. */
-    if (!options_.is_new_key) {
-      /* For new keys we manually run AddDoc command. Check SetFullJson method */
+    if (!options_.disable_indexing) {
       AddDocToIndexes();
     }
   }
@@ -451,18 +450,24 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
   RETURN_ON_BAD_STATUS(it_res);
 
   auto type = it_res->it->second.ObjType();
-  if (type != OBJ_JSON && type != OBJ_STRING) {
+  if (type == OBJ_JSON) {
+    // If it json we need to remove the old json object from the indexes
+    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it_res->it->second);
+  } else if (type != OBJ_STRING) {
     // The object is not a JSON object and not a string, so we cannot set a full JSON value
     return OpStatus::WRONG_TYPE;
   }
 
-  const bool is_new_key = it_res->is_new;
   JsonAutoUpdater updater(op_args, key, *std::move(it_res),
-                          {.is_new_key = is_new_key, .update_on_delete = false});
+                          {.disable_indexing = true, .update_on_delete = false});
 
   std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
+    if (type == OBJ_JSON) {
+      // We need to add the document to the indexes, because we removed it before
+      op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, it_res->it->second);
+    }
     return OpStatus::INVALID_JSON;
   }
 
@@ -482,9 +487,7 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
   updater.SetJsonSize();
 
   // We need to manually run add document here
-  if (is_new_key) {
-    updater.AddDocToIndexes();
-  }
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, it_res->it->second);
 
   return OpStatus::OK;
 }
@@ -1082,7 +1085,7 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
 
   if (json_path.HoldsJsonPath()) {
     JsonAutoUpdater updater(op_args, key, *std::move(it_res),
-                            {.is_new_key = false, .update_on_delete = true});
+                            {.disable_indexing = false, .update_on_delete = true});
     const json::Path& path = json_path.AsJsonPath();
     long deletions = json::MutatePath(
         path, [](optional<string_view>, JsonType* val) { return true; }, updater.GetJson(),
