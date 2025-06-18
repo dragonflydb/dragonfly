@@ -150,9 +150,6 @@ Dfs Dfs::Delete(absl::Span<const PathSegment> path, JsonType* json) {
   vector<Item> stack;
   stack.emplace_back(json);
 
-  // Collect nodes to delete - but simplified without complex filtering
-  std::vector<JsonType*> nodes_to_delete;
-
   do {
     unsigned segment_index = stack.back().segment_idx();
     const auto& path_segment = path[segment_index];
@@ -167,60 +164,23 @@ Dfs Dfs::Delete(absl::Span<const PathSegment> path, JsonType* json) {
         if (next_seg_id + 1 < path.size()) {
           stack.emplace_back(next, next_seg_id);
         } else {
-          // Terminal step: collect node for deletion
-          nodes_to_delete.push_back(next);
+          // Terminal step: perform deletion immediately
+          // At this point we're in the deepest level, so safe to delete
+          dfs.DeleteStep(path[next_seg_id], next);
         }
       }
     } else {
       if (!res && segment_index > 0 && path[segment_index - 1].type() == SegmentType::DESCENT &&
           stack.back().get_segment_step() == 0) {
         if (segment_index + 1 == path.size()) {
-          nodes_to_delete.push_back(stack.back().obj_ptr());
+          // Terminal node discovered via DESCENT - safe to delete immediately
+          // as we're backtracking
+          dfs.DeleteStep(path[segment_index], stack.back().obj_ptr());
         }
       }
       stack.pop_back();
     }
   } while (!stack.empty());
-
-  // Apply deletions with filtering for recursive descent to avoid parent-child duplication
-  const PathSegment& terminal_segment = path.back();
-
-  // For deletion operations with DESCENT and IDENTIFIER, remove direct parent-child duplicates
-  // where deleting the parent would automatically delete the child with the same key name
-  if (path.size() > 1 &&
-      std::any_of(path.begin(), path.end() - 1,
-                  [](const PathSegment& seg) { return seg.type() == SegmentType::DESCENT; }) &&
-      terminal_segment.type() == SegmentType::IDENTIFIER && nodes_to_delete.size() > 1) {
-    const std::string& target_key = terminal_segment.identifier();
-    std::vector<JsonType*> filtered_nodes;
-
-    for (JsonType* candidate : nodes_to_delete) {
-      bool is_direct_child_of_another = false;
-
-      for (JsonType* potential_parent : nodes_to_delete) {
-        if (candidate != potential_parent && potential_parent->is_object()) {
-          // Check if potential_parent directly contains candidate as value of target_key
-          auto it = potential_parent->find(target_key);
-          if (it != potential_parent->object_range().end() && &(it->value()) == candidate) {
-            is_direct_child_of_another = true;
-            break;
-          }
-        }
-      }
-
-      if (!is_direct_child_of_another) {
-        filtered_nodes.push_back(candidate);
-      }
-    }
-
-    if (!filtered_nodes.empty()) {
-      nodes_to_delete = std::move(filtered_nodes);
-    }
-  }
-
-  for (auto it = nodes_to_delete.rbegin(); it != nodes_to_delete.rend(); ++it) {
-    dfs.DeleteStep(terminal_segment, *it);
-  }
 
   return dfs;
 }
