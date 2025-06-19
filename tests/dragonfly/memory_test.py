@@ -230,7 +230,7 @@ async def test_throttle_on_commands_squashing_replies_bytes(df_factory: DflyInst
     df = df_factory.create(
         proactor_threads=2,
         squashed_reply_size_limit=500_000_000,
-        vmodule="multi_command_squasher=2",
+        vmodule="dragonfly_connection=2",
     )
     df.start()
 

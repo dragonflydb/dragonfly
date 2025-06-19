@@ -24,10 +24,8 @@ namespace dfly {
 class MultiCommandSquasher {
  public:
   struct Opts {
-    bool verify_commands = false;  // Whether commands need to be verified before execution
-    bool error_abort = false;      // Abort upon receiving error
-    // If MultiCommandSquasher was used from a pipeline and not from multi/exec block
-    bool is_mult_non_atomic = false;
+    bool verify_commands = false;   // Whether commands need to be verified before execution
+    bool error_abort = false;       // Abort upon receiving error
     unsigned max_squash_size = 32;  // How many commands to squash at once
   };
   // Returns number of processed commands.
@@ -37,8 +35,6 @@ class MultiCommandSquasher {
   }
 
   static size_t GetRepliesMemSize();
-
-  static bool IsReplySizeOverLimit();
 
  private:
   // Per-shard execution info.
@@ -99,10 +95,6 @@ class MultiCommandSquasher {
   size_t num_shards_ = 0;
 
   std::vector<MutableSlice> tmp_keylist_;
-  // Used to throttle when memory is tight
-  static thread_local util::fb2::EventCount ec_;
-
-  static thread_local size_t reply_size_limit_;
 };
 
 }  // namespace dfly

@@ -100,6 +100,10 @@ ABSL_FLAG(uint32_t, max_busy_read_usec, 100,
           "Maximum time we read and parse from "
           "a socket without yielding. In microseconds.");
 
+ABSL_FLAG(size_t, squashed_reply_size_limit, 0,
+          "Max bytes allowed for squashing_current_reply_size. If this limit is reached, "
+          "connections dispatching via pipelines will block until this value is decremented.");
+
 using namespace util;
 using namespace std;
 using absl::GetFlag;
@@ -181,6 +185,10 @@ bool TrafficLogger::Write(iovec* blobs, size_t len) {
 
 thread_local TrafficLogger tl_traffic_logger{};
 thread_local base::Histogram* io_req_size_hist = nullptr;
+
+thread_local const size_t reply_size_limit = absl::GetFlag(FLAGS_squashed_reply_size_limit);
+// When current_reply_size grows we throttle on the ec here.
+thread_local util::fb2::CondVarAny tl_reply_size_throttle;
 
 void OpenTrafficLogger(string_view base_path) {
   unique_lock lk{tl_traffic_logger.mutex};
@@ -1170,7 +1178,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
     last_interaction_ = time(nullptr);
 
     // We might have blocked the dispatch queue from processing, wake it up.
-    if (dispatch_q_.size() > 0)
+    if (!dispatch_q_.empty())
       cnd_.notify_one();
   }
 }
@@ -1518,6 +1526,20 @@ void Connection::SquashPipeline() {
 
   cc_->async_dispatch = true;
 
+  // We need to first set async_dispatch before we preempt. Otherwise, when the AsyncFiber
+  // wakes up, sync_dispatch might be true, violating the precondition of this flow
+  // (when we block earlier in the body of AsyncFiber at cnd_.wait(noop_lk, [this])...)
+  fb2::NoOpLock noop;
+  tl_reply_size_throttle.wait(noop,
+                              [this] { return !IsReplySizeOverLimit() || cc_->conn_closing; });
+
+  // Don't dispatch if we woke up but the connection was closed. AsyncFiber will exit
+  // after the return.
+  if (cc_->conn_closing) {
+    cc_->async_dispatch = false;
+    return;
+  }
+
   size_t dispatched =
       service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), reply_builder_.get(), cc_.get());
 
@@ -1544,6 +1566,7 @@ void Connection::SquashPipeline() {
 
   // If interrupted due to pause, fall back to regular dispatch
   skip_next_squashing_ = dispatched != squash_cmds.size();
+  tl_reply_size_throttle.notify_all();
 }
 
 void Connection::ClearPipelinedMessages() {
@@ -2075,6 +2098,16 @@ void Connection::DecrNumConns() {
     --stats_->num_conns_other;
 }
 
+bool Connection::IsReplySizeOverLimit() const {
+  std::atomic<size_t>& reply_sz = tl_facade_stats->reply_stats.squashing_current_reply_size;
+  size_t current = reply_sz.load(std::memory_order_acquire);
+  const bool over_limit = reply_size_limit != 0 && current > 0 && current > reply_size_limit;
+  LOG(INFO) << "current: " << current << "/" << reply_size_limit;
+  VLOG_IF(2, over_limit) << "MultiCommandSquasher overlimit: " << current << "/"
+                         << reply_size_limit;
+  return over_limit;
+}
+
 void Connection::SetMaxQueueLenThreadLocal(unsigned tid, uint32_t val) {
   thread_queue_backpressure[tid].pipeline_queue_max_len = val;
   thread_queue_backpressure[tid].pipeline_cnd.notify_all();
@@ -2105,7 +2138,7 @@ void Connection::EnsureMemoryBudget(unsigned tid) {
 
 Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, unsigned thread_id,
                              uint32_t client_id)
-    : ptr_{ptr}, thread_id_{thread_id}, client_id_{client_id} {
+    : ptr_{std::move(ptr)}, thread_id_{thread_id}, client_id_{client_id} {
 }
 
 unsigned Connection::WeakRef::Thread() const {
@@ -2131,7 +2164,7 @@ uint32_t Connection::WeakRef::GetClientId() const {
   return client_id_;
 }
 
-bool Connection::WeakRef::operator<(const WeakRef& other) {
+bool Connection::WeakRef::operator<(const WeakRef& other) const {
   return client_id_ < other.client_id_;
 }
 
@@ -2152,6 +2185,8 @@ void ResetStats() {
   tl_facade_stats->reply_stats = {};
   if (io_req_size_hist)
     io_req_size_hist->Clear();
+
+  tl_reply_size_throttle.notify_all();
 }
 
 }  // namespace facade

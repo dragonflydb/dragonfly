@@ -17,10 +17,6 @@
 #include "server/tx_base.h"
 #include "util/fibers/synchronization.h"
 
-ABSL_FLAG(size_t, squashed_reply_size_limit, 0,
-          "Max bytes allowed for squashing_current_reply_size. If this limit is reached, "
-          "connections dispatching via pipelines will block until this value is decremented.");
-
 namespace dfly {
 
 using namespace std;
@@ -222,15 +218,6 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   if (order_.empty())
     return true;
 
-  // Multi non atomic does not lock ahead. So it's safe to preempt while we haven't
-  // really started the transaction.
-  // This is not true for `multi/exec` which uses `Execute()` but locks ahead before it
-  // calls `ScheduleSingleHop` below.
-  // TODO Investigate what are the side effects for allowing it `lock ahead` mode.
-  if (opts_.is_mult_non_atomic) {
-    MultiCommandSquasher::ec_.await([]() { return !MultiCommandSquasher::IsReplySizeOverLimit(); });
-  }
-
   unsigned num_shards = 0;
   for (auto& sd : sharded_) {
     if (!sd.dispatched.empty())
@@ -294,8 +281,6 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
 
   tl_facade_stats->reply_stats.squashing_current_reply_size.fetch_sub(total_reply_size,
                                                                       std::memory_order_release);
-  MultiCommandSquasher::ec_.notifyAll();
-
   for (auto& sinfo : sharded_) {
     sinfo.dispatched.clear();
     sinfo.reply_id = 0;
@@ -349,22 +334,5 @@ size_t MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
 bool MultiCommandSquasher::IsAtomic() const {
   return atomic_;
 }
-
-size_t MultiCommandSquasher::GetRepliesMemSize() {
-  std::atomic<size_t>& reply_sz = tl_facade_stats->reply_stats.squashing_current_reply_size;
-  return reply_sz.load(std::memory_order_relaxed);
-}
-
-bool MultiCommandSquasher::IsReplySizeOverLimit() {
-  std::atomic<size_t>& reply_sz = tl_facade_stats->reply_stats.squashing_current_reply_size;
-  size_t current = reply_sz.load(std::memory_order_relaxed);
-  const bool over_limit = current > 0 && current > reply_size_limit_;
-  VLOG_IF(2, over_limit) << "MultiCommandSquasher overlimit: " << reply_sz << " current reply size "
-                         << reply_size_limit_;
-  return over_limit;
-}
-
-thread_local util::fb2::EventCount MultiCommandSquasher::ec_;
-thread_local size_t MultiCommandSquasher::reply_size_limit_ = 0;
 
 }  // namespace dfly
