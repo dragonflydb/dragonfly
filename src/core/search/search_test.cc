@@ -933,8 +933,7 @@ static std::string GenerateWordSequence(size_t word_count, size_t doc_offset = 0
 }
 
 // Helper function to generate pattern with variety
-static std::string GeneratePattern(SearchType search_type, size_t pattern_len,
-                                   bool use_uniform = true) {
+static std::string GeneratePattern(SearchType search_type, size_t pattern_len, bool use_uniform) {
   if (use_uniform) {
     // Original uniform pattern for comparison
     switch (search_type) {
