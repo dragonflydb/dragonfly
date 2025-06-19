@@ -11,7 +11,6 @@ extern "C" {
 #include "redis/intset.h"
 #include "redis/listpack.h"
 #include "redis/lzfP.h" /* LZF compression library */
-#include "redis/quicklist.h"
 #include "redis/stream.h"
 #include "redis/util.h"
 #include "redis/ziplist.h"
@@ -56,7 +55,6 @@ extern "C" {
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
-ABSL_DECLARE_FLAG(bool, list_experimental_v2);
 ABSL_FLAG(bool, rdb_load_dry_run, false, "Dry run RDB load without applying changes");
 ABSL_FLAG(bool, rdb_ignore_expiry, false, "Ignore Key Expiry when loding from RDB snapshot");
 
@@ -526,34 +524,22 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
-  quicklist* ql = nullptr;
   QList* qlv2 = nullptr;
   if (config_.append) {
     if (pv_->ObjType() != OBJ_LIST) {
       ec_ = RdbError(errc::invalid_rdb_type);
       return;
     }
-    if (pv_->Encoding() == OBJ_ENCODING_QUICKLIST) {
-      ql = static_cast<quicklist*>(pv_->RObjPtr());
-    } else {
-      DCHECK_EQ(pv_->Encoding(), kEncodingQL2);
-      qlv2 = static_cast<QList*>(pv_->RObjPtr());
-    }
+    DCHECK_EQ(pv_->Encoding(), kEncodingQL2);
+    qlv2 = static_cast<QList*>(pv_->RObjPtr());
   } else {
-    if (absl::GetFlag(FLAGS_list_experimental_v2)) {
-      qlv2 = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
-                                           GetFlag(FLAGS_list_compress_depth));
-    } else {
-      ql = quicklistNew(GetFlag(FLAGS_list_max_listpack_size), GetFlag(FLAGS_list_compress_depth));
-    }
+    qlv2 = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
+                                         GetFlag(FLAGS_list_compress_depth));
   }
 
   auto cleanup = absl::Cleanup([&] {
     if (!config_.append) {
-      if (ql)
-        quicklistRelease(ql);
-      else
-        CompactObj::DeleteMR<QList>(qlv2);
+      CompactObj::DeleteMR<QList>(qlv2);
     }
   });
 
@@ -568,10 +554,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
     if (container == QUICKLIST_NODE_CONTAINER_PLAIN) {
       lp = (uint8_t*)zmalloc(sv.size());
       ::memcpy(lp, (uint8_t*)sv.data(), sv.size());
-      if (ql)
-        quicklistAppendPlainNode(ql, lp, sv.size());
-      else
-        qlv2->AppendPlain(lp, sv.size());
+      qlv2->AppendPlain(lp, sv.size());
 
       return true;
     }
@@ -609,16 +592,13 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
       lp = lpShrinkToFit(lp);
     }
 
-    if (ql)
-      quicklistAppendListpack(ql, lp);
-    else
-      qlv2->AppendListpack(lp);
+    qlv2->AppendListpack(lp);
     return true;
   });
 
   if (ec_)
     return;
-  if ((ql && quicklistCount(ql) == 0) || (qlv2 && qlv2->Size() == 0)) {
+  if (qlv2 && qlv2->Size() == 0) {
     ec_ = RdbError(errc::empty_key);
     return;
   }
@@ -626,10 +606,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   std::move(cleanup).Cancel();
 
   if (!config_.append) {
-    if (ql)
-      pv_->InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, ql);
-    else
-      pv_->InitRobj(OBJ_LIST, kEncodingQL2, qlv2);
+    pv_->InitRobj(OBJ_LIST, kEncodingQL2, qlv2);
   }
 }
 
@@ -1177,7 +1154,8 @@ auto RdbLoaderBase::FetchLzfStringObject() -> io::Result<string> {
   SET_OR_UNEXPECT(LoadLen(NULL), clen);
   SET_OR_UNEXPECT(LoadLen(NULL), len);
 
-  if (len > 1ULL << 29 || len <= clen || clen == 0) {
+  // TODO serialization and deserialization for data > 512 MB should be done via chunks
+  if (len <= clen || clen == 0) {
     LOG(ERROR) << "Bad compressed string";
     return Unexpected(rdb::rdb_file_corrupted);
   }

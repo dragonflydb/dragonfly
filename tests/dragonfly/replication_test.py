@@ -3270,3 +3270,71 @@ async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_le
     # Second partial sync failed because of stale LSN
     lines = master.find_in_logs("Partial sync requested from stale LSN")
     assert len(lines) == 1
+
+
+async def test_mc_gat_replication(df_factory):
+    master = df_factory.create(memcached_port=11211, proactor_threads=1)
+    replica = df_factory.create(memcached_port=11212, proactor_threads=1)
+    df_factory.start_all([master, replica])
+
+    cm = pymemcache.Client(f"127.0.0.1:{master.mc_port}", default_noreply=False)
+
+    key = "foo"
+    value = b"bar"
+    not_found = b"NOTFOUND"
+    assert cm.set(key, value, noreply=True)
+
+    async with replica.client() as cl:
+        await cl.execute_command(f"REPLICAOF localhost {master.port}")
+        await wait_available_async(cl)
+
+    async def state_transitioned_stable(
+        init: bytes,
+        expected: bytes,
+        duration_sec=5,
+        sleep_sec=1,
+    ):
+        """
+        Asserts that the state goes from initial to expected and then stays at expected, observing state for duration_sec
+        """
+        _start = time.time()
+        transitioned = False
+        state = None
+        while time.time() - _start < duration_sec:
+            state = cr.get(key, not_found)
+            if not transitioned and state == expected:
+                transitioned = True
+            if transitioned:
+                assert (
+                    state == expected
+                ), f"state moved back to initial after transition {state=} {init=} {expected=}"
+            else:
+                assert state == init, f"unexpected state: {state=} {init=}"
+            await asyncio.sleep(sleep_sec)
+        return state == expected
+
+    cr = pymemcache.Client(f"127.0.0.1:{replica.mc_port}", default_noreply=False)
+
+    assert await state_transitioned_stable(not_found, value)
+
+    # Force the key to be removed by setting expiry in the past. Memcache treats expiry > 1 month as absolute from
+    # epoch, so 1 month + 1 second expires the key
+    month_plus_one = 60 * 60 * 24 * 30 + 1
+
+    # GAT|GATS are not directly exposed in the python client API
+    assert cm._fetch_cmd(b"gat", [str(month_plus_one), key], expect_cas=False) == {}
+
+    # The replica should eventually sync the delete operation
+    assert await state_transitioned_stable(value, not_found)
+
+    assert cm.set(key, value, noreply=True)
+    # expiry is set as now + 1000 seconds, which ensures the key will remain for the duration of the test
+    assert cm._fetch_cmd(b"gat", [str(1000), key], expect_cas=False) == {key: value}
+
+    # once the value is synced to the replica, assert that it remains stable and is not removed by setting expiry
+    assert await state_transitioned_stable(not_found, value)
+
+    result = cm._fetch_cmd(b"gats", [str(1000), key], expect_cas=True)
+    assert len(result) == 1 and key in result, f"missing expected key: {result=}"
+    expected_cas_ver = b"0"
+    assert result[key] == (value, expected_cas_ver), f"unexpected result for key: {result=}"

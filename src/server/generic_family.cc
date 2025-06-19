@@ -17,6 +17,7 @@ extern "C" {
 #include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/qlist.h"
 #include "redis/rdb.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
@@ -25,6 +26,7 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/family_utils.h"
 #include "server/hset_family.h"
 #include "server/journal/journal.h"
 #include "server/rdb_extensions.h"
@@ -226,7 +228,7 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
   auto res = db_slice->AddOrUpdate(cntx, key, std::move(pv), args.ExpirationTime());
   if (res) {
     res->it->first.SetSticky(args.Sticky());
-    db_slice->shard_owner()->search_indices()->AddDoc(key, cntx, res->it->second);
+    AddKeyToIndexesIfNeeded(key, cntx, res->it->second, db_slice->shard_owner());
   }
   return res;
 }
@@ -316,7 +318,7 @@ class Renamer {
 
  private:
   void FetchData();
-  void FinalizeRename();
+  facade::OpStatus FinalizeRename();
 
   bool KeyExists(Transaction* t, EngineShard* shard, std::string_view key) const;
   void SerializeSrc(Transaction* t, EngineShard* shard);
@@ -364,8 +366,7 @@ ErrorReply Renamer::Rename(bool destination_should_not_exist) {
     return OpStatus::KEY_EXISTS;
   }
 
-  FinalizeRename();
-  return OpStatus::OK;
+  return FinalizeRename();
 }
 
 void Renamer::FetchData() {
@@ -389,22 +390,28 @@ void Renamer::FetchData() {
   transaction_->Execute(std::move(cb), false);
 }
 
-void Renamer::FinalizeRename() {
-  auto cb = [this](Transaction* t, EngineShard* shard) {
+OpStatus Renamer::FinalizeRename() {
+  OpStatus del_status = OpStatus::OK;
+  OpStatus deserialize_status = OpStatus::OK;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
     const ShardId shard_id = shard->shard_id();
 
     if (!do_copy_ && shard_id == src_sid_) {
-      return DelSrc(t, shard);
+      del_status = DelSrc(t, shard);
+    } else if (shard_id == dest_sid_) {
+      deserialize_status = DeserializeDest(t, shard);
     }
-
-    if (shard_id == dest_sid_) {
-      return DeserializeDest(t, shard);
-    }
-
     return OpStatus::OK;
   };
 
   transaction_->Execute(std::move(cb), true);
+
+  LOG_IF(DFATAL,
+         (deserialize_status != OpStatus::OK && deserialize_status != OpStatus::OUT_OF_MEMORY) ||
+             del_status != OpStatus::OK)
+      << "Error during rename command, deserialize_status: " << deserialize_status
+      << " del_status: " << del_status;
+  return deserialize_status != OpStatus::OK ? deserialize_status : del_status;
 }
 
 bool Renamer::KeyExists(Transaction* t, EngineShard* shard, std::string_view key) const {
@@ -879,15 +886,16 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     if (destination_should_not_exist)
       return OpStatus::KEY_EXISTS;
 
-    op_args.shard->search_indices()->RemoveDoc(to_key, op_args.db_cntx, to_res.it->second);
+    RemoveKeyFromIndexesIfNeeded(to_key, op_args.db_cntx, to_res.it->second, op_args.shard);
     is_prior_list = (to_res.it->second.ObjType() == OBJ_LIST);
   }
 
   // Delete the "from" document from the search index before deleting from the database
-  op_args.shard->search_indices()->RemoveDoc(from_key, op_args.db_cntx, from_res.it->second);
+  RemoveKeyFromIndexesIfNeeded(from_key, op_args.db_cntx, from_res.it->second, op_args.shard);
 
   bool sticky = from_res.it->first.IsSticky();
   uint64_t exp_ts = db_slice.ExpireTime(from_res.exp_it);
+  from_res.post_updater.ReduceHeapUsage();
 
   // we keep the value we want to move.
   PrimeValue from_obj = std::move(from_res.it->second);
@@ -896,6 +904,7 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
   from_res.it->second.SetExpire(IsValid(from_res.exp_it));
 
   if (IsValid(to_res.it)) {
+    to_res.post_updater.ReduceHeapUsage();
     to_res.it->second = std::move(from_obj);
     to_res.it->second.SetExpire(IsValid(to_res.exp_it));  // keep the expire flag on 'to'.
 
@@ -920,7 +929,7 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     to_res.it->first.SetSticky(sticky);
   }
 
-  op_args.shard->search_indices()->AddDoc(to_key, op_args.db_cntx, to_res.it->second);
+  AddKeyToIndexesIfNeeded(to_key, op_args.db_cntx, to_res.it->second, op_args.shard);
 
   auto bc = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
   if (!is_prior_list && to_res.it->second.ObjType() == OBJ_LIST && bc) {
@@ -1232,11 +1241,7 @@ void GenericFamily::Keys(CmdArgList args, const CommandContext& cmd_cntx) {
     cursor = ScanGeneric(cursor, scan_opts, &keys, cmd_cntx.conn_cntx);
   } while (cursor != 0 && keys.size() < output_limit);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  rb->StartArray(keys.size());
-  for (const auto& k : keys) {
-    rb->SendBulkString(k);
-  }
+  static_cast<RedisReplyBuilder*>(cmd_cntx.rb)->SendBulkStrArr(keys);
 }
 
 void GenericFamily::PexpireAt(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -1444,10 +1449,33 @@ OpResultTyped<SortEntryList> OpFetchSortEntries(const OpArgs& op_args, std::stri
   return success ? res : OpStatus::INVALID_NUMERIC_RESULT;
 }
 
+template <typename IteratorBegin, typename IteratorEnd>
+OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, IteratorBegin&& start_it,
+                           IteratorEnd&& end_it) {
+  uint32_t len = 0;
+
+  QList* ql_v2 = CompactObj::AllocateMR<QList>();
+  QList::Where where = QList::TAIL;
+  for (auto it = start_it; it != end_it; ++it) {
+    ql_v2->Push(it->key, where);
+  }
+  len = ql_v2->Size();
+
+  PrimeValue pv;
+  pv.InitRobj(OBJ_LIST, kEncodingQL2, ql_v2);
+
+  // This would overwrite existing value if any with new list.
+  auto op_res = op_args.GetDbSlice().AddOrUpdate(op_args.db_cntx, key, std::move(pv), 0);
+  RETURN_ON_BAD_STATUS(op_res);
+
+  return len;
+}
+
 void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   bool alpha = false;
   bool reversed = false;
+  std::optional<std::string_view> store_key;
   std::optional<std::pair<size_t, size_t>> bounds;
   auto* builder = cmd_cntx.rb;
   for (size_t i = 1; i < args.size(); i++) {
@@ -1469,29 +1497,43 @@ void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
       }
       bounds = {offset, limit};
       i += 2;
+    } else if (arg == "STORE") {
+      if (i + 1 >= args.size()) {
+        return builder->SendError(kSyntaxErr);
+      }
+      store_key = ArgS(args, i + 1);
+      i += 1;
     } else {
       LOG_EVERY_T(ERROR, 1) << "Unsupported option " << arg;
       return builder->SendError(kSyntaxErr, kSyntaxErrType);
     }
   }
 
-  OpResultTyped<SortEntryList> fetch_result =
-      cmd_cntx.tx->ScheduleSingleHopT([&](Transaction* t, EngineShard* shard) {
-        return OpFetchSortEntries(t->GetOpArgs(shard), key, alpha);
-      });
+  ShardId source_sid = Shard(key, shard_set->size());
+  OpResultTyped<SortEntryList> fetch_result;
+  auto fetch_cb = [&](Transaction* t, EngineShard* shard) {
+    ShardId shard_id = shard->shard_id();
+    // in case of SORT option, we fetch only on the source shard
+    if (shard_id == source_sid) {
+      fetch_result = OpFetchSortEntries(t->GetOpArgs(shard), key, alpha);
+    }
+    return OpStatus::OK;
+  };
 
-  if (fetch_result == OpStatus::WRONG_TYPE)
-    return builder->SendError(fetch_result.status());
-
-  if (fetch_result.status() == OpStatus::INVALID_NUMERIC_RESULT)
-    return builder->SendError("One or more scores can't be converted into double");
-
+  cmd_cntx.tx->Execute(std::move(fetch_cb), !bool(store_key));
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  if (!fetch_result.ok())
-    return rb->SendEmptyArray();
+  if (!fetch_result.ok()) {
+    cmd_cntx.tx->Conclude();
+    if (fetch_result == OpStatus::WRONG_TYPE)
+      return builder->SendError(fetch_result.status());
+    else if (fetch_result.status() == OpStatus::INVALID_NUMERIC_RESULT)
+      return builder->SendError("One or more scores can't be converted into double");
+    else
+      return rb->SendEmptyArray();
+  }
 
   auto result_type = fetch_result.type();
-  auto sort_call = [builder, bounds, reversed, result_type](auto& entries) {
+  auto sort_call = [builder, bounds, reversed, result_type, &store_key, &cmd_cntx](auto& entries) {
     using value_t = typename std::decay_t<decltype(entries)>::value_type;
     auto cmp = reversed ? &value_t::greater : &value_t::less;
     if (bounds) {
@@ -1510,11 +1552,29 @@ void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
 
     bool is_set = (result_type == OBJ_SET || result_type == OBJ_ZSET);
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    rb->StartCollection(std::distance(start_it, end_it),
-                        is_set ? RedisReplyBuilder::SET : RedisReplyBuilder::ARRAY);
+    if (store_key) {
+      ShardId dest_sid = Shard(store_key.value(), shard_set->size());
+      OpResult<uint32_t> store_len;
+      auto store_callback = [&](Transaction* t, EngineShard* shard) {
+        ShardId shard_id = shard->shard_id();
+        if (shard_id == dest_sid) {
+          store_len = OpStore(t->GetOpArgs(shard), store_key.value(), start_it, end_it);
+        }
+        return OpStatus::OK;
+      };
+      cmd_cntx.tx->Execute(std::move(store_callback), true);
+      if (store_len) {
+        rb->SendLong(store_len.value());
+      } else {
+        rb->SendError(store_len.status());
+      }
+    } else {
+      rb->StartCollection(std::distance(start_it, end_it),
+                          is_set ? RedisReplyBuilder::SET : RedisReplyBuilder::ARRAY);
 
-    for (auto it = start_it; it != end_it; ++it) {
-      rb->SendBulkString(it->key);
+      for (auto it = start_it; it != end_it; ++it) {
+        rb->SendBulkString(it->key);
+      }
     }
   };
 
@@ -1577,11 +1637,7 @@ void GenericFamily::FieldExpire(CmdArgList args, const CommandContext& cmd_cntx)
   OpResult<vector<long>> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    rb->StartArray(result->size());
-    const auto& array = result.value();
-    for (const auto& v : array) {
-      rb->SendLong(v);
-    }
+    rb->SendLongArr(absl::MakeConstSpan(result.value()));
   } else {
     rb->SendError(result.status());
   }
@@ -1850,12 +1906,9 @@ void GenericFamily::Scan(CmdArgList args, const CommandContext& cmd_cntx) {
   StringVec keys;
   cursor = ScanGeneric(cursor, scan_op, &keys, cmd_cntx.conn_cntx);
 
-  builder->StartArray(2);
+  RedisReplyBuilder::ArrayScope scope{builder, 2};
   builder->SendBulkString(absl::StrCat(cursor));
-  builder->StartArray(keys.size());
-  for (const auto& k : keys) {
-    builder->SendBulkString(k);
-  }
+  builder->SendBulkStrArr(keys);
 }
 
 OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, const ShardArgs& keys) {
@@ -1996,7 +2049,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"DUMP", CO::READONLY, 2, 1, 1, acl::kDump}.HFUNC(Dump)
       << CI{"UNLINK", CO::WRITE, -2, 1, -1, acl::kUnlink}.HFUNC(Unlink)
       << CI{"STICK", CO::WRITE, -2, 1, -1, acl::kStick}.HFUNC(Stick)
-      << CI{"SORT", CO::READONLY, -2, 1, 1, acl::kSort}.HFUNC(Sort)
+      << CI{"SORT", CO::WRITE, -2, 1, -1, acl::kSort}.HFUNC(Sort)
       << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kMove}.HFUNC(
              Move)
       << CI{"RESTORE", CO::WRITE, -4, 1, 1, acl::kRestore}.HFUNC(Restore)

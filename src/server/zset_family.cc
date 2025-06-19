@@ -157,7 +157,9 @@ OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZSetFamily::ZParams& zparams,
     return db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
   }
 
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  // Here we use nullopt for type because we can override the type if it exists.
+  // If override is not set, we will return an error if the type is not OBJ_ZSET.
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, std::nullopt);
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
@@ -1935,9 +1937,10 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
   auto& db_slice = op_args.GetDbSlice();
 
   if (zparams.override && members.empty()) {
-    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
-    if (IsValid(it)) {
-      db_slice.Del(op_args.db_cntx, it);
+    auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
+    if (res_it && IsValid(res_it->it)) {
+      res_it->post_updater.Run();
+      db_slice.Del(op_args.db_cntx, res_it->it);
     }
     return OpStatus::OK;
   }

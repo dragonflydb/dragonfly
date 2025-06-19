@@ -907,6 +907,187 @@ TEST_F(SearchTest, NotImplementedSearchTypes) {
       << "Infix search should return a not implemented error";
 }
 
+// Enumeration for different search types
+enum class SearchType { PREFIX = 0, SUFFIX = 1, INFIX = 2 };
+
+// Helper function to generate content with ASCII characters
+static std::string GenerateWordSequence(size_t word_count, size_t doc_offset = 0) {
+  std::string content;
+  for (size_t i = 0; i < word_count; ++i) {
+    std::string word;
+    char start_char = 'a' + ((doc_offset + i) % 26);
+    size_t word_len = 3 + (i % 5);  // Word length 3-7 chars
+
+    for (size_t j = 0; j < word_len; ++j) {
+      char c = start_char + (j % 26);
+      if (c > 'z')
+        c = 'a' + (c - 'z' - 1);
+      word += c;
+    }
+
+    if (i > 0)
+      content += " ";
+    content += word;
+  }
+  return content;
+}
+
+// Helper function to generate pattern with variety
+static std::string GeneratePattern(SearchType search_type, size_t pattern_len, bool use_uniform) {
+  if (use_uniform) {
+    // Original uniform pattern for comparison
+    switch (search_type) {
+      case SearchType::PREFIX:
+        return std::string(pattern_len, 'p');
+      case SearchType::SUFFIX:
+        return std::string(pattern_len, 's');
+      case SearchType::INFIX:
+        return std::string(pattern_len, 'i');
+    }
+  } else {
+    // Diverse ASCII pattern
+    std::string pattern;
+    char base_char = (search_type == SearchType::PREFIX)   ? 'p'
+                     : (search_type == SearchType::SUFFIX) ? 's'
+                                                           : 'i';
+
+    for (size_t i = 0; i < pattern_len; ++i) {
+      char c = base_char + (i % 10);  // Use variety of chars
+      if (c > 'z')
+        c = 'a' + (c - 'z' - 1);
+      pattern += c;
+    }
+    return pattern;
+  }
+  return "";
+}
+
+static void BM_SearchByTypeImpl(benchmark::State& state, bool use_diverse_pattern) {
+  size_t num_docs = state.range(0);
+  size_t pattern_len = state.range(1);
+  SearchType search_type = static_cast<SearchType>(state.range(2));
+
+  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // Generate pattern
+  std::string pattern = GeneratePattern(search_type, pattern_len, !use_diverse_pattern);
+  std::string search_type_name = (search_type == SearchType::PREFIX)   ? "prefix"
+                                 : (search_type == SearchType::SUFFIX) ? "suffix"
+                                                                       : "infix";
+
+  // Generate test data with more realistic content
+  for (size_t i = 0; i < num_docs; i++) {
+    std::string content;
+    if (i < num_docs / 2) {
+      // Half documents have the pattern in appropriate position
+      std::string base_content = GenerateWordSequence(5 + (i % 5), i);
+
+      switch (search_type) {
+        case SearchType::PREFIX:
+          content = pattern + base_content;
+          break;
+        case SearchType::SUFFIX:
+          content = base_content + pattern;
+          break;
+        case SearchType::INFIX:
+          // Fix: embed pattern inside a word, not as separate word
+          size_t split_pos = base_content.length() / 2;
+          content = base_content.substr(0, split_pos) + pattern + base_content.substr(split_pos);
+          break;
+      }
+    } else {
+      // Half don't have the pattern - generate different content
+      content = GenerateWordSequence(8 + (i % 3), i + 1000);
+    }
+    MockedDocument doc{Map{{"title", content}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  std::string query;
+
+  // Generate query based on search type
+  switch (search_type) {
+    case SearchType::PREFIX:
+      query = pattern + "*";
+      break;
+    case SearchType::SUFFIX:
+      query = "*" + pattern;
+      break;
+    case SearchType::INFIX:
+      query = "*" + pattern + "*";
+      break;
+  }
+
+  if (!algo.Init(query, &params)) {
+    state.SkipWithError("Failed to initialize " + search_type_name + " search");
+    return;
+  }
+
+  while (state.KeepRunning()) {
+    auto result = algo.Search(&indices);
+    benchmark::DoNotOptimize(result);
+
+    // If result has error, skip the benchmark
+    if (!result.error.empty()) {
+      state.SkipWithError(search_type_name + " search returned error: " + result.error);
+      return;
+    }
+  }
+
+  // Set counters for analysis
+  state.counters["docs_total"] = num_docs;
+  state.counters["pattern_length"] = pattern_len;
+  state.counters["diverse_pattern"] = use_diverse_pattern ? 1 : 0;
+  state.SetLabel(search_type_name + (use_diverse_pattern ? "_diverse" : "_uniform"));
+}
+
+// Instantiate template functions
+static void BM_SearchByType_Uniform(benchmark::State& state) {
+  BM_SearchByTypeImpl(state, false);
+}
+
+static void BM_SearchByType_Diverse(benchmark::State& state) {
+  BM_SearchByTypeImpl(state, true);
+}
+
+// Benchmark to compare all search types - removed 100K docs per romange's suggestion
+BENCHMARK(BM_SearchByType_Uniform)
+    // Uniform patterns (original test)
+    ->Args({1000, 3, static_cast<int>(SearchType::PREFIX)})
+    ->Args({1000, 5, static_cast<int>(SearchType::PREFIX)})
+    ->Args({10000, 3, static_cast<int>(SearchType::PREFIX)})
+    ->Args({10000, 5, static_cast<int>(SearchType::PREFIX)})
+    ->Args({1000, 3, static_cast<int>(SearchType::SUFFIX)})
+    ->Args({1000, 5, static_cast<int>(SearchType::SUFFIX)})
+    ->Args({10000, 3, static_cast<int>(SearchType::SUFFIX)})
+    ->Args({10000, 5, static_cast<int>(SearchType::SUFFIX)})
+    ->Args({1000, 3, static_cast<int>(SearchType::INFIX)})
+    ->Args({1000, 5, static_cast<int>(SearchType::INFIX)})
+    ->Args({10000, 3, static_cast<int>(SearchType::INFIX)})
+    ->Args({10000, 5, static_cast<int>(SearchType::INFIX)})
+    ->ArgNames({"docs", "pattern_len", "search_type"})
+    ->Unit(benchmark::kMicrosecond);
+
+BENCHMARK(BM_SearchByType_Diverse)
+    // Diverse patterns (new test with ASCII variety)
+    ->Args({1000, 3, static_cast<int>(SearchType::PREFIX)})
+    ->Args({1000, 5, static_cast<int>(SearchType::PREFIX)})
+    ->Args({10000, 3, static_cast<int>(SearchType::PREFIX)})
+    ->Args({10000, 5, static_cast<int>(SearchType::PREFIX)})
+    ->Args({1000, 3, static_cast<int>(SearchType::SUFFIX)})
+    ->Args({1000, 5, static_cast<int>(SearchType::SUFFIX)})
+    ->Args({10000, 3, static_cast<int>(SearchType::SUFFIX)})
+    ->Args({10000, 5, static_cast<int>(SearchType::SUFFIX)})
+    ->Args({1000, 3, static_cast<int>(SearchType::INFIX)})
+    ->Args({1000, 5, static_cast<int>(SearchType::INFIX)})
+    ->Args({10000, 3, static_cast<int>(SearchType::INFIX)})
+    ->Args({10000, 5, static_cast<int>(SearchType::INFIX)})
+    ->ArgNames({"docs", "pattern_len", "search_type"})
+    ->Unit(benchmark::kMicrosecond);
+
 }  // namespace search
 
 }  // namespace dfly

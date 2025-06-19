@@ -98,6 +98,8 @@ class PrimeEvictionPolicy {
   void RecordSplit(PrimeTable::Segment_t* segment) {
     DVLOG(2) << "split: " << segment->SlowSize() << "/" << segment->capacity();
   }
+  void OnMove(PrimeTable::Cursor source, PrimeTable::Cursor dest) {
+  }
 
   bool CanGrow(const PrimeTable& tbl) const;
 
@@ -361,6 +363,8 @@ class DbSlice::PrimeBumpPolicy {
   bool CanBump(const CompactObj& obj) const {
     return !obj.IsSticky();
   }
+  void OnMove(PrimeTable::Cursor source, PrimeTable::Cursor dest) {
+  }
 };
 
 DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
@@ -436,7 +440,7 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
 DbSlice::AutoUpdater::AutoUpdater() {
 }
 
-DbSlice::AutoUpdater::AutoUpdater(AutoUpdater&& o) {
+DbSlice::AutoUpdater::AutoUpdater(AutoUpdater&& o) noexcept {
   *this = std::move(o);
 }
 
@@ -451,8 +455,14 @@ DbSlice::AutoUpdater::~AutoUpdater() {
   Run();
 }
 
+void DbSlice::AutoUpdater::ReduceHeapUsage() {
+  AccountObjectMemory(fields_.key, fields_.it->second.ObjType(), -fields_.orig_heap_size,
+                      fields_.db_slice->GetDBTable(fields_.db_ind));
+  fields_.orig_heap_size = 0;  // Reset to avoid double accounting.
+}
+
 void DbSlice::AutoUpdater::Run() {
-  if (fields_.action == DestructorAction::kDoNothing) {
+  if (fields_.db_slice == nullptr) {
     return;
   }
 
@@ -461,10 +471,13 @@ void DbSlice::AutoUpdater::Run() {
   // updater in scope. You'll probably want to call Run() (or Cancel() - but be careful).
   DCHECK(IsValid(fields_.db_slice->db_arr_[fields_.db_ind]->prime.Find(fields_.key)));
 
-  DCHECK(fields_.action == DestructorAction::kRun);
   CHECK_NE(fields_.db_slice, nullptr);
 
-  fields_.db_slice->PostUpdate(fields_.db_ind, fields_.it, fields_.key, fields_.orig_heap_size);
+  ssize_t delta = static_cast<int64_t>(fields_.it->second.MallocUsed()) -
+                  static_cast<int64_t>(fields_.orig_heap_size);
+  AccountObjectMemory(fields_.key, fields_.it->second.ObjType(), delta,
+                      fields_.db_slice->GetDBTable(fields_.db_ind));
+  fields_.db_slice->PostUpdate(fields_.db_ind, fields_.key);
   Cancel();  // Reset to not run again
 }
 
@@ -472,10 +485,14 @@ void DbSlice::AutoUpdater::Cancel() {
   this->fields_ = {};
 }
 
-DbSlice::AutoUpdater::AutoUpdater(const Fields& fields) : fields_(fields) {
-  DCHECK(fields_.action == DestructorAction::kRun);
-  DCHECK(IsValid(fields.it));
-  fields_.orig_heap_size = fields.it->second.MallocUsed();
+DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it,
+                                  DbSlice* db_slice)
+    : fields_{.db_slice = db_slice,
+              .db_ind = db_ind,
+              .it = it,
+              .key = key,
+              .orig_heap_size = it->second.MallocUsed()} {
+  DCHECK(IsValid(it));
 }
 
 DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key) {
@@ -501,12 +518,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
   if (res->it.IsOccupied()) {
     DCHECK_GE(db_arr_[cntx.db_index]->stats.obj_memory_usage, res->it->second.MallocUsed());
 
-    return {{it, exp_it,
-             AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
-                          .db_slice = this,
-                          .db_ind = cntx.db_index,
-                          .it = it,
-                          .key = key})}};
+    return {{it, exp_it, AutoUpdater{cntx.db_index, key, it, this}}};
   } else {
     return OpStatus::KEY_NOTFOUND;
   }
@@ -607,15 +619,17 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   return res;
 }
 
-OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_view key) {
-  return AddOrFindInternal(cntx, key);
+OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_view key,
+                                                   std::optional<unsigned> req_obj_type) {
+  return AddOrFindInternal(cntx, key, req_obj_type);
 }
 
-OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, string_view key) {
+OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, string_view key,
+                                                           std::optional<unsigned> req_obj_type) {
   DCHECK(IsDbValid(cntx.db_index));
 
   DbTable& db = *db_arr_[cntx.db_index];
-  auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kMutableStats);
+  auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kMutableStats);
 
   if (res.ok()) {
     Iterator it(res->it, StringOrView::FromView(key));
@@ -625,18 +639,14 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
     // PreUpdate() might have caused a deletion of `it`
     if (res->it.IsOccupied()) {
       return ItAndUpdater{
-          .it = it,
-          .exp_it = exp_it,
-          .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
-                                       .db_slice = this,
-                                       .db_ind = cntx.db_index,
-                                       .it = it,
-                                       .key = key}),
-          .is_new = false};
+          .it = it, .exp_it = exp_it, .post_updater{cntx.db_index, key, it, this}, .is_new = false};
     } else {
       res = OpStatus::KEY_NOTFOUND;
     }
+  } else if (res == OpStatus::WRONG_TYPE) {
+    return OpStatus::WRONG_TYPE;
   }
+
   auto status = res.status();
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
@@ -740,14 +750,11 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
     db.slots_stats[sid].key_count += 1;
   }
 
-  return ItAndUpdater{.it = Iterator(it, StringOrView::FromView(key)),
-                      .exp_it = ExpIterator{},
-                      .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
-                                                   .db_slice = this,
-                                                   .db_ind = cntx.db_index,
-                                                   .it = Iterator(it, StringOrView::FromView(key)),
-                                                   .key = key}),
-                      .is_new = true};
+  return ItAndUpdater{
+      .it = Iterator(it, StringOrView::FromView(key)),
+      .exp_it = ExpIterator{},
+      .post_updater{cntx.db_index, key, Iterator(it, StringOrView::FromView(key)), this},
+      .is_new = true};
 }
 
 void DbSlice::ActivateDb(DbIndex db_ind) {
@@ -1027,7 +1034,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx
                                                              bool force_update) {
   DCHECK(!obj.IsRef());
 
-  auto op_result = AddOrFind(cntx, key);
+  auto op_result = AddOrFind(cntx, key, std::nullopt);
   RETURN_ON_BAD_STATUS(op_result);
 
   auto& res = *op_result;
@@ -1132,10 +1139,7 @@ void DbSlice::PreUpdateBlocking(DbIndex db_ind, Iterator it) {
   it.GetInnerIt().SetVersion(NextVersion());
 }
 
-void DbSlice::PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size) {
-  int64_t delta = static_cast<int64_t>(it->second.MallocUsed()) - static_cast<int64_t>(orig_size);
-  AccountObjectMemory(key, it->second.ObjType(), delta, GetDBTable(db_ind));
-
+void DbSlice::PostUpdate(DbIndex db_ind, std::string_view key) {
   auto& db = *db_arr_[db_ind];
   auto& watched_keys = db.watched_keys;
   if (!watched_keys.empty()) {
@@ -1745,7 +1749,8 @@ void DbSlice::OnCbFinishBlocking() {
 
       // We must not change the bucket's internal order during serialization
       serialization_latch_.Wait();
-      auto bump_it = db.prime.BumpUp(it, PrimeBumpPolicy{});
+      PrimeBumpPolicy policy;
+      auto bump_it = db.prime.BumpUp(it, policy);
       if (bump_it != it) {  // the item was bumped
         ++events_.bumpups;
       }

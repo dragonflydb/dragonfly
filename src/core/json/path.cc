@@ -148,14 +148,24 @@ nonstd::expected<json::Path, string> ParsePath(string_view path) {
   return driver.TakePath();
 }
 
-unsigned MutatePath(const Path& path, MutateCallback callback, JsonType* json,
-                    bool reverse_traversal) {
+unsigned MutatePath(const Path& path, MutateCallback callback, JsonType* json) {
   if (path.empty()) {
     callback(nullopt, json);
     return 1;
   }
 
-  Dfs dfs = Dfs::Mutate(path, callback, json, reverse_traversal);
+  Dfs dfs = Dfs::Mutate(path, callback, json);
+  return dfs.matches();
+}
+
+unsigned DeletePath(const Path& path, JsonType* json) {
+  if (path.empty()) {
+    // For empty path, we cannot delete the root JSON itself within this function
+    // as it would require modifying the pointer itself. Return 0 for no deletion.
+    return 0;
+  }
+
+  Dfs dfs = Dfs::Delete(path, json);
   return dfs.matches();
 }
 
@@ -286,9 +296,9 @@ void FromJsonType(const JsonType& src, flexbuffers::Builder* fbb) {
 }
 
 unsigned MutatePath(const Path& path, MutateCallback callback, FlatJson json,
-                    flexbuffers::Builder* fbb, bool reverse_traversal) {
+                    flexbuffers::Builder* fbb) {
   JsonType mut_json = FromFlat(json);
-  unsigned res = MutatePath(path, std::move(callback), &mut_json, reverse_traversal);
+  unsigned res = MutatePath(path, std::move(callback), &mut_json);
 
   // Populate the output builder 'fbb' with the resulting JSON state
   // (mutated or original if res == 0) and finalize it.
@@ -299,6 +309,15 @@ unsigned MutatePath(const Path& path, MutateCallback callback, FlatJson json,
   fbb->Finish();                // Always finish the builder
 
   // Return the number of actual mutations that occurred.
+  return res;
+}
+
+unsigned DeletePath(const Path& path, FlatJson json, flexbuffers::Builder* fbb) {
+  JsonType mut_json = FromFlat(json);
+  unsigned res = DeletePath(path, &mut_json);
+
+  FromJsonType(mut_json, fbb);
+  fbb->Finish();
   return res;
 }
 

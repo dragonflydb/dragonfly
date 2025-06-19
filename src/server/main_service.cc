@@ -1603,8 +1603,11 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     case MemcacheParser::PREPEND:
       strcpy(cmd_name, "PREPEND");
       break;
-    case MemcacheParser::GAT:
+    case MemcacheParser::GATS:
       [[fallthrough]];
+    case MemcacheParser::GAT:
+      strcpy(cmd_name, "GAT");
+      break;
     case MemcacheParser::GET:
       [[fallthrough]];
     case MemcacheParser::GETS:
@@ -1629,12 +1632,6 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
 
   args.emplace_back(cmd_name, strlen(cmd_name));
 
-  if (!cmd.key.empty()) {
-    char* key = const_cast<char*>(cmd.key.data());
-    args.emplace_back(key, cmd.key.size());
-  }
-
-  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   // if expire_ts is greater than month it's a unix timestamp
   // https://github.com/memcached/memcached/blob/master/doc/protocol.txt#L139
   constexpr uint32_t kExpireLimit = 60 * 60 * 24 * 30;
@@ -1642,6 +1639,19 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
                                  ? cmd.expire_ts + time(nullptr)
                                  : cmd.expire_ts;
 
+  // For GAT/GATS commands, the expiry precedes the keys which will be looked up:
+  // GAT|GATS <expiry> key [key...]
+  if (cmd.type == MemcacheParser::GAT || cmd.type == MemcacheParser::GATS) {
+    char* next = absl::numbers_internal::FastIntToBuffer(expire_ts, ttl);
+    args.emplace_back(ttl, next - ttl);
+  }
+
+  if (!cmd.key.empty()) {
+    char* key = const_cast<char*>(cmd.key.data());
+    args.emplace_back(key, cmd.key.size());
+  }
+
+  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   if (MemcacheParser::IsStoreCmd(cmd.type)) {
     char* v = const_cast<char*>(value.data());
     args.emplace_back(v, value.size());
@@ -1661,12 +1671,8 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       char* key = const_cast<char*>(s.data());
       args.emplace_back(key, s.size());
     }
-    if (cmd.type == MemcacheParser::GETS) {
+    if (cmd.type == MemcacheParser::GETS || cmd.type == MemcacheParser::GATS) {
       dfly_cntx->conn_state.memcache_flag |= ConnectionState::FETCH_CAS_VER;
-    }
-
-    if (cmd.type == MemcacheParser::GAT) {
-      dfly_cntx->conn_state.memcache_flag |= ConnectionState::SET_EXPIRY | expire_ts << 2;
     }
   } else {  // write commands.
     if (store_opt[0]) {
@@ -2124,6 +2130,8 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   CHECK(result == Interpreter::RUN_OK);
 
+  // TODO(vlad): Investigate if using ReplyScope here is possible with a different serialization
+  // strategy due to currently SerializeResult destructuring a value while serializing
   SinkReplyBuilder::ReplyAggregator agg(builder);
   EvalSerializer ser{static_cast<RedisReplyBuilder*>(builder)};
   if (!interpreter->IsResultSafe()) {

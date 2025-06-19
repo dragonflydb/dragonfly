@@ -10,7 +10,6 @@
 extern "C" {
 #include "redis/intset.h"
 #include "redis/listpack.h"
-#include "redis/quicklist.h"
 #include "redis/redis_aux.h"
 #include "redis/stream.h"
 #include "redis/util.h"
@@ -43,18 +42,6 @@ namespace {
 constexpr XXH64_hash_t kHashSeed = 24061983;
 constexpr size_t kAlignSize = 8u;
 
-// Approximation since does not account for listpacks.
-size_t QlMAllocSize(quicklist* ql, bool slow) {
-  size_t node_size = ql->len * sizeof(quicklistNode) + znallocx(sizeof(quicklist));
-  if (slow) {
-    for (quicklistNode* node = ql->head; node; node = node->next) {
-      node_size += zmalloc_usable_size(node->entry);
-    }
-    return node_size;
-  }
-  return node_size + ql->count * 16;  // we account for each member 16 bytes.
-}
-
 size_t UpdateSize(size_t size, int64_t update) {
   int64_t result = static_cast<int64_t>(size) + update;
   if (result < 0) {
@@ -80,16 +67,8 @@ inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
 }
 
 void FreeList(unsigned encoding, void* ptr, MemoryResource* mr) {
-  switch (encoding) {
-    case OBJ_ENCODING_QUICKLIST:
-      quicklistRelease((quicklist*)ptr);
-      break;
-    case kEncodingQL2:
-      CompactObj::DeleteMR<QList>(ptr);
-      break;
-    default:
-      LOG(FATAL) << "Unknown list encoding type";
-  }
+  CHECK_EQ(encoding, kEncodingQL2);
+  CompactObj::DeleteMR<QList>(ptr);
 }
 
 size_t MallocUsedSet(unsigned encoding, void* ptr) {
@@ -409,8 +388,6 @@ size_t RobjWrapper::MallocUsed(bool slow) const {
       CHECK_EQ(OBJ_ENCODING_RAW, encoding_);
       return InnerObjMallocUsed();
     case OBJ_LIST:
-      if (encoding_ == OBJ_ENCODING_QUICKLIST)
-        return QlMAllocSize((quicklist*)inner_obj_, slow);
       return ((QList*)inner_obj_)->MallocUsed(slow);
     case OBJ_SET:
       return MallocUsedSet(encoding_, inner_obj_);
@@ -434,8 +411,6 @@ size_t RobjWrapper::Size() const {
       DCHECK_EQ(OBJ_ENCODING_RAW, encoding_);
       return sz_;
     case OBJ_LIST:
-      if (encoding_ == OBJ_ENCODING_QUICKLIST)
-        return quicklistCount((quicklist*)inner_obj_);
       return ((QList*)inner_obj_)->Size();
     case OBJ_ZSET: {
       switch (encoding_) {

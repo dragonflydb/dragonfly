@@ -330,6 +330,29 @@ TEST_F(MultiTest, MultiWithoutTx) {
   EXPECT_EQ(resp.GetVec()[4], "OK3");
 }
 
+TEST_F(MultiTest, MultiCommandsWithBonusKeys) {
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_multi_exec_squash, true);
+
+  EXPECT_EQ(Shard("za", shard_set->size()), Shard("zb", shard_set->size()));
+  EXPECT_EQ(Shard("zb", shard_set->size()), Shard("ze", shard_set->size()));
+
+  // Check bonus keys are correctly processed with squashing
+  Run({"multi"});
+  Run({"zadd", "za", "1", "a", "2", "b"});
+  Run({"zadd", "zb", "2", "b", "3", "c"});
+  Run({"zinterstore", "ze", "2", "za", "zb"});
+  auto resp = Run({"exec"});
+  EXPECT_THAT(resp.GetVec()[2], IntArg(1));
+  EXPECT_THAT(Run({"zcard", "ze"}), IntArg(1));
+
+  // Check squashing correctly pre-validates commands
+  Run({"multi"});
+  Run({"zinterstore", "ze", "2", "za", "zb", "z one extra"});
+  resp = Run({"exec"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
 TEST_F(MultiTest, MultiHop) {
   Run({"set", kKey1, "1"});
 

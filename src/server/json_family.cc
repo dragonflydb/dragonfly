@@ -18,6 +18,7 @@
 #include "core/mi_memory_resource.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
+#include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/common.h"
@@ -54,15 +55,22 @@ using CI = CommandId;
 
 namespace {
 
+struct JsonAutoUpdaterOptions {
+  bool disable_indexing = false;  // If true, the key will not be removed or added to the indexes
+  bool update_on_delete = false;  // If true, SetJsonSize will be called on destruction
+};
+
 /* Helper class which must be initialized before any mutate operations on json.
   It will track the memory usage of the json object and update the size in the CompactObj.
   It also contains indexes updates, post update operations on the iterator. */
 class JsonAutoUpdater {
  public:
   JsonAutoUpdater(const OpArgs& op_args, string_view key, DbSlice::ItAndUpdater it,
-                  bool update_on_delete = false)
-      : op_args_(op_args), key_(key), it_(std::move(it)), update_on_delete_(update_on_delete) {
-    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it.it->second);
+                  JsonAutoUpdaterOptions options = {})
+      : op_args_(op_args), key_(key), it_(std::move(it)), options_(options) {
+    if (!options_.disable_indexing) {
+      op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it.it->second);
+    }
 
     /* We need to initialize start memory usage after RemoveDoc because internally RemoveDoc has
     static cache that can allocate/deallocate memory. Because of this, we will
@@ -90,8 +98,12 @@ class JsonAutoUpdater {
     DCHECK(GetPrimeValue().MallocUsed() != 0);
   }
 
+  void AddDocToIndexes() {
+    op_args_.shard->search_indices()->AddDoc(key_, op_args_.db_cntx, GetPrimeValue());
+  }
+
   ~JsonAutoUpdater() {
-    if (update_on_delete_ && !set_size_was_called_) {
+    if (options_.update_on_delete && !set_size_was_called_) {
       SetJsonSize();
     } else if (!set_size_was_called_) {
       LOG(WARNING) << "JsonAutoUpdater destructor called without SetJsonSize() being called. This "
@@ -103,7 +115,9 @@ class JsonAutoUpdater {
     /* We need to call AddDoc after SetJsonSize because internally AddDoc has static cache that can
     allocate/deallocate memory. Because of this, we will overestimate/underestimate memory usage for
     json object. */
-    op_args_.shard->search_indices()->AddDoc(key_, op_args_.db_cntx, GetPrimeValue());
+    if (!options_.disable_indexing) {
+      AddDocToIndexes();
+    }
   }
 
   PrimeValue& GetPrimeValue() {
@@ -133,11 +147,11 @@ class JsonAutoUpdater {
   const OpArgs& op_args_;
   string_view key_;
   DbSlice::ItAndUpdater it_;
+  JsonAutoUpdaterOptions options_;
 
   // Used to track the memory usage of the json object
   size_t start_size_{0};
   bool set_size_was_called_{false};
-  bool update_on_delete_;
 };
 
 template <typename T> using ParseResult = io::Result<T, std::string>;
@@ -257,6 +271,7 @@ template <typename T> void Send(const std::optional<T>& opt, RedisReplyBuilder* 
 }
 
 template <typename I> void Send(I begin, I end, RedisReplyBuilder* rb) {
+  RedisReplyBuilder::ReplyScope scope{rb};
   if (begin == end) {
     rb->SendEmptyArray();
   } else {
@@ -291,6 +306,7 @@ template <typename T> void Send(const JsonCallbackResult<T>& result, RedisReplyB
 }
 
 template <typename T> void Send(const OpResult<T>& result, RedisReplyBuilder* rb) {
+  RedisReplyBuilder::ReplyScope scope{rb};
   if (result) {
     Send(result.value(), rb);
   } else {
@@ -429,20 +445,29 @@ std::optional<JsonType> ShardJsonFromString(std::string_view input) {
 }
 
 OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_str) {
-  auto it_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key);
+  // We check the type of the object later, because we allow here OBJ_JSON and OBJ_STRING
+  auto it_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key, std::nullopt);
   RETURN_ON_BAD_STATUS(it_res);
 
   auto type = it_res->it->second.ObjType();
-  if (type != OBJ_JSON && type != OBJ_STRING) {
+  if (type == OBJ_JSON) {
+    // If it json we need to remove the old json object from the indexes
+    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it_res->it->second);
+  } else if (type != OBJ_STRING) {
     // The object is not a JSON object and not a string, so we cannot set a full JSON value
     return OpStatus::WRONG_TYPE;
   }
 
-  JsonAutoUpdater updater(op_args, key, *std::move(it_res));
+  JsonAutoUpdater updater(op_args, key, *std::move(it_res),
+                          {.disable_indexing = true, .update_on_delete = false});
 
   std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
+    if (type == OBJ_JSON) {
+      // We need to add the document to the indexes, because we removed it before
+      op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, it_res->it->second);
+    }
     return OpStatus::INVALID_JSON;
   }
 
@@ -460,6 +485,9 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
   // std::optional still holds the value and it will be deallocated
   parsed_json.reset();
   updater.SetJsonSize();
+
+  // We need to manually run add document here
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, it_res->it->second);
 
   return OpStatus::OK;
 }
@@ -1056,11 +1084,10 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
   }
 
   if (json_path.HoldsJsonPath()) {
-    JsonAutoUpdater updater(op_args, key, *std::move(it_res), true);
+    JsonAutoUpdater updater(op_args, key, *std::move(it_res),
+                            {.disable_indexing = false, .update_on_delete = true});
     const json::Path& path = json_path.AsJsonPath();
-    long deletions = json::MutatePath(
-        path, [](optional<string_view>, JsonType* val) { return true; }, updater.GetJson(),
-        true /* reverse_traversal */);
+    long deletions = json::DeletePath(path, updater.GetJson());
     return deletions;
   }
 

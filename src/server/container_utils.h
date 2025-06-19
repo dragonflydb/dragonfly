@@ -9,7 +9,6 @@
 
 extern "C" {
 #include "redis/listpack.h"
-#include "redis/quicklist.h"
 }
 
 #include <functional>
@@ -25,9 +24,6 @@ inline bool IsContainer(const PrimeValue& pv) {
   unsigned type = pv.ObjType();
   return (type == OBJ_LIST || type == OBJ_SET || type == OBJ_ZSET);
 }
-
-// Create empty quicklistEntry
-quicklistEntry QLEntry();
 
 // Stores either:
 // - A single long long value (longval) when value = nullptr

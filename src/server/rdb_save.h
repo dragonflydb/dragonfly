@@ -7,7 +7,6 @@
 
 extern "C" {
 #include "redis/lzfP.h"
-#include "redis/quicklist.h"
 }
 
 #include <optional>

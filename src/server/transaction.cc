@@ -307,12 +307,14 @@ void Transaction::PrepareMultiFps(CmdArgList keys) {
 }
 
 void Transaction::StoreKeysInArgs(const KeyIndex& key_index) {
-  DCHECK(!key_index.bonus);
   DCHECK(kv_fp_.empty());
   DCHECK(args_slices_.empty());
 
   // even for a single key we may have multiple arguments per key (MSET).
+  if (key_index.bonus)
+    args_slices_.emplace_back(*key_index.bonus, *key_index.bonus + 1);
   args_slices_.emplace_back(key_index.start, key_index.end);
+
   for (string_view key : key_index.Range(full_args_))
     kv_fp_.push_back(LockTag(key).Fingerprint());
 }
@@ -766,11 +768,7 @@ void Transaction::ScheduleInternal() {
 
     ScheduleContext schedule_ctx{this, optimistic_exec};
 
-    // TODO: this optimization is disabled due to a issue #4648 revealing this code can
-    // lead to transaction not being scheduled.
-    // To reproduce the bug remove the false in the condition and run
-    // ./list_family_test --gtest_filter=*AwakeMulti on alpine machine
-    if (false && unique_shard_cnt_ == 1) {
+    if (unique_shard_cnt_ == 1) {
       // Single shard optimization. Note: we could apply the same optimization
       // to multi-shard transactions as well by creating a vector of ScheduleContext.
       schedule_queues[unique_shard_id_].queue.Push(&schedule_ctx);
@@ -1221,7 +1219,7 @@ void Transaction::ScheduleBatchInShard() {
     // We do this to avoid the situation where we have a data race, where
     // a transaction is added to the queue, we've checked that sq.armed is true and skipped
     // adding the callback that fetches the transaction.
-    sq.armed.store(false, memory_order_release);
+    sq.armed.exchange(false, memory_order_acq_rel);
   }
 }
 

@@ -11,7 +11,7 @@
 
 > 在您继续之前，请考虑给我们一个 GitHub 星标 ⭐️。谢谢！
 
-其他语言:  [English](README.md) [日本語](README.ja-JP.md) [한국어](README.ko-KR.md)
+其他语言:  [English](README.md) [日本語](README.ja-JP.md) [한국어](README.ko-KR.md) [Português](README.pt-BR.md)
 
 [主页](https://dragonflydb.io/) • [快速入门](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start) • [社区 Discord](https://discord.gg/HsPjXGVH85) • [Dragonfly 论坛](https://dragonfly.discourse.group/) • [加入 Dragonfly 社区](https://www.dragonflydb.io/community)
 
@@ -204,4 +204,4 @@ Dragonfly始于一项实验，旨在探索如果在2022年重新设计内存数�
 目前，我们已经实现了约185个Redis命令（大致相当于Redis 5.0 API）和13个Memcached命令。
 
 最后，<br>
-<em>我们的使命是构建一个设计良好、超高速、成本效益高的云工作负载内存数据存储系统，利用最新的硬件技术。我们旨在解决当前解决方案的痛点，同时保留其产品API和优势。</em>
+<em>我们的使命是构建一个设计良好、超高速、成本效益高的云工作负载内存数据存储系统，利用最新的硬件技术。我们旨在解决当前解决方案的痛点，同时保留其产品API和优势。 </em>

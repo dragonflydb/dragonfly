@@ -85,6 +85,9 @@ class DashTable : public detail::DashTableBase {
       return true;
     }
 
+    void OnMove(Cursor source, Cursor dest) {
+    }
+
     void RecordSplit(SegmentType* segment) {
     }
     /*
@@ -286,9 +289,13 @@ class DashTable : public detail::DashTableBase {
   // Returns true if an element was deleted i.e the rightmost slot was busy.
   bool ShiftRight(bucket_iterator it);
 
-  template <typename BumpPolicy> iterator BumpUp(iterator it, const BumpPolicy& bp) {
-    SegmentIterator seg_it =
-        segment_[it.seg_id_]->BumpUp(it.bucket_id_, it.slot_id_, DoHash(it->first), bp);
+  template <typename BumpPolicy> iterator BumpUp(iterator it, BumpPolicy& bp) {
+    SegmentIterator seg_it = segment_[it.seg_id_]->BumpUp(
+        it.bucket_id_, it.slot_id_, DoHash(it->first), bp,
+        [&](uint32_t segment_id, detail::PhysicalBid from, detail::PhysicalBid to) {
+          // OnMove is used to notify policy about the items moves across buckets.
+          bp.OnMove(Cursor{global_depth_, segment_id, from}, Cursor{global_depth_, segment_id, to});
+        });
 
     return iterator{this, it.seg_id_, seg_it.index, seg_it.slot};
   }
@@ -314,7 +321,7 @@ class DashTable : public detail::DashTableBase {
                                            InsertMode mode);
 
   void IncreaseDepth(unsigned new_depth);
-  void Split(uint32_t seg_id);
+  template <typename EvictionPolicy> void Split(uint32_t seg_id, EvictionPolicy& ev);
 
   // Segment directory contains multiple segment pointers, some of them pointing to
   // the same object. IterateDistinct goes over all distinct segments in the table.
@@ -786,12 +793,19 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
     typename SegmentType::Iterator it;
     bool res = true;
     unsigned num_buckets = target->num_buckets();
+
+    auto move_cb = [&](uint32_t segment_id, detail::PhysicalBid from, detail::PhysicalBid to) {
+      // OnMove is used to notify policy about the move of items across buckets.
+      ev.OnMove(Cursor{global_depth_, segment_id, from}, Cursor{global_depth_, segment_id, to});
+    };
+
     if (mode == InsertMode::kForceInsert) {
-      it = target->InsertUniq(std::forward<U>(key), std::forward<V>(value), key_hash, true);
+      it =
+          target->InsertUniq(std::forward<U>(key), std::forward<V>(value), key_hash, true, move_cb);
       res = it.found();
     } else {
-      std::tie(it, res) =
-          target->Insert(std::forward<U>(key), std::forward<V>(value), key_hash, EqPred(key));
+      std::tie(it, res) = target->Insert(std::forward<U>(key), std::forward<V>(value), key_hash,
+                                         EqPred(key), move_cb);
     }
 
     if (res) {  // success
@@ -846,7 +860,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       }
 
       auto hash_fn = [this](const auto& k) { return policy_.HashFn(k); };
-      unsigned moved = target->UnloadStash(hash_fn);
+      unsigned moved = target->UnloadStash(hash_fn, move_cb);
       if (moved > 0) {
         stash_unloaded_ += moved;
         continue;
@@ -876,7 +890,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
     }
 
     ev.RecordSplit(target);
-    Split(target_seg_id);
+    Split(target_seg_id, ev);
   }
 
   return std::make_pair(iterator{}, false);
@@ -893,12 +907,14 @@ void DashTable<_Key, _Value, Policy>::IncreaseDepth(unsigned new_depth) {
   for (int i = prev_sz - 1; i >= 0; --i) {
     size_t offs = i * repl_cnt;
     std::fill(segment_.begin() + offs, segment_.begin() + offs + repl_cnt, segment_[i]);
+    segment_[i]->set_segment_id(offs);  // update segment id.
   }
   global_depth_ = new_depth;
 }
 
 template <typename _Key, typename _Value, typename Policy>
-void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id) {
+template <typename EvictionPolicy>
+void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id, EvictionPolicy& ev) {
   SegmentType* source = segment_[seg_id];
 
   uint32_t chunk_size = 1u << (global_depth_ - source->local_depth());
@@ -911,7 +927,15 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id) {
 
   // remove current segment bucket count.
   bucket_count_ -= (source->num_buckets() + target->num_buckets());
-  source->Split(std::move(hash_fn), target);  // increases the depth.
+
+  source->Split(
+      std::move(hash_fn), target,
+      [&](uint32_t segment_from, detail::PhysicalBid from, uint32_t segment_to,
+          detail::PhysicalBid to) {
+        // OnMove is used to notify eviction policy about the moves across buckets/segments
+        // during the split.
+        ev.OnMove(Cursor{global_depth_, segment_from, from}, Cursor{global_depth_, segment_to, to});
+      });
 
   // add back the updated bucket count.
   bucket_count_ += (target->num_buckets() + source->num_buckets());

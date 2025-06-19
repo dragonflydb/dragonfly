@@ -1261,6 +1261,24 @@ TEST_F(JsonFamilyTest, Del) {
 
   resp = Run({"JSON.GET", "json"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  if (absl::GetFlag(FLAGS_jsonpathv2)) {
+    // Test recursive delete with $..a path
+    resp = Run({"JSON.SET", "doc2", "$",
+                R"({"a": {"a": 2, "b": 3}, "b": ["a", "b"], "nested": {"b": [true, "a", "b"]}})"});
+    ASSERT_THAT(resp, "OK");
+
+    resp = Run({"JSON.GET", "doc2"});
+    EXPECT_EQ(resp, R"({"a":{"a":2,"b":3},"b":["a","b"],"nested":{"b":[true,"a","b"]}})");
+
+    // JSON.DEL with $..a should find and delete the key "a" at root level
+    // but not string values "a" inside arrays
+    resp = Run({"JSON.DEL", "doc2", "$..a"});
+    EXPECT_THAT(resp, IntArg(1));
+
+    resp = Run({"JSON.GET", "doc2"});
+    EXPECT_EQ(resp, R"({"b":["a","b"],"nested":{"b":[true,"a","b"]}})");
+  }
 }
 
 TEST_F(JsonFamilyTest, DelLegacy) {
@@ -3108,6 +3126,33 @@ TEST_F(JsonFamilyTest, JsonCommandsWorkingWithOtherTypesBug) {
 
   resp = Run({"HGET", "k2", "field"});
   EXPECT_THAT(resp, "value");
+}
+
+TEST_F(JsonFamilyTest, ResetStringKeyWithSetGet) {
+  auto resp = Run({"JSON.SET", "key", "$", R"({"a":"b"})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "key"});
+  EXPECT_THAT(resp, R"({"a":"b"})");
+
+  // Resetting the key with a string value
+  resp = Run({"SET", "key", R"({"a":"b"})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"GET", "key"});
+  EXPECT_THAT(resp, R"({"a":"b"})");
+
+  // JSON.GET should still work after resetting the key with a string value
+  resp = Run({"JSON.GET", "key"});
+  EXPECT_THAT(resp, R"({"a":"b"})");
+
+  // Resetting the key again with JSON.SET
+  // This should not cause any issues
+  resp = Run({"JSON.SET", "key", "$", R"({"a":"b"})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "key"});
+  EXPECT_THAT(resp, R"({"a":"b"})");
 }
 
 }  // namespace dfly

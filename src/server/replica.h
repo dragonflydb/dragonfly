@@ -207,7 +207,9 @@ class DflyShardReplica : public ProtocolClient {
 
   void StableSyncDflyAcksFb(ExecutionState* cntx);
 
-  void ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx);
+  // Return true if the transaction executed successfully. On error,
+  // or on context cancellation return false.
+  bool ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx);
 
   uint32_t FlowId() const;
 

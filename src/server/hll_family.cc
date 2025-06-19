@@ -81,14 +81,12 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
 
   string hll;
 
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_STRING);
   RETURN_ON_BAD_STATUS(op_res);
   auto& res = *op_res;
   if (res.is_new) {
     hll.resize(getSparseHllInitSize());
     initSparseHll(StringToHllPtr(hll));
-  } else if (res.it->second.ObjType() != OBJ_STRING) {
-    return OpStatus::WRONG_TYPE;
   } else {
     res.it->second.GetString(&hll);
   }
@@ -299,7 +297,7 @@ OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder
     string_view key = ArgS(args, 0);
     const OpArgs& op_args = t->GetOpArgs(shard);
     auto& db_slice = op_args.GetDbSlice();
-    auto op_res = db_slice.AddOrFind(t->GetDbContext(), key);
+    auto op_res = db_slice.AddOrFind(t->GetDbContext(), key, OBJ_STRING);
     RETURN_ON_BAD_STATUS(op_res);
     auto& res = *op_res;
     res.it->second.SetString(hll);
