@@ -7,7 +7,6 @@
 #include "facade/reply_capture.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
-#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
@@ -33,8 +32,6 @@ class MultiCommandSquasher {
                         ConnectionContext* cntx, Service* service, const Opts& opts) {
     return MultiCommandSquasher{cmds, cntx, service, opts}.Run(rb);
   }
-
-  static size_t GetRepliesMemSize();
 
  private:
   // Per-shard execution info.

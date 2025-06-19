@@ -6,7 +6,6 @@
 
 #include <absl/container/inlined_vector.h>
 
-#include "base/flags.h"
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "facade/dragonfly_connection.h"
@@ -15,7 +14,6 @@
 #include "server/engine_shard_set.h"
 #include "server/transaction.h"
 #include "server/tx_base.h"
-#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
