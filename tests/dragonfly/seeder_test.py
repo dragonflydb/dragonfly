@@ -50,7 +50,7 @@ async def test_seeder_key_target(async_client: aioredis.Redis):
     s = Seeder(units=len(Seeder.DEFAULT_TYPES) * 2, key_target=5000)
 
     # Ensure tests are not reasonably slow
-    async with async_timeout.timeout(1 + 4):
+    async with async_timeout.timeout(10):
         # Fill with 5k keys, 1% derivation = 50
         await s.run(async_client, target_deviation=0.01)
         assert abs(await async_client.dbsize() - 5000) <= 50
@@ -135,3 +135,45 @@ async def test_seeder_fake_redis(
     capture = await seeder.capture_fake_redis()
 
     assert await seeder.compare(capture, instance.port)
+
+
+@pytest.mark.asyncio
+@dfly_args({"proactor_threads": 2})
+async def test_seeder_huge_value(
+    df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
+):
+    instance = df_factory.create()
+    df_factory.start_all([instance])
+
+    expected_huge_value_count = 10
+    seeder = df_seeder_factory.create(
+        keys=100,
+        port=instance.port,
+        huge_value_count=expected_huge_value_count,
+        huge_value_size=240_000,
+    )
+
+    def custom_command_generation_probability():
+        return [
+            0.0,
+            0.0,
+            100.0,
+        ]  # We will only execute GROW commands
+
+    # Provide custom function for command generation probability
+    seeder.gen.size_change_probs = custom_command_generation_probability
+
+    await seeder.run(target_ops=100)
+
+    client = instance.client()
+
+    keys = await client.execute_command("KEYS *")
+    huge_val_keys_count = 0
+
+    for key in keys:
+        key_size = await client.execute_command(f"MEMORY USAGE {key}")
+        # Count all keys that have memory - i.e. contain huge strings
+        if key_size != None and key_size > 100_000:
+            huge_val_keys_count += 1
+
+    assert huge_val_keys_count == expected_huge_value_count

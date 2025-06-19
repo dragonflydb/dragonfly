@@ -810,6 +810,18 @@ TEST_F(StringFamilyTest, SetMGetWithNilResp3) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("val", ArgType(RespExpr::NIL)));
 }
 
+TEST_F(StringFamilyTest, OverrideOther) {
+  Run({"lpush", "a", "fooo"});
+  Run({"set", "a", string(100, 'b')});
+  Metrics metrics = GetMetrics();
+
+  size_t list_usage = metrics.db_stats[0].memory_usage_by_type[OBJ_LIST];
+  size_t string_usage = metrics.db_stats[0].memory_usage_by_type[OBJ_STRING];
+  EXPECT_EQ(list_usage, 0);
+  EXPECT_GT(string_usage, 0);
+  EXPECT_LT(string_usage, 100);
+}
+
 TEST_F(StringFamilyTest, SetWithGetParam) {
   EXPECT_THAT(Run({"set", "key1", "val1", "get"}), ArgType(RespExpr::NIL));
   EXPECT_EQ(Run({"set", "key1", "val2", "get"}), "val1");

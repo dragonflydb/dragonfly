@@ -232,7 +232,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
 
   src_res->post_updater.Run();
 
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, dest);
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, dest, OBJ_LIST);
   RETURN_ON_BAD_STATUS(op_res);
   auto& dest_res = *op_res;
 
@@ -255,15 +255,11 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
     if (blocking_controller) {
       blocking_controller->AwakeWatched(op_args.db_cntx.db_index, dest);
     }
+  } else if (dest_res.it->second.Encoding() == kEncodingQL2) {
+    destql_v2 = GetQLV2(dest_res.it->second);
   } else {
-    if (dest_res.it->second.ObjType() != OBJ_LIST)
-      return OpStatus::WRONG_TYPE;
-    if (dest_res.it->second.Encoding() == kEncodingQL2) {
-      destql_v2 = GetQLV2(dest_res.it->second);
-    } else {
-      DCHECK_EQ(dest_res.it->second.Encoding(), OBJ_ENCODING_QUICKLIST);
-      dest_ql = GetQL(dest_res.it->second);
-    }
+    DCHECK_EQ(dest_res.it->second.Encoding(), OBJ_ENCODING_QUICKLIST);
+    dest_ql = GetQL(dest_res.it->second);
   }
 
   if (src_ql) {
@@ -335,7 +331,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
     RETURN_ON_BAD_STATUS(tmp_res);
     res = std::move(*tmp_res);
   } else {
-    auto op_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key);
+    auto op_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key, OBJ_LIST);
     RETURN_ON_BAD_STATUS(op_res);
     res = std::move(*op_res);
   }
@@ -356,14 +352,10 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
                           GetFlag(FLAGS_list_compress_depth));
       res.it->second.InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, ql);
     }
+  } else if (res.it->second.Encoding() == kEncodingQL2) {
+    ql_v2 = GetQLV2(res.it->second);
   } else {
-    if (res.it->second.ObjType() != OBJ_LIST)
-      return OpStatus::WRONG_TYPE;
-    if (res.it->second.Encoding() == kEncodingQL2) {
-      ql_v2 = GetQLV2(res.it->second);
-    } else {
-      ql = GetQL(res.it->second);
-    }
+    ql = GetQL(res.it->second);
   }
 
   if (ql) {
@@ -1112,10 +1104,7 @@ void PopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder*
   }
 
   if (return_arr) {
-    rb->StartArray(result->size());
-    for (const auto& k : *result) {
-      rb->SendBulkString(k);
-    }
+    rb->SendBulkStrArr(*result);
   } else {
     DCHECK_EQ(1u, result->size());
     rb->SendBulkString(result->front());
@@ -1170,47 +1159,6 @@ void BPopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder
   return rb->SendNullArray();
 }
 
-struct LMPopParams {
-  uint32_t num_keys;
-  ListDir dir;
-  int pop_count;
-};
-
-facade::ErrorReply ParseLMPop(CmdArgList args, LMPopParams* params) {
-  CmdArgParser parser{args};
-
-  if (!SimpleAtoi(parser.Next(), &params->num_keys)) {
-    return facade::ErrorReply(kUintErr);
-  }
-
-  if (params->num_keys <= 0 || !parser.HasAtLeast(params->num_keys + 1)) {
-    return facade::ErrorReply(kSyntaxErr);
-  }
-
-  parser.Skip(params->num_keys);
-
-  if (parser.Check("LEFT")) {
-    params->dir = ListDir::LEFT;
-  } else if (parser.Check("RIGHT")) {
-    params->dir = ListDir::RIGHT;
-  } else {
-    return facade::ErrorReply(kSyntaxErr);
-  }
-
-  params->pop_count = 1;
-  if (parser.HasNext()) {
-    if (!parser.Check("COUNT", &params->pop_count)) {
-      return facade::ErrorReply(kSyntaxErr);
-    }
-  }
-
-  if (!parser.Finalize()) {
-    return facade::ErrorReply(parser.Error()->MakeReply());
-  }
-
-  return facade::ErrorReply(OpStatus::OK);
-}
-
 // Returns the first non-empty key found in the shard arguments along with its type validity.
 // Returns a pair of (key, is_valid_type) where is_valid_type is true if the key exists
 // and has the correct type (LIST). If a wrong type is found, returns that key with false.
@@ -1244,13 +1192,16 @@ optional<pair<string_view, bool>> GetFirstNonEmptyKeyFound(EngineShard* shard, T
 void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
-  LMPopParams params;
-  facade::ErrorReply parse_result = ParseLMPop(args, &params);
+  CmdArgParser parser{args};
+  parser.Skip(parser.Next<size_t>());  // skip numkeys and keys
 
-  if (parse_result.status != OpStatus::OK) {
-    response_builder->SendError(parse_result);
-    return;
-  }
+  ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
+  size_t pop_count = 1;
+  if (parser.Check("COUNT"))
+    pop_count = parser.Next<size_t>();
+
+  if (!parser.Finalize())
+    return response_builder->SendError(parser.Error()->MakeReply());
 
   // Create a vector to store first found key for each shard
   vector<optional<pair<string_view, bool>>> found_keys_per_shard(shard_set->size());
@@ -1301,10 +1252,10 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   optional<ShardId> key_shard = Shard(*key_to_pop, shard_set->size());
   OpResult<StringVec> result;
 
-  auto cb_pop = [&params, key_shard, &result, key = *key_to_pop](Transaction* t,
-                                                                 EngineShard* shard) {
+  auto cb_pop = [dir, pop_count, key_shard, &result, key = *key_to_pop](Transaction* t,
+                                                                        EngineShard* shard) {
     if (*key_shard == shard->shard_id()) {
-      result = OpPop(t->GetOpArgs(shard), key, params.dir, params.pop_count, true, false);
+      result = OpPop(t->GetOpArgs(shard), key, dir, pop_count, true, false);
     }
     return OpStatus::OK;
   };
@@ -1314,10 +1265,7 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   if (result) {
     response_builder->StartArray(2);
     response_builder->SendBulkString(*key_to_pop);
-    response_builder->StartArray(result->size());
-    for (const auto& val : *result) {
-      response_builder->SendBulkString(val);
-    }
+    response_builder->SendBulkStrArr(*result);
   } else {
     response_builder->SendNull();
   }
@@ -1401,7 +1349,7 @@ void ListFamily::LPos(CmdArgList args, const CommandContext& cmd_cntx) {
   };
 
   Transaction* trans = cmd_cntx.tx;
-  OpResult<vector<uint32_t>> result = trans->ScheduleSingleHopT(std::move(cb));
+  auto result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::WRONG_TYPE) {
     return rb->SendError(result.status());
@@ -1416,12 +1364,7 @@ void ListFamily::LPos(CmdArgList args, const CommandContext& cmd_cntx) {
       rb->SendLong((*result)[0]);
     }
   } else {
-    SinkReplyBuilder::ReplyAggregator agg(rb);
-    rb->StartArray(result->size());
-    const auto& array = result.value();
-    for (const auto& v : array) {
-      rb->SendLong(v);
-    }
+    rb->SendLongArr(absl::MakeConstSpan(result.value()));
   }
 }
 

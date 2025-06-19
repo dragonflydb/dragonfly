@@ -21,7 +21,6 @@ extern "C" {
 using namespace testing;
 using namespace std;
 using namespace util;
-using namespace boost;
 using absl::StrCat;
 
 namespace dfly {
@@ -145,6 +144,218 @@ TEST_F(GenericFamilyTest, ExpireOptions) {
   EXPECT_THAT(resp.GetInt(), 101);
 }
 
+TEST_F(GenericFamilyTest, ExpireAtOptions) {
+  auto test_time_ms = TEST_current_time_ms;
+  auto time_s = (test_time_ms + 500) / 1000;
+  auto test_time_s = time_s;
+
+  Run({"set", "key", "val"});
+  // NX and XX are mutually exclusive
+  auto resp = Run({"expireat", "key", "3600", "NX", "XX"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // NX and GT are mutually exclusive
+  resp = Run({"expireat", "key", "3600", "NX", "GT"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // NX and LT are mutually exclusive
+  resp = Run({"expireat", "key", "3600", "NX", "LT"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // GT and LT are mutually exclusive
+  resp = Run({"expireat", "key", "3600", "GT", "LT"});
+  ASSERT_THAT(resp, ErrArg("GT and LT options at the same time are not compatible"));
+
+  // NX option should be added since there is no expiry
+  test_time_s = time_s + 5;
+  resp = Run({"expireat", "key", absl::StrCat(test_time_s), "NX"});
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(test_time_s, CheckedInt({"EXPIRETIME", "key"}));
+
+  // running again with NX option, should not change expiry
+  test_time_s = time_s + 9;
+  resp = Run({"expireat", "key", absl::StrCat(test_time_s), "NX"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // given a key with no expiry
+  Run({"set", "key2", "val"});
+  test_time_s = time_s + 9;
+  resp = Run({"expireat", "key2", absl::StrCat(test_time_s), "XX"});
+  // XX does not apply expiry since key has no existing expiry
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"ttl", "key2"});
+  EXPECT_THAT(resp.GetInt(), -1);
+
+  // set expiry to 101
+  test_time_s = time_s + 101;
+  resp = Run({"expireat", "key", absl::StrCat(test_time_s)});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // GT should not apply expiry since new is not greater than the current one
+  auto less_test_time_s = time_s + 99;
+  resp = Run({"expireat", "key", absl::StrCat(less_test_time_s), "GT"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_EQ(test_time_s, CheckedInt({"EXPIRETIME", "key"}));
+
+  // GT should apply expiry since new is greater than the current one
+  test_time_s = time_s + 105;
+  resp = Run({"expireat", "key", absl::StrCat(test_time_s), "GT"});
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(test_time_s, CheckedInt({"EXPIRETIME", "key"}));
+
+  // LT should apply new expiry is smaller than current
+  test_time_s = time_s + 101;
+  resp = Run({"expireat", "key", absl::StrCat(test_time_s), "LT"});
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(test_time_s, CheckedInt({"EXPIRETIME", "key"}));
+
+  // LT should not apply expiry since new is not lesser than the current one
+  auto gt_test_time_s = time_s + 102;
+  resp = Run({"expireat", "key", absl::StrCat(gt_test_time_s), "LT"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_EQ(test_time_s, CheckedInt({"EXPIRETIME", "key"}));
+}
+
+TEST_F(GenericFamilyTest, PExpireOptions) {
+  // NX and XX are mutually exclusive
+  Run({"set", "key", "val"});
+  auto resp = Run({"pexpire", "key", "3600", "NX", "XX"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // NX and GT are mutually exclusive
+  resp = Run({"pexpire", "key", "3600", "NX", "GT"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // NX and LT are mutually exclusive
+  resp = Run({"pexpire", "key", "3600", "NX", "LT"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // GT and LT are mutually exclusive
+  resp = Run({"pexpire", "key", "3600", "GT", "LT"});
+  ASSERT_THAT(resp, ErrArg("GT and LT options at the same time are not compatible"));
+
+  // NX option should be added since there is no expiry
+  resp = Run({"pexpire", "key", "3600000", "NX"});
+  EXPECT_THAT(resp, IntArg(1));
+  resp = Run({"pttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 3600000);
+
+  // running again with NX option, should not change expiry
+  resp = Run({"pexpire", "key", "42", "NX"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // given a key with no expiry
+  Run({"set", "key2", "val"});
+  resp = Run({"pexpire", "key2", "404", "XX"});
+  // XX does not apply expiry since key has no existing expiry
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"pttl", "key2"});
+  EXPECT_THAT(resp.GetInt(), -1);
+
+  // set expiry to 101
+  resp = Run({"pexpire", "key", "101000"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // GT should not apply expiry since new is not greater than the current one
+  resp = Run({"pexpire", "key", "100000", "GT"});
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"pttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 101000);
+
+  // GT should apply expiry since new is greater than the current one
+  resp = Run({"pexpire", "key", "102000", "GT"});
+  EXPECT_THAT(resp, IntArg(1));
+  resp = Run({"pttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 102000);
+
+  // GT should not apply since expiry is smaller than current
+  resp = Run({"pexpire", "key", "101000", "GT"});
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"pttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 102000);
+
+  // LT should apply new expiry is smaller than current
+  resp = Run({"pexpire", "key", "101000", "LT"});
+  EXPECT_THAT(resp, IntArg(1));
+  resp = Run({"pttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 101000);
+
+  // LT should not apply since expiry is greater than current
+  resp = Run({"pexpire", "key", "102000", "LT"});
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"pttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 101000);
+}
+
+TEST_F(GenericFamilyTest, PExpireAtOptions) {
+  auto test_time_ms = TEST_current_time_ms;
+  Run({"set", "key", "val"});
+  // NX and XX are mutually exclusive
+  auto resp = Run({"pexpireat", "key", "3600", "NX", "XX"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // NX and GT are mutually exclusive
+  resp = Run({"pexpireat", "key", "3600", "NX", "GT"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // NX and LT are mutually exclusive
+  resp = Run({"pexpireat", "key", "3600", "NX", "LT"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // GT and LT are mutually exclusive
+  resp = Run({"pexpireat", "key", "3600", "GT", "LT"});
+  ASSERT_THAT(resp, ErrArg("GT and LT options at the same time are not compatible"));
+
+  // NX option should be added since there is no expiry
+  test_time_ms = TEST_current_time_ms + 3600;
+  resp = Run({"pexpireat", "key", absl::StrCat(test_time_ms), "NX"});
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(test_time_ms, CheckedInt({"PEXPIRETIME", "key"}));
+
+  // running again with NX option, should not change expiry
+  test_time_ms = TEST_current_time_ms + 42000;
+  resp = Run({"pexpireat", "key", absl::StrCat(test_time_ms), "NX"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // given a key with no expiry
+  Run({"set", "key2", "val"});
+  test_time_ms = TEST_current_time_ms + 404;
+  resp = Run({"pexpireat", "key2", absl::StrCat(test_time_ms), "XX"});
+  // XX does not apply expiry since key has no existing expiry
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"ttl", "key2"});
+  EXPECT_THAT(resp.GetInt(), -1);
+
+  // set expiry to 101
+  test_time_ms = TEST_current_time_ms + 101;
+  resp = Run({"pexpireat", "key", absl::StrCat(test_time_ms)});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // GT should not apply expiry since new is not greater than the current one
+  auto less_test_time_ms = TEST_current_time_ms + 100;
+  resp = Run({"pexpireat", "key", absl::StrCat(less_test_time_ms), "GT"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_EQ(test_time_ms, CheckedInt({"PEXPIRETIME", "key"}));
+
+  // GT should apply expiry since new is greater than the current one
+  test_time_ms = TEST_current_time_ms + 105;
+  resp = Run({"pexpireat", "key", absl::StrCat(test_time_ms), "GT"});
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(test_time_ms, CheckedInt({"PEXPIRETIME", "key"}));
+
+  // LT should apply new expiry is smaller than current
+  test_time_ms = TEST_current_time_ms + 101;
+  resp = Run({"pexpireat", "key", absl::StrCat(test_time_ms), "LT"});
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(test_time_ms, CheckedInt({"PEXPIRETIME", "key"}));
+
+  // LT should not apply expiry since new is not lesser than the current one
+  auto gt_test_time_ms = TEST_current_time_ms + 102;
+  resp = Run({"pexpireat", "key", absl::StrCat(gt_test_time_ms), "LT"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_EQ(test_time_ms, CheckedInt({"PEXPIRETIME", "key"}));
+}
+
 TEST_F(GenericFamilyTest, Del) {
   for (size_t i = 0; i < 1000; ++i) {
     Run({"set", StrCat("foo", i), "1"});
@@ -241,14 +452,33 @@ TEST_F(GenericFamilyTest, Rename) {
   ren_fb.Join();
 }
 
-TEST_F(GenericFamilyTest, RenameNonString) {
-  EXPECT_EQ(1, CheckedInt({"lpush", "x", "elem"}));
-  auto resp = Run({"rename", "x", "b"});
-  ASSERT_EQ(resp, "OK");
-  ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
+TEST_F(GenericFamilyTest, RenameList) {
+  for (string_view dest : {"b", "y", "z"}) {
+    EXPECT_EQ(1, CheckedInt({"lpush", "x", "elem"}));
+    Metrics metrics = GetMetrics();
 
-  EXPECT_EQ(0, CheckedInt({"del", "x"}));
-  EXPECT_EQ(1, CheckedInt({"del", "b"}));
+    size_t list_usage = metrics.db_stats[0].memory_usage_by_type[OBJ_LIST];
+    size_t string_usage = metrics.db_stats[0].memory_usage_by_type[OBJ_STRING];
+    ASSERT_GT(list_usage, 0);
+    ASSERT_EQ(string_usage, 0);
+
+    auto resp = Run({"rename", "x", dest});
+    ASSERT_EQ(resp, "OK");
+    if (dest == "b") {
+      ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
+    } else {
+      ASSERT_EQ(1, last_cmd_dbg_info_.shards_count);
+    }
+
+    metrics = GetMetrics();
+    size_t list_usage_after = metrics.db_stats[0].memory_usage_by_type[OBJ_LIST];
+    string_usage = metrics.db_stats[0].memory_usage_by_type[OBJ_STRING];
+    ASSERT_EQ(list_usage_after, list_usage);
+    ASSERT_EQ(string_usage, 0);
+
+    EXPECT_EQ(0, CheckedInt({"del", "x"}));
+    EXPECT_EQ(1, CheckedInt({"del", dest}));
+  }
 }
 
 TEST_F(GenericFamilyTest, RenameBinary) {
@@ -413,8 +643,6 @@ TEST_F(GenericFamilyTest, Scan) {
 }
 
 TEST_F(GenericFamilyTest, ScanWithAttr) {
-  Run({"flushdb"});
-
   Run({"set", "hello", "world"});
   Run({"set", "foo", "bar"});
 
@@ -453,6 +681,17 @@ TEST_F(GenericFamilyTest, ScanWithAttr) {
   resp = Run({"scan", "0", "attr", "u"});
   vec = StrArray(resp.GetVec()[1]);
   ASSERT_EQ(0, vec.size());
+}
+
+TEST_F(GenericFamilyTest, ScanMallocSize) {
+  Run({"set", "k1", string(1000, 'a')});
+  Run({"set", "k2", string(500, 'b')});
+  Run({"set", "k3", string(15, 'c')});
+
+  auto resp = Run({"scan", "0", "MINMSZ", "15"});
+  EXPECT_THAT(resp.GetVec()[1], RespArray(UnorderedElementsAre("k1", "k2")));
+  resp = Run({"scan", "0", "MINMSZ", "500"});
+  EXPECT_THAT(resp.GetVec()[1], RespArray(UnorderedElementsAre("k1")));
 }
 
 TEST_F(GenericFamilyTest, Sort) {
@@ -543,6 +782,93 @@ TEST_F(GenericFamilyTest, SortBug3636) {
   ASSERT_THAT(resp, ArrLen(17));
 }
 
+TEST_F(GenericFamilyTest, SortStore) {
+  // Test list sort with params
+  Run({"del", "list-1"});
+  Run({"del", "list-2"});
+  Run({"lpush", "list-1", "3.5", "1.2", "10.1", "2.20", "200"});
+  // numeric
+  auto resp = Run({"sort", "list-1", "store", "list-2"});
+  EXPECT_EQ(5, resp.GetInt());
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(),
+              ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
+
+  // string
+  resp = Run({"sort", "list-1", "ALPHA", "store", "list-2"});
+  EXPECT_EQ(5, resp.GetInt());
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(),
+              ElementsAre("1.2", "10.1", "2.20", "200", "3.5"));
+
+  // desc numeric
+  resp = Run({"sort", "list-1", "DESC", "store", "list-2"});
+  EXPECT_EQ(5, resp.GetInt());
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(),
+              ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
+
+  // desc string
+  resp = Run({"sort", "list-1", "ALPHA", "DESC", "store", "list-2"});
+  EXPECT_EQ(5, resp.GetInt());
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(),
+              ElementsAre("3.5", "200", "2.20", "10.1", "1.2"));
+
+  // limits
+  resp = Run({"sort", "list-1", "LIMIT", "0", "5", "store", "list-2"});
+  EXPECT_EQ(5, resp.GetInt());
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(),
+              ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
+  resp = Run({"sort", "list-1", "LIMIT", "0", "10", "store", "list-2"});
+  EXPECT_EQ(5, resp.GetInt());
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(),
+              ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
+  resp = Run({"sort", "list-1", "LIMIT", "2", "2", "store", "list-2"});
+  EXPECT_EQ(2, resp.GetInt());
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(), ElementsAre("3.5", "10.1"));
+  resp = Run({"sort", "list-1", "LIMIT", "1", "1", "store", "list-2"});
+  EXPECT_EQ(1, resp.GetInt());
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), "2.20");
+  resp = Run({"sort", "list-1", "LIMIT", "4", "2", "store", "list-2"});
+  EXPECT_EQ(1, resp.GetInt());
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), "200");
+  resp = Run({"sort", "list-1", "LIMIT", "5", "2", "store", "list-2"});
+  EXPECT_EQ(0, resp.GetInt());
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}), ArrLen(0));
+
+  // Test set sort
+  Run({"del", "set-1"});
+  Run({"del", "list-3"});
+  Run({"sadd", "set-1", "5.3", "4.4", "60", "99.9", "100", "9"});
+  resp = Run({"sort", "set-1", "store", "list-3"});
+  EXPECT_EQ(6, resp.GetInt());
+  ASSERT_THAT(Run({"lrange", "list-3", "0", "-1"}).GetVec(),
+              ElementsAre("4.4", "5.3", "9", "60", "99.9", "100"));
+
+  // Test sorted set sort
+  Run({"del", "zset-1"});
+  Run({"del", "list-4"});
+  Run({"zadd", "zset-1", "0", "3.3", "0", "30.1", "0", "8.2"});
+  resp = Run({"sort", "zset-1", "store", "list-4"});
+  EXPECT_EQ(3, resp.GetInt());
+  ASSERT_THAT(Run({"lrange", "list-4", "0", "-1"}).GetVec(), ElementsAre("3.3", "8.2", "30.1"));
+
+  // Same key overwrite.
+  Run({"del", "list-1"});
+  Run({"del", "list-2"});
+  Run({"lpush", "list-1", "3.5", "1.2", "10.1", "2.20", "200"});
+  resp = Run({"sort", "list-1", "store", "list-1"});
+  EXPECT_EQ(5, resp.GetInt());
+  ASSERT_THAT(Run({"lrange", "list-1", "0", "-1"}).GetVec(),
+              ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
+
+  // Check that the keys should not expire after some time.
+  Run({"del", "list-1"});
+  Run({"del", "list-2"});
+  Run({"lpush", "list-1", "3.5", "1.2", "10.1", "2.20", "200"});
+  Run({"sort", "list-1", "store", "list-2"});
+  AdvanceTime(5000);
+  ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(),
+              ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
+}
+
 TEST_F(GenericFamilyTest, TimeNoKeys) {
   auto resp = Run({"time"});
   EXPECT_THAT(resp, ArrLen(2));
@@ -609,9 +935,9 @@ TEST_F(GenericFamilyTest, Dump) {
   ASSERT_EQ(RDB_SER_VERSION, 9);
   uint8_t EXPECTED_STRING_DUMP[13] = {0x00, 0xc0, 0x13, 0x09, 0x00, 0x23, 0x13,
                                       0x6f, 0x4d, 0x68, 0xf6, 0x35, 0x6e};
-  uint8_t EXPECTED_HASH_DUMP[] = {0x0d, 0x12, 0x12, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00,
-                                  0x02, 0x00, 0x00, 0xfe, 0x13, 0x03, 0xc0, 0xd2, 0x04, 0xff,
-                                  0x09, 0x00, 0xb1, 0x0b, 0xae, 0x6c, 0x23, 0x5d, 0x17, 0xaa};
+  uint8_t EXPECTED_HASH_DUMP[] = {0x10, 0xc,  0xc,  0x0,  0x0, 0x0,  0x2,  0x0,
+                                  0x13, 0x1,  0xc4, 0xd2, 0x2, 0xff, 0x9,  0x0,
+                                  0x68, 0x4d, 0x73, 0xa4, 0xf, 0x23, 0x4f, 0xc7};
 
   uint8_t EXPECTED_LIST_DUMP[] = {0x12, 0x01, 0x02, '\t', '\t', 0x00, 0x00, 0x00,
                                   0x01, 0x00, 0x14, 0x01, 0xff, '\t', 0x00, 0xfb,
@@ -622,19 +948,19 @@ TEST_F(GenericFamilyTest, Dump) {
   EXPECT_EQ(resp, "OK");
   resp = Run({"dump", "z"});
   auto dump = resp.GetBuf();
-  CHECK_EQ(ToSV(dump), ToSV(EXPECTED_STRING_DUMP));
+  ASSERT_EQ(ToSV(dump), ToSV(EXPECTED_STRING_DUMP));
 
   // Check list dump
   EXPECT_EQ(1, CheckedInt({"rpush", "l", "20"}));
   resp = Run({"dump", "l"});
   dump = resp.GetBuf();
-  CHECK_EQ(ToSV(dump), ToSV(EXPECTED_LIST_DUMP)) << absl::CHexEscape(resp.GetString());
+  ASSERT_EQ(ToSV(dump), ToSV(EXPECTED_LIST_DUMP)) << absl::CHexEscape(resp.GetString());
 
   // Check for hash dump
   EXPECT_EQ(1, CheckedInt({"hset", "z2", "19", "1234"}));
   resp = Run({"dump", "z2"});
   dump = resp.GetBuf();
-  CHECK_EQ(ToSV(dump), ToSV(EXPECTED_HASH_DUMP));
+  ASSERT_EQ(ToSV(dump), ToSV(EXPECTED_HASH_DUMP));
 
   // Check that when running with none existing key we're getting nil
   resp = Run({"dump", "foo"});
@@ -661,7 +987,7 @@ TEST_F(GenericFamilyTest, Restore) {
   // note that value for expiration is just some valid unix time stamp from the pass
   resp = Run(
       {"restore", "exiting-key", "1665476212900", ToSV(STRING_DUMP_REDIS), "ABSTTL", "REPLACE"});
-  CHECK_EQ(resp, "OK");
+  ASSERT_EQ(resp, "OK");
   resp = Run({"get", "exiting-key"});
   EXPECT_EQ(resp.type, RespExpr::NIL);  // it was deleted as a result of restore action
 
@@ -672,7 +998,7 @@ TEST_F(GenericFamilyTest, Restore) {
   EXPECT_EQ("1234", resp);
   resp = Run({"dump", "new-key"});
   auto dump = resp.GetBuf();
-  CHECK_EQ(ToSV(dump), ToSV(STRING_DUMP_REDIS));
+  ASSERT_EQ(ToSV(dump), ToSV(STRING_DUMP_REDIS));
 
   // test for list
   EXPECT_EQ(1, CheckedInt({"rpush", "orig-list", "20"}));
@@ -937,6 +1263,101 @@ TEST_F(GenericFamilyTest, Unlink) {
   }
   auto resp = Run({"unlink", "s1", "s2"});
   EXPECT_THAT(resp, IntArg(2));
+}
+
+TEST_F(GenericFamilyTest, Copy) {
+  RespExpr resp;
+  string b_val(32, 'b');
+  string x_val(32, 'x');
+
+  resp = Run({"mset", "x", x_val, "b", b_val});
+  ASSERT_EQ(resp, "OK");
+  ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
+
+  resp = Run({"COPY", "z", "b"});
+  ASSERT_THAT(resp, IntArg(0));
+
+  resp = Run({"COPY", "b", "c"});
+  ASSERT_THAT(resp, IntArg(1));
+  ASSERT_EQ(b_val, Run({"get", "c"}));
+
+  resp = Run({"COPY", "x", "b", "REPLACE"});
+  ASSERT_THAT(resp, IntArg(1));
+
+  ASSERT_EQ(x_val, Run({"get", "x"}));
+  ASSERT_EQ(x_val, Run({"get", "b"}));
+  EXPECT_EQ(CheckedInt({"exists", "x", "b"}), 2);
+
+  const char* keys[2] = {"b", "x"};
+  auto ren_fb = pp_->at(0)->LaunchFiber([&] {
+    for (size_t i = 0; i < 200; ++i) {
+      int j = i % 2;
+      auto resp = Run({"COPY", keys[j], keys[1 - j], "REPLACE"});
+      ASSERT_THAT(resp, IntArg(1));
+    }
+  });
+
+  auto exist_fb = pp_->at(2)->LaunchFiber([&] {
+    for (size_t i = 0; i < 300; ++i) {
+      int64_t resp = CheckedInt({"exists", "x", "b"});
+      ASSERT_EQ(2, resp);
+    }
+  });
+
+  exist_fb.Join();
+  ren_fb.Join();
+}
+
+TEST_F(GenericFamilyTest, CopyNonString) {
+  EXPECT_EQ(1, CheckedInt({"lpush", "x", "elem"}));
+  auto resp = Run({"COPY", "x", "b"});
+  ASSERT_THAT(resp, IntArg(1));
+  ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
+
+  EXPECT_EQ(1, CheckedInt({"del", "x"}));
+  EXPECT_EQ(1, CheckedInt({"del", "b"}));
+}
+
+TEST_F(GenericFamilyTest, CopyBinary) {
+  const char kKey1[] = "\x01\x02\x03\x04";
+  const char kKey2[] = "\x05\x06\x07\x08";
+
+  Run({"set", kKey1, "bar"});
+  Run({"COPY", kKey1, kKey2});
+  EXPECT_EQ(Run({"get", kKey1}), "bar");
+  EXPECT_EQ(Run({"get", kKey2}), "bar");
+}
+
+TEST_F(GenericFamilyTest, CopyTTL) {
+  Run({"setex", "k1", "10", "bar"});
+
+  ASSERT_THAT(Run({"COPY", "k1", "k2"}), IntArg(1));
+  EXPECT_THAT(Run({"ttl", "k2"}), 10);
+}
+
+TEST_F(GenericFamilyTest, CopySameName) {
+  ASSERT_THAT(Run({"COPY", "k1", "k1"}), ErrArg("source and destination objects are the same"));
+
+  ASSERT_EQ(Run({"set", "k1", "v"}), "OK");
+  ASSERT_THAT(Run({"COPY", "k1", "k1"}), ErrArg("source and destination objects are the same"));
+}
+
+TEST_F(GenericFamilyTest, CopyToDB) {
+  // we don't support DB arg for now
+  ASSERT_THAT(Run({"COPY", "k1", "k1", "DB", "SOME_DB"}), ErrArg("syntax error"));
+}
+
+TEST_F(GenericFamilyTest, CopyKeyExists) {
+  Run({"set", "source", "value1"});
+  Run({"set", "destination", "value2"});
+
+  ASSERT_THAT(Run({"COPY", "source", "destination"}), IntArg(0));
+
+  EXPECT_EQ(Run({"get", "destination"}), "value2");
+  EXPECT_EQ(Run({"get", "source"}), "value1");
+
+  ASSERT_THAT(Run({"COPY", "source", "destination", "REPLACE"}), IntArg(1));
+  EXPECT_EQ(Run({"get", "destination"}), "value1");
 }
 
 }  // namespace dfly

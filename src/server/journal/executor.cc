@@ -11,6 +11,7 @@
 #include <memory>
 
 #include "base/logging.h"
+#include "facade/service_interface.h"
 #include "server/main_service.h"
 
 using namespace std;
@@ -33,7 +34,7 @@ template <typename... Ts> journal::ParsedEntry::CmdData BuildFromParts(Ts... par
     start += part.size();
   }
 
-  return {std::move(buf), std::move(slice_parts)};
+  return {std::move(buf), std::move(slice_parts), cmd_str.size()};
 }
 }  // namespace
 
@@ -48,31 +49,24 @@ JournalExecutor::JournalExecutor(Service* service)
 JournalExecutor::~JournalExecutor() {
 }
 
-void JournalExecutor::Execute(DbIndex dbid, absl::Span<journal::ParsedEntry::CmdData> cmds) {
+facade::DispatchResult JournalExecutor::Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd) {
   SelectDb(dbid);
-  for (auto& cmd : cmds) {
-    Execute(cmd);
-  }
-}
-
-void JournalExecutor::Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd) {
-  SelectDb(dbid);
-  Execute(cmd);
+  return Execute(cmd);
 }
 
 void JournalExecutor::FlushAll() {
   auto cmd = BuildFromParts("FLUSHALL");
-  Execute(cmd);
+  std::ignore = Execute(cmd);
 }
 
 void JournalExecutor::FlushSlots(const cluster::SlotRange& slot_range) {
   auto cmd = BuildFromParts("DFLYCLUSTER", "FLUSHSLOTS", slot_range.start, slot_range.end);
-  Execute(cmd);
+  std::ignore = Execute(cmd);
 }
 
-void JournalExecutor::Execute(journal::ParsedEntry::CmdData& cmd) {
+facade::DispatchResult JournalExecutor::Execute(journal::ParsedEntry::CmdData& cmd) {
   auto span = CmdArgList{cmd.cmd_args.data(), cmd.cmd_args.size()};
-  service_->DispatchCommand(span, &reply_builder_, &conn_context_);
+  return service_->DispatchCommand(span, &reply_builder_, &conn_context_);
 }
 
 void JournalExecutor::SelectDb(DbIndex dbid) {
@@ -81,7 +75,7 @@ void JournalExecutor::SelectDb(DbIndex dbid) {
 
   if (!ensured_dbs_[dbid]) {
     auto cmd = BuildFromParts("SELECT", dbid);
-    Execute(cmd);
+    std::ignore = Execute(cmd);
     ensured_dbs_[dbid] = true;
 
     // TODO: This is a temporary fix for #4146.

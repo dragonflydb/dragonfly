@@ -43,6 +43,7 @@ jobs:
             ./tools/release.sh
             ./tools/packaging/generate_debian_package.sh ${{ env.RELEASE_DIR }}/dragonfly-aarch64
             mv dragonfly_*.deb ${{ env.RELEASE_DIR }}/
+
     - name: Upload
       uses: actions/upload-artifact@v4
       with:
@@ -50,6 +51,7 @@ jobs:
         path: |
           ${{ env.RELEASE_DIR }}/dragonfly-*tar.gz
           ${{ env.RELEASE_DIR }}/dragonfly_*.deb
+          ${{ env.RELEASE_DIR }}/dfly_bench-*tar.gz
 
   build-native:
     runs-on: ubuntu-latest
@@ -81,6 +83,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git describe --always --tags ${{ github.sha }}
           ./tools/release.sh
+
           # once the build is over, we want to generate a Debian package
           if [ -f /etc/debian_version ]; then
             ./tools/packaging/generate_debian_package.sh ${{ env.RELEASE_DIR }}/dragonfly-x86_64
@@ -104,10 +107,12 @@ jobs:
           if [ -f /etc/debian_version ]; then
             mv ${{ env.RELEASE_DIR }}/dragonfly-*tar.gz results-artifacts
             mv dragonfly_*.deb results-artifacts
+            mv ${{ env.RELEASE_DIR }}/dfly_bench-*tar.gz results-artifacts
           else
             ls -l *.rpm
             mv ./*.rpm ./results-artifacts/
           fi
+
     - name: Upload
       uses: actions/upload-artifact@v4
       with:

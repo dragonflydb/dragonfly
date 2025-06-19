@@ -43,6 +43,14 @@ template <bool IsConst> class JsonconsDfsItem {
     return depth_state_.second;
   }
 
+  Ptr obj_ptr() const {
+    return depth_state_.first;
+  }
+
+  unsigned get_segment_step() const {
+    return segment_step_;
+  }
+
  private:
   static bool ShouldIterateAll(SegmentType type) {
     return type == SegmentType::WILDCARD || type == SegmentType::DESCENT;
@@ -107,6 +115,9 @@ class Dfs {
   static Dfs Mutate(absl::Span<const PathSegment> path, const MutateCallback& callback,
                     JsonType* json);
 
+  // Simplified deletion without callback - more efficient for deletion operations
+  static Dfs Delete(absl::Span<const PathSegment> path, JsonType* json);
+
   unsigned matches() const {
     return matches_;
   }
@@ -120,16 +131,11 @@ class Dfs {
   nonstd::expected<void, MatchStatus> MutateStep(const PathSegment& segment,
                                                  const MutateCallback& cb, JsonType* node);
 
-  void Mutate(const PathSegment& segment, const MutateCallback& callback, JsonType* node);
+  nonstd::expected<void, MatchStatus> DeleteStep(const PathSegment& segment, JsonType* node);
 
   void DoCall(const Cb& callback, std::optional<std::string_view> key, const JsonType& node) {
     ++matches_;
     callback(key, node);
-  }
-
-  bool Mutate(const MutateCallback& callback, std::optional<std::string_view> key, JsonType* node) {
-    ++matches_;
-    return callback(key, node);
   }
 
   unsigned matches_ = 0;

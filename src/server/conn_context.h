@@ -147,9 +147,7 @@ struct ConnectionState {
     const ConnectionContext* owner = nullptr;
   };
 
-  enum MCGetMask {
-    FETCH_CAS_VER = 1,
-  };
+  enum MCGetMask { FETCH_CAS_VER = 1 };
 
   size_t UsedMemory() const;
 
@@ -303,7 +301,6 @@ class ConnectionContext : public facade::ConnectionContext {
   void UnsubscribeAll(bool to_reply, facade::RedisReplyBuilder* rb);
   void PUnsubscribeAll(bool to_reply, facade::RedisReplyBuilder* rb);
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
-  void SwitchTxCmd(const CommandId* cid);
 
   size_t UsedMemory() const override;
 

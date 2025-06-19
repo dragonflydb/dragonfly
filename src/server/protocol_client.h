@@ -85,6 +85,9 @@ class ProtocolClient {
   // Check if reps_args contains a simple reply.
   bool CheckRespIsSimpleReply(std::string_view reply) const;
 
+  // Check if resp_args contains a simple error
+  bool CheckRespSimpleError(std::string_view error) const;
+
   // Check resp_args contains the following types at front.
   bool CheckRespFirstTypes(std::initializer_list<facade::RespExpr::Type> types) const;
 

@@ -13,7 +13,7 @@
 namespace dfly {
 namespace journal {
 
-enum class Op : uint8_t { NOOP = 0, SELECT = 6, EXPIRED = 9, COMMAND = 10, PING = 13, LSN = 15 };
+enum class Op : uint8_t { SELECT = 6, EXPIRED = 9, COMMAND = 10, PING = 13, LSN = 15 };
 
 struct EntryBase {
   TxId txid;
@@ -73,6 +73,7 @@ struct ParsedEntry : public EntryBase {
   struct CmdData {
     std::unique_ptr<uint8_t[]> command_buf;
     CmdArgVec cmd_args;  // represents the parsed command.
+    size_t cmd_len{0};
   };
   CmdData cmd;
 
@@ -87,7 +88,14 @@ struct JournalItem {
   std::optional<SlotId> slot;
 };
 
-using ChangeCallback = std::function<void(const JournalItem&, bool await)>;
+struct JournalConsumerInterface {
+  virtual ~JournalConsumerInterface() = default;
+
+  // Receives a journal change for serializing
+  virtual void ConsumeJournalChange(const JournalItem& item) = 0;
+  // Waits for writing the serialized data
+  virtual void ThrottleIfNeeded() = 0;
+};
 
 }  // namespace journal
 }  // namespace dfly

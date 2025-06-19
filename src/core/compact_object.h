@@ -116,7 +116,7 @@ class CompactObj {
   CompactObj(const CompactObj&) = delete;
 
   // 0-16 is reserved for inline lengths of string type.
-  enum TagEnum {
+  enum TagEnum : uint8_t {
     INT_TAG = 17,
     SMALL_TAG = 18,
     ROBJ_TAG = 19,
@@ -125,35 +125,17 @@ class CompactObj {
     SBF_TAG = 22,
   };
 
-  enum MaskBit {
-    REF_BIT = 1,
-    EXPIRE_BIT = 2,  // Mark objects that have expiry timestamp assigned.
-    FLAG_BIT = 4,    // Used to mark keys that have memcache flags assigned.
-
-    // ascii encoding is not an injective function. it compresses 8 bytes to 7 but also 7 to 7.
-    // therefore, in order to know the original length we introduce 2 flags that
-    // correct the length upon decoding. ASCII1_ENC_BIT rounds down the decoded length,
-    // while ASCII2_ENC_BIT rounds it up. See DecodedLen implementation for more info.
-    ASCII1_ENC_BIT = 8,
-    ASCII2_ENC_BIT = 0x10,
-
-    // IO_PENDING is set when the tiered storage has issued an i/o request to save the value. It is
-    // cleared when the io request finishes or is cancelled.
-    IO_PENDING = 0x20,
-
-    // Applied only on keys that should be deleted asynchronously.
-    // (it can be the same value as IO_PENDING) that is applied only on values.
-    KEY_ASYNC_DELETE = 0x20,
-    STICKY = 0x40,
-
-    // TOUCHED used to determin which items are hot/cold.
-    // by checking if the item was touched from the last time we
-    // reached this item while travering the database to set items as cold.
-    // https://junchengyang.com/publication/nsdi24-SIEVE.pdf
-    TOUCHED = 0x80,
+  // String encoding types.
+  // With ascii compression it compresses 8 bytes to 7 but also 7 to 7.
+  // Therefore, in order to know the original length we introduce 2 states that
+  // correct the length upon decoding. ASCII1_ENC rounds down the decoded length,
+  // while ASCII2_ENC rounds it up. See DecodedLen implementation for more info.
+  enum Encoding : uint8_t {
+    NONE_ENC = 0,
+    ASCII1_ENC = 1,
+    ASCII2_ENC = 2,
+    HUFFMAN_ENC = 3,  // TBD
   };
-
-  static constexpr uint8_t kEncMask = ASCII1_ENC_BIT | ASCII2_ENC_BIT;
 
  public:
   using PrefixArray = std::vector<std::string_view>;
@@ -185,13 +167,14 @@ class CompactObj {
     CompactObj res;
     memcpy(&res.u_, &u_, sizeof(u_));
     res.taglen_ = taglen_;
-    res.mask_ = mask_ | REF_BIT;
+    res.mask_ = mask_;
+    res.mask_bits_.ref = 1;
 
     return res;
   }
 
   bool IsRef() const {
-    return mask_ & REF_BIT;
+    return mask_bits_.ref;
   }
 
   std::string_view GetSlice(std::string* scratch) const;
@@ -222,73 +205,53 @@ class CompactObj {
   }
 
   bool HasExpire() const {
-    return mask_ & EXPIRE_BIT;
+    return mask_bits_.expire;
   }
 
   void SetExpire(bool e) {
-    if (e) {
-      mask_ |= EXPIRE_BIT;
-    } else {
-      mask_ &= ~EXPIRE_BIT;
-    }
+    mask_bits_.expire = e;
   }
 
   bool HasFlag() const {
-    return mask_ & FLAG_BIT;
+    return mask_bits_.mc_flag;
   }
 
   void SetFlag(bool e) {
-    if (e) {
-      mask_ |= FLAG_BIT;
-    } else {
-      mask_ &= ~FLAG_BIT;
-    }
+    mask_bits_.mc_flag = e;
   }
 
   bool WasTouched() const {
-    return mask_ & TOUCHED;
+    return mask_bits_.touched;
   }
 
   void SetTouched(bool e) {
-    if (e) {
-      mask_ |= TOUCHED;
-    } else {
-      mask_ &= ~TOUCHED;
-    }
+    mask_bits_.touched = e;
   }
 
   bool DefragIfNeeded(float ratio);
 
   void SetAsyncDelete() {
-    mask_ |= KEY_ASYNC_DELETE;
+    mask_bits_.io_pending = 1;  // io_pending flag is used for async delete for keys.
   }
 
   bool IsAsyncDelete() const {
-    return mask_ & KEY_ASYNC_DELETE;
+    return mask_bits_.io_pending;
   }
 
   bool HasStashPending() const {
-    return mask_ & IO_PENDING;
+    return mask_bits_.io_pending;
   }
 
   void SetStashPending(bool b) {
-    if (b) {
-      mask_ |= IO_PENDING;
-    } else {
-      mask_ &= ~IO_PENDING;
-    }
+    mask_bits_.io_pending = b;
   }
 
   bool IsSticky() const {
-    return mask_ & STICKY;
+    return mask_bits_.sticky;
   }
 
-  void SetSticky(bool s) {
-    if (s) {
-      mask_ |= STICKY;
-    } else {
-      mask_ &= ~STICKY;
-    }
+  void SetSticky(bool e) {
+    mask_bits_.sticky = e;
   }
 
   unsigned Encoding() const;
@@ -410,11 +373,18 @@ class CompactObj {
 
   struct Stats {
     size_t small_string_bytes = 0;
+    uint64_t huff_encode_total = 0, huff_encode_success = 0;
   };
 
-  static Stats GetStats();
-
+  static Stats GetStatsThreadLocal();
   static void InitThreadLocal(MemoryResource* mr);
+
+  enum HuffmanDomain : uint8_t {
+    HUFF_KEYS = 0,
+    // TODO: add more domains.
+  };
+
+  static bool InitHuffmanThreadLocal(HuffmanDomain domain, std::string_view hufftable);
   static MemoryResource* memory_resource();  // thread-local.
 
   template <typename T, typename... Args> static T* AllocateMR(Args&&... args) {
@@ -446,7 +416,7 @@ class CompactObj {
 
  private:
   void EncodeString(std::string_view str);
-  size_t DecodedLen(size_t sz) const;
+  size_t DecodedLen(size_t sz, uint8_t firstb) const;
 
   bool EqualNonInline(std::string_view sv) const;
 
@@ -525,14 +495,35 @@ class CompactObj {
   //
   static_assert(sizeof(u_) == 16);
 
-  uint8_t mask_ = 0;
+  union {
+    uint8_t mask_ = 0;
+    struct {
+      uint8_t ref : 1;  // Mark objects that have expiry timestamp assigned.
+      uint8_t expire : 1;
+      uint8_t mc_flag : 1;  // Marks keys that have memcache flags assigned.
+
+      // See the Encoding enum for the meaning of these bits.
+      uint8_t encoding : 2;
+
+      // IO_PENDING is set when the tiered storage has issued an i/o request to save the value.
+      // It is cleared when the io request finishes or is cancelled.
+      uint8_t io_pending : 1;  // also serves as async-delete for keys.
+      uint8_t sticky : 1;
+
+      // TOUCHED used to determin which items are hot/cold.
+      // by checking if the item was touched from the last time we
+      // reached this item while travering the database to set items as cold.
+      // https://junchengyang.com/publication/nsdi24-SIEVE.pdf
+      uint8_t touched : 1;  // used to mark keys that were accessed.
+    } mask_bits_;
+  };
 
   // We currently reserve 5 bits for tags and 3 bits for extending the mask. currently reserved.
   uint8_t taglen_ = 0;
 };
 
 inline bool CompactObj::operator==(std::string_view sv) const {
-  if (mask_ & kEncMask)
+  if (mask_bits_.encoding)
     return CmpEncoded(sv);
 
   if (IsInline()) {
@@ -543,7 +534,8 @@ inline bool CompactObj::operator==(std::string_view sv) const {
 
 std::string_view ObjTypeToString(CompactObjType type);
 
-std::optional<CompactObjType> ObjTypeFromString(std::string_view sv);
+// Returns kInvalidCompactObjType if sv is not a valid type.
+CompactObjType ObjTypeFromString(std::string_view sv);
 
 namespace detail {
 

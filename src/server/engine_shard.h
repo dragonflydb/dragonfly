@@ -48,6 +48,9 @@ class EngineShard {
     uint64_t total_heartbeat_expired_bytes = 0;
     uint64_t total_heartbeat_expired_calls = 0;
 
+    // cluster stats
+    uint64_t total_migrated_keys = 0;
+
     Stats& operator+=(const Stats&);
   };
 
@@ -263,6 +266,8 @@ class EngineShard {
   // Logical ts used to order distributed transactions.
   TxId committed_txid_ = 0;
   Transaction* continuation_trans_ = nullptr;
+  std::string continuation_debug_id_;
+  unsigned poll_concurrent_factor_ = 0;
   journal::Journal* journal_ = nullptr;
   IntentLock shard_lock_;
 

@@ -155,7 +155,7 @@ TEST_F(SearchParserTest, Scanner) {
 
   // Prefix simple
   SetInput("pre*");
-  NEXT_EQ(TOK_PREFIX, string, "pre*");
+  NEXT_EQ(TOK_PREFIX, string, "pre");
 
   // TODO: uncomment when we support escaped terms
   // Prefix escaped (redis doesn't support quoted prefix matches)
@@ -167,7 +167,7 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_EQ(TOK_FIELD, string, "@color");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_PREFIX, string, "prefix*");
+  NEXT_EQ(TOK_PREFIX, string, "prefix");
   NEXT_TOK(TOK_RCURLBR);
 
   // Prefix escaped star
@@ -196,28 +196,28 @@ TEST_F(SearchParserTest, EscapedTagPrefixes) {
   NEXT_EQ(TOK_FIELD, string, "@name");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_PREFIX, string, "escape-err*");
+  NEXT_EQ(TOK_PREFIX, string, "escape-err");
   NEXT_TOK(TOK_RCURLBR);
 
   SetInput("@name:{escape\\+pre*}");
   NEXT_EQ(TOK_FIELD, string, "@name");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_PREFIX, string, "escape+pre*");
+  NEXT_EQ(TOK_PREFIX, string, "escape+pre");
   NEXT_TOK(TOK_RCURLBR);
 
   SetInput("@name:{escape\\.pre*}");
   NEXT_EQ(TOK_FIELD, string, "@name");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_PREFIX, string, "escape.pre*");
+  NEXT_EQ(TOK_PREFIX, string, "escape.pre");
   NEXT_TOK(TOK_RCURLBR);
 
   SetInput("@name:{complex\\-escape\\+with\\.many\\*chars*}");
   NEXT_EQ(TOK_FIELD, string, "@name");
   NEXT_TOK(TOK_COLON);
   NEXT_TOK(TOK_LCURLBR);
-  NEXT_EQ(TOK_PREFIX, string, "complex-escape+with.many*chars*");
+  NEXT_EQ(TOK_PREFIX, string, "complex-escape+with.many*chars");
   NEXT_TOK(TOK_RCURLBR);
 }
 
@@ -237,9 +237,8 @@ TEST_F(SearchParserTest, Parse) {
   EXPECT_EQ(1, Parse(" @foo:@bar "));
   EXPECT_EQ(1, Parse(" @foo: "));
 
-  // We don't support suffix/any other position for now
-  EXPECT_EQ(1, Parse("*pre"));
-  EXPECT_EQ(1, Parse("*pre*"));
+  EXPECT_EQ(0, Parse("*suffix"));
+  EXPECT_EQ(0, Parse("*infix*"));
 
   EXPECT_EQ(1, Parse("pre***"));
 }
@@ -278,7 +277,7 @@ TEST_F(SearchParserTest, KNN) {
 }
 
 TEST_F(SearchParserTest, KNNfull) {
-  SetInput("*=>[KNN 1 @vector field_vec AS vec_sort EF_RUNTIME 15]");
+  SetInput("*=>[Knn 1 @vector field_vec EF_Runtime 15 as vec_sort]");
   NEXT_TOK(TOK_STAR);
   NEXT_TOK(TOK_ARROW);
   NEXT_TOK(TOK_LBRACKET);
@@ -288,11 +287,11 @@ TEST_F(SearchParserTest, KNNfull) {
   NEXT_TOK(TOK_FIELD);
   NEXT_TOK(TOK_TERM);
 
-  NEXT_TOK(TOK_AS);
-  NEXT_EQ(TOK_TERM, string, "vec_sort");
-
   NEXT_TOK(TOK_EF_RUNTIME);
   NEXT_EQ(TOK_UINT32, string, "15");
+
+  NEXT_TOK(TOK_AS);
+  NEXT_EQ(TOK_TERM, string, "vec_sort");
 
   NEXT_TOK(TOK_RBRACKET);
 }

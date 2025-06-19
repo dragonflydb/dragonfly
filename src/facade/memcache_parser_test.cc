@@ -149,6 +149,29 @@ TEST_F(MCParserTest, Meta) {
   EXPECT_TRUE(cmd_.return_hit);
 }
 
+TEST_F(MCParserTest, Gat) {
+  auto res = parser_.Parse("gat 1000 foo bar baz\r\n", &consumed_, &cmd_);
+  EXPECT_EQ(MemcacheParser::OK, res);
+  EXPECT_EQ(consumed_, 22);
+  EXPECT_EQ(cmd_.type, MemcacheParser::GAT);
+  EXPECT_EQ(cmd_.key, "foo");
+  EXPECT_THAT(cmd_.keys_ext, UnorderedElementsAre("bar", "baz"));
+  EXPECT_EQ(cmd_.expire_ts, 1000);
+
+  cmd_ = {};
+  res = parser_.Parse("gat foo bar\r\n", &consumed_, &cmd_);
+  EXPECT_EQ(MemcacheParser::BAD_INT, res);
+
+  cmd_ = {};
+  res = parser_.Parse("gats 1000 foo bar baz\r\n", &consumed_, &cmd_);
+  EXPECT_EQ(MemcacheParser::OK, res);
+  EXPECT_EQ(consumed_, 23);
+  EXPECT_EQ(cmd_.type, MemcacheParser::GATS);
+  EXPECT_EQ(cmd_.key, "foo");
+  EXPECT_THAT(cmd_.keys_ext, UnorderedElementsAre("bar", "baz"));
+  EXPECT_EQ(cmd_.expire_ts, 1000);
+}
+
 class MCParserNoreplyTest : public MCParserTest {
  protected:
   void RunTest(string_view str, bool noreply) {

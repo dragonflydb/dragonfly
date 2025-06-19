@@ -468,7 +468,6 @@ TYPED_TEST(JsonPathTest, Mutate) {
   auto cb = [](optional<string_view>, JsonType* val) {
     int intval = val->as<int>();
     *val = intval + 1;
-    return false;
   };
 
   vector<int> arr;
@@ -499,16 +498,13 @@ TYPED_TEST(JsonPathTest, Mutate) {
   auto cb2 = [](optional<string_view> key, JsonType* val) {
     if (val->is_int64() && !key) {  // array element
       *val = 42;
-      return false;
     }
     if (val->is_bool()) {
       *val = false;
-      return false;
     }
-    return true;
   };
 
-  auto expected = ValidJson<JsonType>(R"({"a":[42],"inner":{"a":{"bool":false}}})");
+  auto expected = ValidJson<JsonType>(R"({"a":[42],"inner":{"a":{"bool":false,"c":42}}})");
   if constexpr (std::is_same_v<TypeParam, JsonType>) {
     MutatePath(path, cb2, &json);
 
@@ -519,6 +515,28 @@ TYPED_TEST(JsonPathTest, Mutate) {
     FlatJson fj = flexbuffers::GetRoot(fbb.GetBuffer());
     ASSERT_EQ(expected, FromFlat(fj));
   }
+}
+
+TYPED_TEST(JsonPathTest, MutateRecursiveDescentKey) {
+  ASSERT_EQ(0, this->Parse("$..value"));
+  Path path = this->driver_.TakePath();
+
+  JsonType json = ValidJson<JsonType>(R"({"data":{"value":10,"subdata":{"value":20}}})");
+  JsonType replacement = ValidJson<JsonType>(R"({"value": 30})");
+
+  auto cb = [&](optional<string_view> key, JsonType* val) {
+    if (key && key.value() == "value" && (val->is_int64() || val->is_double())) {
+      *val = replacement;
+    }
+  };
+
+  unsigned reported_matches = MutatePath(path, cb, &json);
+
+  JsonType expected =
+      ValidJson<JsonType>(R"({"data":{"subdata":{"value":{"value":30}},"value":{"value":30}}})");
+
+  EXPECT_EQ(expected, json);
+  EXPECT_EQ(0, reported_matches);
 }
 
 TYPED_TEST(JsonPathTest, SubRange) {
@@ -573,6 +591,56 @@ TYPED_TEST(JsonPathTest, SubRange) {
   EvaluatePath(path, json, cb);
   ASSERT_THAT(arr, ElementsAre(3, 4, 5));
   arr.clear();
+}
+
+TYPED_TEST(JsonPathTest, DeleteNestedWithSameKey) {
+  // Test for deleting nested elements with the same key using "$..a"
+  // Corresponds to command: JSON.DEL doc1 "$..a"
+  ASSERT_EQ(0, this->Parse("$..a"));
+  Path path = this->driver_.TakePath();
+
+  TypeParam json = ValidJson<TypeParam>(R"({"a": 1, "nested": {"a": 2, "b": 3}})");
+
+  if constexpr (std::is_same_v<TypeParam, JsonType>) {
+    unsigned reported_matches = DeletePath(path, &json);
+    EXPECT_EQ(2, reported_matches);
+
+    auto expected = ValidJson<JsonType>(R"({"nested": {"b": 3}})");
+    EXPECT_EQ(expected, json);
+  } else {
+    flexbuffers::Builder fbb;
+    unsigned reported_matches = DeletePath(path, json, &fbb);
+
+    EXPECT_EQ(2, reported_matches);
+
+    FlatJson result = flexbuffers::GetRoot(fbb.GetBuffer());
+    auto expected = ValidJson<JsonType>(R"({"nested": {"b": 3}})");
+    EXPECT_EQ(expected, FromFlat(result));
+  }
+}
+
+TYPED_TEST(JsonPathTest, DeleteRecursiveWithKeysAndArrayValues) {
+  ASSERT_EQ(0, this->Parse("$..a"));
+  Path path = this->driver_.TakePath();
+
+  TypeParam json = ValidJson<TypeParam>(
+      R"({"a": {"a": 2, "b": 3}, "b": ["a", "b"], "nested": {"b": [true, "a", "b"]}})");
+
+  if constexpr (std::is_same_v<TypeParam, JsonType>) {
+    unsigned reported_matches = DeletePath(path, &json);
+    EXPECT_EQ(1, reported_matches);
+
+    auto expected = ValidJson<JsonType>(R"({"b": ["a", "b"], "nested": {"b": [true, "a", "b"]}})");
+    EXPECT_EQ(expected, json);
+  } else {
+    flexbuffers::Builder fbb;
+    unsigned reported_matches = DeletePath(path, json, &fbb);
+    EXPECT_EQ(1, reported_matches);
+
+    FlatJson result = flexbuffers::GetRoot(fbb.GetBuffer());
+    auto expected = ValidJson<JsonType>(R"({"b": ["a", "b"], "nested": {"b": [true, "a", "b"]}})");
+    EXPECT_EQ(expected, FromFlat(result));
+  }
 }
 
 }  // namespace dfly::json

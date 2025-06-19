@@ -6,6 +6,8 @@
 
 #include <absl/strings/match.h>
 
+#include <random>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -16,6 +18,7 @@
 #include "server/string_family.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
+#include "util/fibers/fibers.h"
 
 using namespace testing;
 using namespace std;
@@ -1109,7 +1112,7 @@ TEST_F(ListFamilyTest, LMPopInvalidSyntax) {
 
   // Zero keys
   resp = Run({"lmpop", "0", "LEFT", "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
 
   // Number of keys is not uint
   resp = Run({"lmpop", "aa", "a", "LEFT"});
@@ -1256,7 +1259,7 @@ TEST_F(ListFamilyTest, LMPopEdgeCases) {
 
   // Test with negative COUNT - should return error
   resp = Run({"lmpop", "1", "list", "LEFT", "COUNT", "-1"});
-  EXPECT_THAT(resp, RespArray(ElementsAre("list", RespArray(ElementsAre("b")))));
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
 }
 
 TEST_F(ListFamilyTest, LMPopDocExample) {
@@ -1323,7 +1326,7 @@ TEST_F(ListFamilyTest, LMPopWrongType) {
   EXPECT_THAT(resp, RespArray(ElementsAre("l1", RespArray(ElementsAre("e1")))));
 }
 
-// Reproduce a flow that trigerred a wrong DCHECK in the transaction flow.
+// Blocking command wakeup is complicated by running multi transaction at the same time
 TEST_F(ListFamilyTest, AwakeMulti) {
   auto f1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
     for (unsigned i = 0; i < 100; ++i) {
@@ -1350,6 +1353,33 @@ TEST_F(ListFamilyTest, AwakeMulti) {
   f1.Join();
   f2.Join();
   f3.Join();
+}
+
+TEST_F(ListFamilyTest, PressureBLMove) {
+#ifndef NDEBUG
+  GTEST_SKIP() << "Requires release build to reproduce";
+#endif
+
+  auto consumer = [this](string_view id, string_view src, string_view dest) {
+    for (unsigned i = 0; i < 1000; ++i) {
+      Run(id, {"blmove", src, dest, "LEFT", "LEFT", "0"});
+    };
+  };
+  auto producer = [this](string_view id, size_t delay, string_view src) {
+    for (unsigned i = 0; i < 1000; ++i) {
+      Run(id, {"lpush", src, "a"});
+      ThisFiber::SleepFor(1us * delay);
+    }
+  };
+
+  for (size_t delay : {1, 2, 5}) {
+    LOG(INFO) << "Running with delay: " << delay;
+    auto f1 = pp_->at(1)->LaunchFiber([=] { consumer("c1", "src", "dest"); });
+    auto f2 = pp_->at(1)->LaunchFiber([=] { producer("p1", delay, "src"); });
+
+    f1.Join();
+    f2.Join();
+  }
 }
 
 TEST_F(ListFamilyTest, AwakeDb1) {

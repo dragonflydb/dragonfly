@@ -18,6 +18,7 @@
 #include "core/mi_memory_resource.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
+#include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/common.h"
@@ -54,32 +55,103 @@ using CI = CommandId;
 
 namespace {
 
-class JsonMemTracker {
+struct JsonAutoUpdaterOptions {
+  bool disable_indexing = false;  // If true, the key will not be removed or added to the indexes
+  bool update_on_delete = false;  // If true, SetJsonSize will be called on destruction
+};
+
+/* Helper class which must be initialized before any mutate operations on json.
+  It will track the memory usage of the json object and update the size in the CompactObj.
+  It also contains indexes updates, post update operations on the iterator. */
+class JsonAutoUpdater {
  public:
-  JsonMemTracker() {
-    start_size_ = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
+  JsonAutoUpdater(const OpArgs& op_args, string_view key, DbSlice::ItAndUpdater it,
+                  JsonAutoUpdaterOptions options = {})
+      : op_args_(op_args), key_(key), it_(std::move(it)), options_(options) {
+    if (!options_.disable_indexing) {
+      op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it.it->second);
+    }
+
+    /* We need to initialize start memory usage after RemoveDoc because internally RemoveDoc has
+    static cache that can allocate/deallocate memory. Because of this, we will
+    overestimate/underestimate memory usage for json object. */
+    start_size_ = GetMemoryUsage();
   }
 
-  void SetJsonSize(PrimeValue& pv, bool is_op_set) {
-    const size_t current = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
+  JsonAutoUpdater(const JsonAutoUpdater&) = delete;
+  JsonAutoUpdater& operator=(const JsonAutoUpdater&) = delete;
+
+  JsonAutoUpdater(JsonAutoUpdater&&) = default;
+  JsonAutoUpdater& operator=(JsonAutoUpdater&&) = delete;
+
+  void SetJsonSize() {
+    set_size_was_called_ = true;
+
+    ShrinkJsonIfNeeded();
+
+    const size_t current = GetMemoryUsage();
     int64_t diff = static_cast<int64_t>(current) - static_cast<int64_t>(start_size_);
-    // If the diff is 0 it means the object use the same memory as before. No action needed.
-    if (diff == 0) {
-      return;
-    }
-    // If op_set_ it means we JSON.SET or JSON.MSET was called. This is a blind update,
-    // and because the operation sets the size to 0 we also need to include the size of
-    // the pointer.
-    if (is_op_set) {
-      diff += static_cast<int64_t>(mi_usable_size(pv.GetJson()));
-    }
-    pv.SetJsonSize(diff);
+
+    GetPrimeValue().SetJsonSize(diff);
+
     // Under any flow we must not end up with this special value.
-    DCHECK(pv.MallocUsed() != 0);
+    DCHECK(GetPrimeValue().MallocUsed() != 0);
+  }
+
+  void AddDocToIndexes() {
+    op_args_.shard->search_indices()->AddDoc(key_, op_args_.db_cntx, GetPrimeValue());
+  }
+
+  ~JsonAutoUpdater() {
+    if (options_.update_on_delete && !set_size_was_called_) {
+      SetJsonSize();
+    } else if (!set_size_was_called_) {
+      LOG(WARNING) << "JsonAutoUpdater destructor called without SetJsonSize() being called. This "
+                      "may lead to memory tracking issues.";
+    }
+
+    it_.post_updater.Run();
+
+    /* We need to call AddDoc after SetJsonSize because internally AddDoc has static cache that can
+    allocate/deallocate memory. Because of this, we will overestimate/underestimate memory usage for
+    json object. */
+    if (!options_.disable_indexing) {
+      AddDocToIndexes();
+    }
+  }
+
+  PrimeValue& GetPrimeValue() {
+    return it_.it->second;
+  }
+
+  JsonType* GetJson() {
+    return GetPrimeValue().GetJson();
   }
 
  private:
+  size_t GetMemoryUsage() const {
+    return static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
+  }
+
+  /* Shrinks the json object to fit its current size.
+     Sometimes after mutating the json object, it may have more capacity than needed.
+     This method will reduce the capacity to fit the current size. */
+  void ShrinkJsonIfNeeded() {
+    auto json = GetJson();
+    if (json->size() * 2 < json->capacity()) {
+      json->shrink_to_fit();
+    }
+  }
+
+ private:
+  const OpArgs& op_args_;
+  string_view key_;
+  DbSlice::ItAndUpdater it_;
+  JsonAutoUpdaterOptions options_;
+
+  // Used to track the memory usage of the json object
   size_t start_size_{0};
+  bool set_size_was_called_{false};
 };
 
 template <typename T> using ParseResult = io::Result<T, std::string>;
@@ -199,6 +271,7 @@ template <typename T> void Send(const std::optional<T>& opt, RedisReplyBuilder* 
 }
 
 template <typename I> void Send(I begin, I end, RedisReplyBuilder* rb) {
+  RedisReplyBuilder::ReplyScope scope{rb};
   if (begin == end) {
     rb->SendEmptyArray();
   } else {
@@ -233,6 +306,7 @@ template <typename T> void Send(const JsonCallbackResult<T>& result, RedisReplyB
 }
 
 template <typename T> void Send(const OpResult<T>& result, RedisReplyBuilder* rb) {
+  RedisReplyBuilder::ReplyScope scope{rb};
   if (result) {
     Send(result.value(), rb);
   } else {
@@ -318,32 +392,82 @@ bool JsonAreEquals(const JsonType& lhs, const JsonType& rhs) {
   }
 }
 
+/* Converts a JSONPath to a JSONPointer.
+   E.g. $[a][b][0] -> /a/b/0.
+   V1 JSONPath is not supported. */
+std::optional<std::string> ConvertJsonPathToJsonPointer(string_view json_path) {
+  auto parsed_path = json::ParsePath(json_path);
+
+  if (!parsed_path) {
+    VLOG(2) << "Error during conversion of JSONPath to JSONPointer: " << json_path
+            << ". Invalid JSONPath.";
+    return std::nullopt;
+  }
+
+  std::string pointer;
+  const auto& path = parsed_path.value();
+  for (const auto& node : path) {
+    const auto& type = node.type();
+    if (type == json::SegmentType::IDENTIFIER) {
+      absl::StrAppend(&pointer, "/"sv, node.identifier());
+    } else if (type == json::SegmentType::INDEX) {
+      const auto& index = node.index();
+
+      if (index.first != index.second) {
+        VLOG(2) << "Error during conversion of JSONPath to JSONPointer: " << json_path
+                << ". Index range is not supported.";
+        return std::nullopt;
+      }
+
+      absl::StrAppend(&pointer, "/"sv, node.index().first);
+    } else {
+      VLOG(2) << "Error during conversion of JSONPath to JSONPointer: " << json_path
+              << ". Unsupported segment type.";
+      return std::nullopt;
+    }
+  }
+
+  return pointer;
+}
+
 // Use this method on the coordinator thread
 std::optional<JsonType> JsonFromString(std::string_view input) {
   return dfly::JsonFromString(input, PMR_NS::get_default_resource());
 }
 
-// Use this method on the shard thread
+/* Use this method on the shard thread
+
+   If you do memory tracking, make sure to initialize it before calling this method, and reset the
+   result before invoking SetJsonSize. Note that even after calling std::move on an optional, it may
+   still hold the JSON value, which can lead to incorrect memory tracking. */
 std::optional<JsonType> ShardJsonFromString(std::string_view input) {
   return dfly::JsonFromString(input, CompactObj::memory_resource());
 }
 
-OpResult<DbSlice::ItAndUpdater> SetJson(const OpArgs& op_args, string_view key,
-                                        string_view json_str) {
-  auto& db_slice = op_args.GetDbSlice();
+OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_str) {
+  // We check the type of the object later, because we allow here OBJ_JSON and OBJ_STRING
+  auto it_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key, std::nullopt);
+  RETURN_ON_BAD_STATUS(it_res);
 
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  RETURN_ON_BAD_STATUS(op_res);
+  auto type = it_res->it->second.ObjType();
+  if (type == OBJ_JSON) {
+    // If it json we need to remove the old json object from the indexes
+    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it_res->it->second);
+  } else if (type != OBJ_STRING) {
+    // The object is not a JSON object and not a string, so we cannot set a full JSON value
+    return OpStatus::WRONG_TYPE;
+  }
 
-  auto& res = *op_res;
-
-  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, res.it->second);
-
-  JsonMemTracker tracker;
+  JsonAutoUpdater updater(op_args, key, *std::move(it_res),
+                          {.disable_indexing = true, .update_on_delete = false});
 
   std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
+    if (type == OBJ_JSON) {
+      // We need to add the document to the indexes, because we removed it before
+      op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, it_res->it->second);
+    }
     return OpStatus::INVALID_JSON;
   }
 
@@ -352,15 +476,86 @@ OpResult<DbSlice::ItAndUpdater> SetJson(const OpArgs& op_args, string_view key,
     json::FromJsonType(*parsed_json, &fbb);
     fbb.Finish();
     const auto& buf = fbb.GetBuffer();
-    res.it->second.SetJson(buf.data(), buf.size());
+    updater.GetPrimeValue().SetJson(buf.data(), buf.size());
   } else {
-    res.it->second.SetJson(std::move(*parsed_json));
+    updater.GetPrimeValue().SetJson(std::move(*parsed_json));
   }
 
-  tracker.SetJsonSize(res.it->second, res.is_new);
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, res.it->second);
+  // We should do reset before setting the size of the json, because
+  // std::optional still holds the value and it will be deallocated
+  parsed_json.reset();
+  updater.SetJsonSize();
 
-  return std::move(res);
+  // We need to manually run add document here
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, it_res->it->second);
+
+  return OpStatus::OK;
+}
+
+/* Sets a partial JSON value at the specified path.
+   True means that the value was set, false means that the value was not set. */
+OpResult<bool> SetPartialJson(const OpArgs& op_args, string_view key,
+                              const WrappedJsonPath& json_path, string_view json_str,
+                              bool is_nx_condition, bool is_xx_condition) {
+  auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
+  RETURN_ON_BAD_STATUS(it_res);
+
+  JsonAutoUpdater updater(op_args, key, *std::move(it_res));
+
+  /* This method would use copy for parsed_json and not move!
+     The reason being, that we are applying this multiple times for each match we found.
+     So for example if we have an array that this expression will match each entry in it then the
+     assign here is called N times. */
+  std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
+  if (!parsed_json) {
+    VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
+    return OpStatus::INVALID_JSON;
+  }
+
+  bool path_exists = false;
+  bool value_was_set = false;
+
+  // If the path exists, this callback will be called
+  auto mutate_cb = [&](std::optional<std::string_view>, JsonType* val) -> MutateCallbackResult<> {
+    path_exists = true;
+    if (!is_nx_condition) {
+      value_was_set = true;
+      *val = JsonType(parsed_json.value(),
+                      std::pmr::polymorphic_allocator<char>{CompactObj::memory_resource()});
+    }
+    return {};
+  };
+
+  auto mutate_res = json_path.ExecuteMutateCallback<Nothing>(
+      updater.GetJson(), mutate_cb, CallbackResultOptions::DefaultMutateOptions());
+
+  // Set a new value if the path doesn't exist and the xx condition is not set.
+  if (mutate_res && !path_exists && !is_xx_condition) {
+    auto pointer = ConvertJsonPathToJsonPointer(json_path.Path());
+    if (!pointer) {
+      return OpStatus::SYNTAX_ERR;
+    }
+
+    std::error_code ec;
+    jsoncons::jsonpointer::add(*updater.GetJson(), pointer.value(), std::move(parsed_json).value(),
+                               ec);
+    if (ec) {
+      VLOG(1) << "Failed to add a JSON value to the following path: " << json_str
+              << " with the error: " << ec.message();
+      return OpStatus::SYNTAX_ERR;
+    }
+
+    value_was_set = true;
+  }
+
+  if (value_was_set) {
+    // We should do reset before setting the size of the json, because
+    // std::optional still holds the value and it will be deallocated
+    parsed_json.reset();
+    updater.SetJsonSize();
+  }
+
+  return value_was_set;
 }
 
 size_t NormalizeNegativeIndex(int index, size_t size) {
@@ -402,17 +597,6 @@ string JsonTypeToName(const JsonType& val) {
   }
 
   return std::string{};
-}
-
-OpResult<JsonType*> GetJson(const OpArgs& op_args, string_view key) {
-  auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
-  if (!it_res.ok())
-    return it_res.status();
-
-  JsonType* json_val = it_res.value()->second.GetJson();
-  DCHECK(json_val) << "should have a valid JSON object for key " << key;
-
-  return json_val;
 }
 
 // Returns the index of the next right bracket
@@ -528,44 +712,6 @@ string ConvertToJsonPointer(string_view json_path) {
   return result;
 }
 
-/* Converts a JSONPath to a JSONPointer.
-   E.g. $[a][b][0] -> /a/b/0.
-   V1 JSONPath is not supported. */
-std::optional<std::string> ConvertJsonPathToJsonPointer(string_view json_path) {
-  auto parsed_path = json::ParsePath(json_path);
-
-  if (!parsed_path) {
-    VLOG(2) << "Error during conversion of JSONPath to JSONPointer: " << json_path
-            << ". Invalid JSONPath.";
-    return std::nullopt;
-  }
-
-  std::string pointer;
-  const auto& path = parsed_path.value();
-  for (const auto& node : path) {
-    const auto& type = node.type();
-    if (type == json::SegmentType::IDENTIFIER) {
-      pointer += '/' + node.identifier();
-    } else if (type == json::SegmentType::INDEX) {
-      const auto& index = node.index();
-
-      if (index.first != index.second) {
-        VLOG(2) << "Error during conversion of JSONPath to JSONPointer: " << json_path
-                << ". Index range is not supported.";
-        return std::nullopt;
-      }
-
-      pointer += '/' + std::to_string(node.index().first);
-    } else {
-      VLOG(2) << "Error during conversion of JSONPath to JSONPointer: " << json_path
-              << ". Unsupported segment type.";
-      return std::nullopt;
-    }
-  }
-
-  return pointer;
-}
-
 size_t CountJsonFields(const JsonType& j) {
   size_t res = 0;
   json_type type = j.type();
@@ -593,68 +739,46 @@ size_t CountJsonFields(const JsonType& j) {
   return res;
 }
 
-struct EvaluateOperationOptions {
+struct ReadOnlyOperationOptions {
   bool return_nil_if_key_not_found = false;
-  CallbackResultOptions cb_result_options = CallbackResultOptions::DefaultEvaluateOptions();
+  CallbackResultOptions cb_result_options = CallbackResultOptions::DefaultReadOnlyOptions();
 };
 
 template <typename T>
-OpResult<JsonCallbackResult<T>> JsonEvaluateOperation(const OpArgs& op_args, std::string_view key,
+OpResult<JsonCallbackResult<T>> JsonReadOnlyOperation(const OpArgs& op_args, std::string_view key,
                                                       const WrappedJsonPath& json_path,
-                                                      JsonPathEvaluateCallback<T> cb,
-                                                      EvaluateOperationOptions options = {}) {
-  OpResult<JsonType*> result = GetJson(op_args, key);
-  if (options.return_nil_if_key_not_found && result == OpStatus::KEY_NOTFOUND) {
-    return JsonCallbackResult<T>{
-        {JsonPathType::kLegacy, options.cb_result_options.saving_order,
-         CallbackResultOptions::OnEmpty::kSendNil}};  // set legacy mode to return nil
+                                                      JsonPathReadOnlyCallback<T> cb,
+                                                      ReadOnlyOperationOptions options = {}) {
+  auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
+
+  if (!it_res) {
+    if (options.return_nil_if_key_not_found && it_res == OpStatus::KEY_NOTFOUND) {
+      return JsonCallbackResult<T>{{CallbackResultOptions::OnEmpty::kSendNil,
+                                    options.cb_result_options.saving_order,
+                                    JsonPathType::kLegacy}};  // set legacy mode to return nil
+    }
+    return it_res.status();
   }
 
-  RETURN_ON_BAD_STATUS(result);
-  return json_path.Evaluate<T>(*result, cb, options.cb_result_options);
+  JsonType* json_val = it_res.value()->second.GetJson();
+  DCHECK(json_val) << "should have a valid JSON object for key " << key;
+
+  return json_path.ExecuteReadOnlyCallback<T>(json_val, cb, options.cb_result_options);
 }
 
-struct MutateOperationOptions {
-  using PostMutateCallback = absl::FunctionRef<OpStatus(JsonType*)>;
-
-  std::optional<PostMutateCallback> post_mutate_cb;
-  CallbackResultOptions cb_result_options = CallbackResultOptions::DefaultMutateOptions();
-};
-
 template <typename T>
-OpResult<JsonCallbackResult<optional<T>>> JsonMutateOperation(const OpArgs& op_args,
-                                                              std::string_view key,
-                                                              const WrappedJsonPath& json_path,
-                                                              JsonPathMutateCallback<T> cb,
-                                                              MutateOperationOptions options = {}) {
+OpResult<JsonCallbackResult<optional<T>>> JsonMutateOperation(
+    const OpArgs& op_args, std::string_view key, const WrappedJsonPath& json_path,
+    JsonPathMutateCallback<T> cb,
+    CallbackResultOptions cb_result_options = CallbackResultOptions::DefaultMutateOptions()) {
   auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
   RETURN_ON_BAD_STATUS(it_res);
 
-  JsonMemTracker mem_tracker;
+  JsonAutoUpdater updater(op_args, key, *std::move(it_res));
 
-  PrimeValue& pv = it_res->it->second;
+  auto mutate_res = json_path.ExecuteMutateCallback(updater.GetJson(), cb, cb_result_options);
 
-  JsonType* json_val = pv.GetJson();
-  DCHECK(json_val) << "should have a valid JSON object for key '" << key << "' the type for it is '"
-                   << pv.ObjType() << "'";
-
-  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
-
-  auto mutate_res = json_path.Mutate(json_val, cb, options.cb_result_options);
-
-  // Call post mutate callback
-  if (mutate_res && options.post_mutate_cb) {
-    auto res = options.post_mutate_cb.value()(json_val);
-    // We can not return result here, because we need to update the size
-    if (res != OpStatus::OK) {
-      mutate_res = res;
-    }
-  }
-
-  // we need to manually run this before the PostUpdater run
-  mem_tracker.SetJsonSize(pv, false);
-  it_res->post_updater.Run();
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+  updater.SetJsonSize();
 
   return mutate_res;
 }
@@ -666,6 +790,8 @@ bool LegacyModeIsEnabled(const std::vector<std::pair<std::string_view, WrappedJs
 
 OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
                                 const JsonGetParams& params) {
+  // We don't use OBJ_JSON here because we want to support both JSON and STRING types.
+  // If the key is not OBJ_JSON and not OBJ_STRING, we return WRONG_TYPE.
   auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
@@ -719,11 +845,11 @@ OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
   auto cb = [](std::string_view, const JsonType& val) { return val; };
 
   const bool legacy_mode_is_enabled = LegacyModeIsEnabled(paths);
-  CallbackResultOptions cb_options = CallbackResultOptions::DefaultEvaluateOptions();
+  CallbackResultOptions cb_options = CallbackResultOptions::DefaultReadOnlyOptions();
   cb_options.path_type = legacy_mode_is_enabled ? JsonPathType::kLegacy : JsonPathType::kV2;
 
   auto eval_wrapped = [&](const WrappedJsonPath& json_path) -> std::optional<JsonType> {
-    auto eval_result = json_path.Evaluate<JsonType>(&json_entry, cb, cb_options);
+    auto eval_result = json_path.ExecuteReadOnlyCallback<JsonType>(&json_entry, cb, cb_options);
 
     DCHECK(legacy_mode_is_enabled == eval_result.IsV1());
 
@@ -764,7 +890,7 @@ auto OpType(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_
   auto cb = [](const string_view&, const JsonType& val) -> std::string {
     return JsonTypeToName(val);
   };
-  return JsonEvaluateOperation<std::string>(op_args, key, json_path, std::move(cb), {true});
+  return JsonReadOnlyOperation<std::string>(op_args, key, json_path, std::move(cb), {true});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpStrLen(const OpArgs& op_args, string_view key,
@@ -776,9 +902,9 @@ OpResult<JsonCallbackResult<OptSize>> OpStrLen(const OpArgs& op_args, string_vie
       return nullopt;
     }
   };
-  return JsonEvaluateOperation<OptSize>(
+  return JsonReadOnlyOperation<OptSize>(
       op_args, key, json_path, std::move(cb),
-      {true, CallbackResultOptions::DefaultEvaluateOptions(SavingOrder::kSaveFirst)});
+      {true, CallbackResultOptions::DefaultReadOnlyOptions(SavingOrder::kSaveFirst)});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpObjLen(const OpArgs& op_args, string_view key,
@@ -790,10 +916,10 @@ OpResult<JsonCallbackResult<OptSize>> OpObjLen(const OpArgs& op_args, string_vie
       return nullopt;
     }
   };
-  return JsonEvaluateOperation<OptSize>(
+  return JsonReadOnlyOperation<OptSize>(
       op_args, key, json_path, std::move(cb),
       {json_path.IsLegacyModePath(),
-       CallbackResultOptions::DefaultEvaluateOptions(SavingOrder::kSaveFirst)});
+       CallbackResultOptions::DefaultReadOnlyOptions(SavingOrder::kSaveFirst)});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpArrLen(const OpArgs& op_args, string_view key,
@@ -805,9 +931,9 @@ OpResult<JsonCallbackResult<OptSize>> OpArrLen(const OpArgs& op_args, string_vie
       return std::nullopt;
     }
   };
-  return JsonEvaluateOperation<OptSize>(
+  return JsonReadOnlyOperation<OptSize>(
       op_args, key, json_path, std::move(cb),
-      {true, CallbackResultOptions::DefaultEvaluateOptions(SavingOrder::kSaveFirst)});
+      {true, CallbackResultOptions::DefaultReadOnlyOptions(SavingOrder::kSaveFirst)});
 }
 
 template <typename T>
@@ -939,9 +1065,12 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
                      const WrappedJsonPath& json_path) {
   if (json_path.RefersToRootElement()) {
     auto& db_slice = op_args.GetDbSlice();
-    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
-    if (IsValid(it)) {
-      db_slice.Del(op_args.db_cntx, it);
+    auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_JSON);
+    RETURN_ON_BAD_STATUS(res_it);
+
+    if (IsValid(res_it->it)) {
+      res_it->post_updater.Run();
+      db_slice.Del(op_args.db_cntx, res_it->it);
       return 1;
     }
     return 0;
@@ -954,29 +1083,24 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
     return 0;
   }
 
-  PrimeValue& pv = it_res->it->second;
-  JsonType* json_val = pv.GetJson();
-
-  JsonMemTracker tracker;
-  absl::Cleanup update_size_on_exit([tracker, &pv]() mutable { tracker.SetJsonSize(pv, false); });
-
   if (json_path.HoldsJsonPath()) {
+    JsonAutoUpdater updater(op_args, key, *std::move(it_res),
+                            {.disable_indexing = false, .update_on_delete = true});
     const json::Path& path = json_path.AsJsonPath();
-    long deletions = json::MutatePath(
-        path, [](optional<string_view>, JsonType* val) { return true; }, json_val);
+    long deletions = json::DeletePath(path, updater.GetJson());
     return deletions;
   }
 
+  // Allocates memory for the deletion_items.
+  // So we need to initialize JsonAutoUpdater after this callback
   vector<string> deletion_items;
-  auto cb = [&](std::optional<std::string_view> path, JsonType* val) -> MutateCallbackResult<> {
-    deletion_items.emplace_back(*path);
+  auto cb = [&deletion_items](string_view path, const JsonType& val) -> Nothing {
+    deletion_items.emplace_back(path);
     return {};
   };
 
-  auto res = json_path.Mutate<Nothing>(json_val, std::move(cb),
-                                       CallbackResultOptions::DefaultMutateOptions());
-  RETURN_ON_BAD_STATUS(res);
-
+  auto res = json_path.ExecuteReadOnlyCallback<Nothing>(
+      it_res->it->second.GetJson(), cb, CallbackResultOptions::DefaultReadOnlyOptions());
   if (deletion_items.empty()) {
     return 0;
   }
@@ -991,12 +1115,16 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
     patch.emplace_back(patch_item);
   }
 
+  JsonAutoUpdater updater(op_args, key, *std::move(it_res));
+
   std::error_code ec;
-  jsoncons::jsonpatch::apply_patch(*json_val, patch, ec);
+  jsoncons::jsonpatch::apply_patch(*updater.GetJson(), patch, ec);
   if (ec) {
     VLOG(1) << "Failed to apply patch on json with error: " << ec.message();
     return 0;
   }
+
+  updater.SetJsonSize();
 
   // SetString(op_args, key, j.as_string());
   return total_deletions;
@@ -1017,10 +1145,10 @@ auto OpObjKeys(const OpArgs& op_args, string_view key, const WrappedJsonPath& js
     }
     return vec;
   };
-  return JsonEvaluateOperation<StringVec>(
+  return JsonReadOnlyOperation<StringVec>(
       op_args, key, json_path, std::move(cb),
       {json_path.IsLegacyModePath(),
-       CallbackResultOptions::DefaultEvaluateOptions(SavingOrder::kSaveFirst)});
+       CallbackResultOptions::DefaultReadOnlyOptions(SavingOrder::kSaveFirst)});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpStrAppend(const OpArgs& op_args, string_view key,
@@ -1089,7 +1217,7 @@ auto OpArrPop(const OpArgs& op_args, string_view key, WrappedJsonPath& path, int
     return {false, std::move(str)};
   };
   return JsonMutateOperation<std::string>(op_args, key, path, std::move(cb),
-                                          {{}, CallbackResultOptions{OnEmpty::kSendNil}});
+                                          CallbackResultOptions{OnEmpty::kSendNil});
 }
 
 // Returns numeric vector that represents the new length of the array at each path.
@@ -1243,7 +1371,7 @@ auto OpArrIndex(const OpArgs& op_args, string_view key, const WrappedJsonPath& j
     return pos;
   };
 
-  return JsonEvaluateOperation<std::optional<long>>(
+  return JsonReadOnlyOperation<std::optional<long>>(
       op_args, key, json_path, std::move(cb),
       {false, CallbackResultOptions{CallbackResultOptions::OnEmpty::kSendWrongType}});
 }
@@ -1270,8 +1398,8 @@ std::vector<std::optional<std::string>> OpJsonMGet(const WrappedJsonPath& json_p
 
     auto eval_wrapped = [&json_val,
                          &cb](const WrappedJsonPath& json_path) -> std::optional<JsonType> {
-      auto eval_result = json_path.Evaluate<JsonType>(
-          json_val, std::move(cb), CallbackResultOptions::DefaultEvaluateOptions());
+      auto eval_result = json_path.ExecuteReadOnlyCallback<JsonType>(
+          json_val, std::move(cb), CallbackResultOptions::DefaultReadOnlyOptions());
 
       if (eval_result.IsV1()) {
         if (eval_result.Empty())
@@ -1306,13 +1434,13 @@ auto OpFields(const OpArgs& op_args, string_view key, const WrappedJsonPath& jso
   auto cb = [](const string_view&, const JsonType& val) -> std::optional<std::size_t> {
     return CountJsonFields(val);
   };
-  return JsonEvaluateOperation<std::optional<std::size_t>>(op_args, key, json_path, std::move(cb));
+  return JsonReadOnlyOperation<std::optional<std::size_t>>(op_args, key, json_path, std::move(cb));
 }
 
 // Returns json vector that represents the result of the json query.
 auto OpResp(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_path) {
   auto cb = [](const string_view&, const JsonType& val) { return val; };
-  return JsonEvaluateOperation<JsonType>(op_args, key, json_path, std::move(cb));
+  return JsonReadOnlyOperation<JsonType>(op_args, key, json_path, std::move(cb));
 }
 
 // Returns boolean that represents the result of the operation.
@@ -1336,68 +1464,14 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
       }
     }
 
-    auto st = SetJson(op_args, key, json_str);
-    RETURN_ON_BAD_STATUS(st);
-    return true;
+    OpStatus result = SetFullJson(op_args, key, json_str);
+    if (result == OpStatus::OK) {
+      return true;
+    }
+    return result;
   }
 
-  // Note that this operation would use copy and not move!
-  // The reason being, that we are applying this multiple times
-  // For each match we found. So for example if we have
-  // an array that this expression will match each entry in it
-  // then the assign here is called N times, where N == array.size().
-  bool path_exists = false;
-  bool operation_result = false;
-
-  optional<JsonType> parsed_json = ShardJsonFromString(json_str);
-  if (!parsed_json) {
-    VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
-    return OpStatus::INVALID_JSON;
-  }
-  const JsonType& new_json = parsed_json.value();
-
-  // If the path exists, this callback will be called
-  auto mutate_cb = [&](std::optional<std::string_view>, JsonType* val) -> MutateCallbackResult<> {
-    path_exists = true;
-    if (!is_nx_condition) {
-      operation_result = true;
-      *val =
-          JsonType(new_json, std::pmr::polymorphic_allocator<char>{CompactObj::memory_resource()});
-    }
-    return {};
-  };
-
-  // If the path doesn't exist, this callback will be called
-  auto insert_cb = [&](JsonType* json) {
-    // Set a new value if the path doesn't exist and the xx condition is not set.
-    if (!path_exists && !is_xx_condition) {
-      auto pointer = ConvertJsonPathToJsonPointer(json_path.Path());
-      if (!pointer) {
-        return OpStatus::SYNTAX_ERR;
-      }
-
-      std::error_code ec;
-      jsoncons::jsonpointer::add(*json, pointer.value(), new_json, ec);
-      if (ec) {
-        VLOG(1) << "Failed to add a JSON value to the following path: " << path
-                << " with the error: " << ec.message();
-        return OpStatus::SYNTAX_ERR;
-      }
-
-      operation_result = true;
-    }
-
-    return OpStatus::OK;
-  };
-
-  // JsonMutateOperation uses it's own JsonMemTracker. It will work, because updates to already
-  // existing json keys use copy assign, so we don't really need to account for the memory
-  // allocated by ShardJsonFromString above since it's not being moved here at all.
-  auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(mutate_cb),
-                                          MutateOperationOptions{std::move(insert_cb)});
-  RETURN_ON_BAD_STATUS(res);
-
-  return operation_result;
+  return SetPartialJson(op_args, key, json_path, json_str, is_nx_condition, is_xx_condition);
 }
 
 OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
@@ -1794,6 +1868,10 @@ void JsonFamily::ArrPop(CmdArgList args, const CommandContext& cmd_cntx) {
   int index = parser.NextOrDefault<int>(-1);
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  if (auto err = parser.Error(); err) {
+    return builder->SendError(err->MakeReply());
+  }
+
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {

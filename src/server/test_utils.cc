@@ -467,6 +467,25 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   return e;
 }
 
+void BaseFamilyTest::RunMany(const std::vector<std::vector<std::string>>& cmds) {
+  if (!ProactorBase::IsProactorThread()) {
+    return pp_->at(0)->Await([&] { return this->RunMany(cmds); });
+  }
+  TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, GetId());
+  auto* context = conn_wrapper->cmd_cntx();
+  context->ns = &namespaces->GetDefaultNamespace();
+  vector<ArgSlice> args_vec(cmds.size());
+  vector<vector<string_view>> cmd_views(cmds.size());
+  for (size_t i = 0; i < cmds.size(); ++i) {
+    for (const auto& arg : cmds[i]) {
+      cmd_views[i].emplace_back(arg);
+    }
+    args_vec[i] = absl::MakeSpan(cmd_views[i]);
+  }
+  service_->DispatchManyCommands(absl::MakeSpan(args_vec), conn_wrapper->builder(), context);
+  DCHECK(context->transaction == nullptr);
+}
+
 auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view value, uint32_t flags,
                            chrono::seconds ttl) -> MCResponse {
   if (!ProactorBase::IsProactorThread()) {
@@ -513,7 +532,12 @@ auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::stri
   MP::Command cmd;
   cmd.type = cmd_type;
   auto src = list.begin();
-  cmd.key = *src++;
+  if (cmd.type == MP::GAT || cmd.type == MP::GATS) {
+    CHECK(absl::SimpleAtoi(*src++, &cmd.expire_ts));
+  } else {
+    cmd.key = *src++;
+  }
+
   for (; src != list.end(); ++src) {
     cmd.keys_ext.push_back(*src);
   }

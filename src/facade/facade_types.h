@@ -140,7 +140,13 @@ struct ReplyStats {
   absl::flat_hash_map<std::string, uint64_t> err_count;
   size_t script_error_count = 0;
 
+  // This variable can be updated directly from shard threads when they allocate memory for replies.
+  std::atomic<size_t> squashing_current_reply_size{0};
+
+  ReplyStats() = default;
+  ReplyStats(ReplyStats&& other) noexcept;
   ReplyStats& operator+=(const ReplyStats& other);
+  ReplyStats& operator=(const ReplyStats& other);
 };
 
 struct FacadeStats {
@@ -189,6 +195,21 @@ constexpr inline unsigned long long operator""_KB(unsigned long long x) {
 extern __thread FacadeStats* tl_facade_stats;
 
 void ResetStats();
+
+// TODO: move this flag to helio (base/flags.h)
+struct MemoryBytesFlag {
+  size_t value = 0;
+
+  MemoryBytesFlag(size_t s = 0) : value(s) {  // NOLINT
+  }
+
+  operator size_t() const {  // NOLINT
+    return value;
+  }
+};
+
+bool AbslParseFlag(std::string_view in, MemoryBytesFlag* flag, std::string* err);
+std::string AbslUnparseFlag(const MemoryBytesFlag& flag);
 
 // Constants for socket bufring.
 constexpr uint16_t kRecvSockGid = 0;

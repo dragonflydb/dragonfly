@@ -13,6 +13,7 @@
 #include "core/overloaded.h"
 #include "core/search/indices.h"
 #include "server/engine_shard_set.h"
+#include "server/family_utils.h"
 #include "server/search/doc_accessors.h"
 #include "server/server_state.h"
 
@@ -223,7 +224,8 @@ std::optional<ShardDocIndex::DocId> ShardDocIndex::DocKeyIndex::Remove(string_vi
 
 string_view ShardDocIndex::DocKeyIndex::Get(DocId id) const {
   DCHECK_LT(id, keys_.size());
-  DCHECK_GT(keys_[id].size(), 0u);
+  // Check that this id was not removed
+  DCHECK(id < last_id_ && std::find(free_ids_.begin(), free_ids_.end(), id) == free_ids_.end());
 
   return keys_[id];
 }
@@ -513,6 +515,7 @@ vector<string> ShardDocIndices::GetIndexNames() const {
 }
 
 void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
+  DCHECK(IsIndexedKeyType(pv));
   for (auto& [_, index] : indices_) {
     if (index->Matches(key, pv.ObjType()))
       index->AddDoc(key, db_cntx, pv);
@@ -520,6 +523,7 @@ void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, const Pr
 }
 
 void ShardDocIndices::RemoveDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
+  DCHECK(IsIndexedKeyType(pv));
   for (auto& [_, index] : indices_) {
     if (index->Matches(key, pv.ObjType()))
       index->RemoveDoc(key, db_cntx, pv);

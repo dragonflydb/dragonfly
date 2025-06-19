@@ -23,6 +23,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/glob_matcher.h"
+#include "core/huff_coder.h"
 #include "core/intent_lock.h"
 #include "core/tx_queue.h"
 
@@ -124,6 +125,7 @@ class StringMatchTest : public ::testing::Test {
 TEST_F(StringMatchTest, Glob2Regex) {
   EXPECT_EQ(GlobMatcher::Glob2Regex(""), "");
   EXPECT_EQ(GlobMatcher::Glob2Regex("*"), ".*");
+  EXPECT_EQ(GlobMatcher::Glob2Regex("\\*"), "\\*");
   EXPECT_EQ(GlobMatcher::Glob2Regex("\\?"), "\\?");
   EXPECT_EQ(GlobMatcher::Glob2Regex("[abc]"), "[abc]");
   EXPECT_EQ(GlobMatcher::Glob2Regex("[^abc]"), "[^abc]");
@@ -134,7 +136,7 @@ TEST_F(StringMatchTest, Glob2Regex) {
   EXPECT_EQ(GlobMatcher::Glob2Regex("\\d"), "d");
   EXPECT_EQ(GlobMatcher::Glob2Regex("[\\d]"), "[\\\\d]");
   EXPECT_EQ(GlobMatcher::Glob2Regex("abc\\"), "abc\\\\");
-
+  EXPECT_EQ(GlobMatcher::Glob2Regex("[\\]]"), "[\\]]");
   reflex::Matcher matcher("abc[\\\\d]e");
   matcher.input("abcde");
   ASSERT_TRUE(matcher.find());
@@ -180,12 +182,187 @@ TEST_F(StringMatchTest, Basic) {
   EXPECT_EQ(MatchLen("abc?", "abc\n", 0), 1);
 }
 
+#define TEST_STRINGMATCH(pattern, str, case_res, nocase_res) \
+  {                                                          \
+    EXPECT_EQ(int(MatchLen(pattern, str, 0)), case_res);     \
+    EXPECT_EQ(int(MatchLen(pattern, str, 1)), nocase_res);   \
+  }
+
 TEST_F(StringMatchTest, Special) {
   EXPECT_TRUE(MatchLen("h\\[^|", "h[^|", 0));
   EXPECT_FALSE(MatchLen("[^", "[^", 0));
   EXPECT_TRUE(MatchLen("[$?^]a", "?a", 0));
   EXPECT_TRUE(MatchLen("abc[\\d]e", "abcde", 0));
   EXPECT_TRUE(MatchLen("foo\\", "foo\\", 0));
+
+  /* Case sensitivity: */
+  TEST_STRINGMATCH("a", "a", 1, 1);
+  TEST_STRINGMATCH("a", "A", 0, 1);
+  TEST_STRINGMATCH("A", "A", 1, 1);
+  TEST_STRINGMATCH("A", "a", 0, 1);
+  TEST_STRINGMATCH("\\a", "a", 1, 1);
+  TEST_STRINGMATCH("\\a", "A", 0, 1);
+  TEST_STRINGMATCH("\\A", "A", 1, 1);
+  TEST_STRINGMATCH("\\A", "a", 0, 1);
+  TEST_STRINGMATCH("[\\a]", "a", 1, 1);
+
+  // TODO: to fix this: TEST_STRINGMATCH("[\\a]", "A", 0, 1);
+  TEST_STRINGMATCH("[\\A]", "A", 1, 1);
+  // TODO: to fix this: TEST_STRINGMATCH("[\\A]", "a", 0, 1);
+
+  /* Escaped metacharacters: */
+  TEST_STRINGMATCH("\\*", "*", 1, 1);
+  TEST_STRINGMATCH("\\?", "?", 1, 1);
+  TEST_STRINGMATCH("\\\\", "\\", 1, 1);
+  TEST_STRINGMATCH("\\[", "[", 1, 1);
+  TEST_STRINGMATCH("\\]", "]", 1, 1);
+  TEST_STRINGMATCH("\\^", "^", 1, 1);
+  TEST_STRINGMATCH("\\-", "-", 1, 1);
+  TEST_STRINGMATCH("[\\*]", "*", 1, 1);
+  TEST_STRINGMATCH("[\\?]", "?", 1, 1);
+  TEST_STRINGMATCH("[\\\\]", "\\", 1, 1);
+  TEST_STRINGMATCH("[\\[]", "[", 1, 1);
+  TEST_STRINGMATCH("[\\]]", "]", 1, 1);
+  TEST_STRINGMATCH("[\\^]", "^", 1, 1);
+  TEST_STRINGMATCH("[\\-]", "-", 1, 1);
+
+  /* Not special outside character classes: */
+  TEST_STRINGMATCH("]", "]", 1, 1);
+  TEST_STRINGMATCH("^", "^", 1, 1);
+  TEST_STRINGMATCH("-", "-", 1, 1);
+  /* Not special inside character classes: */
+  TEST_STRINGMATCH("[*]", "*", 1, 1);
+  TEST_STRINGMATCH("[?]", "?", 1, 1);
+  TEST_STRINGMATCH("[[]", "[", 1, 1);
+  /* Not special as the first character in a character class: */
+  TEST_STRINGMATCH("[-]", "-", 1, 1);
+
+  /* Not special as range end (undocumented): */
+  TEST_STRINGMATCH("[+-]]", "*", 0, 0); /*   but not * (below) */
+  TEST_STRINGMATCH("[+-]]", "^", 0, 0); /*   or ^ (above) */
+  TEST_STRINGMATCH("[+--]", ",", 1, 1); /* ASCII range + to - includes , */
+  TEST_STRINGMATCH("[+--]", "*", 0, 0); /*   but not * (below) */
+  TEST_STRINGMATCH("[+--]", ".", 0, 0); /*   or . (above) */
+
+  /* And the same, but unclosed: */
+  TEST_STRINGMATCH("[+-]", "*", 0, 0);
+  TEST_STRINGMATCH("[+-]", "^", 0, 0);
+  TEST_STRINGMATCH("[+--", ",", 1, 1);
+  TEST_STRINGMATCH("[+--", "*", 0, 0);
+  TEST_STRINGMATCH("[+--", ".", 0, 0);
+
+  /* Escaped ] alone is literal: */
+  TEST_STRINGMATCH("[\\]a]", "]", 1, 1);
+  TEST_STRINGMATCH("[\\]a]", "a", 1, 1);
+
+  /* Escapes at range end: */
+  TEST_STRINGMATCH("[+-\\\\]", ",", 1, 1); /* ASCII range + to \ includes , */
+  TEST_STRINGMATCH("[+-\\\\]", "*", 0, 0); /*   but not * (below) */
+  TEST_STRINGMATCH("[+-\\]]", "*", 0, 0);  /*   but not * (below) */
+  TEST_STRINGMATCH("[+-\\]]", "^", 0, 0);  /*   or ^ (above) */
+
+  /* Unclosed is the same: */
+  TEST_STRINGMATCH("[+-\\\\", ",", 1, 1);
+  TEST_STRINGMATCH("[+-\\\\", "*", 0, 0);
+  TEST_STRINGMATCH("[+-\\\\", "]", 0, 0);
+  TEST_STRINGMATCH("[+-\\]", ",", 1, 1);
+  TEST_STRINGMATCH("[+-\\]", "*", 0, 0);
+  TEST_STRINGMATCH("[+-\\]", "^", 0, 0);
+  /* An incomplete escape is treated as literal backslash: */
+  TEST_STRINGMATCH("[+-\\", ",", 1, 1);
+  TEST_STRINGMATCH("[+-\\", "*", 0, 0);
+  TEST_STRINGMATCH("[+-\\", "]", 0, 0);
+
+  /* Empty character class matches nothing: */
+  TEST_STRINGMATCH("[]", "", 0, 0);
+  TEST_STRINGMATCH("[]", "a", 0, 0);
+  TEST_STRINGMATCH("[", "", 0, 0); /* Unclosed is the same */
+  TEST_STRINGMATCH("[", "a", 0, 0);
+
+  /* Empty negated character class is equivalent to pattern "?": */
+  TEST_STRINGMATCH("[^]", "", 0, 0);
+  TEST_STRINGMATCH("[^]", "a", 1, 1);
+  TEST_STRINGMATCH("[^]", "ab", 0, 0);
+  TEST_STRINGMATCH("[^", "", 0, 0); /* Unclosed is the same */
+  TEST_STRINGMATCH("[^", "a", 1, 1);
+  TEST_STRINGMATCH("[^", "ab", 0, 0);
+
+  /* Unclosed character classes are not an error (undocumented): */
+  TEST_STRINGMATCH("[A-", "B", 0, 0);
+}
+
+class HuffCoderTest : public ::testing::Test {
+ protected:
+  HuffmanEncoder encoder_;
+  HuffmanDecoder decoder_;
+  string error_msg_;
+  const string_view good_table_{
+      "\x1b\x10\xd8\n\n\x19\xc6\x0c\xc3\x30\x0c\x43\x1e\x93\xe4\x11roB\xf6\xde\xbb\x18V\xc2Zk\x03"sv};
+};
+
+TEST_F(HuffCoderTest, Load) {
+  string data("bad");
+
+  ASSERT_FALSE(encoder_.Load(data, &error_msg_));
+
+  data = good_table_;
+  ASSERT_TRUE(encoder_.Load(data, &error_msg_)) << error_msg_;
+
+  data.append("foo");
+  encoder_.Reset();
+  ASSERT_FALSE(encoder_.Load(data, &error_msg_));
+}
+
+TEST_F(HuffCoderTest, Encode) {
+  ASSERT_TRUE(encoder_.Load(good_table_, &error_msg_)) << error_msg_;
+
+  EXPECT_EQ(1, encoder_.GetNBits('x'));
+  EXPECT_EQ(3, encoder_.GetNBits(':'));
+  EXPECT_EQ(5, encoder_.GetNBits('2'));
+  EXPECT_EQ(5, encoder_.GetNBits('3'));
+
+  string data("x:23xx");
+
+  array<uint8_t, 100> dest;
+  uint32_t dest_size = dest.size();
+  ASSERT_TRUE(encoder_.Encode(data, dest.data(), &dest_size, &error_msg_));
+  ASSERT_EQ(3, dest_size);
+
+  // testing small destination buffer.
+  data = "3333333333333333333";
+  dest_size = 16;
+  EXPECT_TRUE(encoder_.Encode(data, dest.data(), &dest_size, &error_msg_));
+
+  // destination too small
+  ASSERT_EQ(0, dest_size);
+  ASSERT_EQ("", error_msg_);
+}
+
+TEST_F(HuffCoderTest, Decode) {
+  array<unsigned, 256> hist;
+  hist.fill(1);
+  hist['a'] = 100;
+  hist['b'] = 50;
+
+  ASSERT_TRUE(encoder_.Build(hist.data(), hist.size() - 1, &error_msg_));
+  string data("aab");
+
+  array<uint8_t, 100> encoded{0};
+  uint32_t encoded_size = encoded.size();
+  ASSERT_TRUE(encoder_.Encode(data, encoded.data(), &encoded_size, &error_msg_));
+  ASSERT_EQ(1, encoded_size);
+
+  EXPECT_EQ(2, encoder_.GetNBits('a'));
+  EXPECT_EQ(3, encoder_.GetNBits('b'));
+
+  string bindata = encoder_.Export();
+  ASSERT_TRUE(decoder_.Load(bindata, &error_msg_)) << error_msg_;
+
+  const char* src_ptr = reinterpret_cast<const char*>(encoded.data());
+  array<char, 100> decode_dest{0};
+  size_t decoded_size = data.size();
+  ASSERT_TRUE(decoder_.Decode({src_ptr, encoded_size}, decoded_size, decode_dest.data()));
+  ASSERT_EQ("aab", string_view(decode_dest.data(), decoded_size));
 }
 
 using benchmark::DoNotOptimize;
@@ -222,6 +399,26 @@ static void BM_ParseDoubleAbsl(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_ParseDoubleAbsl);
+
+template <clockid_t cid> void BM_ClockType(benchmark::State& state) {
+  timespec ts;
+  while (state.KeepRunning()) {
+    DoNotOptimize(clock_gettime(cid, &ts));
+  }
+}
+
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_REALTIME);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_MONOTONIC);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_PROCESS_CPUTIME_ID);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_THREAD_CPUTIME_ID);
+
+// These clocks are not available on apple platform
+#if !defined(__APPLE__)
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_REALTIME_COARSE);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_MONOTONIC_COARSE);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_BOOTTIME);
+BENCHMARK_TEMPLATE(BM_ClockType, CLOCK_BOOTTIME_ALARM);
+#endif
 
 static void BM_MatchGlob(benchmark::State& state) {
   string random_val = GetRandomHex(state.range(0));
@@ -309,6 +506,30 @@ static void BM_MatchRedisGlob2(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_MatchRedisGlob2)->Arg(32)->Arg(1000)->Arg(10000);
+
+static void BM_MatchData(benchmark::State& state) {
+  vector<string> keys(5000);
+  for (unsigned i = 0; i < keys.size(); ++i) {
+    keys[i] = GetRandomHex(80);
+  }
+  string_view pattern =
+      "*2addb1c3-eae5-5265-ac8e-9fc9106dda8d*77de68daecd823babbb58edb1c8e14d7106e83bb"sv;
+  if (state.range(0) == 1) {
+    GlobMatcher matcher(pattern, true);
+    while (state.KeepRunning()) {
+      for (const auto& key : keys) {
+        DoNotOptimize(matcher.Matches(key));
+      }
+    }
+  } else {
+    while (state.KeepRunning()) {
+      for (const auto& key : keys) {
+        DoNotOptimize(stringmatchlen(pattern.data(), pattern.size(), key.c_str(), key.size(), 0));
+      }
+    }
+  }
+}
+BENCHMARK(BM_MatchData)->ArgName("algo")->Arg(0)->Arg(1);
 
 #ifdef USE_RE2
 static void BM_MatchRe2(benchmark::State& state) {

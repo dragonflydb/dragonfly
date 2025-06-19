@@ -4,7 +4,6 @@
 
 #include "server/stream_family.h"
 
-#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 
 extern "C" {
@@ -29,10 +28,6 @@ using namespace facade;
 using namespace std;
 
 StreamMemTracker::StreamMemTracker() {
-  start_size_ = zmalloc_used_memory_tl;
-}
-
-void StreamMemTracker::UpdateStartSize() {
   start_size_ = zmalloc_used_memory_tl;
 }
 
@@ -684,7 +679,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
     RETURN_ON_BAD_STATUS(res_it);
     add_res = std::move(*res_it);
   } else {
-    auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+    auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_STREAM);
     RETURN_ON_BAD_STATUS(op_res);
     add_res = std::move(*op_res);
   }
@@ -696,8 +691,6 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
   if (add_res.is_new) {
     stream* s = streamNew();
     it->second.InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, s);
-  } else if (it->second.ObjType() != OBJ_STREAM) {
-    return OpStatus::WRONG_TYPE;
   }
 
   stream* stream_inst = (stream*)it->second.RObjPtr();
@@ -1213,7 +1206,6 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
   auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   int64_t entries_read = SCG_INVALID_ENTRIES_READ;
-
   StreamMemTracker mem_tracker;
   if (!res_it) {
     if (opts.flags & kCreateOptMkstream) {
@@ -1221,8 +1213,6 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
       res_it = db_slice.AddNew(op_args.db_cntx, key, PrimeValue{}, 0);
       if (!res_it)
         return res_it.status();
-
-      mem_tracker.UpdateStartSize();
 
       stream* s = streamNew();
       res_it->it->second.InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, s);
@@ -1507,7 +1497,6 @@ OpStatus OpSetId(const OpArgs& op_args, string_view key, string_view gname, stri
       return OpStatus::SYNTAX_ERR;
     }
   }
-  // We are not using stream memory tracker here because we are not allocating
   cgr_res->cg->last_id = sid;
 
   return OpStatus::OK;
@@ -1853,8 +1842,6 @@ OpResult<PendingResult> OpPending(const OpArgs& op_args, string_view key, const 
   auto cgroup_res = FindGroup(op_args, key, opts.group_name);
   RETURN_ON_BAD_STATUS(cgroup_res);
 
-  StreamMemTracker mem_tracker;
-
   streamConsumer* consumer = nullptr;
   if (!opts.consumer_name.empty()) {
     consumer = streamLookupConsumer(cgroup_res->cg, WrapSds(opts.consumer_name));
@@ -1867,9 +1854,6 @@ OpResult<PendingResult> OpPending(const OpArgs& op_args, string_view key, const 
   } else {
     result = GetPendingExtendedResult(op_args.db_cntx.time_now_ms, cgroup_res->cg, consumer, opts);
   }
-
-  mem_tracker.UpdateStreamSize(cgroup_res->it->second);
-
   return result;
 }
 
@@ -2152,7 +2136,7 @@ struct StreamReplies {
   }
 
   void SendRecord(const Record& record) const {
-    rb->StartArray(2);
+    RedisReplyBuilder::ArrayScope scope{rb, 2};
     rb->SendBulkString(StreamIdRepr(record.id));
     rb->StartArray(record.kv_arr.size() * 2);
     for (const auto& k_v : record.kv_arr) {
@@ -2162,13 +2146,13 @@ struct StreamReplies {
   }
 
   void SendIDs(absl::Span<const streamID> ids) const {
-    rb->StartArray(ids.size());
+    RedisReplyBuilder::ArrayScope scope{rb, ids.size()};
     for (auto id : ids)
       rb->SendBulkString(StreamIdRepr(id));
   }
 
   void SendRecords(absl::Span<const Record> records) const {
-    rb->StartArray(records.size());
+    RedisReplyBuilder::ArrayScope scope{rb, records.size()};
     for (const auto& record : records)
       SendRecord(record);
   }
@@ -2456,13 +2440,6 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
 
       // Update consumer
       if (sitem.group) {
-        auto res_it =
-            t->GetDbSlice(shard->shard_id()).FindMutable(t->GetDbContext(), *wake_key, OBJ_STREAM);
-        DCHECK(res_it.ok());
-
-        StreamMemTracker mem_tracker;
-
-        // Can allocate a new consumer
         range_opts.consumer =
             FindOrAddConsumer(opts->consumer_name, sitem.group, GetCurrentTimeMs());
         sitem.consumer = range_opts.consumer;
@@ -2476,11 +2453,6 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
           result = OpStatus::CANCELLED;
           return OpStatus::OK;
         }
-
-        /* We should track memory here in case the consumer hasn’t been used before this XREAD
-         * command — in that case, a new consumer will be created during the FindOrAddConsumer
-         * method. That means that allocation will occur. */
-        mem_tracker.UpdateStreamSize(res_it->it->second);
       }
 
       range_opts.noack = opts->noack;
@@ -2588,7 +2560,7 @@ void XReadGeneric2(CmdArgList args, bool read_group, Transaction* tx, SinkReplyB
 
   // Send all results back
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  SinkReplyBuilder::ReplyAggregator agg(builder);
+  SinkReplyBuilder::ReplyScope scope(builder);
   if (opts->read_group) {
     if (rb->IsResp3()) {
       rb->StartCollection(opts->stream_ids.size(), RedisReplyBuilder::CollectionType::MAP);
@@ -2826,6 +2798,11 @@ void StreamFamily::XClaim(CmdArgList args, const CommandContext& cmd_cntx) {
   };
   OpResult<ClaimInfo> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   if (!result) {
+    if (result.status() == OpStatus::SKIPPED) {
+      // Return empty result when operation is skipped
+      StreamReplies{cmd_cntx.rb}.SendClaimInfo(ClaimInfo{});
+      return;
+    }
     cmd_cntx.rb->SendError(result.status());
     return;
   }
@@ -3165,6 +3142,7 @@ void StreamFamily::XPending(CmdArgList args, const CommandContext& cmd_cntx) {
   }
   const PendingResult& result = op_result.value();
 
+  SinkReplyBuilder::ReplyScope scope{rb};
   if (std::holds_alternative<PendingReducedResult>(result)) {
     const auto& res = std::get<PendingReducedResult>(result);
     rb->StartArray(4);
@@ -3219,7 +3197,7 @@ void StreamFamily::XRevRange(CmdArgList args, const CommandContext& cmd_cntx) {
 variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view skey,
                                               ReadOpts* opts) {
   auto& db_slice = op_args.GetDbSlice();
-  auto res_it = db_slice.FindMutable(op_args.db_cntx, skey, OBJ_STREAM);
+  auto res_it = db_slice.FindReadOnly(op_args.db_cntx, skey, OBJ_STREAM);
   if (!res_it) {
     if (res_it.status() == OpStatus::WRONG_TYPE)
       return facade::ErrorReply{res_it.status()};
@@ -3229,13 +3207,7 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
     return false;
   }
 
-  /* We should enable memory tracking because this operation can add a consumer during the
-   * FindOrAddConsumer command if the consumer hasn't been used before — which means memory
-   * allocation can occur. */
-  StreamMemTracker mem_tracker;
-  absl::Cleanup update_size_cb([&]() { mem_tracker.UpdateStreamSize(res_it->it->second); });
-
-  const CompactObj& cobj = res_it->it->second;
+  const CompactObj& cobj = (*res_it)->second;
   stream* s = GetReadOnlyStream(cobj);
 
   // Fetch last id
@@ -3255,7 +3227,6 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
       return facade::ErrorReply{
           NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option")};
 
-    // Can allocate memory if the consumer is not existing
     consumer = FindOrAddConsumer(opts->consumer_name, group, op_args.db_cntx.time_now_ms);
 
     requested_sitem.group = group;
@@ -3322,8 +3293,9 @@ void StreamFamily::XTrim(CmdArgList args, const CommandContext& cmd_cntx) {
   std::string_view key = parser.Next();
 
   auto parsed_trim_opts = ParseTrimOpts(&parser);
-  if (!parsed_trim_opts || !parser.Finalize()) {
-    rb->SendError(!parsed_trim_opts ? parsed_trim_opts.error() : parser.Error()->MakeReply());
+  if (!parser.Finalize() || !parsed_trim_opts) {
+    auto err = parser.Error();
+    rb->SendError(!parsed_trim_opts ? parsed_trim_opts.error() : err->MakeReply());
     return;
   }
 

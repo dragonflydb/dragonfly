@@ -318,7 +318,7 @@ TEST_F(AclFamilyTest, TestUsers) {
 TEST_F(AclFamilyTest, TestCat) {
   TestInitAclFam();
   auto resp = Run({"ACL", "CAT", "nonsense"});
-  EXPECT_THAT(resp, ErrArg("ERR Unkown category: NONSENSE"));
+  EXPECT_THAT(resp, ErrArg("ERR Unknown category: NONSENSE"));
 
   resp = Run({"ACL", "CAT"});
   EXPECT_GE(resp.GetVec().size(), 24u);
@@ -329,7 +329,7 @@ TEST_F(AclFamilyTest, TestCat) {
               UnorderedElementsAre("GETSET", "GETRANGE", "INCRBYFLOAT", "GETDEL", "DECRBY",
                                    "PREPEND", "SETEX", "MSET", "SET", "PSETEX", "SUBSTR", "DECR",
                                    "STRLEN", "INCR", "INCRBY", "MGET", "GET", "SETNX", "GETEX",
-                                   "APPEND", "MSETNX", "SETRANGE"));
+                                   "APPEND", "MSETNX", "SETRANGE", "GAT"));
 }
 
 TEST_F(AclFamilyTest, TestGetUser) {

@@ -75,10 +75,7 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   if (stream_journal) {
     auto* journal = db_slice_->shard_owner()->journal();
     DCHECK(journal);
-    auto journal_cb = [this](const journal::JournalItem& item, bool await) {
-      OnJournalEntry(item, await);
-    };
-    journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
+    journal_cb_id_ = journal->RegisterOnChange(this);
   }
 
   const auto flush_threshold = ServerState::tlocal()->serialization_max_chunk_size;
@@ -118,6 +115,9 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
   VLOG(1) << "FinalizeJournalStream";
   DCHECK(db_slice_->shard_owner()->IsMyThread());
   if (!journal_cb_id_) {  // Finalize only once.
+    // In case of incremental snapshotting in StartIncremental, if an error is encountered,
+    // journal_cb_id_ may not be set, but the snapshot fiber is still running.
+    snapshot_fb_.JoinIfNeeded();
     return;
   }
   uint32_t cb_id = journal_cb_id_;
@@ -131,6 +131,7 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
   journal->UnregisterOnChange(cb_id);
   if (!cancel) {
     // always succeeds because serializer_ flushes to string.
+    VLOG(1) << "FinalizeJournalStream lsn: " << journal->GetLsn();
     std::ignore = serializer_->SendJournalOffset(journal->GetLsn());
     PushSerialized(true);
   }
@@ -227,10 +228,7 @@ void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
   if (journal->GetLsn() == lsn) {
     std::ignore = serializer_->SendFullSyncCut();
 
-    auto journal_cb = [this](const journal::JournalItem& item, bool await) {
-      OnJournalEntry(item, await);
-    };
-    journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
+    journal_cb_id_ = journal->RegisterOnChange(this);
     PushSerialized(true);
   } else {
     // We stopped but we didn't manage to send the whole stream.
@@ -238,7 +236,6 @@ void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
         std::make_error_code(errc::state_not_recoverable),
         absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
                      " was dropped from the buffer. Current lsn=", journal->GetLsn()));
-    FinalizeJournalStream(true);
   }
 }
 
@@ -413,23 +410,17 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 // value. This is guaranteed by the fact that OnJournalEntry runs always after OnDbChange, and
 // no database switch can be performed between those two calls, because they are part of one
 // transaction.
-// allow_flush is controlled by Journal::SetFlushMode
-// (usually it's true unless we are in the middle of a critical section that can not preempt).
-void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool allow_flush) {
+void SliceSnapshot::ConsumeJournalChange(const journal::JournalItem& item) {
   {
     // We grab the lock in case we are in the middle of serializing a bucket, so it serves as a
     // barrier here for atomic serialization.
     std::lock_guard barrier(big_value_mu_);
-    if (item.opcode != journal::Op::NOOP) {
-      std::ignore = serializer_->WriteJournalEntry(item.data);
-    }
+    std::ignore = serializer_->WriteJournalEntry(item.data);
   }
+}
 
-  if (allow_flush) {
-    // This is the only place that flushes in streaming mode
-    // once the iterate buckets fiber finished.
-    PushSerialized(false);
-  }
+void SliceSnapshot::ThrottleIfNeeded() {
+  PushSerialized(false);
 }
 
 size_t SliceSnapshot::GetBufferCapacity() const {

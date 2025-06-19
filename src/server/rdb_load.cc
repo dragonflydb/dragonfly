@@ -482,11 +482,12 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
       }
     });
     std::string key;
+    std::string val;
     for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
       // ToSV may reference an internal buffer, therefore we can use only before the
       // next call to ToSV. To workaround, copy the key locally.
       key = ToSV(ltrace->arr[i].rdb_var);
-      string_view val = ToSV(ltrace->arr[i + 1].rdb_var);
+      val = ToSV(ltrace->arr[i + 1].rdb_var);
 
       if (ec_)
         return;
@@ -915,7 +916,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
   } else if (rdb_type_ == RDB_TYPE_HASH_ZIPLIST || rdb_type_ == RDB_TYPE_HASH_LISTPACK) {
     unsigned char* lp = lpNew(blob.size());
     switch (rdb_type_) {
-      case RDB_TYPE_HASH_ZIPLIST:
+      case RDB_TYPE_HASH_ZIPLIST:  // legacy format
         if (!ziplistPairsConvertAndValidateIntegrity((const uint8_t*)blob.data(), blob.size(),
                                                      &lp)) {
           LOG(ERROR) << "Zset ziplist integrity check failed.";
@@ -950,7 +951,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       pv_->InitRobj(OBJ_HASH, kEncodingListPack, lp);
     }
     return;
-  } else if (rdb_type_ == RDB_TYPE_ZSET_ZIPLIST) {
+  } else if (rdb_type_ == RDB_TYPE_ZSET_ZIPLIST) {  // legacy format
     unsigned char* lp = lpNew(blob.size());
     if (!ziplistPairsConvertAndValidateIntegrity((uint8_t*)blob.data(), blob.size(), &lp)) {
       LOG(ERROR) << "Zset ziplist integrity check failed.";
@@ -1176,7 +1177,8 @@ auto RdbLoaderBase::FetchLzfStringObject() -> io::Result<string> {
   SET_OR_UNEXPECT(LoadLen(NULL), clen);
   SET_OR_UNEXPECT(LoadLen(NULL), len);
 
-  if (len > 1ULL << 29 || len <= clen || clen == 0) {
+  // TODO serialization and deserialization for data > 512 MB should be done via chunks
+  if (len <= clen || clen == 0) {
     LOG(ERROR) << "Bad compressed string";
     return Unexpected(rdb::rdb_file_corrupted);
   }

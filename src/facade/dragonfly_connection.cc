@@ -18,12 +18,14 @@
 #include "base/histogram.h"
 #include "base/io_buf.h"
 #include "base/logging.h"
+#include "base/stl_util.h"
 #include "core/heap_size.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
+#include "facade/socket_utils.h"
 #include "glog/logging.h"
 #include "io/file.h"
 #include "util/fibers/fibers.h"
@@ -55,10 +57,10 @@ ABSL_FLAG(string, admin_bind, "",
           "If set, the admin consol TCP connection would be bind the given address. "
           "This supports both HTTP and RESP protocols");
 
-ABSL_FLAG(uint64_t, request_cache_limit, 64_MB,
+ABSL_FLAG(facade::MemoryBytesFlag, request_cache_limit, 64_MB,
           "Amount of memory to use for request cache in bytes - per IO thread.");
 
-ABSL_FLAG(uint64_t, pipeline_buffer_limit, 128_MB,
+ABSL_FLAG(facade::MemoryBytesFlag, pipeline_buffer_limit, 128_MB,
           "Amount of memory to use for storing pipeline requests - per IO thread."
           "Please note that clients that send excecissively huge pipelines, "
           "may deadlock themselves. See https://github.com/dragonflydb/dragonfly/discussions/3997"
@@ -71,12 +73,10 @@ ABSL_FLAG(uint32_t, pipeline_queue_limit, 10000,
           "may require increasing this limit to prevent the risk of deadlocking."
           "See https://github.com/dragonflydb/dragonfly/discussions/3997 for details");
 
-ABSL_FLAG(uint64_t, publish_buffer_limit, 128_MB,
+ABSL_FLAG(facade::MemoryBytesFlag, publish_buffer_limit, 128_MB,
           "Amount of memory to use for storing pub commands in bytes - per IO thread");
 
-ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin port");
-
-ABSL_FLAG(uint32_t, pipeline_squash, 10,
+ABSL_FLAG(uint32_t, pipeline_squash, 1,
           "Number of queued pipelined commands above which squashing is enabled, 0 means disabled");
 
 // When changing this constant, also update `test_large_cmd` test in connection_test.py.
@@ -88,7 +88,7 @@ ABSL_FLAG(uint64_t, max_bulk_len, 2u << 30,
           "Maximum bulk length that is "
           "allowed to be accepted when parsing RESP protocol");
 
-ABSL_FLAG(size_t, max_client_iobuf_len, 1u << 16,
+ABSL_FLAG(facade::MemoryBytesFlag, max_client_iobuf_len, 1u << 16,
           "Maximum io buffer length that is used to read client requests.");
 
 ABSL_FLAG(bool, migrate_connections, true,
@@ -262,13 +262,16 @@ void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp,
   }
 
   for (auto part : resp) {
-    blobs[index++] = iovec{.iov_base = const_cast<char*>(part.GetView().data()),
-                           .iov_len = part.GetView().size()};
-    if (index >= blobs.size()) {
-      if (!tl_traffic_logger.Write(blobs.data(), blobs.size())) {
-        return;
+    if (auto blob_len = part.GetView().size(); blob_len > 0) {
+      blobs[index++] =
+          iovec{.iov_base = const_cast<char*>(part.GetView().data()), .iov_len = blob_len};
+
+      if (index >= blobs.size()) {
+        if (!tl_traffic_logger.Write(blobs.data(), blobs.size())) {
+          return;
+        }
+        index = 0;
       }
-      index = 0;
     }
   }
 
@@ -508,6 +511,14 @@ void Connection::AsyncOperations::operator()(const AclUpdateMessage& msg) {
 void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
 
+  // Discard stale messages to not break the protocol after exiting "pubsub" mode.
+  // Even after removing all subscriptions, we still can receive messages delayed
+  // by inter-thread dispatches or backpressure.
+  // TODO: filter messages from channels the client unsubscribed from
+  if (self->cntx()->subscriptions == 0 &&
+      !base::_in(pub_msg.channel, {"unsubscribe", "punsubscribe"}))
+    return;
+
   if (pub_msg.should_unsubscribe) {
     rbuilder->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
     rbuilder->SendBulkString("unsubscribe");
@@ -733,40 +744,39 @@ void Connection::HandleRequests() {
 
 #ifdef DFLY_USE_SSL
   if (ssl_ctx_) {
-    const bool no_tls_on_admin_port = GetFlag(FLAGS_no_tls_on_admin_port);
-    if (!(IsPrivileged() && no_tls_on_admin_port)) {
-      // Must be done atomically before the premption point in Accept so that at any
-      // point in time, the socket_ is defined.
-      uint8_t buf[2];
-      auto read_sz = socket_->Read(io::MutableBytes(buf));
-      if (!read_sz || *read_sz < sizeof(buf)) {
-        VLOG(1) << "Error reading from peer " << remote_ep << " " << read_sz.error().message();
-        return;
-      }
-      if (buf[0] != 0x16 || buf[1] != 0x03) {
-        VLOG(1) << "Bad TLS header "
-                << absl::StrCat(absl::Hex(buf[0], absl::kZeroPad2),
-                                absl::Hex(buf[1], absl::kZeroPad2));
-        socket_->Write(
-            io::Buffer("-ERR Bad TLS header, double check "
-                       "if you enabled TLS for your client.\r\n"));
-      }
-
-      {
-        FiberAtomicGuard fg;
-        unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
-        tls_sock->InitSSL(ssl_ctx_, buf);
-        SetSocket(tls_sock.release());
-      }
-      FiberSocketBase::AcceptResult aresult = socket_->Accept();
-
-      if (!aresult) {
-        LOG(INFO) << "Error handshaking " << aresult.error().message();
-        return;
-      }
-      is_tls_ = 1;
-      VLOG(1) << "TLS handshake succeeded";
+    // Must be done atomically before the premption point in Accept so that at any
+    // point in time, the socket_ is defined.
+    uint8_t buf[2];
+    auto read_sz = socket_->Read(io::MutableBytes(buf));
+    if (!read_sz || *read_sz < sizeof(buf)) {
+      VLOG(1) << "Error reading from peer " << remote_ep << " " << read_sz.error().message()
+              << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+      return;
     }
+    if (buf[0] != 0x16 || buf[1] != 0x03) {
+      VLOG(1) << "Bad TLS header "
+              << absl::StrCat(absl::Hex(buf[0], absl::kZeroPad2),
+                              absl::Hex(buf[1], absl::kZeroPad2));
+      std::ignore =
+          socket_->Write(io::Buffer("-ERR Bad TLS header, double check "
+                                    "if you enabled TLS for your client.\r\n"));
+    }
+
+    {
+      FiberAtomicGuard fg;
+      unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
+      tls_sock->InitSSL(ssl_ctx_, buf);
+      SetSocket(tls_sock.release());
+    }
+    FiberSocketBase::AcceptResult aresult = socket_->Accept();
+
+    if (!aresult) {
+      LOG(INFO) << "Error handshaking " << aresult.error().message()
+                << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+      return;
+    }
+    is_tls_ = 1;
+    VLOG(1) << "TLS handshake succeeded";
   }
 #endif
 
@@ -878,7 +888,12 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   } else {
     absl::StrAppend(&before, " name=", name_);
   }
-
+  if (is_tls_) {
+    tls::TlsSocket* tls_sock = static_cast<tls::TlsSocket*>(socket_.get());
+    string_view proto_version = SSL_get_version(tls_sock->ssl_handle());
+    const SSL_CIPHER* cipher = SSL_get_current_cipher(tls_sock->ssl_handle());
+    absl::StrAppend(&before, " tls=", proto_version, "|", SSL_CIPHER_get_name(cipher));
+  }
   string after;
   absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
   if (dispatch_q_.size()) {
@@ -1110,7 +1125,8 @@ void Connection::ConnectionFlow() {
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {
     string conn_info = service_->GetContextInfo(cc_.get()).Format();
     LOG(WARNING) << "Socket error for connection " << conn_info << " " << GetName()
-                 << " during phase " << kPhaseName[phase_] << " : " << ec << " " << ec.message();
+                 << " during phase " << kPhaseName[phase_] << " : " << ec << " " << ec.message()
+                 << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
   }
 }
 
@@ -1445,7 +1461,12 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
           });
         }
 
-        DCHECK_GT(io_buf_.AppendLen(), 0U);
+        if (io_buf_.AppendLen() == 0U) {
+          // it can happen with memcached but not for RedisParser, because RedisParser fully
+          // consumes the passed buffer
+          LOG_EVERY_T(WARNING, 10)
+              << "Maximum io_buf length reached, consider to increase max_client_iobuf_len flag";
+        }
       }
     } else if (parse_status != OK) {
       break;
@@ -1500,6 +1521,11 @@ void Connection::SquashPipeline() {
   size_t dispatched =
       service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), reply_builder_.get(), cc_.get());
 
+  // async_dispatch is a guard to prevent concurrent writes into reply_builder_, hence
+  // it must guard the Flush() as well.
+  //
+  // TODO: to investigate if always flushing will improve P99 latency because otherwise we
+  // wait for the next batch to finish before fully flushing the current response.
   if (pending_pipeline_cmd_cnt_ == squash_cmds.size()) {  // Flush if no new commands appeared
     reply_builder_->Flush();
     reply_builder_->SetBatchMode(false);  // in case the next dispatch is sync
@@ -1627,7 +1653,8 @@ void Connection::AsyncFiber() {
       // We keep the batch mode enabled as long as the dispatch queue is not empty, relying on the
       // last command to reply and flush. If it doesn't reply (i.e. is a control message like
       // migrate), we have to flush manually.
-      if (dispatch_q_.empty() && !msg.IsReplying()) {
+      bool is_replying = msg.IsReplying();
+      if (dispatch_q_.empty() && !is_replying) {
         reply_builder_->Flush();
       }
 
@@ -1638,9 +1665,16 @@ void Connection::AsyncFiber() {
         return;  // don't set conn closing flag
       }
 
+      auto replies_recorded_before = reply_builder_->RepliesRecorded();
       cc_->async_dispatch = true;
       std::visit(async_op, msg.handle);
       cc_->async_dispatch = false;
+      // If last msg in queue was replying but nothing was replied during dispatch
+      // (i.e. pubsub message was discarded) we have to manually flush now.
+      if (dispatch_q_.empty() && is_replying &&
+          (replies_recorded_before == reply_builder_->RepliesRecorded())) {
+        reply_builder_->Flush();
+      }
       RecycleMessage(std::move(msg));
     }
 
@@ -1795,8 +1829,9 @@ void Connection::SendAsync(MessageHandle msg) {
   DCHECK_EQ(ProactorBase::me(), socket_->proactor());
 
   // "Closing" connections might be still processing commands, as we don't interrupt them.
-  // So we still want to deliver control messages to them (like checkpoints).
-  if (cc_->conn_closing && !msg.IsControl())
+  // So we still want to deliver control messages to them (like checkpoints) if
+  // async_fb_ is running (joinable).
+  if (cc_->conn_closing && (!msg.IsControl() || !async_fb_.IsJoinable()))
     return;
 
   // If we launch while closing, it won't be awaited. Control messages will be processed on cleanup.

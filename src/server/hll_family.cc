@@ -46,6 +46,9 @@ void HandleOpValueResult(const OpResult<T>& result, SinkReplyBuilder* builder) {
       case OpStatus::INVALID_VALUE:
         builder->SendError(HllFamily::kInvalidHllErr);
         break;
+      case OpStatus::CORRUPTED_HLL:
+        builder->SendError(facade::StatusToMsg(OpStatus::CORRUPTED_HLL));
+        break;
       default:
         builder->SendLong(0);  // in case we don't have the value we should just send 0
         break;
@@ -57,14 +60,20 @@ HllBufferPtr StringToHllPtr(string_view hll) {
   return {.hll = (unsigned char*)hll.data(), .size = hll.size()};
 }
 
-void ConvertToDenseIfNeeded(string* hll) {
-  if (isValidHLL(StringToHllPtr(*hll)) == HLL_VALID_SPARSE) {
+bool ConvertToDenseIfNeeded(string* hll) {
+  int hll_validity = isValidHLL(StringToHllPtr(*hll));
+  if (hll_validity == HLL_VALID_SPARSE) {
     string new_hll;
     new_hll.resize(getDenseHllSize());
     int result = convertSparseToDenseHll(StringToHllPtr(*hll), StringToHllPtr(new_hll));
-    DCHECK_EQ(result, 0);
+    if (result != 0) {
+      // Conversion failed - HLL data is corrupted
+      return false;
+    }
     *hll = std::move(new_hll);
+    return true;
   }
+  return hll_validity == HLL_VALID_DENSE;
 }
 
 OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values) {
@@ -72,14 +81,12 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
 
   string hll;
 
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_STRING);
   RETURN_ON_BAD_STATUS(op_res);
   auto& res = *op_res;
   if (res.is_new) {
     hll.resize(getSparseHllInitSize());
     initSparseHll(StringToHllPtr(hll));
-  } else if (res.it->second.ObjType() != OBJ_STRING) {
-    return OpStatus::WRONG_TYPE;
   } else {
     res.it->second.GetString(&hll);
   }
@@ -152,7 +159,9 @@ OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
         // Even in the case of a read - we still want to convert the hll to dense format, as it
         // could originate in Redis (like in replication or rdb load).
         hll = hll_view;
-        ConvertToDenseIfNeeded(&hll);
+        if (!ConvertToDenseIfNeeded(&hll)) {
+          return OpStatus::CORRUPTED_HLL;
+        }
         hll_view = hll;
         break;
       case HLL_INVALID:
@@ -177,12 +186,10 @@ OpResult<vector<string>> ReadValues(const OpArgs& op_args, const ShardArgs& keys
       if (it.ok()) {
         string hll;
         it.value()->second.GetString(&hll);
-        ConvertToDenseIfNeeded(&hll);
-        if (isValidHLL(StringToHllPtr(hll)) != HLL_VALID_DENSE) {
-          return OpStatus::INVALID_VALUE;
-        } else {
-          values.push_back(std::move(hll));
+        if (!ConvertToDenseIfNeeded(&hll)) {
+          return OpStatus::CORRUPTED_HLL;
         }
+        values.push_back(std::move(hll));
       } else if (it.status() == OpStatus::WRONG_TYPE) {
         return OpStatus::WRONG_TYPE;
       }
@@ -208,17 +215,28 @@ OpResult<int64_t> PFCountMulti(CmdArgList args, const CommandContext& cmd_cntx) 
   vector<vector<string>> hlls;
   hlls.resize(shard_set->size());
 
+  atomic<OpStatus> error_status{OpStatus::OK};
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
     ShardArgs shard_args = t->GetShardArgs(shard->shard_id());
     auto result = ReadValues(t->GetOpArgs(shard), shard_args);
     if (result.ok()) {
       hlls[sid] = std::move(result.value());
+    } else {
+      error_status.store(result.status(), memory_order_relaxed);
     }
-    return result.status();
+    return OpStatus::OK;
   };
 
-  cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpStatus cb_status = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  if (cb_status != OpStatus::OK) {
+    return cb_status;
+  }
+
+  OpStatus stored_error = error_status.load(memory_order_relaxed);
+  if (stored_error != OpStatus::OK) {
+    return stored_error;
+  }
 
   vector<HllBufferPtr> ptrs = ConvertShardVector(hlls);
   int64_t pf_count = pfcountMulti(ptrs.data(), ptrs.size());
@@ -247,7 +265,7 @@ OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder
   vector<vector<string>> hlls;
   hlls.resize(shard_set->size());
 
-  atomic_bool success = true;
+  atomic<OpStatus> error_status{OpStatus::OK};
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
     ShardArgs shard_args = t->GetShardArgs(shard->shard_id());
@@ -255,16 +273,17 @@ OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder
     if (result.ok()) {
       hlls[sid] = std::move(result.value());
     } else {
-      success.store(false, memory_order_relaxed);
+      error_status.store(result.status(), memory_order_relaxed);
     }
     return OpStatus::OK;
   };
 
   tx->Execute(std::move(cb), false);
 
-  if (!success.load(memory_order_relaxed)) {
+  OpStatus stored_error = error_status.load(memory_order_relaxed);
+  if (stored_error != OpStatus::OK) {
     tx->Conclude();
-    return OpStatus::INVALID_VALUE;
+    return stored_error;
   }
 
   vector<HllBufferPtr> ptrs = ConvertShardVector(hlls);
@@ -278,7 +297,7 @@ OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder
     string_view key = ArgS(args, 0);
     const OpArgs& op_args = t->GetOpArgs(shard);
     auto& db_slice = op_args.GetDbSlice();
-    auto op_res = db_slice.AddOrFind(t->GetDbContext(), key);
+    auto op_res = db_slice.AddOrFind(t->GetDbContext(), key, OBJ_STRING);
     RETURN_ON_BAD_STATUS(op_res);
     auto& res = *op_res;
     res.it->second.SetString(hll);

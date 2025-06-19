@@ -249,6 +249,16 @@ TEST_F(RedisReplyBuilderTest, SimpleError) {
   EXPECT_THAT(parsing.args, ElementsAre("OK"));
 }
 
+TEST_F(RedisReplyBuilderTest, VeryLongError) {
+  std::string long_error(10 * 1024, 'X');  // 10KB error
+  std::string_view empty_type;
+
+  builder_->SendError(long_error, empty_type);
+
+  ASSERT_TRUE(absl::StartsWith(str(), kErrorStart));
+  ASSERT_TRUE(absl::EndsWith(str(), kCRLF));
+}
+
 TEST_F(RedisReplyBuilderTest, ErrorBuiltInMessage) {
   OpStatus error_codes[] = {
       OpStatus::KEY_NOTFOUND,  OpStatus::OUT_OF_RANGE,  OpStatus::WRONG_TYPE,
@@ -797,8 +807,6 @@ TEST_F(RedisReplyBuilderTest, SendLabeledScoredArray) {
 }
 
 TEST_F(RedisReplyBuilderTest, BasicCapture) {
-  GTEST_SKIP() << "Unmark when CaptuingReplyBuilder is updated";
-
   using namespace std;
   string_view kTestSws[] = {"a1"sv, "a2"sv, "a3"sv, "a4"sv};
 
@@ -858,8 +866,8 @@ TEST_F(RedisReplyBuilderTest, BasicCapture) {
   for (auto& f : funcs) {
     f(builder_.get());
     auto expected = TakePayload();
-    // f(&crb);
-    // CapturingReplyBuilder::Apply(crb.Take(), builder_.get());
+    f(&crb);
+    CapturingReplyBuilder::Apply(crb.Take(), builder_.get());
     auto actual = TakePayload();
     EXPECT_EQ(expected, actual);
   }

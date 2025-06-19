@@ -4,6 +4,7 @@
 #include "core/compact_object.h"
 
 #include <absl/strings/str_cat.h>
+#include <gtest/gtest.h>
 #include <mimalloc.h>
 #include <xxhash.h>
 
@@ -13,6 +14,7 @@
 #include "base/logging.h"
 #include "core/detail/bitpacking.h"
 #include "core/flat_set.h"
+#include "core/huff_coder.h"
 #include "core/mi_memory_resource.h"
 #include "core/string_set.h"
 
@@ -607,6 +609,7 @@ TEST_F(CompactObjectTest, RawInterface) {
 
   str.assign(50, char(200));  // non ascii
   cobj_.SetString(str);
+  ASSERT_EQ(str, cobj_.GetSlice(&tmp));
 
   {
     auto raw_blob = cobj_.GetRawString();
@@ -619,6 +622,12 @@ TEST_F(CompactObjectTest, RawInterface) {
 
     EXPECT_EQ(str, cobj_.GetSlice(&tmp));
   }
+}
+
+TEST_F(CompactObjectTest, AsanTriggerReadOverflow) {
+  cobj_.SetString(string(32, 'a'));
+  auto dest = make_unique<char[]>(32);
+  cobj_.GetString(dest.get());
 }
 
 TEST_F(CompactObjectTest, lpGetInteger) {
@@ -649,6 +658,30 @@ TEST_F(CompactObjectTest, lpGetInteger) {
   lpFree(lp);
 }
 
+TEST_F(CompactObjectTest, HuffMan) {
+  array<unsigned, 256> hist;
+  hist.fill(1);
+  hist['a'] = 100;
+  hist['b'] = 50;
+  HuffmanEncoder encoder;
+  ASSERT_TRUE(encoder.Build(hist.data(), hist.size() - 1, nullptr));
+  string bindata = encoder.Export();
+  ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_KEYS, bindata));
+  for (unsigned i = 30; i < 2048; i += 10) {
+    string data(i, 'a');
+    cobj_.SetString(data);
+    bool malloc_used = i >= 60;
+    ASSERT_EQ(malloc_used, cobj_.MallocUsed() > 0) << i;
+    ASSERT_EQ(data.size(), cobj_.Size());
+    ASSERT_EQ(CompactObj::HashCode(data), cobj_.HashCode());
+
+    string actual;
+    cobj_.GetString(&actual);
+    EXPECT_EQ(data, actual);
+    EXPECT_EQ(cobj_, data);
+  }
+}
+
 static void ascii_pack_naive(const char* ascii, size_t len, uint8_t* bin) {
   const char* end = ascii + len;
 
@@ -664,29 +697,6 @@ static void ascii_pack_naive(const char* ascii, size_t len, uint8_t* bin) {
   // epilog - we do not pack since we have less than 8 bytes.
   while (ascii < end) {
     *bin++ = *ascii++;
-  }
-}
-
-static void ascii_unpack_naive(const uint8_t* bin, size_t ascii_len, char* ascii) {
-  constexpr uint8_t kM = 0x7F;
-  uint8_t p = 0;
-  unsigned i = 0;
-
-  while (ascii_len >= 8) {
-    for (i = 0; i < 7; ++i) {
-      uint8_t src = *bin;  // keep on stack in case we unpack inplace.
-      *ascii++ = (p >> (8 - i)) | ((src << i) & kM);
-      p = src;
-      ++bin;
-    }
-
-    ascii_len -= 8;
-    *ascii++ = p >> 1;
-  }
-
-  DCHECK_LT(ascii_len, 8u);
-  for (i = 0; i < ascii_len; ++i) {
-    *ascii++ = *bin++;
   }
 }
 
@@ -710,16 +720,6 @@ static void BM_Pack(benchmark::State& state) {
 }
 BENCHMARK(BM_Pack);
 
-static void BM_Pack2(benchmark::State& state) {
-  string val(1024, 'a');
-  uint8_t buf[1024];
-
-  while (state.KeepRunning()) {
-    detail::ascii_pack(val.data(), val.size(), buf);
-  }
-}
-BENCHMARK(BM_Pack2);
-
 static void BM_PackSimd(benchmark::State& state) {
   string val(1024, 'a');
   uint8_t buf[1024];
@@ -739,18 +739,6 @@ static void BM_PackSimd2(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_PackSimd2);
-
-static void BM_UnpackNaive(benchmark::State& state) {
-  string val(1024, 'a');
-  uint8_t buf[1024];
-
-  detail::ascii_pack(val.data(), val.size(), buf);
-
-  while (state.KeepRunning()) {
-    ascii_unpack_naive(buf, val.size(), val.data());
-  }
-}
-BENCHMARK(BM_UnpackNaive);
 
 static void BM_Unpack(benchmark::State& state) {
   string val(1024, 'a');

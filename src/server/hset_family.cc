@@ -170,7 +170,7 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
 
 OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, IncrByParam* param) {
   auto& db_slice = op_args.GetDbSlice();
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_HASH);
   RETURN_ON_BAD_STATUS(op_res);
   if (!op_res) {
     return op_res.status();
@@ -181,9 +181,6 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   if (add_res.is_new) {
     pv.InitRobj(OBJ_HASH, kEncodingListPack, lpNew(0));
   } else {
-    if (pv.ObjType() != OBJ_HASH)
-      return OpStatus::WRONG_TYPE;
-
     op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, add_res.it->second);
 
     if (pv.Encoding() == kEncodingListPack) {
@@ -675,7 +672,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   VLOG(2) << "OpSet(" << key << ")";
 
   auto& db_slice = op_args.GetDbSlice();
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_HASH);
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
@@ -691,9 +688,6 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
       pv.InitRobj(OBJ_HASH, kEncodingStrMap2, CompactObj::AllocateMR<StringMap>());
     }
   } else {
-    if (pv.ObjType() != OBJ_HASH)
-      return OpStatus::WRONG_TYPE;
-
     op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it->second);
   }
 
@@ -915,13 +909,8 @@ void HSetFamily::HExpire(CmdArgList args, const CommandContext& cmd_cntx) {
   };
 
   OpResult<vector<long>> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   if (result) {
-    rb->StartArray(result->size());
-    const auto& array = result.value();
-    for (const auto& v : array) {
-      rb->SendLong(v);
-    }
+    static_cast<RedisReplyBuilder*>(cmd_cntx.rb)->SendLongArr(absl::MakeConstSpan(result.value()));
   } else {
     cmd_cntx.rb->SendError(result.status());
   }
@@ -939,8 +928,7 @@ void HSetFamily::HMGet(CmdArgList args, const CommandContext& cmd_cntx) {
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   if (result) {
-    SinkReplyBuilder::ReplyAggregator agg(rb);
-    rb->StartArray(result->size());
+    RedisReplyBuilder::ArrayScope scope{rb, result->size()};
     for (const auto& val : *result) {
       if (val) {
         rb->SendBulkString(*val);
@@ -949,9 +937,7 @@ void HSetFamily::HMGet(CmdArgList args, const CommandContext& cmd_cntx) {
       }
     }
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    SinkReplyBuilder::ReplyAggregator agg(rb);
-
-    rb->StartArray(args.size());
+    RedisReplyBuilder::ArrayScope scope{rb, args.size()};
     for (unsigned i = 0; i < args.size(); ++i) {
       rb->SendNull();
     }
@@ -1089,18 +1075,14 @@ void HSetFamily::HScan(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   OpResult<StringVec> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  if (result.status() != OpStatus::WRONG_TYPE) {
-    rb->StartArray(2);
-    rb->SendBulkString(absl::StrCat(cursor));
-    rb->StartArray(result->size());  // Within scan the page type is array
-    for (const auto& k : *result) {
-      rb->SendBulkString(k);
-    }
-  } else {
-    cmd_cntx.rb->SendError(result.status());
-  }
+  if (result.status() == OpStatus::WRONG_TYPE)
+    return cmd_cntx.rb->SendError(result.status());
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  RedisReplyBuilder::ArrayScope scope{rb, 2};
+  rb->SendBulkString(absl::StrCat(cursor));
+  rb->SendBulkStrArr(*result);
 }
 
 void HSetFamily::HSet(CmdArgList args, const CommandContext& cmd_cntx) {

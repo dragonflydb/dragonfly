@@ -35,7 +35,7 @@ func DetermineBaseTime(files []string) time.Time {
 				minTime = r.Time
 			}
 			return false
-		})
+		}, *fIgnoreParseErrors)
 	}
 	return time.Unix(0, int64(minTime))
 }
@@ -64,6 +64,7 @@ var pipelineRanges = []struct {
 type FileWorker struct {
 	clientGroup sync.WaitGroup
 	timeOffset  time.Duration
+	skipUntil   uint64
 	// stats for output, updated by clients, read by rendering goroutine
 	processed uint64
 	delayed   uint64
@@ -170,10 +171,15 @@ func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
 		if cmdName != "eval" && recordId < uint64(*fSkip) {
 			return true
 		}
+
+		if w.skipUntil > 0 && r.Time < w.skipUntil {
+			return true
+		}
+
 		atomic.AddUint64(&w.parsed, 1)
 		client.incoming <- r
 		return true
-	})
+	}, *fIgnoreParseErrors)
 
 	if err != nil {
 		log.Fatalf("Could not parse records for file %s: %v", file, err)

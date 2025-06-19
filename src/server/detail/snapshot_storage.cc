@@ -24,9 +24,10 @@
 #include "base/logging.h"
 #include "io/file_util.h"
 #include "server/engine_shard_set.h"
+#include "util/cloud/azure/creds_provider.h"
+#include "util/cloud/azure/storage.h"
 #include "util/cloud/gcp/gcs_file.h"
 #include "util/fibers/fiber_file.h"
-
 namespace dfly {
 namespace detail {
 
@@ -234,6 +235,7 @@ error_code FileSnapshotStorage::CheckPath(const string& path) {
 }
 
 GcsSnapshotStorage::~GcsSnapshotStorage() {
+  util::http::TlsClient::FreeContext(ctx_);
 }
 
 error_code GcsSnapshotStorage::Init(unsigned connect_ms) {
@@ -341,7 +343,7 @@ io::Result<vector<string>, GenericError> GcsSnapshotStorage::ExpandFromPath(
     vector<string> res;
     cloud::GCS gcs(&creds_provider_, ctx_, proactor);
 
-    error_code ec = gcs.List(bucket_name, prefix, false, [&](const cloud::GCS::ObjectItem& item) {
+    error_code ec = gcs.List(bucket_name, prefix, false, [&](const cloud::StorageListItem& item) {
       std::smatch m;
       string key{item.key};
       if (std::regex_match(key, m, re)) {
@@ -366,6 +368,127 @@ io::Result<vector<string>, GenericError> GcsSnapshotStorage::ExpandFromPath(
 }
 
 error_code GcsSnapshotStorage::CheckPath(const std::string& path) {
+  return {};
+}
+
+// AZURE
+
+AzureSnapshotStorage::AzureSnapshotStorage() {
+  creds_provider_ = make_unique<util::cloud::azure::Credentials>();
+}
+
+AzureSnapshotStorage::~AzureSnapshotStorage() {
+  util::http::TlsClient::FreeContext(ctx_);
+}
+
+error_code AzureSnapshotStorage::Init(unsigned connect_ms) {
+  error_code ec = creds_provider_->Init(connect_ms);
+  if (!ec) {
+    ctx_ = util::http::TlsClient::CreateSslContext();
+  }
+  return ec;
+}
+
+io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AzureSnapshotStorage::OpenWriteFile(
+    const std::string& path) {
+  return nonstd::make_unexpected(GenericError("Not implemented"));
+}
+
+io::ReadonlyFileOrError AzureSnapshotStorage::OpenReadFile(const std::string& path) {
+  if (!IsAzurePath(path))
+    return nonstd::make_unexpected(GenericError("Invalid azure path"));
+
+  auto [bucket, key] = GetBucketPath(path);
+
+  return nonstd::make_unexpected(GenericError("Not implemented"));
+}
+
+io::Result<std::string, GenericError> AzureSnapshotStorage::LoadPath(string_view dir,
+                                                                     string_view dbfilename) {
+  if (dbfilename.empty())
+    return "";
+
+  auto [bucket_name, prefix] = GetBucketPath(dir);
+
+  // TODO: check if needed
+  if (!prefix.empty() && prefix.back() != '/') {
+    prefix += '/';
+  }
+
+  fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
+
+  io::Result<vector<SnapStat>, GenericError> keys =
+      proactor->Await([this, bucket_name = bucket_name,
+                       prefix = prefix]() -> io::Result<vector<SnapStat>, GenericError> {
+        cloud::azure::Storage azure((cloud::azure::Credentials*)creds_provider_.get());
+        vector<SnapStat> res;
+        error_code ec =
+            azure.List(bucket_name, prefix, false, 500, [&res](const cloud::StorageListItem& item) {
+              res.emplace_back(string(item.key), item.mtime_ns);
+            });
+        if (ec)
+          return nonstd::make_unexpected(GenericError(ec, "Failed to list objects"));
+        return res;
+      });
+
+  if (!keys) {
+    return nonstd::make_unexpected(keys.error());
+  }
+
+  auto match_key = FindMatchingFile(prefix, dbfilename, *keys);
+  if (!match_key.empty()) {
+    return absl::StrCat(kGCSPrefix, bucket_name, "/", match_key);
+  }
+  return nonstd::make_unexpected(GenericError(
+      std::make_error_code(std::errc::no_such_file_or_directory), "Snapshot not found"));
+}
+
+io::Result<vector<string>, GenericError> AzureSnapshotStorage::ExpandFromPath(
+    const string& load_path) {
+  if (!IsAzurePath(load_path))
+    return nonstd::make_unexpected(
+        GenericError(make_error_code(errc::invalid_argument), "Invalid Azure path"));
+
+  if (!absl::EndsWith(load_path, kSummarySuffix))
+    return vector<string>{};
+
+  const auto [bucket_name, obj_path] = GetBucketPath(load_path);
+  regex re(absl::StrReplaceAll(obj_path, {{"summary", "[0-9]{4}"}}));
+  string_view prefix = absl::StripSuffix(obj_path, kSummarySuffix);
+
+  // Find snapshot shard files if we're loading DFS.
+  fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
+  auto paths = proactor->Await(
+      [&, &bucket_name = bucket_name]() -> io::Result<vector<string>, GenericError> {
+        vector<string> res;
+        cloud::azure::Storage azure(creds_provider_.get());
+
+        error_code ec =
+            azure.List(bucket_name, prefix, false, 500, [&](const cloud::StorageListItem& item) {
+              std::smatch m;
+              string key{item.key};
+              if (std::regex_match(key, m, re)) {
+                res.push_back(absl::StrCat(kAzurePrefix, bucket_name, "/", item.key));
+              }
+            });
+
+        if (ec) {
+          return nonstd::make_unexpected(ec);
+        }
+
+        return res;
+      });
+
+  if (!paths || paths->empty()) {
+    return nonstd::make_unexpected(
+        GenericError{std::make_error_code(std::errc::no_such_file_or_directory),
+                     "Cound not find DFS snapshot shard files"});
+  }
+
+  return *paths;
+}
+
+error_code AzureSnapshotStorage::CheckPath(const std::string& path) {
   return {};
 }
 

@@ -9,6 +9,7 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "facade/error.h"
 #include "facade/facade_test.h"
 #include "server/command_registry.h"
 #include "server/test_utils.h"
@@ -1260,6 +1261,24 @@ TEST_F(JsonFamilyTest, Del) {
 
   resp = Run({"JSON.GET", "json"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  if (absl::GetFlag(FLAGS_jsonpathv2)) {
+    // Test recursive delete with $..a path
+    resp = Run({"JSON.SET", "doc2", "$",
+                R"({"a": {"a": 2, "b": 3}, "b": ["a", "b"], "nested": {"b": [true, "a", "b"]}})"});
+    ASSERT_THAT(resp, "OK");
+
+    resp = Run({"JSON.GET", "doc2"});
+    EXPECT_EQ(resp, R"({"a":{"a":2,"b":3},"b":["a","b"],"nested":{"b":[true,"a","b"]}})");
+
+    // JSON.DEL with $..a should find and delete the key "a" at root level
+    // but not string values "a" inside arrays
+    resp = Run({"JSON.DEL", "doc2", "$..a"});
+    EXPECT_THAT(resp, IntArg(1));
+
+    resp = Run({"JSON.GET", "doc2"});
+    EXPECT_EQ(resp, R"({"b":["a","b"],"nested":{"b":[true,"a","b"]}})");
+  }
 }
 
 TEST_F(JsonFamilyTest, DelLegacy) {
@@ -3072,6 +3091,68 @@ TEST_F(JsonFamilyTest, SetNestedFields) {
 
   resp = Run({"JSON.GET", "json"});
   EXPECT_EQ(resp, R"({"-field2":2,"field1":1})");
+}
+
+TEST_F(JsonFamilyTest, ArrPopWithFormatParameter) {
+  auto resp = Run({"JSON.ARRPOP", "test_resp3", "FORMAT", "EXPAND", "$.a"});
+  ASSERT_THAT(resp, ErrArg("value is not an integer or out of range"));
+}
+
+TEST_F(JsonFamilyTest, DepthLimitExceeded) {
+  string deep_json =
+      R"({"jdiqr":{"nro":{"uzuf":{"bq":{"yc":{"zodmw":{"zbbq":{"sf":{"oule":{"j":{"mjsss":{"tap":{"bh":{"f":{"zlwgu":{"s":{"kt":{"fnmo":{"hub":{"xj":{"jo":{"ofara":{"kx":{"uw":{"z":{"mwvk":{"jo":{"qqz":{"b":{"tbp":{"esx":{"g":{"p":{"tpzk":{"i":{"azq":{"ttcd":{"wl":{"zo":{"l":{"nsq":{"tulso":{"uk":{"imfzw":{"vlub":{"k":{"ypml":{"voack":{"sosd":{"f":{"x":{"usv":{"hnw":{"ax":{"e":{"ozi":{"doi":{"k":{"bz":{"vxhp":{"e":{"vnpv":{"rhs":{"j":{"esp":{"f":{"ykyvy":{"xvmhg":{"eks":{"oijy":{"sjk":{"a":{"sejgy":{"msd":{"acyo":{"yxss":{"slbf":{"ssuns":{"c":{"kv":{"i":{"y":{"ubqz":{"uam":{"igaq":{"jl":{"vy":{"zlu":{"gscx":{"mb":{"idca":{"k":{"twx":{"ngjs":{"k":{"xcx":{"sxc":{"ye":{"fty":{"pho":{"lrn":{"wmv":{"h":{"sfuk":{"ilwzy":{"nlofv":{"mpcms":{"bg":{"jykgm":{"x":{"nbe":{"ixbyh":{"tmus":{"nqulr":{"cqxdw":{"wwpi":{"kj":{"udb":{"oct":{"tqkv":{"r":{"zev":{"rsu":{"gs":{"pyzm":{"au":{"__leaf":42}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}})";
+
+  auto resp = Run({"JSON.SET", "test", "$", deep_json});
+  ASSERT_THAT(resp, ErrArg("ERR failed to parse JSON"));
+}
+
+TEST_F(JsonFamilyTest, JsonCommandsWorkingWithOtherTypesBug) {
+  std::string_view wrong_type_err{kWrongTypeErr};
+  wrong_type_err.remove_prefix(1);  // Remove the leading - character
+
+  auto resp = Run({"HSET", "k1", "field", "value"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // First bug: JSON.SET should return an error
+  resp = Run({"JSON.SET", "k1", "$", R"({"a":"b"})"});
+  ASSERT_THAT(resp, ErrArg(wrong_type_err));
+
+  // Second bug: JSON.DEL should not delete the hash
+  resp = Run({"HSET", "k2", "field", "value"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.DEL", "k2"});
+  ASSERT_THAT(resp, ErrArg(wrong_type_err));
+
+  resp = Run({"HGET", "k2", "field"});
+  EXPECT_THAT(resp, "value");
+}
+
+TEST_F(JsonFamilyTest, ResetStringKeyWithSetGet) {
+  auto resp = Run({"JSON.SET", "key", "$", R"({"a":"b"})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "key"});
+  EXPECT_THAT(resp, R"({"a":"b"})");
+
+  // Resetting the key with a string value
+  resp = Run({"SET", "key", R"({"a":"b"})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"GET", "key"});
+  EXPECT_THAT(resp, R"({"a":"b"})");
+
+  // JSON.GET should still work after resetting the key with a string value
+  resp = Run({"JSON.GET", "key"});
+  EXPECT_THAT(resp, R"({"a":"b"})");
+
+  // Resetting the key again with JSON.SET
+  // This should not cause any issues
+  resp = Run({"JSON.SET", "key", "$", R"({"a":"b"})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "key"});
+  EXPECT_THAT(resp, R"({"a":"b"})");
 }
 
 }  // namespace dfly

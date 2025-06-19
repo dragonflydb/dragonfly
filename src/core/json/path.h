@@ -126,7 +126,7 @@ using PathCallback = absl::FunctionRef<void(std::optional<std::string_view>, con
 using PathFlatCallback = absl::FunctionRef<void(std::optional<std::string_view>, FlatJson)>;
 
 // Returns true if the entry should be deleted, false otherwise.
-using MutateCallback = absl::FunctionRef<bool(std::optional<std::string_view>, JsonType*)>;
+using MutateCallback = absl::FunctionRef<void(std::optional<std::string_view>, JsonType*)>;
 
 void EvaluatePath(const Path& path, const JsonType& json, PathCallback callback);
 
@@ -137,6 +137,10 @@ void EvaluatePath(const Path& path, FlatJson json, PathFlatCallback callback);
 unsigned MutatePath(const Path& path, MutateCallback callback, JsonType* json);
 unsigned MutatePath(const Path& path, MutateCallback callback, FlatJson json,
                     flexbuffers::Builder* fbb);
+
+// Simplified deletion operation without callback - more efficient for JSON.DEL operations
+unsigned DeletePath(const Path& path, JsonType* json);
+unsigned DeletePath(const Path& path, FlatJson json, flexbuffers::Builder* fbb);
 
 // utility function to parse a jsonpath. Returns an error message if a parse error was
 // encountered.

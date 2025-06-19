@@ -92,7 +92,15 @@ auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> R
     }
 
     if (resultc.first == INPUT_PENDING) {
-      DCHECK(str.empty());
+      // TODO: we still need to handle ':' and ',' cases for client mode
+      // to consume them completely.
+      if (server_mode_ && !str.empty()) {
+        LOG(DFATAL) << "Did not consume all input: "
+                    << absl::CHexEscape({reinterpret_cast<const char*>(str.data()), str.size()})
+                    << ", state: " << int(state_) << " smallbuf: "
+                    << absl::CHexEscape(
+                           {reinterpret_cast<const char*>(small_buf_.data()), small_len_});
+      }
       StashState(res);
     }
     return resultc.first;
@@ -281,7 +289,7 @@ auto RedisParser::ParseLen(Buffer str, int64_t* res) -> ResultConsumed {
     return {BAD_ARRAYLEN, consumed};
   }
 
-  // Skip the first character and 2 last ones (\r\n).
+  // Skip 2 last characters (\r\n).
   string_view len_token{s, size_t(pos - 1 - s)};
   bool success = absl::SimpleAtoi(len_token, res);
 
@@ -289,7 +297,9 @@ auto RedisParser::ParseLen(Buffer str, int64_t* res) -> ResultConsumed {
     return ResultConsumed{OK, consumed};
   }
 
-  LOG(WARNING) << "Failed to parse len " << len_token;
+  LOG(ERROR) << "Failed to parse len " << absl::CHexEscape(len_token) << " "
+             << absl::CHexEscape(string_view{reinterpret_cast<const char*>(str.data()), str.size()})
+             << " " << consumed << " " << int(s == small_buf_.data());
   return ResultConsumed{BAD_ARRAYLEN, consumed};
 }
 
@@ -414,13 +424,18 @@ auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
   const char* s = reinterpret_cast<const char*>(str.data());
   const char* eol = reinterpret_cast<const char*>(memchr(s, '\n', str.size()));
 
-  // TODO: in client mode we still may not consume everything (see INPUT_PENDING below).
-  // It's not a problem, because we need consume all the input only in server mode.
-
   if (arg_c_ == '+' || arg_c_ == '-') {  // Simple string or error.
     DCHECK(!server_mode_);
     if (!eol) {
-      Result r = str.size() < 256 ? INPUT_PENDING : BAD_STRING;
+      // if eol is not found we should still read input as bulk string
+      cached_expr_->emplace_back(RespExpr::STRING);
+      cached_expr_->back().u = Buffer{};
+      bulk_len_ = str.length();
+      // eol is not found but if '\r' is present decrease bulk_len
+      if (s[bulk_len_ - 1] == '\r')
+        bulk_len_--;
+      state_ = BULK_STR_S;
+      Result r = str.size() < 256 ? OK : BAD_STRING;
       return {r, 0};
     }
 
@@ -453,7 +468,7 @@ auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
     std::string_view tok{s, size_t((eol - s) - 1)};
 
     if (eol[-1] != '\r' || !absl::SimpleAtod(tok, &dval))
-      return {BAD_INT, 0};
+      return {BAD_DOUBLE, 0};
 
     cached_expr_->emplace_back(RespExpr::DOUBLE);
     cached_expr_->back().u = dval;
@@ -471,6 +486,16 @@ auto RedisParser::ConsumeBulk(Buffer str) -> ResultConsumed {
   uint32_t consumed = 0;
   auto& bulk_str = get<Buffer>(cached_expr_->back().u);
 
+  bool extend = false;
+  // Handle split simple message or error in client mode
+  if (!server_mode_ && (arg_c_ == '+' || arg_c_ == '-') && !bulk_len_) {
+    // Search first '\r' in next partial message which ends bulk string
+    const char* s = reinterpret_cast<const char*>(str.data());
+    const char* pos = reinterpret_cast<const char*>(memchr(s, '\r', str.size()));
+    bulk_len_ = pos ? pos - s : str.size();
+    extend = true;
+  }
+
   if (str.size() >= bulk_len_) {
     consumed = bulk_len_;
     if (bulk_len_) {
@@ -479,6 +504,8 @@ auto RedisParser::ConsumeBulk(Buffer str) -> ResultConsumed {
       if (is_broken_token_) {
         memcpy(const_cast<uint8_t*>(bulk_str.end()), str.data(), bulk_len_);
         bulk_str = Buffer{bulk_str.data(), bulk_str.size() + bulk_len_};
+      } else if (extend) {
+        ExtendBulkString(Buffer(str.begin(), bulk_len_));
       } else {
         bulk_str = str.subspan(0, bulk_len_);
       }
@@ -557,6 +584,20 @@ void RedisParser::ExtendLastString(Buffer str) {
   memcpy(nb.data(), last_str.data(), last_str.size());
   memcpy(nb.data() + last_str.size(), str.data(), str.size());
   last_str = RespExpr::Buffer{nb.data(), last_str.size() + str.size()};
+  buf_stash_.back() = std::move(nb);
+}
+
+void RedisParser::ExtendBulkString(Buffer str) {
+  DCHECK(!cached_expr_->empty() && cached_expr_->back().type == RespExpr::STRING);
+
+  Buffer& bulk_str = get<Buffer>(cached_expr_->back().u);
+
+  DCHECK(bulk_str.data() == buf_stash_.back().data());
+
+  vector<uint8_t> nb(bulk_str.size() + str.size());
+  memcpy(nb.data(), bulk_str.data(), bulk_str.size());
+  memcpy(nb.data() + bulk_str.size(), str.data(), str.size());
+  bulk_str = RespExpr::Buffer{nb.data(), bulk_str.size() + str.size()};
   buf_stash_.back() = std::move(nb);
 }
 

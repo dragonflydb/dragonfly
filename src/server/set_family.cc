@@ -452,7 +452,9 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
     return 0;
   }
 
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  // We can use std::nullopt here because we check the type later.
+  // If the overwrite is true, we will call InitSet that calles SetMeta
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, std::nullopt);
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
@@ -520,7 +522,7 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
                            const NewEntries& vals, bool keepttl) {
   auto& db_slice = op_args.GetDbSlice();
 
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_SET);
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
@@ -529,10 +531,6 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
   if (add_res.is_new) {
     StringSetWrapper::Init(&co);
   } else {
-    // for non-overwrite case it must be set.
-    if (co.ObjType() != OBJ_SET)
-      return OpStatus::WRONG_TYPE;
-
     // Update stats and trigger any handle the old value if needed.
     if (co.Encoding() == kEncodingIntSet) {
       intset* is = (intset*)co.RObjPtr();
@@ -1025,32 +1023,26 @@ void SMIsMember(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto members = args.subspan(1);
 
-  vector<bool> memberships(members.size());
+  vector<int32_t> memberships(members.size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     DbContext db_cntx = t->GetDbContext();
     auto find_res = t->GetDbSlice(shard->shard_id()).FindReadOnly(db_cntx, key, OBJ_SET);
     if (find_res) {
       SetType st{(*find_res)->second.RObjPtr(), find_res.value()->second.Encoding()};
-      for (size_t i = 0; i < members.size(); ++i) {
-        auto member = members[i];
-        bool status = IsInSet(db_cntx, st, ToSV(member));
-        memberships[i] = status;
-      }
+      for (size_t i = 0; i < members.size(); ++i)
+        memberships[i] = IsInSet(db_cntx, st, ToSV(members[i]));
+      ;
       return OpStatus::OK;
     }
     return find_res.status();
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   OpResult<void> result = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
-  if (result || result == OpStatus::KEY_NOTFOUND) {
-    rb->StartArray(memberships.size());
-    for (bool b : memberships)
-      rb->SendLong(int(b));
-    return;
-  }
-  cmd_cntx.rb->SendError(result.status());
+  if (result || result == OpStatus::KEY_NOTFOUND)
+    static_cast<RedisReplyBuilder*>(cmd_cntx.rb)->SendLongArr(absl::MakeConstSpan(memberships));
+  else
+    cmd_cntx.rb->SendError(result.status());
 }
 
 void SMove(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -1419,15 +1411,12 @@ void SScan(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   OpResult<StringVec> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
-    rb->StartArray(2);
+    auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+    RedisReplyBuilder::ArrayScope scope{rb, 2};
     rb->SendBulkString(absl::StrCat(cursor));
-    rb->StartArray(result->size());  // Within scan the return page is of type array
-    for (const auto& k : *result) {
-      rb->SendBulkString(k);
-    }
+    rb->SendBulkStrArr(*result);
   } else {
     cmd_cntx.rb->SendError(result.status());
   }

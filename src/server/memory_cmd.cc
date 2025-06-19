@@ -82,8 +82,8 @@ std::string MallocStatsCb(bool backing, unsigned tid) {
   return str;
 }
 
-size_t MemoryUsage(PrimeIterator it) {
-  size_t key_size = it->first.MallocUsed();
+size_t MemoryUsage(PrimeIterator it, bool account_key_memory_usage) {
+  size_t key_size = account_key_memory_usage ? it->first.MallocUsed() : 0;
   return key_size + it->second.MallocUsed(true);
 }
 
@@ -95,9 +95,9 @@ MemoryCmd::MemoryCmd(ServerFamily* owner, facade::SinkReplyBuilder* builder,
 }
 
 void MemoryCmd::Run(CmdArgList args) {
-  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
+  CmdArgParser parser(args);
 
-  if (sub_cmd == "HELP") {
+  if (parser.Check("HELP")) {
     string_view help_arr[] = {
         "MEMORY <subcommand> [<arg> ...]. Subcommands are:",
         "STATS",
@@ -110,8 +110,9 @@ void MemoryCmd::Run(CmdArgList args) {
         "ARENA SHOW",
         "    Prints the arena summary report for the entire process.",
         "    Requires MIMALLOC_VERBOSE=1 environment to be set. The output goes to stdout",
-        "USAGE <key>",
+        "USAGE <key> [WITHOUTKEY]",
         "    Show memory usage of a key.",
+        "    If WITHOUTKEY is specified, the key itself is not accounted.",
         "DECOMMIT",
         "    Force decommit the memory freed by the server back to OS.",
         "TRACK",
@@ -137,35 +138,36 @@ void MemoryCmd::Run(CmdArgList args) {
     return rb->SendSimpleStrArr(help_arr);
   };
 
-  if (sub_cmd == "STATS") {
+  if (parser.Check("STATS")) {
     return Stats();
   }
 
-  if (sub_cmd == "USAGE" && args.size() > 1) {
-    string_view key = ArgS(args, 1);
-    return Usage(key);
+  if (parser.Check("USAGE") && args.size() > 1) {
+    string_view key = parser.Next();
+    bool account_key_memory_usage = !parser.Check("WITHOUTKEY");
+    return Usage(key, account_key_memory_usage);
   }
 
-  if (sub_cmd == "DECOMMIT") {
+  if (parser.Check("DECOMMIT")) {
     shard_set->pool()->AwaitBrief(
         [](unsigned, auto* pb) { ServerState::tlocal()->DecommitMemory(ServerState::kAllMemory); });
     return builder_->SendSimpleString("OK");
   }
 
-  if (sub_cmd == "MALLOC-STATS") {
+  if (parser.Check("MALLOC-STATS")) {
     return MallocStats();
   }
 
-  if (sub_cmd == "ARENA") {
+  if (parser.Check("ARENA")) {
     return ArenaStats(args);
   }
 
-  if (sub_cmd == "TRACK") {
+  if (parser.Check("TRACK")) {
     args.remove_prefix(1);
     return Track(args);
   }
 
-  if (sub_cmd == "DEFRAGMENT") {
+  if (parser.Check("DEFRAGMENT")) {
     shard_set->pool()->DispatchOnAll([](util::ProactorBase*) {
       if (auto* shard = EngineShard::tlocal(); shard)
         shard->ForceDefrag();
@@ -173,7 +175,7 @@ void MemoryCmd::Run(CmdArgList args) {
     return builder_->SendSimpleString("OK");
   }
 
-  string err = UnknownSubCmd(sub_cmd, "MEMORY");
+  string err = UnknownSubCmd(parser.Next(), "MEMORY");
   return builder_->SendError(err, kSyntaxErrType);
 }
 
@@ -346,18 +348,19 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
   return rb->SendVerbatimString(mi_malloc_info);
 }
 
-void MemoryCmd::Usage(std::string_view key) {
+void MemoryCmd::Usage(std::string_view key, bool account_key_memory_usage) {
   ShardId sid = Shard(key, shard_set->size());
-  ssize_t memory_usage = shard_set->pool()->at(sid)->AwaitBrief([key, this, sid]() -> ssize_t {
-    auto& db_slice = cntx_->ns->GetDbSlice(sid);
-    auto [pt, exp_t] = db_slice.GetTables(cntx_->db_index());
-    PrimeIterator it = pt->Find(key);
-    if (IsValid(it)) {
-      return MemoryUsage(it);
-    } else {
-      return -1;
-    }
-  });
+  ssize_t memory_usage = shard_set->pool()->at(sid)->AwaitBrief(
+      [key, account_key_memory_usage, this, sid]() -> ssize_t {
+        auto& db_slice = cntx_->ns->GetDbSlice(sid);
+        auto [pt, exp_t] = db_slice.GetTables(cntx_->db_index());
+        PrimeIterator it = pt->Find(key);
+        if (IsValid(it)) {
+          return MemoryUsage(it, account_key_memory_usage);
+        } else {
+          return -1;
+        }
+      });
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder_);
   if (memory_usage < 0)

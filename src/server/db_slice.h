@@ -73,6 +73,8 @@ struct SliceEvents {
   // how many updates and insertions of keys between snapshot intervals
   size_t update = 0;
 
+  uint64_t huff_encode_total = 0, huff_encode_success = 0;
+
   SliceEvents& operator+=(const SliceEvents& o);
 };
 
@@ -150,25 +152,24 @@ class DbSlice {
     AutoUpdater();
     AutoUpdater(const AutoUpdater& o) = delete;
     AutoUpdater& operator=(const AutoUpdater& o) = delete;
-    AutoUpdater(AutoUpdater&& o);
+    AutoUpdater(AutoUpdater&& o) noexcept;
     AutoUpdater& operator=(AutoUpdater&& o);
     ~AutoUpdater();
+
+    // Removes the memory usage attributed to the iterator and resets orig_heap_size.
+    // Used when the existing object is overridden by a new one.
+    void ReduceHeapUsage();
 
     void Run();
     void Cancel();
 
    private:
-    enum class DestructorAction {
-      kDoNothing,
-      kRun,
-    };
-
     // Wrap members in a struct to auto generate operator=
     struct Fields {
-      DestructorAction action = DestructorAction::kDoNothing;
-
       DbSlice* db_slice = nullptr;
       DbIndex db_ind = 0;
+
+      // TODO: remove `it` from ItAndUpdater as it's redundant with respect to this iterator.
       Iterator it;
       std::string_view key;
 
@@ -176,7 +177,7 @@ class DbSlice {
       size_t orig_heap_size = 0;
     };
 
-    AutoUpdater(const Fields& fields);
+    AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it, DbSlice* db_slice);
 
     friend class DbSlice;
 
@@ -198,9 +199,9 @@ class DbSlice {
     // Otherwise (string_view is set) then it's a new key that is going to be added to the table.
     std::variant<PrimeTable::bucket_iterator, std::string_view> change;
 
-    ChangeReq(PrimeTable::bucket_iterator it) : change(it) {
+    explicit ChangeReq(PrimeTable::bucket_iterator it) : change(it) {
     }
-    ChangeReq(std::string_view key) : change(key) {
+    explicit ChangeReq(std::string_view key) : change(key) {
     }
 
     const PrimeTable::bucket_iterator* update() const {
@@ -304,7 +305,16 @@ class DbSlice {
   OpResult<ConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
                                        unsigned req_obj_type) const;
 
-  OpResult<ItAndUpdater> AddOrFind(const Context& cntx, std::string_view key);
+  // Consider using req_obj_type to specify the type of object you expect.
+  // Because it can evaluate to bugs like this:
+  // - We already have a key but with another type you expect.
+  // - During FindMutable we will not use req_obj_type, so the object type will not be checked.
+  // - AddOrFind will return the object with this key but with a different type.
+  // - Then you will update this object with a different type, which will lead to an error.
+  // If you proved the key type on your own, please add a comment there why don't specify
+  // req_obj_type
+  OpResult<ItAndUpdater> AddOrFind(const Context& cntx, std::string_view key,
+                                   std::optional<unsigned> req_obj_type);
 
   // Same as AddOrSkip, but overwrites in case entry exists.
   OpResult<ItAndUpdater> AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
@@ -452,9 +462,10 @@ class DbSlice {
 
   // Evicts items with dynamically allocated data from the primary table.
   // Does not shrink tables.
-  // Returnes number of (elements,bytes) freed due to evictions.
-  std::pair<uint64_t, size_t> FreeMemWithEvictionStep(DbIndex db_indx, size_t starting_segment_id,
-                                                      size_t increase_goal_bytes);
+  // Returns number of (elements,bytes) freed due to evictions.
+  std::pair<uint64_t, size_t> FreeMemWithEvictionStepAtomic(DbIndex db_indx,
+                                                            size_t starting_segment_id,
+                                                            size_t increase_goal_bytes);
 
   int32_t GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const;
 
@@ -539,7 +550,7 @@ class DbSlice {
 
  private:
   void PreUpdateBlocking(DbIndex db_ind, Iterator it);
-  void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
+  void PostUpdate(DbIndex db_ind, std::string_view key);
 
   bool DelEmptyPrimeValue(const Context& cntx, Iterator it);
 
@@ -564,6 +575,7 @@ class DbSlice {
   // Queues invalidation message to the clients that are tracking the change to a key.
   void QueueInvalidationTrackingMessageAtomic(std::string_view key);
   void SendQueuedInvalidationMessages();
+  void SendQueuedInvalidationMessagesAsync();
 
   void CreateDb(DbIndex index);
 
@@ -579,7 +591,8 @@ class DbSlice {
 
   PrimeItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
 
-  OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key);
+  OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key,
+                                           std::optional<unsigned> req_obj_type);
 
   OpResult<PrimeItAndExp> FindInternal(const Context& cntx, std::string_view key,
                                        std::optional<unsigned> req_obj_type,
@@ -673,10 +686,13 @@ class DbSlice {
 
   using AllocatorType = PMR_NS::polymorphic_allocator<std::pair<std::string, ConnectionHashSet>>;
 
-  absl::flat_hash_map<std::string, ConnectionHashSet,
-                      absl::container_internal::hash_default_hash<std::string>,
-                      absl::container_internal::hash_default_eq<std::string>, AllocatorType>
-      client_tracking_map_, pending_send_map_;
+  using TrackingMap =
+      absl::flat_hash_map<std::string, ConnectionHashSet,
+                          absl::container_internal::hash_default_hash<std::string>,
+                          absl::container_internal::hash_default_eq<std::string>, AllocatorType>;
+  TrackingMap client_tracking_map_, pending_send_map_;
+
+  void SendQueuedInvalidationMessagesCb(const TrackingMap& track_map, unsigned idx) const;
 
   class PrimeBumpPolicy;
 };

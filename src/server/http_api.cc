@@ -140,13 +140,17 @@ struct CaptureVisitor {
       absl::StrAppend(&str, "[]");
       return;
     }
-
     absl::StrAppend(&str, "[");
+    bool append_delimiter = false;
     for (auto& pl : cp->arr) {
+      if (append_delimiter) {
+        absl::StrAppend(&str, ",");
+      }
+      append_delimiter = true;
       visit(*this, std::move(pl));
     }
+    absl::StrAppend(&str, "]");
   }
-
   string str;
 };
 

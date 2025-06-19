@@ -1,23 +1,18 @@
-import random
-
-from itertools import chain, repeat
-import re
-import pytest
-import asyncio
-import async_timeout
 import platform
-import pymemcache
-import logging
+import shutil
 import tarfile
 import urllib.request
-import shutil
-from redis import asyncio as aioredis
-from .utility import *
-from .instance import DflyInstanceFactory, DflyInstance
-from .seeder import Seeder as SeederV2
+from itertools import chain, repeat
+
+import async_timeout
+import pymemcache
+
 from . import dfly_args
+from .instance import DflyInstanceFactory, DflyInstance
 from .proxy import Proxy
 from .seeder import DebugPopulateSeeder
+from .seeder import Seeder as SeederV2
+from .utility import *
 
 ADMIN_PORT = 1211
 
@@ -1844,8 +1839,9 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
         finally:
             await proxy.close(task)
 
-    # Partial replication is currently not implemented so the following does not work
-    # assert master.is_in_logs("Partial sync requested from stale LSN")
+    master.stop()
+    lines = master.find_in_logs("Partial sync requested from stale LSN")
+    assert len(lines) > 0
 
 
 async def test_replica_reconnections_after_network_disconnect(df_factory, df_seeder_factory):
@@ -2284,7 +2280,11 @@ async def test_replica_reconnect(df_factory, break_conn):
     # kill existing master, create master with different repl_id but same port
     master_port = master.port
     master.stop()
-    assert (await c_replica.info("REPLICATION"))["master_link_status"] == "down"
+
+    await asyncio.sleep(1)
+
+    repl_info = await c_replica.info("REPLICATION")
+    assert repl_info["master_link_status"] == "down", str(repl_info)
 
     master = df_factory.create(proactor_threads=1, port=master_port)
     df_factory.start_all([master])
@@ -2959,12 +2959,16 @@ async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFa
     await fill_task
 
 
-@pytest.mark.skip("temporarily skipped")
+@pytest.mark.skip("Flaky test")
 async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     """
     This test reproduces a bug in the JSON memory tracking.
     """
-    master = df_factory.create(proactor_threads=2, serialization_max_chunk_size=1)
+    master = df_factory.create(
+        proactor_threads=2,
+        serialization_max_chunk_size=1,
+        vmodule="replica=2,dflycmd=2,snapshot=1,rdb_save=1,rdb_load=1,journal_slice=2",
+    )
     replicas = [df_factory.create(proactor_threads=2) for i in range(2)]
 
     # Start instances and connect clients
@@ -2982,6 +2986,7 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
 
     seeder = SeederV2(key_target=50_000)
     fill_task = asyncio.create_task(seeder.run(master.client()))
+    await asyncio.sleep(0.2)
 
     for replica in c_replicas:
         await replica.execute_command(f"REPLICAOF LOCALHOST {master.port}")
@@ -3110,3 +3115,226 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
         lines = replica2.find_in_logs(f"Started full with localhost:{replica1.port}")
         assert len(lines) == 0
         assert len(replica1.find_in_logs("No partial sync due to diff")) > 0
+
+
+async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df_factory):
+    server1 = df_factory.create()
+    server2 = df_factory.create()
+    server3 = df_factory.create()
+    server4 = df_factory.create()
+
+    df_factory.start_all([server1, server2, server3, server4])
+    c_s2 = server2.client()
+    c_s3 = server3.client()
+    c_s4 = server4.client()
+
+    logging.debug("Start replication and wait for full sync")
+    await c_s2.execute_command(f"REPLICAOF localhost {server1.port}")
+    await wait_for_replicas_state(c_s2)
+    await c_s3.execute_command(f"REPLICAOF localhost {server1.port}")
+    await wait_for_replicas_state(c_s3)
+
+    # Promote server 2 to master
+    await c_s2.execute_command(f"REPLICAOF NO ONE")
+    # Make server 4 replica of server 2
+    await c_s4.execute_command(f"REPLICAOF localhost {server2.port}")
+    # Send some write command for lsn inc
+    for i in range(100):
+        await c_s2.set(i, "val")
+    # Make server 3 replica of server 2
+    await c_s3.execute_command(f"REPLICAOF localhost {server2.port}")
+    await check_all_replicas_finished([c_s3], c_s2)
+    await check_all_replicas_finished([c_s4], c_s2)
+
+    server3.stop()
+    # Check logs for partial replication
+    lines = server3.find_in_logs(f"Started partial sync with localhost:{server2.port}")
+    assert len(lines) == 1
+
+
+async def test_replicate_hset_with_expiry(df_factory: DflyInstanceFactory):
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+
+    master.start()
+    replica.start()
+
+    cm = master.client()
+    await cm.execute_command("HSETEX key 86400 name 1234")
+
+    cr = replica.client()
+    await cr.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(cr)
+
+    result = await cr.hgetall("key")
+
+    assert "name" in result
+    assert result["name"] == "1234"
+
+
+async def test_bug_5221(df_factory):
+    master = df_factory.create(
+        proactor_threads=1,
+        cache_mode="true",
+        maxmemory="256mb",
+        enable_heartbeat_eviction="true",
+        eviction_memory_budget_threshold=0.9,
+    )
+    replica = df_factory.create(proactor_threads=4)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+    await c_replica.execute_command(f"replicaof localhost {master.port}")
+
+    # Fill master with test data
+    seeder = SeederV2(key_target=22000, data_size=1000)
+    await seeder.run(c_master, target_deviation=0.01)
+    await asyncio.sleep(1)
+    await seeder.run(c_master, target_deviation=0.01)
+    res = await c_master.execute_command("dbsize")
+    assert res > 0
+
+
+@pytest.mark.parametrize("proactors", [1, 4, 6])
+@pytest.mark.parametrize("backlog_len", [1, 256, 1024, 1300])
+async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_len):
+    keys = 5_000
+    if proactors > 1:
+        keys = 10_000
+
+    # We use lock_on_hashtag because we want to seed enough elements to one flow/journal such that
+    # the partial sync stales.
+    master = df_factory.create(
+        proactor_threads=proactors, shard_repl_backlog_len=backlog_len, lock_on_hashtags=True
+    )
+    replica = df_factory.create(proactor_threads=proactors)
+
+    df_factory.start_all([replica, master])
+
+    async def stream(client, total):
+        for i in range(0, total):
+            prefix = "{prefix}"
+            # Seed to one shard only. This will eventually cause one of the flows to become stale.
+            await client.execute_command(f"SET {prefix}foo{i} bar{i}")
+
+    async with replica.client() as c_replica, master.client() as c_master:
+        seeder = SeederV2(key_target=keys)
+        await seeder.run(c_master, target_deviation=0.01)
+
+        proxy = Proxy("127.0.0.1", 1113, "127.0.0.1", master.port)
+        await proxy.start()
+        task = asyncio.create_task(proxy.serve())
+
+        try:
+            await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
+            # Reach stable sync
+            await wait_for_replicas_state(c_replica)
+            # Stream some elements
+            await stream(c_master, backlog_len)
+
+            proxy.drop_connection()
+            # Give time to detect dropped connection and reconnect
+            await asyncio.sleep(1.0)
+            # Partial synced here
+            await check_all_replicas_finished([c_replica], c_master)
+            hash1, hash2 = await asyncio.gather(
+                *(SeederV2.capture(c) for c in (c_master, c_replica))
+            )
+            assert hash1 == hash2
+
+            await proxy.close()
+            # Whoops we moved too much, no partial sync here
+            await stream(c_master, backlog_len + 10)
+            await proxy.start()
+            await asyncio.sleep(1.0)
+
+            await check_all_replicas_finished([c_replica], c_master)
+
+            hash1, hash2 = await asyncio.gather(
+                *(SeederV2.capture(c) for c in (c_master, c_replica))
+            )
+            assert hash1 == hash2
+        finally:
+            await proxy.close(task)
+
+    master.stop()
+    replica.stop()
+    # Partial sync worked
+    lines = master.find_in_logs("Partial sync requested from LSN")
+    # Because we run with num_shards = proactors - 1
+    total_attempts = 1
+    if proactors > 1:
+        total_attempts = proactors - 1 + proactors - 2
+    assert len(lines) == total_attempts
+    # Second partial sync failed because of stale LSN
+    lines = master.find_in_logs("Partial sync requested from stale LSN")
+    assert len(lines) == 1
+
+
+async def test_mc_gat_replication(df_factory):
+    master = df_factory.create(memcached_port=11211, proactor_threads=1)
+    replica = df_factory.create(memcached_port=11212, proactor_threads=1)
+    df_factory.start_all([master, replica])
+
+    cm = pymemcache.Client(f"127.0.0.1:{master.mc_port}", default_noreply=False)
+
+    key = "foo"
+    value = b"bar"
+    not_found = b"NOTFOUND"
+    assert cm.set(key, value, noreply=True)
+
+    async with replica.client() as cl:
+        await cl.execute_command(f"REPLICAOF localhost {master.port}")
+        await wait_available_async(cl)
+
+    async def state_transitioned_stable(
+        init: bytes,
+        expected: bytes,
+        duration_sec=5,
+        sleep_sec=1,
+    ):
+        """
+        Asserts that the state goes from initial to expected and then stays at expected, observing state for duration_sec
+        """
+        _start = time.time()
+        transitioned = False
+        state = None
+        while time.time() - _start < duration_sec:
+            state = cr.get(key, not_found)
+            if not transitioned and state == expected:
+                transitioned = True
+            if transitioned:
+                assert (
+                    state == expected
+                ), f"state moved back to initial after transition {state=} {init=} {expected=}"
+            else:
+                assert state == init, f"unexpected state: {state=} {init=}"
+            await asyncio.sleep(sleep_sec)
+        return state == expected
+
+    cr = pymemcache.Client(f"127.0.0.1:{replica.mc_port}", default_noreply=False)
+
+    assert await state_transitioned_stable(not_found, value)
+
+    # Force the key to be removed by setting expiry in the past. Memcache treats expiry > 1 month as absolute from
+    # epoch, so 1 month + 1 second expires the key
+    month_plus_one = 60 * 60 * 24 * 30 + 1
+
+    # GAT|GATS are not directly exposed in the python client API
+    assert cm._fetch_cmd(b"gat", [str(month_plus_one), key], expect_cas=False) == {}
+
+    # The replica should eventually sync the delete operation
+    assert await state_transitioned_stable(value, not_found)
+
+    assert cm.set(key, value, noreply=True)
+    # expiry is set as now + 1000 seconds, which ensures the key will remain for the duration of the test
+    assert cm._fetch_cmd(b"gat", [str(1000), key], expect_cas=False) == {key: value}
+
+    # once the value is synced to the replica, assert that it remains stable and is not removed by setting expiry
+    assert await state_transitioned_stable(not_found, value)
+
+    result = cm._fetch_cmd(b"gats", [str(1000), key], expect_cas=True)
+    assert len(result) == 1 and key in result, f"missing expected key: {result=}"
+    expected_cas_ver = b"0"
+    assert result[key] == (value, expected_cas_ver), f"unexpected result for key: {result=}"

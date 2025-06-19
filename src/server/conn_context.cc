@@ -7,6 +7,7 @@
 #include "base/logging.h"
 #include "core/heap_size.h"
 #include "facade/acl_commands_def.h"
+#include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/channel_store.h"
 #include "server/command_registry.h"
@@ -173,22 +174,15 @@ void ConnectionContext::ChangeMonitor(bool start) {
   EnableMonitoring(start);
 }
 
-void ConnectionContext::SwitchTxCmd(const CommandId* cid) {
-  transaction->MultiSwitchCmd(cid);
-  this->cid = cid;
-}
-
 void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgList args,
                                            facade::RedisReplyBuilder* rb) {
   vector<unsigned> result = ChangeSubscriptions(args, false, to_add, to_reply);
 
   if (to_reply) {
+    SinkReplyBuilder::ReplyScope scope{rb};
     for (size_t i = 0; i < result.size(); ++i) {
       const char* action[2] = {"unsubscribe", "subscribe"};
-      rb->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
-      rb->SendBulkString(action[to_add]);
-      rb->SendBulkString(ArgS(args, i));
-      rb->SendLong(result[i]);
+      SendSubscriptionChangedResponse(action[to_add], ArgS(args, i), result[i], rb);
     }
   }
 }
@@ -203,6 +197,7 @@ void ConnectionContext::ChangePSubscription(bool to_add, bool to_reply, CmdArgLi
       return SendSubscriptionChangedResponse(action[to_add], std::nullopt, 0, rb);
     }
 
+    SinkReplyBuilder::ReplyScope scope{rb};
     for (size_t i = 0; i < result.size(); ++i) {
       SendSubscriptionChangedResponse(action[to_add], ArgS(args, i), result[i], rb);
     }

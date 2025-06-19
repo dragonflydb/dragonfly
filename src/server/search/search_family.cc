@@ -64,8 +64,6 @@ bool SendErrorIfOccurred(const ParseResult<T>& result, CmdArgParser* parser,
   return false;
 }
 
-static const set<string_view> kIgnoredOptions = {"WEIGHT", "SEPARATOR"};
-
 bool IsValidJsonPath(string_view path) {
   error_code ec;
   MakeJsonPathExpr(path, ec);
@@ -191,6 +189,11 @@ ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
   return true;
 }
 
+constexpr std::array<const std::string_view, 6> kIgnoredOptions = {
+    "UNF"sv, "NOSTEM"sv, "CASESENSITIVE"sv, "WITHSUFFIXTRIE"sv, "INDEXMISSING"sv, "INDEXEMPTY"sv};
+constexpr std::array<const std::string_view, 3> kIgnoredOptionsWithArg = {"WEIGHT"sv, "SEPARATOR"sv,
+                                                                          "PHONETIC"sv};
+
 // SCHEMA field [AS alias] type [flags...]
 ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
   auto& schema = index->schema;
@@ -237,15 +240,27 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
       auto flag = parser->TryMapNext("NOINDEX", search::SchemaField::NOINDEX, "SORTABLE",
                                      search::SchemaField::SORTABLE);
       if (!flag) {
+        std::string_view option = parser->Peek();
+        if (std::find(kIgnoredOptions.begin(), kIgnoredOptions.end(), option) !=
+            kIgnoredOptions.end()) {
+          LOG_IF(WARNING, option != "INDEXMISSING"sv && option != "INDEXEMPTY"sv)
+              << "Ignoring unsupported field option in FT.CREATE: " << option;
+          // Ignore these options
+          parser->Skip(1);
+          continue;
+        }
+        if (std::find(kIgnoredOptionsWithArg.begin(), kIgnoredOptionsWithArg.end(), option) !=
+            kIgnoredOptionsWithArg.end()) {
+          LOG(WARNING) << "Ignoring unsupported field option in FT.CREATE: " << option;
+          // Ignore these options with argument
+          parser->Skip(2);
+          continue;
+        }
         break;
       }
 
       flags |= *flag;
     }
-
-    // Skip all trailing ignored parameters
-    while (kIgnoredOptions.count(parser->Peek()) > 0)
-      parser->Skip(2);
 
     schema.fields[field] = {field_type, flags, string{field_alias}, params};
     schema.field_names[field_alias] = field;
@@ -610,14 +625,11 @@ void SearchReply(const SearchParams& params,
   }
 
   const bool reply_with_ids_only = params.IdsOnly();
-  const size_t reply_size = reply_with_ids_only ? (limit + 1) : (limit * 2 + 1);
-
-  facade::SinkReplyBuilder::ReplyAggregator agg{builder};
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  rb->StartArray(reply_size);
-  rb->SendLong(total_hits);
+  RedisReplyBuilder::ArrayScope scope{rb, reply_with_ids_only ? (limit + 1) : (limit * 2 + 1)};
 
+  rb->SendLong(total_hits);
   for (size_t i = offset; i < end; i++) {
     if (reply_with_ids_only) {
       rb->SendBulkString(docs[i]->key);
@@ -978,21 +990,30 @@ void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {
       const auto& event = events[i];
 
       size_t children = 0;
+      size_t children_micros = 0;
       for (size_t j = i + 1; j < events.size(); j++) {
         if (events[j].depth == event.depth)
           break;
-        if (events[j].depth == event.depth + 1)
+        if (events[j].depth == event.depth + 1) {
           children++;
+          children_micros += events[j].micros;
+        }
       }
 
-      if (children > 0)
-        rb->StartArray(2);
+      rb->StartCollection(4 + (children > 0), RedisReplyBuilder::MAP);
+      rb->SendSimpleString("total_time");
+      rb->SendLong(event.micros);
+      rb->SendSimpleString("operation");
+      rb->SendSimpleString(event.descr);
+      rb->SendSimpleString("self_time");
+      rb->SendLong(event.micros - children_micros);
+      rb->SendSimpleString("procecssed");
+      rb->SendLong(event.num_processed);
 
-      rb->SendSimpleString(
-          absl::StrFormat("t=%-10u n=%-10u %s", event.micros, event.num_processed, event.descr));
-
-      if (children > 0)
+      if (children > 0) {
+        rb->SendSimpleString("children");
         rb->StartArray(children);
+      }
     }
   }
 }
@@ -1084,7 +1105,7 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
   auto sortable_value_sender = SortableValueSender(rb);
 
   const size_t result_size = agg_results.values.size();
-  rb->StartArray(result_size + 1);
+  RedisReplyBuilder::ArrayScope scope{rb, result_size + 1};
   rb->SendLong(result_size);
 
   for (const auto& value : agg_results.values) {

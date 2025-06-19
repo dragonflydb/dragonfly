@@ -308,7 +308,7 @@ string EngineShard::TxQueueInfo::Format() const {
 }
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
-  static_assert(sizeof(Stats) == 88);
+  static_assert(sizeof(Stats) == 96);
 
 #define ADD(x) x += o.x
 
@@ -323,6 +323,7 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
   ADD(total_heartbeat_expired_keys);
   ADD(total_heartbeat_expired_bytes);
   ADD(total_heartbeat_expired_calls);
+  ADD(total_migrated_keys);
 
 #undef ADD
   return *this;
@@ -413,7 +414,7 @@ bool EngineShard::DoDefrag() {
 
   DCHECK(slice.IsDbValid(defrag_state_.dbid));
   auto [prime_table, expire_table] = slice.GetTables(defrag_state_.dbid);
-  PrimeTable::Cursor cur = defrag_state_.cursor;
+  PrimeTable::Cursor cur{defrag_state_.cursor};
   uint64_t reallocations = 0;
   unsigned traverses_count = 0;
   uint64_t attempts = 0;
@@ -431,7 +432,7 @@ bool EngineShard::DoDefrag() {
     traverses_count++;
   } while (traverses_count < kMaxTraverses && cur && namespaces);
 
-  defrag_state_.UpdateScanState(cur.value());
+  defrag_state_.UpdateScanState(cur.token());
 
   if (reallocations > 0) {
     VLOG(1) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations
@@ -648,6 +649,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   }
 
   bool update_stats = false;
+  ++poll_concurrent_factor_;
 
   auto run = [this, &update_stats](Transaction* tx, bool allow_removal) -> bool /* concluding */ {
     update_stats = true;
@@ -663,6 +665,9 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     if ((is_self && disarmed) || continuation_trans_->DisarmInShard(sid)) {
       if (bool concludes = run(continuation_trans_, true); concludes) {
         continuation_trans_ = nullptr;
+        continuation_debug_id_.clear();
+      } else {
+        continuation_debug_id_ = continuation_trans_->DebugId(sid);
       }
     }
   }
@@ -703,6 +708,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     if (bool concludes = run(head, true); !concludes) {
       DCHECK_EQ(head->DEBUG_GetTxqPosInShard(sid), TxQueue::kEnd) << head->DebugId(sid);
       continuation_trans_ = head;
+      continuation_debug_id_ = head->DebugId(sid);
     }
   }
 
@@ -728,6 +734,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       LOG_IF(DFATAL, trans->DEBUG_GetTxqPosInShard(sid) == TxQueue::kEnd);
     }
   }
+  --poll_concurrent_factor_;
   if (update_stats) {
     CacheStats();
   }
@@ -736,6 +743,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 void EngineShard::RemoveContTx(Transaction* tx) {
   if (continuation_trans_ == tx) {
     continuation_trans_ = nullptr;
+    continuation_debug_id_.clear();
   }
 }
 
@@ -756,7 +764,9 @@ void EngineShard::Heartbeat() {
   if (db_slice.WillBlockOnJournalWrite() || !can_acquire_global_lock) {
     const auto elapsed = std::chrono::system_clock::now() - start;
     if (elapsed > std::chrono::seconds(1)) {
-      LOG_EVERY_T(WARNING, 5) << "Stalled heartbeat() fiber for " << elapsed.count() << " seconds";
+      const auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed);
+      LOG_EVERY_T(WARNING, 5) << "Stalled heartbeat() fiber for " << elapsed_seconds.count()
+                              << " seconds";
     }
     return;
   }
@@ -836,7 +846,7 @@ void EngineShard::RetireExpiredAndEvict() {
     if (eviction_goal) {
       uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
       auto [evicted_items, evicted_bytes] =
-          db_slice.FreeMemWithEvictionStep(i, starting_segment_id, eviction_goal);
+          db_slice.FreeMemWithEvictionStepAtomic(i, starting_segment_id, eviction_goal);
 
       DVLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
                << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
