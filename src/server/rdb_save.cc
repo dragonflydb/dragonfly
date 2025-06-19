@@ -14,7 +14,6 @@ extern "C" {
 #include "redis/crc64.h"
 #include "redis/intset.h"
 #include "redis/listpack.h"
-#include "redis/quicklist.h"
 #include "redis/rdb.h"
 #include "redis/stream.h"
 #include "redis/util.h"
@@ -166,9 +165,7 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
     case OBJ_STRING:
       return RDB_TYPE_STRING;
     case OBJ_LIST:
-      if (compact_enc == OBJ_ENCODING_QUICKLIST || compact_enc == kEncodingQL2) {
-        return RDB_TYPE_LIST_QUICKLIST_2;
-      }
+      return RDB_TYPE_LIST_QUICKLIST_2;
       break;
     case OBJ_SET:
       if (compact_enc == kEncodingIntSet)
@@ -354,20 +351,11 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
 
 error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
   /* Save a list value */
-  size_t len = 0;
-  const quicklistNode* node = nullptr;
+  DCHECK_EQ(pv.Encoding(), kEncodingQL2);
+  QList* ql = reinterpret_cast<QList*>(pv.RObjPtr());
+  const quicklistNode* node = (const quicklistNode*)ql->Head();
+  size_t len = ql->node_count();
 
-  if (pv.Encoding() == OBJ_ENCODING_QUICKLIST) {
-    const quicklist* ql = reinterpret_cast<const quicklist*>(pv.RObjPtr());
-    node = ql->head;
-    DVLOG(2) << "Saving list of length " << ql->len;
-    len = ql->len;
-  } else {
-    DCHECK_EQ(pv.Encoding(), kEncodingQL2);
-    QList* ql = reinterpret_cast<QList*>(pv.RObjPtr());
-    node = (const quicklistNode*)ql->Head();  // We rely on common ABI for Q2 and Q1 nodes.
-    len = ql->node_count();
-  }
   RETURN_ON_ERR(SaveLen(len));
 
   while (node) {
