@@ -2,7 +2,7 @@ packaging <= 24.2
 gevent <= 24.11.1
 deepdiff <= 8.3.0
 redis >= 5.2.1
-git+https://github.com/vyavdoshenko/RLTest.git@master
+git+https://github.com/dragonflydb/RLTest.git@DF
 numpy <= 2.2.4
 scipy <= 1.15.2
 faker <= 37.1.0
