@@ -176,7 +176,6 @@ class DashTest : public testing::Test {
 
 set<Segment::Key_t> DashTest::FillSegment(unsigned bid) {
   std::set<Segment::Key_t> keys;
-  auto cb = [](uint8_t a, uint8_t b) {};
   for (Segment::Key_t key = 0; key < 1000000u; ++key) {
     uint64_t hash = dt_.DoHash(key);
     unsigned bi = (hash >> 8) % Segment::kBucketNum;
@@ -185,7 +184,7 @@ set<Segment::Key_t> DashTest::FillSegment(unsigned bid) {
     uint8_t fp = hash & 0xFF;
     if (fp > 2)  // limit fps considerably to find interesting cases.
       continue;
-    auto [it, success] = segment_.Insert(key, 0, hash, EqTo(key), cb);
+    auto [it, success] = segment_.Insert(key, 0, hash, EqTo(key), [](auto&&...) {});
     if (!success) {
       LOG(INFO) << "Stopped at " << key;
       break;
@@ -219,9 +218,8 @@ TEST_F(DashTest, Basic) {
   Segment::Value_t val = 0;
   uint64_t hash = dt_.DoHash(key);
 
-  auto move_cb = [](uint8_t a, uint8_t b) {};
-  EXPECT_TRUE(segment_.Insert(key, val, hash, EqTo(key), move_cb).second);
-  auto [it, res] = segment_.Insert(key, val, hash, EqTo(key), move_cb);
+  EXPECT_TRUE(segment_.Insert(key, val, hash, EqTo(key), [](auto&&...) {}).second);
+  auto [it, res] = segment_.Insert(key, val, hash, EqTo(key), [](auto&&...) {});
   EXPECT_TRUE(!res && it.found());
 
   EXPECT_TRUE(Find(key, &val));
@@ -290,10 +288,9 @@ TEST_F(DashTest, Segment) {
 
 TEST_F(DashTest, SegmentFull) {
   std::equal_to<> eq;
-  auto cb = [](uint8_t a, uint8_t b) {};
   for (Segment::Key_t key = 8000; key < 15000u; ++key) {
     uint64_t hash = dt_.DoHash(key);
-    bool res = segment_.Insert(key, 0, hash, eq, cb).second;
+    bool res = segment_.Insert(key, 0, hash, eq, [](auto&&...) {}).second;
     if (!res) {
       LOG(INFO) << "Stopped at " << key;
       break;
@@ -328,14 +325,13 @@ TEST_F(DashTest, SegmentFull) {
 
 TEST_F(DashTest, FirstStash) {
   constexpr unsigned kRegularCapacity = Segment::kBucketNum * Segment::kSlotNum;
-  auto cb = [](uint8_t a, uint8_t b) {};
   unsigned less_seventy = 0;
   for (unsigned j = 0; j < 100; ++j) {
     unsigned num_items = 0;
     for (unsigned i = 0; i < 1000; ++i) {
       uint64_t key = i + j * 2000;
       uint64_t hash = dt_.DoHash(key);
-      auto [it, inserted] = segment_.Insert(key, 0, hash, equal_to<>{}, cb);
+      auto [it, inserted] = segment_.Insert(key, 0, hash, equal_to<>{}, [](auto&&...) {});
       ASSERT_TRUE(inserted);
       if (it.index >= Segment::kBucketNum) {  // stash iterator
         break;
@@ -359,19 +355,7 @@ TEST_F(DashTest, Split) {
   Segment::Value_t val;
   Segment s2{2, 0, PMR_NS::get_default_resource()};  // segment with local depth 2.
 
-  class EmptyMoveCallback {
-   public:
-    void SetMoveInDest() {
-    }
-    void SetMoveInSource() {
-    }
-    void SetMoveBeweenSegments() {
-    }
-    void operator()(uint8_t a, uint8_t b) const {
-    }
-  };
-  EmptyMoveCallback move_cb;
-  segment_.Split(&UInt64Policy::HashFn, &s2, move_cb);
+  segment_.Split(&UInt64Policy::HashFn, &s2, [](auto&...) {});
   unsigned sum[2] = {0};
   for (auto key : keys) {
     auto eq = [key](const auto& probe) { return key == probe; };
@@ -419,8 +403,8 @@ TEST_F(DashTest, BumpUp) {
 
   // Bump up
   std::vector<std::pair<uint8_t, uint8_t>> moved_buckets;
-  auto move_cb = [&moved_buckets](uint8_t a, uint8_t b) {
-    moved_buckets.push_back(std::make_pair(a, b));
+  auto move_cb = [&moved_buckets](uint32_t /* segment_id */, uint8_t a, uint8_t b) {
+    moved_buckets.emplace_back(a, b);
   };
   segment_.BumpUp(kFirstStashId, 5, hash, RelaxedBumpPolicy{}, move_cb);
 
@@ -478,14 +462,13 @@ TEST_F(DashTest, BumpPolicy) {
   // check items are immovable in bucket
   Segment::Key_t key = segment_.Key(1, 2);
   uint64_t hash = dt_.DoHash(key);
-  auto cb = [](uint8_t a, uint8_t b) {};
-  segment_.BumpUp(1, 2, hash, RestrictedBumpPolicy{}, cb);
+  segment_.BumpUp(1, 2, hash, RestrictedBumpPolicy{}, [](auto&&...) {});
   EXPECT_EQ(key, segment_.Key(1, 2));
 
   // check items don't swap from stash
   key = segment_.Key(kFirstStashId, 2);
   hash = dt_.DoHash(key);
-  segment_.BumpUp(kFirstStashId, 2, hash, RestrictedBumpPolicy{}, cb);
+  segment_.BumpUp(kFirstStashId, 2, hash, RestrictedBumpPolicy{}, [](auto&&...) {});
   EXPECT_EQ(key, segment_.Key(kFirstStashId, 2));
 }
 
@@ -545,15 +528,16 @@ TEST_F(DashTest, Custom) {
 
 TEST_F(DashTest, FindByValue) {
   using ItemSegment = detail::Segment<Item, uint64_t>;
-  auto cb = [](uint8_t a, uint8_t b) {};
+  auto no_op_cb = [](auto&&...) {};
+
   // Insert three different values with the same hash
   ItemSegment segment{2, 0, PMR_NS::get_default_resource()};
   segment.Insert(
-      Item{1}, 1, 42, [](const auto& pred) { return pred.buf[0] == 1; }, cb);
+      Item{1}, 1, 42, [](const auto& pred) { return pred.buf[0] == 1; }, no_op_cb);
   segment.Insert(
-      Item{2}, 2, 42, [](const auto& pred) { return pred.buf[0] == 2; }, cb);
+      Item{2}, 2, 42, [](const auto& pred) { return pred.buf[0] == 2; }, no_op_cb);
   segment.Insert(
-      Item{3}, 3, 42, [](const auto& pred) { return pred.buf[0] == 3; }, cb);
+      Item{3}, 3, 42, [](const auto& pred) { return pred.buf[0] == 3; }, no_op_cb);
 
   // We should be able to find the middle one by value
   auto it = segment.FindIt(42, [](const auto& key, const auto& value) { return value == 2; });

@@ -11,74 +11,6 @@
 
 namespace dfly {
 
-template <typename EvictionPolicy> class MoveCallback {
- public:
-  // Constructor with 2 segments (source and destination), used in split flow
-  MoveCallback(EvictionPolicy& ev, uint8_t global_depth, uint32_t src_seg_id, uint32_t dest_seg_id)
-      : ev_(ev), global_depth_(global_depth), src_seg_id_(src_seg_id), dest_seg_id_(dest_seg_id) {
-  }
-
-  // Constructor for single segment (intra-segment move)
-  MoveCallback(EvictionPolicy& ev, uint8_t global_depth, uint32_t seg_id)
-      : ev_(ev), global_depth_(global_depth), src_seg_id_(seg_id), dest_seg_id_(seg_id) {
-  }
-
-  enum class MoveOpt {
-    kMoveInSourceSegment,
-    kMoveInDestSegment,
-    kMoveBetweenSegments,
-    kIntraSegment
-  };
-
-  void SetMoveInDest() {
-    move_opt_ = MoveOpt::kMoveInDestSegment;
-  }
-  void SetMoveInSource() {
-    move_opt_ = MoveOpt::kMoveInSourceSegment;
-  }
-  void SetMoveBeweenSegments() {
-    move_opt_ = MoveOpt::kMoveBetweenSegments;
-  }
-
-  using Cursor = detail::DashCursor;
-  void operator()(uint8_t src_bid, uint8_t dest_bid) const {
-    Cursor src_cursor{global_depth_, GetSrcSegId(), src_bid};
-    Cursor dest_cursor{global_depth_, GetDestSegId(), dest_bid};
-    ev_.OnMove(src_cursor, dest_cursor);
-  }
-
- private:
-  EvictionPolicy& ev_;
-  uint8_t global_depth_;
-  uint32_t src_seg_id_;
-  uint32_t dest_seg_id_;
-  MoveOpt move_opt_ = MoveOpt::kIntraSegment;
-
-  uint32_t GetSrcSegId() const {
-    switch (move_opt_) {
-      case MoveOpt::kMoveInDestSegment:
-        return dest_seg_id_;
-      case MoveOpt::kIntraSegment:
-      case MoveOpt::kMoveInSourceSegment:
-      case MoveOpt::kMoveBetweenSegments:
-      default:
-        return src_seg_id_;
-    }
-  }
-
-  uint32_t GetDestSegId() const {
-    switch (move_opt_) {
-      case MoveOpt::kMoveInSourceSegment:
-        return src_seg_id_;
-      case MoveOpt::kIntraSegment:
-      case MoveOpt::kMoveInDestSegment:
-      case MoveOpt::kMoveBetweenSegments:
-      default:
-        return dest_seg_id_;
-    }
-  }
-};
-
 // DASH: Dynamic And Scalable Hashing.
 
 template <typename _Key, typename _Value, typename Policy>
@@ -358,9 +290,12 @@ class DashTable : public detail::DashTableBase {
   bool ShiftRight(bucket_iterator it);
 
   template <typename BumpPolicy> iterator BumpUp(iterator it, BumpPolicy& bp) {
-    MoveCallback move_cb(bp, global_depth_, it.seg_id_);
-    SegmentIterator seg_it =
-        segment_[it.seg_id_]->BumpUp(it.bucket_id_, it.slot_id_, DoHash(it->first), bp, move_cb);
+    SegmentIterator seg_it = segment_[it.seg_id_]->BumpUp(
+        it.bucket_id_, it.slot_id_, DoHash(it->first), bp,
+        [&](uint32_t segment_id, detail::PhysicalBid from, detail::PhysicalBid to) {
+          // OnMove is used to notify policy about the items moves across buckets.
+          bp.OnMove(Cursor{global_depth_, segment_id, from}, Cursor{global_depth_, segment_id, to});
+        });
 
     return iterator{this, it.seg_id_, seg_it.index, seg_it.slot};
   }
@@ -859,7 +794,11 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
     bool res = true;
     unsigned num_buckets = target->num_buckets();
 
-    MoveCallback move_cb(ev, global_depth_, target_seg_id);
+    auto move_cb = [&](uint32_t segment_id, detail::PhysicalBid from, detail::PhysicalBid to) {
+      // OnMove is used to notify policy about the move of items across buckets.
+      ev.OnMove(Cursor{global_depth_, segment_id, from}, Cursor{global_depth_, segment_id, to});
+    };
+
     if (mode == InsertMode::kForceInsert) {
       it =
           target->InsertUniq(std::forward<U>(key), std::forward<V>(value), key_hash, true, move_cb);
@@ -968,6 +907,7 @@ void DashTable<_Key, _Value, Policy>::IncreaseDepth(unsigned new_depth) {
   for (int i = prev_sz - 1; i >= 0; --i) {
     size_t offs = i * repl_cnt;
     std::fill(segment_.begin() + offs, segment_.begin() + offs + repl_cnt, segment_[i]);
+    segment_[i]->set_segment_id(offs);  // update segment id.
   }
   global_depth_ = new_depth;
 }
@@ -988,8 +928,14 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id, EvictionPolicy& ev)
   // remove current segment bucket count.
   bucket_count_ -= (source->num_buckets() + target->num_buckets());
 
-  MoveCallback move_cb(ev, global_depth_, start_idx, start_idx + chunk_size / 2);
-  source->Split(std::move(hash_fn), target, move_cb);  // increases the depth.
+  source->Split(
+      std::move(hash_fn), target,
+      [&](uint32_t segment_from, detail::PhysicalBid from, uint32_t segment_to,
+          detail::PhysicalBid to) {
+        // OnMove is used to notify eviction policy about the moves across buckets/segments
+        // during the split.
+        ev.OnMove(Cursor{global_depth_, segment_from, from}, Cursor{global_depth_, segment_to, to});
+      });
 
   // add back the updated bucket count.
   bucket_count_ += (target->num_buckets() + source->num_buckets());
