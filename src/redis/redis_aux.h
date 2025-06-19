@@ -49,15 +49,10 @@ void InitRedisTables();
 #define OBJ_ENCODING_INTSET 6U  /* Encoded as intset */
 #define OBJ_ENCODING_SKIPLIST 7U  /* Encoded as skiplist */
 #define OBJ_ENCODING_EMBSTR 8U  /* Embedded sds string encoding */
-#define OBJ_ENCODING_QUICKLIST 9U /* Encoded as linked list of ziplists */
+// #define OBJ_ENCODING_QUICKLIST 9U /* Encoded as linked list of ziplists */
 #define OBJ_ENCODING_STREAM 10U /* Encoded as a radix tree of listpacks */
 #define OBJ_ENCODING_LISTPACK 11 /* Encoded as a listpack */
 #define OBJ_ENCODING_COMPRESS_INTERNAL 15U  /* Kept as lzf compressed, to pass compressed blob to another thread */
 
-typedef struct quicklistIter quicklistIter;
-typedef struct quicklist quicklist;
-
-void quicklistInitIterator(quicklistIter* iter, quicklist *quicklist, int direction, const long long idx);
-void quicklistCompressIterator(quicklistIter* iter);
 
 #endif /* __REDIS_AUX_H */

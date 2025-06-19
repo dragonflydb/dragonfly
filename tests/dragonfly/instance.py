@@ -423,9 +423,6 @@ class DflyInstanceFactory:
         if version > 1.27:
             args.setdefault("omit_basic_usage")
 
-        # If path is not set, we assume that we are running the latest dragonfly.
-        if not path:
-            args.setdefault("list_experimental_v2")
         args.setdefault("log_dir", self.params.log_dir)
 
         if version >= 1.21 and "serialization_max_chunk_size" not in args:
