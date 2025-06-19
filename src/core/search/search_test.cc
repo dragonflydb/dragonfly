@@ -963,7 +963,6 @@ static std::string GeneratePattern(SearchType search_type, size_t pattern_len,
   return "";
 }
 
-// Template function for benchmark implementations
 static void BM_SearchByTypeImpl(benchmark::State& state, bool use_diverse_pattern) {
   size_t num_docs = state.range(0);
   size_t pattern_len = state.range(1);
