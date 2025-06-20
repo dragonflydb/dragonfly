@@ -1810,8 +1810,7 @@ async def test_cluster_replication_migration(
     assert await seeder.compare(fake_capture, r1_node.instance.port)
 
 
-@pytest.mark.skip("Flaky test")
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "pause_wait_timeout": 10})
 async def test_start_replication_during_migration(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
 ):
@@ -2561,8 +2560,7 @@ async def test_replicate_redis_cluster(redis_cluster, df_factory, df_seeder_fact
     assert await seeder.compare(capture, replica.port)
 
 
-@pytest.mark.skip("Flaky test")
-@dfly_args({"proactor_threads": 4})
+@dfly_args({"proactor_threads": 4, "pause_wait_timeout": 10})
 async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_seeder_factory):
     """
     Create redis cluster of 3 nodes.
@@ -2859,11 +2857,10 @@ For each migration we start migration, wait for it to finish and once it is fini
 """
 
 
-@pytest.mark.skip("Flaky test")
 @pytest.mark.slow
 @pytest.mark.exclude_epoll
 @pytest.mark.asyncio
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "pause_wait_timeout": 10})
 async def test_migration_rebalance_node(df_factory: DflyInstanceFactory, df_seeder_factory):
     # 1. Create cluster of 3 nodes with all slots allocated to first node.
     instances = [
