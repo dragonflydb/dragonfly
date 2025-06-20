@@ -112,6 +112,8 @@ ABSL_FLAG(int32_t, slowlog_log_slower_than, 10000,
           "microseconds and if it's negative - disables the slowlog.");
 ABSL_FLAG(uint32_t, slowlog_max_len, 20, "Slow log maximum length.");
 
+ABSL_FLAG(uint32_t, pause_wait_timeout, 1, "Timeout for set up the pause for all connections");
+
 ABSL_FLAG(string, s3_endpoint, "", "endpoint for s3 snapshots, default uses aws regional endpoint");
 ABSL_FLAG(bool, s3_use_https, true, "whether to use https for s3 endpoints");
 // Disable EC2 metadata by default, or if a users credentials are invalid the
@@ -751,7 +753,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
 
   // Wait for all busy commands to finish running before replying to guarantee
   // that no more (write) operations will occur.
-  const absl::Duration kDispatchTimeout = absl::Seconds(1);
+  const absl::Duration kDispatchTimeout = absl::Seconds(absl::GetFlag(FLAGS_pause_wait_timeout));
   if (!tracker.Wait(kDispatchTimeout)) {
     LOG(WARNING) << "Couldn't wait for commands to finish dispatching in " << kDispatchTimeout;
     shard_set->pool()->AwaitBrief([pause_state](unsigned, util::ProactorBase*) {
