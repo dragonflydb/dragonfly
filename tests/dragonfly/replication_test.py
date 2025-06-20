@@ -3016,6 +3016,8 @@ async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyIn
     await seeder.stop(c_master)
     await stream_task
 
+    await check_all_replicas_finished([c_replica], c_master)
+
     # Check that everything is in sync
     hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master, c_replica]))
     assert len(set(hashes)) == 1
