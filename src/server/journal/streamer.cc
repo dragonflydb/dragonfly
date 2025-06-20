@@ -121,6 +121,8 @@ void JournalStreamer::StalledWriterFiber(std::chrono::milliseconds period_ms,
       }
     }
 
+    // We don't want to force async write to replicate if last data
+    // was written recent. Data needs to be stalled for period_ms duration.
     if (!pending_buf_.Size() || in_flight_bytes_ > 0 ||
         ((last_async_write_time_ + period_ms.count()) >
          (fb2::ProactorBase::GetMonotonicTimeNs() / 1000000))) {
@@ -132,8 +134,16 @@ void JournalStreamer::StalledWriterFiber(std::chrono::milliseconds period_ms,
 }
 
 void JournalStreamer::AsyncWrite(bool force_send) {
+  // Stable sync or RestoreStreamer replication can't write data until
+  // previous AsyncWriter finished.
+  if (in_flight_bytes_ > 0) {
+    return;
+  }
+
+  // Writing in stable sync and outside of fiber needs to check
+  // threshold before writing data.
   if (is_stable_sync_ && !force_send &&
-      (in_flight_bytes_ > 0 || pending_buf_.FrontBufSize() < PendingBuf::Buf::kMaxBufSize)) {
+      pending_buf_.FrontBufSize() < PendingBuf::Buf::kMaxBufSize) {
     return;
   }
 
