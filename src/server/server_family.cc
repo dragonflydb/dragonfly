@@ -113,7 +113,7 @@ ABSL_FLAG(int32_t, slowlog_log_slower_than, 10000,
 ABSL_FLAG(uint32_t, slowlog_max_len, 20, "Slow log maximum length.");
 
 ABSL_FLAG(uint32_t, pause_wait_timeout, 1,
-          "Timeout in seconnds, to set up the pause for all connections for CLIENT PAUSE command "
+          "Timeout in seconds, to set up the pause for all connections for CLIENT PAUSE command "
           "and cluster slot migration finalization procedure.");
 
 ABSL_FLAG(string, s3_endpoint, "", "endpoint for s3 snapshots, default uses aws regional endpoint");
