@@ -20,7 +20,7 @@ class PendingBuf {
 #ifdef UIO_MAXIOV
     static constexpr size_t kMaxBufSize = UIO_MAXIOV;
 #else
-    static constexpr size_t kMaxBufSize = 1024;
+    static constexpr size_t kMaxBufSize = 1500;  // 1024;
 #endif
   };
 
