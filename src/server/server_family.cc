@@ -112,7 +112,9 @@ ABSL_FLAG(int32_t, slowlog_log_slower_than, 10000,
           "microseconds and if it's negative - disables the slowlog.");
 ABSL_FLAG(uint32_t, slowlog_max_len, 20, "Slow log maximum length.");
 
-ABSL_FLAG(uint32_t, pause_wait_timeout, 1, "Timeout for set up the pause for all connections");
+ABSL_FLAG(uint32_t, pause_wait_timeout, 1,
+          "Timeout in seconnds, to set up the pause for all connections for CLIENT PAUSE command "
+          "and cluster slot migration finalization procedure.");
 
 ABSL_FLAG(string, s3_endpoint, "", "endpoint for s3 snapshots, default uses aws regional endpoint");
 ABSL_FLAG(bool, s3_use_https, true, "whether to use https for s3 endpoints");
