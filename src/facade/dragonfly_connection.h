@@ -203,7 +203,7 @@ class Connection : public util::Connection {
     // Returns client id.Thread-safe.
     uint32_t GetClientId() const;
 
-    bool operator<(const WeakRef& other);
+    bool operator<(const WeakRef& other) const;
     bool operator==(const WeakRef& other) const;
 
    private:
@@ -426,6 +426,8 @@ class Connection : public util::Connection {
 
   void IncrNumConns();
   void DecrNumConns();
+
+  bool IsReplySizeOverLimit() const;
 
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
