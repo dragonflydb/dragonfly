@@ -68,7 +68,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
 
   // Initialize snapshot, start bucket iteration fiber, register listeners.
   // In journal streaming mode it needs to be stopped by either Stop or Cancel.
-  enum class SnapshotFlush { kAllow, kDisallow };
+  enum class SnapshotFlush : uint8_t { kAllow, kDisallow };
 
   void Start(bool stream_journal, SnapshotFlush allow_flush = SnapshotFlush::kDisallow);
 
