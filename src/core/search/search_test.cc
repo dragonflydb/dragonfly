@@ -103,9 +103,12 @@ IndicesOptions kEmptyOptions{{}};
 Schema MakeSimpleSchema(initializer_list<pair<string_view, SchemaField::FieldType>> ilist) {
   Schema schema;
   for (auto [name, type] : ilist) {
-    schema.fields[name] = {type, 0, string{name}};
+    auto& field = schema.fields[name];
+    field = {type, 0, string{name}};
     if (type == SchemaField::TAG)
-      schema.fields[name].special_params = SchemaField::TagParams{};
+      field.special_params = SchemaField::TagParams{};
+    else if (type == SchemaField::TEXT)
+      field.special_params = SchemaField::TextParams{};
   }
   return schema;
 }
@@ -472,6 +475,59 @@ TEST_F(SearchTest, StopWords) {
   algo.Init("found", &params);
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
 }
+
+class SearchRaxTest : public SearchTest,
+                      public testing::WithParamInterface<bool /* build suffix trie */> {};
+
+TEST_P(SearchRaxTest, SuffixInfix) {
+  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
+  schema.fields["title"].special_params = SchemaField::TextParams{.with_suffixtrie = GetParam()};
+
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  vector<string> documents = {"Berries",     "Blueberries", "Blackberries", "Apples",
+                              "Cranberries", "Wolfberry",   "Strawberry"};
+  for (size_t i = 0; i < documents.size(); i++) {
+    MockedDocument doc{{{"title", documents[i]}}};
+    indices.Add(i, doc);
+  }
+
+  // suffix queries
+
+  algo.Init("*es", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 3, 4));
+
+  algo.Init("*berries", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 4));
+
+  algo.Init("*les", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(3));
+
+  algo.Init("*lueberries", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1));
+
+  algo.Init("*berry", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(5, 6));
+
+  // infix queries
+
+  algo.Init("*berr*", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 4, 5, 6));
+
+  algo.Init("*anb*", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(4));
+
+  algo.Init("*berries*", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 4));
+
+  algo.Init("*bl*", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 2));
+}
+
+INSTANTIATE_TEST_SUITE_P(SuffixInfixNoTrie, SearchRaxTest, testing::Values(false));
+INSTANTIATE_TEST_SUITE_P(SuffixInfixWithTrie, SearchRaxTest, testing::Values(true));
 
 std::string ToBytes(absl::Span<const float> vec) {
   return string{reinterpret_cast<const char*>(vec.data()), sizeof(float) * vec.size()};
@@ -879,32 +935,6 @@ TEST_F(SearchTest, InvalidVectorParameter) {
   query_params["b"] = "abcdefg";
 
   ASSERT_FALSE(algo.Init("*=>[KNN 2 @v $b]", &query_params));
-}
-
-TEST_F(SearchTest, NotImplementedSearchTypes) {
-  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
-
-  SearchAlgorithm algo{};
-  QueryParams params;
-
-  // Add a document for testing
-  MockedDocument doc{Map{{"title", "text for search"}}};
-  indices.Add(0, doc);
-
-  // Test suffix search (words ending with "search")
-  algo.Init("*search", &params);
-  auto suffix_result = algo.Search(&indices);
-  EXPECT_TRUE(suffix_result.ids.empty()) << "Suffix search should return empty result";
-  EXPECT_THAT(suffix_result.error, testing::HasSubstr("Not implemented"))
-      << "Suffix search should return a not implemented error";
-
-  // Test infix search (words containing "for")
-  algo.Init("*for*", &params);
-  auto infix_result = algo.Search(&indices);
-  EXPECT_TRUE(infix_result.ids.empty()) << "Infix search should return empty result";
-  EXPECT_THAT(infix_result.error, testing::HasSubstr("Not implemented"))
-      << "Infix search should return a not implemented error";
 }
 
 // Enumeration for different search types

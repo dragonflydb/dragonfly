@@ -47,8 +47,9 @@ struct NumericIndex : public BaseIndex {
 // Base index for string based indices.
 template <typename C> struct BaseStringIndex : public BaseIndex {
   using Container = BlockList<C>;
+  using VecOrPtr = std::variant<std::vector<DocId>, const Container*>;
 
-  BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive);
+  BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive, bool with_suffixtrie);
 
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
@@ -59,22 +60,15 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // Iterate over all Matching on prefix.
   void MatchingPrefix(std::string_view prefix, absl::FunctionRef<void(const Container*)> cb) const;
 
+  // Get all entries matching suffix query. Faster if suffix trie is built.
+  void MatchingSuffix(std::string_view suffix, absl::FunctionRef<void(const Container*)> cb) const;
+
+  void MatchingInfix(std::string_view prefix, absl::FunctionRef<void(const Container*)> cb) const;
+
   // Returns all the terms that appear as keys in the reverse index.
   std::vector<std::string> GetTerms() const;
 
-  std::optional<std::vector<DocId>> GetAllResults() const override {
-    absl::flat_hash_set<DocId> unique_docs;
-
-    for (const auto& [term, container] : entries_) {
-      for (const DocId& id : container) {
-        unique_docs.insert(id);
-      }
-    }
-
-    auto result = std::vector<DocId>(unique_docs.begin(), unique_docs.end());
-    std::sort(result.begin(), result.end());
-    return result;
-  }
+  std::optional<std::vector<DocId>> GetAllResults() const override;
 
  protected:
   using StringList = DocumentAccessor::StringList;
@@ -86,10 +80,12 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // Used by Add & Remove to tokenize text value
   virtual absl::flat_hash_set<std::string> Tokenize(std::string_view value) const = 0;
 
-  Container* GetOrCreate(std::string_view word);
+  static Container* GetOrCreate(search::RaxTreeMap<Container>* map, std::string_view word);
+  static void Remove(search::RaxTreeMap<Container>* map, DocId id, std::string_view word);
 
   bool case_sensitive_ = false;
   search::RaxTreeMap<Container> entries_;
+  std::optional<search::RaxTreeMap<Container>> suffix_trie_;
 };
 
 // Index for text fields.
@@ -97,9 +93,8 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
 struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
   using StopWords = absl::flat_hash_set<std::string>;
 
-  TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords, const Synonyms* synonyms)
-      : BaseStringIndex(mr, false), stopwords_{stopwords}, synonyms_{synonyms} {
-  }
+  TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords, const Synonyms* synonyms,
+            bool with_suffixtrie);
 
  protected:
   std::optional<StringList> GetStrings(const DocumentAccessor& doc,
@@ -115,7 +110,7 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
 // Hashmap based lookup per word.
 struct TagIndex : public BaseStringIndex<SortedVector> {
   TagIndex(PMR_NS::memory_resource* mr, SchemaField::TagParams params)
-      : BaseStringIndex(mr, params.case_sensitive), separator_{params.separator} {
+      : BaseStringIndex(mr, params.case_sensitive, false), separator_{params.separator} {
   }
 
  protected:
@@ -152,31 +147,7 @@ struct FlatVectorIndex : public BaseVectorIndex {
   const float* Get(DocId doc) const;
 
   // Return all documents that have vectors in this index
-  std::optional<std::vector<DocId>> GetAllResults() const override {
-    std::vector<DocId> result;
-    size_t num_vectors = entries_.size() / dim_;
-    result.reserve(num_vectors);
-
-    for (DocId id = 0; id < num_vectors; ++id) {
-      // Check if the vector is not zero (all elements are 0)
-      // TODO: Valid vector can contain 0s, we should use a better approach
-      const float* vec = Get(id);
-      bool is_zero_vector = true;
-
-      for (size_t i = 0; i < dim_; ++i) {
-        if (vec[i] != 0.0f) {
-          is_zero_vector = false;
-          break;
-        }
-      }
-
-      if (!is_zero_vector) {
-        result.push_back(id);
-      }
-    }
-
-    return result;
-  }
+  std::optional<std::vector<DocId>> GetAllResults() const override;
 
  protected:
   void AddVector(DocId id, const VectorPtr& vector) override;
