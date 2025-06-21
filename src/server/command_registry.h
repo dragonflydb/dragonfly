@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/types/span.h>
+#include <hdr/hdr_histogram.h>
 
 #include <functional>
 #include <optional>
@@ -84,14 +85,41 @@ struct CommandContext {
   ConnectionContext* conn_cntx;
 };
 
+// TODO: move it to helio
+// Makes sure that the POD T that is passed to the constructor is reset to default state
+template <typename T> class MoveOnly {
+ public:
+  MoveOnly() = default;
+
+  MoveOnly(const MoveOnly&) = delete;
+  MoveOnly& operator=(const MoveOnly&) = delete;
+
+  explicit MoveOnly(MoveOnly&& t) noexcept : value_(std::move(t.value_)) {
+    t.value_ = T{};  // Reset the passed value to default state
+  }
+
+  MoveOnly& operator=(const T& t) noexcept {
+    value_ = t;
+    return *this;
+  }
+
+  operator const T&() const {  // NOLINT
+    return value_;
+  }
+
+ private:
+  T value_;
+};
+
 class CommandId : public facade::CommandId {
  public:
   // NOTICE: name must be a literal string, otherwise metrics break! (see cmd_stats_map in
   // server_state.h)
   CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
             std::optional<uint32_t> acl_categories = std::nullopt);
+  CommandId(CommandId&& o) = default;
 
-  CommandId(CommandId&&) = default;
+  ~CommandId();
 
   [[nodiscard]] CommandId Clone(std::string_view name) const;
 
@@ -160,11 +188,13 @@ class CommandId : public facade::CommandId {
   }
 
  private:
+  // The following fields must copy manually in the move constructor.
   bool implicit_acl_;
+  bool is_alias_{false};
   std::unique_ptr<CmdCallStats[]> command_stats_;
   Handler3 handler_;
   ArgValidator validator_;
-  bool is_alias_{false};
+  MoveOnly<struct hdr_histogram*> latency_histogram_;  // Histogram for command latency in usec
 };
 
 class CommandRegistry {

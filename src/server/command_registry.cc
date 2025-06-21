@@ -121,6 +121,10 @@ CmdLineMapping OriginalToAliasMap() {
   return original_to_alias;
 }
 
+constexpr int64_t kLatencyHistogramMinValue = 1;        // Minimum value in usec
+constexpr int64_t kLatencyHistogramMaxValue = 1000000;  // Maximum value in usec (1s)
+constexpr int32_t kLatencyHistogramPrecision = 2;
+
 }  // namespace
 
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
@@ -128,6 +132,16 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
     : facade::CommandId(name, ImplicitCategories(mask), arity, first_key, last_key,
                         acl_categories.value_or(ImplicitAclCategories(mask))) {
   implicit_acl_ = !acl_categories.has_value();
+  struct hdr_histogram* hist = nullptr;
+  hdr_init(kLatencyHistogramMinValue, kLatencyHistogramMaxValue, kLatencyHistogramPrecision, &hist);
+  latency_histogram_ = hist;
+}
+
+CommandId::~CommandId() {
+  // Aliases share the same latency histogram, so we only close it if this is not an alias.
+  if (latency_histogram_ && !is_alias_) {
+    hdr_close(latency_histogram_);
+  }
 }
 
 CommandId CommandId::Clone(const std::string_view name) const {
@@ -138,6 +152,11 @@ CommandId CommandId::Clone(const std::string_view name) const {
   cloned.acl_categories_ = acl_categories_;
   cloned.implicit_acl_ = implicit_acl_;
   cloned.is_alias_ = true;
+
+  // explicit sharing of the object since it's an alias we can do that.
+  // I am assuming that the source object lifetime is at least as of the cloned object.
+  hdr_close(cloned.latency_histogram_);  // Free the histogram in the cloned object.
+  cloned.latency_histogram_ = static_cast<struct hdr_histogram*>(latency_histogram_);
   return cloned;
 }
 
@@ -157,7 +176,8 @@ bool CommandId::IsMultiTransactional() const {
 }
 
 uint64_t CommandId::Invoke(CmdArgList args, const CommandContext& cmd_cntx) const {
-  int64_t before = absl::GetCurrentTimeNanos();
+  uint64_t before = cmd_cntx.conn_cntx->conn_state.cmd_start_time_ns;
+  DCHECK_GT(before, 0u);
   handler_(args, cmd_cntx);
   int64_t after = absl::GetCurrentTimeNanos();
 
