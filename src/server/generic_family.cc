@@ -2013,6 +2013,7 @@ constexpr uint32_t kDump = KEYSPACE | READ | SLOW;
 constexpr uint32_t kUnlink = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kStick = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kSort = WRITE | SET | SORTEDSET | LIST | SLOW | DANGEROUS;
+constexpr uint32_t kSortRO = READ | SET | SORTEDSET | LIST | SLOW | DANGEROUS;
 constexpr uint32_t kMove = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kRestore = KEYSPACE | WRITE | SLOW | DANGEROUS;
 constexpr uint32_t kExpireTime = KEYSPACE | READ | FAST;
@@ -2059,7 +2060,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"UNLINK", CO::WRITE, -2, 1, -1, acl::kUnlink}.HFUNC(Unlink)
       << CI{"STICK", CO::WRITE, -2, 1, -1, acl::kStick}.HFUNC(Stick)
       << CI{"SORT", CO::WRITE, -2, 1, -1, acl::kSort}.HFUNC(Sort)
-      << CI{"SORT_RO", CO::READONLY, -2, 1, 1, acl::kSort}.HFUNC(Sort_RO)
+      << CI{"SORT_RO", CO::READONLY, -2, 1, 1, acl::kSortRO}.HFUNC(Sort_RO)
       << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kMove}.HFUNC(
              Move)
       << CI{"RESTORE", CO::WRITE, -4, 1, 1, acl::kRestore}.HFUNC(Restore)
