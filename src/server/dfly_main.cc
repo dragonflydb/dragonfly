@@ -714,11 +714,11 @@ void ParseFlagsFromEnv() {
         auto& flag = entry->second;
         bool success = flag->ParseFrom(flag_value, &error);
         if (!success) {
-          LOG(FATAL) << "could not parse flag " << flag->Name()
-                     << " from environment variable. Error: " << error;
+          LOG(WARNING) << "could not parse flag " << flag->Name()
+                       << " from environment variable. Error: " << error;
         }
       } else {
-        LOG(FATAL) << "unknown environment variable DFLY_" << flag_name;
+        LOG(WARNING) << "unknown environment variable DFLY_" << flag_name;
       }
     }
   }
