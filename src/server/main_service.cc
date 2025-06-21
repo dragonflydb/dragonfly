@@ -1044,11 +1044,10 @@ static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
   return nullopt;
 }
 
-bool ShouldDenyOnOOM(const CommandId* cid) {
+bool ShouldDenyOnOOM(const CommandId* cid, uint64_t curr_time_ns) {
   ServerState& etl = *ServerState::tlocal();
   if ((cid->opt_mask() & CO::DENYOOM) && etl.is_master) {
-    uint64_t start_ns = absl::GetCurrentTimeNanos();
-    auto memory_stats = etl.GetMemoryUsage(start_ns);
+    auto memory_stats = etl.GetMemoryUsage(curr_time_ns);
 
     if (memory_stats.used_mem > max_memory_limit ||
         (etl.rss_oom_deny_ratio > 0 &&
@@ -1062,14 +1061,14 @@ bool ShouldDenyOnOOM(const CommandId* cid) {
   return false;
 }
 
-optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid,
-                                                     const ConnectionContext* cntx,
+optional<ErrorReply> Service::VerifyCommandExecution(const ConnectionContext* cntx,
                                                      CmdArgList tail_args) {
-  if (ShouldDenyOnOOM(cid)) {
+  DCHECK(cntx->conn_state.cmd_start_time_ns);
+  if (ShouldDenyOnOOM(cntx->cid, cntx->conn_state.cmd_start_time_ns)) {
     return facade::ErrorReply{OpStatus::OUT_OF_MEMORY};
   }
 
-  return VerifyConnectionAclStatus(cid, cntx, "ACL rules changed between the MULTI and EXEC",
+  return VerifyConnectionAclStatus(cntx->cid, cntx, "ACL rules changed between the MULTI and EXEC",
                                    tail_args);
 }
 
@@ -1361,11 +1360,12 @@ DispatchResult Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
 
   ConnectionContext* cntx = cmd_cntx.conn_cntx;
   cntx->cid = cid;
+  cntx->conn_state.cmd_start_time_ns = absl::GetCurrentTimeNanos();
   auto* builder = cmd_cntx.rb;
   DCHECK(builder);
   DCHECK(cntx);
 
-  if (auto err = VerifyCommandExecution(cid, cntx, tail_args); err) {
+  if (auto err = VerifyCommandExecution(cntx, tail_args); err) {
     // We need to skip this because ACK's should not be replied to
     // Bonus points because this allows to continue replication with ACL users who got
     // their access revoked and reinstated
