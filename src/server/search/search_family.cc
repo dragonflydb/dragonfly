@@ -123,6 +123,13 @@ ParseResult<search::SchemaField::TagParams> ParseTagParams(CmdArgParser* parser)
   return params;
 }
 
+ParseResult<search::SchemaField::TextParams> ParseTextParams(CmdArgParser* parser) {
+  search::SchemaField::TextParams params{};
+
+  params.with_suffixtrie = parser->Check("WITHSUFFIXTRIE");
+  return params;
+}
+
 // breaks on ParamsVariant initialization
 #ifndef __clang__
 #pragma GCC diagnostic push
@@ -142,7 +149,10 @@ ParsedSchemaField ParseTag(CmdArgParser* parser) {
 }
 
 ParsedSchemaField ParseText(CmdArgParser* parser) {
-  return std::make_pair(search::SchemaField::TEXT, std::monostate{});
+  auto text_params = ParseTextParams(parser);
+  if (!text_params)
+    return make_unexpected(text_params.error());
+  return std::make_pair(search::SchemaField::TEXT, std::move(text_params).value());
 }
 
 ParsedSchemaField ParseNumeric(CmdArgParser* parser) {
