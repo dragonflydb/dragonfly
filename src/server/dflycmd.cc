@@ -658,7 +658,8 @@ void DflyCmd::StartStableSyncInThread(FlowInfo* flow, ExecutionState* exec_st, E
   DCHECK(shard);
   DCHECK(flow->conn);
 
-  flow->streamer.reset(new JournalStreamer(sf_->journal(), exec_st, JournalStreamer::SendLsn::YES));
+  flow->streamer.reset(
+      new JournalStreamer(sf_->journal(), exec_st, JournalStreamer::SendLsn::YES, true));
   flow->streamer->Start(flow->conn->socket());
 
   // Register cleanup.
