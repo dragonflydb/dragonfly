@@ -297,6 +297,9 @@ async def test_multidim_knn(async_client: aioredis.Redis, index_type, algo_type)
         definition=IndexDefinition(index_type=index_type),
     )
 
+    # Use fixed seed for deterministic results
+    np.random.seed(42)
+
     def rand_point():
         return np.random.uniform(0, 10, NUM_DIMS).astype(np.float32)
 
@@ -315,7 +318,9 @@ async def test_multidim_knn(async_client: aioredis.Redis, index_type, algo_type)
     # Run 10 random queries
     for _ in range(10):
         center = rand_point()
-        limit = random.randint(1, NUM_POINTS // 10)
+        limit = np.random.randint(
+            1, NUM_POINTS // 10 + 1
+        )  # +1 because numpy's randint is exclusive
 
         expected_ids = [
             f"k{i}"
