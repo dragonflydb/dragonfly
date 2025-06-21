@@ -1,14 +1,15 @@
 import async_timeout
 import asyncio
 import itertools
+import logging
 import pytest
 import random
 import redis.asyncio as aioredis
 
 from . import dfly_args
 from .seeder import DebugPopulateSeeder
-from .utility import info_tick_timer
-
+from .utility import info_tick_timer, wait_for_replicas_state
+from .instance import DflyInstanceFactory
 
 BASIC_ARGS = {"port": 6379, "proactor_threads": 4, "tiered_prefix": "/tmp/tiered/backing"}
 
@@ -87,3 +88,35 @@ async def test_mixed_append(async_client: aioredis.Redis):
     res = await p.execute()
 
     assert res == [10 * k for k in key_range]
+
+
+@pytest.mark.exclude_epoll
+@pytest.mark.opt_only
+@dfly_args(
+    {
+        "proactor_threads": 2,
+        "tiered_prefix": "/tmp/tiered/backing_master",
+        "maxmemory": "4G",
+        "cache_mode": True,
+        "tiered_offload_threshold": "0.2",
+        "tiered_storage_write_depth": 100,
+    }
+)
+async def test_full_sync(async_client: aioredis.Redis, df_factory: DflyInstanceFactory):
+    replica = df_factory.create(
+        proactor_threads=2,
+        cache_mode=True,
+        maxmemory="4G",
+        tiered_prefix="/tmp/tiered/backing_replica",
+        tiered_offload_threshold="0.2",
+        tiered_storage_write_depth=1000,
+    )
+    replica.start()
+    replica_client = replica.client()
+    await async_client.execute_command("debug", "populate", "3000000", "key", "2000")
+    await replica_client.replicaof(
+        "localhost", async_client.connection_pool.connection_kwargs["port"]
+    )
+    logging.info("Waiting for replica to sync")
+    async with async_timeout.timeout(120):
+        await wait_for_replicas_state(replica_client)

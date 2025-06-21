@@ -26,14 +26,6 @@ M_STRESS = [pytest.mark.slow, pytest.mark.opt_only]
 M_NOT_EPOLL = [pytest.mark.exclude_epoll]
 
 
-async def wait_for_replicas_state(*clients, state="online", node_role="slave", timeout=0.05):
-    """Wait until all clients (replicas) reach passed state"""
-    while len(clients) > 0:
-        await asyncio.sleep(timeout)
-        roles = await asyncio.gather(*(c.role() for c in clients))
-        clients = [c for c, role in zip(clients, roles) if role[0] != node_role or role[3] != state]
-
-
 """
 Test full replication pipeline. Test full sync with streaming changes and stable state streaming.
 """

@@ -104,6 +104,7 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
 }
 
 void SliceSnapshot::StartIncremental(LSN start_lsn) {
+  VLOG(1) << "StartIncremental: " << start_lsn;
   serializer_ = std::make_unique<RdbSerializer>(compression_mode_);
 
   snapshot_fb_ = fb2::Fiber("incremental_snapshot",
@@ -319,7 +320,6 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
   uint64_t running_cycles = ThisFiber::GetRunningTimeCycles();
 
   fb2::NoOpLock lk;
-
   // We create a critical section here that ensures that records are pushed in sequential order.
   // As a result, it is not possible for two fiber producers to push concurrently.
   // If A.id = 5, and then B.id = 6, and both are blocked here, it means that last_pushed_id_ < 4.
@@ -356,7 +356,10 @@ bool SliceSnapshot::PushSerialized(bool force) {
     // Async bucket serialization might have accumulated some delayed values.
     // Because we can finally block in this function, we'll await and serialize them
     do {
-      auto& entry = delayed_entries_.back();
+      // We may call PushSerialized from multiple fibers concurrently, so we need to
+      // ensure that we are not serializing the same entry concurrently.
+      DelayedEntry entry = std::move(delayed_entries_.back());
+      delayed_entries_.pop_back();
 
       // TODO: https://github.com/dragonflydb/dragonfly/issues/4654
       // there are a few problems with how we serialize external values.
@@ -367,7 +370,6 @@ bool SliceSnapshot::PushSerialized(bool force) {
 
       // TODO: to introduce RdbSerializer::SaveString that can accept a string value directly.
       serializer_->SaveEntry(entry.key, pv, entry.expire, entry.mc_flags, entry.dbid);
-      delayed_entries_.pop_back();
     } while (!delayed_entries_.empty());
 
     // blocking point.
