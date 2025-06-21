@@ -869,6 +869,101 @@ TEST_F(GenericFamilyTest, SortStore) {
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
 }
 
+TEST_F(GenericFamilyTest, Sort_RO) {
+  // Test list sort with params
+  Run({"del", "list-1"});
+  Run({"lpush", "list-1", "3.5", "1.2", "10.1", "2.20", "200"});
+  // numeric
+  ASSERT_THAT(Run({"sort_ro", "list-1"}).GetVec(),
+              ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
+  // string
+  ASSERT_THAT(Run({"sort_ro", "list-1", "ALPHA"}).GetVec(),
+              ElementsAre("1.2", "10.1", "2.20", "200", "3.5"));
+  // desc numeric
+  ASSERT_THAT(Run({"sort_ro", "list-1", "DESC"}).GetVec(),
+              ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
+  // desc strig
+  ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "ALPHA"}).GetVec(),
+              ElementsAre("3.5", "200", "2.20", "10.1", "1.2"));
+  // limits
+  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "0", "5"}).GetVec(),
+              ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
+  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "0", "10"}).GetVec(),
+              ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
+  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "2", "2"}).GetVec(), ElementsAre("3.5", "10.1"));
+  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "1", "1"}), "2.20");
+  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "4", "2"}), "200");
+  ASSERT_THAT(Run({"sort_ro", "list-1", "LIMIT", "5", "2"}), ArrLen(0));
+  // limits desc
+  ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "0", "5"}).GetVec(),
+              ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
+  ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "2", "2"}).GetVec(),
+              ElementsAre("3.5", "2.20"));
+  ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "1", "1"}), "10.1");
+  ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "LIMIT", "5", "2"}), ArrLen(0));
+
+  // Test set sort
+  Run({"del", "set-1"});
+  Run({"sadd", "set-1", "5.3", "4.4", "60", "99.9", "100", "9"});
+  ASSERT_THAT(Run({"sort_ro", "set-1"}).GetVec(),
+              ElementsAre("4.4", "5.3", "9", "60", "99.9", "100"));
+  ASSERT_THAT(Run({"sort_ro", "set-1", "ALPHA"}).GetVec(),
+              ElementsAre("100", "4.4", "5.3", "60", "9", "99.9"));
+  ASSERT_THAT(Run({"sort_ro", "set-1", "DESC"}).GetVec(),
+              ElementsAre("100", "99.9", "60", "9", "5.3", "4.4"));
+  ASSERT_THAT(Run({"sort_ro", "set-1", "DESC", "ALPHA"}).GetVec(),
+              ElementsAre("99.9", "9", "60", "5.3", "4.4", "100"));
+
+  // Test intset sort
+  Run({"del", "intset-1"});
+  Run({"sadd", "intset-1", "5", "4", "3", "2", "1"});
+  ASSERT_THAT(Run({"sort_ro", "intset-1"}).GetVec(), ElementsAre("1", "2", "3", "4", "5"));
+
+  // Test sorted set sort
+  Run({"del", "zset-1"});
+  Run({"zadd", "zset-1", "0", "3.3", "0", "30.1", "0", "8.2"});
+  ASSERT_THAT(Run({"sort_ro", "zset-1"}).GetVec(), ElementsAre("3.3", "8.2", "30.1"));
+  ASSERT_THAT(Run({"sort_ro", "zset-1", "ALPHA"}).GetVec(), ElementsAre("3.3", "30.1", "8.2"));
+  ASSERT_THAT(Run({"sort_ro", "zset-1", "DESC"}).GetVec(), ElementsAre("30.1", "8.2", "3.3"));
+  ASSERT_THAT(Run({"sort_ro", "zset-1", "DESC", "ALPHA"}).GetVec(),
+              ElementsAre("8.2", "30.1", "3.3"));
+
+  // Test sort with non existent key
+  Run({"del", "list-2"});
+  ASSERT_THAT(Run({"sort_ro", "list-2"}), ArrLen(0));
+
+  // Test not convertible to double
+  Run({"lpush", "list-2", "NOTADOUBLE"});
+  ASSERT_THAT(Run({"sort_ro", "list-2"}),
+              ErrArg("One or more scores can't be converted into double"));
+
+  Run({"set", "foo", "bar"});
+  ASSERT_THAT(Run({"sort_ro", "foo"}), ErrArg("WRONGTYPE "));
+
+  Run({"rpush", "list-3", ""});
+  ASSERT_THAT(Run({"sort_ro", "list-3"}), "");
+
+  Run({"rpush", "list-3", "2", "0", "", "-0.14", "0.12", "-0", "-123123", "7654"});
+  ASSERT_THAT(Run({"sort_ro", "list-3"}).GetVec(),
+              ElementsAre("-123123", "-0.14", "", "", "-0", "0", "0.12", "2", "7654"));
+
+  Run({"rpush", "NANvalue", "nan"});
+  ASSERT_THAT(Run({"sort_ro", "NANvalue"}),
+              ErrArg("One or more scores can't be converted into double"));
+
+  // Test store option should not work
+  ASSERT_THAT(Run({"sort_ro", "list-1", "store", "list-2"}), ErrArg("syntax error"));
+}
+
+TEST_F(GenericFamilyTest, SortROBug3636) {
+  Run({"RPUSH", "foo", "1.100000023841858", "1.100000023841858", "1.100000023841858", "-15710",
+       "1.100000023841858", "1.100000023841858", "1.100000023841858", "-15710", "-15710",
+       "1.100000023841858", "-15710", "-15710", "-15710", "-15710", "1.100000023841858", "-15710",
+       "-15710"});
+  auto resp = Run({"SORT_RO", "foo", "desc", "alpha"});
+  ASSERT_THAT(resp, ArrLen(17));
+}
+
 TEST_F(GenericFamilyTest, TimeNoKeys) {
   auto resp = Run({"time"});
   EXPECT_THAT(resp, ArrLen(2));

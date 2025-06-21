@@ -1471,7 +1471,7 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
   return len;
 }
 
-void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
+void SortGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_read_only) {
   std::string_view key = ArgS(args, 0);
   bool alpha = false;
   bool reversed = false;
@@ -1497,7 +1497,7 @@ void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
       }
       bounds = {offset, limit};
       i += 2;
-    } else if (arg == "STORE") {
+    } else if (!is_read_only && arg == "STORE") {
       if (i + 1 >= args.size()) {
         return builder->SendError(kSyntaxErr);
       }
@@ -1520,7 +1520,7 @@ void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->Execute(std::move(fetch_cb), !bool(store_key));
+  cmd_cntx.tx->Execute(std::move(fetch_cb), (is_read_only || !bool(store_key)));
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (!fetch_result.ok()) {
     cmd_cntx.tx->Conclude();
@@ -1533,7 +1533,9 @@ void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   auto result_type = fetch_result.type();
-  auto sort_call = [builder, bounds, reversed, result_type, &store_key, &cmd_cntx](auto& entries) {
+
+  auto sort_call = [result_type, bounds, reversed, is_read_only, &rb, &store_key,
+                    &cmd_cntx](auto& entries) {
     using value_t = typename std::decay_t<decltype(entries)>::value_type;
     auto cmp = reversed ? &value_t::greater : &value_t::less;
     if (bounds) {
@@ -1550,9 +1552,15 @@ void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
       end_it = entries.begin() + std::min(bounds->first + bounds->second, entries.size());
     }
 
-    bool is_set = (result_type == OBJ_SET || result_type == OBJ_ZSET);
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    if (store_key) {
+    if (is_read_only || !bool(store_key)) {
+      bool is_set = (result_type == OBJ_SET || result_type == OBJ_ZSET);
+      rb->StartCollection(std::distance(start_it, end_it),
+                          is_set ? RedisReplyBuilder::SET : RedisReplyBuilder::ARRAY);
+
+      for (auto it = start_it; it != end_it; ++it) {
+        rb->SendBulkString(it->key);
+      }
+    } else {
       ShardId dest_sid = Shard(store_key.value(), shard_set->size());
       OpResult<uint32_t> store_len;
       auto store_callback = [&](Transaction* t, EngineShard* shard) {
@@ -1568,17 +1576,18 @@ void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
       } else {
         rb->SendError(store_len.status());
       }
-    } else {
-      rb->StartCollection(std::distance(start_it, end_it),
-                          is_set ? RedisReplyBuilder::SET : RedisReplyBuilder::ARRAY);
-
-      for (auto it = start_it; it != end_it; ++it) {
-        rb->SendBulkString(it->key);
-      }
     }
   };
 
-  std::visit(std::move(sort_call), fetch_result.value());
+  std::visit(sort_call, fetch_result.value());
+}
+
+void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
+  SortGeneric(args, cmd_cntx, false);
+}
+
+void GenericFamily::Sort_RO(CmdArgList args, const CommandContext& cmd_cntx) {
+  SortGeneric(args, cmd_cntx, true);
 }
 
 void GenericFamily::Restore(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2050,6 +2059,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"UNLINK", CO::WRITE, -2, 1, -1, acl::kUnlink}.HFUNC(Unlink)
       << CI{"STICK", CO::WRITE, -2, 1, -1, acl::kStick}.HFUNC(Stick)
       << CI{"SORT", CO::WRITE, -2, 1, -1, acl::kSort}.HFUNC(Sort)
+      << CI{"SORT_RO", CO::READONLY, -2, 1, 1, acl::kSort}.HFUNC(Sort_RO)
       << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kMove}.HFUNC(
              Move)
       << CI{"RESTORE", CO::WRITE, -4, 1, 1, acl::kRestore}.HFUNC(Restore)
