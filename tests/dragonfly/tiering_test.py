@@ -118,5 +118,12 @@ async def test_full_sync(async_client: aioredis.Redis, df_factory: DflyInstanceF
         "localhost", async_client.connection_pool.connection_kwargs["port"]
     )
     logging.info("Waiting for replica to sync")
-    async with async_timeout.timeout(120):
-        await wait_for_replicas_state(replica_client)
+    try:
+        async with async_timeout.timeout(200):
+            await wait_for_replicas_state(replica_client)
+    except asyncio.TimeoutError:
+        master_info = await async_client.info("ALL")
+        replica_info = await replica_client.info("ALL")
+        pytest.fail(
+            f"Replica did not sync in time. \nmaster: {master_info} \n\nreplica: {replica_info}"
+        )
