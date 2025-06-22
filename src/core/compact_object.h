@@ -141,7 +141,7 @@ class CompactObj {
   // Utility class for working with different string encodings (ascii, huffman, etc)
   struct StrEncoding {
     size_t DecodedSize(std::string_view blob) const;         // Size of decoded blob
-    size_t Decode(char* dest, std::string_view blob) const;  // Decode into dest
+    size_t Decode(char* dest, std::string_view blob) const;  // Decode into dest, return size
     StringOrView Decode(std::string_view blob) const;
 
    private:
@@ -422,7 +422,7 @@ class CompactObj {
   // Precondition: the object is a non-inline string.
   StringOrView GetRawString() const;
 
-  StrEncoding GetEncoding() const {
+  StrEncoding GetStrEncoding() const {
     return StrEncoding{mask_bits_.encoding};
   }
 

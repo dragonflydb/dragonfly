@@ -60,16 +60,6 @@ void RecordDeleted(const PrimeValue& pv, size_t tiered_len, DbTableStats* stats)
   stats->tiered_used_bytes -= tiered_len;
 }
 
-string DecodeString(bool is_raw, string_view str, PrimeValue decoder) {
-  if (is_raw) {
-    decoder.Materialize(str, true);
-    string tmp;
-    decoder.GetString(&tmp);
-    return tmp;
-  }
-  return string{str};
-}
-
 tiering::DiskSegment FromCoolItem(const PrimeValue::CoolItem& item) {
   return {item.record->page_index * tiering::kPageSize + item.page_offset, item.serialized_size};
 }
@@ -346,8 +336,8 @@ void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& v
                          std::function<void(const std::string&)> readf) {
   DCHECK(value.IsExternal());
   DCHECK(!value.IsCool());
-  auto cb = [readf = std::move(readf), enc = value.GetEncoding()](bool is_raw,
-                                                                  const string* raw_val) mutable {
+  auto cb = [readf = std::move(readf), enc = value.GetStrEncoding()](
+                bool is_raw, const string* raw_val) mutable {
     readf(is_raw ? enc.Decode(*raw_val).Take() : *raw_val);
     return false;
   };
@@ -361,7 +351,7 @@ util::fb2::Future<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
   DCHECK(value.IsExternal());
 
   util::fb2::Future<T> future;
-  auto cb = [future, modf = std::move(modf), enc = value.GetEncoding()](
+  auto cb = [future, modf = std::move(modf), enc = value.GetStrEncoding()](
                 bool is_raw, std::string* raw_val) mutable {
     if (is_raw) {
       raw_val->resize(enc.DecodedSize(*raw_val));

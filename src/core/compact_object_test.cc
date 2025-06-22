@@ -605,7 +605,7 @@ TEST_F(CompactObjectTest, StrEncoding) {
     obj.SetString(test_str);
 
     string raw_str = obj.GetRawString().Take();
-    CompactObj::StrEncoding enc = obj.GetEncoding();
+    CompactObj::StrEncoding enc = obj.GetStrEncoding();
 
     EXPECT_EQ(test_str, enc.Decode(raw_str).Take());
   }

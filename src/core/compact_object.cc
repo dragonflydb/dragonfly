@@ -817,7 +817,7 @@ size_t CompactObj::Size() const {
         LOG(DFATAL) << "Should not reach " << int(taglen_);
     }
   }
-  return GetEncoding().DecodedSize(raw_size, first_byte);
+  return GetStrEncoding().DecodedSize(raw_size, first_byte);
 }
 
 uint64_t CompactObj::HashCode() const {
@@ -844,7 +844,7 @@ uint64_t CompactObj::HashCode() const {
 
   if (IsInline()) {
     char buf[kInlineLen * 3];  // should suffice for most huffman decodings.
-    size_t decoded_len = GetEncoding().Decode(buf, string_view{u_.inline_str, taglen_});
+    size_t decoded_len = GetStrEncoding().Decode(buf, string_view{u_.inline_str, taglen_});
     return XXH3_64bits_withSeed(buf, decoded_len, kHashSeed);
   }
 
@@ -1102,7 +1102,7 @@ void CompactObj::GetString(char* dest) const {
   CHECK(!IsExternal());
 
   if (IsInline()) {
-    GetEncoding().Decode(dest, {u_.inline_str, taglen_});
+    GetStrEncoding().Decode(dest, {u_.inline_str, taglen_});
     return;
   }
 
@@ -1117,14 +1117,14 @@ void CompactObj::GetString(char* dest) const {
       CHECK_EQ(OBJ_STRING, u_.r_obj.type());
       DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
       string_view blob{(const char*)u_.r_obj.inner_obj(), u_.r_obj.Size()};
-      GetEncoding().Decode(dest, blob);
+      GetStrEncoding().Decode(dest, blob);
       return;
     } else {
       CHECK_EQ(SMALL_TAG, taglen_);
       string_view slices[2];
       unsigned num = u_.small_str.GetV(slices);
       DCHECK_EQ(2u, num);
-      size_t decoded_len = GetEncoding().DecodedSize(u_.small_str.size(), slices[0][0]);
+      size_t decoded_len = GetStrEncoding().DecodedSize(u_.small_str.size(), slices[0][0]);
 
       if (mask_bits_.encoding == HUFFMAN_ENC) {
         tl.tmp_buf.resize(slices[0].size() + slices[1].size() - 1);
