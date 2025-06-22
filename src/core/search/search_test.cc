@@ -17,6 +17,7 @@
 #include <memory_resource>
 #include <random>
 
+#include "absl/base/macros.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/search/base.h"
@@ -1088,6 +1089,33 @@ BENCHMARK(BM_SearchByType_Diverse)
     ->ArgNames({"docs", "pattern_len", "search_type"})
     ->Unit(benchmark::kMicrosecond);
 
-}  // namespace search
+static void BM_SearchDocIds(benchmark::State& state) {
+  auto schema = MakeSimpleSchema({{"score", SchemaField::NUMERIC}, {"tag", SchemaField::TAG}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
+  SearchAlgorithm algo;
+  QueryParams params;
+  default_random_engine rnd;
+  const char* tag_vals[] = {"test", "example", "sample", "demo", "demo2"};
+  uniform_int_distribution<size_t> tag_dist(0, ABSL_ARRAYSIZE(tag_vals) - 1);
+  uniform_int_distribution<size_t> score_dist(0, 100);
+
+  for (size_t i = 0; i < 1000; i++) {
+    MockedDocument doc{
+        Map{{"score", std::to_string(score_dist(rnd))}, {"tag", tag_vals[tag_dist(rnd)]}}};
+    indices.Add(i, doc);
+  }
+
+  std::string queries[] = {"@tag:{test} @score:[10 50]", "@tag: *", "@score:*"};
+  size_t query_type = state.range(0);
+  CHECK_LT(query_type, ABSL_ARRAYSIZE(queries));
+  CHECK(algo.Init(queries[query_type], &params));
+  while (state.KeepRunning()) {
+    auto result = algo.Search(&indices);
+    CHECK(result.error.empty());
+  }
+}
+BENCHMARK(BM_SearchDocIds)->Range(0, 2);
+
+}  // namespace search
 }  // namespace dfly
