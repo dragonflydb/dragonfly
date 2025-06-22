@@ -346,13 +346,9 @@ void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& v
                          std::function<void(const std::string&)> readf) {
   DCHECK(value.IsExternal());
   DCHECK(!value.IsCool());
-
-  PrimeValue decoder;
-  decoder.ImportExternal(value);
-
-  auto cb = [readf = std::move(readf), decoder = std::move(decoder)](
-                bool is_raw, const string* raw_val) mutable {
-    readf(DecodeString(is_raw, *raw_val, std::move(decoder)));
+  auto cb = [readf = std::move(readf), enc = value.GetEncoding()](bool is_raw,
+                                                                  const string* raw_val) mutable {
+    readf(is_raw ? enc.Decode(*raw_val).Take() : *raw_val);
     return false;
   };
   op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
@@ -365,14 +361,11 @@ util::fb2::Future<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
   DCHECK(value.IsExternal());
 
   util::fb2::Future<T> future;
-  PrimeValue decoder;
-  decoder.ImportExternal(value);
-
-  auto cb = [future, modf = std::move(modf), decoder = std::move(decoder)](
+  auto cb = [future, modf = std::move(modf), enc = value.GetEncoding()](
                 bool is_raw, std::string* raw_val) mutable {
     if (is_raw) {
-      decoder.Materialize(*raw_val, true);
-      decoder.GetString(raw_val);
+      raw_val->resize(enc.DecodedSize(*raw_val));
+      enc.Decode(raw_val->data(), *raw_val);
     }
     future.Resolve(modf(raw_val));
     return true;

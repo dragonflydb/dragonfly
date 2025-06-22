@@ -65,6 +65,11 @@ class StringOrView {
       val_ = std::string{std::get<std::string_view>(val_)};
   }
 
+  std::string Take() && {
+    MakeOwned();
+    return std::move(std::get<std::string>(val_));
+  }
+
   bool empty() const {
     return visit([](const auto& s) { return s.empty(); }, val_);
   }

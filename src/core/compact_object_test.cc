@@ -8,6 +8,7 @@
 #include <mimalloc.h>
 #include <xxhash.h>
 
+#include <cstddef>
 #include <random>
 
 #include "base/gtest.h"
@@ -16,6 +17,7 @@
 #include "core/flat_set.h"
 #include "core/huff_coder.h"
 #include "core/mi_memory_resource.h"
+#include "core/string_or_view.h"
 #include "core/string_set.h"
 
 extern "C" {
@@ -593,34 +595,19 @@ TEST_F(CompactObjectTest, DefragSet) {
   ASSERT_FALSE(cobj_.DefragIfNeeded(0.8));
 }
 
-TEST_F(CompactObjectTest, RawInterface) {
-  string str(50, 'a'), tmp, owned;
-  cobj_.SetString(str);
-  {
-    auto raw_blob = cobj_.GetRawString();
-    EXPECT_LT(raw_blob.view().size(), str.size());
+TEST_F(CompactObjectTest, StrEncoding) {
+  for (size_t len : {64, 128, 256, 512, 1024}) {
+    string test_str(len, 'a');
+    for (size_t i = 0; i < len; i++)
+      test_str[i] = char('a' + (i % 10));
 
-    raw_blob.MakeOwned();
-    cobj_.SetExternal(0, 10);  // dummy external pointer
-    cobj_.Materialize(raw_blob.view(), true);
+    CompactObj obj;
+    obj.SetString(test_str);
 
-    EXPECT_EQ(str, cobj_.GetSlice(&tmp));
-  }
+    string raw_str = obj.GetRawString().Take();
+    CompactObj::StrEncoding enc = obj.GetEncoding();
 
-  str.assign(50, char(200));  // non ascii
-  cobj_.SetString(str);
-  ASSERT_EQ(str, cobj_.GetSlice(&tmp));
-
-  {
-    auto raw_blob = cobj_.GetRawString();
-
-    EXPECT_EQ(raw_blob.view(), str);
-
-    raw_blob.MakeOwned();
-    cobj_.SetExternal(0, 10);  // dummy external pointer
-    cobj_.Materialize(raw_blob.view(), true);
-
-    EXPECT_EQ(str, cobj_.GetSlice(&tmp));
+    EXPECT_EQ(test_str, enc.Decode(raw_str).Take());
   }
 }
 
