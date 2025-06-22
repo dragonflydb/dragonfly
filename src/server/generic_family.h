@@ -39,6 +39,7 @@ class GenericFamily {
   static void Pexpire(CmdArgList args, const CommandContext& cmd_cntx);
   static void Stick(CmdArgList args, const CommandContext& cmd_cntx);
   static void Sort(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Sort_RO(CmdArgList args, const CommandContext& cmd_cntx);
   static void Move(CmdArgList args, const CommandContext& cmd_cntx);
 
   static void Rename(CmdArgList args, const CommandContext& cmd_cntx);
