@@ -38,6 +38,7 @@ struct NumericIndex : public BaseIndex {
   std::vector<DocId> GetAllDocsWithNonNullValues() const override;
 
  private:
+  bool unique_ids_ = true;  // If true, docs ids are unique in the index, otherwise they can repeat.
   using Entry = std::pair<double, DocId>;
   absl::btree_set<Entry, std::less<Entry>, PMR_NS::polymorphic_allocator<Entry>> entries_;
 };
@@ -75,6 +76,7 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   Container* GetOrCreate(std::string_view word);
 
   bool case_sensitive_ = false;
+  bool unique_ids_ = true;  // If true, docs ids are unique in the index, otherwise they can repeat.
   search::RaxTreeMap<Container> entries_;
 };
 

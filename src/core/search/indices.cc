@@ -85,6 +85,9 @@ bool NumericIndex::Add(DocId id, const DocumentAccessor& doc, string_view field)
     return false;
   }
 
+  if (numbers->size() > 1) {
+    unique_ids_ = false;
+  }
   for (auto num : numbers.value()) {
     entries_.emplace(num, id);
   }
@@ -111,21 +114,31 @@ vector<DocId> NumericIndex::Range(double l, double r) const {
     out.push_back(it->second);
 
   sort(out.begin(), out.end());
-  out.erase(unique(out.begin(), out.end()), out.end());
+
+  if (!unique_ids_) {
+    out.erase(unique(out.begin(), out.end()), out.end());
+  }
   return out;
 }
 
 vector<DocId> NumericIndex::GetAllDocsWithNonNullValues() const {
-  UniqueDocsList<> unique_docs;
   std::vector<DocId> result;
 
-  unique_docs.reserve(entries_.size());
   result.reserve(entries_.size());
 
-  for (const auto& [_, doc_id] : entries_) {
-    const auto [__, is_new] = unique_docs.insert(doc_id);
-    if (is_new) {
+  if (unique_ids_) {
+    // If unique_ids_ is true, we can just take the second element of each entry
+    for (const auto& [_, doc_id] : entries_) {
       result.push_back(doc_id);
+    }
+  } else {
+    UniqueDocsList<> unique_docs;
+    unique_docs.reserve(entries_.size());
+    for (const auto& [_, doc_id] : entries_) {
+      const auto [__, is_new] = unique_docs.insert(doc_id);
+      if (is_new) {
+        result.push_back(doc_id);
+      }
     }
   }
 
@@ -181,6 +194,8 @@ bool BaseStringIndex<C>::Add(DocId id, const DocumentAccessor& doc, string_view 
   for (string_view str : strings_list.value())
     tokens.merge(Tokenize(str));
 
+  if (tokens.size() > 1)
+    unique_ids_ = false;
   for (string_view token : tokens)
     GetOrCreate(token)->Insert(id);
   return true;
@@ -215,21 +230,31 @@ template <typename C> vector<string> BaseStringIndex<C>::GetTerms() const {
 }
 
 template <typename C> vector<DocId> BaseStringIndex<C>::GetAllDocsWithNonNullValues() const {
-  UniqueDocsList<> unique_docs;
   std::vector<DocId> result;
 
-  unique_docs.reserve(entries_.size());
   result.reserve(entries_.size());
 
-  for (const auto& [_, container] : entries_) {
-    for (const auto& doc_id : container) {
-      auto [_, is_new] = unique_docs.insert(doc_id);
-      if (is_new) {
+  if (unique_ids_) {
+    // If unique_ids_ is true, we can just take the second element of each entry
+    for (const auto& [_, container] : entries_) {
+      for (const auto& doc_id : container) {
         result.push_back(doc_id);
       }
     }
-  }
+  } else {
+    UniqueDocsList<> unique_docs;
 
+    unique_docs.reserve(entries_.size());
+
+    for (const auto& [_, container] : entries_) {
+      for (const auto& doc_id : container) {
+        auto [_, is_new] = unique_docs.insert(doc_id);
+        if (is_new) {
+          result.push_back(doc_id);
+        }
+      }
+    }
+  }
   std::sort(result.begin(), result.end());
   return result;
 }
