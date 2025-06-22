@@ -184,17 +184,25 @@ struct BasicSearch {
     profile_builder_ = ProfileBuilder{};
   }
 
-  // Get casted sub index by field
-  template <typename T> T* GetIndex(string_view field) {
-    static_assert(is_base_of_v<BaseIndex, T>);
-
+  BaseIndex* GetBaseIndex(string_view field) {
     auto index = indices_->GetIndex(field);
     if (!index) {
       error_ = absl::StrCat("Invalid field: ", field);
       return nullptr;
     }
+    return index;
+  }
 
-    auto* casted_ptr = dynamic_cast<T*>(index);
+  // Get casted sub index by field
+  template <typename T> T* GetIndex(string_view field) {
+    static_assert(is_base_of_v<BaseIndex, T>);
+
+    auto base_index = GetBaseIndex(field);
+    if (!base_index) {
+      return nullptr;
+    }
+
+    auto* casted_ptr = dynamic_cast<T*>(base_index);
     if (!casted_ptr) {
       error_ = absl::StrCat("Wrong access type for field: ", field);
       return nullptr;
@@ -246,7 +254,7 @@ struct BasicSearch {
   // Efficiently unify multiple sub results with specified logical op
   IndexResult UnifyResults(vector<IndexResult>&& sub_results, LogicOp op) {
     if (sub_results.empty())
-      return vector<DocId>{};
+      return IndexResult{};
 
     // Unifying from smallest to largest is more efficient.
     // AND: the result only shrinks, so starting with the smallest is most optimal.
@@ -283,7 +291,7 @@ struct BasicSearch {
   }
 
   IndexResult Search(monostate, string_view) {
-    return vector<DocId>{};
+    return IndexResult{};
   }
 
   IndexResult Search(const AstStarNode& node, string_view active_field) {
@@ -321,26 +329,12 @@ struct BasicSearch {
     // Try to get a sort index first, as `@field:*` might imply wanting sortable behavior
     BaseSortIndex* sort_index = indices_->GetSortIndex(active_field);
     if (sort_index) {
-      if (auto result = sort_index->GetAllResults()) {
-        return std::move(*result);
-      }
+      return {sort_index->GetAllDocsWithNonNullValues()};
     }
 
-    // If sort index doesn't exist or doesn't support GetAllResults, try regular index
-    BaseIndex* base_index = indices_->GetIndex(active_field);
-    if (base_index) {
-      if (auto result = base_index->GetAllResults()) {
-        return std::move(*result);
-      }
-    }
-
-    // If we get here, neither index could handle the request
-    if (!base_index && !sort_index) {
-      error_ = absl::StrCat("Invalid field: ", active_field);
-    } else {
-      error_ = absl::StrCat("Wrong access type for field: ", active_field);
-    }
-    return IndexResult{};
+    // If sort index doesn't exist try regular index
+    BaseIndex* base_index = GetBaseIndex(active_field);
+    return base_index ? IndexResult{base_index->GetAllDocsWithNonNullValues()} : IndexResult{};
   }
 
   IndexResult Search(const AstPrefixNode& node, string_view active_field) {

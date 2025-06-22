@@ -115,6 +115,24 @@ vector<DocId> NumericIndex::Range(double l, double r) const {
   return out;
 }
 
+vector<DocId> NumericIndex::GetAllDocsWithNonNullValues() const {
+  DocsList unique_docs{entries_.get_allocator().resource()};
+  std::vector<DocId> result;
+
+  unique_docs.reserve(entries_.size());
+  result.reserve(entries_.size());
+
+  for (const auto& [_, doc_id] : entries_) {
+    const auto [__, is_new] = unique_docs.insert(doc_id);
+    if (is_new) {
+      result.push_back(doc_id);
+    }
+  }
+
+  std::sort(result.begin(), result.end());
+  return result;
+}
+
 template <typename C>
 BaseStringIndex<C>::BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive)
     : case_sensitive_{case_sensitive}, entries_{mr} {
@@ -196,6 +214,26 @@ template <typename C> vector<string> BaseStringIndex<C>::GetTerms() const {
   return res;
 }
 
+template <typename C> vector<DocId> BaseStringIndex<C>::GetAllDocsWithNonNullValues() const {
+  DocsList unique_docs{entries_.get_allocator().resource()};
+  std::vector<DocId> result;
+
+  unique_docs.reserve(entries_.size());
+  result.reserve(entries_.size());
+
+  for (const auto& [_, container] : entries_) {
+    for (const auto& doc_id : container) {
+      auto [_, is_new] = unique_docs.insert(doc_id);
+      if (is_new) {
+        result.push_back(doc_id);
+      }
+    }
+  }
+
+  std::sort(result.begin(), result.end());
+  return result;
+}
+
 template struct BaseStringIndex<CompressedSortedSet>;
 template struct BaseStringIndex<SortedVector>;
 
@@ -262,6 +300,40 @@ void FlatVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view 
 
 const float* FlatVectorIndex::Get(DocId doc) const {
   return &entries_[doc * dim_];
+}
+
+std::vector<DocId> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
+  DocsList unique_docs{entries_.get_allocator().resource()};
+  std::vector<DocId> result;
+
+  size_t num_vectors = entries_.size() / dim_;
+  unique_docs.reserve(num_vectors);
+  result.reserve(num_vectors);
+
+  for (DocId id = 0; id < num_vectors; ++id) {
+    // Check if the vector is not zero (all elements are 0)
+    // TODO: Valid vector can contain 0s, we should use a better approach
+    const float* vec = Get(id);
+    bool is_zero_vector = true;
+
+    // TODO: Consider don't use check for zero vector
+    for (size_t i = 0; i < dim_; ++i) {
+      if (vec[i] != 0.0f) {  // TODO: Consider using a threshold for float comparison
+        is_zero_vector = false;
+        break;
+      }
+    }
+
+    if (!is_zero_vector) {
+      auto [_, is_new] = unique_docs.insert(id);
+      if (is_new) {
+        result.push_back(id);
+      }
+    }
+  }
+
+  std::sort(result.begin(), result.end());
+  return result;
 }
 
 struct HnswlibAdapter {

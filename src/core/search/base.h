@@ -13,6 +13,7 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "base/pmr/memory_resource.h"
 #include "core/string_map.h"
 
@@ -80,6 +81,11 @@ struct DocumentAccessor {
   virtual std::optional<StringList> GetTags(std::string_view active_field) const = 0;
 };
 
+// Represents a set of document IDs, used for merging results of inverse indices.
+using DocsList =
+    absl::flat_hash_set<DocId, absl::DefaultHashContainerHash<DocId>,
+                        absl::DefaultHashContainerEq<DocId>, PMR_NS::polymorphic_allocator<DocId>>;
+
 // Base class for type-specific indices.
 //
 // Queries should be done directly on subclasses with their distinc
@@ -92,9 +98,8 @@ struct BaseIndex {
   virtual void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) = 0;
 
   // Returns documents that have non-null values for this field (used for @field:* queries)
-  virtual std::optional<std::vector<DocId>> GetAllResults() const {
-    return std::nullopt;
-  }
+  // Result must be sorted
+  virtual std::vector<DocId> GetAllDocsWithNonNullValues() const = 0;
 };
 
 // Base class for type-specific sorting indices.
