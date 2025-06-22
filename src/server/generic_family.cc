@@ -1509,6 +1509,11 @@ void SortGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_read_o
     }
   }
 
+  // Asserting that if is_read_only as true, then store_key should not exist.
+  DLOG(INFO) << "is_read_only parameter: " << is_read_only
+             << " and store_key parameter: " << bool(store_key);
+  assert(((is_read_only && !bool(store_key)) || !is_read_only));
+
   ShardId source_sid = Shard(key, shard_set->size());
   OpResultTyped<SortEntryList> fetch_result;
   auto fetch_cb = [&](Transaction* t, EngineShard* shard) {
@@ -1520,7 +1525,7 @@ void SortGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_read_o
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->Execute(std::move(fetch_cb), (is_read_only || !bool(store_key)));
+  cmd_cntx.tx->Execute(std::move(fetch_cb), !bool(store_key));
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (!fetch_result.ok()) {
     cmd_cntx.tx->Conclude();
@@ -1552,7 +1557,7 @@ void SortGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_read_o
       end_it = entries.begin() + std::min(bounds->first + bounds->second, entries.size());
     }
 
-    if (is_read_only || !bool(store_key)) {
+    if (!bool(store_key)) {
       bool is_set = (result_type == OBJ_SET || result_type == OBJ_ZSET);
       rb->StartCollection(std::distance(start_it, end_it),
                           is_set ? RedisReplyBuilder::SET : RedisReplyBuilder::ARRAY);
