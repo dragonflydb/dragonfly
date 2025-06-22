@@ -844,7 +844,7 @@ uint64_t CompactObj::HashCode() const {
 
   if (IsInline()) {
     char buf[kInlineLen * 3];  // should suffice for most huffman decodings.
-    size_t decoded_len = GetStrEncoding().Decode(buf, string_view{u_.inline_str, taglen_});
+    size_t decoded_len = GetStrEncoding().Decode(string_view{u_.inline_str, taglen_}, buf);
     return XXH3_64bits_withSeed(buf, decoded_len, kHashSeed);
   }
 
@@ -1102,7 +1102,7 @@ void CompactObj::GetString(char* dest) const {
   CHECK(!IsExternal());
 
   if (IsInline()) {
-    GetStrEncoding().Decode(dest, {u_.inline_str, taglen_});
+    GetStrEncoding().Decode({u_.inline_str, taglen_}, dest);
     return;
   }
 
@@ -1117,7 +1117,7 @@ void CompactObj::GetString(char* dest) const {
       CHECK_EQ(OBJ_STRING, u_.r_obj.type());
       DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
       string_view blob{(const char*)u_.r_obj.inner_obj(), u_.r_obj.Size()};
-      GetStrEncoding().Decode(dest, blob);
+      GetStrEncoding().Decode(blob, dest);
       return;
     } else {
       CHECK_EQ(SMALL_TAG, taglen_);
@@ -1591,7 +1591,7 @@ size_t CompactObj::StrEncoding::DecodedSize(size_t blob_size, uint8_t first_byte
   return 0;
 }
 
-size_t CompactObj::StrEncoding::Decode(char* dest, std::string_view blob) const {
+size_t CompactObj::StrEncoding::Decode(std::string_view blob, char* dest) const {
   size_t decoded_len = DecodedSize(blob);
   switch (enc_) {
     case NONE_ENC:
@@ -1615,7 +1615,7 @@ StringOrView CompactObj::StrEncoding::Decode(std::string_view blob) const {
     default: {
       string out;
       out.resize(DecodedSize(blob));
-      Decode(out.data(), blob);
+      Decode(blob, out.data());
       return StringOrView::FromString(std::move(out));
     }
   }

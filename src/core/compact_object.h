@@ -141,7 +141,7 @@ class CompactObj {
   // Utility class for working with different string encodings (ascii, huffman, etc)
   struct StrEncoding {
     size_t DecodedSize(std::string_view blob) const;         // Size of decoded blob
-    size_t Decode(char* dest, std::string_view blob) const;  // Decode into dest, return size
+    size_t Decode(std::string_view blob, char* dest) const;  // Decode into dest, return size
     StringOrView Decode(std::string_view blob) const;
 
    private:

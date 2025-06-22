@@ -355,7 +355,7 @@ util::fb2::Future<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
                 bool is_raw, std::string* raw_val) mutable {
     if (is_raw) {
       raw_val->resize(enc.DecodedSize(*raw_val));
-      enc.Decode(raw_val->data(), *raw_val);
+      enc.Decode(*raw_val, raw_val->data());
     }
     future.Resolve(modf(raw_val));
     return true;

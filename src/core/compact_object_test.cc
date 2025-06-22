@@ -595,19 +595,28 @@ TEST_F(CompactObjectTest, DefragSet) {
   ASSERT_FALSE(cobj_.DefragIfNeeded(0.8));
 }
 
-TEST_F(CompactObjectTest, StrEncoding) {
-  for (size_t len : {64, 128, 256, 512, 1024}) {
-    string test_str(len, 'a');
-    for (size_t i = 0; i < len; i++)
-      test_str[i] = char('a' + (i % 10));
+TEST_F(CompactObjectTest, StrEncodingAndMaterialize) {
+  for (bool ascii : {true, false}) {
+    for (size_t len : {64, 128, 256, 512, 1024}) {
+      string test_str(len, 'a');
+      for (size_t i = 0; i < len; i++)
+        test_str[i] = char('a' + (i % 10));
+      if (!ascii)
+        test_str.push_back(char(200));  // non-ascii
 
-    CompactObj obj;
-    obj.SetString(test_str);
+      CompactObj obj;
+      obj.SetString(test_str);
 
-    string raw_str = obj.GetRawString().Take();
-    CompactObj::StrEncoding enc = obj.GetStrEncoding();
+      // Test StrEncoding helper
+      string raw_str = obj.GetRawString().Take();
+      CompactObj::StrEncoding enc = obj.GetStrEncoding();
+      EXPECT_EQ(test_str, enc.Decode(raw_str).Take());
 
-    EXPECT_EQ(test_str, enc.Decode(raw_str).Take());
+      // Test Materialize
+      obj.SetExternal(0, 0);  // dummy values
+      obj.Materialize(raw_str, true);
+      EXPECT_EQ(test_str, obj.ToString());
+    }
   }
 }
 
