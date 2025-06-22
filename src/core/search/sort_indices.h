@@ -51,7 +51,7 @@ template <typename T> struct SimpleValueSortIndex : public BaseSortIndex {
 
  private:
   PMR_NS::vector<T> values_;
-  DocsList null_values_;
+  UniqueDocsList<PMR_NS::polymorphic_allocator<DocId>> null_values_;
 };
 
 struct NumericSortIndex : public SimpleValueSortIndex<double> {

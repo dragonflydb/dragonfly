@@ -82,9 +82,9 @@ struct DocumentAccessor {
 };
 
 // Represents a set of document IDs, used for merging results of inverse indices.
-using DocsList =
-    absl::flat_hash_set<DocId, absl::DefaultHashContainerHash<DocId>,
-                        absl::DefaultHashContainerEq<DocId>, PMR_NS::polymorphic_allocator<DocId>>;
+template <typename Allocator = std::allocator<DocId>>
+using UniqueDocsList = absl::flat_hash_set<DocId, absl::DefaultHashContainerHash<DocId>,
+                                           absl::DefaultHashContainerEq<DocId>, Allocator>;
 
 // Base class for type-specific indices.
 //

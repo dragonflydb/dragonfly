@@ -116,7 +116,7 @@ vector<DocId> NumericIndex::Range(double l, double r) const {
 }
 
 vector<DocId> NumericIndex::GetAllDocsWithNonNullValues() const {
-  DocsList unique_docs{entries_.get_allocator().resource()};
+  UniqueDocsList<> unique_docs;
   std::vector<DocId> result;
 
   unique_docs.reserve(entries_.size());
@@ -215,7 +215,7 @@ template <typename C> vector<string> BaseStringIndex<C>::GetTerms() const {
 }
 
 template <typename C> vector<DocId> BaseStringIndex<C>::GetAllDocsWithNonNullValues() const {
-  DocsList unique_docs{entries_.get_allocator().resource()};
+  UniqueDocsList<> unique_docs;
   std::vector<DocId> result;
 
   unique_docs.reserve(entries_.size());
@@ -303,11 +303,9 @@ const float* FlatVectorIndex::Get(DocId doc) const {
 }
 
 std::vector<DocId> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
-  DocsList unique_docs{entries_.get_allocator().resource()};
   std::vector<DocId> result;
 
   size_t num_vectors = entries_.size() / dim_;
-  unique_docs.reserve(num_vectors);
   result.reserve(num_vectors);
 
   for (DocId id = 0; id < num_vectors; ++id) {
@@ -325,14 +323,12 @@ std::vector<DocId> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
     }
 
     if (!is_zero_vector) {
-      auto [_, is_new] = unique_docs.insert(id);
-      if (is_new) {
-        result.push_back(id);
-      }
+      result.push_back(id);
     }
   }
 
-  std::sort(result.begin(), result.end());
+  // Result is already sorted by id, no need to sort again
+  // Also it has no duplicates
   return result;
 }
 
