@@ -20,6 +20,8 @@
 #include "server/tiered_storage.h"
 #include "util/fibers/synchronization.h"
 
+ABSL_FLAG(bool, use_snapshot_version, false, "If true replication uses point in time snapshoting");
+
 namespace dfly {
 
 using namespace std;
@@ -27,6 +29,7 @@ using namespace util;
 using namespace chrono_literals;
 
 using facade::operator""_KB;
+
 namespace {
 thread_local absl::flat_hash_set<SliceSnapshot*> tl_slice_snapshots;
 
@@ -73,15 +76,16 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
 
   if (stream_journal) {
-    use_version_snapshot_ = false;
+    use_snapshot_version_ = absl::GetFlag(FLAGS_use_snapshot_version);
     auto* journal = db_slice_->shard_owner()->journal();
     DCHECK(journal);
     journal_cb_id_ = journal->RegisterOnChange(this);
-
-    auto moved_cb = [this](DbIndex db_index, const DbSlice::MovedItemsVec& items) {
-      OnMoved(db_index, items);
-    };
-    moved_cb_id_ = db_slice_->RegisterOnMove(std::move(moved_cb));
+    if (!use_snapshot_version_) {
+      auto moved_cb = [this](DbIndex db_index, const DbSlice::MovedItemsVec& items) {
+        OnMoved(db_index, items);
+      };
+      moved_cb_id_ = db_slice_->RegisterOnMove(std::move(moved_cb));
+    }
   }
 
   const auto flush_threshold = ServerState::tlocal()->serialization_max_chunk_size;
@@ -105,7 +109,7 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   snapshot_fb_ = fb2::Fiber(fb_name, [this, stream_journal] {
     this->IterateBucketsFb(stream_journal);
     db_slice_->UnregisterOnChange(snapshot_version_);
-    if (!use_version_snapshot_) {
+    if (!use_snapshot_version_) {
       db_slice_->UnregisterOnMoved(moved_cb_id_);
     }
     consumer_->Finalize();
@@ -256,7 +260,7 @@ bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator i
 
   ++stats_.savecb_calls;
 
-  if (use_version_snapshot_) {
+  if (use_snapshot_version_) {
     if (it.GetVersion() >= snapshot_version_) {
       // either has been already serialized or added after snapshotting started.
       DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << " at "
@@ -282,7 +286,7 @@ bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator i
 }
 
 unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it) {
-  if (use_version_snapshot_) {
+  if (use_snapshot_version_) {
     DCHECK_LT(it.GetVersion(), snapshot_version_);
     it.SetVersion(snapshot_version_);
   }
@@ -411,7 +415,7 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
   // Only when creating point in time snapshot we need to serialize the bucket before we change the
   // db entry. When creating no point in time snapshot we need to call OnDbChange which will take
   // the big_value_mu_ to make sure we do not mutate the bucket while serializing it.
-  if (use_version_snapshot_) {
+  if (use_snapshot_version_) {
     PrimeTable* table = db_slice_->GetTables(db_index).first;
     const PrimeTable::bucket_iterator* bit = req.update();
 
@@ -441,7 +445,7 @@ bool SliceSnapshot::IsPositionSerialized(DbIndex id, PrimeTable::Cursor cursor) 
 }
 
 void SliceSnapshot::OnMoved(DbIndex id, const DbSlice::MovedItemsVec& items) {
-  DCHECK(!use_version_snapshot_);
+  DCHECK(!use_snapshot_version_);
   for (const auto& item_cursors : items) {
     // If item was moved from a bucket that was serialized to a bucket that was not serialized
     // serialize the moved item.

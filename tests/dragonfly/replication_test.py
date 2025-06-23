@@ -52,6 +52,7 @@ Test full replication pipeline. Test full sync with streaming changes and stable
     ],
 )
 @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
+@pytest.mark.parametrize("point_in_time_replication", [True, False])
 async def test_replication_all(
     df_factory: DflyInstanceFactory,
     t_master,
@@ -59,13 +60,19 @@ async def test_replication_all(
     seeder_config,
     stream_target,
     mode,
+    point_in_time_replication,
 ):
     args = {}
     if mode:
         args["cache_mode"] = "true"
         args["maxmemory"] = str(t_master * 256) + "mb"
 
-    master = df_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master, **args)
+    master = df_factory.create(
+        admin_port=ADMIN_PORT,
+        proactor_threads=t_master,
+        use_snapshot_version=point_in_time_replication,
+        **args,
+    )
     replicas = [
         df_factory.create(admin_port=ADMIN_PORT + i + 1, proactor_threads=t)
         for i, t in enumerate(t_replicas)
