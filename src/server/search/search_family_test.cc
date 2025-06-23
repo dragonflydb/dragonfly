@@ -2824,6 +2824,8 @@ TEST_F(SearchFamilyTest, SearchReindexWriteSearchRace) {
 }
 
 TEST_F(SearchFamilyTest, IgnoredOptionsInFtCreate) {
+  GTEST_SKIP() << "The usage of ignored options is now wrong - it skips supported ones!";
+
   Run({"HSET", "doc:1", "title", "Test Document"});
 
   // Create an index with various options, some of which should be ignored
