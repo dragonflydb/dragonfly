@@ -541,10 +541,10 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
     const PrimeValue& pv = it->second;
 
     if (pv.IsExternal() && !pv.IsCool()) {
-      util::fb2::Future<string> future =
+      util::fb2::Future<io::Result<string>> future =
           op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv);
 
-      CompactObj co(future.Get());
+      CompactObj co(*future.Get());
       SerializerBase::DumpObject(co, &sink);
     } else {
       SerializerBase::DumpObject(it->second, &sink);

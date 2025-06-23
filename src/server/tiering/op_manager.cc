@@ -109,8 +109,7 @@ OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {
   auto [it, inserted] = pending_reads_.try_emplace(aligned_segment.offset, aligned_segment);
   if (inserted) {
     auto io_cb = [this, aligned_segment](io::Result<std::string_view> result) {
-      CHECK(result) << result.error();  // TODO: to handle this gracefully.
-      ProcessRead(aligned_segment.offset, *result);
+      ProcessRead(aligned_segment.offset, result);
     };
     storage_.Read(aligned_segment, io_cb);
   }
@@ -132,7 +131,7 @@ void OpManager::ProcessStashed(EntryId id, unsigned version,
   }
 }
 
-void OpManager::ProcessRead(size_t offset, std::string_view page) {
+void OpManager::ProcessRead(size_t offset, io::Result<std::string_view> page) {
   util::FiberAtomicGuard guard;  // atomically update items, no in-between states should be possible
   ReadOp* info = &pending_reads_.at(offset);
 
@@ -152,18 +151,22 @@ void OpManager::ProcessRead(size_t offset, std::string_view page) {
 
   // Report functions in the loop may append items to info->key_ops during the traversal
   for (size_t i = 0; i < info->key_ops.size(); i++) {
-    auto& ko = info->key_ops[i];
-    key_value = page.substr(ko.segment.offset - info->segment.offset, ko.segment.length);
-
     bool modified = false;
-    for (auto& cb : ko.callbacks)
-      modified |= cb(!modified, &key_value);
+    auto& ko = info->key_ops[i];
+    if (page) {
+      key_value = page->substr(ko.segment.offset - info->segment.offset, ko.segment.length);
+      for (auto& cb : ko.callbacks)
+        modified |= cb(std::pair{&key_value, !modified});
+    } else {
+      for (auto& cb : ko.callbacks)
+        cb(nonstd::make_unexpected(page.error()));
+    }
 
     bool delete_from_storage = ko.deleting;
 
     // If the item is not being deleted, report is as fetched to be cached potentially.
     // In case it's cached, we might need to delete it.
-    if (!delete_from_storage)
+    if (page.has_value() && !delete_from_storage)
       delete_from_storage |= NotifyFetched(Borrowed(ko.id), key_value, ko.segment, modified);
 
     // If the item is being deleted, check if the full page needs to be deleted.

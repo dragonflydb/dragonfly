@@ -46,7 +46,8 @@ struct OpManagerTest : PoolTestBase, OpManager {
 
   util::fb2::Future<std::string> Read(EntryId id, DiskSegment segment) {
     util::fb2::Future<std::string> future;
-    Enqueue(id, segment, [future](bool, std::string* value) mutable {
+    Enqueue(id, segment, [future](io::Result<OpManager::FetchedEntry> res) mutable {
+      auto [value, _] = *res;
       future.Resolve(*value);
       return false;
     });
@@ -164,8 +165,8 @@ TEST_F(OpManagerTest, Modify) {
     // Atomically issue sequence of modify-read operations
     std::vector<util::fb2::Future<std::string>> futures;
     for (size_t i = 0; i < 10; i++) {
-      Enqueue(0u, stashed_[0u], [i](bool, std::string* v) {
-        absl::StrAppend(v, i);
+      Enqueue(0u, stashed_[0u], [i](auto res) {
+        absl::StrAppend(res->first, i);
         return true;
       });
       futures.emplace_back(Read(0u, stashed_[0u]));

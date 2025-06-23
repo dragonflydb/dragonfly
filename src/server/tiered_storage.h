@@ -47,18 +47,20 @@ class TieredStorage {
   void SetMemoryLowWatermark(size_t mem_limit);
 
   // Read offloaded value. It must be of external type
-  util::fb2::Future<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);
+  util::fb2::Future<io::Result<std::string>> Read(DbIndex dbid, std::string_view key,
+                                                  const PrimeValue& value);
 
   // Read offloaded value. It must be of external type
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-            std::function<void(const std::string&)> readf);
+            std::function<void(const io::Result<std::string>&)> readf);
 
   // Apply modification to offloaded value, return generic result from callback.
   // Unlike immutable Reads - the modified value must be uploaded back to memory.
   // This is handled by OpManager when modf completes.
   template <typename T>
-  util::fb2::Future<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
-                              std::function<T(std::string*)> modf);
+  util::fb2::Future<io::Result<T>> Modify(DbIndex dbid, std::string_view key,
+                                          const PrimeValue& value,
+                                          std::function<T(std::string*)> modf);
 
   // Stash value. Sets IO_PENDING flag and unsets it on error or when finished
   // Returns true if item was scheduled for stashing.
@@ -103,8 +105,8 @@ class TieredStorage {
 
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
-  typedef ::boost::intrusive::list<detail::TieredColdRecord> CoolQueue;
 
+  using CoolQueue = ::boost::intrusive::list<detail::TieredColdRecord>;
   CoolQueue cool_queue_;
 
   unsigned write_depth_limit_ = 10;

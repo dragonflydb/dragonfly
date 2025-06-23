@@ -260,7 +260,7 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
   if (bin.fragmented) {
     // Trigger read to signal need for defragmentation. NotifyFetched will handle it.
     DVLOG(2) << "Enqueueing bin defragmentation for: " << bin.segment.offset;
-    auto cb = [dummy = 5](bool, std::string*) -> bool {
+    auto cb = [dummy = 5](auto res) -> bool {
       (void)dummy;  // a hack to make cb non constexpr that confuses some old) compilers.
       return false;
     };
@@ -324,35 +324,46 @@ void TieredStorage::SetMemoryLowWatermark(size_t mem_limit) {
   VLOG(1) << "Memory low limit is " << mem_limit;
 }
 
-util::fb2::Future<string> TieredStorage::Read(DbIndex dbid, string_view key,
-                                              const PrimeValue& value) {
-  util::fb2::Future<std::string> fut;
-  Read(dbid, key, value, [fut](const std::string& value) mutable { fut.Resolve(value); });
-
+util::fb2::Future<io::Result<string>> TieredStorage::Read(DbIndex dbid, string_view key,
+                                                          const PrimeValue& value) {
+  util::fb2::Future<io::Result<std::string>> fut;
+  Read(dbid, key, value,
+       [fut](const io::Result<std::string>& value) mutable { fut.Resolve(value); });
   return fut;
 }
 
 void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-                         std::function<void(const std::string&)> readf) {
+                         std::function<void(const io::Result<std::string>&)> readf) {
   DCHECK(value.IsExternal());
   DCHECK(!value.IsCool());
   auto cb = [readf = std::move(readf), enc = value.GetStrEncoding()](
-                bool is_raw, const string* raw_val) mutable {
-    readf(is_raw ? enc.Decode(*raw_val).Take() : *raw_val);
+                io::Result<tiering::OpManager::FetchedEntry> res) mutable {
+    if (!res.has_value()) {
+      readf(nonstd::make_unexpected(res.error()));
+    } else {
+      auto [raw_val, is_raw] = *res;
+      readf(is_raw ? enc.Decode(*raw_val).Take() : *raw_val);
+    }
     return false;
   };
   op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
 }
 
 template <typename T>
-util::fb2::Future<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
-                                           const PrimeValue& value,
-                                           std::function<T(std::string*)> modf) {
+util::fb2::Future<io::Result<T>> TieredStorage::Modify(DbIndex dbid, std::string_view key,
+                                                       const PrimeValue& value,
+                                                       std::function<T(std::string*)> modf) {
   DCHECK(value.IsExternal());
 
-  util::fb2::Future<T> future;
+  util::fb2::Future<io::Result<T>> future;
   auto cb = [future, modf = std::move(modf), enc = value.GetStrEncoding()](
-                bool is_raw, std::string* raw_val) mutable {
+                io::Result<tiering::OpManager::FetchedEntry> res) mutable {
+    if (!res.has_value()) {
+      future.Resolve(nonstd::make_unexpected(res.error()));
+      return false;
+    }
+
+    auto [raw_val, is_raw] = *res;
     if (is_raw) {
       raw_val->resize(enc.DecodedSize(*raw_val));
       enc.Decode(*raw_val, raw_val->data());
@@ -365,9 +376,9 @@ util::fb2::Future<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
 }
 
 // Instantiate for size_t only - used in string_family's OpExtend.
-template util::fb2::Future<size_t> TieredStorage::Modify(DbIndex dbid, std::string_view key,
-                                                         const PrimeValue& value,
-                                                         std::function<size_t(std::string*)> modf);
+template util::fb2::Future<io::Result<size_t>> TieredStorage::Modify(
+    DbIndex dbid, std::string_view key, const PrimeValue& value,
+    std::function<size_t(std::string*)> modf);
 
 bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
   if (!ShouldStash(*value))
