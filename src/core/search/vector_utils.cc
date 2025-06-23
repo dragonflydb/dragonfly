@@ -9,6 +9,26 @@
 
 #include "base/logging.h"
 
+#ifdef USE_SIMSIMD
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wcpp"
+#pragma GCC diagnostic ignored "-Wunknown-pragmas"
+#elif defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+#pragma clang diagnostic ignored "-Wunknown-pragmas"
+#pragma clang diagnostic ignored "-Wunknown-warning-option"
+#endif
+#include <simsimd/simsimd.h>
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#elif defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+#endif
+
 namespace dfly::search {
 
 using namespace std;
@@ -21,16 +41,29 @@ namespace {
 #define FAST_MATH
 #endif
 
-// Euclidean vector distance: sqrt( sum: (u[i] - v[i])^2  )
+// Optimized Euclidean vector distance using SimSIMD
 FAST_MATH float L2Distance(const float* u, const float* v, size_t dims) {
+#ifdef USE_SIMSIMD
+  simsimd_distance_t distance = 0;
+  simsimd_l2sq_f32(u, v, dims, &distance);
+  return sqrt(static_cast<float>(distance));
+#else
+  // Fallback to manual implementation
   float sum = 0;
   for (size_t i = 0; i < dims; i++)
     sum += (u[i] - v[i]) * (u[i] - v[i]);
   return sqrt(sum);
+#endif
 }
 
-// TODO: Normalize vectors ahead if cosine distance is used
+// Optimized cosine vector distance using SimSIMD
 FAST_MATH float CosineDistance(const float* u, const float* v, size_t dims) {
+#ifdef USE_SIMSIMD
+  simsimd_distance_t distance = 0;
+  simsimd_cos_f32(u, v, dims, &distance);
+  return static_cast<float>(distance);
+#else
+  // Fallback to manual implementation
   float sum_uv = 0, sum_uu = 0, sum_vv = 0;
   for (size_t i = 0; i < dims; i++) {
     sum_uv += u[i] * v[i];
@@ -41,6 +74,7 @@ FAST_MATH float CosineDistance(const float* u, const float* v, size_t dims) {
   if (float denom = sum_uu * sum_vv; denom != 0.0f)
     return 1 - sum_uv / sqrt(denom);
   return 0.0f;
+#endif
 }
 
 OwnedFtVector ConvertToFtVector(string_view value) {
