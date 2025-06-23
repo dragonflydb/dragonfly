@@ -384,7 +384,11 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
   if (obj.Encoding() == kEncodingStrMap2) {
     StringSet* set = (StringSet*)obj.RObjPtr();
 
-    RETURN_ON_ERR(SaveLen(set->SizeSlow()));
+    // We don't expire any data during serialization
+    set->set_time(0);
+
+    // due to we avoid expiring we can use UpperBoundSize() instead of SlowSize()
+    RETURN_ON_ERR(SaveLen(set->UpperBoundSize()));
     for (auto it = set->begin(); it != set->end();) {
       RETURN_ON_ERR(SaveString(string_view{*it, sdslen(*it)}));
       if (set->ExpirationUsed()) {
@@ -416,7 +420,11 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
   if (pv.Encoding() == kEncodingStrMap2) {
     StringMap* string_map = (StringMap*)pv.RObjPtr();
 
-    RETURN_ON_ERR(SaveLen(string_map->SizeSlow()));
+    // We don't expire any data during serialization
+    string_map->set_time(0);
+
+    // due to we avoid expiring we can use UpperBoundSize() instead of SlowSize()
+    RETURN_ON_ERR(SaveLen(string_map->UpperBoundSize()));
 
     for (auto it = string_map->begin(); it != string_map->end();) {
       const auto& [k, v] = *it;

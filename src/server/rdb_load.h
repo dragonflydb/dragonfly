@@ -278,6 +278,7 @@ class RdbLoader : protected RdbLoaderBase {
     std::atomic<Item*> next;
     bool is_sticky = false;
     bool has_mc_flags = false;
+    bool has_expired = false;
     uint32_t mc_flags = 0;
 
     LoadConfig load_config;
@@ -297,7 +298,7 @@ class RdbLoader : protected RdbLoaderBase {
 
   std::error_code LoadKeyValPair(int type, ObjSettings* settings);
   // Returns whether to discard the read key pair.
-  bool ShouldDiscardKey(std::string_view key, ObjSettings* settings) const;
+  bool ShouldDiscardKey(std::string_view key, const Item& item) const;
   void ResizeDb(size_t key_num, size_t expire_num);
   std::error_code HandleAux();
 
@@ -310,7 +311,7 @@ class RdbLoader : protected RdbLoaderBase {
 
   void LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib);
 
-  void CreateObjectOnShard(const DbContext& db_cntx, const Item* item, DbSlice* db_slice);
+  void CreateObjectOnShard(const DbContext& db_cntx, Item* item, DbSlice* db_slice);
 
   void LoadScriptFromAux(std::string&& value);
 

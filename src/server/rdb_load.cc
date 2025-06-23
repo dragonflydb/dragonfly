@@ -374,6 +374,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       increment = 2;
     }
 
+    bool has_expired = false;
+
     for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
       string_view element = ToSV(ltrace->arr[i].rdb_var);
 
@@ -389,6 +391,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
 
         if (ttl_time != -1) {
           if (ttl_time < set->time_now()) {
+            has_expired = true;
             continue;
           }
 
@@ -400,6 +403,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
         ec_ = RdbError(errc::duplicate_key);
         return;
       }
+    }
+    if (set->Empty() && has_expired) {
+      ec_ = RdbError(errc::value_expired);
     }
   }
 
@@ -480,6 +486,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     });
     std::string key;
     std::string val;
+    bool has_expired = false;
     for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
       // ToSV may reference an internal buffer, therefore we can use only before the
       // next call to ToSV. To workaround, copy the key locally.
@@ -502,6 +509,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
 
         if (ttl_time != -1) {
           if (ttl_time < string_map->time_now()) {
+            has_expired = true;
             continue;
           }
 
@@ -515,10 +523,14 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
         return;
       }
     }
-    if (!config_.append) {
-      pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, string_map);
+    if (string_map->Empty() && has_expired) {
+      ec_ = RdbError(errc::value_expired);
+    } else {
+      if (!config_.append) {
+        pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, string_map);
+      }
+      std::move(cleanup).Cancel();
     }
-    std::move(cleanup).Cancel();
   }
 }
 
@@ -2515,7 +2527,7 @@ void RdbLoaderBase::CopyStreamId(const StreamID& src, struct streamID* dest) {
   dest->seq = src.seq;
 }
 
-void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, DbSlice* db_slice) {
+void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, Item* item, DbSlice* db_slice) {
   PrimeValue pv;
   PrimeValue* pv_ptr = &pv;
   DbIndex db_ind = db_cntx.db_index;
@@ -2553,6 +2565,9 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
       } else {
         LOG(ERROR) << error;
       }
+      return;
+    } else if ((*ec_).value() == errc::value_expired) {
+      item->has_expired = true;
       return;
     }
     LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
@@ -2607,7 +2622,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
   bool dry_run = absl::GetFlag(FLAGS_rdb_load_dry_run);
 
-  for (const auto* item : ib) {
+  for (auto* item : ib) {
     if (dry_run) {
       continue;
     }
@@ -2654,6 +2669,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     auto cleanup = absl::Cleanup([item] { delete item; });
 
     item->load_config.append = pending_read_.remaining > 0;
+    item->has_expired = item->has_expired || settings->has_expired;
 
     error_code ec = ReadObj(type, &item->val);
     if (ec) {
@@ -2663,7 +2679,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
 
     // If the key can be discarded, we must still continue to read the
     // object from the RDB so we can read the next key.
-    if (ShouldDiscardKey(key, settings)) {
+    if (ShouldDiscardKey(key, *item)) {
       pending_read_.reserve = 0;
       continue;
     }
@@ -2714,7 +2730,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   return kOk;
 }
 
-bool RdbLoader::ShouldDiscardKey(std::string_view key, ObjSettings* settings) const {
+bool RdbLoader::ShouldDiscardKey(std::string_view key, const Item& item) const {
   if (!load_unowned_slots_ && IsClusterEnabled()) {
     const auto cluster_config = cluster::ClusterConfig::Current();
     if (cluster_config && !cluster_config->IsMySlot(key)) {
@@ -2730,7 +2746,7 @@ bool RdbLoader::ShouldDiscardKey(std::string_view key, ObjSettings* settings) co
    * Similarly if the RDB is the preamble of an AOF file, we want to
    * load all the keys as they are, since the log of operations later
    * assume to work in an exact keyspace state. */
-  if (ServerState::tlocal()->is_master && settings->has_expired) {
+  if (ServerState::tlocal()->is_master && item.has_expired) {
     VLOG(3) << "Expire key on read: " << key;
     return true;
   }

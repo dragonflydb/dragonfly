@@ -315,6 +315,46 @@ TEST_F(RdbTest, HashmapExpiry) {
               RespArray(UnorderedElementsAre("key1", "val1", "key2", "val2")));
 }
 
+TEST_F(RdbTest, SaveEmptyHmap) {
+  // Add expiring elements
+  Run({"hsetex", "hkey", "1", "key3", "val3", "key4", "val4"});
+
+  RespExpr resp = Run({"TYPE", "hkey"});
+  ASSERT_EQ(resp, "hash");
+
+  AdvanceTime(10'000);
+  resp = Run({"save", "RDB"});
+  ASSERT_EQ(resp, "OK");
+
+  resp = Run({"TYPE", "hkey"});
+  ASSERT_EQ(resp, "hash");
+
+  Run({"debug", "reload"});
+
+  resp = Run({"TYPE", "hkey"});
+  ASSERT_EQ(resp, "none");
+}
+
+TEST_F(RdbTest, SaveEmptySSet) {
+  // Add expiring elements
+  Run({"saddex", "skey", "1", "key3", "key4"});
+
+  RespExpr resp = Run({"TYPE", "skey"});
+  ASSERT_EQ(resp, "set");
+
+  AdvanceTime(10'000);
+  resp = Run({"save", "RDB"});
+  ASSERT_EQ(resp, "OK");
+
+  resp = Run({"TYPE", "skey"});
+  ASSERT_EQ(resp, "set");
+
+  Run({"debug", "reload"});
+
+  resp = Run({"TYPE", "skey"});
+  ASSERT_EQ(resp, "none");
+}
+
 TEST_F(RdbTest, SetExpiry) {
   // Add non-expiring elements
   Run({"sadd", "key", "key1", "key2"});
