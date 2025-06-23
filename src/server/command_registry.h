@@ -94,7 +94,7 @@ template <typename T> class MoveOnly {
   MoveOnly(const MoveOnly&) = delete;
   MoveOnly& operator=(const MoveOnly&) = delete;
 
-  explicit MoveOnly(MoveOnly&& t) noexcept : value_(std::move(t.value_)) {
+  MoveOnly(MoveOnly&& t) noexcept : value_(std::move(t.value_)) {
     t.value_ = T{};  // Reset the passed value to default state
   }
 
@@ -194,7 +194,7 @@ class CommandId : public facade::CommandId {
   std::unique_ptr<CmdCallStats[]> command_stats_;
   Handler3 handler_;
   ArgValidator validator_;
-  MoveOnly<struct hdr_histogram*> latency_histogram_;  // Histogram for command latency in usec
+  MoveOnly<hdr_histogram*> latency_histogram_;  // Histogram for command latency in usec
 };
 
 class CommandRegistry {

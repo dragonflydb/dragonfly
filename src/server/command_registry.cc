@@ -132,7 +132,7 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
     : facade::CommandId(name, ImplicitCategories(mask), arity, first_key, last_key,
                         acl_categories.value_or(ImplicitAclCategories(mask))) {
   implicit_acl_ = !acl_categories.has_value();
-  struct hdr_histogram* hist = nullptr;
+  hdr_histogram* hist = nullptr;
   hdr_init(kLatencyHistogramMinValue, kLatencyHistogramMaxValue, kLatencyHistogramPrecision, &hist);
   latency_histogram_ = hist;
 }
@@ -156,7 +156,7 @@ CommandId CommandId::Clone(const std::string_view name) const {
   // explicit sharing of the object since it's an alias we can do that.
   // I am assuming that the source object lifetime is at least as of the cloned object.
   hdr_close(cloned.latency_histogram_);  // Free the histogram in the cloned object.
-  cloned.latency_histogram_ = static_cast<struct hdr_histogram*>(latency_histogram_);
+  cloned.latency_histogram_ = static_cast<hdr_histogram*>(latency_histogram_);
   return cloned;
 }
 
