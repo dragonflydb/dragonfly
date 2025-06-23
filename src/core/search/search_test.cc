@@ -778,6 +778,43 @@ TEST_P(KnnTest, AutoResize) {
 INSTANTIATE_TEST_SUITE_P(KnnFlat, KnnTest, testing::Values(false));
 INSTANTIATE_TEST_SUITE_P(KnnHnsw, KnnTest, testing::Values(true));
 
+TEST_F(SearchTest, VectorDistanceBasic) {
+  // Test basic vector distance calculations
+  std::vector<float> vec1 = {1.0f, 2.0f, 3.0f};
+  std::vector<float> vec2 = {4.0f, 5.0f, 6.0f};
+
+  // Test L2 distance
+  float l2_dist = VectorDistance(vec1.data(), vec2.data(), 3, VectorSimilarity::L2);
+  EXPECT_GT(l2_dist, 0.0f);
+  EXPECT_LT(l2_dist, 10.0f);  // Should be reasonable value
+
+  // Test Cosine distance
+  float cos_dist = VectorDistance(vec1.data(), vec2.data(), 3, VectorSimilarity::COSINE);
+  EXPECT_GE(cos_dist, 0.0f);
+  EXPECT_LE(cos_dist, 2.0f);  // Cosine distance range
+
+  // Test identical vectors
+  float l2_same = VectorDistance(vec1.data(), vec1.data(), 3, VectorSimilarity::L2);
+  EXPECT_NEAR(l2_same, 0.0f, 1e-6);
+
+  float cos_same = VectorDistance(vec1.data(), vec1.data(), 3, VectorSimilarity::COSINE);
+  EXPECT_NEAR(cos_same, 0.0f, 1e-6);
+}
+
+TEST_F(SearchTest, VectorDistanceConsistency) {
+  // Test that results are consistent across multiple calls
+  std::vector<float> vec1 = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f};
+  std::vector<float> vec2 = {0.6f, 0.7f, 0.8f, 0.9f, 1.0f};
+
+  float l2_dist1 = VectorDistance(vec1.data(), vec2.data(), 5, VectorSimilarity::L2);
+  float l2_dist2 = VectorDistance(vec1.data(), vec2.data(), 5, VectorSimilarity::L2);
+  EXPECT_EQ(l2_dist1, l2_dist2);
+
+  float cos_dist1 = VectorDistance(vec1.data(), vec2.data(), 5, VectorSimilarity::COSINE);
+  float cos_dist2 = VectorDistance(vec1.data(), vec2.data(), 5, VectorSimilarity::COSINE);
+  EXPECT_EQ(cos_dist1, cos_dist2);
+}
+
 static void BM_VectorSearch(benchmark::State& state) {
   unsigned ndims = state.range(0);
   unsigned nvecs = state.range(1);
@@ -1086,6 +1123,126 @@ BENCHMARK(BM_SearchByType_Diverse)
     ->Args({10000, 3, static_cast<int>(SearchType::INFIX)})
     ->Args({10000, 5, static_cast<int>(SearchType::INFIX)})
     ->ArgNames({"docs", "pattern_len", "search_type"})
+    ->Unit(benchmark::kMicrosecond);
+
+// Helper function to generate random vector
+static std::vector<float> GenerateRandomVector(size_t dims, unsigned seed = 42) {
+  std::mt19937 gen(seed);
+  std::uniform_real_distribution<float> dis(-1.0f, 1.0f);
+
+  std::vector<float> vec(dims);
+  for (size_t i = 0; i < dims; ++i) {
+    vec[i] = dis(gen);
+  }
+  return vec;
+}
+
+// Benchmark vector distance calculation (parametrized by similarity type)
+static void BM_VectorDistance(benchmark::State& state) {
+  size_t dims = state.range(0);
+  size_t num_pairs = state.range(1);
+  VectorSimilarity sim = static_cast<VectorSimilarity>(state.range(2));
+
+  // Generate test vectors with different seeds per similarity type
+  uint32_t seed_offset = (sim == VectorSimilarity::L2) ? 1000 : 2000;
+  std::vector<std::vector<float>> vectors_a, vectors_b;
+  vectors_a.reserve(num_pairs);
+  vectors_b.reserve(num_pairs);
+
+  for (size_t i = 0; i < num_pairs; ++i) {
+    vectors_a.push_back(GenerateRandomVector(dims, i));
+    vectors_b.push_back(GenerateRandomVector(dims, i + seed_offset));
+  }
+
+  size_t pair_idx = 0;
+  while (state.KeepRunning()) {
+    float distance =
+        VectorDistance(vectors_a[pair_idx].data(), vectors_b[pair_idx].data(), dims, sim);
+    benchmark::DoNotOptimize(distance);
+
+    pair_idx = (pair_idx + 1) % num_pairs;
+  }
+
+  state.counters["dims"] = dims;
+  state.counters["pairs"] = num_pairs;
+
+  std::string sim_name = (sim == VectorSimilarity::L2) ? "L2" : "Cosine";
+  state.SetLabel(sim_name);
+}
+
+// Benchmark with different vector dimensions, batch sizes and similarity types
+BENCHMARK(BM_VectorDistance)
+    // Small vectors, different batch sizes - L2 Distance
+    ->Args({32, 100, static_cast<int>(VectorSimilarity::L2)})    // 32D, 100 pairs
+    ->Args({32, 1000, static_cast<int>(VectorSimilarity::L2)})   // 32D, 1K pairs
+    ->Args({32, 10000, static_cast<int>(VectorSimilarity::L2)})  // 32D, 10K pairs
+    // Medium vectors - L2 Distance
+    ->Args({128, 100, static_cast<int>(VectorSimilarity::L2)})    // 128D, 100 pairs
+    ->Args({128, 1000, static_cast<int>(VectorSimilarity::L2)})   // 128D, 1K pairs
+    ->Args({128, 10000, static_cast<int>(VectorSimilarity::L2)})  // 128D, 10K pairs
+    // Large vectors - L2 Distance
+    ->Args({512, 100, static_cast<int>(VectorSimilarity::L2)})   // 512D, 100 pairs
+    ->Args({512, 1000, static_cast<int>(VectorSimilarity::L2)})  // 512D, 1K pairs
+    ->Args({512, 5000, static_cast<int>(VectorSimilarity::L2)})  // 512D, 5K pairs
+    // Very large vectors - L2 Distance
+    ->Args({1536, 100, static_cast<int>(VectorSimilarity::L2)})   // 1536D, 100 pairs
+    ->Args({1536, 1000, static_cast<int>(VectorSimilarity::L2)})  // 1536D, 1K pairs
+
+    // Small vectors, different batch sizes - Cosine Distance
+    ->Args({32, 100, static_cast<int>(VectorSimilarity::COSINE)})    // 32D, 100 pairs
+    ->Args({32, 1000, static_cast<int>(VectorSimilarity::COSINE)})   // 32D, 1K pairs
+    ->Args({32, 10000, static_cast<int>(VectorSimilarity::COSINE)})  // 32D, 10K pairs
+    // Medium vectors - Cosine Distance
+    ->Args({128, 100, static_cast<int>(VectorSimilarity::COSINE)})    // 128D, 100 pairs
+    ->Args({128, 1000, static_cast<int>(VectorSimilarity::COSINE)})   // 128D, 1K pairs
+    ->Args({128, 10000, static_cast<int>(VectorSimilarity::COSINE)})  // 128D, 10K pairs
+    // Large vectors - Cosine Distance
+    ->Args({512, 100, static_cast<int>(VectorSimilarity::COSINE)})   // 512D, 100 pairs
+    ->Args({512, 1000, static_cast<int>(VectorSimilarity::COSINE)})  // 512D, 1K pairs
+    ->Args({512, 5000, static_cast<int>(VectorSimilarity::COSINE)})  // 512D, 5K pairs
+    // Very large vectors - Cosine Distance
+    ->Args({1536, 100, static_cast<int>(VectorSimilarity::COSINE)})   // 1536D, 100 pairs
+    ->Args({1536, 1000, static_cast<int>(VectorSimilarity::COSINE)})  // 1536D, 1K pairs
+    ->ArgNames({"dims", "pairs", "similarity"})
+    ->Unit(benchmark::kMicrosecond);
+
+// Intensive benchmark for performance comparison
+static void BM_VectorDistanceIntensive(benchmark::State& state) {
+  size_t dims = 512;  // Fixed medium size
+  size_t batch_size = 1000;
+  VectorSimilarity sim = static_cast<VectorSimilarity>(state.range(0));
+
+  // Generate test vectors
+  std::vector<std::vector<float>> vectors_a, vectors_b;
+  vectors_a.reserve(batch_size);
+  vectors_b.reserve(batch_size);
+
+  for (size_t i = 0; i < batch_size; ++i) {
+    vectors_a.push_back(GenerateRandomVector(dims, i));
+    vectors_b.push_back(GenerateRandomVector(dims, i + 3000));
+  }
+
+  size_t total_ops = 0;
+  while (state.KeepRunning()) {
+    // Process entire batch
+    for (size_t i = 0; i < batch_size; ++i) {
+      float distance = VectorDistance(vectors_a[i].data(), vectors_b[i].data(), dims, sim);
+      benchmark::DoNotOptimize(distance);
+      ++total_ops;
+    }
+  }
+
+  state.counters["ops"] = total_ops;
+  state.counters["ops_per_sec"] = benchmark::Counter(total_ops, benchmark::Counter::kIsRate);
+
+  std::string sim_name = (sim == VectorSimilarity::L2) ? "L2" : "Cosine";
+  state.SetLabel(sim_name + "_Intensive");
+}
+
+BENCHMARK(BM_VectorDistanceIntensive)
+    ->Arg(static_cast<int>(VectorSimilarity::L2))
+    ->Arg(static_cast<int>(VectorSimilarity::COSINE))
+    ->ArgNames({"similarity_type"})
     ->Unit(benchmark::kMicrosecond);
 
 }  // namespace search
