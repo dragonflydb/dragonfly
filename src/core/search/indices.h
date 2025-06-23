@@ -46,8 +46,9 @@ struct NumericIndex : public BaseIndex {
 // Base index for string based indices.
 template <typename C> struct BaseStringIndex : public BaseIndex {
   using Container = BlockList<C>;
+  using VecOrPtr = std::variant<std::vector<DocId>, const Container*>;
 
-  BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive);
+  BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive, bool with_suffixtrie);
 
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
@@ -55,8 +56,14 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // Pointer is valid as long as index is not mutated. Nullptr if not found
   const Container* Matching(std::string_view str, bool strip_whitespace = true) const;
 
-  // Iterate over all Matching on prefix.
-  void MatchingPrefix(std::string_view prefix, absl::FunctionRef<void(const Container*)> cb) const;
+  // Iterate over all nodes matching on prefix.
+  void MatchPrefix(std::string_view prefix, absl::FunctionRef<void(const Container*)> cb) const;
+
+  // Iterate over all nodes matching suffix query. Faster if suffix trie is built.
+  void MatchSuffix(std::string_view suffix, absl::FunctionRef<void(const Container*)> cb) const;
+
+  // Iterate over all nodes matching infix query. Faster if suffix trie is built.
+  void MatchInfix(std::string_view prefix, absl::FunctionRef<void(const Container*)> cb) const;
 
   // Returns all the terms that appear as keys in the reverse index.
   std::vector<std::string> GetTerms() const;
@@ -73,11 +80,13 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // Used by Add & Remove to tokenize text value
   virtual absl::flat_hash_set<std::string> Tokenize(std::string_view value) const = 0;
 
-  Container* GetOrCreate(std::string_view word);
+  static Container* GetOrCreate(search::RaxTreeMap<Container>* map, std::string_view word);
+  static void Remove(search::RaxTreeMap<Container>* map, DocId id, std::string_view word);
 
   bool case_sensitive_ = false;
   bool unique_ids_ = true;  // If true, docs ids are unique in the index, otherwise they can repeat.
   search::RaxTreeMap<Container> entries_;
+  std::optional<search::RaxTreeMap<Container>> suffix_trie_;
 };
 
 // Index for text fields.
@@ -85,9 +94,8 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
 struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
   using StopWords = absl::flat_hash_set<std::string>;
 
-  TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords, const Synonyms* synonyms)
-      : BaseStringIndex(mr, false), stopwords_{stopwords}, synonyms_{synonyms} {
-  }
+  TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords, const Synonyms* synonyms,
+            bool with_suffixtrie);
 
  protected:
   std::optional<StringList> GetStrings(const DocumentAccessor& doc,
@@ -103,7 +111,7 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
 // Hashmap based lookup per word.
 struct TagIndex : public BaseStringIndex<SortedVector> {
   TagIndex(PMR_NS::memory_resource* mr, SchemaField::TagParams params)
-      : BaseStringIndex(mr, params.case_sensitive), separator_{params.separator} {
+      : BaseStringIndex(mr, params.case_sensitive, false), separator_{params.separator} {
   }
 
  protected:
