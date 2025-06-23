@@ -10,23 +10,9 @@
 #include "base/logging.h"
 
 #ifdef USE_SIMSIMD
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
-#pragma GCC diagnostic ignored "-Wcpp"
-#pragma GCC diagnostic ignored "-Wunknown-pragmas"
-#elif defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-function"
-#pragma clang diagnostic ignored "-Wunknown-pragmas"
-#pragma clang diagnostic ignored "-Wunknown-warning-option"
-#endif
+#define SIMSIMD_NATIVE_F16 0
+#define SIMSIMD_NATIVE_BF16 0
 #include <simsimd/simsimd.h>
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic pop
-#elif defined(__clang__)
-#pragma clang diagnostic pop
-#endif
 #endif
 
 namespace dfly::search {
@@ -45,8 +31,8 @@ namespace {
 FAST_MATH float L2Distance(const float* u, const float* v, size_t dims) {
 #ifdef USE_SIMSIMD
   simsimd_distance_t distance = 0;
-  simsimd_l2sq_f32(u, v, dims, &distance);
-  return sqrt(static_cast<float>(distance));
+  simsimd_l2_f32(u, v, dims, &distance);  // Note: direct L2 instead of squared
+  return static_cast<float>(distance);
 #else
   // Fallback to manual implementation
   float sum = 0;
