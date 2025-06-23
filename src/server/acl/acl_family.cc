@@ -1186,12 +1186,13 @@ std::variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(
 }
 
 void AclFamily::BuildIndexers(RevCommandsIndexStore families) {
-  acl::NumberOfFamilies(families.size());
+  size_t family_count = acl::NumberOfFamilies(families.size());
   CommandsRevIndexer(std::move(families));
   CategoryToCommandsIndexStore index;
   cmd_registry_->Traverse([&](std::string_view, auto& cid) {
     const uint32_t cat = cid.acl_categories();
     const size_t family = cid.GetFamily();
+    DCHECK_LT(family, family_count);
     const uint64_t bit_index = cid.GetBitIndex();
     for (size_t i = 0; i < 32; ++i) {
       if (cat & 1 << i) {

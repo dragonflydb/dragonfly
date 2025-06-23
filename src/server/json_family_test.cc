@@ -3155,4 +3155,18 @@ TEST_F(JsonFamilyTest, ResetStringKeyWithSetGet) {
   EXPECT_THAT(resp, R"({"a":"b"})");
 }
 
+TEST_F(JsonFamilyTest, DelNonExistingKey) {
+  auto resp = Run({"EXISTS", "nonexisting_key"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"JSON.DEL", "nonexisting_key", "."});
+  EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"JSON.DEL", "nonexisting_key", "$"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"JSON.DEL", "nonexisting_key"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
 }  // namespace dfly
