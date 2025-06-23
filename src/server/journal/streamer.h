@@ -68,11 +68,11 @@ class JournalStreamer : public journal::JournalConsumerInterface {
 
   journal::Journal* journal_;
 
-  util::fb2::Fiber stalled_writer_;
-  util::fb2::Done stalled_writer_done_;
+  util::fb2::Fiber stalled_data_writer_;
+  util::fb2::Done stalled_data_writer_done_;
   void StartStalledDataWriterFiber();
   void StopStalledDataWriterFiber();
-  void StalledWriterFiber(std::chrono::milliseconds period_ms, util::fb2::Done* waiter);
+  void StalledDataWriterFiber(std::chrono::milliseconds period_ms, util::fb2::Done* waiter);
 
   PendingBuf pending_buf_;
 
