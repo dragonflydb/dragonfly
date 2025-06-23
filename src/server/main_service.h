@@ -49,8 +49,7 @@ class Service : public facade::ServiceInterface {
 
   // Verify command can be executed now (check out of memory), always called immediately before
   // execution
-  std::optional<facade::ErrorReply> VerifyCommandExecution(const CommandId* cid,
-                                                           const ConnectionContext* cntx,
+  std::optional<facade::ErrorReply> VerifyCommandExecution(const ConnectionContext* cntx,
                                                            CmdArgList tail_args);
 
   // Verify command prepares excution in correct state.
