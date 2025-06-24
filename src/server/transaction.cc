@@ -1590,6 +1590,8 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     unsigned num_keys_index;
     if (absl::StartsWith(name, "EVAL"))
       num_keys_index = 1;
+    else if (name == "BLMPOP")
+      num_keys_index = 1;
     else
       num_keys_index = bonus ? *bonus + 1 : 0;
 
