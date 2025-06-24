@@ -17,6 +17,7 @@
 #include <memory_resource>
 #include <random>
 
+#include "absl/base/macros.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/search/base.h"
@@ -103,9 +104,12 @@ IndicesOptions kEmptyOptions{{}};
 Schema MakeSimpleSchema(initializer_list<pair<string_view, SchemaField::FieldType>> ilist) {
   Schema schema;
   for (auto [name, type] : ilist) {
-    schema.fields[name] = {type, 0, string{name}};
+    auto& field = schema.fields[name];
+    field = {type, 0, string{name}};
     if (type == SchemaField::TAG)
-      schema.fields[name].special_params = SchemaField::TagParams{};
+      field.special_params = SchemaField::TagParams{};
+    else if (type == SchemaField::TEXT)
+      field.special_params = SchemaField::TextParams{};
   }
   return schema;
 }
@@ -472,6 +476,59 @@ TEST_F(SearchTest, StopWords) {
   algo.Init("found", &params);
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
 }
+
+class SearchRaxTest : public SearchTest,
+                      public testing::WithParamInterface<bool /* build suffix trie */> {};
+
+TEST_P(SearchRaxTest, SuffixInfix) {
+  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
+  schema.fields["title"].special_params = SchemaField::TextParams{.with_suffixtrie = GetParam()};
+
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  vector<string> documents = {"Berries",     "Blueberries", "Blackberries", "Apples",
+                              "Cranberries", "Wolfberry",   "Strawberry"};
+  for (size_t i = 0; i < documents.size(); i++) {
+    MockedDocument doc{{{"title", documents[i]}}};
+    indices.Add(i, doc);
+  }
+
+  // suffix queries
+
+  algo.Init("*es", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 3, 4));
+
+  algo.Init("*berries", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 4));
+
+  algo.Init("*les", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(3));
+
+  algo.Init("*lueberries", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1));
+
+  algo.Init("*berry", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(5, 6));
+
+  // infix queries
+
+  algo.Init("*berr*", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 4, 5, 6));
+
+  algo.Init("*anb*", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(4));
+
+  algo.Init("*berries*", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 4));
+
+  algo.Init("*bl*", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 2));
+}
+
+INSTANTIATE_TEST_SUITE_P(SuffixInfixNoTrie, SearchRaxTest, testing::Values(false));
+INSTANTIATE_TEST_SUITE_P(SuffixInfixWithTrie, SearchRaxTest, testing::Values(true));
 
 std::string ToBytes(absl::Span<const float> vec) {
   return string{reinterpret_cast<const char*>(vec.data()), sizeof(float) * vec.size()};
@@ -918,32 +975,6 @@ TEST_F(SearchTest, InvalidVectorParameter) {
   ASSERT_FALSE(algo.Init("*=>[KNN 2 @v $b]", &query_params));
 }
 
-TEST_F(SearchTest, NotImplementedSearchTypes) {
-  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
-
-  SearchAlgorithm algo{};
-  QueryParams params;
-
-  // Add a document for testing
-  MockedDocument doc{Map{{"title", "text for search"}}};
-  indices.Add(0, doc);
-
-  // Test suffix search (words ending with "search")
-  algo.Init("*search", &params);
-  auto suffix_result = algo.Search(&indices);
-  EXPECT_TRUE(suffix_result.ids.empty()) << "Suffix search should return empty result";
-  EXPECT_THAT(suffix_result.error, testing::HasSubstr("Not implemented"))
-      << "Suffix search should return a not implemented error";
-
-  // Test infix search (words containing "for")
-  algo.Init("*for*", &params);
-  auto infix_result = algo.Search(&indices);
-  EXPECT_TRUE(infix_result.ids.empty()) << "Infix search should return empty result";
-  EXPECT_THAT(infix_result.error, testing::HasSubstr("Not implemented"))
-      << "Infix search should return a not implemented error";
-}
-
 // Enumeration for different search types
 enum class SearchType { PREFIX = 0, SUFFIX = 1, INFIX = 2 };
 
@@ -1245,6 +1276,153 @@ BENCHMARK(BM_VectorDistanceIntensive)
     ->ArgNames({"similarity_type"})
     ->Unit(benchmark::kMicrosecond);
 
-}  // namespace search
+// Helper function to generate random vector
+static std::vector<float> GenerateRandomVector(size_t dims, unsigned seed = 42) {
+  std::mt19937 gen(seed);
+  std::uniform_real_distribution<float> dis(-1.0f, 1.0f);
 
+  std::vector<float> vec(dims);
+  for (size_t i = 0; i < dims; ++i) {
+    vec[i] = dis(gen);
+  }
+  return vec;
+}
+
+// Benchmark vector distance calculation (parametrized by similarity type)
+static void BM_VectorDistance(benchmark::State& state) {
+  size_t dims = state.range(0);
+  size_t num_pairs = state.range(1);
+  VectorSimilarity sim = static_cast<VectorSimilarity>(state.range(2));
+
+  // Generate test vectors with different seeds per similarity type
+  uint32_t seed_offset = (sim == VectorSimilarity::L2) ? 1000 : 2000;
+  std::vector<std::vector<float>> vectors_a, vectors_b;
+  vectors_a.reserve(num_pairs);
+  vectors_b.reserve(num_pairs);
+
+  for (size_t i = 0; i < num_pairs; ++i) {
+    vectors_a.push_back(GenerateRandomVector(dims, i));
+    vectors_b.push_back(GenerateRandomVector(dims, i + seed_offset));
+  }
+
+  size_t pair_idx = 0;
+  while (state.KeepRunning()) {
+    float distance =
+        VectorDistance(vectors_a[pair_idx].data(), vectors_b[pair_idx].data(), dims, sim);
+    benchmark::DoNotOptimize(distance);
+
+    pair_idx = (pair_idx + 1) % num_pairs;
+  }
+
+  state.counters["dims"] = dims;
+  state.counters["pairs"] = num_pairs;
+
+  std::string sim_name = (sim == VectorSimilarity::L2) ? "L2" : "Cosine";
+  state.SetLabel(sim_name);
+}
+
+// Benchmark with different vector dimensions, batch sizes and similarity types
+BENCHMARK(BM_VectorDistance)
+    // Small vectors, different batch sizes - L2 Distance
+    ->Args({32, 100, static_cast<int>(VectorSimilarity::L2)})    // 32D, 100 pairs
+    ->Args({32, 1000, static_cast<int>(VectorSimilarity::L2)})   // 32D, 1K pairs
+    ->Args({32, 10000, static_cast<int>(VectorSimilarity::L2)})  // 32D, 10K pairs
+    // Medium vectors - L2 Distance
+    ->Args({128, 100, static_cast<int>(VectorSimilarity::L2)})    // 128D, 100 pairs
+    ->Args({128, 1000, static_cast<int>(VectorSimilarity::L2)})   // 128D, 1K pairs
+    ->Args({128, 10000, static_cast<int>(VectorSimilarity::L2)})  // 128D, 10K pairs
+    // Large vectors - L2 Distance
+    ->Args({512, 100, static_cast<int>(VectorSimilarity::L2)})   // 512D, 100 pairs
+    ->Args({512, 1000, static_cast<int>(VectorSimilarity::L2)})  // 512D, 1K pairs
+    ->Args({512, 5000, static_cast<int>(VectorSimilarity::L2)})  // 512D, 5K pairs
+    // Very large vectors - L2 Distance
+    ->Args({1536, 100, static_cast<int>(VectorSimilarity::L2)})   // 1536D, 100 pairs
+    ->Args({1536, 1000, static_cast<int>(VectorSimilarity::L2)})  // 1536D, 1K pairs
+
+    // Small vectors, different batch sizes - Cosine Distance
+    ->Args({32, 100, static_cast<int>(VectorSimilarity::COSINE)})    // 32D, 100 pairs
+    ->Args({32, 1000, static_cast<int>(VectorSimilarity::COSINE)})   // 32D, 1K pairs
+    ->Args({32, 10000, static_cast<int>(VectorSimilarity::COSINE)})  // 32D, 10K pairs
+    // Medium vectors - Cosine Distance
+    ->Args({128, 100, static_cast<int>(VectorSimilarity::COSINE)})    // 128D, 100 pairs
+    ->Args({128, 1000, static_cast<int>(VectorSimilarity::COSINE)})   // 128D, 1K pairs
+    ->Args({128, 10000, static_cast<int>(VectorSimilarity::COSINE)})  // 128D, 10K pairs
+    // Large vectors - Cosine Distance
+    ->Args({512, 100, static_cast<int>(VectorSimilarity::COSINE)})   // 512D, 100 pairs
+    ->Args({512, 1000, static_cast<int>(VectorSimilarity::COSINE)})  // 512D, 1K pairs
+    ->Args({512, 5000, static_cast<int>(VectorSimilarity::COSINE)})  // 512D, 5K pairs
+    // Very large vectors - Cosine Distance
+    ->Args({1536, 100, static_cast<int>(VectorSimilarity::COSINE)})   // 1536D, 100 pairs
+    ->Args({1536, 1000, static_cast<int>(VectorSimilarity::COSINE)})  // 1536D, 1K pairs
+    ->ArgNames({"dims", "pairs", "similarity"})
+    ->Unit(benchmark::kMicrosecond);
+
+// Intensive benchmark for performance comparison
+static void BM_VectorDistanceIntensive(benchmark::State& state) {
+  size_t dims = 512;  // Fixed medium size
+  size_t batch_size = 1000;
+  VectorSimilarity sim = static_cast<VectorSimilarity>(state.range(0));
+
+  // Generate test vectors
+  std::vector<std::vector<float>> vectors_a, vectors_b;
+  vectors_a.reserve(batch_size);
+  vectors_b.reserve(batch_size);
+
+  for (size_t i = 0; i < batch_size; ++i) {
+    vectors_a.push_back(GenerateRandomVector(dims, i));
+    vectors_b.push_back(GenerateRandomVector(dims, i + 3000));
+  }
+
+  size_t total_ops = 0;
+  while (state.KeepRunning()) {
+    // Process entire batch
+    for (size_t i = 0; i < batch_size; ++i) {
+      float distance = VectorDistance(vectors_a[i].data(), vectors_b[i].data(), dims, sim);
+      benchmark::DoNotOptimize(distance);
+      ++total_ops;
+    }
+  }
+
+  state.counters["ops"] = total_ops;
+  state.counters["ops_per_sec"] = benchmark::Counter(total_ops, benchmark::Counter::kIsRate);
+
+  std::string sim_name = (sim == VectorSimilarity::L2) ? "L2" : "Cosine";
+  state.SetLabel(sim_name + "_Intensive");
+}
+
+BENCHMARK(BM_VectorDistanceIntensive)
+    ->Arg(static_cast<int>(VectorSimilarity::L2))
+    ->Arg(static_cast<int>(VectorSimilarity::COSINE))
+    ->ArgNames({"similarity_type"})
+    ->Unit(benchmark::kMicrosecond);
+
+static void BM_SearchDocIds(benchmark::State& state) {
+  auto schema = MakeSimpleSchema({{"score", SchemaField::NUMERIC}, {"tag", SchemaField::TAG}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  default_random_engine rnd;
+  const char* tag_vals[] = {"test", "example", "sample", "demo", "demo2"};
+  uniform_int_distribution<size_t> tag_dist(0, ABSL_ARRAYSIZE(tag_vals) - 1);
+  uniform_int_distribution<size_t> score_dist(0, 100);
+
+  for (size_t i = 0; i < 1000; i++) {
+    MockedDocument doc{
+        Map{{"score", std::to_string(score_dist(rnd))}, {"tag", tag_vals[tag_dist(rnd)]}}};
+    indices.Add(i, doc);
+  }
+
+  std::string queries[] = {"@tag:{test} @score:[10 50]", "@tag: *", "@score:*"};
+  size_t query_type = state.range(0);
+  CHECK_LT(query_type, ABSL_ARRAYSIZE(queries));
+  CHECK(algo.Init(queries[query_type], &params));
+  while (state.KeepRunning()) {
+    auto result = algo.Search(&indices);
+    CHECK(result.error.empty());
+  }
+}
+BENCHMARK(BM_SearchDocIds)->Range(0, 2);
+
+}  // namespace search
 }  // namespace dfly
