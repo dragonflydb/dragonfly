@@ -35,7 +35,7 @@ class DashTable : public detail::DashTableBase {
   static constexpr size_t kSegRegularBytes =
       kSegBytes - (SegmentType::kStashBucketNum * SegmentType::kBucketSz);
 
-  static constexpr size_t kSegCapacity = SegmentType::capacity();
+  static constexpr size_t kSegMinCapacity = SegmentType::kBucketNum * SegmentType::kSlotNum;
   static constexpr size_t kSlotNum = SegmentType::kSlotNum;
   static constexpr size_t kBucketNum = SegmentType::kBucketNum;
 
@@ -769,7 +769,7 @@ void DashTable<_Key, _Value, Policy>::Reserve(size_t size) {
   if (size <= capacity())
     return;
 
-  size_t sg_floor = (size - 1) / SegmentType::capacity();
+  size_t sg_floor = (size + kSegMinCapacity - 1) / kSegMinCapacity;
   if (sg_floor < segment_.size()) {
     return;
   }

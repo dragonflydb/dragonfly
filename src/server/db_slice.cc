@@ -147,7 +147,7 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
   // we estimate how much memory we will take with the current capacity
   // even though we may currently use less memory.
   // see https://github.com/dragonflydb/dragonfly/issues/256#issuecomment-1227095503
-  size_t table_free_items = ((tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity) *
+  size_t table_free_items = ((tbl.capacity() - tbl.size()) + PrimeTable::kSegMinCapacity) *
                             GetFlag(FLAGS_table_growth_margin);
 
   size_t obj_bytes_estimation = db_slice_->bytes_per_object() * table_free_items;
