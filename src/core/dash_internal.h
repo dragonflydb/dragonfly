@@ -426,8 +426,8 @@ class Segment {
 
   size_t SlowSize() const;
 
-  static constexpr size_t capacity() {
-    return kMaxSize;
+  size_t capacity() const {
+    return num_buckets() * kSlotNum;
   }
 
   static constexpr bool OutOfRange(PhysicalBid bid) {
