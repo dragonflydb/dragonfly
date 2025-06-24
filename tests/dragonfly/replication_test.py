@@ -3353,8 +3353,10 @@ async def test_replicaiton_onmove_flow(df_factory):
     await c_master.execute_command(f"DEBUG POPULATE {key_target} key 1048 RAND")
     logging.debug("finished populate")
 
+    stop_event = asyncio.Event()
+
     async def get_keys():
-        while True:
+        while not stop_event.is_set():
             pipe = c_master.pipeline(transaction=False)
             for _ in range(50):
                 id = random.randint(0, key_target)
@@ -3372,6 +3374,8 @@ async def test_replicaiton_onmove_flow(df_factory):
     assert info["bump_ups"] >= 100
 
     await check_all_replicas_finished([c_replica], c_master)
+    stop_event.set()
+    await get_task
 
     # Check replica data consisten
     hash1, hash2 = await asyncio.gather(*(SeederV2.capture(c) for c in (c_master, c_replica)))
