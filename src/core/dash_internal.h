@@ -13,6 +13,7 @@
 #include <cstring>
 #include <type_traits>
 
+#include "base/logging.h"
 #include "base/pmr/memory_resource.h"
 #include "core/sse_port.h"
 
@@ -1240,6 +1241,9 @@ template <typename HFunc, typename MoveCb>
 void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right, MoveCb&& on_move_cb) {
   ++local_depth_;
   dest_right->local_depth_ = local_depth_;
+
+  LOG(INFO) << "Splitting segment " << segment_id_
+            << " utilization: " << double(100 * SlowSize()) / capacity() << "%";
 
   // versioning does not work when entries move across buckets.
   // we need to setup rules on how we do that
