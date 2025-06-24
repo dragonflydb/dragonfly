@@ -24,6 +24,9 @@ ABSL_FLAG(uint32_t, replication_stream_output_limit, 64_KB,
 ABSL_FLAG(uint32_t, migration_buckets_serialization_threshold, 100,
           "The Number of buckets to serialize on each iteration before yielding");
 
+ABSL_FLAG(uint32_t, replication_dispatch_threshold, 1500,
+          "Number of bytes to aggregate before replication");
+
 namespace dfly {
 using namespace util;
 using namespace journal;
@@ -36,13 +39,18 @@ iovec IoVec(io::Bytes src) {
 
 uint32_t replication_stream_output_limit_cached = 64_KB;
 uint32_t migration_buckets_serialization_threshold_cached = 100;
+uint32_t replication_dispatch_threshold = 1500;
+uint32_t stalled_writer_base_period_ms = 10;
 
 }  // namespace
 
-JournalStreamer::JournalStreamer(journal::Journal* journal, ExecutionState* cntx, SendLsn send_lsn)
-    : cntx_(cntx), journal_(journal), send_lsn_(send_lsn) {
+JournalStreamer::JournalStreamer(journal::Journal* journal, ExecutionState* cntx, SendLsn send_lsn,
+                                 bool is_stable_sync)
+    : cntx_(cntx), journal_(journal), is_stable_sync_(is_stable_sync), send_lsn_(send_lsn) {
   // cache the flag to avoid accessing it later.
   replication_stream_output_limit_cached = absl::GetFlag(FLAGS_replication_stream_output_limit);
+  replication_dispatch_threshold = absl::GetFlag(FLAGS_replication_dispatch_threshold);
+  last_async_write_time_ = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
 }
 
 JournalStreamer::~JournalStreamer() {
@@ -75,27 +83,72 @@ void JournalStreamer::Start(util::FiberSocketBase* dest) {
   CHECK(dest_ == nullptr && dest != nullptr);
   dest_ = dest;
   journal_cb_id_ = journal_->RegisterOnChange(this);
+  StartStalledDataWriterFiber();
 }
 
 void JournalStreamer::Cancel() {
   VLOG(1) << "JournalStreamer::Cancel";
   waker_.notifyAll();
   journal_->UnregisterOnChange(journal_cb_id_);
-  if (!cntx_->IsError()) {
-    WaitForInflightToComplete();
-  }
+  StopStalledDataWriterFiber();
+  WaitForInflightToComplete();
 }
 
 size_t JournalStreamer::UsedBytes() const {
   return pending_buf_.Size();
 }
 
-void JournalStreamer::AsyncWrite() {
-  DCHECK(!pending_buf_.Empty());
+void JournalStreamer::Write(std::string str) {
+  DCHECK(!str.empty());
+  DVLOG(3) << "Writing " << str.size() << " bytes";
 
+  pending_buf_.Push(std::move(str));
+  AsyncWrite(false);
+}
+
+void JournalStreamer::StartStalledDataWriterFiber() {
+  if (is_stable_sync_ && !stalled_data_writer_.IsJoinable()) {
+    auto pb = fb2::ProactorBase::me();
+    std::chrono::milliseconds period_us(stalled_writer_base_period_ms);
+    stalled_data_writer_ = MakeFiber([this, index = pb->GetPoolIndex(), period_us]() mutable {
+      ThisFiber::SetName(absl::StrCat("fiber_periodic_journal_writer_", index));
+      this->StalledDataWriterFiber(period_us, &stalled_data_writer_done_);
+    });
+  }
+}
+
+void JournalStreamer::StalledDataWriterFiber(std::chrono::milliseconds period_ms,
+                                             util::fb2::Done* waiter) {
+  while (cntx_->IsRunning()) {
+    if (waiter->WaitFor(period_ms)) {
+      if (!cntx_->IsRunning()) {
+        return;
+      }
+    }
+
+    // We don't want to force async write to replicate if last data
+    // was written recent. Data needs to be stalled for period_ms duration.
+    if (!pending_buf_.Size() || in_flight_bytes_ > 0 ||
+        ((last_async_write_time_ + period_ms.count()) >
+         (fb2::ProactorBase::GetMonotonicTimeNs() / 1000000))) {
+      continue;
+    }
+
+    AsyncWrite(true);
+  }
+}
+
+void JournalStreamer::AsyncWrite(bool force_send) {
+  // Stable sync or RestoreStreamer replication can't write data until
+  // previous AsyncWriter finished.
   if (in_flight_bytes_ > 0) {
-    // We can not flush data while there are in flight requests because AsyncWrite
-    // is not atomic. Therefore, we just aggregate.
+    return;
+  }
+
+  // Writing in stable sync and outside of fiber needs to check
+  // threshold before writing data.
+  if (is_stable_sync_ && !force_send &&
+      pending_buf_.FrontBufSize() < replication_dispatch_threshold) {
     return;
   }
 
@@ -103,6 +156,7 @@ void JournalStreamer::AsyncWrite() {
 
   in_flight_bytes_ = cur_buf.mem_size;
   total_sent_ += in_flight_bytes_;
+  last_async_write_time_ = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
 
   const auto v_size = cur_buf.buf.size();
   absl::InlinedVector<iovec, 8> v(v_size);
@@ -112,18 +166,8 @@ void JournalStreamer::AsyncWrite() {
     v[i] = IoVec(io::Bytes(uptr, cur_buf.buf[i].size()));
   }
 
-  dest_->AsyncWrite(v.data(), v.size(), [this, len = in_flight_bytes_](std::error_code ec) {
-    OnCompletion(std::move(ec), len);
-  });
-}
-
-void JournalStreamer::Write(std::string str) {
-  DCHECK(!str.empty());
-  DVLOG(3) << "Writing " << str.size() << " bytes";
-
-  pending_buf_.Push(std::move(str));
-
-  AsyncWrite();
+  dest_->AsyncWrite(v.data(), v.size(),
+                    [this, len = in_flight_bytes_](std::error_code ec) { OnCompletion(ec, len); });
 }
 
 void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
@@ -136,7 +180,7 @@ void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
     if (ec) {
       cntx_->ReportError(ec);
     } else if (!pending_buf_.Empty()) {
-      AsyncWrite();
+      AsyncWrite(false);
     }
   }
 
@@ -176,13 +220,22 @@ void JournalStreamer::WaitForInflightToComplete() {
   }
 }
 
+void JournalStreamer::StopStalledDataWriterFiber() {
+  if (is_stable_sync_ && stalled_data_writer_.IsJoinable()) {
+    stalled_data_writer_done_.Notify();
+    if (stalled_data_writer_.IsJoinable()) {
+      stalled_data_writer_.Join();
+    }
+  }
+}
+
 bool JournalStreamer::IsStalled() const {
   return pending_buf_.Size() >= replication_stream_output_limit_cached;
 }
 
 RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
                                  ExecutionState* cntx)
-    : JournalStreamer(journal, cntx, JournalStreamer::SendLsn::NO),
+    : JournalStreamer(journal, cntx, JournalStreamer::SendLsn::NO, false),
       db_slice_(slice),
       my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
