@@ -9,12 +9,6 @@
 
 #include "base/logging.h"
 
-#ifdef USE_SIMSIMD
-#define SIMSIMD_NATIVE_F16 0
-#define SIMSIMD_NATIVE_BF16 0
-#include <simsimd/simsimd.h>
-#endif
-
 namespace dfly::search {
 
 using namespace std;
@@ -27,29 +21,16 @@ namespace {
 #define FAST_MATH
 #endif
 
-// Optimized Euclidean vector distance using SimSIMD
+// Euclidean vector distance: sqrt( sum: (u[i] - v[i])^2  )
 FAST_MATH float L2Distance(const float* u, const float* v, size_t dims) {
-#ifdef USE_SIMSIMD
-  simsimd_distance_t distance = 0;
-  simsimd_l2_f32(u, v, dims, &distance);  // Note: direct L2 instead of squared
-  return static_cast<float>(distance);
-#else
-  // Fallback to manual implementation
   float sum = 0;
   for (size_t i = 0; i < dims; i++)
     sum += (u[i] - v[i]) * (u[i] - v[i]);
   return sqrt(sum);
-#endif
 }
 
-// Optimized cosine vector distance using SimSIMD
+// TODO: Normalize vectors ahead if cosine distance is used
 FAST_MATH float CosineDistance(const float* u, const float* v, size_t dims) {
-#ifdef USE_SIMSIMD
-  simsimd_distance_t distance = 0;
-  simsimd_cos_f32(u, v, dims, &distance);
-  return static_cast<float>(distance);
-#else
-  // Fallback to manual implementation
   float sum_uv = 0, sum_uu = 0, sum_vv = 0;
   for (size_t i = 0; i < dims; i++) {
     sum_uv += u[i] * v[i];
@@ -60,7 +41,6 @@ FAST_MATH float CosineDistance(const float* u, const float* v, size_t dims) {
   if (float denom = sum_uu * sum_vv; denom != 0.0f)
     return 1 - sum_uv / sqrt(denom);
   return 0.0f;
-#endif
 }
 
 OwnedFtVector ConvertToFtVector(string_view value) {

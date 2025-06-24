@@ -11,18 +11,6 @@ add_library(query_parser base.cc ast_expr.cc query_driver.cc search.cc indices.c
 
 target_link_libraries(query_parser base absl::strings TRDP::reflex TRDP::uni-algo TRDP::hnswlib redis_lib)
 
-# Optional SimSIMD support
-option(USE_SIMSIMD "Enable SimSIMD vector optimizations" OFF)
-if(USE_SIMSIMD)
-  target_link_libraries(query_parser TRDP::simsimd)
-  target_compile_definitions(query_parser PRIVATE USE_SIMSIMD)
-  target_compile_definitions(query_parser PRIVATE SIMSIMD_DYNAMIC_DISPATCH=1)
-  target_include_directories(query_parser SYSTEM PRIVATE ${simsimd_SOURCE_DIR}/include)
-  message(STATUS "SimSIMD vector optimizations: ENABLED")
-else()
-  message(STATUS "SimSIMD vector optimizations: DISABLED")
-endif()
-
 cxx_test(compressed_sorted_set_test query_parser LABELS DFLY)
 cxx_test(block_list_test query_parser LABELS DFLY)
 cxx_test(rax_tree_test redis_test_lib LABELS DFLY)
