@@ -1304,5 +1304,187 @@ static void BM_SearchDocIds(benchmark::State& state) {
 }
 BENCHMARK(BM_SearchDocIds)->Range(0, 2);
 
+#ifdef USE_SIMSIMD
+
+#define SIMSIMD_NATIVE_F16 0
+#define SIMSIMD_NATIVE_BF16 0
+#include <simsimd/simsimd.h>
+
+namespace {
+
+// SimSIMD implementations for testing
+float SimSIMD_L2Distance(const float* u, const float* v, size_t dims) {
+  simsimd_distance_t distance = 0;
+  simsimd_l2_f32(u, v, dims, &distance);  // Note: direct L2 instead of squared
+  return static_cast<float>(distance);
+}
+
+float SimSIMD_CosineDistance(const float* u, const float* v, size_t dims) {
+  simsimd_distance_t distance = 0;
+  simsimd_cos_f32(u, v, dims, &distance);
+  return static_cast<float>(distance);
+}
+
+}  // namespace
+
+// Test that SimSIMD functions produce similar results to original functions
+TEST(SimSIMDTest, CompareWithOriginal) {
+  const size_t dims = 128;
+  auto vec1 = GenerateRandomVector(dims, 1);
+  auto vec2 = GenerateRandomVector(dims, 2);
+
+  // Test L2 distance
+  float original_l2 = VectorDistance(vec1.data(), vec2.data(), dims, VectorSimilarity::L2);
+  float simsimd_l2 = SimSIMD_L2Distance(vec1.data(), vec2.data(), dims);
+
+  // Allow small floating point differences
+  EXPECT_NEAR(original_l2, simsimd_l2, 1e-5f) << "L2 distances should be nearly equal";
+
+  // Test Cosine distance
+  float original_cosine = VectorDistance(vec1.data(), vec2.data(), dims, VectorSimilarity::COSINE);
+  float simsimd_cosine = SimSIMD_CosineDistance(vec1.data(), vec2.data(), dims);
+
+  EXPECT_NEAR(original_cosine, simsimd_cosine, 1e-5f) << "Cosine distances should be nearly equal";
+}
+
+// Benchmark SimSIMD L2 distance
+static void BM_SimSIMD_L2Distance(benchmark::State& state) {
+  size_t dims = state.range(0);
+  size_t num_pairs = state.range(1);
+
+  std::vector<std::vector<float>> vectors_a, vectors_b;
+  vectors_a.reserve(num_pairs);
+  vectors_b.reserve(num_pairs);
+
+  for (size_t i = 0; i < num_pairs; ++i) {
+    vectors_a.push_back(GenerateRandomVector(dims, i));
+    vectors_b.push_back(GenerateRandomVector(dims, i + 1000));
+  }
+
+  size_t pair_idx = 0;
+  while (state.KeepRunning()) {
+    float distance =
+        SimSIMD_L2Distance(vectors_a[pair_idx].data(), vectors_b[pair_idx].data(), dims);
+    benchmark::DoNotOptimize(distance);
+
+    pair_idx = (pair_idx + 1) % num_pairs;
+  }
+
+  state.counters["dims"] = dims;
+  state.counters["pairs"] = num_pairs;
+  state.SetLabel("SimSIMD_L2");
+}
+
+// Benchmark SimSIMD Cosine distance
+static void BM_SimSIMD_CosineDistance(benchmark::State& state) {
+  size_t dims = state.range(0);
+  size_t num_pairs = state.range(1);
+
+  std::vector<std::vector<float>> vectors_a, vectors_b;
+  vectors_a.reserve(num_pairs);
+  vectors_b.reserve(num_pairs);
+
+  for (size_t i = 0; i < num_pairs; ++i) {
+    vectors_a.push_back(GenerateRandomVector(dims, i));
+    vectors_b.push_back(GenerateRandomVector(dims, i + 2000));
+  }
+
+  size_t pair_idx = 0;
+  while (state.KeepRunning()) {
+    float distance =
+        SimSIMD_CosineDistance(vectors_a[pair_idx].data(), vectors_b[pair_idx].data(), dims);
+    benchmark::DoNotOptimize(distance);
+
+    pair_idx = (pair_idx + 1) % num_pairs;
+  }
+
+  state.counters["dims"] = dims;
+  state.counters["pairs"] = num_pairs;
+  state.SetLabel("SimSIMD_Cosine");
+}
+
+// SimSIMD benchmarks with same parameters as original VectorDistance benchmarks
+BENCHMARK(BM_SimSIMD_L2Distance)
+    // Small vectors
+    ->Args({32, 100})    // 32D, 100 pairs
+    ->Args({32, 1000})   // 32D, 1K pairs
+    ->Args({32, 10000})  // 32D, 10K pairs
+    // Medium vectors
+    ->Args({128, 100})    // 128D, 100 pairs
+    ->Args({128, 1000})   // 128D, 1K pairs
+    ->Args({128, 10000})  // 128D, 10K pairs
+    // Large vectors
+    ->Args({512, 100})   // 512D, 100 pairs
+    ->Args({512, 1000})  // 512D, 1K pairs
+    ->Args({512, 5000})  // 512D, 5K pairs
+    // Very large vectors
+    ->Args({1536, 100})   // 1536D, 100 pairs
+    ->Args({1536, 1000})  // 1536D, 1K pairs
+    ->ArgNames({"dims", "pairs"})
+    ->Unit(benchmark::kMicrosecond);
+
+BENCHMARK(BM_SimSIMD_CosineDistance)
+    // Small vectors
+    ->Args({32, 100})    // 32D, 100 pairs
+    ->Args({32, 1000})   // 32D, 1K pairs
+    ->Args({32, 10000})  // 32D, 10K pairs
+    // Medium vectors
+    ->Args({128, 100})    // 128D, 100 pairs
+    ->Args({128, 1000})   // 128D, 1K pairs
+    ->Args({128, 10000})  // 128D, 10K pairs
+    // Large vectors
+    ->Args({512, 100})   // 512D, 100 pairs
+    ->Args({512, 1000})  // 512D, 1K pairs
+    ->Args({512, 5000})  // 512D, 5K pairs
+    // Very large vectors
+    ->Args({1536, 100})   // 1536D, 100 pairs
+    ->Args({1536, 1000})  // 1536D, 1K pairs
+    ->ArgNames({"dims", "pairs"})
+    ->Unit(benchmark::kMicrosecond);
+
+// Intensive benchmark for SimSIMD performance comparison
+static void BM_SimSIMD_Intensive(benchmark::State& state) {
+  size_t dims = 512;  // Fixed medium size
+  size_t batch_size = 1000;
+  bool use_l2 = state.range(0) == 0;
+
+  std::vector<std::vector<float>> vectors_a, vectors_b;
+  vectors_a.reserve(batch_size);
+  vectors_b.reserve(batch_size);
+
+  for (size_t i = 0; i < batch_size; ++i) {
+    vectors_a.push_back(GenerateRandomVector(dims, i));
+    vectors_b.push_back(GenerateRandomVector(dims, i + 4000));
+  }
+
+  size_t total_ops = 0;
+  while (state.KeepRunning()) {
+    for (size_t i = 0; i < batch_size; ++i) {
+      float distance;
+      if (use_l2) {
+        distance = SimSIMD_L2Distance(vectors_a[i].data(), vectors_b[i].data(), dims);
+      } else {
+        distance = SimSIMD_CosineDistance(vectors_a[i].data(), vectors_b[i].data(), dims);
+      }
+      benchmark::DoNotOptimize(distance);
+      ++total_ops;
+    }
+  }
+
+  state.counters["ops"] = total_ops;
+  state.counters["ops_per_sec"] = benchmark::Counter(total_ops, benchmark::Counter::kIsRate);
+
+  std::string label = use_l2 ? "SimSIMD_L2_Intensive" : "SimSIMD_Cosine_Intensive";
+  state.SetLabel(label);
+}
+
+BENCHMARK(BM_SimSIMD_Intensive)
+    ->Arg(0)  // L2
+    ->Arg(1)  // Cosine
+    ->ArgNames({"distance_type"})
+    ->Unit(benchmark::kMicrosecond);
+
+#endif  // USE_SIMSIMD
+
 }  // namespace search
 }  // namespace dfly

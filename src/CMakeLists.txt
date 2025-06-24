@@ -135,6 +135,17 @@ add_third_party(
   LIB libhdr_histogram_static.a
 )
 
+option(USE_SIMSIMD "Enable SimSIMD vector optimizations" OFF)
+if(USE_SIMSIMD)
+  add_third_party(
+    simsimd
+    URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.4.9.tar.gz
+    BUILD_COMMAND echo SKIP
+    INSTALL_COMMAND cp -R <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/simsimd/
+    LIB "none"
+  )
+endif()
+
 
 add_library(TRDP::jsoncons INTERFACE IMPORTED)
 add_dependencies(TRDP::jsoncons jsoncons_project)
@@ -155,6 +166,13 @@ add_library(TRDP::fast_float INTERFACE IMPORTED)
 add_dependencies(TRDP::fast_float fast_float_project)
 set_target_properties(TRDP::fast_float PROPERTIES
                       INTERFACE_INCLUDE_DIRECTORIES "${FAST_FLOAT_INCLUDE_DIR}")
+
+if(USE_SIMSIMD)
+  add_library(TRDP::simsimd INTERFACE IMPORTED)
+  add_dependencies(TRDP::simsimd simsimd_project)
+  set_target_properties(TRDP::simsimd PROPERTIES
+                        INTERFACE_INCLUDE_DIRECTORIES "${SIMSIMD_INCLUDE_DIR}")
+endif()
 
 Message(STATUS "THIRD_PARTY_LIB_DIR ${THIRD_PARTY_LIB_DIR}")
 

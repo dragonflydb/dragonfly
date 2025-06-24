@@ -16,3 +16,8 @@ cxx_test(block_list_test query_parser LABELS DFLY)
 cxx_test(rax_tree_test redis_test_lib LABELS DFLY)
 cxx_test(search_parser_test query_parser LABELS DFLY)
 cxx_test(search_test redis_test_lib query_parser LABELS DFLY)
+
+if(USE_SIMSIMD)
+  target_link_libraries(search_test TRDP::simsimd)
+  target_compile_definitions(search_test PRIVATE USE_SIMSIMD=1)
+endif()
