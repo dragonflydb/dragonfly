@@ -312,6 +312,13 @@ class DashTable : public detail::DashTableBase {
     return stash_unloaded_;
   }
 
+  template <typename F> void IterateSegments(F&& cb) {
+    IterateDistinct([&](SegmentType* seg) {
+      cb(seg);
+      return false;
+    });
+  }
+
  private:
   enum class InsertMode {
     kInsertIfNotFound,

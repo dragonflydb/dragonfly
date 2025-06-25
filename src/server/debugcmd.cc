@@ -913,6 +913,16 @@ void DebugCmd::Populate(CmdArgList args, facade::SinkReplyBuilder* builder) {
   for (auto& fb : fb_arr)
     fb.Join();
 
+  pp.AwaitBrief([this](auto index, ProactorBase* pb) {
+    auto* shard = EngineShard::tlocal();
+    DbIndex db_indx = cntx_->db_index();
+    auto* prime = cntx_->ns->GetDbSlice(shard->shard_id()).GetTables(db_indx).first;
+    LOG(INFO) << "Segment Count: " << prime->unique_segments();
+    prime->IterateSegments([](const auto* segment) {
+      LOG(INFO) << "Segment Capacity/Size: " << segment->capacity() << "/" << segment->SlowSize();
+    });
+  });
+
   builder->SendOk();
 
   DCHECK(sf_.AreAllReplicasInStableSync());
