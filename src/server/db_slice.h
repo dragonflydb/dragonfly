@@ -434,6 +434,7 @@ class DbSlice {
   }
 
   using ChangeCallback = std::function<void(DbIndex, const ChangeReq&)>;
+  // Holds pairs of source and destination cursors for items moved in the dash table
   using MovedItemsVec = std::vector<std::pair<PrimeTable::Cursor, PrimeTable::Cursor>>;
   using MovedCallback = std::function<void(DbIndex, const MovedItemsVec&)>;
 
@@ -614,7 +615,7 @@ class DbSlice {
   }
 
   void CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const;
-  void CallMovedCallbacks(DbIndex id, const MovedItemsVec& moved_itmes);
+  void CallMovedCallbacks(DbIndex id, const MovedItemsVec& moved_items);
 
   // We need this because registered callbacks might yield and when they do so we want
   // to avoid Heartbeat or Flushing the db.

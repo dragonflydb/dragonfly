@@ -847,6 +847,8 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
     }
   });
 
+  rdb_loader_->SetOverrideExistingKeys(true);
+
   // Load incoming rdb stream.
   if (std::error_code ec = rdb_loader_->Load(&ps); ec) {
     cntx->ReportError(ec, "Error loading rdb format");

@@ -114,8 +114,8 @@ class PrimeEvictionPolicy {
   unsigned checked() const {
     return checked_;
   }
-  DbSlice::MovedItemsVec moved_items() {
-    return std::move(moved_items_);
+  const DbSlice::MovedItemsVec& moved_items() {
+    return moved_items_;
   }
 
  private:
@@ -371,8 +371,8 @@ class DbSlice::PrimeBumpPolicy {
   void OnMove(PrimeTable::Cursor source, PrimeTable::Cursor dest) {
     moved_items_.push_back(std::make_pair(source, dest));
   }
-  DbSlice::MovedItemsVec moved_itmes() {
-    return std::move(moved_items_);
+  const DbSlice::MovedItemsVec moved_items() {
+    return moved_items_;
   }
 
  private:
@@ -1781,7 +1781,7 @@ void DbSlice::OnCbFinishBlocking() {
       if (bump_it != it) {  // the item was bumped
         ++events_.bumpups;
       }
-      CallMovedCallbacks(db_index, policy.moved_itmes());
+      CallMovedCallbacks(db_index, policy.moved_items());
     }
   }
 
@@ -1806,7 +1806,7 @@ void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
 }
 
 void DbSlice::CallMovedCallbacks(
-    DbIndex id, const std::vector<std::pair<PrimeTable::Cursor, PrimeTable::Cursor>>& moved_itmes) {
+    DbIndex id, const std::vector<std::pair<PrimeTable::Cursor, PrimeTable::Cursor>>& moved_items) {
   if (moved_cb_.empty())
     return;
 
@@ -1817,7 +1817,7 @@ void DbSlice::CallMovedCallbacks(
   auto ccb = moved_cb_.begin();
   for (size_t i = 0; i < limit; ++i) {
     CHECK(ccb->second);
-    ccb->second(id, moved_itmes);
+    ccb->second(id, moved_items);
     ++ccb;
   }
 }

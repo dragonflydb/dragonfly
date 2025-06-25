@@ -70,7 +70,7 @@ async def test_replication_all(
     master = df_factory.create(
         admin_port=ADMIN_PORT,
         proactor_threads=t_master,
-        use_snapshot_version=point_in_time_replication,
+        point_in_time_snapshot=point_in_time_replication,
         **args,
     )
     replicas = [

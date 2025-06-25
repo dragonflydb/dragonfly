@@ -20,7 +20,8 @@
 #include "server/tiered_storage.h"
 #include "util/fibers/synchronization.h"
 
-ABSL_FLAG(bool, use_snapshot_version, false, "If true replication uses point in time snapshoting");
+ABSL_FLAG(bool, point_in_time_snapshot, false,
+          "If true replication uses point in time snapshoting");
 
 namespace dfly {
 
@@ -76,7 +77,7 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
 
   if (stream_journal) {
-    use_snapshot_version_ = absl::GetFlag(FLAGS_use_snapshot_version);
+    use_snapshot_version_ = absl::GetFlag(FLAGS_point_in_time_snapshot);
     auto* journal = db_slice_->shard_owner()->journal();
     DCHECK(journal);
     journal_cb_id_ = journal->RegisterOnChange(this);
