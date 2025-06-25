@@ -371,7 +371,8 @@ class DbSlice::PrimeBumpPolicy {
   void OnMove(PrimeTable::Cursor source, PrimeTable::Cursor dest) {
     moved_items_.push_back(std::make_pair(source, dest));
   }
-  const DbSlice::MovedItemsVec moved_items() {
+
+  const DbSlice::MovedItemsVec& moved_items() {
     return moved_items_;
   }
 
