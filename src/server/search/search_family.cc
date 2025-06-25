@@ -203,7 +203,7 @@ ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
   return true;
 }
 
-constexpr std::array<const std::string_view, 6> kIgnoredOptions = {
+constexpr std::array<const std::string_view, 4> kIgnoredOptions = {
     "UNF"sv, "NOSTEM"sv, "INDEXMISSING"sv, "INDEXEMPTY"sv};
 constexpr std::array<const std::string_view, 3> kIgnoredOptionsWithArg = {"WEIGHT"sv, "PHONETIC"sv};
 
