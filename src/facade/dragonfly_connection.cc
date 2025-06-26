@@ -419,16 +419,6 @@ Connection::MCPipelineMessage::MCPipelineMessage(MemcacheParser::Command cmd_in,
   }
 }
 
-void Connection::MessageDeleter::operator()(PipelineMessage* msg) const {
-  msg->~PipelineMessage();
-  mi_free(msg);
-}
-
-void Connection::MessageDeleter::operator()(PubMessage* msg) const {
-  msg->~PubMessage();
-  mi_free(msg);
-}
-
 void Connection::PipelineMessage::Reset(size_t nargs, size_t capacity) {
   storage.resize(capacity);
   args.resize(nargs);
@@ -1220,8 +1210,8 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
     service_->DispatchCommand(absl::MakeSpan(tmp_cmd_vec_), reply_builder_.get(), cc_.get());
   };
 
-  auto dispatch_async = [this, tlh = mi_heap_get_backing()]() -> MessageHandle {
-    return {FromArgs(std::move(tmp_parse_args_), tlh)};
+  auto dispatch_async = [this]() -> MessageHandle {
+    return {FromArgs(std::move(tmp_parse_args_))};
   };
 
   ReadBuffer read_buffer = GetReadBuffer();
@@ -1767,7 +1757,7 @@ void Connection::AsyncFiber() {
   qbp.pipeline_cnd.notify_all();
 }
 
-Connection::PipelineMessagePtr Connection::FromArgs(RespVec args, mi_heap_t* heap) {
+Connection::PipelineMessagePtr Connection::FromArgs(const RespVec& args) {
   DCHECK(!args.empty());
   size_t backed_sz = 0;
   for (const auto& arg : args) {
@@ -1776,17 +1766,14 @@ Connection::PipelineMessagePtr Connection::FromArgs(RespVec args, mi_heap_t* hea
   }
   DCHECK(backed_sz);
 
-  constexpr auto kReqSz = sizeof(PipelineMessage);
-  static_assert(kReqSz < MI_SMALL_SIZE_MAX);
   static_assert(alignof(PipelineMessage) == 8);
 
   PipelineMessagePtr ptr;
   if (ptr = GetFromPipelinePool(); ptr) {
     ptr->Reset(args.size(), backed_sz);
   } else {
-    void* heap_ptr = mi_heap_malloc_small(heap, sizeof(PipelineMessage));
     // We must construct in place here, since there is a slice that uses memory locations
-    ptr.reset(new (heap_ptr) PipelineMessage(args.size(), backed_sz));
+    ptr = make_unique<PipelineMessage>(args.size(), backed_sz);
   }
 
   ptr->SetArgs(args);
@@ -1858,8 +1845,7 @@ bool Connection::IsCurrentlyDispatching() const {
 }
 
 void Connection::SendPubMessageAsync(PubMessage msg) {
-  void* ptr = mi_malloc(sizeof(PubMessage));
-  SendAsync({PubMessagePtr{new (ptr) PubMessage{std::move(msg)}, MessageDeleter{}}});
+  SendAsync({make_unique<PubMessage>(std::move(msg))});
 }
 
 void Connection::SendMonitorMessageAsync(string msg) {
