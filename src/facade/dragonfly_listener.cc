@@ -4,6 +4,7 @@
 
 #include "facade/dragonfly_listener.h"
 
+#include <mimalloc.h>
 #include <openssl/err.h>
 
 #include <memory>
