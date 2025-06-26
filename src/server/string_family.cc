@@ -177,7 +177,7 @@ OpResult<TResult<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
     fb2::Future<size_t> fut;
     op_args.shard->tiered_storage()->Read(
         op_args.db_cntx.db_index, key, co,
-        [fut](const io::Result<std::string>& s) mutable { fut.Resolve(s->size()); });
+        [fut](io::Result<std::string> s) mutable { fut.Resolve(s->size()); });
     return {std::move(fut)};
   } else {
     return {co.Size()};

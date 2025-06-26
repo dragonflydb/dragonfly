@@ -7,6 +7,7 @@
 #include <mimalloc.h>
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <variant>
@@ -326,24 +327,20 @@ void TieredStorage::SetMemoryLowWatermark(size_t mem_limit) {
 
 util::fb2::Future<io::Result<string>> TieredStorage::Read(DbIndex dbid, string_view key,
                                                           const PrimeValue& value) {
-  util::fb2::Future<io::Result<std::string>> fut;
-  Read(dbid, key, value,
-       [fut](const io::Result<std::string>& value) mutable { fut.Resolve(value); });
+  util::fb2::Future<io::Result<string>> fut;
+  Read(dbid, key, value, bind(&decltype(fut)::Resolve, fut, placeholders::_1));
   return fut;
 }
 
 void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-                         std::function<void(const io::Result<std::string>&)> readf) {
+                         std::function<void(io::Result<std::string>)> readf) {
   DCHECK(value.IsExternal());
   DCHECK(!value.IsCool());
-  auto cb = [readf = std::move(readf), enc = value.GetStrEncoding()](
-                io::Result<tiering::OpManager::FetchedEntry> res) mutable {
-    if (!res.has_value()) {
-      readf(nonstd::make_unexpected(res.error()));
-    } else {
-      auto [raw_val, is_raw] = *res;
-      readf(is_raw ? enc.Decode(*raw_val).Take() : *raw_val);
-    }
+  auto cb = [readf = std::move(readf), enc = value.GetStrEncoding()](auto res) mutable {
+    readf(res.transform([enc](tiering::OpManager::FetchedEntry entry) {
+      auto [ptr, raw] = entry;
+      return raw ? enc.Decode(*ptr).Take() : *ptr;  // TODO(vlad): optimize last value copy
+    }));
     return false;
   };
   op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
@@ -356,10 +353,9 @@ util::fb2::Future<io::Result<T>> TieredStorage::Modify(DbIndex dbid, std::string
   DCHECK(value.IsExternal());
 
   util::fb2::Future<io::Result<T>> future;
-  auto cb = [future, modf = std::move(modf), enc = value.GetStrEncoding()](
-                io::Result<tiering::OpManager::FetchedEntry> res) mutable {
+  auto cb = [future, modf = std::move(modf), enc = value.GetStrEncoding()](auto res) mutable {
     if (!res.has_value()) {
-      future.Resolve(nonstd::make_unexpected(res.error()));
+      future.Resolve(res.get_unexpected());
       return false;
     }
 

@@ -146,13 +146,9 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
 
   // If we've run out of space, block and grow as much as needed
   if (offset < 0) {
-    if (CanGrow()) {
-      // TODO: To introduce asynchronous call that starts resizing before we reach this step.
-      // Right now we do it synchronously as well (see Grow(256MB) call.)
-      RETURN_ON_ERR(Grow(-offset));
-    } else {
-      return make_error_code(errc::file_too_large);
-    }
+    // TODO: To introduce asynchronous call that starts resizing before we reach this step.
+    // Right now we do it synchronously as well (see Grow(256MB) call.)
+    RETURN_ON_ERR(TryGrow(-offset));
     offset = alloc_.Malloc(len);
     if (offset < 0)  // we can't fit it even after resizing
       return make_error_code(errc::file_too_large);
@@ -181,9 +177,9 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
   // Grow in advance if needed and possible
   size_t capacity = alloc_.capacity();
   size_t available = capacity - alloc_.allocated_bytes();
-  if ((available < 256_MB) && (available < capacity * 0.15) && !grow_pending_ && CanGrow()) {
-    auto ec = Grow(256_MB);
-    LOG_IF(ERROR, ec) << "Could not call grow :" << ec.message();
+  if ((available < 256_MB) && (available < capacity * 0.15) && !grow_pending_) {
+    auto ec = TryGrow(256_MB);
+    LOG_IF(ERROR, ec && ec != errc::file_too_large) << "Could not call grow :" << ec.message();
     return ec;
   }
   return {};
@@ -195,12 +191,9 @@ DiskStorage::Stats DiskStorage::GetStats() const {
       static_cast<size_t>(max_size_), pending_ops_};
 }
 
-bool DiskStorage::CanGrow() const {
-  return alloc_.capacity() + ExternalAllocator::kExtAlignment <= static_cast<size_t>(max_size_);
-}
-
-error_code DiskStorage::Grow(off_t grow_size) {
-  DCHECK(CanGrow());
+error_code DiskStorage::TryGrow(off_t grow_size) {
+  if (alloc_.capacity() + ExternalAllocator::kExtAlignment <= static_cast<size_t>(max_size_))
+    return make_error_code(errc::file_too_large);
 
   if (std::exchange(grow_pending_, true)) {
     // TODO: to introduce future like semantics where multiple flows can block on the

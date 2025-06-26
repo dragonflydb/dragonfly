@@ -52,7 +52,7 @@ class TieredStorage {
 
   // Read offloaded value. It must be of external type
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-            std::function<void(const io::Result<std::string>&)> readf);
+            std::function<void(io::Result<std::string>)> readf);
 
   // Apply modification to offloaded value, return generic result from callback.
   // Unlike immutable Reads - the modified value must be uploaded back to memory.

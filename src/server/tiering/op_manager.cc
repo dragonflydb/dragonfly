@@ -149,7 +149,7 @@ void OpManager::ProcessRead(size_t offset, io::Result<std::string_view> page) {
   bool deleting_full = false;
   std::string key_value;
 
-  // Report functions in the loop may append items to info->key_ops during the traversal
+  // Notify functions in the loop may append items to info->key_ops during the traversal
   for (size_t i = 0; i < info->key_ops.size(); i++) {
     bool modified = false;
     auto& ko = info->key_ops[i];
@@ -159,7 +159,7 @@ void OpManager::ProcessRead(size_t offset, io::Result<std::string_view> page) {
         modified |= cb(std::pair{&key_value, !modified});
     } else {
       for (auto& cb : ko.callbacks)
-        cb(nonstd::make_unexpected(page.error()));
+        cb(page.get_unexpected());
     }
 
     bool delete_from_storage = ko.deleting;
