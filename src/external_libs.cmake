@@ -60,6 +60,25 @@ add_third_party(
   INSTALL_COMMAND ${DFLY_TOOLS_MAKE} install BUILD_SHARED=no PREFIX=${THIRD_PARTY_LIB_DIR}/lz4
 )
 
+set(MIMALLOC_INCLUDE_DIR ${THIRD_PARTY_LIB_DIR}/mimalloc2/include)
+
+set (MIMALLOC_PATCH_COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${CMAKE_CURRENT_LIST_DIR}/../patches/mimalloc-v2.2.4.patch)
+
+add_third_party(mimalloc2
+   # GIT_REPOSITORY https://github.com/microsoft/mimalloc/
+   # GIT_TAG v2.2.4
+   URL https://github.com/microsoft/mimalloc/archive/refs/tags/v2.2.4.tar.gz
+   PATCH_COMMAND "${MIMALLOC_PATCH_COMMAND}"
+   # Add -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS=-O0 to debug
+   CMAKE_PASS_FLAGS "-DCMAKE_BUILD_TYPE=Release -DMI_BUILD_SHARED=OFF -DMI_BUILD_TESTS=OFF \
+                    -DMI_INSTALL_TOPLEVEL=ON -DMI_OVERRIDE=OFF -DMI_NO_PADDING=ON \ -DCMAKE_C_FLAGS=-g"
+
+  BUILD_COMMAND make mimalloc-static
+  INSTALL_COMMAND make install
+  COMMAND cp -r <SOURCE_DIR>/include/mimalloc ${MIMALLOC_INCLUDE_DIR}/
+  LIB ${HELIO_MIMALLOC_LIBNAME}
+)
+
 add_third_party(
   croncpp
   URL https://github.com/mariusbancila/croncpp/archive/refs/tags/v2023.03.30.tar.gz
