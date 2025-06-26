@@ -33,12 +33,17 @@ extern "C" {
 #include "server/rdb_load.h"
 #include "strings/human_readable.h"
 
-#define LOG_REPL_ERROR(msg)      \
-  do {                           \
-    if (state_mask_ & R_ENABLED) \
-      LOG(ERROR) << msg;         \
-    else                         \
-      VLOG(1) << msg;            \
+#define LOG_REPL_ERROR(msg)                                         \
+  do {                                                              \
+    if (state_mask_ & R_ENABLED) {                                  \
+      if ((state_mask_ & R_SYNCING) || (state_mask_ & R_SYNC_OK)) { \
+        LOG(WARNING) << msg;                                        \
+      } else {                                                      \
+        LOG(ERROR) << msg;                                          \
+      }                                                             \
+    } else {                                                        \
+      VLOG(1) << msg;                                               \
+    }                                                               \
   } while (0)
 
 ABSL_FLAG(int, replication_acks_interval, 1000, "Interval between acks in milliseconds.");
