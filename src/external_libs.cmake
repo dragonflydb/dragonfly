@@ -73,7 +73,7 @@ add_third_party(mimalloc2
    CMAKE_PASS_FLAGS "-DCMAKE_BUILD_TYPE=Release -DMI_BUILD_SHARED=OFF -DMI_BUILD_TESTS=OFF \
                     -DMI_INSTALL_TOPLEVEL=ON -DMI_OVERRIDE=OFF -DMI_NO_PADDING=ON \ -DCMAKE_C_FLAGS=-g"
 
-  BUILD_COMMAND make -j4 mimalloc-static
+  BUILD_COMMAND make mimalloc-static
   INSTALL_COMMAND make install
   COMMAND cp -r <SOURCE_DIR>/include/mimalloc ${MIMALLOC_INCLUDE_DIR}/
   LIB ${HELIO_MIMALLOC_LIBNAME}
