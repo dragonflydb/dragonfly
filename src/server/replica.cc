@@ -33,6 +33,14 @@ extern "C" {
 #include "server/rdb_load.h"
 #include "strings/human_readable.h"
 
+#define LOG_REPL_ERROR(msg)      \
+  do {                           \
+    if (state_mask_ & R_ENABLED) \
+      LOG(ERROR) << msg;         \
+    else                         \
+      VLOG(1) << msg;            \
+  } while (0)
+
 ABSL_FLAG(int, replication_acks_interval, 1000, "Interval between acks in milliseconds.");
 ABSL_FLAG(int, master_connect_timeout_ms, 20000,
           "Timeout for establishing connection to a replication master");
@@ -657,9 +665,10 @@ error_code Replica::ConsumeRedisStream() {
   while (true) {
     auto response = ReadRespReply(&io_buf, /*copy_msg=*/false);
     if (!response.has_value()) {
-      LOG(ERROR) << "Error in Redis Stream at phase " << GetCurrentPhase() << " with "
-                 << server().Description() << ", error: " << response.error()
-                 << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+      LOG_REPL_ERROR("Error in Redis Stream at phase "
+                     << GetCurrentPhase() << " with " << server().Description()
+                     << ", error: " << response.error()
+                     << ", socket state: " + GetSocketInfo(Sock()->native_handle()));
       exec_st_.ReportError(response.error());
       acks_fb_.JoinIfNeeded();
       return response.error();
@@ -698,9 +707,9 @@ error_code Replica::ConsumeDflyStream() {
     // Make sure the flows are not in a state transition
     lock_guard lk{flows_op_mu_};
 
-    LOG(ERROR) << "Replication error in phase " << GetCurrentPhase() << " with "
-               << server().Description() << ", error: " << ge.Format()
-               << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+    LOG_REPL_ERROR("Replication error in phase "
+                   << GetCurrentPhase() << " with " << server().Description() << ", error: "
+                   << ge.Format() << ", socket state: " + GetSocketInfo(Sock()->native_handle()));
 
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_) {
