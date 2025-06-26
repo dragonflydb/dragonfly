@@ -2515,8 +2515,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("snapshot_serialization_bytes", m.serialization_bytes);
     append("commands_squashing_replies_bytes",
            m.facade_stats.reply_stats.squashing_current_reply_size.load(memory_order_relaxed));
-    append("lsn_buffer_size_sum", m.lsn_buffer_size);
-    append("lsn_buffer_bytes_sum", m.lsn_buffer_bytes);
+    append("psync_buffer_size", m.lsn_buffer_size);
+    append("psync_buffer_bytes", m.lsn_buffer_bytes);
 
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
@@ -2747,6 +2747,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
           append("slave_repl_offset", rinfo.repl_offset_sum);
         append("slave_priority", GetFlag(FLAGS_replica_priority));
         append("slave_read_only", 1);
+        append("psync_attempts", rinfo.psync_attempts);
+        append("psync_successes", rinfo.psync_successes);
       };
       fb2::LockGuard lk(replicaof_mu_);
 

@@ -565,6 +565,10 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     lock_guard lk{flows_op_mu_};
 
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
+    if (last_journal_LSNs_) {
+      ++psync_attempts_;
+    }
+
     last_journal_LSNs_.reset();
     size_t num_full_flows =
         std::accumulate(is_full_sync.get(), is_full_sync.get() + num_df_flows, 0);
@@ -614,6 +618,10 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
   // Joining flows and resetting state is done by cleanup.
   double seconds = double(absl::ToInt64Milliseconds(absl::Now() - start_time)) / 1000;
   LOG(INFO) << sync_type << " sync finished in " << strings::HumanReadableElapsedTime(seconds);
+
+  if (sync_type == "partial") {
+    ++psync_successes_;
+  }
 
   return exec_st_.GetError();
 }
@@ -1177,6 +1185,8 @@ auto Replica::GetSummary() const -> Summary {
     for (uint64_t offs : GetReplicaOffset()) {
       res.repl_offset_sum += offs;
     }
+    res.psync_successes = psync_successes_;
+    res.psync_attempts = psync_attempts_;
     return res;
   };
 

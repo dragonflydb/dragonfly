@@ -1838,9 +1838,9 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
         finally:
             await proxy.close(task)
 
-    master.stop()
-    lines = master.find_in_logs("Partial sync requested from stale LSN")
-    assert len(lines) > 0
+    info = await c_replica.info("replication")
+    assert info["psync_attempts"] > 0
+    assert info["psync_successes"] == 0
 
 
 async def test_replica_reconnections_after_network_disconnect(df_factory, df_seeder_factory):
@@ -3259,18 +3259,9 @@ async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_le
         finally:
             await proxy.close(task)
 
-    master.stop()
-    replica.stop()
-    # Partial sync worked
-    lines = master.find_in_logs("Partial sync requested from LSN")
-    # Because we run with num_shards = proactors - 1
-    total_attempts = 1
-    if proactors > 1:
-        total_attempts = proactors - 1 + proactors - 2
-    assert len(lines) == total_attempts
-    # Second partial sync failed because of stale LSN
-    lines = master.find_in_logs("Partial sync requested from stale LSN")
-    assert len(lines) == 1
+    info = await c_replica.info("replication")
+    assert info["psync_attempts"] == 2
+    assert info["psync_successes"] == 1
 
 
 async def test_mc_gat_replication(df_factory):
