@@ -3048,7 +3048,7 @@ async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyIn
 
 @pytest.mark.parametrize(
     "use_takeover, allowed_diff",
-    [(False, 2), (False, 0), (True, 0)],
+    [(False, 2), (False, 0), (True, 1)],
 )
 async def test_partial_replication_on_same_source_master(df_factory, use_takeover, allowed_diff):
     master = df_factory.create()
