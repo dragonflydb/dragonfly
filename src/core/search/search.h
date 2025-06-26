@@ -41,6 +41,7 @@ struct SchemaField {
   struct TagParams {
     char separator = ',';
     bool case_sensitive = false;
+    bool with_suffixtrie = false;  // see TextParams
   };
 
   struct TextParams {

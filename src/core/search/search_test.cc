@@ -477,58 +477,73 @@ TEST_F(SearchTest, StopWords) {
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
 }
 
-class SearchRaxTest : public SearchTest,
-                      public testing::WithParamInterface<bool /* build suffix trie */> {};
+class SearchRaxTest
+    : public SearchTest,
+      public testing::WithParamInterface<pair<bool /* build suffix trie */, bool /* tag index */>> {
+};
 
 TEST_P(SearchRaxTest, SuffixInfix) {
-  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
-  schema.fields["title"].special_params = SchemaField::TextParams{.with_suffixtrie = GetParam()};
+  auto [with_trie, use_tag] = GetParam();
+  Schema schema = MakeSimpleSchema({{"title", use_tag ? SchemaField::TAG : SchemaField::TEXT}});
+  if (use_tag) {
+    schema.fields["title"].special_params = SchemaField::TagParams{.with_suffixtrie = with_trie};
+  } else {
+    schema.fields["title"].special_params = SchemaField::TextParams{.with_suffixtrie = with_trie};
+  }
 
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
   SearchAlgorithm algo{};
   QueryParams params;
 
-  vector<string> documents = {"Berries",     "Blueberries", "Blackberries", "Apples",
-                              "Cranberries", "Wolfberry",   "Strawberry"};
+  vector<string> documents = {"Berries",     "BlueBeRRies", "Blackberries", "APPLES",
+                              "CranbeRRies", "Wolfberry",   "StraWberry"};
   for (size_t i = 0; i < documents.size(); i++) {
     MockedDocument doc{{{"title", documents[i]}}};
     indices.Add(i, doc);
   }
 
+  auto prepare = [&, use_tag = use_tag](string q) {
+    if (use_tag)
+      q = "@title:{"s + q + "}"s;
+    algo.Init(q, &params);
+  };
+
   // suffix queries
 
-  algo.Init("*es", &params);
+  prepare("*Es");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 3, 4));
 
-  algo.Init("*berries", &params);
+  prepare("*beRRies");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 4));
 
-  algo.Init("*les", &params);
+  prepare("*les");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(3));
 
-  algo.Init("*lueberries", &params);
+  prepare("*lueBERRies");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1));
 
-  algo.Init("*berry", &params);
+  prepare("*berrY");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(5, 6));
 
   // infix queries
 
-  algo.Init("*berr*", &params);
+  prepare("*berr*");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 4, 5, 6));
 
-  algo.Init("*anb*", &params);
+  prepare("*ANB*");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(4));
 
-  algo.Init("*berries*", &params);
+  prepare("*berries*");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 4));
 
-  algo.Init("*bl*", &params);
+  prepare("*bL*");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 2));
 }
 
-INSTANTIATE_TEST_SUITE_P(SuffixInfixNoTrie, SearchRaxTest, testing::Values(false));
-INSTANTIATE_TEST_SUITE_P(SuffixInfixWithTrie, SearchRaxTest, testing::Values(true));
+INSTANTIATE_TEST_SUITE_P(NoTrieText, SearchRaxTest, testing::Values(pair{false, false}));
+INSTANTIATE_TEST_SUITE_P(WithTrieText, SearchRaxTest, testing::Values(pair{true, false}));
+INSTANTIATE_TEST_SUITE_P(NoTrieTag, SearchRaxTest, testing::Values(pair{false, true}));
+INSTANTIATE_TEST_SUITE_P(WithTrieTag, SearchRaxTest, testing::Values(pair{true, true}));
 
 std::string ToBytes(absl::Span<const float> vec) {
   return string{reinterpret_cast<const char*>(vec.data()), sizeof(float) * vec.size()};

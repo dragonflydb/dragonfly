@@ -164,24 +164,20 @@ BaseStringIndex<C>::BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensi
 
 template <typename C>
 const typename BaseStringIndex<C>::Container* BaseStringIndex<C>::Matching(
-    string_view str, bool strip_whitespace) const {
-  if (strip_whitespace) {
-    str = absl::StripAsciiWhitespace(str);
-  }
+    string_view word, bool strip_whitespace) const {
+  if (strip_whitespace)
+    word = absl::StripAsciiWhitespace(word);
 
-  string tmp;
-  if (!case_sensitive_) {
-    tmp = ToLower(str);
-    str = tmp;
-  }
-
-  auto it = entries_.find(str);
+  auto it = entries_.find(NormalizeQueryWord(word).view());
   return (it != entries_.end()) ? &it->second : nullptr;
 }
 
 template <typename C>
 void BaseStringIndex<C>::MatchPrefix(std::string_view prefix,
                                      absl::FunctionRef<void(const Container*)> cb) const {
+  StringOrView prefix_norm{NormalizeQueryWord(prefix)};
+  prefix = prefix_norm.view();
+
   // TODO(vlad): Use right iterator to avoid string comparison?
   for (auto it = entries_.lower_bound(prefix);
        it != entries_.end() && (*it).first.rfind(prefix, 0) == 0; ++it) {
@@ -192,6 +188,9 @@ void BaseStringIndex<C>::MatchPrefix(std::string_view prefix,
 template <typename C>
 void BaseStringIndex<C>::MatchSuffix(std::string_view suffix,
                                      absl::FunctionRef<void(const Container*)> cb) const {
+  StringOrView suffix_norm{NormalizeQueryWord(suffix)};
+  suffix = suffix_norm.view();
+
   // If we have a suffix trie built, we just need to fetch the relevant suffix
   if (suffix_trie_) {
     auto it = suffix_trie_->find(suffix);
@@ -210,6 +209,9 @@ void BaseStringIndex<C>::MatchSuffix(std::string_view suffix,
 template <typename C>
 void BaseStringIndex<C>::MatchInfix(std::string_view infix,
                                     absl::FunctionRef<void(const Container*)> cb) const {
+  StringOrView infix_norm{NormalizeQueryWord(infix)};
+  infix = infix_norm.view();
+
   // If we have a suffix trie built, we just need to match the prefix
   if (suffix_trie_) {
     for (auto it = suffix_trie_->lower_bound(infix);
@@ -300,6 +302,14 @@ template <typename C> vector<DocId> BaseStringIndex<C>::GetAllDocsWithNonNullVal
   }
   std::sort(result.begin(), result.end());
   return result;
+}
+
+template <typename C>
+StringOrView BaseStringIndex<C>::NormalizeQueryWord(std::string_view query) const {
+  if (case_sensitive_)
+    return StringOrView::FromView(query);
+
+  return StringOrView::FromString(ToLower(query));
 }
 
 template <typename C>
