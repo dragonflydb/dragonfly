@@ -117,10 +117,9 @@ void DiskStorage::Read(DiskSegment segment, ReadCb cb) {
   auto io_cb = [this, cb = std::move(cb), buf, len](int io_res) {
     if (io_res < 0) {
       cb(nonstd::make_unexpected(error_code{-io_res, system_category()}));
-      return;
+    } else {
+      cb(string_view{reinterpret_cast<char*>(buf.bytes.data()), len});
     }
-
-    cb(string_view{reinterpret_cast<char*>(buf.bytes.data()), len});
     ReturnBuf(buf);
     pending_ops_--;
   };
