@@ -52,6 +52,7 @@ Test full replication pipeline. Test full sync with streaming changes and stable
     ],
 )
 @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
+@pytest.mark.parametrize("point_in_time_replication", [True, False])
 async def test_replication_all(
     df_factory: DflyInstanceFactory,
     t_master,
@@ -59,13 +60,19 @@ async def test_replication_all(
     seeder_config,
     stream_target,
     mode,
+    point_in_time_replication,
 ):
     args = {}
     if mode:
         args["cache_mode"] = "true"
         args["maxmemory"] = str(t_master * 256) + "mb"
 
-    master = df_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master, **args)
+    master = df_factory.create(
+        admin_port=ADMIN_PORT,
+        proactor_threads=t_master,
+        point_in_time_snapshot=point_in_time_replication,
+        **args,
+    )
     replicas = [
         df_factory.create(admin_port=ADMIN_PORT + i + 1, proactor_threads=t)
         for i, t in enumerate(t_replicas)
@@ -3332,3 +3339,55 @@ async def test_mc_gat_replication(df_factory):
     assert len(result) == 1 and key in result, f"missing expected key: {result=}"
     expected_cas_ver = b"0"
     assert result[key] == (value, expected_cas_ver), f"unexpected result for key: {result=}"
+
+
+@pytest.mark.slow
+async def test_replicaiton_onmove_flow(df_factory):
+    master = df_factory.create(proactor_threads=2, cache_mode=True)
+    replica = df_factory.create(proactor_threads=2)
+
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    key_target = 100000
+    # Fill master with test data
+    await c_master.execute_command(f"DEBUG POPULATE {key_target} key 1048 RAND")
+    logging.debug("finished populate")
+
+    stop_event = asyncio.Event()
+
+    async def get_keys():
+        while not stop_event.is_set():
+            pipe = c_master.pipeline(transaction=False)
+            for _ in range(50):
+                id = random.randint(0, key_target)
+                pipe.get(f"key:{id}")
+            await pipe.execute()
+
+    get_task = asyncio.create_task(get_keys())
+    await asyncio.sleep(0.1)
+
+    # Start replication and wait for full sync
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+
+    info = await c_master.info("stats")
+    assert info["bump_ups"] >= 100
+
+    await check_all_replicas_finished([c_replica], c_master)
+    stop_event.set()
+    await get_task
+
+    # Check replica data consisten
+    hash1, hash2 = await asyncio.gather(*(SeederV2.capture(c) for c in (c_master, c_replica)))
+    assert hash1 == hash2
+
+    master.stop()
+    lines = master.find_in_logs("Exit SnapshotSerializer")
+    assert len(lines) > 0
+    for line in lines:
+        # We test the full sync on moved path execution
+        moved_saved = extract_int_after_prefix("moved_saved ", line)
+        logging.debug(f"Moved saves {moved_saved}")
+        assert moved_saved > 0

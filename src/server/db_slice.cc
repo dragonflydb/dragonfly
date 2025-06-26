@@ -99,6 +99,7 @@ class PrimeEvictionPolicy {
     DVLOG(2) << "split: " << segment->SlowSize() << "/" << segment->capacity();
   }
   void OnMove(PrimeTable::Cursor source, PrimeTable::Cursor dest) {
+    moved_items_.push_back(std::make_pair(source, dest));
   }
 
   bool CanGrow(const PrimeTable& tbl) const;
@@ -113,8 +114,12 @@ class PrimeEvictionPolicy {
   unsigned checked() const {
     return checked_;
   }
+  const DbSlice::MovedItemsVec& moved_items() {
+    return moved_items_;
+  }
 
  private:
+  DbSlice::MovedItemsVec moved_items_;
   DbSlice* db_slice_;
   ssize_t mem_offset_;
   ssize_t soft_limit_ = 0;
@@ -364,7 +369,15 @@ class DbSlice::PrimeBumpPolicy {
     return !obj.IsSticky();
   }
   void OnMove(PrimeTable::Cursor source, PrimeTable::Cursor dest) {
+    moved_items_.push_back(std::make_pair(source, dest));
   }
+
+  const DbSlice::MovedItemsVec& moved_items() {
+    return moved_items_;
+  }
+
+ private:
+  DbSlice::MovedItemsVec moved_items_;
 };
 
 DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
@@ -708,6 +721,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
+  CallMovedCallbacks(cntx.db_index, evp.moved_items());
 
   events_.mutations++;
   ssize_t table_increase = db.prime.mem_usage() - table_before;
@@ -1252,6 +1266,12 @@ uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
   return change_cb_.emplace_back(NextVersion(), std::move(cb)).first;
 }
 
+uint64_t DbSlice::RegisterOnMove(MovedCallback cb) {
+  ++next_moved_id_;
+  moved_cb_.emplace_back(next_moved_id_, cb);
+  return next_moved_id_;
+}
+
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
   unique_lock<LocalLatch> lk(serialization_latch_);
 
@@ -1282,6 +1302,14 @@ void DbSlice::UnregisterOnChange(uint64_t id) {
                     [id](const auto& cb) { return cb.first == id; });
   CHECK(it != change_cb_.end());
   change_cb_.erase(it);
+}
+
+void DbSlice::UnregisterOnMoved(uint64_t id) {
+  serialization_latch_.Wait();
+  auto it =
+      find_if(moved_cb_.begin(), moved_cb_.end(), [id](const auto& cb) { return cb.first == id; });
+  CHECK(it != moved_cb_.end());
+  moved_cb_.erase(it);
 }
 
 auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteExpiredStats {
@@ -1754,6 +1782,7 @@ void DbSlice::OnCbFinishBlocking() {
       if (bump_it != it) {  // the item was bumped
         ++events_.bumpups;
       }
+      CallMovedCallbacks(db_index, policy.moved_items());
     }
   }
 
@@ -1773,6 +1802,23 @@ void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
   for (size_t i = 0; i < limit; ++i) {
     CHECK(ccb->second);
     ccb->second(id, cr);
+    ++ccb;
+  }
+}
+
+void DbSlice::CallMovedCallbacks(
+    DbIndex id, const std::vector<std::pair<PrimeTable::Cursor, PrimeTable::Cursor>>& moved_items) {
+  if (moved_cb_.empty())
+    return;
+
+  // does not preempt, just increments the counter.
+  unique_lock<LocalLatch> lk(serialization_latch_);
+
+  const size_t limit = moved_cb_.size();
+  auto ccb = moved_cb_.begin();
+  for (size_t i = 0; i < limit; ++i) {
+    CHECK(ccb->second);
+    ccb->second(id, moved_items);
     ++ccb;
   }
 }

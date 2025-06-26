@@ -847,6 +847,13 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
     }
   });
 
+  // In the no point-in-time replication flow, it's possible to serialize a journal change
+  // before serializing the bucket that the key was updated in on the master side. As a result,
+  // when loading the serialized bucket data on the replica, it may overwrite the earlier entry
+  // added by the journal change. This is an expected and valid scenario, so to avoid unnecessary
+  // warnings, we enable SetOverrideExistingKeys(true).
+  rdb_loader_->SetOverrideExistingKeys(true);
+
   // Load incoming rdb stream.
   if (std::error_code ec = rdb_loader_->Load(&ps); ec) {
     cntx->ReportError(ec, "Error loading rdb format");
