@@ -187,6 +187,8 @@ class CommandId : public facade::CommandId {
     return is_alias_;
   }
 
+  hdr_histogram* LatencyHist() const;
+
  private:
   // The following fields must copy manually in the move constructor.
   bool implicit_acl_;
@@ -248,6 +250,8 @@ class CommandRegistry {
 
   std::pair<const CommandId*, facade::ArgSlice> FindExtended(std::string_view cmd,
                                                              facade::ArgSlice tail_args) const;
+
+  absl::flat_hash_map<std::string, hdr_histogram*> LatencyMap() const;
 
  private:
   absl::flat_hash_map<std::string, CommandId> cmd_map_;

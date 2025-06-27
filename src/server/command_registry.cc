@@ -189,6 +189,9 @@ uint64_t CommandId::Invoke(CmdArgList args, const CommandContext& cmd_cntx) cons
   ++ent.first;
   ent.second += execution_time_usec;
 
+  if (hdr_histogram* cmd_histogram = latency_histogram_; cmd_histogram != nullptr) {
+    hdr_record_value(cmd_histogram, execution_time_usec);
+  }
   return execution_time_usec;
 }
 
@@ -210,6 +213,10 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
   if (validator_)
     return validator_(tail_args);
   return nullopt;
+}
+
+hdr_histogram* CommandId::LatencyHist() const {
+  return latency_histogram_;
 }
 
 CommandRegistry::CommandRegistry() {
@@ -319,6 +326,15 @@ std::pair<const CommandId*, ArgSlice> CommandRegistry::FindExtended(string_view 
     }
   }
   return {res, tail_args};
+}
+
+absl::flat_hash_map<std::string, hdr_histogram*> CommandRegistry::LatencyMap() const {
+  absl::flat_hash_map<std::string, hdr_histogram*> cmd_latencies;
+  cmd_latencies.reserve(cmd_map_.size());
+  for (const auto& [cmd_name, cmd] : cmd_map_) {
+    cmd_latencies.insert({absl::AsciiStrToLower(cmd_name), cmd.LatencyHist()});
+  }
+  return cmd_latencies;
 }
 
 namespace CO {
