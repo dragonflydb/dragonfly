@@ -2186,6 +2186,15 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
   if (sub_cmd == "RESETSTAT") {
     ResetStat(cmd_cntx.conn_cntx->ns);
     return builder->SendOk();
+  } else if (sub_cmd == "REWRITE") {
+    if (g_config_file_path.empty()) {
+      return builder->SendError("The server is running without a config file");
+    }
+    if (config_registry.Rewrite()) {
+      return builder->SendOk();
+    } else {
+      return builder->SendError("Failed to rewrite config file");
+    }
   } else {
     return builder->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErrType);
   }
@@ -2500,9 +2509,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("uptime_in_days", uptime / (3600 * 24));
 
     append("hz", GetFlag(FLAGS_hz));
-    append("executable", base::kProgramName);
-    absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
-    append("config_file", flagfile_flag->CurrentValue());
+    append("executable", g_executable_path);
+    append("config_file", g_config_file_path);
   };
 
   auto add_clients_info = [&] {
@@ -3642,3 +3650,10 @@ void ServerFamily::Register(CommandRegistry* registry) {
 }
 
 }  // namespace dfly
+
+std::string g_config_file_path;
+std::string g_executable_path;
+void SetInfoServerGlobals(const std::string& config_file_path, const std::string& executable_path) {
+    g_config_file_path = config_file_path;
+    g_executable_path = executable_path;
+}
