@@ -724,6 +724,22 @@ void ParseFlagsFromEnv() {
   }
 }
 
+void ParseFlagfileAndSetGlobals(int argc, char* argv[]) {
+    std::string config_file_path;
+    std::string executable_path = argv[0];
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--flagfile" && i + 1 < argc) {
+            config_file_path = argv[i + 1];
+            break;
+        } else if (absl::StartsWith(arg, "--flagfile=")) {
+            config_file_path = arg.substr(11);
+            break;
+        }
+    }
+    dfly::SetInfoServerGlobals(config_file_path, executable_path);
+}
+
 int main(int argc, char* argv[]) {
   absl::SetProgramUsageMessage(
       R"(a modern in-memory store.
@@ -864,6 +880,8 @@ Usage: dragonfly [FLAGS]
       unlink(pidfile_path.c_str());
     }
   }
+
+  ParseFlagfileAndSetGlobals(argc, argv);
 
   return 0;
 }
