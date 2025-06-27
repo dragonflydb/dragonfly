@@ -132,6 +132,8 @@ struct Metrics {
   size_t migration_errors_total;
 
   LoadingStats loading_stats;
+
+  absl::flat_hash_map<std::string, hdr_histogram*> cmd_latency_map;
 };
 
 struct LastSaveInfo {
