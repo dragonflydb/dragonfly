@@ -22,7 +22,6 @@
 
 // TODO: move core field definitions out of big header
 #include "core/search/search.h"
-#include "core/string_or_view.h"
 
 namespace dfly::search {
 
@@ -81,7 +80,6 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // Used by Add & Remove to tokenize text value
   virtual absl::flat_hash_set<std::string> Tokenize(std::string_view value) const = 0;
 
-  StringOrView NormalizeQueryWord(std::string_view word) const;
   static Container* GetOrCreate(search::RaxTreeMap<Container>* map, std::string_view word);
   static void Remove(search::RaxTreeMap<Container>* map, DocId id, std::string_view word);
 
@@ -113,8 +111,7 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
 // Hashmap based lookup per word.
 struct TagIndex : public BaseStringIndex<SortedVector> {
   TagIndex(PMR_NS::memory_resource* mr, SchemaField::TagParams params)
-      : BaseStringIndex(mr, params.case_sensitive, params.with_suffixtrie),
-        separator_{params.separator} {
+      : BaseStringIndex(mr, params.case_sensitive, false), separator_{params.separator} {
   }
 
  protected:

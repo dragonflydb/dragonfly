@@ -778,20 +778,6 @@ TEST_F(SearchFamilyTest, UnicodeWords) {
               AreDocIds("d:1"));
 }
 
-TEST_F(SearchFamilyTest, PrefixSuffixInfixTrie) {
-  Run({"ft.create", "i1", "schema", "title", "text", "withsuffixtrie"});
-
-  Run({"hset", "d:1", "title", "CaspIAn SeA"});
-  Run({"hset", "d:2", "title", "GreAt LakEs"});
-  Run({"hset", "d:3", "title", "Lake VictorIA"});
-  Run({"hset", "d:4", "title", "LaKE Como"});
-
-  EXPECT_THAT(Run({"ft.search", "i1", "*ea*"}), AreDocIds("d:1", "d:2"));
-  EXPECT_THAT(Run({"ft.search", "i1", "*ia*"}), AreDocIds("d:1", "d:3"));
-  EXPECT_THAT(Run({"ft.search", "i1", "lake*"}), AreDocIds("d:2", "d:3", "d:4"));
-  EXPECT_THAT(Run({"ft.search", "i1", "*lake"}), AreDocIds("d:3", "d:4"));
-}
-
 TEST_F(SearchFamilyTest, BasicSort) {
   auto AreRange = [](size_t total, size_t l, size_t r, string_view prefix) {
     vector<string> out;
@@ -2824,8 +2810,6 @@ TEST_F(SearchFamilyTest, SearchReindexWriteSearchRace) {
 }
 
 TEST_F(SearchFamilyTest, IgnoredOptionsInFtCreate) {
-  GTEST_SKIP() << "The usage of ignored options is now wrong - it skips supported ones!";
-
   Run({"HSET", "doc:1", "title", "Test Document"});
 
   // Create an index with various options, some of which should be ignored

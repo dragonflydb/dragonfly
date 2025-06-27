@@ -54,6 +54,9 @@ class ConfigRegistry {
 
   std::vector<std::string> List(std::string_view glob) const ABSL_LOCKS_EXCLUDED(mu_);
 
+  // Rewrite configuration file with current values
+  bool Rewrite() const ABSL_LOCKS_EXCLUDED(mu_);
+
  private:
   void RegisterInternal(std::string_view name, bool is_mutable, WriteCb cb)
       ABSL_LOCKS_EXCLUDED(mu_);
@@ -66,6 +69,9 @@ class ConfigRegistry {
   };
 
   absl::flat_hash_map<std::string, Entry> registry_ ABSL_GUARDED_BY(mu_);
+
+  // Track configs that were set by CONFIG SET (for rewrite)
+  std::set<std::string> set_by_user_ ABSL_GUARDED_BY(mu_);
 };
 
 extern ConfigRegistry config_registry;
