@@ -129,6 +129,8 @@ class Replica : ProtocolClient {
 
     // sum of the offsets on all the flows.
     uint64_t repl_offset_sum;
+    size_t psync_attempts;
+    size_t psync_successes;
   };
 
   Summary GetSummary() const;  // thread-safe, blocks fiber, makes a hop.
@@ -175,6 +177,8 @@ class Replica : ProtocolClient {
   std::optional<cluster::SlotRange> slot_range_;
 
   uint32_t reconnect_count_ = 0;
+  size_t psync_attempts_ = 0;
+  size_t psync_successes_ = 0;
 };
 
 class RdbLoader;
