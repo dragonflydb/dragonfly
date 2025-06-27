@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/fixed_array.h>
+#include <mimalloc.h>
 #include <sys/socket.h>
 
 #include <deque>
@@ -23,6 +24,7 @@
 #include "util/http/http_handler.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
+typedef struct mi_heap_s mi_heap_t;
 
 // need to declare for older linux distributions like CentOS 7
 #ifndef SO_INCOMING_CPU
@@ -89,7 +91,7 @@ class Connection : public util::Connection {
 
     // mi_stl_allocator uses mi heap internally.
     // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
-    using StorageType = absl::InlinedVector<char, kReqStorageSize>;
+    using StorageType = absl::InlinedVector<char, kReqStorageSize, mi_stl_allocator<char>>;
 
     absl::InlinedVector<std::string_view, 6> args;
     StorageType storage;
@@ -130,9 +132,14 @@ class Connection : public util::Connection {
     bool invalidate_due_to_flush = false;
   };
 
+  struct MessageDeleter {
+    void operator()(PipelineMessage* msg) const;
+    void operator()(PubMessage* msg) const;
+  };
+
   // Requests are allocated on the mimalloc heap and thus require a custom deleter.
-  using PipelineMessagePtr = std::unique_ptr<PipelineMessage>;
-  using PubMessagePtr = std::unique_ptr<PubMessage>;
+  using PipelineMessagePtr = std::unique_ptr<PipelineMessage, MessageDeleter>;
+  using PubMessagePtr = std::unique_ptr<PubMessage, MessageDeleter>;
 
   using MCPipelineMessagePtr = std::unique_ptr<MCPipelineMessage>;
   using AclUpdateMessagePtr = std::unique_ptr<AclUpdateMessage>;
@@ -363,7 +370,7 @@ class Connection : public util::Connection {
   void RecycleMessage(MessageHandle msg);
 
   // Create new pipeline request, re-use from pool when possible.
-  PipelineMessagePtr FromArgs(const RespVec& args);
+  PipelineMessagePtr FromArgs(RespVec args, mi_heap_t* heap);
 
   ParserStatus ParseRedis(unsigned max_busy_cycles);
   ParserStatus ParseMemcache();

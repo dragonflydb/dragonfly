@@ -174,6 +174,9 @@ struct SaveCmdOptions {
   std::string_view basename;
 };
 
+// Function to set global variables for info server
+void SetInfoServerGlobals(const std::string& config_file_path, const std::string& executable_path);
+
 class ServerFamily {
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 

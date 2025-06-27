@@ -235,6 +235,12 @@ using detail::SaveStagesController;
 using http::StringResponse;
 using strings::HumanReadableNumBytes;
 
+// Global variable to store the config file path
+std::string g_config_file_path;
+
+// Global variable to store the executable path
+std::string g_executable_path;
+
 namespace {
 
 const auto kRedisVersion = "7.4.0";
@@ -885,7 +891,9 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   config_registry.RegisterMutable("tls_ca_cert_dir");
   config_registry.RegisterMutable("replica_priority");
   config_registry.RegisterMutable("lua_undeclared_keys_shas");
-  config_registry.RegisterMutable("point_in_time_snapshot");
+
+  // Register config_file as a read-only config parameter
+  config_registry.Register("config_file");
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
@@ -2078,6 +2086,8 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
         "    Return parameters matching the glob-like <pattern> and their values.",
         "SET <directive> <value>",
         "    Set the configuration <directive> to <value>.",
+        "REWRITE",
+        "    Rewrite the configuration file with the current configuration.",
         "RESETSTAT",
         "    Reset statistics reported by the INFO command.",
         "HELP",
@@ -2143,9 +2153,21 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
   if (sub_cmd == "RESETSTAT") {
     ResetStat(cmd_cntx.conn_cntx->ns);
     return builder->SendOk();
-  } else {
-    return builder->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErrType);
   }
+
+  if (sub_cmd == "REWRITE") {
+    if (g_config_file_path.empty()) {
+      return builder->SendError("The server is running without a config file");
+    }
+
+    if (config_registry.Rewrite()) {
+      return builder->SendOk();
+    } else {
+      return builder->SendError("Failed to rewrite config file");
+    }
+  }
+
+  return builder->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErrType);
 }
 
 void ServerFamily::Debug(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2452,6 +2474,15 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     uint64_t uptime = time(NULL) - start_time_;
     append("uptime_in_seconds", uptime);
     append("uptime_in_days", uptime / (3600 * 24));
+
+    // Add hz (frequency of the internal periodic operations)
+    append("hz", GetFlag(FLAGS_hz));
+
+    // Add executable path (argv[0] from main function)
+    append("executable", g_executable_path);
+
+    // Add config file path
+    append("config_file", g_config_file_path);
   };
 
   auto add_clients_info = [&] {
@@ -3557,6 +3588,12 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_TRANSACTIONAL, -2, 0, 0, acl::kScript}.HFUNC(Script)
       << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, acl::kDfly}.HFUNC(Dfly)
       << CI{"MODULE", CO::ADMIN, 2, 0, 0, acl::kModule}.HFUNC(Module);
+}
+
+// Function to set global variables for info server
+void SetInfoServerGlobals(const std::string& config_file_path, const std::string& executable_path) {
+  g_config_file_path = config_file_path;
+  g_executable_path = executable_path;
 }
 
 }  // namespace dfly

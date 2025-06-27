@@ -118,11 +118,6 @@ ParseResult<search::SchemaField::TagParams> ParseTagParams(CmdArgParser* parser)
       continue;
     }
 
-    if (parser->Check("WITHSUFFIXTRIE")) {
-      params.with_suffixtrie = true;
-      continue;
-    }
-
     break;
   }
   return params;
@@ -130,6 +125,7 @@ ParseResult<search::SchemaField::TagParams> ParseTagParams(CmdArgParser* parser)
 
 ParseResult<search::SchemaField::TextParams> ParseTextParams(CmdArgParser* parser) {
   search::SchemaField::TextParams params{};
+
   params.with_suffixtrie = parser->Check("WITHSUFFIXTRIE");
   return params;
 }
@@ -203,9 +199,10 @@ ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
   return true;
 }
 
-constexpr std::array<const std::string_view, 4> kIgnoredOptions = {
-    "UNF"sv, "NOSTEM"sv, "INDEXMISSING"sv, "INDEXEMPTY"sv};
-constexpr std::array<const std::string_view, 3> kIgnoredOptionsWithArg = {"WEIGHT"sv, "PHONETIC"sv};
+constexpr std::array<const std::string_view, 6> kIgnoredOptions = {
+    "UNF"sv, "NOSTEM"sv, "CASESENSITIVE"sv, "WITHSUFFIXTRIE"sv, "INDEXMISSING"sv, "INDEXEMPTY"sv};
+constexpr std::array<const std::string_view, 3> kIgnoredOptionsWithArg = {"WEIGHT"sv, "SEPARATOR"sv,
+                                                                          "PHONETIC"sv};
 
 // SCHEMA field [AS alias] type [flags...]
 ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {

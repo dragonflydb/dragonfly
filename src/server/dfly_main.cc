@@ -40,6 +40,7 @@
 #include "server/common.h"
 #include "server/generic_family.h"
 #include "server/main_service.h"
+#include "server/server_family.h"
 #include "server/version.h"
 #include "server/version_monitor.h"
 #include "strings/human_readable.h"
@@ -724,6 +725,26 @@ void ParseFlagsFromEnv() {
   }
 }
 
+void ParseFlagfileAndSetGlobals(int argc, char* argv[]) {
+  std::string config_file_path;
+  std::string executable_path = argv[0];
+
+  // Parse command line arguments to find --flagfile
+  for (int i = 1; i < argc; i++) {
+    std::string arg = argv[i];
+    if (arg == "--flagfile" && i + 1 < argc) {
+      config_file_path = argv[i + 1];
+      break;
+    } else if (absl::StartsWith(arg, "--flagfile=")) {
+      config_file_path = arg.substr(11);  // Remove "--flagfile=" prefix
+      break;
+    }
+  }
+
+  // Set global variables for info server
+  dfly::SetInfoServerGlobals(config_file_path, executable_path);
+}
+
 int main(int argc, char* argv[]) {
   absl::SetProgramUsageMessage(
       R"(a modern in-memory store.
@@ -748,6 +769,7 @@ Usage: dragonfly [FLAGS]
   MainInitGuard guard(&argc, &argv);
 
   ParseFlagsFromEnv();
+  ParseFlagfileAndSetGlobals(argc, argv);
 
   if (!GetFlag(FLAGS_omit_basic_usage)) {
     PrintBasicUsageInfo();
