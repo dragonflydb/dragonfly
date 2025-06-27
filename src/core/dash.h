@@ -823,6 +823,8 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       return std::make_pair(iterator{this, target_seg_id, it.index, it.slot}, false);
     }
 
+    bool consider_throw = true;
+
     // At this point we must split the segment.
     // try garbage collect or evict.
     if constexpr (EvictionPolicy::can_evict || EvictionPolicy::can_gc) {
@@ -872,7 +874,9 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       // We evict only if our policy says we can not grow
       if constexpr (EvictionPolicy::can_evict) {
         bool can_grow = ev.CanGrow(*this);
-        if (!can_grow) {
+        if (can_grow) {
+          consider_throw = false;
+        } else {
           unsigned res = ev.Evict(hotspot, this);
           if (res)
             continue;
@@ -880,7 +884,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       }
     }
 
-    if (!ev.CanGrow(*this)) {
+    if (consider_throw && !ev.CanGrow(*this)) {
       throw std::bad_alloc{};
     }
 
