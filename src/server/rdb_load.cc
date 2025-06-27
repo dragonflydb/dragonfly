@@ -2546,16 +2546,18 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, Item* item, DbSlic
   // object.
   if (item->load_config.append) {
     append_res = db_slice->FindMutable(db_cntx, item->key);
-    if (!IsValid(append_res.it)) {
+    if (IsValid(append_res.it)) {
+      pv_ptr = &append_res.it->second;
+    } else {
       // If the item has expired we may not find the key. Note if the key
       // is found, but expired since we started loading, we still append to
       // avoid an inconsistent state where only part of the key is loaded.
-      if (item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms) {
+      if (!item->has_expired && (item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms)) {
         LOG(ERROR) << "Count not to find append key '" << item->key << "' in DB " << db_ind;
+        return;
       }
-      return;
+      item->load_config.append = false;
     }
-    pv_ptr = &append_res.it->second;
   }
 
   if (ec_ = FromOpaque(item->val, item->load_config, pv_ptr); ec_) {
@@ -2650,8 +2652,7 @@ void RdbLoader::ResizeDb(size_t key_num, size_t expire_num) {
 //
 // Huge objects may be loaded in parts, where only a subset of elements are
 // loaded at a time. This reduces the memory required to load huge objects and
-// prevents LoadItemsBuffer blocking. (Note so far only RDB_TYPE_SET and
-// RDB_TYPE_SET_WITH_EXPIRY support partial reads).
+// prevents LoadItemsBuffer blocking.
 error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   std::string key;
   int64_t start = absl::GetCurrentTimeNanos();
@@ -2670,7 +2671,6 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     auto cleanup = absl::Cleanup([item] { delete item; });
 
     item->load_config.append = pending_read_.remaining > 0;
-    item->has_expired = item->has_expired || settings->has_expired;
 
     error_code ec = ReadObj(type, &item->val);
     if (ec) {
@@ -2680,7 +2680,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
 
     // If the key can be discarded, we must still continue to read the
     // object from the RDB so we can read the next key.
-    if (ShouldDiscardKey(key, *item)) {
+    if (ShouldDiscardKey(key, *settings)) {
       pending_read_.reserve = 0;
       continue;
     }
@@ -2731,7 +2731,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   return kOk;
 }
 
-bool RdbLoader::ShouldDiscardKey(std::string_view key, const Item& item) const {
+bool RdbLoader::ShouldDiscardKey(std::string_view key, const ObjSettings& settings) const {
   if (!load_unowned_slots_ && IsClusterEnabled()) {
     const auto cluster_config = cluster::ClusterConfig::Current();
     if (cluster_config && !cluster_config->IsMySlot(key)) {
@@ -2747,7 +2747,7 @@ bool RdbLoader::ShouldDiscardKey(std::string_view key, const Item& item) const {
    * Similarly if the RDB is the preamble of an AOF file, we want to
    * load all the keys as they are, since the log of operations later
    * assume to work in an exact keyspace state. */
-  if (ServerState::tlocal()->is_master && item.has_expired) {
+  if (ServerState::tlocal()->is_master && (settings.has_expired)) {
     VLOG(3) << "Expire key on read: " << key;
     return true;
   }

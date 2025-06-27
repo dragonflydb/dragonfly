@@ -404,6 +404,7 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
         flush_state = FlushState::kFlushEndEntry;
       FlushIfNeeded(flush_state);
     }
+    set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
   } else {
     CHECK_EQ(obj.Encoding(), kEncodingIntSet);
     intset* is = (intset*)obj.RObjPtr();
@@ -443,6 +444,8 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
         flush_state = FlushState::kFlushEndEntry;
       FlushIfNeeded(flush_state);
     }
+
+    string_map->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
   } else {
     CHECK_EQ(kEncodingListPack, pv.Encoding());
 
