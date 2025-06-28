@@ -2958,11 +2958,12 @@ async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFa
     await fill_task
 
 
-@pytest.mark.skip("Flaky test")
 async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     """
     This test reproduces a bug in the JSON memory tracking.
     """
+    random.seed(42)
+
     master = df_factory.create(
         proactor_threads=2,
         serialization_max_chunk_size=1,
@@ -2978,8 +2979,8 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     total = 100000
     await c_master.execute_command(f"DEBUG POPULATE {total} tmp 1000 TYPE SET ELEMENTS 100")
 
-    thresehold = 25000
-    for i in range(thresehold):
+    threshold = 25000
+    for i in range(threshold):
         rand = random.randint(1, 4)
         await c_master.execute_command(f"EXPIRE tmp:{i} {rand} NX")
 
@@ -2993,6 +2994,7 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     async with async_timeout.timeout(240):
         await wait_for_replicas_state(*c_replicas)
 
+    await seeder.stop(c_master)
     await fill_task
 
 
