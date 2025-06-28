@@ -5,14 +5,12 @@
 #include "server/list_family.h"
 
 #include <absl/strings/match.h>
-#include <gtest/gtest.h>
 
 #include <random>
 
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
-#include "gmock/gmock.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -92,15 +90,15 @@ TEST_F(ListFamilyTest, BLMPopNonblocking) {
   EXPECT_THAT(resp, IntArg(4));
 
   resp = Run({"blmpop", "0.01", "2", kKey2, kKey1, "LEFT"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(kKey1, RespArray(ElementsAre("4")))));
+  EXPECT_THAT(resp, RespElementsAre(kKey1, RespElementsAre("4")));
 
   resp = Run({"blmpop", "0.01", "2", kKey2, kKey1, "RIGHT", "COUNT", "2"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(kKey1, RespArray(ElementsAre("1", "2")))));
+  EXPECT_THAT(resp, RespElementsAre(kKey1, RespElementsAre("1", "2")));
 
   // If the count exceeds the size of the key's values (but the key is non-empty) then return all of
   // the key's values
   resp = Run({"blmpop", "0.01", "1", kKey1, "RIGHT", "COUNT", "10"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(kKey1, RespArray(ElementsAre("3")))));
+  EXPECT_THAT(resp, RespElementsAre(kKey1, RespElementsAre("3")));
 }
 
 TEST_F(ListFamilyTest, BLMPopInvalidSyntax) {
@@ -186,7 +184,7 @@ TEST_F(ListFamilyTest, BLMPopBlocking) {
   // key should be unlocked after being inserted to
   fb2.Join();
   ASSERT_FALSE(IsLocked(0, kKey1));
-  EXPECT_THAT(resp, RespArray(ElementsAre(kKey1, RespArray(ElementsAre("1")))));
+  EXPECT_THAT(resp, RespElementsAre(kKey1, RespElementsAre("1")));
 }
 
 TEST_F(ListFamilyTest, BLPopUnblocking) {
