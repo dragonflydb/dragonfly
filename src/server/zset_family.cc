@@ -41,10 +41,10 @@ namespace {
 
 using CI = CommandId;
 
-static const char kNxXxErr[] = "XX and NX options at the same time are not compatible";
-static const char kLexRangeErr[] = "min or max not valid string range item";
-static const char kFloatRangeErr[] = "min or max is not a float";
-static const char kScoreNaN[] = "resulting score is not a number (NaN)";
+const char kNxXxErr[] = "XX and NX options at the same time are not compatible";
+const char kLexRangeErr[] = "min or max not valid string range item";
+const char kFloatRangeErr[] = "min or max is not a float";
+const char kScoreNaN[] = "resulting score is not a number (NaN)";
 
 using MScoreResponse = std::vector<std::optional<double>>;
 using ScoredMember = ZSetFamily::ScoredMember;
@@ -104,9 +104,9 @@ bool IsListPack(const detail::RobjWrapper* robj_wrapper) {
 
 int ZsetDel(detail::RobjWrapper* robj_wrapper, std::string_view ele) {
   if (IsListPack(robj_wrapper)) {
-    unsigned char* eptr;
     uint8_t* lp = (uint8_t*)robj_wrapper->inner_obj();
-    if ((eptr = detail::ZzlFind(lp, ele, nullptr)) != nullptr) {
+    unsigned char* eptr = detail::ZzlFind(lp, ele, nullptr);
+    if (eptr) {
       lp = lpDeleteRangeWithEntry(lp, &eptr, 2);
       robj_wrapper->set_inner_obj(lp);
       return 1;
@@ -185,7 +185,7 @@ OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZSetFamily::ZParams& zparams,
   return DbSlice::ItAndUpdater{add_res.it, add_res.exp_it, std::move(add_res.post_updater)};
 }
 
-enum class Action { RANGE = 0, REMOVE = 1, POP = 2 };
+enum class Action : uint8_t { RANGE = 0, REMOVE = 1, POP = 2 };
 
 class IntervalVisitor {
  public:
@@ -253,8 +253,8 @@ class IntervalVisitor {
 
 void IntervalVisitor::operator()(const ZSetFamily::IndexInterval& ii) {
   unsigned long llen = robj_wrapper_->Size();
-  int32_t start = ii.first;
-  int32_t end = ii.second;
+  int64_t start = ii.first;
+  int64_t end = ii.second;
 
   if (start < 0)
     start = llen + start;
@@ -326,6 +326,7 @@ void IntervalVisitor::operator()(ZSetFamily::TopNScored sc) {
 void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
   if (params_.limit == 0)
     return;
+
   // Calculate new start and end given offset and limit.
   start += params_.offset;
   end = static_cast<uint32_t>(min(1ULL * start + params_.limit - 1, 1ULL * end));
@@ -1343,7 +1344,7 @@ OpResult<unsigned> OpLexCount(const OpArgs& op_args, string_view key,
   return count;
 }
 
-OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, facade::ArgRange members) {
+OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, const facade::ArgRange& members) {
   auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
@@ -1365,7 +1366,7 @@ OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, facade::ArgRang
 }
 
 OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key,
-                                  facade::ArgRange members) {
+                                  const facade::ArgRange& members) {
   auto res_it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
 
   if (res_it.status() == OpStatus::KEY_NOTFOUND) {
@@ -1395,8 +1396,7 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
   if (!find_res)
     return find_res.status();
 
-  auto it = find_res.value();
-  const PrimeValue& pv = it->second;
+  const PrimeValue& pv = (*find_res)->second;
   StringVec res;
   char buf[128];
 
@@ -1558,7 +1558,7 @@ void ZBooleanOperation(CmdArgList args, string_view cmd, bool is_union, bool sto
   }
 }
 
-enum class FilterShards { NO = 0, YES = 1 };
+enum class FilterShards : uint8_t { NO = 0, YES = 1 };
 
 OpResult<ScoredArray> ZPopMinMaxInternal(std::string_view key, FilterShards should_filter_shards,
                                          uint32 count, bool reverse, Transaction* tx) {
@@ -2470,11 +2470,11 @@ void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void ZSetFamily::ZPopMax(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZPopMinMaxFromArgs(std::move(args), true, cmd_cntx.tx, cmd_cntx.rb);
+  ZPopMinMaxFromArgs(args, true, cmd_cntx.tx, cmd_cntx.rb);
 }
 
 void ZSetFamily::ZPopMin(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZPopMinMaxFromArgs(std::move(args), false, cmd_cntx.tx, cmd_cntx.rb);
+  ZPopMinMaxFromArgs(args, false, cmd_cntx.tx, cmd_cntx.rb);
 }
 
 void ZSetFamily::ZLexCount(CmdArgList args, const CommandContext& cmd_cntx) {
