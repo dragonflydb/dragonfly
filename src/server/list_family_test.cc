@@ -85,6 +85,108 @@ TEST_F(ListFamilyTest, Expire) {
   EXPECT_THAT(resp, IntArg(1));
 }
 
+TEST_F(ListFamilyTest, BLMPopNonblocking) {
+  auto resp = Run({"lpush", kKey1, "1", "2", "3", "4"});
+  EXPECT_THAT(resp, IntArg(4));
+
+  resp = Run({"blmpop", "0.01", "2", kKey2, kKey1, "LEFT"});
+  EXPECT_THAT(resp, RespElementsAre(kKey1, RespElementsAre("4")));
+
+  resp = Run({"blmpop", "0.01", "2", kKey2, kKey1, "RIGHT", "COUNT", "2"});
+  EXPECT_THAT(resp, RespElementsAre(kKey1, RespElementsAre("1", "2")));
+
+  // If the count exceeds the size of the key's values (but the key is non-empty) then return all of
+  // the key's values
+  resp = Run({"blmpop", "0.01", "1", kKey1, "RIGHT", "COUNT", "10"});
+  EXPECT_THAT(resp, RespElementsAre(kKey1, RespElementsAre("3")));
+}
+
+TEST_F(ListFamilyTest, BLMPopInvalidSyntax) {
+  // Not enough arguments
+  auto resp = Run({"blmpop", "0.1", "1", kKey1});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  // Timeout is not a float
+  resp = Run({"blmpop", "foo", "1", kKey1, "LEFT", "COUNT", "1"});
+  EXPECT_THAT(resp, ErrArg("value is not a valid float"));
+
+  // Negative timeout
+  resp = Run({"blmpop", "-0.01", "1", kKey1, "LEFT", "COUNT", "1"});
+  EXPECT_THAT(resp, ErrArg("timeout is negative"));
+
+  // Zero keys
+  resp = Run({"blmpop", "0.01", "0", "LEFT", "COUNT", "1"});
+  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
+
+  // Number of keys is not uint
+  resp = Run({"blmpop", "0.01", "aa", kKey1, "LEFT"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  // Missing LEFT/RIGHT
+  resp = Run({"blmpop", "0.01", "1", kKey1, "COUNT", "1"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Wrong number of keys
+  resp = Run({"blmpop", "0.01", "1", kKey1, kKey2, "LEFT"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // COUNT without number
+  resp = Run({"blmpop", "0.01", "1", kKey1, "LEFT", "COUNT"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // COUNT is not uint
+  resp = Run({"blmpop", "0.01", "1", kKey1, "LEFT", "COUNT", "boo"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  // Too many arguments
+  resp = Run({"blmpop", "0.01", "1", "c", "LEFT", "COUNT", "2", "foo"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
+TEST_F(ListFamilyTest, BLMPopBlocking) {
+  // attempting to pop from empty key results in blocking and returns
+  // null if no values are pushed to the key.
+  RespExpr resp;
+  auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    resp = Run({"blmpop", "0.1", "1", kKey1, "LEFT"});
+  });
+  ThisFiber::SleepFor(50us);
+  ASSERT_TRUE(IsLocked(0, kKey1));
+
+  fb0.Join();
+  ASSERT_FALSE(IsLocked(0, kKey1));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  // BLMPOP should not block if there is a non-empty key available
+  resp = Run({"lpush", kKey1, "0"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  auto fb1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    resp = Run({"blmpop", "0.1", "1", kKey1, "LEFT"});
+  });
+  ThisFiber::SleepFor(50us);
+  // shouldn't need to lock the key just pop immediately
+  ASSERT_FALSE(IsLocked(0, kKey1));
+  fb1.Join();
+
+  // should block until a key is available and then immediately unblock
+  auto fb2 = pp_->at(2)->LaunchFiber(Launch::dispatch, [&] {
+    resp = Run({"blmpop", "0.1", "1", kKey1, "LEFT"});
+  });
+  ThisFiber::SleepFor(50us);
+
+  // key should be locked while waiting
+  ASSERT_TRUE(IsLocked(0, kKey1));
+
+  auto push_resp = Run({"lpush", kKey1, "1"});
+  EXPECT_THAT(push_resp, IntArg(1));
+
+  // key should be unlocked after being inserted to
+  fb2.Join();
+  ASSERT_FALSE(IsLocked(0, kKey1));
+  EXPECT_THAT(resp, RespElementsAre(kKey1, RespElementsAre("1")));
+}
+
 TEST_F(ListFamilyTest, BLPopUnblocking) {
   auto resp = Run({"lpush", kKey1, "1"});
   EXPECT_THAT(resp, IntArg(1));

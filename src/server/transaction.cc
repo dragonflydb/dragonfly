@@ -1588,7 +1588,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
       bonus = 0;  // Z<xxx>STORE <key> commands
 
     unsigned num_keys_index;
-    if (absl::StartsWith(name, "EVAL"))
+    if (absl::StartsWith(name, "EVAL") || name == "BLMPOP")
       num_keys_index = 1;
     else
       num_keys_index = bonus ? *bonus + 1 : 0;
