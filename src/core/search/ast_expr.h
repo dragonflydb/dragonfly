@@ -91,6 +91,8 @@ struct AstTagsNode {
 
 // Applies nearest neighbor search to the final result set
 struct AstKnnNode {
+  static constexpr std::string_view kDefaultScoreAlias = "__vector_score";
+
   AstKnnNode() = default;
   AstKnnNode(uint32_t limit, std::string_view field, OwnedFtVector vec,
              std::string_view score_alias, std::optional<size_t> ef_runtime);
@@ -105,7 +107,7 @@ struct AstKnnNode {
   size_t limit;
   std::string field;
   OwnedFtVector vec;
-  std::string score_alias;
+  std::string score_alias{kDefaultScoreAlias};
   std::optional<float> ef_runtime;
 };
 

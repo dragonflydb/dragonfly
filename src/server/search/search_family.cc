@@ -39,6 +39,8 @@ using namespace facade;
 
 namespace {
 
+using namespace search;
+
 using nonstd::make_unexpected;
 
 template <typename T> using ParseResult = io::Result<T, ErrorReply>;
@@ -402,6 +404,10 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
     } else if (parser->Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
       params.query_params = ParseQueryParams(parser);
     } else if (parser->Check("SORTBY")) {
+      if (params.sort_option) {
+        return CreateSyntaxError("SORTBY cannot be applied after another SORTBY"sv);
+      }
+
       auto parsed_field = ParseField(parser);
       StringOrView field = StringOrView::FromString(std::string{parsed_field});
       params.sort_option = SearchParams::SortOption{
@@ -565,92 +571,183 @@ void SendSerializedDoc(const SerializedSearchDoc& doc, SinkReplyBuilder* builder
   }
 }
 
-void SearchReply(const SearchParams& params,
-                 std::optional<search::KnnScoreSortOption> knn_sort_option,
-                 absl::Span<SearchResult> results, SinkReplyBuilder* builder) {
-  size_t total_hits = 0;
-  absl::InlinedVector<SerializedSearchDoc*, 5> docs;
-  docs.reserve(results.size());
-  for (auto& shard_results : results) {
-    total_hits += shard_results.total_hits;
-    for (auto& doc : shard_results.docs) {
-      docs.push_back(&doc);
-    }
-  }
+// Merges sorted search results from multiple shards into a single vector of SerializedSearchDoc*.
+// Used in MergeSearchResults
+template <typename T>
+absl::InlinedVector<SerializedSearchDoc*, 10> MergeSortedResults(
+    size_t offset, size_t limit, size_t final_size, SortOrder sort_order,
+    absl::Span<SearchResult> results,
+    absl::FunctionRef<void(size_t, const SerializedSearchDoc&, std::vector<const T*>*)>
+        update_cached_value) {
+  // We need to merge results from all shards by the field name.
+  std::vector<const T*> cached_values(results.size(), nullptr);
 
-  size_t size = docs.size();
-  bool should_add_score_field = false;
-
-  if (knn_sort_option) {
-    size = std::min(size, knn_sort_option->limit);
-    total_hits = std::min(total_hits, knn_sort_option->limit);
-    should_add_score_field = params.ShouldReturnField(knn_sort_option->score_field_alias);
-
-    auto comparator = [](const SerializedSearchDoc* l, const SerializedSearchDoc* r) {
-      return *l < *r;
-    };
-
-    const size_t prefix_size_to_sort = std::min(params.limit_offset + params.limit_total, size);
-    if (prefix_size_to_sort == docs.size()) {
-      std::sort(docs.begin(), docs.end(), std::move(comparator));
+  for (size_t i = 0; i < results.size(); ++i) {
+    if (!results[i].docs.empty()) {
+      const auto& first_doc = results[i].docs[0];
+      update_cached_value(i, first_doc, &cached_values);
     } else {
-      std::partial_sort(docs.begin(), docs.begin() + prefix_size_to_sort, docs.end(),
-                        std::move(comparator));
+      cached_values[i] = nullptr;  // No documents in this shard
     }
   }
 
-  const size_t offset = std::min(params.limit_offset, size);
-  const size_t limit = std::min(size - offset, params.limit_total);
-  const size_t end = offset + limit;
-  DCHECK(end <= docs.size());
+  auto comparator = BuildAscDescComparator<size_t>(
+      [&](const size_t& l, const size_t& r) -> bool {
+        if (cached_values[l] == nullptr || cached_values[r] == nullptr) {
+          return cached_values[r] == nullptr;
+        }
+        return *cached_values[l] < *cached_values[r];
+      },
+      [&](const size_t& l, const size_t& r) -> bool {
+        if (cached_values[l] == nullptr || cached_values[r] == nullptr) {
+          return cached_values[r] == nullptr;
+        }
+        return *cached_values[l] > *cached_values[r];
+      },
+      sort_order);
 
-  if (params.sort_option) {
-    auto field_alias = params.sort_option->field.NameView();
+  std::vector<size_t> indexes(results.size());
+  absl::InlinedVector<SerializedSearchDoc*, 10> docs;
+  docs.reserve(final_size);
 
-    auto comparator = [&](const SerializedSearchDoc* l_doc, const SerializedSearchDoc* r_doc) {
-      auto& l = l_doc->values;
-      auto& r = r_doc->values;
+  size_t current_index = 0;
+  while (docs.size() < final_size) {
+    SerializedSearchDoc* next_doc = nullptr;
+    size_t next_index = 0;
 
-      auto l_it = l.find(field_alias);
-      auto r_it = r.find(field_alias);
+    // Find the minimum value in all shards
+    for (size_t i = 0; i < results.size(); ++i) {
+      if (indexes[i] < results[i].docs.size() && (!next_doc || comparator(i, next_index))) {
+        next_doc = &results[i].docs[indexes[i]];
+        next_index = i;
+      }
+    }
 
-      // If some of the values is not present
-      if (l_it == l.end() || r_it == r.end()) {
-        return l_it != l.end();
+    DCHECK(next_doc);
+
+    if (current_index >= offset) {
+      DCHECK(current_index < offset + final_size);
+      docs.push_back(next_doc);
+    }
+    current_index++;
+
+    indexes[next_index]++;
+    if (indexes[next_index] < results[next_index].docs.size()) {
+      update_cached_value(next_index, results[next_index].docs[indexes[next_index]],
+                          &cached_values);
+    } else {
+      cached_values[next_index] = nullptr;  // No more documents in this shard
+    }
+  }
+
+  return docs;
+}
+
+/* This function merges search results from multiple shards into a single vector of
+   SerializedSearchDoc*. It handles sorting based on the provided sort option or knn_score_alias. If
+   no sorting is requested, it simply returns the documents from all shards, limited by offset and
+   final_size.*/
+absl::InlinedVector<SerializedSearchDoc*, 10> MergeSearchResults(const SearchParams& params,
+                                                                 std::string_view knn_score_alias,
+                                                                 absl::Span<SearchResult> results) {
+  size_t size = 0;
+  for (const auto& shard_result : results) {
+    size += shard_result.docs.size();
+  }
+
+  const size_t offset = params.limit_offset;
+  const size_t limit = params.limit_total;
+
+  if (offset >= size) {
+    // If offset is greater than the total number of documents, return an empty vector
+    return {};
+  }
+
+  const size_t final_size = std::min(limit, size - offset);
+
+  if (!params.sort_option && knn_score_alias.empty()) {
+    // If no sorting is requested and no knn_score_alias is provided, we just return
+    // the documents from all shards, limited by offset and final_size.
+    absl::InlinedVector<SerializedSearchDoc*, 10> docs;
+    docs.reserve(final_size);
+
+    size_t current_index = 0;
+    for (auto& shard_result : results) {
+      if (current_index + shard_result.docs.size() < offset) {
+        current_index += shard_result.docs.size();
+        continue;  // Skip this shard
       }
 
-      const auto& lv = l_it->second;
-      const auto& rv = r_it->second;
-      return params.sort_option->order == SortOrder::ASC ? lv < rv : lv > rv;
-    };
+      const size_t final_index =
+          std::min(shard_result.docs.size(), offset + final_size - current_index);
+      for (size_t i = offset > current_index ? offset - current_index : 0; i < final_index; ++i) {
+        docs.emplace_back(&shard_result.docs[i]);
+      }
 
-    auto sort_begin = docs.begin();
-    auto sort_end = docs.end();
-    // If we first sorted by knn, we need to sort only the result of knn
-    if (knn_sort_option) {
-      sort_begin = docs.begin() + offset;
-      sort_end = docs.begin() + end;
+      if (docs.size() == final_size) {
+        break;
+      }
+
+      current_index += shard_result.docs.size();
     }
-    std::sort(sort_begin, sort_end, std::move(comparator));
+
+    DCHECK(docs.size() == final_size);
+    return docs;
   }
 
+  if (params.sort_option && params.sort_option->field.NameView() != knn_score_alias) {
+    // We need to merge results from all shards by the field name
+    const std::string_view sorted_field = params.sort_option->field.NameView();
+    auto update_cached_value = [&](size_t index, const SerializedSearchDoc& doc,
+                                   std::vector<const SortableValue*>* cached_values) {
+      if (auto it = doc.values.find(sorted_field); it != doc.values.end()) {
+        cached_values->at(index) = &it->second;
+      }
+    };
+    return MergeSortedResults<SortableValue>(offset, limit, final_size, params.sort_option->order,
+                                             results, update_cached_value);
+  }
+
+  // We need to merge results from all shards by the score field.
+  DCHECK(!knn_score_alias.empty());
+  auto update_cached_value = [&](size_t index, const SerializedSearchDoc& doc,
+                                 std::vector<const search::ResultScore*>* cached_values) {
+    cached_values->at(index) = &doc.score;
+  };
+  return MergeSortedResults<search::ResultScore>(offset, limit, final_size, SortOrder::ASC, results,
+                                                 update_cached_value);
+}
+
+// If knn_score_alias is empty, it means that we are not using KNN search
+void SearchReply(const SearchParams& params, std::string_view knn_score_alias,
+                 absl::Span<SearchResult> results, SinkReplyBuilder* builder) {
+  size_t total_hits = 0;
+  for (const auto& result : results) {
+    total_hits += result.total_hits;
+  }
+
+  // We need to merge results from all shards to single vector of SerializedSearchDoc*
+  absl::InlinedVector<SerializedSearchDoc*, 10> docs =
+      MergeSearchResults(params, knn_score_alias, results);
+
   const bool reply_with_ids_only = params.IdsOnly();
+  const bool should_add_knn_score =
+      !knn_score_alias.empty() && params.ShouldReturnField(knn_score_alias);
+  const size_t size = docs.size();
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  RedisReplyBuilder::ArrayScope scope{rb, reply_with_ids_only ? (limit + 1) : (limit * 2 + 1)};
+  RedisReplyBuilder::ArrayScope scope{rb, reply_with_ids_only ? (size + 1) : (size * 2 + 1)};
 
   rb->SendLong(total_hits);
-  for (size_t i = offset; i < end; i++) {
-    if (reply_with_ids_only) {
+  for (size_t i = 0; i < size; i++) {
+    if (!reply_with_ids_only) {
+      if (should_add_knn_score) {
+        docs[i]->values[knn_score_alias] = docs[i]->score;
+      }
+      SendSerializedDoc(*docs[i], builder);
+    } else {
       rb->SendBulkString(docs[i]->key);
-      continue;
     }
-
-    if (should_add_score_field && holds_alternative<float>(docs[i]->score))
-      docs[i]->values[knn_sort_option->score_field_alias] =
-          absl::StrCat(get<float>(docs[i]->score));
-
-    SendSerializedDoc(*docs[i], builder);
   }
 }
 
@@ -889,7 +986,7 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
       return builder->SendError(*res.error);
   }
 
-  SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(docs), builder);
+  SearchReply(*params, search_algo.GetKnnScoreAlias(), absl::MakeSpan(docs), builder);
 }
 
 void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -964,7 +1061,7 @@ void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {
 
   // Result of the search command
   if (!result_is_empty) {
-    SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(search_results), rb);
+    SearchReply(*params, search_algo.GetKnnScoreAlias(), absl::MakeSpan(search_results), rb);
   } else {
     rb->StartArray(1);
     rb->SendLong(0);

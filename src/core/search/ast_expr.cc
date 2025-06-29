@@ -60,7 +60,7 @@ AstKnnNode::AstKnnNode(uint32_t limit, std::string_view field, OwnedFtVector vec
       limit{limit},
       field{field.substr(1)},
       vec{std::move(vec)},
-      score_alias{score_alias},
+      score_alias{!score_alias.empty() ? std::string{score_alias} : kDefaultScoreAlias},
       ef_runtime{ef_runtime} {
 }
 

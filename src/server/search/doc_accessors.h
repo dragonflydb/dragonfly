@@ -32,6 +32,10 @@ struct BaseAccessor : public search::DocumentAccessor {
   virtual SearchDocData Serialize(const search::Schema& schema,
                                   absl::Span<const SearchField> fields) const;
 
+  // Serialize a single field
+  search::SortableValue SerializeSingleField(const search::Schema& schema,
+                                             const SearchField& field) const;
+
   /*
   Serialize the whole type, the default implementation is to serialize all fields.
   For JSON in FT.SEARCH we need to get answer as {"$", <the whole document>}, but it is not an
@@ -109,5 +113,17 @@ struct JsonAccessor : public BaseAccessor {
 
 // Get accessor for value
 std::unique_ptr<BaseAccessor> GetAccessor(const DbContext& db_cntx, const PrimeValue& pv);
+
+// Implementation
+/******************************************************************/
+inline search::SortableValue BaseAccessor::SerializeSingleField(const search::Schema& schema,
+                                                                const SearchField& field) const {
+  auto result = Serialize(schema, {field});
+  if (result.empty()) {
+    return std::monostate{};
+  }
+  DCHECK_EQ(result.size(), 1u);
+  return result.begin()->second;
+}
 
 }  // namespace dfly

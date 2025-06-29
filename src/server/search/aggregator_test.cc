@@ -21,7 +21,7 @@ TEST(AggregatorTest, Sort) {
   };
 
   SortParams params;
-  params.fields.emplace_back("a", SortOrder::ASC);
+  params.fields.emplace_back("a", search::SortOrder::ASC);
   StepsList steps = {MakeSortStep(std::move(params))};
 
   auto result = Process(values, {"a"}, steps);

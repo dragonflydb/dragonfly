@@ -14,6 +14,8 @@
 #include <type_traits>
 #include <variant>
 
+#include "core/search/search.h"
+
 namespace dfly::search {
 
 using namespace std;
@@ -47,16 +49,48 @@ template <typename T> SortableValue SimpleValueSortIndex<T>::Lookup(DocId doc) c
 }
 
 template <typename T>
-std::vector<ResultScore> SimpleValueSortIndex<T>::Sort(std::vector<DocId>* ids, size_t limit,
-                                                       bool desc) const {
-  auto cb = [this, desc](const auto& lhs, const auto& rhs) {
-    return desc ? (values_[lhs] > values_[rhs]) : (values_[lhs] < values_[rhs]);
-  };
-  std::partial_sort(ids->begin(), ids->begin() + std::min(ids->size(), limit), ids->end(), cb);
+std::vector<SortableValue> SimpleValueSortIndex<T>::Sort(
+    size_t shard_limit, SortOrder sort_order, SearchAlrgorithmResult* search_result) const {
+  const size_t initial_size = search_result->ids.size();
 
-  vector<ResultScore> out(min(ids->size(), limit));
-  for (size_t i = 0; i < out.size(); i++)
-    out[i] = values_[(*ids)[i]];
+  // TODO: remove this and use DocId or std::pair<DocId, ResultScore> instead in
+  // SearchAlrgorithmResult
+  std::vector<size_t> ids_to_sort(initial_size);
+  for (size_t i = 0; i < initial_size; ++i) {
+    ids_to_sort[i] = i;
+  }
+
+  auto compator = BuildAscDescComparator<size_t>(
+      [&](const size_t& l, const size_t& r) {
+        return values_[search_result->ids[l]] < values_[search_result->ids[r]];
+      },
+      [&](const size_t& l, const size_t& r) {
+        return values_[search_result->ids[l]] > values_[search_result->ids[r]];
+      },
+      sort_order);
+
+  size_t size = initial_size;
+  if (shard_limit < size) {
+    std::partial_sort(ids_to_sort.begin(), ids_to_sort.begin() + shard_limit, ids_to_sort.end(),
+                      std::move(compator));
+    size = shard_limit;
+    ids_to_sort.resize(shard_limit);
+  } else {
+    std::sort(ids_to_sort.begin(), ids_to_sort.end(), std::move(compator));
+  }
+
+  search_result->RearrangeAccordingToIndexes(ids_to_sort);
+
+  std::vector<SortableValue> out(size);
+  for (size_t i = 0; i < size; i++) {
+    const auto doc_id = search_result->ids[i];
+    auto& value = values_[doc_id];
+    if constexpr (!std::is_arithmetic_v<T>) {
+      out[i] = std::string{value};
+    } else {
+      out[i] = static_cast<double>(value);
+    }
+  }
   return out;
 }
 

@@ -15,10 +15,6 @@
 #include "facade/reply_builder.h"
 #include "io/io.h"
 
-namespace dfly {
-enum class SortOrder;
-}
-
 namespace dfly::aggregate {
 
 struct Reducer;
@@ -47,7 +43,7 @@ struct SortParams {
   /* Fields to sort by. If multiple fields are provided, sorting works hierarchically:
      - First, the i-th field is compared.
      - If the i-th field values are equal, the (i + 1)-th field is compared, and so on. */
-  absl::InlinedVector<std::pair<std::string, SortOrder>, 2> fields;
+  absl::InlinedVector<std::pair<std::string, search::SortOrder>, 2> fields;
   /* Max number of elements to include in the sorted result.
      If set, only the first [max] elements are fully sorted using partial_sort. */
   int64_t max = kSortAll;

@@ -126,7 +126,7 @@ struct AlgorithmProfile {
 };
 
 // Represents a search result returned from the search algorithm.
-struct SearchResult {
+struct SearchAlrgorithmResult {
   size_t total;  // how many documents were matched in total
 
   // number of matches before any aggregation, used by multi-shard optimizations
@@ -135,7 +135,8 @@ struct SearchResult {
   // The ids of the matched documents
   std::vector<DocId> ids;
 
-  // Contains final scores if an aggregation was present
+  // Contains final scores (e.g. for KNN queries)
+  // TODO: remove this and use: variant<vector<DocId>, vector<pair<DocId, ResultScore>>>
   std::vector<ResultScore> scores;
 
   // If profiling was enabled
@@ -143,11 +144,13 @@ struct SearchResult {
 
   // If an error occurred, last recent one
   std::string error;
-};
 
-struct KnnScoreSortOption {
-  std::string_view score_field_alias;
-  size_t limit = std::numeric_limits<size_t>::max();
+  // This method used during sorting the search results
+  // It rearranges the ids and scores according to the provided indices.
+  // The indices should be the same size as ids and scores.
+  // The ids and scores can have a new size after rearrangement.
+  // TODO: remove this and use DocId or std::pair<DocId, ResultScore> instead
+  void RearrangeAccordingToIndexes(absl::Span<const size_t> indices);
 };
 
 // SearchAlgorithm allows searching field indices with a query
@@ -159,10 +162,10 @@ class SearchAlgorithm {
   // Init with query and return true if successful.
   bool Init(std::string_view query, const QueryParams* params);
 
-  SearchResult Search(const FieldIndices* index) const;
+  SearchAlrgorithmResult Search(const FieldIndices* index) const;
 
   // if enabled, return limit & alias for knn query
-  std::optional<KnnScoreSortOption> GetKnnScoreSortOption() const;
+  std::string_view GetKnnScoreAlias() const;
 
   void EnableProfiling();
 

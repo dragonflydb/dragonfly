@@ -25,6 +25,8 @@ using nonstd::make_unexpected;
 
 namespace {
 
+using namespace search;
+
 template <typename F>
 void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
   auto& db_slice = op_args.GetDbSlice();
@@ -56,11 +58,15 @@ bool IsSortableField(std::string_view field_identifier, const search::Schema& sc
   return it != schema.fields.end() && (it->second.flags & search::SchemaField::SORTABLE);
 }
 
-SearchFieldsList ToSV(const search::Schema& schema, const std::optional<SearchFieldsList>& fields) {
+SearchFieldsList ToSV(const search::Schema& schema, const std::optional<SearchFieldsList>& fields,
+                      const absl::flat_hash_set<std::string_view>& skip_fields) {
   SearchFieldsList sv_fields;
   if (fields) {
     sv_fields.reserve(fields->size());
     for (const auto& field : fields.value()) {
+      if (skip_fields.contains(field.NameView())) {
+        continue;  // Skip the field if it is in the skip_fields set
+      }
       sv_fields.push_back(field.View());
     }
   }
@@ -71,7 +77,7 @@ using SortIndiciesFieldsList =
     std::vector<std::pair<string_view /*identifier*/, string_view /*alias*/>>;
 
 std::pair<SearchFieldsList, SortIndiciesFieldsList> PreprocessAggregateFields(
-    const search::Schema& schema, const AggregateParams& params,
+    const Schema& schema, const AggregateParams& params,
     const std::optional<SearchFieldsList>& load_fields) {
   absl::flat_hash_map<std::string_view, SearchField> fields_by_identifier;
   absl::flat_hash_map<std::string_view, std::string_view> sort_indicies_aliases;
@@ -113,14 +119,81 @@ std::pair<SearchFieldsList, SortIndiciesFieldsList> PreprocessAggregateFields(
   return {std::move(fields), std::move(sort_fields)};
 }
 
-}  // namespace
+// This method can change the order of the elements and also resize the vectors in search_result
+std::vector<SerializedSearchDoc> SortSearchResultForNonSortableField(
+    std::string_view field_alias, SortOrder sort_order, size_t shard_limit,
+    const ShardDocIndex::DocKeyIndex& key_index,
+    absl::FunctionRef<std::optional<SortableValue>(std::size_t)> get_sortable_field_value,
+    SearchAlrgorithmResult* search_result) {
+  std::vector<SortableValue> sortable_values;
+  std::vector<size_t> ids_to_sort;
 
-bool SerializedSearchDoc::operator<(const SerializedSearchDoc& other) const {
-  return this->score < other.score;
+  const size_t initial_size = search_result->ids.size();
+  sortable_values.reserve(initial_size);
+  ids_to_sort.reserve(initial_size);
+
+  for (size_t i = 0; i < initial_size; i++) {
+    auto field_value = get_sortable_field_value(i);
+    if (field_value.has_value()) {
+      sortable_values.emplace_back(std::move(field_value).value());
+      ids_to_sort.emplace_back(i);
+    } else {
+      sortable_values.emplace_back();
+    }
+  }
+
+  auto comparator = BuildAscDescComparator<size_t>(
+      [&](const size_t& l, const size_t& r) { return sortable_values[l] < sortable_values[r]; },
+      [&](const size_t& l, const size_t& r) { return sortable_values[l] > sortable_values[r]; },
+      sort_order);
+
+  size_t size = ids_to_sort.size();
+  if (shard_limit < size) {
+    std::partial_sort(ids_to_sort.begin(), ids_to_sort.begin() + shard_limit, ids_to_sort.end(),
+                      std::move(comparator));
+    size = shard_limit;
+    ids_to_sort.resize(shard_limit);
+  } else {
+    std::sort(ids_to_sort.begin(), ids_to_sort.end(), std::move(comparator));
+  }
+
+  // Now we need to fill the search_result in sorted order
+  // And also fill the docs_data with the values
+  search_result->RearrangeAccordingToIndexes(ids_to_sort);
+  std::vector<SerializedSearchDoc> docs_data(size);
+  for (size_t i = 0; i < size; i++) {
+    const auto doc_id = search_result->ids[i];
+    auto& value = sortable_values[ids_to_sort[i]];
+
+    docs_data[i].key = key_index.Get(doc_id);
+    docs_data[i].values[field_alias] = std::move(value);
+  }
+  return docs_data;
 }
 
-bool SerializedSearchDoc::operator>=(const SerializedSearchDoc& other) const {
-  return this->score >= other.score;
+// This method can change the order of the elements and also resize the vectors in search_result
+std::vector<SerializedSearchDoc> SortSearchResultForSortableField(
+    std::string_view field_alias, SortOrder order, size_t shard_limit,
+    const BaseSortIndex& sort_index, const ShardDocIndex::DocKeyIndex& key_index,
+    SearchAlrgorithmResult* search_result) {
+  auto sortable_values = sort_index.Sort(shard_limit, order, search_result);
+
+  const size_t size = search_result->ids.size();
+  DCHECK(sortable_values.size() == size);
+
+  std::vector<SerializedSearchDoc> docs_data(size);
+  for (size_t i = 0; i < size; i++) {
+    const DocId doc_id = search_result->ids[i];
+    docs_data[i].key = key_index.Get(doc_id);
+    docs_data[i].values[field_alias] = std::move(sortable_values[i]);
+  }
+  return docs_data;
+}
+
+}  // namespace
+
+bool operator==(const SearchField& l, const std::string_view& r) {
+  return l.NameView() == r;
 }
 
 bool SearchParams::ShouldReturnField(std::string_view alias) const {
@@ -346,58 +419,111 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   if (!search_results.error.empty())
     return SearchResult{facade::ErrorReply{std::move(search_results.error)}};
 
+  /* We need to skip the knn score alias from the fields to load,
+     because it is not a field in the schema, but an alias for the KNN
+     score that is added by the search algorithm.
+     If the sort option is provided, we also need to skip the sort field
+     from the fields to load, because it will be loaded during sorting. */
   SearchFieldsList fields_to_load = ToSV(
-      base_->schema, params.ShouldReturnAllFields() ? params.load_fields : params.return_fields);
+      base_->schema, params.ShouldReturnAllFields() ? params.load_fields : params.return_fields,
+      {search_algo->GetKnnScoreAlias(),
+       params.sort_option ? params.sort_option->field.NameView() : ""sv});
 
-  vector<SerializedSearchDoc> out;
-  out.reserve(search_results.ids.size());
+  const size_t shard_limit = params.limit_offset + params.limit_total;
+  const size_t size = std::min(search_results.ids.size(), shard_limit);
+
+  std::vector<SerializedSearchDoc> out;
+
+  bool out_initialized = false;
+  if (params.sort_option &&
+      params.sort_option->field.NameView() != search_algo->GetKnnScoreAlias()) {
+    auto& field = params.sort_option->field;
+
+    auto sorting_result =
+        SortSearchResult(op_args, field, shard_limit, params.sort_option->order, &search_results);
+    if (!sorting_result) {
+      return SearchResult{std::move(sorting_result.error())};
+    }
+
+    out = std::move(sorting_result).value();
+    out_initialized = true;
+  } else {
+    // We need to resize the results
+    search_results.ids.resize(size);
+    search_results.scores.resize(size);
+  }
+
+  DCHECK(search_results.ids.size() == size &&
+         (search_results.scores.empty() || search_results.scores.size() == size));
 
   size_t expired_count = 0;
-  for (size_t i = 0; i < search_results.ids.size(); i++) {
-    const DocId doc = search_results.ids[i];
-    auto key = key_index_.Get(doc);
-    auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
-
-    if (!it || !IsValid(*it)) {  // Item must have expired
+  for (size_t i = 0; i < size; i++) {
+    const auto& doc_key = out_initialized ? out[i].key : key_index_.Get(search_results.ids[i]);
+    auto it = db_slice.FindReadOnly(op_args.db_cntx, doc_key, base_->GetObjCode());
+    if (!it || !IsValid(*it)) {  // Item can be expired
       expired_count++;
       continue;
     }
 
+    if (!out_initialized) {
+      out.emplace_back();
+      out[i].key = doc_key;
+    }
+
     auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
 
-    SearchDocData doc_data;
+    auto& values = out[i].values;
+    values.reserve(fields_to_load.size() + 1);
+
     if (params.ShouldReturnAllFields()) {
-      /*
-      In this case we need to load the whole document or loaded fields.
-      For JSON indexes it would be {"$", <the whole document as string>}
-      */
-      doc_data = accessor->SerializeDocument(base_->schema);
+      /* In this case we need to load the whole document or loaded fields.
+         For JSON indexes it would be {"$", <the whole document as string>} */
+      SearchDocData doc_data = accessor->SerializeDocument(base_->schema);
+      values.insert(std::make_move_iterator(doc_data.begin()),
+                    std::make_move_iterator(doc_data.end()));
     }
 
     SearchDocData loaded_fields = accessor->Serialize(base_->schema, fields_to_load);
-    doc_data.insert(std::make_move_iterator(loaded_fields.begin()),
-                    std::make_move_iterator(loaded_fields.end()));
+    values.insert(std::make_move_iterator(loaded_fields.begin()),
+                  std::make_move_iterator(loaded_fields.end()));
 
-    if (params.sort_option) {
-      auto& field = params.sort_option->field;
-      auto fident = field.GetIdentifier(base_->schema, false);
-      if (IsSortableField(fident, base_->schema)) {
-        doc_data[field.NameView()] = indices_->GetSortIndexValue(doc, fident);
-      } else {
-        SearchDocData sort_field_data = accessor->Serialize(base_->schema, {field});
-        DCHECK_LE(sort_field_data.size(), 1u);
-        if (!sort_field_data.empty()) {
-          doc_data[field.NameView()] = sort_field_data.begin()->second;
-        }
-      }
+    if (!search_results.scores.empty()) {
+      out[i].score = search_results.scores[i];
     }
-
-    auto score = search_results.scores.empty() ? monostate{} : std::move(search_results.scores[i]);
-    out.push_back(SerializedSearchDoc{string{key}, std::move(doc_data), std::move(score)});
   }
 
   return SearchResult{search_results.total - expired_count, std::move(out),
                       std::move(search_results.profile)};
+}
+
+io::Result<std::vector<SerializedSearchDoc>, facade::ErrorReply> ShardDocIndex::SortSearchResult(
+    const OpArgs& op_args, const SearchField& field, size_t shard_limit,
+    search::SortOrder sort_order, search::SearchAlrgorithmResult* search_result) const {
+  auto fident = field.GetIdentifier(base_->schema, false);
+
+  if (IsSortableField(fident, base_->schema)) {
+    BaseSortIndex* sort_index = indices_ ? indices_->GetSortIndex(fident) : nullptr;
+    if (!sort_index) {
+      return make_unexpected(
+          facade::ErrorReply{absl::StrCat("-Sortable field is not found: "sv, field.NameView())});
+    }
+    return SortSearchResultForSortableField(field.NameView(), sort_order, shard_limit, *sort_index,
+                                            key_index_, search_result);
+  }
+
+  auto get_value = [&](size_t index) -> std::optional<SortableValue> {
+    DCHECK(index < search_result->ids.size());
+    const auto& doc_id = search_result->ids[index];
+    const auto& key = key_index_.Get(doc_id);
+    auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
+    if (it && IsValid(*it)) {
+      auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
+      return accessor->SerializeSingleField(base_->schema, field);
+    }
+    return std::nullopt;
+  };
+  return SortSearchResultForNonSortableField(field.NameView(), sort_order, shard_limit, key_index_,
+                                             get_value, search_result);
 }
 
 vector<SearchDocData> ShardDocIndex::SearchForAggregator(

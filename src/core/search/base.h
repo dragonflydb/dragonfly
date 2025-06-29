@@ -19,6 +19,8 @@
 
 namespace dfly::search {
 
+struct SearchAlrgorithmResult;
+
 using DocId = uint32_t;
 
 enum class VectorSimilarity { L2, COSINE };
@@ -52,8 +54,22 @@ struct WrappedStrPtr {
   std::unique_ptr<char[]> ptr;
 };
 
-// Score produced either by KNN (float) or SORT (double / wrapped str)
-using ResultScore = std::variant<std::monostate, float, double, WrappedStrPtr>;
+// Score produced either by KNN
+using ResultScore = float;
+
+// Sort order for sorting indices and results.
+enum class SortOrder { ASC, DESC };
+
+/* Optimized comparator for ascending or descending sort.
+   Instead of checking the sort order on every comparison, like this:
+    [](const T& l, const T& r) { return asc ? l < r : l > r; }
+   this method returns the correct comparison function once at construction:
+    - less_   — used for ascending order
+    - greater_— used for descending order */
+template <typename T>
+std::function<bool(const T&, const T&)> BuildAscDescComparator(
+    std::function<bool(const T&, const T&)> less, std::function<bool(const T&, const T&)> greater,
+    SortOrder order);
 
 // Values are either sortable as doubles or strings, or not sortable at all.
 // Contrary to ResultScore it doesn't include KNN results and is not optimized for smaller struct
@@ -105,7 +121,13 @@ struct BaseIndex {
 // Base class for type-specific sorting indices.
 struct BaseSortIndex : BaseIndex {
   virtual SortableValue Lookup(DocId doc) const = 0;
-  virtual std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const = 0;
+
+  /* Sorts the given document IDs based on index values.
+     shard_limit is the maximum number of documents to keep after sorting,
+     equal to offset + limit from the query.
+     It calls RearrangeAccordingToIndexes on result */
+  virtual std::vector<SortableValue> Sort(size_t shard_limit, SortOrder sort_order,
+                                          SearchAlrgorithmResult* search_result) const = 0;
 };
 
 /* Used for converting field values to double. Returns std::nullopt if the conversion fails */
@@ -116,6 +138,17 @@ std::optional<double> ParseNumericField(std::string_view value);
    details of absl::InlineVector, we are getting a -Wmaybe-uninitialized compiler warning. To
    suppress this false warning, we temporarily disable it around this block of code using GCC
    diagnostic directives. */
+template <typename InlinedVector> std::optional<InlinedVector> EmptyAccessResult();
+
+// Implementation
+/******************************************************************/
+template <typename T>
+std::function<bool(const T&, const T&)> BuildAscDescComparator(
+    std::function<bool(const T&, const T&)> less, std::function<bool(const T&, const T&)> greater,
+    SortOrder order) {
+  return order == SortOrder::ASC ? less : greater;
+}
+
 template <typename InlinedVector> std::optional<InlinedVector> EmptyAccessResult() {
 #if !defined(__clang__)
   // GCC 13.1 throws spurious warnings around this code.

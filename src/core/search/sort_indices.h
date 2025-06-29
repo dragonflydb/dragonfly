@@ -36,7 +36,9 @@ template <typename T> struct SimpleValueSortIndex : public BaseSortIndex {
   SimpleValueSortIndex(PMR_NS::memory_resource* mr);
 
   SortableValue Lookup(DocId doc) const override;
-  std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const override;
+
+  std::vector<SortableValue> Sort(size_t shard_limit, SortOrder sort_order,
+                                  SearchAlrgorithmResult* search_result) const override;
 
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
