@@ -702,19 +702,9 @@ string FailedCommandToString(std::string_view command, facade::CmdArgList args,
   return result;
 }
 
-void SetRssOomDenyRatioOnAllThreads(double ratio) {
-  auto cb = [ratio](unsigned, auto*) { ServerState::tlocal()->rss_oom_deny_ratio = ratio; };
-  shard_set->pool()->AwaitBrief(cb);
-}
-
-void SetSerializationMaxChunkSize(size_t val) {
-  auto cb = [val](unsigned, auto*) { ServerState::tlocal()->serialization_max_chunk_size = val; };
-  shard_set->pool()->AwaitBrief(cb);
-}
-
-void SetMaxSquashedCmdNum(int32_t val) {
-  auto cb = [val](unsigned, auto*) { ServerState::tlocal()->max_squash_cmd_num = val; };
-  shard_set->pool()->AwaitBrief(cb);
+template <typename T> void Update(T ServerState::*member, T val) {
+  shard_set->pool()->AwaitBrief(
+      [member, val](unsigned, auto* p) { (ServerState::tlocal()->*member) = val; });
 }
 
 void SetHuffmanTable(const std::string& huffman_table) {
@@ -814,10 +804,11 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("max_eviction_per_heartbeat");
   config_registry.RegisterMutable("max_segment_to_consider");
 
-  config_registry.RegisterSetter<double>("rss_oom_deny_ratio",
-                                         [](double val) { SetRssOomDenyRatioOnAllThreads(val); });
-  config_registry.RegisterSetter<size_t>("serialization_max_chunk_size",
-                                         [](size_t val) { SetSerializationMaxChunkSize(val); });
+  config_registry.RegisterSetter<double>(
+      "rss_oom_deny_ratio", [](double val) { Update(&ServerState::rss_oom_deny_ratio, val); });
+  config_registry.RegisterSetter<size_t>("serialization_max_chunk_size", [](size_t val) {
+    Update(&ServerState::serialization_max_chunk_size, val);
+  });
 
   config_registry.RegisterMutable("pipeline_squash");
 
@@ -833,8 +824,8 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
         [val](unsigned tid, auto*) { facade::Connection::SetPipelineBufferLimit(tid, val); });
   });
 
-  config_registry.RegisterSetter<uint32_t>("max_squashed_cmd_num",
-                                           [](uint32_t val) { SetMaxSquashedCmdNum(val); });
+  config_registry.RegisterSetter<uint32_t>(
+      "max_squashed_cmd_num", [](uint32_t val) { Update(&ServerState::max_squash_cmd_num, val); });
 
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("replication_timeout");
@@ -904,9 +895,10 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   });
   Transaction::Init(shard_num);
 
-  SetRssOomDenyRatioOnAllThreads(absl::GetFlag(FLAGS_rss_oom_deny_ratio));
-  SetSerializationMaxChunkSize(absl::GetFlag(FLAGS_serialization_max_chunk_size));
-  SetMaxSquashedCmdNum(absl::GetFlag(FLAGS_max_squashed_cmd_num));
+  Update(&ServerState::rss_oom_deny_ratio, absl::GetFlag(FLAGS_rss_oom_deny_ratio));
+  Update(&ServerState::serialization_max_chunk_size,
+         absl::GetFlag(FLAGS_serialization_max_chunk_size));
+  Update(&ServerState::max_squash_cmd_num, absl::GetFlag(FLAGS_max_squashed_cmd_num));
   SetHuffmanTable(absl::GetFlag(FLAGS_huffman_table));
 
   // Requires that shard_set will be initialized before because server_family_.Init might
