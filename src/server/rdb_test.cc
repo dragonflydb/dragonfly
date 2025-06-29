@@ -315,6 +315,82 @@ TEST_F(RdbTest, HashmapExpiry) {
               RespArray(UnorderedElementsAre("key1", "val1", "key2", "val2")));
 }
 
+TEST_F(RdbTest, SaveLoadExpiredValuesHmap) {
+  // Add expiring elements
+  Run({"hsetex", "hkey", "1", "key3", "val3", "key4", "val4"});
+
+  RespExpr resp = Run({"TYPE", "hkey"});
+  ASSERT_EQ(resp, "hash");
+
+  AdvanceTime(10'000);
+  resp = Run({"save", "RDB"});
+  ASSERT_EQ(resp, "OK");
+
+  resp = Run({"TYPE", "hkey"});
+  ASSERT_EQ(resp, "hash");
+
+  Run({"debug", "reload"});
+
+  resp = Run({"TYPE", "hkey"});
+  ASSERT_EQ(resp, "none");
+}
+
+TEST_F(RdbTest, SaveLoadExpiredValuesHugeHmap) {
+  for (int i = 0; i < 50000; ++i) {
+    Run({"hsetex", "hkey", "1", absl::StrCat("key", i), "val"});
+  }
+
+  ASSERT_EQ(50000, CheckedInt({"hlen", "hkey"}));
+
+  RespExpr resp = Run({"TYPE", "hkey"});
+  ASSERT_EQ(resp, "hash");
+
+  AdvanceTime(10'000);
+
+  Run({"debug", "reload"});
+
+  resp = Run({"TYPE", "hkey"});
+  ASSERT_EQ(resp, "none");
+}
+
+TEST_F(RdbTest, SaveLoadExpiredValuesSSet) {
+  // Add expiring elements
+  Run({"saddex", "skey", "1", "key3", "key4"});
+
+  RespExpr resp = Run({"TYPE", "skey"});
+  ASSERT_EQ(resp, "set");
+
+  AdvanceTime(10'000);
+  resp = Run({"save", "RDB"});
+  ASSERT_EQ(resp, "OK");
+
+  resp = Run({"TYPE", "skey"});
+  ASSERT_EQ(resp, "set");
+
+  Run({"debug", "reload"});
+
+  resp = Run({"TYPE", "skey"});
+  ASSERT_EQ(resp, "none");
+}
+
+TEST_F(RdbTest, SaveLoadExpiredValuesHugeSet) {
+  for (int i = 0; i < 50000; ++i) {
+    Run({"saddex", "skey", "1", absl::StrCat("key", i)});
+  }
+
+  ASSERT_EQ(50000, CheckedInt({"scard", "skey"}));
+
+  RespExpr resp = Run({"TYPE", "skey"});
+  ASSERT_EQ(resp, "set");
+
+  AdvanceTime(10'000);
+
+  Run({"debug", "reload"});
+
+  resp = Run({"TYPE", "skey"});
+  ASSERT_EQ(resp, "none");
+}
+
 TEST_F(RdbTest, SetExpiry) {
   // Add non-expiring elements
   Run({"sadd", "key", "key1", "key2"});

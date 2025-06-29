@@ -375,6 +375,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       increment = 2;
     }
 
+    bool has_expired = false;
+
     for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
       string_view element = ToSV(ltrace->arr[i].rdb_var);
 
@@ -390,6 +392,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
 
         if (ttl_time != -1) {
           if (ttl_time < set->time_now()) {
+            has_expired = true;
             continue;
           }
 
@@ -401,6 +404,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
         ec_ = RdbError(errc::duplicate_key);
         return;
       }
+    }
+    if (set->Empty() && has_expired) {
+      ec_ = RdbError(errc::value_expired);
     }
   }
 
@@ -481,6 +487,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     });
     std::string key;
     std::string val;
+    bool has_expired = false;
     for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
       // ToSV may reference an internal buffer, therefore we can use only before the
       // next call to ToSV. To workaround, copy the key locally.
@@ -503,6 +510,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
 
         if (ttl_time != -1) {
           if (ttl_time < string_map->time_now()) {
+            has_expired = true;
             continue;
           }
 
@@ -516,10 +524,14 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
         return;
       }
     }
-    if (!config_.append) {
-      pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, string_map);
+    if (string_map->Empty() && has_expired) {
+      ec_ = RdbError(errc::value_expired);
+    } else {
+      if (!config_.append) {
+        pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, string_map);
+      }
+      std::move(cleanup).Cancel();
     }
-    std::move(cleanup).Cancel();
   }
 }
 
@@ -2516,7 +2528,7 @@ void RdbLoaderBase::CopyStreamId(const StreamID& src, struct streamID* dest) {
   dest->seq = src.seq;
 }
 
-void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, DbSlice* db_slice) {
+void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, Item* item, DbSlice* db_slice) {
   PrimeValue pv;
   PrimeValue* pv_ptr = &pv;
   DbIndex db_ind = db_cntx.db_index;
@@ -2534,16 +2546,18 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   // object.
   if (item->load_config.append) {
     append_res = db_slice->FindMutable(db_cntx, item->key);
-    if (!IsValid(append_res.it)) {
+    if (IsValid(append_res.it)) {
+      pv_ptr = &append_res.it->second;
+    } else {
       // If the item has expired we may not find the key. Note if the key
       // is found, but expired since we started loading, we still append to
       // avoid an inconsistent state where only part of the key is loaded.
-      if (item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms) {
+      if (!item->has_expired && (item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms)) {
         LOG(ERROR) << "Count not to find append key '" << item->key << "' in DB " << db_ind;
+        return;
       }
-      return;
+      item->load_config.append = false;
     }
-    pv_ptr = &append_res.it->second;
   }
 
   if (ec_ = FromOpaque(item->val, item->load_config, pv_ptr); ec_) {
@@ -2554,6 +2568,9 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
       } else {
         LOG(ERROR) << error;
       }
+      return;
+    } else if ((*ec_).value() == errc::value_expired) {
+      item->has_expired = true;
       return;
     }
     LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
@@ -2608,7 +2625,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
   bool dry_run = absl::GetFlag(FLAGS_rdb_load_dry_run);
 
-  for (const auto* item : ib) {
+  for (auto* item : ib) {
     if (dry_run) {
       continue;
     }
@@ -2635,8 +2652,7 @@ void RdbLoader::ResizeDb(size_t key_num, size_t expire_num) {
 //
 // Huge objects may be loaded in parts, where only a subset of elements are
 // loaded at a time. This reduces the memory required to load huge objects and
-// prevents LoadItemsBuffer blocking. (Note so far only RDB_TYPE_SET and
-// RDB_TYPE_SET_WITH_EXPIRY support partial reads).
+// prevents LoadItemsBuffer blocking.
 error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   std::string key;
   int64_t start = absl::GetCurrentTimeNanos();
@@ -2664,7 +2680,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
 
     // If the key can be discarded, we must still continue to read the
     // object from the RDB so we can read the next key.
-    if (ShouldDiscardKey(key, settings)) {
+    if (ShouldDiscardKey(key, *settings)) {
       pending_read_.reserve = 0;
       continue;
     }
@@ -2715,7 +2731,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   return kOk;
 }
 
-bool RdbLoader::ShouldDiscardKey(std::string_view key, ObjSettings* settings) const {
+bool RdbLoader::ShouldDiscardKey(std::string_view key, const ObjSettings& settings) const {
   if (!load_unowned_slots_ && IsClusterEnabled()) {
     const auto cluster_config = cluster::ClusterConfig::Current();
     if (cluster_config && !cluster_config->IsMySlot(key)) {
@@ -2731,7 +2747,7 @@ bool RdbLoader::ShouldDiscardKey(std::string_view key, ObjSettings* settings) co
    * Similarly if the RDB is the preamble of an AOF file, we want to
    * load all the keys as they are, since the log of operations later
    * assume to work in an exact keyspace state. */
-  if (ServerState::tlocal()->is_master && settings->has_expired) {
+  if (ServerState::tlocal()->is_master && (settings.has_expired)) {
     VLOG(3) << "Expire key on read: " << key;
     return true;
   }
