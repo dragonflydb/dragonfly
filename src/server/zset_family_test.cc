@@ -305,7 +305,7 @@ TEST_F(ZSetFamilyTest, ZMScoreNonExistentKeys) {
               ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL), ArgType(RespExpr::NIL)));
 }
 
-TEST_F(ZSetFamilyTest, ZRangeRank) {
+TEST_F(ZSetFamilyTest, ByScore) {
   Run({"zadd", "x", "1.1", "a", "2.1", "b"});
   EXPECT_THAT(Run({"zrangebyscore", "x", "0", "(1.1"}), ArrLen(0));
   EXPECT_THAT(Run({"zrangebyscore", "x", "-inf", "1.1", "limit", "0", "10"}), "a");
@@ -506,6 +506,9 @@ TEST_F(ZSetFamilyTest, ZRange) {
   resp = Run({"zrange", "key", "+", "[cool", "BYLEX", "LIMIT", "2", "2", "REV"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre("great", "foo"));
+
+  resp = Run({"zrange", "key", "5", "2147483648"});
+  ASSERT_THAT(resp, RespElementsAre("foo", "great", "hill", "omega"));
 }
 
 TEST_F(ZSetFamilyTest, ZRevRange) {
