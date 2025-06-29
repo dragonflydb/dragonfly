@@ -98,7 +98,7 @@ void Aggregator::DoSort(const SortParams& sort_params) {
       if (lv == rv) {
         continue;
       }
-      return order == SortOrder::ASC ? lv < rv : lv > rv;
+      return order == search::SortOrder::ASC ? lv < rv : lv > rv;
     }
     return false;
   };

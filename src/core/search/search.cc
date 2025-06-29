@@ -92,15 +92,15 @@ struct IndexResult {
   }
 
   // Move out of owned or copy borrowed, truncate to limit if set
-  DocVec Take(optional<size_t> limit = nullopt) {
+  DocVec Take() {
     if (IsOwned()) {
       auto out = std::move(get<DocVec>(value_));
-      out.resize(min(limit.value_or(out.size()), out.size()));
+      out.resize(out.size());
       return out;
     }
 
-    auto cb = [limit](auto* set) {
-      DocVec out(min(limit.value_or(set->size()), set->size()));
+    auto cb = [](auto* set) {
+      DocVec out(set->size());
       auto it = set->begin();
       for (size_t i = 0; it != set->end() && i < out.size(); ++i, ++it)
         out[i] = *it;
@@ -416,10 +416,14 @@ struct BasicSearch {
     };
     visit(cb, sub_results.Borrowed());
 
-    size_t prefix_size = min(knn.limit, knn_distances_.size());
-    partial_sort(knn_distances_.begin(), knn_distances_.begin() + prefix_size,
-                 knn_distances_.end());
-    knn_distances_.resize(prefix_size);
+    if (knn.limit < knn_distances_.size()) {
+      // TODO: use min-heap if limit is much smaller than the number of results
+      std::partial_sort(knn_distances_.begin(), knn_distances_.begin() + knn.limit,
+                        knn_distances_.end());
+      knn_distances_.resize(knn.limit);
+    } else {
+      std::sort(knn_distances_.begin(), knn_distances_.end());
+    }
   }
 
   void SearchKnnHnsw(HnswVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {
@@ -484,7 +488,7 @@ struct BasicSearch {
     return result;
   }
 
-  SearchResult Search(const AstNode& query) {
+  SearchAlrgorithmResult Search(const AstNode& query) {
     IndexResult result = SearchGeneric(query, "", true);
 
     // Extract profile if enabled
@@ -492,12 +496,12 @@ struct BasicSearch {
         profile_builder_ ? make_optional(profile_builder_->Take()) : nullopt;
 
     size_t total = result.Size();
-    return SearchResult{total,
-                        max(total, preagg_total_),
-                        result.Take(),
-                        std::move(scores_),
-                        std::move(profile),
-                        std::move(error_)};
+    return SearchAlrgorithmResult{total,
+                                  max(total, preagg_total_),
+                                  result.Take(),
+                                  std::move(scores_),
+                                  std::move(profile),
+                                  std::move(error_)};
   }
 
   const FieldIndices* indices_;
@@ -684,6 +688,25 @@ SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view field_
   return it->second->Lookup(doc);
 }
 
+void SearchAlrgorithmResult::RearrangeAccordingToIndexes(absl::Span<const size_t> indices) {
+  const size_t new_size = indices.size();
+  std::vector<DocId> new_ids(indices.size());
+  std::vector<ResultScore> new_scores(scores.empty() ? 0 : indices.size());
+
+  for (size_t i = 0; i < new_size; ++i) {
+    const auto index = indices[i];
+    DCHECK(index < ids.size());
+
+    new_ids[i] = ids[index];
+    if (!scores.empty()) {
+      new_scores[i] = scores[index];
+    }
+  }
+
+  ids = std::move(new_ids);
+  scores = std::move(new_scores);
+}
+
 const Synonyms* FieldIndices::GetSynonyms() const {
   return synonyms_;
 }
@@ -710,21 +733,21 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params) {
   return true;
 }
 
-SearchResult SearchAlgorithm::Search(const FieldIndices* index) const {
+SearchAlrgorithmResult SearchAlgorithm::Search(const FieldIndices* index) const {
   auto bs = BasicSearch{index};
   if (profiling_enabled_)
     bs.EnableProfiling();
   return bs.Search(*query_);
 }
 
-optional<KnnScoreSortOption> SearchAlgorithm::GetKnnScoreSortOption() const {
+std::string_view SearchAlgorithm::GetKnnScoreAlias() const {
   DCHECK(query_);
 
   // KNN query
   if (auto* knn = get_if<AstKnnNode>(query_.get()); knn)
-    return KnnScoreSortOption{string_view{knn->score_alias}, knn->limit};
+    return std::string_view{knn->score_alias};
 
-  return nullopt;
+  return ""sv;
 }
 
 void SearchAlgorithm::EnableProfiling() {

@@ -16,6 +16,7 @@
 
 #include "base/pmr/memory_resource.h"
 #include "core/mi_memory_resource.h"
+#include "core/search/base.h"
 #include "core/search/search.h"
 #include "core/search/synonyms.h"
 #include "server/common.h"
@@ -33,9 +34,6 @@ struct SerializedSearchDoc {
   std::string key;
   SearchDocData values;
   search::ResultScore score;
-
-  bool operator<(const SerializedSearchDoc& other) const;
-  bool operator>=(const SerializedSearchDoc& other) const;
 };
 
 struct SearchResult {
@@ -135,14 +133,14 @@ class SearchField {
   StringOrView new_alias_;
 };
 
-using SearchFieldsList = std::vector<SearchField>;
+bool operator==(const SearchField& l, const std::string_view& r);
 
-enum class SortOrder { ASC, DESC };
+using SearchFieldsList = std::vector<SearchField>;
 
 struct SearchParams {
   struct SortOption {
     SearchField field;
-    SortOrder order = SortOrder::ASC;
+    search::SortOrder order = search::SortOrder::ASC;
   };
 
   // Parameters for "LIMIT offset total": select total amount documents with a specific offset from
@@ -215,6 +213,7 @@ class ShardDocIndices;
 
 // Stores internal search indices for documents of a document index on a specific shard.
 class ShardDocIndex {
+ public:
   friend class ShardDocIndices;
   using DocId = search::DocId;
 
@@ -233,7 +232,6 @@ class ShardDocIndex {
     DocId last_id_ = 0;
   };
 
- public:
   // Index must be rebuilt at least once after intialization
   ShardDocIndex(std::shared_ptr<const DocIndex> index);
 
@@ -272,6 +270,10 @@ class ShardDocIndex {
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
+
+  io::Result<std::vector<SerializedSearchDoc>, facade::ErrorReply> SortSearchResult(
+      const OpArgs& op_args, const SearchField& field, size_t shard_limit,
+      search::SortOrder sort_order, search::SearchAlrgorithmResult* search_result) const;
 
  private:
   std::shared_ptr<const DocIndex> base_;
