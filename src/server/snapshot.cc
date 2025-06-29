@@ -446,6 +446,7 @@ bool SliceSnapshot::IsPositionSerialized(DbIndex id, PrimeTable::Cursor cursor) 
 }
 
 void SliceSnapshot::OnMoved(DbIndex id, const DbSlice::MovedItemsVec& items) {
+  std::lock_guard barrier(big_value_mu_);
   DCHECK(!use_snapshot_version_);
   for (const auto& item_cursors : items) {
     // If item was moved from a bucket that was serialized to a bucket that was not serialized

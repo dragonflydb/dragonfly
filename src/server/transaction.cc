@@ -703,9 +703,6 @@ void Transaction::RunCallback(EngineShard* shard) {
     LOG(FATAL) << "Unexpected exception " << e.what();
   }
 
-  auto& db_slice = GetDbSlice(shard->shard_id());
-  db_slice.OnCbFinishBlocking();
-
   // Handle result flags to alter behaviour.
   if (result.flags & RunnableResult::AVOID_CONCLUDING) {
     // Multi shard callbacks should either all or none choose to conclude. They can't communicate,
@@ -720,6 +717,9 @@ void Transaction::RunCallback(EngineShard* shard) {
     LogAutoJournalOnShard(shard, result);
     MaybeInvokeTrackingCb();
   }
+
+  auto& db_slice = GetDbSlice(shard->shard_id());
+  db_slice.OnCbFinishBlocking();
 }
 
 // TODO: For multi-transactions we should be able to deduce mode() at run-time based
