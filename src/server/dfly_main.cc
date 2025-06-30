@@ -724,6 +724,7 @@ void ParseFlagsFromEnv() {
   }
 }
 
+// Sets global variables for executable and config file path for info reporting.
 void ParseFlagfileAndSetGlobals(int argc, char* argv[]) {
     std::string config_file_path;
     std::string executable_path = argv[0];
@@ -741,6 +742,9 @@ void ParseFlagfileAndSetGlobals(int argc, char* argv[]) {
 }
 
 int main(int argc, char* argv[]) {
+  // Set global executable and config file path before parsing flags.
+  ParseFlagfileAndSetGlobals(argc, argv);
+
   absl::SetProgramUsageMessage(
       R"(a modern in-memory store.
 
@@ -880,8 +884,6 @@ Usage: dragonfly [FLAGS]
       unlink(pidfile_path.c_str());
     }
   }
-
-  ParseFlagfileAndSetGlobals(argc, argv);
 
   return 0;
 }
