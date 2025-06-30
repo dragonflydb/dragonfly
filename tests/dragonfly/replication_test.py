@@ -2086,7 +2086,6 @@ async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
         proactor_threads=2,
         cache_mode="true",
         maxmemory="512mb",
-        logtostdout="true",
         enable_heartbeat_eviction="false",
         rss_oom_deny_ratio=1.3,
     )
