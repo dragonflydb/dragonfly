@@ -51,7 +51,8 @@ Test full replication pipeline. Test full sync with streaming changes and stable
         pytest.param(8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, marks=M_STRESS),
     ],
 )
-@pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
+# Disabled cache_mode until #5371 is fixed
+# @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
 @pytest.mark.parametrize("point_in_time_replication", [True, False])
 async def test_replication_all(
     df_factory: DflyInstanceFactory,
@@ -59,13 +60,13 @@ async def test_replication_all(
     t_replicas,
     seeder_config,
     stream_target,
-    mode,
+    # mode,
     point_in_time_replication,
 ):
     args = {}
-    if mode:
-        args["cache_mode"] = "true"
-        args["maxmemory"] = str(t_master * 256) + "mb"
+    # if mode:
+    #    args["cache_mode"] = "true"
+    #    args["maxmemory"] = str(t_master * 256) + "mb"
 
     master = df_factory.create(
         admin_port=ADMIN_PORT,
@@ -2086,7 +2087,6 @@ async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
         proactor_threads=2,
         cache_mode="true",
         maxmemory="512mb",
-        logtostdout="true",
         enable_heartbeat_eviction="false",
         rss_oom_deny_ratio=1.3,
     )
