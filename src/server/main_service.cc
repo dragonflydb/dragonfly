@@ -1141,11 +1141,9 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
     return ErrorReply{"-READONLY You can't write against a read only replica."};
 
   if (multi_active) {
-    if (absl::EndsWith(cmd_name, "SUBSCRIBE"))
-      return ErrorReply{absl::StrCat("Can not call ", cmd_name, " within a transaction")};
-
-    if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB")
-      return ErrorReply{absl::StrCat("'", cmd_name, "' inside MULTI is not allowed")};
+    if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB" ||
+        absl::EndsWith(cmd_name, "SUBSCRIBE"))
+      return ErrorReply{absl::StrCat("'", cmd_name, "' not allowed inside a transaction")};
   }
 
   if (IsClusterEnabled()) {
