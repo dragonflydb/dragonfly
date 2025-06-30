@@ -13,6 +13,7 @@
 #include <croncpp.h>  // cron::cronexpr
 #include <sys/resource.h>
 #include <sys/utsname.h>
+#include <unistd.h>  // for getpid()
 
 #include <algorithm>
 #include <chrono>
@@ -2444,6 +2445,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("dragonfly_version", GetVersion());
     append("redis_mode", GetRedisMode());
     append("arch_bits", 64);
+    // Add process_id for Redis compatibility (same order as Redis INFO output).
+    append("process_id", getpid());
 
     if (show_managed_info) {
       append("os", GetOSString());
