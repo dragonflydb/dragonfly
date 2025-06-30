@@ -416,6 +416,9 @@ TEST_F(JsonFamilyTest, StrLen) {
   resp = Run({"JSON.STRLEN", "non_existent_key", "$.c.b"});
   EXPECT_THAT(resp, ErrArg("no such key"));
 
+  resp = Run({"JSON.STRLEN", "non_existent_key", "$"});
+  EXPECT_THAT(resp, ErrArg("no such key"));
+
   /*
   Test response from several possible values
   In JSON V2, the response is an array of all possible values
@@ -469,11 +472,6 @@ TEST_F(JsonFamilyTest, StrLenLegacy) {
 
   resp = Run({"JSON.STRLEN", "json", ".d.*"});
   EXPECT_THAT(resp, IntArg(1));
-}
-
-TEST_F(JsonFamilyTest, StrLenNonExistentKey) {
-  auto resp = Run({"JSON.STRLEN", "non_existent_key", "$"});
-  EXPECT_THAT(resp, ErrArg("no such key"));
 }
 
 TEST_F(JsonFamilyTest, ObjLen) {
