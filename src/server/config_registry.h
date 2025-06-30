@@ -4,7 +4,6 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/reflection.h>
-#include <set>
 
 #include "util/fibers/synchronization.h"
 
@@ -54,10 +53,6 @@ class ConfigRegistry {
   void Reset();
 
   std::vector<std::string> List(std::string_view glob) const ABSL_LOCKS_EXCLUDED(mu_);
-
-  bool Rewrite() const;
-
-  std::set<std::string> set_by_user_;
 
  private:
   void RegisterInternal(std::string_view name, bool is_mutable, WriteCb cb)
