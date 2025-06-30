@@ -688,6 +688,13 @@ size_t SortedMap::LexCount(const zlexrangespec& range) const {
   if (score_tree->Size() == 0)
     return 0;
 
+  // Ranges that will always be zero
+  if ((range.min == cminstring && range.max == cminstring) ||
+      (range.min == cmaxstring && range.max == cmaxstring) ||
+      (range.min == cmaxstring && range.max == cminstring)) {
+    return 0;
+  }
+
   uint32_t min_rank = 0;
   detail::BPTreePath<ScoreSds> path;
 

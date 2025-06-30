@@ -1185,6 +1185,10 @@ TEST_F(ZSetFamilyTest, Count) {
 
   EXPECT_THAT(CheckedInt({"zcount", "key", "-inf", "+inf"}), 129);
   EXPECT_THAT(CheckedInt({"zlexcount", "key", "-", "+"}), 129);
+  // Ranges that are expected to be zero
+  EXPECT_THAT(CheckedInt({"ZLEXCOUNT", "key", "-", "-"}), 0);
+  EXPECT_THAT(CheckedInt({"ZLEXCOUNT", "key", "+", "-"}), 0);
+  EXPECT_THAT(CheckedInt({"ZLEXCOUNT", "key", "+", "-"}), 0);
 }
 
 TEST_F(ZSetFamilyTest, RangeLimit) {
