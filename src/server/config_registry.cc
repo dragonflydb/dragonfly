@@ -15,7 +15,6 @@
 #include "server/common.h"
 #include "server/server_family.h"
 #include <sys/stat.h>
-111
 
 namespace dfly {
 namespace {
