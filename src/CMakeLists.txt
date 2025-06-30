@@ -40,7 +40,7 @@ Message(STATUS "THIRD_PARTY_LIB_DIR ${THIRD_PARTY_LIB_DIR}")
 include(external_libs.cmake)
 
 if(ENABLE_GIT_VERSION)
-    include(GetGitRevisionDescription)
+    include(GetGitRevisionDescription.cmake)
     get_git_head_revision(GIT_REFSPEC GIT_SHA1)
     git_local_changes(GIT_CLEAN_DIRTY)
     if("${GIT_CLEAN_DIRTY}" STREQUAL "DIRTY")
