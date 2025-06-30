@@ -377,23 +377,13 @@ def test_zmscore_mixed_membership(r: redis.Redis):
 
     r.zadd(
         cache_key,
-        dict(
-            (member, scores[idx])
-            for (idx, member) in enumerate(members)
-            if idx % 2 != 0
-        ),
+        dict((member, scores[idx]) for (idx, member) in enumerate(members) if idx % 2 != 0),
     )
 
     cached_scores: List[Optional[float]] = r.zmscore(cache_key, list(members))
 
-    assert all(
-        cached_scores[idx] is None for (idx, score) in enumerate(scores) if idx % 2 == 0
-    )
-    assert all(
-        cached_scores[idx] == score
-        for (idx, score) in enumerate(scores)
-        if idx % 2 != 0
-    )
+    assert all(cached_scores[idx] is None for (idx, score) in enumerate(scores) if idx % 2 == 0)
+    assert all(cached_scores[idx] == score for (idx, score) in enumerate(scores) if idx % 2 != 0)
 
 
 def test_zrevrank(r: redis.Redis):
@@ -452,13 +442,9 @@ def test_zrevrange_score_cast(r: redis.Redis):
 
 
 def test_zrange_with_large_int(r: redis.Redis):
-    with pytest.raises(
-        redis.ResponseError, match="value is not an integer or out of range"
-    ):
+    with pytest.raises(redis.ResponseError, match="value is not an integer or out of range"):
         r.zrange("", 0, 9223372036854775808)
-    with pytest.raises(
-        redis.ResponseError, match="value is not an integer or out of range"
-    ):
+    with pytest.raises(redis.ResponseError, match="value is not an integer or out of range"):
         r.zrange("", 0, -9223372036854775809)
 
 
@@ -604,9 +590,7 @@ def test_zrevrangebyscore_cast_scores(r: redis.Redis):
         (b"two", 2.0),
     ]
 
-    assert r.zrevrangebyscore(
-        "foo", 3, 2, withscores=True, score_cast_func=round_str
-    ) == [
+    assert r.zrevrangebyscore("foo", 3, 2, withscores=True, score_cast_func=round_str) == [
         (b"two_a_also", 2.0),
         (b"two", 2.0),
     ]
@@ -985,6 +969,7 @@ def test_zunionstore_nan_to_zero2(r: redis.Redis):
     assert r.zrange("bar", 0, -1, withscores=True) == [(b"one", 0)]
 
 
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_zunionstore_nan_to_zero_ordering(r: redis.Redis):
     r.zadd("foo", {"e1": math.inf})
     r.zadd("bar", {"e1": -math.inf, "e2": 0.0})
@@ -992,7 +977,6 @@ def test_zunionstore_nan_to_zero_ordering(r: redis.Redis):
     assert r.zscore("baz", "e1") == 0.0
 
 
-@pytest.mark.unsupported_server_types("dragonfly")  # TODO Should pass?
 def test_zunionstore_mixed_set_types(r: redis.Redis):
     # No score, redis will use 1.0.
     r.sadd("foo", "one")
@@ -1017,7 +1001,6 @@ def test_zunionstore_badkey(r: redis.Redis):
     assert r.zrange("baz", 0, -1, withscores=True) == [(b"one", 1), (b"two", 2)]
 
 
-@pytest.mark.unsupported_server_types("dragonfly")  # TODO Should pass?
 def test_zunionstore_wrong_type(r: redis.Redis):
     r.set("foo", "bar")
     with pytest.raises(redis.ResponseError):

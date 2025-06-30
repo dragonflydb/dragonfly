@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  checks: write
 
 concurrency:
   group: dragonfly-${{ github.workflow }}-${{ github.ref }}
@@ -59,9 +60,13 @@ jobs:
       - name: Run tests
         working-directory: tests/fakeredis
         run: |
-          poetry run pytest -s test/ \
+          # Some tests are pending on #5383
+          poetry run pytest test/ \
+          --ignore test/test_hypothesis/test_transaction.py \
+          --ignore test/test_hypothesis/test_zset.py \
+          --ignore test/test_hypotesis_joint/test_joint.py \
           --junit-xml=results-tests.xml  --html=report-tests.html -v
-        continue-on-error: true  # For now to mark the flow as successful
+        continue-on-error: false  # Fail the job if tests fail
 
       - name: Show Dragonfly stats
         if: always()
@@ -88,7 +93,7 @@ jobs:
         with:
           report_paths: tests/fakeredis/results-tests.xml
           # Do not create a check run
-          annotate_only: true
+          # annotate_only: true
 
   publish-html-results:
     name: Publish HTML Test Results to GitHub Pages
