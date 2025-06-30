@@ -2144,15 +2144,6 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
   if (sub_cmd == "RESETSTAT") {
     ResetStat(cmd_cntx.conn_cntx->ns);
     return builder->SendOk();
-  } else if (sub_cmd == "REWRITE") {
-    if (g_config_file_path.empty()) {
-      return builder->SendError("The server is running without a config file");
-    }
-    if (config_registry.Rewrite()) {
-      return builder->SendOk();
-    } else {
-      return builder->SendError("Failed to rewrite config file");
-    }
   } else {
     return builder->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErrType);
   }
