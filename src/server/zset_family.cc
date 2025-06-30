@@ -7,14 +7,10 @@
 #include "server/acl/acl_commands_def.h"
 
 extern "C" {
-#include "redis/geo.h"
-#include "redis/geohash.h"
-#include "redis/geohash_helper.h"
 #include "redis/listpack.h"
 #include "redis/redis_aux.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"
-#include "redis/zset.h"
 }
 
 #include "base/logging.h"
@@ -231,14 +227,15 @@ class IntervalVisitor {
 
   void Next(uint8_t* zl, uint8_t** eptr, uint8_t** sptr) const {
     if (params_.reverse) {
-      zzlPrev(zl, eptr, sptr);
+      detail::ZzlPrev(zl, eptr, sptr);
     } else {
-      zzlNext(zl, eptr, sptr);
+      detail::ZzlNext(zl, eptr, sptr);
     }
   }
 
   bool IsUnder(double score, const zrangespec& spec) const {
-    return params_.reverse ? zslValueGteMin(score, &spec) : zslValueLteMax(score, &spec);
+    return params_.reverse ? detail::ZslValueGteMin(score, &spec)
+                           : detail::ZslValueLteMax(score, &spec);
   }
 
   void AddResult(const uint8_t* vstr, unsigned vlen, long long vlon, double score);
@@ -310,7 +307,7 @@ void IntervalVisitor::operator()(const ZSetFamily::LexInterval& li) {
     default:
       break;
   }
-  zslFreeLexRange(&range);
+  detail::ZslFreeLexRange(&range);
 }
 
 void IntervalVisitor::operator()(ZSetFamily::TopNScored sc) {
@@ -376,7 +373,7 @@ void IntervalVisitor::ActionRem(const zrangespec& range) {
   if (IsListPack(robj_wrapper_)) {
     uint8_t* zl = (uint8_t*)robj_wrapper_->inner_obj();
     unsigned long deleted = 0;
-    zl = zzlDeleteRangeByScore(zl, &range, &deleted);
+    zl = detail::ZzlDeleteRangeByScore(zl, &range, &deleted);
     robj_wrapper_->set_inner_obj(zl);
     removed_ = deleted;
   } else {
@@ -390,7 +387,7 @@ void IntervalVisitor::ActionRem(const zlexrangespec& range) {
   if (IsListPack(robj_wrapper_)) {
     uint8_t* zl = (uint8_t*)robj_wrapper_->inner_obj();
     unsigned long deleted = 0;
-    zl = zzlDeleteRangeByLex(zl, &range, &deleted);
+    zl = detail::ZzlDeleteRangeByLex(zl, &range, &deleted);
     robj_wrapper_->set_inner_obj(zl);
     removed_ = deleted;
   } else {
@@ -422,9 +419,9 @@ void IntervalVisitor::ExtractListPack(const zrangespec& range) {
 
   /* If reversed, get the last node in range as starting point. */
   if (params_.reverse) {
-    eptr = zzlLastInRange(zl, &range);
+    eptr = detail::ZzlLastInRange(zl, &range);
   } else {
-    eptr = zzlFirstInRange(zl, &range);
+    eptr = detail::ZzlFirstInRange(zl, &range);
   }
 
   /* Get score pointer for the first element. */
@@ -438,7 +435,7 @@ void IntervalVisitor::ExtractListPack(const zrangespec& range) {
   }
 
   while (eptr && limit--) {
-    double score = zzlGetScore(sptr);
+    double score = detail::ZzlGetScore(sptr);
 
     /* Abort when the node is no longer in range. */
     if (!IsUnder(score, range))
@@ -475,9 +472,9 @@ void IntervalVisitor::ExtractListPack(const zlexrangespec& range) {
 
   /* If reversed, get the last node in range as starting point. */
   if (params_.reverse) {
-    eptr = zzlLastInLexRange(zl, &range);
+    eptr = detail::ZzlLastInLexRange(zl, &range);
   } else {
-    eptr = zzlFirstInLexRange(zl, &range);
+    eptr = detail::ZzlFirstInLexRange(zl, &range);
   }
 
   /* Get score pointer for the first element. */
@@ -493,14 +490,14 @@ void IntervalVisitor::ExtractListPack(const zlexrangespec& range) {
   while (eptr && limit--) {
     double score = 0;
     if (params_.with_scores) /* don't bother to extract the score if it's gonna be ignored. */
-      score = zzlGetScore(sptr);
+      score = detail::ZzlGetScore(sptr);
 
     /* Abort when the node is no longer in range. */
     if (params_.reverse) {
-      if (!zzlLexValueGteMin(eptr, &range))
+      if (!detail::ZzlLexValueGteMin(eptr, &range))
         break;
     } else {
-      if (!zzlLexValueLteMax(eptr, &range))
+      if (!detail::ZzlLexValueLteMax(eptr, &range))
         break;
     }
 
@@ -539,7 +536,7 @@ void IntervalVisitor::PopListPack(ZSetFamily::TopNScored sc) {
   /* First we get the entries */
   unsigned int num = sc;
   while (eptr && num--) {
-    double score = zzlGetScore(sptr);
+    double score = detail::ZzlGetScore(sptr);
     vstr = lpGetValue(eptr, &vlen, &vlong);
     AddResult(vstr, vlen, vlong, score);
 
@@ -1211,7 +1208,7 @@ OpResult<RankResult> OpRank(const OpArgs& op_args, string_view key, string_view 
       if (lpCompare(eptr, (const uint8_t*)member.data(), member.size()))
         break;
       rank++;
-      zzlNext(zl, &eptr, &sptr);
+      detail::ZzlNext(zl, &eptr, &sptr);
     }
 
     if (eptr == NULL)
@@ -1220,7 +1217,7 @@ OpResult<RankResult> OpRank(const OpArgs& op_args, string_view key, string_view 
     RankResult res{};
     res.rank = reverse ? lpLength(zl) / 2 - rank : rank - 1;
     if (with_score) {
-      res.score = zzlGetScore(sptr);
+      res.score = detail::ZzlGetScore(sptr);
     }
     return res;
   }
@@ -1267,7 +1264,7 @@ OpResult<unsigned> OpCount(const OpArgs& op_args, std::string_view key,
     double score;
 
     /* Use the first element in range as the starting point */
-    eptr = zzlFirstInRange(zl, &range);
+    eptr = detail::ZzlFirstInRange(zl, &range);
 
     /* No "first" element */
     if (eptr == NULL) {
@@ -1276,20 +1273,20 @@ OpResult<unsigned> OpCount(const OpArgs& op_args, std::string_view key,
 
     /* First element is in range */
     sptr = lpNext(zl, eptr);
-    score = zzlGetScore(sptr);
+    score = detail::ZzlGetScore(sptr);
 
-    DCHECK(zslValueLteMax(score, &range));
+    DCHECK(detail::ZslValueLteMax(score, &range));
 
     /* Iterate over elements in range */
     while (eptr) {
-      score = zzlGetScore(sptr);
+      score = detail::ZzlGetScore(sptr);
 
       /* Abort when the node is no longer in range. */
-      if (!zslValueLteMax(score, &range)) {
+      if (!detail::ZslValueLteMax(score, &range)) {
         break;
       } else {
         count++;
-        zzlNext(zl, &eptr, &sptr);
+        detail::ZzlNext(zl, &eptr, &sptr);
       }
     }
   } else {
@@ -1316,21 +1313,21 @@ OpResult<unsigned> OpLexCount(const OpArgs& op_args, string_view key,
     uint8_t *eptr, *sptr;
 
     /* Use the first element in range as the starting point */
-    eptr = zzlFirstInLexRange(zl, &range);
+    eptr = detail::ZzlFirstInLexRange(zl, &range);
 
     if (eptr) {
       /* First element is in range */
       sptr = lpNext(zl, eptr);
-      DCHECK(zzlLexValueLteMax(eptr, &range));
+      DCHECK(detail::ZzlLexValueLteMax(eptr, &range));
 
       /* Iterate over elements in range */
       while (eptr) {
         /* Abort when the node is no longer in range. */
-        if (!zzlLexValueLteMax(eptr, &range)) {
+        if (!detail::ZzlLexValueLteMax(eptr, &range)) {
           break;
         } else {
           count++;
-          zzlNext(zl, &eptr, &sptr);
+          detail::ZzlNext(zl, &eptr, &sptr);
         }
       }
     }
@@ -1340,7 +1337,7 @@ OpResult<unsigned> OpLexCount(const OpArgs& op_args, string_view key,
     count = zs->LexCount(range);
   }
 
-  zslFreeLexRange(&range);
+  detail::ZslFreeLexRange(&range);
   return count;
 }
 

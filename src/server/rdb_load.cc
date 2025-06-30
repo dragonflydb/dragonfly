@@ -15,7 +15,6 @@ extern "C" {
 #include "redis/util.h"
 #include "redis/ziplist.h"
 #include "redis/zmalloc.h"
-#include "redis/zset.h"
 }
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/match.h>

@@ -14,10 +14,10 @@ extern "C" {
 #include "redis/redis_aux.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"
-#include "redis/zset.h"
 }
 
 #include "base/logging.h"
+#include "core/sorted_map.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
 #include "server/command_registry.h"

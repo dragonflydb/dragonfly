@@ -10,8 +10,8 @@
 #include <random>
 
 extern "C" {
+#include "redis/sds.h"
 #include "redis/zmalloc.h"
-#include "redis/zset.h"
 }
 
 #include "base/gtest.h"
@@ -300,6 +300,7 @@ TEST_F(BPTreeSetTest, HalfRanges) {
   ASSERT_TRUE(path.Empty());
 }
 
+#if 0
 TEST_F(BPTreeSetTest, MemoryUsage) {
   zskiplist* zsl = zslCreate();
   std::vector<sds> sds_vec;
@@ -346,6 +347,7 @@ TEST_F(BPTreeSetTest, MemoryUsage) {
   ASSERT_GT(mi_alloc.used(), 0u);
   LOG(INFO) << "df btree: " << double(mi_alloc.used()) / sds_vec.size() << " bytes per entry";
 }
+#endif
 
 TEST_F(BPTreeSetTest, InsertSDS) {
   vector<ZsetPolicy::KeyT> vals;
@@ -453,6 +455,7 @@ static void BM_FindRandomBPTree(benchmark::State& state) {
 }
 BENCHMARK(BM_FindRandomBPTree)->Arg(1024)->Arg(1 << 16)->Arg(1 << 20);
 
+#if 0
 static void BM_FindRandomZSL(benchmark::State& state) {
   zskiplist* zsl = zslCreate();
   unsigned iters = state.range(0);
@@ -485,6 +488,7 @@ static void BM_FindRandomZSL(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_FindRandomZSL)->Arg(1024)->Arg(1 << 16)->Arg(1 << 20);
+#endif
 
 void RegisterBPTreeBench() {
   auto* tlh = mi_heap_get_backing();
