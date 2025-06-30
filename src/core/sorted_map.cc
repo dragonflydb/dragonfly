@@ -688,10 +688,8 @@ size_t SortedMap::LexCount(const zlexrangespec& range) const {
   if (score_tree->Size() == 0)
     return 0;
 
-  // Ranges that will always be zero
-  if ((range.min == cminstring && range.max == cminstring) ||
-      (range.min == cmaxstring && range.max == cmaxstring) ||
-      (range.min == cmaxstring && range.max == cminstring)) {
+  // Ranges that will always be zero - (+inf, anything) or (anything, -inf)
+  if (range.min == cmaxstring || range.max == cminstring) {
     return 0;
   }
 
