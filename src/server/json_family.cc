@@ -904,7 +904,8 @@ OpResult<JsonCallbackResult<OptSize>> OpStrLen(const OpArgs& op_args, string_vie
   };
   return JsonReadOnlyOperation<OptSize>(
       op_args, key, json_path, std::move(cb),
-      {true, CallbackResultOptions::DefaultReadOnlyOptions(SavingOrder::kSaveFirst)});
+      {json_path.IsLegacyModePath(),
+       CallbackResultOptions::DefaultReadOnlyOptions(SavingOrder::kSaveFirst)});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpObjLen(const OpArgs& op_args, string_view key,
