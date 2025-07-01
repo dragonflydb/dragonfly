@@ -414,7 +414,10 @@ TEST_F(JsonFamilyTest, StrLen) {
   EXPECT_THAT(resp, IntArg(2));
 
   resp = Run({"JSON.STRLEN", "non_existent_key", "$.c.b"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, ErrArg("no such key"));
+
+  resp = Run({"JSON.STRLEN", "non_existent_key", "$"});
+  EXPECT_THAT(resp, ErrArg("no such key"));
 
   /*
   Test response from several possible values
