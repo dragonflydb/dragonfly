@@ -51,7 +51,7 @@ optional<string> ConfigRegistry::Get(string_view config_name) {
     if (!registry_.contains(name))
       return nullopt;
   }
-  
+
   absl::CommandLineFlag* flag = absl::FindCommandLineFlag(name);
   CHECK(flag);
   return flag->CurrentValue();
