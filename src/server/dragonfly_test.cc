@@ -920,4 +920,18 @@ TEST_F(DflyCommandAliasTest, Aliasing) {
   EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("exec", Key(1))));
 }
 
+TEST_F(DflyCommandAliasTest, AliasesShareHistogramPtr) {
+  EXPECT_EQ(Run({"SET", "foo", "bar"}), "OK");
+  EXPECT_EQ(Run({"___SET", "a", "b"}), "OK");
+  EXPECT_EQ(Run({"___ping"}), "PONG");
+
+  const auto command_histograms = GetMetrics().cmd_latency_map;
+  for (const auto& key : {"set", "___set", "___ping", "ping"}) {
+    EXPECT_TRUE(command_histograms.contains(key));
+  }
+
+  EXPECT_EQ(command_histograms.at("set"), command_histograms.at("___set"));
+  EXPECT_EQ(command_histograms.at("ping"), command_histograms.at("___ping"));
+}
+
 }  // namespace dfly
