@@ -34,6 +34,7 @@ ABSL_DECLARE_FLAG(int32, list_compress_depth);
 ABSL_DECLARE_FLAG(int32, list_max_listpack_size);
 ABSL_DECLARE_FLAG(dfly::CompressionMode, compression_mode);
 ABSL_DECLARE_FLAG(bool, rdb_ignore_expiry);
+ABSL_DECLARE_FLAG(uint32_t, num_shards);
 
 namespace dfly {
 
@@ -72,6 +73,31 @@ io::FileSource RdbTest::GetSource(string name) {
   CHECK(open_res) << rdb_file;
 
   return io::FileSource(*open_res);
+}
+
+TEST_F(RdbTest, SnapshotIdTest) {
+  num_threads_ = 4;
+  absl::SetFlag(&FLAGS_num_shards, num_threads_ - 1);
+  ResetService();
+
+  EXPECT_EQ(Run({"mset", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"}), "OK");
+
+  Run({"save", "df", "test_dump"});
+
+  num_threads_ = 2;
+  absl::SetFlag(&FLAGS_num_shards, num_threads_ - 1);
+  ResetService();
+
+  EXPECT_EQ(Run({"mset", "test1", "val1", "test2", "val2"}), "OK");
+
+  Run({"save", "df", "test_dump"});
+
+  ResetService();
+
+  EXPECT_EQ(Run({"dfly", "load", "test_dump-summary.dfs"}), "OK");
+
+  auto resp = Run({"keys", "*"});
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("test1", "test2"));
 }
 
 TEST_F(RdbTest, Crc) {

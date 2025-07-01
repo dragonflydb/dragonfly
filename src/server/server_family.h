@@ -337,7 +337,8 @@ class ServerFamily {
                          ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   // Returns the number of loaded keys if successful.
-  io::Result<size_t> LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys);
+  io::Result<size_t> LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys,
+                             std::string* snapshot_id = nullptr);
 
   void SnapshotScheduling() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
 

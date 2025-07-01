@@ -1360,7 +1360,8 @@ unique_ptr<SliceSnapshot>& RdbSaver::Impl::GetSnapshot(EngineShard* shard) {
   return shard_snapshots_[sid];
 }
 
-RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes) {
+RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes, std::string snapshot_id)
+    : snapshot_id_(std::move(snapshot_id)) {
   CHECK_NOTNULL(sink);
   CompressionMode compression_mode = GetDefaultCompressionMode();
   int producer_count = 0;
@@ -1426,7 +1427,7 @@ error_code RdbSaver::SaveHeader(const GlobalData& glob_state) {
   CHECK_EQ(9u, sz);
 
   RETURN_ON_ERR(impl_->serializer()->WriteRaw(Bytes{reinterpret_cast<uint8_t*>(magic), sz}));
-  RETURN_ON_ERR(SaveAux(std::move(glob_state)));
+  RETURN_ON_ERR(SaveAux(std::move(glob_state)));  // Should be first after magic
   RETURN_ON_ERR(impl_->FlushSerializer());
   return error_code{};
 }
@@ -1459,6 +1460,9 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
   static_assert(sizeof(void*) == 8, "");
 
   error_code ec;
+
+  // Should be first
+  RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("snapshot-id", snapshot_id_));
 
   /* Add a few fields about the state when the RDB was created. */
   RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("redis-ver", REDIS_VERSION));

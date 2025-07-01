@@ -1927,8 +1927,9 @@ struct RdbLoader::ObjSettings {
   ObjSettings() = default;
 };
 
-RdbLoader::RdbLoader(Service* service)
+RdbLoader::RdbLoader(Service* service, std::string snapshot_id)
     : service_{service},
+      snapshot_id_(std::move(snapshot_id)),
       rdb_ignore_expiry_{GetFlag(FLAGS_rdb_ignore_expiry)},
       script_mgr_{service == nullptr ? nullptr : service->script_mgr()},
       shard_buf_{shard_set->size()} {
@@ -2004,6 +2005,8 @@ error_code RdbLoader::Load(io::Source* src) {
     namespaces->GetDefaultNamespace().GetCurrentDbSlice().IncrLoadInProgress();
   }
 
+  bool correct_snapshot_id = snapshot_id_.empty();
+
   while (!stop_early_.load(memory_order_relaxed)) {
     if (pause_) {
       ThisFiber::SleepFor(100ms);
@@ -2012,6 +2015,12 @@ error_code RdbLoader::Load(io::Source* src) {
 
     /* Read type. */
     SET_OR_RETURN(FetchType(), type);
+
+    if (!correct_snapshot_id) {
+      if (type != RDB_OPCODE_AUX) {
+        return RdbError(errc::incorrect_snapshot_id);
+      }
+    }
 
     DVLOG(3) << "Opcode type: " << type;
 
@@ -2125,7 +2134,7 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_AUX) {
-      RETURN_ON_ERR(HandleAux());
+      RETURN_ON_ERR(HandleAux(&correct_snapshot_id));
       continue; /* Read type again. */
     }
 
@@ -2400,7 +2409,7 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
   return std::error_code{};
 }
 
-error_code RdbLoader::HandleAux() {
+error_code RdbLoader::HandleAux(bool* correct_snapshot_id) {
   /* AUX: generic string-string fields. Use to add state to RDB
    * which is backward compatible. Implementations of RDB loading
    * are required to skip AUX fields they don't understand.
@@ -2416,6 +2425,14 @@ error_code RdbLoader::HandleAux() {
      * information fields and are logged at startup with a log
      * level of NOTICE. */
     LOG(INFO) << "RDB '" << auxkey << "': " << auxval;
+  } else if (auxkey == "snapshot-id") {
+    if (snapshot_id_.empty()) {
+      snapshot_id_ = auxval;
+    } else if (snapshot_id_ != auxval) {
+      *correct_snapshot_id = false;
+      return RdbError(errc::incorrect_snapshot_id);
+    }
+    *correct_snapshot_id = true;
   } else if (auxkey == "repl-stream-db") {
     // TODO
   } else if (auxkey == "repl-id") {
