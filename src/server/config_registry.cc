@@ -22,30 +22,36 @@ string NormalizeConfigName(string_view name) {
 // Returns true if the value was updated.
 auto ConfigRegistry::Set(string_view config_name, string_view value) -> SetResult {
   string name = NormalizeConfigName(config_name);
+
   util::fb2::LockGuard lk(mu_);
   auto it = registry_.find(name);
   if (it == registry_.end())
     return SetResult::UNKNOWN;
   if (!it->second.is_mutable)
     return SetResult::READONLY;
+
   auto cb = it->second.cb;
+
   absl::CommandLineFlag* flag = absl::FindCommandLineFlag(name);
   CHECK(flag) << config_name;
   if (string error; !flag->ParseFrom(value, &error)) {
     LOG(WARNING) << error;
     return SetResult::INVALID;
   }
+
   bool success = !cb || cb(*flag);
   return success ? SetResult::OK : SetResult::INVALID;
 }
 
 optional<string> ConfigRegistry::Get(string_view config_name) {
   string name = NormalizeConfigName(config_name);
+
   {
     util::fb2::LockGuard lk(mu_);
     if (!registry_.contains(name))
       return nullopt;
   }
+  
   absl::CommandLineFlag* flag = absl::FindCommandLineFlag(name);
   CHECK(flag);
   return flag->CurrentValue();
