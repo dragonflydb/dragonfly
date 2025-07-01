@@ -3201,7 +3201,7 @@ async def test_bug_5221(df_factory):
 
 @pytest.mark.parametrize("proactors", [1, 4, 6])
 @pytest.mark.parametrize("backlog_len", [1, 256, 1024, 1300])
-async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_len):
+async def test_partial_sync(df_factory, proactors, backlog_len):
     keys = 5_000
     if proactors > 1:
         keys = 10_000
@@ -3335,8 +3335,11 @@ async def test_mc_gat_replication(df_factory):
 
 
 @pytest.mark.slow
-async def test_replicaiton_onmove_flow(df_factory):
-    master = df_factory.create(proactor_threads=2, cache_mode=True)
+@pytest.mark.parametrize("serialization_max_size", [1, 64000])
+async def test_replication_onmove_flow(df_factory, serialization_max_size):
+    master = df_factory.create(
+        proactor_threads=2, cache_mode=True, serialization_max_chunk_size=serialization_max_size
+    )
     replica = df_factory.create(proactor_threads=2)
 
     df_factory.start_all([master, replica])
@@ -3345,7 +3348,7 @@ async def test_replicaiton_onmove_flow(df_factory):
 
     key_target = 100000
     # Fill master with test data
-    await c_master.execute_command(f"DEBUG POPULATE {key_target} key 1048 RAND")
+    await c_master.execute_command(f"DEBUG POPULATE {key_target} key 32 RAND TYPE hash ELEMENTS 10")
     logging.debug("finished populate")
 
     stop_event = asyncio.Event()
@@ -3355,7 +3358,7 @@ async def test_replicaiton_onmove_flow(df_factory):
             pipe = c_master.pipeline(transaction=False)
             for _ in range(50):
                 id = random.randint(0, key_target)
-                pipe.get(f"key:{id}")
+                pipe.hlen(f"key:{id}")
             await pipe.execute()
 
     get_task = asyncio.create_task(get_keys())
