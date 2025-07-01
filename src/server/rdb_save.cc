@@ -18,7 +18,6 @@ extern "C" {
 #include "redis/stream.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"
-#include "redis/zset.h"
 }
 
 #include "base/flags.h"

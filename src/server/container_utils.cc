@@ -19,7 +19,6 @@ extern "C" {
 #include "redis/listpack.h"
 #include "redis/redis_aux.h"
 #include "redis/util.h"
-#include "redis/zset.h"
 }
 
 namespace dfly::container_utils {
@@ -215,7 +214,7 @@ bool IterateSortedSet(const detail::RobjWrapper* robj_wrapper, const IterateSort
 
       // don't bother to extract the score if it's gonna be ignored.
       if (use_score)
-        score = zzlGetScore(sptr);
+        score = detail::ZzlGetScore(sptr);
 
       if (vstr == NULL) {
         success = func(ContainerEntry{vlong}, score);
@@ -224,9 +223,9 @@ bool IterateSortedSet(const detail::RobjWrapper* robj_wrapper, const IterateSort
       }
 
       if (reverse) {
-        zzlPrev(zl, &eptr, &sptr);
+        detail::ZzlPrev(zl, &eptr, &sptr);
       } else {
-        zzlNext(zl, &eptr, &sptr);
+        detail::ZzlNext(zl, &eptr, &sptr);
       };
     }
     return success;

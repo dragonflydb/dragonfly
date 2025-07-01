@@ -14,7 +14,6 @@ extern "C" {
 #include "redis/stream.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"  // for non-string objects.
-#include "redis/zset.h"
 }
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
