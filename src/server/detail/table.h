@@ -16,7 +16,7 @@ using PrimeKey = CompactObj;
 using PrimeValue = CompactObj;
 
 struct PrimeTablePolicy {
-  enum { kSlotNum = 14, kBucketNum = 56 };
+  enum { kSlotNum = 14, kBucketNum = 60 };
 
   static constexpr bool kUseVersion = true;
 
@@ -46,7 +46,7 @@ struct PrimeTablePolicy {
 };
 
 struct ExpireTablePolicy {
-  enum { kSlotNum = 14, kBucketNum = 56 };
+  enum { kSlotNum = 14, kBucketNum = 60 };
   static constexpr bool kUseVersion = false;
 
   static uint64_t HashFn(const PrimeKey& s) {
