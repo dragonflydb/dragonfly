@@ -2459,7 +2459,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("hz", GetFlag(FLAGS_hz));
     append("executable", base::kProgramName);
     absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
-    append("config_file", flagfile_flag ? flagfile_flag->CurrentValue() : "");
+    append("config_file", flagfile_flag->CurrentValue());
   };
 
   auto add_clients_info = [&] {
