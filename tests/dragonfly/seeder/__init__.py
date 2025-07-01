@@ -7,6 +7,7 @@ import math
 import redis.asyncio as aioredis
 from dataclasses import dataclass
 import time
+import sys
 
 try:
     from importlib import resources as impresources
@@ -20,10 +21,17 @@ class SeederBase:
     CACHED_SCRIPTS = {}
     DEFAULT_TYPES = ["STRING", "LIST", "SET", "HASH", "ZSET", "JSON", "STREAM"]
 
-    def __init__(self, types: typing.Optional[typing.List[str]] = None):
+    def __init__(self, types: typing.Optional[typing.List[str]] = None, seed=None):
         self.uid = SeederBase.UID_COUNTER
         SeederBase.UID_COUNTER += 1
         self.types = types if types is not None else SeederBase.DEFAULT_TYPES
+
+        self.seed = random.randrange(sys.maxsize)
+        if seed is not None:
+            self.seed = seed
+
+        random.seed(int(self.seed))
+        logging.debug(f"Random seed: {self.seed}, check: {random.randrange(100)}")
 
     @classmethod
     async def capture(
@@ -81,8 +89,9 @@ class DebugPopulateSeeder(SeederBase):
         samples=10,
         collection_size=None,
         types: typing.Optional[typing.List[str]] = None,
+        seed=None,
     ):
-        SeederBase.__init__(self, types)
+        SeederBase.__init__(self, types, seed)
         self.key_target = key_target
         self.data_size = data_size
         self.variance = variance
@@ -140,8 +149,9 @@ class Seeder(SeederBase):
         types: typing.Optional[typing.List[str]] = None,
         huge_value_target=5,
         huge_value_size=100000,
+        seed=None,
     ):
-        SeederBase.__init__(self, types)
+        SeederBase.__init__(self, types, seed)
         self.key_target = key_target
         self.data_size = data_size
         if collection_size is None:
@@ -174,6 +184,7 @@ class Seeder(SeederBase):
             self.collection_size,
             self.huge_value_target / len(self.units),
             self.huge_value_size,
+            self.seed,
         ]
 
         sha = await client.script_load(Seeder._load_script("generate"))

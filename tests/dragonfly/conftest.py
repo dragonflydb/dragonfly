@@ -95,7 +95,7 @@ def df_seeder_factory(request) -> DflySeederFactory:
         seed = random.randrange(sys.maxsize)
 
     random.seed(int(seed))
-    print(f"--- Random seed: {seed}, check: {random.randrange(100)} ---")
+    logging.debug(f"Random seed: {seed}, check: {random.randrange(100)}")
 
     return DflySeederFactory(request.config.getoption("--log-seeder"))
 

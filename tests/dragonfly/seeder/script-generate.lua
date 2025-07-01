@@ -21,6 +21,9 @@ local collection_size = tonumber(ARGV[9])
 -- Probability of each key in key_target to be a big value
 local huge_value_target = tonumber(ARGV[10])
 local huge_value_size = tonumber(ARGV[11])
+local seed = tonumber(ARGV[12])
+
+math.randomseed(seed)
 
 -- collect all keys belonging to this script
 -- assumes exclusive ownership
