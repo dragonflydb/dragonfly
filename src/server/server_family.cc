@@ -2457,8 +2457,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("uptime_in_days", uptime / (3600 * 24));
 
     append("hz", GetFlag(FLAGS_hz));
-    append("executable", g_executable_path);
-    append("config_file", g_config_file_path);
+    append("executable", base::kProgramName);
+    absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
+    append("config_file", flagfile_flag ? flagfile_flag->CurrentValue() : "");
   };
 
   auto add_clients_info = [&] {

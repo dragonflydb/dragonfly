@@ -420,9 +420,3 @@ std::optional<util::fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, 
                                       facade::Connection* conn, ClientPause pause_state,
                                       std::function<bool()> is_pause_in_progress,
                                       std::function<void()> maybe_cleanup = {});
-
-extern std::string g_config_file_path;
-extern std::string g_executable_path;
-void SetInfoServerGlobals(const std::string& config_file_path, const std::string& executable_path);
-
-}  // namespace dfly
