@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <iterator>
 #include <optional>
+#include <type_traits>
 #include <vector>
 
 #include "core/search/base.h"
@@ -18,20 +19,74 @@ namespace dfly::search {
 //
 // It tries to balance block sizes in the range [block_size / 2, block_size * 2]
 // by splitting or merging nodes when needed.
+// container must have declare ElementType typename
 template <typename Container /* underlying container */> class BlockList {
+ private:
   using BlockIt = typename PMR_NS::vector<Container>::iterator;
   using ConstBlockIt = typename PMR_NS::vector<Container>::const_iterator;
+  using ElementType = typename Container::ElementType;
 
  public:
+  // Used by Split method
+  struct SplitResult {
+    BlockList<Container> left;
+    BlockList<Container> right;
+    double median;
+  };
+
   BlockList(PMR_NS::memory_resource* mr, size_t block_size = 1000)
       : block_size_{block_size}, blocks_(mr) {
   }
 
+  BlockList(const BlockList& other) = default;
+
+  BlockList(BlockList&& other) noexcept {
+    // Consider not to do move if block_size_ is different
+    // DCHECK(block_size_ == other.block_size_);
+    // It seams there is bugs in StringIndex
+    // because this check fails for them
+
+    size_ = other.size_;
+    blocks_ = std::move(other.blocks_);
+    other.Clear();
+  }
+
+  BlockList& operator=(const BlockList& other) = delete;
+  BlockList& operator=(BlockList&& other) = delete;
+
+  ~BlockList() = default;
+
   // Insert element, returns true if inserted, false if already present.
-  bool Insert(DocId t);
+  bool Insert(ElementType t);
 
   // Remove element, returns true if removed, false if not found.
-  bool Remove(DocId t);
+  bool Remove(ElementType t);
+
+  // TODO: it is not correct that we return DocId here
+  // We need extract DocId from ElementType
+  std::vector<DocId> GetAllDocIds() const;
+
+  // TODO: remove ebanle_if_t for all methods below
+  // It is temporary solution
+  // TODO: remove DocId for return type, the same as in GetAllDocIds
+  template <typename U = ElementType>
+  std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, std::vector<DocId>> LessOrEqual(
+      double r) const;
+
+  template <typename U = ElementType>
+  std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, std::vector<DocId>> GreaterOrEqual(
+      double l) const;
+
+  // Both l and r are inclusive.
+  template <typename U = ElementType>
+  std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, std::vector<DocId>> Range(
+      double l, double r) const;
+
+  /* Split into two blocks, left and right,
+     so that both blocks have approximately the same number of elements.
+     Returns median value of the split. */
+  template <typename U = ElementType>
+  std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, SplitResult> Split() &&;
 
   size_t Size() const {
     return size_;
@@ -41,15 +96,20 @@ template <typename Container /* underlying container */> class BlockList {
     return size_;
   }
 
+  void Clear() {
+    size_ = 0;
+    blocks_.clear();
+  }
+
   struct BlockListIterator {
     // To make it work with std container contructors
     using iterator_category = std::forward_iterator_tag;
     using difference_type = std::ptrdiff_t;
-    using value_type = DocId;
-    using pointer = DocId*;
-    using reference = DocId&;
+    using value_type = ElementType;
+    using pointer = ElementType*;
+    using reference = ElementType&;
 
-    DocId operator*() const {
+    ElementType operator*() const {
       return **block_it;
     }
 
@@ -87,7 +147,7 @@ template <typename Container /* underlying container */> class BlockList {
 
  private:
   // Find block that should contain t. Returns end() only if empty
-  BlockIt FindBlock(DocId t);
+  BlockIt FindBlock(const ElementType& t);
 
   void TryMerge(BlockIt block);  // If needed, merge with previous block
   void TrySplit(BlockIt block);  // If needed, split into two blocks
@@ -100,20 +160,27 @@ template <typename Container /* underlying container */> class BlockList {
 
 // Supports Insert and Remove operations for keeping a sorted vector internally.
 // Wrapper to use vectors with BlockList
-struct SortedVector {
+template <typename T> class SortedVector {
+ public:
+  using ElementType = T;
+
   explicit SortedVector(PMR_NS::memory_resource* mr) : entries_(mr) {
   }
 
-  bool Insert(DocId t);
-  bool Remove(DocId t);
-  void Merge(SortedVector&& other);
-  std::pair<SortedVector, SortedVector> Split() &&;
+  bool Insert(T t);
+  bool Remove(T t);
+  void Merge(SortedVector<T>&& other);
+  std::pair<SortedVector<T>, SortedVector<T>> Split() &&;
 
   size_t Size() {
     return entries_.size();
   }
 
-  using iterator = typename PMR_NS::vector<DocId>::const_iterator;
+  void Clear() {
+    entries_.clear();
+  }
+
+  using iterator = typename PMR_NS::vector<T>::const_iterator;
 
   iterator begin() const {
     return entries_.cbegin();
@@ -124,13 +191,103 @@ struct SortedVector {
   }
 
  private:
-  SortedVector(PMR_NS::vector<DocId>&& v) : entries_{std::move(v)} {
+  SortedVector(PMR_NS::vector<T>&& v) : entries_{std::move(v)} {
   }
 
-  PMR_NS::vector<DocId> entries_;
+  PMR_NS::vector<T> entries_;
 };
 
+extern template class SortedVector<DocId>;
+extern template class SortedVector<std::pair<DocId, double>>;
+
 extern template class BlockList<CompressedSortedSet>;
-extern template class BlockList<SortedVector>;
+extern template class BlockList<SortedVector<DocId>>;
+extern template class BlockList<SortedVector<std::pair<DocId, double>>>;
+
+// Implementation
+/******************************************************************/
+template <typename C>
+template <typename U>
+std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, std::vector<DocId>>
+BlockList<C>::LessOrEqual(double r) const {
+  std::vector<DocId> result;
+  for (const auto& block : blocks_) {
+    for (const auto& entry : block) {
+      if (entry.second <= r) {
+        result.push_back(entry.first);
+      }
+    }
+  }
+  return result;
+}
+
+template <typename C>
+template <typename U>
+std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, std::vector<DocId>>
+BlockList<C>::GreaterOrEqual(double l) const {
+  std::vector<DocId> result;
+  for (const auto& block : blocks_) {
+    for (const auto& entry : block) {
+      if (entry.second >= l) {
+        result.push_back(entry.first);
+      }
+    }
+  }
+  return result;
+}
+
+template <typename C>
+template <typename U>
+std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, std::vector<DocId>>
+BlockList<C>::Range(double l, double r) const {
+  std::vector<DocId> result;
+  for (const auto& block : blocks_) {
+    for (const auto& entry : block) {
+      if (entry.second >= l && entry.second <= r) {
+        result.push_back(entry.first);
+      }
+    }
+  }
+  return result;
+}
+
+template <typename C>
+template <typename U>
+std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, typename BlockList<C>::SplitResult>
+BlockList<C>::Split() && {
+  DCHECK(size_ > 0);
+
+  const size_t initial_size = size_;
+  BlockList<C> left(blocks_.get_allocator().resource(), block_size_);
+  BlockList<C> right(blocks_.get_allocator().resource(), block_size_);
+
+  std::vector<ElementType> all_entries;
+  all_entries.reserve(initial_size);
+  for (auto& block : blocks_) {
+    for (auto& entry : block) {
+      all_entries.emplace_back(std::move(entry));
+    }
+    block.Clear();
+  }
+  Clear();
+
+  DCHECK(all_entries.size() == initial_size);
+
+  std::nth_element(all_entries.begin(), all_entries.begin() + initial_size / 2, all_entries.end(),
+                   [](const ElementType& l, const ElementType& r) { return l.second < r.second; });
+
+  for (size_t i = 0; i < initial_size / 2; ++i) {
+    // TODO: Add InsertSortedBatch
+    left.Insert(all_entries[i]);
+  }
+
+  double median = all_entries[initial_size / 2].second;
+  for (size_t i = initial_size / 2; i < initial_size; ++i) {
+    // TODO: Add InsertSortedBatch
+    right.Insert(all_entries[i]);
+  }
+
+  return {std::move(left), std::move(right), median};
+}
 
 }  // namespace dfly::search

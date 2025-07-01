@@ -4,12 +4,12 @@ namespace dfly::search {
 
 using namespace std;
 
-template <typename C> bool BlockList<C>::Insert(DocId t) {
+template <typename C> bool BlockList<C>::Insert(ElementType t) {
   auto block = FindBlock(t);
   if (block == blocks_.end())
     block = blocks_.insert(blocks_.end(), C{blocks_.get_allocator().resource()});
 
-  if (!block->Insert(t))
+  if (!block->Insert(std::move(t)))
     return false;
 
   size_++;
@@ -17,8 +17,8 @@ template <typename C> bool BlockList<C>::Insert(DocId t) {
   return true;
 }
 
-template <typename C> bool BlockList<C>::Remove(DocId t) {
-  if (auto block = FindBlock(t); block != blocks_.end() && block->Remove(t)) {
+template <typename C> bool BlockList<C>::Remove(ElementType t) {
+  if (auto block = FindBlock(t); block != blocks_.end() && block->Remove(std::move(t))) {
     size_--;
     TryMerge(block);
     return true;
@@ -27,7 +27,7 @@ template <typename C> bool BlockList<C>::Remove(DocId t) {
   return false;
 }
 
-template <typename C> typename BlockList<C>::BlockIt BlockList<C>::FindBlock(DocId t) {
+template <typename C> typename BlockList<C>::BlockIt BlockList<C>::FindBlock(const ElementType& t) {
   DCHECK(blocks_.empty() || blocks_.back().Size() > 0u);
 
   if (!blocks_.empty() && t >= *blocks_.back().begin())
@@ -35,7 +35,7 @@ template <typename C> typename BlockList<C>::BlockIt BlockList<C>::FindBlock(Doc
 
   // Find first block that can't contain t
   auto it = std::upper_bound(blocks_.begin(), blocks_.end(), t,
-                             [](DocId t, const C& l) { return *l.begin() > t; });
+                             [](const ElementType& t, const C& l) { return *l.begin() > t; });
 
   // Move to previous if possible
   if (it != blocks_.begin())
@@ -73,6 +73,24 @@ template <typename C> void BlockList<C>::TrySplit(BlockIt block) {
   blocks_.insert(block, std::move(left));
 }
 
+template <typename C> std::vector<DocId> BlockList<C>::GetAllDocIds() const {
+  std::vector<DocId> result;
+  result.reserve(size_);
+  for (const auto& block : blocks_) {
+    for (const auto& entry : block) {
+      // TODO: not good approach with is_same_v
+      // It is temporary solution
+      if constexpr (std::is_same_v<ElementType, std::pair<DocId, double>>) {
+        result.push_back(entry.first);
+      } else {
+        static_assert(std::is_same_v<ElementType, DocId>, "Unsupported entry type");
+        result.push_back(entry);
+      }
+    }
+  }
+  return result;
+}
+
 template <typename C>
 typename BlockList<C>::BlockListIterator& BlockList<C>::BlockListIterator::operator++() {
   ++*block_it;
@@ -90,10 +108,11 @@ typename BlockList<C>::BlockListIterator& BlockList<C>::BlockListIterator::opera
 }
 
 template class BlockList<CompressedSortedSet>;
-template class BlockList<SortedVector>;
+template class BlockList<SortedVector<DocId>>;
+template class BlockList<SortedVector<std::pair<DocId, double>>>;
 
-bool SortedVector::Insert(DocId t) {
-  if (entries_.size() > 0 && t > entries_.back()) {
+template <typename T> bool SortedVector<T>::Insert(T t) {
+  if (entries_.empty() || t > entries_.back()) {
     entries_.push_back(t);
     return true;
   }
@@ -106,7 +125,7 @@ bool SortedVector::Insert(DocId t) {
   return true;
 }
 
-bool SortedVector::Remove(DocId t) {
+template <typename T> bool SortedVector<T>::Remove(T t) {
   auto it = std::lower_bound(entries_.begin(), entries_.end(), t);
   if (it != entries_.end() && *it == t) {
     entries_.erase(it);
@@ -115,19 +134,22 @@ bool SortedVector::Remove(DocId t) {
   return false;
 }
 
-void SortedVector::Merge(SortedVector&& other) {
+template <typename T> void SortedVector<T>::Merge(SortedVector&& other) {
   // NLog compexity in theory, but in practice used only to merge with larger values.
   // Tail insert optimization makes it linear
   entries_.reserve(entries_.size() + other.entries_.size());
-  for (int t : other.entries_)
-    Insert(t);
+  for (T& t : other.entries_)
+    Insert(std::move(t));
 }
 
-std::pair<SortedVector, SortedVector> SortedVector::Split() && {
-  PMR_NS::vector<DocId> tail(entries_.begin() + entries_.size() / 2, entries_.end());
+template <typename T> std::pair<SortedVector<T>, SortedVector<T>> SortedVector<T>::Split() && {
+  PMR_NS::vector<T> tail(entries_.begin() + entries_.size() / 2, entries_.end());
   entries_.resize(entries_.size() / 2);
 
-  return std::make_pair(std::move(*this), SortedVector{std::move(tail)});
+  return std::make_pair(std::move(*this), SortedVector<T>{std::move(tail)});
 }
+
+template class SortedVector<DocId>;
+template class SortedVector<std::pair<DocId, double>>;
 
 }  // namespace dfly::search

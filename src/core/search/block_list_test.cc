@@ -26,7 +26,8 @@ template <typename C> class BlockListTest : public testing::Test {
   }
 };
 
-using ContainerTypes = ::testing::Types<CompressedSortedSet, SortedVector>;
+// TODO: add SortedVector<std::pair<DocId, double>> as well
+using ContainerTypes = ::testing::Types<CompressedSortedSet, SortedVector<DocId>>;
 TYPED_TEST_SUITE(BlockListTest, ContainerTypes);
 
 TYPED_TEST(BlockListTest, LoopMidInsertErase) {

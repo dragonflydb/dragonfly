@@ -19,6 +19,7 @@ namespace dfly::search {
 class CompressedSortedSet {
  public:
   using IntType = DocId;
+  using ElementType = IntType;
 
   // Const access iterator that decodes the compressed list on traversal
   struct ConstIterator {
@@ -62,6 +63,12 @@ class CompressedSortedSet {
 
   size_t Size() const;
   size_t ByteSize() const;
+
+  void Clear() {
+    size_ = 0;
+    tail_value_.reset();
+    diffs_.clear();
+  }
 
   // Add all values from other
   void Merge(CompressedSortedSet&& other);

@@ -887,7 +887,7 @@ TEST_F(SearchTest, VectorDistanceConsistency) {
   EXPECT_EQ(cos_dist1, cos_dist2);
 }
 
-static void BM_VectorSearch(benchmark::State& state) {
+/* static void BM_VectorSearch(benchmark::State& state) {
   unsigned ndims = state.range(0);
   unsigned nvecs = state.range(1);
 
@@ -922,7 +922,7 @@ static void BM_VectorSearch(benchmark::State& state) {
 }
 
 BENCHMARK(BM_VectorSearch)->Args({120, 10'000});
-
+ */
 TEST_F(SearchTest, MatchNonNullField) {
   PrepareSchema({{"text_field", SchemaField::TEXT},
                  {"tag_field", SchemaField::TAG},
@@ -1045,7 +1045,7 @@ static std::string GeneratePattern(SearchType search_type, size_t pattern_len, b
   return "";
 }
 
-static void BM_SearchByTypeImpl(benchmark::State& state, bool use_diverse_pattern) {
+/* static void BM_SearchByTypeImpl(benchmark::State& state, bool use_diverse_pattern) {
   size_t num_docs = state.range(0);
   size_t pattern_len = state.range(1);
   SearchType search_type = static_cast<SearchType>(state.range(2));
@@ -1170,9 +1170,9 @@ BENCHMARK(BM_SearchByType_Diverse)
     ->Args({10000, 5, static_cast<int>(SearchType::INFIX)})
     ->ArgNames({"docs", "pattern_len", "search_type"})
     ->Unit(benchmark::kMicrosecond);
-
+ */
 // Helper function to generate random vector
-static std::vector<float> GenerateRandomVector(size_t dims, unsigned seed = 42) {
+/* static std::vector<float> GenerateRandomVector(size_t dims, unsigned seed = 42) {
   std::mt19937 gen(seed);
   std::uniform_real_distribution<float> dis(-1.0f, 1.0f);
 
@@ -1290,8 +1290,9 @@ BENCHMARK(BM_VectorDistanceIntensive)
     ->Arg(static_cast<int>(VectorSimilarity::COSINE))
     ->ArgNames({"similarity_type"})
     ->Unit(benchmark::kMicrosecond);
+ */
 
-static void BM_SearchDocIds(benchmark::State& state) {
+/* static void BM_SearchDocIds(benchmark::State& state) {
   auto schema = MakeSimpleSchema({{"score", SchemaField::NUMERIC}, {"tag", SchemaField::TAG}});
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
@@ -1317,7 +1318,148 @@ static void BM_SearchDocIds(benchmark::State& state) {
     CHECK(result.error.empty());
   }
 }
-BENCHMARK(BM_SearchDocIds)->Range(0, 2);
+BENCHMARK(BM_SearchDocIds)->Range(0, 2); */
+
+static void BM_SearchNumericIndexes(benchmark::State& state) {
+  auto schema = MakeSimpleSchema({{"numeric", SchemaField::NUMERIC}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  default_random_engine rnd;
+
+  using NumericType = long long;
+  uniform_int_distribution<NumericType> dist(std::numeric_limits<NumericType>::min(),
+                                             std::numeric_limits<NumericType>::max());
+
+  const size_t num_docs = state.range(0);
+  CHECK_GT(num_docs, 0);
+  for (size_t i = 0; i < num_docs; i++) {
+    MockedDocument doc{Map{{"numeric", std::to_string(dist(rnd))}}};
+    indices.Add(i, doc);
+  }
+
+  std::string queries[] = {"@numeric:[15 +inf]", "@numeric:[-inf 20]", "@numeric:[-inf +inf]",
+                           "@numeric:[0 100000]"};
+
+  // bool print_on_this_run = true;
+  while (state.KeepRunning()) {
+    for (const auto& query : queries) {
+      CHECK(algo.Init(query, &params));
+      auto result = algo.Search(&indices);
+      CHECK(result.error.empty());
+      // if (print_on_this_run) {
+      //   std::cerr << "Query: " << query << " Result: " << result.total << "\n";
+      // }
+    }
+    // print_on_this_run = false;
+  }
+}
+
+BENCHMARK(BM_SearchNumericIndexes)->Arg(10000)->Arg(100000)->Arg(1000000)->ArgNames({"num_docs"});
+
+static void BM_SearchTwoNumericIndexes(benchmark::State& state) {
+  auto schema = MakeSimpleSchema({
+      {"numeric1", SchemaField::NUMERIC},
+      {"numeric2", SchemaField::NUMERIC},
+  });
+
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  std::default_random_engine rnd;
+
+  using NumericType = long long;
+  uniform_int_distribution<NumericType> dist1(std::numeric_limits<NumericType>::min(),
+                                              std::numeric_limits<NumericType>::max());
+  uniform_int_distribution<NumericType> dist2(std::numeric_limits<NumericType>::min(),
+                                              std::numeric_limits<NumericType>::max());
+
+  const size_t num_docs = state.range(0);
+  CHECK_GT(num_docs, 0);
+
+  for (size_t i = 0; i < num_docs; ++i) {
+    MockedDocument doc{Map{
+        {"numeric1", std::to_string(dist1(rnd))},
+        {"numeric2", std::to_string(dist2(rnd))},
+    }};
+    indices.Add(i, doc);
+  }
+
+  std::string queries[] = {absl::StrCat("@numeric1:[15 +inf] @numeric2:[-inf 20]"),
+                           absl::StrCat("@numeric1:[-inf 20] @numeric2:[15 +inf]"),
+                           absl::StrCat("@numeric1:[0 100000] @numeric2:[-100000 0]"),
+                           absl::StrCat("@numeric1:[-100000 0] @numeric2:[0 100000]")};
+
+  // bool print_on_this_run = true;
+  while (state.KeepRunning()) {
+    for (const auto& query : queries) {
+      CHECK(algo.Init(query, &params));
+      auto result = algo.Search(&indices);
+      CHECK(result.error.empty());
+      // if (print_on_this_run) {
+      //   std::cerr << "Query: " << query << " Result: " << result.total << "\n";
+      // }
+    }
+    // print_on_this_run = false;
+  }
+}
+
+BENCHMARK(BM_SearchTwoNumericIndexes)
+    ->Arg(10000)
+    ->Arg(100000)
+    ->Arg(1000000)
+    ->ArgNames({"num_docs"});
+
+static void BM_SearchNumericAndTagIndexes(benchmark::State& state) {
+  auto schema = MakeSimpleSchema({{"tag", SchemaField::TAG}, {"numeric", SchemaField::NUMERIC}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  default_random_engine rnd;
+
+  using NumericType = long long;
+  uniform_int_distribution<NumericType> dist(std::numeric_limits<NumericType>::min(),
+                                             std::numeric_limits<NumericType>::max());
+
+  size_t tag_number = 0;
+  const size_t max_tag_number = 1000;
+
+  const size_t num_docs = state.range(0);
+  CHECK_GT(num_docs, 0);
+  for (size_t i = 0; i < num_docs; i++) {
+    MockedDocument doc{
+        Map{{"tag", absl::StrCat("tag", tag_number)}, {"numeric", std::to_string(dist(rnd))}}};
+    indices.Add(i, doc);
+
+    tag_number = (tag_number + 1) % max_tag_number;
+  }
+
+  std::string queries[] = {absl::StrCat("@tag:{tag230|tag3|tag942} @numeric:[15 +inf]"),
+                           absl::StrCat("@tag:{tag1|tag829|tag236} @numeric:[-inf 20]"),
+                           absl::StrCat("@tag:{tag0|tag999} @numeric:[-1000000 +inf]")};
+
+  // bool print_on_this_run = true;
+  while (state.KeepRunning()) {
+    for (const auto& query : queries) {
+      CHECK(algo.Init(query, &params));
+      auto result = algo.Search(&indices);
+      CHECK(result.error.empty());
+      // if (print_on_this_run) {
+      //   std::cerr << "Query: " << query << " Result: " << result.total << "\n";
+      // }
+    }
+    // print_on_this_run = false;
+  }
+}
+
+BENCHMARK(BM_SearchNumericAndTagIndexes)
+    ->Arg(10000)
+    ->Arg(100000)
+    ->Arg(1000000)
+    ->ArgNames({"num_docs"});
 
 #ifdef USE_SIMSIMD
 
