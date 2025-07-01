@@ -420,3 +420,5 @@ std::optional<util::fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, 
                                       facade::Connection* conn, ClientPause pause_state,
                                       std::function<bool()> is_pause_in_progress,
                                       std::function<void()> maybe_cleanup = {});
+
+}  // namespace dfly
