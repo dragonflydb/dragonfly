@@ -419,8 +419,8 @@ class ServerFamily {
 
   // Captured memory peaks
   struct {
-    std::atomic<size_t> used;
-    std::atomic<size_t> rss;
+    std::atomic<size_t> used = 0;
+    std::atomic<size_t> rss = 0;
   } memory_peaks_;
 
   mutable util::fb2::Mutex loading_stats_mu_;

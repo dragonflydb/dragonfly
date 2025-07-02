@@ -1009,7 +1009,8 @@ void ServerFamily::Shutdown() {
 }
 
 bool ServerFamily::HasPrivilegedInterface() {
-  return any_of(listeners_.begin(), listeners_.end(), &Listener::IsPrivilegedInterface);
+  return any_of(listeners_.begin(), listeners_.end(),
+                [](auto* l) { return l->IsPrivilegedInterface(); });
 }
 
 void ServerFamily::UpdateMemoryGlobalStats() {
@@ -1029,7 +1030,7 @@ void ServerFamily::UpdateMemoryGlobalStats() {
   // Update rss memory peak
   size_t total_rss = FetchRssMemory(sdata_res.value());
   rss_mem_current.store(total_rss, memory_order_relaxed);
-  if (rss_mem_current > memory_peaks_.rss.load(memory_order_relaxed))
+  if (total_rss > memory_peaks_.rss.load(memory_order_relaxed))
     memory_peaks_.rss.store(total_rss, memory_order_relaxed);
 
   // Decide on stopping or accepting new connections based on oom deny ratio
