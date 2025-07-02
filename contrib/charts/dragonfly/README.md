@@ -70,7 +70,7 @@ helm upgrade --install dragonfly oci://ghcr.io/dragonflydb/dragonfly/helm/dragon
 | envFrom | list | `[]` | Extra environment variables from K8s objects |
 | securityContext | object | `{}` | Set securityContext for containers |
 | service.annotations | object | `{}` | Extra annotations for the service |
-| service.lablels | object | `{}` | Extra labels for the service |
+| service.labels | object | `{}` | Extra labels for the service |
 | service.metrics.portName | string | `"metrics"` | name for the metrics port |
 | service.metrics.serviceType | string | `"ClusterIP"` | serviceType for the metrics service |
 | service.port | int | `6379` | Dragonfly service port |
