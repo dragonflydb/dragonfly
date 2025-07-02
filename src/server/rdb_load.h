@@ -253,7 +253,7 @@ class RdbLoader : protected RdbLoaderBase {
     pause_ = pause;
   }
 
-  const std::string& SnapshotId() const {
+  const std::string& GetSnapshotId() const {
     return snapshot_id_;
   }
 

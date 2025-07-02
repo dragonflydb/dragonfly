@@ -1125,7 +1125,8 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
   std::string snapshot_id;
   if (absl::EndsWith(load_path, "summary.dfs")) {
     // we read summary first to get snapshot_id and load data correctly
-    auto load_result = LoadRdb(std::string(load_path), existing_keys, &snapshot_id);
+    auto load_result = pool.GetNextProactor()->Await(
+        [&] { return LoadRdb(std::string(load_path), existing_keys, &snapshot_id); });
     if (!load_result.has_value())
       aggregated_result->first_error = load_result.error();
   }
@@ -1245,7 +1246,7 @@ io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
       VLOG(1) << "Loading finished after " << strings::HumanReadableElapsedTime(loader.load_time());
       result = loader.keys_loaded();
       if (snapshot_id && snapshot_id->empty()) {
-        *snapshot_id = loader.SnapshotId();
+        *snapshot_id = loader.GetSnapshotId();
       }
     }
   });
