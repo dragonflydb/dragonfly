@@ -887,7 +887,7 @@ TEST_F(SearchTest, VectorDistanceConsistency) {
   EXPECT_EQ(cos_dist1, cos_dist2);
 }
 
-/* static void BM_VectorSearch(benchmark::State& state) {
+static void BM_VectorSearch(benchmark::State& state) {
   unsigned ndims = state.range(0);
   unsigned nvecs = state.range(1);
 
@@ -922,7 +922,7 @@ TEST_F(SearchTest, VectorDistanceConsistency) {
 }
 
 BENCHMARK(BM_VectorSearch)->Args({120, 10'000});
- */
+
 TEST_F(SearchTest, MatchNonNullField) {
   PrepareSchema({{"text_field", SchemaField::TEXT},
                  {"tag_field", SchemaField::TAG},
@@ -1045,7 +1045,7 @@ static std::string GeneratePattern(SearchType search_type, size_t pattern_len, b
   return "";
 }
 
-/* static void BM_SearchByTypeImpl(benchmark::State& state, bool use_diverse_pattern) {
+static void BM_SearchByTypeImpl(benchmark::State& state, bool use_diverse_pattern) {
   size_t num_docs = state.range(0);
   size_t pattern_len = state.range(1);
   SearchType search_type = static_cast<SearchType>(state.range(2));
@@ -1170,9 +1170,9 @@ BENCHMARK(BM_SearchByType_Diverse)
     ->Args({10000, 5, static_cast<int>(SearchType::INFIX)})
     ->ArgNames({"docs", "pattern_len", "search_type"})
     ->Unit(benchmark::kMicrosecond);
- */
+
 // Helper function to generate random vector
-/* static std::vector<float> GenerateRandomVector(size_t dims, unsigned seed = 42) {
+static std::vector<float> GenerateRandomVector(size_t dims, unsigned seed = 42) {
   std::mt19937 gen(seed);
   std::uniform_real_distribution<float> dis(-1.0f, 1.0f);
 
@@ -1290,9 +1290,8 @@ BENCHMARK(BM_VectorDistanceIntensive)
     ->Arg(static_cast<int>(VectorSimilarity::COSINE))
     ->ArgNames({"similarity_type"})
     ->Unit(benchmark::kMicrosecond);
- */
 
-/* static void BM_SearchDocIds(benchmark::State& state) {
+static void BM_SearchDocIds(benchmark::State& state) {
   auto schema = MakeSimpleSchema({{"score", SchemaField::NUMERIC}, {"tag", SchemaField::TAG}});
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
@@ -1318,7 +1317,7 @@ BENCHMARK(BM_VectorDistanceIntensive)
     CHECK(result.error.empty());
   }
 }
-BENCHMARK(BM_SearchDocIds)->Range(0, 2); */
+BENCHMARK(BM_SearchDocIds)->Range(0, 2);
 
 static void BM_SearchNumericIndexes(benchmark::State& state) {
   auto schema = MakeSimpleSchema({{"numeric", SchemaField::NUMERIC}});
