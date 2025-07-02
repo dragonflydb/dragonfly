@@ -1,12 +1,3 @@
-"""
-Dragonfly benchmark test
-Replicates the workflow from original POC scripts in a single pytest test:
-1. schema_generator.py - Create search index
-2. account_data_generator.py - Generate test data
-3. account_queries.py - Run concurrent queries
-4. account_updates.py - Run concurrent updates
-"""
-
 import redis
 
 from . import dfly_args
@@ -15,24 +6,20 @@ from .benchmark_utils import (
     generate_account_columns,
     create_search_index,
     get_column_name_to_type_mapping,
+    generate_account_data,
     INDEX_KEY,
 )
 
 
 @dfly_args({"proactor_threads": 4})
 def test_dragonfly_benchmark(df_server: DflyInstance):
-    """
-    Comprehensive Dragonfly benchmark test
-    Gradually implements all POC functionality in stages
-    """
-    # Create redis client from df_server fixture
     client = redis.Redis(port=df_server.port)
 
     # Basic connectivity check
     assert client.ping() == True
 
-    # Stage 1: Schema Generation (replaces schema_generator.py)
-    account_columns = generate_account_columns(num_columns=50)
+    # Stage 1: Schema Generation
+    account_columns = generate_account_columns()  # Uses default 2774 columns like original
     create_search_index(client, account_columns)
 
     # Verify the index was created
@@ -43,6 +30,23 @@ def test_dragonfly_benchmark(df_server: DflyInstance):
     column_mappings = get_column_name_to_type_mapping(account_columns)
     assert len(column_mappings) == len(account_columns)
 
-    # TODO: Stage 2 - Data Generation (account_data_generator.py)
+    # Stage 2: Data Generation
+    account_ids = generate_account_data(
+        client=client,
+        column_mappings=column_mappings,
+        num_accounts=1000,  # Original size
+        chunk_size=1000,  # Efficient chunk size for large dataset
+    )
+
+    # Verify data was generated
+    assert len(account_ids) == 1000
+
+    # Verify some accounts were stored
+    sample_account_id = account_ids[0]
+    account_key = f"AccountBase:{sample_account_id}"
+    stored_account = client.hgetall(account_key)
+    assert stored_account is not None
+    assert stored_account[b"AccountId"].decode() == sample_account_id
+
     # TODO: Stage 3 - Load Testing (account_queries.py + account_updates.py)
     # TODO: Stage 4 - Results & Cleanup
