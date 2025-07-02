@@ -76,15 +76,13 @@ io::FileSource RdbTest::GetSource(string name) {
 }
 
 TEST_F(RdbTest, SnapshotIdTest) {
-  num_threads_ = 4;
-  absl::SetFlag(&FLAGS_num_shards, num_threads_ - 1);
+  absl::SetFlag(&FLAGS_num_shards, num_threads_);
   ResetService();
 
   EXPECT_EQ(Run({"mset", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"}), "OK");
 
   Run({"save", "df", "test_dump"});
 
-  num_threads_ = 2;
   absl::SetFlag(&FLAGS_num_shards, num_threads_ - 1);
   ResetService();
 

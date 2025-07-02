@@ -303,7 +303,7 @@ class RdbLoader : protected RdbLoaderBase {
   // Returns whether to discard the read key pair.
   bool ShouldDiscardKey(std::string_view key, const ObjSettings& settings) const;
   void ResizeDb(size_t key_num, size_t expire_num);
-  std::error_code HandleAux(bool* correct_snapshot_id);
+  std::error_code HandleAux();
 
   std::error_code VerifyChecksum();
 
