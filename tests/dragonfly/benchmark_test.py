@@ -91,5 +91,4 @@ def run_dragonfly_benchmark(
 
 @dfly_args({"proactor_threads": 4})
 def test_dragonfly_benchmark_small(df_server: DflyInstance):
-    """Small benchmark test for quick testing"""
-    run_dragonfly_benchmark(df_server, num_accounts=1000, num_queries=100, num_agents=5)
+    run_dragonfly_benchmark(df_server, num_accounts=1000, num_queries=10000, num_agents=50)

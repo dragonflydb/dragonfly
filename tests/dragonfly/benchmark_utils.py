@@ -51,6 +51,8 @@ def generate_account_columns(num_columns: int = 2774) -> List[Dict[str, str]]:
     ]
 
     columns = []
+    # Track generated names to guarantee uniqueness
+    existing_names: set[str] = set()
 
     # Add some standard columns
     standard_columns = [
@@ -67,14 +69,20 @@ def generate_account_columns(num_columns: int = 2774) -> List[Dict[str, str]]:
     ]
 
     columns.extend(standard_columns)
+    existing_names.update(col["COLUMN_NAME"] for col in standard_columns)
 
-    # Generate additional random columns
-    for i in range(num_columns - len(standard_columns)):
-        column_name = (
+    while len(columns) < num_columns:
+        candidate_name = (
             f"lv_{''.join(random.choices(string.ascii_lowercase, k=random.randint(5, 15)))}"
         )
+
+        # Ensure the column name is unique
+        if candidate_name in existing_names:
+            continue
+
         column_type = random.choice(sql_types)
-        columns.append({"COLUMN_NAME": column_name, "TYPE_NAME": column_type})
+        columns.append({"COLUMN_NAME": candidate_name, "TYPE_NAME": column_type})
+        existing_names.add(candidate_name)
 
     return columns
 
@@ -281,21 +289,25 @@ def generate_search_query(column_mappings: Dict[str, str], account_ids: List[str
 
 def run_query_agent(
     agent_id: int,
-    client: redis.Redis,
+    client_template: redis.Redis,
     column_mappings: Dict[str, str],
     account_ids: List[str],
     num_queries: int,
 ) -> int:
+    # Create a dedicated client for this thread/agent to avoid contention on the same
+    # connection pool and better emulate concurrent users.
+    connection_kwargs = client_template.connection_pool.connection_kwargs
+    client = redis.Redis(**connection_kwargs)
+
     query_count = 0
 
     for _ in range(num_queries):
         try:
             query = generate_search_query(column_mappings, account_ids)
-            results = client.ft(INDEX_KEY).search(query)
+            _ = client.ft(INDEX_KEY).search(query)
             query_count += 1
-
         except Exception:
-            # Continue on errors for resilience testing
+            # Ignore individual query failures – they are counted elsewhere if needed
             pass
 
     return query_count
