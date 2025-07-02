@@ -2,8 +2,15 @@ import random
 import string
 import uuid
 import math
+import threading
 from typing import Dict, List
+from concurrent.futures import ThreadPoolExecutor
 import redis
+from redis.commands.search.query import Query
+
+
+def set_random_seed(seed: int = 42):
+    random.seed(seed)
 
 
 class DragonFlyColumnTypes:
@@ -72,7 +79,7 @@ def generate_account_columns(num_columns: int = 2774) -> List[Dict[str, str]]:
     return columns
 
 
-def map_sql_type_to_dragonfly_type(sql_type: str) -> str:
+def map_sql_type_to_dragonfly_type(type: str) -> str:
     mapping = {
         ServerTypes.UNIQUE_IDENTIFIER: DragonFlyColumnTypes.TAG,
         ServerTypes.INT: DragonFlyColumnTypes.NUMERIC,
@@ -88,10 +95,10 @@ def map_sql_type_to_dragonfly_type(sql_type: str) -> str:
         ServerTypes.IMAGE: DragonFlyColumnTypes.TEXT,
     }
 
-    if sql_type not in mapping:
-        raise ValueError(f"Unknown Server type: {sql_type}")
+    if type not in mapping:
+        raise ValueError(f"Unknown Server type: {type}")
 
-    return mapping[sql_type]
+    return mapping[type]
 
 
 def create_search_index(client: redis.Redis, columns: List[Dict[str, str]]) -> None:
@@ -119,14 +126,27 @@ def get_column_name_to_type_mapping(columns: List[Dict[str, str]]) -> Dict[str, 
     return {column["COLUMN_NAME"]: column["TYPE_NAME"] for column in columns}
 
 
-# Pre-generated data for performance
-PRE_GENERATED_STRINGS = [
-    "".join(random.choices(string.ascii_letters, k=k))
-    for _ in range(10000)  # Original size
-    for k in range(5, 11)  # lengths 5–10
-]
+# Pre-generated data for performance - will be initialized by _initialize_pre_generated_data()
+PRE_GENERATED_STRINGS = []
+PRE_GENERATED_UIDS = []
 
-PRE_GENERATED_UIDS = [str(uuid.uuid4()) for _ in range(10000)]  # Original size
+
+def _initialize_pre_generated_data(size: int):
+    global PRE_GENERATED_STRINGS, PRE_GENERATED_UIDS
+
+    # Clear previous data and generate new
+    PRE_GENERATED_STRINGS.clear()
+    PRE_GENERATED_UIDS.clear()
+
+    PRE_GENERATED_STRINGS.extend(
+        [
+            "".join(random.choices(string.ascii_letters, k=k))
+            for _ in range(size)
+            for k in range(5, 11)  # lengths 5–10
+        ]
+    )
+
+    PRE_GENERATED_UIDS.extend([str(uuid.uuid4()) for _ in range(size)])
 
 
 def generate_property_value(column_type: str):
@@ -158,9 +178,12 @@ def generate_property_value(column_type: str):
 def generate_account_data(
     client: redis.Redis,
     column_mappings: Dict[str, str],
-    num_accounts: int = 10000,
-    chunk_size: int = 500,
+    num_accounts: int = 10000,  # Default for quick testing
+    chunk_size: int = 1000,  # Chunk size for batch processing
 ) -> List[str]:
+    # Initialize pre-generated data with required size
+    _initialize_pre_generated_data(num_accounts)
+
     # Generate account IDs
     account_ids = [str(uuid.uuid4()) for _ in range(num_accounts)]
 
@@ -200,6 +223,102 @@ def _generate_accounts_chunk(
     pipeline.execute()
 
 
-# TODO: Add query generation functions (account_queries.py)
-# TODO: Add update functions (account_updates.py)
-# TODO: Add performance metrics collection
+def create_property_filter(property_name: str, property_type: str, account_ids: List[str]) -> str:
+    if property_type in [ServerTypes.NVARCHAR, ServerTypes.N_TEXT]:
+        filter_string = "".join(random.choices(string.ascii_letters, k=3))
+        return f'@{property_name}: "*{filter_string}*"'
+    elif property_type in [
+        ServerTypes.INT,
+        ServerTypes.MONEY,
+        ServerTypes.DECIMAL,
+        ServerTypes.FLOAT,
+        ServerTypes.DATETIME,
+        ServerTypes.BIGINT,
+    ]:
+        filter_number = random.randint(1, 100)
+        return f"@{property_name}: [{filter_number} +inf]"
+    elif property_type == ServerTypes.BIT:
+        filter_number = random.choice([0, 1])
+        return f"@{property_name}: [{filter_number} {filter_number}]"
+    elif property_type == ServerTypes.UNIQUE_IDENTIFIER:
+        filter_string = random.choice(account_ids).replace("-", "\\-")
+        return f"@{property_name}: {{{filter_string}}}"
+    elif property_type in [ServerTypes.TIMESTAMP, ServerTypes.IMAGE]:
+        return ""
+    else:
+        raise NotImplementedError(
+            f"Type {property_type} is not implemented in create_property_filter"
+        )
+
+
+def generate_search_query(column_mappings: Dict[str, str], account_ids: List[str]) -> Query:
+    columns = list(column_mappings.keys())
+    num_columns = random.randint(1, len(columns))  # Original: use all columns
+    num_filters = random.randint(0, num_columns)  # Original: no limits
+
+    selected_columns = random.sample(columns, num_columns)
+    filter_columns = random.sample(selected_columns, num_filters)
+    page_size = 50  # Original page size
+
+    if len(filter_columns) > 0:
+        filters = []
+        for filter_column in filter_columns:
+            filter_str = create_property_filter(
+                filter_column, column_mappings[filter_column], account_ids
+            )
+            if filter_str:  # Skip empty filters
+                filters.append(filter_str)
+
+        filter_string = " ".join(filters) if filters else "*"
+    else:
+        filter_string = "*"
+
+    query = Query(filter_string).return_fields(*selected_columns)  # Original: no limits
+    query = query.paging(0, page_size)
+
+    return query
+
+
+def run_query_agent(
+    agent_id: int,
+    client: redis.Redis,
+    column_mappings: Dict[str, str],
+    account_ids: List[str],
+    num_queries: int,
+) -> int:
+    query_count = 0
+
+    for _ in range(num_queries):
+        try:
+            query = generate_search_query(column_mappings, account_ids)
+            results = client.ft(INDEX_KEY).search(query)
+            query_count += 1
+
+        except Exception:
+            # Continue on errors for resilience testing
+            pass
+
+    return query_count
+
+
+def run_query_load_test(
+    client: redis.Redis,
+    column_mappings: Dict[str, str],
+    account_ids: List[str],
+    total_queries: int = 1000,
+    num_agents: int = 50,
+) -> int:
+    queries_per_agent = total_queries // num_agents
+
+    with ThreadPoolExecutor(max_workers=num_agents) as executor:
+        futures = []
+        for agent_id in range(num_agents):
+            future = executor.submit(
+                run_query_agent, agent_id, client, column_mappings, account_ids, queries_per_agent
+            )
+            futures.append(future)
+
+        # Wait for all agents to complete
+        total_completed = sum(future.result() for future in futures)
+
+    return total_completed
