@@ -331,7 +331,7 @@ void BaseStringIndex<C>::Remove(search::RaxTreeMap<Container>* map, DocId id, st
 }
 
 template struct BaseStringIndex<CompressedSortedSet>;
-template struct BaseStringIndex<SortedVector>;
+template struct BaseStringIndex<SortedVector<DocId>>;
 
 TextIndex::TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords,
                      const Synonyms* synonyms, bool with_suffixtrie)

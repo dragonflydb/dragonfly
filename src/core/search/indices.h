@@ -111,7 +111,7 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
 
 // Index for text fields.
 // Hashmap based lookup per word.
-struct TagIndex : public BaseStringIndex<SortedVector> {
+struct TagIndex : public BaseStringIndex<SortedVector<DocId>> {
   TagIndex(PMR_NS::memory_resource* mr, SchemaField::TagParams params)
       : BaseStringIndex(mr, params.case_sensitive, params.with_suffixtrie),
         separator_{params.separator} {
