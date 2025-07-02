@@ -310,7 +310,7 @@ class RdbLoader : protected RdbLoaderBase {
 
   void LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib);
 
-  void CreateObjectOnShard(const DbContext& db_cntx, Item* item, DbSlice* db_slice);
+  void CreateObjectOnShard(const DbContext& db_cntx, const Item* item, DbSlice* db_slice);
 
   void LoadScriptFromAux(std::string&& value);
 

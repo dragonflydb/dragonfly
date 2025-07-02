@@ -390,7 +390,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
         }
 
         if (ttl_time != -1) {
-          if (ttl_time < set->time_now()) {
+          if (ttl_time <= set->time_now()) {
             values_expired = true;
             continue;
           }
@@ -508,7 +508,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
         }
 
         if (ttl_time != -1) {
-          if (ttl_time < string_map->time_now()) {
+          if (ttl_time <= string_map->time_now()) {
             values_expired = true;
             continue;
           }
@@ -526,12 +526,11 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     if (string_map->Empty() && values_expired) {
       ec_ = RdbError(errc::value_expired);
       return;
-    } else {
-      if (!config_.append) {
-        pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, string_map);
-      }
-      std::move(cleanup).Cancel();
     }
+    if (!config_.append) {
+      pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, string_map);
+    }
+    std::move(cleanup).Cancel();
   }
 }
 
@@ -2528,7 +2527,7 @@ void RdbLoaderBase::CopyStreamId(const StreamID& src, struct streamID* dest) {
   dest->seq = src.seq;
 }
 
-void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, Item* item, DbSlice* db_slice) {
+void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, DbSlice* db_slice) {
   PrimeValue pv;
   PrimeValue* pv_ptr = &pv;
   DbIndex db_ind = db_cntx.db_index;
@@ -2542,9 +2541,11 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, Item* item, DbSlic
   // accounted for.
   DbSlice::ItAndUpdater append_res;
 
+  LoadConfig tmp_load_config = item->load_config;
+
   // If we're appending the item to an existing key, first load the
   // object.
-  if (item->load_config.append) {
+  if (tmp_load_config.append) {
     append_res = db_slice->FindMutable(db_cntx, item->key);
     if (IsValid(append_res.it)) {
       pv_ptr = &append_res.it->second;
@@ -2552,18 +2553,22 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, Item* item, DbSlic
       // If the item has expired we may not find the key. Note if the key
       // is found, but expired since we started loading, we still append to
       // avoid an inconsistent state where only part of the key is loaded.
-      // we avoid expiration for values inside RDB_TYPE_HASH_WITH_EXPIRY so the object can unexist
-      if ((item->val.rdb_type != RDB_TYPE_HASH_WITH_EXPIRY &&
-           item->val.rdb_type != RDB_TYPE_SET_WITH_EXPIRY) &&
-          (item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms)) {
+      // We allow expiration for values inside sset/hmap,
+      // so the object can unexist if all keys in it were expired
+      bool key_is_not_expired = item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms;
+      bool is_set_expiry_type = item->val.rdb_type == RDB_TYPE_HASH_WITH_EXPIRY ||
+                                item->val.rdb_type == RDB_TYPE_SET_WITH_EXPIRY;
+      if (!is_set_expiry_type && key_is_not_expired) {
         LOG(ERROR) << "Count not to find append key '" << item->key << "' in DB " << db_ind;
         return;
       }
-      item->load_config.append = false;
+      // Because the previous batches of items for this key were fully expired,
+      // we need to create a new key
+      tmp_load_config.append = false;
     }
   }
 
-  if (auto ec = FromOpaque(item->val, item->load_config, pv_ptr); ec) {
+  if (auto ec = FromOpaque(item->val, tmp_load_config, pv_ptr); ec) {
     if (ec.value() == errc::value_expired) {
       // hmap and sset values can expire and we ok with it,
       // so we don't set ec_ in this case
@@ -2584,7 +2589,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, Item* item, DbSlic
     return;
   }
 
-  if (item->load_config.append) {
+  if (tmp_load_config.append) {
     return;
   }
 
@@ -2631,7 +2636,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
   bool dry_run = absl::GetFlag(FLAGS_rdb_load_dry_run);
 
-  for (auto* item : ib) {
+  for (const auto* item : ib) {
     if (dry_run) {
       continue;
     }
