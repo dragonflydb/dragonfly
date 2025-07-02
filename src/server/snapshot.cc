@@ -20,8 +20,7 @@
 #include "server/tiered_storage.h"
 #include "util/fibers/synchronization.h"
 
-ABSL_FLAG(bool, point_in_time_snapshot, false,
-          "If true replication uses point in time snapshoting");
+ABSL_FLAG(bool, point_in_time_snapshot, true, "If true replication uses point in time snapshoting");
 
 namespace dfly {
 

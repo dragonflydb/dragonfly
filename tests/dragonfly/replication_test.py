@@ -3338,7 +3338,10 @@ async def test_mc_gat_replication(df_factory):
 @pytest.mark.parametrize("serialization_max_size", [1, 64000])
 async def test_replication_onmove_flow(df_factory, serialization_max_size):
     master = df_factory.create(
-        proactor_threads=2, cache_mode=True, serialization_max_chunk_size=serialization_max_size
+        proactor_threads=2,
+        cache_mode=True,
+        point_in_time_snapshot=False,
+        serialization_max_chunk_size=serialization_max_size,
     )
     replica = df_factory.create(proactor_threads=2)
 
