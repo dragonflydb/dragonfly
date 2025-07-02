@@ -1297,7 +1297,7 @@ async def test_take_over_seeder(df_factory, df_seeder_factory, master_threads, r
     # Give the seeder a bit of time.
     await asyncio.sleep(3)
     logging.debug("running repltakover")
-    await c_replica.execute_command(f"REPLTAKEOVER 10 SAVE")
+    await c_replica.execute_command(f"REPLTAKEOVER 30 SAVE")
     logging.debug("after running repltakover")
     seeder.stop()
     await fill_task
