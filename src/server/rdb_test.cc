@@ -315,6 +315,105 @@ TEST_F(RdbTest, HashmapExpiry) {
               RespArray(UnorderedElementsAre("key1", "val1", "key2", "val2")));
 }
 
+TEST_F(RdbTest, SaveLoadExpiredValuesHmap) {
+  // Add expiring elements
+  Run({"hsetex", "hkey", "1", "key3", "val3", "key4", "val4"});
+
+  RespExpr resp = Run({"TYPE", "hkey"});
+  ASSERT_EQ(resp, "hash");
+
+  AdvanceTime(10'000);
+  resp = Run({"save", "RDB"});
+  ASSERT_EQ(resp, "OK");
+
+  resp = Run({"TYPE", "hkey"});
+  ASSERT_EQ(resp, "hash");
+
+  Run({"debug", "reload"});
+
+  resp = Run({"TYPE", "hkey"});
+  ASSERT_EQ(resp, "none");
+}
+
+TEST_F(RdbTest, SaveLoadExpiredValuesHugeHmap) {
+  constexpr auto keys_num = 10000;
+  for (int i = 0; i < keys_num; ++i) {
+    Run({"hsetex", "hkey", "1", absl::StrCat("key", i), "val"});
+  }
+
+  ASSERT_EQ(keys_num, CheckedInt({"hlen", "hkey"}));
+
+  AdvanceTime(10'000);
+
+  Run({"debug", "reload"});
+
+  ASSERT_EQ(Run({"TYPE", "hkey"}), "none");
+
+  // with one value that isn't expired
+  for (int i = 0; i < keys_num; ++i) {
+    Run({"hsetex", "hkey", "1", absl::StrCat("key", i), "val"});
+  }
+
+  Run({"hset", "hkey", base::RandStr(20), "val"});
+
+  ASSERT_EQ(keys_num + 1, CheckedInt({"hlen", "hkey"}));
+
+  AdvanceTime(10'000);
+
+  Run({"debug", "reload"});
+
+  ASSERT_EQ(1, CheckedInt({"hlen", "hkey"}));
+}
+
+TEST_F(RdbTest, SaveLoadExpiredValuesSSet) {
+  // Add expiring elements
+  Run({"saddex", "skey", "1", "key3", "key4"});
+
+  RespExpr resp = Run({"TYPE", "skey"});
+  ASSERT_EQ(resp, "set");
+
+  AdvanceTime(10'000);
+  resp = Run({"save", "RDB"});
+  ASSERT_EQ(resp, "OK");
+
+  resp = Run({"TYPE", "skey"});
+  ASSERT_EQ(resp, "set");
+
+  Run({"debug", "reload"});
+
+  resp = Run({"TYPE", "skey"});
+  ASSERT_EQ(resp, "none");
+}
+
+TEST_F(RdbTest, SaveLoadExpiredValuesHugeSet) {
+  constexpr auto keys_num = 10000;
+  for (int i = 0; i < keys_num; ++i) {
+    Run({"saddex", "skey", "1", absl::StrCat("key", i)});
+  }
+
+  ASSERT_EQ(keys_num, CheckedInt({"scard", "skey"}));
+
+  AdvanceTime(10'000);
+
+  Run({"debug", "reload"});
+
+  ASSERT_EQ(Run({"TYPE", "skey"}), "none");
+
+  // with one value that isn't expired
+  for (int i = 0; i < keys_num; ++i) {
+    Run({"saddex", "skey", "1", absl::StrCat("key", i)});
+  }
+  Run({"sadd", "skey", base::RandStr(20)});
+
+  ASSERT_EQ(keys_num + 1, CheckedInt({"scard", "skey"}));
+
+  AdvanceTime(10'000);
+
+  Run({"debug", "reload"});
+
+  ASSERT_EQ(1, CheckedInt({"scard", "skey"}));
+}
+
 TEST_F(RdbTest, SetExpiry) {
   // Add non-expiring elements
   Run({"sadd", "key", "key1", "key2"});
