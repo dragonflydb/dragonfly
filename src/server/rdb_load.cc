@@ -525,6 +525,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     }
     if (string_map->Empty() && values_expired) {
       ec_ = RdbError(errc::value_expired);
+      return;
     } else {
       if (!config_.append) {
         pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, string_map);
