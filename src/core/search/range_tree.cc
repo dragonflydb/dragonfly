@@ -239,12 +239,12 @@ DocId RangeResult::ResultsMerger::GetMin(DocId min_value) {
 }
 
 RangeResult::RangeResult(absl::InlinedVector<RangeBlockPointer, 10> blocks)
-    : leftmost_block_(blocks.front()->GetAllDocIds()) {
+    : leftmost_block_(GetAllDocIds(*blocks.front())) {
   const size_t size = blocks.size();
   DCHECK(size > 0);
 
   if (size > 1) {
-    rightmost_block_ = blocks.back()->GetAllDocIds();
+    rightmost_block_ = GetAllDocIds(*blocks.back());
     if (size > 2) {
       middle_blocks_.reserve(size - 2);
       for (size_t i = 1; i < size - 1; ++i) {
@@ -255,7 +255,7 @@ RangeResult::RangeResult(absl::InlinedVector<RangeBlockPointer, 10> blocks)
 }
 
 RangeResult::RangeResult(const RangeTree::RangeBlock& block, std::pair<double, double> range)
-    : leftmost_block_(block.Range(range.first, range.second)) {
+    : leftmost_block_(Range(block, range.first, range.second)) {
 }
 
 RangeResult::RangeResult(absl::InlinedVector<RangeBlockPointer, 10> blocks,
@@ -264,15 +264,15 @@ RangeResult::RangeResult(absl::InlinedVector<RangeBlockPointer, 10> blocks,
   DCHECK(blocks.size() > 1);
 
   if (leftmost_block_range) {
-    leftmost_block_ = blocks.front()->GreaterOrEqual(leftmost_block_range.value());
+    leftmost_block_ = GreaterOrEqual(*blocks.front(), leftmost_block_range.value());
   } else {
-    leftmost_block_ = blocks.front()->GetAllDocIds();
+    leftmost_block_ = GetAllDocIds(*blocks.front());
   }
 
   if (rightmost_block_range) {
-    rightmost_block_ = blocks.back()->LessOrEqual(rightmost_block_range.value());
+    rightmost_block_ = LessOrEqual(*blocks.back(), rightmost_block_range.value());
   } else {
-    rightmost_block_ = blocks.back()->GetAllDocIds();
+    rightmost_block_ = GetAllDocIds(*blocks.back());
   }
 
   middle_blocks_.reserve(blocks.size() - 2);
@@ -297,6 +297,49 @@ std::vector<DocId> RangeResult::MergeAllResults() {
     }
   }
 
+  return result;
+}
+
+std::vector<DocId> RangeResult::LessOrEqual(const RangeTree::RangeBlock& range_block, double r) {
+  std::vector<DocId> result;
+  result.reserve(range_block.Size() / 8);
+  for (const auto& entry : range_block) {
+    if (entry.second <= r) {
+      result.push_back(entry.first);
+    }
+  }
+  return result;
+}
+
+std::vector<DocId> RangeResult::GreaterOrEqual(const RangeTree::RangeBlock& range_block, double l) {
+  std::vector<DocId> result;
+  result.reserve(range_block.Size() / 8);
+  for (const auto& entry : range_block) {
+    if (entry.second >= l) {
+      result.push_back(entry.first);
+    }
+  }
+  return result;
+}
+
+std::vector<DocId> RangeResult::Range(const RangeTree::RangeBlock& range_block, double l,
+                                      double r) {
+  std::vector<DocId> result;
+  result.reserve(range_block.Size() / 16);
+  for (const auto& entry : range_block) {
+    if (entry.second >= l && entry.second <= r) {
+      result.push_back(entry.first);
+    }
+  }
+  return result;
+}
+
+std::vector<DocId> RangeResult::GetAllDocIds(const RangeTree::RangeBlock& range_block) {
+  std::vector<DocId> result;
+  result.reserve(range_block.Size());
+  for (const auto& entry : range_block) {
+    result.push_back(entry.first);
+  }
   return result;
 }
 

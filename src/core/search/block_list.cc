@@ -73,24 +73,6 @@ template <typename C> void BlockList<C>::TrySplit(BlockIt block) {
   blocks_.insert(block, std::move(left));
 }
 
-template <typename C> std::vector<DocId> BlockList<C>::GetAllDocIds() const {
-  std::vector<DocId> result;
-  result.reserve(size_);
-  for (const auto& block : blocks_) {
-    for (const auto& entry : block) {
-      // TODO: not good approach with is_same_v
-      // It is temporary solution
-      if constexpr (std::is_same_v<ElementType, std::pair<DocId, double>>) {
-        result.push_back(entry.first);
-      } else {
-        static_assert(std::is_same_v<ElementType, DocId>, "Unsupported entry type");
-        result.push_back(entry);
-      }
-    }
-  }
-  return result;
-}
-
 template <typename C>
 typename BlockList<C>::BlockListIterator& BlockList<C>::BlockListIterator::operator++() {
   ++*block_it;

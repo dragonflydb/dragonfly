@@ -62,29 +62,10 @@ template <typename Container /* underlying container */> class BlockList {
   // Remove element, returns true if removed, false if not found.
   bool Remove(ElementType t);
 
-  // TODO: it is not correct that we return DocId here
-  // We need extract DocId from ElementType
-  std::vector<DocId> GetAllDocIds() const;
-
-  // TODO: remove ebanle_if_t for all methods below
-  // It is temporary solution
-  // TODO: remove DocId for return type, the same as in GetAllDocIds
-  template <typename U = ElementType>
-  std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, std::vector<DocId>> LessOrEqual(
-      double r) const;
-
-  template <typename U = ElementType>
-  std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, std::vector<DocId>> GreaterOrEqual(
-      double l) const;
-
-  // Both l and r are inclusive.
-  template <typename U = ElementType>
-  std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, std::vector<DocId>> Range(
-      double l, double r) const;
-
   /* Split into two blocks, left and right,
      so that both blocks have approximately the same number of elements.
      Returns median value of the split. */
+  // TODO: remove enable_if_t from here, add template return type
   template <typename U = ElementType>
   std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, SplitResult> Split() &&;
 
@@ -206,51 +187,6 @@ extern template class BlockList<SortedVector<std::pair<DocId, double>>>;
 
 // Implementation
 /******************************************************************/
-template <typename C>
-template <typename U>
-std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, std::vector<DocId>>
-BlockList<C>::LessOrEqual(double r) const {
-  std::vector<DocId> result;
-  for (const auto& block : blocks_) {
-    for (const auto& entry : block) {
-      if (entry.second <= r) {
-        result.push_back(entry.first);
-      }
-    }
-  }
-  return result;
-}
-
-template <typename C>
-template <typename U>
-std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, std::vector<DocId>>
-BlockList<C>::GreaterOrEqual(double l) const {
-  std::vector<DocId> result;
-  for (const auto& block : blocks_) {
-    for (const auto& entry : block) {
-      if (entry.second >= l) {
-        result.push_back(entry.first);
-      }
-    }
-  }
-  return result;
-}
-
-template <typename C>
-template <typename U>
-std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, std::vector<DocId>>
-BlockList<C>::Range(double l, double r) const {
-  std::vector<DocId> result;
-  for (const auto& block : blocks_) {
-    for (const auto& entry : block) {
-      if (entry.second >= l && entry.second <= r) {
-        result.push_back(entry.first);
-      }
-    }
-  }
-  return result;
-}
-
 template <typename C>
 template <typename U>
 std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, typename BlockList<C>::SplitResult>

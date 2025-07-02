@@ -62,6 +62,12 @@ class RangeResult {
   using BorderBlockIterator = std::vector<DocId>::const_iterator;
   using RangeBlockIterator = RangeTree::RangeBlock::BlockListIterator;
 
+  // Utils methods to extract DocIds from RangeBlock
+  static std::vector<DocId> LessOrEqual(const RangeTree::RangeBlock& range_block, double r);
+  static std::vector<DocId> GreaterOrEqual(const RangeTree::RangeBlock& range_block, double l);
+  static std::vector<DocId> Range(const RangeTree::RangeBlock& range_block, double l, double r);
+  static std::vector<DocId> GetAllDocIds(const RangeTree::RangeBlock& range_block);
+
  public:
   class ResultsMerger {
    private:
