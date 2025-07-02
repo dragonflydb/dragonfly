@@ -1462,7 +1462,9 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
   error_code ec;
 
   // Should be first
-  RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("snapshot-id", snapshot_id_));
+  if (!snapshot_id_.empty()) {
+    RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("snapshot-id", snapshot_id_));
+  }
 
   /* Add a few fields about the state when the RDB was created. */
   RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("redis-ver", REDIS_VERSION));
