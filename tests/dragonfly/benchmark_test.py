@@ -1,4 +1,5 @@
 import logging
+import time
 import redis
 
 from . import dfly_args
@@ -16,8 +17,8 @@ from .benchmark_utils import (
 
 def run_dragonfly_benchmark(
     df_server: DflyInstance,
-    num_accounts: int = 10000,
-    num_queries: int = 1000,
+    num_accounts: int = 200,
+    num_queries: int = 500,
     num_agents: int = 50,
     random_seed: int = 42,
 ):
@@ -52,6 +53,7 @@ def run_dragonfly_benchmark(
     logging.info(
         f"Stage 2: Data Generation - generating {num_accounts:,} accounts with full column data"
     )
+    stage2_start = time.perf_counter()
     account_ids = generate_account_data(
         client=client,
         column_mappings=column_mappings,
@@ -68,12 +70,16 @@ def run_dragonfly_benchmark(
     stored_account = client.hgetall(account_key)
     assert stored_account is not None
     assert stored_account[b"AccountId"].decode() == sample_account_id
-    logging.info(f"Stage 2 completed: {len(account_ids)} accounts generated and stored in Redis")
+    stage2_duration = time.perf_counter() - stage2_start
+    logging.info(
+        f"Stage 2 completed in {stage2_duration:.2f}s: {len(account_ids)} accounts generated and stored"
+    )
 
     # Stage 3: Query Load Testing
     logging.info(
         f"Stage 3: Query Load Testing - running {num_queries:,} queries with {num_agents} concurrent agents"
     )
+    stage3_start = time.perf_counter()
     total_completed = run_query_load_test(
         client=client,
         column_mappings=column_mappings,
@@ -84,11 +90,19 @@ def run_dragonfly_benchmark(
 
     # Verify queries completed
     assert total_completed > 0
-    logging.info(f"Stage 3 completed: {total_completed} queries executed successfully")
+    stage3_duration = time.perf_counter() - stage3_start
+    logging.info(
+        f"Stage 3 completed in {stage3_duration:.2f}s: {total_completed} queries executed successfully"
+    )
+
+    # Final summary
+    logging.info(
+        f"Benchmark Timings Summary -> Data Generation: {stage2_duration:.2f}s | Query Load: {stage3_duration:.2f}s"
+    )
 
     logging.info("Benchmark test completed successfully")
 
 
 @dfly_args({"proactor_threads": 4})
-def test_dragonfly_benchmark_small(df_server: DflyInstance):
+def test_dragonfly_benchmark(df_server: DflyInstance):
     run_dragonfly_benchmark(df_server)

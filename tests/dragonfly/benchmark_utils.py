@@ -34,7 +34,7 @@ class ServerTypes:
 
 
 INDEX_KEY = "idx:AccountBase"
-ACCOUNT_REDIS_KEY = "AccountBase:{accountId}"
+ACCOUNT_KEY = "AccountBase:{accountId}"
 
 
 def generate_account_columns(num_columns: int = 2774) -> List[Dict[str, str]]:
@@ -223,8 +223,8 @@ def _generate_accounts_chunk(
             if value is not None:
                 account[column_name] = value
 
-        redis_key = ACCOUNT_REDIS_KEY.format(accountId=account_id)
-        pipeline.hset(redis_key, mapping=account)
+        acc_key = ACCOUNT_KEY.format(accountId=account_id)
+        pipeline.hset(acc_key, mapping=account)
 
     pipeline.execute()
 
