@@ -18,6 +18,7 @@
 #include "core/search/base.h"
 #include "core/search/block_list.h"
 #include "core/search/compressed_sorted_set.h"
+#include "core/search/range_tree.h"
 #include "core/search/rax_tree.h"
 
 // TODO: move core field definitions out of big header
@@ -39,9 +40,9 @@ struct NumericIndex : public BaseIndex {
   std::vector<DocId> GetAllDocsWithNonNullValues() const override;
 
  private:
+  // TODO: remove unique_ids_
   bool unique_ids_ = true;  // If true, docs ids are unique in the index, otherwise they can repeat.
-  using Entry = std::pair<double, DocId>;
-  absl::btree_set<Entry, std::less<Entry>, PMR_NS::polymorphic_allocator<Entry>> entries_;
+  RangeTree tree_;
 };
 
 // Base index for string based indices.
@@ -111,7 +112,7 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
 
 // Index for text fields.
 // Hashmap based lookup per word.
-struct TagIndex : public BaseStringIndex<SortedVector> {
+struct TagIndex : public BaseStringIndex<SortedVector<DocId>> {
   TagIndex(PMR_NS::memory_resource* mr, SchemaField::TagParams params)
       : BaseStringIndex(mr, params.case_sensitive, params.with_suffixtrie),
         separator_{params.separator} {

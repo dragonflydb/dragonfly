@@ -84,7 +84,7 @@ void IterateAllSuffixes(const absl::flat_hash_set<string>& words,
 
 };  // namespace
 
-NumericIndex::NumericIndex(PMR_NS::memory_resource* mr) : entries_{mr} {
+NumericIndex::NumericIndex(PMR_NS::memory_resource* mr) : tree_{mr} {
 }
 
 bool NumericIndex::Add(DocId id, const DocumentAccessor& doc, string_view field) {
@@ -97,7 +97,7 @@ bool NumericIndex::Add(DocId id, const DocumentAccessor& doc, string_view field)
     unique_ids_ = false;
   }
   for (auto num : numbers.value()) {
-    entries_.emplace(num, id);
+    tree_.Add(id, num);
   }
   return true;
 }
@@ -105,53 +105,18 @@ bool NumericIndex::Add(DocId id, const DocumentAccessor& doc, string_view field)
 void NumericIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
   auto numbers = doc.GetNumbers(field).value();
   for (auto num : numbers) {
-    entries_.erase({num, id});
+    tree_.Remove(id, num);
   }
 }
 
 vector<DocId> NumericIndex::Range(double l, double r) const {
   if (r < l)
     return {};
-
-  auto it_l = entries_.lower_bound({l, 0});
-  auto it_r = entries_.lower_bound({r, numeric_limits<DocId>::max()});
-  DCHECK_GE(it_r - it_l, 0);
-
-  vector<DocId> out;
-  for (auto it = it_l; it != it_r; ++it)
-    out.push_back(it->second);
-
-  sort(out.begin(), out.end());
-
-  if (!unique_ids_) {
-    out.erase(unique(out.begin(), out.end()), out.end());
-  }
-  return out;
+  return tree_.Range(l, r).MergeAllResults();
 }
 
 vector<DocId> NumericIndex::GetAllDocsWithNonNullValues() const {
-  std::vector<DocId> result;
-
-  result.reserve(entries_.size());
-
-  if (unique_ids_) {
-    // If unique_ids_ is true, we can just take the second element of each entry
-    for (const auto& [_, doc_id] : entries_) {
-      result.push_back(doc_id);
-    }
-  } else {
-    UniqueDocsList<> unique_docs;
-    unique_docs.reserve(entries_.size());
-    for (const auto& [_, doc_id] : entries_) {
-      const auto [__, is_new] = unique_docs.insert(doc_id);
-      if (is_new) {
-        result.push_back(doc_id);
-      }
-    }
-  }
-
-  std::sort(result.begin(), result.end());
-  return result;
+  return tree_.GetAllDocIds().MergeAllResults();
 }
 
 template <typename C>
@@ -331,7 +296,7 @@ void BaseStringIndex<C>::Remove(search::RaxTreeMap<Container>* map, DocId id, st
 }
 
 template struct BaseStringIndex<CompressedSortedSet>;
-template struct BaseStringIndex<SortedVector>;
+template struct BaseStringIndex<SortedVector<DocId>>;
 
 TextIndex::TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords,
                      const Synonyms* synonyms, bool with_suffixtrie)
