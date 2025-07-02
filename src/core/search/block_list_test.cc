@@ -175,7 +175,7 @@ TEST_F(BlockListTest, Split) {
     value = (max_value + value - step) % max_value;
   }
 
-  auto split_result = std::move(bl).Split();
+  auto split_result = Split(std::move(bl));
   auto& left = split_result.left;
   auto& right = split_result.right;
 
@@ -232,7 +232,7 @@ TEST_F(BlockListTest, SplitHard) {
     bl1.Insert({i, 2.0});
   }
 
-  auto split_result1 = std::move(bl1).Split();
+  auto split_result1 = Split(std::move(bl1));
 
   EXPECT_EQ(split_result1.median, 2.0);
   EXPECT_EQ(split_result1.left.size(), 70u);
@@ -254,7 +254,7 @@ TEST_F(BlockListTest, SplitHard) {
   for (size_t i = 30; i < 100; i++) {
     bl2.Insert({i, 2.0});
   }
-  auto split_result2 = std::move(bl2).Split();
+  auto split_result2 = Split(std::move(bl2));
 
   EXPECT_EQ(split_result2.median, 2.0);
   EXPECT_EQ(split_result2.left.size(), 30u);
@@ -276,7 +276,7 @@ TEST_F(BlockListTest, SplitSingleDoubleValue) {
     bl.Insert({i, 1.0});
   }
 
-  auto split_result = std::move(bl).Split();
+  auto split_result = Split(std::move(bl));
   auto& left = split_result.left;
   auto& right = split_result.right;
 

@@ -13,6 +13,18 @@
 #include "core/search/compressed_sorted_set.h"
 
 namespace dfly::search {
+
+// Forward declarations
+struct SplitResult;
+template <typename Container> class BlockList;
+template <typename T> class SortedVector;
+
+/* Split into two blocks, left and right, so that both blocks have approximately the same number
+   of elements. Returns median value of the split. Garantees that median present in the right
+   block and not present in the left block. Does not work for empty BlockList. */
+// TODO: Move to RangeTree logic
+SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& result);
+
 // BlockList is a container wrapper for CompressedSortedSet / vector<DocId>
 // to divide the full sorted id range into separate blocks. This reduces modification
 // complexity from O(N) to O(logN + K), where K is the max block size.
@@ -27,13 +39,6 @@ template <typename Container /* underlying container */> class BlockList {
   using ElementType = typename Container::ElementType;
 
  public:
-  // Used by Split method
-  struct SplitResult {
-    BlockList<Container> left;
-    BlockList<Container> right;
-    double median;
-  };
-
   BlockList(PMR_NS::memory_resource* mr, size_t block_size = 1000)
       : block_size_{block_size}, blocks_(mr) {
   }
@@ -61,13 +66,6 @@ template <typename Container /* underlying container */> class BlockList {
 
   // Remove element, returns true if removed, false if not found.
   bool Remove(ElementType t);
-
-  /* Split into two blocks, left and right, so that both blocks have approximately the same number
-     of elements. Returns median value of the split. Garantees that median present in the right
-     block and not present in the left block. Does not work for empty BlockList. */
-  // TODO: remove enable_if_t from here, add template return type
-  template <typename U = ElementType>
-  std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, SplitResult> Split() &&;
 
   size_t Size() const {
     return size_;
@@ -133,6 +131,8 @@ template <typename Container /* underlying container */> class BlockList {
   void TryMerge(BlockIt block);  // If needed, merge with previous block
   void TrySplit(BlockIt block);  // If needed, split into two blocks
 
+  friend SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list);
+
  private:
   const size_t block_size_ = 1000;
   size_t size_ = 0;
@@ -185,69 +185,12 @@ extern template class BlockList<CompressedSortedSet>;
 extern template class BlockList<SortedVector<DocId>>;
 extern template class BlockList<SortedVector<std::pair<DocId, double>>>;
 
-// Implementation
-/******************************************************************/
-template <typename C>
-template <typename U>
-std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, typename BlockList<C>::SplitResult>
-BlockList<C>::Split() && {
-  DCHECK(size() > 0);
+// Used by Split method
+struct SplitResult {
+  using Container = BlockList<SortedVector<std::pair<DocId, double>>>;
 
-  const size_t initial_size = size_;
-
-  std::vector<ElementType> all_entries;
-  all_entries.reserve(initial_size);
-  for (auto& block : blocks_) {
-    // TODO: Instead of clear use move iterators
-    for (auto& entry : block) {
-      all_entries.emplace_back(std::move(entry));
-    }
-    block.Clear();
-  }
-  Clear();
-
-  DCHECK(all_entries.size() == initial_size);
-
-  std::nth_element(all_entries.begin(), all_entries.begin() + initial_size / 2, all_entries.end(),
-                   [](const ElementType& l, const ElementType& r) { return l.second < r.second; });
-
-  double median_value = all_entries[initial_size / 2].second;
-
-  BlockList<C> left(blocks_.get_allocator().resource(), block_size_);
-  BlockList<C> right(blocks_.get_allocator().resource(), block_size_);
-  absl::InlinedVector<ElementType, 1> median_entries;
-
-  double min_value_in_right_part = std::numeric_limits<double>::infinity();
-  for (const auto& entry : all_entries) {
-    if (entry.second < median_value) {
-      left.Insert(entry);
-    } else if (entry.second > median_value) {
-      right.Insert(entry);
-      if (entry.second < min_value_in_right_part) {
-        min_value_in_right_part = entry.second;
-      }
-    } else {
-      median_entries.push_back(entry);
-    }
-  }
-  all_entries.clear();
-
-  if (left.Size() < right.Size()) {
-    // If left is smaller, we can add median entries to it
-    // We need to change median value to the right part
-    median_value = min_value_in_right_part;
-    for (const auto& entry : median_entries) {
-      left.Insert(entry);
-    }
-  } else {
-    // If right part is smaller, we can add median entries to it
-    // Median value is still the same
-    for (const auto& entry : median_entries) {
-      right.Insert(entry);
-    }
-  }
-
-  return {std::move(left), std::move(right), median_value};
-}
-
+  Container left;
+  Container right;
+  double median;
+};
 }  // namespace dfly::search

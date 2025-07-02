@@ -4,6 +4,69 @@ namespace dfly::search {
 
 using namespace std;
 
+SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list) {
+  using Entry = std::pair<DocId, double>;
+
+  const size_t initial_size = block_list.Size();
+  DCHECK(block_list.Size() > 0);
+
+  // Collect all entries from the blocks into a single vector
+  // We copy the block and clear it on the fly to save memory
+  std::vector<std::pair<DocId, double>> all_entries;
+  for (auto& block : block_list.blocks_) {
+    all_entries.reserve(all_entries.size() +
+                        block.Size());  // Reserve space for all entries in the block
+    all_entries.insert(all_entries.end(), block.begin(), block.end());
+    block.Clear();  // At the same time clear the block to save memory
+  }
+  block_list.Clear();
+
+  DCHECK(all_entries.size() == initial_size);
+
+  std::nth_element(all_entries.begin(), all_entries.begin() + initial_size / 2, all_entries.end(),
+                   [](const Entry& l, const Entry& r) { return l.second < r.second; });
+
+  double median_value = all_entries[initial_size / 2].second;
+
+  BlockList<SortedVector<Entry>> left(block_list.blocks_.get_allocator().resource(),
+                                      block_list.block_size_);
+  BlockList<SortedVector<Entry>> right(block_list.blocks_.get_allocator().resource(),
+                                       block_list.block_size_);
+  absl::InlinedVector<Entry, 1> median_entries;
+
+  double min_value_in_right_part = std::numeric_limits<double>::infinity();
+  for (const auto& entry : all_entries) {
+    if (entry.second < median_value) {
+      left.Insert(entry);
+    } else if (entry.second > median_value) {
+      right.Insert(entry);
+      if (entry.second < min_value_in_right_part) {
+        min_value_in_right_part = entry.second;
+      }
+    } else {
+      median_entries.push_back(entry);
+    }
+  }
+  all_entries.clear();
+
+  if (left.Size() < right.Size()) {
+    // If left is smaller, we can add median entries to it
+    // We need to change median value to the right part
+    median_value = min_value_in_right_part;
+    for (const auto& entry : median_entries) {
+      left.Insert(entry);
+    }
+  } else {
+    // If right part is smaller, we can add median entries to it
+    // Median value is still the same
+    for (const auto& entry : median_entries) {
+      right.Insert(entry);
+    }
+  }
+
+  return {std::move(left), std::move(right), median_value};
+}
+
 template <typename C> bool BlockList<C>::Insert(ElementType t) {
   auto block = FindBlock(t);
   if (block == blocks_.end())
