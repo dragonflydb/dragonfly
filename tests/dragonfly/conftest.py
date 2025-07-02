@@ -88,7 +88,7 @@ def test_env(tmp_dir: Path):
     return env
 
 
-@pytest.fixture(scope="session", params=[{}])
+@pytest.fixture(scope="function", params=[{}])
 def df_seeder_factory(request) -> DflySeederFactory:
     seed = request.config.getoption("--rand-seed")
     if seed is None:
