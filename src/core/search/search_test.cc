@@ -1332,7 +1332,6 @@ static void BM_SearchNumericIndexes(benchmark::State& state) {
                                              std::numeric_limits<NumericType>::max());
 
   const size_t num_docs = state.range(0);
-  CHECK_GT(num_docs, 0);
   for (size_t i = 0; i < num_docs; i++) {
     MockedDocument doc{Map{{"numeric", std::to_string(dist(rnd))}}};
     indices.Add(i, doc);
@@ -1376,8 +1375,6 @@ static void BM_SearchTwoNumericIndexes(benchmark::State& state) {
                                               std::numeric_limits<NumericType>::max());
 
   const size_t num_docs = state.range(0);
-  CHECK_GT(num_docs, 0);
-
   for (size_t i = 0; i < num_docs; ++i) {
     MockedDocument doc{Map{
         {"numeric1", std::to_string(dist1(rnd))},
@@ -1427,7 +1424,6 @@ static void BM_SearchNumericAndTagIndexes(benchmark::State& state) {
   const size_t max_tag_number = 1000;
 
   const size_t num_docs = state.range(0);
-  CHECK_GT(num_docs, 0);
   for (size_t i = 0; i < num_docs; i++) {
     MockedDocument doc{
         Map{{"tag", absl::StrCat("tag", tag_number)}, {"numeric", std::to_string(dist(rnd))}}};
