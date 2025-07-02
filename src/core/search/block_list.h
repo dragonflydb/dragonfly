@@ -62,11 +62,9 @@ template <typename Container /* underlying container */> class BlockList {
   // Remove element, returns true if removed, false if not found.
   bool Remove(ElementType t);
 
-  /* Split into two blocks, left and right,
-     so that both blocks have approximately the same number of elements.
-     Returns median value of the split.
-     Garantees that median present in the right block
-     and not present in the left block. */
+  /* Split into two blocks, left and right, so that both blocks have approximately the same number
+     of elements. Returns median value of the split. Garantees that median present in the right
+     block and not present in the left block. Does not work for empty BlockList. */
   // TODO: remove enable_if_t from here, add template return type
   template <typename U = ElementType>
   std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, SplitResult> Split() &&;
@@ -193,9 +191,9 @@ template <typename C>
 template <typename U>
 std::enable_if_t<std::is_same_v<U, std::pair<DocId, double>>, typename BlockList<C>::SplitResult>
 BlockList<C>::Split() && {
+  DCHECK(size() > 0);
+
   const size_t initial_size = size_;
-  BlockList<C> left(blocks_.get_allocator().resource(), block_size_);
-  BlockList<C> right(blocks_.get_allocator().resource(), block_size_);
 
   std::vector<ElementType> all_entries;
   all_entries.reserve(initial_size);
@@ -213,32 +211,43 @@ BlockList<C>::Split() && {
   std::nth_element(all_entries.begin(), all_entries.begin() + initial_size / 2, all_entries.end(),
                    [](const ElementType& l, const ElementType& r) { return l.second < r.second; });
 
-  double max_value_in_left_part = -std::numeric_limits<double>::infinity();
-  for (size_t i = 0; i < initial_size / 2; ++i) {
-    // TODO: Add InsertSortedBatch
-    left.Insert(all_entries[i]);
+  double median_value = all_entries[initial_size / 2].second;
 
-    if (all_entries[i].second > max_value_in_left_part) {
-      max_value_in_left_part = all_entries[i].second;
-    }
-  }
+  BlockList<C> left(blocks_.get_allocator().resource(), block_size_);
+  BlockList<C> right(blocks_.get_allocator().resource(), block_size_);
+  absl::InlinedVector<ElementType, 1> median_entries;
 
   double min_value_in_right_part = std::numeric_limits<double>::infinity();
-  for (size_t i = initial_size / 2; i < initial_size; ++i) {
-    // TODO: Add InsertSortedBatch
-    if (all_entries[i].second == max_value_in_left_part) {
-      left.Insert(all_entries[i]);
-      continue;  // Skip if equal to max_value_in_left_part
+  for (const auto& entry : all_entries) {
+    if (entry.second < median_value) {
+      left.Insert(entry);
+    } else if (entry.second > median_value) {
+      right.Insert(entry);
+      if (entry.second < min_value_in_right_part) {
+        min_value_in_right_part = entry.second;
+      }
+    } else {
+      median_entries.push_back(entry);
     }
+  }
+  all_entries.clear();
 
-    right.Insert(all_entries[i]);
-
-    if (all_entries[i].second < min_value_in_right_part) {
-      min_value_in_right_part = all_entries[i].second;
+  if (left.Size() < right.Size()) {
+    // If left is smaller, we can add median entries to it
+    // We need to change median value to the right part
+    median_value = min_value_in_right_part;
+    for (const auto& entry : median_entries) {
+      left.Insert(entry);
+    }
+  } else {
+    // If right part is smaller, we can add median entries to it
+    // Median value is still the same
+    for (const auto& entry : median_entries) {
+      right.Insert(entry);
     }
   }
 
-  return {std::move(left), std::move(right), min_value_in_right_part};
+  return {std::move(left), std::move(right), median_value};
 }
 
 }  // namespace dfly::search

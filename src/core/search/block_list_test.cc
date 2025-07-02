@@ -222,30 +222,49 @@ TEST_F(BlockListTest, Split) {
 }
 
 TEST_F(BlockListTest, SplitHard) {
-  BlockList<SortedVector<std::pair<DocId, double>>> bl{PMR_NS::get_default_resource(), 20};
+  // First test 70 values on the left and 30 on the right
+  BlockList<SortedVector<std::pair<DocId, double>>> bl1{PMR_NS::get_default_resource(), 20};
 
   for (size_t i = 0; i < 70; i++) {
-    bl.Insert({i, 1.0});
+    bl1.Insert({i, 1.0});
   }
-
   for (size_t i = 70; i < 100; i++) {
-    bl.Insert({i, 2.0});
+    bl1.Insert({i, 2.0});
   }
 
-  auto split_result = std::move(bl).Split();
-  auto& left = split_result.left;
-  auto& right = split_result.right;
+  auto split_result1 = std::move(bl1).Split();
 
-  DCHECK_EQ(split_result.median, 2.0);
+  EXPECT_EQ(split_result1.median, 2.0);
+  EXPECT_EQ(split_result1.left.size(), 70u);
+  EXPECT_EQ(split_result1.right.size(), 30u);
 
-  EXPECT_EQ(left.size(), 70u);
-  EXPECT_EQ(right.size(), 30u);
-
-  for (const auto& [_, value] : left) {
+  for (const auto& [_, value] : split_result1.left) {
     EXPECT_EQ(value, 1.0);
   }
 
-  for (const auto& [_, value] : right) {
+  for (const auto& [_, value] : split_result1.right) {
+    EXPECT_EQ(value, 2.0);
+  }
+
+  // Now test 30 values on the left and 70 on the right
+  BlockList<SortedVector<std::pair<DocId, double>>> bl2{PMR_NS::get_default_resource(), 20};
+  for (size_t i = 0; i < 30; i++) {
+    bl2.Insert({i, 1.0});
+  }
+  for (size_t i = 30; i < 100; i++) {
+    bl2.Insert({i, 2.0});
+  }
+  auto split_result2 = std::move(bl2).Split();
+
+  EXPECT_EQ(split_result2.median, 2.0);
+  EXPECT_EQ(split_result2.left.size(), 30u);
+  EXPECT_EQ(split_result2.right.size(), 70u);
+
+  for (const auto& [_, value] : split_result2.left) {
+    EXPECT_EQ(value, 1.0);
+  }
+
+  for (const auto& [_, value] : split_result2.right) {
     EXPECT_EQ(value, 2.0);
   }
 }
@@ -261,21 +280,9 @@ TEST_F(BlockListTest, SplitSingleDoubleValue) {
   auto& left = split_result.left;
   auto& right = split_result.right;
 
-  DCHECK_EQ(left.Size(), 100u);
-  DCHECK_EQ(right.Size(), 0u);
-  DCHECK_EQ(split_result.median, std::numeric_limits<double>::infinity());
-}
-
-TEST_F(BlockListTest, SplitEmpty) {
-  BlockList<SortedVector<std::pair<DocId, double>>> bl{PMR_NS::get_default_resource(), 20};
-
-  auto split_result = std::move(bl).Split();
-  auto& left = split_result.left;
-  auto& right = split_result.right;
-
-  DCHECK_EQ(left.Size(), 0u);
-  DCHECK_EQ(right.Size(), 0u);
-  DCHECK_EQ(split_result.median, std::numeric_limits<double>::infinity());
+  EXPECT_EQ(left.Size(), 0u);
+  EXPECT_EQ(right.Size(), 100u);
+  EXPECT_EQ(split_result.median, 1.0);
 }
 
 static void BM_Erase90PctTail(benchmark::State& state) {
