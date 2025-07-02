@@ -2,7 +2,6 @@ import random
 import string
 import uuid
 import math
-import threading
 from typing import Dict, List
 from concurrent.futures import ThreadPoolExecutor
 import redis
@@ -39,7 +38,7 @@ ACCOUNT_REDIS_KEY = "AccountBase:{accountId}"
 
 
 def generate_account_columns(num_columns: int = 2774) -> List[Dict[str, str]]:
-    sql_types = [
+    server_types = [
         ServerTypes.NVARCHAR,
         ServerTypes.INT,
         ServerTypes.BIT,
@@ -80,14 +79,14 @@ def generate_account_columns(num_columns: int = 2774) -> List[Dict[str, str]]:
         if candidate_name in existing_names:
             continue
 
-        column_type = random.choice(sql_types)
+        column_type = random.choice(server_types)
         columns.append({"COLUMN_NAME": candidate_name, "TYPE_NAME": column_type})
         existing_names.add(candidate_name)
 
     return columns
 
 
-def map_sql_type_to_dragonfly_type(type: str) -> str:
+def map_server_type_to_dragonfly_type(server_type: str) -> str:
     mapping = {
         ServerTypes.UNIQUE_IDENTIFIER: DragonFlyColumnTypes.TAG,
         ServerTypes.INT: DragonFlyColumnTypes.NUMERIC,
@@ -103,17 +102,17 @@ def map_sql_type_to_dragonfly_type(type: str) -> str:
         ServerTypes.IMAGE: DragonFlyColumnTypes.TEXT,
     }
 
-    if type not in mapping:
-        raise ValueError(f"Unknown Server type: {type}")
+    if server_type not in mapping:
+        raise ValueError(f"Unknown Server type: {server_type}")
 
-    return mapping[type]
+    return mapping[server_type]
 
 
 def create_search_index(client: redis.Redis, columns: List[Dict[str, str]]) -> None:
     # Map columns to Dragonfly types
     column_name_to_dragonfly_type = {}
     for column in columns:
-        dragonfly_type = map_sql_type_to_dragonfly_type(column["TYPE_NAME"])
+        dragonfly_type = map_server_type_to_dragonfly_type(column["TYPE_NAME"])
         column_name_to_dragonfly_type[column["COLUMN_NAME"]] = dragonfly_type
 
     # Build schema command
@@ -134,7 +133,6 @@ def get_column_name_to_type_mapping(columns: List[Dict[str, str]]) -> Dict[str, 
     return {column["COLUMN_NAME"]: column["TYPE_NAME"] for column in columns}
 
 
-# Pre-generated data for performance - will be initialized by _initialize_pre_generated_data()
 PRE_GENERATED_STRINGS = []
 PRE_GENERATED_UIDS = []
 
@@ -261,12 +259,12 @@ def create_property_filter(property_name: str, property_type: str, account_ids: 
 
 def generate_search_query(column_mappings: Dict[str, str], account_ids: List[str]) -> Query:
     columns = list(column_mappings.keys())
-    num_columns = random.randint(1, len(columns))  # Original: use all columns
-    num_filters = random.randint(0, num_columns)  # Original: no limits
+    num_columns = random.randint(len(columns) / 2, len(columns))
+    num_filters = random.randint(len(columns) / 2, len(columns))
 
     selected_columns = random.sample(columns, num_columns)
     filter_columns = random.sample(selected_columns, num_filters)
-    page_size = 50  # Original page size
+    page_size = 50
 
     if len(filter_columns) > 0:
         filters = []
@@ -274,14 +272,14 @@ def generate_search_query(column_mappings: Dict[str, str], account_ids: List[str
             filter_str = create_property_filter(
                 filter_column, column_mappings[filter_column], account_ids
             )
-            if filter_str:  # Skip empty filters
+            if filter_str:
                 filters.append(filter_str)
 
         filter_string = " ".join(filters) if filters else "*"
     else:
         filter_string = "*"
 
-    query = Query(filter_string).return_fields(*selected_columns)  # Original: no limits
+    query = Query(filter_string).return_fields(*selected_columns)
     query = query.paging(0, page_size)
 
     return query
@@ -307,7 +305,7 @@ def run_query_agent(
             _ = client.ft(INDEX_KEY).search(query)
             query_count += 1
         except Exception:
-            # Ignore individual query failures – they are counted elsewhere if needed
+            # Ignore individual query failures
             pass
 
     return query_count
