@@ -84,7 +84,9 @@ class RdbSaver {
   // single_shard - false, means we capture all the data using a single RdbSaver instance
   // (corresponds to legacy, redis compatible mode)
   // if align_writes is true - writes data in aligned chunks of 4KB to fit direct I/O requirements.
-  explicit RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes);
+  // snapshot_id - allows to identify that group of files belongs to the same snapshot
+  explicit RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes,
+                    std::string snapshot_id);
 
   ~RdbSaver();
 
@@ -146,6 +148,7 @@ class RdbSaver {
   std::unique_ptr<Impl> impl_;
   SaveMode save_mode_;
   CompressionMode compression_mode_;
+  std::string snapshot_id_;
 };
 
 class SerializerBase {

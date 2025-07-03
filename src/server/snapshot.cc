@@ -20,8 +20,7 @@
 #include "server/tiered_storage.h"
 #include "util/fibers/synchronization.h"
 
-ABSL_FLAG(bool, point_in_time_snapshot, false,
-          "If true replication uses point in time snapshoting");
+ABSL_FLAG(bool, point_in_time_snapshot, true, "If true replication uses point in time snapshoting");
 
 namespace dfly {
 
@@ -446,6 +445,7 @@ bool SliceSnapshot::IsPositionSerialized(DbIndex id, PrimeTable::Cursor cursor) 
 }
 
 void SliceSnapshot::OnMoved(DbIndex id, const DbSlice::MovedItemsVec& items) {
+  std::lock_guard barrier(big_value_mu_);
   DCHECK(!use_snapshot_version_);
   for (const auto& item_cursors : items) {
     // If item was moved from a bucket that was serialized to a bucket that was not serialized

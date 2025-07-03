@@ -49,8 +49,8 @@ AstExpr ParseQuery(std::string_view query, const QueryParams* params) {
 // Represents an either owned or non-owned result set that can be accessed transparently.
 struct IndexResult {
   using DocVec = vector<DocId>;
-  using BorrowedView =
-      variant<const DocVec*, const BlockList<CompressedSortedSet>*, const BlockList<SortedVector>*>;
+  using BorrowedView = variant<const DocVec*, const BlockList<CompressedSortedSet>*,
+                               const BlockList<SortedVector<DocId>>*>;
 
   IndexResult() : value_{DocVec{}} {
   }
@@ -111,7 +111,7 @@ struct IndexResult {
 
  private:
   variant<DocVec /*owned*/, const DocVec*, const BlockList<CompressedSortedSet>*,
-          const BlockList<SortedVector>*>
+          const BlockList<SortedVector<DocId>>*>
       value_;
 };
 

@@ -18,7 +18,6 @@ extern "C" {
 #include "redis/stream.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"
-#include "redis/zset.h"
 }
 
 #include "base/flags.h"
@@ -385,7 +384,11 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
   if (obj.Encoding() == kEncodingStrMap2) {
     StringSet* set = (StringSet*)obj.RObjPtr();
 
-    RETURN_ON_ERR(SaveLen(set->SizeSlow()));
+    // We don't expire any data during serialization
+    set->set_time(0);
+
+    // due to we avoid expiring we can use UpperBoundSize() instead of SlowSize()
+    RETURN_ON_ERR(SaveLen(set->UpperBoundSize()));
     for (auto it = set->begin(); it != set->end();) {
       RETURN_ON_ERR(SaveString(string_view{*it, sdslen(*it)}));
       if (set->ExpirationUsed()) {
@@ -400,6 +403,7 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
         flush_state = FlushState::kFlushEndEntry;
       FlushIfNeeded(flush_state);
     }
+    set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
   } else {
     CHECK_EQ(obj.Encoding(), kEncodingIntSet);
     intset* is = (intset*)obj.RObjPtr();
@@ -417,7 +421,11 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
   if (pv.Encoding() == kEncodingStrMap2) {
     StringMap* string_map = (StringMap*)pv.RObjPtr();
 
-    RETURN_ON_ERR(SaveLen(string_map->SizeSlow()));
+    // We don't expire any data during serialization
+    string_map->set_time(0);
+
+    // due to we avoid expiring we can use UpperBoundSize() instead of SlowSize()
+    RETURN_ON_ERR(SaveLen(string_map->UpperBoundSize()));
 
     for (auto it = string_map->begin(); it != string_map->end();) {
       const auto& [k, v] = *it;
@@ -435,6 +443,8 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
         flush_state = FlushState::kFlushEndEntry;
       FlushIfNeeded(flush_state);
     }
+
+    string_map->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
   } else {
     CHECK_EQ(kEncodingListPack, pv.Encoding());
 
@@ -1350,7 +1360,8 @@ unique_ptr<SliceSnapshot>& RdbSaver::Impl::GetSnapshot(EngineShard* shard) {
   return shard_snapshots_[sid];
 }
 
-RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes) {
+RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes, std::string snapshot_id)
+    : snapshot_id_(std::move(snapshot_id)) {
   CHECK_NOTNULL(sink);
   CompressionMode compression_mode = GetDefaultCompressionMode();
   int producer_count = 0;
@@ -1416,7 +1427,7 @@ error_code RdbSaver::SaveHeader(const GlobalData& glob_state) {
   CHECK_EQ(9u, sz);
 
   RETURN_ON_ERR(impl_->serializer()->WriteRaw(Bytes{reinterpret_cast<uint8_t*>(magic), sz}));
-  RETURN_ON_ERR(SaveAux(std::move(glob_state)));
+  RETURN_ON_ERR(SaveAux(std::move(glob_state)));  // Should be first after magic
   RETURN_ON_ERR(impl_->FlushSerializer());
   return error_code{};
 }
@@ -1449,6 +1460,11 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
   static_assert(sizeof(void*) == 8, "");
 
   error_code ec;
+
+  // Should be first
+  if (!snapshot_id_.empty()) {
+    RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("snapshot-id", snapshot_id_));
+  }
 
   /* Add a few fields about the state when the RDB was created. */
   RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("redis-ver", REDIS_VERSION));

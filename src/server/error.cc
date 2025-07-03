@@ -36,6 +36,8 @@ string error_category::message(int ev) const {
       return "Wrong signature while trying to load from rdb file";
     case errc::out_of_memory:
       return "Out of memory, or used memory is too high";
+    case errc::incorrect_snapshot_id:
+      return "Snapshot id mismatch";
     default:
       return absl::StrCat("Internal error when loading RDB file ", ev);
       break;
