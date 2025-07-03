@@ -134,7 +134,8 @@ tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
   } else if (type == "STREAM") {
     cid = registry.Find("XADD");
     args.push_back("*");
-    for (size_t i = 0; i < elements; ++i) {
+    uint32_t num_values = rand() % 4 + 1;
+    for (size_t i = 0; i < num_values; ++i) {
       args.push_back(GenerateValue(val_size / 2, random_value, gen));
       args.push_back(GenerateValue(val_size / 2, random_value, gen));
     }
@@ -595,7 +596,8 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    to meet value size.",
         "    If RAND is specified then value will be set to random hex string in specified size.",
         "    If SLOTS is specified then create keys only in given slots range.",
-        "    TYPE specifies data type (must be STRING/LIST/SET/HASH/ZSET/JSON), default STRING.",
+        "    TYPE specifies data type (must be STRING/LIST/SET/HASH/ZSET/JSON/STREAM), default "
+        "STRING.",
         "    ELEMENTS specifies how many sub elements if relevant (like entries in a list / set).",
         "    EXPIRE specifies key expire ttl range.",
         "OBJHIST",
@@ -1498,9 +1500,10 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
     string key = StrCat(options.prefix, ":", batch.index[i]);
     uint32_t elements_left = options.elements;
 
+    // limit rss grow by 32K by limiting the element count in each command.
+    uint32_t max_batch_elements =
+        options.type == "STREAM" ? 1 : std::max(32_KB / options.val_size, 1ULL);
     while (elements_left) {
-      // limit rss grow by 32K by limiting the element count in each command.
-      uint32_t max_batch_elements = std::max(32_KB / options.val_size, 1ULL);
       uint32_t populate_elements = std::min(max_batch_elements, elements_left);
       elements_left -= populate_elements;
       auto [cid, args] = GeneratePopulateCommand(options.type, key, options.val_size,

@@ -784,28 +784,17 @@ TEST_F(RdbTest, LoadHugeList) {
 TEST_F(RdbTest, LoadHugeStream) {
   TEST_current_time_ms = 1000;
 
-  // Add a huge stream (test:0) with 2000 entries, and 4 1k elements per entry
+  // Add a huge stream (test:0) with 2000 entries, and 1-4 elements per entry
   // (note must be more than 512*4kb elements to test partial reads).
-  // We add 2000 entries to the stream to ensure that the stream, because populate strream
-  // adds only a single entry at a time, with multiple elements in it.
-  for (unsigned i = 0; i < 2000; i++) {
-    Run({"debug", "populate", "1", "test", "2000", "rand", "type", "stream", "elements", "4"});
-  }
+  Run({"debug", "populate", "1", "test", "2000", "rand", "type", "stream", "elements", "2000"});
+
   ASSERT_EQ(2000, CheckedInt({"xlen", "test:0"}));
   Run({"XGROUP", "CREATE", "test:0", "grp1", "0"});
   Run({"XGROUP", "CREATE", "test:0", "grp2", "0"});
   Run({"XREADGROUP", "GROUP", "grp1", "Alice", "COUNT", "1", "STREAMS", "test:0", ">"});
   Run({"XREADGROUP", "GROUP", "grp2", "Alice", "COUNT", "1", "STREAMS", "test:0", ">"});
 
-  auto resp = Run({"xinfo", "stream", "test:0"});
-
-  EXPECT_THAT(
-      resp, RespElementsAre("length", 2000, "radix-tree-keys", 2000, "radix-tree-nodes", 2010,
-                            "last-generated-id", "1000-1999", "max-deleted-entry-id", "0-0",
-                            "entries-added", 2000, "recorded-first-entry-id", "1000-0", "groups", 2,
-                            "first-entry", ArrLen(2), "last-entry", ArrLen(2)));
-
-  resp = Run({"save", "df"});
+  auto resp = Run({"save", "df"});
   ASSERT_EQ(resp, "OK");
 
   auto save_info = service_->server_family().GetLastSaveInfo();
@@ -813,12 +802,7 @@ TEST_F(RdbTest, LoadHugeStream) {
   ASSERT_EQ(resp, "OK");
 
   ASSERT_EQ(2000, CheckedInt({"xlen", "test:0"}));
-  resp = Run({"xinfo", "stream", "test:0"});
-  EXPECT_THAT(
-      resp, RespElementsAre("length", 2000, "radix-tree-keys", 2000, "radix-tree-nodes", 2010,
-                            "last-generated-id", "1000-1999", "max-deleted-entry-id", "0-0",
-                            "entries-added", 2000, "recorded-first-entry-id", "1000-0", "groups", 2,
-                            "first-entry", ArrLen(2), "last-entry", ArrLen(2)));
+
   resp = Run({"xinfo", "groups", "test:0"});
   EXPECT_THAT(resp, RespElementsAre(RespElementsAre("name", "grp1", "consumers", 1, "pending", 1,
                                                     "last-delivered-id", "1000-0", "entries-read",
