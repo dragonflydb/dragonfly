@@ -152,7 +152,368 @@ unsigned char* ZzlInsertAt(unsigned char* zl, unsigned char* eptr, std::string_v
   return zl;
 }
 
+double ZzlStrtod(unsigned char* vstr, unsigned int vlen) {
+  char buf[128];
+  if (vlen > sizeof(buf))
+    vlen = sizeof(buf);
+  memcpy(buf, vstr, vlen);
+  buf[vlen] = '\0';
+  return strtod(buf, NULL);
+}
+
+/* Return a listpack element as an SDS string. */
+sds LpGetObject(const uint8_t* sptr) {
+  unsigned char* vstr;
+  unsigned int vlen;
+  long long vlong;
+
+  serverAssert(sptr != NULL);
+  vstr = lpGetValue(const_cast<uint8_t*>(sptr), &vlen, &vlong);
+
+  if (vstr) {
+    return sdsnewlen((char*)vstr, vlen);
+  } else {
+    return sdsfromlonglong(vlong);
+  }
+}
+
+// static representation of sds strings
+char kMinStrData[] =
+    "\110"
+    "minstring";
+char kMaxStrData[] =
+    "\110"
+    "maxstring";
+
 }  // namespace
+
+double ZzlGetScore(const uint8_t* sptr) {
+  unsigned char* vstr;
+  unsigned int vlen;
+  long long vlong;
+  double score;
+
+  DCHECK(sptr != NULL);
+  vstr = lpGetValue(const_cast<uint8_t*>(sptr), &vlen, &vlong);
+
+  if (vstr) {
+    score = ZzlStrtod(vstr, vlen);
+  } else {
+    score = vlong;
+  }
+
+  return score;
+}
+
+/* Move to the previous entry based on the values in eptr and sptr. Both are
+ * set to NULL when there is no prev entry. */
+void ZzlPrev(const uint8_t* zl, uint8_t** eptr, uint8_t** sptr) {
+  unsigned char *_eptr, *_sptr;
+  serverAssert(*eptr != NULL && *sptr != NULL);
+
+  _sptr = lpPrev(const_cast<uint8_t*>(zl), *eptr);
+  if (_sptr != NULL) {
+    _eptr = lpPrev(const_cast<uint8_t*>(zl), _sptr);
+    DCHECK(_eptr != NULL);
+  } else {
+    /* No previous entry. */
+    _eptr = NULL;
+  }
+
+  *eptr = _eptr;
+  *sptr = _sptr;
+}
+
+/* Move to next entry based on the values in eptr and sptr. Both are set to
+ * NULL when there is no next entry. */
+void ZzlNext(const uint8_t* zl, uint8_t** eptr, uint8_t** sptr) {
+  unsigned char *_eptr, *_sptr;
+  DCHECK(*eptr != NULL && *sptr != NULL);
+
+  _eptr = lpNext(const_cast<uint8_t*>(zl), *sptr);
+  if (_eptr != NULL) {
+    _sptr = lpNext(const_cast<uint8_t*>(zl), _eptr);
+    DCHECK(_sptr != NULL);
+  } else {
+    /* No next entry. */
+    _sptr = NULL;
+  }
+
+  *eptr = _eptr;
+  *sptr = _sptr;
+}
+
+/* Free a lex range structure, must be called only after zslParseLexRange()
+ * populated the structure with success (C_OK returned). */
+void ZslFreeLexRange(const zlexrangespec* spec) {
+  if (spec->min != cminstring && spec->min != cmaxstring)
+    sdsfree(spec->min);
+  if (spec->max != cminstring && spec->max != cmaxstring)
+    sdsfree(spec->max);
+}
+
+/* This is just a wrapper to sdscmp() that is able to
+ * handle shared.minstring and shared.maxstring as the equivalent of
+ * -inf and +inf for strings */
+int sdscmplex(sds a, sds b) {
+  if (a == b)
+    return 0;
+  if (a == cminstring || b == cmaxstring)
+    return -1;
+  if (a == cmaxstring || b == cminstring)
+    return 1;
+  return sdscmp(a, b);
+}
+
+int zslLexValueGteMin(sds value, const zlexrangespec* spec) {
+  return spec->minex ? (sdscmplex(value, spec->min) > 0) : (sdscmplex(value, spec->min) >= 0);
+}
+
+int zslLexValueLteMax(sds value, const zlexrangespec* spec) {
+  return spec->maxex ? (sdscmplex(value, spec->max) < 0) : (sdscmplex(value, spec->max) <= 0);
+}
+
+int ZzlLexValueGteMin(unsigned char* p, const zlexrangespec* spec) {
+  sds value = LpGetObject(p);
+  int res = zslLexValueGteMin(value, spec);
+  sdsfree(value);
+  return res;
+}
+
+int ZzlLexValueLteMax(unsigned char* p, const zlexrangespec* spec) {
+  sds value = LpGetObject(p);
+  int res = zslLexValueLteMax(value, spec);
+  sdsfree(value);
+  return res;
+}
+
+/* Returns if there is a part of the zset is in range. Should only be used
+ * internally by zzlFirstInRange and zzlLastInRange. */
+int zzlIsInRange(unsigned char* zl, const zrangespec* range) {
+  unsigned char* p;
+  double score;
+
+  /* Test for ranges that will always be empty. */
+  if (range->min > range->max || (range->min == range->max && (range->minex || range->maxex)))
+    return 0;
+
+  p = lpSeek(zl, -1); /* Last score. */
+  if (p == NULL)
+    return 0; /* Empty sorted set */
+  score = ZzlGetScore(p);
+  if (!ZslValueGteMin(score, range))
+    return 0;
+
+  p = lpSeek(zl, 1); /* First score. */
+  serverAssert(p != NULL);
+  score = ZzlGetScore(p);
+  if (!ZslValueLteMax(score, range))
+    return 0;
+
+  return 1;
+}
+
+/* Find pointer to the first element contained in the specified range.
+ * Returns NULL when no element is contained in the range. */
+unsigned char* ZzlFirstInRange(unsigned char* zl, const zrangespec* range) {
+  unsigned char *eptr = lpSeek(zl, 0), *sptr;
+  double score;
+
+  /* If everything is out of range, return early. */
+  if (!zzlIsInRange(zl, range))
+    return NULL;
+
+  while (eptr != NULL) {
+    sptr = lpNext(zl, eptr);
+    serverAssert(sptr != NULL);
+
+    score = ZzlGetScore(sptr);
+    if (ZslValueGteMin(score, range)) {
+      /* Check if score <= max. */
+      if (ZslValueLteMax(score, range))
+        return eptr;
+      return NULL;
+    }
+
+    /* Move to next element. */
+    eptr = lpNext(zl, sptr);
+  }
+
+  return NULL;
+}
+
+/* Find pointer to the last element contained in the specified range.
+ * Returns NULL when no element is contained in the range. */
+unsigned char* ZzlLastInRange(unsigned char* zl, const zrangespec* range) {
+  unsigned char *eptr = lpSeek(zl, -2), *sptr;
+  double score;
+
+  /* If everything is out of range, return early. */
+  if (!zzlIsInRange(zl, range))
+    return NULL;
+
+  while (eptr != NULL) {
+    sptr = lpNext(zl, eptr);
+    serverAssert(sptr != NULL);
+
+    score = ZzlGetScore(sptr);
+    if (ZslValueLteMax(score, range)) {
+      /* Check if score >= min. */
+      if (ZslValueGteMin(score, range))
+        return eptr;
+      return NULL;
+    }
+
+    /* Move to previous element by moving to the score of previous element.
+     * When this returns NULL, we know there also is no element. */
+    sptr = lpPrev(zl, eptr);
+    if (sptr != NULL)
+      serverAssert((eptr = lpPrev(zl, sptr)) != NULL);
+    else
+      eptr = NULL;
+  }
+
+  return NULL;
+}
+
+/* Returns if there is a part of the zset is in range. Should only be used
+ * internally by zzlFirstInRange and zzlLastInRange. */
+int ZzlIsInLexRange(unsigned char* zl, const zlexrangespec* range) {
+  unsigned char* p;
+
+  /* Test for ranges that will always be empty. */
+  int cmp = sdscmplex(range->min, range->max);
+  if (cmp > 0 || (cmp == 0 && (range->minex || range->maxex)))
+    return 0;
+
+  p = lpSeek(zl, -2); /* Last element. */
+  if (p == NULL)
+    return 0;
+  if (!ZzlLexValueGteMin(p, range))
+    return 0;
+
+  p = lpSeek(zl, 0); /* First element. */
+  serverAssert(p != NULL);
+  if (!ZzlLexValueLteMax(p, range))
+    return 0;
+
+  return 1;
+}
+
+/* Find pointer to the first element contained in the specified lex range.
+ * Returns NULL when no element is contained in the range. */
+unsigned char* ZzlFirstInLexRange(unsigned char* zl, const zlexrangespec* range) {
+  unsigned char *eptr = lpSeek(zl, 0), *sptr;
+
+  /* If everything is out of range, return early. */
+  if (!ZzlIsInLexRange(zl, range))
+    return NULL;
+
+  while (eptr != NULL) {
+    if (ZzlLexValueGteMin(eptr, range)) {
+      /* Check if score <= max. */
+      if (ZzlLexValueLteMax(eptr, range))
+        return eptr;
+      return NULL;
+    }
+
+    /* Move to next element. */
+    sptr = lpNext(zl, eptr); /* This element score. Skip it. */
+    serverAssert(sptr != NULL);
+    eptr = lpNext(zl, sptr); /* Next element. */
+  }
+
+  return NULL;
+}
+
+/* Find pointer to the last element contained in the specified lex range.
+ * Returns NULL when no element is contained in the range. */
+unsigned char* ZzlLastInLexRange(unsigned char* zl, const zlexrangespec* range) {
+  unsigned char *eptr = lpSeek(zl, -2), *sptr;
+
+  /* If everything is out of range, return early. */
+  if (!ZzlIsInLexRange(zl, range))
+    return NULL;
+
+  while (eptr != NULL) {
+    if (ZzlLexValueLteMax(eptr, range)) {
+      /* Check if score >= min. */
+      if (ZzlLexValueGteMin(eptr, range))
+        return eptr;
+      return NULL;
+    }
+
+    /* Move to previous element by moving to the score of previous element.
+     * When this returns NULL, we know there also is no element. */
+    sptr = lpPrev(zl, eptr);
+    if (sptr != NULL)
+      serverAssert((eptr = lpPrev(zl, sptr)) != NULL);
+    else
+      eptr = NULL;
+  }
+
+  return NULL;
+}
+
+unsigned char* ZzlDeleteRangeByLex(unsigned char* zl, const zlexrangespec* range,
+                                   unsigned long* deleted) {
+  unsigned char *eptr, *sptr;
+  unsigned long num = 0;
+
+  if (deleted != NULL)
+    *deleted = 0;
+
+  eptr = ZzlFirstInLexRange(zl, range);
+  if (eptr == NULL)
+    return zl;
+
+  /* When the tail of the listpack is deleted, eptr will be NULL. */
+  while (eptr && (sptr = lpNext(zl, eptr)) != NULL) {
+    if (ZzlLexValueLteMax(eptr, range)) {
+      /* Delete both the element and the score. */
+      zl = lpDeleteRangeWithEntry(zl, &eptr, 2);
+      num++;
+    } else {
+      /* No longer in range. */
+      break;
+    }
+  }
+
+  if (deleted != NULL)
+    *deleted = num;
+  return zl;
+}
+
+unsigned char* ZzlDeleteRangeByScore(unsigned char* zl, const zrangespec* range,
+                                     unsigned long* deleted) {
+  unsigned char *eptr, *sptr;
+  double score;
+  unsigned long num = 0;
+
+  if (deleted != NULL)
+    *deleted = 0;
+
+  eptr = ZzlFirstInRange(zl, range);
+  if (eptr == NULL)
+    return zl;
+
+  /* When the tail of the listpack is deleted, eptr will be NULL. */
+  while (eptr && (sptr = lpNext(zl, eptr)) != NULL) {
+    score = ZzlGetScore(sptr);
+    if (ZslValueLteMax(score, range)) {
+      /* Delete both the element and the score. */
+      zl = lpDeleteRangeWithEntry(zl, &eptr, 2);
+      num++;
+    } else {
+      /* No longer in range. */
+      break;
+    }
+  }
+
+  if (deleted != NULL)
+    *deleted = num;
+  return zl;
+}
 
 /* Insert (element,score) pair in listpack. This function assumes the element is
  * not yet present in the list. */
@@ -162,7 +523,7 @@ unsigned char* ZzlInsert(unsigned char* zl, std::string_view ele, double score) 
 
   // Optimization: check first whether the new element should be the last.
   if (sptr != NULL) {
-    s = zzlGetScore(sptr);
+    s = ZzlGetScore(sptr);
     if (s >= score) {
       // It should not be the last, so fallback to the forward iteration.
       eptr = lpSeek(zl, 0);
@@ -171,8 +532,7 @@ unsigned char* ZzlInsert(unsigned char* zl, std::string_view ele, double score) 
 
   while (eptr != NULL) {
     sptr = lpNext(zl, eptr);
-    serverAssert(sptr != NULL);
-    s = zzlGetScore(sptr);
+    s = ZzlGetScore(sptr);
 
     if (s > score) {
       /* First element with score larger than score for element to be
@@ -195,9 +555,9 @@ unsigned char* ZzlInsert(unsigned char* zl, std::string_view ele, double score) 
 }
 
 unsigned char* ZzlFind(unsigned char* lp, std::string_view ele, double* score) {
-  unsigned char *eptr, *sptr;
+  uint8_t *sptr, *eptr = lpFirst(lp);
 
-  if ((eptr = lpFirst(lp)) == nullptr)
+  if (eptr == nullptr)
     return nullptr;
   eptr = lpFind(lp, eptr, (unsigned char*)ele.data(), ele.size(), 1);
   if (eptr) {
@@ -206,7 +566,7 @@ unsigned char* ZzlFind(unsigned char* lp, std::string_view ele, double* score) {
 
     /* Matching element, pull out score. */
     if (score != nullptr)
-      *score = zzlGetScore(sptr);
+      *score = ZzlGetScore(sptr);
     return eptr;
   }
 
@@ -688,6 +1048,11 @@ size_t SortedMap::LexCount(const zlexrangespec& range) const {
   if (score_tree->Size() == 0)
     return 0;
 
+  // Ranges that will always be zero - (+inf, anything) or (anything, -inf)
+  if (range.min == cmaxstring || range.max == cminstring) {
+    return 0;
+  }
+
   uint32_t min_rank = 0;
   detail::BPTreePath<ScoreSds> path;
 
@@ -768,7 +1133,7 @@ SortedMap* SortedMap::FromListPack(PMR_NS::memory_resource* res, const uint8_t* 
   }
 
   while (eptr != NULL) {
-    double score = zzlGetScore(sptr);
+    double score = ZzlGetScore(sptr);
     vstr = lpGetValue(eptr, &vlen, &vlong);
     if (vstr == NULL) {
       CHECK(zs->InsertNew(score, absl::StrCat(vlong)));
@@ -776,7 +1141,7 @@ SortedMap* SortedMap::FromListPack(PMR_NS::memory_resource* res, const uint8_t* 
       CHECK(zs->InsertNew(score, string_view{reinterpret_cast<const char*>(vstr), vlen}));
     }
 
-    zzlNext(zl, &eptr, &sptr);
+    ZzlNext(zl, &eptr, &sptr);
   }
 
   return zs;
@@ -805,4 +1170,8 @@ std::optional<SortedMap::RankAndScore> SortedMap::GetRankAndScore(std::string_vi
   return SortedMap::RankAndScore{*rank, GetObjScore(obj)};
 }
 }  // namespace detail
+
+sds cminstring = detail::kMinStrData + 1;
+sds cmaxstring = detail::kMaxStrData + 1;
+
 }  // namespace dfly

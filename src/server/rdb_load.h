@@ -297,7 +297,7 @@ class RdbLoader : protected RdbLoaderBase {
 
   std::error_code LoadKeyValPair(int type, ObjSettings* settings);
   // Returns whether to discard the read key pair.
-  bool ShouldDiscardKey(std::string_view key, ObjSettings* settings) const;
+  bool ShouldDiscardKey(std::string_view key, const ObjSettings& settings) const;
   void ResizeDb(size_t key_num, size_t expire_num);
   std::error_code HandleAux();
 

@@ -6,32 +6,66 @@
 #include <cstdint>
 #include <iterator>
 #include <optional>
+#include <type_traits>
 #include <vector>
 
 #include "core/search/base.h"
 #include "core/search/compressed_sorted_set.h"
 
 namespace dfly::search {
+
+// Forward declarations
+struct SplitResult;
+template <typename Container> class BlockList;
+template <typename T> class SortedVector;
+
+/* Split into two blocks, left and right, so that both blocks have approximately the same number
+   of elements. Returns median value of the split. Garantees that median present in the right
+   block and not present in the left block. Does not work for empty BlockList. */
+// TODO: Move to RangeTree logic
+SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& result);
+
 // BlockList is a container wrapper for CompressedSortedSet / vector<DocId>
 // to divide the full sorted id range into separate blocks. This reduces modification
 // complexity from O(N) to O(logN + K), where K is the max block size.
 //
 // It tries to balance block sizes in the range [block_size / 2, block_size * 2]
 // by splitting or merging nodes when needed.
+// container must have declare ElementType typename
 template <typename Container /* underlying container */> class BlockList {
+ private:
   using BlockIt = typename PMR_NS::vector<Container>::iterator;
   using ConstBlockIt = typename PMR_NS::vector<Container>::const_iterator;
+  using ElementType = typename Container::ElementType;
 
  public:
   BlockList(PMR_NS::memory_resource* mr, size_t block_size = 1000)
       : block_size_{block_size}, blocks_(mr) {
   }
 
+  BlockList(const BlockList& other) = default;
+
+  BlockList(BlockList&& other) noexcept {
+    // Consider not to do move if block_size_ is different
+    // DCHECK(block_size_ == other.block_size_);
+    // It seams there is bugs in BaseStringIndex
+    // because this check fails for it
+
+    size_ = other.size_;
+    blocks_ = std::move(other.blocks_);
+    other.Clear();
+  }
+
+  BlockList& operator=(const BlockList& other) = delete;
+  BlockList& operator=(BlockList&& other) = delete;
+
+  ~BlockList() = default;
+
   // Insert element, returns true if inserted, false if already present.
-  bool Insert(DocId t);
+  bool Insert(ElementType t);
 
   // Remove element, returns true if removed, false if not found.
-  bool Remove(DocId t);
+  bool Remove(ElementType t);
 
   size_t Size() const {
     return size_;
@@ -41,15 +75,20 @@ template <typename Container /* underlying container */> class BlockList {
     return size_;
   }
 
+  void Clear() {
+    size_ = 0;
+    blocks_.clear();
+  }
+
   struct BlockListIterator {
     // To make it work with std container contructors
     using iterator_category = std::forward_iterator_tag;
     using difference_type = std::ptrdiff_t;
-    using value_type = DocId;
-    using pointer = DocId*;
-    using reference = DocId&;
+    using value_type = ElementType;
+    using pointer = ElementType*;
+    using reference = ElementType&;
 
-    DocId operator*() const {
+    ElementType operator*() const {
       return **block_it;
     }
 
@@ -87,10 +126,12 @@ template <typename Container /* underlying container */> class BlockList {
 
  private:
   // Find block that should contain t. Returns end() only if empty
-  BlockIt FindBlock(DocId t);
+  BlockIt FindBlock(const ElementType& t);
 
   void TryMerge(BlockIt block);  // If needed, merge with previous block
   void TrySplit(BlockIt block);  // If needed, split into two blocks
+
+  friend SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list);
 
  private:
   const size_t block_size_ = 1000;
@@ -100,20 +141,27 @@ template <typename Container /* underlying container */> class BlockList {
 
 // Supports Insert and Remove operations for keeping a sorted vector internally.
 // Wrapper to use vectors with BlockList
-struct SortedVector {
+template <typename T> class SortedVector {
+ public:
+  using ElementType = T;
+
   explicit SortedVector(PMR_NS::memory_resource* mr) : entries_(mr) {
   }
 
-  bool Insert(DocId t);
-  bool Remove(DocId t);
-  void Merge(SortedVector&& other);
-  std::pair<SortedVector, SortedVector> Split() &&;
+  bool Insert(T t);
+  bool Remove(T t);
+  void Merge(SortedVector<T>&& other);
+  std::pair<SortedVector<T>, SortedVector<T>> Split() &&;
 
   size_t Size() {
     return entries_.size();
   }
 
-  using iterator = typename PMR_NS::vector<DocId>::const_iterator;
+  void Clear() {
+    entries_.clear();
+  }
+
+  using iterator = typename PMR_NS::vector<T>::const_iterator;
 
   iterator begin() const {
     return entries_.cbegin();
@@ -124,13 +172,25 @@ struct SortedVector {
   }
 
  private:
-  SortedVector(PMR_NS::vector<DocId>&& v) : entries_{std::move(v)} {
+  SortedVector(PMR_NS::vector<T>&& v) : entries_{std::move(v)} {
   }
 
-  PMR_NS::vector<DocId> entries_;
+  PMR_NS::vector<T> entries_;
 };
 
-extern template class BlockList<CompressedSortedSet>;
-extern template class BlockList<SortedVector>;
+extern template class SortedVector<DocId>;
+extern template class SortedVector<std::pair<DocId, double>>;
 
+extern template class BlockList<CompressedSortedSet>;
+extern template class BlockList<SortedVector<DocId>>;
+extern template class BlockList<SortedVector<std::pair<DocId, double>>>;
+
+// Used by Split method
+struct SplitResult {
+  using Container = BlockList<SortedVector<std::pair<DocId, double>>>;
+
+  Container left;
+  Container right;
+  double median;
+};
 }  // namespace dfly::search

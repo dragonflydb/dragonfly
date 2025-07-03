@@ -88,14 +88,14 @@ def test_env(tmp_dir: Path):
     return env
 
 
-@pytest.fixture(scope="session", params=[{}])
+@pytest.fixture(scope="function", params=[{}])
 def df_seeder_factory(request) -> DflySeederFactory:
     seed = request.config.getoption("--rand-seed")
     if seed is None:
         seed = random.randrange(sys.maxsize)
 
     random.seed(int(seed))
-    print(f"--- Random seed: {seed}, check: {random.randrange(100)} ---")
+    logging.debug(f"Random seed: {seed}, check: {random.randrange(100)}")
 
     return DflySeederFactory(request.config.getoption("--log-seeder"))
 

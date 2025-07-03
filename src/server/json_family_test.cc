@@ -414,7 +414,10 @@ TEST_F(JsonFamilyTest, StrLen) {
   EXPECT_THAT(resp, IntArg(2));
 
   resp = Run({"JSON.STRLEN", "non_existent_key", "$.c.b"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, ErrArg("no such key"));
+
+  resp = Run({"JSON.STRLEN", "non_existent_key", "$"});
+  EXPECT_THAT(resp, ErrArg("no such key"));
 
   /*
   Test response from several possible values
@@ -3153,6 +3156,20 @@ TEST_F(JsonFamilyTest, ResetStringKeyWithSetGet) {
 
   resp = Run({"JSON.GET", "key"});
   EXPECT_THAT(resp, R"({"a":"b"})");
+}
+
+TEST_F(JsonFamilyTest, DelNonExistingKey) {
+  auto resp = Run({"EXISTS", "nonexisting_key"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"JSON.DEL", "nonexisting_key", "."});
+  EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"JSON.DEL", "nonexisting_key", "$"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"JSON.DEL", "nonexisting_key"});
+  EXPECT_THAT(resp, IntArg(0));
 }
 
 }  // namespace dfly

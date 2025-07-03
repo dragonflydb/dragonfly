@@ -22,8 +22,6 @@
 #include <algorithm>
 #include <cctype>
 
-#include "base/logging.h"
-
 namespace dfly::search {
 
 using namespace std;
@@ -74,6 +72,16 @@ absl::flat_hash_set<string> NormalizeTags(string_view taglist, bool case_sensiti
   return tags;
 }
 
+// Iterate over all suffixes of all words
+void IterateAllSuffixes(const absl::flat_hash_set<string>& words,
+                        absl::FunctionRef<void(std::string_view)> cb) {
+  for (string_view word : words) {
+    for (size_t offs = 0; offs < word.length(); offs++) {
+      cb(word.substr(offs));
+    }
+  }
+}
+
 };  // namespace
 
 NumericIndex::NumericIndex(PMR_NS::memory_resource* mr) : entries_{mr} {
@@ -85,6 +93,9 @@ bool NumericIndex::Add(DocId id, const DocumentAccessor& doc, string_view field)
     return false;
   }
 
+  if (numbers->size() > 1) {
+    unique_ids_ = false;
+  }
   for (auto num : numbers.value()) {
     entries_.emplace(num, id);
   }
@@ -111,35 +122,63 @@ vector<DocId> NumericIndex::Range(double l, double r) const {
     out.push_back(it->second);
 
   sort(out.begin(), out.end());
-  out.erase(unique(out.begin(), out.end()), out.end());
+
+  if (!unique_ids_) {
+    out.erase(unique(out.begin(), out.end()), out.end());
+  }
   return out;
 }
 
+vector<DocId> NumericIndex::GetAllDocsWithNonNullValues() const {
+  std::vector<DocId> result;
+
+  result.reserve(entries_.size());
+
+  if (unique_ids_) {
+    // If unique_ids_ is true, we can just take the second element of each entry
+    for (const auto& [_, doc_id] : entries_) {
+      result.push_back(doc_id);
+    }
+  } else {
+    UniqueDocsList<> unique_docs;
+    unique_docs.reserve(entries_.size());
+    for (const auto& [_, doc_id] : entries_) {
+      const auto [__, is_new] = unique_docs.insert(doc_id);
+      if (is_new) {
+        result.push_back(doc_id);
+      }
+    }
+  }
+
+  std::sort(result.begin(), result.end());
+  return result;
+}
+
 template <typename C>
-BaseStringIndex<C>::BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive)
+BaseStringIndex<C>::BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive,
+                                    bool with_suffix)
     : case_sensitive_{case_sensitive}, entries_{mr} {
+  if (with_suffix)
+    suffix_trie_.emplace(mr);
 }
 
 template <typename C>
 const typename BaseStringIndex<C>::Container* BaseStringIndex<C>::Matching(
-    string_view str, bool strip_whitespace) const {
-  if (strip_whitespace) {
-    str = absl::StripAsciiWhitespace(str);
-  }
+    string_view word, bool strip_whitespace) const {
+  if (strip_whitespace)
+    word = absl::StripAsciiWhitespace(word);
 
-  string tmp;
-  if (!case_sensitive_) {
-    tmp = ToLower(str);
-    str = tmp;
-  }
-
-  auto it = entries_.find(str);
+  auto it = entries_.find(NormalizeQueryWord(word).view());
   return (it != entries_.end()) ? &it->second : nullptr;
 }
 
 template <typename C>
-void BaseStringIndex<C>::MatchingPrefix(std::string_view prefix,
-                                        absl::FunctionRef<void(const Container*)> cb) const {
+void BaseStringIndex<C>::MatchPrefix(std::string_view prefix,
+                                     absl::FunctionRef<void(const Container*)> cb) const {
+  StringOrView prefix_norm{NormalizeQueryWord(prefix)};
+  prefix = prefix_norm.view();
+
+  // TODO(vlad): Use right iterator to avoid string comparison?
   for (auto it = entries_.lower_bound(prefix);
        it != entries_.end() && (*it).first.rfind(prefix, 0) == 0; ++it) {
     cb(&(*it).second);
@@ -147,9 +186,45 @@ void BaseStringIndex<C>::MatchingPrefix(std::string_view prefix,
 }
 
 template <typename C>
-typename BaseStringIndex<C>::Container* BaseStringIndex<C>::GetOrCreate(string_view word) {
-  auto* mr = entries_.get_allocator().resource();
-  return &entries_.try_emplace(PMR_NS::string{word, mr}, mr, 1000 /* block size */).first->second;
+void BaseStringIndex<C>::MatchSuffix(std::string_view suffix,
+                                     absl::FunctionRef<void(const Container*)> cb) const {
+  StringOrView suffix_norm{NormalizeQueryWord(suffix)};
+  suffix = suffix_norm.view();
+
+  // If we have a suffix trie built, we just need to fetch the relevant suffix
+  if (suffix_trie_) {
+    auto it = suffix_trie_->find(suffix);
+    cb((it != suffix_trie_->end()) ? &it->second : nullptr);
+    return;
+  }
+
+  // Otherwise, iterate over all entries and look for the suffix
+  for (const auto& entry : entries_) {
+    int32_t start = entry.first.size() - suffix.size();
+    if (start >= 0 && entry.first.substr(start) == suffix)
+      cb(&entry.second);
+  }
+}
+
+template <typename C>
+void BaseStringIndex<C>::MatchInfix(std::string_view infix,
+                                    absl::FunctionRef<void(const Container*)> cb) const {
+  StringOrView infix_norm{NormalizeQueryWord(infix)};
+  infix = infix_norm.view();
+
+  // If we have a suffix trie built, we just need to match the prefix
+  if (suffix_trie_) {
+    for (auto it = suffix_trie_->lower_bound(infix);
+         it != suffix_trie_->end() && (*it).first.rfind(infix, 0) == 0; ++it)
+      cb(&(*it).second);
+    return;
+  }
+
+  // Otherwise, iterate over all entries and check if it contains the entry
+  for (const auto& entry : entries_) {
+    if (entry.first.find(infix) != string::npos)
+      cb(&entry.second);
+  }
 }
 
 template <typename C>
@@ -163,8 +238,15 @@ bool BaseStringIndex<C>::Add(DocId id, const DocumentAccessor& doc, string_view 
   for (string_view str : strings_list.value())
     tokens.merge(Tokenize(str));
 
+  if (tokens.size() > 1)
+    unique_ids_ = false;
   for (string_view token : tokens)
-    GetOrCreate(token)->Insert(id);
+    GetOrCreate(&entries_, token)->Insert(id);
+
+  if (suffix_trie_)
+    IterateAllSuffixes(tokens,
+                       [&](string_view str) { GetOrCreate(&*suffix_trie_, str)->Insert(id); });
+
   return true;
 }
 
@@ -176,15 +258,11 @@ void BaseStringIndex<C>::Remove(DocId id, const DocumentAccessor& doc, string_vi
   for (string_view str : strings_list)
     tokens.merge(Tokenize(str));
 
-  for (const auto& token : tokens) {
-    auto it = entries_.find(token);
-    if (it == entries_.end())
-      continue;
+  for (string_view token : tokens)
+    Remove(&entries_, id, token);
 
-    it->second.Remove(id);
-    if (it->second.Size() == 0)
-      entries_.erase(it);
-  }
+  if (suffix_trie_)
+    IterateAllSuffixes(tokens, [&](string_view str) { Remove(&*suffix_trie_, id, str); });
 }
 
 template <typename C> vector<string> BaseStringIndex<C>::GetTerms() const {
@@ -196,8 +274,69 @@ template <typename C> vector<string> BaseStringIndex<C>::GetTerms() const {
   return res;
 }
 
+template <typename C> vector<DocId> BaseStringIndex<C>::GetAllDocsWithNonNullValues() const {
+  std::vector<DocId> result;
+
+  result.reserve(entries_.size());
+
+  if (unique_ids_) {
+    // If unique_ids_ is true, we can just take the second element of each entry
+    for (const auto& [_, container] : entries_) {
+      for (const auto& doc_id : container) {
+        result.push_back(doc_id);
+      }
+    }
+  } else {
+    UniqueDocsList<> unique_docs;
+
+    unique_docs.reserve(entries_.size());
+
+    for (const auto& [_, container] : entries_) {
+      for (const auto& doc_id : container) {
+        auto [_, is_new] = unique_docs.insert(doc_id);
+        if (is_new) {
+          result.push_back(doc_id);
+        }
+      }
+    }
+  }
+  std::sort(result.begin(), result.end());
+  return result;
+}
+
+template <typename C>
+StringOrView BaseStringIndex<C>::NormalizeQueryWord(std::string_view query) const {
+  if (case_sensitive_)
+    return StringOrView::FromView(query);
+
+  return StringOrView::FromString(ToLower(query));
+}
+
+template <typename C>
+typename BaseStringIndex<C>::Container* BaseStringIndex<C>::GetOrCreate(
+    search::RaxTreeMap<Container>* map, string_view word) {
+  auto* mr = map->get_allocator().resource();
+  return &map->try_emplace(PMR_NS::string{word, mr}, mr, 1000 /* block size */).first->second;
+}
+
+template <typename C>
+void BaseStringIndex<C>::Remove(search::RaxTreeMap<Container>* map, DocId id, string_view word) {
+  auto it = map->find(word);
+  if (it == map->end())
+    return;
+
+  it->second.Remove(id);
+  if (it->second.Size() == 0)
+    map->erase(it);
+}
+
 template struct BaseStringIndex<CompressedSortedSet>;
-template struct BaseStringIndex<SortedVector>;
+template struct BaseStringIndex<SortedVector<DocId>>;
+
+TextIndex::TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords,
+                     const Synonyms* synonyms, bool with_suffixtrie)
+    : BaseStringIndex(mr, false, with_suffixtrie), stopwords_{stopwords}, synonyms_{synonyms} {
+}
 
 std::optional<DocumentAccessor::StringList> TextIndex::GetStrings(const DocumentAccessor& doc,
                                                                   std::string_view field) const {
@@ -262,6 +401,36 @@ void FlatVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view 
 
 const float* FlatVectorIndex::Get(DocId doc) const {
   return &entries_[doc * dim_];
+}
+
+std::vector<DocId> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
+  std::vector<DocId> result;
+
+  size_t num_vectors = entries_.size() / dim_;
+  result.reserve(num_vectors);
+
+  for (DocId id = 0; id < num_vectors; ++id) {
+    // Check if the vector is not zero (all elements are 0)
+    // TODO: Valid vector can contain 0s, we should use a better approach
+    const float* vec = Get(id);
+    bool is_zero_vector = true;
+
+    // TODO: Consider don't use check for zero vector
+    for (size_t i = 0; i < dim_; ++i) {
+      if (vec[i] != 0.0f) {  // TODO: Consider using a threshold for float comparison
+        is_zero_vector = false;
+        break;
+      }
+    }
+
+    if (!is_zero_vector) {
+      result.push_back(id);
+    }
+  }
+
+  // Result is already sorted by id, no need to sort again
+  // Also it has no duplicates
+  return result;
 }
 
 struct HnswlibAdapter {

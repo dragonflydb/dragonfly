@@ -41,9 +41,15 @@ struct SchemaField {
   struct TagParams {
     char separator = ',';
     bool case_sensitive = false;
+    bool with_suffixtrie = false;  // see TextParams
   };
 
-  using ParamsVariant = std::variant<std::monostate, VectorParams, TagParams>;
+  struct TextParams {
+    // if enabled, suffix trie is build for efficient suffix and infix queries
+    bool with_suffixtrie = false;
+  };
+
+  using ParamsVariant = std::variant<std::monostate, VectorParams, TagParams, TextParams>;
 
   FieldType type;
   uint8_t flags;

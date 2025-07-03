@@ -62,7 +62,7 @@ service:
   # -- Extra annotations for the service
   annotations: {}
   # -- Extra labels for the service
-  lablels: {}
+  labels: {}
   metrics:
     # -- name for the metrics port
     portName: metrics

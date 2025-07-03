@@ -130,7 +130,7 @@ class CompactObj {
   // Therefore, in order to know the original length we introduce 2 states that
   // correct the length upon decoding. ASCII1_ENC rounds down the decoded length,
   // while ASCII2_ENC rounds it up. See DecodedLen implementation for more info.
-  enum Encoding : uint8_t {
+  enum EncodingEnum : uint8_t {
     NONE_ENC = 0,
     ASCII1_ENC = 1,
     ASCII2_ENC = 2,
@@ -138,6 +138,22 @@ class CompactObj {
   };
 
  public:
+  // Utility class for working with different string encodings (ascii, huffman, etc)
+  struct StrEncoding {
+    size_t DecodedSize(std::string_view blob) const;         // Size of decoded blob
+    size_t Decode(std::string_view blob, char* dest) const;  // Decode into dest, return size
+    StringOrView Decode(std::string_view blob) const;
+
+   private:
+    friend class CompactObj;
+    explicit StrEncoding(uint8_t enc) : enc_(static_cast<EncodingEnum>(enc)) {
+    }
+
+    size_t DecodedSize(size_t compr_size, uint8_t first_byte) const;
+
+    EncodingEnum enc_;
+  };
+
   using PrefixArray = std::vector<std::string_view>;
   using MemoryResource = detail::RobjWrapper::MemoryResource;
 
@@ -406,6 +422,10 @@ class CompactObj {
   // Precondition: the object is a non-inline string.
   StringOrView GetRawString() const;
 
+  StrEncoding GetStrEncoding() const {
+    return StrEncoding{mask_bits_.encoding};
+  }
+
   bool HasAllocated() const;
 
   bool TagAllowsEmptyValue() const;
@@ -416,7 +436,6 @@ class CompactObj {
 
  private:
   void EncodeString(std::string_view str);
-  size_t DecodedLen(size_t sz, uint8_t firstb) const;
 
   bool EqualNonInline(std::string_view sv) const;
 

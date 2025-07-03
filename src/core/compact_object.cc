@@ -14,7 +14,6 @@ extern "C" {
 #include "redis/stream.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"  // for non-string objects.
-#include "redis/zset.h"
 }
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
@@ -786,9 +785,7 @@ size_t CompactObj::Size() const {
     switch (taglen_) {
       case SMALL_TAG:
         raw_size = u_.small_str.size();
-        if (mask_bits_.encoding == HUFFMAN_ENC) {
-          return DecodedLen(raw_size, u_.small_str.first_byte());
-        }
+        first_byte = u_.small_str.first_byte();
         break;
       case INT_TAG: {
         absl::AlphaNum an(u_.ival);
@@ -801,9 +798,7 @@ size_t CompactObj::Size() const {
         break;
       case ROBJ_TAG:
         raw_size = u_.r_obj.Size();
-        if (mask_bits_.encoding == HUFFMAN_ENC) {
-          return DecodedLen(raw_size, *(uint8_t*)u_.r_obj.inner_obj());
-        }
+        first_byte = *(uint8_t*)u_.r_obj.inner_obj();
         break;
       case JSON_TAG:
         DCHECK_EQ(mask_bits_.encoding, NONE_ENC);
@@ -821,7 +816,7 @@ size_t CompactObj::Size() const {
         LOG(DFATAL) << "Should not reach " << int(taglen_);
     }
   }
-  return mask_bits_.encoding ? DecodedLen(raw_size, first_byte) : raw_size;
+  return GetStrEncoding().DecodedSize(raw_size, first_byte);
 }
 
 uint64_t CompactObj::HashCode() const {
@@ -848,16 +843,8 @@ uint64_t CompactObj::HashCode() const {
 
   if (IsInline()) {
     char buf[kInlineLen * 3];  // should suffice for most huffman decodings.
-    size_t decoded_len = DecodedLen(taglen_, u_.inline_str[0]);
-    if (mask_bits_.encoding == HUFFMAN_ENC) {
-      if (decoded_len <= sizeof(buf) &&
-          tl.huff_keys.decoder.Decode({u_.inline_str + 1, size_t(taglen_ - 1)}, decoded_len, buf)) {
-        return XXH3_64bits_withSeed(buf, decoded_len, kHashSeed);
-      }
-    } else {
-      detail::ascii_unpack(to_byte(u_.inline_str), decoded_len, buf);
-      return XXH3_64bits_withSeed(buf, decoded_len, kHashSeed);
-    }
+    size_t decoded_len = GetStrEncoding().Decode(string_view{u_.inline_str, taglen_}, buf);
+    return XXH3_64bits_withSeed(buf, decoded_len, kHashSeed);
   }
 
   string_view sv = GetSlice(&tl.tmp_str);
@@ -1114,21 +1101,7 @@ void CompactObj::GetString(char* dest) const {
   CHECK(!IsExternal());
 
   if (IsInline()) {
-    switch (mask_bits_.encoding) {
-      case ASCII2_ENC:
-        DCHECK_EQ(taglen_ + 2u, ascii_len(taglen_));
-        detail::ascii_unpack(to_byte(u_.inline_str), taglen_ + 2, dest);
-        break;
-      case HUFFMAN_ENC:
-        tl.huff_keys.decoder.Decode({u_.inline_str + 1, size_t(taglen_ - 1)},
-                                    u_.inline_str[0] + taglen_ - 1, dest);
-        break;
-      case NONE_ENC:
-        memcpy(dest, u_.inline_str, taglen_);
-        break;
-      default:
-        DLOG(FATAL) << "should not reach " << int(mask_bits_.encoding);
-    }
+    GetStrEncoding().Decode({u_.inline_str, taglen_}, dest);
     return;
   }
 
@@ -1142,19 +1115,15 @@ void CompactObj::GetString(char* dest) const {
     if (taglen_ == ROBJ_TAG) {
       CHECK_EQ(OBJ_STRING, u_.r_obj.type());
       DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-      size_t decoded_len = DecodedLen(u_.r_obj.Size(), *(const uint8_t*)u_.r_obj.inner_obj());
-      if (mask_bits_.encoding == HUFFMAN_ENC) {
-        CHECK(tl.huff_keys.decoder.Decode(
-            {(const char*)u_.r_obj.inner_obj() + 1, u_.r_obj.Size() - 1}, decoded_len, dest));
-        return;
-      }
-      detail::ascii_unpack_simd(to_byte(u_.r_obj.inner_obj()), decoded_len, dest);
+      string_view blob{(const char*)u_.r_obj.inner_obj(), u_.r_obj.Size()};
+      GetStrEncoding().Decode(blob, dest);
+      return;
     } else {
       CHECK_EQ(SMALL_TAG, taglen_);
       string_view slices[2];
       unsigned num = u_.small_str.GetV(slices);
       DCHECK_EQ(2u, num);
-      size_t decoded_len = DecodedLen(u_.small_str.size(), slices[0][0]);
+      size_t decoded_len = GetStrEncoding().DecodedSize(u_.small_str.size(), slices[0][0]);
 
       if (mask_bits_.encoding == HUFFMAN_ENC) {
         tl.tmp_buf.resize(slices[0].size() + slices[1].size() - 1);
@@ -1575,15 +1544,6 @@ StringOrView CompactObj::GetRawString() const {
   return {};
 }
 
-size_t CompactObj::DecodedLen(size_t sz, uint8_t b) const {
-  DCHECK(mask_bits_.encoding);
-  if (mask_bits_.encoding == HUFFMAN_ENC) {
-    return sz + b - 1;
-  }
-  unsigned delta = (mask_bits_.encoding == ASCII1_ENC) ? 1 : 0;
-  return ascii_len(sz) - delta;
-}
-
 MemoryResource* CompactObj::memory_resource() {
   return tl.local_mr;
 }
@@ -1611,6 +1571,54 @@ CompactObjType ObjTypeFromString(std::string_view sv) {
     }
   }
   return kInvalidCompactObjType;
+}
+
+size_t CompactObj::StrEncoding::DecodedSize(string_view blob) const {
+  return DecodedSize(blob.size(), blob[0]);
+}
+
+size_t CompactObj::StrEncoding::DecodedSize(size_t blob_size, uint8_t first_byte) const {
+  switch (enc_) {
+    case NONE_ENC:
+      return blob_size;
+    case ASCII1_ENC:
+    case ASCII2_ENC:
+      return ascii_len(blob_size) - (enc_ == ASCII1_ENC);
+    case HUFFMAN_ENC:
+      return blob_size + int(first_byte) - 1;
+  };
+  return 0;
+}
+
+size_t CompactObj::StrEncoding::Decode(std::string_view blob, char* dest) const {
+  size_t decoded_len = DecodedSize(blob);
+  switch (enc_) {
+    case NONE_ENC:
+      memcpy(dest, blob.data(), blob.size());
+      break;
+    case ASCII1_ENC:
+    case ASCII2_ENC:
+      detail::ascii_unpack(reinterpret_cast<const uint8_t*>(blob.data()), decoded_len, dest);
+      break;
+    case HUFFMAN_ENC:
+      tl.huff_keys.decoder.Decode(blob.substr(1), decoded_len, dest);
+      break;
+  };
+  return decoded_len;
+}
+
+StringOrView CompactObj::StrEncoding::Decode(std::string_view blob) const {
+  switch (enc_) {
+    case NONE_ENC:
+      return StringOrView::FromView(blob);
+    default: {
+      string out;
+      out.resize(DecodedSize(blob));
+      Decode(blob, out.data());
+      return StringOrView::FromString(std::move(out));
+    }
+  }
+  return {};
 }
 
 }  // namespace dfly

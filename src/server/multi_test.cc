@@ -69,7 +69,7 @@ TEST_F(MultiTest, MultiAndFlush) {
   resp = Run({"get", kKey1});
   ASSERT_EQ(resp, "QUEUED");
 
-  EXPECT_THAT(Run({"FLUSHALL"}), ErrArg("'FLUSHALL' inside MULTI is not allowed"));
+  EXPECT_THAT(Run({"FLUSHALL"}), ErrArg("not allowed inside a transaction"));
 }
 
 TEST_F(MultiTest, MultiWithError) {
@@ -509,7 +509,7 @@ TEST_F(MultiTest, Watch) {
 
   // Check watch doesn't run in multi.
   Run({"multi"});
-  ASSERT_THAT(Run({"watch", "a"}), ErrArg("'WATCH' inside MULTI is not allowed"));
+  ASSERT_THAT(Run({"watch", "a"}), ErrArg("not allowed inside a transaction"));
   Run({"discard"});
 
   // Check watch on existing key.

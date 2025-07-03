@@ -904,7 +904,8 @@ OpResult<JsonCallbackResult<OptSize>> OpStrLen(const OpArgs& op_args, string_vie
   };
   return JsonReadOnlyOperation<OptSize>(
       op_args, key, json_path, std::move(cb),
-      {true, CallbackResultOptions::DefaultReadOnlyOptions(SavingOrder::kSaveFirst)});
+      {json_path.IsLegacyModePath(),
+       CallbackResultOptions::DefaultReadOnlyOptions(SavingOrder::kSaveFirst)});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpObjLen(const OpArgs& op_args, string_view key,
@@ -1066,6 +1067,12 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
   if (json_path.RefersToRootElement()) {
     auto& db_slice = op_args.GetDbSlice();
     auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_JSON);
+
+    // For JSON.DEL, if key doesn't exist, return 0 instead of error
+    if (res_it.status() == OpStatus::KEY_NOTFOUND) {
+      return 0;
+    }
+
     RETURN_ON_BAD_STATUS(res_it);
 
     if (IsValid(res_it->it)) {

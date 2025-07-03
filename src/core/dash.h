@@ -268,6 +268,9 @@ class DashTable : public detail::DashTableBase {
   const_bucket_iterator CursorToBucketIt(Cursor c) const {
     return const_bucket_iterator{this, c.segment_id(global_depth_), c.bucket_id(), 0};
   }
+  bucket_iterator CursorToBucketIt(Cursor c) {
+    return bucket_iterator{this, c.segment_id(global_depth_), c.bucket_id(), 0};
+  }
 
   // Capture Version Change. Runs cb(it) on every bucket! (not entry) in the table whose version
   // would potentially change upon insertion of 'k'.
@@ -932,8 +935,8 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id, EvictionPolicy& ev)
       std::move(hash_fn), target,
       [&](uint32_t segment_from, detail::PhysicalBid from, uint32_t segment_to,
           detail::PhysicalBid to) {
-        // OnMove is used to notify eviction policy about the moves across buckets/segments
-        // during the split.
+        // OnMove is used to notify eviction policy about the moves across
+        // buckets/segments during the split.
         ev.OnMove(Cursor{global_depth_, segment_from, from}, Cursor{global_depth_, segment_to, to});
       });
 

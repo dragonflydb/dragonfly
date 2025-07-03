@@ -147,7 +147,7 @@ struct ConnectionState {
     const ConnectionContext* owner = nullptr;
   };
 
-  enum MCGetMask { FETCH_CAS_VER = 1 };
+  enum MCGetMask : uint8_t { FETCH_CAS_VER = 1 };
 
   size_t UsedMemory() const;
 
@@ -265,6 +265,7 @@ struct ConnectionState {
   std::unique_ptr<ScriptInfo> script_info;
   std::unique_ptr<SubscribeInfo> subscribe_info;
   ClientTracking tracking_info_;
+  uint64_t cmd_start_time_ns = 0;  // time when the last command started executing
 };
 
 class ConnectionContext : public facade::ConnectionContext {

@@ -112,6 +112,10 @@ ABSL_FLAG(int32_t, slowlog_log_slower_than, 10000,
           "microseconds and if it's negative - disables the slowlog.");
 ABSL_FLAG(uint32_t, slowlog_max_len, 20, "Slow log maximum length.");
 
+ABSL_FLAG(uint32_t, pause_wait_timeout, 1,
+          "Timeout in seconds, to set up the pause for all connections for CLIENT PAUSE command "
+          "and cluster slot migration finalization procedure.");
+
 ABSL_FLAG(string, s3_endpoint, "", "endpoint for s3 snapshots, default uses aws regional endpoint");
 ABSL_FLAG(bool, s3_use_https, true, "whether to use https for s3 endpoints");
 // Disable EC2 metadata by default, or if a users credentials are invalid the
@@ -751,7 +755,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
 
   // Wait for all busy commands to finish running before replying to guarantee
   // that no more (write) operations will occur.
-  const absl::Duration kDispatchTimeout = absl::Seconds(1);
+  const absl::Duration kDispatchTimeout = absl::Seconds(absl::GetFlag(FLAGS_pause_wait_timeout));
   if (!tracker.Wait(kDispatchTimeout)) {
     LOG(WARNING) << "Couldn't wait for commands to finish dispatching in " << kDispatchTimeout;
     shard_set->pool()->AwaitBrief([pause_state](unsigned, util::ProactorBase*) {
@@ -881,6 +885,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   config_registry.RegisterMutable("tls_ca_cert_dir");
   config_registry.RegisterMutable("replica_priority");
   config_registry.RegisterMutable("lua_undeclared_keys_shas");
+  config_registry.RegisterMutable("point_in_time_snapshot");
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
@@ -2510,8 +2515,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("snapshot_serialization_bytes", m.serialization_bytes);
     append("commands_squashing_replies_bytes",
            m.facade_stats.reply_stats.squashing_current_reply_size.load(memory_order_relaxed));
-    append("lsn_buffer_size_sum", m.lsn_buffer_size);
-    append("lsn_buffer_bytes_sum", m.lsn_buffer_bytes);
+    append("psync_buffer_size", m.lsn_buffer_size);
+    append("psync_buffer_bytes", m.lsn_buffer_bytes);
 
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
@@ -2742,6 +2747,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
           append("slave_repl_offset", rinfo.repl_offset_sum);
         append("slave_priority", GetFlag(FLAGS_replica_priority));
         append("slave_read_only", 1);
+        append("psync_attempts", rinfo.psync_attempts);
+        append("psync_successes", rinfo.psync_successes);
       };
       fb2::LockGuard lk(replicaof_mu_);
 
