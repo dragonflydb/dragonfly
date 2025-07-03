@@ -1,7 +1,6 @@
-import asyncio
 import logging
 import time
-from redis import asyncio as aioredis
+import pytest
 
 from . import dfly_args
 from .instance import DflyInstance
@@ -108,5 +107,7 @@ async def run_dragonfly_benchmark(
 
 
 @dfly_args({"proactor_threads": 4})
+@pytest.mark.opt_only
+@pytest.mark.slow
 async def test_dragonfly_benchmark(df_server: DflyInstance):
     await run_dragonfly_benchmark(df_server)
