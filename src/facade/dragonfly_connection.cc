@@ -187,8 +187,6 @@ thread_local TrafficLogger tl_traffic_logger{};
 thread_local base::Histogram* io_req_size_hist = nullptr;
 
 thread_local const size_t reply_size_limit = absl::GetFlag(FLAGS_squashed_reply_size_limit);
-// When current_reply_size grows we throttle on the ec here.
-thread_local util::fb2::CondVarAny tl_reply_size_throttle;
 
 void OpenTrafficLogger(string_view base_path) {
   unique_lock lk{tl_traffic_logger.mutex};
@@ -1526,20 +1524,6 @@ void Connection::SquashPipeline() {
 
   cc_->async_dispatch = true;
 
-  // We need to first set async_dispatch before we preempt. Otherwise, when the AsyncFiber
-  // wakes up, sync_dispatch might be true, violating the precondition of this flow
-  // (when we block earlier in the body of AsyncFiber at cnd_.wait(noop_lk, [this])...)
-  fb2::NoOpLock noop;
-  tl_reply_size_throttle.wait(noop,
-                              [this] { return !IsReplySizeOverLimit() || cc_->conn_closing; });
-
-  // Don't dispatch if we woke up but the connection was closed. AsyncFiber will exit
-  // after the return.
-  if (cc_->conn_closing) {
-    cc_->async_dispatch = false;
-    return;
-  }
-
   size_t dispatched =
       service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), reply_builder_.get(), cc_.get());
 
@@ -1566,7 +1550,6 @@ void Connection::SquashPipeline() {
 
   // If interrupted due to pause, fall back to regular dispatch
   skip_next_squashing_ = dispatched != squash_cmds.size();
-  tl_reply_size_throttle.notify_all();
 }
 
 void Connection::ClearPipelinedMessages() {
@@ -1667,7 +1650,8 @@ void Connection::AsyncFiber() {
     bool squashing_enabled = squashing_threshold > 0;
     bool threshold_reached = pending_pipeline_cmd_cnt_ > squashing_threshold;
     bool are_all_plain_cmds = pending_pipeline_cmd_cnt_ == dispatch_q_.size();
-    if (squashing_enabled && threshold_reached && are_all_plain_cmds && !skip_next_squashing_) {
+    if (squashing_enabled && threshold_reached && are_all_plain_cmds && !skip_next_squashing_ &&
+        !IsReplySizeOverLimit()) {
       SquashPipeline();
     } else {
       MessageHandle msg = std::move(dispatch_q_.front());
@@ -2102,9 +2086,9 @@ bool Connection::IsReplySizeOverLimit() const {
   std::atomic<size_t>& reply_sz = tl_facade_stats->reply_stats.squashing_current_reply_size;
   size_t current = reply_sz.load(std::memory_order_acquire);
   const bool over_limit = reply_size_limit != 0 && current > 0 && current > reply_size_limit;
-  LOG(INFO) << "current: " << current << "/" << reply_size_limit;
-  VLOG_IF(2, over_limit) << "MultiCommandSquasher overlimit: " << current << "/"
-                         << reply_size_limit;
+  // Every 10 seconds. Otherwise, it can be too sensitive on certain workloads in production
+  // instances.
+  LOG_EVERY_N(INFO, 10) << "MultiCommandSquasher overlimit: " << current << "/" << reply_size_limit;
   return over_limit;
 }
 
@@ -2185,8 +2169,6 @@ void ResetStats() {
   tl_facade_stats->reply_stats = {};
   if (io_req_size_hist)
     io_req_size_hist->Clear();
-
-  tl_reply_size_throttle.notify_all();
 }
 
 }  // namespace facade

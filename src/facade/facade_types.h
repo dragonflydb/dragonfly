@@ -14,7 +14,6 @@
 
 #include "base/iterator.h"
 #include "facade/op_status.h"
-#include "util/fibers/synchronization.h"
 
 namespace facade {
 
