@@ -150,7 +150,7 @@ TEST_F(ListFamilyTest, BLMPopBlocking) {
   auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
     resp = Run({"blmpop", "0.1", "1", kKey1, "LEFT"});
   });
-  ThisFiber::SleepFor(50us);
+  ThisFiber::SleepFor(1ms);
   ASSERT_TRUE(IsLocked(0, kKey1));
 
   fb0.Join();
@@ -164,7 +164,7 @@ TEST_F(ListFamilyTest, BLMPopBlocking) {
   auto fb1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
     resp = Run({"blmpop", "0.1", "1", kKey1, "LEFT"});
   });
-  ThisFiber::SleepFor(50us);
+  ThisFiber::SleepFor(1ms);
   // shouldn't need to lock the key just pop immediately
   ASSERT_FALSE(IsLocked(0, kKey1));
   fb1.Join();
@@ -173,7 +173,7 @@ TEST_F(ListFamilyTest, BLMPopBlocking) {
   auto fb2 = pp_->at(2)->LaunchFiber(Launch::dispatch, [&] {
     resp = Run({"blmpop", "0.1", "1", kKey1, "LEFT"});
   });
-  ThisFiber::SleepFor(50us);
+  ThisFiber::SleepFor(1ms);
 
   // key should be locked while waiting
   ASSERT_TRUE(IsLocked(0, kKey1));
