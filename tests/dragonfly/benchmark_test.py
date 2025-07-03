@@ -1,6 +1,7 @@
+import asyncio
 import logging
 import time
-import redis
+from redis import asyncio as aioredis
 
 from . import dfly_args
 from .instance import DflyInstance
@@ -15,7 +16,7 @@ from .benchmark_utils import (
 )
 
 
-def run_dragonfly_benchmark(
+async def run_dragonfly_benchmark(
     df_server: DflyInstance,
     num_accounts: int = 200,
     num_queries: int = 500,
@@ -28,18 +29,18 @@ def run_dragonfly_benchmark(
     logging.info(
         f"Parameters: {num_accounts} accounts, {num_queries} queries, {num_agents} agents, seed={random_seed}"
     )
-    client = redis.Redis(port=df_server.port)
+    client = df_server.client()
 
     # Basic connectivity check
-    assert client.ping() == True
+    assert await client.ping() == True
 
     # Stage 1: Schema Generation
     logging.info("Stage 1: Schema Generation - generating columns and creating search index")
     account_columns = generate_account_columns()
-    create_search_index(client, account_columns)
+    await create_search_index(client, account_columns)
 
     # Verify the index was created
-    index_info = client.execute_command(f"FT.INFO {INDEX_KEY}")
+    index_info = await client.execute_command(f"FT.INFO {INDEX_KEY}")
     assert index_info is not None
     logging.info(
         f"Stage 1 completed: search index '{INDEX_KEY}' created with {len(account_columns)} columns"
@@ -54,7 +55,7 @@ def run_dragonfly_benchmark(
         f"Stage 2: Data Generation - generating {num_accounts:,} accounts with full column data"
     )
     stage2_start = time.perf_counter()
-    account_ids = generate_account_data(
+    account_ids = await generate_account_data(
         client=client,
         column_mappings=column_mappings,
         num_accounts=num_accounts,
@@ -67,9 +68,9 @@ def run_dragonfly_benchmark(
     # Verify some accounts were stored
     sample_account_id = account_ids[0]
     account_key = f"AccountBase:{sample_account_id}"
-    stored_account = client.hgetall(account_key)
+    stored_account = await client.hgetall(account_key)
     assert stored_account is not None
-    assert stored_account[b"AccountId"].decode() == sample_account_id
+    assert stored_account["AccountId"] == sample_account_id
     stage2_duration = time.perf_counter() - stage2_start
     logging.info(
         f"Stage 2 completed in {stage2_duration:.2f}s: {len(account_ids)} accounts generated and stored"
@@ -80,8 +81,8 @@ def run_dragonfly_benchmark(
         f"Stage 3: Query Load Testing - running {num_queries:,} queries with {num_agents} concurrent agents"
     )
     stage3_start = time.perf_counter()
-    total_completed = run_query_load_test(
-        client=client,
+    total_completed = await run_query_load_test(
+        df_server=df_server,
         column_mappings=column_mappings,
         account_ids=account_ids,
         total_queries=num_queries,
@@ -102,7 +103,10 @@ def run_dragonfly_benchmark(
 
     logging.info("Benchmark test completed successfully")
 
+    # Close client
+    await client.aclose()
+
 
 @dfly_args({"proactor_threads": 4})
-def test_dragonfly_benchmark(df_server: DflyInstance):
-    run_dragonfly_benchmark(df_server)
+async def test_dragonfly_benchmark(df_server: DflyInstance):
+    await run_dragonfly_benchmark(df_server)

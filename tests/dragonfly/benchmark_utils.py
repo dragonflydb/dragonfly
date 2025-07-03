@@ -1,10 +1,10 @@
+import asyncio
 import random
 import string
 import uuid
 import math
 from typing import Dict, List
-from concurrent.futures import ThreadPoolExecutor
-import redis
+from redis import asyncio as aioredis
 from redis.commands.search.query import Query
 
 
@@ -108,7 +108,7 @@ def map_server_type_to_dragonfly_type(server_type: str) -> str:
     return mapping[server_type]
 
 
-def create_search_index(client: redis.Redis, columns: List[Dict[str, str]]) -> None:
+async def create_search_index(client: aioredis.Redis, columns: List[Dict[str, str]]) -> None:
     # Map columns to Dragonfly types
     column_name_to_dragonfly_type = {}
     for column in columns:
@@ -126,7 +126,7 @@ def create_search_index(client: redis.Redis, columns: List[Dict[str, str]]) -> N
     schema_create_command = (
         f"FT.CREATE {INDEX_KEY} ON HASH PREFIX 1 AccountBase: SCHEMA {dragonfly_columns}"
     )
-    client.execute_command(schema_create_command)
+    await client.execute_command(schema_create_command)
 
 
 def get_column_name_to_type_mapping(columns: List[Dict[str, str]]) -> Dict[str, str]:
@@ -181,8 +181,8 @@ def generate_property_value(column_type: str):
         )
 
 
-def generate_account_data(
-    client: redis.Redis,
+async def generate_account_data(
+    client: aioredis.Redis,
     column_mappings: Dict[str, str],
     num_accounts: int = 10000,  # Default for quick testing
     chunk_size: int = 1000,  # Chunk size for batch processing
@@ -196,18 +196,25 @@ def generate_account_data(
     # Process accounts in chunks for better performance
     chunks_count = math.ceil(num_accounts / chunk_size)
 
+    tasks = []
     for chunk_number in range(chunks_count):
         start_idx = chunk_number * chunk_size
         end_idx = min((chunk_number + 1) * chunk_size, num_accounts)
         chunk_account_ids = account_ids[start_idx:end_idx]
 
-        _generate_accounts_chunk(client, chunk_account_ids, column_mappings)
+        task = asyncio.create_task(
+            _generate_accounts_chunk(client, chunk_account_ids, column_mappings)
+        )
+        tasks.append(task)
+
+    # Wait for all chunks to complete
+    await asyncio.gather(*tasks)
 
     return account_ids
 
 
-def _generate_accounts_chunk(
-    client: redis.Redis, account_ids: List[str], column_mappings: Dict[str, str]
+async def _generate_accounts_chunk(
+    client: aioredis.Redis, account_ids: List[str], column_mappings: Dict[str, str]
 ):
     pipeline = client.pipeline()
 
@@ -226,7 +233,7 @@ def _generate_accounts_chunk(
         acc_key = ACCOUNT_KEY.format(accountId=account_id)
         pipeline.hset(acc_key, mapping=account)
 
-    pipeline.execute()
+    await pipeline.execute()
 
 
 def create_property_filter(property_name: str, property_type: str, account_ids: List[str]) -> str:
@@ -259,8 +266,8 @@ def create_property_filter(property_name: str, property_type: str, account_ids: 
 
 def generate_search_query(column_mappings: Dict[str, str], account_ids: List[str]) -> Query:
     columns = list(column_mappings.keys())
-    num_columns = random.randint(len(columns) / 2, len(columns))
-    num_filters = random.randint(len(columns) / 2, len(columns))
+    num_columns = random.randint(len(columns) // 2, len(columns))
+    num_filters = random.randint(len(columns) // 2, len(columns))
 
     selected_columns = random.sample(columns, num_columns)
     filter_columns = random.sample(selected_columns, num_filters)
@@ -285,34 +292,35 @@ def generate_search_query(column_mappings: Dict[str, str], account_ids: List[str
     return query
 
 
-def run_query_agent(
+async def run_query_agent(
     agent_id: int,
-    client_template: redis.Redis,
+    df_server,
     column_mappings: Dict[str, str],
     account_ids: List[str],
     num_queries: int,
 ) -> int:
-    # Create a dedicated client for this thread/agent to avoid contention on the same
-    # connection pool and better emulate concurrent users.
-    connection_kwargs = client_template.connection_pool.connection_kwargs
-    client = redis.Redis(**connection_kwargs)
+    # Create a dedicated client for this agent to avoid contention
+    client = df_server.client()
 
     query_count = 0
 
-    for _ in range(num_queries):
-        try:
-            query = generate_search_query(column_mappings, account_ids)
-            _ = client.ft(INDEX_KEY).search(query)
-            query_count += 1
-        except Exception:
-            # Ignore individual query failures
-            pass
+    try:
+        for _ in range(num_queries):
+            try:
+                query = generate_search_query(column_mappings, account_ids)
+                _ = await client.ft(INDEX_KEY).search(query)
+                query_count += 1
+            except Exception:
+                # Ignore individual query failures
+                pass
+    finally:
+        await client.aclose()
 
     return query_count
 
 
-def run_query_load_test(
-    client: redis.Redis,
+async def run_query_load_test(
+    df_server,
     column_mappings: Dict[str, str],
     account_ids: List[str],
     total_queries: int = 1000,
@@ -320,15 +328,15 @@ def run_query_load_test(
 ) -> int:
     queries_per_agent = total_queries // num_agents
 
-    with ThreadPoolExecutor(max_workers=num_agents) as executor:
-        futures = []
-        for agent_id in range(num_agents):
-            future = executor.submit(
-                run_query_agent, agent_id, client, column_mappings, account_ids, queries_per_agent
-            )
-            futures.append(future)
+    tasks = []
+    for agent_id in range(num_agents):
+        task = asyncio.create_task(
+            run_query_agent(agent_id, df_server, column_mappings, account_ids, queries_per_agent)
+        )
+        tasks.append(task)
 
-        # Wait for all agents to complete
-        total_completed = sum(future.result() for future in futures)
+    # Wait for all agents to complete
+    results = await asyncio.gather(*tasks)
+    total_completed = sum(results)
 
     return total_completed
