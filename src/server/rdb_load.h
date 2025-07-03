@@ -210,7 +210,7 @@ class RdbLoaderBase {
 
 class RdbLoader : protected RdbLoaderBase {
  public:
-  explicit RdbLoader(Service* service);
+  explicit RdbLoader(Service* service, std::string snapshot_id = {});
 
   ~RdbLoader();
 
@@ -251,6 +251,10 @@ class RdbLoader : protected RdbLoaderBase {
 
   void Pause(bool pause) {
     pause_ = pause;
+  }
+
+  const std::string& GetSnapshotId() const {
+    return snapshot_id_;
   }
 
   // Return the offset that was received with a RDB_OPCODE_JOURNAL_OFFSET command,
@@ -320,6 +324,7 @@ class RdbLoader : protected RdbLoaderBase {
 
  private:
   Service* service_;
+  std::string snapshot_id_;
   bool override_existing_keys_ = false;
   bool load_unowned_slots_ = false;
   bool rdb_ignore_expiry_;

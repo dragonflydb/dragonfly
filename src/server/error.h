@@ -84,6 +84,7 @@ enum errc {
   bad_json_string = 12,
   unsupported_operation = 13,
   value_expired = 14,  // applying to set and hmap
+  incorrect_snapshot_id = 15,
 };
 
 }  // namespace rdb

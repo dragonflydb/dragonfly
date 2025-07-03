@@ -1122,7 +1122,19 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
 
   auto aggregated_result = std::make_shared<AggregateLoadResult>();
 
+  std::string snapshot_id;
+  if (absl::EndsWith(load_path, "summary.dfs")) {
+    // we read summary first to get snapshot_id and load data correctly
+    auto load_result = pool.GetNextProactor()->Await(
+        [&] { return LoadRdb(std::string(load_path), existing_keys, &snapshot_id); });
+    if (!load_result.has_value())
+      aggregated_result->first_error = load_result.error();
+  }
+
   for (auto& path : paths) {
+    // we have already read summary so we skip it now
+    if (absl::EndsWith(path, "summary.dfs"))
+      continue;
     // For single file, choose thread that does not handle shards if possible.
     // This will balance out the CPU during the load.
     ProactorBase* proactor;
@@ -1132,8 +1144,11 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
       proactor = pool.GetNextProactor();
     }
 
-    auto load_func = [this, aggregated_result, existing_keys, path = std::move(path)]() {
-      auto load_result = LoadRdb(path, existing_keys);
+    auto load_func = [this, aggregated_result, existing_keys, path = std::move(path),
+                      snapshot_id]() {
+      auto sid = snapshot_id;
+      auto load_result = LoadRdb(path, existing_keys, &sid);
+      DCHECK(sid == snapshot_id);
       if (load_result.has_value())
         aggregated_result->keys_read.fetch_add(*load_result);
       else
@@ -1200,9 +1215,11 @@ void ServerFamily::SnapshotScheduling() {
 }
 
 io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
-                                         LoadExistingKeys existing_keys) {
+                                         LoadExistingKeys existing_keys, std::string* snapshot_id) {
   VLOG(1) << "Loading data from " << rdb_file;
   CHECK(fb2::ProactorBase::IsProactorThread()) << "must be called from proactor thread";
+
+  std::string filt_snapshot_id = snapshot_id ? *snapshot_id : "";
 
   io::Result<size_t> result;
   ProactorBase* proactor = fb2::ProactorBase::me();
@@ -1215,18 +1232,22 @@ io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
 
     io::FileSource fs(*res);
 
-    RdbLoader loader{&service_};
+    RdbLoader loader{&service_, filt_snapshot_id};
     if (existing_keys == LoadExistingKeys::kOverride) {
       loader.SetOverrideExistingKeys(true);
     }
 
     auto ec = loader.Load(&fs);
-    if (ec) {
+    // we ignore incorrect_snapshot_id, it means we try to load file not from the snapshot
+    if (ec && (ec.value() != rdb::errc::incorrect_snapshot_id)) {
       result = nonstd::make_unexpected(ec);
     } else {
       VLOG(1) << "Done loading RDB from " << rdb_file << ", keys loaded: " << loader.keys_loaded();
       VLOG(1) << "Loading finished after " << strings::HumanReadableElapsedTime(loader.load_time());
       result = loader.keys_loaded();
+      if (snapshot_id && snapshot_id->empty()) {
+        *snapshot_id = loader.GetSnapshotId();
+      }
     }
   });
 

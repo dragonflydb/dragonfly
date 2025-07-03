@@ -1927,8 +1927,9 @@ struct RdbLoader::ObjSettings {
   ObjSettings() = default;
 };
 
-RdbLoader::RdbLoader(Service* service)
+RdbLoader::RdbLoader(Service* service, std::string snapshot_id)
     : service_{service},
+      snapshot_id_(std::move(snapshot_id)),
       rdb_ignore_expiry_{GetFlag(FLAGS_rdb_ignore_expiry)},
       script_mgr_{service == nullptr ? nullptr : service->script_mgr()},
       shard_buf_{shard_set->size()} {
@@ -2416,6 +2417,12 @@ error_code RdbLoader::HandleAux() {
      * information fields and are logged at startup with a log
      * level of NOTICE. */
     LOG(INFO) << "RDB '" << auxkey << "': " << auxval;
+  } else if (auxkey == "snapshot-id") {
+    if (snapshot_id_.empty()) {
+      snapshot_id_ = auxval;
+    } else if (snapshot_id_ != auxval) {
+      return RdbError(errc::incorrect_snapshot_id);
+    }
   } else if (auxkey == "repl-stream-db") {
     // TODO
   } else if (auxkey == "repl-id") {
