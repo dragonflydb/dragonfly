@@ -228,8 +228,8 @@ class ServerFamily {
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
-  enum class LoadExistingKeys { kFail, kOverride };
-  std::optional<util::fb2::Future<GenericError>> Load(std::string_view file_name,
+  enum class LoadExistingKeys : uint8_t { kFail, kOverride };
+  std::optional<util::fb2::Future<GenericError>> Load(const std::string& file_name,
                                                       LoadExistingKeys existing_keys);
 
   bool TEST_IsSaving() const;
@@ -338,9 +338,16 @@ class ServerFamily {
   void ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                          ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
-  // Returns the number of loaded keys if successful.
-  io::Result<size_t> LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys,
-                             std::string* snapshot_id = nullptr);
+  struct LoadOptions {
+    std::string snapshot_id;
+    uint32_t shard_count = 0;      // Shard count of the snapshot being loaded.
+    uint64_t num_loaded_keys = 0;  // Number of keys loaded.
+  };
+
+  // Updates LoadOptions if successful. If snapshot_id and shard_count are passed in,
+  // may use them for consistency checks.
+  std::error_code LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys,
+                          LoadOptions* load_opts);
 
   void SnapshotScheduling() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
 

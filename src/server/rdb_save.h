@@ -153,7 +153,7 @@ class RdbSaver {
 
 class SerializerBase {
  public:
-  enum class FlushState { kFlushMidEntry, kFlushEndEntry };
+  enum class FlushState : uint8_t { kFlushMidEntry, kFlushEndEntry };
 
   explicit SerializerBase(CompressionMode compression_mode);
   virtual ~SerializerBase() = default;
@@ -224,6 +224,7 @@ class RdbSerializer : public SerializerBase {
 
   std::error_code FlushToSink(io::Sink* s, FlushState flush_state) override;
   std::error_code SelectDb(uint32_t dbid);
+  std::error_code SaveSegmentCounts(uint32_t prime_count, uint32_t expires_count);
 
   // Must be called in the thread to which `it` belongs.
   // Returns the serialized rdb_type or the error.
