@@ -27,6 +27,7 @@ class MultiCommandSquasher {
     bool error_abort = false;       // Abort upon receiving error
     unsigned max_squash_size = 32;  // How many commands to squash at once
   };
+
   // Returns number of processed commands.
   static size_t Execute(absl::Span<StoredCmd> cmds, facade::RedisReplyBuilder* rb,
                         ConnectionContext* cntx, Service* service, const Opts& opts) {

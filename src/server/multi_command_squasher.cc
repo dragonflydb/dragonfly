@@ -279,13 +279,13 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     if (aborted)
       break;
   }
-
   uint64_t after_reply = proactor->GetMonotonicTimeNs();
   fresh_ss->stats.multi_squash_exec_hop_usec += (after_hop - start) / 1000;
   fresh_ss->stats.multi_squash_exec_reply_usec += (after_reply - after_hop) / 1000;
 
   tl_facade_stats->reply_stats.squashing_current_reply_size.fetch_sub(total_reply_size,
                                                                       std::memory_order_release);
+
   for (auto& sinfo : sharded_) {
     sinfo.dispatched.clear();
     sinfo.reply_id = 0;
