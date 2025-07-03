@@ -2,6 +2,7 @@
 Pytest fixtures to be provided for all tests without import
 """
 
+import asyncio
 import logging
 import os
 import sys
@@ -16,6 +17,7 @@ import random
 import subprocess
 import shutil
 import time
+import typing
 from copy import deepcopy
 
 from pathlib import Path
@@ -42,24 +44,27 @@ def pytest_configure(config):
         shutil.rmtree(BASE_LOG_DIR)
 
 
-# runs per test case
-def pytest_runtest_setup(item):
-    # Generate a unique directory name for each test based on its nodeid
+@pytest.fixture(scope="class")
+def df_log_dir(request):
+    """
+    Fixture to provide a log directory for the test class.
+    This directory will be created before each test class and cleaned up after.
+    """
+    # Generate a unique directory name for the test class based on its nodeid
     translator = str.maketrans(":[]{}/ ", "_______", "\"*'")
-    unique_dir = item.name.translate(translator)
+    unique_dir = request.node.name.translate(translator)
+    log_dir = os.path.join(BASE_LOG_DIR, unique_dir)
 
-    test_dir = os.path.join(BASE_LOG_DIR, unique_dir)
-    if os.path.exists(test_dir):
-        shutil.rmtree(test_dir)
-    os.makedirs(test_dir)
-
-    # Attach the directory path to the item for later access
-    item.log_dir = test_dir
+    if os.path.exists(log_dir):
+        shutil.rmtree(log_dir)
+    os.makedirs(log_dir)
 
     # needs for action.yml to get logs if timedout is happen for test
     last_logs = open(LAST_LOGS, "w")
-    last_logs.write(test_dir)
+    last_logs.write(log_dir)
     last_logs.close()
+
+    return log_dir
 
 
 @pytest.fixture(scope="session")
@@ -88,7 +93,7 @@ def test_env(tmp_dir: Path):
     return env
 
 
-@pytest.fixture(scope="function", params=[{}])
+@pytest.fixture(scope="class", params=[{}])
 def df_seeder_factory(request) -> DflySeederFactory:
     seed = request.config.getoption("--rand-seed")
     if seed is None:
@@ -112,16 +117,26 @@ def parse_args(args: List[str]) -> Dict[str, Union[str, None]]:
     return args_dict
 
 
-@pytest_asyncio.fixture(scope="function", params=[{}])
-async def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
+@pytest_asyncio.fixture(scope="class")
+def event_loop():
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()
+
+
+@pytest_asyncio.fixture(scope="class", params=[{}])
+async def df_factory(
+    request,
+    tmp_dir,
+    test_env,
+    df_log_dir,
+) -> typing.AsyncGenerator[DflyInstanceFactory, None]:
     """
     Create an instance factory with supplied params.
     """
     os.makedirs(os.path.join(gettempdir(), "tiered"), exist_ok=True)
     scripts_dir = os.path.dirname(os.path.abspath(__file__))
     path = os.environ.get("DRAGONFLY_PATH", os.path.join(scripts_dir, "../../build-dbg/dragonfly"))
-
-    log_directory = getattr(request.node, "log_dir")
 
     args = request.param if request.param else {}
     existing = request.config.getoption("--existing-port")
@@ -138,7 +153,7 @@ async def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
         existing_admin_port=int(existing_admin) if existing_admin else None,
         existing_mc_port=int(existing_mc) if existing_mc else None,
         env=test_env,
-        log_dir=log_directory,
+        log_dir=df_log_dir,
     )
 
     factory = DflyInstanceFactory(params, args)
@@ -146,8 +161,8 @@ async def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
     await factory.stop_all()
 
 
-@pytest.fixture(scope="function")
-def df_server(df_factory: DflyInstanceFactory) -> DflyInstance:
+@pytest.fixture(scope="class")
+def df_server(df_factory: DflyInstanceFactory) -> typing.Generator[DflyInstance, None, None]:
     """
     Start the default Dragonfly server that will be used for the default pools
     and clients.
@@ -179,11 +194,6 @@ def df_server(df_factory: DflyInstanceFactory) -> DflyInstance:
 
     if instance["cluster_mode"]:
         print("Cluster clients left: ", len(clients_left))
-
-
-@pytest.fixture(scope="function")
-def connection(df_server: DflyInstance):
-    return redis.Connection(port=df_server.port)
 
 
 @pytest.fixture(scope="function")
@@ -373,6 +383,7 @@ def with_ca_tls_client_args(with_tls_client_args, with_tls_ca_cert_args):
 
 
 def copy_failed_logs(log_dir, report):
+    assert log_dir
     test_failed_path = os.path.join(FAILED_PATH, os.path.basename(log_dir))
     if not os.path.exists(test_failed_path):
         os.makedirs(test_failed_path)
@@ -406,8 +417,8 @@ def pytest_runtest_makereport(item, call):
         item.call_outcome = report
 
     if report.when == "teardown":
-        log_dir = getattr(item, "log_dir", None)
         call_outcome = getattr(item, "call_outcome", None)
+        log_dir = item.funcargs.get("df_log_dir")
         if report.failed:
             copy_failed_logs(log_dir, report)
         if call_outcome and call_outcome.failed:
