@@ -134,8 +134,7 @@ tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
   } else if (type == "STREAM") {
     cid = registry.Find("XADD");
     args.push_back("*");
-    uint32_t num_values = rand() % 4 + 1;
-    for (size_t i = 0; i < num_values; ++i) {
+    for (size_t i = 0; i < 4; ++i) {  // we decided always generate 4 values
       args.push_back(GenerateValue(val_size / 2, random_value, gen));
       args.push_back(GenerateValue(val_size / 2, random_value, gen));
     }
