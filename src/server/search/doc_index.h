@@ -16,6 +16,7 @@
 
 #include "base/pmr/memory_resource.h"
 #include "core/mi_memory_resource.h"
+#include "core/search/base.h"
 #include "core/search/search.h"
 #include "core/search/synonyms.h"
 #include "server/common.h"

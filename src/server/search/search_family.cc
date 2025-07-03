@@ -581,60 +581,26 @@ void SearchReply(const SearchParams& params,
     }
   }
 
-  size_t size = docs.size();
-  bool should_add_score_field = false;
-
+  optional<SortOrder> sort_order;
+  optional<string> score_ret_field;
   if (knn_sort_option) {
-    size = std::min(size, knn_sort_option->limit);
-    total_hits = std::min(total_hits, knn_sort_option->limit);
-    should_add_score_field = params.ShouldReturnField(knn_sort_option->score_field_alias);
-
-    auto comparator = [](const SerializedSearchDoc* l, const SerializedSearchDoc* r) {
-      return *l < *r;
-    };
-
-    const size_t prefix_size_to_sort = std::min(params.limit_offset + params.limit_total, size);
-    if (prefix_size_to_sort == docs.size()) {
-      std::sort(docs.begin(), docs.end(), std::move(comparator));
-    } else {
-      std::partial_sort(docs.begin(), docs.begin() + prefix_size_to_sort, docs.end(),
-                        std::move(comparator));
-    }
+    sort_order = SortOrder::ASC;
+    if (params.ShouldReturnField(knn_sort_option->score_field_alias))
+      score_ret_field = knn_sort_option->score_field_alias;
+  }
+  if (params.sort_option) {
+    sort_order = params.sort_option->order;  // SORTBY overrides KNN
   }
 
-  const size_t offset = std::min(params.limit_offset, size);
-  const size_t limit = std::min(size - offset, params.limit_total);
+  const size_t offset = std::min(params.limit_offset, docs.size());
+  const size_t limit = std::min(docs.size() - offset, params.limit_total);
   const size_t end = offset + limit;
-  DCHECK(end <= docs.size());
 
-  if (params.sort_option) {
-    auto field_alias = params.sort_option->field.NameView();
-
-    auto comparator = [&](const SerializedSearchDoc* l_doc, const SerializedSearchDoc* r_doc) {
-      auto& l = l_doc->values;
-      auto& r = r_doc->values;
-
-      auto l_it = l.find(field_alias);
-      auto r_it = r.find(field_alias);
-
-      // If some of the values is not present
-      if (l_it == l.end() || r_it == r.end()) {
-        return l_it != l.end();
-      }
-
-      const auto& lv = l_it->second;
-      const auto& rv = r_it->second;
-      return params.sort_option->order == SortOrder::ASC ? lv < rv : lv > rv;
+  if (sort_order) {
+    auto cmp = [order = *sort_order](const SerializedSearchDoc* l, const SerializedSearchDoc* r) {
+      return order == SortOrder::ASC ? l->score < r->score : r->score < l->score;
     };
-
-    auto sort_begin = docs.begin();
-    auto sort_end = docs.end();
-    // If we first sorted by knn, we need to sort only the result of knn
-    if (knn_sort_option) {
-      sort_begin = docs.begin() + offset;
-      sort_end = docs.begin() + end;
-    }
-    std::sort(sort_begin, sort_end, std::move(comparator));
+    partial_sort(docs.begin(), docs.begin() + min(docs.size(), end), docs.end(), cmp);
   }
 
   const bool reply_with_ids_only = params.IdsOnly();
@@ -649,9 +615,8 @@ void SearchReply(const SearchParams& params,
       continue;
     }
 
-    if (should_add_score_field && holds_alternative<float>(docs[i]->score))
-      docs[i]->values[knn_sort_option->score_field_alias] =
-          absl::StrCat(get<float>(docs[i]->score));
+    if (score_ret_field)
+      docs[i]->values[*score_ret_field] = absl::StrCat(get<double>(docs[i]->score));
 
     SendSerializedDoc(*docs[i], builder);
   }

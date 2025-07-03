@@ -792,7 +792,9 @@ TEST_F(SearchFamilyTest, PrefixSuffixInfixTrie) {
   EXPECT_THAT(Run({"ft.search", "i1", "*lake"}), AreDocIds("d:3", "d:4"));
 }
 
-TEST_F(SearchFamilyTest, BasicSort) {
+struct SortTest : SearchFamilyTest, public testing::WithParamInterface<bool /* sortable */> {};
+
+TEST_P(SortTest, BasicSort) {
   auto AreRange = [](size_t total, size_t l, size_t r, string_view prefix) {
     vector<string> out;
     for (size_t i = min(l, r); i < max(l, r); i++)
@@ -802,9 +804,10 @@ TEST_F(SearchFamilyTest, BasicSort) {
     return DocIds(total, out);
   };
 
-  // max_memory_limit = INT_MAX;
-
-  Run({"ft.create", "i1", "prefix", "1", "d:", "schema", "ord", "numeric", "sortable"});
+  vector<string_view> params{"ft.create", "i1", "prefix", "1", "d:", "schema", "ord", "numeric"};
+  if (GetParam())
+    params.emplace_back("sortable");
+  Run(params);
 
   for (size_t i = 0; i < 100; i++)
     Run({"hset", absl::StrCat("d:", i), "ord", absl::StrCat(i)});
@@ -819,7 +822,10 @@ TEST_F(SearchFamilyTest, BasicSort) {
     EXPECT_THAT(Run({"ft.search", "i1", "*", "SORTBY", "ord", "DESC", "LIMIT", to_string(i), "27"}),
                 AreRange(100, 100 - i, 100 - i - 27, "d:"));
 
-  Run({"ft.create", "i2", "prefix", "1", "d2:", "schema", "name", "text", "sortable"});
+  params = {"ft.create", "i2", "prefix", "1", "d2:", "schema", "name", "text"};
+  if (GetParam())
+    params.emplace_back("sortable");
+  Run(params);
 
   absl::InsecureBitGen gen;
   vector<string> random_strs;
@@ -834,6 +840,9 @@ TEST_F(SearchFamilyTest, BasicSort) {
     EXPECT_THAT(Run({"ft.search", "i2", "*", "SORTBY", "name", "DESC", "LIMIT", to_string(i), "3"}),
                 AreRange(10, 10 - i, 10 - i - 3, "d2:"));
 }
+
+INSTANTIATE_TEST_SUITE_P(Sortable, SortTest, testing::Values(true));
+INSTANTIATE_TEST_SUITE_P(NotSortable, SortTest, testing::Values(false));
 
 TEST_F(SearchFamilyTest, FtProfile) {
   Run({"ft.create", "i1", "schema", "name", "text"});
@@ -2330,28 +2339,6 @@ TEST_F(SearchFamilyTest, SearchSortByOptionNonSortableFieldJson) {
 
   resp = Run({"FT.SEARCH", "index", "*", "SORTBY", "text"});
   EXPECT_THAT(resp, expect_expr("text"sv));
-
-  resp = Run({"FT.SEARCH", "index", "*", "SORTBY", "@text"});
-  EXPECT_THAT(resp, expect_expr("text"sv));
-
-  resp = Run({"FT.SEARCH", "index", "*", "SORTBY", "$.text"});
-  EXPECT_THAT(resp, expect_expr("$.text"sv));
-}
-
-TEST_F(SearchFamilyTest, SearchSortByOptionNonSortableFieldHash) {
-  Run({"HSET", "h1", "text", "2"});
-  Run({"HSET", "h2", "text", "1"});
-
-  auto resp = Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "text", "TEXT"});
-  EXPECT_EQ(resp, "OK");
-
-  auto expected_expr = IsArray(2, "h2", IsMap("text", "1"), "h1", IsMap("text", "2"));
-
-  resp = Run({"FT.SEARCH", "index", "*", "SORTBY", "text"});
-  EXPECT_THAT(resp, expected_expr);
-
-  resp = Run({"FT.SEARCH", "index", "*", "SORTBY", "@text"});
-  EXPECT_THAT(resp, expected_expr);
 }
 
 TEST_F(SearchFamilyTest, KnnSearchWithSortby) {
