@@ -253,9 +253,7 @@ class DbSlice {
     expire_base_[generation & 1] = now;
   }
 
-  // From time to time DbSlice is set with a new set of params needed to estimate its
-  // memory usage.
-  void SetCachedParams(int64_t budget, size_t bytes_per_object) {
+  void UpdateMemoryParams(int64_t budget, size_t bytes_per_object) {
     memory_budget_ = budget;
     bytes_per_object_ = bytes_per_object;
   }
@@ -632,8 +630,12 @@ class DbSlice {
 
   uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
   uint64_t next_moved_id_ = 1;
+
+  // Estimation of available memory dedicated to this shard.
+  // Recalculated periodically by dividing free memory left among all shards equally
   ssize_t memory_budget_ = SSIZE_MAX / 2;
   size_t bytes_per_object_ = 0;
+
   size_t soft_budget_limit_ = 0;
   size_t table_memory_ = 0;
   uint64_t entries_count_ = 0;

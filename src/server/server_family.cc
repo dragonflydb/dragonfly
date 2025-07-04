@@ -656,6 +656,10 @@ uint64_t GetDelayMs(uint64_t ts) {
   return delay_ns;
 }
 
+size_t FetchRssMemory(const io::StatusData& sdata) {
+  return sdata.vm_rss + sdata.hugetlb_pages;
+}
+
 }  // namespace
 
 void SlowLogGet(dfly::CmdArgList args, std::string_view sub_cmd, util::ProactorPool* pp,
@@ -1005,53 +1009,38 @@ void ServerFamily::Shutdown() {
 }
 
 bool ServerFamily::HasPrivilegedInterface() {
-  for (auto* listener : listeners_) {
-    if (listener->IsPrivilegedInterface()) {
-      return true;
-    }
-  }
-  return false;
+  return any_of(listeners_.begin(), listeners_.end(),
+                [](auto* l) { return l->IsPrivilegedInterface(); });
 }
 
 void ServerFamily::UpdateMemoryGlobalStats() {
-  ShardId sid = EngineShard::tlocal()->shard_id();
-  if (sid != 0) {  // This function is executed periodicaly on all shards. To ensure the logic
-                   // bellow runs only on one shard we return is the shard is not 0.
+  // Called from all shards, but one updates global stats below
+  if (EngineShard::tlocal()->shard_id() > 0)
     return;
-  }
 
+  // Update used memory peak
   uint64_t mem_current = used_mem_current.load(std::memory_order_relaxed);
-  if (mem_current > used_mem_peak.load(memory_order_relaxed)) {
-    used_mem_peak.store(mem_current, memory_order_relaxed);
-  }
+  if (mem_current > memory_peaks_.used.load(memory_order_relaxed))
+    memory_peaks_.used.store(mem_current, memory_order_relaxed);
 
   io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
-  if (sdata_res) {
-    size_t total_rss = FetchRssMemory(sdata_res.value());
-    rss_mem_current.store(total_rss, memory_order_relaxed);
-    if (rss_mem_peak.load(memory_order_relaxed) < total_rss) {
-      rss_mem_peak.store(total_rss, memory_order_relaxed);
-    }
-    double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
-    if (rss_oom_deny_ratio > 0) {
-      size_t memory_limit = max_memory_limit * rss_oom_deny_ratio;
-      if (total_rss > memory_limit && accepting_connections_ && HasPrivilegedInterface()) {
-        for (auto* listener : listeners_) {
-          if (!listener->IsPrivilegedInterface()) {
-            listener->socket()->proactor()->Await([listener]() { listener->pause_accepting(); });
-          }
-        }
-        accepting_connections_ = false;
+  if (!sdata_res)
+    return;
 
-      } else if (total_rss < memory_limit && !accepting_connections_) {
-        for (auto* listener : listeners_) {
-          if (!listener->IsPrivilegedInterface()) {
-            listener->socket()->proactor()->Await([listener]() { listener->resume_accepting(); });
-          }
-        }
-        accepting_connections_ = true;
-      }
-    }
+  // Update rss memory peak
+  size_t total_rss = FetchRssMemory(sdata_res.value());
+  rss_mem_current.store(total_rss, memory_order_relaxed);
+  if (total_rss > memory_peaks_.rss.load(memory_order_relaxed))
+    memory_peaks_.rss.store(total_rss, memory_order_relaxed);
+
+  // Decide on stopping or accepting new connections based on oom deny ratio
+  double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
+  if (rss_oom_deny_ratio > 0) {
+    size_t memory_limit = max_memory_limit * rss_oom_deny_ratio;
+    if (total_rss > memory_limit && accepting_connections_ && HasPrivilegedInterface())
+      ChangeConnectionAccept(false);
+    else if (total_rss < memory_limit && !accepting_connections_)
+      ChangeConnectionAccept(true);
   }
 }
 
@@ -1384,8 +1373,8 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   auto sdata_res = io::ReadStatusInfo();
   AppendMetricWithoutLabels("memory_used_bytes", "", m.heap_used_bytes, MetricType::GAUGE,
                             &resp->body());
-  AppendMetricWithoutLabels("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
-                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("memory_used_peak_bytes", "", m.used_mem_peak, MetricType::GAUGE,
+                            &resp->body());
   AppendMetricWithoutLabels("memory_fiberstack_vms_bytes",
                             "virtual memory size used by all the fibers", m.worker_fiber_stack_size,
                             MetricType::GAUGE, &resp->body());
@@ -1405,7 +1394,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                       &resp->body());
   }
   if (sdata_res.has_value()) {
-    size_t rss = FetchRssMemory(sdata_res.value());
+    size_t rss = FetchRssMemory(*sdata_res);
     AppendMetricWithoutLabels("used_memory_rss_bytes", "", rss, MetricType::GAUGE, &resp->body());
     AppendMetricWithoutLabels("swap_memory_bytes", "", sdata_res->vm_swap, MetricType::GAUGE,
                               &resp->body());
@@ -2016,6 +2005,14 @@ void ServerFamily::ClientUnPauseCmd(CmdArgList args, SinkReplyBuilder* builder) 
   builder->SendOk();
 }
 
+void ServerFamily::ChangeConnectionAccept(bool accept) {
+  DCHECK_NE(accept, accepting_connections_);
+  auto h = accept ? &ListenerInterface::resume_accepting : &ListenerInterface::pause_accepting;
+  for (auto* listener : GetNonPriviligedListeners())
+    listener->socket()->proactor()->Await([listener, h]() { (listener->*h)(); });
+  accepting_connections_ = accept;
+}
+
 void ClientHelp(SinkReplyBuilder* builder) {
   string_view help_arr[] = {
       "CLIENT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
@@ -2403,12 +2400,17 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
   // update peak_stats_ from it.
-  util::fb2::LockGuard lk{peak_stats_mu_};
-  UpdateMax(&peak_stats_.conn_dispatch_queue_bytes,
-            result.facade_stats.conn_stats.dispatch_queue_bytes);
-  UpdateMax(&peak_stats_.conn_read_buf_capacity, result.facade_stats.conn_stats.read_buf_capacity);
+  {
+    util::fb2::LockGuard lk{peak_stats_mu_};
+    UpdateMax(&peak_stats_.conn_dispatch_queue_bytes,
+              result.facade_stats.conn_stats.dispatch_queue_bytes);
+    UpdateMax(&peak_stats_.conn_read_buf_capacity,
+              result.facade_stats.conn_stats.read_buf_capacity);
+    result.peak_stats = peak_stats_;
+  }
 
-  result.peak_stats = peak_stats_;
+  result.used_mem_peak = memory_peaks_.used.load(memory_order_relaxed);
+  result.used_mem_rss_peak = memory_peaks_.rss.load(memory_order_relaxed);
 
   uint64_t delta_ms = (absl::GetCurrentTimeNanos() - start) / 1'000'000;
   if (delta_ms > 30) {
@@ -2490,9 +2492,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
   auto add_mem_info = [&] {
     append("used_memory", m.heap_used_bytes);
     append("used_memory_human", HumanReadableNumBytes(m.heap_used_bytes));
-    const auto ump = used_mem_peak.load(memory_order_relaxed);
-    append("used_memory_peak", ump);
-    append("used_memory_peak_human", HumanReadableNumBytes(ump));
+    append("used_memory_peak", m.used_mem_peak);
+    append("used_memory_peak_human", HumanReadableNumBytes(m.used_mem_peak));
 
     // Virtual memory size, upper bound estimation on the RSS memory used by the fiber stacks.
     append("fibers_stack_vms", m.worker_fiber_stack_size);
@@ -2501,7 +2502,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     size_t rss = rss_mem_current.load(memory_order_relaxed);
     append("used_memory_rss", rss);
     append("used_memory_rss_human", HumanReadableNumBytes(rss));
-    append("used_memory_peak_rss", rss_mem_peak.load(memory_order_relaxed));
+    append("used_memory_peak_rss", m.used_mem_rss_peak);
 
     append("maxmemory", max_memory_limit);
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
