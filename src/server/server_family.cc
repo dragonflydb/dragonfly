@@ -237,6 +237,13 @@ using strings::HumanReadableNumBytes;
 
 namespace {
 
+// TODO these should be configurable as command line flag and at runtime via config set
+constexpr std::array<double, 3> kLatencyPercentiles = {50.0, 99.0, 99.9};
+
+bool is_histogram_empty(const hdr_histogram* h) {
+  return hdr_min(h) == std::numeric_limits<int64_t>::max();
+}
+
 const auto kRedisVersion = "7.4.0";
 
 using EngineFunc = void (ServerFamily::*)(CmdArgList args, const CommandContext&);
@@ -2409,6 +2416,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   UpdateMax(&peak_stats_.conn_read_buf_capacity, result.facade_stats.conn_stats.read_buf_capacity);
 
   result.peak_stats = peak_stats_;
+  result.cmd_latency_map = service_.mutable_registry()->LatencyMap();
 
   uint64_t delta_ms = (absl::GetCurrentTimeNanos() - start) / 1'000'000;
   if (delta_ms > 30) {
@@ -2894,6 +2902,31 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("cluster_enabled", IsClusterEnabledOrEmulated());
     append("migration_errors_total", service_.cluster_family().MigrationsErrorsCount());
     append("total_migrated_keys", m.shard_stats.total_migrated_keys);
+  }
+
+  if (should_enter("LATENCYSTATS")) {
+    for (const auto& [cmd_name, hist] : m.cmd_latency_map) {
+      if (!hist) {
+        continue;
+      }
+
+      if (is_histogram_empty(hist)) {
+        continue;
+      }
+
+      absl::InlinedVector<std::string, 4> stats;
+      for (const auto percentile : kLatencyPercentiles) {
+        const auto value = hdr_value_at_percentile(hist, percentile);
+        // If the percentile is an integer, print it as an integer, otherwise print it as a double
+        if (std::trunc(percentile) == percentile) {
+          stats.emplace_back(absl::StrFormat("p%d=%d", static_cast<int64_t>(percentile), value));
+        } else {
+          stats.emplace_back(absl::StrFormat("p%g=%d", percentile, value));
+        }
+      }
+
+      append(absl::StrFormat("latency_percentiles_usec_%s", cmd_name), absl::StrJoin(stats, ","));
+    }
   }
 
   return info;
