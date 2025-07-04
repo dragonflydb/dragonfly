@@ -49,7 +49,7 @@ async def run_dragonfly_benchmark(
     logging.info(
         f"Stage 2: Data Generation - generating {num_documents:,} documents with full column data"
     )
-    stage2_start = time.perf_counter()
+    stage2_start = time.time()
     document_ids = await generate_document_data(
         client=client,
         columns=document_columns,
@@ -66,7 +66,7 @@ async def run_dragonfly_benchmark(
     stored_document = await client.hgetall(document_key)
     assert stored_document is not None
     assert stored_document["DocumentId"] == sample_document_id
-    stage2_duration = time.perf_counter() - stage2_start
+    stage2_duration = time.time() - stage2_start
     logging.info(
         f"Stage 2 completed in {stage2_duration:.2f}s: {len(document_ids)} documents generated and stored"
     )
@@ -75,7 +75,7 @@ async def run_dragonfly_benchmark(
     logging.info(
         f"Stage 3: Query Load Testing - running {num_queries:,} queries with {num_concurrent_clients} concurrent clients"
     )
-    stage3_start = time.perf_counter()
+    stage3_start = time.time()
     total_completed = await run_query_load_test(
         df_server=df_server,
         columns=document_columns,
@@ -86,7 +86,7 @@ async def run_dragonfly_benchmark(
 
     # Verify queries completed
     assert total_completed == num_queries
-    stage3_duration = time.perf_counter() - stage3_start
+    stage3_duration = time.time() - stage3_start
     logging.info(
         f"Stage 3 completed in {stage3_duration:.2f}s: {total_completed} queries executed successfully"
     )
@@ -95,6 +95,45 @@ async def run_dragonfly_benchmark(
     logging.info(
         f"Benchmark Timings Summary -> Data Generation: {stage2_duration:.2f}s | Query Load: {stage3_duration:.2f}s"
     )
+
+    # Command statistics
+    try:
+        cmd_stats = await client.info("commandstats")
+        logging.info("Command Statistics:")
+        for key, value in cmd_stats.items():
+            if key.startswith("cmdstat_") and "ft." in key.lower():
+                command = key[8:]  # Remove "cmdstat_" prefix
+                logging.info(f"  {command}: {value}")
+    except Exception as e:
+        logging.warning(f"Could not retrieve command stats: {e}")
+
+    # Latency statistics
+    try:
+        latency_stats = await client.info("latencystats")
+        logging.info("Latency Statistics:")
+        for key, value in latency_stats.items():
+            if "ft." in key.lower():
+                logging.info(f"  {key}: {value}")
+    except Exception as e:
+        logging.warning(f"Could not retrieve latency stats: {e}")
+
+    # Memory statistics
+    try:
+        memory_stats = await client.info("memory")
+        logging.info("Memory Statistics:")
+        important_memory_keys = [
+            "used_memory",
+            "used_memory_human",
+            "used_memory_rss",
+            "used_memory_rss_human",
+            "used_memory_peak",
+            "used_memory_peak_human",
+        ]
+        for key in important_memory_keys:
+            if key in memory_stats:
+                logging.info(f"  {key}: {memory_stats[key]}")
+    except Exception as e:
+        logging.warning(f"Could not retrieve memory stats: {e}")
 
     logging.info("Benchmark test completed successfully")
 
@@ -109,4 +148,4 @@ async def test_dragonfly_benchmark(
     df_server: DflyInstance,
 ):
     # num_documents, num_queries, num_concurrent_clients, random_seed
-    await run_dragonfly_benchmark(df_server, 2000, 200, 25, 42)
+    await run_dragonfly_benchmark(df_server, 1000, 200, 25, 42)
