@@ -4,7 +4,7 @@ import random
 import string
 import uuid
 import math
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from redis import asyncio as aioredis
 from redis.commands.search.query import Query
 
@@ -13,148 +13,29 @@ def set_random_seed(seed: int = 42):
     random.seed(seed)
 
 
-class DragonFlyColumnTypes:
-    NUMERIC = "NUMERIC"
-    TAG = "TAG"
-    TEXT = "TEXT"
-
-
-class ServerTypes:
-    UNIQUE_IDENTIFIER = "uniqueidentifier"
-    INT = "int"
-    BIT = "bit"
-    NVARCHAR = "nvarchar"
-    MONEY = "money"
-    DATETIME = "datetime"
-    FLOAT = "float"
-    BIGINT = "bigint"
-
-
 INDEX_KEY = "idx:AccountBase"
 ACCOUNT_KEY = "AccountBase:{accountId}"
 
 
-def generate_account_columns(num_columns: int = 1024) -> List[Dict[str, str]]:
-    max_text_fields = 128
-
-    server_types = [
-        ServerTypes.NVARCHAR,
-        ServerTypes.INT,
-        ServerTypes.BIT,
-        ServerTypes.UNIQUE_IDENTIFIER,
-        ServerTypes.MONEY,
-        ServerTypes.DATETIME,
-        ServerTypes.FLOAT,
-        ServerTypes.BIGINT,
-    ]
-
-    columns = []
-    # Track generated names to guarantee uniqueness
-    existing_names: set[str] = set()
-    text_field_count = 0
-
-    # Add some standard columns
-    standard_columns = [
-        {"COLUMN_NAME": "AccountId", "TYPE_NAME": ServerTypes.UNIQUE_IDENTIFIER},
-        {"COLUMN_NAME": "Name", "TYPE_NAME": ServerTypes.NVARCHAR},
-        {"COLUMN_NAME": "AccountNumber", "TYPE_NAME": ServerTypes.NVARCHAR},
-        {"COLUMN_NAME": "Revenue", "TYPE_NAME": ServerTypes.MONEY},
-        {"COLUMN_NAME": "NumberOfEmployees", "TYPE_NAME": ServerTypes.INT},
-        {"COLUMN_NAME": "CreatedOn", "TYPE_NAME": ServerTypes.DATETIME},
-        {"COLUMN_NAME": "ModifiedOn", "TYPE_NAME": ServerTypes.DATETIME},
-        {"COLUMN_NAME": "IsPrivate", "TYPE_NAME": ServerTypes.BIT},
-        {"COLUMN_NAME": "StateCode", "TYPE_NAME": ServerTypes.INT},
-        {"COLUMN_NAME": "StatusCode", "TYPE_NAME": ServerTypes.INT},
-    ]
-
-    columns.extend(standard_columns)
-    existing_names.update(col["COLUMN_NAME"] for col in standard_columns)
-
-    for col in standard_columns:
-        if col["TYPE_NAME"] in [ServerTypes.NVARCHAR]:
-            text_field_count += 1
-
-    while len(columns) < num_columns:
-        candidate_name = (
-            f"lv_{''.join(random.choices(string.ascii_lowercase, k=random.randint(5, 15)))}"
-        )
-
-        # Ensure the column name is unique
-        if candidate_name in existing_names:
-            continue
-
-        if text_field_count > max_text_fields - 1:
-            non_text_types = [t for t in server_types if t not in [ServerTypes.NVARCHAR]]
-            column_type = random.choice(non_text_types)
-        else:
-            column_type = random.choice(server_types)
-            if column_type in [ServerTypes.NVARCHAR]:
-                text_field_count += 1
-
-        columns.append({"COLUMN_NAME": candidate_name, "TYPE_NAME": column_type})
-        existing_names.add(candidate_name)
-
-    logging.info(f"Created {len(columns)} columns, with {text_field_count} TEXT fields")
-
-    return columns
-
-
-def map_server_type_to_dragonfly_type(server_type: str) -> str:
-    mapping = {
-        ServerTypes.UNIQUE_IDENTIFIER: DragonFlyColumnTypes.TAG,
-        ServerTypes.INT: DragonFlyColumnTypes.NUMERIC,
-        ServerTypes.BIT: DragonFlyColumnTypes.NUMERIC,
-        ServerTypes.NVARCHAR: DragonFlyColumnTypes.TEXT,
-        ServerTypes.MONEY: DragonFlyColumnTypes.NUMERIC,
-        ServerTypes.DATETIME: DragonFlyColumnTypes.NUMERIC,
-        ServerTypes.FLOAT: DragonFlyColumnTypes.NUMERIC,
-        ServerTypes.BIGINT: DragonFlyColumnTypes.NUMERIC,
-    }
-
-    if server_type not in mapping:
-        raise ValueError(f"Unknown Server type: {server_type}")
-
-    return mapping[server_type]
-
-
-async def create_search_index(client: aioredis.Redis, columns: List[Dict[str, str]]) -> None:
-    # Map columns to Dragonfly types
-    column_name_to_dragonfly_type = {}
-    text_field_count = 0
-
-    for column in columns:
-        dragonfly_type = map_server_type_to_dragonfly_type(column["TYPE_NAME"])
-        column_name_to_dragonfly_type[column["COLUMN_NAME"]] = dragonfly_type
-
-        if dragonfly_type == DragonFlyColumnTypes.TEXT:
-            text_field_count += 1
-
-    # Check TEXT field limit
-    if text_field_count > 128:
-        raise ValueError(
-            f"Too many TEXT fields: {text_field_count}. RediSearch supports a maximum of 128 TEXT fields."
-        )
-
-    logging.info(
-        f"Creating index with {len(columns)} columns, including {text_field_count} TEXT fields"
-    )
-
-    # Build schema command
-    dragonfly_columns = " ".join(
-        [
-            f"{column_name} {dragonfly_type}"
-            for column_name, dragonfly_type in column_name_to_dragonfly_type.items()
-        ]
-    )
-
-    schema_create_command = (
-        f"FT.CREATE {INDEX_KEY} ON HASH PREFIX 1 AccountBase: SCHEMA {dragonfly_columns}"
-    )
-    await client.execute_command(schema_create_command)
-
-
-def get_column_name_to_type_mapping(columns: List[Dict[str, str]]) -> Dict[str, str]:
-    return {column["COLUMN_NAME"]: column["TYPE_NAME"] for column in columns}
+# Simple data types for generation
+COLUMN_TYPES = {
+    "TEXT": {
+        "dragonfly_type": "TEXT",
+        "generator": lambda: random.choice(PRE_GENERATED_STRINGS),
+    },
+    "NUMERIC": {
+        "dragonfly_type": "NUMERIC",
+        "generator": lambda: random.randint(1, 100),
+    },
+    "TAG": {
+        "dragonfly_type": "TAG",
+        "generator": lambda: random.choice(PRE_GENERATED_UIDS),
+    },
+    "BIT": {
+        "dragonfly_type": "NUMERIC",
+        "generator": lambda: random.choice([0, 1]),
+    },
+}
 
 
 PRE_GENERATED_STRINGS = []
@@ -179,40 +60,19 @@ def _initialize_pre_generated_data(size: int):
     PRE_GENERATED_UIDS.extend([str(uuid.uuid4()) for _ in range(size)])
 
 
-def generate_property_value(column_type: str):
-    if column_type in [ServerTypes.NVARCHAR]:
-        return random.choice(PRE_GENERATED_STRINGS)
-    elif column_type in [
-        ServerTypes.INT,
-        ServerTypes.MONEY,
-        ServerTypes.DATETIME,
-        ServerTypes.FLOAT,
-        ServerTypes.BIGINT,
-    ]:
-        return random.randint(1, 100)
-    elif column_type == ServerTypes.BIT:
-        return random.choice([0, 1])
-    elif column_type == ServerTypes.UNIQUE_IDENTIFIER:
-        return random.choice(PRE_GENERATED_UIDS)
-    else:
-        raise NotImplementedError(
-            f"Type {column_type} is not implemented in generate_property_value"
-        )
-
-
 async def generate_account_data(
     client: aioredis.Redis,
-    column_mappings: Dict[str, str],
-    num_accounts: int = 10000,  # Default for quick testing
-    chunk_size: int = 1000,  # Chunk size for batch processing
+    columns: List[Tuple[str, str]],
+    num_accounts: int = 10000,
+    chunk_size: int = 1000,
 ) -> List[str]:
-    # Initialize pre-generated data with required size
+    # Initialize pre-generated data
     _initialize_pre_generated_data(num_accounts)
 
     # Generate account IDs
     account_ids = [str(uuid.uuid4()) for _ in range(num_accounts)]
 
-    # Process accounts in chunks for better performance
+    # Process in chunks for better performance
     chunks_count = math.ceil(num_accounts / chunk_size)
 
     tasks = []
@@ -221,19 +81,15 @@ async def generate_account_data(
         end_idx = min((chunk_number + 1) * chunk_size, num_accounts)
         chunk_account_ids = account_ids[start_idx:end_idx]
 
-        task = asyncio.create_task(
-            _generate_accounts_chunk(client, chunk_account_ids, column_mappings)
-        )
+        task = asyncio.create_task(_generate_accounts_chunk(client, chunk_account_ids, columns))
         tasks.append(task)
 
-    # Wait for all chunks to complete
     await asyncio.gather(*tasks)
-
     return account_ids
 
 
 async def _generate_accounts_chunk(
-    client: aioredis.Redis, account_ids: List[str], column_mappings: Dict[str, str]
+    client: aioredis.Redis, account_ids: List[str], columns: List[Tuple[str, str]]
 ):
     pipeline = client.pipeline()
 
@@ -241,11 +97,11 @@ async def _generate_accounts_chunk(
         account = {"AccountId": account_id}
 
         # Generate values for all columns except AccountId
-        for column_name, column_type in column_mappings.items():
+        for column_name, column_type in columns:
             if column_name == "AccountId":
                 continue
 
-            value = generate_property_value(column_type)
+            value = COLUMN_TYPES[column_type]["generator"]()
             if value is not None:
                 account[column_name] = value
 
@@ -255,48 +111,41 @@ async def _generate_accounts_chunk(
     await pipeline.execute()
 
 
-def generate_search_query(column_mappings: Dict[str, str], account_ids: List[str]) -> Query:
-    columns = list(column_mappings.keys())
+def generate_search_query(columns: List[Tuple[str, str]], account_ids: List[str]) -> Query:
+    column_names = [name for name, _ in columns]
 
-    if random.random() < 0.1:
-        num_columns = random.randint(1, min(500, len(columns)))
-        selected_columns = random.sample(columns, num_columns)
-        filter_string = "*"
+    if random.random() < 0.5:
+        num_columns = random.randint(len(column_names) // 2, len(column_names))
+        selected_columns = random.sample(column_names, num_columns)
 
-        query = Query(filter_string).return_fields(*selected_columns)
+        query = Query("*").return_fields(*selected_columns)
         query = query.paging(0, 50)
         return query
 
-    reliable_filter_columns = [
-        col
-        for col, col_type in column_mappings.items()
-        if col_type in [ServerTypes.INT, ServerTypes.BIT, ServerTypes.MONEY]
-    ]
+    reliable_filter_columns = [name for name, col_type in columns if col_type in ["NUMERIC", "BIT"]]
 
-    num_columns = random.randint(1, min(500, len(columns)))
-    selected_columns = random.sample(columns, num_columns)
+    num_columns = random.randint(len(column_names) // 2, len(column_names))
+    selected_columns = random.sample(column_names, num_columns)
 
     if reliable_filter_columns and random.random() < 0.5:
         filter_column = random.choice(reliable_filter_columns)
-        filter_str = create_simple_numeric_filter(filter_column, column_mappings[filter_column])
+        filter_column_type = next(col_type for name, col_type in columns if name == filter_column)
+        filter_str = create_simple_numeric_filter(filter_column, filter_column_type)
         filter_string = filter_str if filter_str else "*"
     else:
         filter_string = "*"
 
     query = Query(filter_string).return_fields(*selected_columns)
     query = query.paging(0, 50)
-
     return query
 
 
 def create_simple_numeric_filter(property_name: str, property_type: str) -> str:
-    if property_type == ServerTypes.INT:
+    if property_type == "NUMERIC":
         return f"@{property_name}: [1 100]"
-    elif property_type == ServerTypes.BIT:
+    elif property_type == "BIT":
         bit_value = random.choice([0, 1])
         return f"@{property_name}: [{bit_value} {bit_value}]"
-    elif property_type == ServerTypes.MONEY:
-        return f"@{property_name}: [1 1000]"
     else:
         return "*"
 
@@ -304,11 +153,10 @@ def create_simple_numeric_filter(property_name: str, property_type: str) -> str:
 async def run_query_agent(
     agent_id: int,
     df_server,
-    column_mappings: Dict[str, str],
+    columns: List[Tuple[str, str]],
     account_ids: List[str],
     num_queries: int,
 ) -> int:
-    # Create a dedicated client for this agent to avoid contention
     client = df_server.client()
 
     query_count = 0
@@ -317,7 +165,7 @@ async def run_query_agent(
     try:
         for i in range(num_queries):
             try:
-                query = generate_search_query(column_mappings, account_ids)
+                query = generate_search_query(columns, account_ids)
                 results = await client.ft(INDEX_KEY).search(query)
                 success_count += 1
 
@@ -339,7 +187,7 @@ async def run_query_agent(
 
 async def run_query_load_test(
     df_server,
-    column_mappings: Dict[str, str],
+    columns: List[Tuple[str, str]],
     account_ids: List[str],
     total_queries: int = 1000,
     num_agents: int = 50,
@@ -349,12 +197,86 @@ async def run_query_load_test(
     tasks = []
     for agent_id in range(num_agents):
         task = asyncio.create_task(
-            run_query_agent(agent_id, df_server, column_mappings, account_ids, queries_per_agent)
+            run_query_agent(agent_id, df_server, columns, account_ids, queries_per_agent)
         )
         tasks.append(task)
 
-    # Wait for all agents to complete
     results = await asyncio.gather(*tasks)
     total_completed = sum(results)
-
     return total_completed
+
+
+def generate_account_columns(num_columns: int = 1024) -> List[Tuple[str, str]]:
+    max_text_fields = 128
+
+    # Available types for generation
+    available_types = ["TEXT", "NUMERIC", "BIT", "TAG"]
+
+    columns = []
+    existing_names = set()
+    text_field_count = 0
+
+    # Standard columns
+    standard_columns = [
+        ("AccountId", "TAG"),
+        ("Name", "TEXT"),
+        ("AccountNumber", "TEXT"),
+        ("Revenue", "NUMERIC"),
+        ("NumberOfEmployees", "NUMERIC"),
+        ("CreatedOn", "NUMERIC"),
+        ("ModifiedOn", "NUMERIC"),
+        ("IsPrivate", "BIT"),
+        ("StateCode", "NUMERIC"),
+        ("StatusCode", "NUMERIC"),
+    ]
+
+    columns.extend(standard_columns)
+    existing_names.update(name for name, _ in standard_columns)
+    text_field_count = sum(1 for _, col_type in standard_columns if col_type == "TEXT")
+
+    while len(columns) < num_columns:
+        # Generate unique name
+        candidate_name = (
+            f"lv_{''.join(random.choices(string.ascii_lowercase, k=random.randint(5, 15)))}"
+        )
+
+        if candidate_name in existing_names:
+            continue
+
+        # Choose type
+        if text_field_count >= max_text_fields:
+            column_type = random.choice([t for t in available_types if t != "TEXT"])
+        else:
+            column_type = random.choice(available_types)
+            if column_type == "TEXT":
+                text_field_count += 1
+
+        columns.append((candidate_name, column_type))
+        existing_names.add(candidate_name)
+
+    logging.info(f"Created {len(columns)} columns, with {text_field_count} TEXT fields")
+    return columns
+
+
+async def create_search_index(client: aioredis.Redis, columns: List[Tuple[str, str]]) -> None:
+    text_field_count = sum(1 for _, col_type in columns if col_type == "TEXT")
+
+    if text_field_count > 128:
+        raise ValueError(
+            f"Too many TEXT fields: {text_field_count}. RediSearch supports a maximum of 128 TEXT fields."
+        )
+
+    logging.info(
+        f"Creating index with {len(columns)} columns, including {text_field_count} TEXT fields"
+    )
+
+    # Create schema directly
+    schema_parts = []
+    for name, col_type in columns:
+        dragonfly_type = COLUMN_TYPES[col_type]["dragonfly_type"]
+        schema_parts.append(f"{name} {dragonfly_type}")
+
+    schema_create_command = (
+        f"FT.CREATE {INDEX_KEY} ON HASH PREFIX 1 AccountBase: SCHEMA {' '.join(schema_parts)}"
+    )
+    await client.execute_command(schema_create_command)

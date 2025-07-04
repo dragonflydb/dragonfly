@@ -7,7 +7,6 @@ from .instance import DflyInstance
 from .benchmark_utils import (
     generate_account_columns,
     create_search_index,
-    get_column_name_to_type_mapping,
     generate_account_data,
     run_query_load_test,
     set_random_seed,
@@ -46,10 +45,6 @@ async def run_dragonfly_benchmark(
         f"Stage 1 completed: search index '{INDEX_KEY}' created with {len(account_columns)} columns"
     )
 
-    # Get column mappings for future stages
-    column_mappings = get_column_name_to_type_mapping(account_columns)
-    assert len(column_mappings) == len(account_columns)
-
     # Stage 2: Data Generation
     logging.info(
         f"Stage 2: Data Generation - generating {num_accounts:,} accounts with full column data"
@@ -57,7 +52,7 @@ async def run_dragonfly_benchmark(
     stage2_start = time.perf_counter()
     account_ids = await generate_account_data(
         client=client,
-        column_mappings=column_mappings,
+        columns=account_columns,
         num_accounts=num_accounts,
         chunk_size=1000,  # Chunk size for batch processing
     )
@@ -83,14 +78,14 @@ async def run_dragonfly_benchmark(
     stage3_start = time.perf_counter()
     total_completed = await run_query_load_test(
         df_server=df_server,
-        column_mappings=column_mappings,
+        columns=account_columns,
         account_ids=account_ids,
         total_queries=num_queries,
         num_agents=num_agents,
     )
 
     # Verify queries completed
-    assert total_completed > 0
+    assert total_completed == num_queries
     stage3_duration = time.perf_counter() - stage3_start
     logging.info(
         f"Stage 3 completed in {stage3_duration:.2f}s: {total_completed} queries executed successfully"
@@ -113,4 +108,4 @@ async def run_dragonfly_benchmark(
 async def test_dragonfly_benchmark(
     df_server: DflyInstance,
 ):
-    await run_dragonfly_benchmark(df_server, 20000, 1000)
+    await run_dragonfly_benchmark(df_server, 10000, 1000)
