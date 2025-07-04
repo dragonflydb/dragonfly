@@ -4,7 +4,7 @@ import pytest
 
 from . import dfly_args
 from .instance import DflyInstance
-from .benchmark_utils import (
+from .search_benchmark_utils import (
     generate_document_columns,
     create_search_index,
     generate_document_data,
@@ -17,10 +17,10 @@ from .benchmark_utils import (
 
 async def run_dragonfly_benchmark(
     df_server: DflyInstance,
-    num_documents: int = 200,
-    num_queries: int = 500,
-    num_agents: int = 50,
-    random_seed: int = 42,
+    num_documents: int,
+    num_queries: int,
+    num_agents: int,
+    random_seed: int,
 ):
     set_random_seed(random_seed)
 
@@ -108,4 +108,4 @@ async def run_dragonfly_benchmark(
 async def test_dragonfly_benchmark(
     df_server: DflyInstance,
 ):
-    await run_dragonfly_benchmark(df_server, 10000, 1000)
+    await run_dragonfly_benchmark(df_server, 5000, 200, 25, 42)

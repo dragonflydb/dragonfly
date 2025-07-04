@@ -9,7 +9,7 @@ from redis import asyncio as aioredis
 from redis.commands.search.query import Query
 
 
-def set_random_seed(seed: int = 42):
+def set_random_seed(seed: int):
     random.seed(seed)
 
 
@@ -63,7 +63,7 @@ def _initialize_pre_generated_data(size: int):
 async def generate_document_data(
     client: aioredis.Redis,
     columns: List[Tuple[str, str]],
-    num_documents: int = 10000,
+    num_documents: int,
     chunk_size: int = 1000,
 ) -> List[str]:
     # Initialize pre-generated data
