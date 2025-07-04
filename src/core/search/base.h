@@ -39,11 +39,7 @@ struct QueryParams {
 };
 
 // Values are either sortable as doubles or strings, or not sortable at all.
-// Contrary to ResultScore it doesn't include KNN results and is not optimized for smaller struct
-// size.
 using SortableValue = std::variant<std::monostate, double, std::string>;
-
-using ResultScore = SortableValue;
 
 // Interface for accessing document values with different data structures underneath.
 struct DocumentAccessor {
@@ -90,7 +86,8 @@ struct BaseIndex {
 // Base class for type-specific sorting indices.
 struct BaseSortIndex : BaseIndex {
   virtual SortableValue Lookup(DocId doc) const = 0;
-  virtual std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const = 0;
+  virtual std::vector<SortableValue> Sort(std::vector<DocId>* ids, size_t limit,
+                                          bool desc) const = 0;
 };
 
 /* Used for converting field values to double. Returns std::nullopt if the conversion fails */

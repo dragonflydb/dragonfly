@@ -12,14 +12,11 @@
 #include "absl/strings/str_cat.h"
 #include "base/logging.h"
 #include "core/overloaded.h"
-#include "core/search/base.h"
 #include "core/search/indices.h"
-#include "core/search/search.h"
 #include "server/engine_shard_set.h"
 #include "server/family_utils.h"
 #include "server/search/doc_accessors.h"
 #include "server/server_state.h"
-#include "server/tx_base.h"
 
 namespace dfly {
 
@@ -345,7 +342,7 @@ std::vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(
       continue;
     auto& first_val = val.begin()->second;
 
-    // Check if extracted value is better than the worst (q.top())
+    // Check if the extracted value is better than the worst (q.top())
     if (q.size() < limit || comp(first_val, q.top().first)) {
       if (q.size() >= limit)
         q.pop();
@@ -353,7 +350,7 @@ std::vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(
     }
   }
 
-  // Reorder ids and collect sortable
+  // Reorder ids and collect scores
   vector<search::SortableValue> out(q.size());
   for (int i = 0; !q.empty(); i++) {
     auto [v, id] = q.top();
@@ -393,9 +390,9 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
     // If we sorted with knn_scores present, rearrange them
     if (!sort_scores.empty() && !result.knn_scores.empty()) {
-      unordered_map<DocId, size_t> knn_scores(result.knn_scores.begin(), result.knn_scores.end());
+      unordered_map<DocId, size_t> score_lookup(result.knn_scores.begin(), result.knn_scores.end());
       for (size_t i = 0; i < min(limit, result.ids.size()); i++)
-        result.knn_scores[i] = {result.ids[i], knn_scores[result.ids[i]]};
+        result.knn_scores[i] = {result.ids[i], score_lookup[result.ids[i]]};
     }
   }
 

@@ -809,18 +809,22 @@ TEST_P(SortTest, BasicSort) {
     params.emplace_back("sortable");
   Run(params);
 
-  for (size_t i = 0; i < 100; i++)
+  size_t num_docs = 100;
+  for (size_t i = 0; i < num_docs; i++)
     Run({"hset", absl::StrCat("d:", i), "ord", absl::StrCat(i)});
 
-  // Sort ranges of 23 elements
-  for (size_t i = 0; i < 77; i++)
-    EXPECT_THAT(Run({"ft.search", "i1", "*", "SORTBY", "ord", "LIMIT", to_string(i), "23"}),
-                AreRange(100, i, i + 23, "d:"));
+  // Check SORTBY in ASC and DESC mode with different LIMIT parameters
+  for (int take = 17; take < 35; take += 7) {
+    for (size_t i = 0; i < num_docs - take; i++)
+      EXPECT_THAT(
+          Run({"ft.search", "i1", "*", "SORTBY", "ord", "LIMIT", to_string(i), to_string(take)}),
+          AreRange(num_docs, i, i + take, "d:"));
 
-  // Sort ranges of 27 elements in reverse
-  for (size_t i = 0; i < 73; i++)
-    EXPECT_THAT(Run({"ft.search", "i1", "*", "SORTBY", "ord", "DESC", "LIMIT", to_string(i), "27"}),
-                AreRange(100, 100 - i, 100 - i - 27, "d:"));
+    for (size_t i = 0; i < num_docs - take; i++)
+      EXPECT_THAT(Run({"ft.search", "i1", "*", "SORTBY", "ord", "DESC", "LIMIT", to_string(i),
+                       to_string(take)}),
+                  AreRange(num_docs, num_docs - i, num_docs - i - take, "d:"));
+  }
 
   params = {"ft.create", "i2", "prefix", "1", "d2:", "schema", "name", "text"};
   if (GetParam())
