@@ -37,8 +37,10 @@ void RangeTree::Add(DocId id, double value) {
   auto it = FindRangeBlock(value);
   RangeBlock& block = it->second;
 
-  [[maybe_unused]] auto insert_result = block.Insert({id, value});
-  DCHECK(insert_result);
+  auto insert_result = block.Insert({id, value});
+  LOG_IF(ERROR, !insert_result) << "RangeTree: Failed to insert id: " << id << ", value: " << value
+                                << " into block with range [" << it->first.first << ", "
+                                << it->first.second << ")";
 
   if (block.Size() <= max_range_block_size_) {
     return;
@@ -53,8 +55,10 @@ void RangeTree::Remove(DocId id, double value) {
   auto it = FindRangeBlock(value);
   RangeBlock& block = it->second;
 
-  [[maybe_unused]] auto remove_result = block.Remove({id, value});
-  DCHECK(remove_result);
+  auto remove_result = block.Remove({id, value});
+  LOG_IF(ERROR, !remove_result) << "RangeTree: Failed to remove id: " << id << ", value: " << value
+                                << " from block with range [" << it->first.first << ", "
+                                << it->first.second << ")";
 
   // TODO: maybe merging blocks if they are too small
   // The problem that for each mutable operation we do Remove and then Add,
