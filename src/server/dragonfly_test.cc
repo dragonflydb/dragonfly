@@ -28,6 +28,7 @@ ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
 ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
 ABSL_DECLARE_FLAG(double, eviction_memory_budget_threshold);
 ABSL_DECLARE_FLAG(std::vector<std::string>, command_alias);
+ABSL_DECLARE_FLAG(bool, latency_tracking);
 
 namespace dfly {
 
@@ -887,7 +888,8 @@ TEST_F(DflyEngineTest, CommandMetricLabels) {
 class DflyCommandAliasTest : public DflyEngineTest {
  protected:
   DflyCommandAliasTest() {
-    absl::SetFlag(&FLAGS_command_alias, {"___set=set", "___ping=ping"});
+    SetFlag(&FLAGS_command_alias, {"___set=set", "___ping=ping"});
+    SetFlag(&FLAGS_latency_tracking, true);
   }
 
   absl::FlagSaver saver_;

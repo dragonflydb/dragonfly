@@ -32,6 +32,8 @@ ABSL_FLAG(vector<string>, command_alias, {},
           "Add an alias for given command(s), format is: <alias>=<original>, <alias>=<original>. "
           "Aliases must be set identically on replicas, if applicable");
 
+ABSL_FLAG(bool, latency_tracking, false, "If true, track latency for commands");
+
 namespace dfly {
 
 using namespace facade;
@@ -188,9 +190,11 @@ uint64_t CommandId::Invoke(CmdArgList args, const CommandContext& cmd_cntx) cons
 
   ++ent.first;
   ent.second += execution_time_usec;
-
-  if (hdr_histogram* cmd_histogram = latency_histogram_; cmd_histogram != nullptr) {
-    hdr_record_value(cmd_histogram, execution_time_usec);
+  static const bool is_latency_tracked = GetFlag(FLAGS_latency_tracking);
+  if (is_latency_tracked) {
+    if (hdr_histogram* cmd_histogram = latency_histogram_; cmd_histogram != nullptr) {
+      hdr_record_value(cmd_histogram, execution_time_usec);
+    }
   }
   return execution_time_usec;
 }
