@@ -599,7 +599,7 @@ void SearchReply(const SearchParams& params,
     docs.resize(min(docs.size(), knn_sort_option->limit));
 
     ignore_sort = !params.sort_option || params.sort_option->IsSame(*knn_sort_option);
-    if (!knn_sort_option->score_field_alias.empty())
+    if (params.ShouldReturnField(knn_sort_option->score_field_alias))
       knn_score_ret_field = knn_sort_option->score_field_alias;
   }
 
