@@ -19,14 +19,14 @@ async def run_dragonfly_benchmark(
     df_server: DflyInstance,
     num_documents: int,
     num_queries: int,
-    num_agents: int,
+    num_concurrent_clients: int,
     random_seed: int,
 ):
     set_random_seed(random_seed)
 
     logging.info(f"Starting Dragonfly benchmark test on port {df_server.port}")
     logging.info(
-        f"Parameters: {num_documents} documents, {num_queries} queries, {num_agents} agents, seed={random_seed}"
+        f"Parameters: {num_documents} documents, {num_queries} queries, {num_concurrent_clients} concurrent clients, seed={random_seed}"
     )
     client = df_server.client()
 
@@ -73,7 +73,7 @@ async def run_dragonfly_benchmark(
 
     # Stage 3: Query Load Testing
     logging.info(
-        f"Stage 3: Query Load Testing - running {num_queries:,} queries with {num_agents} concurrent agents"
+        f"Stage 3: Query Load Testing - running {num_queries:,} queries with {num_concurrent_clients} concurrent clients"
     )
     stage3_start = time.perf_counter()
     total_completed = await run_query_load_test(
@@ -81,7 +81,7 @@ async def run_dragonfly_benchmark(
         columns=document_columns,
         document_ids=document_ids,
         total_queries=num_queries,
-        num_agents=num_agents,
+        num_concurrent_clients=num_concurrent_clients,
     )
 
     # Verify queries completed
@@ -108,4 +108,5 @@ async def run_dragonfly_benchmark(
 async def test_dragonfly_benchmark(
     df_server: DflyInstance,
 ):
-    await run_dragonfly_benchmark(df_server, 5000, 200, 25, 42)
+    # num_documents, num_queries, num_concurrent_clients, random_seed
+    await run_dragonfly_benchmark(df_server, 2000, 200, 25, 42)

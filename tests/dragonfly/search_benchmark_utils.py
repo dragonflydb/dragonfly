@@ -4,7 +4,7 @@ import random
 import string
 import uuid
 import math
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 from redis import asyncio as aioredis
 from redis.commands.search.query import Query
 
@@ -150,8 +150,8 @@ def create_simple_numeric_filter(property_name: str, property_type: str) -> str:
         return "*"
 
 
-async def run_query_agent(
-    agent_id: int,
+async def run_query_client(
+    client_id: int,
     df_server,
     columns: List[Tuple[str, str]],
     document_ids: List[str],
@@ -170,7 +170,7 @@ async def run_query_agent(
                 success_count += 1
 
             except Exception as e:
-                logging.error(f"Agent {agent_id}: ERROR in query {i}: {e}")
+                logging.error(f"Client {client_id}: ERROR in query {i}: {e}")
 
             query_count += 1
 
@@ -178,7 +178,7 @@ async def run_query_agent(
         if query_count > 0:
             final_success_rate = (success_count / query_count) * 100
             logging.info(
-                f"Agent {agent_id} completed: {success_count}/{query_count} successful queries ({final_success_rate:.1f}%)"
+                f"Client {client_id} completed: {success_count}/{query_count} successful queries ({final_success_rate:.1f}%)"
             )
         await client.aclose()
 
@@ -189,15 +189,15 @@ async def run_query_load_test(
     df_server,
     columns: List[Tuple[str, str]],
     document_ids: List[str],
-    total_queries: int = 1000,
-    num_agents: int = 50,
+    total_queries: int,
+    num_concurrent_clients: int,
 ) -> int:
-    queries_per_agent = total_queries // num_agents
+    queries_per_client = total_queries // num_concurrent_clients
 
     tasks = []
-    for agent_id in range(num_agents):
+    for client_id in range(num_concurrent_clients):
         task = asyncio.create_task(
-            run_query_agent(agent_id, df_server, columns, document_ids, queries_per_agent)
+            run_query_client(client_id, df_server, columns, document_ids, queries_per_client)
         )
         tasks.append(task)
 
