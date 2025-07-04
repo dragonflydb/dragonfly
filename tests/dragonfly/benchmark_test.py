@@ -5,19 +5,19 @@ import pytest
 from . import dfly_args
 from .instance import DflyInstance
 from .benchmark_utils import (
-    generate_account_columns,
+    generate_document_columns,
     create_search_index,
-    generate_account_data,
+    generate_document_data,
     run_query_load_test,
     set_random_seed,
     INDEX_KEY,
-    ACCOUNT_KEY,
+    DOCUMENT_KEY,
 )
 
 
 async def run_dragonfly_benchmark(
     df_server: DflyInstance,
-    num_accounts: int = 200,
+    num_documents: int = 200,
     num_queries: int = 500,
     num_agents: int = 50,
     random_seed: int = 42,
@@ -26,7 +26,7 @@ async def run_dragonfly_benchmark(
 
     logging.info(f"Starting Dragonfly benchmark test on port {df_server.port}")
     logging.info(
-        f"Parameters: {num_accounts} accounts, {num_queries} queries, {num_agents} agents, seed={random_seed}"
+        f"Parameters: {num_documents} documents, {num_queries} queries, {num_agents} agents, seed={random_seed}"
     )
     client = df_server.client()
 
@@ -35,40 +35,40 @@ async def run_dragonfly_benchmark(
 
     # Stage 1: Schema Generation
     logging.info("Stage 1: Schema Generation - generating columns and creating search index")
-    account_columns = generate_account_columns()
-    await create_search_index(client, account_columns)
+    document_columns = generate_document_columns()
+    await create_search_index(client, document_columns)
 
     # Verify the index was created
     index_info = await client.execute_command(f"FT.INFO {INDEX_KEY}")
     assert index_info is not None
     logging.info(
-        f"Stage 1 completed: search index '{INDEX_KEY}' created with {len(account_columns)} columns"
+        f"Stage 1 completed: search index '{INDEX_KEY}' created with {len(document_columns)} columns"
     )
 
     # Stage 2: Data Generation
     logging.info(
-        f"Stage 2: Data Generation - generating {num_accounts:,} accounts with full column data"
+        f"Stage 2: Data Generation - generating {num_documents:,} documents with full column data"
     )
     stage2_start = time.perf_counter()
-    account_ids = await generate_account_data(
+    document_ids = await generate_document_data(
         client=client,
-        columns=account_columns,
-        num_accounts=num_accounts,
+        columns=document_columns,
+        num_documents=num_documents,
         chunk_size=1000,  # Chunk size for batch processing
     )
 
     # Verify data was generated
-    assert len(account_ids) == num_accounts
+    assert len(document_ids) == num_documents
 
-    # Verify some accounts were stored
-    sample_account_id = account_ids[0]
-    account_key = ACCOUNT_KEY.format(accountId=sample_account_id)
-    stored_account = await client.hgetall(account_key)
-    assert stored_account is not None
-    assert stored_account["AccountId"] == sample_account_id
+    # Verify some documents were stored
+    sample_document_id = document_ids[0]
+    document_key = DOCUMENT_KEY.format(documentId=sample_document_id)
+    stored_document = await client.hgetall(document_key)
+    assert stored_document is not None
+    assert stored_document["DocumentId"] == sample_document_id
     stage2_duration = time.perf_counter() - stage2_start
     logging.info(
-        f"Stage 2 completed in {stage2_duration:.2f}s: {len(account_ids)} accounts generated and stored"
+        f"Stage 2 completed in {stage2_duration:.2f}s: {len(document_ids)} documents generated and stored"
     )
 
     # Stage 3: Query Load Testing
@@ -78,8 +78,8 @@ async def run_dragonfly_benchmark(
     stage3_start = time.perf_counter()
     total_completed = await run_query_load_test(
         df_server=df_server,
-        columns=account_columns,
-        account_ids=account_ids,
+        columns=document_columns,
+        document_ids=document_ids,
         total_queries=num_queries,
         num_agents=num_agents,
     )

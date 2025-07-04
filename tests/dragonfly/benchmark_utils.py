@@ -13,8 +13,8 @@ def set_random_seed(seed: int = 42):
     random.seed(seed)
 
 
-INDEX_KEY = "idx:AccountBase"
-ACCOUNT_KEY = "AccountBase:{accountId}"
+INDEX_KEY = "idx:DocumentBase"
+DOCUMENT_KEY = "DocumentBase:{documentId}"
 
 
 # Simple data types for generation
@@ -60,58 +60,58 @@ def _initialize_pre_generated_data(size: int):
     PRE_GENERATED_UIDS.extend([str(uuid.uuid4()) for _ in range(size)])
 
 
-async def generate_account_data(
+async def generate_document_data(
     client: aioredis.Redis,
     columns: List[Tuple[str, str]],
-    num_accounts: int = 10000,
+    num_documents: int = 10000,
     chunk_size: int = 1000,
 ) -> List[str]:
     # Initialize pre-generated data
-    _initialize_pre_generated_data(num_accounts)
+    _initialize_pre_generated_data(num_documents)
 
-    # Generate account IDs
-    account_ids = [str(uuid.uuid4()) for _ in range(num_accounts)]
+    # Generate document IDs
+    document_ids = [str(uuid.uuid4()) for _ in range(num_documents)]
 
     # Process in chunks for better performance
-    chunks_count = math.ceil(num_accounts / chunk_size)
+    chunks_count = math.ceil(num_documents / chunk_size)
 
     tasks = []
     for chunk_number in range(chunks_count):
         start_idx = chunk_number * chunk_size
-        end_idx = min((chunk_number + 1) * chunk_size, num_accounts)
-        chunk_account_ids = account_ids[start_idx:end_idx]
+        end_idx = min((chunk_number + 1) * chunk_size, num_documents)
+        chunk_document_ids = document_ids[start_idx:end_idx]
 
-        task = asyncio.create_task(_generate_accounts_chunk(client, chunk_account_ids, columns))
+        task = asyncio.create_task(_generate_documents_chunk(client, chunk_document_ids, columns))
         tasks.append(task)
 
     await asyncio.gather(*tasks)
-    return account_ids
+    return document_ids
 
 
-async def _generate_accounts_chunk(
-    client: aioredis.Redis, account_ids: List[str], columns: List[Tuple[str, str]]
+async def _generate_documents_chunk(
+    client: aioredis.Redis, document_ids: List[str], columns: List[Tuple[str, str]]
 ):
     pipeline = client.pipeline()
 
-    for account_id in account_ids:
-        account = {"AccountId": account_id}
+    for document_id in document_ids:
+        document = {"DocumentId": document_id}
 
-        # Generate values for all columns except AccountId
+        # Generate values for all columns except DocumentId
         for column_name, column_type in columns:
-            if column_name == "AccountId":
+            if column_name == "DocumentId":
                 continue
 
             value = COLUMN_TYPES[column_type]["generator"]()
             if value is not None:
-                account[column_name] = value
+                document[column_name] = value
 
-        acc_key = ACCOUNT_KEY.format(accountId=account_id)
-        pipeline.hset(acc_key, mapping=account)
+        doc_key = DOCUMENT_KEY.format(documentId=document_id)
+        pipeline.hset(doc_key, mapping=document)
 
     await pipeline.execute()
 
 
-def generate_search_query(columns: List[Tuple[str, str]], account_ids: List[str]) -> Query:
+def generate_search_query(columns: List[Tuple[str, str]], document_ids: List[str]) -> Query:
     column_names = [name for name, _ in columns]
 
     if random.random() < 0.5:
@@ -154,7 +154,7 @@ async def run_query_agent(
     agent_id: int,
     df_server,
     columns: List[Tuple[str, str]],
-    account_ids: List[str],
+    document_ids: List[str],
     num_queries: int,
 ) -> int:
     client = df_server.client()
@@ -165,7 +165,7 @@ async def run_query_agent(
     try:
         for i in range(num_queries):
             try:
-                query = generate_search_query(columns, account_ids)
+                query = generate_search_query(columns, document_ids)
                 results = await client.ft(INDEX_KEY).search(query)
                 success_count += 1
 
@@ -188,7 +188,7 @@ async def run_query_agent(
 async def run_query_load_test(
     df_server,
     columns: List[Tuple[str, str]],
-    account_ids: List[str],
+    document_ids: List[str],
     total_queries: int = 1000,
     num_agents: int = 50,
 ) -> int:
@@ -197,7 +197,7 @@ async def run_query_load_test(
     tasks = []
     for agent_id in range(num_agents):
         task = asyncio.create_task(
-            run_query_agent(agent_id, df_server, columns, account_ids, queries_per_agent)
+            run_query_agent(agent_id, df_server, columns, document_ids, queries_per_agent)
         )
         tasks.append(task)
 
@@ -206,7 +206,7 @@ async def run_query_load_test(
     return total_completed
 
 
-def generate_account_columns(num_columns: int = 1024) -> List[Tuple[str, str]]:
+def generate_document_columns(num_columns: int = 1024) -> List[Tuple[str, str]]:
     max_text_fields = 128
 
     # Available types for generation
@@ -218,9 +218,9 @@ def generate_account_columns(num_columns: int = 1024) -> List[Tuple[str, str]]:
 
     # Standard columns
     standard_columns = [
-        ("AccountId", "TAG"),
+        ("DocumentId", "TAG"),
         ("Name", "TEXT"),
-        ("AccountNumber", "TEXT"),
+        ("DocumentNumber", "TEXT"),
         ("Revenue", "NUMERIC"),
         ("NumberOfEmployees", "NUMERIC"),
         ("CreatedOn", "NUMERIC"),
@@ -277,6 +277,6 @@ async def create_search_index(client: aioredis.Redis, columns: List[Tuple[str, s
         schema_parts.append(f"{name} {dragonfly_type}")
 
     schema_create_command = (
-        f"FT.CREATE {INDEX_KEY} ON HASH PREFIX 1 AccountBase: SCHEMA {' '.join(schema_parts)}"
+        f"FT.CREATE {INDEX_KEY} ON HASH PREFIX 1 DocumentBase: SCHEMA {' '.join(schema_parts)}"
     )
     await client.execute_command(schema_create_command)
