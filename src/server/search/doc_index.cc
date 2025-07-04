@@ -373,14 +373,20 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
                                         ? params.load_fields.value_or(SearchFieldsList{})
                                         : params.return_fields.value_or(SearchFieldsList{});
 
+  // Tune sort for KNN: Skip if it's on the knn field, otherwise extend the limit if needed
+  bool skip_sort = false;
+  if (auto ko = search_algo->GetKnnScoreSortOption(); ko) {
+    skip_sort = !params.sort_option || params.sort_option->IsSame(*ko);
+    if (!skip_sort)
+      limit = max(limit, ko->limit);
+  }
+
   // Apply SORTBY
   vector<search::SortableValue> sort_scores;
-  if (params.sort_option) {
+  if (params.sort_option && !skip_sort) {
     const auto& so = *params.sort_option;
     auto fident = so.field.GetIdentifier(base_->schema, false);
-    if (auto ko = search_algo->GetKnnScoreSortOption(); ko && so.Shadows(*ko)) {
-      // We sort by knn, no separate sort is required
-    } else if (IsSortableField(fident, base_->schema)) {
+    if (IsSortableField(fident, base_->schema)) {
       auto* idx = indices_->GetSortIndex(fident);
       sort_scores = idx->Sort(&result.ids, limit, so.order == SortOrder::DESC);
     } else {

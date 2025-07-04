@@ -598,7 +598,7 @@ void SearchReply(const SearchParams& params,
     PartialSort(absl::MakeSpan(docs), total_hits, SortOrder::ASC, &SerializedSearchDoc::knn_score);
     docs.resize(min(docs.size(), knn_sort_option->limit));
 
-    ignore_sort = !params.sort_option || params.sort_option->Shadows(*knn_sort_option);
+    ignore_sort = !params.sort_option || params.sort_option->IsSame(*knn_sort_option);
     if (!knn_sort_option->score_field_alias.empty())
       knn_score_ret_field = knn_sort_option->score_field_alias;
   }

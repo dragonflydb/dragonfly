@@ -6,6 +6,9 @@
 
 #include <absl/flags/flag.h>
 
+#include <algorithm>
+
+#include "absl/strings/str_format.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/error.h"
@@ -620,15 +623,15 @@ TEST_F(SearchFamilyTest, TestLimit) {
   EXPECT_THAT(resp, ArrLen(3 * 2 + 1));
 }
 
-TEST_F(SearchFamilyTest, TestReturn) {
-  auto floatsv = [](const float* f) -> string_view {
-    return {reinterpret_cast<const char*>(f), sizeof(float)};
-  };
+string_view FloatSV(const float* f) {
+  return {reinterpret_cast<const char*>(f), sizeof(float)};
+}
 
+TEST_F(SearchFamilyTest, TestReturn) {
   for (unsigned i = 0; i < 20; i++) {
     const float score = i;
     Run({"hset", "k"s + to_string(i), "longA", to_string(i), "longB", to_string(i + 1), "longC",
-         to_string(i + 2), "secret", to_string(i + 3), "vector", floatsv(&score)});
+         to_string(i + 2), "secret", to_string(i + 3), "vector", FloatSV(&score)});
   }
 
   Run({"ft.create", "i1",     "SCHEMA", "longA",   "AS",    "justA", "TEXT",
@@ -668,14 +671,14 @@ TEST_F(SearchFamilyTest, TestReturn) {
   // Checl implcit __vector_score is provided
   float score = 20;
   resp = Run({"ft.search", "i1", "@justA:0 => [KNN 20 @vector $vector]", "SORTBY", "__vector_score",
-              "DESC", "RETURN", "1", "longA", "PARAMS", "2", "vector", floatsv(&score)});
+              "DESC", "RETURN", "1", "longA", "PARAMS", "2", "vector", FloatSV(&score)});
   EXPECT_THAT(resp, MatchEntry("k0", "longA", "0"));
 
   // Check sort doesn't shadow knn return alias
   score = 20;
   resp = Run({"ft.search", "i1", "@justA:0 => [KNN 20 @vector $vector AS vec_return]", "SORTBY",
               "vec_return", "DESC", "RETURN", "1", "vec_return", "PARAMS", "2", "vector",
-              floatsv(&score)});
+              FloatSV(&score)});
   EXPECT_THAT(resp, MatchEntry("k0", "vec_return", "20"));
 }
 
@@ -2027,6 +2030,34 @@ TEST_F(SearchFamilyTest, KnnSearchOptions) {
   EXPECT_THAT(resp, AreDocIds("doc:1"));
 }
 
+TEST_F(SearchFamilyTest, KnnWithSortBy) {
+  vector<string> doc_ids(100);
+  for (size_t i = 0; i < doc_ids.size(); i++) {
+    doc_ids[i] = absl::StrCat("d:", i);
+    auto v = absl::StrFormat(R"({"v": [%d.0], "d": %d})", i, i);
+    Run({"JSON.SET", doc_ids[i], ".", v});
+  }
+
+  Run({"FT.CREATE", "i1",      "ON",     "JSON", "PREFIX",          "1",    "d:",
+       "SCHEMA",    "$.v",     "AS",     "v",    "VECTOR",          "FLAT", "6",
+       "TYPE",      "FLOAT32", "DIM",    "1",    "DISTANCE_METRIC", "L2",   "$.d",
+       "AS",        "d",       "NUMERIC"});
+
+  // We first select knn_limit closest values and then sort in REVERSE by distance
+  // on a non-sortable field. The result should be first cut off by knn_limit and then sorted
+  for (size_t knn_limit = 8; knn_limit < 47; knn_limit += 3) {
+    vector<string> expect_ids(doc_ids.begin() + knn_limit - min<size_t>(knn_limit, 10u),
+                              doc_ids.begin() + knn_limit);
+    reverse(expect_ids.begin(), expect_ids.end());
+
+    const float qpoint = 0.0f;
+    std::string q = absl::StrFormat("*=>[KNN %d @v $query_vector]", knn_limit);
+    auto resp = Run({"ft.search", "i1", q, "SORTBY", "d", "DESC", "PARAMS", "2", "query_vector",
+                     FloatSV(&qpoint), "LIMIT", "0", "10", "RETURN", "1", "d"});
+    EXPECT_THAT(resp, DocIds(knn_limit, expect_ids)) << knn_limit;
+  }
+}
+
 TEST_F(SearchFamilyTest, InvalidAggregateOptions) {
   Run({"JSON.SET", "j1", ".", R"({"field1":"first","field2":"second"})"});
   Run({"FT.CREATE", "idx", "ON", "JSON", "SCHEMA", "$.field1", "AS", "field1", "TEXT", "$.field2",
@@ -2343,33 +2374,6 @@ TEST_F(SearchFamilyTest, SearchSortByOptionNonSortableFieldJson) {
 
   resp = Run({"FT.SEARCH", "index", "*", "SORTBY", "text"});
   EXPECT_THAT(resp, expect_expr("text"sv));
-}
-
-TEST_F(SearchFamilyTest, KnnSearchWithSortby) {
-  auto to_vector = [](const char* value) { return std::string(value, 16); };
-
-  Run({"HSET", "doc:1", "timestamp", "1713100000", "embedding",
-       to_vector("\x3d\xcc\xcc\x3d\x00\x00\x80\x3f\xcd\xcc\x4c\x3e\x9a\x99\x19\x3f")});
-  Run({"HSET", "doc:2", "timestamp", "1713200000", "embedding",
-       to_vector("\x9a\x99\x19\x3f\xcd\xcc\x4c\x3e\x00\x00\x80\x3f\x3d\xcc\xcc\x3d")});
-  Run({"HSET", "doc:3", "timestamp", "1713300000", "embedding",
-       to_vector("\x00\x00\x80\x3f\x3d\xcc\xcc\x3d\xcd\xcc\x4c\x3e\x9a\x99\x19\x3f")});
-
-  Run({"FT.CREATE", "my_index", "ON", "HASH", "SCHEMA", "timestamp", "NUMERIC", "SORTABLE",
-       "embedding", "VECTOR", "FLAT", "6", "TYPE", "FLOAT32", "DIM", "4", "DISTANCE_METRIC",
-       "COSINE"});
-
-  auto search_vector =
-      to_vector("\x3d\xcc\xcc\x3d\x00\x00\x80\x3f\xcd\xcc\x4c\x3e\x9a\x99\x19\x3f");
-
-  auto resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 2 @embedding $vec]", "PARAMS", "2", "vec",
-                   search_vector, "NOCONTENT"});
-  EXPECT_THAT(resp, IsArray(2, "doc:1", "doc:3"));
-
-  // FT.SEARCH with KNN + SORTBY
-  resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 2 @embedding $vec]", "PARAMS", "2", "vec",
-              search_vector, "SORTBY", "timestamp", "DESC", "NOCONTENT"});
-  EXPECT_THAT(resp, IsArray(2, "doc:3", "doc:1"));
 }
 
 TEST_F(SearchFamilyTest, SearchNonNullFields) {

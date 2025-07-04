@@ -143,7 +143,7 @@ struct SearchParams {
     SearchField field;
     SortOrder order = SortOrder::ASC;
 
-    bool Shadows(const search::KnnScoreSortOption& knn_sort) const {
+    bool IsSame(const search::KnnScoreSortOption& knn_sort) const {
       return knn_sort.score_field_alias == field.NameView();
     }
   };
