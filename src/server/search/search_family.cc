@@ -581,10 +581,13 @@ void SearchReply(const SearchParams& params,
     }
   }
 
+  size_t limit_total = params.limit_total;
   optional<SortOrder> sort_order;
   optional<string> score_ret_field;
   if (knn_sort_option) {
     sort_order = SortOrder::ASC;
+    limit_total = min(limit_total, knn_sort_option->limit);
+    total_hits = min(total_hits, knn_sort_option->limit);
     if (params.ShouldReturnField(knn_sort_option->score_field_alias))
       score_ret_field = knn_sort_option->score_field_alias;
   }
@@ -593,7 +596,7 @@ void SearchReply(const SearchParams& params,
   }
 
   const size_t offset = std::min(params.limit_offset, docs.size());
-  const size_t limit = std::min(docs.size() - offset, params.limit_total);
+  const size_t limit = std::min(docs.size() - offset, limit_total);
   const size_t end = offset + limit;
 
   if (sort_order) {
