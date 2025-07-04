@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import random
 import string
 import uuid
@@ -37,7 +38,9 @@ INDEX_KEY = "idx:AccountBase"
 ACCOUNT_KEY = "AccountBase:{accountId}"
 
 
-def generate_account_columns(num_columns: int = 2774) -> List[Dict[str, str]]:
+def generate_account_columns(num_columns: int = 1024) -> List[Dict[str, str]]:
+    max_text_fields = 128
+
     server_types = [
         ServerTypes.NVARCHAR,
         ServerTypes.INT,
@@ -52,6 +55,7 @@ def generate_account_columns(num_columns: int = 2774) -> List[Dict[str, str]]:
     columns = []
     # Track generated names to guarantee uniqueness
     existing_names: set[str] = set()
+    text_field_count = 0
 
     # Add some standard columns
     standard_columns = [
@@ -70,6 +74,10 @@ def generate_account_columns(num_columns: int = 2774) -> List[Dict[str, str]]:
     columns.extend(standard_columns)
     existing_names.update(col["COLUMN_NAME"] for col in standard_columns)
 
+    for col in standard_columns:
+        if col["TYPE_NAME"] in [ServerTypes.NVARCHAR, ServerTypes.N_TEXT]:
+            text_field_count += 1
+
     while len(columns) < num_columns:
         candidate_name = (
             f"lv_{''.join(random.choices(string.ascii_lowercase, k=random.randint(5, 15)))}"
@@ -79,9 +87,20 @@ def generate_account_columns(num_columns: int = 2774) -> List[Dict[str, str]]:
         if candidate_name in existing_names:
             continue
 
-        column_type = random.choice(server_types)
+        if text_field_count > max_text_fields - 1:
+            non_text_types = [
+                t for t in server_types if t not in [ServerTypes.NVARCHAR, ServerTypes.N_TEXT]
+            ]
+            column_type = random.choice(non_text_types)
+        else:
+            column_type = random.choice(server_types)
+            if column_type in [ServerTypes.NVARCHAR, ServerTypes.N_TEXT]:
+                text_field_count += 1
+
         columns.append({"COLUMN_NAME": candidate_name, "TYPE_NAME": column_type})
         existing_names.add(candidate_name)
+
+    logging.info(f"Created {len(columns)} columns, with {text_field_count} TEXT fields")
 
     return columns
 
@@ -111,9 +130,24 @@ def map_server_type_to_dragonfly_type(server_type: str) -> str:
 async def create_search_index(client: aioredis.Redis, columns: List[Dict[str, str]]) -> None:
     # Map columns to Dragonfly types
     column_name_to_dragonfly_type = {}
+    text_field_count = 0
+
     for column in columns:
         dragonfly_type = map_server_type_to_dragonfly_type(column["TYPE_NAME"])
         column_name_to_dragonfly_type[column["COLUMN_NAME"]] = dragonfly_type
+
+        if dragonfly_type == DragonFlyColumnTypes.TEXT:
+            text_field_count += 1
+
+    # Check TEXT field limit
+    if text_field_count > 128:
+        raise ValueError(
+            f"Too many TEXT fields: {text_field_count}. RediSearch supports a maximum of 128 TEXT fields."
+        )
+
+    logging.info(
+        f"Creating index with {len(columns)} columns, including {text_field_count} TEXT fields"
+    )
 
     # Build schema command
     dragonfly_columns = " ".join(
@@ -237,6 +271,10 @@ async def _generate_accounts_chunk(
 
 
 def create_property_filter(property_name: str, property_type: str, account_ids: List[str]) -> str:
+    # Return None for types that cannot be filtered
+    if property_type in [ServerTypes.TIMESTAMP, ServerTypes.IMAGE]:
+        return None
+
     if property_type in [ServerTypes.NVARCHAR, ServerTypes.N_TEXT]:
         filter_string = "".join(random.choices(string.ascii_letters, k=3))
         return f'@{property_name}: "*{filter_string}*"'
@@ -256,8 +294,6 @@ def create_property_filter(property_name: str, property_type: str, account_ids: 
     elif property_type == ServerTypes.UNIQUE_IDENTIFIER:
         filter_string = random.choice(account_ids).replace("-", "\\-")
         return f"@{property_name}: {{{filter_string}}}"
-    elif property_type in [ServerTypes.TIMESTAMP, ServerTypes.IMAGE]:
-        return ""
     else:
         raise NotImplementedError(
             f"Type {property_type} is not implemented in create_property_filter"
@@ -266,30 +302,48 @@ def create_property_filter(property_name: str, property_type: str, account_ids: 
 
 def generate_search_query(column_mappings: Dict[str, str], account_ids: List[str]) -> Query:
     columns = list(column_mappings.keys())
-    num_columns = random.randint(len(columns) // 2, len(columns))
-    num_filters = random.randint(len(columns) // 2, len(columns))
 
+    if random.random() < 0.1:
+        num_columns = random.randint(1, min(500, len(columns)))
+        selected_columns = random.sample(columns, num_columns)
+        filter_string = "*"
+
+        query = Query(filter_string).return_fields(*selected_columns)
+        query = query.paging(0, 50)
+        return query
+
+    reliable_filter_columns = [
+        col
+        for col, col_type in column_mappings.items()
+        if col_type in [ServerTypes.INT, ServerTypes.BIT, ServerTypes.MONEY]
+    ]
+
+    num_columns = random.randint(1, min(500, len(columns)))
     selected_columns = random.sample(columns, num_columns)
-    filter_columns = random.sample(selected_columns, num_filters)
-    page_size = 50
 
-    if len(filter_columns) > 0:
-        filters = []
-        for filter_column in filter_columns:
-            filter_str = create_property_filter(
-                filter_column, column_mappings[filter_column], account_ids
-            )
-            if filter_str:
-                filters.append(filter_str)
-
-        filter_string = " ".join(filters) if filters else "*"
+    if reliable_filter_columns and random.random() < 0.5:
+        filter_column = random.choice(reliable_filter_columns)
+        filter_str = create_simple_numeric_filter(filter_column, column_mappings[filter_column])
+        filter_string = filter_str if filter_str else "*"
     else:
         filter_string = "*"
 
     query = Query(filter_string).return_fields(*selected_columns)
-    query = query.paging(0, page_size)
+    query = query.paging(0, 50)
 
     return query
+
+
+def create_simple_numeric_filter(property_name: str, property_type: str) -> str:
+    if property_type == ServerTypes.INT:
+        return f"@{property_name}: [1 100]"
+    elif property_type == ServerTypes.BIT:
+        bit_value = random.choice([0, 1])
+        return f"@{property_name}: [{bit_value} {bit_value}]"
+    elif property_type == ServerTypes.MONEY:
+        return f"@{property_name}: [1 1000]"
+    else:
+        return "*"
 
 
 async def run_query_agent(
@@ -303,20 +357,29 @@ async def run_query_agent(
     client = df_server.client()
 
     query_count = 0
+    success_count = 0
 
     try:
-        for _ in range(num_queries):
+        for i in range(num_queries):
             try:
                 query = generate_search_query(column_mappings, account_ids)
-                _ = await client.ft(INDEX_KEY).search(query)
-                query_count += 1
-            except Exception:
-                # Ignore individual query failures
-                pass
+                results = await client.ft(INDEX_KEY).search(query)
+                success_count += 1
+
+            except Exception as e:
+                logging.error(f"Agent {agent_id}: ERROR in query {i}: {e}")
+
+            query_count += 1
+
     finally:
+        if query_count > 0:
+            final_success_rate = (success_count / query_count) * 100
+            logging.info(
+                f"Agent {agent_id} completed: {success_count}/{query_count} successful queries ({final_success_rate:.1f}%)"
+            )
         await client.aclose()
 
-    return query_count
+    return success_count
 
 
 async def run_query_load_test(
