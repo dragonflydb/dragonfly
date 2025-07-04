@@ -12,203 +12,75 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pre-commit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-      - uses: actions/setup-python@v5
-        with:
-            python-version: '3.x'
-            check-latest: true
-      - name: Install dependencies
-        run: |
-          python -m venv venv
-          source venv/bin/activate
-          python -m pip install pre-commit
-          lsblk -l
-          echo "sda rotational = $(cat /sys/block/sda/queue/rotational)"
-          echo "sdb rotational = $(cat /sys/block/sdb/queue/rotational)"
-      - name: Run pre-commit checks
-        run: |
-          source venv/bin/activate
-          pre-commit run --show-diff-on-failure --color=always --from-ref HEAD^ --to-ref HEAD
-        shell: bash
   build:
     strategy:
       matrix:
         # Test of these containers
-        container: ["ubuntu-dev:20", "alpine-dev:latest"]
-        build-type: [Debug, Release]
-        compiler: [{ cxx: g++, c: gcc }]
-        # -no-pie to disable address randomization so we could symbolize stacktraces
-        cxx_flags: ["-Werror -no-pie"]
-        sanitizers: ["NoSanitizers"]
-        include:
-          - container: "alpine-dev:latest"
-            build-type: Debug
-            compiler: { cxx: clang++, c: clang }
-            cxx_flags: ""
-            sanitizers: "NoSanitizers"
-          - container: "ubuntu-dev:24"
-            build-type: Debug
-            compiler: { cxx: clang++, c: clang }
-            # https://maskray.me/blog/2023-08-25-clang-wunused-command-line-argument (search for compiler-rt)
-            cxx_flags: "-Wno-error=unused-command-line-argument"
-            sanitizers: "Sanitizers"
+        container: ["ubuntu-dev:20"]
+        proactor: [Uring]
+        build-type: [Debug]
+        runner: [ubuntu-latest]
 
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+
     container:
       image: ghcr.io/romange/${{ matrix.container }}
-      # Seems that docker by default prohibits running iouring syscalls
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
       volumes:
-        - /:/hostroot
-        - /mnt:/mnt
-      credentials:
-        username: ${{ github.repository_owner }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        - /var/crash:/var/crash
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
 
-      - name: Prepare Environment
+      - name: Print environment info
         run: |
-          uname -a
-          cmake --version
-          mkdir -p ${GITHUB_WORKSPACE}/build
-          mount
+          cat /proc/cpuinfo
+          ulimit -a
+          env
 
-          echo "===================Before freeing up space ============================================"
-          df -h
-          rm -rf /hostroot/usr/share/dotnet
-          rm -rf /hostroot/usr/local/share/boost
-          rm -rf /hostroot/usr/local/lib/android
-          rm -rf /hostroot/opt/ghc
-          echo "===================After freeing up space ============================================"
-          df -h
-          touch /mnt/foo
-          ls -la /mnt/foo
-
-      - name: Configure CMake
-        # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
-        # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
+      - name: Configure & Build
         run: |
-          echo "ulimit is"
-          ulimit -s
-          echo "-----------------------------"
-          echo "disk space is:"
-          df -h
-          echo "-----------------------------"
+          # -no-pie to disable address randomization so we could symbolize stacktraces
+          cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
+                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPRINT_STACKTRACES_ON_SIGNAL=ON \
+                -DCMAKE_CXX_FLAGS=-no-pie -DHELIO_STACK_CHECK:STRING=4096
 
-          export ASAN="OFF"
-          export USAN="OFF"
+          cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly
+          pwd
+          ls -l ..
 
-          if [ '${{matrix.sanitizers}}' = 'Sanitizers' ]; then
-            echo "ASAN/USAN"
-            export ASAN="ON"
-            export USAN="ON"
-          fi
-
-          cmake -B ${GITHUB_WORKSPACE}/build \
-            -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
-            -GNinja \
-            -DCMAKE_C_COMPILER="${{matrix.compiler.c}}" \
-            -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
-            -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}}" -DWITH_AWS:BOOL=OFF \
-            -DWITH_ASAN="${ASAN}" \
-            -DWITH_USAN="${USAN}" \
-            -L
-
-          cd ${GITHUB_WORKSPACE}/build && pwd
-          du -hcs _deps/
-
-      - name: Build
-        run: |
-          cd ${GITHUB_WORKSPACE}/build
-          ninja search_family_test
-          df -h
-          echo "-----------------------------"
-          ninja src/all
-
-      - name: PostFail
-        if: failure()
-        run: |
-          echo "disk space is:"
-          df -h
-
-      - name: C++ Unit Tests - IoUring
-        run: |
-          cd ${GITHUB_WORKSPACE}/build
-          echo Run ctest -V -L DFLY
-
-          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1,op_manager=1,op_manager_test=1 \
-          FLAGS_fiber_safety_margin=4096 timeout 20m ctest -V -L DFLY -E allocation_tracker_test
-
-          # Run allocation tracker test separately without alsologtostderr because it generates a TON of logs.
-          FLAGS_fiber_safety_margin=4096 timeout 5m ./allocation_tracker_test
-
-          timeout 5m ./dragonfly_test
-          timeout 5m ./json_family_test --jsonpathv2=false
-          timeout 5m ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
-
-
-      - name: C++ Unit Tests - Epoll
-        run: |
-          cd ${GITHUB_WORKSPACE}/build
-
-          # Create a rule that automatically prints stacktrace upon segfault
-          cat > ./init.gdb <<EOF
-          catch signal SIGSEGV
-          command
-          bt
-          end
-          EOF
-
-          gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
-          FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 timeout 20m ctest -V -L DFLY -E allocation_tracker_test
-
-          FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true timeout 5m ./allocation_tracker_test
-
-      - name: C++ Unit Tests - IoUring with cluster mode
-        run: |
-          FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY
-
-      - name: C++ Unit Tests - IoUring with cluster mode and FLAGS_lock_on_hashtags
-        run: |
-          FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY
-
-      - name: Upload unit logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: unit_logs
-          path: /tmp/*INFO*
-
-      - name: Run regression tests
-        if: matrix.container == 'ubuntu-dev:20'
+      - name: Run regression tests action
         uses: ./.github/actions/regression-tests
         with:
           dfly-executable: dragonfly
-          run-only-on-ubuntu-latest: true
+          gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
           build-folder-name: build
-          # Non-release build will not run tests marked as slow or opt_only
-          # "not empty" string is needed for release build because pytest command can not get empty string for filter
-          filter: ${{ matrix.build-type == 'Release' && 'not empty' || '(not slow) and (not opt_only)' }}
+          filter: ${{ matrix.build-type == 'Release' && 'not empty' || 'not opt_only' }}
+          aws-access-key-id: ${{ secrets.AWS_S3_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_S3_ACCESS_SECRET }}
+          s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
 
-      - name: Upload regression logs on failure
+      - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: regression_logs
+          name: logs
           path: /tmp/failed/*
+
+      - name: Copy binary on a self hosted runner
+        if: failure()
+        run: |
+          # We must use sh syntax.
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
+            cd ${GITHUB_WORKSPACE}/build
+            timestamp=$(date +%Y-%m-%d_%H:%M:%S)
+            mv ./dragonfly /var/crash/dragonfy_${timestamp}
+          fi
 
   lint-test-chart:
     runs-on: ubuntu-latest
-    needs: [build]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/lint-test-chart
