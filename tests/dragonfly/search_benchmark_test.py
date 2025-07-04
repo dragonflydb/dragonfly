@@ -97,43 +97,34 @@ async def run_dragonfly_benchmark(
     )
 
     # Command statistics
-    try:
-        cmd_stats = await client.info("commandstats")
-        logging.info("Command Statistics:")
-        for key, value in cmd_stats.items():
-            if key.startswith("cmdstat_") and "ft." in key.lower():
-                command = key[8:]  # Remove "cmdstat_" prefix
-                logging.info(f"  {command}: {value}")
-    except Exception as e:
-        logging.warning(f"Could not retrieve command stats: {e}")
+    cmd_stats = await client.info("commandstats")
+    logging.info("Command Statistics:")
+    for key, value in cmd_stats.items():
+        if key.startswith("cmdstat_") and "ft." in key.lower():
+            command = key[8:]  # Remove "cmdstat_" prefix
+            logging.info(f"  {command}: {value}")
 
     # Latency statistics
-    try:
-        latency_stats = await client.info("latencystats")
-        logging.info("Latency Statistics:")
-        for key, value in latency_stats.items():
-            if "ft." in key.lower():
-                logging.info(f"  {key}: {value}")
-    except Exception as e:
-        logging.warning(f"Could not retrieve latency stats: {e}")
+    latency_stats = await client.info("latencystats")
+    logging.info("Latency Statistics:")
+    for key, value in latency_stats.items():
+        if "ft." in key.lower():
+            logging.info(f"  {key}: {value}")
 
     # Memory statistics
-    try:
-        memory_stats = await client.info("memory")
-        logging.info("Memory Statistics:")
-        important_memory_keys = [
-            "used_memory",
-            "used_memory_human",
-            "used_memory_rss",
-            "used_memory_rss_human",
-            "used_memory_peak",
-            "used_memory_peak_human",
-        ]
-        for key in important_memory_keys:
-            if key in memory_stats:
-                logging.info(f"  {key}: {memory_stats[key]}")
-    except Exception as e:
-        logging.warning(f"Could not retrieve memory stats: {e}")
+    memory_stats = await client.info("memory")
+    logging.info("Memory Statistics:")
+    important_memory_keys = [
+        "used_memory",
+        "used_memory_human",
+        "used_memory_rss",
+        "used_memory_rss_human",
+        "used_memory_peak",
+        "used_memory_peak_human",
+    ]
+    for key in important_memory_keys:
+        if key in memory_stats:
+            logging.info(f"  {key}: {memory_stats[key]}")
 
     logging.info("Benchmark test completed successfully")
 
@@ -148,4 +139,4 @@ async def test_dragonfly_benchmark(
     df_server: DflyInstance,
 ):
     # num_documents, num_queries, num_concurrent_clients, random_seed
-    await run_dragonfly_benchmark(df_server, 1000, 200, 25, 42)
+    await run_dragonfly_benchmark(df_server, 3000, 100, 10, 42)

@@ -115,7 +115,7 @@ def generate_search_query(columns: List[Tuple[str, str]], document_ids: List[str
     column_names = [name for name, _ in columns]
 
     if random.random() < 0.5:
-        num_columns = random.randint(len(column_names) // 2, len(column_names))
+        num_columns = random.randint(len(column_names) / 3.5, len(column_names) / 2)
         selected_columns = random.sample(column_names, num_columns)
 
         query = Query("*").return_fields(*selected_columns)
@@ -124,7 +124,7 @@ def generate_search_query(columns: List[Tuple[str, str]], document_ids: List[str
 
     reliable_filter_columns = [name for name, col_type in columns if col_type in ["NUMERIC", "BIT"]]
 
-    num_columns = random.randint(len(column_names) // 2, len(column_names))
+    num_columns = random.randint(len(column_names) / 3.5, len(column_names) / 2)
     selected_columns = random.sample(column_names, num_columns)
 
     if reliable_filter_columns and random.random() < 0.5:
@@ -206,7 +206,7 @@ async def run_query_load_test(
     return total_completed
 
 
-def generate_document_columns(num_columns: int = 1024) -> List[Tuple[str, str]]:
+def generate_document_columns(num_columns: int = 700) -> List[Tuple[str, str]]:
     max_text_fields = 128
 
     # Available types for generation
