@@ -12,6 +12,7 @@ from .benchmark_utils import (
     run_query_load_test,
     set_random_seed,
     INDEX_KEY,
+    ACCOUNT_KEY,
 )
 
 
@@ -66,7 +67,7 @@ async def run_dragonfly_benchmark(
 
     # Verify some accounts were stored
     sample_account_id = account_ids[0]
-    account_key = f"AccountBase:{sample_account_id}"
+    account_key = ACCOUNT_KEY.format(accountId=sample_account_id)
     stored_account = await client.hgetall(account_key)
     assert stored_account is not None
     assert stored_account["AccountId"] == sample_account_id

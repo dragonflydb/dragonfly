@@ -25,13 +25,9 @@ class ServerTypes:
     BIT = "bit"
     NVARCHAR = "nvarchar"
     MONEY = "money"
-    N_TEXT = "ntext"
     DATETIME = "datetime"
-    TIMESTAMP = "timestamp"
-    DECIMAL = "decimal"
     FLOAT = "float"
     BIGINT = "bigint"
-    IMAGE = "image"
 
 
 INDEX_KEY = "idx:AccountBase"
@@ -75,7 +71,7 @@ def generate_account_columns(num_columns: int = 1024) -> List[Dict[str, str]]:
     existing_names.update(col["COLUMN_NAME"] for col in standard_columns)
 
     for col in standard_columns:
-        if col["TYPE_NAME"] in [ServerTypes.NVARCHAR, ServerTypes.N_TEXT]:
+        if col["TYPE_NAME"] in [ServerTypes.NVARCHAR]:
             text_field_count += 1
 
     while len(columns) < num_columns:
@@ -88,13 +84,11 @@ def generate_account_columns(num_columns: int = 1024) -> List[Dict[str, str]]:
             continue
 
         if text_field_count > max_text_fields - 1:
-            non_text_types = [
-                t for t in server_types if t not in [ServerTypes.NVARCHAR, ServerTypes.N_TEXT]
-            ]
+            non_text_types = [t for t in server_types if t not in [ServerTypes.NVARCHAR]]
             column_type = random.choice(non_text_types)
         else:
             column_type = random.choice(server_types)
-            if column_type in [ServerTypes.NVARCHAR, ServerTypes.N_TEXT]:
+            if column_type in [ServerTypes.NVARCHAR]:
                 text_field_count += 1
 
         columns.append({"COLUMN_NAME": candidate_name, "TYPE_NAME": column_type})
@@ -112,13 +106,9 @@ def map_server_type_to_dragonfly_type(server_type: str) -> str:
         ServerTypes.BIT: DragonFlyColumnTypes.NUMERIC,
         ServerTypes.NVARCHAR: DragonFlyColumnTypes.TEXT,
         ServerTypes.MONEY: DragonFlyColumnTypes.NUMERIC,
-        ServerTypes.N_TEXT: DragonFlyColumnTypes.TEXT,
         ServerTypes.DATETIME: DragonFlyColumnTypes.NUMERIC,
-        ServerTypes.TIMESTAMP: DragonFlyColumnTypes.TEXT,
-        ServerTypes.DECIMAL: DragonFlyColumnTypes.NUMERIC,
         ServerTypes.FLOAT: DragonFlyColumnTypes.NUMERIC,
         ServerTypes.BIGINT: DragonFlyColumnTypes.NUMERIC,
-        ServerTypes.IMAGE: DragonFlyColumnTypes.TEXT,
     }
 
     if server_type not in mapping:
@@ -190,14 +180,13 @@ def _initialize_pre_generated_data(size: int):
 
 
 def generate_property_value(column_type: str):
-    if column_type in [ServerTypes.NVARCHAR, ServerTypes.N_TEXT]:
+    if column_type in [ServerTypes.NVARCHAR]:
         return random.choice(PRE_GENERATED_STRINGS)
     elif column_type in [
         ServerTypes.INT,
         ServerTypes.MONEY,
-        ServerTypes.DECIMAL,
-        ServerTypes.FLOAT,
         ServerTypes.DATETIME,
+        ServerTypes.FLOAT,
         ServerTypes.BIGINT,
     ]:
         return random.randint(1, 100)
@@ -205,10 +194,6 @@ def generate_property_value(column_type: str):
         return random.choice([0, 1])
     elif column_type == ServerTypes.UNIQUE_IDENTIFIER:
         return random.choice(PRE_GENERATED_UIDS)
-    elif column_type == ServerTypes.TIMESTAMP:
-        return None
-    elif column_type == ServerTypes.IMAGE:
-        return None
     else:
         raise NotImplementedError(
             f"Type {column_type} is not implemented in generate_property_value"
@@ -268,36 +253,6 @@ async def _generate_accounts_chunk(
         pipeline.hset(acc_key, mapping=account)
 
     await pipeline.execute()
-
-
-def create_property_filter(property_name: str, property_type: str, account_ids: List[str]) -> str:
-    # Return None for types that cannot be filtered
-    if property_type in [ServerTypes.TIMESTAMP, ServerTypes.IMAGE]:
-        return None
-
-    if property_type in [ServerTypes.NVARCHAR, ServerTypes.N_TEXT]:
-        filter_string = "".join(random.choices(string.ascii_letters, k=3))
-        return f'@{property_name}: "*{filter_string}*"'
-    elif property_type in [
-        ServerTypes.INT,
-        ServerTypes.MONEY,
-        ServerTypes.DECIMAL,
-        ServerTypes.FLOAT,
-        ServerTypes.DATETIME,
-        ServerTypes.BIGINT,
-    ]:
-        filter_number = random.randint(1, 100)
-        return f"@{property_name}: [{filter_number} +inf]"
-    elif property_type == ServerTypes.BIT:
-        filter_number = random.choice([0, 1])
-        return f"@{property_name}: [{filter_number} {filter_number}]"
-    elif property_type == ServerTypes.UNIQUE_IDENTIFIER:
-        filter_string = random.choice(account_ids).replace("-", "\\-")
-        return f"@{property_name}: {{{filter_string}}}"
-    else:
-        raise NotImplementedError(
-            f"Type {property_type} is not implemented in create_property_filter"
-        )
 
 
 def generate_search_query(column_mappings: Dict[str, str], account_ids: List[str]) -> Query:
