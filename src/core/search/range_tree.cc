@@ -2,6 +2,27 @@
 
 namespace dfly::search {
 
+namespace {
+
+template <typename MapT> auto FindRangeBlockImpl(MapT& entries, double value) {
+  using RangeNumber = double;
+  DCHECK(!entries.empty());
+
+  auto it = entries.lower_bound({value, -std::numeric_limits<RangeNumber>::infinity()});
+  if (it != entries.begin() && (it == entries.end() || it->first.first > value)) {
+    // TODO: remove this, we do log N here
+    // we can use negative left bouding to find the block
+    --it;  // Move to the block that contains the value
+  }
+
+  DCHECK(it != entries.end() &&
+         (it->first.first <= value &&
+          (value == std::numeric_limits<RangeNumber>::infinity() || value < it->first.second)));
+  return it;
+}
+
+}  // namespace
+
 RangeTree::RangeTree(PMR_NS::memory_resource* mr, size_t max_range_block_size)
     : max_range_block_size_(max_range_block_size), entries_(mr) {
   // TODO: at the beggining create more blocks
@@ -72,31 +93,11 @@ RangeResult RangeTree::GetAllDocIds() const {
 }
 
 RangeTree::Map::iterator RangeTree::FindRangeBlock(double value) {
-  DCHECK(!entries_.empty());
-
-  auto it = entries_.lower_bound({value, std::numeric_limits<RangeNumber>::min()});
-  if (it != entries_.begin() && (it == entries_.end() || it->first.first > value)) {
-    // TODO: remove this, we do log N here
-    // we can use negative left bouding to find the block
-    --it;  // Move to the block that contains the value
-  }
-
-  DCHECK(it != entries_.end() && (it->first.first <= value && value < it->first.second));
-  return it;
+  return FindRangeBlockImpl(entries_, value);
 }
 
 RangeTree::Map::const_iterator RangeTree::FindRangeBlock(double value) const {
-  DCHECK(!entries_.empty());
-
-  auto it = entries_.lower_bound({value, std::numeric_limits<RangeNumber>::min()});
-  if (it != entries_.begin() && (it == entries_.end() || it->first.first > value)) {
-    // TODO: remove this, we do log N here
-    // we can use negative left bouding to find the block
-    --it;  // Move to the block that contains the value
-  }
-
-  DCHECK(it != entries_.end() && (it->first.first <= value && value < it->first.second));
-  return it;
+  return FindRangeBlockImpl(entries_, value);
 }
 
 /*
