@@ -568,6 +568,15 @@ void SendSerializedDoc(const SerializedSearchDoc& doc, SinkReplyBuilder* builder
   }
 }
 
+template <typename T>
+void PartialSort(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder order,
+                 T SerializedSearchDoc::*field) {
+  auto cb = [order, field](SerializedSearchDoc* l, SerializedSearchDoc* r) {
+    return order == SortOrder::ASC ? l->*field < r->*field : r->*field < l->*field;
+  };
+  partial_sort(docs.begin(), docs.begin() + min(limit, docs.size()), docs.end(), cb);
+}
+
 void SearchReply(const SearchParams& params,
                  std::optional<search::KnnScoreSortOption> knn_sort_option,
                  absl::Span<SearchResult> results, SinkReplyBuilder* builder) {
@@ -581,33 +590,30 @@ void SearchReply(const SearchParams& params,
     }
   }
 
-  size_t limit_total = params.limit_total;
-  optional<SortOrder> sort_order;
-  optional<string> score_ret_field;
+  // Reorder and cut KNN results before applying SORT and LIMIT
+  optional<string> knn_score_ret_field;
+  bool ignore_sort = false;
   if (knn_sort_option) {
-    sort_order = SortOrder::ASC;
-    limit_total = min(limit_total, knn_sort_option->limit);
     total_hits = min(total_hits, knn_sort_option->limit);
-    if (params.ShouldReturnField(knn_sort_option->score_field_alias))
-      score_ret_field = knn_sort_option->score_field_alias;
-  }
-  if (params.sort_option) {
-    sort_order = params.sort_option->order;  // SORTBY overrides KNN
+    PartialSort(absl::MakeSpan(docs), total_hits, SortOrder::ASC, &SerializedSearchDoc::knn_score);
+    docs.resize(min(docs.size(), knn_sort_option->limit));
+
+    ignore_sort = !params.sort_option || params.sort_option->Shadows(*knn_sort_option);
+    if (!knn_sort_option->score_field_alias.empty())
+      knn_score_ret_field = knn_sort_option->score_field_alias;
   }
 
+  // Apply LIMIT
   const size_t offset = std::min(params.limit_offset, docs.size());
-  const size_t limit = std::min(docs.size() - offset, limit_total);
+  const size_t limit = std::min(docs.size() - offset, params.limit_total);
   const size_t end = offset + limit;
 
-  if (sort_order) {
-    auto cmp = [order = *sort_order](const SerializedSearchDoc* l, const SerializedSearchDoc* r) {
-      return order == SortOrder::ASC ? l->score < r->score : r->score < l->score;
-    };
-    partial_sort(docs.begin(), docs.begin() + min(docs.size(), end), docs.end(), cmp);
-  }
+  // Apply SORTBY if its different from the KNN sort
+  if (params.sort_option && !ignore_sort)
+    PartialSort(absl::MakeSpan(docs), end, params.sort_option->order,
+                &SerializedSearchDoc::sort_score);
 
   const bool reply_with_ids_only = params.IdsOnly();
-
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   RedisReplyBuilder::ArrayScope scope{rb, reply_with_ids_only ? (limit + 1) : (limit * 2 + 1)};
 
@@ -618,8 +624,8 @@ void SearchReply(const SearchParams& params,
       continue;
     }
 
-    if (score_ret_field)
-      docs[i]->values[*score_ret_field] = absl::StrCat(get<double>(docs[i]->score));
+    if (knn_score_ret_field)
+      docs[i]->values[*knn_score_ret_field] = docs[i]->knn_score;
 
     SendSerializedDoc(*docs[i], builder);
   }

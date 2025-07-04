@@ -7,15 +7,19 @@
 #include <absl/strings/str_join.h>
 
 #include <memory>
+#include <queue>
 
 #include "absl/strings/str_cat.h"
 #include "base/logging.h"
 #include "core/overloaded.h"
+#include "core/search/base.h"
 #include "core/search/indices.h"
+#include "core/search/search.h"
 #include "server/engine_shard_set.h"
 #include "server/family_utils.h"
 #include "server/search/doc_accessors.h"
 #include "server/server_state.h"
+#include "server/tx_base.h"
 
 namespace dfly {
 
@@ -103,14 +107,6 @@ std::pair<SearchFieldsList, SortIndiciesFieldsList> PreprocessAggregateFields(
 }
 
 }  // namespace
-
-bool SerializedSearchDoc::operator<(const SerializedSearchDoc& other) const {
-  return this->score < other.score;
-}
-
-bool SerializedSearchDoc::operator>=(const SerializedSearchDoc& other) const {
-  return this->score >= other.score;
-}
 
 bool SearchParams::ShouldReturnField(std::string_view alias) const {
   auto cb = [alias](const auto& entry) { return entry.GetShortName() == alias; };
@@ -327,6 +323,47 @@ bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
   return base_->Matches(key, obj_code);
 }
 
+std::vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(
+    std::vector<DocId>* ids, const SearchParams::SortOption& sort, size_t limit,
+    const OpArgs& op_args) const {
+  auto comp = [order = sort.order](const auto& lhs, const auto& rhs) {
+    return order == SortOrder::ASC ? lhs < rhs : lhs > rhs;
+  };
+  // Priority queue keeps top-k values in reverse order (to compare against top - worst value)
+  using QPair = std::pair<search::SortableValue, DocId>;
+  std::priority_queue<QPair, std::vector<QPair>, decltype(comp)> q(comp);
+
+  // Iterate over all documents, extract sortable field and update the queue
+  auto& db_slice = op_args.GetDbSlice();
+  for (DocId id : *ids) {
+    auto it = db_slice.FindReadOnly(op_args.db_cntx, key_index_.Get(id), base_->GetObjCode());
+    if (!it || !IsValid(*it))
+      continue;
+
+    auto val = GetAccessor(op_args.db_cntx, (*it)->second)->Serialize(base_->schema, {sort.field});
+    if (val.empty())
+      continue;
+    auto& first_val = val.begin()->second;
+
+    // Check if extracted value is better than the worst (q.top())
+    if (q.size() < limit || comp(first_val, q.top().first)) {
+      if (q.size() >= limit)
+        q.pop();
+      q.emplace(std::move(first_val), id);
+    }
+  }
+
+  // Reorder ids and collect sortable
+  vector<search::SortableValue> out(q.size());
+  for (int i = 0; !q.empty(); i++) {
+    auto [v, id] = q.top();
+    (*ids)[i] = id;
+    out[i] = std::move(v);
+    q.pop();
+  }
+  return out;
+}
+
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
                                    search::SearchAlgorithm* search_algo) const {
   size_t limit = params.limit_offset + params.limit_total;
@@ -339,31 +376,37 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
                                         ? params.load_fields.value_or(SearchFieldsList{})
                                         : params.return_fields.value_or(SearchFieldsList{});
 
-  // For sortable fields, apply SORTBY ahead of loading all douments to cut off redundant ones.
-  // Otherwise, add field to document lookup. Ignore SORTBY if it matches with a KNN query.
-  bool keep_all = false;
+  // Apply SORTBY
+  vector<search::SortableValue> sort_scores;
   if (params.sort_option) {
-    auto fident = params.sort_option->field.GetIdentifier(base_->schema, false);
-    if (auto ko = search_algo->GetKnnScoreSortOption(); ko && ko->score_field_alias == fident) {
-      DCHECK_EQ(result.scores.size(), result.ids.size());  // KNN output is already sorted and cut
+    const auto& so = *params.sort_option;
+    auto fident = so.field.GetIdentifier(base_->schema, false);
+    if (auto ko = search_algo->GetKnnScoreSortOption(); ko && so.Shadows(*ko)) {
+      // We sort by knn, no separate sort is required
     } else if (IsSortableField(fident, base_->schema)) {
       auto* idx = indices_->GetSortIndex(fident);
-      result.scores = idx->Sort(&result.ids, limit, params.sort_option->order == SortOrder::DESC);
+      sort_scores = idx->Sort(&result.ids, limit, so.order == SortOrder::DESC);
     } else {
-      fields_to_load.push_back(params.sort_option->field);
-      keep_all = true;  // we sort after serializing documents
+      sort_scores = KeepTopKSorted(&result.ids, so, limit, op_args);
+      fields_to_load.emplace_back(so.field);
+    }
+
+    // If we sorted with knn_scores present, rearrange them
+    if (!sort_scores.empty() && !result.knn_scores.empty()) {
+      unordered_map<DocId, size_t> knn_scores(result.knn_scores.begin(), result.knn_scores.end());
+      for (size_t i = 0; i < min(limit, result.ids.size()); i++)
+        result.knn_scores[i] = {result.ids[i], knn_scores[result.ids[i]]};
     }
   }
 
-  // If the order doesn't depend on looked up values, cut off the rest
-  if (!keep_all)
-    result.ids.resize(min(limit, result.ids.size()));
+  // Cut off unnecessary items
+  result.ids.resize(min(result.ids.size(), limit));
 
+  // Serialize documents
   vector<SerializedSearchDoc> out;
   out.reserve(min(limit, result.ids.size()));
   auto& db_slice = op_args.GetDbSlice();
   size_t expired_count = 0;
-
   for (size_t i = 0; i < result.ids.size(); i++) {
     DocId id = result.ids[i];
     auto key = key_index_.Get(id);
@@ -374,7 +417,6 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
       continue;
     }
 
-    // TODO(vlad): Separate dry run to load only sortable fields?
     // Load all required fields from document
     auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
     auto fields = params.ShouldReturnAllFields() ? accessor->SerializeDocument(base_->schema)
@@ -382,23 +424,10 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     auto loaded = accessor->Serialize(base_->schema, fields_to_load);
     fields.insert(std::make_move_iterator(loaded.begin()), std::make_move_iterator(loaded.end()));
 
-    // Determine score if needed
-    search::ResultScore score{};
-    if (!result.scores.empty())
-      score = std::move(result.scores[i]);
-    else if (params.sort_option)
-      score = fields[params.sort_option->field.GetShortName(base_->schema)];
-
-    out.push_back({string{key}, std::move(fields), std::move(score)});
-  }
-
-  // If SORTBY was requested, but no scores were prepared, we sort after serializing documents
-  if (params.sort_option && result.scores.empty()) {
-    auto cmp = [order = params.sort_option->order](const auto& l, const auto& r) {
-      return order == SortOrder::ASC ? l < r : r < l;
-    };
-    std::partial_sort(out.begin(), out.begin() + min(out.size(), limit), out.end(), cmp);
-    out.resize(min(limit, out.size()));
+    SerializedSearchDoc doc{string{key}, std::move(fields),
+                            result.knn_scores.empty() ? 0 : result.knn_scores[i].second,
+                            sort_scores.empty() ? std::monostate{} : std::move(sort_scores[i])};
+    out.push_back(std::move(doc));
   }
 
   return {result.total - expired_count, std::move(out), std::move(result.profile)};
