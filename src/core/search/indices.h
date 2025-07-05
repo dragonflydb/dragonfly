@@ -18,7 +18,6 @@
 #include "core/search/base.h"
 #include "core/search/block_list.h"
 #include "core/search/compressed_sorted_set.h"
-#include "core/search/range_tree.h"
 #include "core/search/rax_tree.h"
 
 // TODO: move core field definitions out of big header
@@ -40,7 +39,9 @@ struct NumericIndex : public BaseIndex {
   std::vector<DocId> GetAllDocsWithNonNullValues() const override;
 
  private:
-  RangeTree tree_;
+  bool unique_ids_ = true;  // If true, docs ids are unique in the index, otherwise they can repeat.
+  using Entry = std::pair<double, DocId>;
+  absl::btree_set<Entry, std::less<Entry>, PMR_NS::polymorphic_allocator<Entry>> entries_;
 };
 
 // Base index for string based indices.

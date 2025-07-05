@@ -1,3 +1,7 @@
+// Copyright 2025, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
 #include "core/search/range_tree.h"
 
 namespace dfly::search {
@@ -188,69 +192,6 @@ RangeResult::RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks)
 RangeResult::RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks, double l, double r)
     : l_(l), r_(r), blocks_(std::move(blocks)) {
   DCHECK(!blocks_.empty());
-}
-
-std::vector<DocId> RangeResult::MergeAllResults() {
-  using Entry = std::pair<RangeBlockIterator, RangeBlockIterator>;
-
-  // After the benchmarking, it is better to use inlined vector
-  // than std::priority_queue
-  absl::InlinedVector<Entry, 10> heap;
-  heap.reserve(blocks_.size());
-
-  size_t doc_ids_count = 0;
-  for (const auto* block : blocks_) {
-    auto it = block->begin();
-    while (it != block->end()) {
-      if (l_ <= (*it).second && (*it).second <= r_) {
-        heap.emplace_back(it, block->end());
-        doc_ids_count += block->Size();
-        break;
-      }
-      ++it;
-    }
-  }
-
-  std::vector<DocId> result;
-  result.reserve(doc_ids_count);
-
-  size_t size = heap.size();
-  while (size) {
-    DCHECK(heap[0].first != heap[0].second);
-    DCHECK(l_ <= (*heap[0].first).second && (*heap[0].first).second <= r_);
-
-    size_t min_doc_id_index = 0;
-    for (size_t i = 1; i < size; ++i) {
-      DCHECK(heap[i].first != heap[i].second);
-      DCHECK(l_ <= (*heap[i].first).second && (*heap[i].first).second <= r_);
-
-      if ((*heap[i].first).first < (*heap[min_doc_id_index].first).first) {
-        min_doc_id_index = i;
-      }
-    }
-
-    auto& it = heap[min_doc_id_index].first;
-    auto& end_it = heap[min_doc_id_index].second;
-
-    result.push_back((*it).first);
-
-    while (++it != end_it) {
-      if (l_ <= (*it).second && (*it).second <= r_ && (*it).first != result.back()) {
-        // Found the next valid entry in the current block
-        break;
-      }
-    }
-
-    if (it == end_it) {
-      // If we reached the end of the current block, remove it from the heap
-      std::swap(heap[min_doc_id_index], heap[size - 1]);
-      --size;
-    }
-  }
-
-  DCHECK(std::is_sorted(result.begin(), result.end()));
-
-  return result;
 }
 
 }  // namespace dfly::search

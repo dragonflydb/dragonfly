@@ -299,9 +299,8 @@ TEST_F(RangeTreeTest, BugNotUniqueDoubleValues) {
   tree.Add(1, 10.0);
   tree.Remove(1, 10.0);
 
-  auto result = tree.GetAllDocIds().MergeAllResults();
-  EXPECT_EQ(result.size(), 1u);
-  EXPECT_EQ(result[0], 1);
+  auto result = tree.GetAllDocIds();
+  EXPECT_THAT(result, BlocksAre({{{1, 10.0}}}));
 }
 
 }  // namespace dfly::search
