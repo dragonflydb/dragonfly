@@ -1351,6 +1351,44 @@ static void BM_SearchNumericIndexes(benchmark::State& state) {
 
 BENCHMARK(BM_SearchNumericIndexes)->Arg(10000)->Arg(100000)->Arg(1000000)->ArgNames({"num_docs"});
 
+static void BM_SearchNumericIndexesSmallRanges(benchmark::State& state) {
+  auto schema = MakeSimpleSchema({{"numeric", SchemaField::NUMERIC}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  default_random_engine rnd;
+
+  using NumericType = uint16_t;
+  uniform_int_distribution<NumericType> dist(0, std::numeric_limits<NumericType>::max() / 2048);
+
+  const size_t num_docs = state.range(0);
+  // Insert zero values
+  for (size_t i = 0; i < num_docs / 50; i++) {
+    MockedDocument doc{Map{{"numeric", "0"}}};
+    indices.Add(i, doc);
+  }
+  for (size_t i = num_docs / 50; i < num_docs; i++) {
+    MockedDocument doc{Map{{"numeric", std::to_string(dist(rnd))}}};
+    indices.Add(i, doc);
+  }
+
+  std::string queries[] = {"@numeric:[0 40000]", "@numeric:[-inf +inf]"};
+
+  while (state.KeepRunning()) {
+    for (const auto& query : queries) {
+      CHECK(algo.Init(query, &params));
+      auto result = algo.Search(&indices);
+      CHECK(result.error.empty());
+    }
+  }
+}
+
+BENCHMARK(BM_SearchNumericIndexesSmallRanges)
+    ->Arg(100000)   // One block
+    ->Arg(1000000)  // Two blocks
+    ->ArgNames({"num_docs"});
+
 static void BM_SearchTwoNumericIndexes(benchmark::State& state) {
   auto schema = MakeSimpleSchema({
       {"numeric1", SchemaField::NUMERIC},

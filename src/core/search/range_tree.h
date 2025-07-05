@@ -81,12 +81,17 @@ class RangeResult {
   explicit RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks);
   RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks, double l, double r);
 
-  std::vector<DocId> MergeAllResults();
+  std::vector<DocId> MergeAllResults() const;
 
   // Used in tests
   absl::InlinedVector<RangeBlockPointer, 5> GetBlocks() const {
     return blocks_;
   }
+
+ private:
+  std::vector<DocId> ReturnSingleBlock(const RangeTree::RangeBlock& block) const;
+  std::vector<DocId> MergeTwoBlocks(const RangeTree::RangeBlock& left,
+                                    const RangeTree::RangeBlock& right) const;
 
  private:
   double l_ = -std::numeric_limits<double>::infinity();
