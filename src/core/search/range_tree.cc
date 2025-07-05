@@ -194,4 +194,167 @@ RangeResult::RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks, doubl
   DCHECK(!blocks_.empty());
 }
 
+std::vector<DocId> RangeResult::MergeAllResults() const {
+  if (blocks_.size() == 1) {
+    // If there is only one block, we can return its result directly
+    return ReturnSingleBlock(*blocks_[0]);
+  } else if (blocks_.size() == 2) {
+    // If there are two blocks, we can merge them directly
+    return MergeTwoBlocks(*blocks_[0], *blocks_[1]);
+  }
+
+  using Entry = std::pair<RangeBlockIterator, RangeBlockIterator>;
+
+  // After the benchmarking, it is better to use inlined vector
+  // than std::priority_queue
+  absl::InlinedVector<Entry, 10> heap;
+  heap.reserve(blocks_.size());
+
+  size_t doc_ids_count = 0;
+  for (const auto* block : blocks_) {
+    auto it = block->begin();
+    while (it != block->end()) {
+      if (l_ <= (*it).second && (*it).second <= r_) {
+        heap.emplace_back(it, block->end());
+        doc_ids_count += block->Size();
+        break;
+      }
+      ++it;
+    }
+  }
+
+  std::vector<DocId> result;
+  result.reserve(doc_ids_count);
+
+  size_t size = heap.size();
+  while (size) {
+    DCHECK(heap[0].first != heap[0].second);
+    DCHECK(l_ <= (*heap[0].first).second && (*heap[0].first).second <= r_);
+
+    size_t min_doc_id_index = 0;
+    for (size_t i = 1; i < size; ++i) {
+      DCHECK(heap[i].first != heap[i].second);
+      DCHECK(l_ <= (*heap[i].first).second && (*heap[i].first).second <= r_);
+
+      if ((*heap[i].first).first < (*heap[min_doc_id_index].first).first) {
+        min_doc_id_index = i;
+      }
+    }
+
+    auto& it = heap[min_doc_id_index].first;
+    auto& end_it = heap[min_doc_id_index].second;
+
+    result.push_back((*it).first);
+
+    while (++it != end_it) {
+      if (l_ <= (*it).second && (*it).second <= r_ && (*it).first != result.back()) {
+        // Found the next valid entry in the current block
+        break;
+      }
+    }
+
+    if (it == end_it) {
+      // If we reached the end of the current block, remove it from the heap
+      std::swap(heap[min_doc_id_index], heap[size - 1]);
+      --size;
+    }
+  }
+
+  DCHECK(std::is_sorted(result.begin(), result.end()));
+
+  return result;
+}
+
+std::vector<DocId> RangeResult::ReturnSingleBlock(const RangeTree::RangeBlock& block) const {
+  std::vector<DocId> result;
+  result.reserve(block.Size() / 16);
+
+  for (const auto& entry : block) {
+    if (l_ <= entry.second && entry.second <= r_) {
+      result.push_back(entry.first);
+    }
+  }
+
+  DCHECK(std::is_sorted(result.begin(), result.end()));
+  return result;
+}
+
+std::vector<DocId> RangeResult::MergeTwoBlocks(const RangeTree::RangeBlock& left,
+                                               const RangeTree::RangeBlock& right) const {
+  std::vector<DocId> result;
+  result.reserve(left.Size() / 4 + right.Size() / 4);
+
+  auto left_it = left.begin();
+  auto right_it = right.begin();
+
+  // Better perfomance that using std::find_if
+  auto skip_left = [&](DocId doc_id) {
+    while (++left_it != left.end() && (*left_it).first == doc_id) {
+    };
+  };
+  auto skip_right = [&](DocId doc_id) {
+    while (++right_it != right.end() && (*right_it).first == doc_id) {
+    };
+  };
+
+  while (true) {
+    while (left_it != left.end() && (*left_it).second < l_) {
+      ++left_it;
+    }
+
+    while (right_it != right.end() && r_ < (*right_it).second) {
+      ++right_it;
+    }
+
+    if (left_it == left.end() || right_it == right.end()) {
+      break;
+    }
+
+    DocId l = (*left_it).first;
+    DocId r = (*right_it).first;
+
+    if (l < r) {
+      result.push_back(l);
+
+      // Skip all entries in the left block that have the same doc_id
+      skip_left(l);
+    } else if (r < l) {
+      result.push_back(r);
+
+      // Skip all entries in the right block that have the same doc_id
+      skip_right(r);
+    } else {
+      result.push_back(l);
+
+      // Skip all entries in both blocks that have the same doc_id
+      skip_left(l);
+      skip_right(r);
+    }
+  }
+
+  while (left_it != left.end()) {
+    if (l_ <= (*left_it).second) {
+      DocId doc_id = (*left_it).first;
+      result.push_back(doc_id);
+      skip_left(doc_id);
+    } else {
+      ++left_it;
+    }
+  }
+
+  while (right_it != right.end()) {
+    if ((*right_it).second <= r_) {
+      DocId doc_id = (*right_it).first;
+      result.push_back(doc_id);
+      skip_right(doc_id);
+    } else {
+      ++right_it;
+    }
+  }
+
+  DCHECK(std::is_sorted(result.begin(), result.end()));
+  DCHECK(left_it == left.end() && right_it == right.end());
+  return result;
+}
+
 }  // namespace dfly::search
