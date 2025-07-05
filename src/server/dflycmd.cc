@@ -560,7 +560,7 @@ void DflyCmd::ReplicaOffset(CmdArgList args, RedisReplyBuilder* rb) {
 void DflyCmd::Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   parser.ExpectTag("LOAD");
-  string filename{parser.Next()};
+  string filename = parser.Next<string>();
   ServerFamily::LoadExistingKeys existing_keys = ServerFamily::LoadExistingKeys::kFail;
 
   if (parser.HasNext()) {

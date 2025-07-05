@@ -1119,10 +1119,10 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
   LoadOptions load_opts;
   if (absl::EndsWith(path, "summary.dfs")) {
     // we read summary first to get snapshot_id and load data correctly
-    error_code load_result =
+    error_code load_ec =
         pool.GetNextProactor()->Await([&] { return LoadRdb(path, existing_keys, &load_opts); });
-    if (load_result)
-      return immediate(load_result);
+    if (load_ec)
+      return immediate(load_ec);
   }
 
   auto aggregated_result = std::make_shared<AggregateLoadResult>();
@@ -1142,9 +1142,9 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     }
 
     auto load_func = [=]() mutable {
-      error_code load_result = LoadRdb(file, existing_keys, &load_opts);
-      if (load_result) {
-        aggregated_result->first_error = load_result;
+      error_code load_ec = LoadRdb(file, existing_keys, &load_opts);
+      if (load_ec) {
+        aggregated_result->first_error = load_ec;
       } else {
         aggregated_result->keys_read.fetch_add(load_opts.num_loaded_keys, memory_order_relaxed);
       }
