@@ -16,6 +16,7 @@
 
 #include "base/pmr/memory_resource.h"
 #include "core/mi_memory_resource.h"
+#include "core/search/base.h"
 #include "core/search/search.h"
 #include "core/search/synonyms.h"
 #include "server/common.h"
@@ -32,10 +33,8 @@ std::string_view SearchFieldTypeToString(search::SchemaField::FieldType);
 struct SerializedSearchDoc {
   std::string key;
   SearchDocData values;
-  search::ResultScore score;
-
-  bool operator<(const SerializedSearchDoc& other) const;
-  bool operator>=(const SerializedSearchDoc& other) const;
+  float knn_score;
+  search::SortableValue sort_score;
 };
 
 struct SearchResult {
@@ -143,6 +142,10 @@ struct SearchParams {
   struct SortOption {
     SearchField field;
     SortOrder order = SortOrder::ASC;
+
+    bool IsSame(const search::KnnScoreSortOption& knn_sort) const {
+      return knn_sort.score_field_alias == field.NameView();
+    }
   };
 
   // Parameters for "LIMIT offset total": select total amount documents with a specific offset from
@@ -272,6 +275,11 @@ class ShardDocIndex {
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
+
+  // Behaviour identical to SortIndex::Sort for non-sortable fields that need to be fetched first
+  std::vector<search::SortableValue> KeepTopKSorted(std::vector<DocId>* ids,
+                                                    const SearchParams::SortOption& sort,
+                                                    size_t limit, const OpArgs& op_args) const;
 
  private:
   std::shared_ptr<const DocIndex> base_;

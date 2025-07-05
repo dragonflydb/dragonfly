@@ -2,6 +2,7 @@
 Test compatibility with the redis-py client search module.
 Search correctness should be ensured with unit tests.
 """
+
 import pytest
 from redis import asyncio as aioredis
 from .utility import *
@@ -489,7 +490,7 @@ def test_redis_om(df_server):
     try:
         import redis_om
     except ModuleNotFoundError:
-        skip_if_not_in_github()
+        skip_if_not_in_github("redis-om python library not installed")
         raise
 
     client = redis.Redis(port=df_server.port)

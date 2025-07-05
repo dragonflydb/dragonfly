@@ -130,14 +130,11 @@ struct AlgorithmProfile {
 struct SearchResult {
   size_t total;  // how many documents were matched in total
 
-  // number of matches before any aggregation, used by multi-shard optimizations
-  size_t pre_aggregation_total;
-
   // The ids of the matched documents
   std::vector<DocId> ids;
 
   // Contains final scores if an aggregation was present
-  std::vector<ResultScore> scores;
+  std::vector<std::pair<DocId, float>> knn_scores;
 
   // If profiling was enabled
   std::optional<AlgorithmProfile> profile;
