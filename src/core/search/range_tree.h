@@ -81,6 +81,8 @@ class RangeResult {
   explicit RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks);
   RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks, double l, double r);
 
+  std::vector<DocId> MergeAllResults();
+
   // Used in tests
   absl::InlinedVector<RangeBlockPointer, 5> GetBlocks() const {
     return blocks_;
