@@ -11,7 +11,7 @@ if (DF_USE_SSL)
 endif()
 
 cxx_link(dfly_facade dfly_parser_lib http_server_lib fibers2
-         ${TLS_LIB} TRDP::mimalloc TRDP::dconv)
+         ${TLS_LIB} TRDP::mimalloc2 TRDP::dconv)
 
 add_library(facade_test facade_test.cc)
 cxx_link(facade_test dfly_facade gtest_main_ext)
