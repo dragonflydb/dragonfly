@@ -1203,35 +1203,6 @@ TEST_F(SearchFamilyTest, FlushSearchIndices) {
   EXPECT_THAT(resp, ErrArg("ERR Index already exists"));
 }
 
-TEST_F(SearchFamilyTest, SearchWithLoadOptionHard) {
-  // Test HASH
-  Run({"HSET", "h1", "a", "1", "b", "one", "first", "h1"});
-  Run({"HSET", "h2", "a", "2", "b", "two", "second", "h2"});
-  Run({"HSET", "h3", "a", "1", "b", "one", "third", "h3"});
-
-  auto resp = Run({"FT.CREATE", "i1", "ON", "HASH", "SCHEMA", "@a", "TAG"});
-  EXPECT_EQ(resp, "OK");
-
-  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "@b"});
-  EXPECT_THAT(resp, IsMapWithSize("h1", IsMap("a", "1", "b", "one", "first", "h1"), "h2",
-                                  IsMap("a", "2", "b", "two", "second", "h2"), "h3",
-                                  IsMap("a", "1", "b", "one", "third", "h3")));
-
-  // Test JSON
-  Run({"JSON.SET", "j1", ".", R"({"a":"1","b":"one","first":"j1"})"});
-  Run({"JSON.SET", "j2", ".", R"({"a":"2","b":"two","second":"j2"})"});
-  Run({"JSON.SET", "j3", ".", R"({"a":"1","b":"one","third":"j3"})"});
-
-  resp = Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.a", "AS", "a", "TAG"});
-  EXPECT_EQ(resp, "OK");
-
-  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "$.b", "AS", "b"});
-  EXPECT_THAT(
-      resp, IsMapWithSize("j1", IsMap("b", "\"one\"", "$", R"({"a":"1","b":"one","first":"j1"})"),
-                          "j2", IsMap("b", "\"two\"", "$", R"({"a":"2","b":"two","second":"j2"})"),
-                          "j3", IsMap("b", "\"one\"", "$", R"({"a":"1","b":"one","third":"j3"})")));
-}
-
 // todo: ASAN fails heres on arm
 #ifndef SANITIZERS
 TEST_F(SearchFamilyTest, AggregateWithLoadOptionHard) {
@@ -1296,11 +1267,6 @@ TEST_F(SearchFamilyTest, WrongFieldTypeJson) {
 
   EXPECT_EQ(Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.value", "AS", "value", "NUMERIC"}),
             "OK");
-
-  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "$.another_value"});
-  EXPECT_THAT(
-      resp, IsMapWithSize("j2", IsMap("$", R"({"value":1})"), "j4",
-                          IsMap("$", R"({"another_value":2,"value":2})", "$.another_value", "2")));
 
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
@@ -1508,208 +1474,6 @@ TEST_F(SearchFamilyTest, WrongVectorFieldType) {
 
   resp = Run({"FT.SEARCH", "index", "*"});
   EXPECT_THAT(resp, AreDocIds("j6", "j7", "j1", "j4", "j8"));
-}
-
-#ifndef SANITIZERS
-TEST_F(SearchFamilyTest, SearchLoadReturnJson) {
-  Run({"JSON.SET", "j1", ".", R"({"a":"one"})"});
-  Run({"JSON.SET", "j2", ".", R"({"a":"two"})"});
-
-  auto resp = Run({"FT.CREATE", "i1", "ON", "JSON", "SCHEMA", "$.a", "AS", "a", "TEXT"});
-  EXPECT_EQ(resp, "OK");
-
-  // Search with RETURN $.a
-  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "$.a"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("$.a", "\"one\""), "j2", IsMap("$.a", "\"two\"")));
-
-  // Search with RETURN a
-  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "a"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("a", "\"one\""), "j2", IsMap("a", "\"two\"")));
-
-  // Search with RETURN @a
-  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "@a"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap(), "j2", IsMap()));
-
-  // Search with RETURN $.a AS vvv
-  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "$.a", "AS", "vvv"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("vvv", "\"one\""), "j2", IsMap("vvv", "\"two\"")));
-
-  // Search with RETURN a AS vvv
-  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "a", "AS", "vvv"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("vvv", "\"one\""), "j2", IsMap("vvv", "\"two\"")));
-
-  // Search with RETURN @a AS vvv
-  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "@a", "AS", "vvv"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap(), "j2", IsMap()));
-
-  // Search with LOAD $.a
-  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "$.a"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("$.a", "\"one\"", "$", R"({"a":"one"})"), "j2",
-                                  IsMap("$.a", "\"two\"", "$", R"({"a":"two"})")));
-
-  // Search with LOAD a
-  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "a"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("a", "\"one\"", "$", R"({"a":"one"})"), "j2",
-                                  IsMap("a", "\"two\"", "$", R"({"a":"two"})")));
-
-  // Search with LOAD @a
-  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "@a"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("a", "\"one\"", "$", R"({"a":"one"})"), "j2",
-                                  IsMap("a", "\"two\"", "$", R"({"a":"two"})")));
-
-  // Search with LOAD $.a AS vvv
-  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "$.a", "AS", "vvv"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("$", R"({"a":"one"})", "vvv", "\"one\""), "j2",
-                                  IsMap("$", R"({"a":"two"})", "vvv", "\"two\"")));
-
-  // Search with LOAD a AS vvv
-  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "a", "AS", "vvv"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("$", R"({"a":"one"})", "vvv", "\"one\""), "j2",
-                                  IsMap("$", R"({"a":"two"})", "vvv", "\"two\"")));
-
-  // Search with LOAD @a AS vvv
-  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "@a", "AS", "vvv"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("$", R"({"a":"one"})", "vvv", "\"one\""), "j2",
-                                  IsMap("$", R"({"a":"two"})", "vvv", "\"two\"")));
-
-  /* Test another name */
-
-  resp = Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.a", "AS", "nnn", "TEXT"});
-  EXPECT_EQ(resp, "OK");
-
-  // Search with RETURN nnn
-  resp = Run({"FT.SEARCH", "i2", "*", "RETURN", "1", "nnn"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("nnn", "\"one\""), "j2", IsMap("nnn", "\"two\"")));
-
-  // Search with RETURN @nnn
-  resp = Run({"FT.SEARCH", "i2", "*", "RETURN", "1", "@nnn"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap(), "j2", IsMap()));
-
-  // Search with RETURN a
-  resp = Run({"FT.SEARCH", "i2", "*", "RETURN", "1", "a"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap(), "j2", IsMap()));
-
-  // Search with RETURN @a
-  resp = Run({"FT.SEARCH", "i2", "*", "RETURN", "1", "@a"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap(), "j2", IsMap()));
-
-  // Search with LOAD nnn
-  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "nnn"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("nnn", "\"one\"", "$", R"({"a":"one"})"), "j2",
-                                  IsMap("nnn", "\"two\"", "$", R"({"a":"two"})")));
-
-  // Search with LOAD @nnn
-  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "@nnn"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("nnn", "\"one\"", "$", R"({"a":"one"})"), "j2",
-                                  IsMap("nnn", "\"two\"", "$", R"({"a":"two"})")));
-
-  // Search with LOAD a
-  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "a"});
-  EXPECT_THAT(
-      resp, IsMapWithSize("j1", IsMap("$", R"({"a":"one"})"), "j2", IsMap("$", R"({"a":"two"})")));
-
-  // Search with LOAD @a
-  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "@a"});
-  EXPECT_THAT(
-      resp, IsMapWithSize("j1", IsMap("$", R"({"a":"one"})"), "j2", IsMap("$", R"({"a":"two"})")));
-}
-#endif
-
-TEST_F(SearchFamilyTest, SearchLoadReturnHash) {
-  Run({"HSET", "h1", "a", "one"});
-  Run({"HSET", "h2", "a", "two"});
-
-  auto resp = Run({"FT.CREATE", "i1", "ON", "HASH", "SCHEMA", "a", "TEXT"});
-  EXPECT_EQ(resp, "OK");
-
-  // Search with RETURN $.a
-  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "$.a"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap(), "h1", IsMap()));
-
-  // Search with RETURN a
-  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "a"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("a", "two"), "h1", IsMap("a", "one")));
-
-  // Search with RETURN @a
-  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "@a"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap(), "h1", IsMap()));
-
-  // Search with RETURN $.a AS vvv
-  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "$.a", "AS", "vvv"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap(), "h1", IsMap()));
-
-  // Search with RETURN a AS vvv
-  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "a", "AS", "vvv"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("vvv", "two"), "h1", IsMap("vvv", "one")));
-
-  // Search with RETURN @a AS vvv
-  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "@a", "AS", "vvv"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap(), "h1", IsMap()));
-
-  // Search with LOAD $.a
-  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "$.a"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("a", "two"), "h1", IsMap("a", "one")));
-
-  // Search with LOAD a
-  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "a"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("a", "two"), "h1", IsMap("a", "one")));
-
-  // Search with LOAD @a
-  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "@a"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("a", "two"), "h1", IsMap("a", "one")));
-
-  // Search with LOAD $.a AS vvv
-  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "$.a", "AS", "vvv"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("a", "two"), "h1", IsMap("a", "one")));
-
-  // Search with LOAD a AS vvv
-  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "a", "AS", "vvv"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("vvv", "two", "a", "two"), "h1",
-                                  IsMap("vvv", "one", "a", "one")));
-
-  // Search with LOAD @a AS vvv
-  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "@a", "AS", "vvv"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("vvv", "two", "a", "two"), "h1",
-                                  IsMap("vvv", "one", "a", "one")));
-
-  /* Test another name */
-
-  resp = Run({"FT.CREATE", "i2", "ON", "HASH", "SCHEMA", "a", "AS", "nnn", "TEXT"});
-  EXPECT_EQ(resp, "OK");
-
-  // Search with RETURN nnn
-  resp = Run({"FT.SEARCH", "i2", "*", "RETURN", "1", "nnn"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("nnn", "two"), "h1", IsMap("nnn", "one")));
-
-  // Search with RETURN @nnn
-  resp = Run({"FT.SEARCH", "i2", "*", "RETURN", "1", "@nnn"});
-  EXPECT_THAT(resp, IsMapWithSize("h1", IsMap(), "h2", IsMap()));
-
-  // Search with RETURN a
-  resp = Run({"FT.SEARCH", "i2", "*", "RETURN", "1", "a"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("a", "two"), "h1", IsMap("a", "one")));
-
-  // Search with RETURN @a
-  resp = Run({"FT.SEARCH", "i2", "*", "RETURN", "1", "@a"});
-  EXPECT_THAT(resp, IsMapWithSize("h1", IsMap(), "h2", IsMap()));
-
-  // Search with LOAD nnn
-  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "nnn"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("nnn", "two", "a", "two"), "h1",
-                                  IsMap("nnn", "one", "a", "one")));
-
-  // Search with LOAD @nnn
-  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "@nnn"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("nnn", "two", "a", "two"), "h1",
-                                  IsMap("nnn", "one", "a", "one")));
-
-  // Search with LOAD a
-  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "a"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("a", "two"), "h1", IsMap("a", "one")));
-
-  // Search with LOAD @a
-  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "@a"});
-  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("a", "two"), "h1", IsMap("a", "one")));
 }
 
 // Test that FT.AGGREGATE prints only needed fields
@@ -1958,19 +1722,6 @@ TEST_F(SearchFamilyTest, InvalidSearchOptions) {
   resp = Run({"FT.SEARCH", "idx", "*", "LIMIT", "start", "count"});
   EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
 
-  // Test with invalid LOAD arguments
-  resp = Run({"FT.SEARCH", "idx", "*", "LOAD", "@field1", "@field2"});
-  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
-
-  // Test with duplicate fields in LOAD
-  resp = Run({"FT.SEARCH", "idx", "*", "LOAD", "4", "@field1", "@field1", "@field2", "@field2"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("field1", "\"first\"", "field2", "\"second\"", "$",
-                                              R"({"field1":"first","field2":"second"})")));
-
-  // Test with LOAD exceeding maximum allowed count
-  resp = Run({"FT.SEARCH", "idx", "*", "LOAD", "100000000000000000000", "@field1", "@field2"});
-  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
-
   // Test with invalid RETURN syntax (missing count)
   resp = Run({"FT.SEARCH", "idx", "*", "RETURN", "@field1", "@field2"});
   EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
@@ -1982,10 +1733,6 @@ TEST_F(SearchFamilyTest, InvalidSearchOptions) {
   // Test with RETURN exceeding maximum allowed count
   resp = Run({"FT.SEARCH", "idx", "*", "RETURN", "100000000000000000000", "@field1", "@field2"});
   EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
-
-  // Test with NOCONTENT and LOAD
-  resp = Run({"FT.SEARCH", "idx", "*", "NOCONTENT", "LOAD", "2", "@field1", "@field2"});
-  EXPECT_THAT(resp, IsArray(IntArg(1), "j1"));
 
   // Test with NOCONTENT and RETURN
   resp = Run({"FT.SEARCH", "idx", "*", "NOCONTENT", "RETURN", "2", "@field1", "@field2"});
