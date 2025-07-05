@@ -25,6 +25,8 @@
 
 namespace dfly {
 
+struct BaseAccessor;
+
 using SearchDocData = absl::flat_hash_map<std::string /*field*/, search::SortableValue /*value*/>;
 using Synonyms = search::Synonyms;
 
@@ -276,10 +278,13 @@ class ShardDocIndex {
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
 
+  using LoadedEntry = std::pair<std::string_view, std::unique_ptr<BaseAccessor>>;
+  std::optional<LoadedEntry> LoadEntry(search::DocId id, const OpArgs& op_args) const;
+
   // Behaviour identical to SortIndex::Sort for non-sortable fields that need to be fetched first
-  std::vector<search::SortableValue> KeepTopKSorted(std::vector<DocId>* ids,
+  std::vector<search::SortableValue> KeepTopKSorted(std::vector<DocId>* ids, size_t limit,
                                                     const SearchParams::SortOption& sort,
-                                                    size_t limit, const OpArgs& op_args) const;
+                                                    const OpArgs& op_args) const;
 
  private:
   std::shared_ptr<const DocIndex> base_;
