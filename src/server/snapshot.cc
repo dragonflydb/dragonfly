@@ -22,6 +22,13 @@
 
 ABSL_FLAG(bool, point_in_time_snapshot, true, "If true replication uses point in time snapshoting");
 
+// This flag breaks compatibility with previous versions of Dragonfly, i.e. they won't be able
+// to load snapshots created with this flag set to true. Therefore we set it to false by default.
+// And enable it around 10/2025.
+ABSL_FLAG(bool, save_segment_counts, false,
+          "If true, RDB snapshot will save segment counts of prime and expiry tables. "
+          "This is an optimization to reduce rehashing of tables upon load.");
+
 namespace dfly {
 
 using namespace std;
@@ -169,6 +176,23 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   }
 
   const uint64_t kCyclesPerJiffy = base::CycleClock::Frequency() >> 16;  // ~15usec.
+
+  // TODO: to prohibit this for legacy RDB format. Since we disable save_segment_counts,
+  // this can wait.
+  if (absl::GetFlag(FLAGS_save_segment_counts)) {
+    for (DbIndex db_index = 0; db_index < db_array_.size(); ++db_index) {
+      if (!db_array_[db_index])
+        continue;
+      if (!cntx_->IsRunning())
+        return;
+
+      PrimeTable* pt = &db_array_[db_index]->prime;
+      ExpireTable* et = &db_array_[db_index]->expire;
+      std::ignore = serializer_->SelectDb(db_index);
+      std::ignore = serializer_->SaveSegmentCounts(pt->GetSegmentCount(), et->GetSegmentCount());
+    }
+    PushSerialized(false);
+  }
 
   for (DbIndex snapshot_db_index_ = 0; snapshot_db_index_ < db_array_.size();
        ++snapshot_db_index_) {

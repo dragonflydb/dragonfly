@@ -31,6 +31,11 @@ constexpr uint8_t RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START = 201;
 constexpr uint8_t RDB_OPCODE_COMPRESSED_LZ4_BLOB_START = 202;
 constexpr uint8_t RDB_OPCODE_COMPRESSED_BLOB_END = 203;
 
+// This opcode is used to send the number of segments in prime and expiry tables.
+// It is an optimization to reduce rehashing of tables upon load.
+// The format is RDB_OPCODE_SEGMENT_COUNT, followed up by two numbers
+// denoting the (minimal) number of segments in the prime and expiry tables respectively.
+constexpr uint8_t RDB_OPCODE_SEGMENT_COUNT = 204;
 constexpr uint8_t RDB_OPCODE_JOURNAL_BLOB = 210;
 
 // A full sync will continue to send information in journal blobs until the replica

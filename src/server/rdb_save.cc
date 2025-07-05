@@ -46,7 +46,6 @@ ABSL_FLAG(dfly::CompressionMode, compression_mode, dfly::CompressionMode::MULTI_
           "set 2 for multi entry zstd compression on df snapshot and single entry on rdb snapshot,"
           "set 3 for multi entry lz4 compression on df snapshot and single entry on rdb snapshot");
 
-// TODO: to retire this flag in v1.31
 ABSL_RETIRED_FLAG(bool, stream_rdb_encode_v2, true,
                   "Retired. Uses format, compatible with redis 7.2 and Dragonfly v1.26+");
 
@@ -257,6 +256,13 @@ error_code RdbSerializer::SelectDb(uint32_t dbid) {
   return WriteRaw(Bytes{buf, enclen + 1});
 }
 
+std::error_code RdbSerializer::SaveSegmentCounts(uint32_t prime_count, uint32_t expires_count) {
+  RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_SEGMENT_COUNT));
+  RETURN_ON_ERR(SaveLen(prime_count));
+  RETURN_ON_ERR(SaveLen(expires_count));
+  return {};
+}
+
 // Called by snapshot
 io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv,
                                              uint64_t expire_ms, uint32_t mc_flags, DbIndex dbid) {
@@ -268,7 +274,10 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
   }
 
   DVLOG(3) << "Selecting " << dbid << " previous: " << last_entry_db_index_;
-  SelectDb(dbid);
+  auto ec = SelectDb(dbid);
+  if (ec) {
+    return make_unexpected(ec);
+  }
 
   /* Save the expire time */
   if (expire_ms > 0) {
@@ -1427,7 +1436,7 @@ error_code RdbSaver::SaveHeader(const GlobalData& glob_state) {
   CHECK_EQ(9u, sz);
 
   RETURN_ON_ERR(impl_->serializer()->WriteRaw(Bytes{reinterpret_cast<uint8_t*>(magic), sz}));
-  RETURN_ON_ERR(SaveAux(std::move(glob_state)));  // Should be first after magic
+  RETURN_ON_ERR(SaveAux(glob_state));  // Should be first after magic
   RETURN_ON_ERR(impl_->FlushSerializer());
   return error_code{};
 }
@@ -1457,10 +1466,6 @@ void RdbSaver::FillFreqMap(RdbTypeFreqMap* freq_map) {
 }
 
 error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
-  static_assert(sizeof(void*) == 8, "");
-
-  error_code ec;
-
   // Should be first
   if (!snapshot_id_.empty()) {
     RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("snapshot-id", snapshot_id_));
@@ -1490,6 +1495,13 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
     DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_indices.empty());
     for (const string& s : glob_state.search_indices)
       RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));
+    if (save_mode_ == SaveMode::SINGLE_SHARD_WITH_SUMMARY || save_mode_ == SaveMode::SUMMARY) {
+      // We save the shard id in the summary file, so that we can restore it later.
+      RETURN_ON_ERR(SaveAuxFieldStrInt("shard-count", shard_set->size()));
+    }
+    if (EngineShard* shard = EngineShard::tlocal(); shard) {
+      RETURN_ON_ERR(SaveAuxFieldStrInt("shard-id", shard->shard_id()));
+    }
   }
 
   // TODO: "repl-stream-db", "repl-id", "repl-offset"
