@@ -61,7 +61,7 @@ struct StringValue {
   StringValue(std::string s) : v_{std::move(s)} {
   }
 
-  StringValue(fb2::Future<std::string> f) : v_{std::move(f)} {
+  StringValue(fb2::Future<io::Result<std::string>> f) : v_{std::move(f)} {
   }
 
   // Get and consume value. If backed by a future, blocks until resolved.
@@ -74,12 +74,8 @@ struct StringValue {
   static StringValue Read(DbIndex dbid, std::string_view key, const PrimeValue& pv,
                           EngineShard* es);
 
-  bool IsFuturized() const {
-    return std::holds_alternative<fb2::Future<std::string>>(v_);
-  }
-
  private:
-  std::variant<std::monostate, std::string, fb2::Future<std::string>> v_;
+  std::variant<std::monostate, std::string, fb2::Future<io::Result<std::string>>> v_;
 };
 
 // Helper for performing SET operations with various options
@@ -155,12 +151,13 @@ size_t SetRange(std::string* value, size_t start, std::string_view range) {
   return value->size();
 }
 
-template <typename T> using TResult = std::variant<T, fb2::Future<T>>;
+template <typename T> using TResult = std::variant<T, fb2::Future<T>, fb2::Future<io::Result<T>>>;
 
 template <typename T> T GetResult(TResult<T> v) {
   Overloaded ov{
       [](T&& t) { return t; },
       [](fb2::Future<T>&& future) { return future.Get(); },
+      [](fb2::Future<io::Result<T>>&& future) { return *future.Get(); },
   };
   return std::visit(ov, std::move(v));
 }
@@ -180,7 +177,7 @@ OpResult<TResult<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
     fb2::Future<size_t> fut;
     op_args.shard->tiered_storage()->Read(
         op_args.db_cntx.db_index, key, co,
-        [fut](const std::string& s) mutable { fut.Resolve(s.size()); });
+        [fut](io::Result<std::string> s) mutable { fut.Resolve(s->size()); });
     return {std::move(fut)};
   } else {
     return {co.Size()};
@@ -255,10 +252,10 @@ OpResult<StringValue> OpGetRange(const OpArgs& op_args, string_view key, int32_t
   RETURN_ON_BAD_STATUS(it_res);
 
   if (const CompactObj& co = it_res.value()->second; co.IsExternal()) {
-    fb2::Future<std::string> fut;
+    fb2::Future<io::Result<std::string>> fut;
     op_args.shard->tiered_storage()->Read(
         op_args.db_cntx.db_index, key, co,
-        [read, fut](const std::string& s) mutable { fut.Resolve(string{read(s)}); });
+        [read, fut](const io::Result<std::string>& s) mutable { fut.Resolve(string{read(*s)}); });
     return {std::move(fut)};
   } else {
     string tmp;
@@ -613,8 +610,8 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
     const PrimeValue& value = it->second;
     if (value.IsExternal()) {
       wait_bc->Add(1);
-      auto cb = [next, wait_bc](const string& v) mutable {
-        memcpy(next, v.data(), v.size());
+      auto cb = [next, wait_bc](const io::Result<string>& v) mutable {
+        memcpy(next, v->data(), v->size());
         wait_bc->Dec();
       };
       shard->tiered_storage()->Read(t->GetDbIndex(), it.key(), value, std::move(cb));
@@ -881,7 +878,9 @@ string StringValue::Get() && {
   auto prev = exchange(v_, monostate{});
   if (holds_alternative<string>(prev))
     return std::move(std::get<string>(prev));
-  return std::get<fb2::Future<std::string>>(prev).Get();
+
+  // TODO(vlad): Propagate error further
+  return *std::get<fb2::Future<io::Result<std::string>>>(prev).Get();
 }
 
 bool StringValue::IsEmpty() const {

@@ -32,7 +32,8 @@ void JournalWriter::Write(uint64_t v) {
 
 void JournalWriter::Write(std::string_view sv) {
   Write(sv.size());
-  sink_->Write(io::Buffer(sv));
+  if (!sv.empty())  // arguments can be empty strings
+    sink_->Write(io::Buffer(sv));
 }
 
 void JournalWriter::Write(const journal::Entry::Payload& payload) {
