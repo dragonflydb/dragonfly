@@ -34,7 +34,7 @@ class RangeTree {
   friend class RangeResult;
 
   using RangeNumber = double;
-  using Key = std::pair<RangeNumber, RangeNumber>;
+  using Key = RangeNumber;
   using Entry = std::pair<DocId, double>;
   using RangeBlock = BlockList<SortedVector<Entry>>;
   using Map = absl::btree_map<Key, RangeBlock, std::less<Key>,
@@ -81,10 +81,17 @@ class RangeResult {
   explicit RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks);
   RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks, double l, double r);
 
+  std::vector<DocId> MergeAllResults() const;
+
   // Used in tests
   absl::InlinedVector<RangeBlockPointer, 5> GetBlocks() const {
     return blocks_;
   }
+
+ private:
+  std::vector<DocId> ReturnSingleBlock(const RangeTree::RangeBlock& block) const;
+  std::vector<DocId> MergeTwoBlocks(const RangeTree::RangeBlock& left,
+                                    const RangeTree::RangeBlock& right) const;
 
  private:
   double l_ = -std::numeric_limits<double>::infinity();

@@ -9,19 +9,16 @@ namespace dfly::search {
 namespace {
 
 template <typename MapT> auto FindRangeBlockImpl(MapT& entries, double value) {
-  using RangeNumber = double;
   DCHECK(!entries.empty());
 
-  auto it = entries.lower_bound({value, -std::numeric_limits<RangeNumber>::infinity()});
-  if (it != entries.begin() && (it == entries.end() || it->first.first > value)) {
+  auto it = entries.lower_bound(value);
+  if (it != entries.begin() && (it == entries.end() || it->first > value)) {
     // TODO: remove this, we do log N here
     // we can use negative left bouding to find the block
     --it;  // Move to the block that contains the value
   }
 
-  DCHECK(it != entries.end() &&
-         (it->first.first <= value &&
-          (value == std::numeric_limits<RangeNumber>::infinity() || value < it->first.second)));
+  DCHECK(it != entries.end() && it->first <= value);
   return it;
 }
 
@@ -30,8 +27,7 @@ template <typename MapT> auto FindRangeBlockImpl(MapT& entries, double value) {
 RangeTree::RangeTree(PMR_NS::memory_resource* mr, size_t max_range_block_size)
     : max_range_block_size_(max_range_block_size), entries_(mr) {
   // TODO: at the beggining create more blocks
-  entries_.insert({{-std::numeric_limits<RangeNumber>::infinity(),
-                    std::numeric_limits<RangeNumber>::infinity()},
+  entries_.insert({{-std::numeric_limits<RangeNumber>::infinity()},
                    RangeBlock{entries_.get_allocator().resource(), max_range_block_size_}});
 }
 
@@ -42,9 +38,7 @@ void RangeTree::Add(DocId id, double value) {
   RangeBlock& block = it->second;
 
   auto insert_result = block.Insert({id, value});
-  LOG_IF(ERROR, !insert_result) << "RangeTree: Failed to insert id: " << id << ", value: " << value
-                                << " into block with range [" << it->first.first << ", "
-                                << it->first.second << ")";
+  LOG_IF(ERROR, !insert_result) << "RangeTree: Failed to insert id: " << id << ", value: " << value;
 
   if (block.Size() <= max_range_block_size_) {
     return;
@@ -60,9 +54,7 @@ void RangeTree::Remove(DocId id, double value) {
   RangeBlock& block = it->second;
 
   auto remove_result = block.Remove({id, value});
-  LOG_IF(ERROR, !remove_result) << "RangeTree: Failed to remove id: " << id << ", value: " << value
-                                << " from block with range [" << it->first.first << ", "
-                                << it->first.second << ")";
+  LOG_IF(ERROR, !remove_result) << "RangeTree: Failed to remove id: " << id << ", value: " << value;
 
   // TODO: maybe merging blocks if they are too small
   // The problem that for each mutable operation we do Remove and then Add,
@@ -129,10 +121,7 @@ TODO: we can optimize this case by splitting to three blocks:
  - empty right block with range [std::nextafter(m, +inf), r)
 */
 void RangeTree::SplitBlock(Map::iterator it) {
-  const RangeNumber l = it->first.first;
-  const RangeNumber r = it->first.second;
-
-  DCHECK(l < r);
+  const RangeNumber l = it->first;
 
   auto split_result = Split(std::move(it->second));
 
@@ -144,11 +133,11 @@ void RangeTree::SplitBlock(Map::iterator it) {
   if (l != m) {
     // If l == m, it means that all values in the block were equal to the median value
     // We can not insert an empty block with range [l, l) because it is not valid.
-    entries_.emplace(std::piecewise_construct, std::forward_as_tuple(l, m),
+    entries_.emplace(std::piecewise_construct, std::forward_as_tuple(l),
                      std::forward_as_tuple(std::move(split_result.left)));
   }
 
-  entries_.emplace(std::piecewise_construct, std::forward_as_tuple(m, r),
+  entries_.emplace(std::piecewise_construct, std::forward_as_tuple(m),
                    std::forward_as_tuple(std::move(split_result.right)));
 
   DCHECK(TreeIsInCorrectState());
@@ -161,20 +150,12 @@ void RangeTree::SplitBlock(Map::iterator it) {
   }
 
   Key prev_range = entries_.begin()->first;
-  if (prev_range.first >= prev_range.second) {
-    return false;  // Invalid range
-  }
-
   for (auto it = std::next(entries_.begin()); it != entries_.end(); ++it) {
     const Key& current_range = it->first;
 
-    if (current_range.first >= current_range.second) {
-      return false;  // Invalid range
-    }
-
     // Check that ranges are non-overlapping and sorted
     // Also there can not be gaps between ranges
-    if (prev_range.second != current_range.first) {
+    if (prev_range >= current_range) {
       return false;
     }
 
@@ -192,6 +173,169 @@ RangeResult::RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks)
 RangeResult::RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks, double l, double r)
     : l_(l), r_(r), blocks_(std::move(blocks)) {
   DCHECK(!blocks_.empty());
+}
+
+std::vector<DocId> RangeResult::MergeAllResults() const {
+  if (blocks_.size() == 1) {
+    // If there is only one block, we can return its result directly
+    return ReturnSingleBlock(*blocks_[0]);
+  } else if (blocks_.size() == 2) {
+    // If there are two blocks, we can merge them directly
+    return MergeTwoBlocks(*blocks_[0], *blocks_[1]);
+  }
+
+  using Entry = std::pair<RangeBlockIterator, RangeBlockIterator>;
+
+  // After the benchmarking, it is better to use inlined vector
+  // than std::priority_queue
+  absl::InlinedVector<Entry, 10> heap;
+  heap.reserve(blocks_.size());
+
+  size_t doc_ids_count = 0;
+  for (const auto* block : blocks_) {
+    auto it = block->begin();
+    while (it != block->end()) {
+      if (l_ <= (*it).second && (*it).second <= r_) {
+        heap.emplace_back(it, block->end());
+        doc_ids_count += block->Size();
+        break;
+      }
+      ++it;
+    }
+  }
+
+  std::vector<DocId> result;
+  result.reserve(doc_ids_count);
+
+  size_t size = heap.size();
+  while (size) {
+    DCHECK(heap[0].first != heap[0].second);
+    DCHECK(l_ <= (*heap[0].first).second && (*heap[0].first).second <= r_);
+
+    size_t min_doc_id_index = 0;
+    for (size_t i = 1; i < size; ++i) {
+      DCHECK(heap[i].first != heap[i].second);
+      DCHECK(l_ <= (*heap[i].first).second && (*heap[i].first).second <= r_);
+
+      if ((*heap[i].first).first < (*heap[min_doc_id_index].first).first) {
+        min_doc_id_index = i;
+      }
+    }
+
+    auto& it = heap[min_doc_id_index].first;
+    auto& end_it = heap[min_doc_id_index].second;
+
+    result.push_back((*it).first);
+
+    while (++it != end_it) {
+      if (l_ <= (*it).second && (*it).second <= r_ && (*it).first != result.back()) {
+        // Found the next valid entry in the current block
+        break;
+      }
+    }
+
+    if (it == end_it) {
+      // If we reached the end of the current block, remove it from the heap
+      std::swap(heap[min_doc_id_index], heap[size - 1]);
+      --size;
+    }
+  }
+
+  DCHECK(std::is_sorted(result.begin(), result.end()));
+
+  return result;
+}
+
+std::vector<DocId> RangeResult::ReturnSingleBlock(const RangeTree::RangeBlock& block) const {
+  std::vector<DocId> result;
+  result.reserve(block.Size() / 16);
+
+  for (const auto& entry : block) {
+    if (l_ <= entry.second && entry.second <= r_) {
+      result.push_back(entry.first);
+    }
+  }
+
+  DCHECK(std::is_sorted(result.begin(), result.end()));
+  return result;
+}
+
+std::vector<DocId> RangeResult::MergeTwoBlocks(const RangeTree::RangeBlock& left,
+                                               const RangeTree::RangeBlock& right) const {
+  std::vector<DocId> result;
+  result.reserve(left.Size() / 4 + right.Size() / 4);
+
+  auto left_it = left.begin();
+  auto right_it = right.begin();
+
+  // Better perfomance that using std::find_if
+  auto skip_left = [&](DocId doc_id) {
+    while (++left_it != left.end() && (*left_it).first == doc_id) {
+    };
+  };
+  auto skip_right = [&](DocId doc_id) {
+    while (++right_it != right.end() && (*right_it).first == doc_id) {
+    };
+  };
+
+  while (true) {
+    while (left_it != left.end() && (*left_it).second < l_) {
+      ++left_it;
+    }
+
+    while (right_it != right.end() && r_ < (*right_it).second) {
+      ++right_it;
+    }
+
+    if (left_it == left.end() || right_it == right.end()) {
+      break;
+    }
+
+    DocId l = (*left_it).first;
+    DocId r = (*right_it).first;
+
+    if (l < r) {
+      result.push_back(l);
+
+      // Skip all entries in the left block that have the same doc_id
+      skip_left(l);
+    } else if (r < l) {
+      result.push_back(r);
+
+      // Skip all entries in the right block that have the same doc_id
+      skip_right(r);
+    } else {
+      result.push_back(l);
+
+      // Skip all entries in both blocks that have the same doc_id
+      skip_left(l);
+      skip_right(r);
+    }
+  }
+
+  while (left_it != left.end()) {
+    if (l_ <= (*left_it).second) {
+      DocId doc_id = (*left_it).first;
+      result.push_back(doc_id);
+      skip_left(doc_id);
+    } else {
+      ++left_it;
+    }
+  }
+
+  while (right_it != right.end()) {
+    if ((*right_it).second <= r_) {
+      DocId doc_id = (*right_it).first;
+      result.push_back(doc_id);
+      skip_right(doc_id);
+    } else {
+      ++right_it;
+    }
+  }
+
+  DCHECK(std::is_sorted(result.begin(), result.end()));
+  DCHECK(left_it == left.end() && right_it == right.end());
+  return result;
 }
 
 }  // namespace dfly::search
