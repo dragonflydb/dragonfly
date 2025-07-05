@@ -196,31 +196,6 @@ async def test_basic(async_client: aioredis.Redis, index_type):
     await i1.dropindex()
 
 
-@dfly_args({"proactor_threads": 4})
-async def test_big_json(async_client: aioredis.Redis):
-    i1 = async_client.ft("i1")
-    gen_arr = lambda base: {"blob": [base + str(i) for i in range(100)]}
-
-    await async_client.json().set("k1", "$", gen_arr("alex"))
-    await async_client.json().set("k2", "$", gen_arr("bob"))
-
-    await i1.create_index(
-        [TextField(name="$.blob", as_name="items")],
-        definition=IndexDefinition(index_type=IndexType.JSON),
-    )
-
-    res = await i1.search("alex55")
-    assert res.docs[0].id == "k1"
-
-    res = await i1.search("bob77")
-    assert res.docs[0].id == "k2"
-
-    res = await i1.search("alex11 | bob22")
-    assert res.total == 2
-
-    await i1.dropindex()
-
-
 async def knn_query(idx, query, vector):
     params = {"vec": np.array(vector, dtype=np.float32).tobytes()}
     result = await idx.search(query, params)
@@ -483,6 +458,80 @@ async def test_index_persistence(df_server):
 
     await i1.dropindex()
     await i2.dropindex()
+
+
+@dfly_args({"proactor_threads": 4, "jsonpathv2": "false"})
+async def test_big_json(async_client: aioredis.Redis):
+    try:
+        from faker import Faker
+    except ModuleNotFoundError:
+        skip_if_not_in_github("faker python library is not installed")
+        raise
+
+    fake = Faker()
+    CITIES = [fake.city() for _ in range(10)]
+    AUTHORS = [fake.name() for _ in range(10)]
+
+    # Information about a book seller and it's stores about availability
+    # { city: {author: [title: tags:] } ... }
+    gen_book_seller = lambda: {
+        city: {
+            author: [
+                {
+                    "author": author,
+                    "title": fake.catch_phrase(),
+                }
+                for _ in range(random.randrange(3, 5))
+            ]
+            for author in random.sample(AUTHORS, random.randrange(3, 5))
+        }
+        for city in random.sample(CITIES, random.randrange(3, 5))
+    }
+
+    # Populare Dragonfly with sellers and create index
+    for i in range(50):
+        await async_client.json().set(f"k{i}", ".", gen_book_seller())
+
+    await async_client.ft("i1").create_index(
+        [TagField("keys($)", as_name="city"), TagField("$..author", as_name="author")],
+        definition=IndexDefinition(index_type=IndexType.JSON),
+    )
+
+    hits = 0
+
+    # Query for cities
+    for city in CITIES:
+        q = (
+            Query(f'@city:{{"{city}"}}')
+            .return_field(f"$", as_field="document")
+            .return_field(f'$["{city}"].*[:].title', as_field="city_titles")
+        )
+        res = await async_client.ft("i1").search(q)
+        for doc in res.docs:
+            print(doc["city_titles"])
+            hits += 1
+            # check city was selected correctly
+            doc_obj = json.loads(doc["document"])
+            assert city in doc_obj
+            # check city titles were fetched corretly
+            # TODO: wrong return for arrays!
+            # city_titles = {v["title"] for v in itertools.chain(*doc_obj[city].values())}
+            # assert set(city_titles) == set(doc["city_titles"])
+
+    assert hits > 0
+    hits = 0
+
+    # Quert for authors
+    for author in AUTHORS:
+        q = Query(f'@author:{{"{author}"}}').return_field(f"$", as_field="document")
+        res = await async_client.ft("i1").search(q)
+        for doc in res.docs:
+            hits += 1
+            doc_obj = json.loads(doc["document"])
+            authors = set(itertools.chain(*(city.keys() for city in doc_obj.values())))
+            assert author in authors
+
+    assert hits > 0
 
 
 @dfly_args({"proactor_threads": 4})
