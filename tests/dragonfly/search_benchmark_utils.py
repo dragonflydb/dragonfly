@@ -113,19 +113,15 @@ async def _generate_documents_chunk(
 
 def generate_search_query(columns: List[Tuple[str, str]], document_ids: List[str]) -> Query:
     column_names = [name for name, _ in columns]
+    num_columns = random.randint(int(len(column_names) / 3.5), int(len(column_names) / 2))
+    selected_columns = random.sample(column_names, num_columns)
 
     if random.random() < 0.5:
-        num_columns = random.randint(len(column_names) / 3.5, len(column_names) / 2)
-        selected_columns = random.sample(column_names, num_columns)
-
         query = Query("*").return_fields(*selected_columns)
         query = query.paging(0, 50)
         return query
 
     reliable_filter_columns = [name for name, col_type in columns if col_type in ["NUMERIC", "BIT"]]
-
-    num_columns = random.randint(len(column_names) / 3.5, len(column_names) / 2)
-    selected_columns = random.sample(column_names, num_columns)
 
     if reliable_filter_columns and random.random() < 0.5:
         filter_column = random.choice(reliable_filter_columns)
