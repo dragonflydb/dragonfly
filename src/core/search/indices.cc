@@ -22,6 +22,14 @@
 #include <algorithm>
 #include <cctype>
 
+#include "base/flags.h"
+
+ABSL_FLAG(bool, use_numeric_range_tree, true,
+          "Use range tree for numeric index. "
+          "If false, use a simple implementation with btree_set. "
+          "Range tree is more memory efficient and faster for range queries, "
+          "but slower for single value queries.");
+
 namespace dfly::search {
 
 using namespace std;
@@ -84,7 +92,111 @@ void IterateAllSuffixes(const absl::flat_hash_set<string>& words,
 
 };  // namespace
 
-NumericIndex::NumericIndex(PMR_NS::memory_resource* mr) : tree_{mr} {
+class RangeTreeAdapter : public NumericIndex::RangeTreeBase {
+ public:
+  explicit RangeTreeAdapter(PMR_NS::memory_resource* mr) : range_tree_{mr} {
+  }
+
+  void Add(DocId id, absl::Span<double> values) override {
+    for (double value : values) {
+      range_tree_.Add(id, value);
+    }
+  }
+
+  void Remove(DocId id, absl::Span<double> values) override {
+    for (double value : values) {
+      range_tree_.Remove(id, value);
+    }
+  }
+
+  vector<DocId> Range(double l, double r) const override {
+    return range_tree_.Range(l, r).MergeAllResults();
+  }
+
+  vector<DocId> GetAllDocIds() const override {
+    return range_tree_.GetAllDocIds().MergeAllResults();
+  }
+
+ private:
+  RangeTree range_tree_;
+};
+
+class BtreeSetImpl : public NumericIndex::RangeTreeBase {
+ public:
+  explicit BtreeSetImpl(PMR_NS::memory_resource* mr) : entries_(mr) {
+  }
+
+  void Add(DocId id, absl::Span<double> values) override {
+    if (values.size() > 1) {
+      unique_ids_ = false;
+    }
+    for (double value : values) {
+      entries_.insert({value, id});
+    }
+  }
+
+  void Remove(DocId id, absl::Span<double> values) override {
+    for (double value : values) {
+      entries_.erase({value, id});
+    }
+  }
+
+  vector<DocId> Range(double l, double r) const override {
+    DCHECK(l <= r);
+
+    auto it_l = entries_.lower_bound({l, 0});
+    auto it_r = entries_.lower_bound({r, numeric_limits<DocId>::max()});
+    DCHECK_GE(it_r - it_l, 0);
+
+    vector<DocId> out;
+    for (auto it = it_l; it != it_r; ++it)
+      out.push_back(it->second);
+
+    sort(out.begin(), out.end());
+
+    if (!unique_ids_) {
+      out.erase(unique(out.begin(), out.end()), out.end());
+    }
+    return out;
+  }
+
+  vector<DocId> GetAllDocIds() const override {
+    std::vector<DocId> result;
+
+    result.reserve(entries_.size());
+
+    if (unique_ids_) {
+      // If unique_ids_ is true, we can just take the second element of each entry
+      for (const auto& [_, doc_id] : entries_) {
+        result.push_back(doc_id);
+      }
+    } else {
+      UniqueDocsList<> unique_docs;
+      unique_docs.reserve(entries_.size());
+      for (const auto& [_, doc_id] : entries_) {
+        const auto [__, is_new] = unique_docs.insert(doc_id);
+        if (is_new) {
+          result.push_back(doc_id);
+        }
+      }
+    }
+
+    std::sort(result.begin(), result.end());
+    return result;
+  }
+
+ private:
+  bool unique_ids_ = true;  // If true, docs ids are unique in the index, otherwise they can repeat.
+  using Entry = std::pair<double, DocId>;
+  absl::btree_set<Entry, std::less<Entry>, PMR_NS::polymorphic_allocator<Entry>> entries_;
+};
+
+NumericIndex::NumericIndex(PMR_NS::memory_resource* mr) {
+  if (absl::GetFlag(FLAGS_use_numeric_range_tree)) {
+    range_tree_ = make_unique<RangeTreeAdapter>(mr);
+  } else {
+    range_tree_ = make_unique<BtreeSetImpl>(mr);
+  }
 }
 
 bool NumericIndex::Add(DocId id, const DocumentAccessor& doc, string_view field) {
@@ -93,27 +205,23 @@ bool NumericIndex::Add(DocId id, const DocumentAccessor& doc, string_view field)
     return false;
   }
 
-  for (auto num : numbers.value()) {
-    tree_.Add(id, num);
-  }
+  range_tree_->Add(id, absl::MakeSpan(numbers.value()));
   return true;
 }
 
 void NumericIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
   auto numbers = doc.GetNumbers(field).value();
-  for (auto num : numbers) {
-    tree_.Remove(id, num);
-  }
+  range_tree_->Remove(id, absl::MakeSpan(numbers));
 }
 
 vector<DocId> NumericIndex::Range(double l, double r) const {
   if (r < l)
     return {};
-  return tree_.Range(l, r).MergeAllResults();
+  return range_tree_->Range(l, r);
 }
 
 vector<DocId> NumericIndex::GetAllDocsWithNonNullValues() const {
-  return tree_.GetAllDocIds().MergeAllResults();
+  return range_tree_->GetAllDocIds();
 }
 
 template <typename C>

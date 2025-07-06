@@ -30,6 +30,22 @@ namespace dfly::search {
 // Index for integer fields.
 // Range bounds are queried in logarithmic time, iteration is constant.
 struct NumericIndex : public BaseIndex {
+  // Temporary base class for range tree.
+  // It is used to use two different range trees depending on the flag use_range_tree.
+  // If the flag is true, RangeTree is used, otherwise a simple implementation with btree_set.
+  struct RangeTreeBase {
+    virtual void Add(DocId id, absl::Span<double> values) = 0;
+    virtual void Remove(DocId id, absl::Span<double> values) = 0;
+
+    // Returns all DocIds that match the range [l, r].
+    virtual std::vector<DocId> Range(double l, double r) const = 0;
+
+    // Returns all DocIds that have non-null values in the index.
+    virtual std::vector<DocId> GetAllDocIds() const = 0;
+
+    virtual ~RangeTreeBase() = default;
+  };
+
   explicit NumericIndex(PMR_NS::memory_resource* mr);
 
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
@@ -40,7 +56,7 @@ struct NumericIndex : public BaseIndex {
   std::vector<DocId> GetAllDocsWithNonNullValues() const override;
 
  private:
-  RangeTree tree_;
+  std::unique_ptr<RangeTreeBase> range_tree_;
 };
 
 // Base index for string based indices.
