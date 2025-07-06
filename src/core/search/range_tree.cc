@@ -27,7 +27,7 @@ class RangeFilterIterator {
 
   RangeFilterIterator(BaseIterator begin, BaseIterator end, double l, double r)
       : l_(l), r_(r), current_(begin), end_(end) {
-    SkipUnvalidEntries(std::numeric_limits<DocId>::max());
+    SkipInvalidEntries(std::numeric_limits<DocId>::max());
   }
 
   value_type operator*() const {
@@ -37,7 +37,7 @@ class RangeFilterIterator {
   RangeFilterIterator& operator++() {
     const DocId last_id = (*current_).first;
     ++current_;
-    SkipUnvalidEntries(last_id);
+    SkipInvalidEntries(last_id);
     return *this;
   }
 
@@ -54,7 +54,7 @@ class RangeFilterIterator {
   }
 
  private:
-  void SkipUnvalidEntries(DocId last_id) {
+  void SkipInvalidEntries(DocId last_id) {
     // Faster than using std::find_if
     while (current_ != end_ && (!InRange(current_) || (*current_).first == last_id)) {
       ++current_;
