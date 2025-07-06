@@ -34,7 +34,7 @@ class RangeTree {
   friend class RangeResult;
 
   using RangeNumber = double;
-  using Key = std::pair<RangeNumber, RangeNumber>;
+  using Key = RangeNumber;
   using Entry = std::pair<DocId, double>;
   using RangeBlock = BlockList<SortedVector<Entry>>;
   using Map = absl::btree_map<Key, RangeBlock, std::less<Key>,
