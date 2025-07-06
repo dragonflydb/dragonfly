@@ -382,8 +382,6 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   if (limit == 0)
     return {result.total, {}, std::move(result.profile)};
 
-  SearchFieldsList loaded_fields = params.return_fields.value_or(SearchFieldsList{});
-
   // Tune sort for KNN: Skip if it's on the knn field, otherwise extend the limit if needed
   bool skip_sort = false;
   if (auto ko = search_algo->GetKnnScoreSortOption(); ko) {
@@ -444,9 +442,8 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     SearchDocData fields{};
     if (params.ShouldReturnAllFields())
       fields = accessor->SerializeDocument(base_->schema);
-    auto loaded = accessor->Serialize(base_->schema, loaded_fields);
-    fields.insert(make_move_iterator(loaded.begin()), make_move_iterator(loaded.end()));
-
+    else
+      fields = accessor->Serialize(base_->schema, *params.return_fields);
     out.push_back({string{key}, std::move(fields), knn_score, sort_score});
   }
 
