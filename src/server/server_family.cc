@@ -13,6 +13,7 @@
 #include <croncpp.h>  // cron::cronexpr
 #include <sys/resource.h>
 #include <sys/utsname.h>
+#include <unistd.h>  // for getpid()
 
 #include <algorithm>
 #include <chrono>
@@ -140,7 +141,7 @@ ABSL_FLAG(string, availability_zone, "",
 
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
-ABSL_DECLARE_FLAG(uint32_t, hz);
+ABSL_DECLARE_FLAG(int32_t, hz);
 ABSL_DECLARE_FLAG(bool, tls);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
@@ -2478,6 +2479,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("dragonfly_version", GetVersion());
     append("redis_mode", GetRedisMode());
     append("arch_bits", 64);
+    // Add process_id for Redis compatibility (same order as Redis INFO output).
+    append("process_id", getpid());
 
     if (show_managed_info) {
       append("os", GetOSString());
@@ -2495,6 +2498,11 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     uint64_t uptime = time(NULL) - start_time_;
     append("uptime_in_seconds", uptime);
     append("uptime_in_days", uptime / (3600 * 24));
+
+    append("hz", GetFlag(FLAGS_hz));
+    append("executable", base::kProgramName);
+    absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
+    append("config_file", flagfile_flag->CurrentValue());
   };
 
   auto add_clients_info = [&] {
