@@ -2724,10 +2724,10 @@ TEST_F(SearchFamilyTest, BlockSizeOptionFtCreate) {
   // Verify that the index was created successfully
   resp = Run({"FT.INFO", "index"});
   EXPECT_THAT(resp, IsArray(_, _, _, _, "attributes",
-                            IsArray(IsArray("identifier", "number2", "attribute", "number2", "type",
-                                            "NUMERIC", "blocksize", "1024"),
-                                    IsArray("identifier", "number1", "attribute", "number1", "type",
-                                            "NUMERIC", "blocksize", "2")),
+                            IsUnordArray(IsArray("identifier", "number1", "attribute", "number1",
+                                                 "type", "NUMERIC", "blocksize", "2"),
+                                         IsArray("identifier", "number2", "attribute", "number2",
+                                                 "type", "NUMERIC", "blocksize", "1024")),
                             "num_docs", IntArg(0)));
 
   // Add a document to the index
