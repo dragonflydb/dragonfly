@@ -156,8 +156,8 @@ class TestSearchBenchmark:
         # Close client
         await client.aclose()
 
-    async def test_dragonfly_benchmark(self, df_server: DflyInstance, prepared_benchmark_data):
-        """Main benchmark test - 100 queries with 10 concurrent clients."""
+    async def test_standard_benchmark(self, df_server: DflyInstance, prepared_benchmark_data):
+        """Standard benchmark test - 100 queries with 10 concurrent clients."""
         await self._run_benchmark(df_server, prepared_benchmark_data, 100, 10, "Standard Benchmark")
 
     async def test_small_benchmark(self, df_server: DflyInstance, prepared_benchmark_data):
