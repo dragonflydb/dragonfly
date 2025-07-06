@@ -134,6 +134,14 @@ ParseResult<search::SchemaField::TextParams> ParseTextParams(CmdArgParser* parse
   return params;
 }
 
+search::SchemaField::NumericParams ParseNumericParams(CmdArgParser* parser) {
+  search::SchemaField::NumericParams params{};
+  if (parser->Check("BLOCKSIZE")) {
+    params.block_size = parser->Next<size_t>();
+  }
+  return params;
+}
+
 // breaks on ParamsVariant initialization
 #ifndef __clang__
 #pragma GCC diagnostic push
@@ -160,7 +168,7 @@ ParsedSchemaField ParseText(CmdArgParser* parser) {
 }
 
 ParsedSchemaField ParseNumeric(CmdArgParser* parser) {
-  return std::make_pair(search::SchemaField::NUMERIC, std::monostate{});
+  return std::make_pair(search::SchemaField::NUMERIC, ParseNumericParams(parser));
 }
 
 // Vector fields include: {algorithm} num_args args...
