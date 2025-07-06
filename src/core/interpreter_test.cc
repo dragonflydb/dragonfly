@@ -522,4 +522,8 @@ TEST_F(InterpreterTest, AvoidIntOverflow) {
   EXPECT_EQ("str(0000FFFF)", ser_.res);
 }
 
+TEST_F(InterpreterTest, LuaIntOverflow) {
+  EXPECT_FALSE(Execute("EVAL \"struct.pack('>I2147483648', '10')\" 0"));
+}
+
 }  // namespace dfly
