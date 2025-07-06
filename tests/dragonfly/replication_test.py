@@ -2102,12 +2102,14 @@ async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
     await wait_available_async(c_replica)
 
     seeder = df_seeder_factory.create(
-        port=master.port, keys=500, val_size=1000, stop_on_failure=False
+        port=master.port, keys=600, val_size=1000, stop_on_failure=False
     )
     await seeder.run(target_deviation=0.1)
 
     info = await c_master.info("stats")
-    assert info["evicted_keys"] > 0, "Weak testcase: policy based eviction was not triggered."
+    assert (
+        info["evicted_keys"] > 0
+    ), f"Weak testcase: policy based eviction was not triggered. {await c_master.info()}"
 
     await check_all_replicas_finished([c_replica], c_master)
     keys_master = await c_master.execute_command("keys k*")
