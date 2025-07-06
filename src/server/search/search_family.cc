@@ -789,15 +789,22 @@ void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
     vector<string> info;
 
     string_view base[] = {"identifier"sv, string_view{field_ident},
-                          "attribute",    field_info.short_name,
+                          "attribute"sv,  field_info.short_name,
                           "type"sv,       SearchFieldTypeToString(field_info.type)};
     info.insert(info.end(), base, base + ABSL_ARRAYSIZE(base));
 
     if (field_info.flags & search::SchemaField::NOINDEX)
-      info.push_back("NOINDEX");
+      info.emplace_back("NOINDEX"sv);
 
     if (field_info.flags & search::SchemaField::SORTABLE)
-      info.push_back("SORTABLE");
+      info.emplace_back("SORTABLE"sv);
+
+    if (field_info.type == search::SchemaField::NUMERIC) {
+      auto& numeric_params =
+          std::get<search::SchemaField::NumericParams>(field_info.special_params);
+      info.emplace_back("blocksize"sv);
+      info.emplace_back(std::to_string(numeric_params.block_size));
+    }
 
     rb->SendSimpleStrArr(info);
   }
