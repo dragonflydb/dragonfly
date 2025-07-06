@@ -770,8 +770,6 @@ Usage: dragonfly [FLAGS]
     LOG(INFO) << "listening on unix socket " << usock << ".";
   }
 
-  mi_stats_reset();
-
   if (GetFlag(FLAGS_dbnum) > dfly::kMaxDbId) {
     LOG(ERROR) << "dbnum is too big. Exiting...";
     return 1;
@@ -821,9 +819,13 @@ Usage: dragonfly [FLAGS]
 
   // Initialize mi_malloc options
   // export MIMALLOC_VERBOSE=1 to see the options before the override.
-  mi_option_enable(mi_option_show_errors);
-  mi_option_set(mi_option_max_warnings, 0);
-  mi_option_enable(mi_option_purge_decommits);
+  // _default functions override the default options vaues but if the options were set
+  // via the environment variables, they will not be overridden.
+  mi_option_set_enabled_default(mi_option_show_errors, true);
+  mi_option_set_default(mi_option_purge_delay, 0);
+
+  // To see the options after the override, use:
+  // mi_options_print();
 
   fb2::SetDefaultStackResource(&fb2::std_malloc_resource, kFiberDefaultStackSize);
 
