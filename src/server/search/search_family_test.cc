@@ -2714,4 +2714,30 @@ TEST_F(SearchFamilyTest, SetDoesNotUpdateIndexesBug) {
   resp = Run({"FT.SEARCH", "index", "*"});
   EXPECT_THAT(resp, AreDocIds("k1"));
 }
+
+TEST_F(SearchFamilyTest, BlockSizeOptionFtCreate) {
+  // Create an index with a block size option
+  auto resp = Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "number1", "NUMERIC", "BLOCKSIZE",
+                   "2", "number2", "NUMERIC", "BLOCKSIZE", "1024"});
+  EXPECT_THAT(resp, "OK");
+
+  // Verify that the index was created successfully
+  resp = Run({"FT.INFO", "index"});
+  EXPECT_THAT(resp, IsArray(_, _, _, _, "attributes",
+                            IsArray(IsArray("identifier", "number2", "attribute", "number2", "type",
+                                            "NUMERIC", "blocksize", "1024"),
+                                    IsArray("identifier", "number1", "attribute", "number1", "type",
+                                            "NUMERIC", "blocksize", "2")),
+                            "num_docs", IntArg(0)));
+
+  // Add a document to the index
+  for (int i = 1; i <= 5; ++i) {
+    Run({"HSET", absl::StrCat("doc:", i), "number1", std::to_string(i), "number2",
+         std::to_string(i * 10)});
+  }
+
+  // Search the index
+  resp = Run({"FT.SEARCH", "index", "@number1:[1 3] @number2:[10 30]", "SORTBY", "number1", "ASC"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3"));
+}
 }  // namespace dfly
