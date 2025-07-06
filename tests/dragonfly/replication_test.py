@@ -1963,6 +1963,7 @@ async def test_search_with_stream(df_factory: DflyInstanceFactory):
 
     # expect replica to see only 10k - 1k + 1 = 9001 keys in it's index
     await wait_available_async(c_replica)
+    await check_all_replicas_finished([c_replica], c_master)
     assert await c_replica.execute_command("FT.SEARCH i1 * LIMIT 0 0") == [9_001]
     assert await c_replica.execute_command('FT.SEARCH i1 "secret"') == [
         1,
