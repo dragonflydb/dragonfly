@@ -384,7 +384,7 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
 
       params.return_fields = ParseLoadOrReturnFields(parser, false);
     } else if (parser->Check("NOCONTENT")) {  // NOCONTENT
-      params.return_fields = {};
+      params.return_fields.emplace();
     } else if (parser->Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
       params.query_params = ParseQueryParams(parser);
     } else if (parser->Check("SORTBY")) {
@@ -1223,7 +1223,7 @@ void SearchFamily::Register(CommandRegistry* registry) {
 
   // Disable journaling, because no-key-transactional enables it by default
   const uint32_t kReadOnlyMask =
-      CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL;
+      CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL | CO::IDEMPOTENT;
 
   registry->StartFamily();
   *registry << CI{"FT.CREATE", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
