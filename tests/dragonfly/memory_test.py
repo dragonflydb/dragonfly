@@ -54,8 +54,8 @@ async def test_rss_used_mem_gap(df_factory, type, keys, val_size, elements):
         assert info["used_memory"] > min_rss, "Weak testcase: too little used memory"
         delta = info["used_memory_rss"] - info["used_memory"]
         # It could be the case that the machine is configured to use swap if this assertion fails
-        assert delta > 0
-        assert delta < max_unaccounted
+        assert delta > 0, info
+        assert delta < max_unaccounted, info
 
         if type != "STRING" and type != "JSON":
             # STRINGs keep some of the data inline, so not all of it is accounted in object_used_memory

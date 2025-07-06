@@ -154,6 +154,8 @@ jobs:
           timeout 5m ./dragonfly_test
           timeout 5m ./json_family_test --jsonpathv2=false
           timeout 5m ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
+          timeout 5m ./search_test --use_numeric_range_tree=false
+          timeout 5m ./search_family_test --use_numeric_range_tree=false
 
 
       - name: C++ Unit Tests - Epoll

@@ -446,17 +446,17 @@ struct BasicSearch {
     }
 
     preagg_total_ = sub_results.Size();
-    scores_.clear();
+    knn_scores_.clear();
     if (auto hnsw_index = dynamic_cast<HnswVectorIndex*>(vec_index); hnsw_index)
       SearchKnnHnsw(hnsw_index, knn, std::move(sub_results));
     else
       SearchKnnFlat(dynamic_cast<FlatVectorIndex*>(vec_index), knn, std::move(sub_results));
 
     vector<DocId> out(knn_distances_.size());
-    scores_.reserve(knn_distances_.size());
+    knn_scores_.reserve(knn_distances_.size());
 
     for (size_t i = 0; i < knn_distances_.size(); i++) {
-      scores_.emplace_back(knn_distances_[i].first);
+      knn_scores_.emplace_back(knn_distances_[i].second, knn_distances_[i].first);
       out[i] = knn_distances_[i].second;
     }
 
@@ -492,11 +492,7 @@ struct BasicSearch {
         profile_builder_ ? make_optional(profile_builder_->Take()) : nullopt;
 
     size_t total = result.Size();
-    return SearchResult{total,
-                        max(total, preagg_total_),
-                        result.Take(),
-                        std::move(scores_),
-                        std::move(profile),
+    return SearchResult{total, result.Take(), std::move(knn_scores_), std::move(profile),
                         std::move(error_)};
   }
 
@@ -506,7 +502,7 @@ struct BasicSearch {
   string error_;
   optional<ProfileBuilder> profile_builder_ = ProfileBuilder{};
 
-  std::vector<ResultScore> scores_;
+  std::vector<pair<DocId, float>> knn_scores_;
 
   vector<DocId> tmp_vec_;
   vector<pair<float, DocId>> knn_distances_;

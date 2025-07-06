@@ -47,16 +47,18 @@ template <typename T> SortableValue SimpleValueSortIndex<T>::Lookup(DocId doc) c
 }
 
 template <typename T>
-std::vector<ResultScore> SimpleValueSortIndex<T>::Sort(std::vector<DocId>* ids, size_t limit,
-                                                       bool desc) const {
+std::vector<SortableValue> SimpleValueSortIndex<T>::Sort(std::vector<DocId>* ids, size_t limit,
+                                                         bool desc) const {
   auto cb = [this, desc](const auto& lhs, const auto& rhs) {
     return desc ? (values_[lhs] > values_[rhs]) : (values_[lhs] < values_[rhs]);
   };
   std::partial_sort(ids->begin(), ids->begin() + std::min(ids->size(), limit), ids->end(), cb);
 
-  vector<ResultScore> out(min(ids->size(), limit));
+  // Turn PMR string into std::string
+  using ScoreT = std::conditional_t<is_same_v<T, PMR_NS::string>, std::string, T>;
+  vector<SortableValue> out(min(ids->size(), limit));
   for (size_t i = 0; i < out.size(); i++)
-    out[i] = values_[(*ids)[i]];
+    out[i] = ScoreT{values_[(*ids)[i]]};
   return out;
 }
 

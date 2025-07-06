@@ -220,3 +220,24 @@ async def test_metric_labels(
         for sample in metrics["dragonfly_connected_clients"].samples:
             match_label_value(sample, "main", lambda v: v == 2)
             match_label_value(sample, "other", lambda v: v == 1)
+
+
+@dfly_args({"latency_tracking": True})
+async def test_latency_stats(async_client: aioredis.Redis):
+    for _ in range(100):
+        await async_client.set("foo", "bar")
+        await async_client.get("foo")
+        await async_client.get("bar")
+        await async_client.hgetall("missing")
+
+    latency_stats = await async_client.info("LATENCYSTATS")
+    for expected in {"hgetall", "set", "get"}:
+        key = f"latency_percentiles_usec_{expected}"
+        assert key in latency_stats
+        assert latency_stats[key].keys() == {"p50", "p99", "p99.9"}
+
+
+async def test_latency_stats_disabled_by_default(async_client: aioredis.Redis):
+    for _ in range(100):
+        await async_client.set("foo", "bar")
+    assert await async_client.info("LATENCYSTATS") == {}

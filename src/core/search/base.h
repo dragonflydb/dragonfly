@@ -38,26 +38,7 @@ struct QueryParams {
   absl::flat_hash_map<std::string, std::string> params;
 };
 
-// Comparable string stored as char[]. Used to reduce size of std::variant with strings.
-struct WrappedStrPtr {
-  // Intentionally implicit and const std::string& for use in templates
-  WrappedStrPtr(const PMR_NS::string& s);
-  WrappedStrPtr(const std::string& s);
-  bool operator<(const WrappedStrPtr& other) const;
-  bool operator>=(const WrappedStrPtr& other) const;
-
-  operator std::string_view() const;
-
- private:
-  std::unique_ptr<char[]> ptr;
-};
-
-// Score produced either by KNN (float) or SORT (double / wrapped str)
-using ResultScore = std::variant<std::monostate, float, double, WrappedStrPtr>;
-
 // Values are either sortable as doubles or strings, or not sortable at all.
-// Contrary to ResultScore it doesn't include KNN results and is not optimized for smaller struct
-// size.
 using SortableValue = std::variant<std::monostate, double, std::string>;
 
 // Interface for accessing document values with different data structures underneath.
@@ -105,7 +86,8 @@ struct BaseIndex {
 // Base class for type-specific sorting indices.
 struct BaseSortIndex : BaseIndex {
   virtual SortableValue Lookup(DocId doc) const = 0;
-  virtual std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const = 0;
+  virtual std::vector<SortableValue> Sort(std::vector<DocId>* ids, size_t limit,
+                                          bool desc) const = 0;
 };
 
 /* Used for converting field values to double. Returns std::nullopt if the conversion fails */

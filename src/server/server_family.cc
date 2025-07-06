@@ -21,6 +21,7 @@
 
 #include "absl/strings/ascii.h"
 #include "facade/error.h"
+#include "server/common.h"
 #include "slowlog.h"
 #include "util/fibers/synchronization.h"
 
@@ -236,6 +237,13 @@ using http::StringResponse;
 using strings::HumanReadableNumBytes;
 
 namespace {
+
+// TODO these should be configurable as command line flag and at runtime via config set
+constexpr std::array<double, 3> kLatencyPercentiles = {50.0, 99.0, 99.9};
+
+bool is_histogram_empty(const hdr_histogram* h) {
+  return hdr_min(h) == std::numeric_limits<int64_t>::max();
+}
 
 const auto kRedisVersion = "7.4.0";
 
@@ -656,6 +664,23 @@ uint64_t GetDelayMs(uint64_t ts) {
   return delay_ns;
 }
 
+bool ReadProcStats(io::StatusData* sdata) {
+  io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
+  if (!sdata_res) {
+    LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
+                           << sdata_res.error().message();
+    return false;
+  }
+
+  size_t total_rss = FetchRssMemory(sdata_res.value());
+  rss_mem_current.store(total_rss, memory_order_relaxed);
+  if (rss_mem_peak.load(memory_order_relaxed) < total_rss) {
+    rss_mem_peak.store(total_rss, memory_order_relaxed);
+  }
+  *sdata = *sdata_res;
+  return true;
+}
+
 }  // namespace
 
 void SlowLogGet(dfly::CmdArgList args, std::string_view sub_cmd, util::ProactorPool* pp,
@@ -1025,32 +1050,30 @@ void ServerFamily::UpdateMemoryGlobalStats() {
     used_mem_peak.store(mem_current, memory_order_relaxed);
   }
 
-  io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
-  if (sdata_res) {
-    size_t total_rss = FetchRssMemory(sdata_res.value());
-    rss_mem_current.store(total_rss, memory_order_relaxed);
-    if (rss_mem_peak.load(memory_order_relaxed) < total_rss) {
-      rss_mem_peak.store(total_rss, memory_order_relaxed);
-    }
-    double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
-    if (rss_oom_deny_ratio > 0) {
-      size_t memory_limit = max_memory_limit * rss_oom_deny_ratio;
-      if (total_rss > memory_limit && accepting_connections_ && HasPrivilegedInterface()) {
-        for (auto* listener : listeners_) {
-          if (!listener->IsPrivilegedInterface()) {
-            listener->socket()->proactor()->Await([listener]() { listener->pause_accepting(); });
-          }
-        }
-        accepting_connections_ = false;
+  io::StatusData status_data;
+  bool success = ReadProcStats(&status_data);
+  if (!success)
+    return;
 
-      } else if (total_rss < memory_limit && !accepting_connections_) {
-        for (auto* listener : listeners_) {
-          if (!listener->IsPrivilegedInterface()) {
-            listener->socket()->proactor()->Await([listener]() { listener->resume_accepting(); });
-          }
+  size_t total_rss = FetchRssMemory(status_data);
+  double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
+  if (rss_oom_deny_ratio > 0) {
+    size_t memory_limit = max_memory_limit * rss_oom_deny_ratio;
+    if (total_rss > memory_limit && accepting_connections_ && HasPrivilegedInterface()) {
+      for (auto* listener : listeners_) {
+        if (!listener->IsPrivilegedInterface()) {
+          listener->socket()->proactor()->Await([listener]() { listener->pause_accepting(); });
         }
-        accepting_connections_ = true;
       }
+      accepting_connections_ = false;
+
+    } else if (total_rss < memory_limit && !accepting_connections_) {
+      for (auto* listener : listeners_) {
+        if (!listener->IsPrivilegedInterface()) {
+          listener->socket()->proactor()->Await([listener]() { listener->resume_accepting(); });
+        }
+      }
+      accepting_connections_ = true;
     }
   }
 }
@@ -1381,7 +1404,8 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   absl::StrAppend(&resp->body(), connections_libs);
 
   // Memory metrics
-  auto sdata_res = io::ReadStatusInfo();
+  io::StatusData sdata;
+  bool success = ReadProcStats(&sdata);
   AppendMetricWithoutLabels("memory_used_bytes", "", m.heap_used_bytes, MetricType::GAUGE,
                             &resp->body());
   AppendMetricWithoutLabels("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
@@ -1404,14 +1428,11 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     AppendMetricValue("oom_errors_total", m.coordinator_stats.oom_error_cmd_cnt, {"type"}, {"cmd"},
                       &resp->body());
   }
-  if (sdata_res.has_value()) {
-    size_t rss = FetchRssMemory(sdata_res.value());
+  if (success) {
+    size_t rss = FetchRssMemory(sdata);
     AppendMetricWithoutLabels("used_memory_rss_bytes", "", rss, MetricType::GAUGE, &resp->body());
-    AppendMetricWithoutLabels("swap_memory_bytes", "", sdata_res->vm_swap, MetricType::GAUGE,
+    AppendMetricWithoutLabels("swap_memory_bytes", "", sdata.vm_swap, MetricType::GAUGE,
                               &resp->body());
-  } else {
-    LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
-                           << sdata_res.error().message();
   }
   AppendMetricWithoutLabels("tls_bytes", "", m.tls_bytes, MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("snapshot_serialization_bytes", "", m.serialization_bytes,
@@ -2409,6 +2430,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   UpdateMax(&peak_stats_.conn_read_buf_capacity, result.facade_stats.conn_stats.read_buf_capacity);
 
   result.peak_stats = peak_stats_;
+  result.cmd_latency_map = service_.mutable_registry()->LatencyMap();
 
   uint64_t delta_ms = (absl::GetCurrentTimeNanos() - start) / 1'000'000;
   if (delta_ms > 30) {
@@ -2498,9 +2520,13 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("fibers_stack_vms", m.worker_fiber_stack_size);
     append("fibers_count", m.worker_fiber_count);
 
-    size_t rss = rss_mem_current.load(memory_order_relaxed);
-    append("used_memory_rss", rss);
-    append("used_memory_rss_human", HumanReadableNumBytes(rss));
+    io::StatusData sdata;
+    bool success = ReadProcStats(&sdata);
+    size_t rss = FetchRssMemory(sdata);
+    if (success) {
+      append("used_memory_rss", rss);
+      append("used_memory_rss_human", HumanReadableNumBytes(rss));
+    }
     append("used_memory_peak_rss", rss_mem_peak.load(memory_order_relaxed));
 
     append("maxmemory", max_memory_limit);
@@ -2894,6 +2920,31 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("cluster_enabled", IsClusterEnabledOrEmulated());
     append("migration_errors_total", service_.cluster_family().MigrationsErrorsCount());
     append("total_migrated_keys", m.shard_stats.total_migrated_keys);
+  }
+
+  if (should_enter("LATENCYSTATS")) {
+    for (const auto& [cmd_name, hist] : m.cmd_latency_map) {
+      if (!hist) {
+        continue;
+      }
+
+      if (is_histogram_empty(hist)) {
+        continue;
+      }
+
+      absl::InlinedVector<std::string, 4> stats;
+      for (const auto percentile : kLatencyPercentiles) {
+        const auto value = hdr_value_at_percentile(hist, percentile);
+        // If the percentile is an integer, print it as an integer, otherwise print it as a double
+        if (std::trunc(percentile) == percentile) {
+          stats.emplace_back(absl::StrFormat("p%d=%d", static_cast<int64_t>(percentile), value));
+        } else {
+          stats.emplace_back(absl::StrFormat("p%g=%d", percentile, value));
+        }
+      }
+
+      append(absl::StrFormat("latency_percentiles_usec_%s", cmd_name), absl::StrJoin(stats, ","));
+    }
   }
 
   return info;
