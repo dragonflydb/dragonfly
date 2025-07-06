@@ -384,7 +384,7 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
 
       params.return_fields = ParseLoadOrReturnFields(parser, false);
     } else if (parser->Check("NOCONTENT")) {  // NOCONTENT
-      params.no_content = true;
+      params.return_fields = {};
     } else if (parser->Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
       params.query_params = ParseQueryParams(parser);
     } else if (parser->Check("SORTBY")) {

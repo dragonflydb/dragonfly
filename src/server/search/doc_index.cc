@@ -403,7 +403,6 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
       sort_scores = idx->Sort(&result.ids, limit, so.order == SortOrder::DESC);
     } else {
       sort_scores = KeepTopKSorted(&result.ids, limit, so, op_args);
-      loaded_fields.emplace_back(so.field);
     }
 
     // If we sorted with knn_scores present, rearrange them
@@ -423,6 +422,16 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
   size_t expired_count = 0;
   for (size_t i = 0; i < result.ids.size(); i++) {
+    float knn_score = result.knn_scores.empty() ? 0 : result.knn_scores[i].second;
+    auto sort_score = sort_scores.empty() ? std::monostate{} : std::move(sort_scores[i]);
+
+    // Don't load entry if we need only its key. Ignore expiration.
+    if (params.IdsOnly()) {
+      string_view key = key_index_.Get(result.ids[i]);
+      out.push_back({string{key}, {}, knn_score, sort_score});
+      continue;
+    }
+
     auto entry = LoadEntry(result.ids[i], op_args);
     if (!entry) {
       expired_count++;
@@ -438,9 +447,6 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     auto loaded = accessor->Serialize(base_->schema, loaded_fields);
     fields.insert(make_move_iterator(loaded.begin()), make_move_iterator(loaded.end()));
 
-    // Fetch scores and append entry to result
-    float knn_score = result.knn_scores.empty() ? 0 : result.knn_scores[i].second;
-    auto sort_score = sort_scores.empty() ? std::monostate{} : std::move(sort_scores[i]);
     out.push_back({string{key}, std::move(fields), knn_score, sort_score});
   }
 
