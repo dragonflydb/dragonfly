@@ -8,6 +8,88 @@ namespace dfly::search {
 
 namespace {
 
+// This iterator filters out entries that are not in the range [l, r].
+// It is used to iterate over the RangeBlock and return only the entries
+// that are within the specified range.
+// The iterator is initialized with a range [l, r] and will skip entries
+// that are outside this range.
+class RangeFilterIterator {
+ private:
+  using RangeBlock = RangeTree::RangeBlock;
+  using BaseIterator = RangeBlock::BlockListIterator;
+
+ public:
+  using iterator_category = BaseIterator::iterator_category;
+  using difference_type = BaseIterator::difference_type;
+  using value_type = DocId;
+  using pointer = value_type*;
+  using reference = value_type&;
+
+  RangeFilterIterator(BaseIterator begin, BaseIterator end, double l, double r)
+      : l_(l), r_(r), current_(begin), end_(end) {
+    SkipUnvalidEntries(std::numeric_limits<DocId>::max());
+  }
+
+  value_type operator*() const {
+    return (*current_).first;
+  }
+
+  RangeFilterIterator& operator++() {
+    const DocId last_id = (*current_).first;
+    ++current_;
+    SkipUnvalidEntries(last_id);
+    return *this;
+  }
+
+  bool operator==(const RangeFilterIterator& other) const {
+    return current_ == other.current_;
+  }
+
+  bool operator!=(const RangeFilterIterator& other) const {
+    return current_ != other.current_;
+  }
+
+ private:
+  void SkipUnvalidEntries(DocId last_id) {
+    // Faster than using std::find_if
+    while (current_ != end_ && (!InRange(current_) || (*current_).first == last_id)) {
+      ++current_;
+    }
+  }
+
+  bool InRange(BaseIterator it) const {
+    return l_ <= (*it).second && (*it).second <= r_;
+  }
+
+  double l_, r_;
+  BaseIterator current_, end_;
+};
+
+RangeFilterIterator MakeBegin(const RangeTree::RangeBlock& block, double l, double r) {
+  return {block.begin(), block.end(), l, r};
+}
+
+RangeFilterIterator MakeEnd(const RangeTree::RangeBlock& block, double l, double r) {
+  return {block.end(), block.end(), l, r};
+}
+
+std::vector<DocId> MergeSingleBlock(const RangeTree::RangeBlock& block, double l, double r) {
+  std::vector<DocId> result;
+  result.reserve(block.Size() / 16);
+  std::copy(MakeBegin(block, l, r), MakeEnd(block, l, r), std::back_inserter(result));
+  return result;
+}
+
+std::vector<DocId> MergeTwoBlocks(const RangeTree::RangeBlock& left_block,
+                                  const RangeTree::RangeBlock& right_block, double l, double r) {
+  std::vector<DocId> result;
+  result.reserve(left_block.Size() / 3 + right_block.Size() / 3);
+  std::set_union(MakeBegin(left_block, l, r), MakeEnd(left_block, l, r),
+                 MakeBegin(right_block, l, r), MakeEnd(right_block, l, r),
+                 std::back_inserter(result));
+  return result;
+}
+
 template <typename MapT> auto FindRangeBlockImpl(MapT& entries, double value) {
   using RangeNumber = double;
   DCHECK(!entries.empty());
@@ -24,7 +106,6 @@ template <typename MapT> auto FindRangeBlockImpl(MapT& entries, double value) {
           (value == std::numeric_limits<RangeNumber>::infinity() || value < it->first.second)));
   return it;
 }
-
 }  // namespace
 
 RangeTree::RangeTree(PMR_NS::memory_resource* mr, size_t max_range_block_size)
@@ -194,24 +275,27 @@ RangeResult::RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks, doubl
   DCHECK(!blocks_.empty());
 }
 
-std::vector<DocId> RangeResult::MergeAllResults() {
-  using Entry = std::pair<RangeBlockIterator, RangeBlockIterator>;
+std::vector<DocId> RangeResult::MergeAllResults() const {
+  if (blocks_.size() == 1) {
+    // If there is only one block, we can return its result directly
+    return MergeSingleBlock(*blocks_[0], l_, r_);
+  } else if (blocks_.size() == 2) {
+    // If there are two blocks, we can merge them directly
+    return MergeTwoBlocks(*blocks_[0], *blocks_[1], l_, r_);
+  }
 
   // After the benchmarking, it is better to use inlined vector
   // than std::priority_queue
-  absl::InlinedVector<Entry, 10> heap;
+  absl::InlinedVector<std::pair<RangeFilterIterator, RangeFilterIterator>, 10> heap;
   heap.reserve(blocks_.size());
 
   size_t doc_ids_count = 0;
   for (const auto* block : blocks_) {
-    auto it = block->begin();
-    while (it != block->end()) {
-      if (l_ <= (*it).second && (*it).second <= r_) {
-        heap.emplace_back(it, block->end());
-        doc_ids_count += block->Size();
-        break;
-      }
-      ++it;
+    auto it = MakeBegin(*block, l_, r_);
+    auto end_it = MakeEnd(*block, l_, r_);
+    if (it != end_it) {
+      heap.emplace_back(it, end_it);
+      doc_ids_count += block->Size();
     }
   }
 
@@ -221,14 +305,12 @@ std::vector<DocId> RangeResult::MergeAllResults() {
   size_t size = heap.size();
   while (size) {
     DCHECK(heap[0].first != heap[0].second);
-    DCHECK(l_ <= (*heap[0].first).second && (*heap[0].first).second <= r_);
 
     size_t min_doc_id_index = 0;
     for (size_t i = 1; i < size; ++i) {
       DCHECK(heap[i].first != heap[i].second);
-      DCHECK(l_ <= (*heap[i].first).second && (*heap[i].first).second <= r_);
 
-      if ((*heap[i].first).first < (*heap[min_doc_id_index].first).first) {
+      if (*heap[i].first < *heap[min_doc_id_index].first) {
         min_doc_id_index = i;
       }
     }
@@ -236,14 +318,8 @@ std::vector<DocId> RangeResult::MergeAllResults() {
     auto& it = heap[min_doc_id_index].first;
     auto& end_it = heap[min_doc_id_index].second;
 
-    result.push_back((*it).first);
-
-    while (++it != end_it) {
-      if (l_ <= (*it).second && (*it).second <= r_ && (*it).first != result.back()) {
-        // Found the next valid entry in the current block
-        break;
-      }
-    }
+    result.push_back(*it);
+    ++it;
 
     if (it == end_it) {
       // If we reached the end of the current block, remove it from the heap
@@ -253,7 +329,6 @@ std::vector<DocId> RangeResult::MergeAllResults() {
   }
 
   DCHECK(std::is_sorted(result.begin(), result.end()));
-
   return result;
 }
 

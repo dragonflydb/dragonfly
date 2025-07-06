@@ -30,7 +30,7 @@ class RangeResult;
    performance.
 */
 class RangeTree {
- private:
+ public:
   friend class RangeResult;
 
   using RangeNumber = double;
@@ -43,7 +43,6 @@ class RangeTree {
   static constexpr size_t kMaxRangeBlockSize = 500000;
   static constexpr size_t kBlockSize = 400;
 
- public:
   explicit RangeTree(PMR_NS::memory_resource* mr, size_t max_range_block_size = kMaxRangeBlockSize);
 
   // Adds a document with a value to the index.
@@ -81,7 +80,7 @@ class RangeResult {
   explicit RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks);
   RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks, double l, double r);
 
-  std::vector<DocId> MergeAllResults();
+  std::vector<DocId> MergeAllResults() const;
 
   // Used in tests
   absl::InlinedVector<RangeBlockPointer, 5> GetBlocks() const {
