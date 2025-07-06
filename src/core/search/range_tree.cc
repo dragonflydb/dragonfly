@@ -49,6 +49,10 @@ class RangeFilterIterator {
     return current_ != other.current_;
   }
 
+  bool HasReachedEnd() const {
+    return current_ == end_;
+  }
+
  private:
   void SkipUnvalidEntries(DocId last_id) {
     // Faster than using std::find_if
@@ -267,15 +271,14 @@ std::vector<DocId> RangeResult::MergeAllResults() const {
 
   // After the benchmarking, it is better to use inlined vector
   // than std::priority_queue
-  absl::InlinedVector<std::pair<RangeFilterIterator, RangeFilterIterator>, 10> heap;
+  absl::InlinedVector<RangeFilterIterator, 10> heap;
   heap.reserve(blocks_.size());
 
   size_t doc_ids_count = 0;
   for (const auto* block : blocks_) {
     auto it = MakeBegin(*block, l_, r_);
-    auto end_it = MakeEnd(*block, l_, r_);
-    if (it != end_it) {
-      heap.emplace_back(it, end_it);
+    if (!it.HasReachedEnd()) {
+      heap.emplace_back(it);
       doc_ids_count += block->Size();
     }
   }
@@ -285,24 +288,22 @@ std::vector<DocId> RangeResult::MergeAllResults() const {
 
   size_t size = heap.size();
   while (size) {
-    DCHECK(heap[0].first != heap[0].second);
+    DCHECK(!heap[0].HasReachedEnd());
 
     size_t min_doc_id_index = 0;
     for (size_t i = 1; i < size; ++i) {
-      DCHECK(heap[i].first != heap[i].second);
+      DCHECK(!heap[i].HasReachedEnd());
 
-      if (*heap[i].first < *heap[min_doc_id_index].first) {
+      if (*heap[i] < *heap[min_doc_id_index]) {
         min_doc_id_index = i;
       }
     }
 
-    auto& it = heap[min_doc_id_index].first;
-    auto& end_it = heap[min_doc_id_index].second;
-
+    auto& it = heap[min_doc_id_index];
     result.push_back(*it);
     ++it;
 
-    if (it == end_it) {
+    if (it.HasReachedEnd()) {
       // If we reached the end of the current block, remove it from the heap
       std::swap(heap[min_doc_id_index], heap[size - 1]);
       --size;
