@@ -390,6 +390,8 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
       limit = max(limit, ko->limit);
   }
 
+  auto return_fields = params.return_fields.value_or(SearchFieldsList{});
+
   // Apply SORTBY
   // TODO(vlad): Write profiling up to here
   vector<search::SortableValue> sort_scores;
@@ -401,6 +403,8 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
       sort_scores = idx->Sort(&result.ids, limit, so.order == SortOrder::DESC);
     } else {
       sort_scores = KeepTopKSorted(&result.ids, limit, so, op_args);
+      if (params.ShouldReturnAllFields())
+        return_fields.push_back(so.field);
     }
 
     // If we sorted with knn_scores present, rearrange them
@@ -442,8 +446,9 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     SearchDocData fields{};
     if (params.ShouldReturnAllFields())
       fields = accessor->SerializeDocument(base_->schema);
-    else
-      fields = accessor->Serialize(base_->schema, *params.return_fields);
+
+    auto more_fields = accessor->Serialize(base_->schema, return_fields);
+    fields.insert(make_move_iterator(more_fields.begin()), make_move_iterator(more_fields.end()));
     out.push_back({string{key}, std::move(fields), knn_score, sort_score});
   }
 

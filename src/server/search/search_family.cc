@@ -381,8 +381,8 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
       if (params.load_fields) {
         return CreateSyntaxError("RETURN cannot be applied after LOAD"sv);
       }
-
-      params.return_fields = ParseLoadOrReturnFields(parser, false);
+      if (!params.return_fields)  // after NOCONTENT it's silently ignored
+        params.return_fields = ParseLoadOrReturnFields(parser, false);
     } else if (parser->Check("NOCONTENT")) {  // NOCONTENT
       params.return_fields.emplace();
     } else if (parser->Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
