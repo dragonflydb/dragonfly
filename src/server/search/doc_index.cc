@@ -320,9 +320,22 @@ bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
   return base_->Matches(key, obj_code);
 }
 
-std::vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(
-    std::vector<DocId>* ids, const SearchParams::SortOption& sort, size_t limit,
-    const OpArgs& op_args) const {
+optional<ShardDocIndex::LoadedEntry> ShardDocIndex::LoadEntry(DocId id,
+                                                              const OpArgs& op_args) const {
+  auto& db_slice = op_args.GetDbSlice();
+  string_view key = key_index_.Get(id);
+  auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
+  if (!it || !IsValid(*it))
+    return std::nullopt;
+
+  return {{key, GetAccessor(op_args.db_cntx, (*it)->second)}};
+}
+
+vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, size_t limit,
+                                                            const SearchParams::SortOption& sort,
+                                                            const OpArgs& op_args) const {
+  DCHECK_GT(limit, 0u) << "Limit=0 still has O(ids->size()) complexity";
+
   auto comp = [order = sort.order](const auto& lhs, const auto& rhs) {
     return order == SortOrder::ASC ? lhs < rhs : lhs > rhs;
   };
@@ -331,22 +344,20 @@ std::vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(
   std::priority_queue<QPair, std::vector<QPair>, decltype(comp)> q(comp);
 
   // Iterate over all documents, extract sortable field and update the queue
-  auto& db_slice = op_args.GetDbSlice();
   for (DocId id : *ids) {
-    auto it = db_slice.FindReadOnly(op_args.db_cntx, key_index_.Get(id), base_->GetObjCode());
-    if (!it || !IsValid(*it))
+    auto entry = LoadEntry(id, op_args);
+    if (!entry)
       continue;
 
-    auto val = GetAccessor(op_args.db_cntx, (*it)->second)->Serialize(base_->schema, {sort.field});
-    if (val.empty())
+    auto result = entry->second->Serialize(base_->schema, {sort.field});
+    if (result.empty())
       continue;
-    auto& first_val = val.begin()->second;
 
     // Check if the extracted value is better than the worst (q.top())
-    if (q.size() < limit || comp(first_val, q.top().first)) {
+    if (q.size() < limit || comp(result.begin()->second, q.top().first)) {
       if (q.size() >= limit)
         q.pop();
-      q.emplace(std::move(first_val), id);
+      q.emplace(std::move(result.begin()->second), id);
     }
   }
 
@@ -368,10 +379,8 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   if (!result.error.empty())
     return {facade::ErrorReply(std::move(result.error))};
 
-  // TODO(vlad): LOAD does NOT exist as a FT.SEARCH option, logic is blurry
-  SearchFieldsList fields_to_load = params.ShouldReturnAllFields()
-                                        ? params.load_fields.value_or(SearchFieldsList{})
-                                        : params.return_fields.value_or(SearchFieldsList{});
+  if (limit == 0)
+    return {result.total, {}, std::move(result.profile)};
 
   // Tune sort for KNN: Skip if it's on the knn field, otherwise extend the limit if needed
   bool skip_sort = false;
@@ -381,7 +390,10 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
       limit = max(limit, ko->limit);
   }
 
+  auto return_fields = params.return_fields.value_or(SearchFieldsList{});
+
   // Apply SORTBY
+  // TODO(vlad): Write profiling up to here
   vector<search::SortableValue> sort_scores;
   if (params.sort_option && !skip_sort) {
     const auto& so = *params.sort_option;
@@ -390,8 +402,9 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
       auto* idx = indices_->GetSortIndex(fident);
       sort_scores = idx->Sort(&result.ids, limit, so.order == SortOrder::DESC);
     } else {
-      sort_scores = KeepTopKSorted(&result.ids, so, limit, op_args);
-      fields_to_load.emplace_back(so.field);
+      sort_scores = KeepTopKSorted(&result.ids, limit, so, op_args);
+      if (params.ShouldReturnAllFields())
+        return_fields.push_back(so.field);
     }
 
     // If we sorted with knn_scores present, rearrange them
@@ -408,29 +421,35 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   // Serialize documents
   vector<SerializedSearchDoc> out;
   out.reserve(min(limit, result.ids.size()));
-  auto& db_slice = op_args.GetDbSlice();
+
   size_t expired_count = 0;
   for (size_t i = 0; i < result.ids.size(); i++) {
-    DocId id = result.ids[i];
-    auto key = key_index_.Get(id);
-    auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
+    float knn_score = result.knn_scores.empty() ? 0 : result.knn_scores[i].second;
+    auto sort_score = sort_scores.empty() ? std::monostate{} : std::move(sort_scores[i]);
 
-    if (!it || !IsValid(*it)) {
+    // Don't load entry if we need only its key. Ignore expiration.
+    if (params.IdsOnly()) {
+      string_view key = key_index_.Get(result.ids[i]);
+      out.push_back({string{key}, {}, knn_score, sort_score});
+      continue;
+    }
+
+    auto entry = LoadEntry(result.ids[i], op_args);
+    if (!entry) {
       expired_count++;
       continue;
     }
 
-    // Load all required fields from document
-    auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
-    auto fields = params.ShouldReturnAllFields() ? accessor->SerializeDocument(base_->schema)
-                                                 : SearchDocData{};
-    auto loaded = accessor->Serialize(base_->schema, fields_to_load);
-    fields.insert(std::make_move_iterator(loaded.begin()), std::make_move_iterator(loaded.end()));
+    auto& [key, accessor] = *entry;
 
-    SerializedSearchDoc doc{string{key}, std::move(fields),
-                            result.knn_scores.empty() ? 0 : result.knn_scores[i].second,
-                            sort_scores.empty() ? std::monostate{} : std::move(sort_scores[i])};
-    out.push_back(std::move(doc));
+    // Load all specified fields from document
+    SearchDocData fields{};
+    if (params.ShouldReturnAllFields())
+      fields = accessor->SerializeDocument(base_->schema);
+
+    auto more_fields = accessor->Serialize(base_->schema, return_fields);
+    fields.insert(make_move_iterator(more_fields.begin()), make_move_iterator(more_fields.end()));
+    out.push_back({string{key}, std::move(fields), knn_score, sort_score});
   }
 
   return {result.total - expired_count, std::move(out), std::move(result.profile)};
@@ -439,7 +458,6 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 vector<SearchDocData> ShardDocIndex::SearchForAggregator(
     const OpArgs& op_args, const AggregateParams& params,
     search::SearchAlgorithm* search_algo) const {
-  auto& db_slice = op_args.GetDbSlice();
   auto search_results = search_algo->Search(&*indices_);
 
   if (!search_results.error.empty())
@@ -450,13 +468,10 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
 
   vector<absl::flat_hash_map<string, search::SortableValue>> out;
   for (DocId doc : search_results.ids) {
-    auto key = key_index_.Get(doc);
-    auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
-
-    if (!it || !IsValid(*it))  // Item must have expired
+    auto entry = LoadEntry(doc, op_args);
+    if (!entry)
       continue;
-
-    auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
+    auto& [_, accessor] = *entry;
 
     SearchDocData extracted_sort_indicies;
     extracted_sort_indicies.reserve(sort_indicies.size());

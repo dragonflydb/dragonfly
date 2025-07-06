@@ -25,6 +25,8 @@
 
 namespace dfly {
 
+struct BaseAccessor;
+
 using SearchDocData = absl::flat_hash_map<std::string /*field*/, search::SortableValue /*value*/>;
 using Synonyms = search::Synonyms;
 
@@ -166,7 +168,6 @@ struct SearchParams {
     Only one of load_fields and return_fields should be set.
   */
   std::optional<SearchFieldsList> load_fields;
-  bool no_content = false;
 
   std::optional<SortOption> sort_option;
   search::QueryParams query_params;
@@ -176,7 +177,7 @@ struct SearchParams {
   }
 
   bool IdsOnly() const {
-    return no_content || (return_fields && return_fields->empty());
+    return return_fields && return_fields->empty();
   }
 
   bool ShouldReturnField(std::string_view alias) const;
@@ -276,10 +277,13 @@ class ShardDocIndex {
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
 
+  using LoadedEntry = std::pair<std::string_view, std::unique_ptr<BaseAccessor>>;
+  std::optional<LoadedEntry> LoadEntry(search::DocId id, const OpArgs& op_args) const;
+
   // Behaviour identical to SortIndex::Sort for non-sortable fields that need to be fetched first
-  std::vector<search::SortableValue> KeepTopKSorted(std::vector<DocId>* ids,
+  std::vector<search::SortableValue> KeepTopKSorted(std::vector<DocId>* ids, size_t limit,
                                                     const SearchParams::SortOption& sort,
-                                                    size_t limit, const OpArgs& op_args) const;
+                                                    const OpArgs& op_args) const;
 
  private:
   std::shared_ptr<const DocIndex> base_;
