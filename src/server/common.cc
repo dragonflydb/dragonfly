@@ -119,7 +119,7 @@ unsigned kernel_version = 0;
 size_t max_memory_limit = 0;
 Namespaces* namespaces = nullptr;
 
-size_t FetchRssMemory(io::StatusData sdata) {
+size_t FetchRssMemory(const io::StatusData& sdata) {
   return sdata.vm_rss + sdata.hugetlb_pages;
 }
 

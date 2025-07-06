@@ -28,6 +28,7 @@ ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
 ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
 ABSL_DECLARE_FLAG(double, eviction_memory_budget_threshold);
 ABSL_DECLARE_FLAG(std::vector<std::string>, command_alias);
+ABSL_DECLARE_FLAG(bool, latency_tracking);
 
 namespace dfly {
 
@@ -887,7 +888,8 @@ TEST_F(DflyEngineTest, CommandMetricLabels) {
 class DflyCommandAliasTest : public DflyEngineTest {
  protected:
   DflyCommandAliasTest() {
-    absl::SetFlag(&FLAGS_command_alias, {"___set=set", "___ping=ping"});
+    SetFlag(&FLAGS_command_alias, {"___set=set", "___ping=ping"});
+    SetFlag(&FLAGS_latency_tracking, true);
   }
 
   absl::FlagSaver saver_;
@@ -918,6 +920,20 @@ TEST_F(DflyCommandAliasTest, Aliasing) {
   EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("set", Key(1))));
   EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("multi", Key(1))));
   EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("exec", Key(1))));
+}
+
+TEST_F(DflyCommandAliasTest, AliasesShareHistogramPtr) {
+  EXPECT_EQ(Run({"SET", "foo", "bar"}), "OK");
+  EXPECT_EQ(Run({"___SET", "a", "b"}), "OK");
+  EXPECT_EQ(Run({"___ping"}), "PONG");
+
+  const auto command_histograms = GetMetrics().cmd_latency_map;
+  for (const auto& key : {"set", "___set", "___ping", "ping"}) {
+    EXPECT_TRUE(command_histograms.contains(key));
+  }
+
+  EXPECT_EQ(command_histograms.at("set"), command_histograms.at("___set"));
+  EXPECT_EQ(command_histograms.at("ping"), command_histograms.at("___ping"));
 }
 
 }  // namespace dfly
