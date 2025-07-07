@@ -236,6 +236,14 @@ async def test_latency_stats(async_client: aioredis.Redis):
         assert key in latency_stats
         assert latency_stats[key].keys() == {"p50", "p99", "p99.9"}
 
+    await async_client.config_resetstat()
+    latency_stats = await async_client.info("LATENCYSTATS")
+    # Only stats for the `config resetstat` command should remain in stats
+    assert (
+        len(latency_stats) == 1 and "latency_percentiles_usec_config" in latency_stats,
+        f"unexpected latency stats after reset: {latency_stats}",
+    )
+
 
 async def test_latency_stats_disabled_by_default(async_client: aioredis.Redis):
     for _ in range(100):
