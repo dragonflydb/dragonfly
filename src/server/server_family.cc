@@ -3649,13 +3649,11 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"MODULE", CO::ADMIN, 2, 0, 0, acl::kModule}.HFUNC(Module);
 }
 
-}  // namespace dfly
-
-namespace dfly {
 std::string g_config_file_path;
 std::string g_executable_path;
 void SetInfoServerGlobals(const std::string& config_file_path, const std::string& executable_path) {
     g_config_file_path = config_file_path;
     g_executable_path = executable_path;
 }
-} // namespace dfly
+
+}  // namespace dfly
