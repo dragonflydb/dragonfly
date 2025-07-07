@@ -49,10 +49,32 @@ index 5ce084f6..00eba70c 100644
  include(GNUInstallDirs)
  include("cmake/mimalloc-config-version.cmake")
 diff --git a/src/alloc.c b/src/alloc.c
-index 0fed5e75..870f8d10 100644
+index 0fed5e75..893f3094 100644
 --- a/src/alloc.c
 +++ b/src/alloc.c
-@@ -670,6 +670,24 @@ mi_decl_restrict void* _mi_heap_malloc_guarded(mi_heap_t* heap, size_t size, boo
+@@ -25,6 +25,12 @@ terms of the MIT license. A copy of the license can be found in the file
+ // Allocation
+ // ------------------------------------------------------
+ 
++static void _mi_assert_local(const char* assertion, const char* fname, unsigned line) {
++  _mi_fprintf(NULL, NULL, "mimalloc: assertion failed: at \"%s\":%u, assertion: \"%s\"\n", fname, line, assertion);
++  abort();
++}
++#define mi_assert_local(expr)     ((expr) ? (void)0 : _mi_assert_local(#expr,__FILE__,__LINE__))
++
+ // Fast allocation in a page: just pop from the free list.
+ // Fall back to generic allocation only if the list is empty.
+ // Note: in release mode the (inlined) routine is about 7 instructions with a single test.
+@@ -43,7 +49,7 @@ extern inline void* _mi_page_malloc_zero(mi_heap_t* heap, mi_page_t* page, size_
+   // pop from the free list
+   page->free = mi_block_next(page, block);
+   page->used++;
+-  mi_assert_internal(page->free == NULL || _mi_ptr_page(page->free) == page);
++  mi_assert_local(page->free == NULL || _mi_ptr_page(page->free) == page);
+   mi_assert_internal(page->block_size < MI_MAX_ALIGN_SIZE || _mi_is_aligned(block, MI_MAX_ALIGN_SIZE));
+ 
+   #if MI_DEBUG>3
+@@ -670,6 +676,24 @@ mi_decl_restrict void* _mi_heap_malloc_guarded(mi_heap_t* heap, size_t size, boo
  }
  #endif
  
