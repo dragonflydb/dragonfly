@@ -222,7 +222,6 @@ async def test_metric_labels(
             match_label_value(sample, "other", lambda v: v == 1)
 
 
-@dfly_args({"latency_tracking": True})
 async def test_latency_stats(async_client: aioredis.Redis):
     for _ in range(100):
         await async_client.set("foo", "bar")
@@ -237,7 +236,8 @@ async def test_latency_stats(async_client: aioredis.Redis):
         assert latency_stats[key].keys() == {"p50", "p99", "p99.9"}
 
 
-async def test_latency_stats_disabled_by_default(async_client: aioredis.Redis):
+@dfly_args({"latency_tracking": False})
+async def test_latency_stats_disabled(async_client: aioredis.Redis):
     for _ in range(100):
         await async_client.set("foo", "bar")
     assert await async_client.info("LATENCYSTATS") == {}
