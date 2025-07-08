@@ -100,7 +100,7 @@ ABSL_FLAG(uint32_t, max_busy_read_usec, 100,
 
 ABSL_FLAG(size_t, squashed_reply_size_limit, 0,
           "Max bytes allowed for squashing_current_reply_size. If this limit is reached, "
-          "connections dispatching via pipelines will block until this value is decremented.");
+          "connections dispatching pipelines won't squash them.");
 
 using namespace util;
 using namespace std;
