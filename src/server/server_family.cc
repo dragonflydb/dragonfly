@@ -2517,15 +2517,6 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("executable", base::kProgramName);
     absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
     append("config_file", flagfile_flag->CurrentValue());
-    
-    // Enhanced config info with full paths  
-    if (!g_executable_path.empty()) {
-      append("executable_path", g_executable_path);
-    }
-    std::string config_file = flagfile_flag ? flagfile_flag->CurrentValue() : "";
-    if (!config_file.empty()) {
-      append("config_file_path", config_file);
-    }
   };
 
   auto add_clients_info = [&] {
@@ -3662,11 +3653,6 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_TRANSACTIONAL, -2, 0, 0, acl::kScript}.HFUNC(Script)
       << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, acl::kDfly}.HFUNC(Dfly)
       << CI{"MODULE", CO::ADMIN, 2, 0, 0, acl::kModule}.HFUNC(Module);
-}
-
-std::string g_executable_path;
-void SetInfoServerGlobals(const std::string& config_file_path, const std::string& executable_path) {
-    g_executable_path = executable_path;
 }
 
 }  // namespace dfly
