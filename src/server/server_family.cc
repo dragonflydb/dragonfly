@@ -2195,7 +2195,8 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
   }
   
   if (sub_cmd == "REWRITE") {
-    if (g_config_file_path.empty()) {
+    absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
+    if (!flagfile_flag || flagfile_flag->CurrentValue().empty()) {
       return builder->SendError("The server is running without a config file");
     }
     if (config_registry.Rewrite()) {
@@ -2519,14 +2520,15 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("hz", GetFlag(FLAGS_hz));
     append("executable", base::kProgramName);
     absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
-    append("config_file", flagfile_flag->CurrentValue());
+    std::string config_file = flagfile_flag ? flagfile_flag->CurrentValue() : "";
+    append("config_file", config_file);
     
-    // Enhanced config info with full paths
+    // Enhanced config info with full paths  
     if (!g_executable_path.empty()) {
       append("executable_path", g_executable_path);
     }
-    if (!g_config_file_path.empty()) {
-      append("config_file_path", g_config_file_path);
+    if (!config_file.empty()) {
+      append("config_file_path", config_file);
     }
   };
 
@@ -3666,10 +3668,8 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"MODULE", CO::ADMIN, 2, 0, 0, acl::kModule}.HFUNC(Module);
 }
 
-std::string g_config_file_path;
 std::string g_executable_path;
 void SetInfoServerGlobals(const std::string& config_file_path, const std::string& executable_path) {
-    g_config_file_path = config_file_path;
     g_executable_path = executable_path;
 }
 

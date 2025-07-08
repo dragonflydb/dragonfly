@@ -28,7 +28,7 @@ string NormalizeConfigName(string_view name) {
 // Returns true if the value was updated.
 auto ConfigRegistry::Set(string_view config_name, string_view value) -> SetResult {
   string name = NormalizeConfigName(config_name);
-  
+
   util::fb2::LockGuard lk(mu_);
   auto it = registry_.find(name);
   if (it == registry_.end())
@@ -44,6 +44,7 @@ auto ConfigRegistry::Set(string_view config_name, string_view value) -> SetResul
     LOG(WARNING) << error;
     return SetResult::INVALID;
   }
+
   bool success = !cb || cb(*flag);
   if (success) {
     set_by_user_.insert(name);
@@ -55,14 +56,15 @@ optional<string> ConfigRegistry::Get(string_view config_name) {
   string name = NormalizeConfigName(config_name);
 
   if (name == "config_file") {
-    return g_config_file_path;
+    absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
+    return flagfile_flag ? flagfile_flag->CurrentValue() : "";
   }
   {
     util::fb2::LockGuard lk(mu_);
     if (!registry_.contains(name))
       return nullopt;
   }
-  
+
   absl::CommandLineFlag* flag = absl::FindCommandLineFlag(name);
   CHECK(flag);
   return flag->CurrentValue();
@@ -99,8 +101,11 @@ void ConfigRegistry::RegisterInternal(string_view config_name, bool is_mutable, 
 }
 
 bool ConfigRegistry::Rewrite() const {
-  if (g_config_file_path.empty()) return false;
-  std::filesystem::path config_path(g_config_file_path);
+  absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
+  if (!flagfile_flag) return false;
+  std::string config_file_path = flagfile_flag->CurrentValue();
+  if (config_file_path.empty()) return false;
+  std::filesystem::path config_path(config_file_path);
   if (!std::filesystem::exists(config_path)) return false;
   std::ifstream config_file(config_path);
   if (!config_file.is_open()) return false;
@@ -181,7 +186,7 @@ bool ConfigRegistry::Rewrite() const {
   std::string content;
   for (const auto& l : lines) content += l + "\n";
   // Atomic write
-  std::string tmp_template = g_config_file_path + ".tmpXXXXXX";
+  std::string tmp_template = config_file_path + ".tmpXXXXXX";
   std::vector<char> tmp_path(tmp_template.begin(), tmp_template.end());
   tmp_path.push_back('\0');
   int fd = mkstemp(tmp_path.data());
@@ -193,12 +198,12 @@ bool ConfigRegistry::Rewrite() const {
     off += n;
   }
   fsync(fd); fchmod(fd, 0644); close(fd);
-  if (rename(tmp_path.data(), g_config_file_path.c_str()) == -1) {
+  if (rename(tmp_path.data(), config_file_path.c_str()) == -1) {
     unlink(tmp_path.data());
     return false;
   }
   // sync dir
-  int dir_fd = open(std::filesystem::path(g_config_file_path).parent_path().c_str(), O_RDONLY);
+  int dir_fd = open(std::filesystem::path(config_file_path).parent_path().c_str(), O_RDONLY);
   if (dir_fd != -1) { fsync(dir_fd); close(dir_fd); }
   return true;
 }
