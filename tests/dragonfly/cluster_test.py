@@ -2107,7 +2107,7 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
         collection_size=10_000,
         variance=1,
         samples=1,
-        types=["LIST", "HASH", "SET", "ZSET", "STRING"],
+        types=["LIST", "HASH", "SET", "ZSET", "STREAM", "STRING"],
     )
     await seeder.run(nodes[0].client)
     source_data = await DebugPopulateSeeder.capture(nodes[0].client)
