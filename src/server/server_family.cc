@@ -23,7 +23,6 @@
 #include "absl/strings/ascii.h"
 #include "facade/error.h"
 #include "server/common.h"
-#include "server/config_registry.h"
 #include "slowlog.h"
 #include "util/fibers/synchronization.h"
 
