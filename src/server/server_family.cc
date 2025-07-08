@@ -2161,11 +2161,7 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
     ABSL_UNREACHABLE();
   }
 
-  if (sub_cmd == "GET") {
-    if (args.size() != 2) {
-      return builder->SendError(WrongNumArgsError("config|get"));
-    }
-    
+  if (sub_cmd == "GET" && args.size() == 2) {
     vector<string> res;
     string_view param = ArgS(args, 1);
 
@@ -2193,7 +2189,7 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
     ResetStat(cmd_cntx.conn_cntx->ns);
     return builder->SendOk();
   }
-  
+
   if (sub_cmd == "REWRITE") {
     absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
     if (!flagfile_flag || flagfile_flag->CurrentValue().empty()) {
@@ -2204,9 +2200,9 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
     } else {
       return builder->SendError("Failed to rewrite config file");
     }
+  } else {
+    return builder->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErrType);
   }
-
-  return builder->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErrType);
 }
 
 void ServerFamily::Debug(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2520,13 +2516,13 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("hz", GetFlag(FLAGS_hz));
     append("executable", base::kProgramName);
     absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
-    std::string config_file = flagfile_flag ? flagfile_flag->CurrentValue() : "";
-    append("config_file", config_file);
+    append("config_file", flagfile_flag->CurrentValue());
     
     // Enhanced config info with full paths  
     if (!g_executable_path.empty()) {
       append("executable_path", g_executable_path);
     }
+    std::string config_file = flagfile_flag ? flagfile_flag->CurrentValue() : "";
     if (!config_file.empty()) {
       append("config_file_path", config_file);
     }
