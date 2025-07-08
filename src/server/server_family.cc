@@ -23,6 +23,7 @@
 #include "absl/strings/ascii.h"
 #include "facade/error.h"
 #include "server/common.h"
+#include "server/config_registry.h"
 #include "slowlog.h"
 #include "util/fibers/synchronization.h"
 
@@ -2123,6 +2124,8 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
         "    Set the configuration <directive> to <value>.",
         "RESETSTAT",
         "    Reset statistics reported by the INFO command.",
+        "REWRITE",
+        "    Rewrite the configuration file with the current configuration.",
         "HELP",
         "    Prints this help.",
     };
@@ -2159,7 +2162,11 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
     ABSL_UNREACHABLE();
   }
 
-  if (sub_cmd == "GET" && args.size() == 2) {
+  if (sub_cmd == "GET") {
+    if (args.size() != 2) {
+      return builder->SendError(WrongNumArgsError("config|get"));
+    }
+    
     vector<string> res;
     string_view param = ArgS(args, 1);
 
@@ -2186,7 +2193,9 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
   if (sub_cmd == "RESETSTAT") {
     ResetStat(cmd_cntx.conn_cntx->ns);
     return builder->SendOk();
-  } else if (sub_cmd == "REWRITE") {
+  }
+  
+  if (sub_cmd == "REWRITE") {
     if (g_config_file_path.empty()) {
       return builder->SendError("The server is running without a config file");
     }
@@ -2195,9 +2204,9 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
     } else {
       return builder->SendError("Failed to rewrite config file");
     }
-  } else {
-    return builder->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErrType);
   }
+
+  return builder->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErrType);
 }
 
 void ServerFamily::Debug(CmdArgList args, const CommandContext& cmd_cntx) {
