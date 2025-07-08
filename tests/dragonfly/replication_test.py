@@ -2861,7 +2861,7 @@ async def test_stream_approximate_trimming(df_factory):
         await c_master.execute_command("XTRIM", stream_name, "MAXLEN", "~", trim_size)
 
     # Wait for replica sync
-    await asyncio.sleep(1)
+    await check_all_replicas_finished([c_replica], c_master)
 
     # Check replica data consistent
     master_data = await DebugPopulateSeeder.capture(c_master)
@@ -2872,6 +2872,9 @@ async def test_stream_approximate_trimming(df_factory):
     for i in range(num_streams):
         stream_name = f"stream{i}"
         await c_master.execute_command("XTRIM", stream_name, "MAXLEN", "0")
+
+    # Wait for replica sync
+    await check_all_replicas_finished([c_replica], c_master)
 
     # Check replica data consistent
     master_data = await DebugPopulateSeeder.capture(c_master)
