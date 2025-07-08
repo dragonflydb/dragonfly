@@ -106,6 +106,9 @@ ABSL_FLAG(uint32_t, pipeline_squash_limit, 1 << 30, "Limit on the size of a squa
 ABSL_FLAG(uint32_t, pipeline_wait_batch_usec, 0,
           "If non-zero, waits for this time for more I/O "
           " events to come for the connection in case there is only one command in the pipeline. ");
+ABSL_FLAG(size_t, squashed_reply_size_limit, 0,
+          "Max bytes allowed for squashing_current_reply_size. If this limit is reached, "
+          "connections dispatching pipelines won't squash them.");
 
 using namespace util;
 using namespace std;
@@ -191,6 +194,7 @@ thread_local TrafficLogger tl_traffic_logger{};
 thread_local base::Histogram* io_req_size_hist = nullptr;
 
 thread_local uint32 pipeline_wait_batch_usec = absl::GetFlag(FLAGS_pipeline_wait_batch_usec);
+thread_local const size_t reply_size_limit = absl::GetFlag(FLAGS_squashed_reply_size_limit);
 
 void OpenTrafficLogger(string_view base_path) {
   unique_lock lk{tl_traffic_logger.mutex};
@@ -1196,7 +1200,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
     last_interaction_ = time(nullptr);
 
     // We might have blocked the dispatch queue from processing, wake it up.
-    if (dispatch_q_.size() > 0)
+    if (!dispatch_q_.empty())
       cnd_.notify_one();
   }
 }
@@ -1707,7 +1711,8 @@ void Connection::AsyncFiber() {
     bool squashing_enabled = squashing_threshold > 0;
     bool threshold_reached = pending_pipeline_cmd_cnt_ > squashing_threshold;
     bool are_all_plain_cmds = pending_pipeline_cmd_cnt_ == dispatch_q_.size();
-    if (squashing_enabled && threshold_reached && are_all_plain_cmds && !skip_next_squashing_) {
+    if (squashing_enabled && threshold_reached && are_all_plain_cmds && !skip_next_squashing_ &&
+        !IsReplySizeOverLimit()) {
       SquashPipeline();
     } else {
       MessageHandle msg = std::move(dispatch_q_.front());
@@ -2135,6 +2140,16 @@ void Connection::DecrNumConns() {
     --stats_->num_conns_main;
   else
     --stats_->num_conns_other;
+}
+
+bool Connection::IsReplySizeOverLimit() const {
+  std::atomic<size_t>& reply_sz = tl_facade_stats->reply_stats.squashing_current_reply_size;
+  size_t current = reply_sz.load(std::memory_order_acquire);
+  const bool over_limit = reply_size_limit != 0 && current > 0 && current > reply_size_limit;
+  // Every 10 seconds. Otherwise, it can be too sensitive on certain workloads in production
+  // instances.
+  LOG_EVERY_N(INFO, 10) << "MultiCommandSquasher overlimit: " << current << "/" << reply_size_limit;
+  return over_limit;
 }
 
 void Connection::SetMaxQueueLenThreadLocal(unsigned tid, uint32_t val) {

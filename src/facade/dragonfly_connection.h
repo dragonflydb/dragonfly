@@ -426,6 +426,8 @@ class Connection : public util::Connection {
   void IncrNumConns();
   void DecrNumConns();
 
+  bool IsReplySizeOverLimit() const;
+
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
   util::fb2::Fiber async_fb_;             // async fiber (if started)
