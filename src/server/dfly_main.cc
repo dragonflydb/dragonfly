@@ -724,8 +724,6 @@ void ParseFlagsFromEnv() {
   }
 }
 
-
-
 int main(int argc, char* argv[]) {
   absl::SetProgramUsageMessage(
       R"(a modern in-memory store.
