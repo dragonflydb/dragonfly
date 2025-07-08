@@ -254,7 +254,7 @@ async def test_denyoom_commands(df_factory):
     await client.execute_command("mget x")
 
 
-@pytest.mark.parametrize("type", ["LIST", "HASH", "SET", "ZSET", "STRING"])
+@pytest.mark.parametrize("type", ["LIST", "HASH", "SET", "ZSET", "STRING", "STREAM"])
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.asyncio
 async def test_rename_huge_values(df_factory, type):

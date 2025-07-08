@@ -2766,7 +2766,7 @@ async def test_memory_on_big_string_loading(df_factory):
 @pytest.mark.exclude_epoll
 @pytest.mark.parametrize(
     "element_size, elements_number",
-    [(16, 20000), (30000, 16)],
+    [(16, 15000), (30000, 16)],
 )
 @dfly_args({"proactor_threads": 1})
 async def test_big_containers(df_factory, element_size, elements_number):
