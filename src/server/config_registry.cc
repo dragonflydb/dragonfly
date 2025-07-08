@@ -55,10 +55,6 @@ auto ConfigRegistry::Set(string_view config_name, string_view value) -> SetResul
 optional<string> ConfigRegistry::Get(string_view config_name) {
   string name = NormalizeConfigName(config_name);
 
-  if (name == "config_file") {
-    absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
-    return flagfile_flag ? flagfile_flag->CurrentValue() : "";
-  }
   {
     util::fb2::LockGuard lk(mu_);
     if (!registry_.contains(name))
