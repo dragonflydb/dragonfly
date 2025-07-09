@@ -1158,6 +1158,41 @@ void AclFamily::BuildIndexers(RevCommandsIndexStore families) {
   CategoryToIdx(std::move(idx_store));
 }
 
+void AclFamily::Help(CmdArgList args, const CommandContext& cmd_cntx) {
+  string_view help_arr[] = {
+      "ACL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+      "CAT [<category>]",
+      "    List all commands that belong to <category>, or all command categories",
+      "    when no category is specified.",
+      "DELUSER <username> [<username> ...]",
+      "    Delete a list of users.",
+      "DRYRUN <username> <command> [<arg> ...]",
+      "    Returns whether the user can execute the given command without executing the command.",
+      "GETUSER <username>",
+      "    Get the user's details.",
+      "GENPASS [<bits>]",
+      "    Generate a secure 256-bit user password. The optional `bits` argument can",
+      "    be used to specify a different size.",
+      "LIST",
+      "    Show users details in config file format.",
+      "LOAD",
+      "    Reload users from the ACL file.",
+      "LOG [<count> | RESET]",
+      "    Show the ACL log entries.",
+      "SAVE",
+      "    Save the current config to the ACL file.",
+      "SETUSER <username> <attribute> [<attribute> ...]",
+      "    Create or modify a user with the specified attributes.",
+      "USERS",
+      "    List all the registered usernames.",
+      "WHOAMI",
+      "    Return the current connection username.",
+      "HELP",
+      "    Print this help."};
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
+  return rb->SendSimpleStrArr(help_arr);
+}
+
 using MemberFunc = void (AclFamily::*)(CmdArgList args, const CommandContext& cmd_cntx);
 
 CommandId::Handler3 HandlerFunc(AclFamily* acl, MemberFunc f) {
@@ -1179,6 +1214,7 @@ constexpr uint32_t kCat = acl::SLOW;
 constexpr uint32_t kGetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kDryRun = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kGenPass = acl::SLOW;
+constexpr uint32_t kHelp = acl::SLOW;
 
 // We can't implement the ACL commands and its respective subcommands LIST, CAT, etc
 // the usual way, (that is, one command called ACL which then dispatches to the subcommand
@@ -1205,6 +1241,7 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
   *registry << CI{"ACL DRYRUN", kAclMask, 3, 0, 0, acl::kDryRun}.HFUNC(DryRun);
   *registry << CI{"ACL GENPASS", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kGenPass}.HFUNC(
       GenPass);
+  *registry << CI{"ACL HELP", kAclMask, 0, 0, 0, acl::kHelp}.HFUNC(Help);
   cmd_registry_ = registry;
 
   // build indexers
