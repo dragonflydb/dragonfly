@@ -38,7 +38,7 @@ struct NumericIndex : public BaseIndex {
     virtual void Remove(DocId id, absl::Span<double> values) = 0;
 
     // Returns all DocIds that match the range [l, r].
-    virtual std::vector<DocId> Range(double l, double r) const = 0;
+    virtual std::variant<RangeResult, std::vector<DocId>> Range(double l, double r) const = 0;
 
     // Returns all DocIds that have non-null values in the index.
     virtual std::vector<DocId> GetAllDocIds() const = 0;
@@ -51,7 +51,7 @@ struct NumericIndex : public BaseIndex {
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
 
-  std::vector<DocId> Range(double l, double r) const;
+  std::variant<RangeResult, std::vector<DocId>> Range(double l, double r) const;
 
   std::vector<DocId> GetAllDocsWithNonNullValues() const override;
 
