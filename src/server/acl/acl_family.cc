@@ -1158,7 +1158,6 @@ void AclFamily::BuildIndexers(RevCommandsIndexStore families) {
   CategoryToIdx(std::move(idx_store));
 }
 
-<<<<<<< HEAD
 void AclFamily::Help(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view help_arr[] = {
       "ACL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
@@ -1194,8 +1193,6 @@ void AclFamily::Help(CmdArgList args, const CommandContext& cmd_cntx) {
   return rb->SendSimpleStrArr(help_arr);
 }
 
-=======
->>>>>>> main
 using MemberFunc = void (AclFamily::*)(CmdArgList args, const CommandContext& cmd_cntx);
 
 CommandId::Handler3 HandlerFunc(AclFamily* acl, MemberFunc f) {
