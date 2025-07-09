@@ -728,22 +728,27 @@ void SetHuffmanTable(const std::string& huffman_table) {
       continue;
     }
     string domain_str = absl::AsciiStrToUpper(kv[0]);
-    optional<CompactObj::HuffmanDomain> domain;
+    CompactObj::HuffmanDomain domain;
+
     if (domain_str == "KEYS") {
       domain = CompactObj::HUFF_KEYS;
+    } else if (domain_str == "STRINGS") {
+      domain = CompactObj::HUFF_STRING_VALUES;
     } else {
       LOG(ERROR) << "Unknown huffman domain: " << kv[0];
       continue;
     }
+
     string unescaped;
     if (!absl::Base64Unescape(kv[1], &unescaped)) {
       LOG(ERROR) << "Failed to decode base64 huffman table for domain " << kv[0] << " with value "
                  << kv[1];
       continue;
     }
+
     atomic_bool success = true;
     shard_set->RunBriefInParallel([&](auto* shard) {
-      if (!CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_KEYS, unescaped)) {
+      if (!CompactObj::InitHuffmanThreadLocal(domain, unescaped)) {
         success = false;
       }
     });

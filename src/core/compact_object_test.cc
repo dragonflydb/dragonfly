@@ -654,13 +654,17 @@ TEST_F(CompactObjectTest, lpGetInteger) {
   lpFree(lp);
 }
 
-TEST_F(CompactObjectTest, HuffMan) {
+static void BuildEncoderAB(HuffmanEncoder* encoder) {
   array<unsigned, 256> hist;
   hist.fill(1);
   hist['a'] = 100;
   hist['b'] = 50;
+  CHECK(encoder->Build(hist.data(), hist.size() - 1, nullptr));
+}
+
+TEST_F(CompactObjectTest, HuffMan) {
   HuffmanEncoder encoder;
-  ASSERT_TRUE(encoder.Build(hist.data(), hist.size() - 1, nullptr));
+  BuildEncoderAB(&encoder);
   string bindata = encoder.Export();
   ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_KEYS, bindata));
   for (unsigned i = 30; i < 2048; i += 10) {
