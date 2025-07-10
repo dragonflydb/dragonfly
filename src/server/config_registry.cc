@@ -206,7 +206,7 @@ bool ConfigRegistry::Rewrite() const {
   std::string config_file_path = flagfile_flag->CurrentValue();
   if (config_file_path.empty())
     return false;
-  
+
   std::filesystem::path config_path(config_file_path);
   if (!std::filesystem::exists(config_path))
     return false;
