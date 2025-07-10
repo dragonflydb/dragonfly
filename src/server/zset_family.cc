@@ -1819,11 +1819,22 @@ std::optional<std::string_view> GetFirstNonEmptyKeyFound(EngineShard* shard, Tra
   return std::nullopt;
 }
 
-// Validates the ZMPop command arguments and extracts the values to the output params.
+// Validates the ZMPop and BZMPop command arguments and extracts the values to the output params.
 // If the arguments are invalid sends the appropiate error to builder and returns false.
 bool ValidateZMPopCommand(CmdArgList args, uint32* num_keys, bool* is_max, int* pop_count,
-                          SinkReplyBuilder* builder) {
+                          SinkReplyBuilder* builder, bool is_blocking, float* timeout) {
   CmdArgParser parser{args};
+
+  if (is_blocking) {
+    if (!absl::SimpleAtof(parser.Next(), timeout)) {
+      builder->SendError("timeout is not a float or out of range");
+      return false;
+    }
+    if (*timeout < 0) {
+      builder->SendError("timeout is negative");
+      return false;
+    }
+  }
 
   if (!SimpleAtoi(parser.Next(), num_keys)) {
     builder->SendError(kUintErr);
@@ -2401,11 +2412,14 @@ void ZSetFamily::ZInterCard(CmdArgList args, const CommandContext& cmd_cntx) {
   builder->SendLong(result.value().size());
 }
 
-void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
+// Generic function for ZMPop and BZMPop commands
+void ZMPopGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_blocking) {
   uint32 num_keys;
   bool is_max;
   int pop_count;
-  if (!ValidateZMPopCommand(args, &num_keys, &is_max, &pop_count, cmd_cntx.rb)) {
+  float timeout;
+  if (!ValidateZMPopCommand(args, &num_keys, &is_max, &pop_count, cmd_cntx.rb, is_blocking,
+                            &timeout)) {
     return;
   }
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
@@ -2439,7 +2453,8 @@ void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   // Now that we have the first non empty key from each shard, find the first overall first key and
   // pop elements from it.
   std::optional<std::string_view> key_to_pop = std::nullopt;
-  ArgRange arg_keys(args.subspan(1, num_keys));
+  // BZMPOP have 1 extra argument as compared to ZMPOP hence adding 1 is is_blocking is true
+  ArgRange arg_keys(args.subspan(1 + is_blocking, num_keys));
   // Find the first arg_key which exists in any shard and is not empty.
   for (std::string_view key : arg_keys) {
     if (first_found_keys_for_shard.contains(key)) {
@@ -2448,6 +2463,49 @@ void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
     }
   }
 
+  // if we don't have any key to block and it's blocking then we will block it using `WaitOnWatch`
+  if (is_blocking && !key_to_pop.has_value()) {
+    auto trans = cmd_cntx.tx;
+    auto cntx = cmd_cntx.conn_cntx;
+    auto* ns = &trans->GetNamespace();
+
+    // Concluding transaction if it's multi mode as blocking is not allowed in it.
+    if (trans->IsMulti()) {
+      trans->Conclude();
+      response_builder->SendNull();
+      return;
+    }
+
+    auto limit_tp = Transaction::time_point::max();
+    auto limit_ms = (unsigned)(timeout * 1000);
+    if (limit_ms > 0) {
+      using namespace std::chrono;
+      limit_tp = steady_clock::now() + milliseconds(limit_ms);
+    }
+    const auto key_checker = [ns](EngineShard* owner, const DbContext& context, Transaction*,
+                                  std::string_view key) -> bool {
+      return ns->GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_ZSET).ok();
+    };
+
+    DCHECK(trans->IsScheduled());  // Checking if the transaction is scheduled before calling
+                                   // `WaitOnWatch`
+    auto status = trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker, &cntx->blocked,
+                                     &cntx->paused);
+
+    if (status != OpStatus::OK) {
+      response_builder->SendNull();
+      return;
+    }
+
+    auto cb = [&key_to_pop](Transaction* t, EngineShard* shard) {
+      if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {
+        key_to_pop = *wake_key;
+      }
+      return OpStatus::OK;
+    };
+    trans->Execute(std::move(cb), false);
+  }
+  // else we will check if key_to_pop has value in case of ZMPOP.
   if (!key_to_pop.has_value()) {
     cmd_cntx.tx->Conclude();
     response_builder->SendNull();
@@ -2464,6 +2522,14 @@ void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
 
   LOG_IF(WARNING, !pop_result) << "Unexpected status " << pop_result.status();
   response_builder->SendLabeledScoredArray(*key_to_pop, pop_result.value());
+}
+
+void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
+  ZMPopGeneric(args, cmd_cntx, false);
+}
+
+void ZSetFamily::BZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
+  ZMPopGeneric(args, cmd_cntx, true);
 }
 
 void ZSetFamily::ZPopMax(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2737,6 +2803,7 @@ constexpr uint32_t kZInter = READ | SORTEDSET | SLOW;
 constexpr uint32_t kZInterCard = WRITE | SORTEDSET | SLOW;
 constexpr uint32_t kZLexCount = READ | SORTEDSET | FAST;
 constexpr uint32_t kZMPop = WRITE | SORTEDSET | SLOW;
+constexpr uint32_t kBZMPop = WRITE | SORTEDSET | SLOW | BLOCKING;
 constexpr uint32_t kZPopMax = WRITE | SORTEDSET | FAST;
 constexpr uint32_t kZPopMin = WRITE | SORTEDSET | FAST;
 constexpr uint32_t kZRem = WRITE | SORTEDSET | FAST;
@@ -2783,6 +2850,9 @@ void ZSetFamily::Register(CommandRegistry* registry) {
              ZInterCard)
       << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, acl::kZLexCount}.HFUNC(ZLexCount)
       << CI{"ZMPOP", CO::SLOW | CO::WRITE | CO::VARIADIC_KEYS, -4, 2, 2, acl::kZMPop}.HFUNC(ZMPop)
+      << CI{"BZMPOP",    CO::SLOW | CO::WRITE | CO::VARIADIC_KEYS | CO::BLOCKING, -5, 3, 3,
+            acl::kBZMPop}
+             .HFUNC(BZMPop)
 
       << CI{"ZPOPMAX", CO::FAST | CO::WRITE, -2, 1, 1, acl::kZPopMax}.HFUNC(ZPopMax)
       << CI{"ZPOPMIN", CO::FAST | CO::WRITE, -2, 1, 1, acl::kZPopMin}.HFUNC(ZPopMin)

@@ -113,6 +113,7 @@ class ZSetFamily {
   static void ZInterCard(CmdArgList args, const CommandContext& cmd_cntx);
   static void ZLexCount(CmdArgList args, const CommandContext& cmd_cntx);
   static void ZMPop(CmdArgList args, const CommandContext& cmd_cntx);
+  static void BZMPop(CmdArgList args, const CommandContext& cmd_cntx);
   static void ZPopMax(CmdArgList args, const CommandContext& cmd_cntx);
   static void ZPopMin(CmdArgList args, const CommandContext& cmd_cntx);
   static void ZRange(CmdArgList args, const CommandContext& cmd_cntx);
