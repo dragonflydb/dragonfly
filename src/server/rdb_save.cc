@@ -240,10 +240,6 @@ std::error_code RdbSerializer::SaveValue(const PrimeValue& pv) {
         ec = SaveString(pv.GetSlice(&tmp_str_));
       }
     }
-    // We flush here because if the next element in the bucket we are serializing is a container,
-    // it will first serialize the first entry and then flush the internal buffer, even if
-    // crossed the limit.
-    FlushIfNeeded(FlushState::kFlushEndEntry);
   } else {
     ec = SaveObject(pv);
   }
@@ -313,6 +309,10 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
     return make_unexpected(ec);
   }
 
+  // We flush here because if the next element in the bucket we are serializing is a container,
+  // it will first serialize the first entry and then flush the internal buffer, even if
+  // crossed the limit.
+  FlushIfNeeded(FlushState::kFlushEndEntry);
   return rdb_type;
 }
 
