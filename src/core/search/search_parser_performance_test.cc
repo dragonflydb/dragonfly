@@ -83,7 +83,6 @@ TEST(SearchParserPerformanceTest, FirstQueryInitializationPenalty) {
       driver.SetParams(&params);
       driver.SetInput(std::string{production_query});
       (void)Parser (&driver)();
-      (void)driver.Take();
     }
 
     absl::Duration elapsed = absl::Now() - start;
