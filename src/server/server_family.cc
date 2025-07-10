@@ -11,9 +11,11 @@
 #include <absl/strings/str_replace.h>
 #include <absl/strings/strip.h>
 #include <croncpp.h>  // cron::cronexpr
+#include <fcntl.h>    // for mkstemp
 #include <sys/resource.h>
+#include <sys/stat.h>  // for fchmod
 #include <sys/utsname.h>
-#include <unistd.h>  // for getpid()
+#include <unistd.h>  // for getpid(), write, close, unlink, fsync
 
 #include <algorithm>
 #include <chrono>
@@ -2123,6 +2125,8 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
         "    Set the configuration <directive> to <value>.",
         "RESETSTAT",
         "    Reset statistics reported by the INFO command.",
+        "REWRITE",
+        "    Rewrite the configuration file with the current configuration.",
         "HELP",
         "    Prints this help.",
     };
@@ -2181,6 +2185,62 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
     }
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
     return rb->SendBulkStrArr(res, RedisReplyBuilder::MAP);
+  }
+
+  if (sub_cmd == "REWRITE") {
+    absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
+    if (!flagfile_flag || flagfile_flag->CurrentValue().empty()) {
+      return builder->SendError("The server is running without a config file");
+    }
+
+    std::string config_file_path = flagfile_flag->CurrentValue();
+
+    // Generate config content using absl reflection
+    std::vector<std::string> config_lines;
+    auto all_flags = absl::GetAllFlags();
+
+    for (const auto& [flag_name, flag_ptr] : all_flags) {
+      if (flag_ptr->CurrentValue() != flag_ptr->DefaultValue()) {
+        config_lines.push_back(absl::StrCat("--", flag_name, "=", flag_ptr->CurrentValue()));
+      }
+    }
+
+    // Write config file atomically
+    std::string content;
+    for (const auto& line : config_lines) {
+      content += line + "\n";
+    }
+
+    // Atomic write using mkstemp + rename
+    std::string tmp_template = config_file_path + ".tmpXXXXXX";
+    std::vector<char> tmp_path(tmp_template.begin(), tmp_template.end());
+    tmp_path.push_back('\0');
+    int fd = mkstemp(tmp_path.data());
+    if (fd == -1) {
+      return builder->SendError("Failed to create temporary file");
+    }
+
+    size_t off = 0;
+    while (off < content.size()) {
+      ssize_t n = write(fd, content.c_str() + off, content.size() - off);
+      if (n <= 0) {
+        close(fd);
+        unlink(tmp_path.data());
+        return builder->SendError("Failed to write config file");
+      }
+      off += n;
+    }
+
+    fsync(fd);
+    fchmod(fd, 0644);
+    close(fd);
+
+    if (rename(tmp_path.data(), config_file_path.c_str()) == -1) {
+      unlink(tmp_path.data());
+      return builder->SendError("Failed to rewrite config file");
+    }
+
+    return builder->SendOk();
   }
 
   if (sub_cmd == "RESETSTAT") {
