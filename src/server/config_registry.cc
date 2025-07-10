@@ -48,7 +48,7 @@ auto ConfigRegistry::Set(string_view config_name, string_view value) -> SetResul
 
   bool success = !cb || cb(*flag);
   if (success) {
-    set_by_user_.insert(name);
+    it->second.is_modified = true;
   }
   return success ? SetResult::OK : SetResult::INVALID;
 }
@@ -148,7 +148,11 @@ bool ConfigRegistry::Rewrite() const {
   std::set<std::string> rewrite_now;
   {
     util::fb2::LockGuard lk(mu_);
-    rewrite_now = set_by_user_;
+    for (const auto& [name, entry] : registry_) {
+      if (entry.is_modified) {
+        rewrite_now.insert(name);
+      }
+    }
   }
   // Update original items
   for (const auto& name : rewrite_now) {

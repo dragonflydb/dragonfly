@@ -58,8 +58,6 @@ class ConfigRegistry {
 
   bool Rewrite() const;
 
-  std::set<std::string> set_by_user_;
-
  private:
   void RegisterInternal(std::string_view name, bool is_mutable, WriteCb cb)
       ABSL_LOCKS_EXCLUDED(mu_);
@@ -69,6 +67,7 @@ class ConfigRegistry {
   struct Entry {
     WriteCb cb;
     bool is_mutable;
+    bool is_modified = false;
   };
 
   absl::flat_hash_map<std::string, Entry> registry_ ABSL_GUARDED_BY(mu_);
