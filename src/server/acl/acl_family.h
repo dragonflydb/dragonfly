@@ -52,6 +52,7 @@ class AclFamily final {
   void GetUser(CmdArgList args, const CommandContext& cmd_cntx);
   void DryRun(CmdArgList args, const CommandContext& cmd_cntx);
   void GenPass(CmdArgList args, const CommandContext& cmd_cntx);
+  void Help(CmdArgList args, const CommandContext& cmd_cntx);
 
   // Helper function that updates all open connections and their
   // respective ACL fields on all the available proactor threads
