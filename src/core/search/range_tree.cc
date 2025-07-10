@@ -8,89 +8,52 @@ namespace dfly::search {
 
 namespace {
 
-// This iterator filters out entries that are not in the range [l, r].
-// It is used to iterate over the RangeBlock and return only the entries
-// that are within the specified range.
-// The iterator is initialized with a range [l, r] and will skip entries
-// that are outside this range.
-class RangeFilterIterator {
- private:
-  using RangeBlock = RangeTree::RangeBlock;
-  using BaseIterator = RangeBlock::BlockListIterator;
+std::vector<DocId> MergeAllResults(absl::Span<const RangeTree::RangeBlock*> blocks, double l,
+                                   double r) {
+  DCHECK(blocks.size() != 1 && blocks.size() != 2);
 
- public:
-  using iterator_category = BaseIterator::iterator_category;
-  using difference_type = BaseIterator::difference_type;
-  using value_type = DocId;
-  using pointer = value_type*;
-  using reference = value_type&;
+  // After the benchmarking, it is better to use inlined vector
+  // than std::priority_queue
+  absl::InlinedVector<RangeFilterIterator, 10> heap;
+  heap.reserve(blocks.size());
 
-  RangeFilterIterator(BaseIterator begin, BaseIterator end, double l, double r)
-      : l_(l), r_(r), current_(begin), end_(end) {
-    SkipInvalidEntries(std::numeric_limits<DocId>::max());
-  }
-
-  value_type operator*() const {
-    return (*current_).first;
-  }
-
-  RangeFilterIterator& operator++() {
-    const DocId last_id = (*current_).first;
-    ++current_;
-    SkipInvalidEntries(last_id);
-    return *this;
-  }
-
-  bool operator==(const RangeFilterIterator& other) const {
-    return current_ == other.current_;
-  }
-
-  bool operator!=(const RangeFilterIterator& other) const {
-    return current_ != other.current_;
-  }
-
-  bool HasReachedEnd() const {
-    return current_ == end_;
-  }
-
- private:
-  void SkipInvalidEntries(DocId last_id) {
-    // Faster than using std::find_if
-    while (current_ != end_ && (!InRange(current_) || (*current_).first == last_id)) {
-      ++current_;
+  size_t doc_ids_count = 0;
+  for (const auto* block : blocks) {
+    auto it = MakeBegin(*block, l, r);
+    if (!it.HasReachedEnd()) {
+      heap.emplace_back(it);
+      doc_ids_count += block->Size();
     }
   }
 
-  bool InRange(BaseIterator it) const {
-    return l_ <= (*it).second && (*it).second <= r_;
+  std::vector<DocId> result;
+  result.reserve(doc_ids_count);
+
+  size_t size = heap.size();
+  while (size) {
+    DCHECK(!heap[0].HasReachedEnd());
+
+    size_t min_doc_id_index = 0;
+    for (size_t i = 1; i < size; ++i) {
+      DCHECK(!heap[i].HasReachedEnd());
+
+      if (*heap[i] < *heap[min_doc_id_index]) {
+        min_doc_id_index = i;
+      }
+    }
+
+    auto& it = heap[min_doc_id_index];
+    result.push_back(*it);
+    ++it;
+
+    if (it.HasReachedEnd()) {
+      // If we reached the end of the current block, remove it from the heap
+      std::swap(heap[min_doc_id_index], heap[size - 1]);
+      --size;
+    }
   }
 
-  double l_, r_;
-  BaseIterator current_, end_;
-};
-
-RangeFilterIterator MakeBegin(const RangeTree::RangeBlock& block, double l, double r) {
-  return {block.begin(), block.end(), l, r};
-}
-
-RangeFilterIterator MakeEnd(const RangeTree::RangeBlock& block, double l, double r) {
-  return {block.end(), block.end(), l, r};
-}
-
-std::vector<DocId> MergeSingleBlock(const RangeTree::RangeBlock& block, double l, double r) {
-  std::vector<DocId> result;
-  result.reserve(block.Size() / 16);
-  std::copy(MakeBegin(block, l, r), MakeEnd(block, l, r), std::back_inserter(result));
-  return result;
-}
-
-std::vector<DocId> MergeTwoBlocks(const RangeTree::RangeBlock& left_block,
-                                  const RangeTree::RangeBlock& right_block, double l, double r) {
-  std::vector<DocId> result;
-  result.reserve(left_block.Size() / 3 + right_block.Size() / 3);
-  std::set_union(MakeBegin(left_block, l, r), MakeEnd(left_block, l, r),
-                 MakeBegin(right_block, l, r), MakeEnd(right_block, l, r),
-                 std::back_inserter(result));
+  DCHECK(std::is_sorted(result.begin(), result.end()));
   return result;
 }
 
@@ -107,6 +70,7 @@ template <typename MapT> auto FindRangeBlockImpl(MapT& entries, double value) {
   DCHECK(it != entries.end() && it->first <= value);
   return it;
 }
+
 }  // namespace
 
 RangeTree::RangeTree(PMR_NS::memory_resource* mr, size_t max_range_block_size)
@@ -148,6 +112,11 @@ void RangeTree::Remove(DocId id, double value) {
 }
 
 RangeResult RangeTree::Range(double l, double r) const {
+  return {RangeBlocks(l, r), l, r};
+}
+
+absl::InlinedVector<const RangeTree::RangeBlock*, 5> RangeTree::RangeBlocks(double l,
+                                                                            double r) const {
   DCHECK(l <= r);
 
   auto it_l = FindRangeBlock(l);
@@ -162,11 +131,14 @@ RangeResult RangeTree::Range(double l, double r) const {
   }
 
   DCHECK(!blocks.empty());
-
-  return {std::move(blocks), l, r};
+  return blocks;
 }
 
 RangeResult RangeTree::GetAllDocIds() const {
+  return RangeResult{GetAllBlocks()};
+}
+
+absl::InlinedVector<const RangeTree::RangeBlock*, 5> RangeTree::GetAllBlocks() const {
   absl::InlinedVector<const RangeBlock*, 5> blocks;
   blocks.reserve(entries_.size());
 
@@ -174,7 +146,7 @@ RangeResult RangeTree::GetAllDocIds() const {
     blocks.push_back(&entry.second);
   }
 
-  return RangeResult{std::move(blocks)};
+  return blocks;
 }
 
 RangeTree::Map::iterator RangeTree::FindRangeBlock(double value) {
@@ -251,67 +223,35 @@ void RangeTree::SplitBlock(Map::iterator it) {
 }
 
 RangeResult::RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks)
-    : blocks_(std::move(blocks)) {
-  DCHECK(!blocks_.empty());
+    : RangeResult(std::move(blocks), -std::numeric_limits<double>::infinity(),
+                  std::numeric_limits<double>::infinity()) {
 }
 
-RangeResult::RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks, double l, double r)
-    : l_(l), r_(r), blocks_(std::move(blocks)) {
-  DCHECK(!blocks_.empty());
+RangeResult::RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks, double l, double r) {
+  if (blocks.size() == 1) {
+    result_ = SingleBlockRangeResult(blocks[0], l, r);
+  } else if (blocks.size() == 2) {
+    result_ = TwoBlocksRangeResult(blocks[0], blocks[1], l, r);
+  } else {
+    result_ = MergeAllResults(absl::MakeSpan(blocks), l, r);
+  }
 }
 
-std::vector<DocId> RangeResult::MergeAllResults() const {
-  if (blocks_.size() == 1) {
-    // If there is only one block, we can return its result directly
-    return MergeSingleBlock(*blocks_[0], l_, r_);
-  } else if (blocks_.size() == 2) {
-    // If there are two blocks, we can merge them directly
-    return MergeTwoBlocks(*blocks_[0], *blocks_[1], l_, r_);
+std::vector<DocId> RangeResult::Take() {
+  if (std::holds_alternative<DocsList>(result_)) {
+    DCHECK(std::is_sorted(std::get<DocsList>(result_).begin(), std::get<DocsList>(result_).end()));
+    return std::get<DocsList>(std::move(result_));
   }
 
-  // After the benchmarking, it is better to use inlined vector
-  // than std::priority_queue
-  absl::InlinedVector<RangeFilterIterator, 10> heap;
-  heap.reserve(blocks_.size());
+  auto cb = [](const auto& v) {
+    std::vector<DocId> result;
+    result.reserve(v.size());
+    std::copy(v.begin(), v.end(), std::back_inserter(result));
+    DCHECK(std::is_sorted(result.begin(), result.end()));
+    return result;
+  };
 
-  size_t doc_ids_count = 0;
-  for (const auto* block : blocks_) {
-    auto it = MakeBegin(*block, l_, r_);
-    if (!it.HasReachedEnd()) {
-      heap.emplace_back(it);
-      doc_ids_count += block->Size();
-    }
-  }
-
-  std::vector<DocId> result;
-  result.reserve(doc_ids_count);
-
-  size_t size = heap.size();
-  while (size) {
-    DCHECK(!heap[0].HasReachedEnd());
-
-    size_t min_doc_id_index = 0;
-    for (size_t i = 1; i < size; ++i) {
-      DCHECK(!heap[i].HasReachedEnd());
-
-      if (*heap[i] < *heap[min_doc_id_index]) {
-        min_doc_id_index = i;
-      }
-    }
-
-    auto& it = heap[min_doc_id_index];
-    result.push_back(*it);
-    ++it;
-
-    if (it.HasReachedEnd()) {
-      // If we reached the end of the current block, remove it from the heap
-      std::swap(heap[min_doc_id_index], heap[size - 1]);
-      --size;
-    }
-  }
-
-  DCHECK(std::is_sorted(result.begin(), result.end()));
-  return result;
+  return std::visit(cb, result_);
 }
 
 }  // namespace dfly::search
