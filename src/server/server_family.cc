@@ -15,7 +15,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>  // for fchmod
 #include <sys/utsname.h>
-#include <unistd.h>  // for getpid(), write, close, unlink, fsync
+#include <unistd.h>  // for getpid(), write(), close(), unlink(), fsync()
 
 #include <algorithm>
 #include <chrono>
