@@ -56,7 +56,7 @@ class ConfigRegistry {
 
   std::vector<std::string> List(std::string_view glob) const ABSL_LOCKS_EXCLUDED(mu_);
 
-  std::string GenerateConfig() const;
+  std::string GenerateConfig(const std::string& config_file_path) const;
 
   bool Rewrite() const;
 

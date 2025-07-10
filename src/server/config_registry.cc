@@ -15,7 +15,6 @@
 #include "base/logging.h"
 #include "core/glob_matcher.h"
 #include "server/common.h"
-#include "server/server_family.h"
 
 namespace dfly {
 namespace {
@@ -97,17 +96,8 @@ void ConfigRegistry::RegisterInternal(string_view config_name, bool is_mutable, 
   CHECK(inserted) << "Duplicate config name: " << name;
 }
 
-std::string ConfigRegistry::GenerateConfig() const {
-  absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
-  if (!flagfile_flag)
-    return "";
-  std::string config_file_path = flagfile_flag->CurrentValue();
-  if (config_file_path.empty())
-    return "";
-  std::filesystem::path config_path(config_file_path);
-  if (!std::filesystem::exists(config_path))
-    return "";
-  std::ifstream config_file(config_path);
+std::string ConfigRegistry::GenerateConfig(const std::string& config_file_path) const {
+  std::ifstream config_file(config_file_path);
   if (!config_file.is_open())
     return "";
 
@@ -216,8 +206,12 @@ bool ConfigRegistry::Rewrite() const {
   std::string config_file_path = flagfile_flag->CurrentValue();
   if (config_file_path.empty())
     return false;
+  
+  std::filesystem::path config_path(config_file_path);
+  if (!std::filesystem::exists(config_path))
+    return false;
 
-  std::string content = GenerateConfig();
+  std::string content = GenerateConfig(config_file_path);
   if (content.empty())
     return false;
 
