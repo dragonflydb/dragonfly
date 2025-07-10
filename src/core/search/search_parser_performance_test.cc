@@ -21,6 +21,8 @@ namespace dfly::search {
 // when running the test standalone. The slowest query is the first one per process, and the
 // subsequent ones are much faster.
 TEST(SearchParserPerformanceTest, FirstQueryInitializationPenalty) {
+  QueryParams params;  // No extra params needed for this query
+
   // Real production query that causes the issue (250 RETURN fields)
   std::string production_query =
       "* RETURN 250 lv_gwlurzpyxpsnv lv_urruguhbk lv_jagzzrtdeoo lv_unzcq lv_sstmwej "
@@ -67,8 +69,6 @@ TEST(SearchParserPerformanceTest, FirstQueryInitializationPenalty) {
       "lv_oqbsubxihbyxrxk lv_vuiqunkkqoz lv_rmefbtbibmxnb lv_dwjjhjzwcsl lv_sbtbwjnhrphyjva "
       "lv_zlbgeiqc lv_sroknmopiq lv_autaxqpaguhzq LIMIT 0 50";
 
-  QueryParams params;  // No extra params needed for this query
-
   const int num_iterations = 5;
   std::vector<int64_t> parse_times_us;
   parse_times_us.reserve(num_iterations);
@@ -77,8 +77,14 @@ TEST(SearchParserPerformanceTest, FirstQueryInitializationPenalty) {
   for (int i = 0; i < num_iterations; i++) {
     absl::Time start = absl::Now();
 
-    SearchAlgorithm search_algo;
-    search_algo.Init(production_query, &params);
+    {
+      QueryDriver driver{};
+      driver.ResetScanner();
+      driver.SetParams(&params);
+      driver.SetInput(std::string{production_query});
+      (void)Parser (&driver)();
+      (void)driver.Take();
+    }
 
     absl::Duration elapsed = absl::Now() - start;
     int64_t elapsed_us = absl::ToInt64Microseconds(elapsed);
