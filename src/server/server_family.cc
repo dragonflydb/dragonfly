@@ -2215,7 +2215,7 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
     auto all_flags = absl::GetAllFlags();
     for (const auto& [flag_name, flag_ptr] : all_flags) {
       if (flag_ptr->CurrentValue() != flag_ptr->DefaultValue()) {
-        current_flags[flag_name] = flag_ptr->CurrentValue();
+        current_flags[std::string(flag_name)] = flag_ptr->CurrentValue();
       }
     }
 
