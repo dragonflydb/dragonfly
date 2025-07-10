@@ -16,6 +16,7 @@ cxx_test(block_list_test query_parser LABELS DFLY)
 cxx_test(range_tree_test query_parser LABELS DFLY)
 cxx_test(rax_tree_test redis_test_lib LABELS DFLY)
 cxx_test(search_parser_test query_parser LABELS DFLY)
+cxx_test(search_parser_performance_test query_parser LABELS DFLY)
 cxx_test(search_test redis_test_lib query_parser LABELS DFLY)
 
 if(USE_SIMSIMD)
