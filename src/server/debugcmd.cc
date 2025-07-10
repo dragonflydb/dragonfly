@@ -134,8 +134,12 @@ tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
     args.push_back(json);
   } else if (type == "STREAM") {
     cid = registry.Find("XADD");
+    uint32_t repeat = std::max(elements / 4, uint32_t(1));
+    args.push_back("REPEAT");
+    args.push_back(to_string(repeat));
     args.push_back("*");
-    for (size_t i = 0; i < elements; ++i) {
+    uint32_t fields = repeat == 1 ? elements : 4;
+    for (size_t i = 0; i < fields; ++i) {
       args.push_back(GenerateValue(val_size / 2, random_value, gen));
       args.push_back(GenerateValue(val_size / 2, random_value, gen));
     }
@@ -574,7 +578,8 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    to meet value size.",
         "    If RAND is specified then value will be set to random hex string in specified size.",
         "    If SLOTS is specified then create keys only in given slots range.",
-        "    TYPE specifies data type (must be STRING/LIST/SET/HASH/ZSET/JSON), default STRING.",
+        "    TYPE specifies data type (must be STRING/LIST/SET/HASH/ZSET/JSON/STREAM), default "
+        "STRING.",
         "    ELEMENTS specifies how many sub elements if relevant (like entries in a list / set).",
         "    EXPIRE specifies key expire ttl range.",
         "OBJHIST",
@@ -1446,10 +1451,15 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
     string key = StrCat(options.prefix, ":", batch.index[i]);
     uint32_t elements_left = options.elements;
 
+    // limit rss grow by 32K by limiting the element count in each command.
+    // for stream we use 4 fields and (elements / 4) stream entries
+    uint32_t max_batch_elements = std::max(32_KB / options.val_size, 1ULL);
     while (elements_left) {
-      // limit rss grow by 32K by limiting the element count in each command.
-      uint32_t max_batch_elements = std::max(32_KB / options.val_size, 1ULL);
       uint32_t populate_elements = std::min(max_batch_elements, elements_left);
+      if (options.type == "STREAM" && populate_elements > 4) {
+        // populate_elements % 4 == 0, because we add 4 fields into one stream entry
+        populate_elements -= (populate_elements % 4);
+      }
       elements_left -= populate_elements;
       auto [cid, args] = GeneratePopulateCommand(options.type, key, options.val_size,
                                                  options.populate_random_values, populate_elements,

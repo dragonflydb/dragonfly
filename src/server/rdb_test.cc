@@ -786,11 +786,11 @@ TEST_F(RdbTest, LoadHugeStream) {
 
   // Add a huge stream (test:0) with 2000 entries, and 4 1k elements per entry
   // (note must be more than 512*4kb elements to test partial reads).
-  // We add 2000 entries to the stream to ensure that the stream, because populate strream
+  // We add 2000 entries to the stream to ensure that the stream, because populate stream
   // adds only a single entry at a time, with multiple elements in it.
-  for (unsigned i = 0; i < 2000; i++) {
-    Run({"debug", "populate", "1", "test", "2000", "rand", "type", "stream", "elements", "4"});
-  }
+
+  Run({"debug", "populate", "1", "test", "2000", "rand", "type", "stream", "elements", "8000"});
+
   ASSERT_EQ(2000, CheckedInt({"xlen", "test:0"}));
   Run({"XGROUP", "CREATE", "test:0", "grp1", "0"});
   Run({"XGROUP", "CREATE", "test:0", "grp2", "0"});

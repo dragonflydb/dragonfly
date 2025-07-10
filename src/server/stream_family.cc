@@ -103,6 +103,7 @@ struct AddOpts {
   std::optional<TrimOpts> trim_opts;
   ParsedStreamId parsed_id;
   bool no_mkstream = false;
+  uint32_t repeat = 1;  // only for internal usage in DEBUG POPULATE
 };
 
 /* Used to journal the XADD command.
@@ -695,65 +696,70 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
 
   stream* stream_inst = (stream*)it->second.RObjPtr();
 
+  // we return only last ID because opts.repeat == 1 for normal mode, and can be different during
+  // DEBUG POPULATE only
   streamID result_id;
-  const auto& parsed_id = opts.parsed_id;
-  streamID passed_id = parsed_id.val;
-  int res = StreamAppendItem(stream_inst, args, op_args.db_cntx.time_now_ms, &result_id,
-                             parsed_id.id_given ? &passed_id : nullptr, parsed_id.has_seq);
+  for (uint32_t i = 0; i < opts.repeat; ++i) {
+    const auto& parsed_id = opts.parsed_id;
+    streamID passed_id = parsed_id.val;
 
-  if (res != 0) {
-    if (res == ERANGE)
-      return OpStatus::OUT_OF_RANGE;
-    if (res == EDOM)
-      return OpStatus::STREAM_ID_SMALL;
+    int res = StreamAppendItem(stream_inst, args, op_args.db_cntx.time_now_ms, &result_id,
+                               parsed_id.id_given ? &passed_id : nullptr, parsed_id.has_seq);
 
-    return OpStatus::OUT_OF_MEMORY;
-  }
+    if (res != 0) {
+      if (res == ERANGE)
+        return OpStatus::OUT_OF_RANGE;
+      if (res == EDOM)
+        return OpStatus::STREAM_ID_SMALL;
 
-  if (opts.trim_opts) {
-    int64_t deleted_items_number = TrimStream(opts.trim_opts.value(), stream_inst);
-    VLOG(2) << "Trimmed " << deleted_items_number << " items from stream " << key
-            << " during the XADD command";
-  }
+      return OpStatus::OUT_OF_MEMORY;
+    }
 
-  mem_tracker.UpdateStreamSize(it->second);
+    if (opts.trim_opts) {
+      int64_t deleted_items_number = TrimStream(opts.trim_opts.value(), stream_inst);
+      VLOG(2) << "Trimmed " << deleted_items_number << " items from stream " << key
+              << " during the XADD command";
+    }
 
-  if (op_args.shard->journal()) {
-    std::string result_id_as_string = StreamsIdToString(result_id);
-    const bool stream_is_empty = stream_inst->length == 0;
+    mem_tracker.UpdateStreamSize(it->second);
 
-    if (opts.trim_opts && (stream_is_empty || JournalAsMinId(opts.trim_opts.value()))) {
-      std::string last_id;
+    if (op_args.shard->journal()) {
+      std::string result_id_as_string = StreamsIdToString(result_id);
+      const bool stream_is_empty = stream_inst->length == 0;
 
-      CmdArgVec journal_args = {key};
-      journal_args.reserve(args.size() + 4);
+      if (opts.trim_opts && (stream_is_empty || JournalAsMinId(opts.trim_opts.value()))) {
+        std::string last_id;
 
-      if (stream_is_empty) {
-        // We need remove the whole stream in replica
-        journal_args.emplace_back("MAXLEN"sv);
-        journal_args.emplace_back("0"sv);
+        CmdArgVec journal_args = {key};
+        journal_args.reserve(args.size() + 4);
+
+        if (stream_is_empty) {
+          // We need remove the whole stream in replica
+          journal_args.emplace_back("MAXLEN"sv);
+          journal_args.emplace_back("0"sv);
+        } else {
+          // We need to set exact MinId in the journal.
+          // For this we are using new first_id from the stream
+          last_id = StreamsIdToString(stream_inst->first_id);
+          journal_args.emplace_back("MINID"sv);
+          journal_args.emplace_back(last_id);
+        }
+
+        if (opts.no_mkstream) {
+          journal_args.emplace_back("NOMKSTREAM"sv);
+        }
+
+        journal_args.emplace_back(result_id_as_string);
+
+        for (size_t i = 0; i < args.size(); i++) {
+          journal_args.emplace_back(args[i]);
+        }
+
+        RecordJournal(op_args, "XADD"sv, journal_args);
       } else {
-        // We need to set exact MinId in the journal.
-        // For this we are using new first_id from the stream
-        last_id = StreamsIdToString(stream_inst->first_id);
-        journal_args.emplace_back("MINID"sv);
-        journal_args.emplace_back(last_id);
+        journaler.SetStreamId(result_id_as_string);
+        RecordJournal(op_args, "XADD"sv, journaler.add_args);
       }
-
-      if (opts.no_mkstream) {
-        journal_args.emplace_back("NOMKSTREAM"sv);
-      }
-
-      journal_args.emplace_back(result_id_as_string);
-
-      for (size_t i = 0; i < args.size(); i++) {
-        journal_args.emplace_back(args[i]);
-      }
-
-      RecordJournal(op_args, "XADD"sv, journal_args);
-    } else {
-      journaler.SetStreamId(result_id_as_string);
-      RecordJournal(op_args, "XADD"sv, journaler.add_args);
     }
   }
 
@@ -2100,6 +2106,10 @@ ParseResult<TrimOpts> ParseTrimOpts(CmdArgParser* parser) {
 ParseResult<AddOpts> ParseAddOpts(CmdArgParser* parser) {
   AddOpts opts;
   while (parser->HasNext()) {
+    // only for internal usage in DEBUG POPULATE
+    if (parser->Check("REPEAT", &opts.repeat)) {
+      continue;
+    }
     if (parser->Check("NOMKSTREAM")) {
       opts.no_mkstream = true;
       continue;
