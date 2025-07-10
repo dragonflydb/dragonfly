@@ -11,9 +11,11 @@
 #include <absl/strings/str_replace.h>
 #include <absl/strings/strip.h>
 #include <croncpp.h>  // cron::cronexpr
+#include <fcntl.h>    // for mkstemp
 #include <sys/resource.h>
+#include <sys/stat.h>  // for fchmod
 #include <sys/utsname.h>
-#include <unistd.h>  // for getpid()
+#include <unistd.h>  // for write, close, unlink, fsync
 
 #include <algorithm>
 #include <chrono>
@@ -22,7 +24,6 @@
 
 #include "absl/strings/ascii.h"
 #include "facade/error.h"
-#include "server/common.h"
 #include "slowlog.h"
 #include "util/fibers/synchronization.h"
 
@@ -141,7 +142,7 @@ ABSL_FLAG(string, availability_zone, "",
 
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
-ABSL_DECLARE_FLAG(int32_t, hz);
+ABSL_DECLARE_FLAG(uint32_t, hz);
 ABSL_DECLARE_FLAG(bool, tls);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
@@ -238,13 +239,6 @@ using http::StringResponse;
 using strings::HumanReadableNumBytes;
 
 namespace {
-
-// TODO these should be configurable as command line flag and at runtime via config set
-constexpr std::array<double, 3> kLatencyPercentiles = {50.0, 99.0, 99.9};
-
-bool is_histogram_empty(const hdr_histogram* h) {
-  return hdr_min(h) == std::numeric_limits<int64_t>::max();
-}
 
 const auto kRedisVersion = "7.4.0";
 
@@ -665,23 +659,6 @@ uint64_t GetDelayMs(uint64_t ts) {
   return delay_ns;
 }
 
-bool ReadProcStats(io::StatusData* sdata) {
-  io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
-  if (!sdata_res) {
-    LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
-                           << sdata_res.error().message();
-    return false;
-  }
-
-  size_t total_rss = FetchRssMemory(sdata_res.value());
-  rss_mem_current.store(total_rss, memory_order_relaxed);
-  if (rss_mem_peak.load(memory_order_relaxed) < total_rss) {
-    rss_mem_peak.store(total_rss, memory_order_relaxed);
-  }
-  *sdata = *sdata_res;
-  return true;
-}
-
 }  // namespace
 
 void SlowLogGet(dfly::CmdArgList args, std::string_view sub_cmd, util::ProactorPool* pp,
@@ -1051,30 +1028,32 @@ void ServerFamily::UpdateMemoryGlobalStats() {
     used_mem_peak.store(mem_current, memory_order_relaxed);
   }
 
-  io::StatusData status_data;
-  bool success = ReadProcStats(&status_data);
-  if (!success)
-    return;
-
-  size_t total_rss = FetchRssMemory(status_data);
-  double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
-  if (rss_oom_deny_ratio > 0) {
-    size_t memory_limit = max_memory_limit * rss_oom_deny_ratio;
-    if (total_rss > memory_limit && accepting_connections_ && HasPrivilegedInterface()) {
-      for (auto* listener : listeners_) {
-        if (!listener->IsPrivilegedInterface()) {
-          listener->socket()->proactor()->Await([listener]() { listener->pause_accepting(); });
+  io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
+  if (sdata_res) {
+    size_t total_rss = FetchRssMemory(sdata_res.value());
+    rss_mem_current.store(total_rss, memory_order_relaxed);
+    if (rss_mem_peak.load(memory_order_relaxed) < total_rss) {
+      rss_mem_peak.store(total_rss, memory_order_relaxed);
+    }
+    double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
+    if (rss_oom_deny_ratio > 0) {
+      size_t memory_limit = max_memory_limit * rss_oom_deny_ratio;
+      if (total_rss > memory_limit && accepting_connections_ && HasPrivilegedInterface()) {
+        for (auto* listener : listeners_) {
+          if (!listener->IsPrivilegedInterface()) {
+            listener->socket()->proactor()->Await([listener]() { listener->pause_accepting(); });
+          }
         }
-      }
-      accepting_connections_ = false;
+        accepting_connections_ = false;
 
-    } else if (total_rss < memory_limit && !accepting_connections_) {
-      for (auto* listener : listeners_) {
-        if (!listener->IsPrivilegedInterface()) {
-          listener->socket()->proactor()->Await([listener]() { listener->resume_accepting(); });
+      } else if (total_rss < memory_limit && !accepting_connections_) {
+        for (auto* listener : listeners_) {
+          if (!listener->IsPrivilegedInterface()) {
+            listener->socket()->proactor()->Await([listener]() { listener->resume_accepting(); });
+          }
         }
+        accepting_connections_ = true;
       }
-      accepting_connections_ = true;
     }
   }
 }
@@ -1146,19 +1125,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
 
   auto aggregated_result = std::make_shared<AggregateLoadResult>();
 
-  std::string snapshot_id;
-  if (absl::EndsWith(load_path, "summary.dfs")) {
-    // we read summary first to get snapshot_id and load data correctly
-    auto load_result = pool.GetNextProactor()->Await(
-        [&] { return LoadRdb(std::string(load_path), existing_keys, &snapshot_id); });
-    if (!load_result.has_value())
-      aggregated_result->first_error = load_result.error();
-  }
-
   for (auto& path : paths) {
-    // we have already read summary so we skip it now
-    if (absl::EndsWith(path, "summary.dfs"))
-      continue;
     // For single file, choose thread that does not handle shards if possible.
     // This will balance out the CPU during the load.
     ProactorBase* proactor;
@@ -1168,11 +1135,8 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
       proactor = pool.GetNextProactor();
     }
 
-    auto load_func = [this, aggregated_result, existing_keys, path = std::move(path),
-                      snapshot_id]() {
-      auto sid = snapshot_id;
-      auto load_result = LoadRdb(path, existing_keys, &sid);
-      DCHECK(sid == snapshot_id);
+    auto load_func = [this, aggregated_result, existing_keys, path = std::move(path)]() {
+      auto load_result = LoadRdb(path, existing_keys);
       if (load_result.has_value())
         aggregated_result->keys_read.fetch_add(*load_result);
       else
@@ -1239,11 +1203,9 @@ void ServerFamily::SnapshotScheduling() {
 }
 
 io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
-                                         LoadExistingKeys existing_keys, std::string* snapshot_id) {
+                                         LoadExistingKeys existing_keys) {
   VLOG(1) << "Loading data from " << rdb_file;
   CHECK(fb2::ProactorBase::IsProactorThread()) << "must be called from proactor thread";
-
-  std::string filt_snapshot_id = snapshot_id ? *snapshot_id : "";
 
   io::Result<size_t> result;
   ProactorBase* proactor = fb2::ProactorBase::me();
@@ -1256,22 +1218,18 @@ io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
 
     io::FileSource fs(*res);
 
-    RdbLoader loader{&service_, filt_snapshot_id};
+    RdbLoader loader{&service_};
     if (existing_keys == LoadExistingKeys::kOverride) {
       loader.SetOverrideExistingKeys(true);
     }
 
     auto ec = loader.Load(&fs);
-    // we ignore incorrect_snapshot_id, it means we try to load file not from the snapshot
-    if (ec && (ec.value() != rdb::errc::incorrect_snapshot_id)) {
+    if (ec) {
       result = nonstd::make_unexpected(ec);
     } else {
       VLOG(1) << "Done loading RDB from " << rdb_file << ", keys loaded: " << loader.keys_loaded();
       VLOG(1) << "Loading finished after " << strings::HumanReadableElapsedTime(loader.load_time());
       result = loader.keys_loaded();
-      if (snapshot_id && snapshot_id->empty()) {
-        *snapshot_id = loader.GetSnapshotId();
-      }
     }
   });
 
@@ -1405,8 +1363,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   absl::StrAppend(&resp->body(), connections_libs);
 
   // Memory metrics
-  io::StatusData sdata;
-  bool success = ReadProcStats(&sdata);
+  auto sdata_res = io::ReadStatusInfo();
   AppendMetricWithoutLabels("memory_used_bytes", "", m.heap_used_bytes, MetricType::GAUGE,
                             &resp->body());
   AppendMetricWithoutLabels("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
@@ -1429,11 +1386,14 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     AppendMetricValue("oom_errors_total", m.coordinator_stats.oom_error_cmd_cnt, {"type"}, {"cmd"},
                       &resp->body());
   }
-  if (success) {
-    size_t rss = FetchRssMemory(sdata);
+  if (sdata_res.has_value()) {
+    size_t rss = FetchRssMemory(sdata_res.value());
     AppendMetricWithoutLabels("used_memory_rss_bytes", "", rss, MetricType::GAUGE, &resp->body());
-    AppendMetricWithoutLabels("swap_memory_bytes", "", sdata.vm_swap, MetricType::GAUGE,
+    AppendMetricWithoutLabels("swap_memory_bytes", "", sdata_res->vm_swap, MetricType::GAUGE,
                               &resp->body());
+  } else {
+    LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
+                           << sdata_res.error().message();
   }
   AppendMetricWithoutLabels("tls_bytes", "", m.tls_bytes, MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("snapshot_serialization_bytes", "", m.serialization_bytes,
@@ -2185,21 +2145,65 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
     return rb->SendBulkStrArr(res, RedisReplyBuilder::MAP);
   }
 
-  if (sub_cmd == "RESETSTAT") {
-    ResetStat(cmd_cntx.conn_cntx->ns);
-    return builder->SendOk();
-  }
-
   if (sub_cmd == "REWRITE") {
     absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
     if (!flagfile_flag || flagfile_flag->CurrentValue().empty()) {
       return builder->SendError("The server is running without a config file");
     }
-    if (config_registry.Rewrite()) {
-      return builder->SendOk();
-    } else {
+
+    std::string config_file_path = flagfile_flag->CurrentValue();
+
+    // Generate config content using absl reflection
+    std::vector<std::string> config_lines;
+    auto all_flags = absl::GetAllFlags();
+
+    for (const auto& [flag_name, flag_ptr] : all_flags) {
+      if (flag_ptr->CurrentValue() != flag_ptr->DefaultValue()) {
+        config_lines.push_back("--" + flag_name + "=" + flag_ptr->CurrentValue());
+      }
+    }
+
+    // Write config file atomically
+    std::string content;
+    for (const auto& line : config_lines) {
+      content += line + "\n";
+    }
+
+    // Atomic write using mkstemp + rename
+    std::string tmp_template = config_file_path + ".tmpXXXXXX";
+    std::vector<char> tmp_path(tmp_template.begin(), tmp_template.end());
+    tmp_path.push_back('\0');
+    int fd = mkstemp(tmp_path.data());
+    if (fd == -1) {
+      return builder->SendError("Failed to create temporary file");
+    }
+
+    size_t off = 0;
+    while (off < content.size()) {
+      ssize_t n = write(fd, content.c_str() + off, content.size() - off);
+      if (n <= 0) {
+        close(fd);
+        unlink(tmp_path.data());
+        return builder->SendError("Failed to write config file");
+      }
+      off += n;
+    }
+
+    fsync(fd);
+    fchmod(fd, 0644);
+    close(fd);
+
+    if (rename(tmp_path.data(), config_file_path.c_str()) == -1) {
+      unlink(tmp_path.data());
       return builder->SendError("Failed to rewrite config file");
     }
+
+    return builder->SendOk();
+  }
+
+  if (sub_cmd == "RESETSTAT") {
+    ResetStat(cmd_cntx.conn_cntx->ns);
+    return builder->SendOk();
   } else {
     return builder->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErrType);
   }
@@ -2445,7 +2449,6 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   UpdateMax(&peak_stats_.conn_read_buf_capacity, result.facade_stats.conn_stats.read_buf_capacity);
 
   result.peak_stats = peak_stats_;
-  result.cmd_latency_map = service_.mutable_registry()->LatencyMap();
 
   uint64_t delta_ms = (absl::GetCurrentTimeNanos() - start) / 1'000'000;
   if (delta_ms > 30) {
@@ -2493,8 +2496,6 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("dragonfly_version", GetVersion());
     append("redis_mode", GetRedisMode());
     append("arch_bits", 64);
-    // Add process_id for Redis compatibility (same order as Redis INFO output).
-    append("process_id", getpid());
 
     if (show_managed_info) {
       append("os", GetOSString());
@@ -2512,11 +2513,6 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     uint64_t uptime = time(NULL) - start_time_;
     append("uptime_in_seconds", uptime);
     append("uptime_in_days", uptime / (3600 * 24));
-
-    append("hz", GetFlag(FLAGS_hz));
-    append("executable", base::kProgramName);
-    absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
-    append("config_file", flagfile_flag->CurrentValue());
   };
 
   auto add_clients_info = [&] {
@@ -2542,13 +2538,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("fibers_stack_vms", m.worker_fiber_stack_size);
     append("fibers_count", m.worker_fiber_count);
 
-    io::StatusData sdata;
-    bool success = ReadProcStats(&sdata);
-    size_t rss = FetchRssMemory(sdata);
-    if (success) {
-      append("used_memory_rss", rss);
-      append("used_memory_rss_human", HumanReadableNumBytes(rss));
-    }
+    size_t rss = rss_mem_current.load(memory_order_relaxed);
+    append("used_memory_rss", rss);
+    append("used_memory_rss_human", HumanReadableNumBytes(rss));
     append("used_memory_peak_rss", rss_mem_peak.load(memory_order_relaxed));
 
     append("maxmemory", max_memory_limit);
@@ -2584,8 +2576,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("snapshot_serialization_bytes", m.serialization_bytes);
     append("commands_squashing_replies_bytes",
            m.facade_stats.reply_stats.squashing_current_reply_size.load(memory_order_relaxed));
-    append("psync_buffer_size", m.lsn_buffer_size);
-    append("psync_buffer_bytes", m.lsn_buffer_bytes);
+    append("lsn_buffer_size_sum", m.lsn_buffer_size);
+    append("lsn_buffer_bytes_sum", m.lsn_buffer_bytes);
 
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
@@ -2816,8 +2808,6 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
           append("slave_repl_offset", rinfo.repl_offset_sum);
         append("slave_priority", GetFlag(FLAGS_replica_priority));
         append("slave_read_only", 1);
-        append("psync_attempts", rinfo.psync_attempts);
-        append("psync_successes", rinfo.psync_successes);
       };
       fb2::LockGuard lk(replicaof_mu_);
 
@@ -2942,31 +2932,6 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("cluster_enabled", IsClusterEnabledOrEmulated());
     append("migration_errors_total", service_.cluster_family().MigrationsErrorsCount());
     append("total_migrated_keys", m.shard_stats.total_migrated_keys);
-  }
-
-  if (should_enter("LATENCYSTATS")) {
-    for (const auto& [cmd_name, hist] : m.cmd_latency_map) {
-      if (!hist) {
-        continue;
-      }
-
-      if (is_histogram_empty(hist)) {
-        continue;
-      }
-
-      absl::InlinedVector<std::string, 4> stats;
-      for (const auto percentile : kLatencyPercentiles) {
-        const auto value = hdr_value_at_percentile(hist, percentile);
-        // If the percentile is an integer, print it as an integer, otherwise print it as a double
-        if (std::trunc(percentile) == percentile) {
-          stats.emplace_back(absl::StrFormat("p%d=%d", static_cast<int64_t>(percentile), value));
-        } else {
-          stats.emplace_back(absl::StrFormat("p%g=%d", percentile, value));
-        }
-      }
-
-      append(absl::StrFormat("latency_percentiles_usec_%s", cmd_name), absl::StrJoin(stats, ","));
-    }
   }
 
   return info;
