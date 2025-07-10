@@ -103,12 +103,12 @@ TEST(SearchParserPerformanceTest, FirstQueryInitializationPenalty) {
         static_cast<double>(first_time) / static_cast<double>(avg_subsequent_time);
 
     std::cout << "Performance analysis:  " << std::endl;
-    std::cout << "First query time:     " << first_time << " us" << std::endl;
-    std::cout << "Min subsequent time:  " << min_subsequent_time << " us" << std::endl;
-    std::cout << "Avg subsequent time:  " << avg_subsequent_time << " us" << std::endl;
+    std::cout << "First query time:     " << first_time << " μs" << std::endl;
+    std::cout << "Min subsequent time:  " << min_subsequent_time << " μs" << std::endl;
+    std::cout << "Avg subsequent time:  " << avg_subsequent_time << " μs" << std::endl;
     std::cout << "Performance ratio:    " << std::fixed << std::setprecision(1) << performance_ratio
               << "x" << std::endl;
-    std::cout << "Difference:           " << (first_time - avg_subsequent_time) << " us"
+    std::cout << "Difference:           " << (first_time - avg_subsequent_time) << " μs"
               << std::endl;
 
     // The test demonstrates the issue - first call should be significantly slower
