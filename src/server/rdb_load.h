@@ -222,6 +222,12 @@ class RdbLoader : protected RdbLoaderBase {
     load_unowned_slots_ = load_unowned;
   }
 
+  // Sets shard count of the snapshot being loaded.
+  // Does not necessarily match the shard count of the current instance.
+  void SetShardCount(uint32_t shard_cnt) {
+    shard_count_ = shard_cnt;
+  }
+
   std::error_code Load(::io::Source* src);
 
   void set_source_limit(size_t n) {
@@ -274,6 +280,14 @@ class RdbLoader : protected RdbLoaderBase {
   // Called once immediately after loading the snapshot / full sync succeeded from the coordinator.
   static void PerformPostLoad(Service* service);
 
+  uint32_t shard_id() const {
+    return shard_id_;
+  }
+
+  uint32_t shard_count() const {
+    return shard_count_;
+  }
+
  private:
   struct Item {
     std::string key;
@@ -302,7 +316,7 @@ class RdbLoader : protected RdbLoaderBase {
   std::error_code LoadKeyValPair(int type, ObjSettings* settings);
   // Returns whether to discard the read key pair.
   bool ShouldDiscardKey(std::string_view key, const ObjSettings& settings) const;
-  void ResizeDb(size_t key_num, size_t expire_num);
+
   std::error_code HandleAux();
 
   std::error_code VerifyChecksum();
@@ -322,12 +336,14 @@ class RdbLoader : protected RdbLoaderBase {
   // issues an FT.CREATE call, but does not start indexing
   void LoadSearchIndexDefFromAux(std::string&& value);
 
- private:
   Service* service_;
   std::string snapshot_id_;
   bool override_existing_keys_ = false;
   bool load_unowned_slots_ = false;
   bool rdb_ignore_expiry_;
+  uint32_t shard_id_ = UINT32_MAX;
+  uint32_t shard_count_ = 0;
+  size_t table_used_memory_ = 0;
   ScriptMgr* script_mgr_;
   std::vector<ItemsBuf> shard_buf_;
 

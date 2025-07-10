@@ -79,7 +79,7 @@ inline auto Unexpected(errc ev) {
   return make_unexpected(RdbError(ev));
 }
 
-static const error_code kOk;
+const error_code kOk;
 
 struct ZiplistCbArgs {
   long count = 0;
@@ -189,6 +189,10 @@ bool RdbTypeAllowedEmpty(int type) {
   return type == RDB_TYPE_STRING || type == RDB_TYPE_JSON || type == RDB_TYPE_SBF ||
          type == RDB_TYPE_STREAM_LISTPACKS || type == RDB_TYPE_SET_WITH_EXPIRY ||
          type == RDB_TYPE_HASH_WITH_EXPIRY;
+}
+
+DbSlice& GetCurrentDbSlice() {
+  return namespaces->GetDefaultNamespace().GetCurrentDbSlice();
 }
 
 }  // namespace
@@ -2002,7 +2006,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
   // Increment local one if it exists
   if (EngineShard* es = EngineShard::tlocal(); es) {
-    namespaces->GetDefaultNamespace().GetCurrentDbSlice().IncrLoadInProgress();
+    GetCurrentDbSlice().IncrLoadInProgress();
   }
 
   while (!stop_early_.load(memory_order_relaxed)) {
@@ -2103,13 +2107,12 @@ error_code RdbLoader::Load(io::Source* src) {
         FlushShardAsync(i);
 
         // Active database if not existed before.
-        shard_set->Add(
-            i, [dbid] { namespaces->GetDefaultNamespace().GetCurrentDbSlice().ActivateDb(dbid); });
+        shard_set->Add(i, [dbid] { GetCurrentDbSlice().ActivateDb(dbid); });
       }
 
       cur_db_index_ = dbid;
       if (EngineShard::tlocal()) {  // because we sometimes create entries inline.
-        namespaces->GetDefaultNamespace().GetCurrentDbSlice().ActivateDb(dbid);
+        GetCurrentDbSlice().ActivateDb(dbid);
       }
       continue; /* Read next opcode. */
     }
@@ -2121,7 +2124,11 @@ error_code RdbLoader::Load(io::Source* src) {
       SET_OR_RETURN(LoadLen(nullptr), db_size);
       SET_OR_RETURN(LoadLen(nullptr), expires_size);
 
-      ResizeDb(db_size, expires_size);
+      VLOG(1) << "RESIZEDB: db_size=" << db_size << ", expires_size=" << expires_size;
+
+      // We do not use this information because it is not possible to easily preallocate
+      // dash tables based on this information. Moreover, number of shards can change
+      // between the original shard set and the loading server.
       continue; /* Read next opcode. */
     }
 
@@ -2200,7 +2207,7 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
   bc->Wait();  // wait for sentinels to report.
   // Decrement local one if it exists
   if (EngineShard* es = EngineShard::tlocal(); es) {
-    namespaces->GetDefaultNamespace().GetCurrentDbSlice().DecrLoadInProgress();
+    GetCurrentDbSlice().DecrLoadInProgress();
   }
 
   absl::Duration dur = absl::Now() - start_time;
@@ -2470,6 +2477,21 @@ error_code RdbLoader::HandleAux() {
     /* Just ignored. */
   } else if (auxkey == "search-index") {
     LoadSearchIndexDefFromAux(std::move(auxval));
+  } else if (auxkey == "shard-count") {
+    uint32_t shard_count;
+    if (absl::SimpleAtoi(auxval, &shard_count)) {
+      shard_count_ = shard_count;
+    }
+  } else if (auxkey == "shard-id") {
+    uint32_t shard_id;
+    if (absl::SimpleAtoi(auxval, &shard_id)) {
+      shard_id_ = shard_id;
+    }
+  } else if (auxkey == "table-mem") {
+    size_t mem;
+    if (absl::SimpleAtoi(auxval, &mem)) {
+      table_used_memory_ = mem;
+    }
   } else {
     /* We ignore fields we don't understand, as by AUX field
      * contract. */
@@ -2497,7 +2519,7 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
     return;
 
   auto cb = [indx = this->cur_db_index_, this, ib = std::move(out_buf)] {
-    auto& db_slice = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
+    auto& db_slice = GetCurrentDbSlice();
 
     // Before we start loading, increment LoadInProgress.
     // This is required because FlushShardAsync dispatches to multiple shards, and those shards
@@ -2659,13 +2681,6 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   }
 }
 
-void RdbLoader::ResizeDb(size_t key_num, size_t expire_num) {
-  DCHECK_LT(key_num, 1U << 31);
-  DCHECK_LT(expire_num, 1U << 31);
-  // Note: To reserve space, it's necessary to allocate space at the shard level. We might
-  // load with different number of shards which makes database resizing unfeasible.
-}
-
 // Loads the next key/val pair.
 //
 // Huge objects may be loaded in parts, where only a subset of elements are
@@ -2733,7 +2748,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     } else {
       auto& out_buf = shard_buf_[sid];
 
-      out_buf.emplace_back(std::move(item));
+      out_buf.emplace_back(item);
 
       constexpr size_t kBufSize = 64;
       if (out_buf.size() >= kBufSize) {
