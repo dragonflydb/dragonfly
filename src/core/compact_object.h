@@ -397,6 +397,7 @@ class CompactObj {
 
   enum HuffmanDomain : uint8_t {
     HUFF_KEYS = 0,
+    HUFF_STRING_VALUES = 1,
     // TODO: add more domains.
   };
 
