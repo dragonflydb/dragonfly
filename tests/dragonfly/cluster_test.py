@@ -3359,7 +3359,9 @@ async def test_slot_migration_oom(df_factory):
     assert status[0][4] == "INCOMING_MIGRATION_OOM"
 
 
-@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+@dfly_args(
+    {"proactor_threads": 2, "migration_buckets_serialization_threshold": 1, "cluster_mode": "yes"}
+)
 @pytest.mark.asyncio
 @pytest.mark.opt_only
 @pytest.mark.exclude_epoll
