@@ -46,7 +46,9 @@ struct NumericIndex : public BaseIndex {
     virtual ~RangeTreeBase() = default;
   };
 
-  explicit NumericIndex(PMR_NS::memory_resource* mr);
+  // max_range_block_size is the maximum number of entries in a single range block.
+  // It is used in RangeTree. Check RangeTree for details.
+  explicit NumericIndex(size_t max_range_block_size, PMR_NS::memory_resource* mr);
 
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;

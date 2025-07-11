@@ -94,7 +94,8 @@ void IterateAllSuffixes(const absl::flat_hash_set<string>& words,
 
 class RangeTreeAdapter : public NumericIndex::RangeTreeBase {
  public:
-  explicit RangeTreeAdapter(PMR_NS::memory_resource* mr) : range_tree_{mr} {
+  explicit RangeTreeAdapter(size_t max_range_block_size, PMR_NS::memory_resource* mr)
+      : range_tree_(mr, max_range_block_size) {
   }
 
   void Add(DocId id, absl::Span<double> values) override {
@@ -192,9 +193,9 @@ class BtreeSetImpl : public NumericIndex::RangeTreeBase {
   absl::btree_set<Entry, std::less<Entry>, PMR_NS::polymorphic_allocator<Entry>> entries_;
 };
 
-NumericIndex::NumericIndex(PMR_NS::memory_resource* mr) {
+NumericIndex::NumericIndex(size_t max_range_block_size, PMR_NS::memory_resource* mr) {
   if (absl::GetFlag(FLAGS_use_numeric_range_tree)) {
-    range_tree_ = make_unique<RangeTreeAdapter>(mr);
+    range_tree_ = make_unique<RangeTreeAdapter>(max_range_block_size, mr);
   } else {
     range_tree_ = make_unique<BtreeSetImpl>(mr);
   }
