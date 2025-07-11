@@ -3357,3 +3357,43 @@ async def test_slot_migration_oom(df_factory):
     assert status[0][0] == "in"
     # Error message
     assert status[0][4] == "INCOMING_MIGRATION_OOM"
+
+
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+@pytest.mark.asyncio
+@pytest.mark.opt_only
+@pytest.mark.exclude_epoll
+async def test_write_stall(df_factory: DflyInstanceFactory):
+    instances = [
+        df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)
+    ]
+    df_factory.start_all(instances)
+
+    nodes = [await create_node_info(instance) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    client = instances[0].client()
+    logging.debug("===============================Starting populate....")
+    await client.execute_command(
+        "debug populate 7500000 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx 160 RAND"
+    )
+    logging.debug("Datastore populated with 4gb")
+    logging.debug("==========Starting migrations")
+    await asyncio.sleep(10)
+    logging.debug("==========Slept for 10 seconds - kickstarting migrations")
+
+    nodes[0].migrations = [
+        MigrationInfo("127.0.0.1", instances[1].admin_port, [(0, 16383)], nodes[1].id)
+    ]
+    logging.debug("Migrating slots")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug("Waiting for migration to finish")
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", timeout=3000)
+
+    logging.debug("============================================================")
+    logging.debug("done with migrations")
+    await asyncio.sleep(100000)
