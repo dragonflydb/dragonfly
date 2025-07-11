@@ -18,7 +18,7 @@ from .seeder import Seeder, SeederBase, DebugPopulateSeeder
 
 from . import dfly_args
 
-BASE_PORT = 30001
+BASE_PORT = 6378
 
 
 def monotonically_increasing_port_number():
