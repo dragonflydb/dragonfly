@@ -5,9 +5,9 @@
 #include "server/bitops_family.h"
 
 #include <bitset>
+#include <nonstd/expected.hpp>
 
 #include "absl/strings/match.h"
-#include "base/expected.hpp"
 #include "base/logging.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
