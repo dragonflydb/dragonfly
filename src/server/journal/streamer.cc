@@ -6,6 +6,7 @@
 
 #include <absl/functional/bind_front.h>
 
+#include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/engine_shard.h"
@@ -201,6 +202,8 @@ void JournalStreamer::ThrottleIfNeeded() {
   if (!cntx_->IsRunning() || !IsStalled())
     return;
 
+  ++throttle_count_;
+
   auto next =
       chrono::steady_clock::now() + chrono::milliseconds(absl::GetFlag(FLAGS_replication_timeout));
   size_t inflight_start = in_flight_bytes_;
@@ -266,10 +269,12 @@ void RestoreStreamer::Run() {
   PrimeTable::Cursor cursor;
   uint64_t last_yield = 0;
   PrimeTable* pt = &db_array_[0]->prime;
-
+  const uint64_t kCyclesPerJiffy = base::CycleClock::Frequency() >> 16;  // ~15usec.
   do {
     if (!cntx_->IsRunning())
       return;
+    constexpr size_t kBucketsPerMsGoal = 1000;
+    // size_t buckets_per_second = pt->bucket_count() / 60
     cursor = pt->TraverseBuckets(cursor, [&](PrimeTable::bucket_iterator it) {
       if (!cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt
         return;
@@ -289,9 +294,17 @@ void RestoreStreamer::Run() {
       stats_.buckets_loop += WriteBucket(it);
     });
 
-    if (++last_yield >= migration_buckets_serialization_threshold_cached) {
+    uint64_t running_cycles = ThisFiber::GetRunningTimeCycles();
+
+    if (running_cycles >= kCyclesPerJiffy) {
+      uint64_t sleep_usec = (running_cycles * 1000'000 / base::CycleClock::Frequency()) / 2;
+      stats_.sleep_calls++;
+      stats_.sleep_usec += sleep_usec;
+
+      ThisFiber::SleepFor(chrono::microseconds(std::min<uint64_t>(sleep_usec, 2000ul)));
+
       // TODO: to align this with how we sleep in SliceSnapshot::FlushSerialized.
-      ThisFiber::SleepFor(chrono::microseconds(migration_buckets_sleep_usec_cached));
+      // ThisFiber::SleepFor(chrono::microseconds(migration_buckets_sleep_usec_cached));
       last_yield = 0;
     }
   } while (cursor);
@@ -306,7 +319,9 @@ void RestoreStreamer::SendFinalize(long attempt) {
           << " commands. Buckets looped " << stats_.buckets_loop << ", buckets on_db_update "
           << stats_.buckets_on_db_update << ", buckets skipped " << stats_.buckets_skipped
           << ", buckets written " << stats_.buckets_written << ". Keys skipped "
-          << stats_.keys_skipped << ", keys written " << stats_.keys_written;
+          << stats_.keys_skipped << ", keys written " << stats_.keys_written
+          << " throttle count: " << throttle_count_ << " sleep calls: " << stats_.sleep_calls
+          << ", sleep usec: " << stats_.sleep_usec;
 
   journal::Entry entry(journal::Op::LSN, attempt);
 
@@ -386,7 +401,6 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
   } else {
     stats_.buckets_skipped++;
   }
-  ThrottleIfNeeded();
 
   return written;
 }
@@ -413,7 +427,7 @@ void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const Pr
   CmdSerializer serializer(
       [&](std::string s) {
         Write(std::move(s));
-        ThrottleIfNeeded();
+        // ThrottleIfNeeded();
       },
       ServerState::tlocal()->serialization_max_chunk_size);
   stats_.commands += serializer.SerializeEntry(key, pk, pv, expire_ms);

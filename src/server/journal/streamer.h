@@ -59,6 +59,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
 
   util::FiberSocketBase* dest_ = nullptr;
   ExecutionState* cntx_;
+  uint64_t throttle_count_ = 0;
 
  private:
   void AsyncWrite(bool force_send);
@@ -125,6 +126,7 @@ class RestoreStreamer : public JournalStreamer {
     size_t keys_written = 0;
     size_t keys_skipped = 0;
     size_t commands = 0;
+    uint64_t sleep_calls = 0, sleep_usec = 0;
   };
 
   DbSlice* db_slice_;
