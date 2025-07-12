@@ -3360,15 +3360,25 @@ async def test_slot_migration_oom(df_factory):
 
 
 @dfly_args(
-    {"proactor_threads": 2, "migration_buckets_serialization_threshold": 1, "cluster_mode": "yes"}
+    {
+        "proactor_threads": 4,
+        "migration_buckets_serialization_threshold": 1,
+        "cluster_mode": "yes",
+        "compression_mode": 0,
+    }
 )
 @pytest.mark.asyncio
 @pytest.mark.opt_only
 @pytest.mark.exclude_epoll
 async def test_write_stall(df_factory: DflyInstanceFactory):
     instances = [
-        df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)
+        df_factory.create(port=next(next_port), admin_port=next(next_port))
+        for i in range(2)
+        # df_factory.create(existing_port=6379, admin_port=6380)
     ]
+    # instances.append(
+    #    df_factory.create(existing_port=6381, admin_port=6382)
+    # )
     df_factory.start_all(instances)
 
     nodes = [await create_node_info(instance) for instance in instances]
@@ -3379,11 +3389,9 @@ async def test_write_stall(df_factory: DflyInstanceFactory):
 
     client = instances[0].client()
     logging.debug("===============================Starting populate....")
-    await client.execute_command(
-        "debug populate 7500000 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx 160 RAND"
-    )
+    await client.execute_command("debug populate 15000000 xxxxx 200 RAND")
     logging.debug("Datastore populated with 4gb")
-    logging.debug("==========Starting migrations")
+    logging.debug("==========Starting migrations, sleeping for 10s")
     await asyncio.sleep(10)
     logging.debug("==========Slept for 10 seconds - kickstarting migrations")
 
