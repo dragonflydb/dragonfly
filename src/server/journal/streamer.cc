@@ -9,6 +9,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/engine_shard.h"
+#include "server/engine_shard_set.h"
 #include "server/journal/cmd_serializer.h"
 #include "server/server_state.h"
 #include "util/fibers/synchronization.h"
@@ -34,6 +35,7 @@ using namespace journal;
 
 namespace {
 
+std::atomic_uint32_t current_threads = 0;
 iovec IoVec(io::Bytes src) {
   return iovec{const_cast<uint8_t*>(src.data()), src.size()};
 }
@@ -215,9 +217,16 @@ void RestoreStreamer::Run() {
   uint64_t last_yield = 0;
   PrimeTable* pt = &db_array_[0]->prime;
 
+  // ThisFiber::SleepFor(chrono::microseconds(20000000));
+
   do {
     if (!cntx_->IsRunning())
       return;
+
+    if (current_threads != 0) {
+      ThisFiber::SleepFor(chrono::microseconds(migration_buckets_sleep_usec_cached));
+      continue;
+    }
     cursor = pt->TraverseBuckets(cursor, [&](PrimeTable::bucket_iterator it) {
       if (!cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt
         return;
@@ -305,6 +314,7 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
 }
 
 bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
+  ++current_threads;
   auto& shard_stats = EngineShard::tlocal()->stats();
   bool written = false;
 
@@ -335,6 +345,8 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
     stats_.buckets_skipped++;
   }
   ThrottleIfNeeded();
+
+  --current_threads;
 
   return written;
 }
