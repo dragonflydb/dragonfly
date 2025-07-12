@@ -472,11 +472,11 @@ uint32_t EngineShard::DefragTask() {
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
-    : queue_(kQueueLen, 1, 1),
+    : txq_([](const Transaction* t) { return t->txid(); }),
+      queue_(kQueueLen, 1, 1),
       queue2_(kQueueLen / 2, 2, 2),
-      txq_([](const Transaction* t) { return t->txid(); }),
-      mi_resource_(heap),
-      shard_id_(pb->GetPoolIndex()) {
+      shard_id_(pb->GetPoolIndex()),
+      mi_resource_(heap) {
   queue_.Start(absl::StrCat("shard_queue_", shard_id()));
   queue2_.Start(absl::StrCat("l2_queue_", shard_id()));
 }
@@ -855,30 +855,26 @@ void EngineShard::RetireExpiredAndEvict() {
 
 void EngineShard::CacheStats() {
   uint64_t now = fb2::ProactorBase::GetMonotonicTimeNs();
-  if (cache_stats_time_ + 1000000 > now)  // 1ms
+  if (last_mem_params_.updated_at + 1000000 > now)  // 1ms
     return;
 
-  cache_stats_time_ = now;
-  // Used memory for this shard.
   size_t used_mem = UsedMemory();
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
 
-  // delta can wrap if used_memory is smaller than last_cached_used_memory_ and it's fine.
-  size_t delta = used_mem - last_cached_used_memory_;
-  last_cached_used_memory_ = used_mem;
+  // Reflect local memory change on global value
+  size_t delta = used_mem - last_mem_params_.used_mem;  // negative value wraps safely
   size_t current = used_mem_current.fetch_add(delta, memory_order_relaxed) + delta;
   ssize_t free_mem = max_memory_limit - current;
 
+  // Estimate bytes per object, excluding table memory
   size_t entries = db_slice.entries_count();
-  size_t table_memory = db_slice.table_memory();
-
-  if (tiered_storage_) {
-    table_memory += tiered_storage_->CoolMemoryUsage();
-  }
+  size_t table_memory =
+      db_slice.table_memory() + (tiered_storage_ ? tiered_storage_->CoolMemoryUsage() : 0);
   size_t obj_memory = table_memory <= used_mem ? used_mem - table_memory : 0;
-
   size_t bytes_per_obj = entries > 0 ? obj_memory / entries : 0;
-  db_slice.SetCachedParams(free_mem / shard_set->size(), bytes_per_obj);
+
+  db_slice.UpdateMemoryParams(free_mem / shard_set->size(), bytes_per_obj);
+  last_mem_params_ = {now, used_mem};
 }
 
 size_t EngineShard::UsedMemory() const {
