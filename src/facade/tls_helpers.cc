@@ -104,7 +104,7 @@ SSL_CTX* CreateSslCntx(TlsContextRole role) {
     SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_SERVER);
     SSL_CTX_sess_set_cache_size(ctx, GetFlag(FLAGS_tls_session_cache_size));
     SSL_CTX_set_timeout(ctx, GetFlag(FLAGS_tls_session_cache_timeout));
-    SSL_CTX_set_session_id_context(ctx, (const unsigned char*)"dragonfly", 5);
+    SSL_CTX_set_session_id_context(ctx, (const unsigned char*)"dragonfly", 9);
   }
   return ctx;
 }

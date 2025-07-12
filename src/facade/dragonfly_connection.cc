@@ -772,8 +772,8 @@ void Connection::HandleRequests() {
 
     if (!aresult) {
       // This can flood the logs -- don't change
-      LOG_EVERY_T(INFO, 10) << "Error handshaking " << aresult.error().message()
-                            << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+      LOG_EVERY_T(INFO, 1) << "Error handshaking " << aresult.error().message()
+                           << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
       return;
     }
     is_tls_ = 1;
