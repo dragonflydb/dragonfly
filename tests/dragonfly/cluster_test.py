@@ -3356,3 +3356,35 @@ async def test_slot_migration_oom(df_factory):
     assert status[0][0] == "in"
     # Error message
     assert status[0][4] == "INCOMING_MIGRATION_OOM"
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_buckets_sleep_usec": 100000})
+async def test_performance(df_factory: DflyInstanceFactory):
+    instances = [
+        df_factory.create(maxmemory="25G", port=next(next_port), admin_port=next(next_port))
+        for i in range(2)
+    ]
+
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await nodes[0].client.execute_command("DEBUG POPULATE 15000000 test 1000 RAND SLOTS 0 16383")
+
+    await asyncio.sleep(2)
+
+    logging.debug("Start migration")
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 16383)], nodes[1].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED", 1000)
+
+    nodes[0].migrations = []
+    nodes[1].slots = [(0, 16383)]
+    nodes[0].slots = []
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+    await check_for_no_state_status([node.admin_client for node in nodes])

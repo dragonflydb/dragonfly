@@ -24,6 +24,10 @@ ABSL_FLAG(uint32_t, replication_stream_output_limit, 64_KB,
 ABSL_FLAG(uint32_t, migration_buckets_serialization_threshold, 100,
           "The Number of buckets to serialize on each iteration before yielding");
 
+ABSL_FLAG(uint32_t, migration_buckets_sleep_usec, 100,
+          "Sleep time in microseconds after each time we reach "
+          "migration_buckets_serialization_threshold");
+
 namespace dfly {
 using namespace util;
 using namespace journal;
@@ -36,6 +40,7 @@ iovec IoVec(io::Bytes src) {
 
 uint32_t replication_stream_output_limit_cached = 64_KB;
 uint32_t migration_buckets_serialization_threshold_cached = 100;
+uint32_t migration_buckets_sleep_usec_cached = 100;
 
 }  // namespace
 
@@ -43,6 +48,7 @@ JournalStreamer::JournalStreamer(journal::Journal* journal, ExecutionState* cntx
     : cntx_(cntx), journal_(journal), send_lsn_(send_lsn) {
   // cache the flag to avoid accessing it later.
   replication_stream_output_limit_cached = absl::GetFlag(FLAGS_replication_stream_output_limit);
+  migration_buckets_sleep_usec_cached = absl::GetFlag(FLAGS_migration_buckets_sleep_usec);
 }
 
 JournalStreamer::~JournalStreamer() {
@@ -232,7 +238,8 @@ void RestoreStreamer::Run() {
     });
 
     if (++last_yield >= migration_buckets_serialization_threshold_cached) {
-      ThisFiber::Yield();
+      // TODO: to align this with how we sleep in SliceSnapshot::FlushSerialized.
+      ThisFiber::SleepFor(chrono::microseconds(migration_buckets_sleep_usec_cached));
       last_yield = 0;
     }
   } while (cursor);
