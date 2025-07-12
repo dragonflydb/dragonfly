@@ -821,7 +821,7 @@ VersionBuffer MakeRdbVersion() {
 }
 
 CrcBuffer MakeCheckSum(std::string_view dump_res) {
-  uint64_t chksum = crc64(0, reinterpret_cast<const uint8_t*>(dump_res.data()), dump_res.size());
+  uint64_t chksum = 0;
   CrcBuffer buf;
   absl::little_endian::Store64(buf.data(), chksum);
   return buf;

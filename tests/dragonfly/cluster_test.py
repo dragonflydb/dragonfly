@@ -3358,7 +3358,14 @@ async def test_slot_migration_oom(df_factory):
     assert status[0][4] == "INCOMING_MIGRATION_OOM"
 
 
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_buckets_sleep_usec": 100000})
+@dfly_args(
+    {
+        "proactor_threads": 4,
+        "cluster_mode": "yes",
+        "migration_buckets_sleep_usec": 20000,
+        "compression_mode": 0,
+    }
+)
 async def test_performance(df_factory: DflyInstanceFactory):
     instances = [
         df_factory.create(maxmemory="25G", port=next(next_port), admin_port=next(next_port))
@@ -3374,9 +3381,9 @@ async def test_performance(df_factory: DflyInstanceFactory):
 
     await nodes[0].client.execute_command("DEBUG POPULATE 15000000 test 1000 RAND SLOTS 0 16383")
 
-    await asyncio.sleep(2)
+    await asyncio.sleep(10)
 
-    logging.debug("Start migration")
+    logging.debug("--------------Start migration")
     nodes[0].migrations.append(
         MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 16383)], nodes[1].id)
     )
@@ -3388,3 +3395,7 @@ async def test_performance(df_factory: DflyInstanceFactory):
     nodes[0].slots = []
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
     await check_for_no_state_status([node.admin_client for node in nodes])
+
+    logging.debug("--------------Migration is finished")
+
+    await asyncio.sleep(20)

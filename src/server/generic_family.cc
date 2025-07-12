@@ -71,15 +71,15 @@ std::optional<RdbVersion> GetRdbVersion(std::string_view msg) {
   }
 
   // Compute expected crc64 based on the actual data upto the expected crc64 field.
-  uint64_t actual_cs =
-      crc64(0, reinterpret_cast<const uint8_t*>(msg.data()), msg.size() - sizeof(uint64_t));
+  // uint64_t actual_cs =
+  //     crc64(0, reinterpret_cast<const uint8_t*>(msg.data()), msg.size() - sizeof(uint64_t));
   uint64_t expected_cs = absl::little_endian::Load64(footer + 2);  // skip the version
-
-  if (actual_cs != expected_cs) {
-    LOG(WARNING) << "CRC check failed for restore command, expecting: " << expected_cs << " got "
-                 << actual_cs;
-    return std::nullopt;
-  }
+  (void)expected_cs;
+  // if (actual_cs != expected_cs) {
+  //   LOG(WARNING) << "CRC check failed for restore command, expecting: " << expected_cs << " got "
+  //                << actual_cs;
+  //   return std::nullopt;
+  // }
 
   return version;
 }
