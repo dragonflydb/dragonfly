@@ -180,6 +180,21 @@ TEST_F(SetFamilyTest, SPop) {
   resp = Run({"smembers", "y"});
   ASSERT_THAT(resp, ArrLen(2));
   EXPECT_THAT(resp.GetVec(), IsSubsetOf({"a", "b", "c"}));
+
+  // Test POP on large set with small pop count
+  vector<string> xlarge{"sadd", "xlarge"};
+  for (size_t i = 0; i < 100; i++)
+    xlarge.push_back(to_string(i));
+  Run(absl::MakeSpan(xlarge));
+
+  resp = Run({"spop", "xlarge", "2"});
+  {
+    auto elems = resp.GetVec();
+    EXPECT_NE(elems[0], elems[1]);
+  }
+
+  resp = Run({"scard", "xlarge"});
+  EXPECT_THAT(resp, IntArg(98));
 }
 
 TEST_F(SetFamilyTest, SRandMember) {
