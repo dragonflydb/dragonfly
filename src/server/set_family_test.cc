@@ -190,7 +190,7 @@ TEST_F(SetFamilyTest, SPop) {
   resp = Run({"spop", "xlarge", "2"});
   {
     auto elems = resp.GetVec();
-    EXPECT_NE(elems[0], elems[1]);
+    EXPECT_NE(elems[0].GetString(), elems[1].GetString());
   }
 
   resp = Run({"scard", "xlarge"});

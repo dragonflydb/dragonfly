@@ -112,8 +112,8 @@ unsigned StringSet::AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec
   return res;
 }
 
-StringSet::iterator StringSet::RandomMember(size_t search_offset) {
-  return iterator{DenseSet::RandomIterator(search_offset)};
+StringSet::iterator StringSet::GetRandomMember(size_t search_offset) {
+  return iterator{DenseSet::GetRandomIterator(search_offset)};
 }
 
 std::optional<std::string> StringSet::Pop() {

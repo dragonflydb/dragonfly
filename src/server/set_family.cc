@@ -274,7 +274,7 @@ StringVec RandMemberStrSetPicky(StringSet* strset, PicksGenerator& generator, si
   C picks;
   picks.reserve(count);
   while (picks.size() < count) {
-    string member = *strset->RandomMember(generator.Generate());
+    string member = *strset->GetRandomMember(generator.Generate());
     picks.insert(picks.end(), std::move(member));
   }
 
@@ -288,7 +288,7 @@ StringVec RandMemberStrSet(const DbContext& db_context, const CompactObj& co,
   CHECK(IsDenseEncoding(co));
   StringSetWrapper strset{co, db_context};
 
-  // If the set is small, extract entries with StringSet::RandomMember
+  // If the set is small, extract entries with StringSet::GetRandomMember
   if (picks_count * 5 < strset->UpperBoundSize()) {
     StringSet* ss(strset);
     if (bool unique = (dynamic_cast<UniquePicksGenerator*>(&generator) != nullptr); unique)

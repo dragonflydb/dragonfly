@@ -670,7 +670,7 @@ void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
   ObjDelete(obj, false);
 }
 
-DenseSet::ChainVectorIterator DenseSet::RandomChain(size_t offset) {
+DenseSet::ChainVectorIterator DenseSet::GetRandomChain(size_t offset) {
   for (size_t i = offset; i < entries_.size() + offset; i++) {
     auto it = entries_.begin() + (i % entries_.size());
     ExpireIfNeeded(nullptr, &*it);
@@ -680,8 +680,8 @@ DenseSet::ChainVectorIterator DenseSet::RandomChain(size_t offset) {
   return entries_.end();
 }
 
-DenseSet::IteratorBase DenseSet::RandomIterator(size_t offset) {
-  ChainVectorIterator chain_it = RandomChain(offset);
+DenseSet::IteratorBase DenseSet::GetRandomIterator(size_t offset) {
+  ChainVectorIterator chain_it = GetRandomChain(offset);
   if (chain_it == entries_.end())
     return IteratorBase{};
 
@@ -689,7 +689,7 @@ DenseSet::IteratorBase DenseSet::RandomIterator(size_t offset) {
 }
 
 void* DenseSet::PopInternal() {
-  auto bucket_iter = RandomChain();  // Find first non empty chain
+  auto bucket_iter = GetRandomChain();  // Find first non empty chain
   if (bucket_iter == entries_.end())
     return nullptr;
 
