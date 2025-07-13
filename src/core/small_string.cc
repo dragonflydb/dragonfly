@@ -10,6 +10,7 @@
 #include <memory>
 
 #include "base/logging.h"
+#include "core/page_stats.h"
 #include "core/segment_allocator.h"
 
 extern "C" bool mi_heap_page_is_underutilized(mi_heap_t* heap, void* p, float ratio);
@@ -174,7 +175,7 @@ unsigned SmallString::GetV(string_view dest[2]) const {
   return 2;
 }
 
-bool SmallString::DefragIfNeeded(float ratio) {
+bool SmallString::DefragIfNeeded(float ratio, PageStatsCollector& page_stats) {
   DCHECK_GT(size_, kPrefLen);
   if (size_ <= kPrefLen) {
     return false;

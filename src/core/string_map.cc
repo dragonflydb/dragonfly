@@ -7,6 +7,7 @@
 #include "base/endian.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
+#include "core/page_stats.h"
 #include "core/sds_utils.h"
 
 extern "C" {
@@ -189,7 +190,7 @@ sds StringMap::GetValue(sds key) {
   return (sds)(kValMask & val);
 }
 
-pair<sds, bool> StringMap::ReallocIfNeeded(void* obj, float ratio) {
+pair<sds, bool> StringMap::ReallocIfNeeded(void* obj, float ratio, PageStatsCollector& page_stats) {
   sds key = (sds)obj;
   size_t key_len = sdslen(key);
 
@@ -302,7 +303,7 @@ detail::SdsPair StringMap::iterator::BreakToPair(void* obj) {
   return detail::SdsPair(f, GetValue(f));
 }
 
-bool StringMap::iterator::ReallocIfNeeded(float ratio) {
+bool StringMap::iterator::ReallocIfNeeded(float ratio, PageStatsCollector& page_stats) {
   auto* ptr = curr_entry_;
   if (ptr->IsLink()) {
     ptr = ptr->AsLink();
@@ -312,7 +313,8 @@ bool StringMap::iterator::ReallocIfNeeded(float ratio) {
   DCHECK(ptr->IsObject());
 
   auto* obj = ptr->GetObject();
-  auto [new_obj, realloced] = static_cast<StringMap*>(owner_)->ReallocIfNeeded(obj, ratio);
+  auto [new_obj, realloced] =
+      static_cast<StringMap*>(owner_)->ReallocIfNeeded(obj, ratio, page_stats);
   ptr->SetObject(new_obj);
 
   return realloced;

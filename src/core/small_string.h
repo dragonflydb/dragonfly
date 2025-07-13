@@ -8,6 +8,8 @@
 
 namespace dfly {
 
+class PageStatsCollector;
+
 // blob strings of upto ~256B. Small sizes are probably predominant
 // for in-memory workloads, especially for keys.
 // Please note that this class does not have automatic constructors and destructors, therefore
@@ -48,7 +50,7 @@ class SmallString {
   // With current implementation, it will return 2 slices for a non-empty string.
   unsigned GetV(std::string_view dest[2]) const;
 
-  bool DefragIfNeeded(float ratio);
+  bool DefragIfNeeded(float ratio, PageStatsCollector& page_stats);
 
   uint8_t first_byte() const {
     return prefix_[0];

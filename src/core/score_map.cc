@@ -7,6 +7,7 @@
 #include "base/endian.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
+#include "core/page_stats.h"
 #include "core/sds_utils.h"
 
 extern "C" {
@@ -148,7 +149,7 @@ detail::SdsScorePair ScoreMap::iterator::BreakToPair(void* obj) {
 
 namespace {
 // Does not Release obj. Callers must do so explicitly if a `Reallocation` happened
-pair<sds, bool> DuplicateEntryIfFragmented(void* obj, float ratio) {
+pair<sds, bool> DuplicateEntryIfFragmented(void* obj, float ratio, PageStatsCollector& page_stats) {
   sds key = (sds)obj;
   size_t key_len = sdslen(key);
 
@@ -163,7 +164,8 @@ pair<sds, bool> DuplicateEntryIfFragmented(void* obj, float ratio) {
 
 }  // namespace
 
-bool ScoreMap::iterator::ReallocIfNeeded(float ratio, std::function<void(sds, sds)> cb) {
+bool ScoreMap::iterator::ReallocIfNeeded(float ratio, PageStatsCollector& page_stats,
+                                         std::function<void(sds, sds)> cb) {
   auto* ptr = curr_entry_;
 
   if (ptr->IsLink()) {
@@ -174,7 +176,7 @@ bool ScoreMap::iterator::ReallocIfNeeded(float ratio, std::function<void(sds, sd
   DCHECK(ptr->IsObject());
 
   auto* obj = ptr->GetObject();
-  auto [new_obj, realloced] = DuplicateEntryIfFragmented(obj, ratio);
+  auto [new_obj, realloced] = DuplicateEntryIfFragmented(obj, ratio, page_stats);
   if (realloced) {
     if (cb) {
       cb((sds)obj, (sds)new_obj);

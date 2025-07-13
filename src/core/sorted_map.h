@@ -48,6 +48,8 @@ typedef struct {
 
 namespace dfly {
 
+class PageStatsCollector;
+
 // Copied from zset.h
 extern sds cmaxstring;
 extern sds cminstring;
@@ -116,7 +118,7 @@ class SortedMap {
   uint8_t* ToListPack() const;
   static SortedMap* FromListPack(PMR_NS::memory_resource* res, const uint8_t* lp);
 
-  bool DefragIfNeeded(float ratio);
+  bool DefragIfNeeded(float ratio, PageStatsCollector& page_stats);
 
  private:
   struct Query {

@@ -1147,12 +1147,12 @@ SortedMap* SortedMap::FromListPack(PMR_NS::memory_resource* res, const uint8_t* 
   return zs;
 }
 
-bool SortedMap::DefragIfNeeded(float ratio) {
+bool SortedMap::DefragIfNeeded(float ratio, PageStatsCollector& page_stats) {
   auto cb = [this](sds old_obj, sds new_obj) { score_tree->ForceUpdate(old_obj, new_obj); };
   bool reallocated = false;
 
   for (auto it = score_map->begin(); it != score_map->end(); ++it) {
-    reallocated |= it.ReallocIfNeeded(ratio, cb);
+    reallocated |= it.ReallocIfNeeded(ratio, page_stats, cb);
   }
 
   return reallocated;

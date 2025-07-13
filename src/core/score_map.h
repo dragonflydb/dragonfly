@@ -15,6 +15,8 @@ extern "C" {
 
 namespace dfly {
 
+class PageStatsCollector;
+
 namespace detail {
 
 class SdsScorePair {
@@ -69,7 +71,8 @@ class ScoreMap : public DenseSet {
     // structures that hold multiple storages that need to be update simultaneously. For example,
     // SortedMap contains both a B+ tree and a ScoreMap with the former, containing pointers
     // to the later. Therefore, we need to update those. This is handled by the cb below.
-    bool ReallocIfNeeded(float ratio, std::function<void(sds, sds)> = {});
+    bool ReallocIfNeeded(float ratio, PageStatsCollector& page_stats,
+                         std::function<void(sds, sds)> = {});
 
     iterator& operator++() {
       Advance();
