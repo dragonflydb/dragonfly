@@ -1576,6 +1576,17 @@ OpResult<ScoredArray> ZPopMinMaxInternal(std::string_view key, FilterShards shou
   auto cb = [&](Transaction* t, EngineShard* shard) {
     if (!key_shard.has_value() || *key_shard == shard->shard_id()) {
       result = OpPopCount(range_spec, t->GetOpArgs(shard), key);
+      auto cid = t->GetCId();
+      // if command conatins no_autojournal and it's BZMPOP then we will write to journal manually.
+      if ((result == OpStatus::OK) && (cid->opt_mask() & CO::NO_AUTOJOURNAL) &&
+          (cid->name() == "BZMPOP")) {
+        OpArgs op_args = t->GetOpArgs(shard);
+        if (op_args.shard->journal()) {
+          string is_max = (reverse ? "MAX" : "MIN");
+          RecordJournal(op_args, "ZMPOP", ArgSlice{"1", key, is_max, "COUNT", absl::StrCat(count)},
+                        1);
+        }
+      }
     }
     return OpStatus::OK;
   };
@@ -2850,8 +2861,9 @@ void ZSetFamily::Register(CommandRegistry* registry) {
              ZInterCard)
       << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, acl::kZLexCount}.HFUNC(ZLexCount)
       << CI{"ZMPOP", CO::SLOW | CO::WRITE | CO::VARIADIC_KEYS, -4, 2, 2, acl::kZMPop}.HFUNC(ZMPop)
-      << CI{"BZMPOP",    CO::SLOW | CO::WRITE | CO::VARIADIC_KEYS | CO::BLOCKING, -5, 3, 3,
-            acl::kBZMPop}
+      << CI{"BZMPOP", CO::SLOW | CO::WRITE | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL,
+            -5,       3,
+            3,        acl::kBZMPop}
              .HFUNC(BZMPop)
 
       << CI{"ZPOPMAX", CO::FAST | CO::WRITE, -2, 1, 1, acl::kZPopMax}.HFUNC(ZPopMax)

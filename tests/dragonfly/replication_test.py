@@ -746,6 +746,11 @@ async def test_rewrites(df_factory):
             [r"XTRIM k-stream MINID 0", r"SREM k-one-element-set value[12]"],
         )
 
+        # check BZMPOP turns into ZMPOP command
+        await c_master.zadd("key", {"a": 1, "b": 2, "c": 3})
+        await skip_cmd()
+        await check("BZMPOP 0 3 key3 key2 key MAX COUNT 3", r"ZMPOP 1 key MAX COUNT 3")
+
 
 """
 Test automatic replication of expiry.
