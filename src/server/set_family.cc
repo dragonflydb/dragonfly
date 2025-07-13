@@ -273,7 +273,9 @@ template <typename C = absl::flat_hash_set<string>>
 StringVec RandMemberStrSetPicky(StringSet* strset, PicksGenerator& generator, size_t count) {
   C picks;
   picks.reserve(count);
-  while (picks.size() < count) {
+
+  size_t tries = 0;
+  while (picks.size() < count && tries++ < count * 2) {
     string member = *strset->GetRandomMember(generator.Generate());
     picks.insert(picks.end(), std::move(member));
   }
