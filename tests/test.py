@@ -11,11 +11,11 @@ def main():
     server_port = 6379
 
     # Path to CA bundle that verifies the server certificate
-    ca_cert_path = "/ca-cert.pem"  # Replace with your CA bundle file
+    ca_cert_path = "/path/to/ca-cert.pem"  # Replace with your CA bundle file
 
     # Client certificate and private key files (PEM format)
-    client_cert_path = "/cl-cert.pem"  # Client public certificate
-    client_key_path = "/cl-key.pem"  # Client private key
+    client_cert_path = "path/to/cl-cert.pem"  # Client public certificate
+    client_key_path = "path/to/cl-key.pem"  # Client private key
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setblocking(False)
@@ -54,5 +54,9 @@ def main():
 #    # If handshake somehow completes, close anyway
 #    ssl_sock.close()
 
-if __name__ == "__main__":
-    main()
+for i in range(1, 100000):
+    try:
+        main()
+    except Exception as e:
+        print(e)
+        pass
