@@ -18,6 +18,8 @@ class PageUsage {
 
   bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object);
 
+  std::vector<mi_page_usage_stats_t> Stats();
+
  private:
   bool ConsumePageStats(mi_page_usage_stats_t stats);
 

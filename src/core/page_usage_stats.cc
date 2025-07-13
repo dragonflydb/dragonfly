@@ -25,6 +25,10 @@ bool PageUsage::IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) {
   return ConsumePageStats(mi_heap_page_is_underutilized(heap, object, ratio_));
 }
 
+std::vector<mi_page_usage_stats_t> PageUsage::Stats() {
+  return std::move(page_stats_);
+}
+
 bool PageUsage::ConsumePageStats(mi_page_usage_stats_t stats) {
   const bool should_reallocate = stats.should_realloc;
   if (collect_stats_ == CollectStats::YES) {

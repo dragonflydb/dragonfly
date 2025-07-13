@@ -447,6 +447,19 @@ bool EngineShard::DoDefrag() {
             << " but no location for defrag were found";
   }
 
+  const auto stats = page_usage.Stats();
+  LOG(WARNING) << " page stats for threshold: " << threshold;
+  for (const auto& stat : stats) {
+    if (stat.is_full || stat.should_realloc || stat.is_malloc_page) {
+      continue;
+    }
+    // DCHECK(!stat.heap_mismatch) << "detected unexpected heap mismatch!";
+    LOG(WARNING) << "address: " << stat.page_address << " b-sz " << stat.block_size
+                 << " capacity B " << stat.capacity << " used B " << stat.used << " reserved B "
+                 << stat.reserved << " full? " << stat.is_full << " malloc? " << stat.is_malloc_page
+                 << " realloc? " << stat.should_realloc;
+  }
+
   stats_.defrag_realloc_total += reallocations;
   stats_.defrag_task_invocation_total++;
   stats_.defrag_attempt_total += attempts;
