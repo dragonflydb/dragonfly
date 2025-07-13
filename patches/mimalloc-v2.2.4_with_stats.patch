@@ -1,0 +1,149 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5ce084f6..00eba70c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,4 +1,4 @@
+-cmake_minimum_required(VERSION 3.18)
++cmake_minimum_required(VERSION 3.16)
+ project(libmimalloc C CXX)
+ 
+ set(CMAKE_C_STANDARD 11)
+@@ -44,7 +44,38 @@ option(MI_WIN_USE_FLS       "Use Fiber local storage on Windows to detect thread
+ option(MI_CHECK_FULL        "Use full internal invariant checking in DEBUG mode (deprecated, use MI_DEBUG_FULL instead)" OFF)
+ option(MI_USE_LIBATOMIC     "Explicitly link with -latomic (on older systems) (deprecated and detected automatically)" OFF)
+ 
+-include(CheckLinkerFlag)    # requires cmake 3.18
++function(CHECK_LINKER_FLAG _lang _flag _var)
++  get_property (_supported_languages GLOBAL PROPERTY ENABLED_LANGUAGES)
++  if (NOT _lang IN_LIST _supported_languages)
++    message (SEND_ERROR "check_linker_flag: ${_lang}: unknown language.")
++    return()
++  endif()
++  include (Check${_lang}SourceCompiles)
++  set(CMAKE_REQUIRED_LINK_OPTIONS "${_flag}")
++  # Normalize locale during test compilation.
++  set(_locale_vars LC_ALL LC_MESSAGES LANG)
++  foreach(v IN LISTS _locale_vars)
++    set(_locale_vars_saved_${v} "$ENV{${v}}")
++    set(ENV{${v}} C)
++  endforeach()
++  if (_lang MATCHES "^(C|CXX)$")
++    set (_source "int main() { return 0; }")
++  elseif (_lang STREQUAL "Fortran")
++    set (_source "       program test\n       stop\n       end program")
++  elseif (_lang MATCHES "^(OBJC|OBJCXX)$")
++    set (_source "#ifndef __OBJC__\n#  error \"Not an Objective-C++ compiler\"\n#endif\nint main(void) { return 0; }")
++  else()
++    message (SEND_ERROR "check_linker_flag: ${_lang}: unsupported language.")
++    return()
++  endif()
++  set(_common_patterns "")
++  check_c_source_compiles("${_source}" ${_var} ${_common_patterns})
++  foreach(v IN LISTS _locale_vars)
++    set(ENV{${v}} ${_locale_vars_saved_${v}})
++  endforeach()
++  set(${_var} "${${_var}}" PARENT_SCOPE)
++endfunction()
++
+ include(CheckIncludeFiles)
+ include(GNUInstallDirs)
+ include("cmake/mimalloc-config-version.cmake")
+diff --git a/include/mimalloc/types.h b/include/mimalloc/types.h
+index a15d9cba..cea0e2e4 100644
+--- a/include/mimalloc/types.h
++++ b/include/mimalloc/types.h
+@@ -682,4 +682,16 @@ void _mi_stat_counter_increase(mi_stat_counter_t* stat, size_t amount);
+ #define mi_heap_stat_decrease(heap,stat,amount)  mi_stat_decrease( (heap)->tld->stats.stat, amount)
+ #define mi_heap_stat_adjust_decrease(heap,stat,amount)  mi_stat_adjust_decrease( (heap)->tld->stats.stat, amount)
+ 
++typedef struct mi_page_usage_stats_s {
++  bool should_realloc;
++  uintptr_t page_address;
++  uint16_t capacity;
++  uint16_t reserved;
++  uint16_t used;
++  bool is_full;
++  size_t block_size;
++  bool heap_mismatch;
++  bool is_malloc_page;
++} mi_page_usage_stats_t;
++
+ #endif
+diff --git a/src/alloc.c b/src/alloc.c
+index 0fed5e75..597a6ed3 100644
+--- a/src/alloc.c
++++ b/src/alloc.c
+@@ -25,6 +25,12 @@ terms of the MIT license. A copy of the license can be found in the file
+ // Allocation
+ // ------------------------------------------------------
+ 
++static void _mi_assert_local(const char* assertion, const char* fname, unsigned line) {
++  _mi_fprintf(NULL, NULL, "mimalloc: assertion failed: at \"%s\":%u, assertion: \"%s\"\n", fname, line, assertion);
++  abort();
++}
++#define mi_assert_local(expr)     ((expr) ? (void)0 : _mi_assert_local(#expr,__FILE__,__LINE__))
++
+ // Fast allocation in a page: just pop from the free list.
+ // Fall back to generic allocation only if the list is empty.
+ // Note: in release mode the (inlined) routine is about 7 instructions with a single test.
+@@ -43,7 +49,7 @@ extern inline void* _mi_page_malloc_zero(mi_heap_t* heap, mi_page_t* page, size_
+   // pop from the free list
+   page->free = mi_block_next(page, block);
+   page->used++;
+-  mi_assert_internal(page->free == NULL || _mi_ptr_page(page->free) == page);
++  mi_assert_local(page->free == NULL || _mi_ptr_page(page->free) == page);
+   mi_assert_internal(page->block_size < MI_MAX_ALIGN_SIZE || _mi_is_aligned(block, MI_MAX_ALIGN_SIZE));
+ 
+   #if MI_DEBUG>3
+@@ -670,6 +676,51 @@ mi_decl_restrict void* _mi_heap_malloc_guarded(mi_heap_t* heap, size_t size, boo
+ }
+ #endif
+ 
++mi_page_usage_stats_t mi_heap_page_is_underutilized(mi_heap_t *heap, void *p, float ratio,
++                                                    bool return_detailed_stats) mi_attr_noexcept {
++  mi_page_t *page = _mi_ptr_page(p); // get the page that this belongs to
++  mi_heap_t *page_heap = (mi_heap_t *) (mi_atomic_load_acquire(&(page)->xheap));
++
++  if (!return_detailed_stats) {
++    mi_page_usage_stats_t result = {.should_realloc = false};
++    if (mi_likely(page_heap == heap && page->flags.x.in_full == 0)) {
++      if (page->prev == NULL)
++        return result;
++      result.should_realloc = page->used <= (unsigned) (page->capacity * ratio);
++    }
++    return result;
++  }
++
++  mi_page_usage_stats_t result = {
++    .page_address = (uintptr_t) page,
++    .reserved = page->reserved,
++    .block_size = page->block_size,
++    .used = page->used,
++    .capacity = page->capacity,
++    .is_full = page->flags.x.in_full == 1,
++    .should_realloc = false,
++    .heap_mismatch = false,
++    .is_malloc_page = false,
++  };
++
++  if (result.is_full) {
++    return result;
++  }
++
++  if (page_heap != heap) {
++    result.heap_mismatch = true;
++    return result;
++  }
++
++  if (page->prev == NULL) {
++    result.is_malloc_page = true;
++    return result;
++  }
++
++  result.should_realloc = result.used <= (unsigned) (result.capacity * ratio);
++  return result;
++}
++
+ // ------------------------------------------------------
+ // ensure explicit external inline definitions are emitted!
+ // ------------------------------------------------------
