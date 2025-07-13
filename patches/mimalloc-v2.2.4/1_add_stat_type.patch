@@ -1,0 +1,19 @@
+diff --git a/include/mimalloc/types.h b/include/mimalloc/types.h
+index a15d9cba..48ae64af 100644
+--- a/include/mimalloc/types.h
++++ b/include/mimalloc/types.h
+@@ -682,4 +682,14 @@ void _mi_stat_counter_increase(mi_stat_counter_t* stat, size_t amount);
+ #define mi_heap_stat_decrease(heap,stat,amount)  mi_stat_decrease( (heap)->tld->stats.stat, amount)
+ #define mi_heap_stat_adjust_decrease(heap,stat,amount)  mi_stat_adjust_decrease( (heap)->tld->stats.stat, amount)
+ 
++typedef struct mi_page_usage_stats_s {
++  uintptr_t page_address;
++  size_t block_size;
++  uint16_t capacity;
++  uint16_t reserved;
++  uint16_t used;
++  uint8_t flags;
++  bool should_realloc;
++} mi_page_usage_stats_t;
++
+ #endif
