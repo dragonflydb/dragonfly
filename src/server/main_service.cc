@@ -1224,6 +1224,7 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
   }
 
   if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {
+    LOG_IF(WARNING, cntx->replica_conn) << "VerifyCommandState error: " << err->ToSv();
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
       exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
 
