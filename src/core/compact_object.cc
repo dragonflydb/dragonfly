@@ -24,6 +24,7 @@ extern "C" {
 #include "core/bloom.h"
 #include "core/detail/bitpacking.h"
 #include "core/huff_coder.h"
+#include "core/page_usage_stats.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -225,17 +226,17 @@ inline void FreeObjZset(unsigned encoding, void* ptr) {
   }
 }
 
-pair<void*, bool> DefragStrMap2(StringMap* sm, float ratio) {
+pair<void*, bool> DefragStrMap2(StringMap* sm, PageUsage* page_usage) {
   bool realloced = false;
 
   for (auto it = sm->begin(); it != sm->end(); ++it)
-    realloced |= it.ReallocIfNeeded(ratio);
+    realloced |= it.ReallocIfNeeded(page_usage);
 
   return {sm, realloced};
 }
 
-pair<void*, bool> DefragListPack(uint8_t* lp, float ratio) {
-  if (!zmalloc_page_is_underutilized(lp, ratio))
+pair<void*, bool> DefragListPack(uint8_t* lp, PageUsage* page_usage) {
+  if (!page_usage->IsPageForObjectUnderUtilized(lp))
     return {lp, false};
 
   size_t lp_bytes = lpBytes(lp);
@@ -246,8 +247,8 @@ pair<void*, bool> DefragListPack(uint8_t* lp, float ratio) {
   return {replacement, true};
 }
 
-pair<void*, bool> DefragIntSet(intset* is, float ratio) {
-  if (!zmalloc_page_is_underutilized(is, ratio))
+pair<void*, bool> DefragIntSet(intset* is, PageUsage* page_usage) {
+  if (!page_usage->IsPageForObjectUnderUtilized(is))
     return {is, false};
 
   const size_t blob_len = intsetBlobLen(is);
@@ -258,16 +259,16 @@ pair<void*, bool> DefragIntSet(intset* is, float ratio) {
   return {replacement, true};
 }
 
-pair<void*, bool> DefragSortedMap(detail::SortedMap* sm, float ratio) {
-  const bool reallocated = sm->DefragIfNeeded(ratio);
+pair<void*, bool> DefragSortedMap(detail::SortedMap* sm, PageUsage* page_usage) {
+  const bool reallocated = sm->DefragIfNeeded(page_usage);
   return {sm, reallocated};
 }
 
-pair<void*, bool> DefragStrSet(StringSet* ss, float ratio) {
+pair<void*, bool> DefragStrSet(StringSet* ss, PageUsage* page_usage) {
   bool realloced = false;
 
   for (auto it = ss->begin(); it != ss->end(); ++it)
-    realloced |= it.ReallocIfNeeded(ratio);
+    realloced |= it.ReallocIfNeeded(page_usage);
 
   return {ss, realloced};
 }
@@ -275,16 +276,16 @@ pair<void*, bool> DefragStrSet(StringSet* ss, float ratio) {
 // Iterates over allocations of internal hash data structures and re-allocates
 // them if their pages are underutilized.
 // Returns pointer to new object ptr and whether any re-allocations happened.
-pair<void*, bool> DefragHash(unsigned encoding, void* ptr, float ratio) {
+pair<void*, bool> DefragHash(unsigned encoding, void* ptr, PageUsage* page_usage) {
   switch (encoding) {
     // Listpack is stored as a single contiguous array
     case kEncodingListPack: {
-      return DefragListPack((uint8_t*)ptr, ratio);
+      return DefragListPack((uint8_t*)ptr, page_usage);
     }
 
     // StringMap supports re-allocation of it's internal nodes
     case kEncodingStrMap2: {
-      return DefragStrMap2((StringMap*)ptr, ratio);
+      return DefragStrMap2((StringMap*)ptr, page_usage);
     }
 
     default:
@@ -292,15 +293,15 @@ pair<void*, bool> DefragHash(unsigned encoding, void* ptr, float ratio) {
   }
 }
 
-pair<void*, bool> DefragSet(unsigned encoding, void* ptr, float ratio) {
+pair<void*, bool> DefragSet(unsigned encoding, void* ptr, PageUsage* page_usage) {
   switch (encoding) {
     // Int sets have flat storage
     case kEncodingIntSet: {
-      return DefragIntSet((intset*)ptr, ratio);
+      return DefragIntSet((intset*)ptr, page_usage);
     }
 
     case kEncodingStrMap2: {
-      return DefragStrSet((StringSet*)ptr, ratio);
+      return DefragStrSet((StringSet*)ptr, page_usage);
     }
 
     default:
@@ -308,16 +309,16 @@ pair<void*, bool> DefragSet(unsigned encoding, void* ptr, float ratio) {
   }
 }
 
-pair<void*, bool> DefragZSet(unsigned encoding, void* ptr, float ratio) {
+pair<void*, bool> DefragZSet(unsigned encoding, void* ptr, PageUsage* page_usage) {
   switch (encoding) {
     // Listpack is stored as a single contiguous array
     case OBJ_ENCODING_LISTPACK: {
-      return DefragListPack((uint8_t*)ptr, ratio);
+      return DefragListPack((uint8_t*)ptr, page_usage);
     }
 
     // SKIPLIST really means ScoreMap
     case OBJ_ENCODING_SKIPLIST: {
-      return DefragSortedMap((detail::SortedMap*)ptr, ratio);
+      return DefragSortedMap((detail::SortedMap*)ptr, page_usage);
     }
 
     default:
@@ -561,15 +562,15 @@ void RobjWrapper::SetSize(uint64_t size) {
   sz_ = size;
 }
 
-bool RobjWrapper::DefragIfNeeded(float ratio) {
-  auto do_defrag = [this, ratio](auto defrag_fun) mutable {
-    auto [new_ptr, realloced] = defrag_fun(encoding_, inner_obj_, ratio);
+bool RobjWrapper::DefragIfNeeded(PageUsage* page_usage) {
+  auto do_defrag = [this, &page_usage](auto defrag_fun) mutable {
+    auto [new_ptr, realloced] = defrag_fun(encoding_, inner_obj_, page_usage);
     inner_obj_ = new_ptr;
     return realloced;
   };
 
   if (type() == OBJ_STRING) {
-    if (zmalloc_page_is_underutilized(inner_obj(), ratio)) {
+    if (page_usage->IsPageForObjectUnderUtilized(inner_obj())) {
       ReallocateString(tl.local_mr);
       return true;
     }
@@ -1059,16 +1060,16 @@ string_view CompactObj::GetSlice(string* scratch) const {
   return string_view{};
 }
 
-bool CompactObj::DefragIfNeeded(float ratio) {
+bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
   switch (taglen_) {
     case ROBJ_TAG:
       // currently only these objet types are supported for this operation
       if (u_.r_obj.inner_obj() != nullptr) {
-        return u_.r_obj.DefragIfNeeded(ratio);
+        return u_.r_obj.DefragIfNeeded(page_usage);
       }
       return false;
     case SMALL_TAG:
-      return u_.small_str.DefragIfNeeded(ratio);
+      return u_.small_str.DefragIfNeeded(page_usage);
     case INT_TAG:
       // this is not relevant in this case
       return false;
