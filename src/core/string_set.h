@@ -98,7 +98,7 @@ class StringSet : public DenseSet {
   }
 
   // See DenseSet::GetRandomIterator
-  iterator GetRandomMember(size_t search_offset);
+  iterator GetRandomMember();
 
   std::optional<std::string> Pop();
 

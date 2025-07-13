@@ -270,15 +270,13 @@ void InterStrSet(const DbContext& db_context, const vector<SetType>& vec, String
 }
 
 template <typename C = absl::flat_hash_set<string>>
-StringVec RandMemberStrSetPicky(StringSet* strset, PicksGenerator& generator, size_t count) {
+StringVec RandMemberStrSetPicky(StringSet* strset, size_t count) {
   C picks;
   picks.reserve(count);
 
   size_t tries = 0;
-  while (picks.size() < count && tries++ < count * 2) {
-    string member = *strset->GetRandomMember(generator.Generate());
-    picks.insert(picks.end(), std::move(member));
-  }
+  while (picks.size() < count && tries++ < count * 2)
+    picks.insert(picks.end(), string{*strset->GetRandomMember()});
 
   if constexpr (is_same_v<StringVec, C>)
     return picks;
@@ -294,9 +292,9 @@ StringVec RandMemberStrSet(const DbContext& db_context, const CompactObj& co,
   if (picks_count * 5 < strset->UpperBoundSize()) {
     StringSet* ss(strset);
     if (bool unique = (dynamic_cast<UniquePicksGenerator*>(&generator) != nullptr); unique)
-      return RandMemberStrSetPicky(ss, generator, picks_count);
+      return RandMemberStrSetPicky(ss, picks_count);
     else
-      return RandMemberStrSetPicky<StringVec>(ss, generator, picks_count);
+      return RandMemberStrSetPicky<StringVec>(ss, picks_count);
   }
 
   std::unordered_map<RandomPick, std::uint32_t> times_index_is_picked;

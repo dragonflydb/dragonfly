@@ -305,12 +305,11 @@ class DenseSet {
     return IteratorBase{};
   }
 
-  // Get iterator to start of first non-empty chain.
-  // Start searching from offset in the backing array.
-  ChainVectorIterator GetRandomChain(size_t offset = 0);
+  // Get iterator to start of random non-empty chain (bucket)
+  ChainVectorIterator GetRandomChain();
 
-  // Wrap RandomChain() into iterator. Can be used to get "random" element.
-  IteratorBase GetRandomIterator(size_t offset = 0);
+  // Wrap RandomChain() into iterator and advance with reservoir sampling
+  IteratorBase GetRandomIterator();
 
   void* PopInternal();
 
