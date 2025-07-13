@@ -305,6 +305,13 @@ class DenseSet {
     return IteratorBase{};
   }
 
+  // Get iterator to start of random non-empty chain.
+  // Start searching from offset in the backing array.
+  ChainVectorIterator RandomChain(size_t offset = 0);
+
+  // Wrap ::RandomChain into iterator, pseudo random element
+  IteratorBase RandomIterator(size_t offset = 0);
+
   void* PopInternal();
 
   void IncreaseMallocUsed(size_t delta) {
