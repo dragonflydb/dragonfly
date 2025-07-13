@@ -7,7 +7,7 @@
 #include "base/endian.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
-#include "core/page_stats.h"
+#include "core/page_usage_stats.h"
 #include "core/sds_utils.h"
 
 extern "C" {
@@ -149,11 +149,11 @@ detail::SdsScorePair ScoreMap::iterator::BreakToPair(void* obj) {
 
 namespace {
 // Does not Release obj. Callers must do so explicitly if a `Reallocation` happened
-pair<sds, bool> DuplicateEntryIfFragmented(void* obj, float ratio, PageStatsCollector& page_stats) {
+pair<sds, bool> DuplicateEntryIfFragmented(void* obj, PageUsage& page_usage) {
   sds key = (sds)obj;
   size_t key_len = sdslen(key);
 
-  if (!zmalloc_page_is_underutilized(key, ratio))
+  if (!page_usage.IsPageForObjectUnderUtilized(key))
     return {key, false};
 
   sds newkey = AllocSdsWithSpace(key_len, 8);
@@ -164,8 +164,7 @@ pair<sds, bool> DuplicateEntryIfFragmented(void* obj, float ratio, PageStatsColl
 
 }  // namespace
 
-bool ScoreMap::iterator::ReallocIfNeeded(float ratio, PageStatsCollector& page_stats,
-                                         std::function<void(sds, sds)> cb) {
+bool ScoreMap::iterator::ReallocIfNeeded(PageUsage& page_usage, std::function<void(sds, sds)> cb) {
   auto* ptr = curr_entry_;
 
   if (ptr->IsLink()) {
@@ -176,7 +175,7 @@ bool ScoreMap::iterator::ReallocIfNeeded(float ratio, PageStatsCollector& page_s
   DCHECK(ptr->IsObject());
 
   auto* obj = ptr->GetObject();
-  auto [new_obj, realloced] = DuplicateEntryIfFragmented(obj, ratio, page_stats);
+  auto [new_obj, realloced] = DuplicateEntryIfFragmented(obj, page_usage);
   if (realloced) {
     if (cb) {
       cb((sds)obj, (sds)new_obj);

@@ -8,7 +8,7 @@
 #include <absl/strings/str_cat.h>
 
 #include "base/flags.h"
-#include "core/page_stats.h"
+#include "core/page_usage_stats.h"
 #include "io/proc_reader.h"
 
 extern "C" {
@@ -420,12 +420,12 @@ bool EngineShard::DoDefrag() {
   unsigned traverses_count = 0;
   uint64_t attempts = 0;
 
-  PageStatsCollector page_stats{true};
+  PageUsage page_usage{PageUsage::CollectStats::YES, threshold};
   do {
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       // for each value check whether we should move it because it
       // seats on underutilized page of memory, and if so, do it.
-      bool did = it->second.DefragIfNeeded(threshold, page_stats);
+      bool did = it->second.DefragIfNeeded(page_usage);
       attempts++;
       if (did) {
         reallocations++;

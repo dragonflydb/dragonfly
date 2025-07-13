@@ -10,10 +10,8 @@
 #include <memory>
 
 #include "base/logging.h"
-#include "core/page_stats.h"
+#include "core/page_usage_stats.h"
 #include "core/segment_allocator.h"
-
-extern "C" bool mi_heap_page_is_underutilized(mi_heap_t* heap, void* p, float ratio);
 
 namespace dfly {
 using namespace std;
@@ -175,14 +173,14 @@ unsigned SmallString::GetV(string_view dest[2]) const {
   return 2;
 }
 
-bool SmallString::DefragIfNeeded(float ratio, PageStatsCollector& page_stats) {
+bool SmallString::DefragIfNeeded(PageUsage& page_usage) {
   DCHECK_GT(size_, kPrefLen);
   if (size_ <= kPrefLen) {
     return false;
   }
 
   uint8_t* cur_real_ptr = tl.seg_alloc->Translate(small_ptr_);
-  if (!mi_heap_page_is_underutilized(tl.seg_alloc->heap(), cur_real_ptr, ratio))
+  if (!page_usage.IsPageForObjectUnderUtilized(tl.seg_alloc->heap(), cur_real_ptr))
     return false;
 
   auto [sp, rp] = tl.seg_alloc->Allocate(size_ - kPrefLen);

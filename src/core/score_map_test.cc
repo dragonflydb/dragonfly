@@ -9,6 +9,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/mi_memory_resource.h"
+#include "page_usage_stats.h"
 
 extern "C" {
 #include "redis/zmalloc.h"
@@ -113,9 +114,10 @@ TEST_F(ScoreMapTest, ReallocIfNeeded) {
   size_t wasted_before = total_wasted_memory;
 
   size_t underutilized = 0;
+  PageUsage page_usage{CollectPageStats::NO, 0.9};
   for (auto it = sm_->begin(); it != sm_->end(); ++it) {
-    underutilized += zmalloc_page_is_underutilized(it->first, 0.9);
-    it.ReallocIfNeeded(0.9);
+    underutilized += page_usage.IsPageForObjectUnderUtilized(it->first);
+    it.ReallocIfNeeded(page_usage);
   }
   // Check there are underutilized pages
   CHECK_GT(underutilized, 0u);

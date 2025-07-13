@@ -18,7 +18,7 @@ extern "C" {
 }
 
 namespace dfly {
-class PageStatsCollector;
+class PageUsage;
 
 class StringSet : public DenseSet {
  public:
@@ -89,7 +89,7 @@ class StringSet : public DenseSet {
 
     // Try reducing memory fragmentation of the value by re-allocating. Returns true if
     // re-allocation happened.
-    bool ReallocIfNeeded(float ratio, PageStatsCollector& page_stats);
+    bool ReallocIfNeeded(PageUsage& page_usage);
   };
 
   iterator begin() {
@@ -121,8 +121,7 @@ class StringSet : public DenseSet {
   sds MakeSetSds(std::string_view src, uint32_t ttl_sec) const;
 
  private:
-  std::pair<sds, bool> DuplicateEntryIfFragmented(void* obj, float ratio,
-                                                  PageStatsCollector& page_stats);
+  std::pair<sds, bool> DuplicateEntryIfFragmented(void* obj, PageUsage& page_usage);
 };
 
 }  // end namespace dfly

@@ -6,7 +6,7 @@
 
 #include "absl/flags/flag.h"
 #include "core/compact_object.h"
-#include "core/page_stats.h"
+#include "core/page_usage_stats.h"
 #include "core/sds_utils.h"
 
 extern "C" {
@@ -203,11 +203,10 @@ sds StringSet::MakeSetSds(string_view src, uint32_t ttl_sec) const {
 }
 
 // Does not release obj. Callers must deallocate with sdsfree explicitly
-pair<sds, bool> StringSet::DuplicateEntryIfFragmented(void* obj, float ratio,
-                                                      PageStatsCollector& page_stats) {
+pair<sds, bool> StringSet::DuplicateEntryIfFragmented(void* obj, PageUsage& page_usage) {
   sds key = (sds)obj;
 
-  if (!zmalloc_page_is_underutilized(key, ratio))
+  if (!page_usage.IsPageForObjectUnderUtilized(key))
     return {key, false};
 
   size_t key_len = sdslen(key);
@@ -222,7 +221,7 @@ pair<sds, bool> StringSet::DuplicateEntryIfFragmented(void* obj, float ratio,
   return {sdsnewlen(key, key_len), true};
 }
 
-bool StringSet::iterator::ReallocIfNeeded(float ratio, PageStatsCollector& page_stats) {
+bool StringSet::iterator::ReallocIfNeeded(PageUsage& page_usage) {
   auto* ptr = curr_entry_;
   if (ptr->IsLink()) {
     ptr = ptr->AsLink();
@@ -233,7 +232,7 @@ bool StringSet::iterator::ReallocIfNeeded(float ratio, PageStatsCollector& page_
 
   auto* obj = ptr->GetObject();
   auto [new_obj, realloced] =
-      static_cast<StringSet*>(owner_)->DuplicateEntryIfFragmented(obj, ratio, page_stats);
+      static_cast<StringSet*>(owner_)->DuplicateEntryIfFragmented(obj, page_usage);
 
   if (realloced) {
     ptr->SetObject(new_obj);

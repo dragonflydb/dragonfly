@@ -26,7 +26,7 @@ constexpr unsigned kEncodingJsonCons = 0;
 constexpr unsigned kEncodingJsonFlat = 1;
 
 class SBF;
-class PageStatsCollector;
+class PageUsage;
 
 namespace detail {
 
@@ -73,7 +73,7 @@ class RobjWrapper {
 
   // Try reducing memory fragmentation by re-allocating values from underutilized pages.
   // Returns true if re-allocated.
-  bool DefragIfNeeded(float ratio, PageStatsCollector& page_stats);
+  bool DefragIfNeeded(PageUsage& page_usage);
 
   // as defined in zset.h
   int ZsetAdd(double score, std::string_view ele, int in_flags, int* out_flags, double* newscore);
@@ -245,7 +245,7 @@ class CompactObj {
     mask_bits_.touched = e;
   }
 
-  bool DefragIfNeeded(float ratio, PageStatsCollector& page_stats);
+  bool DefragIfNeeded(PageUsage& page_usage);
 
   void SetAsyncDelete() {
     mask_bits_.io_pending = 1;  // io_pending flag is used for async delete for keys.
