@@ -765,8 +765,9 @@ void Connection::HandleRequests() {
     FiberSocketBase::AcceptResult aresult = socket_->Accept();
 
     if (!aresult) {
-      LOG(INFO) << "Error handshaking " << aresult.error().message()
-                << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+      // This can flood the logs -- don't change
+      LOG_EVERY_T(INFO, 1) << "Error handshaking " << aresult.error().message()
+                           << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
       return;
     }
     is_tls_ = 1;
