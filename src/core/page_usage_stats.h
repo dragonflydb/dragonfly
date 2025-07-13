@@ -15,9 +15,17 @@ class PageUsage {
  public:
   PageUsage(CollectPageStats collect_stats, float threshold);
 
-  bool ConsumePageStats(mi_page_usage_stats_t page_stat);
+  bool IsPageForObjectUnderUtilized(void* object);
+
+  bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object);
+
+  const std::vector<mi_page_usage_stats_t>& Stats() const {
+    return stats_;
+  }
 
  private:
+  bool ConsumePageStats(mi_page_usage_stats_t stats);
+
   CollectPageStats collect_stats_{CollectPageStats::NO};
   float threshold_;
 
