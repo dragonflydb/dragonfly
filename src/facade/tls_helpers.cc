@@ -14,6 +14,7 @@
 #include "absl/functional/bind_front.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/facade_types.h"
 
 ABSL_FLAG(std::string, tls_cert_file, "", "cert file for tls connections");
 ABSL_FLAG(std::string, tls_key_file, "", "key file for tls connections");
@@ -106,6 +107,18 @@ SSL_CTX* CreateSslCntx(TlsContextRole role) {
     SSL_CTX_set_timeout(ctx, GetFlag(FLAGS_tls_session_cache_timeout));
     SSL_CTX_set_session_id_context(ctx, (const unsigned char*)"dragonfly", 9);
   }
+
+  SSL_CTX_set_info_callback(ctx, [](const SSL* ssl, int where, int ret) {
+    // When we skip the handshake we never reach this state.
+    if (where & SSL_CB_HANDSHAKE_START) {
+      ++tl_facade_stats->conn_stats.handshakes_started;
+    }
+    // When we skip the handshake, we never reach this state.
+    if (where & SSL_CB_HANDSHAKE_DONE) {
+      ++tl_facade_stats->conn_stats.handshakes_completed;
+    }
+  });
+
   return ctx;
 }
 
