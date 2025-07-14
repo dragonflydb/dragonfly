@@ -1521,6 +1521,8 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                      &resp->body());
   AppendMetricValue("listener_accept_error_total", m.refused_conn_max_clients_reached_count,
                     {"reason"}, {"limit_reached"}, &resp->body());
+  AppendMetricValue("listener_accept_error_total", m.facade_stats.conn_stats.tls_accept_disconnects,
+                    {"reason"}, {"tls_error"}, &resp->body());
 
   // DB stats
   AppendMetricWithoutLabels("expired_keys_total", "", m.events.expired_keys, MetricType::COUNTER,
