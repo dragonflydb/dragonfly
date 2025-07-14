@@ -305,6 +305,12 @@ class DenseSet {
     return IteratorBase{};
   }
 
+  // Get iterator to start of random non-empty chain (bucket)
+  ChainVectorIterator GetRandomChain();
+
+  // Wrap RandomChain() into iterator and advance with reservoir sampling
+  IteratorBase GetRandomIterator();
+
   void* PopInternal();
 
   void IncreaseMallocUsed(size_t delta) {
