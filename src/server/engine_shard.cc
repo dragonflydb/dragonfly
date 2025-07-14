@@ -6,6 +6,7 @@
 
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_join.h>
 
 #include "base/flags.h"
 #include "core/page_usage_stats.h"
@@ -449,19 +450,29 @@ bool EngineShard::DoDefrag(float threshold, CollectPageStats collect_stats) {
             << " but no location for defrag were found";
   }
 
-  const auto stats = page_usage.Stats();
-  LOG(WARNING) << " page stats for threshold: " << threshold;
-  for (const auto& stat : stats) {
-    if (stat.is_full || stat.should_realloc || stat.is_malloc_page) {
-      continue;
-    }
-    // DCHECK(!stat.heap_mismatch) << "detected unexpected heap mismatch!";
-    LOG(WARNING) << "address: " << stat.page_address << " b-sz " << stat.block_size
-                 << " capacity B " << stat.capacity << " used B " << stat.used << " reserved B "
-                 << stat.reserved << " full? " << stat.is_full << " malloc? " << stat.is_malloc_page
-                 << " realloc? " << stat.should_realloc;
-  }
+  // const auto stats = page_usage.Stats();
+  // LOG(WARNING) << " page stats for threshold: " << threshold;
+  // for (const auto& stat : stats) {
+  //   if (stat.is_full || stat.should_realloc || stat.is_malloc_page) {
+  //     continue;
+  //   }
+  //   LOG(WARNING) << "address: " << stat.page_address << " b-sz " << stat.block_size
+  //                << " capacity B " << stat.capacity << " used B " << stat.used << " reserved B "
+  //                << stat.reserved << " full? " << stat.is_full << " malloc? " <<
+  //                stat.is_malloc_page
+  //                << " realloc? " << stat.should_realloc;
+  // }
 
+  const PageScanStats& summary = page_usage.Summary();
+  LOG(WARNING) << "total pages scanned: " << summary.pages_scanned;
+  LOG(WARNING) << "free pages which were not considered for realloc: "
+               << summary.pages_not_considered_for_realloc;
+  LOG(WARNING) << "unique page sizes: {" << absl::StrJoin(summary.page_sizes, ", ") << "}";
+  for (const auto& [size, stat] : summary.data_for_page_not_realloc) {
+    LOG(WARNING) << "page size: " << size << ", address: " << stat.page_address << ", block-size "
+                 << stat.block_size << ", capacity-blocks " << stat.capacity << ", used-blocks "
+                 << stat.used << ", reserved-blocks " << stat.reserved;
+  }
   stats_.defrag_realloc_total += reallocations;
   stats_.defrag_task_invocation_total++;
   stats_.defrag_attempt_total += attempts;
