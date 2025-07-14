@@ -56,8 +56,15 @@ class JournalStreamer : public journal::JournalConsumerInterface {
 
   void WaitForInflightToComplete();
 
+  size_t inflight_bytes() const {
+    return in_flight_bytes_;
+  }
+
   util::FiberSocketBase* dest_ = nullptr;
   ExecutionState* cntx_;
+  uint64_t throttle_count_ = 0;
+  uint64_t total_throttle_wait_usec_ = 0;
+  uint32_t throttle_waiters_ = 0;
 
  private:
   void AsyncWrite();
@@ -107,13 +114,16 @@ class RestoreStreamer : public JournalStreamer {
                   uint64_t expire_ms);
 
   struct Stats {
-    size_t buckets_skipped = 0;
-    size_t buckets_written = 0;
-    size_t buckets_loop = 0;
-    size_t buckets_on_db_update = 0;
-    size_t keys_written = 0;
-    size_t keys_skipped = 0;
-    size_t commands = 0;
+    uint64_t buckets_skipped = 0;
+    uint64_t buckets_written = 0;
+    uint64_t buckets_loop = 0;
+    uint64_t buckets_on_db_update = 0;
+    uint64_t throttle_on_db_update = 0;
+    uint64_t throttle_usec_on_db_update = 0;
+    uint64_t keys_written = 0;
+    uint64_t keys_skipped = 0;
+    uint64_t commands = 0;
+    uint64_t iter_skips = 0;
   };
 
   DbSlice* db_slice_;
