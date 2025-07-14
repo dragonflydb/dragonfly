@@ -168,9 +168,10 @@ void MemoryCmd::Run(CmdArgList args) {
   }
 
   if (parser.Check("DEFRAGMENT")) {
-    shard_set->pool()->AwaitFiberOnAll([](util::ProactorBase*) {
+    const float threshold = parser.NextOrDefault(0.0);
+    shard_set->pool()->AwaitFiberOnAll([threshold](util::ProactorBase*) {
       if (auto* shard = EngineShard::tlocal(); shard)
-        shard->DoDefrag();
+        shard->DoDefrag(threshold);
     });
     return builder_->SendSimpleString("OK");
   }

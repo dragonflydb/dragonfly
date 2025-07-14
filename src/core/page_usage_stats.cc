@@ -11,7 +11,7 @@ mi_page_usage_stats_t mi_heap_page_is_underutilized(mi_heap_t* heap, void* p, fl
 
 namespace dfly {
 
-PageUsage::PageUsage(CollectStats collect_stats, float ratio)
+PageUsage::PageUsage(CollectPageStats collect_stats, float ratio)
     : collect_stats_{collect_stats}, ratio_{ratio} {
 }
 
@@ -31,7 +31,7 @@ std::vector<mi_page_usage_stats_t> PageUsage::Stats() {
 
 bool PageUsage::ConsumePageStats(mi_page_usage_stats_t stats) {
   const bool should_reallocate = stats.should_realloc;
-  if (collect_stats_ == CollectStats::YES) {
+  if (collect_stats_ == CollectPageStats::YES) {
     page_stats_.push_back(stats);
   }
   return should_reallocate;

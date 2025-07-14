@@ -389,7 +389,7 @@ void EngineShard::ForceDefrag() {
   defrag_state_.is_force_defrag = true;
 }
 
-bool EngineShard::DoDefrag() {
+bool EngineShard::DoDefrag(float threshold, CollectPageStats collect_stats) {
   // --------------------------------------------------------------------------
   // NOTE: This task is running with exclusive access to the shard.
   // i.e. - Since we are using shared nothing access here, and all access
@@ -398,7 +398,9 @@ bool EngineShard::DoDefrag() {
   // --------------------------------------------------------------------------
 
   constexpr size_t kMaxTraverses = 40;
-  const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
+  if (threshold == 0.0) {
+    threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
+  }
 
   // TODO: enable tiered storage on non-default db slice
   DbSlice& slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
@@ -420,7 +422,7 @@ bool EngineShard::DoDefrag() {
   unsigned traverses_count = 0;
   uint64_t attempts = 0;
 
-  PageUsage page_usage{PageUsage::CollectStats::YES, threshold};
+  PageUsage page_usage{collect_stats, threshold};
   do {
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       // for each value check whether we should move it because it
