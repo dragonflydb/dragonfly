@@ -1832,48 +1832,48 @@ std::optional<std::string_view> GetFirstNonEmptyKeyFound(EngineShard* shard, Tra
 
 // Validates the ZMPop and BZMPop command arguments and extracts the values to the output params.
 // If the arguments are invalid sends the appropiate error to builder and returns false.
-bool ValidateZMPopCommand(CmdArgList args, uint32* num_keys, bool* is_max, int* pop_count,
-                          SinkReplyBuilder* builder, bool is_blocking, float* timeout) {
+bool ValidateZMPopCommand(CmdArgList args, ZSetFamily::ValidateZMPopResult* result,
+                          SinkReplyBuilder* builder, bool is_blocking) {
   CmdArgParser parser{args};
 
   if (is_blocking) {
-    if (!absl::SimpleAtof(parser.Next(), timeout)) {
+    if (!absl::SimpleAtof(parser.Next(), result->timeout)) {
       builder->SendError("timeout is not a float or out of range");
       return false;
     }
-    if (*timeout < 0) {
+    if (*(result->timeout) < 0) {
       builder->SendError("timeout is negative");
       return false;
     }
   }
 
-  if (!SimpleAtoi(parser.Next(), num_keys)) {
+  if (!SimpleAtoi(parser.Next(), result->num_keys)) {
     builder->SendError(kUintErr);
     return false;
   }
 
-  if (*num_keys <= 0 || !parser.HasAtLeast(*num_keys + 1)) {
+  if (*(result->num_keys) <= 0 || !parser.HasAtLeast(*(result->num_keys) + 1)) {
     // We should have at least num_keys keys + a MIN/MAX arg.
     builder->SendError(kSyntaxErr);
     return false;
   }
   // Skip over the keys themselves.
-  parser.Skip(*num_keys);
+  parser.Skip(*(result->num_keys));
 
   // We know we have at least one more arg (we checked above).
   if (parser.Check("MAX")) {
-    *is_max = true;
+    *(result->is_max) = true;
   } else if (parser.Check("MIN")) {
-    *is_max = false;
+    *(result->is_max) = false;
   } else {
     builder->SendError(kSyntaxErr);
     return false;
   }
 
-  *pop_count = 1;
+  *(result->pop_count) = 1;
   // Check if we have additional COUNT argument.
   if (parser.HasNext()) {
-    if (!parser.Check("COUNT", pop_count)) {
+    if (!parser.Check("COUNT", result->pop_count)) {
       builder->SendError(kSyntaxErr);
       return false;
     }
@@ -2429,8 +2429,12 @@ void ZMPopGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_block
   bool is_max;
   int pop_count;
   float timeout;
-  if (!ValidateZMPopCommand(args, &num_keys, &is_max, &pop_count, cmd_cntx.rb, is_blocking,
-                            &timeout)) {
+  ZSetFamily::ValidateZMPopResult result;
+  result.num_keys = &num_keys;
+  result.is_max = &is_max;
+  result.pop_count = &pop_count;
+  result.timeout = &timeout;
+  if (!ValidateZMPopCommand(args, &result, cmd_cntx.rb, is_blocking)) {
     return;
   }
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
@@ -2474,18 +2478,16 @@ void ZMPopGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_block
     }
   }
 
-  // if we don't have any key to block and it's blocking then we will block it using `WaitOnWatch`
+  if (!key_to_pop.has_value() && (!is_blocking || cmd_cntx.tx->IsMulti())) {
+    cmd_cntx.tx->Conclude();
+    response_builder->SendNull();
+    return;
+  }
+  // if we don't have any key to pop and it's blocking then we will block it using `WaitOnWatch`
   if (is_blocking && !key_to_pop.has_value()) {
     auto trans = cmd_cntx.tx;
     auto cntx = cmd_cntx.conn_cntx;
     auto* ns = &trans->GetNamespace();
-
-    // Concluding transaction if it's multi mode as blocking is not allowed in it.
-    if (trans->IsMulti()) {
-      trans->Conclude();
-      response_builder->SendNull();
-      return;
-    }
 
     auto limit_tp = Transaction::time_point::max();
     auto limit_ms = (unsigned)(timeout * 1000);
@@ -2516,12 +2518,8 @@ void ZMPopGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_block
     };
     trans->Execute(std::move(cb), false);
   }
-  // else we will check if key_to_pop has value in case of ZMPOP.
-  if (!key_to_pop.has_value()) {
-    cmd_cntx.tx->Conclude();
-    response_builder->SendNull();
-    return;
-  }
+
+  DCHECK(key_to_pop.has_value());
 
   // Pop elements from relevant set.
   OpResult<ScoredArray> pop_result =
