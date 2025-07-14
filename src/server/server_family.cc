@@ -1502,8 +1502,11 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             MetricType::COUNTER, &resp->body());
 
   // Net metrics
+  AppendMetricWithoutLabels("net_input_recv_total", "", conn_stats.io_read_cnt, MetricType::COUNTER,
+                            &resp->body());
   AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
                             MetricType::COUNTER, &resp->body());
+
   AppendMetricWithoutLabels("net_output_bytes_total", "", m.facade_stats.reply_stats.io_write_bytes,
                             MetricType::COUNTER, &resp->body());
   {
