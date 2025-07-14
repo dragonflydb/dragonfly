@@ -49,8 +49,13 @@ AstExpr ParseQuery(std::string_view query, const QueryParams* params) {
 // Represents an either owned or non-owned result set that can be accessed transparently.
 struct IndexResult {
   using DocVec = vector<DocId>;
-  using BorrowedView = variant<const DocVec*, const BlockList<CompressedSortedSet>*,
-                               const BlockList<SortedVector<DocId>>*>;
+  using Variant =
+      variant<DocVec /*owned*/, const DocVec*, const BlockList<CompressedSortedSet>*,
+              const BlockList<SortedVector<DocId>>*, SingleBlockRangeResult, TwoBlocksRangeResult>;
+  using BorrowedView =
+      variant<const DocVec*, const BlockList<CompressedSortedSet>*,
+              const BlockList<SortedVector<DocId>>*, const SingleBlockRangeResult*,
+              const TwoBlocksRangeResult*>;  // TODO: use derived types instead of variant
 
   IndexResult() : value_{DocVec{}} {
   }
@@ -58,11 +63,21 @@ struct IndexResult {
   IndexResult(DocVec&& dv) : value_{std::move(dv)} {
   }
 
+  // TODO: remove this
+  explicit IndexResult(RangeResult range_result) {
+    auto& variant = range_result.GetResult();
+    auto cb = [&](auto& result) { value_ = std::move(result); };
+    std::visit(cb, variant);
+  }
+
   template <typename C> IndexResult(const C* container = nullptr) : value_{container} {
     if (container == nullptr)
       value_ = DocVec{};
   }
 
+  // It will return approximate size of the result set
+  // Actual result can be smaller than the size returned by this method.
+  // TODO: bool allow_approx_size
   size_t Size() const {
     return visit([](auto* set) { return set->size(); }, Borrowed());
   }
@@ -92,27 +107,45 @@ struct IndexResult {
   }
 
   // Move out of owned or copy borrowed, truncate to limit if set
-  DocVec Take(optional<size_t> limit = nullopt) {
+  // Returns a pair of total size and the result set.
+  std::pair<size_t, DocVec> Take(optional<size_t> limit = nullopt) {
     if (IsOwned()) {
       auto out = std::move(get<DocVec>(value_));
+      const size_t total = out.size();
       out.resize(min(limit.value_or(out.size()), out.size()));
-      return out;
+      return {total, std::move(out)};
     }
 
-    auto cb = [limit](auto* set) {
-      DocVec out(min(limit.value_or(set->size()), set->size()));
-      auto it = set->begin();
-      for (size_t i = 0; it != set->end() && i < out.size(); ++i, ++it)
-        out[i] = *it;
-      return out;
+    auto cb = [limit](auto* set) -> std::pair<size_t, DocVec> {
+      using T = std::decay_t<decltype(set)>;
+      if constexpr (std::is_same_v<T, const SingleBlockRangeResult*> ||
+                    std::is_same_v<T, const TwoBlocksRangeResult*>) {
+        /* We can not use Borrowed for RangeResult, because its size method returns approximate size
+         * of the result set, not the exact size. */
+        // TODO: remove this
+        DocVec out;
+        out.reserve(set->size());
+        std::copy(set->begin(), set->end(), std::back_inserter(out));
+        const size_t total = out.size();
+        if (limit.has_value() && out.size() > limit.value()) {
+          out.resize(limit.value());
+        }
+        return {total, std::move(out)};
+      } else {
+        const size_t total = set->size();
+        DocVec out(min(limit.value_or(set->size()), set->size()));
+        auto it = set->begin();
+        for (size_t i = 0; it != set->end() && i < out.size(); ++i, ++it) {
+          out[i] = *it;
+        }
+        return {total, std::move(out)};
+      }
     };
-    return visit(cb, Borrowed());
+    return std::visit(cb, Borrowed());
   }
 
  private:
-  variant<DocVec /*owned*/, const DocVec*, const BlockList<CompressedSortedSet>*,
-          const BlockList<SortedVector<DocId>>*>
-      value_;
+  Variant value_;
 };
 
 struct ProfileBuilder {
@@ -351,14 +384,18 @@ struct BasicSearch {
   // [range]: access field's numeric index
   IndexResult Search(const AstRangeNode& node, string_view active_field) {
     DCHECK(!active_field.empty());
-    if (auto* index = GetIndex<NumericIndex>(active_field); index)
-      return index->Range(node.lo, node.hi);
+    if (auto* index = GetIndex<NumericIndex>(active_field); index) {
+      auto result = index->Range(node.lo, node.hi);
+      // TODO: simplify this
+      auto cb = [](auto& result) -> IndexResult { return IndexResult{std::move(result)}; };
+      return std::visit(cb, result);
+    }
     return IndexResult{};
   }
 
   // negate -(*subquery*): explicitly compute result complement. Needs further optimizations
   IndexResult Search(const AstNegateNode& node, string_view active_field) {
-    vector<DocId> matched = SearchGeneric(*node.node, active_field).Take();
+    vector<DocId> matched = SearchGeneric(*node.node, active_field).Take().second;
     vector<DocId> all = indices_->GetAllDocs();
 
     // To negate a result, we have to find the complement of matched to all documents,
@@ -427,7 +464,7 @@ struct BasicSearch {
       knn_distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime);
     else
       knn_distances_ =
-          vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime, sub_results.Take());
+          vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime, sub_results.Take().second);
   }
 
   // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`
@@ -475,6 +512,7 @@ struct BasicSearch {
 
     // Top level results don't need to be sorted, because they will be scored, sorted by fields or
     // used by knn
+
     DCHECK(top_level || holds_alternative<AstKnnNode>(node.Variant()) ||
            visit([](auto* set) { return is_sorted(set->begin(), set->end()); }, result.Borrowed()));
 
@@ -491,8 +529,8 @@ struct BasicSearch {
     optional<AlgorithmProfile> profile =
         profile_builder_ ? make_optional(profile_builder_->Take()) : nullopt;
 
-    size_t total = result.Size();
-    return SearchResult{total, result.Take(), std::move(knn_scores_), std::move(profile),
+    auto [total, out] = result.Take();
+    return SearchResult{total, std::move(out), std::move(knn_scores_), std::move(profile),
                         std::move(error_)};
   }
 

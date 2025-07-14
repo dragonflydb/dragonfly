@@ -1340,11 +1340,23 @@ static void BM_SearchNumericIndexes(benchmark::State& state) {
   std::string queries[] = {"@numeric:[15 +inf]", "@numeric:[-inf 20]", "@numeric:[-inf +inf]",
                            "@numeric:[0 100000]"};
 
+  std::unordered_map<size_t, std::vector<size_t>> expected_results_per_num_docs = {
+      {10000, {4982, 5018, 10000, 0}},
+      {100000, {49885, 50115, 100000, 0}},
+      {1000000, {500853, 499147, 1000000, 0}},
+  };
+
   while (state.KeepRunning()) {
-    for (const auto& query : queries) {
+    for (size_t i = 0; i < ABSL_ARRAYSIZE(queries); ++i) {
+      const auto& query = queries[i];
+
       CHECK(algo.Init(query, &params));
       auto result = algo.Search(&indices);
       CHECK(result.error.empty());
+
+      const size_t expected_result = expected_results_per_num_docs[num_docs][i];
+      CHECK_EQ(result.total, expected_result);
+      CHECK_EQ(result.ids.size(), expected_result);
     }
   }
 }
@@ -1360,7 +1372,7 @@ static void BM_SearchNumericIndexesSmallRanges(benchmark::State& state) {
   default_random_engine rnd;
 
   using NumericType = uint16_t;
-  uniform_int_distribution<NumericType> dist(0, std::numeric_limits<NumericType>::max() / 2048);
+  uniform_int_distribution<NumericType> dist(0, std::numeric_limits<NumericType>::max());
 
   const size_t num_docs = state.range(0);
   // Insert zero values
@@ -1375,11 +1387,22 @@ static void BM_SearchNumericIndexesSmallRanges(benchmark::State& state) {
 
   std::string queries[] = {"@numeric:[0 40000]", "@numeric:[-inf +inf]"};
 
+  std::unordered_map<size_t, std::vector<size_t>> expected_results_per_num_docs = {
+      {100000, {61939, 100000}},
+      {1000000, {618365, 1000000}},
+  };
+
   while (state.KeepRunning()) {
-    for (const auto& query : queries) {
+    for (size_t i = 0; i < ABSL_ARRAYSIZE(queries); ++i) {
+      const auto& query = queries[i];
+
       CHECK(algo.Init(query, &params));
       auto result = algo.Search(&indices);
       CHECK(result.error.empty());
+
+      const size_t expected_result = expected_results_per_num_docs[num_docs][i];
+      CHECK_EQ(result.total, expected_result);
+      CHECK_EQ(result.ids.size(), expected_result);
     }
   }
 }
@@ -1421,11 +1444,23 @@ static void BM_SearchTwoNumericIndexes(benchmark::State& state) {
                            absl::StrCat("@numeric1:[0 100000] @numeric2:[-100000 0]"),
                            absl::StrCat("@numeric1:[-100000 0] @numeric2:[0 100000]")};
 
+  std::unordered_map<size_t, std::vector<size_t>> expected_results_per_num_docs = {
+      {10000, {2508, 2507, 0, 0}},
+      {100000, {25119, 25232, 0, 0}},
+      {1000000, {250623, 250643, 0, 0}},
+  };
+
   while (state.KeepRunning()) {
-    for (const auto& query : queries) {
+    for (size_t i = 0; i < ABSL_ARRAYSIZE(queries); ++i) {
+      const auto& query = queries[i];
+
       CHECK(algo.Init(query, &params));
       auto result = algo.Search(&indices);
       CHECK(result.error.empty());
+
+      const size_t expected_result = expected_results_per_num_docs[num_docs][i];
+      CHECK_EQ(result.total, expected_result);
+      CHECK_EQ(result.ids.size(), expected_result);
     }
   }
 }
@@ -1464,16 +1499,93 @@ static void BM_SearchNumericAndTagIndexes(benchmark::State& state) {
                            absl::StrCat("@tag:{tag1|tag829|tag236} @numeric:[-inf 20]"),
                            absl::StrCat("@tag:{tag0|tag999} @numeric:[-1000000 +inf]")};
 
+  std::unordered_map<size_t, std::vector<size_t>> expected_results_per_num_docs = {
+      {10000, {19, 16, 8}},
+      {100000, {164, 157, 97}},
+      {1000000, {1528, 1518, 1017}},
+  };
+
   while (state.KeepRunning()) {
-    for (const auto& query : queries) {
+    for (size_t i = 0; i < ABSL_ARRAYSIZE(queries); ++i) {
+      const auto& query = queries[i];
+
       CHECK(algo.Init(query, &params));
       auto result = algo.Search(&indices);
       CHECK(result.error.empty());
+
+      const size_t expected_result = expected_results_per_num_docs[num_docs][i];
+      CHECK_EQ(result.total, expected_result);
+      CHECK_EQ(result.ids.size(), expected_result);
     }
   }
 }
 
 BENCHMARK(BM_SearchNumericAndTagIndexes)
+    ->Arg(10000)
+    ->Arg(100000)
+    ->Arg(1000000)
+    ->ArgNames({"num_docs"});
+
+static void BM_SearchSeveralNumericAndTagIndexes(benchmark::State& state) {
+  auto schema = MakeSimpleSchema({{"tag", SchemaField::TAG},
+                                  {"numeric1", SchemaField::NUMERIC},
+                                  {"numeric2", SchemaField::NUMERIC},
+                                  {"numeric3", SchemaField::NUMERIC}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  default_random_engine rnd;
+
+  using NumericType = uint16_t;
+  uniform_int_distribution<NumericType> dist(std::numeric_limits<NumericType>::min(),
+                                             std::numeric_limits<NumericType>::max());
+
+  const size_t num_docs = state.range(0);
+
+  size_t tag_number = 0;
+  const size_t max_tag_number = num_docs / 30;
+
+  for (size_t i = 0; i < num_docs; i++) {
+    MockedDocument doc{Map{{"tag", absl::StrCat("tag", tag_number)},
+                           {"numeric1", std::to_string(dist(rnd))},
+                           {"numeric2", std::to_string(dist(rnd))},
+                           {"numeric3", std::to_string(dist(rnd))}}};
+    indices.Add(i, doc);
+
+    tag_number = (tag_number + 1) % max_tag_number;
+  }
+
+  std::string queries[] = {
+      absl::StrCat(
+          "@tag:{tag230|tag3} @numeric1:[0 10000] @numeric2:[20000 30000] @numeric3:[-1000 +inf]"),
+      absl::StrCat("@tag:{tag829|tag236} @numeric1:[-inf 10000] @numeric2:[40000 +inf] "
+                   "@numeric3:[10000 30000]"),
+      absl::StrCat(
+          "@tag:{tag0|tag999} @numeric1:[-inf +inf] @numeric2:[20 +inf] @numeric3:[1000 10000]")};
+
+  std::unordered_map<size_t, std::vector<size_t>> expected_results_per_num_docs = {
+      {10000, {1, 0, 4}},
+      {100000, {1, 1, 10}},
+      {1000000, {0, 1, 9}},
+  };
+
+  while (state.KeepRunning()) {
+    for (size_t i = 0; i < ABSL_ARRAYSIZE(queries); ++i) {
+      const auto& query = queries[i];
+
+      CHECK(algo.Init(query, &params));
+      auto result = algo.Search(&indices);
+      CHECK(result.error.empty());
+
+      const size_t expected_result = expected_results_per_num_docs[num_docs][i];
+      CHECK_EQ(result.total, expected_result);
+      CHECK_EQ(result.ids.size(), expected_result);
+    }
+  }
+}
+
+BENCHMARK(BM_SearchSeveralNumericAndTagIndexes)
     ->Arg(10000)
     ->Arg(100000)
     ->Arg(1000000)

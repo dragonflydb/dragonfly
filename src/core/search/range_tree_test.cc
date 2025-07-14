@@ -22,10 +22,11 @@ static constexpr double kMinRangeValue = std::numeric_limits<double>::min();
 static constexpr double kMaxRangeValue = std::numeric_limits<double>::max();
 
 using Entry = std::pair<DocId, double>;
+using BlocksList = absl::InlinedVector<const RangeTree::RangeBlock*, 5>;
 
-std::vector<Entry> ExtractDocPairs(const RangeResult& result) {
+std::vector<Entry> ExtractDocPairs(const BlocksList& result) {
   std::vector<Entry> out;
-  for (const auto& block : result.GetBlocks()) {
+  for (const auto& block : result) {
     for (const auto& entry : *block) {
       out.push_back(entry);
     }
@@ -33,9 +34,9 @@ std::vector<Entry> ExtractDocPairs(const RangeResult& result) {
   return out;
 }
 
-std::vector<std::vector<Entry>> ExtractAllBlocks(const RangeResult& result) {
+std::vector<std::vector<Entry>> ExtractAllBlocks(const BlocksList& result) {
   std::vector<std::vector<Entry>> all;
-  for (const auto& block : result.GetBlocks()) {
+  for (const auto& block : result) {
     std::vector<Entry> block_entries;
     for (const auto& entry : *block) {
       block_entries.push_back(entry);
@@ -67,6 +68,26 @@ auto BlocksAre(std::initializer_list<std::vector<Entry>> blocks) {
   return BlocksAreMatcher(std::vector<std::vector<Entry>>(blocks));
 }
 
+std::vector<DocId> ExtractDocIdsFromRange(const std::vector<Entry>& entries, double l, double r) {
+  std::vector<DocId> result;
+  for (const auto& entry : entries) {
+    if (entry.second >= l && entry.second <= r) {
+      result.push_back(entry.first);
+    }
+  }
+
+  std::sort(result.begin(), result.end());
+  result.erase(std::unique(result.begin(), result.end()), result.end());
+  return result;
+}
+
+std::vector<DocId> MergeTwoBlocksRangeResult(const RangeTree& tree, double l, double r) {
+  auto result = tree.Range(l, r).GetResult();
+  DCHECK(std::holds_alternative<TwoBlocksRangeResult>(result));
+  auto& two_blocks_result = std::get<TwoBlocksRangeResult>(result);
+  return {two_blocks_result.begin(), two_blocks_result.end()};
+}
+
 TEST_F(RangeTreeTest, AddSimple) {
   RangeTree tree{PMR_NS::get_default_resource()};
 
@@ -78,7 +99,7 @@ TEST_F(RangeTreeTest, AddSimple) {
   tree.Add(4, 40.0);
   tree.Add(4, 60.0);
 
-  auto result = tree.GetAllDocIds();
+  auto result = tree.GetAllBlocks();
   EXPECT_THAT(result, UnorderedElementsAreDocPairs(
                           {{1, 10.0}, {2, 10.0}, {2, 20.0}, {3, 30.0}, {4, 40.0}, {4, 60.0}}));
 }
@@ -94,18 +115,18 @@ TEST_F(RangeTreeTest, Add) {
   tree.Add(4, 30.0);
   tree.Add(5, 30.0);
 
-  auto result = tree.Range(10.0, 30.0);
+  auto result = tree.RangeBlocks(10.0, 30.0);
   EXPECT_THAT(result, UnorderedElementsAreDocPairs(
                           {{1, 10.0}, {1, 20.0}, {2, 20.0}, {3, 20.0}, {4, 30.0}, {5, 30.0}}));
 
   // Test that the ranges was split correctly
-  result = tree.Range(kMinRangeValue, 19.0);
+  result = tree.RangeBlocks(kMinRangeValue, 19.0);
   EXPECT_THAT(result, UnorderedElementsAreDocPairs({{1, 10.0}}));
 
-  result = tree.Range(20.0, 29.0);
+  result = tree.RangeBlocks(20.0, 29.0);
   EXPECT_THAT(result, UnorderedElementsAreDocPairs({{1, 20.0}, {2, 20.0}, {3, 20.0}}));
 
-  result = tree.Range(30.0, kMaxRangeValue);
+  result = tree.RangeBlocks(30.0, kMaxRangeValue);
   EXPECT_THAT(result, UnorderedElementsAreDocPairs({{4, 30.0}, {5, 30.0}}));
 }
 
@@ -122,7 +143,7 @@ TEST_F(RangeTreeTest, RemoveSimple) {
   tree.Remove(1, 10.0);
   tree.Remove(2, 20.0);
 
-  auto result = tree.GetAllDocIds();
+  auto result = tree.GetAllBlocks();
   EXPECT_THAT(result, UnorderedElementsAreDocPairs({{3, 30.0}, {4, 40.0}}));
 }
 
@@ -186,7 +207,7 @@ TEST_F(RangeTreeTest, Remove) {
   // Remove some values
   remove_entries_with_step(3);
 
-  auto result = tree.GetAllDocIds();
+  auto result = tree.GetAllBlocks();
   EXPECT_THAT(result, UnorderedElementsAreDocPairs(expected_values));
 
   // Second wave of Add and Remove
@@ -197,13 +218,13 @@ TEST_F(RangeTreeTest, Remove) {
   // Remove a first half of the values
   remove_entries_with_step(2);
 
-  result = tree.GetAllDocIds();
+  result = tree.GetAllBlocks();
   EXPECT_THAT(result, UnorderedElementsAreDocPairs(expected_values));
 
   // Remove all values
   remove_entries_with_step(1);
 
-  result = tree.GetAllDocIds();
+  result = tree.GetAllBlocks();
   EXPECT_THAT(result, UnorderedElementsAreDocPairs({}));
 }
 
@@ -219,26 +240,26 @@ TEST_F(RangeTreeTest, RangeSimple) {
   tree.Add(3, 40.0);
   tree.Add(4, 40.0);
 
-  auto result = tree.Range(10.0, 10.0);
+  auto result = tree.RangeBlocks(10.0, 10.0);
   EXPECT_THAT(result, BlocksAre({{{1, 10.0}}}));
 
-  result = tree.Range(20.0, 20.0);
+  result = tree.RangeBlocks(20.0, 20.0);
   EXPECT_THAT(result, BlocksAre({{{1, 20.0}, {2, 20.0}}}));
 
-  result = tree.Range(30.0, 30.0);
+  result = tree.RangeBlocks(30.0, 30.0);
   EXPECT_THAT(result, BlocksAre({{{2, 30.0}, {3, 30.0}}}));
 
-  result = tree.Range(40.0, 40.0);
+  result = tree.RangeBlocks(40.0, 40.0);
   EXPECT_THAT(result, BlocksAre({{{3, 40.0}, {4, 40.0}}}));
 
-  result = tree.Range(10.0, 30.0);
+  result = tree.RangeBlocks(10.0, 30.0);
   EXPECT_THAT(result, BlocksAre({{{1, 10.0}}, {{1, 20.0}, {2, 20.0}}, {{2, 30.0}, {3, 30.0}}}));
 
-  result = tree.Range(20.0, 40.0);
+  result = tree.RangeBlocks(20.0, 40.0);
   EXPECT_THAT(result,
               BlocksAre({{{1, 20.0}, {2, 20.0}}, {{2, 30.0}, {3, 30.0}}, {{3, 40.0}, {4, 40.0}}}));
 
-  result = tree.Range(10.0, 40.0);
+  result = tree.RangeBlocks(10.0, 40.0);
   EXPECT_THAT(
       result,
       BlocksAre(
@@ -256,7 +277,7 @@ TEST_F(RangeTreeTest, Range) {
     tree.Add(4, 20.0);
     tree.Add(4, 30.0);
 
-    auto result = tree.Range(10.0, 30.0);
+    auto result = tree.RangeBlocks(10.0, 30.0);
     EXPECT_THAT(
         result,
         BlocksAre({{{1, 10.0}}, {{1, 20.0}, {2, 20.0}, {4, 20.0}}, {{3, 30.0}, {4, 30.0}}}));
@@ -271,7 +292,7 @@ TEST_F(RangeTreeTest, Range) {
     tree.Add(3, 20.0);
     tree.Add(4, 20.0);
 
-    auto result = tree.Range(10.0, 20.0);
+    auto result = tree.RangeBlocks(10.0, 20.0);
     EXPECT_THAT(result, BlocksAre({{{1, 10.0}}, {{1, 20.0}, {2, 20.0}, {3, 20.0}, {4, 20.0}}}));
   }
 
@@ -284,7 +305,7 @@ TEST_F(RangeTreeTest, Range) {
     tree.Add(4, 20.0);
     tree.Add(4, 10.0);
 
-    auto result = tree.Range(10.0, 20.0);
+    auto result = tree.RangeBlocks(10.0, 20.0);
     EXPECT_THAT(result, BlocksAre({{{1, 10.0}, {2, 10.0}, {3, 10.0}, {4, 10.0}}, {{4, 20.0}}}));
   }
 }
@@ -299,8 +320,86 @@ TEST_F(RangeTreeTest, BugNotUniqueDoubleValues) {
   tree.Add(1, 10.0);
   tree.Remove(1, 10.0);
 
-  auto result = tree.GetAllDocIds();
+  auto result = tree.GetAllBlocks();
   EXPECT_THAT(result, BlocksAre({{{1, 10.0}}}));
+}
+
+TEST_F(RangeTreeTest, RangeResultTwoBlocksSimple) {
+  RangeTree tree{PMR_NS::get_default_resource(), 4};
+
+  // First block: [[1, 10.0], [16, 12.0], [12, 15.0], [5, 17.0]]
+  // Second block: [[8, 20.0], [5, 30.0], [12, 50.0], [20, 55.0]]
+  // [10.0, 12.0, 15.0, 17.0] | [20.0, 30.0, 50.0, 55.0]
+  tree.Add(1, 10.0);   // 1
+  tree.Add(5, 30.0);   // 2
+  tree.Add(20, 55.0);  // 2
+  tree.Add(5, 17.0);   // 1
+  tree.Add(8, 20.0);   // 2
+  tree.Add(16, 12.0);  // 1
+  tree.Add(12, 15.0);  // 1
+  tree.Add(12, 50.0);  // 2
+
+  EXPECT_THAT(tree.RangeBlocks(10.0, 55.0),
+              BlocksAre({{{1, 10.0}, {16, 12.0}, {12, 15.0}, {5, 17.0}},
+                         {{8, 20.0}, {5, 30.0}, {12, 50.0}, {20, 55.0}}}));
+
+  std::vector<Entry> entries = {{1, 10.0}, {16, 12.0}, {12, 15.0}, {5, 17.0},
+                                {8, 20.0}, {5, 30.0},  {12, 50.0}, {20, 55.0}};
+
+  for (size_t i = 0; i < entries.size() / 2; i++) {
+    const double l = entries[i].second;
+    for (size_t j = entries.size() / 2; j < entries.size(); j++) {
+      const double r = entries[j].second;
+      auto range_result = MergeTwoBlocksRangeResult(tree, l, r);
+      EXPECT_THAT(range_result, testing::ElementsAreArray(ExtractDocIdsFromRange(entries, l, r)));
+    }
+  }
+}
+
+TEST_F(RangeTreeTest, RangeResultTwoBlocks) {
+  RangeTree tree{PMR_NS::get_default_resource(), 50};
+
+  const long long max_value = 100;
+  long long step = 23;
+  long long current_value = max_value;
+
+  std::vector<Entry> entries;
+  for (size_t i = 0; i < 20; i++) {
+    const double value = static_cast<double>(current_value);
+    entries.emplace_back(i, value);
+    entries.emplace_back(i, value + 100.0);
+    current_value = (max_value + current_value - step) % max_value;
+  }
+  for (size_t i = 20; i < 80; i++) {
+    const double value = static_cast<double>(current_value);
+    entries.emplace_back(i, value);
+    current_value = (max_value + current_value - step) % max_value;
+  }
+
+  DCHECK(entries.size() == 100);
+
+  std::sort(entries.begin(), entries.end(),
+            [](const Entry& a, const Entry& b) { return a.second < b.second; });
+
+  auto add_entries = [&tree, &entries](size_t start, size_t end) {
+    for (size_t i = start; i < end; i++) {
+      tree.Add(entries[i].first, entries[i].second);
+    }
+  };
+
+  add_entries(0, 25);
+  add_entries(50, 76);
+  add_entries(25, 50);
+  add_entries(76, entries.size());
+
+  for (size_t i = 0; i < 50; i++) {
+    const double l = entries[i].second;
+    for (size_t j = 50; j < entries.size(); j++) {
+      const double r = entries[j].second;
+      auto range_result = MergeTwoBlocksRangeResult(tree, l, r);
+      EXPECT_THAT(range_result, testing::ElementsAreArray(ExtractDocIdsFromRange(entries, l, r)));
+    }
+  }
 }
 
 }  // namespace dfly::search

@@ -765,8 +765,9 @@ void Connection::HandleRequests() {
     FiberSocketBase::AcceptResult aresult = socket_->Accept();
 
     if (!aresult) {
-      LOG(INFO) << "Error handshaking " << aresult.error().message()
-                << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+      // This can flood the logs -- don't change
+      LOG_EVERY_T(INFO, 1) << "Error handshaking " << aresult.error().message()
+                           << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
       return;
     }
     is_tls_ = 1;
@@ -1206,6 +1207,11 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
 
       DispatchSingle(has_more, dispatch_sync, dispatch_async);
     }
+    if (result != RedisParser::OK && result != RedisParser::INPUT_PENDING) {
+      // We do not expect that a replica sends an invalid command so we log if it happens.
+      LOG_IF(WARNING, cntx()->replica_conn)
+          << "Redis parser error: " << result << " during parse: " << ToSV(read_buffer.slice);
+    }
     read_buffer.Consume(consumed);
 
     // We must yield from time to time to allow other fibers to run.
@@ -1410,6 +1416,7 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
     HandleMigrateRequest();
     ec = HandleRecvSocket();
     if (ec) {
+      LOG_IF(WARNING, cntx()->replica_conn) << "HandleRecvSocket() error: " << ec;
       return ec;
     }
 
