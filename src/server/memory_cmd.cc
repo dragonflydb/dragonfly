@@ -10,11 +10,9 @@
 #include <malloc.h>
 #endif
 
-#include <absl/flags/declare.h>
-#include <absl/flags/internal/flag.h>
 #include <mimalloc.h>
 
-#include "base/logging.h"
+#include "base/flags.h"
 #include "core/allocation_tracker.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
@@ -22,11 +20,9 @@
 #include "facade/error.h"
 #include "io/io_buf.h"
 #include "server/engine_shard_set.h"
-#include "server/main_service.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
 #include "server/snapshot.h"
-#include "server/transaction.h"
 
 using namespace std;
 using namespace facade;
