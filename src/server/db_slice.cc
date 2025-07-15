@@ -1417,6 +1417,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind,
           continue;
 
         auto evict_it = db_table->prime.GetIterator(segment_id, bucket_id, slot_id);
+        // TODO: consider evicting inline entries as well
         if (evict_it->first.IsSticky() || evict_it->second.IsExternal())
           continue;
 
