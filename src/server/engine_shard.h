@@ -194,8 +194,6 @@ class EngineShard {
 
   TxQueueInfo AnalyzeTxQueue() const;
 
-  void ForceDefrag();
-
   // Returns true if revelant write operations should throttle to wait for tiering to catch up.
   // The estimate is based on memory usage crossing tiering redline and the write depth being at
   // least 50% of allowed max, providing at least some guarantee of progress.
@@ -214,7 +212,6 @@ class EngineShard {
     size_t dbid = 0u;
     uint64_t cursor = 0u;
     time_t last_check_time = 0;
-    bool is_force_defrag = false;
 
     // check the current threshold and return true if
     // we need to do the defragmentation

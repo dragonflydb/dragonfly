@@ -348,9 +348,8 @@ void EngineShard::DefragTaskState::ResetScanState() {
 // 3. in case the above is OK, make sure that we have a "gap" between usage and commited memory
 // (control by mem_defrag_waste_threshold flag)
 bool EngineShard::DefragTaskState::CheckRequired() {
-  if (is_force_defrag || cursor > kCursorDoneState) {
-    is_force_defrag = false;
-    VLOG(2) << "cursor: " << cursor << " and is_force_defrag " << is_force_defrag;
+  if (cursor > kCursorDoneState) {
+    VLOG(2) << "cursor: " << cursor;
     return true;
   }
 
@@ -382,10 +381,6 @@ bool EngineShard::DefragTaskState::CheckRequired() {
   }
 
   return false;
-}
-
-void EngineShard::ForceDefrag() {
-  defrag_state_.is_force_defrag = true;
 }
 
 bool EngineShard::DoDefrag(const float threshold) {
