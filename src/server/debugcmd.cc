@@ -278,8 +278,7 @@ void DoSegmentHist(EngineShard* shard, ConnectionContext* cntx, SegmentInfo* inf
     const auto* segment = prime.GetSegment(i);
 
     info->hist.Add(segment->SlowSize());
-    if (steps++ >= 2000) {
-      steps = 0;
+    if (++steps % 2000 == 0) {
       ThisFiber::Yield();
     }
   }
