@@ -1418,7 +1418,9 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind,
 
         auto evict_it = db_table->prime.GetIterator(segment_id, bucket_id, slot_id);
         // TODO: consider evicting inline entries as well
-        if (evict_it->first.IsSticky() || evict_it->second.IsExternal())
+
+        bool has_allocated = evict_it->second.HasAllocated() || evict_it->first.HasAllocated();
+        if (evict_it->first.IsSticky() || !has_allocated)
           continue;
 
         // check if the key is locked by looking up transaction table.
