@@ -653,7 +653,7 @@ string ConvertToJsonPointer(string_view json_path) {
   // numeric or '<key>' and then a right bracket.
   vector<string_view> parts;
   bool invalid_syntax = false;
-  while (json_path.size() > 0) {
+  while (!json_path.empty()) {
     bool is_array = false;
     bool is_object = false;
 

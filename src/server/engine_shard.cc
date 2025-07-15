@@ -829,7 +829,7 @@ void EngineShard::RetireExpiredAndEvict() {
 
     db_cntx.db_index = i;
     auto [pt, expt] = db_slice.GetTables(i);
-    if (expt->size() > 0) {
+    if (!expt->Empty()) {
       DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
 
       eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));

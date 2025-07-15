@@ -330,7 +330,7 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
         });
       }
 
-      if (scratch.size() > 0) {
+      if (!scratch.empty()) {
         size_t len = std::min(scratch.size(), kMaxLen);
         HIST_add(dest->hist.data(), scratch.data(), len);
       }
@@ -1407,7 +1407,7 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
 void DebugCmd::IOStats(CmdArgList args, facade::SinkReplyBuilder* builder) {
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
 
-  bool per_second = args.size() > 0 && absl::EqualsIgnoreCase(args[0], "PS");
+  bool per_second = !args.empty() && absl::EqualsIgnoreCase(args[0], "PS");
   vector<IOStat> stats(shard_set->pool()->size());
 
   shard_set->pool()->AwaitBrief(

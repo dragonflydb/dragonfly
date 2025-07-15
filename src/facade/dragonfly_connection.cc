@@ -1583,7 +1583,7 @@ string Connection::DebugInfo() const {
   }
   absl::StrAppend(&info, "dispatch_fiber:joinable=", async_fb_.IsJoinable(), ", ");
 
-  bool intrusive_front = dispatch_q_.size() > 0 && dispatch_q_.front().IsControl();
+  bool intrusive_front = !dispatch_q_.empty() && dispatch_q_.front().IsControl();
   absl::StrAppend(&info, "dispatch_queue:size=", dispatch_q_.size(), ", ");
   absl::StrAppend(&info, "dispatch_queue:pipelined=", pending_pipeline_cmd_cnt_, ", ");
   absl::StrAppend(&info, "dispatch_queue:intrusive=", intrusive_front, ", ");
@@ -2083,9 +2083,9 @@ bool Connection::IsReplySizeOverLimit() const {
   std::atomic<size_t>& reply_sz = tl_facade_stats->reply_stats.squashing_current_reply_size;
   size_t current = reply_sz.load(std::memory_order_acquire);
   const bool over_limit = reply_size_limit != 0 && current > 0 && current > reply_size_limit;
-  // Every 10 seconds. Otherwise, it can be too sensitive on certain workloads in production
-  // instances.
-  LOG_EVERY_N(INFO, 10) << "MultiCommandSquasher overlimit: " << current << "/" << reply_size_limit;
+  LOG_EVERY_T(INFO, 10) << "Commands squashing current reply size is overlimit: " << current << "/"
+                        << reply_size_limit
+                        << ". Falling back to single command dispatch (instead of squashing)";
   return over_limit;
 }
 

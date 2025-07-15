@@ -63,7 +63,7 @@ size_t SliceSnapshot::GetThreadLocalMemoryUsage() {
 }
 
 bool SliceSnapshot::IsSnaphotInProgress() {
-  return tl_slice_snapshots.size() > 0;
+  return !tl_slice_snapshots.empty();
 }
 
 void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {

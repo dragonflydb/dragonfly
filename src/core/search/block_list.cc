@@ -8,7 +8,7 @@ SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list
   using Entry = std::pair<DocId, double>;
 
   const size_t initial_size = block_list.Size();
-  DCHECK(block_list.Size() > 0);
+  DCHECK(!block_list.Empty());
 
   // Collect all entries from the blocks into a single vector
   // We copy the block and clear it on the fly to save memory
@@ -91,7 +91,7 @@ template <typename C> bool BlockList<C>::Remove(ElementType t) {
 }
 
 template <typename C> typename BlockList<C>::BlockIt BlockList<C>::FindBlock(const ElementType& t) {
-  DCHECK(blocks_.empty() || blocks_.back().Size() > 0u);
+  DCHECK(blocks_.empty() || !blocks_.back().Empty());
 
   if (!blocks_.empty() && t >= *blocks_.back().begin())
     return --blocks_.end();

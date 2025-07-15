@@ -192,14 +192,6 @@ bool CompressedSortedSet::Remove(IntType value) {
   return true;
 }
 
-size_t CompressedSortedSet::Size() const {
-  return size_;
-}
-
-size_t CompressedSortedSet::ByteSize() const {
-  return diffs_.size();
-}
-
 void CompressedSortedSet::Merge(CompressedSortedSet&& other) {
   // Quadratic compexity in theory, but in practice used only to merge with larger values.
   // Tail insert optimization makes it linear

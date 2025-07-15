@@ -647,6 +647,10 @@ class DashTableBase {
     return size_;
   }
 
+  size_t Empty() const {
+    return size_ == 0;
+  }
+
  protected:
   uint32_t SegmentId(size_t hash) const {
     if (global_depth_) {

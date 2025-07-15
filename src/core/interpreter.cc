@@ -1195,7 +1195,7 @@ Interpreter* InterpreterManager::Get() {
     return &storage_.back();
   }
 
-  bool blocked = waker_.await([this]() { return available_.size() > 0; });
+  bool blocked = waker_.await([this]() { return !available_.empty(); });
   tl_stats().blocked_cnt += (uint64_t)blocked;
 
   Interpreter* ir = available_.back();
