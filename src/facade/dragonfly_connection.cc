@@ -727,6 +727,7 @@ void Connection::OnConnectionStart() {
 
 void Connection::HandleRequests() {
   VLOG(1) << "[" << id_ << "] HandleRequests";
+  DCHECK(stats_);
 
   if (GetFlag(FLAGS_tcp_nodelay) && !socket_->IsUDS()) {
     int val = 1;
@@ -743,8 +744,10 @@ void Connection::HandleRequests() {
     uint8_t buf[2];
     auto read_sz = socket_->Read(io::MutableBytes(buf));
     if (!read_sz || *read_sz < sizeof(buf)) {
-      VLOG(1) << "Error reading from peer " << remote_ep << " " << read_sz.error().message()
-              << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+      LOG_EVERY_T(INFO, 1) << "Error reading from peer " << remote_ep << " "
+                           << read_sz.error().message()
+                           << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+      stats_->tls_accept_disconnects++;
       return;
     }
     if (buf[0] != 0x16 || buf[1] != 0x03) {
@@ -754,6 +757,8 @@ void Connection::HandleRequests() {
       std::ignore =
           socket_->Write(io::Buffer("-ERR Bad TLS header, double check "
                                     "if you enabled TLS for your client.\r\n"));
+      stats_->tls_accept_disconnects++;
+      return;
     }
 
     {
@@ -768,6 +773,7 @@ void Connection::HandleRequests() {
       // This can flood the logs -- don't change
       LOG_EVERY_T(INFO, 1) << "Error handshaking " << aresult.error().message()
                            << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+      stats_->tls_accept_disconnects++;
       return;
     }
     is_tls_ = 1;

@@ -232,8 +232,6 @@ std::string AbslUnparseFlag(const CronExprFlag& flag) {
 
 namespace dfly {
 
-namespace fs = std::filesystem;
-
 using absl::GetFlag;
 using absl::StrCat;
 using namespace facade;
@@ -1102,7 +1100,7 @@ void ServerFamily::LoadFromSnapshot() {
       snapshot_storage_->LoadPath(GetFlag(FLAGS_dir), GetFlag(FLAGS_dbfilename));
 
   if (load_path_result) {
-    const std::string load_path = *load_path_result;
+    const std::string& load_path = *load_path_result;
     if (!load_path.empty()) {
       auto future = Load(load_path, LoadExistingKeys::kFail);
       load_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber([future]() mutable {
@@ -1241,23 +1239,15 @@ void ServerFamily::FlushAll(Namespace* ns) {
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
-std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_path,
+std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& path,
                                                             LoadExistingKeys existing_keys) {
-  std::string path(load_path);
-
-  if (load_path.empty()) {
-    fs::path dir_path(GetFlag(FLAGS_dir));
-    string filename = GetFlag(FLAGS_dbfilename);
-    dir_path.append(filename);
-    path = dir_path.generic_string();
-  }
-
+  DCHECK(!path.empty());
   DCHECK_GT(shard_count(), 0u);
 
   // TODO: to move it to helio.
   auto immediate = [](auto val) {
     fb2::Future<GenericError> future;
-    future.Resolve(val);
+    future.Resolve(std::move(val));
     return future;
   };
 
@@ -1287,21 +1277,22 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
   vector<fb2::Fiber> load_fibers;
   load_fibers.reserve(paths.size());
 
-  auto aggregated_result = std::make_shared<AggregateLoadResult>();
-
-  std::string snapshot_id;
-  if (absl::EndsWith(load_path, "summary.dfs")) {
+  LoadOptions load_opts;
+  if (absl::EndsWith(path, "summary.dfs")) {
     // we read summary first to get snapshot_id and load data correctly
-    auto load_result = pool.GetNextProactor()->Await(
-        [&] { return LoadRdb(std::string(load_path), existing_keys, &snapshot_id); });
-    if (!load_result.has_value())
-      aggregated_result->first_error = load_result.error();
+    error_code load_ec =
+        pool.GetNextProactor()->Await([&] { return LoadRdb(path, existing_keys, &load_opts); });
+    if (load_ec)
+      return immediate(load_ec);
   }
 
-  for (auto& path : paths) {
+  auto aggregated_result = std::make_shared<AggregateLoadResult>();
+
+  for (const auto& file : paths) {
     // we have already read summary so we skip it now
-    if (absl::EndsWith(path, "summary.dfs"))
+    if (absl::EndsWith(file, "summary.dfs"))
       continue;
+
     // For single file, choose thread that does not handle shards if possible.
     // This will balance out the CPU during the load.
     ProactorBase* proactor;
@@ -1311,15 +1302,13 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
       proactor = pool.GetNextProactor();
     }
 
-    auto load_func = [this, aggregated_result, existing_keys, path = std::move(path),
-                      snapshot_id]() {
-      auto sid = snapshot_id;
-      auto load_result = LoadRdb(path, existing_keys, &sid);
-      DCHECK(sid == snapshot_id);
-      if (load_result.has_value())
-        aggregated_result->keys_read.fetch_add(*load_result);
-      else
-        aggregated_result->first_error = load_result.error();
+    auto load_func = [=]() mutable {
+      error_code load_ec = LoadRdb(file, existing_keys, &load_opts);
+      if (load_ec) {
+        aggregated_result->first_error = load_ec;
+      } else {
+        aggregated_result->keys_read.fetch_add(load_opts.num_loaded_keys, memory_order_relaxed);
+      }
     };
     load_fibers.push_back(proactor->LaunchFiber(std::move(load_func)));
   }
@@ -1381,40 +1370,42 @@ void ServerFamily::SnapshotScheduling() {
   }
 }
 
-io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
-                                         LoadExistingKeys existing_keys, std::string* snapshot_id) {
+std::error_code ServerFamily::LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys,
+                                      LoadOptions* load_opts) {
+  DCHECK(load_opts);
   VLOG(1) << "Loading data from " << rdb_file;
   CHECK(fb2::ProactorBase::IsProactorThread()) << "must be called from proactor thread";
 
-  std::string filt_snapshot_id = snapshot_id ? *snapshot_id : "";
+  const std::string& filt_snapshot_id = load_opts->snapshot_id;
 
-  io::Result<size_t> result;
   ProactorBase* proactor = fb2::ProactorBase::me();
+  error_code result;
   auto fb = proactor->LaunchFiber([&] {
     io::ReadonlyFileOrError res = snapshot_storage_->OpenReadFile(rdb_file);
     if (!res) {
-      result = nonstd::make_unexpected(res.error());
+      result = res.error();
       return;
     }
 
     io::FileSource fs(*res);
 
     RdbLoader loader{&service_, filt_snapshot_id};
+    loader.SetShardCount(load_opts->shard_count);
     if (existing_keys == LoadExistingKeys::kOverride) {
       loader.SetOverrideExistingKeys(true);
     }
 
     auto ec = loader.Load(&fs);
-    // we ignore incorrect_snapshot_id, it means we try to load file not from the snapshot
-    if (ec && (ec.value() != rdb::errc::incorrect_snapshot_id)) {
-      result = nonstd::make_unexpected(ec);
+    if (ec) {
+      // We ignore incorrect_snapshot_id, it means we try to load file from incorrect snapshot.
+      if (ec.value() != rdb::errc::incorrect_snapshot_id)
+        result = ec;
     } else {
       VLOG(1) << "Done loading RDB from " << rdb_file << ", keys loaded: " << loader.keys_loaded();
       VLOG(1) << "Loading finished after " << strings::HumanReadableElapsedTime(loader.load_time());
-      result = loader.keys_loaded();
-      if (snapshot_id && snapshot_id->empty()) {
-        *snapshot_id = loader.GetSnapshotId();
-      }
+      load_opts->num_loaded_keys = loader.keys_loaded();
+      load_opts->snapshot_id = loader.GetSnapshotId();
+      load_opts->shard_count = loader.shard_count();
     }
   });
 
@@ -1422,7 +1413,7 @@ io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
   return result;
 }
 
-enum MetricType { COUNTER, GAUGE, SUMMARY, HISTOGRAM };
+enum MetricType : uint8_t { COUNTER, GAUGE, SUMMARY, HISTOGRAM };
 
 const char* MetricTypeName(MetricType type) {
   switch (type) {
@@ -1645,8 +1636,11 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             MetricType::COUNTER, &resp->body());
 
   // Net metrics
+  AppendMetricWithoutLabels("net_input_recv_total", "", conn_stats.io_read_cnt, MetricType::COUNTER,
+                            &resp->body());
   AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
                             MetricType::COUNTER, &resp->body());
+
   AppendMetricWithoutLabels("net_output_bytes_total", "", m.facade_stats.reply_stats.io_write_bytes,
                             MetricType::COUNTER, &resp->body());
   {
@@ -1664,6 +1658,8 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                      &resp->body());
   AppendMetricValue("listener_accept_error_total", m.refused_conn_max_clients_reached_count,
                     {"reason"}, {"limit_reached"}, &resp->body());
+  AppendMetricValue("listener_accept_error_total", m.facade_stats.conn_stats.tls_accept_disconnects,
+                    {"reason"}, {"tls_error"}, &resp->body());
 
   // DB stats
   AppendMetricWithoutLabels("expired_keys_total", "", m.events.expired_keys, MetricType::COUNTER,
@@ -2755,6 +2751,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     auto& reply_stats = m.facade_stats.reply_stats;
 
     append("total_connections_received", conn_stats.conn_received_cnt);
+    append("total_handshakes_started", conn_stats.handshakes_started);
+    append("total_handshakes_completed", conn_stats.handshakes_completed);
     append("total_commands_processed", conn_stats.command_cnt_main + conn_stats.command_cnt_other);
     append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);

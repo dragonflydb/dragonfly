@@ -133,6 +133,10 @@ struct StringSetWrapper {
     return curs;
   }
 
+  explicit operator StringSet*() const {
+    return ss;
+  }
+
   StringSet* operator->() const {
     return ss;
   }
@@ -265,9 +269,33 @@ void InterStrSet(const DbContext& db_context, const vector<SetType>& vec, String
   }
 }
 
+template <typename C = absl::flat_hash_set<string>>
+StringVec RandMemberStrSetPicky(StringSet* strset, size_t count) {
+  C picks;
+  picks.reserve(count);
+
+  size_t tries = 0;
+  while (picks.size() < count && tries++ < count * 2)
+    picks.insert(picks.end(), string{*strset->GetRandomMember()});
+
+  if constexpr (is_same_v<StringVec, C>)
+    return picks;
+  return StringVec{make_move_iterator(picks.begin()), make_move_iterator(picks.end())};
+}
+
 StringVec RandMemberStrSet(const DbContext& db_context, const CompactObj& co,
-                           PicksGenerator& generator, std::size_t picks_count) {
+                           PicksGenerator& generator, size_t picks_count) {
   CHECK(IsDenseEncoding(co));
+  StringSetWrapper strset{co, db_context};
+
+  // If the set is small, extract entries with StringSet::GetRandomMember
+  if (picks_count * 5 < strset->UpperBoundSize()) {
+    StringSet* ss(strset);
+    if (bool unique = (dynamic_cast<UniquePicksGenerator*>(&generator) != nullptr); unique)
+      return RandMemberStrSetPicky(ss, picks_count);
+    else
+      return RandMemberStrSetPicky<StringVec>(ss, picks_count);
+  }
 
   std::unordered_map<RandomPick, std::uint32_t> times_index_is_picked;
   for (std::size_t i = 0; i < picks_count; i++) {
@@ -278,7 +306,7 @@ StringVec RandMemberStrSet(const DbContext& db_context, const CompactObj& co,
   result.reserve(picks_count);
 
   std::uint32_t ss_entry_index = 0;
-  for (string_view str : StringSetWrapper{co, db_context}.Range()) {
+  for (string_view str : strset.Range()) {
     auto it = times_index_is_picked.find(ss_entry_index++);
     if (it != times_index_is_picked.end()) {
       while (it->second--)

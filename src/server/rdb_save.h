@@ -77,6 +77,7 @@ class RdbSaver {
   struct GlobalData {
     const StringVec lua_scripts;     // bodies of lua scripts
     const StringVec search_indices;  // ft.create commands to re-create search indices
+    size_t table_used_memory = 0;    // total memory used by all tables in all shards
   };
 
   // single_shard - true means that we run RdbSaver on a single shard and we do not use
@@ -153,7 +154,7 @@ class RdbSaver {
 
 class SerializerBase {
  public:
-  enum class FlushState { kFlushMidEntry, kFlushEndEntry };
+  enum class FlushState : uint8_t { kFlushMidEntry, kFlushEndEntry };
 
   explicit SerializerBase(CompressionMode compression_mode);
   virtual ~SerializerBase() = default;

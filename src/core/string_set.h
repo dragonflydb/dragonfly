@@ -39,8 +39,6 @@ class StringSet : public DenseSet {
     return FindInternal(&s1, Hash(&s1, 1), 1) != nullptr;
   }
 
-  std::optional<std::string> Pop();
-
   class iterator : private IteratorBase {
    public:
     using iterator_category = std::forward_iterator_tag;
@@ -98,6 +96,11 @@ class StringSet : public DenseSet {
   iterator end() {
     return iterator{};
   }
+
+  // See DenseSet::GetRandomIterator
+  iterator GetRandomMember();
+
+  std::optional<std::string> Pop();
 
   uint32_t Scan(uint32_t, const std::function<void(sds)>&) const;
 
