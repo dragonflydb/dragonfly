@@ -10,6 +10,8 @@
 #include <malloc.h>
 #endif
 
+#include <absl/flags/declare.h>
+#include <absl/flags/internal/flag.h>
 #include <mimalloc.h>
 
 #include "base/logging.h"
@@ -28,6 +30,8 @@
 
 using namespace std;
 using namespace facade;
+
+ABSL_DECLARE_FLAG(float, mem_defrag_page_utilization_threshold);
 
 namespace dfly {
 
@@ -133,6 +137,12 @@ void MemoryCmd::Run(CmdArgList args) {
         "    ADDRESS <address>",
         "        Returns whether <address> is known to be allocated internally by any of the "
         "backing heaps",
+        "DEFRAGMENT [threshold]",
+        "    Tries to free memory by moving allocations around from sparsely used memory pages.",
+        "    If a threshold is supplied, it is used to determine if data will be moved from the "
+        "page.",
+        "    Pages used less than the threshold percentage (default 0.8) are targeted for moving "
+        "out data.",
     };
     auto* rb = static_cast<RedisReplyBuilder*>(builder_);
     return rb->SendSimpleStrArr(help_arr);
@@ -168,9 +178,12 @@ void MemoryCmd::Run(CmdArgList args) {
   }
 
   if (parser.Check("DEFRAGMENT")) {
-    shard_set->pool()->DispatchOnAll([](util::ProactorBase*) {
+    static const float default_threshold =
+        absl::GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
+    const float threshold = parser.NextOrDefault(default_threshold);
+    shard_set->pool()->AwaitFiberOnAll([threshold](util::ProactorBase*) {
       if (auto* shard = EngineShard::tlocal(); shard)
-        shard->ForceDefrag();
+        shard->DoDefrag(threshold);
     });
     return builder_->SendSimpleString("OK");
   }
