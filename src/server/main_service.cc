@@ -2688,6 +2688,8 @@ void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privil
 void Service::OnConnectionClose(facade::ConnectionContext* cntx) {
   ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
   ConnectionState& conn_state = server_cntx->conn_state;
+  VLOG_IF(1, conn_state.replication_info.repl_session_id)
+      << "OnConnectionClose, repl_session_id: " << conn_state.replication_info.repl_session_id;
 
   if (conn_state.subscribe_info) {  // Clean-ups related to PUBSUB
     if (!conn_state.subscribe_info->channels.empty()) {

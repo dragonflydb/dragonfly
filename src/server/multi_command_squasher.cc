@@ -6,6 +6,8 @@
 
 #include <absl/container/inlined_vector.h>
 
+#include "base/cycle_clock.h"
+#include "base/flags.h"
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "facade/dragonfly_connection.h"
@@ -14,6 +16,9 @@
 #include "server/engine_shard_set.h"
 #include "server/transaction.h"
 #include "server/tx_base.h"
+
+ABSL_FLAG(uint32_t, max_busy_squash_usec, 200,
+          "Maximum time in microseconds to execute squashed commands before yielding.");
 
 namespace dfly {
 
@@ -246,7 +251,12 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     fb2::BlockingCounter bc(num_shards);
     DVLOG(1) << "Squashing " << num_shards << " " << tx->DebugId();
 
+    static uint64_t tsc_cycles_limit =
+        base::CycleClock::Frequency() * absl::GetFlag(FLAGS_max_busy_squash_usec) / 1000'000;
     auto cb = [this, bc, rb]() mutable {
+      if (ThisFiber::GetRunningTimeCycles() > tsc_cycles_limit) {
+        ThisFiber::Yield();
+      }
       this->SquashedHopCb(EngineShard::tlocal(), rb->GetRespVersion());
       bc->Dec();
     };
