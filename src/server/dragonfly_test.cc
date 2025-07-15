@@ -591,6 +591,7 @@ TEST_F(DflyEngineTest, ZeroAllocationEviction) {
   }
 
   // Should have evicted some entries with zero-allocation values
+  // but not external (disk storage) entries
   EXPECT_GT(evicted_count, 0) << "Zero-allocation entries should be evicted under memory pressure";
 }
 
