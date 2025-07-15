@@ -1294,11 +1294,20 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
   bool print_bintable = false;
 
   if (parser.Check("SET", &bintable)) {
+    // SET <bintable> [type]
     string raw;
     atomic_bool succeed = absl::Base64Unescape(bintable, &raw);
     if (succeed) {
+      CompactObj::HuffmanDomain domain = CompactObj::HUFF_KEYS;
+      if (parser.HasNext()) {
+        string_view type_str = parser.Next();
+        type = ObjTypeFromString(type_str);
+        if (type != OBJ_STRING) {  // Currently only string type is supported.
+          return builder->SendError(kSyntaxErr);
+        }
+      }
       shard_set->RunBriefInParallel([&](EngineShard* shard) {
-        if (!CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_KEYS, raw)) {
+        if (!CompactObj::InitHuffmanThreadLocal(domain, raw)) {
           succeed = false;
         }
       });

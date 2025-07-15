@@ -219,6 +219,13 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
   return nullopt;
 }
 
+void CommandId::ResetStats(unsigned thread_index) {
+  command_stats_[thread_index] = {0, 0};
+  if (hdr_histogram* h = latency_histogram_; h != nullptr) {
+    hdr_reset(h);
+  }
+}
+
 hdr_histogram* CommandId::LatencyHist() const {
   return latency_histogram_;
 }

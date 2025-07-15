@@ -332,28 +332,25 @@ std::optional<std::string_view> ParseFieldWithAtSign(CmdArgParser* parser) {
   return field;
 }
 
-void ParseLoadFields(CmdArgParser* parser, std::optional<SearchFieldsList>* load_fields) {
+SearchFieldsList ParseLoadOrReturnFields(CmdArgParser* parser, bool is_load) {
   // TODO: Change to num_strings. In Redis strings number is expected. For example: LOAD 3 $.a AS a
+  SearchFieldsList fields;
   size_t num_fields = parser->Next<size_t>();
-  if (!load_fields->has_value()) {
-    load_fields->emplace();
-  }
 
   while (parser->HasNext() && num_fields--) {
     string_view str = parser->Next();
 
-    if (absl::StartsWith(str, "@"sv)) {
+    if (is_load && absl::StartsWith(str, "@"sv)) {
       str.remove_prefix(1);  // remove leading @
     }
 
     StringOrView name = StringOrView::FromString(std::string{str});
-    if (parser->Check("AS")) {
-      load_fields->value().emplace_back(name, true,
-                                        StringOrView::FromString(parser->Next<std::string>()));
-    } else {
-      load_fields->value().emplace_back(name, true);
-    }
+    if (parser->Check("AS"))
+      fields.emplace_back(name, true, StringOrView::FromString(parser->Next<std::string>()));
+    else
+      fields.emplace_back(name, true);
   }
+  return fields;
 }
 
 search::QueryParams ParseQueryParams(CmdArgParser* parser) {
@@ -379,29 +376,15 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
         return CreateSyntaxError("LOAD cannot be applied after RETURN"sv);
       }
 
-      ParseLoadFields(parser, &params.load_fields);
+      params.load_fields = ParseLoadOrReturnFields(parser, true);
     } else if (parser->Check("RETURN")) {
       if (params.load_fields) {
         return CreateSyntaxError("RETURN cannot be applied after LOAD"sv);
       }
-
-      // RETURN {num} [{ident} AS {name}...]
-      /* TODO: Change to num_strings. In Redis strings number is expected. For example: RETURN 3 $.a
-       * AS a */
-      size_t num_fields = parser->Next<size_t>();
-      params.return_fields.emplace();
-      while (parser->HasNext() && params.return_fields->size() < num_fields) {
-        StringOrView name = StringOrView::FromString(parser->Next<std::string>());
-
-        if (parser->Check("AS")) {
-          params.return_fields->emplace_back(std::move(name), true,
-                                             StringOrView::FromString(parser->Next<std::string>()));
-        } else {
-          params.return_fields->emplace_back(std::move(name), true);
-        }
-      }
+      if (!params.return_fields)  // after NOCONTENT it's silently ignored
+        params.return_fields = ParseLoadOrReturnFields(parser, false);
     } else if (parser->Check("NOCONTENT")) {  // NOCONTENT
-      params.no_content = true;
+      params.return_fields.emplace();
     } else if (parser->Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
       params.query_params = ParseQueryParams(parser);
     } else if (parser->Check("SORTBY")) {
@@ -464,7 +447,12 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
   // Parse LOAD count field [field ...]
   // LOAD options are at the beginning of the query, so we need to parse them first
   while (parser->HasNext() && parser->Check("LOAD")) {
-    ParseLoadFields(parser, &params.load_fields);
+    auto fields = ParseLoadOrReturnFields(parser, true);
+    if (!params.load_fields.has_value())
+      params.load_fields = std::move(fields);
+    else
+      params.load_fields->insert(params.load_fields->end(), make_move_iterator(fields.begin()),
+                                 make_move_iterator(fields.end()));
   }
 
   while (parser->HasNext()) {
@@ -1235,7 +1223,7 @@ void SearchFamily::Register(CommandRegistry* registry) {
 
   // Disable journaling, because no-key-transactional enables it by default
   const uint32_t kReadOnlyMask =
-      CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL;
+      CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL | CO::IDEMPOTENT;
 
   registry->StartFamily();
   *registry << CI{"FT.CREATE", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(

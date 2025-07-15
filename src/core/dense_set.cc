@@ -12,6 +12,8 @@
 #include <type_traits>
 #include <vector>
 
+#include "absl/random/distributions.h"
+#include "absl/random/random.h"
 #include "base/logging.h"
 
 extern "C" {
@@ -670,22 +672,38 @@ void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
   ObjDelete(obj, false);
 }
 
+DenseSet::ChainVectorIterator DenseSet::GetRandomChain() {
+  size_t offset = absl::Uniform(absl::BitGen{}, 0u, entries_.size());
+  for (size_t i = offset; i < entries_.size() + offset; i++) {
+    auto it = entries_.begin() + (i % entries_.size());
+    ExpireIfNeeded(nullptr, &*it);
+    if (!it->IsEmpty())
+      return it;
+  }
+  return entries_.end();
+}
+
+DenseSet::IteratorBase DenseSet::GetRandomIterator() {
+  ChainVectorIterator chain_it = GetRandomChain();
+  if (chain_it == entries_.end())
+    return IteratorBase{};
+
+  DensePtr* ptr = &*chain_it;
+  absl::BitGen bg{};
+  while (ptr->IsLink() && absl::Bernoulli(bg, 0.5)) {
+    DensePtr* next = ptr->Next();
+    if (ExpireIfNeeded(ptr, next))  // stop if we break the chain with expiration
+      break;
+    ptr = next;
+  }
+
+  return IteratorBase{(DenseSet*)this, chain_it, ptr};
+}
+
 void* DenseSet::PopInternal() {
-  ChainVectorIterator bucket_iter = entries_.begin();
-
-  // find the first non-empty chain
-  do {
-    while (bucket_iter != entries_.end() && bucket_iter->IsEmpty()) {
-      ++bucket_iter;
-    }
-
-    // empty set
-    if (bucket_iter == entries_.end()) {
-      return nullptr;
-    }
-
-    ExpireIfNeeded(nullptr, &(*bucket_iter));
-  } while (bucket_iter->IsEmpty());
+  auto bucket_iter = GetRandomChain();  // Find first non empty chain
+  if (bucket_iter == entries_.end())
+    return nullptr;
 
   if (bucket_iter->IsObject()) {
     --num_used_buckets_;

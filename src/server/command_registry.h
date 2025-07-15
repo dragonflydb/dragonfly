@@ -170,9 +170,7 @@ class CommandId : public facade::CommandId {
     return (last_key_ != first_key_) || (opt_mask_ & CO::VARIADIC_KEYS);
   }
 
-  void ResetStats(unsigned thread_index) {
-    command_stats_[thread_index] = {0, 0};
-  }
+  void ResetStats(unsigned thread_index);
 
   CmdCallStats GetStats(unsigned thread_index) const {
     return command_stats_[thread_index];

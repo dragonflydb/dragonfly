@@ -20,8 +20,7 @@ using namespace std;
 constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
-  // To break this code deliberately if we add/remove a field to this struct.
-  static_assert(kSizeConnStats == 136u);
+  static_assert(kSizeConnStats == 160u);
 
   ADD(read_buf_capacity);
   ADD(dispatch_queue_entries);
@@ -41,6 +40,9 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(num_migrations);
   ADD(num_recv_provided_calls);
   ADD(pipeline_throttle_count);
+  ADD(tls_accept_disconnects);
+  ADD(handshakes_started);
+  ADD(handshakes_completed);
 
   return *this;
 }

@@ -423,6 +423,9 @@ class DflyInstanceFactory:
         if version > 1.27:
             args.setdefault("omit_basic_usage")
 
+        if version > 1.31:
+            args.setdefault("latency_tracking")
+
         args.setdefault("log_dir", self.params.log_dir)
 
         if version >= 1.21 and "serialization_max_chunk_size" not in args:

@@ -112,6 +112,12 @@ struct ConnectionStats {
   uint64_t num_migrations = 0;
   uint64_t num_recv_provided_calls = 0;
 
+  // Number of times the tls connection was closed by the time we started reading from it.
+  uint64_t tls_accept_disconnects = 0;  // number of TLS socket disconnects during the handshake
+                                        //
+  uint64_t handshakes_started = 0;
+  uint64_t handshakes_completed = 0;
+
   // Number of events when the pipeline queue was over the limit and was throttled.
   uint64_t pipeline_throttle_count = 0;
 
