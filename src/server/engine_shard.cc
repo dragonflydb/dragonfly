@@ -384,7 +384,7 @@ bool EngineShard::DefragTaskState::CheckRequired() {
   return false;
 }
 
-bool EngineShard::DoDefrag(const float threshold) {
+bool EngineShard::DoDefrag(CollectPageStats collect_page_stats, const float threshold) {
   // --------------------------------------------------------------------------
   // NOTE: This task is running with exclusive access to the shard.
   // i.e. - Since we are using shared nothing access here, and all access
@@ -414,7 +414,7 @@ bool EngineShard::DoDefrag(const float threshold) {
   unsigned traverses_count = 0;
   uint64_t attempts = 0;
 
-  PageUsage page_usage{CollectPageStats::YES, threshold};
+  PageUsage page_usage{collect_page_stats, threshold};
   do {
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       // for each value check whether we should move it because it
@@ -465,7 +465,7 @@ uint32_t EngineShard::DefragTask() {
   if (defrag_state_.CheckRequired()) {
     VLOG(2) << shard_id_ << ": need to run defrag memory cursor state: " << defrag_state_.cursor;
     static const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
-    if (DoDefrag(threshold)) {
+    if (DoDefrag(CollectPageStats::NO, threshold)) {
       // we didn't finish the scan
       return util::ProactorBase::kOnIdleMaxLevel;
     }
