@@ -348,9 +348,8 @@ void EngineShard::DefragTaskState::ResetScanState() {
 // 3. in case the above is OK, make sure that we have a "gap" between usage and commited memory
 // (control by mem_defrag_waste_threshold flag)
 bool EngineShard::DefragTaskState::CheckRequired() {
-  if (is_force_defrag || cursor > kCursorDoneState) {
-    is_force_defrag = false;
-    VLOG(2) << "cursor: " << cursor << " and is_force_defrag " << is_force_defrag;
+  if (cursor > kCursorDoneState) {
+    VLOG(2) << "cursor: " << cursor;
     return true;
   }
 
@@ -384,11 +383,7 @@ bool EngineShard::DefragTaskState::CheckRequired() {
   return false;
 }
 
-void EngineShard::ForceDefrag() {
-  defrag_state_.is_force_defrag = true;
-}
-
-bool EngineShard::DoDefrag() {
+bool EngineShard::DoDefrag(const float threshold) {
   // --------------------------------------------------------------------------
   // NOTE: This task is running with exclusive access to the shard.
   // i.e. - Since we are using shared nothing access here, and all access
@@ -397,7 +392,6 @@ bool EngineShard::DoDefrag() {
   // --------------------------------------------------------------------------
 
   constexpr size_t kMaxTraverses = 40;
-  const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
 
   // TODO: enable tiered storage on non-default db slice
   DbSlice& slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
@@ -468,7 +462,8 @@ uint32_t EngineShard::DefragTask() {
 
   if (defrag_state_.CheckRequired()) {
     VLOG(2) << shard_id_ << ": need to run defrag memory cursor state: " << defrag_state_.cursor;
-    if (DoDefrag()) {
+    static const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
+    if (DoDefrag(threshold)) {
       // we didn't finish the scan
       return util::ProactorBase::kOnIdleMaxLevel;
     }
