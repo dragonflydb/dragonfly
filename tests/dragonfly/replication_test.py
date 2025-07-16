@@ -746,10 +746,23 @@ async def test_rewrites(df_factory):
             [r"XTRIM k-stream MINID 0", r"SREM k-one-element-set value[12]"],
         )
 
-        # check BZMPOP turns into ZMPOP command
+        # check BZMPOP turns into ZPOPMAX and ZPOPMIN command
         await c_master.zadd("key", {"a": 1, "b": 2, "c": 3})
         await skip_cmd()
-        await check("BZMPOP 0 3 key3 key2 key MAX COUNT 3", r"ZMPOP 1 key MAX COUNT 3")
+        await check("BZMPOP 0 3 key3 key2 key MAX COUNT 3", r"ZPOPMAX key 3")
+
+        await c_master.zadd("key", {"a": 1, "b": 2, "c": 3})
+        await skip_cmd()
+        await check("BZMPOP 0 3 key3 key2 key MIN", r"ZPOPMIN key 1")
+
+        # Check ZMPOP turns into ZPOPMAX and ZPOPMIN commands
+        await c_master.zadd("key", {"a": 1, "b": 2, "c": 3})
+        await skip_cmd()
+        await check("ZMPOP 3 key3 key2 key MIN COUNT 3", r"ZPOPMIN key 3")
+
+        await c_master.zadd("key", {"a": 1, "b": 2, "c": 3})
+        await skip_cmd()
+        await check("ZMPOP 3 key3 key2 key MAX", r"ZPOPMAX key 1")
 
 
 """

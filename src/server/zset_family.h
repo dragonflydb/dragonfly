@@ -7,7 +7,6 @@
 #include <string_view>
 #include <variant>
 
-#include "base/integral_types.h"
 #include "facade/op_status.h"
 #include "server/common.h"
 
@@ -65,13 +64,6 @@ class ZSetFamily {
     unsigned flags = 0;  // mask of ZADD_IN_ macros.
     bool ch = false;     // Corresponds to CH option.
     bool override = false;
-  };
-
-  struct ValidateZMPopResult {
-    uint32* num_keys;
-    bool* is_max;
-    int* pop_count;
-    float* timeout;
   };
 
   using ScoredMember = std::pair<std::string, double>;

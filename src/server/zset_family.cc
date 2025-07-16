@@ -48,6 +48,13 @@ using ScoredArray = ZSetFamily::ScoredArray;
 using ScoredMemberView = ZSetFamily::ScoredMemberView;
 using ScoredMemberSpan = ZSetFamily::ScoredMemberSpan;
 
+struct ValidateZMPopResult {
+  uint32_t num_keys;
+  bool is_max;
+  int pop_count;
+  float timeout;
+};
+
 inline zrangespec GetZrangeSpec(bool reverse, const ZSetFamily::ScoreInterval& si) {
   auto interval = si;
   if (reverse)
@@ -1140,6 +1147,17 @@ auto OpPopCount(const ZSetFamily::ZRangeSpec& range_spec, const OpArgs& op_args,
     op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it);
   }
 
+  // Checking if command conatins flag with no autojournal
+  // and we are assuming auto journaling is not re-enabled.
+  if ((op_args.tx->GetCId()->opt_mask() & CO::NO_AUTOJOURNAL) && op_args.shard->journal()) {
+    auto reverse = range_spec.params.reverse;
+    // Checking if interval is actually TopNScored or something else before proceeding.
+    DCHECK(std::holds_alternative<ZSetFamily::TopNScored>(range_spec.interval));
+    auto count = std::get<ZSetFamily::TopNScored>(range_spec.interval);
+    string command = (reverse ? "ZPOPMAX" : "ZPOPMIN");
+    RecordJournal(op_args, command, ArgSlice{key, absl::StrCat(count)}, 1);
+  }
+
   return iv.PopResult();
 }
 
@@ -1576,17 +1594,6 @@ OpResult<ScoredArray> ZPopMinMaxInternal(std::string_view key, FilterShards shou
   auto cb = [&](Transaction* t, EngineShard* shard) {
     if (!key_shard.has_value() || *key_shard == shard->shard_id()) {
       result = OpPopCount(range_spec, t->GetOpArgs(shard), key);
-      auto cid = t->GetCId();
-      // if command conatins no_autojournal and it's BZMPOP then we will write to journal manually.
-      if ((result == OpStatus::OK) && (cid->opt_mask() & CO::NO_AUTOJOURNAL) &&
-          (cid->name() == "BZMPOP")) {
-        OpArgs op_args = t->GetOpArgs(shard);
-        if (op_args.shard->journal()) {
-          string is_max = (reverse ? "MAX" : "MIN");
-          RecordJournal(op_args, "ZMPOP", ArgSlice{"1", key, is_max, "COUNT", absl::StrCat(count)},
-                        1);
-        }
-      }
     }
     return OpStatus::OK;
   };
@@ -1832,48 +1839,48 @@ std::optional<std::string_view> GetFirstNonEmptyKeyFound(EngineShard* shard, Tra
 
 // Validates the ZMPop and BZMPop command arguments and extracts the values to the output params.
 // If the arguments are invalid sends the appropiate error to builder and returns false.
-bool ValidateZMPopCommand(CmdArgList args, ZSetFamily::ValidateZMPopResult* result,
-                          SinkReplyBuilder* builder, bool is_blocking) {
+bool ValidateZMPopCommand(CmdArgList args, bool is_blocking, SinkReplyBuilder* builder,
+                          ValidateZMPopResult* result) {
   CmdArgParser parser{args};
 
   if (is_blocking) {
-    if (!absl::SimpleAtof(parser.Next(), result->timeout)) {
+    if (!absl::SimpleAtof(parser.Next(), &(result->timeout))) {
       builder->SendError("timeout is not a float or out of range");
       return false;
     }
-    if (*(result->timeout) < 0) {
+    if (result->timeout < 0) {
       builder->SendError("timeout is negative");
       return false;
     }
   }
 
-  if (!SimpleAtoi(parser.Next(), result->num_keys)) {
+  if (!SimpleAtoi(parser.Next(), &(result->num_keys))) {
     builder->SendError(kUintErr);
     return false;
   }
 
-  if (*(result->num_keys) <= 0 || !parser.HasAtLeast(*(result->num_keys) + 1)) {
+  if (result->num_keys <= 0 || !parser.HasAtLeast(result->num_keys + 1)) {
     // We should have at least num_keys keys + a MIN/MAX arg.
     builder->SendError(kSyntaxErr);
     return false;
   }
   // Skip over the keys themselves.
-  parser.Skip(*(result->num_keys));
+  parser.Skip(result->num_keys);
 
   // We know we have at least one more arg (we checked above).
   if (parser.Check("MAX")) {
-    *(result->is_max) = true;
+    result->is_max = true;
   } else if (parser.Check("MIN")) {
-    *(result->is_max) = false;
+    result->is_max = false;
   } else {
     builder->SendError(kSyntaxErr);
     return false;
   }
 
-  *(result->pop_count) = 1;
+  result->pop_count = 1;
   // Check if we have additional COUNT argument.
   if (parser.HasNext()) {
-    if (!parser.Check("COUNT", result->pop_count)) {
+    if (!parser.Check("COUNT", &(result->pop_count))) {
       builder->SendError(kSyntaxErr);
       return false;
     }
@@ -2425,16 +2432,8 @@ void ZSetFamily::ZInterCard(CmdArgList args, const CommandContext& cmd_cntx) {
 
 // Generic function for ZMPop and BZMPop commands
 void ZMPopGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_blocking) {
-  uint32 num_keys;
-  bool is_max;
-  int pop_count;
-  float timeout;
-  ZSetFamily::ValidateZMPopResult result;
-  result.num_keys = &num_keys;
-  result.is_max = &is_max;
-  result.pop_count = &pop_count;
-  result.timeout = &timeout;
-  if (!ValidateZMPopCommand(args, &result, cmd_cntx.rb, is_blocking)) {
+  ValidateZMPopResult zmpopArgs;
+  if (!ValidateZMPopCommand(args, is_blocking, cmd_cntx.rb, &zmpopArgs)) {
     return;
   }
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
@@ -2457,7 +2456,7 @@ void ZMPopGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_block
   // Keep all the keys found (first only for each shard) in a set for fast lookups.
   absl::flat_hash_set<std::string_view> first_found_keys_for_shard;
   // We can have at most one result from each shard.
-  first_found_keys_for_shard.reserve(std::min(shard_set->size(), num_keys));
+  first_found_keys_for_shard.reserve(std::min(shard_set->size(), zmpopArgs.num_keys));
   for (const auto& key : first_found_key_per_shard_vec) {
     if (!key.has_value()) {
       continue;
@@ -2469,7 +2468,7 @@ void ZMPopGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_block
   // pop elements from it.
   std::optional<std::string_view> key_to_pop = std::nullopt;
   // BZMPOP have 1 extra argument as compared to ZMPOP hence adding 1 is is_blocking is true
-  ArgRange arg_keys(args.subspan(1 + is_blocking, num_keys));
+  ArgRange arg_keys(args.subspan(1 + is_blocking, zmpopArgs.num_keys));
   // Find the first arg_key which exists in any shard and is not empty.
   for (std::string_view key : arg_keys) {
     if (first_found_keys_for_shard.contains(key)) {
@@ -2490,7 +2489,7 @@ void ZMPopGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_block
     auto* ns = &trans->GetNamespace();
 
     auto limit_tp = Transaction::time_point::max();
-    auto limit_ms = (unsigned)(timeout * 1000);
+    auto limit_ms = (unsigned)(zmpopArgs.timeout * 1000);
     if (limit_ms > 0) {
       using namespace std::chrono;
       limit_tp = steady_clock::now() + milliseconds(limit_ms);
@@ -2522,8 +2521,8 @@ void ZMPopGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_block
   DCHECK(key_to_pop.has_value());
 
   // Pop elements from relevant set.
-  OpResult<ScoredArray> pop_result =
-      ZPopMinMaxInternal(*key_to_pop, FilterShards::YES, pop_count, is_max, cmd_cntx.tx);
+  OpResult<ScoredArray> pop_result = ZPopMinMaxInternal(
+      *key_to_pop, FilterShards::YES, zmpopArgs.pop_count, zmpopArgs.is_max, cmd_cntx.tx);
 
   if (pop_result.status() == OpStatus::WRONG_TYPE) {
     return response_builder->SendError(kWrongTypeErr);
@@ -2858,7 +2857,9 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"ZINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZInterCard}.HFUNC(
              ZInterCard)
       << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, acl::kZLexCount}.HFUNC(ZLexCount)
-      << CI{"ZMPOP", CO::SLOW | CO::WRITE | CO::VARIADIC_KEYS, -4, 2, 2, acl::kZMPop}.HFUNC(ZMPop)
+      << CI{"ZMPOP",    CO::SLOW | CO::WRITE | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2,
+            acl::kZMPop}
+             .HFUNC(ZMPop)
       << CI{"BZMPOP", CO::SLOW | CO::WRITE | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL,
             -5,       3,
             3,        acl::kBZMPop}
