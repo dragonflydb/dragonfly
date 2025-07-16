@@ -296,11 +296,33 @@ template <typename T> void Send(const JsonCallbackResult<T>& result, RedisReplyB
   if (result.IsV1()) {
     /* The specified path was restricted (JSON legacy mode), then the result consists only of a
      * single value */
+    // Special handling for JSON.TYPE in RESP3
+    if constexpr (std::is_same_v<T, std::string>) {
+      if (rb->IsResp3()) {
+        // For RESP3, wrap single value in array
+        rb->StartArray(1);
+        rb->SendBulkString(result.AsV1());
+        return;
+      }
+    }
     Send(result.AsV1(), rb);
   } else {
     /* The specified path was enhanced (starts with '$'), then the result is an array of multiple
      * values */
     const auto& arr = result.AsV2();
+
+    // Special handling for JSON.TYPE in RESP3
+    if constexpr (std::is_same_v<T, std::string>) {
+      if (rb->IsResp3()) {
+        // For RESP3, send as proper array of arrays for enhanced paths
+        rb->StartArray(arr.size());
+        for (const auto& item : arr) {
+          rb->StartArray(1);
+          rb->SendBulkString(item);
+        }
+        return;
+      }
+    }
     Send(arr.begin(), arr.end(), rb);
   }
 }
@@ -309,6 +331,44 @@ template <typename T> void Send(const OpResult<T>& result, RedisReplyBuilder* rb
   RedisReplyBuilder::ReplyScope scope{rb};
   if (result) {
     Send(result.value(), rb);
+  } else {
+    rb->SendError(result.status());
+  }
+}
+
+// Specialization for JSON numeric operations that return string results
+template <> void Send(const OpResult<string>& result, RedisReplyBuilder* rb) {
+  RedisReplyBuilder::ReplyScope scope{rb};
+  if (result) {
+    const string& json_str = result.value();
+
+    // Check if this is a JSON array result from numeric operations
+    if (!json_str.empty() && json_str[0] == '[' && json_str.back() == ']' && rb->IsResp3()) {
+      // For RESP3, parse JSON array and send as proper array with numeric types
+      std::optional<JsonType> parsed_json =
+          JsonFromString(json_str, PMR_NS::get_default_resource());
+      if (parsed_json && parsed_json->is_array()) {
+        const auto& arr = parsed_json->array_range();
+        size_t arr_size = std::distance(arr.begin(), arr.end());
+        rb->StartArray(arr_size);
+        for (const auto& item : arr) {
+          if (item.is_int64()) {
+            rb->SendLong(item.as<int64_t>());
+          } else if (item.is_uint64()) {
+            rb->SendLong(static_cast<int64_t>(item.as<uint64_t>()));
+          } else if (item.is_double()) {
+            rb->SendDouble(item.as<double>());
+          } else {
+            // Fallback for other types
+            rb->SendBulkString(item.as_string());
+          }
+        }
+        return;
+      }
+    }
+
+    // Default behavior
+    Send(json_str, rb);
   } else {
     rb->SendError(result.status());
   }
