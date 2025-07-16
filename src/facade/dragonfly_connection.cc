@@ -1524,6 +1524,8 @@ void Connection::SquashPipeline() {
   }
 
   cc_->async_dispatch = true;
+  stats_->pipeline_dispatch_calls++;
+  stats_->pipeline_dispatch_commands += squash_cmds.size();
 
   size_t dispatched =
       service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), reply_builder_.get(), cc_.get());

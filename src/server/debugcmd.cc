@@ -24,7 +24,6 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "core/compact_object.h"
 #include "core/huff_coder.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
@@ -1132,9 +1131,10 @@ void DebugCmd::Stacktrace(facade::SinkReplyBuilder* builder) {
 void DebugCmd::Shards(facade::SinkReplyBuilder* builder) {
   struct ShardInfo {
     size_t used_memory = 0;
-    size_t key_count = 0;
-    size_t expire_count = 0;
-    size_t key_reads = 0;
+    uint64_t key_count = 0;
+    uint64_t prime_capacity = 0;
+    uint64_t expire_count = 0;
+    uint64_t key_reads = 0;
   };
 
   vector<ShardInfo> infos(shard_set->size());
@@ -1146,6 +1146,7 @@ void DebugCmd::Shards(facade::SinkReplyBuilder* builder) {
     stats.used_memory = shard->UsedMemory();
     for (const auto& db_stats : slice_stats.db_stats) {
       stats.key_count += db_stats.key_count;
+      stats.prime_capacity += db_stats.prime_capacity;
       stats.expire_count += db_stats.expire_count;
     }
     stats.key_reads = slice_stats.events.hits + slice_stats.events.misses;
@@ -1172,6 +1173,9 @@ void DebugCmd::Shards(facade::SinkReplyBuilder* builder) {
     ADD_STAT(i, key_count);
     ADD_STAT(i, expire_count);
     ADD_STAT(i, key_reads);
+    absl::StrAppend(&out, "shard", i,
+                    "_prime_utilization: ", double(infos[i].key_count) / infos[i].prime_capacity,
+                    "\n");
   }
 
   MAXMIN_STAT(used_memory);

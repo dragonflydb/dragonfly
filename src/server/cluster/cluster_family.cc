@@ -667,13 +667,18 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, SinkReplyBuilder* bu
     rb->StartArray(9);
     rb->SendLong(slot_data.first);
     rb->SendBulkString("key_count");
-    rb->SendLong(static_cast<long>(slot_data.second.key_count));
+    rb->SendLong(slot_data.second.key_count);
     rb->SendBulkString("total_reads");
-    rb->SendLong(static_cast<long>(slot_data.second.total_reads));
+    rb->SendLong(slot_data.second.total_reads);
     rb->SendBulkString("total_writes");
-    rb->SendLong(static_cast<long>(slot_data.second.total_writes));
+    rb->SendLong(slot_data.second.total_writes);
+
+    // Account for both the values and the table space of the entries.
+    // Each entry is comprised from CompactObj for key and CompactObj for value.
+    // Sometimes the values are very small and table space becomes significant.
     rb->SendBulkString("memory_bytes");
-    rb->SendLong(static_cast<long>(slot_data.second.memory_bytes));
+    rb->SendLong(slot_data.second.memory_bytes +
+                 slot_data.second.key_count * sizeof(CompactObj) * 2);
   }
 }
 
