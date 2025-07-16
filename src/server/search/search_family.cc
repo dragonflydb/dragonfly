@@ -332,23 +332,16 @@ std::optional<std::string_view> ParseFieldWithAtSign(CmdArgParser* parser) {
   return field;
 }
 
-SearchFieldsList ParseLoadOrReturnFields(CmdArgParser* parser, bool is_load) {
+std::vector<FieldReference> ParseLoadOrReturnFields(CmdArgParser* parser, bool is_load) {
   // TODO: Change to num_strings. In Redis strings number is expected. For example: LOAD 3 $.a AS a
-  SearchFieldsList fields;
+  std::vector<FieldReference> fields;
   size_t num_fields = parser->Next<size_t>();
 
   while (parser->HasNext() && num_fields--) {
-    string_view str = parser->Next();
-
-    if (is_load && absl::StartsWith(str, "@"sv)) {
-      str.remove_prefix(1);  // remove leading @
-    }
-
-    StringOrView name = StringOrView::FromString(std::string{str});
-    if (parser->Check("AS"))
-      fields.emplace_back(name, true, StringOrView::FromString(parser->Next<std::string>()));
-    else
-      fields.emplace_back(name, true);
+    string_view field = is_load ? ParseField(parser) : parser->Next();
+    string_view alias;
+    parser->Check("AS", &alias);
+    fields.emplace_back(field, alias);
   }
   return fields;
 }
@@ -388,10 +381,9 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
     } else if (parser->Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
       params.query_params = ParseQueryParams(parser);
     } else if (parser->Check("SORTBY")) {
-      auto parsed_field = ParseField(parser);
-      StringOrView field = StringOrView::FromString(std::string{parsed_field});
-      params.sort_option = SearchParams::SortOption{
-          SearchField{std::move(field)}, parser->Check("DESC") ? SortOrder::DESC : SortOrder::ASC};
+      FieldReference field{ParseField(parser)};
+      params.sort_option =
+          SearchParams::SortOption{field, parser->Check("DESC") ? SortOrder::DESC : SortOrder::ASC};
     } else {
       // Unsupported parameters are ignored for now
       parser->Skip(1);
@@ -1070,7 +1062,7 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
   if (params->load_fields) {
     load_fields.reserve(params->load_fields->size());
     for (const auto& field : params->load_fields.value()) {
-      load_fields.push_back(field.GetShortName());
+      load_fields.push_back(field.OutputName());
     }
   }
 
