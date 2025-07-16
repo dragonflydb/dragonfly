@@ -11,7 +11,6 @@
 #include "base/logging.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
-#include "gmock/gmock.h"
 #include "server/command_registry.h"
 #include "server/test_utils.h"
 
