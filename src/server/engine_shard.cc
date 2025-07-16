@@ -6,8 +6,10 @@
 
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_join.h>
 
 #include "base/flags.h"
+#include "core/page_usage_stats.h"
 #include "io/proc_reader.h"
 
 extern "C" {
@@ -388,7 +390,7 @@ void EngineShard::ForceDefrag() {
   defrag_state_.is_force_defrag = true;
 }
 
-bool EngineShard::DoDefrag() {
+bool EngineShard::DoDefrag(float threshold, CollectPageStats collect_stats) {
   // --------------------------------------------------------------------------
   // NOTE: This task is running with exclusive access to the shard.
   // i.e. - Since we are using shared nothing access here, and all access
@@ -397,7 +399,9 @@ bool EngineShard::DoDefrag() {
   // --------------------------------------------------------------------------
 
   constexpr size_t kMaxTraverses = 40;
-  const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
+  if (threshold == 0.0) {
+    threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
+  }
 
   // TODO: enable tiered storage on non-default db slice
   DbSlice& slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
@@ -419,11 +423,12 @@ bool EngineShard::DoDefrag() {
   unsigned traverses_count = 0;
   uint64_t attempts = 0;
 
+  PageUsage page_usage{collect_stats, threshold};
   do {
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       // for each value check whether we should move it because it
       // seats on underutilized page of memory, and if so, do it.
-      bool did = it->second.DefragIfNeeded(threshold);
+      bool did = it->second.DefragIfNeeded(page_usage);
       attempts++;
       if (did) {
         reallocations++;
@@ -445,6 +450,29 @@ bool EngineShard::DoDefrag() {
             << " but no location for defrag were found";
   }
 
+  // const auto stats = page_usage.Stats();
+  // LOG(WARNING) << " page stats for threshold: " << threshold;
+  // for (const auto& stat : stats) {
+  //   if (stat.is_full || stat.should_realloc || stat.is_malloc_page) {
+  //     continue;
+  //   }
+  //   LOG(WARNING) << "address: " << stat.page_address << " b-sz " << stat.block_size
+  //                << " capacity B " << stat.capacity << " used B " << stat.used << " reserved B "
+  //                << stat.reserved << " full? " << stat.is_full << " malloc? " <<
+  //                stat.is_malloc_page
+  //                << " realloc? " << stat.should_realloc;
+  // }
+
+  const PageScanStats& summary = page_usage.Summary();
+  LOG(WARNING) << "total pages scanned: " << summary.pages_scanned;
+  LOG(WARNING) << "free pages which were not considered for realloc: "
+               << summary.pages_not_considered_for_realloc;
+  LOG(WARNING) << "unique page sizes: {" << absl::StrJoin(summary.page_sizes, ", ") << "}";
+  for (const auto& [size, stat] : summary.data_for_page_not_realloc) {
+    LOG(WARNING) << "page size: " << size << ", address: " << stat.page_address << ", block-size "
+                 << stat.block_size << ", capacity-blocks " << stat.capacity << ", used-blocks "
+                 << stat.used << ", reserved-blocks " << stat.reserved;
+  }
   stats_.defrag_realloc_total += reallocations;
   stats_.defrag_task_invocation_total++;
   stats_.defrag_attempt_total += attempts;

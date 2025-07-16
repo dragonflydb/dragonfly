@@ -6,6 +6,7 @@
 
 #include "core/intent_lock.h"
 #include "core/mi_memory_resource.h"
+#include "core/page_usage_stats.h"
 #include "core/task_queue.h"
 #include "core/tx_queue.h"
 #include "server/common.h"
@@ -203,6 +204,12 @@ class EngineShard {
 
   void FinalizeMulti(Transaction* tx);
 
+  // scan the shard with the cursor and apply
+  // de-fragmentation option for entries. This function will return the new cursor at the end of the
+  // scan This function is called from context of StartDefragTask
+  // return true if we did not complete the shard scan
+  bool DoDefrag(float threshold = 0.0, CollectPageStats collect_stats = CollectPageStats::YES);
+
  private:
   struct DefragTaskState {
     size_t dbid = 0u;
@@ -242,12 +249,6 @@ class EngineShard {
   // context of the controlling thread will access this shard!
   // --------------------------------------------------------------------------
   uint32_t DefragTask();
-
-  // scan the shard with the cursor and apply
-  // de-fragmentation option for entries. This function will return the new cursor at the end of the
-  // scan This function is called from context of StartDefragTask
-  // return true if we did not complete the shard scan
-  bool DoDefrag();
 
   TaskQueue queue_, queue2_;
 
