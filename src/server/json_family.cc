@@ -296,33 +296,12 @@ template <typename T> void Send(const JsonCallbackResult<T>& result, RedisReplyB
   if (result.IsV1()) {
     /* The specified path was restricted (JSON legacy mode), then the result consists only of a
      * single value */
-    // Special handling for JSON.TYPE in RESP3
-    if constexpr (std::is_same_v<T, std::string>) {
-      if (rb->IsResp3()) {
-        // For RESP3, wrap single value in array
-        rb->StartArray(1);
-        rb->SendBulkString(result.AsV1());
-        return;
-      }
-    }
     Send(result.AsV1(), rb);
   } else {
     /* The specified path was enhanced (starts with '$'), then the result is an array of multiple
      * values */
     const auto& arr = result.AsV2();
 
-    // Special handling for JSON.TYPE in RESP3
-    if constexpr (std::is_same_v<T, std::string>) {
-      if (rb->IsResp3()) {
-        // For RESP3, send as proper array of arrays for enhanced paths
-        rb->StartArray(arr.size());
-        for (const auto& item : arr) {
-          rb->StartArray(1);
-          rb->SendBulkString(item);
-        }
-        return;
-      }
-    }
     Send(arr.begin(), arr.end(), rb);
   }
 }
@@ -2088,7 +2067,49 @@ void JsonFamily::Type(CmdArgList args, const CommandContext& cmd_cntx) {
 
   auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+
+  // Handle RESP3 formatting directly in the function
+  if (!result) {
+    rb->SendError(result.status());
+    return;
+  }
+
+  const auto& callback_result = result.value();
+
+  if (callback_result.ShouldSendNil()) {
+    rb->SendNull();
+    return;
+  }
+
+  if (callback_result.ShouldSendWrongType()) {
+    rb->SendError(OpStatus::WRONG_JSON_TYPE);
+    return;
+  }
+
+  if (callback_result.IsV1()) {
+    // Legacy path (.) - single value
+    if (rb->IsResp3()) {
+      rb->StartArray(1);
+      rb->SendBulkString(callback_result.AsV1());
+    } else {
+      rb->SendBulkString(callback_result.AsV1());
+    }
+  } else {
+    // Enhanced path ($) - array of values
+    const auto& arr = callback_result.AsV2();
+    if (rb->IsResp3()) {
+      rb->StartArray(arr.size());
+      for (const auto& item : arr) {
+        rb->StartArray(1);
+        rb->SendBulkString(item);
+      }
+    } else {
+      rb->StartArray(arr.size());
+      for (const auto& item : arr) {
+        rb->SendBulkString(item);
+      }
+    }
+  }
 }
 
 void JsonFamily::ArrLen(CmdArgList args, const CommandContext& cmd_cntx) {
