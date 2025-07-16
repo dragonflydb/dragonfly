@@ -337,7 +337,7 @@ template <typename T> void Send(const OpResult<T>& result, RedisReplyBuilder* rb
 }
 
 // Specialization for JSON numeric operations that return string results
-template <> void Send(const OpResult<string>& result, RedisReplyBuilder* rb) {
+void SendNumericData(const OpResult<string>& result, RedisReplyBuilder* rb) {
   RedisReplyBuilder::ReplyScope scope{rb};
   if (result) {
     const string& json_str = result.value();
@@ -2039,7 +2039,7 @@ void JsonFamily::NumIncrBy(CmdArgList args, const CommandContext& cmd_cntx) {
 
   OpResult<string> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  reply_generic::SendNumericData(result, rb);
 }
 
 void JsonFamily::NumMultBy(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2056,7 +2056,7 @@ void JsonFamily::NumMultBy(CmdArgList args, const CommandContext& cmd_cntx) {
 
   OpResult<string> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  reply_generic::SendNumericData(result, rb);
 }
 
 void JsonFamily::Toggle(CmdArgList args, const CommandContext& cmd_cntx) {
