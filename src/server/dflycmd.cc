@@ -290,6 +290,7 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     cntx->conn()->SetName(absl::StrCat("repl_flow_", sync_id));
     cntx->conn_state.replication_info.repl_session_id = sync_id;
     cntx->conn_state.replication_info.repl_flow_id = flow_id;
+    cntx->replica_conn = true;
 
     absl::InsecureBitGen gen;
     eof_token = GetRandomHex(gen, 40);
