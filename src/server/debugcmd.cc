@@ -261,6 +261,28 @@ void DoBuildObjHist(EngineShard* shard, ConnectionContext* cntx, ObjHistMap* obj
   }
 }
 
+struct SegmentInfo {
+  base::Histogram hist;
+};
+
+void DoSegmentHist(EngineShard* shard, ConnectionContext* cntx, SegmentInfo* info) {
+  auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
+  DbTable* dbt = db_slice.GetDBTable(cntx->db_index());
+  if (dbt == nullptr)
+    return;
+
+  unsigned steps = 0;
+  auto& prime = dbt->prime;
+  for (size_t i = 0; i < prime.GetSegmentCount(); i = prime.NextSeg(i)) {
+    const auto* segment = prime.GetSegment(i);
+
+    info->hist.Add(segment->SlowSize());
+    if (++steps % 2000 == 0) {
+      ThisFiber::Yield();
+    }
+  }
+}
+
 struct HufHist {
   static constexpr unsigned kMaxSymbol = 255;
   array<unsigned, kMaxSymbol + 1> hist;  // histogram of symbols.
@@ -608,6 +630,8 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "IOSTATS [PS]",
         "    Prints IO stats per thread. If PS is specified, prints thread-level stats ",
         "    per second.",
+        "SEGMENTS",
+        "    Prints segment info for the current database.",
         "HELP",
         "    Prints this help.",
     };
@@ -685,6 +709,9 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
 
   if (subcmd == "IOSTATS") {
     return IOStats(args.subspan(1), builder);
+  }
+  if (subcmd == "SEGMENTS") {
+    return Segments(args.subspan(1), builder);
   }
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return builder->SendError(reply, kSyntaxErrType);
@@ -1428,6 +1455,27 @@ void DebugCmd::IOStats(CmdArgList args, facade::SinkReplyBuilder* builder) {
   for (const auto& stat : stats) {
     stat.Print(rb);
   }
+}
+
+void DebugCmd::Segments(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  vector<SegmentInfo> info(shard_set->size());
+
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    auto& hist = info[shard->shard_id()];
+    DoSegmentHist(shard, cntx_, &hist);
+  });
+
+  base::Histogram hist;
+  for (const auto& seg_info : info) {
+    hist.Merge(seg_info.hist);
+  }
+  string result;
+  absl::StrAppend(&result, "___begin segment info___\n\n");
+  absl::StrAppend(&result, "Segment Capacity: ", PrimeTable::kSegCapacity, "\n");
+  absl::StrAppend(&result, "Segment Size Histogram: \n");
+  absl::StrAppend(&result, hist.ToString(), "\n");
+  rb->SendVerbatimString(result);
 }
 
 void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBatch& batch) {
