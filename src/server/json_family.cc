@@ -314,7 +314,6 @@ template <typename T> void Send(const OpResult<T>& result, RedisReplyBuilder* rb
   }
 }
 
-// Specialization for JSON numeric operations that return string results
 void SendNumericData(const OpResult<string>& result, RedisReplyBuilder* rb) {
   RedisReplyBuilder::ReplyScope scope{rb};
   if (result) {
