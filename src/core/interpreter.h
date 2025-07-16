@@ -104,6 +104,12 @@ class Interpreter {
   // sha must be 40 char length.
   RunResult RunFunction(std::string_view sha, std::string* err);
 
+  uint64_t TakeUsedBytes() {
+    uint64_t tmp = used_bytes_;
+    used_bytes_ = 0;
+    return tmp;
+  }
+
   // Checks whether the result is safe to serialize.
   // Should fit 2 conditions:
   // 1. Be the only value on the stack.
@@ -150,6 +156,7 @@ class Interpreter {
   unsigned cmd_depth_ = 0;
   RedisFunc redis_func_;
   std::string buffer_;
+  std::uint64_t used_bytes_;
   char name_buffer_[32];  // backing storage for cmd name
 };
 
