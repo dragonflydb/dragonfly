@@ -11,6 +11,7 @@
 #include "base/logging.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
+#include "gmock/gmock.h"
 #include "server/command_registry.h"
 #include "server/test_utils.h"
 
@@ -1191,7 +1192,7 @@ TEST_F(JsonFamilyTest, NumericOperationsWithConversionsLegacy) {
 
 TEST_F(JsonFamilyTest, NumericOperationsResp2Resp3) {
   // Test RESP2 behavior
-  Run({"CONFIG", "SET", "resp", "2"});
+  Run({"HELLO", "2"});
 
   auto resp = Run({"JSON.SET", "a", "$", "1"});
   ASSERT_THAT(resp, "OK");
@@ -1209,7 +1210,7 @@ TEST_F(JsonFamilyTest, NumericOperationsResp2Resp3) {
   EXPECT_EQ(resp, "[4]");  // Currently returns string "[4]"
 
   // Test RESP3 behavior
-  Run({"CONFIG", "SET", "resp", "3"});
+  Run({"HELLO", "3"});
   Run({"FLUSHALL"});
 
   resp = Run({"JSON.SET", "a", "$", "1"});
@@ -1220,7 +1221,7 @@ TEST_F(JsonFamilyTest, NumericOperationsResp2Resp3) {
   EXPECT_THAT(resp, IntArg(2));
 
   resp = Run({"JSON.TYPE", "a", "$"});
-  EXPECT_EQ(resp, "[\"integer\"]");
+  EXPECT_THAT(resp, RespArray(ElementsAre("integer")));
 
   resp = Run({"JSON.TYPE", "a", "."});
   EXPECT_EQ(resp, "integer");
