@@ -167,6 +167,9 @@ string DocIndexInfo::BuildRestoreCommand() const {
                     [out = &out](const search::SchemaField::TextParams& params) {
                       if (params.with_suffixtrie)
                         absl::StrAppend(out, " ", "WITH_SUFFIXTRIE");
+                    },
+                    [out = &out](const search::SchemaField::NumericParams& params) {
+                      absl::StrAppend(out, " ", "BLOCKSIZE", " ", params.block_size);
                     }};
     visit(info, finfo.special_params);
   }
