@@ -2090,10 +2090,8 @@ void JsonFamily::Type(CmdArgList args, const CommandContext& cmd_cntx) {
     // Legacy path (.) - single value
     if (rb->IsResp3()) {
       rb->StartArray(1);
-      rb->SendBulkString(callback_result.AsV1());
-    } else {
-      rb->SendBulkString(callback_result.AsV1());
     }
+    rb->SendBulkString(callback_result.AsV1());
   } else {
     // Enhanced path ($) - array of values
     const auto& arr = callback_result.AsV2();
