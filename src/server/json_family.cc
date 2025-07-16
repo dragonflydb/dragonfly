@@ -301,7 +301,6 @@ template <typename T> void Send(const JsonCallbackResult<T>& result, RedisReplyB
     /* The specified path was enhanced (starts with '$'), then the result is an array of multiple
      * values */
     const auto& arr = result.AsV2();
-
     Send(arr.begin(), arr.end(), rb);
   }
 }
