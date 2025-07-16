@@ -75,6 +75,10 @@ template <typename Container /* underlying container */> class BlockList {
     return size_;
   }
 
+  bool Empty() const {
+    return size_ == 0;
+  }
+
   void Clear() {
     size_ = 0;
     blocks_.clear();
@@ -155,6 +159,10 @@ template <typename T> class SortedVector {
 
   size_t Size() {
     return entries_.size();
+  }
+
+  bool Empty() const {
+    return entries_.empty();
   }
 
   void Clear() {

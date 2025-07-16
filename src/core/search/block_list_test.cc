@@ -92,7 +92,7 @@ TYPED_TEST(TemplatedBlockListTest, LoopMidInsertErase) {
   }
 
   vector<ElementType> out(list.begin(), list.end());
-  ASSERT_EQ(list.size(), kNumElements);
+  ASSERT_EQ(list.Size(), kNumElements);
   ASSERT_EQ(out.size(), kNumElements);
   for (size_t i = 0; i < kNumElements; i++)
     ASSERT_EQ(this->GetDocId(out[i]), i);
@@ -134,7 +134,7 @@ TYPED_TEST(TemplatedBlockListTest, InsertReverseRemoveSteps) {
     }
   }
 
-  EXPECT_EQ(list.size(), 0u);
+  EXPECT_EQ(list.Size(), 0u);
 }
 
 TYPED_TEST(TemplatedBlockListTest, RandomNumbers) {
@@ -179,8 +179,8 @@ TEST_F(BlockListTest, Split) {
   auto& left = split_result.left;
   auto& right = split_result.right;
 
-  EXPECT_EQ(left.size(), 50);
-  EXPECT_EQ(right.size(), 50);
+  EXPECT_EQ(left.Size(), 50);
+  EXPECT_EQ(right.Size(), 50);
 
   // Test that all values in the left part are less than or equal to max_value
   for (const auto& [_, left_value] : left) {
@@ -235,8 +235,8 @@ TEST_F(BlockListTest, SplitHard) {
   auto split_result1 = Split(std::move(bl1));
 
   EXPECT_EQ(split_result1.median, 2.0);
-  EXPECT_EQ(split_result1.left.size(), 70u);
-  EXPECT_EQ(split_result1.right.size(), 30u);
+  EXPECT_EQ(split_result1.left.Size(), 70u);
+  EXPECT_EQ(split_result1.right.Size(), 30u);
 
   for (const auto& [_, value] : split_result1.left) {
     EXPECT_EQ(value, 1.0);
@@ -257,8 +257,8 @@ TEST_F(BlockListTest, SplitHard) {
   auto split_result2 = Split(std::move(bl2));
 
   EXPECT_EQ(split_result2.median, 2.0);
-  EXPECT_EQ(split_result2.left.size(), 30u);
-  EXPECT_EQ(split_result2.right.size(), 70u);
+  EXPECT_EQ(split_result2.left.Size(), 30u);
+  EXPECT_EQ(split_result2.right.Size(), 70u);
 
   for (const auto& [_, value] : split_result2.left) {
     EXPECT_EQ(value, 1.0);

@@ -2328,7 +2328,7 @@ void XRangeGeneric(std::string_view key, std::string_view start, std::string_vie
     return builder->SendError("invalid end ID for the interval", kSyntaxErrType);
   }
 
-  if (args.size() > 0) {
+  if (!args.empty()) {
     if (args.size() != 2) {
       return builder->SendError(WrongNumArgsError("XRANGE"), kSyntaxErrType);
     }

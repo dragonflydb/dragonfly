@@ -173,6 +173,7 @@ class DashTable : public detail::DashTableBase {
   }
 
   using Base::depth;
+  using Base::Empty;
   using Base::size;
   using Base::unique_segments;
 

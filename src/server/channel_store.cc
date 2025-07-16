@@ -281,7 +281,7 @@ void ChannelStoreUpdater::Modify(ChannelMap* target, string_view key) {
   }
 
   // RCU update existing SubscribeMap entry.
-  DCHECK(it->second->size() > 0);
+  DCHECK(!it->second->empty());
   auto* replacement = new SubscribeMap{*it->second};
   if (to_add_)
     replacement->emplace(cntx_, thread_id_);

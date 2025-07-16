@@ -899,7 +899,7 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
 
   // Keep loader leftover.
   io::Bytes unused = chained_tail.UnusedPrefix();
-  if (unused.size() > 0) {
+  if (!unused.empty()) {
     leftover_buf_.emplace(unused.size());
     leftover_buf_->WriteAndCommit(unused.data(), unused.size());
   } else {
