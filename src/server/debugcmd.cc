@@ -133,12 +133,8 @@ tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
     args.push_back(json);
   } else if (type == "STREAM") {
     cid = registry.Find("XADD");
-    uint32_t repeat = std::max(elements / 4, uint32_t(1));
-    args.push_back("REPEAT");
-    args.push_back(to_string(repeat));
     args.push_back("*");
-    uint32_t fields = repeat == 1 ? elements : 4;
-    for (size_t i = 0; i < fields; ++i) {
+    for (size_t i = 0; i < elements; ++i) {
       args.push_back(GenerateValue(val_size / 2, random_value, gen));
       args.push_back(GenerateValue(val_size / 2, random_value, gen));
     }
@@ -1505,7 +1501,8 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
 
     // limit rss grow by 32K by limiting the element count in each command.
     // for stream we use 4 fields and (elements / 4) stream entries
-    uint32_t max_batch_elements = std::max(32_KB / options.val_size, 1ULL);
+    uint32_t max_batch_elements =
+        options.type == "STREAM" ? 4 : std::max(32_KB / options.val_size, 1ULL);
     while (elements_left) {
       uint32_t populate_elements = std::min(max_batch_elements, elements_left);
       if (options.type == "STREAM" && populate_elements > 4) {
