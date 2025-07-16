@@ -83,7 +83,7 @@ void JournalStreamer::Start(util::FiberSocketBase* dest) {
 }
 
 void JournalStreamer::Cancel() {
-  VLOG(1) << "JournalStreamer::Cancel";
+  VLOG(1) << "JournalStreamer::Cancel " << cntx_->IsCancelled();
   waker_.notifyAll();
   journal_->UnregisterOnChange(journal_cb_id_);
   if (!cntx_->IsError()) {

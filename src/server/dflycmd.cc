@@ -312,8 +312,9 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
 
     std::optional<Replica::LastMasterSyncData> data = sf_->GetLastMasterData();
     // In this flow the master and the registered replica where synced from the same master.
-    if (last_master_id && data && data.value().id == last_master_id.value()) {
-      std::vector<std::string_view> lsn_str_vec = absl::StrSplit(last_master_lsn.value(), '-');
+    if (last_master_id && data && data->id == *last_master_id) {
+      ++ServerState::tlocal()->stats.psync_requests_total;
+      std::vector<std::string_view> lsn_str_vec = absl::StrSplit(*last_master_lsn, '-');
       if (lsn_str_vec.size() != data.value().last_journal_LSNs.size()) {
         return rb->SendError(facade::kSyntaxErr);  // Unexpected flow. LSN vector of same master
                                                    // should be the same size on all replicas.
@@ -716,6 +717,7 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
   auto replica_ptr = GetReplicaInfo(sync_id);
   if (!replica_ptr)
     return;
+  VLOG(1) << "Stopping replication for sync_id: " << sync_id;
 
   // Because CancelReplication holds the per-replica mutex,
   // aborting connection will block here until cancellation finishes.

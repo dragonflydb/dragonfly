@@ -20,7 +20,7 @@ using namespace std;
 constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
-  static_assert(kSizeConnStats == 160u);
+  static_assert(kSizeConnStats == 176u);
 
   ADD(read_buf_capacity);
   ADD(dispatch_queue_entries);
@@ -43,6 +43,8 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(tls_accept_disconnects);
   ADD(handshakes_started);
   ADD(handshakes_completed);
+  ADD(pipeline_dispatch_calls);
+  ADD(pipeline_dispatch_commands);
 
   return *this;
 }
