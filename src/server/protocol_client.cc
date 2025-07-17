@@ -195,20 +195,21 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
     sock_->set_timeout(timeout);
   }
 
-  /* These may help but require additional field testing to learn.
-   int yes = 1;
-   CHECK_EQ(0, setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)));
-   CHECK_EQ(0, setsockopt(sock_->native_handle(), SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes)));
+  // For idle connections we enable TCP keepalive to prevent disconnects.
+  int yes = 1;
+  if (setsockopt(sock_->native_handle(), SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes)) == 0) {
+    int intv = 300;
+    setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_KEEPIDLE, &intv, sizeof(intv));
 
-   int intv = 15;
-   CHECK_EQ(0, setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_KEEPIDLE, &intv, sizeof(intv)));
+    intv /= 3;
+    setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_KEEPINTVL, &intv, sizeof(intv));
 
-   intv /= 3;
-   CHECK_EQ(0, setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_KEEPINTVL, &intv, sizeof(intv)));
+    intv = 3;
+    setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_KEEPCNT, &intv, sizeof(intv));
+  }
 
-   intv = 3;
-   CHECK_EQ(0, setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_KEEPCNT, &intv, sizeof(intv)));
-  */
+  // CHECK_EQ(0, setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)));
+
   auto masterauth = absl::GetFlag(FLAGS_masterauth);
   auto masteruser = absl::GetFlag(FLAGS_masteruser);
   ResetParser(RedisParser::Mode::CLIENT);

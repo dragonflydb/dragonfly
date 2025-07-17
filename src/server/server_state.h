@@ -134,7 +134,7 @@ class ServerState {  // public struct - to allow initialization.
     uint64_t oom_error_cmd_cnt = 0;
     uint32_t conn_timeout_events = 0;
     uint64_t psync_requests_total = 0;
-    std::valarray<uint64_t> tx_width_freq_arr;
+    std::valarray<uint64_t> tx_width_freq_arr, squash_width_freq_arr;
   };
 
   // Unsafe version.
