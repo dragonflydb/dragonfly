@@ -1877,6 +1877,8 @@ void Connection::SendAsync(MessageHandle msg) {
   // Close MONITOR connection if we overflow pipeline limits
   if (msg.IsMonitor() &&
       qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, dispatch_q_.size())) {
+    // This might preempt if socket is a tls socket which violates the contract
+    // of SendAsync that should never block
     ShutdownSelf();
     return;
   }

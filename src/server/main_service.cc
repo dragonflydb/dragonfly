@@ -272,13 +272,23 @@ std::string MakeMonitorMessage(const ConnectionContext* cntx, const CommandId* c
 void SendMonitor(const std::string& msg) {
   const auto& monitor_repo = ServerState::tlocal()->Monitors();
   const auto& monitors = monitor_repo.monitors();
-  if (!monitors.empty()) {
-    VLOG(2) << "Thread " << ProactorBase::me()->GetPoolIndex() << " sending monitor message '"
-            << msg << "' for " << monitors.size();
+  if (monitors.empty()) {
+    return;
+  }
+  VLOG(2) << "Thread " << ProactorBase::me()->GetPoolIndex() << " sending monitor message '" << msg
+          << "' for " << monitors.size();
 
-    for (auto monitor_conn : monitors) {
-      // never preempts, so we can iterate safely.
-      monitor_conn->SendMonitorMessageAsync(msg);
+  // We need this because SendMonitorMessageAsync might preempt and the iteration
+  // below might trigger UB. To solve this, we use WeakRef.
+  std::vector<facade::Connection::WeakRef> refs;
+  refs.reserve(monitors.size());
+  for (auto monitor_conn : monitors) {
+    refs.push_back(monitor_conn->Borrow());
+  }
+
+  for (const auto& conn : refs) {
+    if (!conn.IsExpired()) {
+      conn.Get()->SendMonitorMessageAsync(msg);
     }
   }
 }
@@ -289,7 +299,7 @@ void DispatchMonitor(ConnectionContext* cntx, const CommandId* cid, CmdArgList t
 
   VLOG(2) << "Sending command '" << monitor_msg << "' to the clients that registered on it";
 
-  shard_set->pool()->DispatchBrief(
+  shard_set->pool()->DispatchOnAll(
       [msg = std::move(monitor_msg)](unsigned idx, util::ProactorBase*) { SendMonitor(msg); });
 }
 
