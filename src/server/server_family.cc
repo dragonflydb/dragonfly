@@ -2320,6 +2320,10 @@ void ServerFamily::ResetStat(Namespace* ns) {
         }
         facade::ResetStats();
         ServerState::tlocal()->exec_freq_count.clear();
+
+        auto reset_cb = [](uint64_t) -> uint64_t { return 0u; };
+        ServerState::tlocal()->stats.tx_width_freq_arr.apply(reset_cb);
+        ServerState::tlocal()->stats.squash_width_freq_arr.apply(reset_cb);
       });
 }
 
@@ -2762,6 +2766,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("tx_batch_scheduled_items_total", m.shard_stats.tx_batch_scheduled_items_total);
     append("tx_batch_schedule_calls_total", m.shard_stats.tx_batch_schedule_calls_total);
     append("tx_with_freq", absl::StrJoin(m.coordinator_stats.tx_width_freq_arr, ","));
+    append("squash_with_freq", absl::StrJoin(m.coordinator_stats.squash_width_freq_arr, ","));
     append("tx_queue_len", m.tx_queue_len);
 
     append("eval_io_coordination_total", m.coordinator_stats.eval_io_coordination_cnt);
