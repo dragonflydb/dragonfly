@@ -17,9 +17,6 @@
 #include "server/transaction.h"
 #include "server/tx_base.h"
 
-ABSL_FLAG(uint32_t, max_busy_squash_usec, 200,
-          "Maximum time in microseconds to execute squashed commands before yielding.");
-
 namespace dfly {
 
 using namespace std;
@@ -27,6 +24,8 @@ using namespace facade;
 using namespace util;
 
 namespace {
+
+thread_local uint64_t max_busy_squash_cycles_cached = 1ULL << 32;
 
 void CheckConnStateClean(const ConnectionState& state) {
   DCHECK_EQ(state.exec_info.state, ConnectionState::ExecInfo::EXEC_INACTIVE);
@@ -251,10 +250,8 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     fb2::BlockingCounter bc(num_shards);
     DVLOG(1) << "Squashing " << num_shards << " " << tx->DebugId();
 
-    static uint64_t tsc_cycles_limit =
-        base::CycleClock::Frequency() * absl::GetFlag(FLAGS_max_busy_squash_usec) / 1000'000;
     auto cb = [this, bc, rb]() mutable {
-      if (ThisFiber::GetRunningTimeCycles() > tsc_cycles_limit) {
+      if (ThisFiber::GetRunningTimeCycles() > max_busy_squash_cycles_cached) {
         ThisFiber::Yield();
       }
       this->SquashedHopCb(EngineShard::tlocal(), rb->GetRespVersion());
@@ -348,6 +345,10 @@ size_t MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
 
 bool MultiCommandSquasher::IsAtomic() const {
   return atomic_;
+}
+
+void MultiCommandSquasher::SetMaxBusySquashUsec(uint32_t usec) {
+  max_busy_squash_cycles_cached = base::CycleClock::Frequency() * usec / 1000'000;
 }
 
 }  // namespace dfly

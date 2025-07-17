@@ -34,6 +34,8 @@ class MultiCommandSquasher {
     return MultiCommandSquasher{cmds, cntx, service, opts}.Run(rb);
   }
 
+  static void SetMaxBusySquashUsec(uint32_t usec);
+
  private:
   // Per-shard execution info.
   struct ShardExecInfo {
