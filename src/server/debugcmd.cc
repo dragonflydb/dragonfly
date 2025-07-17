@@ -298,7 +298,22 @@ struct HufHist {
       hist[i] += other.hist[i];
     }
   }
+
+  unsigned MaxFreqCount() const;
 };
+
+unsigned HufHist::MaxFreqCount() const {
+  unsigned max_freq = 0;
+  for (unsigned i = 0; i < kMaxSymbol; ++i) {
+    if (hist[i] > max_freq) {
+      max_freq = hist[i];
+    }
+  }
+  return max_freq;
+}
+
+unsigned kMaxFreqPerShard = 1U << 19;
+unsigned kMaxFreqTotal = 1U << 23;
 
 void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* cntx,
                    HufHist* dest) {
@@ -315,6 +330,7 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
   do {
     cursor = table.Traverse(cursor, [&](PrimeIterator it) {
       scratch.clear();
+      ++steps;
       if (type == kInvalidCompactObjType) {  // KEYSPACE
         if (it->first.MallocUsed() > 0) {
           it->first.GetString(&scratch);
@@ -326,6 +342,7 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
       } else if (type == OBJ_ZSET && it->second.ObjType() == OBJ_ZSET) {
         container_utils::IterateSortedSet(
             it->second.GetRobjWrapper(), [&](container_utils::ContainerEntry entry, double) {
+              ++steps;
               if (entry.value) {
                 HIST_add(dest->hist.data(), entry.value, entry.length);
               }
@@ -333,6 +350,7 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
             });
       } else if (type == OBJ_LIST && it->second.ObjType() == OBJ_LIST) {
         container_utils::IterateList(it->second, [&](container_utils::ContainerEntry entry) {
+          ++steps;
           if (entry.value) {
             HIST_add(dest->hist.data(), entry.value, entry.length);
           }
@@ -341,6 +359,7 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
       } else if (type == OBJ_HASH && it->second.ObjType() == OBJ_HASH) {
         container_utils::IterateMap(it->second, [&](container_utils::ContainerEntry key,
                                                     container_utils::ContainerEntry value) {
+          ++steps;
           if (key.value) {
             HIST_add(dest->hist.data(), key.value, key.length);
           }
@@ -357,7 +376,11 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
       }
     });
 
-    if (steps >= 20000) {
+    if (steps >= 40000) {
+      if (dest->MaxFreqCount() > kMaxFreqPerShard) {
+        break;
+      }
+
       steps = 0;
       ThisFiber::Yield();
     }
@@ -1322,6 +1345,37 @@ void DebugCmd::Keys(CmdArgList args, facade::SinkReplyBuilder* builder) {
   return builder->SendError(kSyntaxErr);
 }
 
+static size_t PostProcessHist(HufHist* dest) {
+  size_t raw_size = 0;
+  auto& hist = dest->hist;
+  unsigned max_freq = 0;
+
+  for (unsigned i = 0; i <= HufHist::kMaxSymbol; i++) {
+    // raw_size may count less characters than the actual size because
+    // we may cut the counting early.
+    raw_size += hist[i];
+    if (hist[i] > max_freq) {
+      max_freq = hist[i];
+    }
+    if (hist[i] == 0) {
+      hist[i] = 1;  // Avoid zero frequency symbols.
+    }
+  }
+
+  if (max_freq > kMaxFreqTotal) {
+    // huffman encoder has a bug with frequencies too high, so we scale down everything
+    // to avoid overflow.
+    double scale = static_cast<double>(max_freq) / kMaxFreqTotal;
+    for (unsigned i = 0; i <= HufHist::kMaxSymbol; i++) {
+      hist[i] = unsigned(hist[i] / scale);
+      if (hist[i] == 0) {
+        hist[i] = 1;  // Avoid zero frequency symbols.
+      }
+    }
+  }
+  return raw_size;
+}
+
 void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
   CompactObjType type = kInvalidCompactObjType;
   CmdArgParser parser(args);
@@ -1375,19 +1429,11 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
   });
 
   size_t num_bits = 0, compressed_size = 0, raw_size = 0;
-
   if (hist.max_symbol) {
     HuffmanEncoder huff_enc;
     string err_msg;
 
-    raw_size = 0;
-    for (unsigned i = 0; i <= HufHist::kMaxSymbol; i++) {
-      raw_size += hist.hist[i];
-
-      // force non-zero weights for all symbols.
-      if (hist.hist[i] == 0)
-        hist.hist[i] = 1;
-    }
+    raw_size = PostProcessHist(&hist);
 
     if (bintable.empty()) {
       if (!huff_enc.Build(hist.hist.data(), HufHist::kMaxSymbol, &err_msg)) {
