@@ -145,7 +145,11 @@ struct StringCollectorTranslator : public ObjectExplorer {
     values.emplace_back(str);
   }
   void OnArrayStart(unsigned len) final {
-    values.reserve(values.size() + len);
+    // if values is n't empty it means we can not predict the needed size so reserve can
+    // significantly decrease performance
+    if (values.empty()) {
+      values.reserve(len);
+    }
   }
   void OnArrayEnd() final {
   }
