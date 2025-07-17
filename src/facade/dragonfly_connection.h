@@ -231,7 +231,7 @@ class Connection : public util::Connection {
   void RegisterBreakHook(BreakerCb breaker_cb);
 
   // Manually shutdown self.
-  void ShutdownSelf();
+  void ShutdownSelfBlocking();
 
   // Migrate this connecton to a different thread.
   // Return true if Migrate succeeded
@@ -494,6 +494,8 @@ class Connection : public util::Connection {
       bool is_main_ : 1;
     };
   };
+
+  bool request_shutdown_ = false;
 };
 
 }  // namespace facade

@@ -55,9 +55,6 @@ class ConnectionContext {
   // Skip ACL validation, used by internal commands and commands run on admin port
   bool skip_acl_validation = false;
 
-  // Monitor shutdown
-  bool monitor_shutdown_conn = false;
-
   // How many async subscription sources are active: monitor and/or pubsub - at most 2.
   uint8_t subscriptions;
 
