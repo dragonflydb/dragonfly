@@ -235,6 +235,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
 
   Transaction* tx = cntx_->transaction;
   ServerState::tlocal()->stats.multi_squash_executions++;
+  ServerState::tlocal()->stats.squash_width_freq_arr[num_shards - 1]++;
   ProactorBase* proactor = ProactorBase::me();
   uint64_t start = proactor->GetMonotonicTimeNs();
 
