@@ -1844,7 +1844,7 @@ bool ValidateZMPopCommand(CmdArgList args, bool is_blocking, SinkReplyBuilder* b
   CmdArgParser parser{args};
 
   if (is_blocking) {
-    if (!absl::SimpleAtof(parser.Next(), &(result->timeout))) {
+    if (!absl::SimpleAtof(parser.Next(), &result->timeout)) {
       builder->SendError("timeout is not a float or out of range");
       return false;
     }
@@ -1880,7 +1880,7 @@ bool ValidateZMPopCommand(CmdArgList args, bool is_blocking, SinkReplyBuilder* b
   result->pop_count = 1;
   // Check if we have additional COUNT argument.
   if (parser.HasNext()) {
-    if (!parser.Check("COUNT", &(result->pop_count))) {
+    if (!parser.Check("COUNT", &result->pop_count)) {
       builder->SendError(kSyntaxErr);
       return false;
     }
@@ -2432,8 +2432,8 @@ void ZSetFamily::ZInterCard(CmdArgList args, const CommandContext& cmd_cntx) {
 
 // Generic function for ZMPop and BZMPop commands
 void ZMPopGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_blocking) {
-  ValidateZMPopResult zmpopArgs;
-  if (!ValidateZMPopCommand(args, is_blocking, cmd_cntx.rb, &zmpopArgs)) {
+  ValidateZMPopResult zmpop_args;
+  if (!ValidateZMPopCommand(args, is_blocking, cmd_cntx.rb, &zmpop_args)) {
     return;
   }
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
@@ -2456,7 +2456,7 @@ void ZMPopGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_block
   // Keep all the keys found (first only for each shard) in a set for fast lookups.
   absl::flat_hash_set<std::string_view> first_found_keys_for_shard;
   // We can have at most one result from each shard.
-  first_found_keys_for_shard.reserve(std::min(shard_set->size(), zmpopArgs.num_keys));
+  first_found_keys_for_shard.reserve(std::min(shard_set->size(), zmpop_args.num_keys));
   for (const auto& key : first_found_key_per_shard_vec) {
     if (!key.has_value()) {
       continue;
@@ -2468,7 +2468,7 @@ void ZMPopGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_block
   // pop elements from it.
   std::optional<std::string_view> key_to_pop = std::nullopt;
   // BZMPOP have 1 extra argument as compared to ZMPOP hence adding 1 is is_blocking is true
-  ArgRange arg_keys(args.subspan(1 + is_blocking, zmpopArgs.num_keys));
+  ArgRange arg_keys(args.subspan(1 + is_blocking, zmpop_args.num_keys));
   // Find the first arg_key which exists in any shard and is not empty.
   for (std::string_view key : arg_keys) {
     if (first_found_keys_for_shard.contains(key)) {
@@ -2489,7 +2489,7 @@ void ZMPopGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_block
     auto* ns = &trans->GetNamespace();
 
     auto limit_tp = Transaction::time_point::max();
-    auto limit_ms = (unsigned)(zmpopArgs.timeout * 1000);
+    auto limit_ms = (unsigned)(zmpop_args.timeout * 1000);
     if (limit_ms > 0) {
       using namespace std::chrono;
       limit_tp = steady_clock::now() + milliseconds(limit_ms);
@@ -2522,7 +2522,7 @@ void ZMPopGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_block
 
   // Pop elements from relevant set.
   OpResult<ScoredArray> pop_result = ZPopMinMaxInternal(
-      *key_to_pop, FilterShards::YES, zmpopArgs.pop_count, zmpopArgs.is_max, cmd_cntx.tx);
+      *key_to_pop, FilterShards::YES, zmpop_args.pop_count, zmpop_args.is_max, cmd_cntx.tx);
 
   if (pop_result.status() == OpStatus::WRONG_TYPE) {
     return response_builder->SendError(kWrongTypeErr);
