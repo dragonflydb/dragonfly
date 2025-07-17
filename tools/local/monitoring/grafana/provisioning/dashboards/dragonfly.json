@@ -1788,10 +1788,25 @@
           "editorMode": "code",
           "expr":
               "irate(dragonfly_cmd_squash_commands_total\n{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])/irate(dragonfly_cmd_squash_hop_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])",
+          "hide": false,
           "instant": false,
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr":
+              "irate(dragonfly_pipeline_dispatch_commands_total\n{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])/irate(dragonfly_pipeline_dispatch_calls_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "B"
         }
       ],
       "title": "Average Squashing Length",
@@ -1930,6 +1945,105 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 52
+      },
+      "id": 29,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.1.10",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr":
+              "irate(dragonfly_pipeline_dispatch_calls_total\n{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])/(irate(dragonfly_pipeline_dispatch_calls_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval]) + irate(dragonfly_pipeline_dispatch_stats_ignored_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Metrics Select Pipeline Ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1987,7 +2101,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 52
+        "y": 60
       },
       "id": 21,
       "options": {
@@ -2120,13 +2234,13 @@
     ]
   },
   "time": {
-    "from": "now-15m",
+    "from": "now-5m",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "Dragonfly Dashboard",
   "uid": "xDLNRKUWz",
-  "version": 5,
+  "version": 14,
   "weekStart": ""
 }
