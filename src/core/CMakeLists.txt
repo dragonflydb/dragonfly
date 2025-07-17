@@ -50,6 +50,7 @@ cxx_test(allocation_tracker_test dfly_core absl::random_random LABELS DFLY)
 cxx_test(qlist_test dfly_core DATA testdata/list.txt.zst LABELS DFLY)
 cxx_test(zstd_test dfly_core TRDP::zstd LABELS DFLY)
 cxx_test(top_keys_test dfly_core LABELS DFLY)
+cxx_test(page_usage_stats_test dfly_core LABELS DFLY)
 
 if(LIB_PCRE2)
   target_compile_definitions(dfly_core_test PRIVATE USE_PCRE2=1)
