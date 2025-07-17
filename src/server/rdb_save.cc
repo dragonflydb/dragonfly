@@ -780,6 +780,10 @@ error_code SerializerBase::FlushToSink(io::Sink* sink, SerializerBase::FlushStat
   if (bytes.empty())
     return error_code{};
 
+  if (bytes.size() > serialization_peak_bytes_) {
+    serialization_peak_bytes_ = bytes.size();
+  }
+
   DVLOG(2) << "FlushToSink " << bytes.size() << " bytes";
 
   // interrupt point.

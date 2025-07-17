@@ -3391,26 +3391,27 @@ async def test_replication_onmove_flow(df_factory, serialization_max_size):
 
 @dfly_args({"proactor_threads": 1})
 async def test_big_strings(df_factory):
-    master = df_factory.create(proactor_threads=1, serialization_max_chunk_size=1)
-    replica = df_factory.create(proactor_threads=1, serialization_max_chunk_size=1)
+    master = df_factory.create(
+        proactor_threads=1, serialization_max_chunk_size=1, vmodule="snapshot=1"
+    )
+    replica = df_factory.create(proactor_threads=1)
 
     df_factory.start_all([master, replica])
     c_master = master.client()
     c_replica = replica.client()
+
+    # 500kb
+    value_size = 500_000
 
     async def get_memory(client, field):
         info = await client.info("memory")
         return info[field]
 
     capacity = await get_memory(c_master, "prime_capacity")
-    # sanity
-    assert capacity < 8000
-    logging.debug(f"Capacity is {capacity}")
 
     seeder = DebugPopulateSeeder(
         key_target=int(capacity * 0.8),
-        # 500kb
-        data_size=500_000,
+        data_size=value_size,
         collection_size=1,
         variance=1,
         samples=1,
@@ -3418,29 +3419,24 @@ async def test_big_strings(df_factory):
     )
     await seeder.run(c_master)
 
+    # sanity
+    capacity = await get_memory(c_master, "prime_capacity")
+    assert capacity < 8000
+
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_for_replicas_state(c_replica)
 
-    # make sure capacity hasn't changed after seeding
-    new_capacity = await get_memory(c_master, "prime_capacity")
-    assert capacity == new_capacity
-
-    used_memory = await get_memory(c_master, "used_memory_rss")
-    peak_memory = await get_memory(c_master, "used_memory_peak_rss")
-
-    logging.info(f"Used memory {used_memory}, peak memory {peak_memory}")
-    five_mb = 5_000_000
-    # I got this value by experimenting. Basically, without flushing big strings early,
-    # the difference between peak and used is roughly 16mb. However, with flushing the
-    # diff is usually 0 locally so I assume that maybe now we are a little faster
-    # and the periodic fiber that updates the peak_rss does not run in the middle of the bucket
-    # serialization. I added a "grace range" of 5mb to this to account for other allocations
-    # inbetween. This is not a great test for this but we are limited because we can't fill
-    # a bucket with big strings as the memory in the gh runner is fairly limited. We at
-    # least check for correctness and *some* improvement in the memory foot print.
-    assert peak_memory < used_memory + five_mb
-
-    # Check replica data consistent
+    # Check if replica data is consistent
     replica_data = await DebugPopulateSeeder.capture(c_replica)
     master_data = await DebugPopulateSeeder.capture(c_master)
     assert master_data == replica_data
+
+    replica.stop()
+    master.stop()
+
+    lines = master.find_in_logs("Serialization peak bytes: ")
+    assert len(lines) == 1
+    # We test the serializtion path of command execution
+    line = lines[0]
+    peak_bytes = extract_int_after_prefix("Serialization peak bytes: ", line)
+    assert peak_bytes < value_size
