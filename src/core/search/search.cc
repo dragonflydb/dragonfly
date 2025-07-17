@@ -49,25 +49,18 @@ AstExpr ParseQuery(std::string_view query, const QueryParams* params) {
 // Represents an either owned or non-owned result set that can be accessed transparently.
 struct IndexResult {
   using DocVec = vector<DocId>;
-  using Variant =
-      variant<DocVec /*owned*/, const DocVec*, const BlockList<CompressedSortedSet>*,
-              const BlockList<SortedVector<DocId>>*, SingleBlockRangeResult, TwoBlocksRangeResult>;
-  using BorrowedView =
-      variant<const DocVec*, const BlockList<CompressedSortedSet>*,
-              const BlockList<SortedVector<DocId>>*, const SingleBlockRangeResult*,
-              const TwoBlocksRangeResult*>;  // TODO: use derived types instead of variant
+  using Variant = variant<DocVec /*owned*/, const DocVec*, const BlockList<CompressedSortedSet>*,
+                          const BlockList<SortedVector<DocId>>*, RangeResult>;
+  using BorrowedView = variant<const DocVec*, const BlockList<CompressedSortedSet>*,
+                               const BlockList<SortedVector<DocId>>*, const SingleBlockRangeResult*,
+                               const TwoBlocksRangeResult*>;
 
-  IndexResult() : value_{DocVec{}} {
-  }
+  IndexResult() = default;
 
   IndexResult(DocVec&& dv) : value_{std::move(dv)} {
   }
 
-  // TODO: remove this
-  explicit IndexResult(RangeResult range_result) {
-    auto& variant = range_result.GetResult();
-    auto cb = [&](auto& result) { value_ = std::move(result); };
-    std::visit(cb, variant);
+  explicit IndexResult(RangeResult range_result) : value_(std::move(range_result)) {
   }
 
   template <typename C> IndexResult(const C* container = nullptr) : value_{container} {
@@ -98,48 +91,33 @@ struct IndexResult {
 
   BorrowedView Borrowed() const {
     auto cb = [](const auto& v) -> BorrowedView {
-      if constexpr (is_pointer_v<remove_reference_t<decltype(v)>>)
+      using T = std::decay_t<decltype(v)>;
+      if constexpr (is_pointer_v<remove_reference_t<decltype(v)>>) {
         return v;
-      else
+      } else if constexpr (is_same_v<T, RangeResult>) {
+        auto range_cb = [](const auto& set) -> BorrowedView { return &set; };
+        return std::visit(range_cb, v.GetResult());
+      } else {
         return &v;
+      }
     };
     return visit(cb, value_);
   }
 
   // Move out of owned or copy borrowed, truncate to limit if set
   // Returns a pair of total size and the result set.
-  std::pair<size_t, DocVec> Take(optional<size_t> limit = nullopt) {
+  DocVec Take() {
     if (IsOwned()) {
-      auto out = std::move(get<DocVec>(value_));
-      const size_t total = out.size();
-      out.resize(min(limit.value_or(out.size()), out.size()));
-      return {total, std::move(out)};
+      return std::move(get<DocVec>(value_));
     }
 
-    auto cb = [limit](auto* set) -> std::pair<size_t, DocVec> {
-      using T = std::decay_t<decltype(set)>;
-      if constexpr (std::is_same_v<T, const SingleBlockRangeResult*> ||
-                    std::is_same_v<T, const TwoBlocksRangeResult*>) {
-        /* We can not use Borrowed for RangeResult, because its size method returns approximate size
-         * of the result set, not the exact size. */
-        // TODO: remove this
-        DocVec out;
-        out.reserve(set->size());
-        std::copy(set->begin(), set->end(), std::back_inserter(out));
-        const size_t total = out.size();
-        if (limit.has_value() && out.size() > limit.value()) {
-          out.resize(limit.value());
-        }
-        return {total, std::move(out)};
-      } else {
-        const size_t total = set->size();
-        DocVec out(min(limit.value_or(set->size()), set->size()));
-        auto it = set->begin();
-        for (size_t i = 0; it != set->end() && i < out.size(); ++i, ++it) {
-          out[i] = *it;
-        }
-        return {total, std::move(out)};
+    auto cb = [](auto* set) -> DocVec {
+      DocVec out;
+      out.reserve(set->size());
+      for (auto it = set->begin(); it != set->end(); ++it) {
+        out.push_back(*it);
       }
+      return out;
     };
     return std::visit(cb, Borrowed());
   }
@@ -385,17 +363,14 @@ struct BasicSearch {
   IndexResult Search(const AstRangeNode& node, string_view active_field) {
     DCHECK(!active_field.empty());
     if (auto* index = GetIndex<NumericIndex>(active_field); index) {
-      auto result = index->Range(node.lo, node.hi);
-      // TODO: simplify this
-      auto cb = [](auto& result) -> IndexResult { return IndexResult{std::move(result)}; };
-      return std::visit(cb, result);
+      return IndexResult{index->Range(node.lo, node.hi)};
     }
     return IndexResult{};
   }
 
   // negate -(*subquery*): explicitly compute result complement. Needs further optimizations
   IndexResult Search(const AstNegateNode& node, string_view active_field) {
-    vector<DocId> matched = SearchGeneric(*node.node, active_field).Take().second;
+    vector<DocId> matched = SearchGeneric(*node.node, active_field).Take();
     vector<DocId> all = indices_->GetAllDocs();
 
     // To negate a result, we have to find the complement of matched to all documents,
@@ -464,7 +439,7 @@ struct BasicSearch {
       knn_distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime);
     else
       knn_distances_ =
-          vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime, sub_results.Take().second);
+          vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime, sub_results.Take());
   }
 
   // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`
@@ -529,7 +504,8 @@ struct BasicSearch {
     optional<AlgorithmProfile> profile =
         profile_builder_ ? make_optional(profile_builder_->Take()) : nullopt;
 
-    auto [total, out] = result.Take();
+    auto out = result.Take();
+    const size_t total = out.size();
     return SearchResult{total, std::move(out), std::move(knn_scores_), std::move(profile),
                         std::move(error_)};
   }
