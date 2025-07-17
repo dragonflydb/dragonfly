@@ -109,7 +109,7 @@ class RangeTreeAdapter : public NumericIndex::RangeTreeBase {
     }
   }
 
-  std::variant<RangeResult, std::vector<DocId>> Range(double l, double r) const override {
+  RangeResult Range(double l, double r) const override {
     return range_tree_.Range(l, r);
   }
 
@@ -142,7 +142,7 @@ class BtreeSetImpl : public NumericIndex::RangeTreeBase {
     }
   }
 
-  std::variant<RangeResult, std::vector<DocId>> Range(double l, double r) const override {
+  RangeResult Range(double l, double r) const override {
     DCHECK(l <= r);
 
     auto it_l = entries_.lower_bound({l, 0});
@@ -158,7 +158,7 @@ class BtreeSetImpl : public NumericIndex::RangeTreeBase {
     if (!unique_ids_) {
       out.erase(unique(out.begin(), out.end()), out.end());
     }
-    return out;
+    return RangeResult(std::move(out));
   }
 
   vector<DocId> GetAllDocIds() const override {
@@ -215,9 +215,9 @@ void NumericIndex::Remove(DocId id, const DocumentAccessor& doc, string_view fie
   range_tree_->Remove(id, absl::MakeSpan(numbers));
 }
 
-std::variant<RangeResult, std::vector<DocId>> NumericIndex::Range(double l, double r) const {
+RangeResult NumericIndex::Range(double l, double r) const {
   if (r < l)
-    return std::vector<DocId>{};
+    return {};
   return range_tree_->Range(l, r);
 }
 
