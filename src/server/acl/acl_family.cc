@@ -163,35 +163,40 @@ void AclFamily::SetUser(CmdArgList args, const CommandContext& cmd_cntx) {
   std::visit(Overloaded{error_case, update_case}, std::move(req));
 }
 
-void AclFamily::EvictOpenConnectionsOnAllProactors(const absl::flat_hash_set<string_view>& users) {
-  auto close_cb = [&users]([[maybe_unused]] size_t id, util::Connection* conn) {
-    CHECK(conn);
-    auto connection = static_cast<facade::Connection*>(conn);
-    auto ctx = static_cast<ConnectionContext*>(connection->cntx());
-    if (ctx && users.contains(ctx->authed_username)) {
-      connection->ShutdownSelf();
+template <typename P> void AclFamily::TraverseEvictImpl(P predicate) {
+  auto close_cb = [&, this](unsigned idx, util::ProactorBase* p) {
+    std::vector<facade::Connection::WeakRef> connections;
+    auto traverse_cb = [&, this](unsigned id, util::Connection* conn) {
+      auto connection = static_cast<facade::Connection*>(conn);
+      auto ctx = connection->cntx();
+      if (predicate(ctx)) {
+        connections.push_back(connection->Borrow());
+      }
+    };
+
+    main_listener_->TraverseConnectionsOnThread(traverse_cb, UINT32_MAX, nullptr);
+
+    for (auto& tcon : connections) {
+      facade::Connection* conn = tcon.Get();
+      if (conn && conn->socket()->proactor()->GetPoolIndex() == p->GetPoolIndex()) {
+        // preemptive for TlsSocket
+        conn->ShutdownSelf();
+      }
     }
   };
 
-  if (main_listener_) {
-    main_listener_->TraverseConnections(close_cb);
-  }
+  pool_->AwaitFiberOnAll(close_cb);
+}
+
+void AclFamily::EvictOpenConnectionsOnAllProactors(const absl::flat_hash_set<string_view>& users) {
+  return TraverseEvictImpl([&](auto* ctx) { return ctx && users.contains(ctx->authed_username); });
 }
 
 void AclFamily::EvictOpenConnectionsOnAllProactorsWithRegistry(
     const UserRegistry::RegistryType& registry) {
-  auto close_cb = [&registry]([[maybe_unused]] size_t id, util::Connection* conn) {
-    CHECK(conn);
-    auto connection = static_cast<facade::Connection*>(conn);
-    auto ctx = static_cast<ConnectionContext*>(connection->cntx());
-    if (ctx && ctx->authed_username != "default" && registry.contains(ctx->authed_username)) {
-      connection->ShutdownSelf();
-    }
-  };
-
-  if (main_listener_) {
-    main_listener_->TraverseConnections(close_cb);
-  }
+  return TraverseEvictImpl([&](auto* ctx) {
+    return ctx && ctx->authed_username != "default" && registry.contains(ctx->authed_username);
+  });
 }
 
 void AclFamily::DelUser(CmdArgList args, const CommandContext& cmd_cntx) {
