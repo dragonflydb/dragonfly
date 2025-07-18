@@ -164,6 +164,8 @@ class AclFamily final {
 
   size_t dbnum_ = 0;
 
+  template <typename P> void TraverseEvictImpl(P predicate);
+
   // Only for testing interface
  public:
   // Helper accessors for tests. Do not use them directly.
