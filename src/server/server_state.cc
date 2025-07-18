@@ -303,7 +303,7 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       facade::Connection* conn = ref.Get();
       if (conn) {
         VLOG(1) << "Closing connection due to timeout: " << conn->GetClientInfo();
-        conn->ShutdownSelf();
+        conn->ShutdownSelfBlocking();
         stats.conn_timeout_events++;
       }
     }

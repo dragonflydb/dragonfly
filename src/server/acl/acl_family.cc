@@ -169,11 +169,12 @@ void AclFamily::EvictOpenConnectionsOnAllProactors(const absl::flat_hash_set<str
     auto connection = static_cast<facade::Connection*>(conn);
     auto ctx = static_cast<ConnectionContext*>(connection->cntx());
     if (ctx && users.contains(ctx->authed_username)) {
-      connection->ShutdownSelf();
+      connection->ShutdownSelfBlocking();
     }
   };
 
   if (main_listener_) {
+    // TODO(kostas) fix this it might preempt and TraverseConnection shall be atomic
     main_listener_->TraverseConnections(close_cb);
   }
 }
@@ -185,11 +186,12 @@ void AclFamily::EvictOpenConnectionsOnAllProactorsWithRegistry(
     auto connection = static_cast<facade::Connection*>(conn);
     auto ctx = static_cast<ConnectionContext*>(connection->cntx());
     if (ctx && ctx->authed_username != "default" && registry.contains(ctx->authed_username)) {
-      connection->ShutdownSelf();
+      connection->ShutdownSelfBlocking();
     }
   };
 
   if (main_listener_) {
+    // TODO(kostas) fix this it might preempt and TraverseConnection shall be atomic
     main_listener_->TraverseConnections(close_cb);
   }
 }

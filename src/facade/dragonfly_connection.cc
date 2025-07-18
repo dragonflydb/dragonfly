@@ -1161,8 +1161,13 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
           qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, dispatch_q_.size());
       return !over_limits || (dispatch_q_.empty() && !cc_->async_dispatch) || cc_->conn_closing;
     });
-    if (cc_->conn_closing)
+
+    if (cc_->conn_closing) {
+      if (request_shutdown_) {
+        ShutdownSelfBlocking();
+      }
       return;
+    }
 
     // prefer synchronous dispatching to save memory.
     optimize_for_async = false;
@@ -1770,7 +1775,7 @@ Connection::PipelineMessagePtr Connection::GetFromPipelinePool() {
   return ptr;
 }
 
-void Connection::ShutdownSelf() {
+void Connection::ShutdownSelfBlocking() {
   util::Connection::Shutdown();
 }
 
@@ -1877,7 +1882,11 @@ void Connection::SendAsync(MessageHandle msg) {
   // Close MONITOR connection if we overflow pipeline limits
   if (msg.IsMonitor() &&
       qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, dispatch_q_.size())) {
-    ShutdownSelf();
+    cc_->conn_closing = true;
+    request_shutdown_ = true;
+    // We don't shutdown here. The reason is that TLS socket is preemptive
+    // and SendAsync is atomic.
+    cnd_.notify_one();
     return;
   }
 

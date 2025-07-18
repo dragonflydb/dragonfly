@@ -272,14 +272,14 @@ std::string MakeMonitorMessage(const ConnectionContext* cntx, const CommandId* c
 void SendMonitor(const std::string& msg) {
   const auto& monitor_repo = ServerState::tlocal()->Monitors();
   const auto& monitors = monitor_repo.monitors();
-  if (!monitors.empty()) {
-    VLOG(2) << "Thread " << ProactorBase::me()->GetPoolIndex() << " sending monitor message '"
-            << msg << "' for " << monitors.size();
+  if (monitors.empty()) {
+    return;
+  }
+  VLOG(2) << "Thread " << ProactorBase::me()->GetPoolIndex() << " sending monitor message '" << msg
+          << "' for " << monitors.size();
 
-    for (auto monitor_conn : monitors) {
-      // never preempts, so we can iterate safely.
-      monitor_conn->SendMonitorMessageAsync(msg);
-    }
+  for (auto monitor_conn : monitors) {
+    monitor_conn->SendMonitorMessageAsync(msg);
   }
 }
 
@@ -1798,7 +1798,7 @@ void Service::Quit(CmdArgList args, const CommandContext& cmd_cntx) {
   cmd_cntx.rb->CloseConnection();
 
   DeactivateMonitoring(cmd_cntx.conn_cntx);
-  cmd_cntx.conn_cntx->conn()->ShutdownSelf();
+  cmd_cntx.conn_cntx->conn()->ShutdownSelfBlocking();
 }
 
 void Service::Multi(CmdArgList args, const CommandContext& cmd_cntx) {
