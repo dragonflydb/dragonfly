@@ -254,10 +254,17 @@ void Send(const JsonType& value, RedisReplyBuilder* rb) {
       Send(item.value(), rb);
     }
   } else if (value.is_array()) {
-    rb->StartArray(value.size() + 1);
-    rb->SendSimpleString("[");
-    for (const auto& item : value.array_range()) {
-      Send(item, rb);
+    if (rb->IsResp3()) {
+      rb->StartArray(value.size());
+      for (const auto& item : value.array_range()) {
+        Send(item, rb);
+      }
+    } else {
+      rb->StartArray(value.size() + 1);
+      rb->SendSimpleString("[");
+      for (const auto& item : value.array_range()) {
+        Send(item, rb);
+      }
     }
   }
 }
@@ -296,12 +303,23 @@ template <typename T> void Send(const JsonCallbackResult<T>& result, RedisReplyB
   if (result.IsV1()) {
     /* The specified path was restricted (JSON legacy mode), then the result consists only of a
      * single value */
+    if (rb->IsResp3()) {
+      rb->StartArray(1);
+    }
     Send(result.AsV1(), rb);
   } else {
     /* The specified path was enhanced (starts with '$'), then the result is an array of multiple
      * values */
     const auto& arr = result.AsV2();
-    Send(arr.begin(), arr.end(), rb);
+    if (rb->IsResp3()) {
+      rb->StartArray(arr.size());
+      for (const auto& item : arr) {
+        rb->StartArray(1);
+        Send(item, rb);
+      }
+    } else {
+      Send(arr.begin(), arr.end(), rb);
+    }
   }
 }
 
@@ -314,37 +332,18 @@ template <typename T> void Send(const OpResult<T>& result, RedisReplyBuilder* rb
   }
 }
 
-void SendNumericData(const OpResult<string>& result, RedisReplyBuilder* rb) {
+void SendJsonString(const OpResult<string>& result, RedisReplyBuilder* rb) {
   RedisReplyBuilder::ReplyScope scope{rb};
   if (result) {
     const string& json_str = result.value();
-
-    // Check if this is a JSON array result from numeric operations
-    if (!json_str.empty() && json_str[0] == '[' && json_str.back() == ']' && rb->IsResp3()) {
-      // For RESP3, parse JSON array and send as proper array with numeric types
+    if (rb->IsResp3()) {
       std::optional<JsonType> parsed_json =
           JsonFromString(json_str, PMR_NS::get_default_resource());
-      if (parsed_json && parsed_json->is_array()) {
-        const auto& arr = parsed_json->array_range();
-        size_t arr_size = std::distance(arr.begin(), arr.end());
-        rb->StartArray(arr_size);
-        for (const auto& item : arr) {
-          if (item.is_int64()) {
-            rb->SendLong(item.as<int64_t>());
-          } else if (item.is_uint64()) {
-            rb->SendLong(static_cast<int64_t>(item.as<uint64_t>()));
-          } else if (item.is_double()) {
-            rb->SendDouble(item.as<double>());
-          } else {
-            // Fallback for other types
-            rb->SendBulkString(item.as_string());
-          }
-        }
+      if (parsed_json) {
+        Send(parsed_json.value(), rb);
         return;
       }
     }
-
-    // Default behavior
     Send(json_str, rb);
   } else {
     rb->SendError(result.status());
@@ -2016,7 +2015,7 @@ void JsonFamily::NumIncrBy(CmdArgList args, const CommandContext& cmd_cntx) {
 
   OpResult<string> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::SendNumericData(result, rb);
+  reply_generic::SendJsonString(result, rb);
 }
 
 void JsonFamily::NumMultBy(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2033,7 +2032,7 @@ void JsonFamily::NumMultBy(CmdArgList args, const CommandContext& cmd_cntx) {
 
   OpResult<string> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::SendNumericData(result, rb);
+  reply_generic::SendJsonString(result, rb);
 }
 
 void JsonFamily::Toggle(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2065,47 +2064,7 @@ void JsonFamily::Type(CmdArgList args, const CommandContext& cmd_cntx) {
 
   auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-
-  // Handle RESP3 formatting directly in the function
-  if (!result) {
-    rb->SendError(result.status());
-    return;
-  }
-
-  const auto& callback_result = result.value();
-
-  if (callback_result.ShouldSendNil()) {
-    rb->SendNull();
-    return;
-  }
-
-  if (callback_result.ShouldSendWrongType()) {
-    rb->SendError(OpStatus::WRONG_JSON_TYPE);
-    return;
-  }
-
-  if (callback_result.IsV1()) {
-    // Legacy path (.) - single value
-    if (rb->IsResp3()) {
-      rb->StartArray(1);
-    }
-    rb->SendBulkString(callback_result.AsV1());
-  } else {
-    // Enhanced path ($) - array of values
-    const auto& arr = callback_result.AsV2();
-    if (rb->IsResp3()) {
-      rb->StartArray(arr.size());
-      for (const auto& item : arr) {
-        rb->StartArray(1);
-        rb->SendBulkString(item);
-      }
-    } else {
-      rb->StartArray(arr.size());
-      for (const auto& item : arr) {
-        rb->SendBulkString(item);
-      }
-    }
-  }
+  reply_generic::Send(result, rb);
 }
 
 void JsonFamily::ArrLen(CmdArgList args, const CommandContext& cmd_cntx) {
