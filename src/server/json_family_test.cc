@@ -1189,6 +1189,47 @@ TEST_F(JsonFamilyTest, NumericOperationsWithConversionsLegacy) {
   EXPECT_EQ(resp, R"({"a":8.0})");  // Is converted to double
 }
 
+TEST_F(JsonFamilyTest, NumericOperationsResp2Resp3) {
+  // Test RESP2 behavior
+  Run({"HELLO", "2"});
+
+  auto resp = Run({"JSON.SET", "a", "$", "1"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMINCRBY", "a", "$", "1"});
+  EXPECT_EQ(resp, "[2]");  // Currently returns string "[2]"
+
+  resp = Run({"JSON.TYPE", "a", "$"});
+  EXPECT_EQ(resp, "integer");
+
+  resp = Run({"JSON.TYPE", "a", "."});
+  EXPECT_EQ(resp, "integer");
+
+  resp = Run({"JSON.NUMMULTBY", "a", "$", "2"});
+  EXPECT_EQ(resp, "[4]");  // Currently returns string "[4]"
+
+  // Test RESP3 behavior
+  Run({"HELLO", "3"});
+  Run({"FLUSHALL"});
+
+  resp = Run({"JSON.SET", "a", "$", "1"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMINCRBY", "a", "$", "1"});
+  // In RESP3, this should return a proper array with integer: 1) (integer) 2
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"JSON.TYPE", "a", "$"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("integer")));
+
+  resp = Run({"JSON.TYPE", "a", "."});
+  EXPECT_EQ(resp, "integer");
+
+  resp = Run({"JSON.NUMMULTBY", "a", "$", "2"});
+  // In RESP3, this should return a proper array with integer: 1) (integer) 4
+  EXPECT_THAT(resp, IntArg(4));
+}
+
 TEST_F(JsonFamilyTest, Del) {
   string json = R"(
     {"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}, "e": [1,2,3,4,5]}}
