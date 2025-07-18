@@ -975,6 +975,15 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, SinkReplyBuilder* builder,
   // TODO provide a more clear approach
   cntx->sync_dispatch = false;
 
+  auto proactor_id = (shard_id + 1) % shard_set->pool()->size();
+  if (!cntx->conn()->Migrate(shard_set->pool()->at(proactor_id))) {
+    if (cntx->conn()->socket()->IsOpen()) {
+      return builder->SendError("DFLYMIGRATE FLOW failed");
+    }
+    LOG(WARNING) << "Can't do migrate";
+    return;
+  }
+
   builder->SendOk();
 
   migration->StartFlow(shard_id, cntx->conn()->socket());
