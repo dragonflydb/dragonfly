@@ -12,6 +12,7 @@ extern "C" {
 #include "redis/util.h"  // for string2ll
 }
 
+#include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
@@ -123,13 +124,19 @@ struct StringSetWrapper {
     uint32_t count = scan_op.limit;
     long maxiterations = count * 10;
 
+    const auto start_cycles = base::CycleClock::Now();
+    // Don't allow it to monopolize cpu time.
+    // Approximately 15 microseconds.
+    const uint64_t timeout_cycles = base::CycleClock::Frequency() >> 16;
+
     do {
       auto scan_callback = [&](const sds ptr) {
         if (string_view str{ptr, sdslen(ptr)}; scan_op.Matches(str))
           res->emplace_back(str);
       };
       curs = ss->Scan(curs, scan_callback);
-    } while (curs && maxiterations-- && res->size() < count);
+    } while (curs && maxiterations-- && res->size() < count &&
+             (base::CycleClock::Now() - start_cycles) < timeout_cycles);
     return curs;
   }
 
