@@ -6,9 +6,9 @@
 
 #include <absl/types/span.h>
 
+#include <nonstd/expected.hpp>
 #include <variant>
 
-#include "base/expected.hpp"
 #include "core/flatbuffers.h"
 #include "core/json/detail/common.h"
 #include "core/json/path.h"

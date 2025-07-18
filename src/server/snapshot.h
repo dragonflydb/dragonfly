@@ -149,7 +149,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   struct DelayedEntry {
     DbIndex dbid;
     PrimeKey key;
-    util::fb2::Future<string> value;
+    util::fb2::Future<io::Result<string>> value;
     time_t expire;
     uint32_t mc_flags;
   };

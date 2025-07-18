@@ -36,6 +36,8 @@ class OpManager {
   using EntryId = std::variant<unsigned, KeyRef>;
   using OwnedEntryId = std::variant<unsigned, std::pair<DbIndex, std::string>>;
 
+  using FetchedEntry = std::pair<std::string* /* ptr */, bool /* raw */>;
+
   // Callback for post-read completion. Returns whether the value was modified.
   // We use fu2 function to allow moveable semantics. The arguments are:
   // bool - true if the string is raw as it was extracted from the prime value.
@@ -45,7 +47,7 @@ class OpManager {
   using ReadCallback =
       fu2::function_base<true /*owns*/, false /*moveable*/, fu2::capacity_fixed<40, 8>,
                          false /* non-throwing*/, false /* strong exceptions guarantees*/,
-                         bool(bool, std::string*)>;
+                         bool(io::Result<FetchedEntry>)>;
 
   explicit OpManager(size_t max_size);
   virtual ~OpManager();
@@ -116,7 +118,7 @@ class OpManager {
   ReadOp& PrepareRead(DiskSegment aligned_segment);
 
   // Called once read finished
-  void ProcessRead(size_t offset, std::string_view value);
+  void ProcessRead(size_t offset, io::Result<std::string_view> value);
 
   // Called once Stash finished
   void ProcessStashed(EntryId id, unsigned version, const io::Result<DiskSegment>& segment);
