@@ -179,7 +179,7 @@ void MemoryCmd::Run(CmdArgList args) {
     const float threshold = parser.NextOrDefault(default_threshold);
     shard_set->pool()->AwaitFiberOnAll([threshold](util::ProactorBase*) {
       if (auto* shard = EngineShard::tlocal(); shard)
-        shard->DoDefrag(threshold);
+        shard->DoDefrag(CollectPageStats::YES, threshold);
     });
     return builder_->SendSimpleString("OK");
   }
