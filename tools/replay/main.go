@@ -52,22 +52,22 @@ func RenderTable(area *pterm.AreaPrinter, files []string, workers []FileWorker) 
 
 // RenderPipelineRangesTable renders the latency digests for each pipeline range
 func RenderPipelineRangesTable(area *pterm.AreaPrinter, files []string, workers []FileWorker) {
-	tableData := pterm.TableData{{"file", "Pipeline Range", "p50(us)", "p75(us)", "p90(us)", "p99(us)"}}
+	tableData := pterm.TableData{{"file", "Pipeline Range", "p75(us)", "p90(us)", "p99(us)", "p99.9(us)"}}
 	for i := range workers {
 		workers[i].latencyMu.Lock()
 		for _, rng := range pipelineRanges {
 			if digest, ok := workers[i].perRange[rng.label]; ok {
-				p50 := digest.Quantile(0.5)
 				p75 := digest.Quantile(0.75)
 				p90 := digest.Quantile(0.9)
 				p99 := digest.Quantile(0.99)
+				p999 := digest.Quantile(0.999)
 				tableData = append(tableData, []string{
 					files[i],
 					rng.label,
-					fmt.Sprintf("%.0f", p50),
 					fmt.Sprintf("%.0f", p75),
 					fmt.Sprintf("%.0f", p90),
 					fmt.Sprintf("%.0f", p99),
+					fmt.Sprintf("%.0f", p999),
 				})
 			}
 		}
@@ -82,7 +82,7 @@ func Run(files []string) {
 
 	var skipUntil uint64
 	effectiveBaseTime := baseTime
-	if  *fSkipTimeSec > 0 {
+	if *fSkipTimeSec > 0 {
 		skipDuration := time.Duration(*fSkipTimeSec) * time.Second
 		skipUntil = uint64(baseTime.Add(skipDuration).UnixNano())
 		effectiveBaseTime = baseTime.Add(skipDuration)
