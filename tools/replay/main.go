@@ -19,6 +19,7 @@ var fPace = flag.Bool("pace", true, "whether to pace the traffic according to th
 var fSkip = flag.Uint("skip", 0, "skip N records")
 var fSkipTimeSec = flag.Int("skip-time-sec", 0, "skip records in the first N seconds of the recording")
 var fIgnoreParseErrors = flag.Bool("ignore-parse-errors", false, "ignore parsing errors")
+var fTimeLimit = flag.Int("time-limit", 0, "time limit in seconds (0 = no limit)")
 
 func RenderTable(area *pterm.AreaPrinter, files []string, workers []FileWorker) {
 	tableData := pterm.TableData{{"file", "parsed", "processed", "delayed", "clients", "avg(us)", "p50(us)", "p75(us)", "p90(us)", "p99(us)"}}
@@ -90,11 +91,19 @@ func Run(files []string) {
 	timeOffset := time.Now().Add(500 * time.Millisecond).Sub(effectiveBaseTime)
 	fmt.Println("Offset -> ", timeOffset)
 
+	// Calculate stop time based on recording timestamps if time limit is specified
+	var stopUntil uint64
+	if *fTimeLimit > 0 {
+		limitDuration := time.Duration(*fTimeLimit) * time.Second
+		stopUntil = uint64(effectiveBaseTime.Add(limitDuration).UnixNano())
+		fmt.Printf("Time limit set to %d seconds\n", *fTimeLimit)
+	}
+
 	// Start a worker for every file. They take care of spawning client workers.
 	var wg sync.WaitGroup
 	workers := make([]FileWorker, len(files))
 	for i := range workers {
-		workers[i] = FileWorker{timeOffset: timeOffset, skipUntil: skipUntil}
+		workers[i] = FileWorker{timeOffset: timeOffset, skipUntil: skipUntil, stopUntil: stopUntil}
 		wg.Add(1)
 		go workers[i].Run(files[i], &wg)
 	}
@@ -235,7 +244,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "\nExamples:")
 		fmt.Fprintf(os.Stderr, "   %s -host 192.168.1.10:6379 -buffer 50 run *.bin\n", binaryName)
 		fmt.Fprintf(os.Stderr, "   %s -skip-time-sec 30 run *.bin\n", binaryName)
-		fmt.Fprintf(os.Stderr, "  %s print *.bin\n", binaryName)
+		fmt.Fprintf(os.Stderr, "   %s -time-limit 60 run *.bin\n", binaryName)
+		fmt.Fprintf(os.Stderr, "   %s print *.bin\n", binaryName)
 	}
 
 	flag.Parse()
