@@ -65,6 +65,7 @@ type FileWorker struct {
 	clientGroup sync.WaitGroup
 	timeOffset  time.Duration
 	skipUntil   uint64
+	stopUntil   uint64 // timestamp when to stop processing traffic (0 = no limit)
 	// stats for output, updated by clients, read by rendering goroutine
 	processed uint64
 	delayed   uint64
@@ -177,6 +178,12 @@ func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
 		}
 
 		atomic.AddUint64(&w.parsed, 1)
+
+		// Check if we should stop sending traffic due to time limit (but continue parsing)
+		if w.stopUntil > 0 && r.Time > w.stopUntil {
+			return true // continue parsing but don't send traffic
+		}
+
 		client.incoming <- r
 		return true
 	}, *fIgnoreParseErrors)
