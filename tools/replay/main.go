@@ -22,17 +22,17 @@ var fIgnoreParseErrors = flag.Bool("ignore-parse-errors", false, "ignore parsing
 var fTimeLimit = flag.Int("time-limit", 0, "time limit in seconds (0 = no limit)")
 
 func RenderTable(area *pterm.AreaPrinter, files []string, workers []FileWorker) {
-	tableData := pterm.TableData{{"file", "parsed", "processed", "delayed", "clients", "avg(us)", "p50(us)", "p75(us)", "p90(us)", "p99(us)"}}
+	tableData := pterm.TableData{{"file", "parsed", "processed", "delayed", "clients", "avg(us)", "p75(us)", "p90(us)", "p99(us)", "p99.9(us)"}}
 	for i := range workers {
 		workers[i].latencyMu.Lock()
 		avg := 0.0
 		if workers[i].latencyCount > 0 {
 			avg = workers[i].latencySum / float64(workers[i].latencyCount)
 		}
-		p50 := workers[i].latencyDigest.Quantile(0.5)
 		p75 := workers[i].latencyDigest.Quantile(0.75)
 		p90 := workers[i].latencyDigest.Quantile(0.9)
 		p99 := workers[i].latencyDigest.Quantile(0.99)
+		p999 := workers[i].latencyDigest.Quantile(0.999)
 		workers[i].latencyMu.Unlock()
 		tableData = append(tableData, []string{
 			files[i],
@@ -41,10 +41,10 @@ func RenderTable(area *pterm.AreaPrinter, files []string, workers []FileWorker) 
 			fmt.Sprint(atomic.LoadUint64(&workers[i].delayed)),
 			fmt.Sprint(atomic.LoadUint64(&workers[i].clients)),
 			fmt.Sprintf("%.0f", avg),
-			fmt.Sprintf("%.0f", p50),
 			fmt.Sprintf("%.0f", p75),
 			fmt.Sprintf("%.0f", p90),
 			fmt.Sprintf("%.0f", p99),
+			fmt.Sprintf("%.0f", p999),
 		})
 	}
 	content, _ := pterm.DefaultTable.WithHasHeader().WithBoxed().WithData(tableData).Srender()
