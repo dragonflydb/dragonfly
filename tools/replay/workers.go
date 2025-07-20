@@ -179,9 +179,8 @@ func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
 
 		atomic.AddUint64(&w.parsed, 1)
 
-		// Check if we should stop sending traffic due to time limit (but continue parsing)
 		if w.stopUntil > 0 && r.Time > w.stopUntil {
-			return true // continue parsing but don't send traffic
+			return true
 		}
 
 		client.incoming <- r
