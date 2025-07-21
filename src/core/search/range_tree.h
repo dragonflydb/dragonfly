@@ -40,10 +40,11 @@ class RangeTree {
   using Map = absl::btree_map<Key, RangeBlock, std::less<Key>,
                               PMR_NS::polymorphic_allocator<std::pair<const Key, RangeBlock>>>;
 
-  static constexpr size_t kMaxRangeBlockSize = 500000;
+  static constexpr size_t kDefaultMaxRangeBlockSize = 7000;
   static constexpr size_t kBlockSize = 400;
 
-  explicit RangeTree(PMR_NS::memory_resource* mr, size_t max_range_block_size = kMaxRangeBlockSize);
+  explicit RangeTree(PMR_NS::memory_resource* mr,
+                     size_t max_range_block_size = kDefaultMaxRangeBlockSize);
 
   // Adds a document with a value to the index.
   void Add(DocId id, double value);

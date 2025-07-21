@@ -35,6 +35,10 @@ using namespace std;
 
 using ::testing::HasSubstr;
 
+// Used for NumericIndex benchmarks.
+// The value is used to determine the maximum size of a range block in the range tree.
+constexpr size_t kMaxRangeBlockSize = 500000;
+
 struct MockedDocument : public DocumentAccessor {
  public:
   using Map = absl::flat_hash_map<std::string, std::string>;
@@ -101,15 +105,40 @@ struct MockedDocument : public DocumentAccessor {
 
 IndicesOptions kEmptyOptions{{}};
 
-Schema MakeSimpleSchema(initializer_list<pair<string_view, SchemaField::FieldType>> ilist) {
+struct SchemaFieldInitializer {
+  SchemaFieldInitializer(std::string_view name, SchemaField::FieldType type)
+      : name{name}, type{type} {
+    switch (type) {
+      case SchemaField::TAG:
+        special_params = SchemaField::TagParams{};
+        break;
+      case SchemaField::TEXT:
+        special_params = SchemaField::TextParams{};
+        break;
+      case SchemaField::NUMERIC:
+        special_params = SchemaField::NumericParams{};
+        break;
+      case SchemaField::VECTOR:
+        special_params = SchemaField::VectorParams{};
+        break;
+    }
+  }
+
+  SchemaFieldInitializer(std::string_view name, SchemaField::FieldType type,
+                         SchemaField::ParamsVariant special_params)
+      : name{name}, type{type}, special_params{special_params} {
+  }
+
+  std::string_view name;
+  SchemaField::FieldType type;
+  SchemaField::ParamsVariant special_params{std::monostate{}};
+};
+
+Schema MakeSimpleSchema(initializer_list<SchemaFieldInitializer> ilist) {
   Schema schema;
-  for (auto [name, type] : ilist) {
-    auto& field = schema.fields[name];
-    field = {type, 0, string{name}};
-    if (type == SchemaField::TAG)
-      field.special_params = SchemaField::TagParams{};
-    else if (type == SchemaField::TEXT)
-      field.special_params = SchemaField::TextParams{};
+  for (auto ifield : ilist) {
+    auto& field = schema.fields[ifield.name];
+    field = {ifield.type, 0, string{ifield.name}, ifield.special_params};
   }
   return schema;
 }
@@ -129,7 +158,7 @@ class SearchTest : public ::testing::Test {
     EXPECT_EQ(entries_.size(), 0u) << "Missing check";
   }
 
-  void PrepareSchema(initializer_list<pair<string_view, SchemaField::FieldType>> ilist) {
+  void PrepareSchema(initializer_list<SchemaFieldInitializer> ilist) {
     schema_ = MakeSimpleSchema(ilist);
   }
 
@@ -1320,7 +1349,8 @@ static void BM_SearchDocIds(benchmark::State& state) {
 BENCHMARK(BM_SearchDocIds)->Range(0, 2);
 
 static void BM_SearchNumericIndexes(benchmark::State& state) {
-  auto schema = MakeSimpleSchema({{"numeric", SchemaField::NUMERIC}});
+  auto schema = MakeSimpleSchema({{"numeric", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}});
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   SearchAlgorithm algo;
@@ -1364,7 +1394,8 @@ static void BM_SearchNumericIndexes(benchmark::State& state) {
 BENCHMARK(BM_SearchNumericIndexes)->Arg(10000)->Arg(100000)->Arg(1000000)->ArgNames({"num_docs"});
 
 static void BM_SearchNumericIndexesSmallRanges(benchmark::State& state) {
-  auto schema = MakeSimpleSchema({{"numeric", SchemaField::NUMERIC}});
+  auto schema = MakeSimpleSchema({{"numeric", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}});
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   SearchAlgorithm algo;
@@ -1414,8 +1445,10 @@ BENCHMARK(BM_SearchNumericIndexesSmallRanges)
 
 static void BM_SearchTwoNumericIndexes(benchmark::State& state) {
   auto schema = MakeSimpleSchema({
-      {"numeric1", SchemaField::NUMERIC},
-      {"numeric2", SchemaField::NUMERIC},
+      {"numeric1", SchemaField::NUMERIC,
+       SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
+      {"numeric2", SchemaField::NUMERIC,
+       SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
   });
 
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
@@ -1472,7 +1505,9 @@ BENCHMARK(BM_SearchTwoNumericIndexes)
     ->ArgNames({"num_docs"});
 
 static void BM_SearchNumericAndTagIndexes(benchmark::State& state) {
-  auto schema = MakeSimpleSchema({{"tag", SchemaField::TAG}, {"numeric", SchemaField::NUMERIC}});
+  auto schema = MakeSimpleSchema({{"tag", SchemaField::TAG},
+                                  {"numeric", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}});
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   SearchAlgorithm algo;
