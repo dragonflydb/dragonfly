@@ -569,7 +569,7 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkRe
     for (auto& tcon : connections) {
       facade::Connection* conn = tcon.Get();
       if (conn && conn->socket()->proactor()->GetPoolIndex() == p->GetPoolIndex()) {
-        conn->ShutdownSelf();
+        conn->ShutdownSelfBlocking();
         killed_connections.fetch_add(1);
       }
     }
