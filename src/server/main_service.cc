@@ -127,6 +127,10 @@ ABSL_FLAG(string, huffman_table, "",
           "domain can currently be only KEYS, code is base64 encoded huffman table exported via "
           "DEBUG COMPRESSION EXPORT. if empty no huffman compression is appplied.");
 
+ABSL_FLAG(bool, jsonpathv2, true,
+          "If true uses Dragonfly jsonpath implementation, "
+          "otherwise uses legacy jsoncons implementation.");
+
 namespace dfly {
 
 #if defined(__linux__)
