@@ -40,7 +40,7 @@ class RangeTree {
   using Map = absl::btree_map<Key, RangeBlock, std::less<Key>,
                               PMR_NS::polymorphic_allocator<std::pair<const Key, RangeBlock>>>;
 
-  static constexpr size_t kDefaultMaxRangeBlockSize = 500000;
+  static constexpr size_t kDefaultMaxRangeBlockSize = 7000;
   static constexpr size_t kBlockSize = 400;
 
   explicit RangeTree(PMR_NS::memory_resource* mr,
