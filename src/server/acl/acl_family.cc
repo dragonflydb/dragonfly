@@ -180,7 +180,7 @@ template <typename P> void AclFamily::TraverseEvictImpl(P predicate) {
       facade::Connection* conn = tcon.Get();
       if (conn && conn->socket()->proactor()->GetPoolIndex() == p->GetPoolIndex()) {
         // preemptive for TlsSocket
-        conn->ShutdownSelf();
+        conn->ShutdownSelfBlocking();
       }
     }
   };
