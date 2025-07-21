@@ -38,7 +38,7 @@ endif()
 # Optionally compile collection commands
 if (WITH_COLLECTION_CMDS)
   set(DF_FAMILY_SRCS set_family.cc hset_family.cc zset_family.cc stream_family.cc)
-  add_definitions(-D_WITH_COLLECTION_CMDS)
+  add_definitions(-DWITH_COLLECTION_CMDS)
 else()
   set(DF_FAMILY_SRCS collection_family_fallback.cc)
 endif()
@@ -46,7 +46,7 @@ endif()
 # Optionally compile extension commands
 if (WITH_EXTENSION_CMDS)
   list(APPEND DF_FAMILY_SRCS geo_family.cc hll_family.cc bitops_family.cc bloom_family.cc json_family.cc)
-  add_definitions(-D_WITH_EXTENSION_CMDS)
+  add_definitions(-DWITH_EXTENSION_CMDS)
 endif()
 
 add_library(dfly_transaction db_slice.cc blocking_controller.cc
