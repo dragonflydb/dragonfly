@@ -8,5 +8,8 @@ add_library(dfly_search_server aggregator.cc doc_accessors.cc doc_index.cc searc
 target_link_libraries(dfly_search_server dfly_transaction dfly_facade redis_lib jsonpath TRDP::jsoncons)
 
 
-cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
-cxx_test(search/aggregator_test dfly_test_lib LABELS DFLY)
+cxx_test(search_family_test dfly_test_lib LABELS DFLY)
+cxx_test(aggregator_test dfly_test_lib LABELS DFLY)
+
+
+add_dependencies(check_dfly search_family_test aggregator_test)

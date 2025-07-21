@@ -5,6 +5,7 @@ option(WITH_COLLECTION_CMDS "Compile SET/HASH/ZSET/STREAM commands" ON)
 option(WITH_EXTENSION_CMDS "Compile BLOOM/BITOPS/GEO/HLL/JSON commands" ON)
 
 add_executable(dragonfly dfly_main.cc version_monitor.cc)
+add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
 cxx_link(dragonfly base dragonfly_lib)
 
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -154,9 +155,6 @@ if (WITH_ASAN OR WITH_USAN)
   target_compile_definitions(dragonfly_test PRIVATE SANITIZERS)
 endif()
 
-
-
-add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
 add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  generic_family_test memcache_parser_test rdb_test journal_test
                  redis_parser_test stream_family_test string_family_test
