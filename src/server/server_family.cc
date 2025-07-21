@@ -662,10 +662,6 @@ uint64_t GetDelayMs(uint64_t ts) {
   return delay_ns;
 }
 
-size_t FetchRssMemory(const io::StatusData& sdata) {
-  return sdata.vm_rss + sdata.hugetlb_pages;
-}
-
 bool ReadProcStats(io::StatusData* sdata) {
   io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
   if (!sdata_res) {
@@ -1031,6 +1027,16 @@ bool ServerFamily::HasPrivilegedInterface() {
                 [](auto* l) { return l->IsPrivilegedInterface(); });
 }
 
+size_t ServerFamily::FetchRssMemory(const io::StatusData& sdata) {
+  size_t total_rss = sdata.vm_rss + sdata.hugetlb_pages;
+
+  rss_mem_current.store(total_rss, memory_order_relaxed);
+  if (total_rss > memory_peaks_.rss.load(memory_order_relaxed))
+    memory_peaks_.rss.store(total_rss, memory_order_relaxed);
+
+  return total_rss;
+}
+
 void ServerFamily::UpdateMemoryGlobalStats() {
   // Called from all shards, but one updates global stats below
   if (EngineShard::tlocal()->shard_id() > 0)
@@ -1046,11 +1052,7 @@ void ServerFamily::UpdateMemoryGlobalStats() {
   if (!success)
     return;
 
-  // Update rss memory peak
   size_t total_rss = FetchRssMemory(status_data);
-  rss_mem_current.store(total_rss, memory_order_relaxed);
-  if (total_rss > memory_peaks_.rss.load(memory_order_relaxed))
-    memory_peaks_.rss.store(total_rss, memory_order_relaxed);
 
   // Decide on stopping or accepting new connections based on oom deny ratio
   double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
@@ -1417,7 +1419,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                       &resp->body());
   }
   if (success) {
-    size_t rss = FetchRssMemory(sdata);
+    size_t rss = ServerFamily::FetchRssMemory(sdata);
     AppendMetricWithoutLabels("used_memory_rss_bytes", "", rss, MetricType::GAUGE, &resp->body());
     AppendMetricWithoutLabels("swap_memory_bytes", "", sdata.vm_swap, MetricType::GAUGE,
                               &resp->body());
