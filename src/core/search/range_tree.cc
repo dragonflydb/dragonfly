@@ -183,7 +183,7 @@ void RangeTree::SplitBlock(Map::iterator it) {
   auto split_result = Split(std::move(it->second));
 
   const RangeNumber m = split_result.median;
-  DCHECK(split_result.right.Size() > 0);
+  DCHECK(!split_result.right.Empty());
 
   entries_.erase(it);
 
@@ -220,6 +220,9 @@ void RangeTree::SplitBlock(Map::iterator it) {
   }
 
   return true;
+}
+
+RangeResult::RangeResult(std::vector<DocId> doc_ids) : result_(std::move(doc_ids)) {
 }
 
 RangeResult::RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks)

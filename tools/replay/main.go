@@ -19,19 +19,20 @@ var fPace = flag.Bool("pace", true, "whether to pace the traffic according to th
 var fSkip = flag.Uint("skip", 0, "skip N records")
 var fSkipTimeSec = flag.Int("skip-time-sec", 0, "skip records in the first N seconds of the recording")
 var fIgnoreParseErrors = flag.Bool("ignore-parse-errors", false, "ignore parsing errors")
+var fTimeLimit = flag.Int("time-limit", 0, "time limit in seconds (0 = no limit)")
 
 func RenderTable(area *pterm.AreaPrinter, files []string, workers []FileWorker) {
-	tableData := pterm.TableData{{"file", "parsed", "processed", "delayed", "clients", "avg(us)", "p50(us)", "p75(us)", "p90(us)", "p99(us)"}}
+	tableData := pterm.TableData{{"file", "parsed", "processed", "delayed", "clients", "avg(us)", "p75(us)", "p90(us)", "p99(us)", "p99.9(us)"}}
 	for i := range workers {
 		workers[i].latencyMu.Lock()
 		avg := 0.0
 		if workers[i].latencyCount > 0 {
 			avg = workers[i].latencySum / float64(workers[i].latencyCount)
 		}
-		p50 := workers[i].latencyDigest.Quantile(0.5)
 		p75 := workers[i].latencyDigest.Quantile(0.75)
 		p90 := workers[i].latencyDigest.Quantile(0.9)
 		p99 := workers[i].latencyDigest.Quantile(0.99)
+		p999 := workers[i].latencyDigest.Quantile(0.999)
 		workers[i].latencyMu.Unlock()
 		tableData = append(tableData, []string{
 			files[i],
@@ -40,10 +41,10 @@ func RenderTable(area *pterm.AreaPrinter, files []string, workers []FileWorker) 
 			fmt.Sprint(atomic.LoadUint64(&workers[i].delayed)),
 			fmt.Sprint(atomic.LoadUint64(&workers[i].clients)),
 			fmt.Sprintf("%.0f", avg),
-			fmt.Sprintf("%.0f", p50),
 			fmt.Sprintf("%.0f", p75),
 			fmt.Sprintf("%.0f", p90),
 			fmt.Sprintf("%.0f", p99),
+			fmt.Sprintf("%.0f", p999),
 		})
 	}
 	content, _ := pterm.DefaultTable.WithHasHeader().WithBoxed().WithData(tableData).Srender()
@@ -52,22 +53,22 @@ func RenderTable(area *pterm.AreaPrinter, files []string, workers []FileWorker) 
 
 // RenderPipelineRangesTable renders the latency digests for each pipeline range
 func RenderPipelineRangesTable(area *pterm.AreaPrinter, files []string, workers []FileWorker) {
-	tableData := pterm.TableData{{"file", "Pipeline Range", "p50(us)", "p75(us)", "p90(us)", "p99(us)"}}
+	tableData := pterm.TableData{{"file", "Pipeline Range", "p75(us)", "p90(us)", "p99(us)", "p99.9(us)"}}
 	for i := range workers {
 		workers[i].latencyMu.Lock()
 		for _, rng := range pipelineRanges {
 			if digest, ok := workers[i].perRange[rng.label]; ok {
-				p50 := digest.Quantile(0.5)
 				p75 := digest.Quantile(0.75)
 				p90 := digest.Quantile(0.9)
 				p99 := digest.Quantile(0.99)
+				p999 := digest.Quantile(0.999)
 				tableData = append(tableData, []string{
 					files[i],
 					rng.label,
-					fmt.Sprintf("%.0f", p50),
 					fmt.Sprintf("%.0f", p75),
 					fmt.Sprintf("%.0f", p90),
 					fmt.Sprintf("%.0f", p99),
+					fmt.Sprintf("%.0f", p999),
 				})
 			}
 		}
@@ -82,7 +83,7 @@ func Run(files []string) {
 
 	var skipUntil uint64
 	effectiveBaseTime := baseTime
-	if  *fSkipTimeSec > 0 {
+	if *fSkipTimeSec > 0 {
 		skipDuration := time.Duration(*fSkipTimeSec) * time.Second
 		skipUntil = uint64(baseTime.Add(skipDuration).UnixNano())
 		effectiveBaseTime = baseTime.Add(skipDuration)
@@ -90,11 +91,19 @@ func Run(files []string) {
 	timeOffset := time.Now().Add(500 * time.Millisecond).Sub(effectiveBaseTime)
 	fmt.Println("Offset -> ", timeOffset)
 
+	// Calculate stop time based on recording timestamps if time limit is specified
+	var stopUntil uint64
+	if *fTimeLimit > 0 {
+		limitDuration := time.Duration(*fTimeLimit) * time.Second
+		stopUntil = uint64(effectiveBaseTime.Add(limitDuration).UnixNano())
+		fmt.Printf("Time limit set to %d seconds\n", *fTimeLimit)
+	}
+
 	// Start a worker for every file. They take care of spawning client workers.
 	var wg sync.WaitGroup
 	workers := make([]FileWorker, len(files))
 	for i := range workers {
-		workers[i] = FileWorker{timeOffset: timeOffset, skipUntil: skipUntil}
+		workers[i] = FileWorker{timeOffset: timeOffset, skipUntil: skipUntil, stopUntil: stopUntil}
 		wg.Add(1)
 		go workers[i].Run(files[i], &wg)
 	}
@@ -235,7 +244,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "\nExamples:")
 		fmt.Fprintf(os.Stderr, "   %s -host 192.168.1.10:6379 -buffer 50 run *.bin\n", binaryName)
 		fmt.Fprintf(os.Stderr, "   %s -skip-time-sec 30 run *.bin\n", binaryName)
-		fmt.Fprintf(os.Stderr, "  %s print *.bin\n", binaryName)
+		fmt.Fprintf(os.Stderr, "   %s -time-limit 60 run *.bin\n", binaryName)
+		fmt.Fprintf(os.Stderr, "   %s print *.bin\n", binaryName)
 	}
 
 	flag.Parse()

@@ -1,4 +1,5 @@
 // Copyright 2022, DragonflyDB authors.  All rights reserved.
+//
 // See LICENSE for licensing terms.
 //
 
@@ -101,6 +102,13 @@ ABSL_FLAG(uint32_t, max_busy_read_usec, 100,
 ABSL_FLAG(size_t, squashed_reply_size_limit, 0,
           "Max bytes allowed for squashing_current_reply_size. If this limit is reached, "
           "connections dispatching pipelines won't squash them.");
+
+ABSL_FLAG(bool, always_flush_pipeline, false,
+          "if true will flush pipeline response after each pipeline squashing");
+
+ABSL_FLAG(uint32_t, pipeline_squash_limit, 1 << 30, "Limit on the size of a squashed pipeline. ");
+ABSL_FLAG(uint32_t, pipeline_low_bound_stats, 0,
+          "If set, will not track pipeline stats below this threshold. ");
 
 using namespace util;
 using namespace std;
@@ -330,6 +338,12 @@ QueueBackpressure& GetQueueBackpressure() {
 
   return thread_queue_backpressure[ProactorBase::me()->GetPoolIndex()];
 }
+
+thread_local uint64_t max_busy_read_cycles_cached = 1ULL << 32;
+thread_local bool always_flush_pipeline_cached = absl::GetFlag(FLAGS_always_flush_pipeline);
+thread_local uint32_t pipeline_squash_limit_cached = absl::GetFlag(FLAGS_pipeline_squash_limit);
+thread_local uint32_t pipeline_low_bound_stats_cached =
+    absl::GetFlag(FLAGS_pipeline_low_bound_stats);
 
 }  // namespace
 
@@ -1412,8 +1426,7 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
   ParserStatus parse_status = OK;
 
   size_t max_iobfuf_len = GetFlag(FLAGS_max_client_iobuf_len);
-  unsigned max_busy_read_cycles =
-      (base::CycleClock::Frequency() * GetFlag(FLAGS_max_busy_read_usec)) / 1000000U;
+  SetMaxBusyReadUsecThreadLocal(GetFlag(FLAGS_max_busy_read_usec));
 
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
@@ -1430,7 +1443,7 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
 
     if (redis_parser_) {
-      parse_status = ParseRedis(max_busy_read_cycles);
+      parse_status = ParseRedis(max_busy_read_cycles_cached);
     } else {
       DCHECK(memcache_parser_);
       parse_status = ParseMemcache();
@@ -1515,16 +1528,29 @@ void Connection::SquashPipeline() {
   vector<ArgSlice> squash_cmds;
   squash_cmds.reserve(dispatch_q_.size());
 
+  bool include_pipeline_for_stats = dispatch_q_.size() >= pipeline_low_bound_stats_cached;
   for (auto& msg : dispatch_q_) {
     CHECK(holds_alternative<PipelineMessagePtr>(msg.handle))
         << msg.handle.index() << " on " << DebugInfo();
 
+    if (!include_pipeline_for_stats) {
+      msg.dispatch_ts = 0;  // resetting this will prevent stats to include this message
+    }
     auto& pmsg = get<PipelineMessagePtr>(msg.handle);
     squash_cmds.push_back(absl::MakeSpan(pmsg->args));
+    if (squash_cmds.size() >= pipeline_squash_limit_cached) {
+      // We reached the limit of commands to squash, so we dispatch them.
+      break;
+    }
   }
 
   cc_->async_dispatch = true;
-
+  if (include_pipeline_for_stats) {
+    stats_->pipeline_dispatch_calls++;
+    stats_->pipeline_dispatch_commands += squash_cmds.size();
+  } else {
+    stats_->pipeline_stats_ignored++;
+  }
   size_t dispatched =
       service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), reply_builder_.get(), cc_.get());
 
@@ -1533,7 +1559,8 @@ void Connection::SquashPipeline() {
   //
   // TODO: to investigate if always flushing will improve P99 latency because otherwise we
   // wait for the next batch to finish before fully flushing the current response.
-  if (pending_pipeline_cmd_cnt_ == squash_cmds.size()) {  // Flush if no new commands appeared
+  if (pending_pipeline_cmd_cnt_ == squash_cmds.size() ||
+      always_flush_pipeline_cached) {  // Flush if no new commands appeared
     reply_builder_->Flush();
     reply_builder_->SetBatchMode(false);  // in case the next dispatch is sync
   }
@@ -1583,7 +1610,7 @@ string Connection::DebugInfo() const {
   }
   absl::StrAppend(&info, "dispatch_fiber:joinable=", async_fb_.IsJoinable(), ", ");
 
-  bool intrusive_front = dispatch_q_.size() > 0 && dispatch_q_.front().IsControl();
+  bool intrusive_front = !dispatch_q_.empty() && dispatch_q_.front().IsControl();
   absl::StrAppend(&info, "dispatch_queue:size=", dispatch_q_.size(), ", ");
   absl::StrAppend(&info, "dispatch_queue:pipelined=", pending_pipeline_cmd_cnt_, ", ");
   absl::StrAppend(&info, "dispatch_queue:intrusive=", intrusive_front, ", ");
@@ -1897,7 +1924,7 @@ void Connection::RecycleMessage(MessageHandle msg) {
     stats_->dispatch_queue_subscriber_bytes -= used_mem;
   }
 
-  if (msg.IsPipelineMsg()) {
+  if (msg.IsPipelineMsg() && msg.dispatch_ts) {
     ++stats_->pipelined_cmd_cnt;
     stats_->pipelined_cmd_latency += (ProactorBase::GetMonotonicTimeNs() - msg.dispatch_ts) / 1000;
   }
@@ -2083,9 +2110,11 @@ bool Connection::IsReplySizeOverLimit() const {
   std::atomic<size_t>& reply_sz = tl_facade_stats->reply_stats.squashing_current_reply_size;
   size_t current = reply_sz.load(std::memory_order_acquire);
   const bool over_limit = reply_size_limit != 0 && current > 0 && current > reply_size_limit;
-  // Every 10 seconds. Otherwise, it can be too sensitive on certain workloads in production
-  // instances.
-  LOG_EVERY_N(INFO, 10) << "MultiCommandSquasher overlimit: " << current << "/" << reply_size_limit;
+  if (over_limit) {
+    LOG_EVERY_T(INFO, 10) << "Commands squashing current reply size is overlimit: " << current
+                          << "/" << reply_size_limit
+                          << ". Falling back to single command dispatch (instead of squashing)";
+  }
   return over_limit;
 }
 
@@ -2115,6 +2144,22 @@ void Connection::TrackRequestSize(bool enable) {
 
 void Connection::EnsureMemoryBudget(unsigned tid) {
   thread_queue_backpressure[tid].EnsureBelowLimit();
+}
+
+void Connection::SetMaxBusyReadUsecThreadLocal(unsigned usec) {
+  max_busy_read_cycles_cached = (base::CycleClock::Frequency() * usec) / 1000000U;
+}
+
+void Connection::SetAlwaysFlushPipelineThreadLocal(bool flush) {
+  always_flush_pipeline_cached = flush;
+}
+
+void Connection::SetPipelineSquashLimitThreadLocal(unsigned limit) {
+  pipeline_squash_limit_cached = limit;
+}
+
+void Connection::SetPipelineLowBoundStats(unsigned limit) {
+  pipeline_low_bound_stats_cached = limit;
 }
 
 Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, unsigned thread_id,

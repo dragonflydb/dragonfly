@@ -60,53 +60,51 @@ bool IsSortableField(std::string_view field_identifier, const search::Schema& sc
 using SortIndiciesFieldsList =
     std::vector<std::pair<string_view /*identifier*/, string_view /*alias*/>>;
 
-std::pair<SearchFieldsList, SortIndiciesFieldsList> PreprocessAggregateFields(
+std::pair<std::vector<FieldReference>, SortIndiciesFieldsList> PreprocessAggregateFields(
     const search::Schema& schema, const AggregateParams& params,
-    const std::optional<SearchFieldsList>& load_fields) {
-  absl::flat_hash_map<std::string_view, SearchField> fields_by_identifier;
+    const std::optional<std::vector<FieldReference>>& load_fields) {
+  absl::flat_hash_map<std::string_view, FieldReference> fields_by_identifier;
   absl::flat_hash_map<std::string_view, std::string_view> sort_indicies_aliases;
   fields_by_identifier.reserve(schema.field_names.size());
   sort_indicies_aliases.reserve(schema.field_names.size());
 
   for (const auto& [fname, fident] : schema.field_names) {
     if (!IsSortableField(fident, schema)) {
-      fields_by_identifier[fident] = {StringOrView::FromView(fident), true,
-                                      StringOrView::FromView(fname)};
+      fields_by_identifier.emplace(fident, FieldReference{fident, fname});
     } else {
       sort_indicies_aliases[fident] = fname;
     }
   }
 
-  if (load_fields) {
-    for (const auto& field : load_fields.value()) {
-      const auto& fident = field.GetIdentifier(schema, false);
-      if (!IsSortableField(fident, schema)) {
-        fields_by_identifier[fident] = field.View();
-      } else {
-        sort_indicies_aliases[fident] = field.GetShortName();
-      }
+  for (const auto& field : load_fields.value_or(vector<FieldReference>{})) {
+    string_view fident = field.Identifier(schema, false);
+    if (!IsSortableField(fident, schema)) {
+      fields_by_identifier.insert_or_assign(fident, field);
+    } else {
+      sort_indicies_aliases[fident] = field.OutputName();
     }
   }
 
-  SearchFieldsList fields;
+  vector<FieldReference> fields;
   fields.reserve(fields_by_identifier.size());
   for (auto& [_, field] : fields_by_identifier) {
-    fields.emplace_back(std::move(field));
+    fields.emplace_back(field);
   }
 
-  SortIndiciesFieldsList sort_fields;
-  sort_fields.reserve(sort_indicies_aliases.size());
-  for (auto& [fident, fname] : sort_indicies_aliases) {
-    sort_fields.emplace_back(fident, fname);
-  }
-
-  return {std::move(fields), std::move(sort_fields)};
+  return {std::move(fields), {sort_indicies_aliases.begin(), sort_indicies_aliases.end()}};
 }
 
 }  // namespace
 
+bool FieldReference::IsJsonPath(std::string_view name) {
+  if (name.size() < 2) {
+    return false;
+  }
+  return name.front() == '$' && (name[1] == '.' || name[1] == '[');
+}
+
 bool SearchParams::ShouldReturnField(std::string_view alias) const {
-  auto cb = [alias](const auto& entry) { return entry.GetShortName() == alias; };
+  auto cb = [alias](const auto& entry) { return entry.OutputName() == alias; };
   return !return_fields || any_of(return_fields->begin(), return_fields->end(), cb);
 }
 
@@ -390,14 +388,14 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
       limit = max(limit, ko->limit);
   }
 
-  auto return_fields = params.return_fields.value_or(SearchFieldsList{});
+  auto return_fields = params.return_fields.value_or(vector<FieldReference>{});
 
   // Apply SORTBY
   // TODO(vlad): Write profiling up to here
   vector<search::SortableValue> sort_scores;
   if (params.sort_option && !skip_sort) {
     const auto& so = *params.sort_option;
-    auto fident = so.field.GetIdentifier(base_->schema, false);
+    auto fident = so.field.Identifier(base_->schema, false);
     if (IsSortableField(fident, base_->schema)) {
       auto* idx = indices_->GetSortIndex(fident);
       sort_scores = idx->Sort(&result.ids, limit, so.order == SortOrder::DESC);
@@ -445,7 +443,7 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     // Load all specified fields from document
     SearchDocData fields{};
     if (params.ShouldReturnAllFields())
-      fields = accessor->SerializeDocument(base_->schema);
+      fields = accessor->Serialize(base_->schema);
 
     auto more_fields = accessor->Serialize(base_->schema, return_fields);
     fields.insert(make_move_iterator(more_fields.begin()), make_move_iterator(more_fields.end()));

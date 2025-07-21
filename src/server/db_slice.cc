@@ -746,8 +746,11 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   table_memory_ += table_increase;
   entries_count_++;
 
-  db.stats.inline_keys += it->first.IsInline();
-  AccountObjectMemory(key, it->first.ObjType(), it->first.MallocUsed(), &db);  // Account for key
+  if (it->first.IsInline()) {
+    ++db.stats.inline_keys;
+  } else {
+    AccountObjectMemory(key, it->first.ObjType(), it->first.MallocUsed(), &db);  // Account for key
+  }
 
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
   it.SetVersion(NextVersion());
@@ -1417,7 +1420,10 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind,
           continue;
 
         auto evict_it = db_table->prime.GetIterator(segment_id, bucket_id, slot_id);
-        if (evict_it->first.IsSticky() || !evict_it->second.HasAllocated())
+        // TODO: consider evicting inline entries as well
+
+        bool has_allocated = evict_it->second.HasAllocated() || evict_it->first.HasAllocated();
+        if (evict_it->first.IsSticky() || !has_allocated)
           continue;
 
         // check if the key is locked by looking up transaction table.
@@ -1701,9 +1707,12 @@ void DbSlice::PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable
   }
 
   ssize_t value_heap_size = pv.MallocUsed(), key_size_used = del_it->first.MallocUsed();
-  stats.inline_keys -= del_it->first.IsInline();
-  AccountObjectMemory(del_it.key(), del_it->first.ObjType(), -key_size_used,
-                      table);                                                // Key
+  if (del_it->first.IsInline()) {
+    --stats.inline_keys;
+  } else {
+    AccountObjectMemory(del_it.key(), del_it->first.ObjType(), -key_size_used,
+                        table);  // Key
+  }
   AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
 
   if (del_it->first.IsAsyncDelete() && pv.ObjType() == OBJ_SET &&

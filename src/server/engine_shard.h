@@ -194,8 +194,6 @@ class EngineShard {
 
   TxQueueInfo AnalyzeTxQueue() const;
 
-  void ForceDefrag();
-
   // Returns true if revelant write operations should throttle to wait for tiering to catch up.
   // The estimate is based on memory usage crossing tiering redline and the write depth being at
   // least 50% of allowed max, providing at least some guarantee of progress.
@@ -203,12 +201,17 @@ class EngineShard {
 
   void FinalizeMulti(Transaction* tx);
 
+  // Scan the shard with the cursor and apply defragmentation for database entries. An optional
+  // threshold can be passed, which will be used to determine if defragmentation should be
+  // performed.
+  // Returns true if defragmentation was performed.
+  bool DoDefrag(float threshold);
+
  private:
   struct DefragTaskState {
     size_t dbid = 0u;
     uint64_t cursor = 0u;
     time_t last_check_time = 0;
-    bool is_force_defrag = false;
 
     // check the current threshold and return true if
     // we need to do the defragmentation
@@ -242,12 +245,6 @@ class EngineShard {
   // context of the controlling thread will access this shard!
   // --------------------------------------------------------------------------
   uint32_t DefragTask();
-
-  // scan the shard with the cursor and apply
-  // de-fragmentation option for entries. This function will return the new cursor at the end of the
-  // scan This function is called from context of StartDefragTask
-  // return true if we did not complete the shard scan
-  bool DoDefrag();
 
   TaskQueue queue_, queue2_;
 

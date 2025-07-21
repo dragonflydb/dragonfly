@@ -120,7 +120,9 @@ struct ConnectionStats {
 
   // Number of events when the pipeline queue was over the limit and was throttled.
   uint64_t pipeline_throttle_count = 0;
-
+  uint64_t pipeline_dispatch_calls = 0;
+  uint64_t pipeline_dispatch_commands = 0;
+  uint64_t pipeline_stats_ignored = 0;
   ConnectionStats& operator+=(const ConnectionStats& o);
 };
 

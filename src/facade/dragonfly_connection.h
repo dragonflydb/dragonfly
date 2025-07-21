@@ -310,6 +310,10 @@ class Connection : public util::Connection {
   static void GetRequestSizeHistogramThreadLocal(std::string* hist);
   static void TrackRequestSize(bool enable);
   static void EnsureMemoryBudget(unsigned tid);
+  static void SetMaxBusyReadUsecThreadLocal(unsigned usec);
+  static void SetAlwaysFlushPipelineThreadLocal(bool flush);
+  static void SetPipelineSquashLimitThreadLocal(unsigned limit);
+  static void SetPipelineLowBoundStats(unsigned limit);
 
   unsigned idle_time() const {
     return time(nullptr) - last_interaction_;

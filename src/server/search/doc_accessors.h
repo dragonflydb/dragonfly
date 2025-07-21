@@ -30,14 +30,7 @@ struct BaseAccessor : public search::DocumentAccessor {
 
   // Serialize selected fields
   virtual SearchDocData Serialize(const search::Schema& schema,
-                                  absl::Span<const SearchField> fields) const;
-
-  /*
-  Serialize the whole type, the default implementation is to serialize all fields.
-  For JSON in FT.SEARCH we need to get answer as {"$", <the whole document>}, but it is not an
-  indexed field
-  */
-  virtual SearchDocData SerializeDocument(const search::Schema& schema) const;
+                                  absl::Span<const FieldReference> fields) const;
 
   // Default implementation uses GetStrings
   virtual std::optional<VectorInfo> GetVector(std::string_view active_field) const override;
@@ -86,9 +79,8 @@ struct JsonAccessor : public BaseAccessor {
 
   // The JsonAccessor works with structured types and not plain strings, so an overload is needed
   SearchDocData Serialize(const search::Schema& schema,
-                          absl::Span<const SearchField> fields) const override;
+                          absl::Span<const FieldReference> fields) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
-  SearchDocData SerializeDocument(const search::Schema& schema) const override;
 
   static void RemoveFieldFromCache(std::string_view field);
 

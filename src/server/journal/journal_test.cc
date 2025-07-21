@@ -45,7 +45,7 @@ struct EntryPayloadVisitor {
 std::string ExtractPayload(ParsedEntry& entry) {
   std::string out = ConCat(entry.cmd.cmd_args);
 
-  if (out.size() > 0)
+  if (!out.empty())
     out.pop_back();
 
   return out;
@@ -56,7 +56,7 @@ std::string ExtractPayload(Entry& entry) {
   EntryPayloadVisitor visitor{&out};
   visitor(entry.payload);
 
-  if (out.size() > 0)
+  if (!out.empty())
     out.pop_back();
 
   return out;

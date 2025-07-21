@@ -627,7 +627,9 @@ string_view FloatSV(const float* f) {
   return {reinterpret_cast<const char*>(f), sizeof(float)};
 }
 
-TEST_F(SearchFamilyTest, TestReturn) {
+auto MatchEntry = [](string key, auto... fields) { return IsMapWithSize(key, IsMap(fields...)); };
+
+TEST_F(SearchFamilyTest, ReturnOption) {
   for (unsigned i = 0; i < 20; i++) {
     const float score = i;
     Run({"hset", "k"s + to_string(i), "longA", to_string(i), "longB", to_string(i + 1), "longC",
@@ -637,8 +639,6 @@ TEST_F(SearchFamilyTest, TestReturn) {
   Run({"ft.create", "i1",     "SCHEMA", "longA",   "AS",    "justA", "TEXT",
        "longB",     "AS",     "justB",  "NUMERIC", "longC", "AS",    "justC",
        "NUMERIC",   "vector", "VECTOR", "FLAT",    "2",     "DIM",   "1"});
-
-  auto MatchEntry = [](string key, auto... fields) { return IsMapWithSize(key, IsMap(fields...)); };
 
   // Check all fields are returned
   auto resp = Run({"ft.search", "i1", "@justA:0"});
@@ -680,6 +680,50 @@ TEST_F(SearchFamilyTest, TestReturn) {
               "vec_return", "DESC", "RETURN", "1", "vec_return", "PARAMS", "2", "vector",
               FloatSV(&score)});
   EXPECT_THAT(resp, MatchEntry("k0", "vec_return", "20"));
+}
+
+TEST_F(SearchFamilyTest, ReturnOptionJson) {
+  const string_view j =
+      R"({"actions":["fly","sleep"],"name":"dragon","not_indexed":true,"size":3})";
+  Run({"json.set", "k1", ".", j});
+  Run({"ft.create", "i1", "on", "json", "schema", "$.name", "as", "name", "text", "$.actions[0]",
+       "as", "primary_action", "tag", "$.size", "as", "size", "numeric"});
+
+  // Return whole document as a single field by default
+  EXPECT_THAT(Run({"ft.search", "i1", "*"}), MatchEntry("k1", "$", j));
+
+  // RETURN 0
+  EXPECT_THAT(Run({"ft.search", "i1", "*", "return", "0"}), IsArray(IntArg(1), "k1"));
+
+  // RETURN by full path
+  EXPECT_THAT(Run({"ft.search", "i1", "*", "return", "1", "$.name"}),
+              MatchEntry("k1", "$.name", "dragon"));
+  EXPECT_THAT(Run({"ft.search", "i1", "*", "return", "1", "$.actions"}),
+              MatchEntry("k1", "$.actions", "[\"fly\",\"sleep\"]"));
+
+  // RETURN by full path with alias
+  EXPECT_THAT(Run({"ft.search", "i1", "*", "return", "1", "$.name", "as", "n"}),
+              MatchEntry("k1", "n", "dragon"));
+
+  // RETURN by schema alias
+  EXPECT_THAT(Run({"ft.search", "i1", "*", "return", "1", "name"}),
+              MatchEntry("k1", "name", "dragon"));
+  EXPECT_THAT(Run({"ft.search", "i1", "*", "return", "1", "primary_action"}),
+              MatchEntry("k1", "primary_action", "fly"));
+
+  // RETURN by schema alias with new alias
+  EXPECT_THAT(Run({"ft.search", "i1", "*", "return", "1", "name", "as", "n"}),
+              MatchEntry("k1", "n", "dragon"));
+  EXPECT_THAT(Run({"ft.search", "i1", "*", "return", "1", "primary_action", "as", "pa"}),
+              MatchEntry("k1", "pa", "fly"));
+
+  // Whole document with SORTBY includes sortable field as return field
+  EXPECT_THAT(Run({"ft.search", "i1", "*", "sortby", "size"}),
+              MatchEntry("k1", "$", j, "size", "3"));
+
+  // RETURN with SORTBY doesn't include sortable field
+  EXPECT_THAT(Run({"ft.search", "i1", "*", "sortby", "size", "return", "1", "name"}),
+              MatchEntry("k1", "name", "dragon"));
 }
 
 TEST_F(SearchFamilyTest, TestStopWords) {
@@ -1235,14 +1279,14 @@ TEST_F(SearchFamilyTest, AggregateWithLoadOptionHard) {
 
   resp = Run({"FT.AGGREGATE", "i2", "*", "LOAD", "2", "foo", "text", "GROUPBY", "2", "@word",
               "@text", "REDUCE", "SUM", "1", "@foo", "AS", "foo_total"});
-  EXPECT_THAT(resp, IsUnordArrayWithSize(
-                        IsMap("foo_total", "20", "word", "\"item2\"", "text", "\"second key\""),
-                        IsMap("foo_total", "10", "word", "\"item1\"", "text", "\"first key\"")));
+  EXPECT_THAT(resp,
+              IsUnordArrayWithSize(IsMap("foo_total", "20", "word", "item2", "text", "second key"),
+                                   IsMap("foo_total", "10", "word", "item1", "text", "first key")));
 
   resp = Run({"FT.AGGREGATE", "i2", "*", "LOAD", "1", "@word", "GROUPBY", "1", "@word", "REDUCE",
               "SUM", "1", "@foo", "AS", "foo_total"});
-  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("foo_total", "20", "word", "\"item2\""),
-                                         IsMap("foo_total", "10", "word", "\"item1\"")));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("foo_total", "20", "word", "item2"),
+                                         IsMap("foo_total", "10", "word", "item1")));
 }
 #endif
 
@@ -1499,9 +1543,8 @@ TEST_F(SearchFamilyTest, AggregateResultFields) {
 
   absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "@b", "SORTBY", "1", "a"});
-  EXPECT_THAT(resp,
-              IsUnordArrayWithSize(IsMap("b", "\"2\"", "a", "1"), IsMap("b", "\"5\"", "a", "4"),
-                                   IsMap("b", "\"8\"", "a", "7")));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("b", "2", "a", "1"), IsMap("b", "5", "a", "4"),
+                                         IsMap("b", "8", "a", "7")));
   absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
   resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "@b", "SORTBY", "1", "a"});
   EXPECT_THAT(resp, ErrArg("SORTBY field name 'a' must start with '@'"));
@@ -1509,9 +1552,9 @@ TEST_F(SearchFamilyTest, AggregateResultFields) {
   absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a", "GROUPBY", "2", "@b", "@a", "REDUCE",
               "COUNT", "0", "AS", "count"});
-  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("b", "\"8\"", "a", "7", "count", "1"),
-                                         IsMap("b", "\"2\"", "a", "1", "count", "1"),
-                                         IsMap("b", "\"5\"", "a", "4", "count", "1")));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("b", "8", "a", "7", "count", "1"),
+                                         IsMap("b", "2", "a", "1", "count", "1"),
+                                         IsMap("b", "5", "a", "4", "count", "1")));
   absl::SetFlag(&FLAGS_search_reject_legacy_field, true);
   resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a", "GROUPBY", "2", "@b", "@a", "REDUCE",
               "COUNT", "0", "AS", "count"});
@@ -1545,53 +1588,51 @@ TEST_F(SearchFamilyTest, AggregateSortByJson) {
 
   // Test sorting by name (DESC) and number (ASC)
   auto resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "4", "@name", "DESC", "@number", "ASC"});
-  EXPECT_THAT(resp, IsUnordArrayWithSize(
-                        IsMap("name", "\"third\"", "number", "300"),
-                        IsMap("name", "\"sixth\"", "number", "300"),
-                        IsMap("name", "\"seventh\"", "number", "400"),
-                        IsMap("name", "\"second\"", "number", "800"), IsMap("name", "\"ninth\""),
-                        IsMap("name", "\"fourth\"", "number", "400"),
-                        IsMap("name", "\"first\"", "number", "1200"),
-                        IsMap("name", "\"fifth\"", "number", "900"), IsMap("name", "\"eighth\"")));
+  EXPECT_THAT(
+      resp, IsUnordArrayWithSize(
+                IsMap("name", "third", "number", "300"), IsMap("name", "sixth", "number", "300"),
+                IsMap("name", "seventh", "number", "400"), IsMap("name", "second", "number", "800"),
+                IsMap("name", "ninth"), IsMap("name", "fourth", "number", "400"),
+                IsMap("name", "first", "number", "1200"), IsMap("name", "fifth", "number", "900"),
+                IsMap("name", "eighth")));
 
   // Test sorting by name (ASC) and number (DESC)
   resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "4", "@name", "ASC", "@number", "DESC"});
-  EXPECT_THAT(resp, IsUnordArrayWithSize(
-                        IsMap("name", "\"eighth\""), IsMap("name", "\"fifth\"", "number", "900"),
-                        IsMap("name", "\"first\"", "number", "1200"),
-                        IsMap("name", "\"fourth\"", "number", "400"), IsMap("name", "\"ninth\""),
-                        IsMap("name", "\"second\"", "number", "800"),
-                        IsMap("name", "\"seventh\"", "number", "400"),
-                        IsMap("name", "\"sixth\"", "number", "300"),
-                        IsMap("name", "\"third\"", "number", "300")));
+  EXPECT_THAT(
+      resp, IsUnordArrayWithSize(
+                IsMap("name", "eighth"), IsMap("name", "fifth", "number", "900"),
+                IsMap("name", "first", "number", "1200"), IsMap("name", "fourth", "number", "400"),
+                IsMap("name", "ninth"), IsMap("name", "second", "number", "800"),
+                IsMap("name", "seventh", "number", "400"), IsMap("name", "sixth", "number", "300"),
+                IsMap("name", "third", "number", "300")));
 
   // Test sorting by group (ASC), number (DESC), and name
   resp = Run(
       {"FT.AGGREGATE", "index", "*", "SORTBY", "5", "@group", "ASC", "@number", "DESC", "@name"});
-  EXPECT_THAT(resp, IsUnordArrayWithSize(
-                        IsMap("group", "\"first\"", "number", "1200", "name", "\"first\""),
-                        IsMap("group", "\"first\"", "number", "800", "name", "\"second\""),
-                        IsMap("group", "\"first\"", "number", "300", "name", "\"sixth\""),
-                        IsMap("group", "\"first\"", "number", "300", "name", "\"third\""),
-                        IsMap("group", "\"first\"", "name", "\"eighth\""),
-                        IsMap("group", "\"second\"", "number", "900", "name", "\"fifth\""),
-                        IsMap("group", "\"second\"", "number", "400", "name", "\"fourth\""),
-                        IsMap("group", "\"second\"", "number", "400", "name", "\"seventh\""),
-                        IsMap("group", "\"second\"", "name", "\"ninth\"")));
+  EXPECT_THAT(resp,
+              IsUnordArrayWithSize(IsMap("group", "first", "number", "1200", "name", "first"),
+                                   IsMap("group", "first", "number", "800", "name", "second"),
+                                   IsMap("group", "first", "number", "300", "name", "sixth"),
+                                   IsMap("group", "first", "number", "300", "name", "third"),
+                                   IsMap("group", "first", "name", "eighth"),
+                                   IsMap("group", "second", "number", "900", "name", "fifth"),
+                                   IsMap("group", "second", "number", "400", "name", "fourth"),
+                                   IsMap("group", "second", "number", "400", "name", "seventh"),
+                                   IsMap("group", "second", "name", "ninth")));
 
   // Test sorting by number (ASC), group (DESC), and name
   resp = Run(
       {"FT.AGGREGATE", "index", "*", "SORTBY", "5", "@number", "ASC", "@group", "DESC", "@name"});
-  EXPECT_THAT(resp, IsUnordArrayWithSize(
-                        IsMap("number", "300", "group", "\"first\"", "name", "\"sixth\""),
-                        IsMap("number", "300", "group", "\"first\"", "name", "\"third\""),
-                        IsMap("number", "400", "group", "\"second\"", "name", "\"fourth\""),
-                        IsMap("number", "400", "group", "\"second\"", "name", "\"seventh\""),
-                        IsMap("number", "800", "group", "\"first\"", "name", "\"second\""),
-                        IsMap("number", "900", "group", "\"second\"", "name", "\"fifth\""),
-                        IsMap("number", "1200", "group", "\"first\"", "name", "\"first\""),
-                        IsMap("group", "\"second\"", "name", "\"ninth\""),
-                        IsMap("group", "\"first\"", "name", "\"eighth\"")));
+  EXPECT_THAT(resp,
+              IsUnordArrayWithSize(IsMap("number", "300", "group", "first", "name", "sixth"),
+                                   IsMap("number", "300", "group", "first", "name", "third"),
+                                   IsMap("number", "400", "group", "second", "name", "fourth"),
+                                   IsMap("number", "400", "group", "second", "name", "seventh"),
+                                   IsMap("number", "800", "group", "first", "name", "second"),
+                                   IsMap("number", "900", "group", "second", "name", "fifth"),
+                                   IsMap("number", "1200", "group", "first", "name", "first"),
+                                   IsMap("group", "second", "name", "ninth"),
+                                   IsMap("group", "first", "name", "eighth")));
 
   // Test sorting with MAX 3
   resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@number", "MAX", "3"});
@@ -1612,14 +1653,13 @@ TEST_F(SearchFamilyTest, AggregateSortByJson) {
 
   // Test sorting by name and number (DESC)
   resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "3", "@name", "@number", "DESC"});
-  EXPECT_THAT(resp, IsUnordArrayWithSize(
-                        IsMap("name", "\"eighth\""), IsMap("name", "\"fifth\"", "number", "900"),
-                        IsMap("name", "\"first\"", "number", "1200"),
-                        IsMap("name", "\"fourth\"", "number", "400"), IsMap("name", "\"ninth\""),
-                        IsMap("name", "\"second\"", "number", "800"),
-                        IsMap("name", "\"seventh\"", "number", "400"),
-                        IsMap("name", "\"sixth\"", "number", "300"),
-                        IsMap("name", "\"third\"", "number", "300")));
+  EXPECT_THAT(
+      resp, IsUnordArrayWithSize(
+                IsMap("name", "eighth"), IsMap("name", "fifth", "number", "900"),
+                IsMap("name", "first", "number", "1200"), IsMap("name", "fourth", "number", "400"),
+                IsMap("name", "ninth"), IsMap("name", "second", "number", "800"),
+                IsMap("name", "seventh", "number", "400"), IsMap("name", "sixth", "number", "300"),
+                IsMap("name", "third", "number", "300")));
 
   // Test SORTBY with MAX, GROUPBY, and REDUCE COUNT
   resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@name", "MAX", "3", "GROUPBY", "1",
@@ -1728,7 +1768,7 @@ TEST_F(SearchFamilyTest, InvalidSearchOptions) {
 
   // Test with RETURN having duplicate fields
   resp = Run({"FT.SEARCH", "idx", "*", "RETURN", "4", "field1", "field1", "field2", "field2"});
-  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("field1", "\"first\"", "field2", "\"second\"")));
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("field1", "first", "field2", "second")));
 
   // Test with RETURN exceeding maximum allowed count
   resp = Run({"FT.SEARCH", "idx", "*", "RETURN", "100000000000000000000", "@field1", "@field2"});
@@ -2115,8 +2155,8 @@ TEST_F(SearchFamilyTest, SearchSortByOptionNonSortableFieldJson) {
   EXPECT_EQ(resp, "OK");
 
   auto expect_expr = [](std::string_view text_field) {
-    return IsArray(2, "json2", IsMap(text_field, "\"1\"", "$", R"({"text":"1"})"), "json1",
-                   IsMap(text_field, "\"2\"", "$", R"({"text":"2"})"));
+    return IsArray(2, "json2", IsMap(text_field, "1", "$", R"({"text":"1"})"), "json1",
+                   IsMap(text_field, "2", "$", R"({"text":"2"})"));
   };
 
   resp = Run({"FT.SEARCH", "index", "*", "SORTBY", "text"});

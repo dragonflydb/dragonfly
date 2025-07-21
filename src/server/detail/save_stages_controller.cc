@@ -217,7 +217,7 @@ size_t SaveStagesController::GetSaveBuffersSize() {
     }
   };
 
-  if (snapshots_.size() > 0) {
+  if (!snapshots_.empty()) {
     if (use_dfs_format_) {
       shard_set->RunBriefInParallel([&](EngineShard* es) { add_snapshot_bytes(es->shard_id()); });
 
@@ -232,7 +232,7 @@ size_t SaveStagesController::GetSaveBuffersSize() {
 }
 
 RdbSaver::SnapshotStats SaveStagesController::GetCurrentSnapshotProgress() const {
-  if (snapshots_.size() == 0) {
+  if (snapshots_.empty()) {
     return {0, 0};
   }
 

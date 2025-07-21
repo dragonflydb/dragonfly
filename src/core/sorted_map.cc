@@ -890,7 +890,7 @@ size_t SortedMap::DeleteRangeByScore(const zrangespec& range) {
   char buf[16] = {0};
   size_t deleted = 0;
 
-  while (score_tree->Size() > 0) {
+  while (!score_tree->Empty()) {
     ScoreSds min_key = BuildScoredKey(range.min, buf);
     auto path = score_tree->GEQ(Query{min_key, false, range.minex});
     if (path.Empty())

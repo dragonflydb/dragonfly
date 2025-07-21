@@ -1509,6 +1509,16 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("pipeline_commands_total", "", conn_stats.pipelined_cmd_cnt,
                             MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_dispatch_calls_total", "", conn_stats.pipeline_dispatch_calls,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_dispatch_stats_ignored_total", "",
+                            conn_stats.pipeline_stats_ignored, MetricType::COUNTER, &resp->body());
+
+  AppendMetricWithoutLabels("pipeline_dispatch_commands_total", "",
+                            conn_stats.pipeline_dispatch_commands,
+
+                            MetricType::COUNTER, &resp->body());
+
   AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
                             conn_stats.pipelined_cmd_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
@@ -1699,12 +1709,14 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
 
     ReplicationMemoryStats repl_mem;
     dfly_cmd->GetReplicationMemoryStats(&repl_mem);
-    AppendMetricWithoutLabels(
-        "replication_streaming_bytes", "Stable sync replication memory  usage",
-        repl_mem.streamer_buf_capacity_bytes, MetricType::GAUGE, &resp->body());
+    AppendMetricWithoutLabels("replication_streaming_bytes", "Stable sync replication memory usage",
+                              repl_mem.streamer_buf_capacity_bytes, MetricType::GAUGE,
+                              &resp->body());
     AppendMetricWithoutLabels("replication_full_sync_bytes", "Full sync memory usage",
                               repl_mem.full_sync_buf_bytes, MetricType::GAUGE, &resp->body());
-
+    AppendMetricWithoutLabels("replication_psync_count", "Pync count",
+                              m.coordinator_stats.psync_requests_total, MetricType::COUNTER,
+                              &resp->body());
     AppendMetricHeader("connected_replica_lag_records", "Lag in records of a connected replica.",
                        MetricType::GAUGE, &replication_lag_metrics);
     for (const auto& replica : replicas_info) {
@@ -1925,33 +1937,49 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
     return GenericError{make_error_code(errc::operation_in_progress),
                         StrCat(GlobalStateName(state), " - can not save database")};
   }
+  // Check if save is already in progress
   {
     util::fb2::LockGuard lk(save_mu_);
     if (save_controller_) {
       return GenericError{make_error_code(errc::operation_in_progress),
                           "SAVING - can not save database"};
     }
+  }
 
-    auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
-                                ? snapshot_storage_
-                                : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
+  // Create save controller outside of mutex to avoid blocking INFO commands
+  auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
+                              ? snapshot_storage_
+                              : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
 
-    save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
-        save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
-        &service_, fq_threadpool_.get(), snapshot_storage, opts.bg_save});
+  auto temp_save_controller = make_unique<SaveStagesController>(detail::SaveStagesInputs{
+      save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans, &service_,
+      fq_threadpool_.get(), snapshot_storage, opts.bg_save});
 
-    auto res = save_controller_->InitResourcesAndStart();
+  // Initialize resources outside of mutex (this may take time for S3 operations)
+  auto res = temp_save_controller->InitResourcesAndStart();
+
+  // Now acquire mutex only to set the controller and update state
+  {
+    util::fb2::LockGuard lk(save_mu_);
+
+    // Double-check that no other save started while we were initializing
+    if (save_controller_) {
+      return GenericError{make_error_code(errc::operation_in_progress),
+                          "SAVING - can not save database"};
+    }
 
     if (res) {
       DCHECK_EQ(res->error, true);
       last_save_info_.SetLastSaveError(*res);
-      save_controller_.reset();
+      // Don't set save_controller_ since initialization failed
       if (bg_save) {
         last_save_info_.last_bgsave_status = false;
       }
       return res->error;
     }
 
+    // Success - set the controller and update state
+    save_controller_ = std::move(temp_save_controller);
     last_save_info_.bgsave_in_progress = bg_save;
   }
   return {};
@@ -2461,6 +2489,10 @@ void ServerFamily::ResetStat(Namespace* ns) {
         }
         facade::ResetStats();
         ServerState::tlocal()->exec_freq_count.clear();
+
+        auto reset_cb = [](uint64_t) -> uint64_t { return 0u; };
+        ServerState::tlocal()->stats.tx_width_freq_arr.apply(reset_cb);
+        ServerState::tlocal()->stats.squash_width_freq_arr.apply(reset_cb);
       });
 }
 
@@ -2903,6 +2935,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("tx_batch_scheduled_items_total", m.shard_stats.tx_batch_scheduled_items_total);
     append("tx_batch_schedule_calls_total", m.shard_stats.tx_batch_schedule_calls_total);
     append("tx_with_freq", absl::StrJoin(m.coordinator_stats.tx_width_freq_arr, ","));
+    append("squash_with_freq", absl::StrJoin(m.coordinator_stats.squash_width_freq_arr, ","));
     append("tx_queue_len", m.tx_queue_len);
 
     append("eval_io_coordination_total", m.coordinator_stats.eval_io_coordination_cnt);
@@ -3142,7 +3175,7 @@ void ServerFamily::Hello(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view clientname;
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (args.size() > 0) {
+  if (!args.empty()) {
     string_view proto_version = ArgS(args, 0);
     is_resp3 = proto_version == "3";
     bool valid_proto_version = proto_version == "2" || is_resp3;

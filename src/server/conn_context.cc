@@ -46,7 +46,7 @@ StoredCmd::StoredCmd(const CommandId* cid, bool own_args, ArgSlice args)
   own_storage.buffer.resize(total_size);
   char* next = own_storage.buffer.data();
   for (unsigned i = 0; i < args.size(); i++) {
-    if (args[i].size() > 0)
+    if (!args[i].empty())
       memcpy(next, args[i].data(), args[i].size());
     next += args[i].size();
     own_storage.sizes[i] = args[i].size();

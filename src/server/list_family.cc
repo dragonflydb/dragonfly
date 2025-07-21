@@ -1031,7 +1031,7 @@ void ListFamily::BLMPop(CmdArgList args, const CommandContext& cmd_cntx) {
 
   OpResult<StringVec> result;
   auto cb = [&](Transaction* t, EngineShard* shard, string_view key) {
-    result = OpPop(t->GetOpArgs(shard), key, dir, pop_count, true, false);
+    result = OpPop(t->GetOpArgs(shard), key, dir, pop_count, true, true);
     return result.status();
   };
 
@@ -1339,8 +1339,9 @@ void ListFamily::Register(CommandRegistry* registry) {
       << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kLPushX}.HFUNC(LPushX)
       << CI{"LPOP", CO::WRITE | CO::FAST, -2, 1, 1, acl::kLPop}.HFUNC(LPop)
       << CI{"LMPOP", CO::WRITE | CO::SLOW | CO::VARIADIC_KEYS, -4, 2, 2, acl::kLMPop}.HFUNC(LMPop)
-      << CI{"BLMPOP", CO::WRITE | CO::SLOW | CO::VARIADIC_KEYS, -5, 3, 3, acl::kBLMPop}.HFUNC(
-             BLMPop)
+      << CI{"BLMPOP",    CO::WRITE | CO::SLOW | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -5, 3, 3,
+            acl::kBLMPop}
+             .HFUNC(BLMPop)
       << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kRPush}.HFUNC(RPush)
       << CI{"RPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kRPushX}.HFUNC(RPushX)
       << CI{"RPOP", CO::WRITE | CO::FAST, -2, 1, 1, acl::kRPop}.HFUNC(RPop)
