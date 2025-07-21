@@ -207,12 +207,18 @@ class RangeResult {
   using Variant = std::variant<DocsList, SingleBlockRangeResult, TwoBlocksRangeResult>;
 
  public:
+  RangeResult() = default;
+
+  explicit RangeResult(std::vector<DocId> doc_ids);
   explicit RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks);
   RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks, double l, double r);
 
   std::vector<DocId> Take();
 
   Variant& GetResult();
+  const Variant& GetResult() const {
+    return result_;
+  }
 
  private:
   Variant result_;

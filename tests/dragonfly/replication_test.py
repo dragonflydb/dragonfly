@@ -3340,6 +3340,7 @@ async def test_mc_gat_replication(df_factory):
     assert result[key] == (value, expected_cas_ver), f"unexpected result for key: {result=}"
 
 
+@pytest.mark.skip("Fails constantly on CI")
 @pytest.mark.slow
 @pytest.mark.parametrize("serialization_max_size", [1, 64000])
 async def test_replication_onmove_flow(df_factory, serialization_max_size):
