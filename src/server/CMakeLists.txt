@@ -1,6 +1,9 @@
 option(DF_ENABLE_MEMORY_TRACKING "Adds memory tracking debugging via MEMORY TRACK command" ON)
 option(PRINT_STACKTRACES_ON_SIGNAL "Enables DF to print all fiber stacktraces on SIGUSR1" OFF)
 
+option(WITH_COLLECTION_CMDS "Compile SET/HASH/ZSET/STREAM commands" ON)
+option(WITH_EXTENSION_CMDS "Compile BLOOM/BITOPS/GEO/HLL/JSON commands" ON)
+
 add_executable(dragonfly dfly_main.cc version_monitor.cc)
 cxx_link(dragonfly base dragonfly_lib)
 
@@ -25,6 +28,25 @@ if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
     cxx_test(tiering/external_alloc_test dfly_test_lib LABELS DFLY)
 endif()
 
+# Optionally include command families as needed
+add_subdirectory(search)
+if (WITH_SEARCH)
+  add_definitions(-DWITH_SEARCH)
+endif()
+
+# Optionally compile collection commands
+if (WITH_COLLECTION_CMDS)
+  set(DF_FAMILY_SRCS set_family.cc hset_family.cc zset_family.cc stream_family.cc)
+  add_definitions(-D_WITH_COLLECTION_CMDS)
+else()
+  set(DF_FAMILY_SRCS collection_family_fallback.cc)
+endif()
+
+# Optionally compile extension commands
+if (WITH_EXTENSION_CMDS)
+  list(APPEND DF_FAMILY_SRCS geo_family.cc hll_family.cc bitops_family.cc bloom_family.cc json_family.cc)
+  add_definitions(-D_WITH_EXTENSION_CMDS)
+endif()
 
 add_library(dfly_transaction db_slice.cc blocking_controller.cc
             command_registry.cc  cluster_support.cc
@@ -34,30 +56,26 @@ add_library(dfly_transaction db_slice.cc blocking_controller.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
             ${TX_LINUX_SRCS} acl/acl_log.cc slowlog.cc channel_store.cc)
 
-SET(DF_SEARCH_SRCS search/search_family.cc search/doc_index.cc search/doc_accessors.cc
-    search/aggregator.cc)
-
 if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
   SET(DF_LINUX_SRCS tiered_storage.cc)
 
   cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
 endif()
 
-add_library(dragonfly_lib bloom_family.cc
+set(FAMILY_SRCS "")
+
+
+add_library(dragonfly_lib
             config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc engine_shard.cc
             engine_shard_set.cc error.cc family_utils.cc
-            generic_family.cc hset_family.cc http_api.cc json_family.cc
-            list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc
+            server_family.cc string_family.cc list_family.cc generic_family.cc
+            ${DF_FAMILY_SRCS}
+            main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc http_api.cc
             protocol_client.cc
-            snapshot.cc script_mgr.cc server_family.cc
-            detail/compressor.cc
-            detail/decompress.cc
-            detail/save_stages_controller.cc
-            detail/snapshot_storage.cc
-            set_family.cc stream_family.cc string_family.cc
-            zset_family.cc geo_family.cc version.cc bitops_family.cc container_utils.cc
-            multi_command_squasher.cc hll_family.cc
-            ${DF_SEARCH_SRCS}
+            snapshot.cc script_mgr.cc
+            detail/compressor.cc detail/decompress.cc detail/save_stages_controller.cc detail/snapshot_storage.cc
+            version.cc container_utils.cc
+            multi_command_squasher.cc
             ${DF_LINUX_SRCS}
             cluster/cluster_config.cc cluster/cluster_family.cc cluster/incoming_slot_migration.cc
             cluster/outgoing_slot_migration.cc cluster/cluster_defs.cc cluster/cluster_utility.cc
@@ -83,7 +101,8 @@ if (WITH_AWS)
 endif()
 
 cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float TRDP::hdr_histogram)
-cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib ${AWS_LIB} jsonpath
+cxx_link(dragonfly_lib dfly_transaction dfly_facade dfly_search_server
+         redis_lib ${AWS_LIB} jsonpath
          strings_lib html_lib gcp_lib azure_lib
          http_client_lib absl::random_random TRDP::jsoncons TRDP::zstd TRDP::lz4
          TRDP::croncpp TRDP::flatbuffers)
@@ -126,7 +145,6 @@ cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
 cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
-cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
 if (WITH_ASAN OR WITH_USAN)
   target_compile_definitions(stream_family_test PRIVATE SANITIZERS)
   target_compile_definitions(multi_test PRIVATE SANITIZERS)
@@ -135,7 +153,6 @@ if (WITH_ASAN OR WITH_USAN)
   target_compile_definitions(json_family_memory_test PRIVATE SANITIZERS)
   target_compile_definitions(dragonfly_test PRIVATE SANITIZERS)
 endif()
-cxx_test(search/aggregator_test dfly_test_lib LABELS DFLY)
 
 
 

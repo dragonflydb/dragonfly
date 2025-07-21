@@ -2822,20 +2822,30 @@ void Service::Register(CommandRegistry* registry) {
 
 void Service::RegisterCommands() {
   Register(&registry_);
-  StreamFamily::Register(&registry_);
-  StringFamily::Register(&registry_);
+  server_family_.Register(&registry_);
   GenericFamily::Register(&registry_);
   ListFamily::Register(&registry_);
+  StringFamily::Register(&registry_);
+
+#ifdef WITH_COLLECTION_CMDS
   SetFamily::Register(&registry_);
   HSetFamily::Register(&registry_);
   ZSetFamily::Register(&registry_);
+  StreamFamily::Register(&registry_);
+#endif
+
+#ifdef WITH_EXTENSION_CMDS
   GeoFamily::Register(&registry_);
-  JsonFamily::Register(&registry_);
   BitOpsFamily::Register(&registry_);
   HllFamily::Register(&registry_);
-  SearchFamily::Register(&registry_);
   BloomFamily::Register(&registry_);
-  server_family_.Register(&registry_);
+  JsonFamily::Register(&registry_);
+#endif
+
+#ifdef WITH_SEARCH
+  SearchFamily::Register(&registry_);
+#endif
+
   cluster_family_.Register(&registry_);
 
   // AclFamily should always be registered last

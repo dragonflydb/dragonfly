@@ -7,6 +7,8 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
+#include <memory>
+
 #include "base/flags.h"
 #include "io/proc_reader.h"
 
@@ -567,7 +569,7 @@ void EngineShard::InitThreadLocal(ProactorBase* pb) {
 
   RoundRobinSharder::Init();
 
-  shard_->shard_search_indices_.reset(new ShardDocIndices());
+  shard_->shard_search_indices_ = std::make_unique<ShardDocIndices>();
 }
 
 void EngineShard::InitTieredStorage(ProactorBase* pb, size_t max_file_size) {

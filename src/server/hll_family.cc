@@ -324,6 +324,7 @@ void PFMerge(CmdArgList args, const CommandContext& cmd_cntx) {
   } else {
     HandleOpValueResult(result, cmd_cntx.rb);
   }
+  THIS SHOULD BREAK THE CODE !
 }
 
 }  // namespace
