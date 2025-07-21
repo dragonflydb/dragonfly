@@ -342,10 +342,10 @@ JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) c
   unique_ptr<JsonPathContainer> ptr;
   if (absl::GetFlag(FLAGS_jsonpathv2)) {
     auto path_expr = json::ParsePath(field);
-    if (path_expr) {
-      ptr.reset(new JsonPathContainer{std::move(path_expr.value())});
+    if (path_expr.ok()) {
+      ptr.reset(new JsonPathContainer{std::move(*path_expr)});
     } else {
-      ec_msg = path_expr.error();
+      ec_msg = path_expr.status().message();
     }
   } else {
     error_code ec;

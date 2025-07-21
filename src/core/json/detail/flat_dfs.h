@@ -8,7 +8,7 @@
 
 #include <variant>
 
-#include "base/expected.hpp"
+#include "absl/status/statusor.h"
 #include "core/flatbuffers.h"
 #include "core/json/detail/common.h"
 #include "core/json/path.h"
@@ -19,7 +19,7 @@ class FlatDfsItem {
  public:
   using ValueType = flexbuffers::Reference;
   using DepthState = std::pair<ValueType, unsigned>;  // object, segment_idx pair
-  using AdvanceResult = nonstd::expected<DepthState, MatchStatus>;
+  using AdvanceResult = absl::StatusOr<DepthState>;
 
   FlatDfsItem(ValueType val, unsigned idx = 0) : depth_state_(val, idx) {
   }
@@ -71,9 +71,8 @@ class FlatDfs {
  private:
   bool TraverseImpl(absl::Span<const PathSegment> path, const PathFlatCallback& callback);
 
-  nonstd::expected<void, MatchStatus> PerformStep(const PathSegment& segment,
-                                                  const flexbuffers::Reference node,
-                                                  const PathFlatCallback& callback);
+  absl::Status PerformStep(const PathSegment& segment, const flexbuffers::Reference node,
+                           const PathFlatCallback& callback);
 
   void DoCall(const PathFlatCallback& callback, std::optional<std::string_view> key,
               const flexbuffers::Reference node) {

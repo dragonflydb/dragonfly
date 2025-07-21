@@ -8,7 +8,7 @@
 
 #include <variant>
 
-#include "base/expected.hpp"
+#include "absl/status/statusor.h"
 #include "core/json/detail/common.h"
 #include "core/json/json_object.h"
 #include "core/json/path.h"
@@ -30,7 +30,7 @@ template <bool IsConst> class JsonconsDfsItem {
       std::conditional_t<IsConst, JsonType::const_array_iterator, JsonType::array_iterator>;
 
   using DepthState = std::pair<Ptr, unsigned>;  // object, segment_idx pair
-  using AdvanceResult = nonstd::expected<DepthState, MatchStatus>;
+  using AdvanceResult = absl::StatusOr<DepthState>;
 
   JsonconsDfsItem(Ptr o, unsigned idx = 0) : depth_state_(o, idx) {
   }
@@ -125,13 +125,11 @@ class Dfs {
  private:
   bool TraverseImpl(absl::Span<const PathSegment> path, const Cb& callback);
 
-  nonstd::expected<void, MatchStatus> PerformStep(const PathSegment& segment, const JsonType& node,
-                                                  const Cb& callback);
+  absl::Status PerformStep(const PathSegment& segment, const JsonType& node, const Cb& callback);
 
-  nonstd::expected<void, MatchStatus> MutateStep(const PathSegment& segment,
-                                                 const MutateCallback& cb, JsonType* node);
+  absl::Status MutateStep(const PathSegment& segment, const MutateCallback& cb, JsonType* node);
 
-  nonstd::expected<void, MatchStatus> DeleteStep(const PathSegment& segment, JsonType* node);
+  absl::Status DeleteStep(const PathSegment& segment, JsonType* node);
 
   void DoCall(const Cb& callback, std::optional<std::string_view> key, const JsonType& node) {
     ++matches_;
@@ -183,7 +181,7 @@ auto JsonconsDfsItem<IsConst>::Init(const PathSegment& segment) -> AdvanceResult
       if (obj().is_array()) {
         IndexExpr index = segment.index().Normalize(obj().size());
         if (index.Empty()) {
-          return nonstd::make_unexpected(OUT_OF_BOUNDS);
+          return absl::InvalidArgumentError("Index out of bounds");
         }
 
         auto start = ArrBegin() + index.first, end = ArrBegin() + index.second;
@@ -227,7 +225,7 @@ auto JsonconsDfsItem<IsConst>::Init(const PathSegment& segment) -> AdvanceResult
       LOG(DFATAL) << "Unknown segment " << SegmentName(segment.type());
   }  // end switch
 
-  return nonstd::make_unexpected(MISMATCH);
+  return absl::InvalidArgumentError("Path segment mismatch");
 }
 
 }  // namespace dfly::json::detail

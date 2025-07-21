@@ -9,7 +9,6 @@
 namespace dfly::json::detail {
 
 using namespace std;
-using nonstd::make_unexpected;
 
 inline bool IsRecursive(flexbuffers::Type type) {
   return type == flexbuffers::FBT_MAP || type == flexbuffers::FBT_VECTOR;
@@ -52,7 +51,7 @@ auto FlatDfsItem::Init(const PathSegment& segment) -> AdvanceResult {
       auto vec = obj().AsVector();
       IndexExpr index = segment.index().Normalize(vec.size());
       if (index.Empty()) {
-        return make_unexpected(OUT_OF_BOUNDS);
+        return absl::OutOfRangeError("Index out of bounds");
       }
 
       state_ = index;
@@ -85,7 +84,7 @@ auto FlatDfsItem::Init(const PathSegment& segment) -> AdvanceResult {
       LOG(DFATAL) << "Unknown segment " << SegmentName(segment.type());
   }  // end switch
 
-  return nonstd::make_unexpected(MISMATCH);
+  return absl::InvalidArgumentError("Path segment mismatch");
 }
 
 auto FlatDfsItem::Advance(const PathSegment& segment) -> AdvanceResult {
@@ -107,7 +106,7 @@ FlatDfs FlatDfs::Traverse(absl::Span<const PathSegment> path, const flexbuffers:
   FlatDfs dfs;
 
   if (path.size() == 1) {
-    dfs.PerformStep(path[0], root, callback);
+    (void)dfs.PerformStep(path[0], root, callback);
     return dfs;
   }
 
@@ -121,7 +120,7 @@ FlatDfs FlatDfs::Traverse(absl::Span<const PathSegment> path, const flexbuffers:
 
     // init or advance the current object
     ConstItem::AdvanceResult res = stack.back().Advance(path_segment);
-    if (res && !res->first.IsNull()) {
+    if (res.ok() && !res->first.IsNull()) {
       const flexbuffers::Reference next = res->first;
       DVLOG(2) << "Handling now " << next.GetType() << " " << next.ToString();
 
@@ -135,7 +134,7 @@ FlatDfs FlatDfs::Traverse(absl::Span<const PathSegment> path, const flexbuffers:
           // terminal step
           // TODO: to take into account MatchStatus
           // for `json.set foo $.a[10]` or for `json.set foo $.*.b`
-          dfs.PerformStep(path[next_seg_id], next, callback);
+          (void)dfs.PerformStep(path[next_seg_id], next, callback);
         }
       }
     } else {
@@ -147,11 +146,11 @@ FlatDfs FlatDfs::Traverse(absl::Span<const PathSegment> path, const flexbuffers:
 }
 
 auto FlatDfs::PerformStep(const PathSegment& segment, const flexbuffers::Reference node,
-                          const PathFlatCallback& callback) -> nonstd::expected<void, MatchStatus> {
+                          const PathFlatCallback& callback) -> absl::Status {
   switch (segment.type()) {
     case SegmentType::IDENTIFIER: {
       if (!node.IsMap())
-        return make_unexpected(MISMATCH);
+        return absl::InvalidArgumentError("Path segment mismatch");
       auto map = node.AsMap();
       flexbuffers::Reference value = map[segment.identifier().c_str()];
       if (!value.IsNull()) {
@@ -160,11 +159,11 @@ auto FlatDfs::PerformStep(const PathSegment& segment, const flexbuffers::Referen
     } break;
     case SegmentType::INDEX: {
       if (!node.IsUntypedVector())
-        return make_unexpected(MISMATCH);
+        return absl::InvalidArgumentError("Path segment mismatch");
       auto vec = node.AsVector();
       IndexExpr index = segment.index().Normalize(vec.size());
       if (index.Empty()) {
-        return make_unexpected(OUT_OF_BOUNDS);
+        return absl::OutOfRangeError("Index out of bounds");
       }
       for (; index.first <= index.second; ++index.first)
         DoCall(callback, nullopt, vec[index.first]);
@@ -188,7 +187,8 @@ auto FlatDfs::PerformStep(const PathSegment& segment, const flexbuffers::Referen
     default:
       LOG(DFATAL) << "Unknown segment " << SegmentName(segment.type());
   }
-  return {};
+
+  return absl::OkStatus();
 }
 
 }  // namespace dfly::json::detail

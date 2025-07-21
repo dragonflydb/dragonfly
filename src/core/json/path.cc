@@ -15,7 +15,6 @@
 #include "src/core/overloaded.h"
 
 using namespace std;
-using nonstd::make_unexpected;
 
 namespace dfly::json {
 
@@ -130,9 +129,9 @@ void EvaluatePath(const Path& path, const JsonType& json, PathCallback callback)
   callback(nullopt, val);
 }
 
-nonstd::expected<json::Path, string> ParsePath(string_view path) {
+absl::StatusOr<json::Path> ParsePath(string_view path) {
   if (path.size() > 8192)
-    return nonstd::make_unexpected("Path too long");
+    return absl::InvalidArgumentError("Path too long");
 
   VLOG(2) << "Parsing path: " << path;
 
@@ -142,7 +141,7 @@ nonstd::expected<json::Path, string> ParsePath(string_view path) {
   driver.SetInput(string(path));
   int res = parser();
   if (res != 0) {
-    return nonstd::make_unexpected(driver.msg);
+    return absl::InvalidArgumentError(driver.msg);
   }
 
   return driver.TakePath();

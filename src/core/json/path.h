@@ -10,7 +10,7 @@
 #include <variant>
 #include <vector>
 
-#include "base/expected.hpp"
+#include "absl/status/statusor.h"
 #include "core/flatbuffers.h"
 #include "core/json/json_object.h"
 
@@ -144,7 +144,7 @@ unsigned DeletePath(const Path& path, FlatJson json, flexbuffers::Builder* fbb);
 
 // utility function to parse a jsonpath. Returns an error message if a parse error was
 // encountered.
-nonstd::expected<Path, std::string> ParsePath(std::string_view path);
+absl::StatusOr<Path> ParsePath(std::string_view path);
 
 // Transforms FlatJson to JsonType.
 JsonType FromFlat(FlatJson src);

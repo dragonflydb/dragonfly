@@ -167,11 +167,11 @@ ParseResult<JsonExpression> ParseJsonPathAsExpression(std::string_view path) {
 ParseResult<WrappedJsonPath> ParseJsonPath(StringOrView path, JsonPathType path_type) {
   if (absl::GetFlag(FLAGS_jsonpathv2)) {
     auto path_result = json::ParsePath(path.view());
-    if (!path_result) {
-      VLOG(1) << "Invalid Json path: " << path << ' ' << path_result.error();
+    if (!path_result.ok()) {
+      VLOG(1) << "Invalid Json path: " << path << ' ' << path_result.status();
       return nonstd::make_unexpected(kSyntaxErr);
     }
-    return WrappedJsonPath{std::move(path_result).value(), std::move(path), path_type};
+    return WrappedJsonPath{std::move(*path_result), std::move(path), path_type};
   }
 
   auto expr_result = ParseJsonPathAsExpression(path.view());
@@ -398,14 +398,14 @@ bool JsonAreEquals(const JsonType& lhs, const JsonType& rhs) {
 std::optional<std::string> ConvertJsonPathToJsonPointer(string_view json_path) {
   auto parsed_path = json::ParsePath(json_path);
 
-  if (!parsed_path) {
+  if (!parsed_path.ok()) {
     VLOG(2) << "Error during conversion of JSONPath to JSONPointer: " << json_path
             << ". Invalid JSONPath.";
     return std::nullopt;
   }
 
   std::string pointer;
-  const auto& path = parsed_path.value();
+  const auto& path = *parsed_path;
   for (const auto& node : path) {
     const auto& type = node.type();
     if (type == json::SegmentType::IDENTIFIER) {
