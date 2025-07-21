@@ -222,6 +222,9 @@ void RangeTree::SplitBlock(Map::iterator it) {
   return true;
 }
 
+RangeResult::RangeResult(std::vector<DocId> doc_ids) : result_(std::move(doc_ids)) {
+}
+
 RangeResult::RangeResult(absl::InlinedVector<RangeBlockPointer, 5> blocks)
     : RangeResult(std::move(blocks), -std::numeric_limits<double>::infinity(),
                   std::numeric_limits<double>::infinity()) {

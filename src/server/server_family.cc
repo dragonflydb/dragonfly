@@ -1793,33 +1793,49 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
     return GenericError{make_error_code(errc::operation_in_progress),
                         StrCat(GlobalStateName(state), " - can not save database")};
   }
+  // Check if save is already in progress
   {
     util::fb2::LockGuard lk(save_mu_);
     if (save_controller_) {
       return GenericError{make_error_code(errc::operation_in_progress),
                           "SAVING - can not save database"};
     }
+  }
 
-    auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
-                                ? snapshot_storage_
-                                : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
+  // Create save controller outside of mutex to avoid blocking INFO commands
+  auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
+                              ? snapshot_storage_
+                              : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
 
-    save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
-        save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
-        &service_, fq_threadpool_.get(), snapshot_storage, opts.bg_save});
+  auto temp_save_controller = make_unique<SaveStagesController>(detail::SaveStagesInputs{
+      save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans, &service_,
+      fq_threadpool_.get(), snapshot_storage, opts.bg_save});
 
-    auto res = save_controller_->InitResourcesAndStart();
+  // Initialize resources outside of mutex (this may take time for S3 operations)
+  auto res = temp_save_controller->InitResourcesAndStart();
+
+  // Now acquire mutex only to set the controller and update state
+  {
+    util::fb2::LockGuard lk(save_mu_);
+
+    // Double-check that no other save started while we were initializing
+    if (save_controller_) {
+      return GenericError{make_error_code(errc::operation_in_progress),
+                          "SAVING - can not save database"};
+    }
 
     if (res) {
       DCHECK_EQ(res->error, true);
       last_save_info_.SetLastSaveError(*res);
-      save_controller_.reset();
+      // Don't set save_controller_ since initialization failed
       if (bg_save) {
         last_save_info_.last_bgsave_status = false;
       }
       return res->error;
     }
 
+    // Success - set the controller and update state
+    save_controller_ = std::move(temp_save_controller);
     last_save_info_.bgsave_in_progress = bg_save;
   }
   return {};

@@ -113,6 +113,7 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
       db_slice_->UnregisterOnMoved(moved_cb_id_);
     }
     consumer_->Finalize();
+    VLOG(1) << "Serialization peak bytes: " << serializer_->GetSerializationPeakBytes();
   });
 }
 
