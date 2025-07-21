@@ -80,8 +80,10 @@ class RangeTree {
    that are within the specified range.
    The iterator is initialized with a range [l, r] and will skip entries
    that are outside this range. */
-class RangeFilterIterator {
+class RangeFilterIterator : public MergeableIterator {
  private:
+  static constexpr DocId kInvalidDocId = std::numeric_limits<DocId>::max();
+
   using RangeBlock = RangeTree::RangeBlock;
   using BaseIterator = RangeBlock::BlockListIterator;
 
@@ -97,6 +99,8 @@ class RangeFilterIterator {
   value_type operator*() const;
 
   RangeFilterIterator& operator++();
+
+  void SeakGE(DocId min_doc_id) override;
 
   bool operator==(const RangeFilterIterator& other) const;
   bool operator!=(const RangeFilterIterator& other) const;
@@ -154,7 +158,7 @@ class TwoBlocksRangeResult {
 
   size_t size() const;
 
-  class MergingIterator {
+  class MergingIterator : public MergeableIterator {
    private:
     static constexpr DocId kInvalidDocId = std::numeric_limits<DocId>::max();
 
@@ -170,6 +174,8 @@ class TwoBlocksRangeResult {
     value_type operator*() const;
 
     MergingIterator& operator++();
+
+    void SeakGE(DocId min_doc_id) override;
 
     bool operator==(const MergingIterator& other) const;
     bool operator!=(const MergingIterator& other) const;
@@ -216,9 +222,7 @@ class RangeResult {
   std::vector<DocId> Take();
 
   Variant& GetResult();
-  const Variant& GetResult() const {
-    return result_;
-  }
+  const Variant& GetResult() const;
 
  private:
   Variant result_;
@@ -229,7 +233,7 @@ class RangeResult {
 inline RangeFilterIterator::RangeFilterIterator(BaseIterator begin, BaseIterator end, double l,
                                                 double r)
     : l_(l), r_(r), current_(begin), end_(end) {
-  SkipInvalidEntries(std::numeric_limits<DocId>::max());
+  SkipInvalidEntries(kInvalidDocId);
 }
 
 inline RangeFilterIterator::value_type RangeFilterIterator::operator*() const {
@@ -241,6 +245,12 @@ inline RangeFilterIterator& RangeFilterIterator::operator++() {
   ++current_;
   SkipInvalidEntries(last_id);
   return *this;
+}
+
+inline void RangeFilterIterator::SeakGE(DocId min_doc_id) {
+  while (current_ != end_ && (!InRange(current_) || (*current_).first < min_doc_id)) {
+    ++current_;
+  }
 }
 
 inline bool RangeFilterIterator::operator==(const RangeFilterIterator& other) const {
@@ -339,6 +349,12 @@ inline TwoBlocksRangeResult::MergingIterator& TwoBlocksRangeResult::MergingItera
   return *this;
 }
 
+inline void TwoBlocksRangeResult::MergingIterator::SeakGE(DocId min_doc_id) {
+  l_.SeakGE(min_doc_id);
+  r_.SeakGE(min_doc_id);
+  InitializeMin();
+}
+
 inline bool TwoBlocksRangeResult::MergingIterator::operator==(
     const TwoBlocksRangeResult::MergingIterator& other) const {
   return l_ == other.l_ && r_ == other.r_;
@@ -364,6 +380,10 @@ inline TwoBlocksRangeResult::MergingIterator TwoBlocksRangeResult::end() const {
 }
 
 inline RangeResult::Variant& RangeResult::GetResult() {
+  return result_;
+}
+
+inline const RangeResult::Variant& RangeResult::GetResult() const {
   return result_;
 }
 
