@@ -34,15 +34,26 @@ class JournalExecutor {
   }
 
  private:
+  struct ErrorCounter : public facade::CapturingReplyBuilder {
+    explicit ErrorCounter() : CapturingReplyBuilder(facade::ReplyMode::NONE) {
+    }
+
+    void SendError(std::string_view str, std::string_view type) override;
+    void Reset();
+
+    size_t num_oom = 0, num_other = 0;
+  };
+
   facade::DispatchResult Execute(journal::ParsedEntry::CmdData& cmd);
 
   // Select database. Ensure it exists if accessed for first time.
   void SelectDb(DbIndex dbid);
 
   Service* service_;
-  facade::CapturingReplyBuilder reply_builder_;
+  ErrorCounter reply_builder_;
   ConnectionContext conn_context_;
 
+  std::vector<std::string_view> tmp_scratch_;
   std::vector<bool> ensured_dbs_;
 };
 

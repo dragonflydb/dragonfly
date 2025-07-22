@@ -11,6 +11,7 @@
 #include <memory>
 
 #include "base/logging.h"
+#include "facade/error.h"
 #include "facade/service_interface.h"
 #include "server/main_service.h"
 
@@ -20,26 +21,31 @@ namespace dfly {
 
 namespace {
 // Build a CmdData from parts passed to absl::StrCat.
-template <typename... Ts> journal::ParsedEntry::CmdData BuildFromParts(Ts... parts) {
+template <typename... Ts>
+journal::ParsedEntry::CmdData BuildFromParts(std::string_view cmd, Ts... parts) {
   vector<string> raw_parts{absl::StrCat(std::forward<Ts>(parts))...};
 
   auto cmd_str = accumulate(raw_parts.begin(), raw_parts.end(), std::string{});
-  auto buf = make_unique<uint8_t[]>(cmd_str.size());
-  memcpy(buf.get(), cmd_str.data(), cmd_str.size());
-
-  CmdArgVec slice_parts;
-  size_t start = 0;
-  for (const auto& part : raw_parts) {
-    slice_parts.emplace_back(reinterpret_cast<char*>(buf.get()) + start, part.size());
-    start += part.size();
-  }
-
-  return {std::move(buf), std::move(slice_parts), cmd_str.size()};
+  auto sizes = base::it::Transform([](string_view s) { return s.size(); },
+                                   base::it::Range{raw_parts.begin(), raw_parts.end()});
+  return {string{cmd}, std::move(cmd_str), {sizes.begin(), sizes.end()}};
 }
 }  // namespace
 
+void JournalExecutor::ErrorCounter::SendError(std::string_view str, std::string_view type) {
+  if (str == facade::kOutOfMemory)
+    num_oom++;
+  else
+    num_other++;
+}
+
+void JournalExecutor::ErrorCounter::Reset() {
+  num_oom = 0;
+  num_other = 0;
+}
+
 JournalExecutor::JournalExecutor(Service* service)
-    : service_{service}, reply_builder_{facade::ReplyMode::NONE}, conn_context_{nullptr, nullptr} {
+    : service_{service}, conn_context_{nullptr, nullptr} {
   conn_context_.is_replicating = true;
   conn_context_.journal_emulated = true;
   conn_context_.skip_acl_validation = true;
@@ -65,8 +71,14 @@ void JournalExecutor::FlushSlots(const cluster::SlotRange& slot_range) {
 }
 
 facade::DispatchResult JournalExecutor::Execute(journal::ParsedEntry::CmdData& cmd) {
-  auto span = CmdArgList{cmd.cmd_args.data(), cmd.cmd_args.size()};
-  return service_->DispatchCommand(span, &reply_builder_, &conn_context_);
+  tmp_scratch_.resize(cmd.arg_sizes.size() + 1);
+  tmp_scratch_[0] = cmd.command;
+  size_t i = 1, offset = 0;
+  for (uint32_t sz : cmd.arg_sizes) {
+    tmp_scratch_[i++] = string_view{cmd.arg_buf}.substr(offset, sz);
+    offset += sz;
+  }
+  return service_->DispatchCommand(tmp_scratch_, &reply_builder_, &conn_context_);
 }
 
 void JournalExecutor::SelectDb(DbIndex dbid) {

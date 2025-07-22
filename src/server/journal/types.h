@@ -71,11 +71,10 @@ struct Entry : public EntryBase {
 
 struct ParsedEntry : public EntryBase {
   struct CmdData {
-    std::unique_ptr<uint8_t[]> command_buf;
-    CmdArgVec cmd_args;  // represents the parsed command.
-    size_t cmd_len{0};
-  };
-  CmdData cmd;
+    std::string command;
+    std::string arg_buf;
+    absl::InlinedVector<uint32_t, 4> arg_sizes;
+  } cmd;
 
   std::string ToString() const;
 };

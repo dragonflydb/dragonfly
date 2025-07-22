@@ -23,7 +23,7 @@ namespace dfly {
 class MultiCommandSquasher {
  public:
   struct Opts {
-    bool verify_commands = false;   // Whether commands need to be verified before execution
+    bool verify_commands = true;    // Whether commands need to be verified before execution
     bool error_abort = false;       // Abort upon receiving error
     unsigned max_squash_size = 32;  // How many commands to squash at once
   };
@@ -32,6 +32,9 @@ class MultiCommandSquasher {
 
   // Run all commands until completion. Returns number of processed commands.
   size_t Run(absl::Span<const StoredCmd> cmds, facade::RedisReplyBuilder* rb);
+
+  // Execute separate non-squashed cmd. Return false if aborting on error.
+  bool ExecuteStandalone(facade::RedisReplyBuilder* rb, const StoredCmd& cmd);
 
   static void SetMaxBusySquashUsec(uint32_t usec);
 
@@ -60,9 +63,6 @@ class MultiCommandSquasher {
 
   // Retrun squash flags
   SquashResult TrySquash(const StoredCmd* cmd);
-
-  // Execute separate non-squashed cmd. Return false if aborting on error.
-  bool ExecuteStandalone(facade::RedisReplyBuilder* rb, const StoredCmd* cmd);
 
   // Callback that runs on shards during squashed hop.
   facade::OpStatus SquashedHopCb(EngineShard* es, facade::RespVersion resp_v);

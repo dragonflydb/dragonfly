@@ -68,15 +68,14 @@ void TransactionData::AddEntry(journal::ParsedEntry&& entry) {
 }
 
 bool TransactionData::IsGlobalCmd() const {
-  if (command.cmd_args.empty()) {
+  string_view cmd = command.command;
+  if (cmd.empty()) {
     return false;
   }
 
-  auto& args = command.cmd_args;
-  if (absl::EqualsIgnoreCase(ToSV(args[0]), "FLUSHDB"sv) ||
-      absl::EqualsIgnoreCase(ToSV(args[0]), "FLUSHALL"sv) ||
-      (absl::EqualsIgnoreCase(ToSV(args[0]), "DFLYCLUSTER"sv) &&
-       absl::EqualsIgnoreCase(ToSV(args[1]), "FLUSHSLOTS"sv))) {
+  if (absl::EqualsIgnoreCase(cmd, "FLUSHDB"sv) || absl::EqualsIgnoreCase(cmd, "FLUSHALL"sv) ||
+      (absl::EqualsIgnoreCase(cmd, "DFLYCLUSTER"sv) &&
+       absl::EqualsIgnoreCase(cmd, "FLUSHSLOTS"sv))) {
     return true;
   }
 

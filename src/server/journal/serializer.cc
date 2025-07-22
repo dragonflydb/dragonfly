@@ -159,26 +159,27 @@ io::Result<size_t> JournalReader::ReadString(io::MutableBytes buffer) {
 std::error_code JournalReader::ReadCommand(journal::ParsedEntry::CmdData* data) {
   size_t num_strings = 0;
   SET_OR_RETURN(ReadUInt<uint64_t>(), num_strings);
-  data->cmd_args.resize(num_strings);
+  CHECK_GT(num_strings, 0u);
+  data->arg_sizes.resize(num_strings - 1);
 
-  size_t cmd_size = 0;
-  SET_OR_RETURN(ReadUInt<uint64_t>(), cmd_size);
-  data->cmd_len = cmd_size;
+  size_t total_size = 0;
+  SET_OR_RETURN(ReadUInt<uint64_t>(), total_size);
 
-  // Read all strings consecutively.
-  data->command_buf = make_unique<uint8_t[]>(cmd_size);
-  uint8_t* ptr = data->command_buf.get();
-  for (auto& span : data->cmd_args) {
-    size_t size;
-    SET_OR_RETURN(ReadString({ptr, cmd_size}), size);
-    DCHECK(size <= cmd_size);
-    span = string_view{reinterpret_cast<char*>(ptr), size};
+  // Read command - first string
+  size_t cmd_size;
+  std::array<uint8_t, 32> cmd_buf;
+  SET_OR_RETURN(ReadString({cmd_buf.data(), cmd_buf.size()}), cmd_size);
+  data->command = string_view{reinterpret_cast<char*>(cmd_buf.data()), cmd_size};
+  total_size -= cmd_size;
+
+  // Read all remaining strings consecutively.
+  data->arg_buf.resize(total_size);
+  uint8_t* ptr = reinterpret_cast<uint8_t*>(data->arg_buf.data());
+  for (uint32_t& size : data->arg_sizes) {
+    SET_OR_RETURN(ReadString({ptr, total_size}), size);
     ptr += size;
-    cmd_size -= size;
+    total_size -= size;
   }
-
-  data->cmd_len -= cmd_size;
-
   return {};
 }
 

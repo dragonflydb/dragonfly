@@ -38,10 +38,14 @@ string Entry::ToString() const {
 
 string ParsedEntry::ToString() const {
   string rv = absl::StrCat("{op=", opcode, ", dbid=", dbid, ", cmd='");
-  for (auto& arg : cmd.cmd_args) {
-    absl::StrAppend(&rv, facade::ToSV(arg));
-    absl::StrAppend(&rv, " ");
+  absl::StrAppend(&rv, cmd.command, " ");
+
+  size_t offset = 0;
+  for (uint32_t sz : cmd.arg_sizes) {
+    absl::StrAppend(&rv, cmd.arg_buf.substr(offset, sz), " ");
+    offset += sz;
   }
+
   rv.pop_back();
   rv += "'}";
   return rv;
