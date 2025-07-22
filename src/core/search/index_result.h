@@ -111,9 +111,7 @@ template <typename Iterator> void Seek(DocId min_doc_id, const Iterator& end, It
   if constexpr (IsSeekableIterator<Iterator>) {
     it->SeekGE(min_doc_id);
   } else {
-    while (*it != end && **it < min_doc_id) {
-      ++(*it);
-    }
+    BasicSeekGE(min_doc_id, end, it);
   }
 }
 
