@@ -51,9 +51,8 @@ class DiskStorage {
   Stats GetStats() const;
 
  private:
-  bool CanGrow() const;
-
-  std::error_code Grow(off_t grow_size);
+  // Try growing backing file by requested size
+  std::error_code TryGrow(off_t grow_size);
 
   // Returns a buffer with size greater or equal to len.
   util::fb2::UringBuf PrepareBuf(size_t len);
