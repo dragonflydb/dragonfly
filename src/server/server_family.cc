@@ -251,6 +251,22 @@ inline CommandId::Handler3 HandlerFunc(ServerFamily* se, EngineFunc f) {
   return [=](CmdArgList args, const CommandContext& cntx) { return (se->*f)(args, cntx); };
 }
 
+// Captured memory peaks
+struct {
+  std::atomic<size_t> used = 0;
+  std::atomic<size_t> rss = 0;
+} glob_memory_peaks;
+
+size_t FetchRssMemory(const io::StatusData& sdata) {
+  size_t total_rss = sdata.vm_rss + sdata.hugetlb_pages;
+
+  rss_mem_current.store(total_rss, memory_order_relaxed);
+  if (total_rss > glob_memory_peaks.rss.load(memory_order_relaxed))
+    glob_memory_peaks.rss.store(total_rss, memory_order_relaxed);
+
+  return total_rss;
+}
+
 using CI = CommandId;
 
 struct CmdArgListFormatter {
@@ -1027,16 +1043,6 @@ bool ServerFamily::HasPrivilegedInterface() {
                 [](auto* l) { return l->IsPrivilegedInterface(); });
 }
 
-size_t ServerFamily::FetchRssMemory(const io::StatusData& sdata) {
-  size_t total_rss = sdata.vm_rss + sdata.hugetlb_pages;
-
-  rss_mem_current.store(total_rss, memory_order_relaxed);
-  if (total_rss > memory_peaks_.rss.load(memory_order_relaxed))
-    memory_peaks_.rss.store(total_rss, memory_order_relaxed);
-
-  return total_rss;
-}
-
 void ServerFamily::UpdateMemoryGlobalStats() {
   // Called from all shards, but one updates global stats below
   if (EngineShard::tlocal()->shard_id() > 0)
@@ -1044,8 +1050,8 @@ void ServerFamily::UpdateMemoryGlobalStats() {
 
   // Update used memory peak
   uint64_t mem_current = used_mem_current.load(std::memory_order_relaxed);
-  if (mem_current > memory_peaks_.used.load(memory_order_relaxed))
-    memory_peaks_.used.store(mem_current, memory_order_relaxed);
+  if (mem_current > glob_memory_peaks.used.load(memory_order_relaxed))
+    glob_memory_peaks.used.store(mem_current, memory_order_relaxed);
 
   io::StatusData status_data;
   bool success = ReadProcStats(&status_data);
@@ -1419,7 +1425,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                       &resp->body());
   }
   if (success) {
-    size_t rss = ServerFamily::FetchRssMemory(sdata);
+    size_t rss = FetchRssMemory(sdata);
     AppendMetricWithoutLabels("used_memory_rss_bytes", "", rss, MetricType::GAUGE, &resp->body());
     AppendMetricWithoutLabels("swap_memory_bytes", "", sdata.vm_swap, MetricType::GAUGE,
                               &resp->body());
@@ -2460,8 +2466,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   result.peak_stats = peak_stats_;
   result.cmd_latency_map = service_.mutable_registry()->LatencyMap();
-  result.used_mem_peak = memory_peaks_.used.load(memory_order_relaxed);
-  result.used_mem_rss_peak = memory_peaks_.rss.load(memory_order_relaxed);
+  result.used_mem_peak = glob_memory_peaks.used.load(memory_order_relaxed);
+  result.used_mem_rss_peak = glob_memory_peaks.rss.load(memory_order_relaxed);
 
   uint64_t delta_ms = (absl::GetCurrentTimeNanos() - start) / 1'000'000;
   if (delta_ms > 30) {
@@ -2564,7 +2570,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       append("used_memory_rss", rss);
       append("used_memory_rss_human", HumanReadableNumBytes(rss));
     }
-    append("used_memory_peak_rss", memory_peaks_.used.load(memory_order_relaxed));
+    append("used_memory_peak_rss", glob_memory_peaks.used.load(memory_order_relaxed));
 
     append("maxmemory", max_memory_limit);
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));

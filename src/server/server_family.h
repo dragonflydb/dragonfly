@@ -281,7 +281,6 @@ class ServerFamily {
   void Replicate(std::string_view host, std::string_view port);
 
   void UpdateMemoryGlobalStats();
-  static size_t FetchRssMemory(const io::StatusData& sdata);  // Fetch RSS memory and update peak
 
   // Return true if no replicas are registered or if all replicas reached stable sync
   // Used in debug populate to DCHECK insocsistent flows that violate transaction gurantees
@@ -427,12 +426,6 @@ class ServerFamily {
 
   mutable util::fb2::Mutex peak_stats_mu_;
   mutable PeakStats peak_stats_;
-
-  // Captured memory peaks
-  static struct {
-    std::atomic<size_t> used = 0;
-    std::atomic<size_t> rss = 0;
-  } memory_peaks_;
 
   mutable util::fb2::Mutex loading_stats_mu_;
   LoadingStats loading_stats_ ABSL_GUARDED_BY(loading_stats_mu_);
