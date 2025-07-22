@@ -1331,6 +1331,7 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
   InvokeCmd(cid, args_no_cmd, CommandContext{dfly_cntx->transaction, builder, dfly_cntx});
 
   if (auto err = builder->ConsumeLastError(); !err.empty()) {
+    LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), args_no_cmd, err);
     if (err == facade::kOutOfMemory)
       return DispatchResult::OOM;
     return DispatchResult::ERROR;
