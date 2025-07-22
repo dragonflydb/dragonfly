@@ -80,7 +80,7 @@ class RangeTree {
    that are within the specified range.
    The iterator is initialized with a range [l, r] and will skip entries
    that are outside this range. */
-class RangeFilterIterator : public MergeableIterator {
+class RangeFilterIterator : public SeekableTag {
  private:
   static constexpr DocId kInvalidDocId = std::numeric_limits<DocId>::max();
 
@@ -100,7 +100,7 @@ class RangeFilterIterator : public MergeableIterator {
 
   RangeFilterIterator& operator++();
 
-  void SeakGE(DocId min_doc_id) override;
+  void SeekGE(DocId min_doc_id);
 
   bool operator==(const RangeFilterIterator& other) const;
   bool operator!=(const RangeFilterIterator& other) const;
@@ -158,7 +158,7 @@ class TwoBlocksRangeResult {
 
   size_t size() const;
 
-  class MergingIterator : public MergeableIterator {
+  class MergingIterator : public SeekableTag {
    private:
     static constexpr DocId kInvalidDocId = std::numeric_limits<DocId>::max();
 
@@ -175,7 +175,7 @@ class TwoBlocksRangeResult {
 
     MergingIterator& operator++();
 
-    void SeakGE(DocId min_doc_id) override;
+    void SeekGE(DocId min_doc_id);
 
     bool operator==(const MergingIterator& other) const;
     bool operator!=(const MergingIterator& other) const;
@@ -247,7 +247,7 @@ inline RangeFilterIterator& RangeFilterIterator::operator++() {
   return *this;
 }
 
-inline void RangeFilterIterator::SeakGE(DocId min_doc_id) {
+inline void RangeFilterIterator::SeekGE(DocId min_doc_id) {
   while (current_ != end_ && (!InRange(current_) || (*current_).first < min_doc_id)) {
     ++current_;
   }
@@ -349,9 +349,9 @@ inline TwoBlocksRangeResult::MergingIterator& TwoBlocksRangeResult::MergingItera
   return *this;
 }
 
-inline void TwoBlocksRangeResult::MergingIterator::SeakGE(DocId min_doc_id) {
-  l_.SeakGE(min_doc_id);
-  r_.SeakGE(min_doc_id);
+inline void TwoBlocksRangeResult::MergingIterator::SeekGE(DocId min_doc_id) {
+  l_.SeekGE(min_doc_id);
+  r_.SeekGE(min_doc_id);
   InitializeMin();
 }
 

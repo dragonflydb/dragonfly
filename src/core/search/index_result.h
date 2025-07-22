@@ -105,59 +105,24 @@ inline bool IndexResult::IsOwned() const {
 namespace details {
 using BackInserter = std::back_insert_iterator<std::vector<DocId>>;
 
-// First - MergeableIterator, Second - non-MergeableIterator
-template <typename FirstIterator, typename SecondIterator,
-          typename = std::enable_if_t<std::is_base_of<MergeableIterator, FirstIterator>::value>>
-std::enable_if_t<std::is_base_of<MergeableIterator, FirstIterator>::value &&
-                     !std::is_base_of<MergeableIterator, SecondIterator>::value,
-                 void>
-SetIntersection(FirstIterator first_begin, FirstIterator first_end, SecondIterator second_begin,
-                SecondIterator second_end, BackInserter out) {
-  auto l_it = first_begin;
-  auto r_it = second_begin;
-  while (l_it != first_end && r_it != second_end) {
-    DocId l_value = *l_it;
-    DocId r_value = *r_it;
+template <typename T> constexpr bool IsSeekableIterator = std::is_base_of_v<SeekableTag, T>;
 
-    if (l_value == r_value) {
-      *out++ = l_value;
-      ++r_it;
-      if (r_it != second_end) {
-        l_it.SeakGE(*r_it);  // Move to the next value in the first iterator
-      }
-    } else if (l_value < r_value) {
-      l_it.SeakGE(r_value);  // Move to the next value in the first iterator
-    } else {
-      DCHECK(l_value > r_value);
-      while (r_it != second_end && *r_it < l_value) {
-        ++r_it;  // Move to the next value in the second iterator
-      }
+template <typename Iterator> void Seek(DocId min_doc_id, const Iterator& end, Iterator* it) {
+  if constexpr (IsSeekableIterator<Iterator>) {
+    it->SeekGE(min_doc_id);
+  } else {
+    while (*it != end && **it < min_doc_id) {
+      ++(*it);
     }
   }
 }
 
-// First - non-MergeableIterator, Second - MergeableIterator
-template <typename FirstIterator, typename SecondIterator,
-          typename = std::enable_if_t<std::is_base_of<MergeableIterator, SecondIterator>::value>>
-std::enable_if_t<!std::is_base_of<MergeableIterator, FirstIterator>::value &&
-                     std::is_base_of<MergeableIterator, SecondIterator>::value,
-                 void>
-SetIntersection(FirstIterator first_begin, FirstIterator first_end, SecondIterator second_begin,
-                SecondIterator second_end, BackInserter out) {
-  SetIntersection(second_begin, second_end, first_begin, first_end, out);
-}
-
-// Specialization for both iterators being MergeableIterator
-template <typename FirstIterator, typename SecondIterator,
-          typename = std::enable_if_t<std::is_base_of<MergeableIterator, FirstIterator>::value &&
-                                      std::is_base_of<MergeableIterator, SecondIterator>::value>>
-std::enable_if_t<std::is_base_of<MergeableIterator, FirstIterator>::value &&
-                     std::is_base_of<MergeableIterator, SecondIterator>::value,
-                 void>
-SetIntersection(FirstIterator first_begin, FirstIterator first_end, SecondIterator second_begin,
-                SecondIterator second_end, BackInserter out) {
+template <typename FirstIterator, typename SecondIterator>
+void SetIntersection(FirstIterator first_begin, FirstIterator first_end,
+                     SecondIterator second_begin, SecondIterator second_end, BackInserter out) {
   auto l_it = first_begin;
   auto r_it = second_begin;
+
   while (l_it != first_end && r_it != second_end) {
     DocId l_value = *l_it;
     DocId r_value = *r_it;
@@ -165,24 +130,16 @@ SetIntersection(FirstIterator first_begin, FirstIterator first_end, SecondIterat
     if (l_value == r_value) {
       *out++ = l_value;
       ++l_it;
-      ++r_it;
+      if (l_it != first_end) {
+        Seek(*l_it, second_end, &r_it);
+      }
     } else if (l_value < r_value) {
-      l_it.SeakGE(r_value);  // Move to the next value in the first iterator
+      Seek(r_value, first_end, &l_it);
     } else {
       DCHECK(l_value > r_value);
-      r_it.SeakGE(l_value);  // Move to the next value in the second iterator
+      Seek(l_value, second_end, &r_it);
     }
   }
-}
-
-// Default case for iterators that are not MergeableIterator
-template <typename FirstIterator, typename SecondIterator>
-std::enable_if_t<!std::is_base_of<MergeableIterator, FirstIterator>::value &&
-                     !std::is_base_of<MergeableIterator, SecondIterator>::value,
-                 void>
-SetIntersection(FirstIterator first_begin, FirstIterator first_end, SecondIterator second_begin,
-                SecondIterator second_end, BackInserter out) {
-  std::set_intersection(first_begin, first_end, second_begin, second_end, out);
 }
 
 }  // namespace details

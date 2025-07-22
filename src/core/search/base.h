@@ -90,13 +90,12 @@ struct BaseSortIndex : BaseIndex {
                                           bool desc) const = 0;
 };
 
-// Iterator interface for merging results of the indexes
-// This is used to merge results of different indexes into a single result set.
-// For more information, see index_result.h.
-struct MergeableIterator {
-  virtual void SeakGE(DocId min_doc_id) = 0;
-  virtual ~MergeableIterator() = default;
-};
+/* Used in iterators of inverse indices.
+   It is used to mark iterators that can be seeked to doc id that is greater than or equal to
+   the specified value (method name is SeekGE(DocId min_doc_id)).
+   This is used to optimize merging of results from different indices.
+   See index_result.h for more details. */
+struct SeekableTag {};
 
 /* Used for converting field values to double. Returns std::nullopt if the conversion fails */
 std::optional<double> ParseNumericField(std::string_view value);
