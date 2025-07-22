@@ -1039,6 +1039,46 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
   return nullopt;
 }
 
+// TODO(kostas) refactor. Almost 1-1 with CheckKeyOwnership() above.
+std::optional<facade::ErrorReply> Service::TakenOverSlotError(const CommandId* cid, CmdArgList args,
+                                                              const ConnectionContext& dfly_cntx) {
+  if (cid->first_key_pos() == 0 && !cid->IsShardedPSub()) {
+    return nullopt;  // No key command.
+  }
+
+  OpResult<KeyIndex> key_index_res = FindKeys(cid, args);
+
+  if (!key_index_res) {
+    return ErrorReply{key_index_res.status()};
+  }
+
+  const auto& key_index = *key_index_res;
+
+  UniqueSlotChecker slot_checker;
+  for (string_view key : key_index.Range(args)) {
+    slot_checker.Add(key);
+  }
+
+  if (slot_checker.IsCrossSlot()) {
+    return ErrorReply{kCrossSlotError};
+  }
+
+  optional<SlotId> keys_slot = slot_checker.GetUniqueSlotId();
+  if (!keys_slot.has_value()) {
+    return nullopt;
+  }
+
+  if (auto error = cluster::SlotOwnershipError(*keys_slot);
+      !error.status.has_value() || error.status.value() != facade::OpStatus::OK) {
+    return ErrorReply{std::move(error)};
+  }
+
+  return facade::ErrorReply{
+      absl::StrCat("-MOVED ", *keys_slot, " ", server_family_.TakenOverMaster(), ":",
+                   server_family_.TakenOverPort()),
+      "MOVED"};
+}
+
 // Return OK if all keys are allowed to be accessed: either declared in EVAL or
 // transaction is running in global or non-atomic mode.
 optional<ErrorReply> CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info,
@@ -1155,6 +1195,15 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
     VLOG(1) << "Command " << cid->name() << " not executed because global state is " << gstate;
 
     if (gstate == GlobalState::LOADING) {
+      return ErrorReply(kLoadingErr);
+    }
+
+    if (gstate == GlobalState::TAKEN_OVER) {
+      if (IsClusterEnabled()) {
+        if (auto err = TakenOverSlotError(cid, tail_args, dfly_cntx); err) {
+          return err;
+        }
+      }
       return ErrorReply(kLoadingErr);
     }
 

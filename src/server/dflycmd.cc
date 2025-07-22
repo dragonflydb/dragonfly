@@ -20,6 +20,7 @@
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
+#include "server/cluster_support.h"
 #include "server/debugcmd.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -511,8 +512,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
   atomic_bool catchup_success = true;
   if (*status == OpStatus::OK) {
     dfly::SharedLock lk{replica_ptr->shared_mu};
-    auto cb = [replica_ptr = std::move(replica_ptr), end_time,
-               &catchup_success](EngineShard* shard) {
+    auto cb = [replica_ptr, end_time, &catchup_success](EngineShard* shard) {
       if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
         catchup_success.store(false);
       }
@@ -535,10 +535,20 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
       LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
     }
   }
-  VLOG(1) << "Takeover accepted, shutting down.";
-  std::string save_arg = "NOSAVE";
-  MutableSlice sargs(save_arg);
-  return sf_->ShutdownCmd(CmdArgList(&sargs, 1), CommandContext{nullptr, rb, nullptr});
+
+  // For non-cluster mode we shutdown
+  if (detail::cluster_mode == detail::ClusterMode::kNoCluster) {
+    VLOG(1) << "Takeover accepted, shutting down.";
+    std::string save_arg = "NOSAVE";
+    MutableSlice sargs(save_arg);
+    sf_->ShutdownCmd(CmdArgList(&sargs, 1), CommandContext{nullptr, rb, nullptr});
+    return;
+  }
+
+  // For cluster mode we do not shutdown. Instead we redirect
+  // incoming requests with MOVED repl-ip if we owned the slots.
+  util::fb2::LockGuard lk(last_takeover_src_mu_);
+  last_takeover_source_ = replica_ptr;
 }
 
 void DflyCmd::Expire(CmdArgList args, Transaction* tx, RedisReplyBuilder* rb) {

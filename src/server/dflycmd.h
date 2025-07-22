@@ -157,6 +157,22 @@ class DflyCmd {
   // Tries to break those flows that stuck on socket write for too long time.
   void BreakStalledFlowsInShard() ABSL_NO_THREAD_SAFETY_ANALYSIS;
 
+  std::string_view TakenOverMaster() {
+    dfly::SharedLock lk{last_takeover_src_mu_};
+    if (!last_takeover_source_) {
+      return {};
+    }
+    return last_takeover_source_->address;
+  }
+
+  uint64_t TakenOverPort() {
+    dfly::SharedLock lk{last_takeover_src_mu_};
+    if (!last_takeover_source_) {
+      return 0;
+    }
+    return last_takeover_source_->listening_port;
+  }
+
  private:
   using RedisReplyBuilder = facade::RedisReplyBuilder;
 
@@ -217,7 +233,6 @@ class DflyCmd {
   bool CheckReplicaStateOrReply(const ReplicaInfo& ri, SyncState expected,
                                 facade::RedisReplyBuilder* rb);
 
- private:
   // Main entrypoint for stopping replication.
   void StopReplication(uint32_t sync_id) ABSL_LOCKS_EXCLUDED(mu_);
 
@@ -231,6 +246,11 @@ class DflyCmd {
 
   using ReplicaInfoMap = absl::btree_map<uint32_t, std::shared_ptr<ReplicaInfo>>;
   ReplicaInfoMap replica_infos_ ABSL_GUARDED_BY(mu_);
+
+  // We only acquire a write lock in TakeOver. This happens only once, as the state
+  // after the takeover is TAKEN_OVER. All other paths, acquire it in read only mode.
+  util::fb2::SharedMutex last_takeover_src_mu_;
+  std::shared_ptr<ReplicaInfo> last_takeover_source_;
 
   mutable util::fb2::Mutex mu_;  // Guard global operations. See header top for locking levels.
 };

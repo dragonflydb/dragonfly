@@ -291,6 +291,14 @@ class ServerFamily {
                        [&match](auto& elem) { return elem.state == match; });
   }
 
+  string_view TakenOverMaster() const {
+    return dfly_cmd_->TakenOverMaster();
+  }
+
+  uint64_t TakenOverPort() const {
+    return dfly_cmd_->TakenOverPort();
+  }
+
  private:
   bool HasPrivilegedInterface();
   void JoinSnapshotSchedule();

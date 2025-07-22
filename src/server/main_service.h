@@ -160,6 +160,10 @@ class Service : public facade::ServiceInterface {
   std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId* cid, CmdArgList args,
                                                        const ConnectionContext& dfly_cntx);
 
+  // Return error if not all keys are owned by the server when running in cluster mode
+  std::optional<facade::ErrorReply> TakenOverSlotError(const CommandId* cid, CmdArgList args,
+                                                       const ConnectionContext& dfly_cntx);
+
   void EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
                     SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only);
   void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter,
