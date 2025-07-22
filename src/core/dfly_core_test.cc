@@ -660,4 +660,11 @@ BENCHMARK(BM_MatchPcre2JitExp);
 
 #endif
 
+static void BM_MatchGlobSlow(benchmark::State& state) {
+  GlobMatcher matcher("a*a*a*a*a*.pt", false);
+  while (state.KeepRunning()) {
+    DoNotOptimize(GlobMatcher("a*a*a*a*a*.pt", false));
+  }
+}
+BENCHMARK(BM_MatchGlobSlow);
 }  // namespace dfly

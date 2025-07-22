@@ -251,7 +251,7 @@ GlobMatcher::GlobMatcher(string_view pattern, bool case_sensitive)
     regex.append(Glob2Regex(pattern));
   }
   matcher_.pattern(regex);
-#elif USE_PCRE2
+#elif defined(USE_PCRE2)
   string regex("(?s");  // dotall mode
   if (!case_sensitive) {
     regex.push_back('i');
@@ -300,7 +300,7 @@ bool GlobMatcher::Matches(std::string_view str) const {
   }
 
   return true;
-#elif USE_PCRE2
+#elif defined(USE_PCRE2)
   if (!re_ || str.size() < 16) {
     return stringmatchlen(glob_.data(), glob_.size(), str.data(), str.size(), !case_sensitive_);
   }
@@ -319,7 +319,7 @@ bool GlobMatcher::Matches(std::string_view str) const {
 
 GlobMatcher::~GlobMatcher() {
 #ifdef REFLEX_PERFORMANCE
-#elif USE_PCRE2
+#elif defined(USE_PCRE2)
   if (re_) {
     pcre2_code_free(re_);
     pcre2_match_data_free(match_data_);
