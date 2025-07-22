@@ -1,5 +1,3 @@
-option(USE_SIMSIMD "Enable SimSIMD vector optimizations" OFF)
-
 add_third_party(
   lua
   GIT_REPOSITORY https://github.com/dragonflydb/lua
@@ -85,21 +83,23 @@ add_third_party(
   LIB "none"
 )
 
-add_third_party(
-  uni-algo
-  URL https://github.com/uni-algo/uni-algo/archive/refs/tags/v1.0.0.tar.gz
+if (WITH_SEARCH)
+  add_third_party(
+    uni-algo
+    URL https://github.com/uni-algo/uni-algo/archive/refs/tags/v1.0.0.tar.gz
 
-  CMAKE_PASS_FLAGS "-DCMAKE_CXX_STANDARD:STRING=17"
-)
+    CMAKE_PASS_FLAGS "-DCMAKE_CXX_STANDARD:STRING=17"
+  )
 
-add_third_party(
-  hnswlib
-  URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.7.0.tar.gz
+  add_third_party(
+    hnswlib
+    URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.7.0.tar.gz
 
-  BUILD_COMMAND echo SKIP
-  INSTALL_COMMAND cp -R <SOURCE_DIR>/hnswlib ${THIRD_PARTY_LIB_DIR}/hnswlib/include/
-  LIB "none"
-)
+    BUILD_COMMAND echo SKIP
+    INSTALL_COMMAND cp -R <SOURCE_DIR>/hnswlib ${THIRD_PARTY_LIB_DIR}/hnswlib/include/
+    LIB "none"
+  )
+endif()
 
 add_third_party(
   fast_float
@@ -145,10 +145,12 @@ add_dependencies(TRDP::croncpp croncpp_project)
 set_target_properties(TRDP::croncpp PROPERTIES
                       INTERFACE_INCLUDE_DIRECTORIES "${CRONCPP_INCLUDE_DIR}")
 
-add_library(TRDP::hnswlib INTERFACE IMPORTED)
-add_dependencies(TRDP::hnswlib hnswlib_project)
-set_target_properties(TRDP::hnswlib PROPERTIES
-                      INTERFACE_INCLUDE_DIRECTORIES "${HNSWLIB_INCLUDE_DIR}")
+if (WITH_SEARCH)
+  add_library(TRDP::hnswlib INTERFACE IMPORTED)
+  add_dependencies(TRDP::hnswlib hnswlib_project)
+  set_target_properties(TRDP::hnswlib PROPERTIES
+                        INTERFACE_INCLUDE_DIRECTORIES "${HNSWLIB_INCLUDE_DIR}")
+endif()
 
 add_library(TRDP::fast_float INTERFACE IMPORTED)
 add_dependencies(TRDP::fast_float fast_float_project)

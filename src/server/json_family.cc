@@ -37,9 +37,7 @@
 #include <jsoncons_ext/mergepatch/mergepatch.hpp>
 // clang-format on
 
-ABSL_FLAG(bool, jsonpathv2, true,
-          "If true uses Dragonfly jsonpath implementation, "
-          "otherwise uses legacy jsoncons implementation.");
+ABSL_DECLARE_FLAG(bool, jsonpathv2);
 
 namespace dfly {
 

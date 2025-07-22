@@ -6,7 +6,6 @@ else()
   set(PCRE2_LIB "")
 endif()
 
-
 find_library(LIB_RE2 NAMES re2)
 if(LIB_RE2)
   set(RE2_LIB ${LIB_RE2})
@@ -15,10 +14,13 @@ else()
   set(RE2_LIB "")
 endif()
 
-add_subdirectory(search)
-add_subdirectory(json)
+if (WITH_SEARCH)
+  add_subdirectory(search)
+else()
+  add_library(dfly_search_core INTERFACE)
+endif()
 
-set(SEARCH_LIB query_parser)
+add_subdirectory(json)
 
 add_library(dfly_core allocation_tracker.cc bloom.cc compact_object.cc dense_set.cc
     dragonfly_core.cc extent_tree.cc huff_coder.cc
@@ -26,8 +28,10 @@ add_library(dfly_core allocation_tracker.cc bloom.cc compact_object.cc dense_set
     segment_allocator.cc score_map.cc small_string.cc sorted_map.cc task_queue.cc
     tx_queue.cc string_set.cc string_map.cc top_keys.cc detail/bitpacking.cc)
 
-cxx_link(dfly_core base absl::flat_hash_map absl::str_format absl::random_random redis_lib TRDP::lua lua_modules
-    fibers2 ${SEARCH_LIB} jsonpath OpenSSL::Crypto TRDP::dconv TRDP::lz4)
+cxx_link(dfly_core base dfly_search_core fibers2 jsonpath
+    absl::flat_hash_map absl::str_format absl::random_random redis_lib
+    TRDP::lua lua_modules
+    OpenSSL::Crypto TRDP::dconv TRDP::lz4)
 
 add_executable(dash_bench dash_bench.cc)
 cxx_link(dash_bench dfly_core redis_test_lib)

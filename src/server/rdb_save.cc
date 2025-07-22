@@ -1342,6 +1342,7 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
 
   atomic<size_t> table_mem{0};
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
+#ifdef WITH_SEARCH
     if (shard->shard_id() == 0) {
       auto* indices = shard->search_indices();
       for (const auto& index_name : indices->GetIndexNames()) {
@@ -1350,6 +1351,7 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
             absl::StrCat(index_name, " ", index_info.BuildRestoreCommand()));
       }
     }
+#endif
     auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
     size_t shard_table_mem = 0;
     for (size_t db_id = 0; db_id < db_slice.db_array_size(); ++db_id) {
