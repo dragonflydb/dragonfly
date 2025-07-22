@@ -66,9 +66,9 @@ size_t Size(const CapturingReplyBuilder::Payload& payload) {
 
 }  // namespace
 
-MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
-                                           Service* service, const Opts& opts)
-    : cmds_{cmds}, cntx_{cntx}, service_{service}, base_cid_{nullptr}, opts_{opts} {
+MultiCommandSquasher::MultiCommandSquasher(ConnectionContext* cntx, Service* service,
+                                           const Opts& opts)
+    : cntx_{cntx}, service_{service}, base_cid_{nullptr}, opts_{opts} {
   auto mode = cntx->transaction->GetMultiMode();
   base_cid_ = cntx->transaction->GetCId();
   atomic_ = mode != Transaction::NON_ATOMIC;
@@ -303,11 +303,11 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   return !aborted;
 }
 
-size_t MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
-  DVLOG(1) << "Trying to squash " << cmds_.size() << " commands for transaction "
+size_t MultiCommandSquasher::Run(absl::Span<const StoredCmd> cmds, RedisReplyBuilder* rb) {
+  DVLOG(1) << "Trying to squash " << cmds.size() << " commands for transaction "
            << cntx_->transaction->DebugId();
 
-  for (auto& cmd : cmds_) {
+  for (auto& cmd : cmds) {
     auto res = TrySquash(&cmd);
 
     if (res == SquashResult::ERROR)
@@ -339,7 +339,7 @@ size_t MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
     }
   }
 
-  VLOG(1) << "Squashed " << num_squashed_ << " of " << cmds_.size()
+  VLOG(1) << "Squashed " << num_squashed_ << " of " << cmds.size()
           << " commands, max fanout: " << num_shards_ << ", atomic: " << atomic_;
   return num_squashed_;
 }

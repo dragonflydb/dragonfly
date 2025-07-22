@@ -1543,9 +1543,8 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
     opts.verify_commands = true;
     opts.max_squash_size = ss->max_squash_cmd_num;
 
-    size_t squashed_num = MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
-                                                        static_cast<RedisReplyBuilder*>(builder),
-                                                        dfly_cntx, this, opts);
+    size_t squashed_num = MultiCommandSquasher{dfly_cntx, this, opts}.Run(
+        stored_cmds, static_cast<RedisReplyBuilder*>(builder));
     dfly_cntx->transaction = nullptr;
 
     dispatched += stored_cmds.size();
@@ -1869,7 +1868,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   opts.verify_commands = true;
   opts.error_abort = true;
   opts.max_squash_size = ServerState::tlocal()->max_squash_cmd_num;
-  MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), &crb, cntx, this, opts);
+  MultiCommandSquasher{cntx, this, opts}.Run(info->async_cmds, &crb);
 
   info->async_cmds_heap_mem = 0;
   info->async_cmds.clear();
@@ -2342,7 +2341,7 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
         !cntx->conn_state.tracking_info_.IsTrackingOn()) {
       MultiCommandSquasher::Opts opts;
       opts.max_squash_size = ServerState::tlocal()->max_squash_cmd_num;
-      MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), rb, cntx, this, opts);
+      MultiCommandSquasher{cntx, this, opts}.Run(exec_info.body, rb);
     } else {
       CmdArgVec arg_vec;
       for (const auto& scmd : exec_info.body) {

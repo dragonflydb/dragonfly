@@ -28,11 +28,10 @@ class MultiCommandSquasher {
     unsigned max_squash_size = 32;  // How many commands to squash at once
   };
 
-  // Returns number of processed commands.
-  static size_t Execute(absl::Span<StoredCmd> cmds, facade::RedisReplyBuilder* rb,
-                        ConnectionContext* cntx, Service* service, const Opts& opts) {
-    return MultiCommandSquasher{cmds, cntx, service, opts}.Run(rb);
-  }
+  MultiCommandSquasher(ConnectionContext* cntx, Service* Service, const Opts& opts);
+
+  // Run all commands until completion. Returns number of processed commands.
+  size_t Run(absl::Span<const StoredCmd> cmds, facade::RedisReplyBuilder* rb);
 
   static void SetMaxBusySquashUsec(uint32_t usec);
 
@@ -56,9 +55,6 @@ class MultiCommandSquasher {
 
   enum class SquashResult { SQUASHED, SQUASHED_FULL, NOT_SQUASHED, ERROR };
 
-  MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx, Service* Service,
-                       const Opts& opts);
-
   // Lazy initialize shard info.
   ShardExecInfo& PrepareShardInfo(ShardId sid);
 
@@ -74,13 +70,9 @@ class MultiCommandSquasher {
   // Execute all currently squashed commands. Return false if aborting on error.
   bool ExecuteSquashed(facade::RedisReplyBuilder* rb);
 
-  // Run all commands until completion. Returns number of processed commands.
-  size_t Run(facade::RedisReplyBuilder* rb);
-
   bool IsAtomic() const;
 
-  absl::Span<StoredCmd> cmds_;  // Input range of stored commands
-  ConnectionContext* cntx_;     // Underlying context
+  ConnectionContext* cntx_;  // Underlying context
   Service* service_;
 
   bool atomic_;                // Whether working in any of the atomic modes
