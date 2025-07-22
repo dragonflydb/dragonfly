@@ -395,7 +395,8 @@ QList::QList(QList&& other)
       len_(other.len_),
       fill_(other.fill_),
       compress_(other.compress_),
-      bookmark_count_(other.bookmark_count_) {
+      bookmark_count_(other.bookmark_count_),
+      compr_method_(other.compr_method_){
   other.head_ = nullptr;
   other.len_ = other.count_ = 0;
 }
