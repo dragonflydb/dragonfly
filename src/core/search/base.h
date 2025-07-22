@@ -62,11 +62,6 @@ struct DocumentAccessor {
   virtual std::optional<StringList> GetTags(std::string_view active_field) const = 0;
 };
 
-// Represents a set of document IDs, used for merging results of inverse indices.
-template <typename Allocator = std::allocator<DocId>>
-using UniqueDocsList = absl::flat_hash_set<DocId, absl::DefaultHashContainerHash<DocId>,
-                                           absl::DefaultHashContainerEq<DocId>, Allocator>;
-
 // Base class for type-specific indices.
 //
 // Queries should be done directly on subclasses with their distinc
