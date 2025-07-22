@@ -172,7 +172,7 @@ class BtreeSetImpl : public NumericIndex::RangeTreeBase {
         result.push_back(doc_id);
       }
     } else {
-      UniqueDocsList<> unique_docs;
+      absl::flat_hash_set<DocId> unique_docs;
       unique_docs.reserve(entries_.size());
       for (const auto& [_, doc_id] : entries_) {
         const auto [__, is_new] = unique_docs.insert(doc_id);
@@ -358,8 +358,7 @@ template <typename C> vector<DocId> BaseStringIndex<C>::GetAllDocsWithNonNullVal
       }
     }
   } else {
-    UniqueDocsList<> unique_docs;
-
+    absl::flat_hash_set<DocId> unique_docs;
     unique_docs.reserve(entries_.size());
 
     for (const auto& [_, container] : entries_) {
