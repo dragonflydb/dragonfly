@@ -18,29 +18,47 @@
 #include "core/search/base.h"
 #include "core/search/block_list.h"
 #include "core/search/compressed_sorted_set.h"
+#include "core/search/range_tree.h"
 #include "core/search/rax_tree.h"
 
 // TODO: move core field definitions out of big header
 #include "core/search/search.h"
+#include "core/string_or_view.h"
 
 namespace dfly::search {
 
 // Index for integer fields.
 // Range bounds are queried in logarithmic time, iteration is constant.
 struct NumericIndex : public BaseIndex {
-  explicit NumericIndex(PMR_NS::memory_resource* mr);
+  // Temporary base class for range tree.
+  // It is used to use two different range trees depending on the flag use_range_tree.
+  // If the flag is true, RangeTree is used, otherwise a simple implementation with btree_set.
+  struct RangeTreeBase {
+    virtual void Add(DocId id, absl::Span<double> values) = 0;
+    virtual void Remove(DocId id, absl::Span<double> values) = 0;
+
+    // Returns all DocIds that match the range [l, r].
+    virtual RangeResult Range(double l, double r) const = 0;
+
+    // Returns all DocIds that have non-null values in the index.
+    virtual std::vector<DocId> GetAllDocIds() const = 0;
+
+    virtual ~RangeTreeBase() = default;
+  };
+
+  // max_range_block_size is the maximum number of entries in a single range block.
+  // It is used in RangeTree. Check RangeTree for details.
+  explicit NumericIndex(size_t max_range_block_size, PMR_NS::memory_resource* mr);
 
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
 
-  std::vector<DocId> Range(double l, double r) const;
+  RangeResult Range(double l, double r) const;
 
   std::vector<DocId> GetAllDocsWithNonNullValues() const override;
 
  private:
-  bool unique_ids_ = true;  // If true, docs ids are unique in the index, otherwise they can repeat.
-  using Entry = std::pair<double, DocId>;
-  absl::btree_set<Entry, std::less<Entry>, PMR_NS::polymorphic_allocator<Entry>> entries_;
+  std::unique_ptr<RangeTreeBase> range_tree_;
 };
 
 // Base index for string based indices.
@@ -80,6 +98,7 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // Used by Add & Remove to tokenize text value
   virtual absl::flat_hash_set<std::string> Tokenize(std::string_view value) const = 0;
 
+  StringOrView NormalizeQueryWord(std::string_view word) const;
   static Container* GetOrCreate(search::RaxTreeMap<Container>* map, std::string_view word);
   static void Remove(search::RaxTreeMap<Container>* map, DocId id, std::string_view word);
 
@@ -109,9 +128,10 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
 
 // Index for text fields.
 // Hashmap based lookup per word.
-struct TagIndex : public BaseStringIndex<SortedVector> {
+struct TagIndex : public BaseStringIndex<SortedVector<DocId>> {
   TagIndex(PMR_NS::memory_resource* mr, SchemaField::TagParams params)
-      : BaseStringIndex(mr, params.case_sensitive, false), separator_{params.separator} {
+      : BaseStringIndex(mr, params.case_sensitive, params.with_suffixtrie),
+        separator_{params.separator} {
   }
 
  protected:

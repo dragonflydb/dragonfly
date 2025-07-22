@@ -835,7 +835,7 @@ async def test_cluster_replica_sets_non_owned_keys(df_factory: DflyInstanceFacto
         assert re.match(r"MOVED \d+ localhost:1111", e.value.args[0])
 
         await push_config(replica_config, [c_master_admin])
-        await asyncio.sleep(0.5)
+        await check_all_replicas_finished([c_replica], c_master)
         assert await c_master.execute_command("dbsize") == 0
         assert await c_replica.execute_command("dbsize") == 0
 
@@ -941,7 +941,7 @@ async def test_cluster_flush_slots_after_config_change(df_factory: DflyInstanceF
     """
     await push_config(config, [c_master_admin, c_replica_admin])
 
-    await asyncio.sleep(0.5)
+    await check_all_replicas_finished([c_replica], c_master)
 
     assert await c_master.execute_command("dbsize") == (100_000 - slot_0_size)
     assert await c_replica.execute_command("dbsize") == (100_000 - slot_0_size)
@@ -1146,6 +1146,10 @@ async def test_cluster_native_client(
             assert await client.get(key) == "value"
 
     await test_random_keys()
+
+    for i in range(3):
+        await check_all_replicas_finished([c_replicas[i]], c_masters_admin[i])
+
     await asyncio.gather(*(wait_available_async(c) for c in c_replicas))
 
     # Make sure that getting a value from a replica works as well.
@@ -2103,7 +2107,7 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
         collection_size=10_000,
         variance=1,
         samples=1,
-        types=["LIST", "HASH", "SET", "ZSET", "STRING"],
+        types=["LIST", "HASH", "SET", "ZSET", "STREAM", "STRING"],
     )
     await seeder.run(nodes[0].client)
     source_data = await DebugPopulateSeeder.capture(nodes[0].client)

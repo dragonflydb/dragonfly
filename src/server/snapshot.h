@@ -49,12 +49,14 @@ struct Entry;
 // over the sink until explicitly stopped.
 class SliceSnapshot : public journal::JournalConsumerInterface {
  public:
-  // Represents a target for receiving snapshot data.
+  // Represents a target sink for receiving snapshot data. Specifically designed
+  // to send data to RdbSaver wrapping up a file shard or a socket.
   struct SnapshotDataConsumerInterface {
     virtual ~SnapshotDataConsumerInterface() = default;
 
     // Receives a chunk of snapshot data for processing
     virtual void ConsumeData(std::string data, ExecutionState* cntx) = 0;
+
     // Finalizes the snapshot writing
     virtual void Finalize() = 0;
   };
@@ -87,10 +89,6 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // Called only for non-replication, backups usecases.
   void WaitSnapshotting() {
     snapshot_fb_.JoinIfNeeded();
-  }
-
-  uint64_t snapshot_version() const {
-    return snapshot_version_;
   }
 
   const RdbTypeFreqMap& freq_map() const {
@@ -128,6 +126,10 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // DbChange listener
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
 
+  // DbSlice moved listener
+  void OnMoved(DbIndex db_index, const DbSlice::MovedItemsVec& items);
+  bool IsPositionSerialized(DbIndex db_index, PrimeTable::Cursor cursor);
+
   // Journal listener
   void OnJournalEntry(const journal::JournalItem& item, bool allow_flush);
 
@@ -154,6 +156,8 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
 
   DbSlice* db_slice_;
   const DbTableArray db_array_;
+  PrimeTable::Cursor snapshot_cursor_;
+  DbIndex snapshot_db_index_ = 0;
 
   std::unique_ptr<RdbSerializer> serializer_;
   std::vector<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
@@ -166,8 +170,12 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   RdbTypeFreqMap type_freq_map_;
 
   // version upper bound for entries that should be saved (not included).
-  uint64_t snapshot_version_ = 0;
+  uint64_t snapshot_version_;
+  uint64_t moved_cb_id_ = 0;
   uint32_t journal_cb_id_ = 0;
+  uint32_t moved_cb_id = 0;
+
+  bool use_snapshot_version_ = true;
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 
@@ -177,6 +185,8 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
     size_t side_saved = 0;
     size_t savecb_calls = 0;
     size_t keys_total = 0;
+    size_t jounal_changes = 0;
+    size_t moved_saved = 0;
   } stats_;
 
   ThreadLocalMutex big_value_mu_;

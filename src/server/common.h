@@ -136,7 +136,7 @@ extern std::atomic_uint64_t rss_mem_peak;
 
 extern size_t max_memory_limit;
 
-size_t FetchRssMemory(io::StatusData sdata);
+size_t FetchRssMemory(const io::StatusData& sdata);
 
 extern Namespaces* namespaces;
 

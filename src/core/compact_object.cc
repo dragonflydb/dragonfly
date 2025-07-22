@@ -14,7 +14,6 @@ extern "C" {
 #include "redis/stream.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"  // for non-string objects.
-#include "redis/zset.h"
 }
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
@@ -364,7 +363,7 @@ struct TL {
   base::PODArray<uint8_t> tmp_buf;
   string tmp_str;
   size_t small_str_bytes;
-  Huffman huff_keys;
+  Huffman huff_keys, huff_string_values;
   uint64_t huff_encode_total = 0, huff_encode_success = 0;  // success/total metrics.
 };
 
@@ -737,6 +736,9 @@ bool CompactObj::InitHuffmanThreadLocal(HuffmanDomain domain, std::string_view h
   switch (domain) {
     case HUFF_KEYS:
       huffman = &tl.huff_keys;
+      break;
+    case HUFF_STRING_VALUES:
+      huffman = &tl.huff_string_values;
       break;
   }
 

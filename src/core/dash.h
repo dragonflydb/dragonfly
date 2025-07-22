@@ -173,6 +173,7 @@ class DashTable : public detail::DashTableBase {
   }
 
   using Base::depth;
+  using Base::Empty;
   using Base::size;
   using Base::unique_segments;
 
@@ -267,6 +268,9 @@ class DashTable : public detail::DashTableBase {
 
   const_bucket_iterator CursorToBucketIt(Cursor c) const {
     return const_bucket_iterator{this, c.segment_id(global_depth_), c.bucket_id(), 0};
+  }
+  bucket_iterator CursorToBucketIt(Cursor c) {
+    return bucket_iterator{this, c.segment_id(global_depth_), c.bucket_id(), 0};
   }
 
   // Capture Version Change. Runs cb(it) on every bucket! (not entry) in the table whose version
@@ -820,6 +824,8 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       return std::make_pair(iterator{this, target_seg_id, it.index, it.slot}, false);
     }
 
+    bool consider_throw = true;
+
     // At this point we must split the segment.
     // try garbage collect or evict.
     if constexpr (EvictionPolicy::can_evict || EvictionPolicy::can_gc) {
@@ -869,7 +875,9 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       // We evict only if our policy says we can not grow
       if constexpr (EvictionPolicy::can_evict) {
         bool can_grow = ev.CanGrow(*this);
-        if (!can_grow) {
+        if (can_grow) {
+          consider_throw = false;
+        } else {
           unsigned res = ev.Evict(hotspot, this);
           if (res)
             continue;
@@ -877,7 +885,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       }
     }
 
-    if (!ev.CanGrow(*this)) {
+    if (consider_throw && !ev.CanGrow(*this)) {
       throw std::bad_alloc{};
     }
 
@@ -932,8 +940,8 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id, EvictionPolicy& ev)
       std::move(hash_fn), target,
       [&](uint32_t segment_from, detail::PhysicalBid from, uint32_t segment_to,
           detail::PhysicalBid to) {
-        // OnMove is used to notify eviction policy about the moves across buckets/segments
-        // during the split.
+        // OnMove is used to notify eviction policy about the moves across
+        // buckets/segments during the split.
         ev.OnMove(Cursor{global_depth_, segment_from, from}, Cursor{global_depth_, segment_to, to});
       });
 

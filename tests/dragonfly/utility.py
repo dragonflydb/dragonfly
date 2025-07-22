@@ -809,9 +809,9 @@ def assert_eventually(wrapped=None, *, times=100):
     return wrapper(wrapped)
 
 
-def skip_if_not_in_github():
+def skip_if_not_in_github(reason: str = "Redis server not found"):
     if os.getenv("GITHUB_ACTIONS") == None:
-        pytest.skip("Redis server not found")
+        pytest.skip(reason)
 
 
 class ExpirySeeder:

@@ -25,7 +25,7 @@ class ZSetFamily {
  public:
   static void Register(CommandRegistry* registry);
 
-  using IndexInterval = std::pair<int32_t, int32_t>;
+  using IndexInterval = std::pair<int64_t, int64_t>;
   using MScoreResponse = std::vector<std::optional<double>>;
 
   struct Bound {
@@ -37,7 +37,7 @@ class ZSetFamily {
 
   struct LexBound {
     std::string_view val;
-    enum Type { PLUS_INF, MINUS_INF, OPEN, CLOSED } type = CLOSED;
+    enum Type : uint8_t { PLUS_INF, MINUS_INF, OPEN, CLOSED } type = CLOSED;
   };
 
   using LexInterval = std::pair<LexBound, LexBound>;
@@ -49,7 +49,7 @@ class ZSetFamily {
     uint32_t limit = UINT32_MAX;
     bool with_scores = false;
     bool reverse = false;
-    enum IntervalType { LEX, RANK, SCORE } interval_type = RANK;
+    enum IntervalType : uint8_t { LEX, RANK, SCORE } interval_type = RANK;
     std::optional<std::string_view> store_key = std::nullopt;
   };
 

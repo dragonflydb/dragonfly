@@ -34,6 +34,7 @@ ABSL_DECLARE_FLAG(int32, list_compress_depth);
 ABSL_DECLARE_FLAG(int32, list_max_listpack_size);
 ABSL_DECLARE_FLAG(dfly::CompressionMode, compression_mode);
 ABSL_DECLARE_FLAG(bool, rdb_ignore_expiry);
+ABSL_DECLARE_FLAG(uint32_t, num_shards);
 
 namespace dfly {
 
@@ -72,6 +73,29 @@ io::FileSource RdbTest::GetSource(string name) {
   CHECK(open_res) << rdb_file;
 
   return io::FileSource(*open_res);
+}
+
+TEST_F(RdbTest, SnapshotIdTest) {
+  absl::SetFlag(&FLAGS_num_shards, num_threads_);
+  ResetService();
+
+  EXPECT_EQ(Run({"mset", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"}), "OK");
+
+  Run({"save", "df", "test_dump"});
+
+  absl::SetFlag(&FLAGS_num_shards, num_threads_ - 1);
+  ResetService();
+
+  EXPECT_EQ(Run({"mset", "test1", "val1", "test2", "val2"}), "OK");
+
+  Run({"save", "df", "test_dump"});
+
+  ResetService();
+
+  EXPECT_EQ(Run({"dfly", "load", "test_dump-summary.dfs"}), "OK");
+
+  auto resp = Run({"keys", "*"});
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("test1", "test2"));
 }
 
 TEST_F(RdbTest, Crc) {
@@ -313,6 +337,105 @@ TEST_F(RdbTest, HashmapExpiry) {
   Run({"debug", "reload"});  // Reload after expiration
   EXPECT_THAT(Run({"hgetall", "key"}),
               RespArray(UnorderedElementsAre("key1", "val1", "key2", "val2")));
+}
+
+TEST_F(RdbTest, SaveLoadExpiredValuesHmap) {
+  // Add expiring elements
+  Run({"hsetex", "hkey", "1", "key3", "val3", "key4", "val4"});
+
+  RespExpr resp = Run({"TYPE", "hkey"});
+  ASSERT_EQ(resp, "hash");
+
+  AdvanceTime(10'000);
+  resp = Run({"save", "RDB"});
+  ASSERT_EQ(resp, "OK");
+
+  resp = Run({"TYPE", "hkey"});
+  ASSERT_EQ(resp, "hash");
+
+  Run({"debug", "reload"});
+
+  resp = Run({"TYPE", "hkey"});
+  ASSERT_EQ(resp, "none");
+}
+
+TEST_F(RdbTest, SaveLoadExpiredValuesHugeHmap) {
+  constexpr auto keys_num = 10000;
+  for (int i = 0; i < keys_num; ++i) {
+    Run({"hsetex", "hkey", "1", absl::StrCat("key", i), "val"});
+  }
+
+  ASSERT_EQ(keys_num, CheckedInt({"hlen", "hkey"}));
+
+  AdvanceTime(10'000);
+
+  Run({"debug", "reload"});
+
+  ASSERT_EQ(Run({"TYPE", "hkey"}), "none");
+
+  // with one value that isn't expired
+  for (int i = 0; i < keys_num; ++i) {
+    Run({"hsetex", "hkey", "1", absl::StrCat("key", i), "val"});
+  }
+
+  Run({"hset", "hkey", base::RandStr(20), "val"});
+
+  ASSERT_EQ(keys_num + 1, CheckedInt({"hlen", "hkey"}));
+
+  AdvanceTime(10'000);
+
+  Run({"debug", "reload"});
+
+  ASSERT_EQ(1, CheckedInt({"hlen", "hkey"}));
+}
+
+TEST_F(RdbTest, SaveLoadExpiredValuesSSet) {
+  // Add expiring elements
+  Run({"saddex", "skey", "1", "key3", "key4"});
+
+  RespExpr resp = Run({"TYPE", "skey"});
+  ASSERT_EQ(resp, "set");
+
+  AdvanceTime(10'000);
+  resp = Run({"save", "RDB"});
+  ASSERT_EQ(resp, "OK");
+
+  resp = Run({"TYPE", "skey"});
+  ASSERT_EQ(resp, "set");
+
+  Run({"debug", "reload"});
+
+  resp = Run({"TYPE", "skey"});
+  ASSERT_EQ(resp, "none");
+}
+
+TEST_F(RdbTest, SaveLoadExpiredValuesHugeSet) {
+  constexpr auto keys_num = 10000;
+  for (int i = 0; i < keys_num; ++i) {
+    Run({"saddex", "skey", "1", absl::StrCat("key", i)});
+  }
+
+  ASSERT_EQ(keys_num, CheckedInt({"scard", "skey"}));
+
+  AdvanceTime(10'000);
+
+  Run({"debug", "reload"});
+
+  ASSERT_EQ(Run({"TYPE", "skey"}), "none");
+
+  // with one value that isn't expired
+  for (int i = 0; i < keys_num; ++i) {
+    Run({"saddex", "skey", "1", absl::StrCat("key", i)});
+  }
+  Run({"sadd", "skey", base::RandStr(20)});
+
+  ASSERT_EQ(keys_num + 1, CheckedInt({"scard", "skey"}));
+
+  AdvanceTime(10'000);
+
+  Run({"debug", "reload"});
+
+  ASSERT_EQ(1, CheckedInt({"scard", "skey"}));
 }
 
 TEST_F(RdbTest, SetExpiry) {
@@ -663,11 +786,11 @@ TEST_F(RdbTest, LoadHugeStream) {
 
   // Add a huge stream (test:0) with 2000 entries, and 4 1k elements per entry
   // (note must be more than 512*4kb elements to test partial reads).
-  // We add 2000 entries to the stream to ensure that the stream, because populate strream
+  // We add 2000 entries to the stream to ensure that the stream, because populate stream
   // adds only a single entry at a time, with multiple elements in it.
-  for (unsigned i = 0; i < 2000; i++) {
-    Run({"debug", "populate", "1", "test", "2000", "rand", "type", "stream", "elements", "4"});
-  }
+
+  Run({"debug", "populate", "1", "test", "2000", "rand", "type", "stream", "elements", "8000"});
+
   ASSERT_EQ(2000, CheckedInt({"xlen", "test:0"}));
   Run({"XGROUP", "CREATE", "test:0", "grp1", "0"});
   Run({"XGROUP", "CREATE", "test:0", "grp2", "0"});

@@ -417,11 +417,14 @@ class DflyInstanceFactory:
         args.setdefault("noversion_check", None)
         # MacOs does not set it automatically, so we need to set it manually
         args.setdefault("maxmemory", "8G")
-        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,proactor_pool=1,dflycmd=1,snapshot=1,streamer=1"
+        vmod = "dragonfly_connection=1,db_slice=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,engine_shard=1,dflycmd=1,snapshot=1,streamer=1"
         args.setdefault("vmodule", vmod)
         args.setdefault("jsonpathv2")
         if version > 1.27:
             args.setdefault("omit_basic_usage")
+
+        if version > 1.31:
+            args.setdefault("latency_tracking")
 
         args.setdefault("log_dir", self.params.log_dir)
 

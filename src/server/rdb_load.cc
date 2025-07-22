@@ -15,7 +15,6 @@ extern "C" {
 #include "redis/util.h"
 #include "redis/ziplist.h"
 #include "redis/zmalloc.h"
-#include "redis/zset.h"
 }
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/match.h>
@@ -80,7 +79,7 @@ inline auto Unexpected(errc ev) {
   return make_unexpected(RdbError(ev));
 }
 
-static const error_code kOk;
+const error_code kOk;
 
 struct ZiplistCbArgs {
   long count = 0;
@@ -190,6 +189,10 @@ bool RdbTypeAllowedEmpty(int type) {
   return type == RDB_TYPE_STRING || type == RDB_TYPE_JSON || type == RDB_TYPE_SBF ||
          type == RDB_TYPE_STREAM_LISTPACKS || type == RDB_TYPE_SET_WITH_EXPIRY ||
          type == RDB_TYPE_HASH_WITH_EXPIRY;
+}
+
+DbSlice& GetCurrentDbSlice() {
+  return namespaces->GetDefaultNamespace().GetCurrentDbSlice();
 }
 
 }  // namespace
@@ -375,6 +378,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       increment = 2;
     }
 
+    bool values_expired = false;
+
     for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
       string_view element = ToSV(ltrace->arr[i].rdb_var);
 
@@ -389,7 +394,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
         }
 
         if (ttl_time != -1) {
-          if (ttl_time < set->time_now()) {
+          if (ttl_time <= set->time_now()) {
+            values_expired = true;
             continue;
           }
 
@@ -401,6 +407,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
         ec_ = RdbError(errc::duplicate_key);
         return;
       }
+    }
+    if (set->Empty() && values_expired) {
+      ec_ = RdbError(errc::value_expired);
     }
   }
 
@@ -481,6 +490,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     });
     std::string key;
     std::string val;
+    bool values_expired = false;
     for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
       // ToSV may reference an internal buffer, therefore we can use only before the
       // next call to ToSV. To workaround, copy the key locally.
@@ -502,7 +512,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
         }
 
         if (ttl_time != -1) {
-          if (ttl_time < string_map->time_now()) {
+          if (ttl_time <= string_map->time_now()) {
+            values_expired = true;
             continue;
           }
 
@@ -515,6 +526,10 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
         ec_ = RdbError(errc::rdb_file_corrupted);
         return;
       }
+    }
+    if (string_map->Empty() && values_expired) {
+      ec_ = RdbError(errc::value_expired);
+      return;
     }
     if (!config_.append) {
       pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, string_map);
@@ -1916,8 +1931,9 @@ struct RdbLoader::ObjSettings {
   ObjSettings() = default;
 };
 
-RdbLoader::RdbLoader(Service* service)
+RdbLoader::RdbLoader(Service* service, std::string snapshot_id)
     : service_{service},
+      snapshot_id_(std::move(snapshot_id)),
       rdb_ignore_expiry_{GetFlag(FLAGS_rdb_ignore_expiry)},
       script_mgr_{service == nullptr ? nullptr : service->script_mgr()},
       shard_buf_{shard_set->size()} {
@@ -1990,7 +2006,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
   // Increment local one if it exists
   if (EngineShard* es = EngineShard::tlocal(); es) {
-    namespaces->GetDefaultNamespace().GetCurrentDbSlice().IncrLoadInProgress();
+    GetCurrentDbSlice().IncrLoadInProgress();
   }
 
   while (!stop_early_.load(memory_order_relaxed)) {
@@ -2091,13 +2107,12 @@ error_code RdbLoader::Load(io::Source* src) {
         FlushShardAsync(i);
 
         // Active database if not existed before.
-        shard_set->Add(
-            i, [dbid] { namespaces->GetDefaultNamespace().GetCurrentDbSlice().ActivateDb(dbid); });
+        shard_set->Add(i, [dbid] { GetCurrentDbSlice().ActivateDb(dbid); });
       }
 
       cur_db_index_ = dbid;
       if (EngineShard::tlocal()) {  // because we sometimes create entries inline.
-        namespaces->GetDefaultNamespace().GetCurrentDbSlice().ActivateDb(dbid);
+        GetCurrentDbSlice().ActivateDb(dbid);
       }
       continue; /* Read next opcode. */
     }
@@ -2109,7 +2124,11 @@ error_code RdbLoader::Load(io::Source* src) {
       SET_OR_RETURN(LoadLen(nullptr), db_size);
       SET_OR_RETURN(LoadLen(nullptr), expires_size);
 
-      ResizeDb(db_size, expires_size);
+      VLOG(1) << "RESIZEDB: db_size=" << db_size << ", expires_size=" << expires_size;
+
+      // We do not use this information because it is not possible to easily preallocate
+      // dash tables based on this information. Moreover, number of shards can change
+      // between the original shard set and the loading server.
       continue; /* Read next opcode. */
     }
 
@@ -2188,7 +2207,7 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
   bc->Wait();  // wait for sentinels to report.
   // Decrement local one if it exists
   if (EngineShard* es = EngineShard::tlocal(); es) {
-    namespaces->GetDefaultNamespace().GetCurrentDbSlice().DecrLoadInProgress();
+    GetCurrentDbSlice().DecrLoadInProgress();
   }
 
   absl::Duration dur = absl::Now() - start_time;
@@ -2405,6 +2424,12 @@ error_code RdbLoader::HandleAux() {
      * information fields and are logged at startup with a log
      * level of NOTICE. */
     LOG(INFO) << "RDB '" << auxkey << "': " << auxval;
+  } else if (auxkey == "snapshot-id") {
+    if (snapshot_id_.empty()) {
+      snapshot_id_ = auxval;
+    } else if (snapshot_id_ != auxval) {
+      return RdbError(errc::incorrect_snapshot_id);
+    }
   } else if (auxkey == "repl-stream-db") {
     // TODO
   } else if (auxkey == "repl-id") {
@@ -2452,6 +2477,21 @@ error_code RdbLoader::HandleAux() {
     /* Just ignored. */
   } else if (auxkey == "search-index") {
     LoadSearchIndexDefFromAux(std::move(auxval));
+  } else if (auxkey == "shard-count") {
+    uint32_t shard_count;
+    if (absl::SimpleAtoi(auxval, &shard_count)) {
+      shard_count_ = shard_count;
+    }
+  } else if (auxkey == "shard-id") {
+    uint32_t shard_id;
+    if (absl::SimpleAtoi(auxval, &shard_id)) {
+      shard_id_ = shard_id;
+    }
+  } else if (auxkey == "table-mem") {
+    size_t mem;
+    if (absl::SimpleAtoi(auxval, &mem)) {
+      table_used_memory_ = mem;
+    }
   } else {
     /* We ignore fields we don't understand, as by AUX field
      * contract. */
@@ -2479,7 +2519,7 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
     return;
 
   auto cb = [indx = this->cur_db_index_, this, ib = std::move(out_buf)] {
-    auto& db_slice = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
+    auto& db_slice = GetCurrentDbSlice();
 
     // Before we start loading, increment LoadInProgress.
     // This is required because FlushShardAsync dispatches to multiple shards, and those shards
@@ -2530,24 +2570,41 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   // accounted for.
   DbSlice::ItAndUpdater append_res;
 
+  LoadConfig tmp_load_config = item->load_config;
+
   // If we're appending the item to an existing key, first load the
   // object.
-  if (item->load_config.append) {
+  if (tmp_load_config.append) {
     append_res = db_slice->FindMutable(db_cntx, item->key);
-    if (!IsValid(append_res.it)) {
+    if (IsValid(append_res.it)) {
+      pv_ptr = &append_res.it->second;
+    } else {
       // If the item has expired we may not find the key. Note if the key
       // is found, but expired since we started loading, we still append to
       // avoid an inconsistent state where only part of the key is loaded.
-      if (item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms) {
+      // We allow expiration for values inside sset/hmap,
+      // so the object can unexist if all keys in it were expired
+      bool key_is_not_expired = item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms;
+      bool is_set_expiry_type = item->val.rdb_type == RDB_TYPE_HASH_WITH_EXPIRY ||
+                                item->val.rdb_type == RDB_TYPE_SET_WITH_EXPIRY;
+      if (!is_set_expiry_type && key_is_not_expired) {
         LOG(ERROR) << "Count not to find append key '" << item->key << "' in DB " << db_ind;
+        return;
       }
-      return;
+      // Because the previous batches of items for this key were fully expired,
+      // we need to create a new key
+      tmp_load_config.append = false;
     }
-    pv_ptr = &append_res.it->second;
   }
 
-  if (ec_ = FromOpaque(item->val, item->load_config, pv_ptr); ec_) {
-    if ((*ec_).value() == errc::empty_key) {
+  if (auto ec = FromOpaque(item->val, tmp_load_config, pv_ptr); ec) {
+    if (ec.value() == errc::value_expired) {
+      // hmap and sset values can expire and we ok with it,
+      // so we don't set ec_ in this case
+      return;
+    }
+    ec_ = ec;
+    if (ec.value() == errc::empty_key) {
       auto error = error_msg(item, db_ind);
       if (RdbTypeAllowedEmpty(item->val.rdb_type)) {
         LOG(WARNING) << error;
@@ -2561,7 +2618,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
     return;
   }
 
-  if (item->load_config.append) {
+  if (tmp_load_config.append) {
     return;
   }
 
@@ -2624,19 +2681,11 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   }
 }
 
-void RdbLoader::ResizeDb(size_t key_num, size_t expire_num) {
-  DCHECK_LT(key_num, 1U << 31);
-  DCHECK_LT(expire_num, 1U << 31);
-  // Note: To reserve space, it's necessary to allocate space at the shard level. We might
-  // load with different number of shards which makes database resizing unfeasible.
-}
-
 // Loads the next key/val pair.
 //
 // Huge objects may be loaded in parts, where only a subset of elements are
 // loaded at a time. This reduces the memory required to load huge objects and
-// prevents LoadItemsBuffer blocking. (Note so far only RDB_TYPE_SET and
-// RDB_TYPE_SET_WITH_EXPIRY support partial reads).
+// prevents LoadItemsBuffer blocking.
 error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   std::string key;
   int64_t start = absl::GetCurrentTimeNanos();
@@ -2664,7 +2713,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
 
     // If the key can be discarded, we must still continue to read the
     // object from the RDB so we can read the next key.
-    if (ShouldDiscardKey(key, settings)) {
+    if (ShouldDiscardKey(key, *settings)) {
       pending_read_.reserve = 0;
       continue;
     }
@@ -2699,7 +2748,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     } else {
       auto& out_buf = shard_buf_[sid];
 
-      out_buf.emplace_back(std::move(item));
+      out_buf.emplace_back(item);
 
       constexpr size_t kBufSize = 64;
       if (out_buf.size() >= kBufSize) {
@@ -2715,7 +2764,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   return kOk;
 }
 
-bool RdbLoader::ShouldDiscardKey(std::string_view key, ObjSettings* settings) const {
+bool RdbLoader::ShouldDiscardKey(std::string_view key, const ObjSettings& settings) const {
   if (!load_unowned_slots_ && IsClusterEnabled()) {
     const auto cluster_config = cluster::ClusterConfig::Current();
     if (cluster_config && !cluster_config->IsMySlot(key)) {
@@ -2731,7 +2780,7 @@ bool RdbLoader::ShouldDiscardKey(std::string_view key, ObjSettings* settings) co
    * Similarly if the RDB is the preamble of an AOF file, we want to
    * load all the keys as they are, since the log of operations later
    * assume to work in an exact keyspace state. */
-  if (ServerState::tlocal()->is_master && settings->has_expired) {
+  if (ServerState::tlocal()->is_master && (settings.has_expired)) {
     VLOG(3) << "Expire key on read: " << key;
     return true;
   }

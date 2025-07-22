@@ -21,7 +21,8 @@ namespace dfly {
 class JournalStreamer : public journal::JournalConsumerInterface {
  public:
   enum class SendLsn { NO = 0, YES = 1 };
-  JournalStreamer(journal::Journal* journal, ExecutionState* cntx, SendLsn send_lsn);
+  JournalStreamer(journal::Journal* journal, ExecutionState* cntx, SendLsn send_lsn,
+                  bool is_stable_sync);
   virtual ~JournalStreamer();
 
   // Self referential.
@@ -56,20 +57,37 @@ class JournalStreamer : public journal::JournalConsumerInterface {
 
   void WaitForInflightToComplete();
 
+  size_t inflight_bytes() const {
+    return in_flight_bytes_;
+  }
+
   util::FiberSocketBase* dest_ = nullptr;
   ExecutionState* cntx_;
+  uint64_t throttle_count_ = 0;
+  uint64_t total_throttle_wait_usec_ = 0;
+  uint32_t throttle_waiters_ = 0;
 
  private:
-  void AsyncWrite();
+  void AsyncWrite(bool force_send);
   void OnCompletion(std::error_code ec, size_t len);
 
   bool IsStalled() const;
 
   journal::Journal* journal_;
 
+  util::fb2::Fiber stalled_data_writer_;
+  util::fb2::Done stalled_data_writer_done_;
+  void StartStalledDataWriterFiber();
+  void StopStalledDataWriterFiber();
+  void StalledDataWriterFiber(std::chrono::milliseconds period_ms, util::fb2::Done* waiter);
+
   PendingBuf pending_buf_;
 
+  // If we are replication in stable sync we can aggregate data before sending
+  bool is_stable_sync_;
   size_t in_flight_bytes_ = 0, total_sent_ = 0;
+  // Last time that send data in milliseconds
+  uint64_t last_async_write_time_ = 0;
   time_t last_lsn_time_ = 0;
   LSN last_lsn_writen_ = 0;
   util::fb2::EventCount waker_;
@@ -107,13 +125,16 @@ class RestoreStreamer : public JournalStreamer {
                   uint64_t expire_ms);
 
   struct Stats {
-    size_t buckets_skipped = 0;
-    size_t buckets_written = 0;
-    size_t buckets_loop = 0;
-    size_t buckets_on_db_update = 0;
-    size_t keys_written = 0;
-    size_t keys_skipped = 0;
-    size_t commands = 0;
+    uint64_t buckets_skipped = 0;
+    uint64_t buckets_written = 0;
+    uint64_t buckets_loop = 0;
+    uint64_t buckets_on_db_update = 0;
+    uint64_t throttle_on_db_update = 0;
+    uint64_t throttle_usec_on_db_update = 0;
+    uint64_t keys_written = 0;
+    uint64_t keys_skipped = 0;
+    uint64_t commands = 0;
+    uint64_t iter_skips = 0;
   };
 
   DbSlice* db_slice_;

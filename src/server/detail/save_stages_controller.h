@@ -45,7 +45,8 @@ class RdbSnapshot {
       : snapshot_storage_{snapshot_storage} {
   }
 
-  GenericError Start(SaveMode save_mode, const string& path, const RdbSaver::GlobalData& glob_data);
+  GenericError Start(SaveMode save_mode, const string& path, const RdbSaver::GlobalData& glob_data,
+                     const std::string& snapshot_id);
   void StartInShard(EngineShard* shard);
 
   error_code SaveBody();
@@ -109,7 +110,7 @@ struct SaveStagesController : public SaveStagesInputs {
   void SaveDfs();
 
   // Start saving a dfs file on shard
-  void SaveDfsSingle(EngineShard* shard);
+  void SaveDfsSingle(EngineShard* shard, const std::string& snapshot_id);
   void SaveSnashot(EngineShard* shard);
   void WaitSnapshotInShard(EngineShard* shard);
 

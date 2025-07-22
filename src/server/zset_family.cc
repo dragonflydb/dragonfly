@@ -7,14 +7,10 @@
 #include "server/acl/acl_commands_def.h"
 
 extern "C" {
-#include "redis/geo.h"
-#include "redis/geohash.h"
-#include "redis/geohash_helper.h"
 #include "redis/listpack.h"
 #include "redis/redis_aux.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"
-#include "redis/zset.h"
 }
 
 #include "base/logging.h"
@@ -41,10 +37,10 @@ namespace {
 
 using CI = CommandId;
 
-static const char kNxXxErr[] = "XX and NX options at the same time are not compatible";
-static const char kLexRangeErr[] = "min or max not valid string range item";
-static const char kFloatRangeErr[] = "min or max is not a float";
-static const char kScoreNaN[] = "resulting score is not a number (NaN)";
+const char kNxXxErr[] = "XX and NX options at the same time are not compatible";
+const char kLexRangeErr[] = "min or max not valid string range item";
+const char kFloatRangeErr[] = "min or max is not a float";
+const char kScoreNaN[] = "resulting score is not a number (NaN)";
 
 using MScoreResponse = std::vector<std::optional<double>>;
 using ScoredMember = ZSetFamily::ScoredMember;
@@ -104,9 +100,9 @@ bool IsListPack(const detail::RobjWrapper* robj_wrapper) {
 
 int ZsetDel(detail::RobjWrapper* robj_wrapper, std::string_view ele) {
   if (IsListPack(robj_wrapper)) {
-    unsigned char* eptr;
     uint8_t* lp = (uint8_t*)robj_wrapper->inner_obj();
-    if ((eptr = detail::ZzlFind(lp, ele, nullptr)) != nullptr) {
+    unsigned char* eptr = detail::ZzlFind(lp, ele, nullptr);
+    if (eptr) {
       lp = lpDeleteRangeWithEntry(lp, &eptr, 2);
       robj_wrapper->set_inner_obj(lp);
       return 1;
@@ -185,7 +181,7 @@ OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZSetFamily::ZParams& zparams,
   return DbSlice::ItAndUpdater{add_res.it, add_res.exp_it, std::move(add_res.post_updater)};
 }
 
-enum class Action { RANGE = 0, REMOVE = 1, POP = 2 };
+enum class Action : uint8_t { RANGE = 0, REMOVE = 1, POP = 2 };
 
 class IntervalVisitor {
  public:
@@ -231,14 +227,15 @@ class IntervalVisitor {
 
   void Next(uint8_t* zl, uint8_t** eptr, uint8_t** sptr) const {
     if (params_.reverse) {
-      zzlPrev(zl, eptr, sptr);
+      detail::ZzlPrev(zl, eptr, sptr);
     } else {
-      zzlNext(zl, eptr, sptr);
+      detail::ZzlNext(zl, eptr, sptr);
     }
   }
 
   bool IsUnder(double score, const zrangespec& spec) const {
-    return params_.reverse ? zslValueGteMin(score, &spec) : zslValueLteMax(score, &spec);
+    return params_.reverse ? detail::ZslValueGteMin(score, &spec)
+                           : detail::ZslValueLteMax(score, &spec);
   }
 
   void AddResult(const uint8_t* vstr, unsigned vlen, long long vlon, double score);
@@ -253,8 +250,8 @@ class IntervalVisitor {
 
 void IntervalVisitor::operator()(const ZSetFamily::IndexInterval& ii) {
   unsigned long llen = robj_wrapper_->Size();
-  int32_t start = ii.first;
-  int32_t end = ii.second;
+  int64_t start = ii.first;
+  int64_t end = ii.second;
 
   if (start < 0)
     start = llen + start;
@@ -310,7 +307,7 @@ void IntervalVisitor::operator()(const ZSetFamily::LexInterval& li) {
     default:
       break;
   }
-  zslFreeLexRange(&range);
+  detail::ZslFreeLexRange(&range);
 }
 
 void IntervalVisitor::operator()(ZSetFamily::TopNScored sc) {
@@ -326,6 +323,7 @@ void IntervalVisitor::operator()(ZSetFamily::TopNScored sc) {
 void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
   if (params_.limit == 0)
     return;
+
   // Calculate new start and end given offset and limit.
   start += params_.offset;
   end = static_cast<uint32_t>(min(1ULL * start + params_.limit - 1, 1ULL * end));
@@ -375,7 +373,7 @@ void IntervalVisitor::ActionRem(const zrangespec& range) {
   if (IsListPack(robj_wrapper_)) {
     uint8_t* zl = (uint8_t*)robj_wrapper_->inner_obj();
     unsigned long deleted = 0;
-    zl = zzlDeleteRangeByScore(zl, &range, &deleted);
+    zl = detail::ZzlDeleteRangeByScore(zl, &range, &deleted);
     robj_wrapper_->set_inner_obj(zl);
     removed_ = deleted;
   } else {
@@ -389,7 +387,7 @@ void IntervalVisitor::ActionRem(const zlexrangespec& range) {
   if (IsListPack(robj_wrapper_)) {
     uint8_t* zl = (uint8_t*)robj_wrapper_->inner_obj();
     unsigned long deleted = 0;
-    zl = zzlDeleteRangeByLex(zl, &range, &deleted);
+    zl = detail::ZzlDeleteRangeByLex(zl, &range, &deleted);
     robj_wrapper_->set_inner_obj(zl);
     removed_ = deleted;
   } else {
@@ -421,9 +419,9 @@ void IntervalVisitor::ExtractListPack(const zrangespec& range) {
 
   /* If reversed, get the last node in range as starting point. */
   if (params_.reverse) {
-    eptr = zzlLastInRange(zl, &range);
+    eptr = detail::ZzlLastInRange(zl, &range);
   } else {
-    eptr = zzlFirstInRange(zl, &range);
+    eptr = detail::ZzlFirstInRange(zl, &range);
   }
 
   /* Get score pointer for the first element. */
@@ -437,7 +435,7 @@ void IntervalVisitor::ExtractListPack(const zrangespec& range) {
   }
 
   while (eptr && limit--) {
-    double score = zzlGetScore(sptr);
+    double score = detail::ZzlGetScore(sptr);
 
     /* Abort when the node is no longer in range. */
     if (!IsUnder(score, range))
@@ -474,9 +472,9 @@ void IntervalVisitor::ExtractListPack(const zlexrangespec& range) {
 
   /* If reversed, get the last node in range as starting point. */
   if (params_.reverse) {
-    eptr = zzlLastInLexRange(zl, &range);
+    eptr = detail::ZzlLastInLexRange(zl, &range);
   } else {
-    eptr = zzlFirstInLexRange(zl, &range);
+    eptr = detail::ZzlFirstInLexRange(zl, &range);
   }
 
   /* Get score pointer for the first element. */
@@ -492,14 +490,14 @@ void IntervalVisitor::ExtractListPack(const zlexrangespec& range) {
   while (eptr && limit--) {
     double score = 0;
     if (params_.with_scores) /* don't bother to extract the score if it's gonna be ignored. */
-      score = zzlGetScore(sptr);
+      score = detail::ZzlGetScore(sptr);
 
     /* Abort when the node is no longer in range. */
     if (params_.reverse) {
-      if (!zzlLexValueGteMin(eptr, &range))
+      if (!detail::ZzlLexValueGteMin(eptr, &range))
         break;
     } else {
-      if (!zzlLexValueLteMax(eptr, &range))
+      if (!detail::ZzlLexValueLteMax(eptr, &range))
         break;
     }
 
@@ -538,7 +536,7 @@ void IntervalVisitor::PopListPack(ZSetFamily::TopNScored sc) {
   /* First we get the entries */
   unsigned int num = sc;
   while (eptr && num--) {
-    double score = zzlGetScore(sptr);
+    double score = detail::ZzlGetScore(sptr);
     vstr = lpGetValue(eptr, &vlen, &vlong);
     AddResult(vstr, vlen, vlong, score);
 
@@ -1210,7 +1208,7 @@ OpResult<RankResult> OpRank(const OpArgs& op_args, string_view key, string_view 
       if (lpCompare(eptr, (const uint8_t*)member.data(), member.size()))
         break;
       rank++;
-      zzlNext(zl, &eptr, &sptr);
+      detail::ZzlNext(zl, &eptr, &sptr);
     }
 
     if (eptr == NULL)
@@ -1219,7 +1217,7 @@ OpResult<RankResult> OpRank(const OpArgs& op_args, string_view key, string_view 
     RankResult res{};
     res.rank = reverse ? lpLength(zl) / 2 - rank : rank - 1;
     if (with_score) {
-      res.score = zzlGetScore(sptr);
+      res.score = detail::ZzlGetScore(sptr);
     }
     return res;
   }
@@ -1266,7 +1264,7 @@ OpResult<unsigned> OpCount(const OpArgs& op_args, std::string_view key,
     double score;
 
     /* Use the first element in range as the starting point */
-    eptr = zzlFirstInRange(zl, &range);
+    eptr = detail::ZzlFirstInRange(zl, &range);
 
     /* No "first" element */
     if (eptr == NULL) {
@@ -1275,20 +1273,20 @@ OpResult<unsigned> OpCount(const OpArgs& op_args, std::string_view key,
 
     /* First element is in range */
     sptr = lpNext(zl, eptr);
-    score = zzlGetScore(sptr);
+    score = detail::ZzlGetScore(sptr);
 
-    DCHECK(zslValueLteMax(score, &range));
+    DCHECK(detail::ZslValueLteMax(score, &range));
 
     /* Iterate over elements in range */
     while (eptr) {
-      score = zzlGetScore(sptr);
+      score = detail::ZzlGetScore(sptr);
 
       /* Abort when the node is no longer in range. */
-      if (!zslValueLteMax(score, &range)) {
+      if (!detail::ZslValueLteMax(score, &range)) {
         break;
       } else {
         count++;
-        zzlNext(zl, &eptr, &sptr);
+        detail::ZzlNext(zl, &eptr, &sptr);
       }
     }
   } else {
@@ -1315,21 +1313,21 @@ OpResult<unsigned> OpLexCount(const OpArgs& op_args, string_view key,
     uint8_t *eptr, *sptr;
 
     /* Use the first element in range as the starting point */
-    eptr = zzlFirstInLexRange(zl, &range);
+    eptr = detail::ZzlFirstInLexRange(zl, &range);
 
     if (eptr) {
       /* First element is in range */
       sptr = lpNext(zl, eptr);
-      DCHECK(zzlLexValueLteMax(eptr, &range));
+      DCHECK(detail::ZzlLexValueLteMax(eptr, &range));
 
       /* Iterate over elements in range */
       while (eptr) {
         /* Abort when the node is no longer in range. */
-        if (!zzlLexValueLteMax(eptr, &range)) {
+        if (!detail::ZzlLexValueLteMax(eptr, &range)) {
           break;
         } else {
           count++;
-          zzlNext(zl, &eptr, &sptr);
+          detail::ZzlNext(zl, &eptr, &sptr);
         }
       }
     }
@@ -1339,11 +1337,11 @@ OpResult<unsigned> OpLexCount(const OpArgs& op_args, string_view key,
     count = zs->LexCount(range);
   }
 
-  zslFreeLexRange(&range);
+  detail::ZslFreeLexRange(&range);
   return count;
 }
 
-OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, facade::ArgRange members) {
+OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, const facade::ArgRange& members) {
   auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
@@ -1365,7 +1363,7 @@ OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, facade::ArgRang
 }
 
 OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key,
-                                  facade::ArgRange members) {
+                                  const facade::ArgRange& members) {
   auto res_it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
 
   if (res_it.status() == OpStatus::KEY_NOTFOUND) {
@@ -1395,8 +1393,7 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
   if (!find_res)
     return find_res.status();
 
-  auto it = find_res.value();
-  const PrimeValue& pv = it->second;
+  const PrimeValue& pv = (*find_res)->second;
   StringVec res;
   char buf[128];
 
@@ -1558,7 +1555,7 @@ void ZBooleanOperation(CmdArgList args, string_view cmd, bool is_union, bool sto
   }
 }
 
-enum class FilterShards { NO = 0, YES = 1 };
+enum class FilterShards : uint8_t { NO = 0, YES = 1 };
 
 OpResult<ScoredArray> ZPopMinMaxInternal(std::string_view key, FilterShards should_filter_shards,
                                          uint32 count, bool reverse, Transaction* tx) {
@@ -2470,11 +2467,11 @@ void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void ZSetFamily::ZPopMax(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZPopMinMaxFromArgs(std::move(args), true, cmd_cntx.tx, cmd_cntx.rb);
+  ZPopMinMaxFromArgs(args, true, cmd_cntx.tx, cmd_cntx.rb);
 }
 
 void ZSetFamily::ZPopMin(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZPopMinMaxFromArgs(std::move(args), false, cmd_cntx.tx, cmd_cntx.rb);
+  ZPopMinMaxFromArgs(args, false, cmd_cntx.tx, cmd_cntx.rb);
 }
 
 void ZSetFamily::ZLexCount(CmdArgList args, const CommandContext& cmd_cntx) {

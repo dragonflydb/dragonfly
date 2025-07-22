@@ -33,11 +33,12 @@ using namespace std::chrono_literals;
 
 __thread ServerState* ServerState::state_ = nullptr;
 
-ServerState::Stats::Stats(unsigned num_shards) : tx_width_freq_arr(num_shards) {
+ServerState::Stats::Stats(unsigned num_shards)
+    : tx_width_freq_arr(num_shards), squash_width_freq_arr(num_shards) {
 }
 
 ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
-  static_assert(sizeof(Stats) == 20 * 8, "Stats size mismatch");
+  static_assert(sizeof(Stats) == 23 * 8, "Stats size mismatch");
 
 #define ADD(x) this->x += (other.x)
 
@@ -65,11 +66,19 @@ ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
 
   ADD(oom_error_cmd_cnt);
   ADD(conn_timeout_events);
+  ADD(psync_requests_total);
+
   if (this->tx_width_freq_arr.size() > 0) {
     DCHECK_EQ(this->tx_width_freq_arr.size(), other.tx_width_freq_arr.size());
     this->tx_width_freq_arr += other.tx_width_freq_arr;
   } else {
     this->tx_width_freq_arr = other.tx_width_freq_arr;
+  }
+  if (this->squash_width_freq_arr.size() > 0) {
+    DCHECK_EQ(this->squash_width_freq_arr.size(), other.squash_width_freq_arr.size());
+    this->squash_width_freq_arr += other.squash_width_freq_arr;
+  } else {
+    this->squash_width_freq_arr = other.squash_width_freq_arr;
   }
   return *this;
 #undef ADD
@@ -294,7 +303,7 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       facade::Connection* conn = ref.Get();
       if (conn) {
         VLOG(1) << "Closing connection due to timeout: " << conn->GetClientInfo();
-        conn->ShutdownSelf();
+        conn->ShutdownSelfBlocking();
         stats.conn_timeout_events++;
       }
     }

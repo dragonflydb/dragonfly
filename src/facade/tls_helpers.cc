@@ -14,6 +14,7 @@
 #include "absl/functional/bind_front.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/facade_types.h"
 
 ABSL_FLAG(std::string, tls_cert_file, "", "cert file for tls connections");
 ABSL_FLAG(std::string, tls_key_file, "", "key file for tls connections");
@@ -25,6 +26,9 @@ ABSL_FLAG(std::string, tls_ciphers, "DEFAULT:!MEDIUM", "TLS ciphers configuratio
 ABSL_FLAG(std::string, tls_cipher_suites, "", "TLS ciphers configuration for tls1.3");
 ABSL_FLAG(bool, tls_prefer_server_ciphers, false,
           "If true, prefer server ciphers over client ciphers");
+ABSL_FLAG(bool, tls_session_caching, false, "If true enables session caching and tickets");
+ABSL_FLAG(size_t, tls_session_cache_size, 20 * 1024, "Size of the cache for tls sessions");
+ABSL_FLAG(size_t, tls_session_cache_timeout, 300, "Timeout for each session/ticket");
 
 namespace facade {
 
@@ -96,6 +100,25 @@ SSL_CTX* CreateSslCntx(TlsContextRole role) {
   if (GetFlag(FLAGS_tls_prefer_server_ciphers)) {
     SSL_CTX_set_options(ctx, SSL_OP_CIPHER_SERVER_PREFERENCE);
   }
+
+  if (GetFlag(FLAGS_tls_session_caching)) {
+    SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_SERVER);
+    SSL_CTX_sess_set_cache_size(ctx, GetFlag(FLAGS_tls_session_cache_size));
+    SSL_CTX_set_timeout(ctx, GetFlag(FLAGS_tls_session_cache_timeout));
+    SSL_CTX_set_session_id_context(ctx, (const unsigned char*)"dragonfly", 9);
+  }
+
+  SSL_CTX_set_info_callback(ctx, [](const SSL* ssl, int where, int ret) {
+    // When we skip the handshake we never reach this state.
+    if (where & SSL_CB_HANDSHAKE_START) {
+      ++tl_facade_stats->conn_stats.handshakes_started;
+    }
+    // When we skip the handshake, we never reach this state.
+    if (where & SSL_CB_HANDSHAKE_DONE) {
+      ++tl_facade_stats->conn_stats.handshakes_completed;
+    }
+  });
+
   return ctx;
 }
 

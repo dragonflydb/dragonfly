@@ -35,6 +35,10 @@ using namespace std;
 
 using ::testing::HasSubstr;
 
+// Used for NumericIndex benchmarks.
+// The value is used to determine the maximum size of a range block in the range tree.
+constexpr size_t kMaxRangeBlockSize = 500000;
+
 struct MockedDocument : public DocumentAccessor {
  public:
   using Map = absl::flat_hash_map<std::string, std::string>;
@@ -101,15 +105,40 @@ struct MockedDocument : public DocumentAccessor {
 
 IndicesOptions kEmptyOptions{{}};
 
-Schema MakeSimpleSchema(initializer_list<pair<string_view, SchemaField::FieldType>> ilist) {
+struct SchemaFieldInitializer {
+  SchemaFieldInitializer(std::string_view name, SchemaField::FieldType type)
+      : name{name}, type{type} {
+    switch (type) {
+      case SchemaField::TAG:
+        special_params = SchemaField::TagParams{};
+        break;
+      case SchemaField::TEXT:
+        special_params = SchemaField::TextParams{};
+        break;
+      case SchemaField::NUMERIC:
+        special_params = SchemaField::NumericParams{};
+        break;
+      case SchemaField::VECTOR:
+        special_params = SchemaField::VectorParams{};
+        break;
+    }
+  }
+
+  SchemaFieldInitializer(std::string_view name, SchemaField::FieldType type,
+                         SchemaField::ParamsVariant special_params)
+      : name{name}, type{type}, special_params{special_params} {
+  }
+
+  std::string_view name;
+  SchemaField::FieldType type;
+  SchemaField::ParamsVariant special_params{std::monostate{}};
+};
+
+Schema MakeSimpleSchema(initializer_list<SchemaFieldInitializer> ilist) {
   Schema schema;
-  for (auto [name, type] : ilist) {
-    auto& field = schema.fields[name];
-    field = {type, 0, string{name}};
-    if (type == SchemaField::TAG)
-      field.special_params = SchemaField::TagParams{};
-    else if (type == SchemaField::TEXT)
-      field.special_params = SchemaField::TextParams{};
+  for (auto ifield : ilist) {
+    auto& field = schema.fields[ifield.name];
+    field = {ifield.type, 0, string{ifield.name}, ifield.special_params};
   }
   return schema;
 }
@@ -129,7 +158,7 @@ class SearchTest : public ::testing::Test {
     EXPECT_EQ(entries_.size(), 0u) << "Missing check";
   }
 
-  void PrepareSchema(initializer_list<pair<string_view, SchemaField::FieldType>> ilist) {
+  void PrepareSchema(initializer_list<SchemaFieldInitializer> ilist) {
     schema_ = MakeSimpleSchema(ilist);
   }
 
@@ -477,58 +506,73 @@ TEST_F(SearchTest, StopWords) {
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
 }
 
-class SearchRaxTest : public SearchTest,
-                      public testing::WithParamInterface<bool /* build suffix trie */> {};
+class SearchRaxTest
+    : public SearchTest,
+      public testing::WithParamInterface<pair<bool /* build suffix trie */, bool /* tag index */>> {
+};
 
 TEST_P(SearchRaxTest, SuffixInfix) {
-  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
-  schema.fields["title"].special_params = SchemaField::TextParams{.with_suffixtrie = GetParam()};
+  auto [with_trie, use_tag] = GetParam();
+  Schema schema = MakeSimpleSchema({{"title", use_tag ? SchemaField::TAG : SchemaField::TEXT}});
+  if (use_tag) {
+    schema.fields["title"].special_params = SchemaField::TagParams{.with_suffixtrie = with_trie};
+  } else {
+    schema.fields["title"].special_params = SchemaField::TextParams{.with_suffixtrie = with_trie};
+  }
 
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
   SearchAlgorithm algo{};
   QueryParams params;
 
-  vector<string> documents = {"Berries",     "Blueberries", "Blackberries", "Apples",
-                              "Cranberries", "Wolfberry",   "Strawberry"};
+  vector<string> documents = {"Berries",     "BlueBeRRies", "Blackberries", "APPLES",
+                              "CranbeRRies", "Wolfberry",   "StraWberry"};
   for (size_t i = 0; i < documents.size(); i++) {
     MockedDocument doc{{{"title", documents[i]}}};
     indices.Add(i, doc);
   }
 
+  auto prepare = [&, use_tag = use_tag](string q) {
+    if (use_tag)
+      q = "@title:{"s + q + "}"s;
+    algo.Init(q, &params);
+  };
+
   // suffix queries
 
-  algo.Init("*es", &params);
+  prepare("*Es");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 3, 4));
 
-  algo.Init("*berries", &params);
+  prepare("*beRRies");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 4));
 
-  algo.Init("*les", &params);
+  prepare("*les");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(3));
 
-  algo.Init("*lueberries", &params);
+  prepare("*lueBERRies");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1));
 
-  algo.Init("*berry", &params);
+  prepare("*berrY");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(5, 6));
 
   // infix queries
 
-  algo.Init("*berr*", &params);
+  prepare("*berr*");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 4, 5, 6));
 
-  algo.Init("*anb*", &params);
+  prepare("*ANB*");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(4));
 
-  algo.Init("*berries*", &params);
+  prepare("*berries*");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 4));
 
-  algo.Init("*bl*", &params);
+  prepare("*bL*");
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 2));
 }
 
-INSTANTIATE_TEST_SUITE_P(SuffixInfixNoTrie, SearchRaxTest, testing::Values(false));
-INSTANTIATE_TEST_SUITE_P(SuffixInfixWithTrie, SearchRaxTest, testing::Values(true));
+INSTANTIATE_TEST_SUITE_P(NoTrieText, SearchRaxTest, testing::Values(pair{false, false}));
+INSTANTIATE_TEST_SUITE_P(WithTrieText, SearchRaxTest, testing::Values(pair{true, false}));
+INSTANTIATE_TEST_SUITE_P(NoTrieTag, SearchRaxTest, testing::Values(pair{false, true}));
+INSTANTIATE_TEST_SUITE_P(WithTrieTag, SearchRaxTest, testing::Values(pair{true, true}));
 
 std::string ToBytes(absl::Span<const float> vec) {
   return string{reinterpret_cast<const char*>(vec.data()), sizeof(float) * vec.size()};
@@ -835,6 +879,43 @@ TEST_P(KnnTest, AutoResize) {
 INSTANTIATE_TEST_SUITE_P(KnnFlat, KnnTest, testing::Values(false));
 INSTANTIATE_TEST_SUITE_P(KnnHnsw, KnnTest, testing::Values(true));
 
+TEST_F(SearchTest, VectorDistanceBasic) {
+  // Test basic vector distance calculations
+  std::vector<float> vec1 = {1.0f, 2.0f, 3.0f};
+  std::vector<float> vec2 = {4.0f, 5.0f, 6.0f};
+
+  // Test L2 distance
+  float l2_dist = VectorDistance(vec1.data(), vec2.data(), 3, VectorSimilarity::L2);
+  EXPECT_GT(l2_dist, 0.0f);
+  EXPECT_LT(l2_dist, 10.0f);  // Should be reasonable value
+
+  // Test Cosine distance
+  float cos_dist = VectorDistance(vec1.data(), vec2.data(), 3, VectorSimilarity::COSINE);
+  EXPECT_GE(cos_dist, 0.0f);
+  EXPECT_LE(cos_dist, 2.0f);  // Cosine distance range
+
+  // Test identical vectors
+  float l2_same = VectorDistance(vec1.data(), vec1.data(), 3, VectorSimilarity::L2);
+  EXPECT_NEAR(l2_same, 0.0f, 1e-6);
+
+  float cos_same = VectorDistance(vec1.data(), vec1.data(), 3, VectorSimilarity::COSINE);
+  EXPECT_NEAR(cos_same, 0.0f, 1e-6);
+}
+
+TEST_F(SearchTest, VectorDistanceConsistency) {
+  // Test that results are consistent across multiple calls
+  std::vector<float> vec1 = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f};
+  std::vector<float> vec2 = {0.6f, 0.7f, 0.8f, 0.9f, 1.0f};
+
+  float l2_dist1 = VectorDistance(vec1.data(), vec2.data(), 5, VectorSimilarity::L2);
+  float l2_dist2 = VectorDistance(vec1.data(), vec2.data(), 5, VectorSimilarity::L2);
+  EXPECT_EQ(l2_dist1, l2_dist2);
+
+  float cos_dist1 = VectorDistance(vec1.data(), vec2.data(), 5, VectorSimilarity::COSINE);
+  float cos_dist2 = VectorDistance(vec1.data(), vec2.data(), 5, VectorSimilarity::COSINE);
+  EXPECT_EQ(cos_dist1, cos_dist2);
+}
+
 static void BM_VectorSearch(benchmark::State& state) {
   unsigned ndims = state.range(0);
   unsigned nvecs = state.range(1);
@@ -1119,6 +1200,126 @@ BENCHMARK(BM_SearchByType_Diverse)
     ->ArgNames({"docs", "pattern_len", "search_type"})
     ->Unit(benchmark::kMicrosecond);
 
+// Helper function to generate random vector
+static std::vector<float> GenerateRandomVector(size_t dims, unsigned seed = 42) {
+  std::mt19937 gen(seed);
+  std::uniform_real_distribution<float> dis(-1.0f, 1.0f);
+
+  std::vector<float> vec(dims);
+  for (size_t i = 0; i < dims; ++i) {
+    vec[i] = dis(gen);
+  }
+  return vec;
+}
+
+// Benchmark vector distance calculation (parametrized by similarity type)
+static void BM_VectorDistance(benchmark::State& state) {
+  size_t dims = state.range(0);
+  size_t num_pairs = state.range(1);
+  VectorSimilarity sim = static_cast<VectorSimilarity>(state.range(2));
+
+  // Generate test vectors with different seeds per similarity type
+  uint32_t seed_offset = (sim == VectorSimilarity::L2) ? 1000 : 2000;
+  std::vector<std::vector<float>> vectors_a, vectors_b;
+  vectors_a.reserve(num_pairs);
+  vectors_b.reserve(num_pairs);
+
+  for (size_t i = 0; i < num_pairs; ++i) {
+    vectors_a.push_back(GenerateRandomVector(dims, i));
+    vectors_b.push_back(GenerateRandomVector(dims, i + seed_offset));
+  }
+
+  size_t pair_idx = 0;
+  while (state.KeepRunning()) {
+    float distance =
+        VectorDistance(vectors_a[pair_idx].data(), vectors_b[pair_idx].data(), dims, sim);
+    benchmark::DoNotOptimize(distance);
+
+    pair_idx = (pair_idx + 1) % num_pairs;
+  }
+
+  state.counters["dims"] = dims;
+  state.counters["pairs"] = num_pairs;
+
+  std::string sim_name = (sim == VectorSimilarity::L2) ? "L2" : "Cosine";
+  state.SetLabel(sim_name);
+}
+
+// Benchmark with different vector dimensions, batch sizes and similarity types
+BENCHMARK(BM_VectorDistance)
+    // Small vectors, different batch sizes - L2 Distance
+    ->Args({32, 100, static_cast<int>(VectorSimilarity::L2)})    // 32D, 100 pairs
+    ->Args({32, 1000, static_cast<int>(VectorSimilarity::L2)})   // 32D, 1K pairs
+    ->Args({32, 10000, static_cast<int>(VectorSimilarity::L2)})  // 32D, 10K pairs
+    // Medium vectors - L2 Distance
+    ->Args({128, 100, static_cast<int>(VectorSimilarity::L2)})    // 128D, 100 pairs
+    ->Args({128, 1000, static_cast<int>(VectorSimilarity::L2)})   // 128D, 1K pairs
+    ->Args({128, 10000, static_cast<int>(VectorSimilarity::L2)})  // 128D, 10K pairs
+    // Large vectors - L2 Distance
+    ->Args({512, 100, static_cast<int>(VectorSimilarity::L2)})   // 512D, 100 pairs
+    ->Args({512, 1000, static_cast<int>(VectorSimilarity::L2)})  // 512D, 1K pairs
+    ->Args({512, 5000, static_cast<int>(VectorSimilarity::L2)})  // 512D, 5K pairs
+    // Very large vectors - L2 Distance
+    ->Args({1536, 100, static_cast<int>(VectorSimilarity::L2)})   // 1536D, 100 pairs
+    ->Args({1536, 1000, static_cast<int>(VectorSimilarity::L2)})  // 1536D, 1K pairs
+
+    // Small vectors, different batch sizes - Cosine Distance
+    ->Args({32, 100, static_cast<int>(VectorSimilarity::COSINE)})    // 32D, 100 pairs
+    ->Args({32, 1000, static_cast<int>(VectorSimilarity::COSINE)})   // 32D, 1K pairs
+    ->Args({32, 10000, static_cast<int>(VectorSimilarity::COSINE)})  // 32D, 10K pairs
+    // Medium vectors - Cosine Distance
+    ->Args({128, 100, static_cast<int>(VectorSimilarity::COSINE)})    // 128D, 100 pairs
+    ->Args({128, 1000, static_cast<int>(VectorSimilarity::COSINE)})   // 128D, 1K pairs
+    ->Args({128, 10000, static_cast<int>(VectorSimilarity::COSINE)})  // 128D, 10K pairs
+    // Large vectors - Cosine Distance
+    ->Args({512, 100, static_cast<int>(VectorSimilarity::COSINE)})   // 512D, 100 pairs
+    ->Args({512, 1000, static_cast<int>(VectorSimilarity::COSINE)})  // 512D, 1K pairs
+    ->Args({512, 5000, static_cast<int>(VectorSimilarity::COSINE)})  // 512D, 5K pairs
+    // Very large vectors - Cosine Distance
+    ->Args({1536, 100, static_cast<int>(VectorSimilarity::COSINE)})   // 1536D, 100 pairs
+    ->Args({1536, 1000, static_cast<int>(VectorSimilarity::COSINE)})  // 1536D, 1K pairs
+    ->ArgNames({"dims", "pairs", "similarity"})
+    ->Unit(benchmark::kMicrosecond);
+
+// Intensive benchmark for performance comparison
+static void BM_VectorDistanceIntensive(benchmark::State& state) {
+  size_t dims = 512;  // Fixed medium size
+  size_t batch_size = 1000;
+  VectorSimilarity sim = static_cast<VectorSimilarity>(state.range(0));
+
+  // Generate test vectors
+  std::vector<std::vector<float>> vectors_a, vectors_b;
+  vectors_a.reserve(batch_size);
+  vectors_b.reserve(batch_size);
+
+  for (size_t i = 0; i < batch_size; ++i) {
+    vectors_a.push_back(GenerateRandomVector(dims, i));
+    vectors_b.push_back(GenerateRandomVector(dims, i + 3000));
+  }
+
+  size_t total_ops = 0;
+  while (state.KeepRunning()) {
+    // Process entire batch
+    for (size_t i = 0; i < batch_size; ++i) {
+      float distance = VectorDistance(vectors_a[i].data(), vectors_b[i].data(), dims, sim);
+      benchmark::DoNotOptimize(distance);
+      ++total_ops;
+    }
+  }
+
+  state.counters["ops"] = total_ops;
+  state.counters["ops_per_sec"] = benchmark::Counter(total_ops, benchmark::Counter::kIsRate);
+
+  std::string sim_name = (sim == VectorSimilarity::L2) ? "L2" : "Cosine";
+  state.SetLabel(sim_name + "_Intensive");
+}
+
+BENCHMARK(BM_VectorDistanceIntensive)
+    ->Arg(static_cast<int>(VectorSimilarity::L2))
+    ->Arg(static_cast<int>(VectorSimilarity::COSINE))
+    ->ArgNames({"similarity_type"})
+    ->Unit(benchmark::kMicrosecond);
+
 static void BM_SearchDocIds(benchmark::State& state) {
   auto schema = MakeSimpleSchema({{"score", SchemaField::NUMERIC}, {"tag", SchemaField::TAG}});
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
@@ -1146,6 +1347,469 @@ static void BM_SearchDocIds(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_SearchDocIds)->Range(0, 2);
+
+static void BM_SearchNumericIndexes(benchmark::State& state) {
+  auto schema = MakeSimpleSchema({{"numeric", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  default_random_engine rnd;
+
+  using NumericType = long long;
+  uniform_int_distribution<NumericType> dist(std::numeric_limits<NumericType>::min(),
+                                             std::numeric_limits<NumericType>::max());
+
+  const size_t num_docs = state.range(0);
+  for (size_t i = 0; i < num_docs; i++) {
+    MockedDocument doc{Map{{"numeric", std::to_string(dist(rnd))}}};
+    indices.Add(i, doc);
+  }
+
+  std::string queries[] = {"@numeric:[15 +inf]", "@numeric:[-inf 20]", "@numeric:[-inf +inf]",
+                           "@numeric:[0 100000]"};
+
+  std::unordered_map<size_t, std::vector<size_t>> expected_results_per_num_docs = {
+      {10000, {4982, 5018, 10000, 0}},
+      {100000, {49885, 50115, 100000, 0}},
+      {1000000, {500853, 499147, 1000000, 0}},
+  };
+
+  while (state.KeepRunning()) {
+    for (size_t i = 0; i < ABSL_ARRAYSIZE(queries); ++i) {
+      const auto& query = queries[i];
+
+      CHECK(algo.Init(query, &params));
+      auto result = algo.Search(&indices);
+      CHECK(result.error.empty());
+
+      const size_t expected_result = expected_results_per_num_docs[num_docs][i];
+      CHECK_EQ(result.total, expected_result);
+      CHECK_EQ(result.ids.size(), expected_result);
+    }
+  }
+}
+
+BENCHMARK(BM_SearchNumericIndexes)->Arg(10000)->Arg(100000)->Arg(1000000)->ArgNames({"num_docs"});
+
+static void BM_SearchNumericIndexesSmallRanges(benchmark::State& state) {
+  auto schema = MakeSimpleSchema({{"numeric", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  default_random_engine rnd;
+
+  using NumericType = uint16_t;
+  uniform_int_distribution<NumericType> dist(0, std::numeric_limits<NumericType>::max());
+
+  const size_t num_docs = state.range(0);
+  // Insert zero values
+  for (size_t i = 0; i < num_docs / 50; i++) {
+    MockedDocument doc{Map{{"numeric", "0"}}};
+    indices.Add(i, doc);
+  }
+  for (size_t i = num_docs / 50; i < num_docs; i++) {
+    MockedDocument doc{Map{{"numeric", std::to_string(dist(rnd))}}};
+    indices.Add(i, doc);
+  }
+
+  std::string queries[] = {"@numeric:[0 40000]", "@numeric:[-inf +inf]"};
+
+  std::unordered_map<size_t, std::vector<size_t>> expected_results_per_num_docs = {
+      {100000, {61939, 100000}},
+      {1000000, {618365, 1000000}},
+  };
+
+  while (state.KeepRunning()) {
+    for (size_t i = 0; i < ABSL_ARRAYSIZE(queries); ++i) {
+      const auto& query = queries[i];
+
+      CHECK(algo.Init(query, &params));
+      auto result = algo.Search(&indices);
+      CHECK(result.error.empty());
+
+      const size_t expected_result = expected_results_per_num_docs[num_docs][i];
+      CHECK_EQ(result.total, expected_result);
+      CHECK_EQ(result.ids.size(), expected_result);
+    }
+  }
+}
+
+BENCHMARK(BM_SearchNumericIndexesSmallRanges)
+    ->Arg(100000)   // One block
+    ->Arg(1000000)  // Two blocks
+    ->ArgNames({"num_docs"});
+
+static void BM_SearchTwoNumericIndexes(benchmark::State& state) {
+  auto schema = MakeSimpleSchema({
+      {"numeric1", SchemaField::NUMERIC,
+       SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
+      {"numeric2", SchemaField::NUMERIC,
+       SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
+  });
+
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  std::default_random_engine rnd;
+
+  using NumericType = long long;
+  uniform_int_distribution<NumericType> dist1(std::numeric_limits<NumericType>::min(),
+                                              std::numeric_limits<NumericType>::max());
+  uniform_int_distribution<NumericType> dist2(std::numeric_limits<NumericType>::min(),
+                                              std::numeric_limits<NumericType>::max());
+
+  const size_t num_docs = state.range(0);
+  for (size_t i = 0; i < num_docs; ++i) {
+    MockedDocument doc{Map{
+        {"numeric1", std::to_string(dist1(rnd))},
+        {"numeric2", std::to_string(dist2(rnd))},
+    }};
+    indices.Add(i, doc);
+  }
+
+  std::string queries[] = {absl::StrCat("@numeric1:[15 +inf] @numeric2:[-inf 20]"),
+                           absl::StrCat("@numeric1:[-inf 20] @numeric2:[15 +inf]"),
+                           absl::StrCat("@numeric1:[0 100000] @numeric2:[-100000 0]"),
+                           absl::StrCat("@numeric1:[-100000 0] @numeric2:[0 100000]")};
+
+  std::unordered_map<size_t, std::vector<size_t>> expected_results_per_num_docs = {
+      {10000, {2508, 2507, 0, 0}},
+      {100000, {25119, 25232, 0, 0}},
+      {1000000, {250623, 250643, 0, 0}},
+  };
+
+  while (state.KeepRunning()) {
+    for (size_t i = 0; i < ABSL_ARRAYSIZE(queries); ++i) {
+      const auto& query = queries[i];
+
+      CHECK(algo.Init(query, &params));
+      auto result = algo.Search(&indices);
+      CHECK(result.error.empty());
+
+      const size_t expected_result = expected_results_per_num_docs[num_docs][i];
+      CHECK_EQ(result.total, expected_result);
+      CHECK_EQ(result.ids.size(), expected_result);
+    }
+  }
+}
+
+BENCHMARK(BM_SearchTwoNumericIndexes)
+    ->Arg(10000)
+    ->Arg(100000)
+    ->Arg(1000000)
+    ->ArgNames({"num_docs"});
+
+static void BM_SearchNumericAndTagIndexes(benchmark::State& state) {
+  auto schema = MakeSimpleSchema({{"tag", SchemaField::TAG},
+                                  {"numeric", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  default_random_engine rnd;
+
+  using NumericType = long long;
+  uniform_int_distribution<NumericType> dist(std::numeric_limits<NumericType>::min(),
+                                             std::numeric_limits<NumericType>::max());
+
+  size_t tag_number = 0;
+  const size_t max_tag_number = 1000;
+
+  const size_t num_docs = state.range(0);
+  for (size_t i = 0; i < num_docs; i++) {
+    MockedDocument doc{
+        Map{{"tag", absl::StrCat("tag", tag_number)}, {"numeric", std::to_string(dist(rnd))}}};
+    indices.Add(i, doc);
+
+    tag_number = (tag_number + 1) % max_tag_number;
+  }
+
+  std::string queries[] = {absl::StrCat("@tag:{tag230|tag3|tag942} @numeric:[15 +inf]"),
+                           absl::StrCat("@tag:{tag1|tag829|tag236} @numeric:[-inf 20]"),
+                           absl::StrCat("@tag:{tag0|tag999} @numeric:[-1000000 +inf]")};
+
+  std::unordered_map<size_t, std::vector<size_t>> expected_results_per_num_docs = {
+      {10000, {19, 16, 8}},
+      {100000, {164, 157, 97}},
+      {1000000, {1528, 1518, 1017}},
+  };
+
+  while (state.KeepRunning()) {
+    for (size_t i = 0; i < ABSL_ARRAYSIZE(queries); ++i) {
+      const auto& query = queries[i];
+
+      CHECK(algo.Init(query, &params));
+      auto result = algo.Search(&indices);
+      CHECK(result.error.empty());
+
+      const size_t expected_result = expected_results_per_num_docs[num_docs][i];
+      CHECK_EQ(result.total, expected_result);
+      CHECK_EQ(result.ids.size(), expected_result);
+    }
+  }
+}
+
+BENCHMARK(BM_SearchNumericAndTagIndexes)
+    ->Arg(10000)
+    ->Arg(100000)
+    ->Arg(1000000)
+    ->ArgNames({"num_docs"});
+
+static void BM_SearchSeveralNumericAndTagIndexes(benchmark::State& state) {
+  auto schema = MakeSimpleSchema({{"tag", SchemaField::TAG},
+                                  {"numeric1", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
+                                  {"numeric2", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
+                                  {"numeric3", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  default_random_engine rnd;
+
+  using NumericType = uint16_t;
+  uniform_int_distribution<NumericType> dist(std::numeric_limits<NumericType>::min(),
+                                             std::numeric_limits<NumericType>::max());
+
+  const size_t num_docs = state.range(0);
+
+  size_t tag_number = 0;
+  const size_t max_tag_number = num_docs / 30;
+
+  for (size_t i = 0; i < num_docs; i++) {
+    MockedDocument doc{Map{{"tag", absl::StrCat("tag", tag_number)},
+                           {"numeric1", std::to_string(dist(rnd))},
+                           {"numeric2", std::to_string(dist(rnd))},
+                           {"numeric3", std::to_string(dist(rnd))}}};
+    indices.Add(i, doc);
+
+    tag_number = (tag_number + 1) % max_tag_number;
+  }
+
+  std::string queries[] = {
+      absl::StrCat(
+          "@tag:{tag230|tag3} @numeric1:[0 10000] @numeric2:[20000 30000] @numeric3:[-1000 +inf]"),
+      absl::StrCat("@tag:{tag829|tag236} @numeric1:[-inf 10000] @numeric2:[40000 +inf] "
+                   "@numeric3:[10000 30000]"),
+      absl::StrCat(
+          "@tag:{tag0|tag999} @numeric1:[-inf +inf] @numeric2:[20 +inf] @numeric3:[1000 10000]")};
+
+  std::unordered_map<size_t, std::vector<size_t>> expected_results_per_num_docs = {
+      {10000, {1, 0, 4}},
+      {100000, {1, 1, 10}},
+      {1000000, {0, 1, 9}},
+  };
+
+  while (state.KeepRunning()) {
+    for (size_t i = 0; i < ABSL_ARRAYSIZE(queries); ++i) {
+      const auto& query = queries[i];
+
+      CHECK(algo.Init(query, &params));
+      auto result = algo.Search(&indices);
+      CHECK(result.error.empty());
+
+      const size_t expected_result = expected_results_per_num_docs[num_docs][i];
+      CHECK_EQ(result.total, expected_result);
+      CHECK_EQ(result.ids.size(), expected_result);
+    }
+  }
+}
+
+BENCHMARK(BM_SearchSeveralNumericAndTagIndexes)
+    ->Arg(10000)
+    ->Arg(100000)
+    ->Arg(1000000)
+    ->ArgNames({"num_docs"});
+
+#ifdef USE_SIMSIMD
+
+#define SIMSIMD_NATIVE_F16 0
+#define SIMSIMD_NATIVE_BF16 0
+#include <simsimd/simsimd.h>
+
+namespace {
+
+// SimSIMD implementations for testing
+float SimSIMD_L2Distance(const float* u, const float* v, size_t dims) {
+  simsimd_distance_t distance = 0;
+  simsimd_l2_f32(u, v, dims, &distance);  // Note: direct L2 instead of squared
+  return static_cast<float>(distance);
+}
+
+float SimSIMD_CosineDistance(const float* u, const float* v, size_t dims) {
+  simsimd_distance_t distance = 0;
+  simsimd_cos_f32(u, v, dims, &distance);
+  return static_cast<float>(distance);
+}
+
+}  // namespace
+
+// Test that SimSIMD functions produce similar results to original functions
+TEST(SimSIMDTest, CompareWithOriginal) {
+  const size_t dims = 128;
+  auto vec1 = GenerateRandomVector(dims, 1);
+  auto vec2 = GenerateRandomVector(dims, 2);
+
+  // Test L2 distance
+  float original_l2 = VectorDistance(vec1.data(), vec2.data(), dims, VectorSimilarity::L2);
+  float simsimd_l2 = SimSIMD_L2Distance(vec1.data(), vec2.data(), dims);
+
+  // Allow small floating point differences
+  EXPECT_NEAR(original_l2, simsimd_l2, 1e-5f) << "L2 distances should be nearly equal";
+
+  // Test Cosine distance
+  float original_cosine = VectorDistance(vec1.data(), vec2.data(), dims, VectorSimilarity::COSINE);
+  float simsimd_cosine = SimSIMD_CosineDistance(vec1.data(), vec2.data(), dims);
+
+  EXPECT_NEAR(original_cosine, simsimd_cosine, 1e-5f) << "Cosine distances should be nearly equal";
+}
+
+// Benchmark SimSIMD L2 distance
+static void BM_SimSIMD_L2Distance(benchmark::State& state) {
+  size_t dims = state.range(0);
+  size_t num_pairs = state.range(1);
+
+  std::vector<std::vector<float>> vectors_a, vectors_b;
+  vectors_a.reserve(num_pairs);
+  vectors_b.reserve(num_pairs);
+
+  for (size_t i = 0; i < num_pairs; ++i) {
+    vectors_a.push_back(GenerateRandomVector(dims, i));
+    vectors_b.push_back(GenerateRandomVector(dims, i + 1000));
+  }
+
+  size_t pair_idx = 0;
+  while (state.KeepRunning()) {
+    float distance =
+        SimSIMD_L2Distance(vectors_a[pair_idx].data(), vectors_b[pair_idx].data(), dims);
+    benchmark::DoNotOptimize(distance);
+
+    pair_idx = (pair_idx + 1) % num_pairs;
+  }
+
+  state.counters["dims"] = dims;
+  state.counters["pairs"] = num_pairs;
+  state.SetLabel("SimSIMD_L2");
+}
+
+// Benchmark SimSIMD Cosine distance
+static void BM_SimSIMD_CosineDistance(benchmark::State& state) {
+  size_t dims = state.range(0);
+  size_t num_pairs = state.range(1);
+
+  std::vector<std::vector<float>> vectors_a, vectors_b;
+  vectors_a.reserve(num_pairs);
+  vectors_b.reserve(num_pairs);
+
+  for (size_t i = 0; i < num_pairs; ++i) {
+    vectors_a.push_back(GenerateRandomVector(dims, i));
+    vectors_b.push_back(GenerateRandomVector(dims, i + 2000));
+  }
+
+  size_t pair_idx = 0;
+  while (state.KeepRunning()) {
+    float distance =
+        SimSIMD_CosineDistance(vectors_a[pair_idx].data(), vectors_b[pair_idx].data(), dims);
+    benchmark::DoNotOptimize(distance);
+
+    pair_idx = (pair_idx + 1) % num_pairs;
+  }
+
+  state.counters["dims"] = dims;
+  state.counters["pairs"] = num_pairs;
+  state.SetLabel("SimSIMD_Cosine");
+}
+
+// SimSIMD benchmarks with same parameters as original VectorDistance benchmarks
+BENCHMARK(BM_SimSIMD_L2Distance)
+    // Small vectors
+    ->Args({32, 100})    // 32D, 100 pairs
+    ->Args({32, 1000})   // 32D, 1K pairs
+    ->Args({32, 10000})  // 32D, 10K pairs
+    // Medium vectors
+    ->Args({128, 100})    // 128D, 100 pairs
+    ->Args({128, 1000})   // 128D, 1K pairs
+    ->Args({128, 10000})  // 128D, 10K pairs
+    // Large vectors
+    ->Args({512, 100})   // 512D, 100 pairs
+    ->Args({512, 1000})  // 512D, 1K pairs
+    ->Args({512, 5000})  // 512D, 5K pairs
+    // Very large vectors
+    ->Args({1536, 100})   // 1536D, 100 pairs
+    ->Args({1536, 1000})  // 1536D, 1K pairs
+    ->ArgNames({"dims", "pairs"})
+    ->Unit(benchmark::kMicrosecond);
+
+BENCHMARK(BM_SimSIMD_CosineDistance)
+    // Small vectors
+    ->Args({32, 100})    // 32D, 100 pairs
+    ->Args({32, 1000})   // 32D, 1K pairs
+    ->Args({32, 10000})  // 32D, 10K pairs
+    // Medium vectors
+    ->Args({128, 100})    // 128D, 100 pairs
+    ->Args({128, 1000})   // 128D, 1K pairs
+    ->Args({128, 10000})  // 128D, 10K pairs
+    // Large vectors
+    ->Args({512, 100})   // 512D, 100 pairs
+    ->Args({512, 1000})  // 512D, 1K pairs
+    ->Args({512, 5000})  // 512D, 5K pairs
+    // Very large vectors
+    ->Args({1536, 100})   // 1536D, 100 pairs
+    ->Args({1536, 1000})  // 1536D, 1K pairs
+    ->ArgNames({"dims", "pairs"})
+    ->Unit(benchmark::kMicrosecond);
+
+// Intensive benchmark for SimSIMD performance comparison
+static void BM_SimSIMD_Intensive(benchmark::State& state) {
+  size_t dims = 512;  // Fixed medium size
+  size_t batch_size = 1000;
+  bool use_l2 = state.range(0) == 0;
+
+  std::vector<std::vector<float>> vectors_a, vectors_b;
+  vectors_a.reserve(batch_size);
+  vectors_b.reserve(batch_size);
+
+  for (size_t i = 0; i < batch_size; ++i) {
+    vectors_a.push_back(GenerateRandomVector(dims, i));
+    vectors_b.push_back(GenerateRandomVector(dims, i + 4000));
+  }
+
+  size_t total_ops = 0;
+  while (state.KeepRunning()) {
+    for (size_t i = 0; i < batch_size; ++i) {
+      float distance;
+      if (use_l2) {
+        distance = SimSIMD_L2Distance(vectors_a[i].data(), vectors_b[i].data(), dims);
+      } else {
+        distance = SimSIMD_CosineDistance(vectors_a[i].data(), vectors_b[i].data(), dims);
+      }
+      benchmark::DoNotOptimize(distance);
+      ++total_ops;
+    }
+  }
+
+  state.counters["ops"] = total_ops;
+  state.counters["ops_per_sec"] = benchmark::Counter(total_ops, benchmark::Counter::kIsRate);
+
+  std::string label = use_l2 ? "SimSIMD_L2_Intensive" : "SimSIMD_Cosine_Intensive";
+  state.SetLabel(label);
+}
+
+BENCHMARK(BM_SimSIMD_Intensive)
+    ->Arg(0)  // L2
+    ->Arg(1)  // Cosine
+    ->ArgNames({"distance_type"})
+    ->Unit(benchmark::kMicrosecond);
+
+#endif  // USE_SIMSIMD
 
 }  // namespace search
 }  // namespace dfly

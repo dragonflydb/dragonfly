@@ -653,7 +653,7 @@ string ConvertToJsonPointer(string_view json_path) {
   // numeric or '<key>' and then a right bracket.
   vector<string_view> parts;
   bool invalid_syntax = false;
-  while (json_path.size() > 0) {
+  while (!json_path.empty()) {
     bool is_array = false;
     bool is_object = false;
 
@@ -904,7 +904,8 @@ OpResult<JsonCallbackResult<OptSize>> OpStrLen(const OpArgs& op_args, string_vie
   };
   return JsonReadOnlyOperation<OptSize>(
       op_args, key, json_path, std::move(cb),
-      {true, CallbackResultOptions::DefaultReadOnlyOptions(SavingOrder::kSaveFirst)});
+      {json_path.IsLegacyModePath(),
+       CallbackResultOptions::DefaultReadOnlyOptions(SavingOrder::kSaveFirst)});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpObjLen(const OpArgs& op_args, string_view key,

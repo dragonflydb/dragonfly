@@ -77,6 +77,7 @@ class RdbSaver {
   struct GlobalData {
     const StringVec lua_scripts;     // bodies of lua scripts
     const StringVec search_indices;  // ft.create commands to re-create search indices
+    size_t table_used_memory = 0;    // total memory used by all tables in all shards
   };
 
   // single_shard - true means that we run RdbSaver on a single shard and we do not use
@@ -84,7 +85,9 @@ class RdbSaver {
   // single_shard - false, means we capture all the data using a single RdbSaver instance
   // (corresponds to legacy, redis compatible mode)
   // if align_writes is true - writes data in aligned chunks of 4KB to fit direct I/O requirements.
-  explicit RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes);
+  // snapshot_id - allows to identify that group of files belongs to the same snapshot
+  explicit RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes,
+                    std::string snapshot_id);
 
   ~RdbSaver();
 
@@ -146,11 +149,12 @@ class RdbSaver {
   std::unique_ptr<Impl> impl_;
   SaveMode save_mode_;
   CompressionMode compression_mode_;
+  std::string snapshot_id_;
 };
 
 class SerializerBase {
  public:
-  enum class FlushState { kFlushMidEntry, kFlushEndEntry };
+  enum class FlushState : uint8_t { kFlushMidEntry, kFlushEndEntry };
 
   explicit SerializerBase(CompressionMode compression_mode);
   virtual ~SerializerBase() = default;
@@ -183,6 +187,10 @@ class SerializerBase {
     return SaveString(io::View(io::Bytes{buf, len}));
   }
 
+  uint64_t GetSerializationPeakBytes() const {
+    return serialization_peak_bytes_;
+  }
+
  protected:
   // Prepare internal buffer for flush. Compress it.
   io::Bytes PrepareFlush(FlushState flush_state);
@@ -210,6 +218,8 @@ class SerializerBase {
   base::PODArray<uint8_t> tmp_buf_;
   std::unique_ptr<LZF_HSLOT[]> lzf_;
   size_t number_of_chunks_ = 0;
+
+  uint64_t serialization_peak_bytes_ = 0;
 };
 
 class RdbSerializer : public SerializerBase {

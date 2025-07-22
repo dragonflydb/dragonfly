@@ -118,6 +118,11 @@ ParseResult<search::SchemaField::TagParams> ParseTagParams(CmdArgParser* parser)
       continue;
     }
 
+    if (parser->Check("WITHSUFFIXTRIE")) {
+      params.with_suffixtrie = true;
+      continue;
+    }
+
     break;
   }
   return params;
@@ -125,8 +130,15 @@ ParseResult<search::SchemaField::TagParams> ParseTagParams(CmdArgParser* parser)
 
 ParseResult<search::SchemaField::TextParams> ParseTextParams(CmdArgParser* parser) {
   search::SchemaField::TextParams params{};
-
   params.with_suffixtrie = parser->Check("WITHSUFFIXTRIE");
+  return params;
+}
+
+search::SchemaField::NumericParams ParseNumericParams(CmdArgParser* parser) {
+  search::SchemaField::NumericParams params{};
+  if (parser->Check("BLOCKSIZE")) {
+    params.block_size = parser->Next<size_t>();
+  }
   return params;
 }
 
@@ -156,7 +168,7 @@ ParsedSchemaField ParseText(CmdArgParser* parser) {
 }
 
 ParsedSchemaField ParseNumeric(CmdArgParser* parser) {
-  return std::make_pair(search::SchemaField::NUMERIC, std::monostate{});
+  return std::make_pair(search::SchemaField::NUMERIC, ParseNumericParams(parser));
 }
 
 // Vector fields include: {algorithm} num_args args...
@@ -199,10 +211,9 @@ ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
   return true;
 }
 
-constexpr std::array<const std::string_view, 6> kIgnoredOptions = {
-    "UNF"sv, "NOSTEM"sv, "CASESENSITIVE"sv, "WITHSUFFIXTRIE"sv, "INDEXMISSING"sv, "INDEXEMPTY"sv};
-constexpr std::array<const std::string_view, 3> kIgnoredOptionsWithArg = {"WEIGHT"sv, "SEPARATOR"sv,
-                                                                          "PHONETIC"sv};
+constexpr std::array<const std::string_view, 4> kIgnoredOptions = {
+    "UNF"sv, "NOSTEM"sv, "INDEXMISSING"sv, "INDEXEMPTY"sv};
+constexpr std::array<const std::string_view, 3> kIgnoredOptionsWithArg = {"WEIGHT"sv, "PHONETIC"sv};
 
 // SCHEMA field [AS alias] type [flags...]
 ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
@@ -329,28 +340,18 @@ std::optional<std::string_view> ParseFieldWithAtSign(CmdArgParser* parser) {
   return field;
 }
 
-void ParseLoadFields(CmdArgParser* parser, std::optional<SearchFieldsList>* load_fields) {
+std::vector<FieldReference> ParseLoadOrReturnFields(CmdArgParser* parser, bool is_load) {
   // TODO: Change to num_strings. In Redis strings number is expected. For example: LOAD 3 $.a AS a
+  std::vector<FieldReference> fields;
   size_t num_fields = parser->Next<size_t>();
-  if (!load_fields->has_value()) {
-    load_fields->emplace();
-  }
 
   while (parser->HasNext() && num_fields--) {
-    string_view str = parser->Next();
-
-    if (absl::StartsWith(str, "@"sv)) {
-      str.remove_prefix(1);  // remove leading @
-    }
-
-    StringOrView name = StringOrView::FromString(std::string{str});
-    if (parser->Check("AS")) {
-      load_fields->value().emplace_back(name, true,
-                                        StringOrView::FromString(parser->Next<std::string>()));
-    } else {
-      load_fields->value().emplace_back(name, true);
-    }
+    string_view field = is_load ? ParseField(parser) : parser->Next();
+    string_view alias;
+    parser->Check("AS", &alias);
+    fields.emplace_back(field, alias);
   }
+  return fields;
 }
 
 search::QueryParams ParseQueryParams(CmdArgParser* parser) {
@@ -376,36 +377,21 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
         return CreateSyntaxError("LOAD cannot be applied after RETURN"sv);
       }
 
-      ParseLoadFields(parser, &params.load_fields);
+      params.load_fields = ParseLoadOrReturnFields(parser, true);
     } else if (parser->Check("RETURN")) {
       if (params.load_fields) {
         return CreateSyntaxError("RETURN cannot be applied after LOAD"sv);
       }
-
-      // RETURN {num} [{ident} AS {name}...]
-      /* TODO: Change to num_strings. In Redis strings number is expected. For example: RETURN 3 $.a
-       * AS a */
-      size_t num_fields = parser->Next<size_t>();
-      params.return_fields.emplace();
-      while (parser->HasNext() && params.return_fields->size() < num_fields) {
-        StringOrView name = StringOrView::FromString(parser->Next<std::string>());
-
-        if (parser->Check("AS")) {
-          params.return_fields->emplace_back(std::move(name), true,
-                                             StringOrView::FromString(parser->Next<std::string>()));
-        } else {
-          params.return_fields->emplace_back(std::move(name), true);
-        }
-      }
+      if (!params.return_fields)  // after NOCONTENT it's silently ignored
+        params.return_fields = ParseLoadOrReturnFields(parser, false);
     } else if (parser->Check("NOCONTENT")) {  // NOCONTENT
-      params.no_content = true;
+      params.return_fields.emplace();
     } else if (parser->Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
       params.query_params = ParseQueryParams(parser);
     } else if (parser->Check("SORTBY")) {
-      auto parsed_field = ParseField(parser);
-      StringOrView field = StringOrView::FromString(std::string{parsed_field});
-      params.sort_option = SearchParams::SortOption{
-          SearchField{std::move(field)}, parser->Check("DESC") ? SortOrder::DESC : SortOrder::ASC};
+      FieldReference field{ParseField(parser)};
+      params.sort_option =
+          SearchParams::SortOption{field, parser->Check("DESC") ? SortOrder::DESC : SortOrder::ASC};
     } else {
       // Unsupported parameters are ignored for now
       parser->Skip(1);
@@ -461,7 +447,12 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
   // Parse LOAD count field [field ...]
   // LOAD options are at the beginning of the query, so we need to parse them first
   while (parser->HasNext() && parser->Check("LOAD")) {
-    ParseLoadFields(parser, &params.load_fields);
+    auto fields = ParseLoadOrReturnFields(parser, true);
+    if (!params.load_fields.has_value())
+      params.load_fields = std::move(fields);
+    else
+      params.load_fields->insert(params.load_fields->end(), make_move_iterator(fields.begin()),
+                                 make_move_iterator(fields.end()));
   }
 
   while (parser->HasNext()) {
@@ -565,6 +556,15 @@ void SendSerializedDoc(const SerializedSearchDoc& doc, SinkReplyBuilder* builder
   }
 }
 
+template <typename T>
+void PartialSort(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder order,
+                 T SerializedSearchDoc::*field) {
+  auto cb = [order, field](SerializedSearchDoc* l, SerializedSearchDoc* r) {
+    return order == SortOrder::ASC ? l->*field < r->*field : r->*field < l->*field;
+  };
+  partial_sort(docs.begin(), docs.begin() + min(limit, docs.size()), docs.end(), cb);
+}
+
 void SearchReply(const SearchParams& params,
                  std::optional<search::KnnScoreSortOption> knn_sort_option,
                  absl::Span<SearchResult> results, SinkReplyBuilder* builder) {
@@ -578,64 +578,30 @@ void SearchReply(const SearchParams& params,
     }
   }
 
-  size_t size = docs.size();
-  bool should_add_score_field = false;
-
+  // Reorder and cut KNN results before applying SORT and LIMIT
+  optional<string> knn_score_ret_field;
+  bool ignore_sort = false;
   if (knn_sort_option) {
-    size = std::min(size, knn_sort_option->limit);
-    total_hits = std::min(total_hits, knn_sort_option->limit);
-    should_add_score_field = params.ShouldReturnField(knn_sort_option->score_field_alias);
+    total_hits = min(total_hits, knn_sort_option->limit);
+    PartialSort(absl::MakeSpan(docs), total_hits, SortOrder::ASC, &SerializedSearchDoc::knn_score);
+    docs.resize(min(docs.size(), knn_sort_option->limit));
 
-    auto comparator = [](const SerializedSearchDoc* l, const SerializedSearchDoc* r) {
-      return *l < *r;
-    };
-
-    const size_t prefix_size_to_sort = std::min(params.limit_offset + params.limit_total, size);
-    if (prefix_size_to_sort == docs.size()) {
-      std::sort(docs.begin(), docs.end(), std::move(comparator));
-    } else {
-      std::partial_sort(docs.begin(), docs.begin() + prefix_size_to_sort, docs.end(),
-                        std::move(comparator));
-    }
+    ignore_sort = !params.sort_option || params.sort_option->IsSame(*knn_sort_option);
+    if (params.ShouldReturnField(knn_sort_option->score_field_alias))
+      knn_score_ret_field = knn_sort_option->score_field_alias;
   }
 
-  const size_t offset = std::min(params.limit_offset, size);
-  const size_t limit = std::min(size - offset, params.limit_total);
+  // Apply LIMIT
+  const size_t offset = std::min(params.limit_offset, docs.size());
+  const size_t limit = std::min(docs.size() - offset, params.limit_total);
   const size_t end = offset + limit;
-  DCHECK(end <= docs.size());
 
-  if (params.sort_option) {
-    auto field_alias = params.sort_option->field.NameView();
-
-    auto comparator = [&](const SerializedSearchDoc* l_doc, const SerializedSearchDoc* r_doc) {
-      auto& l = l_doc->values;
-      auto& r = r_doc->values;
-
-      auto l_it = l.find(field_alias);
-      auto r_it = r.find(field_alias);
-
-      // If some of the values is not present
-      if (l_it == l.end() || r_it == r.end()) {
-        return l_it != l.end();
-      }
-
-      const auto& lv = l_it->second;
-      const auto& rv = r_it->second;
-      return params.sort_option->order == SortOrder::ASC ? lv < rv : lv > rv;
-    };
-
-    auto sort_begin = docs.begin();
-    auto sort_end = docs.end();
-    // If we first sorted by knn, we need to sort only the result of knn
-    if (knn_sort_option) {
-      sort_begin = docs.begin() + offset;
-      sort_end = docs.begin() + end;
-    }
-    std::sort(sort_begin, sort_end, std::move(comparator));
-  }
+  // Apply SORTBY if its different from the KNN sort
+  if (params.sort_option && !ignore_sort)
+    PartialSort(absl::MakeSpan(docs), end, params.sort_option->order,
+                &SerializedSearchDoc::sort_score);
 
   const bool reply_with_ids_only = params.IdsOnly();
-
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   RedisReplyBuilder::ArrayScope scope{rb, reply_with_ids_only ? (limit + 1) : (limit * 2 + 1)};
 
@@ -646,9 +612,8 @@ void SearchReply(const SearchParams& params,
       continue;
     }
 
-    if (should_add_score_field && holds_alternative<float>(docs[i]->score))
-      docs[i]->values[knn_sort_option->score_field_alias] =
-          absl::StrCat(get<float>(docs[i]->score));
+    if (knn_score_ret_field)
+      docs[i]->values[*knn_score_ret_field] = docs[i]->knn_score;
 
     SendSerializedDoc(*docs[i], builder);
   }
@@ -824,15 +789,22 @@ void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
     vector<string> info;
 
     string_view base[] = {"identifier"sv, string_view{field_ident},
-                          "attribute",    field_info.short_name,
+                          "attribute"sv,  field_info.short_name,
                           "type"sv,       SearchFieldTypeToString(field_info.type)};
     info.insert(info.end(), base, base + ABSL_ARRAYSIZE(base));
 
     if (field_info.flags & search::SchemaField::NOINDEX)
-      info.push_back("NOINDEX");
+      info.emplace_back("NOINDEX"sv);
 
     if (field_info.flags & search::SchemaField::SORTABLE)
-      info.push_back("SORTABLE");
+      info.emplace_back("SORTABLE"sv);
+
+    if (field_info.type == search::SchemaField::NUMERIC) {
+      auto& numeric_params =
+          std::get<search::SchemaField::NumericParams>(field_info.special_params);
+      info.emplace_back("blocksize"sv);
+      info.emplace_back(std::to_string(numeric_params.block_size));
+    }
 
     rb->SendSimpleStrArr(info);
   }
@@ -1105,7 +1077,7 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
   if (params->load_fields) {
     load_fields.reserve(params->load_fields->size());
     for (const auto& field : params->load_fields.value()) {
-      load_fields.push_back(field.GetShortName());
+      load_fields.push_back(field.OutputName());
     }
   }
 
@@ -1258,7 +1230,7 @@ void SearchFamily::Register(CommandRegistry* registry) {
 
   // Disable journaling, because no-key-transactional enables it by default
   const uint32_t kReadOnlyMask =
-      CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL;
+      CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL | CO::IDEMPOTENT;
 
   registry->StartFamily();
   *registry << CI{"FT.CREATE", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(

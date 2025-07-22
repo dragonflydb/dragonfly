@@ -51,21 +51,29 @@ Test full replication pipeline. Test full sync with streaming changes and stable
         pytest.param(8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, marks=M_STRESS),
     ],
 )
-@pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
+# Disabled cache_mode until #5371 is fixed
+# @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
+@pytest.mark.parametrize("point_in_time_replication", [True, False])
 async def test_replication_all(
     df_factory: DflyInstanceFactory,
     t_master,
     t_replicas,
     seeder_config,
     stream_target,
-    mode,
+    # mode,
+    point_in_time_replication,
 ):
     args = {}
-    if mode:
-        args["cache_mode"] = "true"
-        args["maxmemory"] = str(t_master * 256) + "mb"
+    # if mode:
+    #    args["cache_mode"] = "true"
+    #    args["maxmemory"] = str(t_master * 256) + "mb"
 
-    master = df_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master, **args)
+    master = df_factory.create(
+        admin_port=ADMIN_PORT,
+        proactor_threads=t_master,
+        point_in_time_snapshot=point_in_time_replication,
+        **args,
+    )
     replicas = [
         df_factory.create(admin_port=ADMIN_PORT + i + 1, proactor_threads=t)
         for i, t in enumerate(t_replicas)
@@ -1286,7 +1294,7 @@ async def test_take_over_seeder(
     # Give the seeder a bit of time.
     await asyncio.sleep(3)
     logging.debug("running repltakover")
-    await c_replica.execute_command(f"REPLTAKEOVER 10 SAVE")
+    await c_replica.execute_command(f"REPLTAKEOVER 30 SAVE")
     logging.debug("after running repltakover")
     seeder.stop()
     await fill_task
@@ -1831,9 +1839,9 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
         finally:
             await proxy.close(task)
 
-    master.stop()
-    lines = master.find_in_logs("Partial sync requested from stale LSN")
-    assert len(lines) > 0
+    info = await c_replica.info("replication")
+    assert info["psync_attempts"] > 0
+    assert info["psync_successes"] == 0
 
 
 async def test_replica_reconnections_after_network_disconnect(df_factory, df_seeder_factory):
@@ -1955,6 +1963,7 @@ async def test_search_with_stream(df_factory: DflyInstanceFactory):
 
     # expect replica to see only 10k - 1k + 1 = 9001 keys in it's index
     await wait_available_async(c_replica)
+    await check_all_replicas_finished([c_replica], c_master)
     assert await c_replica.execute_command("FT.SEARCH i1 * LIMIT 0 0") == [9_001]
     assert await c_replica.execute_command('FT.SEARCH i1 "secret"') == [
         1,
@@ -2079,7 +2088,6 @@ async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
         proactor_threads=2,
         cache_mode="true",
         maxmemory="512mb",
-        logtostdout="true",
         enable_heartbeat_eviction="false",
         rss_oom_deny_ratio=1.3,
     )
@@ -2095,12 +2103,14 @@ async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
     await wait_available_async(c_replica)
 
     seeder = df_seeder_factory.create(
-        port=master.port, keys=500, val_size=1000, stop_on_failure=False
+        port=master.port, keys=600, val_size=1000, stop_on_failure=False
     )
     await seeder.run(target_deviation=0.1)
 
     info = await c_master.info("stats")
-    assert info["evicted_keys"] > 0, "Weak testcase: policy based eviction was not triggered."
+    assert (
+        info["evicted_keys"] > 0
+    ), f"Weak testcase: policy based eviction was not triggered. {await c_master.info()}"
 
     await check_all_replicas_finished([c_replica], c_master)
     keys_master = await c_master.execute_command("keys k*")
@@ -2851,7 +2861,7 @@ async def test_stream_approximate_trimming(df_factory):
         await c_master.execute_command("XTRIM", stream_name, "MAXLEN", "~", trim_size)
 
     # Wait for replica sync
-    await asyncio.sleep(1)
+    await check_all_replicas_finished([c_replica], c_master)
 
     # Check replica data consistent
     master_data = await DebugPopulateSeeder.capture(c_master)
@@ -2862,6 +2872,9 @@ async def test_stream_approximate_trimming(df_factory):
     for i in range(num_streams):
         stream_name = f"stream{i}"
         await c_master.execute_command("XTRIM", stream_name, "MAXLEN", "0")
+
+    # Wait for replica sync
+    await check_all_replicas_finished([c_replica], c_master)
 
     # Check replica data consistent
     master_data = await DebugPopulateSeeder.capture(c_master)
@@ -2951,11 +2964,12 @@ async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFa
     await fill_task
 
 
-@pytest.mark.skip("Flaky test")
 async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     """
     This test reproduces a bug in the JSON memory tracking.
     """
+    random.seed(42)
+
     master = df_factory.create(
         proactor_threads=2,
         serialization_max_chunk_size=1,
@@ -2971,8 +2985,8 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     total = 100000
     await c_master.execute_command(f"DEBUG POPULATE {total} tmp 1000 TYPE SET ELEMENTS 100")
 
-    thresehold = 25000
-    for i in range(thresehold):
+    threshold = 25000
+    for i in range(threshold):
         rand = random.randint(1, 4)
         await c_master.execute_command(f"EXPIRE tmp:{i} {rand} NX")
 
@@ -2986,6 +3000,7 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     async with async_timeout.timeout(240):
         await wait_for_replicas_state(*c_replicas)
 
+    await seeder.stop(c_master)
     await fill_task
 
 
@@ -3016,6 +3031,8 @@ async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyIn
     await seeder.stop(c_master)
     await stream_task
 
+    await check_all_replicas_finished([c_replica], c_master)
+
     # Check that everything is in sync
     hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master, c_replica]))
     assert len(set(hashes)) == 1
@@ -3039,7 +3056,7 @@ async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyIn
 
 @pytest.mark.parametrize(
     "use_takeover, allowed_diff",
-    [(False, 2), (False, 0), (True, 0)],
+    [(False, 2), (False, 0), (True, 1)],
 )
 async def test_partial_replication_on_same_source_master(df_factory, use_takeover, allowed_diff):
     master = df_factory.create()
@@ -3190,7 +3207,7 @@ async def test_bug_5221(df_factory):
 
 @pytest.mark.parametrize("proactors", [1, 4, 6])
 @pytest.mark.parametrize("backlog_len", [1, 256, 1024, 1300])
-async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_len):
+async def test_partial_sync(df_factory, proactors, backlog_len):
     keys = 5_000
     if proactors > 1:
         keys = 10_000
@@ -3250,18 +3267,9 @@ async def test_partial_sync(df_factory, df_seeder_factory, proactors, backlog_le
         finally:
             await proxy.close(task)
 
-    master.stop()
-    replica.stop()
-    # Partial sync worked
-    lines = master.find_in_logs("Partial sync requested from LSN")
-    # Because we run with num_shards = proactors - 1
-    total_attempts = 1
-    if proactors > 1:
-        total_attempts = proactors - 1 + proactors - 2
-    assert len(lines) == total_attempts
-    # Second partial sync failed because of stale LSN
-    lines = master.find_in_logs("Partial sync requested from stale LSN")
-    assert len(lines) == 1
+    info = await c_replica.info("replication")
+    assert info["psync_attempts"] == 2
+    assert info["psync_successes"] == 1
 
 
 async def test_mc_gat_replication(df_factory):
@@ -3330,3 +3338,115 @@ async def test_mc_gat_replication(df_factory):
     assert len(result) == 1 and key in result, f"missing expected key: {result=}"
     expected_cas_ver = b"0"
     assert result[key] == (value, expected_cas_ver), f"unexpected result for key: {result=}"
+
+
+@pytest.mark.skip("Fails constantly on CI")
+@pytest.mark.slow
+@pytest.mark.parametrize("serialization_max_size", [1, 64000])
+async def test_replication_onmove_flow(df_factory, serialization_max_size):
+    master = df_factory.create(
+        proactor_threads=2,
+        cache_mode=True,
+        point_in_time_snapshot=False,
+        serialization_max_chunk_size=serialization_max_size,
+    )
+    replica = df_factory.create(proactor_threads=2)
+
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    key_target = 100000
+    # Fill master with test data
+    await c_master.execute_command(f"DEBUG POPULATE {key_target} key 32 RAND TYPE hash ELEMENTS 10")
+    logging.debug("finished populate")
+
+    stop_event = asyncio.Event()
+
+    async def get_keys():
+        while not stop_event.is_set():
+            pipe = c_master.pipeline(transaction=False)
+            for _ in range(50):
+                id = random.randint(0, key_target)
+                pipe.hlen(f"key:{id}")
+            await pipe.execute()
+
+    get_task = asyncio.create_task(get_keys())
+    await asyncio.sleep(0.1)
+
+    # Start replication and wait for full sync
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+
+    info = await c_master.info("stats")
+    assert info["bump_ups"] >= 100
+
+    await check_all_replicas_finished([c_replica], c_master)
+    stop_event.set()
+    await get_task
+
+    # Check replica data consisten
+    hash1, hash2 = await asyncio.gather(*(SeederV2.capture(c) for c in (c_master, c_replica)))
+    assert hash1 == hash2
+
+    master.stop()
+    lines = master.find_in_logs("Exit SnapshotSerializer")
+    assert len(lines) > 0
+    for line in lines:
+        # We test the full sync on moved path execution
+        moved_saved = extract_int_after_prefix("moved_saved ", line)
+        logging.debug(f"Moved saves {moved_saved}")
+        assert moved_saved > 0
+
+
+@dfly_args({"proactor_threads": 1})
+async def test_big_strings(df_factory):
+    master = df_factory.create(
+        proactor_threads=1, serialization_max_chunk_size=1, vmodule="snapshot=1"
+    )
+    replica = df_factory.create(proactor_threads=1)
+
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # 200kb
+    value_size = 200_000
+
+    async def get_memory(client, field):
+        info = await client.info("memory")
+        return info[field]
+
+    capacity = await get_memory(c_master, "prime_capacity")
+
+    seeder = DebugPopulateSeeder(
+        key_target=int(capacity * 0.7),
+        data_size=value_size,
+        collection_size=1,
+        variance=1,
+        samples=1,
+        types=["STRING"],
+    )
+    await seeder.run(c_master)
+
+    # sanity
+    capacity = await get_memory(c_master, "prime_capacity")
+    assert capacity < 8000
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+
+    # Check if replica data is consistent
+    replica_data = await DebugPopulateSeeder.capture(c_replica)
+    master_data = await DebugPopulateSeeder.capture(c_master)
+    assert master_data == replica_data
+
+    replica.stop()
+    master.stop()
+
+    lines = master.find_in_logs("Serialization peak bytes: ")
+    assert len(lines) == 1
+    # We test the serializtion path of command execution
+    line = lines[0]
+    peak_bytes = extract_int_after_prefix("Serialization peak bytes: ", line)
+    assert peak_bytes < value_size

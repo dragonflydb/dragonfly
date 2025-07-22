@@ -119,6 +119,9 @@ ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
 ABSL_FLAG(uint32_t, max_squashed_cmd_num, 100,
           "Max number of commands squashed in a single shard during squash optimizaiton");
 
+ABSL_FLAG(uint32_t, max_busy_squash_usec, 200,
+          "Maximum time in microseconds to execute squashed commands before yielding.");
+
 ABSL_FLAG(string, huffman_table, "",
           "a comma separated map: domain1:code1,domain2:code2,... where "
           "domain can currently be only KEYS, code is base64 encoded huffman table exported via "
@@ -269,14 +272,14 @@ std::string MakeMonitorMessage(const ConnectionContext* cntx, const CommandId* c
 void SendMonitor(const std::string& msg) {
   const auto& monitor_repo = ServerState::tlocal()->Monitors();
   const auto& monitors = monitor_repo.monitors();
-  if (!monitors.empty()) {
-    VLOG(2) << "Thread " << ProactorBase::me()->GetPoolIndex() << " sending monitor message '"
-            << msg << "' for " << monitors.size();
+  if (monitors.empty()) {
+    return;
+  }
+  VLOG(2) << "Thread " << ProactorBase::me()->GetPoolIndex() << " sending monitor message '" << msg
+          << "' for " << monitors.size();
 
-    for (auto monitor_conn : monitors) {
-      // never preempts, so we can iterate safely.
-      monitor_conn->SendMonitorMessageAsync(msg);
-    }
+  for (auto monitor_conn : monitors) {
+    monitor_conn->SendMonitorMessageAsync(msg);
   }
 }
 
@@ -717,6 +720,11 @@ void SetMaxSquashedCmdNum(int32_t val) {
   shard_set->pool()->AwaitBrief(cb);
 }
 
+void SetMaxBusySquashUsec(uint32_t val) {
+  shard_set->pool()->AwaitBrief(
+      [=](unsigned, auto*) { MultiCommandSquasher::SetMaxBusySquashUsec(val); });
+}
+
 void SetHuffmanTable(const std::string& huffman_table) {
   if (huffman_table.empty())
     return;
@@ -728,22 +736,27 @@ void SetHuffmanTable(const std::string& huffman_table) {
       continue;
     }
     string domain_str = absl::AsciiStrToUpper(kv[0]);
-    optional<CompactObj::HuffmanDomain> domain;
+    CompactObj::HuffmanDomain domain;
+
     if (domain_str == "KEYS") {
       domain = CompactObj::HUFF_KEYS;
+    } else if (domain_str == "STRINGS") {
+      domain = CompactObj::HUFF_STRING_VALUES;
     } else {
       LOG(ERROR) << "Unknown huffman domain: " << kv[0];
       continue;
     }
+
     string unescaped;
     if (!absl::Base64Unescape(kv[1], &unescaped)) {
       LOG(ERROR) << "Failed to decode base64 huffman table for domain " << kv[0] << " with value "
                  << kv[1];
       continue;
     }
+
     atomic_bool success = true;
     shard_set->RunBriefInParallel([&](auto* shard) {
-      if (!CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_KEYS, unescaped)) {
+      if (!CompactObj::InitHuffmanThreadLocal(domain, unescaped)) {
         success = false;
       }
     });
@@ -833,8 +846,30 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
         [val](unsigned tid, auto*) { facade::Connection::SetPipelineBufferLimit(tid, val); });
   });
 
+  config_registry.RegisterSetter<uint64_t>("max_busy_read_usec", [](uint64_t usec) {
+    shard_set->pool()->AwaitBrief(
+        [=](unsigned, auto*) { facade::Connection::SetMaxBusyReadUsecThreadLocal(usec); });
+  });
+
+  config_registry.RegisterSetter<bool>("always_flush_pipeline", [](bool val) {
+    shard_set->pool()->AwaitBrief(
+        [=](unsigned, auto*) { facade::Connection::SetAlwaysFlushPipelineThreadLocal(val); });
+  });
+
+  config_registry.RegisterSetter<unsigned>("pipeline_squash_limit", [](unsigned val) {
+    shard_set->pool()->AwaitBrief(
+        [=](unsigned, auto*) { facade::Connection::SetPipelineSquashLimitThreadLocal(val); });
+  });
+
+  config_registry.RegisterSetter<uint32_t>("pipeline_low_bound_stats", [](uint32_t val) {
+    shard_set->pool()->AwaitBrief(
+        [=](unsigned, auto*) { facade::Connection::SetPipelineLowBoundStats(val); });
+  });
+
   config_registry.RegisterSetter<uint32_t>("max_squashed_cmd_num",
                                            [](uint32_t val) { SetMaxSquashedCmdNum(val); });
+  config_registry.RegisterSetter<uint32_t>("max_busy_squash_usec",
+                                           [](uint32_t val) { SetMaxBusySquashUsec(val); });
 
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("replication_timeout");
@@ -908,6 +943,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   SetSerializationMaxChunkSize(absl::GetFlag(FLAGS_serialization_max_chunk_size));
   SetMaxSquashedCmdNum(absl::GetFlag(FLAGS_max_squashed_cmd_num));
   SetHuffmanTable(absl::GetFlag(FLAGS_huffman_table));
+  SetMaxBusySquashUsec(absl::GetFlag(FLAGS_max_busy_squash_usec));
 
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.
@@ -1141,11 +1177,9 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
     return ErrorReply{"-READONLY You can't write against a read only replica."};
 
   if (multi_active) {
-    if (absl::EndsWith(cmd_name, "SUBSCRIBE"))
-      return ErrorReply{absl::StrCat("Can not call ", cmd_name, " within a transaction")};
-
-    if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB")
-      return ErrorReply{absl::StrCat("'", cmd_name, "' inside MULTI is not allowed")};
+    if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB" ||
+        absl::EndsWith(cmd_name, "SUBSCRIBE"))
+      return ErrorReply{absl::StrCat("'", cmd_name, "' not allowed inside a transaction")};
   }
 
   if (IsClusterEnabled()) {
@@ -1221,6 +1255,7 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
   }
 
   if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {
+    LOG_IF(WARNING, cntx->replica_conn) << "VerifyCommandState error: " << err->ToSv();
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
       exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
 
@@ -1763,7 +1798,7 @@ void Service::Quit(CmdArgList args, const CommandContext& cmd_cntx) {
   cmd_cntx.rb->CloseConnection();
 
   DeactivateMonitoring(cmd_cntx.conn_cntx);
-  cmd_cntx.conn_cntx->conn()->ShutdownSelf();
+  cmd_cntx.conn_cntx->conn()->ShutdownSelfBlocking();
 }
 
 void Service::Multi(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2684,6 +2719,9 @@ void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privil
 void Service::OnConnectionClose(facade::ConnectionContext* cntx) {
   ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
   ConnectionState& conn_state = server_cntx->conn_state;
+  VLOG_IF(1, conn_state.replication_info.repl_session_id)
+      << "OnConnectionClose: " << server_cntx->conn()->GetName()
+      << ", repl_session_id: " << conn_state.replication_info.repl_session_id;
 
   if (conn_state.subscribe_info) {  // Clean-ups related to PUBSUB
     if (!conn_state.subscribe_info->channels.empty()) {

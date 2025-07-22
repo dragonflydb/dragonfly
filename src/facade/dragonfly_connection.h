@@ -5,7 +5,6 @@
 #pragma once
 
 #include <absl/container/fixed_array.h>
-#include <mimalloc.h>
 #include <sys/socket.h>
 
 #include <deque>
@@ -24,7 +23,6 @@
 #include "util/http/http_handler.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
-typedef struct mi_heap_s mi_heap_t;
 
 // need to declare for older linux distributions like CentOS 7
 #ifndef SO_INCOMING_CPU
@@ -91,7 +89,7 @@ class Connection : public util::Connection {
 
     // mi_stl_allocator uses mi heap internally.
     // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
-    using StorageType = absl::InlinedVector<char, kReqStorageSize, mi_stl_allocator<char>>;
+    using StorageType = absl::InlinedVector<char, kReqStorageSize>;
 
     absl::InlinedVector<std::string_view, 6> args;
     StorageType storage;
@@ -132,14 +130,9 @@ class Connection : public util::Connection {
     bool invalidate_due_to_flush = false;
   };
 
-  struct MessageDeleter {
-    void operator()(PipelineMessage* msg) const;
-    void operator()(PubMessage* msg) const;
-  };
-
   // Requests are allocated on the mimalloc heap and thus require a custom deleter.
-  using PipelineMessagePtr = std::unique_ptr<PipelineMessage, MessageDeleter>;
-  using PubMessagePtr = std::unique_ptr<PubMessage, MessageDeleter>;
+  using PipelineMessagePtr = std::unique_ptr<PipelineMessage>;
+  using PubMessagePtr = std::unique_ptr<PubMessage>;
 
   using MCPipelineMessagePtr = std::unique_ptr<MCPipelineMessage>;
   using AclUpdateMessagePtr = std::unique_ptr<AclUpdateMessage>;
@@ -203,7 +196,7 @@ class Connection : public util::Connection {
     // Returns client id.Thread-safe.
     uint32_t GetClientId() const;
 
-    bool operator<(const WeakRef& other);
+    bool operator<(const WeakRef& other) const;
     bool operator==(const WeakRef& other) const;
 
    private:
@@ -238,7 +231,7 @@ class Connection : public util::Connection {
   void RegisterBreakHook(BreakerCb breaker_cb);
 
   // Manually shutdown self.
-  void ShutdownSelf();
+  void ShutdownSelfBlocking();
 
   // Migrate this connecton to a different thread.
   // Return true if Migrate succeeded
@@ -317,6 +310,10 @@ class Connection : public util::Connection {
   static void GetRequestSizeHistogramThreadLocal(std::string* hist);
   static void TrackRequestSize(bool enable);
   static void EnsureMemoryBudget(unsigned tid);
+  static void SetMaxBusyReadUsecThreadLocal(unsigned usec);
+  static void SetAlwaysFlushPipelineThreadLocal(bool flush);
+  static void SetPipelineSquashLimitThreadLocal(unsigned limit);
+  static void SetPipelineLowBoundStats(unsigned limit);
 
   unsigned idle_time() const {
     return time(nullptr) - last_interaction_;
@@ -370,7 +367,7 @@ class Connection : public util::Connection {
   void RecycleMessage(MessageHandle msg);
 
   // Create new pipeline request, re-use from pool when possible.
-  PipelineMessagePtr FromArgs(RespVec args, mi_heap_t* heap);
+  PipelineMessagePtr FromArgs(const RespVec& args);
 
   ParserStatus ParseRedis(unsigned max_busy_cycles);
   ParserStatus ParseMemcache();
@@ -426,6 +423,8 @@ class Connection : public util::Connection {
 
   void IncrNumConns();
   void DecrNumConns();
+
+  bool IsReplySizeOverLimit() const;
 
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
@@ -495,6 +494,8 @@ class Connection : public util::Connection {
       bool is_main_ : 1;
     };
   };
+
+  bool request_shutdown_ = false;
 };
 
 }  // namespace facade

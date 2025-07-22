@@ -23,6 +23,12 @@ ABSL_FLAG(uint32_t, replication_stream_output_limit, 64_KB,
 
 ABSL_FLAG(uint32_t, migration_buckets_serialization_threshold, 100,
           "The Number of buckets to serialize on each iteration before yielding");
+ABSL_FLAG(uint32_t, migration_buckets_sleep_usec, 100,
+          "Sleep time in microseconds after each time we reach "
+          "migration_buckets_serialization_threshold");
+
+ABSL_FLAG(uint32_t, replication_dispatch_threshold, 1500,
+          "Number of bytes to aggregate before replication");
 
 namespace dfly {
 using namespace util;
@@ -36,13 +42,20 @@ iovec IoVec(io::Bytes src) {
 
 uint32_t replication_stream_output_limit_cached = 64_KB;
 uint32_t migration_buckets_serialization_threshold_cached = 100;
+uint32_t migration_buckets_sleep_usec_cached = 100;
+uint32_t replication_dispatch_threshold = 1500;
+uint32_t stalled_writer_base_period_ms = 10;
 
 }  // namespace
 
-JournalStreamer::JournalStreamer(journal::Journal* journal, ExecutionState* cntx, SendLsn send_lsn)
-    : cntx_(cntx), journal_(journal), send_lsn_(send_lsn) {
+JournalStreamer::JournalStreamer(journal::Journal* journal, ExecutionState* cntx, SendLsn send_lsn,
+                                 bool is_stable_sync)
+    : cntx_(cntx), journal_(journal), is_stable_sync_(is_stable_sync), send_lsn_(send_lsn) {
   // cache the flag to avoid accessing it later.
   replication_stream_output_limit_cached = absl::GetFlag(FLAGS_replication_stream_output_limit);
+  migration_buckets_sleep_usec_cached = absl::GetFlag(FLAGS_migration_buckets_sleep_usec);
+  replication_dispatch_threshold = absl::GetFlag(FLAGS_replication_dispatch_threshold);
+  last_async_write_time_ = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
 }
 
 JournalStreamer::~JournalStreamer() {
@@ -75,27 +88,72 @@ void JournalStreamer::Start(util::FiberSocketBase* dest) {
   CHECK(dest_ == nullptr && dest != nullptr);
   dest_ = dest;
   journal_cb_id_ = journal_->RegisterOnChange(this);
+  StartStalledDataWriterFiber();
 }
 
 void JournalStreamer::Cancel() {
-  VLOG(1) << "JournalStreamer::Cancel";
+  VLOG(1) << "JournalStreamer::Cancel " << cntx_->IsCancelled();
   waker_.notifyAll();
   journal_->UnregisterOnChange(journal_cb_id_);
-  if (!cntx_->IsError()) {
-    WaitForInflightToComplete();
-  }
+  StopStalledDataWriterFiber();
+  WaitForInflightToComplete();
 }
 
 size_t JournalStreamer::UsedBytes() const {
   return pending_buf_.Size();
 }
 
-void JournalStreamer::AsyncWrite() {
-  DCHECK(!pending_buf_.Empty());
+void JournalStreamer::Write(std::string str) {
+  DCHECK(!str.empty());
+  DVLOG(3) << "Writing " << str.size() << " bytes";
 
+  pending_buf_.Push(std::move(str));
+  AsyncWrite(false);
+}
+
+void JournalStreamer::StartStalledDataWriterFiber() {
+  if (is_stable_sync_ && !stalled_data_writer_.IsJoinable()) {
+    auto pb = fb2::ProactorBase::me();
+    std::chrono::milliseconds period_us(stalled_writer_base_period_ms);
+    stalled_data_writer_ = MakeFiber([this, index = pb->GetPoolIndex(), period_us]() mutable {
+      ThisFiber::SetName(absl::StrCat("fiber_periodic_journal_writer_", index));
+      this->StalledDataWriterFiber(period_us, &stalled_data_writer_done_);
+    });
+  }
+}
+
+void JournalStreamer::StalledDataWriterFiber(std::chrono::milliseconds period_ms,
+                                             util::fb2::Done* waiter) {
+  while (cntx_->IsRunning()) {
+    if (waiter->WaitFor(period_ms)) {
+      if (!cntx_->IsRunning()) {
+        return;
+      }
+    }
+
+    // We don't want to force async write to replicate if last data
+    // was written recent. Data needs to be stalled for period_ms duration.
+    if (!pending_buf_.Size() || in_flight_bytes_ > 0 ||
+        ((last_async_write_time_ + period_ms.count()) >
+         (fb2::ProactorBase::GetMonotonicTimeNs() / 1000000))) {
+      continue;
+    }
+
+    AsyncWrite(true);
+  }
+}
+
+void JournalStreamer::AsyncWrite(bool force_send) {
+  // Stable sync or RestoreStreamer replication can't write data until
+  // previous AsyncWriter finished.
   if (in_flight_bytes_ > 0) {
-    // We can not flush data while there are in flight requests because AsyncWrite
-    // is not atomic. Therefore, we just aggregate.
+    return;
+  }
+
+  // Writing in stable sync and outside of fiber needs to check
+  // threshold before writing data.
+  if (is_stable_sync_ && !force_send &&
+      pending_buf_.FrontBufSize() < replication_dispatch_threshold) {
     return;
   }
 
@@ -103,6 +161,7 @@ void JournalStreamer::AsyncWrite() {
 
   in_flight_bytes_ = cur_buf.mem_size;
   total_sent_ += in_flight_bytes_;
+  last_async_write_time_ = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
 
   const auto v_size = cur_buf.buf.size();
   absl::InlinedVector<iovec, 8> v(v_size);
@@ -112,18 +171,8 @@ void JournalStreamer::AsyncWrite() {
     v[i] = IoVec(io::Bytes(uptr, cur_buf.buf[i].size()));
   }
 
-  dest_->AsyncWrite(v.data(), v.size(), [this, len = in_flight_bytes_](std::error_code ec) {
-    OnCompletion(std::move(ec), len);
-  });
-}
-
-void JournalStreamer::Write(std::string str) {
-  DCHECK(!str.empty());
-  DVLOG(3) << "Writing " << str.size() << " bytes";
-
-  pending_buf_.Push(std::move(str));
-
-  AsyncWrite();
+  dest_->AsyncWrite(v.data(), v.size(),
+                    [this, len = in_flight_bytes_](std::error_code ec) { OnCompletion(ec, len); });
 }
 
 void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
@@ -136,7 +185,7 @@ void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
     if (ec) {
       cntx_->ReportError(ec);
     } else if (!pending_buf_.Empty()) {
-      AsyncWrite();
+      AsyncWrite(false);
     }
   }
 
@@ -152,13 +201,42 @@ void JournalStreamer::ThrottleIfNeeded() {
   if (!cntx_->IsRunning() || !IsStalled())
     return;
 
-  auto next =
-      chrono::steady_clock::now() + chrono::milliseconds(absl::GetFlag(FLAGS_replication_timeout));
+  ++throttle_count_;
+  ++throttle_waiters_;
+
+  const auto start = chrono::steady_clock::now();
+  const auto next = start + chrono::milliseconds(absl::GetFlag(FLAGS_replication_timeout));
+  auto log_start = start;
   size_t inflight_start = in_flight_bytes_;
   size_t sent_start = total_sent_;
 
-  std::cv_status status =
-      waker_.await_until([this]() { return !IsStalled() || !cntx_->IsRunning(); }, next);
+  // Please note that ThrottleIfNeeded is unfair. Specifically with several producers pushing data
+  // to this JournalStreamer, one of them may be stalled and the other will be able to
+  // progress indefinitely. The stalled producer will be woken up only to verify again that the
+  // other one succeeded to push data before it.
+  // We currently do not solve this problem, but at least we will be more verbose about it.
+  std::cv_status status = waker_.await_until(
+      [&] {
+        bool finished = !IsStalled() || !cntx_->IsRunning();
+        if (finished)
+          return finished;
+
+        // Log every second that we are stalled and for how long.
+        auto current = chrono::steady_clock::now();
+        if (current - log_start > 1000ms) {
+          log_start = current;
+          LOG(WARNING) << "Waiting for "
+                       << chrono::duration_cast<chrono::milliseconds>(current - start).count()
+                       << "ms " << ThisFiber::GetName();
+        }
+
+        return false;
+      },
+      next);
+
+  --throttle_waiters_;
+  total_throttle_wait_usec_ +=
+      chrono::duration_cast<chrono::microseconds>(chrono::steady_clock::now() - start).count();
   if (status == std::cv_status::timeout) {
     LOG(WARNING) << "Stream timed out, inflight bytes/sent start: " << inflight_start << "/"
                  << sent_start << ", end: " << in_flight_bytes_ << "/" << total_sent_;
@@ -176,13 +254,22 @@ void JournalStreamer::WaitForInflightToComplete() {
   }
 }
 
+void JournalStreamer::StopStalledDataWriterFiber() {
+  if (is_stable_sync_ && stalled_data_writer_.IsJoinable()) {
+    stalled_data_writer_done_.Notify();
+    if (stalled_data_writer_.IsJoinable()) {
+      stalled_data_writer_.Join();
+    }
+  }
+}
+
 bool JournalStreamer::IsStalled() const {
   return pending_buf_.Size() >= replication_stream_output_limit_cached;
 }
 
 RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
                                  ExecutionState* cntx)
-    : JournalStreamer(journal, cntx, JournalStreamer::SendLsn::NO),
+    : JournalStreamer(journal, cntx, JournalStreamer::SendLsn::NO, false),
       db_slice_(slice),
       my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
@@ -212,7 +299,18 @@ void RestoreStreamer::Run() {
   do {
     if (!cntx_->IsRunning())
       return;
-    cursor = pt->TraverseBuckets(cursor, [&](PrimeTable::bucket_iterator it) {
+
+    // If someone else is waiting for the inflight bytes to complete, give it priority.
+    // Apparently, continue goes through the loop by checking the condition below, so we check
+    // cursor here as well.
+    if (cursor &&
+        (throttle_waiters_ > 0 || inflight_bytes() > replication_stream_output_limit_cached / 3)) {
+      ThisFiber::SleepFor(300us);
+      stats_.iter_skips++;
+      continue;
+    }
+
+    cursor = pt->TraverseBuckets(cursor, [this](PrimeTable::bucket_iterator it) {
       if (!cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt
         return;
 
@@ -221,6 +319,9 @@ void RestoreStreamer::Run() {
 
       if (!cntx_->IsRunning())  // Could have been cancelled in above call too
         return;
+
+      // Do not progress if we are stalled.
+      ThrottleIfNeeded();
 
       std::lock_guard guard(big_value_mu_);
 
@@ -232,7 +333,8 @@ void RestoreStreamer::Run() {
     });
 
     if (++last_yield >= migration_buckets_serialization_threshold_cached) {
-      ThisFiber::Yield();
+      // TODO: to align this with how we sleep in SliceSnapshot::FlushSerialized.
+      ThisFiber::SleepFor(chrono::microseconds(migration_buckets_sleep_usec_cached));
       last_yield = 0;
     }
   } while (cursor);
@@ -247,7 +349,11 @@ void RestoreStreamer::SendFinalize(long attempt) {
           << " commands. Buckets looped " << stats_.buckets_loop << ", buckets on_db_update "
           << stats_.buckets_on_db_update << ", buckets skipped " << stats_.buckets_skipped
           << ", buckets written " << stats_.buckets_written << ". Keys skipped "
-          << stats_.keys_skipped << ", keys written " << stats_.keys_written;
+          << stats_.keys_skipped << ", keys written " << stats_.keys_written
+          << " throttle count: " << throttle_count_
+          << ", throttle on db update: " << stats_.throttle_on_db_update
+          << ", throttle usec on db update: " << stats_.throttle_usec_on_db_update
+          << ", iter_skips: " << stats_.iter_skips;
 
   journal::Entry entry(journal::Op::LSN, attempt);
 
@@ -338,6 +444,8 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
 
   PrimeTable* table = db_slice_->GetTables(0).first;
 
+  uint64_t throttle_start = throttle_count_;
+  uint64_t throttle_usec_start = total_throttle_wait_usec_;
   if (const PrimeTable::bucket_iterator* bit = req.update()) {
     stats_.buckets_on_db_update += WriteBucket(*bit);
   } else {
@@ -347,6 +455,8 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
       stats_.buckets_on_db_update += WriteBucket(it);
     });
   }
+  stats_.throttle_on_db_update += throttle_count_ - throttle_start;
+  stats_.throttle_usec_on_db_update += total_throttle_wait_usec_ - throttle_usec_start;
 }
 
 void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,

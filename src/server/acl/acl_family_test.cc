@@ -558,4 +558,12 @@ TEST_F(AclFamilyTest, TestAlias) {
   EXPECT_EQ(Run({"ACL", "DRYRUN", "jarjar", "SET"}), "OK");
 }
 
+TEST_F(AclFamilyTest, TestAclLogUB) {
+  auto resp = Run({"ACL", "LOG"});
+  EXPECT_TRUE(resp.GetVec().empty());
+
+  resp = Run({"ACL", "LOG", "2", "RESET"});
+  EXPECT_THAT(resp, ErrArg("ERR index out of range"));
+}
+
 }  // namespace dfly

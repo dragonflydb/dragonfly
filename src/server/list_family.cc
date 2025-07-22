@@ -1008,6 +1008,47 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
+void ListFamily::BLMPop(CmdArgList args, const CommandContext& cmd_cntx) {
+  auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+
+  CmdArgParser parser{args};
+  float timeout = parser.Next<float>();
+  if (auto err = parser.Error(); err)
+    return response_builder->SendError(err->MakeReply());
+
+  if (timeout < 0)
+    return response_builder->SendError("timeout is negative");
+
+  parser.Skip(parser.Next<size_t>());  // Skip numkeys and keys
+  ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
+
+  size_t pop_count = 1;
+  if (parser.Check("COUNT"))
+    pop_count = parser.Next<size_t>();
+
+  if (!parser.Finalize())
+    return response_builder->SendError(parser.Error()->MakeReply());
+
+  OpResult<StringVec> result;
+  auto cb = [&](Transaction* t, EngineShard* shard, string_view key) {
+    result = OpPop(t->GetOpArgs(shard), key, dir, pop_count, true, true);
+    return result.status();
+  };
+
+  ConnectionContext* conn_cntx = cmd_cntx.conn_cntx;
+  OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
+      cmd_cntx.tx, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &conn_cntx->blocked,
+      &conn_cntx->paused);
+
+  if (popped_key.ok()) {
+    response_builder->StartArray(2);
+    response_builder->SendBulkString(*popped_key);
+    response_builder->SendBulkStrArr(*result);
+  } else {
+    response_builder->SendNull();
+  }
+}
+
 void ListFamily::LPush(CmdArgList args, const CommandContext& cmd_cntx) {
   return PushGeneric(ListDir::LEFT, false, args, cmd_cntx.tx, cmd_cntx.rb);
 }
@@ -1271,6 +1312,7 @@ constexpr uint32_t kLPush = WRITE | LIST | FAST;
 constexpr uint32_t kLPushX = WRITE | LIST | FAST;
 constexpr uint32_t kLPop = WRITE | LIST | FAST;
 constexpr uint32_t kLMPop = WRITE | LIST | FAST;
+constexpr uint32_t kBLMPop = WRITE | LIST | SLOW | BLOCKING;
 constexpr uint32_t kRPush = WRITE | LIST | FAST;
 constexpr uint32_t kRPushX = WRITE | LIST | FAST;
 constexpr uint32_t kRPop = WRITE | LIST | FAST;
@@ -1297,6 +1339,9 @@ void ListFamily::Register(CommandRegistry* registry) {
       << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kLPushX}.HFUNC(LPushX)
       << CI{"LPOP", CO::WRITE | CO::FAST, -2, 1, 1, acl::kLPop}.HFUNC(LPop)
       << CI{"LMPOP", CO::WRITE | CO::SLOW | CO::VARIADIC_KEYS, -4, 2, 2, acl::kLMPop}.HFUNC(LMPop)
+      << CI{"BLMPOP",    CO::WRITE | CO::SLOW | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -5, 3, 3,
+            acl::kBLMPop}
+             .HFUNC(BLMPop)
       << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kRPush}.HFUNC(RPush)
       << CI{"RPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kRPushX}.HFUNC(RPushX)
       << CI{"RPOP", CO::WRITE | CO::FAST, -2, 1, 1, acl::kRPop}.HFUNC(RPop)

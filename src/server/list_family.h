@@ -34,6 +34,7 @@ class ListFamily {
   static void BLPop(CmdArgList args, const CommandContext& cmd_cntx);
   static void BRPop(CmdArgList args, const CommandContext& cmd_cntx);
   static void LMPop(CmdArgList args, const CommandContext& cmd_cntx);
+  static void BLMPop(CmdArgList args, const CommandContext& cmd_cntx);
   static void LLen(CmdArgList args, const CommandContext& cmd_cntx);
   static void LPos(CmdArgList args, const CommandContext& cmd_cntx);
   static void LIndex(CmdArgList args, const CommandContext& cmd_cntx);

@@ -6,31 +6,35 @@ from .instance import DflyInstance
 from .utility import *
 
 
-def test_quit(connection):
-    connection.send_command("QUIT")
-    assert connection.read_response() == b"OK"
+@pytest.fixture(scope="class")
+def connection(df_server: DflyInstance):
+    return redis.Connection(port=df_server.port)
 
-    with pytest.raises(redis.exceptions.ConnectionError) as e:
+
+class TestServer:
+    def test_quit(self, connection: redis.Connection):
+        connection.send_command("QUIT")
+        assert connection.read_response() == b"OK"
+
+        with pytest.raises(redis.exceptions.ConnectionError) as e:
+            connection.read_response()
+
+    def test_quit_after_sub(self, connection):
+        connection.send_command("SUBSCRIBE", "foo")
         connection.read_response()
 
+        connection.send_command("QUIT")
+        assert connection.read_response() == b"OK"
 
-def test_quit_after_sub(connection):
-    connection.send_command("SUBSCRIBE", "foo")
-    connection.read_response()
+        with pytest.raises(redis.exceptions.ConnectionError) as e:
+            connection.read_response()
 
-    connection.send_command("QUIT")
-    assert connection.read_response() == b"OK"
-
-    with pytest.raises(redis.exceptions.ConnectionError) as e:
-        connection.read_response()
-
-
-async def test_multi_exec(async_client: aioredis.Redis):
-    pipeline = async_client.pipeline()
-    pipeline.set("foo", "bar")
-    pipeline.get("foo")
-    val = await pipeline.execute()
-    assert val == [True, "bar"]
+    async def test_multi_exec(self, async_client: aioredis.Redis):
+        pipeline = async_client.pipeline()
+        pipeline.set("foo", "bar")
+        pipeline.get("foo")
+        val = await pipeline.execute()
+        assert val == [True, "bar"]
 
 
 """
@@ -44,18 +48,13 @@ For now we are expecting to get an error
 """
 
 
-@pytest.mark.skip("Skip until we decided on correct behaviour of eval inside multi")
 async def test_multi_eval(async_client: aioredis.Redis):
-    try:
-        pipeline = async_client.pipeline()
-        pipeline.set("foo", "bar")
-        pipeline.get("foo")
-        pipeline.eval("return 43", 0)
-        val = await pipeline.execute()
-        assert val == "foo"
-    except Exception as e:
-        msg = str(e)
-        assert "Dragonfly does not allow execution of" in msg
+    pipeline = async_client.pipeline()
+    pipeline.set("foo", "bar")
+    pipeline.get("foo")
+    pipeline.eval("return 43", 0)
+    val = await pipeline.execute()
+    assert val == [True, "bar", 43]
 
 
 async def test_connection_name(async_client: aioredis.Redis):
@@ -221,3 +220,32 @@ async def test_metric_labels(
         for sample in metrics["dragonfly_connected_clients"].samples:
             match_label_value(sample, "main", lambda v: v == 2)
             match_label_value(sample, "other", lambda v: v == 1)
+
+
+async def test_latency_stats(async_client: aioredis.Redis):
+    for _ in range(100):
+        await async_client.set("foo", "bar")
+        await async_client.get("foo")
+        await async_client.get("bar")
+        await async_client.hgetall("missing")
+
+    latency_stats = await async_client.info("LATENCYSTATS")
+    for expected in {"hgetall", "set", "get"}:
+        key = f"latency_percentiles_usec_{expected}"
+        assert key in latency_stats
+        assert latency_stats[key].keys() == {"p50", "p99", "p99.9"}
+
+    await async_client.config_resetstat()
+    latency_stats = await async_client.info("LATENCYSTATS")
+    # Only stats for the `config resetstat` command should remain in stats
+    assert (
+        len(latency_stats) == 1 and "latency_percentiles_usec_config" in latency_stats,
+        f"unexpected latency stats after reset: {latency_stats}",
+    )
+
+
+@dfly_args({"latency_tracking": False})
+async def test_latency_stats_disabled(async_client: aioredis.Redis):
+    for _ in range(100):
+        await async_client.set("foo", "bar")
+    assert await async_client.info("LATENCYSTATS") == {}

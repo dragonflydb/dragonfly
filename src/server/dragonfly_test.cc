@@ -28,6 +28,7 @@ ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
 ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
 ABSL_DECLARE_FLAG(double, eviction_memory_budget_threshold);
 ABSL_DECLARE_FLAG(std::vector<std::string>, command_alias);
+ABSL_DECLARE_FLAG(bool, latency_tracking);
 
 namespace dfly {
 
@@ -551,6 +552,49 @@ TEST_F(DflyEngineTest, StickyEviction) {
 
 #endif
 
+TEST_F(DflyEngineTest, ZeroAllocationEviction) {
+  max_memory_limit = 500000;  // 0.5mb
+  shard_set->TEST_EnableCacheMode();
+
+  // Create entries with zero-allocation values (small integers)
+  // but with long keys to consume memory
+  string long_key_prefix(50, 'k');  // 50 character prefix
+
+  vector<string> keys;
+  int successful_sets = 0;
+  for (int i = 0; i < 1000; ++i) {
+    string key = StrCat(long_key_prefix, i);
+    auto result = Run({"set", key, to_string(i)});  // small integer value
+    if (result == "OK") {
+      keys.emplace_back(key);
+      successful_sets++;
+    } else {
+      break;  // Stop when we hit memory limit
+    }
+  }
+
+  ASSERT_GT(successful_sets, 10) << "Should be able to set at least some keys";
+
+  // Fill up more memory to trigger eviction
+  string large_value(500, 'v');
+  for (int i = 0; i < 500; ++i) {
+    string key = StrCat("trigger", i);
+    Run({"set", key, large_value});  // This will trigger eviction
+  }
+
+  // Verify that some zero-allocation entries were evicted
+  int evicted_count = 0;
+  for (const string& key : keys) {
+    if (Run({"exists", key}).GetInt() == 0) {
+      evicted_count++;
+    }
+  }
+
+  // Should have evicted some entries with zero-allocation values
+  // but not external (disk storage) entries
+  EXPECT_GT(evicted_count, 0) << "Zero-allocation entries should be evicted under memory pressure";
+}
+
 TEST_F(DflyEngineTest, PSubscribe) {
   single_response_ = false;
   auto resp = pp_->at(1)->Await([&] { return Run({"psubscribe", "a*", "b*"}); });
@@ -887,7 +931,8 @@ TEST_F(DflyEngineTest, CommandMetricLabels) {
 class DflyCommandAliasTest : public DflyEngineTest {
  protected:
   DflyCommandAliasTest() {
-    absl::SetFlag(&FLAGS_command_alias, {"___set=set", "___ping=ping"});
+    SetFlag(&FLAGS_command_alias, {"___set=set", "___ping=ping"});
+    SetFlag(&FLAGS_latency_tracking, true);
   }
 
   absl::FlagSaver saver_;
@@ -918,6 +963,20 @@ TEST_F(DflyCommandAliasTest, Aliasing) {
   EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("set", Key(1))));
   EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("multi", Key(1))));
   EXPECT_THAT(metrics.cmd_stats_map, Contains(Pair("exec", Key(1))));
+}
+
+TEST_F(DflyCommandAliasTest, AliasesShareHistogramPtr) {
+  EXPECT_EQ(Run({"SET", "foo", "bar"}), "OK");
+  EXPECT_EQ(Run({"___SET", "a", "b"}), "OK");
+  EXPECT_EQ(Run({"___ping"}), "PONG");
+
+  const auto command_histograms = GetMetrics().cmd_latency_map;
+  for (const auto& key : {"set", "___set", "___ping", "ping"}) {
+    EXPECT_TRUE(command_histograms.contains(key));
+  }
+
+  EXPECT_EQ(command_histograms.at("set"), command_histograms.at("___set"));
+  EXPECT_EQ(command_histograms.at("ping"), command_histograms.at("___ping"));
 }
 
 }  // namespace dfly

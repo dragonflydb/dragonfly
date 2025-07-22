@@ -290,6 +290,7 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     cntx->conn()->SetName(absl::StrCat("repl_flow_", sync_id));
     cntx->conn_state.replication_info.repl_session_id = sync_id;
     cntx->conn_state.replication_info.repl_flow_id = flow_id;
+    cntx->replica_conn = true;
 
     absl::InsecureBitGen gen;
     eof_token = GetRandomHex(gen, 40);
@@ -312,8 +313,9 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
 
     std::optional<Replica::LastMasterSyncData> data = sf_->GetLastMasterData();
     // In this flow the master and the registered replica where synced from the same master.
-    if (last_master_id && data && data.value().id == last_master_id.value()) {
-      std::vector<std::string_view> lsn_str_vec = absl::StrSplit(last_master_lsn.value(), '-');
+    if (last_master_id && data && data->id == *last_master_id) {
+      ++ServerState::tlocal()->stats.psync_requests_total;
+      std::vector<std::string_view> lsn_str_vec = absl::StrSplit(*last_master_lsn, '-');
       if (lsn_str_vec.size() != data.value().last_journal_LSNs.size()) {
         return rb->SendError(facade::kSyntaxErr);  // Unexpected flow. LSN vector of same master
                                                    // should be the same size on all replicas.
@@ -561,7 +563,7 @@ void DflyCmd::ReplicaOffset(CmdArgList args, RedisReplyBuilder* rb) {
 void DflyCmd::Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   parser.ExpectTag("LOAD");
-  string_view filename = parser.Next();
+  string filename = parser.Next<string>();
   ServerFamily::LoadExistingKeys existing_keys = ServerFamily::LoadExistingKeys::kFail;
 
   if (parser.HasNext()) {
@@ -569,7 +571,7 @@ void DflyCmd::Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     existing_keys = ServerFamily::LoadExistingKeys::kOverride;
   }
 
-  if (parser.Error() || parser.HasNext()) {
+  if (parser.Error() || parser.HasNext() || filename.empty()) {
     return rb->SendError(kSyntaxErr);
   }
 
@@ -598,7 +600,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, ExecutionState* exec_st,
   // of the flows also contain them.
   SaveMode save_mode =
       shard->shard_id() == 0 ? SaveMode::SINGLE_SHARD_WITH_SUMMARY : SaveMode::SINGLE_SHARD;
-  flow->saver = std::make_unique<RdbSaver>(flow->conn->socket(), save_mode, false);
+  flow->saver = std::make_unique<RdbSaver>(flow->conn->socket(), save_mode, false, "");
 
   flow->cleanup = [flow, shard]() {
     // socket shutdown is needed before calling saver->Cancel(). Because
@@ -658,7 +660,8 @@ void DflyCmd::StartStableSyncInThread(FlowInfo* flow, ExecutionState* exec_st, E
   DCHECK(shard);
   DCHECK(flow->conn);
 
-  flow->streamer.reset(new JournalStreamer(sf_->journal(), exec_st, JournalStreamer::SendLsn::YES));
+  flow->streamer.reset(
+      new JournalStreamer(sf_->journal(), exec_st, JournalStreamer::SendLsn::YES, true));
   flow->streamer->Start(flow->conn->socket());
 
   // Register cleanup.
@@ -716,6 +719,7 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
   auto replica_ptr = GetReplicaInfo(sync_id);
   if (!replica_ptr)
     return;
+  VLOG(1) << "Stopping replication for sync_id: " << sync_id;
 
   // Because CancelReplication holds the per-replica mutex,
   // aborting connection will block here until cancellation finishes.

@@ -16,6 +16,7 @@
 
 #include "base/pmr/memory_resource.h"
 #include "core/search/base.h"
+#include "core/search/range_tree.h"
 #include "core/search/synonyms.h"
 
 namespace dfly::search {
@@ -41,6 +42,7 @@ struct SchemaField {
   struct TagParams {
     char separator = ',';
     bool case_sensitive = false;
+    bool with_suffixtrie = false;  // see TextParams
   };
 
   struct TextParams {
@@ -48,7 +50,14 @@ struct SchemaField {
     bool with_suffixtrie = false;
   };
 
-  using ParamsVariant = std::variant<std::monostate, VectorParams, TagParams, TextParams>;
+  struct NumericParams {
+    // Block size of the range tree
+    // Check RangeTree for details.
+    size_t block_size = RangeTree::kDefaultMaxRangeBlockSize;
+  };
+
+  using ParamsVariant =
+      std::variant<std::monostate, VectorParams, TagParams, TextParams, NumericParams>;
 
   FieldType type;
   uint8_t flags;
@@ -129,14 +138,11 @@ struct AlgorithmProfile {
 struct SearchResult {
   size_t total;  // how many documents were matched in total
 
-  // number of matches before any aggregation, used by multi-shard optimizations
-  size_t pre_aggregation_total;
-
   // The ids of the matched documents
   std::vector<DocId> ids;
 
   // Contains final scores if an aggregation was present
-  std::vector<ResultScore> scores;
+  std::vector<std::pair<DocId, float>> knn_scores;
 
   // If profiling was enabled
   std::optional<AlgorithmProfile> profile;

@@ -4,12 +4,75 @@ namespace dfly::search {
 
 using namespace std;
 
-template <typename C> bool BlockList<C>::Insert(DocId t) {
+SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list) {
+  using Entry = std::pair<DocId, double>;
+
+  const size_t initial_size = block_list.Size();
+  DCHECK(!block_list.Empty());
+
+  // Collect all entries from the blocks into a single vector
+  // We copy the block and clear it on the fly to save memory
+  std::vector<std::pair<DocId, double>> all_entries;
+  for (auto& block : block_list.blocks_) {
+    all_entries.reserve(all_entries.size() +
+                        block.Size());  // Reserve space for all entries in the block
+    all_entries.insert(all_entries.end(), block.begin(), block.end());
+    block.Clear();  // At the same time clear the block to save memory
+  }
+  block_list.Clear();
+
+  DCHECK(all_entries.size() == initial_size);
+
+  std::nth_element(all_entries.begin(), all_entries.begin() + initial_size / 2, all_entries.end(),
+                   [](const Entry& l, const Entry& r) { return l.second < r.second; });
+
+  double median_value = all_entries[initial_size / 2].second;
+
+  BlockList<SortedVector<Entry>> left(block_list.blocks_.get_allocator().resource(),
+                                      block_list.block_size_);
+  BlockList<SortedVector<Entry>> right(block_list.blocks_.get_allocator().resource(),
+                                       block_list.block_size_);
+  absl::InlinedVector<Entry, 1> median_entries;
+
+  double min_value_in_right_part = std::numeric_limits<double>::infinity();
+  for (const auto& entry : all_entries) {
+    if (entry.second < median_value) {
+      left.Insert(entry);
+    } else if (entry.second > median_value) {
+      right.Insert(entry);
+      if (entry.second < min_value_in_right_part) {
+        min_value_in_right_part = entry.second;
+      }
+    } else {
+      median_entries.push_back(entry);
+    }
+  }
+  all_entries.clear();
+
+  if (left.Size() < right.Size()) {
+    // If left is smaller, we can add median entries to it
+    // We need to change median value to the right part
+    median_value = min_value_in_right_part;
+    for (const auto& entry : median_entries) {
+      left.Insert(entry);
+    }
+  } else {
+    // If right part is smaller, we can add median entries to it
+    // Median value is still the same
+    for (const auto& entry : median_entries) {
+      right.Insert(entry);
+    }
+  }
+
+  return {std::move(left), std::move(right), median_value};
+}
+
+template <typename C> bool BlockList<C>::Insert(ElementType t) {
   auto block = FindBlock(t);
   if (block == blocks_.end())
     block = blocks_.insert(blocks_.end(), C{blocks_.get_allocator().resource()});
 
-  if (!block->Insert(t))
+  if (!block->Insert(std::move(t)))
     return false;
 
   size_++;
@@ -17,8 +80,8 @@ template <typename C> bool BlockList<C>::Insert(DocId t) {
   return true;
 }
 
-template <typename C> bool BlockList<C>::Remove(DocId t) {
-  if (auto block = FindBlock(t); block != blocks_.end() && block->Remove(t)) {
+template <typename C> bool BlockList<C>::Remove(ElementType t) {
+  if (auto block = FindBlock(t); block != blocks_.end() && block->Remove(std::move(t))) {
     size_--;
     TryMerge(block);
     return true;
@@ -27,15 +90,15 @@ template <typename C> bool BlockList<C>::Remove(DocId t) {
   return false;
 }
 
-template <typename C> typename BlockList<C>::BlockIt BlockList<C>::FindBlock(DocId t) {
-  DCHECK(blocks_.empty() || blocks_.back().Size() > 0u);
+template <typename C> typename BlockList<C>::BlockIt BlockList<C>::FindBlock(const ElementType& t) {
+  DCHECK(blocks_.empty() || !blocks_.back().Empty());
 
   if (!blocks_.empty() && t >= *blocks_.back().begin())
     return --blocks_.end();
 
   // Find first block that can't contain t
   auto it = std::upper_bound(blocks_.begin(), blocks_.end(), t,
-                             [](DocId t, const C& l) { return *l.begin() > t; });
+                             [](const ElementType& t, const C& l) { return *l.begin() > t; });
 
   // Move to previous if possible
   if (it != blocks_.begin())
@@ -75,25 +138,26 @@ template <typename C> void BlockList<C>::TrySplit(BlockIt block) {
 
 template <typename C>
 typename BlockList<C>::BlockListIterator& BlockList<C>::BlockListIterator::operator++() {
-  ++*block_it;
+  ++block_it;
   if (block_it == block_end) {
     ++it;
     if (it != it_end) {
       block_it = it->begin();
       block_end = it->end();
     } else {
-      block_it = std::nullopt;
-      block_end = std::nullopt;
+      block_it = {};
+      block_end = {};
     }
   }
   return *this;
 }
 
 template class BlockList<CompressedSortedSet>;
-template class BlockList<SortedVector>;
+template class BlockList<SortedVector<DocId>>;
+template class BlockList<SortedVector<std::pair<DocId, double>>>;
 
-bool SortedVector::Insert(DocId t) {
-  if (entries_.size() > 0 && t > entries_.back()) {
+template <typename T> bool SortedVector<T>::Insert(T t) {
+  if (entries_.empty() || t > entries_.back()) {
     entries_.push_back(t);
     return true;
   }
@@ -106,7 +170,7 @@ bool SortedVector::Insert(DocId t) {
   return true;
 }
 
-bool SortedVector::Remove(DocId t) {
+template <typename T> bool SortedVector<T>::Remove(T t) {
   auto it = std::lower_bound(entries_.begin(), entries_.end(), t);
   if (it != entries_.end() && *it == t) {
     entries_.erase(it);
@@ -115,19 +179,22 @@ bool SortedVector::Remove(DocId t) {
   return false;
 }
 
-void SortedVector::Merge(SortedVector&& other) {
+template <typename T> void SortedVector<T>::Merge(SortedVector&& other) {
   // NLog compexity in theory, but in practice used only to merge with larger values.
   // Tail insert optimization makes it linear
   entries_.reserve(entries_.size() + other.entries_.size());
-  for (int t : other.entries_)
-    Insert(t);
+  for (T& t : other.entries_)
+    Insert(std::move(t));
 }
 
-std::pair<SortedVector, SortedVector> SortedVector::Split() && {
-  PMR_NS::vector<DocId> tail(entries_.begin() + entries_.size() / 2, entries_.end());
+template <typename T> std::pair<SortedVector<T>, SortedVector<T>> SortedVector<T>::Split() && {
+  PMR_NS::vector<T> tail(entries_.begin() + entries_.size() / 2, entries_.end());
   entries_.resize(entries_.size() / 2);
 
-  return std::make_pair(std::move(*this), SortedVector{std::move(tail)});
+  return std::make_pair(std::move(*this), SortedVector<T>{std::move(tail)});
 }
+
+template class SortedVector<DocId>;
+template class SortedVector<std::pair<DocId, double>>;
 
 }  // namespace dfly::search

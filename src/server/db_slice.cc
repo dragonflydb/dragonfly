@@ -99,6 +99,7 @@ class PrimeEvictionPolicy {
     DVLOG(2) << "split: " << segment->SlowSize() << "/" << segment->capacity();
   }
   void OnMove(PrimeTable::Cursor source, PrimeTable::Cursor dest) {
+    moved_items_.push_back(std::make_pair(source, dest));
   }
 
   bool CanGrow(const PrimeTable& tbl) const;
@@ -113,8 +114,12 @@ class PrimeEvictionPolicy {
   unsigned checked() const {
     return checked_;
   }
+  const DbSlice::MovedItemsVec& moved_items() {
+    return moved_items_;
+  }
 
  private:
+  DbSlice::MovedItemsVec moved_items_;
   DbSlice* db_slice_;
   ssize_t mem_offset_;
   ssize_t soft_limit_ = 0;
@@ -364,7 +369,15 @@ class DbSlice::PrimeBumpPolicy {
     return !obj.IsSticky();
   }
   void OnMove(PrimeTable::Cursor source, PrimeTable::Cursor dest) {
+    moved_items_.push_back(std::make_pair(source, dest));
   }
+
+  const DbSlice::MovedItemsVec& moved_items() {
+    return moved_items_;
+  }
+
+ private:
+  DbSlice::MovedItemsVec moved_items_;
 };
 
 DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
@@ -708,6 +721,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
+  CallMovedCallbacks(cntx.db_index, evp.moved_items());
 
   events_.mutations++;
   ssize_t table_increase = db.prime.mem_usage() - table_before;
@@ -732,8 +746,11 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   table_memory_ += table_increase;
   entries_count_++;
 
-  db.stats.inline_keys += it->first.IsInline();
-  AccountObjectMemory(key, it->first.ObjType(), it->first.MallocUsed(), &db);  // Account for key
+  if (it->first.IsInline()) {
+    ++db.stats.inline_keys;
+  } else {
+    AccountObjectMemory(key, it->first.ObjType(), it->first.MallocUsed(), &db);  // Account for key
+  }
 
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
   it.SetVersion(NextVersion());
@@ -1252,6 +1269,12 @@ uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
   return change_cb_.emplace_back(NextVersion(), std::move(cb)).first;
 }
 
+uint64_t DbSlice::RegisterOnMove(MovedCallback cb) {
+  ++next_moved_id_;
+  moved_cb_.emplace_back(next_moved_id_, cb);
+  return next_moved_id_;
+}
+
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
   unique_lock<LocalLatch> lk(serialization_latch_);
 
@@ -1282,6 +1305,14 @@ void DbSlice::UnregisterOnChange(uint64_t id) {
                     [id](const auto& cb) { return cb.first == id; });
   CHECK(it != change_cb_.end());
   change_cb_.erase(it);
+}
+
+void DbSlice::UnregisterOnMoved(uint64_t id) {
+  serialization_latch_.Wait();
+  auto it =
+      find_if(moved_cb_.begin(), moved_cb_.end(), [id](const auto& cb) { return cb.first == id; });
+  CHECK(it != moved_cb_.end());
+  moved_cb_.erase(it);
 }
 
 auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteExpiredStats {
@@ -1389,7 +1420,10 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind,
           continue;
 
         auto evict_it = db_table->prime.GetIterator(segment_id, bucket_id, slot_id);
-        if (evict_it->first.IsSticky() || !evict_it->second.HasAllocated())
+        // TODO: consider evicting inline entries as well
+
+        bool has_allocated = evict_it->second.HasAllocated() || evict_it->first.HasAllocated();
+        if (evict_it->first.IsSticky() || !has_allocated)
           continue;
 
         // check if the key is locked by looking up transaction table.
@@ -1673,9 +1707,12 @@ void DbSlice::PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable
   }
 
   ssize_t value_heap_size = pv.MallocUsed(), key_size_used = del_it->first.MallocUsed();
-  stats.inline_keys -= del_it->first.IsInline();
-  AccountObjectMemory(del_it.key(), del_it->first.ObjType(), -key_size_used,
-                      table);                                                // Key
+  if (del_it->first.IsInline()) {
+    --stats.inline_keys;
+  } else {
+    AccountObjectMemory(del_it.key(), del_it->first.ObjType(), -key_size_used,
+                        table);  // Key
+  }
   AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
 
   if (del_it->first.IsAsyncDelete() && pv.ObjType() == OBJ_SET &&
@@ -1754,6 +1791,7 @@ void DbSlice::OnCbFinishBlocking() {
       if (bump_it != it) {  // the item was bumped
         ++events_.bumpups;
       }
+      CallMovedCallbacks(db_index, policy.moved_items());
     }
   }
 
@@ -1773,6 +1811,23 @@ void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
   for (size_t i = 0; i < limit; ++i) {
     CHECK(ccb->second);
     ccb->second(id, cr);
+    ++ccb;
+  }
+}
+
+void DbSlice::CallMovedCallbacks(
+    DbIndex id, const std::vector<std::pair<PrimeTable::Cursor, PrimeTable::Cursor>>& moved_items) {
+  if (moved_cb_.empty())
+    return;
+
+  // does not preempt, just increments the counter.
+  unique_lock<LocalLatch> lk(serialization_latch_);
+
+  const size_t limit = moved_cb_.size();
+  auto ccb = moved_cb_.begin();
+  for (size_t i = 0; i < limit; ++i) {
+    CHECK(ccb->second);
+    ccb->second(id, moved_items);
     ++ccb;
   }
 }

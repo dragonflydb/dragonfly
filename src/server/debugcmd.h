@@ -60,6 +60,7 @@ class DebugCmd {
   void Keys(CmdArgList args, facade::SinkReplyBuilder* builder);
   void Compression(CmdArgList args, facade::SinkReplyBuilder* builder);
   void IOStats(CmdArgList args, facade::SinkReplyBuilder* builder);
+  void Segments(CmdArgList args, facade::SinkReplyBuilder* builder);
   struct PopulateBatch {
     DbIndex dbid;
     uint64_t index[32];
