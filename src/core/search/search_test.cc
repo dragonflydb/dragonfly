@@ -1563,9 +1563,12 @@ BENCHMARK(BM_SearchNumericAndTagIndexes)
 
 static void BM_SearchSeveralNumericAndTagIndexes(benchmark::State& state) {
   auto schema = MakeSimpleSchema({{"tag", SchemaField::TAG},
-                                  {"numeric1", SchemaField::NUMERIC},
-                                  {"numeric2", SchemaField::NUMERIC},
-                                  {"numeric3", SchemaField::NUMERIC}});
+                                  {"numeric1", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
+                                  {"numeric2", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
+                                  {"numeric3", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}});
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   SearchAlgorithm algo;
