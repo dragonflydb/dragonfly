@@ -1182,7 +1182,7 @@ void DebugCmd::Stacktrace(facade::SinkReplyBuilder* builder) {
 
 void DebugCmd::Shards(facade::SinkReplyBuilder* builder) {
   struct ShardInfo {
-    size_t used_memory = 0;
+    uint64_t used_memory = 0;
     uint64_t key_count = 0;
     uint64_t prime_capacity = 0;
     uint64_t expire_count = 0;
@@ -1207,8 +1207,8 @@ void DebugCmd::Shards(facade::SinkReplyBuilder* builder) {
 #define ADD_STAT(i, stat) absl::StrAppend(&out, "shard", i, "_", #stat, ": ", infos[i].stat, "\n");
 #define MAXMIN_STAT(stat)                                   \
   {                                                         \
-    size_t minv = numeric_limits<size_t>::max();            \
-    size_t maxv = 0;                                        \
+    uint64_t minv = std::numeric_limits<uint64_t>::max();   \
+    uint64_t maxv = 0;                                      \
     for (const auto& info : infos) {                        \
       minv = std::min(minv, info.stat);                     \
       maxv = std::max(maxv, info.stat);                     \
