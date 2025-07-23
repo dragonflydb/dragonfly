@@ -1088,6 +1088,47 @@ size_t ClusterFamily::MigrationsErrorsCount() const {
   return error_num;
 }
 
+void ClusterFamily::ReconcileMasterReplicaTakeoverSlots(const ClusterExtendedNodeInfo& old_master,
+                                                        const ClusterExtendedNodeInfo& new_master) {
+  util::fb2::LockGuard gu(set_config_mu);
+  util::fb2::LockGuard lk(migration_mu_);
+
+  auto config = ClusterConfig::Current();
+
+  // Sanity -- we should not reach there
+  if (!config) {
+    LOG_EVERY_T(ERROR, 1) << "Cluster config after takeover is empty";
+    return;
+  }
+
+  auto new_config = config->CloneWithChanges({}, {});
+  auto mutable_shard_info = new_config->GetMutableConfig();
+
+  for (ClusterShardInfo& info : mutable_shard_info) {
+    // we can't use == because it also contains the id in the comparisson.
+    // It's a mistake as ip/port are enough to make it unique but anyway...
+    if (info.master.port == old_master.port && info.master.ip == old_master.ip) {
+      info.master.port = new_master.port;
+      info.master.ip = new_master.ip;
+      auto it = info.replicas.begin();
+      auto end = info.replicas.end();
+      for (; it != end; ++it) {
+        auto& replica = *it;
+        if (replica.ip == new_master.ip && replica.port == new_master.port) {
+          info.master.id = replica.id;
+          break;
+        }
+      }
+      CHECK(it != end);
+      info.replicas.erase(it);
+      break;
+    }
+  }
+
+  server_family_->service().proactor_pool().AwaitFiberOnAll(
+      [&new_config](util::ProactorBase*) { ClusterConfig::SetCurrent(new_config); });
+}
+
 using EngineFunc = void (ClusterFamily::*)(CmdArgList args, const CommandContext& cmd_cntx);
 
 inline CommandId::Handler3 HandlerFunc(ClusterFamily* se, EngineFunc f) {

@@ -3405,3 +3405,7 @@ async def test_replica_takeover_moved(
         await m1.client.execute_command("GET FOOX")
 
     assert str(moved_error.value) == f"MOVED 16022 127.0.0.1:{m2.instance.port}"
+
+    # Try write command on the new master. It should succeed because during takeover,
+    # we updated the config as well
+    assert await r1.client.execute_command("SET X 2") == "OK"

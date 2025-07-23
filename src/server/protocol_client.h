@@ -45,7 +45,6 @@ class ProtocolClient {
   uint64_t LastIoTime() const;
   void TouchIoTime();
 
- protected:
   struct ServerContext {
     std::string host;
     uint16_t port;
@@ -54,6 +53,11 @@ class ProtocolClient {
     std::string Description() const;
   };
 
+  const ServerContext& server() const {
+    return server_context_;
+  }
+
+ protected:
   // Constructing using a fully initialized ServerContext allows to skip
   // the DNS resolution step.
   explicit ProtocolClient(ServerContext context);
@@ -95,10 +99,6 @@ class ProtocolClient {
   std::error_code SendCommand(std::string_view command);
   // Send command, read response into resp_args_.
   std::error_code SendCommandAndReadResponse(std::string_view command);
-
-  const ServerContext& server() const {
-    return server_context_;
-  }
 
   void ResetParser(facade::RedisParser::Mode mode);
 

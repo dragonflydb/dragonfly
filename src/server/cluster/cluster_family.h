@@ -44,6 +44,11 @@ class ClusterFamily {
 
   size_t MigrationsErrorsCount() const ABSL_LOCKS_EXCLUDED(migration_mu_);
 
+  // Helper function to be used from repltakeover flow. It swaps master and replica
+  // slot config transparently for this node only.
+  void ReconcileMasterReplicaTakeoverSlots(const ClusterExtendedNodeInfo& old_master,
+                                           const ClusterExtendedNodeInfo& new_master);
+
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
@@ -69,7 +74,6 @@ class ClusterFamily {
       ABSL_LOCKS_EXCLUDED(migration_mu_);
   void DflyClusterFlushSlots(CmdArgList args, SinkReplyBuilder* builder);
 
- private:  // Slots migration section
   void DflySlotMigrationStatus(CmdArgList args, SinkReplyBuilder* builder)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
 
@@ -114,7 +118,6 @@ class ClusterFamily {
   std::vector<std::shared_ptr<OutgoingMigration>> outgoing_migration_jobs_
       ABSL_GUARDED_BY(migration_mu_);
 
- private:
   std::optional<ClusterShardInfos> GetShardInfos(ConnectionContext* cntx) const;
 
   ClusterShardInfo GetEmulatedShardInfo(ConnectionContext* cntx) const;
