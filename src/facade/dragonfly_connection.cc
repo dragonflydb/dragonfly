@@ -562,6 +562,7 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
 void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
   DVLOG(2) << "Dispatching pipeline: " << ToSV(msg.args.front());
 
+  ++self->local_stats_.cmds;
   self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()},
                                   self->reply_builder_.get(), self->cc_.get());
 
@@ -570,6 +571,7 @@ void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
 }
 
 void Connection::AsyncOperations::operator()(const MCPipelineMessage& msg) {
+  ++self->local_stats_.cmds;
   self->service_->DispatchMC(msg.cmd, msg.value,
                              static_cast<MCReplyBuilder*>(self->reply_builder_.get()),
                              self->cc_.get());
@@ -924,6 +926,11 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   absl::StrAppend(&after, " age=", now - creation_time_, " idle=", now - last_interaction_);
   string_view phase_name = PHASE_NAMES[phase_];
 
+  absl::StrAppend(&after, " tot-cmds=", local_stats_.cmds,
+                  " tot-net-in=", local_stats_.net_bytes_in,
+                  " tot-read-calls=", local_stats_.read_cnt,
+                  " tot-dispatches=", local_stats_.dispatch_entries_added);
+
   if (cc_) {
     string cc_info = service_->GetContextInfo(cc_.get()).Format();
 
@@ -1065,6 +1072,9 @@ void Connection::ConnectionFlow() {
   ++stats_->conn_received_cnt;
   stats_->read_buf_capacity += io_buf_.Capacity();
 
+  ++local_stats_.read_cnt;
+  local_stats_.net_bytes_in += io_buf_.InputLen();
+
   ParserStatus parse_status = OK;
 
   // At the start we read from the socket to determine the HTTP/Memstore protocol.
@@ -1184,6 +1194,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   } else {
     ShrinkPipelinePool();  // Gradually release pipeline request pool.
     {
+      ++local_stats_.cmds;
       cc_->sync_dispatch = true;
       invoke_cb();
       cc_->sync_dispatch = false;
@@ -1406,6 +1417,7 @@ error_code Connection::HandleRecvSocket() {
     CHECK_GT(recv_buf_.res_len, 0);
 
     stats_->io_read_bytes += recv_buf_.res_len;
+    local_stats_.net_bytes_in += recv_buf_.res_len;
   } else {
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
     DCHECK(!append_buf.empty());
@@ -1419,10 +1431,13 @@ error_code Connection::HandleRecvSocket() {
 
     size_t commit_sz = *recv_sz;
     io_buf_.CommitWrite(commit_sz);
+
     stats_->io_read_bytes += commit_sz;
+    local_stats_.net_bytes_in += commit_sz;
   }
 
   ++stats_->io_read_cnt;
+  ++local_stats_.read_cnt;
 
   return {};
 }
@@ -1891,6 +1906,7 @@ void Connection::SendAsync(MessageHandle msg) {
   }
 
   size_t used_mem = msg.UsedMemory();
+  ++local_stats_.dispatch_entries_added;
   stats_->dispatch_queue_entries++;
   stats_->dispatch_queue_bytes += used_mem;
 
