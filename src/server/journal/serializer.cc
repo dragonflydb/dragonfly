@@ -163,16 +163,18 @@ io::Result<size_t> JournalReader::ReadString(io::MutableBytes buffer) {
 
   auto remainder_buf_pos = buffer.data() + available;
 
-  if (!is_short_remainder && remainder) {
-    uint64_t read;
-    SET_OR_UNEXPECT(source_->Read({remainder_buf_pos, remainder}), read)
-    if (read < remainder) {
-      return make_unexpected(make_error_code(errc::io_error));
+  if (remainder) {
+    if (is_short_remainder) {
+      if (auto ec = EnsureRead(remainder); ec)
+        return make_unexpected(ec);
+      buf_.ReadAndConsume(remainder, remainder_buf_pos);
+    } else {
+      uint64_t read;
+      SET_OR_UNEXPECT(source_->Read({remainder_buf_pos, remainder}), read)
+      if (read < remainder) {
+        return make_unexpected(make_error_code(errc::io_error));
+      }
     }
-  } else if (remainder) {
-    if (auto ec = EnsureRead(remainder); ec)
-      return make_unexpected(ec);
-    buf_.ReadAndConsume(remainder, remainder_buf_pos);
   }
 
   return size;
