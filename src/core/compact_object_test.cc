@@ -17,6 +17,7 @@
 #include "core/flat_set.h"
 #include "core/huff_coder.h"
 #include "core/mi_memory_resource.h"
+#include "core/page_usage_stats.h"
 #include "core/string_or_view.h"
 #include "core/string_set.h"
 
@@ -63,8 +64,9 @@ std::vector<void*> AllocateForTest(int size, std::size_t allocate_size, int fact
 }
 
 bool HasUnderutilizedMemory(const std::vector<void*>& ptrs, float ratio) {
+  PageUsage page_usage{CollectPageStats::NO, ratio};
   auto it = std::find_if(ptrs.begin(), ptrs.end(), [&](auto p) {
-    int r = p && zmalloc_page_is_underutilized(p, ratio);
+    int r = p && page_usage.IsPageForObjectUnderUtilized(p);
     return r > 0;
   });
   return it != ptrs.end();
@@ -556,15 +558,16 @@ TEST_F(CompactObjectTest, DefragHash) {
 
   // Find a listpack that is located on a underutilized page
   uint8_t* target_lp = nullptr;
+  PageUsage page_usage{CollectPageStats::NO, 0.8};
   for (size_t i = 0; i < lps.size(); i += 10) {
-    if (zmalloc_page_is_underutilized(lps[i], 0.8))
+    if (page_usage.IsPageForObjectUnderUtilized(lps[i]))
       target_lp = lps[i];
   }
   CHECK_NE(target_lp, nullptr);
 
   // Trigger re-allocation
   cobj_.InitRobj(OBJ_HASH, kEncodingListPack, target_lp);
-  ASSERT_TRUE(cobj_.DefragIfNeeded(0.8));
+  ASSERT_TRUE(cobj_.DefragIfNeeded(&page_usage));
 
   // Check the pointer changes as the listpack needed defragmentation
   auto lp = (uint8_t*)cobj_.RObjPtr();
@@ -592,7 +595,8 @@ TEST_F(CompactObjectTest, DefragSet) {
   StringSet* s = CompactObj::AllocateMR<StringSet>();
   s->Add("str");
   cobj_.InitRobj(OBJ_SET, kEncodingStrMap2, s);
-  ASSERT_FALSE(cobj_.DefragIfNeeded(0.8));
+  PageUsage page_usage{CollectPageStats::NO, 0.8};
+  ASSERT_FALSE(cobj_.DefragIfNeeded(&page_usage));
 }
 
 TEST_F(CompactObjectTest, StrEncodingAndMaterialize) {

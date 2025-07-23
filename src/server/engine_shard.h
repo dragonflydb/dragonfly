@@ -6,6 +6,7 @@
 
 #include "core/intent_lock.h"
 #include "core/mi_memory_resource.h"
+#include "core/page_usage_stats.h"
 #include "core/task_queue.h"
 #include "core/tx_queue.h"
 #include "server/common.h"
@@ -205,7 +206,7 @@ class EngineShard {
   // threshold can be passed, which will be used to determine if defragmentation should be
   // performed.
   // Returns true if defragmentation was performed.
-  bool DoDefrag(float threshold);
+  bool DoDefrag(CollectPageStats collect_page_stats, float threshold);
 
  private:
   struct DefragTaskState {
