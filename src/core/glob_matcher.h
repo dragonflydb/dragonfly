@@ -10,6 +10,10 @@
 
 // We opt for using Reflex library for glob matching.
 // While I find PCRE2 faster, it's not substantially faster to justify the shared lib dependency.
+
+// For some regex, Reflex (and pcre2) have extremely slow compile times(70+ms).
+// This latency is significant for the hot path and therefore both are disabled
+// and we fall back to the plain old stringmatchlen. For more info, refer to #5547 on gh.
 //#define REFLEX_PERFORMANCE
 
 #ifndef REFLEX_PERFORMANCE
