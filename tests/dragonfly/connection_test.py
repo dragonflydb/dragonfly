@@ -1213,13 +1213,10 @@ async def test_pipeline_cache_only_async_squashed_dispatches(df_factory):
 # the cache becomes progressively underutilized. At that stage, the pipeline should slowly
 # shrink (because it's underutilized).
 @dfly_args({"proactor_threads": 1})
-async def test_pipeline_cache_size(df_factory):
-    server = df_factory.create(proactor_threads=1)
-    server.start()
-
+async def test_pipeline_cache_size(df_server: DflyInstance):
     # Start 1 client.
-    good_client = server.client()
-    bad_actor_client = server.client()
+    good_client = df_server.client()
+    bad_actor_client = df_server.client()
 
     async def push_pipeline(bad_actor_client, size=1):
         # Fill cache.
@@ -1256,16 +1253,13 @@ async def test_pipeline_cache_size(df_factory):
 
 
 @dfly_args({"proactor_threads": 4, "pipeline_queue_limit": 10})
-async def test_pipeline_overlimit(df_factory: DflyInstanceFactory):
-    server = df_factory.create()
-    server.start()
-
-    client = server.client()
+async def test_pipeline_overlimit(df_server: DflyInstance):
+    client = df_server.client()
 
     await client.set("x", "a" * 1024 * 5)
 
     async def pipe_overlimit():
-        c = server.client()
+        c = df_server.client()
         pipe = c.pipeline()
         for i in range(1000):
             pipe.get("x")
@@ -1281,15 +1275,12 @@ async def test_pipeline_overlimit(df_factory: DflyInstanceFactory):
         await task
 
 
-async def test_client_unpause(df_factory):
-    server = df_factory.create()
-    server.start()
-
-    async_client = server.client()
+async def test_client_unpause(df_server: DflyInstance):
+    async_client = df_server.client()
     await async_client.client_pause(3000, all=False)
 
     async def set_foo():
-        client = server.client()
+        client = df_server.client()
         async with async_timeout.timeout(2):
             await client.execute_command("SET", "foo", "bar")
 
@@ -1307,7 +1298,6 @@ async def test_client_unpause(df_factory):
 
     await async_client.client_pause(1, all=False)
     await asyncio.sleep(2)
-    server.stop()
 
 
 async def test_client_pause_b2b(async_client):
@@ -1370,3 +1360,24 @@ async def test_tls_client_kill_preemption(
     server.stop()
     lines = server.find_in_logs("Preempting inside of atomic section, fiber")
     assert len(lines) == 0
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_client_migrate(df_server: DflyInstance):
+    """
+    Test that we can migrate a client with "CLIENT MIGRATE" command.
+    """
+    client1 = df_server.client()
+    await client1.client_setname("test_migrate")
+    resp = await client1.execute_command("DFLY THREAD")
+    client_id = await client1.client_id()
+    assert resp[1] == 4
+    current_tid = resp[0]
+    client2 = df_server.client()
+    resp = await client2.execute_command("CLIENT", "MIGRATE", client_id, current_tid)
+    assert resp == 0  # not migrated as it's the same thread
+    dest_tid = (current_tid + 1) % 4
+    resp = await client2.execute_command("CLIENT", "MIGRATE", client_id + 999, dest_tid)
+    assert resp == 0  # Not migrated as the client does not exist
+    resp = await client2.execute_command("CLIENT", "MIGRATE", client_id, dest_tid)
+    assert resp == 1  # migrated successfully
