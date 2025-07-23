@@ -1378,8 +1378,7 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
     return OpStatus::OK;
   }
 
-  DVLOG(2) << "Start tracking keys for client ID: " << conn_ref.GetClientId()
-           << " with thread ID: " << conn_ref.Thread();
+  DVLOG(2) << "Start tracking keys for client ID: " << conn_ref.GetClientId();
 
   auto& db_slice = slice_args.GetDbSlice();
   // TODO: There is a bug here that we track all arguments instead of tracking only keys.
@@ -2125,7 +2124,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     if (*sid != ServerState::tlocal()->thread_index()) {
       VLOG(2) << "Migrating connection " << cntx->conn() << " from "
               << ProactorBase::me()->GetPoolIndex() << " to " << *sid;
-      cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid));
+      cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid), false);
     }
   } else {
     Transaction::MultiMode script_mode = DetermineMultiMode(*params);

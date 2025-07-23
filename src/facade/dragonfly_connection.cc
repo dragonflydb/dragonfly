@@ -707,6 +707,9 @@ void Connection::OnPreMigrateThread() {
   // is marked beforehand.
   migration_in_process_ = true;
 
+  // Mark as not owned by any thread as it going through the dark hole
+  self_.reset();
+
   socket_->CancelOnErrorCb();
   DCHECK(!async_fb_.IsJoinable()) << GetClientId();
 }
@@ -719,6 +722,7 @@ void Connection::OnPostMigrateThread() {
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
   }
   migration_in_process_ = false;
+  self_ = {make_shared<std::monostate>(), this};  // Recreate shared_ptr to self.
   DCHECK(!async_fb_.IsJoinable());
 
   // If someone had sent Async during the migration, we must create async_fb_.
@@ -1820,7 +1824,7 @@ bool Connection::Migrate(util::fb2::ProactorBase* dest) {
 Connection::WeakRef Connection::Borrow() {
   DCHECK(self_);
 
-  return WeakRef(self_, socket_->proactor()->GetPoolIndex(), id_);
+  return {self_, unsigned(socket_->proactor()->GetPoolIndex()), id_};
 }
 
 void Connection::ShutdownThreadLocal() {
@@ -2003,8 +2007,8 @@ facade::ConnectionContext* Connection::cntx() {
   return cc_.get();
 }
 
-void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest) {
-  if (!migration_enabled_ || cc_ == nullptr) {
+void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest, bool force) {
+  if ((!force && !migration_enabled_) || cc_ == nullptr) {
     return;
   }
 
@@ -2189,22 +2193,17 @@ void Connection::SetPipelineLowBoundStats(unsigned limit) {
 
 Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, unsigned thread_id,
                              uint32_t client_id)
-    : ptr_{std::move(ptr)}, thread_id_{thread_id}, client_id_{client_id} {
-}
-
-unsigned Connection::WeakRef::Thread() const {
-  return thread_id_;
+    : ptr_{std::move(ptr)}, last_known_thread_id_{thread_id}, client_id_{client_id} {
 }
 
 Connection* Connection::WeakRef::Get() const {
-  // We should never access the connection object from other threads.
-  DCHECK_EQ(ProactorBase::me()->GetPoolIndex(), int(thread_id_));
+  auto sptr = ptr_.lock();
 
   //  The connection can only be deleted on this thread, so
   //  this pointer is valid until the next suspension.
   //  Note: keeping a shared_ptr doesn't prolong the lifetime because
   //  it doesn't manage the underlying connection. See definition of `self_`.
-  return ptr_.lock().get();
+  return sptr.get();
 }
 
 bool Connection::WeakRef::IsExpired() const {
