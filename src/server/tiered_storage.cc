@@ -286,7 +286,7 @@ void TieredStorage::ShardOpManager::RetireColdEntries(size_t additional_memory) 
 
     // Update memory_budget directly since we know that gained bytes were released.
     // We will overwrite the budget correctly in the next Hearbeat.
-    db_slice_.SetCachedParams(gained + db_slice_.memory_budget(), db_slice_.bytes_per_object());
+    db_slice_.UpdateMemoryParams(gained + db_slice_.memory_budget(), db_slice_.bytes_per_object());
   }
 }
 

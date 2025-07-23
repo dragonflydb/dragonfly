@@ -122,7 +122,7 @@ class EngineShard {
     return stats_;
   }
 
-  // Returns used memory for this shard.
+  // Calculate memory used by shard by summing multiple sources
   size_t UsedMemory() const;
 
   TieredStorage* tiered_storage() {
@@ -247,19 +247,22 @@ class EngineShard {
   // --------------------------------------------------------------------------
   uint32_t DefragTask();
 
+  TxQueue txq_;
   TaskQueue queue_, queue2_;
 
-  TxQueue txq_;
-  MiMemoryResource mi_resource_;
   ShardId shard_id_;
-
   Stats stats_;
 
   // Become passive if replica: don't automatially evict expired items.
   bool is_replica_ = false;
 
-  size_t last_cached_used_memory_ = 0;
-  uint64_t cache_stats_time_ = 0;  // monotonic, set by ProactorBase::GetMonotonicTimeNs.
+  // Precise tracking of used memory by persistent shard local values and structures
+  MiMemoryResource mi_resource_;
+
+  struct {
+    uint64_t updated_at = 0;  // from GetMonotonicTimeNs
+    size_t used_mem = 0;
+  } last_mem_params_;
 
   // Logical ts used to order distributed transactions.
   TxId committed_txid_ = 0;
