@@ -802,6 +802,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   uint64_t next_version = 0;
   uint64_t del_count = 0;
 
+  // Explicitly copy table smart pointer to keep reference count up (flushall drops it)
   boost::intrusive_ptr<DbTable> table = db_arr_.front();
 
   std::string tmp;

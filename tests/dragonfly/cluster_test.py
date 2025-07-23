@@ -1335,7 +1335,7 @@ async def test_cluster_flushall_during_migration(
     nodes[1].slots = []
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    # And issue flushall
+    # Issue flushall right after pushing new config so it runs at the same time as disowned slots are flushed
     await nodes[1].client.execute_command("flushall")
 
 
