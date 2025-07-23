@@ -846,7 +846,7 @@ GenericError RewriteConfigFile() {
 
   // Atomic write using mkstemp + rename
   std::string tmp_template = config_file_path + ".tmpXXXXXX";
-  int fd = mkstemp(tmp_template.data());  
+  int fd = mkstemp(tmp_template.data());
   if (fd == -1) {
     return GenericError("Failed to create temporary file");
   }
@@ -856,7 +856,7 @@ GenericError RewriteConfigFile() {
     ssize_t n = write(fd, final_content.c_str() + off, final_content.size() - off);
     if (n <= 0) {
       close(fd);
-      unlink(tmp_path.data());
+      unlink(tmp_template.data());
       return GenericError("Failed to write config file");
     }
     off += n;
@@ -866,8 +866,8 @@ GenericError RewriteConfigFile() {
   fchmod(fd, 0644);
   close(fd);
 
-  if (rename(tmp_path.data(), config_file_path.c_str()) == -1) {
-    unlink(tmp_path.data());
+  if (rename(tmp_template.data(), config_file_path.c_str()) == -1) {
+    unlink(tmp_template.data());
     return GenericError("Failed to rewrite config file");
   }
 
