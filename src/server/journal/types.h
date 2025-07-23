@@ -73,7 +73,7 @@ struct ParsedEntry : public EntryBase {
   struct CmdData {
     std::string command;
     std::string arg_buf;
-    absl::InlinedVector<uint32_t, 4> arg_sizes{};
+    std::vector<uint32_t> arg_sizes;
   } cmd;
 
   std::string ToString() const;
