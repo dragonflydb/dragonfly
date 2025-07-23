@@ -14,6 +14,7 @@ import (
 )
 
 var fHost = flag.String("host", "127.0.0.1:6379", "Redis host")
+var fCompareHost = flag.String("compare-host", "", "Redis host to compare with")
 var fClientBuffer = flag.Int("buffer", 100, "How many records to buffer per client")
 var fPace = flag.Bool("pace", true, "whether to pace the traffic according to the original timings.false - to pace as fast as possible")
 var fSkip = flag.Uint("skip", 0, "skip N records")
