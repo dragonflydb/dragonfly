@@ -160,7 +160,8 @@ class Service : public facade::ServiceInterface {
   std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId* cid, CmdArgList args,
                                                        const ConnectionContext& dfly_cntx);
 
-  // Return error if not all keys are owned by the server when running in cluster mode
+  // Return moved error if we *own* the slot. This function is used from flows that assume our
+  // state is TAKEN_OVER which happens after a replica takeover.
   std::optional<facade::ErrorReply> TakenOverSlotError(const CommandId* cid, CmdArgList args,
                                                        const ConnectionContext& dfly_cntx);
 

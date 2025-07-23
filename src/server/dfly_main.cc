@@ -56,14 +56,12 @@ extern char** environ;
 
 using namespace std;
 
+ABSL_DECLARE_FLAG(string, bind);
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(uint32_t, memcached_port);
 ABSL_DECLARE_FLAG(uint16_t, admin_port);
 ABSL_DECLARE_FLAG(std::string, admin_bind);
 
-ABSL_FLAG(string, bind, "",
-          "Bind address. If empty - binds on all interfaces. "
-          "It's not advised due to security implications.");
 ABSL_FLAG(string, pidfile, "", "If not empty - server writes its pid into the file");
 ABSL_FLAG(string, unixsocket, "",
           "If not empty - specifies path for the Unix socket that will "

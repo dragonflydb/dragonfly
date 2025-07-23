@@ -3313,8 +3313,8 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   old_master_info.port = master_ctx.port;
 
   cluster::ClusterExtendedNodeInfo new_master_info;
-  old_master_info.ip = absl::GetFlag(FLAGS_bind);
-  old_master_info.port = master_ctx.port;
+  new_master_info.ip = absl::GetFlag(FLAGS_bind);
+  new_master_info.port = absl::GetFlag(FLAGS_port);
 
   service().cluster_family().ReconcileMasterReplicaTakeoverSlots(old_master_info, new_master_info);
   SetMasterFlagOnAllThreads(true);

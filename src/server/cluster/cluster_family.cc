@@ -1102,11 +1102,11 @@ void ClusterFamily::ReconcileMasterReplicaTakeoverSlots(const ClusterExtendedNod
   }
 
   auto new_config = config->CloneWithChanges({}, {});
-  auto mutable_shard_info = new_config->GetMutableConfig();
+  auto current_shard_info = new_config->GetMutableConfig();
 
-  for (ClusterShardInfo& info : mutable_shard_info) {
+  for (ClusterShardInfo& info : current_shard_info) {
     // we can't use == because it also contains the id in the comparisson.
-    // It's a mistake as ip/port are enough to make it unique but anyway...
+    // It's a mistake as ip/port are enough to make it unique.
     if (info.master.port == old_master.port && info.master.ip == old_master.ip) {
       info.master.port = new_master.port;
       info.master.ip = new_master.ip;
@@ -1119,7 +1119,7 @@ void ClusterFamily::ReconcileMasterReplicaTakeoverSlots(const ClusterExtendedNod
           break;
         }
       }
-      CHECK(it != end);
+      LOG_EVER_T(ERROR, 1) << "replica not found in the list of cluster replicas for old master";
       info.replicas.erase(it);
       break;
     }
