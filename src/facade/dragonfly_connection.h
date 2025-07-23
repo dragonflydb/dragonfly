@@ -288,8 +288,9 @@ class Connection : public util::Connection {
   ConnectionContext* cntx();
 
   // Requests that at some point, this connection will be migrated to `dest` thread.
-  // Connections will migrate at most once, and only when the flag --migrate_connections is true.
-  void RequestAsyncMigration(util::fb2::ProactorBase* dest);
+  // If force is false, the connection will migrate at most once,
+  // and only when the flag --migrate_connections is true.
+  void RequestAsyncMigration(util::fb2::ProactorBase* dest, bool force);
 
   // Starts traffic logging in the calling thread. Must be a proactor thread.
   // Each thread creates its own log file combining requests from all the connections in

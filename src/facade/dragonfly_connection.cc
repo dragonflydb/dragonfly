@@ -2003,8 +2003,8 @@ facade::ConnectionContext* Connection::cntx() {
   return cc_.get();
 }
 
-void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest) {
-  if (!migration_enabled_ || cc_ == nullptr) {
+void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest, bool force) {
+  if ((!force && !migration_enabled_) || cc_ == nullptr) {
     return;
   }
 

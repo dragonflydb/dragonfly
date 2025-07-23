@@ -2125,7 +2125,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     if (*sid != ServerState::tlocal()->thread_index()) {
       VLOG(2) << "Migrating connection " << cntx->conn() << " from "
               << ProactorBase::me()->GetPoolIndex() << " to " << *sid;
-      cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid));
+      cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid), false);
     }
   } else {
     Transaction::MultiMode script_mode = DetermineMultiMode(*params);
