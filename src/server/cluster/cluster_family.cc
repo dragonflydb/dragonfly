@@ -1104,23 +1104,35 @@ void ClusterFamily::ReconcileMasterReplicaTakeoverSlots(const ClusterExtendedNod
   auto new_config = config->CloneWithChanges({}, {});
   auto current_shard_info = new_config->GetMutableConfig();
 
+  // Going to extreme for this because the listener socket address returns 0.0.0.0
+  // The replica address returns localhost and the nodes in the cluster config
+  // have 127.0.0.1. To allow local testing, I normalize them.
+  auto is_equal = [](const std::string& ip_a, const std::string& ip_b) -> bool {
+    if (ip_a == ip_b) {
+      return true;
+    }
+    bool ip_a_local = false;
+    if (ip_a == "127.0.0.1" || ip_a == "localhost" || ip_a == "0.0.0.0") {
+      ip_a_local = true;
+    }
+    bool ip_b_local = false;
+    if (ip_b == "127.0.0.1" || ip_b == "localhost" || ip_b == "0.0.0.0") {
+      ip_b_local = true;
+    }
+    if (ip_a_local && ip_b_local) {
+      return true;
+    }
+    return false;
+  };
+
   for (ClusterShardInfo& info : current_shard_info) {
     // we can't use == because it also contains the id in the comparisson.
     // It's a mistake as ip/port are enough to make it unique.
-    if (info.master.port == old_master.port && info.master.ip == old_master.ip) {
+    if (info.master.port == old_master.port && is_equal(info.master.ip, old_master.ip)) {
       info.master.port = new_master.port;
       info.master.ip = new_master.ip;
-      auto it = info.replicas.begin();
-      auto end = info.replicas.end();
-      for (; it != end; ++it) {
-        auto& replica = *it;
-        if (replica.ip == new_master.ip && replica.port == new_master.port) {
-          info.master.id = replica.id;
-          break;
-        }
-      }
-      LOG_EVER_T(ERROR, 1) << "replica not found in the list of cluster replicas for old master";
-      info.replicas.erase(it);
+      info.master.id = id_;
+      info.replicas.clear();
       break;
     }
   }

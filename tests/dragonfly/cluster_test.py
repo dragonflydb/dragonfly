@@ -3363,9 +3363,7 @@ async def test_slot_migration_oom(df_factory):
 async def test_replica_takeover_moved(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
 ):
-    instances = [
-        df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(4)
-    ]
+    instances = [df_factory.create(port=next(next_port)) for i in range(4)]
     df_factory.start_all(instances)
 
     nodes = [await create_node_info(n) for n in instances]
@@ -3378,9 +3376,7 @@ async def test_replica_takeover_moved(
     m1.replicas = [r1]
     m2.replicas = [r2]
 
-    await push_config(
-        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
-    )
+    await push_config(json.dumps(generate_config(master_nodes)), [node.client for node in nodes])
 
     logging.debug("create data")
     await m1.client.execute_command("SET X 1")
@@ -3388,10 +3384,10 @@ async def test_replica_takeover_moved(
     await m2.client.execute_command("SET FOOX 1")
 
     logging.debug("start replication")
-    await r1.admin_client.execute_command(f"replicaof localhost {m1.instance.admin_port}")
-    await r2.admin_client.execute_command(f"replicaof localhost {m2.instance.admin_port}")
+    await r1.client.execute_command(f"replicaof localhost {m1.instance.port}")
+    await r2.client.execute_command(f"replicaof localhost {m2.instance.port}")
 
-    await wait_available_async(r1.admin_client)
+    await wait_available_async(r1.client)
 
     assert await r1.client.execute_command("GET X") == "1"
     assert await r1.client.execute_command("REPLTAKEOVER 20") == "OK"
@@ -3409,3 +3405,11 @@ async def test_replica_takeover_moved(
     # Try write command on the new master. It should succeed because during takeover,
     # we updated the config as well
     assert await r1.client.execute_command("SET X 2") == "OK"
+
+    master_nodes = [r1, m2]
+    r1.slots = [(0, 9000)]
+    nodes.pop(0)
+    await push_config(json.dumps(generate_config(master_nodes)), [node.client for node in nodes])
+
+    assert await r1.client.execute_command("GET X") == "2"
+    assert await m2.client.execute_command("GET FOOX") == "1"
