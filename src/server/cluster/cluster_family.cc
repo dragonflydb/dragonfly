@@ -978,7 +978,8 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, SinkReplyBuilder* builder,
   builder->SendOk();
 
   // Try migrating the connection if we have the same shard configuration
-  if (migration->ShardNum() == shard_set->size()) {
+  if (migration->ShardNum() == shard_set->size() &&
+      int32_t(shard_id) != fb2::ProactorBase::me()->GetPoolIndex()) {
     DCHECK_LT(shard_id, shard_set->size());
     if (bool success = cntx->conn()->Migrate(shard_set->pool()->at(shard_id)); !success) {
       builder->SendError("invalid state");
