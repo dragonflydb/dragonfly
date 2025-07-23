@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "base/logging.h"
+#include "core/search/query_driver.h"
 #include "core/search/search.h"
 #include "core/search/vector_utils.h"
 #include "facade/cmd_arg_parser.h"
@@ -619,9 +620,23 @@ void SearchReply(const SearchParams& params,
   }
 }
 
+// Warms up the query parser to avoid first-call slowness
+void WarmupQueryParser() {
+  static std::once_flag warmed_up;
+  std::call_once(warmed_up, []() {
+    search::QueryParams params;
+    search::QueryDriver driver{};
+    driver.SetParams(&params);
+    driver.SetInput(std::string{""});
+    (void)search::Parser (&driver)();
+  });
+}
+
 }  // namespace
 
 void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
+  WarmupQueryParser();
+
   auto* builder = cmd_cntx.rb;
   if (cmd_cntx.conn_cntx->conn_state.db_index != 0) {
     return builder->SendError("Cannot create index on db != 0"sv);
