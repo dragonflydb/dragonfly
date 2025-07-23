@@ -448,6 +448,7 @@ class Connection : public util::Connection {
     size_t read_cnt = 0;                // total number of read calls
     size_t net_bytes_in = 0;            // total number of bytes read
     size_t dispatch_entries_added = 0;  // total number of dispatch queue entries
+    size_t cmds = 0;                    // total number of commands added
   } local_stats_;
   ConnectionStats* stats_ = nullptr;
 

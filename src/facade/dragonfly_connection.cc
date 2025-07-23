@@ -556,6 +556,7 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
 void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
   DVLOG(2) << "Dispatching pipeline: " << ToSV(msg.args.front());
 
+  ++self->local_stats_.cmds;
   self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()},
                                   self->reply_builder_.get(), self->cc_.get());
 
@@ -564,6 +565,7 @@ void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
 }
 
 void Connection::AsyncOperations::operator()(const MCPipelineMessage& msg) {
+  ++self->local_stats_.cmds;
   self->service_->DispatchMC(msg.cmd, msg.value,
                              static_cast<MCReplyBuilder*>(self->reply_builder_.get()),
                              self->cc_.get());
@@ -918,10 +920,10 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   absl::StrAppend(&after, " age=", now - creation_time_, " idle=", now - last_interaction_);
   string_view phase_name = PHASE_NAMES[phase_];
 
-  // Local stats
-  absl::StrAppend(&after, " total-reads=", local_stats_.read_cnt,
-                  " total-net-in=", local_stats_.net_bytes_in,
-                  " total-dispatched=", local_stats_.dispatch_entries_added);
+  absl::StrAppend(&after, " tot-cmds=", local_stats_.cmds,
+                  " tot-net-in=", local_stats_.net_bytes_in,
+                  " tot-read-calls=", local_stats_.read_cnt,
+                  " tot-dispatches=", local_stats_.dispatch_entries_added);
 
   if (cc_) {
     string cc_info = service_->GetContextInfo(cc_.get()).Format();
@@ -1064,6 +1066,9 @@ void Connection::ConnectionFlow() {
   ++stats_->conn_received_cnt;
   stats_->read_buf_capacity += io_buf_.Capacity();
 
+  ++local_stats_.read_cnt;
+  local_stats_.net_bytes_in += io_buf_.InputLen();
+
   ParserStatus parse_status = OK;
 
   // At the start we read from the socket to determine the HTTP/Memstore protocol.
@@ -1188,6 +1193,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   } else {
     ShrinkPipelinePool();  // Gradually release pipeline request pool.
     {
+      ++local_stats_.cmds;
       cc_->sync_dispatch = true;
       invoke_cb();
       cc_->sync_dispatch = false;
