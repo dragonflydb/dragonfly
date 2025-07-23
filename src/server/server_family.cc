@@ -258,13 +258,7 @@ struct {
 } glob_memory_peaks;
 
 size_t FetchRssMemory(const io::StatusData& sdata) {
-  size_t total_rss = sdata.vm_rss + sdata.hugetlb_pages;
-
-  rss_mem_current.store(total_rss, memory_order_relaxed);
-  if (total_rss > glob_memory_peaks.rss.load(memory_order_relaxed))
-    glob_memory_peaks.rss.store(total_rss, memory_order_relaxed);
-
-  return total_rss;
+  return sdata.vm_rss + sdata.hugetlb_pages;
 }
 
 using CI = CommandId;
@@ -686,6 +680,11 @@ bool ReadProcStats(io::StatusData* sdata) {
     return false;
   }
 
+  size_t total_rss = FetchRssMemory(*sdata_res);
+  rss_mem_current.store(total_rss, memory_order_relaxed);
+  if (total_rss > glob_memory_peaks.rss.load(memory_order_relaxed))
+    glob_memory_peaks.rss.store(total_rss, memory_order_relaxed);
+
   *sdata = *sdata_res;
   return true;
 }
@@ -1054,7 +1053,7 @@ void ServerFamily::UpdateMemoryGlobalStats() {
     glob_memory_peaks.used.store(mem_current, memory_order_relaxed);
 
   io::StatusData status_data;
-  bool success = ReadProcStats(&status_data);
+  bool success = ReadProcStats(&status_data);  // updates glob_memory_peaks.rss
   if (!success)
     return;
 
