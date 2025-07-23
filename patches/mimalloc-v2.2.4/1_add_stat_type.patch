@@ -1,0 +1,28 @@
+diff --git a/include/mimalloc/types.h b/include/mimalloc/types.h
+index a15d9cba..ee822ca9 100644
+--- a/include/mimalloc/types.h
++++ b/include/mimalloc/types.h
+@@ -682,4 +682,23 @@ void _mi_stat_counter_increase(mi_stat_counter_t* stat, size_t amount);
+ #define mi_heap_stat_decrease(heap,stat,amount)  mi_stat_decrease( (heap)->tld->stats.stat, amount)
+ #define mi_heap_stat_adjust_decrease(heap,stat,amount)  mi_stat_adjust_decrease( (heap)->tld->stats.stat, amount)
+ 
++#define MI_DFLY_PAGE_BELOW_THRESHOLD 1
++#define MI_DFLY_PAGE_FULL 2
++#define MI_DFLY_HEAP_MISMATCH 4
++#define MI_DFLY_PAGE_USED_FOR_MALLOC 8
++
++typedef struct mi_page_usage_stats_s {
++  uintptr_t page_address;
++  size_t block_size;
++  uint16_t capacity;
++  uint16_t reserved;
++  uint16_t used;
++  // Collects the current state of page as returned by mi_heap_page_is_underutilized
++  // 0th bit set: page usage is below threshold: MI_DFLY_PAGE_BELOW_THRESHOLD
++  // 1st bit set: the page is full: MI_DFLY_PAGE_FULL
++  // 2nd bit set: the page heap did not match the heap requested: MI_DFLY_HEAP_MISMATCH
++  // 3rd bit set: that the page is currently used for malloc operations: MI_DFLY_PAGE_USED_FOR_MALLOC
++  uint8_t flags;
++} mi_page_usage_stats_t;
++
+ #endif

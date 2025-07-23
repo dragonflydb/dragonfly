@@ -62,11 +62,6 @@ struct DocumentAccessor {
   virtual std::optional<StringList> GetTags(std::string_view active_field) const = 0;
 };
 
-// Represents a set of document IDs, used for merging results of inverse indices.
-template <typename Allocator = std::allocator<DocId>>
-using UniqueDocsList = absl::flat_hash_set<DocId, absl::DefaultHashContainerHash<DocId>,
-                                           absl::DefaultHashContainerEq<DocId>, Allocator>;
-
 // Base class for type-specific indices.
 //
 // Queries should be done directly on subclasses with their distinc
@@ -89,6 +84,13 @@ struct BaseSortIndex : BaseIndex {
   virtual std::vector<SortableValue> Sort(std::vector<DocId>* ids, size_t limit,
                                           bool desc) const = 0;
 };
+
+/* Used in iterators of inverse indices.
+   It is used to mark iterators that can be seeked to doc id that is greater than or equal to
+   the specified value (method name is SeekGE(DocId min_doc_id)).
+   This is used to optimize merging of results from different indices.
+   See index_result.h for more details. */
+struct SeekableTag {};
 
 /* Used for converting field values to double. Returns std::nullopt if the conversion fails */
 std::optional<double> ParseNumericField(std::string_view value);

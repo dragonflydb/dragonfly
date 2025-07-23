@@ -1,5 +1,3 @@
-option(USE_SIMSIMD "Enable SimSIMD vector optimizations" OFF)
-
 add_third_party(
   lua
   GIT_REPOSITORY https://github.com/dragonflydb/lua
@@ -62,13 +60,16 @@ add_third_party(
 
 set(MIMALLOC_INCLUDE_DIR ${THIRD_PARTY_LIB_DIR}/mimalloc2/include)
 
-set (MIMALLOC_PATCH_COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${CMAKE_CURRENT_LIST_DIR}/../patches/mimalloc-v2.2.4.patch)
+set(MIMALLOC_PATCH_DIR ${CMAKE_CURRENT_LIST_DIR}/../patches/mimalloc-v2.2.4/)
 
 add_third_party(mimalloc2
    # GIT_REPOSITORY https://github.com/microsoft/mimalloc/
    # GIT_TAG v2.2.4
    URL https://github.com/microsoft/mimalloc/archive/refs/tags/v2.2.4.tar.gz
-   PATCH_COMMAND "${MIMALLOC_PATCH_COMMAND}"
+   PATCH_COMMAND
+        patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${MIMALLOC_PATCH_DIR}/0_base.patch
+        COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${MIMALLOC_PATCH_DIR}/1_add_stat_type.patch
+        COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${MIMALLOC_PATCH_DIR}/2_return_stat.patch
    # Add -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS=-O0 to debug
    CMAKE_PASS_FLAGS "-DCMAKE_BUILD_TYPE=Release -DMI_BUILD_SHARED=OFF -DMI_BUILD_TESTS=OFF \
                     -DMI_INSTALL_TOPLEVEL=ON -DMI_OVERRIDE=OFF -DMI_NO_PADDING=ON \ -DCMAKE_C_FLAGS=-g"
@@ -85,21 +86,23 @@ add_third_party(
   LIB "none"
 )
 
-add_third_party(
-  uni-algo
-  URL https://github.com/uni-algo/uni-algo/archive/refs/tags/v1.0.0.tar.gz
+if (WITH_SEARCH)
+  add_third_party(
+    uni-algo
+    URL https://github.com/uni-algo/uni-algo/archive/refs/tags/v1.0.0.tar.gz
 
-  CMAKE_PASS_FLAGS "-DCMAKE_CXX_STANDARD:STRING=17"
-)
+    CMAKE_PASS_FLAGS "-DCMAKE_CXX_STANDARD:STRING=17"
+  )
 
-add_third_party(
-  hnswlib
-  URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.7.0.tar.gz
+  add_third_party(
+    hnswlib
+    URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.7.0.tar.gz
 
-  BUILD_COMMAND echo SKIP
-  INSTALL_COMMAND cp -R <SOURCE_DIR>/hnswlib ${THIRD_PARTY_LIB_DIR}/hnswlib/include/
-  LIB "none"
-)
+    BUILD_COMMAND echo SKIP
+    INSTALL_COMMAND cp -R <SOURCE_DIR>/hnswlib ${THIRD_PARTY_LIB_DIR}/hnswlib/include/
+    LIB "none"
+  )
+endif()
 
 add_third_party(
   fast_float
@@ -145,10 +148,12 @@ add_dependencies(TRDP::croncpp croncpp_project)
 set_target_properties(TRDP::croncpp PROPERTIES
                       INTERFACE_INCLUDE_DIRECTORIES "${CRONCPP_INCLUDE_DIR}")
 
-add_library(TRDP::hnswlib INTERFACE IMPORTED)
-add_dependencies(TRDP::hnswlib hnswlib_project)
-set_target_properties(TRDP::hnswlib PROPERTIES
-                      INTERFACE_INCLUDE_DIRECTORIES "${HNSWLIB_INCLUDE_DIR}")
+if (WITH_SEARCH)
+  add_library(TRDP::hnswlib INTERFACE IMPORTED)
+  add_dependencies(TRDP::hnswlib hnswlib_project)
+  set_target_properties(TRDP::hnswlib PROPERTIES
+                        INTERFACE_INCLUDE_DIRECTORIES "${HNSWLIB_INCLUDE_DIR}")
+endif()
 
 add_library(TRDP::fast_float INTERFACE IMPORTED)
 add_dependencies(TRDP::fast_float fast_float_project)

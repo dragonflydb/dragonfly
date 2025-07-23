@@ -87,6 +87,9 @@ struct Metrics {
 
   size_t qps = 0;
 
+  size_t used_mem_peak = 0;
+  size_t used_mem_rss_peak = 0;
+
   size_t heap_used_bytes = 0;
   size_t small_string_bytes = 0;
   uint32_t traverse_ttl_per_sec = 0;
@@ -374,6 +377,9 @@ class ServerFamily {
   void ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx);
   void ClientUnPauseCmd(CmdArgList args, SinkReplyBuilder* builder);
 
+  // Set accepting_connections_ and update listners according to it
+  void ChangeConnectionAccept(bool accept);
+
   util::fb2::Fiber snapshot_schedule_fb_;
   util::fb2::Fiber load_fiber_;
 
@@ -381,7 +387,7 @@ class ServerFamily {
 
   util::AcceptServer* acceptor_ = nullptr;
   std::vector<facade::Listener*> listeners_;
-  bool accepting_connections_ = true;
+  bool accepting_connections_ = true;  // reject connections near oom
   util::ProactorBase* pb_task_ = nullptr;
 
   mutable util::fb2::Mutex replicaof_mu_, save_mu_;

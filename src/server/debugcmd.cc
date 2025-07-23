@@ -20,6 +20,7 @@ extern "C" {
 #include <zdict.h>
 #include <zstd.h>
 
+#include <algorithm>
 #include <filesystem>
 
 #include "base/flags.h"
@@ -611,7 +612,7 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "WATCHED",
         "    Shows the watched keys as a result of BLPOP and similar operations.",
         "POPULATE <count> [prefix] [size] [RAND] [SLOTS start end] [TYPE type] [ELEMENTS elements]"
-        "[EXPIRE start end]",
+        " [EXPIRE start end]",
         "    Create <count> string keys named key:<num> with value value:<num>.",
         "    If <prefix> is specified then it is used instead of the 'key' prefix.",
         "    If <size> is specified then X character is concatenated multiple times to value:<num>",
@@ -1181,7 +1182,7 @@ void DebugCmd::Stacktrace(facade::SinkReplyBuilder* builder) {
 
 void DebugCmd::Shards(facade::SinkReplyBuilder* builder) {
   struct ShardInfo {
-    size_t used_memory = 0;
+    uint64_t used_memory = 0;
     uint64_t key_count = 0;
     uint64_t prime_capacity = 0;
     uint64_t expire_count = 0;
@@ -1206,11 +1207,11 @@ void DebugCmd::Shards(facade::SinkReplyBuilder* builder) {
 #define ADD_STAT(i, stat) absl::StrAppend(&out, "shard", i, "_", #stat, ": ", infos[i].stat, "\n");
 #define MAXMIN_STAT(stat)                                   \
   {                                                         \
-    size_t minv = numeric_limits<size_t>::max();            \
-    size_t maxv = 0;                                        \
+    uint64_t minv = std::numeric_limits<uint64_t>::max();   \
+    uint64_t maxv = 0;                                      \
     for (const auto& info : infos) {                        \
-      minv = min(minv, info.stat);                          \
-      maxv = max(maxv, info.stat);                          \
+      minv = std::min(minv, info.stat);                     \
+      maxv = std::max(maxv, info.stat);                     \
     }                                                       \
     absl::StrAppend(&out, "max_", #stat, ": ", maxv, "\n"); \
     absl::StrAppend(&out, "min_", #stat, ": ", minv, "\n"); \

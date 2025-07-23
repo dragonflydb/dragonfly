@@ -138,15 +138,15 @@ template <typename C> void BlockList<C>::TrySplit(BlockIt block) {
 
 template <typename C>
 typename BlockList<C>::BlockListIterator& BlockList<C>::BlockListIterator::operator++() {
-  ++*block_it;
+  ++block_it;
   if (block_it == block_end) {
     ++it;
     if (it != it_end) {
       block_it = it->begin();
       block_end = it->end();
     } else {
-      block_it = std::nullopt;
-      block_end = std::nullopt;
+      block_it = {};
+      block_end = {};
     }
   }
   return *this;

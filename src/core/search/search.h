@@ -16,6 +16,7 @@
 
 #include "base/pmr/memory_resource.h"
 #include "core/search/base.h"
+#include "core/search/range_tree.h"
 #include "core/search/synonyms.h"
 
 namespace dfly::search {
@@ -49,7 +50,14 @@ struct SchemaField {
     bool with_suffixtrie = false;
   };
 
-  using ParamsVariant = std::variant<std::monostate, VectorParams, TagParams, TextParams>;
+  struct NumericParams {
+    // Block size of the range tree
+    // Check RangeTree for details.
+    size_t block_size = RangeTree::kDefaultMaxRangeBlockSize;
+  };
+
+  using ParamsVariant =
+      std::variant<std::monostate, VectorParams, TagParams, TextParams, NumericParams>;
 
   FieldType type;
   uint8_t flags;

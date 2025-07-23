@@ -93,7 +93,7 @@ template <typename Container /* underlying container */> class BlockList {
     using reference = ElementType&;
 
     ElementType operator*() const {
-      return **block_it;
+      return *block_it;
     }
 
     BlockListIterator& operator++();
@@ -117,7 +117,7 @@ template <typename Container /* underlying container */> class BlockList {
     }
 
     ConstBlockIt it, it_end;
-    std::optional<typename Container::iterator> block_it, block_end;
+    typename Container::iterator block_it, block_end;
   };
 
   BlockListIterator begin() const {

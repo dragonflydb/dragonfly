@@ -231,7 +231,7 @@ class Connection : public util::Connection {
   void RegisterBreakHook(BreakerCb breaker_cb);
 
   // Manually shutdown self.
-  void ShutdownSelf();
+  void ShutdownSelfBlocking();
 
   // Migrate this connecton to a different thread.
   // Return true if Migrate succeeded
@@ -443,6 +443,13 @@ class Connection : public util::Connection {
 
   uint32_t id_;
   Protocol protocol_;
+
+  struct {
+    size_t read_cnt = 0;                // total number of read calls
+    size_t net_bytes_in = 0;            // total number of bytes read
+    size_t dispatch_entries_added = 0;  // total number of dispatch queue entries
+    size_t cmds = 0;                    // total number of commands executed
+  } local_stats_;
   ConnectionStats* stats_ = nullptr;
 
   std::unique_ptr<SinkReplyBuilder> reply_builder_;
@@ -494,6 +501,8 @@ class Connection : public util::Connection {
       bool is_main_ : 1;
     };
   };
+
+  bool request_shutdown_ = false;
 };
 
 }  // namespace facade
