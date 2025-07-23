@@ -602,6 +602,49 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkRe
   }
 }
 
+void ClientMigrate(CmdArgList args, absl::Span<facade::Listener*> listeners,
+                   SinkReplyBuilder* builder, ConnectionContext* cntx) {
+  if (args.size() != 2) {
+    return builder->SendError(kSyntaxErr);
+  }
+
+  uint32_t id;
+  if (!absl::SimpleAtoi(args[0], &id)) {
+    return builder->SendError("Invalid client id");
+  }
+
+  uint32_t tid = 0;
+  if (!absl::SimpleAtoi(args[1], &tid) || tid >= shard_set->pool()->size()) {
+    return builder->SendError("Invalid thread id");
+  }
+
+  unsigned migrated = 0;
+  auto cb_brief = [&](unsigned current_tid, ProactorBase* p) {
+    if (current_tid == tid) {
+      return;  // we should not migrate to the same thread
+    }
+
+    auto traverse_cb = [&](unsigned, util::Connection* conn) {
+      facade::Connection* dconn = static_cast<facade::Connection*>(conn);
+      if (dconn->GetClientId() == id) {
+        ++migrated;
+        dconn->RequestAsyncMigration(shard_set->pool()->at(tid), true /* force */);
+      }
+    };
+
+    for (auto* listener : listeners) {
+      if (listener->IsPrivilegedInterface())
+        continue;  // skip privileged interfaces
+
+      listener->TraverseConnectionsOnThread(traverse_cb, UINT32_MAX, nullptr);
+    }
+  };
+
+  shard_set->pool()->AwaitBrief(cb_brief);
+
+  return builder->SendLong(migrated);
+}
+
 std::string_view GetOSString() {
   // Call uname() only once since it can be expensive. Cache the final result in a static string.
   static string os_string = []() {
@@ -2238,6 +2281,8 @@ void ClientHelp(SinkReplyBuilder* builder) {
       "    * LIB-VER: the client lib version.",
       "TRACKING (ON|OFF) [OPTIN] [OPTOUT] [NOLOOP]",
       "    Control server assisted client side caching.",
+      "MIGRATE <client-id> <tid>",
+      "    Migrates connection specified by client-id to the specified thread id.",
       "HELP",
       "    Print this help."};
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
@@ -2270,6 +2315,8 @@ void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
     return ClientSetInfo(sub_args, builder, cntx);
   } else if (sub_cmd == "ID") {
     return ClientId(sub_args, builder, cntx);
+  } else if (sub_cmd == "MIGRATE") {
+    return ClientMigrate(sub_args, absl::MakeSpan(listeners_), builder, cntx);
   } else if (sub_cmd == "HELP") {
     return ClientHelp(builder);
   }
