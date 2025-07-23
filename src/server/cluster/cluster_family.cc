@@ -1129,8 +1129,7 @@ void ClusterFamily::ReconcileMasterReplicaTakeoverSlots(const ClusterExtendedNod
     // we can't use == because it also contains the id in the comparisson.
     // It's a mistake as ip/port are enough to make it unique.
     if (info.master.port == old_master.port && is_equal(info.master.ip, old_master.ip)) {
-      info.master.port = new_master.port;
-      info.master.ip = new_master.ip;
+      info.master = new_master;
       info.master.id = id_;
       info.replicas.clear();
       break;
