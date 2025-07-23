@@ -803,9 +803,7 @@ GenericError RewriteConfigFile() {
 
   // Atomic write using mkstemp + rename
   std::string tmp_template = config_file_path + ".tmpXXXXXX";
-  std::vector<char> tmp_path(tmp_template.begin(), tmp_template.end());
-  tmp_path.push_back('\0');
-  int fd = mkstemp(tmp_path.data());
+  int fd = mkstemp(tmp_template.data());  
   if (fd == -1) {
     return GenericError("Failed to create temporary file");
   }
