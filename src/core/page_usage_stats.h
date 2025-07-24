@@ -36,6 +36,9 @@ struct CollectedPageStats {
   absl::btree_map<ShardId, ShardUsageSummary> shard_wide_summary;
 
   void Merge(CollectedPageStats&& other, ShardId shard_id);
+  static CollectedPageStats Merge(CollectedPageStats* stats, size_t size, float threshold);
+
+  std::string ToString() const;
 };
 
 struct UniquePages {

@@ -187,7 +187,10 @@ void MemoryCmd::Run(CmdArgList args) {
         }
       }
     });
-    return builder_->SendSimpleString("OK");
+
+    const auto merged = CollectedPageStats::Merge(results, shard_set->size(), threshold);
+    auto* rb = static_cast<RedisReplyBuilder*>(builder_);
+    return rb->SendVerbatimString(merged.ToString());
   }
 
   string err = UnknownSubCmd(parser.Next(), "MEMORY");

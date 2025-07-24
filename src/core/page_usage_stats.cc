@@ -5,7 +5,7 @@
 #include "core/page_usage_stats.h"
 
 #include <absl/container/flat_hash_set.h>
-#include <cmake-build-debug/third_party/libs/hdr_histogram/include/hdr/hdr_histogram.h>
+#include <absl/strings/str_join.h>
 #include <glog/logging.h>
 #include <hdr/hdr_histogram.h>
 
@@ -54,13 +54,43 @@ void CollectedPageStats::Merge(CollectedPageStats&& other, ShardId shard_id) {
   shard_wide_summary.emplace(std::make_pair(shard_id, std::move(other.page_usage_hist)));
 }
 
-UniquePages::UniquePages(float threshold)
-    : pages_scanned{MakeBloomFilter()},
-      pages_marked_for_realloc{MakeBloomFilter()},
-      pages_full{MakeBloomFilter()},
-      pages_reserved_for_malloc{MakeBloomFilter()},
-      pages_with_heap_mismatch{MakeBloomFilter()},
-      pages_above_threshold{MakeBloomFilter()} {
+CollectedPageStats CollectedPageStats::Merge(CollectedPageStats* stats, const size_t size,
+                                             const float threshold) {
+  CollectedPageStats result;
+  result.threshold = threshold;
+  for (size_t i = 0; i < size; ++i) {
+    result.Merge(std::move(*stats), i);
+    stats++;
+  }
+  return result;
+}
+
+std::string CollectedPageStats::ToString() const {
+  std::vector<std::string> rows;
+  rows.push_back(absl::StrFormat("Page usage threshold: %f", threshold * 100));
+  rows.push_back(absl::StrFormat("Pages scanned: %d", pages_scanned));
+  rows.push_back(absl::StrFormat("Pages marked for reallocation: %d", pages_marked_for_realloc));
+  rows.push_back(absl::StrFormat("Pages full: %d", pages_full));
+  rows.push_back(absl::StrFormat("Pages reserved for malloc: %d", pages_reserved_for_malloc));
+  rows.push_back(
+      absl::StrFormat("Pages skipped due to heap mismatch: %d", pages_with_heap_mismatch));
+  rows.push_back(absl::StrFormat("Pages with usage above threshold: %d", pages_above_threshold));
+  for (const auto& [shard_id, usage] : shard_wide_summary) {
+    rows.push_back(absl::StrFormat("[Shard %d]", shard_id));
+    for (const auto& [percentage, count] : usage) {
+      rows.push_back(absl::StrFormat(" %d%% pages are below %d%% block usage", percentage, count));
+    }
+  }
+  return absl::StrJoin(rows, "\n");
+}
+
+UniquePages::UniquePages()
+    : pages_scanned{MakeSBF()},
+      pages_marked_for_realloc{MakeSBF()},
+      pages_full{MakeSBF()},
+      pages_reserved_for_malloc{MakeSBF()},
+      pages_with_heap_mismatch{MakeSBF()},
+      pages_above_threshold{MakeSBF()} {
   hdr_histogram* h = nullptr;
   const auto init_result = hdr_init(1, 100, kHistSignificantFigures, &h);
   CHECK_EQ(0, init_result) << "failed to initialize histogram";
