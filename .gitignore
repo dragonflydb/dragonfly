@@ -20,3 +20,4 @@ releases
 .hypothesis
 .secrets
 cmake-build-debug
+.venv/
