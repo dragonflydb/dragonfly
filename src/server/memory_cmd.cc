@@ -177,9 +177,15 @@ void MemoryCmd::Run(CmdArgList args) {
     static const float default_threshold =
         absl::GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
     const float threshold = parser.NextOrDefault(default_threshold);
-    shard_set->pool()->AwaitFiberOnAll([threshold](util::ProactorBase*) {
-      if (auto* shard = EngineShard::tlocal(); shard)
-        shard->DoDefrag(CollectPageStats::YES, threshold);
+
+    CollectedPageStats results[shard_set->size()];
+    shard_set->pool()->AwaitFiberOnAll([threshold, &results](util::ProactorBase*) {
+      if (auto* shard = EngineShard::tlocal(); shard) {
+        if (auto shard_res = shard->DoDefrag(CollectPageStats::YES, threshold);
+            shard_res.has_value()) {
+          results[shard->shard_id()] = std::move(shard_res.value());
+        }
+      }
     });
     return builder_->SendSimpleString("OK");
   }
