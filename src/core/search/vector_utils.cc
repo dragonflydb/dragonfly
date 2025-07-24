@@ -29,7 +29,15 @@ FAST_MATH float L2Distance(const float* u, const float* v, size_t dims) {
   return sqrt(sum);
 }
 
-// TODO: Normalize vectors ahead if cosine distance is used
+// Inner product distance: 1 - dot_product(u, v)
+// For normalized vectors, this is equivalent to cosine distance
+FAST_MATH float IPDistance(const float* u, const float* v, size_t dims) {
+  float sum_uv = 0;
+  for (size_t i = 0; i < dims; i++)
+    sum_uv += u[i] * v[i];
+  return 1.0f - sum_uv;
+}
+
 FAST_MATH float CosineDistance(const float* u, const float* v, size_t dims) {
   float sum_uv = 0, sum_uu = 0, sum_vv = 0;
   for (size_t i = 0; i < dims; i++) {
@@ -71,6 +79,8 @@ float VectorDistance(const float* u, const float* v, size_t dims, VectorSimilari
   switch (sim) {
     case VectorSimilarity::L2:
       return L2Distance(u, v, dims);
+    case VectorSimilarity::IP:
+      return IPDistance(u, v, dims);
     case VectorSimilarity::COSINE:
       return CosineDistance(u, v, dims);
   };

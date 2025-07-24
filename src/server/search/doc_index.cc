@@ -148,7 +148,9 @@ string DocIndexInfo::BuildRestoreCommand() const {
     Overloaded info{
         [](monostate) {},
         [out = &out](const search::SchemaField::VectorParams& params) {
-          auto sim = params.sim == search::VectorSimilarity::L2 ? "L2" : "COSINE";
+          auto sim = params.sim == search::VectorSimilarity::L2   ? "L2"
+                     : params.sim == search::VectorSimilarity::IP ? "IP"
+                                                                  : "COSINE";
           absl::StrAppend(out, " ", params.use_hnsw ? "HNSW" : "FLAT", " 6 ", "DIM ", params.dim,
                           " DISTANCE_METRIC ", sim, " INITIAL_CAP ", params.capacity);
         },
