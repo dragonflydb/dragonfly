@@ -48,11 +48,6 @@ class ClusterFamily {
   // slot config transparently for replica node becoming the new master (where it is called).
   void ReconcileMasterReplicaTakeoverSlots(bool was_master);
 
-  // Fetches the IP/PORT of the replica becoming the new master.
-  std::pair<std::string, uint32_t> GetTakingOverReplicaIpPort();
-
-  void SetTakeoverSourceInfo();
-
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
