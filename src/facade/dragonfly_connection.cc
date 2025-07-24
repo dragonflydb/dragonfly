@@ -1153,9 +1153,9 @@ void Connection::ConnectionFlow() {
 
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {
     string conn_info = service_->GetContextInfo(cc_.get()).Format();
-    LOG(WARNING) << "Socket error for connection " << conn_info << " " << GetName()
-                 << " during phase " << kPhaseName[phase_] << " : " << ec << " " << ec.message()
-                 << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+    LOG_EVERY_T(5) << "Socket error for connection " << conn_info << " " << GetName()
+                   << " during phase " << kPhaseName[phase_] << " : " << ec << " " << ec.message()
+                   << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
   }
 }
 
