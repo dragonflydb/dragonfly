@@ -125,8 +125,7 @@ struct StringSetWrapper {
     long maxiterations = count * 10;
 
     const auto start_cycles = base::CycleClock::Now();
-    // Don't allow it to monopolize cpu time.
-    // Approximately 15 microseconds.
+    // Don't allow it to monopolize cpu time. Roughly 15 microseconds.
     const uint64_t timeout_cycles = base::CycleClock::Frequency() >> 16;
 
     do {
