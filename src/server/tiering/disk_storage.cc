@@ -192,7 +192,7 @@ DiskStorage::Stats DiskStorage::GetStats() const {
 }
 
 error_code DiskStorage::TryGrow(off_t grow_size) {
-  if (alloc_.capacity() + ExternalAllocator::kExtAlignment <= static_cast<size_t>(max_size_))
+  if (alloc_.capacity() + ExternalAllocator::kExtAlignment >= static_cast<size_t>(max_size_))
     return make_error_code(errc::file_too_large);
 
   if (std::exchange(grow_pending_, true)) {
