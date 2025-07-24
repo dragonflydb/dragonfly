@@ -87,11 +87,8 @@ TEST_F(PageUsageStatsTest, Defrag) {
     string_map_->begin().ReallocIfNeeded(&p);
     small_string_.DefragIfNeeded(&p);
 
-    const auto& stats = p.Stats();
-    EXPECT_FALSE(stats.empty());
-    for (const auto& stat : p.Stats()) {
-      EXPECT_TRUE(stat.flags == MI_DFLY_PAGE_BELOW_THRESHOLD || PageCannotRealloc(stat));
-    }
+    const auto stats = p.CollectedStats();
+    EXPECT_GT(stats.pages_scanned, 0);
   }
 
   {
@@ -101,6 +98,6 @@ TEST_F(PageUsageStatsTest, Defrag) {
     string_set_->begin().ReallocIfNeeded(&p);
     string_map_->begin().ReallocIfNeeded(&p);
     small_string_.DefragIfNeeded(&p);
-    EXPECT_TRUE(p.Stats().empty());
+    EXPECT_EQ(p.CollectedStats().pages_scanned, 0);
   }
 }
