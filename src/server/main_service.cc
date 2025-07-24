@@ -819,8 +819,9 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   InitRedisTables();
   facade::Connection::Init(pp_.size());
 
-  config_registry.RegisterSetter<MemoryBytesFlag>(
-      "maxmemory", [](const MemoryBytesFlag& flag) { max_memory_limit = flag.value; });
+  config_registry.RegisterSetter<MemoryBytesFlag>("maxmemory", [](const MemoryBytesFlag& flag) {
+    max_memory_limit.store(flag.value, memory_order_relaxed);
+  });
 
   config_registry.RegisterMutable("dbfilename");
   config_registry.Register("dbnum");  // equivalent to databases in redis.
@@ -1089,11 +1090,11 @@ bool ShouldDenyOnOOM(const CommandId* cid, uint64_t curr_time_ns) {
   if ((cid->opt_mask() & CO::DENYOOM) && etl.is_master) {
     auto memory_stats = etl.GetMemoryUsage(curr_time_ns);
 
-    if (memory_stats.used_mem > max_memory_limit ||
-        (etl.rss_oom_deny_ratio > 0 &&
-         memory_stats.rss_mem > (max_memory_limit * etl.rss_oom_deny_ratio))) {
+    size_t limit = max_memory_limit.load(memory_order_relaxed);
+    if (memory_stats.used_mem > limit ||
+        (etl.rss_oom_deny_ratio > 0 && memory_stats.rss_mem > (limit * etl.rss_oom_deny_ratio))) {
       DLOG(WARNING) << "Out of memory, used " << memory_stats.used_mem << " ,rss "
-                    << memory_stats.rss_mem << " ,limit " << max_memory_limit;
+                    << memory_stats.rss_mem << " ,limit " << limit;
       etl.stats.oom_error_cmd_cnt++;
       return true;
     }
@@ -2884,14 +2885,6 @@ void Service::RegisterCommands() {
 const acl::AclFamily* Service::TestInit() {
   acl_family_.Init(nullptr, &user_registry_);
   return &acl_family_;
-}
-
-void SetMaxMemoryFlag(uint64_t value) {
-  absl::SetFlag(&FLAGS_maxmemory, {value});
-}
-
-uint64_t GetMaxMemoryFlag() {
-  return absl::GetFlag(FLAGS_maxmemory).value;
 }
 
 }  // namespace dfly

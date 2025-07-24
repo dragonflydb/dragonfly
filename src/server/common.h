@@ -128,11 +128,11 @@ bool ParseDouble(std::string_view src, double* value);
 
 const char* RdbTypeName(unsigned type);
 
-extern size_t max_memory_limit;  // Value of maxmemory flag
-
 // Globally used atomics for memory readings
 extern std::atomic_uint64_t used_mem_current;
 extern std::atomic_uint64_t rss_mem_current;
+// Current value of --maxmemory flag
+extern std::atomic_uint64_t max_memory_limit;
 
 extern Namespaces* namespaces;
 

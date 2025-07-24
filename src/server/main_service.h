@@ -194,7 +194,4 @@ class Service : public facade::ServiceInterface {
   uint32_t loading_state_counter_ ABSL_GUARDED_BY(mu_) = 0;
 };
 
-uint64_t GetMaxMemoryFlag();
-void SetMaxMemoryFlag(uint64_t value);
-
 }  // namespace dfly
