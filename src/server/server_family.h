@@ -291,13 +291,8 @@ class ServerFamily {
                        [&match](auto& elem) { return elem.state == match; });
   }
 
-  string_view TakenOverMaster() const {
-    return dfly_cmd_->TakenOverMaster();
-  }
-
-  uint64_t TakenOverPort() const {
-    return dfly_cmd_->TakenOverPort();
-  }
+  // Used by DFLY command after replica takeover
+  void ReconcileMasterReplicaTakeoverSlots();
 
  private:
   bool HasPrivilegedInterface();

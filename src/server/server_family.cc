@@ -3305,7 +3305,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
 
   LOG(INFO) << "Takeover successful, promoting this instance to master.";
 
-  service().cluster_family().ReconcileMasterReplicaTakeoverSlots();
+  service().cluster_family().ReconcileMasterReplicaTakeoverSlots(false);
   SetMasterFlagOnAllThreads(true);
   last_master_data_ = replica_->Stop();
   replica_.reset();
@@ -3603,6 +3603,10 @@ void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,
   } else {
     builder->SendError("Failed to pause all running clients");
   }
+}
+
+void ServerFamily::ReconcileMasterReplicaTakeoverSlots() {
+  service_.cluster_family().ReconcileMasterReplicaTakeoverSlots(true);
 }
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))

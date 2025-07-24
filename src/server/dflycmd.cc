@@ -544,11 +544,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
     sf_->ShutdownCmd(CmdArgList(&sargs, 1), CommandContext{nullptr, rb, nullptr});
     return;
   }
-
-  // For cluster mode we do not shutdown. Instead we redirect
-  // incoming requests with MOVED repl-ip if we owned the slots.
-  util::fb2::LockGuard lk(last_takeover_src_mu_);
-  last_takeover_source_ = replica_ptr;
+  sf_->ReconcileMasterReplicaTakeoverSlots();
 }
 
 void DflyCmd::Expire(CmdArgList args, Transaction* tx, RedisReplyBuilder* rb) {

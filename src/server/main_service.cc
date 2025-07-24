@@ -1072,11 +1072,14 @@ std::optional<facade::ErrorReply> Service::TakenOverSlotError(const CommandId* c
       !error.status.has_value() || error.status.value() != facade::OpStatus::OK) {
     return ErrorReply{std::move(error)};
   }
+  const auto cluster_config = cluster::ClusterConfig::Current();
+  if (!cluster_config)
+    return facade::ErrorReply{facade::kClusterNotConfigured};
 
+  // Moved regardless, we have been taken over
+  cluster::ClusterNodeInfo redirect = cluster_config->GetMasterNodeForSlot(*keys_slot);
   return facade::ErrorReply{
-      absl::StrCat("-MOVED ", *keys_slot, " ", server_family_.TakenOverMaster(), ":",
-                   server_family_.TakenOverPort()),
-      "MOVED"};
+      absl::StrCat("-MOVED ", *keys_slot, " ", redirect.ip, ":", redirect.port), "MOVED"};
 }
 
 // Return OK if all keys are allowed to be accessed: either declared in EVAL or

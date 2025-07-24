@@ -46,7 +46,12 @@ class ClusterFamily {
 
   // Helper function to be used from repltakeover flow. It swaps master and replica
   // slot config transparently for replica node becoming the new master (where it is called).
-  void ReconcileMasterReplicaTakeoverSlots();
+  void ReconcileMasterReplicaTakeoverSlots(bool was_master);
+
+  // Fetches the IP/PORT of the replica becoming the new master.
+  std::pair<std::string, uint32_t> GetTakingOverReplicaIpPort();
+
+  void SetTakeoverSourceInfo();
 
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
@@ -120,6 +125,9 @@ class ClusterFamily {
   std::optional<ClusterShardInfos> GetShardInfos(ConnectionContext* cntx) const;
 
   ClusterShardInfo GetEmulatedShardInfo(ConnectionContext* cntx) const;
+
+  void ReconcileMasterFlow();
+  void ReconcileReplicaFlow();
 
   // Guards set configuration, so that we won't handle 2 in parallel.
   mutable util::fb2::Mutex set_config_mu;
