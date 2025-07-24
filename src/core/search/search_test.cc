@@ -814,6 +814,41 @@ TEST_P(KnnTest, Cosine) {
   }
 }
 
+TEST_P(KnnTest, IP) {
+  // Test with normalized unit vectors for IP distance
+  // Using unit vectors pointing in different directions
+  const pair<float, float> kTestCoords[] = {
+      {1.0f, 0.0f}, {0.0f, 1.0f}, {-1.0f, 0.0f}, {0.0f, -1.0f}};
+
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params =
+      SchemaField::VectorParams{GetParam(), 2, VectorSimilarity::IP};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
+    string coords = ToBytes({kTestCoords[i].first, kTestCoords[i].second});
+    MockedDocument doc{Map{{"pos", coords}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  // Query with vector pointing right - should find exact match (highest dot product)
+  {
+    params["vec"] = ToBytes({1.0f, 0.0f});
+    algo.Init("* =>[KNN 1 @pos $vec]", &params);
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0));
+  }
+
+  // Query with vector pointing up - should find exact match (highest dot product)
+  {
+    params["vec"] = ToBytes({0.0f, 1.0f});
+    algo.Init("* =>[KNN 1 @pos $vec]", &params);
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1));
+  }
+}
+
 TEST_P(KnnTest, AddRemove) {
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params =
@@ -894,12 +929,22 @@ TEST_F(SearchTest, VectorDistanceBasic) {
   EXPECT_GE(cos_dist, 0.0f);
   EXPECT_LE(cos_dist, 2.0f);  // Cosine distance range
 
+  // Test IP distance
+  float ip_dist = VectorDistance(vec1.data(), vec2.data(), 3, VectorSimilarity::IP);
+  // IP distance can be negative for non-normalized vectors
+  EXPECT_NE(ip_dist, 0.0f);  // Should be non-zero for different vectors
+
   // Test identical vectors
   float l2_same = VectorDistance(vec1.data(), vec1.data(), 3, VectorSimilarity::L2);
   EXPECT_NEAR(l2_same, 0.0f, 1e-6);
 
   float cos_same = VectorDistance(vec1.data(), vec1.data(), 3, VectorSimilarity::COSINE);
   EXPECT_NEAR(cos_same, 0.0f, 1e-6);
+
+  float ip_same = VectorDistance(vec1.data(), vec1.data(), 3, VectorSimilarity::IP);
+  // For identical vectors: IP = 1 - dot_product(v, v) = 1 - ||v||^2
+  // For vec1 = {1, 2, 3}: ||v||^2 = 1 + 4 + 9 = 14, so IP = 1 - 14 = -13
+  EXPECT_LT(ip_same, 0.0f);  // Should be negative for non-normalized vectors
 }
 
 TEST_F(SearchTest, VectorDistanceConsistency) {
@@ -914,6 +959,10 @@ TEST_F(SearchTest, VectorDistanceConsistency) {
   float cos_dist1 = VectorDistance(vec1.data(), vec2.data(), 5, VectorSimilarity::COSINE);
   float cos_dist2 = VectorDistance(vec1.data(), vec2.data(), 5, VectorSimilarity::COSINE);
   EXPECT_EQ(cos_dist1, cos_dist2);
+
+  float ip_dist1 = VectorDistance(vec1.data(), vec2.data(), 5, VectorSimilarity::IP);
+  float ip_dist2 = VectorDistance(vec1.data(), vec2.data(), 5, VectorSimilarity::IP);
+  EXPECT_EQ(ip_dist1, ip_dist2);
 }
 
 static void BM_VectorSearch(benchmark::State& state) {

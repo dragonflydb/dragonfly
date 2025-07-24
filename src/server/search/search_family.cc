@@ -80,8 +80,9 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   for (size_t i = 0; i * 2 < num_args; i++) {
     if (parser->Check("DIM", &params.dim)) {
     } else if (parser->Check("DISTANCE_METRIC")) {
-      params.sim = parser->MapNext("L2", search::VectorSimilarity::L2, "COSINE",
-                                   search::VectorSimilarity::COSINE);
+      params.sim =
+          parser->MapNext("L2", search::VectorSimilarity::L2, "IP", search::VectorSimilarity::IP,
+                          "COSINE", search::VectorSimilarity::COSINE);
     } else if (parser->Check("INITIAL_CAP", &params.capacity)) {
     } else if (parser->Check("M", &params.hnsw_m)) {
     } else if (parser->Check("EF_CONSTRUCTION", &params.hnsw_ef_construction)) {
