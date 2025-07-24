@@ -45,9 +45,8 @@ class ClusterFamily {
   size_t MigrationsErrorsCount() const ABSL_LOCKS_EXCLUDED(migration_mu_);
 
   // Helper function to be used from repltakeover flow. It swaps master and replica
-  // slot config transparently for this node only.
-  void ReconcileMasterReplicaTakeoverSlots(const ClusterExtendedNodeInfo& old_master,
-                                           const ClusterExtendedNodeInfo& new_master);
+  // slot config transparently for replica node becoming the new master (where it is called).
+  void ReconcileMasterReplicaTakeoverSlots();
 
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;

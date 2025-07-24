@@ -1088,8 +1088,7 @@ size_t ClusterFamily::MigrationsErrorsCount() const {
   return error_num;
 }
 
-void ClusterFamily::ReconcileMasterReplicaTakeoverSlots(const ClusterExtendedNodeInfo& old_master,
-                                                        const ClusterExtendedNodeInfo& new_master) {
+void ClusterFamily::ReconcileMasterReplicaTakeoverSlots() {
   util::fb2::LockGuard gu(set_config_mu);
   util::fb2::LockGuard lk(migration_mu_);
 
@@ -1104,37 +1103,23 @@ void ClusterFamily::ReconcileMasterReplicaTakeoverSlots(const ClusterExtendedNod
   auto new_config = config->CloneWithChanges({}, {});
   auto current_shard_info = new_config->GetMutableConfig();
 
-  // Going to extreme for this because the listener socket address returns 0.0.0.0
-  // The replica address returns localhost and the nodes in the cluster config
-  // have 127.0.0.1. To allow local testing, I normalize them.
-  auto is_equal = [](const std::string& ip_a, const std::string& ip_b) -> bool {
-    if (ip_a == ip_b) {
-      return true;
-    }
-    bool ip_a_local = false;
-    if (ip_a == "127.0.0.1" || ip_a == "localhost" || ip_a == "0.0.0.0") {
-      ip_a_local = true;
-    }
-    bool ip_b_local = false;
-    if (ip_b == "127.0.0.1" || ip_b == "localhost" || ip_b == "0.0.0.0") {
-      ip_b_local = true;
-    }
-    if (ip_a_local && ip_b_local) {
-      return true;
-    }
-    return false;
-  };
-
+  // Replace master with replica in shard config.
+  bool found = false;
   for (ClusterShardInfo& info : current_shard_info) {
-    // we can't use == because it also contains the id in the comparisson.
-    // It's a mistake as ip/port are enough to make it unique.
-    if (info.master.port == old_master.port && is_equal(info.master.ip, old_master.ip)) {
-      info.master = new_master;
-      info.master.id = id_;
-      info.replicas.clear();
-      break;
+    for (const auto& replica : info.replicas) {
+      if (replica.id == id_) {
+        info.master = replica;
+        // New master has no replicas
+        info.replicas.clear();
+        found = true;
+        break;
+      }
     }
+    if (found)
+      break;
   }
+
+  LOG_IF(ERROR, !found) << "Did not find replica in the cluster map";
 
   server_family_->service().proactor_pool().AwaitFiberOnAll(
       [&new_config](util::ProactorBase*) { ClusterConfig::SetCurrent(new_config); });

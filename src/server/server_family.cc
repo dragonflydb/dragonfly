@@ -65,9 +65,6 @@ extern "C" {
 #include "util/accept_server.h"
 #include "util/aws/aws.h"
 
-ABSL_DECLARE_FLAG(int32_t, port);
-ABSL_DECLARE_FLAG(std::string, bind);
-
 using namespace std;
 
 struct ReplicaOfFlag {
@@ -3307,20 +3304,8 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
     return builder->SendError("Couldn't execute takeover");
 
   LOG(INFO) << "Takeover successful, promoting this instance to master.";
-  const auto& master_ctx = replica_->server();
-  cluster::ClusterExtendedNodeInfo old_master_info;
-  old_master_info.ip = master_ctx.host;
-  old_master_info.port = master_ctx.port;
 
-  cluster::ClusterExtendedNodeInfo new_master_info;
-  for (facade::Listener* listener : listeners_) {
-    if (listener->IsMainInterface()) {
-      new_master_info.ip = listener->socket()->LocalEndpoint().address().to_string();
-    }
-  }
-  new_master_info.port = absl::GetFlag(FLAGS_port);
-
-  service().cluster_family().ReconcileMasterReplicaTakeoverSlots(old_master_info, new_master_info);
+  service().cluster_family().ReconcileMasterReplicaTakeoverSlots();
   SetMasterFlagOnAllThreads(true);
   last_master_data_ = replica_->Stop();
   replica_.reset();

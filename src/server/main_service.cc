@@ -68,10 +68,6 @@ using namespace std;
 using facade::operator""_KB;
 using facade::ErrorReply;
 
-ABSL_FLAG(string, bind, "",
-          "Bind address. If empty - binds on all interfaces. "
-          "It's not advised due to security implications.");
-
 ABSL_FLAG(int32_t, port, 6379,
           "Redis port. 0 disables the port, -1 will bind on a random available port.");
 

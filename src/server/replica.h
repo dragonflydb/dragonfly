@@ -55,8 +55,6 @@ class Replica : ProtocolClient {
           std::optional<cluster::SlotRange> slot_range);
   ~Replica();
 
-  using ProtocolClient::server;
-
   // Spawns a fiber that runs until link with master is broken or the replication is stopped.
   // Returns true if initial link with master has been established or
   // false if it has failed.
