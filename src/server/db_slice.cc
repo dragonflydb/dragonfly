@@ -802,6 +802,9 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   uint64_t next_version = 0;
   uint64_t del_count = 0;
 
+  // Explicitly copy table smart pointer to keep reference count up (flushall drops it)
+  boost::intrusive_ptr<DbTable> table = db_arr_.front();
+
   std::string tmp;
   auto iterate_bucket = [&](PrimeTable::bucket_iterator it) {
     it.AdvanceIfNotOccupied();
@@ -809,7 +812,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
       std::string_view key = it->first.GetSlice(&tmp);
       SlotId sid = KeySlot(key);
       if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
-        PerformDeletion(Iterator::FromPrime(it), db_arr_[0].get());
+        PerformDeletion(Iterator::FromPrime(it), table.get());
         ++del_count;
       }
       ++it;
@@ -836,7 +839,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   next_version = RegisterOnChange(std::move(on_change));
 
   ServerState& etl = *ServerState::tlocal();
-  PrimeTable* pt = &db_arr_[0]->prime;
+  PrimeTable* pt = &table->prime;
   PrimeTable::Cursor cursor;
 
   do {
@@ -1569,19 +1572,20 @@ void DbSlice::QueueInvalidationTrackingMessageAtomic(std::string_view key) {
   auto [pend_it, inserted] = pending_send_map_.emplace(key, std::move(moved_set));
   if (!inserted) {
     ConnectionHashSet& client_set = pend_it->second;
-    for (auto& client : moved_set) {
-      client_set.insert(client);
+    for (auto& weak_ref : moved_set) {
+      client_set.insert(weak_ref);
     }
   }
 }
 
-void DbSlice::SendQueuedInvalidationMessagesCb(const TrackingMap& track_map, unsigned idx) const {
+void DbSlice::SendQueuedInvalidationMessagesCb(const TrackingMap& track_map,
+                                               unsigned calling_thread_id) const {
   for (auto& [key, client_list] : track_map) {
-    for (auto& client : client_list) {
-      if (client.IsExpired() || (client.Thread() != idx)) {
-        continue;
+    for (auto& weak_ref : client_list) {
+      if (weak_ref.IsExpired() || (weak_ref.LastKnownThreadId() != calling_thread_id)) {
+        continue;  // Expired or migrated.
       }
-      auto* conn = client.Get();
+      auto* conn = weak_ref.Get();
       auto* cntx = static_cast<ConnectionContext*>(conn->cntx());
       if (cntx && cntx->conn_state.tracking_info_.IsTrackingOn()) {
         conn->SendInvalidationMessageAsync({key});
@@ -1597,8 +1601,8 @@ void DbSlice::SendQueuedInvalidationMessages() {
     // Notify all the clients. this function is not efficient,
     // because it broadcasts to all threads unrelated to the subscribers for the key.
     auto local_map = std::move(pending_send_map_);
-    auto cb = [&](unsigned idx, util::ProactorBase*) {
-      SendQueuedInvalidationMessagesCb(local_map, idx);
+    auto cb = [&](unsigned thread_id, util::ProactorBase*) {
+      SendQueuedInvalidationMessagesCb(local_map, thread_id);
     };
 
     shard_set->pool()->AwaitBrief(std::move(cb));

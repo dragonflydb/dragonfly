@@ -127,6 +127,10 @@ ABSL_FLAG(string, huffman_table, "",
           "domain can currently be only KEYS, code is base64 encoded huffman table exported via "
           "DEBUG COMPRESSION EXPORT. if empty no huffman compression is appplied.");
 
+ABSL_FLAG(bool, jsonpathv2, true,
+          "If true uses Dragonfly jsonpath implementation, "
+          "otherwise uses legacy jsoncons implementation.");
+
 namespace dfly {
 
 #if defined(__linux__)
@@ -272,14 +276,14 @@ std::string MakeMonitorMessage(const ConnectionContext* cntx, const CommandId* c
 void SendMonitor(const std::string& msg) {
   const auto& monitor_repo = ServerState::tlocal()->Monitors();
   const auto& monitors = monitor_repo.monitors();
-  if (!monitors.empty()) {
-    VLOG(2) << "Thread " << ProactorBase::me()->GetPoolIndex() << " sending monitor message '"
-            << msg << "' for " << monitors.size();
+  if (monitors.empty()) {
+    return;
+  }
+  VLOG(2) << "Thread " << ProactorBase::me()->GetPoolIndex() << " sending monitor message '" << msg
+          << "' for " << monitors.size();
 
-    for (auto monitor_conn : monitors) {
-      // never preempts, so we can iterate safely.
-      monitor_conn->SendMonitorMessageAsync(msg);
-    }
+  for (auto monitor_conn : monitors) {
+    monitor_conn->SendMonitorMessageAsync(msg);
   }
 }
 
@@ -1374,8 +1378,7 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
     return OpStatus::OK;
   }
 
-  DVLOG(2) << "Start tracking keys for client ID: " << conn_ref.GetClientId()
-           << " with thread ID: " << conn_ref.Thread();
+  DVLOG(2) << "Start tracking keys for client ID: " << conn_ref.GetClientId();
 
   auto& db_slice = slice_args.GetDbSlice();
   // TODO: There is a bug here that we track all arguments instead of tracking only keys.
@@ -1798,7 +1801,7 @@ void Service::Quit(CmdArgList args, const CommandContext& cmd_cntx) {
   cmd_cntx.rb->CloseConnection();
 
   DeactivateMonitoring(cmd_cntx.conn_cntx);
-  cmd_cntx.conn_cntx->conn()->ShutdownSelf();
+  cmd_cntx.conn_cntx->conn()->ShutdownSelfBlocking();
 }
 
 void Service::Multi(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2121,7 +2124,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     if (*sid != ServerState::tlocal()->thread_index()) {
       VLOG(2) << "Migrating connection " << cntx->conn() << " from "
               << ProactorBase::me()->GetPoolIndex() << " to " << *sid;
-      cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid));
+      cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid), false);
     }
   } else {
     Transaction::MultiMode script_mode = DetermineMultiMode(*params);
@@ -2822,20 +2825,30 @@ void Service::Register(CommandRegistry* registry) {
 
 void Service::RegisterCommands() {
   Register(&registry_);
-  StreamFamily::Register(&registry_);
-  StringFamily::Register(&registry_);
+  server_family_.Register(&registry_);
   GenericFamily::Register(&registry_);
   ListFamily::Register(&registry_);
+  StringFamily::Register(&registry_);
+
+#ifdef WITH_COLLECTION_CMDS
   SetFamily::Register(&registry_);
   HSetFamily::Register(&registry_);
   ZSetFamily::Register(&registry_);
+  StreamFamily::Register(&registry_);
+#endif
+
+#ifdef WITH_EXTENSION_CMDS
   GeoFamily::Register(&registry_);
-  JsonFamily::Register(&registry_);
   BitOpsFamily::Register(&registry_);
   HllFamily::Register(&registry_);
-  SearchFamily::Register(&registry_);
   BloomFamily::Register(&registry_);
-  server_family_.Register(&registry_);
+  JsonFamily::Register(&registry_);
+#endif
+
+#ifdef WITH_SEARCH
+  SearchFamily::Register(&registry_);
+#endif
+
   cluster_family_.Register(&registry_);
 
   // AclFamily should always be registered last

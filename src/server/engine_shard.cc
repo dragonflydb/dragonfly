@@ -7,7 +7,10 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
+#include <memory>
+
 #include "base/flags.h"
+#include "core/page_usage_stats.h"
 #include "io/proc_reader.h"
 
 extern "C" {
@@ -383,7 +386,7 @@ bool EngineShard::DefragTaskState::CheckRequired() {
   return false;
 }
 
-bool EngineShard::DoDefrag(const float threshold) {
+bool EngineShard::DoDefrag(CollectPageStats collect_page_stats, const float threshold) {
   // --------------------------------------------------------------------------
   // NOTE: This task is running with exclusive access to the shard.
   // i.e. - Since we are using shared nothing access here, and all access
@@ -413,11 +416,12 @@ bool EngineShard::DoDefrag(const float threshold) {
   unsigned traverses_count = 0;
   uint64_t attempts = 0;
 
+  PageUsage page_usage{collect_page_stats, threshold};
   do {
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       // for each value check whether we should move it because it
       // seats on underutilized page of memory, and if so, do it.
-      bool did = it->second.DefragIfNeeded(threshold);
+      bool did = it->second.DefragIfNeeded(&page_usage);
       attempts++;
       if (did) {
         reallocations++;
@@ -463,7 +467,7 @@ uint32_t EngineShard::DefragTask() {
   if (defrag_state_.CheckRequired()) {
     VLOG(2) << shard_id_ << ": need to run defrag memory cursor state: " << defrag_state_.cursor;
     static const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
-    if (DoDefrag(threshold)) {
+    if (DoDefrag(CollectPageStats::NO, threshold)) {
       // we didn't finish the scan
       return util::ProactorBase::kOnIdleMaxLevel;
     }
@@ -472,11 +476,11 @@ uint32_t EngineShard::DefragTask() {
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
-    : queue_(kQueueLen, 1, 1),
+    : txq_([](const Transaction* t) { return t->txid(); }),
+      queue_(kQueueLen, 1, 1),
       queue2_(kQueueLen / 2, 2, 2),
-      txq_([](const Transaction* t) { return t->txid(); }),
-      mi_resource_(heap),
-      shard_id_(pb->GetPoolIndex()) {
+      shard_id_(pb->GetPoolIndex()),
+      mi_resource_(heap) {
   queue_.Start(absl::StrCat("shard_queue_", shard_id()));
   queue2_.Start(absl::StrCat("l2_queue_", shard_id()));
 }
@@ -567,7 +571,7 @@ void EngineShard::InitThreadLocal(ProactorBase* pb) {
 
   RoundRobinSharder::Init();
 
-  shard_->shard_search_indices_.reset(new ShardDocIndices());
+  shard_->shard_search_indices_ = std::make_unique<ShardDocIndices>();
 }
 
 void EngineShard::InitTieredStorage(ProactorBase* pb, size_t max_file_size) {
@@ -855,30 +859,26 @@ void EngineShard::RetireExpiredAndEvict() {
 
 void EngineShard::CacheStats() {
   uint64_t now = fb2::ProactorBase::GetMonotonicTimeNs();
-  if (cache_stats_time_ + 1000000 > now)  // 1ms
+  if (last_mem_params_.updated_at + 1000000 > now)  // 1ms
     return;
 
-  cache_stats_time_ = now;
-  // Used memory for this shard.
   size_t used_mem = UsedMemory();
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
 
-  // delta can wrap if used_memory is smaller than last_cached_used_memory_ and it's fine.
-  size_t delta = used_mem - last_cached_used_memory_;
-  last_cached_used_memory_ = used_mem;
+  // Reflect local memory change on global value
+  size_t delta = used_mem - last_mem_params_.used_mem;  // negative value wraps safely
   size_t current = used_mem_current.fetch_add(delta, memory_order_relaxed) + delta;
   ssize_t free_mem = max_memory_limit - current;
 
+  // Estimate bytes per object, excluding table memory
   size_t entries = db_slice.entries_count();
-  size_t table_memory = db_slice.table_memory();
-
-  if (tiered_storage_) {
-    table_memory += tiered_storage_->CoolMemoryUsage();
-  }
+  size_t table_memory =
+      db_slice.table_memory() + (tiered_storage_ ? tiered_storage_->CoolMemoryUsage() : 0);
   size_t obj_memory = table_memory <= used_mem ? used_mem - table_memory : 0;
-
   size_t bytes_per_obj = entries > 0 ? obj_memory / entries : 0;
-  db_slice.SetCachedParams(free_mem / shard_set->size(), bytes_per_obj);
+
+  db_slice.UpdateMemoryParams(free_mem / shard_set->size(), bytes_per_obj);
+  last_mem_params_ = {now, used_mem};
 }
 
 size_t EngineShard::UsedMemory() const {

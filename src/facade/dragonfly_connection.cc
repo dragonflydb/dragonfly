@@ -556,6 +556,7 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
 void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
   DVLOG(2) << "Dispatching pipeline: " << ToSV(msg.args.front());
 
+  ++self->local_stats_.cmds;
   self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()},
                                   self->reply_builder_.get(), self->cc_.get());
 
@@ -564,6 +565,7 @@ void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
 }
 
 void Connection::AsyncOperations::operator()(const MCPipelineMessage& msg) {
+  ++self->local_stats_.cmds;
   self->service_->DispatchMC(msg.cmd, msg.value,
                              static_cast<MCReplyBuilder*>(self->reply_builder_.get()),
                              self->cc_.get());
@@ -705,6 +707,9 @@ void Connection::OnPreMigrateThread() {
   // is marked beforehand.
   migration_in_process_ = true;
 
+  // Mark as not owned by any thread as it going through the dark hole
+  self_.reset();
+
   socket_->CancelOnErrorCb();
   DCHECK(!async_fb_.IsJoinable()) << GetClientId();
 }
@@ -717,6 +722,7 @@ void Connection::OnPostMigrateThread() {
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
   }
   migration_in_process_ = false;
+  self_ = {make_shared<std::monostate>(), this};  // Recreate shared_ptr to self.
   DCHECK(!async_fb_.IsJoinable());
 
   // If someone had sent Async during the migration, we must create async_fb_.
@@ -918,6 +924,11 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   absl::StrAppend(&after, " age=", now - creation_time_, " idle=", now - last_interaction_);
   string_view phase_name = PHASE_NAMES[phase_];
 
+  absl::StrAppend(&after, " tot-cmds=", local_stats_.cmds,
+                  " tot-net-in=", local_stats_.net_bytes_in,
+                  " tot-read-calls=", local_stats_.read_cnt,
+                  " tot-dispatches=", local_stats_.dispatch_entries_added);
+
   if (cc_) {
     string cc_info = service_->GetContextInfo(cc_.get()).Format();
 
@@ -1059,6 +1070,9 @@ void Connection::ConnectionFlow() {
   ++stats_->conn_received_cnt;
   stats_->read_buf_capacity += io_buf_.Capacity();
 
+  ++local_stats_.read_cnt;
+  local_stats_.net_bytes_in += io_buf_.InputLen();
+
   ParserStatus parse_status = OK;
 
   // At the start we read from the socket to determine the HTTP/Memstore protocol.
@@ -1161,8 +1175,13 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
           qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, dispatch_q_.size());
       return !over_limits || (dispatch_q_.empty() && !cc_->async_dispatch) || cc_->conn_closing;
     });
-    if (cc_->conn_closing)
+
+    if (cc_->conn_closing) {
+      if (request_shutdown_) {
+        ShutdownSelfBlocking();
+      }
       return;
+    }
 
     // prefer synchronous dispatching to save memory.
     optimize_for_async = false;
@@ -1178,6 +1197,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   } else {
     ShrinkPipelinePool();  // Gradually release pipeline request pool.
     {
+      ++local_stats_.cmds;
       cc_->sync_dispatch = true;
       invoke_cb();
       cc_->sync_dispatch = false;
@@ -1400,6 +1420,7 @@ error_code Connection::HandleRecvSocket() {
     CHECK_GT(recv_buf_.res_len, 0);
 
     stats_->io_read_bytes += recv_buf_.res_len;
+    local_stats_.net_bytes_in += recv_buf_.res_len;
   } else {
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
     DCHECK(!append_buf.empty());
@@ -1413,10 +1434,13 @@ error_code Connection::HandleRecvSocket() {
 
     size_t commit_sz = *recv_sz;
     io_buf_.CommitWrite(commit_sz);
+
     stats_->io_read_bytes += commit_sz;
+    local_stats_.net_bytes_in += commit_sz;
   }
 
   ++stats_->io_read_cnt;
+  ++local_stats_.read_cnt;
 
   return {};
 }
@@ -1770,7 +1794,7 @@ Connection::PipelineMessagePtr Connection::GetFromPipelinePool() {
   return ptr;
 }
 
-void Connection::ShutdownSelf() {
+void Connection::ShutdownSelfBlocking() {
   util::Connection::Shutdown();
 }
 
@@ -1800,7 +1824,7 @@ bool Connection::Migrate(util::fb2::ProactorBase* dest) {
 Connection::WeakRef Connection::Borrow() {
   DCHECK(self_);
 
-  return WeakRef(self_, socket_->proactor()->GetPoolIndex(), id_);
+  return {self_, unsigned(socket_->proactor()->GetPoolIndex()), id_};
 }
 
 void Connection::ShutdownThreadLocal() {
@@ -1877,11 +1901,16 @@ void Connection::SendAsync(MessageHandle msg) {
   // Close MONITOR connection if we overflow pipeline limits
   if (msg.IsMonitor() &&
       qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, dispatch_q_.size())) {
-    ShutdownSelf();
+    cc_->conn_closing = true;
+    request_shutdown_ = true;
+    // We don't shutdown here. The reason is that TLS socket is preemptive
+    // and SendAsync is atomic.
+    cnd_.notify_one();
     return;
   }
 
   size_t used_mem = msg.UsedMemory();
+  ++local_stats_.dispatch_entries_added;
   stats_->dispatch_queue_entries++;
   stats_->dispatch_queue_bytes += used_mem;
 
@@ -1978,8 +2007,8 @@ facade::ConnectionContext* Connection::cntx() {
   return cc_.get();
 }
 
-void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest) {
-  if (!migration_enabled_ || cc_ == nullptr) {
+void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest, bool force) {
+  if ((!force && !migration_enabled_) || cc_ == nullptr) {
     return;
   }
 
@@ -2164,22 +2193,17 @@ void Connection::SetPipelineLowBoundStats(unsigned limit) {
 
 Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, unsigned thread_id,
                              uint32_t client_id)
-    : ptr_{std::move(ptr)}, thread_id_{thread_id}, client_id_{client_id} {
-}
-
-unsigned Connection::WeakRef::Thread() const {
-  return thread_id_;
+    : ptr_{std::move(ptr)}, last_known_thread_id_{thread_id}, client_id_{client_id} {
 }
 
 Connection* Connection::WeakRef::Get() const {
-  // We should never access the connection object from other threads.
-  DCHECK_EQ(ProactorBase::me()->GetPoolIndex(), int(thread_id_));
+  auto sptr = ptr_.lock();
 
   //  The connection can only be deleted on this thread, so
   //  this pointer is valid until the next suspension.
   //  Note: keeping a shared_ptr doesn't prolong the lifetime because
   //  it doesn't manage the underlying connection. See definition of `self_`.
-  return ptr_.lock().get();
+  return sptr.get();
 }
 
 bool Connection::WeakRef::IsExpired() const {

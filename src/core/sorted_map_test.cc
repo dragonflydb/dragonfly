@@ -11,6 +11,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/mi_memory_resource.h"
+#include "core/page_usage_stats.h"
 
 extern "C" {
 #include "redis/zmalloc.h"
@@ -279,7 +280,8 @@ TEST_F(SortedMapTest, ReallocIfNeeded) {
   mi_heap_visit_blocks(mi_heap_get_backing(), false, count_waste, nullptr);
   size_t wasted_before = total_wasted_memory;
 
-  ASSERT_TRUE(sm_.DefragIfNeeded(9));
+  PageUsage page_usage{CollectPageStats::NO, 9};
+  ASSERT_TRUE(sm_.DefragIfNeeded(&page_usage));
 
   total_wasted_memory = 0;
   mi_heap_collect(mi_heap_get_backing(), true);

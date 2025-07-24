@@ -39,9 +39,10 @@ class CompressedSortedSet {
     friend bool operator==(const ConstIterator& l, const ConstIterator& r);
     friend bool operator!=(const ConstIterator& l, const ConstIterator& r);
 
+    ConstIterator() = default;
+
    private:
     explicit ConstIterator(const CompressedSortedSet& list);
-    ConstIterator() = default;
 
     void ReadNext();  // Decode next value to stash
 

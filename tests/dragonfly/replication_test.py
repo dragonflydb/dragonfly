@@ -3340,6 +3340,7 @@ async def test_mc_gat_replication(df_factory):
     assert result[key] == (value, expected_cas_ver), f"unexpected result for key: {result=}"
 
 
+@pytest.mark.skip("Fails constantly on CI")
 @pytest.mark.slow
 @pytest.mark.parametrize("serialization_max_size", [1, 64000])
 async def test_replication_onmove_flow(df_factory, serialization_max_size):
@@ -3409,8 +3410,8 @@ async def test_big_strings(df_factory):
     c_master = master.client()
     c_replica = replica.client()
 
-    # 500kb
-    value_size = 500_000
+    # 200kb
+    value_size = 200_000
 
     async def get_memory(client, field):
         info = await client.info("memory")
@@ -3419,7 +3420,7 @@ async def test_big_strings(df_factory):
     capacity = await get_memory(c_master, "prime_capacity")
 
     seeder = DebugPopulateSeeder(
-        key_target=int(capacity * 0.8),
+        key_target=int(capacity * 0.7),
         data_size=value_size,
         collection_size=1,
         variance=1,

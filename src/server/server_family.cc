@@ -11,13 +11,19 @@
 #include <absl/strings/str_replace.h>
 #include <absl/strings/strip.h>
 #include <croncpp.h>  // cron::cronexpr
+#include <fcntl.h>    // for mkstemp
 #include <sys/resource.h>
+#include <sys/stat.h>  // for fchmod
 #include <sys/utsname.h>
-#include <unistd.h>  // for getpid()
+#include <unistd.h>  // for getpid(), write(), close(), unlink(), fsync()
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <optional>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "absl/strings/ascii.h"
 #include "facade/error.h"
@@ -249,6 +255,16 @@ using EngineFunc = void (ServerFamily::*)(CmdArgList args, const CommandContext&
 
 inline CommandId::Handler3 HandlerFunc(ServerFamily* se, EngineFunc f) {
   return [=](CmdArgList args, const CommandContext& cntx) { return (se->*f)(args, cntx); };
+}
+
+// Captured memory peaks
+struct {
+  std::atomic<size_t> used = 0;
+  std::atomic<size_t> rss = 0;
+} glob_memory_peaks;
+
+size_t FetchRssMemory(const io::StatusData& sdata) {
+  return sdata.vm_rss + sdata.hugetlb_pages;
 }
 
 using CI = CommandId;
@@ -569,7 +585,7 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkRe
     for (auto& tcon : connections) {
       facade::Connection* conn = tcon.Get();
       if (conn && conn->socket()->proactor()->GetPoolIndex() == p->GetPoolIndex()) {
-        conn->ShutdownSelf();
+        conn->ShutdownSelfBlocking();
         killed_connections.fetch_add(1);
       }
     }
@@ -584,6 +600,49 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkRe
                                            " client(s), but unable to kill ", kill_errors.load(),
                                            " admin client(s)."));
   }
+}
+
+void ClientMigrate(CmdArgList args, absl::Span<facade::Listener*> listeners,
+                   SinkReplyBuilder* builder, ConnectionContext* cntx) {
+  if (args.size() != 2) {
+    return builder->SendError(kSyntaxErr);
+  }
+
+  uint32_t id;
+  if (!absl::SimpleAtoi(args[0], &id)) {
+    return builder->SendError("Invalid client id");
+  }
+
+  uint32_t tid = 0;
+  if (!absl::SimpleAtoi(args[1], &tid) || tid >= shard_set->pool()->size()) {
+    return builder->SendError("Invalid thread id");
+  }
+
+  unsigned migrated = 0;
+  auto cb_brief = [&](unsigned current_tid, ProactorBase* p) {
+    if (current_tid == tid) {
+      return;  // we should not migrate to the same thread
+    }
+
+    auto traverse_cb = [&](unsigned, util::Connection* conn) {
+      facade::Connection* dconn = static_cast<facade::Connection*>(conn);
+      if (dconn->GetClientId() == id) {
+        ++migrated;
+        dconn->RequestAsyncMigration(shard_set->pool()->at(tid), true /* force */);
+      }
+    };
+
+    for (auto* listener : listeners) {
+      if (listener->IsPrivilegedInterface())
+        continue;  // skip privileged interfaces
+
+      listener->TraverseConnectionsOnThread(traverse_cb, UINT32_MAX, nullptr);
+    }
+  };
+
+  shard_set->pool()->AwaitBrief(cb_brief);
+
+  return builder->SendLong(migrated);
 }
 
 std::string_view GetOSString() {
@@ -670,13 +729,149 @@ bool ReadProcStats(io::StatusData* sdata) {
     return false;
   }
 
-  size_t total_rss = FetchRssMemory(sdata_res.value());
+  size_t total_rss = FetchRssMemory(*sdata_res);
   rss_mem_current.store(total_rss, memory_order_relaxed);
-  if (rss_mem_peak.load(memory_order_relaxed) < total_rss) {
-    rss_mem_peak.store(total_rss, memory_order_relaxed);
-  }
+  if (total_rss > glob_memory_peaks.rss.load(memory_order_relaxed))
+    glob_memory_peaks.rss.store(total_rss, memory_order_relaxed);
+
   *sdata = *sdata_res;
   return true;
+}
+
+// Rewrite the configuration file with runtime modified settings
+GenericError RewriteConfigFile() {
+  absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
+  if (!flagfile_flag || flagfile_flag->CurrentValue().empty()) {
+    return GenericError("The server is running without a config file");
+  }
+
+  std::string config_file_path = flagfile_flag->CurrentValue();
+
+  // Read original config file
+  std::ifstream file(config_file_path);
+  if (!file.is_open()) {
+    return GenericError("Cannot read config file");
+  }
+
+  std::string original_content;
+  std::string line;
+  std::unordered_set<std::string> existing_flags;
+  std::vector<std::string> updated_lines;
+  bool in_generated_section = false;
+  bool had_generated_section = false;
+
+  // Get only runtime modified flag values (not startup config)
+  std::unordered_map<std::string, std::string> current_flags;
+  auto all_flags = absl::GetAllFlags();
+  for (const auto& [flag_name, flag_ptr] : all_flags) {
+    // Only include flags that were modified at runtime via CONFIG SET
+    // We exclude 'flagfile' and other startup-only configs
+    if (flag_ptr->CurrentValue() != flag_ptr->DefaultValue() && flag_name != "flagfile") {
+      // Additional check: only include if the config is known to ConfigRegistry
+      // This ensures we only write configs that can be modified at runtime
+      auto config_names = config_registry.List(flag_name);
+      if (!config_names.empty()) {
+        current_flags[std::string(flag_name)] = flag_ptr->CurrentValue();
+      }
+    }
+  }
+
+  // Process original file line by line
+  while (std::getline(file, line)) {
+    std::string trimmed = line;
+    trimmed.erase(0, trimmed.find_first_not_of(" \t"));
+
+    // Skip generated section from previous rewrites
+    if (trimmed == "# Generated by CONFIG REWRITE") {
+      in_generated_section = true;
+      had_generated_section = true;
+      break;
+    }
+
+    if (!in_generated_section) {
+      // Check if this line is a flag definition
+      if (!trimmed.empty() && trimmed[0] == '-' && trimmed[1] == '-') {
+        size_t eq_pos = trimmed.find('=');
+        if (eq_pos != std::string::npos) {
+          std::string flag_name = trimmed.substr(2, eq_pos - 2);
+          if (current_flags.count(flag_name)) {
+            // Update existing flag with current value
+            updated_lines.push_back(absl::StrCat("--", flag_name, "=", current_flags[flag_name]));
+            existing_flags.insert(flag_name);
+          } else {
+            // Keep original line if flag is not in current active flags
+            updated_lines.push_back(line);
+          }
+        } else {
+          // Keep original line as-is
+          updated_lines.push_back(line);
+        }
+      } else {
+        // Keep comments and other lines as-is
+        updated_lines.push_back(line);
+      }
+    }
+  }
+  file.close();
+
+  // Collect new flags that weren't in original config
+  std::vector<std::string> new_flags;
+  for (const auto& [flag_name, flag_value] : current_flags) {
+    if (existing_flags.find(flag_name) == existing_flags.end()) {
+      new_flags.push_back(absl::StrCat("--", flag_name, "=", flag_value));
+    }
+  }
+
+  // Build final content
+  std::string final_content;
+  for (const auto& line : updated_lines) {
+    final_content += line + "\n";
+  }
+
+  // Add new flags section if there are any
+  if (!new_flags.empty()) {
+    if (!final_content.empty() && final_content.back() != '\n') {
+      final_content += "\n";
+    }
+    // Only add extra spacing if this is the first time adding generated section
+    if (!had_generated_section) {
+      final_content += "\n# Generated by CONFIG REWRITE\n";
+    } else {
+      final_content += "# Generated by CONFIG REWRITE\n";
+    }
+    for (const auto& new_flag : new_flags) {
+      final_content += new_flag + "\n";
+    }
+  }
+
+  // Atomic write using mkstemp + rename
+  std::string tmp_template = config_file_path + ".tmpXXXXXX";
+  int fd = mkstemp(tmp_template.data());
+  if (fd == -1) {
+    return GenericError("Failed to create temporary file");
+  }
+
+  size_t off = 0;
+  while (off < final_content.size()) {
+    ssize_t n = write(fd, final_content.c_str() + off, final_content.size() - off);
+    if (n <= 0) {
+      close(fd);
+      unlink(tmp_template.data());
+      return GenericError("Failed to write config file");
+    }
+    off += n;
+  }
+
+  fsync(fd);
+  fchmod(fd, 0644);
+  close(fd);
+
+  if (rename(tmp_template.data(), config_file_path.c_str()) == -1) {
+    unlink(tmp_template.data());
+    return GenericError("Failed to rewrite config file");
+  }
+
+  return {};
 }
 
 }  // namespace
@@ -1028,51 +1223,35 @@ void ServerFamily::Shutdown() {
 }
 
 bool ServerFamily::HasPrivilegedInterface() {
-  for (auto* listener : listeners_) {
-    if (listener->IsPrivilegedInterface()) {
-      return true;
-    }
-  }
-  return false;
+  return any_of(listeners_.begin(), listeners_.end(),
+                [](auto* l) { return l->IsPrivilegedInterface(); });
 }
 
 void ServerFamily::UpdateMemoryGlobalStats() {
-  ShardId sid = EngineShard::tlocal()->shard_id();
-  if (sid != 0) {  // This function is executed periodicaly on all shards. To ensure the logic
-                   // bellow runs only on one shard we return is the shard is not 0.
+  // Called from all shards, but one updates global stats below
+  if (EngineShard::tlocal()->shard_id() > 0)
     return;
-  }
 
+  // Update used memory peak
   uint64_t mem_current = used_mem_current.load(std::memory_order_relaxed);
-  if (mem_current > used_mem_peak.load(memory_order_relaxed)) {
-    used_mem_peak.store(mem_current, memory_order_relaxed);
-  }
+  if (mem_current > glob_memory_peaks.used.load(memory_order_relaxed))
+    glob_memory_peaks.used.store(mem_current, memory_order_relaxed);
 
   io::StatusData status_data;
-  bool success = ReadProcStats(&status_data);
+  bool success = ReadProcStats(&status_data);  // updates glob_memory_peaks.rss
   if (!success)
     return;
 
   size_t total_rss = FetchRssMemory(status_data);
+
+  // Decide on stopping or accepting new connections based on oom deny ratio
   double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
   if (rss_oom_deny_ratio > 0) {
     size_t memory_limit = max_memory_limit * rss_oom_deny_ratio;
-    if (total_rss > memory_limit && accepting_connections_ && HasPrivilegedInterface()) {
-      for (auto* listener : listeners_) {
-        if (!listener->IsPrivilegedInterface()) {
-          listener->socket()->proactor()->Await([listener]() { listener->pause_accepting(); });
-        }
-      }
-      accepting_connections_ = false;
-
-    } else if (total_rss < memory_limit && !accepting_connections_) {
-      for (auto* listener : listeners_) {
-        if (!listener->IsPrivilegedInterface()) {
-          listener->socket()->proactor()->Await([listener]() { listener->resume_accepting(); });
-        }
-      }
-      accepting_connections_ = true;
-    }
+    if (total_rss > memory_limit && accepting_connections_ && HasPrivilegedInterface())
+      ChangeConnectionAccept(false);
+    else if (total_rss < memory_limit && !accepting_connections_)
+      ChangeConnectionAccept(true);
   }
 }
 
@@ -1409,8 +1588,8 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   bool success = ReadProcStats(&sdata);
   AppendMetricWithoutLabels("memory_used_bytes", "", m.heap_used_bytes, MetricType::GAUGE,
                             &resp->body());
-  AppendMetricWithoutLabels("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
-                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("memory_used_peak_bytes", "", m.used_mem_peak, MetricType::GAUGE,
+                            &resp->body());
   AppendMetricWithoutLabels("memory_fiberstack_vms_bytes",
                             "virtual memory size used by all the fibers", m.worker_fiber_stack_size,
                             MetricType::GAUGE, &resp->body());
@@ -1793,33 +1972,49 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
     return GenericError{make_error_code(errc::operation_in_progress),
                         StrCat(GlobalStateName(state), " - can not save database")};
   }
+  // Check if save is already in progress
   {
     util::fb2::LockGuard lk(save_mu_);
     if (save_controller_) {
       return GenericError{make_error_code(errc::operation_in_progress),
                           "SAVING - can not save database"};
     }
+  }
 
-    auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
-                                ? snapshot_storage_
-                                : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
+  // Create save controller outside of mutex to avoid blocking INFO commands
+  auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
+                              ? snapshot_storage_
+                              : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
 
-    save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
-        save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
-        &service_, fq_threadpool_.get(), snapshot_storage, opts.bg_save});
+  auto temp_save_controller = make_unique<SaveStagesController>(detail::SaveStagesInputs{
+      save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans, &service_,
+      fq_threadpool_.get(), snapshot_storage, opts.bg_save});
 
-    auto res = save_controller_->InitResourcesAndStart();
+  // Initialize resources outside of mutex (this may take time for S3 operations)
+  auto res = temp_save_controller->InitResourcesAndStart();
+
+  // Now acquire mutex only to set the controller and update state
+  {
+    util::fb2::LockGuard lk(save_mu_);
+
+    // Double-check that no other save started while we were initializing
+    if (save_controller_) {
+      return GenericError{make_error_code(errc::operation_in_progress),
+                          "SAVING - can not save database"};
+    }
 
     if (res) {
       DCHECK_EQ(res->error, true);
       last_save_info_.SetLastSaveError(*res);
-      save_controller_.reset();
+      // Don't set save_controller_ since initialization failed
       if (bg_save) {
         last_save_info_.last_bgsave_status = false;
       }
       return res->error;
     }
 
+    // Success - set the controller and update state
+    save_controller_ = std::move(temp_save_controller);
     last_save_info_.bgsave_in_progress = bg_save;
   }
   return {};
@@ -2045,6 +2240,14 @@ void ServerFamily::ClientUnPauseCmd(CmdArgList args, SinkReplyBuilder* builder) 
   builder->SendOk();
 }
 
+void ServerFamily::ChangeConnectionAccept(bool accept) {
+  DCHECK_NE(accept, accepting_connections_);
+  auto h = accept ? &ListenerInterface::resume_accepting : &ListenerInterface::pause_accepting;
+  for (auto* listener : GetNonPriviligedListeners())
+    listener->socket()->proactor()->Await([listener, h]() { (listener->*h)(); });
+  accepting_connections_ = accept;
+}
+
 void ClientHelp(SinkReplyBuilder* builder) {
   string_view help_arr[] = {
       "CLIENT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
@@ -2078,6 +2281,8 @@ void ClientHelp(SinkReplyBuilder* builder) {
       "    * LIB-VER: the client lib version.",
       "TRACKING (ON|OFF) [OPTIN] [OPTOUT] [NOLOOP]",
       "    Control server assisted client side caching.",
+      "MIGRATE <client-id> <tid>",
+      "    Migrates connection specified by client-id to the specified thread id.",
       "HELP",
       "    Print this help."};
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
@@ -2110,6 +2315,8 @@ void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
     return ClientSetInfo(sub_args, builder, cntx);
   } else if (sub_cmd == "ID") {
     return ClientId(sub_args, builder, cntx);
+  } else if (sub_cmd == "MIGRATE") {
+    return ClientMigrate(sub_args, absl::MakeSpan(listeners_), builder, cntx);
   } else if (sub_cmd == "HELP") {
     return ClientHelp(builder);
   }
@@ -2130,6 +2337,8 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
         "    Set the configuration <directive> to <value>.",
         "RESETSTAT",
         "    Reset statistics reported by the INFO command.",
+        "REWRITE",
+        "    Rewrite the configuration file with the current configuration.",
         "HELP",
         "    Prints this help.",
     };
@@ -2188,6 +2397,13 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
     }
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
     return rb->SendBulkStrArr(res, RedisReplyBuilder::MAP);
+  }
+
+  if (sub_cmd == "REWRITE") {
+    if (auto ec = RewriteConfigFile(); ec) {
+      return builder->SendError(ec.Format());
+    }
+    return builder->SendOk();
   }
 
   if (sub_cmd == "RESETSTAT") {
@@ -2436,13 +2652,19 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
   // update peak_stats_ from it.
-  util::fb2::LockGuard lk{peak_stats_mu_};
-  UpdateMax(&peak_stats_.conn_dispatch_queue_bytes,
-            result.facade_stats.conn_stats.dispatch_queue_bytes);
-  UpdateMax(&peak_stats_.conn_read_buf_capacity, result.facade_stats.conn_stats.read_buf_capacity);
+  {
+    util::fb2::LockGuard lk{peak_stats_mu_};
+    UpdateMax(&peak_stats_.conn_dispatch_queue_bytes,
+              result.facade_stats.conn_stats.dispatch_queue_bytes);
+    UpdateMax(&peak_stats_.conn_read_buf_capacity,
+              result.facade_stats.conn_stats.read_buf_capacity);
+    result.peak_stats = peak_stats_;
+  }
 
   result.peak_stats = peak_stats_;
   result.cmd_latency_map = service_.mutable_registry()->LatencyMap();
+  result.used_mem_peak = glob_memory_peaks.used.load(memory_order_relaxed);
+  result.used_mem_rss_peak = glob_memory_peaks.rss.load(memory_order_relaxed);
 
   uint64_t delta_ms = (absl::GetCurrentTimeNanos() - start) / 1'000'000;
   if (delta_ms > 30) {
@@ -2531,9 +2753,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
   auto add_mem_info = [&] {
     append("used_memory", m.heap_used_bytes);
     append("used_memory_human", HumanReadableNumBytes(m.heap_used_bytes));
-    const auto ump = used_mem_peak.load(memory_order_relaxed);
-    append("used_memory_peak", ump);
-    append("used_memory_peak_human", HumanReadableNumBytes(ump));
+    append("used_memory_peak", m.used_mem_peak);
+    append("used_memory_peak_human", HumanReadableNumBytes(m.used_mem_peak));
 
     // Virtual memory size, upper bound estimation on the RSS memory used by the fiber stacks.
     append("fibers_stack_vms", m.worker_fiber_stack_size);
@@ -2546,7 +2767,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       append("used_memory_rss", rss);
       append("used_memory_rss_human", HumanReadableNumBytes(rss));
     }
-    append("used_memory_peak_rss", rss_mem_peak.load(memory_order_relaxed));
+    append("used_memory_peak_rss", glob_memory_peaks.used.load(memory_order_relaxed));
 
     append("maxmemory", max_memory_limit);
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));

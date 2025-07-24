@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "base/logging.h"
+#include "core/search/query_driver.h"
 #include "core/search/search.h"
 #include "core/search/vector_utils.h"
 #include "facade/cmd_arg_parser.h"
@@ -134,6 +135,14 @@ ParseResult<search::SchemaField::TextParams> ParseTextParams(CmdArgParser* parse
   return params;
 }
 
+search::SchemaField::NumericParams ParseNumericParams(CmdArgParser* parser) {
+  search::SchemaField::NumericParams params{};
+  if (parser->Check("BLOCKSIZE")) {
+    params.block_size = parser->Next<size_t>();
+  }
+  return params;
+}
+
 // breaks on ParamsVariant initialization
 #ifndef __clang__
 #pragma GCC diagnostic push
@@ -160,7 +169,7 @@ ParsedSchemaField ParseText(CmdArgParser* parser) {
 }
 
 ParsedSchemaField ParseNumeric(CmdArgParser* parser) {
-  return std::make_pair(search::SchemaField::NUMERIC, std::monostate{});
+  return std::make_pair(search::SchemaField::NUMERIC, ParseNumericParams(parser));
 }
 
 // Vector fields include: {algorithm} num_args args...
@@ -611,9 +620,23 @@ void SearchReply(const SearchParams& params,
   }
 }
 
+// Warms up the query parser to avoid first-call slowness
+void WarmupQueryParser() {
+  static std::once_flag warmed_up;
+  std::call_once(warmed_up, []() {
+    search::QueryParams params;
+    search::QueryDriver driver{};
+    driver.SetParams(&params);
+    driver.SetInput(std::string{""});
+    (void)search::Parser (&driver)();
+  });
+}
+
 }  // namespace
 
 void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
+  WarmupQueryParser();
+
   auto* builder = cmd_cntx.rb;
   if (cmd_cntx.conn_cntx->conn_state.db_index != 0) {
     return builder->SendError("Cannot create index on db != 0"sv);
@@ -781,15 +804,22 @@ void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
     vector<string> info;
 
     string_view base[] = {"identifier"sv, string_view{field_ident},
-                          "attribute",    field_info.short_name,
+                          "attribute"sv,  field_info.short_name,
                           "type"sv,       SearchFieldTypeToString(field_info.type)};
     info.insert(info.end(), base, base + ABSL_ARRAYSIZE(base));
 
     if (field_info.flags & search::SchemaField::NOINDEX)
-      info.push_back("NOINDEX");
+      info.emplace_back("NOINDEX"sv);
 
     if (field_info.flags & search::SchemaField::SORTABLE)
-      info.push_back("SORTABLE");
+      info.emplace_back("SORTABLE"sv);
+
+    if (field_info.type == search::SchemaField::NUMERIC) {
+      auto& numeric_params =
+          std::get<search::SchemaField::NumericParams>(field_info.special_params);
+      info.emplace_back("blocksize"sv);
+      info.emplace_back(std::to_string(numeric_params.block_size));
+    }
 
     rb->SendSimpleStrArr(info);
   }

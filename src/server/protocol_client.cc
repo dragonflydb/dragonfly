@@ -199,7 +199,11 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
   int yes = 1;
   if (setsockopt(sock_->native_handle(), SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes)) == 0) {
     int intv = 300;
+#ifdef __APPLE__
+    setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_KEEPALIVE, &intv, sizeof(intv));
+#else
     setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_KEEPIDLE, &intv, sizeof(intv));
+#endif
 
     intv /= 3;
     setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_KEEPINTVL, &intv, sizeof(intv));
