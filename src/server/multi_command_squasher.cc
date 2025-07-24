@@ -66,9 +66,9 @@ size_t Size(const CapturingReplyBuilder::Payload& payload) {
 
 }  // namespace
 
-MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
-                                           Service* service, const Opts& opts)
-    : cmds_{cmds}, cntx_{cntx}, service_{service}, base_cid_{nullptr}, opts_{opts} {
+MultiCommandSquasher::MultiCommandSquasher(ConnectionContext* cntx, Service* service,
+                                           const Opts& opts)
+    : cntx_{cntx}, service_{service}, base_cid_{nullptr}, opts_{opts} {
   auto mode = cntx->transaction->GetMultiMode();
   base_cid_ = cntx->transaction->GetCId();
   atomic_ = mode != Transaction::NON_ATOMIC;
@@ -141,13 +141,13 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(const StoredC
   return need_flush ? SquashResult::SQUASHED_FULL : SquashResult::SQUASHED;
 }
 
-bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const StoredCmd* cmd) {
+bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const StoredCmd& cmd) {
   DCHECK(order_.empty());  // check no squashed chain is interrupted
 
-  auto args = cmd->ArgList(&tmp_keylist_);
+  auto args = cmd.ArgList(&tmp_keylist_);
 
   if (opts_.verify_commands) {
-    if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
+    if (auto err = service_->VerifyCommandState(cmd.Cid(), args, *cntx_); err) {
       rb->SendError(std::move(*err));
       rb->ConsumeLastError();
       return !opts_.error_abort;
@@ -155,8 +155,8 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const Stored
   }
 
   auto* tx = cntx_->transaction;
-  if (cmd->Cid()->IsTransactional()) {
-    tx->MultiSwitchCmd(cmd->Cid());
+  if (cmd.Cid()->IsTransactional()) {
+    tx->MultiSwitchCmd(cmd.Cid());
     auto status = tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
     if (status != OpStatus::OK) {
       rb->SendError(status);
@@ -164,8 +164,8 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const Stored
       return !opts_.error_abort;
     }
   }
-  service_->InvokeCmd(cmd->Cid(), args, CommandContext{tx, rb, cntx_});
-  return true;
+  service_->InvokeCmd(cmd.Cid(), args, CommandContext{tx, rb, cntx_});
+  return !(!rb->ConsumeLastError().empty() && opts_.error_abort);
 }
 
 OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v) {
@@ -303,11 +303,11 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   return !aborted;
 }
 
-size_t MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
-  DVLOG(1) << "Trying to squash " << cmds_.size() << " commands for transaction "
+size_t MultiCommandSquasher::Run(absl::Span<const StoredCmd> cmds, RedisReplyBuilder* rb) {
+  DVLOG(1) << "Trying to squash " << cmds.size() << " commands for transaction "
            << cntx_->transaction->DebugId();
 
-  for (auto& cmd : cmds_) {
+  for (auto& cmd : cmds) {
     auto res = TrySquash(&cmd);
 
     if (res == SquashResult::ERROR)
@@ -319,7 +319,7 @@ size_t MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
 
       // if the last command was not added - we squash it separately.
       if (res == SquashResult::NOT_SQUASHED) {
-        if (!ExecuteStandalone(rb, &cmd))
+        if (!ExecuteStandalone(rb, cmd))
           break;
       }
     }
@@ -339,7 +339,7 @@ size_t MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
     }
   }
 
-  VLOG(1) << "Squashed " << num_squashed_ << " of " << cmds_.size()
+  VLOG(1) << "Squashed " << num_squashed_ << " of " << cmds.size()
           << " commands, max fanout: " << num_shards_ << ", atomic: " << atomic_;
   return num_squashed_;
 }

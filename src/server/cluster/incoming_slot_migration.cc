@@ -91,9 +91,9 @@ class ClusterShardMigration {
                   << " canceled due memory limit reached";
           return;
         }
-        if (!tx_data->command.cmd_args.empty()) {
+        if (!tx_data->command.command.empty()) {
           VLOG(1) << "Flow finalization failed " << source_shard_id_ << " by "
-                  << tx_data->command.cmd_args[0];
+                  << tx_data->command.command;
         } else {
           VLOG(1) << "Flow finalization failed " << source_shard_id_ << " by opcode "
                   << (int)tx_data->opcode;
@@ -155,9 +155,8 @@ class ClusterShardMigration {
                                                 : error_code();
     } else {
       // TODO check which global commands should be supported
-      std::string error =
-          absl::StrCat("We don't support command: ", ToSV(tx_data.command.cmd_args[0]),
-                       " in cluster migration process.");
+      std::string error = absl::StrCat("We don't support command: ", tx_data.command.command,
+                                       " in cluster migration process.");
       LOG(ERROR) << error;
       cntx->ReportError(error);
       in_migration_->ReportError(error);

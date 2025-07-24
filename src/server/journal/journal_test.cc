@@ -23,27 +23,16 @@ template <typename T> string ConCat(const T& list) {
   return res;
 }
 
-template <> string ConCat(const CmdArgList& list) {
-  string res;
-  for (auto arg : list) {
-    res += facade::ToSV(arg);
-    res += ' ';
-  }
-  return res;
-}
-
-struct EntryPayloadVisitor {
-  void operator()(const Entry::Payload& p) {
-    out->append(p.cmd).append(" ");
-    *out += visit([](const auto& args) { return ConCat(args); }, p.args);
-  }
-
-  string* out;
-};
-
 // Extract payload from entry in string form.
 std::string ExtractPayload(ParsedEntry& entry) {
-  std::string out = ConCat(entry.cmd.cmd_args);
+  std::string out = entry.cmd.command;
+  out.push_back(' ');
+
+  size_t offset = 0;
+  for (uint32_t sz : entry.cmd.arg_sizes) {
+    absl::StrAppend(&out, entry.cmd.arg_buf.substr(offset, sz));
+    offset += sz;
+  }
 
   if (!out.empty())
     out.pop_back();
@@ -53,8 +42,8 @@ std::string ExtractPayload(ParsedEntry& entry) {
 
 std::string ExtractPayload(Entry& entry) {
   std::string out;
-  EntryPayloadVisitor visitor{&out};
-  visitor(entry.payload);
+  out.append(entry.payload.cmd).append(" ");
+  out += visit([](const auto& args) { return ConCat(args); }, entry.payload.args);
 
   if (!out.empty())
     out.pop_back();

@@ -23,16 +23,18 @@ namespace dfly {
 class MultiCommandSquasher {
  public:
   struct Opts {
-    bool verify_commands = false;   // Whether commands need to be verified before execution
+    bool verify_commands = true;    // Whether commands need to be verified before execution
     bool error_abort = false;       // Abort upon receiving error
     unsigned max_squash_size = 32;  // How many commands to squash at once
   };
 
-  // Returns number of processed commands.
-  static size_t Execute(absl::Span<StoredCmd> cmds, facade::RedisReplyBuilder* rb,
-                        ConnectionContext* cntx, Service* service, const Opts& opts) {
-    return MultiCommandSquasher{cmds, cntx, service, opts}.Run(rb);
-  }
+  MultiCommandSquasher(ConnectionContext* cntx, Service* Service, const Opts& opts);
+
+  // Run all commands until completion. Returns number of processed commands.
+  size_t Run(absl::Span<const StoredCmd> cmds, facade::RedisReplyBuilder* rb);
+
+  // Execute separate non-squashed cmd. Return false if aborting on error.
+  bool ExecuteStandalone(facade::RedisReplyBuilder* rb, const StoredCmd& cmd);
 
   static void SetMaxBusySquashUsec(uint32_t usec);
 
@@ -56,17 +58,11 @@ class MultiCommandSquasher {
 
   enum class SquashResult { SQUASHED, SQUASHED_FULL, NOT_SQUASHED, ERROR };
 
-  MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx, Service* Service,
-                       const Opts& opts);
-
   // Lazy initialize shard info.
   ShardExecInfo& PrepareShardInfo(ShardId sid);
 
   // Retrun squash flags
   SquashResult TrySquash(const StoredCmd* cmd);
-
-  // Execute separate non-squashed cmd. Return false if aborting on error.
-  bool ExecuteStandalone(facade::RedisReplyBuilder* rb, const StoredCmd* cmd);
 
   // Callback that runs on shards during squashed hop.
   facade::OpStatus SquashedHopCb(EngineShard* es, facade::RespVersion resp_v);
@@ -74,13 +70,9 @@ class MultiCommandSquasher {
   // Execute all currently squashed commands. Return false if aborting on error.
   bool ExecuteSquashed(facade::RedisReplyBuilder* rb);
 
-  // Run all commands until completion. Returns number of processed commands.
-  size_t Run(facade::RedisReplyBuilder* rb);
-
   bool IsAtomic() const;
 
-  absl::Span<StoredCmd> cmds_;  // Input range of stored commands
-  ConnectionContext* cntx_;     // Underlying context
+  ConnectionContext* cntx_;  // Underlying context
   Service* service_;
 
   bool atomic_;                // Whether working in any of the atomic modes
