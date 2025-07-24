@@ -180,9 +180,9 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
   if ((available < 256_MB) && (available < capacity * 0.15) && !grow_pending_) {
     auto ec = TryGrow(256_MB);
     LOG_IF(ERROR, ec && ec != errc::file_too_large) << "Could not call grow :" << ec.message();
-    return ec;
   }
-  return {};
+
+  return {};  // Must succeed after the operation was scheduled to run cleanup
 }
 
 DiskStorage::Stats DiskStorage::GetStats() const {
