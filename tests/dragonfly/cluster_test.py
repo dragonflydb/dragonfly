@@ -1326,6 +1326,14 @@ async def test_cluster_flushall_during_migration(
 
     assert await nodes[0].client.dbsize() == 0
 
+    # Push config that causes mass async slot deletion on nodes[1]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    # Issue flushall right after pushing new config so it runs at the same time as disowned slots are flushed
+    await nodes[1].client.execute_command("flushall")
+
 
 @pytest.mark.parametrize("interrupt", [False, True])
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})

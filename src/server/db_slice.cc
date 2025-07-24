@@ -788,6 +788,9 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   uint64_t next_version = 0;
   uint64_t del_count = 0;
 
+  // Explicitly copy table smart pointer to keep reference count up (flushall drops it)
+  boost::intrusive_ptr<DbTable> table = db_arr_.front();
+
   std::string tmp;
   auto iterate_bucket = [&](PrimeTable::bucket_iterator it) {
     it.AdvanceIfNotOccupied();
@@ -795,7 +798,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
       std::string_view key = it->first.GetSlice(&tmp);
       SlotId sid = KeySlot(key);
       if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
-        PerformDeletion(Iterator::FromPrime(it), db_arr_[0].get());
+        PerformDeletion(Iterator::FromPrime(it), table.get());
         ++del_count;
       }
       ++it;
@@ -822,7 +825,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   next_version = RegisterOnChange(std::move(on_change));
 
   ServerState& etl = *ServerState::tlocal();
-  PrimeTable* pt = &db_arr_[0]->prime;
+  PrimeTable* pt = &table->prime;
   PrimeTable::Cursor cursor;
 
   do {

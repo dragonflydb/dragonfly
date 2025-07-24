@@ -50,6 +50,10 @@ class IncomingSlotMigration {
     return source_id_;
   }
 
+  size_t ShardNum() const {
+    return shard_flows_.size();
+  }
+
   // Switch to  FATAL state and store error message
   void ReportFatalError(dfly::GenericError err) ABSL_LOCKS_EXCLUDED(state_mu_, error_mu_) {
     errors_count_.fetch_add(1, std::memory_order_relaxed);
