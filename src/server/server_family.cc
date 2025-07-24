@@ -292,6 +292,7 @@ std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_
     exit(1);
 #endif
   } else if (detail::IsGCSPath(uri)) {
+#ifdef WITH_GCP
     auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
     auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return gcs->Init(3000); });
     if (ec) {
@@ -299,6 +300,10 @@ std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_
       exit(1);
     }
     return gcs;
+#else
+    LOG(ERROR) << "Compiled without GCP support";
+    exit(1);
+#endif
   } else {
     LOG(ERROR) << "Uknown cloud storage " << uri;
     exit(1);
