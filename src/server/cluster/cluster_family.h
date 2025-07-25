@@ -44,9 +44,13 @@ class ClusterFamily {
 
   size_t MigrationsErrorsCount() const ABSL_LOCKS_EXCLUDED(migration_mu_);
 
-  // Helper function to be used from repltakeover flow. It swaps master and replica
-  // slot config transparently for replica node becoming the new master (where it is called).
-  void ReconcileMasterReplicaTakeoverSlots(bool was_master);
+  // Helper function to be used during takeover from both nodes (master and replica).
+  // It reconciles the cluster configuration for both nodes to reflect the node
+  // role changes after the takeover.
+  // For the taking over node it's called at the end of the ReplTakeOver flow
+  // and for the taken over node it's called at the end of the dflycmd::TakeOver
+  void ReconcileMasterReplicaTakeoverSlots(bool was_master)
+      ABSL_LOCKS_EXCLUDED(set_config_mu, migration_mu_);
 
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
@@ -121,8 +125,8 @@ class ClusterFamily {
 
   ClusterShardInfo GetEmulatedShardInfo(ConnectionContext* cntx) const;
 
-  void ReconcileMasterFlow();
-  void ReconcileReplicaFlow();
+  void ReconcileMasterFlow() ABSL_EXCLUSIVE_LOCKS_REQUIRED(set_config_mu, migration_mu_);
+  void ReconcileReplicaFlow() ABSL_EXCLUSIVE_LOCKS_REQUIRED(set_config_mu, migration_mu_);
 
   // Guards set configuration, so that we won't handle 2 in parallel.
   mutable util::fb2::Mutex set_config_mu;

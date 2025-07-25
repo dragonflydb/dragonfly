@@ -291,9 +291,6 @@ class ServerFamily {
                        [&match](auto& elem) { return elem.state == match; });
   }
 
-  // Used by DFLY command after replica takeover
-  void ReconcileMasterReplicaTakeoverSlots();
-
  private:
   bool HasPrivilegedInterface();
   void JoinSnapshotSchedule();

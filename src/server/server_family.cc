@@ -3605,10 +3605,6 @@ void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,
   }
 }
 
-void ServerFamily::ReconcileMasterReplicaTakeoverSlots() {
-  service_.cluster_family().ReconcileMasterReplicaTakeoverSlots(true);
-}
-
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))
 
 namespace acl {
