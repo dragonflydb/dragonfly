@@ -92,6 +92,8 @@ struct BaseSortIndex : BaseIndex {
    See index_result.h for more details. */
 struct SeekableTag {};
 
+template <typename Iterator> void BasicSeekGE(DocId min_doc_id, const Iterator& end, Iterator* it);
+
 /* Used for converting field values to double. Returns std::nullopt if the conversion fails */
 std::optional<double> ParseNumericField(std::string_view value);
 
@@ -112,6 +114,41 @@ template <typename InlinedVector> std::optional<InlinedVector> EmptyAccessResult
 #if !defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
+}
+
+// Implementation
+/******************************************************************/
+namespace details {
+inline size_t GetHighestPowerOfTwo(size_t n) {
+  static constexpr size_t kBitsNumber = sizeof(size_t) * 8;
+  return size_t(1) << (kBitsNumber - 1 - __builtin_clzl(n));
+}
+}  // namespace details
+
+template <typename Iterator> void BasicSeekGE(DocId min_doc_id, const Iterator& end, Iterator* it) {
+  auto less_than_min_doc_id = [&](const auto& value) {
+    using T = std::decay_t<decltype(value)>;
+    if constexpr (std::is_same_v<T, DocId>) {
+      return value < min_doc_id;
+    } else {
+      return value.first < min_doc_id;
+    }
+  };
+
+  size_t length = std::distance(*it, end);
+  for (size_t step = details::GetHighestPowerOfTwo(length); step > 0; step >>= 1) {
+    if (step < length) {
+      auto next_it = *it + step;
+      if (less_than_min_doc_id(*next_it)) {
+        *it = next_it;
+        length -= step;
+      }
+    }
+  }
+
+  while (*it != end && less_than_min_doc_id(**it)) {
+    ++(*it);
+  }
 }
 
 }  // namespace dfly::search
