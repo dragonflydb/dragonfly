@@ -69,9 +69,9 @@ class PageUsage {
     return unique_pages_.CollectedStats();
   }
 
- private:
   bool ConsumePageStats(mi_page_usage_stats_t stats);
 
+ private:
   CollectPageStats collect_stats_{CollectPageStats::NO};
   float threshold_;
 
