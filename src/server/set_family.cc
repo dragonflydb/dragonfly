@@ -125,8 +125,8 @@ struct StringSetWrapper {
     long maxiterations = count * 10;
 
     const auto start_cycles = base::CycleClock::Now();
-    // Don't allow it to monopolize cpu time. Roughly 15 microseconds.
-    const uint64_t timeout_cycles = base::CycleClock::Frequency() >> 16;
+    // Approximately 100usec
+    const uint64_t timeout_cycles = base::CycleClock::Now() + base::CycleClock::Frequency() / 10000;
 
     do {
       auto scan_callback = [&](const sds ptr) {
