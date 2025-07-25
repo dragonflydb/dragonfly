@@ -35,6 +35,8 @@ class TieredStorage {
   // Min sizes of values taking up full page on their own
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
 
+  template <typename T> using TResult = util::fb2::Future<io::Result<T>>;
+
   explicit TieredStorage(size_t max_file_size, DbSlice* db_slice);
   ~TieredStorage();  // drop forward declared unique_ptrs
 
@@ -44,11 +46,8 @@ class TieredStorage {
   std::error_code Open(std::string_view path);
   void Close();
 
-  void SetMemoryLowWatermark(size_t mem_limit);
-
   // Read offloaded value. It must be of external type
-  util::fb2::Future<io::Result<std::string>> Read(DbIndex dbid, std::string_view key,
-                                                  const PrimeValue& value);
+  TResult<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);
 
   // Read offloaded value. It must be of external type
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
@@ -58,9 +57,8 @@ class TieredStorage {
   // Unlike immutable Reads - the modified value must be uploaded back to memory.
   // This is handled by OpManager when modf completes.
   template <typename T>
-  util::fb2::Future<io::Result<T>> Modify(DbIndex dbid, std::string_view key,
-                                          const PrimeValue& value,
-                                          std::function<T(std::string*)> modf);
+  TResult<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                    std::function<T(std::string*)> modf);
 
   // Stash value. Sets IO_PENDING flag and unsets it on error or when finished
   // Returns true if item was scheduled for stashing.
@@ -82,6 +80,9 @@ class TieredStorage {
 
   // Prune cool entries to reach the set memory goal with freed memory
   size_t ReclaimMemory(size_t goal);
+
+  // See OpManager::memory_low_limit
+  void SetMemoryLowWatermark(size_t mem_limit);
 
   // Returns the primary value, and deletes the cool item as well as its offloaded storage.
   PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item);
