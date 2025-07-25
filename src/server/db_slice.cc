@@ -1601,6 +1601,7 @@ void DbSlice::SendQueuedInvalidationMessages() {
     // Notify all the clients. this function is not efficient,
     // because it broadcasts to all threads unrelated to the subscribers for the key.
     auto local_map = std::move(pending_send_map_);
+    pending_send_map_ = {};
     auto cb = [&](unsigned thread_id, util::ProactorBase*) {
       SendQueuedInvalidationMessagesCb(local_map, thread_id);
     };

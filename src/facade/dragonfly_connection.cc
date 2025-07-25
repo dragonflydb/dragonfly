@@ -736,7 +736,7 @@ void Connection::OnPostMigrateThread() {
 }
 
 void Connection::OnConnectionStart() {
-  ThisFiber::SetName("DflyConnection");
+  SetName(absl::StrCat(id_));
 
   stats_ = &tl_facade_stats->conn_stats;
 
@@ -996,7 +996,7 @@ bool Connection::IsMainOrMemcache() const {
 }
 
 void Connection::SetName(string name) {
-  util::ThisFiber::SetName(absl::StrCat("DflyConnection_", name));
+  util::ThisFiber::SetName(absl::StrCat("DflyConn_", name));
   name_ = std::move(name);
 }
 
@@ -1424,7 +1424,6 @@ error_code Connection::HandleRecvSocket() {
   } else {
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
     DCHECK(!append_buf.empty());
-
     ::io::Result<size_t> recv_sz = socket_->Recv(append_buf);
     last_interaction_ = time(nullptr);
 
@@ -2176,7 +2175,7 @@ void Connection::EnsureMemoryBudget(unsigned tid) {
 }
 
 void Connection::SetMaxBusyReadUsecThreadLocal(unsigned usec) {
-  max_busy_read_cycles_cached = (base::CycleClock::Frequency() * usec) / 1000000U;
+  max_busy_read_cycles_cached = base::CycleClock::FromUsec(usec);
 }
 
 void Connection::SetAlwaysFlushPipelineThreadLocal(bool flush) {
