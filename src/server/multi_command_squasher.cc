@@ -258,7 +258,11 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
       this->SquashedHopCb(EngineShard::tlocal(), rb->GetRespVersion());
       bc->Dec();
     };
-
+    unsigned run_usec = base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles());
+    if (run_usec > 10'000) {
+      LOG_EVERY_T(WARNING, 1) << "Fiber run " << run_usec << " usec, squashed " << cmds_.size()
+                              << " commands";
+    }
     for (unsigned i = 0; i < sharded_.size(); ++i) {
       if (!sharded_[i].dispatched.empty())
         shard_set->AddL2(i, cb);
