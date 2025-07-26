@@ -101,10 +101,15 @@ if (WITH_AWS)
   add_definitions(-DWITH_AWS)
 endif()
 
+if (WITH_GCP)
+  SET(GCP_LIB gcp_lib)
+  add_definitions(-DWITH_GCP)
+endif()
+
 cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float TRDP::hdr_histogram)
 cxx_link(dragonfly_lib dfly_transaction dfly_facade dfly_search_server
-         redis_lib ${AWS_LIB} jsonpath
-         strings_lib html_lib gcp_lib azure_lib
+         redis_lib ${AWS_LIB} ${GCP_LIB} azure_lib jsonpath
+         strings_lib html_lib
          http_client_lib absl::random_random TRDP::jsoncons TRDP::zstd TRDP::lz4
          TRDP::croncpp TRDP::flatbuffers)
 

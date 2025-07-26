@@ -7,6 +7,11 @@
 #include <aws/s3/S3Client.h>
 #endif
 
+#ifdef WITH_GCP
+#include "util/cloud/gcp/gcp_creds_provider.h"
+#include "util/cloud/gcp/gcs.h"
+#endif
+
 #include <absl/strings/match.h>
 
 #include <filesystem>
@@ -16,8 +21,7 @@
 
 #include "io/io.h"
 #include "server/common.h"
-#include "util/cloud/gcp/gcp_creds_provider.h"
-#include "util/cloud/gcp/gcs.h"
+#include "util/cloud/utils.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/uring_file.h"
 
@@ -100,6 +104,7 @@ class FileSnapshotStorage : public SnapshotStorage {
   util::fb2::FiberQueueThreadPool* fq_threadpool_;
 };
 
+#ifdef WITH_GCP
 class GcsSnapshotStorage : public SnapshotStorage {
  public:
   ~GcsSnapshotStorage();
@@ -126,6 +131,7 @@ class GcsSnapshotStorage : public SnapshotStorage {
   util::cloud::GCPCredsProvider creds_provider_;
   SSL_CTX* ctx_ = NULL;
 };
+#endif
 
 class AzureSnapshotStorage : public SnapshotStorage {
  public:
