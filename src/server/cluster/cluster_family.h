@@ -44,6 +44,14 @@ class ClusterFamily {
 
   size_t MigrationsErrorsCount() const ABSL_LOCKS_EXCLUDED(migration_mu_);
 
+  // Helper function to be used during takeover from both nodes (master and replica).
+  // It reconciles the cluster configuration for both nodes to reflect the node
+  // role changes after the takeover.
+  // For the taking over node it's called at the end of the ReplTakeOver flow
+  // and for the taken over node it's called at the end of the dflycmd::TakeOver
+  void ReconcileMasterReplicaTakeoverSlots(bool was_master)
+      ABSL_LOCKS_EXCLUDED(set_config_mu, migration_mu_);
+
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
@@ -69,7 +77,6 @@ class ClusterFamily {
       ABSL_LOCKS_EXCLUDED(migration_mu_);
   void DflyClusterFlushSlots(CmdArgList args, SinkReplyBuilder* builder);
 
- private:  // Slots migration section
   void DflySlotMigrationStatus(CmdArgList args, SinkReplyBuilder* builder)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
 
@@ -114,10 +121,12 @@ class ClusterFamily {
   std::vector<std::shared_ptr<OutgoingMigration>> outgoing_migration_jobs_
       ABSL_GUARDED_BY(migration_mu_);
 
- private:
   std::optional<ClusterShardInfos> GetShardInfos(ConnectionContext* cntx) const;
 
   ClusterShardInfo GetEmulatedShardInfo(ConnectionContext* cntx) const;
+
+  void ReconcileMasterFlow() ABSL_EXCLUSIVE_LOCKS_REQUIRED(set_config_mu, migration_mu_);
+  void ReconcileReplicaFlow() ABSL_EXCLUSIVE_LOCKS_REQUIRED(set_config_mu, migration_mu_);
 
   // Guards set configuration, so that we won't handle 2 in parallel.
   mutable util::fb2::Mutex set_config_mu;

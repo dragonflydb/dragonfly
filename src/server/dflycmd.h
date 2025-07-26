@@ -217,7 +217,6 @@ class DflyCmd {
   bool CheckReplicaStateOrReply(const ReplicaInfo& ri, SyncState expected,
                                 facade::RedisReplyBuilder* rb);
 
- private:
   // Main entrypoint for stopping replication.
   void StopReplication(uint32_t sync_id) ABSL_LOCKS_EXCLUDED(mu_);
 

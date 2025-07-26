@@ -3509,6 +3509,8 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
     return builder->SendError("Couldn't execute takeover");
 
   LOG(INFO) << "Takeover successful, promoting this instance to master.";
+
+  service().cluster_family().ReconcileMasterReplicaTakeoverSlots(false);
   SetMasterFlagOnAllThreads(true);
   last_master_data_ = replica_->Stop();
   replica_.reset();
