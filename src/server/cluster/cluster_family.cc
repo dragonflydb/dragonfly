@@ -1108,7 +1108,7 @@ inline CommandId::Handler3 HandlerFunc(ClusterFamily* se, EngineFunc f) {
 
 void ClusterFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
-  *registry << CI{"CLUSTER", CO::READONLY, -2, 0, 0, acl::kCluster}.HFUNC(Cluster)
+  *registry << CI{"CLUSTER", CO::READONLY | CO::LOADING, -2, 0, 0, acl::kCluster}.HFUNC(Cluster)
             << CI{"DFLYCLUSTER",    CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0,
                   acl::kDflyCluster}
                    .HFUNC(DflyCluster)
