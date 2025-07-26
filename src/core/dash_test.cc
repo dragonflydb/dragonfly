@@ -296,9 +296,9 @@ TEST_F(DashTest, SegmentFull) {
       break;
     }
   }
-  EXPECT_GT(segment_.SlowSize(), Segment::capacity() * 0.85);
+  EXPECT_GT(segment_.SlowSize(), segment_.capacity() * 0.85);
 
-  LOG(INFO) << "Utilization " << double(segment_.SlowSize()) / Segment::capacity()
+  LOG(INFO) << "Utilization " << double(segment_.SlowSize()) / segment_.capacity()
             << " num probing buckets: " << segment_.NumProbingBuckets();
 
   LOG(INFO) << "NB: " << segment_.stats.neighbour_probes << " SP: " << segment_.stats.stash_probes
@@ -549,7 +549,9 @@ TEST_F(DashTest, Reserve) {
   unsigned bc = dt_.capacity();
   for (unsigned i = 0; i <= bc * 2; ++i) {
     dt_.Reserve(i);
-    ASSERT_GE((1 << dt_.depth()) * Dash64::kSegCapacity, i);
+
+    // Currently we do not preallocate segments, so we compute the "potential capacity".
+    ASSERT_GE(dt_.GetSegmentCount() * Dash64::kSegMinCapacity, i);
   }
 }
 
@@ -558,7 +560,7 @@ TEST_F(DashTest, Insert) {
   double sum = 0;
   for (size_t i = 0; i < kNumItems; ++i) {
     dt_.Insert(i, i);
-    double u = (dt_.size() * 100.0) / (dt_.unique_segments() * Segment::capacity());
+    double u = (dt_.size() * 100.0) / dt_.capacity();
 
     sum += u;
     VLOG(1) << "Num items " << dt_.size() << ", load factor " << u << ", size per entry "
@@ -800,7 +802,7 @@ TEST_F(DashTest, Version) {
   dt.Clear();
   ASSERT_EQ(0, dt.size());
   ASSERT_EQ(2, dt.unique_segments());
-  ASSERT_EQ(136, dt.bucket_count());
+  ASSERT_EQ(128, dt.bucket_count());
   constexpr int kNum = 68000;
   for (int i = 0; i < kNum; ++i) {
     auto it = dt.Insert(i, 0).first;
@@ -1010,8 +1012,8 @@ struct SimpleEvictPolicy {
   static constexpr bool can_gc = false;
   static constexpr bool can_evict = true;
 
-  bool CanGrow(const U64Dash& tbl) {
-    return tbl.capacity() + U64Dash::kSegCapacity < max_capacity;
+  bool CanGrow(const U64Dash& tbl) const {
+    return tbl.capacity() + U64Dash::kSegMinCapacity < max_capacity;
   }
 
   void OnMove(U64Dash::Cursor source, U64Dash::Cursor dest) {
@@ -1058,8 +1060,8 @@ struct ShiftRightPolicy {
   static constexpr bool can_gc = false;
   static constexpr bool can_evict = true;
 
-  bool CanGrow(const U64Dash& tbl) {
-    return tbl.capacity() + U64Dash::kSegCapacity < max_capacity;
+  bool CanGrow(const U64Dash& tbl) const {
+    return tbl.capacity() + U64Dash::kSegMinCapacity < max_capacity;
   }
 
   void RecordSplit(U64Dash::Segment_t* segment) {
