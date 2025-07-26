@@ -19,6 +19,8 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+using namespace dfly;
+
 class PageUsageStatsTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
@@ -41,11 +43,11 @@ class PageUsageStatsTest : public ::testing::Test {
   }
 
   void SetUp() override {
-    score_map_ = std::make_unique<dfly::ScoreMap>(&m_);
-    sorted_map_ = std::make_unique<dfly::detail::SortedMap>(&m_);
-    string_set_ = std::make_unique<dfly::StringSet>(&m_);
-    string_map_ = std::make_unique<dfly::StringMap>(&m_);
-    dfly::SmallString::InitThreadLocal(m_.heap());
+    score_map_ = std::make_unique<ScoreMap>(&m_);
+    sorted_map_ = std::make_unique<detail::SortedMap>(&m_);
+    string_set_ = std::make_unique<StringSet>(&m_);
+    string_map_ = std::make_unique<StringMap>(&m_);
+    SmallString::InitThreadLocal(m_.heap());
   }
 
   void TearDown() override {
@@ -57,12 +59,12 @@ class PageUsageStatsTest : public ::testing::Test {
     EXPECT_EQ(zmalloc_used_memory_tl, 0);
   }
 
-  dfly::MiMemoryResource m_;
-  std::unique_ptr<dfly::ScoreMap> score_map_;
-  std::unique_ptr<dfly::detail::SortedMap> sorted_map_;
-  std::unique_ptr<dfly::StringSet> string_set_;
-  std::unique_ptr<dfly::StringMap> string_map_;
-  dfly::SmallString small_string_{};
+  MiMemoryResource m_;
+  std::unique_ptr<ScoreMap> score_map_;
+  std::unique_ptr<detail::SortedMap> sorted_map_;
+  std::unique_ptr<StringSet> string_set_;
+  std::unique_ptr<StringMap> string_map_;
+  SmallString small_string_{};
 };
 
 bool PageCannotRealloc(mi_page_usage_stats_t s) {
@@ -80,27 +82,89 @@ TEST_F(PageUsageStatsTest, Defrag) {
   small_string_.Assign("small-string");
 
   {
-    dfly::PageUsage p{dfly::CollectPageStats::YES, 0.1};
+    PageUsage p{CollectPageStats::YES, 0.1};
     score_map_->begin().ReallocIfNeeded(&p);
     sorted_map_->DefragIfNeeded(&p);
     string_set_->begin().ReallocIfNeeded(&p);
     string_map_->begin().ReallocIfNeeded(&p);
     small_string_.DefragIfNeeded(&p);
 
-    const auto& stats = p.Stats();
-    EXPECT_FALSE(stats.empty());
-    for (const auto& stat : p.Stats()) {
-      EXPECT_TRUE(stat.flags == MI_DFLY_PAGE_BELOW_THRESHOLD || PageCannotRealloc(stat));
-    }
+    const auto stats = p.CollectedStats();
+    EXPECT_GT(stats.pages_scanned, 0);
   }
 
   {
-    dfly::PageUsage p{dfly::CollectPageStats::NO, 0.1};
+    PageUsage p{CollectPageStats::NO, 0.1};
     score_map_->begin().ReallocIfNeeded(&p);
     sorted_map_->DefragIfNeeded(&p);
     string_set_->begin().ReallocIfNeeded(&p);
     string_map_->begin().ReallocIfNeeded(&p);
     small_string_.DefragIfNeeded(&p);
-    EXPECT_TRUE(p.Stats().empty());
+    EXPECT_EQ(p.CollectedStats().pages_scanned, 0);
   }
+}
+
+TEST_F(PageUsageStatsTest, StatCollection) {
+  constexpr auto threshold = 0.5;
+  PageUsage p{CollectPageStats::YES, threshold};
+  for (size_t i = 0; i < 10000; ++i) {
+    p.ConsumePageStats({.page_address = uintptr_t{100000 + i},
+                        .block_size = 1,
+                        .capacity = 100,
+                        .reserved = 100,
+                        .used = 65,
+                        .flags = 0});
+  }
+
+  for (size_t i = 0; i < 2000; ++i) {
+    p.ConsumePageStats({.page_address = uintptr_t{200000 + i},
+                        .block_size = 1,
+                        .capacity = 100,
+                        .reserved = 100,
+                        .used = 85,
+                        .flags = 0});
+  }
+
+  for (size_t i = 0; i < 1000; ++i) {
+    p.ConsumePageStats({.page_address = uintptr_t{300000 + i},
+                        .block_size = 1,
+                        .capacity = 100,
+                        .reserved = 100,
+                        .used = 89,
+                        .flags = 0});
+  }
+
+  constexpr auto page_count_per_flag = 150;
+  // allow for collisions in filter
+  constexpr auto expected_min_count = 140;
+
+  auto start = 0;
+  for (const uint8_t flag : {MI_DFLY_PAGE_FULL, MI_DFLY_PAGE_USED_FOR_MALLOC, MI_DFLY_HEAP_MISMATCH,
+                             MI_DFLY_PAGE_BELOW_THRESHOLD}) {
+    for (size_t i = 0; i < page_count_per_flag; ++i) {
+      p.ConsumePageStats({.page_address = uintptr_t{start + i},
+                          .block_size = 1,
+                          .capacity = 100,
+                          .reserved = 100,
+                          .used = 100,
+                          .flags = flag});
+    }
+    start += page_count_per_flag;
+  }
+
+  CollectedPageStats st;
+  st.Merge(p.CollectedStats(), 1);
+
+  EXPECT_GT(st.pages_scanned, 12000);
+  EXPECT_GT(st.pages_full, expected_min_count);
+  EXPECT_GT(st.pages_reserved_for_malloc, expected_min_count);
+  EXPECT_GT(st.pages_marked_for_realloc, expected_min_count);
+
+  const auto usage = st.shard_wide_summary;
+
+  EXPECT_EQ(usage.size(), 1);
+  EXPECT_TRUE(usage.contains(1));
+
+  const CollectedPageStats::ShardUsageSummary expected{{50, 65}, {90, 85}, {99, 89}};
+  EXPECT_EQ(usage.at(1), expected);
 }

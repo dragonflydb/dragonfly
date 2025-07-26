@@ -386,7 +386,8 @@ bool EngineShard::DefragTaskState::CheckRequired() {
   return false;
 }
 
-bool EngineShard::DoDefrag(CollectPageStats collect_page_stats, const float threshold) {
+std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect_page_stats,
+                                                        const float threshold) {
   // --------------------------------------------------------------------------
   // NOTE: This task is running with exclusive access to the shard.
   // i.e. - Since we are using shared nothing access here, and all access
@@ -406,7 +407,7 @@ bool EngineShard::DoDefrag(CollectPageStats collect_page_stats, const float thre
   // If we found no valid db, we finished traversing and start from scratch next time
   if (!slice.IsDbValid(defrag_state_.dbid)) {
     defrag_state_.ResetScanState();
-    return false;
+    return std::nullopt;
   }
 
   DCHECK(slice.IsDbValid(defrag_state_.dbid));
@@ -447,7 +448,7 @@ bool EngineShard::DoDefrag(CollectPageStats collect_page_stats, const float thre
   stats_.defrag_task_invocation_total++;
   stats_.defrag_attempt_total += attempts;
 
-  return true;
+  return page_usage.CollectedStats();
 }
 
 // the memory defragmentation task is as follow:
