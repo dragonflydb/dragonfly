@@ -934,7 +934,7 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
 
   std::optional<TransactionData> tx_data;
   while ((tx_data = tx_reader.NextTxData(&reader, cntx))) {
-    DVLOG(3) << "Lsn: " << tx_data->lsn;
+    DVLOG(3) << "Lsn: " << tx_data->lsn << " flowid: " << flow_id_;
 
     last_io_time_ = Proactor()->GetMonotonicTimeNs();
     if (tx_data->opcode == journal::Op::LSN) {
@@ -953,6 +953,7 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
         // inconsistent data because the replica will resume from the next
         // lsn of the master and this lsn entry will be lost.
         journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
+        DVLOG(3) << "journal_rec_executed_: " << journal_rec_executed_ << " flowid: " << flow_id_;
       }
     }
     shard_replica_waker_.notifyAll();
@@ -996,7 +997,8 @@ void DflyShardReplica::StableSyncDflyAcksFb(ExecutionState* cntx) {
     // Handle ACKs with the master. PING opcodes from the master mean we should immediately
     // answer.
     current_offset = journal_rec_executed_.load(std::memory_order_relaxed);
-    VLOG(1) << "Sending an ACK with offset=" << current_offset << " forced=" << force_ping_;
+    VLOG(1) << "Sending an ACK with offset=" << current_offset << " forced=" << force_ping_
+            << " flowid=" << flow_id_;
     ack_cmd = absl::StrCat("REPLCONF ACK ", current_offset);
     force_ping_ = false;
     next_ack_tp = std::chrono::steady_clock::now() + ack_time_max_interval;
