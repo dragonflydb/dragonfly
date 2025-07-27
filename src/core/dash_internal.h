@@ -1013,6 +1013,11 @@ ___] |___ |__] |  | |___ | \|  |
 
 */
 
+// for clang ignore -Wunused-lambda-capture
+#ifdef __clang__
+#pragma clang diagnostic ignored "-Wunused-lambda-capture"
+#endif
+
 template <typename Key, typename Value, typename Policy>
 template <typename Pred>
 auto Segment<Key, Value, Policy>::Bucket::FindByFp(uint8_t fp_hash, bool probe, Pred&& pred) const
