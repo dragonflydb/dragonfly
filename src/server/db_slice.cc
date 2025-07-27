@@ -1601,6 +1601,7 @@ void DbSlice::SendQueuedInvalidationMessages() {
     // Notify all the clients. this function is not efficient,
     // because it broadcasts to all threads unrelated to the subscribers for the key.
     auto local_map = std::move(pending_send_map_);
+    pending_send_map_ = {};
     auto cb = [&](unsigned thread_id, util::ProactorBase*) {
       SendQueuedInvalidationMessagesCb(local_map, thread_id);
     };
@@ -1767,6 +1768,7 @@ void DbSlice::OnCbFinishBlocking() {
   if (IsCacheMode()) {
     // move fetched items to local variable
     auto fetched_items = std::move(fetched_items_);
+    fetched_items_ = {};
     for (const auto& [key_hash, db_index] : fetched_items) {
       auto& db = *db_arr_[db_index];
 

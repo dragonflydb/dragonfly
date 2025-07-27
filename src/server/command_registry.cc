@@ -40,8 +40,6 @@ using namespace facade;
 
 using absl::AsciiStrToUpper;
 using absl::GetFlag;
-using absl::StrAppend;
-using absl::StrCat;
 using absl::StrSplit;
 
 namespace {
@@ -235,11 +233,11 @@ hdr_histogram* CommandId::LatencyHist() const {
 CommandRegistry::CommandRegistry() {
   cmd_rename_map_ = ParseCmdlineArgMap(FLAGS_rename_command);
 
-  for (string name : GetFlag(FLAGS_restricted_commands)) {
+  for (const string& name : GetFlag(FLAGS_restricted_commands)) {
     restricted_cmds_.emplace(AsciiStrToUpper(name));
   }
 
-  for (string name : GetFlag(FLAGS_oom_deny_commands)) {
+  for (const string& name : GetFlag(FLAGS_oom_deny_commands)) {
     oomdeny_cmds_.emplace(AsciiStrToUpper(name));
   }
 }
