@@ -5,6 +5,8 @@
 #include "server/journal/streamer.h"
 
 #include <absl/functional/bind_front.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
 
 #include "base/flags.h"
 #include "base/logging.h"
@@ -183,6 +185,50 @@ void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
   pending_buf_.Pop();
   if (cntx_->IsRunning()) {
     if (ec) {
+      // Enhanced error logging with socket diagnostics for master disconnects
+      LOG(WARNING) << "JournalStreamer write error: " << ec.message() << " (code: " << ec.value()
+                   << ", category: " << ec.category().name() << ")";
+
+      // Get TCP socket info for troubleshooting disconnects
+      if (dest_) {
+        int sockfd = dest_->native_handle();
+        if (sockfd >= 0) {
+          struct tcp_info info;
+          socklen_t info_len = sizeof(info);
+          if (getsockopt(sockfd, IPPROTO_TCP, TCP_INFO, &info, &info_len) == 0) {
+            LOG(WARNING) << "TCP socket diagnostics - "
+                         << "state: " << static_cast<int>(info.tcpi_state)
+                         << ", ca_state: " << static_cast<int>(info.tcpi_ca_state)
+                         << ", retransmits: " << static_cast<int>(info.tcpi_retransmits)
+                         << ", probes: " << static_cast<int>(info.tcpi_probes)
+                         << ", backoff: " << static_cast<int>(info.tcpi_backoff)
+                         << ", options: " << static_cast<int>(info.tcpi_options)
+                         << ", snd_wscale: " << static_cast<int>(info.tcpi_snd_wscale)
+                         << ", rcv_wscale: " << static_cast<int>(info.tcpi_rcv_wscale)
+                         << ", rto: " << info.tcpi_rto << ", ato: " << info.tcpi_ato
+                         << ", snd_mss: " << info.tcpi_snd_mss << ", rcv_mss: " << info.tcpi_rcv_mss
+                         << ", unacked: " << info.tcpi_unacked << ", sacked: " << info.tcpi_sacked
+                         << ", lost: " << info.tcpi_lost << ", retrans: " << info.tcpi_retrans
+                         << ", fackets: " << info.tcpi_fackets
+                         << ", last_data_sent: " << info.tcpi_last_data_sent
+                         << ", last_ack_sent: " << info.tcpi_last_ack_sent
+                         << ", last_data_recv: " << info.tcpi_last_data_recv
+                         << ", last_ack_recv: " << info.tcpi_last_ack_recv
+                         << ", pmtu: " << info.tcpi_pmtu
+                         << ", rcv_ssthresh: " << info.tcpi_rcv_ssthresh
+                         << ", rtt: " << info.tcpi_rtt << ", rttvar: " << info.tcpi_rttvar
+                         << ", snd_ssthresh: " << info.tcpi_snd_ssthresh
+                         << ", snd_cwnd: " << info.tcpi_snd_cwnd << ", advmss: " << info.tcpi_advmss
+                         << ", reordering: " << info.tcpi_reordering
+                         << ", rcv_rtt: " << info.tcpi_rcv_rtt
+                         << ", rcv_space: " << info.tcpi_rcv_space
+                         << ", total_retrans: " << info.tcpi_total_retrans;
+          } else {
+            LOG(WARNING) << "Failed to get TCP socket info: " << strerror(errno);
+          }
+        }
+      }
+
       cntx_->ReportError(ec);
     } else if (!pending_buf_.Empty()) {
       AsyncWrite(false);
