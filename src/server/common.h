@@ -189,6 +189,11 @@ template <typename T> struct AggregateValue {
     return bool(**this);
   }
 
+  // Move out of value without critical section. Safe only when no longer in use.
+  T Destroy() && {
+    return std::move(current_);
+  }
+
  private:
   util::fb2::Mutex mu_{};
   T current_{};
