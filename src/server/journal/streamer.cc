@@ -5,6 +5,8 @@
 #include "server/journal/streamer.h"
 
 #include <absl/functional/bind_front.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
 
 #include "base/flags.h"
 #include "base/logging.h"
@@ -45,6 +47,51 @@ uint32_t migration_buckets_serialization_threshold_cached = 100;
 uint32_t migration_buckets_sleep_usec_cached = 100;
 uint32_t replication_dispatch_threshold = 1500;
 uint32_t stalled_writer_base_period_ms = 10;
+
+void LogTcpSocketDiagnostics(util::FiberSocketBase* dest) {
+  if (!dest) {
+    return;
+  }
+
+  int sockfd = dest->native_handle();
+  if (sockfd < 0) {
+    return;
+  }
+
+  struct tcp_info info;
+  socklen_t info_len = sizeof(info);
+  if (getsockopt(sockfd, IPPROTO_TCP, TCP_INFO, &info, &info_len) == 0) {
+    LOG_EVERY_T(INFO, 1) << "TCP socket diagnostics - "
+                         << "state: " << static_cast<int>(info.tcpi_state)
+                         << ", ca_state: " << static_cast<int>(info.tcpi_ca_state)
+                         << ", retransmits: " << static_cast<int>(info.tcpi_retransmits)
+                         << ", probes: " << static_cast<int>(info.tcpi_probes)
+                         << ", backoff: " << static_cast<int>(info.tcpi_backoff)
+                         << ", options: " << static_cast<int>(info.tcpi_options)
+                         << ", snd_wscale: " << static_cast<int>(info.tcpi_snd_wscale)
+                         << ", rcv_wscale: " << static_cast<int>(info.tcpi_rcv_wscale)
+                         << ", rto: " << info.tcpi_rto << ", ato: " << info.tcpi_ato
+                         << ", snd_mss: " << info.tcpi_snd_mss << ", rcv_mss: " << info.tcpi_rcv_mss
+                         << ", unacked: " << info.tcpi_unacked << ", sacked: " << info.tcpi_sacked
+                         << ", lost: " << info.tcpi_lost << ", retrans: " << info.tcpi_retrans
+                         << ", fackets: " << info.tcpi_fackets
+                         << ", last_data_sent: " << info.tcpi_last_data_sent
+                         << ", last_ack_sent: " << info.tcpi_last_ack_sent
+                         << ", last_data_recv: " << info.tcpi_last_data_recv
+                         << ", last_ack_recv: " << info.tcpi_last_ack_recv
+                         << ", pmtu: " << info.tcpi_pmtu
+                         << ", rcv_ssthresh: " << info.tcpi_rcv_ssthresh
+                         << ", rtt: " << info.tcpi_rtt << ", rttvar: " << info.tcpi_rttvar
+                         << ", snd_ssthresh: " << info.tcpi_snd_ssthresh
+                         << ", snd_cwnd: " << info.tcpi_snd_cwnd << ", advmss: " << info.tcpi_advmss
+                         << ", reordering: " << info.tcpi_reordering
+                         << ", rcv_rtt: " << info.tcpi_rcv_rtt
+                         << ", rcv_space: " << info.tcpi_rcv_space
+                         << ", total_retrans: " << info.tcpi_total_retrans;
+  } else {
+    LOG_EVERY_T(INFO, 1) << "Failed to get TCP socket info: " << strerror(errno);
+  }
+}
 
 }  // namespace
 
@@ -183,6 +230,13 @@ void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
   pending_buf_.Pop();
   if (cntx_->IsRunning()) {
     if (ec) {
+      // Enhanced error logging with socket diagnostics for master disconnects
+      LOG_EVERY_T(INFO, 1) << "JournalStreamer write error: " << ec.message()
+                           << " (code: " << ec.value() << ", category: " << ec.category().name()
+                           << ")";
+
+      LogTcpSocketDiagnostics(dest_);
+
       cntx_->ReportError(ec);
     } else if (!pending_buf_.Empty()) {
       AsyncWrite(false);
