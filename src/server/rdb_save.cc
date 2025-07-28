@@ -820,14 +820,15 @@ VersionBuffer MakeRdbVersion() {
   return buf;
 }
 
-CrcBuffer MakeCheckSum(std::string_view dump_res) {
-  uint64_t chksum = crc64(0, reinterpret_cast<const uint8_t*>(dump_res.data()), dump_res.size());
+CrcBuffer MakeCheckSum(std::string_view dump_res, bool ignore_crc) {
+  uint64_t chksum =
+      ignore_crc ? 0 : crc64(0, reinterpret_cast<const uint8_t*>(dump_res.data()), dump_res.size());
   CrcBuffer buf;
   absl::little_endian::Store64(buf.data(), chksum);
   return buf;
 }
 
-void AppendFooter(io::StringSink* dump_res) {
+void AppendFooter(io::StringSink* dump_res, bool ignore_crc) {
   auto to_bytes = [](const auto& buf) {
     return io::Bytes(reinterpret_cast<const uint8_t*>(buf.data()), buf.size());
   };
@@ -840,12 +841,12 @@ void AppendFooter(io::StringSink* dump_res) {
    */
   const auto ver = MakeRdbVersion();
   dump_res->Write(to_bytes(ver));
-  const auto crc = MakeCheckSum(dump_res->str());
+  const auto crc = MakeCheckSum(dump_res->str(), ignore_crc);
   dump_res->Write(to_bytes(crc));
 }
 }  // namespace
 
-void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out) {
+void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out, bool ignore_crc) {
   CompressionMode compression_mode = GetDefaultCompressionMode();
   if (compression_mode != CompressionMode::NONE) {
     compression_mode = CompressionMode::SINGLE_ENTRY;
@@ -863,8 +864,8 @@ void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out) {
   ec = serializer.SaveValue(obj);
   CHECK(!ec);  // make sure that fully was successful
   ec = serializer.FlushToSink(out, SerializerBase::FlushState::kFlushMidEntry);
-  CHECK(!ec);         // make sure that fully was successful
-  AppendFooter(out);  // version and crc
+  CHECK(!ec);                     // make sure that fully was successful
+  AppendFooter(out, ignore_crc);  // version and crc
   CHECK_GT(out->str().size(), 10u);
 }
 

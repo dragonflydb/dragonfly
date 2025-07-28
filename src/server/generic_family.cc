@@ -53,7 +53,7 @@ namespace {
 constexpr uint32_t kMaxTtl = (1UL << 26);
 constexpr size_t DUMP_FOOTER_SIZE = sizeof(uint64_t) + sizeof(uint16_t);  // version number and crc
 
-std::optional<RdbVersion> GetRdbVersion(std::string_view msg) {
+std::optional<RdbVersion> GetRdbVersion(std::string_view msg, bool ignore_crc = false) {
   if (msg.size() <= DUMP_FOOTER_SIZE) {
     LOG(WARNING) << "got restore payload that is too short - " << msg.size();
     return std::nullopt;
@@ -70,15 +70,18 @@ std::optional<RdbVersion> GetRdbVersion(std::string_view msg) {
     return std::nullopt;
   }
 
-  // Compute expected crc64 based on the actual data upto the expected crc64 field.
-  uint64_t actual_cs =
-      crc64(0, reinterpret_cast<const uint8_t*>(msg.data()), msg.size() - sizeof(uint64_t));
   uint64_t expected_cs = absl::little_endian::Load64(footer + 2);  // skip the version
 
-  if (actual_cs != expected_cs) {
-    LOG(WARNING) << "CRC check failed for restore command, expecting: " << expected_cs << " got "
-                 << actual_cs;
-    return std::nullopt;
+  if (!ignore_crc) {
+    // Compute expected crc64 based on the actual data upto the expected crc64 field.
+    uint64_t actual_cs =
+        crc64(0, reinterpret_cast<const uint8_t*>(msg.data()), msg.size() - sizeof(uint64_t));
+
+    if (actual_cs != expected_cs) {
+      LOG(WARNING) << "CRC check failed for restore command, expecting: " << expected_cs << " got "
+                   << actual_cs;
+      return std::nullopt;
+    }
   }
 
   return version;
@@ -1585,7 +1588,7 @@ void GenericFamily::Restore(CmdArgList args, const CommandContext& cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view serialized_value = ArgS(args, 2);
 
-  auto rdb_version = GetRdbVersion(serialized_value);
+  auto rdb_version = GetRdbVersion(serialized_value, cmd_cntx.conn_cntx->journal_emulated);
   auto* builder = cmd_cntx.rb;
   if (!rdb_version) {
     return builder->SendError(kInvalidDumpValueErr);

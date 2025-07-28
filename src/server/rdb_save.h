@@ -157,7 +157,7 @@ class SerializerBase {
   virtual ~SerializerBase() = default;
 
   // Dumps `obj` in DUMP command format into `out`. Uses default compression mode.
-  static void DumpObject(const CompactObj& obj, io::StringSink* out);
+  static void DumpObject(const CompactObj& obj, io::StringSink* out, bool ignore_crc = false);
 
   // Internal buffer size. Might shrink after flush due to compression.
   size_t SerializedLen() const;
