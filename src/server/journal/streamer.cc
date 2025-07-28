@@ -49,13 +49,15 @@ uint32_t stalled_writer_base_period_ms = 10;
 }  // namespace
 
 JournalStreamer::JournalStreamer(journal::Journal* journal, ExecutionState* cntx, SendLsn send_lsn,
-                                 bool is_stable_sync)
+                                 bool is_stable_sync,
+                                 LSN partial_sync_lsn /*TODO merge them in enum(*/)
     : cntx_(cntx), journal_(journal), is_stable_sync_(is_stable_sync), send_lsn_(send_lsn) {
   // cache the flag to avoid accessing it later.
   replication_stream_output_limit_cached = absl::GetFlag(FLAGS_replication_stream_output_limit);
   migration_buckets_sleep_usec_cached = absl::GetFlag(FLAGS_migration_buckets_sleep_usec);
   replication_dispatch_threshold = absl::GetFlag(FLAGS_replication_dispatch_threshold);
   last_async_write_time_ = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
+  partial_sync_lsn_ = partial_sync_lsn;
 }
 
 JournalStreamer::~JournalStreamer() {
@@ -87,14 +89,19 @@ void JournalStreamer::ConsumeJournalChange(const JournalItem& item) {
 void JournalStreamer::Start(util::FiberSocketBase* dest) {
   CHECK(dest_ == nullptr && dest != nullptr);
   dest_ = dest;
-  journal_cb_id_ = journal_->RegisterOnChange(this);
+  // For partial sync we first need to catch up
+  if (partial_sync_lsn_ == 0) {
+    journal_cb_id_ = journal_->RegisterOnChange(this);
+  }
   StartStalledDataWriterFiber();
 }
 
 void JournalStreamer::Cancel() {
   VLOG(1) << "JournalStreamer::Cancel " << cntx_->IsCancelled();
   waker_.notifyAll();
-  journal_->UnregisterOnChange(journal_cb_id_);
+  if (journal_cb_id_) {
+    journal_->UnregisterOnChange(journal_cb_id_);
+  }
   StopStalledDataWriterFiber();
   WaitForInflightToComplete();
 }
@@ -124,6 +131,31 @@ void JournalStreamer::StartStalledDataWriterFiber() {
 
 void JournalStreamer::StalledDataWriterFiber(std::chrono::milliseconds period_ms,
                                              util::fb2::Done* waiter) {
+  // Same algorithm as SwitchIncrementalFb. The only difference is that we don't sent
+  // the old LSN"s via a snapshot but rather as journal changes.
+  if (partial_sync_lsn_ > 0) {
+    LSN lsn = partial_sync_lsn_;
+    DCHECK_LE(lsn, journal_->GetLsn()) << "The replica tried to sync from the future.";
+
+    LOG(INFO) << "Starting partial sync from lsn: " << lsn;
+    using facade::operator""_KB;
+    auto threshold = std::exchange(replication_dispatch_threshold, 8_KB);
+    // The replica sends the LSN of the next entry is wants to receive.
+    while (cntx_->IsRunning() && journal_->IsLSNInBuffer(lsn)) {
+      JournalItem item;
+      item.data = journal_->GetEntry(lsn);
+      item.lsn = lsn;
+      ConsumeJournalChange(item);
+      lsn++;
+    }
+
+    // We are done
+    journal_cb_id_ = journal_->RegisterOnChange(this);
+
+    LOG(INFO) << "Last LSN sent in partial sync was " << (lsn - 1);
+    replication_dispatch_threshold = threshold;
+  }
+
   while (cntx_->IsRunning()) {
     if (waiter->WaitFor(period_ms)) {
       if (!cntx_->IsRunning()) {
