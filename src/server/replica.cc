@@ -533,19 +533,16 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 
   RETURN_ON_ERR(exec_st_.SwitchErrorHandler(std::move(err_handler)));
 
-  // Make sure we're in LOADING state.
-  if (!service_.RequestLoadingState()) {
-    return exec_st_.ReportError(std::make_error_code(errc::state_not_recoverable),
-                                "Failed to enter LOADING state");
-  }
-
   // Start full sync flows.
   state_mask_ |= R_SYNCING;
 
-  absl::Cleanup cleanup = [this]() {
+  bool loading_state = false;
+  absl::Cleanup cleanup = [this, &loading_state]() {
     // We do the following operations regardless of outcome.
     JoinDflyFlows();
-    service_.RemoveLoadingState();
+    if (loading_state) {
+      service_.RemoveLoadingState();
+    }
     state_mask_ &= ~R_SYNCING;
     last_journal_LSNs_.reset();
   };
@@ -587,6 +584,13 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
         std::accumulate(is_full_sync.get(), is_full_sync.get() + num_df_flows, 0);
 
     if (num_full_flows == num_df_flows) {
+      // Make sure we're in LOADING state.
+      if (!service_.RequestLoadingState()) {
+        return exec_st_.ReportError(std::make_error_code(errc::state_not_recoverable),
+                                    "Failed to enter LOADING state");
+      }
+      loading_state = true;
+
       DVLOG(1) << "Calling Flush on all slots " << this;
 
       if (slot_range_.has_value()) {
