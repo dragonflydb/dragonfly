@@ -21,7 +21,6 @@ COPY ./Makefile ./CMakeLists.txt ./
 COPY src ./src
 
 COPY .git ./.git
-COPY cmake ./cmake
 COPY helio ./helio
 
 RUN make release
