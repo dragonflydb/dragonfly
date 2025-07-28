@@ -855,8 +855,9 @@ OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params)
   return find_res->it;
 }
 
-MGetResponse OpGAT(BlockingCounter wait_bc, uint8_t fetch_mask, const Transaction* t,
-                   EngineShard* shard, const DbSlice::ExpireParams& expire_params) {
+MGetResponse OpGAT(BlockingCounter wait_bc, AggregateError* err, uint8_t fetch_mask,
+                   const Transaction* t, EngineShard* shard,
+                   const DbSlice::ExpireParams& expire_params) {
   SearchMut find_op = [&](string_view key) {
     return FindKeyAndSetExpiry(GetAndTouchParams{
         .t = t,
@@ -865,7 +866,7 @@ MGetResponse OpGAT(BlockingCounter wait_bc, uint8_t fetch_mask, const Transactio
         .key = key,
     });
   };
-  return CollectKeys(wait_bc, fetch_mask, t, shard, std::move(find_op));
+  return CollectKeys(std::move(wait_bc), err, fetch_mask, t, shard, std::move(find_op));
 }
 
 }  // namespace
@@ -1721,17 +1722,23 @@ void StringFamily::GAT(CmdArgList args, const CommandContext& cmnd_cntx) {
   }
 
   BlockingCounter tiering_bc{0};
+  AggregateError tiering_err;
   std::vector<MGetResponse> mget_resp(shard_set->size());
+
   const DbSlice::ExpireParams expire_params{
       .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    mget_resp[shard->shard_id()] = OpGAT(tiering_bc, fetch_mask, t, shard, expire_params);
+    mget_resp[shard->shard_id()] =
+        OpGAT(tiering_bc, &tiering_err, fetch_mask, t, shard, expire_params);
     return OpStatus::OK;
   };
 
   const OpStatus result = cmnd_cntx.tx->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, result);
+
   tiering_bc->Wait();
+  if (auto err = std::move(tiering_err).Destroy(); err)
+    return builder->SendError(err.message());
 
   absl::FixedArray<optional<GetResp>, 8> ordered_by_shard{args.size()};
   ReorderShardResults(mget_resp, cmnd_cntx.tx, true, &ordered_by_shard);
