@@ -302,7 +302,9 @@ TieredStorage::TieredStorage(size_t max_size, DbSlice* db_slice)
     : op_manager_{make_unique<ShardOpManager>(this, db_slice, max_size)},
       bins_{make_unique<tiering::SmallBins>()} {
   write_depth_limit_ = absl::GetFlag(FLAGS_tiered_storage_write_depth);
-  size_t mem_per_shard = max_memory_limit / shard_set->size();
+
+  // TODO: update when max_memory_limit flag changes
+  size_t mem_per_shard = max_memory_limit.load(memory_order_relaxed) / shard_set->size();
   SetMemoryLowWatermark(absl::GetFlag(FLAGS_tiered_low_memory_factor) * mem_per_shard);
 }
 
