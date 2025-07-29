@@ -112,21 +112,21 @@ JournalStreamer::~JournalStreamer() {
   VLOG(1) << "~JournalStreamer";
 }
 
-void JournalStreamer::ConsumeJournalChange(const JournalItem& item) {
+void JournalStreamer::ConsumeJournalChange(const JournalChangeItem& item) {
   if (!ShouldWrite(item)) {
     return;
   }
 
-  DCHECK_GT(item.lsn, last_lsn_writen_);
-  Write(item.data);
+  DCHECK_GT(item.journal_item.lsn, last_lsn_writen_);
+  Write(item.journal_item.data);
   time_t now = time(nullptr);
-  last_lsn_writen_ = item.lsn;
+  last_lsn_writen_ = item.journal_item.lsn;
   // TODO: to chain it to the previous Write call.
   if (send_lsn_ == SendLsn::YES && now - last_lsn_time_ > 3) {
     last_lsn_time_ = now;
     io::StringSink sink;
     JournalWriter writer(&sink);
-    writer.Write(Entry{journal::Op::LSN, item.lsn});
+    writer.Write(Entry{journal::Op::LSN, last_lsn_writen_});
     Write(std::move(sink).str());
   }
 }
@@ -433,7 +433,7 @@ void RestoreStreamer::Cancel() {
   }
 }
 
-bool RestoreStreamer::ShouldWrite(const journal::JournalItem& item) const {
+bool RestoreStreamer::ShouldWrite(const journal::JournalChangeItem& item) const {
   if (item.cmd == "FLUSHALL" || item.cmd == "FLUSHDB") {
     // On FLUSH* we restart the migration
     CHECK(dest_ != nullptr);

@@ -102,7 +102,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
 
   // Journal listener
-  void ConsumeJournalChange(const journal::JournalItem& item);
+  void ConsumeJournalChange(const journal::JournalChangeItem& item);
   void ThrottleIfNeeded();
 
  private:
