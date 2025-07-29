@@ -544,18 +544,24 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
   // Start full sync flows.
   state_mask_ |= R_SYNCING;
 
-  bool remove_loading_state = false;
-  absl::Cleanup cleanup = [this, &remove_loading_state]() {
+  std::string_view sync_type;
+  absl::Cleanup cleanup = [this, &sync_type]() {
     // We do the following operations regardless of outcome.
     JoinDflyFlows();
-    if (remove_loading_state) {
+    if (sync_type == "full") {
       service_.RemoveLoadingState();
+    } else if (service_.IsLoadingState()) {
+      // We need this check. We originally set the state unconditionally to LOADING
+      // when we call ReplicaOf command. If for some reason we fail to start full sync below
+      // or cancel the context, we still need to switch to ACTIVE state.
+      // TODO(kostasrim) we can remove this once my proposed changes for replication move forward
+      // as the state transitions for ReplicaOf command will be much clearer.
+      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     }
     state_mask_ &= ~R_SYNCING;
     last_journal_LSNs_.reset();
   };
 
-  std::string sync_type = "full";
   {
     unsigned num_df_flows = shard_flows_.size();
     // Going out of the way to avoid using std::vector<bool>...
@@ -592,6 +598,13 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
         std::accumulate(is_full_sync.get(), is_full_sync.get() + num_df_flows, 0);
 
     if (num_full_flows == num_df_flows) {
+      // Make sure we're in LOADING state.
+      if (!service_.RequestLoadingState()) {
+        return exec_st_.ReportError(std::make_error_code(errc::state_not_recoverable),
+                                    "Failed to enter LOADING state");
+      }
+      sync_type = "full";
+
       DVLOG(1) << "Calling Flush on all slots " << this;
       // Make sure we're in LOADING state.
       // For partial sync we don't enter this state at all and we skip FullSync

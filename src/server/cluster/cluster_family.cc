@@ -1098,6 +1098,70 @@ size_t ClusterFamily::MigrationsErrorsCount() const {
   return error_num;
 }
 
+void ClusterFamily::ReconcileMasterFlow() {
+  auto config = cluster::ClusterConfig::Current();
+
+  for (auto& info : config->GetMutableConfig()) {
+    if (info.master.id == id_) {
+      if (!info.replicas.empty()) {
+        LOG_IF(ERROR, info.replicas.size() > 1)
+            << "More than one replica found, slot redirection after takeover corrupted";
+
+        // assumes there is one replica per master node
+        // TODO figure a smart way to get the replica id_ so
+        // we can find it here
+        info.master = info.replicas.front();
+        info.replicas.clear();
+      }
+      break;
+    }
+  }
+}
+
+void ClusterFamily::ReconcileReplicaFlow() {
+  auto new_config = ClusterConfig::Current()->CloneWithChanges({}, {});
+  // Replace master with replica in shard config.
+  bool found = false;
+  for (ClusterShardInfo& info : new_config->GetMutableConfig()) {
+    for (const auto& replica : info.replicas) {
+      if (replica.id == id_) {
+        info.master = replica;
+        // New master has no replicas
+        info.replicas.clear();
+        found = true;
+        break;
+      }
+    }
+    if (found)
+      break;
+  }
+
+  LOG_IF(ERROR, !found) << "Did not find replica in the cluster map";
+
+  server_family_->service().proactor_pool().AwaitFiberOnAll(
+      [&new_config](util::ProactorBase*) { ClusterConfig::SetCurrent(new_config); });
+}
+
+void ClusterFamily::ReconcileMasterReplicaTakeoverSlots(bool was_master) {
+  util::fb2::LockGuard gu(set_config_mu);
+  util::fb2::LockGuard lk(migration_mu_);
+
+  auto config = ClusterConfig::Current();
+
+  // Sanity -- we should not reach there
+  if (!config) {
+    LOG(ERROR) << "Cluster config after takeover is empty";
+    return;
+  }
+
+  if (was_master) {
+    ReconcileMasterFlow();
+    return;
+  }
+
+  ReconcileReplicaFlow();
+}
+
 using EngineFunc = void (ClusterFamily::*)(CmdArgList args, const CommandContext& cmd_cntx);
 
 inline CommandId::Handler3 HandlerFunc(ClusterFamily* se, EngineFunc f) {

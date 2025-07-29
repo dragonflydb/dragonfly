@@ -80,6 +80,10 @@ class Service : public facade::ServiceInterface {
   bool RequestLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
   void RemoveLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
 
+  // Return true if state is LOADING and loading_state_counter_ == 0, that is,
+  // if no multiple operations require LOADING_STATE at the same time.
+  bool IsLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
+
   void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) final;
   void OnConnectionClose(facade::ConnectionContext* cntx) final;
 
@@ -158,6 +162,11 @@ class Service : public facade::ServiceInterface {
 
   // Return error if not all keys are owned by the server when running in cluster mode
   std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId* cid, CmdArgList args,
+                                                       const ConnectionContext& dfly_cntx);
+
+  // Return moved error if we *own* the slot. This function is used from flows that assume our
+  // state is TAKEN_OVER which happens after a replica takeover.
+  std::optional<facade::ErrorReply> TakenOverSlotError(const CommandId* cid, CmdArgList args,
                                                        const ConnectionContext& dfly_cntx);
 
   void EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
