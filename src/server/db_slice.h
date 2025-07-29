@@ -636,7 +636,6 @@ class DbSlice {
   ssize_t memory_budget_ = SSIZE_MAX / 2;
   size_t bytes_per_object_ = 0;
 
-  size_t soft_budget_limit_ = 0;
   size_t table_memory_ = 0;
   uint64_t entries_count_ = 0;
   unsigned load_ref_count_ = 0;

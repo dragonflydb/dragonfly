@@ -512,8 +512,8 @@ using SearchMut = SearchKey<DbSlice::Iterator>;
 using SearchConst = SearchKey<DbSlice::ConstIterator>;
 
 template <typename Iter>
-MGetResponse CollectKeys(BlockingCounter wait_bc, uint8_t fetch_mask, const Transaction* t,
-                         EngineShard* shard, SearchKey<Iter> find_op) {
+MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, uint8_t fetch_mask,
+                         const Transaction* t, EngineShard* shard, SearchKey<Iter> find_op) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
@@ -567,6 +567,7 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
   bool fetch_mcflag = fetch_mask & FETCH_MCFLAG;
   bool fetch_mcver = fetch_mask & FETCH_MCVER;
   const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
+
   for (size_t i = 0; i < items.size(); ++i) {
     auto it = items[i].it;
     if (it.is_done()) {
@@ -582,9 +583,11 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
     const PrimeValue& value = it->second;
     if (value.IsExternal()) {
       wait_bc->Add(1);
-      auto cb = [next, wait_bc](const io::Result<string>& v) mutable {
-        CHECK(v);  // TODO: Part 3 of error propagation
-        memcpy(next, v->data(), v->size());
+      auto cb = [next, err, wait_bc](const io::Result<string>& v) mutable {
+        if (v.has_value())
+          memcpy(next, v->data(), v->size());
+        else
+          *err = v.error();
         wait_bc->Dec();
       };
       shard->tiered_storage()->Read(t->GetDbIndex(), it.key(), value, std::move(cb));
@@ -611,13 +614,13 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
   return response;
 }
 
-MGetResponse OpMGet(BlockingCounter wait_bc, uint8_t fetch_mask, const Transaction* t,
-                    EngineShard* shard) {
+MGetResponse OpMGet(BlockingCounter wait_bc, AggregateError* err, uint8_t fetch_mask,
+                    const Transaction* t, EngineShard* shard) {
   SearchConst find_op = [&](string_view key) {
     const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
     return db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
   };
-  return CollectKeys(wait_bc, fetch_mask, t, shard, std::move(find_op));
+  return CollectKeys(std::move(wait_bc), err, fetch_mask, t, shard, std::move(find_op));
 }
 
 // Extend key with value, either prepend or append. Return size of stored string
@@ -834,8 +837,9 @@ OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params)
   return find_res->it;
 }
 
-MGetResponse OpGAT(BlockingCounter wait_bc, uint8_t fetch_mask, const Transaction* t,
-                   EngineShard* shard, const DbSlice::ExpireParams& expire_params) {
+MGetResponse OpGAT(BlockingCounter wait_bc, AggregateError* err, uint8_t fetch_mask,
+                   const Transaction* t, EngineShard* shard,
+                   const DbSlice::ExpireParams& expire_params) {
   SearchMut find_op = [&](string_view key) {
     return FindKeyAndSetExpiry(GetAndTouchParams{
         .t = t,
@@ -844,7 +848,7 @@ MGetResponse OpGAT(BlockingCounter wait_bc, uint8_t fetch_mask, const Transactio
         .key = key,
     });
   };
-  return CollectKeys(wait_bc, fetch_mask, t, shard, std::move(find_op));
+  return CollectKeys(std::move(wait_bc), err, fetch_mask, t, shard, std::move(find_op));
 }
 
 }  // namespace
@@ -1369,19 +1373,22 @@ void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
       fetch_mask |= FETCH_MCVER;
   }
 
-  // Count of pending tiered reads
-  fb2::BlockingCounter tiering_bc{0};
+  fb2::BlockingCounter tiering_bc{0};  // Count of pending tiered reads
+  AggregateError tiering_err;          // Fist tiering error
+
   std::vector<MGetResponse> mget_resp(shard_set->size());
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    mget_resp[shard->shard_id()] = OpMGet(tiering_bc, fetch_mask, t, shard);
+    mget_resp[shard->shard_id()] = OpMGet(tiering_bc, &tiering_err, fetch_mask, t, shard);
     return OpStatus::OK;
   };
 
   OpStatus result = cmnd_cntx.tx->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, result);
 
-  // wait for all tiered reads to finish
+  // wait for all tiered reads to finish and check for errors
   tiering_bc->Wait();
+  if (auto err = std::move(tiering_err).Destroy(); err)
+    return builder->SendError(err.message());
 
   // reorder shard results back according to argument order
   absl::FixedArray<optional<GetResp>, 8> res(args.size());
@@ -1670,17 +1677,23 @@ void StringFamily::GAT(CmdArgList args, const CommandContext& cmnd_cntx) {
   }
 
   BlockingCounter tiering_bc{0};
+  AggregateError tiering_err;
   std::vector<MGetResponse> mget_resp(shard_set->size());
+
   const DbSlice::ExpireParams expire_params{
       .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    mget_resp[shard->shard_id()] = OpGAT(tiering_bc, fetch_mask, t, shard, expire_params);
+    mget_resp[shard->shard_id()] =
+        OpGAT(tiering_bc, &tiering_err, fetch_mask, t, shard, expire_params);
     return OpStatus::OK;
   };
 
   const OpStatus result = cmnd_cntx.tx->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, result);
+
   tiering_bc->Wait();
+  if (auto err = std::move(tiering_err).Destroy(); err)
+    return builder->SendError(err.message());
 
   absl::FixedArray<optional<GetResp>, 8> ordered_by_shard{args.size()};
   ReorderShardResults(mget_resp, cmnd_cntx.tx, true, &ordered_by_shard);

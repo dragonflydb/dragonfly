@@ -388,7 +388,6 @@ DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
   db_arr_.emplace_back();
   CreateDb(0);
   expire_base_[0] = expire_base_[1] = 0;
-  soft_budget_limit_ = (0.3 * max_memory_limit / shard_set->size());
 
   std::string keyspace_events = GetFlag(FLAGS_notify_keyspace_events);
   if (!keyspace_events.empty() && keyspace_events != "Ex") {
@@ -702,8 +701,10 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
     return OpStatus::OUT_OF_MEMORY;
   }
 
+  ssize_t soft_budget_limit =
+      (0.3 * max_memory_limit.load(memory_order_relaxed)) / shard_set->size();
   PrimeEvictionPolicy evp{cntx,          (IsCacheMode() && !owner_->IsReplica()),
-                          memory_offset, ssize_t(soft_budget_limit_),
+                          memory_offset, soft_budget_limit,
                           this,          apply_memory_limit};
 
   // Fast-path if change_cb_ is empty so we Find or Add using
@@ -1601,6 +1602,7 @@ void DbSlice::SendQueuedInvalidationMessages() {
     // Notify all the clients. this function is not efficient,
     // because it broadcasts to all threads unrelated to the subscribers for the key.
     auto local_map = std::move(pending_send_map_);
+    pending_send_map_ = {};
     auto cb = [&](unsigned thread_id, util::ProactorBase*) {
       SendQueuedInvalidationMessagesCb(local_map, thread_id);
     };
@@ -1767,6 +1769,7 @@ void DbSlice::OnCbFinishBlocking() {
   if (IsCacheMode()) {
     // move fetched items to local variable
     auto fetched_items = std::move(fetched_items_);
+    fetched_items_ = {};
     for (const auto& [key_hash, db_index] : fetched_items) {
       auto& db = *db_arr_[db_index];
 

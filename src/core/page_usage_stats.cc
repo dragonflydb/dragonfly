@@ -19,8 +19,8 @@ PageUsage::PageUsage(CollectPageStats collect_stats, float threshold)
 }
 
 bool PageUsage::IsPageForObjectUnderUtilized(void* object) {
-  mi_page_usage_stats_t stat =
-      zmalloc_page_is_underutilized(object, threshold_, collect_stats_ == CollectPageStats::YES);
+  mi_page_usage_stats_t stat;
+  zmalloc_page_is_underutilized(object, threshold_, collect_stats_ == CollectPageStats::YES, &stat);
   return ConsumePageStats(stat);
 }
 

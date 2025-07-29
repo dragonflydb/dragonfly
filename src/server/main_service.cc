@@ -819,8 +819,9 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   InitRedisTables();
   facade::Connection::Init(pp_.size());
 
-  config_registry.RegisterSetter<MemoryBytesFlag>(
-      "maxmemory", [](const MemoryBytesFlag& flag) { max_memory_limit = flag.value; });
+  config_registry.RegisterSetter<MemoryBytesFlag>("maxmemory", [](const MemoryBytesFlag& flag) {
+    max_memory_limit.store(flag.value, memory_order_relaxed);
+  });
 
   config_registry.RegisterMutable("dbfilename");
   config_registry.Register("dbnum");  // equivalent to databases in redis.
@@ -1043,6 +1044,49 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
   return nullopt;
 }
 
+// TODO(kostas) refactor. Almost 1-1 with CheckKeyOwnership() above.
+std::optional<facade::ErrorReply> Service::TakenOverSlotError(const CommandId* cid, CmdArgList args,
+                                                              const ConnectionContext& dfly_cntx) {
+  if (cid->first_key_pos() == 0 && !cid->IsShardedPSub()) {
+    return nullopt;  // No key command.
+  }
+
+  OpResult<KeyIndex> key_index_res = FindKeys(cid, args);
+
+  if (!key_index_res) {
+    return ErrorReply{key_index_res.status()};
+  }
+
+  const auto& key_index = *key_index_res;
+
+  UniqueSlotChecker slot_checker;
+  for (string_view key : key_index.Range(args)) {
+    slot_checker.Add(key);
+  }
+
+  if (slot_checker.IsCrossSlot()) {
+    return ErrorReply{kCrossSlotError};
+  }
+
+  optional<SlotId> keys_slot = slot_checker.GetUniqueSlotId();
+  if (!keys_slot.has_value()) {
+    return nullopt;
+  }
+
+  if (auto error = cluster::SlotOwnershipError(*keys_slot);
+      !error.status.has_value() || error.status.value() != facade::OpStatus::OK) {
+    return ErrorReply{std::move(error)};
+  }
+  const auto cluster_config = cluster::ClusterConfig::Current();
+  if (!cluster_config)
+    return facade::ErrorReply{facade::kClusterNotConfigured};
+
+  // Moved regardless, we have been taken over
+  cluster::ClusterNodeInfo redirect = cluster_config->GetMasterNodeForSlot(*keys_slot);
+  return facade::ErrorReply{
+      absl::StrCat("-MOVED ", *keys_slot, " ", redirect.ip, ":", redirect.port), "MOVED"};
+}
+
 // Return OK if all keys are allowed to be accessed: either declared in EVAL or
 // transaction is running in global or non-atomic mode.
 optional<ErrorReply> CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info,
@@ -1089,11 +1133,11 @@ bool ShouldDenyOnOOM(const CommandId* cid, uint64_t curr_time_ns) {
   if ((cid->opt_mask() & CO::DENYOOM) && etl.is_master) {
     auto memory_stats = etl.GetMemoryUsage(curr_time_ns);
 
-    if (memory_stats.used_mem > max_memory_limit ||
-        (etl.rss_oom_deny_ratio > 0 &&
-         memory_stats.rss_mem > (max_memory_limit * etl.rss_oom_deny_ratio))) {
+    size_t limit = max_memory_limit.load(memory_order_relaxed);
+    if (memory_stats.used_mem > limit ||
+        (etl.rss_oom_deny_ratio > 0 && memory_stats.rss_mem > (limit * etl.rss_oom_deny_ratio))) {
       DLOG(WARNING) << "Out of memory, used " << memory_stats.used_mem << " ,rss "
-                    << memory_stats.rss_mem << " ,limit " << max_memory_limit;
+                    << memory_stats.rss_mem << " ,limit " << limit;
       etl.stats.oom_error_cmd_cnt++;
       return true;
     }
@@ -1159,6 +1203,15 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
     VLOG(1) << "Command " << cid->name() << " not executed because global state is " << gstate;
 
     if (gstate == GlobalState::LOADING) {
+      return ErrorReply(kLoadingErr);
+    }
+
+    if (gstate == GlobalState::TAKEN_OVER) {
+      if (IsClusterEnabled()) {
+        if (auto err = TakenOverSlotError(cid, tail_args, dfly_cntx); err) {
+          return err;
+        }
+      }
       return ErrorReply(kLoadingErr);
     }
 
@@ -2884,14 +2937,6 @@ void Service::RegisterCommands() {
 const acl::AclFamily* Service::TestInit() {
   acl_family_.Init(nullptr, &user_registry_);
   return &acl_family_;
-}
-
-void SetMaxMemoryFlag(uint64_t value) {
-  absl::SetFlag(&FLAGS_maxmemory, {value});
-}
-
-uint64_t GetMaxMemoryFlag() {
-  return absl::GetFlag(FLAGS_maxmemory).value;
 }
 
 }  // namespace dfly
