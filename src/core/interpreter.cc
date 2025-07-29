@@ -58,7 +58,7 @@ ABSL_FLAG(LuaGcFlag, luagc, {},
 
 ABSL_FLAG(uint64_t, lua_mem_gc_threshold, 10000000,
           "Specifies Lua interpreter's per thread memory limit in bytes after which the GC will be "
-          "called forcefully.");
+          "called forcefully. 0 value remove forced GC calls");
 
 static bool AbslParseFlag(std::string_view in, LuaGcFlag* flag, std::string* err) {
   if (in.empty()) {
@@ -563,18 +563,24 @@ int RedisLogCommand(lua_State* lua) {
 // See https://www.lua.org/manual/5.3/manual.html#lua_Alloc
 void* mimalloc_glue(void* ud, void* ptr, size_t osize, size_t nsize) {
   (void)ud;
+  (void)osize;
+  auto& stats = InterpreterManager::tl_stats();
   if (nsize == 0) {
-    InterpreterManager::tl_stats().used_bytes -= mi_usable_size(ptr);
-    mi_free_size(ptr, osize);
+    stats.used_bytes -= mi_usable_size(ptr);
+    mi_free(ptr);
     return nullptr;
   } else if (ptr == nullptr) {
     ptr = mi_malloc(nsize);
-    InterpreterManager::tl_stats().used_bytes += mi_usable_size(ptr);
+    stats.used_bytes += mi_usable_size(ptr);
     return ptr;
   } else {
-    InterpreterManager::tl_stats().used_bytes -= mi_usable_size(ptr);
+    const auto old_size = mi_usable_size(ptr);
     ptr = mi_realloc(ptr, nsize);
-    InterpreterManager::tl_stats().used_bytes += mi_usable_size(ptr);
+    if (ptr) {
+      stats.used_bytes -= old_size;
+      stats.used_bytes += mi_usable_size(ptr);
+    }
+
     return ptr;
   }
 }
@@ -1211,10 +1217,16 @@ void InterpreterManager::Return(Interpreter* ir) {
   const uint64_t max_memory_usage = absl::GetFlag(FLAGS_lua_mem_gc_threshold);
   using namespace chrono;
   ++tl_stats().interpreter_return;
-  if (tl_stats().used_bytes > max_memory_usage) {
+  if (max_memory_usage != 0 && tl_stats().used_bytes > max_memory_usage) {
     ++tl_stats().force_gc_calls;
     auto before = steady_clock::now();
     tl_stats().gc_freed_memory += ir->RunGC();
+
+    LOG_EVERY_T(INFO, 10) << "stats_used_bytes: " << tl_stats().used_bytes
+                          << " lua_mem_gc_threshold: " << max_memory_usage
+                          << " force_gc_calls: " << tl_stats().force_gc_calls
+                          << " freed_mem: " << tl_stats().gc_freed_memory;
+
     auto after = steady_clock::now();
     tl_stats().gc_duration_ns += duration_cast<nanoseconds>(after - before).count();
   }
