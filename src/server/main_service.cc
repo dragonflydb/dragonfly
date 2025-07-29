@@ -2745,7 +2745,7 @@ void Service::RemoveLoadingState() {
 
 bool Service::IsLoadingState() {
   util::fb2::LockGuard lk(mu_);
-  return global_state_ == GlobalState::LOADING;
+  return global_state_ == GlobalState::LOADING && loading_state_counter_ == 0;
 }
 
 void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) {

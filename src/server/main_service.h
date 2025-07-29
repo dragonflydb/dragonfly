@@ -80,6 +80,8 @@ class Service : public facade::ServiceInterface {
   bool RequestLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
   void RemoveLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
 
+  // Return true if state is LOADING and loading_state_counter_ == 0, that is,
+  // if no multiple operations require LOADING_STATE at the same time.
   bool IsLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
 
   void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) final;
