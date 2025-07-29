@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 
+#include "server/rdb_save.h"
 #include "server/table.h"
 
 namespace dfly {
@@ -41,6 +42,7 @@ class CmdSerializer {
 
   FlushSerialized cb_;
   size_t max_serialization_buffer_size_;
+  std::unique_ptr<RdbSerializer> serializer_;
 };
 
 }  // namespace dfly
