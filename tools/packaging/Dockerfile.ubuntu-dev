@@ -7,7 +7,7 @@ COPY ./Makefile ./CMakeLists.txt ./
 COPY src ./src
 
 COPY .git ./.git
-COPY cmake ./cmake
+COPY patches ./patches
 COPY helio ./helio
 
 RUN make release

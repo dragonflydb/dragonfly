@@ -60,7 +60,7 @@ add_third_party(
 
 set(MIMALLOC_INCLUDE_DIR ${THIRD_PARTY_LIB_DIR}/mimalloc2/include)
 
-set(MIMALLOC_PATCH_DIR ${CMAKE_CURRENT_LIST_DIR}/../patches/mimalloc-v2.2.4/)
+set(MIMALLOC_PATCH_DIR ${CMAKE_CURRENT_LIST_DIR}/../patches/mimalloc-v2.2.4)
 
 add_third_party(mimalloc2
    # GIT_REPOSITORY https://github.com/microsoft/mimalloc/
