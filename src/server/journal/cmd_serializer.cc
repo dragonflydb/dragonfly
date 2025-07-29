@@ -213,7 +213,9 @@ void CmdSerializer::SerializeRestore(string_view key, const PrimeValue& pk, cons
   args.push_back(expire_str);
 
   io::StringSink value_dump_sink;
-  SerializerBase::DumpObject(pv, &value_dump_sink, true);
+  // TODO we already ignore CRC in the load rdb code during migration, we need to provide ignore_crc
+  // = true when we are sure that all shards ignore crc during migration process
+  SerializerBase::DumpObject(pv, &value_dump_sink, false);
   args.push_back(value_dump_sink.str());
 
   args.push_back("ABSTTL");  // Means expire string is since epoch
