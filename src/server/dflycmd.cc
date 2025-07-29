@@ -105,6 +105,9 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
 
 bool IsLSNDiffBellowThreshold(const std::vector<LSN>& lsn_vec1, const std::vector<LSN>& lsn_vec2) {
   DCHECK_EQ(lsn_vec1.size(), lsn_vec2.size());
+  if (lsn_vec1.size() != lsn_vec2.size()) {
+    return false;
+  }
   uint32_t allow_diff = absl::GetFlag(FLAGS_allow_partial_sync_with_lsn_diff);
   for (size_t i = 0; i < lsn_vec1.size(); ++i) {
     uint32_t diff =
@@ -649,10 +652,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, ExecutionState* exec_st,
     return OpStatus::CANCELLED;
   }
 
-  if (flow->start_partial_sync_at.has_value())
-    saver->StartIncrementalSnapshotInShard(*flow->start_partial_sync_at, exec_st, shard);
-  else
-    saver->StartSnapshotInShard(true, exec_st, shard);
+  saver->StartSnapshotInShard(true, exec_st, shard);
 
   return OpStatus::OK;
 }

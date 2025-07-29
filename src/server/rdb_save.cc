@@ -1029,7 +1029,6 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
   ~Impl();
 
   void StartSnapshotting(bool stream_journal, ExecutionState* cntx, EngineShard* shard);
-  void StartIncrementalSnapshotting(LSN start_lsn, ExecutionState* cntx, EngineShard* shard);
 
   void StopSnapshotting(EngineShard* shard);
   void WaitForSnapshottingFinish(EngineShard* shard);
@@ -1217,16 +1216,6 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, ExecutionState* cntx
                                                          : SliceSnapshot::SnapshotFlush::kDisallow;
 
   s->Start(stream_journal, allow_flush);
-}
-
-void RdbSaver::Impl::StartIncrementalSnapshotting(LSN start_lsn, ExecutionState* cntx,
-                                                  EngineShard* shard) {
-  auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
-  auto& s = GetSnapshot(shard);
-
-  s = std::make_unique<SliceSnapshot>(compression_mode_, &db_slice, this, cntx);
-
-  s->StartIncremental(start_lsn);
 }
 
 // called on save flow
@@ -1427,11 +1416,6 @@ RdbSaver::~RdbSaver() {
 
 void RdbSaver::StartSnapshotInShard(bool stream_journal, ExecutionState* cntx, EngineShard* shard) {
   impl_->StartSnapshotting(stream_journal, cntx, shard);
-}
-
-void RdbSaver::StartIncrementalSnapshotInShard(LSN start_lsn, ExecutionState* cntx,
-                                               EngineShard* shard) {
-  impl_->StartIncrementalSnapshotting(start_lsn, cntx, shard);
 }
 
 error_code RdbSaver::WaitSnapshotInShard(EngineShard* shard) {

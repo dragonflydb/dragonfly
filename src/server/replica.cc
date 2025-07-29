@@ -606,13 +606,6 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
       sync_type = "full";
 
       DVLOG(1) << "Calling Flush on all slots " << this;
-      // Make sure we're in LOADING state.
-      // For partial sync we don't enter this state at all and we skip FullSync
-      if (!service_.RequestLoadingState()) {
-        return exec_st_.ReportError(std::make_error_code(errc::state_not_recoverable),
-                                    "Failed to enter LOADING state");
-      }
-      remove_loading_state = true;
 
       if (slot_range_.has_value()) {
         JournalExecutor{&service_}.FlushSlots(slot_range_.value());
@@ -629,14 +622,15 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
   }
 
   RETURN_ON_ERR(exec_st_.GetError());
+
+  LOG(INFO) << "Started " << sync_type << " sync with " << server().Description();
+
   // We skip full sync if we can do partial
   if (sync_type != "partial") {
     // Send DFLY SYNC.
     if (auto ec = SendNextPhaseRequest("SYNC"); ec) {
       return exec_st_.ReportError(ec);
     }
-
-    LOG(INFO) << "Started " << sync_type << " sync with " << server().Description();
 
     // Wait for all flows to receive full sync cut.
     // In case of an error, this is unblocked by the error handler.
