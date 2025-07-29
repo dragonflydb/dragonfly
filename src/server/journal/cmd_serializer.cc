@@ -68,7 +68,7 @@ class CommandAggregator {
 
 CmdSerializer::CmdSerializer(FlushSerialized cb, size_t max_serialization_buffer_size)
     : cb_(std::move(cb)), max_serialization_buffer_size_(max_serialization_buffer_size) {
-  serializer_ = std::make_unique<RdbSerializer>(CompressionMode::NONE);
+  serializer_ = std::make_unique<RdbSerializer>(GetDefaultCompressionMode());
 }
 
 size_t CmdSerializer::SerializeEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,

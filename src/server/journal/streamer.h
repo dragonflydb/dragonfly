@@ -9,7 +9,6 @@
 #include "server/cluster/slot_set.h"
 #include "server/common.h"
 #include "server/db_slice.h"
-#include "server/journal/cmd_serializer.h"
 #include "server/journal/journal.h"
 #include "server/journal/pending_buf.h"
 #include "server/journal/serializer.h"
@@ -95,6 +94,8 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   uint32_t journal_cb_id_{0};
   SendLsn send_lsn_;
 };
+
+class CmdSerializer;
 
 // Serializes existing DB as RESTORE commands, and sends updates as regular commands.
 // Only handles relevant slots, while ignoring all others.

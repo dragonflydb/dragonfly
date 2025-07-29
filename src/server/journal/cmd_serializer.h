@@ -9,10 +9,11 @@
 #include <string>
 #include <string_view>
 
-#include "server/rdb_save.h"
 #include "server/table.h"
 
 namespace dfly {
+
+class RdbSerializer;
 
 // CmdSerializer serializes DB entries (key+value) into command(s) in RESP format string.
 // Small entries are serialized as RESTORE commands, while bigger ones (see
