@@ -75,7 +75,7 @@ string GetString(const PrimeValue& pv) {
   return res;
 }
 
-StringResult ReadST(DbIndex dbid, string_view key, const PrimeValue& pv, EngineShard* es) {
+StringResult ReadString(DbIndex dbid, string_view key, const PrimeValue& pv, EngineShard* es) {
   return pv.IsExternal() ? StringResult{es->tiered_storage()->Read(dbid, key, pv)}
                          : StringResult{GetString(pv)};
 }
@@ -101,7 +101,7 @@ class SetCmd {
     uint16_t flags = SET_ALWAYS;
     uint32_t memcache_flags = 0;
     uint64_t expire_after_ms = 0;  // Relative value based on now. 0 means no expiration.
-    optional<StringResult>* prev_val = nullptr;  // If set, previous value is stored at pointer
+    optional<StringResult>* prev_val = nullptr;  // if set, previous value will be stored if found
 
     constexpr bool IsConditionalSet() const {
       return flags & SET_IF_NOTEXIST || flags & SET_IF_EXISTS;
@@ -145,10 +145,11 @@ OpResult<TResultOrT<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
 
   // For external entries we have to enqueue reads because modify operations like append could be
   // already pending.
-  // TODO: Optimize to return co.Size() if no modify operations are present
+  // TODO(vlad): Optimize to return co.Size() if no modify operations are present
+  // TODO(vlad): Omit decoding string to just query it's length
   if (const auto& co = it_res.value()->second; co.IsExternal()) {
     TieredStorage::TResult<size_t> fut;
-    auto cb = [fut](auto s) mutable { fut.Resolve(s.transform(&string::size)); };
+    auto cb = [fut](io::Result<string> s) mutable { fut.Resolve(s.transform(&string::size)); };
     op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, co, std::move(cb));
     return {std::move(fut)};
   } else {
@@ -1016,7 +1017,8 @@ OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Ite
   if (it->second.ObjType() != OBJ_STRING)
     return OpStatus::WRONG_TYPE;
 
-  *params.prev_val = ReadST(op_args_.db_cntx.db_index, it.key(), it->second, EngineShard::tlocal());
+  *params.prev_val =
+      ReadString(op_args_.db_cntx.db_index, it.key(), it->second, EngineShard::tlocal());
   return OpStatus::OK;
 }
 
@@ -1160,7 +1162,7 @@ void StringFamily::Get(CmdArgList args, const CommandContext& cmnd_cntx) {
     if (!it_res.ok())
       return it_res.status();
 
-    return ReadST(tx->GetDbIndex(), key, (*it_res)->second, es);
+    return ReadString(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
   GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
@@ -1173,7 +1175,7 @@ void StringFamily::GetDel(CmdArgList args, const CommandContext& cmnd_cntx) {
     if (!it_res.ok())
       return it_res.status();
 
-    auto value = ReadST(tx->GetDbIndex(), key, it_res->it->second, es);
+    auto value = ReadString(tx->GetDbIndex(), key, it_res->it->second, es);
     it_res->post_updater.Run();  // Run manually before delete
     db_slice.Del(tx->GetDbContext(), it_res->it);
     return value;
@@ -1250,7 +1252,7 @@ void StringFamily::GetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
     if (!it_res)
       return it_res.status();
 
-    StringResult value = ReadST(t->GetDbIndex(), key, it_res->it->second, shard);
+    StringResult value = ReadString(t->GetDbIndex(), key, it_res->it->second, shard);
 
     if (exp_params.IsDefined()) {
       it_res->post_updater.Run();  // Run manually before possible delete due to negative expire
