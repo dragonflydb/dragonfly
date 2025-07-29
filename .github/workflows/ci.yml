@@ -115,6 +115,10 @@ jobs:
 
           cmake -B ${GITHUB_WORKSPACE}/build \
             -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
+            -DWITH_AWS=OFF \
+            -DWITH_GCP=OFF \
+            -DWITH_UNWIND=OFF \
+            -DWITH_GPERF=OFF \
             -GNinja \
             -DCMAKE_C_COMPILER="${{matrix.compiler.c}}" \
             -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
