@@ -210,6 +210,13 @@ std::optional<ShardDocIndex::DocId> ShardDocIndex::DocKeyIndex::Remove(string_vi
   return id;
 }
 
+std::optional<search::DocId> ShardDocIndex::DocKeyIndex::Find(string_view key) const {
+  if (auto it = ids_.find(key); it != ids_.end()) {
+    return it->second;
+  }
+  return std::nullopt;
+}
+
 string_view ShardDocIndex::DocKeyIndex::Get(DocId id) const {
   DCHECK_LT(id, keys_.size());
   // Check that this id was not removed
@@ -490,6 +497,95 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
   }
 
   return out;
+}
+
+std::vector<KeyData> ShardDocIndex::PreagregateDataForJoin(
+    const OpArgs& op_args, absl::Span<std::string_view> join_fields,
+    search::SearchAlgorithm* search_algo) const {
+  auto search_results = search_algo->Search(&*indices_);
+  return search_results.error.empty() ? LoadData(op_args, search_results.ids, join_fields, true)
+                                      : std::vector<KeyData>{};
+}
+
+KeyDataMap ShardDocIndex::LoadKeysData(const OpArgs& op_args,
+                                       const absl::flat_hash_set<std::string_view>& keys,
+                                       absl::Span<const FieldReference> fields_to_load) const {
+  std::vector<search::DocId> doc_ids;
+  doc_ids.reserve(keys.size());
+  for (const auto& key : keys) {
+    auto doc_id = key_index_.Find(key);
+    if (doc_id) {
+      doc_ids.push_back(doc_id.value());
+    }
+  }
+
+  std::vector<std::string_view> fields;
+  fields.reserve(fields_to_load.size());
+  for (const auto& field : fields_to_load) {
+    auto fident = field.Identifier(base_->schema, false);
+    fields.push_back(fident);
+  }
+
+  auto loaded_data = LoadData(op_args, doc_ids, absl::MakeSpan(fields), false);
+  KeyDataMap result(loaded_data.size());
+  for (auto& [key, values] : loaded_data) {
+    result.emplace(key, std::move(values));
+  }
+  return result;
+}
+
+std::vector<KeyData> ShardDocIndex::LoadData(const OpArgs& op_args,
+                                             absl::Span<const search::DocId> ids,
+                                             absl::Span<std::string_view> fields_to_load,
+                                             bool skip_nil_data) const {
+  const size_t fields_count = fields_to_load.size();
+  std::vector<bool> is_sortable_field(fields_count);
+  std::vector<FieldReference> basic_fields;
+  basic_fields.reserve(fields_count);
+  for (size_t i = 0; i < fields_count; ++i) {
+    bool is_sortable = IsSortableField(fields_to_load[i], base_->schema);
+    is_sortable_field[i] = is_sortable;
+    if (!is_sortable) {
+      basic_fields.emplace_back(fields_to_load[i]);
+    }
+  }
+
+  std::vector<KeyData> result;
+  result.reserve(ids.size());
+
+  for (DocId doc : ids) {
+    auto entry = LoadEntry(doc, op_args);
+    if (!entry)
+      continue;
+
+    auto& [key, accessor] = *entry;
+
+    SearchDocData loaded_basic_fields = accessor->Serialize(base_->schema, basic_fields);
+
+    bool insert_key = true;
+    std::vector<search::SortableValue> join_fields_values(fields_count);
+    for (size_t i = 0; i < fields_count; ++i) {
+      search::SortableValue value;
+      if (is_sortable_field[i]) {
+        value = indices_->GetSortIndexValue(doc, fields_to_load[i]);
+      } else {
+        value = loaded_basic_fields[fields_to_load[i]];
+      }
+      if (std::holds_alternative<std::monostate>(value) && skip_nil_data) {
+        insert_key = false;
+        break;
+      }
+      join_fields_values[i] = std::move(value);
+    }
+
+    if (insert_key) {
+      result.emplace_back(std::piecewise_construct, std::forward_as_tuple(key),
+                          std::forward_as_tuple(std::make_move_iterator(join_fields_values.begin()),
+                                                std::make_move_iterator(join_fields_values.end())));
+    }
+  }
+
+  return result;
 }
 
 DocIndexInfo ShardDocIndex::GetInfo() const {
