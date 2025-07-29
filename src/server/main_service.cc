@@ -1330,6 +1330,10 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
   dfly_cntx->cid = cid;
   InvokeCmd(cid, args_no_cmd, CommandContext{dfly_cntx->transaction, builder, dfly_cntx});
 
+  if (!dispatching_in_multi) {
+    dfly_cntx->transaction = nullptr;
+  }
+
   if (auto err = builder->ConsumeLastError(); !err.empty()) {
     LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), args_no_cmd, err);
     if (err == facade::kOutOfMemory)
@@ -1337,9 +1341,6 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
     return DispatchResult::ERROR;
   }
 
-  if (!dispatching_in_multi) {
-    dfly_cntx->transaction = nullptr;
-  }
   return DispatchResult::OK;
 }
 
