@@ -40,6 +40,8 @@ ABSL_FLAG(double, table_growth_margin, 0.4,
 ABSL_FLAG(std::string, notify_keyspace_events, "",
           "notify-keyspace-events. Only Ex is supported for now");
 
+ABSL_FLAG(bool, cluster_flush_decommit_memory, false, "Decommit memory after flushing slots");
+
 namespace dfly {
 
 using namespace std;
@@ -848,10 +850,16 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
     cursor = next;
     ThisFiber::Yield();
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
+
   VLOG(1) << "FlushSlotsFb del count is: " << del_count;
   UnregisterOnChange(next_version);
 
-  etl.DecommitMemory(ServerState::kDataHeap);
+  if (absl::GetFlag(FLAGS_cluster_flush_decommit_memory)) {
+    int64_t start = absl::GetCurrentTimeNanos();
+    etl.DecommitMemory(ServerState::kDataHeap);
+    int64_t took = absl::GetCurrentTimeNanos() - start;
+    LOG_IF(WARNING, took >= 5'000'000 /* 5 ms */) << "Decommit took " << took;
+  }
 }
 
 void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
