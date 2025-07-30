@@ -40,6 +40,8 @@ ABSL_FLAG(double, table_growth_margin, 0.4,
 ABSL_FLAG(std::string, notify_keyspace_events, "",
           "notify-keyspace-events. Only Ex is supported for now");
 
+ABSL_FLAG(bool, cluster_flush_decommit_memory, false, "Decommit memory after flushing slots");
+
 namespace dfly {
 
 using namespace std;
@@ -790,6 +792,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
 
   // Explicitly copy table smart pointer to keep reference count up (flushall drops it)
   boost::intrusive_ptr<DbTable> table = db_arr_.front();
+  size_t memory_before = table->table_memory() + table->stats.obj_memory_usage;
 
   std::string tmp;
   auto iterate_bucket = [&](PrimeTable::bucket_iterator it) {
@@ -833,10 +836,19 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
     cursor = next;
     ThisFiber::Yield();
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
+
   VLOG(1) << "FlushSlotsFb del count is: " << del_count;
   UnregisterOnChange(next_version);
 
-  etl.DecommitMemory(ServerState::kDataHeap);
+  if (absl::GetFlag(FLAGS_cluster_flush_decommit_memory)) {
+    int64_t start = absl::GetCurrentTimeNanos();
+    etl.DecommitMemory(ServerState::kDataHeap);
+    int64_t took = absl::GetCurrentTimeNanos() - start;
+    size_t memory_after = table->table_memory() + table->stats.obj_memory_usage;
+
+    LOG(INFO) << "Memory decommit took " << took << "ns, deleted " << del_count << ", memory delta "
+              << (memory_before - memory_after);
+  }
 }
 
 void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
