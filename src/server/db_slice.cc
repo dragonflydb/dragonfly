@@ -807,6 +807,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
 
   // Explicitly copy table smart pointer to keep reference count up (flushall drops it)
   boost::intrusive_ptr<DbTable> table = db_arr_.front();
+  size_t memory_before = table->table_memory() + table->stats.obj_memory_usage;
 
   std::string tmp;
   auto iterate_bucket = [&](PrimeTable::bucket_iterator it) {
@@ -858,7 +859,10 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
     int64_t start = absl::GetCurrentTimeNanos();
     etl.DecommitMemory(ServerState::kDataHeap);
     int64_t took = absl::GetCurrentTimeNanos() - start;
-    LOG_IF(WARNING, took >= 5'000'000 /* 5 ms */) << "Decommit took " << took;
+    size_t memory_after = table->table_memory() + table->stats.obj_memory_usage;
+
+    LOG(INFO) << "Memory decommit took " << took << "ns, deleted " << del_count << ", memory delta "
+              << (memory_before - memory_after);
   }
 }
 
