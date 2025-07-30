@@ -43,9 +43,8 @@ class Service : public facade::ServiceInterface {
   size_t DispatchManyCommands(absl::Span<ArgSlice> args_list, facade::SinkReplyBuilder* builder,
                               facade::ConnectionContext* cntx) final;
 
-  // Check VerifyCommandExecution and invoke command with args
-  facade::DispatchResult InvokeCmd(const CommandId* cid, CmdArgList tail_args,
-                                   const CommandContext& cmd_cntx);
+  // Check VerifyCommandExecution and invoke command with args. Reply to builder
+  void InvokeCmd(const CommandId* cid, CmdArgList tail_args, const CommandContext& cmd_cntx);
 
   // Verify command can be executed now (check out of memory), always called immediately before
   // execution
