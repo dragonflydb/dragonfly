@@ -22,7 +22,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
  public:
   enum class SendLsn { NO = 0, YES = 1 };
   JournalStreamer(journal::Journal* journal, ExecutionState* cntx, SendLsn send_lsn,
-                  bool is_stable_sync);
+                  bool is_stable_sync, LSN partial_sync_lsn = 0);
   virtual ~JournalStreamer();
 
   // Self referential.
@@ -85,6 +85,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
 
   // If we are replication in stable sync we can aggregate data before sending
   bool is_stable_sync_;
+  LSN partial_sync_lsn_ = 0;
   size_t in_flight_bytes_ = 0, total_sent_ = 0;
   // Last time that send data in milliseconds
   uint64_t last_async_write_time_ = 0;
