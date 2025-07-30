@@ -2743,7 +2743,7 @@ void Service::RemoveLoadingState() {
   }
 }
 
-bool Service::IsLoadingState() {
+bool Service::IsLoadingExclusively() {
   util::fb2::LockGuard lk(mu_);
   return global_state_ == GlobalState::LOADING && loading_state_counter_ == 0;
 }

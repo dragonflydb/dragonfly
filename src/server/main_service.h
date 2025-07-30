@@ -82,7 +82,7 @@ class Service : public facade::ServiceInterface {
 
   // Return true if state is LOADING and loading_state_counter_ == 0, that is,
   // if no multiple operations require LOADING_STATE at the same time.
-  bool IsLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
+  bool IsLoadingExclusively() ABSL_LOCKS_EXCLUDED(mu_);
 
   void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) final;
   void OnConnectionClose(facade::ConnectionContext* cntx) final;

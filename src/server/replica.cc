@@ -542,7 +542,7 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     JoinDflyFlows();
     if (sync_type == "full") {
       service_.RemoveLoadingState();
-    } else if (service_.IsLoadingState()) {
+    } else if (service_.IsLoadingExclusively()) {
       // We need this check. We originally set the state unconditionally to LOADING
       // when we call ReplicaOf command. If for some reason we fail to start full sync below
       // or cancel the context, we still need to switch to ACTIVE state.
