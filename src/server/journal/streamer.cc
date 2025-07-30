@@ -330,6 +330,13 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal
   migration_buckets_serialization_threshold_cached =
       absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);
   db_array_ = slice->databases();  // Inc ref to make sure DB isn't deleted while we use it
+
+  cmd_serializer_ = std::make_unique<CmdSerializer>(
+      [&](std::string s) {
+        Write(std::move(s));
+        ThrottleIfNeeded();
+      },
+      ServerState::tlocal()->serialization_max_chunk_size);
 }
 
 void RestoreStreamer::Start(util::FiberSocketBase* dest) {
@@ -515,13 +522,7 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
 
 void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
                                  uint64_t expire_ms) {
-  CmdSerializer serializer(
-      [&](std::string s) {
-        Write(std::move(s));
-        ThrottleIfNeeded();
-      },
-      ServerState::tlocal()->serialization_max_chunk_size);
-  stats_.commands += serializer.SerializeEntry(key, pk, pv, expire_ms);
+  stats_.commands += cmd_serializer_->SerializeEntry(key, pk, pv, expire_ms);
 }
 
 }  // namespace dfly
