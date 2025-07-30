@@ -2744,6 +2744,11 @@ void Service::RemoveLoadingState() {
   }
 }
 
+bool Service::IsLoadingExclusively() {
+  util::fb2::LockGuard lk(mu_);
+  return global_state_ == GlobalState::LOADING && loading_state_counter_ == 0;
+}
+
 void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) {
   // We skip authentication on privileged listener if the flag admin_nopass is set
   // We also skip authentication if requirepass is empty
