@@ -155,6 +155,8 @@ TEST_F(LinearSearchMapTest, BasicFunctionality) {
     map.insert(i, i * 1.1);
   }
 
+  EXPECT_EQ(map.size(), 100);
+
   // Using indexes
   for (size_t i = 0; i < map.size(); ++i) {
     auto [key, value] = map[i];
