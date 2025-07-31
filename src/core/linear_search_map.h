@@ -23,143 +23,84 @@ namespace dfly {
    NOTE:
      - Insert() and Emplace() do NOT check for duplicate keys at runtime.
        Inserting a duplicate key results in undefined behavior.
-     - You must ensure keys are unique when inserting. */
-template <typename Key, typename Value, size_t N = 8> class LinearSearchMap {
+     - You must ensure keys are unique when inserting.
+     - This syntax is used to maintain compatibility with absl::InlinedVector. */
+template <typename Key, typename Value, size_t N = 8>
+class LinearSearchMap : public absl::InlinedVector<std::pair<Key, Value>, N> {
  private:
-  using Vector = absl::InlinedVector<std::pair<Key, Value>, N>;
+  using Base = absl::InlinedVector<std::pair<Key, Value>, N>;
+  using Base::emplace_back;
 
  public:
-  using iterator = typename Vector::iterator;
-  using const_iterator = typename Vector::const_iterator;
+  using Base::begin;
+  using Base::clear;
+  using Base::empty;
+  using Base::end;
+  using Base::reserve;
+  using Base::shrink_to_fit;
+  using Base::size;
+  using Base::operator[];
+  using Base::erase;
+  using Base::resize;
 
-  LinearSearchMap() = default;
+  using iterator = typename Base::iterator;
+  using const_iterator = typename Base::const_iterator;
 
   // Does not check if key already exists.
   // If key already exists - undefined behavior.
-  void Insert(Key key, Value value);
-  template <typename... Args> void Emplace(Key key, Args&&... args);
+  void insert(Key key, Value value);
+  template <typename... Args> void emplace(Key key, Args&&... args);
 
-  void Erase(iterator it);
-  void Erase(const Key& key);
+  void erase(const Key& key);
 
-  bool Contains(const Key& key) const;
+  bool contains(const Key& key) const;
 
-  Value& operator[](size_t index);
-  const Value& operator[](size_t index) const;
-
-  iterator Find(const Key& key);
-  const_iterator Find(const Key& key) const;
-  size_t FindIndex(const Key& key) const;
-
-  size_t Size() const;
-  bool Empty() const;
-
-  void Reserve(size_t n);
-
-  iterator begin();
-  const_iterator begin() const;
-  iterator end();
-  const_iterator end() const;
-
- private:
-  Vector data_;
+  iterator find(const Key& key);
+  const_iterator find(const Key& key) const;
+  size_t find_index(const Key& key) const;
 };
 
 // Implementation
 /******************************************************************/
 template <typename Key, typename Value, size_t N>
-void LinearSearchMap<Key, Value, N>::Insert(Key key, Value value) {
-  DCHECK(!Contains(key)) << "Key already exists: " << key;
-  data_.emplace_back(std::move(key), std::move(value));
+void LinearSearchMap<Key, Value, N>::insert(Key key, Value value) {
+  DCHECK(!contains(key)) << "Key already exists: " << key;
+  emplace_back(std::move(key), std::move(value));
 }
 
 template <typename Key, typename Value, size_t N>
 template <typename... Args>
-void LinearSearchMap<Key, Value, N>::Emplace(Key key, Args&&... args) {
-  DCHECK(!Contains(key)) << "Key already exists: " << key;
-  data_.emplace_back(std::piecewise_construct, std::forward_as_tuple(std::move(key)),
-                     std::forward_as_tuple(std::forward<Args>(args)...));
+void LinearSearchMap<Key, Value, N>::emplace(Key key, Args&&... args) {
+  DCHECK(!contains(key)) << "Key already exists: " << key;
+  emplace_back(std::piecewise_construct, std::forward_as_tuple(std::move(key)),
+               std::forward_as_tuple(std::forward<Args>(args)...));
 }
 
 template <typename Key, typename Value, size_t N>
-void LinearSearchMap<Key, Value, N>::Erase(iterator it) {
-  data_.erase(it);
+void LinearSearchMap<Key, Value, N>::erase(const Key& key) {
+  erase(find(key));
 }
 
 template <typename Key, typename Value, size_t N>
-void LinearSearchMap<Key, Value, N>::Erase(const Key& key) {
-  data_.erase(Find(key));
+bool LinearSearchMap<Key, Value, N>::contains(const Key& key) const {
+  return find(key) != end();
 }
 
 template <typename Key, typename Value, size_t N>
-bool LinearSearchMap<Key, Value, N>::Contains(const Key& key) const {
-  return Find(key) != end();
-}
-
-template <typename Key, typename Value, size_t N>
-Value& LinearSearchMap<Key, Value, N>::operator[](size_t index) {
-  return data_[index].second;
-}
-
-template <typename Key, typename Value, size_t N>
-const Value& LinearSearchMap<Key, Value, N>::operator[](size_t index) const {
-  return data_[index].second;
-}
-
-template <typename Key, typename Value, size_t N>
-typename LinearSearchMap<Key, Value, N>::iterator LinearSearchMap<Key, Value, N>::Find(
+typename LinearSearchMap<Key, Value, N>::iterator LinearSearchMap<Key, Value, N>::find(
     const Key& key) {
-  return std::find_if(data_.begin(), data_.end(),
-                      [&key](const auto& pair) { return pair.first == key; });
+  return std::find_if(begin(), end(), [&key](const auto& pair) { return pair.first == key; });
 }
 
 template <typename Key, typename Value, size_t N>
-typename LinearSearchMap<Key, Value, N>::const_iterator LinearSearchMap<Key, Value, N>::Find(
+typename LinearSearchMap<Key, Value, N>::const_iterator LinearSearchMap<Key, Value, N>::find(
     const Key& key) const {
-  return std::find_if(data_.begin(), data_.end(),
-                      [&key](const auto& pair) { return pair.first == key; });
+  return std::find_if(begin(), end(), [&key](const auto& pair) { return pair.first == key; });
 }
 
 template <typename Key, typename Value, size_t N>
-size_t LinearSearchMap<Key, Value, N>::FindIndex(const Key& key) const {
-  return std::distance(data_.begin(), Find(key));
-}
-
-template <typename Key, typename Value, size_t N>
-size_t LinearSearchMap<Key, Value, N>::Size() const {
-  return data_.size();
-}
-
-template <typename Key, typename Value, size_t N>
-bool LinearSearchMap<Key, Value, N>::Empty() const {
-  return data_.empty();
-}
-
-template <typename Key, typename Value, size_t N>
-void LinearSearchMap<Key, Value, N>::Reserve(size_t n) {
-  data_.reserve(n);
-}
-
-template <typename Key, typename Value, size_t N>
-typename LinearSearchMap<Key, Value, N>::iterator LinearSearchMap<Key, Value, N>::begin() {
-  return data_.begin();
-}
-
-template <typename Key, typename Value, size_t N>
-typename LinearSearchMap<Key, Value, N>::const_iterator LinearSearchMap<Key, Value, N>::begin()
-    const {
-  return data_.begin();
-}
-
-template <typename Key, typename Value, size_t N>
-typename LinearSearchMap<Key, Value, N>::iterator LinearSearchMap<Key, Value, N>::end() {
-  return data_.end();
-}
-
-template <typename Key, typename Value, size_t N>
-typename LinearSearchMap<Key, Value, N>::const_iterator LinearSearchMap<Key, Value, N>::end()
-    const {
-  return data_.end();
+size_t LinearSearchMap<Key, Value, N>::find_index(const Key& key) const {
+  return std::distance(begin(), find(key));
 }
 
 }  // namespace dfly
