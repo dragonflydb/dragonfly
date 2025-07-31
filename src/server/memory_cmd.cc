@@ -178,7 +178,7 @@ void MemoryCmd::Run(CmdArgList args) {
         absl::GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
     const float threshold = parser.NextOrDefault(default_threshold);
 
-    CollectedPageStats results[shard_set->size()];
+    std::vector<CollectedPageStats> results(shard_set->size());
     shard_set->pool()->AwaitFiberOnAll([threshold, &results](util::ProactorBase*) {
       if (auto* shard = EngineShard::tlocal(); shard) {
         if (auto shard_res = shard->DoDefrag(CollectPageStats::YES, threshold);
@@ -188,7 +188,7 @@ void MemoryCmd::Run(CmdArgList args) {
       }
     });
 
-    const auto merged = CollectedPageStats::Merge(results, shard_set->size(), threshold);
+    const CollectedPageStats merged = CollectedPageStats::Merge(std::move(results), threshold);
     auto* rb = static_cast<RedisReplyBuilder*>(builder_);
     return rb->SendVerbatimString(merged.ToString());
   }

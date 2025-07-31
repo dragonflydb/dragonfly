@@ -5,6 +5,7 @@
 #include "core/page_usage_stats.h"
 
 #include <absl/container/flat_hash_set.h>
+#include <absl/strings/ascii.h>
 #include <absl/strings/str_join.h>
 #include <glog/logging.h>
 #include <hdr/hdr_histogram.h>
@@ -23,6 +24,10 @@ mi_page_usage_stats_t mi_heap_page_is_underutilized(mi_heap_t* heap, void* p, fl
 
 namespace dfly {
 
+using absl::StrAppend;
+using absl::StrFormat;
+using absl::StripTrailingAsciiWhitespace;
+
 namespace {
 constexpr auto kUsageHistPoints = std::array{50, 90, 99};
 constexpr auto kInitialSBFCap = 1000;
@@ -30,12 +35,11 @@ constexpr auto kFProb = 0.001;
 constexpr auto kGrowthFactor = 2;
 constexpr auto kHistSignificantFigures = 3;
 
-FilterWithSize MakeSBF() {
-  return {.sbf = SBF{kInitialSBFCap, kFProb, kGrowthFactor, PMR_NS::get_default_resource()},
-          .size = 0};
-}
-
 }  // namespace
+
+FilterWithSize::FilterWithSize()
+    : sbf{SBF{kInitialSBFCap, kFProb, kGrowthFactor, PMR_NS::get_default_resource()}}, size{0} {
+}
 
 void FilterWithSize::Add(uintptr_t address) {
   const auto s = std::to_string(address);
@@ -44,7 +48,7 @@ void FilterWithSize::Add(uintptr_t address) {
   }
 }
 
-void CollectedPageStats::Merge(CollectedPageStats&& other, ShardId shard_id) {
+void CollectedPageStats::Merge(CollectedPageStats&& other, uint16_t shard_id) {
   this->pages_scanned += other.pages_scanned;
   this->pages_marked_for_realloc += other.pages_marked_for_realloc;
   this->pages_full += other.pages_full;
@@ -54,54 +58,50 @@ void CollectedPageStats::Merge(CollectedPageStats&& other, ShardId shard_id) {
   shard_wide_summary.emplace(std::make_pair(shard_id, std::move(other.page_usage_hist)));
 }
 
-CollectedPageStats CollectedPageStats::Merge(CollectedPageStats* stats, const size_t size,
+CollectedPageStats CollectedPageStats::Merge(std::vector<CollectedPageStats>&& stats,
                                              const float threshold) {
   CollectedPageStats result;
   result.threshold = threshold;
-  for (size_t i = 0; i < size; ++i) {
-    result.Merge(std::move(*stats), i);
-    stats++;
+
+  size_t shard_index = 0;
+  for (CollectedPageStats& stat : stats) {
+    result.Merge(std::move(stat), shard_index++);
   }
   return result;
 }
 
 std::string CollectedPageStats::ToString() const {
-  std::vector<std::string> rows;
-  rows.push_back(absl::StrFormat("Page usage threshold: %f", threshold * 100));
-  rows.push_back(absl::StrFormat("Pages scanned: %d", pages_scanned));
-  rows.push_back(absl::StrFormat("Pages marked for reallocation: %d", pages_marked_for_realloc));
-  rows.push_back(absl::StrFormat("Pages full: %d", pages_full));
-  rows.push_back(absl::StrFormat("Pages reserved for malloc: %d", pages_reserved_for_malloc));
-  rows.push_back(
-      absl::StrFormat("Pages skipped due to heap mismatch: %d", pages_with_heap_mismatch));
-  rows.push_back(absl::StrFormat("Pages with usage above threshold: %d", pages_above_threshold));
+  std::string response;
+  StrAppend(&response, "Page usage threshold: ", threshold * 100, "\n");
+  StrAppend(&response, "Pages scanned: ", pages_scanned, "\n");
+  StrAppend(&response, "Pages marked for reallocation: ", pages_marked_for_realloc, "\n");
+  StrAppend(&response, "Pages full: ", pages_full, "\n");
+  StrAppend(&response, "Pages reserved for malloc: ", pages_reserved_for_malloc, "\n");
+  StrAppend(&response, "Pages skipped due to heap mismatch: ", pages_with_heap_mismatch, "\n");
+  StrAppend(&response, "Pages with usage above threshold: ", pages_above_threshold, "\n");
   for (const auto& [shard_id, usage] : shard_wide_summary) {
-    rows.push_back(absl::StrFormat("[Shard %d]", shard_id));
+    StrAppend(&response, "[Shard ", shard_id, "]\n");
     for (const auto& [percentage, count] : usage) {
-      rows.push_back(absl::StrFormat(" %d%% pages are below %d%% block usage", percentage, count));
+      StrAppend(&response,
+                StrFormat(" %d%% pages are below %d%% block usage\n", percentage, count));
     }
   }
-  return absl::StrJoin(rows, "\n");
+  StripTrailingAsciiWhitespace(&response);
+  return response;
 }
 
-UniquePages::UniquePages()
-    : pages_scanned{MakeSBF()},
-      pages_marked_for_realloc{MakeSBF()},
-      pages_full{MakeSBF()},
-      pages_reserved_for_malloc{MakeSBF()},
-      pages_with_heap_mismatch{MakeSBF()},
-      pages_above_threshold{MakeSBF()} {
+PageUsage::UniquePages::UniquePages() {
   hdr_histogram* h = nullptr;
   const auto init_result = hdr_init(1, 100, kHistSignificantFigures, &h);
   CHECK_EQ(0, init_result) << "failed to initialize histogram";
   page_usage_hist = h;
 }
 
-UniquePages::~UniquePages() {
+PageUsage::UniquePages::~UniquePages() {
   hdr_close(page_usage_hist);
 }
 
-void UniquePages::AddStat(mi_page_usage_stats_t stat) {
+void PageUsage::UniquePages::AddStat(mi_page_usage_stats_t stat) {
   const auto address = stat.page_address;
   pages_scanned.Add(address);
   if (stat.flags == MI_DFLY_PAGE_BELOW_THRESHOLD) {
@@ -124,7 +124,7 @@ void UniquePages::AddStat(mi_page_usage_stats_t stat) {
   }
 }
 
-CollectedPageStats UniquePages::CollectedStats() const {
+CollectedPageStats PageUsage::UniquePages::CollectedStats() const {
   CollectedPageStats::ShardUsageSummary usage;
   for (const auto p : kUsageHistPoints) {
     usage[p] = hdr_value_at_percentile(page_usage_hist, p);

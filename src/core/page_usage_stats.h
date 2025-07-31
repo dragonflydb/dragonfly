@@ -8,7 +8,6 @@
 #include <mimalloc/types.h>
 
 #include "core/bloom.h"
-#include "server/tx_base.h"
 
 struct hdr_histogram;
 
@@ -17,6 +16,7 @@ namespace dfly {
 enum class CollectPageStats : uint8_t { YES, NO };
 
 struct FilterWithSize {
+  FilterWithSize();
   SBF sbf;
   size_t size;
   void Add(uintptr_t);
@@ -33,28 +33,12 @@ struct CollectedPageStats {
 
   using ShardUsageSummary = absl::btree_map<uint8_t, uint64_t>;
   ShardUsageSummary page_usage_hist;
-  absl::btree_map<ShardId, ShardUsageSummary> shard_wide_summary;
+  absl::btree_map<uint16_t, ShardUsageSummary> shard_wide_summary;
 
-  void Merge(CollectedPageStats&& other, ShardId shard_id);
-  static CollectedPageStats Merge(CollectedPageStats* stats, size_t size, float threshold);
+  void Merge(CollectedPageStats&& other, uint16_t shard_id);
+  static CollectedPageStats Merge(std::vector<CollectedPageStats>&& stats, float threshold);
 
   std::string ToString() const;
-};
-
-struct UniquePages {
-  FilterWithSize pages_scanned;
-  FilterWithSize pages_marked_for_realloc;
-  FilterWithSize pages_full;
-  FilterWithSize pages_reserved_for_malloc;
-  FilterWithSize pages_with_heap_mismatch;
-  FilterWithSize pages_above_threshold;
-  hdr_histogram* page_usage_hist;
-
-  explicit UniquePages();
-  ~UniquePages();
-
-  void AddStat(mi_page_usage_stats_t stat);
-  CollectedPageStats CollectedStats() const;
 };
 
 class PageUsage {
@@ -74,6 +58,22 @@ class PageUsage {
  private:
   CollectPageStats collect_stats_{CollectPageStats::NO};
   float threshold_;
+
+  struct UniquePages {
+    FilterWithSize pages_scanned{};
+    FilterWithSize pages_marked_for_realloc{};
+    FilterWithSize pages_full{};
+    FilterWithSize pages_reserved_for_malloc{};
+    FilterWithSize pages_with_heap_mismatch{};
+    FilterWithSize pages_above_threshold{};
+    hdr_histogram* page_usage_hist{};
+
+    explicit UniquePages();
+    ~UniquePages();
+
+    void AddStat(mi_page_usage_stats_t stat);
+    CollectedPageStats CollectedStats() const;
+  };
 
   UniquePages unique_pages_;
 };
