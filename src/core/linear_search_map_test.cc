@@ -148,4 +148,35 @@ TEST_F(LinearSearchMapTest, Erase) {
   EXPECT_TRUE(map.empty());
 }
 
+TEST_F(LinearSearchMapTest, BasicFunctionality) {
+  LinearSearchMap<double, double> map;
+
+  for (double i = 0; i < 100; ++i) {
+    map.insert(i, i * 1.1);
+  }
+
+  // Using indexes
+  for (size_t i = 0; i < map.size(); ++i) {
+    auto [key, value] = map[i];
+    EXPECT_EQ(value, key * 1.1);
+  }
+
+  // Get index by key
+  for (double i = 0; i < 100; ++i) {
+    size_t index = map.find_index(i);
+    auto [key, value] = map[index];
+    EXPECT_EQ(value, key * 1.1);
+  }
+
+  // Get value by key
+  for (double i = 0; i < 100; ++i) {
+    EXPECT_EQ(map[i], i * 1.1);
+  }
+
+  // Iterate through the map
+  for (const auto& [key, value] : map) {
+    EXPECT_EQ(value, key * 1.1);
+  }
+}
+
 }  // namespace dfly

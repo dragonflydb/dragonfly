@@ -58,6 +58,9 @@ class LinearSearchMap : public absl::InlinedVector<std::pair<Key, Value>, N> {
   iterator find(const Key& key);
   const_iterator find(const Key& key) const;
   size_t find_index(const Key& key) const;
+
+  Value& operator[](const Key& key);
+  const Value& operator[](const Key& key) const;
 };
 
 // Implementation
@@ -101,6 +104,16 @@ typename LinearSearchMap<Key, Value, N>::const_iterator LinearSearchMap<Key, Val
 template <typename Key, typename Value, size_t N>
 size_t LinearSearchMap<Key, Value, N>::find_index(const Key& key) const {
   return std::distance(begin(), find(key));
+}
+
+template <typename Key, typename Value, size_t N>
+Value& LinearSearchMap<Key, Value, N>::operator[](const Key& key) {
+  return find(key)->second;
+}
+
+template <typename Key, typename Value, size_t N>
+const Value& LinearSearchMap<Key, Value, N>::operator[](const Key& key) const {
+  return find(key)->second;
 }
 
 }  // namespace dfly
