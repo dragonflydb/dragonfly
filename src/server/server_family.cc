@@ -384,6 +384,16 @@ void ClientGetName(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext
   }
 }
 
+void ClientInfo(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx) {
+  if (!args.empty()) {
+    return builder->SendError(facade::kSyntaxErr);
+  }
+  auto* conn = cntx->conn();
+  string info = conn->GetClientInfo();
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  return rb->SendVerbatimString(info);
+}
+
 void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkReplyBuilder* builder,
                 ConnectionContext* cntx) {
   if (!args.empty()) {
@@ -2272,6 +2282,8 @@ void ClientHelp(SinkReplyBuilder* builder) {
       "      Kill connections made to specified local address",
       "    * ID <client-id>",
       "      Kill connections by client id.",
+      "INFO",
+      "    Return information about the current client connection.",
       "LIST",
       "    Return information about client connections.",
       "UNPAUSE",
@@ -2304,6 +2316,8 @@ void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
     return ClientSetName(sub_args, builder, cntx);
   } else if (sub_cmd == "GETNAME") {
     return ClientGetName(sub_args, builder, cntx);
+  } else if (sub_cmd == "INFO") {
+    return ClientInfo(sub_args, builder, cntx);
   } else if (sub_cmd == "LIST") {
     return ClientList(sub_args, absl::MakeSpan(listeners_), builder, cntx);
   } else if (sub_cmd == "PAUSE") {
