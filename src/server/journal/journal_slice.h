@@ -62,7 +62,7 @@ class JournalSlice {
   void ResetRingBuffer();
 
  private:
-  void CallOnChange(JournalItem* item);
+  void CallOnChange(JournalChangeItem* item);
   boost::circular_buffer<JournalItem> ring_buffer_;
   base::IoBuf ring_serialize_buf_;
 
