@@ -61,7 +61,7 @@ jobs:
         run: |
           job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           message="Daily build (${{ matrix.name }}) failed.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
-          
+
           curl -s \
             -X POST \
             -H 'Content-Type: application/json' \
@@ -121,7 +121,7 @@ jobs:
         run: |
           job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           message="Daily build (macOS) failed.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
-          
+
           curl -s \
             -X POST \
             -H 'Content-Type: application/json' \
