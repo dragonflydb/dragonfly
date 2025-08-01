@@ -153,49 +153,43 @@ typename BlockList<C>::BlockListIterator& BlockList<C>::BlockListIterator::opera
 }
 
 template <typename C> void BlockList<C>::BlockListIterator::SeekGE(DocId min_doc_id) {
-  if constexpr (std::is_same_v<C, CompressedSortedSet>) {
-    do {
-      operator++();
-    } while (it != it_end && (block_it == block_end || *block_it < min_doc_id));
-  } else {
+  if (it == it_end) {
+    block_it = {};
+    block_end = {};
+    return;
+  }
+
+  auto less_than_min_doc_id = [&](const auto& value) {
+    using T = std::decay_t<decltype(value)>;
+    if constexpr (std::is_same_v<T, DocId>) {
+      return value < min_doc_id;
+    } else {
+      return value.first < min_doc_id;
+    }
+  };
+
+  auto needed_block = [&](const auto& it) {
+    return it->begin() != it->end() && !less_than_min_doc_id(it->Back());
+  };
+
+  // Choose the first block that has the last element >= min_doc_id
+  if (!needed_block(it)) {
+    while (++it != it_end) {
+      if (needed_block(it)) {
+        block_it = it->begin();
+        block_end = it->end();
+        break;
+      }
+    }
     if (it == it_end) {
       block_it = {};
       block_end = {};
       return;
     }
-
-    auto less_than_min_doc_id = [&](const auto& value) {
-      using T = std::decay_t<decltype(value)>;
-      if constexpr (std::is_same_v<T, DocId>) {
-        return value < min_doc_id;
-      } else {
-        return value.first < min_doc_id;
-      }
-    };
-
-    auto needed_block = [&](const auto& it) {
-      return it->begin() != it->end() && !less_than_min_doc_id(it->Back());
-    };
-
-    // Choose the first block that has the last element >= min_doc_id
-    if (!needed_block(it)) {
-      while (++it != it_end) {
-        if (needed_block(it)) {
-          block_it = it->begin();
-          block_end = it->end();
-          break;
-        }
-      }
-      if (it == it_end) {
-        block_it = {};
-        block_end = {};
-        return;
-      }
-    }
-
-    BasicSeekGE(min_doc_id, block_end, &block_it);
-    DCHECK(block_it != block_end && !less_than_min_doc_id(*block_it));
   }
+
+  BasicSeekGE(min_doc_id, block_end, &block_it);
+  DCHECK(block_it != block_end && !less_than_min_doc_id(*block_it));
 }
 
 template class BlockList<CompressedSortedSet>;
