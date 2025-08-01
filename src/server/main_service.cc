@@ -2682,6 +2682,21 @@ void Service::Command(CmdArgList args, const CommandContext& cmd_cntx) {
     return rb->SendError("COMMAND DOCS Not Implemented");
   }
 
+  if (subcmd == "HELP" && sufficient_args) {
+    // Return help information for supported COMMAND subcommands
+    const string_view help[] = {
+      "(no subcommand)",
+      "    Return details about all commands.",
+      "COUNT",
+      "    Return the total number of commands in this server.",
+      "DOCS [<command-name> ...]",
+      "    Return documentation details about multiple commands.",
+      "    If no command names are given, documentation details for all",
+      "    commands are returned.",
+    };
+    return rb->SendSimpleStrArr(help);
+  }
+
   return rb->SendError(kSyntaxErr, kSyntaxErrType);
 }
 
