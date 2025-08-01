@@ -6,68 +6,68 @@ on:
   workflow_dispatch:
 
 jobs:
-#  build:
-#    # The CMake configure and build commands are platform agnostic and should work equally
-#    # well on Windows or Mac.  You can convert this to a matrix build if you need
-#    # cross-platform coverage.
-#    # See: https://docs.github.com/en/free-pro-team@latest/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
-#    runs-on: ubuntu-latest
-#    name: Build ${{ matrix.name }}
-#    strategy:
-#      matrix:
-#        include:
-#          # Build with these flags
-#          - name: generic
-#            container: alpine-dev
-#            flags: "-DMARCH_OPT=-march=x86-64"
-#          - name: fedora
-#            container: fedora:30
-#
-#    timeout-minutes: 45
-#
-#    container:
-#      image: ghcr.io/romange/${{ matrix.container }}
-#      options: --security-opt seccomp=unconfined
-#      credentials:
-#        username: ${{ github.repository_owner }}
-#        password: ${{ secrets.GITHUB_TOKEN }}
-#
-#    steps:
-#      - uses: actions/checkout@v4
-#        with:
-#          submodules: true
-#
-#      - name: Install dependencies
-#        run: |
-#          cmake --version
-#          mkdir -p $GITHUB_WORKSPACE/build
-#      - name: Install packages
-#        if: matrix.container == 'fedora:30'
-#        run: |
-#          echo Passed
-#
-#      - name: Configure & Build
-#        run: |
-#          cd $GITHUB_WORKSPACE/build
-#          cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja ${{ matrix.flags }}
-#          ninja src/all
-#      - name: Test
-#        run: |
-#            cd $GITHUB_WORKSPACE/build
-#            ctest -V -L DFLY
-#
-#      - name: Send notification on failure
-#        if: always() && failure() && github.ref == 'refs/heads/main'
-#        run: |
-#          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-#          message="Daily build (${{ matrix.name }}) failed.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
-#          
-#          curl -s \
-#            -X POST \
-#            -H 'Content-Type: application/json' \
-#            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
-#            -d '{"text": "'"${message}"'"}'
-#
+  build:
+    # The CMake configure and build commands are platform agnostic and should work equally
+    # well on Windows or Mac.  You can convert this to a matrix build if you need
+    # cross-platform coverage.
+    # See: https://docs.github.com/en/free-pro-team@latest/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
+    runs-on: ubuntu-latest
+    name: Build ${{ matrix.name }}
+    strategy:
+      matrix:
+        include:
+          # Build with these flags
+          - name: generic
+            container: alpine-dev
+            flags: "-DMARCH_OPT=-march=x86-64"
+          - name: fedora
+            container: fedora:30
+
+    timeout-minutes: 45
+
+    container:
+      image: ghcr.io/romange/${{ matrix.container }}
+      options: --security-opt seccomp=unconfined
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install dependencies
+        run: |
+          cmake --version
+          mkdir -p $GITHUB_WORKSPACE/build
+      - name: Install packages
+        if: matrix.container == 'fedora:30'
+        run: |
+          echo Passed
+
+      - name: Configure & Build
+        run: |
+          cd $GITHUB_WORKSPACE/build
+          cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja ${{ matrix.flags }}
+          ninja src/all
+      - name: Test
+        run: |
+            cd $GITHUB_WORKSPACE/build
+            ctest -V -L DFLY
+
+      - name: Send notification on failure
+        if: failure() && github.ref == 'refs/heads/main'
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="Daily build (${{ matrix.name }}) failed.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
+          
+          curl -s \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+            -d '{"text": "'"${message}"'"}'
+
   build-macos:
     runs-on: macos-14
     timeout-minutes: 45
@@ -109,7 +109,7 @@ jobs:
             -DCMAKE_CXX_FLAGS="-Wl,-ld_classic" \
             -DCMAKE_C_COMPILER="gcc-12" -DCMAKE_CXX_COMPILER="g++-12"
 
-          make src/all
+          ninja src/all
 
       - name: Test
         run: |
@@ -117,7 +117,7 @@ jobs:
             ctest -V -L DFLY
 
       - name: Send notification on failure
-        if: failure() #&& github.ref == 'refs/heads/main'
+        if: failure() && github.ref == 'refs/heads/main'
         run: |
           job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           message="Daily build (macOS) failed.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
