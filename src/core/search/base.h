@@ -128,12 +128,12 @@ inline size_t GetHighestPowerOfTwo(size_t n) {
 template <typename Iterator> void BasicSeekGE(DocId min_doc_id, const Iterator& end, Iterator* it) {
   using Category = typename std::iterator_traits<Iterator>::iterator_category;
 
-  auto less_than_min_doc_id = [&](const auto& value) {
+  auto extract_doc_id = [](const auto& value) {
     using T = std::decay_t<decltype(value)>;
     if constexpr (std::is_same_v<T, DocId>) {
-      return value < min_doc_id;
+      return value;
     } else {
-      return value.first < min_doc_id;
+      return value.first;
     }
   };
 
@@ -142,7 +142,7 @@ template <typename Iterator> void BasicSeekGE(DocId min_doc_id, const Iterator& 
     for (size_t step = details::GetHighestPowerOfTwo(length); step > 0; step >>= 1) {
       if (step < length) {
         auto next_it = *it + step;
-        if (less_than_min_doc_id(*next_it)) {
+        if (extract_doc_id(*next_it) < min_doc_id) {
           *it = next_it;
           length -= step;
         }
@@ -150,7 +150,7 @@ template <typename Iterator> void BasicSeekGE(DocId min_doc_id, const Iterator& 
     }
   }
 
-  while (*it != end && less_than_min_doc_id(**it)) {
+  while (*it != end && extract_doc_id(**it) < min_doc_id) {
     ++(*it);
   }
 }

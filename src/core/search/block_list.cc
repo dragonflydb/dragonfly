@@ -159,17 +159,17 @@ template <typename C> void BlockList<C>::BlockListIterator::SeekGE(DocId min_doc
     return;
   }
 
-  auto less_than_min_doc_id = [&](const auto& value) {
+  auto extract_doc_id = [](const auto& value) {
     using T = std::decay_t<decltype(value)>;
     if constexpr (std::is_same_v<T, DocId>) {
-      return value < min_doc_id;
+      return value;
     } else {
-      return value.first < min_doc_id;
+      return value.first;
     }
   };
 
   auto needed_block = [&](const auto& it) {
-    return it->begin() != it->end() && !less_than_min_doc_id(it->Back());
+    return it->begin() != it->end() && min_doc_id <= extract_doc_id(it->Back());
   };
 
   // Choose the first block that has the last element >= min_doc_id
@@ -189,7 +189,7 @@ template <typename C> void BlockList<C>::BlockListIterator::SeekGE(DocId min_doc
   }
 
   BasicSeekGE(min_doc_id, block_end, &block_it);
-  DCHECK(block_it != block_end && !less_than_min_doc_id(*block_it));
+  DCHECK(block_it != block_end && min_doc_id <= extract_doc_id(*block_it));
 }
 
 template class BlockList<CompressedSortedSet>;

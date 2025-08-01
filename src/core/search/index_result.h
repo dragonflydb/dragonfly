@@ -108,10 +108,31 @@ using BackInserter = std::back_insert_iterator<std::vector<DocId>>;
 template <typename T> constexpr bool IsSeekableIterator = std::is_base_of_v<SeekableTag, T>;
 
 template <typename Iterator> void Seek(DocId min_doc_id, const Iterator& end, Iterator* it) {
-  if constexpr (IsSeekableIterator<Iterator>) {
-    it->SeekGE(min_doc_id);
+  static constexpr DocId kFastSeekThreshold = 15;
+
+  auto extract_doc_id = [](const auto& value) {
+    using T = std::decay_t<decltype(value)>;
+    if constexpr (std::is_same_v<T, DocId>) {
+      return value;
+    } else {
+      return value.first;
+    }
+  };
+
+  DocId current_value = extract_doc_id(**it);
+  DCHECK(current_value < min_doc_id);
+
+  if (min_doc_id - current_value > kFastSeekThreshold) {  // If the gap is large, use a fast seek
+    if constexpr (IsSeekableIterator<Iterator>) {
+      it->SeekGE(min_doc_id);
+    } else {
+      BasicSeekGE(min_doc_id, end, it);
+    }
   } else {
-    BasicSeekGE(min_doc_id, end, it);
+    // If the gap is small, just iterate
+    do {
+      ++(*it);
+    } while (*it != end && extract_doc_id(**it) < min_doc_id);
   }
 }
 
