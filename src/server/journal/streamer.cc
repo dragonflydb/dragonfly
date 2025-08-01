@@ -5,8 +5,11 @@
 #include "server/journal/streamer.h"
 
 #include <absl/functional/bind_front.h>
-#include <netinet/tcp.h>
 #include <sys/socket.h>
+
+#ifdef __linux__
+#include <netinet/tcp.h>
+#endif
 
 #include "base/flags.h"
 #include "base/logging.h"
@@ -53,6 +56,8 @@ void LogTcpSocketDiagnostics(util::FiberSocketBase* dest) {
     return;
   }
 
+#ifdef __linux__
+  // On Linux, we can get TCP diagnostics using getsockopt.
   int sockfd = dest->native_handle();
   if (sockfd < 0) {
     return;
@@ -91,6 +96,7 @@ void LogTcpSocketDiagnostics(util::FiberSocketBase* dest) {
   } else {
     LOG_EVERY_T(INFO, 1) << "Failed to get TCP socket info: " << strerror(errno);
   }
+#endif
 }
 
 }  // namespace
