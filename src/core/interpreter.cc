@@ -562,23 +562,22 @@ int RedisLogCommand(lua_State* lua) {
 
 // See https://www.lua.org/manual/5.3/manual.html#lua_Alloc
 void* mimalloc_glue(void* ud, void* ptr, size_t osize, size_t nsize) {
-  (void)ud;
-  (void)osize;
-  auto& stats = InterpreterManager::tl_stats();
+  int64_t& used_bytes = *static_cast<int64_t*>(ud);
+
   if (nsize == 0) {
-    stats.used_bytes -= mi_usable_size(ptr);
-    mi_free(ptr);
+    used_bytes -= mi_usable_size(ptr);
+    mi_free_size(ptr, osize);
     return nullptr;
   } else if (ptr == nullptr) {
     ptr = mi_malloc(nsize);
-    stats.used_bytes += mi_usable_size(ptr);
+    used_bytes += mi_usable_size(ptr);
     return ptr;
   } else {
     const auto old_size = mi_usable_size(ptr);
     ptr = mi_realloc(ptr, nsize);
     if (ptr) {
-      stats.used_bytes -= old_size;
-      stats.used_bytes += mi_usable_size(ptr);
+      used_bytes -= old_size;
+      used_bytes += mi_usable_size(ptr);
     }
 
     return ptr;
@@ -590,7 +589,7 @@ void* mimalloc_glue(void* ud, void* ptr, size_t osize, size_t nsize) {
 Interpreter::Interpreter() {
   InterpreterManager::tl_stats().interpreter_cnt++;
 
-  lua_ = lua_newstate(mimalloc_glue, nullptr);
+  lua_ = lua_newstate(mimalloc_glue, &used_bytes_);
   InitLua(lua_);
   void** ptr = static_cast<void**>(lua_getextraspace(lua_));
   *ptr = this;
@@ -1217,6 +1216,7 @@ void InterpreterManager::Return(Interpreter* ir) {
   const uint64_t max_memory_usage = absl::GetFlag(FLAGS_lua_mem_gc_threshold);
   using namespace chrono;
   ++tl_stats().interpreter_return;
+  tl_stats().used_bytes += ir->TakeUsedBytes();
   if (max_memory_usage != 0 && tl_stats().used_bytes > max_memory_usage) {
     ++tl_stats().force_gc_calls;
     auto before = steady_clock::now();
