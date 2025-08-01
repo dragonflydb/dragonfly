@@ -14,11 +14,10 @@ namespace dfly {
 
 /// Bloom filter based on the design of https://github.com/jvirkki/libbloom
 class Bloom {
-  Bloom(const Bloom&) = delete;
-  Bloom& operator=(const Bloom&) = delete;
-
  public:
   Bloom() = default;
+  Bloom(const Bloom&) = delete;
+  Bloom& operator=(const Bloom&) = delete;
 
   // Note, that Destroy() must be called before calling the d'tor
   ~Bloom();
@@ -36,7 +35,7 @@ class Bloom {
   // resource - resource with which the object was initialized.
   void Destroy(PMR_NS::memory_resource* resource);
 
-  Bloom(Bloom&& o);
+  Bloom(Bloom&& o) noexcept;
 
   bool Exists(std::string_view str) const;
 
@@ -46,8 +45,8 @@ class Bloom {
   // Adds an item to the bloom filter.
   // Returns true if element was not present and was added,
   // false - if element (or a collision) had already been added previously.
-  bool Add(std::string_view str);
-  bool Add(const uint64_t fp[2]);
+  bool Add(std::string_view str) const;
+  bool Add(const uint64_t fp[2]) const;
 
   size_t bitlen() const {
     return 1ULL << bit_log_;
@@ -68,7 +67,7 @@ class Bloom {
 
  private:
   bool IsSet(size_t index) const;
-  bool Set(size_t index);  // return true if bit was set (i.e was 0 before)
+  bool Set(size_t index) const;  // return true if bit was set (i.e was 0 before)
 
   uint8_t hash_cnt_ = 0;
   uint8_t bit_log_ = 0;    // log of bit length of the filter. bit length is always power of 2.
@@ -84,10 +83,9 @@ class Bloom {
  * TODO: to test the actual rate of this filter.
  */
 class SBF {
-  SBF(const SBF&) = delete;
-
  public:
   SBF(uint64_t initial_capacity, double fp_prob, double grow_factor, PMR_NS::memory_resource* mr);
+  SBF(const SBF&) = delete;
 
   // C'tor used for loading persisted filters into SBF.
   // Should be followed by AddFilter.
@@ -95,7 +93,7 @@ class SBF {
       size_t current_size, PMR_NS::memory_resource* mr);
   ~SBF();
 
-  SBF& operator=(SBF&& src);
+  SBF& operator=(SBF&& src) noexcept;
 
   void AddFilter(const std::string& blob, unsigned hash_cnt);
 
