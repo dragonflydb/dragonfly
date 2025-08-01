@@ -57,7 +57,7 @@ jobs:
             ctest -V -L DFLY
 
       - name: Send notification on failure
-        #if: failure() && github.ref == 'refs/heads/main'
+        if: always() && failure() && github.ref == 'refs/heads/main'
         run: |
           job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           message="Daily build (${{ matrix.name }}) failed.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
@@ -117,7 +117,7 @@ jobs:
             ctest -V -L DFLY
 
       - name: Send notification on failure
-        #if: failure() && github.ref == 'refs/heads/main'
+        if: always() && failure() #&& github.ref == 'refs/heads/main'
         run: |
           job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           message="Daily build (macOS) failed.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
