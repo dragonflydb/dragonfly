@@ -632,10 +632,11 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "TOPK ON [min_freq] | OFF [max_keys]",
         "    Turns on or off sampling of topk keys. Provides top keys with at least <min_freq> ",
         "    during the sampling period. The results are returned in descending order of frequency",
-        "    when calling TOPK OFF command.",
+        "    when calling TOPK OFF command. First result is the sampled keys count.",
         "KEYS ON | OFF",
         "    Turns on/off counting of unique keys. Results are returned when calling ",
-        "    KEYS OFF command.",
+        "    KEYS OFF command. The results is array with two integers: unique keys count and ",
+        "    sampled keys count.",
         "TX",
         "    Performs transaction analysis per shard.",
         "TRAFFIC <path> | [STOP]",
@@ -1298,8 +1299,9 @@ void DebugCmd::Topk(CmdArgList args, facade::SinkReplyBuilder* builder) {
     });
 
     vector<pair<uint64_t, string>> items;
-
+    uint64_t total_keys = 0;
     for (const auto& res : results) {
+      total_keys += res.total_samples;
       for (const auto& k_v : res.top_keys) {
         items.emplace_back(k_v.second, k_v.first);
         push_heap(items.begin(), items.end(), std::greater<>());
@@ -1310,6 +1312,8 @@ void DebugCmd::Topk(CmdArgList args, facade::SinkReplyBuilder* builder) {
       }
     }
 
+    rb->StartArray(2);
+    rb->SendLong(total_keys);
     rb->StartArray(items.size());
     for (const auto& k_v : items) {
       rb->SendBulkString(StrCat(k_v.second, ":", k_v.first));
@@ -1331,13 +1335,17 @@ void DebugCmd::Keys(CmdArgList args, facade::SinkReplyBuilder* builder) {
   }
 
   if (absl::EqualsIgnoreCase(subcmd, "OFF")) {
-    atomic_uint64_t total_keys = 0;
+    atomic_uint64_t uniq_keys{0}, total_samples{0};
     shard_set->RunBriefInParallel([&](EngineShard* es) {
-      size_t res = cntx_->ns->GetDbSlice(es->shard_id()).StopSampleKeys(cntx_->db_index());
-      total_keys.fetch_add(res, memory_order_relaxed);
+      DbSlice::UniqueSampleResult res =
+          cntx_->ns->GetDbSlice(es->shard_id()).StopSampleKeys(cntx_->db_index());
+      uniq_keys.fetch_add(res.unique_keys_count, memory_order_relaxed);
+      total_samples.fetch_add(res.total_samples, memory_order_relaxed);
     });
 
-    return builder->SendLong(total_keys.load());
+    uint64_t arr[2] = {uniq_keys.load(), total_samples.load()};
+    auto* rb = static_cast<RedisReplyBuilder*>(builder);
+    return rb->SendLongArr(absl::MakeConstSpan(arr));
   }
 
   return builder->SendError(kSyntaxErr);

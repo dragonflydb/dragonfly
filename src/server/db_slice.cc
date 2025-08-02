@@ -306,18 +306,20 @@ int32_t AsyncDeleter::IdleCb() {
   return ProactorBase::kOnIdleMaxLevel;
 };
 
-inline void TouchTopKeysIfNeeded(string_view key, TopKeys* top_keys) {
-  if (top_keys) {
-    top_keys->Touch(key);
+inline void TouchTopKeysIfNeeded(string_view key, DbTable::SampleTopKeys* sample) {
+  if (sample) {
+    sample->top_keys->Touch(key);
+    ++sample->total_samples;
   }
 }
 
-inline void TouchHllIfNeeded(string_view key, uint8_t* hll) {
-  if (hll) {
+inline void TouchHllIfNeeded(string_view key, DbTable::SampleUniqueKeys* sample) {
+  if (sample) {
     HllBufferPtr hll_buf;
     hll_buf.size = getDenseHllSize();
-    hll_buf.hll = hll;
+    hll_buf.hll = sample->dense_hll;
     pfadd_dense(hll_buf, reinterpret_cast<const uint8_t*>(key.data()), key.size());
+    ++sample->total_samples;
   }
 }
 
@@ -570,8 +572,8 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     return OpStatus::KEY_NOTFOUND;
   }
 
-  TouchTopKeysIfNeeded(key, db.top_keys);
-  TouchHllIfNeeded(key, db.dense_hll);
+  TouchTopKeysIfNeeded(key, db.sample_top_keys);
+  TouchHllIfNeeded(key, db.sample_unique_keys);
 
   if (req_obj_type.has_value() && res.it->second.ObjType() != req_obj_type.value()) {
     events_.misses += miss_weight;
@@ -758,8 +760,8 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
   it.SetVersion(NextVersion());
 
-  TouchTopKeysIfNeeded(key, db.top_keys);
-  TouchHllIfNeeded(key, db.dense_hll);
+  TouchTopKeysIfNeeded(key, db.sample_top_keys);
+  TouchHllIfNeeded(key, db.sample_unique_keys);
 
   events_.garbage_collected = db.prime.garbage_collected();
   events_.stash_unloaded = db.prime.stash_unloaded();
@@ -1639,67 +1641,76 @@ void DbSlice::SendQueuedInvalidationMessagesAsync() {
 
 void DbSlice::StartSampleTopK(DbIndex db_ind, uint32_t min_freq) {
   auto& db = *db_arr_[db_ind];
-  if (db.top_keys) {
+  if (db.sample_top_keys) {
     LOG(INFO) << "Sampling already started for db " << db_ind;
     return;
   }
 
   TopKeys::Options opts;
   opts.min_key_count_to_record = min_freq;
-  db.top_keys = new TopKeys(opts);
+  db.sample_top_keys = new DbTable::SampleTopKeys;
+  db.sample_top_keys->top_keys = new TopKeys(opts);
 }
 
 auto DbSlice::StopSampleTopK(DbIndex db_ind) -> SamplingResult {
   auto& db = *db_arr_[db_ind];
 
-  if (!db.top_keys) {
+  if (!db.sample_top_keys) {
     LOG(WARNING) << "Sampling not started for db " << db_ind;
     return {};
   }
-  auto fmap = db.top_keys->GetTopKeys();
-  delete db.top_keys;
-  db.top_keys = nullptr;
+
+  auto fmap = db.sample_top_keys->top_keys->GetTopKeys();
   SamplingResult result;
+  result.total_samples = db.sample_top_keys->total_samples;
+  delete db.sample_top_keys;
+  db.sample_top_keys = nullptr;
+
   result.top_keys.reserve(fmap.size());
-  for (auto& [key, count] : fmap) {
-    result.top_keys.emplace_back(std::move(key), count);
+  while (!fmap.empty()) {
+    auto node = fmap.extract(fmap.begin());  // Clear the map to avoid memory leak.
+    result.top_keys.emplace_back(std::move(node.key()), node.mapped());
   }
   return result;
 }
 
 void DbSlice::StartSampleKeys(DbIndex db_ind) {
   auto& db = *db_arr_[db_ind];
-  if (db.dense_hll) {
+  if (db.sample_unique_keys) {
     LOG(INFO) << "Sampling already started for db " << db_ind;
     return;
   }
 
   HllBufferPtr hll_buf;
   hll_buf.size = getDenseHllSize();
-  db.dense_hll = new uint8_t[hll_buf.size];
-  hll_buf.hll = db.dense_hll;
+  hll_buf.hll = new uint8_t[hll_buf.size];
   CHECK_EQ(0, createDenseHll(hll_buf));
+  db.sample_unique_keys = new DbTable::SampleUniqueKeys;
+  db.sample_unique_keys->dense_hll = hll_buf.hll;
 }
 
 // Returns number of unique keys sampled.
-size_t DbSlice::StopSampleKeys(DbIndex db_ind) {
+auto DbSlice::StopSampleKeys(DbIndex db_ind) -> UniqueSampleResult {
   auto& db = *db_arr_[db_ind];
-  if (!db.dense_hll) {
+  if (!db.sample_unique_keys) {
     LOG(INFO) << "Keys sampling not started for db " << db_ind;
-    return 0;
+    return {};
   }
   HllBufferPtr hll_buf;
-  hll_buf.hll = db.dense_hll;
+  hll_buf.hll = db.sample_unique_keys->dense_hll;
   hll_buf.size = getDenseHllSize();
-  int64_t count = pfcountSingle(hll_buf);
+  UniqueSampleResult result;
+  result.unique_keys_count = pfcountSingle(hll_buf);
+  result.total_samples = db.sample_unique_keys->total_samples;
 
-  delete[] db.dense_hll;
-  db.dense_hll = nullptr;
+  delete db.sample_unique_keys;
+  db.sample_unique_keys = nullptr;
 
-  return count;
+  return result;
 }
 
-void DbSlice::PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable* table) {
+void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& exp_it,
+                                    DbTable* table) {
   FiberAtomicGuard guard;
   size_t table_before = table->table_memory();
   if (!exp_it.is_done()) {

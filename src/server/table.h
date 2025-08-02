@@ -129,8 +129,28 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   std::unique_ptr<SlotStats[]> slots_stats;
   ExpireTable::Cursor expire_cursor;
 
-  TopKeys* top_keys = nullptr;
-  uint8_t* dense_hll = nullptr;
+  struct SampleTopKeys {
+    TopKeys* top_keys = nullptr;
+    uint64_t total_samples = 0;
+
+    SampleTopKeys() = default;
+    ~SampleTopKeys();
+    void operator=(const SampleTopKeys& other) = delete;
+    SampleTopKeys(const SampleTopKeys& other) = delete;
+  };
+  SampleTopKeys* sample_top_keys = nullptr;
+
+  struct SampleUniqueKeys {
+    uint8_t* dense_hll = nullptr;
+    uint64_t total_samples = 0;
+
+    SampleUniqueKeys() = default;
+    ~SampleUniqueKeys();
+
+    void operator=(const SampleUniqueKeys& other) = delete;
+    SampleUniqueKeys(const SampleUniqueKeys& other) = delete;
+  };
+  SampleUniqueKeys* sample_unique_keys = nullptr;
 
   DbIndex index;
   uint32_t thread_index;
