@@ -37,6 +37,9 @@ class MapsList {
 
  public:
   class Map;
+  class ConstMap;
+
+  MapsList() = default;
 
   // Size is number of maps, keys are fixed and shared across all maps.
   MapsList(std::initializer_list<Key> keys, size_t size = 0);
@@ -44,6 +47,7 @@ class MapsList {
   template <typename Iterator> MapsList(Iterator begin, Iterator end, size_t size = 0);
 
   Map operator[](size_t index);
+  ConstMap operator[](size_t index) const;
   Map CreateNewMap();
 
   size_t Size() const;
@@ -79,6 +83,29 @@ class MapsList {
    private:
     const KeyToIndexMap& key_to_index_;
     ValuesVector* maps_values_;
+  };
+
+  class ConstMap {
+   private:
+    friend class MapsList;
+
+    ConstMap(const KeyToIndexMap& key_to_index, const ValuesVector& maps_values);
+
+   public:
+    using iterator = typename ValuesVector::const_iterator;
+
+    const Value& operator[](const Key& key) const;
+    const Value& operator[](size_t index) const;
+
+    bool Contains(const Key& key) const;
+    iterator Find(const Key& key) const;
+
+    iterator begin() const;
+    iterator end() const;
+
+   private:
+    const KeyToIndexMap& key_to_index_;
+    const ValuesVector& maps_values_;
   };
 
  private:
@@ -120,6 +147,12 @@ template <typename Key, typename Value, typename E>
 typename MapsList<Key, Value, E>::Map MapsList<Key, Value, E>::operator[](size_t index) {
   DCHECK_LT(index, maps_values_.size());
   return Map(key_to_index_, &maps_values_[index]);
+}
+
+template <typename Key, typename Value, typename E>
+typename MapsList<Key, Value, E>::ConstMap MapsList<Key, Value, E>::operator[](size_t index) const {
+  DCHECK_LT(index, maps_values_.size());
+  return ConstMap(key_to_index_, maps_values_[index]);
 }
 
 template <typename Key, typename Value, typename E> size_t MapsList<Key, Value, E>::Size() const {
@@ -209,6 +242,52 @@ typename MapsList<Key, Value, E>::Map::const_iterator MapsList<Key, Value, E>::M
 template <typename Key, typename Value, typename E>
 typename MapsList<Key, Value, E>::Map::const_iterator MapsList<Key, Value, E>::Map::end() const {
   return maps_values_->cend();
+}
+
+template <typename Key, typename Value, typename E>
+MapsList<Key, Value, E>::ConstMap::ConstMap(const KeyToIndexMap& key_to_index,
+                                            const ValuesVector& maps_values)
+    : key_to_index_(key_to_index), maps_values_(maps_values) {
+}
+
+template <typename Key, typename Value, typename E>
+const Value& MapsList<Key, Value, E>::ConstMap::operator[](const Key& key) const {
+  auto it = Find(key);
+  DCHECK(it != end());
+  return *it;
+}
+
+template <typename Key, typename Value, typename E>
+const Value& MapsList<Key, Value, E>::ConstMap::operator[](size_t index) const {
+  DCHECK_LT(index, maps_values_.size());
+  return maps_values_[index];
+}
+
+template <typename Key, typename Value, typename E>
+bool MapsList<Key, Value, E>::ConstMap::Contains(const Key& key) const {
+  return key_to_index_.find(key) != key_to_index_.end();
+}
+
+template <typename Key, typename Value, typename E>
+typename MapsList<Key, Value, E>::ConstMap::iterator MapsList<Key, Value, E>::ConstMap::Find(
+    const Key& key) const {
+  auto it = key_to_index_.find(key);
+  if (it != key_to_index_.end()) {
+    return begin() + it->second;
+  }
+  return end();
+}
+
+template <typename Key, typename Value, typename E>
+typename MapsList<Key, Value, E>::ConstMap::iterator MapsList<Key, Value, E>::ConstMap::begin()
+    const {
+  return maps_values_.cbegin();
+}
+
+template <typename Key, typename Value, typename E>
+typename MapsList<Key, Value, E>::ConstMap::iterator MapsList<Key, Value, E>::ConstMap::end()
+    const {
+  return maps_values_.cend();
 }
 
 }  // namespace dfly
