@@ -58,6 +58,7 @@ class DebugCmd {
   void RecvSize(std::string_view param, facade::SinkReplyBuilder* builder);
   void Topk(CmdArgList args, facade::SinkReplyBuilder* builder);
   void Keys(CmdArgList args, facade::SinkReplyBuilder* builder);
+  void Values(CmdArgList args, facade::SinkReplyBuilder* builder);
   void Compression(CmdArgList args, facade::SinkReplyBuilder* builder);
   void IOStats(CmdArgList args, facade::SinkReplyBuilder* builder);
   void Segments(CmdArgList args, facade::SinkReplyBuilder* builder);

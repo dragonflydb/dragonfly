@@ -321,6 +321,12 @@ inline void TouchHllIfNeeded(string_view key, uint8_t* hll) {
   }
 }
 
+inline void TouchValuesHistogramIfNeeded(const PrimeValue& pv, base::Histogram* hist) {
+  if (hist) {
+    hist->Add(pv.Size());
+  }
+}
+
 }  // namespace
 
 #define ADD(x) (x) += o.x
@@ -572,6 +578,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
   TouchTopKeysIfNeeded(key, db.top_keys);
   TouchHllIfNeeded(key, db.dense_hll);
+  TouchValuesHistogramIfNeeded(res.it->second, db.sample_values_hist);
 
   if (req_obj_type.has_value() && res.it->second.ObjType() != req_obj_type.value()) {
     events_.misses += miss_weight;
@@ -878,7 +885,7 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   bool clear_tiered = owner_->tiered_storage() != nullptr;
 
   if (clear_tiered)
-    ClearOffloadedEntries(indexes, db_arr_);
+    RemoveOffloadedEntriesFromTieredStorage(indexes, db_arr_);
 
   DbTableArray flush_db_arr(db_arr_.size());
 
@@ -932,7 +939,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
   FlushDbIndexes(indexes);
 }
 
-void DbSlice::AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at) {
+void DbSlice::AddExpire(DbIndex db_ind, const Iterator& main_it, uint64_t at) {
   uint64_t delta = at - expire_base_[0];  // TODO: employ multigen expire updates.
   auto& db = *db_arr_[db_ind];
   size_t table_before = db.expire.mem_usage();
@@ -941,7 +948,7 @@ void DbSlice::AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at) {
   main_it->second.SetExpire(true);
 }
 
-bool DbSlice::RemoveExpire(DbIndex db_ind, Iterator main_it) {
+bool DbSlice::RemoveExpire(DbIndex db_ind, const Iterator& main_it) {
   if (main_it->second.HasExpire()) {
     auto& db = *db_arr_[db_ind];
     size_t table_before = db.expire.mem_usage();
@@ -954,7 +961,7 @@ bool DbSlice::RemoveExpire(DbIndex db_ind, Iterator main_it) {
 }
 
 // Returns true if a state has changed, false otherwise.
-bool DbSlice::UpdateExpire(DbIndex db_ind, Iterator it, uint64_t at) {
+bool DbSlice::UpdateExpire(DbIndex db_ind, const Iterator& it, uint64_t at) {
   if (at == 0) {
     return RemoveExpire(db_ind, it);
   }
@@ -1528,7 +1535,8 @@ void DbSlice::InvalidateSlotWatches(const cluster::SlotSet& slot_ids) {
   }
 }
 
-void DbSlice::ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbTableArray& db_arr) {
+void DbSlice::RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> indices,
+                                                      const DbTableArray& db_arr) {
   // Currently being used only for tiered storage.
   TieredStorage* tiered_storage = shard_owner()->tiered_storage();
   string scratch;
@@ -1697,6 +1705,29 @@ size_t DbSlice::StopSampleKeys(DbIndex db_ind) {
   db.dense_hll = nullptr;
 
   return count;
+}
+
+void DbSlice::StartSampleValues(DbIndex db_ind) {
+  auto& db = *db_arr_[db_ind];
+  if (db.sample_values_hist) {
+    LOG(INFO) << "Sampling already started for db " << db_ind;
+    return;
+  }
+
+  db.sample_values_hist = new base::Histogram();
+}
+
+base::Histogram* DbSlice::StopSampleValues(DbIndex db_ind) {
+  auto& db = *db_arr_[db_ind];
+  if (!db.sample_values_hist) {
+    LOG(INFO) << "Values sampling not started for db " << db_ind;
+    return nullptr;
+  }
+
+  base::Histogram* hist = db.sample_values_hist;
+  db.sample_values_hist = nullptr;
+
+  return hist;
 }
 
 void DbSlice::PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable* table) {
