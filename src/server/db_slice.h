@@ -315,15 +315,15 @@ class DbSlice {
                                          const ExpireParams& params);
 
   // Adds expiry information.
-  void AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at);
+  void AddExpire(DbIndex db_ind, const Iterator& main_it, uint64_t at);
 
   // Removes the corresponing expiry information if exists.
   // Returns true if expiry existed (and removed).
-  bool RemoveExpire(DbIndex db_ind, Iterator main_it);
+  bool RemoveExpire(DbIndex db_ind, const Iterator& main_it);
 
   // Either adds or removes (if at == 0) expiry. Returns true if a change was made.
   // Does not change expiry if at != 0 and expiry already exists.
-  bool UpdateExpire(DbIndex db_ind, Iterator main_it, uint64_t at);
+  bool UpdateExpire(DbIndex db_ind, const Iterator& main_it, uint64_t at);
 
   void SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag);
   uint32_t GetMCFlag(DbIndex db_ind, const PrimeKey& key) const;
@@ -546,6 +546,12 @@ class DbSlice {
   };
   UniqueSampleResult StopSampleKeys(DbIndex db_ind);
 
+  void StartSampleValues(DbIndex db_ind);
+
+  // Returns a histogram of sampled values. The ownership of the histogram is
+  // transferred to the caller.
+  base::Histogram* StopSampleValues(DbIndex db_ind);
+
  private:
   void PreUpdateBlocking(DbIndex db_ind, Iterator it);
   void PostUpdate(DbIndex db_ind, std::string_view key);
@@ -565,8 +571,9 @@ class DbSlice {
   // Invalidate all watched keys for given slots. Used on FlushSlots.
   void InvalidateSlotWatches(const cluster::SlotSet& slot_ids);
 
-  // Clear tiered storage entries for the specified indices.
-  void ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbTableArray& db_arr);
+  // Clear tiered storage entries for the specified indices. Called during flushing some indices.
+  void RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> indices,
+                                               const DbTableArray& db_arr);
 
   void PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& exp_it, DbTable* table);
 
