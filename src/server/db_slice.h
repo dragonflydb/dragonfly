@@ -533,13 +533,18 @@ class DbSlice {
 
   struct SamplingResult {
     std::vector<std::pair<std::string, uint64_t>> top_keys;  // key -> frequency pairs.
+    uint64_t total_samples = 0;                              // Total number of keys sampled.
   };
   SamplingResult StopSampleTopK(DbIndex db_ind);
 
   void StartSampleKeys(DbIndex db_ind);
 
   // Returns number of unique keys sampled.
-  size_t StopSampleKeys(DbIndex db_ind);
+  struct UniqueSampleResult {
+    uint64_t unique_keys_count = 0;  // Number of unique keys sampled.
+    uint64_t total_samples = 0;      // Total number of keys sampled.
+  };
+  UniqueSampleResult StopSampleKeys(DbIndex db_ind);
 
  private:
   void PreUpdateBlocking(DbIndex db_ind, Iterator it);
@@ -563,7 +568,7 @@ class DbSlice {
   // Clear tiered storage entries for the specified indices.
   void ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbTableArray& db_arr);
 
-  void PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable* table);
+  void PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& exp_it, DbTable* table);
 
   // Queues invalidation message to the clients that are tracking the change to a key.
   void QueueInvalidationTrackingMessageAtomic(std::string_view key);
