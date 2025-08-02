@@ -153,7 +153,7 @@ class DbSlice {
     AutoUpdater(const AutoUpdater& o) = delete;
     AutoUpdater& operator=(const AutoUpdater& o) = delete;
     AutoUpdater(AutoUpdater&& o) noexcept;
-    AutoUpdater& operator=(AutoUpdater&& o);
+    AutoUpdater& operator=(AutoUpdater&& o) noexcept;
     ~AutoUpdater();
 
     // Removes the memory usage attributed to the iterator and resets orig_heap_size.
@@ -192,22 +192,7 @@ class DbSlice {
   };
 
   using Context = DbContext;
-
-  // ChangeReq - describes the change to the table.
-  struct ChangeReq {
-    // If iterator is set then it's an update to the existing bucket.
-    // Otherwise (string_view is set) then it's a new key that is going to be added to the table.
-    std::variant<PrimeTable::bucket_iterator, std::string_view> change;
-
-    explicit ChangeReq(PrimeTable::bucket_iterator it) : change(it) {
-    }
-    explicit ChangeReq(std::string_view key) : change(key) {
-    }
-
-    const PrimeTable::bucket_iterator* update() const {
-      return std::get_if<PrimeTable::bucket_iterator>(&change);
-    }
-  };
+  using ChangeReq = dfly::ChangeReq;
 
   // Called before deleting an element to notify the search indices.
   using DocDeletionCallback =
@@ -587,7 +572,7 @@ class DbSlice {
 
   void CreateDb(DbIndex index);
 
-  enum class UpdateStatsMode {
+  enum class UpdateStatsMode : uint8_t {
     kReadStats,
     kMutableStats,
   };
