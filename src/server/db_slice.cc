@@ -458,7 +458,7 @@ DbSlice::AutoUpdater::AutoUpdater(AutoUpdater&& o) noexcept {
   *this = std::move(o);
 }
 
-DbSlice::AutoUpdater& DbSlice::AutoUpdater::operator=(AutoUpdater&& o) {
+DbSlice::AutoUpdater& DbSlice::AutoUpdater::operator=(AutoUpdater&& o) noexcept {
   Run();
   fields_ = o.fields_;
   o.Cancel();

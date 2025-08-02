@@ -151,4 +151,20 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
 // the snapshot process. We copy the pointers in StartSnapshotInShard function.
 using DbTableArray = std::vector<boost::intrusive_ptr<DbTable>>;
 
+// ChangeReq - describes the change to the table.
+struct ChangeReq {
+  // If iterator is set then it's an update to the existing bucket.
+  // Otherwise (string_view is set) then it's a new key that is going to be added to the table.
+  std::variant<PrimeTable::bucket_iterator, std::string_view> change;
+
+  explicit ChangeReq(PrimeTable::bucket_iterator it) : change(it) {
+  }
+  explicit ChangeReq(std::string_view key) : change(key) {
+  }
+
+  const PrimeTable::bucket_iterator* update() const {
+    return std::get_if<PrimeTable::bucket_iterator>(&change);
+  }
+};
+
 }  // namespace dfly

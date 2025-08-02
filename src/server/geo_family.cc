@@ -826,12 +826,15 @@ void GeoFamily::GeoRadius(CmdArgList args, const CommandContext& cmd_cntx) {
         // an option requiring an argument was missing its argument.
         // The parser has already recorded the error. We retrieve it and send it.
         DCHECK(parser.Error().has_value());
+        LOG_EVERY_T(INFO, 1) << "GeoRadius parser error: " << parser.Error()->MakeReply().ToSv();
         return builder->SendError(parser.Error()->MakeReply());
     }
   }
 
   if (!parser.Finalize()) {
     auto error = parser.Error();
+    LOG_EVERY_T(INFO, 1) << "GeoRadius parser error: " << error->MakeReply().ToSv();
+
     switch (error->type) {
       case Errors::INVALID_LONG_LAT: {
         string err =
