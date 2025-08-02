@@ -1224,10 +1224,10 @@ void InterpreterManager::Return(Interpreter* ir) {
     auto before = steady_clock::now();
     tl_stats().gc_freed_memory += ir->RunGC();
 
-    LOG_EVERY_T(INFO, 10) << "stats_used_bytes: " << tl_stats().used_bytes
-                          << " lua_mem_gc_threshold: " << max_memory_usage
-                          << " force_gc_calls: " << tl_stats().force_gc_calls
-                          << " freed_mem: " << tl_stats().gc_freed_memory;
+    VLOG(2) << "stats_used_bytes: " << tl_stats().used_bytes
+            << " lua_mem_gc_threshold: " << max_memory_usage
+            << " force_gc_calls: " << tl_stats().force_gc_calls
+            << " freed_mem: " << tl_stats().gc_freed_memory;
 
     auto after = steady_clock::now();
     tl_stats().gc_duration_ns += duration_cast<nanoseconds>(after - before).count();

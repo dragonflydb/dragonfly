@@ -90,9 +90,7 @@ class Interpreter {
   AddResult AddFunction(std::string_view sha, std::string_view body, std::string* error);
 
   int64_t TakeUsedBytes() {
-    int64_t tmp = used_bytes_;
-    used_bytes_ = 0;
-    return tmp;
+    return std::exchange(used_bytes_, 0);
   }
 
   bool Exists(std::string_view sha) const;
@@ -156,7 +154,7 @@ class Interpreter {
   unsigned cmd_depth_ = 0;
   RedisFunc redis_func_;
   std::string buffer_;
-  std::int64_t used_bytes_;
+  std::int64_t used_bytes_ = 0;
   char name_buffer_[32];  // backing storage for cmd name
 };
 
