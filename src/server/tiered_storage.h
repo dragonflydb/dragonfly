@@ -7,15 +7,15 @@
 #include <memory>
 #include <utility>
 
+#include "server/common.h"
+#include "server/table.h"
 #include "server/tiering/common.h"
 #include "server/tx_base.h"
 #include "util/fibers/future.h"
+
 #ifdef __linux__
 
 #include <absl/container/flat_hash_map.h>
-
-#include "server/common.h"
-#include "server/table.h"
 
 namespace dfly {
 
@@ -124,8 +124,6 @@ class TieredStorage {
 
 #else
 
-#include "server/common.h"
-
 class DbSlice;
 
 // This is a stub implementation for non-linux platforms.
@@ -138,6 +136,8 @@ class TieredStorage {
 
   // Min sizes of values taking up full page on their own
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
+
+  template <typename T> using TResult = util::fb2::Future<io::Result<T>>;
 
   explicit TieredStorage(size_t max_size, DbSlice* db_slice) {
   }
@@ -152,17 +152,18 @@ class TieredStorage {
   void Close() {
   }
 
-  util::fb2::Future<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value) {
+  TResult<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value) {
     return {};
   }
 
+  // Read offloaded value. It must be of external type
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-            std::function<void(const std::string&)> readf) {
+            std::function<void(io::Result<std::string>)> readf) {
   }
 
   template <typename T>
-  util::fb2::Future<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
-                              std::function<T(std::string*)> modf) {
+  TResult<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                    std::function<T(std::string*)> modf) {
     return {};
   }
 
