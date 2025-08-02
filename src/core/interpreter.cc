@@ -589,6 +589,8 @@ void* mimalloc_glue(void* ud, void* ptr, size_t osize, size_t nsize) {
 Interpreter::Interpreter() {
   InterpreterManager::tl_stats().interpreter_cnt++;
 
+  // interpreter can be runnned in different threads so we need to calculate
+  // used memory via &used_bytes_ additional parameter
   lua_ = lua_newstate(mimalloc_glue, &used_bytes_);
   InitLua(lua_);
   void** ptr = static_cast<void**>(lua_getextraspace(lua_));
