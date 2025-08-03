@@ -154,7 +154,7 @@ class Interpreter {
   unsigned cmd_depth_ = 0;
   RedisFunc redis_func_;
   std::string buffer_;
-  std::int64_t used_bytes_ = 0;
+  int64_t used_bytes_ = 0;
   char name_buffer_[32];  // backing storage for cmd name
 };
 

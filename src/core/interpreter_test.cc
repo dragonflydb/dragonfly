@@ -540,6 +540,10 @@ TEST_F(InterpreterTest, LuaGcStatistic) {
     reply->OnInt(1);
   };
   interpreter->SetRedisFunc(cb);
+  // next script generate several big values and set them to the keys
+  // after the script is finished, GM isn't called for all values and
+  // in the most cases we have more than 300k allocated memory
+  // that will be cleaned later in the separate thread
   std::string script = R"(
         for i = 1, 7 do
           local str = string.rep(i, 1024 * 100)
@@ -555,27 +559,39 @@ TEST_F(InterpreterTest, LuaGcStatistic) {
   Interpreter::AddResult add_res = interpreter->AddFunction(sha, script, &result);
   EXPECT_EQ(Interpreter::ADD_OK, add_res);
 
+  // When script is executed in the most cases we see that not all memory was deallocated
+  // immediately and can be deallocated later
   Interpreter::RunResult run_res = interpreter->RunFunction(sha, &error_);
   EXPECT_EQ(Interpreter::RUN_OK, run_res);
 
-  // we need return interpreter to update statistic
-  im.Return(interpreter);
+  // check that after script is finished not the all memory was deallocated
+  uint64_t used_bytes = InterpreterManager::tl_stats().used_bytes;
+  EXPECT_GE(used_bytes, 0);
 
-  // we get it again to call GC in separate thread
+  auto force_gc_calls = InterpreterManager::tl_stats().force_gc_calls;
+  // we need return interpreter to update statistic
+  // force_gc_calls shouldn't be called
+  im.Return(interpreter);
+  EXPECT_EQ(force_gc_calls, InterpreterManager::tl_stats().force_gc_calls);
+
+  // im.Return() update statistic
+  EXPECT_LE(used_bytes, InterpreterManager::tl_stats().used_bytes);
+
+  used_bytes = InterpreterManager::tl_stats().used_bytes;
+
+  // we get the same interpeter again to call GC in separate thread
   auto* new_interpreter = im.Get();
   EXPECT_EQ(interpreter, new_interpreter);
 
-  uint64_t used_bytes_before_gc = InterpreterManager::tl_stats().used_bytes;
-  EXPECT_GE(used_bytes_before_gc, 0);
-
+  // check that even if memory is deallocated in separate thread our statistic is correct
   std::thread t([&] {
-    intptr_.RunGC();
+    interpreter->RunGC();
     EXPECT_EQ(InterpreterManager::tl_stats().used_bytes, 0);
   });
   t.join();
 
   im.Return(interpreter);
-  EXPECT_GE(used_bytes_before_gc, InterpreterManager::tl_stats().used_bytes);
+  EXPECT_GE(used_bytes, InterpreterManager::tl_stats().used_bytes);
 }
 
 }  // namespace dfly
