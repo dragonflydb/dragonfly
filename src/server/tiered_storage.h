@@ -76,19 +76,17 @@ class TieredStorage {
   // Prune cool entries to reach the set memory goal with freed memory
   size_t ReclaimMemory(size_t goal);
 
-  // See OpManager::memory_low_limit
-  void SetMemoryLowWatermark(size_t mem_limit);
-
   // Returns the primary value, and deletes the cool item as well as its offloaded storage.
   PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item);
 
   TieredStats GetStats() const;
 
-  void UpdateFromFlags();  // Update internal values based on current flag values
-  bool ShouldOffload(size_t free_memory) const;
-  bool ShouldUpload(size_t free_memory) const;
+  void UpdateFromFlags();         // Update internal values based on current flag values
+  bool ShouldOffload() const;     // True if below tiered_offload_threshold
+  float WriteDepthUsage() const;  // Ratio (0-1) of used storage_write_depth for stashesf
 
-  float WriteDepthUsage() const;  // Ratio (0-1) of used storage_write_depth for stashes
+  // How much we are above tiered_upload_threshold. Can be negative!
+  int64_t UploadBudget() const;
   size_t CoolMemoryUsage() const {
     return stats_.cool_memory_used;
   }

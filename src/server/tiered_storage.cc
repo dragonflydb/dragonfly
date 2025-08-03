@@ -164,13 +164,6 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       SetExternal({sub_dbid, sub_key}, sub_segment);
   }
 
-  bool HasEnoughMemoryMargin(int64_t value_len) {
-    return db_slice_.memory_budget() - value_len > ssize_t(memory_low_limit_);
-  }
-
-  // being compared to db_slice_.memory_budget().
-  size_t memory_low_limit_;
-
   struct {
     uint64_t total_stashes = 0, total_cancels = 0, total_fetches = 0;
     uint64_t total_defrags = 0;
@@ -226,9 +219,9 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, string_view value,
   //    Currently, our heuristic is not very smart, because we stop uploading any reads during
   //    the snapshotting.
   // TODO: to revisit this when we rewrite it with more efficient snapshotting algorithm.
-
-  bool should_upload =
-      modified || (HasEnoughMemoryMargin(value.size()) && !SliceSnapshot::IsSnaphotInProgress());
+  bool should_upload = modified;
+  should_upload |=
+      (ts_->UploadBudget() > int64_t(value.length())) && !SliceSnapshot::IsSnaphotInProgress();
 
   if (!should_upload)
     return false;
@@ -275,22 +268,16 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
 }
 
 void TieredStorage::ShardOpManager::RetireColdEntries(size_t additional_memory) {
-  ssize_t threshold = memory_low_limit_ + additional_memory;
+  int64_t budget = ts_->UploadBudget() - additional_memory;
+  if (budget > 0)
+    return;
 
-  // we trigger if we below the low point
-  if (db_slice_.memory_budget() < threshold) {
-    // But once we below we try to raise above high watermark.
-    const double kHighFactor = 1.0;
-    size_t needed_to_free =
-        (threshold - db_slice_.memory_budget()) + memory_low_limit_ * kHighFactor;
-    size_t gained = ts_->ReclaimMemory(needed_to_free);
+  size_t gained = ts_->ReclaimMemory(-budget);
+  VLOG(1) << "Upload budget: " << budget << ", gained " << gained;
 
-    VLOG(1) << "Memory budget: " << db_slice_.memory_budget() << ", gained " << gained;
-
-    // Update memory_budget directly since we know that gained bytes were released.
-    // We will overwrite the budget correctly in the next Hearbeat.
-    db_slice_.UpdateMemoryParams(gained + db_slice_.memory_budget(), db_slice_.bytes_per_object());
-  }
+  // Update memory_budget directly since we know that gained bytes were released.
+  // We will overwrite the budget correctly in the next Hearbeat.
+  db_slice_.UpdateMemoryParams(gained + db_slice_.memory_budget(), db_slice_.bytes_per_object());
 }
 
 void TieredStorage::ShardOpManager::DeleteOffloaded(DbIndex dbid,
@@ -319,11 +306,6 @@ error_code TieredStorage::Open(string_view base_path) {
 
 void TieredStorage::Close() {
   op_manager_->Close();
-}
-
-void TieredStorage::SetMemoryLowWatermark(size_t mem_limit) {
-  op_manager_->memory_low_limit_ = mem_limit;
-  VLOG(1) << "Memory low limit is " << mem_limit;
 }
 
 TieredStorage::TResult<string> TieredStorage::Read(DbIndex dbid, string_view key,
@@ -491,16 +473,17 @@ void TieredStorage::UpdateFromFlags() {
   };
 }
 
-bool TieredStorage::ShouldOffload(size_t free_memory) const {
+bool TieredStorage::ShouldOffload() const {
+  size_t free_memory = op_manager_->db_slice_.memory_budget();
   size_t per_shard = max_memory_limit.load(memory_order_relaxed) / shard_set->size();
   // Cool values are already offloadeded, so don't count them as used memory
   return (free_memory + CoolMemoryUsage()) < config_.offload_threshold * per_shard;
 }
 
-bool TieredStorage::ShouldUpload(size_t free_memory) const {
+int64_t TieredStorage::UploadBudget() const {
+  size_t free_memory = op_manager_->db_slice_.memory_budget();
   size_t per_shard = max_memory_limit.load(memory_order_relaxed) / shard_set->size();
-  // See ShouldOffload for formula
-  return (free_memory + CoolMemoryUsage()) > config_.upload_threshold * per_shard;
+  return int64_t(free_memory) - int64_t(config_.upload_threshold * per_shard);
 }
 
 void TieredStorage::RunOffloading(DbIndex dbid) {
