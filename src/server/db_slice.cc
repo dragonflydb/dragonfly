@@ -1734,10 +1734,7 @@ unique_ptr<base::Histogram> DbSlice::StopSampleValues(DbIndex db_ind) {
     return {};
   }
 
-  base::Histogram* hist = db.sample_values_hist;
-  db.sample_values_hist = nullptr;
-
-  return unique_ptr<base::Histogram>{hist};
+  return unique_ptr<base::Histogram>{exchange(db.sample_values_hist, nullptr)};
 }
 
 void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& exp_it,
