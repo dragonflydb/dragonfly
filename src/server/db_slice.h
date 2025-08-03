@@ -548,9 +548,8 @@ class DbSlice {
 
   void StartSampleValues(DbIndex db_ind);
 
-  // Returns a histogram of sampled values. The ownership of the histogram is
-  // transferred to the caller.
-  base::Histogram* StopSampleValues(DbIndex db_ind);
+  // Returns a histogram of sampled values.
+  std::unique_ptr<base::Histogram> StopSampleValues(DbIndex db_ind);
 
  private:
   void PreUpdateBlocking(DbIndex db_ind, Iterator it);

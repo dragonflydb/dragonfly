@@ -1727,17 +1727,17 @@ void DbSlice::StartSampleValues(DbIndex db_ind) {
   db.sample_values_hist = new base::Histogram();
 }
 
-base::Histogram* DbSlice::StopSampleValues(DbIndex db_ind) {
+unique_ptr<base::Histogram> DbSlice::StopSampleValues(DbIndex db_ind) {
   auto& db = *db_arr_[db_ind];
   if (!db.sample_values_hist) {
     LOG(INFO) << "Values sampling not started for db " << db_ind;
-    return nullptr;
+    return {};
   }
 
   base::Histogram* hist = db.sample_values_hist;
   db.sample_values_hist = nullptr;
 
-  return hist;
+  return unique_ptr<base::Histogram>{hist};
 }
 
 void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& exp_it,

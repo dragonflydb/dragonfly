@@ -1367,7 +1367,7 @@ void DebugCmd::Values(CmdArgList args, facade::SinkReplyBuilder* builder) {
     return builder->SendOk();
   }
 
-  vector<base::Histogram*> histograms(shard_set->size());
+  vector<unique_ptr<base::Histogram>> histograms(shard_set->size());
   if (absl::EqualsIgnoreCase(subcmd, "OFF")) {
     shard_set->RunBriefInParallel([&](EngineShard* es) {
       histograms[es->shard_id()] =
@@ -1378,7 +1378,6 @@ void DebugCmd::Values(CmdArgList args, facade::SinkReplyBuilder* builder) {
     for (const auto& hist : histograms) {
       if (hist) {
         merged_histogram.Merge(*hist);
-        delete hist;
       }
     }
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
