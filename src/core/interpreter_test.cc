@@ -573,8 +573,6 @@ TEST_F(InterpreterTest, LuaGcStatistic) {
   // force_gc_calls shouldn't be called
   im.Return(interpreter);
   EXPECT_EQ(force_gc_calls, InterpreterManager::tl_stats().force_gc_calls);
-
-  // im.Return() update statistic
   EXPECT_LE(used_bytes, InterpreterManager::tl_stats().used_bytes);
 
   used_bytes = InterpreterManager::tl_stats().used_bytes;
