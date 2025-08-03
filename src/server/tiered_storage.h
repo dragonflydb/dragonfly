@@ -70,11 +70,6 @@ class TieredStorage {
   // Cancel pending stash for value, must have IO_PENDING flag set
   void CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value);
 
-  // Percentage (0-1) of currently used storage_write_depth for ongoing stashes
-  float WriteDepthUsage() const;
-
-  TieredStats GetStats() const;
-
   // Run offloading loop until i/o device is loaded or all entries were traversed
   void RunOffloading(DbIndex dbid);
 
@@ -87,6 +82,13 @@ class TieredStorage {
   // Returns the primary value, and deletes the cool item as well as its offloaded storage.
   PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item);
 
+  TieredStats GetStats() const;
+
+  void UpdateFromFlags();  // Update internal values based on current flag values
+  bool ShouldOffload(size_t free_memory) const;
+  bool ShouldUpload(size_t free_memory) const;
+
+  float WriteDepthUsage() const;  // Ratio (0-1) of used storage_write_depth for stashes
   size_t CoolMemoryUsage() const {
     return stats_.cool_memory_used;
   }
@@ -110,7 +112,12 @@ class TieredStorage {
   using CoolQueue = ::boost::intrusive::list<detail::TieredColdRecord>;
   CoolQueue cool_queue_;
 
-  unsigned write_depth_limit_ = 10;
+  struct {
+    bool experimental_cooling;
+    unsigned write_depth_limit;
+    float offload_threshold;
+    float upload_threshold;
+  } config_;
   struct {
     uint64_t stash_overflow_cnt = 0;
     uint64_t total_deletes = 0;

@@ -34,9 +34,12 @@ ABSL_FLAG(bool, tiered_experimental_cooling, true,
 
 ABSL_FLAG(unsigned, tiered_storage_write_depth, 50,
           "Maximum number of concurrent stash requests issued by background offload");
-ABSL_FLAG(float, tiered_low_memory_factor, 0.1,
-          "Determines the low limit per shard that "
-          "tiered storage should not cross");
+
+ABSL_FLAG(float, tiered_offload_threshold, 0.5,
+          "Ratio of free memory (free/max memory) below which offloading starts");
+
+ABSL_FLAG(float, tiered_upload_threshold, 0.1,
+          "Ration of free memory (free/max memory) below which uploading stops");
 
 namespace dfly {
 
@@ -143,7 +146,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       stats->tiered_used_bytes += segment.length;
       stats_.total_stashes++;
 
-      if (absl::GetFlag(FLAGS_tiered_experimental_cooling)) {
+      if (ts_->config_.experimental_cooling) {
         RetireColdEntries(pv->MallocUsed());
         ts_->CoolDown(key.first, key.second, segment, pv);
       } else {
@@ -301,11 +304,7 @@ void TieredStorage::ShardOpManager::DeleteOffloaded(DbIndex dbid,
 TieredStorage::TieredStorage(size_t max_size, DbSlice* db_slice)
     : op_manager_{make_unique<ShardOpManager>(this, db_slice, max_size)},
       bins_{make_unique<tiering::SmallBins>()} {
-  write_depth_limit_ = absl::GetFlag(FLAGS_tiered_storage_write_depth);
-
-  // TODO: update when max_memory_limit flag changes
-  size_t mem_per_shard = max_memory_limit.load(memory_order_relaxed) / shard_set->size();
-  SetMemoryLowWatermark(absl::GetFlag(FLAGS_tiered_low_memory_factor) * mem_per_shard);
+  UpdateFromFlags();
 }
 
 TieredStorage::~TieredStorage() {
@@ -387,7 +386,7 @@ bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
 
   // TODO: When we are low on memory we should introduce a back-pressure, to avoid OOMs
   // with a lot of underutilized disk space.
-  if (op_manager_->GetStats().pending_stash_cnt >= write_depth_limit_) {
+  if (op_manager_->GetStats().pending_stash_cnt >= config_.write_depth_limit) {
     ++stats_.stash_overflow_cnt;
     return false;
   }
@@ -441,10 +440,6 @@ void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* 
   value->SetStashPending(false);
 }
 
-float TieredStorage::WriteDepthUsage() const {
-  return 1.0f * op_manager_->GetStats().pending_stash_cnt / write_depth_limit_;
-}
-
 TieredStats TieredStorage::GetStats() const {
   TieredStats stats{};
 
@@ -483,6 +478,31 @@ TieredStats TieredStorage::GetStats() const {
   return stats;
 }
 
+float TieredStorage::WriteDepthUsage() const {
+  return 1.0f * op_manager_->GetStats().pending_stash_cnt / config_.write_depth_limit;
+}
+
+void TieredStorage::UpdateFromFlags() {
+  config_ = {
+      .experimental_cooling = absl::GetFlag(FLAGS_tiered_experimental_cooling),
+      .write_depth_limit = absl::GetFlag(FLAGS_tiered_storage_write_depth),
+      .offload_threshold = absl::GetFlag(FLAGS_tiered_offload_threshold),
+      .upload_threshold = absl::GetFlag(FLAGS_tiered_upload_threshold),
+  };
+}
+
+bool TieredStorage::ShouldOffload(size_t free_memory) const {
+  size_t per_shard = max_memory_limit.load(memory_order_relaxed) / shard_set->size();
+  // Cool values are already offloadeded, so don't count them as used memory
+  return (free_memory + CoolMemoryUsage()) < config_.offload_threshold * per_shard;
+}
+
+bool TieredStorage::ShouldUpload(size_t free_memory) const {
+  size_t per_shard = max_memory_limit.load(memory_order_relaxed) / shard_set->size();
+  // See ShouldOffload for formula
+  return (free_memory + CoolMemoryUsage()) > config_.upload_threshold * per_shard;
+}
+
 void TieredStorage::RunOffloading(DbIndex dbid) {
   const size_t kMaxIterations = 500;
 
@@ -514,7 +534,7 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   // Keep number of iterations below resonable limit to keep datastore always responsive
   size_t iterations = 0;
   do {
-    if (op_manager_->GetStats().pending_stash_cnt >= write_depth_limit_)
+    if (op_manager_->GetStats().pending_stash_cnt >= config_.write_depth_limit)
       break;
     offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
   } while (offloading_cursor_ && iterations++ < kMaxIterations);
