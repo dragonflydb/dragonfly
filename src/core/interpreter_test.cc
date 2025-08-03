@@ -13,6 +13,8 @@ extern "C" {
 #include <absl/strings/str_replace.h>
 #include <gmock/gmock.h>
 
+#include <thread>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 
@@ -524,6 +526,70 @@ TEST_F(InterpreterTest, AvoidIntOverflow) {
 
 TEST_F(InterpreterTest, LuaIntOverflow) {
   EXPECT_FALSE(Execute("EVAL \"struct.pack('>I2147483648', '10')\" 0"));
+}
+
+TEST_F(InterpreterTest, LuaGcStatistic) {
+  InterpreterManager im(1);
+  auto* interpreter = im.Get();
+
+  std::string_view keys[] = {"key1", "key2", "key3", "key4", "key5", "key6", "key7"};
+  interpreter->SetGlobalArray("KEYS", SliceSpan{keys});
+
+  auto cb = [](Interpreter::CallArgs ca) {
+    auto* reply = ca.translator;
+    reply->OnInt(1);
+  };
+  interpreter->SetRedisFunc(cb);
+  // next script generate several big values and set them to the keys
+  // after the script is finished, GM isn't called for all values and
+  // in the most cases we have more than 300k allocated memory
+  // that will be cleaned later in the separate thread
+  std::string script = R"(
+        for i = 1, 7 do
+          local str = string.rep(i, 1024 * 100)
+          redis.call('SET', KEYS[1], str .. str)
+        end
+       )";
+
+  char sha_buf[64];
+  Interpreter::FuncSha1(script, sha_buf);
+  string_view sha{sha_buf, std::strlen(sha_buf)};
+
+  string result;
+  Interpreter::AddResult add_res = interpreter->AddFunction(sha, script, &result);
+  EXPECT_EQ(Interpreter::ADD_OK, add_res);
+
+  // When script is executed in the most cases we see that not all memory was deallocated
+  // immediately and can be deallocated later
+  Interpreter::RunResult run_res = interpreter->RunFunction(sha, &error_);
+  EXPECT_EQ(Interpreter::RUN_OK, run_res);
+
+  // check that after script is finished not the all memory was deallocated
+  uint64_t used_bytes = InterpreterManager::tl_stats().used_bytes;
+  EXPECT_GE(used_bytes, 0);
+
+  auto force_gc_calls = InterpreterManager::tl_stats().force_gc_calls;
+  // we need return interpreter to update statistic
+  // force_gc_calls shouldn't be called
+  im.Return(interpreter);
+  EXPECT_EQ(force_gc_calls, InterpreterManager::tl_stats().force_gc_calls);
+  EXPECT_LE(used_bytes, InterpreterManager::tl_stats().used_bytes);
+
+  used_bytes = InterpreterManager::tl_stats().used_bytes;
+
+  // we get the same interpeter again to call GC in separate thread
+  auto* new_interpreter = im.Get();
+  EXPECT_EQ(interpreter, new_interpreter);
+
+  // check that even if memory is deallocated in separate thread our statistic is correct
+  std::thread t([&] {
+    interpreter->RunGC();
+    EXPECT_EQ(InterpreterManager::tl_stats().used_bytes, 0);
+  });
+  t.join();
+
+  im.Return(interpreter);
+  EXPECT_GE(used_bytes, InterpreterManager::tl_stats().used_bytes);
 }
 
 }  // namespace dfly
