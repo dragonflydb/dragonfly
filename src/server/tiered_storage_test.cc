@@ -61,7 +61,7 @@ class TieredStorageTest : public BaseFamilyTest {
 // Perform simple series of SET, GETSET and GET
 TEST_F(TieredStorageTest, SimpleGetSet) {
   absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 1.1f);  // disable offloading
+  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // disable offloading
   const int kMin = 256;
   const int kMax = tiering::kPageSize + 10;
 
@@ -201,7 +201,7 @@ TEST_F(TieredStorageTest, Defrag) {
 
 TEST_F(TieredStorageTest, BackgroundOffloading) {
   absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // offload all values
 
   // The setup works without cooling buffers.
   SetFlag(&FLAGS_tiered_experimental_cooling, false);
@@ -249,7 +249,7 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
 
 TEST_F(TieredStorageTest, FlushAll) {
   absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // offload all values
 
   // We want to cover the interaction of FlushAll with concurrent reads from disk.
   // For that we disable tiered_experimental_cooling.
@@ -297,7 +297,7 @@ TEST_F(TieredStorageTest, FlushAll) {
 
 TEST_F(TieredStorageTest, FlushPending) {
   absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // offload all values
 
   const int kNum = 10;
   for (size_t i = 0; i < kNum; i++) {
@@ -339,7 +339,7 @@ TEST_F(TieredStorageTest, Expiry) {
 
 TEST_F(TieredStorageTest, SetExistingExpire) {
   absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // offload all values
   SetFlag(&FLAGS_tiered_experimental_cooling, false);
 
   const int kNum = 20;
@@ -360,7 +360,7 @@ TEST_F(TieredStorageTest, SetExistingExpire) {
 
 TEST_F(TieredStorageTest, Dump) {
   absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // offload all values
 
   // we want to test without cooling to trigger disk I/O on reads.
   SetFlag(&FLAGS_tiered_experimental_cooling, false);
