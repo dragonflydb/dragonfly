@@ -9,6 +9,7 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
 
+#include "base/histogram.h"
 #include "core/expire_period.h"
 #include "core/intent_lock.h"
 #include "server/conn_context.h"
@@ -131,6 +132,7 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
 
   TopKeys* top_keys = nullptr;
   uint8_t* dense_hll = nullptr;
+  base::Histogram* sample_values_hist = nullptr;
 
   DbIndex index;
   uint32_t thread_index;
