@@ -1253,10 +1253,15 @@ void ServerFamily::UpdateMemoryGlobalStats() {
   double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
   if (rss_oom_deny_ratio > 0) {
     size_t memory_limit = max_memory_limit.load(memory_order_relaxed) * rss_oom_deny_ratio;
-    if (total_rss > memory_limit && accepting_connections_ && HasPrivilegedInterface())
+    if (total_rss > memory_limit && accepting_connections_ && HasPrivilegedInterface()) {
+      LOG_EVERY_T(WARNING, 10)
+          << "Accepting connections stopped, used memory over limit: total_rss " << total_rss
+          << " > memory_limit " << memory_limit;
       ChangeConnectionAccept(false);
-    else if (total_rss < memory_limit && !accepting_connections_)
+    } else if (total_rss < memory_limit && !accepting_connections_) {
+      LOG_EVERY_T(INFO, 10) << "Accepting connections again, used memory below limit";
       ChangeConnectionAccept(true);
+    }
   }
 }
 
