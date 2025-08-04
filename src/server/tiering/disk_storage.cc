@@ -146,9 +146,18 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
 
   // If we've run out of space, block and grow as much as needed
   if (offset < 0) {
-    // TODO: To introduce asynchronous call that starts resizing before we reach this step.
-    // Right now we do it synchronously as well (see Grow(256MB) call.)
-    RETURN_ON_ERR(TryGrow(-offset));
+    auto ec = TryGrow(-offset);
+
+    // If a grow is in progress, wait until it completes and possibly retry
+    if (ec == errc::operation_in_progress) {
+      grow_.ev.await([this]() { return !grow_.pending; });
+      RETURN_ON_ERR(grow_.last_err);
+      // If grown, retry from the start (in case we need even more space)
+      // TODO(vlad): Stack overflow possible?
+      return Stash(bytes, std::move(cb));
+    }
+
+    RETURN_ON_ERR(ec);
     offset = alloc_.Malloc(len);
     if (offset < 0)  // we can't fit it even after resizing
       return make_error_code(errc::file_too_large);
@@ -195,20 +204,19 @@ error_code DiskStorage::TryGrow(off_t grow_size) {
   if (alloc_.capacity() + ExternalAllocator::kExtAlignment >= static_cast<size_t>(max_size_))
     return make_error_code(errc::file_too_large);
 
-  if (std::exchange(grow_pending_, true)) {
-    // TODO: to introduce future like semantics where multiple flows can block on the
-    // ongoing Grow operation.
-    LOG(WARNING) << "Concurrent grow request detected from size " << alloc_.capacity();
+  if (std::exchange(grow_.pending, true)) {
+    LOG_EVERY_T(WARNING, 1) << "Blocked on concurrent grow";
     return make_error_code(errc::operation_in_progress);
   }
+
   off_t end = alloc_.capacity();
-  auto err = DoFiberCall(&SubmitEntry::PrepFallocate, backing_file_->fd(), 0, end, grow_size);
-  grow_pending_ = false;
-  RETURN_ON_ERR(err);
+  grow_.last_err = DoFiberCall(&SubmitEntry::PrepFallocate, backing_file_->fd(), 0, end, grow_size);
+  grow_.pending = false;
+  grow_.ev.notifyAll();
 
-  alloc_.AddStorage(end, grow_size);
-
-  return {};
+  if (!grow_.last_err)
+    alloc_.AddStorage(end, grow_size);
+  return grow_.last_err;
 }
 
 UringBuf DiskStorage::PrepareBuf(size_t size) {
