@@ -738,9 +738,55 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
   if (subcmd == "IOSTATS") {
     return IOStats(args.subspan(1), builder);
   }
+
   if (subcmd == "SEGMENTS") {
     return Segments(args.subspan(1), builder);
   }
+
+  if (subcmd == "SHAKE") {
+    using namespace std::chrono_literals;
+    thread_local size_t invocations = 0;
+
+    CmdArgParser parser{args.subspan(1)};
+
+    if (parser.Check("I")) {
+      auto* rb = static_cast<RedisReplyBuilder*>(builder);
+      builder->SendLong(invocations);
+      return;
+    }
+
+    auto mode =
+        parser.MapNext("N", fb2::FiberPriority::NORMAL, "B", fb2::FiberPriority::BACKGROUND);
+    auto delay = parser.Next<size_t>();
+    auto fb = fb2::Fiber(
+        fb2::Fiber::Opts{
+            .priority = mode,
+        },
+        [delay]() {
+          int64_t total_dongle = 0;
+          while (true) {
+            invocations++;
+
+            uint64_t dongle = 0;
+            const auto start = std::chrono::high_resolution_clock::now();
+            while (true) {
+              for (int i = 0; i < 1000; i++)
+                dongle += uint64_t(rand());
+              const auto end = std::chrono::high_resolution_clock::now();
+              const std::chrono::duration<double, std::micro> elapsed = end - start;
+              if (elapsed.count() >= delay)
+                break;
+            }
+            total_dongle += dongle;
+            ThisFiber::Yield();
+          }
+          VLOG(0) << total_dongle;
+        });
+    fb.Detach();
+    builder->SendOk();
+    return;
+  }
+
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return builder->SendError(reply, kSyntaxErrType);
 }
