@@ -52,7 +52,7 @@ async def test_basic_memory_usage(async_client: aioredis.Redis):
     {
         **BASIC_ARGS,
         "maxmemory": "1G",
-        "tiered_offload_threshold": "0.0",
+        "tiered_offload_threshold": "1.0",
         "tiered_storage_write_depth": 1000,
     }
 )
@@ -98,8 +98,8 @@ async def test_mixed_append(async_client: aioredis.Redis):
         "tiered_prefix": "/tmp/tiered/backing_master",
         "maxmemory": "2.0G",
         "cache_mode": True,
-        "tiered_offload_threshold": "0.1",
-        "tiered_low_memory_factor": "0.2",
+        "tiered_offload_threshold": "0.9",
+        "tiered_upload_threshold": "0.2",
         "tiered_storage_write_depth": 100,
     }
 )
@@ -109,7 +109,7 @@ async def test_full_sync(async_client: aioredis.Redis, df_factory: DflyInstanceF
         cache_mode=True,
         maxmemory="2.0G",
         tiered_prefix="/tmp/tiered/backing_replica",
-        tiered_offload_threshold="0.2",
+        tiered_offload_threshold="0.8",
         tiered_storage_write_depth=1000,
     )
     replica.start()
