@@ -3395,9 +3395,11 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
       last_master_data = replica_->Stop();
     StopAllClusterReplicas();
 
-    // First, switch into the loading state
-    if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-        new_state != GlobalState::LOADING) {
+    const GlobalState gstate = ServerState::tlocal()->gstate();
+    if (gstate == GlobalState::TAKEN_OVER) {
+      service_.SwitchState(GlobalState::TAKEN_OVER, GlobalState::LOADING);
+    } else if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+               new_state != GlobalState::LOADING) {
       LOG(WARNING) << new_state << " in progress, ignored";
       builder->SendError("Invalid state");
       return;
