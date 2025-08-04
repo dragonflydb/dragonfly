@@ -83,7 +83,7 @@ void JournalSlice::AddLogRecord(const Entry& entry) {
     FiberAtomicGuard fg;
     item.journal_item.lsn = lsn_++;
 
-    // onlyt in streamer
+    // only used by RestoreStreamer
     item.cmd = entry.payload.cmd;
     item.slot = entry.slot;
 
