@@ -95,6 +95,9 @@ size_t CmdSerializer::SerializeEntry(string_view key, const PrimeValue& pk, cons
         use_restore_serialization = false;
         break;
       case OBJ_STRING:
+        commands = SerializeString(key, pv);
+        use_restore_serialization = false;
+        break;
       case OBJ_STREAM:
       case OBJ_JSON:
       case OBJ_SBF:
@@ -203,6 +206,28 @@ size_t CmdSerializer::SerializeList(string_view key, const PrimeValue& pv) {
     return true;
   });
   return commands;
+}
+
+static string GetString(const PrimeValue& pv) {
+  string res;
+  res.resize(pv.Size());
+  pv.GetString(res.data());
+
+  return res;
+}
+
+static string GetExternalString(const PrimeValue& pv) {
+  if (pv.IsCool()) {
+    return GetString(pv.GetCool().record->value);
+  }
+  LOG(FATAL) << "External string not supported yet";
+}
+
+size_t CmdSerializer::SerializeString(string_view key, const PrimeValue& pv) {
+  const auto str = !pv.IsExternal() ? GetString(pv) : GetExternalString(pv);
+  std::string_view args[] = {key, string_view(str)};
+  SerializeCommand("SET", args);
+  return 1;
 }
 
 void CmdSerializer::SerializeRestore(string_view key, const PrimeValue& pk, const PrimeValue& pv,
