@@ -73,39 +73,37 @@ CmdSerializer::CmdSerializer(FlushSerialized cb, size_t max_serialization_buffer
 
 size_t CmdSerializer::SerializeEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
                                      uint64_t expire_ms) {
-  // We send RESTORE commands for small objects, or objects we don't support breaking.
+  // We send RESTORE commands objects we don't support breaking.
   bool use_restore_serialization = true;
   size_t commands = 1;
-  if (max_serialization_buffer_size_ > 0 && pv.MallocUsed() > max_serialization_buffer_size_) {
-    switch (pv.ObjType()) {
-      case OBJ_SET:
-        commands = SerializeSet(key, pv);
-        use_restore_serialization = false;
-        break;
-      case OBJ_ZSET:
-        commands = SerializeZSet(key, pv);
-        use_restore_serialization = false;
-        break;
-      case OBJ_HASH:
-        commands = SerializeHash(key, pv);
-        use_restore_serialization = false;
-        break;
-      case OBJ_LIST:
-        commands = SerializeList(key, pv);
-        use_restore_serialization = false;
-        break;
-      case OBJ_STRING:
-        commands = SerializeString(key, pv);
-        use_restore_serialization = false;
-        break;
-      case OBJ_STREAM:
-      case OBJ_JSON:
-      case OBJ_SBF:
-      default:
-        // These types are unsupported wrt splitting huge values to multiple commands, so we send
-        // them as a RESTORE command.
-        break;
-    }
+  switch (pv.ObjType()) {
+    case OBJ_SET:
+      commands = SerializeSet(key, pv);
+      use_restore_serialization = false;
+      break;
+    case OBJ_ZSET:
+      commands = SerializeZSet(key, pv);
+      use_restore_serialization = false;
+      break;
+    case OBJ_HASH:
+      commands = SerializeHash(key, pv);
+      use_restore_serialization = false;
+      break;
+    case OBJ_LIST:
+      commands = SerializeList(key, pv);
+      use_restore_serialization = false;
+      break;
+    case OBJ_STRING:
+      commands = SerializeString(key, pv);
+      use_restore_serialization = false;
+      break;
+    case OBJ_STREAM:
+    case OBJ_JSON:
+    case OBJ_SBF:
+    default:
+      // These types are unsupported wrt splitting huge values to multiple commands, so we send
+      // them as a RESTORE command.
+      break;
   }
 
   if (use_restore_serialization) {
