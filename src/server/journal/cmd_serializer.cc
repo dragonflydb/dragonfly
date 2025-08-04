@@ -18,14 +18,14 @@ class CommandAggregator {
   using WriteCmdCallback = std::function<void(absl::Span<const string_view>)>;
 
   CommandAggregator(string_view key, WriteCmdCallback cb, size_t max_agg_bytes)
-      : key_(key), cb_(cb), max_aggragation_bytes_(max_agg_bytes) {
+      : key_(key), cb_(std::move(cb)), max_aggragation_bytes_(max_agg_bytes) {
   }
 
   ~CommandAggregator() {
     CommitPending();
   }
 
-  enum class CommitMode { kAuto, kNoCommit };
+  enum class CommitMode : uint8_t { kAuto, kNoCommit };
 
   // Returns whether CommitPending() was called
   bool AddArg(string arg, CommitMode commit_mode = CommitMode::kAuto) {

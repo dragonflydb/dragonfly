@@ -249,7 +249,9 @@ inline RangeFilterIterator& RangeFilterIterator::operator++() {
 }
 
 inline void RangeFilterIterator::SeekGE(DocId min_doc_id) {
-  while (current_ != end_ && (!InRange(current_) || (*current_).first < min_doc_id)) {
+  current_.SeekGE(min_doc_id);
+  while (current_ != end_ && !InRange(current_)) {
+    DCHECK((*current_).first >= min_doc_id);
     ++current_;
   }
 }
