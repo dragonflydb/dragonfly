@@ -150,20 +150,21 @@ void OutgoingMigration::Finish(GenericError error) {
       next_state = MigrationState::C_FATAL;
     } else {
       next_state = MigrationState::C_ERROR;
+      exec_st_.ReportError(std::move(error));
     }
     LOG(WARNING) << "Finish outgoing migration for " << cf_->MyID() << ": "
                  << migration_info_.node_info.id << " with error: " << error.Format();
-    exec_st_.ReportError(std::move(error));
+
   } else {
     LOG(INFO) << "Finish outgoing migration for " << cf_->MyID() << ": "
               << migration_info_.node_info.id;
   }
 
   bool should_cancel_flows = false;
-
   {
     util::fb2::LockGuard lk(state_mu_);
     switch (state_) {
+      case MigrationState::C_FATAL:
       case MigrationState::C_FINISHED:
         return;  // Already finished, nothing else to do
 
@@ -173,11 +174,15 @@ void OutgoingMigration::Finish(GenericError error) {
 
       case MigrationState::C_SYNC:
       case MigrationState::C_ERROR:
-      case MigrationState::C_FATAL:
         should_cancel_flows = true;
         break;
     }
     state_ = next_state;
+  }
+
+  if (next_state == MigrationState::C_FATAL) {
+    // Fatal state stop any further processing of migration so we need to update error here
+    SetLastError(error);
   }
 
   if (should_cancel_flows) {
@@ -240,7 +245,8 @@ void OutgoingMigration::SyncFb() {
       // happen on second iteration after first failed with OOM. Sending second INIT is required to
       // cleanup slots on incoming slot migration node.
       if (CheckRespSimpleError(kIncomingMigrationOOM)) {
-        ChangeState(MigrationState::C_FATAL);
+        Finish(GenericError{std::make_error_code(errc::not_enough_memory),
+                            std::string(kIncomingMigrationOOM)});
         break;
       }
       if (CheckRespIsSimpleReply(kUnknownMigration)) {

@@ -208,23 +208,16 @@ size_t CmdSerializer::SerializeList(string_view key, const PrimeValue& pv) {
   return commands;
 }
 
-static string GetString(const PrimeValue& pv) {
-  string res;
-  res.resize(pv.Size());
-  pv.GetString(res.data());
-
-  return res;
-}
-
-static string GetExternalString(const PrimeValue& pv) {
-  if (pv.IsCool()) {
-    return GetString(pv.GetCool().record->value);
-  }
-  LOG(FATAL) << "External string not supported yet";
-}
-
 size_t CmdSerializer::SerializeString(string_view key, const PrimeValue& pv) {
-  const auto str = !pv.IsExternal() ? GetString(pv) : GetExternalString(pv);
+  string str;
+  if (pv.IsExternal()) {
+    if (pv.IsCool()) {
+      pv.GetCool().record->value.GetString(&str);
+    }
+    LOG(FATAL) << "External string not supported yet";
+  } else {
+    pv.GetString(&str);
+  }
   std::string_view args[] = {key, string_view(str)};
   SerializeCommand("SET", args);
   return 1;
