@@ -463,11 +463,11 @@ void SliceSnapshot::OnMoved(DbIndex id, const DbSlice::MovedItemsVec& items) {
 // value. This is guaranteed by the fact that OnJournalEntry runs always after OnDbChange, and
 // no database switch can be performed between those two calls, because they are part of one
 // transaction.
-void SliceSnapshot::ConsumeJournalChange(const journal::JournalItem& item) {
+void SliceSnapshot::ConsumeJournalChange(const journal::JournalChangeItem& item) {
   // We grab the lock in case we are in the middle of serializing a bucket, so it serves as a
   // barrier here for atomic serialization.
   std::lock_guard barrier(big_value_mu_);
-  std::ignore = serializer_->WriteJournalEntry(item.data);
+  std::ignore = serializer_->WriteJournalEntry(item.journal_item.data);
   ++stats_.jounal_changes;
 }
 
