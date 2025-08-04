@@ -206,7 +206,7 @@ class EngineShard {
   // threshold can be passed, which will be used to determine if defragmentation should be
   // performed.
   // Returns true if defragmentation was performed.
-  bool DoDefrag(CollectPageStats collect_page_stats, float threshold);
+  std::optional<CollectedPageStats> DoDefrag(CollectPageStats collect_page_stats, float threshold);
 
  private:
   struct DefragTaskState {

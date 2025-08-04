@@ -4,15 +4,11 @@
 
 #pragma once
 
-#include <deque>
-
+#include "base/cycle_clock.h"
 #include "server/cluster/slot_set.h"
 #include "server/common.h"
-#include "server/db_slice.h"
 #include "server/journal/journal.h"
 #include "server/journal/pending_buf.h"
-#include "server/journal/serializer.h"
-#include "server/rdb_save.h"
 
 namespace dfly {
 
@@ -20,7 +16,7 @@ namespace dfly {
 // journal listener and writes them to a destination sink in a separate fiber.
 class JournalStreamer : public journal::JournalConsumerInterface {
  public:
-  enum class SendLsn { NO = 0, YES = 1 };
+  enum class SendLsn : uint8_t { NO = 0, YES = 1 };
   JournalStreamer(journal::Journal* journal, ExecutionState* cntx, SendLsn send_lsn,
                   bool is_stable_sync);
   virtual ~JournalStreamer();
@@ -49,7 +45,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   void Write(std::string str);
 
   // Blocks the if the consumer if not keeping up.
-  void ThrottleIfNeeded();
+  void ThrottleIfNeeded() final;
 
   virtual bool ShouldWrite(const journal::JournalChangeItem& item) const {
     return cntx_->IsRunning();
@@ -95,6 +91,8 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   SendLsn send_lsn_;
 };
 
+class CmdSerializer;
+
 // Serializes existing DB as RESTORE commands, and sends updates as regular commands.
 // Only handles relevant slots, while ignoring all others.
 class RestoreStreamer : public JournalStreamer {
@@ -113,7 +111,7 @@ class RestoreStreamer : public JournalStreamer {
   void SendFinalize(long attempt);
 
  private:
-  void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
+  void OnDbChange(DbIndex db_index, const ChangeReq& req);
   bool ShouldWrite(const journal::JournalChangeItem& item) const override;
   bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(SlotId slot_id) const;
@@ -142,8 +140,11 @@ class RestoreStreamer : public JournalStreamer {
   uint64_t snapshot_version_ = 0;
   cluster::SlotSet my_slots_;
 
+  std::unique_ptr<CmdSerializer> cmd_serializer_;
+
   ThreadLocalMutex big_value_mu_;
   Stats stats_;
+  base::RealTimeAggregator cpu_aggregator_;
 };
 
 }  // namespace dfly

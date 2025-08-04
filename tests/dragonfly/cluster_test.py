@@ -2723,7 +2723,7 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
 
 @pytest.mark.exclude_epoll
 @pytest.mark.asyncio
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_buckets_cpu_budget": 1})
 async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
     # Timeout set to 3 seconds because we must first saturate the socket before we get the timeout
     instances = [

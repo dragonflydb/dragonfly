@@ -18,14 +18,14 @@ class CommandAggregator {
   using WriteCmdCallback = std::function<void(absl::Span<const string_view>)>;
 
   CommandAggregator(string_view key, WriteCmdCallback cb, size_t max_agg_bytes)
-      : key_(key), cb_(cb), max_aggragation_bytes_(max_agg_bytes) {
+      : key_(key), cb_(std::move(cb)), max_aggragation_bytes_(max_agg_bytes) {
   }
 
   ~CommandAggregator() {
     CommitPending();
   }
 
-  enum class CommitMode { kAuto, kNoCommit };
+  enum class CommitMode : uint8_t { kAuto, kNoCommit };
 
   // Returns whether CommitPending() was called
   bool AddArg(string arg, CommitMode commit_mode = CommitMode::kAuto) {
@@ -68,6 +68,7 @@ class CommandAggregator {
 
 CmdSerializer::CmdSerializer(FlushSerialized cb, size_t max_serialization_buffer_size)
     : cb_(std::move(cb)), max_serialization_buffer_size_(max_serialization_buffer_size) {
+  serializer_ = std::make_unique<RdbSerializer>(GetDefaultCompressionMode());
 }
 
 size_t CmdSerializer::SerializeEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
@@ -213,7 +214,9 @@ void CmdSerializer::SerializeRestore(string_view key, const PrimeValue& pk, cons
   args.push_back(expire_str);
 
   io::StringSink value_dump_sink;
-  SerializerBase::DumpObject(pv, &value_dump_sink, true);
+  // TODO we already ignore CRC in the load rdb code during migration, we need to provide ignore_crc
+  // = true when we are sure that all shards ignore crc during migration process
+  SerializerBase::DumpObject(serializer_.get(), pv, &value_dump_sink, false);
   args.push_back(value_dump_sink.str());
 
   args.push_back("ABSTTL");  // Means expire string is since epoch

@@ -5,13 +5,21 @@
 #include "server/journal/streamer.h"
 
 #include <absl/functional/bind_front.h>
-#include <netinet/tcp.h>
 #include <sys/socket.h>
+
+#include <chrono>
+
+#ifdef __linux__
+#include <netinet/tcp.h>
+#endif
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "server/db_slice.h"
 #include "server/engine_shard.h"
 #include "server/journal/cmd_serializer.h"
+#include "server/journal/serializer.h"
+#include "server/rdb_save.h"
 #include "server/server_state.h"
 #include "util/fibers/synchronization.h"
 
@@ -29,13 +37,16 @@ ABSL_FLAG(uint32_t, migration_buckets_sleep_usec, 100,
           "Sleep time in microseconds after each time we reach "
           "migration_buckets_serialization_threshold");
 
+ABSL_FLAG(float, migration_buckets_cpu_budget, 0.2,
+          "How much CPU budget to use for migration buckets serialization");
+
 ABSL_FLAG(uint32_t, replication_dispatch_threshold, 1500,
           "Number of bytes to aggregate before replication");
 
 namespace dfly {
 using namespace util;
 using namespace journal;
-
+using namespace std;
 namespace {
 
 iovec IoVec(io::Bytes src) {
@@ -53,6 +64,8 @@ void LogTcpSocketDiagnostics(util::FiberSocketBase* dest) {
     return;
   }
 
+#ifdef __linux__
+  // On Linux, we can get TCP diagnostics using getsockopt.
   int sockfd = dest->native_handle();
   if (sockfd < 0) {
     return;
@@ -91,6 +104,7 @@ void LogTcpSocketDiagnostics(util::FiberSocketBase* dest) {
   } else {
     LOG_EVERY_T(INFO, 1) << "Failed to get TCP socket info: " << strerror(errno);
   }
+#endif
 }
 
 }  // namespace
@@ -330,6 +344,13 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal
   migration_buckets_serialization_threshold_cached =
       absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);
   db_array_ = slice->databases();  // Inc ref to make sure DB isn't deleted while we use it
+
+  cmd_serializer_ = std::make_unique<CmdSerializer>(
+      [&](std::string s) {
+        Write(std::move(s));
+        ThrottleIfNeeded();
+      },
+      ServerState::tlocal()->serialization_max_chunk_size);
 }
 
 void RestoreStreamer::Start(util::FiberSocketBase* dest) {
@@ -357,9 +378,21 @@ void RestoreStreamer::Run() {
     // If someone else is waiting for the inflight bytes to complete, give it priority.
     // Apparently, continue goes through the loop by checking the condition below, so we check
     // cursor here as well.
-    if (cursor &&
-        (throttle_waiters_ > 0 || inflight_bytes() > replication_stream_output_limit_cached / 3)) {
+    // In addition if bucket writing was too intensive on CPU and we are overloaded.
+    // Note that we account for CPU time from OnDbChange and here as well (inside WriteBucket).
+    // But we only throttle here, so if we migrated lots of slots during mutations, we
+    // won't progress here but if we have not, then this fiber will progress withing the
+    // CPU budget we defined for it.
+    bool should_stall =
+        throttle_waiters_ > 0 || inflight_bytes() > replication_stream_output_limit_cached / 3 ||
+        cpu_aggregator_.IsOverloaded(absl::GetFlag(FLAGS_migration_buckets_cpu_budget));
+    if (cursor && should_stall) {
       ThisFiber::SleepFor(300us);
+
+      // We have a design bug in RealTimeAggregator that resets it measurements only when
+      // the next sample is taken. So we add this sample to ensure cpu_aggregator_
+      // refreshes its state.
+      base::CpuTimeGuard guard(&cpu_aggregator_);
       stats_.iter_skips++;
       continue;
     }
@@ -386,8 +419,11 @@ void RestoreStreamer::Run() {
       stats_.buckets_loop += WriteBucket(it);
     });
 
+    // TODO: FLAGS_migration_buckets_cpu_budget should eventually be a single configurable
+    // setting that controls how agressive we are with migration pace.
+    // Once we gain confidence with FLAGS_migration_buckets_cpu_budget we should retire
+    // migration_buckets_serialization_threshold and migration_buckets_sleep_usec.
     if (++last_yield >= migration_buckets_serialization_threshold_cached) {
-      // TODO: to align this with how we sleep in SliceSnapshot::FlushSerialized.
       ThisFiber::SleepFor(chrono::microseconds(migration_buckets_sleep_usec_cached));
       last_yield = 0;
     }
@@ -462,6 +498,8 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
   bool written = false;
 
   if (!it.is_done() && it.GetVersion() < snapshot_version_) {
+    base::CpuTimeGuard guard(&cpu_aggregator_);
+
     stats_.buckets_written++;
 
     it.SetVersion(snapshot_version_);
@@ -515,13 +553,7 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
 
 void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
                                  uint64_t expire_ms) {
-  CmdSerializer serializer(
-      [&](std::string s) {
-        Write(std::move(s));
-        ThrottleIfNeeded();
-      },
-      ServerState::tlocal()->serialization_max_chunk_size);
-  stats_.commands += serializer.SerializeEntry(key, pk, pv, expire_ms);
+  stats_.commands += cmd_serializer_->SerializeEntry(key, pk, pv, expire_ms);
 }
 
 }  // namespace dfly
