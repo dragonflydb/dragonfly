@@ -101,7 +101,7 @@ void DiskStorage::Close() {
   using namespace chrono_literals;
 
   // TODO: to fix this polling.
-  while (pending_ops_ > 0 || grow_pending_)
+  while (pending_ops_ > 0 || grow_.pending)
     util::ThisFiber::SleepFor(10ms);
 
   backing_file_->Close();
@@ -186,7 +186,7 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
   // Grow in advance if needed and possible
   size_t capacity = alloc_.capacity();
   size_t available = capacity - alloc_.allocated_bytes();
-  if ((available < 256_MB) && (available < capacity * 0.15) && !grow_pending_) {
+  if ((available < 256_MB) && (available < capacity * 0.15) && !grow_.pending) {
     auto ec = TryGrow(256_MB);
     LOG_IF(ERROR, ec && ec != errc::file_too_large) << "Could not call grow :" << ec.message();
   }
