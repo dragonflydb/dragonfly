@@ -169,8 +169,6 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
     stats_.keys_total += db_slice_->DbSize(db_indx);
   }
 
-  const uint64_t kCyclesPerJiffy = base::CycleClock::Frequency() >> 16;  // ~15usec.
-
   for (DbIndex snapshot_db_index_ = 0; snapshot_db_index_ < db_array_.size();
        ++snapshot_db_index_) {
     if (!cntx_->IsRunning())
@@ -187,18 +185,18 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
         return;
       }
 
-      PrimeTable::Cursor next = pt->TraverseBuckets(
+      snapshot_cursor_ = pt->TraverseBuckets(
           snapshot_cursor_,
           [this, &snapshot_db_index_](auto it) { return BucketSaveCb(snapshot_db_index_, it); });
-      snapshot_cursor_ = next;
 
-      // If we do not flush the data, and have not preempted,
-      // we may need to yield to other fibers to avoid grabbing CPU for too long.
-      if (!PushSerialized(false)) {
-        if (ThisFiber::GetRunningTimeCycles() > kCyclesPerJiffy) {
-          ThisFiber::Yield();
-        }
-      }
+      auto epoch = fb2::FiberSwitchEpoch();
+      PushSerialized(false);
+
+      // Yield after every bucket to remain responsive.
+      // Use epochs to determine if PushSerialized yielded internally.
+      if (fb2::FiberSwitchEpoch() == epoch)
+        ThisFiber::Yield();
+
     } while (snapshot_cursor_);
 
     DVLOG(2) << "after loop " << ThisFiber::GetName();
@@ -337,9 +335,6 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
     return 0;
 
   uint64_t id = rec_id_++;
-  DVLOG(2) << "Pushing " << id;
-
-  uint64_t running_cycles = ThisFiber::GetRunningTimeCycles();
 
   fb2::NoOpLock lk;
   // We create a critical section here that ensures that records are pushed in sequential order.
@@ -357,13 +352,6 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
   seq_cond_.notify_all();
 
   VLOG(2) << "Pushed with Serialize() " << serialized;
-
-  // FlushToSink can be quite slow for large values or due compression, therefore
-  // we counter-balance CPU over-usage by forcing sleep.
-  // We measure running_cycles before the preemption points, because they reset the counter.
-  uint64_t sleep_usec = (running_cycles * 1000'000 / base::CycleClock::Frequency()) / 2;
-  ThisFiber::SleepFor(chrono::microseconds(std::min<uint64_t>(sleep_usec, 2000ul)));
-
   return serialized;
 }
 
