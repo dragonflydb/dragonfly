@@ -83,7 +83,7 @@ class TieredStorage {
 
   void UpdateFromFlags();         // Update internal values based on current flag values
   bool ShouldOffload() const;     // True if below tiered_offload_threshold
-  float WriteDepthUsage() const;  // Ratio (0-1) of used storage_write_depth for stashesf
+  float WriteDepthUsage() const;  // Ratio (0-1) of used storage_write_depth for stashes
 
   // How much we are above tiered_upload_threshold. Can be negative!
   int64_t UploadBudget() const;
