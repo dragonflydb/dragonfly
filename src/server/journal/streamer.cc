@@ -203,9 +203,9 @@ void JournalStreamer::StalledDataWriterFiber(std::chrono::milliseconds period_ms
     auto threshold = std::exchange(replication_dispatch_threshold, 8_KB);
     // The replica sends the LSN of the next entry is wants to receive.
     while (cntx_->IsRunning() && journal_->IsLSNInBuffer(lsn)) {
-      JournalItem item;
-      item.data = journal_->GetEntry(lsn);
-      item.lsn = lsn;
+      JournalChangeItem item;
+      item.journal_item.data = journal_->GetEntry(lsn);
+      item.journal_item.lsn = lsn;
       ConsumeJournalChange(item);
       lsn++;
     }
