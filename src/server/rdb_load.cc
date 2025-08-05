@@ -2527,11 +2527,6 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
     db_slice.IncrLoadInProgress();
     this->LoadItemsBuffer(indx, ib);
     db_slice.DecrLoadInProgress();
-
-    // Block, if tiered storage is active, but can't keep up
-    while (db_slice.shard_owner()->ShouldThrottleForTiering()) {
-      ThisFiber::SleepFor(100us);
-    }
   };
 
   bool preempted = shard_set->Add(sid, std::move(cb));
@@ -2652,8 +2647,13 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
     LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
   }
 
-  if (auto* ts = db_slice->shard_owner()->tiered_storage(); ts)
+  if (auto* ts = db_slice->shard_owner()->tiered_storage(); ts) {
     ts->TryStash(db_cntx.db_index, item->key, &res.it->second);
+
+    // Block, if tiered storage is active, but can't keep up
+    while (db_slice->shard_owner()->ShouldThrottleForTiering())
+      ThisFiber::SleepFor(100us);
+  }
 }
 
 void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {

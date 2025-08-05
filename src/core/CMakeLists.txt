@@ -32,7 +32,7 @@ add_library(dfly_core allocation_tracker.cc bloom.cc compact_object.cc dense_set
 cxx_link(dfly_core base dfly_search_core fibers2 jsonpath
     absl::flat_hash_map absl::str_format absl::random_random redis_lib
     TRDP::lua lua_modules
-    OpenSSL::Crypto TRDP::dconv TRDP::lz4)
+    OpenSSL::Crypto TRDP::dconv TRDP::lz4 TRDP::hdr_histogram)
 
 add_executable(dash_bench dash_bench.cc)
 cxx_link(dash_bench dfly_core redis_test_lib)
@@ -47,6 +47,7 @@ cxx_test(string_set_test dfly_core LABELS DFLY)
 cxx_test(string_map_test dfly_core LABELS DFLY)
 cxx_test(sorted_map_test dfly_core redis_test_lib LABELS DFLY)
 cxx_test(bptree_set_test dfly_core LABELS DFLY)
+cxx_test(linear_search_map_test dfly_core LABELS DFLY)
 cxx_test(score_map_test dfly_core LABELS DFLY)
 cxx_test(flatbuffers_test dfly_core TRDP::flatbuffers LABELS DFLY)
 cxx_test(bloom_test dfly_core LABELS DFLY)

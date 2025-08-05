@@ -128,6 +128,7 @@ int zmalloc_get_allocator_wasted_blocks(float ratio, size_t* allocated, size_t* 
  * This uses the current local thread heap.
  * return 0 if not, 1 if underutilized
  */
+struct mi_page_usage_stats_s;
 void zmalloc_page_is_underutilized(void* ptr, float ratio, int collect_stats, struct mi_page_usage_stats_s* result);
 char* zstrdup(const char* s);
 

@@ -854,12 +854,12 @@ void AppendFooter(io::StringSink* dump_res, bool ignore_crc) {
 }
 }  // namespace
 
-void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out, bool ignore_crc) {
-  CompressionMode compression_mode = GetDefaultCompressionMode();
-  if (compression_mode != CompressionMode::NONE) {
-    compression_mode = CompressionMode::SINGLE_ENTRY;
+void SerializerBase::DumpObject(RdbSerializer* serializer, const CompactObj& obj,
+                                io::StringSink* out, bool ignore_crc) {
+  CompressionMode serializer_used_compression_mode = serializer->compression_mode_;
+  if (serializer_used_compression_mode != CompressionMode::NONE) {
+    serializer->SetCompressionMode(CompressionMode::SINGLE_ENTRY);
   }
-  RdbSerializer serializer(compression_mode);
 
   // According to Redis code we need to
   // 1. Save the value itself - without the key
@@ -867,14 +867,21 @@ void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out, bool
   auto type = RdbObjectType(obj);
   DVLOG(2) << "We are going to dump object type: " << int(type);
 
-  std::error_code ec = serializer.WriteOpcode(type);
+  std::error_code ec = serializer->WriteOpcode(type);
   CHECK(!ec);
-  ec = serializer.SaveValue(obj);
+  ec = serializer->SaveValue(obj);
   CHECK(!ec);  // make sure that fully was successful
-  ec = serializer.FlushToSink(out, SerializerBase::FlushState::kFlushMidEntry);
+  ec = serializer->FlushToSink(out, SerializerBase::FlushState::kFlushMidEntry);
   CHECK(!ec);                     // make sure that fully was successful
   AppendFooter(out, ignore_crc);  // version and crc
   CHECK_GT(out->str().size(), 10u);
+
+  serializer->SetCompressionMode(serializer_used_compression_mode);
+}
+
+void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out, bool ignore_crc) {
+  RdbSerializer serializer(GetDefaultCompressionMode());
+  DumpObject(&serializer, obj, out, ignore_crc);
 }
 
 size_t SerializerBase::SerializedLen() const {

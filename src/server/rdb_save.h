@@ -149,6 +149,7 @@ class RdbSaver {
   std::string snapshot_id_;
 };
 
+class RdbSerializer;
 class SerializerBase {
  public:
   enum class FlushState : uint8_t { kFlushMidEntry, kFlushEndEntry };
@@ -158,6 +159,8 @@ class SerializerBase {
 
   // Dumps `obj` in DUMP command format into `out`. Uses default compression mode.
   static void DumpObject(const CompactObj& obj, io::StringSink* out, bool ignore_crc = false);
+  static void DumpObject(RdbSerializer* serializer, const CompactObj& obj, io::StringSink* out,
+                         bool ignore_crc = false);
 
   // Internal buffer size. Might shrink after flush due to compression.
   size_t SerializedLen() const;
@@ -186,6 +189,10 @@ class SerializerBase {
 
   uint64_t GetSerializationPeakBytes() const {
     return serialization_peak_bytes_;
+  }
+
+  void SetCompressionMode(CompressionMode mode) {
+    compression_mode_ = mode;
   }
 
  protected:

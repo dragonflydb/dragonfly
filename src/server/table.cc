@@ -78,6 +78,14 @@ void LockTable::Release(uint64_t fp, IntentLock::Mode mode) {
 
 [[maybe_unused]] constexpr size_t kSzTable = sizeof(DbTable);
 
+DbTable::SampleTopKeys::~SampleTopKeys() {
+  delete top_keys;
+}
+
+DbTable::SampleUniqueKeys::~SampleUniqueKeys() {
+  delete[] dense_hll;
+}
+
 DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
     : prime(kInitSegmentLog, detail::PrimeTablePolicy{}, mr),
       expire(0, detail::ExpireTablePolicy{}, mr),
@@ -91,8 +99,8 @@ DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
 
 DbTable::~DbTable() {
   DCHECK_EQ(thread_index, ServerState::tlocal()->thread_index());
-  delete top_keys;
-  delete[] dense_hll;
+  delete sample_top_keys;
+  delete sample_unique_keys;
 }
 
 void DbTable::Clear() {

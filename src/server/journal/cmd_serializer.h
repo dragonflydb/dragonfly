@@ -13,6 +13,8 @@
 
 namespace dfly {
 
+class RdbSerializer;
+
 // CmdSerializer serializes DB entries (key+value) into command(s) in RESP format string.
 // Small entries are serialized as RESTORE commands, while bigger ones (see
 // serialization_max_chunk_size) are split into multiple commands (like rpush, hset, etc).
@@ -41,6 +43,7 @@ class CmdSerializer {
 
   FlushSerialized cb_;
   size_t max_serialization_buffer_size_;
+  std::unique_ptr<RdbSerializer> serializer_;
 };
 
 }  // namespace dfly

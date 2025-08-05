@@ -53,30 +53,32 @@ enum class ExpT { EX, PX, EXAT, PXAT };
 
 constexpr uint32_t kMaxStrLen = 1 << 28;
 
-// Stores a string, the pending result of a tiered read or nothing
-struct StringValue {
-  StringValue() : v_{std::monostate{}} {
-  }
+// Either immediately available value or tiering future + result
+template <typename T> using TResultOrT = variant<T, TieredStorage::TResult<T>>;
+using StringResult = TResultOrT<string>;
 
-  StringValue(std::string s) : v_{std::move(s)} {
-  }
+void CopyValueToBuffer(const PrimeValue& pv, char* dest) {
+  DCHECK_EQ(pv.ObjType(), OBJ_STRING);
+  DCHECK(!pv.IsExternal());
+  pv.GetString(dest);
+}
 
-  StringValue(fb2::Future<io::Result<std::string>> f) : v_{std::move(f)} {
-  }
+string GetString(const PrimeValue& pv) {
+  string res;
+  DCHECK_EQ(pv.ObjType(), OBJ_STRING);
 
-  // Get and consume value. If backed by a future, blocks until resolved.
-  std::string Get() &&;
+  if (pv.ObjType() != OBJ_STRING)
+    return res;
+  res.resize(pv.Size());
+  CopyValueToBuffer(pv, res.data());
 
-  // If no value is stored
-  bool IsEmpty() const;
+  return res;
+}
 
-  // Read string from prime value - either from memory or issue tiered storage read
-  static StringValue Read(DbIndex dbid, std::string_view key, const PrimeValue& pv,
-                          EngineShard* es);
-
- private:
-  std::variant<std::monostate, std::string, fb2::Future<io::Result<std::string>>> v_;
-};
+StringResult ReadString(DbIndex dbid, string_view key, const PrimeValue& pv, EngineShard* es) {
+  return pv.IsExternal() ? StringResult{es->tiered_storage()->Read(dbid, key, pv)}
+                         : StringResult{GetString(pv)};
+}
 
 // Helper for performing SET operations with various options
 class SetCmd {
@@ -98,8 +100,8 @@ class SetCmd {
   struct SetParams {
     uint16_t flags = SET_ALWAYS;
     uint32_t memcache_flags = 0;
-    uint64_t expire_after_ms = 0;     // Relative value based on now. 0 means no expiration.
-    StringValue* prev_val = nullptr;  // If set, previous value is stored at pointer
+    uint64_t expire_after_ms = 0;  // Relative value based on now. 0 means no expiration.
+    optional<StringResult>* prev_val = nullptr;  // if set, previous value will be stored if found
 
     constexpr bool IsConditionalSet() const {
       return flags & SET_IF_NOTEXIST || flags & SET_IF_EXISTS;
@@ -127,65 +129,36 @@ class SetCmd {
   bool manual_journal_;
 };
 
-void CopyValueToBuffer(const PrimeValue& pv, char* dest) {
-  DCHECK_EQ(pv.ObjType(), OBJ_STRING);
-  DCHECK(!pv.IsExternal());
-  pv.GetString(dest);
-}
-
-string GetString(const PrimeValue& pv) {
-  string res;
-  DCHECK_EQ(pv.ObjType(), OBJ_STRING);
-
-  if (pv.ObjType() != OBJ_STRING)
-    return res;
-  res.resize(pv.Size());
-  CopyValueToBuffer(pv, res.data());
-
-  return res;
-}
-
 size_t SetRange(std::string* value, size_t start, std::string_view range) {
   value->resize(max(value->size(), start + range.size()));
   memcpy(value->data() + start, range.data(), range.size());
   return value->size();
 }
 
-template <typename T> using TResult = std::variant<T, fb2::Future<T>, fb2::Future<io::Result<T>>>;
-
-template <typename T> T GetResult(TResult<T> v) {
-  Overloaded ov{
-      [](T&& t) { return t; },
-      [](fb2::Future<T>&& future) { return future.Get(); },
-      [](fb2::Future<io::Result<T>>&& future) { return *future.Get(); },
-  };
-  return std::visit(ov, std::move(v));
-}
-
-OpResult<TResult<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
+OpResult<TResultOrT<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (it_res == OpStatus::KEY_NOTFOUND) {
-    return TResult<size_t>{0u};
+    return {0u};
   }
   RETURN_ON_BAD_STATUS(it_res);
 
   // For external entries we have to enqueue reads because modify operations like append could be
   // already pending.
-  // TODO: Optimize to return co.Size() if no modify operations are present
+  // TODO(vlad): Optimize to return co.Size() if no modify operations are present
+  // TODO(vlad): Omit decoding string to just query it's length
   if (const auto& co = it_res.value()->second; co.IsExternal()) {
-    fb2::Future<size_t> fut;
-    op_args.shard->tiered_storage()->Read(
-        op_args.db_cntx.db_index, key, co,
-        [fut](io::Result<std::string> s) mutable { fut.Resolve(s->size()); });
+    TieredStorage::TResult<size_t> fut;
+    auto cb = [fut](io::Result<string> s) mutable { fut.Resolve(s.transform(&string::size)); };
+    op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, co, std::move(cb));
     return {std::move(fut)};
   } else {
     return {co.Size()};
   }
 }
 
-OpResult<TResult<size_t>> OpSetRange(const OpArgs& op_args, string_view key, size_t start,
-                                     string_view range) {
+OpResult<TResultOrT<size_t>> OpSetRange(const OpArgs& op_args, string_view key, size_t start,
+                                        string_view range) {
   VLOG(2) << "SetRange(" << key << ", " << start << ", " << range << ")";
   auto& db_slice = op_args.GetDbSlice();
 
@@ -215,8 +188,8 @@ OpResult<TResult<size_t>> OpSetRange(const OpArgs& op_args, string_view key, siz
   }
 }
 
-OpResult<StringValue> OpGetRange(const OpArgs& op_args, string_view key, int32_t start,
-                                 int32_t end) {
+OpResult<StringResult> OpGetRange(const OpArgs& op_args, string_view key, int32_t start,
+                                  int32_t end) {
   auto read = [start, end](std::string_view slice) mutable -> string_view {
     int32_t strlen = slice.size();
     if (strlen == 0)
@@ -247,7 +220,7 @@ OpResult<StringValue> OpGetRange(const OpArgs& op_args, string_view key, int32_t
   auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (it_res == OpStatus::KEY_NOTFOUND) {
-    return StringValue(string{});
+    return StringResult(string{});
   }
   RETURN_ON_BAD_STATUS(it_res);
 
@@ -540,8 +513,8 @@ using SearchMut = SearchKey<DbSlice::Iterator>;
 using SearchConst = SearchKey<DbSlice::ConstIterator>;
 
 template <typename Iter>
-MGetResponse CollectKeys(BlockingCounter wait_bc, uint8_t fetch_mask, const Transaction* t,
-                         EngineShard* shard, SearchKey<Iter> find_op) {
+MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, uint8_t fetch_mask,
+                         const Transaction* t, EngineShard* shard, SearchKey<Iter> find_op) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
@@ -595,6 +568,7 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
   bool fetch_mcflag = fetch_mask & FETCH_MCFLAG;
   bool fetch_mcver = fetch_mask & FETCH_MCVER;
   const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
+
   for (size_t i = 0; i < items.size(); ++i) {
     auto it = items[i].it;
     if (it.is_done()) {
@@ -610,8 +584,11 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
     const PrimeValue& value = it->second;
     if (value.IsExternal()) {
       wait_bc->Add(1);
-      auto cb = [next, wait_bc](const io::Result<string>& v) mutable {
-        memcpy(next, v->data(), v->size());
+      auto cb = [next, err, wait_bc](const io::Result<string>& v) mutable {
+        if (v.has_value())
+          memcpy(next, v->data(), v->size());
+        else
+          *err = v.error();
         wait_bc->Dec();
       };
       shard->tiered_storage()->Read(t->GetDbIndex(), it.key(), value, std::move(cb));
@@ -638,19 +615,19 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
   return response;
 }
 
-MGetResponse OpMGet(BlockingCounter wait_bc, uint8_t fetch_mask, const Transaction* t,
-                    EngineShard* shard) {
+MGetResponse OpMGet(BlockingCounter wait_bc, AggregateError* err, uint8_t fetch_mask,
+                    const Transaction* t, EngineShard* shard) {
   SearchConst find_op = [&](string_view key) {
     const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
     return db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
   };
-  return CollectKeys(wait_bc, fetch_mask, t, shard, std::move(find_op));
+  return CollectKeys(std::move(wait_bc), err, fetch_mask, t, shard, std::move(find_op));
 }
 
 // Extend key with value, either prepend or append. Return size of stored string
 // after modification
-OpResult<TResult<size_t>> OpExtend(const OpArgs& op_args, std::string_view key,
-                                   std::string_view value, bool prepend) {
+OpResult<TResultOrT<size_t>> OpExtend(const OpArgs& op_args, std::string_view key,
+                                      std::string_view value, bool prepend) {
   auto* shard = op_args.shard;
   auto it_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key, OBJ_STRING);
   RETURN_ON_BAD_STATUS(it_res);
@@ -689,16 +666,29 @@ struct GetReplies {
     }
   }
 
-  void Send(TResult<size_t>&& val) const {
-    rb->SendLong(GetResult(std::move(val)));
+  template <typename T> void Send(optional<T>&& res) const {
+    if (res.has_value())
+      return Send(std::move(*res));
+    return rb->SendNull();
   }
 
-  void Send(StringValue&& val) const {
-    if (val.IsEmpty()) {
-      rb->SendNull();
-    } else {
-      rb->SendBulkString(std::move(val).Get());
-    }
+  template <typename T> void Send(TResultOrT<T>&& res) const {
+    if (holds_alternative<T>(res))
+      return Send(get<T>(res));
+
+    io::Result<T> iores = get<1>(std::move(res)).Get();
+    if (iores.has_value())
+      Send(*iores);
+    else
+      Send(iores.error().message());
+  }
+
+  void Send(size_t val) const {
+    rb->SendLong(val);
+  }
+
+  void Send(string_view str) const {
+    rb->SendBulkString(str);
   }
 
   RedisReplyBuilder* rb;
@@ -715,10 +705,7 @@ void ExtendGeneric(CmdArgList args, bool prepend, Transaction* tx, SinkReplyBuil
     };
 
     RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(builder);
-    auto res = tx->ScheduleSingleHopT(cb);
-    if (!res)
-      return rb->SendError(res.status());
-    rb->SendLong(GetResult(std::move(res.value())));
+    GetReplies{rb}.Send(tx->ScheduleSingleHopT(cb));
   } else {
     // Memcached skips if key is missing
     DCHECK(builder->GetProtocol() == Protocol::MEMCACHE);
@@ -851,8 +838,9 @@ OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params)
   return find_res->it;
 }
 
-MGetResponse OpGAT(BlockingCounter wait_bc, uint8_t fetch_mask, const Transaction* t,
-                   EngineShard* shard, const DbSlice::ExpireParams& expire_params) {
+MGetResponse OpGAT(BlockingCounter wait_bc, AggregateError* err, uint8_t fetch_mask,
+                   const Transaction* t, EngineShard* shard,
+                   const DbSlice::ExpireParams& expire_params) {
   SearchMut find_op = [&](string_view key) {
     return FindKeyAndSetExpiry(GetAndTouchParams{
         .t = t,
@@ -861,31 +849,10 @@ MGetResponse OpGAT(BlockingCounter wait_bc, uint8_t fetch_mask, const Transactio
         .key = key,
     });
   };
-  return CollectKeys(wait_bc, fetch_mask, t, shard, std::move(find_op));
+  return CollectKeys(std::move(wait_bc), err, fetch_mask, t, shard, std::move(find_op));
 }
 
 }  // namespace
-
-StringValue StringValue::Read(DbIndex dbid, string_view key, const PrimeValue& pv,
-                              EngineShard* es) {
-  return pv.IsExternal() ? StringValue{es->tiered_storage()->Read(dbid, key, pv)}
-                         : StringValue(GetString(pv));
-}
-
-string StringValue::Get() && {
-  DCHECK(!holds_alternative<monostate>(v_));
-
-  auto prev = exchange(v_, monostate{});
-  if (holds_alternative<string>(prev))
-    return std::move(std::get<string>(prev));
-
-  // TODO(vlad): Propagate error further
-  return *std::get<fb2::Future<io::Result<std::string>>>(prev).Get();
-}
-
-bool StringValue::IsEmpty() const {
-  return holds_alternative<monostate>(v_);
-}
 
 OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value) {
   auto& db_slice = op_args_.GetDbSlice();
@@ -1051,7 +1018,7 @@ OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Ite
     return OpStatus::WRONG_TYPE;
 
   *params.prev_val =
-      StringValue::Read(op_args_.db_cntx.db_index, it.key(), it->second, EngineShard::tlocal());
+      ReadString(op_args_.db_cntx.db_index, it.key(), it->second, EngineShard::tlocal());
   return OpStatus::OK;
 }
 
@@ -1128,7 +1095,7 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
     return builder->SendError(kSyntaxErr);
   }
 
-  StringValue prev;
+  optional<StringResult> prev;
   if (sparams.flags & SetCmd::SET_GET)
     sparams.prev_val = &prev;
   bool manual_journal = cmnd_cntx.conn_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
@@ -1190,25 +1157,25 @@ void StringFamily::SetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
 }
 
 void StringFamily::Get(CmdArgList args, const CommandContext& cmnd_cntx) {
-  auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringValue> {
+  auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
-    return StringValue::Read(tx->GetDbIndex(), key, (*it_res)->second, es);
+    return ReadString(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
   GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
 }
 
 void StringFamily::GetDel(CmdArgList args, const CommandContext& cmnd_cntx) {
-  auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringValue> {
+  auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto& db_slice = tx->GetDbSlice(es->shard_id());
     auto it_res = db_slice.FindMutable(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
-    auto value = StringValue::Read(tx->GetDbIndex(), key, it_res->it->second, es);
+    auto value = ReadString(tx->GetDbIndex(), key, it_res->it->second, es);
     it_res->post_updater.Run();  // Run manually before delete
     db_slice.Del(tx->GetDbContext(), it_res->it);
     return value;
@@ -1221,7 +1188,7 @@ void StringFamily::GetSet(CmdArgList args, const CommandContext& cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
-  StringValue prev;
+  optional<StringResult> prev;
   SetCmd::SetParams sparams;
   sparams.prev_val = &prev;
   bool manual_journal = cmnd_cntx.conn_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
@@ -1278,14 +1245,14 @@ void StringFamily::GetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
     }
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringValue> {
+  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringResult> {
     auto op_args = t->GetOpArgs(shard);
 
     auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_STRING);
     if (!it_res)
       return it_res.status();
 
-    StringValue value = StringValue::Read(t->GetDbIndex(), key, it_res->it->second, shard);
+    StringResult value = ReadString(t->GetDbIndex(), key, it_res->it->second, shard);
 
     if (exp_params.IsDefined()) {
       it_res->post_updater.Run();  // Run manually before possible delete due to negative expire
@@ -1408,19 +1375,22 @@ void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
       fetch_mask |= FETCH_MCVER;
   }
 
-  // Count of pending tiered reads
-  fb2::BlockingCounter tiering_bc{0};
+  fb2::BlockingCounter tiering_bc{0};  // Count of pending tiered reads
+  AggregateError tiering_err;          // Fist tiering error
+
   std::vector<MGetResponse> mget_resp(shard_set->size());
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    mget_resp[shard->shard_id()] = OpMGet(tiering_bc, fetch_mask, t, shard);
+    mget_resp[shard->shard_id()] = OpMGet(tiering_bc, &tiering_err, fetch_mask, t, shard);
     return OpStatus::OK;
   };
 
   OpStatus result = cmnd_cntx.tx->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, result);
 
-  // wait for all tiered reads to finish
+  // wait for all tiered reads to finish and check for errors
   tiering_bc->Wait();
+  if (auto err = std::move(tiering_err).Destroy(); err)
+    return builder->SendError(err.message());
 
   // reorder shard results back according to argument order
   absl::FixedArray<optional<GetResp>, 8> res(args.size());
@@ -1574,13 +1544,8 @@ void StringFamily::SetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
   auto cb = [&, &key = key, &start = start, &value = value](Transaction* t, EngineShard* shard) {
     return OpSetRange(t->GetOpArgs(shard), key, start, value);
   };
-  auto res = cmnd_cntx.tx->ScheduleSingleHopT(cb);
-
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  if (res.ok())
-    rb->SendLong(GetResult(std::move(*res)));
-  else
-    rb->SendError(res.status());
+  GetReplies{rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
 }
 
 /* CL.THROTTLE <key> <max_burst> <count per period> <period> [<quantity>] */
@@ -1714,17 +1679,23 @@ void StringFamily::GAT(CmdArgList args, const CommandContext& cmnd_cntx) {
   }
 
   BlockingCounter tiering_bc{0};
+  AggregateError tiering_err;
   std::vector<MGetResponse> mget_resp(shard_set->size());
+
   const DbSlice::ExpireParams expire_params{
       .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    mget_resp[shard->shard_id()] = OpGAT(tiering_bc, fetch_mask, t, shard, expire_params);
+    mget_resp[shard->shard_id()] =
+        OpGAT(tiering_bc, &tiering_err, fetch_mask, t, shard, expire_params);
     return OpStatus::OK;
   };
 
   const OpStatus result = cmnd_cntx.tx->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, result);
+
   tiering_bc->Wait();
+  if (auto err = std::move(tiering_err).Destroy(); err)
+    return builder->SendError(err.message());
 
   absl::FixedArray<optional<GetResp>, 8> ordered_by_shard{args.size()};
   ReorderShardResults(mget_resp, cmnd_cntx.tx, true, &ordered_by_shard);

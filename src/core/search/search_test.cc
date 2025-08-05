@@ -1678,6 +1678,56 @@ BENCHMARK(BM_SearchSeveralNumericAndTagIndexes)
     ->Arg(1000000)
     ->ArgNames({"num_docs"});
 
+static void BM_SearchMergeEqualSets(benchmark::State& state) {
+  auto schema = MakeSimpleSchema({
+      {"numeric1", SchemaField::NUMERIC,
+       SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
+      {"numeric2", SchemaField::NUMERIC,
+       SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
+  });
+
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  std::default_random_engine rnd;
+
+  using NumericType = long long;
+  uniform_int_distribution<NumericType> dist1(std::numeric_limits<NumericType>::min(),
+                                              std::numeric_limits<NumericType>::max());
+  uniform_int_distribution<NumericType> dist2(std::numeric_limits<NumericType>::min(),
+                                              std::numeric_limits<NumericType>::max());
+
+  const size_t num_docs = state.range(0);
+  for (size_t i = 0; i < num_docs; ++i) {
+    MockedDocument doc{Map{
+        {"numeric1", std::to_string(dist1(rnd))},
+        {"numeric2", std::to_string(dist2(rnd))},
+    }};
+    indices.Add(i, doc);
+  }
+
+  std::string query = absl::StrCat("@numeric1:[-inf +inf] @numeric2:[-inf +inf]");
+
+  while (state.KeepRunning()) {
+    CHECK(algo.Init(query, &params));
+    auto result = algo.Search(&indices);
+    CHECK(result.error.empty());
+
+    // All documents should match both conditions, so total should equal num_docs
+    CHECK_EQ(result.total, num_docs);
+    CHECK_EQ(result.ids.size(), num_docs);
+  }
+}
+
+BENCHMARK(BM_SearchMergeEqualSets)
+    ->Arg(100)
+    ->Arg(1000)
+    ->Arg(10000)
+    ->Arg(100000)
+    ->Arg(1000000)
+    ->ArgNames({"num_docs"});
+
 #ifdef USE_SIMSIMD
 
 #define SIMSIMD_NATIVE_F16 0

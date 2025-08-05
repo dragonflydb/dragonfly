@@ -302,7 +302,9 @@ TieredStorage::TieredStorage(size_t max_size, DbSlice* db_slice)
     : op_manager_{make_unique<ShardOpManager>(this, db_slice, max_size)},
       bins_{make_unique<tiering::SmallBins>()} {
   write_depth_limit_ = absl::GetFlag(FLAGS_tiered_storage_write_depth);
-  size_t mem_per_shard = max_memory_limit / shard_set->size();
+
+  // TODO: update when max_memory_limit flag changes
+  size_t mem_per_shard = max_memory_limit.load(memory_order_relaxed) / shard_set->size();
   SetMemoryLowWatermark(absl::GetFlag(FLAGS_tiered_low_memory_factor) * mem_per_shard);
 }
 
@@ -325,8 +327,8 @@ void TieredStorage::SetMemoryLowWatermark(size_t mem_limit) {
   VLOG(1) << "Memory low limit is " << mem_limit;
 }
 
-util::fb2::Future<io::Result<string>> TieredStorage::Read(DbIndex dbid, string_view key,
-                                                          const PrimeValue& value) {
+TieredStorage::TResult<string> TieredStorage::Read(DbIndex dbid, string_view key,
+                                                   const PrimeValue& value) {
   util::fb2::Future<io::Result<string>> fut;
   Read(dbid, key, value, bind(&decltype(fut)::Resolve, fut, placeholders::_1));
   return fut;
@@ -347,9 +349,9 @@ void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& v
 }
 
 template <typename T>
-util::fb2::Future<io::Result<T>> TieredStorage::Modify(DbIndex dbid, std::string_view key,
-                                                       const PrimeValue& value,
-                                                       std::function<T(std::string*)> modf) {
+TieredStorage::TResult<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
+                                                const PrimeValue& value,
+                                                std::function<T(std::string*)> modf) {
   DCHECK(value.IsExternal());
 
   util::fb2::Future<io::Result<T>> future;
@@ -372,7 +374,7 @@ util::fb2::Future<io::Result<T>> TieredStorage::Modify(DbIndex dbid, std::string
 }
 
 // Instantiate for size_t only - used in string_family's OpExtend.
-template util::fb2::Future<io::Result<size_t>> TieredStorage::Modify(
+template TieredStorage::TResult<size_t> TieredStorage::Modify(
     DbIndex dbid, std::string_view key, const PrimeValue& value,
     std::function<size_t(std::string*)> modf);
 

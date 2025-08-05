@@ -292,6 +292,7 @@ std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_
     exit(1);
 #endif
   } else if (detail::IsGCSPath(uri)) {
+#ifdef WITH_GCP
     auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
     auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return gcs->Init(3000); });
     if (ec) {
@@ -299,6 +300,10 @@ std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_
       exit(1);
     }
     return gcs;
+#else
+    LOG(ERROR) << "Compiled without GCP support";
+    exit(1);
+#endif
   } else {
     LOG(ERROR) << "Uknown cloud storage " << uri;
     exit(1);
@@ -1247,11 +1252,16 @@ void ServerFamily::UpdateMemoryGlobalStats() {
   // Decide on stopping or accepting new connections based on oom deny ratio
   double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
   if (rss_oom_deny_ratio > 0) {
-    size_t memory_limit = max_memory_limit * rss_oom_deny_ratio;
-    if (total_rss > memory_limit && accepting_connections_ && HasPrivilegedInterface())
+    size_t memory_limit = max_memory_limit.load(memory_order_relaxed) * rss_oom_deny_ratio;
+    if (total_rss > memory_limit && accepting_connections_ && HasPrivilegedInterface()) {
+      LOG_EVERY_T(WARNING, 10)
+          << "Accepting connections stopped, used memory over limit: total_rss " << total_rss
+          << " > memory_limit " << memory_limit;
       ChangeConnectionAccept(false);
-    else if (total_rss < memory_limit && !accepting_connections_)
+    } else if (total_rss < memory_limit && !accepting_connections_) {
+      LOG_EVERY_T(INFO, 10) << "Accepting connections again, used memory below limit";
       ChangeConnectionAccept(true);
+    }
   }
 }
 
@@ -1597,8 +1607,8 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             &resp->body());
   AppendMetricWithoutLabels("blocked_tasks", "", m.blocked_tasks, MetricType::GAUGE, &resp->body());
 
-  AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit, MetricType::GAUGE,
-                            &resp->body());
+  AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit.load(memory_order_relaxed),
+                            MetricType::GAUGE, &resp->body());
 
   if (m.events.insertion_rejections | m.coordinator_stats.oom_error_cmd_cnt) {
     AppendMetricHeader("oom_errors_total", "Rejected requests due to out of memory errors",
@@ -2769,8 +2779,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     }
     append("used_memory_peak_rss", glob_memory_peaks.used.load(memory_order_relaxed));
 
-    append("maxmemory", max_memory_limit);
-    append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
+    size_t limit = max_memory_limit.load(memory_order_relaxed);
+    append("maxmemory", limit);
+    append("maxmemory_human", HumanReadableNumBytes(limit));
 
     append("used_memory_lua", m.lua_stats.used_bytes);
 

@@ -43,7 +43,7 @@ jobs:
       - name: Configure CMake
         run: |
           cmake -B ${GITHUB_WORKSPACE}/build \
-            -DCMAKE_BUILD_TYPE=Debug -DWITH_AWS:BOOL=OFF \
+            -DCMAKE_BUILD_TYPE=Debug -DWITH_AWS:BOOL=OFF -DWITH_GCP:BOOL=OFF -DWITH_GPERF:BOOL=OFF \
             -GNinja -L
           cd ${GITHUB_WORKSPACE}/build && pwd
 

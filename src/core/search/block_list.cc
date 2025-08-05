@@ -152,6 +152,46 @@ typename BlockList<C>::BlockListIterator& BlockList<C>::BlockListIterator::opera
   return *this;
 }
 
+template <typename C> void BlockList<C>::BlockListIterator::SeekGE(DocId min_doc_id) {
+  if (it == it_end) {
+    block_it = {};
+    block_end = {};
+    return;
+  }
+
+  auto extract_doc_id = [](const auto& value) {
+    using T = std::decay_t<decltype(value)>;
+    if constexpr (std::is_same_v<T, DocId>) {
+      return value;
+    } else {
+      return value.first;
+    }
+  };
+
+  auto needed_block = [&](const auto& it) {
+    return it->begin() != it->end() && min_doc_id <= extract_doc_id(it->Back());
+  };
+
+  // Choose the first block that has the last element >= min_doc_id
+  if (!needed_block(it)) {
+    while (++it != it_end) {
+      if (needed_block(it)) {
+        block_it = it->begin();
+        block_end = it->end();
+        break;
+      }
+    }
+    if (it == it_end) {
+      block_it = {};
+      block_end = {};
+      return;
+    }
+  }
+
+  BasicSeekGE(min_doc_id, block_end, &block_it);
+  DCHECK(block_it != block_end && min_doc_id <= extract_doc_id(*block_it));
+}
+
 template class BlockList<CompressedSortedSet>;
 template class BlockList<SortedVector<DocId>>;
 template class BlockList<SortedVector<std::pair<DocId, double>>>;

@@ -51,27 +51,27 @@ Test full replication pipeline. Test full sync with streaming changes and stable
         pytest.param(8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, marks=M_STRESS),
     ],
 )
+@pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
 # Disabled cache_mode until #5371 is fixed
-# @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
-@pytest.mark.parametrize("point_in_time_replication", [True, False])
+# @pytest.mark.parametrize("point_in_time_replication", [True, False])
 async def test_replication_all(
     df_factory: DflyInstanceFactory,
     t_master,
     t_replicas,
     seeder_config,
     stream_target,
-    # mode,
-    point_in_time_replication,
+    mode,
+    # point_in_time_replication,
 ):
     args = {}
-    # if mode:
-    #    args["cache_mode"] = "true"
-    #    args["maxmemory"] = str(t_master * 256) + "mb"
+    if mode:
+        args["cache_mode"] = "true"
+        args["maxmemory"] = str(t_master * 256) + "mb"
 
     master = df_factory.create(
         admin_port=ADMIN_PORT,
         proactor_threads=t_master,
-        point_in_time_snapshot=point_in_time_replication,
+        # point_in_time_snapshot=point_in_time_replication,
         **args,
     )
     replicas = [

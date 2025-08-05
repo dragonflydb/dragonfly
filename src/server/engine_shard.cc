@@ -224,14 +224,15 @@ size_t CalculateEvictionBytes() {
   const size_t shards_count = shard_set->size();
   const double eviction_memory_budget_threshold = GetFlag(FLAGS_eviction_memory_budget_threshold);
 
+  size_t limit = max_memory_limit.load(memory_order_relaxed);
   const size_t shard_memory_budget_threshold =
-      size_t(max_memory_limit * eviction_memory_budget_threshold) / shards_count;
+      size_t(limit * eviction_memory_budget_threshold) / shards_count;
 
   const size_t global_used_memory = used_mem_current.load(memory_order_relaxed);
 
   // Calculate how many bytes we need to evict on this shard
-  size_t goal_bytes = CalculateHowManyBytesToEvictOnShard(max_memory_limit, global_used_memory,
-                                                          shard_memory_budget_threshold);
+  size_t goal_bytes =
+      CalculateHowManyBytesToEvictOnShard(limit, global_used_memory, shard_memory_budget_threshold);
 
   // TODO: Eviction due to rss usage is not working well as it causes eviction
   // of to many keys untill we finally see decrease in rss. We need to improve
@@ -356,12 +357,14 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     return true;
   }
 
-  const std::size_t memory_per_shard = max_memory_limit / shard_set->size();
+  size_t limit = max_memory_limit.load(memory_order_relaxed);
+
+  const std::size_t memory_per_shard = limit / shard_set->size();
   if (memory_per_shard < (1 << 16)) {  // Too small.
     return false;
   }
 
-  const std::size_t global_threshold = max_memory_limit * GetFlag(FLAGS_mem_defrag_threshold);
+  const std::size_t global_threshold = limit * GetFlag(FLAGS_mem_defrag_threshold);
   if (global_threshold > rss_mem_current.load(memory_order_relaxed)) {
     return false;
   }
@@ -386,7 +389,8 @@ bool EngineShard::DefragTaskState::CheckRequired() {
   return false;
 }
 
-bool EngineShard::DoDefrag(CollectPageStats collect_page_stats, const float threshold) {
+std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect_page_stats,
+                                                        const float threshold) {
   // --------------------------------------------------------------------------
   // NOTE: This task is running with exclusive access to the shard.
   // i.e. - Since we are using shared nothing access here, and all access
@@ -406,7 +410,7 @@ bool EngineShard::DoDefrag(CollectPageStats collect_page_stats, const float thre
   // If we found no valid db, we finished traversing and start from scratch next time
   if (!slice.IsDbValid(defrag_state_.dbid)) {
     defrag_state_.ResetScanState();
-    return false;
+    return std::nullopt;
   }
 
   DCHECK(slice.IsDbValid(defrag_state_.dbid));
@@ -447,7 +451,7 @@ bool EngineShard::DoDefrag(CollectPageStats collect_page_stats, const float thre
   stats_.defrag_task_invocation_total++;
   stats_.defrag_attempt_total += attempts;
 
-  return true;
+  return page_usage.CollectedStats();
 }
 
 // the memory defragmentation task is as follow:
@@ -778,11 +782,14 @@ void EngineShard::Heartbeat() {
   // Offset CoolMemoryUsage when consider background offloading.
   // TODO: Another approach could be is to align the approach  similarly to how we do with
   // FreeMemWithEvictionStep, i.e. if memory_budget is below the limit.
-  size_t tiering_offload_threshold =
-      tiered_storage_ ? tiered_storage_->CoolMemoryUsage() +
-                            size_t(max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) /
-                                shard_set->size()
-                      : std::numeric_limits<size_t>::max();
+  size_t tiering_offload_threshold = std::numeric_limits<size_t>::max();
+  if (tiered_storage_) {
+    size_t limit = max_memory_limit.load(memory_order_relaxed);
+    tiering_offload_threshold =
+        tiered_storage_->CoolMemoryUsage() +
+        size_t(limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size();
+  }
+
   size_t used_memory = UsedMemory();
   if (used_memory > tiering_offload_threshold) {
     VLOG(1) << "Running Offloading, memory=" << used_memory
@@ -868,7 +875,7 @@ void EngineShard::CacheStats() {
   // Reflect local memory change on global value
   size_t delta = used_mem - last_mem_params_.used_mem;  // negative value wraps safely
   size_t current = used_mem_current.fetch_add(delta, memory_order_relaxed) + delta;
-  ssize_t free_mem = max_memory_limit - current;
+  ssize_t free_mem = max_memory_limit.load(memory_order_relaxed) - current;
 
   // Estimate bytes per object, excluding table memory
   size_t entries = db_slice.entries_count();
@@ -890,8 +897,8 @@ bool EngineShard::ShouldThrottleForTiering() const {  // see header for formula 
   if (!tiered_storage_)
     return false;
 
-  size_t tiering_redline =
-      (max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size();
+  size_t limit = max_memory_limit.load(memory_order_relaxed);
+  size_t tiering_redline = (limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size();
 
   // UsedMemory includes CoolMemoryUsage, so we are offsetting it to remove the cool cache impact.
   return tiered_storage_->WriteDepthUsage() > 0.3 &&

@@ -115,6 +115,10 @@ jobs:
 
           cmake -B ${GITHUB_WORKSPACE}/build \
             -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
+            -DWITH_AWS=OFF \
+            -DWITH_GCP=OFF \
+            -DWITH_UNWIND=OFF \
+            -DWITH_GPERF=OFF \
             -GNinja \
             -DCMAKE_C_COMPILER="${{matrix.compiler.c}}" \
             -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
@@ -171,7 +175,8 @@ jobs:
           EOF
 
           gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
-          FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 timeout 20m ctest -V -L DFLY -E allocation_tracker_test
+          GLOG_alsologtostderr=1 FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 \
+          timeout 20m ctest -V -L DFLY -E allocation_tracker_test
 
           FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true timeout 5m ./allocation_tracker_test
 
