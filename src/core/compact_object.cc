@@ -236,6 +236,7 @@ pair<void*, bool> DefragStrMap2(StringMap* sm, PageUsage* page_usage) {
 }
 
 pair<void*, bool> DefragListPack(uint8_t* lp, PageUsage* page_usage) {
+  VLOG(1) << "DefragListPack";
   if (!page_usage->IsPageForObjectUnderUtilized(lp))
     return {lp, false};
 
@@ -248,6 +249,7 @@ pair<void*, bool> DefragListPack(uint8_t* lp, PageUsage* page_usage) {
 }
 
 pair<void*, bool> DefragIntSet(intset* is, PageUsage* page_usage) {
+  VLOG(1) << "DefragIntSet";
   if (!page_usage->IsPageForObjectUnderUtilized(is))
     return {is, false};
 
@@ -260,6 +262,7 @@ pair<void*, bool> DefragIntSet(intset* is, PageUsage* page_usage) {
 }
 
 pair<void*, bool> DefragSortedMap(detail::SortedMap* sm, PageUsage* page_usage) {
+  VLOG(1) << "DefragSortedMap";
   const bool reallocated = sm->DefragIfNeeded(page_usage);
   return {sm, reallocated};
 }
@@ -267,6 +270,7 @@ pair<void*, bool> DefragSortedMap(detail::SortedMap* sm, PageUsage* page_usage) 
 pair<void*, bool> DefragStrSet(StringSet* ss, PageUsage* page_usage) {
   bool realloced = false;
 
+  VLOG(1) << "DefragStrSet";
   for (auto it = ss->begin(); it != ss->end(); ++it)
     realloced |= it.ReallocIfNeeded(page_usage);
 
@@ -569,16 +573,21 @@ bool RobjWrapper::DefragIfNeeded(PageUsage* page_usage) {
     return realloced;
   };
 
+  VLOG(1) << "RobjWrapper::DefragIfNeeded type() = " << type();
   if (type() == OBJ_STRING) {
+    VLOG(1) << "defragment string";
     if (page_usage->IsPageForObjectUnderUtilized(inner_obj())) {
       ReallocateString(tl.local_mr);
       return true;
     }
   } else if (type() == OBJ_HASH) {
+    VLOG(1) << "defragment hash";
     return do_defrag(DefragHash);
   } else if (type() == OBJ_SET) {
+    VLOG(1) << "defragment set";
     return do_defrag(DefragSet);
   } else if (type() == OBJ_ZSET) {
+    VLOG(1) << "defragment zset";
     return do_defrag(DefragZSet);
   }
   return false;
@@ -1061,6 +1070,24 @@ string_view CompactObj::GetSlice(string* scratch) const {
 }
 
 bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
+  switch (taglen_) {
+    case ROBJ_TAG:
+      VLOG(1) << "DefragIfNeeded ROBJ_TAG, is nullptr: " << (u_.r_obj.inner_obj() == nullptr);
+      break;
+    case SMALL_TAG:
+      VLOG(1) << "DefragIfNeeded SMALL_TAG";
+      break;
+    case INT_TAG:
+      VLOG(1) << "DefragIfNeeded INT_TAG";
+      break;
+    case EXTERNAL_TAG:
+      VLOG(1) << "DefragIfNeeded EXTERNAL_TAG";
+      break;
+    default:
+      VLOG(1) << "DefragIfNeeded default case " << int(taglen_);
+      break;
+  }
+
   switch (taglen_) {
     case ROBJ_TAG:
       // currently only these objet types are supported for this operation

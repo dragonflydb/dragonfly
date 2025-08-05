@@ -425,6 +425,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       // for each value check whether we should move it because it
       // seats on underutilized page of memory, and if so, do it.
+      VLOG(1) << "Defragging an object";
       bool did = it->second.DefragIfNeeded(&page_usage);
       attempts++;
       if (did) {

@@ -144,12 +144,16 @@ PageUsage::PageUsage(CollectPageStats collect_stats, float threshold)
 }
 
 bool PageUsage::IsPageForObjectUnderUtilized(void* object) {
+  VLOG(1) << "IsPageForObjectUnderUtilized invoked, collect_stats: "
+          << (collect_stats_ == CollectPageStats::YES);
   mi_page_usage_stats_t stat;
   zmalloc_page_is_underutilized(object, threshold_, collect_stats_ == CollectPageStats::YES, &stat);
   return ConsumePageStats(stat);
 }
 
 bool PageUsage::IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) {
+  VLOG(1) << "IsPageForObjectUnderUtilized invoked with heap, collect_stats: "
+          << (collect_stats_ == CollectPageStats::YES);
   return ConsumePageStats(mi_heap_page_is_underutilized(heap, object, threshold_,
                                                         collect_stats_ == CollectPageStats::YES));
 }
@@ -157,6 +161,7 @@ bool PageUsage::IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object) {
 bool PageUsage::ConsumePageStats(mi_page_usage_stats_t stat) {
   const bool should_reallocate = stat.flags == MI_DFLY_PAGE_BELOW_THRESHOLD;
   if (collect_stats_ == CollectPageStats::YES) {
+    VLOG(1) << "Adding stat info";
     unique_pages_.AddStat(stat);
   }
   return should_reallocate;

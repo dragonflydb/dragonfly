@@ -174,6 +174,7 @@ unsigned SmallString::GetV(string_view dest[2]) const {
 }
 
 bool SmallString::DefragIfNeeded(PageUsage* page_usage) {
+  VLOG(1) << "DefragIfNeeded size: " << size_ << " kPrefLen: " << kPrefLen;
   DCHECK_GT(size_, kPrefLen);
   if (size_ <= kPrefLen) {
     return false;
