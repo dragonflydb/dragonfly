@@ -28,7 +28,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   // Register journal listener and start writer in fiber.
   virtual void Start(util::FiberSocketBase* dest);
 
-  void ConsumeJournalChange(const journal::JournalItem& item);
+  void ConsumeJournalChange(const journal::JournalChangeItem& item);
 
   // Must be called on context cancellation for unblocking
   // and manual cleanup.
@@ -47,7 +47,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   // Blocks the if the consumer if not keeping up.
   void ThrottleIfNeeded() final;
 
-  virtual bool ShouldWrite(const journal::JournalItem& item) const {
+  virtual bool ShouldWrite(const journal::JournalChangeItem& item) const {
     return cntx_->IsRunning();
   }
 
@@ -113,7 +113,7 @@ class RestoreStreamer : public JournalStreamer {
 
  private:
   void OnDbChange(DbIndex db_index, const ChangeReq& req);
-  bool ShouldWrite(const journal::JournalItem& item) const override;
+  bool ShouldWrite(const journal::JournalChangeItem& item) const override;
   bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(SlotId slot_id) const;
 
