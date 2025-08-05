@@ -577,32 +577,78 @@ struct HnswlibAdapter {
   hnswlib::HierarchicalNSW<float> world_;
 };
 
-HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource*)
-    : BaseVectorIndex{params.dim, params.sim}, adapter_{make_unique<HnswlibAdapter>(params)} {
+// Global registry implementation
+HnswAdapterRegistry& HnswAdapterRegistry::Instance() {
+  static HnswAdapterRegistry instance;
+  return instance;
+}
+
+std::shared_ptr<HnswlibAdapter> HnswAdapterRegistry::GetOrCreate(
+    const std::string& field_ident, const SchemaField::VectorParams& params) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto it = adapters_.find(field_ident);
+  if (it != adapters_.end()) {
+    if (auto adapter = it->second.lock()) {
+      return adapter;
+    }
+    // weak_ptr expired, remove it
+    adapters_.erase(it);
+  }
+
+  // Create new adapter
+  auto adapter = std::make_shared<HnswlibAdapter>(params);
+  adapters_[field_ident] = adapter;
+  return adapter;
+}
+
+void HnswAdapterRegistry::CleanupExpired(const std::string& field_ident) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto it = adapters_.find(field_ident);
+  if (it != adapters_.end() && it->second.expired()) {
+    adapters_.erase(it);
+  }
+}
+
+HnswVectorIndex::HnswVectorIndex(const string& field_ident, const SchemaField::VectorParams& params,
+                                 PMR_NS::memory_resource*)
+    : BaseVectorIndex{params.dim, params.sim},
+      field_ident_{field_ident},
+      adapter_{HnswAdapterRegistry::Instance().GetOrCreate(field_ident, params)} {
   DCHECK(params.use_hnsw);
   // TODO: Patch hnsw to use MR
 }
 
 HnswVectorIndex::~HnswVectorIndex() {
+  // Explicitly reset shared_ptr to potentially trigger cleanup
+  adapter_.reset();
+
+  // Clean up specific entry from global registry if expired
+  HnswAdapterRegistry::Instance().CleanupExpired(field_ident_);
 }
 
 void HnswVectorIndex::AddVector(DocId id, const VectorPtr& vector) {
   if (vector) {
+    std::lock_guard<std::mutex> lock(adapter_mutex_);
     adapter_->Add(vector.get(), id);
   }
 }
 
 std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t k,
                                                           std::optional<size_t> ef) const {
+  std::lock_guard<std::mutex> lock(adapter_mutex_);
   return adapter_->Knn(target, k, ef);
 }
 std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t k,
                                                           std::optional<size_t> ef,
                                                           const std::vector<DocId>& allowed) const {
+  std::lock_guard<std::mutex> lock(adapter_mutex_);
   return adapter_->Knn(target, k, ef, allowed);
 }
 
 void HnswVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
+  std::lock_guard<std::mutex> lock(adapter_mutex_);
   adapter_->Remove(id);
 }
 

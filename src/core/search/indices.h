@@ -10,6 +10,7 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -179,8 +180,25 @@ struct FlatVectorIndex : public BaseVectorIndex {
 
 struct HnswlibAdapter;
 
+// Global registry for shared HNSW adapters
+class HnswAdapterRegistry {
+ public:
+  static HnswAdapterRegistry& Instance();
+
+  std::shared_ptr<HnswlibAdapter> GetOrCreate(const std::string& field_ident,
+                                              const SchemaField::VectorParams& params);
+
+  // Clean up specific field_ident if expired
+  void CleanupExpired(const std::string& field_ident);
+
+ private:
+  std::mutex mutex_;
+  std::map<std::string, std::weak_ptr<HnswlibAdapter>> adapters_;
+};
+
 struct HnswVectorIndex : public BaseVectorIndex {
-  HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
+  HnswVectorIndex(const std::string& field_ident, const SchemaField::VectorParams& params,
+                  PMR_NS::memory_resource* mr);
   ~HnswVectorIndex();
 
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
@@ -198,7 +216,9 @@ struct HnswVectorIndex : public BaseVectorIndex {
   void AddVector(DocId id, const VectorPtr& vector) override;
 
  private:
-  std::unique_ptr<HnswlibAdapter> adapter_;
+  std::string field_ident_;  // Store field identifier for cleanup
+  std::shared_ptr<HnswlibAdapter> adapter_;
+  mutable std::mutex adapter_mutex_;  // For thread-safe access to adapter_
 };
 
 }  // namespace dfly::search
