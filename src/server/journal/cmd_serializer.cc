@@ -145,7 +145,7 @@ void CmdSerializer::SerializeExpireIfNeeded(string_view key, uint64_t expire_ms)
     return;
   }
 
-  SerializeCommand("PEXIRE", {key, absl::StrCat(expire_ms)});
+  SerializeCommand("PEXPIREAT", {key, absl::StrCat(expire_ms)});
 }
 
 size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
