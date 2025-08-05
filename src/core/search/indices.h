@@ -218,7 +218,6 @@ struct HnswVectorIndex : public BaseVectorIndex {
  private:
   std::string field_ident_;  // Store field identifier for cleanup
   std::shared_ptr<HnswlibAdapter> adapter_;
-  mutable std::mutex adapter_mutex_;  // For thread-safe access to adapter_
 };
 
 }  // namespace dfly::search

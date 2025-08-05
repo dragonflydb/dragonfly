@@ -10,7 +10,9 @@
 #include <absl/strings/str_join.h>
 
 #include <chrono>
+#include <thread>
 #include <type_traits>
+#include <unordered_map>
 #include <variant>
 
 #include "absl/container/flat_hash_set.h"
@@ -28,6 +30,10 @@
 using namespace std;
 
 namespace dfly::search {
+
+// Global cache for shared HNSW results across all threads/shards
+static std::mutex g_knn_cache_mutex;
+static std::unordered_map<std::string, std::vector<std::pair<float, DocId>>> g_knn_cache;
 
 namespace {
 
@@ -341,11 +347,32 @@ struct BasicSearch {
   }
 
   void SearchKnnHnsw(HnswVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {
-    if (indices_->GetAllDocs().size() == sub_results.ApproximateSize())  // TODO: remove approx size
+    // For shared HNSW indices, use pointer to AstKnnNode as cache key (unique per query)
+    auto cache_key = std::to_string(reinterpret_cast<uintptr_t>(&knn));
+
+    {
+      std::lock_guard<std::mutex> lock(g_knn_cache_mutex);
+      auto it = g_knn_cache.find(cache_key);
+
+      if (it != g_knn_cache.end()) {
+        // Use cached results from previous shard
+        knn_distances_ = it->second;
+        return;
+      }
+    }
+
+    // Compute results (outside the lock to avoid blocking other threads)
+    if (indices_->GetAllDocs().size() == sub_results.ApproximateSize())
       knn_distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime);
     else
       knn_distances_ =
           vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime, sub_results.Take());
+
+    // Store in cache
+    {
+      std::lock_guard<std::mutex> lock(g_knn_cache_mutex);
+      g_knn_cache[cache_key] = knn_distances_;
+    }
   }
 
   // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`
@@ -603,7 +630,10 @@ const Synonyms* FieldIndices::GetSynonyms() const {
 }
 
 SearchAlgorithm::SearchAlgorithm() = default;
-SearchAlgorithm::~SearchAlgorithm() = default;
+SearchAlgorithm::~SearchAlgorithm() {
+  // Clear KNN cache for this query when SearchAlgorithm is destroyed
+  ClearKnnCacheForQuery();
+}
 
 bool SearchAlgorithm::Init(string_view query, const QueryParams* params) {
   try {
@@ -639,6 +669,52 @@ optional<KnnScoreSortOption> SearchAlgorithm::GetKnnScoreSortOption() const {
     return KnnScoreSortOption{string_view{knn->score_alias}, knn->limit};
 
   return nullopt;
+}
+
+void SearchAlgorithm::ClearKnnCacheForQuery() const {
+  if (!query_)
+    return;
+
+  // Recursively traverse AST to find all KNN nodes and clear their cache
+  ClearKnnCacheRecursive(*query_);
+}
+
+void SearchAlgorithm::ClearKnnCacheRecursive(const AstNode& node) const {
+  visit(
+      [this](const auto& n) {
+        using T = std::decay_t<decltype(n)>;
+
+        // If this is a KNN node, clear its cache
+        if constexpr (std::is_same_v<T, AstKnnNode>) {
+          auto cache_key = std::to_string(reinterpret_cast<uintptr_t>(&n));
+          std::lock_guard<std::mutex> lock(g_knn_cache_mutex);
+          g_knn_cache.erase(cache_key);
+
+          // Recursively process KNN filter node if it exists
+          if (n.filter) {
+            ClearKnnCacheRecursive(*n.filter);
+          }
+        } else if constexpr (std::is_same_v<T, AstLogicalNode>) {
+          // Recursively process all logical node children
+          for (const auto& child : n.nodes) {
+            ClearKnnCacheRecursive(child);
+          }
+        } else if constexpr (std::is_same_v<T, AstFieldNode>) {
+          // Recursively process field node child
+          ClearKnnCacheRecursive(*n.node);
+        } else if constexpr (std::is_same_v<T, AstNegateNode>) {
+          // Recursively process negated node child
+          ClearKnnCacheRecursive(*n.node);
+        } else if constexpr (std::is_same_v<T, AstTagsNode>) {
+          // Recursively process all tag children
+          for (const auto& tag : n.tags) {
+            ClearKnnCacheRecursive(tag);
+          }
+        }
+        // Other node types (AstTermNode, AstPrefixNode, AstSuffixNode, AstInfixNode,
+        // AstRangeNode, AstStarNode, AstStarFieldNode, std::monostate) are leaf nodes
+      },
+      node.Variant());
 }
 
 void SearchAlgorithm::EnableProfiling() {

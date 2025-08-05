@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <mutex>
 
 #include "base/flags.h"
 
@@ -515,12 +516,14 @@ struct HnswlibAdapter {
   }
 
   void Add(const float* data, DocId id) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (world_.cur_element_count + 1 >= world_.max_elements_)
       world_.resizeIndex(world_.cur_element_count * 2);
     world_.addPoint(data, id);
   }
 
   void Remove(DocId id) {
+    std::lock_guard<std::mutex> lock(mutex_);
     try {
       world_.markDelete(id);
     } catch (const std::exception& e) {
@@ -528,6 +531,7 @@ struct HnswlibAdapter {
   }
 
   vector<pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
+    std::lock_guard<std::mutex> lock(mutex_);
     world_.setEf(ef.value_or(kDefaultEfRuntime));
     return QueueToVec(world_.searchKnn(target, k));
   }
@@ -544,6 +548,7 @@ struct HnswlibAdapter {
       const vector<DocId>* allowed;
     };
 
+    std::lock_guard<std::mutex> lock(mutex_);
     world_.setEf(ef.value_or(kDefaultEfRuntime));
     BinsearchFilter filter{&allowed};
     return QueueToVec(world_.searchKnn(target, k, &filter));
@@ -575,6 +580,7 @@ struct HnswlibAdapter {
 
   SpaceUnion space_;
   hnswlib::HierarchicalNSW<float> world_;
+  mutable std::mutex mutex_;  // Thread safety for shared adapter
 };
 
 // Global registry implementation
@@ -630,25 +636,21 @@ HnswVectorIndex::~HnswVectorIndex() {
 
 void HnswVectorIndex::AddVector(DocId id, const VectorPtr& vector) {
   if (vector) {
-    std::lock_guard<std::mutex> lock(adapter_mutex_);
     adapter_->Add(vector.get(), id);
   }
 }
 
 std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t k,
                                                           std::optional<size_t> ef) const {
-  std::lock_guard<std::mutex> lock(adapter_mutex_);
   return adapter_->Knn(target, k, ef);
 }
 std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t k,
                                                           std::optional<size_t> ef,
                                                           const std::vector<DocId>& allowed) const {
-  std::lock_guard<std::mutex> lock(adapter_mutex_);
   return adapter_->Knn(target, k, ef, allowed);
 }
 
 void HnswVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
-  std::lock_guard<std::mutex> lock(adapter_mutex_);
   adapter_->Remove(id);
 }
 

@@ -173,6 +173,12 @@ class SearchAlgorithm {
   void EnableProfiling();
 
  private:
+  // Clear KNN cache for this specific query
+  void ClearKnnCacheForQuery() const;
+
+  // Recursively clear KNN cache for all nodes in AST
+  void ClearKnnCacheRecursive(const AstNode& node) const;
+
   bool profiling_enabled_ = false;
   std::unique_ptr<AstNode> query_;
 };
