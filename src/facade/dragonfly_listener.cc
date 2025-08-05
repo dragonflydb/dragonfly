@@ -141,6 +141,11 @@ Listener::Listener(Protocol protocol, ServiceInterface* si, Role role)
 
   // Always initialise OpenSSL so we can enable TLS at runtime.
   OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, nullptr);
+  // Print this only for main interface
+  if (IsMainInterface()) {
+    std::string_view ssl_version = SSLeay_version(SSLEAY_VERSION);
+    LOG(INFO) << "SSL version: " << ssl_version;
+  }
   if (!ReconfigureTLS()) {
     exit(-1);
   }
