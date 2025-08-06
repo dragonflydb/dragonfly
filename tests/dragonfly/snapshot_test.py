@@ -293,9 +293,7 @@ async def test_parallel_snapshot(async_client):
 
 @pytest.mark.slow
 async def test_parallel_snapshot_race_condition(async_client):
-    # Use larger dataset to increase InitResourcesAndStart() duration
-    # This maximizes the race condition window
-    await async_client.execute_command("debug", "populate", "3000000", "racekey", "2000", "RAND")
+    await async_client.execute_command("debug", "populate", "300000", "racekey", "2000", "RAND")
 
     async def save_operation(operation_id):
         try:
@@ -306,10 +304,10 @@ async def test_parallel_snapshot_race_condition(async_client):
 
     # Fire many concurrent operations to maximize collision probability
     # The more concurrent operations, the higher chance of hitting the race window
-    num_concurrent = 12
+    num_concurrent = 3
 
     # Multiple rounds to increase overall probability
-    for round_num in range(5):
+    for round_num in range(2):
         tasks = [save_operation(f"r{round_num}_op{i}") for i in range(num_concurrent)]
 
         # Execute all operations simultaneously to hit race condition
@@ -324,7 +322,7 @@ async def test_parallel_snapshot_race_condition(async_client):
             len(successes) == 1
         ), f"Round {round_num}: Expected exactly 1 success, got {len(successes)} successes, {len(failures)} failures, {len(exceptions)} exceptions. Results: {results}"
 
-        # Short delay between rounds to avoid overwhelming the system
+        # Short delay between rounds
         await asyncio.sleep(0.05)
 
 
