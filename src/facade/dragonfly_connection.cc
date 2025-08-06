@@ -2142,6 +2142,10 @@ bool Connection::IsReplySizeOverLimit() const {
     LOG_EVERY_T(INFO, 10) << "Commands squashing current reply size is overlimit: " << current
                           << "/" << reply_size_limit
                           << ". Falling back to single command dispatch (instead of squashing)";
+    // Used by testing. Should not be used in production, therefore debug log level 5.
+    DVLOG(5) << "Commands squashing current reply size is overlimit: " << current << "/"
+             << reply_size_limit
+             << ". Falling back to single command dispatch (instead of squashing)";
   }
   return over_limit;
 }
