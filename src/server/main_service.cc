@@ -119,8 +119,10 @@ ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
 ABSL_FLAG(uint32_t, max_squashed_cmd_num, 100,
           "Max number of commands squashed in a single shard during squash optimizaiton");
 
-ABSL_FLAG(uint32_t, max_busy_squash_usec, 200,
+ABSL_FLAG(uint32_t, max_busy_squash_usec, 1000,
           "Maximum time in microseconds to execute squashed commands before yielding.");
+ABSL_FLAG(uint32_t, shard_thread_busy_polling_usec, 0,
+          "If non-zero, overrides the busy polling parameter for shard threads.");
 
 ABSL_FLAG(string, huffman_table, "",
           "a comma separated map: domain1:code1,domain2:code2,... where "
@@ -725,6 +727,17 @@ void SetMaxBusySquashUsec(uint32_t val) {
       [=](unsigned, auto*) { MultiCommandSquasher::SetMaxBusySquashUsec(val); });
 }
 
+void SetShardThreadBusyPollingUsec(uint32_t val) {
+  if (val == 0)
+    return;
+
+  shard_set->pool()->AwaitBrief([=](unsigned, auto* pb) {
+    if (EngineShard::tlocal()) {
+      pb->SetBusyPollUsec(val);
+    }
+  });
+}
+
 void SetHuffmanTable(const std::string& huffman_table) {
   if (huffman_table.empty())
     return;
@@ -865,6 +878,8 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
                                            [](uint32_t val) { SetMaxSquashedCmdNum(val); });
   config_registry.RegisterSetter<uint32_t>("max_busy_squash_usec",
                                            [](uint32_t val) { SetMaxBusySquashUsec(val); });
+  config_registry.RegisterSetter<uint32_t>(
+      "shard_thread_busy_polling_usec", [](uint32_t val) { SetShardThreadBusyPollingUsec(val); });
 
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("replication_timeout");
@@ -939,7 +954,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   SetMaxSquashedCmdNum(absl::GetFlag(FLAGS_max_squashed_cmd_num));
   SetHuffmanTable(absl::GetFlag(FLAGS_huffman_table));
   SetMaxBusySquashUsec(absl::GetFlag(FLAGS_max_busy_squash_usec));
-
+  SetShardThreadBusyPollingUsec(GetFlag(FLAGS_shard_thread_busy_polling_usec));
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.
   server_family_.Init(acceptor, std::move(listeners));
