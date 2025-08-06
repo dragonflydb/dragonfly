@@ -82,8 +82,12 @@ struct ParsedEntry : public EntryBase {
 
 struct JournalItem {
   LSN lsn;
-  Op opcode;
   std::string data;
+};
+
+struct JournalChangeItem {
+  JournalItem journal_item;
+
   std::string_view cmd;
   std::optional<SlotId> slot;
 };
@@ -92,7 +96,7 @@ struct JournalConsumerInterface {
   virtual ~JournalConsumerInterface() = default;
 
   // Receives a journal change for serializing
-  virtual void ConsumeJournalChange(const JournalItem& item) = 0;
+  virtual void ConsumeJournalChange(const JournalChangeItem& item) = 0;
   // Waits for writing the serialized data
   virtual void ThrottleIfNeeded() = 0;
 };
