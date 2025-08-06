@@ -826,13 +826,14 @@ void GeoFamily::GeoRadius(CmdArgList args, const CommandContext& cmd_cntx) {
         // If MapNext failed, it means an unknown option was provided or
         // an option requiring an argument was missing its argument.
         // The parser has already recorded the error. We retrieve it and send it.
-        DCHECK(parser.Error().has_value());
-        return builder->SendError(parser.Error()->MakeReply());
+        DCHECK(parser.HasError());
+        break;
     }
   }
 
   if (!parser.Finalize()) {
     auto error = parser.Error();
+
     switch (error->type) {
       case Errors::INVALID_LONG_LAT: {
         string err =
