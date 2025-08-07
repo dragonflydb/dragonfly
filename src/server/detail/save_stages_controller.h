@@ -85,7 +85,8 @@ struct SaveStagesController : public SaveStagesInputs {
   // in a mutually exlusive context to avoid data races.
   // Also call this function before any call to `WaitAllSnapshots`
   // Returns empty optional on success and SaveInfo on failure
-  std::optional<SaveInfo> InitResourcesAndStart();
+  std::optional<SaveInfo> PreInit();
+  void Start();
 
   ~SaveStagesController();
 

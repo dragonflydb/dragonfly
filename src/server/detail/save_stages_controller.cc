@@ -171,9 +171,14 @@ SaveStagesController::SaveStagesController(SaveStagesInputs&& inputs)
 }
 
 SaveStagesController::~SaveStagesController() {
+  if (!snapshots_.empty() && snapshots_[0].first) {
+    LOG(INFO) << "Forcefully closing save controller";
+    WaitAllSnapshots();
+    Finalize();
+  }
 }
 
-std::optional<SaveInfo> SaveStagesController::InitResourcesAndStart() {
+std::optional<SaveInfo> SaveStagesController::PreInit() {
   if (auto err = BuildFullPath(); err) {
     shared_err_ = err;
     return GetSaveInfo();
@@ -181,12 +186,14 @@ std::optional<SaveInfo> SaveStagesController::InitResourcesAndStart() {
 
   InitResources();
 
+  return {};
+}
+
+void SaveStagesController::Start() {
   if (use_dfs_format_)
     SaveDfs();
   else
     SaveRdb();
-
-  return {};
 }
 
 void SaveStagesController::WaitAllSnapshots() {
