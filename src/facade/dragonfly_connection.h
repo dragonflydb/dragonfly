@@ -176,8 +176,8 @@ class Connection : public util::Connection {
         handle;
 
     // time when the message was dispatched to the dispatch queue as reported by
-    // ProactorBase::GetMonotonicTimeNs()
-    uint64_t dispatch_ts = 0;
+    // CycleClock::Now()
+    uint64_t dispatch_cycle = 0;
   };
 
   static_assert(sizeof(MessageHandle) <= 80,
@@ -322,7 +322,6 @@ class Connection : public util::Connection {
   static void SetMaxBusyReadUsecThreadLocal(unsigned usec);
   static void SetAlwaysFlushPipelineThreadLocal(bool flush);
   static void SetPipelineSquashLimitThreadLocal(unsigned limit);
-  static void SetPipelineLowBoundStats(unsigned limit);
 
   unsigned idle_time() const {
     return time(nullptr) - last_interaction_;
