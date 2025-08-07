@@ -104,11 +104,17 @@ struct ConnectionStats {
   uint64_t command_cnt_other = 0;
   uint64_t pipelined_cmd_cnt = 0;
   uint64_t pipelined_cmd_latency = 0;  // in microseconds
+
+  // in microseconds, time spent waiting for the pipelined commands to start executing
+  uint64_t pipelined_wait_latency = 0;
   uint64_t conn_received_cnt = 0;
 
   uint32_t num_conns_main = 0;
   uint32_t num_conns_other = 0;
   uint32_t num_blocked_clients = 0;
+
+  // number of times the connection yielded due to max_busy_read_usec limit
+  uint32_t num_read_yields = 0;
   uint64_t num_migrations = 0;
   uint64_t num_recv_provided_calls = 0;
 
@@ -122,7 +128,10 @@ struct ConnectionStats {
   uint64_t pipeline_throttle_count = 0;
   uint64_t pipeline_dispatch_calls = 0;
   uint64_t pipeline_dispatch_commands = 0;
-  uint64_t pipeline_stats_ignored = 0;
+  uint64_t pipeline_dispatch_flush_usec = 0;
+
+  uint64_t skip_pipeline_flushing = 0;  // number of times we skipped flushing the pipeline
+
   ConnectionStats& operator+=(const ConnectionStats& o);
 };
 

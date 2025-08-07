@@ -405,6 +405,7 @@ void SortIfNeeded(GeoArray* ga, Sorting sorting, uint64_t count) {
   };
 
   if (count > 0) {
+    count = std::min(count, ga->size());
     std::partial_sort(ga->begin(), ga->begin() + count, ga->end(), comparator);
     ga->resize(count);
   } else {
@@ -824,16 +825,14 @@ void GeoFamily::GeoRadius(CmdArgList args, const CommandContext& cmd_cntx) {
       default:
         // If MapNext failed, it means an unknown option was provided or
         // an option requiring an argument was missing its argument.
-        // The parser has already recorded the error. We retrieve it and send it.
-        DCHECK(parser.Error().has_value());
-        LOG_EVERY_T(INFO, 1) << "GeoRadius parser error: " << parser.Error()->MakeReply().ToSv();
-        return builder->SendError(parser.Error()->MakeReply());
+        // The parser has already recorded the error.
+        DCHECK(parser.HasError());
+        break;
     }
   }
 
   if (!parser.Finalize()) {
     auto error = parser.Error();
-    LOG_EVERY_T(INFO, 1) << "GeoRadius parser error: " << error->MakeReply().ToSv();
 
     switch (error->type) {
       case Errors::INVALID_LONG_LAT: {
