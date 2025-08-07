@@ -128,6 +128,7 @@ struct ConnectionStats {
   uint64_t pipeline_throttle_count = 0;
   uint64_t pipeline_dispatch_calls = 0;
   uint64_t pipeline_dispatch_commands = 0;
+  uint64_t pipeline_dispatch_flush_usec = 0;
 
   uint64_t skip_pipeline_flushing = 0;  // number of times we skipped flushing the pipeline
 
