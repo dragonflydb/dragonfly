@@ -1037,8 +1037,8 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
         exp_type) {
       auto int_arg = parser.Next<int64_t>();
 
-      if (auto err = parser.Error(); err) {
-        return builder->SendError(err->MakeReply());
+      if (auto err = parser.TakeError(); err) {
+        return builder->SendError(err.MakeReply());
       }
 
       // We can set expiry only once.
@@ -1084,8 +1084,8 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
     }
   }
 
-  if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    return builder->SendError(err.MakeReply());
   }
 
   auto has_mask = [&](uint16_t m) { return (sparams.flags & m) == m; };
@@ -1221,8 +1221,8 @@ void StringFamily::GetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
                                           "PXAT", ExpT::PXAT);
         exp_type) {
       auto int_arg = parser.Next<int64_t>();
-      if (auto err = parser.Error(); err) {
-        return builder->SendError(err->MakeReply());
+      if (auto err = parser.TakeError(); err) {
+        return builder->SendError(err.MakeReply());
       }
 
       if (defined) {
@@ -1513,8 +1513,8 @@ void StringFamily::GetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
   CmdArgParser parser(args);
   auto [key, start, end] = parser.Next<string_view, int32_t, int32_t>();
 
-  if (auto err = parser.Error(); err) {
-    return cmnd_cntx.rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    return cmnd_cntx.rb->SendError(err.MakeReply());
   }
 
   auto cb = [&, &key = key, &start = start, &end = end](Transaction* t, EngineShard* shard) {
@@ -1529,8 +1529,8 @@ void StringFamily::SetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
   auto [key, start, value] = parser.Next<string_view, int32_t, string_view>();
   auto* builder = cmnd_cntx.rb;
 
-  if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    return builder->SendError(err.MakeReply());
   }
 
   if (start < 0) {
@@ -1675,7 +1675,7 @@ void StringFamily::GAT(CmdArgList args, const CommandContext& cmnd_cntx) {
   CmdArgParser parser{args};
   const int64_t expire_ts = parser.Next<uint64_t>();
   if (parser.HasError()) {
-    return builder->SendError(parser.Error()->MakeReply());
+    return builder->SendError(parser.TakeError().MakeReply());
   }
 
   BlockingCounter tiering_bc{0};

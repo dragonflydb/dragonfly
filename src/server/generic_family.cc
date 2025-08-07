@@ -1767,7 +1767,7 @@ void GenericFamily::Copy(CmdArgList args, const CommandContext& cmd_cntx) {
   bool replace = parser.Check("REPLACE");
 
   if (!parser.Finalize()) {
-    return cmd_cntx.rb->SendError(parser.Error()->MakeReply());
+    return cmd_cntx.rb->SendError(parser.TakeError().MakeReply());
   }
 
   if (k1 == k2) {
