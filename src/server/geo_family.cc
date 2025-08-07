@@ -405,6 +405,7 @@ void SortIfNeeded(GeoArray* ga, Sorting sorting, uint64_t count) {
   };
 
   if (count > 0) {
+    count = std::min(count, ga->size());
     std::partial_sort(ga->begin(), ga->begin() + count, ga->end(), comparator);
     ga->resize(count);
   } else {

@@ -293,4 +293,17 @@ TEST_F(GeoFamilyTest, GeoRadius) {
   EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
+TEST_F(GeoFamilyTest, GeoRadiusByMemberUb) {
+  Run({"GEOADD", "geo", "-118.2437", "34.0522", "972"});
+  Run({"GEOADD", "geo", "-73.935242", "40.730610", "973"});
+  Run({"GEOADD", "geo", "-122.4194", "37.7749", "971"});
+
+  auto resp = Run({"GEORADIUSBYMEMBER", "geo", "971", "200", "mi", "WITHCOORD", "WITHDIST", "COUNT",
+                   "40", "ASC"});
+
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre(
+                  "971", "0", RespArray(ElementsAre("-122.41940170526505", "37.77490001056578")))));
+}
+
 }  // namespace dfly
