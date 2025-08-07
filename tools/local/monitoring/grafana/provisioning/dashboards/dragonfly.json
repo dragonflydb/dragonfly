@@ -1371,12 +1371,12 @@
           "editorMode": "code",
           "exemplar": true,
           "expr":
-              "irate(dragonfly_cmd_squash_hop_reply_seconds{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])/irate(dragonfly_cmd_squash_hop_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])",
+              "irate(dragonfly_pipeline_queue_wait_duration_seconds{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])/irate(dragonfly_pipeline_commands_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])",
           "format": "time_series",
           "hide": false,
           "interval": "",
           "intervalFactor": 2,
-          "legendFormat": "reply",
+          "legendFormat": "wait_queue",
           "range": true,
           "refId": "C",
           "step": 240
@@ -1871,8 +1871,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -1987,8 +1986,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -2028,7 +2026,7 @@
           },
           "editorMode": "code",
           "expr":
-              "irate(dragonfly_pipeline_dispatch_calls_total\n{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])/(irate(dragonfly_pipeline_dispatch_calls_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval]) + irate(dragonfly_pipeline_dispatch_stats_ignored_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval]))",
+              "1 - irate(dragonfly_cmd_squash_hop_total\n{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])/(irate(dragonfly_cmd_squash_hop_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval]) + irate(dragonfly_cmd_squash_stats_ignored_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval]))",
           "hide": false,
           "instant": false,
           "legendFormat": "__auto",
@@ -2085,8 +2083,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -2241,6 +2238,6 @@
   "timezone": "browser",
   "title": "Dragonfly Dashboard",
   "uid": "xDLNRKUWz",
-  "version": 14,
+  "version": 15,
   "weekStart": ""
 }

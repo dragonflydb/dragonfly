@@ -118,10 +118,11 @@ class ServerState {  // public struct - to allow initialization.
     uint64_t eval_shardlocal_coordination_cnt = 0;
     uint64_t eval_squashed_flushes = 0;
 
-    uint64_t multi_squash_executions = 0;
+    uint64_t multi_squash_hops = 0;
     uint64_t multi_squash_exec_hop_usec = 0;
     uint64_t multi_squash_exec_reply_usec = 0;
     uint64_t squashed_commands = 0;
+    uint64_t squash_stats_ignored = 0;
     uint64_t blocked_on_interpreter = 0;
 
     uint64_t rdb_save_usec = 0;

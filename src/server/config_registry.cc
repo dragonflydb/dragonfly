@@ -87,6 +87,15 @@ void ConfigRegistry::RegisterInternal(string_view config_name, bool is_mutable, 
   CHECK(inserted) << "Duplicate config name: " << name;
 }
 
+void ConfigRegistry::ValidateCustomSetter(std::string_view name, WriteCb setter) const {
+  absl::CommandLineFlag* flag = absl::FindCommandLineFlag(name);
+  CHECK(flag) << "Unknown config name: " << name;
+  if (setter) {
+    bool cb_match = setter(*flag);
+    CHECK(cb_match) << "Possible type mismatch with setter for flag " << name;
+  }
+}
+
 ConfigRegistry config_registry;
 
 }  // namespace dfly
