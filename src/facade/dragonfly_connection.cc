@@ -95,7 +95,7 @@ ABSL_FLAG(bool, migrate_connections, true,
           "they operate. Currently this is only supported for Lua script invocations, and can "
           "happen at most once per connection.");
 
-ABSL_FLAG(uint32_t, max_busy_read_usec, 100,
+ABSL_FLAG(uint32_t, max_busy_read_usec, 200,
           "Maximum time we read and parse from "
           "a socket without yielding. In microseconds.");
 
@@ -1549,13 +1549,14 @@ void Connection::SquashPipeline() {
   vector<ArgSlice> squash_cmds;
   squash_cmds.reserve(dispatch_q_.size());
 
-  uint64_t now = CycleClock::Now();
+  uint64_t start = CycleClock::Now();
+
   for (const auto& msg : dispatch_q_) {
     CHECK(holds_alternative<PipelineMessagePtr>(msg.handle))
         << msg.handle.index() << " on " << DebugInfo();
 
     // measure the time spent in the pipeline  queue waiting for dispatch
-    stats_->pipelined_wait_latency += CycleClock::ToUsec(now - msg.dispatch_cycle);
+    stats_->pipelined_wait_latency += CycleClock::ToUsec(start - msg.dispatch_cycle);
     auto& pmsg = get<PipelineMessagePtr>(msg.handle);
     squash_cmds.emplace_back(absl::MakeSpan(pmsg->args));
     if (squash_cmds.size() >= pipeline_squash_limit_cached) {
@@ -1564,15 +1565,14 @@ void Connection::SquashPipeline() {
     }
   }
 
+  // async_dispatch is a guard to prevent concurrent writes into reply_builder_, hence
+  // it must guard the Flush() as well.
   cc_->async_dispatch = true;
-  stats_->pipeline_dispatch_calls++;
-  stats_->pipeline_dispatch_commands += squash_cmds.size();
 
   size_t dispatched =
       service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), reply_builder_.get(), cc_.get());
 
-  // async_dispatch is a guard to prevent concurrent writes into reply_builder_, hence
-  // it must guard the Flush() as well.
+  uint64_t before_flush = CycleClock::Now();
   //
   // TODO: to investigate if always flushing will improve P99 latency because otherwise we
   // wait for the next batch to finish before fully flushing the current response.
@@ -1585,6 +1585,10 @@ void Connection::SquashPipeline() {
   }
 
   cc_->async_dispatch = false;
+
+  stats_->pipeline_dispatch_calls++;
+  stats_->pipeline_dispatch_commands += squash_cmds.size();
+  stats_->pipeline_dispatch_flush_usec += CycleClock::ToUsec(CycleClock::Now() - before_flush);
 
   auto it = dispatch_q_.begin();
   while (it->IsControl())  // Skip all newly received intrusive messages
@@ -1678,7 +1682,7 @@ void Connection::AsyncFiber() {
     // As an optimization, we only yield if the fiber was not suspended since the last dispatch.
     uint64_t cur_epoch = fb2::FiberSwitchEpoch();
     if (dispatch_q_.size() == 1 && cur_epoch == prev_epoch) {
-      ThisFiber::Yield();
+      ThisFiber::SleepFor(20us);
       DVLOG(2) << "After yielding to producer, dispatch_q_.size()=" << dispatch_q_.size();
       if (cc_->conn_closing)
         break;
