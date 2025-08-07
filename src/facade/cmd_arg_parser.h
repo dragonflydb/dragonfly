@@ -34,6 +34,7 @@ template <auto min, auto max> constexpr bool is_fint<FInt<min, max>> = true;
 // Utility class for easily parsing command options from argument lists.
 struct CmdArgParser {
   enum ErrorType {
+    NO_ERROR,
     OUT_OF_BOUNDS,
     SHORT_OPT_TAIL,
     INVALID_INT,
@@ -45,9 +46,12 @@ struct CmdArgParser {
   };
 
   struct ErrorInfo {
-    int type;
-    size_t index;
+    int type = NO_ERROR;
+    size_t index = 0;
 
+    operator bool() const {
+      return type != ErrorType::NO_ERROR;
+    }
     ErrorReply MakeReply() const;
   };
 
@@ -165,13 +169,10 @@ struct CmdArgParser {
   }
 
   bool HasError() {
-    return error_.has_value();
+    return error_.type != ErrorType::NO_ERROR;
   }
 
-  // Get optional error if occured
-  std::optional<ErrorInfo> Error() {
-    return std::exchange(error_, {});
-  }
+  ErrorInfo TakeError();
 
   bool HasAtLeast(size_t i) const {
     return cur_i_ + i <= args_.size() && !error_;
@@ -276,7 +277,7 @@ struct CmdArgParser {
   size_t cur_i_ = 0;
   CmdArgList args_;
 
-  std::optional<ErrorInfo> error_;
+  ErrorInfo error_;
 };
 
 }  // namespace facade

@@ -696,22 +696,22 @@ optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, SinkReplyBui
   } else {
     replicaof_args.host = parser.Next<string>();
     replicaof_args.port = parser.Next<uint16_t>();
-    if (auto err = parser.Error(); err || replicaof_args.port < 1) {
+    if (auto err = parser.TakeError(); err || replicaof_args.port < 1) {
       builder->SendError("port is out of range");
       return nullopt;
     }
     if (parser.HasNext()) {
       auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
       replicaof_args.slot_range = cluster::SlotRange{slot_start, slot_end};
-      if (auto err = parser.Error(); err || !replicaof_args.slot_range->IsValid()) {
+      if (auto err = parser.TakeError(); err || !replicaof_args.slot_range->IsValid()) {
         builder->SendError("Invalid slot range");
         return nullopt;
       }
     }
   }
 
-  if (auto err = parser.Error(); err) {
-    builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    builder->SendError(err.MakeReply());
     return nullopt;
   }
   return replicaof_args;
@@ -3505,8 +3505,8 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   if (parser.HasNext())
     return builder->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
 
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   // We allow zero timeouts for tests.
   if (timeout_sec < 0) {
@@ -3806,8 +3806,8 @@ void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,
   if (parser.HasNext()) {
     pause_state = parser.MapNext("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
   }
-  if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    return builder->SendError(err.MakeReply());
   }
 
   const auto timeout_ms = timeout * 1ms;

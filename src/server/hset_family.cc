@@ -804,7 +804,7 @@ void HSetEx(CmdArgList args, const CommandContext& cmd_cntx) {
   op_sp.ttl = parser.Next<uint32_t>();
 
   if (parser.HasError()) {
-    return cmd_cntx.rb->SendError(parser.Error()->MakeReply());
+    return cmd_cntx.rb->SendError(parser.TakeError().MakeReply());
   }
 
   constexpr uint32_t kMaxTtl = (1UL << 26);

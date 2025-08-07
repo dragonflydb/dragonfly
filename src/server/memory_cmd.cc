@@ -398,7 +398,7 @@ void MemoryCmd::Track(CmdArgList args) {
     std::tie(tracking_info.lower_bound, tracking_info.upper_bound, tracking_info.sample_odds) =
         parser.Next<size_t, size_t, double>();
     if (parser.HasError()) {
-      return builder_->SendError(parser.Error()->MakeReply());
+      return builder_->SendError(parser.TakeError().MakeReply());
     }
 
     atomic_bool error{false};
@@ -418,7 +418,7 @@ void MemoryCmd::Track(CmdArgList args) {
   if (parser.Check("REMOVE")) {
     auto [lower_bound, upper_bound] = parser.Next<size_t, size_t>();
     if (parser.HasError()) {
-      return builder_->SendError(parser.Error()->MakeReply());
+      return builder_->SendError(parser.TakeError().MakeReply());
     }
 
     atomic_bool error{false};
@@ -454,7 +454,7 @@ void MemoryCmd::Track(CmdArgList args) {
   if (parser.Check("ADDRESS")) {
     string_view ptr_str = parser.Next();
     if (parser.HasError()) {
-      return builder_->SendError(parser.Error()->MakeReply());
+      return builder_->SendError(parser.TakeError().MakeReply());
     }
 
     size_t ptr = 0;

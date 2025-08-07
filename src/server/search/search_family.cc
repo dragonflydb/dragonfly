@@ -57,8 +57,8 @@ nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string_view message) 
 template <typename T>
 bool SendErrorIfOccurred(const ParseResult<T>& result, CmdArgParser* parser,
                          SinkReplyBuilder* builder) {
-  if (auto err = parser->Error(); err || !result) {
-    builder->SendError(!result ? result.error() : err->MakeReply());
+  if (auto err = parser->TakeError(); err || !result) {
+    builder->SendError(!result ? result.error() : err.MakeReply());
     return true;
   }
 
@@ -178,7 +178,7 @@ ParsedSchemaField ParseVector(CmdArgParser* parser) {
   auto vector_params = ParseVectorParams(parser);
 
   if (parser->HasError()) {
-    auto err = *parser->Error();
+    auto err = parser->TakeError();
     VLOG(1) << "Could not parse vector param " << err.index;
     return CreateSyntaxError("Parse error of vector parameters"sv);
   }
@@ -685,8 +685,8 @@ void SearchFamily::FtAlter(CmdArgList args, const CommandContext& cmd_cntx) {
   parser.ExpectTag("SCHEMA");
   parser.ExpectTag("ADD");
   auto* builder = cmd_cntx.rb;
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   // First, extract existing index info
   shared_ptr<DocIndex> index_info;
@@ -1205,7 +1205,7 @@ void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) 
   }
 
   if (!parser.Finalize()) {
-    return cmd_cntx.rb->SendError(parser.Error()->MakeReply());
+    return cmd_cntx.rb->SendError(parser.TakeError().MakeReply());
   }
 
   std::atomic_bool index_not_found{true};
