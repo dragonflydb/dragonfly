@@ -94,8 +94,10 @@ size_t CmdSerializer::SerializeEntry(string_view key, const PrimeValue& pk, cons
       use_restore_serialization = false;
       break;
     case OBJ_STRING:
-      commands = SerializeString(key, pv);
+      commands = SerializeString(key, pv, expire_ms);
       use_restore_serialization = false;
+      // reset expire_ms to skip it in SerializeExpireIfNeeded
+      expire_ms = 0;
       break;
     case OBJ_STREAM:
     case OBJ_JSON:
@@ -206,7 +208,7 @@ size_t CmdSerializer::SerializeList(string_view key, const PrimeValue& pv) {
   return commands;
 }
 
-size_t CmdSerializer::SerializeString(string_view key, const PrimeValue& pv) {
+size_t CmdSerializer::SerializeString(string_view key, const PrimeValue& pv, uint64_t expire_ms) {
   string str;
   if (pv.IsExternal()) {
     if (pv.IsCool()) {
@@ -216,8 +218,16 @@ size_t CmdSerializer::SerializeString(string_view key, const PrimeValue& pv) {
   } else {
     pv.GetString(&str);
   }
-  std::string_view args[] = {key, string_view(str)};
-  SerializeCommand("SET", args);
+
+  if (expire_ms) {
+    std::string expire_ms_str = to_string(expire_ms);
+    std::string_view args[] = {key, string_view(str), "PXAT", string_view(expire_ms_str)};
+    SerializeCommand("SET", args);
+  } else {
+    std::string_view args[] = {key, string_view(str)};
+    SerializeCommand("SET", args);
+  }
+
   return 1;
 }
 
