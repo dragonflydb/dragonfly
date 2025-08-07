@@ -859,12 +859,13 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
         [val](unsigned tid, auto*) { facade::Connection::SetMaxQueueLenThreadLocal(tid, val); });
   });
 
-  config_registry.RegisterSetter<size_t>("pipeline_buffer_limit", [](size_t val) {
-    shard_set->pool()->AwaitBrief(
-        [val](unsigned tid, auto*) { facade::Connection::SetPipelineBufferLimit(tid, val); });
-  });
+  config_registry.RegisterSetter<facade::MemoryBytesFlag>(
+      "pipeline_buffer_limit", [](facade::MemoryBytesFlag val) {
+        shard_set->pool()->AwaitBrief(
+            [val](unsigned tid, auto*) { facade::Connection::SetPipelineBufferLimit(tid, val); });
+      });
 
-  config_registry.RegisterSetter<uint64_t>("max_busy_read_usec", [](uint64_t usec) {
+  config_registry.RegisterSetter<uint32_t>("max_busy_read_usec", [](uint32_t usec) {
     shard_set->pool()->AwaitBrief(
         [=](unsigned, auto*) { facade::Connection::SetMaxBusyReadUsecThreadLocal(usec); });
   });
@@ -879,9 +880,9 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
         [=](unsigned, auto*) { facade::Connection::SetPipelineSquashLimitThreadLocal(val); });
   });
 
-  config_registry.RegisterSetter<uint32_t>("pipeline_low_bound_stats", [](uint32_t val) {
+  config_registry.RegisterSetter<uint32_t>("squash_stats_latency_lower_limit", [](uint32_t val) {
     shard_set->pool()->AwaitBrief(
-        [=](unsigned, auto*) { facade::Connection::SetPipelineLowBoundStats(val); });
+        [=](unsigned, auto*) { MultiCommandSquasher::SetSquashStatsLatencyLowerLimit(val); });
   });
 
   config_registry.RegisterSetter<uint32_t>("max_squashed_cmd_num",
@@ -1611,13 +1612,11 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
     opts.verify_commands = true;
     opts.max_squash_size = ss->max_squash_cmd_num;
 
-    size_t squashed_num = MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
-                                                        static_cast<RedisReplyBuilder*>(builder),
-                                                        dfly_cntx, this, opts);
+    MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
+                                  static_cast<RedisReplyBuilder*>(builder), dfly_cntx, this, opts);
     dfly_cntx->transaction = nullptr;
 
     dispatched += stored_cmds.size();
-    ss->stats.squashed_commands += squashed_num;
     stored_cmds.clear();
   };
 

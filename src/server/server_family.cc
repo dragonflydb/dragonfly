@@ -1556,19 +1556,24 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("pipeline_dispatch_calls_total", "", conn_stats.pipeline_dispatch_calls,
                             MetricType::COUNTER, &resp->body());
-  AppendMetricWithoutLabels("pipeline_dispatch_stats_ignored_total", "",
-                            conn_stats.pipeline_stats_ignored, MetricType::COUNTER, &resp->body());
-
   AppendMetricWithoutLabels("pipeline_dispatch_commands_total", "",
-                            conn_stats.pipeline_dispatch_commands,
-
-                            MetricType::COUNTER, &resp->body());
+                            conn_stats.pipeline_dispatch_commands, MetricType::COUNTER,
+                            &resp->body());
+  AppendMetricWithoutLabels("pipeline_dispatch_skip_flush_total", "",
+                            conn_stats.skip_pipeline_flushing, MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
                             conn_stats.pipelined_cmd_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
+  AppendMetricWithoutLabels("pipeline_queue_wait_duration_seconds", "",
+                            conn_stats.pipelined_wait_latency * 1e-6, MetricType::COUNTER,
+                            &resp->body());
 
-  AppendMetricWithoutLabels("cmd_squash_hop_total", "", m.coordinator_stats.multi_squash_executions,
+  AppendMetricWithoutLabels("cmd_squash_stats_ignored_total", "",
+                            m.coordinator_stats.squash_stats_ignored, MetricType::COUNTER,
+                            &resp->body());
+
+  AppendMetricWithoutLabels("cmd_squash_hop_total", "", m.coordinator_stats.multi_squash_hops,
                             MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("cmd_squash_commands_total", "", m.coordinator_stats.squashed_commands,
@@ -1693,6 +1698,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   // Net metrics
   AppendMetricWithoutLabels("net_input_recv_total", "", conn_stats.io_read_cnt, MetricType::COUNTER,
                             &resp->body());
+  AppendMetricWithoutLabels("net_read_yields_total", "", conn_stats.num_read_yields,
+                            MetricType::COUNTER, &resp->body());
+
   AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
                             MetricType::COUNTER, &resp->body());
 
