@@ -28,6 +28,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/std_ranges.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"
@@ -457,8 +458,7 @@ void InterpreterReplier::StartCollection(unsigned len, CollectionType type) {
 }
 
 bool IsSHA(string_view str) {
-  return std::all_of(str.begin(), str.end(),
-                     [](unsigned char c) { return absl::ascii_isxdigit(c); });
+  return rng::all_of(str, [](unsigned char c) { return absl::ascii_isxdigit(c); });
 }
 
 optional<ErrorReply> EvalValidator(CmdArgList args) {
