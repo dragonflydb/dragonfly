@@ -96,6 +96,7 @@ size_t CmdSerializer::SerializeEntry(string_view key, const PrimeValue& pk, cons
     case OBJ_STRING:
       commands = SerializeString(key, pv, expire_ms);
       use_restore_serialization = false;
+      // reset expire_ms to skip it in SerializeExpireIfNeeded
       expire_ms = 0;
       break;
     case OBJ_STREAM:
