@@ -404,6 +404,11 @@ RespExpr BaseFamilyTest::Run(ArgSlice list) {
   return Run(GetId(), list);
 }
 
+RespExpr BaseFamilyTest::Run(std::string_view command) {
+  std::vector<std::string_view> command_list = absl::StrSplit(command, ' ');
+  return Run(command_list);
+}
+
 RespExpr BaseFamilyTest::RunPrivileged(std::initializer_list<const std::string_view> list) {
   if (!ProactorBase::IsProactorThread()) {
     return pp_->at(0)->Await([&] { return this->RunPrivileged(list); });

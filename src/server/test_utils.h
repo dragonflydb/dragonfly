@@ -85,6 +85,9 @@ class BaseFamilyTest : public ::testing::Test {
   RespExpr Run(absl::Span<std::string> list);
 
   RespExpr Run(std::string_view id, ArgSlice list);
+
+  RespExpr Run(std::string_view command);
+
   void RunMany(const std::vector<std::vector<std::string>>& cmds);
 
   using MCResponse = std::vector<std::string>;
