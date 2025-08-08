@@ -105,6 +105,9 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
 
 bool IsLSNDiffBellowThreshold(const std::vector<LSN>& lsn_vec1, const std::vector<LSN>& lsn_vec2) {
   DCHECK_EQ(lsn_vec1.size(), lsn_vec2.size());
+  if (lsn_vec1.size() != lsn_vec2.size()) {
+    return false;
+  }
   uint32_t allow_diff = absl::GetFlag(FLAGS_allow_partial_sync_with_lsn_diff);
   for (size_t i = 0; i < lsn_vec1.size(); ++i) {
     uint32_t diff =
@@ -284,8 +287,9 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
   {
     util::fb2::LockGuard lk{replica_ptr->shared_mu};
 
-    if (replica_ptr->replica_state != SyncState::PREPARATION)
+    if (replica_ptr->replica_state != SyncState::PREPARATION) {
       return rb->SendError(kInvalidState);
+    }
 
     // Set meta info on connection.
     cntx->conn()->SetName(absl::StrCat("repl_flow_", sync_id));
@@ -343,7 +347,7 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
         flow.start_partial_sync_at = *seqid;
         VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
                 << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
-        sync_type = "PARTIAL";
+        sync_type = absl::StrCat("PARTIAL", sf_->journal()->GetLsn());
       } else {
         LOG(INFO) << "Partial sync requested from stale LSN=" << *seqid
                   << " that the replication buffer doesn't contain this anymore (current_lsn="
@@ -407,8 +411,20 @@ void DflyCmd::StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* r
     return;
 
   util::fb2::LockGuard lk{replica_ptr->shared_mu};
-  if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::FULL_SYNC, rb))
+  auto repl_state = replica_ptr->replica_state;
+  if (repl_state != SyncState::FULL_SYNC && repl_state != SyncState::PREPARATION) {
+    rb->SendError(kInvalidState);
     return;
+  }
+
+  // Check all flows are connected.
+  // This might happen if a flow abruptly disconnected before sending the SYNC request.
+  for (const FlowInfo& flow : replica_ptr->flows) {
+    if (!flow.conn) {
+      rb->SendError(kInvalidState);
+      return;
+    }
+  }
 
   {
     Transaction::Guard tg{tx};
@@ -417,10 +433,15 @@ void DflyCmd::StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* r
     auto cb = [this, &status, replica_ptr = replica_ptr](EngineShard* shard) {
       FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
 
-      status = StopFullSyncInThread(flow, &replica_ptr->exec_st, shard);
-      if (*status != OpStatus::OK) {
-        return;
+      // We are doing partial sync. We never started FullSync so we don't need to stop it.
+      bool is_partial = flow->start_partial_sync_at.has_value();
+      if (!is_partial) {
+        status = StopFullSyncInThread(flow, &replica_ptr->exec_st, shard);
+        if (*status != OpStatus::OK) {
+          return;
+        }
       }
+
       StartStableSyncInThread(flow, &replica_ptr->exec_st, shard);
     };
     shard_set->RunBlockingInParallel(std::move(cb));
@@ -631,10 +652,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, ExecutionState* exec_st,
     return OpStatus::CANCELLED;
   }
 
-  if (flow->start_partial_sync_at.has_value())
-    saver->StartIncrementalSnapshotInShard(*flow->start_partial_sync_at, exec_st, shard);
-  else
-    saver->StartSnapshotInShard(true, exec_st, shard);
+  saver->StartSnapshotInShard(true, exec_st, shard);
 
   return OpStatus::OK;
 }
@@ -666,8 +684,9 @@ void DflyCmd::StartStableSyncInThread(FlowInfo* flow, ExecutionState* exec_st, E
   DCHECK(shard);
   DCHECK(flow->conn);
 
-  flow->streamer.reset(
-      new JournalStreamer(sf_->journal(), exec_st, JournalStreamer::SendLsn::YES, true));
+  LSN partial_lsn = flow->start_partial_sync_at.value_or(0);
+  flow->streamer.reset(new JournalStreamer(sf_->journal(), exec_st, JournalStreamer::SendLsn::YES,
+                                           true, partial_lsn));
   flow->streamer->Start(flow->conn->socket());
 
   // Register cleanup.
