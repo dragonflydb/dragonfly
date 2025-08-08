@@ -258,7 +258,7 @@ async def test_acl_deluser(df_server):
 
 
 script = """
-for i = 1, 100000 do
+for i = 1, 10000 do
   redis.call('SET', 'key', i)
   redis.call('SET', 'key1', i)
   redis.call('SET', 'key2', i)
@@ -268,10 +268,9 @@ end
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip("Non deterministic")
 async def test_acl_del_user_while_running_lua_script(df_server):
     client = aioredis.Redis(port=df_server.port)
-    await client.execute_command("ACL SETUSER kostas ON >kk +@string +@scripting")
+    await client.execute_command("ACL SETUSER kostas ON >kk +@string +@scripting ~*")
     await client.execute_command("AUTH kostas kk")
     admin_client = aioredis.Redis(port=df_server.port, decode_responses=True)
 
@@ -283,14 +282,13 @@ async def test_acl_del_user_while_running_lua_script(df_server):
 
     for i in range(1, 4):
         res = await admin_client.get(f"key{i}")
-        assert res == "100000"
+        assert res == "10000"
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip("Non deterministic")
 async def test_acl_with_long_running_script(df_server):
     client = aioredis.Redis(port=df_server.port)
-    await client.execute_command("ACL SETUSER roman ON >yoman +@string +@scripting")
+    await client.execute_command("ACL SETUSER roman ON >yoman +@string +@scripting ~*")
     await client.execute_command("AUTH roman yoman")
     admin_client = aioredis.Redis(port=df_server.port, decode_responses=True)
 
@@ -301,7 +299,7 @@ async def test_acl_with_long_running_script(df_server):
 
     for i in range(1, 4):
         res = await admin_client.get(f"key{i}")
-        assert res == "100000"
+        assert res == "10000"
 
 
 def create_temp_file(content, tmp_dir):
