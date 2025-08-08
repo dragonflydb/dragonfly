@@ -2740,4 +2740,26 @@ TEST_F(SearchFamilyTest, BlockSizeOptionFtCreate) {
   resp = Run({"FT.SEARCH", "index", "@number1:[1 3] @number2:[10 30]", "SORTBY", "number1", "ASC"});
   EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3"));
 }
+
+TEST_F(SearchFamilyTest, AggregateWithLoadFromJoinSimple) {
+  Run({"ft.create", "idx1", "ON", "HASH", "SCHEMA", "num1", "NUMERIC", "num2", "NUMERIC"});
+  Run({"ft.create", "idx2", "ON", "HASH", "SCHEMA", "num3", "NUMERIC", "num4", "NUMERIC"});
+
+  Run({"hset", "k1", "num1", "0", "num2", "1"});
+  Run({"hset", "k2", "num1", "1", "num2", "2"});
+
+  Run({"hset", "k3", "num3", "0", "num4", "3"});
+  Run({"hset", "k4", "num3", "1", "num4", "4"});
+
+  auto resp = Run({"ft.aggregate", "idx1", "*", "LOAD", "4", "idx1.num1", "idx1.num2", "idx2.num3",
+                   "idx2.num4", "LOAD_FROM", "idx2", "1", "idx2.num3=idx1.num1"});
+
+  EXPECT_THAT(resp,
+              IsUnordArrayWithSize(
+                  IsMap("idx1.num1", "1", "idx1.num2", "2", "idx2.num3", "1", "idx2.num4", "4"),
+                  IsMap("idx1.num1", "0", "idx1.num2", "1", "idx2.num3", "0", "idx2.num4", "3")));
+
+  // TODO: add more tests
+}
+
 }  // namespace dfly
