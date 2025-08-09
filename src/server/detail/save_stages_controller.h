@@ -85,7 +85,7 @@ struct SaveStagesController : public SaveStagesInputs {
   // in a mutually exlusive context to avoid data races.
   // Also call this function before any call to `WaitAllSnapshots`
   // Returns empty optional on success and SaveInfo on failure
-  std::optional<SaveInfo> PreInit();
+  std::optional<SaveInfo> Init();
   void Start();
 
   ~SaveStagesController();
@@ -93,8 +93,7 @@ struct SaveStagesController : public SaveStagesInputs {
   // Safe to call and no locks required
   void WaitAllSnapshots();
 
-  // Same semantics as InitResourcesAndStart. Must be used in a mutually exclusive
-  // context. Call this function after you `WaitAllSnapshots`to finalize the chore.
+  // Call this function after you `WaitAllSnapshots`to finalize the chore.
   // Performs cleanup of the object internally.
   SaveInfo Finalize();
   size_t GetSaveBuffersSize();
@@ -119,8 +118,6 @@ struct SaveStagesController : public SaveStagesInputs {
   void SaveRdb();
 
   SaveInfo GetSaveInfo();
-
-  void InitResources();
 
   // Remove .tmp extension or delete files in case of error
   GenericError FinalizeFileMovement();

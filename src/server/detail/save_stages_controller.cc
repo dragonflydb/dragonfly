@@ -178,13 +178,15 @@ SaveStagesController::~SaveStagesController() {
   }
 }
 
-std::optional<SaveInfo> SaveStagesController::PreInit() {
+std::optional<SaveInfo> SaveStagesController::Init() {
   if (auto err = BuildFullPath(); err) {
     shared_err_ = err;
     return GetSaveInfo();
   }
 
-  InitResources();
+  snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
+  for (auto& [snapshot, _] : snapshots_)
+    snapshot = make_unique<RdbSnapshot>(fq_threadpool_, snapshot_storage_.get());
 
   return {};
 }
@@ -361,12 +363,6 @@ SaveInfo SaveStagesController::GetSaveInfo() {
   info.file_name = resulting_path.generic_string();
 
   return info;
-}
-
-void SaveStagesController::InitResources() {
-  snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
-  for (auto& [snapshot, _] : snapshots_)
-    snapshot = make_unique<RdbSnapshot>(fq_threadpool_, snapshot_storage_.get());
 }
 
 // Remove .tmp extension or delete files in case of error

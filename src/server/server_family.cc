@@ -2001,7 +2001,7 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
       fq_threadpool_.get(), snapshot_storage, opts.bg_save});
 
   // Initialize resources outside of mutex (this may take time for S3 operations)
-  auto res = temp_save_controller->PreInit();
+  auto res = temp_save_controller->Init();
 
   // Now acquire mutex only to set the controller and update state
   {
