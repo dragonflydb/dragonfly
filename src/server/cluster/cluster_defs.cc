@@ -9,6 +9,7 @@
 
 #include "base/logging.h"
 #include "cluster_config.h"
+#include "core/std_ranges.h"
 #include "facade/error.h"
 #include "slot_set.h"
 
@@ -20,7 +21,7 @@ std::string SlotRange::ToString() const {
 }
 
 SlotRanges::SlotRanges(std::vector<SlotRange> ranges) : ranges_(std::move(ranges)) {
-  std::sort(ranges_.begin(), ranges_.end());
+  rng::sort(ranges_);
 }
 
 void SlotRanges::Merge(const SlotRanges& sr) {
@@ -28,7 +29,7 @@ void SlotRanges::Merge(const SlotRanges& sr) {
   for (const auto& r : sr) {
     ranges_.push_back(r);
   }
-  std::sort(ranges_.begin(), ranges_.end());
+  rng::sort(ranges_);
 }
 
 std::string SlotRanges::ToString() const {
@@ -48,10 +49,10 @@ bool ClusterShardInfo::operator==(const ClusterShardInfo& r) const {
     auto lmigrations = migrations;
     auto rreplicas = r.replicas;
     auto rmigrations = r.migrations;
-    std::sort(lreplicas.begin(), lreplicas.end());
-    std::sort(lmigrations.begin(), lmigrations.end());
-    std::sort(rreplicas.begin(), rreplicas.end());
-    std::sort(rmigrations.begin(), rmigrations.end());
+    rng::sort(lreplicas);
+    rng::sort(lmigrations);
+    rng::sort(rreplicas);
+    rng::sort(rmigrations);
     return lreplicas == rreplicas && lmigrations == rmigrations;
   }
   return false;
@@ -59,7 +60,7 @@ bool ClusterShardInfo::operator==(const ClusterShardInfo& r) const {
 
 ClusterShardInfos::ClusterShardInfos(std::vector<ClusterShardInfo> infos)
     : infos_(std::move(infos)) {
-  std::sort(infos_.begin(), infos_.end());
+  rng::sort(infos_);
 }
 
 facade::ErrorReply SlotOwnershipError(SlotId slot_id) {
