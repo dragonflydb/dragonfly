@@ -537,7 +537,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
   }
 
   // For non-cluster mode we shutdown
-  if (detail::cluster_mode == detail::ClusterMode::kNoCluster) {
+  if (detail::cluster_mode != detail::ClusterMode::kRealCluster) {
     VLOG(1) << "Takeover accepted, shutting down.";
     std::string save_arg = "NOSAVE";
     MutableSlice sargs(save_arg);
