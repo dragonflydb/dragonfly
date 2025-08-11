@@ -58,9 +58,6 @@ ABSL_FLAG(string, tiered_prefix, "",
           "high performance NVME ssd disks for this. Also, seems that pipeline_squash does "
           "not work well with tiered storage, so it's advised to set it to 0.");
 
-ABSL_FLAG(float, tiered_offload_threshold, 0.5,
-          "The ratio of used/max memory above which we start offloading values to disk");
-
 ABSL_FLAG(bool, enable_heartbeat_eviction, true,
           "Enable eviction during heartbeat when memory is under pressure.");
 
@@ -779,21 +776,8 @@ void EngineShard::Heartbeat() {
     RetireExpiredAndEvict();
   }
 
-  // Offset CoolMemoryUsage when consider background offloading.
-  // TODO: Another approach could be is to align the approach  similarly to how we do with
-  // FreeMemWithEvictionStep, i.e. if memory_budget is below the limit.
-  size_t tiering_offload_threshold = std::numeric_limits<size_t>::max();
-  if (tiered_storage_) {
-    size_t limit = max_memory_limit.load(memory_order_relaxed);
-    tiering_offload_threshold =
-        tiered_storage_->CoolMemoryUsage() +
-        size_t(limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size();
-  }
-
-  size_t used_memory = UsedMemory();
-  if (used_memory > tiering_offload_threshold) {
-    VLOG(1) << "Running Offloading, memory=" << used_memory
-            << " tiering_threshold: " << tiering_offload_threshold
+  if (tiered_storage_ && tiered_storage_->ShouldOffload()) {
+    VLOG(1) << "Running Offloading, memory=" << db_slice.memory_budget()
             << ", cool memory: " << tiered_storage_->CoolMemoryUsage();
 
     for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
@@ -893,16 +877,10 @@ size_t EngineShard::UsedMemory() const {
          search_indices()->GetUsedMemory();
 }
 
-bool EngineShard::ShouldThrottleForTiering() const {  // see header for formula justification
-  if (!tiered_storage_)
-    return false;
-
-  size_t limit = max_memory_limit.load(memory_order_relaxed);
-  size_t tiering_redline = (limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size();
-
-  // UsedMemory includes CoolMemoryUsage, so we are offsetting it to remove the cool cache impact.
-  return tiered_storage_->WriteDepthUsage() > 0.3 &&
-         (UsedMemory() > tiering_redline + tiered_storage_->CoolMemoryUsage());
+bool EngineShard::ShouldThrottleForTiering() const {
+  // Throttle if the tiered storage is busy offloading (at least 30% of allowed capacity)
+  return tiered_storage_ && tiered_storage_->WriteDepthUsage() > 0.3 &&
+         tiered_storage_->ShouldOffload();
 }
 
 void EngineShard::FinalizeMulti(Transaction* tx) {

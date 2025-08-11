@@ -60,6 +60,7 @@ extern "C" {
 #include "server/set_family.h"
 #include "server/stream_family.h"
 #include "server/string_family.h"
+#include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "server/version.h"
 #include "server/zset_family.h"
@@ -721,23 +722,15 @@ string FailedCommandToString(std::string_view command, facade::CmdArgList args,
   return result;
 }
 
+template <typename T> auto UpdateServerState(T ServerState::*member) {
+  return [member](T value) {
+    auto cb = [member, value](unsigned, auto*) { ServerState::tlocal()->*member = value; };
+    shard_set->pool()->AwaitBrief(cb);
+  };
+}
+
 thread_local uint32_t squash_stats_latency_lower_limit_cached =
     absl::GetFlag(FLAGS_squash_stats_latency_lower_limit);
-
-void SetRssOomDenyRatioOnAllThreads(double ratio) {
-  auto cb = [ratio](unsigned, auto*) { ServerState::tlocal()->rss_oom_deny_ratio = ratio; };
-  shard_set->pool()->AwaitBrief(cb);
-}
-
-void SetSerializationMaxChunkSize(size_t val) {
-  auto cb = [val](unsigned, auto*) { ServerState::tlocal()->serialization_max_chunk_size = val; };
-  shard_set->pool()->AwaitBrief(cb);
-}
-
-void SetMaxSquashedCmdNum(int32_t val) {
-  auto cb = [val](unsigned, auto*) { ServerState::tlocal()->max_squash_cmd_num = val; };
-  shard_set->pool()->AwaitBrief(cb);
-}
 
 void SetMaxBusySquashUsec(uint32_t val) {
   shard_set->pool()->AwaitBrief(
@@ -861,6 +854,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   facade::Connection::Init(pp_.size());
 
   config_registry.RegisterSetter<MemoryBytesFlag>("maxmemory", [](const MemoryBytesFlag& flag) {
+    // TODO: reduce code reliance on constant direct access of max_memory_limit
     max_memory_limit.store(flag.value, memory_order_relaxed);
   });
 
@@ -874,12 +868,12 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("max_segment_to_consider");
 
   config_registry.RegisterSetter<double>("rss_oom_deny_ratio",
-                                         [](double val) { SetRssOomDenyRatioOnAllThreads(val); });
-  config_registry.RegisterSetter<size_t>("serialization_max_chunk_size",
-                                         [](size_t val) { SetSerializationMaxChunkSize(val); });
+                                         UpdateServerState(&ServerState::rss_oom_deny_ratio));
+  config_registry.RegisterSetter<size_t>(
+      "serialization_max_chunk_size",
+      UpdateServerState(&ServerState::serialization_max_chunk_size));
 
   config_registry.RegisterMutable("pipeline_squash");
-
   config_registry.RegisterMutable("lua_mem_gc_threshold");
 
   config_registry.RegisterSetter<uint32_t>("pipeline_queue_limit", [](uint32_t val) {
@@ -919,7 +913,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   });
 
   config_registry.RegisterSetter<uint32_t>("max_squashed_cmd_num",
-                                           [](uint32_t val) { SetMaxSquashedCmdNum(val); });
+                                           UpdateServerState(&ServerState::max_squash_cmd_num));
   config_registry.RegisterSetter<uint32_t>("max_busy_squash_usec",
                                            [](uint32_t val) { SetMaxBusySquashUsec(val); });
   config_registry.RegisterSetter<uint32_t>(
@@ -933,6 +927,19 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("timeout");
   config_registry.RegisterMutable("send_timeout");
   config_registry.RegisterMutable("managed_service_info");
+
+  // TODO(vlad): Introduce templatable flag cache
+  auto update_tiered_storage = [](auto) {
+    shard_set->pool()->AwaitBrief([](unsigned, auto*) {
+      if (auto* es = EngineShard::tlocal(); es && es->tiered_storage()) {
+        es->tiered_storage()->UpdateFromFlags();
+      }
+    });
+  };
+  config_registry.RegisterSetter<bool>("tiered_experimental_cooling", update_tiered_storage);
+  config_registry.RegisterSetter<unsigned>("tiered_storage_write_depth", update_tiered_storage);
+  config_registry.RegisterSetter<float>("tiered_offload_threshold", update_tiered_storage);
+  config_registry.RegisterSetter<float>("tiered_upload_threshold", update_tiered_storage);
 
   config_registry.RegisterMutable(
       "notify_keyspace_events", [pool = &pp_](const absl::CommandLineFlag& flag) {
@@ -996,11 +1003,13 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   });
   Transaction::Init(shard_num);
 
-  SetRssOomDenyRatioOnAllThreads(GetFlag(FLAGS_rss_oom_deny_ratio));
-  SetSerializationMaxChunkSize(GetFlag(FLAGS_serialization_max_chunk_size));
-  SetMaxSquashedCmdNum(GetFlag(FLAGS_max_squashed_cmd_num));
+  UpdateServerState (&ServerState::rss_oom_deny_ratio)(absl::GetFlag(FLAGS_rss_oom_deny_ratio));
+  UpdateServerState (&ServerState::serialization_max_chunk_size)(
+      absl::GetFlag(FLAGS_serialization_max_chunk_size));
+  UpdateServerState (&ServerState::max_squash_cmd_num)(absl::GetFlag(FLAGS_max_squashed_cmd_num));
+  SetHuffmanTable(absl::GetFlag(FLAGS_huffman_table));
+  SetMaxBusySquashUsec(absl::GetFlag(FLAGS_max_busy_squash_usec));
   SetHuffmanTable(GetFlag(FLAGS_huffman_table));
-  SetMaxBusySquashUsec(GetFlag(FLAGS_max_busy_squash_usec));
   SetShardThreadBusyPollingUsec(GetFlag(FLAGS_shard_thread_busy_polling_usec));
   SetUringWakeMode(GetFlag(FLAGS_uring_wake_mode));
 

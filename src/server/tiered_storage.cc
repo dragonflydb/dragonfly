@@ -34,9 +34,12 @@ ABSL_FLAG(bool, tiered_experimental_cooling, true,
 
 ABSL_FLAG(unsigned, tiered_storage_write_depth, 50,
           "Maximum number of concurrent stash requests issued by background offload");
-ABSL_FLAG(float, tiered_low_memory_factor, 0.1,
-          "Determines the low limit per shard that "
-          "tiered storage should not cross");
+
+ABSL_FLAG(float, tiered_offload_threshold, 0.5,
+          "Ratio of free memory (free/max memory) below which offloading starts");
+
+ABSL_FLAG(float, tiered_upload_threshold, 0.1,
+          "Ratio of free memory (free/max memory) below which uploading stops");
 
 namespace dfly {
 
@@ -143,7 +146,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       stats->tiered_used_bytes += segment.length;
       stats_.total_stashes++;
 
-      if (absl::GetFlag(FLAGS_tiered_experimental_cooling)) {
+      if (ts_->config_.experimental_cooling) {
         RetireColdEntries(pv->MallocUsed());
         ts_->CoolDown(key.first, key.second, segment, pv);
       } else {
@@ -160,13 +163,6 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     for (const auto& [sub_dbid, sub_key, sub_segment] : ts_->bins_->ReportStashed(id, segment))
       SetExternal({sub_dbid, sub_key}, sub_segment);
   }
-
-  bool HasEnoughMemoryMargin(int64_t value_len) {
-    return db_slice_.memory_budget() - value_len > ssize_t(memory_low_limit_);
-  }
-
-  // being compared to db_slice_.memory_budget().
-  size_t memory_low_limit_;
 
   struct {
     uint64_t total_stashes = 0, total_cancels = 0, total_fetches = 0;
@@ -223,9 +219,9 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, string_view value,
   //    Currently, our heuristic is not very smart, because we stop uploading any reads during
   //    the snapshotting.
   // TODO: to revisit this when we rewrite it with more efficient snapshotting algorithm.
-
-  bool should_upload =
-      modified || (HasEnoughMemoryMargin(value.size()) && !SliceSnapshot::IsSnaphotInProgress());
+  bool should_upload = modified;
+  should_upload |=
+      (ts_->UploadBudget() > int64_t(value.length())) && !SliceSnapshot::IsSnaphotInProgress();
 
   if (!should_upload)
     return false;
@@ -272,22 +268,16 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
 }
 
 void TieredStorage::ShardOpManager::RetireColdEntries(size_t additional_memory) {
-  ssize_t threshold = memory_low_limit_ + additional_memory;
+  int64_t budget = ts_->UploadBudget() - additional_memory;
+  if (budget > 0)
+    return;
 
-  // we trigger if we below the low point
-  if (db_slice_.memory_budget() < threshold) {
-    // But once we below we try to raise above high watermark.
-    const double kHighFactor = 1.0;
-    size_t needed_to_free =
-        (threshold - db_slice_.memory_budget()) + memory_low_limit_ * kHighFactor;
-    size_t gained = ts_->ReclaimMemory(needed_to_free);
+  size_t gained = ts_->ReclaimMemory(-budget);
+  VLOG(1) << "Upload budget: " << budget << ", gained " << gained;
 
-    VLOG(1) << "Memory budget: " << db_slice_.memory_budget() << ", gained " << gained;
-
-    // Update memory_budget directly since we know that gained bytes were released.
-    // We will overwrite the budget correctly in the next Hearbeat.
-    db_slice_.UpdateMemoryParams(gained + db_slice_.memory_budget(), db_slice_.bytes_per_object());
-  }
+  // Update memory_budget directly since we know that gained bytes were released.
+  // We will overwrite the budget correctly in the next Hearbeat.
+  db_slice_.UpdateMemoryParams(gained + db_slice_.memory_budget(), db_slice_.bytes_per_object());
 }
 
 void TieredStorage::ShardOpManager::DeleteOffloaded(DbIndex dbid,
@@ -301,11 +291,7 @@ void TieredStorage::ShardOpManager::DeleteOffloaded(DbIndex dbid,
 TieredStorage::TieredStorage(size_t max_size, DbSlice* db_slice)
     : op_manager_{make_unique<ShardOpManager>(this, db_slice, max_size)},
       bins_{make_unique<tiering::SmallBins>()} {
-  write_depth_limit_ = absl::GetFlag(FLAGS_tiered_storage_write_depth);
-
-  // TODO: update when max_memory_limit flag changes
-  size_t mem_per_shard = max_memory_limit.load(memory_order_relaxed) / shard_set->size();
-  SetMemoryLowWatermark(absl::GetFlag(FLAGS_tiered_low_memory_factor) * mem_per_shard);
+  UpdateFromFlags();
 }
 
 TieredStorage::~TieredStorage() {
@@ -320,11 +306,6 @@ error_code TieredStorage::Open(string_view base_path) {
 
 void TieredStorage::Close() {
   op_manager_->Close();
-}
-
-void TieredStorage::SetMemoryLowWatermark(size_t mem_limit) {
-  op_manager_->memory_low_limit_ = mem_limit;
-  VLOG(1) << "Memory low limit is " << mem_limit;
 }
 
 TieredStorage::TResult<string> TieredStorage::Read(DbIndex dbid, string_view key,
@@ -387,7 +368,7 @@ bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
 
   // TODO: When we are low on memory we should introduce a back-pressure, to avoid OOMs
   // with a lot of underutilized disk space.
-  if (op_manager_->GetStats().pending_stash_cnt >= write_depth_limit_) {
+  if (op_manager_->GetStats().pending_stash_cnt >= config_.write_depth_limit) {
     ++stats_.stash_overflow_cnt;
     return false;
   }
@@ -441,10 +422,6 @@ void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* 
   value->SetStashPending(false);
 }
 
-float TieredStorage::WriteDepthUsage() const {
-  return 1.0f * op_manager_->GetStats().pending_stash_cnt / write_depth_limit_;
-}
-
 TieredStats TieredStorage::GetStats() const {
   TieredStats stats{};
 
@@ -483,6 +460,32 @@ TieredStats TieredStorage::GetStats() const {
   return stats;
 }
 
+float TieredStorage::WriteDepthUsage() const {
+  return 1.0f * op_manager_->GetStats().pending_stash_cnt / config_.write_depth_limit;
+}
+
+void TieredStorage::UpdateFromFlags() {
+  config_ = {
+      .experimental_cooling = absl::GetFlag(FLAGS_tiered_experimental_cooling),
+      .write_depth_limit = absl::GetFlag(FLAGS_tiered_storage_write_depth),
+      .offload_threshold = absl::GetFlag(FLAGS_tiered_offload_threshold),
+      .upload_threshold = absl::GetFlag(FLAGS_tiered_upload_threshold),
+  };
+}
+
+bool TieredStorage::ShouldOffload() const {
+  size_t free_memory = op_manager_->db_slice_.memory_budget();
+  size_t per_shard = max_memory_limit.load(memory_order_relaxed) / shard_set->size();
+  // Cool values are already offloadeded, so don't count them as used memory
+  return (free_memory + CoolMemoryUsage()) < config_.offload_threshold * per_shard;
+}
+
+int64_t TieredStorage::UploadBudget() const {
+  size_t free_memory = op_manager_->db_slice_.memory_budget();
+  size_t per_shard = max_memory_limit.load(memory_order_relaxed) / shard_set->size();
+  return int64_t(free_memory) - int64_t(config_.upload_threshold * per_shard);
+}
+
 void TieredStorage::RunOffloading(DbIndex dbid) {
   const size_t kMaxIterations = 500;
 
@@ -514,7 +517,7 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   // Keep number of iterations below resonable limit to keep datastore always responsive
   size_t iterations = 0;
   do {
-    if (op_manager_->GetStats().pending_stash_cnt >= write_depth_limit_)
+    if (op_manager_->GetStats().pending_stash_cnt >= config_.write_depth_limit)
       break;
     offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
   } while (offloading_cursor_ && iterations++ < kMaxIterations);

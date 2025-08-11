@@ -556,7 +556,7 @@ async def test_bgsave_and_save(async_client: aioredis.Redis):
         "proactor_threads": 4,
         "dbfilename": "tiered-entries",
         "tiered_prefix": "tiering-test-backing",
-        "tiered_offload_threshold": "0.0",  # ask offloading loop to offload as much as possible
+        "tiered_offload_threshold": "1.0",  # ask offloading loop to offload as much as possible
     }
 )
 async def test_tiered_entries(async_client: aioredis.Redis):
