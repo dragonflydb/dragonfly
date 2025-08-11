@@ -342,6 +342,12 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
   error_code ec = serializer_->FlushToSink(&sfile, flush_state);
   CHECK(!ec);  // always succeeds
 
+  size_t serialized = sfile.val.size();
+  if (serialized == 0)
+    return 0;
+
+  uint64_t id = rec_id_++;
+
   if (use_background_mode_) {
     // Yield after possibly long cpu slice due to compression and serialization
     if (ThisFiber::Priority() == fb2::FiberPriority::BACKGROUND)
@@ -349,11 +355,6 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
     // TODO: else Sleep() to provide write backpressure in advance?
   }
 
-  size_t serialized = sfile.val.size();
-  if (serialized == 0)
-    return 0;
-
-  uint64_t id = rec_id_++;
   uint64_t running_cycles = ThisFiber::GetRunningTimeCycles();
 
   fb2::NoOpLock lk;
