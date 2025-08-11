@@ -55,6 +55,8 @@ void CollectedPageStats::Merge(CollectedPageStats&& other, uint16_t shard_id) {
   this->pages_reserved_for_malloc += other.pages_reserved_for_malloc;
   this->pages_with_heap_mismatch += other.pages_with_heap_mismatch;
   this->pages_above_threshold += other.pages_above_threshold;
+  this->objects_skipped_not_required += other.objects_skipped_not_required;
+  this->objects_skipped_not_supported += other.objects_skipped_not_supported;
   shard_wide_summary.emplace(std::make_pair(shard_id, std::move(other.page_usage_hist)));
 }
 
@@ -79,6 +81,12 @@ std::string CollectedPageStats::ToString() const {
   StrAppend(&response, "Pages reserved for malloc: ", pages_reserved_for_malloc, "\n");
   StrAppend(&response, "Pages skipped due to heap mismatch: ", pages_with_heap_mismatch, "\n");
   StrAppend(&response, "Pages with usage above threshold: ", pages_above_threshold, "\n");
+  StrAppend(&response,
+            "Objects skipped (do not require defragmentation): ", objects_skipped_not_required,
+            "\n");
+  StrAppend(&response,
+            "Objects skipped (do not support defragmentation): ", objects_skipped_not_supported,
+            "\n");
   for (const auto& [shard_id, usage] : shard_wide_summary) {
     StrAppend(&response, "[Shard ", shard_id, "]\n");
     for (const auto& [percentage, count] : usage) {
@@ -135,6 +143,8 @@ CollectedPageStats PageUsage::UniquePages::CollectedStats() const {
                             .pages_reserved_for_malloc = pages_reserved_for_malloc.size,
                             .pages_with_heap_mismatch = pages_with_heap_mismatch.size,
                             .pages_above_threshold = pages_above_threshold.size,
+                            .objects_skipped_not_required = objects_skipped_not_required,
+                            .objects_skipped_not_supported = objects_skipped_not_supported,
                             .page_usage_hist = std::move(usage),
                             .shard_wide_summary = {}};
 }
