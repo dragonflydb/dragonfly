@@ -105,16 +105,18 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
-  string fb_name = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex());
-  snapshot_fb_ = fb2::Fiber(fb_name, [this, stream_journal] {
-    this->IterateBucketsFb(stream_journal);
-    db_slice_->UnregisterOnChange(snapshot_version_);
-    if (!use_snapshot_version_) {
-      db_slice_->UnregisterOnMoved(moved_cb_id_);
-    }
-    consumer_->Finalize();
-    VLOG(1) << "Serialization peak bytes: " << serializer_->GetSerializationPeakBytes();
-  });
+  snapshot_fb_name_ = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex());
+  snapshot_fb_ = fb2::Fiber(
+      fb2::Fiber::Opts{.priority = fb2::FiberPriority::BACKGROUND, .name = snapshot_fb_name_},
+      [this, stream_journal] {
+        this->IterateBucketsFb(stream_journal);
+        db_slice_->UnregisterOnChange(snapshot_version_);
+        if (!use_snapshot_version_) {
+          db_slice_->UnregisterOnMoved(moved_cb_id_);
+        }
+        consumer_->Finalize();
+        VLOG(1) << "Serialization peak bytes: " << serializer_->GetSerializationPeakBytes();
+      });
 }
 
 void SliceSnapshot::StartIncremental(LSN start_lsn) {
@@ -189,14 +191,12 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
           snapshot_cursor_,
           [this, &snapshot_db_index_](auto it) { return BucketSaveCb(snapshot_db_index_, it); });
 
-      auto epoch = fb2::FiberSwitchEpoch();
+      // Yielding for background fibers has low overhead if the time slice isn't used up.
+      // Do it after every bucket for maximum responsiveness.
+      DCHECK_EQ(ThisFiber::Priority(), fb2::FiberPriority::BACKGROUND);
+      ThisFiber::Yield();
+
       PushSerialized(false);
-
-      // Yield after every bucket to remain responsive.
-      // Use epochs to determine if PushSerialized yielded internally.
-      if (fb2::FiberSwitchEpoch() == epoch)
-        ThisFiber::Yield();
-
     } while (snapshot_cursor_);
 
     DVLOG(2) << "after loop " << ThisFiber::GetName();
@@ -329,6 +329,11 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
   io::StringFile sfile;
   error_code ec = serializer_->FlushToSink(&sfile, flush_state);
   CHECK(!ec);  // always succeeds
+
+  // Yield after possibly long cpu slice due to compression and serialization
+  if (ThisFiber::Priority() == fb2::FiberPriority::BACKGROUND)
+    ThisFiber::Yield();
+  // TODO: else Sleep() to provide write backpressure in advance?
 
   size_t serialized = sfile.val.size();
   if (serialized == 0)

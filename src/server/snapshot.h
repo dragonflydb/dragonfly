@@ -164,8 +164,11 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
+
+  std::string snapshot_fb_name_;
   util::fb2::Fiber snapshot_fb_;  // IterateEntriesFb
   util::fb2::CondVarAny seq_cond_;
+
   const CompressionMode compression_mode_;
   RdbTypeFreqMap type_freq_map_;
 
