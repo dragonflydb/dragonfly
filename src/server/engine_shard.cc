@@ -423,7 +423,7 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
 
   std::chrono::milliseconds period_ms(*cycle_ms);
 
-  fb2::Fiber::Opts fb_opts{.priority = fb2::FiberPriority::BACKGROUND, .name = "heatbeat"};
+  fb2::Fiber::Opts fb_opts{.name = "heatbeat"};
   fiber_heartbeat_periodic_ =
       fb2::Fiber(fb_opts, [this, index = pb->GetPoolIndex(), period_ms, heartbeat]() mutable {
         ThisFiber::SetName(absl::StrCat("heartbeat_periodic", index));
