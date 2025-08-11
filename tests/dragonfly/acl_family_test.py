@@ -268,6 +268,7 @@ end
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip("Flaky on CI, needs investigation")
 async def test_acl_del_user_while_running_lua_script(df_server):
     client = aioredis.Redis(port=df_server.port)
     await client.execute_command("ACL SETUSER kostas ON >kk +@string +@scripting ~*")

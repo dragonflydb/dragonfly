@@ -107,6 +107,9 @@ ABSL_FLAG(bool, always_flush_pipeline, false,
           "if true will flush pipeline response after each pipeline squashing");
 
 ABSL_FLAG(uint32_t, pipeline_squash_limit, 1 << 30, "Limit on the size of a squashed pipeline. ");
+ABSL_FLAG(uint32_t, pipeline_wait_batch_usec, 0,
+          "If non-zero, waits for this time for more I/O "
+          " events to come for the connection in case there is only one command in the pipeline. ");
 
 using namespace util;
 using namespace std;
@@ -192,6 +195,7 @@ thread_local TrafficLogger tl_traffic_logger{};
 thread_local base::Histogram* io_req_size_hist = nullptr;
 
 thread_local const size_t reply_size_limit = absl::GetFlag(FLAGS_squashed_reply_size_limit);
+thread_local uint32 pipeline_wait_batch_usec = absl::GetFlag(FLAGS_pipeline_wait_batch_usec);
 
 void OpenTrafficLogger(string_view base_path) {
   unique_lock lk{tl_traffic_logger.mutex};
@@ -1216,9 +1220,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
     service_->DispatchCommand(absl::MakeSpan(tmp_cmd_vec_), reply_builder_.get(), cc_.get());
   };
 
-  auto dispatch_async = [this]() -> MessageHandle {
-    return {FromArgs(std::move(tmp_parse_args_))};
-  };
+  auto dispatch_async = [this]() -> MessageHandle { return {FromArgs(tmp_parse_args_)}; };
 
   ReadBuffer read_buffer = GetReadBuffer();
 
@@ -1569,9 +1571,10 @@ void Connection::SquashPipeline() {
   // it must guard the Flush() as well.
   cc_->async_dispatch = true;
 
-  size_t dispatched =
+  DispatchManyResult result =
       service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), reply_builder_.get(), cc_.get());
 
+  uint32_t dispatched = result.processed;
   uint64_t before_flush = CycleClock::Now();
   //
   // TODO: to investigate if always flushing will improve P99 latency because otherwise we
@@ -1586,10 +1589,11 @@ void Connection::SquashPipeline() {
 
   cc_->async_dispatch = false;
 
-  stats_->pipeline_dispatch_calls++;
-  stats_->pipeline_dispatch_commands += squash_cmds.size();
-  stats_->pipeline_dispatch_flush_usec += CycleClock::ToUsec(CycleClock::Now() - before_flush);
-
+  if (result.account_in_stats) {
+    stats_->pipeline_dispatch_calls++;
+    stats_->pipeline_dispatch_commands += dispatched;
+    stats_->pipeline_dispatch_flush_usec += CycleClock::ToUsec(CycleClock::Now() - before_flush);
+  }
   auto it = dispatch_q_.begin();
   while (it->IsControl())  // Skip all newly received intrusive messages
     ++it;
@@ -1682,7 +1686,11 @@ void Connection::AsyncFiber() {
     // As an optimization, we only yield if the fiber was not suspended since the last dispatch.
     uint64_t cur_epoch = fb2::FiberSwitchEpoch();
     if (dispatch_q_.size() == 1 && cur_epoch == prev_epoch) {
-      ThisFiber::SleepFor(20us);
+      if (pipeline_wait_batch_usec > 0) {
+        ThisFiber::SleepFor(chrono::microseconds(pipeline_wait_batch_usec));
+      } else {
+        ThisFiber::Yield();
+      }
       DVLOG(2) << "After yielding to producer, dispatch_q_.size()=" << dispatch_q_.size();
       if (cc_->conn_closing)
         break;
@@ -2192,9 +2200,13 @@ void Connection::SetPipelineSquashLimitThreadLocal(unsigned limit) {
   pipeline_squash_limit_cached = limit;
 }
 
-Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, unsigned thread_id,
+void Connection::SetPipelineWaitBatchUsecThreadLocal(unsigned usec) {
+  pipeline_wait_batch_usec = usec;
+}
+
+Connection::WeakRef::WeakRef(const std::shared_ptr<Connection>& ptr, unsigned thread_id,
                              uint32_t client_id)
-    : ptr_{std::move(ptr)}, last_known_thread_id_{thread_id}, client_id_{client_id} {
+    : ptr_{ptr}, last_known_thread_id_{thread_id}, client_id_{client_id} {
 }
 
 Connection* Connection::WeakRef::Get() const {
