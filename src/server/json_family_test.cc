@@ -3213,4 +3213,17 @@ TEST_F(JsonFamilyTest, DelNonExistingKey) {
   EXPECT_THAT(resp, IntArg(0));
 }
 
+TEST_F(JsonFamilyTest, JsonKeysWithDots) {
+  auto resp = Run(
+      {"JSON.SET", "OFFERS:DBX-AGG1611-IGN", "$",
+       R"({"Gallery": {"Images": {"bdz1xjm.jpeg": "some_value", "bdz1xjm": "another_value"}}})"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "OFFERS:DBX-AGG1611-IGN", "$['Gallery']['Images']['bdz1xjm']"});
+  EXPECT_THAT(resp, "[\"another_value\"]");
+
+  resp = Run({"JSON.GET", "OFFERS:DBX-AGG1611-IGN", "$['Gallery']['Images']['bdz1xjm.jpeg']"});
+  EXPECT_THAT(resp, "[\"some_value\"]");
+}
+
 }  // namespace dfly
