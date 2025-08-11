@@ -22,6 +22,7 @@ namespace dfly {
 using namespace std;
 using namespace facade;
 using namespace util;
+using base::CycleClock;
 
 namespace {
 
@@ -65,6 +66,16 @@ size_t Size(const CapturingReplyBuilder::Payload& payload) {
 }
 
 }  // namespace
+
+MultiCommandSquasher::Stats& MultiCommandSquasher::Stats::operator+=(const Stats& o) {
+  squashed_commands += o.squashed_commands;
+  hop_usec += o.hop_usec;
+  reply_usec += o.reply_usec;
+  hops += o.hops;
+  yields += o.yields;
+
+  return *this;
+}
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
                                            Service* service, const Opts& opts)
@@ -134,8 +145,6 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(const StoredC
 
   sinfo.dispatched.push_back({.cmd = cmd, .reply = {}});
   order_.push_back(last_sid);
-
-  num_squashed_++;
 
   bool need_flush = sinfo.dispatched.size() >= opts_.max_squash_size;
   return need_flush ? SquashResult::SQUASHED_FULL : SquashResult::SQUASHED;
@@ -234,10 +243,8 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   }
 
   Transaction* tx = cntx_->transaction;
-  ServerState::tlocal()->stats.multi_squash_executions++;
   ServerState::tlocal()->stats.squash_width_freq_arr[num_shards - 1]++;
-  ProactorBase* proactor = ProactorBase::me();
-  uint64_t start = proactor->GetMonotonicTimeNs();
+  uint64_t start = CycleClock::Now();
 
   // Atomic transactions (that have all keys locked) perform hops and run squashed commands via
   // stubs, non-atomic ones just run the commands in parallel.
@@ -254,12 +261,13 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     auto cb = [this, bc, rb]() mutable {
       if (ThisFiber::GetRunningTimeCycles() > max_busy_squash_cycles_cached) {
         ThisFiber::Yield();
+        stats_.yields++;
       }
       this->SquashedHopCb(EngineShard::tlocal(), rb->GetRespVersion());
       bc->Dec();
     };
-    unsigned run_usec = base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles());
-    if (run_usec > 10'000) {
+    unsigned run_usec = CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles());
+    if (run_usec > 5'000) {
       LOG_EVERY_T(WARNING, 1) << "Fiber run " << run_usec << " usec, squashed " << cmds_.size()
                               << " commands";
     }
@@ -270,10 +278,8 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     bc->Wait();
   }
 
-  uint64_t after_hop = proactor->GetMonotonicTimeNs();
+  uint64_t after_hop = CycleClock::Now();
   bool aborted = false;
-
-  ServerState* fresh_ss = ServerState::SafeTLocal();
 
   size_t total_reply_size = 0;
   for (auto& sinfo : sharded_) {
@@ -291,13 +297,16 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     if (aborted)
       break;
   }
-  uint64_t after_reply = proactor->GetMonotonicTimeNs();
-  fresh_ss->stats.multi_squash_exec_hop_usec += (after_hop - start) / 1000;
-  fresh_ss->stats.multi_squash_exec_reply_usec += (after_reply - after_hop) / 1000;
+  uint64_t after_reply = CycleClock::Now();
+  uint64_t total_usec = CycleClock::ToUsec(after_reply - start);
+
+  stats_.hop_usec += total_usec;
+  stats_.reply_usec += CycleClock::ToUsec(after_reply - after_hop);
+  stats_.hops++;
+  stats_.squashed_commands += order_.size();
 
   tl_facade_stats->reply_stats.squashing_current_reply_size.fetch_sub(total_reply_size,
                                                                       std::memory_order_release);
-
   for (auto& sinfo : sharded_) {
     sinfo.dispatched.clear();
     sinfo.reply_id = 0;
@@ -307,7 +316,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   return !aborted;
 }
 
-size_t MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
+void MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
   DVLOG(1) << "Trying to squash " << cmds_.size() << " commands for transaction "
            << cntx_->transaction->DebugId();
 
@@ -343,9 +352,8 @@ size_t MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
     }
   }
 
-  VLOG(1) << "Squashed " << num_squashed_ << " of " << cmds_.size()
-          << " commands, max fanout: " << num_shards_ << ", atomic: " << atomic_;
-  return num_squashed_;
+  VLOG(1) << "Handled " << cmds_.size() << " commands, max fanout: " << num_shards_
+          << ", atomic: " << atomic_;
 }
 
 bool MultiCommandSquasher::IsAtomic() const {
@@ -353,7 +361,7 @@ bool MultiCommandSquasher::IsAtomic() const {
 }
 
 void MultiCommandSquasher::SetMaxBusySquashUsec(uint32_t usec) {
-  max_busy_squash_cycles_cached = base::CycleClock::Frequency() * usec / 1000'000;
+  max_busy_squash_cycles_cached = CycleClock::FromUsec(usec);
 }
 
 }  // namespace dfly

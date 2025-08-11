@@ -864,7 +864,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
         auto [min_ttl, max_ttl] = parser.Next<uint32_t, uint32_t>();
         if (min_ttl >= max_ttl) {
           builder->SendError(kExpiryOutOfRange);
-          (void)parser.Error();
+          (void)parser.TakeError();
           return nullopt;
         }
         options.expire_ttl_range = std::make_pair(min_ttl, max_ttl);
@@ -876,7 +876,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
     }
   }
   if (parser.HasError()) {
-    builder->SendError(parser.Error()->MakeReply());
+    builder->SendError(parser.TakeError().MakeReply());
     return nullopt;
   }
   return options;
@@ -1465,7 +1465,7 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
   }
 
   if (parser.HasError()) {
-    return builder->SendError(parser.Error()->MakeReply());
+    return builder->SendError(parser.TakeError().MakeReply());
   }
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);

@@ -478,6 +478,15 @@ TEST_F(HSetFamilyTest, HExpireNoAddNew) {
   EXPECT_THAT(Run({"HGETALL", "key"}), RespArray(ElementsAre()));
 }
 
+TEST_F(HSetFamilyTest, HExpireWithNullChar) {
+  string val_with_null("test\0test", 9);
+  Run({"HSET", "hash", "field", val_with_null});
+  string expected_val("test\0test", 9);
+  EXPECT_EQ(ToSV(Run({"HGET", "hash", "field"}).GetBuf()), expected_val);
+  Run({"HEXPIRE", "hash", "15", "FIELDS", "1", "field"});
+  EXPECT_EQ(ToSV(Run({"HGET", "hash", "field"}).GetBuf()), expected_val);
+}
+
 TEST_F(HSetFamilyTest, RandomFieldAllExpired) {
   for (int i = 0; i < 10; ++i) {
     EXPECT_EQ(CheckedInt({"HSETEX", "key", "10", absl::StrCat("k", i), "v"}), 1);

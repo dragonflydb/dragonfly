@@ -452,8 +452,8 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
 
   string_view sync_id_str = parser.Next<std::string_view>();
 
-  if (auto err = parser.Error(); err)
-    return rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
 
   VLOG(1) << "Got DFLY TAKEOVER " << sync_id_str << " time out:" << timeout;
 
@@ -537,7 +537,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
   }
 
   // For non-cluster mode we shutdown
-  if (detail::cluster_mode == detail::ClusterMode::kNoCluster) {
+  if (detail::cluster_mode != detail::ClusterMode::kRealCluster) {
     VLOG(1) << "Takeover accepted, shutting down.";
     std::string save_arg = "NOSAVE";
     MutableSlice sargs(save_arg);
@@ -577,7 +577,7 @@ void DflyCmd::Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     existing_keys = ServerFamily::LoadExistingKeys::kOverride;
   }
 
-  if (parser.Error() || parser.HasNext() || filename.empty()) {
+  if (parser.TakeError() || parser.HasNext() || filename.empty()) {
     return rb->SendError(kSyntaxErr);
   }
 

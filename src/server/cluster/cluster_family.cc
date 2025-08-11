@@ -643,8 +643,8 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, SinkReplyBuilder* bu
     slots_stats.emplace_back(sid, SlotStats{});
   } while (parser.HasNext());
 
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   fb2::Mutex mu;
 
@@ -693,8 +693,8 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, SinkReplyBuilder* bui
     slot_ranges.emplace_back(SlotRange{slot_start, slot_end});
   } while (parser.HasNext());
 
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   DeleteSlots(SlotRanges(std::move(slot_ranges)));
 
@@ -747,8 +747,8 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, SinkReplyBuilder* b
   string_view node_id;
   if (parser.HasNext()) {
     node_id = parser.Next<std::string_view>();
-    if (auto err = parser.Error(); err) {
-      return builder->SendError(err->MakeReply());
+    if (auto err = parser.TakeError(); err) {
+      return builder->SendError(err.MakeReply());
     }
   }
 
@@ -909,8 +909,8 @@ void ClusterFamily::InitMigration(CmdArgList args, SinkReplyBuilder* builder) {
     slots.emplace_back(SlotRange{slot_start, slot_end});
   } while (parser.HasNext());
 
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   SlotRanges slot_ranges(std::move(slots));
 
@@ -956,8 +956,8 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, SinkReplyBuilder* builder,
   CmdArgParser parser{args};
   auto [source_id, shard_id] = parser.Next<std::string_view, uint32_t>();
 
-  if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    return builder->SendError(err.MakeReply());
   }
 
   VLOG(1) << "Create flow " << source_id << " shard_id: " << shard_id;
@@ -1043,8 +1043,8 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, SinkReplyBuilder* builder) {
   CmdArgParser parser{args};
   auto [source_id, attempt] = parser.Next<std::string_view, long>();
 
-  if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    return builder->SendError(err.MakeReply());
   }
 
   VLOG(1) << "DFLYMIGRATE ACK" << args;

@@ -38,7 +38,7 @@ class CmdSerializer {
   size_t SerializeZSet(std::string_view key, const PrimeValue& pv);
   size_t SerializeHash(std::string_view key, const PrimeValue& pv);
   size_t SerializeList(std::string_view key, const PrimeValue& pv);
-  size_t SerializeString(std::string_view key, const PrimeValue& pv);
+  size_t SerializeString(std::string_view key, const PrimeValue& pv, uint64_t expire_ms);
   void SerializeRestore(std::string_view key, const PrimeValue& pk, const PrimeValue& pv,
                         uint64_t expire_ms);
 

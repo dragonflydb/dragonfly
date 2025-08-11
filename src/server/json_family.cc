@@ -1606,7 +1606,7 @@ void JsonFamily::Set(CmdArgList args, const CommandContext& cmd_cntx) {
   auto res = parser.TryMapNext("NX", 1, "XX", 2);
   bool is_xx_condition = (res == 2), is_nx_condition = (res == 1);
 
-  if (parser.Error() || parser.HasNext())  // also clear the parser error dcheck
+  if (parser.TakeError() || parser.HasNext())  // also clear the parser error dcheck
     return builder->SendError(kSyntaxErr);
 
   auto cb = [&, &key = key, &path = path, &json_str = json_str](Transaction* t,
@@ -1909,8 +1909,8 @@ void JsonFamily::ArrPop(CmdArgList args, const CommandContext& cmd_cntx) {
   int index = parser.NextOrDefault<int>(-1);
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    return builder->SendError(err.MakeReply());
   }
 
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
@@ -2128,8 +2128,8 @@ void JsonFamily::Get(CmdArgList args, const CommandContext& cmd_cntx) {
     return;  // ParseJsonGetParams should have already sent an error
   }
 
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpJsonGet(t->GetOpArgs(shard), key, params.value());

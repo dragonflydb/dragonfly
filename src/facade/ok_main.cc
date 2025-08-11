@@ -28,11 +28,16 @@ class OkService : public ServiceInterface {
     return DispatchResult::OK;
   }
 
-  size_t DispatchManyCommands(absl::Span<ArgSlice> args_lists, SinkReplyBuilder* builder,
-                              ConnectionContext* cntx) final {
+  DispatchManyResult DispatchManyCommands(absl::Span<ArgSlice> args_lists,
+                                          SinkReplyBuilder* builder,
+                                          ConnectionContext* cntx) final {
     for (auto args : args_lists)
       DispatchCommand(args, builder, cntx);
-    return args_lists.size();
+    DispatchManyResult result{
+        .processed = static_cast<uint32_t>(args_lists.size()),
+        .account_in_stats = true,
+    };
+    return result;
   }
 
   void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,

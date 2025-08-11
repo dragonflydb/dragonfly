@@ -1261,8 +1261,8 @@ void SRandMember(CmdArgList args, const CommandContext& cmd_cntx) {
   if (parser.HasNext())
     return cmd_cntx.rb->SendError(WrongNumArgsError("SRANDMEMBER"));
 
-  if (auto err = parser.Error(); err)
-    return cmd_cntx.rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return cmd_cntx.rb->SendError(err.MakeReply());
 
   const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
     return OpRandMember(t->GetOpArgs(shard), key, count);
@@ -1469,8 +1469,8 @@ void SAddEx(CmdArgList args, const CommandContext& cmd_cntx) {
   const bool keepttl = parser.Check("KEEPTTL");
   const uint32_t ttl_sec = parser.Next<uint32_t>();
 
-  if (auto err = parser.Error(); err) {
-    return cmd_cntx.rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx.rb->SendError(err.MakeReply());
   }
   constexpr uint32_t kMaxTtl = (1UL << 26);
   if (ttl_sec == 0 || ttl_sec > kMaxTtl) {

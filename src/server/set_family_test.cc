@@ -431,15 +431,15 @@ TEST_F(SetFamilyTest, SAddEx) {
 
 TEST_F(SetFamilyTest, CheckSetLinkExpiryTransfer) {
   for (int i = 0; i < 10; i++) {
-    EXPECT_THAT(Run({"SADDEX", "key", "5", absl::StrCat(i)}), IntArg(1));
+    EXPECT_THAT(Run(absl::StrCat("SADDEX key 5 ", i)), IntArg(1));
   }
   for (int i = 0; i < 9; i++) {
-    Run({"SREM", "key", absl::StrCat(i)});
+    Run(absl::StrCat("SREM key ", i));
   }
-  EXPECT_THAT(Run({"SCARD", "key"}), IntArg(1));
+  EXPECT_THAT(Run("SCARD key"), IntArg(1));
   AdvanceTime(6000);
-  Run({"SMEMBERS", "key"});
-  EXPECT_THAT(Run({"SCARD", "key"}), IntArg(0));
+  Run("SMEMBERS key");
+  EXPECT_THAT(Run("SCARD key"), IntArg(0));
 }
 
 }  // namespace dfly
