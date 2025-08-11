@@ -178,6 +178,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   uint32_t journal_cb_id_ = 0;
   uint32_t moved_cb_id = 0;
 
+  bool use_background_mode_ = false;
   bool use_snapshot_version_ = true;
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
