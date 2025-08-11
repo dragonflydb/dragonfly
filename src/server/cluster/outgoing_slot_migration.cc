@@ -372,18 +372,17 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   }
 
   const absl::Time start = absl::Now();
-  const absl::Duration timeout =
-      absl::Milliseconds(absl::GetFlag(FLAGS_migration_finalization_timeout_ms));
+  const int64_t ack_timeout_ms = absl::GetFlag(FLAGS_migration_finalization_timeout_ms);
   while (true) {
     const absl::Time now = absl::Now();
-    const absl::Duration passed = now - start;
-    if (passed >= timeout) {
+    const int64_t passed_ms = absl::ToInt64Milliseconds(now - start);
+    if (passed_ms >= ack_timeout_ms) {
       LOG(WARNING) << "Timeout fot ACK " << cf_->MyID() << " : " << migration_info_.node_info.id
                    << " attempt " << attempt;
       return false;
     }
 
-    if (auto resp = ReadRespReply(absl::ToInt64Milliseconds(passed - timeout)); !resp) {
+    if (auto resp = ReadRespReply(ack_timeout_ms - passed_ms); !resp) {
       LOG(WARNING) << "Error reading response to ACK command from " << server().Description()
                    << ": " << resp.error()
                    << ", socket state: " + GetSocketInfo(Sock()->native_handle());
