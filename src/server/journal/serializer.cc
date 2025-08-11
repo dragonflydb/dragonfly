@@ -32,7 +32,8 @@ void JournalWriter::Write(uint64_t v) {
 
 void JournalWriter::Write(std::string_view sv) {
   Write(sv.size());
-  sink_->Write(io::Buffer(sv));
+  if (!sv.empty())  // arguments can be empty strings
+    sink_->Write(io::Buffer(sv));
 }
 
 void JournalWriter::Write(const journal::Entry::Payload& payload) {
@@ -144,13 +145,37 @@ io::Result<size_t> JournalReader::ReadString(io::MutableBytes buffer) {
   size_t size = 0;
   SET_OR_UNEXPECT(ReadUInt<uint64_t>(), size);
 
-  if (auto ec = EnsureRead(size); ec)
-    return make_unexpected(ec);
-
   if (size > buffer.size())
     return make_unexpected(make_error_code(errc::bad_message));
 
-  buf_.ReadAndConsume(size, buffer.data());
+  uint64_t available = std::min(size, buf_.InputLen());
+  uint64_t remainder = 0;
+
+  if (available < size) {
+    remainder = size - available;
+  }
+
+  buf_.ReadAndConsume(available, buffer.data());
+
+  // If remainder of string is bigger than threshold - read and populate directly
+  // output buffer otherwise use intermediate io_buf.
+  bool is_short_remainder = remainder < (buf_.Capacity() / 2);
+
+  auto remainder_buf_pos = buffer.data() + available;
+
+  if (remainder) {
+    if (is_short_remainder) {
+      if (auto ec = EnsureRead(remainder); ec)
+        return make_unexpected(ec);
+      buf_.ReadAndConsume(remainder, remainder_buf_pos);
+    } else {
+      uint64_t read;
+      SET_OR_UNEXPECT(source_->Read({remainder_buf_pos, remainder}), read)
+      if (read < remainder) {
+        return make_unexpected(make_error_code(errc::io_error));
+      }
+    }
+  }
 
   return size;
 }

@@ -57,6 +57,21 @@ cd build-opt && ninja dragonfly
 
 ```
 
+### Build options
+
+| Option | Description |
+|--|--|
+| WITH_AWS | Include AWS client. Required for cloud snapshots |
+| WITH_SEARCH | Include Search module |
+| WITH_COLLECTION_CMDS | Include commands for collections (SET, HSET, ZSET) |
+| WITH_EXTENSION_CMDS | Include extension commands (Bloom, HLL, JSON, ...) |
+
+Minimal debug build:
+
+```bash
+./helio/blaze.sh -DWITH_AWS=OFF -DWITH_SEARCH=OFF -DWITH_COLLECTION_CMDS=OFF -DWITH_EXTENSION_CMDS=OFF
+```
+
 ## Step 4 - voilà
 
 ```bash

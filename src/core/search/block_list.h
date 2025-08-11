@@ -75,12 +75,16 @@ template <typename Container /* underlying container */> class BlockList {
     return size_;
   }
 
+  bool Empty() const {
+    return size_ == 0;
+  }
+
   void Clear() {
     size_ = 0;
     blocks_.clear();
   }
 
-  struct BlockListIterator {
+  struct BlockListIterator : public SeekableTag {
     // To make it work with std container contructors
     using iterator_category = std::forward_iterator_tag;
     using difference_type = std::ptrdiff_t;
@@ -89,10 +93,11 @@ template <typename Container /* underlying container */> class BlockList {
     using reference = ElementType&;
 
     ElementType operator*() const {
-      return **block_it;
+      return *block_it;
     }
 
     BlockListIterator& operator++();
+    void SeekGE(DocId min_doc_id);
 
     friend class BlockList;
 
@@ -113,7 +118,7 @@ template <typename Container /* underlying container */> class BlockList {
     }
 
     ConstBlockIt it, it_end;
-    std::optional<typename Container::iterator> block_it, block_end;
+    typename Container::iterator block_it, block_end;
   };
 
   BlockListIterator begin() const {
@@ -157,8 +162,16 @@ template <typename T> class SortedVector {
     return entries_.size();
   }
 
+  bool Empty() const {
+    return entries_.empty();
+  }
+
   void Clear() {
     entries_.clear();
+  }
+
+  const T& Back() const {
+    return entries_.back();
   }
 
   using iterator = typename PMR_NS::vector<T>::const_iterator;

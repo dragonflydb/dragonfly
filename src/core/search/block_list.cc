@@ -8,7 +8,7 @@ SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list
   using Entry = std::pair<DocId, double>;
 
   const size_t initial_size = block_list.Size();
-  DCHECK(block_list.Size() > 0);
+  DCHECK(!block_list.Empty());
 
   // Collect all entries from the blocks into a single vector
   // We copy the block and clear it on the fly to save memory
@@ -91,7 +91,7 @@ template <typename C> bool BlockList<C>::Remove(ElementType t) {
 }
 
 template <typename C> typename BlockList<C>::BlockIt BlockList<C>::FindBlock(const ElementType& t) {
-  DCHECK(blocks_.empty() || blocks_.back().Size() > 0u);
+  DCHECK(blocks_.empty() || !blocks_.back().Empty());
 
   if (!blocks_.empty() && t >= *blocks_.back().begin())
     return --blocks_.end();
@@ -138,18 +138,58 @@ template <typename C> void BlockList<C>::TrySplit(BlockIt block) {
 
 template <typename C>
 typename BlockList<C>::BlockListIterator& BlockList<C>::BlockListIterator::operator++() {
-  ++*block_it;
+  ++block_it;
   if (block_it == block_end) {
     ++it;
     if (it != it_end) {
       block_it = it->begin();
       block_end = it->end();
     } else {
-      block_it = std::nullopt;
-      block_end = std::nullopt;
+      block_it = {};
+      block_end = {};
     }
   }
   return *this;
+}
+
+template <typename C> void BlockList<C>::BlockListIterator::SeekGE(DocId min_doc_id) {
+  if (it == it_end) {
+    block_it = {};
+    block_end = {};
+    return;
+  }
+
+  auto extract_doc_id = [](const auto& value) {
+    using T = std::decay_t<decltype(value)>;
+    if constexpr (std::is_same_v<T, DocId>) {
+      return value;
+    } else {
+      return value.first;
+    }
+  };
+
+  auto needed_block = [&](const auto& it) {
+    return it->begin() != it->end() && min_doc_id <= extract_doc_id(it->Back());
+  };
+
+  // Choose the first block that has the last element >= min_doc_id
+  if (!needed_block(it)) {
+    while (++it != it_end) {
+      if (needed_block(it)) {
+        block_it = it->begin();
+        block_end = it->end();
+        break;
+      }
+    }
+    if (it == it_end) {
+      block_it = {};
+      block_end = {};
+      return;
+    }
+  }
+
+  BasicSeekGE(min_doc_id, block_end, &block_it);
+  DCHECK(block_it != block_end && min_doc_id <= extract_doc_id(*block_it));
 }
 
 template class BlockList<CompressedSortedSet>;

@@ -153,7 +153,7 @@ class DbSlice {
     AutoUpdater(const AutoUpdater& o) = delete;
     AutoUpdater& operator=(const AutoUpdater& o) = delete;
     AutoUpdater(AutoUpdater&& o) noexcept;
-    AutoUpdater& operator=(AutoUpdater&& o);
+    AutoUpdater& operator=(AutoUpdater&& o) noexcept;
     ~AutoUpdater();
 
     // Removes the memory usage attributed to the iterator and resets orig_heap_size.
@@ -192,22 +192,7 @@ class DbSlice {
   };
 
   using Context = DbContext;
-
-  // ChangeReq - describes the change to the table.
-  struct ChangeReq {
-    // If iterator is set then it's an update to the existing bucket.
-    // Otherwise (string_view is set) then it's a new key that is going to be added to the table.
-    std::variant<PrimeTable::bucket_iterator, std::string_view> change;
-
-    explicit ChangeReq(PrimeTable::bucket_iterator it) : change(it) {
-    }
-    explicit ChangeReq(std::string_view key) : change(key) {
-    }
-
-    const PrimeTable::bucket_iterator* update() const {
-      return std::get_if<PrimeTable::bucket_iterator>(&change);
-    }
-  };
+  using ChangeReq = dfly::ChangeReq;
 
   // Called before deleting an element to notify the search indices.
   using DocDeletionCallback =
@@ -253,9 +238,7 @@ class DbSlice {
     expire_base_[generation & 1] = now;
   }
 
-  // From time to time DbSlice is set with a new set of params needed to estimate its
-  // memory usage.
-  void SetCachedParams(int64_t budget, size_t bytes_per_object) {
+  void UpdateMemoryParams(int64_t budget, size_t bytes_per_object) {
     memory_budget_ = budget;
     bytes_per_object_ = bytes_per_object;
   }
@@ -332,15 +315,15 @@ class DbSlice {
                                          const ExpireParams& params);
 
   // Adds expiry information.
-  void AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at);
+  void AddExpire(DbIndex db_ind, const Iterator& main_it, uint64_t at);
 
   // Removes the corresponing expiry information if exists.
   // Returns true if expiry existed (and removed).
-  bool RemoveExpire(DbIndex db_ind, Iterator main_it);
+  bool RemoveExpire(DbIndex db_ind, const Iterator& main_it);
 
   // Either adds or removes (if at == 0) expiry. Returns true if a change was made.
   // Does not change expiry if at != 0 and expiry already exists.
-  bool UpdateExpire(DbIndex db_ind, Iterator main_it, uint64_t at);
+  bool UpdateExpire(DbIndex db_ind, const Iterator& main_it, uint64_t at);
 
   void SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag);
   uint32_t GetMCFlag(DbIndex db_ind, const PrimeKey& key) const;
@@ -550,13 +533,23 @@ class DbSlice {
 
   struct SamplingResult {
     std::vector<std::pair<std::string, uint64_t>> top_keys;  // key -> frequency pairs.
+    uint64_t total_samples = 0;                              // Total number of keys sampled.
   };
   SamplingResult StopSampleTopK(DbIndex db_ind);
 
   void StartSampleKeys(DbIndex db_ind);
 
   // Returns number of unique keys sampled.
-  size_t StopSampleKeys(DbIndex db_ind);
+  struct UniqueSampleResult {
+    uint64_t unique_keys_count = 0;  // Number of unique keys sampled.
+    uint64_t total_samples = 0;      // Total number of keys sampled.
+  };
+  UniqueSampleResult StopSampleKeys(DbIndex db_ind);
+
+  void StartSampleValues(DbIndex db_ind);
+
+  // Returns a histogram of sampled values.
+  std::unique_ptr<base::Histogram> StopSampleValues(DbIndex db_ind);
 
  private:
   void PreUpdateBlocking(DbIndex db_ind, Iterator it);
@@ -577,10 +570,11 @@ class DbSlice {
   // Invalidate all watched keys for given slots. Used on FlushSlots.
   void InvalidateSlotWatches(const cluster::SlotSet& slot_ids);
 
-  // Clear tiered storage entries for the specified indices.
-  void ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbTableArray& db_arr);
+  // Clear tiered storage entries for the specified indices. Called during flushing some indices.
+  void RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> indices,
+                                               const DbTableArray& db_arr);
 
-  void PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable* table);
+  void PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& exp_it, DbTable* table);
 
   // Queues invalidation message to the clients that are tracking the change to a key.
   void QueueInvalidationTrackingMessageAtomic(std::string_view key);
@@ -589,7 +583,7 @@ class DbSlice {
 
   void CreateDb(DbIndex index);
 
-  enum class UpdateStatsMode {
+  enum class UpdateStatsMode : uint8_t {
     kReadStats,
     kMutableStats,
   };
@@ -632,9 +626,12 @@ class DbSlice {
 
   uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
   uint64_t next_moved_id_ = 1;
+
+  // Estimation of available memory dedicated to this shard.
+  // Recalculated periodically by dividing free memory left among all shards equally
   ssize_t memory_budget_ = SSIZE_MAX / 2;
   size_t bytes_per_object_ = 0;
-  size_t soft_budget_limit_ = 0;
+
   size_t table_memory_ = 0;
   uint64_t entries_count_ = 0;
   unsigned load_ref_count_ = 0;

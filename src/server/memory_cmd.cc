@@ -12,7 +12,7 @@
 
 #include <mimalloc.h>
 
-#include "base/logging.h"
+#include "base/flags.h"
 #include "core/allocation_tracker.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
@@ -20,14 +20,14 @@
 #include "facade/error.h"
 #include "io/io_buf.h"
 #include "server/engine_shard_set.h"
-#include "server/main_service.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
 #include "server/snapshot.h"
-#include "server/transaction.h"
 
 using namespace std;
 using namespace facade;
+
+ABSL_DECLARE_FLAG(float, mem_defrag_page_utilization_threshold);
 
 namespace dfly {
 
@@ -133,6 +133,12 @@ void MemoryCmd::Run(CmdArgList args) {
         "    ADDRESS <address>",
         "        Returns whether <address> is known to be allocated internally by any of the "
         "backing heaps",
+        "DEFRAGMENT [threshold]",
+        "    Tries to free memory by moving allocations around from sparsely used memory pages.",
+        "    If a threshold is supplied, it is used to determine if data will be moved from the "
+        "page.",
+        "    Pages used less than the threshold percentage (default 0.8) are targeted for moving "
+        "out data.",
     };
     auto* rb = static_cast<RedisReplyBuilder*>(builder_);
     return rb->SendSimpleStrArr(help_arr);
@@ -168,11 +174,23 @@ void MemoryCmd::Run(CmdArgList args) {
   }
 
   if (parser.Check("DEFRAGMENT")) {
-    shard_set->pool()->DispatchOnAll([](util::ProactorBase*) {
-      if (auto* shard = EngineShard::tlocal(); shard)
-        shard->ForceDefrag();
+    static const float default_threshold =
+        absl::GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
+    const float threshold = parser.NextOrDefault(default_threshold);
+
+    std::vector<CollectedPageStats> results(shard_set->size());
+    shard_set->pool()->AwaitFiberOnAll([threshold, &results](util::ProactorBase*) {
+      if (auto* shard = EngineShard::tlocal(); shard) {
+        if (auto shard_res = shard->DoDefrag(CollectPageStats::YES, threshold);
+            shard_res.has_value()) {
+          results[shard->shard_id()] = std::move(shard_res.value());
+        }
+      }
     });
-    return builder_->SendSimpleString("OK");
+
+    const CollectedPageStats merged = CollectedPageStats::Merge(std::move(results), threshold);
+    auto* rb = static_cast<RedisReplyBuilder*>(builder_);
+    return rb->SendVerbatimString(merged.ToString());
   }
 
   string err = UnknownSubCmd(parser.Next(), "MEMORY");
@@ -380,7 +398,7 @@ void MemoryCmd::Track(CmdArgList args) {
     std::tie(tracking_info.lower_bound, tracking_info.upper_bound, tracking_info.sample_odds) =
         parser.Next<size_t, size_t, double>();
     if (parser.HasError()) {
-      return builder_->SendError(parser.Error()->MakeReply());
+      return builder_->SendError(parser.TakeError().MakeReply());
     }
 
     atomic_bool error{false};
@@ -400,7 +418,7 @@ void MemoryCmd::Track(CmdArgList args) {
   if (parser.Check("REMOVE")) {
     auto [lower_bound, upper_bound] = parser.Next<size_t, size_t>();
     if (parser.HasError()) {
-      return builder_->SendError(parser.Error()->MakeReply());
+      return builder_->SendError(parser.TakeError().MakeReply());
     }
 
     atomic_bool error{false};
@@ -436,7 +454,7 @@ void MemoryCmd::Track(CmdArgList args) {
   if (parser.Check("ADDRESS")) {
     string_view ptr_str = parser.Next();
     if (parser.HasError()) {
-      return builder_->SendError(parser.Error()->MakeReply());
+      return builder_->SendError(parser.TakeError().MakeReply());
     }
 
     size_t ptr = 0;

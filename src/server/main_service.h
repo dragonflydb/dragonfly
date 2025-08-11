@@ -80,6 +80,10 @@ class Service : public facade::ServiceInterface {
   bool RequestLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
   void RemoveLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
 
+  // Return true if state is LOADING and loading_state_counter_ == 0, that is,
+  // if no multiple operations require LOADING_STATE at the same time.
+  bool IsLoadingExclusively() ABSL_LOCKS_EXCLUDED(mu_);
+
   void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) final;
   void OnConnectionClose(facade::ConnectionContext* cntx) final;
 
@@ -160,6 +164,11 @@ class Service : public facade::ServiceInterface {
   std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId* cid, CmdArgList args,
                                                        const ConnectionContext& dfly_cntx);
 
+  // Return moved error if we *own* the slot. This function is used from flows that assume our
+  // state is TAKEN_OVER which happens after a replica takeover.
+  std::optional<facade::ErrorReply> TakenOverSlotError(const CommandId* cid, CmdArgList args,
+                                                       const ConnectionContext& dfly_cntx);
+
   void EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
                     SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only);
   void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter,
@@ -193,8 +202,5 @@ class Service : public facade::ServiceInterface {
   GlobalState global_state_ ABSL_GUARDED_BY(mu_) = GlobalState::ACTIVE;
   uint32_t loading_state_counter_ ABSL_GUARDED_BY(mu_) = 0;
 };
-
-uint64_t GetMaxMemoryFlag();
-void SetMaxMemoryFlag(uint64_t value);
 
 }  // namespace dfly

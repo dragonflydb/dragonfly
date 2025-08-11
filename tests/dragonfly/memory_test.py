@@ -229,18 +229,19 @@ async def test_cache_eviction_with_rss_deny_oom(
 async def test_throttle_on_commands_squashing_replies_bytes(df_factory: DflyInstanceFactory):
     df = df_factory.create(
         proactor_threads=2,
-        squashed_reply_size_limit=500_000_000,
-        vmodule="dragonfly_connection=2",
+        squashed_reply_size_limit=100_000_000,
+        vmodule="dragonfly_connection=5",
     )
     df.start()
 
     client = df.client()
-    # 0.5gb
+    # 100mb
     await client.execute_command("debug populate 64 test 3125 rand type hash elements 500")
 
     async def poll():
         # At any point we should not cross this limit
-        assert df.rss < 1_500_000_000
+        # 2x the reply_size_limit, 200mb
+        assert df.rss < 200_000_000
         cl = df.client()
         pipe = cl.pipeline(transaction=False)
         for i in range(64):
@@ -256,5 +257,5 @@ async def test_throttle_on_commands_squashing_replies_bytes(df_factory: DflyInst
         await task
 
     df.stop()
-    found = df.find_in_logs("MultiCommandSquasher overlimit: ")
+    found = df.find_in_logs("Commands squashing current reply size is overlimit")
     assert len(found) > 0

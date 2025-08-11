@@ -533,24 +533,27 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 
   RETURN_ON_ERR(exec_st_.SwitchErrorHandler(std::move(err_handler)));
 
-  // Make sure we're in LOADING state.
-  if (!service_.RequestLoadingState()) {
-    return exec_st_.ReportError(std::make_error_code(errc::state_not_recoverable),
-                                "Failed to enter LOADING state");
-  }
-
   // Start full sync flows.
   state_mask_ |= R_SYNCING;
 
-  absl::Cleanup cleanup = [this]() {
+  std::string_view sync_type;
+  absl::Cleanup cleanup = [this, &sync_type]() {
     // We do the following operations regardless of outcome.
     JoinDflyFlows();
-    service_.RemoveLoadingState();
+    if (sync_type == "full") {
+      service_.RemoveLoadingState();
+    } else if (service_.IsLoadingExclusively()) {
+      // We need this check. We originally set the state unconditionally to LOADING
+      // when we call ReplicaOf command. If for some reason we fail to start full sync below
+      // or cancel the context, we still need to switch to ACTIVE state.
+      // TODO(kostasrim) we can remove this once my proposed changes for replication move forward
+      // as the state transitions for ReplicaOf command will be much clearer.
+      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+    }
     state_mask_ &= ~R_SYNCING;
     last_journal_LSNs_.reset();
   };
 
-  std::string_view sync_type = "full";
   {
     unsigned num_df_flows = shard_flows_.size();
     // Going out of the way to avoid using std::vector<bool>...
@@ -587,6 +590,13 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
         std::accumulate(is_full_sync.get(), is_full_sync.get() + num_df_flows, 0);
 
     if (num_full_flows == num_df_flows) {
+      // Make sure we're in LOADING state.
+      if (!service_.RequestLoadingState()) {
+        return exec_st_.ReportError(std::make_error_code(errc::state_not_recoverable),
+                                    "Failed to enter LOADING state");
+      }
+      sync_type = "full";
+
       DVLOG(1) << "Calling Flush on all slots " << this;
 
       if (slot_range_.has_value()) {
@@ -899,7 +909,7 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
 
   // Keep loader leftover.
   io::Bytes unused = chained_tail.UnusedPrefix();
-  if (unused.size() > 0) {
+  if (!unused.empty()) {
     leftover_buf_.emplace(unused.size());
     leftover_buf_->WriteAndCommit(unused.data(), unused.size());
   } else {

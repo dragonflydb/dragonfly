@@ -96,7 +96,7 @@ void BloomFamily::Reserve(CmdArgList args, const CommandContext& cmd_cntx) {
 
   tie(params.error, params.init_capacity) = parser.Next<double, uint32_t>();
 
-  if (parser.Error())
+  if (parser.TakeError())
     return cmd_cntx.rb->SendError(kSyntaxErr);
 
   if (!params.ok())

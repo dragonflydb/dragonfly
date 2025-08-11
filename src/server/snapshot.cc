@@ -63,7 +63,7 @@ size_t SliceSnapshot::GetThreadLocalMemoryUsage() {
 }
 
 bool SliceSnapshot::IsSnaphotInProgress() {
-  return tl_slice_snapshots.size() > 0;
+  return !tl_slice_snapshots.empty();
 }
 
 void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
@@ -113,6 +113,7 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
       db_slice_->UnregisterOnMoved(moved_cb_id_);
     }
     consumer_->Finalize();
+    VLOG(1) << "Serialization peak bytes: " << serializer_->GetSerializationPeakBytes();
   });
 }
 
@@ -387,7 +388,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
       // 1. We may block here too frequently, slowing down the process.
       // 2. For small bin values, we issue multiple reads for the same page, creating
       //    read factor amplification that can reach factor of ~60.
-      PrimeValue pv{entry.value.Get()};  // Might block until the future resolves.
+      PrimeValue pv{*entry.value.Get()};  // Might block until the future resolves.
 
       // TODO: to introduce RdbSerializer::SaveString that can accept a string value directly.
       serializer_->SaveEntry(entry.key, pv, entry.expire, entry.mc_flags, entry.dbid);
@@ -403,9 +404,7 @@ void SliceSnapshot::SerializeExternal(DbIndex db_index, PrimeKey key, const Prim
                                       time_t expire_time, uint32_t mc_flags) {
   // We prefer avoid blocking, so we just schedule a tiered read and append
   // it to the delayed entries.
-  util::fb2::Future<string> future =
-      EngineShard::tlocal()->tiered_storage()->Read(db_index, key.ToString(), pv);
-
+  auto future = EngineShard::tlocal()->tiered_storage()->Read(db_index, key.ToString(), pv);
   delayed_entries_.push_back({db_index, std::move(key), std::move(future), expire_time, mc_flags});
   ++type_freq_map_[RDB_TYPE_STRING];
 }
@@ -464,11 +463,11 @@ void SliceSnapshot::OnMoved(DbIndex id, const DbSlice::MovedItemsVec& items) {
 // value. This is guaranteed by the fact that OnJournalEntry runs always after OnDbChange, and
 // no database switch can be performed between those two calls, because they are part of one
 // transaction.
-void SliceSnapshot::ConsumeJournalChange(const journal::JournalItem& item) {
+void SliceSnapshot::ConsumeJournalChange(const journal::JournalChangeItem& item) {
   // We grab the lock in case we are in the middle of serializing a bucket, so it serves as a
   // barrier here for atomic serialization.
   std::lock_guard barrier(big_value_mu_);
-  std::ignore = serializer_->WriteJournalEntry(item.data);
+  std::ignore = serializer_->WriteJournalEntry(item.journal_item.data);
   ++stats_.jounal_changes;
 }
 

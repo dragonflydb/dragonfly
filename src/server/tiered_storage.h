@@ -7,15 +7,15 @@
 #include <memory>
 #include <utility>
 
+#include "server/common.h"
+#include "server/table.h"
 #include "server/tiering/common.h"
 #include "server/tx_base.h"
 #include "util/fibers/future.h"
+
 #ifdef __linux__
 
 #include <absl/container/flat_hash_map.h>
-
-#include "server/common.h"
-#include "server/table.h"
 
 namespace dfly {
 
@@ -35,6 +35,8 @@ class TieredStorage {
   // Min sizes of values taking up full page on their own
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
 
+  template <typename T> using TResult = util::fb2::Future<io::Result<T>>;
+
   explicit TieredStorage(size_t max_file_size, DbSlice* db_slice);
   ~TieredStorage();  // drop forward declared unique_ptrs
 
@@ -44,21 +46,19 @@ class TieredStorage {
   std::error_code Open(std::string_view path);
   void Close();
 
-  void SetMemoryLowWatermark(size_t mem_limit);
-
   // Read offloaded value. It must be of external type
-  util::fb2::Future<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);
+  TResult<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);
 
   // Read offloaded value. It must be of external type
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-            std::function<void(const std::string&)> readf);
+            std::function<void(io::Result<std::string>)> readf);
 
   // Apply modification to offloaded value, return generic result from callback.
   // Unlike immutable Reads - the modified value must be uploaded back to memory.
   // This is handled by OpManager when modf completes.
   template <typename T>
-  util::fb2::Future<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
-                              std::function<T(std::string*)> modf);
+  TResult<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                    std::function<T(std::string*)> modf);
 
   // Stash value. Sets IO_PENDING flag and unsets it on error or when finished
   // Returns true if item was scheduled for stashing.
@@ -80,6 +80,9 @@ class TieredStorage {
 
   // Prune cool entries to reach the set memory goal with freed memory
   size_t ReclaimMemory(size_t goal);
+
+  // See OpManager::memory_low_limit
+  void SetMemoryLowWatermark(size_t mem_limit);
 
   // Returns the primary value, and deletes the cool item as well as its offloaded storage.
   PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item);
@@ -103,8 +106,8 @@ class TieredStorage {
 
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
-  typedef ::boost::intrusive::list<detail::TieredColdRecord> CoolQueue;
 
+  using CoolQueue = ::boost::intrusive::list<detail::TieredColdRecord>;
   CoolQueue cool_queue_;
 
   unsigned write_depth_limit_ = 10;
@@ -121,8 +124,6 @@ class TieredStorage {
 
 #else
 
-#include "server/common.h"
-
 class DbSlice;
 
 // This is a stub implementation for non-linux platforms.
@@ -135,6 +136,8 @@ class TieredStorage {
 
   // Min sizes of values taking up full page on their own
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
+
+  template <typename T> using TResult = util::fb2::Future<io::Result<T>>;
 
   explicit TieredStorage(size_t max_size, DbSlice* db_slice) {
   }
@@ -149,17 +152,18 @@ class TieredStorage {
   void Close() {
   }
 
-  util::fb2::Future<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value) {
+  TResult<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value) {
     return {};
   }
 
+  // Read offloaded value. It must be of external type
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-            std::function<void(const std::string&)> readf) {
+            std::function<void(io::Result<std::string>)> readf) {
   }
 
   template <typename T>
-  util::fb2::Future<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
-                              std::function<T(std::string*)> modf) {
+  TResult<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                    std::function<T(std::string*)> modf) {
     return {};
   }
 

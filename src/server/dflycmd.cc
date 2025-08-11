@@ -20,6 +20,7 @@
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
+#include "server/cluster_support.h"
 #include "server/debugcmd.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -290,6 +291,7 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     cntx->conn()->SetName(absl::StrCat("repl_flow_", sync_id));
     cntx->conn_state.replication_info.repl_session_id = sync_id;
     cntx->conn_state.replication_info.repl_flow_id = flow_id;
+    cntx->replica_conn = true;
 
     absl::InsecureBitGen gen;
     eof_token = GetRandomHex(gen, 40);
@@ -312,8 +314,9 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
 
     std::optional<Replica::LastMasterSyncData> data = sf_->GetLastMasterData();
     // In this flow the master and the registered replica where synced from the same master.
-    if (last_master_id && data && data.value().id == last_master_id.value()) {
-      std::vector<std::string_view> lsn_str_vec = absl::StrSplit(last_master_lsn.value(), '-');
+    if (last_master_id && data && data->id == *last_master_id) {
+      ++ServerState::tlocal()->stats.psync_requests_total;
+      std::vector<std::string_view> lsn_str_vec = absl::StrSplit(*last_master_lsn, '-');
       if (lsn_str_vec.size() != data.value().last_journal_LSNs.size()) {
         return rb->SendError(facade::kSyntaxErr);  // Unexpected flow. LSN vector of same master
                                                    // should be the same size on all replicas.
@@ -449,8 +452,8 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
 
   string_view sync_id_str = parser.Next<std::string_view>();
 
-  if (auto err = parser.Error(); err)
-    return rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
 
   VLOG(1) << "Got DFLY TAKEOVER " << sync_id_str << " time out:" << timeout;
 
@@ -509,8 +512,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
   atomic_bool catchup_success = true;
   if (*status == OpStatus::OK) {
     dfly::SharedLock lk{replica_ptr->shared_mu};
-    auto cb = [replica_ptr = std::move(replica_ptr), end_time,
-               &catchup_success](EngineShard* shard) {
+    auto cb = [replica_ptr, end_time, &catchup_success](EngineShard* shard) {
       if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
         catchup_success.store(false);
       }
@@ -533,10 +535,16 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
       LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
     }
   }
-  VLOG(1) << "Takeover accepted, shutting down.";
-  std::string save_arg = "NOSAVE";
-  MutableSlice sargs(save_arg);
-  return sf_->ShutdownCmd(CmdArgList(&sargs, 1), CommandContext{nullptr, rb, nullptr});
+
+  // For non-cluster mode we shutdown
+  if (detail::cluster_mode != detail::ClusterMode::kRealCluster) {
+    VLOG(1) << "Takeover accepted, shutting down.";
+    std::string save_arg = "NOSAVE";
+    MutableSlice sargs(save_arg);
+    sf_->ShutdownCmd(CmdArgList(&sargs, 1), CommandContext{nullptr, rb, nullptr});
+    return;
+  }
+  sf_->service().cluster_family().ReconcileMasterReplicaTakeoverSlots(true);
 }
 
 void DflyCmd::Expire(CmdArgList args, Transaction* tx, RedisReplyBuilder* rb) {
@@ -561,7 +569,7 @@ void DflyCmd::ReplicaOffset(CmdArgList args, RedisReplyBuilder* rb) {
 void DflyCmd::Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   parser.ExpectTag("LOAD");
-  string_view filename = parser.Next();
+  string filename = parser.Next<string>();
   ServerFamily::LoadExistingKeys existing_keys = ServerFamily::LoadExistingKeys::kFail;
 
   if (parser.HasNext()) {
@@ -569,7 +577,7 @@ void DflyCmd::Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     existing_keys = ServerFamily::LoadExistingKeys::kOverride;
   }
 
-  if (parser.Error() || parser.HasNext()) {
+  if (parser.TakeError() || parser.HasNext() || filename.empty()) {
     return rb->SendError(kSyntaxErr);
   }
 
@@ -717,6 +725,7 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
   auto replica_ptr = GetReplicaInfo(sync_id);
   if (!replica_ptr)
     return;
+  VLOG(1) << "Stopping replication for sync_id: " << sync_id;
 
   // Because CancelReplication holds the per-replica mutex,
   // aborting connection will block here until cancellation finishes.

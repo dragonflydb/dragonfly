@@ -1,4 +1,5 @@
 // Copyright 2022, DragonflyDB authors.  All rights reserved.
+//
 // See LICENSE for licensing terms.
 //
 
@@ -94,7 +95,7 @@ ABSL_FLAG(bool, migrate_connections, true,
           "they operate. Currently this is only supported for Lua script invocations, and can "
           "happen at most once per connection.");
 
-ABSL_FLAG(uint32_t, max_busy_read_usec, 100,
+ABSL_FLAG(uint32_t, max_busy_read_usec, 200,
           "Maximum time we read and parse from "
           "a socket without yielding. In microseconds.");
 
@@ -102,9 +103,15 @@ ABSL_FLAG(size_t, squashed_reply_size_limit, 0,
           "Max bytes allowed for squashing_current_reply_size. If this limit is reached, "
           "connections dispatching pipelines won't squash them.");
 
+ABSL_FLAG(bool, always_flush_pipeline, false,
+          "if true will flush pipeline response after each pipeline squashing");
+
+ABSL_FLAG(uint32_t, pipeline_squash_limit, 1 << 30, "Limit on the size of a squashed pipeline. ");
+
 using namespace util;
 using namespace std;
 using absl::GetFlag;
+using base::CycleClock;
 using nonstd::make_unexpected;
 
 namespace facade {
@@ -331,6 +338,10 @@ QueueBackpressure& GetQueueBackpressure() {
   return thread_queue_backpressure[ProactorBase::me()->GetPoolIndex()];
 }
 
+thread_local uint64_t max_busy_read_cycles_cached = 1ULL << 32;
+thread_local bool always_flush_pipeline_cached = absl::GetFlag(FLAGS_always_flush_pipeline);
+thread_local uint32_t pipeline_squash_limit_cached = absl::GetFlag(FLAGS_pipeline_squash_limit);
+
 }  // namespace
 
 thread_local vector<Connection::PipelineMessagePtr> Connection::pipeline_req_pool_;
@@ -542,6 +553,7 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
 void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
   DVLOG(2) << "Dispatching pipeline: " << ToSV(msg.args.front());
 
+  ++self->local_stats_.cmds;
   self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()},
                                   self->reply_builder_.get(), self->cc_.get());
 
@@ -550,6 +562,7 @@ void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
 }
 
 void Connection::AsyncOperations::operator()(const MCPipelineMessage& msg) {
+  ++self->local_stats_.cmds;
   self->service_->DispatchMC(msg.cmd, msg.value,
                              static_cast<MCReplyBuilder*>(self->reply_builder_.get()),
                              self->cc_.get());
@@ -691,6 +704,9 @@ void Connection::OnPreMigrateThread() {
   // is marked beforehand.
   migration_in_process_ = true;
 
+  // Mark as not owned by any thread as it going through the dark hole
+  self_.reset();
+
   socket_->CancelOnErrorCb();
   DCHECK(!async_fb_.IsJoinable()) << GetClientId();
 }
@@ -703,6 +719,7 @@ void Connection::OnPostMigrateThread() {
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
   }
   migration_in_process_ = false;
+  self_ = {make_shared<std::monostate>(), this};  // Recreate shared_ptr to self.
   DCHECK(!async_fb_.IsJoinable());
 
   // If someone had sent Async during the migration, we must create async_fb_.
@@ -716,7 +733,7 @@ void Connection::OnPostMigrateThread() {
 }
 
 void Connection::OnConnectionStart() {
-  ThisFiber::SetName("DflyConnection");
+  SetName(absl::StrCat(id_));
 
   stats_ = &tl_facade_stats->conn_stats;
 
@@ -727,6 +744,7 @@ void Connection::OnConnectionStart() {
 
 void Connection::HandleRequests() {
   VLOG(1) << "[" << id_ << "] HandleRequests";
+  DCHECK(stats_);
 
   if (GetFlag(FLAGS_tcp_nodelay) && !socket_->IsUDS()) {
     int val = 1;
@@ -743,8 +761,10 @@ void Connection::HandleRequests() {
     uint8_t buf[2];
     auto read_sz = socket_->Read(io::MutableBytes(buf));
     if (!read_sz || *read_sz < sizeof(buf)) {
-      VLOG(1) << "Error reading from peer " << remote_ep << " " << read_sz.error().message()
-              << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+      LOG_EVERY_T(INFO, 1) << "Error reading from peer " << remote_ep << " "
+                           << read_sz.error().message()
+                           << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+      stats_->tls_accept_disconnects++;
       return;
     }
     if (buf[0] != 0x16 || buf[1] != 0x03) {
@@ -754,6 +774,8 @@ void Connection::HandleRequests() {
       std::ignore =
           socket_->Write(io::Buffer("-ERR Bad TLS header, double check "
                                     "if you enabled TLS for your client.\r\n"));
+      stats_->tls_accept_disconnects++;
+      return;
     }
 
     {
@@ -765,8 +787,10 @@ void Connection::HandleRequests() {
     FiberSocketBase::AcceptResult aresult = socket_->Accept();
 
     if (!aresult) {
-      LOG(INFO) << "Error handshaking " << aresult.error().message()
-                << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+      // This can flood the logs -- don't change
+      LOG_EVERY_T(INFO, 1) << "Error handshaking " << aresult.error().message()
+                           << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+      stats_->tls_accept_disconnects++;
       return;
     }
     is_tls_ = 1;
@@ -843,7 +867,7 @@ unsigned Connection::GetSendWaitTimeSec() const {
 }
 
 void Connection::RegisterBreakHook(BreakerCb breaker_cb) {
-  breaker_cb_ = breaker_cb;
+  breaker_cb_ = std::move(breaker_cb);
 }
 
 pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
@@ -896,6 +920,11 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   }
   absl::StrAppend(&after, " age=", now - creation_time_, " idle=", now - last_interaction_);
   string_view phase_name = PHASE_NAMES[phase_];
+
+  absl::StrAppend(&after, " tot-cmds=", local_stats_.cmds,
+                  " tot-net-in=", local_stats_.net_bytes_in,
+                  " tot-read-calls=", local_stats_.read_cnt,
+                  " tot-dispatches=", local_stats_.dispatch_entries_added);
 
   if (cc_) {
     string cc_info = service_->GetContextInfo(cc_.get()).Format();
@@ -964,7 +993,7 @@ bool Connection::IsMainOrMemcache() const {
 }
 
 void Connection::SetName(string name) {
-  util::ThisFiber::SetName(absl::StrCat("DflyConnection_", name));
+  util::ThisFiber::SetName(absl::StrCat("DflyConn_", name));
   name_ = std::move(name);
 }
 
@@ -1037,6 +1066,9 @@ void Connection::ConnectionFlow() {
   IncrNumConns();
   ++stats_->conn_received_cnt;
   stats_->read_buf_capacity += io_buf_.Capacity();
+
+  ++local_stats_.read_cnt;
+  local_stats_.net_bytes_in += io_buf_.InputLen();
 
   ParserStatus parse_status = OK;
 
@@ -1118,9 +1150,9 @@ void Connection::ConnectionFlow() {
 
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {
     string conn_info = service_->GetContextInfo(cc_.get()).Format();
-    LOG(WARNING) << "Socket error for connection " << conn_info << " " << GetName()
-                 << " during phase " << kPhaseName[phase_] << " : " << ec << " " << ec.message()
-                 << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+    LOG_EVERY_T(WARNING, 1) << "Socket error for connection " << conn_info << " " << GetName()
+                            << " during phase " << kPhaseName[phase_] << " : " << ec << " "
+                            << ec.message();
   }
 }
 
@@ -1140,8 +1172,13 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
           qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, dispatch_q_.size());
       return !over_limits || (dispatch_q_.empty() && !cc_->async_dispatch) || cc_->conn_closing;
     });
-    if (cc_->conn_closing)
+
+    if (cc_->conn_closing) {
+      if (request_shutdown_) {
+        ShutdownSelfBlocking();
+      }
       return;
+    }
 
     // prefer synchronous dispatching to save memory.
     optimize_for_async = false;
@@ -1157,6 +1194,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   } else {
     ShrinkPipelinePool();  // Gradually release pipeline request pool.
     {
+      ++local_stats_.cmds;
       cc_->sync_dispatch = true;
       invoke_cb();
       cc_->sync_dispatch = false;
@@ -1206,12 +1244,18 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
 
       DispatchSingle(has_more, dispatch_sync, dispatch_async);
     }
+    if (result != RedisParser::OK && result != RedisParser::INPUT_PENDING) {
+      // We do not expect that a replica sends an invalid command so we log if it happens.
+      LOG_IF(WARNING, cntx()->replica_conn)
+          << "Redis parser error: " << result << " during parse: " << ToSV(read_buffer.slice);
+    }
     read_buffer.Consume(consumed);
 
     // We must yield from time to time to allow other fibers to run.
     // Specifically, if a client sends a huge chunk of data resulting in a very long pipeline,
     // we want to yield to allow AsyncFiber to actually execute on the pending pipeline.
     if (ThisFiber::GetRunningTimeCycles() > max_busy_cycles) {
+      stats_->num_read_yields++;
       ThisFiber::Yield();
     }
   } while (RedisParser::OK == result && read_buffer.available_bytes > 0 &&
@@ -1374,10 +1418,10 @@ error_code Connection::HandleRecvSocket() {
     CHECK_GT(recv_buf_.res_len, 0);
 
     stats_->io_read_bytes += recv_buf_.res_len;
+    local_stats_.net_bytes_in += recv_buf_.res_len;
   } else {
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
     DCHECK(!append_buf.empty());
-
     ::io::Result<size_t> recv_sz = socket_->Recv(append_buf);
     last_interaction_ = time(nullptr);
 
@@ -1387,10 +1431,13 @@ error_code Connection::HandleRecvSocket() {
 
     size_t commit_sz = *recv_sz;
     io_buf_.CommitWrite(commit_sz);
+
     stats_->io_read_bytes += commit_sz;
+    local_stats_.net_bytes_in += commit_sz;
   }
 
   ++stats_->io_read_cnt;
+  ++local_stats_.read_cnt;
 
   return {};
 }
@@ -1400,8 +1447,7 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
   ParserStatus parse_status = OK;
 
   size_t max_iobfuf_len = GetFlag(FLAGS_max_client_iobuf_len);
-  unsigned max_busy_read_cycles =
-      (base::CycleClock::Frequency() * GetFlag(FLAGS_max_busy_read_usec)) / 1000000U;
+  SetMaxBusyReadUsecThreadLocal(GetFlag(FLAGS_max_busy_read_usec));
 
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
@@ -1410,6 +1456,7 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
     HandleMigrateRequest();
     ec = HandleRecvSocket();
     if (ec) {
+      LOG_IF(WARNING, cntx()->replica_conn) << "HandleRecvSocket() error: " << ec;
       return ec;
     }
 
@@ -1417,7 +1464,7 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
 
     if (redis_parser_) {
-      parse_status = ParseRedis(max_busy_read_cycles);
+      parse_status = ParseRedis(max_busy_read_cycles_cached);
     } else {
       DCHECK(memcache_parser_);
       parse_status = ParseMemcache();
@@ -1502,30 +1549,46 @@ void Connection::SquashPipeline() {
   vector<ArgSlice> squash_cmds;
   squash_cmds.reserve(dispatch_q_.size());
 
-  for (auto& msg : dispatch_q_) {
+  uint64_t start = CycleClock::Now();
+
+  for (const auto& msg : dispatch_q_) {
     CHECK(holds_alternative<PipelineMessagePtr>(msg.handle))
         << msg.handle.index() << " on " << DebugInfo();
 
+    // measure the time spent in the pipeline  queue waiting for dispatch
+    stats_->pipelined_wait_latency += CycleClock::ToUsec(start - msg.dispatch_cycle);
     auto& pmsg = get<PipelineMessagePtr>(msg.handle);
-    squash_cmds.push_back(absl::MakeSpan(pmsg->args));
+    squash_cmds.emplace_back(absl::MakeSpan(pmsg->args));
+    if (squash_cmds.size() >= pipeline_squash_limit_cached) {
+      // We reached the limit of commands to squash, so we dispatch them.
+      break;
+    }
   }
 
+  // async_dispatch is a guard to prevent concurrent writes into reply_builder_, hence
+  // it must guard the Flush() as well.
   cc_->async_dispatch = true;
 
   size_t dispatched =
       service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), reply_builder_.get(), cc_.get());
 
-  // async_dispatch is a guard to prevent concurrent writes into reply_builder_, hence
-  // it must guard the Flush() as well.
+  uint64_t before_flush = CycleClock::Now();
   //
   // TODO: to investigate if always flushing will improve P99 latency because otherwise we
   // wait for the next batch to finish before fully flushing the current response.
-  if (pending_pipeline_cmd_cnt_ == squash_cmds.size()) {  // Flush if no new commands appeared
+  if (pending_pipeline_cmd_cnt_ == squash_cmds.size() ||
+      always_flush_pipeline_cached) {  // Flush if no new commands appeared
     reply_builder_->Flush();
     reply_builder_->SetBatchMode(false);  // in case the next dispatch is sync
+  } else {
+    stats_->skip_pipeline_flushing++;
   }
 
   cc_->async_dispatch = false;
+
+  stats_->pipeline_dispatch_calls++;
+  stats_->pipeline_dispatch_commands += squash_cmds.size();
+  stats_->pipeline_dispatch_flush_usec += CycleClock::ToUsec(CycleClock::Now() - before_flush);
 
   auto it = dispatch_q_.begin();
   while (it->IsControl())  // Skip all newly received intrusive messages
@@ -1570,7 +1633,7 @@ string Connection::DebugInfo() const {
   }
   absl::StrAppend(&info, "dispatch_fiber:joinable=", async_fb_.IsJoinable(), ", ");
 
-  bool intrusive_front = dispatch_q_.size() > 0 && dispatch_q_.front().IsControl();
+  bool intrusive_front = !dispatch_q_.empty() && dispatch_q_.front().IsControl();
   absl::StrAppend(&info, "dispatch_queue:size=", dispatch_q_.size(), ", ");
   absl::StrAppend(&info, "dispatch_queue:pipelined=", pending_pipeline_cmd_cnt_, ", ");
   absl::StrAppend(&info, "dispatch_queue:intrusive=", intrusive_front, ", ");
@@ -1619,7 +1682,7 @@ void Connection::AsyncFiber() {
     // As an optimization, we only yield if the fiber was not suspended since the last dispatch.
     uint64_t cur_epoch = fb2::FiberSwitchEpoch();
     if (dispatch_q_.size() == 1 && cur_epoch == prev_epoch) {
-      ThisFiber::Yield();
+      ThisFiber::SleepFor(20us);
       DVLOG(2) << "After yielding to producer, dispatch_q_.size()=" << dispatch_q_.size();
       if (cc_->conn_closing)
         break;
@@ -1644,6 +1707,8 @@ void Connection::AsyncFiber() {
     } else {
       MessageHandle msg = std::move(dispatch_q_.front());
       dispatch_q_.pop_front();
+
+      stats_->pipelined_wait_latency += CycleClock::ToUsec(CycleClock::Now() - msg.dispatch_cycle);
 
       // We keep the batch mode enabled as long as the dispatch queue is not empty, relying on the
       // last command to reply and flush. If it doesn't reply (i.e. is a control message like
@@ -1730,7 +1795,7 @@ Connection::PipelineMessagePtr Connection::GetFromPipelinePool() {
   return ptr;
 }
 
-void Connection::ShutdownSelf() {
+void Connection::ShutdownSelfBlocking() {
   util::Connection::Shutdown();
 }
 
@@ -1760,7 +1825,7 @@ bool Connection::Migrate(util::fb2::ProactorBase* dest) {
 Connection::WeakRef Connection::Borrow() {
   DCHECK(self_);
 
-  return WeakRef(self_, socket_->proactor()->GetPoolIndex(), id_);
+  return {self_, unsigned(socket_->proactor()->GetPoolIndex()), id_};
 }
 
 void Connection::ShutdownThreadLocal() {
@@ -1837,15 +1902,20 @@ void Connection::SendAsync(MessageHandle msg) {
   // Close MONITOR connection if we overflow pipeline limits
   if (msg.IsMonitor() &&
       qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, dispatch_q_.size())) {
-    ShutdownSelf();
+    cc_->conn_closing = true;
+    request_shutdown_ = true;
+    // We don't shutdown here. The reason is that TLS socket is preemptive
+    // and SendAsync is atomic.
+    cnd_.notify_one();
     return;
   }
 
   size_t used_mem = msg.UsedMemory();
+  ++local_stats_.dispatch_entries_added;
   stats_->dispatch_queue_entries++;
   stats_->dispatch_queue_bytes += used_mem;
 
-  msg.dispatch_ts = ProactorBase::GetMonotonicTimeNs();
+  msg.dispatch_cycle = CycleClock::Now();
   if (msg.IsPubMsg()) {
     qbp.subscriber_bytes.fetch_add(used_mem, memory_order_relaxed);
     stats_->dispatch_queue_subscriber_bytes += used_mem;
@@ -1884,9 +1954,9 @@ void Connection::RecycleMessage(MessageHandle msg) {
     stats_->dispatch_queue_subscriber_bytes -= used_mem;
   }
 
-  if (msg.IsPipelineMsg()) {
+  if (msg.IsPipelineMsg() && msg.dispatch_cycle) {
     ++stats_->pipelined_cmd_cnt;
-    stats_->pipelined_cmd_latency += (ProactorBase::GetMonotonicTimeNs() - msg.dispatch_ts) / 1000;
+    stats_->pipelined_cmd_latency += CycleClock::ToUsec(CycleClock::Now() - msg.dispatch_cycle);
   }
 
   // Retain pipeline message in pool.
@@ -1938,8 +2008,8 @@ facade::ConnectionContext* Connection::cntx() {
   return cc_.get();
 }
 
-void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest) {
-  if (!migration_enabled_ || cc_ == nullptr) {
+void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest, bool force) {
+  if ((!force && !migration_enabled_) || cc_ == nullptr) {
     return;
   }
 
@@ -2070,9 +2140,15 @@ bool Connection::IsReplySizeOverLimit() const {
   std::atomic<size_t>& reply_sz = tl_facade_stats->reply_stats.squashing_current_reply_size;
   size_t current = reply_sz.load(std::memory_order_acquire);
   const bool over_limit = reply_size_limit != 0 && current > 0 && current > reply_size_limit;
-  // Every 10 seconds. Otherwise, it can be too sensitive on certain workloads in production
-  // instances.
-  LOG_EVERY_N(INFO, 10) << "MultiCommandSquasher overlimit: " << current << "/" << reply_size_limit;
+  if (over_limit) {
+    LOG_EVERY_T(INFO, 10) << "Commands squashing current reply size is overlimit: " << current
+                          << "/" << reply_size_limit
+                          << ". Falling back to single command dispatch (instead of squashing)";
+    // Used by testing. Should not be used in production, therefore debug log level 5.
+    DVLOG(5) << "Commands squashing current reply size is overlimit: " << current << "/"
+             << reply_size_limit
+             << ". Falling back to single command dispatch (instead of squashing)";
+  }
   return over_limit;
 }
 
@@ -2104,24 +2180,31 @@ void Connection::EnsureMemoryBudget(unsigned tid) {
   thread_queue_backpressure[tid].EnsureBelowLimit();
 }
 
-Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, unsigned thread_id,
-                             uint32_t client_id)
-    : ptr_{std::move(ptr)}, thread_id_{thread_id}, client_id_{client_id} {
+void Connection::SetMaxBusyReadUsecThreadLocal(unsigned usec) {
+  max_busy_read_cycles_cached = base::CycleClock::FromUsec(usec);
 }
 
-unsigned Connection::WeakRef::Thread() const {
-  return thread_id_;
+void Connection::SetAlwaysFlushPipelineThreadLocal(bool flush) {
+  always_flush_pipeline_cached = flush;
+}
+
+void Connection::SetPipelineSquashLimitThreadLocal(unsigned limit) {
+  pipeline_squash_limit_cached = limit;
+}
+
+Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, unsigned thread_id,
+                             uint32_t client_id)
+    : ptr_{std::move(ptr)}, last_known_thread_id_{thread_id}, client_id_{client_id} {
 }
 
 Connection* Connection::WeakRef::Get() const {
-  // We should never access the connection object from other threads.
-  DCHECK_EQ(ProactorBase::me()->GetPoolIndex(), int(thread_id_));
+  auto sptr = ptr_.lock();
 
   //  The connection can only be deleted on this thread, so
   //  this pointer is valid until the next suspension.
   //  Note: keeping a shared_ptr doesn't prolong the lifetime because
   //  it doesn't manage the underlying connection. See definition of `self_`.
-  return ptr_.lock().get();
+  return sptr.get();
 }
 
 bool Connection::WeakRef::IsExpired() const {

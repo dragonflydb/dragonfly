@@ -6,6 +6,7 @@
 
 #include "core/intent_lock.h"
 #include "core/mi_memory_resource.h"
+#include "core/page_usage_stats.h"
 #include "core/task_queue.h"
 #include "core/tx_queue.h"
 #include "server/common.h"
@@ -121,7 +122,7 @@ class EngineShard {
     return stats_;
   }
 
-  // Returns used memory for this shard.
+  // Calculate memory used by shard by summing multiple sources
   size_t UsedMemory() const;
 
   TieredStorage* tiered_storage() {
@@ -194,8 +195,6 @@ class EngineShard {
 
   TxQueueInfo AnalyzeTxQueue() const;
 
-  void ForceDefrag();
-
   // Returns true if revelant write operations should throttle to wait for tiering to catch up.
   // The estimate is based on memory usage crossing tiering redline and the write depth being at
   // least 50% of allowed max, providing at least some guarantee of progress.
@@ -203,12 +202,17 @@ class EngineShard {
 
   void FinalizeMulti(Transaction* tx);
 
+  // Scan the shard with the cursor and apply defragmentation for database entries. An optional
+  // threshold can be passed, which will be used to determine if defragmentation should be
+  // performed.
+  // Returns true if defragmentation was performed.
+  std::optional<CollectedPageStats> DoDefrag(CollectPageStats collect_page_stats, float threshold);
+
  private:
   struct DefragTaskState {
     size_t dbid = 0u;
     uint64_t cursor = 0u;
     time_t last_check_time = 0;
-    bool is_force_defrag = false;
 
     // check the current threshold and return true if
     // we need to do the defragmentation
@@ -243,25 +247,22 @@ class EngineShard {
   // --------------------------------------------------------------------------
   uint32_t DefragTask();
 
-  // scan the shard with the cursor and apply
-  // de-fragmentation option for entries. This function will return the new cursor at the end of the
-  // scan This function is called from context of StartDefragTask
-  // return true if we did not complete the shard scan
-  bool DoDefrag();
-
+  TxQueue txq_;
   TaskQueue queue_, queue2_;
 
-  TxQueue txq_;
-  MiMemoryResource mi_resource_;
   ShardId shard_id_;
-
   Stats stats_;
 
   // Become passive if replica: don't automatially evict expired items.
   bool is_replica_ = false;
 
-  size_t last_cached_used_memory_ = 0;
-  uint64_t cache_stats_time_ = 0;  // monotonic, set by ProactorBase::GetMonotonicTimeNs.
+  // Precise tracking of used memory by persistent shard local values and structures
+  MiMemoryResource mi_resource_;
+
+  struct {
+    uint64_t updated_at = 0;  // from GetMonotonicTimeNs
+    size_t used_mem = 0;
+  } last_mem_params_;
 
   // Logical ts used to order distributed transactions.
   TxId committed_txid_ = 0;

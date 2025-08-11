@@ -12,6 +12,7 @@ extern "C" {
 #include "redis/util.h"  // for string2ll
 }
 
+#include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
@@ -123,14 +124,23 @@ struct StringSetWrapper {
     uint32_t count = scan_op.limit;
     long maxiterations = count * 10;
 
+    const auto start_cycles = base::CycleClock::Now();
+    // Approximately 100usec
+    const uint64_t timeout_cycles = base::CycleClock::Now() + base::CycleClock::Frequency() / 10000;
+
     do {
       auto scan_callback = [&](const sds ptr) {
         if (string_view str{ptr, sdslen(ptr)}; scan_op.Matches(str))
           res->emplace_back(str);
       };
       curs = ss->Scan(curs, scan_callback);
-    } while (curs && maxiterations-- && res->size() < count);
+    } while (curs && maxiterations-- && res->size() < count &&
+             (base::CycleClock::Now() - start_cycles) < timeout_cycles);
     return curs;
+  }
+
+  explicit operator StringSet*() const {
+    return ss;
   }
 
   StringSet* operator->() const {
@@ -265,9 +275,33 @@ void InterStrSet(const DbContext& db_context, const vector<SetType>& vec, String
   }
 }
 
+template <typename C = absl::flat_hash_set<string>>
+StringVec RandMemberStrSetPicky(StringSet* strset, size_t count) {
+  C picks;
+  picks.reserve(count);
+
+  size_t tries = 0;
+  while (picks.size() < count && tries++ < count * 2)
+    picks.insert(picks.end(), string{*strset->GetRandomMember()});
+
+  if constexpr (is_same_v<StringVec, C>)
+    return picks;
+  return StringVec{make_move_iterator(picks.begin()), make_move_iterator(picks.end())};
+}
+
 StringVec RandMemberStrSet(const DbContext& db_context, const CompactObj& co,
-                           PicksGenerator& generator, std::size_t picks_count) {
+                           PicksGenerator& generator, size_t picks_count) {
   CHECK(IsDenseEncoding(co));
+  StringSetWrapper strset{co, db_context};
+
+  // If the set is small, extract entries with StringSet::GetRandomMember
+  if (picks_count * 5 < strset->UpperBoundSize()) {
+    StringSet* ss(strset);
+    if (bool unique = (dynamic_cast<UniquePicksGenerator*>(&generator) != nullptr); unique)
+      return RandMemberStrSetPicky(ss, picks_count);
+    else
+      return RandMemberStrSetPicky<StringVec>(ss, picks_count);
+  }
 
   std::unordered_map<RandomPick, std::uint32_t> times_index_is_picked;
   for (std::size_t i = 0; i < picks_count; i++) {
@@ -278,7 +312,7 @@ StringVec RandMemberStrSet(const DbContext& db_context, const CompactObj& co,
   result.reserve(picks_count);
 
   std::uint32_t ss_entry_index = 0;
-  for (string_view str : StringSetWrapper{co, db_context}.Range()) {
+  for (string_view str : strset.Range()) {
     auto it = times_index_is_picked.find(ss_entry_index++);
     if (it != times_index_is_picked.end()) {
       while (it->second--)
@@ -1222,8 +1256,8 @@ void SRandMember(CmdArgList args, const CommandContext& cmd_cntx) {
   if (parser.HasNext())
     return cmd_cntx.rb->SendError(WrongNumArgsError("SRANDMEMBER"));
 
-  if (auto err = parser.Error(); err)
-    return cmd_cntx.rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return cmd_cntx.rb->SendError(err.MakeReply());
 
   const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
     return OpRandMember(t->GetOpArgs(shard), key, count);
@@ -1430,8 +1464,8 @@ void SAddEx(CmdArgList args, const CommandContext& cmd_cntx) {
   const bool keepttl = parser.Check("KEEPTTL");
   const uint32_t ttl_sec = parser.Next<uint32_t>();
 
-  if (auto err = parser.Error(); err) {
-    return cmd_cntx.rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx.rb->SendError(err.MakeReply());
   }
   constexpr uint32_t kMaxTtl = (1UL << 26);
   if (ttl_sec == 0 || ttl_sec > kMaxTtl) {

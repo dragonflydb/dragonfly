@@ -40,8 +40,6 @@ using namespace facade;
 
 using absl::AsciiStrToUpper;
 using absl::GetFlag;
-using absl::StrAppend;
-using absl::StrCat;
 using absl::StrSplit;
 
 namespace {
@@ -135,7 +133,9 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
                         acl_categories.value_or(ImplicitAclCategories(mask))) {
   implicit_acl_ = !acl_categories.has_value();
   hdr_histogram* hist = nullptr;
-  hdr_init(kLatencyHistogramMinValue, kLatencyHistogramMaxValue, kLatencyHistogramPrecision, &hist);
+  const int init_result = hdr_init(kLatencyHistogramMinValue, kLatencyHistogramMaxValue,
+                                   kLatencyHistogramPrecision, &hist);
+  CHECK_EQ(init_result, 0) << "failed to initialize histogram for command " << name;
   latency_histogram_ = hist;
 }
 
@@ -233,11 +233,11 @@ hdr_histogram* CommandId::LatencyHist() const {
 CommandRegistry::CommandRegistry() {
   cmd_rename_map_ = ParseCmdlineArgMap(FLAGS_rename_command);
 
-  for (string name : GetFlag(FLAGS_restricted_commands)) {
+  for (const string& name : GetFlag(FLAGS_restricted_commands)) {
     restricted_cmds_.emplace(AsciiStrToUpper(name));
   }
 
-  for (string name : GetFlag(FLAGS_oom_deny_commands)) {
+  for (const string& name : GetFlag(FLAGS_oom_deny_commands)) {
     oomdeny_cmds_.emplace(AsciiStrToUpper(name));
   }
 }

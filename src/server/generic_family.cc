@@ -53,7 +53,7 @@ namespace {
 constexpr uint32_t kMaxTtl = (1UL << 26);
 constexpr size_t DUMP_FOOTER_SIZE = sizeof(uint64_t) + sizeof(uint16_t);  // version number and crc
 
-std::optional<RdbVersion> GetRdbVersion(std::string_view msg) {
+std::optional<RdbVersion> GetRdbVersion(std::string_view msg, bool ignore_crc = false) {
   if (msg.size() <= DUMP_FOOTER_SIZE) {
     LOG(WARNING) << "got restore payload that is too short - " << msg.size();
     return std::nullopt;
@@ -70,15 +70,18 @@ std::optional<RdbVersion> GetRdbVersion(std::string_view msg) {
     return std::nullopt;
   }
 
-  // Compute expected crc64 based on the actual data upto the expected crc64 field.
-  uint64_t actual_cs =
-      crc64(0, reinterpret_cast<const uint8_t*>(msg.data()), msg.size() - sizeof(uint64_t));
   uint64_t expected_cs = absl::little_endian::Load64(footer + 2);  // skip the version
 
-  if (actual_cs != expected_cs) {
-    LOG(WARNING) << "CRC check failed for restore command, expecting: " << expected_cs << " got "
-                 << actual_cs;
-    return std::nullopt;
+  if (!ignore_crc) {
+    // Compute expected crc64 based on the actual data upto the expected crc64 field.
+    uint64_t actual_cs =
+        crc64(0, reinterpret_cast<const uint8_t*>(msg.data()), msg.size() - sizeof(uint64_t));
+
+    if (actual_cs != expected_cs) {
+      LOG(WARNING) << "CRC check failed for restore command, expecting: " << expected_cs << " got "
+                   << actual_cs;
+      return std::nullopt;
+    }
   }
 
   return version;
@@ -541,10 +544,10 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
     const PrimeValue& pv = it->second;
 
     if (pv.IsExternal() && !pv.IsCool()) {
-      util::fb2::Future<string> future =
+      util::fb2::Future<io::Result<string>> future =
           op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv);
 
-      CompactObj co(future.Get());
+      CompactObj co(*future.Get());
       SerializerBase::DumpObject(co, &sink);
     } else {
       SerializerBase::DumpObject(it->second, &sink);
@@ -755,6 +758,7 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
   return res.status();
 }
 
+#ifdef WITH_COLLECTION_CMDS
 OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uint32_t ttl_sec,
                                      CmdArgList values) {
   auto& db_slice = op_args.GetDbSlice();
@@ -794,6 +798,16 @@ OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, s
   }
   return res <= 0 ? res : int32_t(res - MemberTimeSeconds(db_cntx.time_now_ms));
 }
+#else
+OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uint32_t ttl_sec,
+                                     CmdArgList values) {
+  return OpStatus::SKIPPED;
+}
+OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, string_view field) {
+  return OpStatus::SKIPPED;
+}
+
+#endif
 
 OpResult<uint32_t> OpStick(const OpArgs& op_args, const ShardArgs& keys) {
   DVLOG(1) << "Stick: " << keys.Front();
@@ -1599,7 +1613,7 @@ void GenericFamily::Restore(CmdArgList args, const CommandContext& cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view serialized_value = ArgS(args, 2);
 
-  auto rdb_version = GetRdbVersion(serialized_value);
+  auto rdb_version = GetRdbVersion(serialized_value, cmd_cntx.conn_cntx->journal_emulated);
   auto* builder = cmd_cntx.rb;
   if (!rdb_version) {
     return builder->SendError(kInvalidDumpValueErr);
@@ -1753,7 +1767,7 @@ void GenericFamily::Copy(CmdArgList args, const CommandContext& cmd_cntx) {
   bool replace = parser.Check("REPLACE");
 
   if (!parser.Finalize()) {
-    return cmd_cntx.rb->SendError(parser.Error()->MakeReply());
+    return cmd_cntx.rb->SendError(parser.TakeError().MakeReply());
   }
 
   if (k1 == k2) {

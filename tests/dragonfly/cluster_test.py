@@ -1330,6 +1330,14 @@ async def test_cluster_flushall_during_migration(
 
     assert await nodes[0].client.dbsize() == 0
 
+    # Push config that causes mass async slot deletion on nodes[1]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    # Issue flushall right after pushing new config so it runs at the same time as disowned slots are flushed
+    await nodes[1].client.execute_command("flushall")
+
 
 @pytest.mark.parametrize("interrupt", [False, True])
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -2107,7 +2115,7 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
         collection_size=10_000,
         variance=1,
         samples=1,
-        types=["LIST", "HASH", "SET", "ZSET", "STRING"],
+        types=["LIST", "HASH", "SET", "ZSET", "STREAM", "STRING"],
     )
     await seeder.run(nodes[0].client)
     source_data = await DebugPopulateSeeder.capture(nodes[0].client)
@@ -2715,7 +2723,7 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
 
 @pytest.mark.exclude_epoll
 @pytest.mark.asyncio
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_buckets_cpu_budget": 1})
 async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
     # Timeout set to 3 seconds because we must first saturate the socket before we get the timeout
     instances = [
@@ -3357,3 +3365,59 @@ async def test_slot_migration_oom(df_factory):
     assert status[0][0] == "in"
     # Error message
     assert status[0][4] == "INCOMING_MIGRATION_OOM"
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_replica_takeover_moved(
+    df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
+):
+    instances = [df_factory.create(port=next(next_port)) for i in range(4)]
+    df_factory.start_all(instances)
+
+    nodes = [await create_node_info(n) for n in instances]
+    m1, r1, m2, r2 = nodes
+    master_nodes = [m1, m2]
+
+    m1.slots = [(0, 9000)]
+    m2.slots = [(9001, 16383)]
+
+    m1.replicas = [r1]
+    m2.replicas = [r2]
+
+    await push_config(json.dumps(generate_config(master_nodes)), [node.client for node in nodes])
+
+    logging.debug("create data")
+    await m1.client.execute_command("SET X 1")
+    # Slot number 16022
+    await m2.client.execute_command("SET FOOX 1")
+
+    logging.debug("start replication")
+    await r1.client.execute_command(f"replicaof localhost {m1.instance.port}")
+    await r2.client.execute_command(f"replicaof localhost {m2.instance.port}")
+
+    await wait_available_async(r1.client)
+
+    assert await r1.client.execute_command("GET X") == "1"
+    assert await r1.client.execute_command("REPLTAKEOVER 20") == "OK"
+
+    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+        await m1.client.execute_command("GET X")
+
+    assert str(moved_error.value) == f"MOVED 7165 127.0.0.1:{r1.instance.port}"
+
+    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+        await m1.client.execute_command("GET FOOX")
+
+    assert str(moved_error.value) == f"MOVED 16022 127.0.0.1:{m2.instance.port}"
+
+    # Try write command on the new master. It should succeed because during takeover,
+    # we updated the config as well
+    assert await r1.client.execute_command("SET X 2") == "OK"
+
+    master_nodes = [r1, m2]
+    r1.slots = [(0, 9000)]
+    nodes.pop(0)
+    await push_config(json.dumps(generate_config(master_nodes)), [node.client for node in nodes])
+
+    assert await r1.client.execute_command("GET X") == "2"
+    assert await m2.client.execute_command("GET FOOX") == "1"

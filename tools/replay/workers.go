@@ -43,9 +43,11 @@ func DetermineBaseTime(files []string) time.Time {
 // Handles a single connection/client
 type ClientWorker struct {
 	redis     *redis.Client
+	compare     *redis.Client
 	incoming  chan Record
 	processed uint
 	pipe      redis.Pipeliner
+	comparePipe redis.Pipeliner
 }
 
 // Pipeline length ranges for summary
@@ -60,11 +62,22 @@ var pipelineRanges = []struct {
 	{"200+", 200, 1 << 30},
 }
 
+var compareIgnoreCmds = []string{
+    "HELLO",
+    "AUTH",
+    "SELECT",
+    "INFO",
+    "TIME",
+    "CLIENT",
+    "CONFIG",
+}
+
 // Handles a single file and distributes messages to clients
 type FileWorker struct {
 	clientGroup sync.WaitGroup
 	timeOffset  time.Duration
 	skipUntil   uint64
+	stopUntil   uint64 // timestamp when to stop processing traffic (0 = no limit)
 	// stats for output, updated by clients, read by rendering goroutine
 	processed uint64
 	delayed   uint64
@@ -99,11 +112,82 @@ func trackLatency(worker *FileWorker, batchLatency float64, size int) {
 	}
 }
 
+func ignoreCompareCmd(c redis.Cmder) bool {
+    args := c.Args()
+    if len(args) == 0 {
+        return true
+    }
+    name := strings.ToUpper(fmt.Sprint(args[0]))
+    for _, ign := range compareIgnoreCmds {
+        if name == ign {
+            return true
+        }
+    }
+    return false
+}
+
+func cmdAsString(c redis.Cmder) string {
+    args := c.Args()
+    if len(args) == 0 {
+        return "<no-args>"
+    }
+
+    name := strings.ToUpper(fmt.Sprint(args[0]))
+    if len(args) == 1 {
+        return name
+    }
+
+    parts := make([]string, 0, len(args) - 1)
+    for _, a := range args[1:] {
+        s := fmt.Sprint(a)
+        parts = append(parts, s)
+    }
+    return name + " " + strings.Join(parts, " ")
+}
+
+func cmdResultString(cm redis.Cmder) string {
+    if err := cm.Err(); err != nil {
+        if err == redis.Nil {
+            return "(nil)"
+        }
+        return "ERR: " + err.Error()
+    }
+
+    if cmd, ok := cm.(*redis.Cmd); ok {
+        v := cmd.Val()
+        s := fmt.Sprintf("%v", v)
+        return s
+    }
+
+    return fmt.Sprintf("<unknown Cmder %T>", cm)
+}
+
+func compareCmdResults(a, b []redis.Cmder, lastMsg Record) {
+    if len(a) != len(b) {
+        log.Fatalf("[COMPARE] mismatch count: primary=%d compare=%d (last client=%d time=%d)", len(a), len(b), lastMsg.Client, lastMsg.Time)
+        return
+    }
+
+    for i := range a {
+		if (ignoreCompareCmd(a[i])) {
+			continue
+		}
+		pa := cmdResultString(a[i])
+        pb := cmdResultString(b[i])
+        if pa != pb {
+			log.Fatalf("[COMPARE] mismatch at idx %d cmd=%s\n  primary=%s\n  compare=%s\n  (client=%d time=%d)", i, cmdAsString(a[i]), pa, pb, lastMsg.Client, lastMsg.Time)
+		}
+    }
+}
+
 func (c *ClientWorker) Run(pace bool, worker *FileWorker) {
 	for msg := range c.incoming {
 		if c.processed == 0 && msg.DbIndex != 0 {
 			// There is no easy way to switch, we rely on connection pool consisting only of one connection
 			c.redis.Do(context.Background(), []interface{}{"SELECT", fmt.Sprint(msg.DbIndex)})
+			if c.compare != nil {
+        		c.compare.Do(context.Background(), []interface{}{"SELECT", fmt.Sprint(msg.DbIndex)})
+    		}
 		}
 
 		lag := time.Until(worker.HappensAt(time.Unix(0, int64(msg.Time))))
@@ -116,15 +200,24 @@ func (c *ClientWorker) Run(pace bool, worker *FileWorker) {
 		}
 
 		c.pipe.Do(context.Background(), msg.values...).Result()
+		if c.comparePipe != nil {
+    		c.comparePipe.Do(context.Background(), msg.values...).Result()
+		}
+
 		atomic.AddUint64(&worker.processed, 1)
 
 		if msg.HasMore == 0 {
 			size := c.pipe.Len()
 			start := time.Now()
-			c.pipe.Exec(context.Background())
+			cmds, _ := c.pipe.Exec(context.Background())
 			batchLatency := float64(time.Since(start).Microseconds())
 			trackLatency(worker, batchLatency, size)
 			c.processed += uint(size)
+
+    		if c.comparePipe != nil {
+        		ccmds, _ := c.comparePipe.Exec(context.Background())
+        		compareCmdResults(cmds, ccmds, msg)
+    		}
 		}
 	}
 
@@ -145,6 +238,11 @@ func NewClient(w *FileWorker, pace bool) *ClientWorker {
 		incoming: make(chan Record, *fClientBuffer),
 	}
 	client.pipe = client.redis.Pipeline()
+
+	if *fCompareHost != "" {
+        client.compare = redis.NewClient(&redis.Options{Addr: *fCompareHost, PoolSize: 1, DisableIndentity: true})
+        client.comparePipe = client.compare.Pipeline()
+    }
 
 	atomic.AddUint64(&w.clients, 1)
 	w.clientGroup.Add(1)
@@ -177,6 +275,11 @@ func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
 		}
 
 		atomic.AddUint64(&w.parsed, 1)
+
+		if w.stopUntil > 0 && r.Time > w.stopUntil {
+			return true
+		}
+
 		client.incoming <- r
 		return true
 	}, *fIgnoreParseErrors)

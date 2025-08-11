@@ -70,7 +70,7 @@ class Connection : public util::Connection {
 
   // PubSub message, either incoming message for active subscription or reply for new subscription.
   struct PubMessage {
-    std::string pattern{};              // non-empty for pattern subscriber
+    std::string pattern;                // non-empty for pattern subscriber
     std::shared_ptr<char[]> buf;        // stores channel name and message
     std::string_view channel, message;  // channel and message parts from buf
     bool should_unsubscribe = false;    // unsubscribe from channel after sending the message
@@ -169,22 +169,23 @@ class Connection : public util::Connection {
         handle;
 
     // time when the message was dispatched to the dispatch queue as reported by
-    // ProactorBase::GetMonotonicTimeNs()
-    uint64_t dispatch_ts = 0;
+    // CycleClock::Now()
+    uint64_t dispatch_cycle = 0;
   };
 
   static_assert(sizeof(MessageHandle) <= 80,
                 "Big structs should use indirection to avoid wasting deque space!");
 
-  enum Phase { SETUP, READ_SOCKET, PROCESS, SHUTTING_DOWN, PRECLOSE, NUM_PHASES };
+  enum Phase : uint8_t { SETUP, READ_SOCKET, PROCESS, SHUTTING_DOWN, PRECLOSE, NUM_PHASES };
 
   // Weak reference to a connection, invalidated upon connection close.
   // Used to dispatch async operations for the connection without worrying about pointer lifetime.
   struct WeakRef {
    public:
     // Get residing thread of connection. Thread-safe.
-    unsigned Thread() const;
-
+    unsigned LastKnownThreadId() const {
+      return last_known_thread_id_;
+    }
     // Get pointer to connection if still valid, nullptr if expired.
     // Can only be called from connection's thread. Validity is guaranteed
     // only until the next suspension point.
@@ -205,7 +206,7 @@ class Connection : public util::Connection {
     WeakRef(std::shared_ptr<Connection> ptr, unsigned thread_id, uint32_t client_id);
 
     std::weak_ptr<Connection> ptr_;
-    unsigned thread_id_;
+    unsigned last_known_thread_id_;
     uint32_t client_id_;
   };
 
@@ -231,7 +232,7 @@ class Connection : public util::Connection {
   void RegisterBreakHook(BreakerCb breaker_cb);
 
   // Manually shutdown self.
-  void ShutdownSelf();
+  void ShutdownSelfBlocking();
 
   // Migrate this connecton to a different thread.
   // Return true if Migrate succeeded
@@ -288,8 +289,9 @@ class Connection : public util::Connection {
   ConnectionContext* cntx();
 
   // Requests that at some point, this connection will be migrated to `dest` thread.
-  // Connections will migrate at most once, and only when the flag --migrate_connections is true.
-  void RequestAsyncMigration(util::fb2::ProactorBase* dest);
+  // If force is false, the connection will migrate at most once,
+  // and only when the flag --migrate_connections is true.
+  void RequestAsyncMigration(util::fb2::ProactorBase* dest, bool force);
 
   // Starts traffic logging in the calling thread. Must be a proactor thread.
   // Each thread creates its own log file combining requests from all the connections in
@@ -310,6 +312,9 @@ class Connection : public util::Connection {
   static void GetRequestSizeHistogramThreadLocal(std::string* hist);
   static void TrackRequestSize(bool enable);
   static void EnsureMemoryBudget(unsigned tid);
+  static void SetMaxBusyReadUsecThreadLocal(unsigned usec);
+  static void SetAlwaysFlushPipelineThreadLocal(bool flush);
+  static void SetPipelineSquashLimitThreadLocal(unsigned limit);
 
   unsigned idle_time() const {
     return time(nullptr) - last_interaction_;
@@ -331,7 +336,7 @@ class Connection : public util::Connection {
   std::unique_ptr<ConnectionContext> cc_;  // Null for http connections
 
  private:
-  enum ParserStatus { OK, NEED_MORE, ERROR };
+  enum ParserStatus : uint8_t { OK, NEED_MORE, ERROR };
 
   struct AsyncOperations;
 
@@ -439,6 +444,14 @@ class Connection : public util::Connection {
 
   uint32_t id_;
   Protocol protocol_;
+  Phase phase_ = SETUP;
+
+  struct {
+    size_t read_cnt = 0;                // total number of read calls
+    size_t net_bytes_in = 0;            // total number of bytes read
+    size_t dispatch_entries_added = 0;  // total number of dispatch queue entries
+    size_t cmds = 0;                    // total number of commands executed
+  } local_stats_;
   ConnectionStats* stats_ = nullptr;
 
   std::unique_ptr<SinkReplyBuilder> reply_builder_;
@@ -448,7 +461,6 @@ class Connection : public util::Connection {
   ServiceInterface* service_;
 
   time_t creation_time_, last_interaction_;
-  Phase phase_ = SETUP;
   std::string name_;
 
   std::string lib_name_;
@@ -490,6 +502,8 @@ class Connection : public util::Connection {
       bool is_main_ : 1;
     };
   };
+
+  bool request_shutdown_ = false;
 };
 
 }  // namespace facade

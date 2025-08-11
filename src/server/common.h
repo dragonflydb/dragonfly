@@ -128,15 +128,11 @@ bool ParseDouble(std::string_view src, double* value);
 
 const char* RdbTypeName(unsigned type);
 
-// Cached values, updated frequently to represent the correct state of the system.
-extern std::atomic_uint64_t used_mem_peak;
+// Globally used atomics for memory readings
 extern std::atomic_uint64_t used_mem_current;
 extern std::atomic_uint64_t rss_mem_current;
-extern std::atomic_uint64_t rss_mem_peak;
-
-extern size_t max_memory_limit;
-
-size_t FetchRssMemory(const io::StatusData& sdata);
+// Current value of --maxmemory flag
+extern std::atomic_uint64_t max_memory_limit;
 
 extern Namespaces* namespaces;
 
@@ -191,6 +187,11 @@ template <typename T> struct AggregateValue {
 
   operator bool() {
     return bool(**this);
+  }
+
+  // Move out of value without critical section. Safe only when no longer in use.
+  T Destroy() && {
+    return std::move(current_);
   }
 
  private:

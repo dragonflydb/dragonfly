@@ -656,8 +656,8 @@ void BRPopLPush(CmdArgList args, const CommandContext& cmd_cntx) {
   auto [src, dest] = parser.Next<string_view, string_view>();
   float timeout = parser.Next<float>();
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   if (timeout < 0)
     return builder->SendError("timeout is negative");
@@ -689,8 +689,8 @@ void BLMove(CmdArgList args, const CommandContext& cmd_cntx) {
   ListDir dest_dir = ParseDir(&parser);
   float timeout = parser.Next<float>();
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   if (timeout < 0)
     return builder->SendError("timeout is negative");
@@ -823,8 +823,8 @@ void PopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder*
     return_arr = true;
   }
 
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpPop(t->GetOpArgs(shard), key, dir, count, true, false);
@@ -938,7 +938,7 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
     pop_count = parser.Next<size_t>();
 
   if (!parser.Finalize())
-    return response_builder->SendError(parser.Error()->MakeReply());
+    return response_builder->SendError(parser.TakeError().MakeReply());
 
   // Create a vector to store first found key for each shard
   vector<optional<pair<string_view, bool>>> found_keys_per_shard(shard_set->size());
@@ -1013,8 +1013,8 @@ void ListFamily::BLMPop(CmdArgList args, const CommandContext& cmd_cntx) {
 
   CmdArgParser parser{args};
   float timeout = parser.Next<float>();
-  if (auto err = parser.Error(); err)
-    return response_builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return response_builder->SendError(err.MakeReply());
 
   if (timeout < 0)
     return response_builder->SendError("timeout is negative");
@@ -1027,11 +1027,11 @@ void ListFamily::BLMPop(CmdArgList args, const CommandContext& cmd_cntx) {
     pop_count = parser.Next<size_t>();
 
   if (!parser.Finalize())
-    return response_builder->SendError(parser.Error()->MakeReply());
+    return response_builder->SendError(parser.TakeError().MakeReply());
 
   OpResult<StringVec> result;
   auto cb = [&](Transaction* t, EngineShard* shard, string_view key) {
-    result = OpPop(t->GetOpArgs(shard), key, dir, pop_count, true, false);
+    result = OpPop(t->GetOpArgs(shard), key, dir, pop_count, true, true);
     return result.status();
   };
 
@@ -1119,8 +1119,8 @@ void ListFamily::LPos(CmdArgList args, const CommandContext& cmd_cntx) {
   if (rank == 0)
     return rb->SendError(kInvalidIntErr);
 
-  if (auto err = parser.Error(); err)
-    return rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
 
   auto cb = [&, &key = key, &elem = elem](Transaction* t, EngineShard* shard) {
     return OpPos(t->GetOpArgs(shard), key, elem, rank, count, max_len);
@@ -1178,8 +1178,8 @@ void ListFamily::LInsert(CmdArgList args, const CommandContext& cmd_cntx) {
   InsertParam where = parser.MapNext("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
   auto [pivot, elem] = parser.Next<string_view, string_view>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (auto err = parser.Error(); err)
-    return rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
 
   DCHECK(pivot.data() && elem.data());
 
@@ -1297,8 +1297,8 @@ void ListFamily::LMove(CmdArgList args, const CommandContext& cmd_cntx) {
   ListDir src_dir = ParseDir(&parser);
   ListDir dest_dir = ParseDir(&parser);
 
-  if (auto err = parser.Error(); err)
-    return cmd_cntx.rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return cmd_cntx.rb->SendError(err.MakeReply());
 
   MoveGeneric(src, dest, src_dir, dest_dir, cmd_cntx.tx, cmd_cntx.rb);
 }
@@ -1339,8 +1339,9 @@ void ListFamily::Register(CommandRegistry* registry) {
       << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kLPushX}.HFUNC(LPushX)
       << CI{"LPOP", CO::WRITE | CO::FAST, -2, 1, 1, acl::kLPop}.HFUNC(LPop)
       << CI{"LMPOP", CO::WRITE | CO::SLOW | CO::VARIADIC_KEYS, -4, 2, 2, acl::kLMPop}.HFUNC(LMPop)
-      << CI{"BLMPOP", CO::WRITE | CO::SLOW | CO::VARIADIC_KEYS, -5, 3, 3, acl::kBLMPop}.HFUNC(
-             BLMPop)
+      << CI{"BLMPOP",    CO::WRITE | CO::SLOW | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -5, 3, 3,
+            acl::kBLMPop}
+             .HFUNC(BLMPop)
       << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kRPush}.HFUNC(RPush)
       << CI{"RPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kRPushX}.HFUNC(RPushX)
       << CI{"RPOP", CO::WRITE | CO::FAST, -2, 1, 1, acl::kRPop}.HFUNC(RPop)

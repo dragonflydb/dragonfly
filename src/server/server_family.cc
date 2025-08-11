@@ -11,14 +11,19 @@
 #include <absl/strings/str_replace.h>
 #include <absl/strings/strip.h>
 #include <croncpp.h>  // cron::cronexpr
+#include <fcntl.h>    // for mkstemp
 #include <sys/resource.h>
+#include <sys/stat.h>  // for fchmod
 #include <sys/utsname.h>
-#include <unistd.h>  // for getpid()
+#include <unistd.h>  // for getpid(), write(), close(), unlink(), fsync()
 
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <optional>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "absl/strings/ascii.h"
 #include "facade/error.h"
@@ -227,8 +232,6 @@ std::string AbslUnparseFlag(const CronExprFlag& flag) {
 
 namespace dfly {
 
-namespace fs = std::filesystem;
-
 using absl::GetFlag;
 using absl::StrCat;
 using namespace facade;
@@ -252,6 +255,16 @@ using EngineFunc = void (ServerFamily::*)(CmdArgList args, const CommandContext&
 
 inline CommandId::Handler3 HandlerFunc(ServerFamily* se, EngineFunc f) {
   return [=](CmdArgList args, const CommandContext& cntx) { return (se->*f)(args, cntx); };
+}
+
+// Captured memory peaks
+struct {
+  std::atomic<size_t> used = 0;
+  std::atomic<size_t> rss = 0;
+} glob_memory_peaks;
+
+size_t FetchRssMemory(const io::StatusData& sdata) {
+  return sdata.vm_rss + sdata.hugetlb_pages;
 }
 
 using CI = CommandId;
@@ -279,6 +292,7 @@ std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_
     exit(1);
 #endif
   } else if (detail::IsGCSPath(uri)) {
+#ifdef WITH_GCP
     auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
     auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return gcs->Init(3000); });
     if (ec) {
@@ -286,6 +300,10 @@ std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_
       exit(1);
     }
     return gcs;
+#else
+    LOG(ERROR) << "Compiled without GCP support";
+    exit(1);
+#endif
   } else {
     LOG(ERROR) << "Uknown cloud storage " << uri;
     exit(1);
@@ -572,7 +590,7 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkRe
     for (auto& tcon : connections) {
       facade::Connection* conn = tcon.Get();
       if (conn && conn->socket()->proactor()->GetPoolIndex() == p->GetPoolIndex()) {
-        conn->ShutdownSelf();
+        conn->ShutdownSelfBlocking();
         killed_connections.fetch_add(1);
       }
     }
@@ -587,6 +605,49 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkRe
                                            " client(s), but unable to kill ", kill_errors.load(),
                                            " admin client(s)."));
   }
+}
+
+void ClientMigrate(CmdArgList args, absl::Span<facade::Listener*> listeners,
+                   SinkReplyBuilder* builder, ConnectionContext* cntx) {
+  if (args.size() != 2) {
+    return builder->SendError(kSyntaxErr);
+  }
+
+  uint32_t id;
+  if (!absl::SimpleAtoi(args[0], &id)) {
+    return builder->SendError("Invalid client id");
+  }
+
+  uint32_t tid = 0;
+  if (!absl::SimpleAtoi(args[1], &tid) || tid >= shard_set->pool()->size()) {
+    return builder->SendError("Invalid thread id");
+  }
+
+  unsigned migrated = 0;
+  auto cb_brief = [&](unsigned current_tid, ProactorBase* p) {
+    if (current_tid == tid) {
+      return;  // we should not migrate to the same thread
+    }
+
+    auto traverse_cb = [&](unsigned, util::Connection* conn) {
+      facade::Connection* dconn = static_cast<facade::Connection*>(conn);
+      if (dconn->GetClientId() == id) {
+        ++migrated;
+        dconn->RequestAsyncMigration(shard_set->pool()->at(tid), true /* force */);
+      }
+    };
+
+    for (auto* listener : listeners) {
+      if (listener->IsPrivilegedInterface())
+        continue;  // skip privileged interfaces
+
+      listener->TraverseConnectionsOnThread(traverse_cb, UINT32_MAX, nullptr);
+    }
+  };
+
+  shard_set->pool()->AwaitBrief(cb_brief);
+
+  return builder->SendLong(migrated);
 }
 
 std::string_view GetOSString() {
@@ -635,22 +696,22 @@ optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, SinkReplyBui
   } else {
     replicaof_args.host = parser.Next<string>();
     replicaof_args.port = parser.Next<uint16_t>();
-    if (auto err = parser.Error(); err || replicaof_args.port < 1) {
+    if (auto err = parser.TakeError(); err || replicaof_args.port < 1) {
       builder->SendError("port is out of range");
       return nullopt;
     }
     if (parser.HasNext()) {
       auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
       replicaof_args.slot_range = cluster::SlotRange{slot_start, slot_end};
-      if (auto err = parser.Error(); err || !replicaof_args.slot_range->IsValid()) {
+      if (auto err = parser.TakeError(); err || !replicaof_args.slot_range->IsValid()) {
         builder->SendError("Invalid slot range");
         return nullopt;
       }
     }
   }
 
-  if (auto err = parser.Error(); err) {
-    builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    builder->SendError(err.MakeReply());
     return nullopt;
   }
   return replicaof_args;
@@ -673,13 +734,149 @@ bool ReadProcStats(io::StatusData* sdata) {
     return false;
   }
 
-  size_t total_rss = FetchRssMemory(sdata_res.value());
+  size_t total_rss = FetchRssMemory(*sdata_res);
   rss_mem_current.store(total_rss, memory_order_relaxed);
-  if (rss_mem_peak.load(memory_order_relaxed) < total_rss) {
-    rss_mem_peak.store(total_rss, memory_order_relaxed);
-  }
+  if (total_rss > glob_memory_peaks.rss.load(memory_order_relaxed))
+    glob_memory_peaks.rss.store(total_rss, memory_order_relaxed);
+
   *sdata = *sdata_res;
   return true;
+}
+
+// Rewrite the configuration file with runtime modified settings
+GenericError RewriteConfigFile() {
+  absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
+  if (!flagfile_flag || flagfile_flag->CurrentValue().empty()) {
+    return GenericError("The server is running without a config file");
+  }
+
+  std::string config_file_path = flagfile_flag->CurrentValue();
+
+  // Read original config file
+  std::ifstream file(config_file_path);
+  if (!file.is_open()) {
+    return GenericError("Cannot read config file");
+  }
+
+  std::string original_content;
+  std::string line;
+  std::unordered_set<std::string> existing_flags;
+  std::vector<std::string> updated_lines;
+  bool in_generated_section = false;
+  bool had_generated_section = false;
+
+  // Get only runtime modified flag values (not startup config)
+  std::unordered_map<std::string, std::string> current_flags;
+  auto all_flags = absl::GetAllFlags();
+  for (const auto& [flag_name, flag_ptr] : all_flags) {
+    // Only include flags that were modified at runtime via CONFIG SET
+    // We exclude 'flagfile' and other startup-only configs
+    if (flag_ptr->CurrentValue() != flag_ptr->DefaultValue() && flag_name != "flagfile") {
+      // Additional check: only include if the config is known to ConfigRegistry
+      // This ensures we only write configs that can be modified at runtime
+      auto config_names = config_registry.List(flag_name);
+      if (!config_names.empty()) {
+        current_flags[std::string(flag_name)] = flag_ptr->CurrentValue();
+      }
+    }
+  }
+
+  // Process original file line by line
+  while (std::getline(file, line)) {
+    std::string trimmed = line;
+    trimmed.erase(0, trimmed.find_first_not_of(" \t"));
+
+    // Skip generated section from previous rewrites
+    if (trimmed == "# Generated by CONFIG REWRITE") {
+      in_generated_section = true;
+      had_generated_section = true;
+      break;
+    }
+
+    if (!in_generated_section) {
+      // Check if this line is a flag definition
+      if (!trimmed.empty() && trimmed[0] == '-' && trimmed[1] == '-') {
+        size_t eq_pos = trimmed.find('=');
+        if (eq_pos != std::string::npos) {
+          std::string flag_name = trimmed.substr(2, eq_pos - 2);
+          if (current_flags.count(flag_name)) {
+            // Update existing flag with current value
+            updated_lines.push_back(absl::StrCat("--", flag_name, "=", current_flags[flag_name]));
+            existing_flags.insert(flag_name);
+          } else {
+            // Keep original line if flag is not in current active flags
+            updated_lines.push_back(line);
+          }
+        } else {
+          // Keep original line as-is
+          updated_lines.push_back(line);
+        }
+      } else {
+        // Keep comments and other lines as-is
+        updated_lines.push_back(line);
+      }
+    }
+  }
+  file.close();
+
+  // Collect new flags that weren't in original config
+  std::vector<std::string> new_flags;
+  for (const auto& [flag_name, flag_value] : current_flags) {
+    if (existing_flags.find(flag_name) == existing_flags.end()) {
+      new_flags.push_back(absl::StrCat("--", flag_name, "=", flag_value));
+    }
+  }
+
+  // Build final content
+  std::string final_content;
+  for (const auto& line : updated_lines) {
+    final_content += line + "\n";
+  }
+
+  // Add new flags section if there are any
+  if (!new_flags.empty()) {
+    if (!final_content.empty() && final_content.back() != '\n') {
+      final_content += "\n";
+    }
+    // Only add extra spacing if this is the first time adding generated section
+    if (!had_generated_section) {
+      final_content += "\n# Generated by CONFIG REWRITE\n";
+    } else {
+      final_content += "# Generated by CONFIG REWRITE\n";
+    }
+    for (const auto& new_flag : new_flags) {
+      final_content += new_flag + "\n";
+    }
+  }
+
+  // Atomic write using mkstemp + rename
+  std::string tmp_template = config_file_path + ".tmpXXXXXX";
+  int fd = mkstemp(tmp_template.data());
+  if (fd == -1) {
+    return GenericError("Failed to create temporary file");
+  }
+
+  size_t off = 0;
+  while (off < final_content.size()) {
+    ssize_t n = write(fd, final_content.c_str() + off, final_content.size() - off);
+    if (n <= 0) {
+      close(fd);
+      unlink(tmp_template.data());
+      return GenericError("Failed to write config file");
+    }
+    off += n;
+  }
+
+  fsync(fd);
+  fchmod(fd, 0644);
+  close(fd);
+
+  if (rename(tmp_template.data(), config_file_path.c_str()) == -1) {
+    unlink(tmp_template.data());
+    return GenericError("Failed to rewrite config file");
+  }
+
+  return {};
 }
 
 }  // namespace
@@ -959,7 +1156,7 @@ void ServerFamily::LoadFromSnapshot() {
       snapshot_storage_->LoadPath(GetFlag(FLAGS_dir), GetFlag(FLAGS_dbfilename));
 
   if (load_path_result) {
-    const std::string load_path = *load_path_result;
+    const std::string& load_path = *load_path_result;
     if (!load_path.empty()) {
       auto future = Load(load_path, LoadExistingKeys::kFail);
       load_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber([future]() mutable {
@@ -1031,50 +1228,39 @@ void ServerFamily::Shutdown() {
 }
 
 bool ServerFamily::HasPrivilegedInterface() {
-  for (auto* listener : listeners_) {
-    if (listener->IsPrivilegedInterface()) {
-      return true;
-    }
-  }
-  return false;
+  return any_of(listeners_.begin(), listeners_.end(),
+                [](auto* l) { return l->IsPrivilegedInterface(); });
 }
 
 void ServerFamily::UpdateMemoryGlobalStats() {
-  ShardId sid = EngineShard::tlocal()->shard_id();
-  if (sid != 0) {  // This function is executed periodicaly on all shards. To ensure the logic
-                   // bellow runs only on one shard we return is the shard is not 0.
+  // Called from all shards, but one updates global stats below
+  if (EngineShard::tlocal()->shard_id() > 0)
     return;
-  }
 
+  // Update used memory peak
   uint64_t mem_current = used_mem_current.load(std::memory_order_relaxed);
-  if (mem_current > used_mem_peak.load(memory_order_relaxed)) {
-    used_mem_peak.store(mem_current, memory_order_relaxed);
-  }
+  if (mem_current > glob_memory_peaks.used.load(memory_order_relaxed))
+    glob_memory_peaks.used.store(mem_current, memory_order_relaxed);
 
   io::StatusData status_data;
-  bool success = ReadProcStats(&status_data);
+  bool success = ReadProcStats(&status_data);  // updates glob_memory_peaks.rss
   if (!success)
     return;
 
   size_t total_rss = FetchRssMemory(status_data);
+
+  // Decide on stopping or accepting new connections based on oom deny ratio
   double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
   if (rss_oom_deny_ratio > 0) {
-    size_t memory_limit = max_memory_limit * rss_oom_deny_ratio;
+    size_t memory_limit = max_memory_limit.load(memory_order_relaxed) * rss_oom_deny_ratio;
     if (total_rss > memory_limit && accepting_connections_ && HasPrivilegedInterface()) {
-      for (auto* listener : listeners_) {
-        if (!listener->IsPrivilegedInterface()) {
-          listener->socket()->proactor()->Await([listener]() { listener->pause_accepting(); });
-        }
-      }
-      accepting_connections_ = false;
-
+      LOG_EVERY_T(WARNING, 10)
+          << "Accepting connections stopped, used memory over limit: total_rss " << total_rss
+          << " > memory_limit " << memory_limit;
+      ChangeConnectionAccept(false);
     } else if (total_rss < memory_limit && !accepting_connections_) {
-      for (auto* listener : listeners_) {
-        if (!listener->IsPrivilegedInterface()) {
-          listener->socket()->proactor()->Await([listener]() { listener->resume_accepting(); });
-        }
-      }
-      accepting_connections_ = true;
+      LOG_EVERY_T(INFO, 10) << "Accepting connections again, used memory below limit";
+      ChangeConnectionAccept(true);
     }
   }
 }
@@ -1098,23 +1284,15 @@ void ServerFamily::FlushAll(Namespace* ns) {
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
-std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_path,
+std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& path,
                                                             LoadExistingKeys existing_keys) {
-  std::string path(load_path);
-
-  if (load_path.empty()) {
-    fs::path dir_path(GetFlag(FLAGS_dir));
-    string filename = GetFlag(FLAGS_dbfilename);
-    dir_path.append(filename);
-    path = dir_path.generic_string();
-  }
-
+  DCHECK(!path.empty());
   DCHECK_GT(shard_count(), 0u);
 
   // TODO: to move it to helio.
   auto immediate = [](auto val) {
     fb2::Future<GenericError> future;
-    future.Resolve(val);
+    future.Resolve(std::move(val));
     return future;
   };
 
@@ -1144,21 +1322,22 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
   vector<fb2::Fiber> load_fibers;
   load_fibers.reserve(paths.size());
 
-  auto aggregated_result = std::make_shared<AggregateLoadResult>();
-
-  std::string snapshot_id;
-  if (absl::EndsWith(load_path, "summary.dfs")) {
+  LoadOptions load_opts;
+  if (absl::EndsWith(path, "summary.dfs")) {
     // we read summary first to get snapshot_id and load data correctly
-    auto load_result = pool.GetNextProactor()->Await(
-        [&] { return LoadRdb(std::string(load_path), existing_keys, &snapshot_id); });
-    if (!load_result.has_value())
-      aggregated_result->first_error = load_result.error();
+    error_code load_ec =
+        pool.GetNextProactor()->Await([&] { return LoadRdb(path, existing_keys, &load_opts); });
+    if (load_ec)
+      return immediate(load_ec);
   }
 
-  for (auto& path : paths) {
+  auto aggregated_result = std::make_shared<AggregateLoadResult>();
+
+  for (const auto& file : paths) {
     // we have already read summary so we skip it now
-    if (absl::EndsWith(path, "summary.dfs"))
+    if (absl::EndsWith(file, "summary.dfs"))
       continue;
+
     // For single file, choose thread that does not handle shards if possible.
     // This will balance out the CPU during the load.
     ProactorBase* proactor;
@@ -1168,15 +1347,13 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
       proactor = pool.GetNextProactor();
     }
 
-    auto load_func = [this, aggregated_result, existing_keys, path = std::move(path),
-                      snapshot_id]() {
-      auto sid = snapshot_id;
-      auto load_result = LoadRdb(path, existing_keys, &sid);
-      DCHECK(sid == snapshot_id);
-      if (load_result.has_value())
-        aggregated_result->keys_read.fetch_add(*load_result);
-      else
-        aggregated_result->first_error = load_result.error();
+    auto load_func = [=]() mutable {
+      error_code load_ec = LoadRdb(file, existing_keys, &load_opts);
+      if (load_ec) {
+        aggregated_result->first_error = load_ec;
+      } else {
+        aggregated_result->keys_read.fetch_add(load_opts.num_loaded_keys, memory_order_relaxed);
+      }
     };
     load_fibers.push_back(proactor->LaunchFiber(std::move(load_func)));
   }
@@ -1238,40 +1415,42 @@ void ServerFamily::SnapshotScheduling() {
   }
 }
 
-io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
-                                         LoadExistingKeys existing_keys, std::string* snapshot_id) {
+std::error_code ServerFamily::LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys,
+                                      LoadOptions* load_opts) {
+  DCHECK(load_opts);
   VLOG(1) << "Loading data from " << rdb_file;
   CHECK(fb2::ProactorBase::IsProactorThread()) << "must be called from proactor thread";
 
-  std::string filt_snapshot_id = snapshot_id ? *snapshot_id : "";
+  const std::string& filt_snapshot_id = load_opts->snapshot_id;
 
-  io::Result<size_t> result;
   ProactorBase* proactor = fb2::ProactorBase::me();
+  error_code result;
   auto fb = proactor->LaunchFiber([&] {
     io::ReadonlyFileOrError res = snapshot_storage_->OpenReadFile(rdb_file);
     if (!res) {
-      result = nonstd::make_unexpected(res.error());
+      result = res.error();
       return;
     }
 
     io::FileSource fs(*res);
 
     RdbLoader loader{&service_, filt_snapshot_id};
+    loader.SetShardCount(load_opts->shard_count);
     if (existing_keys == LoadExistingKeys::kOverride) {
       loader.SetOverrideExistingKeys(true);
     }
 
     auto ec = loader.Load(&fs);
-    // we ignore incorrect_snapshot_id, it means we try to load file not from the snapshot
-    if (ec && (ec.value() != rdb::errc::incorrect_snapshot_id)) {
-      result = nonstd::make_unexpected(ec);
+    if (ec) {
+      // We ignore incorrect_snapshot_id, it means we try to load file from incorrect snapshot.
+      if (ec.value() != rdb::errc::incorrect_snapshot_id)
+        result = ec;
     } else {
       VLOG(1) << "Done loading RDB from " << rdb_file << ", keys loaded: " << loader.keys_loaded();
       VLOG(1) << "Loading finished after " << strings::HumanReadableElapsedTime(loader.load_time());
-      result = loader.keys_loaded();
-      if (snapshot_id && snapshot_id->empty()) {
-        *snapshot_id = loader.GetSnapshotId();
-      }
+      load_opts->num_loaded_keys = loader.keys_loaded();
+      load_opts->snapshot_id = loader.GetSnapshotId();
+      load_opts->shard_count = loader.shard_count();
     }
   });
 
@@ -1279,7 +1458,7 @@ io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
   return result;
 }
 
-enum MetricType { COUNTER, GAUGE, SUMMARY, HISTOGRAM };
+enum MetricType : uint8_t { COUNTER, GAUGE, SUMMARY, HISTOGRAM };
 
 const char* MetricTypeName(MetricType type) {
   switch (type) {
@@ -1375,11 +1554,29 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("pipeline_commands_total", "", conn_stats.pipelined_cmd_cnt,
                             MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_dispatch_calls_total", "", conn_stats.pipeline_dispatch_calls,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_dispatch_commands_total", "",
+                            conn_stats.pipeline_dispatch_commands, MetricType::COUNTER,
+                            &resp->body());
+  AppendMetricWithoutLabels("pipeline_dispatch_skip_flush_total", "",
+                            conn_stats.skip_pipeline_flushing, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_dispatch_flush_duration_seconds", "",
+                            conn_stats.pipeline_dispatch_flush_usec * 1e-6, MetricType::COUNTER,
+                            &resp->body());
+
   AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
                             conn_stats.pipelined_cmd_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
+  AppendMetricWithoutLabels("pipeline_queue_wait_duration_seconds", "",
+                            conn_stats.pipelined_wait_latency * 1e-6, MetricType::COUNTER,
+                            &resp->body());
 
-  AppendMetricWithoutLabels("cmd_squash_hop_total", "", m.coordinator_stats.multi_squash_executions,
+  AppendMetricWithoutLabels("cmd_squash_stats_ignored_total", "",
+                            m.coordinator_stats.squash_stats_ignored, MetricType::COUNTER,
+                            &resp->body());
+
+  AppendMetricWithoutLabels("cmd_squash_hop_total", "", m.coordinator_stats.multi_squash_hops,
                             MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("cmd_squash_commands_total", "", m.coordinator_stats.squashed_commands,
@@ -1409,8 +1606,8 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   bool success = ReadProcStats(&sdata);
   AppendMetricWithoutLabels("memory_used_bytes", "", m.heap_used_bytes, MetricType::GAUGE,
                             &resp->body());
-  AppendMetricWithoutLabels("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
-                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("memory_used_peak_bytes", "", m.used_mem_peak, MetricType::GAUGE,
+                            &resp->body());
   AppendMetricWithoutLabels("memory_fiberstack_vms_bytes",
                             "virtual memory size used by all the fibers", m.worker_fiber_stack_size,
                             MetricType::GAUGE, &resp->body());
@@ -1418,8 +1615,8 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             &resp->body());
   AppendMetricWithoutLabels("blocked_tasks", "", m.blocked_tasks, MetricType::GAUGE, &resp->body());
 
-  AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit, MetricType::GAUGE,
-                            &resp->body());
+  AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit.load(memory_order_relaxed),
+                            MetricType::GAUGE, &resp->body());
 
   if (m.events.insertion_rejections | m.coordinator_stats.oom_error_cmd_cnt) {
     AppendMetricHeader("oom_errors_total", "Rejected requests due to out of memory errors",
@@ -1502,8 +1699,14 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             MetricType::COUNTER, &resp->body());
 
   // Net metrics
+  AppendMetricWithoutLabels("net_input_recv_total", "", conn_stats.io_read_cnt, MetricType::COUNTER,
+                            &resp->body());
+  AppendMetricWithoutLabels("net_read_yields_total", "", conn_stats.num_read_yields,
+                            MetricType::COUNTER, &resp->body());
+
   AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
                             MetricType::COUNTER, &resp->body());
+
   AppendMetricWithoutLabels("net_output_bytes_total", "", m.facade_stats.reply_stats.io_write_bytes,
                             MetricType::COUNTER, &resp->body());
   {
@@ -1521,6 +1724,8 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                      &resp->body());
   AppendMetricValue("listener_accept_error_total", m.refused_conn_max_clients_reached_count,
                     {"reason"}, {"limit_reached"}, &resp->body());
+  AppendMetricValue("listener_accept_error_total", m.facade_stats.conn_stats.tls_accept_disconnects,
+                    {"reason"}, {"tls_error"}, &resp->body());
 
   // DB stats
   AppendMetricWithoutLabels("expired_keys_total", "", m.events.expired_keys, MetricType::COUNTER,
@@ -1560,12 +1765,14 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
 
     ReplicationMemoryStats repl_mem;
     dfly_cmd->GetReplicationMemoryStats(&repl_mem);
-    AppendMetricWithoutLabels(
-        "replication_streaming_bytes", "Stable sync replication memory  usage",
-        repl_mem.streamer_buf_capacity_bytes, MetricType::GAUGE, &resp->body());
+    AppendMetricWithoutLabels("replication_streaming_bytes", "Stable sync replication memory usage",
+                              repl_mem.streamer_buf_capacity_bytes, MetricType::GAUGE,
+                              &resp->body());
     AppendMetricWithoutLabels("replication_full_sync_bytes", "Full sync memory usage",
                               repl_mem.full_sync_buf_bytes, MetricType::GAUGE, &resp->body());
-
+    AppendMetricWithoutLabels("replication_psync_count", "Pync count",
+                              m.coordinator_stats.psync_requests_total, MetricType::COUNTER,
+                              &resp->body());
     AppendMetricHeader("connected_replica_lag_records", "Lag in records of a connected replica.",
                        MetricType::GAUGE, &replication_lag_metrics);
     for (const auto& replica : replicas_info) {
@@ -1786,33 +1993,49 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
     return GenericError{make_error_code(errc::operation_in_progress),
                         StrCat(GlobalStateName(state), " - can not save database")};
   }
+  // Check if save is already in progress
   {
     util::fb2::LockGuard lk(save_mu_);
     if (save_controller_) {
       return GenericError{make_error_code(errc::operation_in_progress),
                           "SAVING - can not save database"};
     }
+  }
 
-    auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
-                                ? snapshot_storage_
-                                : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
+  // Create save controller outside of mutex to avoid blocking INFO commands
+  auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
+                              ? snapshot_storage_
+                              : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
 
-    save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
-        save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
-        &service_, fq_threadpool_.get(), snapshot_storage, opts.bg_save});
+  auto temp_save_controller = make_unique<SaveStagesController>(detail::SaveStagesInputs{
+      save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans, &service_,
+      fq_threadpool_.get(), snapshot_storage, opts.bg_save});
 
-    auto res = save_controller_->InitResourcesAndStart();
+  // Initialize resources outside of mutex (this may take time for S3 operations)
+  auto res = temp_save_controller->InitResourcesAndStart();
+
+  // Now acquire mutex only to set the controller and update state
+  {
+    util::fb2::LockGuard lk(save_mu_);
+
+    // Double-check that no other save started while we were initializing
+    if (save_controller_) {
+      return GenericError{make_error_code(errc::operation_in_progress),
+                          "SAVING - can not save database"};
+    }
 
     if (res) {
       DCHECK_EQ(res->error, true);
       last_save_info_.SetLastSaveError(*res);
-      save_controller_.reset();
+      // Don't set save_controller_ since initialization failed
       if (bg_save) {
         last_save_info_.last_bgsave_status = false;
       }
       return res->error;
     }
 
+    // Success - set the controller and update state
+    save_controller_ = std::move(temp_save_controller);
     last_save_info_.bgsave_in_progress = bg_save;
   }
   return {};
@@ -2038,6 +2261,14 @@ void ServerFamily::ClientUnPauseCmd(CmdArgList args, SinkReplyBuilder* builder) 
   builder->SendOk();
 }
 
+void ServerFamily::ChangeConnectionAccept(bool accept) {
+  DCHECK_NE(accept, accepting_connections_);
+  auto h = accept ? &ListenerInterface::resume_accepting : &ListenerInterface::pause_accepting;
+  for (auto* listener : GetNonPriviligedListeners())
+    listener->socket()->proactor()->Await([listener, h]() { (listener->*h)(); });
+  accepting_connections_ = accept;
+}
+
 void ClientHelp(SinkReplyBuilder* builder) {
   string_view help_arr[] = {
       "CLIENT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
@@ -2071,6 +2302,8 @@ void ClientHelp(SinkReplyBuilder* builder) {
       "    * LIB-VER: the client lib version.",
       "TRACKING (ON|OFF) [OPTIN] [OPTOUT] [NOLOOP]",
       "    Control server assisted client side caching.",
+      "MIGRATE <client-id> <tid>",
+      "    Migrates connection specified by client-id to the specified thread id.",
       "HELP",
       "    Print this help."};
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
@@ -2103,6 +2336,8 @@ void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
     return ClientSetInfo(sub_args, builder, cntx);
   } else if (sub_cmd == "ID") {
     return ClientId(sub_args, builder, cntx);
+  } else if (sub_cmd == "MIGRATE") {
+    return ClientMigrate(sub_args, absl::MakeSpan(listeners_), builder, cntx);
   } else if (sub_cmd == "HELP") {
     return ClientHelp(builder);
   }
@@ -2123,6 +2358,8 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
         "    Set the configuration <directive> to <value>.",
         "RESETSTAT",
         "    Reset statistics reported by the INFO command.",
+        "REWRITE",
+        "    Rewrite the configuration file with the current configuration.",
         "HELP",
         "    Prints this help.",
     };
@@ -2181,6 +2418,13 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
     }
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
     return rb->SendBulkStrArr(res, RedisReplyBuilder::MAP);
+  }
+
+  if (sub_cmd == "REWRITE") {
+    if (auto ec = RewriteConfigFile(); ec) {
+      return builder->SendError(ec.Format());
+    }
+    return builder->SendOk();
   }
 
   if (sub_cmd == "RESETSTAT") {
@@ -2313,6 +2557,10 @@ void ServerFamily::ResetStat(Namespace* ns) {
         }
         facade::ResetStats();
         ServerState::tlocal()->exec_freq_count.clear();
+
+        auto reset_cb = [](uint64_t) -> uint64_t { return 0u; };
+        ServerState::tlocal()->stats.tx_width_freq_arr.apply(reset_cb);
+        ServerState::tlocal()->stats.squash_width_freq_arr.apply(reset_cb);
       });
 }
 
@@ -2425,13 +2673,19 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
   // update peak_stats_ from it.
-  util::fb2::LockGuard lk{peak_stats_mu_};
-  UpdateMax(&peak_stats_.conn_dispatch_queue_bytes,
-            result.facade_stats.conn_stats.dispatch_queue_bytes);
-  UpdateMax(&peak_stats_.conn_read_buf_capacity, result.facade_stats.conn_stats.read_buf_capacity);
+  {
+    util::fb2::LockGuard lk{peak_stats_mu_};
+    UpdateMax(&peak_stats_.conn_dispatch_queue_bytes,
+              result.facade_stats.conn_stats.dispatch_queue_bytes);
+    UpdateMax(&peak_stats_.conn_read_buf_capacity,
+              result.facade_stats.conn_stats.read_buf_capacity);
+    result.peak_stats = peak_stats_;
+  }
 
   result.peak_stats = peak_stats_;
   result.cmd_latency_map = service_.mutable_registry()->LatencyMap();
+  result.used_mem_peak = glob_memory_peaks.used.load(memory_order_relaxed);
+  result.used_mem_rss_peak = glob_memory_peaks.rss.load(memory_order_relaxed);
 
   uint64_t delta_ms = (absl::GetCurrentTimeNanos() - start) / 1'000'000;
   if (delta_ms > 30) {
@@ -2520,9 +2774,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
   auto add_mem_info = [&] {
     append("used_memory", m.heap_used_bytes);
     append("used_memory_human", HumanReadableNumBytes(m.heap_used_bytes));
-    const auto ump = used_mem_peak.load(memory_order_relaxed);
-    append("used_memory_peak", ump);
-    append("used_memory_peak_human", HumanReadableNumBytes(ump));
+    append("used_memory_peak", m.used_mem_peak);
+    append("used_memory_peak_human", HumanReadableNumBytes(m.used_mem_peak));
 
     // Virtual memory size, upper bound estimation on the RSS memory used by the fiber stacks.
     append("fibers_stack_vms", m.worker_fiber_stack_size);
@@ -2535,10 +2788,11 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       append("used_memory_rss", rss);
       append("used_memory_rss_human", HumanReadableNumBytes(rss));
     }
-    append("used_memory_peak_rss", rss_mem_peak.load(memory_order_relaxed));
+    append("used_memory_peak_rss", glob_memory_peaks.used.load(memory_order_relaxed));
 
-    append("maxmemory", max_memory_limit);
-    append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
+    size_t limit = max_memory_limit.load(memory_order_relaxed);
+    append("maxmemory", limit);
+    append("maxmemory_human", HumanReadableNumBytes(limit));
 
     append("used_memory_lua", m.lua_stats.used_bytes);
 
@@ -2603,6 +2857,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     auto& reply_stats = m.facade_stats.reply_stats;
 
     append("total_connections_received", conn_stats.conn_received_cnt);
+    append("total_handshakes_started", conn_stats.handshakes_started);
+    append("total_handshakes_completed", conn_stats.handshakes_completed);
     append("total_commands_processed", conn_stats.command_cnt_main + conn_stats.command_cnt_other);
     append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
@@ -2661,6 +2917,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
   auto add_tiered_info = [&] {
     append("tiered_entries", total.tiered_entries);
     append("tiered_entries_bytes", total.tiered_used_bytes);
+    append("tiered_entries_bytes_human", HumanReadableNumBytes(total.tiered_used_bytes));
 
     append("tiered_total_stashes", m.tiered_stats.total_stashes);
     append("tiered_total_fetches", m.tiered_stats.total_fetches);
@@ -2753,6 +3010,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("tx_batch_scheduled_items_total", m.shard_stats.tx_batch_scheduled_items_total);
     append("tx_batch_schedule_calls_total", m.shard_stats.tx_batch_schedule_calls_total);
     append("tx_with_freq", absl::StrJoin(m.coordinator_stats.tx_width_freq_arr, ","));
+    append("squash_with_freq", absl::StrJoin(m.coordinator_stats.squash_width_freq_arr, ","));
     append("tx_queue_len", m.tx_queue_len);
 
     append("eval_io_coordination_total", m.coordinator_stats.eval_io_coordination_cnt);
@@ -2992,7 +3250,7 @@ void ServerFamily::Hello(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view clientname;
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (args.size() > 0) {
+  if (!args.empty()) {
     string_view proto_version = ArgS(args, 0);
     is_resp3 = proto_version == "3";
     bool valid_proto_version = proto_version == "2" || is_resp3;
@@ -3247,8 +3505,8 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   if (parser.HasNext())
     return builder->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
 
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   // We allow zero timeouts for tests.
   if (timeout_sec < 0) {
@@ -3274,6 +3532,10 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
     return builder->SendError("Couldn't execute takeover");
 
   LOG(INFO) << "Takeover successful, promoting this instance to master.";
+
+  if (IsClusterEnabled()) {
+    service().cluster_family().ReconcileMasterReplicaTakeoverSlots(false);
+  }
   SetMasterFlagOnAllThreads(true);
   last_master_data_ = replica_->Stop();
   replica_.reset();
@@ -3546,8 +3808,8 @@ void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,
   if (parser.HasNext()) {
     pause_state = parser.MapNext("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
   }
-  if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    return builder->SendError(err.MakeReply());
   }
 
   const auto timeout_ms = timeout * 1ms;

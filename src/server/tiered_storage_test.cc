@@ -324,7 +324,8 @@ TEST_F(TieredStorageTest, MemoryPressure) {
     ThisFiber::SleepFor(500us);
   }
 
-  EXPECT_LT(used_mem_peak.load(), 20_MB);
+  auto metrics = GetMetrics();
+  EXPECT_LT(metrics.used_mem_peak, 20_MB);
 }
 
 TEST_F(TieredStorageTest, Expiry) {

@@ -164,7 +164,7 @@ async def test_redis_load_snapshot(
     Test redis server loading dragonfly snapshot rdb format
     """
     await DebugPopulateSeeder(
-        **LIGHTWEIGHT_SEEDER_ARGS, types=["STRING", "LIST", "SET", "HASH", "ZSET"]
+        **LIGHTWEIGHT_SEEDER_ARGS, types=["STRING", "LIST", "SET", "HASH", "ZSET", "STREAM"]
     ).run(async_client)
 
     await async_client.lpush("list", "A" * 10_000)

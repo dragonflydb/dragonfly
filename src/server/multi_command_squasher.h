@@ -29,10 +29,13 @@ class MultiCommandSquasher {
   };
 
   // Returns number of processed commands.
-  static size_t Execute(absl::Span<StoredCmd> cmds, facade::RedisReplyBuilder* rb,
-                        ConnectionContext* cntx, Service* service, const Opts& opts) {
-    return MultiCommandSquasher{cmds, cntx, service, opts}.Run(rb);
+  static void Execute(absl::Span<StoredCmd> cmds, facade::RedisReplyBuilder* rb,
+                      ConnectionContext* cntx, Service* service, const Opts& opts) {
+    MultiCommandSquasher{cmds, cntx, service, opts}.Run(rb);
   }
+
+  static void SetMaxBusySquashUsec(uint32_t usec);
+  static void SetSquashStatsLatencyLowerLimit(uint32_t usec);
 
  private:
   // Per-shard execution info.
@@ -72,8 +75,7 @@ class MultiCommandSquasher {
   // Execute all currently squashed commands. Return false if aborting on error.
   bool ExecuteSquashed(facade::RedisReplyBuilder* rb);
 
-  // Run all commands until completion. Returns number of processed commands.
-  size_t Run(facade::RedisReplyBuilder* rb);
+  void Run(facade::RedisReplyBuilder* rb);
 
   bool IsAtomic() const;
 
@@ -89,7 +91,6 @@ class MultiCommandSquasher {
   std::vector<ShardExecInfo> sharded_;
   std::vector<ShardId> order_;  // reply order for squashed cmds
 
-  size_t num_squashed_ = 0;
   size_t num_shards_ = 0;
 
   std::vector<MutableSlice> tmp_keylist_;

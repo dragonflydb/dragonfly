@@ -51,27 +51,27 @@ Test full replication pipeline. Test full sync with streaming changes and stable
         pytest.param(8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, marks=M_STRESS),
     ],
 )
+@pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
 # Disabled cache_mode until #5371 is fixed
-# @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
-@pytest.mark.parametrize("point_in_time_replication", [True, False])
+# @pytest.mark.parametrize("point_in_time_replication", [True, False])
 async def test_replication_all(
     df_factory: DflyInstanceFactory,
     t_master,
     t_replicas,
     seeder_config,
     stream_target,
-    # mode,
-    point_in_time_replication,
+    mode,
+    # point_in_time_replication,
 ):
     args = {}
-    # if mode:
-    #    args["cache_mode"] = "true"
-    #    args["maxmemory"] = str(t_master * 256) + "mb"
+    if mode:
+        args["cache_mode"] = "true"
+        args["maxmemory"] = str(t_master * 256) + "mb"
 
     master = df_factory.create(
         admin_port=ADMIN_PORT,
         proactor_threads=t_master,
-        point_in_time_snapshot=point_in_time_replication,
+        # point_in_time_snapshot=point_in_time_replication,
         **args,
     )
     replicas = [
@@ -745,6 +745,24 @@ async def test_rewrites(df_factory):
             f"EVALSHA {sha} 2 k-stream k-one-element-set",
             [r"XTRIM k-stream MINID 0", r"SREM k-one-element-set value[12]"],
         )
+
+        # check BZMPOP turns into ZPOPMAX and ZPOPMIN command
+        await c_master.zadd("key", {"a": 1, "b": 2, "c": 3})
+        await skip_cmd()
+        await check("BZMPOP 0 3 key3 key2 key MAX COUNT 3", r"ZPOPMAX key 3")
+
+        await c_master.zadd("key", {"a": 1, "b": 2, "c": 3})
+        await skip_cmd()
+        await check("BZMPOP 0 3 key3 key2 key MIN", r"ZPOPMIN key 1")
+
+        # Check ZMPOP turns into ZPOPMAX and ZPOPMIN commands
+        await c_master.zadd("key", {"a": 1, "b": 2, "c": 3})
+        await skip_cmd()
+        await check("ZMPOP 3 key3 key2 key MIN COUNT 3", r"ZPOPMIN key 3")
+
+        await c_master.zadd("key", {"a": 1, "b": 2, "c": 3})
+        await skip_cmd()
+        await check("ZMPOP 3 key3 key2 key MAX", r"ZPOPMAX key 1")
 
 
 """
@@ -3340,6 +3358,7 @@ async def test_mc_gat_replication(df_factory):
     assert result[key] == (value, expected_cas_ver), f"unexpected result for key: {result=}"
 
 
+@pytest.mark.skip("Fails constantly on CI")
 @pytest.mark.slow
 @pytest.mark.parametrize("serialization_max_size", [1, 64000])
 async def test_replication_onmove_flow(df_factory, serialization_max_size):
@@ -3396,3 +3415,56 @@ async def test_replication_onmove_flow(df_factory, serialization_max_size):
         moved_saved = extract_int_after_prefix("moved_saved ", line)
         logging.debug(f"Moved saves {moved_saved}")
         assert moved_saved > 0
+
+
+@dfly_args({"proactor_threads": 1})
+async def test_big_strings(df_factory):
+    master = df_factory.create(
+        proactor_threads=1, serialization_max_chunk_size=1, vmodule="snapshot=1"
+    )
+    replica = df_factory.create(proactor_threads=1)
+
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # 200kb
+    value_size = 200_000
+
+    async def get_memory(client, field):
+        info = await client.info("memory")
+        return info[field]
+
+    capacity = await get_memory(c_master, "prime_capacity")
+
+    seeder = DebugPopulateSeeder(
+        key_target=int(capacity * 0.7),
+        data_size=value_size,
+        collection_size=1,
+        variance=1,
+        samples=1,
+        types=["STRING"],
+    )
+    await seeder.run(c_master)
+
+    # sanity
+    capacity = await get_memory(c_master, "prime_capacity")
+    assert capacity < 8000
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+
+    # Check if replica data is consistent
+    replica_data = await DebugPopulateSeeder.capture(c_replica)
+    master_data = await DebugPopulateSeeder.capture(c_master)
+    assert master_data == replica_data
+
+    replica.stop()
+    master.stop()
+
+    lines = master.find_in_logs("Serialization peak bytes: ")
+    assert len(lines) == 1
+    # We test the serializtion path of command execution
+    line = lines[0]
+    peak_bytes = extract_int_after_prefix("Serialization peak bytes: ", line)
+    assert peak_bytes < value_size

@@ -6,7 +6,6 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
-#include <absl/strings/match.h>
 
 #include <memory>
 #include <optional>
@@ -57,96 +56,35 @@ struct SearchResult {
   std::optional<facade::ErrorReply> error;
 };
 
-/* SearchField represents a field that can store combinations of identifiers and aliases in various
-   forms: [identifier and alias], [alias and new_alias], [new identifier and alias] (used for JSON
-   data) This class provides methods to retrieve the actual identifier and alias for a field,
-   handling different naming conventions and resolving names based on the schema. */
-class SearchField {
- private:
-  static bool IsJsonPath(std::string_view name) {
-    if (name.size() < 2) {
-      return false;
-    }
-    return name.front() == '$' && (name[1] == '.' || name[1] == '[');
+// Field reference with optional alias as parsed from RETURN [field AS alias], LOAD, etc...
+struct FieldReference {
+  explicit FieldReference(std::string_view name, std::string_view alias = "")
+      : name_{name}, alias_{alias} {
   }
 
- public:
-  SearchField() = default;
-
-  explicit SearchField(StringOrView name) : name_(std::move(name)) {
-    is_short_name_ = !IsJsonPath(NameView());
+  std::string_view Identifier(const search::Schema& schema, bool is_json) const {
+    return (is_json && IsJsonPath(name_)) ? name_ : schema.LookupAlias(name_);
   }
 
-  SearchField(StringOrView name, bool is_short_name)
-      : name_(std::move(name)), is_short_name_(is_short_name) {
-  }
-
-  SearchField(StringOrView name, bool is_short_name, StringOrView new_alias)
-      : name_(std::move(name)), is_short_name_(is_short_name), new_alias_(std::move(new_alias)) {
-  }
-
-  std::string_view GetIdentifier(const search::Schema& schema, bool is_json_field) const {
-    auto as_view = NameView();
-    if (!is_short_name_ || (is_json_field && IsJsonPath(as_view))) {
-      return as_view;
-    }
-    return schema.LookupAlias(as_view);
-  }
-
-  std::string_view GetShortName() const {
-    if (HasNewAlias()) {
-      return AliasView();
-    }
-    return NameView();
-  }
-
-  std::string_view GetShortName(const search::Schema& schema) const {
-    if (HasNewAlias()) {
-      return AliasView();
-    }
-    return is_short_name_ ? NameView() : schema.LookupIdentifier(NameView());
-  }
-
-  /* Returns a new SearchField instance with name and alias stored as views to the values in this
-   * SearchField */
-  SearchField View() const {
-    if (HasNewAlias()) {
-      return SearchField{StringOrView::FromView(NameView()), is_short_name_,
-                         StringOrView::FromView(AliasView())};
-    }
-    return SearchField{StringOrView::FromView(NameView()), is_short_name_};
-  }
-
-  std::string_view NameView() const {
-    return name_.view();
+  std::string_view OutputName() const {
+    return alias_.empty() ? name_ : alias_;
   }
 
  private:
-  bool HasNewAlias() const {
-    return !new_alias_.empty();
-  }
+  static bool IsJsonPath(std::string_view name);
 
-  std::string_view AliasView() const {
-    return new_alias_.view();
-  }
-
- private:
-  StringOrView name_;
-  bool is_short_name_;
-  StringOrView new_alias_;
+  std::string_view name_, alias_;
 };
-
-using SearchFieldsList = std::vector<SearchField>;
 
 enum class SortOrder { ASC, DESC };
 
 struct SearchParams {
   struct SortOption {
-    SearchField field;
+    FieldReference field;
     SortOrder order = SortOrder::ASC;
 
     bool IsSame(const search::KnnScoreSortOption& knn_sort) const {
-      return knn_sort.score_field_alias == field.NameView();
+      return knn_sort.score_field_alias == field.OutputName();
     }
   };
 
@@ -160,14 +98,14 @@ struct SearchParams {
   2. If set but empty -> no fields should be returned
   3. If set and not empty -> return only these fields
   */
-  std::optional<SearchFieldsList> return_fields;
+  std::optional<std::vector<FieldReference>> return_fields;
 
   /*
     Fields that should be also loaded from the document.
 
     Only one of load_fields and return_fields should be set.
   */
-  std::optional<SearchFieldsList> load_fields;
+  std::optional<std::vector<FieldReference>> load_fields;
 
   std::optional<SortOption> sort_option;
   search::QueryParams query_params;
@@ -187,7 +125,7 @@ struct AggregateParams {
   std::string_view index, query;
   search::QueryParams params;
 
-  std::optional<SearchFieldsList> load_fields;
+  std::optional<std::vector<FieldReference>> load_fields;
   std::vector<aggregate::AggregationStep> steps;
 };
 

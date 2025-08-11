@@ -87,6 +87,9 @@ struct Metrics {
 
   size_t qps = 0;
 
+  size_t used_mem_peak = 0;
+  size_t used_mem_rss_peak = 0;
+
   size_t heap_used_bytes = 0;
   size_t small_string_bytes = 0;
   uint32_t traverse_ttl_per_sec = 0;
@@ -228,8 +231,8 @@ class ServerFamily {
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
-  enum class LoadExistingKeys { kFail, kOverride };
-  std::optional<util::fb2::Future<GenericError>> Load(std::string_view file_name,
+  enum class LoadExistingKeys : uint8_t { kFail, kOverride };
+  std::optional<util::fb2::Future<GenericError>> Load(const std::string& file_name,
                                                       LoadExistingKeys existing_keys);
 
   bool TEST_IsSaving() const;
@@ -338,9 +341,16 @@ class ServerFamily {
   void ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                          ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
-  // Returns the number of loaded keys if successful.
-  io::Result<size_t> LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys,
-                             std::string* snapshot_id = nullptr);
+  struct LoadOptions {
+    std::string snapshot_id;
+    uint32_t shard_count = 0;      // Shard count of the snapshot being loaded.
+    uint64_t num_loaded_keys = 0;  // Number of keys loaded.
+  };
+
+  // Updates LoadOptions if successful. If snapshot_id and shard_count are passed in,
+  // may use them for consistency checks.
+  std::error_code LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys,
+                          LoadOptions* load_opts);
 
   void SnapshotScheduling() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
 
@@ -367,6 +377,9 @@ class ServerFamily {
   void ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx);
   void ClientUnPauseCmd(CmdArgList args, SinkReplyBuilder* builder);
 
+  // Set accepting_connections_ and update listners according to it
+  void ChangeConnectionAccept(bool accept);
+
   util::fb2::Fiber snapshot_schedule_fb_;
   util::fb2::Fiber load_fiber_;
 
@@ -374,7 +387,7 @@ class ServerFamily {
 
   util::AcceptServer* acceptor_ = nullptr;
   std::vector<facade::Listener*> listeners_;
-  bool accepting_connections_ = true;
+  bool accepting_connections_ = true;  // reject connections near oom
   util::ProactorBase* pb_task_ = nullptr;
 
   mutable util::fb2::Mutex replicaof_mu_, save_mu_;

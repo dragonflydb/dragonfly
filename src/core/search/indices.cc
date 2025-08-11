@@ -94,7 +94,8 @@ void IterateAllSuffixes(const absl::flat_hash_set<string>& words,
 
 class RangeTreeAdapter : public NumericIndex::RangeTreeBase {
  public:
-  explicit RangeTreeAdapter(PMR_NS::memory_resource* mr) : range_tree_{mr} {
+  explicit RangeTreeAdapter(size_t max_range_block_size, PMR_NS::memory_resource* mr)
+      : range_tree_(mr, max_range_block_size) {
   }
 
   void Add(DocId id, absl::Span<double> values) override {
@@ -109,7 +110,7 @@ class RangeTreeAdapter : public NumericIndex::RangeTreeBase {
     }
   }
 
-  std::variant<RangeResult, std::vector<DocId>> Range(double l, double r) const override {
+  RangeResult Range(double l, double r) const override {
     return range_tree_.Range(l, r);
   }
 
@@ -142,7 +143,7 @@ class BtreeSetImpl : public NumericIndex::RangeTreeBase {
     }
   }
 
-  std::variant<RangeResult, std::vector<DocId>> Range(double l, double r) const override {
+  RangeResult Range(double l, double r) const override {
     DCHECK(l <= r);
 
     auto it_l = entries_.lower_bound({l, 0});
@@ -158,7 +159,7 @@ class BtreeSetImpl : public NumericIndex::RangeTreeBase {
     if (!unique_ids_) {
       out.erase(unique(out.begin(), out.end()), out.end());
     }
-    return out;
+    return RangeResult(std::move(out));
   }
 
   vector<DocId> GetAllDocIds() const override {
@@ -172,7 +173,7 @@ class BtreeSetImpl : public NumericIndex::RangeTreeBase {
         result.push_back(doc_id);
       }
     } else {
-      UniqueDocsList<> unique_docs;
+      absl::flat_hash_set<DocId> unique_docs;
       unique_docs.reserve(entries_.size());
       for (const auto& [_, doc_id] : entries_) {
         const auto [__, is_new] = unique_docs.insert(doc_id);
@@ -192,9 +193,9 @@ class BtreeSetImpl : public NumericIndex::RangeTreeBase {
   absl::btree_set<Entry, std::less<Entry>, PMR_NS::polymorphic_allocator<Entry>> entries_;
 };
 
-NumericIndex::NumericIndex(PMR_NS::memory_resource* mr) {
+NumericIndex::NumericIndex(size_t max_range_block_size, PMR_NS::memory_resource* mr) {
   if (absl::GetFlag(FLAGS_use_numeric_range_tree)) {
-    range_tree_ = make_unique<RangeTreeAdapter>(mr);
+    range_tree_ = make_unique<RangeTreeAdapter>(max_range_block_size, mr);
   } else {
     range_tree_ = make_unique<BtreeSetImpl>(mr);
   }
@@ -215,9 +216,9 @@ void NumericIndex::Remove(DocId id, const DocumentAccessor& doc, string_view fie
   range_tree_->Remove(id, absl::MakeSpan(numbers));
 }
 
-std::variant<RangeResult, std::vector<DocId>> NumericIndex::Range(double l, double r) const {
+RangeResult NumericIndex::Range(double l, double r) const {
   if (r < l)
-    return std::vector<DocId>{};
+    return {};
   return range_tree_->Range(l, r);
 }
 
@@ -358,8 +359,7 @@ template <typename C> vector<DocId> BaseStringIndex<C>::GetAllDocsWithNonNullVal
       }
     }
   } else {
-    UniqueDocsList<> unique_docs;
-
+    absl::flat_hash_set<DocId> unique_docs;
     unique_docs.reserve(entries_.size());
 
     for (const auto& [_, container] : entries_) {

@@ -405,6 +405,7 @@ void SortIfNeeded(GeoArray* ga, Sorting sorting, uint64_t count) {
   };
 
   if (count > 0) {
+    count = std::min(count, static_cast<uint64_t>(ga->size()));
     std::partial_sort(ga->begin(), ga->begin() + count, ga->end(), comparator);
     ga->resize(count);
   } else {
@@ -646,8 +647,8 @@ void GeoFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   if (!parser.Finalize()) {
-    auto error = parser.Error();
-    switch (error->type) {
+    auto error = parser.TakeError();
+    switch (error.type) {
       case Errors::INVALID_LONG_LAT: {
         string err =
             absl::StrCat("-ERR invalid longitude,latitude pair ", shape.xy[0], ",", shape.xy[1]);
@@ -657,7 +658,7 @@ void GeoFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
         return builder->SendError("Unsupported unit provided. please use M, KM, FT, MI",
                                   kSyntaxErrType);
       default:
-        return builder->SendError(error->MakeReply());
+        return builder->SendError(error.MakeReply());
     }
   }
 
@@ -824,15 +825,16 @@ void GeoFamily::GeoRadius(CmdArgList args, const CommandContext& cmd_cntx) {
       default:
         // If MapNext failed, it means an unknown option was provided or
         // an option requiring an argument was missing its argument.
-        // The parser has already recorded the error. We retrieve it and send it.
-        DCHECK(parser.Error().has_value());
-        return builder->SendError(parser.Error()->MakeReply());
+        // The parser has already recorded the error.
+        DCHECK(parser.HasError());
+        break;
     }
   }
 
   if (!parser.Finalize()) {
-    auto error = parser.Error();
-    switch (error->type) {
+    auto error = parser.TakeError();
+
+    switch (error.type) {
       case Errors::INVALID_LONG_LAT: {
         string err =
             absl::StrCat("-ERR invalid longitude,latitude pair ", shape.xy[0], ",", shape.xy[1]);
@@ -842,7 +844,7 @@ void GeoFamily::GeoRadius(CmdArgList args, const CommandContext& cmd_cntx) {
         return builder->SendError("Unsupported unit provided. please use M, KM, FT, MI",
                                   kSyntaxErrType);
       default:
-        return builder->SendError(error->MakeReply());
+        return builder->SendError(error.MakeReply());
     }
   }
 

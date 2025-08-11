@@ -365,6 +365,58 @@ TEST_F(HuffCoderTest, Decode) {
   ASSERT_EQ("aab", string_view(decode_dest.data(), decoded_size));
 }
 
+TEST_F(HuffCoderTest, HugeHistogram) {
+  array<unsigned, 256> hist{
+      1,         1,         1,         1,         1,         1,         1,         1,
+      5,         26,        543,       1,         1,         1,         1,         1,
+      4,         1,         1,         1,         1,         1,         1,         1,
+      1,         1,         1,         1,         1,         1,         1,         1,
+      114012534, 12081,     13038,     1596,      1334,      83320,     706165,    475568,
+      2779,      2548,      998,       29249967,  53961,     13175485,  99000,     69726435,
+      69422967,  182172009, 123544533, 76493373,  96341977,  64601914,  48105392,  60215630,
+      69253599,  48811529,  818580990, 1226,      69,        922,       140,       720,
+      230,       333714212, 95995178,  65692203,  50995122,  52156728,  44187793,  32988519,
+      46978428,  49648957,  43769567,  68958857,  56765240,  80721594,  51577447,  70298692,
+      56957407,  93372706,  47400672,  70912347,  78241282,  49291723,  69807896,  48372387,
+      39312015,  58020704,  60084247,  1378,      2471,      1584,      14,        37880886,
+      117,       184273430, 80952783,  135676228, 101229664, 230479318, 70652028,  137836653,
+      70943805,  154072333, 29316298,  58302725,  109445030, 117306062, 129270567, 166048852,
+      103000639, 54174517,  174819705, 166323524, 124543976, 80215452,  49650895,  101281709,
+      49817574,  56668585,  50459552,  273352049, 166,       273352009, 16,        1,
+      57668,     1724,      1886,      3668,      3960,      1963,      1124,      945,
+      1836,      1882,      1709,      2389,      921,       2154,      1020,      1792,
+      3747,      6750,      1318,      3100,      4506,      1175,      1514,      1430,
+      3474,      44548,     3179,      1149,      2410,      9689,      727,       2348,
+      2148,      1785,      5025,      1040,      3246,      1699,      505,       1034,
+      9995,      24776,     3345,      1897,      1019,      1614,      35349,     988,
+      2469,      5759,      2043,      7976,      1229,      896,       2692,      962,
+      3341,      2490,      2648,      1162,      4812,      8404,      949,       3132,
+      1,         1,         34754,     58694,     3400,      561,       6,         5,
+      3,         47,        41,        19,        292,       24,        17,        12,
+      626,       382,       6,         1,         1,         9,         1,         433,
+      879,       743,       7,         9,         1,         1,         1,         60,
+      746,       224,       54115,     4566,      5463,      10917,     5446,      7960,
+      5382,      2204,      281,       649,       761,       188,       1,         2630,
+      6680,      1,         1,         1,         1,         1,         1,         1,
+      1,         1,         1,         1,         1,         1,         1,         1};
+
+  // for huge values we need to scale down the histogram because the Huffman algorithm
+  // implementation crashes otherwise.
+  // The bug is in the following code in huf_compress.c:
+  // huffNode0[0].count = (U32)(1U<<31);  /* fake entry, strong barrier */
+  // where it uses the count as a sentinel assuming that no other counts can be larger than 2^31.
+  // this may not be true for histograms with huge counts, so we need to make sure that
+  // all counts are smaller than 2^31 / 256.
+  for (unsigned i = 0; i < hist.size(); ++i) {
+    hist[i] >>= 2;  // Without this the algorithm causes a data race and crash.
+  }
+  ASSERT_TRUE(encoder_.Build(hist.data(), hist.size() - 1, &error_msg_)) << error_msg_;
+
+  string bindata = encoder_.Export();
+  encoder_.Reset();
+  ASSERT_TRUE(encoder_.Load(bindata, &error_msg_)) << error_msg_;
+}
+
 using benchmark::DoNotOptimize;
 
 // Parse Double benchmarks
@@ -608,4 +660,11 @@ BENCHMARK(BM_MatchPcre2JitExp);
 
 #endif
 
+static void BM_MatchGlobSlow(benchmark::State& state) {
+  GlobMatcher matcher("a*a*a*a*a*.pt", false);
+  while (state.KeepRunning()) {
+    DoNotOptimize(GlobMatcher("a*a*a*a*a*.pt", false));
+  }
+}
+BENCHMARK(BM_MatchGlobSlow);
 }  // namespace dfly

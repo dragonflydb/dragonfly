@@ -49,12 +49,14 @@ struct Entry;
 // over the sink until explicitly stopped.
 class SliceSnapshot : public journal::JournalConsumerInterface {
  public:
-  // Represents a target for receiving snapshot data.
+  // Represents a target sink for receiving snapshot data. Specifically designed
+  // to send data to RdbSaver wrapping up a file shard or a socket.
   struct SnapshotDataConsumerInterface {
     virtual ~SnapshotDataConsumerInterface() = default;
 
     // Receives a chunk of snapshot data for processing
     virtual void ConsumeData(std::string data, ExecutionState* cntx) = 0;
+
     // Finalizes the snapshot writing
     virtual void Finalize() = 0;
   };
@@ -100,7 +102,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
 
   // Journal listener
-  void ConsumeJournalChange(const journal::JournalItem& item);
+  void ConsumeJournalChange(const journal::JournalChangeItem& item);
   void ThrottleIfNeeded();
 
  private:
@@ -147,7 +149,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   struct DelayedEntry {
     DbIndex dbid;
     PrimeKey key;
-    util::fb2::Future<string> value;
+    util::fb2::Future<io::Result<string>> value;
     time_t expire;
     uint32_t mc_flags;
   };

@@ -147,6 +147,14 @@ class ClusterShardInfos {
     return infos_.cend();
   }
 
+  auto begin() noexcept {
+    return infos_.begin();
+  }
+
+  auto end() noexcept {
+    return infos_.end();
+  }
+
   auto size() const noexcept {
     return infos_.size();
   }

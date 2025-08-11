@@ -890,7 +890,7 @@ size_t SortedMap::DeleteRangeByScore(const zrangespec& range) {
   char buf[16] = {0};
   size_t deleted = 0;
 
-  while (score_tree->Size() > 0) {
+  while (!score_tree->Empty()) {
     ScoreSds min_key = BuildScoredKey(range.min, buf);
     auto path = score_tree->GEQ(Query{min_key, false, range.minex});
     if (path.Empty())
@@ -1147,12 +1147,12 @@ SortedMap* SortedMap::FromListPack(PMR_NS::memory_resource* res, const uint8_t* 
   return zs;
 }
 
-bool SortedMap::DefragIfNeeded(float ratio) {
+bool SortedMap::DefragIfNeeded(PageUsage* page_usage) {
   auto cb = [this](sds old_obj, sds new_obj) { score_tree->ForceUpdate(old_obj, new_obj); };
   bool reallocated = false;
 
   for (auto it = score_map->begin(); it != score_map->end(); ++it) {
-    reallocated |= it.ReallocIfNeeded(ratio, cb);
+    reallocated |= it.ReallocIfNeeded(page_usage, cb);
   }
 
   return reallocated;

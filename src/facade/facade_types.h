@@ -104,16 +104,33 @@ struct ConnectionStats {
   uint64_t command_cnt_other = 0;
   uint64_t pipelined_cmd_cnt = 0;
   uint64_t pipelined_cmd_latency = 0;  // in microseconds
+
+  // in microseconds, time spent waiting for the pipelined commands to start executing
+  uint64_t pipelined_wait_latency = 0;
   uint64_t conn_received_cnt = 0;
 
   uint32_t num_conns_main = 0;
   uint32_t num_conns_other = 0;
   uint32_t num_blocked_clients = 0;
+
+  // number of times the connection yielded due to max_busy_read_usec limit
+  uint32_t num_read_yields = 0;
   uint64_t num_migrations = 0;
   uint64_t num_recv_provided_calls = 0;
 
+  // Number of times the tls connection was closed by the time we started reading from it.
+  uint64_t tls_accept_disconnects = 0;  // number of TLS socket disconnects during the handshake
+                                        //
+  uint64_t handshakes_started = 0;
+  uint64_t handshakes_completed = 0;
+
   // Number of events when the pipeline queue was over the limit and was throttled.
   uint64_t pipeline_throttle_count = 0;
+  uint64_t pipeline_dispatch_calls = 0;
+  uint64_t pipeline_dispatch_commands = 0;
+  uint64_t pipeline_dispatch_flush_usec = 0;
+
+  uint64_t skip_pipeline_flushing = 0;  // number of times we skipped flushing the pipeline
 
   ConnectionStats& operator+=(const ConnectionStats& o);
 };

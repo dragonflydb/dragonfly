@@ -46,7 +46,6 @@ ABSL_FLAG(dfly::CompressionMode, compression_mode, dfly::CompressionMode::MULTI_
           "set 2 for multi entry zstd compression on df snapshot and single entry on rdb snapshot,"
           "set 3 for multi entry lz4 compression on df snapshot and single entry on rdb snapshot");
 
-// TODO: to retire this flag in v1.31
 ABSL_RETIRED_FLAG(bool, stream_rdb_encode_v2, true,
                   "Retired. Uses format, compatible with redis 7.2 and Dragonfly v1.26+");
 
@@ -268,7 +267,10 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
   }
 
   DVLOG(3) << "Selecting " << dbid << " previous: " << last_entry_db_index_;
-  SelectDb(dbid);
+  auto ec = SelectDb(dbid);
+  if (ec) {
+    return make_unexpected(ec);
+  }
 
   /* Save the expire time */
   if (expire_ms > 0) {
@@ -309,6 +311,10 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
     return make_unexpected(ec);
   }
 
+  // We flush here because if the next element in the bucket we are serializing is a container,
+  // it will first serialize the first entry and then flush the internal buffer, even if
+  // crossed the limit.
+  FlushIfNeeded(FlushState::kFlushEndEntry);
   return rdb_type;
 }
 
@@ -787,6 +793,10 @@ error_code SerializerBase::FlushToSink(io::Sink* sink, SerializerBase::FlushStat
   if (bytes.empty())
     return error_code{};
 
+  if (bytes.size() > serialization_peak_bytes_) {
+    serialization_peak_bytes_ = bytes.size();
+  }
+
   DVLOG(2) << "FlushToSink " << bytes.size() << " bytes";
 
   // interrupt point.
@@ -818,14 +828,15 @@ VersionBuffer MakeRdbVersion() {
   return buf;
 }
 
-CrcBuffer MakeCheckSum(std::string_view dump_res) {
-  uint64_t chksum = crc64(0, reinterpret_cast<const uint8_t*>(dump_res.data()), dump_res.size());
+CrcBuffer MakeCheckSum(std::string_view dump_res, bool ignore_crc) {
+  uint64_t chksum =
+      ignore_crc ? 0 : crc64(0, reinterpret_cast<const uint8_t*>(dump_res.data()), dump_res.size());
   CrcBuffer buf;
   absl::little_endian::Store64(buf.data(), chksum);
   return buf;
 }
 
-void AppendFooter(io::StringSink* dump_res) {
+void AppendFooter(io::StringSink* dump_res, bool ignore_crc) {
   auto to_bytes = [](const auto& buf) {
     return io::Bytes(reinterpret_cast<const uint8_t*>(buf.data()), buf.size());
   };
@@ -838,17 +849,17 @@ void AppendFooter(io::StringSink* dump_res) {
    */
   const auto ver = MakeRdbVersion();
   dump_res->Write(to_bytes(ver));
-  const auto crc = MakeCheckSum(dump_res->str());
+  const auto crc = MakeCheckSum(dump_res->str(), ignore_crc);
   dump_res->Write(to_bytes(crc));
 }
 }  // namespace
 
-void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out) {
-  CompressionMode compression_mode = GetDefaultCompressionMode();
-  if (compression_mode != CompressionMode::NONE) {
-    compression_mode = CompressionMode::SINGLE_ENTRY;
+void SerializerBase::DumpObject(RdbSerializer* serializer, const CompactObj& obj,
+                                io::StringSink* out, bool ignore_crc) {
+  CompressionMode serializer_used_compression_mode = serializer->compression_mode_;
+  if (serializer_used_compression_mode != CompressionMode::NONE) {
+    serializer->SetCompressionMode(CompressionMode::SINGLE_ENTRY);
   }
-  RdbSerializer serializer(compression_mode);
 
   // According to Redis code we need to
   // 1. Save the value itself - without the key
@@ -856,14 +867,21 @@ void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out) {
   auto type = RdbObjectType(obj);
   DVLOG(2) << "We are going to dump object type: " << int(type);
 
-  std::error_code ec = serializer.WriteOpcode(type);
+  std::error_code ec = serializer->WriteOpcode(type);
   CHECK(!ec);
-  ec = serializer.SaveValue(obj);
+  ec = serializer->SaveValue(obj);
   CHECK(!ec);  // make sure that fully was successful
-  ec = serializer.FlushToSink(out, SerializerBase::FlushState::kFlushMidEntry);
-  CHECK(!ec);         // make sure that fully was successful
-  AppendFooter(out);  // version and crc
+  ec = serializer->FlushToSink(out, SerializerBase::FlushState::kFlushMidEntry);
+  CHECK(!ec);                     // make sure that fully was successful
+  AppendFooter(out, ignore_crc);  // version and crc
   CHECK_GT(out->str().size(), 10u);
+
+  serializer->SetCompressionMode(serializer_used_compression_mode);
+}
+
+void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out, bool ignore_crc) {
+  RdbSerializer serializer(GetDefaultCompressionMode());
+  DumpObject(&serializer, obj, out, ignore_crc);
 }
 
 size_t SerializerBase::SerializedLen() const {
@@ -1330,18 +1348,32 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
       script_bodies.push_back(std::move(data.body));
   }
 
-  {
-    shard_set->Await(0, [&] {
-      auto* indices = EngineShard::tlocal()->search_indices();
-      for (auto index_name : indices->GetIndexNames()) {
+  atomic<size_t> table_mem{0};
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
+#ifdef WITH_SEARCH
+    if (shard->shard_id() == 0) {
+      auto* indices = shard->search_indices();
+      for (const auto& index_name : indices->GetIndexNames()) {
         auto index_info = indices->GetIndex(index_name)->GetInfo();
         search_indices.emplace_back(
             absl::StrCat(index_name, " ", index_info.BuildRestoreCommand()));
       }
-    });
-  }
+    }
+#endif
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+    size_t shard_table_mem = 0;
+    for (size_t db_id = 0; db_id < db_slice.db_array_size(); ++db_id) {
+      auto* db_table = db_slice.GetDBTable(db_id);
 
-  return RdbSaver::GlobalData{std::move(script_bodies), std::move(search_indices)};
+      if (db_table) {
+        shard_table_mem += db_table->table_memory();
+      }
+    }
+    table_mem.fetch_add(shard_table_mem, memory_order_relaxed);
+  });
+
+  return RdbSaver::GlobalData{std::move(script_bodies), std::move(search_indices),
+                              table_mem.load(memory_order_relaxed)};
 }
 
 void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
@@ -1427,7 +1459,7 @@ error_code RdbSaver::SaveHeader(const GlobalData& glob_state) {
   CHECK_EQ(9u, sz);
 
   RETURN_ON_ERR(impl_->serializer()->WriteRaw(Bytes{reinterpret_cast<uint8_t*>(magic), sz}));
-  RETURN_ON_ERR(SaveAux(std::move(glob_state)));  // Should be first after magic
+  RETURN_ON_ERR(SaveAux(glob_state));  // Should be first after magic
   RETURN_ON_ERR(impl_->FlushSerializer());
   return error_code{};
 }
@@ -1457,10 +1489,6 @@ void RdbSaver::FillFreqMap(RdbTypeFreqMap* freq_map) {
 }
 
 error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
-  static_assert(sizeof(void*) == 8, "");
-
-  error_code ec;
-
   // Should be first
   if (!snapshot_id_.empty()) {
     RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("snapshot-id", snapshot_id_));
@@ -1490,6 +1518,14 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
     DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_indices.empty());
     for (const string& s : glob_state.search_indices)
       RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));
+    if (save_mode_ == SaveMode::SINGLE_SHARD_WITH_SUMMARY || save_mode_ == SaveMode::SUMMARY) {
+      // We save the shard id in the summary file, so that we can restore it later.
+      RETURN_ON_ERR(SaveAuxFieldStrInt("shard-count", shard_set->size()));
+      RETURN_ON_ERR(SaveAuxFieldStrInt("table-mem", glob_state.table_used_memory));
+    }
+    if (EngineShard* shard = EngineShard::tlocal(); shard) {
+      RETURN_ON_ERR(SaveAuxFieldStrInt("shard-id", shard->shard_id()));
+    }
   }
 
   // TODO: "repl-stream-db", "repl-id", "repl-offset"

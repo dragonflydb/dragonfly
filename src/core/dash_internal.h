@@ -647,6 +647,10 @@ class DashTableBase {
     return size_;
   }
 
+  size_t Empty() const {
+    return size_ == 0;
+  }
+
  protected:
   uint32_t SegmentId(size_t hash) const {
     if (global_depth_) {
@@ -1008,6 +1012,11 @@ ____ ____ ____ _  _ ____ _  _ ___
 ___] |___ |__] |  | |___ | \|  |
 
 */
+
+// for clang ignore -Wunused-lambda-capture
+#ifdef __clang__
+#pragma clang diagnostic ignored "-Wunused-lambda-capture"
+#endif
 
 template <typename Key, typename Value, typename Policy>
 template <typename Pred>

@@ -48,6 +48,13 @@ using ScoredArray = ZSetFamily::ScoredArray;
 using ScoredMemberView = ZSetFamily::ScoredMemberView;
 using ScoredMemberSpan = ZSetFamily::ScoredMemberSpan;
 
+struct ValidateZMPopResult {
+  uint32_t num_keys;
+  bool is_max;
+  int pop_count;
+  float timeout;
+};
+
 inline zrangespec GetZrangeSpec(bool reverse, const ZSetFamily::ScoreInterval& si) {
   auto interval = si;
   if (reverse)
@@ -1140,6 +1147,17 @@ auto OpPopCount(const ZSetFamily::ZRangeSpec& range_spec, const OpArgs& op_args,
     op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it);
   }
 
+  // Checking if command conatins flag with no autojournal
+  // and we are assuming auto journaling is not re-enabled.
+  if ((op_args.tx->GetCId()->opt_mask() & CO::NO_AUTOJOURNAL) && op_args.shard->journal()) {
+    auto reverse = range_spec.params.reverse;
+    // Checking if interval is actually TopNScored or something else before proceeding.
+    DCHECK(std::holds_alternative<ZSetFamily::TopNScored>(range_spec.interval));
+    auto count = std::get<ZSetFamily::TopNScored>(range_spec.interval);
+    string command = (reverse ? "ZPOPMAX" : "ZPOPMIN");
+    RecordJournal(op_args, command, ArgSlice{key, absl::StrCat(count)}, 1);
+  }
+
   return iv.PopResult();
 }
 
@@ -1699,8 +1717,8 @@ void ZRangeGeneric(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
   using RP = ZSetFamily::RangeParams;
 
   while (true) {
-    if (auto err = parser.Error(); err)
-      return builder->SendError(err->MakeReply());
+    if (auto err = parser.TakeError(); err)
+      return builder->SendError(err.MakeReply());
 
     if (!parser.HasNext())
       break;
@@ -1762,7 +1780,7 @@ void ZRankGeneric(CmdArgList args, bool reverse, Transaction* tx, SinkReplyBuild
   }
 
   if (!parser.Finalize()) {
-    return builder->SendError(parser.Error()->MakeReply());
+    return builder->SendError(parser.TakeError().MakeReply());
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1819,46 +1837,57 @@ std::optional<std::string_view> GetFirstNonEmptyKeyFound(EngineShard* shard, Tra
   return std::nullopt;
 }
 
-// Validates the ZMPop command arguments and extracts the values to the output params.
+// Validates the ZMPop and BZMPop command arguments and extracts the values to the output params.
 // If the arguments are invalid sends the appropiate error to builder and returns false.
-bool ValidateZMPopCommand(CmdArgList args, uint32* num_keys, bool* is_max, int* pop_count,
-                          SinkReplyBuilder* builder) {
+bool ValidateZMPopCommand(CmdArgList args, bool is_blocking, SinkReplyBuilder* builder,
+                          ValidateZMPopResult* result) {
   CmdArgParser parser{args};
 
-  if (!SimpleAtoi(parser.Next(), num_keys)) {
+  if (is_blocking) {
+    if (!absl::SimpleAtof(parser.Next(), &result->timeout)) {
+      builder->SendError("timeout is not a float or out of range");
+      return false;
+    }
+    if (result->timeout < 0) {
+      builder->SendError("timeout is negative");
+      return false;
+    }
+  }
+
+  if (!SimpleAtoi(parser.Next(), &(result->num_keys))) {
     builder->SendError(kUintErr);
     return false;
   }
 
-  if (*num_keys <= 0 || !parser.HasAtLeast(*num_keys + 1)) {
+  if (result->num_keys <= 0 || !parser.HasAtLeast(result->num_keys + 1)) {
     // We should have at least num_keys keys + a MIN/MAX arg.
     builder->SendError(kSyntaxErr);
     return false;
   }
   // Skip over the keys themselves.
-  parser.Skip(*num_keys);
+  parser.Skip(result->num_keys);
 
   // We know we have at least one more arg (we checked above).
   if (parser.Check("MAX")) {
-    *is_max = true;
+    result->is_max = true;
   } else if (parser.Check("MIN")) {
-    *is_max = false;
+    result->is_max = false;
   } else {
     builder->SendError(kSyntaxErr);
     return false;
   }
 
-  *pop_count = 1;
+  result->pop_count = 1;
   // Check if we have additional COUNT argument.
   if (parser.HasNext()) {
-    if (!parser.Check("COUNT", pop_count)) {
+    if (!parser.Check("COUNT", &result->pop_count)) {
       builder->SendError(kSyntaxErr);
       return false;
     }
   }
 
   if (!parser.Finalize()) {
-    builder->SendError(parser.Error()->MakeReply());
+    builder->SendError(parser.TakeError().MakeReply());
     return false;
   }
 
@@ -2401,11 +2430,10 @@ void ZSetFamily::ZInterCard(CmdArgList args, const CommandContext& cmd_cntx) {
   builder->SendLong(result.value().size());
 }
 
-void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  uint32 num_keys;
-  bool is_max;
-  int pop_count;
-  if (!ValidateZMPopCommand(args, &num_keys, &is_max, &pop_count, cmd_cntx.rb)) {
+// Generic function for ZMPop and BZMPop commands
+void ZMPopGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_blocking) {
+  ValidateZMPopResult zmpop_args;
+  if (!ValidateZMPopCommand(args, is_blocking, cmd_cntx.rb, &zmpop_args)) {
     return;
   }
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
@@ -2428,7 +2456,7 @@ void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   // Keep all the keys found (first only for each shard) in a set for fast lookups.
   absl::flat_hash_set<std::string_view> first_found_keys_for_shard;
   // We can have at most one result from each shard.
-  first_found_keys_for_shard.reserve(std::min(shard_set->size(), num_keys));
+  first_found_keys_for_shard.reserve(std::min(shard_set->size(), zmpop_args.num_keys));
   for (const auto& key : first_found_key_per_shard_vec) {
     if (!key.has_value()) {
       continue;
@@ -2439,7 +2467,8 @@ void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   // Now that we have the first non empty key from each shard, find the first overall first key and
   // pop elements from it.
   std::optional<std::string_view> key_to_pop = std::nullopt;
-  ArgRange arg_keys(args.subspan(1, num_keys));
+  // BZMPOP have 1 extra argument as compared to ZMPOP hence adding 1 is is_blocking is true
+  ArgRange arg_keys(args.subspan(1 + is_blocking, zmpop_args.num_keys));
   // Find the first arg_key which exists in any shard and is not empty.
   for (std::string_view key : arg_keys) {
     if (first_found_keys_for_shard.contains(key)) {
@@ -2448,15 +2477,52 @@ void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
     }
   }
 
-  if (!key_to_pop.has_value()) {
+  if (!key_to_pop.has_value() && (!is_blocking || cmd_cntx.tx->IsMulti())) {
     cmd_cntx.tx->Conclude();
     response_builder->SendNull();
     return;
   }
+  // if we don't have any key to pop and it's blocking then we will block it using `WaitOnWatch`
+  if (is_blocking && !key_to_pop.has_value()) {
+    auto trans = cmd_cntx.tx;
+    auto cntx = cmd_cntx.conn_cntx;
+    auto* ns = &trans->GetNamespace();
+
+    auto limit_tp = Transaction::time_point::max();
+    auto limit_ms = (unsigned)(zmpop_args.timeout * 1000);
+    if (limit_ms > 0) {
+      using namespace std::chrono;
+      limit_tp = steady_clock::now() + milliseconds(limit_ms);
+    }
+    const auto key_checker = [ns](EngineShard* owner, const DbContext& context, Transaction*,
+                                  std::string_view key) -> bool {
+      return ns->GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_ZSET).ok();
+    };
+
+    DCHECK(trans->IsScheduled());  // Checking if the transaction is scheduled before calling
+                                   // `WaitOnWatch`
+    auto status = trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker, &cntx->blocked,
+                                     &cntx->paused);
+
+    if (status != OpStatus::OK) {
+      response_builder->SendNull();
+      return;
+    }
+
+    auto cb = [&key_to_pop](Transaction* t, EngineShard* shard) {
+      if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {
+        key_to_pop = *wake_key;
+      }
+      return OpStatus::OK;
+    };
+    trans->Execute(std::move(cb), false);
+  }
+
+  DCHECK(key_to_pop.has_value());
 
   // Pop elements from relevant set.
-  OpResult<ScoredArray> pop_result =
-      ZPopMinMaxInternal(*key_to_pop, FilterShards::YES, pop_count, is_max, cmd_cntx.tx);
+  OpResult<ScoredArray> pop_result = ZPopMinMaxInternal(
+      *key_to_pop, FilterShards::YES, zmpop_args.pop_count, zmpop_args.is_max, cmd_cntx.tx);
 
   if (pop_result.status() == OpStatus::WRONG_TYPE) {
     return response_builder->SendError(kWrongTypeErr);
@@ -2464,6 +2530,14 @@ void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
 
   LOG_IF(WARNING, !pop_result) << "Unexpected status " << pop_result.status();
   response_builder->SendLabeledScoredArray(*key_to_pop, pop_result.value());
+}
+
+void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
+  ZMPopGeneric(args, cmd_cntx, false);
+}
+
+void ZSetFamily::BZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
+  ZMPopGeneric(args, cmd_cntx, true);
 }
 
 void ZSetFamily::ZPopMax(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2618,8 +2692,8 @@ void ZSetFamily::ZRandMember(CmdArgList args, const CommandContext& cmd_cntx) {
   if (parser.HasNext())
     return rb->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
 
-  if (auto err = parser.Error(); err)
-    return rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRandMember(count, params, t->GetOpArgs(shard), key);
@@ -2737,6 +2811,7 @@ constexpr uint32_t kZInter = READ | SORTEDSET | SLOW;
 constexpr uint32_t kZInterCard = WRITE | SORTEDSET | SLOW;
 constexpr uint32_t kZLexCount = READ | SORTEDSET | FAST;
 constexpr uint32_t kZMPop = WRITE | SORTEDSET | SLOW;
+constexpr uint32_t kBZMPop = WRITE | SORTEDSET | SLOW | BLOCKING;
 constexpr uint32_t kZPopMax = WRITE | SORTEDSET | FAST;
 constexpr uint32_t kZPopMin = WRITE | SORTEDSET | FAST;
 constexpr uint32_t kZRem = WRITE | SORTEDSET | FAST;
@@ -2782,7 +2857,13 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"ZINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZInterCard}.HFUNC(
              ZInterCard)
       << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, acl::kZLexCount}.HFUNC(ZLexCount)
-      << CI{"ZMPOP", CO::SLOW | CO::WRITE | CO::VARIADIC_KEYS, -4, 2, 2, acl::kZMPop}.HFUNC(ZMPop)
+      << CI{"ZMPOP",    CO::SLOW | CO::WRITE | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2,
+            acl::kZMPop}
+             .HFUNC(ZMPop)
+      << CI{"BZMPOP", CO::SLOW | CO::WRITE | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL,
+            -5,       3,
+            3,        acl::kBZMPop}
+             .HFUNC(BZMPop)
 
       << CI{"ZPOPMAX", CO::FAST | CO::WRITE, -2, 1, 1, acl::kZPopMax}.HFUNC(ZPopMax)
       << CI{"ZPOPMIN", CO::FAST | CO::WRITE, -2, 1, 1, acl::kZPopMin}.HFUNC(ZPopMin)

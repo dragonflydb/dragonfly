@@ -7,7 +7,10 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
+#include <memory>
+
 #include "base/flags.h"
+#include "core/page_usage_stats.h"
 #include "io/proc_reader.h"
 
 extern "C" {
@@ -221,14 +224,15 @@ size_t CalculateEvictionBytes() {
   const size_t shards_count = shard_set->size();
   const double eviction_memory_budget_threshold = GetFlag(FLAGS_eviction_memory_budget_threshold);
 
+  size_t limit = max_memory_limit.load(memory_order_relaxed);
   const size_t shard_memory_budget_threshold =
-      size_t(max_memory_limit * eviction_memory_budget_threshold) / shards_count;
+      size_t(limit * eviction_memory_budget_threshold) / shards_count;
 
   const size_t global_used_memory = used_mem_current.load(memory_order_relaxed);
 
   // Calculate how many bytes we need to evict on this shard
-  size_t goal_bytes = CalculateHowManyBytesToEvictOnShard(max_memory_limit, global_used_memory,
-                                                          shard_memory_budget_threshold);
+  size_t goal_bytes =
+      CalculateHowManyBytesToEvictOnShard(limit, global_used_memory, shard_memory_budget_threshold);
 
   // TODO: Eviction due to rss usage is not working well as it causes eviction
   // of to many keys untill we finally see decrease in rss. We need to improve
@@ -348,18 +352,19 @@ void EngineShard::DefragTaskState::ResetScanState() {
 // 3. in case the above is OK, make sure that we have a "gap" between usage and commited memory
 // (control by mem_defrag_waste_threshold flag)
 bool EngineShard::DefragTaskState::CheckRequired() {
-  if (is_force_defrag || cursor > kCursorDoneState) {
-    is_force_defrag = false;
-    VLOG(2) << "cursor: " << cursor << " and is_force_defrag " << is_force_defrag;
+  if (cursor > kCursorDoneState) {
+    VLOG(2) << "cursor: " << cursor;
     return true;
   }
 
-  const std::size_t memory_per_shard = max_memory_limit / shard_set->size();
+  size_t limit = max_memory_limit.load(memory_order_relaxed);
+
+  const std::size_t memory_per_shard = limit / shard_set->size();
   if (memory_per_shard < (1 << 16)) {  // Too small.
     return false;
   }
 
-  const std::size_t global_threshold = max_memory_limit * GetFlag(FLAGS_mem_defrag_threshold);
+  const std::size_t global_threshold = limit * GetFlag(FLAGS_mem_defrag_threshold);
   if (global_threshold > rss_mem_current.load(memory_order_relaxed)) {
     return false;
   }
@@ -384,11 +389,8 @@ bool EngineShard::DefragTaskState::CheckRequired() {
   return false;
 }
 
-void EngineShard::ForceDefrag() {
-  defrag_state_.is_force_defrag = true;
-}
-
-bool EngineShard::DoDefrag() {
+std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect_page_stats,
+                                                        const float threshold) {
   // --------------------------------------------------------------------------
   // NOTE: This task is running with exclusive access to the shard.
   // i.e. - Since we are using shared nothing access here, and all access
@@ -397,7 +399,6 @@ bool EngineShard::DoDefrag() {
   // --------------------------------------------------------------------------
 
   constexpr size_t kMaxTraverses = 40;
-  const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
 
   // TODO: enable tiered storage on non-default db slice
   DbSlice& slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
@@ -409,7 +410,7 @@ bool EngineShard::DoDefrag() {
   // If we found no valid db, we finished traversing and start from scratch next time
   if (!slice.IsDbValid(defrag_state_.dbid)) {
     defrag_state_.ResetScanState();
-    return false;
+    return std::nullopt;
   }
 
   DCHECK(slice.IsDbValid(defrag_state_.dbid));
@@ -419,11 +420,12 @@ bool EngineShard::DoDefrag() {
   unsigned traverses_count = 0;
   uint64_t attempts = 0;
 
+  PageUsage page_usage{collect_page_stats, threshold};
   do {
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       // for each value check whether we should move it because it
       // seats on underutilized page of memory, and if so, do it.
-      bool did = it->second.DefragIfNeeded(threshold);
+      bool did = it->second.DefragIfNeeded(&page_usage);
       attempts++;
       if (did) {
         reallocations++;
@@ -449,7 +451,7 @@ bool EngineShard::DoDefrag() {
   stats_.defrag_task_invocation_total++;
   stats_.defrag_attempt_total += attempts;
 
-  return true;
+  return page_usage.CollectedStats();
 }
 
 // the memory defragmentation task is as follow:
@@ -468,7 +470,8 @@ uint32_t EngineShard::DefragTask() {
 
   if (defrag_state_.CheckRequired()) {
     VLOG(2) << shard_id_ << ": need to run defrag memory cursor state: " << defrag_state_.cursor;
-    if (DoDefrag()) {
+    static const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
+    if (DoDefrag(CollectPageStats::NO, threshold)) {
       // we didn't finish the scan
       return util::ProactorBase::kOnIdleMaxLevel;
     }
@@ -477,11 +480,11 @@ uint32_t EngineShard::DefragTask() {
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
-    : queue_(kQueueLen, 1, 1),
+    : txq_([](const Transaction* t) { return t->txid(); }),
+      queue_(kQueueLen, 1, 1),
       queue2_(kQueueLen / 2, 2, 2),
-      txq_([](const Transaction* t) { return t->txid(); }),
-      mi_resource_(heap),
-      shard_id_(pb->GetPoolIndex()) {
+      shard_id_(pb->GetPoolIndex()),
+      mi_resource_(heap) {
   queue_.Start(absl::StrCat("shard_queue_", shard_id()));
   queue2_.Start(absl::StrCat("l2_queue_", shard_id()));
 }
@@ -572,7 +575,7 @@ void EngineShard::InitThreadLocal(ProactorBase* pb) {
 
   RoundRobinSharder::Init();
 
-  shard_->shard_search_indices_.reset(new ShardDocIndices());
+  shard_->shard_search_indices_ = std::make_unique<ShardDocIndices>();
 }
 
 void EngineShard::InitTieredStorage(ProactorBase* pb, size_t max_file_size) {
@@ -779,11 +782,14 @@ void EngineShard::Heartbeat() {
   // Offset CoolMemoryUsage when consider background offloading.
   // TODO: Another approach could be is to align the approach  similarly to how we do with
   // FreeMemWithEvictionStep, i.e. if memory_budget is below the limit.
-  size_t tiering_offload_threshold =
-      tiered_storage_ ? tiered_storage_->CoolMemoryUsage() +
-                            size_t(max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) /
-                                shard_set->size()
-                      : std::numeric_limits<size_t>::max();
+  size_t tiering_offload_threshold = std::numeric_limits<size_t>::max();
+  if (tiered_storage_) {
+    size_t limit = max_memory_limit.load(memory_order_relaxed);
+    tiering_offload_threshold =
+        tiered_storage_->CoolMemoryUsage() +
+        size_t(limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size();
+  }
+
   size_t used_memory = UsedMemory();
   if (used_memory > tiering_offload_threshold) {
     VLOG(1) << "Running Offloading, memory=" << used_memory
@@ -829,7 +835,7 @@ void EngineShard::RetireExpiredAndEvict() {
 
     db_cntx.db_index = i;
     auto [pt, expt] = db_slice.GetTables(i);
-    if (expt->size() > 0) {
+    if (!expt->Empty()) {
       DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
 
       eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
@@ -860,30 +866,26 @@ void EngineShard::RetireExpiredAndEvict() {
 
 void EngineShard::CacheStats() {
   uint64_t now = fb2::ProactorBase::GetMonotonicTimeNs();
-  if (cache_stats_time_ + 1000000 > now)  // 1ms
+  if (last_mem_params_.updated_at + 1000000 > now)  // 1ms
     return;
 
-  cache_stats_time_ = now;
-  // Used memory for this shard.
   size_t used_mem = UsedMemory();
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
 
-  // delta can wrap if used_memory is smaller than last_cached_used_memory_ and it's fine.
-  size_t delta = used_mem - last_cached_used_memory_;
-  last_cached_used_memory_ = used_mem;
+  // Reflect local memory change on global value
+  size_t delta = used_mem - last_mem_params_.used_mem;  // negative value wraps safely
   size_t current = used_mem_current.fetch_add(delta, memory_order_relaxed) + delta;
-  ssize_t free_mem = max_memory_limit - current;
+  ssize_t free_mem = max_memory_limit.load(memory_order_relaxed) - current;
 
+  // Estimate bytes per object, excluding table memory
   size_t entries = db_slice.entries_count();
-  size_t table_memory = db_slice.table_memory();
-
-  if (tiered_storage_) {
-    table_memory += tiered_storage_->CoolMemoryUsage();
-  }
+  size_t table_memory =
+      db_slice.table_memory() + (tiered_storage_ ? tiered_storage_->CoolMemoryUsage() : 0);
   size_t obj_memory = table_memory <= used_mem ? used_mem - table_memory : 0;
-
   size_t bytes_per_obj = entries > 0 ? obj_memory / entries : 0;
-  db_slice.SetCachedParams(free_mem / shard_set->size(), bytes_per_obj);
+
+  db_slice.UpdateMemoryParams(free_mem / shard_set->size(), bytes_per_obj);
+  last_mem_params_ = {now, used_mem};
 }
 
 size_t EngineShard::UsedMemory() const {
@@ -895,8 +897,8 @@ bool EngineShard::ShouldThrottleForTiering() const {  // see header for formula 
   if (!tiered_storage_)
     return false;
 
-  size_t tiering_redline =
-      (max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size();
+  size_t limit = max_memory_limit.load(memory_order_relaxed);
+  size_t tiering_redline = (limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size();
 
   // UsedMemory includes CoolMemoryUsage, so we are offsetting it to remove the cool cache impact.
   return tiered_storage_->WriteDepthUsage() > 0.3 &&

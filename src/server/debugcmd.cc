@@ -20,11 +20,11 @@ extern "C" {
 #include <zdict.h>
 #include <zstd.h>
 
+#include <algorithm>
 #include <filesystem>
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "core/compact_object.h"
 #include "core/huff_coder.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
@@ -67,7 +67,7 @@ struct ObjInfo {
   unsigned num_nodes = 0;
   unsigned num_compressed = 0;
 
-  enum LockStatus { NONE, S, X } lock_status = NONE;
+  enum LockStatus : uint8_t { NONE, S, X } lock_status = NONE;
 
   int64_t ttl = INT64_MAX;
   optional<uint32_t> external_len;
@@ -262,6 +262,28 @@ void DoBuildObjHist(EngineShard* shard, ConnectionContext* cntx, ObjHistMap* obj
   }
 }
 
+struct SegmentInfo {
+  base::Histogram hist;
+};
+
+void DoSegmentHist(EngineShard* shard, ConnectionContext* cntx, SegmentInfo* info) {
+  auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
+  DbTable* dbt = db_slice.GetDBTable(cntx->db_index());
+  if (dbt == nullptr)
+    return;
+
+  unsigned steps = 0;
+  auto& prime = dbt->prime;
+  for (size_t i = 0; i < prime.GetSegmentCount(); i = prime.NextSeg(i)) {
+    const auto* segment = prime.GetSegment(i);
+
+    info->hist.Add(segment->SlowSize());
+    if (++steps % 2000 == 0) {
+      ThisFiber::Yield();
+    }
+  }
+}
+
 struct HufHist {
   static constexpr unsigned kMaxSymbol = 255;
   array<unsigned, kMaxSymbol + 1> hist;  // histogram of symbols.
@@ -277,7 +299,22 @@ struct HufHist {
       hist[i] += other.hist[i];
     }
   }
+
+  unsigned MaxFreqCount() const;
 };
+
+unsigned HufHist::MaxFreqCount() const {
+  unsigned max_freq = 0;
+  for (unsigned i = 0; i < kMaxSymbol; ++i) {
+    if (hist[i] > max_freq) {
+      max_freq = hist[i];
+    }
+  }
+  return max_freq;
+}
+
+unsigned kMaxFreqPerShard = 1U << 19;
+unsigned kMaxFreqTotal = 1U << 23;
 
 void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* cntx,
                    HufHist* dest) {
@@ -294,6 +331,7 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
   do {
     cursor = table.Traverse(cursor, [&](PrimeIterator it) {
       scratch.clear();
+      ++steps;
       if (type == kInvalidCompactObjType) {  // KEYSPACE
         if (it->first.MallocUsed() > 0) {
           it->first.GetString(&scratch);
@@ -305,6 +343,7 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
       } else if (type == OBJ_ZSET && it->second.ObjType() == OBJ_ZSET) {
         container_utils::IterateSortedSet(
             it->second.GetRobjWrapper(), [&](container_utils::ContainerEntry entry, double) {
+              ++steps;
               if (entry.value) {
                 HIST_add(dest->hist.data(), entry.value, entry.length);
               }
@@ -312,6 +351,7 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
             });
       } else if (type == OBJ_LIST && it->second.ObjType() == OBJ_LIST) {
         container_utils::IterateList(it->second, [&](container_utils::ContainerEntry entry) {
+          ++steps;
           if (entry.value) {
             HIST_add(dest->hist.data(), entry.value, entry.length);
           }
@@ -320,6 +360,7 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
       } else if (type == OBJ_HASH && it->second.ObjType() == OBJ_HASH) {
         container_utils::IterateMap(it->second, [&](container_utils::ContainerEntry key,
                                                     container_utils::ContainerEntry value) {
+          ++steps;
           if (key.value) {
             HIST_add(dest->hist.data(), key.value, key.length);
           }
@@ -330,13 +371,17 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
         });
       }
 
-      if (scratch.size() > 0) {
+      if (!scratch.empty()) {
         size_t len = std::min(scratch.size(), kMaxLen);
         HIST_add(dest->hist.data(), scratch.data(), len);
       }
     });
 
-    if (steps >= 20000) {
+    if (steps >= 40000) {
+      if (dest->MaxFreqCount() > kMaxFreqPerShard) {
+        break;
+      }
+
       steps = 0;
       ThisFiber::Yield();
     }
@@ -567,14 +612,15 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "WATCHED",
         "    Shows the watched keys as a result of BLPOP and similar operations.",
         "POPULATE <count> [prefix] [size] [RAND] [SLOTS start end] [TYPE type] [ELEMENTS elements]"
-        "[EXPIRE start end]",
+        " [EXPIRE start end]",
         "    Create <count> string keys named key:<num> with value value:<num>.",
         "    If <prefix> is specified then it is used instead of the 'key' prefix.",
         "    If <size> is specified then X character is concatenated multiple times to value:<num>",
         "    to meet value size.",
         "    If RAND is specified then value will be set to random hex string in specified size.",
         "    If SLOTS is specified then create keys only in given slots range.",
-        "    TYPE specifies data type (must be STRING/LIST/SET/HASH/ZSET/JSON), default STRING.",
+        "    TYPE specifies data type (must be STRING/LIST/SET/HASH/ZSET/JSON/STREAM), default "
+        "STRING.",
         "    ELEMENTS specifies how many sub elements if relevant (like entries in a list / set).",
         "    EXPIRE specifies key expire ttl range.",
         "OBJHIST",
@@ -586,10 +632,14 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "TOPK ON [min_freq] | OFF [max_keys]",
         "    Turns on or off sampling of topk keys. Provides top keys with at least <min_freq> ",
         "    during the sampling period. The results are returned in descending order of frequency",
-        "    when calling TOPK OFF command.",
+        "    when calling TOPK OFF command. First result is the sampled keys count.",
         "KEYS ON | OFF",
         "    Turns on/off counting of unique keys. Results are returned when calling ",
-        "    KEYS OFF command.",
+        "    KEYS OFF command. The results is array with two integers: unique keys count and ",
+        "    sampled keys count.",
+        "VALUES ON | OFF",
+        "    Turns on/off measurement of value length distribution. Results are returned when ",
+        "    calling VALUES OFF command.",
         "TX",
         "    Performs transaction analysis per shard.",
         "TRAFFIC <path> | [STOP]",
@@ -605,6 +655,8 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "IOSTATS [PS]",
         "    Prints IO stats per thread. If PS is specified, prints thread-level stats ",
         "    per second.",
+        "SEGMENTS",
+        "    Prints segment info for the current database.",
         "HELP",
         "    Prints this help.",
     };
@@ -676,12 +728,18 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
     return Keys(args.subspan(1), builder);
   }
 
+  if (subcmd == "VALUES" && args.size() >= 2) {
+    return Values(args.subspan(1), builder);
+  }
   if (subcmd == "COMPRESSION") {
     return Compression(args.subspan(1), builder);
   }
 
   if (subcmd == "IOSTATS") {
     return IOStats(args.subspan(1), builder);
+  }
+  if (subcmd == "SEGMENTS") {
+    return Segments(args.subspan(1), builder);
   }
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return builder->SendError(reply, kSyntaxErrType);
@@ -806,7 +864,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
         auto [min_ttl, max_ttl] = parser.Next<uint32_t, uint32_t>();
         if (min_ttl >= max_ttl) {
           builder->SendError(kExpiryOutOfRange);
-          (void)parser.Error();
+          (void)parser.TakeError();
           return nullopt;
         }
         options.expire_ttl_range = std::make_pair(min_ttl, max_ttl);
@@ -818,7 +876,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
     }
   }
   if (parser.HasError()) {
-    builder->SendError(parser.Error()->MakeReply());
+    builder->SendError(parser.TakeError().MakeReply());
     return nullopt;
   }
   return options;
@@ -1131,10 +1189,11 @@ void DebugCmd::Stacktrace(facade::SinkReplyBuilder* builder) {
 
 void DebugCmd::Shards(facade::SinkReplyBuilder* builder) {
   struct ShardInfo {
-    size_t used_memory = 0;
-    size_t key_count = 0;
-    size_t expire_count = 0;
-    size_t key_reads = 0;
+    uint64_t used_memory = 0;
+    uint64_t key_count = 0;
+    uint64_t prime_capacity = 0;
+    uint64_t expire_count = 0;
+    uint64_t key_reads = 0;
   };
 
   vector<ShardInfo> infos(shard_set->size());
@@ -1146,6 +1205,7 @@ void DebugCmd::Shards(facade::SinkReplyBuilder* builder) {
     stats.used_memory = shard->UsedMemory();
     for (const auto& db_stats : slice_stats.db_stats) {
       stats.key_count += db_stats.key_count;
+      stats.prime_capacity += db_stats.prime_capacity;
       stats.expire_count += db_stats.expire_count;
     }
     stats.key_reads = slice_stats.events.hits + slice_stats.events.misses;
@@ -1154,11 +1214,11 @@ void DebugCmd::Shards(facade::SinkReplyBuilder* builder) {
 #define ADD_STAT(i, stat) absl::StrAppend(&out, "shard", i, "_", #stat, ": ", infos[i].stat, "\n");
 #define MAXMIN_STAT(stat)                                   \
   {                                                         \
-    size_t minv = numeric_limits<size_t>::max();            \
-    size_t maxv = 0;                                        \
+    uint64_t minv = std::numeric_limits<uint64_t>::max();   \
+    uint64_t maxv = 0;                                      \
     for (const auto& info : infos) {                        \
-      minv = min(minv, info.stat);                          \
-      maxv = max(maxv, info.stat);                          \
+      minv = std::min(minv, info.stat);                     \
+      maxv = std::max(maxv, info.stat);                     \
     }                                                       \
     absl::StrAppend(&out, "max_", #stat, ": ", maxv, "\n"); \
     absl::StrAppend(&out, "min_", #stat, ": ", minv, "\n"); \
@@ -1172,6 +1232,9 @@ void DebugCmd::Shards(facade::SinkReplyBuilder* builder) {
     ADD_STAT(i, key_count);
     ADD_STAT(i, expire_count);
     ADD_STAT(i, key_reads);
+    absl::StrAppend(&out, "shard", i,
+                    "_prime_utilization: ", double(infos[i].key_count) / infos[i].prime_capacity,
+                    "\n");
   }
 
   MAXMIN_STAT(used_memory);
@@ -1242,8 +1305,9 @@ void DebugCmd::Topk(CmdArgList args, facade::SinkReplyBuilder* builder) {
     });
 
     vector<pair<uint64_t, string>> items;
-
+    uint64_t total_keys = 0;
     for (const auto& res : results) {
+      total_keys += res.total_samples;
       for (const auto& k_v : res.top_keys) {
         items.emplace_back(k_v.second, k_v.first);
         push_heap(items.begin(), items.end(), std::greater<>());
@@ -1254,6 +1318,8 @@ void DebugCmd::Topk(CmdArgList args, facade::SinkReplyBuilder* builder) {
       }
     }
 
+    rb->StartArray(2);
+    rb->SendLong(total_keys);
     rb->StartArray(items.size());
     for (const auto& k_v : items) {
       rb->SendBulkString(StrCat(k_v.second, ":", k_v.first));
@@ -1275,16 +1341,81 @@ void DebugCmd::Keys(CmdArgList args, facade::SinkReplyBuilder* builder) {
   }
 
   if (absl::EqualsIgnoreCase(subcmd, "OFF")) {
-    atomic_uint64_t total_keys = 0;
+    atomic_uint64_t uniq_keys{0}, total_samples{0};
     shard_set->RunBriefInParallel([&](EngineShard* es) {
-      size_t res = cntx_->ns->GetDbSlice(es->shard_id()).StopSampleKeys(cntx_->db_index());
-      total_keys.fetch_add(res, memory_order_relaxed);
+      DbSlice::UniqueSampleResult res =
+          cntx_->ns->GetDbSlice(es->shard_id()).StopSampleKeys(cntx_->db_index());
+      uniq_keys.fetch_add(res.unique_keys_count, memory_order_relaxed);
+      total_samples.fetch_add(res.total_samples, memory_order_relaxed);
     });
 
-    return builder->SendLong(total_keys.load());
+    uint64_t arr[2] = {uniq_keys.load(), total_samples.load()};
+    auto* rb = static_cast<RedisReplyBuilder*>(builder);
+    return rb->SendLongArr(absl::MakeConstSpan(arr));
   }
 
   return builder->SendError(kSyntaxErr);
+}
+
+void DebugCmd::Values(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  string_view subcmd = ArgS(args, 0);
+
+  if (absl::EqualsIgnoreCase(subcmd, "ON")) {
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      cntx_->ns->GetDbSlice(es->shard_id()).StartSampleValues(cntx_->db_index());
+    });
+    return builder->SendOk();
+  }
+
+  vector<unique_ptr<base::Histogram>> histograms(shard_set->size());
+  if (absl::EqualsIgnoreCase(subcmd, "OFF")) {
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      histograms[es->shard_id()] =
+          cntx_->ns->GetDbSlice(es->shard_id()).StopSampleValues(cntx_->db_index());
+    });
+
+    base::Histogram merged_histogram;
+    for (const auto& hist : histograms) {
+      if (hist) {
+        merged_histogram.Merge(*hist);
+      }
+    }
+    auto* rb = static_cast<RedisReplyBuilder*>(builder);
+    return rb->SendVerbatimString(merged_histogram.ToString());
+  }
+
+  return builder->SendError(kSyntaxErr);
+}
+
+static size_t PostProcessHist(HufHist* dest) {
+  size_t raw_size = 0;
+  auto& hist = dest->hist;
+  unsigned max_freq = 0;
+
+  for (unsigned i = 0; i <= HufHist::kMaxSymbol; i++) {
+    // raw_size may count less characters than the actual size because
+    // we may cut the counting early.
+    raw_size += hist[i];
+    if (hist[i] > max_freq) {
+      max_freq = hist[i];
+    }
+    if (hist[i] == 0) {
+      hist[i] = 1;  // Avoid zero frequency symbols.
+    }
+  }
+
+  if (max_freq > kMaxFreqTotal) {
+    // huffman encoder has a bug with frequencies too high, so we scale down everything
+    // to avoid overflow.
+    double scale = static_cast<double>(max_freq) / kMaxFreqTotal;
+    for (unsigned i = 0; i <= HufHist::kMaxSymbol; i++) {
+      hist[i] = unsigned(hist[i] / scale);
+      if (hist[i] == 0) {
+        hist[i] = 1;  // Avoid zero frequency symbols.
+      }
+    }
+  }
+  return raw_size;
 }
 
 void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
@@ -1334,7 +1465,7 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
   }
 
   if (parser.HasError()) {
-    return builder->SendError(parser.Error()->MakeReply());
+    return builder->SendError(parser.TakeError().MakeReply());
   }
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
@@ -1349,19 +1480,11 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
   });
 
   size_t num_bits = 0, compressed_size = 0, raw_size = 0;
-
   if (hist.max_symbol) {
     HuffmanEncoder huff_enc;
     string err_msg;
 
-    raw_size = 0;
-    for (unsigned i = 0; i <= HufHist::kMaxSymbol; i++) {
-      raw_size += hist.hist[i];
-
-      // force non-zero weights for all symbols.
-      if (hist.hist[i] == 0)
-        hist.hist[i] = 1;
-    }
+    raw_size = PostProcessHist(&hist);
 
     if (bintable.empty()) {
       if (!huff_enc.Build(hist.hist.data(), HufHist::kMaxSymbol, &err_msg)) {
@@ -1407,7 +1530,7 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
 void DebugCmd::IOStats(CmdArgList args, facade::SinkReplyBuilder* builder) {
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
 
-  bool per_second = args.size() > 0 && absl::EqualsIgnoreCase(args[0], "PS");
+  bool per_second = !args.empty() && absl::EqualsIgnoreCase(args[0], "PS");
   vector<IOStat> stats(shard_set->pool()->size());
 
   shard_set->pool()->AwaitBrief(
@@ -1431,6 +1554,27 @@ void DebugCmd::IOStats(CmdArgList args, facade::SinkReplyBuilder* builder) {
   }
 }
 
+void DebugCmd::Segments(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  vector<SegmentInfo> info(shard_set->size());
+
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    auto& hist = info[shard->shard_id()];
+    DoSegmentHist(shard, cntx_, &hist);
+  });
+
+  base::Histogram hist;
+  for (const auto& seg_info : info) {
+    hist.Merge(seg_info.hist);
+  }
+  string result;
+  absl::StrAppend(&result, "___begin segment info___\n\n");
+  absl::StrAppend(&result, "Segment Capacity: ", PrimeTable::kSegCapacity, "\n");
+  absl::StrAppend(&result, "Segment Size Histogram: \n");
+  absl::StrAppend(&result, hist.ToString(), "\n");
+  rb->SendVerbatimString(result);
+}
+
 void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBatch& batch) {
   boost::intrusive_ptr<Transaction> local_tx =
       new Transaction{sf_.service().mutable_registry()->Find("EXEC")};
@@ -1446,10 +1590,16 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
     string key = StrCat(options.prefix, ":", batch.index[i]);
     uint32_t elements_left = options.elements;
 
+    // limit rss grow by 32K by limiting the element count in each command.
+    // for stream we use 4 fields and (elements / 4) stream entries
+    uint32_t max_batch_elements =
+        options.type == "STREAM" ? 4 : std::max(32_KB / options.val_size, 1ULL);
     while (elements_left) {
-      // limit rss grow by 32K by limiting the element count in each command.
-      uint32_t max_batch_elements = std::max(32_KB / options.val_size, 1ULL);
       uint32_t populate_elements = std::min(max_batch_elements, elements_left);
+      if (options.type == "STREAM" && populate_elements > 4) {
+        // populate_elements % 4 == 0, because we add 4 fields into one stream entry
+        populate_elements -= (populate_elements % 4);
+      }
       elements_left -= populate_elements;
       auto [cid, args] = GeneratePopulateCommand(options.type, key, options.val_size,
                                                  options.populate_random_values, populate_elements,

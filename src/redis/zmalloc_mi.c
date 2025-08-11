@@ -4,6 +4,7 @@
 
 #include <assert.h>
 #include <mimalloc.h>
+#include <mimalloc/types.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -12,7 +13,8 @@
 __thread ssize_t zmalloc_used_memory_tl = 0;
 __thread mi_heap_t* zmalloc_heap = NULL;
 
-bool mi_heap_page_is_underutilized(mi_heap_t* heap, void* p, float ratio);
+mi_page_usage_stats_t mi_heap_page_is_underutilized(mi_heap_t* heap, void* p, float ratio,
+                                                    bool collect_stats);
 
 /* Allocate memory or panic */
 void* zmalloc(size_t size) {
@@ -175,13 +177,15 @@ void init_zmalloc_threadlocal(void* heap) {
   zmalloc_heap = heap;
 }
 
-int zmalloc_page_is_underutilized(void* ptr, float ratio) {
-  return mi_heap_page_is_underutilized(zmalloc_heap, ptr, ratio);
+void zmalloc_page_is_underutilized(void* ptr, float ratio, int collect_stats,
+                                   mi_page_usage_stats_t* result) {
+  *result = mi_heap_page_is_underutilized(zmalloc_heap, ptr, ratio,
+                                          collect_stats);
 }
 
-char *zstrdup(const char *s) {
+char* zstrdup(const char* s) {
   size_t l = strlen(s) + 1;
-  char *p = zmalloc(l);
+  char* p = zmalloc(l);
 
   memcpy(p, s, l);
   return p;

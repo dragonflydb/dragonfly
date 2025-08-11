@@ -7,6 +7,7 @@
 #include "base/endian.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
+#include "core/page_usage_stats.h"
 #include "core/sds_utils.h"
 
 extern "C" {
@@ -189,7 +190,7 @@ sds StringMap::GetValue(sds key) {
   return (sds)(kValMask & val);
 }
 
-pair<sds, bool> StringMap::ReallocIfNeeded(void* obj, float ratio) {
+pair<sds, bool> StringMap::ReallocIfNeeded(void* obj, PageUsage* page_usage) {
   sds key = (sds)obj;
   size_t key_len = sdslen(key);
 
@@ -200,7 +201,7 @@ pair<sds, bool> StringMap::ReallocIfNeeded(void* obj, float ratio) {
   bool realloced_value = false;
 
   // If the allocated value is underutilized, re-allocate it and update the pointer inside the key
-  if (zmalloc_page_is_underutilized(value, ratio)) {
+  if (page_usage->IsPageForObjectUnderUtilized(value)) {
     size_t value_len = sdslen(value);
     sds new_value = sdsnewlen(value, value_len);
     memcpy(new_value, value, value_len);
@@ -210,7 +211,7 @@ pair<sds, bool> StringMap::ReallocIfNeeded(void* obj, float ratio) {
     realloced_value = true;
   }
 
-  if (!zmalloc_page_is_underutilized(key, ratio))
+  if (!page_usage->IsPageForObjectUnderUtilized(key))
     return {key, realloced_value};
 
   size_t space_size = 8 /* value ptr */ + ((value_tag & kValTtlBit) ? 4 : 0) /* optional expiry */;
@@ -292,7 +293,10 @@ void* StringMap::ObjectClone(const void* obj, bool has_ttl, bool add_ttl) const 
   uint32_t ttl_sec = add_ttl ? 0 : (has_ttl ? ObjExpireTime(obj) : UINT32_MAX);
   sds str = (sds)obj;
   auto pair = detail::SdsPair(str, GetValue(str));
-  auto [newkey, sdsval_tag] = CreateEntry(pair->first, pair->second, time_now(), ttl_sec);
+  // Use explicit string_view constructor with length to preserve null characters
+  string_view key_sv(pair->first, sdslen(pair->first));
+  string_view value_sv(pair->second, sdslen(pair->second));
+  auto [newkey, sdsval_tag] = CreateEntry(key_sv, value_sv, time_now(), ttl_sec);
 
   return (void*)newkey;
 }
@@ -302,7 +306,7 @@ detail::SdsPair StringMap::iterator::BreakToPair(void* obj) {
   return detail::SdsPair(f, GetValue(f));
 }
 
-bool StringMap::iterator::ReallocIfNeeded(float ratio) {
+bool StringMap::iterator::ReallocIfNeeded(PageUsage* page_usage) {
   auto* ptr = curr_entry_;
   if (ptr->IsLink()) {
     ptr = ptr->AsLink();
@@ -312,7 +316,7 @@ bool StringMap::iterator::ReallocIfNeeded(float ratio) {
   DCHECK(ptr->IsObject());
 
   auto* obj = ptr->GetObject();
-  auto [new_obj, realloced] = static_cast<StringMap*>(owner_)->ReallocIfNeeded(obj, ratio);
+  auto [new_obj, realloced] = static_cast<StringMap*>(owner_)->ReallocIfNeeded(obj, page_usage);
   ptr->SetObject(new_obj);
 
   return realloced;

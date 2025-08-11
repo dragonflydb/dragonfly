@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "base/logging.h"
+#include "core/search/query_driver.h"
 #include "core/search/search.h"
 #include "core/search/vector_utils.h"
 #include "facade/cmd_arg_parser.h"
@@ -56,8 +57,8 @@ nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string_view message) 
 template <typename T>
 bool SendErrorIfOccurred(const ParseResult<T>& result, CmdArgParser* parser,
                          SinkReplyBuilder* builder) {
-  if (auto err = parser->Error(); err || !result) {
-    builder->SendError(!result ? result.error() : err->MakeReply());
+  if (auto err = parser->TakeError(); err || !result) {
+    builder->SendError(!result ? result.error() : err.MakeReply());
     return true;
   }
 
@@ -79,8 +80,9 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   for (size_t i = 0; i * 2 < num_args; i++) {
     if (parser->Check("DIM", &params.dim)) {
     } else if (parser->Check("DISTANCE_METRIC")) {
-      params.sim = parser->MapNext("L2", search::VectorSimilarity::L2, "COSINE",
-                                   search::VectorSimilarity::COSINE);
+      params.sim =
+          parser->MapNext("L2", search::VectorSimilarity::L2, "IP", search::VectorSimilarity::IP,
+                          "COSINE", search::VectorSimilarity::COSINE);
     } else if (parser->Check("INITIAL_CAP", &params.capacity)) {
     } else if (parser->Check("M", &params.hnsw_m)) {
     } else if (parser->Check("EF_CONSTRUCTION", &params.hnsw_ef_construction)) {
@@ -134,6 +136,14 @@ ParseResult<search::SchemaField::TextParams> ParseTextParams(CmdArgParser* parse
   return params;
 }
 
+search::SchemaField::NumericParams ParseNumericParams(CmdArgParser* parser) {
+  search::SchemaField::NumericParams params{};
+  if (parser->Check("BLOCKSIZE")) {
+    params.block_size = parser->Next<size_t>();
+  }
+  return params;
+}
+
 // breaks on ParamsVariant initialization
 #ifndef __clang__
 #pragma GCC diagnostic push
@@ -160,7 +170,7 @@ ParsedSchemaField ParseText(CmdArgParser* parser) {
 }
 
 ParsedSchemaField ParseNumeric(CmdArgParser* parser) {
-  return std::make_pair(search::SchemaField::NUMERIC, std::monostate{});
+  return std::make_pair(search::SchemaField::NUMERIC, ParseNumericParams(parser));
 }
 
 // Vector fields include: {algorithm} num_args args...
@@ -168,7 +178,7 @@ ParsedSchemaField ParseVector(CmdArgParser* parser) {
   auto vector_params = ParseVectorParams(parser);
 
   if (parser->HasError()) {
-    auto err = *parser->Error();
+    auto err = parser->TakeError();
     VLOG(1) << "Could not parse vector param " << err.index;
     return CreateSyntaxError("Parse error of vector parameters"sv);
   }
@@ -332,23 +342,16 @@ std::optional<std::string_view> ParseFieldWithAtSign(CmdArgParser* parser) {
   return field;
 }
 
-SearchFieldsList ParseLoadOrReturnFields(CmdArgParser* parser, bool is_load) {
+std::vector<FieldReference> ParseLoadOrReturnFields(CmdArgParser* parser, bool is_load) {
   // TODO: Change to num_strings. In Redis strings number is expected. For example: LOAD 3 $.a AS a
-  SearchFieldsList fields;
+  std::vector<FieldReference> fields;
   size_t num_fields = parser->Next<size_t>();
 
   while (parser->HasNext() && num_fields--) {
-    string_view str = parser->Next();
-
-    if (is_load && absl::StartsWith(str, "@"sv)) {
-      str.remove_prefix(1);  // remove leading @
-    }
-
-    StringOrView name = StringOrView::FromString(std::string{str});
-    if (parser->Check("AS"))
-      fields.emplace_back(name, true, StringOrView::FromString(parser->Next<std::string>()));
-    else
-      fields.emplace_back(name, true);
+    string_view field = is_load ? ParseField(parser) : parser->Next();
+    string_view alias;
+    parser->Check("AS", &alias);
+    fields.emplace_back(field, alias);
   }
   return fields;
 }
@@ -388,10 +391,9 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
     } else if (parser->Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
       params.query_params = ParseQueryParams(parser);
     } else if (parser->Check("SORTBY")) {
-      auto parsed_field = ParseField(parser);
-      StringOrView field = StringOrView::FromString(std::string{parsed_field});
-      params.sort_option = SearchParams::SortOption{
-          SearchField{std::move(field)}, parser->Check("DESC") ? SortOrder::DESC : SortOrder::ASC};
+      FieldReference field{ParseField(parser)};
+      params.sort_option =
+          SearchParams::SortOption{field, parser->Check("DESC") ? SortOrder::DESC : SortOrder::ASC};
     } else {
       // Unsupported parameters are ignored for now
       parser->Skip(1);
@@ -619,9 +621,23 @@ void SearchReply(const SearchParams& params,
   }
 }
 
+// Warms up the query parser to avoid first-call slowness
+void WarmupQueryParser() {
+  static std::once_flag warmed_up;
+  std::call_once(warmed_up, []() {
+    search::QueryParams params;
+    search::QueryDriver driver{};
+    driver.SetParams(&params);
+    driver.SetInput(std::string{""});
+    (void)search::Parser (&driver)();
+  });
+}
+
 }  // namespace
 
 void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
+  WarmupQueryParser();
+
   auto* builder = cmd_cntx.rb;
   if (cmd_cntx.conn_cntx->conn_state.db_index != 0) {
     return builder->SendError("Cannot create index on db != 0"sv);
@@ -669,8 +685,8 @@ void SearchFamily::FtAlter(CmdArgList args, const CommandContext& cmd_cntx) {
   parser.ExpectTag("SCHEMA");
   parser.ExpectTag("ADD");
   auto* builder = cmd_cntx.rb;
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   // First, extract existing index info
   shared_ptr<DocIndex> index_info;
@@ -789,15 +805,22 @@ void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
     vector<string> info;
 
     string_view base[] = {"identifier"sv, string_view{field_ident},
-                          "attribute",    field_info.short_name,
+                          "attribute"sv,  field_info.short_name,
                           "type"sv,       SearchFieldTypeToString(field_info.type)};
     info.insert(info.end(), base, base + ABSL_ARRAYSIZE(base));
 
     if (field_info.flags & search::SchemaField::NOINDEX)
-      info.push_back("NOINDEX");
+      info.emplace_back("NOINDEX"sv);
 
     if (field_info.flags & search::SchemaField::SORTABLE)
-      info.push_back("SORTABLE");
+      info.emplace_back("SORTABLE"sv);
+
+    if (field_info.type == search::SchemaField::NUMERIC) {
+      auto& numeric_params =
+          std::get<search::SchemaField::NumericParams>(field_info.special_params);
+      info.emplace_back("blocksize"sv);
+      info.emplace_back(std::to_string(numeric_params.block_size));
+    }
 
     rb->SendSimpleStrArr(info);
   }
@@ -1070,7 +1093,7 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
   if (params->load_fields) {
     load_fields.reserve(params->load_fields->size());
     for (const auto& field : params->load_fields.value()) {
-      load_fields.push_back(field.GetShortName());
+      load_fields.push_back(field.OutputName());
     }
   }
 
@@ -1182,7 +1205,7 @@ void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) 
   }
 
   if (!parser.Finalize()) {
-    return cmd_cntx.rb->SendError(parser.Error()->MakeReply());
+    return cmd_cntx.rb->SendError(parser.TakeError().MakeReply());
   }
 
   std::atomic_bool index_not_found{true};

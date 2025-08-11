@@ -35,6 +35,10 @@ using namespace std;
 
 using ::testing::HasSubstr;
 
+// Used for NumericIndex benchmarks.
+// The value is used to determine the maximum size of a range block in the range tree.
+constexpr size_t kMaxRangeBlockSize = 500000;
+
 struct MockedDocument : public DocumentAccessor {
  public:
   using Map = absl::flat_hash_map<std::string, std::string>;
@@ -101,15 +105,40 @@ struct MockedDocument : public DocumentAccessor {
 
 IndicesOptions kEmptyOptions{{}};
 
-Schema MakeSimpleSchema(initializer_list<pair<string_view, SchemaField::FieldType>> ilist) {
+struct SchemaFieldInitializer {
+  SchemaFieldInitializer(std::string_view name, SchemaField::FieldType type)
+      : name{name}, type{type} {
+    switch (type) {
+      case SchemaField::TAG:
+        special_params = SchemaField::TagParams{};
+        break;
+      case SchemaField::TEXT:
+        special_params = SchemaField::TextParams{};
+        break;
+      case SchemaField::NUMERIC:
+        special_params = SchemaField::NumericParams{};
+        break;
+      case SchemaField::VECTOR:
+        special_params = SchemaField::VectorParams{};
+        break;
+    }
+  }
+
+  SchemaFieldInitializer(std::string_view name, SchemaField::FieldType type,
+                         SchemaField::ParamsVariant special_params)
+      : name{name}, type{type}, special_params{special_params} {
+  }
+
+  std::string_view name;
+  SchemaField::FieldType type;
+  SchemaField::ParamsVariant special_params{std::monostate{}};
+};
+
+Schema MakeSimpleSchema(initializer_list<SchemaFieldInitializer> ilist) {
   Schema schema;
-  for (auto [name, type] : ilist) {
-    auto& field = schema.fields[name];
-    field = {type, 0, string{name}};
-    if (type == SchemaField::TAG)
-      field.special_params = SchemaField::TagParams{};
-    else if (type == SchemaField::TEXT)
-      field.special_params = SchemaField::TextParams{};
+  for (auto ifield : ilist) {
+    auto& field = schema.fields[ifield.name];
+    field = {ifield.type, 0, string{ifield.name}, ifield.special_params};
   }
   return schema;
 }
@@ -129,7 +158,7 @@ class SearchTest : public ::testing::Test {
     EXPECT_EQ(entries_.size(), 0u) << "Missing check";
   }
 
-  void PrepareSchema(initializer_list<pair<string_view, SchemaField::FieldType>> ilist) {
+  void PrepareSchema(initializer_list<SchemaFieldInitializer> ilist) {
     schema_ = MakeSimpleSchema(ilist);
   }
 
@@ -785,6 +814,41 @@ TEST_P(KnnTest, Cosine) {
   }
 }
 
+TEST_P(KnnTest, IP) {
+  // Test with normalized unit vectors for IP distance
+  // Using unit vectors pointing in different directions
+  const pair<float, float> kTestCoords[] = {
+      {1.0f, 0.0f}, {0.0f, 1.0f}, {-1.0f, 0.0f}, {0.0f, -1.0f}};
+
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params =
+      SchemaField::VectorParams{GetParam(), 2, VectorSimilarity::IP};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
+    string coords = ToBytes({kTestCoords[i].first, kTestCoords[i].second});
+    MockedDocument doc{Map{{"pos", coords}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  // Query with vector pointing right - should find exact match (highest dot product)
+  {
+    params["vec"] = ToBytes({1.0f, 0.0f});
+    algo.Init("* =>[KNN 1 @pos $vec]", &params);
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0));
+  }
+
+  // Query with vector pointing up - should find exact match (highest dot product)
+  {
+    params["vec"] = ToBytes({0.0f, 1.0f});
+    algo.Init("* =>[KNN 1 @pos $vec]", &params);
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1));
+  }
+}
+
 TEST_P(KnnTest, AddRemove) {
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params =
@@ -865,12 +929,22 @@ TEST_F(SearchTest, VectorDistanceBasic) {
   EXPECT_GE(cos_dist, 0.0f);
   EXPECT_LE(cos_dist, 2.0f);  // Cosine distance range
 
+  // Test IP distance
+  float ip_dist = VectorDistance(vec1.data(), vec2.data(), 3, VectorSimilarity::IP);
+  // IP distance can be negative for non-normalized vectors
+  EXPECT_NE(ip_dist, 0.0f);  // Should be non-zero for different vectors
+
   // Test identical vectors
   float l2_same = VectorDistance(vec1.data(), vec1.data(), 3, VectorSimilarity::L2);
   EXPECT_NEAR(l2_same, 0.0f, 1e-6);
 
   float cos_same = VectorDistance(vec1.data(), vec1.data(), 3, VectorSimilarity::COSINE);
   EXPECT_NEAR(cos_same, 0.0f, 1e-6);
+
+  float ip_same = VectorDistance(vec1.data(), vec1.data(), 3, VectorSimilarity::IP);
+  // For identical vectors: IP = 1 - dot_product(v, v) = 1 - ||v||^2
+  // For vec1 = {1, 2, 3}: ||v||^2 = 1 + 4 + 9 = 14, so IP = 1 - 14 = -13
+  EXPECT_LT(ip_same, 0.0f);  // Should be negative for non-normalized vectors
 }
 
 TEST_F(SearchTest, VectorDistanceConsistency) {
@@ -885,6 +959,10 @@ TEST_F(SearchTest, VectorDistanceConsistency) {
   float cos_dist1 = VectorDistance(vec1.data(), vec2.data(), 5, VectorSimilarity::COSINE);
   float cos_dist2 = VectorDistance(vec1.data(), vec2.data(), 5, VectorSimilarity::COSINE);
   EXPECT_EQ(cos_dist1, cos_dist2);
+
+  float ip_dist1 = VectorDistance(vec1.data(), vec2.data(), 5, VectorSimilarity::IP);
+  float ip_dist2 = VectorDistance(vec1.data(), vec2.data(), 5, VectorSimilarity::IP);
+  EXPECT_EQ(ip_dist1, ip_dist2);
 }
 
 static void BM_VectorSearch(benchmark::State& state) {
@@ -1320,7 +1398,8 @@ static void BM_SearchDocIds(benchmark::State& state) {
 BENCHMARK(BM_SearchDocIds)->Range(0, 2);
 
 static void BM_SearchNumericIndexes(benchmark::State& state) {
-  auto schema = MakeSimpleSchema({{"numeric", SchemaField::NUMERIC}});
+  auto schema = MakeSimpleSchema({{"numeric", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}});
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   SearchAlgorithm algo;
@@ -1364,7 +1443,8 @@ static void BM_SearchNumericIndexes(benchmark::State& state) {
 BENCHMARK(BM_SearchNumericIndexes)->Arg(10000)->Arg(100000)->Arg(1000000)->ArgNames({"num_docs"});
 
 static void BM_SearchNumericIndexesSmallRanges(benchmark::State& state) {
-  auto schema = MakeSimpleSchema({{"numeric", SchemaField::NUMERIC}});
+  auto schema = MakeSimpleSchema({{"numeric", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}});
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   SearchAlgorithm algo;
@@ -1414,8 +1494,10 @@ BENCHMARK(BM_SearchNumericIndexesSmallRanges)
 
 static void BM_SearchTwoNumericIndexes(benchmark::State& state) {
   auto schema = MakeSimpleSchema({
-      {"numeric1", SchemaField::NUMERIC},
-      {"numeric2", SchemaField::NUMERIC},
+      {"numeric1", SchemaField::NUMERIC,
+       SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
+      {"numeric2", SchemaField::NUMERIC,
+       SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
   });
 
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
@@ -1472,7 +1554,9 @@ BENCHMARK(BM_SearchTwoNumericIndexes)
     ->ArgNames({"num_docs"});
 
 static void BM_SearchNumericAndTagIndexes(benchmark::State& state) {
-  auto schema = MakeSimpleSchema({{"tag", SchemaField::TAG}, {"numeric", SchemaField::NUMERIC}});
+  auto schema = MakeSimpleSchema({{"tag", SchemaField::TAG},
+                                  {"numeric", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}});
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   SearchAlgorithm algo;
@@ -1528,9 +1612,12 @@ BENCHMARK(BM_SearchNumericAndTagIndexes)
 
 static void BM_SearchSeveralNumericAndTagIndexes(benchmark::State& state) {
   auto schema = MakeSimpleSchema({{"tag", SchemaField::TAG},
-                                  {"numeric1", SchemaField::NUMERIC},
-                                  {"numeric2", SchemaField::NUMERIC},
-                                  {"numeric3", SchemaField::NUMERIC}});
+                                  {"numeric1", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
+                                  {"numeric2", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
+                                  {"numeric3", SchemaField::NUMERIC,
+                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}});
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   SearchAlgorithm algo;
@@ -1586,6 +1673,56 @@ static void BM_SearchSeveralNumericAndTagIndexes(benchmark::State& state) {
 }
 
 BENCHMARK(BM_SearchSeveralNumericAndTagIndexes)
+    ->Arg(10000)
+    ->Arg(100000)
+    ->Arg(1000000)
+    ->ArgNames({"num_docs"});
+
+static void BM_SearchMergeEqualSets(benchmark::State& state) {
+  auto schema = MakeSimpleSchema({
+      {"numeric1", SchemaField::NUMERIC,
+       SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
+      {"numeric2", SchemaField::NUMERIC,
+       SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
+  });
+
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  std::default_random_engine rnd;
+
+  using NumericType = long long;
+  uniform_int_distribution<NumericType> dist1(std::numeric_limits<NumericType>::min(),
+                                              std::numeric_limits<NumericType>::max());
+  uniform_int_distribution<NumericType> dist2(std::numeric_limits<NumericType>::min(),
+                                              std::numeric_limits<NumericType>::max());
+
+  const size_t num_docs = state.range(0);
+  for (size_t i = 0; i < num_docs; ++i) {
+    MockedDocument doc{Map{
+        {"numeric1", std::to_string(dist1(rnd))},
+        {"numeric2", std::to_string(dist2(rnd))},
+    }};
+    indices.Add(i, doc);
+  }
+
+  std::string query = absl::StrCat("@numeric1:[-inf +inf] @numeric2:[-inf +inf]");
+
+  while (state.KeepRunning()) {
+    CHECK(algo.Init(query, &params));
+    auto result = algo.Search(&indices);
+    CHECK(result.error.empty());
+
+    // All documents should match both conditions, so total should equal num_docs
+    CHECK_EQ(result.total, num_docs);
+    CHECK_EQ(result.ids.size(), num_docs);
+  }
+}
+
+BENCHMARK(BM_SearchMergeEqualSets)
+    ->Arg(100)
+    ->Arg(1000)
     ->Arg(10000)
     ->Arg(100000)
     ->Arg(1000000)

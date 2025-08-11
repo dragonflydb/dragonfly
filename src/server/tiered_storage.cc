@@ -7,6 +7,7 @@
 #include <mimalloc.h>
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <variant>
@@ -260,7 +261,7 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
   if (bin.fragmented) {
     // Trigger read to signal need for defragmentation. NotifyFetched will handle it.
     DVLOG(2) << "Enqueueing bin defragmentation for: " << bin.segment.offset;
-    auto cb = [dummy = 5](bool, std::string*) -> bool {
+    auto cb = [dummy = 5](auto res) -> bool {
       (void)dummy;  // a hack to make cb non constexpr that confuses some old) compilers.
       return false;
     };
@@ -285,7 +286,7 @@ void TieredStorage::ShardOpManager::RetireColdEntries(size_t additional_memory) 
 
     // Update memory_budget directly since we know that gained bytes were released.
     // We will overwrite the budget correctly in the next Hearbeat.
-    db_slice_.SetCachedParams(gained + db_slice_.memory_budget(), db_slice_.bytes_per_object());
+    db_slice_.UpdateMemoryParams(gained + db_slice_.memory_budget(), db_slice_.bytes_per_object());
   }
 }
 
@@ -301,7 +302,9 @@ TieredStorage::TieredStorage(size_t max_size, DbSlice* db_slice)
     : op_manager_{make_unique<ShardOpManager>(this, db_slice, max_size)},
       bins_{make_unique<tiering::SmallBins>()} {
   write_depth_limit_ = absl::GetFlag(FLAGS_tiered_storage_write_depth);
-  size_t mem_per_shard = max_memory_limit / shard_set->size();
+
+  // TODO: update when max_memory_limit flag changes
+  size_t mem_per_shard = max_memory_limit.load(memory_order_relaxed) / shard_set->size();
   SetMemoryLowWatermark(absl::GetFlag(FLAGS_tiered_low_memory_factor) * mem_per_shard);
 }
 
@@ -324,35 +327,41 @@ void TieredStorage::SetMemoryLowWatermark(size_t mem_limit) {
   VLOG(1) << "Memory low limit is " << mem_limit;
 }
 
-util::fb2::Future<string> TieredStorage::Read(DbIndex dbid, string_view key,
-                                              const PrimeValue& value) {
-  util::fb2::Future<std::string> fut;
-  Read(dbid, key, value, [fut](const std::string& value) mutable { fut.Resolve(value); });
-
+TieredStorage::TResult<string> TieredStorage::Read(DbIndex dbid, string_view key,
+                                                   const PrimeValue& value) {
+  util::fb2::Future<io::Result<string>> fut;
+  Read(dbid, key, value, bind(&decltype(fut)::Resolve, fut, placeholders::_1));
   return fut;
 }
 
 void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-                         std::function<void(const std::string&)> readf) {
+                         std::function<void(io::Result<std::string>)> readf) {
   DCHECK(value.IsExternal());
   DCHECK(!value.IsCool());
-  auto cb = [readf = std::move(readf), enc = value.GetStrEncoding()](
-                bool is_raw, const string* raw_val) mutable {
-    readf(is_raw ? enc.Decode(*raw_val).Take() : *raw_val);
+  auto cb = [readf = std::move(readf), enc = value.GetStrEncoding()](auto res) mutable {
+    readf(res.transform([enc](tiering::OpManager::FetchedEntry entry) {
+      auto [ptr, raw] = entry;
+      return raw ? enc.Decode(*ptr).Take() : *ptr;  // TODO(vlad): optimize last value copy
+    }));
     return false;
   };
   op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
 }
 
 template <typename T>
-util::fb2::Future<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
-                                           const PrimeValue& value,
-                                           std::function<T(std::string*)> modf) {
+TieredStorage::TResult<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
+                                                const PrimeValue& value,
+                                                std::function<T(std::string*)> modf) {
   DCHECK(value.IsExternal());
 
-  util::fb2::Future<T> future;
-  auto cb = [future, modf = std::move(modf), enc = value.GetStrEncoding()](
-                bool is_raw, std::string* raw_val) mutable {
+  util::fb2::Future<io::Result<T>> future;
+  auto cb = [future, modf = std::move(modf), enc = value.GetStrEncoding()](auto res) mutable {
+    if (!res.has_value()) {
+      future.Resolve(res.get_unexpected());
+      return false;
+    }
+
+    auto [raw_val, is_raw] = *res;
     if (is_raw) {
       raw_val->resize(enc.DecodedSize(*raw_val));
       enc.Decode(*raw_val, raw_val->data());
@@ -365,9 +374,9 @@ util::fb2::Future<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
 }
 
 // Instantiate for size_t only - used in string_family's OpExtend.
-template util::fb2::Future<size_t> TieredStorage::Modify(DbIndex dbid, std::string_view key,
-                                                         const PrimeValue& value,
-                                                         std::function<size_t(std::string*)> modf);
+template TieredStorage::TResult<size_t> TieredStorage::Modify(
+    DbIndex dbid, std::string_view key, const PrimeValue& value,
+    std::function<size_t(std::string*)> modf);
 
 bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
   if (!ShouldStash(*value))

@@ -48,11 +48,11 @@ auto BuildSender(string_view channel, facade::ArgRange messages, bool unsubscrib
 }  // namespace
 
 bool ChannelStore::Subscriber::ByThread(const Subscriber& lhs, const Subscriber& rhs) {
-  return ByThreadId(lhs, rhs.Thread());
+  return ByThreadId(lhs, rhs.LastKnownThreadId());
 }
 
 bool ChannelStore::Subscriber::ByThreadId(const Subscriber& lhs, const unsigned thread) {
-  return lhs.Thread() < thread;
+  return lhs.LastKnownThreadId() < thread;
 }
 
 ChannelStore::UpdatablePointer::UpdatablePointer(const UpdatablePointer& other) {
@@ -128,7 +128,7 @@ unsigned ChannelStore::SendMessages(std::string_view channel, facade::ArgRange m
   int32_t last_thread = -1;
 
   for (auto& sub : subscribers) {
-    int sub_thread = sub.Thread();
+    int sub_thread = sub.LastKnownThreadId();
     DCHECK_LE(last_thread, sub_thread);
     if (last_thread == sub_thread)  // skip same thread
       continue;
@@ -139,7 +139,7 @@ unsigned ChannelStore::SendMessages(std::string_view channel, facade::ArgRange m
     // Make sure the connection thread has enough memory budget to accept the message.
     // This is a heuristic and not entirely hermetic since the connection memory might
     // get filled again.
-    facade::Connection::EnsureMemoryBudget(sub.Thread());
+    facade::Connection::EnsureMemoryBudget(sub_thread);
     last_thread = sub_thread;
   }
 
@@ -147,7 +147,7 @@ unsigned ChannelStore::SendMessages(std::string_view channel, facade::ArgRange m
   auto cb = [subscribers_ptr, send = BuildSender(channel, messages)](unsigned idx, auto*) {
     auto it = lower_bound(subscribers_ptr->begin(), subscribers_ptr->end(), idx,
                           ChannelStore::Subscriber::ByThreadId);
-    while (it != subscribers_ptr->end() && it->Thread() == idx) {
+    while (it != subscribers_ptr->end() && it->LastKnownThreadId() == idx) {
       if (auto* ptr = it->Get(); ptr && ptr->cntx() != nullptr)
         send(ptr, it->pattern);
       it++;
@@ -227,7 +227,7 @@ void ChannelStore::UnsubscribeConnectionsFromDeletedSlots(const ChannelsSubMap& 
 
     auto it = lower_bound(subscribers.begin(), subscribers.end(), idx,
                           ChannelStore::Subscriber::ByThreadId);
-    while (it != subscribers.end() && it->Thread() == idx) {
+    while (it != subscribers.end() && it->LastKnownThreadId() == idx) {
       // if ptr->cntx() is null, a connection might have closed or be in the process of closing
       if (auto* ptr = it->Get(); ptr && ptr->cntx() != nullptr) {
         DCHECK(it->pattern.empty());
@@ -281,7 +281,7 @@ void ChannelStoreUpdater::Modify(ChannelMap* target, string_view key) {
   }
 
   // RCU update existing SubscribeMap entry.
-  DCHECK(it->second->size() > 0);
+  DCHECK(!it->second->empty());
   auto* replacement = new SubscribeMap{*it->second};
   if (to_add_)
     replacement->emplace(cntx_, thread_id_);

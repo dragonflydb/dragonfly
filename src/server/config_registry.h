@@ -28,6 +28,9 @@ class ConfigRegistry {
 
   template <typename T>
   ConfigRegistry& RegisterSetter(std::string_view name, std::function<void(const T&)> f) {
+    ValidateCustomSetter(name,
+                         [](const absl::CommandLineFlag& flag) { return flag.IsOfType<T>(); });
+
     return RegisterMutable(name, [f](const absl::CommandLineFlag& flag) {
       auto res = flag.TryGet<T>();
       if (res.has_value()) {
@@ -57,6 +60,7 @@ class ConfigRegistry {
  private:
   void RegisterInternal(std::string_view name, bool is_mutable, WriteCb cb)
       ABSL_LOCKS_EXCLUDED(mu_);
+  void ValidateCustomSetter(std::string_view name, WriteCb setter) const;
 
   mutable util::fb2::Mutex mu_;
 
