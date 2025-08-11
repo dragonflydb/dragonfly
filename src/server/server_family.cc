@@ -2012,7 +2012,7 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
       fq_threadpool_.get(), snapshot_storage, opts.bg_save});
 
   // Initialize resources outside of mutex (this may take time for S3 operations)
-  auto res = temp_save_controller->InitResourcesAndStart();
+  auto res = temp_save_controller->Init();
 
   // Now acquire mutex only to set the controller and update state
   {
@@ -2036,6 +2036,7 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
 
     // Success - set the controller and update state
     save_controller_ = std::move(temp_save_controller);
+    save_controller_->Start();
     last_save_info_.bgsave_in_progress = bg_save;
   }
   return {};
