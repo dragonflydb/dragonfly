@@ -103,6 +103,9 @@ ABSL_FLAG(bool, always_flush_pipeline, false,
           "if true will flush pipeline response after each pipeline squashing");
 
 ABSL_FLAG(uint32_t, pipeline_squash_limit, 1 << 30, "Limit on the size of a squashed pipeline. ");
+ABSL_FLAG(uint32_t, pipeline_wait_batch_usec, 0,
+          "If non-zero, waits for this time for more I/O "
+          " events to come for the connection in case there is only one command in the pipeline. ");
 
 using namespace util;
 using namespace std;
@@ -186,6 +189,8 @@ bool TrafficLogger::Write(iovec* blobs, size_t len) {
 
 thread_local TrafficLogger tl_traffic_logger{};
 thread_local base::Histogram* io_req_size_hist = nullptr;
+
+thread_local uint32 pipeline_wait_batch_usec = absl::GetFlag(FLAGS_pipeline_wait_batch_usec);
 
 void OpenTrafficLogger(string_view base_path) {
   unique_lock lk{tl_traffic_logger.mutex};
@@ -737,7 +742,7 @@ void Connection::OnPostMigrateThread() {
 }
 
 void Connection::OnConnectionStart() {
-  ThisFiber::SetName("DflyConnection");
+  SetName(absl::StrCat(id_));
 
   stats_ = &tl_facade_stats->conn_stats;
 
@@ -1154,9 +1159,9 @@ void Connection::ConnectionFlow() {
 
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {
     string conn_info = service_->GetContextInfo(cc_.get()).Format();
-    LOG(WARNING) << "Socket error for connection " << conn_info << " " << GetName()
-                 << " during phase " << kPhaseName[phase_] << " : " << ec << " " << ec.message()
-                 << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+    LOG_EVERY_T(WARNING, 1) << "Socket error for connection " << conn_info << " " << GetName()
+                            << " during phase " << kPhaseName[phase_] << " : " << ec << " "
+                            << ec.message();
   }
 }
 
@@ -1569,9 +1574,10 @@ void Connection::SquashPipeline() {
   // it must guard the Flush() as well.
   cc_->async_dispatch = true;
 
-  size_t dispatched =
+  DispatchManyResult result =
       service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), reply_builder_.get(), cc_.get());
 
+  uint32_t dispatched = result.processed;
   uint64_t before_flush = CycleClock::Now();
   //
   // TODO: to investigate if always flushing will improve P99 latency because otherwise we
@@ -1586,10 +1592,11 @@ void Connection::SquashPipeline() {
 
   cc_->async_dispatch = false;
 
-  stats_->pipeline_dispatch_calls++;
-  stats_->pipeline_dispatch_commands += squash_cmds.size();
-  stats_->pipeline_dispatch_flush_usec += CycleClock::ToUsec(CycleClock::Now() - before_flush);
-
+  if (result.account_in_stats) {
+    stats_->pipeline_dispatch_calls++;
+    stats_->pipeline_dispatch_commands += dispatched;
+    stats_->pipeline_dispatch_flush_usec += CycleClock::ToUsec(CycleClock::Now() - before_flush);
+  }
   auto it = dispatch_q_.begin();
   while (it->IsControl())  // Skip all newly received intrusive messages
     ++it;
@@ -1682,7 +1689,11 @@ void Connection::AsyncFiber() {
     // As an optimization, we only yield if the fiber was not suspended since the last dispatch.
     uint64_t cur_epoch = fb2::FiberSwitchEpoch();
     if (dispatch_q_.size() == 1 && cur_epoch == prev_epoch) {
-      ThisFiber::SleepFor(20us);
+      if (pipeline_wait_batch_usec > 0) {
+        ThisFiber::SleepFor(chrono::microseconds(pipeline_wait_batch_usec));
+      } else {
+        ThisFiber::Yield();
+      }
       DVLOG(2) << "After yielding to producer, dispatch_q_.size()=" << dispatch_q_.size();
       if (cc_->conn_closing)
         break;
@@ -2175,18 +2186,22 @@ void Connection::SetPipelineSquashLimitThreadLocal(unsigned limit) {
   pipeline_squash_limit_cached = limit;
 }
 
-Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, unsigned thread_id,
+void Connection::SetPipelineWaitBatchUsecThreadLocal(unsigned usec) {
+  pipeline_wait_batch_usec = usec;
+}
+
+Connection::WeakRef::WeakRef(const std::shared_ptr<Connection>& ptr, unsigned thread_id,
                              uint32_t client_id)
-    : ptr_{std::move(ptr)}, last_known_thread_id_{thread_id}, client_id_{client_id} {
+    : ptr_{ptr}, last_known_thread_id_{thread_id}, client_id_{client_id} {
 }
 
 Connection* Connection::WeakRef::Get() const {
   auto sptr = ptr_.lock();
-  // We should never access the connection object from other threads.
 
   //  The connection can only be deleted on this thread, so
   //  this pointer is valid until the next suspension.
   //  Note: keeping a shared_ptr doesn't prolong the lifetime because
+  //  it doesn't manage the underlying connection. See definition of `self_`.
   return sptr.get();
 }
 
