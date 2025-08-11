@@ -203,7 +203,7 @@ class Connection : public util::Connection {
    private:
     friend class Connection;
 
-    WeakRef(std::shared_ptr<Connection> ptr, unsigned thread_id, uint32_t client_id);
+    WeakRef(const std::shared_ptr<Connection>& ptr, unsigned thread_id, uint32_t client_id);
 
     std::weak_ptr<Connection> ptr_;
     unsigned last_known_thread_id_;
@@ -315,6 +315,7 @@ class Connection : public util::Connection {
   static void SetMaxBusyReadUsecThreadLocal(unsigned usec);
   static void SetAlwaysFlushPipelineThreadLocal(bool flush);
   static void SetPipelineSquashLimitThreadLocal(unsigned limit);
+  static void SetPipelineWaitBatchUsecThreadLocal(unsigned usec);
 
   unsigned idle_time() const {
     return time(nullptr) - last_interaction_;
