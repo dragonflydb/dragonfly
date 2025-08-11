@@ -571,7 +571,7 @@ void BitCount(CmdArgList args, const CommandContext& cmd_cntx) {
   bool as_bit = parser.HasNext() ? parser.MapNext("BYTE", false, "BIT", true) : false;
   auto* builder = cmd_cntx.rb;
   if (!parser.Finalize()) {
-    return builder->SendError(parser.Error()->MakeReply());
+    return builder->SendError(parser.TakeError().MakeReply());
   }
   auto cb = [&, &start = start, &end = end](Transaction* t, EngineShard* shard) {
     return CountBitsForValue(t->GetOpArgs(shard), key, start, end, as_bit);
@@ -1028,7 +1028,7 @@ nonstd::expected<CommandList, string> ParseToCommandList(CmdArgList args, bool r
   while (parser.HasNext()) {
     auto cmd = parser.MapNext("OVERFLOW", Cmds::OVERFLOW_OPT, "GET", Cmds::GET_OPT, "SET",
                               Cmds::SET_OPT, "INCRBY", Cmds::INCRBY_OPT);
-    if (parser.Error()) {
+    if (parser.TakeError()) {
       return make_unexpected(kSyntaxErr);
     }
 
@@ -1042,13 +1042,13 @@ nonstd::expected<CommandList, string> ParseToCommandList(CmdArgList args, bool r
         result.push_back(Overflow{res});
         continue;
       }
-      parser.Error();
+      parser.TakeError();
       return make_unexpected(kSyntaxErr);
     }
 
     auto maybe_attr = ParseCommonAttr(&parser);
     if (!maybe_attr.has_value()) {
-      parser.Error();
+      parser.TakeError();
       return make_unexpected(std::move(maybe_attr.error()));
     }
 
@@ -1063,7 +1063,7 @@ nonstd::expected<CommandList, string> ParseToCommandList(CmdArgList args, bool r
     }
 
     int64_t value = parser.Next<int64_t>();
-    if (parser.Error()) {
+    if (parser.TakeError()) {
       return make_unexpected(kSyntaxErr);
     }
     if (cmd == Cmds::SET_OPT) {
@@ -1075,7 +1075,7 @@ nonstd::expected<CommandList, string> ParseToCommandList(CmdArgList args, bool r
       result.push_back(Command(IncrBy(attr, value)));
       continue;
     }
-    parser.Error();
+    parser.TakeError();
     return make_unexpected(kSyntaxErr);
   }
 
@@ -1239,8 +1239,8 @@ void SetBit(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser(args);
   auto [key, offset, value] = parser.Next<string_view, uint32_t, FInt<0, 1>>();
 
-  if (auto err = parser.Error(); err) {
-    return cmd_cntx.rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx.rb->SendError(err.MakeReply());
   }
 
   auto cb = [&, &key = key, &offset = offset, &value = value](Transaction* t, EngineShard* shard) {

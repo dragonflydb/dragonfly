@@ -1866,8 +1866,8 @@ void CreateGroup(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder
     opts.flags |= kCreateOptMkstream;
   }
 
-  if (auto err = parser->Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser->TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpCreate(t->GetOpArgs(shard), key, opts);
@@ -1885,8 +1885,8 @@ void CreateGroup(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder
 void DestroyGroup(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* builder) {
   auto [key, gname] = parser->Next<string_view, string_view>();
 
-  if (auto err = parser->Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser->TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   if (parser->HasNext())
     return builder->SendError(UnknownSubCmd("DESTROY", "XGROUP"));
@@ -1911,8 +1911,8 @@ void DestroyGroup(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilde
 void CreateConsumer(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* builder) {
   auto [key, gname, consumer] = parser->Next<string_view, string_view, string_view>();
 
-  if (auto err = parser->Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser->TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   if (parser->HasNext())
     return builder->SendError(UnknownSubCmd("CREATECONSUMER", "XGROUP"));
@@ -1940,8 +1940,8 @@ void CreateConsumer(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuil
 void DelConsumer(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* builder) {
   auto [key, gname, consumer] = parser->Next<string_view, string_view, string_view>();
 
-  if (auto err = parser->Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser->TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   if (parser->HasNext())
     return builder->SendError(UnknownSubCmd("DELCONSUMER", "XGROUP"));
@@ -1977,8 +1977,8 @@ void SetId(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* buil
     }
   }
 
-  if (auto err = parser->Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser->TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   auto cb = [&, &key = key, &gname = gname, &id = id](Transaction* t, EngineShard* shard) {
     return OpSetId(t->GetOpArgs(shard), key, gname, id);
@@ -2661,8 +2661,8 @@ void StreamFamily::XAdd(CmdArgList args, const CommandContext& cmd_cntx) {
 
   auto parsed_add_opts = ParseAddOpts(&parser);
 
-  if (auto err = parser.Error(); err || !parsed_add_opts) {
-    rb->SendError(!parsed_add_opts ? parsed_add_opts.error() : err->MakeReply());
+  if (auto err = parser.TakeError(); err || !parsed_add_opts) {
+    rb->SendError(!parsed_add_opts ? parsed_add_opts.error() : err.MakeReply());
     return;
   }
 
@@ -2844,8 +2844,8 @@ void StreamFamily::XGroup(CmdArgList args, const CommandContext& cmd_cntx) {
                                      &DestroyGroup, "CREATECONSUMER", &CreateConsumer,
                                      "DELCONSUMER", &DelConsumer, "SETID", &SetId);
 
-  if (auto err = parser.Error(); err)
-    return cmd_cntx.rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return cmd_cntx.rb->SendError(err.MakeReply());
 
   sub_cmd_func(&parser, cmd_cntx.tx, cmd_cntx.rb);
 }
@@ -3294,8 +3294,8 @@ void StreamFamily::XTrim(CmdArgList args, const CommandContext& cmd_cntx) {
 
   auto parsed_trim_opts = ParseTrimOpts(&parser);
   if (!parser.Finalize() || !parsed_trim_opts) {
-    auto err = parser.Error();
-    rb->SendError(!parsed_trim_opts ? parsed_trim_opts.error() : err->MakeReply());
+    auto err = parser.TakeError();
+    rb->SendError(!parsed_trim_opts ? parsed_trim_opts.error() : err.MakeReply());
     return;
   }
 

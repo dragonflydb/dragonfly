@@ -67,7 +67,7 @@ struct ObjInfo {
   unsigned num_nodes = 0;
   unsigned num_compressed = 0;
 
-  enum LockStatus { NONE, S, X } lock_status = NONE;
+  enum LockStatus : uint8_t { NONE, S, X } lock_status = NONE;
 
   int64_t ttl = INT64_MAX;
   optional<uint32_t> external_len;
@@ -637,6 +637,9 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    Turns on/off counting of unique keys. Results are returned when calling ",
         "    KEYS OFF command. The results is array with two integers: unique keys count and ",
         "    sampled keys count.",
+        "VALUES ON | OFF",
+        "    Turns on/off measurement of value length distribution. Results are returned when ",
+        "    calling VALUES OFF command.",
         "TX",
         "    Performs transaction analysis per shard.",
         "TRAFFIC <path> | [STOP]",
@@ -725,6 +728,9 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
     return Keys(args.subspan(1), builder);
   }
 
+  if (subcmd == "VALUES" && args.size() >= 2) {
+    return Values(args.subspan(1), builder);
+  }
   if (subcmd == "COMPRESSION") {
     return Compression(args.subspan(1), builder);
   }
@@ -858,7 +864,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
         auto [min_ttl, max_ttl] = parser.Next<uint32_t, uint32_t>();
         if (min_ttl >= max_ttl) {
           builder->SendError(kExpiryOutOfRange);
-          (void)parser.Error();
+          (void)parser.TakeError();
           return nullopt;
         }
         options.expire_ttl_range = std::make_pair(min_ttl, max_ttl);
@@ -870,7 +876,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
     }
   }
   if (parser.HasError()) {
-    builder->SendError(parser.Error()->MakeReply());
+    builder->SendError(parser.TakeError().MakeReply());
     return nullopt;
   }
   return options;
@@ -1351,6 +1357,36 @@ void DebugCmd::Keys(CmdArgList args, facade::SinkReplyBuilder* builder) {
   return builder->SendError(kSyntaxErr);
 }
 
+void DebugCmd::Values(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  string_view subcmd = ArgS(args, 0);
+
+  if (absl::EqualsIgnoreCase(subcmd, "ON")) {
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      cntx_->ns->GetDbSlice(es->shard_id()).StartSampleValues(cntx_->db_index());
+    });
+    return builder->SendOk();
+  }
+
+  vector<unique_ptr<base::Histogram>> histograms(shard_set->size());
+  if (absl::EqualsIgnoreCase(subcmd, "OFF")) {
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      histograms[es->shard_id()] =
+          cntx_->ns->GetDbSlice(es->shard_id()).StopSampleValues(cntx_->db_index());
+    });
+
+    base::Histogram merged_histogram;
+    for (const auto& hist : histograms) {
+      if (hist) {
+        merged_histogram.Merge(*hist);
+      }
+    }
+    auto* rb = static_cast<RedisReplyBuilder*>(builder);
+    return rb->SendVerbatimString(merged_histogram.ToString());
+  }
+
+  return builder->SendError(kSyntaxErr);
+}
+
 static size_t PostProcessHist(HufHist* dest) {
   size_t raw_size = 0;
   auto& hist = dest->hist;
@@ -1429,7 +1465,7 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
   }
 
   if (parser.HasError()) {
-    return builder->SendError(parser.Error()->MakeReply());
+    return builder->SendError(parser.TakeError().MakeReply());
   }
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);

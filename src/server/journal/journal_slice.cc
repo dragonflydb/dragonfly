@@ -77,12 +77,13 @@ void JournalSlice::SetFlushMode(bool allow_flush) {
 void JournalSlice::AddLogRecord(const Entry& entry) {
   DCHECK(ring_buffer_.capacity() > 0);
 
-  JournalItem item;
+  JournalChangeItem item;
 
   {
     FiberAtomicGuard fg;
-    item.opcode = entry.opcode;
-    item.lsn = lsn_++;
+    item.journal_item.lsn = lsn_++;
+
+    // only used by RestoreStreamer
     item.cmd = entry.payload.cmd;
     item.slot = entry.slot;
 
@@ -91,34 +92,34 @@ void JournalSlice::AddLogRecord(const Entry& entry) {
     writer.Write(entry);
 
     // Deep copy here
-    item.data = io::View(ring_serialize_buf_.InputBuffer());
+    item.journal_item.data = io::View(ring_serialize_buf_.InputBuffer());
     ring_serialize_buf_.Clear();
-    VLOG(2) << "Writing item [" << item.lsn << "]: " << entry.ToString();
+    VLOG(2) << "Writing item [" << item.journal_item.lsn << "]: " << entry.ToString();
   }
 
   CallOnChange(&item);
 }
 
-void JournalSlice::CallOnChange(JournalItem* item) {
+void JournalSlice::CallOnChange(JournalChangeItem* change_item) {
   // This lock is never blocking because it contends with UnregisterOnChange, which is cpu only.
   // Hence this lock prevents the UnregisterOnChange to start running in the middle of CallOnChange.
   // CallOnChange is atomic if JournalSlice::SetFlushMode(false) is called before.
   std::shared_lock lk(cb_mu_);
   for (auto k_v : journal_consumers_arr_) {
-    k_v.second->ConsumeJournalChange(*item);
+    k_v.second->ConsumeJournalChange(*change_item);
   }
-  item->cmd = {};
+  auto& item = change_item->journal_item;
   // We preserve order here. After ConsumeJournalChange there can reordering
   if (ring_buffer_.size() == ring_buffer_.capacity()) {
-    const size_t bytes_removed = ring_buffer_.front().data.size() + sizeof(*item);
+    const size_t bytes_removed = ring_buffer_.front().data.size() + sizeof(item);
     DCHECK_GE(ring_buffer_bytes, bytes_removed);
     ring_buffer_bytes -= bytes_removed;
   }
   if (!ring_buffer_.empty()) {
-    DCHECK(item->lsn == ring_buffer_.back().lsn + 1);
+    DCHECK(item.lsn == ring_buffer_.back().lsn + 1);
   }
-  ring_buffer_.push_back(std::move(*item));
-  ring_buffer_bytes += sizeof(*item) + ring_buffer_.back().data.size();
+  ring_buffer_.push_back(std::move(item));
+  ring_buffer_bytes += sizeof(item) + ring_buffer_.back().data.size();
 
   if (enable_journal_flush_) {
     for (auto k_v : journal_consumers_arr_) {
