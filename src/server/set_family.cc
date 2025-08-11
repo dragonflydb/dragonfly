@@ -428,10 +428,10 @@ OpResult<SvArray> InterResultVec(const ResultStringVec& result_vec, unsigned req
   }
 
   // Sort the per shard-sorted sets
-  std::sort(sorted_vec.begin(), sorted_vec.end(),
-            [](const auto* lhs, const auto* rhs) { return lhs->size() < rhs->size(); });
-
   if (!sorted_vec.empty()) {
+    std::sort(sorted_vec.begin(), sorted_vec.end(),
+              [](const auto* lhs, const auto* rhs) { return lhs->size() < rhs->size(); });
+
     for (const string& s : *sorted_vec[0]) {
       uniques.emplace(s, 1);
     }
