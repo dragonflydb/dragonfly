@@ -17,9 +17,6 @@
 #include "server/transaction.h"
 #include "server/tx_base.h"
 
-ABSL_FLAG(uint32_t, squash_stats_latency_lower_limit, 0,
-          "If set, will not track latency stats below this threshold (usec). ");
-
 namespace dfly {
 
 using namespace std;
@@ -30,8 +27,6 @@ using base::CycleClock;
 namespace {
 
 thread_local uint64_t max_busy_squash_cycles_cached = 1ULL << 32;
-thread_local uint32_t squash_stats_latency_lower_limit_cached =
-    absl::GetFlag(FLAGS_squash_stats_latency_lower_limit);
 
 void CheckConnStateClean(const ConnectionState& state) {
   DCHECK_EQ(state.exec_info.state, ConnectionState::ExecInfo::EXEC_INACTIVE);
@@ -71,6 +66,16 @@ size_t Size(const CapturingReplyBuilder::Payload& payload) {
 }
 
 }  // namespace
+
+MultiCommandSquasher::Stats& MultiCommandSquasher::Stats::operator+=(const Stats& o) {
+  squashed_commands += o.squashed_commands;
+  hop_usec += o.hop_usec;
+  reply_usec += o.reply_usec;
+  hops += o.hops;
+  yields += o.yields;
+
+  return *this;
+}
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
                                            Service* service, const Opts& opts)
@@ -256,6 +261,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     auto cb = [this, bc, rb]() mutable {
       if (ThisFiber::GetRunningTimeCycles() > max_busy_squash_cycles_cached) {
         ThisFiber::Yield();
+        stats_.yields++;
       }
       this->SquashedHopCb(EngineShard::tlocal(), rb->GetRespVersion());
       bc->Dec();
@@ -275,8 +281,6 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   uint64_t after_hop = CycleClock::Now();
   bool aborted = false;
 
-  ServerState* fresh_ss = ServerState::SafeTLocal();
-
   size_t total_reply_size = 0;
   for (auto& sinfo : sharded_) {
     total_reply_size += sinfo.reply_size_delta;
@@ -295,18 +299,14 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   }
   uint64_t after_reply = CycleClock::Now();
   uint64_t total_usec = CycleClock::ToUsec(after_reply - start);
-  if (total_usec > squash_stats_latency_lower_limit_cached) {
-    fresh_ss->stats.multi_squash_exec_hop_usec += total_usec;
-    fresh_ss->stats.multi_squash_exec_reply_usec += CycleClock::ToUsec(after_reply - after_hop);
-    fresh_ss->stats.multi_squash_hops++;
-    fresh_ss->stats.squashed_commands += order_.size();
-  } else {
-    fresh_ss->stats.squash_stats_ignored++;
-  }
+
+  stats_.hop_usec += total_usec;
+  stats_.reply_usec += CycleClock::ToUsec(after_reply - after_hop);
+  stats_.hops++;
+  stats_.squashed_commands += order_.size();
 
   tl_facade_stats->reply_stats.squashing_current_reply_size.fetch_sub(total_reply_size,
                                                                       std::memory_order_release);
-
   for (auto& sinfo : sharded_) {
     sinfo.dispatched.clear();
     sinfo.reply_id = 0;
@@ -362,10 +362,6 @@ bool MultiCommandSquasher::IsAtomic() const {
 
 void MultiCommandSquasher::SetMaxBusySquashUsec(uint32_t usec) {
   max_busy_squash_cycles_cached = CycleClock::FromUsec(usec);
-}
-
-void MultiCommandSquasher::SetSquashStatsLatencyLowerLimit(uint32_t usec) {
-  squash_stats_latency_lower_limit_cached = usec;
 }
 
 }  // namespace dfly
