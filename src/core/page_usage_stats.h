@@ -30,6 +30,8 @@ struct CollectedPageStats {
   uint64_t pages_reserved_for_malloc{0};
   uint64_t pages_with_heap_mismatch{0};
   uint64_t pages_above_threshold{0};
+  uint64_t objects_skipped_not_required{0};
+  uint64_t objects_skipped_not_supported{0};
 
   using ShardUsageSummary = absl::btree_map<uint8_t, uint64_t>;
   ShardUsageSummary page_usage_hist;
@@ -55,6 +57,14 @@ class PageUsage {
 
   bool ConsumePageStats(mi_page_usage_stats_t stats);
 
+  void RecordNotRequired() {
+    unique_pages_.objects_skipped_not_required += 1;
+  }
+
+  void RecordNotSupported() {
+    unique_pages_.objects_skipped_not_supported += 1;
+  }
+
  private:
   CollectPageStats collect_stats_{CollectPageStats::NO};
   float threshold_;
@@ -67,6 +77,9 @@ class PageUsage {
     FilterWithSize pages_with_heap_mismatch{};
     FilterWithSize pages_above_threshold{};
     hdr_histogram* page_usage_hist{};
+
+    uint64_t objects_skipped_not_required{0};
+    uint64_t objects_skipped_not_supported{0};
 
     explicit UniquePages();
     ~UniquePages();

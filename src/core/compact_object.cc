@@ -581,6 +581,8 @@ bool RobjWrapper::DefragIfNeeded(PageUsage* page_usage) {
   } else if (type() == OBJ_ZSET) {
     return do_defrag(DefragZSet);
   }
+
+  page_usage->RecordNotSupported();
   return false;
 }
 
@@ -1063,7 +1065,7 @@ string_view CompactObj::GetSlice(string* scratch) const {
 bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
   switch (taglen_) {
     case ROBJ_TAG:
-      // currently only these objet types are supported for this operation
+      // currently only these object types are supported for this operation
       if (u_.r_obj.inner_obj() != nullptr) {
         return u_.r_obj.DefragIfNeeded(page_usage);
       }
@@ -1071,11 +1073,14 @@ bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
     case SMALL_TAG:
       return u_.small_str.DefragIfNeeded(page_usage);
     case INT_TAG:
+      page_usage->RecordNotRequired();
       // this is not relevant in this case
       return false;
     case EXTERNAL_TAG:
+      page_usage->RecordNotRequired();
       return false;
     default:
+      page_usage->RecordNotRequired();
       // This is the case when the object is at inline_str
       return false;
   }
