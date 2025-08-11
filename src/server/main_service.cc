@@ -10,6 +10,8 @@
 
 #ifdef __FreeBSD__
 #include <pthread_np.h>
+#elif defined(__linux__)
+#include "util/fibers/uring_proactor.h"
 #endif
 
 extern "C" {
@@ -26,6 +28,7 @@ extern "C" {
 #include <csignal>
 #include <filesystem>
 
+#include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
@@ -133,6 +136,13 @@ ABSL_FLAG(string, huffman_table, "",
 ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "
           "otherwise uses legacy jsoncons implementation.");
+
+ABSL_FLAG(uint32_t, uring_wake_mode, 1,
+          "0 - use eventfd, 1 - use io_uring, 2 - use io_uring with immediate flush of the "
+          "notification");
+
+ABSL_FLAG(uint32_t, squash_stats_latency_lower_limit, 0,
+          "If set, will not track latency stats below this threshold (usec). ");
 
 namespace dfly {
 
@@ -719,6 +729,9 @@ template <typename T> auto UpdateServerState(T ServerState::*member) {
   };
 }
 
+thread_local uint32_t squash_stats_latency_lower_limit_cached =
+    absl::GetFlag(FLAGS_squash_stats_latency_lower_limit);
+
 void SetMaxBusySquashUsec(uint32_t val) {
   shard_set->pool()->AwaitBrief(
       [=](unsigned, auto*) { MultiCommandSquasher::SetMaxBusySquashUsec(val); });
@@ -733,6 +746,21 @@ void SetShardThreadBusyPollingUsec(uint32_t val) {
       pb->SetBusyPollUsec(val);
     }
   });
+}
+
+void SetUringWakeMode(uint32_t mode) {
+#ifdef __linux__
+  shard_set->pool()->AwaitBrief([mode](unsigned, fb2::ProactorBase* pb) {
+    if (pb->GetKind() == fb2::ProactorBase::IOURING) {
+      fb2::UringProactor* up = static_cast<fb2::UringProactor*>(pb);
+      bool use_msg_ring = mode > 0;
+      bool immediate_flush = mode == 2;
+
+      up->ConfigureMsgRing(use_msg_ring);
+      up->ConfigureSubmitWakeup(immediate_flush);
+    }
+  });
+#endif
 }
 
 void SetHuffmanTable(const std::string& huffman_table) {
@@ -874,9 +902,14 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
         [=](unsigned, auto*) { facade::Connection::SetPipelineSquashLimitThreadLocal(val); });
   });
 
+  config_registry.RegisterSetter<uint32_t>("pipeline_wait_batch_usec", [](uint32_t val) {
+    shard_set->pool()->AwaitBrief(
+        [=](unsigned, auto*) { facade::Connection::SetPipelineWaitBatchUsecThreadLocal(val); });
+  });
+
   config_registry.RegisterSetter<uint32_t>("squash_stats_latency_lower_limit", [](uint32_t val) {
     shard_set->pool()->AwaitBrief(
-        [=](unsigned, auto*) { MultiCommandSquasher::SetSquashStatsLatencyLowerLimit(val); });
+        [=](unsigned, auto*) { squash_stats_latency_lower_limit_cached = val; });
   });
 
   config_registry.RegisterSetter<uint32_t>("max_squashed_cmd_num",
@@ -933,6 +966,9 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
         [val](auto index, auto* context) { ServerState::tlocal()->acl_log.SetTotalEntries(val); });
   });
 
+  config_registry.RegisterSetter<uint32_t>("uring_wake_mode",
+                                           [](uint32_t val) { SetUringWakeMode(val); });
+
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
   if (shard_num == 0 || shard_num > pp_.size()) {
     LOG_IF(WARNING, shard_num > pp_.size())
@@ -975,6 +1011,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   SetMaxBusySquashUsec(absl::GetFlag(FLAGS_max_busy_squash_usec));
   SetHuffmanTable(GetFlag(FLAGS_huffman_table));
   SetShardThreadBusyPollingUsec(GetFlag(FLAGS_shard_thread_busy_polling_usec));
+  SetUringWakeMode(GetFlag(FLAGS_uring_wake_mode));
 
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.
@@ -1589,20 +1626,25 @@ DispatchResult Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
   return res;
 }
 
-size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReplyBuilder* builder,
-                                     facade::ConnectionContext* cntx) {
+DispatchManyResult Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
+                                                 SinkReplyBuilder* builder,
+                                                 facade::ConnectionContext* cntx) {
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
   DCHECK_EQ(builder->GetProtocol(), Protocol::REDIS);
+  DCHECK_GT(args_list.size(), 1u);
 
   auto* ss = dfly::ServerState::tlocal();
   // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
   if (ss->IsPaused())
-    return 0;
+    return {.processed = 0, .account_in_stats = false};
 
   vector<StoredCmd> stored_cmds;
   intrusive_ptr<Transaction> dist_trans;
-  size_t dispatched = 0;
+  uint32_t dispatched = 0;
+  MultiCommandSquasher::Stats stats;
+
+  uint64_t start_cycles = base::CycleClock::Now();
 
   auto perform_squash = [&] {
     if (stored_cmds.empty())
@@ -1621,8 +1663,9 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
     opts.verify_commands = true;
     opts.max_squash_size = ss->max_squash_cmd_num;
 
-    MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
-                                  static_cast<RedisReplyBuilder*>(builder), dfly_cntx, this, opts);
+    stats += MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
+                                           static_cast<RedisReplyBuilder*>(builder), dfly_cntx,
+                                           this, opts);
     dfly_cntx->transaction = nullptr;
 
     dispatched += stored_cmds.size();
@@ -1669,7 +1712,18 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
   if (dist_trans)
     dist_trans->UnlockMulti();
 
-  return dispatched;
+  uint64_t total_usec = base::CycleClock::ToUsec(base::CycleClock::Now() - start_cycles);
+  bool account_in_stats = total_usec > squash_stats_latency_lower_limit_cached;
+  if (account_in_stats) {
+    auto* ss = ServerState::tlocal();
+    ss->stats.multi_squash_exec_hop_usec += stats.hop_usec;
+    ss->stats.multi_squash_exec_reply_usec += stats.reply_usec;
+    ss->stats.multi_squash_hops += stats.hops;
+    ss->stats.squashed_commands += stats.squashed_commands;
+  } else {
+    ss->stats.squash_stats_ignored++;
+  }
+  return {.processed = dispatched, .account_in_stats = account_in_stats};
 }
 
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
