@@ -2039,7 +2039,11 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     df_factory.start_all([master, replica])
 
     c_replica = replica.client()
-    await c_replica.execute_command(f"DEBUG POPULATE 1000 key 1000 RAND type set elements 2000")
+
+    seeder = SeederV2(
+        key_target=2000, types=["SET"], data_size=3000, collection_size=2000, huge_value_size=0
+    )
+    await seeder.run(c_replica, target_deviation=0.01)
 
     replica.stop()
     replica.start()
