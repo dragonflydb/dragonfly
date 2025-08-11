@@ -1628,7 +1628,7 @@ DispatchManyResult Service::DispatchManyCommands(absl::Span<CmdArgList> args_lis
   auto* ss = dfly::ServerState::tlocal();
   // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
   if (ss->IsPaused())
-    return {.processed = 0, .account_in_stats = true};
+    return {.processed = 0, .account_in_stats = false};
 
   vector<StoredCmd> stored_cmds;
   intrusive_ptr<Transaction> dist_trans;
@@ -1704,8 +1704,8 @@ DispatchManyResult Service::DispatchManyCommands(absl::Span<CmdArgList> args_lis
     dist_trans->UnlockMulti();
 
   uint64_t total_usec = base::CycleClock::ToUsec(base::CycleClock::Now() - start_cycles);
-  bool account_in_stats = true;
-  if (total_usec > squash_stats_latency_lower_limit_cached) {
+  bool account_in_stats = total_usec > squash_stats_latency_lower_limit_cached;
+  if (account_in_stats) {
     auto* ss = ServerState::tlocal();
     ss->stats.multi_squash_exec_hop_usec += stats.hop_usec;
     ss->stats.multi_squash_exec_reply_usec += stats.reply_usec;
@@ -1713,7 +1713,6 @@ DispatchManyResult Service::DispatchManyCommands(absl::Span<CmdArgList> args_lis
     ss->stats.squashed_commands += stats.squashed_commands;
   } else {
     ss->stats.squash_stats_ignored++;
-    account_in_stats = false;
   }
   return {.processed = dispatched, .account_in_stats = account_in_stats};
 }
