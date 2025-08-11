@@ -16,7 +16,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
-ABSL_DECLARE_FLAG(bool, legacy_saddex_keepttl);
+ABSL_DECLARE_FLAG(std::string, shard_round_robin_prefix);
 
 using namespace testing;
 using namespace std;
@@ -440,6 +440,32 @@ TEST_F(SetFamilyTest, CheckSetLinkExpiryTransfer) {
   AdvanceTime(6000);
   Run("SMEMBERS key");
   EXPECT_THAT(Run("SCARD key"), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, SetInter_5590) {
+  absl::FlagSaver fs;
+  // Default break num_shards=2 and threads=3
+  // TODO(#5651) fix it
+  SetTestFlag("num_shards", "4");
+  num_threads_ = 4;
+  SetTestFlag("shard_round_robin_prefix", "prefix-");
+  ResetService();
+
+  Run("DEBUG POPULATE 1 prefix- 5 RAND ELEMENTS 5000 TYPE SET");
+  Run("SADD prefix-:0 common");
+  // shard 0 has 1 key
+  EXPECT_THAT(GetShardKeyCount(), Contains(Pair(0, 1)));
+
+  Run("SADD prefix-foo bar hello common");
+  // shard 1 has 1 key
+  EXPECT_THAT(GetShardKeyCount(), Contains(Pair(0, 1)));
+  EXPECT_THAT(GetShardKeyCount(), Contains(Pair(1, 1)));
+
+  int64_t start = absl::GetCurrentTimeNanos();
+  Run("SINTER prefix-foo prefix-:0");
+  int64_t end = absl::GetCurrentTimeNanos();
+  // Less than 100 ms. Before the fix it took 3seconds.
+  EXPECT_LE(end - start, 100000000);
 }
 
 }  // namespace dfly
