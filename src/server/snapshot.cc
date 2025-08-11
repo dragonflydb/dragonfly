@@ -193,7 +193,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
 
       // Yielding for background fibers has low overhead if the time slice isn't used up.
       // Do it after every bucket for maximum responsiveness.
-      DCHECK_EQ(ThisFiber::Priority(), fb2::FiberPriority::BACKGROUND);
+      DCHECK(ThisFiber::Priority() == fb2::FiberPriority::BACKGROUND);
       ThisFiber::Yield();
 
       PushSerialized(false);
