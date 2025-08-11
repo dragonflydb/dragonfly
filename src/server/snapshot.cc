@@ -107,18 +107,18 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
-  snapshot_fb_name_ = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex());
-  auto prio = use_background_mode_ ? fb2::FiberPriority::BACKGROUND : fb2::FiberPriority::NORMAL;
-  snapshot_fb_ = fb2::Fiber(
-      fb2::Fiber::Opts{.priority = prio, .name = snapshot_fb_name_}, [this, stream_journal] {
-        this->IterateBucketsFb(stream_journal);
-        db_slice_->UnregisterOnChange(snapshot_version_);
-        if (!use_snapshot_version_) {
-          db_slice_->UnregisterOnMoved(moved_cb_id_);
-        }
-        consumer_->Finalize();
-        VLOG(1) << "Serialization peak bytes: " << serializer_->GetSerializationPeakBytes();
-      });
+  fb2::Fiber::Opts opts{.priority = use_background_mode_ ? fb2::FiberPriority::BACKGROUND
+                                                         : fb2::FiberPriority::NORMAL,
+                        .name = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex())};
+  snapshot_fb_ = fb2::Fiber(opts, [this, stream_journal] {
+    this->IterateBucketsFb(stream_journal);
+    db_slice_->UnregisterOnChange(snapshot_version_);
+    if (!use_snapshot_version_) {
+      db_slice_->UnregisterOnMoved(moved_cb_id_);
+    }
+    consumer_->Finalize();
+    VLOG(1) << "Serialization peak bytes: " << serializer_->GetSerializationPeakBytes();
+  });
 }
 
 void SliceSnapshot::StartIncremental(LSN start_lsn) {
@@ -349,9 +349,11 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
 
   if (use_background_mode_) {
     // Yield after possibly long cpu slice due to compression and serialization
+    // before possbile suspension of ConsumeData resets the cpu time of the last slice
     if (ThisFiber::Priority() == fb2::FiberPriority::BACKGROUND)
       ThisFiber::Yield();
-    // TODO: else Sleep() to provide write backpressure in advance?
+    // else: This function is invoked from the journal with regular priority as well.
+    // TODO: Mavbe Sleep() to provide write backpressure in advance?
   }
 
   uint64_t running_cycles = ThisFiber::GetRunningTimeCycles();
