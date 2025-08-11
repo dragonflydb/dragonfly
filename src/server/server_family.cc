@@ -2000,30 +2000,18 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
       return GenericError{make_error_code(errc::operation_in_progress),
                           "SAVING - can not save database"};
     }
-  }
 
-  // Create save controller outside of mutex to avoid blocking INFO commands
-  auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
-                              ? snapshot_storage_
-                              : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
+    // Create save controller outside of mutex to avoid blocking INFO commands
+    auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
+                                ? snapshot_storage_
+                                : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
 
-  auto temp_save_controller = make_unique<SaveStagesController>(detail::SaveStagesInputs{
-      save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans, &service_,
-      fq_threadpool_.get(), snapshot_storage, opts.bg_save});
+    save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
+        save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
+        &service_, fq_threadpool_.get(), snapshot_storage, opts.bg_save});
 
-  // Initialize resources outside of mutex (this may take time for S3 operations)
-  auto res = temp_save_controller->Init();
-
-  // Now acquire mutex only to set the controller and update state
-  {
-    util::fb2::LockGuard lk(save_mu_);
-
-    // Double-check that no other save started while we were initializing
-    if (save_controller_) {
-      return GenericError{make_error_code(errc::operation_in_progress),
-                          "SAVING - can not save database"};
-    }
-
+    // Initialize resources outside of mutex (this may take time for S3 operations)
+    auto res = save_controller_->Init();
     if (res) {
       DCHECK_EQ(res->error, true);
       last_save_info_.SetLastSaveError(*res);
@@ -2031,11 +2019,10 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
       if (bg_save) {
         last_save_info_.last_bgsave_status = false;
       }
+      save_controller_.reset();
       return res->error;
     }
-
     // Success - set the controller and update state
-    save_controller_ = std::move(temp_save_controller);
     save_controller_->Start();
     last_save_info_.bgsave_in_progress = bg_save;
   }
