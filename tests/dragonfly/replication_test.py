@@ -52,6 +52,7 @@ Test full replication pipeline. Test full sync with streaming changes and stable
     ],
 )
 @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
+@pytest.mark.parametrize("background_snapshotting", [False, True])
 # Disabled cache_mode until #5371 is fixed
 # @pytest.mark.parametrize("point_in_time_replication", [True, False])
 async def test_replication_all(
@@ -61,12 +62,16 @@ async def test_replication_all(
     seeder_config,
     stream_target,
     mode,
+    background_snapshotting,
     # point_in_time_replication,
 ):
     args = {}
     if mode:
         args["cache_mode"] = "true"
         args["maxmemory"] = str(t_master * 256) + "mb"
+
+    if background_snapshotting:
+        args["background_snapshotting"] = None
 
     master = df_factory.create(
         admin_port=ADMIN_PORT,
