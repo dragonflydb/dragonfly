@@ -3421,3 +3421,14 @@ async def test_replica_takeover_moved(
 
     assert await r1.client.execute_command("GET X") == "2"
     assert await m2.client.execute_command("GET FOOX") == "1"
+
+    await r1.client.execute_command("flushall")
+    assert await r1.client.dbsize() == 0
+    await r1.client.execute_command("SET newk foo")
+    # Now bring back m1 as a replica of r1
+    nodes.append(m1)
+    r1.replicas = [m1]
+    await push_config(json.dumps(generate_config(master_nodes)), [node.client for node in nodes])
+    await m1.client.execute_command(f"replicaof localhost {r1.instance.port}")
+    await check_all_replicas_finished([m1.client], r1.client)
+    assert await m1.client.execute_command("GET newk") == "foo"
