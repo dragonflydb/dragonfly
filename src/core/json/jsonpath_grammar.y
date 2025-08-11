@@ -62,6 +62,7 @@ using namespace std;
 %nterm <PathSegment> bracket_index
 %nterm <std::string> single_quoted_string
 %nterm <std::string> double_quoted_string
+%nterm <std::string> quoted_content
 
 
 %%
@@ -94,9 +95,12 @@ bracket_index: single_quoted_string { $$ = PathSegment(SegmentType::IDENTIFIER, 
               | INT COLON { $$ = PathSegment(SegmentType::INDEX, IndexExpr($1, INT_MAX)); }
               | COLON INT { $$ = PathSegment(SegmentType::INDEX, IndexExpr::HalfOpen(0, $2)); }
 
-single_quoted_string: SINGLE_QUOTE UNQ_STR SINGLE_QUOTE { $$ = $2; }
+single_quoted_string: SINGLE_QUOTE quoted_content SINGLE_QUOTE { $$ = $2; }
 
-double_quoted_string: DOUBLE_QUOTE UNQ_STR DOUBLE_QUOTE { $$ = $2; }
+double_quoted_string: DOUBLE_QUOTE quoted_content DOUBLE_QUOTE { $$ = $2; }
+
+quoted_content: UNQ_STR { $$ = $1; }
+              | quoted_content DOT UNQ_STR { $$ = $1 + "." + $3; }
 
 function_expr: UNQ_STR { driver->AddFunction($1); } LPARENT ROOT relative_location RPARENT
 %%
