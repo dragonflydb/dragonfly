@@ -18,11 +18,12 @@ local total_ops = tonumber(ARGV[6])
 local min_dev = tonumber(ARGV[7])
 local data_size = tonumber(ARGV[8])
 local collection_size = tonumber(ARGV[9])
+local huge_value_keys_add_only = tonumber(ARGV[10])
 -- Probability of each key in key_target to be a big value
-local huge_value_target = tonumber(ARGV[10])
-local huge_value_size = tonumber(ARGV[11])
-local seed = tonumber(ARGV[12])
-
+local huge_value_target = tonumber(ARGV[11])
+local huge_value_size = tonumber(ARGV[12])
+-- Seed
+local seed = tonumber(ARGV[13])
 math.randomseed(seed)
 
 -- collect all keys belonging to this script
@@ -33,14 +34,22 @@ LG_funcs.init(data_size, collection_size, huge_value_target, huge_value_size)
 local addfunc = LG_funcs['add_' .. string.lower(type)]
 local modfunc = LG_funcs['mod_' .. string.lower(type)]
 local huge_entries = LG_funcs["get_huge_entries"]
+local is_next_huge_entry = LG_funcs["is_huge_entry"]
 
 local function action_add()
     local key = prefix .. tostring(key_counter)
     local op_type = string.lower(type)
+    local is_next_huge_entry = is_next_huge_entry(op_type)
     key_counter = key_counter + 1
 
     table.insert(keys, key)
     addfunc(key, keys)
+
+    -- If we allow adding only huge value keys them remove it from
+    -- table so it wouldn't be selected for any action_del / action_mod
+    if huge_value_keys_add_only == 1 and is_next_huge_entry then
+        table.remove(keys)
+    end
 end
 
 local function action_mod()
