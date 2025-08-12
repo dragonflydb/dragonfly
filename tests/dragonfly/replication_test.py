@@ -2033,9 +2033,9 @@ async def test_client_pause_with_replica(df_factory, df_seeder_factory):
     assert await seeder.compare(capture, port=replica.port)
 
 
-async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
+async def test_replicaof_reject_on_load(df_factory: DflyInstanceFactory, df_seeder_factory):
     master = df_factory.create()
-    replica = df_factory.create(dbfilename=f"dump_{tmp_file_name()}")
+    replica = df_factory.create(dbfilename=f"dump_{tmp_file_name()}", vmodule="main_service=1")
     df_factory.start_all([master, replica])
 
     c_replica = replica.client()
@@ -2045,15 +2045,16 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     replica.start()
     c_replica = replica.client()
 
+    expr = re.compile("Switching state from ACTIVE to LOADING")
+
     @assert_eventually
     async def check_replica_isloading():
-        persistence = await c_replica.info("PERSISTENCE")
-        assert persistence["loading"] == 1
+        assert any(expr.search(open(f, "r").read()) for f in (replica.get_logs_from_psutil()))
 
     # If this fails adjust load of DEBUG POPULATE above.
     await check_replica_isloading()
 
-    # Check replica of not alowed while loading snapshot
+    # Check replica of not allowed while loading snapshot
     # Keep in mind that if the exception has not been raised, it doesn't mean
     # that there is a bug because it could be the case that while executing
     # INFO PERSISTENCE df is in loading state but when we call REPLICAOF df
