@@ -774,7 +774,7 @@ void DebugCmd::Reload(CmdArgList args, facade::SinkReplyBuilder* builder) {
     }
   }
 
-  string last_save_file = sf_.GetLastSaveInfo().file_name;
+  string last_save_file = sf_.GetLastSaveInfo()->file_name;
 
   sf_.FlushAll(cntx_->ns);
 

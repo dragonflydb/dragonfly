@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <atomic>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -139,25 +142,49 @@ struct Metrics {
   absl::flat_hash_map<std::string, hdr_histogram*> cmd_latency_map;
 };
 
-struct LastSaveInfo {
-  // last success save info
-  void SetLastSaveError(const detail::SaveInfo& save_info) {
-    last_error = save_info.error;
-    last_error_time = save_info.save_time;
-    failed_duration_sec = save_info.duration_sec;
-  }
-
+// Contains the state of the last save operation.
+// This object is immutable.
+struct SaveInfoData {
   time_t save_time = 0;  // epoch time in seconds.
   uint32_t success_duration_sec = 0;
-  std::string file_name;                                      //
+  std::string file_name;
   std::vector<std::pair<std::string_view, size_t>> freq_map;  // RDB_TYPE_xxx -> count mapping.
+
   // last error save info
   GenericError last_error;
   time_t last_error_time = 0;      // epoch time in seconds.
   time_t failed_duration_sec = 0;  // epoch time in seconds.
+
   // false if last attempt failed
   bool last_bgsave_status = true;
   bool bgsave_in_progress = false;
+};
+
+// A thread-safe wrapper for SaveInfoData using the Copy-on-Write pattern.
+// Provides a non-blocking Get() for readers and a locking Update() for writers.
+class ThreadSafeSaveInfo {
+ public:
+  ThreadSafeSaveInfo() : data_(std::make_shared<const SaveInfoData>()) {
+  }
+
+  // Returns a snapshot of the current save info.
+  // This is a non-blocking, wait-free operation.
+  std::shared_ptr<const SaveInfoData> Get() const {
+    return std::atomic_load(&data_);
+  }
+
+  // Atomically updates the save info.
+  // The modifier function is called under a lock.
+  void Update(std::function<void(SaveInfoData*)> modifier) {
+    std::lock_guard<util::fb2::Mutex> lock(writer_mutex_);
+    auto new_data = std::make_shared<SaveInfoData>(*Get());
+    modifier(new_data.get());
+    std::atomic_store(&data_, std::const_pointer_cast<const SaveInfoData>(new_data));
+  }
+
+ private:
+  mutable util::fb2::Mutex writer_mutex_;
+  std::shared_ptr<const SaveInfoData> data_;
 };
 
 struct SnapshotSpec {
@@ -225,7 +252,7 @@ class ServerFamily {
   // if kDbAll is passed, burns all the databases to the ground.
   std::error_code Drakarys(Transaction* transaction, DbIndex db_ind);
 
-  LastSaveInfo GetLastSaveInfo() const ABSL_LOCKS_EXCLUDED(save_mu_);
+  std::shared_ptr<const SaveInfoData> GetLastSaveInfo() const;
 
   void FlushAll(Namespace* ns);
 
@@ -312,10 +339,9 @@ class ServerFamily {
   void Memory(CmdArgList args, const CommandContext& cmd_cntx);
   void FlushDb(CmdArgList args, const CommandContext& cmd_cntx);
   void FlushAll(CmdArgList args, const CommandContext& cmd_cntx);
-  void Info(CmdArgList args, const CommandContext& cmd_cntx)
-      ABSL_LOCKS_EXCLUDED(save_mu_, replicaof_mu_);
+  void Info(CmdArgList args, const CommandContext& cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   void Hello(CmdArgList args, const CommandContext& cmd_cntx);
-  void LastSave(CmdArgList args, const CommandContext& cmd_cntx) ABSL_LOCKS_EXCLUDED(save_mu_);
+  void LastSave(CmdArgList args, const CommandContext& cmd_cntx);
   void Latency(CmdArgList args, const CommandContext& cmd_cntx);
   void ReplicaOf(CmdArgList args, const CommandContext& cmd_cntx);
   void AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx);
@@ -404,8 +430,8 @@ class ServerFamily {
 
   time_t start_time_ = 0;  // in seconds, epoch time.
 
-  LastSaveInfo last_save_info_ ABSL_GUARDED_BY(save_mu_);
-  std::unique_ptr<detail::SaveStagesController> save_controller_ ABSL_GUARDED_BY(save_mu_);
+  ThreadSafeSaveInfo thread_safe_save_info_;
+  std::shared_ptr<detail::SaveStagesController> save_controller_ ABSL_GUARDED_BY(save_mu_);
 
   // Used to override save on shutdown behavior that is usually set
   // be --dbfilename.

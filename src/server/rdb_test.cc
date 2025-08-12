@@ -208,7 +208,7 @@ TEST_F(RdbTest, ComressionModeSaveDragonflyAndReload) {
     }
 
     auto save_info = service_->server_family().GetLastSaveInfo();
-    resp = Run({"dfly", "load", save_info.file_name});
+    resp = Run({"dfly", "load", save_info->file_name});
     ASSERT_EQ(resp, "OK");
     ASSERT_EQ(50000, CheckedInt({"dbsize"}));
   }
@@ -223,7 +223,7 @@ TEST_F(RdbTest, RdbLoaderOnReadCompressedDataShouldNotEnterEnsureReadFlow) {
   ASSERT_EQ(resp, "OK");
 
   auto save_info = service_->server_family().GetLastSaveInfo();
-  resp = Run({"dfly", "load", save_info.file_name});
+  resp = Run({"dfly", "load", save_info->file_name});
   ASSERT_EQ(resp, "OK");
 }
 
@@ -306,7 +306,7 @@ TEST_F(RdbTest, ReloadExpired) {
   ASSERT_EQ(resp, "OK");
   auto save_info = service_->server_family().GetLastSaveInfo();
   AdvanceTime(2000);
-  resp = Run({"dfly", "load", save_info.file_name});
+  resp = Run({"dfly", "load", save_info->file_name});
   ASSERT_EQ(resp, "OK");
   resp = Run({"get", "key"});
   ASSERT_THAT(resp, ArgType(RespExpr::NIL));
@@ -475,8 +475,8 @@ TEST_F(RdbTest, SaveFlush) {
   Run({"flushdb"});
   save_fb.Join();
   auto save_info = service_->server_family().GetLastSaveInfo();
-  ASSERT_EQ(1, save_info.freq_map.size());
-  auto& k_v = save_info.freq_map.front();
+  ASSERT_EQ(1, save_info->freq_map.size());
+  auto& k_v = save_info->freq_map.front();
   EXPECT_EQ("string", k_v.first);
   EXPECT_EQ(500000, k_v.second);
 }
@@ -512,8 +512,8 @@ TEST_F(RdbTest, SaveManyDbs) {
   save_fb.Join();
 
   auto save_info = service_->server_family().GetLastSaveInfo();
-  ASSERT_EQ(1, save_info.freq_map.size());
-  auto& k_v = save_info.freq_map.front();
+  ASSERT_EQ(1, save_info->freq_map.size());
+  auto& k_v = save_info->freq_map.front();
 
   EXPECT_EQ("string", k_v.first);
   EXPECT_EQ(60000, k_v.second);
@@ -674,7 +674,7 @@ TEST_F(RdbTest, DflyLoadAppend) {
   // Create an RDB with (k1,1) value in it saved as `filename`
   EXPECT_EQ(Run({"set", "k1", "1"}), "OK");
   EXPECT_EQ(Run({"save", "df"}), "OK");
-  string filename = service_->server_family().GetLastSaveInfo().file_name;
+  string filename = service_->server_family().GetLastSaveInfo()->file_name;
 
   // Without APPEND option - db should be flushed
   EXPECT_EQ(Run({"set", "k1", "TO-BE-FLUSHED"}), "OK");
@@ -704,7 +704,7 @@ TEST_F(RdbTest, LoadHugeSet) {
   ASSERT_EQ(resp, "OK");
 
   auto save_info = service_->server_family().GetLastSaveInfo();
-  resp = Run({"dfly", "load", save_info.file_name});
+  resp = Run({"dfly", "load", save_info->file_name});
   ASSERT_EQ(resp, "OK");
 
   ASSERT_EQ(100000, CheckedInt({"scard", "test:0"}));
@@ -726,7 +726,7 @@ TEST_F(RdbTest, LoadHugeHMap) {
   ASSERT_EQ(resp, "OK");
 
   auto save_info = service_->server_family().GetLastSaveInfo();
-  resp = Run({"dfly", "load", save_info.file_name});
+  resp = Run({"dfly", "load", save_info->file_name});
   ASSERT_EQ(resp, "OK");
 
   ASSERT_EQ(100000, CheckedInt({"hlen", "test:0"}));
@@ -748,7 +748,7 @@ TEST_F(RdbTest, LoadHugeZSet) {
   ASSERT_EQ(resp, "OK");
 
   auto save_info = service_->server_family().GetLastSaveInfo();
-  resp = Run({"dfly", "load", save_info.file_name});
+  resp = Run({"dfly", "load", save_info->file_name});
   ASSERT_EQ(resp, "OK");
 
   ASSERT_EQ(100000, CheckedInt({"zcard", "test:0"}));
@@ -770,7 +770,7 @@ TEST_F(RdbTest, LoadHugeList) {
   ASSERT_EQ(resp, "OK");
 
   auto save_info = service_->server_family().GetLastSaveInfo();
-  resp = Run({"dfly", "load", save_info.file_name});
+  resp = Run({"dfly", "load", save_info->file_name});
   ASSERT_EQ(resp, "OK");
 
   ASSERT_EQ(100000, CheckedInt({"llen", "test:0"}));
@@ -809,7 +809,7 @@ TEST_F(RdbTest, LoadHugeStream) {
   ASSERT_EQ(resp, "OK");
 
   auto save_info = service_->server_family().GetLastSaveInfo();
-  resp = Run({"dfly", "load", save_info.file_name});
+  resp = Run({"dfly", "load", save_info->file_name});
   ASSERT_EQ(resp, "OK");
 
   ASSERT_EQ(2000, CheckedInt({"xlen", "test:0"}));
