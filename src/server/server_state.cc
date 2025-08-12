@@ -16,15 +16,30 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/flag_utils.h"
 #include "server/channel_store.h"
 #include "server/journal/journal.h"
 #include "util/listener_interface.h"
+
+using facade::operator""_KB;
 
 ABSL_FLAG(uint32_t, interpreter_per_thread, 10, "Lua interpreters per thread");
 ABSL_FLAG(uint32_t, timeout, 0,
           "Close the connection after it is idle for N seconds (0 to disable)");
 ABSL_FLAG(uint32_t, send_timeout, 0,
           "Close the connection after it is stuck on send for N seconds (0 to disable)");
+
+ABSL_FLAG(double, rss_oom_deny_ratio, 1.25,
+          "When the ratio between maxmemory and RSS memory exceeds this value, commands marked as "
+          "DENYOOM will fail with OOM error and new connections to non-admin port will be "
+          "rejected. Negative value disables this feature.");
+
+ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
+          "Maximum size of a value that may be serialized at once during snapshotting or full "
+          "sync. Values bigger than this threshold will be serialized using streaming "
+          "serialization. 0 - to disable streaming mode");
+ABSL_FLAG(uint32_t, max_squashed_cmd_num, 100,
+          "Max number of commands squashed in a single shard during squash optimizaiton");
 
 namespace dfly {
 
@@ -118,6 +133,8 @@ ServerState::ServerState() : interpreter_mgr_{absl::GetFlag(FLAGS_interpreter_pe
   mi_heap_t* tlh = mi_heap_new();
   init_zmalloc_threadlocal(tlh);
   data_heap_ = tlh;
+
+  UpdateFromFlags();
 }
 
 ServerState::~ServerState() {
@@ -209,6 +226,17 @@ void ServerState::DecommitMemory(uint8_t flags) {
 #endif
 #endif
   }
+}
+
+void ServerState::UpdateFromFlags() {
+  rss_oom_deny_ratio = absl::GetFlag(FLAGS_rss_oom_deny_ratio);
+  serialization_max_chunk_size = absl::GetFlag(FLAGS_serialization_max_chunk_size);
+  max_squash_cmd_num = absl::GetFlag(FLAGS_max_squashed_cmd_num);
+}
+
+vector<string> ServerState::GetMutableFlagNames() {
+  return facade::GetFlagNames(FLAGS_rss_oom_deny_ratio, FLAGS_serialization_max_chunk_size,
+                              FLAGS_max_squashed_cmd_num);
 }
 
 Interpreter* ServerState::BorrowInterpreter() {
