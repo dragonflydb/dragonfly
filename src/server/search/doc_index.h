@@ -56,24 +56,28 @@ struct SearchResult {
   std::optional<facade::ErrorReply> error;
 };
 
+using KeyData =
+    std::pair<std::string_view /*key*/, absl::InlinedVector<search::SortableValue, 1> /*values*/>;
+using KeyDataMap = absl::flat_hash_map<std::string_view /*key*/,
+                                       absl::InlinedVector<search::SortableValue, 1> /*values*/>;
+
 // Field reference with optional alias as parsed from RETURN [field AS alias], LOAD, etc...
 struct FieldReference {
-  explicit FieldReference(std::string_view name, std::string_view alias = "")
-      : name_{name}, alias_{alias} {
+  static bool IsJsonPath(std::string_view name);
+
+  explicit FieldReference(std::string_view name_, std::string_view alias_ = "")
+      : name{name_}, alias{alias_} {
   }
 
   std::string_view Identifier(const search::Schema& schema, bool is_json) const {
-    return (is_json && IsJsonPath(name_)) ? name_ : schema.LookupAlias(name_);
+    return (is_json && IsJsonPath(name)) ? name : schema.LookupAlias(name);
   }
 
   std::string_view OutputName() const {
-    return alias_.empty() ? name_ : alias_;
+    return alias.empty() ? name : alias;
   }
 
- private:
-  static bool IsJsonPath(std::string_view name);
-
-  std::string_view name_, alias_;
+  std::string_view name, alias;
 };
 
 enum class SortOrder { ASC, DESC };
@@ -122,8 +126,30 @@ struct SearchParams {
 };
 
 struct AggregateParams {
+  struct JoinParams {
+    // Fist field is the index name, second is the field name.
+    using Field = std::pair<std::string, std::string>;
+
+    struct Condition {
+      Condition(std::string_view field_, std::string_view foreign_index_,
+                std::string_view foreign_field_)
+          : field{field_}, foreign_field{Field{foreign_index_, foreign_field_}} {
+      }
+
+      std::string field;
+      Field foreign_field;
+    };
+
+    std::string index;
+    std::string index_alias;
+    std::vector<Condition> conditions;
+    std::string query = "*";
+  };
+
   std::string_view index, query;
   search::QueryParams params;
+
+  std::vector<JoinParams> joins;
 
   std::optional<std::vector<FieldReference>> load_fields;
   std::vector<aggregate::AggregationStep> steps;
@@ -165,6 +191,7 @@ class ShardDocIndex {
     DocId Add(std::string_view key);
     std::optional<DocId> Remove(std::string_view key);
 
+    std::optional<DocId> Find(std::string_view key) const;
     std::string_view Get(DocId id) const;
     size_t Size() const;
 
@@ -187,6 +214,13 @@ class ShardDocIndex {
   std::vector<SearchDocData> SearchForAggregator(const OpArgs& op_args,
                                                  const AggregateParams& params,
                                                  search::SearchAlgorithm* search_algo) const;
+
+  // Methods needed for join operation
+  std::vector<KeyData> PreagregateDataForJoin(const OpArgs& op_args,
+                                              absl::Span<std::string_view> join_fields,
+                                              search::SearchAlgorithm* search_algo) const;
+  KeyDataMap LoadKeysData(const OpArgs& op_args, const absl::flat_hash_set<std::string_view>& keys,
+                          absl::Span<const FieldReference> fields_to_load) const;
 
   // Return whether base index matches
   bool Matches(std::string_view key, unsigned obj_code) const;
@@ -217,6 +251,10 @@ class ShardDocIndex {
 
   using LoadedEntry = std::pair<std::string_view, std::unique_ptr<BaseAccessor>>;
   std::optional<LoadedEntry> LoadEntry(search::DocId id, const OpArgs& op_args) const;
+
+  std::vector<KeyData> LoadData(const OpArgs& op_args, absl::Span<const search::DocId> ids,
+                                absl::Span<std::string_view> fields_to_load,
+                                bool skip_nil_data) const;
 
   // Behaviour identical to SortIndex::Sort for non-sortable fields that need to be fetched first
   std::vector<search::SortableValue> KeepTopKSorted(std::vector<DocId>* ids, size_t limit,

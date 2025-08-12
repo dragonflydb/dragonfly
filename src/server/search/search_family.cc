@@ -442,6 +442,58 @@ ParseResult<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* parse
   return sort_params;
 }
 
+std::pair<std::string_view, std::string_view> Split(std::string_view s, char delim) {
+  auto pos = s.find(delim);
+  if (pos == std::string_view::npos)
+    return {s, std::string_view{}};
+  return {s.substr(0, pos), s.substr(pos + 1)};
+}
+
+ParseResult<AggregateParams::JoinParams> ParseAggregatorJoinParams(
+    CmdArgParser* parser, absl::flat_hash_set<std::string_view>* known_indexes) {
+  AggregateParams::JoinParams join_params;
+  join_params.index = parser->Next<std::string>();
+  if (parser->Check("AS")) {
+    join_params.index_alias = parser->Next<std::string>();
+  } else {
+    join_params.index_alias = join_params.index;
+  }
+
+  // Validate index name
+  known_indexes->insert(join_params.index_alias);
+
+  size_t num_fields = parser->Next<size_t>();
+  join_params.conditions.reserve(num_fields);
+  while (parser->HasNext() && num_fields > 0) {
+    auto [left, right] = Split(parser->Next(), '=');
+    auto [l_index, l_field] = Split(left, '.');
+    auto [r_index, r_field] = Split(right, '.');
+
+    if (right.empty() || l_field.empty() || r_field.empty()) {
+      return CreateSyntaxError(
+          "bad arguments for LOAD_FROM: expected 'index.field=foreign_index.field'"sv);
+    }
+
+    if (!known_indexes->contains(l_index) || !known_indexes->contains(r_index)) {
+      return CreateSyntaxError(absl::StrCat("bad arguments for LOAD_FROM: unknown index '",
+                                            known_indexes->contains(l_index) ? r_index : l_index,
+                                            "'"));
+    }
+
+    if (l_index == join_params.index_alias) {
+      join_params.conditions.emplace_back(l_field, r_index, r_field);
+    } else {
+      join_params.conditions.emplace_back(r_field, l_index, l_field);
+    }
+
+    num_fields--;
+  }
+
+  parser->Check("QUERY", &join_params.query);
+
+  return join_params;
+}
+
 ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
   AggregateParams params;
   tie(params.index, params.query) = parser->Next<string_view, string_view>();
@@ -456,6 +508,10 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       params.load_fields->insert(params.load_fields->end(), make_move_iterator(fields.begin()),
                                  make_move_iterator(fields.end()));
   }
+
+  // Used for join params
+  absl::flat_hash_set<std::string_view> current_known_indexes;
+  current_known_indexes.insert(params.index);
 
   while (parser->HasNext()) {
     // GROUPBY nargs property [property ...]
@@ -532,10 +588,294 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       return CreateSyntaxError("LOAD cannot be applied after projectors or reducers"sv);
     }
 
+    if (parser->Check("LOAD_FROM")) {
+      auto join_params = ParseAggregatorJoinParams(parser, &current_known_indexes);
+      if (!join_params) {
+        return make_unexpected(join_params.error());
+      }
+      params.joins.emplace_back(std::move(join_params).value());
+      continue;
+    }
+
     return CreateSyntaxError(absl::StrCat("Unknown clause: ", parser->Peek()));
   }
 
   return params;
+}
+
+struct PreaggregationJoinParams {
+  template <typename T> using Vector = absl::InlinedVector<T, 2>;
+
+  explicit PreaggregationJoinParams(size_t n) : indexes(n), search_algos(n), needed_fields(n) {
+  }
+
+  Vector<std::string_view> indexes;
+  Vector<search::SearchAlgorithm> search_algos;
+  Vector<std::vector<std::string_view>> needed_fields;
+  absl::flat_hash_map<std::string_view, size_t> alias_to_index;
+};
+
+io::Result<PreaggregationJoinParams, ErrorReply> PrepareJoinsParams(std::string_view index,
+                                                                    std::string_view query,
+                                                                    const AggregateParams& params) {
+  DCHECK(!params.joins.empty());
+
+  const size_t n = params.joins.size();
+  PreaggregationJoinParams result(n + 1);
+
+  if (!result.search_algos[0].Init(params.query, &params.params)) {
+    return CreateSyntaxError(absl::StrCat("Query syntax error: ", params.query));
+  }
+
+  for (size_t i = 0; i < n; ++i) {
+    search::QueryParams empty_params;
+    if (!result.search_algos[i + 1].Init(params.joins[i].query, &empty_params)) {
+      return CreateSyntaxError(absl::StrCat("Query syntax error: ", params.joins[i].query));
+    }
+  }
+
+  // Collect aliases and initialize result.indexes
+  result.alias_to_index.reserve(n);
+  result.alias_to_index[index] = 0;
+  result.indexes[0] = index;
+  for (size_t i = 0; i < n; ++i) {
+    result.alias_to_index[params.joins[i].index_alias] = i + 1;
+    result.indexes[i + 1] = params.joins[i].index;
+  }
+
+  // Collect needed fields for joins for each index
+  // needed_fields[i] contains fields needed for index i
+  std::vector<absl::flat_hash_set<std::string_view>> needed_fields(n + 1);
+  for (size_t i = 0; i < n; ++i) {
+    const auto& join = params.joins[i];
+    for (const auto& condition : join.conditions) {
+      needed_fields[i + 1].insert(condition.field);
+      needed_fields[result.alias_to_index[condition.foreign_field.first]].insert(
+          condition.foreign_field.second);
+    }
+  }
+
+  // Map them to the result.needed_fields
+  for (size_t i = 0; i <= n; ++i) {
+    auto& from = needed_fields[i];
+    auto& to = result.needed_fields[i];
+
+    to.reserve(from.size());
+    for (const auto& field : from) {
+      to.push_back(field);
+    }
+  }
+
+  return result;
+}
+
+/* To join new index we need to map AggregateParams::JoinParams::Condition to
+   JoinableCondition, which contains indexes instead of strings. */
+struct JoinableCondition {
+  size_t current_index_field_index;
+  size_t foreign_index;
+  size_t foreign_index_field_index;
+};
+
+/* To not to copy a lot of data during joins, we use JoinableData.
+   Between joins we keep list of JoinableData, that represents list of rows that was matched and can
+   be joined further. Each JoinableData refers to keys in preaggregated_data that matched the
+   conditions.
+
+   preaggregated_data maps index to vector of data (key and his values):
+   index 0 - [{key1, [field1_value, field2_value, ...]}, {key2, [field1_value, field2_value, ...]},
+   ...] index 1 - [{key3, [field1_value, field2_value, ...]}, {key4, [field1_value, field2_value,
+   ...]}, ...]
+   ...
+
+   Imagine after some joins we have joined {key2, key4}, {key1, key3}.
+   Then list of JoinableData will look like this:
+   first element - indexes = {1, 2}
+      meaning that for index0 was matched element with index 1 (key2) and for index1 was matched
+   element with index 2 (key4). second element - indexes = {0, 1} meaning that for index0 was
+   matched element with index 0 (key1) and for index1 was matched element with index 1 (key3).
+
+   In other words... TODO(explain it in other words)
+*/
+struct JoinableData {
+  using SortableValueView = std::variant<std::monostate, double, std::string_view>;
+
+  static SortableValueView AsView(const search::SortableValue& sortable_value) {
+    auto convert_to_view = [](const auto& value) -> SortableValueView {
+      if constexpr (std::is_same_v<decltype(value), std::string>) {
+        return std::string_view(value);
+      } else {
+        return value;
+      }
+    };
+    return std::visit(std::move(convert_to_view), sortable_value);
+  }
+
+  SortableValueView GetValue(const JoinableCondition& condition,
+                             absl::Span<const std::vector<KeyData>> preaggregated_data) const {
+    const size_t index_in_preaggregated_data = indexes[condition.foreign_index];
+    const auto& sortable_value =
+        preaggregated_data[condition.foreign_index][index_in_preaggregated_data]
+            .second[condition.foreign_index_field_index];
+    return AsView(sortable_value);
+  }
+
+  std::vector<size_t> indexes;
+};
+
+// Uses hash joining algorithm to join preaggregated data with new index.
+std::vector<JoinableData> JoinWithNewIndex(
+    size_t new_index, absl::Span<const std::vector<KeyData>> preaggregated_data,
+    absl::Span<const JoinableCondition> conditions, absl::Span<const JoinableData> current_data) {
+  if (current_data.empty() || preaggregated_data[new_index].empty()) {
+    // No data to join, return empty result
+    return {};
+  }
+
+  // {set of field values} to indexes in new_index array that match this set of field values.
+  // TODO: map for the smallest set (new_index or current_data)
+  using Key = absl::InlinedVector<JoinableData::SortableValueView, 1>;
+  absl::flat_hash_map<Key, absl::InlinedVector<size_t, 1>> join_map;
+  join_map.reserve(current_data.size());
+
+  for (size_t i = 0; i < current_data.size(); ++i) {
+    const auto& data = current_data[i];
+
+    Key key;
+    key.reserve(conditions.size());
+    for (const auto& condition : conditions) {
+      key.push_back(data.GetValue(condition, preaggregated_data));
+    }
+
+    join_map[key].push_back(i);
+  }
+
+  std::vector<JoinableData> result;
+  result.reserve(join_map.size());
+
+  for (size_t i = 0; i < preaggregated_data[new_index].size(); ++i) {
+    const auto& data = preaggregated_data[new_index][i];
+
+    Key key;
+    key.reserve(conditions.size());
+    for (const auto& condition : conditions) {
+      key.push_back(JoinableData::AsView(data.second[condition.current_index_field_index]));
+    }
+
+    auto it = join_map.find(key);
+    if (it == join_map.end()) {
+      continue;
+    }
+
+    // New match found
+    for (size_t j : it->second) {
+      result.push_back(JoinableData{current_data[j].indexes});
+      result.back().indexes.emplace_back(i);
+    }
+  }
+
+  return result;
+}
+
+// Join all indexes using hash joining
+std::vector<JoinableData> JoinAllIndexes(
+    const AggregateParams& params, const PreaggregationJoinParams& preaggregation_params,
+    absl::Span<const std::vector<KeyData>> preaggregated_data) {
+  std::vector<JoinableData> joinable_data(preaggregated_data[0].size());
+  for (size_t i = 0; i < joinable_data.size(); ++i) {
+    joinable_data[i].indexes.push_back(i);
+  }
+
+  auto get_index_from_alias = [&preaggregation_params](const std::string_view& alias) -> size_t {
+    auto it = preaggregation_params.alias_to_index.find(alias);
+    DCHECK(it != preaggregation_params.alias_to_index.end());
+    return it->second;
+  };
+
+  auto get_field_index = [&preaggregation_params](size_t index,
+                                                  const std::string_view& field) -> size_t {
+    const auto& fields = preaggregation_params.needed_fields[index];
+    auto it = std::find(fields.begin(), fields.end(), field);
+    DCHECK(it != fields.end());
+    return it - fields.begin();
+  };
+
+  const size_t indexes_count = preaggregated_data.size();
+  for (size_t i = 1; i < indexes_count; i++) {
+    const auto& join = params.joins[i - 1];
+    const auto& conditions = join.conditions;
+
+    std::vector<JoinableCondition> joinable_conditions(conditions.size());
+    for (const auto& condition : conditions) {
+      size_t current_index_field_index = get_field_index(i, condition.field);
+      size_t foreign_index = get_index_from_alias(condition.foreign_field.first);
+      size_t foreign_index_field_index =
+          get_field_index(foreign_index, condition.foreign_field.second);
+
+      joinable_conditions.push_back(
+          JoinableCondition{current_index_field_index, foreign_index, foreign_index_field_index});
+    }
+
+    joinable_data = JoinWithNewIndex(i, preaggregated_data, joinable_conditions, joinable_data);
+  }
+  return joinable_data;
+}
+
+std::vector<std::vector<FieldReference>> GetFieldsPerIndex(
+    const AggregateParams& params, const PreaggregationJoinParams& preaggregation_params) {
+  const size_t indexes_count = preaggregation_params.indexes.size();
+  std::vector<std::vector<FieldReference>> result(indexes_count);
+
+  auto get_index_from_alias = [&preaggregation_params](const std::string_view& alias) -> size_t {
+    auto it = preaggregation_params.alias_to_index.find(alias);
+    DCHECK(it != preaggregation_params.alias_to_index.end());
+    return it->second;
+  };
+
+  for (const auto& field : params.load_fields.value_or(std::vector<FieldReference>{})) {
+    auto [index_alias, field_name] = Split(field.name, '.');
+    auto [_, field_alias] = Split(field.alias, '.');
+    result[get_index_from_alias(index_alias)].emplace_back(field_name, field_alias);
+  }
+  return result;
+}
+
+std::vector<aggregate::DocValues> MergeJoinedKeysWithData(
+    const AggregateParams& params, absl::Span<const JoinableData> join_result,
+    absl::Span<const std::vector<KeyData>> preaggregated_data,
+    absl::Span<const std::vector<FieldReference>> fields_per_index,
+    absl::Span<const KeyDataMap> key_data_per_index) {
+  std::vector<aggregate::DocValues> merged_data;
+  merged_data.reserve(join_result.size());
+
+  const size_t indexes_count = fields_per_index.size();
+  for (const auto& joinable : join_result) {
+    aggregate::DocValues doc_values;
+
+    size_t docs_count = 0;
+    for (size_t i = 0; i < indexes_count; ++i) {
+      docs_count += fields_per_index[i].size();
+    }
+    doc_values.reserve(docs_count);
+
+    for (size_t i = 0; i < indexes_count; ++i) {
+      std::string_view index_alias = (i == 0) ? params.index : params.joins[i - 1].index_alias;
+      const auto& key = preaggregated_data[i][joinable.indexes[i]].first;
+
+      auto it = key_data_per_index[i].find(key);
+      DCHECK(it != key_data_per_index[i].end());
+      const auto& field_values = it->second;
+      DCHECK(field_values.size() == fields_per_index[i].size());
+
+      for (size_t j = 0; j < fields_per_index[i].size(); ++j) {
+        std::string_view field_alias = fields_per_index[i][j].OutputName();
+        doc_values.emplace(absl::StrCat(index_alias, "."sv, field_alias), field_values[j]);
+      }
+    }
+
+    merged_data.push_back(std::move(doc_values));
+  }
+  return merged_data;
 }
 
 auto SortableValueSender(RedisReplyBuilder* rb) {
@@ -1059,34 +1399,130 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
   if (SendErrorIfOccurred(params, &parser, builder))
     return;
 
-  search::SearchAlgorithm search_algo;
-  if (!search_algo.Init(params->query, &params->params))
-    return builder->SendError("Query syntax error");
-
-  using ResultContainer = decltype(declval<ShardDocIndex>().SearchForAggregator(
-      declval<OpArgs>(), params.value(), &search_algo));
-
-  vector<ResultContainer> query_results(shard_set->size());
-  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (auto* index = es->search_indices()->GetIndex(params->index); index) {
-      query_results[es->shard_id()] =
-          index->SearchForAggregator(t->GetOpArgs(es), params.value(), &search_algo);
-    }
-    return OpStatus::OK;
-  });
-
-  // ResultContainer is absl::flat_hash_map<std::string, search::SortableValue>
-  // DocValues is absl::flat_hash_map<std::string_view, SortableValue>
-  // Keys of values should point to the keys of the query_results
   std::vector<aggregate::DocValues> values;
-  for (auto& sub_results : query_results) {
-    for (auto& docs : sub_results) {
-      aggregate::DocValues doc_value;
-      for (auto& doc : docs) {
-        doc_value[doc.first] = std::move(doc.second);
+
+  if (params->joins.empty()) {
+    search::SearchAlgorithm search_algo;
+    if (!search_algo.Init(params->query, &params->params))
+      return builder->SendError("Query syntax error");
+
+    using ResultContainer = decltype(declval<ShardDocIndex>().SearchForAggregator(
+        declval<OpArgs>(), params.value(), &search_algo));
+
+    vector<ResultContainer> query_results(shard_set->size());
+
+    cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+      if (auto* index = es->search_indices()->GetIndex(params->index); index) {
+        query_results[es->shard_id()] =
+            index->SearchForAggregator(t->GetOpArgs(es), params.value(), &search_algo);
       }
-      values.push_back(std::move(doc_value));
+      return OpStatus::OK;
+    });
+
+    // ResultContainer is absl::flat_hash_map<std::string, search::SortableValue>
+    // DocValues is absl::flat_hash_map<std::string_view, SortableValue>
+    // Keys of values should point to the keys of the query_results
+    size_t total_values = 0;
+    for (const auto& sub_results : query_results) {
+      total_values += sub_results.size();
     }
+
+    values.reserve(total_values);
+    for (auto& sub_results : query_results) {
+      for (auto& docs : sub_results) {
+        aggregate::DocValues doc_value;
+        for (auto& doc : docs) {
+          doc_value[doc.first] = std::move(doc.second);
+        }
+        values.emplace_back(std::move(doc_value));
+      }
+    }
+  } else {
+    auto preaggregation_params = PrepareJoinsParams(params->index, params->query, *params);
+
+    const size_t n = preaggregation_params->search_algos.size();
+
+    using JoinDataVector = std::vector<KeyData>;
+
+    // preaggregated_shard_data is preaggregation results per index per shard
+    // preaggregated_shard_data[i][j] is the results of index i on shard j
+    std::vector<std::vector<JoinDataVector>> preaggregated_shard_data(
+        n, std::vector<JoinDataVector>(shard_set->size()));
+    cmd_cntx.tx->Execute(
+        [&](Transaction* t, EngineShard* es) {
+          for (size_t i = 0; i < n; ++i) {
+            if (auto* index = es->search_indices()->GetIndex(preaggregation_params->indexes[i]);
+                index) {
+              preaggregated_shard_data[i][es->shard_id()] = index->PreagregateDataForJoin(
+                  t->GetOpArgs(es), absl::MakeSpan(preaggregation_params->needed_fields[i]),
+                  &preaggregation_params->search_algos[i]);
+            }
+          }
+          return OpStatus::OK;
+        },
+        false);
+
+    // Merge preaggregated results from all shards for each index
+    // preaggregated_data[i] contains the preaggregated data for index i
+    std::vector<JoinDataVector> preaggregated_data(n);
+    for (size_t i = 0; i < n; ++i) {
+      auto& preaggregated = preaggregated_data[i];
+
+      size_t num_docs = 0;
+      for (size_t j = 0; j < shard_set->size(); ++j) {
+        num_docs += preaggregated_shard_data[i][j].size();
+      }
+
+      preaggregated.reserve(num_docs);
+      for (size_t j = 0; j < shard_set->size(); ++j) {
+        preaggregated.insert(preaggregated.end(),
+                             make_move_iterator(preaggregated_shard_data[i][j].begin()),
+                             make_move_iterator(preaggregated_shard_data[i][j].end()));
+      }
+    }
+
+    // Do join
+    auto joinable_data = JoinAllIndexes(*params, *preaggregation_params, preaggregated_data);
+
+    // Collect keys per index that were joined
+    std::vector<absl::flat_hash_set<std::string_view>> keys_per_index(n);
+    for (const auto& data : joinable_data) {
+      for (size_t index = 0; index < data.indexes.size(); index++) {
+        keys_per_index[index].insert(preaggregated_data[index][data.indexes[index]].first);
+      }
+    }
+
+    // Load fields for keys that were joined
+    auto fields_per_index = GetFieldsPerIndex(*params, *preaggregation_params);
+    std::vector<std::vector<KeyDataMap>> shard_keys_data_per_index(
+        n, std::vector<KeyDataMap>(shard_set->size()));
+    cmd_cntx.tx->Execute(
+        [&](Transaction* t, EngineShard* es) {
+          for (size_t i = 0; i < n; ++i) {
+            if (auto* index = es->search_indices()->GetIndex(preaggregation_params->indexes[i]);
+                index) {
+              shard_keys_data_per_index[i][es->shard_id()] =
+                  index->LoadKeysData(t->GetOpArgs(es), keys_per_index[i], fields_per_index[i]);
+            }
+          }
+          return OpStatus::OK;
+        },
+        true);
+
+    // Merge keys data from all shards for each index
+    std::vector<KeyDataMap> keys_data_per_index(n);
+    for (size_t i = 0; i < n; ++i) {
+      auto& keys_data = keys_data_per_index[i];
+      for (size_t j = 0; j < shard_set->size(); ++j) {
+        keys_data.insert(std::make_move_iterator(shard_keys_data_per_index[i][j].begin()),
+                         std::make_move_iterator(shard_keys_data_per_index[i][j].end()));
+      }
+    }
+
+    // Now we have sets of keys that were joined and keys data.
+    // We need to build DocValues for each joined set.
+    values = MergeJoinedKeysWithData(*params, joinable_data, preaggregated_data, fields_per_index,
+                                     keys_data_per_index);
   }
 
   std::vector<std::string_view> load_fields;

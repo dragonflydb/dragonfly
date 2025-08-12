@@ -160,6 +160,7 @@ struct KnnScoreSortOption {
 class SearchAlgorithm {
  public:
   SearchAlgorithm();
+  SearchAlgorithm(SearchAlgorithm&&) noexcept;
   ~SearchAlgorithm();
 
   // Init with query and return true if successful.

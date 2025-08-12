@@ -603,6 +603,7 @@ const Synonyms* FieldIndices::GetSynonyms() const {
 }
 
 SearchAlgorithm::SearchAlgorithm() = default;
+SearchAlgorithm::SearchAlgorithm(SearchAlgorithm&&) noexcept = default;
 SearchAlgorithm::~SearchAlgorithm() = default;
 
 bool SearchAlgorithm::Init(string_view query, const QueryParams* params) {
