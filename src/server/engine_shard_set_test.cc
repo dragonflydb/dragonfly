@@ -30,36 +30,10 @@ using testing::Pair;
 
 class RoundRobinSharderTest : public BaseFamilyTest {
  protected:
-  RoundRobinSharderTest() : BaseFamilyTest() {
+  RoundRobinSharderTest() {
     absl::SetFlag(&FLAGS_shard_round_robin_prefix, "RR:");
     SetTestFlag("cluster_mode", "emulated");
     ResetService();
-  }
-
-  map<int, int> GetShardKeyCount() {
-    map<int, int> m;
-
-    auto res = Run({"debug", "shards"});
-    for (string_view line : absl::StrSplit(res.GetString(), '\n')) {
-      vector<string> parts = absl::StrSplit(line, ": ");
-      if (parts.size() != 2) {
-        continue;
-      }
-
-      string_view k = parts[0];
-      if (!absl::StartsWith(k, "shard") || !absl::EndsWith(k, "_key_count")) {
-        continue;
-      }
-
-      CHECK(absl::ConsumePrefix(&k, "shard")) << k;
-      CHECK(absl::ConsumeSuffix(&k, "_key_count")) << k;
-      int sid;
-      CHECK(absl::SimpleAtoi(k, &sid));
-      int count;
-      CHECK(absl::SimpleAtoi(parts[1], &count));
-      m[sid] = count;
-    }
-    return m;
   }
 };
 

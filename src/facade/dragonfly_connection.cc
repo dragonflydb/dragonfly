@@ -1557,8 +1557,6 @@ void Connection::SquashPipeline() {
     CHECK(holds_alternative<PipelineMessagePtr>(msg.handle))
         << msg.handle.index() << " on " << DebugInfo();
 
-    // measure the time spent in the pipeline  queue waiting for dispatch
-    stats_->pipelined_wait_latency += CycleClock::ToUsec(start - msg.dispatch_cycle);
     auto& pmsg = get<PipelineMessagePtr>(msg.handle);
     squash_cmds.emplace_back(absl::MakeSpan(pmsg->args));
     if (squash_cmds.size() >= pipeline_squash_limit_cached) {
@@ -1598,8 +1596,15 @@ void Connection::SquashPipeline() {
   while (it->IsControl())  // Skip all newly received intrusive messages
     ++it;
 
-  for (auto rit = it; rit != it + dispatched; ++rit)
+  for (auto rit = it; rit != it + dispatched; ++rit) {
+    if (result.account_in_stats) {
+      // measure the time spent in the pipeline  queue waiting for dispatch
+      stats_->pipelined_wait_latency += CycleClock::ToUsec(start - rit->dispatch_cycle);
+    } else {
+      rit->dispatch_cycle = 0;  // Reset dispatch cycle to avoid accounting inside RecycleMessage
+    }
     RecycleMessage(std::move(*rit));
+  }
 
   dispatch_q_.erase(it, it + dispatched);
 
