@@ -204,6 +204,17 @@ class TieredStorage {
   void RunOffloading(DbIndex dbid) {
   }
 
+  void UpdateFromFlags() {
+  }
+
+  bool ShouldOffload() const {
+    return false;
+  }
+
+  int64_t UploadBudget() const {
+    return 0;
+  }
+
   PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
     return PrimeValue{};
   }
