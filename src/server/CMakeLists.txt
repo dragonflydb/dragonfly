@@ -17,7 +17,8 @@ endif()
 set_property(SOURCE dfly_main.cc APPEND PROPERTY COMPILE_DEFINITIONS
              SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
 
-if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
+option(WITH_TIERING "Compile for macos" ON)
+if (WITH_TIERING)
     SET(TX_LINUX_SRCS tiering/disk_storage.cc tiering/op_manager.cc tiering/small_bins.cc
       tiering/external_alloc.cc)
 
@@ -60,9 +61,10 @@ add_library(dfly_transaction db_slice.cc blocking_controller.cc
 
 # For now because the command line arguments are used by dragonfly so this file is needed
 # TODO add a cmake option to turn on/off tiering for df
-SET(DF_LINUX_SRCS tiered_storage.cc)
 
-if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
+if (WITH_TIERING)
+  SET(DF_LINUX_SRCS tiered_storage.cc)
+  add_definitions(-DWITH_TIERING)
   cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
 endif()
 
