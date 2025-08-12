@@ -141,6 +141,8 @@ ABSL_FLAG(uint32_t, uring_wake_mode, 1,
           "0 - use eventfd, 1 - use io_uring, 2 - use io_uring with immediate flush of the "
           "notification");
 
+ABSL_FLAG(uint32_t, uring_submit_threshold, 1u << 31, "");
+
 ABSL_FLAG(uint32_t, squash_stats_latency_lower_limit, 0,
           "If set, will not track latency stats below this threshold (usec). ");
 
@@ -763,6 +765,17 @@ void SetUringWakeMode(uint32_t mode) {
 #endif
 }
 
+void SetUringSubmitThreshold(uint32_t val) {
+#ifdef __linux__
+  shard_set->pool()->AwaitBrief([val](unsigned, fb2::ProactorBase* pb) {
+    if (pb->GetKind() == fb2::ProactorBase::IOURING) {
+      fb2::UringProactor* up = static_cast<fb2::UringProactor*>(pb);
+      up->SetSubmitQueueThreshold(val);
+    }
+  });
+#endif
+}
+
 void SetHuffmanTable(const std::string& huffman_table) {
   if (huffman_table.empty())
     return;
@@ -957,6 +970,8 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   config_registry.RegisterSetter<uint32_t>("uring_wake_mode",
                                            [](uint32_t val) { SetUringWakeMode(val); });
+  config_registry.RegisterSetter<uint32_t>("uring_submit_threshold",
+                                           [](uint32_t val) { SetUringSubmitThreshold(val); });
 
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
   if (shard_num == 0 || shard_num > pp_.size()) {
