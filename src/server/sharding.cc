@@ -15,11 +15,7 @@
 
 using namespace std;
 
-ABSL_FLAG(string, shard_round_robin_prefix, "",
-          "When non-empty, keys which start with this prefix are not distributed across shards "
-          "based on their value but instead via round-robin. Use cautiously! This can efficiently "
-          "support up to a few hundreds of prefixes. Note: prefix is looked inside hash tags when "
-          "cluster mode is enabled.");
+ABSL_FLAG(string, shard_round_robin_prefix, "", "Deprecated -- will be removed");
 
 namespace dfly {
 namespace {
@@ -38,6 +34,7 @@ class RoundRobinSharder {
     shard_set_size_ = shard_set_size;
 
     if (IsEnabled()) {
+      LOG(WARNING) << "shard_round_robin_prefix is deprecated and will be removed in new versions";
       // ~100k entries will consume 200kb per thread, and will allow 100 keys with < 2.5% collision
       // probability. Since this has a considerable footprint, we only allocate when enabled. We're
       // using a prime number close to 100k for better utilization.
