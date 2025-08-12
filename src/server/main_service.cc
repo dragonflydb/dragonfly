@@ -878,11 +878,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     max_memory_limit.store(flag.value, memory_order_relaxed);
   });
 
-  config_registry.RegisterSetter<uint32_t>("squash_stats_latency_lower_limit", [](uint32_t val) {
-    shard_set->pool()->AwaitBrief(
-        [=](unsigned, auto*) { squash_stats_latency_lower_limit_cached = val; });
-  });
-
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("replication_timeout");
   config_registry.RegisterMutable("migration_finalization_timeout_ms");
