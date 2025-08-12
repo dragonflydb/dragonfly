@@ -57,9 +57,12 @@ add_library(dfly_transaction db_slice.cc blocking_controller.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
             ${TX_LINUX_SRCS} acl/acl_log.cc slowlog.cc channel_store.cc)
 
-if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
-  SET(DF_LINUX_SRCS tiered_storage.cc)
 
+# For now because the command line arguments are used by dragonfly so this file is needed
+# TODO add a cmake option to turn on/off tiering for df
+SET(DF_LINUX_SRCS tiered_storage.cc)
+
+if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
   cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
 endif()
 
