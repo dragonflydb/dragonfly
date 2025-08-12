@@ -59,9 +59,6 @@ add_library(dfly_transaction db_slice.cc blocking_controller.cc
             ${TX_LINUX_SRCS} acl/acl_log.cc slowlog.cc channel_store.cc)
 
 
-# For now because the command line arguments are used by dragonfly so this file is needed
-# TODO add a cmake option to turn on/off tiering for df
-
 if (WITH_TIERING)
   SET(DF_LINUX_SRCS tiered_storage.cc)
   add_definitions(-DWITH_TIERING)
