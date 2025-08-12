@@ -384,7 +384,7 @@ void RestoreStreamer::Run() {
     // won't progress here but if we have not, then this fiber will progress withing the
     // CPU budget we defined for it.
     bool should_stall =
-        throttle_waiters_ > 0 || inflight_bytes() > replication_stream_output_limit_cached / 3 ||
+        throttle_waiters_ > 0 || IsStalled() ||
         cpu_aggregator_.IsOverloaded(absl::GetFlag(FLAGS_migration_buckets_cpu_budget));
     if (cursor && should_stall) {
       ThisFiber::SleepFor(300us);

@@ -57,6 +57,8 @@ class JournalStreamer : public journal::JournalConsumerInterface {
     return in_flight_bytes_;
   }
 
+  bool IsStalled() const;
+
   util::FiberSocketBase* dest_ = nullptr;
   ExecutionState* cntx_;
   uint64_t throttle_count_ = 0;
@@ -66,8 +68,6 @@ class JournalStreamer : public journal::JournalConsumerInterface {
  private:
   void AsyncWrite(bool force_send);
   void OnCompletion(std::error_code ec, size_t len);
-
-  bool IsStalled() const;
 
   journal::Journal* journal_;
 
