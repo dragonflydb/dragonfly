@@ -11,11 +11,18 @@
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/flag_utils.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/transaction.h"
 #include "server/tx_base.h"
+
+ABSL_FLAG(uint32_t, max_busy_squash_usec, 1000,
+          "Maximum time in microseconds to execute squashed commands before yielding.");
+
+ABSL_FLAG(uint32_t, log_squash_info_threshold_usec, 1 << 31,
+          "Threshold in microseconds above which to log squashing timings.");
 
 namespace dfly {
 
@@ -349,8 +356,8 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
         << "Squashed " << order_.size() << " commands. "
         << "Total/Fanout/MaxSchedTime/ThreadCbTime/ThreadId/FiberCbTime/FiberSeq/MaxExecTime: "
         << total_usec << "/" << num_shards_ << "/" << max_sched_usec << "/" << proactor_running_usec
-        << "/" << max_sched_thread_id << "/" << fiber_running_usec << "/"
-        << "/" << max_sched_seq_num << "/" << max_exec_usec
+        << "/" << max_sched_thread_id << "/" << fiber_running_usec << "/" << "/"
+        << max_sched_seq_num << "/" << max_exec_usec
         << "\n past fibers: " << absl::StrJoin(past_fibers, ", ")
         << "\ncoordinator thread running time: "
         << CycleClock::ToUsec(ProactorBase::me()->GetCurrentBusyCycles());
@@ -411,12 +418,13 @@ bool MultiCommandSquasher::IsAtomic() const {
   return atomic_;
 }
 
-void MultiCommandSquasher::SetMaxBusySquashUsec(uint32_t usec) {
-  max_busy_squash_cycles_cached = CycleClock::FromUsec(usec);
+void MultiCommandSquasher::UpdateFromFlags() {
+  max_busy_squash_cycles_cached = CycleClock::FromUsec(absl::GetFlag(FLAGS_max_busy_squash_usec));
+  log_squash_threshold_cached = absl::GetFlag(FLAGS_log_squash_info_threshold_usec);
 }
 
-void MultiCommandSquasher::SetLogSquashThreshold(uint32_t usec) {
-  log_squash_threshold_cached = usec;
+vector<string> MultiCommandSquasher::GetMutableFlagNames() {
+  return facade::GetFlagNames(FLAGS_max_busy_squash_usec, FLAGS_log_squash_info_threshold_usec);
 }
 
 }  // namespace dfly
