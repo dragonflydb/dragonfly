@@ -71,6 +71,7 @@ async def test_replication_all(
         args["maxmemory"] = str(t_master * 256) + "mb"
 
     if background_snapshotting:
+        args["background_heartbeat"] = None
         args["background_snapshotting"] = None
 
     master = df_factory.create(
