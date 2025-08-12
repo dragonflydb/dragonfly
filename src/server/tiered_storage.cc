@@ -28,18 +28,10 @@
 
 using namespace facade;
 
-ABSL_FLAG(bool, tiered_experimental_cooling, true,
-          "If true, uses intermidate cooling layer "
-          "when offloading values to storage");
-
-ABSL_FLAG(unsigned, tiered_storage_write_depth, 50,
-          "Maximum number of concurrent stash requests issued by background offload");
-
-ABSL_FLAG(float, tiered_offload_threshold, 0.5,
-          "Ratio of free memory (free/max memory) below which offloading starts");
-
-ABSL_FLAG(float, tiered_upload_threshold, 0.1,
-          "Ratio of free memory (free/max memory) below which uploading stops");
+ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
+ABSL_DECLARE_FLAG(unsigned, tiered_storage_write_depth);
+ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
+ABSL_DECLARE_FLAG(float, tiered_upload_threshold);
 
 namespace dfly {
 
