@@ -1016,6 +1016,9 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     server_family_.GetDflyCmd()->BreakStalledFlowsInShard();
     server_family_.UpdateMemoryGlobalStats();
   });
+  // InitThreadLocals might block
+  pp_.AwaitFiberOnAll(
+      [&](uint32_t index, ProactorBase* pb) { sharding::InitThreadLocals(shard_set->size()); });
   Transaction::Init(shard_num);
 
   UpdateServerState (&ServerState::rss_oom_deny_ratio)(absl::GetFlag(FLAGS_rss_oom_deny_ratio));

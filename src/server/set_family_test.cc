@@ -444,10 +444,8 @@ TEST_F(SetFamilyTest, CheckSetLinkExpiryTransfer) {
 
 TEST_F(SetFamilyTest, SetInter_5590) {
   absl::FlagSaver fs;
-  // Default break num_shards=2 and threads=3
-  // TODO(#5651) fix it
-  SetTestFlag("num_shards", "4");
-  num_threads_ = 4;
+  SetTestFlag("num_shards", "2");
+  num_threads_ = 3;
   SetTestFlag("shard_round_robin_prefix", "prefix-");
   ResetService();
 

@@ -4,6 +4,8 @@
 
 #include "server/tx_base.h"
 
+#include <xxhash.h>
+
 #include "base/logging.h"
 #include "facade/facade_types.h"
 #include "server/cluster/cluster_defs.h"
