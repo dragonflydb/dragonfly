@@ -375,7 +375,7 @@ void RestoreStreamer::Run() {
     if (!cntx_->IsRunning())
       return;
 
-    // If someone else is waiting for the inflight bytes to complete, give it priority.
+    // If someone else throtles due to huge pending_buf_, give it priority.
     // Apparently, continue goes through the loop by checking the condition below, so we check
     // cursor here as well.
     // In addition if bucket writing was too intensive on CPU and we are overloaded.
@@ -384,7 +384,8 @@ void RestoreStreamer::Run() {
     // won't progress here but if we have not, then this fiber will progress withing the
     // CPU budget we defined for it.
     bool should_stall =
-        throttle_waiters_ > 0 || IsStalled() ||
+        throttle_waiters_ > 0 ||
+        (pending_buf_.Size() >= replication_stream_output_limit_cached / 3) ||
         cpu_aggregator_.IsOverloaded(absl::GetFlag(FLAGS_migration_buckets_cpu_budget));
     if (cursor && should_stall) {
       ThisFiber::SleepFor(300us);

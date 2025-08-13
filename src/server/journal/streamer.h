@@ -57,17 +57,19 @@ class JournalStreamer : public journal::JournalConsumerInterface {
     return in_flight_bytes_;
   }
 
-  bool IsStalled() const;
-
   util::FiberSocketBase* dest_ = nullptr;
   ExecutionState* cntx_;
   uint64_t throttle_count_ = 0;
   uint64_t total_throttle_wait_usec_ = 0;
   uint32_t throttle_waiters_ = 0;
 
+  PendingBuf pending_buf_;
+
  private:
   void AsyncWrite(bool force_send);
   void OnCompletion(std::error_code ec, size_t len);
+
+  bool IsStalled() const;
 
   journal::Journal* journal_;
 
@@ -76,8 +78,6 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   void StartStalledDataWriterFiber();
   void StopStalledDataWriterFiber();
   void StalledDataWriterFiber(std::chrono::milliseconds period_ms, util::fb2::Done* waiter);
-
-  PendingBuf pending_buf_;
 
   // If we are replication in stable sync we can aggregate data before sending
   bool is_stable_sync_;
