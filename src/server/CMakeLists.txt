@@ -4,6 +4,13 @@ option(PRINT_STACKTRACES_ON_SIGNAL "Enables DF to print all fiber stacktraces on
 option(WITH_COLLECTION_CMDS "Compile SET/HASH/ZSET/STREAM commands" ON)
 option(WITH_EXTENSION_CMDS "Compile BLOOM/BITOPS/GEO/HLL/JSON commands" ON)
 
+option(WITH_TIERING "Compile for macos" ON)
+
+if(APPLE)
+    message(STATUS "Macos detected. Set WITH_TIERING=off")
+    set(WITH_TIERING OFF CACHE BOOL "Compile for macos" FORCE)
+endif()
+
 add_executable(dragonfly dfly_main.cc version_monitor.cc)
 add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
 cxx_link(dragonfly base dragonfly_lib)
@@ -17,7 +24,7 @@ endif()
 set_property(SOURCE dfly_main.cc APPEND PROPERTY COMPILE_DEFINITIONS
              SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
 
-if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
+if (WITH_TIERING)
     SET(TX_LINUX_SRCS tiering/disk_storage.cc tiering/op_manager.cc tiering/small_bins.cc
       tiering/external_alloc.cc)
 
@@ -57,9 +64,10 @@ add_library(dfly_transaction db_slice.cc blocking_controller.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
             ${TX_LINUX_SRCS} acl/acl_log.cc slowlog.cc channel_store.cc)
 
-if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
-  SET(DF_LINUX_SRCS tiered_storage.cc)
 
+if (WITH_TIERING)
+  SET(DF_LINUX_SRCS tiered_storage.cc)
+  add_definitions(-DWITH_TIERING)
   cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
 endif()
 
@@ -81,7 +89,8 @@ add_library(dragonfly_lib
             cluster/cluster_config.cc cluster/cluster_family.cc cluster/incoming_slot_migration.cc
             cluster/outgoing_slot_migration.cc cluster/cluster_defs.cc cluster/cluster_utility.cc
             acl/user.cc acl/user_registry.cc acl/acl_family.cc
-            acl/validator.cc)
+            acl/validator.cc
+            sharding.cc)
 
 if (DF_ENABLE_MEMORY_TRACKING)
   target_compile_definitions(dragonfly_lib PRIVATE DFLY_ENABLE_MEMORY_TRACKING)

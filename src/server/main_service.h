@@ -185,6 +185,8 @@ class Service : public facade::ServiceInterface {
 
   void RegisterCommands();
   void Register(CommandRegistry* registry);
+  // Helper for registering tiering flags
+  void RegisterTieringFlags();
 
   base::VarzValue::Map GetVarzStats();
 
