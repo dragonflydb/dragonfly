@@ -2370,6 +2370,9 @@ async def test_replicate_cluster(df_factory: DflyInstanceFactory, df_seeder_fact
     # wait for replication to finish
     await asyncio.gather(*(asyncio.create_task(await_no_lag(c)) for c in c_nodes))
 
+    # await_no_lag doesn't guarantee that the replica got all last changes, so we wait a bit more
+    await asyncio.sleep(2)
+
     # promote replica to master and compare data
     await c_replica.execute_command("REPLICAOF NO ONE")
     capture = await seeder.capture()
@@ -2486,6 +2489,9 @@ async def test_replicate_disconnect_cluster(df_factory: DflyInstanceFactory, df_
     await await_stable_sync(c_nodes[0], replica.port)
     # wait for no lag on all cluster nodes
     await asyncio.gather(*(asyncio.create_task(await_no_lag(c)) for c in c_nodes))
+
+    # await_no_lag doesn't guarantee that the replica got all last changes, so we wait a bit more
+    await asyncio.sleep(2)
 
     # promote replica to master and compare data
     await c_replica.execute_command("REPLICAOF NO ONE")
