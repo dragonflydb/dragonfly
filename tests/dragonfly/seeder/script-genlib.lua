@@ -219,3 +219,13 @@ end
 function LG_funcs.get_huge_entries()
   return huge_entries
 end
+
+-- Check if next entry generate huge value keys
+function LG_funcs.is_huge_entry(type)
+    -- These types doesn't generate huge value
+    if type == "string" or type == "json" then
+        return false
+    else
+        return huge_entries < LG_funcs.huge_value_target
+    end
+end
