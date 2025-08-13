@@ -4,6 +4,13 @@ option(PRINT_STACKTRACES_ON_SIGNAL "Enables DF to print all fiber stacktraces on
 option(WITH_COLLECTION_CMDS "Compile SET/HASH/ZSET/STREAM commands" ON)
 option(WITH_EXTENSION_CMDS "Compile BLOOM/BITOPS/GEO/HLL/JSON commands" ON)
 
+option(WITH_TIERING "Compile for macos" ON)
+
+if(APPLE)
+    message(STATUS "Macos detected. Set WITH_TIERING=off")
+    set(WITH_TIERING OFF CACHE BOOL "Compile for macos" FORCE)
+endif()
+
 add_executable(dragonfly dfly_main.cc version_monitor.cc)
 add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
 cxx_link(dragonfly base dragonfly_lib)
@@ -17,7 +24,6 @@ endif()
 set_property(SOURCE dfly_main.cc APPEND PROPERTY COMPILE_DEFINITIONS
              SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
 
-option(WITH_TIERING "Compile for macos" ON)
 if (WITH_TIERING)
     SET(TX_LINUX_SRCS tiering/disk_storage.cc tiering/op_manager.cc tiering/small_bins.cc
       tiering/external_alloc.cc)

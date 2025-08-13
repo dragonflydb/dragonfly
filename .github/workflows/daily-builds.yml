@@ -107,8 +107,7 @@ jobs:
           echo "*************************** START BUILDING **************************************"
           CC=gcc-12 CXX=g++-12 cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF \
             -DCMAKE_CXX_FLAGS="-Wl,-ld_classic" \
-            -DCMAKE_C_COMPILER="gcc-12" -DCMAKE_CXX_COMPILER="g++-12" \
-            -DWITH_TIERING=OFF
+            -DCMAKE_C_COMPILER="gcc-12" -DCMAKE_CXX_COMPILER="g++-12"
 
           ninja src/all
 
