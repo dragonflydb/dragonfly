@@ -10,6 +10,6 @@
 
 namespace facade {
 template <typename... Ts> std::vector<std::string> GetFlagNames(const absl::Flag<Ts>&... flags) {
-  return std::vector<std::string>{std::string{absl::GetFlagReflectionHandle(flags).Name()}...};
+  return {std::string{absl::GetFlagReflectionHandle(flags).Name()}...};
 }
 }  // namespace facade
