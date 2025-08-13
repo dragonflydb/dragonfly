@@ -12,11 +12,16 @@ extern "C" {
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_replace.h>
 #include <gmock/gmock.h>
+#include <mimalloc.h>
 
 #include <thread>
 
 #include "base/gtest.h"
 #include "base/logging.h"
+
+extern "C" {
+#include "redis/zmalloc.h"
+}
 
 namespace dfly {
 using namespace std;
@@ -79,6 +84,9 @@ using SliceSpan = Interpreter::SliceSpan;
 class InterpreterTest : public ::testing::Test {
  protected:
   InterpreterTest() {
+    // configure redis lib zmalloc which requires mimalloc heap to work.
+    auto* tlh = mi_heap_get_backing();
+    init_zmalloc_threadlocal(tlh);
   }
 
   lua_State* lua() {
@@ -483,11 +491,11 @@ TEST_F(InterpreterTest, ReplicateCommands) {
 }
 
 TEST_F(InterpreterTest, Log) {
-  EXPECT_TRUE(Execute(R"(redis.log('nonsense', 'nonsense'))"));
+  EXPECT_FALSE(Execute(R"(redis.log('nonsense', 'nonsense'))"));
+  EXPECT_THAT(error_, testing::HasSubstr("First argument must be a number (log level)."));
+  EXPECT_TRUE(Execute(R"(redis.log(0, 'warn'))"));
   EXPECT_EQ("nil", ser_.res);
-  EXPECT_TRUE(Execute(R"(redis.log(redis.LOG_WARNING, 'warn'))"));
-  EXPECT_EQ("nil", ser_.res);
-  EXPECT_FALSE(Execute(R"(redis.log(redis.LOG_WARNING))"));
+  EXPECT_FALSE(Execute(R"(redis.log(4))"));
   EXPECT_THAT(error_, testing::HasSubstr("requires two arguments or more"));
 }
 

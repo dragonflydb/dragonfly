@@ -28,6 +28,9 @@ extern "C" {
 #include <lua.h>
 #include <lualib.h>
 
+#include "redis/sds.h"
+#include "redis/util.h"
+
 LUALIB_API int(luaopen_cjson)(lua_State* L);
 LUALIB_API int(luaopen_struct)(lua_State* L);
 LUALIB_API int(luaopen_cmsgpack)(lua_State* L);
@@ -551,12 +554,52 @@ int RedisReplicateCommands(lua_State* lua) {
 }
 
 int RedisLogCommand(lua_State* lua) {
-  int argc = lua_gettop(lua);
+  int j, argc = lua_gettop(lua);
+  sds log;
+
   if (argc < 2) {
     PushError(lua, "redis.log() requires two arguments or more.");
     return RaiseErrorAndAbort(lua);
+  } else if (!lua_isnumber(lua, -argc)) {
+    PushError(lua, "First argument must be a number (log level).");
+    return RaiseErrorAndAbort(lua);
   }
 
+  int level = lua_tonumber(lua, -argc);
+  if (level < LL_DEBUG || level > LL_WARNING) {
+    PushError(lua, "Invalid log level.");
+    return RaiseErrorAndAbort(lua);
+  }
+
+  /* Glue together all the arguments */
+  log = sdsempty();
+  for (j = 1; j < argc; j++) {
+    size_t len;
+    char* s;
+
+    s = (char*)lua_tolstring(lua, (-argc) + j, &len);
+    if (s) {
+      if (j != 1)
+        log = sdscatlen(log, " ", 1);
+      log = sdscatlen(log, s, len);
+    }
+  }
+
+  switch (level) {
+    case LL_DEBUG:
+    case LL_VERBOSE:
+      VLOG(1) << log;
+      break;
+    case LL_NOTICE:
+      LOG(INFO) << log;
+      break;
+    case LL_WARNING:
+      LOG(WARNING) << log;
+    default:
+      break;
+  }
+
+  sdsfree(log);
   return 0;
 }
 
