@@ -10,6 +10,7 @@
 #include "core/task_queue.h"
 #include "core/tx_queue.h"
 #include "server/common.h"
+#include "server/sharding.h"
 #include "server/tx_base.h"
 #include "util/sliding_counter.h"
 

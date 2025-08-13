@@ -10,6 +10,8 @@
 
 #ifdef __FreeBSD__
 #include <pthread_np.h>
+#elif defined(__linux__)
+#include "util/fibers/uring_proactor.h"
 #endif
 
 extern "C" {
@@ -26,6 +28,7 @@ extern "C" {
 #include <csignal>
 #include <filesystem>
 
+#include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
@@ -57,6 +60,7 @@ extern "C" {
 #include "server/set_family.h"
 #include "server/stream_family.h"
 #include "server/string_family.h"
+#include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "server/version.h"
 #include "server/zset_family.h"
@@ -119,8 +123,10 @@ ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
 ABSL_FLAG(uint32_t, max_squashed_cmd_num, 100,
           "Max number of commands squashed in a single shard during squash optimizaiton");
 
-ABSL_FLAG(uint32_t, max_busy_squash_usec, 200,
+ABSL_FLAG(uint32_t, max_busy_squash_usec, 1000,
           "Maximum time in microseconds to execute squashed commands before yielding.");
+ABSL_FLAG(uint32_t, shard_thread_busy_polling_usec, 0,
+          "If non-zero, overrides the busy polling parameter for shard threads.");
 
 ABSL_FLAG(string, huffman_table, "",
           "a comma separated map: domain1:code1,domain2:code2,... where "
@@ -130,6 +136,15 @@ ABSL_FLAG(string, huffman_table, "",
 ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "
           "otherwise uses legacy jsoncons implementation.");
+
+ABSL_FLAG(uint32_t, uring_wake_mode, 1,
+          "0 - use eventfd, 1 - use io_uring, 2 - use io_uring with immediate flush of the "
+          "notification");
+
+ABSL_FLAG(uint32_t, uring_submit_threshold, 1u << 31, "");
+
+ABSL_FLAG(uint32_t, squash_stats_latency_lower_limit, 0,
+          "If set, will not track latency stats below this threshold (usec). ");
 
 namespace dfly {
 
@@ -341,7 +356,7 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnDouble(double d) final {
-    if (rb_->IsResp3() || !absl::GetFlag(FLAGS_lua_resp2_legacy_float)) {
+    if (rb_->IsResp3() || !GetFlag(FLAGS_lua_resp2_legacy_float)) {
       rb_->SendDouble(d);
     } else {
       long val = d >= 0 ? static_cast<long>(floor(d)) : static_cast<long>(ceil(d));
@@ -709,24 +724,56 @@ string FailedCommandToString(std::string_view command, facade::CmdArgList args,
   return result;
 }
 
-void SetRssOomDenyRatioOnAllThreads(double ratio) {
-  auto cb = [ratio](unsigned, auto*) { ServerState::tlocal()->rss_oom_deny_ratio = ratio; };
-  shard_set->pool()->AwaitBrief(cb);
+template <typename T> auto UpdateServerState(T ServerState::*member) {
+  return [member](T value) {
+    auto cb = [member, value](unsigned, auto*) { ServerState::tlocal()->*member = value; };
+    shard_set->pool()->AwaitBrief(cb);
+  };
 }
 
-void SetSerializationMaxChunkSize(size_t val) {
-  auto cb = [val](unsigned, auto*) { ServerState::tlocal()->serialization_max_chunk_size = val; };
-  shard_set->pool()->AwaitBrief(cb);
-}
-
-void SetMaxSquashedCmdNum(int32_t val) {
-  auto cb = [val](unsigned, auto*) { ServerState::tlocal()->max_squash_cmd_num = val; };
-  shard_set->pool()->AwaitBrief(cb);
-}
+thread_local uint32_t squash_stats_latency_lower_limit_cached =
+    absl::GetFlag(FLAGS_squash_stats_latency_lower_limit);
 
 void SetMaxBusySquashUsec(uint32_t val) {
   shard_set->pool()->AwaitBrief(
       [=](unsigned, auto*) { MultiCommandSquasher::SetMaxBusySquashUsec(val); });
+}
+
+void SetShardThreadBusyPollingUsec(uint32_t val) {
+  if (val == 0)
+    return;
+
+  shard_set->pool()->AwaitBrief([=](unsigned, auto* pb) {
+    if (EngineShard::tlocal()) {
+      pb->SetBusyPollUsec(val);
+    }
+  });
+}
+
+void SetUringWakeMode(uint32_t mode) {
+#ifdef __linux__
+  shard_set->pool()->AwaitBrief([mode](unsigned, fb2::ProactorBase* pb) {
+    if (pb->GetKind() == fb2::ProactorBase::IOURING) {
+      fb2::UringProactor* up = static_cast<fb2::UringProactor*>(pb);
+      bool use_msg_ring = mode > 0;
+      bool immediate_flush = mode == 2;
+
+      up->ConfigureMsgRing(use_msg_ring);
+      up->ConfigureSubmitWakeup(immediate_flush);
+    }
+  });
+#endif
+}
+
+void SetUringSubmitThreshold(uint32_t val) {
+#ifdef __linux__
+  shard_set->pool()->AwaitBrief([val](unsigned, fb2::ProactorBase* pb) {
+    if (pb->GetKind() == fb2::ProactorBase::IOURING) {
+      fb2::UringProactor* up = static_cast<fb2::UringProactor*>(pb);
+      up->SetSubmitQueueThreshold(val);
+    }
+  });
+#endif
 }
 
 void SetHuffmanTable(const std::string& huffman_table) {
@@ -820,6 +867,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   facade::Connection::Init(pp_.size());
 
   config_registry.RegisterSetter<MemoryBytesFlag>("maxmemory", [](const MemoryBytesFlag& flag) {
+    // TODO: reduce code reliance on constant direct access of max_memory_limit
     max_memory_limit.store(flag.value, memory_order_relaxed);
   });
 
@@ -833,12 +881,12 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("max_segment_to_consider");
 
   config_registry.RegisterSetter<double>("rss_oom_deny_ratio",
-                                         [](double val) { SetRssOomDenyRatioOnAllThreads(val); });
-  config_registry.RegisterSetter<size_t>("serialization_max_chunk_size",
-                                         [](size_t val) { SetSerializationMaxChunkSize(val); });
+                                         UpdateServerState(&ServerState::rss_oom_deny_ratio));
+  config_registry.RegisterSetter<size_t>(
+      "serialization_max_chunk_size",
+      UpdateServerState(&ServerState::serialization_max_chunk_size));
 
   config_registry.RegisterMutable("pipeline_squash");
-
   config_registry.RegisterMutable("lua_mem_gc_threshold");
 
   config_registry.RegisterSetter<uint32_t>("pipeline_queue_limit", [](uint32_t val) {
@@ -846,12 +894,13 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
         [val](unsigned tid, auto*) { facade::Connection::SetMaxQueueLenThreadLocal(tid, val); });
   });
 
-  config_registry.RegisterSetter<size_t>("pipeline_buffer_limit", [](size_t val) {
-    shard_set->pool()->AwaitBrief(
-        [val](unsigned tid, auto*) { facade::Connection::SetPipelineBufferLimit(tid, val); });
-  });
+  config_registry.RegisterSetter<facade::MemoryBytesFlag>(
+      "pipeline_buffer_limit", [](facade::MemoryBytesFlag val) {
+        shard_set->pool()->AwaitBrief(
+            [val](unsigned tid, auto*) { facade::Connection::SetPipelineBufferLimit(tid, val); });
+      });
 
-  config_registry.RegisterSetter<uint64_t>("max_busy_read_usec", [](uint64_t usec) {
+  config_registry.RegisterSetter<uint32_t>("max_busy_read_usec", [](uint32_t usec) {
     shard_set->pool()->AwaitBrief(
         [=](unsigned, auto*) { facade::Connection::SetMaxBusyReadUsecThreadLocal(usec); });
   });
@@ -866,15 +915,22 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
         [=](unsigned, auto*) { facade::Connection::SetPipelineSquashLimitThreadLocal(val); });
   });
 
-  config_registry.RegisterSetter<uint32_t>("pipeline_low_bound_stats", [](uint32_t val) {
+  config_registry.RegisterSetter<uint32_t>("pipeline_wait_batch_usec", [](uint32_t val) {
     shard_set->pool()->AwaitBrief(
-        [=](unsigned, auto*) { facade::Connection::SetPipelineLowBoundStats(val); });
+        [=](unsigned, auto*) { facade::Connection::SetPipelineWaitBatchUsecThreadLocal(val); });
+  });
+
+  config_registry.RegisterSetter<uint32_t>("squash_stats_latency_lower_limit", [](uint32_t val) {
+    shard_set->pool()->AwaitBrief(
+        [=](unsigned, auto*) { squash_stats_latency_lower_limit_cached = val; });
   });
 
   config_registry.RegisterSetter<uint32_t>("max_squashed_cmd_num",
-                                           [](uint32_t val) { SetMaxSquashedCmdNum(val); });
+                                           UpdateServerState(&ServerState::max_squash_cmd_num));
   config_registry.RegisterSetter<uint32_t>("max_busy_squash_usec",
                                            [](uint32_t val) { SetMaxBusySquashUsec(val); });
+  config_registry.RegisterSetter<uint32_t>(
+      "shard_thread_busy_polling_usec", [](uint32_t val) { SetShardThreadBusyPollingUsec(val); });
 
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("replication_timeout");
@@ -884,6 +940,19 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("timeout");
   config_registry.RegisterMutable("send_timeout");
   config_registry.RegisterMutable("managed_service_info");
+
+  // TODO(vlad): Introduce templatable flag cache
+  auto update_tiered_storage = [](auto) {
+    shard_set->pool()->AwaitBrief([](unsigned, auto*) {
+      if (auto* es = EngineShard::tlocal(); es && es->tiered_storage()) {
+        es->tiered_storage()->UpdateFromFlags();
+      }
+    });
+  };
+  config_registry.RegisterSetter<bool>("tiered_experimental_cooling", update_tiered_storage);
+  config_registry.RegisterSetter<unsigned>("tiered_storage_write_depth", update_tiered_storage);
+  config_registry.RegisterSetter<float>("tiered_offload_threshold", update_tiered_storage);
+  config_registry.RegisterSetter<float>("tiered_upload_threshold", update_tiered_storage);
 
   config_registry.RegisterMutable(
       "notify_keyspace_events", [pool = &pp_](const absl::CommandLineFlag& flag) {
@@ -909,6 +978,11 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     shard_set->pool()->AwaitFiberOnAll(
         [val](auto index, auto* context) { ServerState::tlocal()->acl_log.SetTotalEntries(val); });
   });
+
+  config_registry.RegisterSetter<uint32_t>("uring_wake_mode",
+                                           [](uint32_t val) { SetUringWakeMode(val); });
+  config_registry.RegisterSetter<uint32_t>("uring_submit_threshold",
+                                           [](uint32_t val) { SetUringSubmitThreshold(val); });
 
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
   if (shard_num == 0 || shard_num > pp_.size()) {
@@ -942,13 +1016,20 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     server_family_.GetDflyCmd()->BreakStalledFlowsInShard();
     server_family_.UpdateMemoryGlobalStats();
   });
+  // InitThreadLocals might block
+  pp_.AwaitFiberOnAll(
+      [&](uint32_t index, ProactorBase* pb) { sharding::InitThreadLocals(shard_set->size()); });
   Transaction::Init(shard_num);
 
-  SetRssOomDenyRatioOnAllThreads(absl::GetFlag(FLAGS_rss_oom_deny_ratio));
-  SetSerializationMaxChunkSize(absl::GetFlag(FLAGS_serialization_max_chunk_size));
-  SetMaxSquashedCmdNum(absl::GetFlag(FLAGS_max_squashed_cmd_num));
+  UpdateServerState (&ServerState::rss_oom_deny_ratio)(absl::GetFlag(FLAGS_rss_oom_deny_ratio));
+  UpdateServerState (&ServerState::serialization_max_chunk_size)(
+      absl::GetFlag(FLAGS_serialization_max_chunk_size));
+  UpdateServerState (&ServerState::max_squash_cmd_num)(absl::GetFlag(FLAGS_max_squashed_cmd_num));
   SetHuffmanTable(absl::GetFlag(FLAGS_huffman_table));
   SetMaxBusySquashUsec(absl::GetFlag(FLAGS_max_busy_squash_usec));
+  SetHuffmanTable(GetFlag(FLAGS_huffman_table));
+  SetShardThreadBusyPollingUsec(GetFlag(FLAGS_shard_thread_busy_polling_usec));
+  SetUringWakeMode(GetFlag(FLAGS_uring_wake_mode));
 
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.
@@ -1563,20 +1644,25 @@ DispatchResult Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
   return res;
 }
 
-size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReplyBuilder* builder,
-                                     facade::ConnectionContext* cntx) {
+DispatchManyResult Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
+                                                 SinkReplyBuilder* builder,
+                                                 facade::ConnectionContext* cntx) {
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
   DCHECK_EQ(builder->GetProtocol(), Protocol::REDIS);
+  DCHECK_GT(args_list.size(), 1u);
 
   auto* ss = dfly::ServerState::tlocal();
   // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
   if (ss->IsPaused())
-    return 0;
+    return {.processed = 0, .account_in_stats = false};
 
   vector<StoredCmd> stored_cmds;
   intrusive_ptr<Transaction> dist_trans;
-  size_t dispatched = 0;
+  uint32_t dispatched = 0;
+  MultiCommandSquasher::Stats stats;
+
+  uint64_t start_cycles = base::CycleClock::Now();
 
   auto perform_squash = [&] {
     if (stored_cmds.empty())
@@ -1595,13 +1681,12 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
     opts.verify_commands = true;
     opts.max_squash_size = ss->max_squash_cmd_num;
 
-    size_t squashed_num = MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
-                                                        static_cast<RedisReplyBuilder*>(builder),
-                                                        dfly_cntx, this, opts);
+    stats += MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
+                                           static_cast<RedisReplyBuilder*>(builder), dfly_cntx,
+                                           this, opts);
     dfly_cntx->transaction = nullptr;
 
     dispatched += stored_cmds.size();
-    ss->stats.squashed_commands += squashed_num;
     stored_cmds.clear();
   };
 
@@ -1645,7 +1730,18 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
   if (dist_trans)
     dist_trans->UnlockMulti();
 
-  return dispatched;
+  uint64_t total_usec = base::CycleClock::ToUsec(base::CycleClock::Now() - start_cycles);
+  bool account_in_stats = total_usec > squash_stats_latency_lower_limit_cached;
+  if (account_in_stats) {
+    auto* ss = ServerState::tlocal();
+    ss->stats.multi_squash_exec_hop_usec += stats.hop_usec;
+    ss->stats.multi_squash_exec_reply_usec += stats.reply_usec;
+    ss->stats.multi_squash_hops += stats.hops;
+    ss->stats.squashed_commands += stats.squashed_commands;
+  } else {
+    ss->stats.squash_stats_ignored++;
+  }
+  return {.processed = dispatched, .account_in_stats = account_in_stats};
 }
 
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
@@ -2139,7 +2235,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     }
   }
 
-  sinfo->async_cmds_heap_limit = absl::GetFlag(FLAGS_multi_eval_squash_buffer);
+  sinfo->async_cmds_heap_limit = GetFlag(FLAGS_multi_eval_squash_buffer);
   Transaction* tx = cntx->transaction;
   CHECK(tx != nullptr);
 
@@ -2390,7 +2486,7 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
     string descr = CreateExecDescriptor(exec_info.body, cmd_cntx.tx->GetUniqueShardCnt());
     ServerState::tlocal()->exec_freq_count[descr]++;
 
-    if (absl::GetFlag(FLAGS_multi_exec_squash) && state != ExecScriptUse::SCRIPT_RUN &&
+    if (GetFlag(FLAGS_multi_exec_squash) && state != ExecScriptUse::SCRIPT_RUN &&
         !cntx->conn_state.tracking_info_.IsTrackingOn()) {
       MultiCommandSquasher::Opts opts;
       opts.max_squash_size = ServerState::tlocal()->max_squash_cmd_num;
@@ -2782,7 +2878,7 @@ void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privil
     return ClusterHtmlPage(args, send, &cluster_family_);
   });
 
-  if (absl::GetFlag(FLAGS_expose_http_api)) {
+  if (GetFlag(FLAGS_expose_http_api)) {
     base->RegisterCb("/api",
                      [this](const http::QueryArgs& args, HttpRequest&& req, HttpContext* send) {
                        HttpAPI(args, std::move(req), this, send);

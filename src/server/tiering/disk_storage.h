@@ -63,9 +63,13 @@ class DiskStorage {
   // how many times we allocate registered/heap buffers.
   uint64_t heap_buf_alloc_cnt_ = 0, reg_buf_alloc_cnt_ = 0;
 
-  bool grow_pending_ = false;
-  std::unique_ptr<util::fb2::LinuxFile> backing_file_;
+  struct {
+    bool pending = false;
+    std::error_code last_err;
+    util::fb2::EventCount ev;
+  } grow_;
 
+  std::unique_ptr<util::fb2::LinuxFile> backing_file_;
   ExternalAllocator alloc_;
 };
 

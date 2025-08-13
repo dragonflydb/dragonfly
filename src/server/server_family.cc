@@ -696,22 +696,22 @@ optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, SinkReplyBui
   } else {
     replicaof_args.host = parser.Next<string>();
     replicaof_args.port = parser.Next<uint16_t>();
-    if (auto err = parser.Error(); err || replicaof_args.port < 1) {
+    if (auto err = parser.TakeError(); err || replicaof_args.port < 1) {
       builder->SendError("port is out of range");
       return nullopt;
     }
     if (parser.HasNext()) {
       auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
       replicaof_args.slot_range = cluster::SlotRange{slot_start, slot_end};
-      if (auto err = parser.Error(); err || !replicaof_args.slot_range->IsValid()) {
+      if (auto err = parser.TakeError(); err || !replicaof_args.slot_range->IsValid()) {
         builder->SendError("Invalid slot range");
         return nullopt;
       }
     }
   }
 
-  if (auto err = parser.Error(); err) {
-    builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    builder->SendError(err.MakeReply());
     return nullopt;
   }
   return replicaof_args;
@@ -1556,19 +1556,27 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("pipeline_dispatch_calls_total", "", conn_stats.pipeline_dispatch_calls,
                             MetricType::COUNTER, &resp->body());
-  AppendMetricWithoutLabels("pipeline_dispatch_stats_ignored_total", "",
-                            conn_stats.pipeline_stats_ignored, MetricType::COUNTER, &resp->body());
-
   AppendMetricWithoutLabels("pipeline_dispatch_commands_total", "",
-                            conn_stats.pipeline_dispatch_commands,
-
-                            MetricType::COUNTER, &resp->body());
+                            conn_stats.pipeline_dispatch_commands, MetricType::COUNTER,
+                            &resp->body());
+  AppendMetricWithoutLabels("pipeline_dispatch_skip_flush_total", "",
+                            conn_stats.skip_pipeline_flushing, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_dispatch_flush_duration_seconds", "",
+                            conn_stats.pipeline_dispatch_flush_usec * 1e-6, MetricType::COUNTER,
+                            &resp->body());
 
   AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
                             conn_stats.pipelined_cmd_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
+  AppendMetricWithoutLabels("pipeline_queue_wait_duration_seconds", "",
+                            conn_stats.pipelined_wait_latency * 1e-6, MetricType::COUNTER,
+                            &resp->body());
 
-  AppendMetricWithoutLabels("cmd_squash_hop_total", "", m.coordinator_stats.multi_squash_executions,
+  AppendMetricWithoutLabels("cmd_squash_stats_ignored_total", "",
+                            m.coordinator_stats.squash_stats_ignored, MetricType::COUNTER,
+                            &resp->body());
+
+  AppendMetricWithoutLabels("cmd_squash_hop_total", "", m.coordinator_stats.multi_squash_hops,
                             MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("cmd_squash_commands_total", "", m.coordinator_stats.squashed_commands,
@@ -1693,6 +1701,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   // Net metrics
   AppendMetricWithoutLabels("net_input_recv_total", "", conn_stats.io_read_cnt, MetricType::COUNTER,
                             &resp->body());
+  AppendMetricWithoutLabels("net_read_yields_total", "", conn_stats.num_read_yields,
+                            MetricType::COUNTER, &resp->body());
+
   AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
                             MetricType::COUNTER, &resp->body());
 
@@ -2001,7 +2012,7 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
       fq_threadpool_.get(), snapshot_storage, opts.bg_save});
 
   // Initialize resources outside of mutex (this may take time for S3 operations)
-  auto res = temp_save_controller->InitResourcesAndStart();
+  auto res = temp_save_controller->Init();
 
   // Now acquire mutex only to set the controller and update state
   {
@@ -2025,6 +2036,7 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
 
     // Success - set the controller and update state
     save_controller_ = std::move(temp_save_controller);
+    save_controller_->Start();
     last_save_info_.bgsave_in_progress = bg_save;
   }
   return {};
@@ -2906,6 +2918,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
   auto add_tiered_info = [&] {
     append("tiered_entries", total.tiered_entries);
     append("tiered_entries_bytes", total.tiered_used_bytes);
+    append("tiered_entries_bytes_human", HumanReadableNumBytes(total.tiered_used_bytes));
 
     append("tiered_total_stashes", m.tiered_stats.total_stashes);
     append("tiered_total_fetches", m.tiered_stats.total_fetches);
@@ -3395,9 +3408,11 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
       last_master_data = replica_->Stop();
     StopAllClusterReplicas();
 
-    // First, switch into the loading state
-    if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-        new_state != GlobalState::LOADING) {
+    const GlobalState gstate = ServerState::tlocal()->gstate();
+    if (gstate == GlobalState::TAKEN_OVER) {
+      service_.SwitchState(GlobalState::TAKEN_OVER, GlobalState::LOADING);
+    } else if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+               new_state != GlobalState::LOADING) {
       LOG(WARNING) << new_state << " in progress, ignored";
       builder->SendError("Invalid state");
       return;
@@ -3493,8 +3508,8 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   if (parser.HasNext())
     return builder->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
 
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   // We allow zero timeouts for tests.
   if (timeout_sec < 0) {
@@ -3521,7 +3536,9 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
 
   LOG(INFO) << "Takeover successful, promoting this instance to master.";
 
-  service().cluster_family().ReconcileMasterReplicaTakeoverSlots(false);
+  if (IsClusterEnabled()) {
+    service().cluster_family().ReconcileMasterReplicaTakeoverSlots(false);
+  }
   SetMasterFlagOnAllThreads(true);
   last_master_data_ = replica_->Stop();
   replica_.reset();
@@ -3794,8 +3811,8 @@ void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,
   if (parser.HasNext()) {
     pause_state = parser.MapNext("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
   }
-  if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    return builder->SendError(err.MakeReply());
   }
 
   const auto timeout_ms = timeout * 1ms;

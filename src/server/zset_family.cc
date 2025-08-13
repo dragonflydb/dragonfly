@@ -1717,8 +1717,8 @@ void ZRangeGeneric(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
   using RP = ZSetFamily::RangeParams;
 
   while (true) {
-    if (auto err = parser.Error(); err)
-      return builder->SendError(err->MakeReply());
+    if (auto err = parser.TakeError(); err)
+      return builder->SendError(err.MakeReply());
 
     if (!parser.HasNext())
       break;
@@ -1780,7 +1780,7 @@ void ZRankGeneric(CmdArgList args, bool reverse, Transaction* tx, SinkReplyBuild
   }
 
   if (!parser.Finalize()) {
-    return builder->SendError(parser.Error()->MakeReply());
+    return builder->SendError(parser.TakeError().MakeReply());
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1887,7 +1887,7 @@ bool ValidateZMPopCommand(CmdArgList args, bool is_blocking, SinkReplyBuilder* b
   }
 
   if (!parser.Finalize()) {
-    builder->SendError(parser.Error()->MakeReply());
+    builder->SendError(parser.TakeError().MakeReply());
     return false;
   }
 
@@ -2692,8 +2692,8 @@ void ZSetFamily::ZRandMember(CmdArgList args, const CommandContext& cmd_cntx) {
   if (parser.HasNext())
     return rb->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
 
-  if (auto err = parser.Error(); err)
-    return rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRandMember(count, params, t->GetOpArgs(shard), key);

@@ -169,8 +169,8 @@ class Connection : public util::Connection {
         handle;
 
     // time when the message was dispatched to the dispatch queue as reported by
-    // ProactorBase::GetMonotonicTimeNs()
-    uint64_t dispatch_ts = 0;
+    // CycleClock::Now()
+    uint64_t dispatch_cycle = 0;
   };
 
   static_assert(sizeof(MessageHandle) <= 80,
@@ -203,7 +203,7 @@ class Connection : public util::Connection {
    private:
     friend class Connection;
 
-    WeakRef(std::shared_ptr<Connection> ptr, unsigned thread_id, uint32_t client_id);
+    WeakRef(const std::shared_ptr<Connection>& ptr, unsigned thread_id, uint32_t client_id);
 
     std::weak_ptr<Connection> ptr_;
     unsigned last_known_thread_id_;
@@ -315,7 +315,7 @@ class Connection : public util::Connection {
   static void SetMaxBusyReadUsecThreadLocal(unsigned usec);
   static void SetAlwaysFlushPipelineThreadLocal(bool flush);
   static void SetPipelineSquashLimitThreadLocal(unsigned limit);
-  static void SetPipelineLowBoundStats(unsigned limit);
+  static void SetPipelineWaitBatchUsecThreadLocal(unsigned usec);
 
   unsigned idle_time() const {
     return time(nullptr) - last_interaction_;

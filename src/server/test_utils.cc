@@ -404,6 +404,11 @@ RespExpr BaseFamilyTest::Run(ArgSlice list) {
   return Run(GetId(), list);
 }
 
+RespExpr BaseFamilyTest::Run(std::string_view command) {
+  std::vector<std::string_view> command_list = absl::StrSplit(command, ' ');
+  return Run(command_list);
+}
+
 RespExpr BaseFamilyTest::RunPrivileged(std::initializer_list<const std::string_view> list) {
   if (!ProactorBase::IsProactorThread()) {
     return pp_->at(0)->Await([&] { return this->RunPrivileged(list); });
@@ -776,6 +781,32 @@ void BaseFamilyTest::SetTestFlag(string_view flag_name, string_view new_value) {
           << new_value;
   string error;
   CHECK(flag->ParseFrom(new_value, &error)) << "Error: " << error;
+}
+
+std::map<int, int> BaseFamilyTest::GetShardKeyCount() {
+  map<int, int> m;
+
+  auto res = Run({"debug", "shards"});
+  for (string_view line : absl::StrSplit(res.GetString(), '\n')) {
+    vector<string> parts = absl::StrSplit(line, ": ");
+    if (parts.size() != 2) {
+      continue;
+    }
+
+    string_view k = parts[0];
+    if (!absl::StartsWith(k, "shard") || !absl::EndsWith(k, "_key_count")) {
+      continue;
+    }
+
+    CHECK(absl::ConsumePrefix(&k, "shard")) << k;
+    CHECK(absl::ConsumeSuffix(&k, "_key_count")) << k;
+    int sid;
+    CHECK(absl::SimpleAtoi(k, &sid));
+    int count;
+    CHECK(absl::SimpleAtoi(parts[1], &count));
+    m[sid] = count;
+  }
+  return m;
 }
 
 const acl::AclFamily* BaseFamilyTest::TestInitAclFam() {

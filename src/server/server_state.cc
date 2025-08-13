@@ -38,7 +38,7 @@ ServerState::Stats::Stats(unsigned num_shards)
 }
 
 ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
-  static_assert(sizeof(Stats) == 23 * 8, "Stats size mismatch");
+  static_assert(sizeof(Stats) == 24 * 8, "Stats size mismatch");
 
 #define ADD(x) this->x += (other.x)
 
@@ -52,11 +52,11 @@ ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
   ADD(tx_inline_runs);
   ADD(tx_schedule_cancel_cnt);
 
-  ADD(multi_squash_executions);
+  ADD(multi_squash_hops);
   ADD(multi_squash_exec_hop_usec);
   ADD(multi_squash_exec_reply_usec);
   ADD(squashed_commands);
-
+  ADD(squash_stats_ignored);
   ADD(blocked_on_interpreter);
   ADD(rdb_save_usec);
   ADD(rdb_save_count);

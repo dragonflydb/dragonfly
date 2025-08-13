@@ -291,6 +291,41 @@ async def test_parallel_snapshot(async_client):
     assert save_successes == 1, "Only one SAVE must be successful"
 
 
+@pytest.mark.slow
+async def test_parallel_snapshot_race_condition(async_client):
+    await async_client.execute_command("debug", "populate", "300000", "racekey", "2000", "RAND")
+
+    async def save_operation(operation_id):
+        try:
+            await async_client.execute_command("save", "rdb", "dump")
+            return f"success_{operation_id}"
+        except Exception as e:
+            return f"failed_{operation_id}_{type(e).__name__}"
+
+    # Fire many concurrent operations to maximize collision probability
+    # The more concurrent operations, the higher chance of hitting the race window
+    num_concurrent = 3
+
+    # Multiple rounds to increase overall probability
+    for round_num in range(2):
+        tasks = [save_operation(f"r{round_num}_op{i}") for i in range(num_concurrent)]
+
+        # Execute all operations simultaneously to hit race condition
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        successes = [r for r in results if isinstance(r, str) and r.startswith("success_")]
+        failures = [r for r in results if isinstance(r, str) and r.startswith("failed_")]
+        exceptions = [r for r in results if not isinstance(r, str)]
+
+        # Exactly one should succeed, rest should fail gracefully
+        assert (
+            len(successes) == 1
+        ), f"Round {round_num}: Expected exactly 1 success, got {len(successes)} successes, {len(failures)} failures, {len(exceptions)} exceptions. Results: {results}"
+
+        # Short delay between rounds
+        await asyncio.sleep(0.05)
+
+
 async def test_path_escapes(df_factory):
     """Test that we don't allow path escapes. We just check that df_server.start()
     fails because we don't have a much better way to test that."""
@@ -521,7 +556,7 @@ async def test_bgsave_and_save(async_client: aioredis.Redis):
         "proactor_threads": 4,
         "dbfilename": "tiered-entries",
         "tiered_prefix": "tiering-test-backing",
-        "tiered_offload_threshold": "0.0",  # ask offloading loop to offload as much as possible
+        "tiered_offload_threshold": "1.0",  # ask offloading loop to offload as much as possible
     }
 )
 async def test_tiered_entries(async_client: aioredis.Redis):

@@ -70,7 +70,6 @@ class BaseFamilyTest : public ::testing::Test {
   void SetUp() override;
   void TearDown() override;
 
- protected:
   class TestConnWrapper;
 
   RespExpr Run(std::initializer_list<const std::string_view> list) {
@@ -85,6 +84,9 @@ class BaseFamilyTest : public ::testing::Test {
   RespExpr Run(absl::Span<std::string> list);
 
   RespExpr Run(std::string_view id, ArgSlice list);
+
+  RespExpr Run(std::string_view command);
+
   void RunMany(const std::vector<std::vector<std::string>>& cmds);
 
   using MCResponse = std::vector<std::string>;
@@ -156,6 +158,8 @@ class BaseFamilyTest : public ::testing::Test {
   static void SetTestFlag(std::string_view flag_name, std::string_view new_value);
 
   const acl::AclFamily* TestInitAclFam();
+
+  std::map<int, int> GetShardKeyCount();
 
   std::unique_ptr<util::ProactorPool> pp_;
   std::unique_ptr<Service> service_;
