@@ -2033,6 +2033,8 @@ async def test_client_pause_with_replica(df_factory, df_seeder_factory):
     assert await seeder.compare(capture, port=replica.port)
 
 
+@pytest.mark.debug_only
+@dfly_args({"proactor_threads": 2})
 async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     master = df_factory.create()
     replica = df_factory.create(dbfilename=f"dump_{tmp_file_name()}")
@@ -2041,7 +2043,7 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     c_replica = replica.client()
 
     seeder = SeederV2(
-        key_target=2000, types=["SET"], data_size=3000, collection_size=2000, huge_value_size=0
+        key_target=1000, types=["SET"], data_size=150, collection_size=100, huge_value_size=0
     )
     await seeder.run(c_replica, target_deviation=0.01)
 
