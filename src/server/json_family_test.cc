@@ -3226,4 +3226,15 @@ TEST_F(JsonFamilyTest, JsonKeysWithDots) {
   EXPECT_THAT(resp, "[\"some_value\"]");
 }
 
+TEST_F(JsonFamilyTest, JsonSetDeleteExpiryOfExistingKey) {
+  auto resp = Run({"SET", "key", "foo", "EX", "1000"});
+  ASSERT_THAT(resp, "OK");
+  resp = Run({"JSON.SET", "key", "$", "{}"});
+  ASSERT_THAT(resp, "OK");
+  resp = Run({"EXPIRE", "key", "100"});
+  ASSERT_THAT(resp, IntArg(1));
+  resp = Run({"TTL", "key"});
+  EXPECT_THAT(resp.GetInt(), 100);
+}
+
 }  // namespace dfly
