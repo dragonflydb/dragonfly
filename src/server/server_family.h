@@ -161,30 +161,31 @@ struct SaveInfoData {
 };
 
 // A thread-safe wrapper for SaveInfoData using the Copy-on-Write pattern.
-// Provides a non-blocking Get() for readers and a locking Update() for writers.
 class ThreadSafeSaveInfo {
  public:
-  ThreadSafeSaveInfo() : data_(std::make_shared<const SaveInfoData>()) {
-  }
-
   // Returns a snapshot of the current save info.
-  // This is a non-blocking, wait-free operation.
-  std::shared_ptr<const SaveInfoData> Get() const {
-    return std::atomic_load(&data_);
+  SaveInfoData Get() const {
+    std::lock_guard<util::fb2::Mutex> lock(data_mutex_);
+    return data_;
   }
 
-  // Atomically updates the save info.
   // The modifier function is called under a lock.
   void Update(std::function<void(SaveInfoData*)> modifier) {
     std::lock_guard<util::fb2::Mutex> lock(writer_mutex_);
-    auto new_data = std::make_shared<SaveInfoData>(*Get());
-    modifier(new_data.get());
-    std::atomic_store(&data_, std::const_pointer_cast<const SaveInfoData>(new_data));
+    SaveInfoData new_data(Get());
+    modifier(&new_data);
+    UpdateData(new_data);
   }
 
  private:
+  void UpdateData(const SaveInfoData& new_data) {
+    std::lock_guard<util::fb2::Mutex> lock(data_mutex_);
+    data_ = new_data;
+  }
+
   mutable util::fb2::Mutex writer_mutex_;
-  std::shared_ptr<const SaveInfoData> data_;
+  mutable util::fb2::Mutex data_mutex_;
+  SaveInfoData data_;
 };
 
 struct SnapshotSpec {
@@ -252,7 +253,7 @@ class ServerFamily {
   // if kDbAll is passed, burns all the databases to the ground.
   std::error_code Drakarys(Transaction* transaction, DbIndex db_ind);
 
-  std::shared_ptr<const SaveInfoData> GetLastSaveInfo() const;
+  SaveInfoData GetLastSaveInfo() const;
 
   void FlushAll(Namespace* ns);
 

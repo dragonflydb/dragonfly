@@ -2125,7 +2125,7 @@ error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
   return error_code{};
 }
 
-std::shared_ptr<const SaveInfoData> ServerFamily::GetLastSaveInfo() const {
+SaveInfoData ServerFamily::GetLastSaveInfo() const {
   return thread_safe_save_info_.Get();
 }
 
@@ -2999,9 +2999,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 
     auto save_info = GetLastSaveInfo();
     // when last success save
-    append("last_success_save", save_info->save_time);
-    append("last_saved_file", save_info->file_name);
-    append("last_success_save_duration_sec", save_info->success_duration_sec);
+    append("last_success_save", save_info.save_time);
+    append("last_saved_file", save_info.file_name);
+    append("last_success_save_duration_sec", save_info.success_duration_sec);
 
     ServerState* ss = ServerState::tlocal();
 
@@ -3011,19 +3011,19 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("saving", is_saving);
     append("current_save_duration_sec", curent_durration_sec);
 
-    for (const auto& k_v : save_info->freq_map) {
+    for (const auto& k_v : save_info.freq_map) {
       append(StrCat("rdb_", k_v.first), k_v.second);
     }
     append("rdb_changes_since_last_success_save", m.events.update);
 
-    append("rdb_bgsave_in_progress", static_cast<int>(save_info->bgsave_in_progress));
-    std::string val = save_info->last_bgsave_status ? "ok" : "err";
+    append("rdb_bgsave_in_progress", static_cast<int>(save_info.bgsave_in_progress));
+    std::string val = save_info.last_bgsave_status ? "ok" : "err";
     append("rdb_last_bgsave_status", val);
 
     // when last failed save
-    append("last_failed_save", save_info->last_error_time);
-    append("last_error", save_info->last_error.Format());
-    append("last_failed_save_duration_sec", save_info->failed_duration_sec);
+    append("last_failed_save", save_info.last_error_time);
+    append("last_error", save_info.last_error.Format());
+    append("last_failed_save_duration_sec", save_info.failed_duration_sec);
   };
 
   auto add_tx_info = [&] {
@@ -3715,7 +3715,7 @@ void ServerFamily::Script(CmdArgList args, const CommandContext& cmd_cntx) {
 
 void ServerFamily::LastSave(CmdArgList args, const CommandContext& cmd_cntx) {
   auto info = thread_safe_save_info_.Get();
-  cmd_cntx.rb->SendLong(info->save_time);
+  cmd_cntx.rb->SendLong(info.save_time);
 }
 
 void ServerFamily::Latency(CmdArgList args, const CommandContext& cmd_cntx) {

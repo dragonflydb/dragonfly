@@ -678,7 +678,7 @@ TEST_F(ClusterFamilyTest, ClusterFirstConfigCallDropsEntriesNotOwnedByNode) {
   EXPECT_EQ(Run({"save", "df"}), "OK");
 
   auto save_info = service_->server_family().GetLastSaveInfo();
-  EXPECT_EQ(Run({"dfly", "load", save_info->file_name}), "OK");
+  EXPECT_EQ(Run({"dfly", "load", save_info.file_name}), "OK");
   EXPECT_EQ(CheckedInt({"dbsize"}), 50000);
 
   ConfigSingleNodeCluster("abcd1234");
@@ -696,7 +696,7 @@ TEST_F(ClusterFamilyTest, SnapshotBiggerThanMaxMemory) {
 
   max_memory_limit = 10000;
   auto save_info = service_->server_family().GetLastSaveInfo();
-  EXPECT_EQ(Run({"dfly", "load", save_info->file_name}), "OK");
+  EXPECT_EQ(Run({"dfly", "load", save_info.file_name}), "OK");
 }
 
 TEST_F(ClusterFamilyTest, Keyslot) {
