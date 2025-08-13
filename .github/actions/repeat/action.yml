@@ -1,0 +1,72 @@
+name: Run Tests On Repeat
+description: "Repeat specific tests"
+
+inputs:
+  dfly-executable:
+    required: true
+    type: string
+  run-only-on-ubuntu-latest:
+    required: true
+    type: string
+  build-folder-name:
+    required: true
+    type: string
+  expression:
+    required: false
+    type: string
+  aws-access-key-id:
+    required: true
+    type: string
+  aws-secret-access-key:
+    required: true
+    type: string
+  s3-bucket:
+    required: true
+    type: string
+  count:
+    required: true
+    type: number
+  timeout:
+    required: true
+    type: string
+
+runs:
+  using: "composite"
+  steps:
+    - name: Repeat pytests
+      id: main
+      shell: bash
+      run: |
+        ls -l ${GITHUB_WORKSPACE}/
+        cd ${GITHUB_WORKSPACE}/tests
+        echo "Current commit is ${{github.sha}}"
+        pip3 install -r dragonfly/requirements.txt
+        # used by PyTests
+        export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
+        export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
+        echo Running command: timeout ${{ inputs.timeout }} pytest ${{ inputs.expression }} --color=yes --json-report --json-report-file=report.json --log-cli-level=INFO --count=${{ inputs.count }}
+        timeout ${{ inputs.timeout }} pytest ${{ inputs.expression }} --color=yes --json-report --json-report-file=report.json --log-cli-level=INFO --count=${{ inputs.count }} || code=$?
+
+        # timeout returns 124 if we exceeded the timeout duration
+        if [[ $code -eq 124 ]]; then
+          # Add an extra new line here because when tests timeout the first line below continues from the test failure name
+          echo "\n"
+          echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
+          echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 TESTS TIMEDOUT 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
+          echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
+          # Copy the last log file because we timedout and pytest did not copy it over
+          # the /tmp/failed/ folder
+          cat /tmp/last_test_log_dir.txt | xargs -I {} mv {}/ /tmp/failed/
+          exit 1
+        fi
+
+        # when a test fails in pytest it returns 1 but there are other return codes as well so we just check if the code is non zero
+        if [[ $code -ne 0 ]]; then
+          exit 1
+        fi
+      env:
+        # Add environment variables to enable the S3 snapshot test.
+        DRAGONFLY_S3_BUCKET: ${{ inputs.s3-bucket }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
+        AWS_REGION: us-east-1
