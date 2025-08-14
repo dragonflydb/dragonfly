@@ -1017,7 +1017,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
   start_time_ = time(NULL);
-  last_save_info_.save_time = start_time_;
+  thread_safe_save_info_.Update([this](SaveInfoData* data) { data->save_time = start_time_; });
   script_mgr_.reset(new ScriptMgr());
   journal_.reset(new journal::Journal());
 
@@ -1993,79 +1993,102 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
     return GenericError{make_error_code(errc::operation_in_progress),
                         StrCat(GlobalStateName(state), " - can not save database")};
   }
-  // Check if save is already in progress
+
+  std::shared_ptr<SaveStagesController> controller;
   {
     util::fb2::LockGuard lk(save_mu_);
     if (save_controller_) {
       return GenericError{make_error_code(errc::operation_in_progress),
                           "SAVING - can not save database"};
     }
+
+    auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
+                                ? snapshot_storage_
+                                : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
+
+    controller = make_shared<SaveStagesController>(detail::SaveStagesInputs{
+        save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
+        &service_, fq_threadpool_.get(), snapshot_storage, opts.bg_save});
+    save_controller_ = controller;
   }
-
-  // Create save controller outside of mutex to avoid blocking INFO commands
-  auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
-                              ? snapshot_storage_
-                              : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
-
-  auto temp_save_controller = make_unique<SaveStagesController>(detail::SaveStagesInputs{
-      save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans, &service_,
-      fq_threadpool_.get(), snapshot_storage, opts.bg_save});
 
   // Initialize resources outside of mutex (this may take time for S3 operations)
-  auto res = temp_save_controller->Init();
-
-  // Now acquire mutex only to set the controller and update state
-  {
-    util::fb2::LockGuard lk(save_mu_);
-
-    // Double-check that no other save started while we were initializing
-    if (save_controller_) {
-      return GenericError{make_error_code(errc::operation_in_progress),
-                          "SAVING - can not save database"};
-    }
-
-    if (res) {
-      DCHECK_EQ(res->error, true);
-      last_save_info_.SetLastSaveError(*res);
-      // Don't set save_controller_ since initialization failed
+  auto res = controller->Init();
+  if (res) {
+    DCHECK_EQ(res->error, true);
+    thread_safe_save_info_.Update([&](SaveInfoData* data) {
+      data->last_error = res->error;
+      data->last_error_time = res->save_time;
+      data->failed_duration_sec = res->duration_sec;
       if (bg_save) {
-        last_save_info_.last_bgsave_status = false;
+        data->last_bgsave_status = false;
       }
-      return res->error;
-    }
+    });
 
-    // Success - set the controller and update state
-    save_controller_ = std::move(temp_save_controller);
-    save_controller_->Start();
-    last_save_info_.bgsave_in_progress = bg_save;
+    // Reset the controller under lock if initialization failed.
+    util::fb2::LockGuard lk(save_mu_);
+    if (save_controller_ == controller) {
+      save_controller_.reset();
+    }
+    return res->error;
   }
+
+  // Success - update state
+  controller->Start();
+  thread_safe_save_info_.Update(
+      [bg_save](SaveInfoData* data) { data->bgsave_in_progress = bg_save; });
+
   return {};
 }
 
 GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore_state) {
-  save_controller_->WaitAllSnapshots();
+  std::shared_ptr<SaveStagesController> controller;
+  {
+    util::fb2::LockGuard lk(save_mu_);
+    controller = save_controller_;
+  }
+
+  if (!controller) {
+    return GenericError{make_error_code(errc::operation_not_supported), "Save not in progress"};
+  }
+
+  controller->WaitAllSnapshots();
   detail::SaveInfo save_info;
 
   VLOG(1) << "Before WaitUntilSaveFinished::Finalize";
+  bool is_bg_save;
   {
     util::fb2::LockGuard lk(save_mu_);
-    save_info = save_controller_->Finalize();
+    // It's possible that another save was initiated and the controller has changed.
+    // We only finalize and reset if it's still the same one we were waiting for.
+    if (save_controller_ == controller) {
+      save_info = save_controller_->Finalize();
+      is_bg_save = save_controller_->IsBgSave();
+      save_controller_.reset();
+    } else {
+      // Another save has started. The old one is already finalized by the new one.
+      // We just need to get the info.
+      return GenericError("Save operation was superseded by another save");
+    }
+  }
 
-    if (save_controller_->IsBgSave()) {
-      last_save_info_.bgsave_in_progress = false;
-      last_save_info_.last_bgsave_status = !save_info.error;
+  thread_safe_save_info_.Update([&](SaveInfoData* data) {
+    if (is_bg_save) {
+      data->bgsave_in_progress = false;
+      data->last_bgsave_status = !save_info.error;
     }
 
     if (save_info.error) {
-      last_save_info_.SetLastSaveError(save_info);
+      data->last_error = save_info.error;
+      data->last_error_time = save_info.save_time;
+      data->failed_duration_sec = save_info.duration_sec;
     } else {
-      last_save_info_.save_time = save_info.save_time;
-      last_save_info_.success_duration_sec = save_info.duration_sec;
-      last_save_info_.file_name = save_info.file_name;
-      last_save_info_.freq_map = save_info.freq_map;
+      data->save_time = save_info.save_time;
+      data->success_duration_sec = save_info.duration_sec;
+      data->file_name = save_info.file_name;
+      data->freq_map = save_info.freq_map;
     }
-    save_controller_.reset();
-  }
+  });
 
   return save_info.error;
 }
@@ -2102,9 +2125,8 @@ error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
   return error_code{};
 }
 
-LastSaveInfo ServerFamily::GetLastSaveInfo() const {
-  util::fb2::LockGuard lk(save_mu_);
-  return last_save_info_;
+SaveInfoData ServerFamily::GetLastSaveInfo() const {
+  return thread_safe_save_info_.Get();
 }
 
 void ServerFamily::DbSize(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2845,11 +2867,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       append("replication_full_sync_buffer_bytes", repl_mem.full_sync_buf_bytes);
     }
 
-    {
-      util::fb2::LockGuard lk{save_mu_};
-      if (save_controller_) {
-        append("save_buffer_bytes", save_controller_->GetSaveBuffersSize());
-      }
+    if (auto controller_copy = GetSaveController()) {
+      append("save_buffer_bytes", controller_copy->GetSaveBuffersSize());
     }
   };
 
@@ -2952,17 +2971,14 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     double perc = 0;
     bool is_saving = false;
     uint32_t curent_durration_sec = 0;
-    {
-      util::fb2::LockGuard lk{save_mu_};
-      if (save_controller_) {
-        is_saving = true;
-        curent_durration_sec = save_controller_->GetCurrentSaveDuration();
-        auto res = save_controller_->GetCurrentSnapshotProgress();
-        if (res.total_keys != 0) {
-          current_snap_keys = res.current_keys;
-          total_snap_keys = res.total_keys;
-          perc = (static_cast<double>(current_snap_keys) / total_snap_keys) * 100;
-        }
+    if (auto controller_copy = GetSaveController()) {
+      is_saving = true;
+      curent_durration_sec = controller_copy->GetCurrentSaveDuration();
+      auto res = controller_copy->GetCurrentSnapshotProgress();
+      if (res.total_keys != 0) {
+        current_snap_keys = res.current_keys;
+        total_snap_keys = res.total_keys;
+        perc = (static_cast<double>(current_snap_keys) / total_snap_keys) * 100;
       }
     }
 
@@ -2989,9 +3005,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     }
     append("rdb_changes_since_last_success_save", m.events.update);
 
-    auto save = GetLastSaveInfo();
-    append("rdb_bgsave_in_progress", static_cast<int>(save.bgsave_in_progress));
-    std::string val = save.last_bgsave_status ? "ok" : "err";
+    append("rdb_bgsave_in_progress", static_cast<int>(save_info.bgsave_in_progress));
+    std::string val = save_info.last_bgsave_status ? "ok" : "err";
     append("rdb_last_bgsave_status", val);
 
     // when last failed save
@@ -3688,12 +3703,8 @@ void ServerFamily::Script(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void ServerFamily::LastSave(CmdArgList args, const CommandContext& cmd_cntx) {
-  time_t save_time;
-  {
-    util::fb2::LockGuard lk(save_mu_);
-    save_time = last_save_info_.save_time;
-  }
-  cmd_cntx.rb->SendLong(save_time);
+  auto info = thread_safe_save_info_.Get();
+  cmd_cntx.rb->SendLong(info.save_time);
 }
 
 void ServerFamily::Latency(CmdArgList args, const CommandContext& cmd_cntx) {
