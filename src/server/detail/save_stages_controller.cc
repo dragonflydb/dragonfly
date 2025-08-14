@@ -247,7 +247,7 @@ RdbSaver::SnapshotStats SaveStagesController::GetCurrentSnapshotProgress() const
 
   std::vector<RdbSaver::SnapshotStats> results(snapshots_.size());
   auto fetch = [this, &results](ShardId sid) {
-    if (auto& snapshot = snapshots_[sid].first; snapshot) {
+    if (auto& snapshot = snapshots_[sid].first; snapshot && snapshot->HasStarted()) {
       results[sid] = snapshot->GetCurrentSnapshotProgress();
     }
   };
@@ -434,7 +434,7 @@ void SaveStagesController::WaitSnapshotInShard(EngineShard* shard) {
 }
 
 void SaveStagesController::CloseCb(unsigned index) {
-  if (auto& snapshot = snapshots_[index].first; snapshot) {
+  if (auto& snapshot = snapshots_[index].first; snapshot && snapshot->HasStarted()) {
     snapshot->FillFreqMap();
     shared_err_ = snapshot->Close();
 
