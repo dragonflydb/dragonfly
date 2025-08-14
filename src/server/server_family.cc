@@ -1518,13 +1518,6 @@ void AppendMetricWithoutLabels(string_view name, string_view help, const absl::A
   AppendMetricValue(name, value, {}, {}, dest);
 }
 
-#define AppendIfLegacy(f) \
-  do {                    \
-    if (legacy) {         \
-      f;                  \
-    }                     \
-  } while (0)
-
 void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd,
                             StringResponse* resp, bool legacy) {
   // Server metrics
@@ -1546,14 +1539,8 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                     &resp->body());
   AppendMetricValue("connected_clients", conn_stats.num_conns_other, {"listener"}, {"other"},
                     &resp->body());
-  AppendIfLegacy(AppendMetricWithoutLabels("client_read_buffer_bytes", "",
-                                           conn_stats.read_buf_capacity, MetricType::GAUGE,
-                                           &resp->body()));
   AppendMetricWithoutLabels("blocked_clients", "", conn_stats.num_blocked_clients,
                             MetricType::GAUGE, &resp->body());
-  AppendIfLegacy(AppendMetricWithoutLabels("dispatch_queue_bytes", "",
-                                           conn_stats.dispatch_queue_bytes, MetricType::GAUGE,
-                                           &resp->body()));
   AppendMetricWithoutLabels("pipeline_queue_length", "", conn_stats.dispatch_queue_entries,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("send_delay_seconds", "",
@@ -1562,9 +1549,6 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
 
   AppendMetricWithoutLabels("pipeline_throttle_total", "", conn_stats.pipeline_throttle_count,
                             MetricType::COUNTER, &resp->body());
-  AppendIfLegacy(AppendMetricWithoutLabels("pipeline_cmd_cache_bytes", "",
-                                           conn_stats.pipeline_cmd_cache_bytes, MetricType::GAUGE,
-                                           &resp->body()));
   AppendMetricWithoutLabels("pipeline_commands_total", "", conn_stats.pipelined_cmd_cnt,
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("pipeline_dispatch_calls_total", "", conn_stats.pipeline_dispatch_calls,
@@ -1602,10 +1586,6 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             m.coordinator_stats.multi_squash_exec_reply_usec * 1e-6,
                             MetricType::COUNTER, &resp->body());
 
-  AppendIfLegacy(AppendMetricWithoutLabels(
-      "commands_squashing_replies_bytes", "",
-      m.facade_stats.reply_stats.squashing_current_reply_size.load(memory_order_relaxed),
-      MetricType::GAUGE, &resp->body()));
   string connections_libs;
   AppendMetricHeader("connections_libs", "Total number of connections by libname:ver",
                      MetricType::GAUGE, &connections_libs);
@@ -1621,9 +1601,6 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             &resp->body());
   AppendMetricWithoutLabels("memory_used_peak_bytes", "", m.used_mem_peak, MetricType::GAUGE,
                             &resp->body());
-  AppendIfLegacy(AppendMetricWithoutLabels(
-      "memory_fiberstack_vms_bytes", "virtual memory size used by all the fibers",
-      m.worker_fiber_stack_size, MetricType::GAUGE, &resp->body()));
   AppendMetricWithoutLabels("fibers_count", "", m.worker_fiber_count, MetricType::GAUGE,
                             &resp->body());
   AppendMetricWithoutLabels("blocked_tasks", "", m.blocked_tasks, MetricType::GAUGE, &resp->body());
@@ -1645,10 +1622,6 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     AppendMetricWithoutLabels("swap_memory_bytes", "", sdata.vm_swap, MetricType::GAUGE,
                               &resp->body());
   }
-  AppendIfLegacy(
-      AppendMetricWithoutLabels("tls_bytes", "", m.tls_bytes, MetricType::GAUGE, &resp->body()));
-  AppendMetricWithoutLabels("snapshot_serialization_bytes", "", m.serialization_bytes,
-                            MetricType::GAUGE, &resp->body());
 
   DbStats total;
   for (const auto& db_stats : m.db_stats) {
@@ -1690,8 +1663,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             &resp->body());
   AppendMetricWithoutLabels("lua_interpreter_cnt", "", m.lua_stats.interpreter_cnt,
                             MetricType::GAUGE, &resp->body());
-  AppendIfLegacy(AppendMetricWithoutLabels("used_memory_lua", "", m.lua_stats.used_bytes,
-                                           MetricType::GAUGE, &resp->body()));
+
   AppendMetricWithoutLabels("freed_memory_lua", "", m.lua_stats.gc_freed_memory,
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("lua_blocked_total", "", m.lua_stats.blocked_cnt, MetricType::COUNTER,
@@ -1748,7 +1720,29 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             &resp->body());
   // Memory stats
   string memory_by_class_bytes;
-  if (legacy) {
+  AppendMetricWithoutLabels("memory_fiberstack_vms_bytes",
+                            "virtual memory size used by all the fibers", m.worker_fiber_stack_size,
+                            MetricType::GAUGE, &resp->body());
+
+  AppendMetricWithoutLabels(
+      "commands_squashing_replies_bytes", "",
+      m.facade_stats.reply_stats.squashing_current_reply_size.load(memory_order_relaxed),
+      MetricType::GAUGE, &resp->body());
+
+  AppendMetricWithoutLabels("tls_bytes", "", m.tls_bytes, MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("snapshot_serialization_bytes", "", m.serialization_bytes,
+                            MetricType::GAUGE, &resp->body());
+
+  AppendMetricWithoutLabels("used_memory_lua", "", m.lua_stats.used_bytes, MetricType::GAUGE,
+                            &resp->body());
+
+  AppendMetricWithoutLabels("client_read_buffer_bytes", "", conn_stats.read_buf_capacity,
+                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("dispatch_queue_bytes", "", conn_stats.dispatch_queue_bytes,
+                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("pipeline_cmd_cache_bytes", "", conn_stats.pipeline_cmd_cache_bytes,
+                            MetricType::GAUGE, &resp->body());
+  if (!legacy) {
     AppendMetricHeader("memory_by_class_bytes", "Memory metrics", MetricType::GAUGE,
                        &memory_by_class_bytes);
 
@@ -1814,13 +1808,12 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     vector<ReplicaRoleInfo> replicas_info = dfly_cmd->GetReplicasRoleInfo();
     ReplicationMemoryStats repl_mem;
     dfly_cmd->GetReplicationMemoryStats(&repl_mem);
-    if (legacy) {
-      AppendMetricWithoutLabels(
-          "replication_streaming_bytes", "Stable sync replication memory usage",
-          repl_mem.streamer_buf_capacity_bytes, MetricType::GAUGE, &resp->body());
-      AppendMetricWithoutLabels("replication_full_sync_bytes", "Full sync memory usage",
-                                repl_mem.full_sync_buf_bytes, MetricType::GAUGE, &resp->body());
-    } else {
+    AppendMetricWithoutLabels("replication_streaming_bytes", "Stable sync replication memory usage",
+                              repl_mem.streamer_buf_capacity_bytes, MetricType::GAUGE,
+                              &resp->body());
+    AppendMetricWithoutLabels("replication_full_sync_bytes", "Full sync memory usage",
+                              repl_mem.full_sync_buf_bytes, MetricType::GAUGE, &resp->body());
+    if (!legacy) {
       AppendMetricValue("memory_by_class_bytes", repl_mem.streamer_buf_capacity_bytes, {"label"},
                         {"replication_streaming_bytes"}, &memory_by_class_bytes);
       AppendMetricValue("memory_by_class_bytes", repl_mem.full_sync_buf_bytes, {"label"},
@@ -1915,6 +1908,8 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   }
 
   absl::StrAppend(&resp->body(), db_key_metrics, db_key_expire_metrics, db_capacity_metrics);
+  if (!legacy)
+    absl::StrAppend(&resp->body(), memory_by_class_bytes);
 }
 
 void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
