@@ -2867,12 +2867,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       append("replication_full_sync_buffer_bytes", repl_mem.full_sync_buf_bytes);
     }
 
-    std::shared_ptr<detail::SaveStagesController> controller_copy;
-    {
-      util::fb2::LockGuard lk{save_mu_};
-      controller_copy = save_controller_;
-    }
-    if (controller_copy) {
+    if (auto controller_copy = GetSaveController()) {
       append("save_buffer_bytes", controller_copy->GetSaveBuffersSize());
     }
   };
@@ -2976,13 +2971,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     double perc = 0;
     bool is_saving = false;
     uint32_t curent_durration_sec = 0;
-    std::shared_ptr<detail::SaveStagesController> controller_copy;
-    {
-      util::fb2::LockGuard lk{save_mu_};
-      controller_copy = save_controller_;
-    }
-
-    if (controller_copy) {
+    if (auto controller_copy = GetSaveController()) {
       is_saving = true;
       curent_durration_sec = controller_copy->GetCurrentSaveDuration();
       auto res = controller_copy->GetCurrentSnapshotProgress();

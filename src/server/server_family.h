@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include <atomic>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -323,6 +322,12 @@ class ServerFamily {
   }
 
  private:
+  // Helper to safely get save controller copy
+  std::shared_ptr<detail::SaveStagesController> GetSaveController() const {
+    util::fb2::LockGuard lk{save_mu_};
+    return save_controller_;
+  }
+
   bool HasPrivilegedInterface();
   void JoinSnapshotSchedule();
   void LoadFromSnapshot() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
