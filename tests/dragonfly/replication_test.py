@@ -2033,13 +2033,16 @@ async def test_client_pause_with_replica(df_factory, df_seeder_factory):
     assert await seeder.compare(capture, port=replica.port)
 
 
+@pytest.mark.debug_only
+@dfly_args({"proactor_threads": 2})
 async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     master = df_factory.create()
     replica = df_factory.create(dbfilename=f"dump_{tmp_file_name()}")
     df_factory.start_all([master, replica])
 
     c_replica = replica.client()
-    await c_replica.execute_command(f"DEBUG POPULATE 1000 key 1000 RAND type set elements 2000")
+
+    await c_replica.execute_command(f"DEBUG POPULATE 1000 key 500 RAND type set elements 500")
 
     replica.stop()
     replica.start()

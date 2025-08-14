@@ -274,7 +274,7 @@ async def test_shutdown_save_with_rename(df_server):
     await client.connection_pool.disconnect()
 
 
-@pytest.mark.slow
+@pytest.mark.opt_only
 async def test_parallel_snapshot(async_client):
     """Dragonfly does not allow simultaneous save operations, send 2 save operations and make sure one is rejected"""
 
@@ -291,7 +291,7 @@ async def test_parallel_snapshot(async_client):
     assert save_successes == 1, "Only one SAVE must be successful"
 
 
-@pytest.mark.slow
+@pytest.mark.opt_only
 async def test_parallel_snapshot_race_condition(async_client):
     await async_client.execute_command("debug", "populate", "300000", "racekey", "2000", "RAND")
 

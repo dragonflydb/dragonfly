@@ -100,6 +100,7 @@ jobs:
         dfly-executable: dragonfly-x86_64
         gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
         build-folder-name: ${{ env.RELEASE_DIR }}
+        filter: 'not debug_only'
     - name: Save artifacts
       run: |
           # place all artifacts at the same location

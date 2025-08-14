@@ -24,10 +24,16 @@ from .instance import DflyInstance, DflyInstanceFactory
 # We limit to 5gb just in case to sanity check the gh runner. Otherwise, if we ask for too much
 # memory it might force the gh runner to run out of memory (since OOM killer might not even
 # get a chance to run).
-@dfly_args({"proactor_threads": 4, "maxmemory": "5gb"})
 async def test_rss_used_mem_gap(df_factory, type, keys, val_size, elements):
     dbfilename = f"dump_{tmp_file_name()}"
-    instance = df_factory.create(dbfilename=dbfilename)
+    instance = df_factory.create(
+        proactor_threads=2,
+        maxmemory="5gb",
+        dbfilename=dbfilename,
+        compression_mode=0,
+        serialization_max_chunk_size=8192,
+        num_shards=2,
+    )
     instance.start()
     # Create a Dragonfly and fill it up with `type` until it reaches `min_rss`, then make sure that
     # the gap between used_memory and rss is no more than `max_unaccounted_ratio`.
@@ -66,11 +72,14 @@ async def test_rss_used_mem_gap(df_factory, type, keys, val_size, elements):
 
     await check_memory()
 
-    await client.execute_command("SAVE", "DF")
-    await client.execute_command("DFLY", "LOAD", f"{dbfilename}-summary.dfs")
-
+    assert await client.execute_command("SAVE", "DF") == True
+    assert await client.execute_command("DFLY", "LOAD", f"{dbfilename}-summary.dfs") == "OK"
+    #
     await check_memory()
     await client.execute_command("FLUSHALL")
+
+
+#
 
 
 @pytest.mark.asyncio
