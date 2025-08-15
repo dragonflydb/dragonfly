@@ -51,6 +51,15 @@ SliceSnapshot::SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
 
 SliceSnapshot::~SliceSnapshot() {
   DCHECK(db_slice_->shard_owner()->IsMyThread());
+
+  // Normally WaitSnapshotting() should be called before destruction,
+  // but in case of error paths or race conditions, we ensure proper cleanup.
+  // The fiber should already be finished in normal cases.
+  if (snapshot_fb_.IsJoinable()) {
+    LOG(WARNING) << "SliceSnapshot destructor called with active fiber - performing emergency join";
+    snapshot_fb_.Join();
+  }
+
   tl_slice_snapshots.erase(this);
 }
 
