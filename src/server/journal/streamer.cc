@@ -417,6 +417,10 @@ void RestoreStreamer::Run() {
       auto* blocking_counter = db_slice_->GetLatch();
       lock_guard blocking_counter_guard(*blocking_counter);
 
+      if (!cntx_->IsRunning())  // Could have been cancelled during throttling or the lock
+                                // acquisition
+        return;
+
       stats_.buckets_loop += WriteBucket(it);
     });
 
@@ -519,6 +523,9 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
 
         WriteEntry(key, it->first, pv, expire);
         written = true;
+        if (!cntx_->IsRunning()) {
+          break;  // Could have been cancelled during WriteEntry
+        }
       } else {
         stats_.keys_skipped++;
       }
@@ -526,7 +533,7 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
   } else {
     stats_.buckets_skipped++;
   }
-  ThrottleIfNeeded();
+  // we don't need throttle here, because we throttle after every entry written
 
   return written;
 }
@@ -540,12 +547,16 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
   uint64_t throttle_start = throttle_count_;
   uint64_t throttle_usec_start = total_throttle_wait_usec_;
   if (const PrimeTable::bucket_iterator* bit = req.update()) {
-    stats_.buckets_on_db_update += WriteBucket(*bit);
+    if (cntx_->IsRunning()) {
+      stats_.buckets_on_db_update += WriteBucket(*bit);
+    }
   } else {
     string_view key = get<string_view>(req.change);
     table->CVCUponInsert(snapshot_version_, key, [this](PrimeTable::bucket_iterator it) {
-      DCHECK_LT(it.GetVersion(), snapshot_version_);
-      stats_.buckets_on_db_update += WriteBucket(it);
+      if (cntx_->IsRunning()) {
+        DCHECK_LT(it.GetVersion(), snapshot_version_);
+        stats_.buckets_on_db_update += WriteBucket(it);
+      }
     });
   }
   stats_.throttle_on_db_update += throttle_count_ - throttle_start;
