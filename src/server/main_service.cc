@@ -961,6 +961,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   Transaction::Init(shard_num);
 
   shard_set->pool()->AwaitBrief([](unsigned, auto*) {
+    facade::Connection::UpdateFromFlags();
     UpdateFromFlagsOnThread();
     UpdateUringFlagsOnThread();
   });
