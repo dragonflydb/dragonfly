@@ -63,6 +63,8 @@ ABSL_FLAG(uint64_t, lua_mem_gc_threshold, 10000000,
           "Specifies Lua interpreter's per thread memory limit in bytes after which the GC will be "
           "called forcefully. 0 value remove forced GC calls");
 
+ABSL_FLAG(bool, lua_enable_redis_log, false, "Enable redis.log to write logs from lua script.");
+
 static bool AbslParseFlag(std::string_view in, LuaGcFlag* flag, std::string* err) {
   if (in.empty()) {
     *flag = LuaGcFlag{};
@@ -565,41 +567,43 @@ int RedisLogCommand(lua_State* lua) {
     return RaiseErrorAndAbort(lua);
   }
 
-  int level = lua_tonumber(lua, -argc);
-  if (level < LL_DEBUG || level > LL_WARNING) {
-    PushError(lua, "Invalid log level.");
-    return RaiseErrorAndAbort(lua);
-  }
-
-  /* Glue together all the arguments */
-  log = sdsempty();
-  for (j = 1; j < argc; j++) {
-    size_t len;
-    char* s;
-
-    s = (char*)lua_tolstring(lua, (-argc) + j, &len);
-    if (s) {
-      if (j != 1)
-        log = sdscatlen(log, " ", 1);
-      log = sdscatlen(log, s, len);
+  if (absl::GetFlag(FLAGS_lua_enable_redis_log)) {
+    int level = lua_tonumber(lua, -argc);
+    if (level < LL_DEBUG || level > LL_WARNING) {
+      PushError(lua, "Invalid log level.");
+      return RaiseErrorAndAbort(lua);
     }
+
+    /* Glue together all the arguments */
+    log = sdsempty();
+    for (j = 1; j < argc; j++) {
+      size_t len;
+      char* s;
+
+      s = (char*)lua_tolstring(lua, (-argc) + j, &len);
+      if (s) {
+        if (j != 1)
+          log = sdscatlen(log, " ", 1);
+        log = sdscatlen(log, s, len);
+      }
+    }
+
+    switch (level) {
+      case LL_DEBUG:
+      case LL_VERBOSE:
+        VLOG(1) << log;
+        break;
+      case LL_NOTICE:
+        LOG(INFO) << log;
+        break;
+      case LL_WARNING:
+        LOG(WARNING) << log;
+      default:
+        break;
+    }
+    sdsfree(log);
   }
 
-  switch (level) {
-    case LL_DEBUG:
-    case LL_VERBOSE:
-      VLOG(1) << log;
-      break;
-    case LL_NOTICE:
-      LOG(INFO) << log;
-      break;
-    case LL_WARNING:
-      LOG(WARNING) << log;
-    default:
-      break;
-  }
-
-  sdsfree(log);
   return 0;
 }
 
