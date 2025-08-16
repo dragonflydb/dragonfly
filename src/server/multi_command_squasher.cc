@@ -27,6 +27,7 @@ using base::CycleClock;
 namespace {
 
 thread_local uint64_t max_busy_squash_cycles_cached = 1ULL << 32;
+thread_local uint32_t log_squash_threshold_cached = 1ULL << 31;
 
 void CheckConnStateClean(const ConnectionState& state) {
   DCHECK_EQ(state.exec_info.state, ConnectionState::ExecInfo::EXEC_INACTIVE);
@@ -245,6 +246,8 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   Transaction* tx = cntx_->transaction;
   ServerState::tlocal()->stats.squash_width_freq_arr[num_shards - 1]++;
   uint64_t start = CycleClock::Now();
+  atomic_uint64_t max_sched_cycles{0};
+  atomic_uint64_t fiber_running_cycles{0}, proactor_running_cycles{0};
 
   // Atomic transactions (that have all keys locked) perform hops and run squashed commands via
   // stubs, non-atomic ones just run the commands in parallel.
@@ -258,7 +261,23 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     fb2::BlockingCounter bc(num_shards);
     DVLOG(1) << "Squashing " << num_shards << " " << tx->DebugId();
 
-    auto cb = [this, bc, rb]() mutable {
+    auto cb = [&, bc, rb]() mutable {
+      uint64_t sched_time = CycleClock::Now() - start;
+
+      // Update max_sched_cycles in lock-free fashion, to avoid contention
+      uint64_t current = max_sched_cycles.load(memory_order_relaxed);
+      while (sched_time > current) {
+        if (max_sched_cycles.compare_exchange_weak(current, sched_time, memory_order_relaxed,
+                                                   memory_order_relaxed)) {
+          fiber_running_cycles.store(ThisFiber::GetRunningTimeCycles(), memory_order_relaxed);
+          proactor_running_cycles.store(ProactorBase::me()->GetCurrentBusyCycles(),
+                                        memory_order_relaxed);
+          break;
+        }
+        // current is updated to the current value of max_sched_cycles, so the loop will retry
+        // with the new value if sched_time is still greater than it.
+      }
+
       if (ThisFiber::GetRunningTimeCycles() > max_busy_squash_cycles_cached) {
         ThisFiber::Yield();
         stats_.yields++;
@@ -266,11 +285,6 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
       this->SquashedHopCb(EngineShard::tlocal(), rb->GetRespVersion());
       bc->Dec();
     };
-    unsigned run_usec = CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles());
-    if (run_usec > 5'000) {
-      LOG_EVERY_T(WARNING, 1) << "Fiber run " << run_usec << " usec, squashed " << cmds_.size()
-                              << " commands";
-    }
     for (unsigned i = 0; i < sharded_.size(); ++i) {
       if (!sharded_[i].dispatched.empty())
         shard_set->AddL2(i, cb);
@@ -297,13 +311,27 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     if (aborted)
       break;
   }
+
   uint64_t after_reply = CycleClock::Now();
   uint64_t total_usec = CycleClock::ToUsec(after_reply - start);
-
   stats_.hop_usec += total_usec;
   stats_.reply_usec += CycleClock::ToUsec(after_reply - after_hop);
   stats_.hops++;
   stats_.squashed_commands += order_.size();
+
+  if (total_usec > log_squash_threshold_cached) {
+    uint64_t max_sched_usec = CycleClock::ToUsec(max_sched_cycles.load());
+    uint64_t fiber_running_usec = CycleClock::ToUsec(fiber_running_cycles.load());
+    uint64_t proactor_running_usec = CycleClock::ToUsec(proactor_running_cycles.load());
+
+    LOG_EVERY_T(INFO, 0.1) << "Squashed " << order_.size() << " commands in " << total_usec
+                           << " usec, total reply size: " << total_reply_size
+                           << " bytes, fanout: " << num_shards_ << ", atomic: " << atomic_
+                           << ", max_sched_time: " << max_sched_usec
+                           << " usec, \n for that shard fiber running time: " << fiber_running_usec
+                           << " usec, \n for that shard proactor running time: "
+                           << proactor_running_usec << " usec";
+  }
 
   tl_facade_stats->reply_stats.squashing_current_reply_size.fetch_sub(total_reply_size,
                                                                       std::memory_order_release);
@@ -362,6 +390,10 @@ bool MultiCommandSquasher::IsAtomic() const {
 
 void MultiCommandSquasher::SetMaxBusySquashUsec(uint32_t usec) {
   max_busy_squash_cycles_cached = CycleClock::FromUsec(usec);
+}
+
+void MultiCommandSquasher::SetLogSquashThreshold(uint32_t usec) {
+  log_squash_threshold_cached = usec;
 }
 
 }  // namespace dfly
