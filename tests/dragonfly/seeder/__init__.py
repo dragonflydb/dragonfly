@@ -150,6 +150,7 @@ class Seeder(SeederBase):
         huge_value_target=5,
         huge_value_size=100000,
         seed=None,
+        huge_value_add_only=False,
     ):
         SeederBase.__init__(self, types, seed)
         self.key_target = key_target
@@ -159,6 +160,7 @@ class Seeder(SeederBase):
         else:
             self.collection_size = collection_size
 
+        self.huge_value_add_only = huge_value_add_only
         self.huge_value_target = huge_value_target
         self.huge_value_size = huge_value_size
 
@@ -182,6 +184,7 @@ class Seeder(SeederBase):
             target_deviation if target_deviation is not None else -1,
             self.data_size,
             self.collection_size,
+            int(self.huge_value_add_only),
             self.huge_value_target / len(self.units),
             self.huge_value_size,
             self.seed,

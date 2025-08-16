@@ -10,7 +10,6 @@ extern "C" {
 
 #include <absl/container/btree_map.h>
 #include <absl/container/flat_hash_map.h>
-#include <xxhash.h>
 
 #include "core/mi_memory_resource.h"
 #include "server/db_slice.h"

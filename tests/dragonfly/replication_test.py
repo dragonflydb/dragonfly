@@ -87,7 +87,7 @@ async def test_replication_all(
     c_replicas = [replica.client() for replica in replicas]
 
     # Fill master with test data
-    seeder = SeederV2(**seeder_config)
+    seeder = SeederV2(**seeder_config, huge_value_add_only=True)
     await seeder.run(c_master, target_deviation=0.01)
 
     # Start data stream

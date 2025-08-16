@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2025, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -30,7 +30,7 @@
 using namespace facade;
 
 ABSL_FLAG(bool, tiered_experimental_cooling, true,
-          "If true, uses intermidate cooling layer "
+          "If true, uses intermediate cooling layer "
           "when offloading values to storage");
 
 ABSL_FLAG(unsigned, tiered_storage_write_depth, 50,

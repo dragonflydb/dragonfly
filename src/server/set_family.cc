@@ -419,22 +419,27 @@ OpResult<SvArray> InterResultVec(const ResultStringVec& result_vec, unsigned req
       return OpStatus::OK;  // empty set.
   }
 
-  bool first = true;
+  std::vector<const StringVec*> sorted_vec;
   for (const auto& res : result_vec) {
     if (res.status() == OpStatus::SKIPPED)
       continue;
-
     DCHECK(res);  // we handled it above.
+    sorted_vec.push_back(&res.value());
+  }
 
-    // I use this awkward 'first' condition instead of table[s]++ deliberately.
-    // I do not want to add keys that I know will not stay in the set.
-    if (first) {
-      for (const string& s : res.value()) {
-        uniques.emplace(s, 1);
-      }
-      first = false;
-    } else {
-      for (const string& s : res.value()) {
+  // Sort the per shard-sorted sets
+  if (!sorted_vec.empty()) {
+    std::sort(sorted_vec.begin(), sorted_vec.end(),
+              [](const auto* lhs, const auto* rhs) { return lhs->size() < rhs->size(); });
+
+    for (const string& s : *sorted_vec[0]) {
+      uniques.emplace(s, 1);
+    }
+    // Remove the smallest
+    sorted_vec.erase(sorted_vec.begin());
+
+    for (const auto& res : sorted_vec) {
+      for (const string& s : *res) {
         auto it = uniques.find(s);
         if (it != uniques.end()) {
           ++it->second;

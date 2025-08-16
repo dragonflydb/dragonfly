@@ -887,7 +887,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("send_timeout");
   config_registry.RegisterMutable("managed_service_info");
 
-  config_registry.RegisterMutable(
+  config_registry.TMutable(
       "notify_keyspace_events", [pool = &pp_](const absl::CommandLineFlag& flag) {
         auto res = flag.TryGet<std::string>();
         if (!res.has_value() || (!res->empty() && !absl::EqualsIgnoreCase(*res, "EX"))) {
@@ -944,6 +944,9 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     server_family_.GetDflyCmd()->BreakStalledFlowsInShard();
     server_family_.UpdateMemoryGlobalStats();
   });
+  // InitThreadLocals might block
+  pp_.AwaitFiberOnAll(
+      [&](uint32_t index, ProactorBase* pb) { sharding::InitThreadLocals(shard_set->size()); });
   Transaction::Init(shard_num);
 
   shard_set->pool()->AwaitBrief([](unsigned, auto*) {

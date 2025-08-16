@@ -2747,7 +2747,10 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     logging.debug("source node DEBUG POPULATE")
 
     await DebugPopulateSeeder(key_target=300000, data_size=1000).run(nodes[0].client)
-    start_capture = await DebugPopulateSeeder.capture(nodes[0].client)
+
+    # we use this seeder to saturate the pending_buf_ in streamer
+    seeder = df_seeder_factory.create(port=nodes[0].instance.port, cluster_mode=True)
+    fill_task = asyncio.create_task(seeder.run())
 
     logging.debug("Start migration")
     nodes[0].migrations.append(
@@ -2769,6 +2772,10 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     logging.debug("debug migration resume")
     await nodes[1].client.execute_command("debug migration resume")
 
+    # Stop seeder
+    seeder.stop()
+    await fill_task
+
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
     await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
 
@@ -2777,12 +2784,16 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     assert f"MOVED 16287 127.0.0.1:{instances[1].port}" == str(e_info.value)
 
     nodes[0].migrations = []
+    # cancel migration for the source node to get the original data from it
+    await push_config(json.dumps(generate_config(nodes)), [nodes[0].admin_client])
+
     nodes[0].slots = []
     nodes[1].slots = [(0, 16383)]
+    # finish migration for the target node to get the migrated data from it
+    await push_config(json.dumps(generate_config(nodes)), [nodes[1].admin_client])
 
-    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
-
-    assert (await DebugPopulateSeeder.capture(nodes[1].client)) == start_capture
+    source_capture = await DebugPopulateSeeder.capture(nodes[0].client)
+    assert (await DebugPopulateSeeder.capture(nodes[1].client)) == source_capture
 
 
 """
