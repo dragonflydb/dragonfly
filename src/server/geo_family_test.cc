@@ -293,6 +293,25 @@ TEST_F(GeoFamilyTest, GeoRadius) {
   EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
+TEST_F(GeoFamilyTest, GeoRadiusRO) {
+  // functionality for main GEORADIUS is already tested in the above function ensure that invalid
+  // arguments are not accepted
+  EXPECT_EQ(10, CheckedInt({"geoadd",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
+                            "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",
+                            "48.8566", "Paris",     "16.3738", "48.2082", "Vienna",   "4.8952",
+                            "52.3702", "Amsterdam", "10.7522", "59.9139", "Oslo",     "23.7275",
+                            "37.9838", "Athens",    "19.0402", "47.4979", "Budapest", "6.2603",
+                            "53.3498", "Dublin"}));
+
+  // GEORADIUS_RO should not accept arguments for storing (writing data)
+  auto resp =
+      Run({"GEORADIUS_RO", "Europe", "13.4050", "52.5200", "900", "KM", "STORE_DIST", "store_key"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"GEORADIUS_RO", "Europe", "13.4050", "52.5200", "900", "KM", "STORE", "store_key"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
 TEST_F(GeoFamilyTest, GeoRadiusByMemberUb) {
   Run({"GEOADD", "geo", "-118.2437", "34.0522", "972"});
   Run({"GEOADD", "geo", "-73.935242", "40.730610", "973"});
