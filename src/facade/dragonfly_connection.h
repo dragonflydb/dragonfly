@@ -306,16 +306,12 @@ class Connection : public util::Connection {
 
   bool IsHttp() const;
 
-  // Sets max queue length locally in the calling thread.
-  static void SetMaxQueueLenThreadLocal(unsigned tid, uint32_t val);
-  static void SetPipelineBufferLimit(unsigned tid, size_t val);
-  static void GetRequestSizeHistogramThreadLocal(std::string* hist);
+  static void UpdateFromFlags();                          // Set values from flags
+  static std::vector<std::string> GetMutableFlagNames();  // Triggers UpdateFromFlags
+
   static void TrackRequestSize(bool enable);
   static void EnsureMemoryBudget(unsigned tid);
-  static void SetMaxBusyReadUsecThreadLocal(unsigned usec);
-  static void SetAlwaysFlushPipelineThreadLocal(bool flush);
-  static void SetPipelineSquashLimitThreadLocal(unsigned limit);
-  static void SetPipelineWaitBatchUsecThreadLocal(unsigned usec);
+  static void GetRequestSizeHistogramThreadLocal(std::string* hist);
 
   unsigned idle_time() const {
     return time(nullptr) - last_interaction_;
