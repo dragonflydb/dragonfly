@@ -1450,7 +1450,6 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
   ParserStatus parse_status = OK;
 
   size_t max_iobfuf_len = GetFlag(FLAGS_max_client_iobuf_len);
-  max_busy_read_cycles_cached = GetFlag(FLAGS_max_busy_read_usec);
 
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
@@ -2172,7 +2171,7 @@ void Connection::UpdateFromFlags() {
   thread_queue_backpressure[tid].pipeline_buffer_limit = GetFlag(FLAGS_pipeline_buffer_limit);
   thread_queue_backpressure[tid].pipeline_cnd.notify_all();
 
-  max_busy_read_cycles_cached = GetFlag(FLAGS_max_busy_read_usec);
+  max_busy_read_cycles_cached = base::CycleClock::FromUsec(GetFlag(FLAGS_max_busy_read_usec));
   always_flush_pipeline_cached = GetFlag(FLAGS_always_flush_pipeline);
   pipeline_squash_limit_cached = GetFlag(FLAGS_pipeline_squash_limit);
   pipeline_wait_batch_usec = GetFlag(FLAGS_pipeline_wait_batch_usec);
