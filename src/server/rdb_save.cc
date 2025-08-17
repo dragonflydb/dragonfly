@@ -1127,11 +1127,7 @@ void RdbSaver::Impl::CleanShardSnapshots() {
     shard_snapshots_[sid].reset();
   };
 
-  if (shard_snapshots_.size() == 1) {
-    cb(0);
-  } else {
-    shard_set->RunBlockingInParallel([&](EngineShard* es) { cb(es->shard_id()); });
-  }
+  shard_set->RunBlockingInParallel([&](EngineShard* es) { cb(es->shard_id()); });
 }
 
 RdbSaver::Impl::~Impl() {
