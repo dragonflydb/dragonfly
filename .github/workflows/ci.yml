@@ -204,7 +204,7 @@ jobs:
           build-folder-name: build
           # Non-release build will not run tests marked as slow or opt_only
           # "not empty" string is needed for release build because pytest command can not get empty string for filter
-          filter: ${{ matrix.build-type == 'Release' && 'not empty' || '(not slow) and (not opt_only)' }}
+          filter: ${{ matrix.build-type == 'Release' && 'not debug_only' || '(not slow) and (not opt_only)' }}
 
       - name: Upload regression logs on failure
         if: failure()
