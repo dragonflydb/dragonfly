@@ -264,7 +264,8 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     fb2::BlockingCounter bc(num_shards);
     DVLOG(1) << "Squashing " << num_shards << " " << tx->DebugId();
 
-    const uint64_t min_threshold_cycles = CycleClock::FromUsec(100);
+    // Saves work in case logging is disable (i.e. log_squash_threshold_cached is high).
+    const uint64_t min_threshold_cycles = CycleClock::FromUsec(log_squash_threshold_cached / 5);
     auto cb = [&, bc, rb]() mutable {
       uint64_t sched_time = CycleClock::Now() - start;
 
