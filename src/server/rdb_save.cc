@@ -1096,6 +1096,9 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
   // make snapshot size smaller and opreation faster.
   CompressionMode compression_mode_;
   SaveMode save_mode_;
+  // For single-snapshot flows (vector size == 1), remember the owning shard id
+  // so we can destroy the snapshot on the correct shard thread.
+  std::optional<ShardId> single_owner_sid_;
 };
 
 // We pass K=sz to say how many producers are pushing data in order to maintain
@@ -1122,12 +1125,21 @@ void RdbSaver::Impl::CleanShardSnapshots() {
     return;
   }
 
-  auto cb = [this](ShardId sid) {
-    // Destroy SliceSnapshot in target thread, as it registers itself in a thread local set.
-    shard_snapshots_[sid].reset();
-  };
-
-  shard_set->RunBlockingInParallel([&](EngineShard* es) { cb(es->shard_id()); });
+  // Destroy SliceSnapshot in the correct shard thread, as it registers itself in a thread-local set.
+  if (shard_snapshots_.size() == 1) {
+    if (single_owner_sid_.has_value()) {
+      shard_set->Await(*single_owner_sid_, [this] {
+        shard_snapshots_[0].reset();
+      });
+    } else {
+      // Fallback if owner is unknown: destroy inline.
+      shard_snapshots_[0].reset();
+    }
+  } else {
+    shard_set->RunBlockingInParallel([&](EngineShard* es) {
+      shard_snapshots_[es->shard_id()].reset();
+    });
+  }
 }
 
 RdbSaver::Impl::~Impl() {
@@ -1219,6 +1231,10 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, ExecutionState* cntx
   const auto allow_flush = (save_mode_ != SaveMode::RDB) ? SliceSnapshot::SnapshotFlush::kAllow
                                                          : SliceSnapshot::SnapshotFlush::kDisallow;
 
+  if (shard_snapshots_.size() == 1) {
+    single_owner_sid_ = shard->shard_id();
+  }
+
   s->Start(stream_journal, allow_flush);
 }
 
@@ -1228,6 +1244,10 @@ void RdbSaver::Impl::StartIncrementalSnapshotting(LSN start_lsn, ExecutionState*
   auto& s = GetSnapshot(shard);
 
   s = std::make_unique<SliceSnapshot>(compression_mode_, &db_slice, this, cntx);
+
+  if (shard_snapshots_.size() == 1) {
+    single_owner_sid_ = shard->shard_id();
+  }
 
   s->StartIncremental(start_lsn);
 }
