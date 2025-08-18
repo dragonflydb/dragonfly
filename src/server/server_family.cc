@@ -1748,34 +1748,34 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricHeader("memory_by_class_bytes", "Memory metrics", MetricType::GAUGE,
                      &memory_by_class_bytes);
 
-  AppendMetricValue("memory_by_class_bytes", m.lua_stats.used_bytes, {"label"}, {"used_lua"},
+  AppendMetricValue("memory_by_class_bytes", m.lua_stats.used_bytes, {"class"}, {"used_lua"},
                     &memory_by_class_bytes);
 
-  AppendMetricValue("memory_by_class_bytes", m.worker_fiber_stack_size, {"label"},
+  AppendMetricValue("memory_by_class_bytes", m.worker_fiber_stack_size, {"class"},
                     {"fiberstack_vms"}, &memory_by_class_bytes);
 
-  AppendMetricValue("memory_by_class_bytes", m.tls_bytes, {"label"}, {"tls"},
+  AppendMetricValue("memory_by_class_bytes", m.tls_bytes, {"class"}, {"tls"},
                     &memory_by_class_bytes);
 
   const size_t squashed =
       m.facade_stats.reply_stats.squashing_current_reply_size.load(memory_order_relaxed);
 
-  AppendMetricValue("memory_by_class_bytes", squashed, {"label"}, {"commands_squashing_replies"},
+  AppendMetricValue("memory_by_class_bytes", squashed, {"class"}, {"commands_squashing_replies"},
                     &memory_by_class_bytes);
 
-  AppendMetricValue("memory_by_class_bytes", conn_stats.pipeline_cmd_cache_bytes, {"label"},
+  AppendMetricValue("memory_by_class_bytes", conn_stats.pipeline_cmd_cache_bytes, {"class"},
                     {"pipeline_cmd_cache"}, &memory_by_class_bytes);
 
-  AppendMetricValue("memory_by_class_bytes", conn_stats.dispatch_queue_bytes, {"label"},
+  AppendMetricValue("memory_by_class_bytes", conn_stats.dispatch_queue_bytes, {"class"},
                     {"dispatch_queue"}, &memory_by_class_bytes);
 
-  AppendMetricValue("memory_by_class_bytes", conn_stats.read_buf_capacity, {"label"},
+  AppendMetricValue("memory_by_class_bytes", conn_stats.read_buf_capacity, {"class"},
                     {"client_read_buffer"}, &memory_by_class_bytes);
 
-  AppendMetricValue("memory_by_class_bytes", total.table_mem_usage, {"label"}, {"table_used"},
+  AppendMetricValue("memory_by_class_bytes", total.table_mem_usage, {"class"}, {"table_used"},
                     &memory_by_class_bytes);
 
-  AppendMetricValue("memory_by_class_bytes", total.obj_memory_usage, {"label"}, {"object_used"},
+  AppendMetricValue("memory_by_class_bytes", total.obj_memory_usage, {"class"}, {"object_used"},
                     &memory_by_class_bytes);
 
   // Command stats
@@ -1816,9 +1816,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
       AppendMetricWithoutLabels("replication_full_sync_bytes", "Full sync memory usage",
                                 repl_mem.full_sync_buf_bytes, MetricType::GAUGE, &resp->body());
     }
-    AppendMetricValue("memory_by_class_bytes", repl_mem.streamer_buf_capacity_bytes, {"label"},
+    AppendMetricValue("memory_by_class_bytes", repl_mem.streamer_buf_capacity_bytes, {"class"},
                       {"replication_streaming"}, &memory_by_class_bytes);
-    AppendMetricValue("memory_by_class_bytes", repl_mem.full_sync_buf_bytes, {"label"},
+    AppendMetricValue("memory_by_class_bytes", repl_mem.full_sync_buf_bytes, {"class"},
                       {"replication_full_sync"}, &memory_by_class_bytes);
 
     AppendMetricWithoutLabels("replication_psync_count", "Pync count",
