@@ -210,6 +210,10 @@ class TieredStorage {
   void UpdateFromFlags() {
   }
 
+  static std::vector<std::string> GetMutableFlagNames() {
+    return {};
+  }
+
   bool ShouldOffload() const {
     return false;
   }
