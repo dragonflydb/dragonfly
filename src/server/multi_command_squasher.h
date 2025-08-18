@@ -46,6 +46,7 @@ class MultiCommandSquasher {
   }
 
   static void SetMaxBusySquashUsec(uint32_t usec);
+  static void SetLogSquashThreshold(uint32_t usec);
 
  private:
   // Per-shard execution info.
