@@ -356,8 +356,8 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
         << "Squashed " << order_.size() << " commands. "
         << "Total/Fanout/MaxSchedTime/ThreadCbTime/ThreadId/FiberCbTime/FiberSeq/MaxExecTime: "
         << total_usec << "/" << num_shards_ << "/" << max_sched_usec << "/" << proactor_running_usec
-        << "/" << max_sched_thread_id << "/" << fiber_running_usec << "/" << "/"
-        << max_sched_seq_num << "/" << max_exec_usec
+        << "/" << max_sched_thread_id << "/" << fiber_running_usec << "/"
+        << "/" << max_sched_seq_num << "/" << max_exec_usec
         << "\n past fibers: " << absl::StrJoin(past_fibers, ", ")
         << "\ncoordinator thread running time: "
         << CycleClock::ToUsec(ProactorBase::me()->GetCurrentBusyCycles());

@@ -310,9 +310,8 @@ class ServerState {  // public struct - to allow initialization.
   };
   void DecommitMemory(uint8_t flags);
 
-  void UpdateFromFlags();  // Update configration from vlags
-  static std::vector<std::string>
-  GetMutableFlagNames();  // Expects to trigger UpdateFromFlags on change
+  void UpdateFromFlags();                                 // Update configration from flags
+  static std::vector<std::string> GetMutableFlagNames();  // Dependencies of UpdateFromFlags
 
   // Exec descriptor frequency count for this thread.
   absl::flat_hash_map<std::string, unsigned> exec_freq_count;

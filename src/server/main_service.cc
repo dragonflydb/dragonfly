@@ -725,17 +725,6 @@ std::vector<std::string> GetMutableFlagNames() {
                               FLAGS_squash_stats_latency_lower_limit);
 }
 
-void SetShardThreadBusyPollingUsec(uint32_t val) {
-  if (val == 0)
-    return;
-
-  shard_set->pool()->AwaitBrief([=](unsigned, auto* pb) {
-    if (EngineShard::tlocal()) {
-      pb->SetBusyPollUsec(val);
-    }
-  });
-}
-
 void UpdateUringFlagsOnThread() {
 #ifdef __linux__
   if (auto* pb = ProactorBase::me(); pb->GetKind() == fb2::ProactorBase::IOURING) {
