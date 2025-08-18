@@ -33,7 +33,7 @@ LG_funcs.init(data_size, collection_size, huge_value_target, huge_value_size)
 local addfunc = LG_funcs['add_' .. string.lower(type)]
 local modfunc = LG_funcs['mod_' .. string.lower(type)]
 local huge_entries = LG_funcs["get_huge_entries"]
-local is_next_huge_entry = LG_funcs["is_huge_entry"]
+local is_huge_entry = LG_funcs["is_huge_entry"]
 -- Keep track of total number of keys including huge value keys. Intialize
 -- to number of keys that currently exists.
 local total_keys = #keys
@@ -41,16 +41,21 @@ local total_keys = #keys
 local function action_add()
     local key = prefix .. tostring(key_counter)
     local op_type = string.lower(type)
-    local is_next_huge_entry = is_next_huge_entry(op_type)
+    local is_next_huge_entry = false
     key_counter = key_counter + 1
     total_keys = total_keys + 1
+
+    if huge_value_keys_add_only == 1 then
+        is_next_huge_entry = is_huge_entry(op_type)
+    end
 
     table.insert(keys, key)
     addfunc(key, keys)
 
-    -- If we allow adding only huge value keys we will now remove it from
+
+   -- If we allow adding only huge value keys we will now remove it from
     -- table so it wouldn't be selected for any action_del / action_mod
-    if huge_value_keys_add_only == 1 and is_next_huge_entry then
+    if is_next_huge_entry then
         table.remove(keys)
     end
 end
