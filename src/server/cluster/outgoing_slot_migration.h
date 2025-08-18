@@ -30,7 +30,7 @@ class OutgoingMigration : private ProtocolClient {
   // if is_error = false mark migration as FINISHED and cancel migration if it's not finished yet
   // can be called from any thread, but only after Start()
   // if is_error = true and migration is in progress it will be restarted otherwise nothing happens
-  void Finish(GenericError error = {}) ABSL_LOCKS_EXCLUDED(state_mu_);
+  void Finish(const GenericError& error = {}) ABSL_LOCKS_EXCLUDED(state_mu_);
 
   MigrationState GetState() const ABSL_LOCKS_EXCLUDED(state_mu_);
 

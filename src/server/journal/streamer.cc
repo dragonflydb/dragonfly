@@ -526,7 +526,7 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
   } else {
     stats_.buckets_skipped++;
   }
-  ThrottleIfNeeded();
+  // we don't need throttle here, because we throttle after every entry written
 
   return written;
 }
@@ -534,6 +534,11 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
   std::lock_guard guard(big_value_mu_);
   DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
+
+  if (snapshot_version_ == 0) {
+    // If snapshot_version_ is 0, it means that Cancel() was called and we shouldn't proceed.
+    return;
+  }
 
   PrimeTable* table = db_slice_->GetTables(0).first;
 
