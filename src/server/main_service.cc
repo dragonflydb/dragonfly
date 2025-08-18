@@ -124,6 +124,10 @@ ABSL_FLAG(uint32_t, max_squashed_cmd_num, 100,
 
 ABSL_FLAG(uint32_t, max_busy_squash_usec, 1000,
           "Maximum time in microseconds to execute squashed commands before yielding.");
+
+ABSL_FLAG(uint32_t, log_squash_info_threshold_usec, 1 << 31,
+          "Threshold in microseconds above which to log squashing timings.");
+
 ABSL_FLAG(uint32_t, shard_thread_busy_polling_usec, 0,
           "If non-zero, overrides the busy polling parameter for shard threads.");
 
@@ -742,6 +746,11 @@ void SetMaxBusySquashUsec(uint32_t val) {
       [=](unsigned, auto*) { MultiCommandSquasher::SetMaxBusySquashUsec(val); });
 }
 
+void SetLogSquashInfoThreshold(uint32_t val) {
+  shard_set->pool()->AwaitBrief(
+      [=](unsigned, auto*) { MultiCommandSquasher::SetLogSquashThreshold(val); });
+}
+
 void SetShardThreadBusyPollingUsec(uint32_t val) {
   if (val == 0)
     return;
@@ -927,6 +936,8 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
                                            [](uint32_t val) { SetMaxBusySquashUsec(val); });
   config_registry.RegisterSetter<uint32_t>(
       "shard_thread_busy_polling_usec", [](uint32_t val) { SetShardThreadBusyPollingUsec(val); });
+  config_registry.RegisterSetter<uint32_t>("log_squash_info_threshold_usec",
+                                           [](uint32_t val) { SetLogSquashInfoThreshold(val); });
 
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("replication_timeout");
@@ -1008,6 +1019,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   SetMaxBusySquashUsec(absl::GetFlag(FLAGS_max_busy_squash_usec));
   SetShardThreadBusyPollingUsec(GetFlag(FLAGS_shard_thread_busy_polling_usec));
   SetUringWakeMode(GetFlag(FLAGS_uring_wake_mode));
+  SetLogSquashInfoThreshold(GetFlag(FLAGS_log_squash_info_threshold_usec));
 
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.
