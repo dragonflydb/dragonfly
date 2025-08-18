@@ -1125,20 +1125,18 @@ void RdbSaver::Impl::CleanShardSnapshots() {
     return;
   }
 
-  // Destroy SliceSnapshot in the correct shard thread, as it registers itself in a thread-local set.
+  // Destroy SliceSnapshot in the correct shard thread, as it registers itself in a thread-local
+  // set.
   if (shard_snapshots_.size() == 1) {
     if (single_owner_sid_.has_value()) {
-      shard_set->Await(*single_owner_sid_, [this] {
-        shard_snapshots_[0].reset();
-      });
+      shard_set->Await(*single_owner_sid_, [this] { shard_snapshots_[0].reset(); });
     } else {
       // Fallback if owner is unknown: destroy inline.
       shard_snapshots_[0].reset();
     }
   } else {
-    shard_set->RunBlockingInParallel([&](EngineShard* es) {
-      shard_snapshots_[es->shard_id()].reset();
-    });
+    shard_set->RunBlockingInParallel(
+        [&](EngineShard* es) { shard_snapshots_[es->shard_id()].reset(); });
   }
 }
 
