@@ -787,18 +787,21 @@ void GeoFamily::GeoRadiusGeneric(CmdArgList args, const CommandContext& cmd_cntx
   shape.type = CIRCULAR_TYPE;
 
   while (parser.HasNext()) {
-    Type type;
-    if (read_only) {
-      type =
-          parser.MapNext("ASC", Type::ASC, "DESC", Type::DESC, "COUNT", Type::COUNT, "WITHCOORD",
-                         Type::WITHCOORD, "WITHDIST", Type::WITHDIST, "WITHHASH", Type::WITHHASH);
-    } else {
-      type = parser.MapNext("STORE", Type::STORE, "STOREDIST", Type::STOREDIST, "ASC", Type::ASC,
-                            "DESC", Type::DESC, "COUNT", Type::COUNT, "WITHCOORD", Type::WITHCOORD,
-                            "WITHDIST", Type::WITHDIST, "WITHHASH", Type::WITHHASH);
+    // try and parse for only RO options first
+    auto type =
+        parser.TryMapNext("ASC", Type::ASC, "DESC", Type::DESC, "COUNT", Type::COUNT, "WITHCOORD",
+                          Type::WITHCOORD, "WITHDIST", Type::WITHDIST, "WITHHASH", Type::WITHHASH);
+    // if writing variant and there there was a mapping failure test for write variant arguments
+    if (!type && !read_only) {
+      type = parser.MapNext("STORE", Type::STORE, "STOREDIST", Type::STOREDIST);
     }
 
-    switch (type) {
+    // could not map the argument to an argument for RO or write GEORADIUS
+    if (!type) {
+      return builder->SendError("syntax error", kSyntaxErrType);
+    }
+
+    switch (*type) {
       case Type::STORE:
         geo_ops.store_key = parser.Next();
         geo_ops.store = geo_ops.store == GeoStoreType::kNoStore ? GeoStoreType::kStoreHash
