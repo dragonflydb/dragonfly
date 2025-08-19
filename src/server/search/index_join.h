@@ -8,12 +8,16 @@
 
 #include "base/logging.h"
 #include "core/linear_search_map.h"
-#include "core/maps_list.h"
+#include "core/search/base.h"
+#include "server/tx_base.h"
 
 namespace dfly::join {
-// Field value
-// Same as search::SortableValue, but do not have monostate and stores string_view instead of
-// std::string.
+
+template <typename T> using Vector = absl::InlinedVector<T, 4>;
+
+/* Represents field value.
+   Same as search::SortableValue, but do not have monostate and stores string_view instead of
+   std::string. */
 using JoinableValue = std::variant<double, std::string_view>;
 
 /* Each index has its own set of fields used for joins.
@@ -24,39 +28,37 @@ using JoinableValue = std::variant<double, std::string_view>;
     JOIN index2 ON index2.field1 = other_index.field2 AND index2.field3 = other_index.field4
 
     So, index2 uses field1 and field3 for joins. It also indexed docs key1, key2, key3:
-    IndexEntries will store: [{"key1", {"field1" : value, "field3" : value}},
+    EntriesPerIndex will store something like:
+                            [{"key1", {"field1" : value, "field3" : value}},
                              {"key2", {"field1" : value, "field3" : value}},
-                             {"key3", {"field1" : value, "field3" : value}}]
+                             {"key3", {"field1" : value, "field3" : value}}].
+    But to make join algorithm more efficient, we store it as raw vectors,
+    instead of field_name as string, we use indexes;
+    instead of key names we use shard id and doc id.
 */
-using IndexEntries = MapsList<std::string_view /*field names*/, JoinableValue /*field values*/>;
-using EntriesPerIndex = LinearSearchMap<std::string_view /*index name*/, IndexEntries>;
-using KeysPerIndex = LinearSearchMap<std::string_view /*index name*/,
-                                     absl::InlinedVector<std::string_view, 4> /*keys*/>;
+using Key = std::pair<ShardId, search::DocId>;
+using Entry = std::pair<Key, Vector<JoinableValue> /*fields values of this key*/>;
+using EntriesPerIndex = absl::Span<const Vector<Entry> /*one index can store several keys*/>;
 
 // Stores data for single join expression,
 // e.g. index1.field1 = index2.field2:
 // field - "field1", foreign_index - "index2", foreign_field - "field2"
 struct JoinExpression {
-  std::string_view field;
-  std::string_view foreign_index;
-  std::string_view foreign_field;
+  size_t field;          // field is represented as index in the Entry.second array
+  size_t foreign_index;  // foreign_index is represented as index in the EntriesPerIndex array
+  size_t foreign_field;  // foreign_field is too represented as index in the Entry.second array
 };
 
-using JoinExpressionsList = absl::InlinedVector<JoinExpression, 4>;
+using JoinExpressionsVec = Vector<JoinExpression>;
 
 /* Each index can have several join expressions, e.g.:
    JOIN index1 ON index1.field1 = other_index.field2 AND index1.field3 = other_index.field4
    will result in:
    {"index1", {{"field1", "other_index", "field2"}, {"field3", "other_index", "field4"}}} */
-using IndexesJoinExpressions =
-    LinearSearchMap<std::string_view /*index name*/, JoinExpressionsList>;
+using IndexesJoinExpressions = absl::Span<const JoinExpressionsVec>;
 
-/* TODO: add description */
-using JoinResult = MapsList<std::string_view /*index name*/, std::string_view /*key*/>;
-
-// Joins all indexes in indexes_map using join_expressions.
-// Join algorithm is used is hash join.
-JoinResult JoinAllIndexes(const EntriesPerIndex& indexes_entries, const KeysPerIndex& indexes_keys,
-                          const IndexesJoinExpressions& joins);
+/* Joins all indexes in indexes_map using join_expressions.
+   Join algorithm is used is hash join. */
+Vector<Vector<Key>> JoinAllIndexes(EntriesPerIndex indexes_entries, IndexesJoinExpressions joins);
 
 }  // namespace dfly::join

@@ -52,8 +52,6 @@ class LinearSearchMap : public absl::InlinedVector<std::pair<Key, Value>, N> {
 
   Value& operator[](const Key& key);
   const Value& operator[](const Key& key) const;
-
-  std::vector<Key> keys() const;
 };
 
 // Implementation
@@ -109,16 +107,6 @@ Value& LinearSearchMap<Key, Value, N>::operator[](const Key& key) {
 template <typename Key, typename Value, size_t N>
 const Value& LinearSearchMap<Key, Value, N>::operator[](const Key& key) const {
   return find(key)->second;
-}
-
-template <typename Key, typename Value, size_t N>
-std::vector<Key> LinearSearchMap<Key, Value, N>::keys() const {
-  std::vector<Key> keys;
-  keys.reserve(this->size());
-  for (const auto& pair : *this) {
-    keys.push_back(pair.first);
-  }
-  return keys;
 }
 
 }  // namespace dfly
