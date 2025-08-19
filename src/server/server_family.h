@@ -461,6 +461,8 @@ class ServerFamily {
 
   mutable util::fb2::Mutex loading_stats_mu_;
   LoadingStats loading_stats_ ABSL_GUARDED_BY(loading_stats_mu_);
+
+  bool legacy_format_metrics_ = true;
 };
 
 // Reusable CLIENT PAUSE implementation that blocks while polling is_pause_in_progress
