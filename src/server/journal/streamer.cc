@@ -535,22 +535,24 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
   std::lock_guard guard(big_value_mu_);
   DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
 
-  if (snapshot_version_ == 0) {
-    // If snapshot_version_ is 0, it means that Cancel() was called and we shouldn't proceed.
-    return;
-  }
-
   PrimeTable* table = db_slice_->GetTables(0).first;
 
   uint64_t throttle_start = throttle_count_;
   uint64_t throttle_usec_start = total_throttle_wait_usec_;
   if (const PrimeTable::bucket_iterator* bit = req.update()) {
+    if (snapshot_version_ == 0) {
+      // If snapshot_version_ is 0, it means that Cancel() was called and we shouldn't proceed.
+      return;
+    }
     stats_.buckets_on_db_update += WriteBucket(*bit);
   } else {
     string_view key = get<string_view>(req.change);
     table->CVCUponInsert(snapshot_version_, key, [this](PrimeTable::bucket_iterator it) {
-      DCHECK_LT(it.GetVersion(), snapshot_version_);
-      stats_.buckets_on_db_update += WriteBucket(it);
+      if (snapshot_version_ != 0) {  // we need this check because lambda can be called several
+                                     // times and we can preempt in WriteBucket
+        DCHECK_LT(it.GetVersion(), snapshot_version_);
+        stats_.buckets_on_db_update += WriteBucket(it);
+      }
     });
   }
   stats_.throttle_on_db_update += throttle_count_ - throttle_start;
