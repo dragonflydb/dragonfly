@@ -1023,6 +1023,25 @@ error_code AlignedBuffer::Flush() {
   return upstream_->Write(&ivec, 1);
 }
 
+// Ensures SliceSnapshot is destroyed on its owning shard thread.
+struct OwnerThreadDeleter {
+  ShardId owner_sid = 0;
+
+  void operator()(SliceSnapshot* ptr) const {
+    if (!ptr)
+      return;
+
+    if (EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == owner_sid) {
+      delete ptr;
+      return;
+    }
+
+    shard_set->Await(owner_sid, [ptr] { delete ptr; });
+  }
+};
+
+using SnapshotPtr = std::unique_ptr<SliceSnapshot, OwnerThreadDeleter>;
+
 class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface {
  private:
   void CleanShardSnapshots();
@@ -1080,11 +1099,11 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
  private:
   error_code WriteRecord(io::Bytes src);
 
-  unique_ptr<SliceSnapshot>& GetSnapshot(EngineShard* shard);
+  SnapshotPtr& GetSnapshot(EngineShard* shard);
 
   io::Sink* sink_;
   int64_t last_write_time_ns_ = -1;  // last write call.
-  vector<unique_ptr<SliceSnapshot>> shard_snapshots_;
+  vector<SnapshotPtr> shard_snapshots_;
   // used for serializing non-body components in the calling fiber.
   RdbSerializer meta_serializer_;
   using RecordChannel = SizeTrackingChannel<string, base::mpmc_bounded_queue<string>>;
@@ -1096,9 +1115,6 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
   // make snapshot size smaller and opreation faster.
   CompressionMode compression_mode_;
   SaveMode save_mode_;
-  // For single-snapshot flows (vector size == 1), remember the owning shard id
-  // so we can destroy the snapshot on the correct shard thread.
-  std::optional<ShardId> single_owner_sid_;
 };
 
 // We pass K=sz to say how many producers are pushing data in order to maintain
@@ -1125,18 +1141,9 @@ void RdbSaver::Impl::CleanShardSnapshots() {
     return;
   }
 
-  // Destroy SliceSnapshot in the correct shard thread, as it registers itself in a thread-local
-  // set.
-  if (shard_snapshots_.size() == 1) {
-    if (single_owner_sid_.has_value()) {
-      shard_set->Await(*single_owner_sid_, [this] { shard_snapshots_[0].reset(); });
-    } else {
-      // Fallback if owner is unknown: destroy inline.
-      shard_snapshots_[0].reset();
-    }
-  } else {
-    shard_set->RunBlockingInParallel(
-        [&](EngineShard* es) { shard_snapshots_[es->shard_id()].reset(); });
+  // Deleter dispatches destruction to the owning shard thread when needed
+  for (auto& snap : shard_snapshots_) {
+    snap.reset();
   }
 }
 
@@ -1224,14 +1231,11 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, ExecutionState* cntx
   auto& s = GetSnapshot(shard);
   auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
-  s = std::make_unique<SliceSnapshot>(compression_mode_, &db_slice, this, cntx);
+  s = SnapshotPtr(new SliceSnapshot(compression_mode_, &db_slice, this, cntx),
+                  OwnerThreadDeleter{shard->shard_id()});
 
   const auto allow_flush = (save_mode_ != SaveMode::RDB) ? SliceSnapshot::SnapshotFlush::kAllow
                                                          : SliceSnapshot::SnapshotFlush::kDisallow;
-
-  if (shard_snapshots_.size() == 1) {
-    single_owner_sid_ = shard->shard_id();
-  }
 
   s->Start(stream_journal, allow_flush);
 }
@@ -1241,11 +1245,8 @@ void RdbSaver::Impl::StartIncrementalSnapshotting(LSN start_lsn, ExecutionState*
   auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
   auto& s = GetSnapshot(shard);
 
-  s = std::make_unique<SliceSnapshot>(compression_mode_, &db_slice, this, cntx);
-
-  if (shard_snapshots_.size() == 1) {
-    single_owner_sid_ = shard->shard_id();
-  }
+  s = SnapshotPtr(new SliceSnapshot(compression_mode_, &db_slice, this, cntx),
+                  OwnerThreadDeleter{shard->shard_id()});
 
   s->StartIncremental(start_lsn);
 }
@@ -1398,7 +1399,7 @@ void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
   }
 }
 
-unique_ptr<SliceSnapshot>& RdbSaver::Impl::GetSnapshot(EngineShard* shard) {
+SnapshotPtr& RdbSaver::Impl::GetSnapshot(EngineShard* shard) {
   // For single shard configuration, we maintain only one snapshot,
   // so we do not have to map it via shard_id.
   unsigned sid = shard_snapshots_.size() == 1 ? 0 : shard->shard_id();
