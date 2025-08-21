@@ -492,6 +492,115 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
   return out;
 }
 
+join::Vector<join::OwnedEntry> ShardDocIndex::PreagregateDataForJoin(
+    const OpArgs& op_args, absl::Span<const std::string_view> join_fields,
+    search::SearchAlgorithm* search_algo) const {
+  auto search_results = search_algo->Search(&*indices_);
+
+  // First filter out sortable and non-sortable fields
+  // We will load them in different ways
+  const size_t fields_count = join_fields.size();
+  std::vector<bool> is_sortable_field(fields_count);
+  std::vector<FieldReference> basic_fields;
+  basic_fields.reserve(fields_count);
+  for (size_t i = 0; i < fields_count; ++i) {
+    bool is_sortable = IsSortableField(join_fields[i], base_->schema);
+    is_sortable_field[i] = is_sortable;
+    if (!is_sortable) {
+      basic_fields.emplace_back(join_fields[i]);
+    }
+  }
+
+  join::Vector<join::OwnedEntry> result;
+  result.reserve(search_results.ids.size());
+
+  const ShardId shard_id = op_args.shard->shard_id();
+  for (DocId doc : search_results.ids) {
+    auto entry = LoadEntry(doc, op_args);
+    if (!entry)
+      continue;
+
+    auto& [key, accessor] = *entry;
+
+    SearchDocData loaded_basic_fields = accessor->Serialize(base_->schema, basic_fields);
+
+    bool insert_key = true;
+    join::Vector<join::OwnedJoinableValue> join_fields_values(fields_count);
+    for (size_t i = 0; i < fields_count; ++i) {
+      search::SortableValue value;
+      if (is_sortable_field[i]) {
+        value = indices_->GetSortIndexValue(doc, join_fields[i]);
+      } else {
+        value = loaded_basic_fields[join_fields[i]];
+      }
+
+      auto copy = [&](auto&& v) {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (!std::is_same_v<T, std::monostate>) {
+          join_fields_values[i] = v;
+        } else {
+          // If the value is nil, we skip this key
+          insert_key = false;
+        }
+      };
+
+      std::visit(std::move(copy), value);
+    }
+
+    if (insert_key) {
+      result.emplace_back(std::piecewise_construct, std::forward_as_tuple(shard_id, doc),
+                          std::forward_as_tuple(std::make_move_iterator(join_fields_values.begin()),
+                                                std::make_move_iterator(join_fields_values.end())));
+    }
+  }
+
+  return result;
+}
+
+ShardDocIndex::FieldsValuesPerDocId ShardDocIndex::LoadKeysData(
+    const OpArgs& op_args, const absl::flat_hash_set<search::DocId>& doc_ids,
+    absl::Span<const std::string_view> fields_to_load) const {
+  const size_t fields_count = fields_to_load.size();
+  std::vector<bool> is_sortable_field(fields_count);
+  std::vector<FieldReference> basic_fields;
+  basic_fields.reserve(fields_count);
+  for (size_t i = 0; i < fields_count; ++i) {
+    bool is_sortable = IsSortableField(fields_to_load[i], base_->schema);
+    is_sortable_field[i] = is_sortable;
+    if (!is_sortable) {
+      basic_fields.emplace_back(fields_to_load[i]);
+    }
+  }
+
+  FieldsValuesPerDocId result;
+  result.reserve(doc_ids.size());
+
+  for (DocId doc : doc_ids) {
+    auto entry = LoadEntry(doc, op_args);
+    if (!entry)
+      continue;
+
+    auto& [key, accessor] = *entry;
+
+    SearchDocData loaded_basic_fields = accessor->Serialize(base_->schema, basic_fields);
+
+    FieldsValues fields_values(fields_count);
+    for (size_t i = 0; i < fields_count; ++i) {
+      if (is_sortable_field[i]) {
+        fields_values[i] = indices_->GetSortIndexValue(doc, fields_to_load[i]);
+      } else {
+        fields_values[i] = loaded_basic_fields[fields_to_load[i]];
+      }
+    }
+
+    result.emplace(std::piecewise_construct, std::forward_as_tuple(doc),
+                   std::forward_as_tuple(std::make_move_iterator(fields_values.begin()),
+                                         std::make_move_iterator(fields_values.end())));
+  }
+
+  return result;
+}
+
 DocIndexInfo ShardDocIndex::GetInfo() const {
   return {*base_, key_index_.Size()};
 }
