@@ -87,16 +87,6 @@ ListDir ParseDir(facade::CmdArgParser* parser) {
   return parser->MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
 }
 
-string_view DirToSv(ListDir dir) {
-  switch (dir) {
-    case ListDir::LEFT:
-      return "LEFT"sv;
-    case ListDir::RIGHT:
-      return "RIGHT"sv;
-  }
-  return ""sv;
-}
-
 class BPopPusher {
  public:
   BPopPusher(string_view pop_key, string_view push_key, ListDir popdir, ListDir pushdir);
@@ -619,9 +609,18 @@ void MoveGeneric(string_view src, string_view dest, ListDir src_dir, ListDir des
   OpResult<string> result;
 
   if (tx->GetUniqueShardCnt() == 1) {
-    tx->ReviveAutoJournal();  // On single shard we can use the auto journal flow.
     auto cb = [&](Transaction* t, EngineShard* shard) {
-      return OpMoveSingleShard(t->GetOpArgs(shard), src, dest, src_dir, dest_dir);
+      OpArgs op_args = t->GetOpArgs(shard);
+      auto op_res = OpMoveSingleShard(op_args, src, dest, src_dir, dest_dir);
+      if (op_res) {
+        if (op_args.shard->journal()) {
+          std::string_view cmd = src_dir == ListDir::LEFT ? "LPOP" : "RPOP";
+          RecordJournal(op_args, cmd, ArgSlice{src}, 1);
+          cmd = dest_dir == ListDir::LEFT ? "LPUSH" : "RPUSH";
+          RecordJournal(op_args, cmd, ArgSlice{dest, op_res.value()}, 1);
+        }
+      }
+      return op_res;
     };
     result = tx->ScheduleSingleHopT(std::move(cb));
   } else {
@@ -738,8 +737,10 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
     op_res = OpMoveSingleShard(op_args, pop_key_, push_key_, popdir_, pushdir_);
     if (op_res) {
       if (op_args.shard->journal()) {
-        std::array<string_view, 4> arr = {pop_key_, push_key_, DirToSv(popdir_), DirToSv(pushdir_)};
-        RecordJournal(op_args, "LMOVE", arr, 1);
+        std::string_view cmd = popdir_ == ListDir::LEFT ? "LPOP" : "RPOP";
+        RecordJournal(op_args, cmd, ArgSlice{pop_key_}, 1);
+        cmd = pushdir_ == ListDir::LEFT ? "LPUSH" : "RPUSH";
+        RecordJournal(op_args, cmd, ArgSlice{push_key_, op_res.value()}, 1);
       }
     }
     return OpStatus::OK;
@@ -992,7 +993,7 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   auto cb_pop = [dir, pop_count, key_shard, &result, key = *key_to_pop](Transaction* t,
                                                                         EngineShard* shard) {
     if (*key_shard == shard->shard_id()) {
-      result = OpPop(t->GetOpArgs(shard), key, dir, pop_count, true, false);
+      result = OpPop(t->GetOpArgs(shard), key, dir, pop_count, true, true);
     }
     return OpStatus::OK;
   };
@@ -1338,7 +1339,9 @@ void ListFamily::Register(CommandRegistry* registry) {
       << CI{"LPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kLPush}.HFUNC(LPush)
       << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kLPushX}.HFUNC(LPushX)
       << CI{"LPOP", CO::WRITE | CO::FAST, -2, 1, 1, acl::kLPop}.HFUNC(LPop)
-      << CI{"LMPOP", CO::WRITE | CO::SLOW | CO::VARIADIC_KEYS, -4, 2, 2, acl::kLMPop}.HFUNC(LMPop)
+      << CI{"LMPOP",    CO::WRITE | CO::SLOW | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2,
+            acl::kLMPop}
+             .HFUNC(LMPop)
       << CI{"BLMPOP",    CO::WRITE | CO::SLOW | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -5, 3, 3,
             acl::kBLMPop}
              .HFUNC(BLMPop)

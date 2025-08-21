@@ -693,12 +693,14 @@ async def test_rewrites(df_factory):
         # Check there is no rewrite for LMOVE on single shard
         await c_master.lpush("list", "v1", "v2", "v3", "v4")
         await skip_cmd()
-        await check("LMOVE list list LEFT RIGHT", r"LMOVE list list LEFT RIGHT")
+        # Check LMOVE/BLMOVE turns into POP PUSH
+        await check_list_ooo("LMOVE list list LEFT RIGHT", [r"LPOP list", r"RPUSH list v4"])
+        await check_list_ooo("BLMOVE list list RIGHT LEFT 0", [r"RPOP list", r"LPUSH list v4"])
 
-        # Check there is no rewrite for RPOPLPUSH on single shard
-        await check("RPOPLPUSH list list", r"RPOPLPUSH list list")
-        # Check BRPOPLPUSH on single shard turns into LMOVE
-        await check("BRPOPLPUSH list list 0", r"LMOVE list list RIGHT LEFT")
+        # Check RPOPLPUSH turns into RPOP LPUSH
+        await check_list_ooo("RPOPLPUSH list list", [r"RPOP list", r"LPUSH list v1"])
+        # Check BRPOPLPUSH turns into RPOP LPUSH
+        await check_list_ooo("BRPOPLPUSH list list 0", [r"RPOP list", r"LPUSH list v2"])
         # Check BLPOP turns into LPOP
         await check("BLPOP list list1 0", r"LPOP list")
         # Check BRPOP turns into RPOP
@@ -712,6 +714,9 @@ async def test_rewrites(df_factory):
         await check_list_ooo("RPOPLPUSH list1s list2s", [r"LPUSH list2s v1", r"RPOP list1s"])
         # Check BRPOPLPUSH turns into LPUSH RPOP on multi shard
         await check_list_ooo("BRPOPLPUSH list1s list2s 0", [r"LPUSH list2s v2", r"RPOP list1s"])
+
+        await check("LMPOP 2 list list1s LEFT", r"LPOP list")
+        await check("BLMPOP 0 2 list1s list RIGHT", r"RPOP list1s")
 
         # MOVE runs as global command, check only one journal entry is sent
         await check("MOVE list2s 2", r"MOVE list2s 2")
