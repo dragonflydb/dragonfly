@@ -1025,7 +1025,17 @@ error_code AlignedBuffer::Flush() {
 
 // Ensures SliceSnapshot is destroyed on its owning shard thread.
 struct OwnerThreadDeleter {
-  ShardId owner_sid = 0;
+  ShardId owner_sid;
+
+  OwnerThreadDeleter() : owner_sid(0) {
+  }
+
+  explicit OwnerThreadDeleter(ShardId sid) : owner_sid(sid) {
+  }
+
+  static OwnerThreadDeleter FromShard(EngineShard* shard) {
+    return OwnerThreadDeleter(shard->shard_id());
+  }
 
   void operator()(SliceSnapshot* ptr) const {
     if (!ptr)
@@ -1045,6 +1055,7 @@ using SnapshotPtr = std::unique_ptr<SliceSnapshot, OwnerThreadDeleter>;
 class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface {
  private:
   void CleanShardSnapshots();
+  SnapshotPtr CreateSliceSnapshot(EngineShard* shard, DbSlice* db_slice, ExecutionState* cntx);
 
  public:
   // We pass K=sz to say how many producers are pushing data in order to maintain
@@ -1137,14 +1148,8 @@ RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode 
 }
 
 void RdbSaver::Impl::CleanShardSnapshots() {
-  if (shard_snapshots_.empty()) {
-    return;
-  }
-
   // Deleter dispatches destruction to the owning shard thread when needed
-  for (auto& snap : shard_snapshots_) {
-    snap.reset();
-  }
+  shard_snapshots_.clear();
 }
 
 RdbSaver::Impl::~Impl() {
@@ -1231,8 +1236,7 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, ExecutionState* cntx
   auto& s = GetSnapshot(shard);
   auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
-  s = SnapshotPtr(new SliceSnapshot(compression_mode_, &db_slice, this, cntx),
-                  OwnerThreadDeleter{shard->shard_id()});
+  s = CreateSliceSnapshot(shard, &db_slice, cntx);
 
   const auto allow_flush = (save_mode_ != SaveMode::RDB) ? SliceSnapshot::SnapshotFlush::kAllow
                                                          : SliceSnapshot::SnapshotFlush::kDisallow;
@@ -1245,10 +1249,14 @@ void RdbSaver::Impl::StartIncrementalSnapshotting(LSN start_lsn, ExecutionState*
   auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
   auto& s = GetSnapshot(shard);
 
-  s = SnapshotPtr(new SliceSnapshot(compression_mode_, &db_slice, this, cntx),
-                  OwnerThreadDeleter{shard->shard_id()});
-
+  s = CreateSliceSnapshot(shard, &db_slice, cntx);
   s->StartIncremental(start_lsn);
+}
+
+SnapshotPtr RdbSaver::Impl::CreateSliceSnapshot(EngineShard* shard, DbSlice* db_slice,
+                                                ExecutionState* cntx) {
+  return SnapshotPtr(new SliceSnapshot(compression_mode_, db_slice, this, cntx),
+                     OwnerThreadDeleter::FromShard(shard));
 }
 
 // called on save flow
