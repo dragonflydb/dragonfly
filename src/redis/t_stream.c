@@ -28,6 +28,7 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "endianconv.h"
@@ -345,7 +346,12 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
 
         if (remove_node) {
             lpFree(lp);
-            raxRemove(s->rax_tree,ri.key,ri.key_len,NULL);
+            int res = raxRemove(s->rax_tree,ri.key,ri.key_len,NULL);
+            if(res == 0) {
+              // lp freed but node not removed!
+              fprintf(stderr, "Error: corrupted listpack found.");
+              abort();
+            }
             raxSeek(&ri,">=",ri.key,ri.key_len);
             s->length -= entries;
             deleted += entries;
@@ -444,6 +450,12 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
 
         /* Update the listpack with the new pointer. */
         raxInsert(s->rax_tree,ri.key,ri.key_len,lp,NULL);
+
+        if(lpBytes(lp) == 0) {
+         fprintf(stderr, "Error: corrupted listpack found.");
+         abort();
+        }
+
 
         break; /* If we are here, there was enough to delete in the current
                   node, so no need to go to the next node. */
@@ -739,7 +751,13 @@ void streamIteratorRemoveEntry(streamIterator *si, streamID *current) {
         /* If this is the last element in the listpack, we can remove the whole
          * node. */
         lpFree(lp);
-        raxRemove(si->stream->rax_tree,si->ri.key,si->ri.key_len,NULL);
+        int res = raxRemove(si->stream->rax_tree,si->ri.key,si->ri.key_len,NULL);
+        // TODO remove this
+        if(res == 0) {
+          // lp freed but node not removed!
+          fprintf(stderr, "Error: corrupted listpack found.");
+          abort();
+        }
     } else {
         /* In the base case we alter the counters of valid/deleted entries. */
         lp = lpReplaceInteger(lp,&p,aux-1);
@@ -750,6 +768,12 @@ void streamIteratorRemoveEntry(streamIterator *si, streamID *current) {
         /* Update the listpack with the new pointer. */
         if (si->lp != lp)
             raxInsert(si->stream->rax_tree,si->ri.key,si->ri.key_len,lp,NULL);
+
+        if(lpBytes(lp) == 0) {
+          // lp freed but node not removed!
+          fprintf(stderr, "Error: corrupted listpack found.");
+          abort();
+        }
     }
 
     /* Update the number of entries counter. */
