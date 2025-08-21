@@ -296,7 +296,6 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
         stats_.yields++;
       }
       this->SquashedHopCb(EngineShard::tlocal(), rb->GetRespVersion());
-      bc->Dec();
       uint64_t exec_time = CycleClock::Now() - start;
       current = max_exec_cycles.load(memory_order_relaxed);
       while (exec_time > current) {
@@ -304,6 +303,8 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
                                                   memory_order_relaxed))
           break;
       }
+
+      bc->Dec();  // Release barrier: Must be the last one in the callback.
     };
     for (unsigned i = 0; i < sharded_.size(); ++i) {
       if (!sharded_[i].dispatched.empty())

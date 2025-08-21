@@ -432,6 +432,7 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
     /* Get a reference to the tail node listpack. */
     lp = (uint8_t*)ri.data;
     lp_bytes = lpBytes(lp);
+    CHECK_GT(lp_bytes, 0U);
   }
   raxStop(&ri);
 
