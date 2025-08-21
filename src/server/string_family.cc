@@ -382,6 +382,14 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
   return result;
 }
 
+bool IsValueWithinBounds(const int64_t value, const int64_t bound) {
+  if (bound >= 0) {
+    return value >= INT64_MIN + bound;
+  }
+
+  return value <= INT64_MAX + bound;
+}
+
 // emission_interval_ns assumed to be positive
 // limit is assumed to be positive
 OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view key,
@@ -429,9 +437,10 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   // is accepted.
   const int64_t allow_at_ns = new_tat_ns - delay_variation_tolerance_ns;
 
-  if (allow_at_ns >= 0 ? now_ns < INT64_MIN + allow_at_ns : now_ns > INT64_MAX + allow_at_ns) {
+  if (!IsValueWithinBounds(now_ns, allow_at_ns)) {
     return OpStatus::INVALID_INT;
   }
+
   const int64_t diff_ns = now_ns - allow_at_ns;
 
   const bool limited = diff_ns < 0;
@@ -441,10 +450,7 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
       if (diff_ns == INT64_MIN) {
         return OpStatus::INVALID_INT;
       }
-      retry_after_ms = -(diff_ns / kMilliSecondToNanoSecond);
-      if (-diff_ns > 0) {
-        retry_after_ms += 1;
-      }
+      retry_after_ms = (-diff_ns + kMilliSecondToNanoSecond - 1) / kMilliSecondToNanoSecond;
     }
 
     if (now_ns >= 0 ? tat_ns < INT64_MIN + now_ns : tat_ns > INT64_MAX + now_ns) {
@@ -452,7 +458,7 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
     }
     ttl_ns = tat_ns - now_ns;
   } else {
-    if (now_ns >= 0 ? new_tat_ns < INT64_MIN + now_ns : new_tat_ns > INT64_MAX + now_ns) {
+    if (!IsValueWithinBounds(new_tat_ns, now_ns)) {
       return OpStatus::INVALID_INT;
     }
     ttl_ns = new_tat_ns - now_ns;
@@ -465,22 +471,17 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   if (next_ns > -emission_interval_ns) {
     remaining = next_ns / emission_interval_ns;
   }
-  reset_after_ms = ttl_ns / kMilliSecondToNanoSecond;
-  if (ttl_ns) {
-    reset_after_ms += 1;
-  }
+  reset_after_ms = (ttl_ns + kMilliSecondToNanoSecond - 1) / kMilliSecondToNanoSecond;
 
   if (!limited) {
     // Although most computation so far is in nanoseconds, we must store expiry as milliseconds.
     // While this causes loss of precision, the value stored against the throttle key is still in
     // the nanosecond units. When the key is loaded, that value will be read and used as tat_ns. The
     // loss of precision will cause the throttle key to be expired a bit earlier than expected, so
-    // to make up, we extend its expiry by 1 millisecond. Extending the key life does not break
-    // behavior because the tat_ns value will be used to check for throttling.
-    int64_t new_tat_ms = new_tat_ns / 1000000;
-    if (new_tat_ns) {
-      new_tat_ms += 1;
-    }
+    // to make up, we round up its expiry by at most 1 millisecond. Extending the key life does not
+    // break behavior because the tat_ns value will be used to check for throttling.
+    const int64_t new_tat_ms =
+        (new_tat_ns + kMilliSecondToNanoSecond - 1) / kMilliSecondToNanoSecond;
     if (IsValid(res.it)) {
       if (IsValid(res.exp_it)) {
         res.exp_it->second = db_slice.FromAbsoluteTime(new_tat_ms);
