@@ -52,6 +52,9 @@ using CI = CommandId;
 enum class ExpT { EX, PX, EXAT, PXAT };
 
 constexpr uint32_t kMaxStrLen = 1 << 28;
+constexpr uint64_t kSecondToMilliSecond = 1000;
+constexpr uint64_t kMilliSecondToNanoSecond = 1000000;
+constexpr uint64_t kSecondToNanoSecond = 1000000000;
 
 // Either immediately available value or tiering future + result
 template <typename T> using TResultOrT = variant<T, TieredStorage::TResult<T>>;
@@ -390,8 +393,8 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   const int64_t delay_variation_tolerance_ns = emission_interval_ns * limit;  // should be positive
 
   int64_t remaining = 0;
-  int64_t reset_after_ms = -1000;
-  int64_t retry_after_ms = -1000;
+  int64_t reset_after_ms = -kSecondToMilliSecond;
+  int64_t retry_after_ms = -kSecondToMilliSecond;
 
   // Cost of this request
   const int64_t increment_ns = emission_interval_ns * quantity;  // should be nonnegative
@@ -438,7 +441,7 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
       if (diff_ns == INT64_MIN) {
         return OpStatus::INVALID_INT;
       }
-      retry_after_ms = -(diff_ns / 1000000);
+      retry_after_ms = -(diff_ns / kMilliSecondToNanoSecond);
       if (-diff_ns > 0) {
         retry_after_ms += 1;
       }
@@ -462,7 +465,7 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   if (next_ns > -emission_interval_ns) {
     remaining = next_ns / emission_interval_ns;
   }
-  reset_after_ms = ttl_ns / 1000000;
+  reset_after_ms = ttl_ns / kMilliSecondToNanoSecond;
   if (ttl_ns) {
     reset_after_ms += 1;
   }
@@ -1615,10 +1618,12 @@ void StringFamily::ClThrottle(CmdArgList args, const CommandContext& cmnd_cntx) 
   }
   const int64_t limit = max_burst + 1;
 
-  if (period > UINT64_MAX / 1000 || count == 0 || period * 1000 / count > INT64_MAX) {
+  if (period > UINT64_MAX / kSecondToNanoSecond || count == 0 ||
+      period * kSecondToNanoSecond / count > INT64_MAX) {
     return cmnd_cntx.rb->SendError(kInvalidIntErr);
   }
-  const int64_t emission_interval_ns = period * 1000000000 / count;
+
+  const int64_t emission_interval_ns = period * kSecondToNanoSecond / count;
 
   if (emission_interval_ns == 0) {
     return cmnd_cntx.rb->SendError("zero rates are not supported");
