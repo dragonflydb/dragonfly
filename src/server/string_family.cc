@@ -386,11 +386,6 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
                                        const uint64_t quantity) {
   auto& db_slice = op_args.GetDbSlice();
 
-  // TODO run this check before the tx is scheduled
-  if (emission_interval_ns > INT64_MAX / limit) {
-    return OpStatus::INVALID_INT;
-  }
-
   // Total size of the bucket
   const int64_t delay_variation_tolerance_ns = emission_interval_ns * limit;  // should be positive
 
@@ -398,17 +393,10 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   int64_t reset_after_ms = -1000;
   int64_t retry_after_ms = -1000;
 
-  // TODO run this check before the tx is scheduled
-  if (quantity != 0 && static_cast<uint64_t>(emission_interval_ns) > INT64_MAX / quantity) {
-    return OpStatus::INVALID_INT;
-  }
-
   // Cost of this request
   const int64_t increment_ns = emission_interval_ns * quantity;  // should be nonnegative
 
   auto res = db_slice.FindMutable(op_args.db_cntx, key);
-  // Earlier we used the db context timestamp which was set during context initialization, now we
-  // use the current timestamp which assigns a slightly later timestamp to the request than before.
   const int64_t now_ns = GetCurrentTimeNs();
 
   int64_t tat_ns = now_ns;
@@ -482,10 +470,10 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   if (!limited) {
     // Although most computation so far is in nanoseconds, we must store expiry as milliseconds.
     // While this causes loss of precision, the value stored against the throttle key is still in
-    // the nanosecond units. When the key is loaded, the value will be read and used as tat_ns. The
+    // the nanosecond units. When the key is loaded, that value will be read and used as tat_ns. The
     // loss of precision will cause the throttle key to be expired a bit earlier than expected, so
-    // we extend its expiry by 1 millisecond. Extending the key life does not break behavior because
-    // tat_ns will still be loaded from it which is accurate.
+    // to make up, we extend its expiry by 1 millisecond. Extending the key life does not break
+    // behavior because the tat_ns value will be used to check for throttling.
     int64_t new_tat_ms = new_tat_ns / 1000000;
     if (new_tat_ns) {
       new_tat_ms += 1;
@@ -1634,6 +1622,14 @@ void StringFamily::ClThrottle(CmdArgList args, const CommandContext& cmnd_cntx) 
 
   if (emission_interval_ns == 0) {
     return cmnd_cntx.rb->SendError("zero rates are not supported");
+  }
+
+  if (emission_interval_ns > INT64_MAX / limit) {
+    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+  }
+
+  if (quantity != 0 && static_cast<uint64_t>(emission_interval_ns) > INT64_MAX / quantity) {
+    return cmnd_cntx.rb->SendError(kInvalidIntErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
