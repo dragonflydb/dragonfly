@@ -47,10 +47,14 @@ const char kFromMemberLonglatErr[] =
 const char kByRadiusBoxErr[] = "BYRADIUS and BYBOX options at the same time are not compatible";
 const char kAscDescErr[] = "ASC and DESC options at the same time are not compatible";
 const char kStoreTypeErr[] = "STORE and STOREDIST options at the same time are not compatible";
-const char kStoreCompatErr[] =
+const char kStoreCompatRadErr[] =
     "STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORDS options";
+const char kStoreCompatByMemberErr[] =
+    "STORE option in GEORADIUSBYMEMBER is not compatible with WITHDIST, WITHHASH and WITHCOORDS "
+    "options";
 const char kMemberNotFound[] = "could not decode requested zset member";
 const char kInvalidUnit[] = "unsupported unit provided. please use M, KM, FT, MI";
+const char kCountError[] = "ERR COUNT must be > 0";
 constexpr string_view kGeoAlphabet = "0123456789bcdefghjkmnpqrstuvwxyz"sv;
 
 enum class Type {
@@ -93,7 +97,7 @@ enum class Sorting { kUnsorted, kAsc, kDesc, kError };
 enum class GeoStoreType { kNoStore, kStoreHash, kStoreDist, kError };
 struct GeoSearchOpts {
   double conversion = 0;
-  uint64_t count = 0;
+  uint64_t count = std::numeric_limits<uint64_t>::max();
   Sorting sorting = Sorting::kUnsorted;
   bool any = 0;
   bool withdist = 0;
@@ -392,8 +396,12 @@ std::vector<ZSetFamily::ZRangeSpec> GetGeoRangeSpec(const GeoHashRadius& n) {
 }
 
 void SortIfNeeded(GeoArray* ga, Sorting sorting, uint64_t count) {
-  if (sorting == Sorting::kUnsorted)
+  if (sorting == Sorting::kUnsorted) {
+    if (count && ga->size() > count) {
+      ga->resize(count);
+    }
     return;
+  }
 
   auto comparator = [&](const GeoPoint& a, const GeoPoint& b) {
     if (sorting == Sorting::kAsc) {
@@ -673,6 +681,7 @@ void GeoFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
     return builder->SendError(kAscDescErr);
   }
 
+  geo_ops.count = (geo_ops.count == UINT64_MAX) ? 0 : geo_ops.count;
   GeoSearchStoreGeneric(cmd_cntx.tx, builder, shape, key, member, geo_ops);
 }
 
@@ -702,18 +711,19 @@ void GeoFamily::GeoRadiusByMember(CmdArgList args, const CommandContext& cmd_cnt
     if (cur_arg == "ASC") {
       if (geo_ops.sorting != Sorting::kUnsorted) {
         return builder->SendError(kAscDescErr);
-      } else {
-        geo_ops.sorting = Sorting::kAsc;
       }
+      geo_ops.sorting = Sorting::kAsc;
     } else if (cur_arg == "DESC") {
       if (geo_ops.sorting != Sorting::kUnsorted) {
         return builder->SendError(kAscDescErr);
-      } else {
-        geo_ops.sorting = Sorting::kDesc;
       }
+      geo_ops.sorting = Sorting::kDesc;
     } else if (cur_arg == "COUNT") {
       if (i + 1 < args.size() && absl::SimpleAtoi(ArgS(args, i + 1), &geo_ops.count)) {
         i++;
+        if (geo_ops.count == 0) {
+          return builder->SendError(kCountError);
+        }
       } else {
         return builder->SendError(kSyntaxErr);
       }
@@ -722,25 +732,14 @@ void GeoFamily::GeoRadiusByMember(CmdArgList args, const CommandContext& cmd_cnt
         i++;
       }
     } else if (cur_arg == "WITHCOORD") {
-      if (geo_ops.store != GeoStoreType::kNoStore) {
-        return builder->SendError(kStoreCompatErr);
-      }
       geo_ops.withcoord = true;
     } else if (cur_arg == "WITHDIST") {
-      if (geo_ops.store != GeoStoreType::kNoStore) {
-        return builder->SendError(kStoreCompatErr);
-      }
       geo_ops.withdist = true;
     } else if (cur_arg == "WITHHASH") {
-      if (geo_ops.store != GeoStoreType::kNoStore) {
-        return builder->SendError(kStoreCompatErr);
-      }
       geo_ops.withhash = true;
     } else if (cur_arg == "STORE") {
       if (geo_ops.store != GeoStoreType::kNoStore) {
         return builder->SendError(kStoreTypeErr);
-      } else if (geo_ops.withcoord || geo_ops.withdist || geo_ops.withhash) {
-        return builder->SendError(kStoreCompatErr);
       }
       if (i + 1 < args.size()) {
         geo_ops.store_key = ArgS(args, i + 1);
@@ -752,8 +751,6 @@ void GeoFamily::GeoRadiusByMember(CmdArgList args, const CommandContext& cmd_cnt
     } else if (cur_arg == "STOREDIST") {
       if (geo_ops.store != GeoStoreType::kNoStore) {
         return builder->SendError(kStoreTypeErr);
-      } else if (geo_ops.withcoord || geo_ops.withdist || geo_ops.withhash) {
-        return builder->SendError(kStoreCompatErr);
       }
       if (i + 1 < args.size()) {
         geo_ops.store_key = ArgS(args, i + 1);
@@ -766,8 +763,13 @@ void GeoFamily::GeoRadiusByMember(CmdArgList args, const CommandContext& cmd_cnt
       return builder->SendError(kSyntaxErr);
     }
   }
-  // parsing completed
 
+  if ((geo_ops.withcoord || geo_ops.withdist || geo_ops.withhash) &&
+      geo_ops.store != GeoStoreType::kNoStore) {
+    return builder->SendError(kStoreCompatByMemberErr);
+  }
+
+  geo_ops.count = (geo_ops.count == UINT64_MAX) ? 0 : geo_ops.count;
   GeoSearchStoreGeneric(cmd_cntx.tx, builder, shape, key, member, geo_ops);
 }
 
@@ -852,8 +854,16 @@ void GeoFamily::GeoRadius(CmdArgList args, const CommandContext& cmd_cntx) {
     return builder->SendError(kAscDescErr);
   } else if (geo_ops.store == GeoStoreType::kError) {
     return builder->SendError(kStoreTypeErr);
+  } else if (geo_ops.count == 0) {
+    return builder->SendError(kCountError);
   }
 
+  if ((geo_ops.withcoord || geo_ops.withdist || geo_ops.withhash) &&
+      geo_ops.store != GeoStoreType::kNoStore) {
+    return builder->SendError(kStoreCompatRadErr);
+  }
+
+  geo_ops.count = (geo_ops.count == UINT64_MAX) ? 0 : geo_ops.count;
   GeoSearchStoreGeneric(cmd_cntx.tx, builder, shape, key, "", geo_ops);
 }
 

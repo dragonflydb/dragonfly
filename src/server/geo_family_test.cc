@@ -230,8 +230,16 @@ TEST_F(GeoFamilyTest, GeoRadiusByMember) {
 
   resp = Run(
       {"GEORADIUSBYMEMBER", "Europe", "Madrid", "900", "KM", "STORE", "store_key", "WITHCOORD"});
-  EXPECT_THAT(resp, ErrArg("ERR STORE option in GEORADIUS is not compatible with WITHDIST, "
+  EXPECT_THAT(resp, ErrArg("ERR STORE option in GEORADIUSBYMEMBER is not compatible with WITHDIST, "
                            "WITHHASH and WITHCOORDS options"));
+
+  // Do not remove this test case, it's not redundant.
+  // It's different from the one above because the arguments have
+  // different permutation which our code did not handle.
+  auto err =
+      "ERR STORE option in GEORADIUSBYMEMBER is not compatible with WITHDIST, WITHHASH and WITHCOORDS options"sv;
+  resp = Run("GEORADIUSBYMEMBER Sicily Agrigento 100 km WITHHASH store tmp");
+  EXPECT_THAT(resp, ErrArg(err));
 }
 
 TEST_F(GeoFamilyTest, GeoRadius) {
@@ -291,6 +299,22 @@ TEST_F(GeoFamilyTest, GeoRadius) {
               "69.77510489600115", "ft", "key", "WITHDIST", "COUNT", "key", "WITHCOORD", "count",
               "WITHHASH", "STORE"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  Run("GEOADD Sicily 13.361389 38.115556 Palermo 15.087269 37.502669 Catania");
+  resp = Run("GEORADIUS SICILY 15 37 200 KM COUNT 0");
+  EXPECT_THAT(resp, ErrArg("ERR COUNT must be > 0"));
+
+  Run("GEOADD Sicily 13.583333 37.316667 Agrigento");
+  resp = Run("GEORADIUSBYMEMBER Sicily Agrigento 100 km COUNT 0");
+  EXPECT_THAT(resp, ErrArg("ERR COUNT must be > 0"));
+
+  resp = Run("GEORADIUS Sicily 15 37 200 km COUNT 1");
+  EXPECT_THAT(resp, "Agrigento");
+
+  auto err =
+      "ERR STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORDS options"sv;
+  resp = Run("GEORADIUS Sicily 15 37 200 km WITHDIST STORE result");
+  EXPECT_THAT(resp, ErrArg(err));
 }
 
 TEST_F(GeoFamilyTest, GeoRadiusByMemberUb) {
