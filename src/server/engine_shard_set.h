@@ -170,6 +170,10 @@ inline uint64_t GetCurrentTimeMs() {
   return TEST_current_time_ms ? TEST_current_time_ms : absl::GetCurrentTimeNanos() / 1000000;
 }
 
+inline uint64_t GetCurrentTimeNs() {
+  return TEST_current_time_ms ? TEST_current_time_ms * 1000000 : absl::GetCurrentTimeNanos();
+}
+
 extern EngineShardSet* shard_set;
 
 }  // namespace dfly
