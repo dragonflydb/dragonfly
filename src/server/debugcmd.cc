@@ -962,7 +962,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
     ++index;
 
     if (shard_batch.sz == 32) {
-      ess.Add(sid, [this, index, options, shard_batch] {
+      ess.Add(sid, [this, index, options, shard_batch](unsigned) {
         DoPopulateBatch(options, shard_batch);
         if (index % 50 == 0) {
           ThisFiber::Yield();

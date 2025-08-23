@@ -249,7 +249,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   atomic_uint64_t max_sched_cycles{0}, max_exec_cycles{0};
   base::SpinLock lock;
   uint64_t fiber_running_cycles{0}, proactor_running_cycles{0};
-  uint32_t max_sched_thread_id, max_sched_seq_num{0};
+  uint32_t max_sched_thread_id{0}, max_sched_seq_num{0}, max_task_index{0};
   vector<string> past_fibers;
 
   // Atomic transactions (that have all keys locked) perform hops and run squashed commands via
@@ -266,7 +266,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
 
     // Saves work in case logging is disable (i.e. log_squash_threshold_cached is high).
     const uint64_t min_threshold_cycles = CycleClock::FromUsec(log_squash_threshold_cached / 5);
-    auto cb = [&, bc, rb]() mutable {
+    auto cb = [&, bc, rb](unsigned task_index) mutable {
       uint64_t sched_time = CycleClock::Now() - start;
 
       // Update max_sched_cycles in lock-free fashion, to avoid contention
@@ -284,6 +284,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
             max_sched_thread_id = ProactorBase::me()->GetPoolIndex();
             max_sched_seq_num = fb2::GetFiberRunSeq();
             past_fibers = fb2::GetPastFiberNames();
+            max_task_index = task_index;
           }
           break;
         }
@@ -348,10 +349,10 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
 
     LOG_EVERY_T(INFO, 0.1)
         << "Squashed " << order_.size() << " commands. "
-        << "Total/Fanout/MaxSchedTime/ThreadCbTime/ThreadId/FiberCbTime/FiberSeq/MaxExecTime: "
-        << total_usec << "/" << num_shards_ << "/" << max_sched_usec << "/" << proactor_running_usec
-        << "/" << max_sched_thread_id << "/" << fiber_running_usec << "/"
-        << "/" << max_sched_seq_num << "/" << max_exec_usec
+        << "Total/Fanout/MaxSchedTime/ThreadCbTime/ThreadId/FiberCbTime/FiberSeq/TaskSeq/"
+        << "MaxExecTime: " << total_usec << "/" << num_shards_ << "/" << max_sched_usec << "/"
+        << proactor_running_usec << "/" << max_sched_thread_id << "/" << fiber_running_usec << "/"
+        << "/" << max_sched_seq_num << "/" << max_task_index << "/" << max_exec_usec
         << "\n past fibers: " << absl::StrJoin(past_fibers, ", ")
         << "\ncoordinator thread running time: "
         << CycleClock::ToUsec(ProactorBase::me()->GetCurrentBusyCycles());

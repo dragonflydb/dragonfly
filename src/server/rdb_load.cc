@@ -2107,7 +2107,7 @@ error_code RdbLoader::Load(io::Source* src) {
         FlushShardAsync(i);
 
         // Active database if not existed before.
-        shard_set->Add(i, [dbid] { GetCurrentDbSlice().ActivateDb(dbid); });
+        shard_set->Add(i, [dbid](unsigned) { GetCurrentDbSlice().ActivateDb(dbid); });
       }
 
       cur_db_index_ = dbid;
@@ -2202,7 +2202,7 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
     FlushShardAsync(i);
 
     // Send sentinel callbacks to ensure that all previous messages have been processed.
-    shard_set->Add(i, [bc]() mutable { bc->Dec(); });
+    shard_set->Add(i, [bc](unsigned) mutable { bc->Dec(); });
   }
   bc->Wait();  // wait for sentinels to report.
   // Decrement local one if it exists
@@ -2518,7 +2518,7 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
   if (out_buf.empty())
     return;
 
-  auto cb = [indx = this->cur_db_index_, this, ib = std::move(out_buf)] {
+  auto cb = [indx = this->cur_db_index_, this, ib = std::move(out_buf)](unsigned) {
     auto& db_slice = GetCurrentDbSlice();
 
     // Before we start loading, increment LoadInProgress.
@@ -2568,7 +2568,6 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   LoadConfig tmp_load_config = item->load_config;
 
   // If we're appending the item to an existing key, first load the
-  // object.
   if (tmp_load_config.append) {
     append_res = db_slice->FindMutable(db_cntx, item->key);
     if (IsValid(append_res.it)) {
@@ -2681,6 +2680,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   }
 }
 
+// Loads the next key/val pair.
 // Loads the next key/val pair.
 //
 // Huge objects may be loaded in parts, where only a subset of elements are
