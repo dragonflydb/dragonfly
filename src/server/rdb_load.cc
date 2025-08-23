@@ -2114,8 +2114,9 @@ error_code RdbLoader::Load(io::Source* src) {
         FlushShardAsync(i);
 
         // Active database if not existed before.
-        shard_set->Add(
-            i, [dbid] { namespaces->GetDefaultNamespace().GetCurrentDbSlice().ActivateDb(dbid); });
+        shard_set->Add(i, [dbid](unsigned) {
+          namespaces->GetDefaultNamespace().GetCurrentDbSlice().ActivateDb(dbid);
+        });
       }
 
       cur_db_index_ = dbid;
@@ -2206,7 +2207,7 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
     FlushShardAsync(i);
 
     // Send sentinel callbacks to ensure that all previous messages have been processed.
-    shard_set->Add(i, [bc]() mutable { bc->Dec(); });
+    shard_set->Add(i, [bc](unsigned) mutable { bc->Dec(); });
   }
   bc->Wait();  // wait for sentinels to report.
   // Decrement local one if it exists
@@ -2501,7 +2502,7 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
   if (out_buf.empty())
     return;
 
-  auto cb = [indx = this->cur_db_index_, this, ib = std::move(out_buf)] {
+  auto cb = [indx = this->cur_db_index_, this, ib = std::move(out_buf)](unsigned) {
     auto& db_slice = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
 
     // Before we start loading, increment LoadInProgress.
@@ -2554,7 +2555,6 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   DbSlice::ItAndUpdater append_res;
 
   // If we're appending the item to an existing key, first load the
-  // object.
   if (item->load_config.append) {
     append_res = db_slice->FindMutable(db_cntx, item->key);
     if (!IsValid(append_res.it)) {
@@ -2655,11 +2655,11 @@ void RdbLoader::ResizeDb(size_t key_num, size_t expire_num) {
 }
 
 // Loads the next key/val pair.
+// Loads the next key/val pair.
 //
 // Huge objects may be loaded in parts, where only a subset of elements are
 // loaded at a time. This reduces the memory required to load huge objects and
-// prevents LoadItemsBuffer blocking. (Note so far only RDB_TYPE_SET and
-// RDB_TYPE_SET_WITH_EXPIRY support partial reads).
+// prevents LoadItemsBuffer blocking.
 error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   std::string key;
   int64_t start = absl::GetCurrentTimeNanos();

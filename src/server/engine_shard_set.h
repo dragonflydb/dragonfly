@@ -100,7 +100,7 @@ class EngineShardSet {
   template <typename U> void AwaitRunningOnShardQueue(U&& func) {
     util::fb2::BlockingCounter bc(size_);
     for (size_t i = 0; i < size_; ++i) {
-      Add(i, [&func, bc]() mutable {
+      Add(i, [&func, bc](unsigned) mutable {
         func(EngineShard::tlocal());
         bc->Dec();
       });
