@@ -16,6 +16,7 @@
 #include "absl/flags/internal/flag.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/flag_utils.h"
 #include "server/common.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
@@ -471,6 +472,11 @@ void TieredStorage::UpdateFromFlags() {
       .offload_threshold = absl::GetFlag(FLAGS_tiered_offload_threshold),
       .upload_threshold = absl::GetFlag(FLAGS_tiered_upload_threshold),
   };
+}
+
+std::vector<std::string> TieredStorage::GetMutableFlagNames() {
+  return facade::GetFlagNames(FLAGS_tiered_experimental_cooling, FLAGS_tiered_storage_write_depth,
+                              FLAGS_tiered_offload_threshold, FLAGS_tiered_upload_threshold);
 }
 
 bool TieredStorage::ShouldOffload() const {

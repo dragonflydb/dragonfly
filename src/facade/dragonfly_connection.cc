@@ -22,6 +22,7 @@
 #include "core/heap_size.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
+#include "facade/flag_utils.h"
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
@@ -1449,7 +1450,6 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
   ParserStatus parse_status = OK;
 
   size_t max_iobfuf_len = GetFlag(FLAGS_max_client_iobuf_len);
-  SetMaxBusyReadUsecThreadLocal(GetFlag(FLAGS_max_busy_read_usec));
 
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
@@ -2165,14 +2165,22 @@ bool Connection::IsReplySizeOverLimit() const {
   return over_limit;
 }
 
-void Connection::SetMaxQueueLenThreadLocal(unsigned tid, uint32_t val) {
-  thread_queue_backpressure[tid].pipeline_queue_max_len = val;
+void Connection::UpdateFromFlags() {
+  unsigned tid = fb2::ProactorBase::me()->GetPoolIndex();
+  thread_queue_backpressure[tid].pipeline_queue_max_len = GetFlag(FLAGS_pipeline_queue_limit);
+  thread_queue_backpressure[tid].pipeline_buffer_limit = GetFlag(FLAGS_pipeline_buffer_limit);
   thread_queue_backpressure[tid].pipeline_cnd.notify_all();
+
+  max_busy_read_cycles_cached = base::CycleClock::FromUsec(GetFlag(FLAGS_max_busy_read_usec));
+  always_flush_pipeline_cached = GetFlag(FLAGS_always_flush_pipeline);
+  pipeline_squash_limit_cached = GetFlag(FLAGS_pipeline_squash_limit);
+  pipeline_wait_batch_usec = GetFlag(FLAGS_pipeline_wait_batch_usec);
 }
 
-void Connection::SetPipelineBufferLimit(unsigned tid, size_t val) {
-  thread_queue_backpressure[tid].pipeline_buffer_limit = val;
-  thread_queue_backpressure[tid].pipeline_cnd.notify_all();
+std::vector<std::string> Connection::GetMutableFlagNames() {
+  return GetFlagNames(FLAGS_pipeline_queue_limit, FLAGS_pipeline_buffer_limit,
+                      FLAGS_max_busy_read_usec, FLAGS_always_flush_pipeline,
+                      FLAGS_pipeline_squash_limit, FLAGS_pipeline_wait_batch_usec);
 }
 
 void Connection::GetRequestSizeHistogramThreadLocal(std::string* hist) {
@@ -2191,22 +2199,6 @@ void Connection::TrackRequestSize(bool enable) {
 
 void Connection::EnsureMemoryBudget(unsigned tid) {
   thread_queue_backpressure[tid].EnsureBelowLimit();
-}
-
-void Connection::SetMaxBusyReadUsecThreadLocal(unsigned usec) {
-  max_busy_read_cycles_cached = base::CycleClock::FromUsec(usec);
-}
-
-void Connection::SetAlwaysFlushPipelineThreadLocal(bool flush) {
-  always_flush_pipeline_cached = flush;
-}
-
-void Connection::SetPipelineSquashLimitThreadLocal(unsigned limit) {
-  pipeline_squash_limit_cached = limit;
-}
-
-void Connection::SetPipelineWaitBatchUsecThreadLocal(unsigned usec) {
-  pipeline_wait_batch_usec = usec;
 }
 
 Connection::WeakRef::WeakRef(const std::shared_ptr<Connection>& ptr, unsigned thread_id,
