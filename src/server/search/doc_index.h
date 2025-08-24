@@ -147,10 +147,33 @@ struct AggregateParams {
     std::string query = "*";
   };
 
+  /* Can have 2 scenarios:
+      1. No joins - then this is ignored
+      2. Has joins and SORTBY ... LIMIT option - then this is used to sort/limit right after join
+      3. Has joins and LIMIT option - then this is used to limit right after join.
+     Next aggregation steps after first LIMIT or first SORTBY will be applied on the final result,
+     after loading the data for all joined documents. */
+  struct JoinAggregateParams {
+    static constexpr size_t kDefaultLimit = std::numeric_limits<size_t>::max();
+
+    bool HasLimit() const {
+      return limit_total != kDefaultLimit;
+    }
+
+    bool HasValue() const {
+      return HasLimit() || sort.has_value();
+    }
+
+    size_t limit_offset = 0;
+    size_t limit_total = kDefaultLimit;
+    std::optional<aggregate::SortParams> sort;
+  };
+
   std::string_view index, query;
   search::QueryParams params;
 
   std::vector<JoinParams> joins;
+  JoinAggregateParams join_agg_params;
 
   std::optional<std::vector<FieldReference>> load_fields;
   std::vector<aggregate::AggregationStep> steps;

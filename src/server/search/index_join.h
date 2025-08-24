@@ -61,8 +61,15 @@ using JoinExpressionsVec = Vector<JoinExpression>;
    {"index1", {{"field1", "other_index", "field2"}, {"field3", "other_index", "field4"}}} */
 using IndexesJoinExpressions = absl::Span<const JoinExpressionsVec>;
 
+using KeyIndex = size_t;
+using KeyIndexes = Vector<KeyIndex>;
+
 /* Joins all indexes in indexes_map using join_expressions.
    Join algorithm is used is hash join. */
+Vector<Vector<Key>> JoinAllIndexes(
+    EntriesPerIndex indexes_entries, IndexesJoinExpressions joins,
+    absl::FunctionRef<void(std::vector<KeyIndexes>*)> aggregate_after_join);
+
 Vector<Vector<Key>> JoinAllIndexes(EntriesPerIndex indexes_entries, IndexesJoinExpressions joins);
 
 }  // namespace dfly::join
