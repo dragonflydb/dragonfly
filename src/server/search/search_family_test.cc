@@ -3091,6 +3091,12 @@ TEST_F(SearchFamilyTest, AggregateWithLoadFromSyntaxErrors) {
   EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "4", "idx1.num1", "idx1.str1", "idx2.num2",
                    "idx2.str2", "LOAD_FROM", "idx2", "AS", "alias", "1", "alias.num2=idx1.num1"}),
               ErrArg("Unknown index alias 'idx2' in the LOAD option. Field: 'num2'"));
+
+  // Test same index used multiple times
+  EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "4", "idx1.num1", "idx1.str1", "idx2.num2",
+                   "idx2.str2", "LOAD_FROM", "idx2", "1", "idx2.num2=idx1.num1", "LOAD_FROM",
+                   "idx2", "1", "idx2.str2=idx1.str1"}),
+              ErrArg("Duplicate index alias in LOAD_FROM: 'idx2'"));
 }
 
 }  // namespace dfly

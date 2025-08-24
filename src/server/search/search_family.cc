@@ -9,6 +9,8 @@
 #include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_format.h>
+#include <absl/strings/str_split.h>
+#include <absl/strings/string_view.h>
 
 #include <atomic>
 #include <variant>
@@ -443,12 +445,11 @@ ParseResult<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* parse
 }
 
 std::pair<std::string_view, std::string_view> Split(std::string_view s, char delim) {
-  auto pos = s.find(delim);
-  if (pos == std::string_view::npos)
-    return {s, std::string_view{}};
-  return {s.substr(0, pos), s.substr(pos + 1)};
+  return absl::StrSplit(s, absl::MaxSplits(absl::ByChar(delim), 1));
 }
 
+// Example: LOAD_FROM index AS alias num_conditions condition [condition ...] [QUERY query]
+// condition is in the form index.field=foreign_index.field or foreign_index.field=index.field
 ParseResult<AggregateParams::JoinParams> ParseAggregatorJoinParams(
     CmdArgParser* parser, absl::flat_hash_set<std::string>* known_indexes) {
   AggregateParams::JoinParams join_params;
@@ -459,11 +460,17 @@ ParseResult<AggregateParams::JoinParams> ParseAggregatorJoinParams(
     join_params.index_alias = join_params.index;
   }
 
+  if (known_indexes->contains(join_params.index_alias)) {
+    return CreateSyntaxError(
+        absl::StrCat("Duplicate index alias in LOAD_FROM: '", join_params.index_alias, "'"));
+  }
+
   // Validate index name
   known_indexes->insert(join_params.index_alias);
 
   size_t num_fields = parser->Next<size_t>();
   join_params.conditions.reserve(num_fields);
+  // Conditions are in the form index.field=foreign_index.field or foreign_index.field=index.field
   while (parser->HasNext() && num_fields > 0) {
     auto [left, right] = Split(parser->Next(), '=');
     auto [l_index, l_field] = Split(left, '.');
@@ -729,14 +736,8 @@ join::Vector<join::Vector<join::Entry>> MergePreaggregatedShardJoinData(
         join::Vector<join::JoinableValue> field_values;
         field_values.reserve(entry.second.size());
 
-        // We need to convert std::string to std::string_view
         auto insert_copy = [&field_values](const auto& field_value) {
-          using T = std::decay_t<decltype(field_value)>;
-          if constexpr (std::is_same_v<T, std::string>) {
-            field_values.emplace_back(std::string_view{field_value});
-          } else {
-            field_values.emplace_back(field_value);
-          }
+          field_values.emplace_back(field_value);
         };
 
         for (const auto& field_value : entry.second) {

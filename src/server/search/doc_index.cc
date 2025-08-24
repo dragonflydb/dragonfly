@@ -94,6 +94,24 @@ std::pair<std::vector<FieldReference>, SortIndiciesFieldsList> PreprocessAggrega
   return {std::move(fields), {sort_indicies_aliases.begin(), sort_indicies_aliases.end()}};
 }
 
+/* Separate fields into basic and sortable. The second vector contains flags indicating
+   whether the field at the same index in the first vector is sortable or not. */
+std::pair<std::vector<FieldReference>, std::vector<bool>> GetBasicFields(
+    absl::Span<const std::string_view> fields, const search::Schema& schema) {
+  const size_t fields_count = fields.size();
+  std::vector<bool> is_sortable_field(fields_count);
+  std::vector<FieldReference> basic_fields;
+  basic_fields.reserve(fields_count);
+  for (size_t i = 0; i < fields_count; ++i) {
+    bool is_sortable = IsSortableField(fields[i], schema);
+    is_sortable_field[i] = is_sortable;
+    if (!is_sortable) {
+      basic_fields.emplace_back(fields[i]);
+    }
+  }
+  return {std::move(basic_fields), std::move(is_sortable_field)};
+}
+
 }  // namespace
 
 bool FieldReference::IsJsonPath(std::string_view name) {
@@ -497,19 +515,8 @@ join::Vector<join::OwnedEntry> ShardDocIndex::PreagregateDataForJoin(
     search::SearchAlgorithm* search_algo) const {
   auto search_results = search_algo->Search(&*indices_);
 
-  // First filter out sortable and non-sortable fields
-  // We will load them in different ways
   const size_t fields_count = join_fields.size();
-  std::vector<bool> is_sortable_field(fields_count);
-  std::vector<FieldReference> basic_fields;
-  basic_fields.reserve(fields_count);
-  for (size_t i = 0; i < fields_count; ++i) {
-    bool is_sortable = IsSortableField(join_fields[i], base_->schema);
-    is_sortable_field[i] = is_sortable;
-    if (!is_sortable) {
-      basic_fields.emplace_back(join_fields[i]);
-    }
-  }
+  const auto [basic_fields, is_sortable_field] = GetBasicFields(join_fields, base_->schema);
 
   join::Vector<join::OwnedEntry> result;
   result.reserve(search_results.ids.size());
@@ -561,16 +568,7 @@ ShardDocIndex::FieldsValuesPerDocId ShardDocIndex::LoadKeysData(
     const OpArgs& op_args, const absl::flat_hash_set<search::DocId>& doc_ids,
     absl::Span<const std::string_view> fields_to_load) const {
   const size_t fields_count = fields_to_load.size();
-  std::vector<bool> is_sortable_field(fields_count);
-  std::vector<FieldReference> basic_fields;
-  basic_fields.reserve(fields_count);
-  for (size_t i = 0; i < fields_count; ++i) {
-    bool is_sortable = IsSortableField(fields_to_load[i], base_->schema);
-    is_sortable_field[i] = is_sortable;
-    if (!is_sortable) {
-      basic_fields.emplace_back(fields_to_load[i]);
-    }
-  }
+  const auto [basic_fields, is_sortable_field] = GetBasicFields(fields_to_load, base_->schema);
 
   FieldsValuesPerDocId result;
   result.reserve(doc_ids.size());
