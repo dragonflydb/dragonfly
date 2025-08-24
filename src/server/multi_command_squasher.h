@@ -45,8 +45,8 @@ class MultiCommandSquasher {
     return sq.stats_;
   }
 
-  static void SetMaxBusySquashUsec(uint32_t usec);
-  static void SetLogSquashThreshold(uint32_t usec);
+  static void UpdateFromFlags();
+  static std::vector<std::string> GetMutableFlagNames();
 
  private:
   // Per-shard execution info.
