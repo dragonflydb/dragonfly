@@ -294,8 +294,6 @@ TEST_F(GeoFamilyTest, GeoRadius) {
 }
 
 TEST_F(GeoFamilyTest, GeoRadiusRO) {
-  // functionality for main GEORADIUS is already tested in the above function ensure that invalid
-  // arguments are not accepted
   EXPECT_EQ(10, CheckedInt({"geoadd",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
                             "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",
                             "48.8566", "Paris",     "16.3738", "48.2082", "Vienna",   "4.8952",
@@ -310,6 +308,16 @@ TEST_F(GeoFamilyTest, GeoRadiusRO) {
 
   resp = Run({"GEORADIUS_RO", "Europe", "13.4050", "52.5200", "900", "KM", "STORE", "store_key"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"GEORADIUS_RO", "Europe", "13.4050", "52.5200", "500", "KM", "COUNT", "3",
+              "WITHCOORD", "WITHDIST"});
+  EXPECT_THAT(
+      resp,
+      RespArray(ElementsAre(
+          RespArray(ElementsAre("Berlin", DoubleArg(0.00017343178521311378),
+                                RespArray(ElementsAre(DoubleArg(13.4050), DoubleArg(52.5200))))),
+          RespArray(ElementsAre("Dublin", DoubleArg(487.5619030644293),
+                                RespArray(ElementsAre(DoubleArg(6.2603), DoubleArg(53.3498))))))));
 }
 
 TEST_F(GeoFamilyTest, GeoRadiusByMemberUb) {
