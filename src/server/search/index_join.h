@@ -40,6 +40,10 @@ using Key = std::pair<ShardId, search::DocId>;
 using Entry = std::pair<Key, Vector<JoinableValue> /*fields values of this key*/>;
 using EntriesPerIndex = absl::Span<const Vector<Entry> /*one index can store several keys*/>;
 
+// TODO: comments
+using OwnedJoinableValue = std::variant<double, std::string>;
+using OwnedEntry = std::pair<Key, Vector<OwnedJoinableValue>>;
+
 // Stores data for single join expression,
 // e.g. index1.field1 = index2.field2:
 // field - "field1", foreign_index - "index2", foreign_field - "field2"
