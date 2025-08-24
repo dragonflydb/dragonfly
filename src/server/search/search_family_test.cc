@@ -3099,4 +3099,108 @@ TEST_F(SearchFamilyTest, AggregateWithLoadFromSyntaxErrors) {
               ErrArg("Duplicate index alias in LOAD_FROM: 'idx2'"));
 }
 
+TEST_F(SearchFamilyTest, AggregateWithLoadFromSortingAndLimiting) {
+  Run({"ft.create", "idx1", "ON", "HASH", "SCHEMA", "num1", "NUMERIC", "str1", "TEXT"});
+  Run({"ft.create", "idx2", "ON", "HASH", "SCHEMA", "num2", "NUMERIC", "str2", "TEXT"});
+
+  std::vector<::testing::Matcher<RespExpr>> matchers;
+  for (int i = 0; i < 100; ++i) {
+    const std::string num_value = std::to_string(i);
+    const std::string str_value = absl::StrCat("value", i);
+    Run({"hset", absl::StrCat("k1:", i), "num1", num_value, "str1", str_value});
+    Run({"hset", absl::StrCat("k2:", i), "num2", num_value, "str2", str_value});
+
+    if (i > 79 && i <= 89) {
+      // Insert to beginning because we will sort DESCENDING
+      matchers.emplace(matchers.begin(), IsMap("idx1.num1", num_value, "idx1.str1", str_value,
+                                               "idx2.num2", num_value, "idx2.str2", str_value));
+    }
+  }
+  DCHECK_EQ(matchers.size(), 10u);
+  matchers.insert(matchers.begin(), IntArg(10));
+
+  auto resp = Run({"ft.aggregate",
+                   "idx1",
+                   "*",
+                   "LOAD",
+                   "4",
+                   "idx1.num1",
+                   "idx1.str1",
+                   "idx2.num2",
+                   "idx2.str2",
+                   "LOAD_FROM",
+                   "idx2",
+                   "1",
+                   "idx2.num2=idx1.num1",
+                   "SORTBY",
+                   "2",
+                   "@idx1.num1",
+                   "DESC",
+                   "LIMIT",
+                   "10",
+                   "10"});
+
+  EXPECT_THAT(resp.GetVec(), ElementsAreArray(matchers));
+}
+
+TEST_F(SearchFamilyTest, AggregateWithLoadFromSortBySeveralFields) {
+  Run({"ft.create", "idx1", "ON", "HASH", "SCHEMA", "num1", "NUMERIC", "str1", "TEXT", "num3",
+       "NUMERIC"});
+  Run({"ft.create", "idx2", "ON", "HASH", "SCHEMA", "num2", "NUMERIC", "str2", "TEXT", "num4",
+       "NUMERIC"});
+
+  std::vector<std::pair<int, std::string>> expected;
+  for (int i = 0; i < 100; ++i) {
+    const std::string num_value = std::to_string(i % 10);  // Only 10 distinct values
+    const std::string str_value = absl::StrCat("value", i);
+    Run({"hset", absl::StrCat("k1:", i), "num1", num_value, "str1", str_value, "num3",
+         std::to_string(i)});
+    Run({"hset", absl::StrCat("k2:", i), "num2", num_value, "str2", str_value, "num4",
+         std::to_string(i)});
+
+    expected.emplace_back(i % 10, str_value);
+  }
+
+  // Sort by num1 ASC, str1 DESC
+  std::sort(expected.begin(), expected.end(), [](const auto& a, const auto& b) {
+    if (a.first != b.first) {
+      return a.first < b.first;  // Ascending order for num1
+    }
+    return a.second > b.second;  // Descending order for str1
+  });
+
+  std::vector<::testing::Matcher<RespExpr>> matchers;
+  matchers.push_back(IntArg(20));
+  for (size_t i = 50; i < 70; ++i) {
+    const auto& [num, str] = expected[i];
+    matchers.emplace_back(IsMap("idx1.num1", std::to_string(num), "idx1.str1", str, "idx2.num2",
+                                std::to_string(num), "idx2.str2", str));
+  }
+
+  auto resp = Run({"ft.aggregate",
+                   "idx1",
+                   "*",
+                   "LOAD",
+                   "4",
+                   "idx1.num1",
+                   "idx1.str1",
+                   "idx2.num2",
+                   "idx2.str2",
+                   "LOAD_FROM",
+                   "idx2",
+                   "1",
+                   "idx2.num4=idx1.num3",
+                   "SORTBY",
+                   "4",
+                   "@idx1.num1",
+                   "ASC",
+                   "@idx1.str1",
+                   "DESC",
+                   "LIMIT",
+                   "50",
+                   "20"});
+
+  EXPECT_THAT(resp.GetVec(), ElementsAreArray(matchers));
+}
+
 }  // namespace dfly

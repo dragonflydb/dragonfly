@@ -523,6 +523,14 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
   // Used for join params
   absl::flat_hash_set<std::string> current_known_indexes;
   current_known_indexes.insert(std::string{params.index});
+  while (parser->HasNext() && parser->Check("LOAD_FROM")) {
+    auto join_params = ParseAggregatorJoinParams(parser, &current_known_indexes);
+    if (!join_params) {
+      return make_unexpected(join_params.error());
+    }
+    params.joins.emplace_back(std::move(join_params).value());
+  }
+  const bool joining_enabled = !params.joins.empty();
 
   while (parser->HasNext()) {
     // GROUPBY nargs property [property ...]
@@ -578,14 +586,23 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
         return make_unexpected(sort_params.error());  // Propagate the specific error
       }
 
-      params.steps.push_back(aggregate::MakeSortStep(std::move(sort_params).value()));
+      if (!joining_enabled || params.join_agg_params.HasValue()) {
+        params.steps.push_back(aggregate::MakeSortStep(std::move(sort_params).value()));
+      } else {
+        params.join_agg_params.sort = std::move(sort_params).value();
+      }
       continue;
     }
 
     // LIMIT
     if (parser->Check("LIMIT")) {
       auto [offset, num] = parser->Next<size_t, size_t>();
-      params.steps.push_back(aggregate::MakeLimitStep(offset, num));
+      if (!joining_enabled || params.join_agg_params.HasLimit()) {
+        params.steps.push_back(aggregate::MakeLimitStep(offset, num));
+      } else {
+        params.join_agg_params.limit_offset = offset;
+        params.join_agg_params.limit_total = num;
+      }
       continue;
     }
 
@@ -600,12 +617,7 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
     }
 
     if (parser->Check("LOAD_FROM")) {
-      auto join_params = ParseAggregatorJoinParams(parser, &current_known_indexes);
-      if (!join_params) {
-        return make_unexpected(join_params.error());
-      }
-      params.joins.emplace_back(std::move(join_params).value());
-      continue;
+      return CreateSyntaxError("LOAD_FROM cannot be applied after projectors or reducers"sv);
     }
 
     return CreateSyntaxError(absl::StrCat("Unknown clause: ", parser->Peek()));
@@ -616,6 +628,12 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
 
 // Data that we need at the first step of join
 struct PreprocessedJoinData {
+  struct SortParam {
+    size_t index;
+    size_t field_index;
+    SortOrder order;
+  };
+
   explicit PreprocessedJoinData(size_t n)
       : indexes(n), needed_fields(n), joins_per_index(n), fields_to_load_per_index(n) {
   }
@@ -631,6 +649,8 @@ struct PreprocessedJoinData {
   join::Vector<join::JoinExpressionsVec> joins_per_index;
   // For each index we store the fields that should be loaded from the document after the join
   join::Vector<join::Vector<std::string_view>> fields_to_load_per_index;
+  // Maps field names to the shard_id and their index in the needed_fields vector
+  join::Vector<SortParam> sort_params;
 };
 
 io::Result<PreprocessedJoinData, ErrorReply> PreprocessDataForJoin(std::string_view index,
@@ -654,19 +674,19 @@ io::Result<PreprocessedJoinData, ErrorReply> PreprocessDataForJoin(std::string_v
   // for each field name we store its index
   // Also collect joins for each index
   std::vector<absl::flat_hash_map<std::string_view, size_t>> needed_fields(n + 1);
+
+  auto insert = [&](std::string_view field, auto* map) -> size_t {
+    auto it = map->find(field);
+    if (it == map->end()) {
+      const size_t field_index = map->size();
+      map->emplace(field, field_index);
+      return field_index;
+    }
+    return it->second;
+  };
+
   for (size_t i = 0; i < n; ++i) {
     const auto& join = params.joins[i];
-
-    auto insert = [&](std::string_view field, auto* map) -> size_t {
-      auto it = map->find(field);
-      if (it == map->end()) {
-        const size_t field_index = map->size();
-        map->emplace(field, field_index);
-        return field_index;
-      }
-      return it->second;
-    };
-
     for (const auto& condition : join.conditions) {
       size_t field_index = insert(condition.field, &needed_fields[i + 1]);
 
@@ -682,6 +702,25 @@ io::Result<PreprocessedJoinData, ErrorReply> PreprocessDataForJoin(std::string_v
       // Update joins for this index
       result.joins_per_index[i + 1].emplace_back(
           join::JoinExpression{field_index, foreign_index, foreign_field_index});
+    }
+  }
+
+  // Collect fields needed for sorting
+  // Max option will be temprorary ignored
+  if (params.join_agg_params.sort) {
+    for (const auto& sort_field : params.join_agg_params.sort.value().fields) {
+      auto [index_alias, field_name] = Split(sort_field.first, '.');
+
+      auto it = result.alias_to_index.find(index_alias);
+      if (it == result.alias_to_index.end()) {
+        return CreateSyntaxError(absl::StrCat("Unknown index alias '", index_alias,
+                                              "' in the SORTBY option. Field: '", field_name, "'"));
+      }
+
+      size_t index = it->second;
+      size_t field_index = insert(field_name, &needed_fields[index]);
+      result.sort_params.push_back(
+          PreprocessedJoinData::SortParam{index, field_index, sort_field.second});
     }
   }
 
@@ -750,6 +789,66 @@ join::Vector<join::Vector<join::Entry>> MergePreaggregatedShardJoinData(
   }
 
   return indexes_entries;
+}
+
+join::Vector<join::Vector<join::Key>> DoJoin(
+    absl::Span<const std::vector<join::Vector<join::OwnedEntry>>> preaggregated_shard_data,
+    const AggregateParams& params, const PreprocessedJoinData& join_data) {
+  using join::KeyIndexes;
+
+  auto indexes_entries = MergePreaggregatedShardJoinData(preaggregated_shard_data);
+
+  auto sort_and_limit = [&](std::vector<KeyIndexes>* joined_entries) {
+    const size_t offset = params.join_agg_params.limit_offset;
+    const size_t total = params.join_agg_params.limit_total;
+    if (offset >= joined_entries->size()) {
+      joined_entries->clear();
+      return;
+    }
+
+    const auto& sort_params = join_data.sort_params;
+    auto comparator = [&](const KeyIndexes& l, const KeyIndexes& r) {
+      for (const auto& sort_param : sort_params) {
+        size_t index = sort_param.index;
+        const join::JoinableValue& l_value =
+            indexes_entries[index][l[index]].second[sort_param.field_index];
+        const join::JoinableValue& r_value =
+            indexes_entries[index][r[index]].second[sort_param.field_index];
+
+        if (l_value == r_value) {
+          continue;
+        }
+        return sort_param.order == SortOrder::ASC ? l_value < r_value : l_value > r_value;
+      }
+      return false;
+    };
+
+    size_t limit = offset + total;
+    if (!sort_params.empty()) {
+      if (limit >= joined_entries->size()) {
+        std::sort(joined_entries->begin(), joined_entries->end(), std::move(comparator));
+      } else {
+        std::partial_sort(joined_entries->begin(), joined_entries->begin() + limit,
+                          joined_entries->end(), std::move(comparator));
+        joined_entries->resize(limit);
+      }
+    }
+
+    size_t new_limit = std::min(limit, joined_entries->size());
+    if (offset) {
+      for (size_t i = offset; i < new_limit; ++i) {
+        auto& dest = (*joined_entries)[i - offset];
+        auto& src = (*joined_entries)[i];
+        DCHECK(dest.size() == src.size());
+        dest = std::move(src);
+      }
+    }
+
+    size_t new_size = std::min(total, joined_entries->size() - offset);
+    joined_entries->resize(new_size);
+  };
+
+  return join::JoinAllIndexes(indexes_entries, join_data.joins_per_index, sort_and_limit);
 }
 
 std::vector<aggregate::DocValues> MergeJoinedKeysWithData(
@@ -1397,8 +1496,7 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
         false);
 
     // Do join
-    auto joined_entries = join::JoinAllIndexes(
-        MergePreaggregatedShardJoinData(preaggregated_shard_data), data_for_join->joins_per_index);
+    auto joined_entries = DoJoin(preaggregated_shard_data, *params, *data_for_join);
 
     // Collect doc_ids per index that were joined
     // Each shard stores set of doc_ids per each index that was joined
