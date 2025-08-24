@@ -6,6 +6,8 @@
 
 #include "absl/strings/str_split.h"
 #include "facade/resp_expr.h"
+#include "util/fibers/detail/fiber_interface.h"
+#include "util/fibers/proactor_base.h"
 #include "util/fibers/synchronization.h"
 
 #ifdef __FreeBSD__
@@ -129,6 +131,12 @@ ABSL_FLAG(uint32_t, uring_wake_mode, 1,
           "notification");
 
 ABSL_FLAG(uint32_t, uring_submit_threshold, 1u << 31, "");
+
+ABSL_FLAG(uint32_t, scheduler_background_budget, 50'000, "Background fiber budget in nanoseconds");
+ABSL_FLAG(uint32_t, scheduler_background_sleep_prob, 50,
+          "Sleep probability of background fibers on reaching budget");
+ABSL_FLAG(uint32_t, scheduler_background_warrant, 5,
+          "Percentage of guaranteed cpu time for background fibers");
 
 ABSL_FLAG(uint32_t, squash_stats_latency_lower_limit, 0,
           "If set, will not track latency stats below this threshold (usec). ");
@@ -739,6 +747,17 @@ void UpdateUringFlagsOnThread() {
 #endif
 }
 
+void UpdateSchedulerFlagsOnThread() {
+  using fb2::detail::Scheduler;
+  auto* sched = fb2::detail::FbInitializer().sched;
+  sched->UpdateConfig(&Scheduler::Config::budget_background_fib,
+                      GetFlag(FLAGS_scheduler_background_budget));
+  sched->UpdateConfig(&Scheduler::Config::background_sleep_prob,
+                      GetFlag(FLAGS_scheduler_background_sleep_prob));
+  sched->UpdateConfig(&Scheduler::Config::background_warrant_pct,
+                      GetFlag(FLAGS_scheduler_background_warrant));
+}
+
 void SetHuffmanTable(const std::string& huffman_table) {
   if (huffman_table.empty())
     return;
@@ -872,6 +891,12 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   RegisterMutableFlags(&config_registry,
                        facade::GetFlagNames(FLAGS_uring_wake_mode, FLAGS_uring_submit_threshold),
                        []() { UpdateUringFlagsOnThread(); });
+  // Register scheduler flags
+  RegisterMutable(
+      &config_registry,
+      facade::GetFlagNames(FLAGS_scheduler_background_budget, FLAGS_scheduler_background_sleep_prob,
+                           FLAGS_scheduler_background_warrant),
+      []() { UpdateSchedulerFlagsOnThread(); });
 
   config_registry.RegisterSetter<MemoryBytesFlag>("maxmemory", [](const MemoryBytesFlag& flag) {
     // TODO: reduce code reliance on constant direct access of max_memory_limit
@@ -954,6 +979,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     facade::Connection::UpdateFromFlags();
     UpdateFromFlagsOnThread();
     UpdateUringFlagsOnThread();
+    UpdateSchedulerFlagsOnThread();
   });
   SetHuffmanTable(GetFlag(FLAGS_huffman_table));
 
