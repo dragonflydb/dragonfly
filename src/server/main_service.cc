@@ -754,7 +754,8 @@ void UpdateUringFlagsOnThread() {
 
 void UpdateSchedulerFlagsOnThread() {
   using fb2::detail::Scheduler;
-  auto* sched = fb2::detail::FbInitializer().sched;
+  // TODO: expose FbInitializer or introduce FiberScheduler
+  auto* sched = util::fb2::detail::FiberActive()->scheduler();
   sched->UpdateConfig(&Scheduler::Config::budget_background_fib,
                       GetFlag(FLAGS_scheduler_background_budget));
   sched->UpdateConfig(&Scheduler::Config::background_sleep_prob,
@@ -897,7 +898,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
                        facade::GetFlagNames(FLAGS_uring_wake_mode, FLAGS_uring_submit_threshold),
                        []() { UpdateUringFlagsOnThread(); });
   // Register scheduler flags
-  RegisterMutable(
+  RegisterMutableFlags(
       &config_registry,
       facade::GetFlagNames(FLAGS_scheduler_background_budget, FLAGS_scheduler_background_sleep_prob,
                            FLAGS_scheduler_background_warrant),
