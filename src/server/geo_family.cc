@@ -773,7 +773,7 @@ void GeoFamily::GeoRadiusByMember(CmdArgList args, const CommandContext& cmd_cnt
   GeoSearchStoreGeneric(cmd_cntx.tx, builder, shape, key, member, geo_ops);
 }
 
-void GeoFamily::GeoRadius(CmdArgList args, const CommandContext& cmd_cntx) {
+void GeoFamily::GeoRadiusGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool read_only) {
   GeoShape shape = {};
   GeoSearchOpts geo_ops;
 
@@ -789,12 +789,21 @@ void GeoFamily::GeoRadius(CmdArgList args, const CommandContext& cmd_cntx) {
   shape.type = CIRCULAR_TYPE;
 
   while (parser.HasNext()) {
+    // try and parse for only RO options first
     auto type =
-        parser.MapNext("STORE", Type::STORE, "STOREDIST", Type::STOREDIST, "ASC", Type::ASC, "DESC",
-                       Type::DESC, "COUNT", Type::COUNT, "WITHCOORD", Type::WITHCOORD, "WITHDIST",
-                       Type::WITHDIST, "WITHHASH", Type::WITHHASH);
+        parser.TryMapNext("ASC", Type::ASC, "DESC", Type::DESC, "COUNT", Type::COUNT, "WITHCOORD",
+                          Type::WITHCOORD, "WITHDIST", Type::WITHDIST, "WITHHASH", Type::WITHHASH);
+    // if writing variant and there there was a mapping failure test for write variant arguments
+    if (!type && !read_only) {
+      type = parser.MapNext("STORE", Type::STORE, "STOREDIST", Type::STOREDIST);
+    }
 
-    switch (type) {
+    // could not map the argument to an argument for RO or write GEORADIUS
+    if (!type) {
+      return builder->SendError("syntax error", kSyntaxErrType);
+    }
+
+    switch (*type) {
       case Type::STORE:
         geo_ops.store_key = parser.Next();
         geo_ops.store = geo_ops.store == GeoStoreType::kNoStore ? GeoStoreType::kStoreHash
@@ -867,6 +876,14 @@ void GeoFamily::GeoRadius(CmdArgList args, const CommandContext& cmd_cntx) {
   GeoSearchStoreGeneric(cmd_cntx.tx, builder, shape, key, "", geo_ops);
 }
 
+void GeoFamily::GeoRadius(CmdArgList args, const CommandContext& cmd_cntx) {
+  GeoRadiusGeneric(args, cmd_cntx, false);
+}
+
+void GeoFamily::GeoRadiusRO(CmdArgList args, const CommandContext& cmd_cntx) {
+  GeoRadiusGeneric(args, cmd_cntx, true);
+}
+
 #define HFUNC(x) SetHandler(&GeoFamily::x)
 
 namespace acl {
@@ -877,21 +894,21 @@ constexpr uint32_t kGeoDist = READ | GEO | SLOW;
 constexpr uint32_t kGeoSearch = READ | GEO | SLOW;
 constexpr uint32_t kGeoRadiusByMember = WRITE | GEO | SLOW;
 constexpr uint32_t kGeoRadius = WRITE | GEO | SLOW;
+constexpr uint32_t kGeoRadiusRO = READ | GEO | SLOW;
 }  // namespace acl
 
 void GeoFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
-  *registry << CI{"GEOADD", CO::FAST | CO::WRITE | CO::DENYOOM, -5, 1, 1, acl::kGeoAdd}.HFUNC(
-                   GeoAdd)
-            << CI{"GEOHASH", CO::FAST | CO::READONLY, -2, 1, 1, acl::kGeoHash}.HFUNC(GeoHash)
-            << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, acl::kGeoPos}.HFUNC(GeoPos)
-            << CI{"GEODIST", CO::READONLY, -4, 1, 1, acl::kGeoDist}.HFUNC(GeoDist)
-            << CI{"GEOSEARCH", CO::READONLY, -7, 1, 1, acl::kGeoSearch}.HFUNC(GeoSearch)
-            << CI{"GEORADIUSBYMEMBER",    CO::WRITE | CO::STORE_LAST_KEY, -5, 1, 1,
-                  acl::kGeoRadiusByMember}
-                   .HFUNC(GeoRadiusByMember)
-            << CI{"GEORADIUS", CO::WRITE | CO::STORE_LAST_KEY, -6, 1, 1, acl::kGeoRadius}.HFUNC(
-                   GeoRadius);
+  *registry
+      << CI{"GEOADD", CO::FAST | CO::WRITE | CO::DENYOOM, -5, 1, 1, acl::kGeoAdd}.HFUNC(GeoAdd)
+      << CI{"GEOHASH", CO::FAST | CO::READONLY, -2, 1, 1, acl::kGeoHash}.HFUNC(GeoHash)
+      << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, acl::kGeoPos}.HFUNC(GeoPos)
+      << CI{"GEODIST", CO::READONLY, -4, 1, 1, acl::kGeoDist}.HFUNC(GeoDist)
+      << CI{"GEOSEARCH", CO::READONLY, -7, 1, 1, acl::kGeoSearch}.HFUNC(GeoSearch)
+      << CI{"GEORADIUSBYMEMBER", CO::WRITE | CO::STORE_LAST_KEY, -5, 1, 1, acl::kGeoRadiusByMember}
+             .HFUNC(GeoRadiusByMember)
+      << CI{"GEORADIUS", CO::WRITE | CO::STORE_LAST_KEY, -6, 1, 1, acl::kGeoRadius}.HFUNC(GeoRadius)
+      << CI{"GEORADIUS_RO", CO::READONLY, -6, 1, 1, acl::kGeoRadiusRO}.HFUNC(GeoRadiusRO);
 }
 
 }  // namespace dfly
