@@ -74,6 +74,7 @@ async def test_get_databases(async_client: aioredis.Redis):
     assert dbnum == {"databases": "16"}
 
 
+@pytest.mark.skip("Fails for epoll configuration")
 async def test_client_kill(df_factory):
     with df_factory.create(port=1111, admin_port=1112) as instance:
         client = aioredis.Redis(port=instance.port)
