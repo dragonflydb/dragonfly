@@ -60,6 +60,7 @@ class ClusterShardMigration {
     });
     JournalReader reader{source, 0};
     TransactionReader tx_reader;
+    uint64_t last_sleep = fb2::ProactorBase::GetMonotonicTimeNs();
 
     while (cntx->IsRunning()) {
       if (pause_) {
@@ -111,6 +112,12 @@ class ClusterShardMigration {
           in_migration_->ReportFatalError(std::string{kIncomingMigrationOOM});
           break;
         }
+      }
+      uint64_t now = fb2::ProactorBase::GetMonotonicTimeNs();
+      if (now - last_sleep >
+          100000) {  // every 100us we do sleep for 20us to allow other coomands to be processed
+        ThisFiber::SleepFor(20us);
+        last_sleep = now;
       }
     }
 
