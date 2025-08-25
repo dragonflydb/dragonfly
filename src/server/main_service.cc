@@ -103,8 +103,13 @@ ABSL_FLAG(bool, expose_http_api, false,
           "If set, will expose a POST /api handler for sending redis commands as json array.");
 
 ABSL_FLAG(facade::MemoryBytesFlag, maxmemory, facade::MemoryBytesFlag{},
-          "Limit on maximum-memory that is used by the database. "
-          "0 - means the program will automatically determine its maximum memory usage. "
+          "Limit on maximum-memory that is used by the database, until data starts to be evicted "
+          "(according to eviction policy). With tiering, this value defines only the size in RAM, "
+          "and not the whole dataset (RAM + SSD). "
+          "Must be *at least* 256MiB per proactor thread. "
+          "Can be any human‑readable bytes values (supports K/M/G/T/P/E with optional B, "
+          "case‑insensitive, both 'GiB' & 'GB' possible). Examples: 300000000, 512MB, 2G, 1.25GiB. "
+          "0 - value will be automatically defined based on the env (ex: machine's capacity). "
           "default: 0");
 
 ABSL_RETIRED_FLAG(
