@@ -121,7 +121,6 @@ add_third_party(
   hdr_histogram
   GIT_REPOSITORY https://github.com/HdrHistogram/HdrHistogram_c/
   GIT_TAG 652d51bcc36744fd1a6debfeb1a8a5f58b14022c
-  GIT_SHALLOW 1
   CMAKE_PASS_FLAGS "-DHDR_LOG_REQUIRED=OFF -DHDR_HISTOGRAM_BUILD_PROGRAMS=OFF
                     -DHDR_HISTOGRAM_INSTALL_SHARED=OFF"
   LIB libhdr_histogram_static.a
