@@ -1415,8 +1415,14 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
+    ConnectionState::ExecInfo& exec_info = dfly_cntx->conn_state.exec_info;
     // TODO: protect against aggregating huge transactions.
-    dfly_cntx->conn_state.exec_info.body.emplace_back(cid, true, args_no_cmd);
+    exec_info.body.emplace_back(cid, true, args_no_cmd);
+    if (const size_t used_memory = exec_info.UsedMemory(); used_memory > 1024 * 1024) {
+      const ConnectionState::ExecInfo::ExecState state = exec_info.state;
+      LOG_EVERY_T(INFO, 1) << "exec info body size " << exec_info.body.size() << ", used bytes "
+                           << used_memory << ", state: " << state;
+    }
     if (cid->IsWriteOnly()) {
       dfly_cntx->conn_state.exec_info.is_write = true;
     }
