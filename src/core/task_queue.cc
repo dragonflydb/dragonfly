@@ -9,6 +9,8 @@
 #include "base/logging.h"
 
 using namespace std;
+using namespace util::fb2;
+
 namespace dfly {
 
 __thread unsigned TaskQueue::blocked_submitters_ = 0;
@@ -25,7 +27,8 @@ void TaskQueue::Start(std::string_view base_name) {
     CHECK(!fb.IsJoinable());
 
     string name = absl::StrCat(base_name, "/", i);
-    fb = util::fb2::Fiber(name, [this] { queue_.Run(); });
+    fb =
+        Fiber(Fiber::Opts{.priority = FiberPriority::HIGH, .name = name}, [this] { queue_.Run(); });
   }
 }
 
