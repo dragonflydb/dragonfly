@@ -210,10 +210,13 @@ void JournalStreamer::StalledDataWriterFiber(std::chrono::milliseconds period_ms
       lsn++;
     }
 
-    // We are done
+    // We are done, register back to the journal so we don't miss any changes
     journal_cb_id_ = journal_->RegisterOnChange(this);
 
     LOG(INFO) << "Last LSN sent in partial sync was " << (lsn - 1);
+    // flush pending
+    AsyncWrite(true);
+
     replication_dispatch_threshold = threshold;
   }
 
