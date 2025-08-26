@@ -2740,4 +2740,467 @@ TEST_F(SearchFamilyTest, BlockSizeOptionFtCreate) {
   resp = Run({"FT.SEARCH", "index", "@number1:[1 3] @number2:[10 30]", "SORTBY", "number1", "ASC"});
   EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3"));
 }
+
+TEST_F(SearchFamilyTest, AggregateWithLoadFromJoinSimple) {
+  Run({"ft.create", "idx1", "ON", "HASH", "SCHEMA", "num1", "NUMERIC", "num2", "NUMERIC"});
+  Run({"ft.create", "idx2", "ON", "HASH", "SCHEMA", "num3", "NUMERIC", "num4", "NUMERIC"});
+
+  Run({"hset", "k1", "num1", "0", "num2", "1"});
+  Run({"hset", "k2", "num1", "1", "num2", "2"});
+
+  Run({"hset", "k3", "num3", "0", "num4", "3"});
+  Run({"hset", "k4", "num3", "1", "num4", "4"});
+
+  auto resp = Run({"ft.aggregate", "idx1", "*", "LOAD", "4", "idx1.num1", "idx1.num2", "idx2.num3",
+                   "idx2.num4", "LOAD_FROM", "idx2", "1", "idx2.num3=idx1.num1"});
+
+  EXPECT_THAT(resp,
+              IsUnordArrayWithSize(
+                  IsMap("idx1.num1", "1", "idx1.num2", "2", "idx2.num3", "1", "idx2.num4", "4"),
+                  IsMap("idx1.num1", "0", "idx1.num2", "1", "idx2.num3", "0", "idx2.num4", "3")));
+}
+
+TEST_F(SearchFamilyTest, AggregateWithLoadFromJoinMultipleJoins) {
+  Run({"ft.create", "idx1", "ON", "HASH", "SCHEMA", "num1", "NUMERIC", "str1", "TEXT"});
+  Run({"ft.create", "idx2", "ON", "HASH", "SCHEMA", "num2", "NUMERIC", "str2", "TAG"});
+  Run({"ft.create", "idx3", "ON", "HASH", "SCHEMA", "num3", "NUMERIC", "str3", "TAG"});
+  Run({"ft.create", "idx4", "ON", "HASH", "SCHEMA", "num4", "NUMERIC", "str4", "TEXT"});
+
+  Run({"hset", "k1", "num1", "0", "str1", "value1"});
+  Run({"hset", "k2", "num1", "1", "str1", "value2"});
+
+  Run({"hset", "k3", "num2", "0", "str2", "value3"});
+  Run({"hset", "k4", "num2", "1", "str2", "value4"});
+
+  Run({"hset", "k5", "num3", "2", "str3", "value1"});
+  Run({"hset", "k6", "num3", "3", "str3", "value2"});
+
+  Run({"hset", "k7", "num4", "2", "str4", "value3"});
+  Run({"hset", "k8", "num4", "3", "str4", "value4"});
+
+  auto resp = Run({"ft.aggregate",
+                   "idx1",
+                   "*",
+                   "LOAD",
+                   "8",
+                   "idx1.num1",
+                   "idx1.str1",
+                   "idx2.num2",
+                   "idx2.str2",
+                   "idx3.num3",
+                   "idx3.str3",
+                   "idx4.num4",
+                   "idx4.str4",
+                   "LOAD_FROM",
+                   "idx2",
+                   "1",
+                   "idx2.num2=idx1.num1",
+                   "LOAD_FROM",
+                   "idx3",
+                   "1",
+                   "idx3.str3=idx1.str1",
+                   "LOAD_FROM",
+                   "idx4",
+                   "1",
+                   "idx4.str4=idx2.str2"});
+
+  EXPECT_THAT(
+      resp,
+      IsUnordArrayWithSize(
+          IsMap("idx1.num1", "1", "idx1.str1", "value2", "idx2.num2", "1", "idx2.str2", "value4",
+                "idx3.num3", "3", "idx3.str3", "value2", "idx4.num4", "3", "idx4.str4", "value4"),
+          IsMap("idx1.num1", "0", "idx1.str1", "value1", "idx2.num2", "0", "idx2.str2", "value3",
+                "idx3.num3", "2", "idx3.str3", "value1", "idx4.num4", "2", "idx4.str4", "value3")));
+
+  // Simple requests
+  resp = Run({"ft.aggregate", "idx1", "*", "LOAD", "4", "idx1.num1", "idx1.str1", "idx2.num2",
+              "idx2.str2", "LOAD_FROM", "idx2", "1", "idx2.num2=idx1.num1"});
+  EXPECT_THAT(
+      resp,
+      IsUnordArrayWithSize(
+          IsMap("idx1.num1", "1", "idx1.str1", "value2", "idx2.num2", "1", "idx2.str2", "value4"),
+          IsMap("idx1.num1", "0", "idx1.str1", "value1", "idx2.num2", "0", "idx2.str2", "value3")));
+
+  resp = Run({"ft.aggregate", "idx1", "*", "LOAD", "4", "idx1.num1", "idx1.str1", "idx3.num3",
+              "idx3.str3", "LOAD_FROM", "idx3", "1", "idx3.str3=idx1.str1"});
+  EXPECT_THAT(
+      resp,
+      IsUnordArrayWithSize(
+          IsMap("idx1.num1", "1", "idx1.str1", "value2", "idx3.num3", "3", "idx3.str3", "value2"),
+          IsMap("idx1.num1", "0", "idx1.str1", "value1", "idx3.num3", "2", "idx3.str3", "value1")));
+
+  resp = Run({"ft.aggregate", "idx2", "*", "LOAD", "4", "idx2.num2", "idx2.str2", "idx4.num4",
+              "idx4.str4", "LOAD_FROM", "idx4", "1", "idx4.str4=idx2.str2"});
+  EXPECT_THAT(
+      resp,
+      IsUnordArrayWithSize(
+          IsMap("idx2.num2", "1", "idx2.str2", "value4", "idx4.num4", "3", "idx4.str4", "value4"),
+          IsMap("idx2.num2", "0", "idx2.str2", "value3", "idx4.num4", "2", "idx4.str4", "value3")));
+
+  resp = Run({"ft.aggregate", "idx3", "*", "LOAD", "4", "idx3.num3", "idx3.str3", "idx4.num4",
+              "idx4.str4", "LOAD_FROM", "idx4", "1", "idx3.num3=idx4.num4"});
+  EXPECT_THAT(
+      resp,
+      IsUnordArrayWithSize(
+          IsMap("idx3.num3", "3", "idx3.str3", "value2", "idx4.num4", "3", "idx4.str4", "value4"),
+          IsMap("idx3.num3", "2", "idx3.str3", "value1", "idx4.num4", "2", "idx4.str4", "value3")));
+}
+
+TEST_F(SearchFamilyTest, AggregateWithLoadFromMultipleFields) {
+  Run({"ft.create", "idx1", "ON", "HASH", "SCHEMA", "num1", "NUMERIC", "str1", "TEXT", "num2",
+       "NUMERIC"});
+  Run({"ft.create", "idx2", "ON", "HASH", "SCHEMA", "num2", "NUMERIC", "str2", "TAG", "num3",
+       "NUMERIC"});
+  Run({"ft.create", "idx3", "ON", "HASH", "SCHEMA", "num3", "NUMERIC", "str3", "TEXT", "num4",
+       "NUMERIC"});
+
+  Run({"hset", "k1", "num1", "0", "str1", "value1", "num2", "5"});
+  Run({"hset", "k2", "num1", "1", "str1", "value2", "num2", "10"});
+
+  Run({"hset", "k3", "num2", "1", "str2", "value3", "num3", "10"});
+  Run({"hset", "k4", "num2", "0", "str2", "value4", "num3", "5"});
+
+  Run({"hset", "k5", "num3", "2", "str3", "value4", "num4", "5"});
+  Run({"hset", "k6", "num3", "3", "str3", "value3", "num4", "10"});
+
+  auto resp = Run({"ft.aggregate",
+                   "idx1",
+                   "*",
+                   "LOAD",
+                   "9",
+                   "idx1.num1",
+                   "idx1.str1",
+                   "idx1.num2",
+                   "idx2.num2",
+                   "idx2.str2",
+                   "idx2.num3",
+                   "idx3.num3",
+                   "idx3.str3",
+                   "idx3.num4",
+                   "LOAD_FROM",
+                   "idx2",
+                   "2",
+                   "idx1.num1=idx2.num2",
+                   "idx1.num2=idx2.num3",
+                   "LOAD_FROM",
+                   "idx3",
+                   "3",
+                   "idx1.num2=idx3.num4",
+                   "idx2.num3=idx3.num4",
+                   "idx2.str2=idx3.str3"});
+
+  EXPECT_THAT(
+      resp, IsUnordArrayWithSize(IsMap("idx1.num1", "1", "idx1.str1", "value2", "idx1.num2", "10",
+                                       "idx2.num2", "1", "idx2.str2", "value3", "idx2.num3", "10",
+                                       "idx3.num3", "3", "idx3.str3", "value3", "idx3.num4", "10"),
+                                 IsMap("idx1.num1", "0", "idx1.str1", "value1", "idx1.num2", "5",
+                                       "idx2.num2", "0", "idx2.str2", "value4", "idx2.num3", "5",
+                                       "idx3.num3", "2", "idx3.str3", "value4", "idx3.num4", "5")));
+}
+
+TEST_F(SearchFamilyTest, AggregateWithLoadFromSeveralCopiesOfSameKey) {
+  Run({"ft.create", "idx1", "ON", "HASH", "SCHEMA", "num1", "NUMERIC", "str1", "TEXT", "num2",
+       "NUMERIC"});
+  Run({"ft.create", "idx2", "ON", "HASH", "SCHEMA", "num2", "NUMERIC", "str2", "TAG", "num3",
+       "NUMERIC"});
+  Run({"ft.create", "idx3", "ON", "HASH", "SCHEMA", "num3", "NUMERIC", "str3", "TEXT", "num4",
+       "NUMERIC"});
+
+  Run({"hset", "k1", "num1", "0", "str1", "value1", "num2", "5"});
+  Run({"hset", "k2", "num1", "1", "str1", "value2", "num2", "10"});
+
+  Run({"hset", "k3", "num2", "1", "str2", "value3", "num3", "10"});
+  Run({"hset", "k4", "num2", "0", "str2", "value4", "num3", "5"});
+
+  Run({"hset", "k5", "num3", "2", "str3", "value1", "num4", "15"});
+  Run({"hset", "k6", "num3", "3", "str3", "value1", "num4", "20"});
+  Run({"hset", "k7", "num3", "4", "str3", "value2", "num4", "25"});
+  Run({"hset", "k8", "num3", "5", "str3", "value2", "num4", "30"});
+
+  auto resp = Run({"ft.aggregate",
+                   "idx1",
+                   "*",
+                   "LOAD",
+                   "9",
+                   "idx1.num1",
+                   "idx1.str1",
+                   "idx1.num2",
+                   "idx2.num2",
+                   "idx2.str2",
+                   "idx2.num3",
+                   "idx3.num3",
+                   "idx3.str3",
+                   "idx3.num4",
+                   "LOAD_FROM",
+                   "idx2",
+                   "2",
+                   "idx1.num1=idx2.num2",
+                   "idx1.num2=idx2.num3",
+                   "LOAD_FROM",
+                   "idx3",
+                   "1",  // Multiple copies of the same key
+                   "idx1.str1=idx3.str3"});
+
+  EXPECT_THAT(resp, IsUnordArrayWithSize(
+                        IsMap("idx1.num1", "0", "idx1.str1", "value1", "idx1.num2", "5",
+                              "idx2.num2", "0", "idx2.str2", "value4", "idx2.num3", "5",
+                              "idx3.num3", "2", "idx3.str3", "value1", "idx3.num4", "15"),
+                        IsMap("idx1.num1", "0", "idx1.str1", "value1", "idx1.num2", "5",
+                              "idx2.num2", "0", "idx2.str2", "value4", "idx2.num3", "5",
+                              "idx3.num3", "3", "idx3.str3", "value1", "idx3.num4", "20"),
+                        IsMap("idx1.num1", "1", "idx1.str1", "value2", "idx1.num2", "10",
+                              "idx2.num2", "1", "idx2.str2", "value3", "idx2.num3", "10",
+                              "idx3.num3", "4", "idx3.str3", "value2", "idx3.num4", "25"),
+                        IsMap("idx1.num1", "1", "idx1.str1", "value2", "idx1.num2", "10",
+                              "idx2.num2", "1", "idx2.str2", "value3", "idx2.num3", "10",
+                              "idx3.num3", "5", "idx3.str3", "value2", "idx3.num4", "30")));
+}
+
+TEST_F(SearchFamilyTest, AggregateWithLoadFromNoMatches) {
+  Run({"ft.create", "idx1", "ON", "HASH", "SCHEMA", "num1", "NUMERIC", "str1", "TEXT"});
+  Run({"ft.create", "idx2", "ON", "HASH", "SCHEMA", "num2", "NUMERIC", "str2", "TEXT"});
+
+  Run({"hset", "k1", "num1", "0", "str1", "value1"});
+  Run({"hset", "k2", "num1", "1", "str1", "value2"});
+
+  Run({"hset", "k3", "num2", "0", "str2", "value3"});
+  Run({"hset", "k4", "num2", "1", "str2", "value4"});
+
+  auto resp =
+      Run({"ft.aggregate", "idx1", "*", "LOAD", "4", "idx1.num1", "idx1.str1", "idx2.num2",
+           "idx2.str2", "LOAD_FROM", "idx2", "2", "idx2.num2=idx1.num1", "idx2.str2=idx1.str1"});
+
+  EXPECT_THAT(resp, IntArg(0));  // No matches, so result should be empty
+}
+
+TEST_F(SearchFamilyTest, AggregateWithLoadFromQueries) {
+  Run({"ft.create", "idx1", "ON", "HASH", "SCHEMA", "num1", "NUMERIC", "str1", "TAG"});
+  Run({"ft.create", "idx2", "ON", "HASH", "SCHEMA", "num2", "NUMERIC", "str2", "TEXT"});
+
+  std::vector<::testing::Matcher<RespExpr>> matchers;
+  for (int i = 0; i < 100; ++i) {
+    // For even i str1 and str2 should match, for odd i they should not
+    std::string str1 = absl::StrCat("tag", i);
+    std::string str2 = i % 2 == 0 ? str1 : absl::StrCat("text", i);
+    Run({"hset", absl::StrCat("k1:", i), "num1", std::to_string(i), "str1", str1});
+    Run({"hset", absl::StrCat("k2:", i), "num2", std::to_string(i), "str2", str2});
+
+    if (i % 2 == 0 && i >= 35 && i <= 57) {
+      matchers.emplace_back(IsMap("idx1.num1", std::to_string(i), "idx1.str1", str1, "idx2.num2",
+                                  std::to_string(i), "idx2.str2", str2));
+    }
+  }
+  matchers.insert(matchers.begin(), IntArg(matchers.size()));
+
+  auto resp = Run({"ft.aggregate", "idx1", "@num1:[35 57]", "LOAD", "4", "idx1.num1", "idx1.str1",
+                   "idx2.num2", "idx2.str2", "LOAD_FROM", "idx2", "1", "idx2.str2=idx1.str1",
+                   "QUERY", "@num2:[35 57]"});
+
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAreArray(matchers));
+
+  // Another case
+  Run({"ft.create", "idx3", "ON", "HASH", "SCHEMA", "num3", "NUMERIC", "str3", "TAG"});
+  Run({"ft.create", "idx4", "ON", "HASH", "SCHEMA", "num4", "NUMERIC", "str4", "TAG"});
+
+  size_t num3 = 1;
+  size_t num4 = 5;
+
+  std::vector<std::string> tag_values = {"tag1", "tag2", "tag3", "tag4"};
+  matchers.clear();
+  for (size_t i = 0; i < 100; ++i) {
+    std::string str = tag_values[i % tag_values.size()];
+    const size_t num3_actual = i * 100 + num3;
+    const size_t num4_actual = i * 100 + num4;
+
+    Run({"hset", absl::StrCat("k3:", i), "num3", std::to_string(num3_actual), "str3", str});
+    Run({"hset", absl::StrCat("k4:", i), "num4", std::to_string(num4_actual), "str4", str});
+
+    if ((str == "tag1" || str == "tag4") && num3 == num4) {
+      matchers.emplace_back(IsMap("idx3.num3", std::to_string(num3_actual), "idx3.str3", str,
+                                  "idx4.num4", std::to_string(num4_actual), "idx4.str4", str));
+    }
+
+    num3 = (num3 + 3) % 12;
+    num4 = (num4 + 7) % 12;
+  }
+  DCHECK(!matchers.empty());
+  matchers.insert(matchers.begin(), IntArg(matchers.size()));
+
+  resp = Run({"ft.aggregate", "idx3", "@str3:{tag1|tag4}", "LOAD", "4", "idx3.num3", "idx3.str3",
+              "idx4.num4", "idx4.str4", "LOAD_FROM", "idx4", "1", "idx4.num4=idx3.num3", "QUERY",
+              "@str4:{tag1|tag4}"});
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAreArray(matchers));
+}
+
+TEST_F(SearchFamilyTest, AggregateWithLoadFromSyntaxErrors) {
+  Run({"ft.create", "idx1", "ON", "HASH", "SCHEMA", "num1", "NUMERIC", "str1", "TEXT"});
+  Run({"ft.create", "idx2", "ON", "HASH", "SCHEMA", "num2", "NUMERIC", "str2", "TEXT"});
+  Run({"ft.create", "idx3", "ON", "HASH", "SCHEMA", "num3", "NUMERIC", "str3", "TEXT"});
+
+  Run({"hset", "k1", "num1", "0", "str1", "str"});
+  Run({"hset", "k2", "num2", "0", "str2", "str"});
+  Run({"hset", "k3", "num3", "0", "str3", "str"});
+
+  // Test when index does not exist
+  EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM",
+                   "idx4", "1", "idx4.num2=idx1.num1"}),
+              IntArg(0));
+
+  // Test when index exists but no LOAD_FROM is specified
+  EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM",
+                   "idx3", "1", "idx3.num3=idx2.num2"}),
+              ErrArg("bad arguments for LOAD_FROM: unknown index 'idx2'"));
+
+  // Test when index exists but was specified after it was used
+  EXPECT_THAT(
+      Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM", "idx2",
+           "1", "idx2.num2=idx3.num3", "LOAD_FROM", "idx3", "1", "idx3.str3=idx1.str1"}),
+      ErrArg("bad arguments for LOAD_FROM: unknown index 'idx3'"));
+
+  // Test when LOAD_FROM is not using fields of current index
+  EXPECT_THAT(
+      Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM", "idx2",
+           "1", "idx2.str2=idx1.str1", "LOAD_FROM", "idx3", "1", "idx2.str2=idx1.str1"}),
+      ErrArg("bad arguments for LOAD_FROM: one of the field must be from the current index 'idx3'. "
+             "Got 'idx2.str2' and 'idx1.str1'"));
+
+  // Test when field of index does not exist
+  EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM",
+                   "idx2", "1", "idx2.num2=idx1.nonexistent_field"}),
+              IntArg(0));
+  EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM",
+                   "idx2", "1", "idx2.nonexistent_field=idx1.num1"}),
+              IntArg(0));
+
+  // Test when field in QUERY does not exist in index
+  EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM",
+                   "idx2", "1", "idx2.num2=idx1.num1", "QUERY", "@nonexistent_tag:{tag1|tag2}"}),
+              IntArg(0));
+
+  // Test when field in LOAD does not exist in index
+  EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.non_existent_field",
+                   "LOAD_FROM", "idx2", "1", "idx2.num2=idx1.num1"}),
+              IsUnordArrayWithSize(
+                  IsMap("idx1.num1", "0", "idx1.non_existent_field", ArgType(RespExpr::NIL))));
+
+  // Test index aliases
+  EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "4", "idx1.num1", "idx1.str1", "alias.num2",
+                   "alias.str2", "LOAD_FROM", "idx2", "AS", "alias", "1", "alias.num2=idx1.num1"}),
+              IsUnordArrayWithSize(IsMap("idx1.num1", "0", "idx1.str1", "str", "alias.num2", "0",
+                                         "alias.str2", "str")));
+  EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "4", "idx1.num1", "idx1.str1", "idx2.num2",
+                   "idx2.str2", "LOAD_FROM", "idx2", "AS", "alias", "1", "alias.num2=idx1.num1"}),
+              ErrArg("Unknown index alias 'idx2' in the LOAD option. Field: 'num2'"));
+
+  // Test same index used multiple times
+  EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "4", "idx1.num1", "idx1.str1", "idx2.num2",
+                   "idx2.str2", "LOAD_FROM", "idx2", "1", "idx2.num2=idx1.num1", "LOAD_FROM",
+                   "idx2", "1", "idx2.str2=idx1.str1"}),
+              ErrArg("Duplicate index alias in LOAD_FROM: 'idx2'"));
+}
+
+TEST_F(SearchFamilyTest, AggregateWithLoadFromSortingAndLimiting) {
+  Run({"ft.create", "idx1", "ON", "HASH", "SCHEMA", "num1", "NUMERIC", "str1", "TEXT"});
+  Run({"ft.create", "idx2", "ON", "HASH", "SCHEMA", "num2", "NUMERIC", "str2", "TEXT"});
+
+  std::vector<::testing::Matcher<RespExpr>> matchers;
+  for (int i = 0; i < 100; ++i) {
+    const std::string num_value = std::to_string(i);
+    const std::string str_value = absl::StrCat("value", i);
+    Run({"hset", absl::StrCat("k1:", i), "num1", num_value, "str1", str_value});
+    Run({"hset", absl::StrCat("k2:", i), "num2", num_value, "str2", str_value});
+
+    if (i > 79 && i <= 89) {
+      // Insert to beginning because we will sort DESCENDING
+      matchers.emplace(matchers.begin(), IsMap("idx1.num1", num_value, "idx1.str1", str_value,
+                                               "idx2.num2", num_value, "idx2.str2", str_value));
+    }
+  }
+  DCHECK_EQ(matchers.size(), 10u);
+  matchers.insert(matchers.begin(), IntArg(10));
+
+  auto resp = Run({"ft.aggregate",
+                   "idx1",
+                   "*",
+                   "LOAD",
+                   "4",
+                   "idx1.num1",
+                   "idx1.str1",
+                   "idx2.num2",
+                   "idx2.str2",
+                   "LOAD_FROM",
+                   "idx2",
+                   "1",
+                   "idx2.num2=idx1.num1",
+                   "SORTBY",
+                   "2",
+                   "@idx1.num1",
+                   "DESC",
+                   "LIMIT",
+                   "10",
+                   "10"});
+
+  EXPECT_THAT(resp.GetVec(), ElementsAreArray(matchers));
+}
+
+TEST_F(SearchFamilyTest, AggregateWithLoadFromSortBySeveralFields) {
+  Run({"ft.create", "idx1", "ON", "HASH", "SCHEMA", "num1", "NUMERIC", "str1", "TEXT", "num3",
+       "NUMERIC"});
+  Run({"ft.create", "idx2", "ON", "HASH", "SCHEMA", "num2", "NUMERIC", "str2", "TEXT", "num4",
+       "NUMERIC"});
+
+  std::vector<std::pair<int, std::string>> expected;
+  for (int i = 0; i < 100; ++i) {
+    const std::string num_value = std::to_string(i % 10);  // Only 10 distinct values
+    const std::string str_value = absl::StrCat("value", i);
+    Run({"hset", absl::StrCat("k1:", i), "num1", num_value, "str1", str_value, "num3",
+         std::to_string(i)});
+    Run({"hset", absl::StrCat("k2:", i), "num2", num_value, "str2", str_value, "num4",
+         std::to_string(i)});
+
+    expected.emplace_back(i % 10, str_value);
+  }
+
+  // Sort by num1 ASC, str1 DESC
+  std::sort(expected.begin(), expected.end(), [](const auto& a, const auto& b) {
+    if (a.first != b.first) {
+      return a.first < b.first;  // Ascending order for num1
+    }
+    return a.second > b.second;  // Descending order for str1
+  });
+
+  std::vector<::testing::Matcher<RespExpr>> matchers;
+  matchers.push_back(IntArg(20));
+  for (size_t i = 50; i < 70; ++i) {
+    const auto& [num, str] = expected[i];
+    matchers.emplace_back(IsMap("idx1.num1", std::to_string(num), "idx1.str1", str, "idx2.num2",
+                                std::to_string(num), "idx2.str2", str));
+  }
+
+  auto resp = Run({"ft.aggregate",
+                   "idx1",
+                   "*",
+                   "LOAD",
+                   "4",
+                   "idx1.num1",
+                   "idx1.str1",
+                   "idx2.num2",
+                   "idx2.str2",
+                   "LOAD_FROM",
+                   "idx2",
+                   "1",
+                   "idx2.num4=idx1.num3",
+                   "SORTBY",
+                   "4",
+                   "@idx1.num1",
+                   "ASC",
+                   "@idx1.str1",
+                   "DESC",
+                   "LIMIT",
+                   "50",
+                   "20"});
+
+  EXPECT_THAT(resp.GetVec(), ElementsAreArray(matchers));
+}
+
 }  // namespace dfly

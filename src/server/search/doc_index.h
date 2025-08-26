@@ -20,6 +20,7 @@
 #include "core/search/synonyms.h"
 #include "server/common.h"
 #include "server/search/aggregator.h"
+#include "server/search/index_join.h"
 #include "server/table.h"
 
 namespace dfly {
@@ -64,6 +65,10 @@ struct FieldReference {
 
   std::string_view Identifier(const search::Schema& schema, bool is_json) const {
     return (is_json && IsJsonPath(name_)) ? name_ : schema.LookupAlias(name_);
+  }
+
+  std::string_view Name() const {
+    return name_;
   }
 
   std::string_view OutputName() const {
@@ -122,8 +127,53 @@ struct SearchParams {
 };
 
 struct AggregateParams {
+  struct JoinParams {
+    // Fist field is the index name, second is the field name.
+    using Field = std::pair<std::string, std::string>;
+
+    struct Condition {
+      Condition(std::string_view field_, std::string_view foreign_index_,
+                std::string_view foreign_field_)
+          : field{field_}, foreign_field{Field{foreign_index_, foreign_field_}} {
+      }
+
+      std::string field;
+      Field foreign_field;
+    };
+
+    std::string index;
+    std::string index_alias;
+    std::vector<Condition> conditions;
+    std::string query = "*";
+  };
+
+  /* Can have 2 scenarios:
+      1. No joins - then this is ignored
+      2. Has joins and SORTBY ... LIMIT option - then this is used to sort/limit right after join
+      3. Has joins and LIMIT option - then this is used to limit right after join.
+     Next aggregation steps after first LIMIT or first SORTBY will be applied on the final result,
+     after loading the data for all joined documents. */
+  struct JoinAggregateParams {
+    static constexpr size_t kDefaultLimit = std::numeric_limits<size_t>::max();
+
+    bool HasLimit() const {
+      return limit_total != kDefaultLimit;
+    }
+
+    bool HasValue() const {
+      return HasLimit() || sort.has_value();
+    }
+
+    size_t limit_offset = 0;
+    size_t limit_total = kDefaultLimit;
+    std::optional<aggregate::SortParams> sort;
+  };
+
   std::string_view index, query;
   search::QueryParams params;
+
+  std::vector<JoinParams> joins;
+  JoinAggregateParams join_agg_params;
 
   std::optional<std::vector<FieldReference>> load_fields;
   std::vector<aggregate::AggregationStep> steps;
@@ -160,6 +210,9 @@ class ShardDocIndex {
   friend class ShardDocIndices;
   using DocId = search::DocId;
 
+  // Used in FieldsValuesPerDocId to store values for each field per document
+  using FieldsValues = absl::InlinedVector<search::SortableValue, 4>;
+
   // DocKeyIndex manages mapping document keys to ids and vice versa through a simple interface.
   struct DocKeyIndex {
     DocId Add(std::string_view key);
@@ -187,6 +240,16 @@ class ShardDocIndex {
   std::vector<SearchDocData> SearchForAggregator(const OpArgs& op_args,
                                                  const AggregateParams& params,
                                                  search::SearchAlgorithm* search_algo) const;
+
+  // Methods needed for join operation
+  join::Vector<join::OwnedEntry> PreagregateDataForJoin(
+      const OpArgs& op_args, absl::Span<const std::string_view> join_fields,
+      search::SearchAlgorithm* search_algo) const;
+
+  using FieldsValuesPerDocId = absl::flat_hash_map<DocId, FieldsValues>;
+  FieldsValuesPerDocId LoadKeysData(const OpArgs& op_args,
+                                    const absl::flat_hash_set<search::DocId>& doc_ids,
+                                    absl::Span<const std::string_view> fields_to_load) const;
 
   // Return whether base index matches
   bool Matches(std::string_view key, unsigned obj_code) const;

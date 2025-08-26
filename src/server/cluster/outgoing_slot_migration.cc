@@ -142,7 +142,7 @@ void OutgoingMigration::OnAllShards(
   });
 }
 
-void OutgoingMigration::Finish(GenericError error) {
+void OutgoingMigration::Finish(const GenericError& error) {
   auto next_state = MigrationState::C_FINISHED;
   if (error) {
     // If OOM error move to FATAL, non-recoverable  state
@@ -150,7 +150,7 @@ void OutgoingMigration::Finish(GenericError error) {
       next_state = MigrationState::C_FATAL;
     } else {
       next_state = MigrationState::C_ERROR;
-      exec_st_.ReportError(std::move(error));
+      exec_st_.ReportError(error);
     }
     LOG(WARNING) << "Finish outgoing migration for " << cf_->MyID() << ": "
                  << migration_info_.node_info.id << " with error: " << error.Format();

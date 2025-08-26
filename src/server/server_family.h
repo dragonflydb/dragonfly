@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -139,25 +141,50 @@ struct Metrics {
   absl::flat_hash_map<std::string, hdr_histogram*> cmd_latency_map;
 };
 
-struct LastSaveInfo {
-  // last success save info
-  void SetLastSaveError(const detail::SaveInfo& save_info) {
-    last_error = save_info.error;
-    last_error_time = save_info.save_time;
-    failed_duration_sec = save_info.duration_sec;
-  }
-
+// Contains the state of the last save operation.
+// This object is immutable.
+struct SaveInfoData {
   time_t save_time = 0;  // epoch time in seconds.
   uint32_t success_duration_sec = 0;
-  std::string file_name;                                      //
+  std::string file_name;
   std::vector<std::pair<std::string_view, size_t>> freq_map;  // RDB_TYPE_xxx -> count mapping.
+
   // last error save info
   GenericError last_error;
   time_t last_error_time = 0;      // epoch time in seconds.
   time_t failed_duration_sec = 0;  // epoch time in seconds.
+
   // false if last attempt failed
   bool last_bgsave_status = true;
   bool bgsave_in_progress = false;
+};
+
+// A thread-safe wrapper for SaveInfoData using the Copy-on-Write pattern.
+class ThreadSafeSaveInfo {
+ public:
+  // Returns a snapshot of the current save info.
+  SaveInfoData Get() const {
+    std::lock_guard<util::fb2::Mutex> lock(data_mutex_);
+    return data_;
+  }
+
+  // The modifier function is called under a lock.
+  void Update(std::function<void(SaveInfoData*)> modifier) {
+    std::lock_guard<util::fb2::Mutex> lock(writer_mutex_);
+    SaveInfoData new_data(Get());
+    modifier(&new_data);
+    UpdateData(new_data);
+  }
+
+ private:
+  void UpdateData(const SaveInfoData& new_data) {
+    std::lock_guard<util::fb2::Mutex> lock(data_mutex_);
+    data_ = new_data;
+  }
+
+  mutable util::fb2::Mutex writer_mutex_;
+  mutable util::fb2::Mutex data_mutex_;
+  SaveInfoData data_;
 };
 
 struct SnapshotSpec {
@@ -225,7 +252,7 @@ class ServerFamily {
   // if kDbAll is passed, burns all the databases to the ground.
   std::error_code Drakarys(Transaction* transaction, DbIndex db_ind);
 
-  LastSaveInfo GetLastSaveInfo() const ABSL_LOCKS_EXCLUDED(save_mu_);
+  SaveInfoData GetLastSaveInfo() const;
 
   void FlushAll(Namespace* ns);
 
@@ -295,6 +322,12 @@ class ServerFamily {
   }
 
  private:
+  // Helper to safely get save controller copy
+  std::shared_ptr<detail::SaveStagesController> GetSaveController() const {
+    util::fb2::LockGuard lk{save_mu_};
+    return save_controller_;
+  }
+
   bool HasPrivilegedInterface();
   void JoinSnapshotSchedule();
   void LoadFromSnapshot() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
@@ -312,10 +345,9 @@ class ServerFamily {
   void Memory(CmdArgList args, const CommandContext& cmd_cntx);
   void FlushDb(CmdArgList args, const CommandContext& cmd_cntx);
   void FlushAll(CmdArgList args, const CommandContext& cmd_cntx);
-  void Info(CmdArgList args, const CommandContext& cmd_cntx)
-      ABSL_LOCKS_EXCLUDED(save_mu_, replicaof_mu_);
+  void Info(CmdArgList args, const CommandContext& cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   void Hello(CmdArgList args, const CommandContext& cmd_cntx);
-  void LastSave(CmdArgList args, const CommandContext& cmd_cntx) ABSL_LOCKS_EXCLUDED(save_mu_);
+  void LastSave(CmdArgList args, const CommandContext& cmd_cntx);
   void Latency(CmdArgList args, const CommandContext& cmd_cntx);
   void ReplicaOf(CmdArgList args, const CommandContext& cmd_cntx);
   void AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx);
@@ -404,8 +436,8 @@ class ServerFamily {
 
   time_t start_time_ = 0;  // in seconds, epoch time.
 
-  LastSaveInfo last_save_info_ ABSL_GUARDED_BY(save_mu_);
-  std::unique_ptr<detail::SaveStagesController> save_controller_ ABSL_GUARDED_BY(save_mu_);
+  ThreadSafeSaveInfo thread_safe_save_info_;
+  std::shared_ptr<detail::SaveStagesController> save_controller_ ABSL_GUARDED_BY(save_mu_);
 
   // Used to override save on shutdown behavior that is usually set
   // be --dbfilename.
@@ -429,6 +461,8 @@ class ServerFamily {
 
   mutable util::fb2::Mutex loading_stats_mu_;
   LoadingStats loading_stats_ ABSL_GUARDED_BY(loading_stats_mu_);
+
+  bool legacy_format_metrics_ = true;
 };
 
 // Reusable CLIENT PAUSE implementation that blocks while polling is_pause_in_progress

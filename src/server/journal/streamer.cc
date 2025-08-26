@@ -407,7 +407,7 @@ void RestoreStreamer::Run() {
     if (!cntx_->IsRunning())
       return;
 
-    // If someone else is waiting for the inflight bytes to complete, give it priority.
+    // If someone else throtles due to huge pending_buf_, give it priority.
     // Apparently, continue goes through the loop by checking the condition below, so we check
     // cursor here as well.
     // In addition if bucket writing was too intensive on CPU and we are overloaded.
@@ -416,7 +416,8 @@ void RestoreStreamer::Run() {
     // won't progress here but if we have not, then this fiber will progress withing the
     // CPU budget we defined for it.
     bool should_stall =
-        throttle_waiters_ > 0 || inflight_bytes() > replication_stream_output_limit_cached / 3 ||
+        throttle_waiters_ > 0 ||
+        (pending_buf_.Size() >= replication_stream_output_limit_cached / 3) ||
         cpu_aggregator_.IsOverloaded(absl::GetFlag(FLAGS_migration_buckets_cpu_budget));
     if (cursor && should_stall) {
       ThisFiber::SleepFor(300us);
@@ -557,7 +558,7 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
   } else {
     stats_.buckets_skipped++;
   }
-  ThrottleIfNeeded();
+  // we don't need throttle here, because we throttle after every entry written
 
   return written;
 }
@@ -571,12 +572,19 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
   uint64_t throttle_start = throttle_count_;
   uint64_t throttle_usec_start = total_throttle_wait_usec_;
   if (const PrimeTable::bucket_iterator* bit = req.update()) {
+    if (snapshot_version_ == 0) {
+      // If snapshot_version_ is 0, it means that Cancel() was called and we shouldn't proceed.
+      return;
+    }
     stats_.buckets_on_db_update += WriteBucket(*bit);
   } else {
     string_view key = get<string_view>(req.change);
     table->CVCUponInsert(snapshot_version_, key, [this](PrimeTable::bucket_iterator it) {
-      DCHECK_LT(it.GetVersion(), snapshot_version_);
-      stats_.buckets_on_db_update += WriteBucket(it);
+      if (snapshot_version_ != 0) {  // we need this check because lambda can be called several
+                                     // times and we can preempt in WriteBucket
+        DCHECK_LT(it.GetVersion(), snapshot_version_);
+        stats_.buckets_on_db_update += WriteBucket(it);
+      }
     });
   }
   stats_.throttle_on_db_update += throttle_count_ - throttle_start;

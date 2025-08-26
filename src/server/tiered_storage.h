@@ -6,6 +6,7 @@
 #include <boost/intrusive/list.hpp>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "server/common.h"
 #include "server/table.h"
@@ -81,7 +82,9 @@ class TieredStorage {
 
   TieredStats GetStats() const;
 
-  void UpdateFromFlags();         // Update internal values based on current flag values
+  void UpdateFromFlags();  // Update internal values based on current flag values
+  static std::vector<std::string> GetMutableFlagNames();  // Triggers UpdateFromFlags
+
   bool ShouldOffload() const;     // True if below tiered_offload_threshold
   float WriteDepthUsage() const;  // Ratio (0-1) of used storage_write_depth for stashes
 
@@ -205,6 +208,10 @@ class TieredStorage {
   }
 
   void UpdateFromFlags() {
+  }
+
+  static std::vector<std::string> GetMutableFlagNames() {
+    return {};
   }
 
   bool ShouldOffload() const {

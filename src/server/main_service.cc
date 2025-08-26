@@ -33,6 +33,7 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
+#include "facade/flag_utils.h"
 #include "facade/reply_builder.h"
 #include "facade/reply_capture.h"
 #include "server/acl/acl_commands_def.h"
@@ -102,8 +103,13 @@ ABSL_FLAG(bool, expose_http_api, false,
           "If set, will expose a POST /api handler for sending redis commands as json array.");
 
 ABSL_FLAG(facade::MemoryBytesFlag, maxmemory, facade::MemoryBytesFlag{},
-          "Limit on maximum-memory that is used by the database. "
-          "0 - means the program will automatically determine its maximum memory usage. "
+          "Limit on maximum-memory that is used by the database, until data starts to be evicted "
+          "(according to eviction policy). With tiering, this value defines only the size in RAM, "
+          "and not the whole dataset (RAM + SSD). "
+          "Must be *at least* 256MiB per proactor thread. "
+          "Can be any human‑readable bytes values (supports K/M/G/T/P/E with optional B, "
+          "case‑insensitive, both 'GiB' & 'GB' possible). Examples: 300000000, 512MB, 2G, 1.25GiB. "
+          "0 - value will be automatically defined based on the env (ex: machine's capacity). "
           "default: 0");
 
 ABSL_RETIRED_FLAG(
@@ -111,20 +117,6 @@ ABSL_RETIRED_FLAG(
     "commands with flag denyoom will return OOM when the ratio between maxmemory and used "
     "memory is above this value");
 
-ABSL_FLAG(double, rss_oom_deny_ratio, 1.25,
-          "When the ratio between maxmemory and RSS memory exceeds this value, commands marked as "
-          "DENYOOM will fail with OOM error and new connections to non-admin port will be "
-          "rejected. Negative value disables this feature.");
-
-ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
-          "Maximum size of a value that may be serialized at once during snapshotting or full "
-          "sync. Values bigger than this threshold will be serialized using streaming "
-          "serialization. 0 - to disable streaming mode");
-ABSL_FLAG(uint32_t, max_squashed_cmd_num, 100,
-          "Max number of commands squashed in a single shard during squash optimizaiton");
-
-ABSL_FLAG(uint32_t, max_busy_squash_usec, 1000,
-          "Maximum time in microseconds to execute squashed commands before yielding.");
 ABSL_FLAG(uint32_t, shard_thread_busy_polling_usec, 0,
           "If non-zero, overrides the busy polling parameter for shard threads.");
 
@@ -724,55 +716,31 @@ string FailedCommandToString(std::string_view command, facade::CmdArgList args,
   return result;
 }
 
-template <typename T> auto UpdateServerState(T ServerState::*member) {
-  return [member](T value) {
-    auto cb = [member, value](unsigned, auto*) { ServerState::tlocal()->*member = value; };
-    shard_set->pool()->AwaitBrief(cb);
-  };
+thread_local uint32_t squash_stats_latency_lower_limit_cached;
+
+void UpdateFromFlagsOnThread() {
+  if (uint32_t poll = GetFlag(FLAGS_shard_thread_busy_polling_usec);
+      poll > 0 && EngineShard::tlocal())
+    ProactorBase::me()->SetBusyPollUsec(poll);
+  squash_stats_latency_lower_limit_cached = GetFlag(FLAGS_squash_stats_latency_lower_limit);
 }
 
-thread_local uint32_t squash_stats_latency_lower_limit_cached =
-    absl::GetFlag(FLAGS_squash_stats_latency_lower_limit);
-
-void SetMaxBusySquashUsec(uint32_t val) {
-  shard_set->pool()->AwaitBrief(
-      [=](unsigned, auto*) { MultiCommandSquasher::SetMaxBusySquashUsec(val); });
+std::vector<std::string> GetMutableFlagNames() {
+  return facade::GetFlagNames(FLAGS_shard_thread_busy_polling_usec,
+                              FLAGS_squash_stats_latency_lower_limit);
 }
 
-void SetShardThreadBusyPollingUsec(uint32_t val) {
-  if (val == 0)
-    return;
-
-  shard_set->pool()->AwaitBrief([=](unsigned, auto* pb) {
-    if (EngineShard::tlocal()) {
-      pb->SetBusyPollUsec(val);
-    }
-  });
-}
-
-void SetUringWakeMode(uint32_t mode) {
+void UpdateUringFlagsOnThread() {
 #ifdef __linux__
-  shard_set->pool()->AwaitBrief([mode](unsigned, fb2::ProactorBase* pb) {
-    if (pb->GetKind() == fb2::ProactorBase::IOURING) {
-      fb2::UringProactor* up = static_cast<fb2::UringProactor*>(pb);
-      bool use_msg_ring = mode > 0;
-      bool immediate_flush = mode == 2;
+  if (auto* pb = ProactorBase::me(); pb->GetKind() == fb2::ProactorBase::IOURING) {
+    fb2::UringProactor* up = static_cast<fb2::UringProactor*>(pb);
+    uint32_t mode = absl::GetFlag(FLAGS_uring_wake_mode);
+    uint32_t threshold = absl::GetFlag(FLAGS_uring_submit_threshold);
 
-      up->ConfigureMsgRing(use_msg_ring);
-      up->ConfigureSubmitWakeup(immediate_flush);
-    }
-  });
-#endif
-}
-
-void SetUringSubmitThreshold(uint32_t val) {
-#ifdef __linux__
-  shard_set->pool()->AwaitBrief([val](unsigned, fb2::ProactorBase* pb) {
-    if (pb->GetKind() == fb2::ProactorBase::IOURING) {
-      fb2::UringProactor* up = static_cast<fb2::UringProactor*>(pb);
-      up->SetSubmitQueueThreshold(val);
-    }
-  });
+    up->ConfigureMsgRing(mode > 0);
+    up->ConfigureSubmitWakeup(mode == 2);
+    up->SetSubmitQueueThreshold(threshold);
+  }
 #endif
 }
 
@@ -862,14 +830,19 @@ Service::~Service() {
   shard_set = nullptr;
 }
 
+void RegisterMutableFlags(ConfigRegistry* reg, absl::Span<const std::string> names,
+                          std::function<void()> f) {
+  auto cb = [f](auto&&) {
+    shard_set->pool()->AwaitBrief([f](unsigned tid, auto*) { f(); });
+    return true;
+  };
+  for (std::string_view name : names)
+    reg->RegisterMutable(name, cb);
+}
+
 void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   InitRedisTables();
   facade::Connection::Init(pp_.size());
-
-  config_registry.RegisterSetter<MemoryBytesFlag>("maxmemory", [](const MemoryBytesFlag& flag) {
-    // TODO: reduce code reliance on constant direct access of max_memory_limit
-    max_memory_limit.store(flag.value, memory_order_relaxed);
-  });
 
   config_registry.RegisterMutable("dbfilename");
   config_registry.Register("dbnum");  // equivalent to databases in redis.
@@ -879,58 +852,36 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("masteruser");
   config_registry.RegisterMutable("max_eviction_per_heartbeat");
   config_registry.RegisterMutable("max_segment_to_consider");
-
-  config_registry.RegisterSetter<double>("rss_oom_deny_ratio",
-                                         UpdateServerState(&ServerState::rss_oom_deny_ratio));
-  config_registry.RegisterSetter<size_t>(
-      "serialization_max_chunk_size",
-      UpdateServerState(&ServerState::serialization_max_chunk_size));
-
   config_registry.RegisterMutable("pipeline_squash");
   config_registry.RegisterMutable("lua_mem_gc_threshold");
 
-  config_registry.RegisterSetter<uint32_t>("pipeline_queue_limit", [](uint32_t val) {
-    shard_set->pool()->AwaitBrief(
-        [val](unsigned tid, auto*) { facade::Connection::SetMaxQueueLenThreadLocal(tid, val); });
+  // Register ServerState flags
+  RegisterMutableFlags(&config_registry, ServerState::GetMutableFlagNames(),
+                       []() { ServerState::tlocal()->UpdateFromFlags(); });
+  // Register Connection flags
+  RegisterMutableFlags(&config_registry, facade::Connection::GetMutableFlagNames(),
+                       []() { facade::Connection::UpdateFromFlags(); });
+  // Register tiered storage flags
+  RegisterMutableFlags(&config_registry, TieredStorage::GetMutableFlagNames(), []() {
+    if (auto* es = EngineShard::tlocal(); es && es->tiered_storage()) {
+      es->tiered_storage()->UpdateFromFlags();
+    }
   });
+  // Register main service flags
+  RegisterMutableFlags(&config_registry, GetMutableFlagNames(),
+                       []() { UpdateFromFlagsOnThread(); });
+  // Register squsher flags
+  RegisterMutableFlags(&config_registry, MultiCommandSquasher::GetMutableFlagNames(),
+                       []() { MultiCommandSquasher::UpdateFromFlags(); });
+  // Register uring proactor flags
+  RegisterMutableFlags(&config_registry,
+                       facade::GetFlagNames(FLAGS_uring_wake_mode, FLAGS_uring_submit_threshold),
+                       []() { UpdateUringFlagsOnThread(); });
 
-  config_registry.RegisterSetter<facade::MemoryBytesFlag>(
-      "pipeline_buffer_limit", [](facade::MemoryBytesFlag val) {
-        shard_set->pool()->AwaitBrief(
-            [val](unsigned tid, auto*) { facade::Connection::SetPipelineBufferLimit(tid, val); });
-      });
-
-  config_registry.RegisterSetter<uint32_t>("max_busy_read_usec", [](uint32_t usec) {
-    shard_set->pool()->AwaitBrief(
-        [=](unsigned, auto*) { facade::Connection::SetMaxBusyReadUsecThreadLocal(usec); });
+  config_registry.RegisterSetter<MemoryBytesFlag>("maxmemory", [](const MemoryBytesFlag& flag) {
+    // TODO: reduce code reliance on constant direct access of max_memory_limit
+    max_memory_limit.store(flag.value, memory_order_relaxed);
   });
-
-  config_registry.RegisterSetter<bool>("always_flush_pipeline", [](bool val) {
-    shard_set->pool()->AwaitBrief(
-        [=](unsigned, auto*) { facade::Connection::SetAlwaysFlushPipelineThreadLocal(val); });
-  });
-
-  config_registry.RegisterSetter<unsigned>("pipeline_squash_limit", [](unsigned val) {
-    shard_set->pool()->AwaitBrief(
-        [=](unsigned, auto*) { facade::Connection::SetPipelineSquashLimitThreadLocal(val); });
-  });
-
-  config_registry.RegisterSetter<uint32_t>("pipeline_wait_batch_usec", [](uint32_t val) {
-    shard_set->pool()->AwaitBrief(
-        [=](unsigned, auto*) { facade::Connection::SetPipelineWaitBatchUsecThreadLocal(val); });
-  });
-
-  config_registry.RegisterSetter<uint32_t>("squash_stats_latency_lower_limit", [](uint32_t val) {
-    shard_set->pool()->AwaitBrief(
-        [=](unsigned, auto*) { squash_stats_latency_lower_limit_cached = val; });
-  });
-
-  config_registry.RegisterSetter<uint32_t>("max_squashed_cmd_num",
-                                           UpdateServerState(&ServerState::max_squash_cmd_num));
-  config_registry.RegisterSetter<uint32_t>("max_busy_squash_usec",
-                                           [](uint32_t val) { SetMaxBusySquashUsec(val); });
-  config_registry.RegisterSetter<uint32_t>(
-      "shard_thread_busy_polling_usec", [](uint32_t val) { SetShardThreadBusyPollingUsec(val); });
 
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("replication_timeout");
@@ -940,19 +891,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("timeout");
   config_registry.RegisterMutable("send_timeout");
   config_registry.RegisterMutable("managed_service_info");
-
-  // TODO(vlad): Introduce templatable flag cache
-  auto update_tiered_storage = [](auto) {
-    shard_set->pool()->AwaitBrief([](unsigned, auto*) {
-      if (auto* es = EngineShard::tlocal(); es && es->tiered_storage()) {
-        es->tiered_storage()->UpdateFromFlags();
-      }
-    });
-  };
-  config_registry.RegisterSetter<bool>("tiered_experimental_cooling", update_tiered_storage);
-  config_registry.RegisterSetter<unsigned>("tiered_storage_write_depth", update_tiered_storage);
-  config_registry.RegisterSetter<float>("tiered_offload_threshold", update_tiered_storage);
-  config_registry.RegisterSetter<float>("tiered_upload_threshold", update_tiered_storage);
 
   config_registry.RegisterMutable(
       "notify_keyspace_events", [pool = &pp_](const absl::CommandLineFlag& flag) {
@@ -978,11 +916,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     shard_set->pool()->AwaitFiberOnAll(
         [val](auto index, auto* context) { ServerState::tlocal()->acl_log.SetTotalEntries(val); });
   });
-
-  config_registry.RegisterSetter<uint32_t>("uring_wake_mode",
-                                           [](uint32_t val) { SetUringWakeMode(val); });
-  config_registry.RegisterSetter<uint32_t>("uring_submit_threshold",
-                                           [](uint32_t val) { SetUringSubmitThreshold(val); });
 
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
   if (shard_num == 0 || shard_num > pp_.size()) {
@@ -1021,15 +954,12 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
       [&](uint32_t index, ProactorBase* pb) { sharding::InitThreadLocals(shard_set->size()); });
   Transaction::Init(shard_num);
 
-  UpdateServerState (&ServerState::rss_oom_deny_ratio)(absl::GetFlag(FLAGS_rss_oom_deny_ratio));
-  UpdateServerState (&ServerState::serialization_max_chunk_size)(
-      absl::GetFlag(FLAGS_serialization_max_chunk_size));
-  UpdateServerState (&ServerState::max_squash_cmd_num)(absl::GetFlag(FLAGS_max_squashed_cmd_num));
-  SetHuffmanTable(absl::GetFlag(FLAGS_huffman_table));
-  SetMaxBusySquashUsec(absl::GetFlag(FLAGS_max_busy_squash_usec));
+  shard_set->pool()->AwaitBrief([](unsigned, auto*) {
+    facade::Connection::UpdateFromFlags();
+    UpdateFromFlagsOnThread();
+    UpdateUringFlagsOnThread();
+  });
   SetHuffmanTable(GetFlag(FLAGS_huffman_table));
-  SetShardThreadBusyPollingUsec(GetFlag(FLAGS_shard_thread_busy_polling_usec));
-  SetUringWakeMode(GetFlag(FLAGS_uring_wake_mode));
 
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.
@@ -2913,6 +2843,23 @@ void Service::OnConnectionClose(facade::ConnectionContext* cntx) {
   server_family_.OnClose(server_cntx);
 
   conn_state.tracking_info_.SetClientTracking(false);
+}
+
+void Service::RegisterTieringFlags() {
+#ifdef WITH_TIERING
+  // TODO(vlad): Introduce templatable flag cache
+  auto update_tiered_storage = [](auto) {
+    shard_set->pool()->AwaitBrief([](unsigned, auto*) {
+      if (auto* es = EngineShard::tlocal(); es && es->tiered_storage()) {
+        es->tiered_storage()->UpdateFromFlags();
+      }
+    });
+  };
+  config_registry.RegisterSetter<bool>("tiered_experimental_cooling", update_tiered_storage);
+  config_registry.RegisterSetter<unsigned>("tiered_storage_write_depth", update_tiered_storage);
+  config_registry.RegisterSetter<float>("tiered_offload_threshold", update_tiered_storage);
+  config_registry.RegisterSetter<float>("tiered_upload_threshold", update_tiered_storage);
+#endif
 }
 
 Service::ContextInfo Service::GetContextInfo(facade::ConnectionContext* cntx) const {

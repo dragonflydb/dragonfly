@@ -9,6 +9,8 @@
 #include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_format.h>
+#include <absl/strings/str_split.h>
+#include <absl/strings/string_view.h>
 
 #include <atomic>
 #include <variant>
@@ -442,6 +444,67 @@ ParseResult<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* parse
   return sort_params;
 }
 
+std::pair<std::string_view, std::string_view> Split(std::string_view s, char delim) {
+  return absl::StrSplit(s, absl::MaxSplits(absl::ByChar(delim), 1));
+}
+
+// Example: LOAD_FROM index AS alias num_conditions condition [condition ...] [QUERY query]
+// condition is in the form index.field=foreign_index.field or foreign_index.field=index.field
+ParseResult<AggregateParams::JoinParams> ParseAggregatorJoinParams(
+    CmdArgParser* parser, absl::flat_hash_set<std::string>* known_indexes) {
+  AggregateParams::JoinParams join_params;
+  join_params.index = parser->Next<std::string>();
+  if (parser->Check("AS")) {
+    join_params.index_alias = parser->Next<std::string>();
+  } else {
+    join_params.index_alias = join_params.index;
+  }
+
+  if (known_indexes->contains(join_params.index_alias)) {
+    return CreateSyntaxError(
+        absl::StrCat("Duplicate index alias in LOAD_FROM: '", join_params.index_alias, "'"));
+  }
+
+  // Validate index name
+  known_indexes->insert(join_params.index_alias);
+
+  size_t num_fields = parser->Next<size_t>();
+  join_params.conditions.reserve(num_fields);
+  // Conditions are in the form index.field=foreign_index.field or foreign_index.field=index.field
+  while (parser->HasNext() && num_fields > 0) {
+    auto [left, right] = Split(parser->Next(), '=');
+    auto [l_index, l_field] = Split(left, '.');
+    auto [r_index, r_field] = Split(right, '.');
+
+    if (right.empty() || l_field.empty() || r_field.empty()) {
+      return CreateSyntaxError(
+          "bad arguments for LOAD_FROM: expected 'index.field=foreign_index.field'"sv);
+    }
+
+    if (!known_indexes->contains(l_index) || !known_indexes->contains(r_index)) {
+      return CreateSyntaxError(absl::StrCat("bad arguments for LOAD_FROM: unknown index '",
+                                            known_indexes->contains(l_index) ? r_index : l_index,
+                                            "'"));
+    }
+
+    if (l_index == join_params.index_alias) {
+      join_params.conditions.emplace_back(l_field, r_index, r_field);
+    } else if (r_index == join_params.index_alias) {
+      join_params.conditions.emplace_back(r_field, l_index, l_field);
+    } else {
+      return CreateSyntaxError(absl::StrCat(
+          "bad arguments for LOAD_FROM: one of the field must be from the current index '",
+          join_params.index_alias, "'. Got '", left, "' and '", right, "'"));
+    }
+
+    num_fields--;
+  }
+
+  parser->Check("QUERY", &join_params.query);
+
+  return join_params;
+}
+
 ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
   AggregateParams params;
   tie(params.index, params.query) = parser->Next<string_view, string_view>();
@@ -456,6 +519,18 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       params.load_fields->insert(params.load_fields->end(), make_move_iterator(fields.begin()),
                                  make_move_iterator(fields.end()));
   }
+
+  // Used for join params
+  absl::flat_hash_set<std::string> current_known_indexes;
+  current_known_indexes.insert(std::string{params.index});
+  while (parser->HasNext() && parser->Check("LOAD_FROM")) {
+    auto join_params = ParseAggregatorJoinParams(parser, &current_known_indexes);
+    if (!join_params) {
+      return make_unexpected(join_params.error());
+    }
+    params.joins.emplace_back(std::move(join_params).value());
+  }
+  const bool joining_enabled = !params.joins.empty();
 
   while (parser->HasNext()) {
     // GROUPBY nargs property [property ...]
@@ -511,14 +586,23 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
         return make_unexpected(sort_params.error());  // Propagate the specific error
       }
 
-      params.steps.push_back(aggregate::MakeSortStep(std::move(sort_params).value()));
+      if (!joining_enabled || params.join_agg_params.HasValue()) {
+        params.steps.push_back(aggregate::MakeSortStep(std::move(sort_params).value()));
+      } else {
+        params.join_agg_params.sort = std::move(sort_params).value();
+      }
       continue;
     }
 
     // LIMIT
     if (parser->Check("LIMIT")) {
       auto [offset, num] = parser->Next<size_t, size_t>();
-      params.steps.push_back(aggregate::MakeLimitStep(offset, num));
+      if (!joining_enabled || params.join_agg_params.HasLimit()) {
+        params.steps.push_back(aggregate::MakeLimitStep(offset, num));
+      } else {
+        params.join_agg_params.limit_offset = offset;
+        params.join_agg_params.limit_total = num;
+      }
       continue;
     }
 
@@ -532,10 +616,286 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       return CreateSyntaxError("LOAD cannot be applied after projectors or reducers"sv);
     }
 
+    if (parser->Check("LOAD_FROM")) {
+      return CreateSyntaxError("LOAD_FROM cannot be applied after projectors or reducers"sv);
+    }
+
     return CreateSyntaxError(absl::StrCat("Unknown clause: ", parser->Peek()));
   }
 
   return params;
+}
+
+// Data that we need at the first step of join
+struct PreprocessedJoinData {
+  struct SortParam {
+    size_t index;
+    size_t field_index;
+    SortOrder order;
+  };
+
+  explicit PreprocessedJoinData(size_t n)
+      : indexes(n), needed_fields(n), joins_per_index(n), fields_to_load_per_index(n) {
+  }
+
+  // Index names
+  join::Vector<std::string_view> indexes;
+  // Maps index alias to its index in the indexes vector
+  absl::flat_hash_map<std::string_view, size_t> alias_to_index;
+
+  // For each index we store the fields that are needed for the join
+  join::Vector<join::Vector<std::string_view>> needed_fields;
+  // For each index we store the join expressions that are used to join this index
+  join::Vector<join::JoinExpressionsVec> joins_per_index;
+  // For each index we store the fields that should be loaded from the document after the join
+  join::Vector<join::Vector<std::string_view>> fields_to_load_per_index;
+  // Maps field names to the shard_id and their index in the needed_fields vector
+  join::Vector<SortParam> sort_params;
+};
+
+io::Result<PreprocessedJoinData, ErrorReply> PreprocessDataForJoin(std::string_view index,
+                                                                   const AggregateParams& params) {
+  DCHECK(!params.joins.empty());
+
+  const size_t n = params.joins.size();
+  PreprocessedJoinData result(n + 1);
+
+  // Collect aliases and initialize result.indexes
+  result.alias_to_index.reserve(n);
+  result.alias_to_index[index] = 0;
+  result.indexes[0] = index;
+  for (size_t i = 0; i < n; ++i) {
+    result.alias_to_index[params.joins[i].index_alias] = i + 1;
+    result.indexes[i + 1] = params.joins[i].index;
+  }
+
+  // Collect needed fields for joins for each index
+  // needed_fields[i] contains fields needed for index i
+  // for each field name we store its index
+  // Also collect joins for each index
+  std::vector<absl::flat_hash_map<std::string_view, size_t>> needed_fields(n + 1);
+
+  auto insert = [&](std::string_view field, auto* map) -> size_t {
+    auto it = map->find(field);
+    if (it == map->end()) {
+      const size_t field_index = map->size();
+      map->emplace(field, field_index);
+      return field_index;
+    }
+    return it->second;
+  };
+
+  for (size_t i = 0; i < n; ++i) {
+    const auto& join = params.joins[i];
+    for (const auto& condition : join.conditions) {
+      size_t field_index = insert(condition.field, &needed_fields[i + 1]);
+
+      DCHECK(result.alias_to_index.contains(condition.foreign_field.first))
+          << "Unknown foreign index alias: " << condition.foreign_field.first;
+      size_t foreign_index = result.alias_to_index[condition.foreign_field.first];
+      DCHECK_LE(foreign_index, i) << "Foreign index alias out of range: "
+                                  << condition.foreign_field.first;
+
+      size_t foreign_field_index =
+          insert(condition.foreign_field.second, &needed_fields[foreign_index]);
+
+      // Update joins for this index
+      result.joins_per_index[i + 1].emplace_back(
+          join::JoinExpression{field_index, foreign_index, foreign_field_index});
+    }
+  }
+
+  // Collect fields needed for sorting
+  // Max option will be temprorary ignored
+  if (params.join_agg_params.sort) {
+    for (const auto& sort_field : params.join_agg_params.sort.value().fields) {
+      auto [index_alias, field_name] = Split(sort_field.first, '.');
+
+      auto it = result.alias_to_index.find(index_alias);
+      if (it == result.alias_to_index.end()) {
+        return CreateSyntaxError(absl::StrCat("Unknown index alias '", index_alias,
+                                              "' in the SORTBY option. Field: '", field_name, "'"));
+      }
+
+      size_t index = it->second;
+      size_t field_index = insert(field_name, &needed_fields[index]);
+      result.sort_params.push_back(
+          PreprocessedJoinData::SortParam{index, field_index, sort_field.second});
+    }
+  }
+
+  // Map them to the result.needed_fields
+  for (size_t i = 0; i <= n; ++i) {
+    auto& from = needed_fields[i];
+    auto& to = result.needed_fields[i];
+
+    to.resize(from.size());
+    for (const auto& [field_name, field_index] : from) {
+      to[field_index] = field_name;
+    }
+  }
+
+  // Initialize fields_to_load_per_index
+  for (const auto& field : params.load_fields.value_or(std::vector<FieldReference>{})) {
+    auto [index_alias, field_name] = Split(field.Name(), '.');
+
+    auto it = result.alias_to_index.find(index_alias);
+    if (it == result.alias_to_index.end()) {
+      return CreateSyntaxError(absl::StrCat("Unknown index alias '", index_alias,
+                                            "' in the LOAD option. Field: '", field_name, "'"));
+    }
+
+    result.fields_to_load_per_index[it->second].emplace_back(field_name);
+  }
+
+  return result;
+}
+
+// Merge preaggregated results from all shards for each index
+join::Vector<join::Vector<join::Entry>> MergePreaggregatedShardJoinData(
+    absl::Span<const std::vector<join::Vector<join::OwnedEntry>>> preaggregated_shard_data) {
+  if (preaggregated_shard_data.empty()) {
+    return {};
+  }
+
+  // indexes_entries[i] contains the preaggregated data for index i
+  const size_t indexes_count = preaggregated_shard_data[0].size();
+  join::Vector<join::Vector<join::Entry>> indexes_entries(indexes_count);
+  for (size_t i = 0; i < indexes_count; ++i) {
+    auto& entries = indexes_entries[i];
+
+    size_t num_docs = 0;
+    for (size_t j = 0; j < shard_set->size(); ++j) {
+      num_docs += preaggregated_shard_data[j][i].size();
+    }
+
+    entries.reserve(num_docs);
+    for (size_t j = 0; j < shard_set->size(); ++j) {
+      for (const auto& entry : preaggregated_shard_data[j][i]) {
+        join::Vector<join::JoinableValue> field_values;
+        field_values.reserve(entry.second.size());
+
+        auto insert_copy = [&field_values](const auto& field_value) {
+          field_values.emplace_back(field_value);
+        };
+
+        for (const auto& field_value : entry.second) {
+          std::visit(insert_copy, field_value);
+        }
+
+        entries.emplace_back(entry.first, std::move(field_values));
+      }
+    }
+  }
+
+  return indexes_entries;
+}
+
+join::Vector<join::Vector<join::Key>> DoJoin(
+    absl::Span<const std::vector<join::Vector<join::OwnedEntry>>> preaggregated_shard_data,
+    const AggregateParams& params, const PreprocessedJoinData& join_data) {
+  using join::KeyIndexes;
+
+  auto indexes_entries = MergePreaggregatedShardJoinData(preaggregated_shard_data);
+
+  auto sort_and_limit = [&](std::vector<KeyIndexes>* joined_entries) {
+    const size_t offset = params.join_agg_params.limit_offset;
+    const size_t total = params.join_agg_params.limit_total;
+    if (offset >= joined_entries->size()) {
+      joined_entries->clear();
+      return;
+    }
+
+    const auto& sort_params = join_data.sort_params;
+    auto comparator = [&](const KeyIndexes& l, const KeyIndexes& r) {
+      for (const auto& sort_param : sort_params) {
+        size_t index = sort_param.index;
+        const join::JoinableValue& l_value =
+            indexes_entries[index][l[index]].second[sort_param.field_index];
+        const join::JoinableValue& r_value =
+            indexes_entries[index][r[index]].second[sort_param.field_index];
+
+        if (l_value == r_value) {
+          continue;
+        }
+        return sort_param.order == SortOrder::ASC ? l_value < r_value : l_value > r_value;
+      }
+      return false;
+    };
+
+    size_t limit = offset + total;
+    if (!sort_params.empty()) {
+      if (limit >= joined_entries->size()) {
+        std::sort(joined_entries->begin(), joined_entries->end(), std::move(comparator));
+      } else {
+        std::partial_sort(joined_entries->begin(), joined_entries->begin() + limit,
+                          joined_entries->end(), std::move(comparator));
+        joined_entries->resize(limit);
+      }
+    }
+
+    size_t new_limit = std::min(limit, joined_entries->size());
+    if (offset) {
+      for (size_t i = offset; i < new_limit; ++i) {
+        auto& dest = (*joined_entries)[i - offset];
+        auto& src = (*joined_entries)[i];
+        DCHECK(dest.size() == src.size());
+        dest = std::move(src);
+      }
+    }
+
+    size_t new_size = std::min(total, joined_entries->size() - offset);
+    joined_entries->resize(new_size);
+  };
+
+  return join::JoinAllIndexes(indexes_entries, join_data.joins_per_index, sort_and_limit);
+}
+
+std::vector<aggregate::DocValues> MergeJoinedKeysWithData(
+    const AggregateParams& agg_params, const PreprocessedJoinData& join_data,
+    absl::Span<const join::Vector<join::Key>> joined_entries,
+    absl::Span<const std::vector<ShardDocIndex::FieldsValuesPerDocId>> shard_keys_data) {
+  std::vector<aggregate::DocValues> merged_data;
+  merged_data.reserve(joined_entries.size());
+
+  const size_t indexes_count = join_data.indexes.size();
+  const auto& fields_per_index = join_data.fields_to_load_per_index;
+
+  for (const auto& entry : joined_entries) {
+    aggregate::DocValues doc_values;
+
+    // First reserve space for the total number of fields
+    size_t docs_count = 0;
+    for (size_t i = 0; i < indexes_count; ++i) {
+      docs_count += fields_per_index[i].size();
+    }
+    doc_values.reserve(docs_count);
+
+    for (size_t i = 0; i < indexes_count; ++i) {
+      std::string_view index_alias =
+          (i == 0) ? agg_params.index : agg_params.joins[i - 1].index_alias;
+
+      const auto [shard_id, doc_id] = entry[i];
+      const auto& field_values_per_doc_id = shard_keys_data[shard_id][i];
+
+      auto it = field_values_per_doc_id.find(doc_id);
+      if (it == field_values_per_doc_id.end()) {
+        /* This doc id was joined but not found on the second step. This can happen due to
+         * expiration for example. For now, just skip it */
+        continue;
+      }
+
+      const auto& field_values = it->second;
+
+      for (size_t j = 0; j < fields_per_index[i].size(); ++j) {
+        std::string_view field_alias = fields_per_index[i][j];  // tmp alias is identifier
+        doc_values.emplace(absl::StrCat(index_alias, "."sv, field_alias), field_values[j]);
+      }
+    }
+
+    merged_data.push_back(std::move(doc_values));
+  }
+  return merged_data;
 }
 
 auto SortableValueSender(RedisReplyBuilder* rb) {
@@ -1059,34 +1419,120 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
   if (SendErrorIfOccurred(params, &parser, builder))
     return;
 
-  search::SearchAlgorithm search_algo;
-  if (!search_algo.Init(params->query, &params->params))
-    return builder->SendError("Query syntax error");
-
-  using ResultContainer = decltype(declval<ShardDocIndex>().SearchForAggregator(
-      declval<OpArgs>(), params.value(), &search_algo));
-
-  vector<ResultContainer> query_results(shard_set->size());
-  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (auto* index = es->search_indices()->GetIndex(params->index); index) {
-      query_results[es->shard_id()] =
-          index->SearchForAggregator(t->GetOpArgs(es), params.value(), &search_algo);
-    }
-    return OpStatus::OK;
-  });
-
-  // ResultContainer is absl::flat_hash_map<std::string, search::SortableValue>
-  // DocValues is absl::flat_hash_map<std::string_view, SortableValue>
-  // Keys of values should point to the keys of the query_results
   std::vector<aggregate::DocValues> values;
-  for (auto& sub_results : query_results) {
-    for (auto& docs : sub_results) {
-      aggregate::DocValues doc_value;
-      for (auto& doc : docs) {
-        doc_value[doc.first] = std::move(doc.second);
+
+  if (params->joins.empty()) {
+    search::SearchAlgorithm search_algo;
+    if (!search_algo.Init(params->query, &params->params))
+      return builder->SendError("Query syntax error");
+
+    using ResultContainer = decltype(declval<ShardDocIndex>().SearchForAggregator(
+        declval<OpArgs>(), params.value(), &search_algo));
+
+    vector<ResultContainer> query_results(shard_set->size());
+
+    cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+      if (auto* index = es->search_indices()->GetIndex(params->index); index) {
+        query_results[es->shard_id()] =
+            index->SearchForAggregator(t->GetOpArgs(es), params.value(), &search_algo);
       }
-      values.push_back(std::move(doc_value));
+      return OpStatus::OK;
+    });
+
+    // ResultContainer is absl::flat_hash_map<std::string, search::SortableValue>
+    // DocValues is absl::flat_hash_map<std::string_view, SortableValue>
+    // Keys of values should point to the keys of the query_results
+    size_t total_values = 0;
+    for (const auto& sub_results : query_results) {
+      total_values += sub_results.size();
     }
+
+    values.reserve(total_values);
+    for (auto& sub_results : query_results) {
+      for (auto& docs : sub_results) {
+        aggregate::DocValues doc_value;
+        for (auto& doc : docs) {
+          doc_value[doc.first] = std::move(doc.second);
+        }
+        values.emplace_back(std::move(doc_value));
+      }
+    }
+  } else {
+    const size_t indexes_count = params->joins.size() + 1;
+
+    std::vector<search::SearchAlgorithm> search_algos(indexes_count);
+    if (!search_algos[0].Init(params->query, &params->params)) {
+      return builder->SendError("Query syntax error");
+    }
+
+    for (size_t i = 0; i < params->joins.size(); ++i) {
+      search::QueryParams empty_params;
+      if (!search_algos[i + 1].Init(params->joins[i].query, &empty_params)) {
+        return builder->SendError("Query syntax error in JOIN");
+      }
+    }
+
+    auto data_for_join = PreprocessDataForJoin(params->index, *params);
+    if (!data_for_join) {
+      return builder->SendError(data_for_join.error());
+    }
+
+    // preaggregated_shard_data is preaggregation results per index per shard
+    // preaggregated_shard_data[shard_id][i] is the results of index i on shard shard_id
+    using JoinDataVector = join::Vector<join::OwnedEntry>;
+    std::vector<std::vector<JoinDataVector>> preaggregated_shard_data(
+        shard_set->size(), std::vector<JoinDataVector>(indexes_count));
+    cmd_cntx.tx->Execute(
+        [&](Transaction* t, EngineShard* es) {
+          auto& shard_data = preaggregated_shard_data[es->shard_id()];
+          for (size_t i = 0; i < indexes_count; ++i) {
+            if (auto* index = es->search_indices()->GetIndex(data_for_join->indexes[i]); index) {
+              shard_data[i] = index->PreagregateDataForJoin(
+                  t->GetOpArgs(es), data_for_join->needed_fields[i], &search_algos[i]);
+            }
+          }
+          return OpStatus::OK;
+        },
+        false);
+
+    // Do join
+    auto joined_entries = DoJoin(preaggregated_shard_data, *params, *data_for_join);
+
+    // Collect doc_ids per index that were joined
+    // Each shard stores set of doc_ids per each index that was joined
+    using DocIdsSet = absl::flat_hash_set<search::DocId>;
+    std::vector<std::vector<DocIdsSet>> doc_ids_per_shard(shard_set->size(),
+                                                          std::vector<DocIdsSet>(indexes_count));
+    for (const auto& entry : joined_entries) {
+      for (size_t index = 0; index < indexes_count; index++) {
+        const auto [shard_id, doc_id] = entry[index];
+        doc_ids_per_shard[shard_id][index].insert(doc_id);
+      }
+    }
+
+    // Load fields for keys that were joined
+    std::vector<std::vector<ShardDocIndex::FieldsValuesPerDocId>> shard_keys_data_per_index(
+        shard_set->size(), std::vector<ShardDocIndex::FieldsValuesPerDocId>(indexes_count));
+    cmd_cntx.tx->Execute(
+        [&](Transaction* t, EngineShard* es) {
+          const ShardId shard_id = es->shard_id();
+          auto& shard_keys_data = shard_keys_data_per_index[shard_id];
+          const auto& doc_ids_per_index = doc_ids_per_shard[shard_id];
+
+          for (size_t i = 0; i < indexes_count; ++i) {
+            if (auto* index = es->search_indices()->GetIndex(data_for_join->indexes[i]); index) {
+              shard_keys_data[i] = index->LoadKeysData(t->GetOpArgs(es), doc_ids_per_index[i],
+                                                       data_for_join->fields_to_load_per_index[i]);
+            }
+          }
+          return OpStatus::OK;
+        },
+        true);
+
+    // Now we have sets of keys that were joined and keys data.
+    // We need to build DocValues for each joined set.
+    values =
+        MergeJoinedKeysWithData(*params, *data_for_join, joined_entries, shard_keys_data_per_index);
   }
 
   std::vector<std::string_view> load_fields;

@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2025, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -16,6 +16,7 @@
 #include "absl/flags/internal/flag.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/flag_utils.h"
 #include "server/common.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
@@ -28,10 +29,18 @@
 
 using namespace facade;
 
-ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
-ABSL_DECLARE_FLAG(unsigned, tiered_storage_write_depth);
-ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
-ABSL_DECLARE_FLAG(float, tiered_upload_threshold);
+ABSL_FLAG(bool, tiered_experimental_cooling, true,
+          "If true, uses intermediate cooling layer "
+          "when offloading values to storage");
+
+ABSL_FLAG(unsigned, tiered_storage_write_depth, 50,
+          "Maximum number of concurrent stash requests issued by background offload");
+
+ABSL_FLAG(float, tiered_offload_threshold, 0.5,
+          "Ratio of free memory (free/max memory) below which offloading starts");
+
+ABSL_FLAG(float, tiered_upload_threshold, 0.1,
+          "Ratio of free memory (free/max memory) below which uploading stops");
 
 namespace dfly {
 
@@ -463,6 +472,11 @@ void TieredStorage::UpdateFromFlags() {
       .offload_threshold = absl::GetFlag(FLAGS_tiered_offload_threshold),
       .upload_threshold = absl::GetFlag(FLAGS_tiered_upload_threshold),
   };
+}
+
+std::vector<std::string> TieredStorage::GetMutableFlagNames() {
+  return facade::GetFlagNames(FLAGS_tiered_experimental_cooling, FLAGS_tiered_storage_write_depth,
+                              FLAGS_tiered_offload_threshold, FLAGS_tiered_upload_threshold);
 }
 
 bool TieredStorage::ShouldOffload() const {

@@ -27,7 +27,7 @@ using Value = ::dfly::search::SortableValue;
 
 // DocValues sent through the pipeline
 // TODO: Replace DocValues with compact linear search map instead of hash map
-using DocValues = absl::flat_hash_map<std::string_view, Value>;
+using DocValues = absl::flat_hash_map<std::string, Value>;
 
 struct AggregationResult {
   // Values to be passed to the next step

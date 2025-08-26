@@ -144,6 +144,8 @@ ABSL_FLAG(bool, managed_service_info, false,
 ABSL_FLAG(string, availability_zone, "",
           "server availability zone, used by clients to read from local-zone replicas");
 
+ABSL_FLAG(bool, keep_legacy_memory_metrics, true, "legacy metrics format");
+
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(int32_t, hz);
@@ -1017,7 +1019,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
   start_time_ = time(NULL);
-  last_save_info_.save_time = start_time_;
+  thread_safe_save_info_.Update([this](SaveInfoData* data) { data->save_time = start_time_; });
   script_mgr_.reset(new ScriptMgr());
   journal_.reset(new journal::Journal());
 
@@ -1039,6 +1041,7 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
   }
   ValidateClientTlsFlags();
   dfly_cmd_ = make_unique<DflyCmd>(this);
+  legacy_format_metrics_ = GetFlag(FLAGS_keep_legacy_memory_metrics);
 }
 
 ServerFamily::~ServerFamily() {
@@ -1516,7 +1519,7 @@ void AppendMetricWithoutLabels(string_view name, string_view help, const absl::A
 }
 
 void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd,
-                            StringResponse* resp) {
+                            StringResponse* resp, bool legacy) {
   // Server metrics
   AppendMetricHeader("version", "", MetricType::GAUGE, &resp->body());
   AppendMetricValue("version", 1, {"version"}, {GetVersion()}, &resp->body());
@@ -1536,11 +1539,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                     &resp->body());
   AppendMetricValue("connected_clients", conn_stats.num_conns_other, {"listener"}, {"other"},
                     &resp->body());
-  AppendMetricWithoutLabels("client_read_buffer_bytes", "", conn_stats.read_buf_capacity,
-                            MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("blocked_clients", "", conn_stats.num_blocked_clients,
-                            MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("dispatch_queue_bytes", "", conn_stats.dispatch_queue_bytes,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("pipeline_queue_length", "", conn_stats.dispatch_queue_entries,
                             MetricType::GAUGE, &resp->body());
@@ -1550,8 +1549,6 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
 
   AppendMetricWithoutLabels("pipeline_throttle_total", "", conn_stats.pipeline_throttle_count,
                             MetricType::COUNTER, &resp->body());
-  AppendMetricWithoutLabels("pipeline_cmd_cache_bytes", "", conn_stats.pipeline_cmd_cache_bytes,
-                            MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("pipeline_commands_total", "", conn_stats.pipelined_cmd_cnt,
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("pipeline_dispatch_calls_total", "", conn_stats.pipeline_dispatch_calls,
@@ -1589,10 +1586,6 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             m.coordinator_stats.multi_squash_exec_reply_usec * 1e-6,
                             MetricType::COUNTER, &resp->body());
 
-  AppendMetricWithoutLabels(
-      "commands_squashing_replies_bytes", "",
-      m.facade_stats.reply_stats.squashing_current_reply_size.load(memory_order_relaxed),
-      MetricType::GAUGE, &resp->body());
   string connections_libs;
   AppendMetricHeader("connections_libs", "Total number of connections by libname:ver",
                      MetricType::GAUGE, &connections_libs);
@@ -1608,9 +1601,6 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             &resp->body());
   AppendMetricWithoutLabels("memory_used_peak_bytes", "", m.used_mem_peak, MetricType::GAUGE,
                             &resp->body());
-  AppendMetricWithoutLabels("memory_fiberstack_vms_bytes",
-                            "virtual memory size used by all the fibers", m.worker_fiber_stack_size,
-                            MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("fibers_count", "", m.worker_fiber_count, MetricType::GAUGE,
                             &resp->body());
   AppendMetricWithoutLabels("blocked_tasks", "", m.blocked_tasks, MetricType::GAUGE, &resp->body());
@@ -1632,9 +1622,6 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     AppendMetricWithoutLabels("swap_memory_bytes", "", sdata.vm_swap, MetricType::GAUGE,
                               &resp->body());
   }
-  AppendMetricWithoutLabels("tls_bytes", "", m.tls_bytes, MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("snapshot_serialization_bytes", "", m.serialization_bytes,
-                            MetricType::GAUGE, &resp->body());
 
   DbStats total;
   for (const auto& db_stats : m.db_stats) {
@@ -1676,8 +1663,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             &resp->body());
   AppendMetricWithoutLabels("lua_interpreter_cnt", "", m.lua_stats.interpreter_cnt,
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("used_memory_lua", "", m.lua_stats.used_bytes, MetricType::GAUGE,
-                            &resp->body());
+
   AppendMetricWithoutLabels("freed_memory_lua", "", m.lua_stats.gc_freed_memory,
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("lua_blocked_total", "", m.lua_stats.blocked_cnt, MetricType::COUNTER,
@@ -1732,6 +1718,65 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             &resp->body());
   AppendMetricWithoutLabels("evicted_keys_total", "", m.events.evicted_keys, MetricType::COUNTER,
                             &resp->body());
+  // Memory stats
+  if (legacy) {
+    AppendMetricWithoutLabels("memory_fiberstack_vms_bytes",
+                              "virtual memory size used by all the fibers",
+                              m.worker_fiber_stack_size, MetricType::GAUGE, &resp->body());
+
+    AppendMetricWithoutLabels(
+        "commands_squashing_replies_bytes", "",
+        m.facade_stats.reply_stats.squashing_current_reply_size.load(memory_order_relaxed),
+        MetricType::GAUGE, &resp->body());
+
+    AppendMetricWithoutLabels("tls_bytes", "", m.tls_bytes, MetricType::GAUGE, &resp->body());
+    AppendMetricWithoutLabels("snapshot_serialization_bytes", "", m.serialization_bytes,
+                              MetricType::GAUGE, &resp->body());
+
+    AppendMetricWithoutLabels("used_memory_lua", "", m.lua_stats.used_bytes, MetricType::GAUGE,
+                              &resp->body());
+
+    AppendMetricWithoutLabels("client_read_buffer_bytes", "", conn_stats.read_buf_capacity,
+                              MetricType::GAUGE, &resp->body());
+    AppendMetricWithoutLabels("dispatch_queue_bytes", "", conn_stats.dispatch_queue_bytes,
+                              MetricType::GAUGE, &resp->body());
+    AppendMetricWithoutLabels("pipeline_cmd_cache_bytes", "", conn_stats.pipeline_cmd_cache_bytes,
+                              MetricType::GAUGE, &resp->body());
+  }
+
+  string memory_by_class_bytes;
+  AppendMetricHeader("memory_by_class_bytes", "Memory metrics", MetricType::GAUGE,
+                     &memory_by_class_bytes);
+
+  AppendMetricValue("memory_by_class_bytes", m.lua_stats.used_bytes, {"class"}, {"used_lua"},
+                    &memory_by_class_bytes);
+
+  AppendMetricValue("memory_by_class_bytes", m.worker_fiber_stack_size, {"class"},
+                    {"fiberstack_vms"}, &memory_by_class_bytes);
+
+  AppendMetricValue("memory_by_class_bytes", m.tls_bytes, {"class"}, {"tls"},
+                    &memory_by_class_bytes);
+
+  const size_t squashed =
+      m.facade_stats.reply_stats.squashing_current_reply_size.load(memory_order_relaxed);
+
+  AppendMetricValue("memory_by_class_bytes", squashed, {"class"}, {"commands_squashing_replies"},
+                    &memory_by_class_bytes);
+
+  AppendMetricValue("memory_by_class_bytes", conn_stats.pipeline_cmd_cache_bytes, {"class"},
+                    {"pipeline_cmd_cache"}, &memory_by_class_bytes);
+
+  AppendMetricValue("memory_by_class_bytes", conn_stats.dispatch_queue_bytes, {"class"},
+                    {"dispatch_queue"}, &memory_by_class_bytes);
+
+  AppendMetricValue("memory_by_class_bytes", conn_stats.read_buf_capacity, {"class"},
+                    {"client_read_buffer"}, &memory_by_class_bytes);
+
+  AppendMetricValue("memory_by_class_bytes", total.table_mem_usage, {"class"}, {"table_used"},
+                    &memory_by_class_bytes);
+
+  AppendMetricValue("memory_by_class_bytes", total.obj_memory_usage, {"class"}, {"object_used"},
+                    &memory_by_class_bytes);
 
   // Command stats
   if (!m.cmd_stats_map.empty()) {
@@ -1762,14 +1807,20 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   } else {  // Master side
     string replication_lag_metrics;
     vector<ReplicaRoleInfo> replicas_info = dfly_cmd->GetReplicasRoleInfo();
-
     ReplicationMemoryStats repl_mem;
     dfly_cmd->GetReplicationMemoryStats(&repl_mem);
-    AppendMetricWithoutLabels("replication_streaming_bytes", "Stable sync replication memory usage",
-                              repl_mem.streamer_buf_capacity_bytes, MetricType::GAUGE,
-                              &resp->body());
-    AppendMetricWithoutLabels("replication_full_sync_bytes", "Full sync memory usage",
-                              repl_mem.full_sync_buf_bytes, MetricType::GAUGE, &resp->body());
+    if (legacy) {
+      AppendMetricWithoutLabels(
+          "replication_streaming_bytes", "Stable sync replication memory usage",
+          repl_mem.streamer_buf_capacity_bytes, MetricType::GAUGE, &resp->body());
+      AppendMetricWithoutLabels("replication_full_sync_bytes", "Full sync memory usage",
+                                repl_mem.full_sync_buf_bytes, MetricType::GAUGE, &resp->body());
+    }
+    AppendMetricValue("memory_by_class_bytes", repl_mem.streamer_buf_capacity_bytes, {"class"},
+                      {"replication_streaming"}, &memory_by_class_bytes);
+    AppendMetricValue("memory_by_class_bytes", repl_mem.full_sync_buf_bytes, {"class"},
+                      {"replication_full_sync"}, &memory_by_class_bytes);
+
     AppendMetricWithoutLabels("replication_psync_count", "Pync count",
                               m.coordinator_stats.psync_requests_total, MetricType::COUNTER,
                               &resp->body());
@@ -1857,7 +1908,8 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                       &db_key_expire_metrics);
   }
 
-  absl::StrAppend(&resp->body(), db_key_metrics, db_key_expire_metrics, db_capacity_metrics);
+  absl::StrAppend(&resp->body(), db_key_metrics, db_key_expire_metrics, db_capacity_metrics,
+                  memory_by_class_bytes);
 }
 
 void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
@@ -1869,8 +1921,7 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
     util::http::SetMime(util::http::kTextMime, &resp);
     uint64_t uptime = time(NULL) - start_time_;
     PrintPrometheusMetrics(uptime, this->GetMetrics(&namespaces->GetDefaultNamespace()),
-                           this->dfly_cmd_.get(), &resp);
-
+                           this->dfly_cmd_.get(), &resp, legacy_format_metrics_);
     return send->Invoke(std::move(resp));
   };
 
@@ -1993,79 +2044,102 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
     return GenericError{make_error_code(errc::operation_in_progress),
                         StrCat(GlobalStateName(state), " - can not save database")};
   }
-  // Check if save is already in progress
+
+  std::shared_ptr<SaveStagesController> controller;
   {
     util::fb2::LockGuard lk(save_mu_);
     if (save_controller_) {
       return GenericError{make_error_code(errc::operation_in_progress),
                           "SAVING - can not save database"};
     }
+
+    auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
+                                ? snapshot_storage_
+                                : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
+
+    controller = make_shared<SaveStagesController>(detail::SaveStagesInputs{
+        save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
+        &service_, fq_threadpool_.get(), snapshot_storage, opts.bg_save});
+    save_controller_ = controller;
   }
-
-  // Create save controller outside of mutex to avoid blocking INFO commands
-  auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
-                              ? snapshot_storage_
-                              : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
-
-  auto temp_save_controller = make_unique<SaveStagesController>(detail::SaveStagesInputs{
-      save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans, &service_,
-      fq_threadpool_.get(), snapshot_storage, opts.bg_save});
 
   // Initialize resources outside of mutex (this may take time for S3 operations)
-  auto res = temp_save_controller->Init();
-
-  // Now acquire mutex only to set the controller and update state
-  {
-    util::fb2::LockGuard lk(save_mu_);
-
-    // Double-check that no other save started while we were initializing
-    if (save_controller_) {
-      return GenericError{make_error_code(errc::operation_in_progress),
-                          "SAVING - can not save database"};
-    }
-
-    if (res) {
-      DCHECK_EQ(res->error, true);
-      last_save_info_.SetLastSaveError(*res);
-      // Don't set save_controller_ since initialization failed
+  auto res = controller->Init();
+  if (res) {
+    DCHECK_EQ(res->error, true);
+    thread_safe_save_info_.Update([&](SaveInfoData* data) {
+      data->last_error = res->error;
+      data->last_error_time = res->save_time;
+      data->failed_duration_sec = res->duration_sec;
       if (bg_save) {
-        last_save_info_.last_bgsave_status = false;
+        data->last_bgsave_status = false;
       }
-      return res->error;
-    }
+    });
 
-    // Success - set the controller and update state
-    save_controller_ = std::move(temp_save_controller);
-    save_controller_->Start();
-    last_save_info_.bgsave_in_progress = bg_save;
+    // Reset the controller under lock if initialization failed.
+    util::fb2::LockGuard lk(save_mu_);
+    if (save_controller_ == controller) {
+      save_controller_.reset();
+    }
+    return res->error;
   }
+
+  // Success - update state
+  controller->Start();
+  thread_safe_save_info_.Update(
+      [bg_save](SaveInfoData* data) { data->bgsave_in_progress = bg_save; });
+
   return {};
 }
 
 GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore_state) {
-  save_controller_->WaitAllSnapshots();
+  std::shared_ptr<SaveStagesController> controller;
+  {
+    util::fb2::LockGuard lk(save_mu_);
+    controller = save_controller_;
+  }
+
+  if (!controller) {
+    return GenericError{make_error_code(errc::operation_not_supported), "Save not in progress"};
+  }
+
+  controller->WaitAllSnapshots();
   detail::SaveInfo save_info;
 
   VLOG(1) << "Before WaitUntilSaveFinished::Finalize";
+  bool is_bg_save;
   {
     util::fb2::LockGuard lk(save_mu_);
-    save_info = save_controller_->Finalize();
+    // It's possible that another save was initiated and the controller has changed.
+    // We only finalize and reset if it's still the same one we were waiting for.
+    if (save_controller_ == controller) {
+      save_info = save_controller_->Finalize();
+      is_bg_save = save_controller_->IsBgSave();
+      save_controller_.reset();
+    } else {
+      // Another save has started. The old one is already finalized by the new one.
+      // We just need to get the info.
+      return GenericError("Save operation was superseded by another save");
+    }
+  }
 
-    if (save_controller_->IsBgSave()) {
-      last_save_info_.bgsave_in_progress = false;
-      last_save_info_.last_bgsave_status = !save_info.error;
+  thread_safe_save_info_.Update([&](SaveInfoData* data) {
+    if (is_bg_save) {
+      data->bgsave_in_progress = false;
+      data->last_bgsave_status = !save_info.error;
     }
 
     if (save_info.error) {
-      last_save_info_.SetLastSaveError(save_info);
+      data->last_error = save_info.error;
+      data->last_error_time = save_info.save_time;
+      data->failed_duration_sec = save_info.duration_sec;
     } else {
-      last_save_info_.save_time = save_info.save_time;
-      last_save_info_.success_duration_sec = save_info.duration_sec;
-      last_save_info_.file_name = save_info.file_name;
-      last_save_info_.freq_map = save_info.freq_map;
+      data->save_time = save_info.save_time;
+      data->success_duration_sec = save_info.duration_sec;
+      data->file_name = save_info.file_name;
+      data->freq_map = save_info.freq_map;
     }
-    save_controller_.reset();
-  }
+  });
 
   return save_info.error;
 }
@@ -2102,9 +2176,8 @@ error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
   return error_code{};
 }
 
-LastSaveInfo ServerFamily::GetLastSaveInfo() const {
-  util::fb2::LockGuard lk(save_mu_);
-  return last_save_info_;
+SaveInfoData ServerFamily::GetLastSaveInfo() const {
+  return thread_safe_save_info_.Get();
 }
 
 void ServerFamily::DbSize(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2845,11 +2918,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       append("replication_full_sync_buffer_bytes", repl_mem.full_sync_buf_bytes);
     }
 
-    {
-      util::fb2::LockGuard lk{save_mu_};
-      if (save_controller_) {
-        append("save_buffer_bytes", save_controller_->GetSaveBuffersSize());
-      }
+    if (auto controller_copy = GetSaveController()) {
+      append("save_buffer_bytes", controller_copy->GetSaveBuffersSize());
     }
   };
 
@@ -2952,17 +3022,14 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     double perc = 0;
     bool is_saving = false;
     uint32_t curent_durration_sec = 0;
-    {
-      util::fb2::LockGuard lk{save_mu_};
-      if (save_controller_) {
-        is_saving = true;
-        curent_durration_sec = save_controller_->GetCurrentSaveDuration();
-        auto res = save_controller_->GetCurrentSnapshotProgress();
-        if (res.total_keys != 0) {
-          current_snap_keys = res.current_keys;
-          total_snap_keys = res.total_keys;
-          perc = (static_cast<double>(current_snap_keys) / total_snap_keys) * 100;
-        }
+    if (auto controller_copy = GetSaveController()) {
+      is_saving = true;
+      curent_durration_sec = controller_copy->GetCurrentSaveDuration();
+      auto res = controller_copy->GetCurrentSnapshotProgress();
+      if (res.total_keys != 0) {
+        current_snap_keys = res.current_keys;
+        total_snap_keys = res.total_keys;
+        perc = (static_cast<double>(current_snap_keys) / total_snap_keys) * 100;
       }
     }
 
@@ -2989,9 +3056,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     }
     append("rdb_changes_since_last_success_save", m.events.update);
 
-    auto save = GetLastSaveInfo();
-    append("rdb_bgsave_in_progress", static_cast<int>(save.bgsave_in_progress));
-    std::string val = save.last_bgsave_status ? "ok" : "err";
+    append("rdb_bgsave_in_progress", static_cast<int>(save_info.bgsave_in_progress));
+    std::string val = save_info.last_bgsave_status ? "ok" : "err";
     append("rdb_last_bgsave_status", val);
 
     // when last failed save
@@ -3688,12 +3754,8 @@ void ServerFamily::Script(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void ServerFamily::LastSave(CmdArgList args, const CommandContext& cmd_cntx) {
-  time_t save_time;
-  {
-    util::fb2::LockGuard lk(save_mu_);
-    save_time = last_save_info_.save_time;
-  }
-  cmd_cntx.rb->SendLong(save_time);
+  auto info = thread_safe_save_info_.Get();
+  cmd_cntx.rb->SendLong(info.save_time);
 }
 
 void ServerFamily::Latency(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -3876,7 +3938,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, acl::kAuth}.HFUNC(Auth)
       << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, acl::kBGSave}.HFUNC(BgSave)
       << CI{"CLIENT", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kClient}.HFUNC(Client)
-      << CI{"CONFIG", CO::ADMIN | CO::DANGEROUS, -2, 0, 0, acl::kConfig}.HFUNC(Config)
+      << CI{"CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -2, 0, 0, acl::kConfig}.HFUNC(Config)
       << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDbSize}.HFUNC(DbSize)
       << CI{"DEBUG", CO::ADMIN | CO::LOADING, -2, 0, 0, acl::kDebug}.HFUNC(Debug)
       << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS | CO::DANGEROUS, 1, 0, 0, acl::kFlushDB}.HFUNC(

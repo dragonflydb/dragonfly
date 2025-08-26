@@ -52,19 +52,6 @@ ABSL_FLAG(string, tiered_prefix, "",
           "high performance NVME ssd disks for this. Also, seems that pipeline_squash does "
           "not work well with tiered storage, so it's advised to set it to 0.");
 
-ABSL_FLAG(bool, tiered_experimental_cooling, true,
-          "If true, uses intermidate cooling layer "
-          "when offloading values to storage");
-
-ABSL_FLAG(unsigned, tiered_storage_write_depth, 50,
-          "Maximum number of concurrent stash requests issued by background offload");
-
-ABSL_FLAG(float, tiered_offload_threshold, 0.5,
-          "Ratio of free memory (free/max memory) below which offloading starts");
-
-ABSL_FLAG(float, tiered_upload_threshold, 0.1,
-          "Ratio of free memory (free/max memory) below which uploading stops");
-
 ABSL_FLAG(bool, enable_heartbeat_eviction, true,
           "Enable eviction during heartbeat when memory is under pressure.");
 

@@ -798,6 +798,12 @@ TEST_F(StringFamilyTest, ClThrottle) {
   resp = Run({"cl.throttle", "bar", "10", "0", "1"});
   ASSERT_EQ(RespExpr::ERROR, resp.type);
   EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // emission interval = 2000 nanoseconds, cost = 2 units
+  resp = Run({"cl.throttle", "bar", max_burst, "500000", "1", "2"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(),
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(limit - 2), IntArg(-1), IntArg(1)));
 }
 
 TEST_F(StringFamilyTest, SetMGetWithNilResp3) {

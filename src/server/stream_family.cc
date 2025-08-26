@@ -432,6 +432,7 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
     /* Get a reference to the tail node listpack. */
     lp = (uint8_t*)ri.data;
     lp_bytes = lpBytes(lp);
+    CHECK_GT(lp_bytes, 0U);
   }
   raxStop(&ri);
 
@@ -525,6 +526,8 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
     }
     lp = lpAppendInteger(lp, 0); /* Master entry zero terminator. */
     raxInsert(s->rax_tree, (unsigned char*)&rax_key, sizeof(rax_key), lp, NULL);
+    // TODO remove this check
+    CHECK_GT(lpBytes(lp), 0U);
     /* The first entry we insert, has obviously the same fields of the
      * master entry. */
     flags |= STREAM_ITEM_FLAG_SAMEFIELDS;
@@ -609,8 +612,11 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
   lp = lpAppendInteger(lp, lp_count);
 
   /* Insert back into the tree in order to update the listpack pointer. */
-  if (ri.data != lp)
+  if (ri.data != lp) {
     raxInsert(s->rax_tree, (unsigned char*)&rax_key, sizeof(rax_key), lp, NULL);
+    // TODO remove this
+    CHECK_GT(lpBytes(lp), 0U);
+  }
   s->length++;
   s->entries_added++;
   s->last_id = id;
