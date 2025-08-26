@@ -19,9 +19,10 @@
 #include "util/fibers/synchronization.h"
 
 ABSL_DECLARE_FLAG(int, migration_finalization_timeout_ms);
-ABSL_FLAG(uint32_t, slot_migration_throttle_us, 20,
+ABSL_FLAG(uint32_t, slot_migration_throttle_us, 0,
           "Incoming migration throttle time in us, we throttle every 100us of migration commands "
-          "processing, 0 to disable");
+          "processing, 0 to disable. Recommended value is 20. Values more than 50 can "
+          "significantly reduce migration speed.");
 
 namespace dfly::cluster {
 
