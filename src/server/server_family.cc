@@ -1350,7 +1350,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
       proactor = pool.GetNextProactor();
     }
 
-    auto load_func = [=, this]() mutable {
+    auto load_func = [=]() mutable {
       error_code load_ec = LoadRdb(file, existing_keys, &load_opts);
       if (load_ec) {
         aggregated_result->first_error = load_ec;
