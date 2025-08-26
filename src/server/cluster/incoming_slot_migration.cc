@@ -19,6 +19,8 @@
 #include "util/fibers/synchronization.h"
 
 ABSL_DECLARE_FLAG(int, migration_finalization_timeout_ms);
+ABSL_FLAG(bool, slot_migration_throttle, true,
+          "If true, enables throttling of incoming slot migration.");
 
 namespace dfly::cluster {
 
@@ -61,6 +63,8 @@ class ClusterShardMigration {
     JournalReader reader{source, 0};
     TransactionReader tx_reader;
     uint64_t last_sleep = fb2::ProactorBase::GetMonotonicTimeNs();
+
+    const bool do_throttling = absl::GetFlag(FLAGS_slot_migration_throttle);
 
     while (cntx->IsRunning()) {
       if (pause_) {
@@ -113,11 +117,12 @@ class ClusterShardMigration {
           break;
         }
       }
-      uint64_t now = fb2::ProactorBase::GetMonotonicTimeNs();
-      if (now - last_sleep >
-          100000) {  // every 100us we do sleep for 20us to allow other coomands to be processed
-        ThisFiber::SleepFor(20us);
-        last_sleep = now;
+      if (do_throttling) {
+        // every 100us we do sleep for 20us to allow other commands to be processed
+        if (uint64_t now = fb2::ProactorBase::GetMonotonicTimeNs(); now - last_sleep > 100000) {
+          ThisFiber::SleepFor(20us);
+          last_sleep = now;
+        }
       }
     }
 
