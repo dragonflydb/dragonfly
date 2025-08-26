@@ -685,7 +685,8 @@ void GeoFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   GeoSearchStoreGeneric(cmd_cntx.tx, builder, shape, key, member, geo_ops);
 }
 
-void GeoFamily::GeoRadiusByMember(CmdArgList args, const CommandContext& cmd_cntx) {
+void GeoFamily::GeoRadiusByMemberGeneric(CmdArgList args, const CommandContext& cmd_cntx,
+                                         bool read_only) {
   GeoShape shape = {};
   GeoSearchOpts geo_ops;
   // parse arguments
@@ -737,7 +738,7 @@ void GeoFamily::GeoRadiusByMember(CmdArgList args, const CommandContext& cmd_cnt
       geo_ops.withdist = true;
     } else if (cur_arg == "WITHHASH") {
       geo_ops.withhash = true;
-    } else if (cur_arg == "STORE") {
+    } else if (cur_arg == "STORE" && !read_only) {
       if (geo_ops.store != GeoStoreType::kNoStore) {
         return builder->SendError(kStoreTypeErr);
       }
@@ -748,7 +749,7 @@ void GeoFamily::GeoRadiusByMember(CmdArgList args, const CommandContext& cmd_cnt
       } else {
         return builder->SendError(kSyntaxErr);
       }
-    } else if (cur_arg == "STOREDIST") {
+    } else if (cur_arg == "STOREDIST" && !read_only) {
       if (geo_ops.store != GeoStoreType::kNoStore) {
         return builder->SendError(kStoreTypeErr);
       }
@@ -771,6 +772,14 @@ void GeoFamily::GeoRadiusByMember(CmdArgList args, const CommandContext& cmd_cnt
 
   geo_ops.count = (geo_ops.count == UINT64_MAX) ? 0 : geo_ops.count;
   GeoSearchStoreGeneric(cmd_cntx.tx, builder, shape, key, member, geo_ops);
+}
+
+void GeoFamily::GeoRadiusByMember(CmdArgList args, const CommandContext& cmd_cntx) {
+  GeoRadiusByMemberGeneric(args, cmd_cntx, false);
+}
+
+void GeoFamily::GeoRadiusByMemberRO(CmdArgList args, const CommandContext& cmd_cntx) {
+  GeoRadiusByMemberGeneric(args, cmd_cntx, true);
 }
 
 void GeoFamily::GeoRadiusGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool read_only) {
@@ -893,6 +902,7 @@ constexpr uint32_t kGeoPos = READ | GEO | SLOW;
 constexpr uint32_t kGeoDist = READ | GEO | SLOW;
 constexpr uint32_t kGeoSearch = READ | GEO | SLOW;
 constexpr uint32_t kGeoRadiusByMember = WRITE | GEO | SLOW;
+constexpr uint32_t kGeoRadiusByMemberRO = READ | GEO | SLOW;
 constexpr uint32_t kGeoRadius = WRITE | GEO | SLOW;
 constexpr uint32_t kGeoRadiusRO = READ | GEO | SLOW;
 }  // namespace acl
@@ -907,6 +917,8 @@ void GeoFamily::Register(CommandRegistry* registry) {
       << CI{"GEOSEARCH", CO::READONLY, -7, 1, 1, acl::kGeoSearch}.HFUNC(GeoSearch)
       << CI{"GEORADIUSBYMEMBER", CO::WRITE | CO::STORE_LAST_KEY, -5, 1, 1, acl::kGeoRadiusByMember}
              .HFUNC(GeoRadiusByMember)
+      << CI{"GEORADIUSBYMEMBER_RO", CO::READONLY, -5, 1, 1, acl::kGeoRadiusByMemberRO}.HFUNC(
+             GeoRadiusByMemberRO)
       << CI{"GEORADIUS", CO::WRITE | CO::STORE_LAST_KEY, -6, 1, 1, acl::kGeoRadius}.HFUNC(GeoRadius)
       << CI{"GEORADIUS_RO", CO::READONLY, -6, 1, 1, acl::kGeoRadiusRO}.HFUNC(GeoRadiusRO);
 }
