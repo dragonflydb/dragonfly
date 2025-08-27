@@ -215,7 +215,7 @@ void JournalStreamer::StalledDataWriterFiber(std::chrono::milliseconds period_ms
 
     LOG(INFO) << "Last LSN sent in partial sync was " << (lsn - 1);
     // flush pending
-    if (!pending_buf_.Empty()) {
+    if (pending_buf_.Size() != 0) {
       AsyncWrite(true);
     }
 
