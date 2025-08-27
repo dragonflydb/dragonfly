@@ -806,7 +806,7 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(
                   ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &exec_st_));
 
   VLOG(1) << "Sending on flow " << master_context_.master_repl_id << " "
-          << master_context_.dfly_session_id << " " << flow_id_;
+          << master_context_.dfly_session_id << " " << flow_id_ << " lsn: " << lsn.value_or(-1);
 
   // DFLY FLOW <master_id> <session_id> <flow_id> [lsn] [last_master_id lsn-vec]
   std::string cmd = StrCat("DFLY FLOW ", master_context_.master_repl_id, " ",

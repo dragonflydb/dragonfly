@@ -3173,13 +3173,21 @@ async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df
     await c_s2.execute_command(f"REPLICAOF NO ONE")
     # Make server 4 replica of server 2
     await c_s4.execute_command(f"REPLICAOF localhost {server2.port}")
+    await check_all_replicas_finished([c_s4], c_s2)
     # Send some write command for lsn inc
     for i in range(100):
         await c_s2.set(i, "val")
     # Make server 3 replica of server 2
     await c_s3.execute_command(f"REPLICAOF localhost {server2.port}")
     await check_all_replicas_finished([c_s3], c_s2)
-    await check_all_replicas_finished([c_s4], c_s2)
+
+    s2_sz = await c_s2.dbsize()
+    s3_sz = await c_s3.dbsize()
+    assert s2_sz == 100
+    assert s2_sz == s3_sz
+
+    s4_sz = await c_s4.dbsize()
+    assert s3_sz == s4_sz
 
     server3.stop()
     # Check logs for partial replication
