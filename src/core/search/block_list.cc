@@ -10,12 +10,16 @@ SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list
   const size_t initial_size = block_list.Size();
   DCHECK(!block_list.Empty());
 
+  size_t all_entries_size = 0;
+  for (auto& block : block_list.blocks_) {
+    all_entries_size += block.Size();
+  }
+
   // Collect all entries from the blocks into a single vector
   // We copy the block and clear it on the fly to save memory
   std::vector<std::pair<DocId, double>> all_entries;
+  all_entries.reserve(all_entries_size);
   for (auto& block : block_list.blocks_) {
-    all_entries.reserve(all_entries.size() +
-                        block.Size());  // Reserve space for all entries in the block
     all_entries.insert(all_entries.end(), block.begin(), block.end());
     block.Clear();  // At the same time clear the block to save memory
   }
