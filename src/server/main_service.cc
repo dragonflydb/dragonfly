@@ -1805,8 +1805,11 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
 }
 
 ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {
+  constexpr uint8_t kMaxUknownCommands = 64;
+  constexpr uint8_t kMaxUknownCommandLength = 20;
+
   lock_guard lk(mu_);
-  if (unknown_cmds_.size() < 1024)
+  if (unknown_cmds_.size() <= kMaxUknownCommands && cmd_name.size() <= kMaxUknownCommandLength)
     unknown_cmds_[cmd_name]++;
 
   return ErrorReply{StrCat("unknown command `", cmd_name, "`"), "unknown_cmd"};
