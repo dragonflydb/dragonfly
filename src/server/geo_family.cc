@@ -679,6 +679,8 @@ void GeoFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
     return builder->SendError(kByRadiusBoxErr);
   } else if (geo_ops.sorting == Sorting::kError) {
     return builder->SendError(kAscDescErr);
+  } else if (geo_ops.count == 0) {
+    return builder->SendError(kCountError);
   }
 
   geo_ops.count = (geo_ops.count == UINT64_MAX) ? 0 : geo_ops.count;

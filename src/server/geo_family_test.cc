@@ -240,6 +240,10 @@ TEST_F(GeoFamilyTest, GeoRadiusByMember) {
       "ERR STORE option in GEORADIUSBYMEMBER is not compatible with WITHDIST, WITHHASH and WITHCOORDS options"sv;
   resp = Run("GEORADIUSBYMEMBER Sicily Agrigento 100 km WITHHASH store tmp");
   EXPECT_THAT(resp, ErrArg(err));
+
+  resp = Run("GEOADD t 13.361389 38.115556 a 13.3619 38.1159 b 13.3608 38.1152 c");
+  resp = Run("GEOSEARCH t FROMLONLAT 13.361389 38.115556 BYRADIUS 1 KM COUNT 0");
+  EXPECT_THAT(resp, ErrArg("ERR COUNT must be > 0"));
 }
 
 TEST_F(GeoFamilyTest, GeoRadiusByMemberRO) {
