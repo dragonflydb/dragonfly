@@ -3081,12 +3081,12 @@ async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyIn
 
 
 @pytest.mark.parametrize(
-    "use_takeover, allowed_diff",
-    [(False, 2), (False, 0), (True, 1)],
+    "use_takeover, backlog_len",
+    [(False, 2), (False, 1), (True, 1), (True, 10)],
 )
-async def test_partial_replication_on_same_source_master(df_factory, use_takeover, allowed_diff):
+async def test_partial_replication_on_same_source_master(df_factory, use_takeover, backlog_len):
     master = df_factory.create()
-    replica1 = df_factory.create(allow_partial_sync_with_lsn_diff=allowed_diff)
+    replica1 = df_factory.create(shard_repl_backlog_len=backlog_len)
     replica2 = df_factory.create()
 
     df_factory.start_all([master, replica1, replica2])
@@ -3114,11 +3114,21 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
     if use_takeover:
         # Promote first replica to master
         await c_replica1.execute_command(f"REPLTAKEOVER 5")
+        if backlog_len > 1:
+            await c_replica1.execute_command("SET bar foo")
+            await c_replica1.execute_command("SET foo bar")
+
     else:
         # Promote first replica to master
         await c_replica1.execute_command(f"REPLICAOF NO ONE")
-        # Send 2 more commands to be propagated to second replica
-        # Sending 2 more commands will result in partial sync if allow_partial_sync_with_lsn_diff is equal or higher
+        # Not sure what was the point of this test/flow. To assert that we have a bug ?
+        # replica1 stops replicating from master. Then we seed 2 commands to the
+        # old master and wait for replica2 to be in sync. Finally, we make replica2
+        # a replica of replica1 and *expect* them to partially sync??!! Yes it will
+        # but the nodes do not contain the same data. In particular replica2 has 2 more
+        # elements than its new master(replica1). We should not allow partial sync from
+        # same master if we didn't takeover as we can't protect ourselves from the case above.
+        # TODO(kostas)
         await c_master.set("x", "y")
         await c_master.set("x", "y")
         await check_all_replicas_finished([c_replica2], c_master)
@@ -3139,7 +3149,7 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
 
     replica1.stop()
     replica2.stop()
-    if use_takeover or (allowed_diff > 0 and not use_takeover):
+    if use_takeover or (backlog_len > 0 and not use_takeover):
         # Check logs for partial replication
         lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
         assert len(lines) == 1
@@ -3149,7 +3159,7 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
     else:
         lines = replica2.find_in_logs(f"Started full with localhost:{replica1.port}")
         assert len(lines) == 0
-        assert len(replica1.find_in_logs("No partial sync due to diff")) > 0
+        assert len(replica1.find_in_logs("No partial sync due to stale LSN")) > 0
 
 
 async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df_factory):

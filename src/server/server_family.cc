@@ -3605,6 +3605,10 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   if (IsClusterEnabled()) {
     service().cluster_family().ReconcileMasterReplicaTakeoverSlots(false);
   }
+
+  // Start journal to allow partial sync from same source master
+  service_.proactor_pool().AwaitFiberOnAll([this](auto, auto*) { journal()->StartInThread(); });
+
   SetMasterFlagOnAllThreads(true);
   last_master_data_ = replica_->Stop();
   replica_.reset();

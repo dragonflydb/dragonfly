@@ -35,10 +35,11 @@
 #include "util/fibers/synchronization.h"
 using namespace std;
 
-ABSL_FLAG(uint32_t, allow_partial_sync_with_lsn_diff, 0,
-          "Do partial sync in case lsn diff is less than the given threshold");
+ABSL_RETIRED_FLAG(uint32_t, allow_partial_sync_with_lsn_diff, 0,
+                  "Do partial sync in case lsn diff is less than the given threshold");
 ABSL_DECLARE_FLAG(bool, info_replication_valkey_compatible);
 ABSL_DECLARE_FLAG(uint32_t, replication_timeout);
+ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_len);
 
 namespace dfly {
 
@@ -100,20 +101,6 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
     ThisFiber::SleepFor(1ms);
   }
 
-  return true;
-}
-
-bool IsLSNDiffBellowThreshold(const std::vector<LSN>& lsn_vec1, const std::vector<LSN>& lsn_vec2) {
-  DCHECK_EQ(lsn_vec1.size(), lsn_vec2.size());
-  uint32_t allow_diff = absl::GetFlag(FLAGS_allow_partial_sync_with_lsn_diff);
-  for (size_t i = 0; i < lsn_vec1.size(); ++i) {
-    uint32_t diff =
-        lsn_vec1[i] > lsn_vec2[i] ? lsn_vec1[i] - lsn_vec2[i] : lsn_vec2[i] - lsn_vec1[i];
-    if (diff > allow_diff) {
-      VLOG(1) << "No partial sync due to diff: " << diff << " allow_diff is: " << allow_diff;
-      return false;
-    }
-  }
   return true;
 }
 
@@ -331,11 +318,16 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
         lsn_vec.push_back(value);
       }
 
-      if (IsLSNDiffBellowThreshold(data.value().last_journal_LSNs, lsn_vec)) {
+      // We need to replay from start because after the takeover the nodes are in sync. It's
+      // the commands that came after the takeover that are missing from the new replica.
+      LOG(INFO) << "Is LSN in buffer " << sf_->journal()->IsLSNInBuffer(1);
+      if (sf_->journal()->IsLSNInBuffer(1) || sf_->journal()->GetLsn() == 1) {
         sync_type = "PARTIAL";
-        flow.start_partial_sync_at = lsn_vec[flow_id];
-        VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
-                << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
+        flow.start_partial_sync_at = 1;
+        VLOG(1) << "Partial sync from same source master requested and is available. Current LSN is"
+                << sf_->journal()->GetLsn();
+      } else {
+        VLOG(1) << "No partial sync due to stale LSN.";
       }
     } else if (seqid.has_value()) {
       if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
@@ -511,13 +503,19 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
 
   atomic_bool catchup_success = true;
   if (*status == OpStatus::OK) {
-    dfly::SharedLock lk{replica_ptr->shared_mu};
-    auto cb = [replica_ptr, end_time, &catchup_success](EngineShard* shard) {
-      if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
-        catchup_success.store(false);
-      }
-    };
-    shard_set->RunBlockingInParallel(std::move(cb));
+    util::fb2::LockGuard mu_lk(mu_);
+    for (auto [id, repl_ptr] : replica_infos_) {
+      dfly::SharedLock lk{repl_ptr->shared_mu};
+      // Wait for ALL replicas to catch up. Otherwise we can't do partial sync from same source
+      // master. If the replica misses 1 LSN entry, that entry will never exist in the LSN buffer
+      // of the new master effectively killing partial sync.
+      auto cb = [replica_ptr, end_time, &catchup_success](EngineShard* shard) {
+        if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
+          catchup_success.store(false);
+        }
+      };
+      shard_set->RunBlockingInParallel(std::move(cb));
+    }
   }
 
   VLOG(1) << "WaitReplicaFlowToCatchup done";

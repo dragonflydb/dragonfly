@@ -818,6 +818,8 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(
   }
   if (last_master_data && master_context_.version >= DflyVersion::VER5 &&
       absl::GetFlag(FLAGS_replica_partial_sync)) {
+    // TODO(kostas) on the next version remove the lsn array -- it's not needed anymore but
+    // we leave it here for backwards compatibility.
     string lsn_str = absl::StrJoin(last_master_data.value().last_journal_LSNs, "-");
     absl::StrAppend(&cmd, " ", last_master_data.value().id, " ", lsn_str);
     VLOG(1) << "Sending last master sync flow " << last_master_data.value().id << " " << lsn_str;
