@@ -9,6 +9,8 @@
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
 
+#include <type_traits>
+
 #include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
@@ -312,38 +314,10 @@ template <typename T> void Send(const JsonCallbackResult<T>& result, RedisReplyB
     if (rb->IsResp3()) {
       rb->StartArray(arr.size());
       for (const auto& item : arr) {
-        Send(item, rb);
-      }
-    } else {
-      Send(arr.begin(), arr.end(), rb);
-    }
-  }
-}
-
-// Specialized template for JsonCallbackResult<std::string> (JSON.TYPE)
-// to preserve nested array behavior for Redis compatibility
-template <> void Send(const JsonCallbackResult<std::string>& result, RedisReplyBuilder* rb) {
-  if (result.ShouldSendNil())
-    return rb->SendNull();
-
-  if (result.ShouldSendWrongType())
-    return rb->SendError(OpStatus::WRONG_JSON_TYPE);
-
-  if (result.IsV1()) {
-    /* The specified path was restricted (JSON legacy mode), then the result consists only of a
-     * single value */
-    if (rb->IsResp3()) {
-      rb->StartArray(1);
-    }
-    Send(result.AsV1(), rb);
-  } else {
-    /* The specified path was enhanced (starts with '$'), then the result is an array of multiple
-     * values */
-    const auto& arr = result.AsV2();
-    if (rb->IsResp3()) {
-      rb->StartArray(arr.size());
-      for (const auto& item : arr) {
-        rb->StartArray(1);
+        // For JSON.TYPE (std::string), preserve nested array behavior for compatibility
+        if constexpr (std::is_same_v<T, std::string>) {
+          rb->StartArray(1);
+        }
         Send(item, rb);
       }
     } else {
