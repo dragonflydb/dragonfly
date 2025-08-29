@@ -2051,16 +2051,16 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
     if (zparams.override) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{key});
     }
-    size_t size = members.size() * 2 + 1;
-    vector<string> scores(members.size());
-    vector<string_view> mapped(size);
-    mapped[0] = key;
-    auto mem_it = members.begin();
-    auto score_it = scores.begin();
-    for (size_t i = 1; i < size; i += 2, ++mem_it, ++score_it) {
-      *score_it = absl::StrCat(mem_it->first);
-      mapped[i] = *score_it;
-      mapped[i + 1] = mem_it->second;
+
+    vector<string> scores;
+    vector<string_view> mapped;
+    scores.reserve(members.size());
+    mapped.reserve(members.size() * 2 + 1);
+    mapped.push_back(key);
+    for (const auto& [score, member] : members) {
+      scores.push_back(absl::StrCat(score));
+      mapped.push_back(scores.back());
+      mapped.push_back(member);
     }
     RecordJournal(op_args, "ZADD"sv, mapped);
   }
