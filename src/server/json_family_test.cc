@@ -3261,4 +3261,29 @@ TEST_F(JsonFamilyTest, JsonIntPathTest) {
   EXPECT_THAT(resp, "[\"large.jpg\"]");
 }
 
+TEST_F(JsonFamilyTest, RESP3NestedArrayBug) {
+  // Test case for GitHub issue #5741
+  // Switch to RESP3 mode first
+  auto resp = Run({"HELLO", "3"});
+
+  string json = R"({"a":[1], "b":{"a":[1,2,3]}, "c":{"x":"not_a"}})";
+  resp = Run({"JSON.SET", "doc", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  // In RESP3 mode, this should return [1, 3] (direct integers)
+  // NOT [[1], [3]] (integers wrapped in arrays)
+  resp = Run({"JSON.ARRLEN", "doc", "$..a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_EQ(resp.GetVec().size(), 2);
+
+  // The bug: each element is wrapped in array when it shouldn't be
+  // Check that elements are NOT arrays themselves
+  EXPECT_THAT(resp.GetVec()[0], Not(ArgType(RespExpr::ARRAY)));  // Should be integer, not array
+  EXPECT_THAT(resp.GetVec()[1], Not(ArgType(RespExpr::ARRAY)));  // Should be integer, not array
+
+  // Verify the actual values
+  EXPECT_THAT(resp.GetVec()[0], IntArg(1));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(3));
+}
+
 }  // namespace dfly
