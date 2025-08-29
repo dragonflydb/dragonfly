@@ -3239,4 +3239,26 @@ TEST_F(JsonFamilyTest, JsonSetDeleteExpiryOfExistingKey) {
   EXPECT_THAT(resp.GetInt(), 100);
 }
 
+TEST_F(JsonFamilyTest, JsonIntPathTest) {
+  auto resp = Run(
+      R"(JSON.SET test:images $ {"images":[{"id":1,"sizes":{"1":"small.jpg","10":"medium.jpg","14":"large.jpg","8":"thumb.jpg"}}]})");
+  ASSERT_THAT(resp, "OK");
+  resp = Run(R"(JSON.GET test:images $.images[0].sizes.10)");
+  EXPECT_THAT(resp, "[\"medium.jpg\"]");
+  resp = Run(R"(JSON.GET test:images $.images[0].sizes["10"])");
+  EXPECT_THAT(resp, "[\"medium.jpg\"]");
+  resp = Run(R"(JSON.GET test:images $.images[0].sizes['10'])");
+  EXPECT_THAT(resp, "[\"medium.jpg\"]");
+  resp = Run(R"(JSON.GET test:images $.images[0]["sizes"]["10"])");
+  EXPECT_THAT(resp, "[\"medium.jpg\"]");
+  resp = Run(R"(JSON.GET test:images $.images[0].sizes.8)");
+  EXPECT_THAT(resp, "[\"thumb.jpg\"]");
+  resp = Run(R"(JSON.GET test:images $.images[0].sizes.14)");
+  EXPECT_THAT(resp, "[\"large.jpg\"]");
+  resp = Run(R"(JSON.GET test:images $.images[0].sizes["8"])");
+  EXPECT_THAT(resp, "[\"thumb.jpg\"]");
+  resp = Run(R"(JSON.GET test:images $.images[0].sizes["14"])");
+  EXPECT_THAT(resp, "[\"large.jpg\"]");
+}
+
 }  // namespace dfly
