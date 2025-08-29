@@ -1728,6 +1728,31 @@ BENCHMARK(BM_SearchMergeEqualSets)
     ->Arg(1000000)
     ->ArgNames({"num_docs"});
 
+static void BM_SearchRangeTreeSplits(benchmark::State& state) {
+  auto schema = MakeSimpleSchema({
+      {"num", SchemaField::NUMERIC, SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
+  });
+
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  const size_t block_size = state.range(0);
+  std::default_random_engine rnd;
+
+  using NumericType = long long;
+  uniform_int_distribution<NumericType> dist(0, block_size + 1);
+
+  // const size_t num_docs = 4000000;
+  size_t doc_index = 0;
+  while (state.KeepRunning()) {
+    for (size_t i = 0; i < block_size; i++) {
+      MockedDocument doc{Map{{"num", std::to_string(dist(rnd))}}};
+      indices.Add(doc_index++, doc);
+    }
+  }
+}
+
+BENCHMARK(BM_SearchRangeTreeSplits)->Arg(100000)->Arg(1000000)->ArgNames({"block_size"});
+
 #ifdef USE_SIMSIMD
 
 #define SIMSIMD_NATIVE_F16 0
