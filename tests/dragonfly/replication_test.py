@@ -674,6 +674,22 @@ async def test_rewrites(df_factory):
         # Check SUNIONSTORE turns into DEL and SADD
         await check_list_ooo("SUNIONSTORE k set1 set2", [r"DEL k", r"SADD k (.*?)"])
 
+        # Check ZDIFFSTORE turns into DEL and ZADD
+        await c_master.execute_command("zadd zet1 1 v1 2 v2 3 v3")
+        await c_master.execute_command("zadd zet2 1 v1 2 v2")
+        await skip_cmd()
+        await skip_cmd()
+        await check_list("ZDIFFSTORE k 2 zet1 zet2", [r"DEL k", r"ZADD k 3 v3"])
+
+        # Check ZINTERSTORE turns into DEL and ZADD
+        await check_list("ZINTERSTORE k 2 zet1 zet2", [r"DEL k", r"ZADD k (.*?)"])
+
+        # Check ZRANGESTORE turns into SREM and ZADD
+        await check_list_ooo("ZRANGESTORE k zet1 2 -1", [r"DEL k", r"ZADD k 3 v3"])
+
+        # Check ZUNIONSTORE turns into DEL and ZADD
+        await check_list_ooo("ZUNIONSTORE k 2 zet1 zet2", [r"DEL k", r"ZADD k (.*?)"])
+
         await c_master.set("k1", "1000")
         await c_master.set("k2", "1100")
         await skip_cmd()
@@ -751,6 +767,7 @@ async def test_rewrites(df_factory):
             [r"XTRIM k-stream MINID 0", r"SREM k-one-element-set value[12]"],
         )
 
+        # TODO next Z-tests won't work with no-point-in-time replication
         # check BZMPOP turns into ZPOPMAX and ZPOPMIN command
         await c_master.zadd("key", {"a": 1, "b": 2, "c": 3})
         await skip_cmd()

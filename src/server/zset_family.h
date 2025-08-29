@@ -64,6 +64,7 @@ class ZSetFamily {
     unsigned flags = 0;  // mask of ZADD_IN_ macros.
     bool ch = false;     // Corresponds to CH option.
     bool override = false;
+    bool journal_update = false;
   };
 
   using ScoredMember = std::pair<std::string, double>;

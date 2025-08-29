@@ -488,7 +488,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
         RecordJournal(op_args, "DEL"sv, ArgSlice{key});
       }
     }
-    return 0;
+    return OpStatus::OK;
   }
 
   // We can use std::nullopt here because we check the type later.
@@ -544,6 +544,8 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
     res = StringSetWrapper{co, op_args.db_cntx}.Add(vals, UINT32_MAX, false);
   }
 
+  // TODO: consider optimization to record real command if the replica is in stable_sync state
+  // and there is no slot migration process going on.
   if (journal_update && op_args.shard->journal()) {
     if (overwrite) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{key});
