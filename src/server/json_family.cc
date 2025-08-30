@@ -9,6 +9,8 @@
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
 
+#include <type_traits>
+
 #include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
@@ -312,7 +314,10 @@ template <typename T> void Send(const JsonCallbackResult<T>& result, RedisReplyB
     if (rb->IsResp3()) {
       rb->StartArray(arr.size());
       for (const auto& item : arr) {
-        rb->StartArray(1);
+        // For JSON.TYPE (std::string), preserve nested array behavior for compatibility
+        if constexpr (std::is_same_v<T, std::string>) {
+          rb->StartArray(1);
+        }
         Send(item, rb);
       }
     } else {
