@@ -3262,10 +3262,10 @@ TEST_F(JsonFamilyTest, JsonIntPathTest) {
 }
 
 TEST_F(JsonFamilyTest, ARRLEN_RESP3NestedArrayBug) {
-  auto resp = Run({"HELLO", "3"});
+  Run({"HELLO", "3"});
 
   string json = R"({"a":[1], "b":{"a":[1,2,3]}, "c":{"x":"not_a"}})";
-  resp = Run({"JSON.SET", "doc", ".", json});
+  auto resp = Run({"JSON.SET", "doc", ".", json});
   ASSERT_THAT(resp, "OK");
 
   // In RESP3 mode, this should return [1, 3] (direct integers)
@@ -3285,10 +3285,9 @@ TEST_F(JsonFamilyTest, ARRLEN_RESP3NestedArrayBug) {
 }
 
 TEST_F(JsonFamilyTest, ARRAPPEND_RESP3NestedArrayBug) {
-  auto resp = Run({"HELLO", "3"});
-  (void)resp;
+  Run({"HELLO", "3"});
 
-  resp = Run({"JSON.SET", "doc", ".", R"({"a":[1], "b":{"a":[1,2,3]}})"});
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"a":[1], "b":{"a":[1,2,3]}})"});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRAPPEND", "doc", "$..a", "2"});
@@ -3301,10 +3300,9 @@ TEST_F(JsonFamilyTest, ARRAPPEND_RESP3NestedArrayBug) {
 }
 
 TEST_F(JsonFamilyTest, ARRINDEX_RESP3NestedArrayBug) {
-  auto resp = Run({"HELLO", "3"});
-  (void)resp;
+  Run({"HELLO", "3"});
 
-  resp = Run({"JSON.SET", "doc", ".", R"({"a":["x","y"], "b":{"a":["y","z"]}})"});
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"a":["x","y"], "b":{"a":["y","z"]}})"});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRINDEX", "doc", "$..a", R"("y")"});
@@ -3317,10 +3315,9 @@ TEST_F(JsonFamilyTest, ARRINDEX_RESP3NestedArrayBug) {
 }
 
 TEST_F(JsonFamilyTest, ARRPOP_RESP3NestedArrayBug) {
-  auto resp = Run({"HELLO", "3"});
-  (void)resp;
+  Run({"HELLO", "3"});
 
-  resp = Run({"JSON.SET", "doc", ".", R"({"a":[7], "b":{"a":[8]}})"});
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"a":[7], "b":{"a":[8]}})"});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRPOP", "doc", "$..a"});
@@ -3331,10 +3328,9 @@ TEST_F(JsonFamilyTest, ARRPOP_RESP3NestedArrayBug) {
 }
 
 TEST_F(JsonFamilyTest, ARRTRIM_RESP3NestedArrayBug) {
-  auto resp = Run({"HELLO", "3"});
-  (void)resp;
+  Run({"HELLO", "3"});
 
-  resp = Run({"JSON.SET", "doc", ".", R"({"a":[1,2], "b":{"a":[3,4,5]}})"});
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"a":[1,2], "b":{"a":[3,4,5]}})"});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRTRIM", "doc", "$..a", "0", "0"});
@@ -3347,10 +3343,9 @@ TEST_F(JsonFamilyTest, ARRTRIM_RESP3NestedArrayBug) {
 }
 
 TEST_F(JsonFamilyTest, STRLEN_RESP3NestedArrayBug) {
-  auto resp = Run({"HELLO", "3"});
-  (void)resp;
+  Run({"HELLO", "3"});
 
-  resp = Run({"JSON.SET", "doc", ".", R"({"s":"hi", "b":{"s":"abc"}})"});
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"s":"hi", "b":{"s":"abc"}})"});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.STRLEN", "doc", "$..s"});
@@ -3363,10 +3358,9 @@ TEST_F(JsonFamilyTest, STRLEN_RESP3NestedArrayBug) {
 }
 
 TEST_F(JsonFamilyTest, OBJLEN_RESP3NestedArrayBug) {
-  auto resp = Run({"HELLO", "3"});
-  (void)resp;
+  Run({"HELLO", "3"});
 
-  resp = Run({"JSON.SET", "doc", ".", R"({"o":{"k":1}, "b":{"o":{"k":1,"m":2}}})"});
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"o":{"k":1}, "b":{"o":{"k":1,"m":2}}})"});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.OBJLEN", "doc", "$..o"});
@@ -3379,10 +3373,9 @@ TEST_F(JsonFamilyTest, OBJLEN_RESP3NestedArrayBug) {
 }
 
 TEST_F(JsonFamilyTest, OBJKEYS_RESP3NestedArrayBug) {
-  auto resp = Run({"HELLO", "3"});
-  (void)resp;
+  Run({"HELLO", "3"});
 
-  resp = Run({"JSON.SET", "doc", ".", R"({"o":{"k":1}, "b":{"o":{"k":1,"m":2}}})"});
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"o":{"k":1}, "b":{"o":{"k":1,"m":2}}})"});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.OBJKEYS", "doc", "$..o"});
@@ -3399,10 +3392,9 @@ TEST_F(JsonFamilyTest, OBJKEYS_RESP3NestedArrayBug) {
 }
 
 TEST_F(JsonFamilyTest, STRAPPEND_RESP3NestedArrayBug) {
-  auto resp = Run({"HELLO", "3"});
-  (void)resp;
+  Run({"HELLO", "3"});
 
-  resp = Run({"JSON.SET", "doc", ".", R"({"s":"a", "b":{"s":"zz"}})"});
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"s":"a", "b":{"s":"zz"}})"});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.STRAPPEND", "doc", "$..s", R"("b")"});
@@ -3415,10 +3407,9 @@ TEST_F(JsonFamilyTest, STRAPPEND_RESP3NestedArrayBug) {
 }
 
 TEST_F(JsonFamilyTest, TOGGLE_RESP3NestedArrayBug) {
-  auto resp = Run({"HELLO", "3"});
-  (void)resp;
+  Run({"HELLO", "3"});
 
-  resp = Run({"JSON.SET", "doc", ".", R"({"b":true, "x":{"b":false}})"});
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"b":true, "x":{"b":false}})"});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.TOGGLE", "doc", "$..b"});
