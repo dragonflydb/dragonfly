@@ -3261,4 +3261,164 @@ TEST_F(JsonFamilyTest, JsonIntPathTest) {
   EXPECT_THAT(resp, "[\"large.jpg\"]");
 }
 
+TEST_F(JsonFamilyTest, ARRLEN_RESP3NestedArrayBug) {
+  Run({"HELLO", "3"});
+
+  string json = R"({"a":[1], "b":{"a":[1,2,3]}, "c":{"x":"not_a"}})";
+  auto resp = Run({"JSON.SET", "doc", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  // In RESP3 mode, this should return [1, 3] (direct integers)
+  // NOT [[1], [3]] (integers wrapped in arrays)
+  resp = Run({"JSON.ARRLEN", "doc", "$..a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_EQ(resp.GetVec().size(), 2);
+
+  // The bug: each element is wrapped in array when it shouldn't be
+  // Check that elements are NOT arrays themselves
+  EXPECT_THAT(resp.GetVec()[0], Not(ArgType(RespExpr::ARRAY)));  // Should be integer, not array
+  EXPECT_THAT(resp.GetVec()[1], Not(ArgType(RespExpr::ARRAY)));  // Should be integer, not array
+
+  // Verify the actual values
+  EXPECT_THAT(resp.GetVec()[0], IntArg(1));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(3));
+}
+
+TEST_F(JsonFamilyTest, ARRAPPEND_RESP3NestedArrayBug) {
+  Run({"HELLO", "3"});
+
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"a":[1], "b":{"a":[1,2,3]}})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRAPPEND", "doc", "$..a", "2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_EQ(resp.GetVec().size(), 2);
+  EXPECT_THAT(resp.GetVec()[0], Not(ArgType(RespExpr::ARRAY)));
+  EXPECT_THAT(resp.GetVec()[1], Not(ArgType(RespExpr::ARRAY)));
+  EXPECT_THAT(resp.GetVec()[0], IntArg(2));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(4));
+}
+
+TEST_F(JsonFamilyTest, ARRINDEX_RESP3NestedArrayBug) {
+  Run({"HELLO", "3"});
+
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"a":["x","y"], "b":{"a":["y","z"]}})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRINDEX", "doc", "$..a", R"("y")"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_EQ(resp.GetVec().size(), 2);
+  EXPECT_THAT(resp.GetVec()[0], Not(ArgType(RespExpr::ARRAY)));
+  EXPECT_THAT(resp.GetVec()[1], Not(ArgType(RespExpr::ARRAY)));
+  EXPECT_THAT(resp.GetVec()[0], IntArg(1));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(0));
+}
+
+TEST_F(JsonFamilyTest, ARRPOP_RESP3NestedArrayBug) {
+  Run({"HELLO", "3"});
+
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"a":[7], "b":{"a":[8]}})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRPOP", "doc", "$..a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_EQ(resp.GetVec().size(), 2);
+  EXPECT_THAT(resp.GetVec()[0], Not(ArgType(RespExpr::ARRAY)));
+  EXPECT_THAT(resp.GetVec()[1], Not(ArgType(RespExpr::ARRAY)));
+}
+
+TEST_F(JsonFamilyTest, ARRTRIM_RESP3NestedArrayBug) {
+  Run({"HELLO", "3"});
+
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"a":[1,2], "b":{"a":[3,4,5]}})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRTRIM", "doc", "$..a", "0", "0"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_EQ(resp.GetVec().size(), 2);
+  EXPECT_THAT(resp.GetVec()[0], Not(ArgType(RespExpr::ARRAY)));
+  EXPECT_THAT(resp.GetVec()[1], Not(ArgType(RespExpr::ARRAY)));
+  EXPECT_THAT(resp.GetVec()[0], IntArg(1));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(1));
+}
+
+TEST_F(JsonFamilyTest, STRLEN_RESP3NestedArrayBug) {
+  Run({"HELLO", "3"});
+
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"s":"hi", "b":{"s":"abc"}})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.STRLEN", "doc", "$..s"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_EQ(resp.GetVec().size(), 2);
+  EXPECT_THAT(resp.GetVec()[0], Not(ArgType(RespExpr::ARRAY)));
+  EXPECT_THAT(resp.GetVec()[1], Not(ArgType(RespExpr::ARRAY)));
+  EXPECT_THAT(resp.GetVec()[0], IntArg(2));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(3));
+}
+
+TEST_F(JsonFamilyTest, OBJLEN_RESP3NestedArrayBug) {
+  Run({"HELLO", "3"});
+
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"o":{"k":1}, "b":{"o":{"k":1,"m":2}}})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.OBJLEN", "doc", "$..o"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_EQ(resp.GetVec().size(), 2);
+  EXPECT_THAT(resp.GetVec()[0], Not(ArgType(RespExpr::ARRAY)));
+  EXPECT_THAT(resp.GetVec()[1], Not(ArgType(RespExpr::ARRAY)));
+  EXPECT_THAT(resp.GetVec()[0], IntArg(1));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(2));
+}
+
+TEST_F(JsonFamilyTest, OBJKEYS_RESP3NestedArrayBug) {
+  Run({"HELLO", "3"});
+
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"o":{"k":1}, "b":{"o":{"k":1,"m":2}}})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.OBJKEYS", "doc", "$..o"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_EQ(resp.GetVec().size(), 2);
+  // Each element should be array of keys, not array wrapped again
+  auto& el0 = resp.GetVec()[0];
+  auto& el1 = resp.GetVec()[1];
+  ASSERT_THAT(el0, ArgType(RespExpr::ARRAY));
+  ASSERT_THAT(el1, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(el0.GetVec(), ElementsAre("k"));
+  // Order of keys in objects is not guaranteed, so check size only for the second
+  EXPECT_EQ(el1.GetVec().size(), 2);
+}
+
+TEST_F(JsonFamilyTest, STRAPPEND_RESP3NestedArrayBug) {
+  Run({"HELLO", "3"});
+
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"s":"a", "b":{"s":"zz"}})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.STRAPPEND", "doc", "$..s", R"("b")"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_EQ(resp.GetVec().size(), 2);
+  EXPECT_THAT(resp.GetVec()[0], Not(ArgType(RespExpr::ARRAY)));
+  EXPECT_THAT(resp.GetVec()[1], Not(ArgType(RespExpr::ARRAY)));
+  EXPECT_THAT(resp.GetVec()[0], IntArg(2));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(3));
+}
+
+TEST_F(JsonFamilyTest, TOGGLE_RESP3NestedArrayBug) {
+  Run({"HELLO", "3"});
+
+  auto resp = Run({"JSON.SET", "doc", ".", R"({"b":true, "x":{"b":false}})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.TOGGLE", "doc", "$..b"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_EQ(resp.GetVec().size(), 2);
+  EXPECT_THAT(resp.GetVec()[0], Not(ArgType(RespExpr::ARRAY)));
+  EXPECT_THAT(resp.GetVec()[1], Not(ArgType(RespExpr::ARRAY)));
+  EXPECT_THAT(resp.GetVec()[0], IntArg(0));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(1));
+}
+
 }  // namespace dfly
