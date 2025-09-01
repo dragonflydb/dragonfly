@@ -880,4 +880,11 @@ TEST_F(BitOpsFamilyTest, BitFieldAdditionalWrongArguments) {
   ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i16", "0", "bar"}), syntax_error);
 }
 
+TEST_F(BitOpsFamilyTest, BitFieldNoOps) {
+  EXPECT_THAT(Run({"BITFIELD", "k", "OVERFLOW", "SAT"}), RespArray(ElementsAre()));
+  EXPECT_THAT(Run({"BITFIELD", "k"}), RespArray(ElementsAre()));
+  EXPECT_THAT(Run({"BITFIELD_RO", "k", "OVERFLOW", "SAT"}), RespArray(ElementsAre()));
+  EXPECT_THAT(Run({"BITFIELD_RO", "k"}), RespArray(ElementsAre()));
+}
+
 }  // end of namespace dfly
