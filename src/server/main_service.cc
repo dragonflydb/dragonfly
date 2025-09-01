@@ -754,8 +754,7 @@ void UpdateUringFlagsOnThread() {
 
 void UpdateSchedulerFlagsOnThread() {
   using fb2::detail::Scheduler;
-  // TODO: expose FbInitializer or introduce FiberScheduler
-  auto* sched = util::fb2::detail::FiberActive()->scheduler();
+  auto* sched = util::fb2::detail::FiberScheduler();
   sched->UpdateConfig(&Scheduler::Config::budget_background_fib,
                       GetFlag(FLAGS_scheduler_background_budget));
   sched->UpdateConfig(&Scheduler::Config::background_sleep_prob,
