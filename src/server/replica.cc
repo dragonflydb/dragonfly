@@ -806,7 +806,7 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(
                   ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &exec_st_));
 
   VLOG(1) << "Sending on flow " << master_context_.master_repl_id << " "
-          << master_context_.dfly_session_id << " " << flow_id_;
+          << master_context_.dfly_session_id << " " << flow_id_ << " lsn: " << lsn.value_or(-1);
 
   // DFLY FLOW <master_id> <session_id> <flow_id> [lsn] [last_master_id lsn-vec]
   std::string cmd = StrCat("DFLY FLOW ", master_context_.master_repl_id, " ",
@@ -818,6 +818,8 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(
   }
   if (last_master_data && master_context_.version >= DflyVersion::VER5 &&
       absl::GetFlag(FLAGS_replica_partial_sync)) {
+    // TODO(kostas) on the next version remove the lsn array -- it's not needed anymore but
+    // we leave it here for backwards compatibility.
     string lsn_str = absl::StrJoin(last_master_data.value().last_journal_LSNs, "-");
     absl::StrAppend(&cmd, " ", last_master_data.value().id, " ", lsn_str);
     VLOG(1) << "Sending last master sync flow " << last_master_data.value().id << " " << lsn_str;
