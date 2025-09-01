@@ -152,9 +152,9 @@ void OutputScoredArrayResult(const OpResult<ScoredArray>& result, SinkReplyBuild
   rb->SendScoredArray(result.value(), true /* with scores */);
 }
 
-OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZSetFamily::ZParams& zparams,
-                                           const OpArgs& op_args, string_view key,
-                                           size_t member_len) {
+OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams,
+                                              const OpArgs& op_args, string_view key,
+                                              size_t member_len) {
   auto& db_slice = op_args.GetDbSlice();
   if (zparams.flags & ZADD_IN_XX) {
     return db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
@@ -1551,7 +1551,8 @@ void ZBooleanOperation(CmdArgList args, string_view cmd, bool is_union, bool sto
     auto store_cb = [&, dest_shard = Shard(dest_key, maps.size())](Transaction* t,
                                                                    EngineShard* shard) {
       if (shard->shard_id() == dest_shard)
-        ZSetFamily::OpAdd(t->GetOpArgs(shard), ZSetFamily::ZParams{.override = true}, dest_key,
+        ZSetFamily::OpAdd(t->GetOpArgs(shard),
+                          ZSetFamily::ZParams{.override = true, .journal_update = true}, dest_key,
                           smvec);
       return OpStatus::OK;
     };
@@ -1696,7 +1697,8 @@ void ZRangeInternal(CmdArgList args, ZSetFamily::RangeParams range_params, Trans
       mvec[i++] = {score, str};
     }
 
-    add_result = ZSetFamily::OpAdd(t->GetOpArgs(shard), ZSetFamily::ZParams{.override = true},
+    add_result = ZSetFamily::OpAdd(t->GetOpArgs(shard),
+                                   ZSetFamily::ZParams{.override = true, .journal_update = true},
                                    *range_params.store_key, mvec);
 
     return OpStatus::OK;
@@ -1967,6 +1969,9 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
     if (res_it && IsValid(res_it->it)) {
       res_it->post_updater.Run();
       db_slice.Del(op_args.db_cntx, res_it->it);
+      if (zparams.journal_update && op_args.shard->journal()) {
+        RecordJournal(op_args, "DEL"sv, ArgSlice{key});
+      }
     }
     return OpStatus::OK;
   }
@@ -1976,7 +1981,7 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
   size_t field_len = members.size() > server.zset_max_listpack_entries
                          ? UINT32_MAX
                          : members.front().second.size();
-  auto res_it = FindZEntry(zparams, op_args, key, field_len);
+  auto res_it = PrepareZEntry(zparams, op_args, key, field_len);
 
   if (!res_it)
     return res_it.status();
@@ -2039,6 +2044,26 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
 
   if (op_status != OpStatus::OK)
     return op_status;
+
+  // TODO: consider optimization to record real command if the replica is in stable_sync state
+  // and there is no slot migration process going on.
+  if (zparams.journal_update && op_args.shard->journal()) {
+    if (zparams.override) {
+      RecordJournal(op_args, "DEL"sv, ArgSlice{key});
+    }
+
+    vector<string> scores;
+    vector<string_view> mapped;
+    scores.reserve(members.size());
+    mapped.reserve(members.size() * 2 + 1);
+    mapped.push_back(key);
+    for (const auto& [score, member] : members) {
+      scores.push_back(absl::StrCat(score));
+      mapped.push_back(scores.back());
+      mapped.push_back(member);
+    }
+    RecordJournal(op_args, "ZADD"sv, mapped);
+  }
   return aresult;
 }
 
@@ -2336,7 +2361,8 @@ void ZSetFamily::ZDiffStore(CmdArgList args, const CommandContext& cmd_cntx) {
 
   auto store_cb = [&](Transaction* t, EngineShard* shard) {
     if (shard->shard_id() == dest_shard)
-      ZSetFamily::OpAdd(t->GetOpArgs(shard), ZSetFamily::ZParams{.override = true}, dest_key,
+      ZSetFamily::OpAdd(t->GetOpArgs(shard),
+                        ZSetFamily::ZParams{.override = true, .journal_update = true}, dest_key,
                         smvec);
     return OpStatus::OK;
   };
@@ -2836,7 +2862,7 @@ constexpr uint32_t kZUnionStore = WRITE | SORTEDSET | SLOW;
 }  // namespace acl
 
 void ZSetFamily::Register(CommandRegistry* registry) {
-  constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::DENYOOM;
+  constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::DENYOOM | CO::NO_AUTOJOURNAL;
   registry->StartFamily();
   // TODO: to add support for SCRIPT for BZPOPMIN, BZPOPMAX similarly to BLPOP.
   *registry
