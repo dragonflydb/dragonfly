@@ -837,7 +837,7 @@ TEST_F(DflyEngineTest, Latency) {
 
 TEST_F(DflyEngineTest, EvalBug2664) {
   absl::FlagSaver fs;
-  absl::SetFlag(&FLAGS_lua_resp2_legacy_float, true);
+  SetFlag(&FLAGS_lua_resp2_legacy_float, true);
 
   auto resp = Run({"eval", "return 42.9", "0"});
   EXPECT_THAT(resp, IntArg(42));

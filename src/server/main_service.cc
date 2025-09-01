@@ -348,8 +348,7 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnDouble(double d) final {
-    thread_local const bool send_double_as_long = GetFlag(FLAGS_lua_resp2_legacy_float);
-    if (send_double_as_long) {
+    if (GetFlag(FLAGS_lua_resp2_legacy_float)) {
       const long val = d >= 0 ? static_cast<long>(floor(d)) : static_cast<long>(ceil(d));
       rb_->SendLong(val);
     } else {
