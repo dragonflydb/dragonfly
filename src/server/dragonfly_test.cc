@@ -848,7 +848,7 @@ TEST_F(DflyEngineTest, EvalBug2664) {
   ASSERT_THAT(resp, ArrLen(14));
 
   resp = Run({"eval", "return 42.9", "0"});
-  EXPECT_THAT(resp, DoubleArg(42.9));
+  EXPECT_THAT(resp, IntArg(42));
 }
 
 TEST_F(DflyEngineTest, MemoryUsage) {
