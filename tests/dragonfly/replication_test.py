@@ -448,9 +448,6 @@ async def test_cancel_replication_immediately(df_factory, df_seeder_factory: Dfl
     """
     Issue 100 replication commands. This checks that the replication state
     machine can handle cancellation well.
-    We assert that at least one command was cancelled.
-    After we finish the 'fuzzing' part, replicate the first master and check that
-    all the data is correct.
     """
     COMMANDS_TO_ISSUE = 100
 
@@ -484,7 +481,7 @@ async def test_cancel_replication_immediately(df_factory, df_seeder_factory: Dfl
         num_successes += await result
 
     logging.info(f"succeses: {num_successes}")
-    assert COMMANDS_TO_ISSUE > num_successes, "At least one REPLICAOF must be cancelled"
+    assert COMMANDS_TO_ISSUE == num_successes
 
     await wait_available_async(c_replica)
     capture = await seeder.capture()
@@ -492,6 +489,9 @@ async def test_cancel_replication_immediately(df_factory, df_seeder_factory: Dfl
     assert await seeder.compare(capture, replica.port)
 
     ping_job.cancel()
+
+    replica.stop()
+    lines = replica.find_in_logs("Stopping replication")
 
 
 """
@@ -2967,8 +2967,7 @@ async def test_replicaof_inside_multi(df_factory):
         num_successes += await result
 
     logging.info(f"succeses: {num_successes}")
-    assert MULTI_COMMANDS_TO_ISSUE > num_successes, "At least one REPLICAOF must be cancelled"
-    assert num_successes > 0, "At least one REPLICAOF must success"
+    assert MULTI_COMMANDS_TO_ISSUE == num_successes
 
 
 async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFactory):
