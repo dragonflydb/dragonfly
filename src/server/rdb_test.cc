@@ -670,6 +670,26 @@ TEST_F(RdbTest, SBF) {
   EXPECT_THAT(Run({"BF.EXISTS", "k", "1"}), IntArg(1));
 }
 
+TEST_F(RdbTest, RestoreSearchIndexNameStartingWithColon) {
+  // Create an index with a name that starts with ':' and add a sample document
+  EXPECT_EQ(Run({"FT.CREATE", ":Order:index", "ON", "HASH", "PREFIX", "1", ":Order:", "SCHEMA",
+                 "customer_name", "AS", "customer_name", "TEXT", "status", "AS", "status", "TAG"}),
+            "OK");
+
+  EXPECT_THAT(Run({"HSET", ":Order:1", "customer_name", "John", "status", "new"}), IntArg(2));
+
+  // Save and reload to ensure the index definition is persisted and restored
+  EXPECT_EQ(Run({"save", "df"}), "OK");
+  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+
+  // Verify a basic search works on the restored index
+  auto search = Run({"FT.SEARCH", ":Order:index", "John"});
+  ASSERT_THAT(search, ArgType(RespExpr::ARRAY));
+  const auto& v = search.GetVec();
+  ASSERT_FALSE(v.empty());
+  EXPECT_THAT(v.front(), IntArg(1));
+}
+
 TEST_F(RdbTest, DflyLoadAppend) {
   // Create an RDB with (k1,1) value in it saved as `filename`
   EXPECT_EQ(Run({"set", "k1", "1"}), "OK");

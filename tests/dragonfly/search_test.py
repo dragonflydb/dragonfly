@@ -383,42 +383,6 @@ async def test_knn_score_return(async_client: aioredis.Redis):
     await i1.dropindex()
 
 
-@dfly_args({"proactor_threads": 4})
-@pytest.mark.asyncio
-async def test_restore_search_index_with_colon_name(df_factory):
-    dbfilename = f"dump_{tmp_file_name()}"
-    instance = df_factory.create(dbfilename=dbfilename)
-    instance.start()
-
-    client: aioredis.Redis = instance.client()
-    await wait_available_async(client)
-
-    # Create index with name starting with ':' and some simple schema on HASH keys
-    idx_name = ":Order:index"
-    i = client.ft(idx_name)
-    await i.create_index(
-        [TextField("customer_name"), TagField("status")],
-        definition=IndexDefinition(index_type=IndexType.HASH, prefix=[":Order:"]),
-    )
-
-    # Insert sample data matching the prefix
-    await client.hset(":Order:1", mapping={"customer_name": "John", "status": "new"})
-
-    # Save DF snapshot with index definitions in AUX, flush, and load it back
-    await client.execute_command("SAVE", "DF")
-    assert await client.flushall()
-    await client.execute_command("DFLY", "LOAD", f"{dbfilename}-summary.dfs")
-
-    # Verify the index was recreated successfully
-    lst = await client.execute_command("FT._LIST")
-    names = {x.decode() if isinstance(x, bytes) else x for x in lst}
-    assert idx_name in names
-
-    # Verify basic search works on the restored index
-    res = await i.search("John")
-    assert res.total == 1
-
-
 @dfly_args({"proactor_threads": 4, "dbfilename": "search-data"})
 async def test_index_persistence(df_server):
     client = aioredis.Redis(port=df_server.port)
