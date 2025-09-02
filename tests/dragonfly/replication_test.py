@@ -1158,6 +1158,7 @@ More details in https://github.com/dragonflydb/dragonfly/issues/1231
 
 
 @pytest.mark.slow
+@pytest.mark.exclude_epoll
 async def test_flushall_in_full_sync(df_factory):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=2)
@@ -1245,6 +1246,7 @@ take_over_cases = [
 ]
 
 
+@pytest.mark.exclude_epoll
 @pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
 async def test_take_over_counters(df_factory, master_threads, replica_threads):
     master = df_factory.create(proactor_threads=master_threads)
@@ -1299,6 +1301,7 @@ async def test_take_over_counters(df_factory, master_threads, replica_threads):
         assert client_value == int(replicated_value)
 
 
+@pytest.mark.exclude_epoll
 @pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
 async def test_take_over_seeder(
     request, df_factory, df_seeder_factory, master_threads, replica_threads
@@ -1574,6 +1577,7 @@ async def test_tls_replication_without_ca(
     assert 100 == await c_replica.execute_command("dbsize")
 
 
+@pytest.mark.exclude_epoll
 async def test_ipv6_replication(df_factory: DflyInstanceFactory):
     """Test that IPV6 addresses work for replication, ::1 is 127.0.0.1 localhost"""
     master = df_factory.create(proactor_threads=1, bind="::1", port=1111)
@@ -2412,6 +2416,7 @@ async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory,
     await assert_replica_reconnections(replica, 0)
 
 
+@pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 1})
 async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
     # disconnect after 1 second of being blocked
@@ -2760,6 +2765,7 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
     await assert_replica_reconnections(replica, 0)
 
 
+@pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 1})
 async def test_memory_on_big_string_loading(df_factory):
     """
@@ -2800,6 +2806,7 @@ async def test_memory_on_big_string_loading(df_factory):
     assert master_data == replica_data
 
 
+@pytest.mark.exclude_epoll
 @pytest.mark.parametrize(
     "element_size, elements_number",
     [(16, 30000), (30000, 16)],

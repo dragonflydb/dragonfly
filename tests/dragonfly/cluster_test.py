@@ -1471,6 +1471,7 @@ async def test_migration_with_key_ttl(df_factory):
     assert await nodes[1].client.execute_command("stick k_sticky") == 0
 
 
+@pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_finalization_timeout_ms": 5})
 async def test_network_disconnect_during_migration(df_factory):
     instances = [
@@ -2028,6 +2029,7 @@ async def test_snapshoting_during_migration(
     # We can try to use FakeRedis with the DebugPopulateSeeder comparison here.
 
 
+@pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 @pytest.mark.asyncio
 async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
@@ -2093,6 +2095,7 @@ async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 @pytest.mark.asyncio
 @pytest.mark.opt_only
+@pytest.mark.exclude_epoll
 async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory):
     instances = [
         df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)
@@ -2154,6 +2157,7 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
 )
 @pytest.mark.parametrize("chunk_size", [1_000_000, 30])
 @pytest.mark.asyncio
+@pytest.mark.exclude_epoll
 async def test_cluster_migration_while_seeding(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory, chunk_size
 ):
@@ -2301,6 +2305,7 @@ async def await_no_lag(client: aioredis.Redis, timeout=10):
     raise RuntimeError("Lag did not reduced to 0!")
 
 
+@pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 4})
 async def test_replicate_cluster(df_factory: DflyInstanceFactory, df_seeder_factory):
     """
@@ -2510,6 +2515,7 @@ async def await_eq_offset(client: aioredis.Redis, timeout=20):
     raise RuntimeError("offset not equal!")
 
 
+@pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 4})
 async def test_replicate_redis_cluster(redis_cluster, df_factory, df_seeder_factory):
     """
@@ -2715,6 +2721,7 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
     await check_for_no_state_status([node.admin_client for node in nodes])
 
 
+@pytest.mark.exclude_epoll
 @pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_buckets_cpu_budget": 1})
 async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
@@ -2874,6 +2881,7 @@ For each migration we start migration, wait for it to finish and once it is fini
 
 
 @pytest.mark.slow
+@pytest.mark.exclude_epoll
 @pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "pause_wait_timeout": 10})
 async def test_migration_rebalance_node(df_factory: DflyInstanceFactory, df_seeder_factory):
