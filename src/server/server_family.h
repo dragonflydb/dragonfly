@@ -414,6 +414,7 @@ class ServerFamily {
 
   void ReplicaOfNoOne(SinkReplyBuilder* builder);
   bool IsDragonflyLoadingAtomic();
+  void UpdateReplicationThreadLocals(std::shared_ptr<Replica> repl);
 
   util::fb2::Fiber snapshot_schedule_fb_;
   util::fb2::Fiber load_fiber_;

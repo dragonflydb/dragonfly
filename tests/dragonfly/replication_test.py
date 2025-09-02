@@ -466,12 +466,8 @@ async def test_cancel_replication_immediately(df_factory, df_seeder_factory: Dfl
             await asyncio.sleep(0.05)
 
     async def replicate():
-        try:
-            await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-            return True
-        except redis.exceptions.ResponseError as e:
-            assert e.args[0] == "replication cancelled"
-            return False
+        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        return True
 
     ping_job = asyncio.create_task(ping_status())
     replication_commands = [asyncio.create_task(replicate()) for _ in range(COMMANDS_TO_ISSUE)]
@@ -492,6 +488,9 @@ async def test_cancel_replication_immediately(df_factory, df_seeder_factory: Dfl
 
     replica.stop()
     lines = replica.find_in_logs("Stopping replication")
+    # Cancelled 99 times by REPLICAOF command and once by Shutdown() because
+    # we stopped the instance
+    assert len(lines) == COMMANDS_TO_ISSUE
 
 
 """

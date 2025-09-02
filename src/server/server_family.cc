@@ -1234,10 +1234,7 @@ void ServerFamily::Shutdown() {
     DebugCmd::Shutdown();
   });
 
-  service_.proactor_pool().AwaitFiberOnAll([](auto index, auto* cntx) {
-    tl_replica = nullptr;
-    tl_cluster_replicas.clear();
-  });
+  UpdateReplicationThreadLocals(nullptr);
 }
 
 bool ServerFamily::HasPrivilegedInterface() {
@@ -3457,10 +3454,9 @@ void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
     SetMasterFlagOnAllThreads(true);
     // TODO we should not allow partial sync after NO-ONE. Only after Takeover.
     last_master_data_ = replica_->Stop();
-    // TODO set thread locals to nullptr
     replica_.reset();
     StopAllClusterReplicas();
-    service_.proactor_pool().AwaitFiberOnAll([](auto index, auto* cntx) { tl_replica = nullptr; });
+    UpdateReplicationThreadLocals(nullptr);
   }
 
   // May not switch to ACTIVE if the process is, for example, shutting down at the same time.
@@ -3523,6 +3519,11 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
     return builder->SendError(ec ? ec.Format() : "replication cancelled");
   }
 
+  // Critical section.
+  // 1. Stop the old replica_ if it exists
+  // 2. Update all the pointers to the new replica and update master flag
+  // 3. Start the main replication fiber
+  // 4. Send OK
   util::fb2::LockGuard lk(replicaof_mu_);
   if (replica_)
     last_master_data = replica_->Stop();
@@ -3534,10 +3535,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
 
   // Update thread locals. That way INFO never blocks
   replica_ = new_replica;
-  service_.proactor_pool().AwaitFiberOnAll([new_replica](auto index, auto* context) {
-    tl_replica = new_replica;
-    tl_cluster_replicas.clear();
-  });
+  UpdateReplicationThreadLocals(new_replica);
   SetMasterFlagOnAllThreads(false);
 
   if (on_err == ActionOnConnectionFail::kReturnOnError) {
@@ -3622,7 +3620,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   last_master_data_ = replica_->Stop();
   replica_.reset();
 
-  service_.proactor_pool().AwaitFiberOnAll([](auto index, auto* context) { tl_replica = nullptr; });
+  UpdateReplicationThreadLocals(nullptr);
 
   return builder->SendOk();
 }
@@ -3914,6 +3912,13 @@ void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,
   } else {
     builder->SendError("Failed to pause all running clients");
   }
+}
+
+void ServerFamily::UpdateReplicationThreadLocals(std::shared_ptr<Replica> repl) {
+  service_.proactor_pool().AwaitFiberOnAll([repl](auto index, auto* context) {
+    tl_replica = repl;
+    tl_cluster_replicas.clear();
+  });
 }
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))
