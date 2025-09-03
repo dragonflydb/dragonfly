@@ -1909,6 +1909,11 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
 
     AppendMetricValue("db_keys_expiring", m.db_stats[i].expire_count, {"db"}, {StrCat("db", i)},
                       &db_key_expire_metrics);
+
+    AppendMetricValue("keyspace_hits_total", m.db_stats[i].hits, {"db"}, {StrCat("db", i)},
+                      &resp->body());
+    AppendMetricValue("keyspace_misses_total", m.db_stats[i].misses, {"db"}, {StrCat("db", i)},
+                      &resp->body());
   }
 
   absl::StrAppend(&resp->body(), db_key_metrics, db_key_expire_metrics, db_capacity_metrics,
@@ -2638,7 +2643,14 @@ void ServerFamily::ResetStat(Namespace* ns) {
         registry->ResetCallStats(index);
         EngineShard* shard = EngineShard::tlocal();
         if (shard) {
-          ns->GetDbSlice(shard->shard_id()).ResetEvents();
+          auto& db_slice = ns->GetDbSlice(shard->shard_id());
+          db_slice.ResetEvents();
+          // Reset per-db hits/misses
+          auto stats = db_slice.GetStats();
+          for (auto& s : stats.db_stats) {
+            s.hits = 0;
+            s.misses = 0;
+          }
         }
         facade::ResetStats();
         ServerState::tlocal()->exec_freq_count.clear();
@@ -3238,7 +3250,13 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       const auto& stats = m.db_stats[i];
       bool show = (i == 0) || (stats.key_count > 0);
       if (show) {
+        double hit_ratio = (stats.hits + stats.misses > 0)
+                               ? static_cast<double>(stats.hits) /
+                                     (stats.hits + stats.misses) * 100.0
+                               : 0.0;
         string val = StrCat("keys=", stats.key_count, ",expires=", stats.expire_count,
+                            ",hits=", stats.hits, ",misses=", stats.misses,
+                            ",hit_ratio=", absl::StrFormat("%.2f", hit_ratio),
                             ",avg_ttl=-1");  // TODO
         append(StrCat("db", i), val);
       }

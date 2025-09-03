@@ -70,6 +70,10 @@ struct DbTableStats {
   size_t tiered_entries = 0;
   size_t tiered_used_bytes = 0;
 
+  // Per-database hits/misses on keys
+  size_t hits = 0;
+  size_t misses = 0;
+
   std::array<size_t, OBJ_TYPE_MAX> memory_usage_by_type = {};
 
   // Mostly used internally, exposed for tiered storage.

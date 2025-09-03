@@ -150,6 +150,60 @@ TEST_F(MultiTest, HitMissStats) {
   EXPECT_THAT(metrics.events.misses, 1);
 }
 
+TEST_F(MultiTest, PerDbHitMissStats) {
+  Run({"SELECT", "0"});
+  ASSERT_EQ(Run({"SET", "key1", "val1"}), "OK");
+  ASSERT_EQ(Run({"GET", "key1"}), "val1");
+  ASSERT_THAT(Run({"GET", "nonexistent1"}), ArgType(RespExpr::NIL));
+
+  Run({"SELECT", "1"});
+  ASSERT_EQ(Run({"SET", "key2", "val2"}), "OK");
+  ASSERT_EQ(Run({"GET", "key2"}), "val2");
+  ASSERT_THAT(Run({"GET", "nonexistent2"}), ArgType(RespExpr::NIL));
+
+  auto metrics = GetMetrics();
+
+  EXPECT_GE(metrics.db_stats.size(), 2u);
+  EXPECT_EQ(metrics.db_stats[0].hits, 1u);
+  EXPECT_EQ(metrics.db_stats[0].misses, 1u);
+  EXPECT_EQ(metrics.db_stats[1].hits, 1u);
+  EXPECT_EQ(metrics.db_stats[1].misses, 1u);
+
+  EXPECT_EQ(metrics.events.hits, 2u);
+  EXPECT_EQ(metrics.events.misses, 2u);
+}
+
+TEST_F(MultiTest, PerDbHitMissStatsReset) {
+  Run({"SELECT", "0"});
+  Run({"SET", "key1", "val1"});
+  Run({"GET", "key1"});
+  Run({"GET", "key2"});
+
+  auto before = GetMetrics();
+  ASSERT_GT(before.db_stats[0].hits, 0u);
+  ASSERT_GT(before.db_stats[0].misses, 0u);
+
+  Run({"CONFIG", "RESETSTAT"});
+
+  auto after = GetMetrics();
+  EXPECT_EQ(after.db_stats[0].hits, 0u);
+  EXPECT_EQ(after.db_stats[0].misses, 0u);
+}
+
+TEST_F(MultiTest, PerDbHitMissInfoOutput) {
+  Run({"SELECT", "0"});
+  Run({"SET", "testkey", "testval"});
+  Run({"GET", "testkey"});
+  Run({"GET", "missing"});
+
+  auto info_resp = Run({"INFO", "keyspace"});
+  ASSERT_TRUE(info_resp.type == RespExpr::STRING);
+  string info_str = ToSV(info_resp.GetBuf());
+  EXPECT_THAT(info_str, HasSubstr("hits=1"));
+  EXPECT_THAT(info_str, HasSubstr("misses=1"));
+  EXPECT_THAT(info_str, HasSubstr("hit_ratio=50.00"));
+}
+
 TEST_F(MultiTest, MultiEmpty) {
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");

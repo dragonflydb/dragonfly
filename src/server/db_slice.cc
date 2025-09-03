@@ -575,6 +575,9 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
   if (!IsValid(res.it)) {
     events_.misses += miss_weight;
+    if (miss_weight) {
+      db.stats.misses++;
+    }
     return OpStatus::KEY_NOTFOUND;
   }
 
@@ -584,6 +587,9 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
   if (req_obj_type.has_value() && res.it->second.ObjType() != req_obj_type.value()) {
     events_.misses += miss_weight;
+    if (miss_weight) {
+      db.stats.misses++;
+    }
     return OpStatus::WRONG_TYPE;
   }
 
@@ -591,6 +597,9 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     res = ExpireIfNeeded(cntx, res.it);
     if (!IsValid(res.it)) {
       events_.misses += miss_weight;
+      if (miss_weight) {
+        db.stats.misses++;
+      }
       return OpStatus::KEY_NOTFOUND;
     }
   }
@@ -607,6 +616,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
       break;
     case UpdateStatsMode::kReadStats:
       events_.hits++;
+      db.stats.hits++;
       if (db.slots_stats) {
         db.slots_stats[KeySlot(key)].total_reads++;
       }
