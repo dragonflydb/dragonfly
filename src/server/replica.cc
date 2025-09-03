@@ -1207,19 +1207,7 @@ auto Replica::GetSummary() const -> Summary {
     return res;
   };
 
-  if (Sock())
-    return Proactor()->AwaitBrief(f);
-
-  /**
-   * when this branch happens: there is a very short grace period
-   * where Sock() is not initialized, yet the server can
-   * receive ROLE/INFO commands. That period happens when launching
-   * an instance with '--replicaof' and then immediately
-   * sending a command.
-   *
-   * In that instance, we have to run f() on the current fiber.
-   */
-  return f();
+  return Proactor()->AwaitBrief(f);
 }
 
 std::vector<uint64_t> Replica::GetReplicaOffset() const {
