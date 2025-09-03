@@ -22,12 +22,10 @@ extern "C" {
 #include "server/search/doc_index.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
-#include "server/tiering/common.h"
 #include "server/transaction.h"
 #include "util/fibers/proactor_base.h"
 
 using namespace std;
-using namespace ::dfly::tiering::literals;
 
 ABSL_FLAG(float, mem_defrag_threshold, 0.7,
           "Minimum percentage of used memory relative to maxmemory cap before running "
@@ -195,25 +193,7 @@ bool EngineShard::DefragTaskState::CheckRequired() {
 
   static thread_local fragmentation_info finfo{.committed = 0, .wasted = 0, .bin = 0};
 
-  /*
-   If the eviction is enabled, we want to run the defrag task more frequently and more aggressively.
-   For global threshold rss we use the rss memory minus the eviction budget threshold and minus 3%
-    - For example if rss_deny_oom_ratio is 0.8 and eviction_memory_budget_threshold is 0.1,
-      we will start eviction when rss memory is above 0.8 - 0.1 = 0.7. And defragmentation
-      should still working if used rss memory is above 0.7 - 0.03 = 0.67.
-   For defrag interval we use the EvictionTaskState::kMemDefragCheckSecInterval
-   For waste threshold we use the EvictionTaskState::kEvictionWasteThreshold
-  */
-  const bool is_eviction_enabled = GetFlag(FLAGS_enable_heartbeat_eviction);
-
-  const double mem_defrag_threshold_flag = GetFlag(FLAGS_mem_defrag_threshold);
-  const double defrag_threshold =
-      !is_eviction_enabled ? mem_defrag_threshold_flag
-                           : std::min(mem_defrag_threshold_flag,
-                                      ServerState::tlocal()->rss_oom_deny_ratio -
-                                          GetFlag(FLAGS_eviction_memory_budget_threshold) -
-                                          EvictionTaskState::kDefragRssMemoryDelta);
-  const std::size_t global_threshold = double(limit) * defrag_threshold;
+  const std::size_t global_threshold = double(limit) * GetFlag(FLAGS_mem_defrag_threshold);
   if (global_threshold > rss_mem_current.load(memory_order_relaxed)) {
     finfo.bin = 0;  // reset.
     return false;
@@ -222,12 +202,7 @@ bool EngineShard::DefragTaskState::CheckRequired() {
   if (finfo.bin == 0) {  // did not start the iterative checking yet
     const auto now = time(nullptr);
     const auto seconds_from_prev_check = now - last_check_time;
-
-    const uint32_t check_sec_interval_flag = GetFlag(FLAGS_mem_defrag_check_sec_interval);
-    const uint32_t mem_defrag_interval =
-        !is_eviction_enabled
-            ? check_sec_interval_flag
-            : std::min(check_sec_interval_flag, EvictionTaskState::kDefragCheckSecInterval);
+    const auto mem_defrag_interval = GetFlag(FLAGS_mem_defrag_check_sec_interval);
 
     if (seconds_from_prev_check < mem_defrag_interval) {
       return false;
@@ -247,11 +222,7 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     // finished checking.
     last_check_time = time(nullptr);
 
-    const float waste_threshold_flag = GetFlag(FLAGS_mem_defrag_waste_threshold);
-    const double waste_threshold =
-        !is_eviction_enabled
-            ? waste_threshold_flag
-            : std::min(waste_threshold_flag, EvictionTaskState::kDefragWasteThreshold);
+    const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
     if (finfo.wasted > size_t(finfo.committed * waste_threshold)) {
       VLOG(1) << "memory fragmentation issue found: " << finfo.wasted << " " << finfo.committed;
       return true;
