@@ -1970,11 +1970,11 @@ vector<facade::Listener*> ServerFamily::GetNonPriviligedListeners() const {
 }
 
 optional<Replica::Summary> ServerFamily::GetReplicaSummary() const {
-  util::fb2::LockGuard lk(replicaof_mu_);
-  if (replica_ == nullptr) {
+  if (tl_replica == nullptr) {
     return nullopt;
   } else {
-    return replica_->GetSummary();
+    auto replica = tl_replica;
+    return replica->GetSummary();
   }
 }
 
@@ -3095,15 +3095,12 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 
   auto add_repl_info = [&] {
     bool is_master = true;
-    // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
-    // ensuring eventual consistency of is_master. When determining if the server is a replica and
-    // accessing the replica_ object, we must lock replicaof_mu_. Using is_master alone is
-    // insufficient in this scenario.
-    // Please note that we we do not use Metrics object here.
-    {
-      fb2::LockGuard lk(replicaof_mu_);
-      is_master = !replica_;
-    }
+
+    // Deep copy because tl_replica might be overwritten inbetween
+    auto replica = tl_replica;
+    auto cluster_replicas = tl_cluster_replicas;
+    is_master = !replica;
+
     if (is_master) {
       vector<ReplicaRoleInfo> replicas_info = dfly_cmd_->GetReplicasRoleInfo();
       append("role", "master");
@@ -3137,13 +3134,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
         append("psync_attempts", rinfo.psync_attempts);
         append("psync_successes", rinfo.psync_successes);
       };
-      // Deep copy because tl_replica might be overwritten inbetween
-      auto replica = tl_replica;
 
       replication_info_cb(replica->GetSummary());
 
-      // Deep copy because tl_cluster_replicas might be overwritten inbetween
-      auto cluster_replicas = tl_cluster_replicas;
       // Special case, when multiple masters replicate to a single replica.
       for (const auto& replica : cluster_replicas) {
         replication_info_cb(replica->GetSummary());
@@ -3721,12 +3714,11 @@ void ServerFamily::ReplConf(CmdArgList args, const CommandContext& cmd_cntx) {
 
 void ServerFamily::Role(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  util::fb2::LockGuard lk(replicaof_mu_);
   // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
   // ensuring eventual consistency of is_master. When determining if the server is a replica and
   // accessing the replica_ object, we must lock replicaof_mu_. Using is_master alone is
   // insufficient in this scenario.
-  if (!replica_) {
+  if (!tl_replica) {
     rb->StartArray(2);
     rb->SendBulkString("master");
     auto vec = dfly_cmd_->GetReplicasRoleInfo();
@@ -3739,7 +3731,11 @@ void ServerFamily::Role(CmdArgList args, const CommandContext& cmd_cntx) {
     }
 
   } else {
-    rb->StartArray(4 + cluster_replicas_.size() * 3);
+    // Deep copy because tl_replica might be overwritten inbetween
+    auto replica = tl_replica;
+    auto cluster_replicas = tl_cluster_replicas;
+
+    rb->StartArray(4 + cluster_replicas.size() * 3);
     rb->SendBulkString(GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
 
     auto send_replica_info = [rb](Replica::Summary rinfo) {
@@ -3756,9 +3752,9 @@ void ServerFamily::Role(CmdArgList args, const CommandContext& cmd_cntx) {
         rb->SendBulkString("connecting");
       }
     };
-    send_replica_info(replica_->GetSummary());
-    for (const auto& replica : cluster_replicas_) {
-      send_replica_info(replica->GetSummary());
+    send_replica_info(replica->GetSummary());
+    for (const auto& repl : cluster_replicas) {
+      send_replica_info(repl->GetSummary());
     }
   }
 }

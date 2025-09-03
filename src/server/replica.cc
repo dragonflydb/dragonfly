@@ -167,9 +167,12 @@ std::optional<Replica::LastMasterSyncData> Replica::Stop() {
   sync_fb_.JoinIfNeeded();
   DVLOG(1) << "MainReplicationFb stopped " << this;
   acks_fb_.JoinIfNeeded();
-  for (auto& flow : shard_flows_) {
-    flow.reset();
-  }
+
+  proactor_->Await([this]() {
+    for (auto& flow : shard_flows_) {
+      flow.reset();
+    }
+  });
 
   if (last_journal_LSNs_.has_value()) {
     return LastMasterSyncData{master_context_.master_repl_id, last_journal_LSNs_.value()};
@@ -505,14 +508,23 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
   // Initialize MultiShardExecution.
   multi_shard_exe_.reset(new MultiShardExecution());
 
-  // Initialize shard flows.
-  shard_flows_.resize(master_context_.num_flows);
-  DCHECK(!shard_flows_.empty());
-  for (unsigned i = 0; i < shard_flows_.size(); ++i) {
-    shard_flows_[i].reset(
-        new DflyShardReplica(server(), master_context_, i, &service_, multi_shard_exe_));
-  }
-  thread_flow_map_ = Partition(shard_flows_.size());
+  // Initialize shard flows. The update to the shard_flows_ should be done by this thread.
+  // Otherwise, there is a race condition between GetSummary() and the shard_flows_[i].reset()
+  // below.
+  decltype(shard_flows_) shard_flows_copy;
+  shard_flows_copy.resize(master_context_.num_flows);
+  DCHECK(!shard_flows_copy.empty());
+  thread_flow_map_ = Partition(shard_flows_copy.size());
+  const size_t pool_sz = shard_set->pool()->size();
+
+  shard_set->pool()->AwaitFiberOnAll([pool_sz, this, &shard_flows_copy](auto index, auto* ctx) {
+    for (unsigned i = index; i < shard_flows_copy.size(); i += pool_sz) {
+      shard_flows_copy[i].reset(
+          new DflyShardReplica(server(), master_context_, i, &service_, multi_shard_exe_));
+    }
+  });
+  // now update shard_flows on proactor thread
+  shard_flows_ = std::move(shard_flows_copy);
 
   // Blocked on until all flows got full sync cut.
   BlockingCounter sync_block{unsigned(shard_flows_.size())};
@@ -1171,6 +1183,7 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
 
 auto Replica::GetSummary() const -> Summary {
   auto f = [this]() {
+    DCHECK(Proactor() == ProactorBase::me());
     auto last_io_time = LastIoTime();
 
     // Note: we access LastIoTime from foreigh thread in unsafe manner. However, specifically here
