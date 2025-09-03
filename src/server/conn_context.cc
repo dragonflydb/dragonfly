@@ -323,7 +323,8 @@ vector<unsigned> ConnectionContext::ChangeSubscriptions(CmdArgList channels, boo
 void ConnectionState::ExecInfo::Clear() {
   DCHECK(!preborrowed_interpreter);  // Must have been released properly
   state = EXEC_INACTIVE;
-  ClearStoredCmds();
+  const size_t cleared_size = ClearStoredCmds();
+  ServerState::tlocal()->stats.stored_cmd_bytes -= cleared_size;
   is_write = false;
   ClearWatched();
 }

@@ -136,6 +136,9 @@ class ServerState {  // public struct - to allow initialization.
     uint32_t conn_timeout_events = 0;
     uint64_t psync_requests_total = 0;
     std::valarray<uint64_t> tx_width_freq_arr, squash_width_freq_arr;
+
+    // Memory size of stored commands during multi-exec in connections
+    uint64_t stored_cmd_bytes = 0;
   };
 
   // Unsafe version.
