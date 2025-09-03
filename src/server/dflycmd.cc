@@ -85,6 +85,7 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
   shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
 
   const FlowInfo* flow = &replica->flows[shard->shard_id()];
+
   while (flow->last_acked_lsn < shard->journal()->GetLsn()) {
     if (absl::Now() > end_time) {
       LOG(WARNING) << "Couldn't synchronize with replica for takeover in time: " << replica->address
@@ -95,8 +96,9 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
     if (!replica->exec_st.IsRunning()) {
       return false;
     }
-    VLOG(1) << "Replica lsn:" << flow->last_acked_lsn
-            << " master lsn:" << shard->journal()->GetLsn();
+    LOG_EVERY_T(INFO, 1) << "Replica lsn:" << flow->last_acked_lsn
+                         << " master lsn:" << shard->journal()->GetLsn()
+                         << "; Journal streamer state: " << flow->streamer->FormatInternalState();
     ThisFiber::SleepFor(1ms);
   }
 
@@ -512,7 +514,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
   atomic_bool catchup_success = true;
   if (*status == OpStatus::OK) {
     dfly::SharedLock lk{replica_ptr->shared_mu};
-    auto cb = [replica_ptr, end_time, &catchup_success](EngineShard* shard) {
+    auto cb = [replica_ptr = replica_ptr, end_time, &catchup_success](EngineShard* shard) {
       if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
         catchup_success.store(false);
       }

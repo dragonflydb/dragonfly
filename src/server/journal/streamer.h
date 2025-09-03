@@ -36,6 +36,9 @@ class JournalStreamer : public journal::JournalConsumerInterface {
 
   size_t UsedBytes() const;
 
+  // For debugging purposes. Return string with formatted internal state.
+  std::string FormatInternalState() const;
+
  protected:
   // TODO: we copy the string on each write because JournalItem may be passed to multiple
   // streamers so we can not move it. However, if we would either wrap JournalItem in shared_ptr

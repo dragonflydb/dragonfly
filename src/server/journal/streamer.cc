@@ -164,6 +164,15 @@ size_t JournalStreamer::UsedBytes() const {
   return pending_buf_.Size();
 }
 
+std::string JournalStreamer::FormatInternalState() const {
+  return absl::StrCat(
+      "pending_buf_size:", pending_buf_.Size(), " in_flight_bytes:", in_flight_bytes_,
+      " total_sent:", total_sent_, " throttle_count:", throttle_count_,
+      " total_throttle_wait_usec:", total_throttle_wait_usec_,
+      " throttle_waiters:", throttle_waiters_, " last_async_write_time_ms:", last_async_write_time_,
+      " last_lsn_time_s:", last_lsn_time_, " last_lsn_writen_:", last_lsn_writen_);
+}
+
 void JournalStreamer::Write(std::string str) {
   DCHECK(!str.empty());
   DVLOG(3) << "Writing " << str.size() << " bytes";
