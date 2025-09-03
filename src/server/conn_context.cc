@@ -229,6 +229,22 @@ size_t ConnectionState::ExecInfo::UsedMemory() const {
   return dfly::HeapSize(body) + dfly::HeapSize(watched_keys);
 }
 
+void ConnectionState::ExecInfo::AddStoredCmd(const CommandId* cid, bool own_args, CmdArgList args) {
+  body.emplace_back(cid, own_args, args);
+  stored_cmd_bytes += body.back().UsedMemory();
+}
+
+size_t ConnectionState::ExecInfo::ClearStoredCmds() {
+  const size_t used = StoredCmdBytes();
+  vector<StoredCmd>{}.swap(body);
+  stored_cmd_bytes = 0;
+  return used;
+}
+
+size_t ConnectionState::ExecInfo::StoredCmdBytes() const {
+  return stored_cmd_bytes + body.capacity() * sizeof(StoredCmd);
+}
+
 size_t ConnectionState::ScriptInfo::UsedMemory() const {
   return dfly::HeapSize(lock_tags) + async_cmds_heap_mem;
 }
@@ -307,7 +323,7 @@ vector<unsigned> ConnectionContext::ChangeSubscriptions(CmdArgList channels, boo
 void ConnectionState::ExecInfo::Clear() {
   DCHECK(!preborrowed_interpreter);  // Must have been released properly
   state = EXEC_INACTIVE;
-  vector<StoredCmd>{}.swap(body);
+  ClearStoredCmds();
   is_write = false;
   ClearWatched();
 }

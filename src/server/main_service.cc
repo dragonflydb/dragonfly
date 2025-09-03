@@ -1346,7 +1346,7 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
   bool is_trans_cmd = CO::IsTransKind(cid->name());
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
     // TODO: protect against aggregating huge transactions.
-    dfly_cntx->conn_state.exec_info.body.emplace_back(cid, true, args_no_cmd);
+    dfly_cntx->conn_state.exec_info.AddStoredCmd(cid, true, args_no_cmd);
     if (cid->IsWriteOnly()) {
       dfly_cntx->conn_state.exec_info.is_write = true;
     }

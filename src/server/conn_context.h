@@ -86,6 +86,16 @@ struct ConnectionState {
 
     size_t UsedMemory() const;
 
+    // Adds a StoredCmd and updates the stored_cmds_size
+    void AddStoredCmd(const CommandId* cid, bool own_args, CmdArgList args);
+
+    // Empties the body vector and resets stored_cmds_size to 0. Returns the size before data was
+    // cleared.
+    size_t ClearStoredCmds();
+
+    // Returns memory used by the body field without iterating over each stored command
+    size_t StoredCmdBytes() const;
+
     ExecState state = EXEC_INACTIVE;
     std::vector<StoredCmd> body;
     bool is_write = false;
@@ -99,6 +109,10 @@ struct ConnectionState {
     // executing the multi transaction, which can create deadlocks by blocking other transactions
     // that already borrowed all available interpreters but wait for keys to be unlocked.
     Interpreter* preborrowed_interpreter = nullptr;
+
+    // The total size of all stored commands kept in "body". Does not include memory allocated by
+    // the "body" vector.
+    size_t stored_cmd_bytes = 0;
   };
 
   // Lua-script related data.
