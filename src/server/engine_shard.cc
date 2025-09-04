@@ -320,11 +320,11 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect
   defrag_state_.UpdateScanState(cur.token());
 
   if (reallocations > 0) {
-    VLOG(1) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations
+    VLOG(2) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations
             << " times, did it in " << traverses_count << " cursor is at the "
             << (defrag_state_.cursor == kCursorDoneState ? "end" : "in progress");
   } else {
-    VLOG(1) << "shard " << slice.shard_id() << ": run the defrag " << traverses_count
+    VLOG(2) << "shard " << slice.shard_id() << ": run the defrag " << traverses_count
             << " times out of maximum " << kMaxTraverses << ", with cursor at "
             << (defrag_state_.cursor == kCursorDoneState ? "end" : "in progress")
             << " but no location for defrag were found";
@@ -711,7 +711,7 @@ void EngineShard::RetireExpiredAndEvict() {
       stats_.total_heartbeat_expired_keys += stats.deleted;
       stats_.total_heartbeat_expired_bytes += stats.deleted_bytes;
       ++stats_.total_heartbeat_expired_calls;
-      VLOG(1) << "Heartbeat expired " << stats.deleted << " keys with total bytes "
+      VLOG(2) << "Heartbeat expired " << stats.deleted << " keys with total bytes "
               << stats.deleted_bytes << " with total expire flow calls "
               << stats_.total_heartbeat_expired_calls;
     }
