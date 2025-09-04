@@ -29,11 +29,15 @@
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/search/aggregator.h"
+#include "server/search/doc_accessors.h"
 #include "server/search/doc_index.h"
+#include "server/search/global_vector_search.h"
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 
 ABSL_FLAG(bool, search_reject_legacy_field, true, "FT.AGGREGATE: Reject legacy field names.");
+ABSL_FLAG(bool, enable_global_vector_search, true,
+          "PoC: Enable global vector search for KNN queries.");
 
 namespace dfly {
 
@@ -1029,9 +1033,31 @@ void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   auto idx_ptr = make_shared<DocIndex>(std::move(parsed_index).value());
+
+  // PoC: Create global vector indices for vector fields
+  for (const auto& [field_ident, field_info] : idx_ptr->schema.fields) {
+    if (field_info.type == search::SchemaField::VECTOR &&
+        !(field_info.flags & search::SchemaField::NOINDEX)) {
+      const auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
+      // Use field alias (short_name) for global index key, as that's what queries use
+      GlobalVectorIndexRegistry::Instance().GetOrCreateVectorIndex(idx_name, field_info.short_name,
+                                                                   vparams);
+      LOG(INFO) << "Created global vector index for " << idx_name << ":" << field_info.short_name
+                << " (dim=" << vparams.dim << ", hnsw=" << vparams.use_hnsw << ")";
+    }
+  }
+
   cmd_cntx.tx->Execute(
       [idx_name, idx_ptr](auto* tx, auto* es) {
         es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr);
+
+        // PoC: Global vector indices will be populated when documents are added via HSET/JSON.SET
+        if (auto* index = es->search_indices()->GetIndex(idx_name); index) {
+          index->RebuildGlobalVectorIndices(idx_name, tx->GetOpArgs(es));
+        } else {
+          LOG(WARNING) << "Could not find index " << idx_name << " on shard " << es->shard_id();
+        }
+
         return OpStatus::OK;
       },
       true);
@@ -1101,12 +1127,36 @@ void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) 
   string_view idx_name = ArgS(args, 0);
   // TODO: Handle optional DD param
 
+  // PoC: Get index info and drop both local and global indices in single transaction
+  shared_ptr<DocIndex> index_info;
   atomic_uint num_deleted{0};
+
   cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    // Get index info from first shard for global cleanup
+    if (es->shard_id() == 0) {
+      if (auto* idx = es->search_indices()->GetIndex(idx_name); idx != nullptr) {
+        index_info = make_shared<DocIndex>(idx->GetInfo().base_index);
+      }
+    }
+
+    // Drop local index
     if (es->search_indices()->DropIndex(idx_name))
       num_deleted.fetch_add(1);
+
     return OpStatus::OK;
   });
+
+  // PoC: Remove global vector indices for all vector fields (after transaction)
+  if (index_info) {
+    for (const auto& [field_ident, field_info] : index_info->schema.fields) {
+      if (field_info.type == search::SchemaField::VECTOR &&
+          !(field_info.flags & search::SchemaField::NOINDEX)) {
+        // Use field alias (short_name) for global index key, same as in FtCreate
+        GlobalVectorIndexRegistry::Instance().RemoveVectorIndex(idx_name, field_info.short_name);
+        LOG(INFO) << "Removed global vector index for " << idx_name << ":" << field_info.short_name;
+      }
+    }
+  }
 
   DCHECK(num_deleted == 0u || num_deleted == shard_set->size());
   if (num_deleted == 0u)
@@ -1217,20 +1267,159 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   if (!search_algo.Init(query_str, &params->query_params))
     return builder->SendError("Query syntax error");
 
-  // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
+  // PoC: Check if we should use global vector search
+  bool use_global_search = false;
+  GlobalVectorSearchAlgorithm global_algo;
+  if (absl::GetFlag(FLAGS_enable_global_vector_search)) {
+    if (global_algo.Init(query_str, &params->query_params) && global_algo.IsVectorOnlyQuery()) {
+      use_global_search = true;
+      LOG(INFO) << "Will attempt global vector search for KNN query (with SORTBY support): "
+                << query_str;
+    }
+  }
+
+  // Single transaction hop - collect indices and optionally execute global search
+  vector<ShardDocIndex*> shard_indices(shard_set->size(), nullptr);
   atomic<bool> index_not_found{false};
   vector<SearchResult> docs(shard_set->size());
 
+  // Results from global search (if used) - per-shard buckets to avoid race conditions
+  std::vector<std::vector<SerializedSearchDoc>> shard_global_docs(shard_set->size());
+  atomic<size_t> global_total_hits{0};
+  atomic<bool> global_search_used{false};
+  std::vector<std::pair<float, GlobalDocId>> shared_knn_results;
+
   cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (auto* index = es->search_indices()->GetIndex(index_name); index)
-      docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
-    else
+    if (auto* index = es->search_indices()->GetIndex(index_name); index) {
+      shard_indices[es->shard_id()] = index;
+
+      if (use_global_search) {
+        // Try global search from first shard only
+        if (es->shard_id() == 0) {
+          auto vector_field = global_algo.ExtractVectorFieldName();
+          if (vector_field) {
+            auto global_index =
+                GlobalVectorIndexRegistry::Instance().GetVectorIndex(index_name, *vector_field);
+
+            if (global_index && global_index->Size() > 0) {
+              if (auto* knn_node = global_algo.GetKnnNode()) {
+                auto knn_results = global_index->Knn(knn_node->vec.first.get(), knn_node->limit,
+                                                     knn_node->ef_runtime);
+
+                // Store KNN results for processing by all shards
+                shared_knn_results = knn_results;
+
+                global_total_hits.store(knn_results.size());
+                global_search_used.store(true);
+              }
+            }
+          }
+        }
+      }
+
+      // If global search was initiated, collect documents from this shard
+      if (use_global_search && global_search_used.load()) {
+        size_t collected = 0;
+        for (const auto& [score, global_id] : shared_knn_results) {
+          if (global_id.shard_id == es->shard_id()) {
+            auto entry = index->LoadEntry(global_id.local_doc_id, t->GetOpArgs(es));
+            if (entry) {
+              auto& [key, accessor] = *entry;
+
+              SearchDocData fields{};
+              auto index_info = index->GetInfo();
+              if (params->ShouldReturnAllFields()) {
+                fields = accessor->Serialize(index_info.base_index.schema);
+              }
+
+              auto return_fields = params->return_fields.value_or(std::vector<FieldReference>{});
+              auto more_fields = accessor->Serialize(index_info.base_index.schema, return_fields);
+              fields.insert(std::make_move_iterator(more_fields.begin()),
+                            std::make_move_iterator(more_fields.end()));
+
+              search::SortableValue sort_score = std::monostate{};
+
+              // Each shard adds to its own bucket (no race conditions)
+              shard_global_docs[es->shard_id()].push_back(
+                  {std::string{key}, std::move(fields), score, sort_score});
+              collected++;
+            }
+          }
+        }
+      }
+
+      // If not using global search, execute traditional search
+      if (!use_global_search) {
+        docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
+      }
+    } else {
       index_not_found.store(true, memory_order_relaxed);
+    }
     return OpStatus::OK;
   });
 
   if (index_not_found.load())
     return builder->SendError(string{index_name} + ": no such index");
+
+  // PoC: If global search was used, merge results from all shard buckets
+  if (global_search_used.load()) {
+    // Merge all shard buckets into single container
+    std::vector<SerializedSearchDoc> global_docs;
+    for (size_t shard_id = 0; shard_id < shard_global_docs.size(); ++shard_id) {
+      auto& shard_docs = shard_global_docs[shard_id];
+      global_docs.insert(global_docs.end(), std::make_move_iterator(shard_docs.begin()),
+                         std::make_move_iterator(shard_docs.end()));
+    }
+
+    if (!global_docs.empty()) {
+      // Apply SORTBY if needed
+      if (params->sort_option) {
+        const auto& sort_opt = *params->sort_option;
+        auto comparator = [&sort_opt](const SerializedSearchDoc& a, const SerializedSearchDoc& b) {
+          std::string field_name{sort_opt.field.OutputName()};
+
+          auto a_it = a.values.find(field_name);
+          auto b_it = b.values.find(field_name);
+
+          if (a_it == a.values.end() && b_it == b.values.end())
+            return false;
+          if (a_it == a.values.end())
+            return false;
+          if (b_it == b.values.end())
+            return true;
+
+          bool result = a_it->second < b_it->second;
+          return sort_opt.order == SortOrder::DESC ? !result : result;
+        };
+
+        std::sort(global_docs.begin(), global_docs.end(), comparator);
+      }
+
+      // Apply LIMIT
+      size_t start_idx = std::min(params->limit_offset, global_docs.size());
+      size_t end_idx = std::min(start_idx + params->limit_total, global_docs.size());
+
+      if (start_idx > 0 || end_idx < global_docs.size()) {
+        std::vector<SerializedSearchDoc> limited_docs;
+        for (size_t i = start_idx; i < end_idx; ++i) {
+          limited_docs.push_back(std::move(global_docs[i]));
+        }
+        global_docs = std::move(limited_docs);
+      }
+
+      vector<SearchResult> shard_results(1);
+      shard_results[0].total_hits = global_total_hits.load();
+      shard_results[0].docs = std::move(global_docs);
+
+      SearchReply(*params, global_algo.GetKnnScoreSortOption(), absl::MakeSpan(shard_results),
+                  builder);
+      return;
+    } else {
+      LOG(WARNING) << "Global search used but no docs collected";
+    }
+  }
+
+  // Traditional shard-based results (if global search not used)
 
   for (const auto& res : docs) {
     if (res.error)
