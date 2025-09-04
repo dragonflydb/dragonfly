@@ -3,6 +3,7 @@
 //
 #include "core/segment_allocator.h"
 
+#define MI_BUILD_RELEASE 1
 #include <mimalloc/types.h>
 
 #include "base/logging.h"
