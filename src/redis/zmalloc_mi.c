@@ -202,9 +202,19 @@ int zmalloc_get_allocator_fragmentation_step(float ratio, struct fragmentation_i
 
   info->bin++;
   if (info->bin == MI_BIN_FULL) {  // reached end of bins, reset state
+    info->committed_golden = info->committed;
     // Add total comitted size of MI_BIN_FULL that we do not traverse
     // as its tracked by zmalloc_heap->full_page_size variable.
     info->committed += zmalloc_heap->full_page_size;
+
+    // TODO: it's a test code that makes sure `full_page_size` is correct.
+    // Remove it once we are confident with the implementation.
+    mi_page_queue_t* pq = &zmalloc_heap->pages[MI_BIN_FULL];
+    const mi_page_t* page = pq->first;
+    while (page != NULL) {
+      info->committed_golden += page->capacity * page->block_size;
+      page = page->next;
+    }
     info->bin = 0;
     return 0;
   }
