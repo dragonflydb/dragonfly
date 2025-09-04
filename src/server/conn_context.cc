@@ -235,14 +235,10 @@ void ConnectionState::ExecInfo::AddStoredCmd(const CommandId* cid, bool own_args
 }
 
 size_t ConnectionState::ExecInfo::ClearStoredCmds() {
-  const size_t used = StoredCmdBytes();
+  const size_t used = GetStoredCmdBytes();
   vector<StoredCmd>{}.swap(body);
   stored_cmd_bytes = 0;
   return used;
-}
-
-size_t ConnectionState::ExecInfo::StoredCmdBytes() const {
-  return stored_cmd_bytes + body.capacity() * sizeof(StoredCmd);
 }
 
 size_t ConnectionState::ScriptInfo::UsedMemory() const {

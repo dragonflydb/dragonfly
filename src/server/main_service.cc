@@ -1347,9 +1347,9 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
     // TODO: protect against aggregating huge transactions.
     auto& exec_info = dfly_cntx->conn_state.exec_info;
-    const size_t old_size = exec_info.StoredCmdBytes();
+    const size_t old_size = exec_info.GetStoredCmdBytes();
     exec_info.AddStoredCmd(cid, true, args_no_cmd);
-    etl.stats.stored_cmd_bytes += exec_info.StoredCmdBytes() - old_size;
+    etl.stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
     if (cid->IsWriteOnly()) {
       exec_info.is_write = true;
     }

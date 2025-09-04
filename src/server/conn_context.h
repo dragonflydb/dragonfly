@@ -94,7 +94,9 @@ struct ConnectionState {
     size_t ClearStoredCmds();
 
     // Returns memory used by the body field without iterating over each stored command
-    size_t StoredCmdBytes() const;
+    size_t GetStoredCmdBytes() const {
+      return stored_cmd_bytes + body.capacity() * sizeof(StoredCmd);
+    }
 
     ExecState state = EXEC_INACTIVE;
     std::vector<StoredCmd> body;
