@@ -318,6 +318,7 @@ void OutgoingMigration::SyncFb() {
   }
 
   VLOG(1) << "Exiting outgoing migration fiber for migration " << migration_info_.ToString();
+  CloseSocket();
 }
 
 bool OutgoingMigration::FinalizeMigration(long attempt) {
