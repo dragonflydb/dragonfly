@@ -195,6 +195,53 @@ async def test_eval_with_oom(df_factory: DflyInstanceFactory):
     assert rss_before_eval * 1.01 > info["used_memory_rss"]
 
 
+async def test_eviction_on_rss_treshold(df_factory: DflyInstanceFactory):
+    max_memory = 1024 * 1024**2  # 10242mb
+
+    df_server = df_factory.create(
+        proactor_threads=3,
+        cache_mode="yes",
+        maxmemory=max_memory,
+        enable_heartbeat_eviction="false",
+    )
+    df_server.start()
+    client = df_server.client()
+
+    data_fill_size = int(0.80 * max_memory)  # 85% of max_memory
+
+    val_size = 1024 * 5  # 5 kb
+    num_keys = data_fill_size // val_size
+
+    await client.execute_command("DEBUG", "POPULATE", num_keys, "key", val_size)
+
+    # Names choosen so that are found on different shards
+    for name in ["mylist_1", "mylist_2"]:
+        for i in range(1, 1000):
+            rand_str = "".join(random.choices(string.ascii_letters, k=val_size))
+            await client.execute_command(f"LPUSH {name} {rand_str}")
+
+    await client.execute_command(f"STICK mylist_1")
+    await client.execute_command(f"STICK mylist_2")
+
+    await client.execute_command("CONFIG SET enable_heartbeat_eviction true")
+
+    memory_info_before = await client.info("memory")
+
+    # This will increase only RSS memory above treshold (and also above rss_memory_limit)
+    p = client.pipeline()
+    for _ in range(50):
+        p.execute_command("LRANGE mylist_1 0 -1")
+        p.execute_command("LRANGE mylist_2 0 -1")
+    await p.execute()
+
+    # Wait for some time
+    await asyncio.sleep(3)
+    memory_info_after = await client.info("memory")
+
+    assert memory_info_after["used_memory"] < memory_info_before["used_memory"]
+    assert memory_info_after["used_memory_rss"] < memory_info_before["used_memory_rss"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "proactor_threads_param, maxmemory_param",
