@@ -4,6 +4,8 @@
 
 #include <assert.h>
 #include <mimalloc.h>
+
+#define MI_BUILD_RELEASE 1
 #include <mimalloc/types.h>
 #include <string.h>
 #include <unistd.h>
@@ -167,8 +169,42 @@ int zmalloc_get_allocator_wasted_blocks(float ratio, size_t* allocated, size_t* 
   *allocated = sum.allocated;
   *commited = sum.comitted;
   *wasted = sum.wasted;
-
   return 1;
+}
+
+// Implemented based on this mimalloc code:
+// https://github.com/microsoft/mimalloc/blob/main/src/heap.c#L27
+int zmalloc_get_allocator_fragmentation_step(float ratio, struct fragmentation_info* info) {
+  // avoid iterating over full pages as they are not fragmented.
+  if (zmalloc_heap->page_count == 0 || info->bin >= MI_BIN_FULL) {
+    return 0;
+  }
+
+  mi_page_queue_t* pq = &zmalloc_heap->pages[info->bin];
+  const mi_page_t* page = pq->first;
+  while (page != NULL) {
+    const size_t bsize = page->block_size;
+
+    size_t committed = page->capacity * bsize;
+    if (page->used < page->capacity) {
+      size_t used = page->used * bsize;
+
+      size_t threshold = (double)committed * ratio;
+      if (used < threshold) {
+        info->wasted += (committed - used);
+      }
+    }
+    info->page_count++;
+    page = page->next;
+  }
+
+  info->bin++;
+  if (info->bin >= MI_BIN_FULL) {  // reset state
+    info->bin = 0;
+    return 0;
+  }
+
+  return -1;
 }
 
 void init_zmalloc_threadlocal(void* heap) {
