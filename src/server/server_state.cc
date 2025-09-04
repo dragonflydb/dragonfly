@@ -53,7 +53,7 @@ ServerState::Stats::Stats(unsigned num_shards)
 }
 
 ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
-  static_assert(sizeof(Stats) == 24 * 8, "Stats size mismatch");
+  static_assert(sizeof(Stats) == 25 * 8, "Stats size mismatch");
 
 #define ADD(x) this->x += (other.x)
 
@@ -95,6 +95,8 @@ ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
   } else {
     this->squash_width_freq_arr = other.squash_width_freq_arr;
   }
+
+  ADD(stored_cmd_bytes);
   return *this;
 #undef ADD
 }

@@ -1346,9 +1346,12 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
   bool is_trans_cmd = CO::IsTransKind(cid->name());
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
     // TODO: protect against aggregating huge transactions.
-    dfly_cntx->conn_state.exec_info.body.emplace_back(cid, true, args_no_cmd);
+    auto& exec_info = dfly_cntx->conn_state.exec_info;
+    const size_t old_size = exec_info.GetStoredCmdBytes();
+    exec_info.AddStoredCmd(cid, true, args_no_cmd);
+    etl.stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
     if (cid->IsWriteOnly()) {
-      dfly_cntx->conn_state.exec_info.is_write = true;
+      exec_info.is_write = true;
     }
     builder->SendSimpleString("QUEUED");
     return DispatchResult::OK;
