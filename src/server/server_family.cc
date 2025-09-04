@@ -1718,6 +1718,22 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             &resp->body());
   AppendMetricWithoutLabels("evicted_keys_total", "", m.events.evicted_keys, MetricType::COUNTER,
                             &resp->body());
+  // Per-DB expired/evicted totals
+  {
+    string perdb_str;
+    AppendMetricHeader("expired_keys_total", "", MetricType::COUNTER, &perdb_str);
+    AppendMetricHeader("evicted_keys_total", "", MetricType::COUNTER, &perdb_str);
+    for (size_t i = 0; i < m.db_stats.size(); ++i) {
+      const auto& s = m.db_stats[i];
+      if (s.expired_keys > 0)
+        AppendMetricValue("expired_keys_total", s.expired_keys, {"db"}, {StrCat("db", i)},
+                          &perdb_str);
+      if (s.evicted_keys > 0)
+        AppendMetricValue("evicted_keys_total", s.evicted_keys, {"db"}, {StrCat("db", i)},
+                          &perdb_str);
+    }
+    absl::StrAppend(&resp->body(), perdb_str);
+  }
   // Memory stats
   if (legacy) {
     AppendMetricWithoutLabels("memory_fiberstack_vms_bytes",
@@ -3250,14 +3266,13 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       const auto& stats = m.db_stats[i];
       bool show = (i == 0) || (stats.key_count > 0);
       if (show) {
-        double hit_ratio = (stats.hits + stats.misses > 0)
-                               ? static_cast<double>(stats.hits) /
-                                     (stats.hits + stats.misses) * 100.0
-                               : 0.0;
-        string val = StrCat("keys=", stats.key_count, ",expires=", stats.expire_count,
-                            ",hits=", stats.hits, ",misses=", stats.misses,
-                            ",hit_ratio=", absl::StrFormat("%.2f", hit_ratio),
-                            ",avg_ttl=-1");  // TODO
+        double hit_ratio = (stats.hits + stats.misses > 0) ? static_cast<double>(stats.hits) /
+                                                                 (stats.hits + stats.misses) * 100.0
+                                                           : 0.0;
+        string val =
+            StrCat("keys=", stats.key_count, ",expires=", stats.expire_count, ",hits=", stats.hits,
+                   ",misses=", stats.misses, ",hit_ratio=", absl::StrFormat("%.2f", hit_ratio),
+                   ",avg_ttl=-1");  // TODO
         append(StrCat("db", i), val);
       }
     }

@@ -74,6 +74,10 @@ struct DbTableStats {
   size_t hits = 0;
   size_t misses = 0;
 
+  // Per-database expired/evicted keys
+  size_t expired_keys = 0;
+  size_t evicted_keys = 0;
+
   std::array<size_t, OBJ_TYPE_MAX> memory_usage_by_type = {};
 
   // Mostly used internally, exposed for tiered storage.

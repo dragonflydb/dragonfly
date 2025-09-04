@@ -783,6 +783,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   events_.garbage_collected = db.prime.garbage_collected();
   events_.stash_unloaded = db.prime.stash_unloaded();
   events_.evicted_keys += evp.evicted();
+  db.stats.evicted_keys += evp.evicted();
   events_.garbage_checked += evp.checked();
   if (db.slots_stats) {
     SlotId sid = KeySlot(key);
@@ -1268,6 +1269,7 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
       ExpIterator(expire_it, StringOrView::FromView(key)), db.get());
 
   ++events_.expired_keys;
+  db->stats.expired_keys++;
 
   return {PrimeIterator{}, ExpireIterator{}};
 }
@@ -1497,6 +1499,7 @@ finish:
   SendQueuedInvalidationMessagesAsync();
   auto time_finish = absl::GetCurrentTimeNanos();
   events_.evicted_keys += evicted_items;
+  db_arr_[db_ind]->stats.evicted_keys += evicted_items;
   DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
   return pair<uint64_t, size_t>{evicted_items, evicted_bytes};
 }
