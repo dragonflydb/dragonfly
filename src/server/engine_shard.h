@@ -212,6 +212,7 @@ class EngineShard {
     size_t dbid = 0u;
     uint64_t cursor = 0u;
     time_t last_check_time = 0;
+    float page_utilization_threshold = 0.8;
 
     // check the current threshold and return true if
     // we need to do the defragmentation

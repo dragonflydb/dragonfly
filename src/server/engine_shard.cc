@@ -28,7 +28,7 @@ ABSL_FLAG(float, mem_defrag_threshold, 0.7,
           "Minimum percentage of used memory relative to maxmemory cap before running "
           "defragmentation");
 
-ABSL_FLAG(uint32_t, mem_defrag_check_sec_interval, 10,
+ABSL_FLAG(uint32_t, mem_defrag_check_sec_interval, 60,
           "Number of seconds between every defragmentation necessity check");
 
 ABSL_FLAG(float, mem_defrag_waste_threshold, 0.2,
@@ -75,24 +75,6 @@ using namespace util;
 namespace {
 
 constexpr uint64_t kCursorDoneState = 0u;
-
-struct ShardMemUsage {
-  std::size_t commited = 0;
-  std::size_t used = 0;
-  std::size_t wasted_mem = 0;
-};
-
-std::ostream& operator<<(std::ostream& os, const ShardMemUsage& mem) {
-  return os << "commited: " << mem.commited << " vs used " << mem.used << ", wasted memory "
-            << mem.wasted_mem;
-}
-
-ShardMemUsage ReadShardMemUsage(float wasted_ratio) {
-  ShardMemUsage usage;
-  zmalloc_get_allocator_wasted_blocks(wasted_ratio, &usage.used, &usage.commited,
-                                      &usage.wasted_mem);
-  return usage;
-}
 
 // RoundRobinSharder implements a way to distribute keys that begin with some prefix.
 // Round-robin is disabled by default. It is not a general use-case optimization, but instead only
@@ -358,26 +340,47 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     return false;
   }
 
-  const std::size_t global_threshold = max_memory_limit * GetFlag(FLAGS_mem_defrag_threshold);
-  if (global_threshold > rss_mem_current.load(memory_order_relaxed)) {
+  thread_local fragmentation_info finfo{.wasted = 0, .page_count = 0, .bin = 0};
+
+  size_t curr_memory = rss_mem_current.load(memory_order_relaxed);
+  const std::size_t global_threshold =
+      double(max_memory_limit) * GetFlag(FLAGS_mem_defrag_threshold);
+  if (global_threshold > curr_memory) {
+    finfo.bin = 0;  // reset.
     return false;
   }
 
-  const auto now = time(nullptr);
-  const auto seconds_from_prev_check = now - last_check_time;
-  const auto mem_defrag_interval = GetFlag(FLAGS_mem_defrag_check_sec_interval);
+  if (finfo.bin == 0) {  // did not start the iterative checking yet
+    const auto now = time(nullptr);
+    const auto seconds_from_prev_check = now - last_check_time;
+    const auto mem_defrag_interval = GetFlag(FLAGS_mem_defrag_check_sec_interval);
 
-  if (seconds_from_prev_check < mem_defrag_interval) {
-    return false;
+    if (seconds_from_prev_check < mem_defrag_interval) {
+      return false;
+    }
+
+    // start checking.
+    finfo.wasted = 0;
+    finfo.page_count = 0;
+    page_utilization_threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
   }
-  last_check_time = now;
 
-  ShardMemUsage usage = ReadShardMemUsage(GetFlag(FLAGS_mem_defrag_page_utilization_threshold));
+  uint64_t start = absl::GetCurrentTimeNanos();
+  int res = zmalloc_get_allocator_fragmentation_step(page_utilization_threshold, &finfo);
+  uint64_t duration = absl::GetCurrentTimeNanos() - start;
+  VLOG(1) << "Reading memory usage took " << duration << " ns for bin " << finfo.bin - 1 << " with "
+          << finfo.page_count << " pages, wasted " << finfo.wasted << " bytes";
+  if (res == 0) {
+    // finished checking.
+    last_check_time = time(nullptr);
 
-  const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
-  if (usage.wasted_mem > (uint64_t(usage.commited * waste_threshold))) {
-    VLOG(1) << "memory issue found for memory " << usage;
-    return true;
+    const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
+    const size_t current_mem_per_shard = curr_memory / shard_set->size();
+    if (finfo.wasted > size_t(current_mem_per_shard * waste_threshold)) {
+      VLOG(1) << "memory fragmentation issue found: " << finfo.wasted << " "
+              << current_mem_per_shard;
+      return true;
+    }
   }
 
   return false;
@@ -468,7 +471,7 @@ uint32_t EngineShard::DefragTask() {
       return util::ProactorBase::kOnIdleMaxLevel;
     }
   }
-  return kRunAtLowPriority;
+  return kRunAtLowPriority + 5;
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
@@ -863,7 +866,7 @@ void EngineShard::CacheStats() {
   size_t used_mem = UsedMemory();
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
 
-  // delta can wrap if used_memory is smaller than last_cached_used_memory_ and it's fine.
+  // Reflect local memory change on global value
   size_t delta = used_mem - last_cached_used_memory_;
   last_cached_used_memory_ = used_mem;
   size_t current = used_mem_current.fetch_add(delta, memory_order_relaxed) + delta;
@@ -871,7 +874,7 @@ void EngineShard::CacheStats() {
 
   size_t entries = db_slice.entries_count();
   size_t table_memory = db_slice.table_memory();
-
+  // Estimate bytes per object, excluding table memory
   if (tiered_storage_) {
     table_memory += tiered_storage_->CoolMemoryUsage();
   }
@@ -886,10 +889,10 @@ size_t EngineShard::UsedMemory() const {
          search_indices()->GetUsedMemory();
 }
 
-bool EngineShard::ShouldThrottleForTiering() const {  // see header for formula justification
+bool EngineShard::ShouldThrottleForTiering() const {
   if (!tiered_storage_)
     return false;
-
+  // Throttle if the tiered storage is busy offloading (at least 30% of allowed capacity)
   size_t tiering_redline =
       (max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size();
 
