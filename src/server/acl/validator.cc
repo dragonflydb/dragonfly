@@ -50,9 +50,8 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
 
   bool allowed = true;
   if (!pub_sub.all_channels) {
-    for (auto channel : tail_args) {
-      allowed &= iterate_globs(facade::ToSV(channel));
-    }
+    auto channel = tail_args[0];
+    allowed &= iterate_globs(facade::ToSV(channel));
   }
 
   return {allowed, AclLog::Reason::PUB_SUB};
