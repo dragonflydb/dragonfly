@@ -5,6 +5,8 @@
 #pragma once
 
 #include <absl/container/btree_map.h>
+
+#define MI_BUILD_RELEASE 1
 #include <mimalloc/types.h>
 
 #include "core/bloom.h"

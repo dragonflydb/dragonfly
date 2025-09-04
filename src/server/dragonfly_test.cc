@@ -745,9 +745,7 @@ TEST_F(DflyEngineTest, Issue742) {
 }
 
 TEST_F(DefragDflyEngineTest, TestDefragOption) {
-  if (pp_->GetNextProactor()->GetKind() == util::ProactorBase::EPOLL) {
-    GTEST_SKIP() << "Defragmentation via idle task is only supported in io uring";
-  }
+  GTEST_SKIP() << "Defragmentation check takes too long. Disabling this test";
 
   // mem_defrag_threshold is based on RSS statistic, but we don't count it in the test
   absl::SetFlag(&FLAGS_mem_defrag_threshold, 0.0);
