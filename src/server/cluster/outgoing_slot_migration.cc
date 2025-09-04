@@ -166,6 +166,7 @@ void OutgoingMigration::Finish(const GenericError& error) {
     switch (state_) {
       case MigrationState::C_FATAL:
       case MigrationState::C_FINISHED:
+        CloseSocket();
         return;  // Already finished, nothing else to do
 
       case MigrationState::C_CONNECTING:
@@ -192,6 +193,9 @@ void OutgoingMigration::Finish(const GenericError& error) {
     });
     exec_st_.JoinErrorHandler();
   }
+
+  // Close socket for clean disconnect.
+  CloseSocket();
 }
 
 MigrationState OutgoingMigration::GetState() const {
