@@ -595,6 +595,7 @@ void EngineShard::Heartbeat() {
   DCHECK(namespaces);
 
   CacheStats();
+  heartbeat_counter_++;
 
   // TODO: iterate over all namespaces
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
@@ -654,8 +655,18 @@ void EngineShard::RetireExpiredAndEvict() {
   DbContext db_cntx;
   db_cntx.time_now_ms = GetCurrentTimeMs();
 
+  // If we don't have two consecutive evictions we should reset state
+  if (heartbeat_counter_ != eviction_state_.last_eviction_heartbeat_counter + 1) {
+    eviction_state_.global_rss_memory_at_prev_eviction = 0;
+    eviction_state_.deleted_bytes_before_rss_update = 0;
+  }
+
   size_t deleted_bytes = 0;
   size_t eviction_goal = GetFlag(FLAGS_enable_heartbeat_eviction) ? CalculateEvictionBytes() : 0;
+
+  if (eviction_goal) {
+    eviction_state_.last_eviction_heartbeat_counter = heartbeat_counter_;
+  }
 
   for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
     if (!db_slice.IsDbValid(i))

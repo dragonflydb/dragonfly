@@ -225,6 +225,7 @@ class EngineShard {
   };
 
   struct EvictionTaskState {
+    size_t last_eviction_heartbeat_counter = 0;
     size_t deleted_bytes_before_rss_update = 0;
     size_t global_rss_memory_at_prev_eviction = 0;
   };
@@ -283,6 +284,7 @@ class EngineShard {
 
   uint32_t defrag_task_ = 0;
   EvictionTaskState eviction_state_;  // Used on eviction fiber
+  size_t heartbeat_counter_ = 0;
   util::fb2::Fiber fiber_heartbeat_periodic_;
   util::fb2::Done fiber_heartbeat_periodic_done_;
 
