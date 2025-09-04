@@ -1229,12 +1229,11 @@ void ServerFamily::Shutdown() {
       replica_->Stop();
     }
     StopAllClusterReplicas();
+    UpdateReplicationThreadLocals(nullptr);
 
     dfly_cmd_->Shutdown();
     DebugCmd::Shutdown();
   });
-
-  UpdateReplicationThreadLocals(nullptr);
 }
 
 bool ServerFamily::HasPrivilegedInterface() {

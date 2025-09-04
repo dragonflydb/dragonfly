@@ -125,13 +125,6 @@ ProtocolClient::ProtocolClient(ServerContext context) : server_context_(std::mov
 ProtocolClient::~ProtocolClient() {
   exec_st_.JoinErrorHandler();
 
-  // FIXME: We should close the socket explictly outside of the destructor. This currently
-  // breaks test_cancel_replication_immediately.
-  if (sock_) {
-    std::error_code ec;
-    sock_->proactor()->Await([this, &ec]() { ec = sock_->Close(); });
-    LOG_IF(ERROR, ec) << "Error closing socket " << ec;
-  }
 #ifdef DFLY_USE_SSL
   if (ssl_ctx_) {
     SSL_CTX_free(ssl_ctx_);
@@ -242,6 +235,9 @@ void ProtocolClient::CloseSocket() {
         auto ec = sock_->Shutdown(SHUT_RDWR);
         LOG_IF(ERROR, ec) << "Could not shutdown socket " << ec;
       }
+      error_code ec = sock_->Close();  // Quietly close.
+
+      LOG_IF(WARNING, ec) << "Error closing socket " << ec << "/" << ec.message();
     });
   }
 }

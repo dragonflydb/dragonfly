@@ -172,6 +172,7 @@ std::optional<Replica::LastMasterSyncData> Replica::Stop() {
     for (auto& flow : shard_flows_) {
       flow.reset();
     }
+    shard_flows_.clear();
   });
 
   if (last_journal_LSNs_.has_value()) {
@@ -1227,6 +1228,7 @@ std::vector<uint64_t> Replica::GetReplicaOffset() const {
   std::vector<uint64_t> flow_rec_count;
   flow_rec_count.resize(shard_flows_.size());
   for (const auto& flow : shard_flows_) {
+    DCHECK(flow.get());
     uint32_t flow_id = flow->FlowId();
     uint64_t rec_count = flow->JournalExecutedCount();
     DCHECK_LT(flow_id, shard_flows_.size());
