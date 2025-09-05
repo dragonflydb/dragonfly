@@ -383,6 +383,20 @@ void RedisReplyBuilderBase::SendError(std::string_view str, std::string_view typ
   }
 }
 
+void RedisReplyBuilderBase::SendScriptErrorReply(std::string_view str) {
+  ReplyScope scope(this);
+
+  tl_facade_stats->reply_stats.err_count[kScriptErrType]++;
+  last_error_ = str;
+  WritePieces("-");
+  if (str.size() <= kMaxInlineSize) {
+    WritePieces(str, kCRLF);
+  } else {
+    WriteRef(str);
+    WritePieces(kCRLF);
+  }
+}
+
 void RedisReplyBuilderBase::SendProtocolError(std::string_view str) {
   SendError(absl::StrCat("-ERR Protocol error: ", str), "protocol_error");
 }
