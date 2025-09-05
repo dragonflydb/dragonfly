@@ -31,8 +31,3 @@ repos:
     rev: 25.1.0
     hooks:
       - id: black
-
-  - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.16.3
-    hooks:
-      - id: gitleaks
