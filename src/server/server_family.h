@@ -373,6 +373,11 @@ class ServerFamily {
   void ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                          ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
+  void ReplicaOfNoOne(SinkReplyBuilder* builder);
+  // REPLICAOF implementation without two phase locking.
+  void ReplicaOfInternalV2(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                           ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+
   struct LoadOptions {
     std::string snapshot_id;
     uint32_t shard_count = 0;      // Shard count of the snapshot being loaded.

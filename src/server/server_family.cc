@@ -3555,7 +3555,7 @@ void ServerFamily::StopAllClusterReplicas() {
 }
 
 void ServerFamily::ReplicaOf(CmdArgList args, const CommandContext& cmd_cntx) {
-  ReplicaOfInternal(args, cmd_cntx.tx, cmd_cntx.rb, ActionOnConnectionFail::kReturnOnError);
+  ReplicaOfInternalV2(args, cmd_cntx.tx, cmd_cntx.rb, ActionOnConnectionFail::kReturnOnError);
 }
 
 void ServerFamily::Replicate(string_view host, string_view port) {
@@ -3568,7 +3568,101 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   CmdArgList args_list = absl::MakeSpan(args_vec);
   io::NullSink sink;
   facade::RedisReplyBuilder rb(&sink);
-  ReplicaOfInternal(args_list, nullptr, &rb, ActionOnConnectionFail::kContinueReplication);
+  ReplicaOfInternalV2(args_list, nullptr, &rb, ActionOnConnectionFail::kContinueReplication);
+}
+
+void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
+  util::fb2::LockGuard lk(replicaof_mu_);
+  ServerState* ss = ServerState::tlocal();
+
+  if (!ss->is_master) {
+    CHECK(replica_);
+    // flip flag before clearing replica_
+    SetMasterFlagOnAllThreads(true);
+    // TODO we should not allow partial sync after NO-ONE. Only after Takeover.
+    last_master_data_ = replica_->Stop();
+    replica_.reset();
+    StopAllClusterReplicas();
+  }
+
+  // May not switch to ACTIVE if the process is, for example, shutting down at the same time.
+  service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+
+  return builder->SendOk();
+}
+
+void ServerFamily::ReplicaOfInternalV2(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                                       ActionOnConnectionFail on_error)
+    ABSL_LOCKS_EXCLUDED(replicaof_mu_) {
+  auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args, builder);
+  if (!replicaof_args.has_value()) {
+    return;
+  }
+
+  LOG(INFO) << "Initiate replication with: " << *replicaof_args;
+  // This is a "weak" check. For example, if the node is already a replica,
+  // it could be the case that one of the flows disconnects. The MainReplicationFiber
+  // will then loop and if it can't partial sync it will enter LOADING state because of
+  // full sync. Note that the fiber is not aware of the replicaof_mu_ so even
+  // if that mutex is locked below before any state check we can't really enforce
+  // that the old replication fiber won't try to full sync and update the state to LOADING.
+  // What is more here is that we always call `replica->Stop()`. So even if we end up in the
+  // scenario described, the semantics are well defined. First, cancel the old replica and
+  // move on with the new one. Cancelation will be slower and ReplicaOf() will
+  // induce higher latency -- but that's ok because it's an highly improbable flow with
+  // well defined semantics.
+  ServerState* ss = ServerState::tlocal();
+
+  if (ss->is_master && ss->gstate() == GlobalState::LOADING) {
+    builder->SendError(kLoadingErr);
+    return;
+  }
+
+  // replicaof no one
+  if (replicaof_args->IsReplicaOfNoOne()) {
+    return ReplicaOfNoOne(builder);
+  }
+
+  auto new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
+                                          master_replid(), replicaof_args->slot_range);
+  GenericError ec{};
+  switch (on_error) {
+    case ActionOnConnectionFail::kReturnOnError:
+      ec = new_replica->Start();
+      break;
+    case ActionOnConnectionFail::kContinueReplication:
+      new_replica->EnableReplication();
+      break;
+  };
+
+  if (ec || new_replica->IsContextCancelled()) {
+    return builder->SendError(ec ? ec.Format() : "replication cancelled");
+  }
+
+  // Critical section.
+  // 1. Stop the old replica_ if it exists
+  // 2. Update all the pointers to the new replica and update master flag
+  // 3. Start the main replication fiber
+  // 4. Send OK
+  util::fb2::LockGuard lk(replicaof_mu_);
+  std::optional<Replica::LastMasterSyncData> last_master_data;
+  if (replica_)
+    last_master_data = replica_->Stop();
+
+  StopAllClusterReplicas();
+
+  if (ServerState::tlocal()->gstate() == GlobalState::TAKEN_OVER)
+    service_.SwitchState(GlobalState::TAKEN_OVER, GlobalState::LOADING);
+
+  // TODO Update thread locals. That way INFO never blocks
+  replica_ = new_replica;
+  SetMasterFlagOnAllThreads(false);
+
+  if (on_error == ActionOnConnectionFail::kReturnOnError) {
+    replica_->StartMainReplicationFiber(last_master_data);
+  }
+
+  builder->SendOk();
 }
 
 // REPLTAKEOVER <seconds> [SAVE]
