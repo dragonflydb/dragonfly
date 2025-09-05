@@ -6,27 +6,28 @@ using namespace std;
 
 SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list) {
   using Entry = std::pair<DocId, double>;
-
-  const size_t initial_size = block_list.Size();
   DCHECK(!block_list.Empty());
 
-  // Collect all entries from the blocks into a single vector
-  // We copy the block and clear it on the fly to save memory
-  std::vector<std::pair<DocId, double>> all_entries;
-  for (auto& block : block_list.blocks_) {
-    all_entries.reserve(all_entries.size() +
-                        block.Size());  // Reserve space for all entries in the block
-    all_entries.insert(all_entries.end(), block.begin(), block.end());
-    block.Clear();  // At the same time clear the block to save memory
+  const size_t elements_count = block_list.Size();
+
+  using EntryIndex = std::pair<size_t /*block id*/, size_t /*entry id*/>;
+  std::vector<EntryIndex> entries_indexes(elements_count);
+  size_t index = 0;
+  for (size_t i = 0; i < block_list.blocks_.size(); ++i) {
+    auto& block = block_list.blocks_[i];
+    for (size_t j = 0; j < block.Size(); ++j) {
+      entries_indexes[index++] = {i, j};
+    }
   }
-  block_list.Clear();
 
-  DCHECK(all_entries.size() == initial_size);
+  std::nth_element(entries_indexes.begin(), entries_indexes.begin() + elements_count / 2,
+                   entries_indexes.end(), [&](const EntryIndex& l, const EntryIndex& r) {
+                     return block_list.blocks_[l.first][l.second].second <
+                            block_list.blocks_[r.first][r.second].second;
+                   });
 
-  std::nth_element(all_entries.begin(), all_entries.begin() + initial_size / 2, all_entries.end(),
-                   [](const Entry& l, const Entry& r) { return l.second < r.second; });
-
-  double median_value = all_entries[initial_size / 2].second;
+  const EntryIndex median_index = entries_indexes[elements_count / 2];
+  double median_value = block_list.blocks_[median_index.first][median_index.second].second;
 
   BlockList<SortedVector<Entry>> left(block_list.blocks_.get_allocator().resource(),
                                       block_list.block_size_);
@@ -34,12 +35,15 @@ SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list
                                        block_list.block_size_);
   absl::InlinedVector<Entry, 1> median_entries;
 
+  left.ReserveBlocks(block_list.blocks_.size() / 2 + 1);
+  right.ReserveBlocks(block_list.blocks_.size() / 2 + 1);
+
   double min_value_in_right_part = std::numeric_limits<double>::infinity();
-  for (const auto& entry : all_entries) {
+  for (const auto& entry : block_list) {
     if (entry.second < median_value) {
-      left.Insert(entry);
+      left.PushBack(entry);
     } else if (entry.second > median_value) {
-      right.Insert(entry);
+      right.PushBack(entry);
       if (entry.second < min_value_in_right_part) {
         min_value_in_right_part = entry.second;
       }
@@ -47,7 +51,7 @@ SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list
       median_entries.push_back(entry);
     }
   }
-  all_entries.clear();
+  block_list.Clear();
 
   if (left.Size() < right.Size()) {
     // If left is smaller, we can add median entries to it
@@ -77,6 +81,18 @@ template <typename C> bool BlockList<C>::Insert(ElementType t) {
 
   size_++;
   TrySplit(block);
+  return true;
+}
+
+template <typename C> bool BlockList<C>::PushBack(ElementType t) {
+  if (blocks_.empty() || (blocks_.back().Size() >= block_size_ * 2 - 1)) {
+    blocks_.insert(blocks_.end(), C{blocks_.get_allocator().resource()});
+  }
+
+  if (!blocks_.back().Insert(std::move(t)))
+    return false;
+
+  size_++;
   return true;
 }
 
@@ -134,6 +150,10 @@ template <typename C> void BlockList<C>::TrySplit(BlockIt block) {
 
   *block = std::move(right);
   blocks_.insert(block, std::move(left));
+}
+
+template <typename C> void BlockList<C>::ReserveBlocks(size_t n) {
+  blocks_.reserve(n);
 }
 
 template <typename C>
