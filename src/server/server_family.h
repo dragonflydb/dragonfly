@@ -412,6 +412,10 @@ class ServerFamily {
   // Set accepting_connections_ and update listners according to it
   void ChangeConnectionAccept(bool accept);
 
+  void ReplicaOfNoOne(SinkReplyBuilder* builder);
+  bool IsDragonflyLoadingAtomic();
+  void UpdateReplicationThreadLocals(std::shared_ptr<Replica> repl);
+
   util::fb2::Fiber snapshot_schedule_fb_;
   util::fb2::Fiber load_fiber_;
 
@@ -424,7 +428,7 @@ class ServerFamily {
 
   mutable util::fb2::Mutex replicaof_mu_, save_mu_;
   std::shared_ptr<Replica> replica_ ABSL_GUARDED_BY(replicaof_mu_);
-  std::vector<std::unique_ptr<Replica>> cluster_replicas_
+  std::vector<std::shared_ptr<Replica>> cluster_replicas_
       ABSL_GUARDED_BY(replicaof_mu_);  // used to replicating multiple nodes to single dragonfly
 
   std::unique_ptr<ScriptMgr> script_mgr_;
