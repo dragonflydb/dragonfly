@@ -728,31 +728,21 @@ void ShardDocIndex::AddDocToGlobalVectorIndex(std::string_view index_name, std::
     return;
 
   auto accessor = GetAccessor(db_cntx, pv);
+  auto local_id = key_index_.Find(key);
+  if (!local_id)
+    return;
 
-  // Check if document has vector fields and add them to global index
+  GlobalDocId global_id{EngineShard::tlocal()->shard_id(), *local_id};
+
   for (const auto& [field_ident, field_info] : base_->schema.fields) {
     if (field_info.type == search::SchemaField::VECTOR &&
         !(field_info.flags & search::SchemaField::NOINDEX)) {
-      auto vector_info = accessor->GetVector(field_ident);
-      if (vector_info && vector_info->first) {
-        // Get or create global vector index
+      if (auto vector_info = accessor->GetVector(field_ident); vector_info && vector_info->first) {
         const auto& vparams =
             std::get<search::SchemaField::VectorParams>(field_info.special_params);
         auto global_index = GlobalVectorIndexRegistry::Instance().GetOrCreateVectorIndex(
             index_name, field_info.short_name, vparams);
-
-        // Find local DocId for this key
-        auto local_id = key_index_.Find(key);
-        if (local_id) {
-          GlobalDocId global_id{EngineShard::tlocal()->shard_id(), *local_id};
-
-          // Add vector to global index
-          global_index->AddVector(global_id, key, vector_info->first.get());
-
-          LOG(INFO) << "Added vector to global index: " << index_name << ":"
-                    << field_info.short_name << " key=" << key << " global_id={"
-                    << global_id.shard_id << "," << global_id.local_doc_id << "}";
-        }
+        global_index->AddVector(global_id, key, vector_info->first.get());
       }
     }
   }
@@ -764,89 +754,49 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(std::string_view index_name,
   if (!indices_)
     return;
 
-  // Check if document has vector fields and remove them from global index
+  auto local_id = key_index_.Find(key);
+  if (!local_id)
+    return;
+
+  GlobalDocId global_id{EngineShard::tlocal()->shard_id(), *local_id};
+
   for (const auto& [field_ident, field_info] : base_->schema.fields) {
     if (field_info.type == search::SchemaField::VECTOR &&
         !(field_info.flags & search::SchemaField::NOINDEX)) {
-      auto global_index =
-          GlobalVectorIndexRegistry::Instance().GetVectorIndex(index_name, field_info.short_name);
-
-      if (global_index) {
-        // Find local DocId for this key
-        auto local_id = key_index_.Find(key);
-        if (local_id) {
-          GlobalDocId global_id{EngineShard::tlocal()->shard_id(), *local_id};
-
-          // Remove vector from global index
-          global_index->RemoveVector(global_id, key);
-
-          VLOG(1) << "Removed vector from global index: " << index_name << ":"
-                  << field_info.short_name << " key=" << key << " global_id={" << global_id.shard_id
-                  << "," << global_id.local_doc_id << "}";
-        }
+      if (auto global_index = GlobalVectorIndexRegistry::Instance().GetVectorIndex(
+              index_name, field_info.short_name)) {
+        global_index->RemoveVector(global_id, key);
       }
     }
   }
 }
 
 void ShardDocIndex::RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args) {
-  if (!indices_) {
-    LOG(WARNING) << "No indices available for " << index_name;
+  if (!indices_)
     return;
-  }
 
-  // Traverse all documents and rebuild global vector indices
-  size_t vectors_added = 0;
-  auto cb = [this, index_name, &vectors_added](string_view key, const BaseAccessor& doc) {
-    LOG(INFO) << "Processing document: " << key;
+  auto cb = [this, index_name](string_view key, const BaseAccessor& doc) {
+    auto local_id = key_index_.Find(key);
+    if (!local_id)
+      return;
 
-    // Check if document has vector fields and add them to global index
+    GlobalDocId global_id{EngineShard::tlocal()->shard_id(), *local_id};
+
     for (const auto& [field_ident, field_info] : base_->schema.fields) {
-      LOG(INFO) << "Checking field: " << field_ident << " (type=" << field_info.type
-                << ", alias=" << field_info.short_name << ")";
-
       if (field_info.type == search::SchemaField::VECTOR &&
           !(field_info.flags & search::SchemaField::NOINDEX)) {
-        LOG(INFO) << "Found vector field: " << field_ident << " -> " << field_info.short_name;
-
-        auto vector_info = doc.GetVector(field_ident);
-        if (vector_info && vector_info->first) {
-          LOG(INFO) << "Vector data found for field: " << field_ident;
-
-          // Get or create global vector index
+        if (auto vector_info = doc.GetVector(field_ident); vector_info && vector_info->first) {
           const auto& vparams =
               std::get<search::SchemaField::VectorParams>(field_info.special_params);
           auto global_index = GlobalVectorIndexRegistry::Instance().GetOrCreateVectorIndex(
               index_name, field_info.short_name, vparams);
-
-          // Find local DocId for this key
-          auto local_id = key_index_.Find(key);
-          if (local_id) {
-            GlobalDocId global_id{EngineShard::tlocal()->shard_id(), *local_id};
-
-            // Add vector to global index
-            if (global_index->AddVector(global_id, key, vector_info->first.get())) {
-              vectors_added++;
-              LOG(INFO) << "Successfully added vector to global index: " << index_name << ":"
-                        << field_info.short_name << " key=" << key << " global_id={"
-                        << global_id.shard_id << "," << global_id.local_doc_id << "}";
-            } else {
-              LOG(WARNING) << "Failed to add vector to global index: " << key;
-            }
-          } else {
-            LOG(WARNING) << "Could not find local DocId for key: " << key;
-          }
-        } else {
-          LOG(INFO) << "No vector data for field: " << field_ident << " in key: " << key;
+          global_index->AddVector(global_id, key, vector_info->first.get());
         }
       }
     }
   };
 
   TraverseAllMatching(*base_, op_args, cb);
-
-  LOG(INFO) << "Rebuilt global vector indices for " << index_name << " with " << key_index_.Size()
-            << " docs on shard " << EngineShard::tlocal()->shard_id();
 }
 
 }  // namespace dfly

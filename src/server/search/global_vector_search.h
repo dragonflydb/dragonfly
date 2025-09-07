@@ -11,16 +11,12 @@
 
 namespace dfly {
 
-// Enhanced search result that includes global document IDs for vector results
+// Global vector search result with global document IDs
 struct GlobalSearchResult {
   size_t total_hits = 0;
+  std::vector<std::pair<float, GlobalDocId>> knn_results;
   std::vector<SerializedSearchDoc> docs;
-  std::vector<std::pair<search::DocId, float>> knn_scores;
-  std::optional<search::AlgorithmProfile> profile;
   std::optional<facade::ErrorReply> error;
-
-  // Additional field for global document IDs
-  std::vector<GlobalDocId> global_doc_ids;
 
   GlobalSearchResult() = default;
 };
@@ -46,8 +42,13 @@ class GlobalVectorSearchAlgorithm {
   // Extract vector field name from KNN query
   std::optional<std::string> ExtractVectorFieldName() const;
 
-  // Get KNN node for direct access (PoC helper)
-  const search::AstKnnNode* GetKnnNode() const;
+  // Get KNN parameters for global search
+  struct KnnParams {
+    float* vector;
+    size_t limit;
+    std::optional<size_t> ef_runtime;
+  };
+  std::optional<KnnParams> GetKnnParams() const;
 
   void EnableProfiling();
 

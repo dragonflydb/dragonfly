@@ -80,15 +80,7 @@ GlobalSearchResult GlobalVectorSearchAlgorithm::Search(
 
     GlobalSearchResult result;
     result.total_hits = knn_results.size();
-    result.global_doc_ids.reserve(knn_results.size());
-
-    // Convert to search result format
-    result.knn_scores.reserve(knn_results.size());
-
-    for (const auto& [score, global_id] : knn_results) {
-      result.global_doc_ids.push_back(global_id);
-      result.knn_scores.emplace_back(global_id.local_doc_id, score);  // temp mapping
-    }
+    result.knn_results = std::move(knn_results);
 
     LOG(INFO) << "Global vector search found " << result.total_hits << " results for index "
               << index_name << " field " << *vector_field;
@@ -117,8 +109,17 @@ std::optional<std::string> GlobalVectorSearchAlgorithm::ExtractVectorFieldName()
   return std::nullopt;
 }
 
-const search::AstKnnNode* GlobalVectorSearchAlgorithm::GetKnnNode() const {
-  return std::get_if<search::AstKnnNode>(query_.get());
+std::optional<GlobalVectorSearchAlgorithm::KnnParams> GlobalVectorSearchAlgorithm::GetKnnParams()
+    const {
+  if (auto* knn_node = std::get_if<search::AstKnnNode>(query_.get())) {
+    std::optional<size_t> ef_runtime = std::nullopt;
+    if (knn_node->ef_runtime.has_value()) {
+      ef_runtime = static_cast<size_t>(knn_node->ef_runtime.value());
+    }
+    return KnnParams{
+        .vector = knn_node->vec.first.get(), .limit = knn_node->limit, .ef_runtime = ef_runtime};
+  }
+  return std::nullopt;
 }
 
 void GlobalVectorSearchAlgorithm::EnableProfiling() {
@@ -158,12 +159,20 @@ GlobalSearchResult GlobalVectorSearchCoordinator::ExecuteGlobalVectorSearch(
 
   // Execute global search
   auto global_result = algo.Search(index_name, shard_indices);
-  if (global_result.global_doc_ids.empty()) {
+  if (global_result.knn_results.empty()) {
     return global_result;
   }
 
+  // Extract global doc IDs from results and create knn_scores mapping
+  std::vector<GlobalDocId> global_doc_ids;
+  std::vector<std::pair<search::DocId, float>> knn_scores;
+  for (const auto& [score, global_id] : global_result.knn_results) {
+    global_doc_ids.push_back(global_id);
+    knn_scores.emplace_back(global_id.local_doc_id, score);
+  }
+
   // Group global doc IDs by shard
-  auto grouped_ids = GroupByShard(global_result.global_doc_ids);
+  auto grouped_ids = GroupByShard(global_doc_ids);
 
   // Fetch document fields from each shard
   std::vector<SerializedSearchDoc> all_docs;
@@ -175,8 +184,8 @@ GlobalSearchResult GlobalVectorSearchCoordinator::ExecuteGlobalVectorSearch(
       DbContext db_cntx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
       OpArgs op_args{EngineShard::tlocal(), nullptr, db_cntx};
 
-      auto shard_docs = FetchDocumentFields(shard_id, shard_global_ids, global_result.knn_scores,
-                                            params, shard_indices[shard_id], op_args);
+      auto shard_docs = FetchDocumentFields(shard_id, shard_global_ids, knn_scores, params,
+                                            shard_indices[shard_id], op_args);
 
       all_docs.insert(all_docs.end(), std::make_move_iterator(shard_docs.begin()),
                       std::make_move_iterator(shard_docs.end()));
