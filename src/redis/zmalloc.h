@@ -124,6 +124,10 @@ int zmalloc_get_allocator_wasted_blocks(float ratio, size_t* allocated, size_t* 
                                         size_t* wasted);
 struct fragmentation_info {
   size_t committed;
+
+  // a temporary metric to compare against "committed" in production.
+  // TODO: delete it once we are confident committed is computed correctly.
+  size_t committed_golden;
   size_t wasted;
   unsigned bin;
 };
