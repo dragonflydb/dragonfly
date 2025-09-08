@@ -74,7 +74,9 @@ class Replica : ProtocolClient {
 
   void Pause(bool pause);
 
-  std::error_code TakeOver(std::string_view timeout, bool save_flag);
+  enum TakeOverResult : uint8_t { OK, NO_PARTIAL, FAILED };
+
+  TakeOverResult TakeOver(std::string_view timeout, bool save_flag);
 
   bool IsContextCancelled() const {
     return !exec_st_.IsRunning();

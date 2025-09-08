@@ -3608,8 +3608,8 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
     return builder->SendError("Full sync not done");
   }
 
-  std::error_code ec = replica_->TakeOver(ArgS(args, 0), save_flag);
-  if (ec)
+  Replica::TakeOverResult take_over_res = replica_->TakeOver(ArgS(args, 0), save_flag);
+  if (take_over_res == Replica::FAILED)
     return builder->SendError("Couldn't execute takeover");
 
   LOG(INFO) << "Takeover successful, promoting this instance to master.";
@@ -3621,9 +3621,13 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   // Start journal to allow partial sync from same source master
   service_.proactor_pool().AwaitFiberOnAll([this](auto, auto*) { journal()->StartInThread(); });
 
-  SetMasterFlagOnAllThreads(true);
   last_master_data_ = replica_->Stop();
   replica_.reset();
+  if (take_over_res == Replica::NO_PARTIAL) {
+    last_master_data_.reset();
+  }
+
+  SetMasterFlagOnAllThreads(true);
   return builder->SendOk();
 }
 

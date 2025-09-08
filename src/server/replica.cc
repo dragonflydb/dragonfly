@@ -193,15 +193,33 @@ void Replica::Pause(bool pause) {
   });
 }
 
-std::error_code Replica::TakeOver(std::string_view timeout, bool save_flag) {
+Replica::TakeOverResult Replica::TakeOver(std::string_view timeout, bool save_flag) {
   VLOG(1) << "Taking over";
 
-  std::error_code ec;
+  TakeOverResult res;
   auto takeOverCmd = absl::StrCat("TAKEOVER ", timeout, (save_flag ? " SAVE" : ""));
-  Proactor()->Await([this, &ec, cmd = std::move(takeOverCmd)] { ec = SendNextPhaseRequest(cmd); });
+  Proactor()->Await([this, &res, cmd = std::move(takeOverCmd)]() -> void {
+    string request = StrCat("DFLY ", cmd, " ", master_context_.dfly_session_id);
 
-  // If we successfully taken over, return and let server_family stop the replication.
-  return ec;
+    VLOG(1) << "Sending: " << request;
+    auto io_err = SendCommandAndReadResponse(request);
+    res = FAILED;
+    if (io_err) {
+      return;
+    }
+
+    if (CheckRespIsSimpleReply("OK NO PARTIAL")) {
+      res = NO_PARTIAL;
+      return;
+    }
+
+    if (CheckRespIsSimpleReply("OK")) {
+      res = OK;
+      return;
+    }
+  });
+
+  return res;
 }
 
 void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sync_data) {

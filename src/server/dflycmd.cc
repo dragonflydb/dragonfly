@@ -505,6 +505,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
   });
 
   atomic_bool catchup_success = true;
+  atomic_bool rest_catchup_success = true;
   if (*status == OpStatus::OK) {
     // We need to loop or otherwise we can't guarantee that there is no data loss.
     // *All* nodes must be in sync when the takeover completes such that when the replica
@@ -519,11 +520,16 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
       dfly::SharedLock lk{repl_ptr->shared_mu};
 
       // Wait for ALL replicas to catch up. Otherwise we can't do partial sync from same source
-      // master. If the other replica misses a single journal entry, that entry will never exist in the replication buffer
-      // of the new master, so that replica won't be able to use partial sync to sync with the new master.
-      auto cb = [replica_ptr, end_time, &catchup_success](EngineShard* shard) {
+      // master. If the other replica misses a single journal entry, that entry will never exist in
+      // the replication buffer of the new master, so that replica won't be able to use partial sync
+      // to sync with the new master.
+      auto cb = [&, end_time](EngineShard* shard) {
         if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
-          catchup_success.store(false);
+          if (replica_ptr == repl_ptr) {
+            catchup_success.store(false);
+          } else {
+            rest_catchup_success.store(false);
+          }
         }
       };
       shard_set->RunBlockingInParallel(std::move(cb));
@@ -535,6 +541,10 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
   if (*status != OpStatus::OK || !catchup_success.load()) {
     sf_->service().SwitchState(GlobalState::TAKEN_OVER, GlobalState::ACTIVE);
     return rb->SendError("Takeover failed!");
+  }
+
+  if (!rest_catchup_success) {
+    LOG(ERROR) << "Some of the replica nodes did not sync in time. Partial sync is disabled.";
   }
 
   rb->SendOk();
