@@ -545,9 +545,10 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
 
   if (!rest_catchup_success) {
     LOG(ERROR) << "Some of the replica nodes did not sync in time. Partial sync is disabled.";
+    rb->SendSimpleString("OK NO PARTIAL");
+  } else {
+    rb->SendOk();
   }
-
-  rb->SendOk();
 
   if (save_flag) {
     VLOG(1) << "Save snapshot after Takeover.";
