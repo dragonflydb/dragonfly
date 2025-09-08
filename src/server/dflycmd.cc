@@ -517,9 +517,10 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
     util::fb2::LockGuard mu_lk(mu_);
     for (auto [id, repl_ptr] : replica_infos_) {
       dfly::SharedLock lk{repl_ptr->shared_mu};
+
       // Wait for ALL replicas to catch up. Otherwise we can't do partial sync from same source
-      // master. If the replica misses 1 LSN entry, that entry will never exist in the LSN buffer
-      // of the new master effectively killing partial sync.
+      // master. If the other replica misses a single journal entry, that entry will never exist in the replication buffer
+      // of the new master, so that replica won't be able to use partial sync to sync with the new master.
       auto cb = [replica_ptr, end_time, &catchup_success](EngineShard* shard) {
         if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
           catchup_success.store(false);
