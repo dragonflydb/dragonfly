@@ -1223,4 +1223,22 @@ TEST_F(MultiTest, ForceAtomicityFlag) {
   EXPECT_THAT(Run({"eval", kScript, "0"}), ErrArg("undeclared"));
 }
 
+TEST_F(MultiTest, StoredCmdBytesMetric) {
+  ASSERT_EQ(GetMetrics().coordinator_stats.stored_cmd_bytes, 0);
+
+  RespExpr resp = Run({"multi"});
+  ASSERT_EQ(resp, "OK");
+
+  for (auto i = 0; i < 100; ++i) {
+    ASSERT_EQ(Run({"get", kKey1}), "QUEUED");
+  }
+
+  ASSERT_GT(GetMetrics().coordinator_stats.stored_cmd_bytes, 0);
+
+  resp = Run({"exec"});
+  ASSERT_THAT(resp, ArrLen(100));
+  ASSERT_THAT(resp.GetVec(), Contains(ArgType(RespExpr::NIL)).Times(100));
+  ASSERT_EQ(GetMetrics().coordinator_stats.stored_cmd_bytes, 0);
+}
+
 }  // namespace dfly

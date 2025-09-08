@@ -2812,6 +2812,8 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   facade::RespVec resp_vec;
   facade::RedisParser parser;
 
+  // Prepend a whitespace so names starting with ':' are treated as names, not RESP tokens.
+  def.insert(def.begin(), ' ');
   def += "\r\n";  // RESP terminator
   io::MutableBytes buffer{reinterpret_cast<uint8_t*>(def.data()), def.size()};
   auto res = parser.Parse(buffer, &consumed, &resp_vec);

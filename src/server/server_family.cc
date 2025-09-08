@@ -1778,6 +1778,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricValue("memory_by_class_bytes", total.obj_memory_usage, {"class"}, {"object_used"},
                     &memory_by_class_bytes);
 
+  AppendMetricValue("memory_by_class_bytes", m.coordinator_stats.stored_cmd_bytes, {"class"},
+                    {"conn_stored_commands"}, &memory_by_class_bytes);
+
   // Command stats
   if (!m.cmd_stats_map.empty()) {
     string command_metrics;
@@ -1910,6 +1913,14 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
 
   absl::StrAppend(&resp->body(), db_key_metrics, db_key_expire_metrics, db_capacity_metrics,
                   memory_by_class_bytes);
+
+  AppendMetricHeader("defrag_stats", "Stats for defragmentation task", COUNTER, &resp->body());
+  AppendMetricWithoutLabels("defrag_invocations", "Defrag invocations",
+                            m.shard_stats.defrag_task_invocation_total, COUNTER, &resp->body());
+  AppendMetricWithoutLabels("defrag_attempts", "Objects examined",
+                            m.shard_stats.defrag_attempt_total, COUNTER, &resp->body());
+  AppendMetricWithoutLabels("defrag_invocations", "Objects moved",
+                            m.shard_stats.defrag_realloc_total, COUNTER, &resp->body());
 }
 
 void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
@@ -3456,7 +3467,8 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
         CHECK(replica_);
 
         SetMasterFlagOnAllThreads(true);  // Flip flag before clearing replica
-        last_master_data_ = replica_->Stop();
+        // No partial sync for NO ONE flow
+        replica_->Stop();
         replica_.reset();
 
         StopAllClusterReplicas();

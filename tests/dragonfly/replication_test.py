@@ -674,6 +674,22 @@ async def test_rewrites(df_factory):
         # Check SUNIONSTORE turns into DEL and SADD
         await check_list_ooo("SUNIONSTORE k set1 set2", [r"DEL k", r"SADD k (.*?)"])
 
+        # Check ZDIFFSTORE turns into DEL and ZADD
+        await c_master.execute_command("zadd zet1 1 v1 2 v2 3 v3")
+        await c_master.execute_command("zadd zet2 1 v1 2 v2")
+        await skip_cmd()
+        await skip_cmd()
+        await check_list("ZDIFFSTORE k 2 zet1 zet2", [r"DEL k", r"ZADD k 3 v3"])
+
+        # Check ZINTERSTORE turns into DEL and ZADD
+        await check_list("ZINTERSTORE k 2 zet1 zet2", [r"DEL k", r"ZADD k (.*?)"])
+
+        # Check ZRANGESTORE turns into SREM and ZADD
+        await check_list_ooo("ZRANGESTORE k zet1 2 -1", [r"DEL k", r"ZADD k 3 v3"])
+
+        # Check ZUNIONSTORE turns into DEL and ZADD
+        await check_list_ooo("ZUNIONSTORE k 2 zet1 zet2", [r"DEL k", r"ZADD k (.*?)"])
+
         await c_master.set("k1", "1000")
         await c_master.set("k2", "1100")
         await skip_cmd()
@@ -751,6 +767,7 @@ async def test_rewrites(df_factory):
             [r"XTRIM k-stream MINID 0", r"SREM k-one-element-set value[12]"],
         )
 
+        # TODO next Z-tests won't work with no-point-in-time replication
         # check BZMPOP turns into ZPOPMAX and ZPOPMIN command
         await c_master.zadd("key", {"a": 1, "b": 2, "c": 3})
         await skip_cmd()
@@ -3121,14 +3138,6 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
     else:
         # Promote first replica to master
         await c_replica1.execute_command(f"REPLICAOF NO ONE")
-        # Not sure what was the point of this test/flow. To assert that we have a bug ?
-        # replica1 stops replicating from master. Then we seed 2 commands to the
-        # old master and wait for replica2 to be in sync. Finally, we make replica2
-        # a replica of replica1 and *expect* them to partially sync??!! Yes it will
-        # but the nodes do not contain the same data. In particular replica2 has 2 more
-        # elements than its new master(replica1). We should not allow partial sync from
-        # same master if we didn't takeover as we can't protect ourselves from the case above.
-        # TODO(kostas)
         await c_master.set("x", "y")
         await c_master.set("x", "y")
         await check_all_replicas_finished([c_replica2], c_master)
@@ -3143,23 +3152,28 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
             *(SeederV2.capture(c) for c in (c_replica1, c_replica2))
         )
         assert hash1 == hash2
+        s1 = await c_replica1.execute_command("dbsize")
+        s2 = await c_replica1.execute_command("dbsize")
+        assert s1 == s2
 
     # Check we can takeover to the second replica
     await c_replica2.execute_command(f"REPLTAKEOVER 5")
 
     replica1.stop()
     replica2.stop()
-    if use_takeover or (backlog_len > 0 and not use_takeover):
+    if use_takeover:
         # Check logs for partial replication
         lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
         assert len(lines) == 1
         # Check no full sync logs
-        lines = replica2.find_in_logs(f"Started full with localhost:{replica1.port}")
+        lines = replica2.find_in_logs(f"Started full sync with localhost:{replica1.port}")
         assert len(lines) == 0
     else:
-        lines = replica2.find_in_logs(f"Started full with localhost:{replica1.port}")
+        lines = replica2.find_in_logs(f"Started full sync with localhost:{replica1.port}")
+        assert len(lines) == 1
+        # No partial sync after NO ONE
+        lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
         assert len(lines) == 0
-        assert len(replica1.find_in_logs("No partial sync due to stale LSN")) > 0
 
 
 async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df_factory):
@@ -3202,7 +3216,7 @@ async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df
     server3.stop()
     # Check logs for partial replication
     lines = server3.find_in_logs(f"Started partial sync with localhost:{server2.port}")
-    assert len(lines) == 1
+    assert len(lines) == 0
 
 
 async def test_replicate_hset_with_expiry(df_factory: DflyInstanceFactory):

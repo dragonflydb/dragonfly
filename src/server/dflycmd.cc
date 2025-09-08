@@ -86,6 +86,7 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
   shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
 
   const FlowInfo* flow = &replica->flows[shard->shard_id()];
+
   while (flow->last_acked_lsn < shard->journal()->GetLsn()) {
     if (absl::Now() > end_time) {
       LOG(WARNING) << "Couldn't synchronize with replica for takeover in time: " << replica->address
@@ -96,8 +97,9 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
     if (!replica->exec_st.IsRunning()) {
       return false;
     }
-    VLOG(1) << "Replica lsn:" << flow->last_acked_lsn
-            << " master lsn:" << shard->journal()->GetLsn();
+    LOG_EVERY_T(INFO, 1) << "Replica lsn:" << flow->last_acked_lsn
+                         << " master lsn:" << shard->journal()->GetLsn()
+                         << "; Journal streamer state: " << flow->streamer->FormatInternalState();
     ThisFiber::SleepFor(1ms);
   }
 
@@ -320,8 +322,9 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
 
       // We need to replay from start because after the takeover the nodes are in sync. It's
       // the commands that came after the takeover that are missing from the new replica.
-      LOG(INFO) << "Is LSN in buffer " << sf_->journal()->IsLSNInBuffer(1);
-      if (sf_->journal()->IsLSNInBuffer(1) || sf_->journal()->GetLsn() == 1) {
+      // Also, block partial sync if we try to sync from the future.
+      auto* jrnl = sf_->journal();
+      if (jrnl->IsLSNInBuffer(1) || jrnl->GetLsn() == 1) {
         sync_type = "PARTIAL";
         flow.start_partial_sync_at = 1;
         VLOG(1) << "Partial sync from same source master requested and is available. Current LSN is"
@@ -503,6 +506,14 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
 
   atomic_bool catchup_success = true;
   if (*status == OpStatus::OK) {
+    // We need to loop or otherwise we can't guarantee that there is no data loss.
+    // *All* nodes must be in sync when the takeover completes such that when the replica
+    // reconciles with the new promoted master the only data that needs to be sent is the
+    // journaled commands that came after the takeover. On the contrary, If nodes were not
+    // in sync after the takeover, then any data that was not replicated from the old master
+    // is lost, because the new master does not contain their entries and a fallback to FULL
+    // SYNC is required (since the journal starts when the takeover completes, which implies
+    // data parity with the old master and an empty journal on the newly promoted master).
     util::fb2::LockGuard mu_lk(mu_);
     for (auto [id, repl_ptr] : replica_infos_) {
       dfly::SharedLock lk{repl_ptr->shared_mu};

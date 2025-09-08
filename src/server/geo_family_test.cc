@@ -240,6 +240,38 @@ TEST_F(GeoFamilyTest, GeoRadiusByMember) {
       "ERR STORE option in GEORADIUSBYMEMBER is not compatible with WITHDIST, WITHHASH and WITHCOORDS options"sv;
   resp = Run("GEORADIUSBYMEMBER Sicily Agrigento 100 km WITHHASH store tmp");
   EXPECT_THAT(resp, ErrArg(err));
+
+  resp = Run("GEOADD t 13.361389 38.115556 a 13.3619 38.1159 b 13.3608 38.1152 c");
+  resp = Run("GEOSEARCH t FROMLONLAT 13.361389 38.115556 BYRADIUS 1 KM COUNT 0");
+  EXPECT_THAT(resp, ErrArg("ERR COUNT must be > 0"));
+}
+
+TEST_F(GeoFamilyTest, GeoRadiusByMemberRO) {
+  EXPECT_EQ(10, CheckedInt({"geoadd",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
+                            "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",
+                            "48.8566", "Paris",     "16.3738", "48.2082", "Vienna",   "4.8952",
+                            "52.3702", "Amsterdam", "10.7522", "59.9139", "Oslo",     "23.7275",
+                            "37.9838", "Athens",    "19.0402", "47.4979", "Budapest", "6.2603",
+                            "53.3498", "Dublin"}));
+
+  auto resp =
+      Run({"GEORADIUSBYMEMBER_RO", "Europe", "Madrid", "700", "KM", "WITHCOORD", "WITHDIST"});
+  EXPECT_THAT(
+      resp,
+      RespArray(ElementsAre(
+          RespArray(ElementsAre(
+              "Madrid", "0", RespArray(ElementsAre("3.7038007378578186", "40.416799319406216")))),
+          RespArray(
+              ElementsAre("Lisbon", "502.20769462704084",
+                          RespArray(ElementsAre("9.142698347568512", "38.736900197448534")))))));
+
+  // GEORADIUSBYMEMBER_RO should not accept arguments for storing (writing data)
+  resp =
+      Run({"GEORADIUSBYMEMBER_RO", "Europe", "Madrid", "700", "KM", "STOREDIST", "store_dist_key"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"GEORADIUSBYMEMBER_RO", "Europe", "Madrid", "700", "KM", "STORE", "store_key"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
 TEST_F(GeoFamilyTest, GeoRadius) {

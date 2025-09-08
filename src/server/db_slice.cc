@@ -329,6 +329,11 @@ inline void TouchValuesHistogramIfNeeded(const PrimeValue& pv, base::Histogram* 
   }
 }
 
+inline bool MayDeleteAsynchronously(const PrimeValue& pv) {
+  unsigned obj_type = pv.ObjType();
+  return (obj_type == OBJ_SET || obj_type == OBJ_HASH) && pv.Encoding() == kEncodingStrMap2;
+}
+
 }  // namespace
 
 #define ADD(x) (x) += o.x
@@ -1772,8 +1777,7 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
   }
   AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
 
-  if (del_it->first.IsAsyncDelete() && pv.ObjType() == OBJ_SET &&
-      pv.Encoding() == kEncodingStrMap2) {
+  if (del_it->first.IsAsyncDelete() && MayDeleteAsynchronously(pv)) {
     DenseSet* ds = (DenseSet*)pv.RObjPtr();
     pv.SetRObjPtr(nullptr);
     const size_t kClearStepSize = 512;

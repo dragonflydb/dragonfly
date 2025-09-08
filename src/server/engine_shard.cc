@@ -31,7 +31,7 @@ ABSL_FLAG(float, mem_defrag_threshold, 0.7,
           "Minimum percentage of used memory relative to maxmemory cap before running "
           "defragmentation");
 
-ABSL_FLAG(uint32_t, mem_defrag_check_sec_interval, 10,
+ABSL_FLAG(uint32_t, mem_defrag_check_sec_interval, 60,
           "Number of seconds between every defragmentation necessity check");
 
 ABSL_FLAG(float, mem_defrag_waste_threshold, 0.2,
@@ -69,24 +69,6 @@ using namespace util;
 namespace {
 
 constexpr uint64_t kCursorDoneState = 0u;
-
-struct ShardMemUsage {
-  std::size_t commited = 0;
-  std::size_t used = 0;
-  std::size_t wasted_mem = 0;
-};
-
-std::ostream& operator<<(std::ostream& os, const ShardMemUsage& mem) {
-  return os << "commited: " << mem.commited << " vs used " << mem.used << ", wasted memory "
-            << mem.wasted_mem;
-}
-
-ShardMemUsage ReadShardMemUsage(float wasted_ratio) {
-  ShardMemUsage usage;
-  zmalloc_get_allocator_wasted_blocks(wasted_ratio, &usage.used, &usage.commited,
-                                      &usage.wasted_mem);
-  return usage;
-}
 
 bool HasContendedLocks(ShardId shard_id, Transaction* trx, const DbTable* table) {
   auto is_contended = [table](LockFp fp) { return table->trans_locks.Find(fp)->IsContended(); };
@@ -249,26 +231,47 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     return false;
   }
 
-  const std::size_t global_threshold = limit * GetFlag(FLAGS_mem_defrag_threshold);
+  thread_local fragmentation_info finfo{
+      .committed = 0, .committed_golden = 0, .wasted = 0, .bin = 0};
+
+  const std::size_t global_threshold = double(limit) * GetFlag(FLAGS_mem_defrag_threshold);
   if (global_threshold > rss_mem_current.load(memory_order_relaxed)) {
+    finfo.bin = 0;  // reset.
     return false;
   }
 
-  const auto now = time(nullptr);
-  const auto seconds_from_prev_check = now - last_check_time;
-  const auto mem_defrag_interval = GetFlag(FLAGS_mem_defrag_check_sec_interval);
+  if (finfo.bin == 0) {  // did not start the iterative checking yet
+    const auto now = time(nullptr);
+    const auto seconds_from_prev_check = now - last_check_time;
+    const auto mem_defrag_interval = GetFlag(FLAGS_mem_defrag_check_sec_interval);
 
-  if (seconds_from_prev_check < mem_defrag_interval) {
-    return false;
+    if (seconds_from_prev_check < mem_defrag_interval) {
+      return false;
+    }
+
+    // start checking.
+    finfo.committed = finfo.committed_golden = 0;
+    finfo.wasted = 0;
+    page_utilization_threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
   }
-  last_check_time = now;
 
-  ShardMemUsage usage = ReadShardMemUsage(GetFlag(FLAGS_mem_defrag_page_utilization_threshold));
+  uint64_t start = absl::GetCurrentTimeNanos();
+  int res = zmalloc_get_allocator_fragmentation_step(page_utilization_threshold, &finfo);
+  uint64_t duration = absl::GetCurrentTimeNanos() - start;
+  VLOG(1) << "Reading memory usage took " << duration << " ns on bin " << finfo.bin - 1;
 
-  const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
-  if (usage.wasted_mem > (uint64_t(usage.commited * waste_threshold))) {
-    VLOG(1) << "memory issue found for memory " << usage;
-    return true;
+  if (res == 0) {
+    // finished checking.
+    last_check_time = time(nullptr);
+    if (finfo.committed != finfo.committed_golden) {
+      LOG_FIRST_N(ERROR, 100) << "committed memory computed incorrectly: " << finfo.committed
+                              << " vs " << finfo.committed_golden;
+    }
+    const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
+    if (finfo.wasted > size_t(finfo.committed * waste_threshold)) {
+      VLOG(1) << "memory fragmentation issue found: " << finfo.wasted << " " << finfo.committed;
+      return true;
+    }
   }
 
   return false;
@@ -322,11 +325,11 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect
   defrag_state_.UpdateScanState(cur.token());
 
   if (reallocations > 0) {
-    VLOG(1) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations
+    VLOG(2) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations
             << " times, did it in " << traverses_count << " cursor is at the "
             << (defrag_state_.cursor == kCursorDoneState ? "end" : "in progress");
   } else {
-    VLOG(1) << "shard " << slice.shard_id() << ": run the defrag " << traverses_count
+    VLOG(2) << "shard " << slice.shard_id() << ": run the defrag " << traverses_count
             << " times out of maximum " << kMaxTraverses << ", with cursor at "
             << (defrag_state_.cursor == kCursorDoneState ? "end" : "in progress")
             << " but no location for defrag were found";
@@ -361,7 +364,7 @@ uint32_t EngineShard::DefragTask() {
       return util::ProactorBase::kOnIdleMaxLevel;
     }
   }
-  return kRunAtLowPriority;
+  return 6;  // priority.
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
@@ -713,7 +716,7 @@ void EngineShard::RetireExpiredAndEvict() {
       stats_.total_heartbeat_expired_keys += stats.deleted;
       stats_.total_heartbeat_expired_bytes += stats.deleted_bytes;
       ++stats_.total_heartbeat_expired_calls;
-      VLOG(1) << "Heartbeat expired " << stats.deleted << " keys with total bytes "
+      VLOG(2) << "Heartbeat expired " << stats.deleted << " keys with total bytes "
               << stats.deleted_bytes << " with total expire flow calls "
               << stats_.total_heartbeat_expired_calls;
     }

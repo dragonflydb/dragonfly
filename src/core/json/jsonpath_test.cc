@@ -144,7 +144,7 @@ TEST_F(ScannerTest, Basic) {
   NEXT_TOK(DOT);
   NEXT_EQ(UNQ_STR, string, "book");
   NEXT_TOK(LBRACKET);
-  NEXT_EQ(INT, int, 0);
+  NEXT_EQ(INT, string, "0");
   NEXT_TOK(RBRACKET);
   NEXT_TOK(DOT);
   NEXT_TOK(WILDCARD);

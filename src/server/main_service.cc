@@ -348,11 +348,11 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnDouble(double d) final {
-    if (rb_->IsResp3() || !GetFlag(FLAGS_lua_resp2_legacy_float)) {
-      rb_->SendDouble(d);
-    } else {
-      long val = d >= 0 ? static_cast<long>(floor(d)) : static_cast<long>(ceil(d));
+    if (GetFlag(FLAGS_lua_resp2_legacy_float)) {
+      const long val = d >= 0 ? static_cast<long>(floor(d)) : static_cast<long>(ceil(d));
       rb_->SendLong(val);
+    } else {
+      rb_->SendDouble(d);
     }
   }
 
@@ -886,6 +886,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("replication_timeout");
   config_registry.RegisterMutable("migration_finalization_timeout_ms");
+  config_registry.RegisterMutable("slot_migration_throttle_us");
   config_registry.RegisterMutable("table_growth_margin");
   config_registry.RegisterMutable("tcp_keepalive");
   config_registry.RegisterMutable("timeout");
@@ -1345,9 +1346,12 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
   bool is_trans_cmd = CO::IsTransKind(cid->name());
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
     // TODO: protect against aggregating huge transactions.
-    dfly_cntx->conn_state.exec_info.body.emplace_back(cid, true, args_no_cmd);
+    auto& exec_info = dfly_cntx->conn_state.exec_info;
+    const size_t old_size = exec_info.GetStoredCmdBytes();
+    exec_info.AddStoredCmd(cid, true, args_no_cmd);
+    etl.stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
     if (cid->IsWriteOnly()) {
-      dfly_cntx->conn_state.exec_info.is_write = true;
+      exec_info.is_write = true;
     }
     builder->SendSimpleString("QUEUED");
     return DispatchResult::OK;
@@ -1804,8 +1808,11 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
 }
 
 ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {
+  constexpr uint8_t kMaxUknownCommands = 64;
+  constexpr uint8_t kMaxUknownCommandLength = 20;
+
   lock_guard lk(mu_);
-  if (unknown_cmds_.size() < 1024)
+  if (unknown_cmds_.size() <= kMaxUknownCommands && cmd_name.size() <= kMaxUknownCommandLength)
     unknown_cmds_[cmd_name]++;
 
   return ErrorReply{StrCat("unknown command `", cmd_name, "`"), "unknown_cmd"};
