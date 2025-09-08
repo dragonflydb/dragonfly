@@ -3781,24 +3781,72 @@ void ServerFamily::Latency(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void ServerFamily::ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (args.size() > 1) {
-    cmd_cntx.rb->SendError(kSyntaxErr);
-    return;
-  }
+  // Supported options (case-insensitive):
+  // SAVE | NOSAVE, NOW, FORCE, ABORT, SAFE (Valkey-specific, the same as SAVE in Dragonfly)
+  bool saw_save_toggle = false;  // whether SAVE/NOSAVE/SAFE appeared
+  bool opt_now = false;
+  bool opt_force = false;
+  bool opt_abort = false;
 
-  if (args.size() == 1) {
-    auto sub_cmd = ArgS(args, 0);
-    if (absl::EqualsIgnoreCase(sub_cmd, "SAVE")) {
-    } else if (absl::EqualsIgnoreCase(sub_cmd, "NOSAVE")) {
-      save_on_shutdown_ = false;
+  for (size_t i = 0; i < args.size(); ++i) {
+    std::string opt = absl::AsciiStrToUpper(ArgS(args, i));
+    if (opt == "SAVE") {
+      if (saw_save_toggle) {
+        cmd_cntx.rb->SendError(kSyntaxErr);
+        return;
+      }
+      saw_save_toggle = true;
+      // Save during the standard shutdown sequence
+      save_on_shutdown_ = true;
+    } else if (opt == "NOSAVE") {
+      if (saw_save_toggle) {
+        cmd_cntx.rb->SendError(kSyntaxErr);
+        return;
+      }
+      saw_save_toggle = true;
+      save_on_shutdown_ = false;  // ensure no save at all
+    } else if (opt == "NOW") {
+      opt_now = true;
+    } else if (opt == "FORCE") {
+      opt_force = true;
+    } else if (opt == "ABORT") {
+      opt_abort = true;
+    } else if (opt == "SAFE") {
+      if (saw_save_toggle) {
+        cmd_cntx.rb->SendError(kSyntaxErr);
+        return;
+      }
+      saw_save_toggle = true;
+      // Same behavior as SAVE: save during shutdown sequence
+      save_on_shutdown_ = true;
     } else {
       cmd_cntx.rb->SendError(kSyntaxErr);
       return;
     }
   }
 
+  if (opt_abort) {
+    // We currently do not support aborting an in-progress shutdown sequence.
+    cmd_cntx.rb->SendError("SHUTDOWN ABORT is not supported");
+    return;
+  }
+
+  // No immediate save here: SAVE/SAFE/NOSAVE only configure save_on_shutdown_
+  // and the snapshot is handled in ServerFamily::Shutdown.
+
+  // FORCE implies no snapshot on shutdown regardless of SAVE/SAFE
+  if (opt_force) {
+    save_on_shutdown_ = false;
+  }
+
+  // Wire NOW/FORCE to a single fast-shutdown flag for listeners.
+  facade::g_shutdown_fast.store(opt_now || opt_force, std::memory_order_relaxed);
+
   CHECK_NOTNULL(acceptor_)->Stop();
   cmd_cntx.rb->SendOk();
+
+  // Reset flag for any subsequent restarts (defensive; process exits shortly).
+  facade::g_shutdown_fast.store(false, std::memory_order_relaxed);
 }
 
 void ServerFamily::Dfly(CmdArgList args, const CommandContext& cmd_cntx) {
