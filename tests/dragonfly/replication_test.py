@@ -3152,6 +3152,9 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
             *(SeederV2.capture(c) for c in (c_replica1, c_replica2))
         )
         assert hash1 == hash2
+        s1 = await c_replica1.execute_command("dbsize")
+        s2 = await c_replica1.execute_command("dbsize")
+        assert s1 == s2
 
     # Check we can takeover to the second replica
     await c_replica2.execute_command(f"REPLTAKEOVER 5")
@@ -3191,7 +3194,7 @@ async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df
     await wait_for_replicas_state(c_s3)
 
     # Promote server 2 to master
-    await c_s2.execute_command(f"REPLICAOF NO ONE")
+    await c_s2.execute_command(f"REPLTAKEOVER 20")
     # Make server 4 replica of server 2
     await c_s4.execute_command(f"REPLICAOF localhost {server2.port}")
     await check_all_replicas_finished([c_s4], c_s2)
@@ -3213,7 +3216,7 @@ async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df
     server3.stop()
     # Check logs for partial replication
     lines = server3.find_in_logs(f"Started partial sync with localhost:{server2.port}")
-    assert len(lines) == 0
+    assert len(lines) == 1
 
 
 async def test_replicate_hset_with_expiry(df_factory: DflyInstanceFactory):
