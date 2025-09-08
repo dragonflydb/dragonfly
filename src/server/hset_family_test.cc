@@ -131,13 +131,19 @@ TEST_F(HSetFamilyTest, HIncrRespected) {
 }
 
 TEST_F(HSetFamilyTest, HScan) {
+  auto resp = Run("hscan non-existing-key 100 count 5");
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::STRING), ArgType(RespExpr::ARRAY)));
+  EXPECT_EQ(ToSV(resp.GetVec()[0].GetBuf()), "0");
+  EXPECT_EQ(StrArray(resp.GetVec()[1]).size(), 0);
+
   for (int i = 0; i < 10; i++) {
     Run({"HSET", "myhash", absl::StrCat("Field-", i), absl::StrCat("Value-", i)});
   }
 
   // Note that even though this limit by 4, it would return more because
   // all fields are on listpack
-  auto resp = Run({"hscan", "myhash", "0", "count", "4"});
+  resp = Run({"hscan", "myhash", "0", "count", "4"});
   EXPECT_THAT(resp, ArrLen(2));
   auto vec = StrArray(resp.GetVec()[1]);
   EXPECT_EQ(vec.size(), 20);
