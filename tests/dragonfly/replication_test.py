@@ -3152,9 +3152,6 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
             *(SeederV2.capture(c) for c in (c_replica1, c_replica2))
         )
         assert hash1 == hash2
-        s1 = await c_replica1.execute_command("dbsize")
-        s2 = await c_replica1.execute_command("dbsize")
-        assert s1 == s2
 
     # Check we can takeover to the second replica
     await c_replica2.execute_command(f"REPLTAKEOVER 5")
