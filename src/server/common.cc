@@ -110,13 +110,6 @@ std::string_view LockTagOptions::Tag(std::string_view key) const {
   return key.substr(start + 1, end - start - 1);
 }
 
-atomic_uint64_t used_mem_current(0);
-atomic_uint64_t rss_mem_current(0);
-atomic_uint64_t max_memory_limit(0);
-
-unsigned kernel_version = 0;
-Namespaces* namespaces = nullptr;
-
 const char* GlobalStateName(GlobalState s) {
   switch (s) {
     case GlobalState::ACTIVE:
