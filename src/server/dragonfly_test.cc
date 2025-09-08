@@ -149,6 +149,17 @@ TEST_F(SingleThreadDflyEngineTest, GlobalSingleThread) {
   Run({"move", "a", "1"});
 }
 
+TEST_F(DflyEngineTest, LuaErrors) {
+  auto resp = Run({"eval", "return redis.error_reply('some error')", "0"});
+  EXPECT_THAT(resp, ErrArg("some error"));
+
+  resp = Run({"eval", "return redis.pcall('foo', 'bar')", "0"});
+  EXPECT_THAT(resp, ErrArg("ERR Unknown Redis command called from script"));
+
+  resp = Run({"eval", "return redis.pcall('incrby', 'foo', 'bar')", "1"});
+  EXPECT_THAT(resp, ErrArg("ERR Number of keys can't be greater than number of args"));
+}
+
 TEST_F(DflyEngineTest, EvalResp) {
   auto resp = Run({"eval", "return 43", "0"});
   EXPECT_THAT(resp, IntArg(43));

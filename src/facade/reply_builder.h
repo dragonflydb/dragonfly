@@ -255,7 +255,6 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
   using SinkReplyBuilder::SendError;
   void SendError(std::string_view str, std::string_view type = {}) override;
   void SendProtocolError(std::string_view str) override;
-  void SendScriptErrorReply(std::string_view str);
 
   virtual void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT);
 

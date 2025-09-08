@@ -383,7 +383,7 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnError(string_view str) {
-    rb_->SendScriptErrorReply(str);
+    rb_->SendError(absl::StrCat("-", str));
   }
 
  private:
