@@ -96,6 +96,4 @@ void ConfigRegistry::ValidateCustomSetter(std::string_view name, WriteCb setter)
   }
 }
 
-ConfigRegistry config_registry;
-
 }  // namespace dfly

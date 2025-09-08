@@ -47,12 +47,6 @@ optional<SlotId> UniqueSlotChecker::GetUniqueSlotId() const {
   return slot_id_ > kMaxSlotNum ? optional<SlotId>() : slot_id_;
 }
 
-namespace detail {
-ClusterMode cluster_mode = ClusterMode::kUninitialized;
-bool cluster_shard_by_slot = false;
-
-}  // namespace detail
-
 using namespace detail;
 
 void InitializeCluster() {

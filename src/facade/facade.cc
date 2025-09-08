@@ -110,37 +110,6 @@ string ConfigSetFailed(string_view config_name) {
   return absl::StrCat("CONFIG SET failed (possibly related to argument '", config_name, "').");
 }
 
-const char kSyntaxErr[] = "syntax error";
-const char kWrongTypeErr[] = "-WRONGTYPE Operation against a key holding the wrong kind of value";
-const char kWrongJsonTypeErr[] = "-WRONGTYPE wrong JSON type of path value";
-const char kKeyNotFoundErr[] = "no such key";
-const char kInvalidIntErr[] = "value is not an integer or out of range";
-const char kInvalidFloatErr[] = "value is not a valid float";
-const char kUintErr[] = "value is out of range, must be positive";
-const char kIncrOverflow[] = "increment or decrement would overflow";
-const char kDbIndOutOfRangeErr[] = "DB index is out of range";
-const char kInvalidDbIndErr[] = "invalid DB index";
-const char kScriptNotFound[] = "-NOSCRIPT No matching script. Please use EVAL.";
-const char kAuthRejected[] = "-WRONGPASS invalid username-password pair or user is disabled.";
-const char kExpiryOutOfRange[] = "expiry is out of range";
-const char kIndexOutOfRange[] = "index out of range";
-const char kOutOfMemory[] = "Out of memory";
-const char kInvalidNumericResult[] = "result is not a number";
-const char kClusterNotConfigured[] = "Cluster is not yet configured";
-const char kLoadingErr[] = "-LOADING Dragonfly is loading the dataset in memory";
-const char kUndeclaredKeyErr[] = "script tried accessing undeclared key";
-const char kInvalidDumpValueErr[] = "DUMP payload version or checksum are wrong";
-const char kInvalidJsonPathErr[] = "invalid JSON path";
-const char kJsonParseError[] = "failed to parse JSON";
-const char kCrossSlotError[] = "-CROSSSLOT Keys in request don't hash to the same slot";
-
-const char kSyntaxErrType[] = "syntax_error";
-const char kScriptErrType[] = "script_error";
-const char kConfigErrType[] = "config_error";
-const char kSearchErrType[] = "search_error";
-const char kWrongTypeErrType[] = "wrong_type";
-const char kRestrictDenied[] = "restrict_denied";
-
 const char* RespExpr::TypeName(Type t) {
   switch (t) {
     case STRING:
@@ -181,8 +150,6 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
 uint32_t CommandId::OptCount(uint32_t mask) {
   return absl::popcount(mask);
 }
-
-__thread FacadeStats* tl_facade_stats = nullptr;
 
 static bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
   if (str.empty())

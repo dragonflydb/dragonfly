@@ -201,15 +201,15 @@ struct ErrorReply {
   std::optional<OpStatus> status{std::nullopt};
 };
 
-constexpr inline unsigned long long operator""_MB(unsigned long long x) {
+constexpr unsigned long long operator""_MB(unsigned long long x) {
   return 1024L * 1024L * x;
 }
 
-constexpr inline unsigned long long operator""_KB(unsigned long long x) {
+constexpr unsigned long long operator""_KB(unsigned long long x) {
   return 1024L * x;
 }
 
-extern __thread FacadeStats* tl_facade_stats;
+inline thread_local FacadeStats* tl_facade_stats = nullptr;
 
 void ResetStats();
 
