@@ -3788,41 +3788,55 @@ void ServerFamily::ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx) 
   bool opt_force = false;
   bool opt_abort = false;
 
-  for (size_t i = 0; i < args.size(); ++i) {
-    std::string opt = absl::AsciiStrToUpper(ArgS(args, i));
-    if (opt == "SAVE") {
-      if (saw_save_toggle) {
-        cmd_cntx.rb->SendError(kSyntaxErr);
-        return;
-      }
-      saw_save_toggle = true;
-      // Save during the standard shutdown sequence
-      save_on_shutdown_ = true;
-    } else if (opt == "NOSAVE") {
-      if (saw_save_toggle) {
-        cmd_cntx.rb->SendError(kSyntaxErr);
-        return;
-      }
-      saw_save_toggle = true;
-      save_on_shutdown_ = false;  // ensure no save at all
-    } else if (opt == "NOW") {
-      opt_now = true;
-    } else if (opt == "FORCE") {
-      opt_force = true;
-    } else if (opt == "ABORT") {
-      opt_abort = true;
-    } else if (opt == "SAFE") {
-      if (saw_save_toggle) {
-        cmd_cntx.rb->SendError(kSyntaxErr);
-        return;
-      }
-      saw_save_toggle = true;
-      // Same behavior as SAVE: save during shutdown sequence
-      save_on_shutdown_ = true;
-    } else {
-      cmd_cntx.rb->SendError(kSyntaxErr);
-      return;
+  CmdArgParser parser(args);
+  while (parser.HasNext()) {
+    enum class ShutOpt { SAVE, NOSAVE, NOW, FORCE, ABORT, SAFE };
+    ShutOpt opt =
+        parser.MapNext("SAVE", ShutOpt::SAVE, "NOSAVE", ShutOpt::NOSAVE, "NOW", ShutOpt::NOW,
+                       "FORCE", ShutOpt::FORCE, "ABORT", ShutOpt::ABORT, "SAFE", ShutOpt::SAFE);
+
+    switch (opt) {
+      case ShutOpt::SAVE:
+        if (saw_save_toggle) {
+          cmd_cntx.rb->SendError(kSyntaxErr);
+          return;
+        }
+        saw_save_toggle = true;
+        // Save during the standard shutdown sequence
+        save_on_shutdown_ = true;
+        break;
+      case ShutOpt::NOSAVE:
+        if (saw_save_toggle) {
+          cmd_cntx.rb->SendError(kSyntaxErr);
+          return;
+        }
+        saw_save_toggle = true;
+        // ensure no save at all
+        save_on_shutdown_ = false;
+        break;
+      case ShutOpt::NOW:
+        opt_now = true;
+        break;
+      case ShutOpt::FORCE:
+        opt_force = true;
+        break;
+      case ShutOpt::ABORT:
+        opt_abort = true;
+        break;
+      case ShutOpt::SAFE:
+        if (saw_save_toggle) {
+          cmd_cntx.rb->SendError(kSyntaxErr);
+          return;
+        }
+        saw_save_toggle = true;
+        // Same behavior as SAVE: save during shutdown sequence
+        save_on_shutdown_ = true;
+        break;
     }
+  }
+
+  if (auto perr = parser.TakeError(); perr) {
+    return cmd_cntx.rb->SendError(perr.MakeReply());
   }
 
   if (opt_abort) {
