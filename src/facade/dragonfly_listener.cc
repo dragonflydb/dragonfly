@@ -260,7 +260,13 @@ void Listener::PreShutdown() {
     return;
   }
 
-  // Otherwise: Iterate on all connections and allow them to finish their commands briefly.
+  // Otherwise: Iterate on all connections and allow them to finish their commands for
+  // a short period.
+  // Executed commands can be visible in snapshots or replicas, but if we close the client
+  // connections too fast we might not send the acknowledgment for those commands.
+  // This shouldn't take a long time: All clients should reject incoming commands
+  // at this stage since we're in SHUTDOWN mode.
+  // If a command is running for too long we give up and proceed.
   DispatchTracker tracker{{this}};
   tracker.TrackAll();
 
