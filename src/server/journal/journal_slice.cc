@@ -16,7 +16,7 @@
 #include "base/logging.h"
 #include "server/journal/serializer.h"
 
-ABSL_FLAG(uint32_t, shard_repl_backlog_len, 1 << 10,
+ABSL_FLAG(uint32_t, shard_repl_backlog_len, 8192,
           "The length of the circular replication log per shard");
 
 namespace dfly {
