@@ -383,7 +383,11 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnError(string_view str) {
-    rb_->SendError(absl::StrCat("-", str));
+    if (!str.empty() && str.front() != '-') {
+      rb_->SendError(absl::StrCat("-", str));
+    } else {
+      rb_->SendError(str);
+    }
   }
 
  private:
@@ -411,7 +415,11 @@ void InterpreterReplier::PostItem() {
 void InterpreterReplier::SendError(string_view str, std::string_view type) {
   DCHECK(array_len_.empty());
   DVLOG(1) << "Lua/df_call error " << str;
-  explr_->OnError(str);
+  if (!str.empty() && str.front() != '-') {
+    explr_->OnError(absl::StrCat("-ERR ", str));
+  } else {
+    explr_->OnError(str);
+  }
 }
 
 void InterpreterReplier::SendSimpleString(string_view str) {

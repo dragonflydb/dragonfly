@@ -154,7 +154,7 @@ TEST_F(DflyEngineTest, LuaErrors) {
   EXPECT_THAT(resp, ErrArg("some error"));
 
   resp = Run({"eval", "return redis.pcall('foo', 'bar')", "0"});
-  EXPECT_THAT(resp, ErrArg("ERR Unknown Redis command called from script"));
+  EXPECT_THAT(resp, ErrArg("ERR unknown command"));
 
   resp = Run({"eval", "return redis.pcall('incrby', 'foo', 'bar')", "1"});
   EXPECT_THAT(resp, ErrArg("ERR Number of keys can't be greater than number of args"));
