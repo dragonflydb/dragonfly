@@ -38,12 +38,6 @@ HllBufferPtr InitHllPtr() {
   return p;
 }
 
-uint64_t CheckedPFCount(const HllBufferPtr h) {
-  const int64_t count = pfcountSingle(h);
-  CHECK_GT(count, -1);
-  return static_cast<uint64_t>(count);
-}
-
 }  // namespace
 
 void CollectedPageStats::Merge(CollectedPageStats&& other, uint16_t shard_id) {
@@ -149,16 +143,17 @@ CollectedPageStats PageUsage::UniquePages::CollectedStats() const {
     usage[p] = hdr_value_at_percentile(page_usage_hist, p);
   }
 
-  return CollectedPageStats{.pages_scanned = CheckedPFCount(pages_scanned),
-                            .pages_marked_for_realloc = CheckedPFCount(pages_marked_for_realloc),
-                            .pages_full = CheckedPFCount(pages_full),
-                            .pages_reserved_for_malloc = CheckedPFCount(pages_reserved_for_malloc),
-                            .pages_with_heap_mismatch = CheckedPFCount(pages_with_heap_mismatch),
-                            .pages_above_threshold = CheckedPFCount(pages_above_threshold),
-                            .objects_skipped_not_required = objects_skipped_not_required,
-                            .objects_skipped_not_supported = objects_skipped_not_supported,
-                            .page_usage_hist = std::move(usage),
-                            .shard_wide_summary = {}};
+  return CollectedPageStats{
+      .pages_scanned = static_cast<uint64_t>(pfcountSingle(pages_scanned)),
+      .pages_marked_for_realloc = static_cast<uint64_t>(pfcountSingle(pages_marked_for_realloc)),
+      .pages_full = static_cast<uint64_t>(pfcountSingle(pages_full)),
+      .pages_reserved_for_malloc = static_cast<uint64_t>(pfcountSingle(pages_reserved_for_malloc)),
+      .pages_with_heap_mismatch = static_cast<uint64_t>(pfcountSingle(pages_with_heap_mismatch)),
+      .pages_above_threshold = static_cast<uint64_t>(pfcountSingle(pages_above_threshold)),
+      .objects_skipped_not_required = objects_skipped_not_required,
+      .objects_skipped_not_supported = objects_skipped_not_supported,
+      .page_usage_hist = std::move(usage),
+      .shard_wide_summary = {}};
 }
 
 PageUsage::PageUsage(CollectPageStats collect_stats, float threshold)
