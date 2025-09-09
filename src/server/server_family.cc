@@ -3781,24 +3781,60 @@ void ServerFamily::Latency(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void ServerFamily::ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (args.size() > 1) {
+  // Supported options (case-insensitive):
+  // SAVE | NOSAVE, NOW, FORCE, ABORT, SAFE (Valkey-specific, the same as SAVE in Dragonfly)
+  enum ShutBits : uint32_t {
+    SB_SAVE = 1u << 0,
+    SB_NOSAVE = 1u << 1,
+    SB_NOW = 1u << 2,
+    SB_FORCE = 1u << 3,
+    SB_ABORT = 1u << 4,
+  };
+
+  uint32_t sb = 0;
+
+  CmdArgParser parser(args);
+  while (parser.HasNext()) {
+    // Map SAFE to SAVE directly (fallthrough behavior)
+    ShutBits opt = parser.MapNext("SAVE", SB_SAVE, "NOSAVE", SB_NOSAVE, "NOW", SB_NOW, "FORCE",
+                                  SB_FORCE, "ABORT", SB_ABORT, "SAFE", SB_SAVE);
+    sb |= static_cast<uint32_t>(opt);
+  }
+
+  if (auto perr = parser.TakeError(); perr) {
+    return cmd_cntx.rb->SendError(perr.MakeReply());
+  }
+
+  // Conflicting toggles
+  if ((sb & SB_SAVE) && (sb & SB_NOSAVE)) {
     cmd_cntx.rb->SendError(kSyntaxErr);
     return;
   }
 
-  if (args.size() == 1) {
-    auto sub_cmd = ArgS(args, 0);
-    if (absl::EqualsIgnoreCase(sub_cmd, "SAVE")) {
-    } else if (absl::EqualsIgnoreCase(sub_cmd, "NOSAVE")) {
-      save_on_shutdown_ = false;
-    } else {
-      cmd_cntx.rb->SendError(kSyntaxErr);
-      return;
-    }
+  if (sb & SB_ABORT) {
+    // We currently do not support aborting an in-progress shutdown sequence.
+    cmd_cntx.rb->SendError("SHUTDOWN ABORT is not supported");
+    return;
   }
+
+  // Configure save behavior on shutdown according to options.
+  if (sb & SB_FORCE) {
+    // FORCE implies no snapshot on shutdown regardless of SAVE/SAFE
+    save_on_shutdown_ = false;
+  } else if (sb & SB_NOSAVE) {
+    save_on_shutdown_ = false;
+  } else if (sb & SB_SAVE) {
+    save_on_shutdown_ = true;
+  }
+
+  // Wire NOW/FORCE to a single fast-shutdown flag for listeners.
+  facade::g_shutdown_fast.store((sb & (SB_NOW | SB_FORCE)) != 0, std::memory_order_seq_cst);
 
   CHECK_NOTNULL(acceptor_)->Stop();
   cmd_cntx.rb->SendOk();
+
+  // Reset flag for any subsequent restarts (mainly for tests).
+  facade::g_shutdown_fast.store(false, std::memory_order_seq_cst);
 }
 
 void ServerFamily::Dfly(CmdArgList args, const CommandContext& cmd_cntx) {
