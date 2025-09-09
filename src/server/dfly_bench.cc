@@ -821,6 +821,7 @@ void Driver::ParseRESP() {
   RedisParser::Result result = RedisParser::OK;
   RespVec parse_args;
   constexpr string_view kMovedErrorKey = "MOVED"sv;
+  boost::system::error_code ec;
 
   do {
     result = parser_.Parse(io_buf_.InputBuffer(), &consumed, &parse_args);
@@ -840,7 +841,9 @@ void Driver::ParseRESP() {
           vector<string_view> addr_parts = absl::StrSplit(parts[1], ':');
           CHECK_EQ(2u, addr_parts.size());
 
-          auto host = ::boost::asio::ip::make_address(addr_parts[0]);
+          auto host = boost::asio::ip::make_address(addr_parts[0], ec);
+          CHECK(!ec) << "make_address failed with error: " << ec.message()
+                     << " while parsing address " << addr_parts[0];
 
           uint32_t port;
           CHECK(absl::SimpleAtoi(addr_parts[1], &port));
