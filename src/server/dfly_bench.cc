@@ -842,8 +842,8 @@ void Driver::ParseRESP() {
           CHECK_EQ(2u, addr_parts.size());
 
           auto host = boost::asio::ip::make_address(addr_parts[0], ec);
-          CHECK(!ec) << "make_address failed with error:" << ec.message() << "while parsing address"
-                     << addr_parts[0];
+          CHECK(!ec) << "make_address failed with error: " << ec.message()
+                     << " while parsing address " << addr_parts[0];
 
           uint32_t port;
           CHECK(absl::SimpleAtoi(addr_parts[1], &port));
