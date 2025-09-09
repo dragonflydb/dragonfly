@@ -303,6 +303,10 @@ TEST_F(ServerFamilyTest, ClientTrackingOnAndOff) {
   // case 3. turn off client tracking
   resp = Run({"CLIENT", "TRACKING", "OFF"});
   EXPECT_THAT(resp.GetString(), "OK");
+
+  resp = Run({"CLIENT", "CACHING", "YES"});
+  EXPECT_THAT(resp,
+              ErrArg("ERR CLIENT CACHING can only be called when the client is in tracking mode"));
 }
 
 TEST_F(ServerFamilyTest, ClientTrackingReadKey) {

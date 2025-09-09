@@ -476,6 +476,11 @@ void ClientCaching(CmdArgList args, SinkReplyBuilder* builder, Transaction* tx,
     return builder->SendError(kSyntaxErr);
   }
 
+  if (!cntx->conn_state.tracking_info_.IsTrackingOn()) {
+    return builder->SendError(
+        "ERR CLIENT CACHING can only be called when the client is in tracking mode");
+  }
+
   using Tracking = ConnectionState::ClientTracking;
   CmdArgParser parser{args};
   if (parser.Check("YES")) {
