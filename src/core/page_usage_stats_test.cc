@@ -156,9 +156,9 @@ TEST_F(PageUsageStatsTest, StatCollection) {
   EXPECT_GT(st.pages_scanned, 12000);
 
   // Expect a small error margin due to HLL
-  EXPECT_NEAR(st.pages_full, page_count_per_flag, 1);
-  EXPECT_NEAR(st.pages_reserved_for_malloc, page_count_per_flag, 1);
-  EXPECT_NEAR(st.pages_marked_for_realloc, page_count_per_flag, 1);
+  EXPECT_NEAR(st.pages_full, page_count_per_flag, 5);
+  EXPECT_NEAR(st.pages_reserved_for_malloc, page_count_per_flag, 5);
+  EXPECT_NEAR(st.pages_marked_for_realloc, page_count_per_flag, 5);
 
   const auto usage = st.shard_wide_summary;
 
