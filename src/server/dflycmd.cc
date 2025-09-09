@@ -540,6 +540,9 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
 
   // For non-cluster mode we shutdown
   if (detail::cluster_mode != detail::ClusterMode::kRealCluster) {
+    // we don't have flush() mechanism for ReplyBuilder, so we wait a bit to be sure that reply was
+    // delivered to the replica. See https://github.com/dragonflydb/dragonfly/issues/5782
+    ThisFiber::SleepFor(1s);
     VLOG(1) << "Takeover accepted, shutting down.";
     std::string save_arg = "NOSAVE";
     MutableSlice sargs(save_arg);
