@@ -256,7 +256,7 @@ bool Listener::IsMainInterface() const {
 
 void Listener::PreShutdown() {
   // If NOW/FORCE requested, expedite shutdown without waiting.
-  if (g_shutdown_fast.load(std::memory_order_relaxed)) {
+  if (g_shutdown_fast.load(std::memory_order_acquire)) {
     return;
   }
 
