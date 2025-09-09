@@ -3859,8 +3859,8 @@ void ServerFamily::ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx) 
   CHECK_NOTNULL(acceptor_)->Stop();
   cmd_cntx.rb->SendOk();
 
-  // Reset flag for any subsequent restarts (defensive; process exits shortly).
-  facade::g_shutdown_fast.store(false, std::memory_order_relaxed);
+  // Reset flag for any subsequent restarts (mainly for tests).
+  facade::g_shutdown_fast.store(false, std::memory_order_seq_cst);
 }
 
 void ServerFamily::Dfly(CmdArgList args, const CommandContext& cmd_cntx) {
