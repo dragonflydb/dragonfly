@@ -11,18 +11,15 @@
 
 #include "core/bloom.h"
 
+extern "C" {
+#include "redis/hyperloglog.h"
+}
+
 struct hdr_histogram;
 
 namespace dfly {
 
 enum class CollectPageStats : uint8_t { YES, NO };
-
-struct FilterWithSize {
-  FilterWithSize();
-  SBF sbf;
-  size_t size;
-  void Add(uintptr_t);
-};
 
 struct CollectedPageStats {
   double threshold{0.0};
@@ -72,12 +69,12 @@ class PageUsage {
   float threshold_;
 
   struct UniquePages {
-    FilterWithSize pages_scanned{};
-    FilterWithSize pages_marked_for_realloc{};
-    FilterWithSize pages_full{};
-    FilterWithSize pages_reserved_for_malloc{};
-    FilterWithSize pages_with_heap_mismatch{};
-    FilterWithSize pages_above_threshold{};
+    HllBufferPtr pages_scanned;
+    HllBufferPtr pages_marked_for_realloc;
+    HllBufferPtr pages_full;
+    HllBufferPtr pages_reserved_for_malloc;
+    HllBufferPtr pages_with_heap_mismatch;
+    HllBufferPtr pages_above_threshold;
     hdr_histogram* page_usage_hist{};
 
     uint64_t objects_skipped_not_required{0};

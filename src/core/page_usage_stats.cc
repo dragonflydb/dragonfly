@@ -30,23 +30,23 @@ using absl::StripTrailingAsciiWhitespace;
 
 namespace {
 constexpr auto kUsageHistPoints = std::array{50, 90, 99};
-constexpr auto kInitialSBFCap = 1000;
-constexpr auto kFProb = 0.001;
-constexpr auto kGrowthFactor = 2;
 constexpr auto kHistSignificantFigures = 3;
 
+HllBufferPtr InitHllPtr() {
+  HllBufferPtr p;
+  p.size = getDenseHllSize();
+  p.hll = new uint8_t[p.size];
+  CHECK_EQ(0, createDenseHll(p));
+  return p;
+}
+
+uint64_t CheckedPFCount(const HllBufferPtr h) {
+  const int64_t count = pfcountSingle(h);
+  CHECK_GT(count, -1);
+  return static_cast<uint64_t>(count);
+}
+
 }  // namespace
-
-FilterWithSize::FilterWithSize()
-    : sbf{SBF{kInitialSBFCap, kFProb, kGrowthFactor, PMR_NS::get_default_resource()}}, size{0} {
-}
-
-void FilterWithSize::Add(uintptr_t address) {
-  const auto s = std::to_string(address);
-  if (sbf.Add(s)) {
-    size += 1;
-  }
-}
 
 void CollectedPageStats::Merge(CollectedPageStats&& other, uint16_t shard_id) {
   this->pages_scanned += other.pages_scanned;
@@ -98,7 +98,13 @@ std::string CollectedPageStats::ToString() const {
   return response;
 }
 
-PageUsage::UniquePages::UniquePages() {
+PageUsage::UniquePages::UniquePages()
+    : pages_scanned{InitHllPtr()},
+      pages_marked_for_realloc{InitHllPtr()},
+      pages_full{InitHllPtr()},
+      pages_reserved_for_malloc{InitHllPtr()},
+      pages_with_heap_mismatch{InitHllPtr()},
+      pages_above_threshold{InitHllPtr()} {
   hdr_histogram* h = nullptr;
   const auto init_result = hdr_init(1, 100, kHistSignificantFigures, &h);
   CHECK_EQ(0, init_result) << "failed to initialize histogram";
@@ -106,26 +112,35 @@ PageUsage::UniquePages::UniquePages() {
 }
 
 PageUsage::UniquePages::~UniquePages() {
+  delete[] pages_scanned.hll;
+  delete[] pages_marked_for_realloc.hll;
+  delete[] pages_full.hll;
+  delete[] pages_reserved_for_malloc.hll;
+  delete[] pages_with_heap_mismatch.hll;
+  delete[] pages_above_threshold.hll;
   hdr_close(page_usage_hist);
 }
 
 void PageUsage::UniquePages::AddStat(mi_page_usage_stats_t stat) {
   const auto address = stat.page_address;
-  pages_scanned.Add(address);
+  const std::string s = std::to_string(address);
+  const auto data = reinterpret_cast<const unsigned char*>(s.data());
+  const size_t size = s.size();
+  pfadd_dense(pages_scanned, data, size);
   if (stat.flags == MI_DFLY_PAGE_BELOW_THRESHOLD) {
-    pages_marked_for_realloc.Add(address);
+    pfadd_dense(pages_marked_for_realloc, data, size);
   } else {
     if (stat.flags & MI_DFLY_PAGE_FULL) {
-      pages_full.Add(address);
+      pfadd_dense(pages_full, data, size);
     } else if (stat.flags & MI_DFLY_HEAP_MISMATCH) {
-      pages_with_heap_mismatch.Add(address);
+      pfadd_dense(pages_with_heap_mismatch, data, size);
     } else if (stat.flags & MI_DFLY_PAGE_USED_FOR_MALLOC) {
-      pages_reserved_for_malloc.Add(address);
+      pfadd_dense(pages_reserved_for_malloc, data, size);
     } else {
       // We record usage only for pages which have usage above the given threshold but which are not
       // full. This allows tuning the threshold for future commands. This also excludes full pages,
       // so the only pages here have: threshold < usage% < 100
-      pages_above_threshold.Add(address);
+      pfadd_dense(pages_above_threshold, data, size);
       const double perc = static_cast<double>(stat.used) / static_cast<double>(stat.capacity);
       hdr_record_value(page_usage_hist, perc * 100);
     }
@@ -137,12 +152,13 @@ CollectedPageStats PageUsage::UniquePages::CollectedStats() const {
   for (const auto p : kUsageHistPoints) {
     usage[p] = hdr_value_at_percentile(page_usage_hist, p);
   }
-  return CollectedPageStats{.pages_scanned = pages_scanned.size,
-                            .pages_marked_for_realloc = pages_marked_for_realloc.size,
-                            .pages_full = pages_full.size,
-                            .pages_reserved_for_malloc = pages_reserved_for_malloc.size,
-                            .pages_with_heap_mismatch = pages_with_heap_mismatch.size,
-                            .pages_above_threshold = pages_above_threshold.size,
+
+  return CollectedPageStats{.pages_scanned = CheckedPFCount(pages_scanned),
+                            .pages_marked_for_realloc = CheckedPFCount(pages_marked_for_realloc),
+                            .pages_full = CheckedPFCount(pages_full),
+                            .pages_reserved_for_malloc = CheckedPFCount(pages_reserved_for_malloc),
+                            .pages_with_heap_mismatch = CheckedPFCount(pages_with_heap_mismatch),
+                            .pages_above_threshold = CheckedPFCount(pages_above_threshold),
                             .objects_skipped_not_required = objects_skipped_not_required,
                             .objects_skipped_not_supported = objects_skipped_not_supported,
                             .page_usage_hist = std::move(usage),
