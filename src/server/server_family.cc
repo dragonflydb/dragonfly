@@ -3783,78 +3783,52 @@ void ServerFamily::Latency(CmdArgList args, const CommandContext& cmd_cntx) {
 void ServerFamily::ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx) {
   // Supported options (case-insensitive):
   // SAVE | NOSAVE, NOW, FORCE, ABORT, SAFE (Valkey-specific, the same as SAVE in Dragonfly)
-  bool saw_save_toggle = false;  // whether SAVE/NOSAVE/SAFE appeared
-  bool opt_now = false;
-  bool opt_force = false;
-  bool opt_abort = false;
+  enum ShutBits : uint32_t {
+    SB_SAVE = 1u << 0,
+    SB_NOSAVE = 1u << 1,
+    SB_NOW = 1u << 2,
+    SB_FORCE = 1u << 3,
+    SB_ABORT = 1u << 4,
+  };
+
+  uint32_t sb = 0;
 
   CmdArgParser parser(args);
   while (parser.HasNext()) {
-    enum class ShutOpt { SAVE, NOSAVE, NOW, FORCE, ABORT, SAFE };
-    ShutOpt opt =
-        parser.MapNext("SAVE", ShutOpt::SAVE, "NOSAVE", ShutOpt::NOSAVE, "NOW", ShutOpt::NOW,
-                       "FORCE", ShutOpt::FORCE, "ABORT", ShutOpt::ABORT, "SAFE", ShutOpt::SAFE);
-
-    switch (opt) {
-      case ShutOpt::SAVE:
-        if (saw_save_toggle) {
-          cmd_cntx.rb->SendError(kSyntaxErr);
-          return;
-        }
-        saw_save_toggle = true;
-        // Save during the standard shutdown sequence
-        save_on_shutdown_ = true;
-        break;
-      case ShutOpt::NOSAVE:
-        if (saw_save_toggle) {
-          cmd_cntx.rb->SendError(kSyntaxErr);
-          return;
-        }
-        saw_save_toggle = true;
-        // ensure no save at all
-        save_on_shutdown_ = false;
-        break;
-      case ShutOpt::NOW:
-        opt_now = true;
-        break;
-      case ShutOpt::FORCE:
-        opt_force = true;
-        break;
-      case ShutOpt::ABORT:
-        opt_abort = true;
-        break;
-      case ShutOpt::SAFE:
-        if (saw_save_toggle) {
-          cmd_cntx.rb->SendError(kSyntaxErr);
-          return;
-        }
-        saw_save_toggle = true;
-        // Same behavior as SAVE: save during shutdown sequence
-        save_on_shutdown_ = true;
-        break;
-    }
+    // Map SAFE to SAVE directly (fallthrough behavior)
+    ShutBits opt = parser.MapNext("SAVE", SB_SAVE, "NOSAVE", SB_NOSAVE, "NOW", SB_NOW, "FORCE",
+                                  SB_FORCE, "ABORT", SB_ABORT, "SAFE", SB_SAVE);
+    sb |= static_cast<uint32_t>(opt);
   }
 
   if (auto perr = parser.TakeError(); perr) {
     return cmd_cntx.rb->SendError(perr.MakeReply());
   }
 
-  if (opt_abort) {
+  // Conflicting toggles
+  if ((sb & SB_SAVE) && (sb & SB_NOSAVE)) {
+    cmd_cntx.rb->SendError(kSyntaxErr);
+    return;
+  }
+
+  if (sb & SB_ABORT) {
     // We currently do not support aborting an in-progress shutdown sequence.
     cmd_cntx.rb->SendError("SHUTDOWN ABORT is not supported");
     return;
   }
 
-  // No immediate save here: SAVE/SAFE/NOSAVE only configure save_on_shutdown_
-  // and the snapshot is handled in ServerFamily::Shutdown.
-
-  // FORCE implies no snapshot on shutdown regardless of SAVE/SAFE
-  if (opt_force) {
+  // Configure save behavior on shutdown according to options.
+  if (sb & SB_FORCE) {
+    // FORCE implies no snapshot on shutdown regardless of SAVE/SAFE
     save_on_shutdown_ = false;
+  } else if (sb & SB_NOSAVE) {
+    save_on_shutdown_ = false;
+  } else if (sb & SB_SAVE) {
+    save_on_shutdown_ = true;
   }
 
   // Wire NOW/FORCE to a single fast-shutdown flag for listeners.
-  facade::g_shutdown_fast.store(opt_now || opt_force, std::memory_order_seq_cst);
+  facade::g_shutdown_fast.store((sb & (SB_NOW | SB_FORCE)) != 0, std::memory_order_seq_cst);
 
   CHECK_NOTNULL(acceptor_)->Stop();
   cmd_cntx.rb->SendOk();
