@@ -107,7 +107,7 @@ class ProtocolClient {
   }
 
   auto* Proactor() const {
-    return sock_->proactor();
+    return socket_thread_;
   }
 
   util::FiberSocketBase* Sock() const {
@@ -142,6 +142,7 @@ class ProtocolClient {
 #else
   void* ssl_ctx_{nullptr};
 #endif
+  util::fb2::ProactorBase* socket_thread_;
 };
 
 }  // namespace dfly

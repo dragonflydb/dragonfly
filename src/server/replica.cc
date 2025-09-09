@@ -167,9 +167,13 @@ std::optional<Replica::LastMasterSyncData> Replica::Stop() {
   sync_fb_.JoinIfNeeded();
   DVLOG(1) << "MainReplicationFb stopped " << this;
   acks_fb_.JoinIfNeeded();
-  for (auto& flow : shard_flows_) {
-    flow.reset();
-  }
+
+  proactor_->Await([this]() {
+    for (auto& flow : shard_flows_) {
+      flow.reset();
+    }
+    shard_flows_.clear();
+  });
 
   if (last_journal_LSNs_.has_value()) {
     return LastMasterSyncData{master_context_.master_repl_id, last_journal_LSNs_.value()};
@@ -505,14 +509,23 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
   // Initialize MultiShardExecution.
   multi_shard_exe_.reset(new MultiShardExecution());
 
-  // Initialize shard flows.
-  shard_flows_.resize(master_context_.num_flows);
-  DCHECK(!shard_flows_.empty());
-  for (unsigned i = 0; i < shard_flows_.size(); ++i) {
-    shard_flows_[i].reset(
-        new DflyShardReplica(server(), master_context_, i, &service_, multi_shard_exe_));
-  }
-  thread_flow_map_ = Partition(shard_flows_.size());
+  // Initialize shard flows. The update to the shard_flows_ should be done by this thread.
+  // Otherwise, there is a race condition between GetSummary() and the shard_flows_[i].reset()
+  // below.
+  decltype(shard_flows_) shard_flows_copy;
+  shard_flows_copy.resize(master_context_.num_flows);
+  DCHECK(!shard_flows_copy.empty());
+  thread_flow_map_ = Partition(shard_flows_copy.size());
+  const size_t pool_sz = shard_set->pool()->size();
+
+  shard_set->pool()->AwaitFiberOnAll([pool_sz, this, &shard_flows_copy](auto index, auto* ctx) {
+    for (unsigned i = index; i < shard_flows_copy.size(); i += pool_sz) {
+      shard_flows_copy[i].reset(
+          new DflyShardReplica(server(), master_context_, i, &service_, multi_shard_exe_));
+    }
+  });
+  // now update shard_flows on proactor thread
+  shard_flows_ = std::move(shard_flows_copy);
 
   // Blocked on until all flows got full sync cut.
   BlockingCounter sync_block{unsigned(shard_flows_.size())};
@@ -542,13 +555,6 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     JoinDflyFlows();
     if (sync_type == "full") {
       service_.RemoveLoadingState();
-    } else if (service_.IsLoadingExclusively()) {
-      // We need this check. We originally set the state unconditionally to LOADING
-      // when we call ReplicaOf command. If for some reason we fail to start full sync below
-      // or cancel the context, we still need to switch to ACTIVE state.
-      // TODO(kostasrim) we can remove this once my proposed changes for replication move forward
-      // as the state transitions for ReplicaOf command will be much clearer.
-      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     }
     state_mask_ &= ~R_SYNCING;
     last_journal_LSNs_.reset();
@@ -1178,6 +1184,7 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
 
 auto Replica::GetSummary() const -> Summary {
   auto f = [this]() {
+    DCHECK(Proactor() == ProactorBase::me());
     auto last_io_time = LastIoTime();
 
     // Note: we access LastIoTime from foreigh thread in unsafe manner. However, specifically here
@@ -1214,25 +1221,14 @@ auto Replica::GetSummary() const -> Summary {
     return res;
   };
 
-  if (Sock())
-    return Proactor()->AwaitBrief(f);
-
-  /**
-   * when this branch happens: there is a very short grace period
-   * where Sock() is not initialized, yet the server can
-   * receive ROLE/INFO commands. That period happens when launching
-   * an instance with '--replicaof' and then immediately
-   * sending a command.
-   *
-   * In that instance, we have to run f() on the current fiber.
-   */
-  return f();
+  return Proactor()->AwaitBrief(f);
 }
 
 std::vector<uint64_t> Replica::GetReplicaOffset() const {
   std::vector<uint64_t> flow_rec_count;
   flow_rec_count.resize(shard_flows_.size());
   for (const auto& flow : shard_flows_) {
+    DCHECK(flow.get());
     uint32_t flow_id = flow->FlowId();
     uint64_t rec_count = flow->JournalExecutedCount();
     DCHECK_LT(flow_id, shard_flows_.size());

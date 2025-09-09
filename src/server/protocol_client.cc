@@ -109,23 +109,22 @@ ProtocolClient::ProtocolClient(string host, uint16_t port) {
 #ifdef DFLY_USE_SSL
   MaybeInitSslCtx();
 #endif
+
+  // We initialize the proactor thread here such that it never races with Sock().
+  // ProtocolClient is never migrated to a different thread, so this is safe.
+  socket_thread_ = ProactorBase::me();
 }
+
 ProtocolClient::ProtocolClient(ServerContext context) : server_context_(std::move(context)) {
 #ifdef DFLY_USE_SSL
   MaybeInitSslCtx();
 #endif
+  socket_thread_ = ProactorBase::me();
 }
 
 ProtocolClient::~ProtocolClient() {
   exec_st_.JoinErrorHandler();
 
-  // FIXME: We should close the socket explictly outside of the destructor. This currently
-  // breaks test_cancel_replication_immediately.
-  if (sock_) {
-    std::error_code ec;
-    sock_->proactor()->Await([this, &ec]() { ec = sock_->Close(); });
-    LOG_IF(ERROR, ec) << "Error closing socket " << ec;
-  }
 #ifdef DFLY_USE_SSL
   if (ssl_ctx_) {
     SSL_CTX_free(ssl_ctx_);
@@ -162,6 +161,7 @@ error_code ProtocolClient::ResolveHostDns() {
 error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms,
                                           ExecutionState* cntx) {
   ProactorBase* mythread = ProactorBase::me();
+  DCHECK(mythread == socket_thread_);
   CHECK(mythread);
   {
     unique_lock lk(sock_mu_);
@@ -235,6 +235,9 @@ void ProtocolClient::CloseSocket() {
         auto ec = sock_->Shutdown(SHUT_RDWR);
         LOG_IF(ERROR, ec) << "Could not shutdown socket " << ec;
       }
+      error_code ec = sock_->Close();  // Quietly close.
+
+      LOG_IF(WARNING, ec) << "Error closing socket " << ec << "/" << ec.message();
     });
   }
 }

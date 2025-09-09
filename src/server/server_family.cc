@@ -242,6 +242,11 @@ using detail::SaveStagesController;
 using http::StringResponse;
 using strings::HumanReadableNumBytes;
 
+// Initialized by REPLICAOF
+thread_local std::shared_ptr<Replica> tl_replica = nullptr;
+// Initialized by ADDREPLICAOF
+thread_local std::vector<std::shared_ptr<Replica>> tl_cluster_replicas;
+
 namespace {
 
 // TODO these should be configurable as command line flag and at runtime via config set
@@ -1230,6 +1235,7 @@ void ServerFamily::Shutdown() {
       replica_->Stop();
     }
     StopAllClusterReplicas();
+    UpdateReplicationThreadLocals(nullptr);
 
     dfly_cmd_->Shutdown();
     DebugCmd::Shutdown();
@@ -1980,11 +1986,11 @@ vector<facade::Listener*> ServerFamily::GetNonPriviligedListeners() const {
 }
 
 optional<Replica::Summary> ServerFamily::GetReplicaSummary() const {
-  util::fb2::LockGuard lk(replicaof_mu_);
-  if (replica_ == nullptr) {
+  if (tl_replica == nullptr) {
     return nullopt;
   } else {
-    return replica_->GetSummary();
+    auto replica = tl_replica;
+    return replica->GetSummary();
   }
 }
 
@@ -3105,15 +3111,12 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 
   auto add_repl_info = [&] {
     bool is_master = true;
-    // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
-    // ensuring eventual consistency of is_master. When determining if the server is a replica and
-    // accessing the replica_ object, we must lock replicaof_mu_. Using is_master alone is
-    // insufficient in this scenario.
-    // Please note that we we do not use Metrics object here.
-    {
-      fb2::LockGuard lk(replicaof_mu_);
-      is_master = !replica_;
-    }
+
+    // Deep copy because tl_replica might be overwritten inbetween
+    auto replica = tl_replica;
+    auto cluster_replicas = tl_cluster_replicas;
+    is_master = !replica;
+
     if (is_master) {
       vector<ReplicaRoleInfo> replicas_info = dfly_cmd_->GetReplicasRoleInfo();
       append("role", "master");
@@ -3147,12 +3150,11 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
         append("psync_attempts", rinfo.psync_attempts);
         append("psync_successes", rinfo.psync_successes);
       };
-      fb2::LockGuard lk(replicaof_mu_);
 
-      replication_info_cb(replica_->GetSummary());
+      replication_info_cb(replica->GetSummary());
 
       // Special case, when multiple masters replicate to a single replica.
-      for (const auto& replica : cluster_replicas_) {
+      for (const auto& replica : cluster_replicas) {
         replication_info_cb(replica->GetSummary());
       }
     }
@@ -3434,7 +3436,7 @@ void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx)
   }
   LOG(INFO) << "Add Replica " << *replicaof_args;
 
-  auto add_replica = make_unique<Replica>(replicaof_args->host, replicaof_args->port, &service_,
+  auto add_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
                                           master_replid(), replicaof_args->slot_range);
   GenericError ec = add_replica->Start();
   if (ec) {
@@ -3443,77 +3445,75 @@ void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx)
   }
   add_replica->StartMainReplicationFiber(nullopt);
   cluster_replicas_.push_back(std::move(add_replica));
+
+  service_.proactor_pool().AwaitFiberOnAll(
+      [this](auto index, auto* cntx)
+          ABSL_NO_THREAD_SAFETY_ANALYSIS { tl_cluster_replicas = cluster_replicas_; });
+
   cmd_cntx.rb->SendOk();
+}
+
+void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
+  util::fb2::LockGuard lk(replicaof_mu_);
+  ServerState* ss = ServerState::tlocal();
+
+  if (!ss->is_master) {
+    CHECK(replica_);
+    // flip flag before clearing replica_
+    SetMasterFlagOnAllThreads(true);
+    // TODO we should not allow partial sync after NO-ONE. Only after Takeover.
+    last_master_data_ = replica_->Stop();
+    replica_.reset();
+    StopAllClusterReplicas();
+    UpdateReplicationThreadLocals(nullptr);
+  }
+
+  // May not switch to ACTIVE if the process is, for example, shutting down at the same time.
+  service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+
+  return builder->SendOk();
+}
+
+bool ServerFamily::IsDragonflyLoadingAtomic() {
+  util::fb2::LockGuard lk(replicaof_mu_);
+  ServerState* ss = ServerState::tlocal();
+
+  return ss->is_master && ss->gstate() == GlobalState::LOADING;
 }
 
 void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                                      ActionOnConnectionFail on_err) {
-  std::shared_ptr<Replica> new_replica;
   std::optional<Replica::LastMasterSyncData> last_master_data;
-  {
-    util::fb2::LockGuard lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
 
-    // We should not execute replica of command while loading from snapshot.
-    ServerState* ss = ServerState::tlocal();
-    if (ss->is_master && ss->gstate() == GlobalState::LOADING) {
-      builder->SendError(kLoadingErr);
-      return;
-    }
+  auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args, builder);
+  if (!replicaof_args.has_value()) {
+    return;
+  }
 
-    auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args, builder);
-    if (!replicaof_args.has_value()) {
-      return;
-    }
+  LOG(INFO) << "Initiate replication with: " << *replicaof_args;
+  // This is a "weak" check. For example, if the node is already a replica,
+  // it could be the case that one of the flows disconnects. The MainReplicationFiber
+  // will then loop and if it can't partial sync it will enter LOADING state because of
+  // full sync. Note that the fiber is not aware of the replicaof_mu_ so even
+  // if that mutex is locked below before any state check we can't really enforce
+  // that the old replication fiber won't try to full sync and update the state to LOADING.
+  // What is more here is that we always call `replica->Stop()`. So even if we end up in the
+  // scenario described, the semantics are well defined. First, cancel the old replica and
+  // move on with the new one. Cancelation will be slower and ReplicaOf() will
+  // induce higher latency -- but that's ok because it's an highly improbable flow with
+  // well defined semantics.
+  if (IsDragonflyLoadingAtomic()) {
+    builder->SendError(kLoadingErr);
+    return;
+  }
 
-    LOG(INFO) << "Replicating " << *replicaof_args;
+  // replicaof no one
+  if (replicaof_args->IsReplicaOfNoOne()) {
+    return ReplicaOfNoOne(builder);
+  }
 
-    // If NO ONE was supplied, just stop the current replica (if it exists)
-    if (replicaof_args->IsReplicaOfNoOne()) {
-      if (!ss->is_master) {
-        CHECK(replica_);
-
-        SetMasterFlagOnAllThreads(true);  // Flip flag before clearing replica
-        last_master_data_ = replica_->Stop();
-        replica_.reset();
-
-        StopAllClusterReplicas();
-      }
-
-      // May not switch to ACTIVE if the process is, for example, shutting down at the same time.
-      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-
-      return builder->SendOk();
-    }
-
-    // If any replication is in progress, stop it, cancellation should kick in immediately
-
-    if (replica_)
-      last_master_data = replica_->Stop();
-    StopAllClusterReplicas();
-
-    const GlobalState gstate = ServerState::tlocal()->gstate();
-    if (gstate == GlobalState::TAKEN_OVER) {
-      service_.SwitchState(GlobalState::TAKEN_OVER, GlobalState::LOADING);
-    } else if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-               new_state != GlobalState::LOADING) {
-      LOG(WARNING) << new_state << " in progress, ignored";
-      builder->SendError("Invalid state");
-      return;
-    }
-
-    // Create a new replica and assign it
-    new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
-                                       master_replid(), replicaof_args->slot_range);
-
-    replica_ = new_replica;
-
-    // TODO: disconnect pending blocked clients (pubsub, blocking commands)
-    SetMasterFlagOnAllThreads(false);  // Flip flag after assiging replica
-
-  }  // release the lock, lk.unlock()
-  // We proceed connecting below without the lock to allow interrupting the replica immediately.
-  // From this point and onward, it should be highly responsive.
-
+  auto new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
+                                          master_replid(), replicaof_args->slot_range);
   GenericError ec{};
   switch (on_err) {
     case ActionOnConnectionFail::kReturnOnError:
@@ -3524,30 +3524,33 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
       break;
   };
 
-  // If the replication attempt failed, clean up global state. The replica should have stopped
-  // internally.
-  util::fb2::LockGuard lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
+  if (ec || new_replica->IsContextCancelled()) {
+    return builder->SendError(ec ? ec.Format() : "replication cancelled");
+  }
 
-  // If there was an error above during Start we must not start the main replication fiber.
-  // However, it could be the case that Start() above connected succefully and by the time
-  // we acquire the lock, the context got cancelled because another ReplicaOf command
-  // executed and acquired the replicaof_mu_ before us.
-  const bool cancelled = new_replica->IsContextCancelled();
-  if (ec || cancelled) {
-    if (replica_ == new_replica) {
-      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-      SetMasterFlagOnAllThreads(true);
-      replica_.reset();
-    }
-    builder->SendError(ec ? ec.Format() : "replication cancelled");
-    return;
-  }
-  // Successfully connected now we flush
-  // If we are called by "Replicate", tx will be null but we do not need
-  // to flush anything.
+  // Critical section.
+  // 1. Stop the old replica_ if it exists
+  // 2. Update all the pointers to the new replica and update master flag
+  // 3. Start the main replication fiber
+  // 4. Send OK
+  util::fb2::LockGuard lk(replicaof_mu_);
+  if (replica_)
+    last_master_data = replica_->Stop();
+
+  StopAllClusterReplicas();
+
+  if (ServerState::tlocal()->gstate() == GlobalState::TAKEN_OVER)
+    service_.SwitchState(GlobalState::TAKEN_OVER, GlobalState::LOADING);
+
+  // Update thread locals. That way INFO never blocks
+  replica_ = new_replica;
+  UpdateReplicationThreadLocals(new_replica);
+  SetMasterFlagOnAllThreads(false);
+
   if (on_err == ActionOnConnectionFail::kReturnOnError) {
-    new_replica->StartMainReplicationFiber(last_master_data);
+    replica_->StartMainReplicationFiber(last_master_data);
   }
+
   builder->SendOk();
 }
 
@@ -3625,6 +3628,9 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   SetMasterFlagOnAllThreads(true);
   last_master_data_ = replica_->Stop();
   replica_.reset();
+
+  UpdateReplicationThreadLocals(nullptr);
+
   return builder->SendOk();
 }
 
@@ -3724,12 +3730,11 @@ void ServerFamily::ReplConf(CmdArgList args, const CommandContext& cmd_cntx) {
 
 void ServerFamily::Role(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  util::fb2::LockGuard lk(replicaof_mu_);
   // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
   // ensuring eventual consistency of is_master. When determining if the server is a replica and
   // accessing the replica_ object, we must lock replicaof_mu_. Using is_master alone is
   // insufficient in this scenario.
-  if (!replica_) {
+  if (!tl_replica) {
     rb->StartArray(2);
     rb->SendBulkString("master");
     auto vec = dfly_cmd_->GetReplicasRoleInfo();
@@ -3742,7 +3747,11 @@ void ServerFamily::Role(CmdArgList args, const CommandContext& cmd_cntx) {
     }
 
   } else {
-    rb->StartArray(4 + cluster_replicas_.size() * 3);
+    // Deep copy because tl_replica might be overwritten inbetween
+    auto replica = tl_replica;
+    auto cluster_replicas = tl_cluster_replicas;
+
+    rb->StartArray(4 + cluster_replicas.size() * 3);
     rb->SendBulkString(GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
 
     auto send_replica_info = [rb](Replica::Summary rinfo) {
@@ -3759,9 +3768,9 @@ void ServerFamily::Role(CmdArgList args, const CommandContext& cmd_cntx) {
         rb->SendBulkString("connecting");
       }
     };
-    send_replica_info(replica_->GetSummary());
-    for (const auto& replica : cluster_replicas_) {
-      send_replica_info(replica->GetSummary());
+    send_replica_info(replica->GetSummary());
+    for (const auto& repl : cluster_replicas) {
+      send_replica_info(repl->GetSummary());
     }
   }
 }
@@ -3951,6 +3960,13 @@ void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,
   } else {
     builder->SendError("Failed to pause all running clients");
   }
+}
+
+void ServerFamily::UpdateReplicationThreadLocals(std::shared_ptr<Replica> repl) {
+  service_.proactor_pool().AwaitFiberOnAll([repl](auto index, auto* context) {
+    tl_replica = repl;
+    tl_cluster_replicas.clear();
+  });
 }
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))
