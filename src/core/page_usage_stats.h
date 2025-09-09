@@ -9,8 +9,6 @@
 #define MI_BUILD_RELEASE 1
 #include <mimalloc/types.h>
 
-#include "core/bloom.h"
-
 extern "C" {
 #include "redis/hyperloglog.h"
 }

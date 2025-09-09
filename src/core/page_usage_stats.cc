@@ -12,8 +12,6 @@
 
 #include <string>
 
-#include "core/bloom.h"
-
 extern "C" {
 #include <unistd.h>
 
@@ -122,10 +120,8 @@ PageUsage::UniquePages::~UniquePages() {
 }
 
 void PageUsage::UniquePages::AddStat(mi_page_usage_stats_t stat) {
-  const auto address = stat.page_address;
-  const std::string s = std::to_string(address);
-  const auto data = reinterpret_cast<const unsigned char*>(s.data());
-  const size_t size = s.size();
+  const auto data = reinterpret_cast<const unsigned char*>(&stat.page_address);
+  constexpr size_t size = sizeof(stat.page_address);
   pfadd_dense(pages_scanned, data, size);
   if (stat.flags == MI_DFLY_PAGE_BELOW_THRESHOLD) {
     pfadd_dense(pages_marked_for_realloc, data, size);
