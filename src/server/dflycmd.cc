@@ -324,13 +324,16 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
       // the commands that came after the takeover that are missing from the new replica.
       // Also, block partial sync if we try to sync from the future.
       auto* jrnl = sf_->journal();
-      if (jrnl->IsLSNInBuffer(1) || jrnl->GetLsn() == 1) {
+      const LSN curr = lsn_vec[flow_id];
+      if (jrnl->GetLsn() == curr || jrnl->IsLSNInBuffer(curr)) {
         sync_type = "PARTIAL";
-        flow.start_partial_sync_at = 1;
-        VLOG(1) << "Partial sync from same source master requested and is available. Current LSN is"
-                << sf_->journal()->GetLsn();
+        flow.start_partial_sync_at = curr;
+        VLOG(1)
+            << "Partial sync from same source master requested and is available. Current LSN is "
+            << sf_->journal()->GetLsn() << " starting partial sync at " << curr;
       } else {
-        VLOG(1) << "No partial sync due to stale LSN.";
+        VLOG(1) << "No partial sync due to stale LSN. Current LSN is " << sf_->journal()->GetLsn()
+                << ". Requested LSN " << curr;
       }
     } else if (seqid.has_value()) {
       if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
@@ -505,35 +508,14 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
   });
 
   atomic_bool catchup_success = true;
-  atomic_bool rest_catchup_success = true;
   if (*status == OpStatus::OK) {
-    // We need to loop or otherwise we can't guarantee that there is no data loss.
-    // *All* nodes must be in sync when the takeover completes such that when the replica
-    // reconciles with the new promoted master the only data that needs to be sent is the
-    // journaled commands that came after the takeover. On the contrary, If nodes were not
-    // in sync after the takeover, then any data that was not replicated from the old master
-    // is lost, because the new master does not contain their entries and a fallback to FULL
-    // SYNC is required (since the journal starts when the takeover completes, which implies
-    // data parity with the old master and an empty journal on the newly promoted master).
-    util::fb2::LockGuard mu_lk(mu_);
-    for (auto [id, repl_ptr] : replica_infos_) {
-      dfly::SharedLock lk{repl_ptr->shared_mu};
-
-      // Wait for ALL replicas to catch up. Otherwise we can't do partial sync from same source
-      // master. If the other replica misses a single journal entry, that entry will never exist in
-      // the replication buffer of the new master, so that replica won't be able to use partial sync
-      // to sync with the new master.
-      auto cb = [&, end_time](EngineShard* shard) {
-        if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
-          if (replica_ptr == repl_ptr) {
-            catchup_success.store(false);
-          } else {
-            rest_catchup_success.store(false);
-          }
-        }
-      };
-      shard_set->RunBlockingInParallel(std::move(cb));
-    }
+    dfly::SharedLock lk{replica_ptr->shared_mu};
+    auto cb = [replica_ptr = replica_ptr, end_time, &catchup_success](EngineShard* shard) {
+      if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
+        catchup_success.store(false);
+      }
+    };
+    shard_set->RunBlockingInParallel(std::move(cb));
   }
 
   VLOG(1) << "WaitReplicaFlowToCatchup done";
@@ -543,11 +525,27 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
     return rb->SendError("Takeover failed!");
   }
 
-  if (!rest_catchup_success) {
-    LOG(ERROR) << "Some of the replica nodes did not sync in time. Partial sync is disabled.";
-    rb->SendSimpleString("OK NO PARTIAL");
-  } else {
-    rb->SendOk();
+  rb->SendOk();
+
+  atomic_bool rest_catchup_success = true;
+  {
+    util::fb2::LockGuard mu_lk(mu_);
+    for (auto [id, repl_ptr] : replica_infos_) {
+      if (replica_ptr == repl_ptr) {
+        continue;
+      }
+
+      auto cb = [&, end_time](EngineShard* shard) {
+        if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
+          rest_catchup_success.store(false);
+        }
+      };
+      shard_set->RunBlockingInParallel(std::move(cb));
+    }
+
+    if (!rest_catchup_success) {
+      LOG(ERROR) << "Some of the replica nodes did not sync in time.";
+    }
   }
 
   if (save_flag) {

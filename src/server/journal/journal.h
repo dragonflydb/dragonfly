@@ -20,6 +20,9 @@ class Journal {
   Journal();
 
   void StartInThread();
+  // Starts the journal at specified LSN
+  // Also drops the (resets) the partial sync buffers
+  void StartInThreadAtLsn(LSN lsn);
 
   std::error_code Close();
 

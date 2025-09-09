@@ -5,6 +5,7 @@
 
 #include <absl/container/inlined_vector.h>
 
+#include <atomic>
 #include <boost/fiber/barrier.hpp>
 #include <queue>
 #include <variant>
@@ -74,9 +75,7 @@ class Replica : ProtocolClient {
 
   void Pause(bool pause);
 
-  enum TakeOverResult : uint8_t { OK, NO_PARTIAL, FAILED };
-
-  TakeOverResult TakeOver(std::string_view timeout, bool save_flag);
+  std::error_code TakeOver(std::string_view timeout, bool save_flag);
 
   bool IsContextCancelled() const {
     return !exec_st_.IsRunning();
@@ -146,6 +145,16 @@ class Replica : ProtocolClient {
 
   // Get the current replication phase based on state_mask_
   std::string GetCurrentPhase() const;
+
+  // Used *only* in TakeOver flow. There is small data race if
+  // thread_flow_map_ gets written by the MainReplicationFiber thread but
+  // the chances for that are extremely rare.
+  std::vector<unsigned> GetFlowMapAtIndex(size_t index) const {
+    DCHECK(index < thread_flow_map_.size());
+    return thread_flow_map_[index];
+  }
+
+  size_t GetRecCountExecutedPerShard(const std::vector<unsigned>& indexes) const;
 
  private:
   util::fb2::ProactorBase* proactor_ = nullptr;

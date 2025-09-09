@@ -28,6 +28,7 @@ extern "C" {
 #include "facade/socket_utils.h"
 #include "server/error.h"
 #include "server/journal/executor.h"
+#include "server/journal/journal.h"
 #include "server/journal/serializer.h"
 #include "server/main_service.h"
 #include "server/rdb_load.h"
@@ -193,33 +194,15 @@ void Replica::Pause(bool pause) {
   });
 }
 
-Replica::TakeOverResult Replica::TakeOver(std::string_view timeout, bool save_flag) {
+std::error_code Replica::TakeOver(std::string_view timeout, bool save_flag) {
   VLOG(1) << "Taking over";
 
-  TakeOverResult res;
+  std::error_code ec;
   auto takeOverCmd = absl::StrCat("TAKEOVER ", timeout, (save_flag ? " SAVE" : ""));
-  Proactor()->Await([this, &res, cmd = std::move(takeOverCmd)]() -> void {
-    string request = StrCat("DFLY ", cmd, " ", master_context_.dfly_session_id);
+  Proactor()->Await([this, &ec, cmd = std::move(takeOverCmd)] { ec = SendNextPhaseRequest(cmd); });
 
-    VLOG(1) << "Sending: " << request;
-    auto io_err = SendCommandAndReadResponse(request);
-    res = FAILED;
-    if (io_err) {
-      return;
-    }
-
-    if (CheckRespIsSimpleReply("OK NO PARTIAL")) {
-      res = NO_PARTIAL;
-      return;
-    }
-
-    if (CheckRespIsSimpleReply("OK")) {
-      res = OK;
-      return;
-    }
-  });
-
-  return res;
+  // If we successfully taken over, return and let server_family stop the replication.
+  return ec;
 }
 
 void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sync_data) {
@@ -836,8 +819,6 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(
   }
   if (last_master_data && master_context_.version >= DflyVersion::VER5 &&
       absl::GetFlag(FLAGS_replica_partial_sync)) {
-    // TODO(kostas) on the next version remove the lsn array -- it's not needed anymore but
-    // we leave it here for backwards compatibility.
     string lsn_str = absl::StrJoin(last_master_data.value().last_journal_LSNs, "-");
     absl::StrAppend(&cmd, " ", last_master_data.value().id, " ", lsn_str);
     VLOG(1) << "Sending last master sync flow " << last_master_data.value().id << " " << lsn_str;
@@ -972,6 +953,12 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
     } else if (tx_data->opcode == journal::Op::PING) {
       force_ping_ = true;
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
+      auto* journal = ServerState::tlocal()->journal();
+      if (journal) {
+        // We must register this entry to the journal to allow partial sync
+        // if journal is active.
+        journal->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
+      }
     } else {
       const bool is_successful = ExecuteTx(std::move(*tx_data), cntx);
       if (is_successful) {
@@ -1278,6 +1265,14 @@ std::string Replica::GetCurrentPhase() const {
     return "FULL_SYNC_IN_PROGRESS";
 
   return "STABLE_SYNC";
+}
+
+size_t Replica::GetRecCountExecutedPerShard(const std::vector<unsigned>& indexes) const {
+  size_t total_shard_lsn = 0;
+  for (auto index : indexes) {
+    total_shard_lsn += shard_flows_[index]->JournalExecutedCount() + 1;
+  }
+  return total_shard_lsn;
 }
 
 uint32_t DflyShardReplica::FlowId() const {
