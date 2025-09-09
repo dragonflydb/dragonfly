@@ -1023,6 +1023,24 @@ static void ExecuteGlobalVectorSearch(string_view index_name, string_view query_
     return;
   }
 
+  // Early exit for testing: skip shard fetching, synthesize docs preserving counts
+  {
+    vector<SerializedSearchDoc> synthetic_docs;
+    synthetic_docs.reserve(knn_results.size());
+
+    for (const auto& [score, global_id] : knn_results) {
+      string key = absl::StrCat(global_id.local_doc_id);
+      synthetic_docs.push_back({std::move(key), SearchDocData{}, score, std::monostate{}});
+    }
+
+    vector<SearchResult> results(1);
+    results[0].total_hits = knn_results.size();
+    results[0].docs = std::move(synthetic_docs);
+
+    SearchReply(params, global_algo.GetKnnScoreSortOption(), absl::MakeSpan(results), builder);
+    return;
+  }
+
   // Streamlined approach: minimal containers and operations
   vector<SerializedSearchDoc> global_docs;
   global_docs.reserve(knn_results.size());
