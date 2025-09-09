@@ -269,7 +269,7 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     return;
 
   string eof_token;
-  std::string_view sync_type{"FULL"};
+  std::string sync_type{"FULL"};
   {
     util::fb2::LockGuard lk{replica_ptr->shared_mu};
 
@@ -305,50 +305,13 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     // In this flow the master and the registered replica where synced from the same master.
     if (last_master_id && data && data->id == *last_master_id) {
       ++ServerState::tlocal()->stats.psync_requests_total;
-      std::vector<std::string_view> lsn_str_vec = absl::StrSplit(*last_master_lsn, '-');
-      if (lsn_str_vec.size() != data.value().last_journal_LSNs.size()) {
-        return rb->SendError(facade::kSyntaxErr);  // Unexpected flow. LSN vector of same master
-                                                   // should be the same size on all replicas.
+      auto seqid = ParseLsnVec(*last_master_lsn, data->last_journal_LSNs.size(), flow_id, rb);
+      if (!seqid) {
+        return;
       }
-      std::vector<LSN> lsn_vec;
-      lsn_vec.reserve(lsn_str_vec.size());
-      for (string_view lsn_str : lsn_str_vec) {
-        int64_t value;
-        if (!absl::SimpleAtoi(lsn_str, &value)) {
-          return rb->SendError(facade::kInvalidIntErr);
-        }
-        lsn_vec.push_back(value);
-      }
-
-      // We need to replay from start because after the takeover the nodes are in sync. It's
-      // the commands that came after the takeover that are missing from the new replica.
-      // Also, block partial sync if we try to sync from the future.
-      auto* jrnl = sf_->journal();
-      const LSN curr = lsn_vec[flow_id];
-      if (jrnl->GetLsn() == curr || jrnl->IsLSNInBuffer(curr)) {
-        sync_type = "PARTIAL";
-        flow.start_partial_sync_at = curr;
-        VLOG(1)
-            << "Partial sync from same source master requested and is available. Current LSN is "
-            << sf_->journal()->GetLsn() << " starting partial sync at " << curr;
-      } else {
-        VLOG(1) << "No partial sync due to stale LSN. Current LSN is " << sf_->journal()->GetLsn()
-                << ". Requested LSN " << curr;
-      }
+      MaybePartialSync(*seqid, sync_type, flow);
     } else if (seqid.has_value()) {
-      if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
-        auto& flow = replica_ptr->flows[flow_id];
-        flow.start_partial_sync_at = *seqid;
-        VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
-                << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
-        sync_type = "PARTIAL";
-      } else {
-        LOG(INFO) << "Partial sync requested from stale LSN=" << *seqid
-                  << " that the replication buffer doesn't contain this anymore (current_lsn="
-                  << sf_->journal()->GetLsn() << "). Will perform a full sync of the data.";
-        LOG(INFO) << "If this happens often you can control the replication buffer's size with the "
-                     "--shard_repl_backlog_len option";
-      }
+      MaybePartialSync(*seqid, sync_type, flow);
     }
   }
 
@@ -432,6 +395,48 @@ void DflyCmd::StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* r
 
   replica_ptr->replica_state = SyncState::STABLE_SYNC;
   return rb->SendOk();
+}
+
+void DflyCmd::MaybePartialSync(LSN lsn, std::string& sync_type, FlowInfo& flow) {
+  auto* jrnl = sf_->journal();
+
+  if (jrnl->GetLsn() == lsn || jrnl->IsLSNInBuffer(lsn)) {
+    flow.start_partial_sync_at = lsn;
+    sync_type = "PARTIAL";
+    VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
+            << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
+    return;
+  }
+  LOG(INFO) << "Partial sync requested from stale LSN=" << lsn
+            << " that the replication buffer doesn't contain this anymore (current_lsn="
+            << sf_->journal()->GetLsn() << "). Will perform a full sync of the data.";
+  LOG(INFO) << "If this happens often you can control the replication buffer's size with the "
+               "--shard_repl_backlog_len option";
+}
+
+std::optional<LSN> DflyCmd::ParseLsnVec(std::string_view last_master_lsn,
+                                        size_t last_journal_lsn_size, size_t flow_id,
+                                        facade::RedisReplyBuilder* rb) {
+  std::vector<std::string_view> lsn_str_vec = absl::StrSplit(last_master_lsn, '-');
+  if (lsn_str_vec.size() != last_journal_lsn_size) {
+    rb->SendError(facade::kSyntaxErr);  // Unexpected flow. LSN vector of same master
+                                        // should be the same size on all replicas.
+    return {};
+  }
+
+  std::vector<LSN> lsn_vec;
+  lsn_vec.reserve(lsn_str_vec.size());
+
+  for (string_view lsn_str : lsn_str_vec) {
+    int64_t value;
+    if (!absl::SimpleAtoi(lsn_str, &value)) {
+      rb->SendError(facade::kInvalidIntErr);
+      return {};
+    }
+    lsn_vec.push_back(value);
+  }
+
+  return {lsn_vec[flow_id]};
 }
 
 // DFLY TAKEOVER <timeout_sec> [SAVE] <sync_id>
@@ -563,6 +568,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
     sf_->ShutdownCmd(CmdArgList(&sargs, 1), CommandContext{nullptr, rb, nullptr});
     return;
   }
+
   sf_->service().cluster_family().ReconcileMasterReplicaTakeoverSlots(true);
 }
 
