@@ -478,7 +478,8 @@ void ClientCaching(CmdArgList args, SinkReplyBuilder* builder, Transaction* tx,
 
   if (!cntx->conn_state.tracking_info_.IsTrackingOn()) {
     return builder->SendError(
-        "ERR CLIENT CACHING can only be called when the client is in tracking mode");
+        "CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or "
+        "OPTOUT mode enabled");
   }
 
   using Tracking = ConnectionState::ClientTracking;
@@ -486,12 +487,12 @@ void ClientCaching(CmdArgList args, SinkReplyBuilder* builder, Transaction* tx,
   if (parser.Check("YES")) {
     if (!cntx->conn_state.tracking_info_.HasOption(Tracking::OPTIN)) {
       return builder->SendError(
-          "ERR CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode");
+          "CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode");
     }
   } else if (parser.Check("NO")) {
     if (!cntx->conn_state.tracking_info_.HasOption(Tracking::OPTOUT)) {
       return builder->SendError(
-          "ERR CLIENT CACHING NO is only valid when tracking is enabled in OPTOUT mode");
+          "CLIENT CACHING NO is only valid when tracking is enabled in OPTOUT mode");
     }
     cntx->conn_state.tracking_info_.ResetCachingSequenceNumber();
   } else {

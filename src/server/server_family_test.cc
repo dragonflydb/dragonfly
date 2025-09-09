@@ -305,8 +305,10 @@ TEST_F(ServerFamilyTest, ClientTrackingOnAndOff) {
   EXPECT_THAT(resp.GetString(), "OK");
 
   resp = Run({"CLIENT", "CACHING", "YES"});
-  EXPECT_THAT(resp,
-              ErrArg("ERR CLIENT CACHING can only be called when the client is in tracking mode"));
+  EXPECT_THAT(
+      resp,
+      ErrArg("CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or "
+             "OPTOUT mode enabled"));
 }
 
 TEST_F(ServerFamilyTest, ClientTrackingReadKey) {
