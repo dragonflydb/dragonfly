@@ -3854,7 +3854,7 @@ void ServerFamily::ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx) 
   }
 
   // Wire NOW/FORCE to a single fast-shutdown flag for listeners.
-  facade::g_shutdown_fast.store(opt_now || opt_force, std::memory_order_relaxed);
+  facade::g_shutdown_fast.store(opt_now || opt_force, std::memory_order_seq_cst);
 
   CHECK_NOTNULL(acceptor_)->Stop();
   cmd_cntx.rb->SendOk();
