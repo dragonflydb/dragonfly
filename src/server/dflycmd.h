@@ -223,9 +223,9 @@ class DflyCmd {
   std::optional<LSN> ParseLsnVec(std::string_view lsn_vec, size_t flow_id,
                                  size_t last_journal_lsn_size, facade::RedisReplyBuilder* rb);
 
-  // If lsn exists in buffer update sync_type to FULL_SYNC.
-  // Also if we can do partial, update flow.pstart_partial_sync_at
-  void MaybePartialSync(LSN lsn, std::string* sync_type, FlowInfo* flow);
+  // Checks if LSN exists in the partial sync buffer. If not, also LOG that we can't
+  // partial sync.
+  bool IsLSNInPartialSyncBuffer(LSN lsn) const;
 
   // Return a map between replication ID to lag. lag is defined as the maximum of difference
   // between the master's LSN and the last acknowledged LSN in over all shards.

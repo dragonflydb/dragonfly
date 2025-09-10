@@ -302,6 +302,7 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     sf_->journal()->StartInThread();
 
     std::optional<Replica::LastMasterSyncData> data = sf_->GetLastMasterData();
+    std::optional<LSN> lsn_to_start_partial;
     // In this flow the master and the registered replica where synced from the same master.
     if (last_master_id && data && data->id == *last_master_id) {
       ++ServerState::tlocal()->stats.psync_requests_total;
@@ -309,9 +310,20 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
       if (!flow_lsn) {
         return;  // ParseLsnVec replies in case of error
       }
-      MaybePartialSync(*flow_lsn, &sync_type, &flow);
-    } else if (seqid.has_value()) {
-      MaybePartialSync(*seqid, &sync_type, &flow);
+
+      if (IsLSNInPartialSyncBuffer(*flow_lsn)) {
+        lsn_to_start_partial.emplace(*flow_lsn);
+      }
+
+    } else if (seqid.has_value() && IsLSNInPartialSyncBuffer(*seqid)) {
+      lsn_to_start_partial.emplace(*seqid);
+    }
+
+    if (lsn_to_start_partial) {
+      flow.start_partial_sync_at = *lsn_to_start_partial;
+      sync_type = "PARTIAL";
+      VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
+              << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
     }
   }
 
@@ -397,21 +409,18 @@ void DflyCmd::StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* r
   return rb->SendOk();
 }
 
-void DflyCmd::MaybePartialSync(LSN lsn, std::string* sync_type, FlowInfo* flow) {
+bool DflyCmd::IsLSNInPartialSyncBuffer(LSN lsn) const {
   auto* jrnl = sf_->journal();
 
-  if (jrnl->GetLsn() == lsn || jrnl->IsLSNInBuffer(lsn)) {
-    flow->start_partial_sync_at = lsn;
-    *sync_type = "PARTIAL";
-    VLOG(1) << "Partial sync requested from LSN=" << flow->start_partial_sync_at.value()
-            << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
-    return;
+  const bool exists = jrnl->GetLsn() == lsn || jrnl->IsLSNInBuffer(lsn);
+  if (!exists) {
+    LOG(INFO) << "Partial sync requested from stale LSN=" << lsn
+              << " that the replication buffer doesn't contain this anymore (current_lsn="
+              << sf_->journal()->GetLsn() << "). Will perform a full sync of the data.";
+    LOG(INFO) << "If this happens often you can control the replication buffer's size with the "
+                 "--shard_repl_backlog_len option";
   }
-  LOG(INFO) << "Partial sync requested from stale LSN=" << lsn
-            << " that the replication buffer doesn't contain this anymore (current_lsn="
-            << sf_->journal()->GetLsn() << "). Will perform a full sync of the data.";
-  LOG(INFO) << "If this happens often you can control the replication buffer's size with the "
-               "--shard_repl_backlog_len option";
+  return exists;
 }
 
 std::optional<LSN> DflyCmd::ParseLsnVec(std::string_view last_master_lsn,
@@ -421,7 +430,7 @@ std::optional<LSN> DflyCmd::ParseLsnVec(std::string_view last_master_lsn,
   if (lsn_str_vec.size() != last_journal_lsn_size) {
     rb->SendError(facade::kSyntaxErr);  // Unexpected flow. LSN vector of same master
                                         // should be the same size on all replicas.
-    return {};
+    return std::nullopt;
   }
 
   std::vector<LSN> lsn_vec;
@@ -431,7 +440,7 @@ std::optional<LSN> DflyCmd::ParseLsnVec(std::string_view last_master_lsn,
     int64_t value;
     if (!absl::SimpleAtoi(lsn_str, &value)) {
       rb->SendError(facade::kInvalidIntErr);
-      return {};
+      return std::nullopt;
     }
     lsn_vec.push_back(value);
   }
