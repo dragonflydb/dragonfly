@@ -549,7 +549,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
     }
 
     if (!rest_catchup_success) {
-      LOG(ERROR) << "Some of the replica nodes did not sync in time.";
+      LOG(WARNING) << "Some of the replica nodes did not sync in time.";
     }
   }
 
