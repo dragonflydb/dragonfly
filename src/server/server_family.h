@@ -373,7 +373,7 @@ class ServerFamily {
   void ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                          ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
-  void ReplicaOfNoOne(SinkReplyBuilder* builder);
+  void ReplicaOfNoOne(SinkReplyBuilder* builder) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   // REPLICAOF implementation without two phase locking.
   void ReplicaOfInternalV2(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                            ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);

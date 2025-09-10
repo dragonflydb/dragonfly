@@ -154,6 +154,7 @@ ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
 ABSL_DECLARE_FLAG(int, replica_priority);
 ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
+ABSL_DECLARE_FLAG(bool, experimental_replicaof_v2);
 
 bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
 #define RETURN_ON_ERROR(cond, m)                                           \
@@ -3555,7 +3556,12 @@ void ServerFamily::StopAllClusterReplicas() {
 }
 
 void ServerFamily::ReplicaOf(CmdArgList args, const CommandContext& cmd_cntx) {
-  ReplicaOfInternalV2(args, cmd_cntx.tx, cmd_cntx.rb, ActionOnConnectionFail::kReturnOnError);
+  const bool use_replica_of_v2 = absl::GetFlag(FLAGS_experimental_replicaof_v2);
+  if (use_replica_of_v2) {
+    ReplicaOfInternalV2(args, cmd_cntx.tx, cmd_cntx.rb, ActionOnConnectionFail::kReturnOnError);
+    return;
+  }
+  ReplicaOfInternal(args, cmd_cntx.tx, cmd_cntx.rb, ActionOnConnectionFail::kReturnOnError);
 }
 
 void ServerFamily::Replicate(string_view host, string_view port) {
@@ -3568,7 +3574,12 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   CmdArgList args_list = absl::MakeSpan(args_vec);
   io::NullSink sink;
   facade::RedisReplyBuilder rb(&sink);
-  ReplicaOfInternalV2(args_list, nullptr, &rb, ActionOnConnectionFail::kContinueReplication);
+  const bool use_replica_of_v2 = absl::GetFlag(FLAGS_experimental_replicaof_v2);
+  if (use_replica_of_v2) {
+    ReplicaOfInternalV2(args_list, nullptr, &rb, ActionOnConnectionFail::kContinueReplication);
+    return;
+  }
+  ReplicaOfInternal(args_list, nullptr, &rb, ActionOnConnectionFail::kContinueReplication);
 }
 
 void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
@@ -3577,9 +3588,10 @@ void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
 
   if (!ss->is_master) {
     CHECK(replica_);
+
     // flip flag before clearing replica_
     SetMasterFlagOnAllThreads(true);
-    // TODO we should not allow partial sync after NO-ONE. Only after Takeover.
+
     last_master_data_ = replica_->Stop();
     replica_.reset();
     StopAllClusterReplicas();
@@ -3625,7 +3637,7 @@ void ServerFamily::ReplicaOfInternalV2(CmdArgList args, Transaction* tx, SinkRep
 
   auto new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
                                           master_replid(), replicaof_args->slot_range);
-  GenericError ec{};
+  GenericError ec;
   switch (on_error) {
     case ActionOnConnectionFail::kReturnOnError:
       ec = new_replica->Start();
