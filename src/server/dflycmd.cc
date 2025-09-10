@@ -307,7 +307,7 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
       ++ServerState::tlocal()->stats.psync_requests_total;
       auto seqid = ParseLsnVec(*last_master_lsn, data->last_journal_LSNs.size(), flow_id, rb);
       if (!seqid) {
-        return;
+        return;   // ParseLsnVec replies in case of error
       }
       MaybePartialSync(*seqid, sync_type, flow);
     } else if (seqid.has_value()) {
