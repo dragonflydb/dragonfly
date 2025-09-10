@@ -225,6 +225,7 @@ class EngineShard {
   };
 
   struct EvictionTaskState {
+    bool rss_eviction_enabled_ = true;
     size_t deleted_bytes_before_rss_update = 0;
     size_t global_rss_memory_at_prev_eviction = 0;
   };

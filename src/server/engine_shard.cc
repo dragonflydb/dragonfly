@@ -381,6 +381,7 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
   }
   auto heartbeat = [this]() { Heartbeat(); };
 
+  eviction_state_.rss_eviction_enabled_ = GetFlag(FLAGS_enable_heartbeat_rss_eviction);
   std::chrono::milliseconds period_ms(*cycle_ms);
 
   fiber_heartbeat_periodic_ =
@@ -718,7 +719,15 @@ size_t EngineShard::CalculateEvictionBytes() {
 
   // If rss_oom_deny_ratio is set, we should evict depending on rss memory too
   const double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
-  if (rss_oom_deny_ratio > 0.0 && GetFlag(FLAGS_enable_heartbeat_rss_eviction)) {
+  // Check for `enable_heartbeat_rss_eviction` flag since it dynamic. And reset state
+  // if flag has changed.
+  bool rss_eviction_enabled_flag = GetFlag(FLAGS_enable_heartbeat_rss_eviction);
+  if (eviction_state_.rss_eviction_enabled_ != rss_eviction_enabled_flag) {
+    eviction_state_.global_rss_memory_at_prev_eviction =
+        eviction_state_.deleted_bytes_before_rss_update = 0;
+    eviction_state_.rss_eviction_enabled_ = rss_eviction_enabled_flag;
+  }
+  if (rss_oom_deny_ratio > 0.0 && eviction_state_.rss_eviction_enabled_) {
     const size_t max_rss_memory = size_t(rss_oom_deny_ratio * max_memory_limit);
     /* We start eviction when we have less than eviction_memory_budget_threshold * 100% of free rss
      * memory */
