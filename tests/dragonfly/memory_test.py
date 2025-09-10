@@ -7,15 +7,6 @@ from . import dfly_args
 from .instance import DflyInstance, DflyInstanceFactory
 
 
-def extract_fragmentation_waste(memory_arena):
-    """
-    Extracts the fragmentation waste from the memory arena info.
-    """
-    match = re.search(r"fragmentation waste:\s*([0-9.]+)%", memory_arena)
-    assert match.group(1) is not None
-    return float(match.group(1))
-
-
 @pytest.mark.slow
 @pytest.mark.opt_only
 @pytest.mark.parametrize(
@@ -195,6 +186,63 @@ async def test_eval_with_oom(df_factory: DflyInstanceFactory):
     assert rss_before_eval * 1.01 > info["used_memory_rss"]
 
 
+@pytest.mark.parametrize("heartbeat_rss_eviction", [True, False])
+async def test_eviction_on_rss_treshold(df_factory: DflyInstanceFactory, heartbeat_rss_eviction):
+    max_memory = 1024 * 1024**2  # 10242mb
+
+    df_server = df_factory.create(
+        proactor_threads=3,
+        cache_mode="yes",
+        maxmemory=max_memory,
+        enable_heartbeat_eviction="false",
+        enable_heartbeat_rss_eviction=heartbeat_rss_eviction,
+    )
+    df_server.start()
+    client = df_server.client()
+
+    data_fill_size = int(0.80 * max_memory)  # 85% of max_memory
+
+    val_size = 1024 * 5  # 5 kb
+    num_keys = data_fill_size // val_size
+
+    await client.execute_command("DEBUG", "POPULATE", num_keys, "key", val_size)
+
+    # Create huge list which can be used with LRANGE to increase RSS memory only
+    for name in ["list_1", "list_2"]:
+        for i in range(1, 1000):
+            rand_str = "".join(random.choices(string.ascii_letters, k=val_size))
+            await client.execute_command(f"LPUSH {name} {rand_str}")
+
+    # Make them STICK so we don't evict them
+    await client.execute_command(f"STICK list_1")
+    await client.execute_command(f"STICK list_2")
+
+    await client.execute_command("CONFIG SET enable_heartbeat_eviction true")
+
+    memory_info_before = await client.info("memory")
+
+    # This will increase only RSS memory above treshold
+    p = client.pipeline()
+    for _ in range(50):
+        p.execute_command("LRANGE list_1 0 -1")
+        p.execute_command("LRANGE list_2 0 -1")
+    await p.execute()
+
+    # Wait for some time
+    await asyncio.sleep(3)
+    memory_info_after = await client.info("memory")
+    stats_info_after = await client.info("stats")
+
+    if heartbeat_rss_eviction:
+        # We should see used memory deacrease and number of some number of evicted keys
+        assert memory_info_after["used_memory"] < memory_info_before["used_memory"]
+        assert stats_info_after["evicted_keys"]
+    else:
+        # If heartbeat rss eviction is disabled there should be no chage
+        assert memory_info_after["used_memory"] == memory_info_before["used_memory"]
+        assert stats_info_after["evicted_keys"] == 0
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "proactor_threads_param, maxmemory_param",
@@ -267,11 +315,6 @@ async def test_cache_eviction_with_rss_deny_oom_simple_case(
 
     # Wait for some time
     await asyncio.sleep(3)
-
-    memory_arena = await async_client.execute_command("MEMORY", "ARENA")
-    fragmentation_waste = extract_fragmentation_waste(memory_arena)
-    logging.info(f"Memory fragmentation waste: {fragmentation_waste}")
-    assert fragmentation_waste < 12.0, "Memory fragmentation waste should be less than 12%."
 
     # Assert that no more keys are evicted
     memory_info = await async_client.info("memory")
@@ -383,11 +426,6 @@ async def test_cache_eviction_with_rss_deny_oom_two_waves(
 
         # Wait for some time
         await asyncio.sleep(3)
-
-        memory_arena = await async_client.execute_command("MEMORY", "ARENA")
-        fragmentation_waste = extract_fragmentation_waste(memory_arena)
-        logging.info(f"Memory fragmentation waste: {fragmentation_waste}")
-        assert fragmentation_waste < 12.0, "Memory fragmentation waste should be less than 12%."
 
         # Assert that no more keys are evicted
         memory_info = await async_client.info("memory")

@@ -226,14 +226,7 @@ class EngineShard {
   };
 
   struct EvictionTaskState {
-    /* This constant are used to control the defragmentation task when eviction is enabled.
-     The task is run periodically to check whether we need to do memory defragmentation.
-     When eviction is enabled, we want to make defragment task run more frequently
-     and also we want to make waste threshold lower to allow more aggressive defragmentation. */
-    static constexpr uint32_t kDefragCheckSecInterval = 2;
-    static constexpr float kDefragWasteThreshold = 0.05;
-    static constexpr double kDefragRssMemoryDelta = 0.03;
-
+    bool rss_eviction_enabled_ = true;
     size_t deleted_bytes_before_rss_update = 0;
     size_t global_rss_memory_at_prev_eviction = 0;
   };

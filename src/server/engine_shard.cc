@@ -22,12 +22,10 @@ extern "C" {
 #include "server/search/doc_index.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
-#include "server/tiering/common.h"
 #include "server/transaction.h"
 #include "util/fibers/proactor_base.h"
 
 using namespace std;
-using namespace ::dfly::tiering::literals;
 
 ABSL_FLAG(float, mem_defrag_threshold, 0.7,
           "Minimum percentage of used memory relative to maxmemory cap before running "
@@ -56,7 +54,9 @@ ABSL_FLAG(string, tiered_prefix, "",
 
 ABSL_FLAG(bool, enable_heartbeat_eviction, true,
           "Enable eviction during heartbeat when memory is under pressure.");
-
+ABSL_FLAG(bool, enable_heartbeat_rss_eviction, true,
+          "Enable eviction during heartbeat when rss memory is under pressure. Evicition based "
+          "on used_memory will still be enabled.");
 ABSL_FLAG(double, eviction_memory_budget_threshold, 0.1,
           "Eviction starts when the free memory (including RSS memory) drops below "
           "eviction_memory_budget_threshold * max_memory_limit.");
@@ -196,25 +196,7 @@ bool EngineShard::DefragTaskState::CheckRequired() {
   thread_local fragmentation_info finfo{
       .committed = 0, .committed_golden = 0, .wasted = 0, .bin = 0};
 
-  /*
-   If the eviction is enabled, we want to run the defrag task more frequently and more aggressively.
-   For global threshold rss we use the rss memory minus the eviction budget threshold and minus 3%
-    - For example if rss_deny_oom_ratio is 0.8 and eviction_memory_budget_threshold is 0.1,
-      we will start eviction when rss memory is above 0.8 - 0.1 = 0.7. And defragmentation
-      should still working if used rss memory is above 0.7 - 0.03 = 0.67.
-   For defrag interval we use the EvictionTaskState::kMemDefragCheckSecInterval
-   For waste threshold we use the EvictionTaskState::kEvictionWasteThreshold
-  */
-  const bool is_eviction_enabled = GetFlag(FLAGS_enable_heartbeat_eviction);
-
-  const double mem_defrag_threshold_flag = GetFlag(FLAGS_mem_defrag_threshold);
-  const double defrag_threshold =
-      !is_eviction_enabled ? mem_defrag_threshold_flag
-                           : std::min(mem_defrag_threshold_flag,
-                                      ServerState::tlocal()->rss_oom_deny_ratio -
-                                          GetFlag(FLAGS_eviction_memory_budget_threshold) -
-                                          EvictionTaskState::kDefragRssMemoryDelta);
-  const std::size_t global_threshold = double(limit) * defrag_threshold;
+  const std::size_t global_threshold = double(limit) * GetFlag(FLAGS_mem_defrag_threshold);
   if (global_threshold > rss_mem_current.load(memory_order_relaxed)) {
     finfo.bin = 0;  // reset.
     return false;
@@ -223,12 +205,7 @@ bool EngineShard::DefragTaskState::CheckRequired() {
   if (finfo.bin == 0) {  // did not start the iterative checking yet
     const auto now = time(nullptr);
     const auto seconds_from_prev_check = now - last_check_time;
-
-    const uint32_t check_sec_interval_flag = GetFlag(FLAGS_mem_defrag_check_sec_interval);
-    const uint32_t mem_defrag_interval =
-        !is_eviction_enabled
-            ? check_sec_interval_flag
-            : std::min(check_sec_interval_flag, EvictionTaskState::kDefragCheckSecInterval);
+    const auto mem_defrag_interval = GetFlag(FLAGS_mem_defrag_check_sec_interval);
 
     if (seconds_from_prev_check < mem_defrag_interval) {
       return false;
@@ -249,11 +226,7 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     // finished checking.
     last_check_time = time(nullptr);
 
-    const float waste_threshold_flag = GetFlag(FLAGS_mem_defrag_waste_threshold);
-    const double waste_threshold =
-        !is_eviction_enabled
-            ? waste_threshold_flag
-            : std::min(waste_threshold_flag, EvictionTaskState::kDefragWasteThreshold);
+    const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
     if (finfo.wasted > size_t(finfo.committed * waste_threshold)) {
       VLOG(1) << "memory fragmentation issue found: " << finfo.wasted << " " << finfo.committed;
       return true;
@@ -409,6 +382,8 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
     return;
   }
   auto heartbeat = [this]() { Heartbeat(); };
+
+  eviction_state_.rss_eviction_enabled_ = GetFlag(FLAGS_enable_heartbeat_rss_eviction);
   std::chrono::milliseconds period_ms(*cycle_ms);
 
   fb2::Fiber::Opts fb_opts{.priority = absl::GetFlag(FLAGS_background_heartbeat)
@@ -743,12 +718,20 @@ size_t EngineShard::CalculateEvictionBytes() {
       CalculateHowManyBytesToEvictOnShard(limit, global_used_memory, shard_memory_budget_threshold);
 
   VLOG_IF_EVERY_N(1, goal_bytes > 0, 50)
-      << "Memory goal bytes: " << goal_bytes << ", used memory: " << global_used_memory
+      << "Used memory goal bytes: " << goal_bytes << ", used memory: " << global_used_memory
       << ", memory limit: " << max_memory_limit;
 
   // If rss_oom_deny_ratio is set, we should evict depending on rss memory too
   const double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
-  if (rss_oom_deny_ratio > 0.0) {
+  // Check for `enable_heartbeat_rss_eviction` flag since it dynamic. And reset state
+  // if flag has changed.
+  bool rss_eviction_enabled_flag = GetFlag(FLAGS_enable_heartbeat_rss_eviction);
+  if (eviction_state_.rss_eviction_enabled_ != rss_eviction_enabled_flag) {
+    eviction_state_.global_rss_memory_at_prev_eviction =
+        eviction_state_.deleted_bytes_before_rss_update = 0;
+    eviction_state_.rss_eviction_enabled_ = rss_eviction_enabled_flag;
+  }
+  if (rss_oom_deny_ratio > 0.0 && eviction_state_.rss_eviction_enabled_) {
     const size_t max_rss_memory = size_t(rss_oom_deny_ratio * max_memory_limit);
     /* We start eviction when we have less than eviction_memory_budget_threshold * 100% of free rss
      * memory */
@@ -757,13 +740,16 @@ size_t EngineShard::CalculateEvictionBytes() {
 
     // Calculate how much rss memory is used by all shards
     const size_t global_used_rss_memory = rss_mem_current.load(memory_order_relaxed);
-
     auto& global_rss_memory_at_prev_eviction = eviction_state_.global_rss_memory_at_prev_eviction;
     auto& deleted_bytes_before_rss_update = eviction_state_.deleted_bytes_before_rss_update;
     if (global_used_rss_memory < eviction_state_.global_rss_memory_at_prev_eviction) {
-      deleted_bytes_before_rss_update -=
+      auto decrease_delete_bytes_before_rss_update =
           std::min(deleted_bytes_before_rss_update,
                    (global_rss_memory_at_prev_eviction - global_used_rss_memory) / shards_count);
+      VLOG_EVERY_N(1, 50) << "deleted_bytes_before_rss_update: " << deleted_bytes_before_rss_update
+                          << " decrease_delete_bytes_before_rss_update: "
+                          << decrease_delete_bytes_before_rss_update;
+      deleted_bytes_before_rss_update -= decrease_delete_bytes_before_rss_update;
     }
 
     global_rss_memory_at_prev_eviction = global_used_rss_memory;

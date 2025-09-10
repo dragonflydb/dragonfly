@@ -924,6 +924,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.Register("dbnum");  // equivalent to databases in redis.
   config_registry.Register("dir");
   config_registry.RegisterMutable("enable_heartbeat_eviction");
+  config_registry.RegisterMutable("enable_heartbeat_rss_eviction");
   config_registry.RegisterMutable("masterauth");
   config_registry.RegisterMutable("masteruser");
   config_registry.RegisterMutable("max_eviction_per_heartbeat");
