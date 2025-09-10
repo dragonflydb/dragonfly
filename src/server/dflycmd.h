@@ -225,7 +225,7 @@ class DflyCmd {
 
   // If lsn exists in buffer update sync_type to FULL_SYNC.
   // Also if we can do partial, update flow.pstart_partial_sync_at
-  void MaybePartialSync(LSN lsn, std::string& sync_type, FlowInfo& flow);
+  void MaybePartialSync(LSN lsn, std::string* sync_type, FlowInfo* flow);
 
   // Return a map between replication ID to lag. lag is defined as the maximum of difference
   // between the master's LSN and the last acknowledged LSN in over all shards.

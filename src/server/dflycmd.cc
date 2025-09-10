@@ -305,13 +305,13 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     // In this flow the master and the registered replica where synced from the same master.
     if (last_master_id && data && data->id == *last_master_id) {
       ++ServerState::tlocal()->stats.psync_requests_total;
-      auto seqid = ParseLsnVec(*last_master_lsn, data->last_journal_LSNs.size(), flow_id, rb);
-      if (!seqid) {
-        return;   // ParseLsnVec replies in case of error
+      auto flow_lsn = ParseLsnVec(*last_master_lsn, data->last_journal_LSNs.size(), flow_id, rb);
+      if (!flow_lsn) {
+        return;  // ParseLsnVec replies in case of error
       }
-      MaybePartialSync(*seqid, sync_type, flow);
+      MaybePartialSync(*flow_lsn, &sync_type, &flow);
     } else if (seqid.has_value()) {
-      MaybePartialSync(*seqid, sync_type, flow);
+      MaybePartialSync(*seqid, &sync_type, &flow);
     }
   }
 
@@ -397,13 +397,13 @@ void DflyCmd::StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* r
   return rb->SendOk();
 }
 
-void DflyCmd::MaybePartialSync(LSN lsn, std::string& sync_type, FlowInfo& flow) {
+void DflyCmd::MaybePartialSync(LSN lsn, std::string* sync_type, FlowInfo* flow) {
   auto* jrnl = sf_->journal();
 
   if (jrnl->GetLsn() == lsn || jrnl->IsLSNInBuffer(lsn)) {
-    flow.start_partial_sync_at = lsn;
-    sync_type = "PARTIAL";
-    VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
+    flow->start_partial_sync_at = lsn;
+    *sync_type = "PARTIAL";
+    VLOG(1) << "Partial sync requested from LSN=" << flow->start_partial_sync_at.value()
             << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
     return;
   }

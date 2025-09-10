@@ -149,10 +149,7 @@ class Replica : ProtocolClient {
   // Used *only* in TakeOver flow. There is small data race if
   // thread_flow_map_ gets written by the MainReplicationFiber thread but
   // the chances for that are extremely rare.
-  std::vector<unsigned> GetFlowMapAtIndex(size_t index) const {
-    DCHECK(index < thread_flow_map_.size());
-    return thread_flow_map_[index];
-  }
+  std::vector<unsigned> GetFlowMapAtIndex(size_t index) const;
 
   size_t GetRecCountExecutedPerShard(const std::vector<unsigned>& indexes) const;
 

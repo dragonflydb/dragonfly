@@ -1267,6 +1267,11 @@ std::string Replica::GetCurrentPhase() const {
   return "STABLE_SYNC";
 }
 
+std::vector<unsigned> Replica::GetFlowMapAtIndex(size_t index) const {
+  DCHECK(index < thread_flow_map_.size());
+  return thread_flow_map_[index];
+}
+
 size_t Replica::GetRecCountExecutedPerShard(const std::vector<unsigned>& indexes) const {
   size_t total_shard_lsn = 0;
   for (auto index : indexes) {
