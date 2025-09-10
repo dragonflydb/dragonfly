@@ -95,7 +95,7 @@ void IterateAllSuffixes(const absl::flat_hash_set<string>& words,
 class RangeTreeAdapter : public NumericIndex::RangeTreeBase {
  public:
   explicit RangeTreeAdapter(size_t max_range_block_size, PMR_NS::memory_resource* mr)
-      : range_tree_(mr, max_range_block_size) {
+      : range_tree_(mr, max_range_block_size, false) {
   }
 
   void Add(DocId id, absl::Span<double> values) override {
@@ -117,6 +117,10 @@ class RangeTreeAdapter : public NumericIndex::RangeTreeBase {
   vector<DocId> GetAllDocIds() const override {
     // TODO: remove take
     return range_tree_.GetAllDocIds().Take();
+  }
+
+  void FinalizeInitialization() override {
+    range_tree_.FinalizeInitialization();
   }
 
  private:
@@ -214,6 +218,10 @@ bool NumericIndex::Add(DocId id, const DocumentAccessor& doc, string_view field)
 void NumericIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
   auto numbers = doc.GetNumbers(field).value();
   range_tree_->Remove(id, absl::MakeSpan(numbers));
+}
+
+void NumericIndex::FinalizeInitialization() {
+  range_tree_->FinalizeInitialization();
 }
 
 RangeResult NumericIndex::Range(double l, double r) const {

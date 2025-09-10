@@ -402,4 +402,30 @@ TEST_F(RangeTreeTest, RangeResultTwoBlocks) {
   }
 }
 
+TEST_F(RangeTreeTest, FinalizeInitialization) {
+  RangeTree tree{PMR_NS::get_default_resource(), 1, false};
+
+  // Add some values
+  tree.Add(1, 10.0);
+  tree.Add(2, 20.0);
+  tree.Add(3, 20.0);
+  tree.Add(4, 30.0);
+  tree.Add(5, 20.0);
+  tree.Add(6, 30.0);
+  tree.Add(7, 40.0);
+
+  auto result = tree.RangeBlocks(10.0, 40.0);
+  EXPECT_THAT(
+      result,
+      BlocksAre({{{1, 10.0}, {2, 20.0}, {3, 20.0}, {4, 30.0}, {5, 20.0}, {6, 30.0}, {7, 40.0}}}));
+
+  tree.FinalizeInitialization();
+
+  result = tree.RangeBlocks(10.0, 40.0);
+  EXPECT_THAT(
+      result,
+      BlocksAre(
+          {{{1, 10.0}}, {{2, 20.0}, {3, 20.0}, {5, 20.0}}, {{4, 30.0}, {6, 30.0}}, {{7, 40.0}}}));
+}
+
 }  // namespace dfly::search
