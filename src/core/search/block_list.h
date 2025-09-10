@@ -134,6 +134,8 @@ template <typename Container /* underlying container */> class BlockList {
   // Find block that should contain t. Returns end() only if empty
   BlockIt FindBlock(const ElementType& t);
 
+  bool ShouldSplit(size_t block_size) const;
+
   void TryMerge(BlockIt block);  // If needed, merge with previous block
   void TrySplit(BlockIt block);  // If needed, split into two blocks
 

@@ -10,25 +10,27 @@ SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list
 
   const size_t elements_count = block_list.Size();
 
-  using EntryIndex = std::pair<size_t /*block id*/, size_t /*entry id*/>;
-  std::vector<EntryIndex> entries_indexes(elements_count);
+  // Extract values to find median
+  std::vector<double> entries_values(elements_count);
   size_t index = 0;
-  for (size_t i = 0; i < block_list.blocks_.size(); ++i) {
-    auto& block = block_list.blocks_[i];
-    for (size_t j = 0; j < block.Size(); ++j) {
-      entries_indexes[index++] = {i, j};
-    }
+  for (const Entry& entry : block_list) {
+    entries_values[index++] = entry.second;
   }
 
-  std::nth_element(entries_indexes.begin(), entries_indexes.begin() + elements_count / 2,
-                   entries_indexes.end(), [&](const EntryIndex& l, const EntryIndex& r) {
-                     return block_list.blocks_[l.first][l.second].second <
-                            block_list.blocks_[r.first][r.second].second;
-                   });
+  // Find median value
+  std::nth_element(entries_values.begin(), entries_values.begin() + elements_count / 2,
+                   entries_values.end());
+  double median_value = entries_values[elements_count / 2];
 
-  const EntryIndex median_index = entries_indexes[elements_count / 2];
-  double median_value = block_list.blocks_[median_index.first][median_index.second].second;
+  /* Now we need to split entries into two parts, left and right, so that:
+   1) left has values < median_value
+   2) right has values >= median_value
+   3) both parts have approximately the same number of elements
 
+   To achieve this, we first split entries into three parts: < median_value (left blocklist), ==
+   median_value (median_entries), > median_value (righ blocklist). Then we add == median_value part
+   to the smaller of the two parts (< or >). This guarantees that both parts have approximately the
+   same number of elements */
   BlockList<SortedVector<Entry>> left(block_list.blocks_.get_allocator().resource(),
                                       block_list.block_size_);
   BlockList<SortedVector<Entry>> right(block_list.blocks_.get_allocator().resource(),
@@ -39,7 +41,7 @@ SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list
   right.ReserveBlocks(block_list.blocks_.size() / 2 + 1);
 
   double min_value_in_right_part = std::numeric_limits<double>::infinity();
-  for (const auto& entry : block_list) {
+  for (const Entry& entry : block_list) {
     if (entry.second < median_value) {
       left.PushBack(entry);
     } else if (entry.second > median_value) {
@@ -85,7 +87,9 @@ template <typename C> bool BlockList<C>::Insert(ElementType t) {
 }
 
 template <typename C> bool BlockList<C>::PushBack(ElementType t) {
-  if (blocks_.empty() || (blocks_.back().Size() >= block_size_ * 2 - 1)) {
+  // If the last block is full, after insert we will need to split it
+  // So we can prevent split by creating a new block and inserting there
+  if (blocks_.empty() || ShouldSplit(blocks_.back().Size() + 1)) {
     blocks_.insert(blocks_.end(), C{blocks_.get_allocator().resource()});
   }
 
@@ -125,6 +129,10 @@ template <typename C> typename BlockList<C>::BlockIt BlockList<C>::FindBlock(con
   return it;
 }
 
+template <typename C> bool BlockList<C>::ShouldSplit(size_t block_size) const {
+  return block_size >= block_size_ * 2;
+}
+
 template <typename C> void BlockList<C>::TryMerge(BlockIt block) {
   if (block->Size() == 0) {
     blocks_.erase(block);
@@ -143,7 +151,7 @@ template <typename C> void BlockList<C>::TryMerge(BlockIt block) {
 }
 
 template <typename C> void BlockList<C>::TrySplit(BlockIt block) {
-  if (block->Size() < block_size_ * 2)
+  if (!ShouldSplit(block->Size() + 1))
     return;
 
   auto [left, right] = std::move(*block).Split();
