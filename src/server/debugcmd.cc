@@ -33,6 +33,7 @@ extern "C" {
 #include "facade/cmd_arg_parser.h"
 #include "server/blocking_controller.h"
 #include "server/container_utils.h"
+#include "server/debug_sync_point.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/main_service.h"
@@ -41,6 +42,7 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
+
 using namespace std;
 
 ABSL_DECLARE_FLAG(string, dir);
@@ -657,6 +659,8 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    per second.",
         "SEGMENTS",
         "    Prints segment info for the current database.",
+        "SYNC ADD [sync_name] | DEL [sync_name]",
+        "    Enable or disable debug sync point.",
         "HELP",
         "    Prints this help.",
     };
@@ -741,6 +745,11 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
   if (subcmd == "SEGMENTS") {
     return Segments(args.subspan(1), builder);
   }
+
+  if (subcmd == "SYNC") {
+    return Sync(args, builder);
+  }
+
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return builder->SendError(reply, kSyntaxErrType);
 }
@@ -982,6 +991,48 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
     // populating the database.
     cntx_->ns->GetDbSlice(shard->shard_id()).OnCbFinishBlocking();
   });
+}
+
+// SYNC arguments format:
+// [ADD sync_point_name | DEL sync_point_name]
+std::optional<DebugCmd::SyncOptions> DebugCmd::ParseSyncArgs(CmdArgList args,
+                                                             facade::SinkReplyBuilder* builder) {
+  CmdArgParser parser(args.subspan(1));
+  SyncOptions options;
+
+  while (parser.HasNext()) {
+    SyncFlags flag = parser.MapNext("ADD", SYNC_ADD, "DEL", SYNC_DEL);
+    switch (flag) {
+      case SYNC_ADD:
+      case SYNC_DEL:
+        options.sync_point_name = parser.Next<string_view>();
+        options.sync_action = flag;
+        break;
+      default:
+        LOG(FATAL) << "Unexpected flag in PopulateArgs. Args: " << args;
+        break;
+    }
+  }
+  if (parser.HasError()) {
+    builder->SendError(parser.TakeError().MakeReply());
+    return nullopt;
+  }
+  return options;
+}
+
+void DebugCmd::Sync(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  optional<SyncOptions> options = ParseSyncArgs(args, builder);
+  if (!options.has_value()) {
+    return;
+  }
+
+  if (options->sync_action == SYNC_ADD) {
+    debug_sync_point.Add(options->sync_point_name);
+  } else {
+    debug_sync_point.Del(options->sync_point_name);
+  }
+
+  builder->SendOk();
 }
 
 void DebugCmd::Exec(facade::SinkReplyBuilder* builder) {
