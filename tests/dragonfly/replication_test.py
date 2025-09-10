@@ -3098,12 +3098,12 @@ async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyIn
 
 
 @pytest.mark.parametrize(
-    "use_takeover, allowed_diff",
-    [(False, 2), (False, 0), (True, 1)],
+    "use_takeover, backlog_len",
+    [(False, 2), (False, 1), (True, 1), (True, 10)],
 )
-async def test_partial_replication_on_same_source_master(df_factory, use_takeover, allowed_diff):
+async def test_partial_replication_on_same_source_master(df_factory, use_takeover, backlog_len):
     master = df_factory.create()
-    replica1 = df_factory.create(allow_partial_sync_with_lsn_diff=allowed_diff)
+    replica1 = df_factory.create(shard_repl_backlog_len=backlog_len)
     replica2 = df_factory.create()
 
     df_factory.start_all([master, replica1, replica2])
@@ -3131,11 +3131,13 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
     if use_takeover:
         # Promote first replica to master
         await c_replica1.execute_command(f"REPLTAKEOVER 5")
+        if backlog_len > 1:
+            await c_replica1.execute_command("SET bar foo")
+            await c_replica1.execute_command("SET foo bar")
+
     else:
         # Promote first replica to master
         await c_replica1.execute_command(f"REPLICAOF NO ONE")
-        # Send 2 more commands to be propagated to second replica
-        # Sending 2 more commands will result in partial sync if allow_partial_sync_with_lsn_diff is equal or higher
         await c_master.set("x", "y")
         await c_master.set("x", "y")
         await check_all_replicas_finished([c_replica2], c_master)
@@ -3150,23 +3152,28 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
             *(SeederV2.capture(c) for c in (c_replica1, c_replica2))
         )
         assert hash1 == hash2
+        s1 = await c_replica1.execute_command("dbsize")
+        s2 = await c_replica1.execute_command("dbsize")
+        assert s1 == s2
 
     # Check we can takeover to the second replica
     await c_replica2.execute_command(f"REPLTAKEOVER 5")
 
     replica1.stop()
     replica2.stop()
-    if use_takeover or (allowed_diff > 0 and not use_takeover):
+    if use_takeover:
         # Check logs for partial replication
         lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
         assert len(lines) == 1
         # Check no full sync logs
-        lines = replica2.find_in_logs(f"Started full with localhost:{replica1.port}")
+        lines = replica2.find_in_logs(f"Started full sync with localhost:{replica1.port}")
         assert len(lines) == 0
     else:
-        lines = replica2.find_in_logs(f"Started full with localhost:{replica1.port}")
+        lines = replica2.find_in_logs(f"Started full sync with localhost:{replica1.port}")
+        assert len(lines) == 1
+        # No partial sync after NO ONE
+        lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
         assert len(lines) == 0
-        assert len(replica1.find_in_logs("No partial sync due to diff")) > 0
 
 
 async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df_factory):
@@ -3187,16 +3194,24 @@ async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df
     await wait_for_replicas_state(c_s3)
 
     # Promote server 2 to master
-    await c_s2.execute_command(f"REPLICAOF NO ONE")
+    await c_s2.execute_command(f"REPLTAKEOVER 20")
     # Make server 4 replica of server 2
     await c_s4.execute_command(f"REPLICAOF localhost {server2.port}")
+    await check_all_replicas_finished([c_s4], c_s2)
     # Send some write command for lsn inc
     for i in range(100):
         await c_s2.set(i, "val")
     # Make server 3 replica of server 2
     await c_s3.execute_command(f"REPLICAOF localhost {server2.port}")
     await check_all_replicas_finished([c_s3], c_s2)
-    await check_all_replicas_finished([c_s4], c_s2)
+
+    s2_sz = await c_s2.dbsize()
+    s3_sz = await c_s3.dbsize()
+    assert s2_sz == 100
+    assert s2_sz == s3_sz
+
+    s4_sz = await c_s4.dbsize()
+    assert s3_sz == s4_sz
 
     server3.stop()
     # Check logs for partial replication

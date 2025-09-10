@@ -3473,7 +3473,8 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
         CHECK(replica_);
 
         SetMasterFlagOnAllThreads(true);  // Flip flag before clearing replica
-        last_master_data_ = replica_->Stop();
+        // No partial sync for NO ONE flow
+        replica_->Stop();
         replica_.reset();
 
         StopAllClusterReplicas();
@@ -3608,13 +3609,21 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   auto repl_ptr = replica_;
   CHECK(repl_ptr);
 
+  // Start journal to allow partial sync from same source master
+  shard_set->pool()->AwaitFiberOnAll([this, repl_ptr](auto index, auto*) {
+    auto flow_map = repl_ptr->GetFlowMapAtIndex(index);
+    size_t rec_executed = repl_ptr->GetRecCountExecutedPerShard(flow_map);
+    LOG(INFO) << "Shard " << index << " starts journal at: " << rec_executed;
+    journal()->StartInThreadAtLsn(rec_executed);
+  });
+
   auto info = replica_->GetSummary();
   if (!info.full_sync_done) {
     return builder->SendError("Full sync not done");
   }
 
-  std::error_code ec = replica_->TakeOver(ArgS(args, 0), save_flag);
-  if (ec)
+  std::error_code res = replica_->TakeOver(ArgS(args, 0), save_flag);
+  if (res)
     return builder->SendError("Couldn't execute takeover");
 
   LOG(INFO) << "Takeover successful, promoting this instance to master.";
@@ -3622,9 +3631,11 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   if (IsClusterEnabled()) {
     service().cluster_family().ReconcileMasterReplicaTakeoverSlots(false);
   }
-  SetMasterFlagOnAllThreads(true);
+
   last_master_data_ = replica_->Stop();
   replica_.reset();
+
+  SetMasterFlagOnAllThreads(true);
   return builder->SendOk();
 }
 

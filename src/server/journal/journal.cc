@@ -37,6 +37,12 @@ void Journal::StartInThread() {
   }
 }
 
+void Journal::StartInThreadAtLsn(LSN lsn) {
+  StartInThread();
+  journal_slice.ResetRingBuffer();
+  journal_slice.SetStartingLSN(lsn);
+}
+
 error_code Journal::Close() {
   VLOG(1) << "Journal::Close";
 
