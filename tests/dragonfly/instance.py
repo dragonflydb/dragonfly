@@ -126,6 +126,8 @@ class DflyInstance:
                 self.args["num_shards"] = threads - 1
 
     def __del__(self):
+        if self.proc:
+            self.stop()
         assert self.proc == None
 
     def client(self, *args, **kwargs) -> RedisClient:
@@ -461,7 +463,11 @@ class DflyInstanceFactory:
         """Stop all launched instances."""
         exceptions = []  # To collect exceptions
         for instance in self.instances:
-            await instance.close_clients()
+            try:  # ioloop might be no longer running
+                await instance.close_clients()
+            except Exception as e:
+                pass
+
             try:
                 instance.stop()
             except Exception as e:

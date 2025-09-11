@@ -59,6 +59,8 @@ ABSL_FLAG(double, eviction_memory_budget_threshold, 0.1,
           "Eviction starts when the free memory (including RSS memory) drops below "
           "eviction_memory_budget_threshold * max_memory_limit.");
 
+ABSL_FLAG(bool, background_heartbeat, false, "Whether to run heartbeat as a background fiber");
+
 ABSL_DECLARE_FLAG(uint32_t, max_eviction_per_heartbeat);
 
 namespace dfly {
@@ -423,14 +425,15 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
     return;
   }
   auto heartbeat = [this]() { Heartbeat(); };
-
   std::chrono::milliseconds period_ms(*cycle_ms);
 
-  fiber_heartbeat_periodic_ =
-      MakeFiber([this, index = pb->GetPoolIndex(), period_ms, heartbeat]() mutable {
-        ThisFiber::SetName(absl::StrCat("heartbeat_periodic", index));
-        RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
-      });
+  fb2::Fiber::Opts fb_opts{.priority = absl::GetFlag(FLAGS_background_heartbeat)
+                                           ? fb2::FiberPriority::BACKGROUND
+                                           : fb2::FiberPriority::NORMAL,
+                           .name = absl::StrCat("heartbeat_periodic", pb->GetPoolIndex())};
+  fiber_heartbeat_periodic_ = fb2::Fiber(fb_opts, [this, period_ms, heartbeat]() mutable {
+    RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
+  });
   defrag_task_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
 }
 
