@@ -2561,15 +2561,18 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
                         item->val.rdb_type);
   };
 
-  // Streamed big values are stored in a separate map
+  // Streamed big values are stored in a separate map. unique_ptr for pointer stability
   thread_local std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_streamed;
-  if (item->load_config.streamed) {
-    if (item->load_config.reserve)
-      now_streamed.emplace(item->key, make_unique<PrimeValue>());
-    pv_ptr = &*now_streamed[item->key];
+  LoadConfig config_copy = item->load_config;
+  if (item->load_config.streamed && item->load_config.append) {
+    // When a sets members are fully expired, the value is not created, so try again if it's missing
+    if (auto it = now_streamed.find(item->key); it == now_streamed.end())
+      config_copy.append = false;
+    else
+      pv_ptr = &*now_streamed[item->key];
   }
 
-  if (auto ec = FromOpaque(item->val, item->load_config, pv_ptr); ec) {
+  if (auto ec = FromOpaque(item->val, config_copy, pv_ptr); ec) {
     if (ec.value() == errc::value_expired) {
       // hmap and sset values can expire and we ok with it,
       // so we don't set ec_ in this case
@@ -2592,6 +2595,9 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   }
 
   if (item->load_config.streamed) {
+    if (now_streamed.find(item->key) == now_streamed.end())
+      now_streamed.emplace(item->key, make_unique<PrimeValue>(std::move(pv)));
+
     if (!item->load_config.finalize)
       return;
 
