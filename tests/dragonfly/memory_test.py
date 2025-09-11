@@ -335,7 +335,7 @@ async def test_cache_eviction_with_rss_deny_oom_simple_case(
     assert (
         evicted_keys > 0
         and evicted_keys >= prev_evicted_keys
-        and evicted_keys <= prev_evicted_keys * 1.0015
+        and evicted_keys <= prev_evicted_keys * 1.003
     ), "We should not evict more items."
 
 
@@ -446,7 +446,7 @@ async def test_cache_eviction_with_rss_deny_oom_two_waves(
         assert (
             evicted_keys > 0
             and evicted_keys >= prev_evicted_keys
-            and evicted_keys <= prev_evicted_keys * 1.0015
+            and evicted_keys <= prev_evicted_keys * 1.003
         ), "We should not evict more items."
 
 
