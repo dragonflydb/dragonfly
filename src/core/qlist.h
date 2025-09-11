@@ -10,11 +10,12 @@ extern "C" {
 
 #include <absl/functional/function_ref.h>
 
-#include <optional>
 #include <string>
 #include <variant>
 
 namespace dfly {
+
+class PageUsage;
 
 class QList {
  public:
@@ -213,6 +214,10 @@ class QList {
   }
 
   static void SetPackedThreshold(unsigned threshold);
+
+  // Moves nodes away from underused pages by reallocating if required.
+  // Returns count of nodes reallocaed to assist in testing.
+  size_t DefragIfNeeded(PageUsage* page_usage);
 
   struct Stats {
     uint64_t compression_attempts = 0;

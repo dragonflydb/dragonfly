@@ -17,6 +17,7 @@ extern "C" {
 #include <lz4frame.h>
 
 #include "base/logging.h"
+#include "core/page_usage_stats.h"
 
 using namespace std;
 
@@ -383,6 +384,37 @@ __thread QList::Stats QList::stats;
 
 void QList::SetPackedThreshold(unsigned threshold) {
   packed_threshold = threshold;
+}
+
+size_t QList::DefragIfNeeded(PageUsage* page_usage) {
+  size_t reallocated = 0;
+  for (Node* curr = head_; curr; curr = curr->next) {
+    if (!page_usage->IsPageForObjectUnderUtilized(curr->entry)) {
+      continue;
+    }
+
+    unsigned char* old_entry = curr->entry;
+    const bool is_raw_list_pack = curr->container == QUICKLIST_NODE_CONTAINER_PACKED &&
+                                  curr->encoding == QUICKLIST_NODE_ENCODING_RAW;
+    // if the entry is an uncompressed listpack, use the listpack api to initialize and free it,
+    // otherwise it is compressed data and/or a plain string stored in the node, in either case
+    // allocate/free the data directly.
+    unsigned char* new_entry =
+        is_raw_list_pack ? lpNew(curr->sz) : static_cast<unsigned char*>(zmalloc(curr->sz));
+
+    memcpy(new_entry, curr->entry, curr->sz);
+    curr->entry = new_entry;
+
+    // lpFree is just a wrapper to zfree but calling it guards against future changes
+    if (is_raw_list_pack) {
+      lpFree(old_entry);
+    } else {
+      zfree(old_entry);
+    }
+
+    ++reallocated;
+  }
+  return reallocated;
 }
 
 QList::QList(int fill, int compress) : fill_(fill), compress_(compress), bookmark_count_(0) {
