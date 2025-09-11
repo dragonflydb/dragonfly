@@ -5,6 +5,7 @@
 #pragma once
 
 #include "server/common.h"
+#include "server/table.h"
 
 namespace facade {
 class SinkReplyBuilder;
@@ -14,9 +15,6 @@ namespace dfly {
 
 class CommandRegistry;
 struct CommandContext;
-
-class CompactObj;
-using PrimeValue = CompactObj;
 
 class StreamMemTracker {
  public:
