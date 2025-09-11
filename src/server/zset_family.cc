@@ -1408,8 +1408,10 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
                            const ScanOpts& scan_op) {
   auto find_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
 
-  if (!find_res)
+  if (!find_res) {
+    *cursor = 0;
     return find_res.status();
+  }
 
   const PrimeValue& pv = (*find_res)->second;
   StringVec res;

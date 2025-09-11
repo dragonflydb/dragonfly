@@ -335,6 +335,12 @@ TEST_F(SetFamilyTest, Empty) {
 }
 
 TEST_F(SetFamilyTest, SScan) {
+  auto resp = Run("sscan non-existing-key 100 count 5");
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::STRING), ArgType(RespExpr::ARRAY)));
+  EXPECT_EQ(ToSV(resp.GetVec()[0].GetBuf()), "0");
+  EXPECT_EQ(StrArray(resp.GetVec()[1]).size(), 0);
+
   // Test for int set
   for (int i = 0; i < 15; i++) {
     Run({"sadd", "myintset", absl::StrCat(i)});
@@ -342,7 +348,7 @@ TEST_F(SetFamilyTest, SScan) {
 
   // Note that even though this limit by 4, it would return more because
   // all fields are on intlist
-  auto resp = Run({"sscan", "myintset", "0", "count", "4"});
+  resp = Run({"sscan", "myintset", "0", "count", "4"});
   auto vec = StrArray(resp.GetVec()[1]);
   EXPECT_THAT(vec.size(), 15);
 

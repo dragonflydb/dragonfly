@@ -59,6 +59,8 @@ ABSL_FLAG(double, eviction_memory_budget_threshold, 0.1,
           "Eviction starts when the free memory (including RSS memory) drops below "
           "eviction_memory_budget_threshold * max_memory_limit.");
 
+ABSL_FLAG(bool, background_heartbeat, false, "Whether to run heartbeat as a background fiber");
+
 ABSL_DECLARE_FLAG(uint32_t, max_eviction_per_heartbeat);
 
 namespace dfly {
@@ -231,7 +233,8 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     return false;
   }
 
-  static thread_local fragmentation_info finfo{.committed = 0, .wasted = 0, .bin = 0};
+  thread_local fragmentation_info finfo{
+      .committed = 0, .committed_golden = 0, .wasted = 0, .bin = 0};
 
   const std::size_t global_threshold = double(limit) * GetFlag(FLAGS_mem_defrag_threshold);
   if (global_threshold > rss_mem_current.load(memory_order_relaxed)) {
@@ -249,19 +252,23 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     }
 
     // start checking.
-    finfo.committed = finfo.wasted = 0;
+    finfo.committed = finfo.committed_golden = 0;
+    finfo.wasted = 0;
+    page_utilization_threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
   }
 
   uint64_t start = absl::GetCurrentTimeNanos();
-  int res = zmalloc_get_allocator_fragmentation_step(
-      GetFlag(FLAGS_mem_defrag_page_utilization_threshold), &finfo);
+  int res = zmalloc_get_allocator_fragmentation_step(page_utilization_threshold, &finfo);
   uint64_t duration = absl::GetCurrentTimeNanos() - start;
-  VLOG_IF(1, duration > 20'000) << "Reading memory usage took " << duration / 1'000
-                                << " usec on bin " << finfo.bin;
+  VLOG(1) << "Reading memory usage took " << duration << " ns on bin " << finfo.bin - 1;
+
   if (res == 0) {
     // finished checking.
     last_check_time = time(nullptr);
-
+    if (finfo.committed != finfo.committed_golden) {
+      LOG_FIRST_N(ERROR, 100) << "committed memory computed incorrectly: " << finfo.committed
+                              << " vs " << finfo.committed_golden;
+    }
     const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
     if (finfo.wasted > size_t(finfo.committed * waste_threshold)) {
       VLOG(1) << "memory fragmentation issue found: " << finfo.wasted << " " << finfo.committed;
@@ -359,7 +366,7 @@ uint32_t EngineShard::DefragTask() {
       return util::ProactorBase::kOnIdleMaxLevel;
     }
   }
-  return 3;  // priority.
+  return 6;  // priority.
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
@@ -418,14 +425,15 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
     return;
   }
   auto heartbeat = [this]() { Heartbeat(); };
-
   std::chrono::milliseconds period_ms(*cycle_ms);
 
-  fiber_heartbeat_periodic_ =
-      MakeFiber([this, index = pb->GetPoolIndex(), period_ms, heartbeat]() mutable {
-        ThisFiber::SetName(absl::StrCat("heartbeat_periodic", index));
-        RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
-      });
+  fb2::Fiber::Opts fb_opts{.priority = absl::GetFlag(FLAGS_background_heartbeat)
+                                           ? fb2::FiberPriority::BACKGROUND
+                                           : fb2::FiberPriority::NORMAL,
+                           .name = absl::StrCat("heartbeat_periodic", pb->GetPoolIndex())};
+  fiber_heartbeat_periodic_ = fb2::Fiber(fb_opts, [this, period_ms, heartbeat]() mutable {
+    RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
+  });
   defrag_task_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
 }
 

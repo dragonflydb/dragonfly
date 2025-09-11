@@ -77,7 +77,7 @@ TEST_F(PageUsageStatsTest, Defrag) {
   small_string_.Assign("small-string");
 
   // INT_TAG, defrag will be skipped
-  c_obj_.SetString("1");
+  c_obj_.SetValue("1");
 
   {
     PageUsage p{CollectPageStats::YES, 0.1};
@@ -135,8 +135,6 @@ TEST_F(PageUsageStatsTest, StatCollection) {
   }
 
   constexpr auto page_count_per_flag = 150;
-  // allow for collisions in filter
-  constexpr auto expected_min_count = 140;
 
   auto start = 0;
   for (const uint8_t flag : {MI_DFLY_PAGE_FULL, MI_DFLY_PAGE_USED_FOR_MALLOC, MI_DFLY_HEAP_MISMATCH,
@@ -156,9 +154,11 @@ TEST_F(PageUsageStatsTest, StatCollection) {
   st.Merge(p.CollectedStats(), 1);
 
   EXPECT_GT(st.pages_scanned, 12000);
-  EXPECT_GT(st.pages_full, expected_min_count);
-  EXPECT_GT(st.pages_reserved_for_malloc, expected_min_count);
-  EXPECT_GT(st.pages_marked_for_realloc, expected_min_count);
+
+  // Expect a small error margin due to HLL
+  EXPECT_NEAR(st.pages_full, page_count_per_flag, 5);
+  EXPECT_NEAR(st.pages_reserved_for_malloc, page_count_per_flag, 5);
+  EXPECT_NEAR(st.pages_marked_for_realloc, page_count_per_flag, 5);
 
   const auto usage = st.shard_wide_summary;
 

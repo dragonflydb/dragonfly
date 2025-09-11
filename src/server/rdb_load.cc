@@ -852,7 +852,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       pv_->ReserveString(config_.reserve);
       pv_->AppendString(blob);
     } else {
-      pv_->SetString(blob);
+      pv_->SetValue(blob);
     }
     return;
   }
@@ -2390,8 +2390,12 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
     SET_OR_RETURN(journal_reader_.ReadEntry(), entry);
     done++;
 
-    if (entry.cmd.cmd_args.empty())
+    if (entry.cmd.cmd_args.empty()) {
+      if (entry.opcode == journal::Op::PING) {
+        continue;
+      }
       return RdbError(errc::rdb_file_corrupted);
+    }
 
     if (absl::EqualsIgnoreCase(facade::ToSV(entry.cmd.cmd_args[0]), "FLUSHALL") ||
         absl::EqualsIgnoreCase(facade::ToSV(entry.cmd.cmd_args[0]), "FLUSHDB")) {

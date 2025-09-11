@@ -476,17 +476,23 @@ void ClientCaching(CmdArgList args, SinkReplyBuilder* builder, Transaction* tx,
     return builder->SendError(kSyntaxErr);
   }
 
+  if (!cntx->conn_state.tracking_info_.IsTrackingOn()) {
+    return builder->SendError(
+        "CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or "
+        "OPTOUT mode enabled");
+  }
+
   using Tracking = ConnectionState::ClientTracking;
   CmdArgParser parser{args};
   if (parser.Check("YES")) {
     if (!cntx->conn_state.tracking_info_.HasOption(Tracking::OPTIN)) {
       return builder->SendError(
-          "ERR CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode");
+          "CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode");
     }
   } else if (parser.Check("NO")) {
     if (!cntx->conn_state.tracking_info_.HasOption(Tracking::OPTOUT)) {
       return builder->SendError(
-          "ERR CLIENT CACHING NO is only valid when tracking is enabled in OPTOUT mode");
+          "CLIENT CACHING NO is only valid when tracking is enabled in OPTOUT mode");
     }
     cntx->conn_state.tracking_info_.ResetCachingSequenceNumber();
   } else {
@@ -3500,7 +3506,8 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
         CHECK(replica_);
 
         SetMasterFlagOnAllThreads(true);  // Flip flag before clearing replica
-        last_master_data_ = replica_->Stop();
+        // No partial sync for NO ONE flow
+        replica_->Stop();
         replica_.reset();
 
         StopAllClusterReplicas();
@@ -3635,13 +3642,21 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   auto repl_ptr = replica_;
   CHECK(repl_ptr);
 
+  // Start journal to allow partial sync from same source master
+  shard_set->pool()->AwaitFiberOnAll([this, repl_ptr](auto index, auto*) {
+    auto flow_map = repl_ptr->GetFlowMapAtIndex(index);
+    size_t rec_executed = repl_ptr->GetRecCountExecutedPerShard(flow_map);
+    LOG(INFO) << "Shard " << index << " starts journal at: " << rec_executed;
+    journal()->StartInThreadAtLsn(rec_executed);
+  });
+
   auto info = replica_->GetSummary();
   if (!info.full_sync_done) {
     return builder->SendError("Full sync not done");
   }
 
-  std::error_code ec = replica_->TakeOver(ArgS(args, 0), save_flag);
-  if (ec)
+  std::error_code res = replica_->TakeOver(ArgS(args, 0), save_flag);
+  if (res)
     return builder->SendError("Couldn't execute takeover");
 
   LOG(INFO) << "Takeover successful, promoting this instance to master.";
@@ -3649,9 +3664,11 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   if (IsClusterEnabled()) {
     service().cluster_family().ReconcileMasterReplicaTakeoverSlots(false);
   }
-  SetMasterFlagOnAllThreads(true);
+
   last_master_data_ = replica_->Stop();
   replica_.reset();
+
+  SetMasterFlagOnAllThreads(true);
   return builder->SendOk();
 }
 
@@ -3814,24 +3831,60 @@ void ServerFamily::Latency(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void ServerFamily::ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (args.size() > 1) {
+  // Supported options (case-insensitive):
+  // SAVE | NOSAVE, NOW, FORCE, ABORT, SAFE (Valkey-specific, the same as SAVE in Dragonfly)
+  enum ShutBits : uint32_t {
+    SB_SAVE = 1u << 0,
+    SB_NOSAVE = 1u << 1,
+    SB_NOW = 1u << 2,
+    SB_FORCE = 1u << 3,
+    SB_ABORT = 1u << 4,
+  };
+
+  uint32_t sb = 0;
+
+  CmdArgParser parser(args);
+  while (parser.HasNext()) {
+    // Map SAFE to SAVE directly (fallthrough behavior)
+    ShutBits opt = parser.MapNext("SAVE", SB_SAVE, "NOSAVE", SB_NOSAVE, "NOW", SB_NOW, "FORCE",
+                                  SB_FORCE, "ABORT", SB_ABORT, "SAFE", SB_SAVE);
+    sb |= static_cast<uint32_t>(opt);
+  }
+
+  if (auto perr = parser.TakeError(); perr) {
+    return cmd_cntx.rb->SendError(perr.MakeReply());
+  }
+
+  // Conflicting toggles
+  if ((sb & SB_SAVE) && (sb & SB_NOSAVE)) {
     cmd_cntx.rb->SendError(kSyntaxErr);
     return;
   }
 
-  if (args.size() == 1) {
-    auto sub_cmd = ArgS(args, 0);
-    if (absl::EqualsIgnoreCase(sub_cmd, "SAVE")) {
-    } else if (absl::EqualsIgnoreCase(sub_cmd, "NOSAVE")) {
-      save_on_shutdown_ = false;
-    } else {
-      cmd_cntx.rb->SendError(kSyntaxErr);
-      return;
-    }
+  if (sb & SB_ABORT) {
+    // We currently do not support aborting an in-progress shutdown sequence.
+    cmd_cntx.rb->SendError("SHUTDOWN ABORT is not supported");
+    return;
   }
+
+  // Configure save behavior on shutdown according to options.
+  if (sb & SB_FORCE) {
+    // FORCE implies no snapshot on shutdown regardless of SAVE/SAFE
+    save_on_shutdown_ = false;
+  } else if (sb & SB_NOSAVE) {
+    save_on_shutdown_ = false;
+  } else if (sb & SB_SAVE) {
+    save_on_shutdown_ = true;
+  }
+
+  // Wire NOW/FORCE to a single fast-shutdown flag for listeners.
+  facade::g_shutdown_fast.store((sb & (SB_NOW | SB_FORCE)) != 0, std::memory_order_seq_cst);
 
   CHECK_NOTNULL(acceptor_)->Stop();
   cmd_cntx.rb->SendOk();
+
+  // Reset flag for any subsequent restarts (mainly for tests).
+  facade::g_shutdown_fast.store(false, std::memory_order_seq_cst);
 }
 
 void ServerFamily::Dfly(CmdArgList args, const CommandContext& cmd_cntx) {
