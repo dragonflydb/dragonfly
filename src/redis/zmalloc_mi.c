@@ -4,6 +4,8 @@
 
 #include <assert.h>
 #include <mimalloc.h>
+
+#define MI_BUILD_RELEASE 1
 #include <mimalloc/types.h>
 #include <string.h>
 #include <unistd.h>
@@ -167,8 +169,57 @@ int zmalloc_get_allocator_wasted_blocks(float ratio, size_t* allocated, size_t* 
   *allocated = sum.allocated;
   *commited = sum.comitted;
   *wasted = sum.wasted;
-
   return 1;
+}
+
+// Implemented based on this mimalloc code:
+// https://github.com/microsoft/mimalloc/blob/main/src/heap.c#L27
+int zmalloc_get_allocator_fragmentation_step(float ratio, struct fragmentation_info* info) {
+  if (zmalloc_heap->page_count == 0 || info->bin >= MI_BIN_FULL) {
+    // We avoid iterating over full pages since they are fully utilized.
+    return 0;
+  }
+
+  mi_page_queue_t* pq = &zmalloc_heap->pages[info->bin];
+  const mi_page_t* page = pq->first;
+  while (page != NULL) {
+    const mi_page_t* next = page->next;
+
+    const size_t bsize = page->block_size;
+
+    size_t committed = page->capacity * bsize;
+    info->committed += committed;
+    if (page->used < page->capacity) {
+      size_t used = page->used * bsize;
+
+      size_t threshold = (double)committed * ratio;
+      if (used < threshold) {
+        info->wasted += (committed - used);
+      }
+    }
+    page = next;
+  }
+
+  info->bin++;
+  if (info->bin == MI_BIN_FULL) {  // reached end of bins, reset state
+    info->committed_golden = info->committed;
+    // Add total comitted size of MI_BIN_FULL that we do not traverse
+    // as its tracked by zmalloc_heap->full_page_size variable.
+    info->committed += zmalloc_heap->full_page_size;
+
+    // TODO: it's a test code that makes sure `full_page_size` is correct.
+    // Remove it once we are confident with the implementation.
+    mi_page_queue_t* pq = &zmalloc_heap->pages[MI_BIN_FULL];
+    const mi_page_t* page = pq->first;
+    while (page != NULL) {
+      info->committed_golden += page->capacity * page->block_size;
+      page = page->next;
+    }
+    info->bin = 0;
+    return 0;
+  }
+
+  return -1;
 }
 
 void init_zmalloc_threadlocal(void* heap) {
@@ -179,8 +230,7 @@ void init_zmalloc_threadlocal(void* heap) {
 
 void zmalloc_page_is_underutilized(void* ptr, float ratio, int collect_stats,
                                    mi_page_usage_stats_t* result) {
-  *result = mi_heap_page_is_underutilized(zmalloc_heap, ptr, ratio,
-                                          collect_stats);
+  *result = mi_heap_page_is_underutilized(zmalloc_heap, ptr, ratio, collect_stats);
 }
 
 char* zstrdup(const char* s) {

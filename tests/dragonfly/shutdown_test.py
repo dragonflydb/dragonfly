@@ -54,3 +54,83 @@ class TestDflyAutoLoadSnapshot:
             assert acknowleged_value == int(value_from_snapshot)
 
         await client.connection_pool.disconnect()
+
+
+@dfly_args({"proactor_threads": "2"})
+class TestShutdownOptions:
+    @pytest.mark.asyncio
+    async def test_shutdown_abort_and_invalid_option(self, df_factory):
+        df_args = {"dbfilename": "dump", **BASIC_ARGS, "port": 1121}
+        df_server = df_factory.create(**df_args)
+        df_server.start()
+
+        client = aioredis.Redis(port=df_server.port)
+
+        # ABORT should be rejected and server should remain responsive
+        with pytest.raises(redis.exceptions.ResponseError):
+            await client.execute_command("SHUTDOWN ABORT")
+
+        pong = await client.ping()
+        assert pong is True
+
+        # Invalid option -> syntax error
+        with pytest.raises(redis.exceptions.ResponseError):
+            await client.execute_command("SHUTDOWN FOO")
+
+        await client.connection_pool.disconnect()
+        df_server.stop()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_safe_persists_snapshot(self, df_factory, tmp_path):
+        # Ensure snapshot dir exists and is used
+        snap_dir = tmp_path
+        df_args = {"dbfilename": "dump", "dir": str(snap_dir) + "/", "port": 1122}
+
+        df_server = df_factory.create(**df_args)
+        df_server.start()
+
+        client = aioredis.Redis(port=df_server.port)
+        await client.set("safe_key", "safe_value")
+
+        # SHUTDOWN SAFE should save synchronously and then stop
+        try:
+            await client.execute_command("SHUTDOWN SAFE")
+        except Exception:
+            # Connection may be dropped as part of shutdown; this is acceptable
+            pass
+
+        await client.connection_pool.disconnect()
+
+        # Restart and verify data persisted
+        df_server.start()
+        client = aioredis.Redis(port=df_server.port)
+        val = await client.get("safe_key")
+        assert val == b"safe_value"
+        await client.connection_pool.disconnect()
+        df_server.stop()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_save_persists_snapshot(self, df_factory, tmp_path):
+        # SAVE should follow the same synchronous path as SAFE
+        snap_dir = tmp_path
+        df_args = {"dbfilename": "dump", "dir": str(snap_dir) + "/", "port": 1123}
+
+        df_server = df_factory.create(**df_args)
+        df_server.start()
+
+        client = aioredis.Redis(port=df_server.port)
+        await client.set("save_key", "save_value")
+
+        try:
+            await client.execute_command("SHUTDOWN SAVE")
+        except Exception:
+            pass
+
+        await client.connection_pool.disconnect()
+
+        df_server.start()
+        client = aioredis.Redis(port=df_server.port)
+        val = await client.get("save_key")
+        assert val == b"save_value"
+        await client.connection_pool.disconnect()
+        df_server.stop()

@@ -1033,9 +1033,7 @@ nonstd::expected<CommandList, string> ParseToCommandList(CmdArgList args, bool r
     }
 
     if (cmd == Cmds::OVERFLOW_OPT) {
-      if (read_only) {
-        make_unexpected("BITFIELD_RO only supports the GET subcommand");
-      }
+      // BITFIELD_RO shouldn't support this cmd, but it is ignored in Valkey so we ignore it too
       using pol = Overflow::Policy;
       auto res = parser.MapNext("SAT", pol::SAT, "WRAP", pol::WRAP, "FAIL", pol::FAIL);
       if (!parser.HasError()) {
@@ -1086,7 +1084,7 @@ void SendResults(const vector<ResultType>& results, SinkReplyBuilder* builder) {
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   const size_t total = results.size();
   if (total == 0) {
-    rb->SendNullArray();
+    rb->SendEmptyArray();
     return;
   }
 
@@ -1102,7 +1100,7 @@ void SendResults(const vector<ResultType>& results, SinkReplyBuilder* builder) {
 void BitFieldGeneric(CmdArgList args, bool read_only, Transaction* tx, SinkReplyBuilder* builder) {
   if (args.size() == 1) {
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    rb->SendNullArray();
+    rb->SendEmptyArray();
     return;
   }
   auto key = ArgS(args, 0);
@@ -1394,8 +1392,8 @@ void BitOpsFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
   *registry << CI{"BITPOS", CO::CommandOpt::READONLY, -3, 1, 1, acl::kBitPos}.SetHandler(&BitPos)
             << CI{"BITCOUNT", CO::READONLY, -2, 1, 1, acl::kBitCount}.SetHandler(&BitCount)
-            << CI{"BITFIELD", CO::WRITE, -3, 1, 1, acl::kBitField}.SetHandler(&BitField)
-            << CI{"BITFIELD_RO", CO::READONLY, -5, 1, 1, acl::kBitFieldRo}.SetHandler(&BitFieldRo)
+            << CI{"BITFIELD", CO::WRITE, -2, 1, 1, acl::kBitField}.SetHandler(&BitField)
+            << CI{"BITFIELD_RO", CO::READONLY, -2, 1, 1, acl::kBitFieldRo}.SetHandler(&BitFieldRo)
             << CI{"BITOP", CO::WRITE | CO::NO_AUTOJOURNAL, -4, 2, -1, acl::kBitOp}.SetHandler(
                    &BitOp)
             << CI{"GETBIT", CO::READONLY | CO::FAST, 3, 1, 1, acl::kGetBit}.SetHandler(&GetBit)

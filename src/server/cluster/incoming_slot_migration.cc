@@ -19,6 +19,10 @@
 #include "util/fibers/synchronization.h"
 
 ABSL_DECLARE_FLAG(int, migration_finalization_timeout_ms);
+ABSL_FLAG(uint32_t, slot_migration_throttle_us, 0,
+          "Incoming migration throttle time in us, we throttle every 100us of migration commands "
+          "processing, 0 to disable. Recommended value is 20. Values more than 50 can "
+          "significantly reduce migration speed.");
 
 namespace dfly::cluster {
 
@@ -60,6 +64,9 @@ class ClusterShardMigration {
     });
     JournalReader reader{source, 0};
     TransactionReader tx_reader;
+    uint64_t last_sleep = fb2::ProactorBase::GetMonotonicTimeNs();
+
+    const uint64_t throttle_us = absl::GetFlag(FLAGS_slot_migration_throttle_us);
 
     while (cntx->IsRunning()) {
       if (pause_) {
@@ -110,6 +117,13 @@ class ClusterShardMigration {
           cntx->ReportError(std::string{kIncomingMigrationOOM});
           in_migration_->ReportFatalError(std::string{kIncomingMigrationOOM});
           break;
+        }
+      }
+      if (throttle_us > 0) {
+        // every 100us we do sleep for 20us to allow other commands to be processed
+        if (uint64_t now = fb2::ProactorBase::GetMonotonicTimeNs(); now - last_sleep > 100000) {
+          ThisFiber::SleepFor(std::chrono::microseconds(throttle_us));
+          last_sleep = now;
         }
       }
     }

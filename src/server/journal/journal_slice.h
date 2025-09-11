@@ -61,6 +61,10 @@ class JournalSlice {
   size_t GetRingBufferBytes() const;
   void ResetRingBuffer();
 
+  void SetStartingLSN(LSN lsn) {
+    lsn_ = lsn;
+  }
+
  private:
   void CallOnChange(JournalChangeItem* item);
   boost::circular_buffer<JournalItem> ring_buffer_;

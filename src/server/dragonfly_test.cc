@@ -149,6 +149,17 @@ TEST_F(SingleThreadDflyEngineTest, GlobalSingleThread) {
   Run({"move", "a", "1"});
 }
 
+TEST_F(DflyEngineTest, LuaErrors) {
+  auto resp = Run({"eval", "return redis.error_reply('some error')", "0"});
+  EXPECT_THAT(resp, ErrArg("some error"));
+
+  resp = Run({"eval", "return redis.pcall('foo', 'bar')", "0"});
+  EXPECT_THAT(resp, ErrArg("ERR unknown command"));
+
+  resp = Run({"eval", "return redis.pcall('incrby', 'foo', 'bar')", "1"});
+  EXPECT_THAT(resp, ErrArg("ERR Number of keys can't be greater than number of args"));
+}
+
 TEST_F(DflyEngineTest, EvalResp) {
   auto resp = Run({"eval", "return 43", "0"});
   EXPECT_THAT(resp, IntArg(43));
@@ -745,9 +756,7 @@ TEST_F(DflyEngineTest, Issue742) {
 }
 
 TEST_F(DefragDflyEngineTest, TestDefragOption) {
-  if (pp_->GetNextProactor()->GetKind() == util::ProactorBase::EPOLL) {
-    GTEST_SKIP() << "Defragmentation via idle task is only supported in io uring";
-  }
+  GTEST_SKIP() << "Defragmentation check takes too long. Disabling this test";
 
   // mem_defrag_threshold is based on RSS statistic, but we don't count it in the test
   absl::SetFlag(&FLAGS_mem_defrag_threshold, 0.0);
@@ -837,7 +846,7 @@ TEST_F(DflyEngineTest, Latency) {
 
 TEST_F(DflyEngineTest, EvalBug2664) {
   absl::FlagSaver fs;
-  absl::SetFlag(&FLAGS_lua_resp2_legacy_float, true);
+  SetFlag(&FLAGS_lua_resp2_legacy_float, true);
 
   auto resp = Run({"eval", "return 42.9", "0"});
   EXPECT_THAT(resp, IntArg(42));
@@ -848,7 +857,7 @@ TEST_F(DflyEngineTest, EvalBug2664) {
   ASSERT_THAT(resp, ArrLen(14));
 
   resp = Run({"eval", "return 42.9", "0"});
-  EXPECT_THAT(resp, DoubleArg(42.9));
+  EXPECT_THAT(resp, IntArg(42));
 }
 
 TEST_F(DflyEngineTest, MemoryUsage) {

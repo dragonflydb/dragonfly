@@ -2390,8 +2390,12 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
     SET_OR_RETURN(journal_reader_.ReadEntry(), entry);
     done++;
 
-    if (entry.cmd.cmd_args.empty())
+    if (entry.cmd.cmd_args.empty()) {
+      if (entry.opcode == journal::Op::PING) {
+        continue;
+      }
       return RdbError(errc::rdb_file_corrupted);
+    }
 
     if (absl::EqualsIgnoreCase(facade::ToSV(entry.cmd.cmd_args[0]), "FLUSHALL") ||
         absl::EqualsIgnoreCase(facade::ToSV(entry.cmd.cmd_args[0]), "FLUSHDB")) {
@@ -2812,6 +2816,8 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   facade::RespVec resp_vec;
   facade::RedisParser parser;
 
+  // Prepend a whitespace so names starting with ':' are treated as names, not RESP tokens.
+  def.insert(def.begin(), ' ');
   def += "\r\n";  // RESP terminator
   io::MutableBytes buffer{reinterpret_cast<uint8_t*>(def.data()), def.size()};
   auto res = parser.Parse(buffer, &consumed, &resp_vec);

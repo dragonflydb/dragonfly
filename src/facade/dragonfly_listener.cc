@@ -66,6 +66,9 @@ CONFIG_enum(tls_auth_clients, "yes", "", tls_auth_clients_enum, tls_auth_clients
 
 namespace facade {
 
+// See dragonfly_listener.h
+std::atomic<bool> g_shutdown_fast{false};
+
 using namespace util;
 using util::detail::SafeErrorMessage;
 
@@ -252,7 +255,12 @@ bool Listener::IsMainInterface() const {
 }
 
 void Listener::PreShutdown() {
-  // Iterate on all connections and allow them to finish their commands for
+  // If NOW/FORCE requested, expedite shutdown without waiting.
+  if (g_shutdown_fast.load(std::memory_order_acquire)) {
+    return;
+  }
+
+  // Otherwise: Iterate on all connections and allow them to finish their commands for
   // a short period.
   // Executed commands can be visible in snapshots or replicas, but if we close the client
   // connections too fast we might not send the acknowledgment for those commands.

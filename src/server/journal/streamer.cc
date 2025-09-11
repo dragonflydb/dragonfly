@@ -28,12 +28,12 @@ using namespace facade;
 ABSL_FLAG(uint32_t, replication_timeout, 30000,
           "Time in milliseconds to wait for the replication writes being stuck.");
 
-ABSL_FLAG(uint32_t, replication_stream_output_limit, 64_KB,
+ABSL_FLAG(uint32_t, replication_stream_output_limit, 1_MB,
           "Time to wait for the replication output buffer go below the throttle limit");
 
-ABSL_FLAG(uint32_t, migration_buckets_serialization_threshold, 100,
+ABSL_FLAG(uint32_t, migration_buckets_serialization_threshold, 10,
           "The Number of buckets to serialize on each iteration before yielding");
-ABSL_FLAG(uint32_t, migration_buckets_sleep_usec, 100,
+ABSL_FLAG(uint32_t, migration_buckets_sleep_usec, 500,
           "Sleep time in microseconds after each time we reach "
           "migration_buckets_serialization_threshold");
 
@@ -169,6 +169,15 @@ void JournalStreamer::Cancel() {
 
 size_t JournalStreamer::UsedBytes() const {
   return pending_buf_.Size();
+}
+
+std::string JournalStreamer::FormatInternalState() const {
+  return absl::StrCat(
+      "pending_buf_size:", pending_buf_.Size(), " in_flight_bytes:", in_flight_bytes_,
+      " total_sent:", total_sent_, " throttle_count:", throttle_count_,
+      " total_throttle_wait_usec:", total_throttle_wait_usec_,
+      " throttle_waiters:", throttle_waiters_, " last_async_write_time_ms:", last_async_write_time_,
+      " last_lsn_time_s:", last_lsn_time_, " last_lsn_writen_:", last_lsn_writen_);
 }
 
 void JournalStreamer::Write(std::string str) {
