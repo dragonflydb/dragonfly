@@ -122,7 +122,7 @@ class RestoreStreamer : public JournalStreamer {
   // Returns true if any entry was actually written
   bool WriteBucket(PrimeTable::bucket_iterator it);
 
-  void WriteEntry(std::string_view key, const PrimeValue& pk, const PrimeValue& pv,
+  void WriteEntry(std::string_view key, const PrimeKey& pk, const PrimeValue& pv,
                   uint64_t expire_ms);
 
   struct Stats {
