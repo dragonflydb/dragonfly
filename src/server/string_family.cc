@@ -186,7 +186,7 @@ OpResult<TResultOrT<size_t>> OpSetRange(const OpArgs& op_args, string_view key, 
       value = GetString(res.it->second);
 
     size_t len = SetRange(&value, start, range);
-    res.it->second.SetString(value);
+    res.it->second.SetValue(value);
     return {len};
   }
 }
@@ -240,7 +240,7 @@ OpResult<StringResult> OpGetRange(const OpArgs& op_args, string_view key, int32_
   }
 };
 
-size_t ExtendExisting(DbSlice::Iterator it, string_view key, string_view val, bool prepend) {
+size_t ExtendExisting(const DbSlice::Iterator& it, string_view key, string_view val, bool prepend) {
   string tmp, new_val;
   string_view slice = it->second.GetSlice(&tmp);
 
@@ -249,7 +249,7 @@ size_t ExtendExisting(DbSlice::Iterator it, string_view key, string_view val, bo
   else
     new_val = absl::StrCat(slice, val);
 
-  it->second.SetString(new_val);
+  it->second.SetValue(new_val);
 
   return new_val.size();
 }
@@ -275,7 +275,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
 
   if (add_res.is_new) {
     char* str = RedisReplyBuilder::FormatDouble(val, buf, sizeof(buf));
-    add_res.it->second.SetString(str);
+    add_res.it->second.SetValue(str);
 
     return val;
   }
@@ -299,7 +299,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
 
   char* str = RedisReplyBuilder::FormatDouble(base, buf, sizeof(buf));
 
-  add_res.it->second.SetString(str);
+  add_res.it->second.SetValue(str);
 
   return base;
 }
@@ -652,7 +652,7 @@ OpResult<TResultOrT<size_t>> OpExtend(const OpArgs& op_args, std::string_view ke
   RETURN_ON_BAD_STATUS(it_res);
 
   if (it_res->is_new) {
-    it_res->it->second.SetString(value);
+    it_res->it->second.SetValue(value);
     return {it_res->it->second.Size()};
   }
 
@@ -960,7 +960,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   }
 
   // overwrite existing entry.
-  prime_value.SetString(value);
+  prime_value.SetValue(value);
 
   DCHECK_EQ(has_expire, prime_value.HasExpire());
 
@@ -973,7 +973,7 @@ void SetCmd::AddNew(const SetParams& params, const DbSlice::Iterator& it, std::s
   auto& db_slice = op_args_.GetDbSlice();
 
   // Adding new value.
-  PrimeValue tvalue{value};
+  PrimeValue tvalue{value, false};
   tvalue.SetFlag(params.memcache_flags != 0);
   it->second = std::move(tvalue);
 
