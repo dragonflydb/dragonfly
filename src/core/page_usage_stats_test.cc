@@ -10,6 +10,7 @@
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "core/mi_memory_resource.h"
+#include "core/qlist.h"
 #include "core/score_map.h"
 #include "core/small_string.h"
 #include "core/sorted_map.h"
@@ -49,6 +50,7 @@ class PageUsageStatsTest : public ::testing::Test {
     string_set_ = std::make_unique<StringSet>(&m_);
     string_map_ = std::make_unique<StringMap>(&m_);
     SmallString::InitThreadLocal(m_.heap());
+    qlist_ = std::make_unique<QList>(2, 2);
   }
 
   void TearDown() override {
@@ -57,6 +59,7 @@ class PageUsageStatsTest : public ::testing::Test {
     string_set_.reset();
     string_map_.reset();
     small_string_.Free();
+    qlist_->Clear();
     EXPECT_EQ(zmalloc_used_memory_tl, 0);
   }
 
@@ -66,6 +69,7 @@ class PageUsageStatsTest : public ::testing::Test {
   std::unique_ptr<StringSet> string_set_;
   std::unique_ptr<StringMap> string_map_;
   SmallString small_string_{};
+  std::unique_ptr<QList> qlist_;
   CompactObj c_obj_{};
 };
 
@@ -79,6 +83,8 @@ TEST_F(PageUsageStatsTest, Defrag) {
   // INT_TAG, defrag will be skipped
   c_obj_.SetString("1");
 
+  qlist_->Push("xxxx", QList::HEAD);
+
   {
     PageUsage p{CollectPageStats::YES, 0.1};
     score_map_->begin().ReallocIfNeeded(&p);
@@ -87,6 +93,7 @@ TEST_F(PageUsageStatsTest, Defrag) {
     string_map_->begin().ReallocIfNeeded(&p);
     small_string_.DefragIfNeeded(&p);
     c_obj_.DefragIfNeeded(&p);
+    qlist_->DefragIfNeeded(&p);
 
     const auto stats = p.CollectedStats();
     EXPECT_GT(stats.pages_scanned, 0);
@@ -100,6 +107,7 @@ TEST_F(PageUsageStatsTest, Defrag) {
     string_set_->begin().ReallocIfNeeded(&p);
     string_map_->begin().ReallocIfNeeded(&p);
     small_string_.DefragIfNeeded(&p);
+    qlist_->DefragIfNeeded(&p);
     EXPECT_EQ(p.CollectedStats().pages_scanned, 0);
   }
 }
