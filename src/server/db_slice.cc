@@ -1182,8 +1182,8 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const 
 }
 
 void DbSlice::PreUpdateBlocking(DbIndex db_ind, const Iterator& it) {
-  auto inner_it = it.GetInnerIt();
-  CallChangeCallbacks(db_ind, ChangeReq{inner_it});
+  CallChangeCallbacks(db_ind, ChangeReq{it.GetInnerIt()});  // blocking point.
+  auto inner_it = it.GetInnerIt();                          // must call again to launder.
   inner_it.SetVersion(NextVersion());
 }
 
