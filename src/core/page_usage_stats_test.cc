@@ -77,7 +77,7 @@ TEST_F(PageUsageStatsTest, Defrag) {
   small_string_.Assign("small-string");
 
   // INT_TAG, defrag will be skipped
-  c_obj_.SetString("1");
+  c_obj_.SetValue("1");
 
   {
     PageUsage p{CollectPageStats::YES, 0.1};
