@@ -332,6 +332,7 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
 
   if (!find_res) {
     DVLOG(1) << "ScanOp: find failed: " << find_res << ", baling out";
+    *cursor = 0;
     return find_res.status();
   }
 

@@ -166,9 +166,9 @@ void StringMap::RandomPairs(unsigned int count, std::vector<sds>& keys, std::vec
   for (unsigned int i = 0; i < index; ++i)
     ++itr;
 
-  keys.reserve(count);
+  keys.resize(count);
   if (with_value)
-    vals.reserve(count);
+    vals.resize(count);
 
   while (itr != end() && pick_index < count) {
     auto [key, val] = *itr;

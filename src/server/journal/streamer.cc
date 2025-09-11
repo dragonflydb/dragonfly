@@ -28,12 +28,12 @@ using namespace facade;
 ABSL_FLAG(uint32_t, replication_timeout, 30000,
           "Time in milliseconds to wait for the replication writes being stuck.");
 
-ABSL_FLAG(uint32_t, replication_stream_output_limit, 64_KB,
+ABSL_FLAG(uint32_t, replication_stream_output_limit, 1_MB,
           "Time to wait for the replication output buffer go below the throttle limit");
 
-ABSL_FLAG(uint32_t, migration_buckets_serialization_threshold, 100,
+ABSL_FLAG(uint32_t, migration_buckets_serialization_threshold, 10,
           "The Number of buckets to serialize on each iteration before yielding");
-ABSL_FLAG(uint32_t, migration_buckets_sleep_usec, 100,
+ABSL_FLAG(uint32_t, migration_buckets_sleep_usec, 500,
           "Sleep time in microseconds after each time we reach "
           "migration_buckets_serialization_threshold");
 

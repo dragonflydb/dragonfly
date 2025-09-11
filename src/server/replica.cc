@@ -28,6 +28,7 @@ extern "C" {
 #include "facade/socket_utils.h"
 #include "server/error.h"
 #include "server/journal/executor.h"
+#include "server/journal/journal.h"
 #include "server/journal/serializer.h"
 #include "server/main_service.h"
 #include "server/rdb_load.h"
@@ -806,7 +807,7 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(
                   ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &exec_st_));
 
   VLOG(1) << "Sending on flow " << master_context_.master_repl_id << " "
-          << master_context_.dfly_session_id << " " << flow_id_;
+          << master_context_.dfly_session_id << " " << flow_id_ << " lsn: " << lsn.value_or(-1);
 
   // DFLY FLOW <master_id> <session_id> <flow_id> [lsn] [last_master_id lsn-vec]
   std::string cmd = StrCat("DFLY FLOW ", master_context_.master_repl_id, " ",
@@ -952,6 +953,12 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
     } else if (tx_data->opcode == journal::Op::PING) {
       force_ping_ = true;
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
+      auto* journal = ServerState::tlocal()->journal();
+      if (journal) {
+        // We must register this entry to the journal to allow partial sync
+        // if journal is active.
+        journal->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
+      }
     } else {
       const bool is_successful = ExecuteTx(std::move(*tx_data), cntx);
       if (is_successful) {
@@ -1258,6 +1265,19 @@ std::string Replica::GetCurrentPhase() const {
     return "FULL_SYNC_IN_PROGRESS";
 
   return "STABLE_SYNC";
+}
+
+std::vector<unsigned> Replica::GetFlowMapAtIndex(size_t index) const {
+  DCHECK(index < thread_flow_map_.size());
+  return thread_flow_map_[index];
+}
+
+size_t Replica::GetRecCountExecutedPerShard(const std::vector<unsigned>& indexes) const {
+  size_t total_shard_lsn = 0;
+  for (auto index : indexes) {
+    total_shard_lsn += shard_flows_[index]->JournalExecutedCount() + 1;
+  }
+  return total_shard_lsn;
 }
 
 uint32_t DflyShardReplica::FlowId() const {

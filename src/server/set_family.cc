@@ -965,8 +965,10 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cur
                            const ScanOpts& scan_op) {
   auto find_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_SET);
 
-  if (!find_res)
+  if (!find_res) {
+    *cursor = 0;
     return find_res.status();
+  }
 
   auto it = find_res.value();
   StringVec res;
