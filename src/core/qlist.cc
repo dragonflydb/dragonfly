@@ -17,6 +17,7 @@ extern "C" {
 #include <lz4frame.h>
 
 #include "base/logging.h"
+#include "core/page_usage_stats.h"
 
 using namespace std;
 
@@ -383,6 +384,30 @@ __thread QList::Stats QList::stats;
 
 void QList::SetPackedThreshold(unsigned threshold) {
   packed_threshold = threshold;
+}
+
+size_t QList::DefragIfNeeded(PageUsage* page_usage) {
+  size_t reallocated = 0;
+
+  for (Node* curr = head_; curr; curr = curr->next) {
+    if (!page_usage->IsPageForObjectUnderUtilized(curr->entry)) {
+      continue;
+    }
+
+    // Data pointed to by the nodes is reallocated. The nodes themselves are not reallocated because
+    // of their constant (and relatively small, ~40 bytes per object) size. Defragmentation fixes
+    // fragmented memory allocation, which usually happens when variable-sized blocks of data are
+    // allocated and deallocated, which is not expected with nodes.
+    auto new_entry = static_cast<unsigned char*>(zmalloc(curr->sz));
+    memcpy(new_entry, curr->entry, curr->sz);
+
+    unsigned char* old_entry = curr->entry;
+    curr->entry = new_entry;
+
+    zfree(old_entry);
+    ++reallocated;
+  }
+  return reallocated;
 }
 
 QList::QList(int fill, int compress) : fill_(fill), compress_(compress), bookmark_count_(0) {
