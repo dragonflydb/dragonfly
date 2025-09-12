@@ -176,7 +176,7 @@ bool PageUsage::ConsumePageStats(mi_page_usage_stats_t stat) {
   if (collect_stats_ == CollectPageStats::YES) {
     unique_pages_.AddStat(stat);
   }
-  return should_reallocate;
+  return force_reallocate_ || should_reallocate;
 }
 
 }  // namespace dfly
