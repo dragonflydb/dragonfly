@@ -164,10 +164,10 @@ TEST_F(MultiTest, PerDbHitMissStats) {
   auto metrics = GetMetrics();
 
   EXPECT_GE(metrics.db_stats.size(), 2u);
-  EXPECT_EQ(metrics.db_stats[0].hits, 1u);
-  EXPECT_EQ(metrics.db_stats[0].misses, 1u);
-  EXPECT_EQ(metrics.db_stats[1].hits, 1u);
-  EXPECT_EQ(metrics.db_stats[1].misses, 1u);
+  EXPECT_EQ(metrics.db_stats[0].events.hits, 1u);
+  EXPECT_EQ(metrics.db_stats[0].events.misses, 1u);
+  EXPECT_EQ(metrics.db_stats[1].events.hits, 1u);
+  EXPECT_EQ(metrics.db_stats[1].events.misses, 1u);
 
   EXPECT_EQ(metrics.events.hits, 2u);
   EXPECT_EQ(metrics.events.misses, 2u);
@@ -180,14 +180,14 @@ TEST_F(MultiTest, PerDbHitMissStatsReset) {
   Run({"GET", "key2"});
 
   auto before = GetMetrics();
-  ASSERT_GT(before.db_stats[0].hits, 0u);
-  ASSERT_GT(before.db_stats[0].misses, 0u);
+  ASSERT_GT(before.db_stats[0].events.hits, 0u);
+  ASSERT_GT(before.db_stats[0].events.misses, 0u);
 
-  Run({"CONFIG", "RESETSTAT"});
+  EXPECT_EQ("OK", Run({"CONFIG", "RESETSTAT"}));
 
   auto after = GetMetrics();
-  EXPECT_EQ(after.db_stats[0].hits, 0u);
-  EXPECT_EQ(after.db_stats[0].misses, 0u);
+  EXPECT_EQ(after.db_stats[0].events.hits, 0u);
+  EXPECT_EQ(after.db_stats[0].events.misses, 0u);
 }
 
 TEST_F(MultiTest, PerDbHitMissInfoOutput) {
@@ -198,7 +198,7 @@ TEST_F(MultiTest, PerDbHitMissInfoOutput) {
 
   auto info_resp = Run({"INFO", "keyspace"});
   ASSERT_TRUE(info_resp.type == RespExpr::STRING);
-  string info_str = ToSV(info_resp.GetBuf());
+  string info_str = info_resp.GetString();
   EXPECT_THAT(info_str, HasSubstr("hits=1"));
   EXPECT_THAT(info_str, HasSubstr("misses=1"));
   EXPECT_THAT(info_str, HasSubstr("hit_ratio=50.00"));

@@ -36,10 +36,10 @@ DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
   ADD(obj_memory_usage);
   ADD(tiered_entries);
   ADD(tiered_used_bytes);
-  ADD(hits);
-  ADD(misses);
-  ADD(expired_keys);
-  ADD(evicted_keys);
+  ADD(events.hits);
+  ADD(events.misses);
+  ADD(events.expired_keys);
+  ADD(events.evicted_keys);
 
   for (size_t i = 0; i < o.memory_usage_by_type.size(); ++i) {
     memory_usage_by_type[i] += o.memory_usage_by_type[i];

@@ -70,13 +70,15 @@ struct DbTableStats {
   size_t tiered_entries = 0;
   size_t tiered_used_bytes = 0;
 
-  // Per-database hits/misses on keys
-  size_t hits = 0;
-  size_t misses = 0;
+  struct {
+    // Per-database hits/misses on keys
+    size_t hits = 0;
+    size_t misses = 0;
 
-  // Per-database expired/evicted keys
-  size_t expired_keys = 0;
-  size_t evicted_keys = 0;
+    // Per-database expired/evicted keys
+    size_t expired_keys = 0;
+    size_t evicted_keys = 0;
+  } events;
 
   std::array<size_t, OBJ_TYPE_MAX> memory_usage_by_type = {};
 
