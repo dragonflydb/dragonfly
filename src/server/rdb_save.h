@@ -95,9 +95,6 @@ class RdbSaver {
   // cll allows breaking in the middle.
   void StartSnapshotInShard(bool stream_journal, ExecutionState* cntx, EngineShard* shard);
 
-  // Send only the incremental snapshot since start_lsn.
-  void StartIncrementalSnapshotInShard(LSN start_lsn, ExecutionState* cntx, EngineShard* shard);
-
   // Stops full-sync serialization for replication in the shard's thread.
   std::error_code StopFullSyncInShard(EngineShard* shard);
 

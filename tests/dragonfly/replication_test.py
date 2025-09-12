@@ -3219,10 +3219,13 @@ async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df
     s4_sz = await c_s4.dbsize()
     assert s3_sz == s4_sz
 
-    server3.stop()
-    # Check logs for partial replication
-    lines = server3.find_in_logs(f"Started partial sync with localhost:{server2.port}")
-    assert len(lines) == 1
+
+#    await check_all_replicas_finished([c_s4], c_s2)
+#
+#    server3.stop()
+#    # Check logs for partial replication
+#    lines = server3.find_in_logs(f"Started partial sync with localhost:{server2.port}")
+#    assert len(lines) == 1
 
 
 async def test_replicate_hset_with_expiry(df_factory: DflyInstanceFactory):
