@@ -523,7 +523,8 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
         uint64_t expire = 0;
         if (pv.HasExpire()) {
           auto eit = db_slice_->databases()[0]->expire.Find(it->first);
-          expire = db_slice_->ExpireTime(eit);
+          CHECK(IsValid(eit));
+          expire = db_slice_->ExpireTime(eit->second);
         }
 
         WriteEntry(key, it->first, pv, expire);
@@ -568,7 +569,7 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
   stats_.throttle_usec_on_db_update += total_throttle_wait_usec_ - throttle_usec_start;
 }
 
-void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
+void RestoreStreamer::WriteEntry(string_view key, const PrimeKey& pk, const PrimeValue& pv,
                                  uint64_t expire_ms) {
   stats_.commands += cmd_serializer_->SerializeEntry(key, pk, pv, expire_ms);
 }
