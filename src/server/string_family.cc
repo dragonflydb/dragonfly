@@ -227,7 +227,7 @@ OpResult<StringResult> OpGetRange(const OpArgs& op_args, string_view key, int32_
   }
   RETURN_ON_BAD_STATUS(it_res);
 
-  if (const CompactObj& co = it_res.value()->second; co.IsExternal()) {
+  if (const PrimeValue& co = it_res.value()->second; co.IsExternal()) {
     fb2::Future<io::Result<std::string>> fut;
     op_args.shard->tiered_storage()->Read(
         op_args.db_cntx.db_index, key, co,
