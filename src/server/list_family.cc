@@ -1314,8 +1314,7 @@ void ListFamily::Register(CommandRegistry* registry) {
       << CI{"LPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(LPush)
       << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(LPushX)
       << CI{"LPOP", CO::WRITE | CO::FAST, -2, 1, 1}.HFUNC(LPop)
-      << CI{"LMPOP", CO::WRITE | CO::SLOW | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(
-             LMPop)
+      << CI{"LMPOP", CO::WRITE | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(LMPop)
       << CI{"BLMPOP", CO::WRITE | CO::BLOCKING | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -5, 3, 3}
              .HFUNC(BLMPop)
       << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(RPush)

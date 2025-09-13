@@ -2885,10 +2885,9 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"ZINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZInterCard}.HFUNC(
              ZInterCard)
       << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, acl::kZLexCount}.HFUNC(ZLexCount)
-      << CI{"ZMPOP",    CO::SLOW | CO::WRITE | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2,
-            acl::kZMPop}
+      << CI{"ZMPOP", CO::WRITE | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2, acl::kZMPop}
              .HFUNC(ZMPop)
-      << CI{"BZMPOP", CO::SLOW | CO::WRITE | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL,
+      << CI{"BZMPOP", CO::WRITE | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL,
             -5,       3,
             3,        acl::kBZMPop}
              .HFUNC(BZMPop)
