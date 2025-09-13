@@ -6,6 +6,7 @@
 
 #include <absl/container/inlined_vector.h>
 #include <absl/strings/match.h>
+#include <absl/strings/str_cat.h>
 
 #include <algorithm>
 #include <array>
@@ -13,7 +14,6 @@
 #include <cstdint>
 #include <variant>
 
-#include "absl/strings/str_cat.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
@@ -52,42 +52,21 @@ using CI = CommandId;
 enum class ExpT { EX, PX, EXAT, PXAT };
 
 constexpr uint32_t kMaxStrLen = 1 << 28;
-constexpr uint64_t kSecondToMilliSecond = 1000;
-constexpr uint64_t kMilliSecondToNanoSecond = 1000000;
-constexpr uint64_t kSecondToNanoSecond = 1000000000;
 
 // Either immediately available value or tiering future + result
 template <typename T> using TResultOrT = variant<T, TieredStorage::TResult<T>>;
 using StringResult = TResultOrT<string>;
 
-void CopyValueToBuffer(const PrimeValue& pv, char* dest) {
-  DCHECK_EQ(pv.ObjType(), OBJ_STRING);
-  DCHECK(!pv.IsExternal());
-  pv.GetString(dest);
-}
-
-string GetString(const PrimeValue& pv) {
-  string res;
-  DCHECK_EQ(pv.ObjType(), OBJ_STRING);
-
-  if (pv.ObjType() != OBJ_STRING)
-    return res;
-  res.resize(pv.Size());
-  CopyValueToBuffer(pv, res.data());
-
-  return res;
-}
-
 StringResult ReadString(DbIndex dbid, string_view key, const PrimeValue& pv, EngineShard* es) {
   return pv.IsExternal() ? StringResult{es->tiered_storage()->Read(dbid, key, pv)}
-                         : StringResult{GetString(pv)};
+                         : StringResult{pv.ToString()};
 }
 
 // Helper for performing SET operations with various options
 class SetCmd {
  public:
-  explicit SetCmd(OpArgs op_args, bool manual_journal)
-      : op_args_(op_args), manual_journal_{manual_journal} {
+  explicit SetCmd(OpArgs op_args, bool explicit_journal)
+      : op_args_(op_args), explicit_journal_{explicit_journal} {
   }
 
   enum SetFlags {
@@ -129,7 +108,7 @@ class SetCmd {
   OpStatus CachePrevIfNeeded(const SetParams& params, DbSlice::Iterator it);
 
   const OpArgs op_args_;
-  bool manual_journal_;
+  bool explicit_journal_;  // call RecordJournal (auto journaling disabled)
 };
 
 size_t SetRange(std::string* value, size_t start, std::string_view range) {
@@ -183,7 +162,7 @@ OpResult<TResultOrT<size_t>> OpSetRange(const OpArgs& op_args, string_view key, 
     string value;
 
     if (!res.is_new)
-      value = GetString(res.it->second);
+      value = res.it->second.ToString();
 
     size_t len = SetRange(&value, start, range);
     res.it->second.SetString(value);
@@ -240,17 +219,13 @@ OpResult<StringResult> OpGetRange(const OpArgs& op_args, string_view key, int32_
   }
 };
 
+// TODO: Don't copy whole value just to append
 size_t ExtendExisting(DbSlice::Iterator it, string_view key, string_view val, bool prepend) {
-  string tmp, new_val;
+  string tmp;
   string_view slice = it->second.GetSlice(&tmp);
 
-  if (prepend)
-    new_val = absl::StrCat(val, slice);
-  else
-    new_val = absl::StrCat(slice, val);
-
+  string new_val = prepend ? absl::StrCat(val, slice) : absl::StrCat(slice, val);
   it->second.SetString(new_val);
-
   return new_val.size();
 }
 
@@ -367,8 +342,7 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
     stored++;
   }
 
-  // Above loop could have parial success (e.g. OOM), so replicate only what was
-  // changed
+  // Above loop could have parial success (e.g. OOM), replicate only what changed
   if (auto journal = op_args.shard->journal(); journal) {
     if (stored * 2 == args.Size()) {
       RecordJournal(op_args, "MSET", args, op_args.tx->GetUniqueShardCnt());
@@ -390,11 +364,13 @@ bool IsValueWithinBounds(const int64_t value, const int64_t bound) {
   return value <= INT64_MAX + bound;
 }
 
-// emission_interval_ns assumed to be positive
+// emission_interval_ns assumed to be positive // TODO: Change to unsigned??
 // limit is assumed to be positive
 OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view key,
                                        const int64_t limit, const int64_t emission_interval_ns,
                                        const uint64_t quantity) {
+  constexpr uint64_t kSecondToMilliSecond = 1000;
+  constexpr uint64_t kMilliSecondToNanoSecond = 1000000;
   auto& db_slice = op_args.GetDbSlice();
 
   // Total size of the bucket
@@ -612,7 +588,7 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, uint8_t f
       };
       shard->tiered_storage()->Read(t->GetDbIndex(), it.key(), value, std::move(cb));
     } else {
-      CopyValueToBuffer(value, next);
+      value.GetString(next);
     }
 
     size_t size = value.Size();
@@ -745,46 +721,11 @@ void ExtendGeneric(CmdArgList args, bool prepend, Transaction* tx, SinkReplyBuil
 
 // Wrapper to call SetCmd::Set in ScheduleSingleHop
 OpStatus SetGeneric(const SetCmd::SetParams& sparams, string_view key, string_view value,
-                    bool manual_journal, Transaction* tx) {
-  DCHECK(tx);
-
-  return tx->ScheduleSingleHop([&](Transaction* t, EngineShard* shard) {
-    return SetCmd(t->GetOpArgs(shard), manual_journal).Set(sparams, key, value);
+                    const CommandContext& ctx) {
+  bool explicit_journal = ctx.conn_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
+  return ctx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* shard) {
+    return SetCmd(t->GetOpArgs(shard), explicit_journal).Set(sparams, key, value);
   });
-}
-
-/// (P)SETEX key seconds value
-void SetExGeneric(bool seconds, CmdArgList args, const CommandId* cid, Transaction* tx,
-                  SinkReplyBuilder* builder) {
-  string_view key = ArgS(args, 0);
-  string_view ex = ArgS(args, 1);
-  string_view value = ArgS(args, 2);
-  int64_t unit_vals;
-
-  if (!absl::SimpleAtoi(ex, &unit_vals)) {
-    return builder->SendError(kInvalidIntErr, kSyntaxErrType);
-  }
-
-  if (unit_vals < 1) {
-    return builder->SendError(InvalidExpireTime(cid->name()));
-  }
-
-  DbSlice::ExpireParams expiry{
-      .value = unit_vals,
-      .unit = seconds ? TimeUnit::SEC : TimeUnit::MSEC,
-      .absolute = false,
-  };
-
-  int64_t now_ms = GetCurrentTimeMs();
-  auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
-  if (abs_ms < 0)
-    return builder->SendError(InvalidExpireTime("set"));
-
-  SetCmd::SetParams sparams;
-  sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
-  sparams.expire_after_ms = expiry.Calculate(now_ms, true).first;
-  bool manual_journal = cid->opt_mask() & CO::NO_AUTOJOURNAL;
-  builder->SendError(SetGeneric(sparams, key, value, manual_journal, tx));
 }
 
 void IncrByGeneric(string_view key, int64_t val, Transaction* tx, SinkReplyBuilder* builder) {
@@ -971,19 +912,17 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
 void SetCmd::AddNew(const SetParams& params, const DbSlice::Iterator& it, std::string_view key,
                     std::string_view value) {
   auto& db_slice = op_args_.GetDbSlice();
-
-  // Adding new value.
-  PrimeValue tvalue{value};
-  tvalue.SetFlag(params.memcache_flags != 0);
-  it->second = std::move(tvalue);
+  it->second = PrimeValue{value};
 
   if (params.expire_after_ms) {
     db_slice.AddExpire(op_args_.db_cntx.db_index, it,
                        params.expire_after_ms + op_args_.db_cntx.time_now_ms);
   }
 
-  if (params.memcache_flags)
+  if (params.memcache_flags) {
+    it->second.SetFlag(true);
     db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
+  }
 
   if (params.flags & SET_STICK) {
     it->first.SetSticky(true);
@@ -1000,7 +939,7 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
   if (auto* ts = shard->tiered_storage(); ts)
     ts->TryStash(op_args_.db_cntx.db_index, key, pv);
 
-  if (manual_journal_ && op_args_.shard->journal()) {
+  if (explicit_journal_ && op_args_.shard->journal()) {
     RecordJournal(params, key, value);
   }
 }
@@ -1117,9 +1056,8 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
   optional<StringResult> prev;
   if (sparams.flags & SetCmd::SET_GET)
     sparams.prev_val = &prev;
-  bool manual_journal = cmnd_cntx.conn_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
-  OpStatus result = SetGeneric(sparams, key, value, manual_journal, cmnd_cntx.tx);
 
+  OpStatus result = SetGeneric(sparams, key, value, cmnd_cntx);
   if (result == OpStatus::WRONG_TYPE) {
     return builder->SendError(kWrongTypeErr);
   }
@@ -1141,38 +1079,55 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
   builder->SendSetSkipped();
 }
 
-void StringFamily::SetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
-  SetExGeneric(true, args, cmnd_cntx.conn_cntx->cid, cmnd_cntx.tx, cmnd_cntx.rb);
-}
+/// (P)SETEX key seconds (milliseconds) value
+void StringFamily::SetExGeneric(CmdArgList args, const CommandContext& cmd_cntx) {
+  string_view cmd_name = cmd_cntx.conn_cntx->cid->name();
 
-void StringFamily::PSetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
-  SetExGeneric(false, args, cmnd_cntx.conn_cntx->cid, cmnd_cntx.tx, cmnd_cntx.rb);
+  CmdArgParser parser{args};
+  auto [key, exp_int, value] = parser.Next<string_view, int64_t, string_view>();
+
+  auto* builder = cmd_cntx.rb;
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
+
+  if (exp_int < 1)
+    return builder->SendError(InvalidExpireTime(cmd_name));
+
+  DbSlice::ExpireParams expiry{
+      .value = exp_int,
+      .unit = cmd_name.front() == 'P' ? TimeUnit::MSEC : TimeUnit::SEC,
+      .absolute = false,
+  };
+
+  int64_t now_ms = GetCurrentTimeMs();
+  auto [_, abs_ms] = expiry.Calculate(now_ms, false);
+  if (abs_ms < 0)
+    return builder->SendError(InvalidExpireTime("set"));
+
+  SetCmd::SetParams sparams;
+  sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
+  sparams.expire_after_ms = expiry.Calculate(now_ms, true).first;
+  builder->SendError(SetGeneric(sparams, key, value, cmd_cntx));
 }
 
 void StringFamily::SetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
-  // This is the same as calling the "Set" function, only in this case we are
-  // change the value only if the key does not exist. Otherwise the function
-  // will not modify it. in which case it would return 0
-  // it would return to the caller 1 in case the key did not exists and was
-  // added
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_IF_NOTEXIST;
   sparams.memcache_flags = cmnd_cntx.conn_cntx->conn_state.memcache_flag;
-  bool manual_journal = cmnd_cntx.conn_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
-  const auto results{SetGeneric(sparams, key, value, manual_journal, cmnd_cntx.tx)};
-  auto* builder = cmnd_cntx.rb;
-  if (results == OpStatus::OK) {
-    return builder->SendLong(1);  // this means that we successfully set the value
-  }
-  if (results == OpStatus::OUT_OF_MEMORY) {
-    return builder->SendError(kOutOfMemory);
-  }
 
-  CHECK_EQ(results, OpStatus::SKIPPED);  // in this case it must be skipped!
-  return builder->SendLong(0);  // value do exists, we need to report that we didn't change it
+  switch (SetGeneric(sparams, key, value, cmnd_cntx)) {
+    case OpStatus::OK:
+      return cmnd_cntx.rb->SendLong(1);  // Successfully set the value
+    case OpStatus::OUT_OF_MEMORY:
+      return cmnd_cntx.rb->SendError(kOutOfMemory);
+    case OpStatus::SKIPPED:
+      return cmnd_cntx.rb->SendLong(0);  // Existed, zero updates performed
+    default:
+      LOG(FATAL) << "Invalid result";
+  }
 }
 
 void StringFamily::Get(CmdArgList args, const CommandContext& cmnd_cntx) {
@@ -1208,14 +1163,10 @@ void StringFamily::GetSet(CmdArgList args, const CommandContext& cmnd_cntx) {
   string_view value = ArgS(args, 1);
 
   optional<StringResult> prev;
-  SetCmd::SetParams sparams;
-  sparams.prev_val = &prev;
-  bool manual_journal = cmnd_cntx.conn_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
-  if (OpStatus status = SetGeneric(sparams, key, value, manual_journal, cmnd_cntx.tx);
-      status != OpStatus::OK) {
-    auto* builder = cmnd_cntx.rb;
-    return builder->SendError(status);
-  }
+  SetCmd::SetParams sparams{.prev_val = &prev};
+
+  if (OpStatus status = SetGeneric(sparams, key, value, cmnd_cntx); status != OpStatus::OK)
+    return cmnd_cntx.rb->SendError(status);
 
   GetReplies{cmnd_cntx.rb}.Send(std::move(prev));
 }
@@ -1356,9 +1307,9 @@ void StringFamily::DecrBy(CmdArgList args, const CommandContext& cmnd_cntx) {
   return IncrByGeneric(key, -val, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
-void ReorderShardResults(const std::vector<MGetResponse>& mget_resp, const Transaction* t,
-                         const bool is_memcache_protocol,
-                         absl::FixedArray<optional<GetResp>, 8>* dest) {
+// Reorder per-shard results according to argument order of primary command
+void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* t, bool is_memcache,
+                         absl::Span<optional<GetResp>> dest) {
   for (ShardId sid = 0; sid < mget_resp.size(); ++sid) {
     if (!t->IsActive(sid))
       continue;
@@ -1370,13 +1321,10 @@ void ReorderShardResults(const std::vector<MGetResponse>& mget_resp, const Trans
       if (!src.resp_arr[src_indx])
         continue;
 
-      uint32_t indx = it.index();
-      auto& item = (*dest)[indx];
-
+      auto& item = dest[it.index()];
       item = std::move(src.resp_arr[src_indx]);
-      if (is_memcache_protocol) {
+      if (is_memcache)
         item->key = *it;
-      }
     }
   }
 }
@@ -1413,30 +1361,12 @@ void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
 
   // reorder shard results back according to argument order
   absl::FixedArray<optional<GetResp>, 8> res(args.size());
-  ReorderShardResults(mget_resp, cmnd_cntx.tx, is_memcache, &res);
+  ReorderShardResults(absl::MakeSpan(mget_resp), cmnd_cntx.tx, is_memcache, absl::MakeSpan(res));
 
-  // The code below is safe in the context of squashing (uses CapturingReplyBuilder).
-  // Specifically:
-  // 1. For Memcache:
-  //    builder != CapturingReplyBuilder here because this is only used in squashing
-  //    and there are only two cases:
-  //    * Squashing the pipeline something that is turned off when using MEMCACHE.
-  //    * Squashing a multi/exec block. There exist no such command in MEMCACHE.
-  //    Therefore this path is safe, and the DCHECK in the if statement below shall
-  //    never trigger.
-  // 2. For Redis:
-  //    * Call to StartArray() is safe because it calls RedisReplyBuilder::StartCollection which
-  //      calls CapturingReplyBuilder::StartCollection
-  //    * Calls to SendBulkString() and SendNull() find and if builder is CapturingReplyBuilder
-  //      then the right member gets called.
-  //
-  // Finally, the ReplyScope will trigger a Flush() on scope's end. What that means is,
-  // for CapturingReplyBuilder the internal vec is empty and therefore we should skip the call
-  // to Send because sink_ is nullptr and there is no payload to Send since it was captured.
   SinkReplyBuilder::ReplyScope scope(builder);
   if (is_memcache) {
     auto* rb = static_cast<MCReplyBuilder*>(builder);
-    DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);
+    DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);  // memcache is never squashed
     for (const auto& entry : res) {
       if (entry) {
         rb->SendValue(entry->key, entry->value, 0, entry->mc_flag, fetch_mask & FETCH_MCVER);
@@ -1563,8 +1493,7 @@ void StringFamily::SetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
   auto cb = [&, &key = key, &start = start, &value = value](Transaction* t, EngineShard* shard) {
     return OpSetRange(t->GetOpArgs(shard), key, start, value);
   };
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  GetReplies{rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
+  GetReplies{builder}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
 }
 
 /* CL.THROTTLE <key> <max_burst> <count per period> <period> [<quantity>] */
@@ -1581,6 +1510,7 @@ void StringFamily::SetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
  * Equivalent to X-RateLimit-Reset.
  */
 void StringFamily::ClThrottle(CmdArgList args, const CommandContext& cmnd_cntx) {
+  constexpr uint64_t kSecondToNanoSecond = 1000000000;
   const string_view key = ArgS(args, 0);
 
   // Allow max burst in number of tokens
@@ -1727,7 +1657,8 @@ void StringFamily::GAT(CmdArgList args, const CommandContext& cmnd_cntx) {
     return builder->SendError(err.message());
 
   absl::FixedArray<optional<GetResp>, 8> ordered_by_shard{args.size()};
-  ReorderShardResults(mget_resp, cmnd_cntx.tx, true, &ordered_by_shard);
+  ReorderShardResults(absl::MakeSpan(mget_resp), cmnd_cntx.tx, true,
+                      absl::MakeSpan(ordered_by_shard));
   for (const auto& entry : ordered_by_shard) {
     if (entry) {
       rb->SendValue(entry->key, entry->value, 0, entry->mc_flag, fetch_mask & FETCH_MCVER);
@@ -1747,8 +1678,8 @@ void StringFamily::Register(CommandRegistry* registry) {
   registry->StartFamily(acl::STRING);
   *registry
       << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.HFUNC(Set)
-      << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetEx)
-      << CI{"PSETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(PSetEx)
+      << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
+      << CI{"PSETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
       << CI{"SETNX", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(SetNx)
       << CI{"APPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Append)
       << CI{"PREPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Prepend)
