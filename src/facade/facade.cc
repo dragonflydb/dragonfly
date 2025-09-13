@@ -147,10 +147,6 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
   }
 }
 
-uint32_t CommandId::OptCount(uint32_t mask) {
-  return absl::popcount(mask);
-}
-
 static bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
   if (str.empty())
     return false;
