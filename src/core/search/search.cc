@@ -598,6 +598,12 @@ SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view field_
   return it->second->Lookup(doc);
 }
 
+void FieldIndices::FinalizeInitialization() {
+  for (auto& [field, index] : indices_) {
+    index->FinalizeInitialization();
+  }
+}
+
 const Synonyms* FieldIndices::GetSynonyms() const {
   return synonyms_;
 }

@@ -14,7 +14,6 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/detail/bitpacking.h"
-#include "core/flat_set.h"
 #include "core/huff_coder.h"
 #include "core/mi_memory_resource.h"
 #include "core/page_usage_stats.h"
@@ -259,7 +258,7 @@ TEST_F(CompactObjectTest, WastedMemoryDontCount) {
 
 TEST_F(CompactObjectTest, NonInline) {
   string s(22, 'a');
-  CompactObj obj{s};
+  CompactObj obj{s, false};
 
   uint64_t expected_val = XXH3_64bits_withSeed(s.data(), s.size(), kSeed);
   EXPECT_EQ(18261733907982517826UL, expected_val);
@@ -267,7 +266,7 @@ TEST_F(CompactObjectTest, NonInline) {
   EXPECT_EQ(s, obj);
 
   s.assign(25, 'b');
-  obj.SetString(s);
+  obj.SetString(s, false);
   EXPECT_EQ(s, obj);
   EXPECT_EQ(s.size(), obj.Size());
 }
@@ -275,13 +274,13 @@ TEST_F(CompactObjectTest, NonInline) {
 TEST_F(CompactObjectTest, InlineAsciiEncoded) {
   string s = "key:0000000000000";
   uint64_t expected_val = XXH3_64bits_withSeed(s.data(), s.size(), kSeed);
-  CompactObj obj{s};
+  CompactObj obj{s, false};
   EXPECT_EQ(expected_val, obj.HashCode());
   EXPECT_EQ(s.size(), obj.Size());
 }
 
 TEST_F(CompactObjectTest, Int) {
-  cobj_.SetString("0");
+  cobj_.SetString("0", false);
   EXPECT_EQ(0, cobj_.TryGetInt());
   EXPECT_EQ(1, cobj_.Size());
   EXPECT_EQ(cobj_, "0");
@@ -289,7 +288,7 @@ TEST_F(CompactObjectTest, Int) {
   EXPECT_EQ(OBJ_STRING, cobj_.ObjType());
 
   cobj_.SetExpire(true);
-  cobj_.SetString("42");
+  cobj_.SetString("42", false);
   EXPECT_EQ(8181779779123079347, cobj_.HashCode());
   EXPECT_EQ(OBJ_ENCODING_INT, cobj_.Encoding());
   EXPECT_EQ(2, cobj_.Size());
@@ -299,15 +298,15 @@ TEST_F(CompactObjectTest, Int) {
 TEST_F(CompactObjectTest, MediumString) {
   string tmp(511, 'b');
 
-  cobj_.SetString(tmp);
+  cobj_.SetString(tmp, false);
   EXPECT_EQ(tmp.size(), cobj_.Size());
 
-  cobj_.SetString(tmp);
+  cobj_.SetString(tmp, false);
   EXPECT_EQ(tmp.size(), cobj_.Size());
   cobj_.Reset();
 
   tmp.assign(27463, 'c');
-  cobj_.SetString(tmp);
+  cobj_.SetString(tmp, false);
   EXPECT_EQ(27463, cobj_.Size());
 }
 
@@ -457,7 +456,7 @@ TEST_F(CompactObjectTest, JsonTypeTest) {
   std::optional<JsonType> json_option2 =
       JsonFromString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})", CompactObj::memory_resource());
 
-  cobj_.SetString(json_str);
+  cobj_.SetString(json_str, false);
   ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);  // we set this as a string
   JsonType* failed_json = cobj_.GetJson();
   ASSERT_TRUE(failed_json == nullptr);
@@ -479,7 +478,7 @@ TEST_F(CompactObjectTest, JsonTypeTest) {
   ASSERT_FALSE(json->contains("firstName"));
   std::optional<JsonType> set_array = JsonFromString("", CompactObj::memory_resource());
   // now set it to string again
-  cobj_.SetString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})");
+  cobj_.SetString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})", false);
   ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);  // we set this as a string
   failed_json = cobj_.GetJson();
   ASSERT_TRUE(failed_json == nullptr);
@@ -609,7 +608,7 @@ TEST_F(CompactObjectTest, StrEncodingAndMaterialize) {
         test_str.push_back(char(200));  // non-ascii
 
       CompactObj obj;
-      obj.SetString(test_str);
+      obj.SetString(test_str, false);
 
       // Test StrEncoding helper
       string raw_str = obj.GetRawString().Take();
@@ -625,7 +624,7 @@ TEST_F(CompactObjectTest, StrEncodingAndMaterialize) {
 }
 
 TEST_F(CompactObjectTest, AsanTriggerReadOverflow) {
-  cobj_.SetString(string(32, 'a'));
+  cobj_.SetString(string(32, 'a'), false);
   auto dest = make_unique<char[]>(32);
   cobj_.GetString(dest.get());
 }
@@ -673,7 +672,7 @@ TEST_F(CompactObjectTest, HuffMan) {
   ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_KEYS, bindata));
   for (unsigned i = 30; i < 2048; i += 10) {
     string data(i, 'a');
-    cobj_.SetString(data);
+    cobj_.SetString(data, true);
     bool malloc_used = i >= 60;
     ASSERT_EQ(malloc_used, cobj_.MallocUsed() > 0) << i;
     ASSERT_EQ(data.size(), cobj_.Size());

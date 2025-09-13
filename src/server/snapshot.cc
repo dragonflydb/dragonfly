@@ -328,7 +328,7 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
 
   if (pv.IsExternal()) {
     // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
-    SerializeExternal(db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
+    SerializeExternal(db_indx, PrimeKey{pk.ToString(), true}, pv, expire_time, mc_flags);
   } else {
     io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
     CHECK(res);
@@ -406,7 +406,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
       // 1. We may block here too frequently, slowing down the process.
       // 2. For small bin values, we issue multiple reads for the same page, creating
       //    read factor amplification that can reach factor of ~60.
-      PrimeValue pv{*entry.value.Get()};  // Might block until the future resolves.
+      PrimeValue pv{*entry.value.Get(), false};  // Might block until the future resolves.
 
       // TODO: to introduce RdbSerializer::SaveString that can accept a string value directly.
       serializer_->SaveEntry(entry.key, pv, entry.expire, entry.mc_flags, entry.dbid);

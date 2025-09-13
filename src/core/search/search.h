@@ -111,6 +111,8 @@ class FieldIndices {
 
   SortableValue GetSortIndexValue(DocId doc, std::string_view field_identifier) const;
 
+  void FinalizeInitialization();
+
  private:
   void CreateIndices(PMR_NS::memory_resource* mr);
   void CreateSortIndices(PMR_NS::memory_resource* mr);

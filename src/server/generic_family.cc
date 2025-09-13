@@ -547,7 +547,8 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
       util::fb2::Future<io::Result<string>> future =
           op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv);
 
-      CompactObj co(*future.Get());
+      const io::Result<string>& res = future.Get();
+      CompactObj co(*res, false);  // TODO: handle errors.
       SerializerBase::DumpObject(co, &sink);
     } else {
       SerializerBase::DumpObject(it->second, &sink);

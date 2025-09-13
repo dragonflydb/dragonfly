@@ -987,7 +987,7 @@ SBF* CompactObj::GetSBF() const {
   return u_.sbf;
 }
 
-void CompactObj::SetString(std::string_view str) {
+void CompactObj::SetString(std::string_view str, bool is_key) {
   CHECK(!IsExternal());
   mask_bits_.encoding = NONE_ENC;
 
