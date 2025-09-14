@@ -600,7 +600,7 @@ PrimeValue TieredStorage::DeleteCool(detail::TieredColdRecord* record) {
   auto it = CoolQueue::s_iterator_to(*record);
   cool_queue_.erase(it);
 
-  PrimeValue hot = std::move(record->value);
+  PrimeValue hot{std::move(record->value)};
   stats_.cool_memory_used -= (sizeof(detail::TieredColdRecord) + hot.MallocUsed());
   CompactObj::DeleteMR<detail::TieredColdRecord>(record);
   return hot;

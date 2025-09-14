@@ -109,7 +109,7 @@ class DbSlice {
     IteratorT& operator=(IteratorT&& o) = default;
 
     // Do NOT store this iterator in a variable, as it will not be laundered automatically.
-    T GetInnerIt() const {
+    const T& GetInnerIt() const {
       LaunderIfNeeded();
       return it_;
     }
@@ -251,17 +251,8 @@ class DbSlice {
     return bytes_per_object_;
   }
 
-  // returns absolute time of the expiration.
-  time_t ExpireTime(const ExpConstIterator& it) const {
-    return ExpireTime(it.GetInnerIt());
-  }
-
-  time_t ExpireTime(const ExpIterator& it) const {
-    return ExpireTime(it.GetInnerIt());
-  }
-
-  time_t ExpireTime(const ExpireConstIterator& it) const {
-    return it.is_done() ? 0 : expire_base_[0] + it->second.duration_ms();
+  int64_t ExpireTime(const ExpirePeriod& val) const {
+    return expire_base_[0] + val.duration_ms();
   }
 
   ExpirePeriod FromAbsoluteTime(uint64_t time_ms) const {
@@ -552,10 +543,8 @@ class DbSlice {
   std::unique_ptr<base::Histogram> StopSampleValues(DbIndex db_ind);
 
  private:
-  void PreUpdateBlocking(DbIndex db_ind, Iterator it);
+  void PreUpdateBlocking(DbIndex db_ind, const Iterator& it);
   void PostUpdate(DbIndex db_ind, std::string_view key);
-
-  bool DelEmptyPrimeValue(const Context& cntx, Iterator it);
 
   OpResult<ItAndUpdater> AddOrUpdateInternal(const Context& cntx, std::string_view key,
                                              PrimeValue obj, uint64_t expire_at_ms,
@@ -621,7 +610,7 @@ class DbSlice {
 
   EngineShard* owner_;
 
-  time_t expire_base_[2];  // Used for expire logic, represents a real clock.
+  int64_t expire_base_[2];  // Used for expire logic, represents a real clock.
   bool expire_allowed_ = true;
 
   uint64_t version_ = 1;  // Used to version entries in the PrimeTable.

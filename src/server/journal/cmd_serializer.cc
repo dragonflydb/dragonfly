@@ -71,7 +71,7 @@ CmdSerializer::CmdSerializer(FlushSerialized cb, size_t max_serialization_buffer
   serializer_ = std::make_unique<RdbSerializer>(GetDefaultCompressionMode());
 }
 
-size_t CmdSerializer::SerializeEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
+size_t CmdSerializer::SerializeEntry(string_view key, const PrimeKey& pk, const PrimeValue& pv,
                                      uint64_t expire_ms) {
   // We send RESTORE commands objects we don't support breaking.
   bool use_restore_serialization = true;
@@ -134,7 +134,7 @@ void CmdSerializer::SerializeCommand(string_view cmd, absl::Span<const string_vi
   cb_(std::move(cmd_sink).str());
 }
 
-void CmdSerializer::SerializeStickIfNeeded(string_view key, const PrimeValue& pk) {
+void CmdSerializer::SerializeStickIfNeeded(string_view key, const PrimeKey& pk) {
   if (!pk.IsSticky()) {
     return;
   }
@@ -231,7 +231,7 @@ size_t CmdSerializer::SerializeString(string_view key, const PrimeValue& pv, uin
   return 1;
 }
 
-void CmdSerializer::SerializeRestore(string_view key, const PrimeValue& pk, const PrimeValue& pv,
+void CmdSerializer::SerializeRestore(string_view key, const PrimeKey& pk, const PrimeValue& pv,
                                      uint64_t expire_ms) {
   absl::InlinedVector<string_view, 5> args;
   args.push_back(key);
