@@ -322,7 +322,8 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
   time_t expire_time = 0;
   if (pv.HasExpire()) {
     auto eit = db_array_[db_indx]->expire.Find(pk);
-    expire_time = db_slice_->ExpireTime(eit);
+    CHECK(IsValid(eit));
+    expire_time = db_slice_->ExpireTime(eit->second);
   }
   uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(db_indx, pk) : 0;
 

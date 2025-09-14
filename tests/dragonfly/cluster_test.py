@@ -1286,8 +1286,7 @@ async def test_cluster_flushall_during_migration(
         df_factory.create(
             port=next(next_port),
             admin_port=next(next_port),
-            vmodule="cluster_family=2,outgoing_slot_migration=2,incoming_slot_migration=2,streamer=2",
-            logtostdout=True,
+            vmodule="cluster_family=2,outgoing_slot_migration=2,incoming_slot_migration=2,streamer=2,server_family=1",
         )
         for i in range(2)
     ]
