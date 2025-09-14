@@ -406,7 +406,13 @@ bool SliceSnapshot::PushSerialized(bool force) {
       // 1. We may block here too frequently, slowing down the process.
       // 2. For small bin values, we issue multiple reads for the same page, creating
       //    read factor amplification that can reach factor of ~60.
-      PrimeValue pv{*entry.value.Get()};  // Might block until the future resolves.
+      auto res = entry.value.Get();  // Blocking point
+      if (!res.has_value()) {
+        cntx_->ReportError(errc::io_error, absl::StrCat("Failed to read ", entry.key.ToString()));
+        return false;
+      }
+
+      PrimeValue pv{*res};
 
       // TODO: to introduce RdbSerializer::SaveString that can accept a string value directly.
       serializer_->SaveEntry(entry.key, pv, entry.expire, entry.mc_flags, entry.dbid);

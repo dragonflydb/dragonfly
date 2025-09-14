@@ -544,11 +544,13 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
     const PrimeValue& pv = it->second;
 
     if (pv.IsExternal() && !pv.IsCool()) {
-      util::fb2::Future<io::Result<string>> future =
-          op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv);
+      // TODO: consider moving blocking point to coordinator to avoid stalling shard queue
+      auto res = op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv).Get();
+      if (!res.has_value())
+        return OpStatus::IO_ERROR;
 
-      CompactObj co(*future.Get());
-      SerializerBase::DumpObject(co, &sink);
+      // TODO: allow saving string directly without proxy object
+      SerializerBase::DumpObject(PrimeValue{*res}, &sink);
     } else {
       SerializerBase::DumpObject(it->second, &sink);
     }
