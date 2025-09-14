@@ -550,7 +550,7 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
         return OpStatus::IO_ERROR;
 
       // TODO: allow saving string directly without proxy object
-      SerializerBase::DumpObject(PrimeValue{*res}, &sink);
+      SerializerBase::DumpObject(PrimeValue{*res, false}, &sink);
     } else {
       SerializerBase::DumpObject(it->second, &sink);
     }

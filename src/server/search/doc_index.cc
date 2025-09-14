@@ -265,6 +265,8 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) 
 
   TraverseAllMatching(*base_, op_args, cb);
 
+  indices_->FinalizeInitialization();
+
   VLOG(1) << "Indexed " << key_index_.Size() << " docs on " << base_->prefix;
 }
 
