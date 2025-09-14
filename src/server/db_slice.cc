@@ -1059,7 +1059,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     Del(cntx, prime_it);
     return -1;
   } else if (IsValid(expire_it) && !params.persist) {
-    auto current = ExpireTime(expire_it);
+    int64_t current = ExpireTime(expire_it->second);
     if (params.expire_options & ExpireFlags::EXPIRE_NX) {
       return OpStatus::SKIPPED;
     }
@@ -1186,9 +1186,10 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const 
   return true;
 }
 
-void DbSlice::PreUpdateBlocking(DbIndex db_ind, Iterator it) {
-  CallChangeCallbacks(db_ind, ChangeReq{it.GetInnerIt()});
-  it.GetInnerIt().SetVersion(NextVersion());
+void DbSlice::PreUpdateBlocking(DbIndex db_ind, const Iterator& it) {
+  CallChangeCallbacks(db_ind, ChangeReq{it.GetInnerIt()});  // blocking point.
+  auto inner_it = it.GetInnerIt();                          // must call again to launder.
+  inner_it.SetVersion(NextVersion());
 }
 
 void DbSlice::PostUpdate(DbIndex db_ind, std::string_view key) {
@@ -1239,10 +1240,10 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
   }
 
   // TODO: to employ multi-generation update of expire-base and the underlying values.
-  time_t expire_time = ExpireTime(expire_it);
+  int64_t expire_time = ExpireTime(expire_it->second);
 
   // Never do expiration on replica or if expiration is disabled or global lock was taken.
-  if (time_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_ ||
+  if (int64_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_ ||
       !shard_owner()->shard_lock()->Check(IntentLock::Mode::EXCLUSIVE)) {
     return {it, expire_it};
   }
@@ -1363,7 +1364,7 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
       return;
 
     result.traversed++;
-    time_t ttl = ExpireTime(it) - cntx.time_now_ms;
+    int64_t ttl = ExpireTime(it->second) - cntx.time_now_ms;
     if (ttl <= 0) {
       auto prime_it = db.prime.Find(it->first);
       if (prime_it.is_done()) {  // A workaround for the case our tables are inconsistent.

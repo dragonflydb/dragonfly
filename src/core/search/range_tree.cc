@@ -73,11 +73,15 @@ template <typename MapT> auto FindRangeBlockImpl(MapT& entries, double value) {
 
 }  // namespace
 
-RangeTree::RangeTree(PMR_NS::memory_resource* mr, size_t max_range_block_size)
-    : max_range_block_size_(max_range_block_size), entries_(mr) {
-  // TODO: at the beggining create more blocks
-  entries_.insert({{-std::numeric_limits<RangeNumber>::infinity()},
-                   RangeBlock{entries_.get_allocator().resource(), max_range_block_size_}});
+RangeTree::RangeTree(PMR_NS::memory_resource* mr, size_t max_range_block_size,
+                     bool enable_splitting)
+    : max_range_block_size_(max_range_block_size),
+      entries_(mr),
+      enable_splitting_(enable_splitting) {
+  entries_.emplace(
+      std::piecewise_construct,
+      std::forward_as_tuple(-std::numeric_limits<RangeNumber>::infinity()),
+      std::forward_as_tuple(entries_.get_allocator().resource(), max_range_block_size_));
 }
 
 void RangeTree::Add(DocId id, double value) {
@@ -89,7 +93,7 @@ void RangeTree::Add(DocId id, double value) {
   auto insert_result = block.Insert({id, value});
   LOG_IF(ERROR, !insert_result) << "RangeTree: Failed to insert id: " << id << ", value: " << value;
 
-  if (block.Size() <= max_range_block_size_) {
+  if (!enable_splitting_ || block.Size() <= max_range_block_size_) {
     return;
   }
 
@@ -147,6 +151,45 @@ absl::InlinedVector<const RangeTree::RangeBlock*, 5> RangeTree::GetAllBlocks() c
   }
 
   return blocks;
+}
+
+void RangeTree::FinalizeInitialization() {
+  DCHECK(!enable_splitting_);
+  DCHECK_EQ(entries_.size(), 1u);
+
+  auto& block = entries_.begin()->second;
+  const size_t total_size = block.Size();
+
+  std::vector<Entry> entries(total_size);
+  size_t index = 0;
+  for (const auto& [id, value] : block) {
+    entries[index++] = {id, value};
+  }
+
+  enable_splitting_ = true;
+  block.Clear();
+
+  std::sort(entries.begin(), entries.end(),
+            [](const auto& a, const auto& b) { return a.second < b.second; });
+
+  for (size_t b = 0; b < entries.size(); b += max_range_block_size_) {
+    RangeBlock* range_block;
+    if (b) {
+      auto it = entries_.emplace(
+          std::piecewise_construct, std::forward_as_tuple(entries[b].second),
+          std::forward_as_tuple(entries_.get_allocator().resource(), max_range_block_size_));
+      range_block = &it.first->second;
+    } else {
+      range_block = &block;
+    }
+
+    DCHECK(range_block);
+
+    const size_t end = std::min(b + max_range_block_size_, total_size);
+    for (size_t i = b; i < end; ++i) {
+      range_block->Insert(entries[i]);
+    }
+  }
 }
 
 RangeTree::Map::iterator RangeTree::FindRangeBlock(double value) {

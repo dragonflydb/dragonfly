@@ -428,7 +428,7 @@ ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
       ExpireIterator exp_it = exp_t->Find(it->first);
       CHECK(!exp_it.is_done());
 
-      time_t exp_time = db_slice.ExpireTime(exp_it);
+      time_t exp_time = db_slice.ExpireTime(exp_it->second);
       oinfo.ttl = exp_time - GetCurrentTimeMs();
       oinfo.has_sec_precision = exp_it->second.is_second_precision();
     }

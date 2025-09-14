@@ -76,6 +76,11 @@ struct BaseIndex {
   // Returns documents that have non-null values for this field (used for @field:* queries)
   // Result must be sorted
   virtual std::vector<DocId> GetAllDocsWithNonNullValues() const = 0;
+
+  /* Called at the end of indexes rebuilding after all initial Add calls are done.
+     Some indices may need to finalize internal structures. See RangeTree for example. */
+  virtual void FinalizeInitialization() {
+  }
 };
 
 // Base class for type-specific sorting indices.
