@@ -322,7 +322,7 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
 
     if (lsn_to_start_partial) {
       flow.start_partial_sync_at = *lsn_to_start_partial;
-      sync_type = absl::StrCat("PARTIAL", sf_->journal()->GetLsn());
+      sync_type = "PARTIAL";
       VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
               << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
     }

@@ -766,7 +766,6 @@ error_code Replica::ConsumeDflyStream() {
 
   LOG(INFO) << "Transitioned into stable sync";
   // Transition flows into stable sync.
-  std::atomic<size_t> flows_reached_partial = 0;
   {
     auto shard_cb = [&](unsigned index, auto*) {
       const auto& local_ids = thread_flow_map_[index];
@@ -859,12 +858,7 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(
                               CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING}));
 
   string_view flow_directive = ToSV(LastResponseArgs()[0].GetBuf());
-  // Fetch the LSN to consider partial sync complete
-  if (!(flow_directive.back() == 'L')) {
-    string_view lsn = flow_directive.substr(7);
-    std::ignore = absl::SimpleAtoi(lsn, &lsn_to_finish_partial_);
-    flow_directive = flow_directive.substr(0, 7);
-  }
+
   string eof_token;
   PC_RETURN_ON_BAD_RESPONSE_T(make_unexpected,
                               flow_directive == "FULL" || flow_directive == "PARTIAL");
