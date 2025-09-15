@@ -1207,43 +1207,6 @@ async def test_flushall_in_full_sync(df_factory):
     assert new_syncid != syncid
 
 
-"""
-Test read-only scripts work with replication. EVAL_RO and the 'no-writes' flags are currently not supported.
-"""
-
-READONLY_SCRIPT = """
-redis.call('GET', 'A')
-redis.call('EXISTS', 'B')
-return redis.call('GET', 'WORKS')
-"""
-
-WRITE_SCRIPT = """
-redis.call('SET', 'A', 'ErrroR')
-"""
-
-
-async def test_readonly_script(df_factory):
-    master = df_factory.create(proactor_threads=2)
-    replica = df_factory.create(proactor_threads=2)
-
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
-
-    await c_master.set("WORKS", "YES")
-
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-    await wait_available_async(c_replica)
-
-    await c_replica.eval(READONLY_SCRIPT, 3, "A", "B", "WORKS") == "YES"
-
-    with pytest.raises(aioredis.ResponseError) as roe:
-        await c_replica.eval(WRITE_SCRIPT, 1, "A")
-
-    assert "READONLY " in str(roe)
-
-
 take_over_cases = [
     [2, 2],
     [2, 4],
@@ -1644,6 +1607,13 @@ async def test_replicaof_flag(df_factory):
     val = await c_replica.get("KEY")
     assert "VALUE" == val
 
+    # Test disconnect
+
+    await c_replica.replicaof("no", "one")  # disconnect
+
+    role = await c_replica.role()
+    assert role[0] == "master"
+
 
 async def test_replicaof_flag_replication_waits(df_factory):
     # tests --replicaof works when we launch replication before the master
@@ -1686,72 +1656,6 @@ async def test_replicaof_flag_replication_waits(df_factory):
 
     val = await c_replica.get("KEY")
     assert "VALUE" == val
-
-
-async def test_replicaof_flag_disconnect(df_factory):
-    # test stopping replication when started using --replicaof
-    master = df_factory.create(
-        proactor_threads=2,
-    )
-
-    # set up master
-    master.start()
-    c_master = master.client()
-    await wait_available_async(c_master)
-
-    await c_master.set("KEY", "VALUE")
-    db_size = await c_master.dbsize()
-    assert 1 == db_size
-
-    replica = df_factory.create(
-        proactor_threads=2,
-        replicaof=f"localhost:{master.port}",  # start to replicate master
-    )
-
-    # set up replica. check that it is replicating
-    replica.start()
-
-    c_replica = replica.client()
-    await wait_available_async(c_replica)
-    await check_all_replicas_finished([c_replica], c_master)
-
-    dbsize = await c_replica.dbsize()
-    assert 1 == dbsize
-
-    val = await c_replica.get("KEY")
-    assert "VALUE" == val
-
-    await c_replica.replicaof("no", "one")  # disconnect
-
-    role = await c_replica.role()
-    assert role[0] == "master"
-
-
-async def test_df_crash_on_memcached_error(df_factory):
-    master = df_factory.create(
-        memcached_port=11211,
-        proactor_threads=2,
-    )
-
-    replica = df_factory.create(
-        memcached_port=master.mc_port + 1,
-        proactor_threads=2,
-    )
-
-    master.start()
-    replica.start()
-
-    c_master = master.client()
-    await wait_available_async(c_master)
-
-    c_replica = replica.client()
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-    await wait_available_async(c_replica)
-
-    memcached_client = pymemcache.Client(f"127.0.0.1:{replica.mc_port}")
-
-    with pytest.raises(pymemcache.exceptions.MemcacheServerError):
-        memcached_client.set("key", "data", noreply=False)
 
 
 async def test_df_crash_on_replicaof_flag(df_factory):
@@ -2626,43 +2530,6 @@ async def test_empty_hashmap_loading_bug(df_factory: DflyInstanceFactory):
     assert await c_replica.execute_command(f"dbsize") == 0
 
 
-async def test_replicating_mc_flags(df_factory):
-    master = df_factory.create(memcached_port=11211, proactor_threads=1)
-    replica = df_factory.create(
-        memcached_port=11212, proactor_threads=1, dbfilename=f"dump_{tmp_file_name()}"
-    )
-    df_factory.start_all([master, replica])
-
-    c_mc_master = pymemcache.Client(f"127.0.0.1:{master.mc_port}", default_noreply=False)
-
-    c_replica = replica.client()
-
-    assert c_mc_master.set("key1", "value0", noreply=True)
-    assert c_mc_master.set("key2", "value2", noreply=True, expire=3600, flags=123456)
-    assert c_mc_master.replace("key1", "value1", expire=4000, flags=2, noreply=True)
-
-    c_master = master.client()
-    for i in range(3, 100):
-        await c_master.set(f"key{i}", f"value{i}")
-
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-    await wait_available_async(c_replica)
-
-    c_mc_replica = pymemcache.Client(f"127.0.0.1:{replica.mc_port}", default_noreply=False)
-
-    async def check_flag(key, flag):
-        res = c_mc_replica.raw_command("get " + key, "END\r\n").split()
-        # workaround sometimes memcached_client.raw_command returns empty str
-        if len(res) > 2:
-            assert res[2].decode() == str(flag)
-
-    await check_flag("key1", 2)
-    await check_flag("key2", 123456)
-
-    for i in range(1, 100):
-        assert c_mc_replica.get(f"key{i}") == str.encode(f"value{i}")
-
-
 async def test_double_take_over(df_factory, df_seeder_factory):
     master = df_factory.create(proactor_threads=4, dbfilename="", admin_port=ADMIN_PORT)
     replica = df_factory.create(proactor_threads=4, dbfilename="", admin_port=ADMIN_PORT + 1)
@@ -3225,26 +3092,6 @@ async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df
     assert len(lines) == 1
 
 
-async def test_replicate_hset_with_expiry(df_factory: DflyInstanceFactory):
-    master = df_factory.create(proactor_threads=2)
-    replica = df_factory.create(proactor_threads=2)
-
-    master.start()
-    replica.start()
-
-    cm = master.client()
-    await cm.execute_command("HSETEX key 86400 name 1234")
-
-    cr = replica.client()
-    await cr.execute_command(f"REPLICAOF localhost {master.port}")
-    await wait_available_async(cr)
-
-    result = await cr.hgetall("key")
-
-    assert "name" in result
-    assert result["name"] == "1234"
-
-
 async def test_bug_5221(df_factory):
     master = df_factory.create(
         proactor_threads=1,
@@ -3514,3 +3361,97 @@ async def test_big_strings(df_factory):
     line = lines[0]
     peak_bytes = extract_int_after_prefix("Serialization peak bytes: ", line)
     assert peak_bytes < value_size
+
+
+@dfly_args({"proactor_threads": 2})
+class Test1To1Integrity:
+    """
+    Test class for tests that use a single replica-master connection without any specific options.
+    Fits best for testing integrity of simple values and behaviour.
+    """
+
+    @pytest.fixture(scope="class")
+    def master(self, df_factory):
+        return df_factory.create(memcached_port=11211)
+
+    @pytest.fixture(scope="class")
+    def replica(self, df_factory):
+        return df_factory.create(memcached_port=11212)
+
+    @pytest.fixture(scope="class")
+    def instances(self, df_factory, master, replica):
+        df_factory.start_all([master, replica])
+
+    @pytest.fixture(scope="function")
+    async def do_replicate(self, instances, replica, master):
+        c_replica = replica.client()
+
+        async def connect():
+            await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+            await wait_available_async(c_replica)
+
+        yield connect
+
+        await c_replica.execute_command("REPLICAOF NO ONE")
+        await asyncio.gather(*(master.client().flushall(), c_replica.flushall()))
+
+    async def test_readonly_script(self, master, replica, do_replicate):
+        READONLY_SCRIPT = """
+        redis.call('GET', 'A')
+        redis.call('EXISTS', 'B')
+        return redis.call('GET', 'WORKS')
+        """
+
+        WRITE_SCRIPT = """
+        redis.call('SET', 'A', 'ErrroR')
+        """
+        c_replica = replica.client()
+        await master.client().set("WORKS", "YES")
+
+        await do_replicate()
+
+        assert await c_replica.eval(READONLY_SCRIPT, 3, "A", "B", "WORKS") == "YES"
+        with pytest.raises(aioredis.ResponseError) as roe:
+            await c_replica.eval(WRITE_SCRIPT, 1, "A")
+        assert "READONLY " in str(roe)
+
+    async def test_hset_with_expiry(self, master, replica, do_replicate):
+        await master.client().execute_command("HSETEX key 86400 name 1234")
+
+        await do_replicate()
+
+        assert await replica.client().hgetall("key") == {"name": "1234"}
+
+    async def test_df_crash_on_memcached_error(self, master, replica, do_replicate):
+        await do_replicate()
+
+        memcached_client = pymemcache.Client(f"127.0.0.1:{replica.mc_port}")
+        with pytest.raises(pymemcache.exceptions.MemcacheServerError):
+            memcached_client.set("key", "data", noreply=False)
+
+    async def test_replicating_mc_flags(self, master, replica, do_replicate):
+        c_mc_master = pymemcache.Client(f"127.0.0.1:{master.mc_port}", default_noreply=False)
+
+        assert c_mc_master.set("key1", "value0", noreply=True)
+        assert c_mc_master.set("key2", "value2", noreply=True, expire=3600, flags=123456)
+        assert c_mc_master.replace("key1", "value1", expire=4000, flags=2, noreply=True)
+
+        c_master = master.client()
+        for i in range(3, 100):
+            await c_master.set(f"key{i}", f"value{i}")
+
+        await do_replicate()
+
+        c_mc_replica = pymemcache.Client(f"127.0.0.1:{replica.mc_port}", default_noreply=False)
+
+        async def check_flag(key, flag):
+            res = c_mc_replica.raw_command("get " + key, "END\r\n").split()
+            # workaround sometimes memcached_client.raw_command returns empty str
+            if len(res) > 2:
+                assert res[2].decode() == str(flag)
+
+        await check_flag("key1", 2)
+        await check_flag("key2", 123456)
+
+        for i in range(1, 100):
+            assert c_mc_replica.get(f"key{i}") == str.encode(f"value{i}")
