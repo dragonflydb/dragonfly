@@ -21,6 +21,16 @@ on:
         required: false
         type: string
         default: "60m"
+      epoll:
+        description: "Force epoll mode in test"
+        required: false
+        type: string
+        default: "no"
+      use_release:
+        description: "Use latest release instead of building dragonfly"
+        required: false
+        type: string
+        default: "no"
 
 jobs:
   build:
@@ -52,15 +62,24 @@ jobs:
           env
 
       - name: Configure & Build
+        shell: bash
         run: |
-          # -no-pie to disable address randomization so we could symbolize stacktraces
-          cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
-                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPRINT_STACKTRACES_ON_SIGNAL=ON \
-                -DCMAKE_CXX_FLAGS=-no-pie -DHELIO_STACK_CHECK:STRING=4096
-
-          cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly
-          pwd
-          ls -l ..
+          if [[ "${{ inputs.use_release }}" == "yes" ]]; then
+            mkdir "${GITHUB_WORKSPACE}"/build
+            cd "${GITHUB_WORKSPACE}"/build
+            wget -q https://github.com/dragonflydb/dragonfly/releases/latest/download/dragonfly-x86_64.tar.gz
+            tar xf dragonfly-x86_64.tar.gz
+            mv dragonfly-x86_64 dragonfly
+            ls -l
+          else
+            # -no-pie to disable address randomization so we could symbolize stacktraces
+            cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
+                  -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPRINT_STACKTRACES_ON_SIGNAL=ON \
+                  -DCMAKE_CXX_FLAGS=-no-pie -DHELIO_STACK_CHECK:STRING=4096
+            cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly
+            pwd
+            ls -l ..
+          fi
 
       - name: Run tests on repeat
         uses: ./.github/actions/repeat
@@ -74,6 +93,7 @@ jobs:
           expression: ${{ inputs.expression }}
           count: ${{ inputs.count }}
           timeout: ${{ inputs.timeout }}
+          epoll: ${{ inputs.epoll }}
 
       - name: Upload logs on failure
         if: failure()

@@ -29,6 +29,9 @@ inputs:
   timeout:
     required: true
     type: string
+  epoll:
+    required: true
+    type: string
 
 runs:
   using: "composite"
@@ -44,9 +47,13 @@ runs:
         # used by PyTests
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
-        echo Running command: timeout ${{ inputs.timeout }} pytest ${{ inputs.expression }} --drop-data-after-each-test --color=yes --json-report --json-report-file=report.json --log-cli-level=INFO --count=${{ inputs.count }}
-        timeout ${{ inputs.timeout }} pytest ${{ inputs.expression }} --drop-data-after-each-test --color=yes --json-report --json-report-file=report.json --log-cli-level=INFO --count=${{ inputs.count }} || code=$?
-
+        if [[ "${{ inputs.epoll }}" == "epoll" ]]; then
+          FORCE_EPOLL="--df force_epoll=true"
+        else
+          FORCE_EPOLL=""
+        fi
+        echo Running command: timeout ${{ inputs.timeout }} pytest ${{ inputs.expression }} --drop-data-after-each-test ${FORCE_EPOLL} --color=yes --json-report --json-report-file=report.json --log-cli-level=DEBUG --count=${{ inputs.count }}
+        timeout ${{ inputs.timeout }} pytest ${{ inputs.expression }} --drop-data-after-each-test ${FORCE_EPOLL} --color=yes --json-report --json-report-file=report.json --log-cli-level=DEBUG --count=${{ inputs.count }} || code=$?
         # timeout returns 124 if we exceeded the timeout duration
         if [[ $code -eq 124 ]]; then
           # Add an extra new line here because when tests timeout the first line below continues from the test failure name
