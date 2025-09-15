@@ -2565,24 +2565,15 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
                         item->val.rdb_type);
   };
 
-  // The scope is important here, as we need to ensure that the object memory is properly
-  // accounted for.
-  DbSlice::ItAndUpdater append_res;
-
-  LoadConfig tmp_load_config = item->load_config;
-
-  // If we're appending the item to an existing key, first load the
-  // object.
-  if (tmp_load_config.append) {
-    append_res = db_slice->FindMutable(db_cntx, item->key);
-    if (IsValid(append_res.it)) {
-      pv_ptr = &append_res.it->second;
+  // Streamed big values are stored in a separate map. unique_ptr for pointer stability
+  thread_local std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_streamed;
+  LoadConfig config_copy = item->load_config;
+  if (item->load_config.streamed && item->load_config.append) {
+    if (auto it = now_streamed.find(item->key); it != now_streamed.end()) {
+      pv_ptr = &*now_streamed[item->key];
     } else {
-      // If the item has expired we may not find the key. Note if the key
-      // is found, but expired since we started loading, we still append to
-      // avoid an inconsistent state where only part of the key is loaded.
-      // We allow expiration for values inside sset/hmap,
-      // so the object can unexist if all keys in it were expired
+      // Sets and hashes are deleted when all their entries are expired.
+      // If it's the case, set reset append flag and start from scratch.
       bool key_is_not_expired = item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms;
       bool is_set_expiry_type = item->val.rdb_type == RDB_TYPE_HASH_WITH_EXPIRY ||
                                 item->val.rdb_type == RDB_TYPE_SET_WITH_EXPIRY;
@@ -2590,13 +2581,11 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
         LOG(ERROR) << "Count not to find append key '" << item->key << "' in DB " << db_ind;
         return;
       }
-      // Because the previous batches of items for this key were fully expired,
-      // we need to create a new key
-      tmp_load_config.append = false;
+      config_copy.append = false;
     }
   }
 
-  if (auto ec = FromOpaque(item->val, tmp_load_config, pv_ptr); ec) {
+  if (auto ec = FromOpaque(item->val, config_copy, pv_ptr); ec) {
     if (ec.value() == errc::value_expired) {
       // hmap and sset values can expire and we ok with it,
       // so we don't set ec_ in this case
@@ -2614,11 +2603,18 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
     }
     LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
     stop_early_ = true;
+    now_streamed.clear();
     return;
   }
 
-  if (tmp_load_config.append) {
-    return;
+  if (item->load_config.streamed) {
+    if (now_streamed.find(item->key) == now_streamed.end())
+      now_streamed.emplace(item->key, make_unique<PrimeValue>(std::move(pv)));
+
+    if (!item->load_config.finalize)
+      return;
+
+    pv = std::move(*now_streamed.extract(item->key).mapped());
   }
 
   // We need this extra check because we don't return empty_key
@@ -2722,7 +2718,8 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
       continue;
     }
 
-    if (pending_read_.remaining > 0) {
+    item->load_config.finalize = pending_read_.remaining == 0;
+    if (!item->load_config.finalize) {
       item->key = key;
       streamed = true;
     } else {
@@ -2760,7 +2757,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
         FlushShardAsync(sid);
       }
     }
-  } while (pending_read_.remaining > 0);
+  } while (pending_read_.remaining > 0 && !stop_early_.load(memory_order_relaxed));
 
   int delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
   LOG_IF(INFO, delta_ms > 1000) << "Took " << delta_ms << " ms to load rdb_type " << type;

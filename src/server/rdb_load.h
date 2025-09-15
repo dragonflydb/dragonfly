@@ -129,18 +129,10 @@ class RdbLoaderBase {
   };
 
   struct LoadConfig {
-    // Whether the loaded item is being streamed incrementally in partial
-    // reads.
-    bool streamed = false;
-
-    // Number of elements in the object to reserve.
-    //
-    // Used to reserve the elements in a huge object up front, then append
-    // in next loads.
-    size_t reserve = 0;
-
-    // Whether to append to the existing object or initialize a new object.
-    bool append = false;
+    bool streamed = false;  // Big value streamed incrementally
+    size_t reserve = 0;     // Number of elements to reserve to optimize big value load
+    bool append = false;    // Append stream to existing object
+    bool finalize = false;  // Last portion of stream, finalize object
   };
 
   class OpaqueObjLoader;
