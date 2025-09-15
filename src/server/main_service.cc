@@ -811,12 +811,12 @@ void SetHuffmanTable(const std::string& huffman_table) {
   }
 }
 
-optional<string_view> CommandOptName(CO::CommandOpt opt, bool enabled) {
+string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
   using namespace CO;
   if (!enabled) {
     if (opt == FAST)
       return "SLOW";
-    return nullopt;
+    return "";
   }
 
   switch (opt) {
@@ -857,7 +857,7 @@ optional<string_view> CommandOptName(CO::CommandOpt opt, bool enabled) {
     case IDEMPOTENT:
       return "idempotent";
   }
-  return nullopt;
+  return "";
 }
 
 }  // namespace
@@ -2736,8 +2736,8 @@ void Service::Command(CmdArgList args, const CommandContext& cmd_cntx) {
     vector<string> opts;
     for (uint32_t i = 0; i < 32; i++) {
       unsigned obit = (1u << i);
-      if (auto name = CommandOptName(CO::CommandOpt{obit}, cid.opt_mask() & obit); name)
-        opts.emplace_back(*name);
+      if (auto name = CommandOptName(CO::CommandOpt{obit}, cid.opt_mask() & obit); !name.empty())
+        opts.emplace_back(name);
     }
     rb->SendSimpleStrArr(opts);
 
