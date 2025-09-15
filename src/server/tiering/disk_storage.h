@@ -64,10 +64,11 @@ class DiskStorage {
   uint64_t heap_buf_alloc_cnt_ = 0, reg_buf_alloc_cnt_ = 0;
 
   struct {
-    bool pending = false;
+    bool pending = false;  // whether currently in progress
     std::error_code last_err;
-    util::fb2::EventCount ev;
-  } grow_;
+    uint64_t timestamp_ns;     // when last os finished (with any status)
+    util::fb2::EventCount ev;  // woken up when in-progress op finishes
+  } grow_;                     // status of latest blocking Grow() operation
 
   std::unique_ptr<util::fb2::LinuxFile> backing_file_;
   ExternalAllocator alloc_;
