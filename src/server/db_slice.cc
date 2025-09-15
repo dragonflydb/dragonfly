@@ -575,6 +575,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
   if (!IsValid(res.it)) {
     events_.misses += miss_weight;
+    db.stats.events.misses += miss_weight;
     return OpStatus::KEY_NOTFOUND;
   }
 
@@ -584,6 +585,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
   if (req_obj_type.has_value() && res.it->second.ObjType() != req_obj_type.value()) {
     events_.misses += miss_weight;
+    db.stats.events.misses += miss_weight;
     return OpStatus::WRONG_TYPE;
   }
 
@@ -591,6 +593,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     res = ExpireIfNeeded(cntx, res.it);
     if (!IsValid(res.it)) {
       events_.misses += miss_weight;
+      db.stats.events.misses += miss_weight;
       return OpStatus::KEY_NOTFOUND;
     }
   }
@@ -607,6 +610,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
       break;
     case UpdateStatsMode::kReadStats:
       events_.hits++;
+      db.stats.events.hits++;
       if (db.slots_stats) {
         db.slots_stats[KeySlot(key)].total_reads++;
       }
@@ -773,6 +777,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   events_.garbage_collected = db.prime.garbage_collected();
   events_.stash_unloaded = db.prime.stash_unloaded();
   events_.evicted_keys += evp.evicted();
+  db.stats.events.evicted_keys += evp.evicted();
   events_.garbage_checked += evp.checked();
   if (db.slots_stats) {
     SlotId sid = KeySlot(key);
@@ -1258,6 +1263,7 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
       ExpIterator(expire_it, StringOrView::FromView(key)), db.get());
 
   ++events_.expired_keys;
+  db->stats.events.expired_keys++;
 
   return {PrimeIterator{}, ExpireIterator{}};
 }
@@ -1487,6 +1493,7 @@ finish:
   SendQueuedInvalidationMessagesAsync();
   auto time_finish = absl::GetCurrentTimeNanos();
   events_.evicted_keys += evicted_items;
+  db_arr_[db_ind]->stats.events.evicted_keys += evicted_items;
   DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
   return pair<uint64_t, size_t>{evicted_items, evicted_bytes};
 }
@@ -1576,6 +1583,11 @@ void DbSlice::ResetUpdateEvents() {
 
 void DbSlice::ResetEvents() {
   events_ = {};
+  for (auto& db : db_arr_) {
+    if (db) {
+      db->stats.events = {};
+    }
+  }
 }
 
 void DbSlice::SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events) {
