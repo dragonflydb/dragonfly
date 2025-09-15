@@ -16,9 +16,14 @@ namespace dfly {
 // journal listener and writes them to a destination sink in a separate fiber.
 class JournalStreamer : public journal::JournalConsumerInterface {
  public:
-  enum class SendLsn : uint8_t { NO = 0, YES = 1 };
-  JournalStreamer(journal::Journal* journal, ExecutionState* cntx, SendLsn send_lsn,
-                  bool is_stable_sync, LSN partial_sync_lsn = 0);
+  struct Config {
+    bool should_sent_lsn = false;
+    bool init_from_stable_sync = false;
+    LSN start_partial_sync_at = 0;
+  };
+
+  JournalStreamer(journal::Journal* journal, ExecutionState* cntx, Config config);
+
   virtual ~JournalStreamer();
 
   // Self referential.
@@ -82,9 +87,8 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   void StopStalledDataWriterFiber();
   void StalledDataWriterFiber(std::chrono::milliseconds period_ms, util::fb2::Done* waiter);
 
+  const Config config_;
   // If we are replication in stable sync we can aggregate data before sending
-  bool is_stable_sync_;
-  LSN partial_sync_lsn_ = 0;
   size_t in_flight_bytes_ = 0, total_sent_ = 0;
   // Last time that send data in milliseconds
   uint64_t last_async_write_time_ = 0;
@@ -92,7 +96,6 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   LSN last_lsn_writen_ = 0;
   util::fb2::EventCount waker_;
   uint32_t journal_cb_id_{0};
-  SendLsn send_lsn_;
 };
 
 class CmdSerializer;
