@@ -197,8 +197,7 @@ void JournalStreamer::StartStalledDataWriterFiber() {
   }
 }
 
-void JournalStreamer::StalledDataWriterFiber(std::chrono::milliseconds period_ms,
-                                             util::fb2::Done* waiter) {
+bool JournalStreamer::MaybePartialStreamLSNs() {
   // Same algorithm as SwitchIncrementalFb. The only difference is that we don't sent
   // the old LSN"s via a snapshot but rather as journal changes.
   if (config_.start_partial_sync_at > 0) {
@@ -215,6 +214,19 @@ void JournalStreamer::StalledDataWriterFiber(std::chrono::milliseconds period_ms
       lsn++;
     }
 
+    if (!cntx_->IsRunning()) {
+      return false;
+    }
+
+    if (journal_->GetLsn() != lsn) {
+      // We stopped but we didn't manage to send the whole stream.
+      cntx_->ReportError(
+          std::make_error_code(errc::state_not_recoverable),
+          absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
+                       " was dropped from the buffer. Current lsn=", journal_->GetLsn()));
+      return false;
+    }
+
     // We are done, register back to the journal so we don't miss any changes
     journal_cb_id_ = journal_->RegisterOnChange(this);
 
@@ -223,6 +235,15 @@ void JournalStreamer::StalledDataWriterFiber(std::chrono::milliseconds period_ms
     if (pending_buf_.Size() != 0) {
       AsyncWrite(true);
     }
+  }
+  return true;
+}
+
+void JournalStreamer::StalledDataWriterFiber(std::chrono::milliseconds period_ms,
+                                             util::fb2::Done* waiter) {
+  if (!MaybePartialStreamLSNs()) {
+    // Either context got cancelled, or partial sync failed because the lsn's stalled.
+    return;
   }
 
   while (cntx_->IsRunning()) {

@@ -585,6 +585,11 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
           exec_st_.ReportError(ec.error());
       }
     };
+
+    if (last_journal_LSNs_) {
+      ++psync_attempts_;
+    }
+
     // Lock to prevent the error handler from running instantly
     // while the flows are in a mixed state.
     lock_guard lk{flows_op_mu_};
@@ -648,6 +653,10 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
   // Send DFLY STARTSTABLE.
   if (auto ec = SendNextPhaseRequest("STARTSTABLE"); ec) {
     return exec_st_.ReportError(ec);
+  }
+
+  if (sync_type == "partial") {
+    ++psync_successes_;
   }
 
   // Joining flows and resetting state is done by cleanup.
@@ -758,14 +767,12 @@ error_code Replica::ConsumeDflyStream() {
   LOG(INFO) << "Transitioned into stable sync";
   // Transition flows into stable sync.
   std::atomic<size_t> flows_reached_partial = 0;
-  DflyShardReplica::PSyncState psync{&flows_reached_partial, total_flows_to_finish_partial,
-                                     &psync_successes_};
   {
     auto shard_cb = [&](unsigned index, auto*) {
       const auto& local_ids = thread_flow_map_[index];
 
       for (unsigned id : local_ids) {
-        auto ec = shard_flows_[id]->StartStableSyncFlow(&exec_st_, &psync);
+        auto ec = shard_flows_[id]->StartStableSyncFlow(&exec_st_);
         if (ec)
           exec_st_.ReportError(ec);
       }
@@ -882,8 +889,7 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(
   return is_full_sync;
 }
 
-error_code DflyShardReplica::StartStableSyncFlow(ExecutionState* cntx, PSyncState* psync) {
-  DCHECK(psync);
+error_code DflyShardReplica::StartStableSyncFlow(ExecutionState* cntx) {
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
@@ -892,8 +898,8 @@ error_code DflyShardReplica::StartStableSyncFlow(ExecutionState* cntx, PSyncStat
     return std::make_error_code(errc::io_error);
   }
   rdb_loader_.reset();  // we do not need it anymore.
-  sync_fb_ = fb2::Fiber("shard_stable_sync_read", &DflyShardReplica::StableSyncDflyReadFb, this,
-                        cntx, psync);
+  sync_fb_ =
+      fb2::Fiber("shard_stable_sync_read", &DflyShardReplica::StableSyncDflyReadFb, this, cntx);
 
   return std::error_code{};
 }
@@ -956,7 +962,7 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
   VLOG(1) << "FullSyncDflyFb finished after reading " << rdb_loader_->bytes_read() << " bytes";
 }
 
-void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx, PSyncState* psync) {
+void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
   DCHECK_EQ(proactor_index_, ProactorBase::me()->GetPoolIndex());
 
   // Check leftover from full sync.
@@ -970,12 +976,6 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx, PSyncState* ps
   JournalReader reader{&ps, 0};
   DCHECK_GE(journal_rec_executed_, 1u);
   TransactionReader tx_reader{journal_rec_executed_.load(std::memory_order_relaxed) - 1};
-
-  if (lsn_to_finish_partial_ == journal_rec_executed_ &&
-      (++*(psync->flows_reached_partial) == psync->total_flows_to_finish_partial)) {
-    // There is no race condition, it will happen only once
-    ++*(psync->success);
-  }
 
   acks_fb_ = fb2::Fiber("shard_acks", &DflyShardReplica::StableSyncDflyAcksFb, this, cntx);
   std::optional<TransactionData> tx_data;
@@ -1006,12 +1006,6 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx, PSyncState* ps
         // lsn of the master and this lsn entry will be lost.
         journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
       }
-    }
-
-    if (lsn_to_finish_partial_ == journal_rec_executed_ &&
-        (++*(psync->flows_reached_partial) == psync->total_flows_to_finish_partial)) {
-      // There is no race condition, it will happen only once
-      ++*(psync->success);
     }
 
     shard_replica_waker_.notifyAll();

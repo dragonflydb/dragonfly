@@ -74,6 +74,10 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   PendingBuf pending_buf_;
 
  private:
+  // Return true if all lsn's from config_.start_partial_sync_at were sent (or if started from 0).
+  // Return false if not all lsn's were sent (stalled) in time. Cancels the context with error.
+  bool MaybePartialStreamLSNs();
+
   void AsyncWrite(bool force_send);
   void OnCompletion(std::error_code ec, size_t len);
 

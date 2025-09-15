@@ -207,20 +207,15 @@ class DflyShardReplica : public ProtocolClient {
                                  std::optional<LSN>,
                                  std::optional<Replica::LastMasterSyncData> data);
 
-  struct PSyncState {
-    std::atomic<size_t>* flows_reached_partial;
-    size_t total_flows_to_finish_partial = 0;
-    size_t* success;
-  };
   // Transition into stable state mode as dfly flow.
-  std::error_code StartStableSyncFlow(ExecutionState* cntx, PSyncState* psync);
+  std::error_code StartStableSyncFlow(ExecutionState* cntx);
 
   // Single flow full sync fiber spawned by StartFullSyncFlow.
   void FullSyncDflyFb(std::string eof_token, util::fb2::BlockingCounter block,
                       ExecutionState* cntx);
 
   // Single flow stable state sync fiber spawned by StartStableSyncFlow.
-  void StableSyncDflyReadFb(ExecutionState* cntx, PSyncState* state);
+  void StableSyncDflyReadFb(ExecutionState* cntx);
 
   void StableSyncDflyAcksFb(ExecutionState* cntx);
 
