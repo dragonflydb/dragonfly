@@ -811,6 +811,55 @@ void SetHuffmanTable(const std::string& huffman_table) {
   }
 }
 
+string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
+  using namespace CO;
+  if (!enabled) {
+    if (opt == FAST)
+      return "SLOW";
+    return "";
+  }
+
+  switch (opt) {
+    case WRITE:
+      return "write";
+    case READONLY:
+      return "readonly";
+    case DENYOOM:
+      return "denyoom";
+    case FAST:
+      return "fast";
+    case LOADING:
+      return "loading";
+    case DANGEROUS:
+      return "dangerous";
+    case ADMIN:
+      return "admin";
+    case NOSCRIPT:
+      return "noscript";
+    case BLOCKING:
+      return "blocking";
+    case HIDDEN:
+      return "hidden";
+    case INTERLEAVED_KEYS:
+      return "interleaved-keys";
+    case GLOBAL_TRANS:
+      return "global-trans";
+    case STORE_LAST_KEY:
+      return "store-last-key";
+    case VARIADIC_KEYS:
+      return "variadic-keys";
+    case NO_AUTOJOURNAL:
+      return "custom-journal";
+    case NO_KEY_TRANSACTIONAL:
+      return "no-key-transactional";
+    case NO_KEY_TX_SPAN_ALL:
+      return "no-key-tx-span-all";
+    case IDEMPOTENT:
+      return "idempotent";
+  }
+  return "";
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -2683,15 +2732,14 @@ void Service::Command(CmdArgList args, const CommandContext& cmd_cntx) {
     rb->StartArray(7);
     rb->SendSimpleString(cid.name());
     rb->SendLong(cid.arity());
-    rb->StartArray(CommandId::OptCount(cid.opt_mask()));
 
-    for (uint32_t i = 0; i < 32; ++i) {
+    vector<string> opts;
+    for (uint32_t i = 0; i < 32; i++) {
       unsigned obit = (1u << i);
-      if (cid.opt_mask() & obit) {
-        const char* name = CO::OptName(CO::CommandOpt{obit});
-        rb->SendSimpleString(name);
-      }
+      if (auto name = CommandOptName(CO::CommandOpt{obit}, cid.opt_mask() & obit); !name.empty())
+        opts.emplace_back(name);
     }
+    rb->SendSimpleStrArr(opts);
 
     rb->SendLong(cid.first_key_pos());
     rb->SendLong(cid.last_key_pos());

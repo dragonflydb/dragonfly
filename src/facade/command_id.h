@@ -88,8 +88,6 @@ class CommandId {
     opt_mask_ |= flag;
   }
 
-  static uint32_t OptCount(uint32_t mask);
-
   // PUBLISH/SUBSCRIBE/UNSUBSCRIBE variant
   bool IsPubSub() const {
     return is_pub_sub_;

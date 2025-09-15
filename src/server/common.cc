@@ -218,8 +218,6 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
       }
       if (scan_opts.limit == 0)
         scan_opts.limit = 1;
-      else if (scan_opts.limit > 4096)
-        scan_opts.limit = 4096;
     } else if (opt == "MATCH") {
       string_view pattern = ArgS(args, i + 1);
       if (pattern != "*")
