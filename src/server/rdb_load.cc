@@ -2565,11 +2565,20 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   thread_local std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_streamed;
   LoadConfig config_copy = item->load_config;
   if (item->load_config.streamed && item->load_config.append) {
-    // When a sets members are fully expired, the value is not created, so try again if it's missing
-    if (auto it = now_streamed.find(item->key); it == now_streamed.end())
-      config_copy.append = false;
-    else
+    if (auto it = now_streamed.find(item->key); it != now_streamed.end()) {
       pv_ptr = &*now_streamed[item->key];
+    } else {
+      // Sets and hashes are deleted when all their entries are expired.
+      // If it's the case, set reset append flag and start from scratch.
+      bool key_is_not_expired = item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms;
+      bool is_set_expiry_type = item->val.rdb_type == RDB_TYPE_HASH_WITH_EXPIRY ||
+                                item->val.rdb_type == RDB_TYPE_SET_WITH_EXPIRY;
+      if (!is_set_expiry_type && key_is_not_expired) {
+        LOG(ERROR) << "Count not to find append key '" << item->key << "' in DB " << db_ind;
+        return;
+      }
+      config_copy.append = false;
+    }
   }
 
   if (auto ec = FromOpaque(item->val, config_copy, pv_ptr); ec) {
