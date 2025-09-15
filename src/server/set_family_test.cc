@@ -380,6 +380,17 @@ TEST_F(SetFamilyTest, SScan) {
   EXPECT_THAT(vec.size(), 0);
 }
 
+TEST_F(SetFamilyTest, HugeSScan) {
+  for (int i = 0; i < 60000; i += 5) {
+    Run({"sadd", "myintset", absl::StrCat(i), absl::StrCat(i + 1), absl::StrCat(i + 2),
+         absl::StrCat(i + 3), absl::StrCat(i + 4)});
+  }
+
+  auto resp = Run({"sscan", "myintset", "0", "count", "50000"});
+  auto vec = StrArray(resp.GetVec()[1]);
+  EXPECT_GE(vec.size(), 50000);
+}
+
 TEST_F(SetFamilyTest, IntSetMemcpy) {
   // This logic is used in CompactObject::DefragIntSet
   intset* original = intsetNew();
