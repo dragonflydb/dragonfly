@@ -53,10 +53,7 @@ enum CommandOpt : uint32_t {
   // The same callback can be run multiple times without corrupting the result. Used for
   // opportunistic optimizations where inconsistencies can only be detected afterwards.
   IDEMPOTENT = 1U << 18,
-  SLOW = 1U << 19  // Unused?
 };
-
-const char* OptName(CommandOpt fl);
 
 constexpr inline bool IsEvalKind(std::string_view name) {
   return name.compare(0, 4, "EVAL") == 0;
@@ -153,8 +150,6 @@ class CommandId : public facade::CommandId {
   bool IsBlocking() const {
     return opt_mask_ & CO::BLOCKING;
   }
-
-  static const char* OptName(CO::CommandOpt fl);
 
   CommandId&& SetHandler(Handler3 f) && {
     handler_ = std::move(f);
