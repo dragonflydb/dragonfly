@@ -1724,6 +1724,22 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             &resp->body());
   AppendMetricWithoutLabels("evicted_keys_total", "", m.events.evicted_keys, MetricType::COUNTER,
                             &resp->body());
+  // Per-DB expired/evicted totals
+  {
+    string perdb_str;
+    AppendMetricHeader("expired_keys_total", "", MetricType::COUNTER, &perdb_str);
+    AppendMetricHeader("evicted_keys_total", "", MetricType::COUNTER, &perdb_str);
+    for (size_t i = 0; i < m.db_stats.size(); ++i) {
+      const auto& s = m.db_stats[i];
+      if (s.events.expired_keys > 0)
+        AppendMetricValue("expired_keys_total", s.events.expired_keys, {"db"}, {StrCat("db", i)},
+                          &perdb_str);
+      if (s.events.evicted_keys > 0)
+        AppendMetricValue("evicted_keys_total", s.events.evicted_keys, {"db"}, {StrCat("db", i)},
+                          &perdb_str);
+    }
+    absl::StrAppend(&resp->body(), perdb_str);
+  }
   // Memory stats
   if (legacy) {
     AppendMetricWithoutLabels("memory_fiberstack_vms_bytes",
@@ -1915,6 +1931,11 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
 
     AppendMetricValue("db_keys_expiring", m.db_stats[i].expire_count, {"db"}, {StrCat("db", i)},
                       &db_key_expire_metrics);
+
+    AppendMetricValue("keyspace_hits_total", m.db_stats[i].events.hits, {"db"}, {StrCat("db", i)},
+                      &resp->body());
+    AppendMetricValue("keyspace_misses_total", m.db_stats[i].events.misses, {"db"},
+                      {StrCat("db", i)}, &resp->body());
   }
 
   absl::StrAppend(&resp->body(), db_key_metrics, db_key_expire_metrics, db_capacity_metrics,
@@ -2644,7 +2665,8 @@ void ServerFamily::ResetStat(Namespace* ns) {
         registry->ResetCallStats(index);
         EngineShard* shard = EngineShard::tlocal();
         if (shard) {
-          ns->GetDbSlice(shard->shard_id()).ResetEvents();
+          auto& db_slice = ns->GetDbSlice(shard->shard_id());
+          db_slice.ResetEvents();
         }
         facade::ResetStats();
         ServerState::tlocal()->exec_freq_count.clear();
@@ -3244,7 +3266,12 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       const auto& stats = m.db_stats[i];
       bool show = (i == 0) || (stats.key_count > 0);
       if (show) {
+        size_t total = stats.events.hits + stats.events.misses;
+        double hit_ratio =
+            (total > 0) ? static_cast<double>(stats.events.hits) / (total)*100.0 : 0.0;
         string val = StrCat("keys=", stats.key_count, ",expires=", stats.expire_count,
+                            ",hits=", stats.events.hits, ",misses=", stats.events.misses,
+                            ",hit_ratio=", absl::StrFormat("%.2f", hit_ratio),
                             ",avg_ttl=-1");  // TODO
         append(StrCat("db", i), val);
       }
