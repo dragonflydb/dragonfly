@@ -14,9 +14,9 @@
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/flags/internal/flag.h"
+#include "base/flag_utils.h"
 #include "base/flags.h"
 #include "base/logging.h"
-#include "facade/flag_utils.h"
 #include "server/common.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
@@ -28,6 +28,10 @@
 #include "server/tx_base.h"
 
 using namespace facade;
+
+using AtLeast64 = base::ConstrainedNumericFlagValue<size_t, 64>;  // ABSL_FLAG breaks with commas
+ABSL_FLAG(AtLeast64, tiered_min_value_size, 64,
+          "Minimum size of values eligible for offloading. Must be at least 64");
 
 ABSL_FLAG(bool, tiered_experimental_cooling, true,
           "If true, uses intermediate cooling layer "
@@ -467,6 +471,7 @@ float TieredStorage::WriteDepthUsage() const {
 
 void TieredStorage::UpdateFromFlags() {
   config_ = {
+      .min_value_size = absl::GetFlag(FLAGS_tiered_min_value_size),
       .experimental_cooling = absl::GetFlag(FLAGS_tiered_experimental_cooling),
       .write_depth_limit = absl::GetFlag(FLAGS_tiered_storage_write_depth),
       .offload_threshold = absl::GetFlag(FLAGS_tiered_offload_threshold),
@@ -475,8 +480,9 @@ void TieredStorage::UpdateFromFlags() {
 }
 
 std::vector<std::string> TieredStorage::GetMutableFlagNames() {
-  return facade::GetFlagNames(FLAGS_tiered_experimental_cooling, FLAGS_tiered_storage_write_depth,
-                              FLAGS_tiered_offload_threshold, FLAGS_tiered_upload_threshold);
+  return base::GetFlagNames(FLAGS_tiered_min_value_size, FLAGS_tiered_experimental_cooling,
+                            FLAGS_tiered_storage_write_depth, FLAGS_tiered_offload_threshold,
+                            FLAGS_tiered_upload_threshold);
 }
 
 bool TieredStorage::ShouldOffload() const {
@@ -564,7 +570,7 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
 bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
   const auto& disk_stats = op_manager_->GetStats().disk_stats;
   return !pv.IsExternal() && !pv.HasStashPending() && pv.ObjType() == OBJ_STRING &&
-         pv.Size() >= kMinValueSize &&
+         pv.Size() >= config_.min_value_size &&
          disk_stats.allocated_bytes + tiering::kPageSize + pv.Size() < disk_stats.max_file_size;
 }
 

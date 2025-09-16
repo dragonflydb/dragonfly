@@ -14,6 +14,7 @@
 #include <variant>
 
 #include "base/cycle_clock.h"
+#include "base/flag_utils.h"
 #include "base/flags.h"
 #include "base/histogram.h"
 #include "base/io_buf.h"
@@ -22,7 +23,6 @@
 #include "core/heap_size.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
-#include "facade/flag_utils.h"
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
@@ -2178,9 +2178,9 @@ void Connection::UpdateFromFlags() {
 }
 
 std::vector<std::string> Connection::GetMutableFlagNames() {
-  return GetFlagNames(FLAGS_pipeline_queue_limit, FLAGS_pipeline_buffer_limit,
-                      FLAGS_max_busy_read_usec, FLAGS_always_flush_pipeline,
-                      FLAGS_pipeline_squash_limit, FLAGS_pipeline_wait_batch_usec);
+  return base::GetFlagNames(FLAGS_pipeline_queue_limit, FLAGS_pipeline_buffer_limit,
+                            FLAGS_max_busy_read_usec, FLAGS_always_flush_pipeline,
+                            FLAGS_pipeline_squash_limit, FLAGS_pipeline_wait_batch_usec);
 }
 
 void Connection::GetRequestSizeHistogramThreadLocal(std::string* hist) {
