@@ -8,6 +8,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
+#include <boost/geometry.hpp>
 #include <map>
 #include <memory>
 #include <optional>
@@ -203,6 +204,30 @@ struct HnswVectorIndex : public BaseVectorIndex {
 
  private:
   std::unique_ptr<HnswlibAdapter> adapter_;
+};
+
+struct GeoIndex : public BaseIndex {
+  using point =
+      boost::geometry::model::point<double, 2,
+                                    boost::geometry::cs::geographic<boost::geometry::degree>>;
+  using entry = std::pair<point, DocId>;
+
+  explicit GeoIndex(PMR_NS::memory_resource* mr);
+  ~GeoIndex();
+
+  bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
+  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
+  std::vector<DocId> RadiusSearch(double lat, double lon, double radius) const;
+
+  std::vector<DocId> GetAllDocsWithNonNullValues() const override {
+    return std::vector<DocId>{};
+  }
+
+  static double ConvertToRadiusInMeters(size_t radius, std::string_view arg);
+
+ private:
+  using rtree = boost::geometry::index::rtree<entry, boost::geometry::index::quadratic<16>>;
+  std::unique_ptr<rtree> rtree_;
 };
 
 }  // namespace dfly::search

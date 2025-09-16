@@ -10,6 +10,10 @@
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
 
+#include <boost/iterator/function_output_iterator.hpp>
+
+#include "util/fibers/fibers.h"
+
 #define UNI_ALGO_DISABLE_NFKC_NFKD
 
 #include <hnswlib/hnswalg.h>
@@ -612,6 +616,86 @@ std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t 
 
 void HnswVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
   adapter_->Remove(id);
+}
+
+GeoIndex::GeoIndex(PMR_NS::memory_resource* mr) : rtree_(make_unique<rtree>()) {
+}
+
+GeoIndex::~GeoIndex() {
+}
+
+bool GeoIndex::Add(DocId id, const DocumentAccessor& doc, std::string_view field) {
+  auto geolocation = doc.GetStrings(field);
+
+  if (!geolocation)
+    return false;
+
+  absl::InlinedVector<string_view, 2> coordinates = absl::StrSplit(geolocation.value()[0], ",");
+
+  if (coordinates.size() != 2)
+    return false;
+
+  double lat;
+  if (!absl::SimpleAtod(coordinates[0], &lat))
+    return false;
+
+  double lon;
+  if (!absl::SimpleAtod(coordinates[1], &lon))
+    return false;
+
+  entry index_entry = std::make_pair(point{lat, lon}, id);
+
+  rtree_->insert(index_entry);
+
+  return true;
+}
+
+void GeoIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
+}
+
+std::vector<DocId> GeoIndex::RadiusSearch(double lat, double lon, double radius) const {
+  std::vector<DocId> results;
+
+  // Declare the geographic_point_circle strategy (with 36 points)
+  // Default template arguments (taking Andoyer strategy)
+  boost::geometry::strategy::buffer::geographic_point_circle<> point_strategy(36);
+
+  // Declare the distance strategy in meters around the point
+  boost::geometry::strategy::buffer::distance_symmetric<double> distance_strategy(radius);
+
+  // Declare other necessary strategies, unused for point
+  boost::geometry::strategy::buffer::join_round join_strategy;
+  boost::geometry::strategy::buffer::end_round end_strategy;
+  boost::geometry::strategy::buffer::side_straight side_strategy;
+
+  point p{lat, lon};
+
+  // Create the buffer of a point on the Earth
+  boost::geometry::model::multi_polygon<boost::geometry::model::polygon<point>> result;
+
+  boost::geometry::buffer(p, result, distance_strategy, side_strategy, join_strategy, end_strategy,
+                          point_strategy);
+
+  rtree_->query(boost::geometry::index::within(result),
+                boost::make_function_output_iterator(
+                    [&results](auto const& val) { results.push_back(val.second); }));
+
+  return results;
+}
+
+double GeoIndex::ConvertToRadiusInMeters(size_t radius, std::string_view arg) {
+  const std::string unit = absl::AsciiStrToUpper(arg);
+  if (unit == "M") {
+    return radius * 1;
+  } else if (unit == "KM") {
+    return radius * 1000;
+  } else if (unit == "FT") {
+    return radius * 0.3048;
+  } else if (unit == "MI") {
+    return radius * 1609.34;
+  } else {
+    return -1;
+  }
 }
 
 }  // namespace dfly::search

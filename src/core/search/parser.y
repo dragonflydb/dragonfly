@@ -79,7 +79,7 @@ double toDouble(string_view src);
 %token <std::string> UINT32 "uint32"
 %nterm <double> generic_number
 %nterm <bool> opt_lparen
-%nterm <AstExpr> final_query filter search_expr search_unary_expr search_or_expr search_and_expr numeric_filter_expr
+%nterm <AstExpr> final_query filter search_expr search_unary_expr search_or_expr search_and_expr numeric_filter_expr geo_filter_expr
 %nterm <AstExpr> field_cond field_cond_expr field_unary_expr field_or_expr field_and_expr tag_list
 %nterm <AstTagsNode::TagValueProxy> tag_list_element
 
@@ -150,11 +150,15 @@ field_cond:
   | NOT_OP field_cond                                   { $$ = AstNegateNode(std::move($2)); }
   | LPAREN field_cond_expr RPAREN                       { $$ = std::move($2); }
   | LBRACKET numeric_filter_expr RBRACKET               { $$ = std::move($2); }
+  | LBRACKET geo_filter_expr RBRACKET                   { $$ = std::move($2); }
   | LCURLBR tag_list RCURLBR                            { $$ = std::move($2); }
 
 numeric_filter_expr:
   opt_lparen generic_number opt_lparen generic_number         { $$ = AstRangeNode($2, $1, $4, $3); }
   | opt_lparen generic_number COMMA opt_lparen generic_number { $$ = AstRangeNode($2, $1, $5, $4); }
+
+geo_filter_expr:
+  DOUBLE DOUBLE UINT32 TERM { $$ = AstGeoNode(toDouble($1), toDouble($2), toUint32($3), std::move($4)); }
 
 generic_number:
   DOUBLE { $$ = toDouble($1); }

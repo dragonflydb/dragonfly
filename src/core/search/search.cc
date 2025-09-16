@@ -79,6 +79,9 @@ struct ProfileBuilder {
         [](const AstNegateNode& n) { return absl::StrCat("Negate{}"); },
         [](const AstStarNode& n) { return absl::StrCat("Star{}"); },
         [](const AstStarFieldNode& n) { return absl::StrCat("StarField{}"); },
+        [](const AstGeoNode& n) {
+          return absl::StrCat("Geo{", n.lat, " ", n.lon, " ", n.radius, " ", n.unit, "}");
+        },
     };
     return visit(node_info, node.Variant());
   }
@@ -272,6 +275,15 @@ struct BasicSearch {
     DCHECK(!active_field.empty());
     if (auto* index = GetIndex<NumericIndex>(active_field); index) {
       return IndexResult{index->Range(node.lo, node.hi)};
+    }
+    return IndexResult{};
+  }
+
+  IndexResult Search(const AstGeoNode& node, string_view active_field) {
+    DCHECK(!active_field.empty());
+    double converted_radius = GeoIndex::ConvertToRadiusInMeters(node.radius, node.unit);
+    if (auto* index = GetIndex<GeoIndex>(active_field); index) {
+      return IndexResult{index->RadiusSearch(node.lat, node.lon, converted_radius)};
     }
     return IndexResult{};
   }
@@ -500,6 +512,10 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
         indices_[field_ident] = std::move(vector_index);
         break;
       }
+      case SchemaField::GEO: {
+        indices_[field_ident] = make_unique<GeoIndex>(mr);
+        break;
+      }
     }
   }
 }
@@ -518,6 +534,7 @@ void FieldIndices::CreateSortIndices(PMR_NS::memory_resource* mr) {
         sort_indices_[field_ident] = make_unique<NumericSortIndex>(mr);
         break;
       case SchemaField::VECTOR:
+      case SchemaField::GEO:
         break;
     }
   }

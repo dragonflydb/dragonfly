@@ -55,7 +55,7 @@ struct OptionalNumericFilter : public OptionalFilterBase {
 
 // Describes a specific index field
 struct SchemaField {
-  enum FieldType { TAG, TEXT, NUMERIC, VECTOR };
+  enum FieldType { TAG, TEXT, NUMERIC, VECTOR, GEO };
   enum FieldFlags : uint8_t { NOINDEX = 1 << 0, SORTABLE = 1 << 1 };
 
   struct VectorParams {

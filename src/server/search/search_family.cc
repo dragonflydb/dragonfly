@@ -195,6 +195,10 @@ ParsedSchemaField ParseVector(CmdArgParser* parser) {
   return std::make_pair(search::SchemaField::VECTOR, vector_params);
 }
 
+ParsedSchemaField ParseGeo(CmdArgParser* parser) {
+  return std::make_pair(search::SchemaField::GEO, std::monostate{});
+}
+
 // ON HASH | JSON
 ParseResult<bool> ParseOnOption(CmdArgParser* parser, DocIndex* index) {
   index->type = parser->MapNext("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
@@ -249,8 +253,9 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
 
     // Determine type
     using search::SchemaField;
-    auto params_parser = parser->TryMapNext("TAG"sv, &ParseTag, "TEXT"sv, &ParseText, "NUMERIC"sv,
-                                            &ParseNumeric, "VECTOR"sv, &ParseVector);
+    auto params_parser =
+        parser->TryMapNext("TAG"sv, &ParseTag, "TEXT"sv, &ParseText, "NUMERIC"sv, &ParseNumeric,
+                           "VECTOR"sv, &ParseVector, "GEO", &ParseGeo);
     if (!params_parser) {
       return CreateSyntaxError(
           absl::StrCat("Field type "sv, parser->Next(), " is not supported"sv));
