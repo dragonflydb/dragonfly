@@ -893,7 +893,7 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
   }).Detach();
 }
 
-void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
+util::fb2::JoinHandle DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   bool clear_tiered = owner_->tiered_storage() != nullptr;
 
   if (clear_tiered)
@@ -925,20 +925,17 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
                                           ServerState::kGlibcmalloc);
   };
 
-  fb2::Fiber("flush_dbs", std::move(cb)).Detach();
+  return fb2::Fiber("flush_dbs", std::move(cb)).Detach();
 }
 
-void DbSlice::FlushDb(DbIndex db_ind) {
+util::fb2::JoinHandle DbSlice::FlushDb(DbIndex db_ind) {
   DVLOG(1) << "Flushing db " << db_ind;
 
   // clear client tracking map.
   client_tracking_map_.clear();
 
-  if (db_ind != kDbAll) {
-    // Flush a single database if a specific index is provided
-    FlushDbIndexes({db_ind});
-    return;
-  }
+  if (db_ind != kDbAll)  // Flush a single database if a specific index is provided
+    return FlushDbIndexes({db_ind});
 
   std::vector<DbIndex> indexes;
   indexes.reserve(db_arr_.size());
@@ -948,7 +945,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     }
   }
 
-  FlushDbIndexes(indexes);
+  return FlushDbIndexes(indexes);
 }
 
 void DbSlice::AddExpire(DbIndex db_ind, const Iterator& main_it, uint64_t at) {

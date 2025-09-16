@@ -1284,10 +1284,7 @@ void ServerFamily::FlushAll(Namespace* ns) {
   boost::intrusive_ptr<Transaction> flush_trans(new Transaction{cid});
   flush_trans->InitByArgs(ns, 0, {});
   VLOG(1) << "Performing flush";
-  error_code ec = Drakarys(flush_trans.get(), DbSlice::kDbAll);
-  if (ec) {
-    LOG(ERROR) << "Error flushing db " << ec.message();
-  }
+  Drakarys(flush_trans.get(), DbSlice::kDbAll);
 }
 
 // Load starts as many fibers as there are files to load each one separately.
@@ -2201,17 +2198,24 @@ bool ServerFamily::TEST_IsSaving() const {
   return is_saving.load(std::memory_order_relaxed);
 }
 
-error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
+vector<util::fb2::JoinHandle> ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
   VLOG(1) << "Drakarys";
 
+  base::SpinLock lock;
+  vector<util::fb2::JoinHandle> handles;
+
   transaction->Execute(
-      [db_ind](Transaction* t, EngineShard* shard) {
-        t->GetDbSlice(shard->shard_id()).FlushDb(db_ind);
+      [db_ind, &handles, &lock](Transaction* t, EngineShard* shard) {
+        auto handle = t->GetDbSlice(shard->shard_id()).FlushDb(db_ind);
+        {
+          lock_guard lk{lock};
+          handles.emplace_back(std::move(handle));
+        }
         return OpStatus::OK;
       },
       true);
 
-  return error_code{};
+  return handles;
 }
 
 SaveInfoData ServerFamily::GetLastSaveInfo() const {
@@ -2281,20 +2285,16 @@ void ServerFamily::SendInvalidationMessages() const {
 }
 
 void ServerFamily::FlushDb(CmdArgList args, const CommandContext& cmd_cntx) {
-  DCHECK(cmd_cntx.tx);
-  Drakarys(cmd_cntx.tx, cmd_cntx.tx->GetDbIndex());
-  SendInvalidationMessages();
-  cmd_cntx.rb->SendOk();
-}
+  string_view cmd_name = cmd_cntx.tx->GetCId()->name();
+  DbIndex index = cmd_name == "FLUSHALL" ? DbSlice::kDbAll : cmd_cntx.tx->GetDbIndex();
+  bool sync = args.size() > 0 && absl::AsciiStrToUpper(args[0]) == "SYNC";
 
-void ServerFamily::FlushAll(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (args.size() > 1) {
-    cmd_cntx.rb->SendError(kSyntaxErr);
-    return;
+  auto handles = Drakarys(cmd_cntx.tx, index);
+  if (sync) {
+    for (auto& handle : handles)
+      handle.Wait();
   }
 
-  DCHECK(cmd_cntx.tx);
-  Drakarys(cmd_cntx.tx, DbSlice::kDbAll);
   SendInvalidationMessages();
   cmd_cntx.rb->SendOk();
 }
@@ -4035,7 +4035,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS | CO::DANGEROUS, 1, 0, 0, acl::kFlushDB}.HFUNC(
              FlushDb)
       << CI{"FLUSHALL", CO::WRITE | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushAll}
-             .HFUNC(FlushAll)
+             .HFUNC(FlushDb)
       << CI{"INFO", CO::LOADING, -1, 0, 0, acl::kInfo}.HFUNC(Info)
       << CI{"HELLO", CO::LOADING, -1, 0, 0, acl::kHello}.HFUNC(Hello)
       << CI{"LASTSAVE", CO::LOADING | CO::FAST, 1, 0, 0, acl::kLastSave}.HFUNC(LastSave)
