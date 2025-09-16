@@ -200,7 +200,7 @@ async def test_eviction_on_rss_treshold(df_factory: DflyInstanceFactory, heartbe
     df_server.start()
     client = df_server.client()
 
-    data_fill_size = int(0.80 * max_memory)  # 85% of max_memory
+    data_fill_size = int(0.70 * max_memory)  # 70% of max_memory
 
     val_size = 1024 * 5  # 5 kb
     num_keys = data_fill_size // val_size

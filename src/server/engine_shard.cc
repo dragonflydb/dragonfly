@@ -721,8 +721,11 @@ size_t EngineShard::CalculateEvictionBytes() {
       << "Used memory goal bytes: " << goal_bytes << ", used memory: " << global_used_memory
       << ", memory limit: " << max_memory_limit;
 
-  // If rss_oom_deny_ratio is set, we should evict depending on rss memory too
-  const double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
+  // RSS memory limit is always max_memory_limit or if rss_oom_deny_ratio is used than we should
+  // respect but upper limit is again max_memory.
+  const double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio > 0.
+                                        ? std::min(ServerState::tlocal()->rss_oom_deny_ratio, 1.)
+                                        : 1.;
   // Check for `enable_heartbeat_rss_eviction` flag since it dynamic. And reset state
   // if flag has changed.
   bool rss_eviction_enabled_flag = GetFlag(FLAGS_enable_heartbeat_rss_eviction);
@@ -731,7 +734,7 @@ size_t EngineShard::CalculateEvictionBytes() {
         eviction_state_.deleted_bytes_before_rss_update = 0;
     eviction_state_.rss_eviction_enabled_ = rss_eviction_enabled_flag;
   }
-  if (rss_oom_deny_ratio > 0.0 && eviction_state_.rss_eviction_enabled_) {
+  if (eviction_state_.rss_eviction_enabled_) {
     const size_t max_rss_memory = size_t(rss_oom_deny_ratio * max_memory_limit);
     /* We start eviction when we have less than eviction_memory_budget_threshold * 100% of free rss
      * memory */
