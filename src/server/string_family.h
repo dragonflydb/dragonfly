@@ -39,12 +39,11 @@ class StringFamily {
   static void MSetNx(CmdArgList args, const CommandContext& cmnd_cntx);
 
   static void Set(CmdArgList args, const CommandContext& cmnd_cntx);
-  static void SetEx(CmdArgList args, const CommandContext& cmnd_cntx);
   static void SetNx(CmdArgList args, const CommandContext& cmnd_cntx);
   static void SetRange(CmdArgList args, const CommandContext& cmnd_cntx);
+  static void SetExGeneric(CmdArgList args, const CommandContext& cmnd_cntx);
   static void StrLen(CmdArgList args, const CommandContext& cmnd_cntx);
   static void Prepend(CmdArgList args, const CommandContext& cmnd_cntx);
-  static void PSetEx(CmdArgList args, const CommandContext& cmnd_cntx);
 
   static void ClThrottle(CmdArgList args, const CommandContext& cmnd_cntx);
   static void GAT(CmdArgList args, const CommandContext& cmnd_cntx);
