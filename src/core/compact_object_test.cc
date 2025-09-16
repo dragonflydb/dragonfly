@@ -665,23 +665,25 @@ static void BuildEncoderAB(HuffmanEncoder* encoder) {
   CHECK(encoder->Build(hist.data(), hist.size() - 1, nullptr));
 }
 
-TEST_F(CompactObjectTest, HuffMan) {
+TEST_F(CompactObjectTest, Huffman) {
   HuffmanEncoder encoder;
   BuildEncoderAB(&encoder);
   string bindata = encoder.Export();
-  ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_KEYS, bindata));
-  for (unsigned i = 30; i < 2048; i += 10) {
-    string data(i, 'a');
-    cobj_.SetString(data, true);
-    bool malloc_used = i >= 60;
-    ASSERT_EQ(malloc_used, cobj_.MallocUsed() > 0) << i;
-    ASSERT_EQ(data.size(), cobj_.Size());
-    ASSERT_EQ(CompactObj::HashCode(data), cobj_.HashCode());
+  for (CompactObj::HuffmanDomain domain : {CompactObj::HUFF_KEYS, CompactObj::HUFF_STRING_VALUES}) {
+    ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(domain, bindata));
+    for (unsigned i = 30; i < 2048; i += 10) {
+      string data(i, 'a');
+      cobj_.SetString(data, domain == CompactObj::HUFF_KEYS);
+      bool malloc_used = i >= 60;
+      ASSERT_EQ(malloc_used, cobj_.MallocUsed() > 0) << i;
+      ASSERT_EQ(data.size(), cobj_.Size());
+      ASSERT_EQ(CompactObj::HashCode(data), cobj_.HashCode());
 
-    string actual;
-    cobj_.GetString(&actual);
-    EXPECT_EQ(data, actual);
-    EXPECT_EQ(cobj_, data);
+      string actual;
+      cobj_.GetString(&actual);
+      EXPECT_EQ(data, actual);
+      EXPECT_EQ(cobj_, data);
+    }
   }
 }
 
