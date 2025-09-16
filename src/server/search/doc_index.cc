@@ -136,6 +136,8 @@ string_view SearchFieldTypeToString(search::SchemaField::FieldType type) {
       return "NUMERIC";
     case search::SchemaField::VECTOR:
       return "VECTOR";
+    case search::SchemaField::GEO:
+      return "GEO";
   }
   ABSL_UNREACHABLE();
   return "";
