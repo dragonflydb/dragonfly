@@ -431,7 +431,7 @@ class CompactObj {
   StringOrView GetRawString() const;
 
   StrEncoding GetStrEncoding() const {
-    return StrEncoding{mask_bits_.encoding, bool(is_key_)};
+    return StrEncoding{mask_bits_.encoding, bool(huffman_domain_)};
   }
 
   bool HasAllocated() const;
@@ -550,7 +550,7 @@ class CompactObj {
     uint8_t tagbyte_ = 0;
     struct {
       uint8_t taglen_ : 5;
-      uint8_t is_key_ : 1;
+      uint8_t huffman_domain_ : 1;  // value from HuffmanDomain enum.
       uint8_t reserved : 2;
     };
   };

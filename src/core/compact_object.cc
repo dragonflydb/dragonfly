@@ -367,8 +367,8 @@ struct TL {
   Huffman huff_keys, huff_string_values;
   uint64_t huff_encode_total = 0, huff_encode_success = 0;  // success/total metrics.
 
-  const HuffmanDecoder& GetHuffmanDecoder(bool is_key) const {
-    return is_key ? huff_keys.decoder : huff_string_values.decoder;
+  const HuffmanDecoder& GetHuffmanDecoder(uint8_t huffman_domain) const {
+    return huffman_domain == CompactObj::HUFF_KEYS ? huff_keys.decoder : huff_string_values.decoder;
   }
 };
 
@@ -1146,7 +1146,7 @@ void CompactObj::GetString(char* dest) const {
         next += slices[0].size() - 1;
         memcpy(next, slices[1].data(), slices[1].size());
         string_view src(reinterpret_cast<const char*>(tl.tmp_buf.data()), tl.tmp_buf.size());
-        const auto& decoder = tl.GetHuffmanDecoder(is_key_);
+        const auto& decoder = tl.GetHuffmanDecoder(huffman_domain_);
         CHECK(decoder.Decode(src, decoded_len, dest));
         return;
       }
@@ -1361,7 +1361,7 @@ bool CompactObj::CmpEncoded(string_view sv) const {
       constexpr size_t kMaxHuffLen = kInlineLen * 3;
       if (sz <= kMaxHuffLen) {
         char buf[kMaxHuffLen];
-        const auto& decoder = tl.GetHuffmanDecoder(is_key_);
+        const auto& decoder = tl.GetHuffmanDecoder(huffman_domain_);
         CHECK(decoder.Decode({u_.inline_str + 1, size_t(taglen_ - 1)}, sz, buf));
         return sv == string_view(buf, sz);
       }
@@ -1484,7 +1484,7 @@ void CompactObj::EncodeString(string_view str, bool is_key) {
           DCHECK_LT(delta, 256u);
           tl.tmp_buf[0] = static_cast<uint8_t>(delta);
           mask_bits_.encoding = HUFFMAN_ENC;
-          is_key_ = is_key;
+          huffman_domain_ = is_key ? HUFF_KEYS : HUFF_STRING_VALUES;
           if (encoded.size() <= kInlineLen) {
             SetMeta(encoded.size(), mask_);
             memcpy(u_.inline_str, tl.tmp_buf.data(), encoded.size());
