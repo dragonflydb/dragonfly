@@ -31,11 +31,11 @@ extern "C" {
 #include <filesystem>
 
 #include "base/cycle_clock.h"
+#include "base/flag_utils.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
-#include "facade/flag_utils.h"
 #include "facade/reply_builder.h"
 #include "facade/reply_capture.h"
 #include "server/acl/acl_commands_def.h"
@@ -742,8 +742,8 @@ void UpdateFromFlagsOnThread() {
 }
 
 std::vector<std::string> GetMutableFlagNames() {
-  return facade::GetFlagNames(FLAGS_shard_thread_busy_polling_usec,
-                              FLAGS_squash_stats_latency_lower_limit);
+  return base::GetFlagNames(FLAGS_shard_thread_busy_polling_usec,
+                            FLAGS_squash_stats_latency_lower_limit);
 }
 
 void UpdateUringFlagsOnThread() {
@@ -951,13 +951,13 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
                        []() { MultiCommandSquasher::UpdateFromFlags(); });
   // Register uring proactor flags
   RegisterMutableFlags(&config_registry,
-                       facade::GetFlagNames(FLAGS_uring_wake_mode, FLAGS_uring_submit_threshold),
+                       base::GetFlagNames(FLAGS_uring_wake_mode, FLAGS_uring_submit_threshold),
                        []() { UpdateUringFlagsOnThread(); });
   // Register scheduler flags
   RegisterMutableFlags(
       &config_registry,
-      facade::GetFlagNames(FLAGS_scheduler_background_budget, FLAGS_scheduler_background_sleep_prob,
-                           FLAGS_scheduler_background_warrant),
+      base::GetFlagNames(FLAGS_scheduler_background_budget, FLAGS_scheduler_background_sleep_prob,
+                         FLAGS_scheduler_background_warrant),
       []() { UpdateSchedulerFlagsOnThread(); });
 
   config_registry.RegisterSetter<MemoryBytesFlag>("maxmemory", [](const MemoryBytesFlag& flag) {

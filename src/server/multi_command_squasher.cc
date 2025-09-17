@@ -7,11 +7,11 @@
 #include <absl/container/inlined_vector.h>
 
 #include "base/cycle_clock.h"
+#include "base/flag_utils.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "facade/dragonfly_connection.h"
-#include "facade/flag_utils.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -426,7 +426,7 @@ void MultiCommandSquasher::UpdateFromFlags() {
 }
 
 vector<string> MultiCommandSquasher::GetMutableFlagNames() {
-  return facade::GetFlagNames(FLAGS_max_busy_squash_usec, FLAGS_log_squash_info_threshold_usec);
+  return base::GetFlagNames(FLAGS_max_busy_squash_usec, FLAGS_log_squash_info_threshold_usec);
 }
 
 }  // namespace dfly
