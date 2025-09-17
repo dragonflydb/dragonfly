@@ -138,13 +138,6 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
       first_key_(first_key),
       last_key_(last_key),
       acl_categories_(acl_categories) {
-  if (name_ == "PUBLISH" || name_ == "SUBSCRIBE" || name_ == "UNSUBSCRIBE") {
-    is_pub_sub_ = true;
-  } else if (name_ == "PSUBSCRIBE" || name_ == "PUNSUBSCRIBE") {
-    is_p_pub_sub_ = true;
-  } else if (name_ == "SPUBLISH" || name_ == "SSUBSCRIBE" || name_ == "SUNSUBSCRIBE") {
-    is_sharded_pub_sub_ = true;
-  }
 }
 
 static bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {

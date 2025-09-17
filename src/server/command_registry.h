@@ -55,17 +55,14 @@ enum CommandOpt : uint32_t {
   IDEMPOTENT = 1U << 18,
 };
 
-constexpr inline bool IsEvalKind(std::string_view name) {
-  return name.compare(0, 4, "EVAL") == 0;
-}
+enum class PubSubKind : uint8_t { REGULAR = 0, PATTERN = 1, SHARDED = 2 };
 
-constexpr inline bool IsTransKind(std::string_view name) {
-  return (name == "EXEC") || (name == "MULTI") || (name == "DISCARD");
-}
-
-static_assert(IsEvalKind("EVAL") && IsEvalKind("EVAL_RO") && IsEvalKind("EVALSHA") &&
-              IsEvalKind("EVALSHA_RO"));
-static_assert(!IsEvalKind(""));
+// Commands controlling any multi command execution.
+// They often need to be handled separately from regular commands in many contexts
+enum class MultiControlKind : uint8_t {
+  EVAL,  // EVAL, EVAL_RO, EVALSHA, EVALSHA_RO
+  EXEC,  // EXEC, MULTI, DISCARD
+};
 
 };  // namespace CO
 
@@ -114,6 +111,7 @@ class CommandId : public facade::CommandId {
   // server_state.h)
   CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
             std::optional<uint32_t> acl_categories = std::nullopt);
+
   CommandId(CommandId&& o) = default;
 
   ~CommandId();
@@ -182,7 +180,19 @@ class CommandId : public facade::CommandId {
 
   hdr_histogram* LatencyHist() const;
 
+  std::optional<CO::PubSubKind> PubSubKind() const {
+    return kind_pubsub_;
+  }
+
+  // Returns value if this command controls multi command execution (EVAL, EXEC & helpers)
+  std::optional<CO::MultiControlKind> MultiControlKind() const {
+    return kind_multi_ctr_;
+  }
+
  private:
+  std::optional<CO::PubSubKind> kind_pubsub_;
+  std::optional<CO::MultiControlKind> kind_multi_ctr_;
+
   // The following fields must copy manually in the move constructor.
   bool implicit_acl_;
   bool is_alias_{false};

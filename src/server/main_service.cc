@@ -634,7 +634,7 @@ enum class ExecScriptUse {
 ExecScriptUse DetermineScriptPresense(const std::vector<StoredCmd>& body) {
   bool script_load = false;
   for (const auto& scmd : body) {
-    if (CO::IsEvalKind(scmd.Cid()->name())) {
+    if (scmd.Cid()->MultiControlKind() == CO::MultiControlKind::EVAL) {
       return ExecScriptUse::SCRIPT_RUN;
     }
 
@@ -1087,17 +1087,16 @@ void Service::Shutdown() {
 }
 
 OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, CmdArgList args) {
-  if (!cid->IsShardedPSub()) {
-    return DetermineKeys(cid, args);
-  }
-
-  // Sharded pub sub
-  // Command form: SPUBLISH shardchannel message
+  // Sharded pub sub: PUBLISH shardchannel message
   if (cid->name() == registry_.RenamedOrOriginal("SPUBLISH")) {
     return {KeyIndex(0, 1)};
   }
 
-  return {KeyIndex(0, args.size())};
+  if (cid->PubSubKind() == CO::PubSubKind::SHARDED) {
+    return {KeyIndex(0, args.size())};
+  }
+
+  return DetermineKeys(cid, args);
 }
 
 optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
@@ -1107,7 +1106,7 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
     return nullopt;
   }
 
-  if (cid->first_key_pos() == 0 && !cid->IsShardedPSub()) {
+  if (cid->first_key_pos() == 0 && cid->PubSubKind() != CO::PubSubKind::SHARDED) {
     return nullopt;  // No key command.
   }
 
@@ -1143,7 +1142,7 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
 // TODO(kostas) refactor. Almost 1-1 with CheckKeyOwnership() above.
 std::optional<facade::ErrorReply> Service::TakenOverSlotError(const CommandId* cid, CmdArgList args,
                                                               const ConnectionContext& dfly_cntx) {
-  if (cid->first_key_pos() == 0 && !cid->IsShardedPSub()) {
+  if (cid->first_key_pos() == 0 && cid->PubSubKind() != CO::PubSubKind::SHARDED) {
     return nullopt;  // No key command.
   }
 
@@ -1269,7 +1268,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   if (auto err = cid->Validate(tail_args); err)
     return err;
 
-  bool is_trans_cmd = CO::IsTransKind(cid->name());
+  bool is_trans_cmd = cid->MultiControlKind() == CO::MultiControlKind::EXEC;
   bool under_script = dfly_cntx.conn_state.script_info != nullptr;
   bool is_write_cmd = cid->IsWriteOnly();
   bool multi_active = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
@@ -1427,7 +1426,7 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
       << "Executing dangerous command " << cid->name() << " "
       << ConnectionLogContext(dfly_cntx->conn());
 
-  bool is_trans_cmd = CO::IsTransKind(cid->name());
+  bool is_trans_cmd = cid->MultiControlKind() == CO::MultiControlKind::EXEC;
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
     // TODO: protect against aggregating huge transactions.
     auto& exec_info = dfly_cntx->conn_state.exec_info;
@@ -1714,15 +1713,15 @@ DispatchManyResult Service::DispatchManyCommands(absl::Span<CmdArgList> args_lis
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible
-    const bool is_multi = dfly_cntx->conn_state.exec_info.IsCollecting() || CO::IsTransKind(cmd);
+    const bool is_multi = dfly_cntx->conn_state.exec_info.IsCollecting() ||
+                          cid->MultiControlKind() == CO::MultiControlKind::EXEC;
 
     // Generally, executing any multi-transactions (including eval) is not possible because they
     // might request a stricter multi mode than non-atomic which is used for squashing.
     // TODO: By allowing promoting non-atomic multit transactions to lock-ahead for specific command
     // invocations, we can potentially execute multiple eval in parallel, which is very powerful
     // paired with shardlocal eval
-    const bool is_eval = CO::IsEvalKind(cmd);
-
+    const bool is_eval = cid->MultiControlKind() == CO::MultiControlKind::EVAL;
     const bool is_blocking = cid != nullptr && cid->IsBlocking();
 
     if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
@@ -2545,9 +2544,21 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
 
 namespace {
 void PublishImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd_cntx) {
-  if (reject_cluster && IsClusterEnabled()) {
+}
+
+void SubscribeImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd_cntx) {
+}
+
+void UnSubscribeImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd_cntx) {
+}
+
+}  // namespace
+
+void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
+  bool sharded = cmd_cntx.tx->GetCId()->PubSubKind() == CO::PubSubKind::SHARDED;
+  if (!sharded && IsClusterEnabled())
     return cmd_cntx.rb->SendError("PUBLISH is not supported in cluster mode yet");
-  }
+
   string_view channel = ArgS(args, 0);
   string_view messages[] = {ArgS(args, 1)};
 
@@ -2555,51 +2566,26 @@ void PublishImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd
   cmd_cntx.rb->SendLong(cs->SendMessages(channel, messages));
 }
 
-void SubscribeImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd_cntx) {
-  if (reject_cluster && IsClusterEnabled()) {
+void Service::Subscribe(CmdArgList args, const CommandContext& cmd_cntx) {
+  bool sharded = cmd_cntx.tx->GetCId()->PubSubKind() == CO::PubSubKind::SHARDED;
+  if (!sharded && IsClusterEnabled())
     return cmd_cntx.rb->SendError("SUBSCRIBE is not supported in cluster mode yet");
-  }
-  cmd_cntx.conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, args,
-                                         static_cast<RedisReplyBuilder*>(cmd_cntx.rb));
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  cmd_cntx.conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, args, rb);
 }
 
-void UnSubscribeImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (reject_cluster && IsClusterEnabled()) {
+void Service::Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
+  bool sharded = cmd_cntx.tx->GetCId()->PubSubKind() == CO::PubSubKind::SHARDED;
+  if (!sharded && IsClusterEnabled())
     return cmd_cntx.rb->SendError("UNSUBSCRIBE is not supported in cluster mode yet");
-  }
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   if (args.size() == 0) {
     cmd_cntx.conn_cntx->UnsubscribeAll(true, rb);
   } else {
     cmd_cntx.conn_cntx->ChangeSubscription(false, true, args, rb);
   }
-}
-
-}  // namespace
-
-void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
-  PublishImpl(true, args, cmd_cntx);
-}
-
-void Service::SPublish(CmdArgList args, const CommandContext& cmd_cntx) {
-  PublishImpl(false, args, cmd_cntx);
-}
-
-void Service::Subscribe(CmdArgList args, const CommandContext& cmd_cntx) {
-  SubscribeImpl(true, args, cmd_cntx);
-}
-
-void Service::SSubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
-  SubscribeImpl(false, args, cmd_cntx);
-}
-
-void Service::Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
-  UnSubscribeImpl(true, args, cmd_cntx);
-}
-
-void Service::SUnsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
-  UnSubscribeImpl(false, args, cmd_cntx);
 }
 
 void Service::PSubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -3011,13 +2997,13 @@ void Service::Register(CommandRegistry* registry) {
              .SetValidator(&EvalValidator)
       << CI{"EXEC", CO::LOADING | CO::NOSCRIPT, 1, 0, 0, acl::kExec}.MFUNC(Exec)
       << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, acl::kPublish}.MFUNC(Publish)
-      << CI{"SPUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, acl::kPublish}.MFUNC(SPublish)
+      << CI{"SPUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, acl::kPublish}.MFUNC(Publish)
       << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kSubscribe}.MFUNC(Subscribe)
-      << CI{"SSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kSubscribe}.MFUNC(SSubscribe)
+      << CI{"SSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kSubscribe}.MFUNC(Subscribe)
       << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kUnsubscribe}.MFUNC(
              Unsubscribe)
       << CI{"SUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kUnsubscribe}.MFUNC(
-             SUnsubscribe)
+             Unsubscribe)
       << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kPSubscribe}.MFUNC(PSubscribe)
       << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kPUnsubsribe}.MFUNC(
              PUnsubscribe)

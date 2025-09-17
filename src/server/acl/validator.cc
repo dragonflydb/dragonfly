@@ -78,10 +78,10 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
 
   std::pair<bool, AclLog::Reason> auth_res;
 
-  if (id.IsPubSub() || id.IsShardedPSub()) {
-    auth_res = IsPubSubCommandAuthorized(false, cntx.acl_commands, cntx.pub_sub, tail_args, id);
-  } else if (id.IsPSub()) {
-    auth_res = IsPubSubCommandAuthorized(true, cntx.acl_commands, cntx.pub_sub, tail_args, id);
+  if (auto pkind = id.PubSubKind(); pkind) {
+    bool is_pattern = *pkind == CO::PubSubKind::PATTERN;
+    auth_res =
+        IsPubSubCommandAuthorized(is_pattern, cntx.acl_commands, cntx.pub_sub, tail_args, id);
   } else {
     auth_res = IsUserAllowedToInvokeCommandGeneric(cntx, id, tail_args);
   }
