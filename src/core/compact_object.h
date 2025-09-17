@@ -135,7 +135,7 @@ class CompactObj {
     NONE_ENC = 0,
     ASCII1_ENC = 1,
     ASCII2_ENC = 2,
-    HUFFMAN_ENC = 3,  // TBD
+    HUFFMAN_ENC = 3,
   };
 
  public:
@@ -147,12 +147,14 @@ class CompactObj {
 
    private:
     friend class CompactObj;
-    explicit StrEncoding(uint8_t enc) : enc_(static_cast<EncodingEnum>(enc)) {
+    explicit StrEncoding(uint8_t enc, bool is_key)
+        : enc_(static_cast<EncodingEnum>(enc)), is_key_(is_key) {
     }
 
     size_t DecodedSize(size_t compr_size, uint8_t first_byte) const;
 
     EncodingEnum enc_;
+    bool is_key_;
   };
 
   using PrefixArray = std::vector<std::string_view>;
@@ -183,7 +185,7 @@ class CompactObj {
   CompactObj AsRef() const {
     CompactObj res;
     memcpy(&res.u_, &u_, sizeof(u_));
-    res.taglen_ = taglen_;
+    res.tagbyte_ = tagbyte_;
     res.mask_ = mask_;
     res.mask_bits_.ref = 1;
 
@@ -429,7 +431,7 @@ class CompactObj {
   StringOrView GetRawString() const;
 
   StrEncoding GetStrEncoding() const {
-    return StrEncoding{mask_bits_.encoding};
+    return StrEncoding{mask_bits_.encoding, bool(huffman_domain_)};
   }
 
   bool HasAllocated() const;
@@ -441,7 +443,7 @@ class CompactObj {
   }
 
  private:
-  void EncodeString(std::string_view str);
+  void EncodeString(std::string_view str, bool is_key);
 
   bool EqualNonInline(std::string_view sv) const;
 
@@ -544,7 +546,14 @@ class CompactObj {
   };
 
   // We currently reserve 5 bits for tags and 3 bits for extending the mask. currently reserved.
-  uint8_t taglen_ = 0;
+  union {
+    uint8_t tagbyte_ = 0;
+    struct {
+      uint8_t taglen_ : 5;
+      uint8_t huffman_domain_ : 1;  // value from HuffmanDomain enum.
+      uint8_t reserved : 2;
+    };
+  };
 };
 
 inline bool CompactObj::operator==(std::string_view sv) const {

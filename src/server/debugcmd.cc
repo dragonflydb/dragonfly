@@ -1436,6 +1436,7 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
         if (type != OBJ_STRING) {  // Currently only string type is supported.
           return builder->SendError(kSyntaxErr);
         }
+        domain = CompactObj::HUFF_STRING_VALUES;
       }
       shard_set->RunBriefInParallel([&](EngineShard* shard) {
         if (!CompactObj::InitHuffmanThreadLocal(domain, raw)) {

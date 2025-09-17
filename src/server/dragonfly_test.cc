@@ -937,6 +937,22 @@ TEST_F(DflyEngineTest, CommandMetricLabels) {
   EXPECT_EQ(metrics.facade_stats.conn_stats.num_conns_other, 0);
 }
 
+TEST_F(DflyEngineTest, Huffman) {
+  // enable compression for keys optimized for letter a.
+  auto resp = Run({"debug", "compression", "set", "GBDgCpXW/////7/pygS5t9x7792qU1trLQ=="});
+  EXPECT_EQ(resp, "OK");
+
+  // for string values optimized for letter x.
+  resp = Run({"debug", "compression", "set", "ChD4bAf/D/bPSwY=", "string"});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"debug", "populate", "200000", "aaaaaaaaaaaaaaaaaaaaaaaaaa", "32"});
+  EXPECT_EQ(resp, "OK");
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.events.huff_encode_success, 400000);  // each key and value
+  EXPECT_LT(metrics.heap_used_bytes, 14'000'000);         // less than 15mb
+}
+
 class DflyCommandAliasTest : public DflyEngineTest {
  protected:
   DflyCommandAliasTest() {

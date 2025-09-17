@@ -366,6 +366,10 @@ struct TL {
   size_t small_str_bytes;
   Huffman huff_keys, huff_string_values;
   uint64_t huff_encode_total = 0, huff_encode_success = 0;  // success/total metrics.
+
+  const HuffmanDecoder& GetHuffmanDecoder(uint8_t huffman_domain) const {
+    return huffman_domain == CompactObj::HUFF_KEYS ? huff_keys.decoder : huff_string_values.decoder;
+  }
 };
 
 thread_local TL tl;
@@ -606,10 +610,9 @@ int RobjWrapper::ZsetAdd(double score, std::string_view ele, int in_flags, int* 
     bool gt = (in_flags & ZADD_IN_GT) != 0;
     bool lt = (in_flags & ZADD_IN_LT) != 0;
 
-    unsigned char* eptr;
     uint8_t* lp = (uint8_t*)inner_obj_;
-
-    if ((eptr = ZzlFind(lp, ele, &curscore)) != NULL) {
+    uint8_t* eptr = ZzlFind(lp, ele, &curscore);
+    if (eptr != NULL) {
       /* NX? Return, same element already exists. */
       if (nx) {
         *out_flags |= ZADD_OUT_NOP;
@@ -774,8 +777,10 @@ CompactObj& CompactObj::operator=(CompactObj&& o) noexcept {
   SetMeta(o.taglen_, o.mask_);  // Frees underlying resources if needed.
   memcpy(&u_, &o.u_, sizeof(u_));
 
+  tagbyte_ = o.tagbyte_;
+
   // SetMeta deallocates the object and we only want reset it.
-  o.taglen_ = 0;
+  o.tagbyte_ = 0;
   o.mask_ = 0;
 
   return *this;
@@ -1012,7 +1017,7 @@ void CompactObj::SetString(std::string_view str, bool is_key) {
     }
   }
 
-  EncodeString(str);
+  EncodeString(str, is_key);
 }
 
 void CompactObj::ReserveString(size_t size) {
@@ -1141,7 +1146,8 @@ void CompactObj::GetString(char* dest) const {
         next += slices[0].size() - 1;
         memcpy(next, slices[1].data(), slices[1].size());
         string_view src(reinterpret_cast<const char*>(tl.tmp_buf.data()), tl.tmp_buf.size());
-        CHECK(tl.huff_keys.decoder.Decode(src, decoded_len, dest));
+        const auto& decoder = tl.GetHuffmanDecoder(huffman_domain_);
+        CHECK(decoder.Decode(src, decoded_len, dest));
         return;
       }
 
@@ -1237,7 +1243,7 @@ void CompactObj::Materialize(std::string_view blob, bool is_raw) {
       u_.r_obj.SetString(blob, tl.local_mr);
     }
   } else {
-    EncodeString(blob);
+    EncodeString(blob, false);
   }
 }
 
@@ -1245,7 +1251,7 @@ void CompactObj::Reset() {
   if (HasAllocated()) {
     Free();
   }
-  taglen_ = 0;
+  tagbyte_ = 0;
   mask_ = 0;
 }
 
@@ -1355,7 +1361,8 @@ bool CompactObj::CmpEncoded(string_view sv) const {
       constexpr size_t kMaxHuffLen = kInlineLen * 3;
       if (sz <= kMaxHuffLen) {
         char buf[kMaxHuffLen];
-        CHECK(tl.huff_keys.decoder.Decode({u_.inline_str + 1, size_t(taglen_ - 1)}, sz, buf));
+        const auto& decoder = tl.GetHuffmanDecoder(huffman_domain_);
+        CHECK(decoder.Decode({u_.inline_str + 1, size_t(taglen_ - 1)}, sz, buf));
         return sv == string_view(buf, sz);
       }
     }
@@ -1437,7 +1444,7 @@ bool CompactObj::CmpEncoded(string_view sv) const {
   return false;
 }
 
-void CompactObj::EncodeString(string_view str) {
+void CompactObj::EncodeString(string_view str, bool is_key) {
   DCHECK_GT(str.size(), kInlineLen);
   DCHECK_EQ(NONE_ENC, mask_bits_.encoding);
 
@@ -1447,6 +1454,7 @@ void CompactObj::EncodeString(string_view str) {
   // We chose such length that we can store the decoded length delta into 1 byte.
   // The maximum huffman compression is 1/8, so 288 / 8 = 36.
   // 288 - 36 = 252, which is smaller than 256.
+  // TODO: introduce variable length huffman length.
   constexpr unsigned kMaxHuffLen = 288;
 
   // For sizes 17, 18 we would like to test ascii encoding first as it's more efficient.
@@ -1455,34 +1463,38 @@ void CompactObj::EncodeString(string_view str) {
       kUseAsciiEncoding && str.size() < 19 && detail::validate_ascii_fast(str.data(), str.size());
 
   // if !is_ascii, we try huffman encoding next.
-  if (!is_ascii && str.size() <= kMaxHuffLen && tl.huff_keys.encoder.valid()) {
-    unsigned dest_len = tl.huff_keys.encoder.CompressedBound(str.size());
-    // 1 byte for storing the size delta.
-    tl.tmp_buf.resize(1 + dest_len);
-    string err_msg;
-    ++tl.huff_encode_total;
-    bool res = tl.huff_keys.encoder.Encode(str, tl.tmp_buf.data() + 1, &dest_len, &err_msg);
-    if (res) {
-      // we accept huffman encoding only if it is:
-      // 1. smaller than the original string by 20%
-      // 2. allows us to store the encoded string in the inline buffer
-      if (dest_len && (dest_len < kInlineLen || (dest_len + dest_len / 5) < str.size())) {
-        huff_encoded = true;
-        tl.huff_encode_success++;
-        encoded = string_view{reinterpret_cast<char*>(tl.tmp_buf.data()), dest_len + 1};
-        unsigned delta = str.size() - dest_len;
-        DCHECK_LT(delta, 256u);
-        tl.tmp_buf[0] = static_cast<uint8_t>(delta);
-        mask_bits_.encoding = HUFFMAN_ENC;
-        if (encoded.size() <= kInlineLen) {
-          SetMeta(encoded.size(), mask_);
-          memcpy(u_.inline_str, tl.tmp_buf.data(), encoded.size());
-          return;
+  if (!is_ascii && str.size() <= kMaxHuffLen) {
+    auto& huffman = is_key ? tl.huff_keys : tl.huff_string_values;
+    if (huffman.encoder.valid()) {
+      unsigned dest_len = huffman.encoder.CompressedBound(str.size());
+      // 1 byte for storing the size delta.
+      tl.tmp_buf.resize(1 + dest_len);
+      string err_msg;
+      ++tl.huff_encode_total;
+      bool res = huffman.encoder.Encode(str, tl.tmp_buf.data() + 1, &dest_len, &err_msg);
+      if (res) {
+        // we accept huffman encoding only if it is:
+        // 1. smaller than the original string by 20%
+        // 2. allows us to store the encoded string in the inline buffer
+        if (dest_len && (dest_len < kInlineLen || (dest_len + dest_len / 5) < str.size())) {
+          huff_encoded = true;
+          tl.huff_encode_success++;
+          encoded = string_view{reinterpret_cast<char*>(tl.tmp_buf.data()), dest_len + 1};
+          unsigned delta = str.size() - dest_len;
+          DCHECK_LT(delta, 256u);
+          tl.tmp_buf[0] = static_cast<uint8_t>(delta);
+          mask_bits_.encoding = HUFFMAN_ENC;
+          huffman_domain_ = is_key ? HUFF_KEYS : HUFF_STRING_VALUES;
+          if (encoded.size() <= kInlineLen) {
+            SetMeta(encoded.size(), mask_);
+            memcpy(u_.inline_str, tl.tmp_buf.data(), encoded.size());
+            return;
+          }
         }
+      } else {
+        // Should not happen, means we have an internal buf.
+        LOG(DFATAL) << "Failed to encode string with huffman: " << err_msg;
       }
-    } else {
-      // Should not happen, means we have an internal buf.
-      LOG(DFATAL) << "Failed to encode string with huffman: " << err_msg;
     }
   }
 
@@ -1609,9 +1621,11 @@ size_t CompactObj::StrEncoding::Decode(std::string_view blob, char* dest) const 
     case ASCII2_ENC:
       detail::ascii_unpack(reinterpret_cast<const uint8_t*>(blob.data()), decoded_len, dest);
       break;
-    case HUFFMAN_ENC:
-      tl.huff_keys.decoder.Decode(blob.substr(1), decoded_len, dest);
+    case HUFFMAN_ENC: {
+      const auto& decoder = tl.GetHuffmanDecoder(is_key_);
+      decoder.Decode(blob.substr(1), decoded_len, dest);
       break;
+    }
   };
   return decoded_len;
 }
