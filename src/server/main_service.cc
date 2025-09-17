@@ -1087,13 +1087,12 @@ void Service::Shutdown() {
 }
 
 OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, CmdArgList args) {
-  // Sharded pub sub: PUBLISH shardchannel message
-  if (cid->name() == registry_.RenamedOrOriginal("SPUBLISH")) {
-    return {KeyIndex(0, 1)};
-  }
-
+  // Sharded pub-sub acts as if it's sharded by its channel name (just for checks)
   if (cid->PubSubKind() == CO::PubSubKind::SHARDED) {
-    return {KeyIndex(0, args.size())};
+    // SPUBLISH has only one key, the rest is data
+    if (cid->name() == registry_.RenamedOrOriginal("SPUBLISH"))
+      return KeyIndex(0, 1);
+    return {KeyIndex(0, args.size())};  // sub/unsub list of channels
   }
 
   return DetermineKeys(cid, args);
@@ -2543,7 +2542,7 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
-  bool sharded = cmd_cntx.tx->GetCId()->PubSubKind() == CO::PubSubKind::SHARDED;
+  bool sharded = cmd_cntx.conn_cntx->cid->PubSubKind() == CO::PubSubKind::SHARDED;
   if (!sharded && IsClusterEnabled())
     return cmd_cntx.rb->SendError("PUBLISH is not supported in cluster mode yet");
 
@@ -2555,7 +2554,7 @@ void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void Service::Subscribe(CmdArgList args, const CommandContext& cmd_cntx) {
-  bool sharded = cmd_cntx.tx->GetCId()->PubSubKind() == CO::PubSubKind::SHARDED;
+  bool sharded = cmd_cntx.conn_cntx->cid->PubSubKind() == CO::PubSubKind::SHARDED;
   if (!sharded && IsClusterEnabled())
     return cmd_cntx.rb->SendError("SUBSCRIBE is not supported in cluster mode yet");
 
@@ -2564,7 +2563,7 @@ void Service::Subscribe(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void Service::Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
-  bool sharded = cmd_cntx.tx->GetCId()->PubSubKind() == CO::PubSubKind::SHARDED;
+  bool sharded = cmd_cntx.conn_cntx->cid->PubSubKind() == CO::PubSubKind::SHARDED;
   if (!sharded && IsClusterEnabled())
     return cmd_cntx.rb->SendError("UNSUBSCRIBE is not supported in cluster mode yet");
 

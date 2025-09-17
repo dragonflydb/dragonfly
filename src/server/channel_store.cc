@@ -37,12 +37,12 @@ auto BuildSender(string_view channel, facade::ArgRange messages, bool sharded = 
     }
   }
 
-  return [channel, buf = std::move(buf), views = std::move(views), unsubscribe, sharded](
+  return [channel, buf = std::move(buf), views = std::move(views), sharded, unsubscribe](
              facade::Connection* conn, string pattern) {
     string_view channel_view{buf.get(), channel.size()};
     for (std::string_view message_view : views) {
       conn->SendPubMessageAsync(
-          {std::move(pattern), buf, channel_view, message_view, unsubscribe, sharded});
+          {std::move(pattern), buf, channel_view, message_view, sharded, unsubscribe});
     }
   };
 }
