@@ -250,7 +250,7 @@ class ServerFamily {
 
   // Burns down and destroy all the data from the database.
   // if kDbAll is passed, burns all the databases to the ground.
-  std::error_code Drakarys(Transaction* transaction, DbIndex db_ind);
+  void Drakarys(Transaction* transaction, DbIndex db_ind);
 
   SaveInfoData GetLastSaveInfo() const;
 

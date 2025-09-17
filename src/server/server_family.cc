@@ -1284,10 +1284,7 @@ void ServerFamily::FlushAll(Namespace* ns) {
   boost::intrusive_ptr<Transaction> flush_trans(new Transaction{cid});
   flush_trans->InitByArgs(ns, 0, {});
   VLOG(1) << "Performing flush";
-  error_code ec = Drakarys(flush_trans.get(), DbSlice::kDbAll);
-  if (ec) {
-    LOG(ERROR) << "Error flushing db " << ec.message();
-  }
+  Drakarys(flush_trans.get(), DbSlice::kDbAll);
 }
 
 // Load starts as many fibers as there are files to load each one separately.
@@ -2201,7 +2198,7 @@ bool ServerFamily::TEST_IsSaving() const {
   return is_saving.load(std::memory_order_relaxed);
 }
 
-error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
+void ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
   VLOG(1) << "Drakarys";
 
   transaction->Execute(
@@ -2210,8 +2207,6 @@ error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
         return OpStatus::OK;
       },
       true);
-
-  return error_code{};
 }
 
 SaveInfoData ServerFamily::GetLastSaveInfo() const {
