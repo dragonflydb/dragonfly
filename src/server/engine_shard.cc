@@ -707,6 +707,7 @@ size_t EngineShard::CalculateEvictionBytes() {
   const size_t shards_count = shard_set->size();
   const double eviction_memory_budget_threshold = GetFlag(FLAGS_eviction_memory_budget_threshold);
 
+  // Calculate threshold for both used_memory and rss_memory
   size_t limit = max_memory_limit.load(memory_order_relaxed);
   const size_t shard_memory_budget_threshold =
       size_t(limit * eviction_memory_budget_threshold) / shards_count;
@@ -721,13 +722,8 @@ size_t EngineShard::CalculateEvictionBytes() {
       << "Used memory goal bytes: " << goal_bytes << ", used memory: " << global_used_memory
       << ", memory limit: " << max_memory_limit;
 
-  // RSS memory limit is always max_memory_limit or if rss_oom_deny_ratio is used than we should
-  // respect but upper limit is again max_memory.
-  const double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio > 0.
-                                        ? std::min(ServerState::tlocal()->rss_oom_deny_ratio, 1.)
-                                        : 1.;
-  // Check for `enable_heartbeat_rss_eviction` flag since it dynamic. And reset state
-  // if flag has changed.
+  // Check for `enable_heartbeat_rss_eviction` flag since it dynamic. And reset
+  // state if flag has changed.
   bool rss_eviction_enabled_flag = GetFlag(FLAGS_enable_heartbeat_rss_eviction);
   if (eviction_state_.rss_eviction_enabled_ != rss_eviction_enabled_flag) {
     eviction_state_.global_rss_memory_at_prev_eviction =
@@ -735,12 +731,6 @@ size_t EngineShard::CalculateEvictionBytes() {
     eviction_state_.rss_eviction_enabled_ = rss_eviction_enabled_flag;
   }
   if (eviction_state_.rss_eviction_enabled_) {
-    const size_t max_rss_memory = size_t(rss_oom_deny_ratio * max_memory_limit);
-    /* We start eviction when we have less than eviction_memory_budget_threshold * 100% of free rss
-     * memory */
-    const size_t shard_rss_memory_budget_threshold =
-        size_t(max_rss_memory * eviction_memory_budget_threshold) / shards_count;
-
     // Calculate how much rss memory is used by all shards
     const size_t global_used_rss_memory = rss_mem_current.load(memory_order_relaxed);
     auto& global_rss_memory_at_prev_eviction = eviction_state_.global_rss_memory_at_prev_eviction;
@@ -759,13 +749,12 @@ size_t EngineShard::CalculateEvictionBytes() {
 
     // Try to evict more bytes if we are close to the rss memory limit
     const size_t rss_goal_bytes = CalculateHowManyBytesToEvictOnShard(
-        max_rss_memory, global_used_rss_memory - deleted_bytes_before_rss_update * shards_count,
-        shard_rss_memory_budget_threshold);
+        limit, global_used_rss_memory - deleted_bytes_before_rss_update * shards_count,
+        shard_memory_budget_threshold);
 
     VLOG_IF_EVERY_N(1, rss_goal_bytes > 0, 50)
         << "Rss memory goal bytes: " << rss_goal_bytes
-        << ", rss used memory: " << global_used_rss_memory
-        << ", rss memory limit: " << max_rss_memory
+        << ", rss used memory: " << global_used_rss_memory << ", rss memory limit: " << limit
         << ", deleted_bytes_before_rss_update: " << deleted_bytes_before_rss_update;
 
     goal_bytes = std::max(goal_bytes, rss_goal_bytes);
