@@ -542,7 +542,7 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
   unsigned i = 0;
   array<string_view, 4> arr;
   if (pub_msg.pattern.empty()) {
-    arr[i++] = pub_msg.is_sharded ? "message" : "smessage";
+    arr[i++] = pub_msg.is_sharded ? "smessage" : "message";
   } else {
     arr[i++] = "pmessage";
     arr[i++] = pub_msg.pattern;

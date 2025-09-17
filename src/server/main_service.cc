@@ -1713,14 +1713,14 @@ DispatchManyResult Service::DispatchManyCommands(absl::Span<CmdArgList> args_lis
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible
     const bool is_multi = dfly_cntx->conn_state.exec_info.IsCollecting() ||
-                          cid->MultiControlKind() == CO::MultiControlKind::EXEC;
+                          (cid != nullptr && cid->MultiControlKind() == CO::MultiControlKind::EXEC);
 
     // Generally, executing any multi-transactions (including eval) is not possible because they
     // might request a stricter multi mode than non-atomic which is used for squashing.
     // TODO: By allowing promoting non-atomic multit transactions to lock-ahead for specific command
     // invocations, we can potentially execute multiple eval in parallel, which is very powerful
     // paired with shardlocal eval
-    const bool is_eval = cid->MultiControlKind() == CO::MultiControlKind::EVAL;
+    const bool is_eval = cid != nullptr && cid->MultiControlKind() == CO::MultiControlKind::EVAL;
     const bool is_blocking = cid != nullptr && cid->IsBlocking();
 
     if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
