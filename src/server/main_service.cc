@@ -723,8 +723,10 @@ string FailedCommandToString(std::string_view command, facade::CmdArgList args,
   string result;
   absl::StrAppend(&result, " ", command);
 
-  for (auto arg : args) {
-    absl::StrAppend(&result, " ", absl::CHexEscape(arg));
+  if (command != "AUTH") {
+    for (auto arg : args) {
+      absl::StrAppend(&result, " ", absl::CHexEscape(arg));
+    }
   }
 
   absl::StrAppend(&result, " failed with reason: ", reason);
