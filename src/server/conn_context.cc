@@ -174,14 +174,16 @@ void ConnectionContext::ChangeMonitor(bool start) {
   EnableMonitoring(start);
 }
 
-void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgList args,
-                                           facade::RedisReplyBuilder* rb) {
+void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, bool sharded,
+                                           CmdArgList args, facade::RedisReplyBuilder* rb) {
   vector<unsigned> result = ChangeSubscriptions(args, false, to_add, to_reply);
 
   if (to_reply) {
+    const string_view actionRegular[2] = {"unsubscribe", "subscribe"};
+    const string_view actionSharded[2] = {"sunsubscribe", "ssubscribe"};
+    const absl::Span<const string_view> action = sharded ? actionSharded : actionRegular;
     SinkReplyBuilder::ReplyScope scope{rb};
     for (size_t i = 0; i < result.size(); ++i) {
-      const char* action[2] = {"unsubscribe", "subscribe"};
       SendSubscriptionChangedResponse(action[to_add], ArgS(args, i), result[i], rb);
     }
   }
@@ -211,7 +213,7 @@ void ConnectionContext::UnsubscribeAll(bool to_reply, facade::RedisReplyBuilder*
   StringVec channels(conn_state.subscribe_info->channels.begin(),
                      conn_state.subscribe_info->channels.end());
   CmdArgVec arg_vec(channels.begin(), channels.end());
-  ChangeSubscription(false, to_reply, CmdArgList{arg_vec}, rb);
+  ChangeSubscription(false, to_reply, false, CmdArgList{arg_vec}, rb);
 }
 
 void ConnectionContext::PUnsubscribeAll(bool to_reply, facade::RedisReplyBuilder* rb) {

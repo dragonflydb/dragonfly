@@ -73,7 +73,8 @@ class Connection : public util::Connection {
     std::string pattern;                // non-empty for pattern subscriber
     std::shared_ptr<char[]> buf;        // stores channel name and message
     std::string_view channel, message;  // channel and message parts from buf
-    bool should_unsubscribe = false;    // unsubscribe from channel after sending the message
+    bool is_sharded = false;
+    bool should_unsubscribe = false;  // unsubscribe from channel after sending the message
   };
 
   // Pipeline message, accumulated Redis command to be executed.

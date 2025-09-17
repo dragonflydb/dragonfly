@@ -2542,18 +2542,6 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
   VLOG(2) << "Exec completed";
 }
 
-namespace {
-void PublishImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd_cntx) {
-}
-
-void SubscribeImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd_cntx) {
-}
-
-void UnSubscribeImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd_cntx) {
-}
-
-}  // namespace
-
 void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
   bool sharded = cmd_cntx.tx->GetCId()->PubSubKind() == CO::PubSubKind::SHARDED;
   if (!sharded && IsClusterEnabled())
@@ -2563,7 +2551,7 @@ void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view messages[] = {ArgS(args, 1)};
 
   auto* cs = ServerState::tlocal()->channel_store();
-  cmd_cntx.rb->SendLong(cs->SendMessages(channel, messages));
+  cmd_cntx.rb->SendLong(cs->SendMessages(channel, messages, sharded));
 }
 
 void Service::Subscribe(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2572,7 +2560,7 @@ void Service::Subscribe(CmdArgList args, const CommandContext& cmd_cntx) {
     return cmd_cntx.rb->SendError("SUBSCRIBE is not supported in cluster mode yet");
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  cmd_cntx.conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, args, rb);
+  cmd_cntx.conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, sharded, args, rb);
 }
 
 void Service::Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2584,7 +2572,7 @@ void Service::Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
   if (args.size() == 0) {
     cmd_cntx.conn_cntx->UnsubscribeAll(true, rb);
   } else {
-    cmd_cntx.conn_cntx->ChangeSubscription(false, true, args, rb);
+    cmd_cntx.conn_cntx->ChangeSubscription(false, true, sharded, args, rb);
   }
 }
 

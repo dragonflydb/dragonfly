@@ -19,7 +19,8 @@ using namespace std;
 namespace {
 
 // Build functor for sending messages to connection
-auto BuildSender(string_view channel, facade::ArgRange messages, bool unsubscribe = false) {
+auto BuildSender(string_view channel, facade::ArgRange messages, bool sharded = false,
+                 bool unsubscribe = false) {
   absl::FixedArray<string_view, 1> views(messages.Size());
   size_t messages_size = accumulate(messages.begin(), messages.end(), 0,
                                     [](int sum, string_view str) { return sum + str.size(); });
@@ -36,11 +37,12 @@ auto BuildSender(string_view channel, facade::ArgRange messages, bool unsubscrib
     }
   }
 
-  return [channel, buf = std::move(buf), views = std::move(views), unsubscribe](
+  return [channel, buf = std::move(buf), views = std::move(views), unsubscribe, sharded](
              facade::Connection* conn, string pattern) {
     string_view channel_view{buf.get(), channel.size()};
     for (std::string_view message_view : views) {
-      conn->SendPubMessageAsync({std::move(pattern), buf, channel_view, message_view, unsubscribe});
+      conn->SendPubMessageAsync(
+          {std::move(pattern), buf, channel_view, message_view, unsubscribe, sharded});
     }
   };
 }
@@ -117,7 +119,8 @@ void ChannelStore::Destroy() {
 
 ChannelStore::ControlBlock ChannelStore::control_block;
 
-unsigned ChannelStore::SendMessages(std::string_view channel, facade::ArgRange messages) const {
+unsigned ChannelStore::SendMessages(std::string_view channel, facade::ArgRange messages,
+                                    bool sharded) const {
   vector<Subscriber> subscribers = FetchSubscribers(channel);
   if (subscribers.empty())
     return 0;
@@ -144,7 +147,7 @@ unsigned ChannelStore::SendMessages(std::string_view channel, facade::ArgRange m
   }
 
   auto subscribers_ptr = make_shared<decltype(subscribers)>(std::move(subscribers));
-  auto cb = [subscribers_ptr, send = BuildSender(channel, messages)](unsigned idx, auto*) {
+  auto cb = [subscribers_ptr, send = BuildSender(channel, messages, sharded)](unsigned idx, auto*) {
     auto it = lower_bound(subscribers_ptr->begin(), subscribers_ptr->end(), idx,
                           ChannelStore::Subscriber::ByThreadId);
     while (it != subscribers_ptr->end() && it->LastKnownThreadId() == idx) {
@@ -223,7 +226,7 @@ void ChannelStore::UnsubscribeConnectionsFromDeletedSlots(const ChannelsSubMap& 
   for (const auto& [channel, subscribers] : sub_map) {
     // ignored by pub sub handler because should_unsubscribe is true
     std::string msg = "__ignore__";
-    auto send = BuildSender(channel, {facade::ArgSlice{msg}}, should_unsubscribe);
+    auto send = BuildSender(channel, {facade::ArgSlice{msg}}, false, should_unsubscribe);
 
     auto it = lower_bound(subscribers.begin(), subscribers.end(), idx,
                           ChannelStore::Subscriber::ByThreadId);

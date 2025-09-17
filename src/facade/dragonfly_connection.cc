@@ -519,7 +519,7 @@ void Connection::AsyncOperations::operator()(const AclUpdateMessage& msg) {
 }
 
 void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
-  RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
+  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(builder);
 
   // Discard stale messages to not break the protocol after exiting "pubsub" mode.
   // Even after removing all subscriptions, we still can receive messages delayed
@@ -529,20 +529,20 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
       !base::_in(pub_msg.channel, {"unsubscribe", "punsubscribe"}))
     return;
 
+  // TODO: sharded? unclear to me
   if (pub_msg.should_unsubscribe) {
-    rbuilder->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
-    rbuilder->SendBulkString("unsubscribe");
-    rbuilder->SendBulkString(pub_msg.channel);
-    rbuilder->SendLong(0);
-    auto* cntx = self->cntx();
-    cntx->Unsubscribe(pub_msg.channel);
+    rb->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
+    rb->SendBulkString("unsubscribe");
+    rb->SendBulkString(pub_msg.channel);
+    rb->SendLong(0);
+    self->cntx()->Unsubscribe(pub_msg.channel);
     return;
   }
 
   unsigned i = 0;
   array<string_view, 4> arr;
   if (pub_msg.pattern.empty()) {
-    arr[i++] = "message";
+    arr[i++] = pub_msg.is_sharded ? "message" : "smessage";
   } else {
     arr[i++] = "pmessage";
     arr[i++] = pub_msg.pattern;
@@ -551,8 +551,8 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
   arr[i++] = pub_msg.channel;
   arr[i++] = pub_msg.message;
 
-  rbuilder->SendBulkStrArr(absl::Span<string_view>{arr.data(), i},
-                           RedisReplyBuilder::CollectionType::PUSH);
+  rb->SendBulkStrArr(absl::Span<string_view>{arr.data(), i},
+                     RedisReplyBuilder::CollectionType::PUSH);
 }
 
 void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
