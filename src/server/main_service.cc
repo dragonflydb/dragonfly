@@ -839,23 +839,15 @@ string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
     case BLOCKING:
       return "blocking";
     case HIDDEN:
-      return "hidden";
     case INTERLEAVED_KEYS:
-      return "interleaved-keys";
     case GLOBAL_TRANS:
-      return "global-trans";
     case STORE_LAST_KEY:
-      return "store-last-key";
     case VARIADIC_KEYS:
-      return "variadic-keys";
     case NO_AUTOJOURNAL:
-      return "custom-journal";
     case NO_KEY_TRANSACTIONAL:
-      return "no-key-transactional";
     case NO_KEY_TX_SPAN_ALL:
-      return "no-key-tx-span-all";
     case IDEMPOTENT:
-      return "idempotent";
+      return "";
   }
   return "";
 }
