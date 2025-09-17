@@ -186,52 +186,61 @@ async def test_eval_with_oom(df_factory: DflyInstanceFactory):
     assert rss_before_eval * 1.01 > info["used_memory_rss"]
 
 
-@pytest.mark.skip("rss eviction disabled")
-@pytest.mark.asyncio
-@dfly_args(
-    {
-        "proactor_threads": 1,
-        "cache_mode": "true",
-        "maxmemory": "5gb",
-        "rss_oom_deny_ratio": 0.8,
-        "max_eviction_per_heartbeat": 100,
-    }
-)
-async def test_cache_eviction_with_rss_deny_oom(
-    async_client: aioredis.Redis,
-):
-    """
-    Test to verify that cache eviction is triggered even if used memory is small but rss memory is above limit
-    """
+@pytest.mark.parametrize("heartbeat_rss_eviction", [True, False])
+async def test_eviction_on_rss_treshold(df_factory: DflyInstanceFactory, heartbeat_rss_eviction):
+    max_memory = 1024 * 1024**2  # 10242mb
 
-    max_memory = 5 * 1024 * 1024 * 1024  # 5G
-    rss_max_memory = int(max_memory * 0.8)
+    df_server = df_factory.create(
+        proactor_threads=3,
+        cache_mode="yes",
+        maxmemory=max_memory,
+        enable_heartbeat_eviction="false",
+        enable_heartbeat_rss_eviction=heartbeat_rss_eviction,
+    )
+    df_server.start()
+    client = df_server.client()
 
-    data_fill_size = int(0.9 * rss_max_memory)  # 95% of rss_max_memory
+    data_fill_size = int(0.70 * max_memory)  # 70% of max_memory
 
     val_size = 1024 * 5  # 5 kb
     num_keys = data_fill_size // val_size
 
-    await async_client.execute_command("DEBUG", "POPULATE", num_keys, "key", val_size)
-    # Test that used memory is less than 90% of max memory
-    memory_info = await async_client.info("memory")
-    assert (
-        memory_info["used_memory"] < max_memory * 0.9
-    ), "Used memory should be less than 90% of max memory."
-    assert (
-        memory_info["used_memory_rss"] > rss_max_memory * 0.9
-    ), "RSS memory should be less than 90% of rss max memory (max_memory * rss_oom_deny_ratio)."
+    await client.execute_command("DEBUG", "POPULATE", num_keys, "key", val_size)
 
-    # Get RSS memory after creating new connections
-    memory_info = await async_client.info("memory")
-    while memory_info["used_memory_rss"] > rss_max_memory * 0.9:
-        await asyncio.sleep(1)
-        memory_info = await async_client.info("memory")
-        logging.info(
-            f'Current rss: {memory_info["used_memory_rss"]}. rss eviction threshold: {rss_max_memory * 0.9}.'
-        )
-        stats_info = await async_client.info("stats")
-        logging.info(f'Current evicted: {stats_info["evicted_keys"]}. Total keys: {num_keys}.')
+    # Create huge list which can be used with LRANGE to increase RSS memory only
+    for name in ["list_1", "list_2"]:
+        for i in range(1, 1000):
+            rand_str = "".join(random.choices(string.ascii_letters, k=val_size))
+            await client.execute_command(f"LPUSH {name} {rand_str}")
+
+    # Make them STICK so we don't evict them
+    await client.execute_command(f"STICK list_1")
+    await client.execute_command(f"STICK list_2")
+
+    await client.execute_command("CONFIG SET enable_heartbeat_eviction true")
+
+    memory_info_before = await client.info("memory")
+
+    # This will increase only RSS memory above treshold
+    p = client.pipeline()
+    for _ in range(50):
+        p.execute_command("LRANGE list_1 0 -1")
+        p.execute_command("LRANGE list_2 0 -1")
+    await p.execute()
+
+    # Wait for some time
+    await asyncio.sleep(3)
+    memory_info_after = await client.info("memory")
+    stats_info_after = await client.info("stats")
+
+    if heartbeat_rss_eviction:
+        # We should see used memory deacrease and number of some number of evicted keys
+        assert memory_info_after["used_memory"] < memory_info_before["used_memory"]
+        assert stats_info_after["evicted_keys"]
+    else:
+        # If heartbeat rss eviction is disabled there should be no chage
+        assert memory_info_after["used_memory"] == memory_info_before["used_memory"]
+        assert stats_info_after["evicted_keys"] == 0
 
 
 @pytest.mark.asyncio
