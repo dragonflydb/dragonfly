@@ -344,6 +344,20 @@ std::optional<std::string_view> ParseFieldWithAtSign(CmdArgParser* parser) {
   return field;
 }
 
+void ParseNumericFilter(CmdArgParser* parser, SearchParams* params) {
+  auto field = ParseField(parser);
+  size_t lo = parser->Next<size_t>();
+  size_t hi = parser->Next<size_t>();
+  if (auto it = params->optional_filters.find(field); it != params->optional_filters.end()) {
+    search::OptionalNumericFilter* numeric_filter =
+        dynamic_cast<search::OptionalNumericFilter*>(it->second.get());
+    numeric_filter->AddRange(lo, hi);
+  } else {
+    params->optional_filters.emplace(field,
+                                     std::make_unique<search::OptionalNumericFilter>(lo, hi));
+  }
+}
+
 std::vector<FieldReference> ParseLoadOrReturnFields(CmdArgParser* parser, bool is_load) {
   // TODO: Change to num_strings. In Redis strings number is expected. For example: LOAD 3 $.a AS a
   std::vector<FieldReference> fields;
@@ -396,6 +410,8 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
       FieldReference field{ParseField(parser)};
       params.sort_option =
           SearchParams::SortOption{field, parser->Check("DESC") ? SortOrder::DESC : SortOrder::ASC};
+    } else if (parser->Check("FILTER")) {
+      ParseNumericFilter(parser, &params);
     } else {
       // Unsupported parameters are ignored for now
       parser->Skip(1);
@@ -1214,7 +1230,7 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
     return;
 
   search::SearchAlgorithm search_algo;
-  if (!search_algo.Init(query_str, &params->query_params))
+  if (!search_algo.Init(query_str, &params->query_params, &params->optional_filters))
     return builder->SendError("Query syntax error");
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
