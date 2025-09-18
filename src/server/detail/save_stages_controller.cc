@@ -15,6 +15,7 @@
 #include "server/main_service.h"
 #include "server/namespaces.h"
 #include "server/script_mgr.h"
+#include "server/server_family.h"
 #include "server/transaction.h"
 #include "strings/human_readable.h"
 
@@ -179,6 +180,11 @@ SaveStagesController::~SaveStagesController() {
 }
 
 std::optional<SaveInfo> SaveStagesController::Init() {
+  if (absl::GetFlag(FLAGS_master_only_snapshot) && !service_->server_family()->IsMaster()) {
+    VLOG(1) << "Skipping snapshot on replica";
+    return SaveInfo{};
+  }
+
   if (auto err = BuildFullPath(); err) {
     shared_err_ = err;
     return GetSaveInfo();

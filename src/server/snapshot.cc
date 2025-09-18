@@ -22,6 +22,7 @@
 
 ABSL_FLAG(bool, point_in_time_snapshot, true, "If true replication uses point in time snapshoting");
 ABSL_FLAG(bool, background_snapshotting, false, "Whether to run snapshot as a background fiber");
+ABSL_FLAG(bool, master_only_snapshot, false, "If true, allows snapshotting on master only");
 
 namespace dfly {
 

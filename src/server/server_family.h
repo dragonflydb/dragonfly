@@ -310,6 +310,8 @@ class ServerFamily {
 
   void UpdateMemoryGlobalStats();
 
+  bool IsMaster() const;
+
   // Return true if no replicas are registered or if all replicas reached stable sync
   // Used in debug populate to DCHECK insocsistent flows that violate transaction gurantees
   bool AreAllReplicasInStableSync() const {

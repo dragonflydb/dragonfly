@@ -4058,4 +4058,9 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"MODULE", CO::ADMIN, 2, 0, 0, acl::kModule}.HFUNC(Module);
 }
 
+bool ServerFamily::IsMaster() const {
+  fb2::LockGuard lk(replicaof_mu_);
+  return !replica_;
+}
+
 }  // namespace dfly
