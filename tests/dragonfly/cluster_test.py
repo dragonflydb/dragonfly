@@ -3068,16 +3068,16 @@ async def test_cluster_sharded_pub_sub(df_factory: DflyInstanceFactory):
 
     # Consume subscription message result from above
     message = consumer.get_sharded_message(target_node=node_a)
-    assert message == {"type": "subscribe", "pattern": None, "channel": b"kostas", "data": 1}
+    assert message == {"type": "ssubscribe", "pattern": None, "channel": b"kostas", "data": 1}
 
     message = consumer.get_sharded_message(target_node=node_a)
-    assert message == {"type": "message", "pattern": None, "channel": b"kostas", "data": b"hello"}
+    assert message == {"type": "smessage", "pattern": None, "channel": b"kostas", "data": b"hello"}
 
     consumer.sunsubscribe("kostas")
     await asyncio.sleep(2)
     await c_nodes[0].execute_command("SPUBLISH kostas new_message")
     message = consumer.get_sharded_message(target_node=node_a)
-    assert message == {"type": "unsubscribe", "pattern": None, "channel": b"kostas", "data": 0}
+    assert message == {"type": "sunsubscribe", "pattern": None, "channel": b"kostas", "data": 0}
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
@@ -3209,9 +3209,9 @@ async def test_cluster_sharded_pub_sub_migration(df_factory: DflyInstanceFactory
 
     # Consume subscription message result from above
     message = consumer.get_sharded_message(target_node=node_a)
-    assert message == {"type": "subscribe", "pattern": None, "channel": b"kostas", "data": 1}
+    assert message == {"type": "ssubscribe", "pattern": None, "channel": b"kostas", "data": 1}
     message = consumer.get_sharded_message(target_node=node_a)
-    assert message == {"type": "unsubscribe", "pattern": None, "channel": b"kostas", "data": 0}
+    assert message == {"type": "sunsubscribe", "pattern": None, "channel": b"kostas", "data": 0}
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
