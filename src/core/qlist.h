@@ -19,8 +19,8 @@ class PageUsage;
 
 class QList {
  public:
-  enum Where { TAIL, HEAD };
-  enum COMPR_METHOD { LZF = 0, LZ4 = 1 };
+  enum Where : uint8_t { TAIL, HEAD };
+  enum COMPR_METHOD : uint8_t { LZF = 0, LZ4 = 1 };
 
   /* Node is a 40 byte struct describing a listpack for a quicklist.
    * We use bit fields keep the Node at 40 bytes.
@@ -103,7 +103,7 @@ class QList {
   };
 
   using IterateFunc = absl::FunctionRef<bool(Entry)>;
-  enum InsertOpt { BEFORE, AFTER };
+  enum InsertOpt : uint8_t { BEFORE, AFTER };
 
   /**
    * fill: The number of entries allowed per internal list node can be specified
