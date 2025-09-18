@@ -31,6 +31,11 @@ on:
         required: false
         type: string
         default: "no"
+      vmodule_expression:
+        description: "Emit verbose dragonfly logs for modules, eg x=2,y=3"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   build:
@@ -61,25 +66,28 @@ jobs:
           ulimit -a
           env
 
+      - name: Fetch release
+        shell: bash
+        if: ${{ inputs.use_release == 'yes' }}
+        run: |
+          mkdir "${GITHUB_WORKSPACE}"/build
+          cd "${GITHUB_WORKSPACE}"/build
+          wget -q https://github.com/dragonflydb/dragonfly/releases/latest/download/dragonfly-x86_64.tar.gz
+          tar xf dragonfly-x86_64.tar.gz
+          mv dragonfly-x86_64 dragonfly
+          ls -l
+
       - name: Configure & Build
         shell: bash
+        if: ${{ inputs.use_release != 'yes' }}
         run: |
-          if [[ "${{ inputs.use_release }}" == "yes" ]]; then
-            mkdir "${GITHUB_WORKSPACE}"/build
-            cd "${GITHUB_WORKSPACE}"/build
-            wget -q https://github.com/dragonflydb/dragonfly/releases/latest/download/dragonfly-x86_64.tar.gz
-            tar xf dragonfly-x86_64.tar.gz
-            mv dragonfly-x86_64 dragonfly
-            ls -l
-          else
-            # -no-pie to disable address randomization so we could symbolize stacktraces
-            cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
-                  -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPRINT_STACKTRACES_ON_SIGNAL=ON \
-                  -DCMAKE_CXX_FLAGS=-no-pie -DHELIO_STACK_CHECK:STRING=4096
-            cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly
-            pwd
-            ls -l ..
-          fi
+          # -no-pie to disable address randomization so we could symbolize stacktraces
+          cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
+                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPRINT_STACKTRACES_ON_SIGNAL=ON \
+                -DCMAKE_CXX_FLAGS=-no-pie -DHELIO_STACK_CHECK:STRING=4096
+          cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly
+          pwd
+          ls -l ..
 
       - name: Run tests on repeat
         uses: ./.github/actions/repeat
@@ -94,6 +102,7 @@ jobs:
           count: ${{ inputs.count }}
           timeout: ${{ inputs.timeout }}
           epoll: ${{ inputs.epoll }}
+          vmodule_expression: ${{ inputs.vmodule_expression }}
 
       - name: Upload logs on failure
         if: failure()
