@@ -12,6 +12,12 @@ namespace dfly {
 namespace {
 thread_local AllocationTracker g_tracker;
 thread_local absl::InsecureBitGen g_bitgen;
+
+bool CanCallVlog(std::string_view trace) {
+  // GLOG fails when logging while flushing the current log under a mutex
+  return trace.find("LogMessage::Flush") == std::string::npos;
+}
+
 }  // namespace
 
 AllocationTracker& AllocationTracker::Get() {
@@ -75,9 +81,13 @@ void AllocationTracker::ProcessNew(void* ptr, size_t size) {
     }
 
     size_t usable = mi_usable_size(ptr);
-    DCHECK_GE(usable, size);
-    LOG(INFO) << "Allocating " << usable << " bytes (" << ptr
-              << "). Stack: " << util::fb2::GetStacktrace();
+    std::string trace = util::fb2::GetStacktrace();
+
+    if (CanCallVlog(trace)) {
+      DCHECK_GE(usable, size);
+      LOG(INFO) << "Allocating " << usable << " bytes (" << ptr << "). Stack: " << trace;
+    }
+
     break;
   }
   inside_tracker_ = false;
@@ -94,8 +104,9 @@ void AllocationTracker::ProcessDelete(void* ptr) {
   if (tracking_.size() == 1 && tracking_.front().sample_odds == 1) {
     size_t usable = mi_usable_size(ptr);
     if (usable <= tracking_.front().upper_bound && usable >= tracking_.front().lower_bound) {
-      LOG(INFO) << "Deallocating " << usable << " bytes (" << ptr << ")\n"
-                << util::fb2::GetStacktrace();
+      std::string trace = util::fb2::GetStacktrace();
+      LOG_IF(INFO, CanCallVlog(trace)) << "Deallocating " << usable << " bytes (" << ptr << ")\n"
+                                       << trace;
     }
   }
   inside_tracker_ = false;
