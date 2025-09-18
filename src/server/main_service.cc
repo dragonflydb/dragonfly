@@ -723,7 +723,7 @@ string FailedCommandToString(std::string_view command, facade::CmdArgList args,
   string result;
   absl::StrAppend(&result, " ", command);
 
-  if (command != "AUTH") {
+  if (command != "AUTH" && command != "ACL SETUSER") {
     for (auto arg : args) {
       absl::StrAppend(&result, " ", absl::CHexEscape(arg));
     }
