@@ -194,7 +194,7 @@ class QList {
 
   // Returns true if elements were deleted, false if list has not changed.
   // Negative start index is allowed.
-  bool Erase(const long start, unsigned count);
+  bool Erase(long start, unsigned count);
 
   // Needed by tests and the rdb code.
   const Node* Head() const {
