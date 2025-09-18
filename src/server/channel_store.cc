@@ -220,13 +220,14 @@ void ChannelStore::UnsubscribeAfterClusterSlotMigration(const cluster::SlotSet& 
   csu.ApplyAndUnsubscribe();
 }
 
+// TODO: Reuse common code with Send function
+// TODO: Find proper solution to hacky `force_unsubscribe` flag or at least move logic out of io
 void ChannelStore::UnsubscribeConnectionsFromDeletedSlots(const ChannelsSubMap& sub_map,
                                                           uint32_t idx) {
-  const bool should_unsubscribe = true;
   for (const auto& [channel, subscribers] : sub_map) {
     // ignored by pub sub handler because should_unsubscribe is true
     std::string msg = "__ignore__";
-    auto send = BuildSender(channel, {facade::ArgSlice{msg}}, false, should_unsubscribe);
+    auto send = BuildSender(channel, {facade::ArgSlice{msg}}, false, true);
 
     auto it = lower_bound(subscribers.begin(), subscribers.end(), idx,
                           ChannelStore::Subscriber::ByThreadId);

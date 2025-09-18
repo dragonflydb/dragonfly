@@ -74,7 +74,9 @@ class Connection : public util::Connection {
     std::shared_ptr<char[]> buf;        // stores channel name and message
     std::string_view channel, message;  // channel and message parts from buf
     bool is_sharded = false;
-    bool should_unsubscribe = false;  // unsubscribe from channel after sending the message
+
+    // Unsubscribe simultaneously when sending unsubscribe message. Used for cluster migrations
+    bool force_unsubscribe = false;
   };
 
   // Pipeline message, accumulated Redis command to be executed.

@@ -529,10 +529,9 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
       !base::_in(pub_msg.channel, {"unsubscribe", "punsubscribe"}))
     return;
 
-  // TODO: sharded? unclear to me
-  if (pub_msg.should_unsubscribe) {
+  if (pub_msg.force_unsubscribe) {
     rb->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
-    rb->SendBulkString("unsubscribe");
+    rb->SendBulkString("sunsubscribe");
     rb->SendBulkString(pub_msg.channel);
     rb->SendLong(0);
     self->cntx()->Unsubscribe(pub_msg.channel);
