@@ -326,6 +326,12 @@ pair<void*, bool> DefragZSet(unsigned encoding, void* ptr, PageUsage* page_usage
   }
 }
 
+pair<void*, bool> DefragList(unsigned /**/, void* ptr, PageUsage* page_usage) {
+  auto* qlist_ptr = static_cast<QList*>(ptr);
+  bool reallocated = qlist_ptr->DefragIfNeeded(page_usage);
+  return {ptr, reallocated};
+}
+
 inline void FreeObjStream(void* ptr) {
   freeStream((stream*)ptr);
 }
@@ -584,6 +590,8 @@ bool RobjWrapper::DefragIfNeeded(PageUsage* page_usage) {
     return do_defrag(DefragSet);
   } else if (type() == OBJ_ZSET) {
     return do_defrag(DefragZSet);
+  } else if (type() == OBJ_LIST) {
+    return do_defrag(DefragList);
   }
 
   page_usage->RecordNotSupported();
