@@ -33,9 +33,9 @@ class QList {
    * extra: 9 bits, free for future use; pads out the remainder of 32 bits
    * */
 
-  typedef struct Node {
-    struct Node* prev;
-    struct Node* next;
+  struct Node {
+    Node* prev;
+    Node* next;
     unsigned char* entry;
     size_t sz;                           /* entry size in bytes */
     unsigned int count : 16;             /* count of items in listpack */
@@ -45,7 +45,7 @@ class QList {
     unsigned int attempted_compress : 1; /* node can't compress; too small */
     unsigned int dont_compress : 1;      /* prevent compression of entry that will be used later */
     unsigned int extra : 25;             /* more bits to steal for future usage */
-  } Node;
+  };
 
   // Provides wrapper around the references to the listpack entries.
   class Entry {
