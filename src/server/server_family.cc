@@ -1284,7 +1284,7 @@ void ServerFamily::FlushAll(Namespace* ns) {
   boost::intrusive_ptr<Transaction> flush_trans(new Transaction{cid});
   flush_trans->InitByArgs(ns, 0, {});
   VLOG(1) << "Performing flush";
-  Drakarys(flush_trans.get(), DbSlice::kDbAll);
+  Drakarys(flush_trans.get(), DbSlice::kDbAll, false);
 }
 
 // Load starts as many fibers as there are files to load each one separately.
@@ -2198,24 +2198,26 @@ bool ServerFamily::TEST_IsSaving() const {
   return is_saving.load(std::memory_order_relaxed);
 }
 
-vector<util::fb2::JoinHandle> ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
+void ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind, bool wait) {
   VLOG(1) << "Drakarys";
 
   base::SpinLock lock;
-  vector<util::fb2::JoinHandle> handles;
+  vector<fb2::Fiber> fibers;
 
   transaction->Execute(
-      [db_ind, &handles, &lock](Transaction* t, EngineShard* shard) {
-        auto handle = t->GetDbSlice(shard->shard_id()).FlushDb(db_ind);
+      [db_ind, &fibers, &lock](Transaction* t, EngineShard* shard) {
+        auto fib = t->GetDbSlice(shard->shard_id()).FlushDb(db_ind);
         {
           lock_guard lk{lock};
-          handles.emplace_back(std::move(handle));
+          fibers.emplace_back(std::move(fib));
         }
         return OpStatus::OK;
       },
       true);
 
-  return handles;
+  auto action = wait ? &fb2::Fiber::JoinIfNeeded : &fb2::Fiber::Detach;
+  for (auto& f : fibers)
+    (f.*action)();
 }
 
 SaveInfoData ServerFamily::GetLastSaveInfo() const {
@@ -2288,15 +2290,11 @@ void ServerFamily::FlushDb(CmdArgList args, const CommandContext& cmd_cntx) {
   if (args.size() > 1)
     return cmd_cntx.rb->SendError(kSyntaxErr);
 
+  bool sync = CmdArgParser{args}.Check("SYNC");
   string_view cmd_name = cmd_cntx.tx->GetCId()->name();
   DbIndex index = cmd_name == "FLUSHALL" ? DbSlice::kDbAll : cmd_cntx.tx->GetDbIndex();
 
-  auto handles = Drakarys(cmd_cntx.tx, index);
-  if (CmdArgParser{args}.Check("SYNC")) {
-    for (auto& handle : handles)
-      handle.Wait();
-  }
-
+  Drakarys(cmd_cntx.tx, index, sync);
   SendInvalidationMessages();
   cmd_cntx.rb->SendOk();
 }

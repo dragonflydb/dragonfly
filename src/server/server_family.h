@@ -250,7 +250,8 @@ class ServerFamily {
 
   // Burns down and destroy all the data from the database.
   // if kDbAll is passed, burns all the databases to the ground.
-  std::vector<util::fb2::JoinHandle> Drakarys(Transaction* transaction, DbIndex db_ind);
+  // `wait` makes it wait for all fibers to finish and decommit
+  void Drakarys(Transaction* transaction, DbIndex db_ind, bool wait);
 
   SaveInfoData GetLastSaveInfo() const;
 

@@ -893,7 +893,7 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
   }).Detach();
 }
 
-util::fb2::JoinHandle DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
+util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   bool clear_tiered = owner_->tiered_storage() != nullptr;
 
   if (clear_tiered)
@@ -925,10 +925,10 @@ util::fb2::JoinHandle DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexe
                                           ServerState::kGlibcmalloc);
   };
 
-  return fb2::Fiber("flush_dbs", std::move(cb)).Detach();
+  return {"flush_dbs", std::move(cb)};
 }
 
-util::fb2::JoinHandle DbSlice::FlushDb(DbIndex db_ind) {
+util::fb2::Fiber DbSlice::FlushDb(DbIndex db_ind) {
   DVLOG(1) << "Flushing db " << db_ind;
 
   // clear client tracking map.
