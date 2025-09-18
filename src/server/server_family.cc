@@ -1946,7 +1946,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             m.shard_stats.defrag_task_invocation_total, COUNTER, &resp->body());
   AppendMetricWithoutLabels("defrag_attempts", "Objects examined",
                             m.shard_stats.defrag_attempt_total, COUNTER, &resp->body());
-  AppendMetricWithoutLabels("defrag_invocations", "Objects moved",
+  AppendMetricWithoutLabels("defrag_objects_moved", "Objects moved",
                             m.shard_stats.defrag_realloc_total, COUNTER, &resp->body());
 }
 
