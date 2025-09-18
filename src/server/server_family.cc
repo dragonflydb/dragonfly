@@ -1322,6 +1322,10 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     return {};
   }
 
+  // Reset state on error
+  absl::Cleanup reset_state{
+      [this]() { service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE); }};
+
   auto& pool = service_.proactor_pool();
 
   const vector<string>& paths = *expand_result;
@@ -1388,6 +1392,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
   };
   pool.GetNextProactor()->Dispatch(std::move(load_join_func));
 
+  std::move(reset_state).Cancel();  // load_join_func resets state after loading
   return future;
 }
 
