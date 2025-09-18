@@ -2201,16 +2201,10 @@ bool ServerFamily::TEST_IsSaving() const {
 void ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind, bool wait) {
   VLOG(1) << "Drakarys";
 
-  base::SpinLock lock;
-  vector<fb2::Fiber> fibers;
-
+  vector<fb2::Fiber> fibers(shard_set->size());
   transaction->Execute(
-      [db_ind, &fibers, &lock](Transaction* t, EngineShard* shard) {
-        auto fib = t->GetDbSlice(shard->shard_id()).FlushDb(db_ind);
-        {
-          lock_guard lk{lock};
-          fibers.emplace_back(std::move(fib));
-        }
+      [db_ind, &fibers](Transaction* t, EngineShard* shard) {
+        fibers[shard->shard_id()] = t->GetDbSlice(shard->shard_id()).FlushDb(db_ind);
         return OpStatus::OK;
       },
       true);
