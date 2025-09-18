@@ -65,6 +65,10 @@ class PageUsage {
     unique_pages_.objects_skipped_not_supported += 1;
   }
 
+  void SetForceReallocate(bool force_reallocate) {
+    force_reallocate_ = force_reallocate;
+  }
+
  private:
   CollectPageStats collect_stats_{CollectPageStats::NO};
   float threshold_;
@@ -89,6 +93,9 @@ class PageUsage {
   };
 
   UniquePages unique_pages_;
+
+  // For use in testing, forces reallocate check to always return true
+  bool force_reallocate_{false};
 };
 
 }  // namespace dfly
