@@ -398,10 +398,10 @@ size_t QList::DefragIfNeeded(PageUsage* page_usage) {
     // of their constant (and relatively small, ~40 bytes per object) size. Defragmentation fixes
     // fragmented memory allocation, which usually happens when variable-sized blocks of data are
     // allocated and deallocated, which is not expected with nodes.
-    auto new_entry = static_cast<unsigned char*>(zmalloc(curr->sz));
+    uint8_t* new_entry = static_cast<uint8_t*>(zmalloc(curr->sz));
     memcpy(new_entry, curr->entry, curr->sz);
 
-    unsigned char* old_entry = curr->entry;
+    uint8_t* old_entry = curr->entry;
     curr->entry = new_entry;
 
     zfree(old_entry);
