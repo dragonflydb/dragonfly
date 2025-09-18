@@ -138,18 +138,18 @@ class QList {
    */
   explicit QList(int fill = -2, int compress = 0);
 
-  QList(QList&&);
+  QList(QList&&) noexcept;
   QList(const QList&) = delete;
   ~QList();
 
   QList& operator=(const QList&) = delete;
-  QList& operator=(QList&&);
+  QList& operator=(QList&&) noexcept;
 
   size_t Size() const {
     return count_;
   }
 
-  void Clear();
+  void Clear() noexcept;
 
   void Push(std::string_view value, Where where);
 

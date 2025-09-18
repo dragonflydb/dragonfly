@@ -414,7 +414,7 @@ QList::QList(int fill, int compress) : fill_(fill), compress_(compress), bookmar
   compr_method_ = 0;
 }
 
-QList::QList(QList&& other)
+QList::QList(QList&& other) noexcept
     : head_(other.head_),
       count_(other.count_),
       len_(other.len_),
@@ -429,7 +429,7 @@ QList::~QList() {
   Clear();
 }
 
-QList& QList::operator=(QList&& other) {
+QList& QList::operator=(QList&& other) noexcept {
   if (this != &other) {
     Clear();
     head_ = other.head_;
@@ -445,7 +445,7 @@ QList& QList::operator=(QList&& other) {
   return *this;
 }
 
-void QList::Clear() {
+void QList::Clear() noexcept {
   Node* current = head_;
 
   while (len_) {
