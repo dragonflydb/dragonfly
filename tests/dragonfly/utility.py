@@ -118,7 +118,7 @@ async def wait_available_async(
         raise TimeoutError("Timed out!")
 
     # Secondly for replicas, we make sure they reached stable state replicaton
-    async for info, breaker in info_tick_timer(clients, "REPLICATION", timeout=timeout):
+    async for info, breaker in info_tick_timer(clients, "REPLICATION", timeout=timeout, step=0.05):
         with breaker:
             assert info["role"] == "master" or "slave_repl_offset" in info, info
 
