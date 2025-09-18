@@ -2285,12 +2285,14 @@ void ServerFamily::SendInvalidationMessages() const {
 }
 
 void ServerFamily::FlushDb(CmdArgList args, const CommandContext& cmd_cntx) {
+  if (args.size() > 1)
+    return cmd_cntx.rb->SendError(kSyntaxErr);
+
   string_view cmd_name = cmd_cntx.tx->GetCId()->name();
   DbIndex index = cmd_name == "FLUSHALL" ? DbSlice::kDbAll : cmd_cntx.tx->GetDbIndex();
-  bool sync = args.size() > 0 && absl::AsciiStrToUpper(args[0]) == "SYNC";
 
   auto handles = Drakarys(cmd_cntx.tx, index);
-  if (sync) {
+  if (CmdArgParser{args}.Check("SYNC")) {
     for (auto& handle : handles)
       handle.Wait();
   }
@@ -4032,7 +4034,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -2, 0, 0, acl::kConfig}.HFUNC(Config)
       << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDbSize}.HFUNC(DbSize)
       << CI{"DEBUG", CO::ADMIN | CO::LOADING, -2, 0, 0, acl::kDebug}.HFUNC(Debug)
-      << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS | CO::DANGEROUS, 1, 0, 0, acl::kFlushDB}.HFUNC(
+      << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushDB}.HFUNC(
              FlushDb)
       << CI{"FLUSHALL", CO::WRITE | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushAll}
              .HFUNC(FlushDb)

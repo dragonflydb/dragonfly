@@ -902,7 +902,7 @@ util::fb2::JoinHandle DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexe
   DbTableArray flush_db_arr(db_arr_.size());
 
   for (DbIndex index : indexes) {
-    if (!index) {
+    if (index == 0) {  // TODO: Async dealloc?
       owner_->search_indices()->DropAllIndices();
     }
 
