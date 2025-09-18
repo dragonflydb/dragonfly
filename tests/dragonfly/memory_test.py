@@ -24,7 +24,7 @@ from .instance import DflyInstance, DflyInstanceFactory
 # We limit to 5gb just in case to sanity check the gh runner. Otherwise, if we ask for too much
 # memory it might force the gh runner to run out of memory (since OOM killer might not even
 # get a chance to run).
-async def test_rss_used_mem_gap(df_factory, type, keys, val_size, elements):
+async def test_rss_used_mem_gap(df_factory: DflyInstanceFactory, type, keys, val_size, elements):
     dbfilename = f"dump_{tmp_file_name()}"
     instance = df_factory.create(
         proactor_threads=2,
@@ -74,9 +74,17 @@ async def test_rss_used_mem_gap(df_factory, type, keys, val_size, elements):
 
     assert await client.execute_command("SAVE", "DF") == True
     assert await client.execute_command("DFLY", "LOAD", f"{dbfilename}-summary.dfs") == "OK"
-    #
+
     await check_memory()
-    await client.execute_command("FLUSHALL")
+
+    # FLUSHALL sync waits for flush to finish and decommit memory, so send INFO immediately after
+    p = client.pipeline(transaction=False)
+    p.execute_command("FLUSHALL", "SYNC")  # flushall(asynchronous=False) will just issue FLUSHALL$
+    p.info("memory")
+
+    info = (await p.execute())[-1]
+    assert info["used_memory"] < 2 * 1_000_000  # Table memory
+    assert info["used_memory_rss"] < min_rss / 10  # RSS must have been freed
 
 
 #

@@ -250,7 +250,8 @@ class ServerFamily {
 
   // Burns down and destroy all the data from the database.
   // if kDbAll is passed, burns all the databases to the ground.
-  std::error_code Drakarys(Transaction* transaction, DbIndex db_ind);
+  // `wait` makes it wait for all fibers to finish and decommit
+  void Drakarys(Transaction* transaction, DbIndex db_ind, bool wait);
 
   SaveInfoData GetLastSaveInfo() const;
 
@@ -344,7 +345,6 @@ class ServerFamily {
   void Dfly(CmdArgList args, const CommandContext& cmd_cntx);
   void Memory(CmdArgList args, const CommandContext& cmd_cntx);
   void FlushDb(CmdArgList args, const CommandContext& cmd_cntx);
-  void FlushAll(CmdArgList args, const CommandContext& cmd_cntx);
   void Info(CmdArgList args, const CommandContext& cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   void Hello(CmdArgList args, const CommandContext& cmd_cntx);
   void LastSave(CmdArgList args, const CommandContext& cmd_cntx);

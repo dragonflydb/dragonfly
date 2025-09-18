@@ -331,7 +331,7 @@ class DbSlice {
   constexpr static DbIndex kDbAll = 0xFFFF;
 
   // Flushes db_ind or all databases if kDbAll is passed
-  void FlushDb(DbIndex db_ind);
+  util::fb2::Fiber FlushDb(DbIndex db_ind);
 
   // Flushes the data of given slot ranges.
   void FlushSlots(const cluster::SlotRanges& slot_ranges);
@@ -551,7 +551,7 @@ class DbSlice {
                                              bool force_update);
 
   void FlushSlotsFb(const cluster::SlotSet& slot_ids);
-  void FlushDbIndexes(const std::vector<DbIndex>& indexes);
+  util::fb2::Fiber FlushDbIndexes(const std::vector<DbIndex>& indexes);
 
   // Invalidate all watched keys in database. Used on FLUSH.
   void InvalidateDbWatches(DbIndex db_indx);
