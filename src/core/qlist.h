@@ -19,8 +19,8 @@ class PageUsage;
 
 class QList {
  public:
-  enum Where { TAIL, HEAD };
-  enum COMPR_METHOD { LZF = 0, LZ4 = 1 };
+  enum Where : uint8_t { TAIL, HEAD };
+  enum COMPR_METHOD : uint8_t { LZF = 0, LZ4 = 1 };
 
   /* Node is a 40 byte struct describing a listpack for a quicklist.
    * We use bit fields keep the Node at 40 bytes.
@@ -33,9 +33,9 @@ class QList {
    * extra: 9 bits, free for future use; pads out the remainder of 32 bits
    * */
 
-  typedef struct Node {
-    struct Node* prev;
-    struct Node* next;
+  struct Node {
+    Node* prev;
+    Node* next;
     unsigned char* entry;
     size_t sz;                           /* entry size in bytes */
     unsigned int count : 16;             /* count of items in listpack */
@@ -45,7 +45,7 @@ class QList {
     unsigned int attempted_compress : 1; /* node can't compress; too small */
     unsigned int dont_compress : 1;      /* prevent compression of entry that will be used later */
     unsigned int extra : 25;             /* more bits to steal for future usage */
-  } Node;
+  };
 
   // Provides wrapper around the references to the listpack entries.
   class Entry {
@@ -103,7 +103,7 @@ class QList {
   };
 
   using IterateFunc = absl::FunctionRef<bool(Entry)>;
-  enum InsertOpt { BEFORE, AFTER };
+  enum InsertOpt : uint8_t { BEFORE, AFTER };
 
   /**
    * fill: The number of entries allowed per internal list node can be specified
@@ -138,18 +138,18 @@ class QList {
    */
   explicit QList(int fill = -2, int compress = 0);
 
-  QList(QList&&);
+  QList(QList&&) noexcept;
   QList(const QList&) = delete;
   ~QList();
 
   QList& operator=(const QList&) = delete;
-  QList& operator=(QList&&);
+  QList& operator=(QList&&) noexcept;
 
   size_t Size() const {
     return count_;
   }
 
-  void Clear();
+  void Clear() noexcept;
 
   void Push(std::string_view value, Where where);
 
@@ -194,7 +194,7 @@ class QList {
 
   // Returns true if elements were deleted, false if list has not changed.
   // Negative start index is allowed.
-  bool Erase(const long start, unsigned count);
+  bool Erase(long start, unsigned count);
 
   // Needed by tests and the rdb code.
   const Node* Head() const {
@@ -245,9 +245,6 @@ class QList {
   Node* _Tail() const {
     return head_ ? head_->prev : nullptr;
   }
-
-  void OnPreUpdate(Node* node);
-  void OnPostUpdate(Node* node);
 
   // Returns newly created plain node.
   Node* InsertPlainNode(Node* old_node, std::string_view, InsertOpt insert_opt);

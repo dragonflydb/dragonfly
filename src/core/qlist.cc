@@ -398,10 +398,10 @@ size_t QList::DefragIfNeeded(PageUsage* page_usage) {
     // of their constant (and relatively small, ~40 bytes per object) size. Defragmentation fixes
     // fragmented memory allocation, which usually happens when variable-sized blocks of data are
     // allocated and deallocated, which is not expected with nodes.
-    auto new_entry = static_cast<unsigned char*>(zmalloc(curr->sz));
+    uint8_t* new_entry = static_cast<uint8_t*>(zmalloc(curr->sz));
     memcpy(new_entry, curr->entry, curr->sz);
 
-    unsigned char* old_entry = curr->entry;
+    uint8_t* old_entry = curr->entry;
     curr->entry = new_entry;
 
     zfree(old_entry);
@@ -414,7 +414,7 @@ QList::QList(int fill, int compress) : fill_(fill), compress_(compress), bookmar
   compr_method_ = 0;
 }
 
-QList::QList(QList&& other)
+QList::QList(QList&& other) noexcept
     : head_(other.head_),
       count_(other.count_),
       len_(other.len_),
@@ -429,7 +429,7 @@ QList::~QList() {
   Clear();
 }
 
-QList& QList::operator=(QList&& other) {
+QList& QList::operator=(QList&& other) noexcept {
   if (this != &other) {
     Clear();
     head_ = other.head_;
@@ -445,15 +445,15 @@ QList& QList::operator=(QList&& other) {
   return *this;
 }
 
-void QList::Clear() {
+void QList::Clear() noexcept {
   Node* current = head_;
 
   while (len_) {
     Node* next = current->next;
     if (current->encoding != QUICKLIST_NODE_ENCODING_RAW) {
       quicklistLZF* lzf = (quicklistLZF*)current->entry;
-      QList::stats.compressed_bytes -= lzf->sz;
-      QList::stats.raw_compressed_bytes -= current->sz;
+      stats.compressed_bytes -= lzf->sz;
+      stats.raw_compressed_bytes -= current->sz;
     }
     zfree(current->entry);
     zfree(current);
