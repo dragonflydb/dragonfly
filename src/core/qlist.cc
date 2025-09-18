@@ -452,8 +452,8 @@ void QList::Clear() noexcept {
     Node* next = current->next;
     if (current->encoding != QUICKLIST_NODE_ENCODING_RAW) {
       quicklistLZF* lzf = (quicklistLZF*)current->entry;
-      QList::stats.compressed_bytes -= lzf->sz;
-      QList::stats.raw_compressed_bytes -= current->sz;
+      stats.compressed_bytes -= lzf->sz;
+      stats.raw_compressed_bytes -= current->sz;
     }
     zfree(current->entry);
     zfree(current);

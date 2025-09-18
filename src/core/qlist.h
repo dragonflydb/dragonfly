@@ -246,9 +246,6 @@ class QList {
     return head_ ? head_->prev : nullptr;
   }
 
-  void OnPreUpdate(Node* node);
-  void OnPostUpdate(Node* node);
-
   // Returns newly created plain node.
   Node* InsertPlainNode(Node* old_node, std::string_view, InsertOpt insert_opt);
   void InsertNode(Node* old_node, Node* new_node, InsertOpt insert_opt);
