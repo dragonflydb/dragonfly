@@ -132,7 +132,7 @@ if (WITH_SEARCH)
 
   add_third_party(
     hnswlib
-    URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.7.0.tar.gz
+    URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.8.0.tar.gz
 
     BUILD_COMMAND echo SKIP
     INSTALL_COMMAND cp -R <SOURCE_DIR>/hnswlib ${THIRD_PARTY_LIB_DIR}/hnswlib/include/
