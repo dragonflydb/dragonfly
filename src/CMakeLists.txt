@@ -3,6 +3,8 @@ option(ENABLE_GIT_VERSION "Build with Git metadata" OFF)
 option(USE_SIMSIMD "Enable SimSIMD vector optimizations" OFF)
 option(WITH_SEARCH "Enable compilation of search module" ON)
 
+option(USE_PROMETHEUS "Download prometheus binary for tests" OFF)
+
 if ("${CMAKE_SYSTEM_NAME}" STREQUAL "FreeBSD")
   set(DFLY_TOOLS_MAKE "gmake")
 else()
