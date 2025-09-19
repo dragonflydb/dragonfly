@@ -102,10 +102,10 @@ namespace {
 // need additional 8-16 bytes for their internal structures, thus over reserving additional
 // memory pages if using round sizes.
 #ifdef NDEBUG
-constexpr size_t kFiberDefaultStackSize = 36_KB - 16;
+constexpr size_t kFiberDefaultStackSize = 32_KB - 16;
 #else
-// Increase stack size for debug builds.
-constexpr size_t kFiberDefaultStackSize = 40_KB - 16;
+// We leave the same stack size for debug mode, to find out the possible stack overflow bugs.
+constexpr size_t kFiberDefaultStackSize = 32_KB - 16;
 #endif
 
 enum class TermColor { kDefault, kRed, kGreen, kYellow };

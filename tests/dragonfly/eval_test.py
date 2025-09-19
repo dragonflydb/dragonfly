@@ -404,3 +404,13 @@ async def test_gc_force_flag(async_client: aioredis.Redis):
     assert stats["lua_force_gc_calls"] > 0
     assert stats["lua_gc_duration_total_sec"] > 0
     assert stats["lua_gc_freed_memory_total"] > 0
+
+
+@dfly_args({"proactor_threads": 1})
+@pytest.mark.asyncio
+async def test_StackOverflowByHincrbyfloat(df_server: DflyInstance):
+    client = df_server.client()
+
+    await client.execute_command("HSET myhash field 1.0")
+    await client.eval("return redis.pcall('HINCRBYFLOAT', KEYS[1], 'field', '1.5')", 1, "myhash")
+    assert "2.5" == await client.execute_command("HGET myhash field")
