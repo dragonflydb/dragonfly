@@ -119,6 +119,9 @@ jobs:
       - name: Send notification on failure
         if: failure() && github.ref == 'refs/heads/main'
         run: |
+          cd $GITHUB_WORKSPACE/build
+          cat /Users/runner/work/dragonfly/dragonfly/build/third_party/src/hnswlib_project-stamp/hnswlib_project-configure-*.log
+
           job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           message="Daily build (macOS) failed.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
 
