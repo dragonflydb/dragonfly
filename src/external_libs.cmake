@@ -134,6 +134,8 @@ if (WITH_SEARCH)
     hnswlib
     URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.7.0.tar.gz
 
+    CMAKE_PASS_FLAGS "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+
     BUILD_COMMAND echo SKIP
     INSTALL_COMMAND cp -R <SOURCE_DIR>/hnswlib ${THIRD_PARTY_LIB_DIR}/hnswlib/include/
     LIB "none"
