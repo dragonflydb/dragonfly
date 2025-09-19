@@ -55,20 +55,13 @@ class BlockingController {
   struct WatchQueue;
   struct DbWatchTable;
 
-  using WatchQueueMap = absl::flat_hash_map<std::string, std::unique_ptr<WatchQueue>>;
-
   void NotifyWatchQueue(std::string_view key, WatchQueue* wqm, const DbContext& context);
-
-  // void NotifyConvergence(Transaction* tx);
 
   EngineShard* owner_;
   Namespace* ns_;
 
   absl::flat_hash_map<DbIndex, std::unique_ptr<DbWatchTable>> watched_dbs_;
-
-  // serves as a temporary queue that aggregates all the possible awakened dbs.
-  // flushed by RunStep().
-  absl::flat_hash_set<DbIndex> awakened_indices_;
+  absl::flat_hash_set<DbIndex> awakened_indices_;  // watched_dbs_ with awakened keys
 
   // tracks currently notified and awaked transactions.
   // There can be multiple transactions like this because a transaction
