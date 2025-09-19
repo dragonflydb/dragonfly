@@ -20,6 +20,7 @@ endif()
 add_third_party(
   dconv
   URL https://github.com/google/double-conversion/archive/refs/tags/v3.3.0.tar.gz
+  CMAKE_PASS_FLAGS "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
   PATCH_COMMAND ${SED_REPL} "/static const std::ctype/d"
                 <SOURCE_DIR>/double-conversion/string-to-double.cc
   COMMAND ${SED_REPL} "/std::use_facet</d" <SOURCE_DIR>/double-conversion/string-to-double.cc
@@ -133,6 +134,8 @@ if (WITH_SEARCH)
   add_third_party(
     hnswlib
     URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.7.0.tar.gz
+
+    CMAKE_PASS_FLAGS "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
 
     BUILD_COMMAND echo SKIP
     INSTALL_COMMAND cp -R <SOURCE_DIR>/hnswlib ${THIRD_PARTY_LIB_DIR}/hnswlib/include/
