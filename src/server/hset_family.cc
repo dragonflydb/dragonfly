@@ -140,7 +140,7 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
     }
     value += incr;
     if (isnan(value) || isinf(value)) {
-      return OpStatus::INVALID_FLOAT;
+      return OpStatus::NAN_OR_INF_DURING_INCR;
     }
 
     param->emplace<double>(value);

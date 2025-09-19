@@ -40,6 +40,8 @@ std::string_view StatusToMsg(OpStatus status) {
       return kInvalidJsonPathErr;
     case OpStatus::INVALID_JSON:
       return kJsonParseError;
+    case OpStatus::NAN_OR_INF_DURING_INCR:
+      return kNanOrInfDuringIncr;
     default:
       LOG(ERROR) << "Unsupported status " << status;
       return "Internal error";
