@@ -765,7 +765,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
 
   auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (blocking_controller) {
-    blocking_controller->AwakeWatched(op_args.db_cntx.db_index, key);
+    blocking_controller->Touch(op_args.db_cntx.db_index, key);
   }
 
   return result_id;
@@ -1439,7 +1439,7 @@ OpStatus OpDestroyGroup(const OpArgs& op_args, string_view key, string_view gnam
   // Awake readers blocked on this group
   auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (blocking_controller) {
-    blocking_controller->AwakeWatched(op_args.db_cntx.db_index, key);
+    blocking_controller->Touch(op_args.db_cntx.db_index, key);
   }
 
   return OpStatus::OK;
