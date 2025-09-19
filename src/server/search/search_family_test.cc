@@ -3203,4 +3203,47 @@ TEST_F(SearchFamilyTest, AggregateWithLoadFromSortBySeveralFields) {
   EXPECT_THAT(resp.GetVec(), ElementsAreArray(matchers));
 }
 
+TEST_F(SearchFamilyTest, NumericFilter) {
+  // Index name, age, height
+  Run({"FT.CREATE", "i1", "ON", "HASH", "SCHEMA", "name", "TEXT", "age", "NUMERIC", "height",
+       "NUMERIC"});
+
+  // Index name, age
+  Run({"FT.CREATE", "i2", "ON", "HASH", "SCHEMA", "name", "TEXT", "age", "NUMERIC"});
+
+  Run({"HSET", "id:1", "name", "John", "age", "28", "height", "184"});
+  Run({"HSET", "id:2", "name", "Ivan", "age", "30", "height", "180"});
+  Run({"HSET", "id:3", "name", "Jon", "age", "25", "height", "182"});
+  Run({"HSET", "id:4", "name", "Juan", "age", "32", "height", "186"});
+  Run({"HSET", "id:5", "name", "Ioan", "age", "35", "height", "181"});
+
+  // Filter with non-star query
+  auto res = Run({"FT.SEARCH", "i1", "I*", "FILTER", "age", "31", "40"});
+  EXPECT_THAT(res, AreDocIds("id:5"));
+
+  // Filter on ONE NUMERIC index
+  res = Run({"FT.SEARCH", "i1", "*", "FILTER", "age", "25", "28"});
+  EXPECT_THAT(res, AreDocIds("id:1", "id:3"));
+
+  // Filter on TWO NUMERIC indexes
+  res =
+      Run({"FT.SEARCH", "i1", "*", "FILTER", "age", "25", "28", "FILTER", "height", "180", "182"});
+  EXPECT_THAT(res, AreDocIds("id:3"));
+
+  // Filter on TWO NUMERIC indexes where second filtering produce empty result
+  res =
+      Run({"FT.SEARCH", "i1", "*", "FILTER", "age", "25", "28", "FILTER", "height", "200", "300"});
+  EXPECT_THAT(res, AreDocIds());
+
+  // Filter on index which doesn't exists
+  res = Run({"FT.SEARCH", "i2", "*", "FILTER", "height", "180", "190"});
+  EXPECT_THAT(res, ErrArg("Invalid field: height"));
+
+  // Two filters on same field
+  res = Run({"FT.SEARCH", "i1", "J*", "FILTER", "age", "25", "30", "FILTER", "age", "28", "32"});
+  EXPECT_THAT(res, AreDocIds("id:1"));
+
+  Run({"FLUSHALL"});
+}
+
 }  // namespace dfly

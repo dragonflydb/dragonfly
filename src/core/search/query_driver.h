@@ -30,6 +30,8 @@ class QueryDriver {
     scanner_->SetParams(params);
   }
 
+  void SetOptionalFilters(const OptionalFilters* filters);
+
   Parser::symbol_type Lex() {
     return scanner()->Lex();
   }
