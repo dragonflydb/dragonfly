@@ -88,21 +88,6 @@ class CommandId {
     opt_mask_ |= flag;
   }
 
-  // PUBLISH/SUBSCRIBE/UNSUBSCRIBE variant
-  bool IsPubSub() const {
-    return is_pub_sub_;
-  }
-
-  // PSUBSCRIBE/PUNSUBSCRIBE variant
-  bool IsPSub() const {
-    return is_p_pub_sub_;
-  }
-
-  // SSUBSCRIBE/SUNSUBSCRIBE variant
-  bool IsShardedPSub() const {
-    return is_sharded_pub_sub_;
-  }
-
  protected:
   std::string name_;
 
@@ -119,10 +104,6 @@ class CommandId {
 
   // Whether the command can only be used by admin connections.
   bool restricted_ = false;
-
-  bool is_pub_sub_ = false;
-  bool is_sharded_pub_sub_ = false;
-  bool is_p_pub_sub_ = false;
 };
 
 }  // namespace facade

@@ -310,7 +310,7 @@ class ConnectionContext : public facade::ConnectionContext {
     return conn_state.db_index;
   }
 
-  void ChangeSubscription(bool to_add, bool to_reply, CmdArgList args,
+  void ChangeSubscription(bool to_add, bool to_reply, bool sharded, CmdArgList args,
                           facade::RedisReplyBuilder* rb);
 
   void ChangePSubscription(bool to_add, bool to_reply, CmdArgList args,
