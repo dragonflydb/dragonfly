@@ -32,6 +32,9 @@ inputs:
   epoll:
     required: true
     type: string
+  vmodule_expression:
+    required: true
+    type: string
 
 runs:
   using: "composite"
@@ -52,8 +55,13 @@ runs:
         else
           FORCE_EPOLL=""
         fi
-        echo Running command: timeout ${{ inputs.timeout }} pytest ${{ inputs.expression }} --drop-data-after-each-test ${FORCE_EPOLL} --color=yes --json-report --json-report-file=report.json --log-cli-level=DEBUG --count=${{ inputs.count }}
-        timeout ${{ inputs.timeout }} pytest ${{ inputs.expression }} --drop-data-after-each-test ${FORCE_EPOLL} --color=yes --json-report --json-report-file=report.json --log-cli-level=DEBUG --count=${{ inputs.count }} || code=$?
+        if [[ $"{{ inputs.vmodule_expression }}" != "" ]]; then
+          VMOD="--df vmodule=${{ inputs.vmodule_expression }}"
+        else
+          VMOD=""
+        fi
+        echo Running command: timeout ${{ inputs.timeout }} pytest ${{ inputs.expression }} --drop-data-after-each-test ${FORCE_EPOLL} ${VMOD} --color=yes --json-report --json-report-file=report.json --log-cli-level=DEBUG --count=${{ inputs.count }}
+        timeout ${{ inputs.timeout }} pytest ${{ inputs.expression }} --drop-data-after-each-test ${FORCE_EPOLL} ${VMOD} --color=yes --json-report --json-report-file=report.json --log-cli-level=DEBUG --count=${{ inputs.count }} || code=$?
         # timeout returns 124 if we exceeded the timeout duration
         if [[ $code -eq 124 ]]; then
           # Add an extra new line here because when tests timeout the first line below continues from the test failure name
