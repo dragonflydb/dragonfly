@@ -134,7 +134,7 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
     double value = 0;
 
     if (prev_val) {
-      if (!absl::SimpleAtod(*prev_val, &value)) {
+      if (!ParseDouble(*prev_val, &value)) {
         return OpStatus::INVALID_VALUE;
       }
     }
