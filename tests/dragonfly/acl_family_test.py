@@ -1,13 +1,9 @@
-import pytest
-import redis
-from redis import asyncio as aioredis
-from .instance import DflyInstanceFactory
-from .utility import *
 import tempfile
-import asyncio
-import os
-from . import dfly_args
+
 import async_timeout
+
+from . import dfly_args
+from .utility import *
 
 
 @pytest.mark.asyncio
@@ -141,7 +137,6 @@ async def test_acl_commands(async_client):
         await async_client.execute_command("ZADD myset 1 two")
 
 
-@pytest.mark.exclude_epoll  # Failing test. It should be turned on as soon as it is fixed.
 @pytest.mark.asyncio
 async def test_acl_cat_commands_multi_exec_squash(df_factory):
     df = df_factory.create(multi_exec_squash=True, port=1111)
@@ -234,8 +229,18 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
     # NOPERM while executing multi
     await client.execute_command("MULTI")
 
-    with pytest.raises(redis.exceptions.NoPermissionError):
-        await client.execute_command(f"SET x{x} {x}")
+    # retry for a few seconds while the ACL SETUSER propagates, some SET commands might get through
+    start = time.time()
+    denied = False
+    while not denied and time.time() - start < 10:
+        try:
+            await client.execute_command(f"SET x{x} {x}")
+            asyncio.sleep(0.1)
+        except redis.exceptions.NoPermissionError:
+            denied = True
+        except Exception as e:
+            assert False, f"failed with unexpected error: {e}"
+    assert denied, "all SET commands succeeded unexpectedly defying ACL"
 
 
 @pytest.mark.asyncio
