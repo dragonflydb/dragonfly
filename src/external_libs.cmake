@@ -201,3 +201,16 @@ if(USE_SIMSIMD)
   set_target_properties(TRDP::simsimd PROPERTIES
                         INTERFACE_INCLUDE_DIRECTORIES "${SIMSIMD_INCLUDE_DIR}")
 endif()
+
+if (USE_PROMETHEUS)
+  FetchContent_Declare(
+          prometheus
+          DOWNLOAD_EXTRACT_TIMESTAMP true
+          URL "https://github.com/prometheus/prometheus/releases/download/v3.5.0/prometheus-3.5.0.linux-amd64.tar.gz"
+  )
+  FetchContent_MakeAvailable(prometheus)
+  FetchContent_GetProperties(prometheus)
+  if (prometheus_POPULATED)
+    file(COPY ${prometheus_SOURCE_DIR}/prometheus DESTINATION ${CMAKE_BINARY_DIR})
+  endif (prometheus_POPULATED)
+endif (USE_PROMETHEUS)

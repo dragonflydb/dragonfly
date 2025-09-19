@@ -125,6 +125,7 @@ jobs:
             -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}}" -DWITH_AWS:BOOL=OFF \
             -DWITH_ASAN="${ASAN}" \
             -DWITH_USAN="${USAN}" \
+            -DUSE_PROMETHEUS=ON \
             -L
 
           cd ${GITHUB_WORKSPACE}/build && pwd
