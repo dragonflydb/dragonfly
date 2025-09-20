@@ -38,6 +38,7 @@ inline constexpr char kUndeclaredKeyErr[] = "script tried accessing undeclared k
 inline constexpr char kInvalidDumpValueErr[] = "DUMP payload version or checksum are wrong";
 inline constexpr char kInvalidJsonPathErr[] = "invalid JSON path";
 inline constexpr char kJsonParseError[] = "failed to parse JSON";
+inline constexpr char kNanOrInfDuringIncr[] = "increment would produce NaN or Infinity";
 inline constexpr char kCrossSlotError[] = "-CROSSSLOT Keys in request don't hash to the same slot";
 
 inline constexpr char kSyntaxErrType[] = "syntax_error";

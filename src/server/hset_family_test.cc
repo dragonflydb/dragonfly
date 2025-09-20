@@ -197,6 +197,20 @@ TEST_F(HSetFamilyTest, HincrbyFloat) {
   }
 }
 
+TEST_F(HSetFamilyTest, HincrbyFloatCornerCases) {
+  Run({"hset", "k", "mhv", "-1.8E+308", "phv", "1.8E+308", "nd", "-+-inf", "+inf", "+inf", "nan",
+       "nan", "-inf", "-inf"});
+  // we don't support long doubles, so in all next cases we should return errors
+  EXPECT_THAT(Run({"hincrbyfloat", "k", "mhv", "-1"}), ErrArg("ERR hash value is not a float"));
+  EXPECT_THAT(Run({"hincrbyfloat", "k", "phv", "1"}), ErrArg("ERR hash value is not a float"));
+  EXPECT_THAT(Run({"hincrbyfloat", "k", "nd", "1"}), ErrArg("ERR hash value is not a float"));
+  EXPECT_THAT(Run({"hincrbyfloat", "k", "+inf", "1"}),
+              ErrArg("increment would produce NaN or Infinity"));
+  EXPECT_THAT(Run({"hincrbyfloat", "k", "nan", "1"}), ErrArg("ERR hash value is not a float"));
+  EXPECT_THAT(Run({"hincrbyfloat", "k", "-inf", "1"}),
+              ErrArg("increment would produce NaN or Infinity"));
+}
+
 TEST_F(HSetFamilyTest, HRandFloat) {
   Run({"HSET", "k", "1", "2"});
 
