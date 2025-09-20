@@ -1886,8 +1886,9 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
             await proxy.close(task)
 
     info = await c_replica.info("replication")
-    assert info["psync_attempts"] > 0
-    assert info["psync_successes"] == 0
+    master.stop()
+    lines = master.find_in_logs("Partial sync requested from stale LSN")
+    assert len(lines) > 0
 
 
 async def test_replica_reconnections_after_network_disconnect(df_factory, df_seeder_factory):
@@ -3203,13 +3204,14 @@ async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df
     await c_s2.execute_command(f"REPLTAKEOVER 20")
     # Make server 4 replica of server 2
     await c_s4.execute_command(f"REPLICAOF localhost {server2.port}")
-    await check_all_replicas_finished([c_s4], c_s2)
     # Send some write command for lsn inc
     for i in range(100):
         await c_s2.set(i, "val")
     # Make server 3 replica of server 2
     await c_s3.execute_command(f"REPLICAOF localhost {server2.port}")
+
     await check_all_replicas_finished([c_s3], c_s2)
+    await check_all_replicas_finished([c_s4], c_s2)
 
     s2_sz = await c_s2.dbsize()
     s3_sz = await c_s3.dbsize()
@@ -3331,9 +3333,18 @@ async def test_partial_sync(df_factory, proactors, backlog_len):
         finally:
             await proxy.close(task)
 
-    info = await c_replica.info("replication")
-    assert info["psync_attempts"] == 2
-    assert info["psync_successes"] == 1
+    master.stop()
+    replica.stop()
+    # Partial sync worked
+    lines = master.find_in_logs("Partial sync requested from LSN")
+    # Because we run with num_shards = proactors - 1
+    total_attempts = 1
+    if proactors > 1:
+        total_attempts = proactors - 1 + proactors - 2
+    assert len(lines) == total_attempts
+    # Second partial sync failed because of stale LSN
+    lines = master.find_in_logs("Partial sync requested from stale LSN")
+    assert len(lines) == 1
 
 
 async def test_mc_gat_replication(df_factory):
