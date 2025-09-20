@@ -33,6 +33,8 @@ enum class OpStatus : uint16_t {
   MEMBER_NOTFOUND,
   INVALID_JSON_PATH,
   INVALID_JSON,
+  IO_ERROR,
+  NAN_OR_INF_DURING_INCR,
 };
 
 class OpResultBase {

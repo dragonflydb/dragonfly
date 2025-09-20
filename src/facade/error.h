@@ -38,6 +38,7 @@ extern const char kInvalidDumpValueErr[];
 extern const char kInvalidJsonPathErr[];
 extern const char kJsonParseError[];
 extern const char kCrossSlotError[];
+inline constexpr char kNanOrInfDuringIncr[] = "increment would produce NaN or Infinity";
 
 extern const char kSyntaxErrType[];
 extern const char kScriptErrType[];

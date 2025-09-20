@@ -294,7 +294,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
   base += val;
 
   if (isnan(base) || isinf(base)) {
-    return OpStatus::INVALID_FLOAT;
+    return OpStatus::NAN_OR_INF_DURING_INCR;
   }
 
   char* str = RedisReplyBuilder::FormatDouble(base, buf, sizeof(buf));
