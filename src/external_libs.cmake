@@ -19,7 +19,9 @@ endif()
 
 add_third_party(
   dconv
-  URL https://github.com/google/double-conversion/archive/refs/tags/v3.3.0.tar.gz
+  GIT_REPOSITORY https://github.com/google/double-conversion
+  # URL https://github.com/google/double-conversion/archive/refs/tags/v3.3.1.tar.gz
+  GIT_TAG 0604b4c
   PATCH_COMMAND ${SED_REPL} "/static const std::ctype/d"
                 <SOURCE_DIR>/double-conversion/string-to-double.cc
   COMMAND ${SED_REPL} "/std::use_facet</d" <SOURCE_DIR>/double-conversion/string-to-double.cc
@@ -132,7 +134,7 @@ if (WITH_SEARCH)
 
   add_third_party(
     hnswlib
-    URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.7.0.tar.gz
+    URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.8.0.tar.gz
 
     BUILD_COMMAND echo SKIP
     INSTALL_COMMAND cp -R <SOURCE_DIR>/hnswlib ${THIRD_PARTY_LIB_DIR}/hnswlib/include/
