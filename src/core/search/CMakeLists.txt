@@ -12,6 +12,11 @@ add_library(dfly_search_core base.cc ast_expr.cc query_driver.cc search.cc indic
 target_link_libraries(dfly_search_core base redis_lib absl::strings
   TRDP::reflex TRDP::uni-algo TRDP::hnswlib)
 
+if(USE_SIMSIMD)
+  target_link_libraries(dfly_search_core TRDP::simsimd)
+  target_compile_definitions(dfly_search_core PRIVATE USE_SIMSIMD=1)
+endif()
+
 cxx_test(compressed_sorted_set_test dfly_search_core LABELS DFLY)
 cxx_test(block_list_test dfly_search_core LABELS DFLY)
 cxx_test(range_tree_test dfly_search_core LABELS DFLY)
