@@ -32,7 +32,7 @@ jobs:
       id-token: write
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 1
           submodules: true
@@ -47,12 +47,12 @@ jobs:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
 
       - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@v3
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v5
         with:
           aws-access-key-id: ${{ secrets.AWS_S3_ACCESS_KEY }}
           aws-secret-access-key: ${{ secrets.AWS_S3_ACCESS_SECRET }}
@@ -168,7 +168,7 @@ jobs:
         flavor: [alpine,ubuntu]
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Login to Registries
         uses: ./.github/actions/multi-registry-docker-login
