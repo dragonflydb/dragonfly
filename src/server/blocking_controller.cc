@@ -158,7 +158,7 @@ void BlockingController::NotifyPending() {
       continue;
 
     context.db_index = index;
-    DbWatchTable& wt = dbit->second;
+    DbWatchTable& wt = dbit->second;  // pointer stability due to node_hash_map
     for (string_view key : wt.awakened_keys) {
       DVLOG(1) << "Processing awakened key " << key;
       auto w_it = wt.queue_map.find(key);
@@ -200,7 +200,7 @@ void BlockingController::AddWatched(Keys watch_keys, KeyReadyChecker krc, Transa
 }
 
 // Called from commands like lpush.
-void BlockingController::Touch(DbIndex db_index, string_view db_key) {
+void BlockingController::Awaken(DbIndex db_index, string_view db_key) {
   auto it = watched_dbs_.find(db_index);
   if (it == watched_dbs_.end())
     return;

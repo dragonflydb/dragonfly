@@ -7,6 +7,7 @@
 #include <absl/container/btree_map.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
+#include <absl/container/node_hash_map.h>
 
 #include "base/string_view_sso.h"
 #include "server/common.h"
@@ -41,10 +42,10 @@ class BlockingController {
   // Remove transaction from watching these keys
   void RemovedWatched(Keys keys, Transaction* tx);
 
-  // Mark given key as touched. Called by commands mutating this key.
-  void Touch(DbIndex db_index, std::string_view key);
+  // Mark given key as awakened. Called by commands mutating this key.
+  void Awaken(DbIndex db_index, std::string_view key);
 
-  // Notify transactions of touched keys
+  // Notify transactions of awakened keys
   void NotifyPending();
 
   // Used in tests and debugging functions.
@@ -60,12 +61,11 @@ class BlockingController {
   EngineShard* owner_;
   Namespace* ns_;
 
-  absl::flat_hash_map<DbIndex, DbWatchTable> watched_dbs_;
-  absl::flat_hash_set<DbIndex> awakened_indices_;  // watched_dbs_ with awakened keys
+  absl::node_hash_map<DbIndex, DbWatchTable> watched_dbs_;  // watched keys
+  absl::flat_hash_set<DbIndex> awakened_indices_;           // watched_dbs_ with awakened keys
 
-  // tracks currently notified and awaked transactions.
-  // There can be multiple transactions like this because a transaction
-  // could awaken arbitrary number of keys.
+  // Transactions that got awakened with NotifySuspended
+  // TODO: Used only for one DCHECK
   absl::flat_hash_set<Transaction*> awakened_transactions_;
 };
 }  // namespace dfly

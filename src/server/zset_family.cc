@@ -182,7 +182,7 @@ OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams
 
   auto* blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (add_res.is_new && blocking_controller) {
-    blocking_controller->Touch(op_args.db_cntx.db_index, key);
+    blocking_controller->Awaken(op_args.db_cntx.db_index, key);
   }
 
   return DbSlice::ItAndUpdater{add_res.it, add_res.exp_it, std::move(add_res.post_updater)};
