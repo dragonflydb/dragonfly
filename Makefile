@@ -30,39 +30,39 @@ HELIO_FLAGS = -DHELIO_RELEASE_FLAGS="-g" \
 .PHONY: default
 
 configure:
-    cmake -L -B $(RELEASE_DIR) -DCMAKE_BUILD_TYPE=Release -GNinja $(HELIO_FLAGS)
+	cmake -L -B $(RELEASE_DIR) -DCMAKE_BUILD_TYPE=Release -GNinja $(HELIO_FLAGS)
 
 # paired config/build: with and without SimSIMD
 RELEASE_DIR_SIMD=build-release-simd
 
 configure-simd:
-    cmake -L -B $(RELEASE_DIR_SIMD) -DCMAKE_BUILD_TYPE=Release -GNinja $(HELIO_FLAGS) -DUSE_SIMSIMD=ON
+	cmake -L -B $(RELEASE_DIR_SIMD) -DCMAKE_BUILD_TYPE=Release -GNinja $(HELIO_FLAGS) -DUSE_SIMSIMD=ON
 
 build:
-    cd $(RELEASE_DIR); \
-    ninja search_test dfly_bench dragonfly && ldd dragonfly
+	cd $(RELEASE_DIR); \
+	ninja search_test dfly_bench dragonfly && ldd dragonfly
 
 build-simd:
-    cd $(RELEASE_DIR_SIMD); \
-    ninja search_test dfly_bench dragonfly && ldd dragonfly
+	cd $(RELEASE_DIR_SIMD); \
+	ninja search_test dfly_bench dragonfly && ldd dragonfly
 
 package:
-    cd $(RELEASE_DIR); \
-    tar cvfz $(RELEASE_NAME)-dbgsym.tar.gz dragonfly ../LICENSE.md; \
-    objcopy \
-        --remove-section=".debug_*" \
-        --remove-section="!.debug_line" \
-        --compress-debug-sections \
-        dragonfly \
-        $(RELEASE_NAME); \
-    tar cvfz $(RELEASE_NAME).tar.gz $(RELEASE_NAME) ../LICENSE.md; \
-    objcopy \
-        --remove-section=".debug_*" \
-        --remove-section="!.debug_line" \
-        --compress-debug-sections \
-        dfly_bench \
-        dfly_bench-$(BUILD_ARCH); \
-    tar cvfz dfly_bench-$(BUILD_ARCH).tar.gz dfly_bench-$(BUILD_ARCH)
+	cd $(RELEASE_DIR); \
+	tar cvfz $(RELEASE_NAME)-dbgsym.tar.gz dragonfly ../LICENSE.md; \
+	objcopy \
+		--remove-section=".debug_*" \
+		--remove-section="!.debug_line" \
+		--compress-debug-sections \
+		dragonfly \
+		$(RELEASE_NAME); \
+	tar cvfz $(RELEASE_NAME).tar.gz $(RELEASE_NAME) ../LICENSE.md; \
+	objcopy \
+		--remove-section=".debug_*" \
+		--remove-section="!.debug_line" \
+		--compress-debug-sections \
+		dfly_bench \
+		dfly_bench-$(BUILD_ARCH); \
+	tar cvfz dfly_bench-$(BUILD_ARCH).tar.gz dfly_bench-$(BUILD_ARCH)
 
 release: configure build
 
