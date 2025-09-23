@@ -25,7 +25,8 @@ HELIO_FLAGS = -DHELIO_RELEASE_FLAGS="-g" \
               -DBoost_USE_STATIC_LIBS=$(HELIO_USE_STATIC_LIBS) \
               -DOPENSSL_USE_STATIC_LIBS=$(HELIO_OPENSSL_USE_STATIC_LIBS) \
               -DENABLE_GIT_VERSION=$(HELIO_ENABLE_GIT_VERSION) \
-              -DWITH_UNWIND=$(HELIO_WITH_UNWIND) -DMARCH_OPT="$(HELIO_MARCH_OPT)"
+		      -DWITH_UNWIND=$(HELIO_WITH_UNWIND) -DMARCH_OPT="$(HELIO_MARCH_OPT)" \
+		      -DUSE_SIMSIMD=ON
 
 .PHONY: default
 
@@ -57,3 +58,25 @@ package:
 release: configure build
 
 default: release
+
+# --- Multi-arch release targets (ARM only) ---
+.PHONY: configure-armv82 build-armv82 release-armv82 \
+		configure-armv9 build-armv9 release-armv9
+
+configure-armv82:
+	cmake -L -B build-armv82 -DCMAKE_BUILD_TYPE=Release -GNinja $(HELIO_FLAGS) -DMARCH_OPT="-march=armv8.2-a+fp16+dotprod+rcpc+crypto"
+
+build-armv82:
+	cd build-armv82; \
+	ninja dfly_bench dragonfly && ldd dragonfly
+
+release-armv82: configure-armv82 build-armv82
+
+configure-armv9:
+	cmake -L -B build-armv9 -DCMAKE_BUILD_TYPE=Release -GNinja $(HELIO_FLAGS) -DMARCH_OPT="-march=armv9-a+fp16+dotprod+bf16+i8mm+sve2+crypto"
+
+build-armv9:
+	cd build-armv9; \
+	ninja dfly_bench dragonfly && ldd dragonfly
+
+release-armv9: configure-armv9 build-armv9
