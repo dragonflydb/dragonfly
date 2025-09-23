@@ -35,7 +35,7 @@ configure:
 
 build:
 	cd $(RELEASE_DIR); \
-	ninja dfly_bench dragonfly && ldd dragonfly
+	ninja search_test dfly_bench dragonfly && ldd dragonfly
 
 package:
 	cd $(RELEASE_DIR); \
@@ -68,7 +68,7 @@ configure-armv82:
 
 build-armv82:
 	cd build-armv82; \
-	ninja dfly_bench dragonfly && ldd dragonfly
+	ninja search_test dfly_bench dragonfly && ldd dragonfly
 
 release-armv82: configure-armv82 build-armv82
 
@@ -77,6 +77,6 @@ configure-armv9:
 
 build-armv9:
 	cd build-armv9; \
-	ninja dfly_bench dragonfly && ldd dragonfly
+	ninja search_test dfly_bench dragonfly && ldd dragonfly
 
 release-armv9: configure-armv9 build-armv9
