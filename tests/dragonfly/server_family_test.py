@@ -1,5 +1,12 @@
+import os.path
+from tempfile import NamedTemporaryFile
+from typing import Callable
+
+import yaml
 from prometheus_client.samples import Sample
 from pymemcache import Client
+from testcontainers.core.container import DockerContainer
+from testcontainers.core.waiting_utils import wait_for_logs
 
 from . import dfly_args
 from .instance import DflyInstance
@@ -250,3 +257,66 @@ async def test_latency_stats_disabled(async_client: aioredis.Redis):
     for _ in range(100):
         await async_client.set("foo", "bar")
     assert await async_client.info("LATENCYSTATS") == {}
+
+
+async def test_metrics_sanity_check(df_server: DflyInstance):
+
+    def on_container_output(container: DockerContainer, fn: Callable):
+        for entry in container.get_logs():
+            for row in entry.decode("utf-8").split("\n"):
+                fn(row)
+
+    def extract_msg(s: str):
+        return re.search("""msg="([^"]*)""", s).group(1)
+
+    def assert_no_error(entry: str):
+        assert "level=ERROR" not in entry and "level=WARN" not in entry, extract_msg(entry)
+
+    # Piggyback on the first known mounted path if running in CI, the container running the test will start another
+    # container with prometheus. The prometheus container needs the file present on the host to be able to mount it.
+    # Fall back to /tmp so the test can be run on the local machine without using root.
+    parent = next((p for p in ("/var/crash", "/mnt", "/tmp") if os.access(p, os.W_OK)), None)
+
+    # TODO use python-docker api to find a valid mounted volume instead of hardcoded list
+    assert parent is not None, "Could not find a path to write prometheus config"
+    with NamedTemporaryFile("w", dir=parent) as f:
+        prometheus_config = {
+            "scrape_configs": [
+                {
+                    "job_name": "dfly",
+                    "scrape_interval": "1s",
+                    "static_configs": [{"targets": [f"host.docker.internal:{df_server.port}"]}],
+                }
+            ]
+        }
+        prometheus_config_path = "/etc/prometheus/prometheus.yml"
+
+        logging.info(f"Starting prometheus with file {f.name}:\n{yaml.dump(prometheus_config)}")
+
+        yaml.dump(prometheus_config, f)
+        path = os.path.abspath(f.name)
+        os.chmod(path, 0o644)
+
+        with (
+            DockerContainer(image="prom/prometheus")
+            .with_volume_mapping(path, prometheus_config_path)
+            .with_kwargs(extra_hosts={"host.docker.internal": "host-gateway"})
+        ) as prometheus:
+            try:
+                wait_for_logs(prometheus, "Server is ready to receive web requests.", timeout=5)
+
+                # Wait for a few seconds for any potential warnings or errors to appear, it can take several seconds.
+                wait_for_errors_sec, sleep_time_sec = 10, 0.5
+                start = time.monotonic()
+                while time.monotonic() < start + wait_for_errors_sec:
+                    on_container_output(prometheus, assert_no_error)
+                    await asyncio.sleep(sleep_time_sec)
+            except AssertionError:
+                # For assertion errors which we raise, skip printing full prometheus logs
+                raise
+            except Exception as e:
+                # For any other error such as timeout when starting the container, print all container logs
+                logging.error(f"failed to start prometheus: {e}")
+                on_container_output(
+                    prometheus, lambda entry: logging.info(f"prometheus log: {entry}")
+                )
