@@ -40,7 +40,7 @@ configure-simd:
 
 build:
 	cd $(RELEASE_DIR); \
-	ninja search_test dfly_bench dragonfly && ldd dragonfly
+	ninja dfly_bench dragonfly && ldd dragonfly
 
 build-simd:
 	cd $(RELEASE_DIR_SIMD); \
