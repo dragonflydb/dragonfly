@@ -63,6 +63,7 @@ template <typename Container /* underlying container */> class BlockList {
 
   // Insert element, returns true if inserted, false if already present.
   bool Insert(ElementType t);
+  bool PushBack(ElementType t);
 
   // Remove element, returns true if removed, false if not found.
   bool Remove(ElementType t);
@@ -133,8 +134,12 @@ template <typename Container /* underlying container */> class BlockList {
   // Find block that should contain t. Returns end() only if empty
   BlockIt FindBlock(const ElementType& t);
 
+  bool ShouldSplit(size_t block_size) const;
+
   void TryMerge(BlockIt block);  // If needed, merge with previous block
   void TrySplit(BlockIt block);  // If needed, split into two blocks
+
+  void ReserveBlocks(size_t n);
 
   friend SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list);
 
@@ -158,7 +163,15 @@ template <typename T> class SortedVector {
   void Merge(SortedVector<T>&& other);
   std::pair<SortedVector<T>, SortedVector<T>> Split() &&;
 
-  size_t Size() {
+  T& operator[](size_t idx) {
+    return entries_[idx];
+  }
+
+  const T& operator[](size_t idx) const {
+    return entries_[idx];
+  }
+
+  size_t Size() const {
     return entries_.size();
   }
 

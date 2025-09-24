@@ -43,6 +43,8 @@ struct NumericIndex : public BaseIndex {
     // Returns all DocIds that have non-null values in the index.
     virtual std::vector<DocId> GetAllDocIds() const = 0;
 
+    virtual void FinalizeInitialization(){};
+
     virtual ~RangeTreeBase() = default;
   };
 
@@ -52,6 +54,8 @@ struct NumericIndex : public BaseIndex {
 
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
+
+  void FinalizeInitialization() override;
 
   RangeResult Range(double l, double r) const;
 

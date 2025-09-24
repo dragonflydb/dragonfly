@@ -31,8 +31,6 @@ class TieredStorage {
   class ShardOpManager;
 
  public:
-  const static size_t kMinValueSize = 64;
-
   // Min sizes of values taking up full page on their own
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
 
@@ -114,6 +112,7 @@ class TieredStorage {
   CoolQueue cool_queue_;
 
   struct {
+    size_t min_value_size;
     bool experimental_cooling;
     unsigned write_depth_limit;
     float offload_threshold;
@@ -140,8 +139,6 @@ class TieredStorage {
   class ShardOpManager;
 
  public:
-  const static size_t kMinValueSize = 64;
-
   // Min sizes of values taking up full page on their own
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
 

@@ -14,6 +14,7 @@
 #include <variant>
 
 #include "base/cycle_clock.h"
+#include "base/flag_utils.h"
 #include "base/flags.h"
 #include "base/histogram.h"
 #include "base/io_buf.h"
@@ -22,7 +23,6 @@
 #include "core/heap_size.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
-#include "facade/flag_utils.h"
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
@@ -519,7 +519,7 @@ void Connection::AsyncOperations::operator()(const AclUpdateMessage& msg) {
 }
 
 void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
-  RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
+  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(builder);
 
   // Discard stale messages to not break the protocol after exiting "pubsub" mode.
   // Even after removing all subscriptions, we still can receive messages delayed
@@ -529,20 +529,19 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
       !base::_in(pub_msg.channel, {"unsubscribe", "punsubscribe"}))
     return;
 
-  if (pub_msg.should_unsubscribe) {
-    rbuilder->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
-    rbuilder->SendBulkString("unsubscribe");
-    rbuilder->SendBulkString(pub_msg.channel);
-    rbuilder->SendLong(0);
-    auto* cntx = self->cntx();
-    cntx->Unsubscribe(pub_msg.channel);
+  if (pub_msg.force_unsubscribe) {
+    rb->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
+    rb->SendBulkString("sunsubscribe");
+    rb->SendBulkString(pub_msg.channel);
+    rb->SendLong(0);
+    self->cntx()->Unsubscribe(pub_msg.channel);
     return;
   }
 
   unsigned i = 0;
   array<string_view, 4> arr;
   if (pub_msg.pattern.empty()) {
-    arr[i++] = "message";
+    arr[i++] = pub_msg.is_sharded ? "smessage" : "message";
   } else {
     arr[i++] = "pmessage";
     arr[i++] = pub_msg.pattern;
@@ -551,8 +550,8 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
   arr[i++] = pub_msg.channel;
   arr[i++] = pub_msg.message;
 
-  rbuilder->SendBulkStrArr(absl::Span<string_view>{arr.data(), i},
-                           RedisReplyBuilder::CollectionType::PUSH);
+  rb->SendBulkStrArr(absl::Span<string_view>{arr.data(), i},
+                     RedisReplyBuilder::CollectionType::PUSH);
 }
 
 void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
@@ -2178,9 +2177,9 @@ void Connection::UpdateFromFlags() {
 }
 
 std::vector<std::string> Connection::GetMutableFlagNames() {
-  return GetFlagNames(FLAGS_pipeline_queue_limit, FLAGS_pipeline_buffer_limit,
-                      FLAGS_max_busy_read_usec, FLAGS_always_flush_pipeline,
-                      FLAGS_pipeline_squash_limit, FLAGS_pipeline_wait_batch_usec);
+  return base::GetFlagNames(FLAGS_pipeline_queue_limit, FLAGS_pipeline_buffer_limit,
+                            FLAGS_max_busy_read_usec, FLAGS_always_flush_pipeline,
+                            FLAGS_pipeline_squash_limit, FLAGS_pipeline_wait_batch_usec);
 }
 
 void Connection::GetRequestSizeHistogramThreadLocal(std::string* hist) {

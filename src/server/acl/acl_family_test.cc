@@ -538,6 +538,15 @@ TEST_F(AclFamilyTest, TestPubSub) {
   vec = resp.GetVec();
   EXPECT_THAT(vec[8], "channels");
   EXPECT_THAT(vec[9], "resetchannels &foo");
+
+  resp =
+      Run("ACL setuser demo on resetkeys resetchannels ~app|managed-resources|* "
+          "&app|managed-resources|* +publish +ping >passwd");
+  resp = Run("AUTH demo passwd");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("publish app|managed-resources|xyz test");
+  EXPECT_THAT(resp, IntArg(0));
 }
 
 TEST_F(AclFamilyTest, TestAlias) {

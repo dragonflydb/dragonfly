@@ -428,7 +428,7 @@ ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
       ExpireIterator exp_it = exp_t->Find(it->first);
       CHECK(!exp_it.is_done());
 
-      time_t exp_time = db_slice.ExpireTime(exp_it);
+      time_t exp_time = db_slice.ExpireTime(exp_it->second);
       oinfo.ttl = exp_time - GetCurrentTimeMs();
       oinfo.has_sec_precision = exp_it->second.is_second_precision();
     }
@@ -1436,6 +1436,7 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
         if (type != OBJ_STRING) {  // Currently only string type is supported.
           return builder->SendError(kSyntaxErr);
         }
+        domain = CompactObj::HUFF_STRING_VALUES;
       }
       shard_set->RunBriefInParallel([&](EngineShard* shard) {
         if (!CompactObj::InitHuffmanThreadLocal(domain, raw)) {

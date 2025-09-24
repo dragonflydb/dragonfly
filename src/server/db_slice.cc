@@ -329,6 +329,11 @@ inline void TouchValuesHistogramIfNeeded(const PrimeValue& pv, base::Histogram* 
   }
 }
 
+inline bool MayDeleteAsynchronously(const PrimeValue& pv) {
+  unsigned obj_type = pv.ObjType();
+  return (obj_type == OBJ_SET || obj_type == OBJ_HASH) && pv.Encoding() == kEncodingStrMap2;
+}
+
 }  // namespace
 
 #define ADD(x) (x) += o.x
@@ -575,6 +580,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
   if (!IsValid(res.it)) {
     events_.misses += miss_weight;
+    db.stats.events.misses += miss_weight;
     return OpStatus::KEY_NOTFOUND;
   }
 
@@ -584,6 +590,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
   if (req_obj_type.has_value() && res.it->second.ObjType() != req_obj_type.value()) {
     events_.misses += miss_weight;
+    db.stats.events.misses += miss_weight;
     return OpStatus::WRONG_TYPE;
   }
 
@@ -591,6 +598,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     res = ExpireIfNeeded(cntx, res.it);
     if (!IsValid(res.it)) {
       events_.misses += miss_weight;
+      db.stats.events.misses += miss_weight;
       return OpStatus::KEY_NOTFOUND;
     }
   }
@@ -607,6 +615,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
       break;
     case UpdateStatsMode::kReadStats:
       events_.hits++;
+      db.stats.events.hits++;
       if (db.slots_stats) {
         db.slots_stats[KeySlot(key)].total_reads++;
       }
@@ -720,7 +729,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
   // Fast-path if change_cb_ is empty so we Find or Add using
   // the insert operation: twice more efficient.
-  CompactObj co_key{key};
+  PrimeKey co_key{key, true};
   PrimeIterator it;
 
   ssize_t table_before = db.prime.mem_usage();
@@ -773,6 +782,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   events_.garbage_collected = db.prime.garbage_collected();
   events_.stash_unloaded = db.prime.stash_unloaded();
   events_.evicted_keys += evp.evicted();
+  db.stats.events.evicted_keys += evp.evicted();
   events_.garbage_checked += evp.checked();
   if (db.slots_stats) {
     SlotId sid = KeySlot(key);
@@ -883,7 +893,7 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
   }).Detach();
 }
 
-void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
+util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   bool clear_tiered = owner_->tiered_storage() != nullptr;
 
   if (clear_tiered)
@@ -892,7 +902,7 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   DbTableArray flush_db_arr(db_arr_.size());
 
   for (DbIndex index : indexes) {
-    if (!index) {
+    if (index == 0) {  // TODO: Async dealloc?
       owner_->search_indices()->DropAllIndices();
     }
 
@@ -915,20 +925,17 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
                                           ServerState::kGlibcmalloc);
   };
 
-  fb2::Fiber("flush_dbs", std::move(cb)).Detach();
+  return {"flush_dbs", std::move(cb)};
 }
 
-void DbSlice::FlushDb(DbIndex db_ind) {
+util::fb2::Fiber DbSlice::FlushDb(DbIndex db_ind) {
   DVLOG(1) << "Flushing db " << db_ind;
 
   // clear client tracking map.
   client_tracking_map_.clear();
 
-  if (db_ind != kDbAll) {
-    // Flush a single database if a specific index is provided
-    FlushDbIndexes({db_ind});
-    return;
-  }
+  if (db_ind != kDbAll)  // Flush a single database if a specific index is provided
+    return FlushDbIndexes({db_ind});
 
   std::vector<DbIndex> indexes;
   indexes.reserve(db_arr_.size());
@@ -938,7 +945,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     }
   }
 
-  FlushDbIndexes(indexes);
+  return FlushDbIndexes(indexes);
 }
 
 void DbSlice::AddExpire(DbIndex db_ind, const Iterator& main_it, uint64_t at) {
@@ -1049,7 +1056,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     Del(cntx, prime_it);
     return -1;
   } else if (IsValid(expire_it) && !params.persist) {
-    auto current = ExpireTime(expire_it);
+    int64_t current = ExpireTime(expire_it->second);
     if (params.expire_options & ExpireFlags::EXPIRE_NX) {
       return OpStatus::SKIPPED;
     }
@@ -1176,9 +1183,10 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const 
   return true;
 }
 
-void DbSlice::PreUpdateBlocking(DbIndex db_ind, Iterator it) {
-  CallChangeCallbacks(db_ind, ChangeReq{it.GetInnerIt()});
-  it.GetInnerIt().SetVersion(NextVersion());
+void DbSlice::PreUpdateBlocking(DbIndex db_ind, const Iterator& it) {
+  CallChangeCallbacks(db_ind, ChangeReq{it.GetInnerIt()});  // blocking point.
+  auto inner_it = it.GetInnerIt();                          // must call again to launder.
+  inner_it.SetVersion(NextVersion());
 }
 
 void DbSlice::PostUpdate(DbIndex db_ind, std::string_view key) {
@@ -1229,10 +1237,10 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
   }
 
   // TODO: to employ multi-generation update of expire-base and the underlying values.
-  time_t expire_time = ExpireTime(expire_it);
+  int64_t expire_time = ExpireTime(expire_it->second);
 
   // Never do expiration on replica or if expiration is disabled or global lock was taken.
-  if (time_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_ ||
+  if (int64_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_ ||
       !shard_owner()->shard_lock()->Check(IntentLock::Mode::EXCLUSIVE)) {
     return {it, expire_it};
   }
@@ -1258,6 +1266,7 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
       ExpIterator(expire_it, StringOrView::FromView(key)), db.get());
 
   ++events_.expired_keys;
+  db->stats.events.expired_keys++;
 
   return {PrimeIterator{}, ExpireIterator{}};
 }
@@ -1352,7 +1361,7 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
       return;
 
     result.traversed++;
-    time_t ttl = ExpireTime(it) - cntx.time_now_ms;
+    int64_t ttl = ExpireTime(it->second) - cntx.time_now_ms;
     if (ttl <= 0) {
       auto prime_it = db.prime.Find(it->first);
       if (prime_it.is_done()) {  // A workaround for the case our tables are inconsistent.
@@ -1386,7 +1395,7 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
   // Send and clear accumulated expired key events
   if (auto& events = db_arr_[cntx.db_index]->expired_keys_events_; !events.empty()) {
     ChannelStore* store = ServerState::tlocal()->channel_store();
-    store->SendMessages(absl::StrCat("__keyevent@", cntx.db_index, "__:expired"), events);
+    store->SendMessages(absl::StrCat("__keyevent@", cntx.db_index, "__:expired"), events, false);
     events.clear();
   }
 
@@ -1487,6 +1496,7 @@ finish:
   SendQueuedInvalidationMessagesAsync();
   auto time_finish = absl::GetCurrentTimeNanos();
   events_.evicted_keys += evicted_items;
+  db_arr_[db_ind]->stats.events.evicted_keys += evicted_items;
   DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
   return pair<uint64_t, size_t>{evicted_items, evicted_bytes};
 }
@@ -1576,6 +1586,11 @@ void DbSlice::ResetUpdateEvents() {
 
 void DbSlice::ResetEvents() {
   events_ = {};
+  for (auto& db : db_arr_) {
+    if (db) {
+      db->stats.events = {};
+    }
+  }
 }
 
 void DbSlice::SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events) {
@@ -1772,8 +1787,7 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
   }
   AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
 
-  if (del_it->first.IsAsyncDelete() && pv.ObjType() == OBJ_SET &&
-      pv.Encoding() == kEncodingStrMap2) {
+  if (del_it->first.IsAsyncDelete() && MayDeleteAsynchronously(pv)) {
     DenseSet* ds = (DenseSet*)pv.RObjPtr();
     pv.SetRObjPtr(nullptr);
     const size_t kClearStepSize = 512;

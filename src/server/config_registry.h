@@ -72,6 +72,6 @@ class ConfigRegistry {
   absl::flat_hash_map<std::string, Entry> registry_ ABSL_GUARDED_BY(mu_);
 };
 
-extern ConfigRegistry config_registry;
+inline ConfigRegistry config_registry;
 
 }  // namespace dfly

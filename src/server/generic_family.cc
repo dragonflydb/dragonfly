@@ -87,6 +87,13 @@ std::optional<RdbVersion> GetRdbVersion(std::string_view msg, bool ignore_crc = 
   return version;
 }
 
+template <typename It> int64_t GetExpireTime(const DbSlice& db_slice, const It& exp_it) {
+  if (!IsValid(exp_it))
+    return 0;
+
+  return db_slice.ExpireTime(exp_it->second);
+}
+
 class InMemSource : public ::io::Source {
  public:
   InMemSource(std::string_view buf) : buf_(buf) {
@@ -437,8 +444,8 @@ void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
   io::StringSink sink;
   SerializerBase::DumpObject(it->second, &sink);
 
-  auto rdb_version = GetRdbVersion(sink.str());
-  serialized_value_ = {std::move(sink).str(), rdb_version, db_slice.ExpireTime(exp_it),
+  optional rdb_version = GetRdbVersion(sink.str());
+  serialized_value_ = {std::move(sink).str(), rdb_version, GetExpireTime(db_slice, exp_it),
                        it->first.IsSticky()};
 }
 
@@ -544,11 +551,13 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
     const PrimeValue& pv = it->second;
 
     if (pv.IsExternal() && !pv.IsCool()) {
-      util::fb2::Future<io::Result<string>> future =
-          op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv);
+      // TODO: consider moving blocking point to coordinator to avoid stalling shard queue
+      auto res = op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv).Get();
+      if (!res.has_value())
+        return OpStatus::IO_ERROR;
 
-      CompactObj co(*future.Get());
-      SerializerBase::DumpObject(co, &sink);
+      // TODO: allow saving string directly without proxy object
+      SerializerBase::DumpObject(PrimeValue{*res, false}, &sink);
     } else {
       SerializerBase::DumpObject(it->second, &sink);
     }
@@ -835,7 +844,7 @@ OpResult<uint64_t> OpExpireTime(Transaction* t, EngineShard* shard, string_view 
   if (!IsValid(expire_it))
     return OpStatus::SKIPPED;
 
-  int64_t ttl_ms = db_slice.ExpireTime(expire_it);
+  int64_t ttl_ms = db_slice.ExpireTime(expire_it->second);
   DCHECK_GT(ttl_ms, 0);  // Otherwise FindReadOnly would return null.
   return ttl_ms;
 }
@@ -862,7 +871,7 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
     return OpStatus::KEY_EXISTS;
 
   bool sticky = from_res.it->first.IsSticky();
-  uint64_t exp_ts = db_slice.ExpireTime(from_res.exp_it);
+  uint64_t exp_ts = GetExpireTime(db_slice, from_res.exp_it);
   from_res.post_updater.Run();
   PrimeValue from_obj = std::move(from_res.it->second);
 
@@ -908,7 +917,7 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
   RemoveKeyFromIndexesIfNeeded(from_key, op_args.db_cntx, from_res.it->second, op_args.shard);
 
   bool sticky = from_res.it->first.IsSticky();
-  uint64_t exp_ts = db_slice.ExpireTime(from_res.exp_it);
+  uint64_t exp_ts = GetExpireTime(db_slice, from_res.exp_it);
   from_res.post_updater.ReduceHeapUsage();
 
   // we keep the value we want to move.

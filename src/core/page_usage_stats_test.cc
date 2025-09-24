@@ -10,6 +10,7 @@
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "core/mi_memory_resource.h"
+#include "core/qlist.h"
 #include "core/score_map.h"
 #include "core/small_string.h"
 #include "core/sorted_map.h"
@@ -49,6 +50,7 @@ class PageUsageStatsTest : public ::testing::Test {
     string_set_ = std::make_unique<StringSet>(&m_);
     string_map_ = std::make_unique<StringMap>(&m_);
     SmallString::InitThreadLocal(m_.heap());
+    qlist_ = std::make_unique<QList>(2, 2);
   }
 
   void TearDown() override {
@@ -57,6 +59,7 @@ class PageUsageStatsTest : public ::testing::Test {
     string_set_.reset();
     string_map_.reset();
     small_string_.Free();
+    qlist_->Clear();
     EXPECT_EQ(zmalloc_used_memory_tl, 0);
   }
 
@@ -66,6 +69,7 @@ class PageUsageStatsTest : public ::testing::Test {
   std::unique_ptr<StringSet> string_set_;
   std::unique_ptr<StringMap> string_map_;
   SmallString small_string_{};
+  std::unique_ptr<QList> qlist_;
   CompactObj c_obj_{};
 };
 
@@ -77,7 +81,9 @@ TEST_F(PageUsageStatsTest, Defrag) {
   small_string_.Assign("small-string");
 
   // INT_TAG, defrag will be skipped
-  c_obj_.SetString("1");
+  c_obj_.SetValue("1");
+
+  qlist_->Push("xxxx", QList::HEAD);
 
   {
     PageUsage p{CollectPageStats::YES, 0.1};
@@ -87,6 +93,7 @@ TEST_F(PageUsageStatsTest, Defrag) {
     string_map_->begin().ReallocIfNeeded(&p);
     small_string_.DefragIfNeeded(&p);
     c_obj_.DefragIfNeeded(&p);
+    qlist_->DefragIfNeeded(&p);
 
     const auto stats = p.CollectedStats();
     EXPECT_GT(stats.pages_scanned, 0);
@@ -100,6 +107,7 @@ TEST_F(PageUsageStatsTest, Defrag) {
     string_set_->begin().ReallocIfNeeded(&p);
     string_map_->begin().ReallocIfNeeded(&p);
     small_string_.DefragIfNeeded(&p);
+    qlist_->DefragIfNeeded(&p);
     EXPECT_EQ(p.CollectedStats().pages_scanned, 0);
   }
 }
@@ -135,8 +143,6 @@ TEST_F(PageUsageStatsTest, StatCollection) {
   }
 
   constexpr auto page_count_per_flag = 150;
-  // allow for collisions in filter
-  constexpr auto expected_min_count = 140;
 
   auto start = 0;
   for (const uint8_t flag : {MI_DFLY_PAGE_FULL, MI_DFLY_PAGE_USED_FOR_MALLOC, MI_DFLY_HEAP_MISMATCH,
@@ -156,9 +162,11 @@ TEST_F(PageUsageStatsTest, StatCollection) {
   st.Merge(p.CollectedStats(), 1);
 
   EXPECT_GT(st.pages_scanned, 12000);
-  EXPECT_GT(st.pages_full, expected_min_count);
-  EXPECT_GT(st.pages_reserved_for_malloc, expected_min_count);
-  EXPECT_GT(st.pages_marked_for_realloc, expected_min_count);
+
+  // Expect a small error margin due to HLL
+  EXPECT_NEAR(st.pages_full, page_count_per_flag, 5);
+  EXPECT_NEAR(st.pages_reserved_for_malloc, page_count_per_flag, 5);
+  EXPECT_NEAR(st.pages_marked_for_realloc, page_count_per_flag, 5);
 
   const auto usage = st.shard_wide_summary;
 

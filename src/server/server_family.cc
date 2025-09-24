@@ -476,17 +476,23 @@ void ClientCaching(CmdArgList args, SinkReplyBuilder* builder, Transaction* tx,
     return builder->SendError(kSyntaxErr);
   }
 
+  if (!cntx->conn_state.tracking_info_.IsTrackingOn()) {
+    return builder->SendError(
+        "CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or "
+        "OPTOUT mode enabled");
+  }
+
   using Tracking = ConnectionState::ClientTracking;
   CmdArgParser parser{args};
   if (parser.Check("YES")) {
     if (!cntx->conn_state.tracking_info_.HasOption(Tracking::OPTIN)) {
       return builder->SendError(
-          "ERR CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode");
+          "CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode");
     }
   } else if (parser.Check("NO")) {
     if (!cntx->conn_state.tracking_info_.HasOption(Tracking::OPTOUT)) {
       return builder->SendError(
-          "ERR CLIENT CACHING NO is only valid when tracking is enabled in OPTOUT mode");
+          "CLIENT CACHING NO is only valid when tracking is enabled in OPTOUT mode");
     }
     cntx->conn_state.tracking_info_.ResetCachingSequenceNumber();
   } else {
@@ -1278,10 +1284,7 @@ void ServerFamily::FlushAll(Namespace* ns) {
   boost::intrusive_ptr<Transaction> flush_trans(new Transaction{cid});
   flush_trans->InitByArgs(ns, 0, {});
   VLOG(1) << "Performing flush";
-  error_code ec = Drakarys(flush_trans.get(), DbSlice::kDbAll);
-  if (ec) {
-    LOG(ERROR) << "Error flushing db " << ec.message();
-  }
+  Drakarys(flush_trans.get(), DbSlice::kDbAll, false);
 }
 
 // Load starts as many fibers as there are files to load each one separately.
@@ -1315,6 +1318,10 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     LOG(WARNING) << new_state << " in progress, ignored";
     return {};
   }
+
+  // Reset state on error
+  absl::Cleanup reset_state{
+      [this]() { service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE); }};
 
   auto& pool = service_.proactor_pool();
 
@@ -1382,6 +1389,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
   };
   pool.GetNextProactor()->Dispatch(std::move(load_join_func));
 
+  std::move(reset_state).Cancel();  // load_join_func resets state after loading
   return future;
 }
 
@@ -1718,6 +1726,22 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             &resp->body());
   AppendMetricWithoutLabels("evicted_keys_total", "", m.events.evicted_keys, MetricType::COUNTER,
                             &resp->body());
+  // Per-DB expired/evicted totals
+  {
+    string perdb_str;
+    AppendMetricHeader("expired_keys_total", "", MetricType::COUNTER, &perdb_str);
+    AppendMetricHeader("evicted_keys_total", "", MetricType::COUNTER, &perdb_str);
+    for (size_t i = 0; i < m.db_stats.size(); ++i) {
+      const auto& s = m.db_stats[i];
+      if (s.events.expired_keys > 0)
+        AppendMetricValue("expired_keys_total", s.events.expired_keys, {"db"}, {StrCat("db", i)},
+                          &perdb_str);
+      if (s.events.evicted_keys > 0)
+        AppendMetricValue("evicted_keys_total", s.events.evicted_keys, {"db"}, {StrCat("db", i)},
+                          &perdb_str);
+    }
+    absl::StrAppend(&resp->body(), perdb_str);
+  }
   // Memory stats
   if (legacy) {
     AppendMetricWithoutLabels("memory_fiberstack_vms_bytes",
@@ -1777,6 +1801,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
 
   AppendMetricValue("memory_by_class_bytes", total.obj_memory_usage, {"class"}, {"object_used"},
                     &memory_by_class_bytes);
+
+  AppendMetricValue("memory_by_class_bytes", m.coordinator_stats.stored_cmd_bytes, {"class"},
+                    {"conn_stored_commands"}, &memory_by_class_bytes);
 
   // Command stats
   if (!m.cmd_stats_map.empty()) {
@@ -1906,10 +1933,23 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
 
     AppendMetricValue("db_keys_expiring", m.db_stats[i].expire_count, {"db"}, {StrCat("db", i)},
                       &db_key_expire_metrics);
+
+    AppendMetricValue("keyspace_hits_total", m.db_stats[i].events.hits, {"db"}, {StrCat("db", i)},
+                      &resp->body());
+    AppendMetricValue("keyspace_misses_total", m.db_stats[i].events.misses, {"db"},
+                      {StrCat("db", i)}, &resp->body());
   }
 
   absl::StrAppend(&resp->body(), db_key_metrics, db_key_expire_metrics, db_capacity_metrics,
                   memory_by_class_bytes);
+
+  AppendMetricHeader("defrag_stats", "Stats for defragmentation task", COUNTER, &resp->body());
+  AppendMetricWithoutLabels("defrag_invocations", "Defrag invocations",
+                            m.shard_stats.defrag_task_invocation_total, COUNTER, &resp->body());
+  AppendMetricWithoutLabels("defrag_attempts", "Objects examined",
+                            m.shard_stats.defrag_attempt_total, COUNTER, &resp->body());
+  AppendMetricWithoutLabels("defrag_objects_moved", "Objects moved",
+                            m.shard_stats.defrag_realloc_total, COUNTER, &resp->body());
 }
 
 void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
@@ -2163,17 +2203,20 @@ bool ServerFamily::TEST_IsSaving() const {
   return is_saving.load(std::memory_order_relaxed);
 }
 
-error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
+void ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind, bool wait) {
   VLOG(1) << "Drakarys";
 
+  vector<fb2::Fiber> fibers(shard_set->size());
   transaction->Execute(
-      [db_ind](Transaction* t, EngineShard* shard) {
-        t->GetDbSlice(shard->shard_id()).FlushDb(db_ind);
+      [db_ind, &fibers](Transaction* t, EngineShard* shard) {
+        fibers[shard->shard_id()] = t->GetDbSlice(shard->shard_id()).FlushDb(db_ind);
         return OpStatus::OK;
       },
       true);
 
-  return error_code{};
+  auto action = wait ? &fb2::Fiber::JoinIfNeeded : &fb2::Fiber::Detach;
+  for (auto& f : fibers)
+    (f.*action)();
 }
 
 SaveInfoData ServerFamily::GetLastSaveInfo() const {
@@ -2243,20 +2286,14 @@ void ServerFamily::SendInvalidationMessages() const {
 }
 
 void ServerFamily::FlushDb(CmdArgList args, const CommandContext& cmd_cntx) {
-  DCHECK(cmd_cntx.tx);
-  Drakarys(cmd_cntx.tx, cmd_cntx.tx->GetDbIndex());
-  SendInvalidationMessages();
-  cmd_cntx.rb->SendOk();
-}
+  if (args.size() > 1)
+    return cmd_cntx.rb->SendError(kSyntaxErr);
 
-void ServerFamily::FlushAll(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (args.size() > 1) {
-    cmd_cntx.rb->SendError(kSyntaxErr);
-    return;
-  }
+  bool sync = CmdArgParser{args}.Check("SYNC");
+  string_view cmd_name = cmd_cntx.tx->GetCId()->name();
+  DbIndex index = cmd_name == "FLUSHALL" ? DbSlice::kDbAll : cmd_cntx.tx->GetDbIndex();
 
-  DCHECK(cmd_cntx.tx);
-  Drakarys(cmd_cntx.tx, DbSlice::kDbAll);
+  Drakarys(cmd_cntx.tx, index, sync);
   SendInvalidationMessages();
   cmd_cntx.rb->SendOk();
 }
@@ -2627,7 +2664,8 @@ void ServerFamily::ResetStat(Namespace* ns) {
         registry->ResetCallStats(index);
         EngineShard* shard = EngineShard::tlocal();
         if (shard) {
-          ns->GetDbSlice(shard->shard_id()).ResetEvents();
+          auto& db_slice = ns->GetDbSlice(shard->shard_id());
+          db_slice.ResetEvents();
         }
         facade::ResetStats();
         ServerState::tlocal()->exec_freq_count.clear();
@@ -3227,7 +3265,12 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       const auto& stats = m.db_stats[i];
       bool show = (i == 0) || (stats.key_count > 0);
       if (show) {
+        size_t total = stats.events.hits + stats.events.misses;
+        double hit_ratio =
+            (total > 0) ? static_cast<double>(stats.events.hits) / (total)*100.0 : 0.0;
         string val = StrCat("keys=", stats.key_count, ",expires=", stats.expire_count,
+                            ",hits=", stats.events.hits, ",misses=", stats.events.misses,
+                            ",hit_ratio=", absl::StrFormat("%.2f", hit_ratio),
                             ",avg_ttl=-1");  // TODO
         append(StrCat("db", i), val);
       }
@@ -3456,7 +3499,8 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
         CHECK(replica_);
 
         SetMasterFlagOnAllThreads(true);  // Flip flag before clearing replica
-        last_master_data_ = replica_->Stop();
+        // No partial sync for NO ONE flow
+        replica_->Stop();
         replica_.reset();
 
         StopAllClusterReplicas();
@@ -3591,13 +3635,21 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   auto repl_ptr = replica_;
   CHECK(repl_ptr);
 
+  // Start journal to allow partial sync from same source master
+  shard_set->pool()->AwaitFiberOnAll([this, repl_ptr](auto index, auto*) {
+    auto flow_map = repl_ptr->GetFlowMapAtIndex(index);
+    size_t rec_executed = repl_ptr->GetRecCountExecutedPerShard(flow_map);
+    LOG(INFO) << "Shard " << index << " starts journal at: " << rec_executed;
+    journal()->StartInThreadAtLsn(rec_executed);
+  });
+
   auto info = replica_->GetSummary();
   if (!info.full_sync_done) {
     return builder->SendError("Full sync not done");
   }
 
-  std::error_code ec = replica_->TakeOver(ArgS(args, 0), save_flag);
-  if (ec)
+  std::error_code res = replica_->TakeOver(ArgS(args, 0), save_flag);
+  if (res)
     return builder->SendError("Couldn't execute takeover");
 
   LOG(INFO) << "Takeover successful, promoting this instance to master.";
@@ -3605,9 +3657,11 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   if (IsClusterEnabled()) {
     service().cluster_family().ReconcileMasterReplicaTakeoverSlots(false);
   }
-  SetMasterFlagOnAllThreads(true);
+
   last_master_data_ = replica_->Stop();
   replica_.reset();
+
+  SetMasterFlagOnAllThreads(true);
   return builder->SendOk();
 }
 
@@ -3770,24 +3824,60 @@ void ServerFamily::Latency(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void ServerFamily::ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (args.size() > 1) {
+  // Supported options (case-insensitive):
+  // SAVE | NOSAVE, NOW, FORCE, ABORT, SAFE (Valkey-specific, the same as SAVE in Dragonfly)
+  enum ShutBits : uint32_t {
+    SB_SAVE = 1u << 0,
+    SB_NOSAVE = 1u << 1,
+    SB_NOW = 1u << 2,
+    SB_FORCE = 1u << 3,
+    SB_ABORT = 1u << 4,
+  };
+
+  uint32_t sb = 0;
+
+  CmdArgParser parser(args);
+  while (parser.HasNext()) {
+    // Map SAFE to SAVE directly (fallthrough behavior)
+    ShutBits opt = parser.MapNext("SAVE", SB_SAVE, "NOSAVE", SB_NOSAVE, "NOW", SB_NOW, "FORCE",
+                                  SB_FORCE, "ABORT", SB_ABORT, "SAFE", SB_SAVE);
+    sb |= static_cast<uint32_t>(opt);
+  }
+
+  if (auto perr = parser.TakeError(); perr) {
+    return cmd_cntx.rb->SendError(perr.MakeReply());
+  }
+
+  // Conflicting toggles
+  if ((sb & SB_SAVE) && (sb & SB_NOSAVE)) {
     cmd_cntx.rb->SendError(kSyntaxErr);
     return;
   }
 
-  if (args.size() == 1) {
-    auto sub_cmd = ArgS(args, 0);
-    if (absl::EqualsIgnoreCase(sub_cmd, "SAVE")) {
-    } else if (absl::EqualsIgnoreCase(sub_cmd, "NOSAVE")) {
-      save_on_shutdown_ = false;
-    } else {
-      cmd_cntx.rb->SendError(kSyntaxErr);
-      return;
-    }
+  if (sb & SB_ABORT) {
+    // We currently do not support aborting an in-progress shutdown sequence.
+    cmd_cntx.rb->SendError("SHUTDOWN ABORT is not supported");
+    return;
   }
+
+  // Configure save behavior on shutdown according to options.
+  if (sb & SB_FORCE) {
+    // FORCE implies no snapshot on shutdown regardless of SAVE/SAFE
+    save_on_shutdown_ = false;
+  } else if (sb & SB_NOSAVE) {
+    save_on_shutdown_ = false;
+  } else if (sb & SB_SAVE) {
+    save_on_shutdown_ = true;
+  }
+
+  // Wire NOW/FORCE to a single fast-shutdown flag for listeners.
+  facade::g_shutdown_fast.store((sb & (SB_NOW | SB_FORCE)) != 0, std::memory_order_seq_cst);
 
   CHECK_NOTNULL(acceptor_)->Stop();
   cmd_cntx.rb->SendOk();
+
+  // Reset flag for any subsequent restarts (mainly for tests).
+  facade::g_shutdown_fast.store(false, std::memory_order_seq_cst);
 }
 
 void ServerFamily::Dfly(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -3941,10 +4031,10 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -2, 0, 0, acl::kConfig}.HFUNC(Config)
       << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDbSize}.HFUNC(DbSize)
       << CI{"DEBUG", CO::ADMIN | CO::LOADING, -2, 0, 0, acl::kDebug}.HFUNC(Debug)
-      << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS | CO::DANGEROUS, 1, 0, 0, acl::kFlushDB}.HFUNC(
+      << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushDB}.HFUNC(
              FlushDb)
       << CI{"FLUSHALL", CO::WRITE | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushAll}
-             .HFUNC(FlushAll)
+             .HFUNC(FlushDb)
       << CI{"INFO", CO::LOADING, -1, 0, 0, acl::kInfo}.HFUNC(Info)
       << CI{"HELLO", CO::LOADING, -1, 0, 0, acl::kHello}.HFUNC(Hello)
       << CI{"LASTSAVE", CO::LOADING | CO::FAST, 1, 0, 0, acl::kLastSave}.HFUNC(LastSave)

@@ -670,6 +670,34 @@ TEST_F(ClusterFamilyTest, ClusterModePubSubNotAllowed) {
               ErrArg("PUNSUBSCRIBE is not supported in cluster mode yet"));
 }
 
+// SSUBSCRIBE and SPUBLISH work in cluster mode
+TEST_F(ClusterFamilyTest, ClusterModePubSub) {
+  single_response_ = false;
+  ConfigSingleNodeCluster(GetMyId());
+
+  // Ssubscribe works as expected
+  auto resp = pp_->at(1)->Await([&] { return Run({"SSUBSCRIBE", "cluster-channel"}); });
+  EXPECT_THAT(resp, RespElementsAre("ssubscribe", "cluster-channel", IntArg(1)));
+
+  // Send-receive a single message
+  resp = pp_->at(0)->Await([&] {
+    return Run({"SPUBLISH", "cluster-channel", "a simple message"});
+  });
+  EXPECT_THAT(resp, IntArg(1));
+
+  pp_->AwaitFiberOnAll([](util::ProactorBase* pb) {});
+
+  ASSERT_EQ(1, SubscriberMessagesLen("IO1"));
+  const auto& msg = GetPublishedMessage("IO1", 0);
+  EXPECT_TRUE(msg.is_sharded);
+  EXPECT_EQ("cluster-channel", msg.channel);
+  EXPECT_EQ("a simple message", msg.message);
+
+  // Sunsubscribe
+  resp = pp_->at(1)->Await([&] { return Run({"SUNSUBSCRIBE", "cluster-channel"}); });
+  EXPECT_THAT(resp, RespElementsAre("sunsubscribe", "cluster-channel", IntArg(0)));
+}
+
 TEST_F(ClusterFamilyTest, ClusterFirstConfigCallDropsEntriesNotOwnedByNode) {
   InitWithDbFilename();
 

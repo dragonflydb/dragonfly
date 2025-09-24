@@ -131,16 +131,16 @@ size_t HMapLength(const DbContext& db_cntx, const CompactObj& co) {
 OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
   if (holds_alternative<double>(*param)) {
     double incr = get<double>(*param);
-    long double value = 0;
+    double value = 0;
 
     if (prev_val) {
-      if (!string2ld(prev_val->data(), prev_val->size(), &value)) {
+      if (!ParseDouble(*prev_val, &value)) {
         return OpStatus::INVALID_VALUE;
       }
     }
     value += incr;
     if (isnan(value) || isinf(value)) {
-      return OpStatus::INVALID_FLOAT;
+      return OpStatus::NAN_OR_INF_DURING_INCR;
     }
 
     param->emplace<double>(value);
@@ -332,6 +332,7 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
 
   if (!find_res) {
     DVLOG(1) << "ScanOp: find failed: " << find_res << ", baling out";
+    *cursor = 0;
     return find_res.status();
   }
 

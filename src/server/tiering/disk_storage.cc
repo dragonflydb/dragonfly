@@ -204,6 +204,11 @@ error_code DiskStorage::TryGrow(off_t grow_size) {
   if (alloc_.capacity() + ExternalAllocator::kExtAlignment >= static_cast<size_t>(max_size_))
     return make_error_code(errc::file_too_large);
 
+  // Don't try again immediately, most likely it won't succeed ever.
+  const uint64_t kCooldownTime = 100'000'000;  // 100ms
+  if (grow_.last_err && (ProactorBase::GetMonotonicTimeNs() - grow_.timestamp_ns) < kCooldownTime)
+    return make_error_code(errc::operation_canceled);
+
   if (std::exchange(grow_.pending, true)) {
     LOG_EVERY_T(WARNING, 1) << "Blocked on concurrent grow";
     return make_error_code(errc::operation_in_progress);
@@ -212,6 +217,7 @@ error_code DiskStorage::TryGrow(off_t grow_size) {
   off_t end = alloc_.capacity();
   grow_.last_err = DoFiberCall(&SubmitEntry::PrepFallocate, backing_file_->fd(), 0, end, grow_size);
   grow_.pending = false;
+  grow_.timestamp_ns = ProactorBase::GetMonotonicTimeNs();
   grow_.ev.notifyAll();
 
   if (!grow_.last_err)

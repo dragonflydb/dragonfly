@@ -543,6 +543,12 @@ TEST_F(ZSetFamilyTest, ZRevRange) {
 }
 
 TEST_F(ZSetFamilyTest, ZScan) {
+  auto resp = Run("zscan non-existing-key 100 count 5");
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::STRING), ArgType(RespExpr::ARRAY)));
+  EXPECT_EQ(ToSV(resp.GetVec()[0].GetBuf()), "0");
+  EXPECT_EQ(StrArray(resp.GetVec()[1]).size(), 0);
+
   string prefix(128, 'a');
   for (unsigned i = 0; i < 100; ++i) {
     Run({"zadd", "key", "1", absl::StrCat(prefix, i)});

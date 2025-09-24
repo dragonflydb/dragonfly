@@ -12,11 +12,11 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include "base/flag_utils.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
-#include "facade/flag_utils.h"
 #include "server/channel_store.h"
 #include "server/journal/journal.h"
 #include "util/listener_interface.h"
@@ -53,7 +53,7 @@ ServerState::Stats::Stats(unsigned num_shards)
 }
 
 ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
-  static_assert(sizeof(Stats) == 24 * 8, "Stats size mismatch");
+  static_assert(sizeof(Stats) == 25 * 8, "Stats size mismatch");
 
 #define ADD(x) this->x += (other.x)
 
@@ -95,6 +95,8 @@ ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
   } else {
     this->squash_width_freq_arr = other.squash_width_freq_arr;
   }
+
+  ADD(stored_cmd_bytes);
   return *this;
 #undef ADD
 }
@@ -235,8 +237,8 @@ void ServerState::UpdateFromFlags() {
 }
 
 vector<string> ServerState::GetMutableFlagNames() {
-  return facade::GetFlagNames(FLAGS_rss_oom_deny_ratio, FLAGS_serialization_max_chunk_size,
-                              FLAGS_max_squashed_cmd_num);
+  return base::GetFlagNames(FLAGS_rss_oom_deny_ratio, FLAGS_serialization_max_chunk_size,
+                            FLAGS_max_squashed_cmd_num);
 }
 
 Interpreter* ServerState::BorrowInterpreter() {

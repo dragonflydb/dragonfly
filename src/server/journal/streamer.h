@@ -36,6 +36,9 @@ class JournalStreamer : public journal::JournalConsumerInterface {
 
   size_t UsedBytes() const;
 
+  // For debugging purposes. Return string with formatted internal state.
+  std::string FormatInternalState() const;
+
  protected:
   // TODO: we copy the string on each write because JournalItem may be passed to multiple
   // streamers so we can not move it. However, if we would either wrap JournalItem in shared_ptr
@@ -117,9 +120,9 @@ class RestoreStreamer : public JournalStreamer {
   bool ShouldWrite(SlotId slot_id) const;
 
   // Returns true if any entry was actually written
-  bool WriteBucket(PrimeTable::bucket_iterator it);
+  bool WriteBucket(PrimeTable::bucket_iterator it, const ExpireTable& expire_table);
 
-  void WriteEntry(std::string_view key, const PrimeValue& pk, const PrimeValue& pv,
+  void WriteEntry(std::string_view key, const PrimeKey& pk, const PrimeValue& pv,
                   uint64_t expire_ms);
 
   struct Stats {

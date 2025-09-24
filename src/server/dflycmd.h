@@ -220,6 +220,13 @@ class DflyCmd {
   // Main entrypoint for stopping replication.
   void StopReplication(uint32_t sync_id) ABSL_LOCKS_EXCLUDED(mu_);
 
+  std::optional<LSN> ParseLsnVec(std::string_view lsn_vec, size_t flow_id,
+                                 size_t last_journal_lsn_size, facade::RedisReplyBuilder* rb);
+
+  // Checks if LSN exists in the partial sync buffer. If not, also LOG that we can't
+  // partial sync.
+  bool IsLSNInPartialSyncBuffer(LSN lsn) const;
+
   // Return a map between replication ID to lag. lag is defined as the maximum of difference
   // between the master's LSN and the last acknowledged LSN in over all shards.
   std::map<uint32_t, LSN> ReplicationLagsLocked() const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);

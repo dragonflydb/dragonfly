@@ -13,6 +13,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/mi_memory_resource.h"
+#include "core/page_usage_stats.h"
 #include "io/file.h"
 #include "io/line_reader.h"
 
@@ -309,6 +310,56 @@ TEST_F(QListTest, RemoveListpack) {
   ASSERT_TRUE(it.Next());
   it = ql_.Erase(it);
   ASSERT_FALSE(it.Next());
+}
+
+TEST_F(QListTest, DefragListpackRaw) {
+  PageUsage page_usage{CollectPageStats::YES, 100.0};
+  page_usage.SetForceReallocate(true);
+
+  ql_.Push("first", QList::TAIL);
+  ql_.Push("second", QList::TAIL);
+
+  ASSERT_EQ(ql_.DefragIfNeeded(&page_usage), 1);
+  EXPECT_THAT(ToItems(), ElementsAre("first", "second"));
+  ql_.Clear();
+}
+
+TEST_F(QListTest, DefragPlainTextRaw) {
+  PageUsage page_usage{CollectPageStats::YES, 100.0};
+  page_usage.SetForceReallocate(true);
+  string big(100000, 'x');
+  ql_.Push(big, QList::HEAD);
+  ASSERT_EQ(ql_.DefragIfNeeded(&page_usage), 1);
+  EXPECT_THAT(ToItems(), ElementsAre(big));
+  ql_.Clear();
+}
+
+TEST_F(QListTest, DefragmentListpackCompressed) {
+  PageUsage page_usage{CollectPageStats::YES, 100.0};
+  page_usage.SetForceReallocate(true);
+
+  // MIN_COMPRESS_BYTES = 256
+  char buf[256];
+  constexpr auto items_per_list = 4;
+  constexpr auto total_items = 20;
+  ql_ = QList{items_per_list, 1};
+
+  for (auto i = 0; i < total_items; ++i) {
+    absl::SNPrintF(buf, 256, "test__%d", i);
+    ql_.Push(string_view{buf, 256}, QList::TAIL);
+  }
+
+  ASSERT_EQ(total_items / items_per_list, ql_.DefragIfNeeded(&page_usage));
+
+  auto i = 0;
+  auto it = ql_.GetIterator(QList::HEAD);
+  while (it.Next()) {
+    auto v = it.Get().view();
+    ASSERT_EQ(v.size(), 256);
+    ASSERT_TRUE(absl::StartsWith(v, StrCat("test__", i)));
+    ++i;
+  }
+  ASSERT_EQ(i, total_items);
 }
 
 using FillCompress = tuple<int, unsigned, QList::COMPR_METHOD>;

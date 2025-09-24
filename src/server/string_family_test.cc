@@ -519,6 +519,10 @@ TEST_F(StringFamilyTest, IncrByFloat) {
   auto resp = Run({"INCRBYFLOAT", "nonum", "1.0"});
   EXPECT_THAT(resp, ErrArg("not a valid float"));
 
+  Run({"SET", "inf", "+inf"});
+  resp = Run({"INCRBYFLOAT", "inf", "1.0"});
+  EXPECT_THAT(resp, ErrArg("increment would produce NaN or Infinity"));
+
   Run({"SET", "nonum", "11 "});
   resp = Run({"INCRBYFLOAT", "nonum", "1.0"});
   EXPECT_THAT(resp, ErrArg("not a valid float"));

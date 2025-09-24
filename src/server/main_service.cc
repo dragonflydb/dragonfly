@@ -6,6 +6,8 @@
 
 #include "absl/strings/str_split.h"
 #include "facade/resp_expr.h"
+#include "util/fibers/detail/fiber_interface.h"
+#include "util/fibers/proactor_base.h"
 #include "util/fibers/synchronization.h"
 
 #ifdef __FreeBSD__
@@ -29,11 +31,11 @@ extern "C" {
 #include <filesystem>
 
 #include "base/cycle_clock.h"
+#include "base/flag_utils.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
-#include "facade/flag_utils.h"
 #include "facade/reply_builder.h"
 #include "facade/reply_capture.h"
 #include "server/acl/acl_commands_def.h"
@@ -134,6 +136,12 @@ ABSL_FLAG(uint32_t, uring_wake_mode, 1,
           "notification");
 
 ABSL_FLAG(uint32_t, uring_submit_threshold, 1u << 31, "");
+
+ABSL_FLAG(uint32_t, scheduler_background_budget, 50'000, "Background fiber budget in nanoseconds");
+ABSL_FLAG(uint32_t, scheduler_background_sleep_prob, 50,
+          "Sleep probability of background fibers on reaching budget");
+ABSL_FLAG(uint32_t, scheduler_background_warrant, 5,
+          "Percentage of guaranteed cpu time for background fibers");
 
 ABSL_FLAG(uint32_t, squash_stats_latency_lower_limit, 0,
           "If set, will not track latency stats below this threshold (usec). ");
@@ -383,7 +391,11 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnError(string_view str) {
-    rb_->SendError(str);
+    if (!str.empty() && str.front() != '-') {
+      rb_->SendError(absl::StrCat("-", str));
+    } else {
+      rb_->SendError(str);
+    }
   }
 
  private:
@@ -411,7 +423,11 @@ void InterpreterReplier::PostItem() {
 void InterpreterReplier::SendError(string_view str, std::string_view type) {
   DCHECK(array_len_.empty());
   DVLOG(1) << "Lua/df_call error " << str;
-  explr_->OnError(str);
+  if (!str.empty() && str.front() != '-') {
+    explr_->OnError(absl::StrCat("-ERR ", str));
+  } else {
+    explr_->OnError(str);
+  }
 }
 
 void InterpreterReplier::SendSimpleString(string_view str) {
@@ -618,7 +634,7 @@ enum class ExecScriptUse {
 ExecScriptUse DetermineScriptPresense(const std::vector<StoredCmd>& body) {
   bool script_load = false;
   for (const auto& scmd : body) {
-    if (CO::IsEvalKind(scmd.Cid()->name())) {
+    if (scmd.Cid()->MultiControlKind() == CO::MultiControlKind::EVAL) {
       return ExecScriptUse::SCRIPT_RUN;
     }
 
@@ -707,8 +723,10 @@ string FailedCommandToString(std::string_view command, facade::CmdArgList args,
   string result;
   absl::StrAppend(&result, " ", command);
 
-  for (auto arg : args) {
-    absl::StrAppend(&result, " ", absl::CHexEscape(arg));
+  if (command != "AUTH" && command != "ACL SETUSER") {
+    for (auto arg : args) {
+      absl::StrAppend(&result, " ", absl::CHexEscape(arg));
+    }
   }
 
   absl::StrAppend(&result, " failed with reason: ", reason);
@@ -726,8 +744,8 @@ void UpdateFromFlagsOnThread() {
 }
 
 std::vector<std::string> GetMutableFlagNames() {
-  return facade::GetFlagNames(FLAGS_shard_thread_busy_polling_usec,
-                              FLAGS_squash_stats_latency_lower_limit);
+  return base::GetFlagNames(FLAGS_shard_thread_busy_polling_usec,
+                            FLAGS_squash_stats_latency_lower_limit);
 }
 
 void UpdateUringFlagsOnThread() {
@@ -742,6 +760,17 @@ void UpdateUringFlagsOnThread() {
     up->SetSubmitQueueThreshold(threshold);
   }
 #endif
+}
+
+void UpdateSchedulerFlagsOnThread() {
+  using fb2::detail::Scheduler;
+  auto* sched = util::fb2::detail::FiberScheduler();
+  sched->UpdateConfig(&Scheduler::Config::budget_background_fib,
+                      GetFlag(FLAGS_scheduler_background_budget));
+  sched->UpdateConfig(&Scheduler::Config::background_sleep_prob,
+                      GetFlag(FLAGS_scheduler_background_sleep_prob));
+  sched->UpdateConfig(&Scheduler::Config::background_warrant_pct,
+                      GetFlag(FLAGS_scheduler_background_warrant));
 }
 
 void SetHuffmanTable(const std::string& huffman_table) {
@@ -782,6 +811,47 @@ void SetHuffmanTable(const std::string& huffman_table) {
     LOG_IF(ERROR, !success) << "Failed to set huffman table for domain " << kv[0] << " with value "
                             << kv[1];
   }
+}
+
+string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
+  using namespace CO;
+  if (!enabled) {
+    if (opt == FAST)
+      return "SLOW";
+    return "";
+  }
+
+  switch (opt) {
+    case WRITE:
+      return "write";
+    case READONLY:
+      return "readonly";
+    case DENYOOM:
+      return "denyoom";
+    case FAST:
+      return "fast";
+    case LOADING:
+      return "loading";
+    case DANGEROUS:
+      return "dangerous";
+    case ADMIN:
+      return "admin";
+    case NOSCRIPT:
+      return "noscript";
+    case BLOCKING:
+      return "blocking";
+    case HIDDEN:
+    case INTERLEAVED_KEYS:
+    case GLOBAL_TRANS:
+    case STORE_LAST_KEY:
+    case VARIADIC_KEYS:
+    case NO_AUTOJOURNAL:
+    case NO_KEY_TRANSACTIONAL:
+    case NO_KEY_TX_SPAN_ALL:
+    case IDEMPOTENT:
+      return "";
+  }
+  return "";
 }
 
 }  // namespace
@@ -848,6 +918,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.Register("dbnum");  // equivalent to databases in redis.
   config_registry.Register("dir");
   config_registry.RegisterMutable("enable_heartbeat_eviction");
+  config_registry.RegisterMutable("enable_heartbeat_rss_eviction");
   config_registry.RegisterMutable("masterauth");
   config_registry.RegisterMutable("masteruser");
   config_registry.RegisterMutable("max_eviction_per_heartbeat");
@@ -875,8 +946,14 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
                        []() { MultiCommandSquasher::UpdateFromFlags(); });
   // Register uring proactor flags
   RegisterMutableFlags(&config_registry,
-                       facade::GetFlagNames(FLAGS_uring_wake_mode, FLAGS_uring_submit_threshold),
+                       base::GetFlagNames(FLAGS_uring_wake_mode, FLAGS_uring_submit_threshold),
                        []() { UpdateUringFlagsOnThread(); });
+  // Register scheduler flags
+  RegisterMutableFlags(
+      &config_registry,
+      base::GetFlagNames(FLAGS_scheduler_background_budget, FLAGS_scheduler_background_sleep_prob,
+                         FLAGS_scheduler_background_warrant),
+      []() { UpdateSchedulerFlagsOnThread(); });
 
   config_registry.RegisterSetter<MemoryBytesFlag>("maxmemory", [](const MemoryBytesFlag& flag) {
     // TODO: reduce code reliance on constant direct access of max_memory_limit
@@ -884,6 +961,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   });
 
   config_registry.RegisterMutable("replica_partial_sync");
+  config_registry.RegisterMutable("background_snapshotting");
   config_registry.RegisterMutable("replication_timeout");
   config_registry.RegisterMutable("migration_finalization_timeout_ms");
   config_registry.RegisterMutable("slot_migration_throttle_us");
@@ -959,6 +1037,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     facade::Connection::UpdateFromFlags();
     UpdateFromFlagsOnThread();
     UpdateUringFlagsOnThread();
+    UpdateSchedulerFlagsOnThread();
   });
   SetHuffmanTable(GetFlag(FLAGS_huffman_table));
 
@@ -1003,17 +1082,15 @@ void Service::Shutdown() {
 }
 
 OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, CmdArgList args) {
-  if (!cid->IsShardedPSub()) {
-    return DetermineKeys(cid, args);
+  // Sharded pub-sub acts as if it's sharded by its channel name (just for checks)
+  if (cid->PubSubKind() == CO::PubSubKind::SHARDED) {
+    // SPUBLISH has only one key, the rest is data
+    if (cid->name() == registry_.RenamedOrOriginal("SPUBLISH"))
+      return KeyIndex(0, 1);
+    return {KeyIndex(0, args.size())};  // sub/unsub list of channels
   }
 
-  // Sharded pub sub
-  // Command form: SPUBLISH shardchannel message
-  if (cid->name() == registry_.RenamedOrOriginal("SPUBLISH")) {
-    return {KeyIndex(0, 1)};
-  }
-
-  return {KeyIndex(0, args.size())};
+  return DetermineKeys(cid, args);
 }
 
 optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
@@ -1023,7 +1100,7 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
     return nullopt;
   }
 
-  if (cid->first_key_pos() == 0 && !cid->IsShardedPSub()) {
+  if (cid->first_key_pos() == 0 && cid->PubSubKind() != CO::PubSubKind::SHARDED) {
     return nullopt;  // No key command.
   }
 
@@ -1059,7 +1136,7 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
 // TODO(kostas) refactor. Almost 1-1 with CheckKeyOwnership() above.
 std::optional<facade::ErrorReply> Service::TakenOverSlotError(const CommandId* cid, CmdArgList args,
                                                               const ConnectionContext& dfly_cntx) {
-  if (cid->first_key_pos() == 0 && !cid->IsShardedPSub()) {
+  if (cid->first_key_pos() == 0 && cid->PubSubKind() != CO::PubSubKind::SHARDED) {
     return nullopt;  // No key command.
   }
 
@@ -1185,7 +1262,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   if (auto err = cid->Validate(tail_args); err)
     return err;
 
-  bool is_trans_cmd = CO::IsTransKind(cid->name());
+  bool is_trans_cmd = cid->MultiControlKind() == CO::MultiControlKind::EXEC;
   bool under_script = dfly_cntx.conn_state.script_info != nullptr;
   bool is_write_cmd = cid->IsWriteOnly();
   bool multi_active = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
@@ -1343,12 +1420,15 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
       << "Executing dangerous command " << cid->name() << " "
       << ConnectionLogContext(dfly_cntx->conn());
 
-  bool is_trans_cmd = CO::IsTransKind(cid->name());
+  bool is_trans_cmd = cid->MultiControlKind() == CO::MultiControlKind::EXEC;
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
     // TODO: protect against aggregating huge transactions.
-    dfly_cntx->conn_state.exec_info.body.emplace_back(cid, true, args_no_cmd);
+    auto& exec_info = dfly_cntx->conn_state.exec_info;
+    const size_t old_size = exec_info.GetStoredCmdBytes();
+    exec_info.AddStoredCmd(cid, true, args_no_cmd);
+    etl.stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
     if (cid->IsWriteOnly()) {
-      dfly_cntx->conn_state.exec_info.is_write = true;
+      exec_info.is_write = true;
     }
     builder->SendSimpleString("QUEUED");
     return DispatchResult::OK;
@@ -1627,15 +1707,15 @@ DispatchManyResult Service::DispatchManyCommands(absl::Span<CmdArgList> args_lis
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible
-    const bool is_multi = dfly_cntx->conn_state.exec_info.IsCollecting() || CO::IsTransKind(cmd);
+    const bool is_multi = dfly_cntx->conn_state.exec_info.IsCollecting() ||
+                          (cid != nullptr && cid->MultiControlKind() == CO::MultiControlKind::EXEC);
 
     // Generally, executing any multi-transactions (including eval) is not possible because they
     // might request a stricter multi mode than non-atomic which is used for squashing.
     // TODO: By allowing promoting non-atomic multit transactions to lock-ahead for specific command
     // invocations, we can potentially execute multiple eval in parallel, which is very powerful
     // paired with shardlocal eval
-    const bool is_eval = CO::IsEvalKind(cmd);
-
+    const bool is_eval = cid != nullptr && cid->MultiControlKind() == CO::MultiControlKind::EVAL;
     const bool is_blocking = cid != nullptr && cid->IsBlocking();
 
     if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
@@ -2456,63 +2536,38 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
   VLOG(2) << "Exec completed";
 }
 
-namespace {
-void PublishImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd_cntx) {
-  if (reject_cluster && IsClusterEnabled()) {
+void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
+  bool sharded = cmd_cntx.conn_cntx->cid->PubSubKind() == CO::PubSubKind::SHARDED;
+  if (!sharded && IsClusterEnabled())
     return cmd_cntx.rb->SendError("PUBLISH is not supported in cluster mode yet");
-  }
+
   string_view channel = ArgS(args, 0);
   string_view messages[] = {ArgS(args, 1)};
 
   auto* cs = ServerState::tlocal()->channel_store();
-  cmd_cntx.rb->SendLong(cs->SendMessages(channel, messages));
-}
-
-void SubscribeImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd_cntx) {
-  if (reject_cluster && IsClusterEnabled()) {
-    return cmd_cntx.rb->SendError("SUBSCRIBE is not supported in cluster mode yet");
-  }
-  cmd_cntx.conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, args,
-                                         static_cast<RedisReplyBuilder*>(cmd_cntx.rb));
-}
-
-void UnSubscribeImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (reject_cluster && IsClusterEnabled()) {
-    return cmd_cntx.rb->SendError("UNSUBSCRIBE is not supported in cluster mode yet");
-  }
-
-  if (args.size() == 0) {
-    cmd_cntx.conn_cntx->UnsubscribeAll(true, rb);
-  } else {
-    cmd_cntx.conn_cntx->ChangeSubscription(false, true, args, rb);
-  }
-}
-
-}  // namespace
-
-void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
-  PublishImpl(true, args, cmd_cntx);
-}
-
-void Service::SPublish(CmdArgList args, const CommandContext& cmd_cntx) {
-  PublishImpl(false, args, cmd_cntx);
+  cmd_cntx.rb->SendLong(cs->SendMessages(channel, messages, sharded));
 }
 
 void Service::Subscribe(CmdArgList args, const CommandContext& cmd_cntx) {
-  SubscribeImpl(true, args, cmd_cntx);
-}
+  bool sharded = cmd_cntx.conn_cntx->cid->PubSubKind() == CO::PubSubKind::SHARDED;
+  if (!sharded && IsClusterEnabled())
+    return cmd_cntx.rb->SendError("SUBSCRIBE is not supported in cluster mode yet");
 
-void Service::SSubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
-  SubscribeImpl(false, args, cmd_cntx);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  cmd_cntx.conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, sharded, args, rb);
 }
 
 void Service::Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
-  UnSubscribeImpl(true, args, cmd_cntx);
-}
+  bool sharded = cmd_cntx.conn_cntx->cid->PubSubKind() == CO::PubSubKind::SHARDED;
+  if (!sharded && IsClusterEnabled())
+    return cmd_cntx.rb->SendError("UNSUBSCRIBE is not supported in cluster mode yet");
 
-void Service::SUnsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
-  UnSubscribeImpl(false, args, cmd_cntx);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  if (args.size() == 0) {
+    cmd_cntx.conn_cntx->UnsubscribeAll(true, rb);
+  } else {
+    cmd_cntx.conn_cntx->ChangeSubscription(false, true, sharded, args, rb);
+  }
 }
 
 void Service::PSubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2645,15 +2700,14 @@ void Service::Command(CmdArgList args, const CommandContext& cmd_cntx) {
     rb->StartArray(7);
     rb->SendSimpleString(cid.name());
     rb->SendLong(cid.arity());
-    rb->StartArray(CommandId::OptCount(cid.opt_mask()));
 
-    for (uint32_t i = 0; i < 32; ++i) {
+    vector<string> opts;
+    for (uint32_t i = 0; i < 32; i++) {
       unsigned obit = (1u << i);
-      if (cid.opt_mask() & obit) {
-        const char* name = CO::OptName(CO::CommandOpt{obit});
-        rb->SendSimpleString(name);
-      }
+      if (auto name = CommandOptName(CO::CommandOpt{obit}, cid.opt_mask() & obit); !name.empty())
+        opts.emplace_back(name);
     }
+    rb->SendSimpleStrArr(opts);
 
     rb->SendLong(cid.first_key_pos());
     rb->SendLong(cid.last_key_pos());
@@ -2925,13 +2979,13 @@ void Service::Register(CommandRegistry* registry) {
              .SetValidator(&EvalValidator)
       << CI{"EXEC", CO::LOADING | CO::NOSCRIPT, 1, 0, 0, acl::kExec}.MFUNC(Exec)
       << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, acl::kPublish}.MFUNC(Publish)
-      << CI{"SPUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, acl::kPublish}.MFUNC(SPublish)
+      << CI{"SPUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, acl::kPublish}.MFUNC(Publish)
       << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kSubscribe}.MFUNC(Subscribe)
-      << CI{"SSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kSubscribe}.MFUNC(SSubscribe)
+      << CI{"SSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kSubscribe}.MFUNC(Subscribe)
       << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kUnsubscribe}.MFUNC(
              Unsubscribe)
       << CI{"SUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kUnsubscribe}.MFUNC(
-             SUnsubscribe)
+             Unsubscribe)
       << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kPSubscribe}.MFUNC(PSubscribe)
       << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kPUnsubsribe}.MFUNC(
              PUnsubscribe)

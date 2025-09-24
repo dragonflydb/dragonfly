@@ -31,7 +31,7 @@ ABSL_FLAG(float, mem_defrag_threshold, 0.7,
           "Minimum percentage of used memory relative to maxmemory cap before running "
           "defragmentation");
 
-ABSL_FLAG(uint32_t, mem_defrag_check_sec_interval, 10,
+ABSL_FLAG(uint32_t, mem_defrag_check_sec_interval, 60,
           "Number of seconds between every defragmentation necessity check");
 
 ABSL_FLAG(float, mem_defrag_waste_threshold, 0.2,
@@ -54,11 +54,13 @@ ABSL_FLAG(string, tiered_prefix, "",
 
 ABSL_FLAG(bool, enable_heartbeat_eviction, true,
           "Enable eviction during heartbeat when memory is under pressure.");
-
+ABSL_FLAG(bool, enable_heartbeat_rss_eviction, true,
+          "Enable eviction during heartbeat when rss memory is under pressure. Evicition based "
+          "on used_memory will still be enabled.");
 ABSL_FLAG(double, eviction_memory_budget_threshold, 0.1,
           "Eviction starts when the free memory (including RSS memory) drops below "
           "eviction_memory_budget_threshold * max_memory_limit.");
-
+ABSL_FLAG(bool, background_heartbeat, false, "Whether to run heartbeat as a background fiber");
 ABSL_DECLARE_FLAG(uint32_t, max_eviction_per_heartbeat);
 
 namespace dfly {
@@ -69,24 +71,6 @@ using namespace util;
 namespace {
 
 constexpr uint64_t kCursorDoneState = 0u;
-
-struct ShardMemUsage {
-  std::size_t commited = 0;
-  std::size_t used = 0;
-  std::size_t wasted_mem = 0;
-};
-
-std::ostream& operator<<(std::ostream& os, const ShardMemUsage& mem) {
-  return os << "commited: " << mem.commited << " vs used " << mem.used << ", wasted memory "
-            << mem.wasted_mem;
-}
-
-ShardMemUsage ReadShardMemUsage(float wasted_ratio) {
-  ShardMemUsage usage;
-  zmalloc_get_allocator_wasted_blocks(wasted_ratio, &usage.used, &usage.commited,
-                                      &usage.wasted_mem);
-  return usage;
-}
 
 bool HasContendedLocks(ShardId shard_id, Transaction* trx, const DbTable* table) {
   auto is_contended = [table](LockFp fp) { return table->trans_locks.Find(fp)->IsContended(); };
@@ -130,46 +114,6 @@ size_t CalculateHowManyBytesToEvictOnShard(size_t global_memory_limit, size_t gl
 
   const size_t shard_budget = (global_memory_limit - global_used_memory) / shard_set->size();
   return shard_budget < shard_memory_threshold ? (shard_memory_threshold - shard_budget) : 0;
-}
-
-/* Calculates the number of bytes to evict based on memory and rss memory usage. */
-size_t CalculateEvictionBytes() {
-  const size_t shards_count = shard_set->size();
-  const double eviction_memory_budget_threshold = GetFlag(FLAGS_eviction_memory_budget_threshold);
-
-  size_t limit = max_memory_limit.load(memory_order_relaxed);
-  const size_t shard_memory_budget_threshold =
-      size_t(limit * eviction_memory_budget_threshold) / shards_count;
-
-  const size_t global_used_memory = used_mem_current.load(memory_order_relaxed);
-
-  // Calculate how many bytes we need to evict on this shard
-  size_t goal_bytes =
-      CalculateHowManyBytesToEvictOnShard(limit, global_used_memory, shard_memory_budget_threshold);
-
-  // TODO: Eviction due to rss usage is not working well as it causes eviction
-  // of to many keys untill we finally see decrease in rss. We need to improve
-  // this logic before we enable it.
-  /*
-  const double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
-  // If rss_oom_deny_ratio is set, we should evict depending on rss memory too
-  if (rss_oom_deny_ratio > 0.0) {
-    const size_t max_rss_memory = size_t(rss_oom_deny_ratio * max_memory_limit);
-    // We start eviction when we have less than eviction_memory_budget_threshold * 100% of free rss
-    memory const size_t shard_rss_memory_budget_threshold =
-        size_t(max_rss_memory * eviction_memory_budget_threshold) / shards_count;
-
-    // Calculate how much rss memory is used by all shards
-    const size_t global_used_rss_memory = rss_mem_current.load(memory_order_relaxed);
-
-    // Try to evict more bytes if we are close to the rss memory limit
-    goal_bytes = std::max(
-        goal_bytes, CalculateHowManyBytesToEvictOnShard(max_rss_memory, global_used_rss_memory,
-                                                        shard_rss_memory_budget_threshold));
-  }
-  */
-
-  return goal_bytes;
 }
 
 }  // namespace
@@ -249,26 +193,44 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     return false;
   }
 
-  const std::size_t global_threshold = limit * GetFlag(FLAGS_mem_defrag_threshold);
+  thread_local fragmentation_info finfo{
+      .committed = 0, .committed_golden = 0, .wasted = 0, .bin = 0};
+
+  const std::size_t global_threshold = double(limit) * GetFlag(FLAGS_mem_defrag_threshold);
   if (global_threshold > rss_mem_current.load(memory_order_relaxed)) {
+    finfo.bin = 0;  // reset.
     return false;
   }
 
-  const auto now = time(nullptr);
-  const auto seconds_from_prev_check = now - last_check_time;
-  const auto mem_defrag_interval = GetFlag(FLAGS_mem_defrag_check_sec_interval);
+  if (finfo.bin == 0) {  // did not start the iterative checking yet
+    const auto now = time(nullptr);
+    const auto seconds_from_prev_check = now - last_check_time;
+    const auto mem_defrag_interval = GetFlag(FLAGS_mem_defrag_check_sec_interval);
 
-  if (seconds_from_prev_check < mem_defrag_interval) {
-    return false;
+    if (seconds_from_prev_check < mem_defrag_interval) {
+      return false;
+    }
+
+    // start checking.
+    finfo.committed = finfo.committed_golden = 0;
+    finfo.wasted = 0;
+    page_utilization_threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
   }
-  last_check_time = now;
 
-  ShardMemUsage usage = ReadShardMemUsage(GetFlag(FLAGS_mem_defrag_page_utilization_threshold));
+  uint64_t start = absl::GetCurrentTimeNanos();
+  int res = zmalloc_get_allocator_fragmentation_step(page_utilization_threshold, &finfo);
+  uint64_t duration = absl::GetCurrentTimeNanos() - start;
+  VLOG(1) << "Reading memory usage took " << duration << " ns on bin " << finfo.bin - 1;
 
-  const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
-  if (usage.wasted_mem > (uint64_t(usage.commited * waste_threshold))) {
-    VLOG(1) << "memory issue found for memory " << usage;
-    return true;
+  if (res == 0) {
+    // finished checking.
+    last_check_time = time(nullptr);
+
+    const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
+    if (finfo.wasted > size_t(finfo.committed * waste_threshold)) {
+      VLOG(1) << "memory fragmentation issue found: " << finfo.wasted << " " << finfo.committed;
+      return true;
+    }
   }
 
   return false;
@@ -322,11 +284,11 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect
   defrag_state_.UpdateScanState(cur.token());
 
   if (reallocations > 0) {
-    VLOG(1) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations
+    VLOG(2) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations
             << " times, did it in " << traverses_count << " cursor is at the "
             << (defrag_state_.cursor == kCursorDoneState ? "end" : "in progress");
   } else {
-    VLOG(1) << "shard " << slice.shard_id() << ": run the defrag " << traverses_count
+    VLOG(2) << "shard " << slice.shard_id() << ": run the defrag " << traverses_count
             << " times out of maximum " << kMaxTraverses << ", with cursor at "
             << (defrag_state_.cursor == kCursorDoneState ? "end" : "in progress")
             << " but no location for defrag were found";
@@ -361,7 +323,7 @@ uint32_t EngineShard::DefragTask() {
       return util::ProactorBase::kOnIdleMaxLevel;
     }
   }
-  return kRunAtLowPriority;
+  return 6;  // priority.
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
@@ -421,13 +383,16 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
   }
   auto heartbeat = [this]() { Heartbeat(); };
 
+  eviction_state_.rss_eviction_enabled_ = GetFlag(FLAGS_enable_heartbeat_rss_eviction);
   std::chrono::milliseconds period_ms(*cycle_ms);
 
-  fiber_heartbeat_periodic_ =
-      MakeFiber([this, index = pb->GetPoolIndex(), period_ms, heartbeat]() mutable {
-        ThisFiber::SetName(absl::StrCat("heartbeat_periodic", index));
-        RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
-      });
+  fb2::Fiber::Opts fb_opts{.priority = absl::GetFlag(FLAGS_background_heartbeat)
+                                           ? fb2::FiberPriority::BACKGROUND
+                                           : fb2::FiberPriority::NORMAL,
+                           .name = absl::StrCat("heartbeat_periodic", pb->GetPoolIndex())};
+  fiber_heartbeat_periodic_ = fb2::Fiber(fb_opts, [this, period_ms, heartbeat]() mutable {
+    RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
+  });
   defrag_task_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
 }
 
@@ -696,6 +661,7 @@ void EngineShard::RetireExpiredAndEvict() {
   DbContext db_cntx;
   db_cntx.time_now_ms = GetCurrentTimeMs();
 
+  size_t deleted_bytes = 0;
   size_t eviction_goal = GetFlag(FLAGS_enable_heartbeat_eviction) ? CalculateEvictionBytes() : 0;
 
   for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
@@ -707,13 +673,14 @@ void EngineShard::RetireExpiredAndEvict() {
     if (!expt->Empty()) {
       DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
 
+      deleted_bytes += stats.deleted_bytes;
       eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
       counter_[TTL_TRAVERSE].IncBy(stats.traversed);
       counter_[TTL_DELETE].IncBy(stats.deleted);
       stats_.total_heartbeat_expired_keys += stats.deleted;
       stats_.total_heartbeat_expired_bytes += stats.deleted_bytes;
       ++stats_.total_heartbeat_expired_calls;
-      VLOG(1) << "Heartbeat expired " << stats.deleted << " keys with total bytes "
+      VLOG(2) << "Heartbeat expired " << stats.deleted << " keys with total bytes "
               << stats.deleted_bytes << " with total expire flow calls "
               << stats_.total_heartbeat_expired_calls;
     }
@@ -728,9 +695,71 @@ void EngineShard::RetireExpiredAndEvict() {
                << " bytes. Max eviction per heartbeat: "
                << GetFlag(FLAGS_max_eviction_per_heartbeat);
 
+      deleted_bytes += evicted_bytes;
       eviction_goal -= std::min(eviction_goal, evicted_bytes);
     }
   }
+
+  eviction_state_.deleted_bytes_before_rss_update += deleted_bytes;
+}
+
+size_t EngineShard::CalculateEvictionBytes() {
+  const size_t shards_count = shard_set->size();
+  const double eviction_memory_budget_threshold = GetFlag(FLAGS_eviction_memory_budget_threshold);
+
+  // Calculate threshold for both used_memory and rss_memory
+  size_t limit = max_memory_limit.load(memory_order_relaxed);
+  const size_t shard_memory_budget_threshold =
+      size_t(limit * eviction_memory_budget_threshold) / shards_count;
+
+  const size_t global_used_memory = used_mem_current.load(memory_order_relaxed);
+
+  // Calculate how many bytes we need to evict on this shard
+  size_t goal_bytes =
+      CalculateHowManyBytesToEvictOnShard(limit, global_used_memory, shard_memory_budget_threshold);
+
+  VLOG_IF_EVERY_N(1, goal_bytes > 0, 50)
+      << "Used memory goal bytes: " << goal_bytes << ", used memory: " << global_used_memory
+      << ", memory limit: " << max_memory_limit;
+
+  // Check for `enable_heartbeat_rss_eviction` flag since it dynamic. And reset
+  // state if flag has changed.
+  bool rss_eviction_enabled_flag = GetFlag(FLAGS_enable_heartbeat_rss_eviction);
+  if (eviction_state_.rss_eviction_enabled_ != rss_eviction_enabled_flag) {
+    eviction_state_.global_rss_memory_at_prev_eviction =
+        eviction_state_.deleted_bytes_before_rss_update = 0;
+    eviction_state_.rss_eviction_enabled_ = rss_eviction_enabled_flag;
+  }
+  if (eviction_state_.rss_eviction_enabled_) {
+    // Calculate how much rss memory is used by all shards
+    const size_t global_used_rss_memory = rss_mem_current.load(memory_order_relaxed);
+    auto& global_rss_memory_at_prev_eviction = eviction_state_.global_rss_memory_at_prev_eviction;
+    auto& deleted_bytes_before_rss_update = eviction_state_.deleted_bytes_before_rss_update;
+    if (global_used_rss_memory < eviction_state_.global_rss_memory_at_prev_eviction) {
+      auto decrease_delete_bytes_before_rss_update =
+          std::min(deleted_bytes_before_rss_update,
+                   (global_rss_memory_at_prev_eviction - global_used_rss_memory) / shards_count);
+      VLOG_EVERY_N(1, 50) << "deleted_bytes_before_rss_update: " << deleted_bytes_before_rss_update
+                          << " decrease_delete_bytes_before_rss_update: "
+                          << decrease_delete_bytes_before_rss_update;
+      deleted_bytes_before_rss_update -= decrease_delete_bytes_before_rss_update;
+    }
+
+    global_rss_memory_at_prev_eviction = global_used_rss_memory;
+
+    // Try to evict more bytes if we are close to the rss memory limit
+    const size_t rss_goal_bytes = CalculateHowManyBytesToEvictOnShard(
+        limit, global_used_rss_memory - deleted_bytes_before_rss_update * shards_count,
+        shard_memory_budget_threshold);
+
+    VLOG_IF_EVERY_N(1, rss_goal_bytes > 0, 50)
+        << "Rss memory goal bytes: " << rss_goal_bytes
+        << ", rss used memory: " << global_used_rss_memory << ", rss memory limit: " << limit
+        << ", deleted_bytes_before_rss_update: " << deleted_bytes_before_rss_update;
+
+    goal_bytes = std::max(goal_bytes, rss_goal_bytes);
+  }
+  return goal_bytes;
 }
 
 void EngineShard::CacheStats() {

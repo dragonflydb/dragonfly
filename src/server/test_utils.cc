@@ -32,6 +32,8 @@ ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
 ABSL_DECLARE_FLAG(uint32_t, num_shards);
 ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to run tests");
 ABSL_DECLARE_FLAG(uint32_t, acllog_max_len);
+ABSL_DECLARE_FLAG(bool, enable_heartbeat_rss_eviction);
+
 namespace dfly {
 
 namespace {
@@ -185,6 +187,8 @@ void BaseFamilyTest::SetUpTestSuite() {
 
   absl::SetFlag(&FLAGS_rss_oom_deny_ratio, -1);
   absl::SetFlag(&FLAGS_dbfilename, "");
+  // We don't want rss eviction
+  absl::SetFlag(&FLAGS_enable_heartbeat_rss_eviction, false);
 
   static bool init = true;
   if (exchange(init, false)) {
