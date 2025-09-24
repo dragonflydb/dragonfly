@@ -210,7 +210,7 @@ struct GeoIndex : public BaseIndex {
   using point =
       boost::geometry::model::point<double, 2,
                                     boost::geometry::cs::geographic<boost::geometry::degree>>;
-  using entry = std::pair<point, DocId>;
+  using index_entry = std::pair<point, DocId>;
 
   explicit GeoIndex(PMR_NS::memory_resource* mr);
   ~GeoIndex();
@@ -226,7 +226,8 @@ struct GeoIndex : public BaseIndex {
   static double ConvertToRadiusInMeters(size_t radius, std::string_view arg);
 
  private:
-  using rtree = boost::geometry::index::rtree<entry, boost::geometry::index::quadratic<16>>;
+  std::optional<point> GetGeoPoint(const DocumentAccessor& doc, std::string_view field);
+  using rtree = boost::geometry::index::rtree<index_entry, boost::geometry::index::quadratic<16>>;
   std::unique_ptr<rtree> rtree_;
 };
 

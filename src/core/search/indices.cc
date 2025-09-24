@@ -625,32 +625,17 @@ GeoIndex::~GeoIndex() {
 }
 
 bool GeoIndex::Add(DocId id, const DocumentAccessor& doc, std::string_view field) {
-  auto geolocation = doc.GetStrings(field);
-
-  if (!geolocation)
+  auto doc_point = GetGeoPoint(doc, field);
+  if (!doc_point) {
     return false;
-
-  absl::InlinedVector<string_view, 2> coordinates = absl::StrSplit(geolocation.value()[0], ",");
-
-  if (coordinates.size() != 2)
-    return false;
-
-  double lat;
-  if (!absl::SimpleAtod(coordinates[0], &lat))
-    return false;
-
-  double lon;
-  if (!absl::SimpleAtod(coordinates[1], &lon))
-    return false;
-
-  entry index_entry = std::make_pair(point{lat, lon}, id);
-
-  rtree_->insert(index_entry);
-
+  }
+  rtree_->insert({doc_point.value(), id});
   return true;
 }
 
 void GeoIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
+  auto doc_point = GetGeoPoint(doc, field);
+  rtree_->remove({doc_point.value(), id});
 }
 
 std::vector<DocId> GeoIndex::RadiusSearch(double lat, double lon, double radius) const {
@@ -696,6 +681,33 @@ double GeoIndex::ConvertToRadiusInMeters(size_t radius, std::string_view arg) {
   } else {
     return -1;
   }
+}
+
+std::optional<GeoIndex::point> GeoIndex::GetGeoPoint(const DocumentAccessor& doc,
+                                                     string_view field) {
+  auto element = doc.GetStrings(field);
+
+  if (!element) {
+    return std::nullopt;
+  }
+
+  absl::InlinedVector<string_view, 2> coordinates = absl::StrSplit(element.value()[0], ",");
+
+  if (coordinates.size() != 2) {
+    return std::nullopt;
+  }
+
+  double lat;
+  if (!absl::SimpleAtod(coordinates[0], &lat)) {
+    return std::nullopt;
+  }
+
+  double lon;
+  if (!absl::SimpleAtod(coordinates[1], &lon)) {
+    return std::nullopt;
+  }
+
+  return point{lat, lon};
 }
 
 }  // namespace dfly::search

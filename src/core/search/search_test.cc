@@ -122,6 +122,8 @@ struct SchemaFieldInitializer {
       case SchemaField::VECTOR:
         special_params = SchemaField::VectorParams{};
         break;
+      case SchemaField::GEO:
+        break;
     }
   }
 
