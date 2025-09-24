@@ -15,6 +15,7 @@ target_link_libraries(dfly_search_core base redis_lib absl::strings
 if(USE_SIMSIMD)
   target_link_libraries(dfly_search_core TRDP::simsimd)
   target_compile_definitions(dfly_search_core PRIVATE USE_SIMSIMD=1)
+  target_compile_options(dfly_search_core PRIVATE "-march=native")
 
   # Conditionally disable native float16 support (default behavior)
   if(NOT SIMSIMD_NATIVE_F16)

@@ -1674,9 +1674,10 @@ static void BM_VectorDistance(benchmark::State& state) {
 
   size_t pair_idx = 0;
   for (auto _ : state) {
-    float distance =
-        VectorDistance(vectors_a[pair_idx].data(), vectors_b[pair_idx].data(), dims, sim);
-    benchmark::DoNotOptimize(distance);
+    for (unsigned i = 0; i < 100; ++i) {
+      benchmark::DoNotOptimize(
+          VectorDistance(vectors_a[pair_idx].data(), vectors_b[pair_idx].data(), dims, sim));
+    }
     pair_idx = (pair_idx + 1) % num_pairs;
   }
 
@@ -1771,15 +1772,13 @@ BENCHMARK(BM_VectorDistance)
     // Very large vectors - IP Distance
     ->Args({1536, 100, static_cast<int>(VectorSimilarity::IP)})
     ->Args({1536, 1000, static_cast<int>(VectorSimilarity::IP)})
-    ->ArgNames({"dims", "pairs", "similarity"})
-    ->Unit(benchmark::kMicrosecond);
+    ->ArgNames({"dims", "pairs", "similarity"});
 
 BENCHMARK(BM_VectorDistance_Intensive)
     ->Arg(static_cast<int>(VectorSimilarity::L2))
     ->Arg(static_cast<int>(VectorSimilarity::COSINE))
     ->Arg(static_cast<int>(VectorSimilarity::IP))
-    ->ArgNames({"similarity_type"})
-    ->Unit(benchmark::kMicrosecond);
+    ->ArgNames({"similarity_type"});
 
 }  // namespace search
 }  // namespace dfly
