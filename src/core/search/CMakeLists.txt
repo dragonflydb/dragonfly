@@ -12,6 +12,18 @@ add_library(dfly_search_core base.cc ast_expr.cc query_driver.cc search.cc indic
 target_link_libraries(dfly_search_core base redis_lib absl::strings
   TRDP::reflex TRDP::uni-algo TRDP::hnswlib)
 
+if(USE_SIMSIMD)
+  target_link_libraries(dfly_search_core TRDP::simsimd)
+  target_compile_definitions(dfly_search_core PRIVATE USE_SIMSIMD=1)
+
+  # Conditionally disable native float16 support (default behavior)
+  if(NOT SIMSIMD_NATIVE_F16)
+    target_compile_definitions(dfly_search_core PRIVATE
+      SIMSIMD_NATIVE_F16=0
+      SIMSIMD_NATIVE_BF16=0)
+  endif()
+endif()
+
 cxx_test(compressed_sorted_set_test dfly_search_core LABELS DFLY)
 cxx_test(block_list_test dfly_search_core LABELS DFLY)
 cxx_test(range_tree_test dfly_search_core LABELS DFLY)
@@ -22,4 +34,11 @@ cxx_test(search_test redis_test_lib dfly_search_core LABELS DFLY)
 if(USE_SIMSIMD)
   target_link_libraries(search_test TRDP::simsimd)
   target_compile_definitions(search_test PRIVATE USE_SIMSIMD=1)
+
+  # Conditionally disable native float16 support (default behavior)
+  if(NOT SIMSIMD_NATIVE_F16)
+    target_compile_definitions(search_test PRIVATE
+      SIMSIMD_NATIVE_F16=0
+      SIMSIMD_NATIVE_BF16=0)
+  endif()
 endif()

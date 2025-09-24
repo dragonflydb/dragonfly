@@ -167,7 +167,7 @@ add_third_party(
 if(USE_SIMSIMD)
   add_third_party(
     simsimd
-    URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.4.9.tar.gz
+    URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.5.3.tar.gz
     BUILD_COMMAND echo SKIP
     INSTALL_COMMAND cp -R <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/simsimd/
     LIB "none"
