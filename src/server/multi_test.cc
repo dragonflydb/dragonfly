@@ -52,6 +52,10 @@ const char kKeySid2[] = "b";
 class MultiTest : public BaseFamilyTest {
  protected:
   MultiTest() : BaseFamilyTest() {
+    const auto& dirs = google::GetLoggingDirectories();
+    for (const auto& d : dirs) {
+      LOG(ERROR) << "Logging to directory: " << d;
+    }
     num_threads_ = kPoolThreadCount;
   }
 };

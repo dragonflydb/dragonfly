@@ -303,6 +303,12 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
     DCHECK(absl::StartsWith(k, family_of_commands_.back().back()));
     cmd.SetBitIndex(1ULL << (bit_index_ - 1));
   }
+
+  absl::flat_hash_map<std::string, CommandId> cmd_map_tmp;
+  cmd_map_tmp.emplace("QUIT", CommandId("QUIT", CO::FAST | CO::NOSCRIPT, 1, 0, 0));
+  cmd_map_tmp.emplace("MULTI", CommandId("MULTI", CO::FAST | CO::NOSCRIPT, 1, 0, 0));
+
+  LOG(INFO) << "Registering command: " << k << " cmd_map capacity: " << cmd_map_.capacity();
   CHECK(cmd_map_.emplace(k, std::move(cmd)).second) << k;
 
   return *this;

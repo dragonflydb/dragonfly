@@ -69,7 +69,7 @@ jobs:
             -d '{"text": "'"${message}"'"}'
 
   build-macos:
-    runs-on: macos-14
+    runs-on: macos-14 # To use modern bison
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -92,10 +92,12 @@ jobs:
       - name: Configure & Build
         run: |
           cd $GITHUB_WORKSPACE/build
+          echo "*************************** ENVIRONMENT **************************************"
+          env
+          echo "*************************** ENVIRONMENT **************************************"
 
           export PATH=/opt/homebrew/bin:$PATH
           export PATH=/opt/homebrew/opt/bison/bin/:$PATH
-
           which bison
           bison --version
 
@@ -114,6 +116,7 @@ jobs:
       - name: Test
         run: |
             cd $GITHUB_WORKSPACE/build
+            echo "TMPDIR=$TMPDIR" >> $GITHUB_ENV
             ctest -V -L DFLY
 
       - name: Send notification on failure
@@ -127,3 +130,18 @@ jobs:
             -H 'Content-Type: application/json' \
             '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
             -d '{"text": "'"${message}"'"}'
+      - name: List logs on failure
+        if: failure()
+        run: |
+          echo "Listing log files in $TMPDIR"
+          ls -l $TMPDIR/
+          echo "Listing log files matching pattern"
+          ls -l ${{ env.TMPDIR }}/*log.INFO.*
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit_logs
+          path: |
+            ${{ env.TMPDIR }}/*log.INFO.*
