@@ -17,7 +17,6 @@ from tempfile import gettempdir, mkdtemp
 from time import sleep
 from typing import Dict, List, Union
 
-import pymemcache
 import pytest
 import pytest_asyncio
 import redis
@@ -312,15 +311,6 @@ def pytest_generate_tests(metafunc):
 @pytest.fixture(scope="session")
 def port_picker():
     yield PortPicker()
-
-
-@pytest.fixture(scope="function")
-def memcached_client(df_server: DflyInstance):
-    client = pymemcache.Client(f"127.0.0.1:{df_server.mc_port}", default_noreply=False)
-
-    yield client
-
-    client.flush_all()
 
 
 @pytest.fixture(scope="session")
