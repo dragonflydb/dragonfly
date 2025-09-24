@@ -3246,27 +3246,46 @@ TEST_F(SearchFamilyTest, NumericFilter) {
   Run({"FLUSHALL"});
 }
 
+TEST_F(SearchFamilyTest, MAXSEARCHRESULTS) {
+  EXPECT_EQ(Run({"HSET", "s1", "phrase", "hello world"}), 1);
+  EXPECT_EQ(Run({"HSET", "s2", "phrase", "hello simple world"}), 1);
+  EXPECT_EQ(Run({"HSET", "s3", "phrase", "hello somewhat less simple world"}), 1);
+  EXPECT_EQ(Run({"FT.CREATE", "memes", "SCHEMA", "phrase", "TEXT"}), "OK");
 
-TEST_F(SearchFamilyTest, FtConfigCmd) {
   auto resp = Run({"FT.CONFIG", "GET", "MAXSEARCHRESULTS"});
   EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1000000"));
+
+  resp = Run({"FT.SEARCH", "memes", "@phrase:(hello world)", "NOCONTENT"});
+  EXPECT_THAT(resp, RespElementsAre(IntArg(3), _, _, _));
 
   resp = Run({"FT.CONFIG", "SET", "MAXSEARCHRESULTS", "1"});
   EXPECT_EQ(resp, "OK");
 
-  resp = Run({"FT.CONFIG", "GET", "MAXSEARCHRESULTS"});
-  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1"));
+  resp = Run({"FT.SEARCH", "memes", "@phrase:(hello world)", "NOCONTENT"});
+  EXPECT_THAT(resp, RespElementsAre(IntArg(3), _));
 
-  resp = Run({"FT.CONFIG", "GET", "*"});
+  resp = Run({"FT.SEARCH", "memes", "@phrase:(hello world)", "NOCONTENT", "LIMIT", "0", "1"});
+  EXPECT_THAT(resp, RespElementsAre(IntArg(3), _));
+
+  resp = Run({"FT.SEARCH", "memes", "@phrase:(hello world)", "NOCONTENT", "LIMIT", "0", "3"});
+  EXPECT_THAT(resp, ErrArg("LIMIT exceeds maximum of 1"));
+
+  resp = Run({"FT.CONFIG", "GET", "MAXSEARCHRESULTS"});
   EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1"));
 
   resp = Run({"FT.CONFIG", "HELP", "MAXSEARCHRESULTS"});
   EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "Description",
                             "Maximum number of results from ft.search command", "Value", "1"));
 
+  resp = Run({"FT.CONFIG", "GET", "*"});
+  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1"));
+
   resp = Run({"FT.CONFIG", "HELP", "*"});
   EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "Description",
                             "Maximum number of results from ft.search command", "Value", "1"));
+
+  // restore normal value for other tests
+  Run({"FT.CONFIG", "SET", "MAXSEARCHRESULTS", "1000000"});
 }
 
 TEST_F(SearchFamilyTest, InvalidConfigOptions) {

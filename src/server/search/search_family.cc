@@ -35,8 +35,8 @@
 #include "src/core/overloaded.h"
 
 ABSL_FLAG(bool, search_reject_legacy_field, true, "FT.AGGREGATE: Reject legacy field names.");
-// MAXSEARCHRESULTS isn't used yet, I've added it to make tests
-ABSL_FLAG(uint32_t, MAXSEARCHRESULTS, 1000000, "Maximum number of results from ft.search command");
+
+ABSL_FLAG(size_t, MAXSEARCHRESULTS, 1000000, "Maximum number of results from ft.search command");
 namespace dfly {
 
 using namespace std;
@@ -389,11 +389,16 @@ search::QueryParams ParseQueryParams(CmdArgParser* parser) {
 ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
   SearchParams params;
 
+  const size_t max_results = absl::GetFlag(FLAGS_MAXSEARCHRESULTS);
+
   while (parser->HasNext()) {
     // [LIMIT offset total]
     if (parser->Check("LIMIT")) {
       params.limit_offset = parser->Next<size_t>();
       params.limit_total = parser->Next<size_t>();
+      if (params.limit_total > max_results) {
+        return CreateSyntaxError(absl::StrFormat("LIMIT exceeds maximum of %d", max_results));
+      }
     } else if (parser->Check("LOAD")) {
       if (params.return_fields) {
         return CreateSyntaxError("LOAD cannot be applied after RETURN"sv);
@@ -421,6 +426,8 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
       parser->Skip(1);
     }
   }
+
+  params.limit_total = std::min(params.limit_total, max_results);
 
   return params;
 }
