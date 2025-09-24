@@ -3246,4 +3246,54 @@ TEST_F(SearchFamilyTest, NumericFilter) {
   Run({"FLUSHALL"});
 }
 
+
+TEST_F(SearchFamilyTest, FtConfigCmd) {
+  auto resp = Run({"FT.CONFIG", "GET", "MAXSEARCHRESULTS"});
+  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1000000"));
+
+  resp = Run({"FT.CONFIG", "SET", "MAXSEARCHRESULTS", "1"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CONFIG", "GET", "MAXSEARCHRESULTS"});
+  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1"));
+
+  resp = Run({"FT.CONFIG", "GET", "*"});
+  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1"));
+
+  resp = Run({"FT.CONFIG", "HELP", "MAXSEARCHRESULTS"});
+  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "Description",
+                            "Maximum number of results from ft.search command", "Value", "1"));
+
+  resp = Run({"FT.CONFIG", "HELP", "*"});
+  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "Description",
+                            "Maximum number of results from ft.search command", "Value", "1"));
+}
+
+TEST_F(SearchFamilyTest, InvalidConfigOptions) {
+  // Test with an invalid argument
+  auto resp = Run({"FT.CONFIG", "INVALIDARG", "INVLIDARG"});
+  EXPECT_THAT(resp, ErrArg("Unknown subcommand"));
+
+  // Test with an invalid argument
+  resp = Run({"FT.CONFIG", "GET", "INVALIDARG"});
+  EXPECT_THAT(resp, IsArray());
+
+  // Test with an invalid argument
+  resp = Run({"FT.CONFIG", "SET", "INVALIDARG"});
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
+
+  // Test with an invalid argument
+  resp = Run({"FT.CONFIG", "SET", "INVALIDARG", "5"});
+  EXPECT_THAT(resp, ErrArg("Invalid option"));
+
+  // Test with an invalid value
+  resp = Run({"FT.CONFIG", "SET", "MAXSEARCHRESULTS", "not_a_number"});
+  EXPECT_THAT(resp, ErrArg("ERR FT.CONFIG SET failed (possibly related to argument "
+                           "'MAXSEARCHRESULTS') - argument can not be set"));
+
+  // Test with an invalid argument
+  resp = Run({"FT.CONFIG", "HELP", "INVALIDARG"});
+  EXPECT_THAT(resp, IsArray());
+}
+
 }  // namespace dfly
