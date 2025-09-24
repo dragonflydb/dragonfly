@@ -16,10 +16,8 @@ using namespace std;
 namespace {
 
 #ifdef USE_SIMSIMD
-// Disable native float16 support for maximum compatibility across platforms
-// while still benefiting from SIMD optimizations for float32 operations
-#define SIMSIMD_NATIVE_F16 0
-#define SIMSIMD_NATIVE_BF16 0
+// Native float16 support is controlled via CMake option SIMSIMD_NATIVE_F16
+// Default behavior disables native F16/BF16 for maximum compatibility
 #include <simsimd/simsimd.h>
 #endif
 
