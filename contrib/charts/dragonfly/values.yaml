@@ -97,6 +97,8 @@ storage:
   storageClassName: ""
   # -- Volume size to request for the PVC
   requests: 128Mi
+  # If set, use this existing PVC instead of creating a new one (requires replicaCount: 1)
+  existingClaimName: ""
 
 tls:
   # -- enable TLS

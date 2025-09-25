@@ -25,6 +25,13 @@ spec:
         {{- include "dragonfly.selectorLabels" . | nindent 8 }}
     spec:
       {{- include "dragonfly.pod" . | trim | nindent 6 }}
+      {{- if .Values.storage.existingClaimName }}
+      volumes:
+        - name: "{{ .Release.Name }}-data"
+          persistentVolumeClaim:
+            claimName: {{ .Values.storage.existingClaimName }}
+      {{- end }}
+  {{- if not .Values.storage.existingClaimName }}
   volumeClaimTemplates:
     - metadata:
         name: "{{ .Release.Name }}-data"
@@ -34,4 +41,5 @@ spec:
         resources:
           requests:
             storage: {{ .Values.storage.requests }}
+  {{- end }}
 {{- end }}
