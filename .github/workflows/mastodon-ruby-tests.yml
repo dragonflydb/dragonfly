@@ -52,7 +52,7 @@ jobs:
 
     steps:
       - name: Checkout mastodon
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: mastodon/mastodon
       - name: Install pre-requisites
@@ -65,7 +65,7 @@ jobs:
           ruby-version: 3.4
           bundler-cache: true
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version-file: '.nvmrc'
       - name: Enable corepack
