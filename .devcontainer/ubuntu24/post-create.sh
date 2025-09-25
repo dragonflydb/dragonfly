@@ -1,1 +1,0 @@
-../ubuntu22/post-create.sh
