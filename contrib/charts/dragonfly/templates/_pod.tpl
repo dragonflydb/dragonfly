@@ -64,10 +64,16 @@ containers:
   {{- end }}
   {{- end }}
   - name: {{ .Chart.Name }}
-    {{- with .Values.securityContext }}
     securityContext:
-      {{- toYaml . | trim | nindent 6 }}
-    {{- end }}
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      runAsUser: 1000
+      seccompProfile:
+        type: RuntimeDefault
     image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
     imagePullPolicy: {{ .Values.image.pullPolicy }}
     ports:
