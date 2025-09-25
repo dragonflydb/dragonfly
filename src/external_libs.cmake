@@ -172,8 +172,8 @@ if(USE_SIMSIMD)
       URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.5.3.tar.gz
 
       CMAKE_PASS_FLAGS "-DSIMSIMD_NATIVE_F16=${SIMSIMD_NATIVE_F16} -DSIMSIMD_NATIVE_BF16=${SIMSIMD_NATIVE_F16} -DSIMSIMD_BUILD_SHARED=ON"
-      BUILD_COMMAND make all
-      INSTALL_COMMAND bash -c "mkdir -p ${THIRD_PARTY_LIB_DIR}/simsimd/lib && cp -R <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/simsimd/ && find <BINARY_DIR> -name libsimsimd.so -exec cp {} ${THIRD_PARTY_LIB_DIR}/simsimd/lib/ \\;"
+      BUILD_COMMAND bash -c "mkdir -p ${THIRD_PARTY_LIB_DIR}/simsimd/lib && make all"
+      INSTALL_COMMAND cp -R <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/simsimd/
       LIB libsimsimd.so
     )
   else()
@@ -221,7 +221,8 @@ if(USE_SIMSIMD)
       add_dependencies(TRDP::simsimd simsimd_project)
       set_target_properties(TRDP::simsimd PROPERTIES
                             IMPORTED_LOCATION "${THIRD_PARTY_LIB_DIR}/simsimd/lib/libsimsimd.so"
-                            INTERFACE_INCLUDE_DIRECTORIES "${THIRD_PARTY_LIB_DIR}/simsimd/include")
+                            INTERFACE_INCLUDE_DIRECTORIES "${THIRD_PARTY_LIB_DIR}/simsimd/include"
+                            IMPORTED_NO_SONAME ON)
       message(STATUS "SimSIMD: Configured for SHARED linking")
     else()
       # Static library configuration
