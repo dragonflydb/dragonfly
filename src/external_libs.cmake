@@ -165,15 +165,29 @@ add_third_party(
 )
 
 if(USE_SIMSIMD)
-  add_third_party(
-    simsimd
-    URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.5.3.tar.gz
+  if(SIMSIMD_LINK_SHARED)
+    # Dynamic/Shared library build
+    add_third_party(
+      simsimd
+      URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.5.3.tar.gz
 
-    CMAKE_PASS_FLAGS "-DSIMSIMD_NATIVE_F16=${SIMSIMD_NATIVE_F16} -DSIMSIMD_NATIVE_BF16=${SIMSIMD_NATIVE_F16} -DSIMSIMD_BUILD_SHARED=OFF"
-    BUILD_COMMAND bash -c "make all && gcc -c -fPIC -I<SOURCE_DIR>/include <SOURCE_DIR>/c/lib.c -o <BINARY_DIR>/lib.o && ar rcs <BINARY_DIR>/libsimsimd.a <BINARY_DIR>/lib.o"
-    INSTALL_COMMAND bash -c "mkdir -p ${THIRD_PARTY_LIB_DIR}/simsimd/lib && cp -R <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/simsimd/ && cp <BINARY_DIR>/libsimsimd.a ${THIRD_PARTY_LIB_DIR}/simsimd/lib/"
-    LIB libsimsimd.a
-  )
+      CMAKE_PASS_FLAGS "-DSIMSIMD_NATIVE_F16=${SIMSIMD_NATIVE_F16} -DSIMSIMD_NATIVE_BF16=${SIMSIMD_NATIVE_F16} -DSIMSIMD_BUILD_SHARED=ON"
+      BUILD_COMMAND make all
+      INSTALL_COMMAND bash -c "mkdir -p ${THIRD_PARTY_LIB_DIR}/simsimd/lib && cp -R <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/simsimd/ && find <BINARY_DIR> -name libsimsimd.so -exec cp {} ${THIRD_PARTY_LIB_DIR}/simsimd/lib/ \\;"
+      LIB libsimsimd.so
+    )
+  else()
+    # Static library build
+    add_third_party(
+      simsimd
+      URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.5.3.tar.gz
+
+      CMAKE_PASS_FLAGS "-DSIMSIMD_NATIVE_F16=${SIMSIMD_NATIVE_F16} -DSIMSIMD_NATIVE_BF16=${SIMSIMD_NATIVE_F16} -DSIMSIMD_BUILD_SHARED=OFF"
+      BUILD_COMMAND bash -c "make all && gcc -c -fPIC -I<SOURCE_DIR>/include <SOURCE_DIR>/c/lib.c -o <BINARY_DIR>/lib.o && ar rcs <BINARY_DIR>/libsimsimd.a <BINARY_DIR>/lib.o"
+      INSTALL_COMMAND bash -c "mkdir -p ${THIRD_PARTY_LIB_DIR}/simsimd/lib && cp -R <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/simsimd/ && cp <BINARY_DIR>/libsimsimd.a ${THIRD_PARTY_LIB_DIR}/simsimd/lib/"
+      LIB libsimsimd.a
+    )
+  endif()
 endif()
 
 
@@ -201,10 +215,22 @@ set_target_properties(TRDP::fast_float PROPERTIES
 
 if(USE_SIMSIMD)
   if(NOT TARGET TRDP::simsimd)
-    add_library(TRDP::simsimd STATIC IMPORTED)
-    add_dependencies(TRDP::simsimd simsimd_project)
-    set_target_properties(TRDP::simsimd PROPERTIES
-                          IMPORTED_LOCATION "${THIRD_PARTY_LIB_DIR}/simsimd/lib/libsimsimd.a"
-                          INTERFACE_INCLUDE_DIRECTORIES "${THIRD_PARTY_LIB_DIR}/simsimd/include")
+    if(SIMSIMD_LINK_SHARED)
+      # Dynamic/Shared library configuration
+      add_library(TRDP::simsimd SHARED IMPORTED)
+      add_dependencies(TRDP::simsimd simsimd_project)
+      set_target_properties(TRDP::simsimd PROPERTIES
+                            IMPORTED_LOCATION "${THIRD_PARTY_LIB_DIR}/simsimd/lib/libsimsimd.so"
+                            INTERFACE_INCLUDE_DIRECTORIES "${THIRD_PARTY_LIB_DIR}/simsimd/include")
+      message(STATUS "SimSIMD: Configured for SHARED linking")
+    else()
+      # Static library configuration
+      add_library(TRDP::simsimd STATIC IMPORTED)
+      add_dependencies(TRDP::simsimd simsimd_project)
+      set_target_properties(TRDP::simsimd PROPERTIES
+                            IMPORTED_LOCATION "${THIRD_PARTY_LIB_DIR}/simsimd/lib/libsimsimd.a"
+                            INTERFACE_INCLUDE_DIRECTORIES "${THIRD_PARTY_LIB_DIR}/simsimd/include")
+      message(STATUS "SimSIMD: Configured for STATIC linking")
+    endif()
   endif()
 endif()
