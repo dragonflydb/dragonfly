@@ -104,8 +104,9 @@ namespace {
 #ifdef NDEBUG
 constexpr size_t kFiberDefaultStackSize = 32_KB - 16;
 #else
-// We leave the same stack size for debug mode, to find out the possible stack overflow bugs.
-constexpr size_t kFiberDefaultStackSize = 32_KB - 16;
+// Increase stack size for debug builds, because some compilers can create exec, that consumes much
+// mores stack.
+constexpr size_t kFiberDefaultStackSize = 40_KB - 16;
 #endif
 
 enum class TermColor { kDefault, kRed, kGreen, kYellow };
