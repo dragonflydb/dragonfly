@@ -77,9 +77,7 @@ double toDouble(string_view src);
 
 %token <std::string> DOUBLE "double"
 %token <std::string> UINT32 "uint32"
-%nterm <double> generic_number
-%nterm <bool> opt_lparen
-%nterm <AstExpr> final_query filter search_expr search_unary_expr search_or_expr search_and_expr numeric_filter_expr geo_filter_expr
+%nterm <AstExpr> final_query filter search_expr search_unary_expr search_or_expr search_and_expr bracket_filter_expr
 %nterm <AstExpr> field_cond field_cond_expr field_unary_expr field_or_expr field_and_expr tag_list
 %nterm <AstTagsNode::TagValueProxy> tag_list_element
 
@@ -149,24 +147,45 @@ field_cond:
   | STAR                                                { $$ = AstStarFieldNode();           }
   | NOT_OP field_cond                                   { $$ = AstNegateNode(std::move($2)); }
   | LPAREN field_cond_expr RPAREN                       { $$ = std::move($2); }
-  | LBRACKET numeric_filter_expr RBRACKET               { $$ = std::move($2); }
-  | LBRACKET geo_filter_expr RBRACKET                   { $$ = std::move($2); }
+  | LBRACKET bracket_filter_expr RBRACKET               { $$ = std::move($2); }
   | LCURLBR tag_list RCURLBR                            { $$ = std::move($2); }
 
-numeric_filter_expr:
-  opt_lparen generic_number opt_lparen generic_number         { $$ = AstRangeNode($2, $1, $4, $3); }
-  | opt_lparen generic_number COMMA opt_lparen generic_number { $$ = AstRangeNode($2, $1, $5, $4); }
-
-geo_filter_expr:
-  DOUBLE DOUBLE UINT32 TERM { $$ = AstGeoNode(toDouble($1), toDouble($2), toUint32($3), std::move($4)); }
-
-generic_number:
-  DOUBLE { $$ = toDouble($1); }
-  | UINT32 { $$ = toUint32($1); }
-
-opt_lparen:
-  /* empty */ { $$ = false; }
-  | LPAREN { $$ = true; }
+bracket_filter_expr:
+  /* Numeric filter has form [(] UINT32|DOUBLE [COMMA] [(] UINT32|DOUBLE */
+  DOUBLE DOUBLE                                { $$ = AstRangeNode(toDouble($1), false, toDouble($2), false); }
+  | LPAREN DOUBLE DOUBLE                       { $$ = AstRangeNode(toDouble($2), true, toDouble($3), false); }
+  | DOUBLE LPAREN DOUBLE                       { $$ = AstRangeNode(toDouble($1), false, toDouble($3), true); }
+  | LPAREN DOUBLE LPAREN DOUBLE                { $$ = AstRangeNode(toDouble($2), true, toDouble($4), true); }
+  | DOUBLE UINT32                              { $$ = AstRangeNode(toDouble($1), false, toUint32($2), false); }
+  | LPAREN DOUBLE UINT32                       { $$ = AstRangeNode(toDouble($2), true, toUint32($3), false); }
+  | DOUBLE LPAREN UINT32                       { $$ = AstRangeNode(toDouble($1), false, toUint32($3), true); }
+  | LPAREN DOUBLE LPAREN UINT32                { $$ = AstRangeNode(toDouble($2), true, toUint32($4), true); }
+  | UINT32 DOUBLE                              { $$ = AstRangeNode(toUint32($1), false, toDouble($2), false); }
+  | LPAREN UINT32 DOUBLE                       { $$ = AstRangeNode(toUint32($2), true, toDouble($3), false); }
+  | UINT32 LPAREN DOUBLE                       { $$ = AstRangeNode(toUint32($1), false, toDouble($3), true); }
+  | LPAREN UINT32 LPAREN DOUBLE                { $$ = AstRangeNode(toUint32($2), true, toDouble($4), true); }
+  | UINT32 UINT32                              { $$ = AstRangeNode(toUint32($1), false, toUint32($2), false); }
+  | LPAREN UINT32 UINT32                       { $$ = AstRangeNode(toUint32($2), true, toUint32($3), false); }
+  | UINT32 LPAREN UINT32                       { $$ = AstRangeNode(toUint32($1), false, toUint32($3), true); }
+  | LPAREN UINT32 LPAREN UINT32                { $$ = AstRangeNode(toUint32($2), true, toUint32($4), true); }
+  | DOUBLE COMMA DOUBLE                        { $$ = AstRangeNode(toDouble($1), false, toDouble($3), false); }
+  | DOUBLE COMMA UINT32                        { $$ = AstRangeNode(toDouble($1), false, toUint32($3), false); }
+  | UINT32 COMMA DOUBLE                        { $$ = AstRangeNode(toUint32($1), false, toDouble($3), false); }
+  | UINT32 COMMA UINT32                        { $$ = AstRangeNode(toUint32($1), false, toUint32($3), false); }
+  | LPAREN DOUBLE COMMA DOUBLE                 { $$ = AstRangeNode(toDouble($2), true, toDouble($4), false); }
+  | DOUBLE COMMA LPAREN DOUBLE                 { $$ = AstRangeNode(toDouble($1), false, toDouble($4), true); }
+  | LPAREN DOUBLE COMMA LPAREN DOUBLE          { $$ = AstRangeNode(toDouble($2), true, toDouble($5), true); }
+  | LPAREN DOUBLE COMMA UINT32                 { $$ = AstRangeNode(toDouble($2), true, toUint32($4), false); }
+  | DOUBLE COMMA LPAREN UINT32                 { $$ = AstRangeNode(toDouble($1), false, toUint32($4), true); }
+  | LPAREN DOUBLE COMMA LPAREN UINT32          { $$ = AstRangeNode(toDouble($2), true, toUint32($5), true); }
+  | LPAREN UINT32 COMMA DOUBLE                 { $$ = AstRangeNode(toUint32($2), true, toDouble($4), false); }
+  | UINT32 COMMA LPAREN DOUBLE                 { $$ = AstRangeNode(toUint32($1), false, toDouble($4), true); }
+  | LPAREN UINT32 COMMA LPAREN DOUBLE          { $$ = AstRangeNode(toUint32($2), true, toDouble($5), true); }
+  | LPAREN UINT32 COMMA UINT32                 { $$ = AstRangeNode(toUint32($2), true, toUint32($4), false); }
+  | UINT32 COMMA LPAREN UINT32                 { $$ = AstRangeNode(toUint32($1), false, toUint32($4), true); }
+  | LPAREN UINT32 COMMA LPAREN UINT32          { $$ = AstRangeNode(toUint32($2), true, toUint32($5), true); }
+  /* This is rule for GEO filter */
+  | DOUBLE DOUBLE UINT32 TERM                  { $$ = AstGeoNode(toDouble($1), toDouble($2), toUint32($3), std::move($4)); }
 
 field_cond_expr:
   field_unary_expr { $$ = std::move($1); }
