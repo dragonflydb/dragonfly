@@ -22,6 +22,14 @@ void QueryDriver::Error(const Parser::location_type& loc, std::string_view msg) 
   VLOG(1) << "Parse error " << loc << ": " << msg;
 }
 
+void QueryDriver::SetOptionalFilters(const OptionalFilters* filters) {
+  if (filters) {
+    for (auto& [field, filter] : *filters) {
+      expr_ = AstLogicalNode(std::move(expr_), filter->Node(field), AstLogicalNode::AND);
+    }
+  }
+}
+
 }  // namespace search
 
 }  // namespace dfly

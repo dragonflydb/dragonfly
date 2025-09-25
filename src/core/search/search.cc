@@ -31,12 +31,14 @@ namespace dfly::search {
 
 namespace {
 
-AstExpr ParseQuery(std::string_view query, const QueryParams* params) {
+AstExpr ParseQuery(std::string_view query, const QueryParams* params,
+                   const OptionalFilters* filters) {
   QueryDriver driver{};
   driver.ResetScanner();
   driver.SetParams(params);
   driver.SetInput(std::string{query});
   (void)Parser (&driver)();  // can throw
+  driver.SetOptionalFilters(filters);
   return driver.Take();
 }
 
@@ -430,6 +432,10 @@ struct BasicSearch {
 
 }  // namespace
 
+AstNode OptionalNumericFilter::Node(std::string field) {
+  return AstFieldNode{"@" + field, AstRangeNode(lo_, false, hi_, false)};
+}
+
 string_view Schema::LookupAlias(string_view alias) const {
   if (auto it = field_names.find(alias); it != field_names.end())
     return it->second;
@@ -611,9 +617,10 @@ const Synonyms* FieldIndices::GetSynonyms() const {
 SearchAlgorithm::SearchAlgorithm() = default;
 SearchAlgorithm::~SearchAlgorithm() = default;
 
-bool SearchAlgorithm::Init(string_view query, const QueryParams* params) {
+bool SearchAlgorithm::Init(string_view query, const QueryParams* params,
+                           const OptionalFilters* filters) {
   try {
-    query_ = make_unique<AstExpr>(ParseQuery(query, params));
+    query_ = make_unique<AstExpr>(ParseQuery(query, params, filters));
   } catch (const Parser::syntax_error& se) {
     LOG(INFO) << "Failed to parse query \"" << query << "\":" << se.what();
     return false;

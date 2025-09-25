@@ -38,6 +38,19 @@ struct QueryParams {
   absl::flat_hash_map<std::string, std::string> params;
 };
 
+// Base class for optional search filters
+
+class AstNode;
+
+struct OptionalFilterBase {
+  virtual bool IsEmpty() const = 0;
+  virtual AstNode Node(std::string field) = 0;
+  virtual ~OptionalFilterBase() = default;
+};
+
+using OptionalFilters =
+    absl::flat_hash_map<std::string /*field*/, std::unique_ptr<OptionalFilterBase> /* filter */>;
+
 // Values are either sortable as doubles or strings, or not sortable at all.
 using SortableValue = std::variant<std::monostate, double, std::string>;
 

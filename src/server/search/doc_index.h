@@ -113,6 +113,9 @@ struct SearchParams {
   std::optional<std::vector<FieldReference>> load_fields;
 
   std::optional<SortOption> sort_option;
+
+  search::OptionalFilters optional_filters;
+
   search::QueryParams query_params;
 
   bool ShouldReturnAllFields() const {
