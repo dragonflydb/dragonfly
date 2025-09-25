@@ -37,8 +37,11 @@ static bool InitializeSimSIMD() {
     // Log dynamic dispatch status
     LOG(INFO) << "Dynamic dispatch enabled: " << (simsimd_uses_dynamic_dispatch() ? "YES" : "NO");
 
-    // Log x86 backend capabilities
+    // Architecture-specific backend detection
+#if defined(__x86_64__) || defined(__amd64__) || defined(_M_X64) || defined(_M_AMD64)
+    // x86/x64 architecture - log Intel/AMD backend capabilities
     LOG(INFO) << "=== x86/x64 Backend Detection ===";
+    LOG(INFO) << "  Architecture:         x86_64";
     LOG(INFO) << "  Haswell (AVX2):       " << (simsimd_uses_haswell() ? "YES" : "NO");
     LOG(INFO) << "  Skylake (AVX512F):    " << (simsimd_uses_skylake() ? "YES" : "NO");
     LOG(INFO) << "  Ice Lake (AVX512BW):  " << (simsimd_uses_ice() ? "YES" : "NO");
@@ -47,8 +50,10 @@ static bool InitializeSimSIMD() {
     LOG(INFO) << "  Turin (AVX512VNNI):   " << (simsimd_uses_turin() ? "YES" : "NO");
     LOG(INFO) << "  Sierra (AVX10):       " << (simsimd_uses_sierra() ? "YES" : "NO");
 
-    // Log ARM backend capabilities
-    LOG(INFO) << "=== ARM Backend Detection ===";
+#elif defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    // ARM64 architecture - log ARM backend capabilities
+    LOG(INFO) << "=== ARM64 Backend Detection ===";
+    LOG(INFO) << "  Architecture:         aarch64";
     LOG(INFO) << "  NEON:                 " << (simsimd_uses_neon() ? "YES" : "NO");
     LOG(INFO) << "  NEON F16:             " << (simsimd_uses_neon_f16() ? "YES" : "NO");
     LOG(INFO) << "  NEON BF16:            " << (simsimd_uses_neon_bf16() ? "YES" : "NO");
@@ -57,6 +62,24 @@ static bool InitializeSimSIMD() {
     LOG(INFO) << "  SVE F16:              " << (simsimd_uses_sve_f16() ? "YES" : "NO");
     LOG(INFO) << "  SVE BF16:             " << (simsimd_uses_sve_bf16() ? "YES" : "NO");
     LOG(INFO) << "  SVE I8:               " << (simsimd_uses_sve_i8() ? "YES" : "NO");
+    LOG(INFO) << "  SVE2:                 " << (simsimd_uses_sve2() ? "YES" : "NO");
+
+#elif defined(__arm__) || defined(_M_ARM)
+    // ARM32 architecture - log ARM backend capabilities
+    LOG(INFO) << "=== ARM32 Backend Detection ===";
+    LOG(INFO) << "  Architecture:         arm32";
+    LOG(INFO) << "  NEON:                 " << (simsimd_uses_neon() ? "YES" : "NO");
+    LOG(INFO) << "  NEON F16:             " << (simsimd_uses_neon_f16() ? "YES" : "NO");
+    LOG(INFO) << "  NEON BF16:            " << (simsimd_uses_neon_bf16() ? "YES" : "NO");
+    LOG(INFO) << "  NEON I8:              " << (simsimd_uses_neon_i8() ? "YES" : "NO");
+    // Note: SVE/SVE2 not available on ARM32
+
+#else
+    // Unknown or other architecture
+    LOG(INFO) << "=== Unknown Architecture Backend Detection ===";
+    LOG(INFO) << "  Architecture:         unknown";
+    LOG(INFO) << "  Serial fallback will be used";
+#endif
 
     // Log compilation options
     LOG(INFO) << "=== SimSIMD Compilation Options ===";
