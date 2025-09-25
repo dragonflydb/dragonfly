@@ -16,9 +16,29 @@ using namespace std;
 namespace {
 
 #ifdef USE_SIMSIMD
-// Native float16 support is controlled via CMake option SIMSIMD_NATIVE_F16
-// Default behavior disables native F16/BF16 for maximum compatibility
+// Enable dynamic dispatch for automatic backend selection at runtime
+#define SIMSIMD_DYNAMIC_DISPATCH 1
+// Native float16/bfloat16 support is controlled via CMake option SIMSIMD_NATIVE_F16
+// Value is passed from CMake to both the SimSIMD library build and compile definitions
+// Default: OFF (disabled) for maximum compatibility across different compilers/platforms
 #include <simsimd/simsimd.h>
+
+// Initialize dynamic dispatch on first use
+static bool InitializeSimSIMD() {
+  static bool initialized = false;
+  if (!initialized) {
+    simsimd_capabilities();  // Initialize dynamic dispatch
+
+    // Log available capabilities for debugging
+    LOG(INFO) << "SimSIMD dynamic dispatch initialized successfully";
+
+    initialized = true;
+  }
+  return true;
+}
+
+// Ensure initialization happens
+static const bool simsimd_init_guard = InitializeSimSIMD();
 #endif
 
 #if defined(__GNUC__) && !defined(__clang__)
