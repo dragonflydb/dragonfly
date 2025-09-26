@@ -564,9 +564,13 @@ void BitCount(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser(args);
   auto key = parser.Next<string_view>();
 
-  std::pair<int64_t, int64_t> start_end =
-      parser.HasNext() ? std::pair<int64_t, int64_t>(parser.Next<int64_t, int64_t>())
-                       : std::pair<int64_t, int64_t>{0, std::numeric_limits<int64_t>::max()};
+  std::pair<int64_t, int64_t> start_end;
+  if (parser.HasNext()) {
+    auto tuple_result = parser.Next<int64_t, int64_t>();
+    start_end = std::make_pair(std::get<0>(tuple_result), std::get<1>(tuple_result));
+  } else {
+    start_end = std::make_pair(0, std::numeric_limits<int64_t>::max());
+  }
 
   bool as_bit = parser.HasNext() ? parser.MapNext("BYTE", false, "BIT", true) : false;
   auto* builder = cmd_cntx.rb;
