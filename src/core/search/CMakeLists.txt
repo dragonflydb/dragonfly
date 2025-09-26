@@ -16,10 +16,7 @@ if(USE_SIMSIMD)
   target_link_libraries(dfly_search_core TRDP::simsimd)
   target_compile_definitions(dfly_search_core PRIVATE
     USE_SIMSIMD=1
-    SIMSIMD_DYNAMIC_DISPATCH=1
-    SIMSIMD_NATIVE_F16=$<BOOL:${SIMSIMD_NATIVE_F16}>
-    SIMSIMD_NATIVE_BF16=$<BOOL:${SIMSIMD_NATIVE_F16}>
-    SIMSIMD_LINK_SHARED=$<BOOL:${SIMSIMD_LINK_SHARED}>)
+    SIMSIMD_DYNAMIC_DISPATCH=1)
 endif()
 
 cxx_test(compressed_sorted_set_test dfly_search_core LABELS DFLY)
@@ -33,8 +30,5 @@ if(USE_SIMSIMD)
   target_link_libraries(search_test TRDP::simsimd)
   target_compile_definitions(search_test PRIVATE
     USE_SIMSIMD=1
-    SIMSIMD_DYNAMIC_DISPATCH=1
-    SIMSIMD_NATIVE_F16=$<BOOL:${SIMSIMD_NATIVE_F16}>
-    SIMSIMD_NATIVE_BF16=$<BOOL:${SIMSIMD_NATIVE_F16}>
-    SIMSIMD_LINK_SHARED=$<BOOL:${SIMSIMD_LINK_SHARED}>)
+    SIMSIMD_DYNAMIC_DISPATCH=1)
 endif()

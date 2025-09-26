@@ -28,6 +28,9 @@ namespace {
 static bool InitializeSimSIMD() {
   static bool initialized = false;
   if (!initialized) {
+    // Probe capabilities to initialize dynamic dispatch machinery
+    (void)simsimd_capabilities();
+
     // Log dynamic dispatch status
     LOG(INFO) << "SimSIMD dynamic dispatch enabled: "
               << (simsimd_uses_dynamic_dispatch() ? "YES" : "NO");
