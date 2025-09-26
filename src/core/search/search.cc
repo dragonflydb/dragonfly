@@ -281,9 +281,8 @@ struct BasicSearch {
 
   IndexResult Search(const AstGeoNode& node, string_view active_field) {
     DCHECK(!active_field.empty());
-    double converted_radius = GeoIndex::ConvertToRadiusInMeters(node.radius, node.unit);
     if (auto* index = GetIndex<GeoIndex>(active_field); index) {
-      return IndexResult{index->RadiusSearch(node.lat, node.lon, converted_radius)};
+      return IndexResult{index->RadiusSearch(node.lat, node.lon, node.radius, node.unit)};
     }
     return IndexResult{};
   }
@@ -408,6 +407,7 @@ struct BasicSearch {
     // used by knn
 
     DCHECK(top_level || holds_alternative<AstKnnNode>(node.Variant()) ||
+           holds_alternative<AstGeoNode>(node.Variant()) ||
            visit([](auto* set) { return is_sorted(set->begin(), set->end()); }, result.Borrowed()));
 
     if (profile_builder_)

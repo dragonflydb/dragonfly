@@ -46,9 +46,9 @@ struct AstRangeNode {
 };
 
 struct AstGeoNode {
-  AstGeoNode(double lat, double lon, size_t radius, std::string unit);
+  AstGeoNode(double lat, double lon, double radius, std::string unit);
   double lat, lon;
-  size_t radius;
+  double radius;
   std::string unit;
 };
 

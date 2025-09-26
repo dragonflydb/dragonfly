@@ -12,8 +12,6 @@
 
 #include <boost/iterator/function_output_iterator.hpp>
 
-#include "util/fibers/fibers.h"
-
 #define UNI_ALGO_DISABLE_NFKC_NFKD
 
 #include <hnswlib/hnswalg.h>
@@ -92,6 +90,39 @@ void IterateAllSuffixes(const absl::flat_hash_set<string>& words,
       cb(word.substr(offs));
     }
   }
+}
+
+double ConvertToRadiusInMeters(size_t radius, std::string_view arg) {
+  const std::string unit = absl::AsciiStrToUpper(arg);
+  if (unit == "M") {
+    return radius * 1;
+  } else if (unit == "KM") {
+    return radius * 1000;
+  } else if (unit == "FT") {
+    return radius * 0.3048;
+  } else if (unit == "MI") {
+    return radius * 1609.34;
+  } else {
+    return -1;
+  }
+}
+
+std::optional<GeoIndex::point> GetGeoPoint(const DocumentAccessor& doc, string_view field) {
+  auto element = doc.GetStrings(field);
+
+  if (!element)
+    return std::nullopt;
+
+  absl::InlinedVector<string_view, 2> coordinates = absl::StrSplit(element.value()[0], ",");
+
+  if (coordinates.size() != 2)
+    return std::nullopt;
+
+  double lat, lon;
+  if (!absl::SimpleAtod(coordinates[0], &lat) || !absl::SimpleAtod(coordinates[1], &lon))
+    return nullopt;
+
+  return GeoIndex::point{lat, lon};
 }
 
 };  // namespace
@@ -638,15 +669,18 @@ void GeoIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) 
   rtree_->remove({doc_point.value(), id});
 }
 
-std::vector<DocId> GeoIndex::RadiusSearch(double lat, double lon, double radius) const {
+std::vector<DocId> GeoIndex::RadiusSearch(double lat, double lon, double radius,
+                                          std::string_view unit) {
   std::vector<DocId> results;
 
-  // Declare the geographic_point_circle strategy (with 36 points)
-  // Default template arguments (taking Andoyer strategy)
-  boost::geometry::strategy::buffer::geographic_point_circle<> point_strategy(36);
+  // Get radius in meters
+  double converted_radius = ConvertToRadiusInMeters(radius, unit);
+
+  // Declare the geographic_point_circle strategy with 4 points
+  boost::geometry::strategy::buffer::geographic_point_circle<> point_strategy(4);
 
   // Declare the distance strategy in meters around the point
-  boost::geometry::strategy::buffer::distance_symmetric<double> distance_strategy(radius);
+  boost::geometry::strategy::buffer::distance_symmetric<double> distance_strategy(converted_radius);
 
   // Declare other necessary strategies, unused for point
   boost::geometry::strategy::buffer::join_round join_strategy;
@@ -655,59 +689,32 @@ std::vector<DocId> GeoIndex::RadiusSearch(double lat, double lon, double radius)
 
   point p{lat, lon};
 
-  // Create the buffer of a point on the Earth
-  boost::geometry::model::multi_polygon<boost::geometry::model::polygon<point>> result;
+  // Create polygon with 4 point around point
+  boost::geometry::model::multi_polygon<boost::geometry::model::polygon<point>> buffer_polygon;
 
-  boost::geometry::buffer(p, result, distance_strategy, side_strategy, join_strategy, end_strategy,
-                          point_strategy);
+  boost::geometry::buffer(p, buffer_polygon, distance_strategy, side_strategy, join_strategy,
+                          end_strategy, point_strategy);
 
-  rtree_->query(boost::geometry::index::within(result),
-                boost::make_function_output_iterator(
-                    [&results](auto const& val) { results.push_back(val.second); }));
+  // Create bouding box around polygon to include all possible points
+  boost::geometry::model::box<point> box;
+  boost::geometry::envelope(buffer_polygon, box);
+
+  rtree_->query(
+      boost::geometry::index::within(box),
+      boost::make_function_output_iterator([&results, &p, &converted_radius](auto const& val) {
+        if (boost::geometry::distance(val.first, p) <= converted_radius) {
+          results.push_back(val.second);
+        }
+      }));
 
   return results;
 }
 
-double GeoIndex::ConvertToRadiusInMeters(size_t radius, std::string_view arg) {
-  const std::string unit = absl::AsciiStrToUpper(arg);
-  if (unit == "M") {
-    return radius * 1;
-  } else if (unit == "KM") {
-    return radius * 1000;
-  } else if (unit == "FT") {
-    return radius * 0.3048;
-  } else if (unit == "MI") {
-    return radius * 1609.34;
-  } else {
-    return -1;
-  }
-}
-
-std::optional<GeoIndex::point> GeoIndex::GetGeoPoint(const DocumentAccessor& doc,
-                                                     string_view field) {
-  auto element = doc.GetStrings(field);
-
-  if (!element) {
-    return std::nullopt;
-  }
-
-  absl::InlinedVector<string_view, 2> coordinates = absl::StrSplit(element.value()[0], ",");
-
-  if (coordinates.size() != 2) {
-    return std::nullopt;
-  }
-
-  double lat;
-  if (!absl::SimpleAtod(coordinates[0], &lat)) {
-    return std::nullopt;
-  }
-
-  double lon;
-  if (!absl::SimpleAtod(coordinates[1], &lon)) {
-    return std::nullopt;
-  }
-
-  return point{lat, lon};
+std::vector<DocId> GeoIndex::GetAllDocsWithNonNullValues() const {
+  std::vector<DocId> results;
+  std::for_each(boost::geometry::index::begin(*rtree_), boost::geometry::index::end(*rtree_),
+                [&results](auto const& val) { results.push_back(val.second); });
+  return results;
 }
 
 }  // namespace dfly::search

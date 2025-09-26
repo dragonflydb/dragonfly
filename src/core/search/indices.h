@@ -217,17 +217,11 @@ struct GeoIndex : public BaseIndex {
 
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
-  std::vector<DocId> RadiusSearch(double lat, double lon, double radius) const;
-
-  std::vector<DocId> GetAllDocsWithNonNullValues() const override {
-    return std::vector<DocId>{};
-  }
-
-  static double ConvertToRadiusInMeters(size_t radius, std::string_view arg);
+  std::vector<DocId> RadiusSearch(double lat, double lon, double radius, std::string_view arg);
+  std::vector<DocId> GetAllDocsWithNonNullValues() const override;
 
  private:
-  std::optional<point> GetGeoPoint(const DocumentAccessor& doc, std::string_view field);
-  using rtree = boost::geometry::index::rtree<index_entry, boost::geometry::index::quadratic<16>>;
+  using rtree = boost::geometry::index::rtree<index_entry, boost::geometry::index::linear<16>>;
   std::unique_ptr<rtree> rtree_;
 };
 

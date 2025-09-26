@@ -184,8 +184,9 @@ bracket_filter_expr:
   | LPAREN UINT32 COMMA UINT32                 { $$ = AstRangeNode(toUint32($2), true, toUint32($4), false); }
   | UINT32 COMMA LPAREN UINT32                 { $$ = AstRangeNode(toUint32($1), false, toUint32($4), true); }
   | LPAREN UINT32 COMMA LPAREN UINT32          { $$ = AstRangeNode(toUint32($2), true, toUint32($5), true); }
-  /* This is rule for GEO filter */
+  /* GEO filter */
   | DOUBLE DOUBLE UINT32 TERM                  { $$ = AstGeoNode(toDouble($1), toDouble($2), toUint32($3), std::move($4)); }
+  | DOUBLE DOUBLE DOUBLE TERM                  { $$ = AstGeoNode(toDouble($1), toDouble($2), toDouble($3), std::move($4)); }
 
 field_cond_expr:
   field_unary_expr { $$ = std::move($1); }
