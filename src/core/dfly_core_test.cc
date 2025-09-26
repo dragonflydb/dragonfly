@@ -2,6 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/container/flat_hash_map.h>
 #include <absl/strings/charconv.h>
 #include <absl/strings/numbers.h>
 #include <fast_float/fast_float.h>
@@ -96,6 +97,17 @@ TEST_F(TxQueueTest, Basic) {
 
   pq_.Insert(10);
   ASSERT_EQ(10, Pop());
+}
+
+TEST_F(TxQueueTest, Test) {
+  struct Val {
+    char buf[160];
+  };
+
+  absl::flat_hash_map<std::string, Val> cmd_map_tmp;
+  cmd_map_tmp.emplace("QUIT", Val{});
+  cmd_map_tmp.emplace("MULTI", Val{});
+  cmd_map_tmp.emplace("WATCH", Val{});
 }
 
 class IntentLockTest : public ::testing::Test {

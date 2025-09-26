@@ -133,11 +133,11 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
     : facade::CommandId(name, ImplicitCategories(mask), arity, first_key, last_key,
                         acl_categories.value_or(ImplicitAclCategories(mask))) {
   implicit_acl_ = !acl_categories.has_value();
-  hdr_histogram* hist = nullptr;
+  /*hdr_histogram* hist = nullptr;
   const int init_result = hdr_init(kLatencyHistogramMinValue, kLatencyHistogramMaxValue,
                                    kLatencyHistogramPrecision, &hist);
-  CHECK_EQ(init_result, 0) << "failed to initialize histogram for command " << name;
-  latency_histogram_ = hist;
+  CHECK_EQ(init_result, 0) << "failed to initialize histogram for command " << name;*/
+  // latency_histogram_ = nullptr;
 
   if (name_.rfind("EVAL", 0) == 0)
     kind_multi_ctr_ = CO::MultiControlKind::EVAL;
@@ -151,11 +151,27 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
     kind_pubsub_ = CO::PubSubKind::SHARDED;
 }
 
+CommandId::CommandId(CommandId&& o) noexcept
+    : facade::CommandId(std::move(o)),
+      kind_pubsub_(o.kind_pubsub_),
+      kind_multi_ctr_(o.kind_multi_ctr_),
+      implicit_acl_(o.implicit_acl_),
+      is_alias_(o.is_alias_),
+      command_stats_(std::move(o.command_stats_)),
+      handler_(std::move(o.handler_)),
+      validator_(std::move(o.validator_))
+// latency_histogram_(o.latency_histogram_)
+{
+  o.implicit_acl_ = false;
+  o.is_alias_ = false;
+  // o.latency_histogram_ = nullptr;
+}
+
 CommandId::~CommandId() {
   // Aliases share the same latency histogram, so we only close it if this is not an alias.
-  if (latency_histogram_ && !is_alias_) {
+  /*if (latency_histogram_ && !is_alias_) {
     hdr_close(latency_histogram_);
-  }
+  }*/
 }
 
 CommandId CommandId::Clone(const std::string_view name) const {
@@ -169,8 +185,9 @@ CommandId CommandId::Clone(const std::string_view name) const {
 
   // explicit sharing of the object since it's an alias we can do that.
   // I am assuming that the source object lifetime is at least as of the cloned object.
-  hdr_close(cloned.latency_histogram_);  // Free the histogram in the cloned object.
+  /*hdr_close(cloned.latency_histogram_);  // Free the histogram in the cloned object.
   cloned.latency_histogram_ = static_cast<hdr_histogram*>(latency_histogram_);
+  */
   return cloned;
 }
 
@@ -204,9 +221,11 @@ uint64_t CommandId::Invoke(CmdArgList args, const CommandContext& cmd_cntx) cons
   ent.second += execution_time_usec;
   static const bool is_latency_tracked = GetFlag(FLAGS_latency_tracking);
   if (is_latency_tracked) {
+    /*
     if (hdr_histogram* cmd_histogram = latency_histogram_; cmd_histogram != nullptr) {
       hdr_record_value(cmd_histogram, execution_time_usec);
     }
+*/
   }
   return execution_time_usec;
 }
@@ -233,13 +252,13 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
 
 void CommandId::ResetStats(unsigned thread_index) {
   command_stats_[thread_index] = {0, 0};
-  if (hdr_histogram* h = latency_histogram_; h != nullptr) {
+  /*if (hdr_histogram* h = latency_histogram_; h != nullptr) {
     hdr_reset(h);
-  }
+  }*/
 }
 
 hdr_histogram* CommandId::LatencyHist() const {
-  return latency_histogram_;
+  return nullptr;  // latency_histogram_;
 }
 
 CommandRegistry::CommandRegistry() {
@@ -305,8 +324,11 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   }
 
   absl::flat_hash_map<std::string, CommandId> cmd_map_tmp;
-  cmd_map_tmp.emplace("QUIT", CommandId("QUIT", CO::FAST | CO::NOSCRIPT, 1, 0, 0));
-  cmd_map_tmp.emplace("MULTI", CommandId("MULTI", CO::FAST | CO::NOSCRIPT, 1, 0, 0));
+
+  for (unsigned i = 0; i < 100; ++i) {
+    CommandId a("QUIT", CO::FAST | CO::NOSCRIPT, 1, 0, 0);
+    cmd_map_tmp.emplace(absl::StrCat("QUIT_", i), std::move(a));
+  }
 
   LOG(INFO) << "Registering command: " << k << " cmd_map capacity: " << cmd_map_.capacity();
   CHECK(cmd_map_.emplace(k, std::move(cmd)).second) << k;

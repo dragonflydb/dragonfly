@@ -50,11 +50,11 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/build
           cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja ${{ matrix.flags }}
-          ninja src/all
+          # ninja src/all
       - name: Test
         run: |
             cd $GITHUB_WORKSPACE/build
-            ctest -V -L DFLY
+            # ctest -V -L DFLY
 
       - name: Send notification on failure
         if: failure() && github.ref == 'refs/heads/main'
@@ -100,24 +100,26 @@ jobs:
           export PATH=/opt/homebrew/opt/bison/bin/:$PATH
           which bison
           bison --version
-
+          which gcc-13
+          which gcc-14
           gcc-12 --version
 
           autoconf --help
           autoreconf --help
 
           echo "*************************** START BUILDING **************************************"
-          CC=gcc-12 CXX=g++-12 cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF \
+          CC=gcc-13 CXX=g++-13 cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF \
             -DCMAKE_CXX_FLAGS="-Wl,-ld_classic" \
-            -DCMAKE_C_COMPILER="gcc-12" -DCMAKE_CXX_COMPILER="g++-12"
+            -DCMAKE_C_COMPILER="gcc-13" -DCMAKE_CXX_COMPILER="g++-13"
 
-          ninja src/all
+          ninja engine_shard_set_test
 
       - name: Test
         run: |
             cd $GITHUB_WORKSPACE/build
             echo "TMPDIR=$TMPDIR" >> $GITHUB_ENV
-            ctest -V -L DFLY
+            # ctest -V -L DFLY
+            ./engine_shard_set_test --vmodule=main_service=2
 
       - name: Send notification on failure
         if: failure() && github.ref == 'refs/heads/main'

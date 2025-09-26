@@ -97,7 +97,17 @@ template <typename T> class MoveOnly {
     return *this;
   }
 
-  operator const T&() const {  // NOLINT
+  MoveOnly& operator=(MoveOnly&& o) noexcept {
+    value_ = std::move(o.value_);
+    o.value_ = T{};
+    return *this;
+  }
+
+  explicit operator const T&() const {  // NOLINT
+    return value_;
+  }
+
+  const T& get() const {
     return value_;
   }
 
@@ -112,7 +122,7 @@ class CommandId : public facade::CommandId {
   CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
             std::optional<uint32_t> acl_categories = std::nullopt);
 
-  CommandId(CommandId&& o) = default;
+  CommandId(CommandId&& o) noexcept;
 
   ~CommandId();
 
@@ -199,7 +209,8 @@ class CommandId : public facade::CommandId {
   std::unique_ptr<CmdCallStats[]> command_stats_;
   Handler3 handler_;
   ArgValidator validator_;
-  MoveOnly<hdr_histogram*> latency_histogram_;  // Histogram for command latency in usec
+  // hdr_histogram* latency_histogram_ = nullptr;  // Histogram for command latency in usec
+  uint64_t tmp_ = 0;
 };
 
 class CommandRegistry {
