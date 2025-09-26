@@ -19,9 +19,7 @@ namespace {
 #ifdef USE_SIMSIMD
 // Enable dynamic dispatch for automatic backend selection at runtime
 #define SIMSIMD_DYNAMIC_DISPATCH 1
-// Native float16/bfloat16 support is controlled via CMake option SIMSIMD_NATIVE_F16
-// Value is passed from CMake to both the SimSIMD library build and compile definitions
-// Default: OFF (disabled) for maximum compatibility across different compilers/platforms
+
 #include <simsimd/simsimd.h>
 
 // Initialize dynamic dispatch on first use

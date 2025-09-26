@@ -171,7 +171,7 @@ if(USE_SIMSIMD)
       simsimd
       URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.5.3.tar.gz
 
-      CMAKE_PASS_FLAGS "-DSIMSIMD_NATIVE_F16=${SIMSIMD_NATIVE_F16} -DSIMSIMD_NATIVE_BF16=${SIMSIMD_NATIVE_F16} -DSIMSIMD_BUILD_SHARED=ON"
+      CMAKE_PASS_FLAGS "-DSIMSIMD_BUILD_SHARED=ON"
       BUILD_COMMAND bash -c "mkdir -p ${THIRD_PARTY_LIB_DIR}/simsimd/lib && make all"
       INSTALL_COMMAND cp -R <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/simsimd/
       LIB libsimsimd.so
@@ -182,7 +182,7 @@ if(USE_SIMSIMD)
       simsimd
       URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.5.3.tar.gz
 
-      CMAKE_PASS_FLAGS "-DSIMSIMD_NATIVE_F16=${SIMSIMD_NATIVE_F16} -DSIMSIMD_NATIVE_BF16=${SIMSIMD_NATIVE_F16} -DSIMSIMD_BUILD_SHARED=OFF"
+      CMAKE_PASS_FLAGS "-DSIMSIMD_BUILD_SHARED=OFF"
       BUILD_COMMAND bash -c "make all && gcc -c -fPIC -I<SOURCE_DIR>/include <SOURCE_DIR>/c/lib.c -o <BINARY_DIR>/lib.o && ar rcs <BINARY_DIR>/libsimsimd.a <BINARY_DIR>/lib.o"
       INSTALL_COMMAND bash -c "mkdir -p ${THIRD_PARTY_LIB_DIR}/simsimd/lib && cp -R <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/simsimd/ && cp <BINARY_DIR>/libsimsimd.a ${THIRD_PARTY_LIB_DIR}/simsimd/lib/"
       LIB libsimsimd.a
