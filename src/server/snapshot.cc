@@ -121,14 +121,6 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   });
 }
 
-void SliceSnapshot::StartIncremental(LSN start_lsn) {
-  VLOG(1) << "StartIncremental: " << start_lsn;
-  serializer_ = std::make_unique<RdbSerializer>(compression_mode_);
-
-  snapshot_fb_ = fb2::Fiber("incremental_snapshot",
-                            [start_lsn, this] { this->SwitchIncrementalFb(start_lsn); });
-}
-
 // Called only for replication use-case.
 void SliceSnapshot::FinalizeJournalStream(bool cancel) {
   VLOG(1) << "FinalizeJournalStream";
@@ -224,45 +216,6 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   VLOG(1) << "Exit SnapshotSerializer loop_serialized: " << stats_.loop_serialized
           << ", side_saved " << stats_.side_saved << ", cbcalls " << stats_.savecb_calls
           << ", journal_saved " << stats_.jounal_changes << ", moved_saved " << stats_.moved_saved;
-}
-
-void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
-  auto* journal = db_slice_->shard_owner()->journal();
-  DCHECK(journal);
-  DCHECK_LE(lsn, journal->GetLsn()) << "The replica tried to sync from the future.";
-
-  VLOG(1) << "Starting incremental snapshot from lsn=" << lsn;
-
-  // The replica sends the LSN of the next entry is wants to receive.
-  while (cntx_->IsRunning() && journal->IsLSNInBuffer(lsn)) {
-    std::ignore = serializer_->WriteJournalEntry(journal->GetEntry(lsn));
-    PushSerialized(false);
-    lsn++;
-  }
-
-  VLOG(1) << "Last LSN sent in incremental snapshot was " << (lsn - 1);
-
-  // This check is safe, but it is not trivially safe.
-  // We rely here on the fact that JournalSlice::AddLogRecord can
-  // only preempt while holding the callback lock.
-  // That guarantees that if we have processed the last LSN the callback
-  // will only be added after JournalSlice::AddLogRecord has finished
-  // iterating its callbacks and we won't process the record twice.
-  // We have to make sure we don't preempt ourselves before registering the callback!
-
-  // GetLsn() is always the next lsn that we expect to create.
-  if (journal->GetLsn() == lsn) {
-    std::ignore = serializer_->SendFullSyncCut();
-
-    journal_cb_id_ = journal->RegisterOnChange(this);
-    PushSerialized(true);
-  } else {
-    // We stopped but we didn't manage to send the whole stream.
-    cntx_->ReportError(
-        std::make_error_code(errc::state_not_recoverable),
-        absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
-                     " was dropped from the buffer. Current lsn=", journal->GetLsn()));
-  }
 }
 
 bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator it) {

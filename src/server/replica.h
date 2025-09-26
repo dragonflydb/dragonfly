@@ -229,6 +229,10 @@ class DflyShardReplica : public ProtocolClient {
     return journal_rec_executed_.load(std::memory_order_relaxed);
   }
 
+  uint64_t SetRecordsExecuted(uint64_t value) {
+    return journal_rec_executed_ = value;
+  }
+
   // Can be called from any thread.
   void Pause(bool pause);
 
@@ -251,7 +255,7 @@ class DflyShardReplica : public ProtocolClient {
   // **executed** records, which might be received interleaved when commands
   // run out-of-order on the master instance.
   // Atomic, because JournalExecutedCount() can be called from any thread.
-  std::atomic_uint64_t journal_rec_executed_ = 0;
+  std::atomic_uint64_t journal_rec_executed_ = 1;
 
   util::fb2::Fiber sync_fb_, acks_fb_;
   size_t ack_offs_ = 0;
@@ -260,6 +264,7 @@ class DflyShardReplica : public ProtocolClient {
 
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
   uint32_t flow_id_ = UINT32_MAX;  // Flow id if replica acts as a dfly flow.
+  uint64_t lsn_to_finish_partial_ = 0;
 };
 
 }  // namespace dfly

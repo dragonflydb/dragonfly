@@ -74,13 +74,6 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
 
   void Start(bool stream_journal, SnapshotFlush allow_flush = SnapshotFlush::kDisallow);
 
-  // Initialize a snapshot that sends only the missing journal updates
-  // since start_lsn and then registers a callback switches into the
-  // journal streaming mode until stopped.
-  // If we're slower than the buffer and can't continue, `Cancel()` is
-  // called.
-  void StartIncremental(LSN start_lsn);
-
   // Finalizes journal streaming writes. Only called for replication.
   // Blocking. Must be called from the Snapshot thread.
   void FinalizeJournalStream(bool cancel);
@@ -109,9 +102,6 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // Main snapshotting fiber that iterates over all buckets in the db slice
   // and submits them to SerializeBucket.
   void IterateBucketsFb(bool send_full_sync_cut);
-
-  // A fiber function that switches to the incremental mode
-  void SwitchIncrementalFb(LSN lsn);
 
   // Called on traversing cursor by IterateBucketsFb.
   bool BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator it);
