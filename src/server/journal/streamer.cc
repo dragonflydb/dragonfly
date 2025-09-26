@@ -293,6 +293,7 @@ void JournalStreamer::AsyncWrite(bool force_send) {
     v[i] = IoVec(io::Bytes(uptr, cur_buf.buf[i].size()));
   }
 
+  DVLOG(3) << "calling AsyncWrite with buff size:" << v.size();
   dest_->AsyncWrite(v.data(), v.size(),
                     [this, len = in_flight_bytes_](std::error_code ec) { OnCompletion(ec, len); });
 }
