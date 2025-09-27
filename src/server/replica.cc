@@ -64,6 +64,8 @@ ABSL_DECLARE_FLAG(uint16_t, announce_port);
 ABSL_FLAG(
     int, replica_priority, 100,
     "Published by info command for sentinel to pick replica based on score during a failover");
+ABSL_FLAG(bool, experimental_replicaof_v2, true,
+          "Use ReplicaOfV2 algorithm for initiating replication");
 
 namespace dfly {
 
@@ -551,13 +553,6 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     JoinDflyFlows();
     if (sync_type == "full") {
       service_.RemoveLoadingState();
-    } else if (service_.IsLoadingExclusively()) {
-      // We need this check. We originally set the state unconditionally to LOADING
-      // when we call ReplicaOf command. If for some reason we fail to start full sync below
-      // or cancel the context, we still need to switch to ACTIVE state.
-      // TODO(kostasrim) we can remove this once my proposed changes for replication move forward
-      // as the state transitions for ReplicaOf command will be much clearer.
-      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     }
     state_mask_ &= ~R_SYNCING;
     last_journal_LSNs_.reset();
