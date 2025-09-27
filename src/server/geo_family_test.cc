@@ -60,12 +60,12 @@ TEST_F(GeoFamilyTest, GeoAddOptions) {
   // update 1 + CH + XX
   EXPECT_EQ(1, CheckedInt({"geoadd", "Sicily", "CH", "XX", "10.361389", "38.115556", "Palermo"}));
   resp = Run({"geopos", "Sicily", "Palermo"});
-  EXPECT_THAT(resp, RespArray(ElementsAre("10.361386835575104", "38.1155563954963")));
+  EXPECT_THAT(resp, RespArray(ElementsAre(DoubleArg(10.361389), DoubleArg(38.115556))));
 
   // add 1 + CH + NX
   EXPECT_EQ(1, CheckedInt({"geoadd", "Sicily", "CH", "NX", "14.25", "37.066667", "Gela"}));
   resp = Run({"geopos", "Sicily", "Gela"});
-  EXPECT_THAT(resp, RespArray(ElementsAre("14.249999821186066", "37.06666596727141")));
+  EXPECT_THAT(resp, RespArray(ElementsAre(DoubleArg(14.25), DoubleArg(37.066667))));
 
   // add 1 + XX + NX
   resp = Run({"geoadd", "Sicily", "XX", "NX", "14.75", "36.933333", "Ragusa"});
@@ -209,11 +209,11 @@ TEST_F(GeoFamilyTest, GeoRadiusByMember) {
   EXPECT_THAT(
       resp,
       RespArray(ElementsAre(
-          RespArray(ElementsAre(
-              "Madrid", "0", RespArray(ElementsAre("3.7038007378578186", "40.416799319406216")))),
+          RespArray(ElementsAre("Madrid", DoubleArg(0),
+                                RespArray(ElementsAre(DoubleArg(3.703801), DoubleArg(40.416799))))),
           RespArray(
-              ElementsAre("Lisbon", "502.20769462704084",
-                          RespArray(ElementsAre("9.142698347568512", "38.736900197448534")))))));
+              ElementsAre("Lisbon", DoubleArg(502.207695),
+                          RespArray(ElementsAre(DoubleArg(9.142698), DoubleArg(38.736900))))))));
 
   EXPECT_EQ(
       2, CheckedInt({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "STORE", "store_key"}));
@@ -226,7 +226,8 @@ TEST_F(GeoFamilyTest, GeoRadiusByMember) {
   EXPECT_EQ(2, CheckedInt({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "STOREDIST",
                            "store_dist_key"}));
   resp = Run({"ZRANGE", "store_dist_key", "0", "-1", "WITHSCORES"});
-  EXPECT_THAT(resp, RespArray(ElementsAre("Madrid", "0", "Lisbon", "502.20769462704084")));
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre("Madrid", DoubleArg(0), "Lisbon", DoubleArg(502.207695))));
 
   resp = Run(
       {"GEORADIUSBYMEMBER", "Europe", "Madrid", "900", "KM", "STORE", "store_key", "WITHCOORD"});
@@ -259,11 +260,11 @@ TEST_F(GeoFamilyTest, GeoRadiusByMemberRO) {
   EXPECT_THAT(
       resp,
       RespArray(ElementsAre(
-          RespArray(ElementsAre(
-              "Madrid", "0", RespArray(ElementsAre("3.7038007378578186", "40.416799319406216")))),
+          RespArray(ElementsAre("Madrid", DoubleArg(0),
+                                RespArray(ElementsAre(DoubleArg(3.703801), DoubleArg(40.416799))))),
           RespArray(
-              ElementsAre("Lisbon", "502.20769462704084",
-                          RespArray(ElementsAre("9.142698347568512", "38.736900197448534")))))));
+              ElementsAre("Lisbon", DoubleArg(502.207695),
+                          RespArray(ElementsAre(DoubleArg(9.142698), DoubleArg(38.736900))))))));
 
   // GEORADIUSBYMEMBER_RO should not accept arguments for storing (writing data)
   resp =
