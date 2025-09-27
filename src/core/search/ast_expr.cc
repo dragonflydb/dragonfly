@@ -20,6 +20,10 @@ AstRangeNode::AstRangeNode(double lo, bool lo_excl, double hi, bool hi_excl)
     : lo{lo_excl ? nextafter(lo, hi) : lo}, hi{hi_excl ? nextafter(hi, lo) : hi} {
 }
 
+AstGeoNode::AstGeoNode(double lat, double lon, double radius, std::string unit)
+    : lat(lat), lon(lon), radius(radius), unit(std::move(unit)) {
+}
+
 AstNegateNode::AstNegateNode(AstNode&& node) : node{make_unique<AstNode>(std::move(node))} {
 }
 
