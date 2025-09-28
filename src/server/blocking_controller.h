@@ -7,7 +7,6 @@
 #include <absl/container/btree_map.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
-#include <absl/container/node_hash_map.h>
 
 #include "base/string_view_sso.h"
 #include "server/common.h"
@@ -61,8 +60,9 @@ class BlockingController {
   EngineShard* owner_;
   Namespace* ns_;
 
-  absl::node_hash_map<DbIndex, DbWatchTable> watched_dbs_;  // watched keys
-  absl::flat_hash_set<DbIndex> awakened_indices_;           // watched_dbs_ with awakened keys
+  // TODO: check if unique_ptr indirection is required
+  absl::flat_hash_map<DbIndex, std::unique_ptr<DbWatchTable>> watched_dbs_;  // watched keys
+  absl::flat_hash_set<DbIndex> awakened_indices_;  // watched_dbs_ with awakened keys
 
   // Transactions that got awakened with NotifySuspended
   // TODO: Used only for one DCHECK

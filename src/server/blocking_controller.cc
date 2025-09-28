@@ -127,7 +127,7 @@ void BlockingController::RemovedWatched(Keys keys, Transaction* tx) {
   if (dbit == watched_dbs_.end())
     return;
 
-  DbWatchTable& wt = dbit->second;
+  DbWatchTable& wt = *dbit->second;
 
   // Add keys of processed transaction so we could awake the next one in the queue
   // in case those keys still exist.
@@ -158,7 +158,7 @@ void BlockingController::NotifyPending() {
       continue;
 
     context.db_index = index;
-    DbWatchTable& wt = dbit->second;  // pointer stability due to node_hash_map
+    DbWatchTable& wt = *dbit->second;  // pointer stability due to node_hash_map
     for (string_view key : wt.awakened_keys) {
       DVLOG(1) << "Processing awakened key " << key;
       auto w_it = wt.queue_map.find(key);
@@ -179,7 +179,12 @@ void BlockingController::NotifyPending() {
 }
 
 void BlockingController::AddWatched(Keys watch_keys, KeyReadyChecker krc, Transaction* trans) {
-  DbWatchTable& wt = watched_dbs_[trans->GetDbIndex()];
+  auto [dbit, added] = watched_dbs_.emplace(trans->GetDbIndex(), nullptr);
+  if (added) {
+    dbit->second = make_unique<DbWatchTable>();
+  }
+
+  DbWatchTable& wt = *dbit->second;
 
   for (auto key : watch_keys) {
     auto [res, inserted] = wt.queue_map.emplace(key, nullptr);
@@ -205,7 +210,7 @@ void BlockingController::Awaken(DbIndex db_index, string_view db_key) {
   if (it == watched_dbs_.end())
     return;
 
-  DbWatchTable& wt = it->second;
+  DbWatchTable& wt = *it->second;
   DCHECK(!wt.queue_map.empty());
 
   if (wt.AddAwakeEvent(db_key)) {
@@ -252,7 +257,7 @@ size_t BlockingController::NumWatched(DbIndex db_indx) const {
   if (it == watched_dbs_.end())
     return 0;
 
-  return it->second.queue_map.size();
+  return it->second->queue_map.size();
 }
 
 vector<string> BlockingController::GetWatchedKeys(DbIndex db_indx) const {
@@ -260,7 +265,7 @@ vector<string> BlockingController::GetWatchedKeys(DbIndex db_indx) const {
   auto it = watched_dbs_.find(db_indx);
 
   if (it != watched_dbs_.end()) {
-    for (const auto& k_v : it->second.queue_map) {
+    for (const auto& k_v : it->second->queue_map) {
       res.push_back(k_v.first);
     }
   }
