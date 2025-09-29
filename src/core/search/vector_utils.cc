@@ -5,7 +5,6 @@
 #include "core/search/vector_utils.h"
 
 #include <cmath>
-#include <iomanip>
 #include <memory>
 
 #include "base/logging.h"
