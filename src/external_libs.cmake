@@ -164,45 +164,34 @@ add_third_party(
   LIB libhdr_histogram_static.a
 )
 
-if(USE_SIMSIMD)
-  # Always fetch SimSIMD headers; we'll build a static runtime-dispatch library locally.
+if(WITH_SIMSIMD)
+  # Compute integer macros for native half-precision support.
+  set(SIMSIMD_NATIVE_F16_VAL 0)
+  set(SIMSIMD_NATIVE_BF16_VAL 0)
+  if(SIMSIMD_NATIVE_F16)
+    set(SIMSIMD_NATIVE_F16_VAL 1)
+    set(SIMSIMD_NATIVE_BF16_VAL 1)
+  endif()
+
+  # Build statically via add_third_party using the C shim with dynamic dispatch.
   add_third_party(
     simsimd
     URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.5.3.tar.gz
-    CMAKE_PASS_FLAGS ""
-    BUILD_COMMAND echo SKIP
-    INSTALL_COMMAND cp -R <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/simsimd/
-    LIB "none"
+    BUILD_IN_SOURCE 1
+    BUILD_COMMAND bash -c "\
+      mkdir -p ${THIRD_PARTY_LIB_DIR}/simsimd/lib && \
+      ${CMAKE_C_COMPILER} -O3 -fPIC -DNDEBUG \
+        -DSIMSIMD_DYNAMIC_DISPATCH=1 \
+        -DSIMSIMD_NATIVE_F16=${SIMSIMD_NATIVE_F16_VAL} \
+        -DSIMSIMD_NATIVE_BF16=${SIMSIMD_NATIVE_BF16_VAL} \
+        -I<SOURCE_DIR>/include -c <SOURCE_DIR>/c/lib.c -o <SOURCE_DIR>/lib.o && \
+      ar rcs <SOURCE_DIR>/libsimsimd.a <SOURCE_DIR>/lib.o"
+    INSTALL_COMMAND bash -c "\
+      mkdir -p ${THIRD_PARTY_LIB_DIR}/simsimd/include ${THIRD_PARTY_LIB_DIR}/simsimd/lib && \
+      cp -R <SOURCE_DIR>/include/* ${THIRD_PARTY_LIB_DIR}/simsimd/include/ && \
+      cp <SOURCE_DIR>/libsimsimd.a ${THIRD_PARTY_LIB_DIR}/simsimd/lib/"
+    LIB libsimsimd.a
   )
-
-  # Build a static library from SimSIMD dynamic-dispatch C shim. This compiles all ISA variants
-  # for the current platform into a single archive and dispatches at runtime.
-  # We first copy the source into the genfiles tree so that CMake can treat it as a generated source.
-  set(SIMSIMD_GEN_DIR ${ROOT_GEN_DIR}/simsimd)
-  set(SIMSIMD_LIB_C ${SIMSIMD_GEN_DIR}/lib.c)
-  add_custom_command(
-    OUTPUT ${SIMSIMD_LIB_C}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${SIMSIMD_GEN_DIR}
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${THIRD_PARTY_DIR}/simsimd/c/lib.c ${SIMSIMD_LIB_C}
-    DEPENDS simsimd_project
-    COMMENT "Preparing SimSIMD dynamic-dispatch source"
-    VERBATIM)
-
-  add_library(simsimd_static STATIC ${SIMSIMD_LIB_C})
-  add_dependencies(simsimd_static simsimd_project)
-  target_include_directories(simsimd_static PUBLIC
-      ${THIRD_PARTY_DIR}/simsimd/include
-      ${THIRD_PARTY_LIB_DIR}/simsimd/include)
-  set_target_properties(simsimd_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
-  target_compile_definitions(simsimd_static
-    PUBLIC
-      SIMSIMD_DYNAMIC_DISPATCH=1
-      SIMSIMD_NATIVE_F16=$<IF:$<BOOL:${SIMSIMD_NATIVE_F16}>,1,0>
-      SIMSIMD_NATIVE_BF16=$<IF:$<BOOL:${SIMSIMD_NATIVE_F16}>,1,0>)
-
-  # Expose as TRDP::simsimd to seamlessly replace previous header-only/shared variants.
-  add_library(TRDP::simsimd ALIAS simsimd_static)
-  message(STATUS "SimSIMD: Configured for STATIC library with runtime dispatch")
 endif()
 
 
