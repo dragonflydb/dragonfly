@@ -17,6 +17,9 @@ namespace dfly {
 class Transaction;
 class Namespace;
 
+// Used for tracking keys of blocking transactions and properly notifying them.
+// First, keys are marked as watched and associated with an owner transaction. A mutating
+// transaction marks them as touched, and once it concludes, the watching transactions are notified.
 class BlockingController {
  public:
   explicit BlockingController(EngineShard* owner, Namespace* ns);
@@ -32,20 +35,17 @@ class BlockingController {
     return awakened_transactions_;
   }
 
-  // Removes transaction from watching these keys.
-  void RemovedWatched(Keys keys, Transaction* tx);
-
-  // go over potential wakened keys, verify them and activate watch queues.
-  void NotifyPending();
-
-  // Blocking API
-  // TODO: consider moving all watched functions to
-  // EngineShard with separate per db map.
-  //! AddWatched adds a transaction to the blocking queue.
+  // Associate given keys with transaction, checked via the krc checker
   void AddWatched(Keys watch_keys, KeyReadyChecker krc, Transaction* me);
 
-  // Called from operations that create keys like lpush, rename etc.
-  void AwakeWatched(DbIndex db_index, std::string_view db_key);
+  // Remove transaction from watching these keys
+  void RemovedWatched(Keys keys, Transaction* tx);
+
+  // Mark given key as awakened. Called by commands mutating this key.
+  void Awaken(DbIndex db_index, std::string_view key);
+
+  // Notify transactions of awakened keys
+  void NotifyPending();
 
   // Used in tests and debugging functions.
   size_t NumWatched(DbIndex db_indx) const;
@@ -55,24 +55,17 @@ class BlockingController {
   struct WatchQueue;
   struct DbWatchTable;
 
-  using WatchQueueMap = absl::flat_hash_map<std::string, std::unique_ptr<WatchQueue>>;
-
   void NotifyWatchQueue(std::string_view key, WatchQueue* wqm, const DbContext& context);
-
-  // void NotifyConvergence(Transaction* tx);
 
   EngineShard* owner_;
   Namespace* ns_;
 
-  absl::flat_hash_map<DbIndex, std::unique_ptr<DbWatchTable>> watched_dbs_;
+  // TODO: check if unique_ptr indirection is required
+  absl::flat_hash_map<DbIndex, std::unique_ptr<DbWatchTable>> watched_dbs_;  // watched keys
+  absl::flat_hash_set<DbIndex> awakened_indices_;  // watched_dbs_ with awakened keys
 
-  // serves as a temporary queue that aggregates all the possible awakened dbs.
-  // flushed by RunStep().
-  absl::flat_hash_set<DbIndex> awakened_indices_;
-
-  // tracks currently notified and awaked transactions.
-  // There can be multiple transactions like this because a transaction
-  // could awaken arbitrary number of keys.
+  // Transactions that got awakened with NotifySuspended
+  // TODO: Used only for one DCHECK
   absl::flat_hash_set<Transaction*> awakened_transactions_;
 };
 }  // namespace dfly

@@ -507,7 +507,7 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
       << "Unexpected override for key " << dest_key_ << " " << dest_found_;
   auto bc = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (bc) {
-    bc->AwakeWatched(t->GetDbIndex(), dest_key_);
+    bc->Awaken(t->GetDbIndex(), dest_key_);
   }
 
   if (shard->journal()) {
@@ -886,7 +886,7 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
 
   auto bc = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (add_res.it->second.ObjType() == OBJ_LIST && bc) {
-    bc->AwakeWatched(target_db, key);
+    bc->Awaken(target_db, key);
   }
 
   return OpStatus::OK;
@@ -956,7 +956,7 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
 
   auto bc = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
   if (!is_prior_list && to_res.it->second.ObjType() == OBJ_LIST && bc) {
-    bc->AwakeWatched(op_args.db_cntx.db_index, to_key);
+    bc->Awaken(op_args.db_cntx.db_index, to_key);
   }
   return OpStatus::OK;
 }

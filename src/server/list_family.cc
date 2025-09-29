@@ -177,7 +177,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
     dest_res.it->second.InitRobj(OBJ_LIST, kEncodingQL2, destql_v2);
     auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
     if (blocking_controller) {
-      blocking_controller->AwakeWatched(op_args.db_cntx.db_index, dest);
+      blocking_controller->Awaken(op_args.db_cntx.db_index, dest);
     }
   } else {
     destql_v2 = GetQLV2(dest_res.it->second);
@@ -257,7 +257,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   if (res.is_new) {
     auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
     if (blocking_controller) {
-      blocking_controller->AwakeWatched(op_args.db_cntx.db_index, key);
+      blocking_controller->Awaken(op_args.db_cntx.db_index, key);
     }
   }
 
