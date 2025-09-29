@@ -166,27 +166,23 @@ add_third_party(
 
 if(USE_SIMSIMD)
   if(SIMSIMD_LINK_SHARED)
-    # Dynamic/Shared library build
-    add_third_party(
-      simsimd
-      URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.5.3.tar.gz
-
-      CMAKE_PASS_FLAGS "-DSIMSIMD_BUILD_SHARED=ON -DSIMSIMD_NATIVE_F16=${SIMSIMD_NATIVE_F16} -DSIMSIMD_NATIVE_BF16=${SIMSIMD_NATIVE_F16}"
-      BUILD_COMMAND bash -c "mkdir -p ${THIRD_PARTY_LIB_DIR}/simsimd/lib && make all"
-      INSTALL_COMMAND cp -R <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/simsimd/
-      LIB libsimsimd.so
-    )
+    set(SIMD_CMAKE_FLAGS "-DSIMSIMD_BUILD_SHARED=ON -DSIMSIMD_NATIVE_F16=${SIMSIMD_NATIVE_F16} -DSIMSIMD_NATIVE_BF16=${SIMSIMD_NATIVE_F16}")
+    set(SIMD_BUILD_CMD bash -c "mkdir -p ${THIRD_PARTY_LIB_DIR}/simsimd/lib && make all")
+    set(SIMD_LIB libsimsimd.so)
   else()
-    # Header-only usage: fetch headers only, no library produced
-    add_third_party(
-      simsimd
-      URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.5.3.tar.gz
-
-      BUILD_COMMAND echo SKIP
-      INSTALL_COMMAND bash -c "mkdir -p ${THIRD_PARTY_LIB_DIR}/simsimd && cp -R <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/simsimd/"
-      LIB "none"
-    )
+    set(SIMD_CMAKE_FLAGS "")
+    set(SIMD_BUILD_CMD echo SKIP)
+    set(SIMD_LIB "none")
   endif()
+
+  add_third_party(
+    simsimd
+    URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.5.3.tar.gz
+    CMAKE_PASS_FLAGS "${SIMD_CMAKE_FLAGS}"
+    BUILD_COMMAND ${SIMD_BUILD_CMD}
+    INSTALL_COMMAND cp -R <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/simsimd/
+    LIB ${SIMD_LIB}
+  )
 endif()
 
 
