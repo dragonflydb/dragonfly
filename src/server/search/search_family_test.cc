@@ -266,6 +266,19 @@ TEST_F(SearchFamilyTest, AlterIndex) {
               ErrArg("Index not found"));
 }
 
+TEST_F(SearchFamilyTest, SuffixPrefixSearch) {
+  Run({"ft.create", "idx", "SCHEMA", "name", "TEXT"});
+  Run({"hset", "d:1", "name", "apple"});
+  Run({"hset", "d:2", "name", "carrot"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "app*"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@name:app*"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*le"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@name:*le"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*pl*"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@name:*pl*"}), AreDocIds("d:1"));
+}
+
 TEST_F(SearchFamilyTest, InfoIndex) {
   EXPECT_EQ(
       Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "doc-", "SCHEMA", "name", "TEXT"}),
