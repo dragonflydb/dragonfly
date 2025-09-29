@@ -166,17 +166,13 @@ add_third_party(
 
 if(USE_SIMSIMD)
   # Always fetch SimSIMD headers; we'll build a static runtime-dispatch library locally.
-  set(SIMD_CMAKE_FLAGS "")
-  set(SIMD_BUILD_CMD echo SKIP)
-  set(SIMD_LIB "none")
-
   add_third_party(
     simsimd
     URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.5.3.tar.gz
-    CMAKE_PASS_FLAGS "${SIMD_CMAKE_FLAGS}"
-    BUILD_COMMAND ${SIMD_BUILD_CMD}
+    CMAKE_PASS_FLAGS ""
+    BUILD_COMMAND echo SKIP
     INSTALL_COMMAND cp -R <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/simsimd/
-    LIB ${SIMD_LIB}
+    LIB "none"
   )
 
   # Build a static library from SimSIMD dynamic-dispatch C shim. This compiles all ISA variants
