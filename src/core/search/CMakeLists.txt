@@ -14,11 +14,9 @@ target_link_libraries(dfly_search_core base redis_lib absl::strings
 
 if(USE_SIMSIMD)
   target_link_libraries(dfly_search_core TRDP::simsimd)
-  if(SIMSIMD_LINK_SHARED)
-    target_compile_definitions(dfly_search_core PRIVATE SIMSIMD_DYNAMIC_DISPATCH=1)
-  endif()
   target_compile_definitions(dfly_search_core PRIVATE
     USE_SIMSIMD=1
+    SIMSIMD_DYNAMIC_DISPATCH=1
     SIMSIMD_NATIVE_F16=$<IF:$<BOOL:${SIMSIMD_NATIVE_F16}>,1,0>
     SIMSIMD_NATIVE_BF16=$<IF:$<BOOL:${SIMSIMD_NATIVE_F16}>,1,0>)
 endif()
@@ -32,11 +30,9 @@ cxx_test(search_test redis_test_lib dfly_search_core LABELS DFLY)
 
 if(USE_SIMSIMD)
   target_link_libraries(search_test TRDP::simsimd)
-  if(SIMSIMD_LINK_SHARED)
-    target_compile_definitions(search_test PRIVATE SIMSIMD_DYNAMIC_DISPATCH=1)
-  endif()
   target_compile_definitions(search_test PRIVATE
     USE_SIMSIMD=1
+    SIMSIMD_DYNAMIC_DISPATCH=1
     SIMSIMD_NATIVE_F16=$<IF:$<BOOL:${SIMSIMD_NATIVE_F16}>,1,0>
     SIMSIMD_NATIVE_BF16=$<IF:$<BOOL:${SIMSIMD_NATIVE_F16}>,1,0>)
 endif()

@@ -165,15 +165,10 @@ add_third_party(
 )
 
 if(USE_SIMSIMD)
-  if(SIMSIMD_LINK_SHARED)
-    set(SIMD_CMAKE_FLAGS "-DSIMSIMD_BUILD_SHARED=ON -DSIMSIMD_NATIVE_F16=${SIMSIMD_NATIVE_F16} -DSIMSIMD_NATIVE_BF16=${SIMSIMD_NATIVE_F16}")
-    set(SIMD_BUILD_CMD bash -c "mkdir -p ${THIRD_PARTY_LIB_DIR}/simsimd/lib && make all")
-    set(SIMD_LIB libsimsimd.so)
-  else()
-    set(SIMD_CMAKE_FLAGS "")
-    set(SIMD_BUILD_CMD echo SKIP)
-    set(SIMD_LIB "none")
-  endif()
+  # Always fetch SimSIMD headers; we'll build a static runtime-dispatch library locally.
+  set(SIMD_CMAKE_FLAGS "")
+  set(SIMD_BUILD_CMD echo SKIP)
+  set(SIMD_LIB "none")
 
   add_third_party(
     simsimd
@@ -183,6 +178,35 @@ if(USE_SIMSIMD)
     INSTALL_COMMAND cp -R <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/simsimd/
     LIB ${SIMD_LIB}
   )
+
+  # Build a static library from SimSIMD dynamic-dispatch C shim. This compiles all ISA variants
+  # for the current platform into a single archive and dispatches at runtime.
+  # We first copy the source into the genfiles tree so that CMake can treat it as a generated source.
+  set(SIMSIMD_GEN_DIR ${ROOT_GEN_DIR}/simsimd)
+  set(SIMSIMD_LIB_C ${SIMSIMD_GEN_DIR}/lib.c)
+  add_custom_command(
+    OUTPUT ${SIMSIMD_LIB_C}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${SIMSIMD_GEN_DIR}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${THIRD_PARTY_DIR}/simsimd/c/lib.c ${SIMSIMD_LIB_C}
+    DEPENDS simsimd_project
+    COMMENT "Preparing SimSIMD dynamic-dispatch source"
+    VERBATIM)
+
+  add_library(simsimd_static STATIC ${SIMSIMD_LIB_C})
+  add_dependencies(simsimd_static simsimd_project)
+  target_include_directories(simsimd_static PUBLIC
+      ${THIRD_PARTY_DIR}/simsimd/include
+      ${THIRD_PARTY_LIB_DIR}/simsimd/include)
+  set_target_properties(simsimd_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_compile_definitions(simsimd_static
+    PUBLIC
+      SIMSIMD_DYNAMIC_DISPATCH=1
+      SIMSIMD_NATIVE_F16=$<IF:$<BOOL:${SIMSIMD_NATIVE_F16}>,1,0>
+      SIMSIMD_NATIVE_BF16=$<IF:$<BOOL:${SIMSIMD_NATIVE_F16}>,1,0>)
+
+  # Expose as TRDP::simsimd to seamlessly replace previous header-only/shared variants.
+  add_library(TRDP::simsimd ALIAS simsimd_static)
+  message(STATUS "SimSIMD: Configured for STATIC library with runtime dispatch")
 endif()
 
 
@@ -207,27 +231,3 @@ add_library(TRDP::fast_float INTERFACE IMPORTED)
 add_dependencies(TRDP::fast_float fast_float_project)
 set_target_properties(TRDP::fast_float PROPERTIES
                       INTERFACE_INCLUDE_DIRECTORIES "${FAST_FLOAT_INCLUDE_DIR}")
-
-if(USE_SIMSIMD)
-  if(NOT TARGET TRDP::simsimd)
-    if(SIMSIMD_LINK_SHARED)
-      # Dynamic/Shared library configuration
-      add_library(TRDP::simsimd SHARED IMPORTED)
-      add_dependencies(TRDP::simsimd simsimd_project)
-      set_target_properties(TRDP::simsimd PROPERTIES
-                            IMPORTED_LOCATION "${THIRD_PARTY_LIB_DIR}/simsimd/lib/libsimsimd.so"
-                            INTERFACE_INCLUDE_DIRECTORIES "${THIRD_PARTY_LIB_DIR}/simsimd/include"
-                            INTERFACE_COMPILE_DEFINITIONS "SIMSIMD_NATIVE_F16=$<IF:$<BOOL:${SIMSIMD_NATIVE_F16}>,1,0>;SIMSIMD_NATIVE_BF16=$<IF:$<BOOL:${SIMSIMD_NATIVE_F16}>,1,0>"
-                            IMPORTED_NO_SONAME ON)
-      message(STATUS "SimSIMD: Configured for SHARED linking")
-    else()
-      # Header-only configuration
-      add_library(TRDP::simsimd INTERFACE IMPORTED)
-      add_dependencies(TRDP::simsimd simsimd_project)
-      set_target_properties(TRDP::simsimd PROPERTIES
-                            INTERFACE_INCLUDE_DIRECTORIES "${THIRD_PARTY_LIB_DIR}/simsimd/include"
-                            INTERFACE_COMPILE_DEFINITIONS "SIMSIMD_NATIVE_F16=$<IF:$<BOOL:${SIMSIMD_NATIVE_F16}>,1,0>;SIMSIMD_NATIVE_BF16=$<IF:$<BOOL:${SIMSIMD_NATIVE_F16}>,1,0>")
-      message(STATUS "SimSIMD: Configured for HEADER-ONLY usage")
-    endif()
-  endif()
-endif()
