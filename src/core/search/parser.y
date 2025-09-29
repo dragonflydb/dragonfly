@@ -151,6 +151,9 @@ field_cond:
   | LPAREN field_cond_expr RPAREN                       { $$ = std::move($2); }
   | LBRACKET numeric_filter_expr RBRACKET               { $$ = std::move($2); }
   | LCURLBR tag_list RCURLBR                            { $$ = std::move($2); }
+  | PREFIX                                              { $$ = AstPrefixNode(std::move($1)); }
+  | SUFFIX                                              { $$ = AstSuffixNode(std::move($1)); }
+  | INFIX                                               { $$ = AstInfixNode(std::move($1));  }
 
 numeric_filter_expr:
   opt_lparen generic_number opt_lparen generic_number         { $$ = AstRangeNode($2, $1, $4, $3); }
