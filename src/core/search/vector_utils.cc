@@ -17,30 +17,22 @@ using namespace std;
 namespace {
 
 #ifdef USE_SIMSIMD
-// Enable dynamic dispatch for automatic backend selection at runtime
-#define SIMSIMD_DYNAMIC_DISPATCH 1
-
 #include <simsimd/simsimd.h>
-
-// Initialize dynamic dispatch on first use
+#ifdef SIMSIMD_DYNAMIC_DISPATCH
+// Initialize dynamic dispatch on first use (only when dynamic dispatch is enabled)
 static bool InitializeSimSIMD() {
   static bool initialized = false;
   if (!initialized) {
-    // Probe capabilities to initialize dynamic dispatch machinery
     (void)simsimd_capabilities();
-
-    // Log dynamic dispatch status
     LOG(INFO) << "SimSIMD dynamic dispatch enabled: "
               << (simsimd_uses_dynamic_dispatch() ? "YES" : "NO");
-
     initialized = true;
   }
   return true;
 }
-
-// Ensure initialization happens
 static const bool simsimd_init_guard = InitializeSimSIMD();
-#endif
+#endif  // SIMSIMD_DYNAMIC_DISPATCH
+#endif  // USE_SIMSIMD
 
 #if defined(__GNUC__) && !defined(__clang__)
 #define FAST_MATH __attribute__((optimize("fast-math")))

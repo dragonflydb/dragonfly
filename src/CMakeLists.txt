@@ -2,7 +2,7 @@ option(ENABLE_GIT_VERSION "Build with Git metadata" OFF)
 
 option(USE_SIMSIMD "Enable SimSIMD vector optimizations" OFF)
 option(SIMSIMD_NATIVE_F16 "Enable native float16 support in SimSIMD" OFF)
-option(SIMSIMD_LINK_SHARED "Link SimSIMD as shared library (ON) or static (OFF)" ON)
+option(SIMSIMD_LINK_SHARED "Link SimSIMD as shared library (ON) or use header-only (OFF)" ON)
 option(WITH_SEARCH "Enable compilation of search module" ON)
 
 if ("${CMAKE_SYSTEM_NAME}" STREQUAL "FreeBSD")
