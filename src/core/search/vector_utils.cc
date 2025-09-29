@@ -18,19 +18,6 @@ namespace {
 
 #ifdef USE_SIMSIMD
 #include <simsimd/simsimd.h>
-#ifdef SIMSIMD_DYNAMIC_DISPATCH
-// Initialize dynamic dispatch on first use (only when dynamic dispatch is enabled)
-static bool InitializeSimSIMD() {
-  static std::once_flag simsimd_once;
-  std::call_once(simsimd_once, []() {
-    (void)simsimd_capabilities();
-    LOG(INFO) << "SimSIMD dynamic dispatch enabled: "
-              << (simsimd_uses_dynamic_dispatch() ? "YES" : "NO");
-  });
-  return true;
-}
-static const bool simsimd_init_guard = InitializeSimSIMD();
-#endif  // SIMSIMD_DYNAMIC_DISPATCH
 #endif  // USE_SIMSIMD
 
 #if defined(__GNUC__) && !defined(__clang__)
@@ -122,6 +109,17 @@ float VectorDistance(const float* u, const float* v, size_t dims, VectorSimilari
       return CosineDistance(u, v, dims);
   };
   return 0.0f;
+}
+
+void InitSimSIMD() {
+#if defined(USE_SIMSIMD)
+  static std::once_flag simsimd_once;
+  std::call_once(simsimd_once, []() {
+    (void)simsimd_capabilities();
+    LOG(INFO) << "SimSIMD dynamic dispatch enabled: "
+              << (simsimd_uses_dynamic_dispatch() ? "YES" : "NO");
+  });
+#endif
 }
 
 }  // namespace dfly::search
