@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <memory>
+#include <mutex>
 
 #include "base/logging.h"
 
@@ -20,13 +21,12 @@ namespace {
 #ifdef SIMSIMD_DYNAMIC_DISPATCH
 // Initialize dynamic dispatch on first use (only when dynamic dispatch is enabled)
 static bool InitializeSimSIMD() {
-  static bool initialized = false;
-  if (!initialized) {
+  static std::once_flag simsimd_once;
+  std::call_once(simsimd_once, []() {
     (void)simsimd_capabilities();
     LOG(INFO) << "SimSIMD dynamic dispatch enabled: "
               << (simsimd_uses_dynamic_dispatch() ? "YES" : "NO");
-    initialized = true;
-  }
+  });
   return true;
 }
 static const bool simsimd_init_guard = InitializeSimSIMD();
