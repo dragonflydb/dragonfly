@@ -2458,9 +2458,7 @@ error_code RdbLoader::HandleAux() {
     int64_t usedmem;
     if (absl::SimpleAtoi(auxval, &usedmem)) {
       VLOG(1) << "RDB memory usage when created " << strings::HumanReadableNumBytes(usedmem);
-      // We allow 5% tolerance for snapshot used memory, because of a lot of factors.
-      // In my tests I saw used_memory field was 20% higher than maxmemory limit if maxmemory was
-      // 350MB
+      // We allow 5% tolerance for snapshot used memory
       if (usedmem > (max_memory_limit * 1.05)) {
         if (IsClusterEnabled()) {
           LOG(INFO) << "Allowing to load a snapshot of size " << usedmem
