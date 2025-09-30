@@ -6,7 +6,6 @@
 
 #include <cmath>
 #include <memory>
-#include <mutex>
 
 #include "base/logging.h"
 
