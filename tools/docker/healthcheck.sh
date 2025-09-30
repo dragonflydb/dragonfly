@@ -29,24 +29,21 @@ if [ -z "$HEALTHCHECK_PORT" ]; then
   PORT=$(echo $DF_NET | grep -oE ':[0-9]+' | cut -c2- | tail -n 1)
 fi
 
-# Use redis-cli instead of nc for better reliability
-# and to properly check loading state (issue #5863)
-REDIS_CLI="redis-cli -h $HOST -p $PORT"
+_healthcheck="nc -q1 $HOST $PORT"
 
-# Step 1: Basic PING check
-if ! timeout 3 $REDIS_CLI PING 2>/dev/null | grep -q "PONG"; then
+# Send PING and check response
+# During snapshot loading, server returns "LOADING" error instead of "PONG"
+# This handles both issues #5863 (loading detection) and normal healthcheck
+RESPONSE=$(echo PING | timeout 3 ${_healthcheck} 2>/dev/null)
+
+# Check if response contains PONG (ready) or LOADING (not ready)
+if echo "$RESPONSE" | grep -qi "LOADING"; then
+  # Server is loading dataset, not ready for traffic (issue #5863)
+  exit 1
+elif echo "$RESPONSE" | grep -q "PONG"; then
+  # Server is ready
+  exit 0
+else
+  # Unknown response or connection failed
   exit 1
 fi
-
-# Step 2: Check if server is in LOADING state
-# During snapshot loading, the server responds to PING but is not ready for traffic
-# Note: 'loading' field is in PERSISTENCE section
-INFO_OUTPUT=$(timeout 3 $REDIS_CLI INFO PERSISTENCE 2>/dev/null)
-
-# Server is ready when loading:0
-if echo "$INFO_OUTPUT" | grep -q "^loading:0"; then
-  exit 0
-fi
-
-# If loading:1 or can't determine state, fail to be safe
-exit 1
