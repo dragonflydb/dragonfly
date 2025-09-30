@@ -113,8 +113,7 @@ float VectorDistance(const float* u, const float* v, size_t dims, VectorSimilari
 
 void InitSimSIMD() {
 #if defined(WITH_SIMSIMD)
-  static std::once_flag simsimd_once;
-  std::call_once(simsimd_once, []() { (void)simsimd_capabilities(); });
+  (void)simsimd_capabilities();
 #endif
 }
 
