@@ -164,13 +164,33 @@ add_third_party(
   LIB libhdr_histogram_static.a
 )
 
-if(USE_SIMSIMD)
+if(WITH_SIMSIMD)
+  # Compute integer macros for native half-precision support.
+  set(SIMSIMD_NATIVE_F16_VAL 0)
+  set(SIMSIMD_NATIVE_BF16_VAL 0)
+  if(SIMSIMD_NATIVE_F16)
+    set(SIMSIMD_NATIVE_F16_VAL 1)
+    set(SIMSIMD_NATIVE_BF16_VAL 1)
+  endif()
+
+  # Build statically via add_third_party using the C shim with dynamic dispatch.
   add_third_party(
     simsimd
     URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.5.3.tar.gz
-    BUILD_COMMAND echo SKIP
-    INSTALL_COMMAND cp -R <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/simsimd/
-    LIB "none"
+    BUILD_IN_SOURCE 1
+    BUILD_COMMAND bash -c "\
+      mkdir -p ${THIRD_PARTY_LIB_DIR}/simsimd/lib && \
+      ${CMAKE_C_COMPILER} -O3 -fPIC -DNDEBUG \
+        -DSIMSIMD_DYNAMIC_DISPATCH=1 \
+        -DSIMSIMD_NATIVE_F16=${SIMSIMD_NATIVE_F16_VAL} \
+        -DSIMSIMD_NATIVE_BF16=${SIMSIMD_NATIVE_BF16_VAL} \
+        -I<SOURCE_DIR>/include -c <SOURCE_DIR>/c/lib.c -o <SOURCE_DIR>/lib.o && \
+      ar rcs <SOURCE_DIR>/libsimsimd.a <SOURCE_DIR>/lib.o"
+    INSTALL_COMMAND bash -c "\
+      mkdir -p ${THIRD_PARTY_LIB_DIR}/simsimd/include ${THIRD_PARTY_LIB_DIR}/simsimd/lib && \
+      cp -R <SOURCE_DIR>/include/* ${THIRD_PARTY_LIB_DIR}/simsimd/include/ && \
+      cp <SOURCE_DIR>/libsimsimd.a ${THIRD_PARTY_LIB_DIR}/simsimd/lib/"
+    LIB libsimsimd.a
   )
 endif()
 
@@ -196,10 +216,3 @@ add_library(TRDP::fast_float INTERFACE IMPORTED)
 add_dependencies(TRDP::fast_float fast_float_project)
 set_target_properties(TRDP::fast_float PROPERTIES
                       INTERFACE_INCLUDE_DIRECTORIES "${FAST_FLOAT_INCLUDE_DIR}")
-
-if(USE_SIMSIMD)
-  add_library(TRDP::simsimd INTERFACE IMPORTED)
-  add_dependencies(TRDP::simsimd simsimd_project)
-  set_target_properties(TRDP::simsimd PROPERTIES
-                        INTERFACE_INCLUDE_DIRECTORIES "${SIMSIMD_INCLUDE_DIR}")
-endif()

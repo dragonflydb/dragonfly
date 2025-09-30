@@ -149,6 +149,8 @@ class SearchTest : public ::testing::Test {
   static void SetUpTestSuite() {
     auto* tlh = mi_heap_get_backing();
     init_zmalloc_threadlocal(tlh);
+    // Initialize SimSIMD runtime for tests that may exercise vector kernels
+    InitSimSIMD();
   }
 
   SearchTest() {
@@ -967,6 +969,8 @@ TEST_F(SearchTest, VectorDistanceConsistency) {
 }
 
 static void BM_VectorSearch(benchmark::State& state) {
+  // Ensure SimSIMD dynamic dispatch is initialized for the benchmark
+  InitSimSIMD();
   unsigned ndims = state.range(0);
   unsigned nvecs = state.range(1);
 
@@ -1659,6 +1663,8 @@ TEST(CosineDistanceTest, ZeroVectors) {
 
 // Unified vector distance benchmarks using VectorDistance function
 static void BM_VectorDistance(benchmark::State& state) {
+  // Ensure SimSIMD dynamic dispatch is initialized for the benchmark
+  InitSimSIMD();
   size_t dims = state.range(0);
   size_t num_pairs = state.range(1);
   VectorSimilarity sim = static_cast<VectorSimilarity>(state.range(2));
@@ -1691,6 +1697,8 @@ static void BM_VectorDistance(benchmark::State& state) {
 
 // Intensive benchmark with batch processing
 static void BM_VectorDistance_Intensive(benchmark::State& state) {
+  // Ensure SimSIMD dynamic dispatch is initialized for the benchmark
+  InitSimSIMD();
   size_t dims = 512;  // Fixed medium size
   size_t batch_size = 1000;
   VectorSimilarity sim = static_cast<VectorSimilarity>(state.range(0));

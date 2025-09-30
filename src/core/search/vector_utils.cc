@@ -15,9 +15,7 @@ using namespace std;
 
 namespace {
 
-#ifdef USE_SIMSIMD
-// Native float16 support is controlled via CMake option SIMSIMD_NATIVE_F16
-// Default behavior disables native F16/BF16 for maximum compatibility
+#ifdef WITH_SIMSIMD
 #include <simsimd/simsimd.h>
 #endif
 
@@ -29,7 +27,7 @@ namespace {
 
 // Euclidean vector distance: sqrt( sum: (u[i] - v[i])^2  )
 FAST_MATH float L2Distance(const float* u, const float* v, size_t dims) {
-#ifdef USE_SIMSIMD
+#ifdef WITH_SIMSIMD
   simsimd_distance_t distance = 0;
   simsimd_l2_f32(u, v, dims, &distance);
   return static_cast<float>(distance);
@@ -44,7 +42,7 @@ FAST_MATH float L2Distance(const float* u, const float* v, size_t dims) {
 // Inner product distance: 1 - dot_product(u, v)
 // For normalized vectors, this is equivalent to cosine distance
 FAST_MATH float IPDistance(const float* u, const float* v, size_t dims) {
-#ifdef USE_SIMSIMD
+#ifdef WITH_SIMSIMD
   // Use SimSIMD dot product and convert to inner product distance: 1 - dot(u, v).
   simsimd_distance_t dot = 0;
   simsimd_dot_f32(u, v, dims, &dot);
@@ -58,7 +56,7 @@ FAST_MATH float IPDistance(const float* u, const float* v, size_t dims) {
 }
 
 FAST_MATH float CosineDistance(const float* u, const float* v, size_t dims) {
-#ifdef USE_SIMSIMD
+#ifdef WITH_SIMSIMD
   simsimd_distance_t distance = 0;
   simsimd_cos_f32(u, v, dims, &distance);
   return static_cast<float>(distance);
@@ -110,6 +108,12 @@ float VectorDistance(const float* u, const float* v, size_t dims, VectorSimilari
       return CosineDistance(u, v, dims);
   };
   return 0.0f;
+}
+
+void InitSimSIMD() {
+#if defined(WITH_SIMSIMD)
+  (void)simsimd_capabilities();
+#endif
 }
 
 }  // namespace dfly::search

@@ -34,6 +34,7 @@ extern "C" {
 #include "base/flag_utils.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/search/vector_utils.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"
@@ -913,6 +914,11 @@ void RegisterMutableFlags(ConfigRegistry* reg, absl::Span<const std::string> nam
 void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   InitRedisTables();
   facade::Connection::Init(pp_.size());
+
+#if defined(WITH_SEARCH)
+  // Initialize SimSIMD runtime if needed (explicit, avoids implicit static initializers)
+  dfly::search::InitSimSIMD();
+#endif
 
   config_registry.RegisterMutable("dbfilename");
   config_registry.Register("dbnum");  // equivalent to databases in redis.
