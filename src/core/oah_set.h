@@ -354,9 +354,11 @@ class OAHSet {  // Open Addressing Hash Set
   iterator FindInternal(uint32_t bid, std::string_view str, uint64_t hash) {
     const uint32_t displacement_size = std::min(kDisplacementSize, BucketCount());
     const uint32_t capacity_mask = Capacity() - 1;
+    const auto ext_hash = OAHEntry::CalcExtHash(hash, capacity_log_, kShiftLog);
     for (uint32_t i = 0; i < displacement_size; i++) {
       const uint32_t bucket_id = (bid + i) & capacity_mask;
-      auto pos = entries_[bucket_id].Find(str, hash, capacity_log_, kShiftLog, &size_, time_now_);
+      auto pos =
+          entries_[bucket_id].Find(str, ext_hash, capacity_log_, kShiftLog, &size_, time_now_);
       if (pos) {
         return iterator{this, bucket_id, *pos};
       }
