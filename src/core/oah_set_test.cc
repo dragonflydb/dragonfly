@@ -101,7 +101,8 @@ TEST_F(OAHSetTest, OAHEntryTest) {
   test.Insert(std::move(first));
 
   uint32_t set_size = 4;
-  EXPECT_EQ(test.Find("123456789", Hash("123456789"), 4, 4, &set_size), 1);
+  EXPECT_EQ(test.Find("123456789", OAHEntry::CalcExtHash(Hash("123456789"), 4, 4), 4, 4, &set_size),
+            1);
 
   test.Insert(OAHEntry("23456789"));
 
@@ -141,13 +142,19 @@ TEST_F(OAHSetTest, HashCheckTest) {
 
   uint32_t num_expired_fields = 0;
 
-  EXPECT_TRUE(isl.Find("0123456789", Hash("0123456789"), 3, 4, &num_expired_fields));
-  EXPECT_TRUE(isl.Find("123456789", Hash("123456789"), 3, 4, &num_expired_fields));
-  EXPECT_TRUE(isl.Find("23456789", Hash("23456789"), 3, 4, &num_expired_fields));
-  EXPECT_TRUE(isl.Find("3456789", Hash("3456789"), 3, 4, &num_expired_fields));
-  EXPECT_TRUE(isl.Find("456789", Hash("456789"), 3, 4, &num_expired_fields));
+  EXPECT_TRUE(isl.Find("0123456789", OAHEntry::CalcExtHash(Hash("0123456789"), 3, 4), 3, 4,
+                       &num_expired_fields));
+  EXPECT_TRUE(isl.Find("123456789", OAHEntry::CalcExtHash(Hash("123456789"), 3, 4), 3, 4,
+                       &num_expired_fields));
+  EXPECT_TRUE(isl.Find("23456789", OAHEntry::CalcExtHash(Hash("23456789"), 3, 4), 3, 4,
+                       &num_expired_fields));
+  EXPECT_TRUE(
+      isl.Find("3456789", OAHEntry::CalcExtHash(Hash("3456789"), 3, 4), 3, 4, &num_expired_fields));
+  EXPECT_TRUE(
+      isl.Find("456789", OAHEntry::CalcExtHash(Hash("456789"), 3, 4), 3, 4, &num_expired_fields));
 
-  auto idx = isl.Find("456789", Hash("456789"), 3, 4, &num_expired_fields);
+  auto idx =
+      isl.Find("456789", OAHEntry::CalcExtHash(Hash("456789"), 3, 4), 3, 4, &num_expired_fields);
   auto new_pos = isl[*idx].Rehash(7, 3, 4, 4);
   EXPECT_EQ(new_pos, 6);
   EXPECT_FALSE(isl[*idx].GetHash());
