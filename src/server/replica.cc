@@ -516,7 +516,7 @@ void Replica::InitializeShardFlows() {
 
   for (size_t i = 0; i < shard_flows_.size(); ++i) {
     uint64_t partial_sync_lsn = 0;
-    if (!shard_flows_.empty() && shard_flows_[i]) {
+    if (shard_flows_[i]) {
       partial_sync_lsn = shard_flows_[i]->JournalExecutedCount();
     }
     shard_flows_[i].reset(
