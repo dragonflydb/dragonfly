@@ -45,13 +45,6 @@ class ProtocolClient {
   uint64_t LastIoTime() const;
   void TouchIoTime();
 
-  // Used to set the socket_thread_ prior the initialization of sock_.
-  // That way Proactor() returns the right thread even when the sock_ is
-  // not yet initialized
-  void SetSocketThread(util::fb2::ProactorBase* sock_thread) {
-    socket_thread_ = sock_thread;
-  }
-
  protected:
   struct ServerContext {
     std::string host;
@@ -114,7 +107,7 @@ class ProtocolClient {
   }
 
   auto* Proactor() const {
-    return socket_thread_;
+    return sock_->proactor();
   }
 
   util::FiberSocketBase* Sock() const {

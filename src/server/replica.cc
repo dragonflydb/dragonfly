@@ -510,31 +510,21 @@ error_code Replica::InitiatePSync() {
 }
 
 void Replica::InitializeShardFlows() {
-  decltype(shard_flows_) shard_flows_copy;
-  shard_flows_copy.resize(master_context_.num_flows);
-  DCHECK(!shard_flows_copy.empty());
-  thread_flow_map_ = Partition(shard_flows_copy.size());
-  const size_t pool_sz = shard_set->pool()->size();
+  shard_flows_.resize(master_context_.num_flows);
+  DCHECK(!shard_flows_.empty());
+  thread_flow_map_ = Partition(shard_flows_.size());
 
-  for (size_t i = 0; i < shard_flows_copy.size(); ++i) {
+  for (size_t i = 0; i < shard_flows_.size(); ++i) {
     uint64_t partial_sync_lsn = 0;
     if (!shard_flows_.empty() && shard_flows_[i]) {
       partial_sync_lsn = shard_flows_[i]->JournalExecutedCount();
     }
-    shard_flows_copy[i].reset(
+    shard_flows_[i].reset(
         new DflyShardReplica(server(), master_context_, i, &service_, multi_shard_exe_));
     if (partial_sync_lsn > 0) {
-      shard_flows_copy[i]->SetRecordsExecuted(partial_sync_lsn);
+      shard_flows_[i]->SetRecordsExecuted(partial_sync_lsn);
     }
   }
-
-  shard_set->pool()->AwaitFiberOnAll([pool_sz, this, &shard_flows_copy](auto index, auto* ctx) {
-    for (unsigned i = index; i < shard_flows_copy.size(); i += pool_sz) {
-      shard_flows_copy[i]->SetSocketThread(ProactorBase::me());
-    }
-  });
-  // now update shard_flows on proactor thread
-  shard_flows_ = std::move(shard_flows_copy);
 }
 
 // Initialize and start sub-replica for each flow.
@@ -777,11 +767,6 @@ error_code Replica::ConsumeDflyStream() {
     multi_shard_exe_->CancelAllBlockingEntities();
   };
   RETURN_ON_ERR(exec_st_.SwitchErrorHandler(std::move(err_handler)));
-
-  size_t total_flows_to_finish_partial = 0;
-  for (const auto& flow : thread_flow_map_) {
-    total_flows_to_finish_partial += flow.size();
-  }
 
   LOG(INFO) << "Transitioned into stable sync";
   // Transition flows into stable sync.

@@ -109,16 +109,12 @@ ProtocolClient::ProtocolClient(string host, uint16_t port) {
 #ifdef DFLY_USE_SSL
   MaybeInitSslCtx();
 #endif
-  // We initialize the proactor thread here such that it never races with Sock().
-  // ProtocolClient is never migrated to a different thread, so this is safe.
-  socket_thread_ = ProactorBase::me();
 }
 
 ProtocolClient::ProtocolClient(ServerContext context) : server_context_(std::move(context)) {
 #ifdef DFLY_USE_SSL
   MaybeInitSslCtx();
 #endif
-  socket_thread_ = ProactorBase::me();
 }
 
 ProtocolClient::~ProtocolClient() {
@@ -160,7 +156,6 @@ error_code ProtocolClient::ResolveHostDns() {
 error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms,
                                           ExecutionState* cntx) {
   ProactorBase* mythread = ProactorBase::me();
-  DCHECK(mythread == socket_thread_);
   CHECK(mythread);
   {
     unique_lock lk(sock_mu_);
