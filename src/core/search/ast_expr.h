@@ -45,6 +45,13 @@ struct AstRangeNode {
   double lo, hi;
 };
 
+struct AstGeoNode {
+  AstGeoNode(double lon, double lat, double radius, std::string unit);
+  double lon, lat;
+  double radius;
+  std::string unit;
+};
+
 // Negates subtree
 struct AstNegateNode {
   AstNegateNode(AstNode&& node);
@@ -112,7 +119,7 @@ struct AstKnnNode {
 using NodeVariants =
     std::variant<std::monostate, AstStarNode, AstStarFieldNode, AstTermNode, AstPrefixNode,
                  AstSuffixNode, AstInfixNode, AstRangeNode, AstNegateNode, AstLogicalNode,
-                 AstFieldNode, AstTagsNode, AstKnnNode>;
+                 AstFieldNode, AstTagsNode, AstKnnNode, AstGeoNode>;
 
 struct AstNode : public NodeVariants {
   using variant::variant;

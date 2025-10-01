@@ -122,6 +122,8 @@ struct SchemaFieldInitializer {
       case SchemaField::VECTOR:
         special_params = SchemaField::VectorParams{};
         break;
+      case SchemaField::GEO:
+        break;
     }
   }
 
@@ -912,6 +914,59 @@ TEST_P(KnnTest, AutoResize) {
   }
 
   EXPECT_EQ(indices.GetAllDocs().size(), 100);
+}
+
+TEST_F(SearchTest, GeoSearch) {
+  auto schema = MakeSimpleSchema({{"name", SchemaField::TEXT}, {"location", SchemaField::GEO}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  indices.Add(0, MockedDocument(Map{{"name", "Mountain View"}, {"location", "-122.08, 37.386"}}));
+  indices.Add(1, MockedDocument(Map{{"name", "Palo Alto"}, {"location", "-122.143, 37.444"}}));
+  indices.Add(2, MockedDocument(Map{{"name", "San Jose"}, {"location", "-121.886, 37.338"}}));
+  indices.Add(3, MockedDocument(Map{{"name", "San Francisco"}, {"location", "-122.419, 37.774"}}));
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  // Search around Mount View 30 miles - San Francisco not included
+  {
+    algo.Init("@location:[-122.083 37.386 30 mi]", &params);
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2));
+  }
+
+  // Search around Mount View 50 miles - all points included
+  {
+    algo.Init("@location:[-122.083 37.386 50 mi]", &params);
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 3));
+  }
+
+  // Return all indexes
+  {
+    algo.Init("@location:*", &params);
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 3));
+  }
+
+  // Search around Mount View 50 miles - all points included and filter on prefix
+  {
+    algo.Init("San* @location:[-122.083 37.386 50 mi]", &params);
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(2, 3));
+  }
+
+  // Add duplicate point of San Francisco and search again to include this point also
+  {
+    indices.Add(4,
+                MockedDocument(Map{{"name", "San Francisco"}, {"location", "-122.419, 37.774"}}));
+    algo.Init("San* @location:[-122.083 37.386 50 mi]", &params);
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(2, 3, 4));
+  }
+
+  // Remove first index of San Francisco (id = 3) and search
+  {
+    indices.Remove(
+        3, MockedDocument(Map{{"name", "San Francisco"}, {"location", "-122.419, 37.774"}}));
+    algo.Init("San* @location:[-122.083 37.386 50 mi]", &params);
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(2, 4));
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(KnnFlat, KnnTest, testing::Values(false));
