@@ -93,7 +93,7 @@ class OAHEntry {
   }
 
   // consider manual removing, we waste a lot of time to check nullptr
-  inline ~OAHEntry() {
+  ~OAHEntry() {
     Clear();
   }
 
@@ -103,33 +103,33 @@ class OAHEntry {
     return *this;
   }
 
-  inline bool Empty() const {
-    return !Raw();
+  bool Empty() const {
+    return data_ == nullptr;
   }
 
   inline operator bool() const {
     return !Empty();
   }
 
-  inline bool IsVector() const {
+  bool IsVector() const {
     return (uptr() & kVectorBit) != 0;
   }
 
-  inline std::vector<OAHEntry>& AsVector() {
+  std::vector<OAHEntry>& AsVector() {
     return *reinterpret_cast<std::vector<OAHEntry>*>(Raw());
   }
 
-  inline std::string_view Key() const {
+  std::string_view Key() const {
     DCHECK(!IsVector());
     return {GetKeyData(), GetKeySize()};
   }
 
-  inline bool HasExpiry() const {
+  bool HasExpiry() const {
     return (uptr() & kExpiryBit) != 0;
   }
 
   // returns the expiry time of the current entry or UINT32_MAX if no expiry is set.
-  inline uint32_t GetExpiry() const {
+  uint32_t GetExpiry() const {
     std::uint32_t res = UINT32_MAX;
     if (HasExpiry()) {
       DCHECK(!IsVector());
@@ -143,7 +143,7 @@ class OAHEntry {
     return this;
   }
 
-  inline uint64_t GetHash() const {
+  uint64_t GetHash() const {
     return (uptr() & kExtHashShiftedMask) >> kExtHashShift;
   }
 
@@ -162,12 +162,16 @@ class OAHEntry {
     return bucket_id == stored_bucket_id;
   }
 
-  bool CheckExtendedHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) {
-    if (Empty())
-      return false;
+  static uint64_t CalcExtHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) {
     const uint32_t start_hash_bit = capacity_log > shift_log ? capacity_log - shift_log : 0;
     const uint32_t ext_hash_shift = 64 - start_hash_bit - kExtHashSize;
     const uint64_t ext_hash = (hash >> ext_hash_shift) & kExtHashMask;
+    return ext_hash;
+  }
+
+  bool CheckExtendedHash(const uint64_t ext_hash, uint32_t capacity_log, uint32_t shift_log) {
+    if (Empty())
+      return false;
     auto stored_hash = GetHash();
     if (!stored_hash && !IsVector()) {
       stored_hash = SetHash(Hash(Key()), capacity_log, shift_log);
@@ -178,10 +182,9 @@ class OAHEntry {
   // TODO rename to SetHash
   // shift_log identify which bucket the element belongs to
   uint64_t SetHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) {
+    DCHECK(data_);
     DCHECK(!IsVector());
-    const uint32_t start_hash_bit = capacity_log > shift_log ? capacity_log - shift_log : 0;
-    const uint32_t ext_hash_shift = 64 - start_hash_bit - kExtHashSize;
-    const uint64_t result_hash = (hash >> ext_hash_shift) & kExtHashMask;
+    const uint64_t result_hash = CalcExtHash(hash, capacity_log, shift_log);
     const uint64_t ext_hash = result_hash << kExtHashShift;
     data_ = (char*)((uptr() & ~kExtHashShiftedMask) | ext_hash);
     return result_hash;
@@ -237,21 +240,21 @@ class OAHEntry {
   }
 
   // TODO refactor, because it's inefficient
-  std::optional<uint32_t> Find(std::string_view str, uint64_t hash, uint32_t capacity_log,
+  std::optional<uint32_t> Find(std::string_view str, uint64_t ext_hash, uint32_t capacity_log,
                                uint32_t shift_log, uint32_t* set_size, uint32_t time_now = 0) {
-    if (Empty())
-      return std::nullopt;
-    if (!IsVector()) {
-      ExpireIfNeeded(time_now, set_size);
-      return CheckExtendedHash(hash, capacity_log, shift_log) && Key() == str
-                 ? 0
-                 : std::optional<uint32_t>();
-    }
-    auto& vec = AsVector();
-    for (size_t i = 0, size = vec.size(); i < size; ++i) {
-      vec[i].ExpireIfNeeded(time_now, set_size);
-      if (vec[i].CheckExtendedHash(hash, capacity_log, shift_log) && vec[i].Key() == str) {
-        return i;
+    if (!Empty()) {
+      if (!IsVector()) {
+        ExpireIfNeeded(time_now, set_size);
+        return CheckExtendedHash(ext_hash, capacity_log, shift_log) && Key() == str
+                   ? 0
+                   : std::optional<uint32_t>();
+      }
+      auto& vec = AsVector();
+      for (size_t i = 0, size = vec.size(); i < size; ++i) {
+        vec[i].ExpireIfNeeded(time_now, set_size);
+        if (vec[i].CheckExtendedHash(ext_hash, capacity_log, shift_log) && vec[i].Key() == str) {
+          return i;
+        }
       }
     }
     return std::nullopt;
@@ -266,7 +269,7 @@ class OAHEntry {
   }
 
   // TODO refactor, because it's inefficient
-  inline uint32_t Insert(OAHEntry&& e) {
+  uint32_t Insert(OAHEntry&& e) {
     if (Empty()) {
       *this = std::move(e);
       return 0;
@@ -283,6 +286,7 @@ class OAHEntry {
       for (; i < arr.size(); ++i) {
         if (!arr[i]) {
           arr[i] = std::move(e);
+          return i;
         }
       }
       arr.push_back(std::move(e));
@@ -361,7 +365,7 @@ class OAHEntry {
   }
 
  protected:
-  inline void Clear() {
+  void Clear() {
     // TODO add optimization to avoid destructor calls during vector allocator
     if (!data_)
       return;
@@ -390,40 +394,40 @@ class OAHEntry {
     return size;
   }
 
-  inline uint64_t uptr() const {
+  uint64_t uptr() const {
     return uint64_t(data_);
   }
 
-  inline char* Raw() const {
+  char* Raw() const {
     return (char*)(uptr() & ~kTagMask);
   }
 
-  inline void SetExpiryBit(bool b) {
+  void SetExpiryBit(bool b) {
     if (b)
       data_ = (char*)(uptr() | kExpiryBit);
     else
       data_ = (char*)(uptr() & (~kExpiryBit));
   }
 
-  inline void SetVectorBit() {
+  void SetVectorBit() {
     data_ = (char*)(uptr() | kVectorBit);
   }
 
-  inline void SetSsoBit() {
+  void SetSsoBit() {
     data_ = (char*)(uptr() | kSsoBit);
   }
 
-  inline bool HasSso() const {
+  bool HasSso() const {
     return (uptr() & kSsoBit) != 0;
   }
 
-  inline size_t Size() {
+  size_t Size() {
     size_t key_field_size = HasSso() ? 1 : 4;
     size_t expiry_field_size = HasExpiry() ? 4 : 0;
     return expiry_field_size + key_field_size + GetKeySize();
   }
 
-  inline std::uint32_t GetExpirySize() const {
+  std::uint32_t GetExpirySize() const {
     return HasExpiry() ? sizeof(std::uint32_t) : 0;
   }
 
