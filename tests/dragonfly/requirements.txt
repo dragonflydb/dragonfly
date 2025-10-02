@@ -15,7 +15,7 @@ pytest-repeat==0.9.3
 pymemcache==4.0.0
 meta_memcache==2
 prometheus_client==0.17.0
-aiohttp==3.10.2
+aiohttp==3.12.14
 numpy
 pytest-json-report==1.5.0
 psutil==5.9.5
