@@ -64,7 +64,7 @@ ABSL_DECLARE_FLAG(uint16_t, announce_port);
 ABSL_FLAG(
     int, replica_priority, 100,
     "Published by info command for sentinel to pick replica based on score during a failover");
-ABSL_FLAG(bool, experimental_replicaof_v2, true,
+ABSL_FLAG(bool, experimental_replicaof_v2, false,
           "Use ReplicaOfV2 algorithm for initiating replication");
 
 namespace dfly {
