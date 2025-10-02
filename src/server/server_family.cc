@@ -1992,7 +1992,7 @@ std::optional<ReplicaOffsetInfo> ServerFamily::GetReplicaOffsetInfo() {
 
   // Switch to primary mode.
   if (!ServerState::tlocal()->is_master) {
-    auto repl_ptr = tl_replica;
+    auto repl_ptr = replica_;
     CHECK(repl_ptr);
     return ReplicaOffsetInfo{repl_ptr->GetSyncId(), repl_ptr->GetReplicaOffset()};
   }
