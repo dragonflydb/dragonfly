@@ -161,6 +161,7 @@ void OutgoingMigration::Finish(const GenericError& error) {
   }
 
   bool should_cancel_flows = false;
+  absl::Cleanup on_exit([this]() { CloseSocket(); });
   {
     util::fb2::LockGuard lk(state_mu_);
     switch (state_) {
@@ -312,6 +313,8 @@ void OutgoingMigration::SyncFb() {
     }
     break;
   }
+
+  CloseSocket();
 
   VLOG(1) << "Exiting outgoing migration fiber for migration " << migration_info_.ToString();
 }

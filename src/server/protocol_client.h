@@ -107,7 +107,8 @@ class ProtocolClient {
   }
 
   auto* Proactor() const {
-    return sock_->proactor();
+    DCHECK(socket_thread_);
+    return socket_thread_;
   }
 
   util::FiberSocketBase* Sock() const {
@@ -132,7 +133,7 @@ class ProtocolClient {
   std::string last_cmd_;
   std::string last_resp_;
 
-  uint64_t last_io_time_ = 0;  // in ns, monotonic clock.
+  std::atomic<uint64_t> last_io_time_ = 0;  // in ns, monotonic clock.
 
 #ifdef DFLY_USE_SSL
 
@@ -142,6 +143,7 @@ class ProtocolClient {
 #else
   void* ssl_ctx_{nullptr};
 #endif
+  util::fb2::ProactorBase* socket_thread_;
 };
 
 }  // namespace dfly
