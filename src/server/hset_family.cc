@@ -411,7 +411,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
   if (enc == kEncodingListPack) {
     uint8_t* lp = (uint8_t*)pv.RObjPtr();
     for (auto s : values) {
-      auto res = LpDelete(lp, ToSV(s));
+      auto res = LpDelete(lp, s);
       if (res.second) {
         ++deleted;
         lp = res.first;
@@ -427,7 +427,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
     for (auto s : values) {
-      if (sm->Erase(ToSV(s))) {
+      if (sm->Erase(s)) {
         ++deleted;
       }
 
@@ -504,7 +504,7 @@ OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, Cm
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
     for (size_t i = 0; i < fields.size(); ++i) {
-      if (auto it = Find(sm, ToSV(fields[i]), defer_cleanup); it != sm->end()) {
+      if (auto it = Find(sm, fields[i], defer_cleanup); it != sm->end()) {
         result[i].emplace(it->second, sdslen(it->second));
       }
     }
@@ -723,8 +723,8 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
     bool added;
 
     for (size_t i = 0; i < values.size(); i += 2) {
-      string_view field = ToSV(values[i]);
-      string_view value = ToSV(values[i + 1]);
+      string_view field = values[i];
+      string_view value = values[i + 1];
       if (op_sp.skip_if_exists)
         added = sm->AddOrSkip(field, value, op_sp.ttl);
       else
