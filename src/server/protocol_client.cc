@@ -157,6 +157,7 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
                                           ExecutionState* cntx) {
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
+  socket_thread_ = ProactorBase::me();
   {
     unique_lock lk(sock_mu_);
     // The context closes sock_. So if the context error handler has already

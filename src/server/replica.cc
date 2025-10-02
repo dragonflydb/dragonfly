@@ -152,6 +152,8 @@ void Replica::StartMainReplicationFiber(std::optional<LastMasterSyncData> last_m
 void Replica::EnableReplication() {
   VLOG(1) << "Enabling replication";
 
+  socket_thread_ = ProactorBase::me();
+
   state_mask_ = R_ENABLED;                                           // set replica state to enabled
   sync_fb_ = MakeFiber(&Replica::MainReplicationFb, this, nullopt);  // call replication fiber
 }

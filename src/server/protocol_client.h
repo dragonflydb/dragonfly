@@ -107,7 +107,8 @@ class ProtocolClient {
   }
 
   auto* Proactor() const {
-    return sock_->proactor();
+    DCHECK(socket_thread_);
+    return socket_thread_;
   }
 
   util::FiberSocketBase* Sock() const {
