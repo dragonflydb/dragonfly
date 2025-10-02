@@ -8,7 +8,16 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
+// Wrong warning reported when geometry.hpp is loaded
+#ifndef __clang__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
 #include <boost/geometry.hpp>
+#ifndef __clang__
+#pragma GCC diagnostic pop
+#endif
+
 #include <map>
 #include <memory>
 #include <optional>
