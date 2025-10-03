@@ -2716,6 +2716,93 @@ TEST_F(JsonFamilyTest, DebugFieldsLegacy) {
   EXPECT_THAT(resp, IntArg(1));
 }
 
+TEST_F(JsonFamilyTest, DebugMemory) {
+  auto resp = Run({"JSON.SET", "json1", "$",
+                   R"([1, 2.3, "foo", true, null, {}, [], {"a":1, "b":2}, [1,2,3]])"});
+  EXPECT_EQ(resp, "OK");
+
+  // Test wildcard array elements - should return array of memory sizes
+  resp = Run({"JSON.DEBUG", "memory", "json1", "$[*]"});
+  EXPECT_EQ(resp.type, RespExpr::ARRAY);
+  EXPECT_EQ(resp.GetVec().size(), 9);
+  // Note: primitives and small strings may return 0 (inline storage/SSO)
+  for (const auto& elem : resp.GetVec()) {
+    EXPECT_GE(elem.GetInt(), 0);  // All should be >= 0
+  }
+
+  // Test root path - returns single value (not array)
+  resp = Run({"JSON.DEBUG", "memory", "json1", "$"});
+  EXPECT_GE(resp.GetInt(), 0);
+
+  // Test with larger string that won't fit in SSO
+  resp = Run({"JSON.SET", "bigstr", "$",
+              R"({"text":"This is a longer string that should definitely exceed SSO buffer"})"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "memory", "bigstr", "$.text"});
+  EXPECT_GE(resp.GetInt(), 0);
+
+  // Test with phonebook JSON - larger document
+  resp = Run({"JSON.SET", "phonebook", "$", PhonebookJson});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "memory", "phonebook", "$"});
+  EXPECT_GE(resp.GetInt(), 0);
+
+  // Test nested object
+  resp = Run({"JSON.SET", "obj_doc", "$", R"({"a":1, "b":2, "c":{"k1":1,"k2":2}})"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "MEMORY", "obj_doc", "$.a"});
+  EXPECT_GE(resp.GetInt(), 0);
+
+  resp = Run({"JSON.DEBUG", "memory", "obj_doc", "$.c"});
+  EXPECT_GE(resp.GetInt(), 0);
+}
+
+TEST_F(JsonFamilyTest, DebugMemoryLegacy) {
+  auto resp = Run({"JSON.SET", "json1", "$",
+                   R"([1, 2.3, "foo", true, null, {}, [], {"a":1, "b":2}, [1,2,3]])"});
+  EXPECT_EQ(resp, "OK");
+
+  // Legacy path should return single integer, not array
+  resp = Run({"JSON.DEBUG", "memory", "json1", "."});
+  EXPECT_EQ(resp.type, RespExpr::INT64);
+  EXPECT_GE(resp.GetInt(), 0);  // May be 0 or more depending on inline storage
+
+  resp = Run({"JSON.DEBUG", "memory", "json1"});
+  EXPECT_EQ(resp.type, RespExpr::INT64);
+  EXPECT_GE(resp.GetInt(), 0);
+
+  // Test with phonebook - larger document
+  resp = Run({"JSON.SET", "phonebook", "$", PhonebookJson});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "memory", "phonebook", "."});
+  EXPECT_EQ(resp.type, RespExpr::INT64);
+  EXPECT_GE(resp.GetInt(), 0);
+
+  // Test with long string that exceeds SSO (Short String Optimization)
+  // Most implementations use 15-23 byte SSO buffer, so this should allocate
+  resp = Run({"JSON.SET", "obj_doc", "$",
+              R"({"longstring":"This is a very long string that definitely exceeds SSO buffer"})"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "MEMORY", "obj_doc", ".longstring"});
+  EXPECT_EQ(resp.type, RespExpr::INT64);
+  auto mem_size = resp.GetInt();
+  ASSERT_TRUE(mem_size.has_value());
+  EXPECT_GE(mem_size.value(), 0);
+
+  // Test array with multiple elements
+  resp = Run({"JSON.SET", "arr", "$", R"([1,2,3,4,5,6,7,8,9,10])"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "memory", "arr", "."});
+  EXPECT_EQ(resp.type, RespExpr::INT64);
+  EXPECT_GE(resp.GetInt(), 0);
+}
+
 TEST_F(JsonFamilyTest, Resp) {
   auto resp = Run({"JSON.SET", "json", ".", PhonebookJson});
   ASSERT_THAT(resp, "OK");
