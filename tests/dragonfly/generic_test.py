@@ -342,3 +342,28 @@ async def test_key_bump_ups(df_factory):
         new_slot_id = int(dict(map(lambda s: s.split(":"), debug_key_info.split()))["slot"])
         assert new_slot_id + 1 == slot_id
         break
+
+
+@pytest.mark.debug_only
+@pytest.mark.asyncio
+async def test_debug_sync(df_factory):
+    df_server = df_factory.create()
+    df_server.start()
+    client = df_server.client()
+
+    value = "123"
+
+    # Should return key
+    await client.execute_command(f"SET key {value}")
+    result = await client.get("key")
+    assert result == value
+
+    # Enable debug sync point to return KEY_NOTFOUND
+    await client.execute_command("DEBUG SYNC ADD return_get_key_not_found")
+    result = await client.get("key")
+    assert result == None
+
+    # Disable - should return key
+    await client.execute_command("DEBUG SYNC DEL return_get_key_not_found")
+    result = await client.get("key")
+    assert result == value
