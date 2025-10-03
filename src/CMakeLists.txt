@@ -43,6 +43,12 @@ Message(STATUS "THIRD_PARTY_LIB_DIR ${THIRD_PARTY_LIB_DIR}")
 
 include(external_libs.cmake)
 
+# Enable compute_memory_size() method in patched jsoncons
+add_definitions(-DJSONCONS_COMPUTE_MEMORY_SIZE)
+
+# Add mimalloc include path for jsoncons compute_memory_size() support
+include_directories(SYSTEM ${THIRD_PARTY_LIB_DIR}/mimalloc2/include)
+
 if(ENABLE_GIT_VERSION)
     include(GetGitRevisionDescription.cmake)
     get_git_head_revision(GIT_REFSPEC GIT_SHA1)
