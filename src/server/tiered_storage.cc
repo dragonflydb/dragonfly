@@ -123,8 +123,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     }
   }
 
-  bool NotifyFetched(EntryId id, string_view value, tiering::DiskSegment segment,
-                     bool modified) override;
+  bool NotifyFetched(EntryId id, tiering::DiskSegment segment, tiering::Decoder* decoder) override;
 
   bool NotifyDelete(tiering::DiskSegment segment) override;
 
@@ -191,6 +190,8 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
     if (!IsValid(it))
       continue;
 
+    // TODO: Handle upload and cooling via type dependent decoders
+
     stats_.total_defrags++;
     PrimeValue& pv = it->second;
     if (pv.IsCool()) {
@@ -210,12 +211,13 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
   }
 }
 
-bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, string_view value,
-                                                  tiering::DiskSegment segment, bool modified) {
+bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, tiering::DiskSegment segment,
+                                                  tiering::Decoder* decoder) {
   ++stats_.total_fetches;
 
   if (id == EntryId{kFragmentedBin}) {  // Generally we read whole bins only for defrag
-    Defragment(segment, value);
+    auto* bdecoder = static_cast<tiering::BareDecoder*>(decoder);
+    Defragment(segment, bdecoder->slice);
     return true;  // delete
   }
 
@@ -224,9 +226,9 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, string_view value,
   //    Currently, our heuristic is not very smart, because we stop uploading any reads during
   //    the snapshotting.
   // TODO: to revisit this when we rewrite it with more efficient snapshotting algorithm.
-  bool should_upload = modified;
-  should_upload |=
-      (ts_->UploadBudget() > int64_t(value.length())) && !SliceSnapshot::IsSnaphotInProgress();
+  bool should_upload = decoder->modified;
+  should_upload |= (ts_->UploadBudget() > int64_t(decoder->estimated_mem_usage)) &&
+                   !SliceSnapshot::IsSnaphotInProgress();
 
   if (!should_upload)
     return false;
@@ -234,10 +236,10 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, string_view value,
   auto key = get<OpManager::KeyRef>(id);
   auto* pv = Find(key);
   if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
-    if (modified || pv->WasTouched()) {
-      bool is_raw = !modified;
+    if (decoder->modified || pv->WasTouched()) {
       ++stats_.total_uploads;
-      Upload(key.first, value, is_raw, segment.length, pv);
+      decoder->Upload(pv);
+      RecordDeleted(*pv, segment.length, GetDbTableStats(key.first));
       return true;
     }
     pv->SetTouched(true);
@@ -262,11 +264,7 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
   if (bin.fragmented) {
     // Trigger read to signal need for defragmentation. NotifyFetched will handle it.
     DVLOG(2) << "Enqueueing bin defragmentation for: " << bin.segment.offset;
-    auto cb = [dummy = 5](auto res) -> bool {
-      (void)dummy;  // a hack to make cb non constexpr that confuses some old) compilers.
-      return false;
-    };
-    Enqueue(kFragmentedBin, bin.segment, std::move(cb));
+    Enqueue(kFragmentedBin, bin.segment, tiering::BareDecoder{}, [](auto res) {});
   }
 
   return false;
@@ -324,14 +322,11 @@ void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& v
                          std::function<void(io::Result<std::string>)> readf) {
   DCHECK(value.IsExternal());
   DCHECK(!value.IsCool());
-  auto cb = [readf = std::move(readf), enc = value.GetStrEncoding()](auto res) mutable {
-    readf(res.transform([enc](tiering::OpManager::FetchedEntry entry) {
-      auto [ptr, raw] = entry;
-      return raw ? enc.Decode(*ptr).Take() : *ptr;  // TODO(vlad): optimize last value copy
-    }));
-    return false;
+  auto cb = [readf = std::move(readf)](io::Result<tiering::StringDecoder*> res) mutable {
+    readf(res.transform([](auto* d) { return string{d->Read()}; }));
   };
-  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
+  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), tiering::StringDecoder{value},
+                       std::move(cb));
 }
 
 template <typename T>
@@ -341,21 +336,11 @@ TieredStorage::TResult<T> TieredStorage::Modify(DbIndex dbid, std::string_view k
   DCHECK(value.IsExternal());
 
   util::fb2::Future<io::Result<T>> future;
-  auto cb = [future, modf = std::move(modf), enc = value.GetStrEncoding()](auto res) mutable {
-    if (!res.has_value()) {
-      future.Resolve(res.get_unexpected());
-      return false;
-    }
-
-    auto [raw_val, is_raw] = *res;
-    if (is_raw) {
-      raw_val->resize(enc.DecodedSize(*raw_val));
-      enc.Decode(*raw_val, raw_val->data());
-    }
-    future.Resolve(modf(raw_val));
-    return true;
+  auto cb = [future, modf = std::move(modf)](io::Result<tiering::StringDecoder*> res) mutable {
+    future.Resolve(res.transform([&modf](auto* d) { return modf(d->Write()); }));
   };
-  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
+  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), tiering::StringDecoder{value},
+                       std::move(cb));
   return future;
 }
 
