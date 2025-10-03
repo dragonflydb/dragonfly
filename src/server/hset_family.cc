@@ -261,6 +261,7 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   return OpStatus::OK;
 }
 
+// TODO: Make fully automatic + absl cleanup
 struct KeyCleanup {
   using CleanupFuncT = std::function<void(std::string_view)>;
   explicit KeyCleanup(CleanupFuncT func, const std::string_view key_view)
@@ -516,25 +517,14 @@ OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, Cm
 OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
-
-  if (it_res) {
-    return HMapLength(op_args.db_cntx, (*it_res)->second);
-  }
-
-  if (it_res.status() == OpStatus::KEY_NOTFOUND)
-    return 0;
-  return it_res.status();
+  RETURN_ON_BAD_STATUS(it_res);
+  return HMapLength(op_args.db_cntx, (*it_res)->second);
 }
 
-OpResult<int> OpExist(const OpArgs& op_args, string_view key, string_view field) {
+OpResult<uint32_t> OpExist(const OpArgs& op_args, string_view key, string_view field) {
   auto& db_slice = op_args.GetDbSlice();
   auto [it_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
-
-  if (!it_res) {
-    if (it_res.status() == OpStatus::KEY_NOTFOUND)
-      return 0;
-    return it_res.status();
-  }
+  RETURN_ON_BAD_STATUS(it_res);
 
   const PrimeValue& pv = (*it_res)->second;
   void* ptr = pv.RObjPtr();
@@ -552,9 +542,7 @@ OpResult<int> OpExist(const OpArgs& op_args, string_view key, string_view field)
 OpResult<string> OpGet(const OpArgs& op_args, string_view key, string_view field) {
   auto& db_slice = op_args.GetDbSlice();
   auto [it_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
-
-  if (!it_res)
-    return it_res.status();
+  RETURN_ON_BAD_STATUS(it_res);
 
   const PrimeValue& pv = (*it_res)->second;
   void* ptr = pv.RObjPtr();
@@ -635,15 +623,10 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
   return res;
 }
 
-OpResult<size_t> OpStrLen(const OpArgs& op_args, string_view key, string_view field) {
+OpResult<uint32_t> OpStrLen(const OpArgs& op_args, string_view key, string_view field) {
   auto& db_slice = op_args.GetDbSlice();
   auto [it_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
-
-  if (!it_res) {
-    if (it_res.status() == OpStatus::KEY_NOTFOUND)
-      return 0;
-    return it_res.status();
-  }
+  RETURN_ON_BAD_STATUS(it_res);
 
   const PrimeValue& pv = (*it_res)->second;
   void* ptr = pv.RObjPtr();
@@ -832,51 +815,46 @@ void HSetEx(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
+struct HSetReplies {
+  void Send(OpResult<uint32_t> result) const {
+    switch (result.status()) {
+      case OpStatus::OK:
+      case OpStatus::KEY_NOTFOUND:
+        return rb->SendLong(result.value_or(0));
+      default:
+        return rb->SendError(result.status());
+    };
+  }
+
+  facade::SinkReplyBuilder* rb;
+};
+
 }  // namespace
 
 void HSetFamily::HDel(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
 
-  args.remove_prefix(1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpDel(t->GetOpArgs(shard), key, args);
+    return OpDel(t->GetOpArgs(shard), key, args.subspan(1));
   };
-
-  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    cmd_cntx.rb->SendLong(*result);
-  } else {
-    cmd_cntx.rb->SendError(result.status());
-  }
+  HSetReplies{cmd_cntx.rb}.Send(cmd_cntx.tx->ScheduleSingleHopT(cb));
 }
 
 void HSetFamily::HLen(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
-
-  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  if (result) {
-    cmd_cntx.rb->SendLong(*result);
-  } else {
-    cmd_cntx.rb->SendError(result.status());
-  }
+  HSetReplies{cmd_cntx.rb}.Send(cmd_cntx.tx->ScheduleSingleHopT(cb));
 }
 
 void HSetFamily::HExists(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view field = ArgS(args, 1);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<int> {
+  auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExist(t->GetOpArgs(shard), key, field);
   };
-
-  OpResult<int> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  if (result) {
-    cmd_cntx.rb->SendLong(*result);
-  } else {
-    cmd_cntx.rb->SendError(result.status());
-  }
+  HSetReplies{cmd_cntx.rb}.Send(cmd_cntx.tx->ScheduleSingleHopT(cb));
 }
 
 void HSetFamily::HExpire(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -956,16 +934,15 @@ void HSetFamily::HGet(CmdArgList args, const CommandContext& cmd_cntx) {
   };
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  OpResult<string> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  if (result) {
-    rb->SendBulkString(*result);
-  } else {
-    if (result.status() == OpStatus::KEY_NOTFOUND) {
-      rb->SendNull();
-    } else {
-      cmd_cntx.rb->SendError(result.status());
-    }
-  }
+  OpResult<string> result = cmd_cntx.tx->ScheduleSingleHopT(cb);
+  switch (result.status()) {
+    case OpStatus::OK:
+      return rb->SendBulkString(*result);
+    case OpStatus::KEY_NOTFOUND:
+      return rb->SendNull();
+    default:
+      return rb->SendError(result.status());
+  };
 }
 
 void HSetFamily::HIncrBy(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -1132,13 +1109,7 @@ void HSetFamily::HStrLen(CmdArgList args, const CommandContext& cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key, field);
   };
-
-  OpResult<size_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  if (result) {
-    cmd_cntx.rb->SendLong(*result);
-  } else {
-    cmd_cntx.rb->SendError(result.status());
-  }
+  HSetReplies{cmd_cntx.rb}.Send(cmd_cntx.tx->ScheduleSingleHopT(cb));
 }
 
 void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
