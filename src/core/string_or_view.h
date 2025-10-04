@@ -65,9 +65,15 @@ class StringOrView {
       val_ = std::string{std::get<std::string_view>(val_)};
   }
 
+  // Move out of value as string
   std::string Take() && {
     MakeOwned();
     return std::move(std::get<std::string>(val_));
+  }
+
+  std::string* BorrowMut() {
+    MakeOwned();
+    return &std::get<std::string>(val_);
   }
 
   bool empty() const {
