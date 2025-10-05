@@ -2721,43 +2721,59 @@ TEST_F(JsonFamilyTest, DebugMemory) {
                    R"([1, 2.3, "foo", true, null, {}, [], {"a":1, "b":2}, [1,2,3]])"});
   EXPECT_EQ(resp, "OK");
 
-  // Test wildcard array elements - should return array of memory sizes
+  // Test wildcard array elements
   resp = Run({"JSON.DEBUG", "memory", "json1", "$[*]"});
   EXPECT_EQ(resp.type, RespExpr::ARRAY);
   EXPECT_EQ(resp.GetVec().size(), 9);
-  // Note: primitives and small strings may return 0 (inline storage/SSO)
-  for (const auto& elem : resp.GetVec()) {
-    EXPECT_GE(elem.GetInt(), 0);  // All should be >= 0
-  }
 
-  // Test root path - returns single value (not array)
+  // Verify specific expectations for each element:
+  // [0]: 1 (int) - inline → 0
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 0);
+  // [1]: 2.3 (double) - inline → 0
+  EXPECT_EQ(resp.GetVec()[1].GetInt(), 0);
+  // [2]: "foo" (short string) - SSO → 0
+  EXPECT_EQ(resp.GetVec()[2].GetInt(), 0);
+  // [3]: true (bool) - inline → 0
+  EXPECT_EQ(resp.GetVec()[3].GetInt(), 0);
+  // [4]: null - inline → 0
+  EXPECT_EQ(resp.GetVec()[4].GetInt(), 0);
+  // [5]: {} (empty object) - may allocate
+  EXPECT_GE(resp.GetVec()[5].GetInt(), 0);
+  // [6]: [] (empty array) - may allocate
+  EXPECT_GE(resp.GetVec()[6].GetInt(), 0);
+  // [7]: {"a":1, "b":2} (object) - allocates → > 0
+  EXPECT_GT(resp.GetVec()[7].GetInt(), 0);
+  // [8]: [1,2,3] (array) - allocates → > 0
+  EXPECT_GT(resp.GetVec()[8].GetInt(), 0);
+
+  // Test root path - whole array allocates
   resp = Run({"JSON.DEBUG", "memory", "json1", "$"});
-  EXPECT_GE(resp.GetInt(), 0);
+  EXPECT_GT(resp.GetInt(), 0);  // Array itself allocates memory
 
-  // Test with larger string that won't fit in SSO
+  // Test with long string that definitely exceeds SSO (~23 bytes)
   resp = Run({"JSON.SET", "bigstr", "$",
               R"({"text":"This is a longer string that should definitely exceed SSO buffer"})"});
   EXPECT_EQ(resp, "OK");
 
   resp = Run({"JSON.DEBUG", "memory", "bigstr", "$.text"});
-  EXPECT_GE(resp.GetInt(), 0);
+  EXPECT_GT(resp.GetInt(), 0);  // Long string must allocate
 
-  // Test with phonebook JSON - larger document
+  // Test with phonebook JSON - large document
   resp = Run({"JSON.SET", "phonebook", "$", PhonebookJson});
   EXPECT_EQ(resp, "OK");
 
   resp = Run({"JSON.DEBUG", "memory", "phonebook", "$"});
-  EXPECT_GE(resp.GetInt(), 0);
+  EXPECT_GT(resp.GetInt(), 0);  // Large document must allocate
 
-  // Test nested object
-  resp = Run({"JSON.SET", "obj_doc", "$", R"({"a":1, "b":2, "c":{"k1":1,"k2":2}})"});
+  // Test primitive vs container
+  resp = Run({"JSON.SET", "obj_doc", "$", R"({"num":42, "obj":{"k1":1,"k2":2}})"});
   EXPECT_EQ(resp, "OK");
 
-  resp = Run({"JSON.DEBUG", "MEMORY", "obj_doc", "$.a"});
-  EXPECT_GE(resp.GetInt(), 0);
+  resp = Run({"JSON.DEBUG", "MEMORY", "obj_doc", "$.num"});
+  EXPECT_EQ(resp.GetInt(), 0);  // Primitive stored inline
 
-  resp = Run({"JSON.DEBUG", "memory", "obj_doc", "$.c"});
-  EXPECT_GE(resp.GetInt(), 0);
+  resp = Run({"JSON.DEBUG", "memory", "obj_doc", "$.obj"});
+  EXPECT_GT(resp.GetInt(), 0);  // Object allocates memory
 }
 
 TEST_F(JsonFamilyTest, DebugMemoryLegacy) {
@@ -2765,25 +2781,37 @@ TEST_F(JsonFamilyTest, DebugMemoryLegacy) {
                    R"([1, 2.3, "foo", true, null, {}, [], {"a":1, "b":2}, [1,2,3]])"});
   EXPECT_EQ(resp, "OK");
 
-  // Legacy path should return single integer, not array
+  // Legacy path should return single integer for whole array
   resp = Run({"JSON.DEBUG", "memory", "json1", "."});
   EXPECT_EQ(resp.type, RespExpr::INT64);
-  EXPECT_GE(resp.GetInt(), 0);  // May be 0 or more depending on inline storage
+  EXPECT_GT(resp.GetInt(), 0);  // Array allocates memory
 
   resp = Run({"JSON.DEBUG", "memory", "json1"});
   EXPECT_EQ(resp.type, RespExpr::INT64);
-  EXPECT_GE(resp.GetInt(), 0);
+  EXPECT_GT(resp.GetInt(), 0);  // Array allocates memory
 
-  // Test with phonebook - larger document
+  // Test with phonebook - large document
   resp = Run({"JSON.SET", "phonebook", "$", PhonebookJson});
   EXPECT_EQ(resp, "OK");
 
   resp = Run({"JSON.DEBUG", "memory", "phonebook", "."});
   EXPECT_EQ(resp.type, RespExpr::INT64);
-  EXPECT_GE(resp.GetInt(), 0);
+  EXPECT_GT(resp.GetInt(), 0);  // Large document allocates
 
-  // Test with long string that exceeds SSO (Short String Optimization)
-  // Most implementations use 15-23 byte SSO buffer, so this should allocate
+  // Test primitives - should be 0 (inline storage)
+  resp = Run({"JSON.SET", "primitives", "$", R"({"num":42, "bool":true, "null":null})"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "memory", "primitives", ".num"});
+  EXPECT_EQ(resp.GetInt(), 0);  // Int stored inline
+
+  resp = Run({"JSON.DEBUG", "memory", "primitives", ".bool"});
+  EXPECT_EQ(resp.GetInt(), 0);  // Bool stored inline
+
+  resp = Run({"JSON.DEBUG", "memory", "primitives", ".null"});
+  EXPECT_EQ(resp.GetInt(), 0);  // Null stored inline
+
+  // Test long string that exceeds SSO (>23 bytes typically)
   resp = Run({"JSON.SET", "obj_doc", "$",
               R"({"longstring":"This is a very long string that definitely exceeds SSO buffer"})"});
   EXPECT_EQ(resp, "OK");
@@ -2792,15 +2820,22 @@ TEST_F(JsonFamilyTest, DebugMemoryLegacy) {
   EXPECT_EQ(resp.type, RespExpr::INT64);
   auto mem_size = resp.GetInt();
   ASSERT_TRUE(mem_size.has_value());
-  EXPECT_GE(mem_size.value(), 0);
+  EXPECT_GT(mem_size.value(), 0);  // Long string must allocate
 
-  // Test array with multiple elements
+  // Test array with elements - must allocate
   resp = Run({"JSON.SET", "arr", "$", R"([1,2,3,4,5,6,7,8,9,10])"});
   EXPECT_EQ(resp, "OK");
 
   resp = Run({"JSON.DEBUG", "memory", "arr", "."});
   EXPECT_EQ(resp.type, RespExpr::INT64);
-  EXPECT_GE(resp.GetInt(), 0);
+  EXPECT_GT(resp.GetInt(), 0);  // Array allocates
+
+  // Test object - must allocate
+  resp = Run({"JSON.SET", "obj", "$", R"({"a":1, "b":2, "c":3})"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "memory", "obj", "."});
+  EXPECT_GT(resp.GetInt(), 0);  // Object allocates
 }
 
 TEST_F(JsonFamilyTest, Resp) {
