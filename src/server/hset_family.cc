@@ -172,11 +172,8 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_HASH);
   RETURN_ON_BAD_STATUS(op_res);
-  if (!op_res) {
-    return op_res.status();
-  }
-  auto& add_res = *op_res;
 
+  auto& add_res = *op_res;
   PrimeValue& pv = add_res.it->second;
   if (add_res.is_new) {
     pv.InitRobj(OBJ_HASH, kEncodingListPack, lpNew(0));
@@ -398,9 +395,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
 
   auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH);
-
-  if (!it_res)
-    return it_res.status();
+  RETURN_ON_BAD_STATUS(it_res);
 
   PrimeValue& pv = it_res->it->second;
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
@@ -458,9 +453,7 @@ OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, Cm
 
   auto& db_slice = op_args.GetDbSlice();
   auto [it_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
-
-  if (!it_res)
-    return it_res.status();
+  RETURN_ON_BAD_STATUS(it_res);
 
   const PrimeValue& pv = (*it_res)->second;
 
@@ -568,11 +561,7 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key, string_view field
 OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_t mask) {
   auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
-  if (!it_res) {
-    if (it_res.status() == OpStatus::KEY_NOTFOUND)
-      return vector<string>{};
-    return it_res.status();
-  }
+  RETURN_ON_BAD_STATUS(it_res);
 
   const PrimeValue& pv = (*it_res)->second;
 
@@ -728,31 +717,26 @@ void HGetGeneric(CmdArgList args, uint8_t getall_mask, Transaction* tx, SinkRepl
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpGetAll(t->GetOpArgs(shard), key, getall_mask);
   };
-
-  OpResult<vector<string>> result = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<vector<string>> result = tx->ScheduleSingleHopT(cb);
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  if (result) {
-    bool is_map = (getall_mask == (VALUES | FIELDS));
-    rb->SendBulkStrArr(absl::Span<const string>{*result},
-                       is_map ? RedisReplyBuilder::MAP : RedisReplyBuilder::ARRAY);
-  } else {
-    builder->SendError(result.status());
-  }
+  switch (result.status()) {
+    case OpStatus::OK:
+    case OpStatus::KEY_NOTFOUND: {
+      bool is_map = (getall_mask == (VALUES | FIELDS));
+      return rb->SendBulkStrArr(*result,
+                                is_map ? RedisReplyBuilder::MAP : RedisReplyBuilder::ARRAY);
+    }
+    default:
+      return rb->SendError(result.status());
+  };
 }
 
 OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_t ttl_sec,
                                  CmdArgList values) {
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH);
-
-  if (!op_res) {
-    if (op_res.status() == OpStatus::KEY_NOTFOUND) {
-      std::vector<long> res(values.size(), -2);
-      return res;
-    }
-    return op_res.status();
-  }
+  RETURN_ON_BAD_STATUS(op_res);
 
   PrimeValue* pv = &((*op_res).it->second);
   return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, key, values, pv);
@@ -883,16 +867,23 @@ void HSetFamily::HExpire(CmdArgList args, const CommandContext& cmd_cntx) {
                                   kSyntaxErrType);
   }
 
+  if (auto err = parser.TakeError(); err)
+    return cmd_cntx.rb->SendError(err.MakeReply());
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpHExpire(t->GetOpArgs(shard), key, ttl_sec, fields);
   };
-
   OpResult<vector<long>> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  if (result) {
-    static_cast<RedisReplyBuilder*>(cmd_cntx.rb)->SendLongArr(absl::MakeConstSpan(result.value()));
-  } else {
-    cmd_cntx.rb->SendError(result.status());
-  }
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  switch (result.status()) {
+    case OpStatus::OK:
+      return rb->SendLongArr(absl::MakeConstSpan(result.value()));
+    case OpStatus::KEY_NOTFOUND:
+      return rb->SendLongArr(absl::MakeConstSpan(vector<long>(numFields, -2)));
+    default:
+      return rb->SendError(result.status());
+  };
 }
 
 void HSetFamily::HMGet(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -1089,17 +1080,10 @@ void HSetFamily::HSet(CmdArgList args, const CommandContext& cmd_cntx) {
 void HSetFamily::HSetNx(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
 
-  args.remove_prefix(1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, args, OpSetParams{.skip_if_exists = true});
+    return OpSet(t->GetOpArgs(shard), key, args.subspan(1), OpSetParams{.skip_if_exists = true});
   };
-
-  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  if (result) {
-    cmd_cntx.rb->SendLong(*result);
-  } else {
-    cmd_cntx.rb->SendError(result.status());
-  }
+  HSetReplies{cmd_cntx.rb}.Send(cmd_cntx.tx->ScheduleSingleHopT(cb));
 }
 
 void HSetFamily::HStrLen(CmdArgList args, const CommandContext& cmd_cntx) {
