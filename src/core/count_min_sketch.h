@@ -81,12 +81,6 @@ class MultiSketch {
   explicit MultiSketch(uint64_t rollover_ms = 1000, double epsilon = 0.0001, double delta = 0.0001,
                        Decay decay = Decay::Linear);
 
-  MultiSketch(const MultiSketch& other) = delete;
-  MultiSketch& operator=(const MultiSketch& other) = delete;
-
-  MultiSketch(MultiSketch&& other) noexcept = default;
-  MultiSketch& operator=(MultiSketch&& other) noexcept = default;
-
   // Updates the current sketch, which is associated with the latest timestamp. Can cause the oldest
   // sketch to be reset as a side effect if the oldest sketch is older than rollover_ms.
   void Update(uint64_t key, CountMinSketch::SizeT incr = 1);
