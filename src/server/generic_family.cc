@@ -1477,6 +1477,13 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
                            IteratorEnd&& end_it) {
   uint32_t len = 0;
 
+  // If we are about to overwrite an existing indexed document (HASH/JSON),
+  // remove it from search indices first to avoid duplicate entries.
+  auto existing = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
+  if (IsValid(existing)) {
+    RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, existing->second, op_args.shard);
+  }
+
   QList* ql_v2 = CompactObj::AllocateMR<QList>();
   QList::Where where = QList::TAIL;
   for (auto it = start_it; it != end_it; ++it) {
