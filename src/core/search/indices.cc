@@ -10,6 +10,8 @@
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
 
+#include <boost/iterator/function_output_iterator.hpp>
+
 #define UNI_ALGO_DISABLE_NFKC_NFKD
 
 #include <hnswlib/hnswalg.h>
@@ -88,6 +90,42 @@ void IterateAllSuffixes(const absl::flat_hash_set<string>& words,
       cb(word.substr(offs));
     }
   }
+}
+
+// Haversine with earth radius in meters. Used to calculate distance.
+boost::geometry::strategy::distance::haversine haversine_(6372797.560856);
+
+double ConvertToRadiusInMeters(size_t radius, std::string_view arg) {
+  const std::string unit = absl::AsciiStrToUpper(arg);
+  if (unit == "M") {
+    return radius * 1;
+  } else if (unit == "KM") {
+    return radius * 1000;
+  } else if (unit == "FT") {
+    return radius * 0.3048;
+  } else if (unit == "MI") {
+    return radius * 1609.34;
+  } else {
+    return -1;
+  }
+}
+
+std::optional<GeoIndex::point> GetGeoPoint(const DocumentAccessor& doc, string_view field) {
+  auto element = doc.GetStrings(field);
+
+  if (!element)
+    return std::nullopt;
+
+  absl::InlinedVector<string_view, 2> coordinates = absl::StrSplit(element.value()[0], ",");
+
+  if (coordinates.size() != 2)
+    return std::nullopt;
+
+  double lon, lat;
+  if (!absl::SimpleAtod(coordinates[0], &lon) || !absl::SimpleAtod(coordinates[1], &lat))
+    return nullopt;
+
+  return GeoIndex::point{lon, lat};
 }
 
 };  // namespace
@@ -612,6 +650,75 @@ std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t 
 
 void HnswVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
   adapter_->Remove(id);
+}
+
+GeoIndex::GeoIndex(PMR_NS::memory_resource* mr) : rtree_(make_unique<rtree>()) {
+}
+
+GeoIndex::~GeoIndex() {
+}
+
+bool GeoIndex::Add(DocId id, const DocumentAccessor& doc, std::string_view field) {
+  auto doc_point = GetGeoPoint(doc, field);
+  if (!doc_point) {
+    return false;
+  }
+  rtree_->insert({doc_point.value(), id});
+  return true;
+}
+
+void GeoIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
+  auto doc_point = GetGeoPoint(doc, field);
+  rtree_->remove({doc_point.value(), id});
+}
+
+std::vector<DocId> GeoIndex::RadiusSearch(double lon, double lat, double radius,
+                                          std::string_view unit) {
+  std::vector<DocId> results;
+
+  // Get radius in meters
+  double converted_radius = ConvertToRadiusInMeters(radius, unit);
+
+  // Declare the geographic_point_circle strategy with 4 points
+  boost::geometry::strategy::buffer::geographic_point_circle<> point_strategy(4);
+
+  // Declare the distance strategy in meters around the point
+  boost::geometry::strategy::buffer::distance_symmetric<double> distance_strategy(converted_radius);
+
+  // Declare other necessary strategies, unused for point
+  boost::geometry::strategy::buffer::join_round join_strategy;
+  boost::geometry::strategy::buffer::end_round end_strategy;
+  boost::geometry::strategy::buffer::side_straight side_strategy;
+
+  point p{lon, lat};
+
+  // Create polygon with 4 point around point
+  boost::geometry::model::multi_polygon<boost::geometry::model::polygon<point>> buffer_polygon;
+
+  boost::geometry::buffer(p, buffer_polygon, distance_strategy, side_strategy, join_strategy,
+                          end_strategy, point_strategy);
+
+  // Create bouding box around polygon to include all possible points
+  boost::geometry::model::box<point> box;
+  boost::geometry::envelope(buffer_polygon, box);
+
+  rtree_->query(
+      boost::geometry::index::within(box),
+      boost::make_function_output_iterator([&results, &p, &converted_radius](auto const& val) {
+        if (haversine_.apply(val.first, p) <= converted_radius) {
+          results.push_back(val.second);
+        }
+      }));
+
+  // TODO: we should return sorted results by radius distance
+  return results;
+}
+
+std::vector<DocId> GeoIndex::GetAllDocsWithNonNullValues() const {
+  std::vector<DocId> results;
+  std::for_each(boost::geometry::index::begin(*rtree_), boost::geometry::index::end(*rtree_),
+                [&results](auto const& val) { results.push_back(val.second); });
+  return results;
 }
 
 }  // namespace dfly::search

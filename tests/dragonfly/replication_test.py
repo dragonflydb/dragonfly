@@ -454,9 +454,6 @@ async def test_cancel_replication_immediately(df_factory, df_seeder_factory: Dfl
     """
     Issue 100 replication commands. This checks that the replication state
     machine can handle cancellation well.
-    We assert that at least one command was cancelled.
-    After we finish the 'fuzzing' part, replicate the first master and check that
-    all the data is correct.
     """
     COMMANDS_TO_ISSUE = 100
 
@@ -475,12 +472,8 @@ async def test_cancel_replication_immediately(df_factory, df_seeder_factory: Dfl
             await asyncio.sleep(0.05)
 
     async def replicate():
-        try:
-            await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-            return True
-        except redis.exceptions.ResponseError as e:
-            assert e.args[0] == "replication cancelled"
-            return False
+        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        return True
 
     ping_job = asyncio.create_task(ping_status())
     replication_commands = [asyncio.create_task(replicate()) for _ in range(COMMANDS_TO_ISSUE)]
@@ -490,7 +483,7 @@ async def test_cancel_replication_immediately(df_factory, df_seeder_factory: Dfl
         num_successes += await result
 
     logging.info(f"succeses: {num_successes}")
-    assert COMMANDS_TO_ISSUE > num_successes, "At least one REPLICAOF must be cancelled"
+    assert COMMANDS_TO_ISSUE == num_successes
 
     await wait_available_async(c_replica)
     capture = await seeder.capture()
@@ -498,6 +491,12 @@ async def test_cancel_replication_immediately(df_factory, df_seeder_factory: Dfl
     assert await seeder.compare(capture, replica.port)
 
     ping_job.cancel()
+
+    replica.stop()
+    lines = replica.find_in_logs("Stopping replication")
+    # Cancelled 99 times by REPLICAOF command and once by Shutdown() because
+    # we stopped the instance
+    assert len(lines) == COMMANDS_TO_ISSUE
 
 
 """
@@ -1886,8 +1885,9 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
             await proxy.close(task)
 
     info = await c_replica.info("replication")
-    assert info["psync_attempts"] > 0
-    assert info["psync_successes"] == 0
+    master.stop()
+    lines = master.find_in_logs("Partial sync requested from stale LSN")
+    assert len(lines) > 0
 
 
 async def test_replica_reconnections_after_network_disconnect(df_factory, df_seeder_factory):
@@ -2980,8 +2980,7 @@ async def test_replicaof_inside_multi(df_factory):
         num_successes += await result
 
     logging.info(f"succeses: {num_successes}")
-    assert MULTI_COMMANDS_TO_ISSUE > num_successes, "At least one REPLICAOF must be cancelled"
-    assert num_successes > 0, "At least one REPLICAOF must success"
+    assert MULTI_COMMANDS_TO_ISSUE == num_successes
 
 
 async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFactory):
@@ -3203,13 +3202,14 @@ async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df
     await c_s2.execute_command(f"REPLTAKEOVER 20")
     # Make server 4 replica of server 2
     await c_s4.execute_command(f"REPLICAOF localhost {server2.port}")
-    await check_all_replicas_finished([c_s4], c_s2)
     # Send some write command for lsn inc
     for i in range(100):
         await c_s2.set(i, "val")
     # Make server 3 replica of server 2
     await c_s3.execute_command(f"REPLICAOF localhost {server2.port}")
+
     await check_all_replicas_finished([c_s3], c_s2)
+    await check_all_replicas_finished([c_s4], c_s2)
 
     s2_sz = await c_s2.dbsize()
     s3_sz = await c_s3.dbsize()
@@ -3331,9 +3331,18 @@ async def test_partial_sync(df_factory, proactors, backlog_len):
         finally:
             await proxy.close(task)
 
-    info = await c_replica.info("replication")
-    assert info["psync_attempts"] == 2
-    assert info["psync_successes"] == 1
+    master.stop()
+    replica.stop()
+    # Partial sync worked
+    lines = master.find_in_logs("Partial sync requested from LSN")
+    # Because we run with num_shards = proactors - 1
+    total_attempts = 1
+    if proactors > 1:
+        total_attempts = proactors - 1 + proactors - 2
+    assert len(lines) == total_attempts
+    # Second partial sync failed because of stale LSN
+    lines = master.find_in_logs("Partial sync requested from stale LSN")
+    assert len(lines) == 1
 
 
 async def test_mc_gat_replication(df_factory):

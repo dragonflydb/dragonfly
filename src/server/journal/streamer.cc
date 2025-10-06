@@ -109,9 +109,9 @@ void LogTcpSocketDiagnostics(util::FiberSocketBase* dest) {
 
 }  // namespace
 
-JournalStreamer::JournalStreamer(journal::Journal* journal, ExecutionState* cntx, SendLsn send_lsn,
-                                 bool is_stable_sync)
-    : cntx_(cntx), journal_(journal), is_stable_sync_(is_stable_sync), send_lsn_(send_lsn) {
+JournalStreamer::JournalStreamer(journal::Journal* journal, ExecutionState* cntx,
+                                 JournalStreamer::Config config)
+    : cntx_(cntx), journal_(journal), config_(config) {
   // cache the flag to avoid accessing it later.
   replication_stream_output_limit_cached = absl::GetFlag(FLAGS_replication_stream_output_limit);
   migration_buckets_sleep_usec_cached = absl::GetFlag(FLAGS_migration_buckets_sleep_usec);
@@ -136,7 +136,7 @@ void JournalStreamer::ConsumeJournalChange(const JournalChangeItem& item) {
   time_t now = time(nullptr);
   last_lsn_writen_ = item.journal_item.lsn;
   // TODO: to chain it to the previous Write call.
-  if (send_lsn_ == SendLsn::YES && now - last_lsn_time_ > 3) {
+  if (config_.should_sent_lsn && now - last_lsn_time_ > 3) {
     last_lsn_time_ = now;
     io::StringSink sink;
     JournalWriter writer(&sink);
@@ -148,14 +148,19 @@ void JournalStreamer::ConsumeJournalChange(const JournalChangeItem& item) {
 void JournalStreamer::Start(util::FiberSocketBase* dest) {
   CHECK(dest_ == nullptr && dest != nullptr);
   dest_ = dest;
-  journal_cb_id_ = journal_->RegisterOnChange(this);
+  // For partial sync we first catch up from journal replication buffer and only then register.
+  if (config_.start_partial_sync_at == 0) {
+    journal_cb_id_ = journal_->RegisterOnChange(this);
+  }
   StartStalledDataWriterFiber();
 }
 
 void JournalStreamer::Cancel() {
   VLOG(1) << "JournalStreamer::Cancel " << cntx_->IsCancelled();
   waker_.notifyAll();
-  journal_->UnregisterOnChange(journal_cb_id_);
+  if (journal_cb_id_) {
+    journal_->UnregisterOnChange(journal_cb_id_);
+  }
   StopStalledDataWriterFiber();
   WaitForInflightToComplete();
 }
@@ -182,7 +187,7 @@ void JournalStreamer::Write(std::string str) {
 }
 
 void JournalStreamer::StartStalledDataWriterFiber() {
-  if (is_stable_sync_ && !stalled_data_writer_.IsJoinable()) {
+  if (config_.init_from_stable_sync && !stalled_data_writer_.IsJoinable()) {
     auto pb = fb2::ProactorBase::me();
     std::chrono::milliseconds period_us(stalled_writer_base_period_ms);
     stalled_data_writer_ = MakeFiber([this, index = pb->GetPoolIndex(), period_us]() mutable {
@@ -192,8 +197,55 @@ void JournalStreamer::StartStalledDataWriterFiber() {
   }
 }
 
+bool JournalStreamer::MaybePartialStreamLSNs() {
+  // Same algorithm as SwitchIncrementalFb. The only difference is that we don't sent
+  // the old LSN"s via a snapshot but rather as journal changes.
+  if (config_.start_partial_sync_at > 0) {
+    LSN lsn = config_.start_partial_sync_at;
+    DCHECK_LE(lsn, journal_->GetLsn()) << "The replica tried to sync from the future.";
+
+    LOG(INFO) << "Starting partial sync from lsn: " << lsn;
+    // The replica sends the LSN of the next entry is wants to receive.
+    while (cntx_->IsRunning() && journal_->IsLSNInBuffer(lsn)) {
+      JournalChangeItem item;
+      item.journal_item.data = journal_->GetEntry(lsn);
+      item.journal_item.lsn = lsn;
+      ConsumeJournalChange(item);
+      lsn++;
+    }
+
+    if (!cntx_->IsRunning()) {
+      return false;
+    }
+
+    if (journal_->GetLsn() != lsn) {
+      // We stopped but we didn't manage to send the whole stream.
+      cntx_->ReportError(
+          std::make_error_code(errc::state_not_recoverable),
+          absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
+                       " was dropped from the buffer. Current lsn=", journal_->GetLsn()));
+      return false;
+    }
+
+    // We are done, register back to the journal so we don't miss any changes
+    journal_cb_id_ = journal_->RegisterOnChange(this);
+
+    LOG(INFO) << "Last LSN sent in partial sync was " << (lsn - 1);
+    // flush pending
+    if (pending_buf_.Size() != 0) {
+      AsyncWrite(true);
+    }
+  }
+  return true;
+}
+
 void JournalStreamer::StalledDataWriterFiber(std::chrono::milliseconds period_ms,
                                              util::fb2::Done* waiter) {
+  if (!MaybePartialStreamLSNs()) {
+    // Either context got cancelled, or partial sync failed because the lsn's stalled.
+    return;
+  }
+
   while (cntx_->IsRunning()) {
     if (waiter->WaitFor(period_ms)) {
       if (!cntx_->IsRunning()) {
@@ -222,7 +274,7 @@ void JournalStreamer::AsyncWrite(bool force_send) {
 
   // Writing in stable sync and outside of fiber needs to check
   // threshold before writing data.
-  if (is_stable_sync_ && !force_send &&
+  if (config_.init_from_stable_sync && !force_send &&
       pending_buf_.FrontBufSize() < replication_dispatch_threshold) {
     return;
   }
@@ -332,7 +384,7 @@ void JournalStreamer::WaitForInflightToComplete() {
 }
 
 void JournalStreamer::StopStalledDataWriterFiber() {
-  if (is_stable_sync_ && stalled_data_writer_.IsJoinable()) {
+  if (config_.init_from_stable_sync && stalled_data_writer_.IsJoinable()) {
     stalled_data_writer_done_.Notify();
     if (stalled_data_writer_.IsJoinable()) {
       stalled_data_writer_.Join();
@@ -346,9 +398,7 @@ bool JournalStreamer::IsStalled() const {
 
 RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
                                  ExecutionState* cntx)
-    : JournalStreamer(journal, cntx, JournalStreamer::SendLsn::NO, false),
-      db_slice_(slice),
-      my_slots_(std::move(slots)) {
+    : JournalStreamer(journal, cntx, {}), db_slice_(slice), my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
   migration_buckets_serialization_threshold_cached =
       absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);

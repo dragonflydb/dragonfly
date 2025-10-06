@@ -31,12 +31,14 @@ namespace dfly::search {
 
 namespace {
 
-AstExpr ParseQuery(std::string_view query, const QueryParams* params) {
+AstExpr ParseQuery(std::string_view query, const QueryParams* params,
+                   const OptionalFilters* filters) {
   QueryDriver driver{};
   driver.ResetScanner();
   driver.SetParams(params);
   driver.SetInput(std::string{query});
   (void)Parser (&driver)();  // can throw
+  driver.SetOptionalFilters(filters);
   return driver.Take();
 }
 
@@ -77,6 +79,9 @@ struct ProfileBuilder {
         [](const AstNegateNode& n) { return absl::StrCat("Negate{}"); },
         [](const AstStarNode& n) { return absl::StrCat("Star{}"); },
         [](const AstStarFieldNode& n) { return absl::StrCat("StarField{}"); },
+        [](const AstGeoNode& n) {
+          return absl::StrCat("Geo{", n.lat, " ", n.lon, " ", n.radius, " ", n.unit, "}");
+        },
     };
     return visit(node_info, node.Variant());
   }
@@ -274,6 +279,14 @@ struct BasicSearch {
     return IndexResult{};
   }
 
+  IndexResult Search(const AstGeoNode& node, string_view active_field) {
+    DCHECK(!active_field.empty());
+    if (auto* index = GetIndex<GeoIndex>(active_field); index) {
+      return IndexResult{index->RadiusSearch(node.lon, node.lat, node.radius, node.unit)};
+    }
+    return IndexResult{};
+  }
+
   // negate -(*subquery*): explicitly compute result complement. Needs further optimizations
   IndexResult Search(const AstNegateNode& node, string_view active_field) {
     vector<DocId> matched = SearchGeneric(*node.node, active_field).Take();
@@ -394,6 +407,7 @@ struct BasicSearch {
     // used by knn
 
     DCHECK(top_level || holds_alternative<AstKnnNode>(node.Variant()) ||
+           holds_alternative<AstGeoNode>(node.Variant()) ||
            visit([](auto* set) { return is_sorted(set->begin(), set->end()); }, result.Borrowed()));
 
     if (profile_builder_)
@@ -429,6 +443,10 @@ struct BasicSearch {
 #endif
 
 }  // namespace
+
+AstNode OptionalNumericFilter::Node(std::string field) {
+  return AstFieldNode{"@" + field, AstRangeNode(lo_, false, hi_, false)};
+}
 
 string_view Schema::LookupAlias(string_view alias) const {
   if (auto it = field_names.find(alias); it != field_names.end())
@@ -494,6 +512,10 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
         indices_[field_ident] = std::move(vector_index);
         break;
       }
+      case SchemaField::GEO: {
+        indices_[field_ident] = make_unique<GeoIndex>(mr);
+        break;
+      }
     }
   }
 }
@@ -512,6 +534,7 @@ void FieldIndices::CreateSortIndices(PMR_NS::memory_resource* mr) {
         sort_indices_[field_ident] = make_unique<NumericSortIndex>(mr);
         break;
       case SchemaField::VECTOR:
+      case SchemaField::GEO:
         break;
     }
   }
@@ -611,9 +634,10 @@ const Synonyms* FieldIndices::GetSynonyms() const {
 SearchAlgorithm::SearchAlgorithm() = default;
 SearchAlgorithm::~SearchAlgorithm() = default;
 
-bool SearchAlgorithm::Init(string_view query, const QueryParams* params) {
+bool SearchAlgorithm::Init(string_view query, const QueryParams* params,
+                           const OptionalFilters* filters) {
   try {
-    query_ = make_unique<AstExpr>(ParseQuery(query, params));
+    query_ = make_unique<AstExpr>(ParseQuery(query, params, filters));
   } catch (const Parser::syntax_error& se) {
     LOG(INFO) << "Failed to parse query \"" << query << "\":" << se.what();
     return false;

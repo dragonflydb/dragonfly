@@ -43,18 +43,23 @@ auto ConfigRegistry::Set(string_view config_name, string_view value) -> SetResul
   return success ? SetResult::OK : SetResult::INVALID;
 }
 
-optional<string> ConfigRegistry::Get(string_view config_name) {
+absl::CommandLineFlag* ConfigRegistry::GetFlag(std::string_view config_name) {
   string name = NormalizeConfigName(config_name);
 
   {
     util::fb2::LockGuard lk(mu_);
     if (!registry_.contains(name))
-      return nullopt;
+      return nullptr;
   }
 
   absl::CommandLineFlag* flag = absl::FindCommandLineFlag(name);
   CHECK(flag);
-  return flag->CurrentValue();
+  return flag;
+}
+
+optional<string> ConfigRegistry::Get(string_view config_name) {
+  absl::CommandLineFlag* flag = GetFlag(config_name);
+  return flag ? flag->CurrentValue() : optional<string>();
 }
 
 void ConfigRegistry::Reset() {

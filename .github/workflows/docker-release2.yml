@@ -44,7 +44,7 @@ jobs:
 
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           submodules: true
@@ -133,7 +133,7 @@ jobs:
         flavor: [ubuntu]
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Login to Registries
         uses: ./.github/actions/multi-registry-docker-login
@@ -276,7 +276,7 @@ jobs:
       run: env
 
     - name: checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
       with:
         fetch-depth: 0
 
@@ -284,7 +284,7 @@ jobs:
       uses: azure/setup-helm@v4
 
     - name: Setup Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
 
     - name: Configure Git
       if: env.IS_PRERELEASE != 'true'
@@ -328,7 +328,7 @@ jobs:
     - name: Discord notification
       env:
         DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-      uses: Ilshidur/action-discord@0c4b27844ba47cb1c7bee539c8eead5284ce9fa9
+      uses: Ilshidur/action-discord@d2594079a10f1d6739ee50a2471f0ca57418b554
       with:
         args: 'DragonflyDB version [${{ env.TAG_NAME }}](https://github.com/dragonflydb/dragonfly/releases/tag/${{ env.TAG_NAME }}) has been released 🎉'
 

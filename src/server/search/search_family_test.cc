@@ -266,6 +266,19 @@ TEST_F(SearchFamilyTest, AlterIndex) {
               ErrArg("Index not found"));
 }
 
+TEST_F(SearchFamilyTest, SuffixPrefixSearch) {
+  Run({"ft.create", "idx", "SCHEMA", "name", "TEXT"});
+  Run({"hset", "d:1", "name", "apple"});
+  Run({"hset", "d:2", "name", "carrot"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "app*"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@name:app*"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*le"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@name:*le"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*pl*"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@name:*pl*"}), AreDocIds("d:1"));
+}
+
 TEST_F(SearchFamilyTest, InfoIndex) {
   EXPECT_EQ(
       Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "doc-", "SCHEMA", "name", "TEXT"}),
@@ -3201,6 +3214,118 @@ TEST_F(SearchFamilyTest, AggregateWithLoadFromSortBySeveralFields) {
                    "20"});
 
   EXPECT_THAT(resp.GetVec(), ElementsAreArray(matchers));
+}
+
+TEST_F(SearchFamilyTest, NumericFilter) {
+  // Index name, age, height
+  Run({"FT.CREATE", "i1", "ON", "HASH", "SCHEMA", "name", "TEXT", "age", "NUMERIC", "height",
+       "NUMERIC"});
+
+  // Index name, age
+  Run({"FT.CREATE", "i2", "ON", "HASH", "SCHEMA", "name", "TEXT", "age", "NUMERIC"});
+
+  Run({"HSET", "id:1", "name", "John", "age", "28", "height", "184"});
+  Run({"HSET", "id:2", "name", "Ivan", "age", "30", "height", "180"});
+  Run({"HSET", "id:3", "name", "Jon", "age", "25", "height", "182"});
+  Run({"HSET", "id:4", "name", "Juan", "age", "32", "height", "186"});
+  Run({"HSET", "id:5", "name", "Ioan", "age", "35", "height", "181"});
+
+  // Filter with non-star query
+  auto res = Run({"FT.SEARCH", "i1", "I*", "FILTER", "age", "31", "40"});
+  EXPECT_THAT(res, AreDocIds("id:5"));
+
+  // Filter on ONE NUMERIC index
+  res = Run({"FT.SEARCH", "i1", "*", "FILTER", "age", "25", "28"});
+  EXPECT_THAT(res, AreDocIds("id:1", "id:3"));
+
+  // Filter on TWO NUMERIC indexes
+  res =
+      Run({"FT.SEARCH", "i1", "*", "FILTER", "age", "25", "28", "FILTER", "height", "180", "182"});
+  EXPECT_THAT(res, AreDocIds("id:3"));
+
+  // Filter on TWO NUMERIC indexes where second filtering produce empty result
+  res =
+      Run({"FT.SEARCH", "i1", "*", "FILTER", "age", "25", "28", "FILTER", "height", "200", "300"});
+  EXPECT_THAT(res, AreDocIds());
+
+  // Filter on index which doesn't exists
+  res = Run({"FT.SEARCH", "i2", "*", "FILTER", "height", "180", "190"});
+  EXPECT_THAT(res, ErrArg("Invalid field: height"));
+
+  // Two filters on same field
+  res = Run({"FT.SEARCH", "i1", "J*", "FILTER", "age", "25", "30", "FILTER", "age", "28", "32"});
+  EXPECT_THAT(res, AreDocIds("id:1"));
+
+  Run({"FLUSHALL"});
+}
+
+TEST_F(SearchFamilyTest, MAXSEARCHRESULTS) {
+  EXPECT_EQ(Run({"HSET", "s1", "phrase", "hello world"}), 1);
+  EXPECT_EQ(Run({"HSET", "s2", "phrase", "hello simple world"}), 1);
+  EXPECT_EQ(Run({"HSET", "s3", "phrase", "hello somewhat less simple world"}), 1);
+  EXPECT_EQ(Run({"FT.CREATE", "memes", "SCHEMA", "phrase", "TEXT"}), "OK");
+
+  auto resp = Run({"FT.CONFIG", "GET", "MAXSEARCHRESULTS"});
+  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1000000"));
+
+  resp = Run({"FT.SEARCH", "memes", "@phrase:(hello world)", "NOCONTENT"});
+  EXPECT_THAT(resp, RespElementsAre(IntArg(3), _, _, _));
+
+  resp = Run({"FT.CONFIG", "SET", "MAXSEARCHRESULTS", "1"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.SEARCH", "memes", "@phrase:(hello world)", "NOCONTENT"});
+  EXPECT_THAT(resp, RespElementsAre(IntArg(3), _));
+
+  resp = Run({"FT.SEARCH", "memes", "@phrase:(hello world)", "NOCONTENT", "LIMIT", "0", "1"});
+  EXPECT_THAT(resp, RespElementsAre(IntArg(3), _));
+
+  resp = Run({"FT.SEARCH", "memes", "@phrase:(hello world)", "NOCONTENT", "LIMIT", "0", "3"});
+  EXPECT_THAT(resp, ErrArg("LIMIT exceeds maximum of 1"));
+
+  resp = Run({"FT.CONFIG", "GET", "MAXSEARCHRESULTS"});
+  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1"));
+
+  resp = Run({"FT.CONFIG", "HELP", "MAXSEARCHRESULTS"});
+  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "Description",
+                            "Maximum number of results from ft.search command", "Value", "1"));
+
+  resp = Run({"FT.CONFIG", "GET", "*"});
+  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1"));
+
+  resp = Run({"FT.CONFIG", "HELP", "*"});
+  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "Description",
+                            "Maximum number of results from ft.search command", "Value", "1"));
+
+  // restore normal value for other tests
+  Run({"FT.CONFIG", "SET", "MAXSEARCHRESULTS", "1000000"});
+}
+
+TEST_F(SearchFamilyTest, InvalidConfigOptions) {
+  // Test with an invalid argument
+  auto resp = Run({"FT.CONFIG", "INVALIDARG", "INVLIDARG"});
+  EXPECT_THAT(resp, ErrArg("Unknown subcommand"));
+
+  // Test with an invalid argument
+  resp = Run({"FT.CONFIG", "GET", "INVALIDARG"});
+  EXPECT_THAT(resp, IsArray());
+
+  // Test with an invalid argument
+  resp = Run({"FT.CONFIG", "SET", "INVALIDARG"});
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
+
+  // Test with an invalid argument
+  resp = Run({"FT.CONFIG", "SET", "INVALIDARG", "5"});
+  EXPECT_THAT(resp, ErrArg("Invalid option"));
+
+  // Test with an invalid value
+  resp = Run({"FT.CONFIG", "SET", "MAXSEARCHRESULTS", "not_a_number"});
+  EXPECT_THAT(resp, ErrArg("ERR FT.CONFIG SET failed (possibly related to argument "
+                           "'MAXSEARCHRESULTS') - argument can not be set"));
+
+  // Test with an invalid argument
+  resp = Run({"FT.CONFIG", "HELP", "INVALIDARG"});
+  EXPECT_THAT(resp, IsArray());
 }
 
 }  // namespace dfly

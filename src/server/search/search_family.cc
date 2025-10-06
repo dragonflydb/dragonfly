@@ -25,6 +25,7 @@
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
+#include "server/config_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
@@ -39,6 +40,7 @@ ABSL_FLAG(bool, search_reject_legacy_field, true, "FT.AGGREGATE: Reject legacy f
 ABSL_FLAG(bool, enable_global_vector_search, true,
           "PoC: Enable global vector search for KNN queries.");
 
+ABSL_FLAG(size_t, MAXSEARCHRESULTS, 1000000, "Maximum number of results from ft.search command");
 namespace dfly {
 
 using namespace std;
@@ -46,6 +48,8 @@ using namespace std;
 using namespace facade;
 
 namespace {
+// we use it to find which flags are belong to search
+const std::string kCurrentFile = std::filesystem::path(__FILE__).filename().string();
 
 using nonstd::make_unexpected;
 
@@ -196,6 +200,10 @@ ParsedSchemaField ParseVector(CmdArgParser* parser) {
   return std::make_pair(search::SchemaField::VECTOR, vector_params);
 }
 
+ParsedSchemaField ParseGeo(CmdArgParser* parser) {
+  return std::make_pair(search::SchemaField::GEO, std::monostate{});
+}
+
 // ON HASH | JSON
 ParseResult<bool> ParseOnOption(CmdArgParser* parser, DocIndex* index) {
   index->type = parser->MapNext("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
@@ -250,8 +258,9 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
 
     // Determine type
     using search::SchemaField;
-    auto params_parser = parser->TryMapNext("TAG"sv, &ParseTag, "TEXT"sv, &ParseText, "NUMERIC"sv,
-                                            &ParseNumeric, "VECTOR"sv, &ParseVector);
+    auto params_parser =
+        parser->TryMapNext("TAG"sv, &ParseTag, "TEXT"sv, &ParseText, "NUMERIC"sv, &ParseNumeric,
+                           "VECTOR"sv, &ParseVector, "GEO", &ParseGeo);
     if (!params_parser) {
       return CreateSyntaxError(
           absl::StrCat("Field type "sv, parser->Next(), " is not supported"sv));
@@ -349,6 +358,20 @@ std::optional<std::string_view> ParseFieldWithAtSign(CmdArgParser* parser) {
   return field;
 }
 
+void ParseNumericFilter(CmdArgParser* parser, SearchParams* params) {
+  auto field = ParseField(parser);
+  size_t lo = parser->Next<size_t>();
+  size_t hi = parser->Next<size_t>();
+  if (auto it = params->optional_filters.find(field); it != params->optional_filters.end()) {
+    search::OptionalNumericFilter* numeric_filter =
+        dynamic_cast<search::OptionalNumericFilter*>(it->second.get());
+    numeric_filter->AddRange(lo, hi);
+  } else {
+    params->optional_filters.emplace(field,
+                                     std::make_unique<search::OptionalNumericFilter>(lo, hi));
+  }
+}
+
 std::vector<FieldReference> ParseLoadOrReturnFields(CmdArgParser* parser, bool is_load) {
   // TODO: Change to num_strings. In Redis strings number is expected. For example: LOAD 3 $.a AS a
   std::vector<FieldReference> fields;
@@ -376,11 +399,16 @@ search::QueryParams ParseQueryParams(CmdArgParser* parser) {
 ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
   SearchParams params;
 
+  const size_t max_results = absl::GetFlag(FLAGS_MAXSEARCHRESULTS);
+
   while (parser->HasNext()) {
     // [LIMIT offset total]
     if (parser->Check("LIMIT")) {
       params.limit_offset = parser->Next<size_t>();
       params.limit_total = parser->Next<size_t>();
+      if (params.limit_total > max_results) {
+        return CreateSyntaxError(absl::StrFormat("LIMIT exceeds maximum of %d", max_results));
+      }
     } else if (parser->Check("LOAD")) {
       if (params.return_fields) {
         return CreateSyntaxError("LOAD cannot be applied after RETURN"sv);
@@ -401,11 +429,15 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
       FieldReference field{ParseField(parser)};
       params.sort_option =
           SearchParams::SortOption{field, parser->Check("DESC") ? SortOrder::DESC : SortOrder::ASC};
+    } else if (parser->Check("FILTER")) {
+      ParseNumericFilter(parser, &params);
     } else {
       // Unsupported parameters are ignored for now
       parser->Skip(1);
     }
   }
+
+  params.limit_total = std::min(params.limit_total, max_results);
 
   return params;
 }
@@ -1435,7 +1467,8 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
       absl::GetFlag(FLAGS_enable_global_vector_search) && global_algo.IsVectorOnlyQuery();
 
   // Only init shard-based algorithm if needed
-  if (!use_global_search && !search_algo.Init(query_str, &params->query_params))
+  if (!use_global_search &&
+      !search_algo.Init(query_str, &params->query_params, &params->optional_filters))
     return builder->SendError("Query syntax error");
 
   // Early exit for global search if possible
@@ -1865,6 +1898,97 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
+void FtConfigHelp(CmdArgParser* parser, RedisReplyBuilder* rb) {
+  string_view param = parser->Next();
+
+  vector<string> names = config_registry.List(param);
+  vector<absl::CommandLineFlag*> res;
+
+  for (const auto& name : names) {
+    auto* flag = config_registry.GetFlag(name);
+    DCHECK(flag);
+    if (flag && flag->Filename().find(kCurrentFile) != std::string::npos) {
+      res.push_back(flag);
+    }
+  }
+
+  rb->StartArray(res.size());
+  for (const auto& flag : res) {
+    rb->StartArray(5);
+    rb->SendBulkString(flag->Name());
+    rb->SendBulkString("Description"sv);
+    rb->SendBulkString(flag->Help());
+    rb->SendBulkString("Value"sv);
+    rb->SendBulkString(flag->CurrentValue());
+  }
+}
+
+void FtConfigGet(CmdArgParser* parser, RedisReplyBuilder* rb) {
+  string_view param = parser->Next();
+  vector<string> names = config_registry.List(param);
+
+  vector<string> res;
+
+  for (const auto& name : names) {
+    auto* flag = config_registry.GetFlag(name);
+    DCHECK(flag);
+    if (flag && flag->Filename().find(kCurrentFile) != std::string::npos) {
+      res.push_back(name);
+      res.push_back(flag->CurrentValue());
+    }
+  }
+  return rb->SendBulkStrArr(res, RedisReplyBuilder::MAP);
+}
+
+void FtConfigSet(CmdArgParser* parser, RedisReplyBuilder* rb) {
+  auto [param, value] = parser->Next<string_view, string_view>();
+
+  if (!parser->Finalize()) {
+    rb->SendError(parser->TakeError().MakeReply());
+    return;
+  }
+
+  vector<string> names = config_registry.List(param);
+  if (names.size() != 1 ||
+      config_registry.GetFlag(names[0])->Filename().find(kCurrentFile) == std::string::npos) {
+    return rb->SendError("Invalid option name");
+  }
+
+  ConfigRegistry::SetResult result = config_registry.Set(param, value);
+
+  const char kErrPrefix[] = "FT.CONFIG SET failed (possibly related to argument '";
+  switch (result) {
+    case ConfigRegistry::SetResult::OK:
+      return rb->SendOk();
+    case ConfigRegistry::SetResult::UNKNOWN:
+      return rb->SendError(
+          absl::StrCat("Unknown option or number of arguments for CONFIG SET - '", param, "'"),
+          kConfigErrType);
+
+    case ConfigRegistry::SetResult::READONLY:
+      return rb->SendError(absl::StrCat(kErrPrefix, param, "') - can't set immutable config"),
+                           kConfigErrType);
+
+    case ConfigRegistry::SetResult::INVALID:
+      return rb->SendError(absl::StrCat(kErrPrefix, param, "') - argument can not be set"),
+                           kConfigErrType);
+  }
+  ABSL_UNREACHABLE();
+}
+
+void SearchFamily::FtConfig(CmdArgList args, const CommandContext& cmd_cntx) {
+  CmdArgParser parser{args};
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+
+  auto func = parser.MapNext("GET", &FtConfigGet, "SET", &FtConfigSet, "HELP", &FtConfigHelp);
+
+  if (auto err = parser.TakeError(); err) {
+    rb->SendError("Unknown subcommand");
+    return;
+  }
+  func(&parser, rb);
+}
+
 void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [index_name, group_id] = parser.Next<string_view, string>();
@@ -1927,21 +2051,23 @@ void SearchFamily::Register(CommandRegistry* registry) {
       CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL | CO::IDEMPOTENT;
 
   registry->StartFamily();
-  *registry << CI{"FT.CREATE", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
-                   FtCreate)
-            << CI{"FT.ALTER", CO::WRITE | CO::GLOBAL_TRANS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAlter)
-            << CI{"FT.DROPINDEX", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
-                   FtDropIndex)
-            << CI{"FT.INFO", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
-            // Underscore same as in RediSearch because it's "temporary" (long time already)
-            << CI{"FT._LIST", kReadOnlyMask, 1, 0, 0, acl::FT_SEARCH}.HFUNC(FtList)
-            << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch)
-            << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAggregate)
-            << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile)
-            << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::FT_SEARCH}.HFUNC(FtTagVals)
-            << CI{"FT.SYNDUMP", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtSynDump)
-            << CI{"FT.SYNUPDATE", CO::WRITE | CO::GLOBAL_TRANS, -4, 0, 0, acl::FT_SEARCH}.HFUNC(
-                   FtSynUpdate);
+  *registry
+      << CI{"FT.CREATE", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(FtCreate)
+      << CI{"FT.ALTER", CO::WRITE | CO::GLOBAL_TRANS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAlter)
+      << CI{"FT.DROPINDEX", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
+             FtDropIndex)
+      << CI{"FT.INFO", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
+      << CI{"FT.CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(
+             FtConfig)
+      // Underscore same as in RediSearch because it's "temporary" (long time already)
+      << CI{"FT._LIST", kReadOnlyMask, 1, 0, 0, acl::FT_SEARCH}.HFUNC(FtList)
+      << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch)
+      << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAggregate)
+      << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile)
+      << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::FT_SEARCH}.HFUNC(FtTagVals)
+      << CI{"FT.SYNDUMP", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtSynDump)
+      << CI{"FT.SYNUPDATE", CO::WRITE | CO::GLOBAL_TRANS, -4, 0, 0, acl::FT_SEARCH}.HFUNC(
+             FtSynUpdate);
 }
 
 }  // namespace dfly

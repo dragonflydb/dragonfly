@@ -53,6 +53,8 @@ class ConfigRegistry {
 
   std::optional<std::string> Get(std::string_view config_name) ABSL_LOCKS_EXCLUDED(mu_);
 
+  absl::CommandLineFlag* GetFlag(std::string_view config_name) ABSL_LOCKS_EXCLUDED(mu_);
+
   void Reset();
 
   std::vector<std::string> List(std::string_view glob) const ABSL_LOCKS_EXCLUDED(mu_);

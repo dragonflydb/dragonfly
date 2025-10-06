@@ -68,6 +68,10 @@ astrsk_ch  \*
 "KNN"          return Parser::make_KNN (loc());
 "AS"           return Parser::make_AS (loc());
 "EF_RUNTIME"   return Parser::make_EF_RUNTIME (loc());
+"M"            return Parser::make_GEOUNIT_M (loc());
+"KM"           return Parser::make_GEOUNIT_KM (loc());
+"MI"           return Parser::make_GEOUNIT_MI (loc());
+"FT"           return Parser::make_GEOUNIT_FT (loc());
 
 [0-9]{1,9}                          return Parser::make_UINT32(str(), loc());
 [+-]?(([0-9]*[.])?[0-9]+|inf)       return Parser::make_DOUBLE(str(), loc());

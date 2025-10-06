@@ -8,6 +8,9 @@
 
 namespace dfly::search {
 
+// Initializes SimSIMD runtime if dynamic dispatch is enabled.
+void InitSimSIMD();
+
 OwnedFtVector BytesToFtVector(std::string_view value);
 
 // Returns std::nullopt if value can not be converted to the vector

@@ -2458,7 +2458,8 @@ error_code RdbLoader::HandleAux() {
     int64_t usedmem;
     if (absl::SimpleAtoi(auxval, &usedmem)) {
       VLOG(1) << "RDB memory usage when created " << strings::HumanReadableNumBytes(usedmem);
-      if (usedmem > ssize_t(max_memory_limit)) {
+      // We allow 5% tolerance for snapshot used memory
+      if (usedmem > (max_memory_limit * 1.05)) {
         if (IsClusterEnabled()) {
           LOG(INFO) << "Allowing to load a snapshot of size " << usedmem
                     << ", despite memory limit of " << max_memory_limit << " due to cluster mode";

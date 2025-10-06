@@ -34,6 +34,7 @@ extern "C" {
 #include "base/flag_utils.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/search/vector_utils.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"
@@ -914,6 +915,11 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   InitRedisTables();
   facade::Connection::Init(pp_.size());
 
+#if defined(WITH_SEARCH)
+  // Initialize SimSIMD runtime if needed (explicit, avoids implicit static initializers)
+  dfly::search::InitSimSIMD();
+#endif
+
   config_registry.RegisterMutable("dbfilename");
   config_registry.Register("dbnum");  // equivalent to databases in redis.
   config_registry.Register("dir");
@@ -970,6 +976,9 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("timeout");
   config_registry.RegisterMutable("send_timeout");
   config_registry.RegisterMutable("managed_service_info");
+#ifdef WITH_SEARCH
+  config_registry.RegisterMutable("MAXSEARCHRESULTS");
+#endif
 
   config_registry.RegisterMutable(
       "notify_keyspace_events", [pool = &pp_](const absl::CommandLineFlag& flag) {
