@@ -1164,9 +1164,12 @@ void HSetFamily::HRandField(CmdArgList args, const CommandContext& cmd_cntx) {
       }
 
       if (string_map->Empty()) {  // Can happen if we use a TTL on hash members.
-        // post_updater will run immediately
-        auto it = db_slice.FindMutable(db_context, key).it;
-        db_slice.Del(db_context, it);
+        // Use type-safe deletion (fixes #5316)
+        auto res_it = db_slice.FindMutable(db_context, key, OBJ_HASH);
+        if (res_it) {
+          res_it->post_updater.Run();
+          db_slice.Del(db_context, res_it->it);
+        }
         return facade::OpStatus::KEY_NOTFOUND;
       }
     } else if (pv.Encoding() == kEncodingListPack) {
