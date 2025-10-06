@@ -61,22 +61,23 @@ CountMinSketch::CountMinSketch(double epsilon, double delta) {
 
 void CountMinSketch::Update(uint64_t key, CountMinSketch::SizeT incr) {
   uint64_t i = 0;
-  std::for_each(counters_.begin(), counters_.end(), [&](auto& ctr) {
+  std::for_each(counters_.begin(), counters_.end(), [&](auto& counter) {
     // It is possible to compute just two initial hashes and then use them to derive next i-2
     // hashes, but it results in a lot more collisions and thus much larger overestimates.
     const uint64_t index = Hash(key, i++);
-    const SizeT curr = ctr[index];
+    const SizeT curr = counter[index];
     const SizeT updated = curr + incr;
-    ctr[index] = updated < curr ? MAX : updated;
+    counter[index] = updated < curr ? MAX : updated;
   });
 }
 
 CountMinSketch::SizeT CountMinSketch::EstimateFrequency(uint64_t key) const {
   uint64_t i = 0;
-  auto it = counters_.begin();
-  SizeT estimate = (*it)[Hash(key, i++)];
-  std::for_each(++it, counters_.end(),
-                [&](const auto& ctr) { estimate = std::min(estimate, ctr[Hash(key, i++)]); });
+  SizeT estimate = counters_[i][Hash(key, i)];
+  i += 1;
+  for (; i < counters_.size(); ++i) {
+    estimate = std::min(estimate, counters_[i][Hash(key, i)]);
+  }
   return estimate;
 }
 
