@@ -1131,18 +1131,60 @@ void SearchFamily::FtAlter(CmdArgList args, const CommandContext& cmd_cntx) {
 
 void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view idx_name = ArgS(args, 0);
-  // TODO: Handle optional DD param
 
+  // Parse optional DD (Delete Documents) parameter
+  bool delete_docs = false;
+  if (args.size() > 1) {
+    string_view option = ArgS(args, 1);
+    if (absl::EqualsIgnoreCase(option, "DD")) {
+      delete_docs = true;
+    } else {
+      return cmd_cntx.rb->SendError("Unknown argument");
+    }
+  }
+
+  // Collect document keys (if DD is set), drop index, and delete documents in single transaction
+  vector<vector<string>> shard_doc_keys(delete_docs ? shard_set->size() : 0);
   atomic_uint num_deleted{0};
-  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+
+  auto cb = [&](Transaction* t, EngineShard* es) {
+    // Step 1: If DD is set, collect all document keys before dropping the index
+    if (delete_docs) {
+      auto* index = es->search_indices()->GetIndex(idx_name);
+      if (index) {
+        shard_doc_keys[es->shard_id()] = index->GetAllKeys();
+      }
+    }
+
+    // Step 2: Drop the index
     if (es->search_indices()->DropIndex(idx_name))
       num_deleted.fetch_add(1);
+
+    // Step 3: If DD is set, delete all documents that were in the index
+    if (delete_docs) {
+      const auto& keys = shard_doc_keys[es->shard_id()];
+      if (!keys.empty()) {
+        auto op_args = t->GetOpArgs(es);
+        auto& db_slice = op_args.GetDbSlice();
+
+        for (const auto& key : keys) {
+          auto it = db_slice.FindMutable(op_args.db_cntx, key).it;
+          if (IsValid(it)) {
+            db_slice.Del(op_args.db_cntx, it);
+          }
+        }
+      }
+    }
+
     return OpStatus::OK;
-  });
+  };
+
+  cmd_cntx.tx->Execute(cb, true);
 
   DCHECK(num_deleted == 0u || num_deleted == shard_set->size());
   if (num_deleted == 0u)
     return cmd_cntx.rb->SendError("-Unknown Index name");
+
   return cmd_cntx.rb->SendOk();
 }
 

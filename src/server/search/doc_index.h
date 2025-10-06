@@ -224,6 +224,9 @@ class ShardDocIndex {
     std::string_view Get(DocId id) const;
     size_t Size() const;
 
+    // Get all keys in the index
+    std::vector<std::string> GetAllKeys() const;
+
    private:
     absl::flat_hash_map<std::string, DocId> ids_;
     std::vector<std::string> keys_;
@@ -261,6 +264,9 @@ class ShardDocIndex {
   void RemoveDoc(std::string_view key, const DbContext& db_cntx, const PrimeValue& pv);
 
   DocIndexInfo GetInfo() const;
+
+  // Get all document keys in this index
+  std::vector<std::string> GetAllKeys() const;
 
   io::Result<StringVec, facade::ErrorReply> GetTagVals(std::string_view field) const;
 

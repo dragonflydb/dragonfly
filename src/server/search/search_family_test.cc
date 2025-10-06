@@ -3328,4 +3328,80 @@ TEST_F(SearchFamilyTest, InvalidConfigOptions) {
   EXPECT_THAT(resp, IsArray());
 }
 
+TEST_F(SearchFamilyTest, DropIndexWithDD) {
+  // Create an index on HASH documents
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "name", "TEXT"});
+
+  // Add some documents
+  Run({"HSET", "doc:1", "name", "Alice"});
+  Run({"HSET", "doc:2", "name", "Bob"});
+  Run({"HSET", "doc:3", "name", "Charlie"});
+
+  // Verify documents exist
+  auto resp = Run({"EXISTS", "doc:1", "doc:2", "doc:3"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  // Verify index works
+  resp = Run({"FT.SEARCH", "idx", "*"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3"));
+
+  // Drop index WITHOUT DD - documents should remain
+  Run({"FT.DROPINDEX", "idx"});
+  resp = Run({"EXISTS", "doc:1", "doc:2", "doc:3"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  // Create index again
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "name", "TEXT"});
+
+  // Verify index works again
+  resp = Run({"FT.SEARCH", "idx", "*"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3"));
+
+  // Drop index WITH DD - documents should be deleted
+  Run({"FT.DROPINDEX", "idx", "DD"});
+  resp = Run({"EXISTS", "doc:1", "doc:2", "doc:3"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
+TEST_F(SearchFamilyTest, DropIndexWithDDJson) {
+  // Create an index on JSON documents
+  Run({"FT.CREATE", "jidx", "ON", "JSON", "PREFIX", "1", "jdoc:", "SCHEMA", "$.name", "AS", "name",
+       "TEXT"});
+
+  // Add some JSON documents
+  Run({"JSON.SET", "jdoc:1", "$", R"({"name": "Alice"})"});
+  Run({"JSON.SET", "jdoc:2", "$", R"({"name": "Bob"})"});
+  Run({"JSON.SET", "jdoc:3", "$", R"({"name": "Charlie"})"});
+
+  // Verify documents exist
+  auto resp = Run({"EXISTS", "jdoc:1", "jdoc:2", "jdoc:3"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  // Verify index works
+  resp = Run({"FT.SEARCH", "jidx", "*"});
+  EXPECT_THAT(resp, AreDocIds("jdoc:1", "jdoc:2", "jdoc:3"));
+
+  // Drop index WITH DD - documents should be deleted
+  Run({"FT.DROPINDEX", "jidx", "DD"});
+  resp = Run({"EXISTS", "jdoc:1", "jdoc:2", "jdoc:3"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
+TEST_F(SearchFamilyTest, DropIndexWithInvalidOption) {
+  // Create an index
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "name", "TEXT"});
+
+  // Try to drop with invalid option
+  auto resp = Run({"FT.DROPINDEX", "idx", "INVALID"});
+  EXPECT_THAT(resp, ErrArg("Unknown argument"));
+
+  // Index should still exist - verify it can be searched
+  Run({"HSET", "doc:1", "name", "test"});
+  resp = Run({"FT.SEARCH", "idx", "*"});
+  EXPECT_THAT(resp, AreDocIds("doc:1"));
+
+  // Clean up
+  Run({"FT.DROPINDEX", "idx", "DD"});
+}
+
 }  // namespace dfly

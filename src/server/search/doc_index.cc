@@ -242,6 +242,19 @@ size_t ShardDocIndex::DocKeyIndex::Size() const {
   return ids_.size();
 }
 
+std::vector<std::string> ShardDocIndex::DocKeyIndex::GetAllKeys() const {
+  std::vector<std::string> keys;
+  keys.reserve(ids_.size());
+
+  for (const auto& [key, id] : ids_) {
+    if (!key.empty()) {
+      keys.push_back(key);
+    }
+  }
+
+  return keys;
+}
+
 uint8_t DocIndex::GetObjCode() const {
   return type == JSON ? OBJ_JSON : OBJ_HASH;
 }
@@ -605,6 +618,10 @@ ShardDocIndex::FieldsValuesPerDocId ShardDocIndex::LoadKeysData(
 
 DocIndexInfo ShardDocIndex::GetInfo() const {
   return {*base_, key_index_.Size()};
+}
+
+std::vector<std::string> ShardDocIndex::GetAllKeys() const {
+  return key_index_.GetAllKeys();
 }
 
 io::Result<StringVec, ErrorReply> ShardDocIndex::GetTagVals(string_view field) const {
