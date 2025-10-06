@@ -1136,10 +1136,9 @@ void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) 
   bool delete_docs = false;
   if (args.size() > 1) {
     string_view option = ArgS(args, 1);
+    // Only check for DD option, ignore other arguments for compatibility
     if (absl::EqualsIgnoreCase(option, "DD")) {
       delete_docs = true;
-    } else {
-      return cmd_cntx.rb->SendError("Unknown argument");
     }
   }
 

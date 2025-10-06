@@ -3390,18 +3390,18 @@ TEST_F(SearchFamilyTest, DropIndexWithDDJson) {
 TEST_F(SearchFamilyTest, DropIndexWithInvalidOption) {
   // Create an index
   Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "name", "TEXT"});
-
-  // Try to drop with invalid option
-  auto resp = Run({"FT.DROPINDEX", "idx", "INVALID"});
-  EXPECT_THAT(resp, ErrArg("Unknown argument"));
-
-  // Index should still exist - verify it can be searched
   Run({"HSET", "doc:1", "name", "test"});
-  resp = Run({"FT.SEARCH", "idx", "*"});
-  EXPECT_THAT(resp, AreDocIds("doc:1"));
+
+  // Drop with unrecognized option (should be ignored, index dropped but documents remain)
+  auto resp = Run({"FT.DROPINDEX", "idx", "INVALID"});
+  EXPECT_THAT(resp, "OK");
+
+  // Document should still exist
+  resp = Run({"EXISTS", "doc:1"});
+  EXPECT_THAT(resp, IntArg(1));
 
   // Clean up
-  Run({"FT.DROPINDEX", "idx", "DD"});
+  Run({"DEL", "doc:1"});
 }
 
 }  // namespace dfly
