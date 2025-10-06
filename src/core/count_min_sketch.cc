@@ -8,6 +8,7 @@
 #include <xxhash.h>
 
 #include <cmath>
+#include <functional>
 #include <iostream>
 
 namespace {
@@ -33,18 +34,9 @@ uint64_t LinearDecay(uint64_t value, int64_t time_delta) {
   return value - std::min(static_cast<double>(value), decay);
 }
 
-uint64_t ApplyDecay(uint64_t value, int64_t time_delta, dfly::MultiSketch::Decay decay) {
-  using dfly::MultiSketch;
-  switch (decay) {
-    case MultiSketch::Decay::Exponential:
-      return ExponentialDecay(value, time_delta);
-    case MultiSketch::Decay::Linear:
-      return LinearDecay(value, time_delta);
-    case MultiSketch::Decay::SlidingWindow:
-      return value;
-  }
-  ABSL_UNREACHABLE();
-}
+using DecayFn = std::function<uint64_t(uint64_t, int64_t)>;
+
+std::array<DecayFn, 3> decay_fns = {ExponentialDecay, LinearDecay, [](auto v, auto) { return v; }};
 
 }  // namespace
 
@@ -72,10 +64,8 @@ void CountMinSketch::Update(uint64_t key, CountMinSketch::SizeT incr) {
 }
 
 CountMinSketch::SizeT CountMinSketch::EstimateFrequency(uint64_t key) const {
-  uint64_t i = 0;
-  SizeT estimate = counters_[i][Hash(key, i)];
-  i += 1;
-  for (; i < counters_.size(); ++i) {
+  SizeT estimate = MAX;
+  for (uint64_t i = 0; i < counters_.size(); ++i) {
     estimate = std::min(estimate, counters_[i][Hash(key, i)]);
   }
   return estimate;
@@ -114,7 +104,7 @@ CountMinSketch::SizeT MultiSketch::EstimateFrequency(uint64_t key) const {
   for (const auto& sketch : sketches_) {
     const auto e = sketch.sketch_.EstimateFrequency(key);
     // TODO use average time of sketch to compute delta
-    estimate += ApplyDecay(e, now - sketch.start_time_, decay_t_);
+    estimate += decay_fns[static_cast<uint8_t>(decay_t_)](e, now - sketch.start_time_);
   }
   return estimate;
 }
