@@ -816,7 +816,7 @@ void DbSlice::Del(Context cntx, Iterator it) {
   PerformDeletion(it, db.get());
 }
 
-void DbSlice::DelMutable(Context cntx, ItAndUpdater& it_updater) {
+void DbSlice::DelMutable(Context cntx, ItAndUpdater it_updater) {
   it_updater.post_updater.Run();
   Del(cntx, it_updater.it);
 }

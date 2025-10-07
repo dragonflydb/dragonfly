@@ -1149,7 +1149,7 @@ void StringFamily::GetDel(CmdArgList args, const CommandContext& cmnd_cntx) {
       return it_res.status();
 
     auto value = ReadString(tx->GetDbIndex(), key, it_res->it->second, es);
-    db_slice.DelMutable(tx->GetDbContext(), *it_res);
+    db_slice.DelMutable(tx->GetDbContext(), std::move(*it_res));
     return value;
   };
 

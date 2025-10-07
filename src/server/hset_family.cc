@@ -281,7 +281,7 @@ struct KeyCleanup {
 
 void DeleteKey(DbSlice& db_slice, const OpArgs& op_args, std::string_view key) {
   if (auto del_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH); del_it) {
-    db_slice.DelMutable(op_args.db_cntx, *del_it);
+    db_slice.DelMutable(op_args.db_cntx, std::move(*del_it));
     if (op_args.shard->journal()) {
       RecordJournal(op_args, "DEL"sv, {key});
     }
@@ -1165,7 +1165,7 @@ void HSetFamily::HRandField(CmdArgList args, const CommandContext& cmd_cntx) {
       if (string_map->Empty()) {  // Can happen if we use a TTL on hash members.
         auto res_it = db_slice.FindMutable(db_context, key, OBJ_HASH);
         if (res_it) {
-          db_slice.DelMutable(db_context, *res_it);
+          db_slice.DelMutable(db_context, std::move(*res_it));
         }
         return facade::OpStatus::KEY_NOTFOUND;
       }

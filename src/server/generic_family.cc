@@ -458,7 +458,7 @@ OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
 
   DVLOG(1) << "Rename: removing the key '" << src_key_;
 
-  db_slice.DelMutable(t->GetDbContext(), res);
+  db_slice.DelMutable(t->GetDbContext(), std::move(res));
   if (shard->journal()) {
     RecordJournal(t->GetOpArgs(shard), "DEL"sv, ArgSlice{src_key_}, 2);
   }
@@ -479,7 +479,7 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
 
   if (dest_found_) {
     DVLOG(1) << "Rename: deleting the destiny key '" << dest_key_;
-    db_slice.DelMutable(op_args.db_cntx, dest_res);
+    db_slice.DelMutable(op_args.db_cntx, std::move(dest_res));
   }
 
   if (restore_args.Expired()) {
@@ -586,7 +586,7 @@ OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view
       if (restore_args.Replace()) {
         VLOG(1) << "restore command is running with replace, found old key '" << key
                 << "' and removing it";
-        db_slice.DelMutable(op_args.db_cntx, res);
+        db_slice.DelMutable(op_args.db_cntx, std::move(res));
       } else {
         // we are not allowed to replace it.
         return OpStatus::KEY_EXISTS;
@@ -935,12 +935,12 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     to_res.it->first.SetSticky(sticky);
     to_res.post_updater.Run();
 
-    db_slice.DelMutable(op_args.db_cntx, from_res);
+    db_slice.DelMutable(op_args.db_cntx, std::move(from_res));
   } else {
     // Here we first delete from_it because AddNew below could invalidate from_it.
     // On the other hand, AddNew does not rely on the iterators - this is why we keep
     // the value in `from_obj`.
-    db_slice.DelMutable(op_args.db_cntx, from_res);
+    db_slice.DelMutable(op_args.db_cntx, std::move(from_res));
     auto op_result = db_slice.AddNew(op_args.db_cntx, to_key, std::move(from_obj), exp_ts);
     RETURN_ON_BAD_STATUS(op_result);
     to_res = std::move(*op_result);

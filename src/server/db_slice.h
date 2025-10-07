@@ -330,7 +330,8 @@ class DbSlice {
 
   // Deletes a key after FindMutable(). Runs post_updater before deletion
   // to update memory accounting while the key is still valid.
-  void DelMutable(Context cntx, ItAndUpdater& it_updater);
+  // Takes ownership of it_updater (pass by value with move semantics).
+  void DelMutable(Context cntx, ItAndUpdater it_updater);
 
   constexpr static DbIndex kDbAll = 0xFFFF;
 
