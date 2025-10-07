@@ -175,3 +175,24 @@ add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  bitops_family_test set_family_test zset_family_test geo_family_test
                  hll_family_test cluster_config_test cluster_family_test acl_family_test
                  json_family_memory_test)
+
+# AFL++ Fuzzing targets
+if(DFLY_FUZZ)
+  message(STATUS "Building AFL++ fuzzing targets")
+
+  # RESP protocol fuzzer - tests command parsing and execution
+  add_executable(resp_fuzz ${CMAKE_SOURCE_DIR}/fuzz/targets/resp_fuzz.cc)
+  target_link_libraries(resp_fuzz PRIVATE dfly_test_lib)
+  target_compile_definitions(resp_fuzz PRIVATE FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION)
+
+  # Set output directory for fuzz targets
+  set_target_properties(resp_fuzz PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/fuzz"
+  )
+
+  # Create custom target for all fuzzers
+  add_custom_target(fuzz_targets DEPENDS resp_fuzz)
+
+  message(STATUS "Fuzz targets will be built in: ${CMAKE_BINARY_DIR}/fuzz")
+  message(STATUS "Run with: ${CMAKE_SOURCE_DIR}/fuzz/run_fuzzer.sh resp")
+endif()

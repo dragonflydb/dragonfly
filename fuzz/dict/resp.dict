@@ -1,0 +1,200 @@
+# AFL++ dictionary for RESP protocol
+# Redis/Dragonfly command keywords and common patterns
+
+# RESP protocol markers
+"*"
+"$"
+"+"
+"-"
+":"
+"\r\n"
+
+# Common commands - String operations
+"GET"
+"SET"
+"MGET"
+"MSET"
+"INCR"
+"DECR"
+"APPEND"
+"STRLEN"
+"SETEX"
+"SETNX"
+"GETSET"
+"GETRANGE"
+"SETRANGE"
+
+# List operations
+"LPUSH"
+"RPUSH"
+"LPOP"
+"RPOP"
+"LLEN"
+"LRANGE"
+"LINDEX"
+"LSET"
+"LTRIM"
+"BLPOP"
+"BRPOP"
+
+# Hash operations
+"HSET"
+"HGET"
+"HMSET"
+"HMGET"
+"HGETALL"
+"HDEL"
+"HEXISTS"
+"HLEN"
+"HKEYS"
+"HVALS"
+"HINCRBY"
+
+# Set operations
+"SADD"
+"SREM"
+"SMEMBERS"
+"SISMEMBER"
+"SCARD"
+"SINTER"
+"SUNION"
+"SDIFF"
+"SPOP"
+
+# Sorted set operations
+"ZADD"
+"ZREM"
+"ZRANGE"
+"ZRANGEBYSCORE"
+"ZRANK"
+"ZSCORE"
+"ZCARD"
+"ZCOUNT"
+"ZINCRBY"
+
+# Key operations
+"DEL"
+"EXISTS"
+"EXPIRE"
+"TTL"
+"PERSIST"
+"KEYS"
+"SCAN"
+"TYPE"
+"RENAME"
+"RENAMENX"
+
+# Transaction commands
+"MULTI"
+"EXEC"
+"DISCARD"
+"WATCH"
+"UNWATCH"
+
+# Pub/Sub commands
+"PUBLISH"
+"SUBSCRIBE"
+"UNSUBSCRIBE"
+"PSUBSCRIBE"
+"PUNSUBSCRIBE"
+
+# Stream commands
+"XADD"
+"XREAD"
+"XRANGE"
+"XLEN"
+"XDEL"
+"XTRIM"
+"XGROUP"
+"XREADGROUP"
+
+# JSON commands (Dragonfly extension)
+"JSON.SET"
+"JSON.GET"
+"JSON.DEL"
+"JSON.TYPE"
+"JSON.NUMINCRBY"
+"JSON.ARRAPPEND"
+"JSON.ARRLEN"
+
+# Bloom filter commands
+"BF.ADD"
+"BF.EXISTS"
+"BF.RESERVE"
+"BF.MADD"
+"BF.MEXISTS"
+
+# HyperLogLog commands
+"PFADD"
+"PFCOUNT"
+"PFMERGE"
+
+# Geo commands
+"GEOADD"
+"GEODIST"
+"GEORADIUS"
+"GEOSEARCH"
+
+# Server commands
+"PING"
+"ECHO"
+"INFO"
+"DBSIZE"
+"SELECT"
+"FLUSHDB"
+"FLUSHALL"
+"SAVE"
+"BGSAVE"
+
+# Cluster commands
+"CLUSTER"
+"READONLY"
+"READWRITE"
+
+# Common keys for testing
+"key"
+"mykey"
+"key1"
+"key2"
+"test"
+"foo"
+"bar"
+"user:1"
+"session:123"
+
+# Common values
+"value"
+"hello"
+"world"
+"123"
+"0"
+"1"
+"-1"
+
+# Number patterns
+"0"
+"1"
+"100"
+"1000"
+"-1"
+"-100"
+
+# Special arguments
+"NX"
+"XX"
+"EX"
+"PX"
+"GT"
+"LT"
+"WITHSCORES"
+"LIMIT"
+"COUNT"
+"MATCH"
+"BLOCK"
+
+# Common RESP command patterns
+"*1\r\n$4\r\nPING\r\n"
+"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n"
+"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n"
+"*2\r\n$3\r\nDEL\r\n$3\r\nkey\r\n"
+"*2\r\n$6\r\nEXISTS\r\n$3\r\nkey\r\n"

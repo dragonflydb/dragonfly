@@ -37,6 +37,7 @@ set(CMAKE_REQUIRED_FLAGS "")
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/helio/cmake" ${CMAKE_MODULE_PATH})
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(DF_USE_SSL "Provide support for SSL connections" ON)
+option(DFLY_FUZZ "Build AFL++ fuzzing targets" OFF)
 
 find_package(OpenSSL)
 
@@ -58,6 +59,29 @@ endif()
 
 if(SANITIZERS)
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+endif()
+
+# AFL++ fuzzing support
+if(DFLY_FUZZ)
+  message(STATUS "AFL++ fuzzing enabled")
+
+  # Check if AFL++ compilers are available
+  if(NOT DEFINED ENV{AFL_CC} AND NOT CMAKE_C_COMPILER MATCHES "afl-")
+    message(WARNING "AFL++ compilers not detected. Please use afl-clang-fast or afl-clang-lto")
+    message(WARNING "Example: CC=afl-clang-fast CXX=afl-clang-fast++ cmake -DDFLY_FUZZ=ON ..")
+  endif()
+
+  # AFL++ requires specific compiler flags for coverage instrumentation
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g")
+
+  # Disable sanitizers when fuzzing (AFL++ handles this)
+  if(WITH_ASAN OR WITH_USAN)
+    message(WARNING "Sanitizers are incompatible with AFL++ fuzzing, disabling them")
+    set(WITH_ASAN OFF)
+    set(WITH_USAN OFF)
+    set(SANITIZERS OFF)
+  endif()
 endif()
 
 include(third_party)
