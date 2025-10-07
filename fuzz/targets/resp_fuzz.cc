@@ -120,13 +120,13 @@ struct FuzzerState {
     // Suppress logging to avoid performance overhead
     absl::SetFlag(&FLAGS_minloglevel, 2);  // ERROR level only
 
-    // Open monitor file if requested
+    // Open monitor file if requested (opened once, stays open)
     if (absl::GetFlag(FLAGS_fuzzer_monitor)) {
       std::string log_file = absl::GetFlag(FLAGS_fuzzer_monitor_file);
-      // O_APPEND - add to end of file, not overwrite
-      g_monitor_fd = open(log_file.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+      // O_TRUNC - start fresh, O_APPEND would accumulate across runs
+      g_monitor_fd = open(log_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
       if (g_monitor_fd >= 0) {
-        const char* header = "\n=== Fuzzer Monitor Session ===\n";
+        const char* header = "=== Fuzzer Monitor Started (Persistent Mode) ===\n";
         write(g_monitor_fd, header, strlen(header));
       }
     }
@@ -247,28 +247,36 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   return 0;  // Always return 0 to continue fuzzing
 }
 
-// Main function for AFL++ (always compiled, not just for non-libFuzzer)
+// Main function for AFL++ persistent mode
 int main(int argc, char** argv) {
-  // AFL++ will replace stdin with fuzzer input
   MainInitGuard guard(&argc, &argv);
 
-  // Initialize fuzzer state
+  // AFL++ persistent mode with DEFERRED initialization
+  // Initialize forkserver BEFORE heavy Dragonfly init
+  unsigned char input_buf[64 * 1024];
+
+#ifdef __AFL_HAVE_MANUAL_CONTROL
+  __AFL_INIT();  // Initialize AFL++ forkserver FIRST
+#endif
+
+  // NOW initialize Dragonfly (after forkserver, so not measured as timeout)
   g_state = new FuzzerState();
   g_state->Initialize();
 
-  // Read from stdin (AFL++ provides input here)
-  constexpr size_t kMaxInputSize = 64 * 1024;  // 64KB max
-  std::vector<uint8_t> input;
-  input.reserve(kMaxInputSize);
+  // Persistent mode loop - process stays alive for multiple test cases
+  while (__AFL_LOOP(10000)) {  // 10000 iterations before restart
+    // Read ALL data from stdin until EOF (AFL++ closes stdin when done)
+    ssize_t len = 0;
+    ssize_t n;
+    do {
+      n = read(0, input_buf + len, sizeof(input_buf) - len);
+      if (n > 0)
+        len += n;
+    } while (n > 0 && len < (ssize_t)sizeof(input_buf));
 
-  uint8_t byte;
-  while (std::cin.read(reinterpret_cast<char*>(&byte), 1) && input.size() < kMaxInputSize) {
-    input.push_back(byte);
-  }
-
-  // Process input
-  if (!input.empty()) {
-    LLVMFuzzerTestOneInput(input.data(), input.size());
+    if (len > 0) {
+      LLVMFuzzerTestOneInput(input_buf, len);
+    }
   }
 
   return 0;
