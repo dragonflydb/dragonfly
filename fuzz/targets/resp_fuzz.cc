@@ -9,6 +9,10 @@
 // Input format: Fuzzer input is split into chunks, each chunk represents
 // commands from a virtual connection. This tests concurrent command execution.
 
+#include <fcntl.h>   // for open()
+#include <unistd.h>  // for write()
+
+#include <cstring>  // for strlen()
 #include <memory>
 #include <string_view>
 #include <vector>
@@ -24,12 +28,16 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "facade/redis_parser.h"
 #include "facade/reply_builder.h"
+#include "io/io.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
 #include "server/test_utils.h"
 #include "util/fibers/pool.h"
 
 ABSL_DECLARE_FLAG(bool, force_epoll);
+ABSL_FLAG(bool, fuzzer_monitor, false, "Log commands like redis-cli MONITOR");
+ABSL_FLAG(std::string, fuzzer_monitor_file, "/tmp/dragonfly_fuzzer_commands.log",
+          "File to write monitored commands");
 
 using namespace dfly;
 using namespace facade;
@@ -39,10 +47,13 @@ namespace {
 
 // Number of virtual connections to simulate
 constexpr size_t kNumVirtualConnections = 4;
+// File descriptor for monitor output (opened once)
+int g_monitor_fd = -1;
 
 // Per-connection state
 struct VirtualConnection {
   std::unique_ptr<TestConnection> conn;
+  io::StringSink sink;  // In-memory sink for replies (no real socket needed)
   std::unique_ptr<RedisReplyBuilder> builder;
   std::unique_ptr<RedisParser> parser;
   dfly::ConnectionContext* context = nullptr;
@@ -52,12 +63,14 @@ struct VirtualConnection {
     context = static_cast<dfly::ConnectionContext*>(conn->cntx());
     context->ns = &namespaces->GetDefaultNamespace();
     context->skip_acl_validation = true;
-    builder = std::make_unique<RedisReplyBuilder>(conn->socket());
+    // Use StringSink instead of socket - replies go to memory, not network
+    builder = std::make_unique<RedisReplyBuilder>(&sink);
     parser = std::make_unique<RedisParser>(RedisParser::Mode::SERVER);
   }
 
   void Reset() {
-    builder = std::make_unique<RedisReplyBuilder>(conn->socket());
+    sink.Clear();  // Clear previous replies
+    builder = std::make_unique<RedisReplyBuilder>(&sink);
     parser = std::make_unique<RedisParser>(RedisParser::Mode::SERVER);
     context->transaction = nullptr;
   }
@@ -106,6 +119,17 @@ struct FuzzerState {
 
     // Suppress logging to avoid performance overhead
     absl::SetFlag(&FLAGS_minloglevel, 2);  // ERROR level only
+
+    // Open monitor file if requested
+    if (absl::GetFlag(FLAGS_fuzzer_monitor)) {
+      std::string log_file = absl::GetFlag(FLAGS_fuzzer_monitor_file);
+      // O_APPEND - add to end of file, not overwrite
+      g_monitor_fd = open(log_file.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+      if (g_monitor_fd >= 0) {
+        const char* header = "\n=== Fuzzer Monitor Session ===\n";
+        write(g_monitor_fd, header, strlen(header));
+      }
+    }
   }
 
   void ProcessInput(const uint8_t* data, size_t size) {
@@ -170,6 +194,23 @@ struct FuzzerState {
         }
 
         if (!cmd_args.empty()) {
+          // Monitor mode - log commands to file (AFL++ intercepts stdout/stderr)
+          if (g_monitor_fd >= 0) {
+            std::string cmd_str = "[conn";
+            cmd_str += std::to_string(conn_id);
+            cmd_str += "] ";
+            for (size_t i = 0; i < cmd_args.size(); ++i) {
+              if (i > 0)
+                cmd_str += " ";
+              cmd_str += "\"";
+              cmd_str += std::string(cmd_args[i]);
+              cmd_str += "\"";
+            }
+            cmd_str += "\n";
+            // Write directly to file descriptor (bypasses AFL++ interception)
+            write(g_monitor_fd, cmd_str.c_str(), cmd_str.length());
+          }
+
           // Dispatch command through full service stack
           // This tests: parser → registry → transaction → shards → execution
           // with concurrent load from multiple "clients"
@@ -206,9 +247,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   return 0;  // Always return 0 to continue fuzzing
 }
 
-// For non-libFuzzer AFL++ mode, provide a main function
-#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-extern "C" int main(int argc, char** argv) {
+// Main function for AFL++ (always compiled, not just for non-libFuzzer)
+int main(int argc, char** argv) {
   // AFL++ will replace stdin with fuzzer input
   MainInitGuard guard(&argc, &argv);
 
@@ -233,4 +273,3 @@ extern "C" int main(int argc, char** argv) {
 
   return 0;
 }
-#endif

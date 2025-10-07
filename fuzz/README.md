@@ -9,32 +9,7 @@ AFL++ fuzzing infrastructure for Dragonfly. This implementation provides **tight
 - **Full Dragonfly initialization** - Real Service, ProactorPool, EngineShardSet, all shards
 - **AFL++ coverage-guided** - Intelligent input generation based on code coverage
 - **Parallel command execution** - Tests concurrent command processing and race conditions
-
-## Architecture
-
-Input from AFL++ is split across 4 virtual connections, each executing commands concurrently:
-
-```
-AFL++ Input
-    ↓
-Split into chunks
-    ↓
-┌───────────┬───────────┬───────────┬───────────┐
-│ Conn 1    │ Conn 2    │ Conn 3    │ Conn 4    │
-│ (Thread0) │ (Thread1) │ (Thread2) │ (Thread3) │
-└─────┬─────┴─────┬─────┴─────┬─────┴─────┬─────┘
-      │           │           │           │
-      └───────────┴───────────┴───────────┘
-                      ↓
-            Full Dragonfly Service
-         (IoUring/Epoll + All Shards)
-```
-
-This tests:
-- **Concurrent command execution** from multiple clients
-- **Race conditions** in transaction handling
-- **Shard contention** and locking
-- **Parser under load** with interleaved commands
+- **Monitor mode** - Watch commands in real-time, saved to file
 
 ## Prerequisites
 
@@ -50,14 +25,6 @@ sudo apt-get install afl++
 brew install afl++
 ```
 
-**From source:**
-```bash
-git clone https://github.com/AFLplusplus/AFLplusplus
-cd AFLplusplus
-make
-sudo make install
-```
-
 ## Quick Start
 
 ### 1. Build Fuzzer
@@ -67,16 +34,28 @@ cd fuzz
 ./build_fuzzer.sh
 ```
 
-### 2. Run Fuzzer (IoUring)
+### 2. Run Fuzzer
 
 ```bash
 ./run_fuzzer.sh resp
 ```
 
-### 3. Test with Epoll
+### 3. Monitor Mode (See Commands)
 
 ```bash
-USE_EPOLL=1 ./run_fuzzer.sh resp
+# Run with monitor
+MONITOR=1 TIME_LIMIT=60 ./run_fuzzer.sh resp
+
+# Watch in real-time in another terminal
+tail -f artifacts/resp/commands.log
+```
+
+Output example:
+```
+=== Fuzzer Monitor Session ===
+[conn0] "SET" "key" "value"
+[conn1] "GET" "key"
+[conn2] "DEL" "key"
 ```
 
 ## Configuration
@@ -84,6 +63,13 @@ USE_EPOLL=1 ./run_fuzzer.sh resp
 ### Environment Variables
 
 ```bash
+# Monitor mode - save all executed commands to file
+MONITOR=1 ./run_fuzzer.sh resp
+# Commands → artifacts/resp/commands.log
+
+# Custom monitor file location
+MONITOR=1 MONITOR_FILE=./my_commands.log ./run_fuzzer.sh resp
+
 # Use Epoll instead of IoUring
 USE_EPOLL=1 ./run_fuzzer.sh resp
 
@@ -93,22 +79,17 @@ TIMEOUT=500 ./run_fuzzer.sh resp
 # Memory limit (default: 2048MB)
 MEM_LIMIT=4096 ./run_fuzzer.sh resp
 
-# Parallel jobs (default: nproc)
-JOBS=8 ./run_fuzzer.sh resp
-
 # Time limit in seconds (0=unlimited)
 TIME_LIMIT=3600 ./run_fuzzer.sh resp  # 1 hour
 ```
 
 ### Testing Both IO Engines
 
-It's important to test both IoUring and Epoll:
-
 ```bash
 # Test IoUring (default, faster)
 ./run_fuzzer.sh resp
 
-# Test Epoll (backup, different code paths)
+# Test Epoll (different code paths)
 USE_EPOLL=1 OUTPUT_DIR=fuzz/artifacts/resp-epoll ./run_fuzzer.sh resp
 ```
 
@@ -118,35 +99,44 @@ When AFL++ finds a crash:
 
 ```bash
 # List crashes
-ls -lh fuzz/artifacts/resp/crashes/
+ls -lh artifacts/resp/crashes/
 
-# Reproduce with IoUring
-./build-fuzz/fuzz/resp_fuzz < fuzz/artifacts/resp/crashes/id:000000*
+# Reproduce crash with monitor
+./build-fuzz/fuzz/resp_fuzz \
+  --fuzzer_monitor=true \
+  --fuzzer_monitor_file=crash_commands.log \
+  < artifacts/resp/crashes/id:000000*
 
-# Reproduce with Epoll
-FLAGS_force_epoll=true ./build-fuzz/fuzz/resp_fuzz < fuzz/artifacts/resp/crashes/id:000000*
+# See what commands caused crash
+cat crash_commands.log
 
 # Debug with GDB
-gdb --args ./build-fuzz/fuzz/resp_fuzz
-(gdb) run < fuzz/artifacts/resp/crashes/id:000000*
+gdb --args ./build-fuzz/fuzz/resp_fuzz \
+  --fuzzer_monitor=true --fuzzer_monitor_file=debug.log
+(gdb) run < artifacts/resp/crashes/id:000000*
+(gdb) bt
 ```
 
-## Coverage Analysis
+## Monitor Mode Usage
+
+### Real-time monitoring
 
 ```bash
-# Build with coverage
-CC=afl-clang-fast CXX=afl-clang-fast++ \
-  cmake -DDFLY_FUZZ=ON \
-        -DCMAKE_CXX_FLAGS="-fprofile-instr-generate -fcoverage-mapping"
+# Terminal 1: Start fuzzer with monitor
+MONITOR=1 ./run_fuzzer.sh resp
 
-# Run fuzzer
-TIME_LIMIT=300 ./run_fuzzer.sh resp
+# Terminal 2: Watch commands
+tail -f artifacts/resp/commands.log
+```
 
-# Generate report
-llvm-profdata merge -sparse default.profraw -o default.profdata
-llvm-cov show ./build-fuzz/fuzz/resp_fuzz \
-  -instr-profile=default.profdata \
-  -format=html -output-dir=coverage
+### Analyze fuzzer behavior
+
+```bash
+# What commands are being tested?
+grep -o '"[A-Z]*"' artifacts/resp/commands.log | sort | uniq -c | sort -rn | head -20
+
+# How many sessions?
+grep -c "Monitor Session" artifacts/resp/commands.log
 ```
 
 ## Advanced Usage
@@ -158,31 +148,15 @@ llvm-cov show ./build-fuzz/fuzz/resp_fuzz \
 ./run_fuzzer.sh resp
 
 # Terminal 2+ (secondary)
-AFL_SECONDARY=1 OUTPUT_DIR=fuzz/artifacts/resp ./run_fuzzer.sh resp
+AFL_SECONDARY=1 OUTPUT_DIR=artifacts/resp ./run_fuzzer.sh resp
 ```
-
-## Adding New Fuzz Targets
-
-1. Create `fuzz/targets/mycommand_fuzz.cc`
-2. Add to `src/server/CMakeLists.txt`:
-
-```cmake
-if(DFLY_FUZZ)
-  add_executable(mycommand_fuzz ${CMAKE_SOURCE_DIR}/fuzz/targets/mycommand_fuzz.cc)
-  target_link_libraries(mycommand_fuzz PRIVATE dfly_test_lib)
-endif()
-```
-
-3. Create seeds and dictionary
-4. Build and run
 
 ## Best Practices
 
 1. **Test both IoUring and Epoll** - Different code paths
-2. **Run long sessions** - Many bugs only appear after hours
-3. **Parallelize** - Use all CPU cores
-4. **Monitor crashes** - Check regularly
-5. **Minimize inputs** - Before reporting bugs
+2. **Use monitor** for debugging crashes
+3. **Run long sessions** - Bugs appear after hours
+4. **Analyze monitor logs** - See coverage gaps
 
 ## Resources
 
@@ -196,28 +170,22 @@ endif()
 CC=afl-clang-fast CXX=afl-clang-fast++ ./build_fuzzer.sh
 ```
 
-### "Timeout too small"
+### Want to see what's being tested?
 
 ```bash
-TIMEOUT=2000 ./run_fuzzer.sh resp
-```
-
-### "Out of memory"
-
-```bash
-MEM_LIMIT=4096 ./run_fuzzer.sh resp
+MONITOR=1 TIME_LIMIT=60 ./run_fuzzer.sh resp
+tail -f artifacts/resp/commands.log
 ```
 
 ### Slow speed
 
-- Disable CPU frequency scaling
-- Use IoUring (default): `USE_EPOLL=0`
+- Disable monitor mode (adds overhead)
 - Reduce timeout: `TIMEOUT=100`
+- Use IoUring (default)
 
 ## Success Metrics
 
-Good indicators:
 - **Stability**: >95%
 - **Exec speed**: >5000 exec/sec (IoUring), >2000 (Epoll)
-- **New paths**: Growing over time
+- **New paths**: Growing
 - **Crashes**: Finding bugs!

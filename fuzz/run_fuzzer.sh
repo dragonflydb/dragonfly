@@ -26,6 +26,8 @@ MEM_LIMIT="${MEM_LIMIT:-2048}"  # MB
 JOBS="${JOBS:-$(nproc)}"
 TIME_LIMIT="${TIME_LIMIT:-0}"  # 0 = unlimited
 USE_EPOLL="${USE_EPOLL:-0}"  # 0=IoUring (default), 1=Epoll
+MONITOR="${MONITOR:-0}"  # 0=off, 1=show commands like redis-cli MONITOR
+MONITOR_FILE="${MONITOR_FILE:-$FUZZ_DIR/artifacts/$TARGET/commands.log}"  # Where to write commands
 
 print_header() {
     echo -e "${GREEN}--------------------------------${NC}"
@@ -108,6 +110,11 @@ show_config() {
     echo "  Jobs:        $JOBS"
     echo "  Time limit:  ${TIME_LIMIT}s (0=unlimited)"
     echo "  IO Engine:   $([ "$USE_EPOLL" = "1" ] && echo "Epoll" || echo "IoUring (default)")"
+    if [ "$MONITOR" = "1" ]; then
+        echo "  Monitor:     ON → $MONITOR_FILE"
+    else
+        echo "  Monitor:     OFF"
+    fi
     echo ""
 }
 
@@ -140,16 +147,21 @@ run_fuzzer() {
         AFL_CMD+=(-M "fuzzer01")
     fi
 
-    # Add the target binary
+    # Add the target binary with flags
     AFL_CMD+=("$FUZZ_TARGET")
 
-    # Set environment for Epoll if requested
+    # Add Epoll flag if requested
     if [[ "$USE_EPOLL" = "1" ]]; then
-        export FLAGS_force_epoll=true
-        print_info "Using Epoll (FLAGS_force_epoll=true)"
+        AFL_CMD+=(--force_epoll=true)
+        print_info "Using Epoll"
     else
-        export FLAGS_force_epoll=false
         print_info "Using IoUring (default)"
+    fi
+
+    # Add monitor flag if requested
+    if [[ "$MONITOR" = "1" ]]; then
+        AFL_CMD+=(--fuzzer_monitor=true --fuzzer_monitor_file="$MONITOR_FILE")
+        print_info "Monitor mode ON → $MONITOR_FILE"
     fi
 
     # Display command
@@ -178,6 +190,8 @@ Environment Variables:
   JOBS          Number of parallel jobs (default: nproc)
   TIME_LIMIT    Stop after N seconds (default: 0 = unlimited)
   USE_EPOLL     Use Epoll instead of IoUring (default: 0)
+  MONITOR       Show commands like redis-cli MONITOR (default: 0)
+  MONITOR_FILE  Where to write monitored commands (default: artifacts/<target>/commands.log)
 
 Examples:
   # Basic usage
@@ -194,6 +208,12 @@ Examples:
 
   # Test with Epoll instead of IoUring
   USE_EPOLL=1 $0 resp
+
+  # Monitor mode - see all commands being executed
+  MONITOR=1 TIME_LIMIT=10 $0 resp
+
+  # Custom monitor file location
+  MONITOR=1 MONITOR_FILE=./my_commands.log $0 resp
 
 For more information, see: fuzz/README.md
 EOF

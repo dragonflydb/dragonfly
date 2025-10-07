@@ -130,8 +130,13 @@ endif()
 add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)
 
+# Fuzzing library - same as dfly_test_lib but WITHOUT gtest_main_ext
+add_library(dfly_fuzz_lib test_utils.cc)
+cxx_link(dfly_fuzz_lib dragonfly_lib facade_test gtest)
+
 if (WITH_ASAN OR WITH_USAN)
   target_compile_definitions(dfly_test_lib PRIVATE SANITIZERS)
+  target_compile_definitions(dfly_fuzz_lib PRIVATE SANITIZERS)
 endif()
 
 cxx_test(dragonfly_test dfly_test_lib LABELS DFLY)
@@ -182,7 +187,7 @@ if(DFLY_FUZZ)
 
   # RESP protocol fuzzer - tests command parsing and execution
   add_executable(resp_fuzz ${CMAKE_SOURCE_DIR}/fuzz/targets/resp_fuzz.cc)
-  target_link_libraries(resp_fuzz PRIVATE dfly_test_lib)
+  target_link_libraries(resp_fuzz PRIVATE dfly_fuzz_lib)
   target_compile_definitions(resp_fuzz PRIVATE FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION)
 
   # Set output directory for fuzz targets
