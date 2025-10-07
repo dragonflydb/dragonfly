@@ -2728,6 +2728,30 @@ TEST_F(SearchFamilyTest, SetDoesNotUpdateIndexesBug) {
   EXPECT_THAT(resp, AreDocIds("k1"));
 }
 
+TEST_F(SearchFamilyTest, SortStoreDoesNotUpdateIndexesBug) {
+  // Create an index over HASH
+  auto resp = Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "field", "TEXT"});
+  EXPECT_THAT(resp, "OK");
+
+  // Index a HASH document under k1
+  resp = Run({"HSET", "k1", "field", "value"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // Prepare a source list to sort and store into k1 (overwriting k1 to LIST)
+  EXPECT_THAT(Run({"RPUSH", "lst", "b", "a"}), IntArg(2));
+  // SORT lst STORE k1 -> changes type of k1 from HASH to LIST
+  Run({"SORT", "lst", "ALPHA", "STORE", "k1"});
+
+  // Rename away and recreate k1 as HASH again
+  EXPECT_EQ(Run({"RENAME", "k1", "anotherkey"}), "OK");
+  EXPECT_THAT(Run({"HSET", "k1", "field", "value"}), IntArg(1));
+
+  // If SORT/STORE failed to remove k1 from indexes, the re-index here should crash.
+  // Successful run should contain only the new k1 document in the index.
+  resp = Run({"FT.SEARCH", "index", "*"});
+  EXPECT_THAT(resp, AreDocIds("k1"));
+}
+
 TEST_F(SearchFamilyTest, BlockSizeOptionFtCreate) {
   // Create an index with a block size option
   auto resp = Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "number1", "NUMERIC", "BLOCKSIZE",
