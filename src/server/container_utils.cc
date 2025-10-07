@@ -5,6 +5,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/detail/listpack_wrap.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -243,14 +244,8 @@ bool IterateMap(const PrimeValue& pv, const IterateKVFunc& func) {
   bool finished = true;
 
   if (pv.Encoding() == kEncodingListPack) {
-    uint8_t k_intbuf[LP_INTBUF_SIZE], v_intbuf[LP_INTBUF_SIZE];
-    uint8_t* lp = (uint8_t*)pv.RObjPtr();
-    uint8_t* fptr = lpFirst(lp);
-    while (fptr) {
-      string_view key = LpGetView(fptr, k_intbuf);
-      fptr = lpNext(lp, fptr);
-      string_view val = LpGetView(fptr, v_intbuf);
-      fptr = lpNext(lp, fptr);
+    detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
+    for (const auto [key, val] : lw) {
       if (!func(ContainerEntry{key.data(), key.size()}, ContainerEntry{val.data(), val.size()})) {
         finished = false;
         break;

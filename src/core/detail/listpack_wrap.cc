@@ -1,8 +1,18 @@
+// Copyright 2025, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
 #include "core/detail/listpack_wrap.h"
+
+#include "server/container_utils.h"
+
+extern "C" {
+#include "redis/listpack.h"
+}
 
 namespace dfly::detail {
 
 ListpackWrap::Iterator::Iterator(uint8_t* lp, uint8_t* ptr) : lp{lp}, ptr{ptr}, next_ptr{nullptr} {
+  static_assert(sizeof(intbuf[0]) >= LP_INTBUF_SIZE);  // to avoid header dependency
   Read();
 }
 
@@ -39,6 +49,7 @@ ListpackWrap::Iterator ListpackWrap::begin() const {
 ListpackWrap::Iterator ListpackWrap::end() const {
   return Iterator{lp, nullptr};
 }
+
 bool ListpackWrap::Iterator::operator==(const Iterator& other) const {
   return lp == other.lp && ptr == other.ptr;
 }

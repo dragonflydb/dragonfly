@@ -1,18 +1,15 @@
+// Copyright 2025, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
 #pragma once
 
 #include <cstdint>
 #include <cstdio>
 #include <string_view>
 
-#include "server/container_utils.h"
-
-extern "C" {
-#include "redis/listpack.h"
-}
-
 namespace dfly::detail {
 
-// Wrapper around listpack map
+// Wrapper around map data structure based on listpack
 struct ListpackWrap {
   struct Iterator {
     using iterator_category = std::forward_iterator_tag;
@@ -38,17 +35,17 @@ struct ListpackWrap {
     }
 
    private:
-    void Read();
+    void Read();  // Read next entry at ptr and determine next_ptr
 
     uint8_t *lp = nullptr, *ptr = nullptr, *next_ptr = nullptr;
     std::string_view key_v, value_v;
-    uint8_t intbuf[2][LP_INTBUF_SIZE];
+    uint8_t intbuf[2][24];
   };
 
   explicit ListpackWrap(uint8_t* lp) : lp{lp} {
   }
 
-  Iterator Find(std::string_view key) const;
+  Iterator Find(std::string_view key) const;  // Linear search
   Iterator begin() const;
   Iterator end() const;
   size_t size() const;  // number of entries

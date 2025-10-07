@@ -329,7 +329,7 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
   const PrimeValue& pv = it->second;
 
   if (pv.Encoding() == kEncodingListPack) {
-    // TODO: Optimize unnecessary value reads
+    // TODO: Optimize unnecessary value reads from iterator
     detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
     for (const auto [key, value] : lw) {
       if (scan_op.Matches(key)) {
@@ -1215,16 +1215,8 @@ StringMap* HSetFamily::ConvertToStrMap(uint8_t* lp) {
 
   detail::ListpackWrap lw{lp};
   sm->Reserve(lw.size());
-
-  for (const auto [key, value] : lw) {
-    if (!sm->AddOrUpdate(key, value)) {  // Must be unique
-      LOG(ERROR) << "Internal error while converting listpack to stringmap when inserting key: "
-                 << key << " , listpack keys are:";
-      for (const auto [key2, _] : lw)
-        LOG(ERROR) << key2;
-      LOG(FATAL) << "Internal error, report to Dragonfly team! ------------";
-    }
-  }
+  for (const auto [key, value] : lw)
+    LOG_IF(ERROR, !sm->AddOrUpdate(key, value)) << "Internal error: duplicate key " << key;
   return sm;
 }
 
