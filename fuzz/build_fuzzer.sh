@@ -60,9 +60,12 @@ configure_build() {
     CC=afl-clang-fast \
     CXX=afl-clang-fast++ \
     cmake \
-        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        -DCMAKE_BUILD_TYPE=Debug \
+        -GNinja \
         -DDFLY_FUZZ=ON \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        -DWITH_AWS:BOOL=OFF \
+        -DWITH_GCP:BOOL=OFF \
         "$PROJECT_ROOT"
 
     print_info "Configuration complete ✓"

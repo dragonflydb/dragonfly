@@ -15,7 +15,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Default configuration
 TARGET="${1:-resp}"
-BUILD_DIR="${BUILD_DIR:-$PROJECT_ROOT/build-dbg}"
+BUILD_DIR="${BUILD_DIR:-$PROJECT_ROOT/build-fuzz}"
 FUZZ_DIR="$SCRIPT_DIR"
 OUTPUT_DIR="${OUTPUT_DIR:-$FUZZ_DIR/artifacts/$TARGET}"
 CORPUS_DIR="${CORPUS_DIR:-$FUZZ_DIR/corpus/$TARGET}"
@@ -168,7 +168,7 @@ Targets:
   resp          RESP protocol fuzzer (default)
 
 Environment Variables:
-  BUILD_DIR     Build directory (default: build-dbg)
+  BUILD_DIR     Build directory (default: build-fuzz)
   OUTPUT_DIR    AFL++ output directory (default: fuzz/artifacts/<target>)
   CORPUS_DIR    Input corpus directory (default: fuzz/corpus/<target>)
   SEEDS_DIR     Initial seeds directory (default: fuzz/seeds/<target>)

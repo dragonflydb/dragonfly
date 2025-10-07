@@ -43,22 +43,22 @@ constexpr size_t kNumVirtualConnections = 4;
 // Per-connection state
 struct VirtualConnection {
   std::unique_ptr<TestConnection> conn;
-  std::unique_ptr<SinkReplyBuilder> builder;
+  std::unique_ptr<RedisReplyBuilder> builder;
   std::unique_ptr<RedisParser> parser;
-  ConnectionContext* context = nullptr;
+  dfly::ConnectionContext* context = nullptr;
 
   void Initialize(ProactorBase* proactor) {
     conn = std::make_unique<TestConnection>(Protocol::REDIS);
-    context = static_cast<ConnectionContext*>(conn->cntx());
+    context = static_cast<dfly::ConnectionContext*>(conn->cntx());
     context->ns = &namespaces->GetDefaultNamespace();
     context->skip_acl_validation = true;
-    builder = std::make_unique<SinkReplyBuilder>(conn->socket());
-    parser = std::make_unique<RedisParser>(false);  // server mode
+    builder = std::make_unique<RedisReplyBuilder>(conn->socket());
+    parser = std::make_unique<RedisParser>(RedisParser::Mode::SERVER);
   }
 
   void Reset() {
-    builder = std::make_unique<SinkReplyBuilder>(conn->socket());
-    parser = std::make_unique<RedisParser>(false);
+    builder = std::make_unique<RedisReplyBuilder>(conn->socket());
+    parser = std::make_unique<RedisParser>(RedisParser::Mode::SERVER);
     context->transaction = nullptr;
   }
 };
@@ -105,7 +105,7 @@ struct FuzzerState {
     initialized = true;
 
     // Suppress logging to avoid performance overhead
-    FLAGS_minloglevel = 2;  // ERROR level only
+    absl::SetFlag(&FLAGS_minloglevel, 2);  // ERROR level only
   }
 
   void ProcessInput(const uint8_t* data, size_t size) {
@@ -164,7 +164,8 @@ struct FuzzerState {
         CmdArgVec cmd_args;
         for (const auto& arg : args) {
           if (arg.type == RespExpr::STRING) {
-            cmd_args.emplace_back(arg.GetBuf());
+            auto buf = arg.GetBuf();
+            cmd_args.emplace_back(reinterpret_cast<const char*>(buf.data()), buf.size());
           }
         }
 
@@ -177,7 +178,7 @@ struct FuzzerState {
         }
 
         // Reset parser for next command
-        vconn.parser = std::make_unique<RedisParser>(false);
+        vconn.parser = std::make_unique<RedisParser>(RedisParser::Mode::SERVER);
       } else {
         // Invalid or incomplete command, stop processing this connection
         break;
