@@ -1164,7 +1164,6 @@ void HSetFamily::HRandField(CmdArgList args, const CommandContext& cmd_cntx) {
       }
 
       if (string_map->Empty()) {  // Can happen if we use a TTL on hash members.
-        // Use type-safe deletion (fixes #5316)
         auto res_it = db_slice.FindMutable(db_context, key, OBJ_HASH);
         if (res_it) {
           res_it->post_updater.Run();

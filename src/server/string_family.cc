@@ -285,7 +285,6 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
   auto& db_slice = op_args.GetDbSlice();
 
   // we avoid using AddOrFind because of skip_on_missing option for memcache.
-  // Use type-safe FindMutable with OBJ_STRING (fixes #5316)
   auto res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING);
 
   if (!res) {
@@ -384,7 +383,6 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   // Cost of this request
   const int64_t increment_ns = emission_interval_ns * quantity;  // should be nonnegative
 
-  // Use type-safe FindMutable with OBJ_STRING (fixes #5316)
   auto res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING);
   const int64_t now_ns = GetCurrentTimeNs();
 
