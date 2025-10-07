@@ -1117,8 +1117,7 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
     RETURN_ON_BAD_STATUS(res_it);
 
     if (IsValid(res_it->it)) {
-      res_it->post_updater.Run();
-      db_slice.Del(op_args.db_cntx, res_it->it);
+      db_slice.DelMutable(op_args.db_cntx, *res_it);
       return 1;
     }
     return 0;

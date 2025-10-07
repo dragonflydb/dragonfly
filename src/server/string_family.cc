@@ -1149,8 +1149,7 @@ void StringFamily::GetDel(CmdArgList args, const CommandContext& cmnd_cntx) {
       return it_res.status();
 
     auto value = ReadString(tx->GetDbIndex(), key, it_res->it->second, es);
-    it_res->post_updater.Run();  // Run manually before delete
-    db_slice.Del(tx->GetDbContext(), it_res->it);
+    db_slice.DelMutable(tx->GetDbContext(), *it_res);
     return value;
   };
 
