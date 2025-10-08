@@ -1120,7 +1120,7 @@ void SearchFamily::FtAlter(CmdArgList args, const CommandContext& cmd_cntx) {
   // Rebuild index
   // TODO: Introduce partial rebuild
   auto upd_cb = [idx_name, index_info](Transaction* tx, EngineShard* es) {
-    es->search_indices()->DropIndex(idx_name);
+    (void)es->search_indices()->DropIndex(idx_name);
     es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info);
     return OpStatus::OK;
   };
@@ -1131,14 +1131,40 @@ void SearchFamily::FtAlter(CmdArgList args, const CommandContext& cmd_cntx) {
 
 void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view idx_name = ArgS(args, 0);
-  // TODO: Handle optional DD param
+
+  // Parse optional DD (Delete Documents) parameter
+  bool delete_docs = args.size() > 1 && absl::EqualsIgnoreCase(args[1], "DD");
 
   atomic_uint num_deleted{0};
-  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (es->search_indices()->DropIndex(idx_name))
-      num_deleted.fetch_add(1);
+
+  auto cb = [&](Transaction* t, EngineShard* es) {
+    // Drop the index and get its pointer
+    auto index = es->search_indices()->DropIndex(idx_name);
+    if (!index)
+      return OpStatus::OK;
+
+    num_deleted.fetch_add(1);
+
+    // If DD is set, delete all documents that were in the index
+    if (delete_docs) {
+      // Get const reference to document keys map (index will be destroyed after this scope)
+      const auto& doc_keys = index->key_index().GetDocKeysMap();
+
+      auto op_args = t->GetOpArgs(es);
+      auto& db_slice = op_args.GetDbSlice();
+
+      for (const auto& [key, doc_id] : doc_keys) {
+        auto it = db_slice.FindMutable(op_args.db_cntx, key).it;
+        if (IsValid(it)) {
+          db_slice.Del(op_args.db_cntx, it);
+        }
+      }
+    }
+
     return OpStatus::OK;
-  });
+  };
+
+  cmd_cntx.tx->Execute(cb, true);
 
   DCHECK(num_deleted == 0u || num_deleted == shard_set->size());
   if (num_deleted == 0u)
