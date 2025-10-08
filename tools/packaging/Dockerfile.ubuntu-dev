@@ -19,7 +19,7 @@ FROM ubuntu:22.04
 RUN --mount=type=tmpfs,target=/var/cache/apt \
     --mount=type=tmpfs,target=/var/lib/apt/lists \
     apt update && \
-    apt install -q -y --no-install-recommends netcat-openbsd ca-certificates redis-tools net-tools
+    apt install -q -y --no-install-recommends netcat-openbsd ca-certificates redis-tools net-tools tini
 
 RUN groupadd -r -g 999 dfly && useradd -r -g dfly -u 999 dfly
 RUN mkdir /data && chown dfly:dfly /data
@@ -32,7 +32,9 @@ COPY tools/docker/healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY --from=builder /build/build-release/dragonfly /usr/local/bin/
 
 HEALTHCHECK CMD /usr/local/bin/healthcheck.sh
-ENTRYPOINT ["entrypoint.sh"]
+
+# Use tini as PID 1 to properly reap zombie processes (issue #5844)
+ENTRYPOINT ["/usr/bin/tini", "--", "entrypoint.sh"]
 
 # For inter-container communication.
 EXPOSE 6379
