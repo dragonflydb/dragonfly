@@ -749,7 +749,7 @@ size_t EngineShard::CalculateEvictionBytes() {
 
     global_rss_memory_at_prev_eviction = global_used_rss_memory;
 
-    // If we oveflow use limit as used_memory
+    // If we underflow use limit as used_memory
     size_t used_rss_memory_with_deleted_bytes =
         std::min(global_used_rss_memory - deleted_bytes_before_rss_update * shards_count, limit);
 
@@ -763,7 +763,7 @@ size_t EngineShard::CalculateEvictionBytes() {
     }
 
     // There is no RSS eviction goal and we have cleared tracked deleted bytes
-    if (rss_goal_bytes && deleted_bytes_before_rss_update) {
+    if (!rss_goal_bytes && !deleted_bytes_before_rss_update) {
       eviction_state_.track_deleted_bytes = false;
     }
 
