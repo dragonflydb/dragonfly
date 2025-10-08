@@ -251,6 +251,44 @@ async def test_eviction_on_rss_treshold(df_factory: DflyInstanceFactory, heartbe
         assert stats_info_after["evicted_keys"] == 0
 
 
+# Github issue #5891
+async def test_no_rss_eviction_overflow_on_expired_keys(df_factory: DflyInstanceFactory):
+    max_memory = 256 * 1024**2  # 256MB
+    df_server = df_factory.create(
+        proactor_threads=1, cache_mode="yes", maxmemory=max_memory, vmodule="engine_shard=2"
+    )
+    df_server.start()
+    client = df_server.client()
+
+    data_fill_size = int(0.20 * max_memory)  # 20% of max_memory
+
+    val_size = 1024 * 50  # 50 kb for key
+    num_keys = data_fill_size // val_size
+
+    for i in range(0, 5):
+        pipe = client.pipeline(transaction=False)
+        step_keys = num_keys + i * 10
+        await pipe.execute_command("DEBUG", "POPULATE", step_keys, "key_1", val_size)
+        await pipe.execute_command("DEBUG", "POPULATE", step_keys + i * 10, "key_2", val_size)
+        for i in range(step_keys):
+            if i % 2 == 0:
+                await pipe.execute_command(f"EXPIRE key_1:{i} 1")
+            else:
+                await pipe.execute_command(f"EXPIRE key_2:{i} 1")
+        await pipe.execute()
+        await asyncio.sleep(2)
+
+    await client.execute_command("FLUSHALL")
+
+    # New keys should be added
+    await client.execute_command("DEBUG", "POPULATE", num_keys, "key", val_size)
+    # Wait so heartbeat eviction
+    await asyncio.sleep(5)
+
+    keyspace_info = await client.info("keyspace")
+    assert keyspace_info["db0"]["keys"] == num_keys
+
+
 @pytest.mark.asyncio
 async def test_throttle_on_commands_squashing_replies_bytes(df_factory: DflyInstanceFactory):
     df = df_factory.create(
