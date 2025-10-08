@@ -35,6 +35,11 @@ extern "C" {
 #include "util/fibers/pool.h"
 
 ABSL_DECLARE_FLAG(bool, force_epoll);
+ABSL_DECLARE_FLAG(std::string, dbfilename);
+ABSL_DECLARE_FLAG(std::string, dir);
+ABSL_DECLARE_FLAG(std::string, log_dir);
+ABSL_DECLARE_FLAG(bool, alsologtostderr);
+
 ABSL_FLAG(bool, fuzzer_monitor, false, "Log commands like redis-cli MONITOR");
 ABSL_FLAG(std::string, fuzzer_monitor_file, "/tmp/dragonfly_fuzzer_commands.log",
           "File to write monitored commands");
@@ -103,6 +108,10 @@ struct FuzzerState {
 #endif
     pool->Run();
 
+    // Disable snapshot saving for fuzzing (no need to save to disk)
+    absl::SetFlag(&FLAGS_dbfilename, "");
+    absl::SetFlag(&FLAGS_dir, "/tmp");
+
     // Initialize service (this is the core Dragonfly engine)
     service = std::make_unique<Service>(pool.get());
     service->Init(nullptr, {});  // No network, in-process only
@@ -117,18 +126,35 @@ struct FuzzerState {
 
     initialized = true;
 
-    // Suppress logging to avoid performance overhead
-    absl::SetFlag(&FLAGS_minloglevel, 2);  // ERROR level only
-
-    // Open monitor file if requested (opened once, stays open)
+    // Redirect Dragonfly logs to file next to commands.log
     if (absl::GetFlag(FLAGS_fuzzer_monitor)) {
       std::string log_file = absl::GetFlag(FLAGS_fuzzer_monitor_file);
-      // O_TRUNC - start fresh, O_APPEND would accumulate across runs
+
+      // Set log directory to same location as monitor file
+      size_t last_slash = log_file.rfind('/');
+      std::string log_dir =
+          (last_slash != std::string::npos) ? log_file.substr(0, last_slash) : ".";
+
+      // Configure logging: INFO, WARNING, ERROR to file
+      absl::SetFlag(&FLAGS_minloglevel, 0);  // Show INFO and above
+      absl::SetFlag(&FLAGS_alsologtostderr, true);
+
+      // Set log file destinations (glog needs this set explicitly)
+      std::string log_prefix = log_dir + "/dragonfly";
+      google::SetLogDestination(google::INFO, (log_prefix + ".INFO.").c_str());
+      google::SetLogDestination(google::WARNING, (log_prefix + ".WARNING.").c_str());
+      google::SetLogDestination(google::ERROR, (log_prefix + ".ERROR.").c_str());
+
+      // Open monitor file for commands
       g_monitor_fd = open(log_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
       if (g_monitor_fd >= 0) {
         const char* header = "=== Fuzzer Monitor Started (Persistent Mode) ===\n";
         write(g_monitor_fd, header, strlen(header));
       }
+    } else {
+      // No monitor - suppress logs for performance
+      absl::SetFlag(&FLAGS_minloglevel, 2);  // ERROR only
+      absl::SetFlag(&FLAGS_alsologtostderr, false);
     }
   }
 
@@ -197,7 +223,7 @@ struct FuzzerState {
           // Monitor mode - log commands to file (AFL++ intercepts stdout/stderr)
           if (g_monitor_fd >= 0) {
             std::string cmd_str = "[conn";
-            cmd_str += std::to_string(conn_id);
+            cmd_str += std::to_string(conn_id + 1);  // Show conn1-conn4 instead of conn0-conn3
             cmd_str += "] ";
             for (size_t i = 0; i < cmd_args.size(); ++i) {
               if (i > 0)

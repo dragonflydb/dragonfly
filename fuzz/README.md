@@ -5,11 +5,11 @@ AFL++ fuzzing infrastructure for Dragonfly. This implementation provides **tight
 ## Key Features
 
 - **IoUring by default** - Uses Linux io_uring for maximum performance (Epoll as fallback)
-- **Multiple virtual connections** - Simulates 4 concurrent clients for realistic testing
+- **4 concurrent connections** - Simulates realistic multi-client load
 - **Full Dragonfly initialization** - Real Service, ProactorPool, EngineShardSet, all shards
-- **AFL++ coverage-guided** - Intelligent input generation based on code coverage
+- **AFL++ persistent mode** - One process, 10,000 iterations (10-100x faster)
 - **Parallel command execution** - Tests concurrent command processing and race conditions
-- **Monitor mode** - Watch commands in real-time, saved to file
+- **Monitor mode** - Watch commands + Dragonfly logs (INFO/WARNING/ERROR)
 
 ## Prerequisites
 
@@ -40,32 +40,35 @@ cd fuzz
 ./run_fuzzer.sh resp
 ```
 
-### 3. Monitor Mode (See Commands)
+### 3. Monitor Mode (See Commands + Logs)
 
+Watch what's happening:
 ```bash
 # Run with monitor
 MONITOR=1 TIME_LIMIT=60 ./run_fuzzer.sh resp
 
-# Watch in real-time in another terminal
+# In another terminal - watch commands
 tail -f artifacts/resp/commands.log
+
+# Watch Dragonfly logs (INFO, WARNING, ERROR)
+tail -f artifacts/resp/dragonfly*.INFO
+tail -f artifacts/resp/dragonfly*.WARNING
+tail -f artifacts/resp/dragonfly*.ERROR
 ```
 
-Output example:
-```
-=== Fuzzer Monitor Session ===
-[conn0] "SET" "key" "value"
-[conn1] "GET" "key"
-[conn2] "DEL" "key"
-```
+Output files:
+- `artifacts/resp/commands.log` - All executed commands
+- `artifacts/resp/dragonfly*.INFO` - Info logs from Dragonfly
+- `artifacts/resp/dragonfly*.WARNING` - Warnings
+- `artifacts/resp/dragonfly*.ERROR` - Errors
 
 ## Configuration
 
 ### Environment Variables
 
 ```bash
-# Monitor mode - save all executed commands to file
+# Monitor mode - save commands + logs
 MONITOR=1 ./run_fuzzer.sh resp
-# Commands → artifacts/resp/commands.log
 
 # Custom monitor file location
 MONITOR=1 MONITOR_FILE=./my_commands.log ./run_fuzzer.sh resp
@@ -107,8 +110,12 @@ ls -lh artifacts/resp/crashes/
   --fuzzer_monitor_file=crash_commands.log \
   < artifacts/resp/crashes/id:000000*
 
-# See what commands caused crash
+# Check what commands caused crash
 cat crash_commands.log
+
+# Check Dragonfly logs for errors
+cat dragonfly*.ERROR
+cat dragonfly*.WARNING
 
 # Debug with GDB
 gdb --args ./build-fuzz/fuzz/resp_fuzz \
@@ -117,26 +124,29 @@ gdb --args ./build-fuzz/fuzz/resp_fuzz \
 (gdb) bt
 ```
 
-## Monitor Mode Usage
+## Monitor Mode Details
 
-### Real-time monitoring
+Monitor mode creates multiple log files:
 
-```bash
-# Terminal 1: Start fuzzer with monitor
-MONITOR=1 ./run_fuzzer.sh resp
-
-# Terminal 2: Watch commands
-tail -f artifacts/resp/commands.log
+```
+artifacts/resp/
+├── commands.log           # All commands from 4 connections
+├── dragonfly*.INFO        # Info logs from Dragonfly
+├── dragonfly*.WARNING     # Warning logs
+├── dragonfly*.ERROR       # Error logs
+└── crashes/               # AFL++ crash reproducers
 ```
 
-### Analyze fuzzer behavior
-
+Watch in real-time:
 ```bash
-# What commands are being tested?
-grep -o '"[A-Z]*"' artifacts/resp/commands.log | sort | uniq -c | sort -rn | head -20
+# Commands
+tail -f artifacts/resp/commands.log | grep "conn[1-4]"
 
-# How many sessions?
-grep -c "Monitor Session" artifacts/resp/commands.log
+# Errors
+tail -f artifacts/resp/dragonfly*.ERROR
+
+# All logs
+tail -f artifacts/resp/dragonfly*.{INFO,WARNING,ERROR}
 ```
 
 ## Advanced Usage
@@ -151,12 +161,25 @@ grep -c "Monitor Session" artifacts/resp/commands.log
 AFL_SECONDARY=1 OUTPUT_DIR=artifacts/resp ./run_fuzzer.sh resp
 ```
 
+### Analyze What Was Tested
+
+```bash
+# What commands?
+grep -o '"[A-Z]*"' artifacts/resp/commands.log | sort | uniq -c | sort -rn
+
+# Any errors?
+cat artifacts/resp/dragonfly*.ERROR
+
+# Any warnings?
+cat artifacts/resp/dragonfly*.WARNING
+```
+
 ## Best Practices
 
 1. **Test both IoUring and Epoll** - Different code paths
-2. **Use monitor** for debugging crashes
-3. **Run long sessions** - Bugs appear after hours
-4. **Analyze monitor logs** - See coverage gaps
+2. **Use monitor** for debugging - Commands + logs
+3. **Check logs regularly** - Catch warnings early
+4. **Run long sessions** - Bugs appear after hours
 
 ## Resources
 
@@ -175,6 +198,7 @@ CC=afl-clang-fast CXX=afl-clang-fast++ ./build_fuzzer.sh
 ```bash
 MONITOR=1 TIME_LIMIT=60 ./run_fuzzer.sh resp
 tail -f artifacts/resp/commands.log
+tail -f artifacts/resp/dragonfly*.INFO
 ```
 
 ### Slow speed
@@ -189,3 +213,4 @@ tail -f artifacts/resp/commands.log
 - **Exec speed**: >5000 exec/sec (IoUring), >2000 (Epoll)
 - **New paths**: Growing
 - **Crashes**: Finding bugs!
+- **Logs**: Clean (no unexpected ERRORs)
