@@ -1120,7 +1120,6 @@ void SearchFamily::FtAlter(CmdArgList args, const CommandContext& cmd_cntx) {
   // Rebuild index
   // TODO: Introduce partial rebuild
   auto upd_cb = [idx_name, index_info](Transaction* tx, EngineShard* es) {
-    // Drop the old index (we don't need the documents)
     (void)es->search_indices()->DropIndex(idx_name);
     es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info);
     return OpStatus::OK;
@@ -1179,7 +1178,6 @@ void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) 
   DCHECK(num_deleted == 0u || num_deleted == shard_set->size());
   if (num_deleted == 0u)
     return cmd_cntx.rb->SendError("-Unknown Index name");
-
   return cmd_cntx.rb->SendOk();
 }
 
