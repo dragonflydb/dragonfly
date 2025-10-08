@@ -1488,9 +1488,17 @@ auto OpFields(const OpArgs& op_args, string_view key, const WrappedJsonPath& jso
 // Returns numeric vector that represents the memory size in bytes of JSON value at each path.
 auto OpMemory(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_path) {
   auto cb = [](const string_view&, const JsonType& val) -> std::optional<std::size_t> {
-    return val.compute_memory_size();
+    auto mem_cb = [](const void* ptr) -> std::size_t {
+      if (!ptr) {
+        return 0;
+      }
+      return mi_usable_size(const_cast<void*>(ptr));
+    };
+    return val.compute_memory_size(mem_cb);
   };
-  return JsonReadOnlyOperation<std::optional<std::size_t>>(op_args, key, json_path, std::move(cb));
+  return JsonReadOnlyOperation<std::optional<std::size_t>>(
+      op_args, key, json_path, std::move(cb),
+      ReadOnlyOperationOptions{false, CallbackResultOptions::DefaultReadOnlyOptions()});
 }
 
 // Returns json vector that represents the result of the json query.
