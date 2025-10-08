@@ -116,6 +116,10 @@ class OAHSet {  // Open Addressing Hash Set
     uint64_t hash = Hash(str);
     const auto bucket_id = BucketId(hash, capacity_log_);
 
+    PREFETCH_READ(entries_[bucket_id].Raw());
+    uint32_t at = EntryTTL(ttl_sec);
+    OAHEntry entry(str, at);
+
     // TODO FindInternal and FindEmptyAround can be one function to get better performance
     if (auto item = FindInternal(bucket_id, str, hash); item != end()) {
       return false;
@@ -124,8 +128,7 @@ class OAHSet {  // Open Addressing Hash Set
     uint32_t bucket = FindEmptyAround(bucket_id);
 
     DCHECK(bucket_id + kDisplacementSize > bucket);
-
-    AddUnique(str, bucket, hash, ttl_sec);
+    AddUnique(std::move(entry), bucket, hash, ttl_sec);
     return true;
   }
 
@@ -145,11 +148,9 @@ class OAHSet {  // Open Addressing Hash Set
     size_ = 0;
   }
 
-  iterator AddUnique(std::string_view str, uint32_t bucket, uint64_t hash,
-                     uint32_t ttl_sec = UINT32_MAX) {
+  iterator AddUnique(OAHEntry&& e, uint32_t bucket, uint64_t hash, uint32_t ttl_sec = UINT32_MAX) {
     ++size_;
-    uint32_t at = EntryTTL(ttl_sec);
-    uint32_t pos = entries_[bucket].Insert(OAHEntry(str, at));
+    uint32_t pos = entries_[bucket].Insert(std::move(e));
     entries_[bucket][pos].SetHash(hash, capacity_log_, kShiftLog);
     return iterator(this, bucket, pos);
   }
@@ -202,7 +203,7 @@ class OAHSet {  // Open Addressing Hash Set
       bool res = false;
       for (uint32_t i = 0; i < displacement_size; i++) {
         const uint32_t shifted_bid = (bucket_id + i) & capacity_mask;
-        res |= entries_[shifted_bid].Scan(cb, bucket_id, capacity_log_, kShiftLog);
+        res |= ScanBucket(entries_[shifted_bid], cb, bucket_id);
       }
       if (res)
         break;
@@ -329,6 +330,29 @@ class OAHSet {  // Open Addressing Hash Set
     }
   }
 
+  template <class T, std::enable_if_t<std::is_invocable_v<T, std::string_view>>* = nullptr>
+  bool ScanBucket(OAHEntry& entry, const T& cb, uint32_t bucket_id) {
+    if (!entry.IsVector()) {
+      entry.ExpireIfNeeded(time_now_, &size_);
+      if (entry.CheckBucketAffiliation(bucket_id, capacity_log_, kShiftLog)) {
+        cb(entry.Key());
+        return true;
+      }
+    } else {
+      auto& arr = entry.AsVector();
+      bool result = false;
+      for (auto& el : arr) {
+        el.ExpireIfNeeded(time_now_, &size_);
+        if (el.CheckBucketAffiliation(bucket_id, capacity_log_, kShiftLog)) {
+          cb(el.Key());
+          result = true;
+        }
+      }
+      return result;
+    }
+    return false;
+  }
+
   uint32_t EntryTTL(uint32_t ttl_sec) const {
     return ttl_sec == UINT32_MAX ? ttl_sec : time_now_ + ttl_sec;
   }
@@ -368,7 +392,7 @@ class OAHSet {  // Open Addressing Hash Set
 
  private:
   static constexpr std::uint32_t kMinCapacityLog = 3;                   // TODO make template
-  static constexpr std::uint32_t kShiftLog = 4;                         // TODO make template
+  static constexpr std::uint32_t kShiftLog = 3;                         // TODO make template
   static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog);  // TODO check
   std::uint32_t capacity_log_ = 0;
   std::uint32_t size_ = 0;  // number of elements in the set.
