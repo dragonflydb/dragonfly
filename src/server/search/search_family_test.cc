@@ -545,6 +545,18 @@ TEST_F(SearchFamilyTest, TagOptions) {
   EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), AreDocIds("d:2", "d:4"));
 }
 
+TEST_F(SearchFamilyTest, SymbolsInTag) {
+  Run({"FT.CREATE", "demo_idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "tags", "TAG"});
+  Run({"HSET", "doc:1", "name", "First Item", "tags", "@first"});
+  Run({"HSET", "doc:2", "name", "Second Item", "tags", "?second"});
+  Run({"HSET", "doc:3", "name", "Third Item", "tags", ":third"});
+  Run({"HSET", "doc:4", "name", "Fourth Item", "tags", "\"fourth"});
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{\?second})"}), AreDocIds("doc:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{\@first})"}), AreDocIds("doc:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{\:third})"}), AreDocIds("doc:3"));
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{\"fourth})"}), AreDocIds("doc:4"));
+}
+
 TEST_F(SearchFamilyTest, TagNumbers) {
   Run({"hset", "d:1", "number", "1"});
   Run({"hset", "d:2", "number", "2"});
