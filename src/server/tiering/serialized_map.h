@@ -11,6 +11,8 @@ struct SerializedMap {
     using iterator_category = std::forward_iterator_tag;
     using difference_type = std::ptrdiff_t;
     using value_type = std::pair<std::string_view, std::string_view>;
+    using reference = value_type;
+    using pointer = value_type*;
 
     Iterator& operator++();
 

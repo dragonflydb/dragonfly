@@ -50,7 +50,7 @@ size_t SerializedMap::size() const {
 
 size_t SerializedMap::SerializeSize(SerializedMap::Input input) {
   size_t out = 4;  // 4 byte number of entries
-  for (const auto [key, value] : input)
+  for (const auto& [key, value] : input)
     out += 8 + key.size() + value.size();  // two 4 byte lengths
   return out;
 }
@@ -61,7 +61,7 @@ size_t SerializedMap::Serialize(Input input, absl::Span<char> buffer) {
   absl::little_endian::Store32(ptr, input.size());
   ptr += 4;
 
-  for (const auto [key, value] : input) {
+  for (const auto& [key, value] : input) {
     absl::little_endian::Store32(ptr, key.length());
     ptr += 4;
     absl::little_endian::Store32(ptr, value.length());
