@@ -1120,7 +1120,8 @@ void SearchFamily::FtAlter(CmdArgList args, const CommandContext& cmd_cntx) {
   // Rebuild index
   // TODO: Introduce partial rebuild
   auto upd_cb = [idx_name, index_info](Transaction* tx, EngineShard* es) {
-    es->search_indices()->DropIndex(idx_name);
+    // Drop the old index (we don't need the documents)
+    (void)es->search_indices()->DropIndex(idx_name);
     es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info);
     return OpStatus::OK;
   };
@@ -1142,31 +1143,26 @@ void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) 
     }
   }
 
-  // Collect document keys (if DD is set), drop index, and delete documents in single transaction
-  vector<vector<string>> shard_doc_keys(delete_docs ? shard_set->size() : 0);
   atomic_uint num_deleted{0};
 
   auto cb = [&](Transaction* t, EngineShard* es) {
-    // Step 1: If DD is set, collect all document keys before dropping the index
-    if (delete_docs) {
-      auto* index = es->search_indices()->GetIndex(idx_name);
-      if (index) {
-        shard_doc_keys[es->shard_id()] = index->GetAllKeys();
-      }
-    }
+    // Drop the index and get its pointer
+    auto index = es->search_indices()->DropIndex(idx_name);
+    if (!index)
+      return OpStatus::OK;
 
-    // Step 2: Drop the index
-    if (es->search_indices()->DropIndex(idx_name))
-      num_deleted.fetch_add(1);
+    num_deleted.fetch_add(1);
 
-    // Step 3: If DD is set, delete all documents that were in the index
+    // If DD is set, delete all documents that were in the index
     if (delete_docs) {
-      const auto& keys = shard_doc_keys[es->shard_id()];
-      if (!keys.empty()) {
+      // Get const reference to document keys map (index will be destroyed after this scope)
+      const auto& doc_keys = index->key_index().GetDocKeysMap();
+
+      if (!doc_keys.empty()) {
         auto op_args = t->GetOpArgs(es);
         auto& db_slice = op_args.GetDbSlice();
 
-        for (const auto& key : keys) {
+        for (const auto& [key, doc_id] : doc_keys) {
           auto it = db_slice.FindMutable(op_args.db_cntx, key).it;
           if (IsValid(it)) {
             db_slice.Del(op_args.db_cntx, it);

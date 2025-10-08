@@ -242,19 +242,6 @@ size_t ShardDocIndex::DocKeyIndex::Size() const {
   return ids_.size();
 }
 
-std::vector<std::string> ShardDocIndex::DocKeyIndex::GetAllKeys() const {
-  std::vector<std::string> keys;
-  keys.reserve(ids_.size());
-
-  for (const auto& [key, id] : ids_) {
-    if (!key.empty()) {
-      keys.push_back(key);
-    }
-  }
-
-  return keys;
-}
-
 uint8_t DocIndex::GetObjCode() const {
   return type == JSON ? OBJ_JSON : OBJ_HASH;
 }
@@ -620,10 +607,6 @@ DocIndexInfo ShardDocIndex::GetInfo() const {
   return {*base_, key_index_.Size()};
 }
 
-std::vector<std::string> ShardDocIndex::GetAllKeys() const {
-  return key_index_.GetAllKeys();
-}
-
 io::Result<StringVec, ErrorReply> ShardDocIndex::GetTagVals(string_view field) const {
   search::BaseIndex* base_index = indices_->GetIndex(field);
   if (base_index == nullptr) {
@@ -662,15 +645,16 @@ void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
       });
 }
 
-bool ShardDocIndices::DropIndex(string_view name) {
+unique_ptr<ShardDocIndex> ShardDocIndices::DropIndex(string_view name) {
   auto it = indices_.find(name);
   if (it == indices_.end())
-    return false;
+    return nullptr;
 
   DropIndexCache(*it->second);
+  auto index = std::move(it->second);
   indices_.erase(it);
 
-  return true;
+  return index;
 }
 
 void ShardDocIndices::DropAllIndices() {
