@@ -1133,14 +1133,7 @@ void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) 
   string_view idx_name = ArgS(args, 0);
 
   // Parse optional DD (Delete Documents) parameter
-  bool delete_docs = false;
-  if (args.size() > 1) {
-    string_view option = ArgS(args, 1);
-    // Only check for DD option, ignore other arguments for compatibility
-    if (absl::EqualsIgnoreCase(option, "DD")) {
-      delete_docs = true;
-    }
-  }
+  bool delete_docs = args.size() > 1 && absl::EqualsIgnoreCase(args[1], "DD");
 
   atomic_uint num_deleted{0};
 
@@ -1157,15 +1150,13 @@ void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) 
       // Get const reference to document keys map (index will be destroyed after this scope)
       const auto& doc_keys = index->key_index().GetDocKeysMap();
 
-      if (!doc_keys.empty()) {
-        auto op_args = t->GetOpArgs(es);
-        auto& db_slice = op_args.GetDbSlice();
+      auto op_args = t->GetOpArgs(es);
+      auto& db_slice = op_args.GetDbSlice();
 
-        for (const auto& [key, doc_id] : doc_keys) {
-          auto it = db_slice.FindMutable(op_args.db_cntx, key).it;
-          if (IsValid(it)) {
-            db_slice.Del(op_args.db_cntx, it);
-          }
+      for (const auto& [key, doc_id] : doc_keys) {
+        auto it = db_slice.FindMutable(op_args.db_cntx, key).it;
+        if (IsValid(it)) {
+          db_slice.Del(op_args.db_cntx, it);
         }
       }
     }
