@@ -17,6 +17,9 @@ extern "C" {
 
 namespace dfly {
 
+#define PREFETCH_READ(x) __builtin_prefetch(x, 0, 1)
+#define FORCE_INLINE __attribute__((always_inline))
+
 static uint64_t Hash(std::string_view str) {
   constexpr XXH64_hash_t kHashSeed = 24061983;
   return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
@@ -103,15 +106,15 @@ class OAHEntry {
     return *this;
   }
 
-  bool Empty() const {
+  FORCE_INLINE bool Empty() const {
     return data_ == nullptr;
   }
 
-  inline operator bool() const {
+  FORCE_INLINE operator bool() const {
     return !Empty();
   }
 
-  bool IsVector() const {
+  FORCE_INLINE bool IsVector() const {
     return (uptr() & kVectorBit) != 0;
   }
 
@@ -124,12 +127,12 @@ class OAHEntry {
     return {GetKeyData(), GetKeySize()};
   }
 
-  bool HasExpiry() const {
+  FORCE_INLINE bool HasExpiry() const {
     return (uptr() & kExpiryBit) != 0;
   }
 
   // returns the expiry time of the current entry or UINT32_MAX if no expiry is set.
-  uint32_t GetExpiry() const {
+  FORCE_INLINE uint32_t GetExpiry() const {
     std::uint32_t res = UINT32_MAX;
     if (HasExpiry()) {
       DCHECK(!IsVector());
@@ -260,7 +263,7 @@ class OAHEntry {
     return std::nullopt;
   }
 
-  void ExpireIfNeeded(uint32_t time_now, uint32_t* set_size) {
+  FORCE_INLINE void ExpireIfNeeded(uint32_t time_now, uint32_t* set_size) {
     DCHECK(!IsVector());
     if (GetExpiry() <= time_now) {
       Clear();
@@ -343,25 +346,8 @@ class OAHEntry {
     return std::move(*this);
   }
 
-  template <class T, std::enable_if_t<std::is_invocable_v<T, std::string_view>>* = nullptr>
-  bool Scan(const T& cb, uint32_t bucket_id, uint32_t capacity_log, uint32_t shift_log) {
-    if (!IsVector()) {
-      if (CheckBucketAffiliation(bucket_id, capacity_log, shift_log)) {
-        cb(Key());
-        return true;
-      }
-    } else {
-      auto& arr = AsVector();
-      bool result = false;
-      for (auto& el : arr) {
-        if (el.CheckBucketAffiliation(bucket_id, capacity_log, shift_log)) {
-          cb(el.Key());
-          result = true;
-        }
-      }
-      return result;
-    }
-    return false;
+  FORCE_INLINE char* Raw() const {
+    return (char*)(uptr() & ~kTagMask);
   }
 
  protected:
@@ -394,12 +380,8 @@ class OAHEntry {
     return size;
   }
 
-  uint64_t uptr() const {
+  FORCE_INLINE uint64_t uptr() const {
     return uint64_t(data_);
-  }
-
-  char* Raw() const {
-    return (char*)(uptr() & ~kTagMask);
   }
 
   void SetExpiryBit(bool b) {
