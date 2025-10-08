@@ -98,6 +98,32 @@ storage:
   # -- Volume size to request for the PVC
   requests: 128Mi
 
+snapshot:
+  # -- enable snapshot
+  enabled: false
+  # -- snapshot cron schedule format (crontab style)
+  schedule: ""
+  # -- snapshot format (default: "df" for Dragonfly, "rdb" is also supported)
+  format: "df"
+  # -- snapshot cleaner
+  cleaner:
+    # -- snapshot cleaner image
+    image: "alpine:3.22"
+    # -- snapshot cleaner interval
+    interval: 30m
+    # -- max snapshots to keep (default: 10)
+    max_count: 10
+    # -- snapshot cleaner resources
+    resources:
+      # -- The requested resources for the cleaner container
+      requests: {}
+      #   cpu: 50m
+      #   memory: 128Mi
+      # -- The resource limits for the cleaner container
+      limits: {}
+      #   cpu: 50m
+      #   memory: 128Mi
+
 tls:
   # -- enable TLS
   enabled: false
