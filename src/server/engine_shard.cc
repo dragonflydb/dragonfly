@@ -749,6 +749,7 @@ size_t EngineShard::CalculateEvictionBytes() {
 
     global_rss_memory_at_prev_eviction = global_used_rss_memory;
 
+    DCHECK(global_used_rss_memory >= deleted_bytes_before_rss_update);
     // If we underflow use limit as used_memory
     size_t used_rss_memory_with_deleted_bytes =
         std::min(global_used_rss_memory - deleted_bytes_before_rss_update * shards_count, limit);
