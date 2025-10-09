@@ -45,7 +45,7 @@ hexdump -C "$CRASH_FILE" | head -20
 echo ""
 
 echo "=== 2. Monitored Commands ==="
-rm -f crash_commands.log crash_dragonfly.{INFO,WARNING,ERROR}
+rm -f crash_commands.log dragonfly.{INFO,WARNING,ERROR}*
 $FUZZ_BIN \
     --fuzzer_monitor=true \
     --fuzzer_monitor_file=crash_commands.log \
@@ -60,13 +60,13 @@ echo ""
 
 echo "=== 3. Dragonfly Logs ==="
 echo "INFO:"
-cat crash_dragonfly.INFO* 2>/dev/null | tail -20 || echo "(no INFO logs)"
+cat dragonfly.INFO* 2>/dev/null | tail -20 || echo "(no INFO logs)"
 echo ""
 echo "WARNING:"
-cat crash_dragonfly.WARNING* 2>/dev/null | tail -20 || echo "(no WARNING logs)"
+cat dragonfly.WARNING* 2>/dev/null | tail -20 || echo "(no WARNING logs)"
 echo ""
 echo "ERROR:"
-cat crash_dragonfly.ERROR* 2>/dev/null | tail -20 || echo "(no ERROR logs)"
+cat dragonfly.ERROR* 2>/dev/null | tail -20 || echo "(no ERROR logs)"
 echo ""
 
 echo "=== 4. GDB Stack Trace ==="

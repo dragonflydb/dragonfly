@@ -56,12 +56,21 @@ configure_build() {
     mkdir -p "$BUILD_DIR"
     cd "$BUILD_DIR"
 
+    # Prefer Ninja if available, otherwise fallback to default generator
+    GEN_FLAG=""
+    if command -v ninja >/dev/null 2>&1; then
+        GEN_FLAG="-GNinja"
+        print_info "Using Ninja generator"
+    else
+        print_info "Ninja not found, using default CMake generator"
+    fi
+
     # Configure with AFL++ compilers
     CC=afl-clang-fast \
     CXX=afl-clang-fast++ \
     cmake \
         -DCMAKE_BUILD_TYPE=Debug \
-        -GNinja \
+        ${GEN_FLAG} \
         -DDFLY_FUZZ=ON \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DWITH_AWS:BOOL=OFF \

@@ -28,6 +28,7 @@ TIME_LIMIT="${TIME_LIMIT:-0}"  # 0 = unlimited
 USE_EPOLL="${USE_EPOLL:-0}"  # 0=IoUring (default), 1=Epoll
 MONITOR="${MONITOR:-0}"  # 0=off, 1=show commands like redis-cli MONITOR
 MONITOR_FILE="${MONITOR_FILE:-$FUZZ_DIR/artifacts/$TARGET/commands.log}"  # Where to write commands
+FLUSH_BETWEEN="${FLUSH_BETWEEN:-0}"  # 0=off, 1=run FLUSHALL after each test case
 
 print_header() {
     echo -e "${GREEN}--------------------------------${NC}"
@@ -115,6 +116,11 @@ show_config() {
     else
         echo "  Monitor:     OFF"
     fi
+    if [ "$FLUSH_BETWEEN" = "1" ]; then
+        echo "  FlushEach:   ON (FLUSHALL between testcases)"
+    else
+        echo "  FlushEach:   OFF"
+    fi
     echo ""
 }
 
@@ -124,13 +130,25 @@ run_fuzzer() {
     echo ""
 
     # Build AFL++ command
+    # Detect resume mode: if an existing AFL++ queue is present, use -i -
+    RESUME=0
+    if [[ -d "$OUTPUT_DIR/queue" ]] || [[ -d "$OUTPUT_DIR/fuzzer01/queue" ]]; then
+        RESUME=1
+    fi
+
     AFL_CMD=(
         afl-fuzz
-        -i "$CORPUS_DIR"
         -o "$OUTPUT_DIR"
         -t "$TIMEOUT"
         -m "$MEM_LIMIT"
     )
+
+    if [[ "$RESUME" -eq 1 ]]; then
+        AFL_CMD+=(-i -)
+        print_info "Resuming from existing output dir → $OUTPUT_DIR"
+    else
+        AFL_CMD+=(-i "$CORPUS_DIR")
+    fi
 
     # Add dictionary if it exists
     if [[ -f "$DICT_FILE" ]]; then
@@ -162,6 +180,12 @@ run_fuzzer() {
     if [[ "$MONITOR" = "1" ]]; then
         AFL_CMD+=(--fuzzer_monitor=true --fuzzer_monitor_file="$MONITOR_FILE")
         print_info "Monitor mode ON → $MONITOR_FILE"
+    fi
+
+    # Enable deterministic per-testcase state by flushing DB
+    if [[ "$FLUSH_BETWEEN" = "1" ]]; then
+        AFL_CMD+=(--fuzzer_flush_all_between_tests=true)
+        print_info "FLUSHALL between testcases enabled"
     fi
 
     # Display command

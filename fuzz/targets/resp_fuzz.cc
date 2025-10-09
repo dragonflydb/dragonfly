@@ -43,6 +43,8 @@ ABSL_DECLARE_FLAG(bool, alsologtostderr);
 ABSL_FLAG(bool, fuzzer_monitor, false, "Log commands like redis-cli MONITOR");
 ABSL_FLAG(std::string, fuzzer_monitor_file, "/tmp/dragonfly_fuzzer_commands.log",
           "File to write monitored commands");
+ABSL_FLAG(bool, fuzzer_flush_all_between_tests, false,
+          "Run FLUSHALL after each test case for reproducibility");
 
 using namespace dfly;
 using namespace facade;
@@ -50,8 +52,8 @@ using namespace util;
 
 namespace {
 
-// Number of virtual connections to simulate
-constexpr size_t kNumVirtualConnections = 4;
+// Number of virtual connections to simulate (configurable)
+ABSL_FLAG(int, fuzzer_vconns, 1, "Number of virtual connections to simulate");
 // File descriptor for monitor output (opened once)
 int g_monitor_fd = -1;
 
@@ -117,8 +119,9 @@ struct FuzzerState {
     service->Init(nullptr, {});  // No network, in-process only
 
     // Create multiple virtual connections to simulate concurrent clients
-    connections.resize(kNumVirtualConnections);
-    for (size_t i = 0; i < kNumVirtualConnections; ++i) {
+    const size_t num_conns = std::max(1, absl::GetFlag(FLAGS_fuzzer_vconns));
+    connections.resize(num_conns);
+    for (size_t i = 0; i < num_conns; ++i) {
       pool->at(i % pool->size())->Await([this, i] {
         connections[i].Initialize(pool->at(i % pool->size()));
       });
@@ -164,17 +167,18 @@ struct FuzzerState {
 
     // Split fuzzer input across multiple virtual connections
     // This simulates concurrent client activity
-    size_t chunk_size = size / kNumVirtualConnections;
+    const size_t num_conns = connections.size();
+    size_t chunk_size = size / num_conns;
     if (chunk_size == 0)
       chunk_size = size;
 
     std::vector<fb2::Fiber> fibers;
-    fibers.reserve(kNumVirtualConnections);
+    fibers.reserve(num_conns);
 
     // Dispatch commands to different connections in parallel
-    for (size_t conn_id = 0; conn_id < kNumVirtualConnections; ++conn_id) {
+    for (size_t conn_id = 0; conn_id < num_conns; ++conn_id) {
       size_t start = conn_id * chunk_size;
-      size_t end = (conn_id == kNumVirtualConnections - 1) ? size : (conn_id + 1) * chunk_size;
+      size_t end = (conn_id == num_conns - 1) ? size : (conn_id + 1) * chunk_size;
 
       if (start >= size)
         break;
@@ -188,6 +192,19 @@ struct FuzzerState {
     // Wait for all connections to finish processing
     for (auto& fiber : fibers) {
       fiber.Join();
+    }
+
+    // Optionally reset DB state to improve reproducibility of crashes
+    if (absl::GetFlag(FLAGS_fuzzer_flush_all_between_tests)) {
+      // Execute FLUSHALL on a control fiber to ensure all shards are flushed
+      auto* any_conn = connections.empty() ? nullptr : &connections[0];
+      if (any_conn && any_conn->context) {
+        CmdArgVec flush_args;
+        flush_args.emplace_back("FLUSHALL");
+        service->DispatchCommand(CmdArgList{flush_args}, any_conn->builder.get(),
+                                 any_conn->context);
+        any_conn->context->transaction = nullptr;
+      }
     }
   }
 
