@@ -2,13 +2,6 @@
 // See LICENSE for licensing terms.
 //
 
-// AFL++ Fuzzing harness for RESP protocol with multiple virtual connections
-// This harness initializes a full Dragonfly service in-process with IoUring
-// and simulates multiple concurrent client connections.
-//
-// Input format: Fuzzer input is split into chunks, each chunk represents
-// commands from a virtual connection. This tests concurrent command execution.
-
 #include <fcntl.h>   // for open()
 #include <unistd.h>  // for write()
 
@@ -34,17 +27,13 @@ extern "C" {
 #include "server/test_utils.h"
 #include "util/fibers/pool.h"
 
-ABSL_DECLARE_FLAG(bool, force_epoll);
 ABSL_DECLARE_FLAG(std::string, dbfilename);
 ABSL_DECLARE_FLAG(std::string, dir);
-ABSL_DECLARE_FLAG(std::string, log_dir);
-ABSL_DECLARE_FLAG(bool, alsologtostderr);
 
-ABSL_FLAG(bool, fuzzer_monitor, false, "Log commands like redis-cli MONITOR");
-ABSL_FLAG(std::string, fuzzer_monitor_file, "/tmp/dragonfly_fuzzer_commands.log",
-          "File to write monitored commands");
-ABSL_FLAG(bool, fuzzer_flush_all_between_tests, false,
-          "Run FLUSHALL after each test case for reproducibility");
+// Simplified constants (no runtime flags)
+static constexpr bool kFlushBetweenTests = true;
+static constexpr const char* kMonitorFile = "crash_commands.log";  // in current dir
+static constexpr size_t kNumVirtualConnections = 1;                // single connection
 
 using namespace dfly;
 using namespace facade;
@@ -52,8 +41,7 @@ using namespace util;
 
 namespace {
 
-// Number of virtual connections to simulate (configurable)
-ABSL_FLAG(int, fuzzer_vconns, 1, "Number of virtual connections to simulate");
+// Single virtual connection (deterministic)
 // File descriptor for monitor output (opened once)
 int g_monitor_fd = -1;
 
@@ -97,16 +85,11 @@ struct FuzzerState {
     // Initialize mimalloc
     init_zmalloc_threadlocal(mi_heap_get_backing());
 
-    // Create fiber pool - use IoUring on Linux (default), Epoll elsewhere
-    // This matches production behavior
+    // Deterministic single-threaded pool: IOUring on Linux, Epoll elsewhere
 #ifdef __linux__
-    if (absl::GetFlag(FLAGS_force_epoll)) {
-      pool.reset(fb2::Pool::Epoll(4));  // 4 threads for realistic load
-    } else {
-      pool.reset(fb2::Pool::IOUring(16, 4));  // IoUring with 4 threads
-    }
+    pool.reset(fb2::Pool::IOUring(16, 1));
 #else
-    pool.reset(fb2::Pool::Epoll(4));
+    pool.reset(fb2::Pool::Epoll(1));
 #endif
     pool->Run();
 
@@ -118,8 +101,8 @@ struct FuzzerState {
     service = std::make_unique<Service>(pool.get());
     service->Init(nullptr, {});  // No network, in-process only
 
-    // Create multiple virtual connections to simulate concurrent clients
-    const size_t num_conns = std::max(1, absl::GetFlag(FLAGS_fuzzer_vconns));
+    // Single virtual connection for determinism
+    const size_t num_conns = kNumVirtualConnections;
     connections.resize(num_conns);
     for (size_t i = 0; i < num_conns; ++i) {
       pool->at(i % pool->size())->Await([this, i] {
@@ -129,35 +112,17 @@ struct FuzzerState {
 
     initialized = true;
 
-    // Redirect Dragonfly logs to file next to commands.log
-    if (absl::GetFlag(FLAGS_fuzzer_monitor)) {
-      std::string log_file = absl::GetFlag(FLAGS_fuzzer_monitor_file);
+    // Configure logging into files in current directory
+    std::string log_prefix = std::string("./") + "dragonfly";
+    google::SetLogDestination(google::INFO, (log_prefix + ".INFO.").c_str());
+    google::SetLogDestination(google::WARNING, (log_prefix + ".WARNING.").c_str());
+    google::SetLogDestination(google::ERROR, (log_prefix + ".ERROR.").c_str());
 
-      // Set log directory to same location as monitor file
-      size_t last_slash = log_file.rfind('/');
-      std::string log_dir =
-          (last_slash != std::string::npos) ? log_file.substr(0, last_slash) : ".";
-
-      // Configure logging: INFO, WARNING, ERROR to file
-      absl::SetFlag(&FLAGS_minloglevel, 0);  // Show INFO and above
-      absl::SetFlag(&FLAGS_alsologtostderr, true);
-
-      // Set log file destinations (glog needs this set explicitly)
-      std::string log_prefix = log_dir + "/dragonfly";
-      google::SetLogDestination(google::INFO, (log_prefix + ".INFO.").c_str());
-      google::SetLogDestination(google::WARNING, (log_prefix + ".WARNING.").c_str());
-      google::SetLogDestination(google::ERROR, (log_prefix + ".ERROR.").c_str());
-
-      // Open monitor file for commands
-      g_monitor_fd = open(log_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-      if (g_monitor_fd >= 0) {
-        const char* header = "=== Fuzzer Monitor Started (Persistent Mode) ===\n";
-        write(g_monitor_fd, header, strlen(header));
-      }
-    } else {
-      // No monitor - suppress logs for performance
-      absl::SetFlag(&FLAGS_minloglevel, 2);  // ERROR only
-      absl::SetFlag(&FLAGS_alsologtostderr, false);
+    // Open monitor file for commands (always on)
+    g_monitor_fd = open(kMonitorFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (g_monitor_fd >= 0) {
+      const char* header = "=== Fuzzer Monitor Started (Persistent Mode) ===\n";
+      write(g_monitor_fd, header, strlen(header));
     }
   }
 
@@ -165,8 +130,7 @@ struct FuzzerState {
     if (!initialized || size == 0)
       return;
 
-    // Split fuzzer input across multiple virtual connections
-    // This simulates concurrent client activity
+    // Single connection: process as a single chunk
     const size_t num_conns = connections.size();
     size_t chunk_size = size / num_conns;
     if (chunk_size == 0)
@@ -194,17 +158,13 @@ struct FuzzerState {
       fiber.Join();
     }
 
-    // Optionally reset DB state to improve reproducibility of crashes
-    if (absl::GetFlag(FLAGS_fuzzer_flush_all_between_tests)) {
-      // Execute FLUSHALL on a control fiber to ensure all shards are flushed
-      auto* any_conn = connections.empty() ? nullptr : &connections[0];
-      if (any_conn && any_conn->context) {
-        CmdArgVec flush_args;
-        flush_args.emplace_back("FLUSHALL");
-        service->DispatchCommand(CmdArgList{flush_args}, any_conn->builder.get(),
-                                 any_conn->context);
-        any_conn->context->transaction = nullptr;
-      }
+    // Always reset DB state for reproducibility
+    auto* any_conn = connections.empty() ? nullptr : &connections[0];
+    if (any_conn && any_conn->context) {
+      CmdArgVec flush_args;
+      flush_args.emplace_back("FLUSHALL");
+      service->DispatchCommand(CmdArgList{flush_args}, any_conn->builder.get(), any_conn->context);
+      any_conn->context->transaction = nullptr;
     }
   }
 
