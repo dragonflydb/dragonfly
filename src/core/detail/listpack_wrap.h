@@ -15,12 +15,14 @@ struct ListpackWrap {
     using iterator_category = std::forward_iterator_tag;
     using difference_type = std::ptrdiff_t;
     using value_type = std::pair<std::string_view, std::string_view>;
+    using reference = value_type;
+    using pointer = value_type*;
 
     Iterator(uint8_t* lp, uint8_t* ptr);
-    Iterator(const Iterator&) = delete;  // self-referential with intbuf
-    Iterator(Iterator&&) = delete;       // self-referential with intbuf
-    Iterator& operator=(Iterator&&) = delete;
-    Iterator& operator=(const Iterator&) = delete;
+    // Iterator(const Iterator&) = delete;  // self-referential with intbuf
+    // Iterator(Iterator&&) = delete;       // self-referential with intbuf
+    // Iterator& operator=(Iterator&&) = delete;
+    // Iterator& operator=(const Iterator&) = delete;
 
     Iterator& operator++();
 
