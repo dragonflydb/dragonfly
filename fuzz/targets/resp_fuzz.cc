@@ -31,7 +31,6 @@ ABSL_DECLARE_FLAG(std::string, dbfilename);
 ABSL_DECLARE_FLAG(std::string, dir);
 
 // Simplified constants (no runtime flags)
-static constexpr bool kFlushBetweenTests = true;
 static constexpr const char* kMonitorFile = "crash_commands.log";  // in current dir
 static constexpr size_t kNumVirtualConnections = 1;                // single connection
 
@@ -156,15 +155,6 @@ struct FuzzerState {
     // Wait for all connections to finish processing
     for (auto& fiber : fibers) {
       fiber.Join();
-    }
-
-    // Always reset DB state for reproducibility
-    auto* any_conn = connections.empty() ? nullptr : &connections[0];
-    if (any_conn && any_conn->context) {
-      CmdArgVec flush_args;
-      flush_args.emplace_back("FLUSHALL");
-      service->DispatchCommand(CmdArgList{flush_args}, any_conn->builder.get(), any_conn->context);
-      any_conn->context->transaction = nullptr;
     }
   }
 

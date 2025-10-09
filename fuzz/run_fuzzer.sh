@@ -23,6 +23,7 @@ TIMEOUT="1000"    # milliseconds (constant)
 MEM_LIMIT="2048"  # MB (constant)
 JOBS="1"          # single instance for determinism
 TIME_LIMIT="0"    # 0 = unlimited (constant)
+FUZZ_TARGET="$BUILD_DIR/fuzz/${TARGET}_fuzz"
 
 print_warning() {
     echo -e "${YELLOW}WARNING: $1${NC}"
