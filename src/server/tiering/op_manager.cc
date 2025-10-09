@@ -58,10 +58,11 @@ void OpManager::Close() {
   DCHECK(pending_reads_.empty());
 }
 
-void OpManager::Enqueue(EntryId id, DiskSegment segment, ReadCallback cb) {
+void OpManager::EnqueueInternal(EntryId id, DiskSegment segment, const Decoder& decoder,
+                                ReadCallback cb) {
   // Fill pages for prepared read as it has no penalty and potentially covers more small segments
   PrepareRead(segment.ContainingPages())
-      .ForSegment(segment, id)
+      .ForSegment(segment, id, decoder)
       .callbacks.emplace_back(std::move(cb));
 }
 
@@ -147,16 +148,15 @@ void OpManager::ProcessRead(size_t offset, io::Result<std::string_view> page) {
   }
 
   bool deleting_full = false;
-  std::string key_value;
 
   // Notify functions in the loop may append items to info->key_ops during the traversal
   for (size_t i = 0; i < info->key_ops.size(); i++) {
-    bool modified = false;
     auto& ko = info->key_ops[i];
     if (page) {
-      key_value = page->substr(ko.segment.offset - info->segment.offset, ko.segment.length);
+      size_t offset = ko.segment.offset - info->segment.offset;
+      ko.decoder->Initialize(page->substr(offset, ko.segment.length));
       for (auto& cb : ko.callbacks)
-        modified |= cb(std::pair{&key_value, !modified});
+        cb(&*ko.decoder);
     } else {
       for (auto& cb : ko.callbacks)
         cb(page.get_unexpected());
@@ -167,7 +167,7 @@ void OpManager::ProcessRead(size_t offset, io::Result<std::string_view> page) {
     // If the item is not being deleted, report is as fetched to be cached potentially.
     // In case it's cached, we might need to delete it.
     if (page.has_value() && !delete_from_storage)
-      delete_from_storage |= NotifyFetched(Borrowed(ko.id), key_value, ko.segment, modified);
+      delete_from_storage |= NotifyFetched(Borrowed(ko.id), ko.segment, &*ko.decoder);
 
     // If the item is being deleted, check if the full page needs to be deleted.
     if (delete_from_storage)
@@ -181,15 +181,22 @@ void OpManager::ProcessRead(size_t offset, io::Result<std::string_view> page) {
   pending_reads_.erase(offset);
 }
 
-OpManager::EntryOps& OpManager::ReadOp::ForSegment(DiskSegment key_segment, EntryId id) {
+OpManager::EntryOps::EntryOps(OwnedEntryId id, DiskSegment segment, const Decoder& decoder)
+    : id{std::move(id)}, segment{segment}, decoder{decoder.Clone()} {
+}
+
+OpManager::EntryOps& OpManager::ReadOp::ForSegment(DiskSegment key_segment, EntryId id,
+                                                   const Decoder& decoder) {
   DCHECK_GE(key_segment.offset, segment.offset);
   DCHECK_LE(key_segment.length, segment.length);
 
   for (auto& ops : key_ops) {
-    if (ops.segment.offset == key_segment.offset)
+    if (ops.segment.offset == key_segment.offset) {
+      DCHECK(typeid(*ops.decoder) == typeid(decoder));
       return ops;
+    }
   }
-  return key_ops.emplace_back(ToOwned(id), key_segment);
+  return key_ops.emplace_back(ToOwned(id), key_segment, decoder);
 }
 
 OpManager::EntryOps* OpManager::ReadOp::Find(DiskSegment key_segment) {
