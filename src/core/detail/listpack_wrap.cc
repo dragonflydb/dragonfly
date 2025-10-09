@@ -11,46 +11,47 @@ extern "C" {
 
 namespace dfly::detail {
 
-ListpackWrap::Iterator::Iterator(uint8_t* lp, uint8_t* ptr) : lp{lp}, ptr{ptr}, next_ptr{nullptr} {
-  static_assert(sizeof(intbuf[0]) >= LP_INTBUF_SIZE);  // to avoid header dependency
+ListpackWrap::Iterator::Iterator(uint8_t* lp, uint8_t* ptr)
+    : lp_{lp}, ptr_{ptr}, next_ptr_{nullptr} {
+  static_assert(sizeof(intbuf_[0]) >= LP_INTBUF_SIZE);  // to avoid header dependency
   Read();
 }
 
 ListpackWrap::Iterator& ListpackWrap::Iterator::operator++() {
-  ptr = next_ptr;
+  ptr_ = next_ptr_;
   Read();
   return *this;
 }
 
 void ListpackWrap::Iterator::Read() {
-  if (!ptr)
+  if (!ptr_)
     return;
 
   using container_utils::LpGetView;
-  key_v = LpGetView(ptr, intbuf[0]);
-  next_ptr = lpNext(lp, ptr);
-  value_v = LpGetView(next_ptr, intbuf[1]);
-  next_ptr = lpNext(lp, next_ptr);
+  key_v_ = LpGetView(ptr_, intbuf_[0]);
+  next_ptr_ = lpNext(lp_, ptr_);
+  value_v_ = LpGetView(next_ptr_, intbuf_[1]);
+  next_ptr_ = lpNext(lp_, next_ptr_);
 }
 
 ListpackWrap::Iterator ListpackWrap::Find(std::string_view key) const {
-  uint8_t* ptr = lpFind(lp, lpFirst(lp), (unsigned char*)key.data(), key.size(), 1);
-  return Iterator{lp, ptr};
+  uint8_t* ptr = lpFind(lp_, lpFirst(lp_), (unsigned char*)key.data(), key.size(), 1);
+  return Iterator{lp_, ptr};
 }
 
 size_t ListpackWrap::size() const {
-  return lpLength(lp) / 2;
+  return lpLength(lp_) / 2;
 }
 
 ListpackWrap::Iterator ListpackWrap::begin() const {
-  return Iterator{lp, lpFirst(lp)};
+  return Iterator{lp_, lpFirst(lp_)};
 }
 
 ListpackWrap::Iterator ListpackWrap::end() const {
-  return Iterator{lp, nullptr};
+  return Iterator{lp_, nullptr};
 }
 
 bool ListpackWrap::Iterator::operator==(const Iterator& other) const {
-  return lp == other.lp && ptr == other.ptr;
+  return lp_ == other.lp_ && ptr_ == other.ptr_;
 }
 }  // namespace dfly::detail

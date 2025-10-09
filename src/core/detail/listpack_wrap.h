@@ -25,7 +25,7 @@ struct ListpackWrap {
     Iterator& operator++();
 
     value_type operator*() const {
-      return {key_v, value_v};
+      return {key_v_, value_v_};
     }
 
     bool operator==(const Iterator& other) const;
@@ -37,12 +37,12 @@ struct ListpackWrap {
    private:
     void Read();  // Read next entry at ptr and determine next_ptr
 
-    uint8_t *lp = nullptr, *ptr = nullptr, *next_ptr = nullptr;
-    std::string_view key_v, value_v;
-    uint8_t intbuf[2][24];
+    uint8_t *lp_ = nullptr, *ptr_ = nullptr, *next_ptr_ = nullptr;
+    std::string_view key_v_, value_v_;
+    uint8_t intbuf_[2][24];
   };
 
-  explicit ListpackWrap(uint8_t* lp) : lp{lp} {
+  explicit ListpackWrap(uint8_t* lp) : lp_{lp} {
   }
 
   Iterator Find(std::string_view key) const;  // Linear search
@@ -51,7 +51,7 @@ struct ListpackWrap {
   size_t size() const;  // number of entries
 
  private:
-  uint8_t* lp;
+  uint8_t* lp_;
 };
 
 }  // namespace dfly::detail
