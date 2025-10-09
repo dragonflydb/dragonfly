@@ -285,9 +285,12 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
   auto& db_slice = op_args.GetDbSlice();
 
   // we avoid using AddOrFind because of skip_on_missing option for memcache.
-  auto res = db_slice.FindMutable(op_args.db_cntx, key);
+  auto res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING);
 
-  if (!IsValid(res.it)) {
+  if (!res) {
+    if (res.status() == OpStatus::WRONG_TYPE)
+      return res.status();
+
     if (skip_on_missing)
       return OpStatus::KEY_NOTFOUND;
 
@@ -300,11 +303,8 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
     return incr;
   }
 
-  if (res.it->second.ObjType() != OBJ_STRING) {
-    return OpStatus::WRONG_TYPE;
-  }
-
-  auto opt_prev = res.it->second.TryGetInt();
+  // Type is already checked by FindMutable (OBJ_STRING)
+  auto opt_prev = res->it->second.TryGetInt();
   if (!opt_prev) {
     return OpStatus::INVALID_VALUE;
   }
@@ -316,8 +316,8 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
   }
 
   int64_t new_val = prev + incr;
-  DCHECK(!res.it->second.IsExternal());
-  res.it->second.SetInt(new_val);
+  DCHECK(!res->it->second.IsExternal());
+  res->it->second.SetInt(new_val);
 
   return new_val;
 }
@@ -383,20 +383,19 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   // Cost of this request
   const int64_t increment_ns = emission_interval_ns * quantity;  // should be nonnegative
 
-  auto res = db_slice.FindMutable(op_args.db_cntx, key);
+  auto res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING);
   const int64_t now_ns = GetCurrentTimeNs();
 
   int64_t tat_ns = now_ns;
-  if (IsValid(res.it)) {
-    if (res.it->second.ObjType() != OBJ_STRING) {
-      return OpStatus::WRONG_TYPE;
-    }
-
-    auto opt_prev = res.it->second.TryGetInt();
+  if (res) {
+    // Type is already checked by FindMutable (OBJ_STRING)
+    auto opt_prev = res->it->second.TryGetInt();
     if (!opt_prev) {
       return OpStatus::INVALID_VALUE;
     }
     tat_ns = *opt_prev;
+  } else if (res.status() == OpStatus::WRONG_TYPE) {
+    return res.status();
   }
 
   int64_t new_tat_ns = max(tat_ns, now_ns);
@@ -458,14 +457,14 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
     // break behavior because the tat_ns value will be used to check for throttling.
     const int64_t new_tat_ms =
         (new_tat_ns + kMilliSecondToNanoSecond - 1) / kMilliSecondToNanoSecond;
-    if (IsValid(res.it)) {
-      if (IsValid(res.exp_it)) {
-        res.exp_it->second = db_slice.FromAbsoluteTime(new_tat_ms);
+    if (res) {
+      if (IsValid(res->exp_it)) {
+        res->exp_it->second = db_slice.FromAbsoluteTime(new_tat_ms);
       } else {
-        db_slice.AddExpire(op_args.db_cntx.db_index, res.it, new_tat_ms);
+        db_slice.AddExpire(op_args.db_cntx.db_index, res->it, new_tat_ms);
       }
 
-      res.it->second.SetInt(new_tat_ns);
+      res->it->second.SetInt(new_tat_ns);
     } else {
       CompactObj cobj;
       cobj.SetInt(new_tat_ns);
@@ -1150,8 +1149,7 @@ void StringFamily::GetDel(CmdArgList args, const CommandContext& cmnd_cntx) {
       return it_res.status();
 
     auto value = ReadString(tx->GetDbIndex(), key, it_res->it->second, es);
-    it_res->post_updater.Run();  // Run manually before delete
-    db_slice.Del(tx->GetDbContext(), it_res->it);
+    db_slice.DelMutable(tx->GetDbContext(), std::move(*it_res));
     return value;
   };
 
