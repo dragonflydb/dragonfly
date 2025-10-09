@@ -103,6 +103,9 @@ run_fuzzer() {
     print_info "Running: ${AFL_CMD[*]}"
     echo ""
 
+    # Ensure logs (dragonfly.* and crash_commands.log) go into artifacts dir
+    cd "$OUTPUT_DIR"
+
     # Execute fuzzer
     exec "${AFL_CMD[@]}"
 }

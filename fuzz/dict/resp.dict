@@ -7,7 +7,7 @@
 "+"
 "-"
 ":"
-"\r\n"
+"\x0d\x0a"
 
 # Common commands - String operations
 "GET"
@@ -193,8 +193,8 @@
 "BLOCK"
 
 # Common RESP command patterns
-"*1\r\n$4\r\nPING\r\n"
-"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n"
-"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n"
-"*2\r\n$3\r\nDEL\r\n$3\r\nkey\r\n"
-"*2\r\n$6\r\nEXISTS\r\n$3\r\nkey\r\n"
+"*1\x0d\x0a$4\x0d\x0aPING\x0d\x0a"
+"*2\x0d\x0a$3\x0d\x0aGET\x0d\x0a$3\x0d\x0akey\x0d\x0a"
+"*3\x0d\x0a$3\x0d\x0aSET\x0d\x0a$3\x0d\x0akey\x0d\x0a$5\x0d\x0avalue\x0d\x0a"
+"*2\x0d\x0a$3\x0d\x0aDEL\x0d\x0a$3\x0d\x0akey\x0d\x0a"
+"*2\x0d\x0a$6\x0d\x0aEXISTS\x0d\x0a$3\x0d\x0akey\x0d\x0a"
