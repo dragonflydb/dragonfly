@@ -110,6 +110,7 @@ ProtocolClient::ProtocolClient(string host, uint16_t port) {
   MaybeInitSslCtx();
 #endif
 }
+
 ProtocolClient::ProtocolClient(ServerContext context) : server_context_(std::move(context)) {
 #ifdef DFLY_USE_SSL
   MaybeInitSslCtx();
@@ -119,13 +120,6 @@ ProtocolClient::ProtocolClient(ServerContext context) : server_context_(std::mov
 ProtocolClient::~ProtocolClient() {
   exec_st_.JoinErrorHandler();
 
-  // FIXME: We should close the socket explictly outside of the destructor. This currently
-  // breaks test_cancel_replication_immediately.
-  if (sock_) {
-    std::error_code ec;
-    sock_->proactor()->Await([this, &ec]() { ec = sock_->Close(); });
-    LOG_IF(ERROR, ec) << "Error closing socket " << ec;
-  }
 #ifdef DFLY_USE_SSL
   if (ssl_ctx_) {
     SSL_CTX_free(ssl_ctx_);
@@ -163,6 +157,7 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
                                           ExecutionState* cntx) {
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
+  socket_thread_ = ProactorBase::me();
   {
     unique_lock lk(sock_mu_);
     // The context closes sock_. So if the context error handler has already
@@ -235,6 +230,9 @@ void ProtocolClient::CloseSocket() {
         auto ec = sock_->Shutdown(SHUT_RDWR);
         LOG_IF(ERROR, ec) << "Could not shutdown socket " << ec;
       }
+      auto ec = sock_->Close();  // Quietly close.
+
+      LOG_IF(WARNING, ec) << "Error closing socket " << ec << "/" << ec.message();
     });
   }
 }
@@ -385,11 +383,11 @@ void ProtocolClient::ResetParser(RedisParser::Mode mode) {
 }
 
 uint64_t ProtocolClient::LastIoTime() const {
-  return last_io_time_;
+  return last_io_time_.load(std::memory_order_relaxed);
 }
 
 void ProtocolClient::TouchIoTime() {
-  last_io_time_ = Proactor()->GetMonotonicTimeNs();
+  last_io_time_.store(Proactor()->GetMonotonicTimeNs(), std::memory_order_relaxed);
 }
 
 }  // namespace dfly
