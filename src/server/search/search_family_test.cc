@@ -3440,4 +3440,65 @@ TEST_F(SearchFamilyTest, DropIndexWithInvalidOption) {
   Run({"DEL", "doc:1"});
 }
 
+// Test that ZINTERSTORE properly handles indexed HASH keys
+// This test verifies the fix for issue #5014
+TEST_F(SearchFamilyTest, ZinterstoreOverwritesIndexedHash) {
+  // Create an index on HASH documents
+  Run({"FT.CREATE", "myindex", "ON", "HASH", "SCHEMA", "field", "TEXT"});
+
+  // Create a HASH document that will be indexed
+  EXPECT_THAT(Run({"HSET", "destination", "field", "value"}), IntArg(1));
+
+  // Verify the document is in the index
+  auto resp = Run({"FT.SEARCH", "myindex", "*"});
+  EXPECT_THAT(resp, AreDocIds("destination"));
+
+  // Create two non-empty sorted sets for ZINTERSTORE
+  EXPECT_THAT(Run({"ZADD", "set1", "1", "member1", "2", "member2"}), IntArg(2));
+  EXPECT_THAT(Run({"ZADD", "set2", "1.5", "member1", "2.5", "member2"}), IntArg(2));
+
+  // ZINTERSTORE should overwrite the HASH key with a ZSET
+  // This should remove the old HASH document from the index
+  EXPECT_THAT(Run({"ZINTERSTORE", "destination", "2", "set1", "set2"}), IntArg(2));
+
+  // Verify the document is no longer in the index (it's now a ZSET, not HASH)
+  resp = Run({"FT.SEARCH", "myindex", "*"});
+  EXPECT_THAT(resp, kNoResults);
+
+  // The critical test: RENAME should NOT crash
+  // Before the fix, this would crash because the key wasn't properly removed from the index
+  EXPECT_EQ(Run({"RENAME", "destination", "anotherkey"}), "OK");
+
+  // Create a new HASH document with the old name to verify index still works
+  EXPECT_THAT(Run({"HSET", "destination", "field", "newvalue"}), IntArg(1));
+
+  // Verify the new document is properly indexed
+  resp = Run({"FT.SEARCH", "myindex", "*"});
+  EXPECT_THAT(resp, AreDocIds("destination"));
+}
+
+// Test ZUNIONSTORE with indexed keys
+TEST_F(SearchFamilyTest, ZunionstoreOverwritesIndexedHash) {
+  // Create an index on HASH documents
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "field", "TEXT"});
+
+  // Create a HASH document
+  EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
+
+  // Create sorted sets
+  EXPECT_THAT(Run({"ZADD", "zset1", "1", "a", "2", "b"}), IntArg(2));
+  EXPECT_THAT(Run({"ZADD", "zset2", "3", "c", "4", "d"}), IntArg(2));
+
+  // ZUNIONSTORE overwrites the HASH
+  EXPECT_THAT(Run({"ZUNIONSTORE", "dest", "2", "zset1", "zset2"}), IntArg(4));
+
+  // This should NOT crash
+  EXPECT_EQ(Run({"RENAME", "dest", "dest2"}), "OK");
+
+  // Verify we can create new indexed document
+  EXPECT_THAT(Run({"HSET", "dest", "field", "value2"}), IntArg(1));
+  auto resp = Run({"FT.SEARCH", "idx", "*"});
+  EXPECT_THAT(resp, AreDocIds("dest"));
+}
+
 }  // namespace dfly
