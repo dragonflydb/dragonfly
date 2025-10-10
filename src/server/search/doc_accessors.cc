@@ -3,6 +3,7 @@
 //
 
 // GCC yields a spurious warning about uninitialized data in DocumentAccessor::StringList.
+
 #ifndef __clang__
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
@@ -14,6 +15,7 @@
 #include <absl/strings/str_join.h>
 
 #include "base/flags.h"
+#include "core/detail/listpack_wrap.h"
 #include "core/json/path.h"
 #include "core/overloaded.h"
 #include "core/search/search.h"
@@ -155,22 +157,12 @@ std::optional<BaseAccessor::StringList> ListPackAccessor::GetStrings(
 
 SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
   SearchDocData out{};
-
-  uint8_t* fptr = lpFirst(lp_);
-  DCHECK_NE(fptr, nullptr);
-
-  while (fptr) {
-    string_view k = container_utils::LpGetView(fptr, intbuf_[0].data());
-    fptr = lpNext(lp_, fptr);
-    string_view v = container_utils::LpGetView(fptr, intbuf_[1].data());
-    fptr = lpNext(lp_, fptr);
-
-    auto field_value = ExtractSortableValue(schema, k, v);
-    if (field_value) {
-      out[k] = std::move(field_value).value();
+  detail::ListpackWrap lw{lp_};
+  for (const auto [key, value] : lw) {
+    if (auto field_value = ExtractSortableValue(schema, key, value); field_value) {
+      out[key] = std::move(field_value).value();
     }
   }
-
   return out;
 }
 

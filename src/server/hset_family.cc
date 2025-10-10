@@ -14,6 +14,7 @@ extern "C" {
 }
 
 #include "base/logging.h"
+#include "core/detail/listpack_wrap.h"
 #include "core/string_map.h"
 #include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
@@ -51,7 +52,6 @@ bool IsGoodForListpack(CmdArgList args, const uint8_t* lp) {
 
 using container_utils::GetStringMap;
 using container_utils::LpFind;
-using container_utils::LpGetView;
 
 pair<uint8_t*, bool> LpDelete(uint8_t* lp, string_view field) {
   uint8_t* fptr = lpFirst(lp);
@@ -115,17 +115,6 @@ size_t EstimateListpackMinBytes(CmdArgList members) {
     bytes += (member.size() + 1);  // string + at least 1 byte for string header.
   }
   return bytes;
-}
-
-size_t HMapLength(const DbContext& db_cntx, const CompactObj& co) {
-  void* ptr = co.RObjPtr();
-  if (co.Encoding() == kEncodingStrMap2) {
-    StringMap* sm = GetStringMap(co, db_cntx);
-    return sm->UpperBoundSize();
-  }
-
-  DCHECK_EQ(kEncodingListPack, co.Encoding());
-  return lpLength((uint8_t*)ptr) / 2;
 }
 
 OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
@@ -339,26 +328,14 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
   const PrimeValue& pv = it->second;
 
   if (pv.Encoding() == kEncodingListPack) {
-    uint8_t* lp = (uint8_t*)pv.RObjPtr();
-    uint8_t* lp_elem = lpFirst(lp);
-
-    DCHECK(lp_elem);  // empty containers are not allowed.
-
-    uint8_t intbuf[LP_INTBUF_SIZE];
-
-    // We do single pass on listpack for this operation - ignore any limits.
-    do {
-      string_view key = LpGetView(lp_elem, intbuf);
-      lp_elem = lpNext(lp, lp_elem);  // switch to value
-      DCHECK(lp_elem);
-
+    // TODO: Optimize unnecessary value reads from iterator
+    detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
+    for (const auto [key, value] : lw) {
       if (scan_op.Matches(key)) {
         res.emplace_back(key);
-        res.emplace_back(LpGetView(lp_elem, intbuf));
+        res.emplace_back(value);
       }
-      lp_elem = lpNext(lp, lp_elem);  // switch to next key
-    } while (lp_elem);
-
+    }
     *cursor = 0;
   } else {
     DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
@@ -459,39 +436,21 @@ OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, Cm
   std::vector<OptStr> result(fields.size());
 
   if (pv.Encoding() == kEncodingListPack) {
-    uint8_t* lp = (uint8_t*)pv.RObjPtr();
-
     absl::flat_hash_map<string_view, absl::InlinedVector<size_t, 3>> reverse;
     reverse.reserve(fields.size() + 1);
     for (size_t i = 0; i < fields.size(); ++i) {
       reverse[ArgS(fields, i)].push_back(i);  // map fields to their index.
     }
 
-    size_t lplen = lpLength(lp);
-    DCHECK(lplen > 0 && lplen % 2 == 0);
-
-    uint8_t ibuf[32];
-    string_view key;
-
-    uint8_t* lp_elem = lpFirst(lp);
-    DCHECK(lp_elem);  // empty containers are not allowed.
-
-    // We do single pass on listpack for this operation.
-    do {
-      key = LpGetView(lp_elem, ibuf);
-      lp_elem = lpNext(lp, lp_elem);  // switch to value
-      DCHECK(lp_elem);
-
-      auto it = reverse.find(key);
-      if (it != reverse.end()) {
+    detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
+    for (const auto [key, value] : lw) {
+      if (auto it = reverse.find(key); it != reverse.end()) {
         for (size_t index : it->second) {
           DCHECK_LT(index, result.size());
-          result[index].emplace(LpGetView(lp_elem, ibuf));  // populate found items.
+          result[index].emplace(value);
         }
       }
-
-      lp_elem = lpNext(lp, lp_elem);  // switch to the next key
-    } while (lp_elem);
+    }
   } else {
     DCHECK_EQ(kEncodingStrMap2, pv.Encoding());
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
@@ -510,7 +469,15 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
   RETURN_ON_BAD_STATUS(it_res);
-  return HMapLength(op_args.db_cntx, (*it_res)->second);
+
+  const auto& co = (*it_res)->second;
+  if (co.Encoding() == kEncodingStrMap2) {
+    StringMap* sm = GetStringMap(co, op_args.db_cntx);
+    return sm->UpperBoundSize();
+  } else {
+    DCHECK_EQ(kEncodingListPack, co.Encoding());
+    return detail::ListpackWrap{static_cast<uint8_t*>(co.RObjPtr())}.size();
+  }
 }
 
 OpResult<uint32_t> OpExist(const OpArgs& op_args, string_view key, string_view field) {
@@ -519,17 +486,34 @@ OpResult<uint32_t> OpExist(const OpArgs& op_args, string_view key, string_view f
   RETURN_ON_BAD_STATUS(it_res);
 
   const PrimeValue& pv = (*it_res)->second;
-  void* ptr = pv.RObjPtr();
   if (pv.Encoding() == kEncodingListPack) {
-    uint8_t intbuf[LP_INTBUF_SIZE];
-    optional<string_view> res = LpFind((uint8_t*)ptr, field, intbuf);
-    return res.has_value();
+    detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
+    return lw.Find(field) != lw.end() ? 1 : 0;
+  } else {
+    DCHECK_EQ(kEncodingStrMap2, pv.Encoding());
+    StringMap* sm = GetStringMap(pv, op_args.db_cntx);
+    return Contains(sm, field, defer_cleanup) ? 1 : 0;
   }
+}
 
-  DCHECK_EQ(kEncodingStrMap2, pv.Encoding());
-  StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-  return Contains(sm, field, defer_cleanup) ? 1 : 0;
-};
+OpResult<uint32_t> OpStrLen(const OpArgs& op_args, string_view key, string_view field) {
+  auto& db_slice = op_args.GetDbSlice();
+  auto [it_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
+  RETURN_ON_BAD_STATUS(it_res);
+
+  const PrimeValue& pv = (*it_res)->second;
+  if (pv.Encoding() == kEncodingListPack) {
+    detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
+    if (auto it = lw.Find(field); it != lw.end())
+      return (*it).second.size();
+  } else {
+    DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
+    StringMap* sm = GetStringMap(pv, op_args.db_cntx);
+    if (const auto it = Find(sm, field, defer_cleanup); it != sm->end())
+      return sdslen(it->second);
+  }
+  return OpStatus::KEY_NOTFOUND;
+}
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key, string_view field) {
   auto& db_slice = op_args.GetDbSlice();
@@ -537,23 +521,16 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key, string_view field
   RETURN_ON_BAD_STATUS(it_res);
 
   const PrimeValue& pv = (*it_res)->second;
-  void* ptr = pv.RObjPtr();
-
   if (pv.Encoding() == kEncodingListPack) {
-    uint8_t intbuf[LP_INTBUF_SIZE];
-    optional<string_view> res = LpFind((uint8_t*)ptr, field, intbuf);
-    if (!res) {
-      return OpStatus::KEY_NOTFOUND;
-    }
-    return string(*res);
+    detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
+    if (auto it = lw.Find(field); it != lw.end())
+      return string{(*it).second};
+  } else {
+    DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
+    StringMap* sm = GetStringMap(pv, op_args.db_cntx);
+    if (const auto it = Find(sm, field, defer_cleanup); it != sm->end())
+      return string(it->second, sdslen(it->second));
   }
-
-  DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
-  StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-  if (const auto it = Find(sm, field, defer_cleanup); it != sm->end()) {
-    return string(it->second, sdslen(it->second));
-  }
-
   return OpStatus::KEY_NOTFOUND;
 }
 
@@ -568,22 +545,14 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
   bool keyval = (mask == (FIELDS | VALUES));
 
   if (pv.Encoding() == kEncodingListPack) {
-    uint8_t* lp = (uint8_t*)pv.RObjPtr();
-    res.resize(lpLength(lp) / (keyval ? 1 : 2));
-
-    uint8_t* fptr = lpFirst(lp);
-    uint8_t intbuf[LP_INTBUF_SIZE];
-
-    unsigned index = 0;
-    while (fptr) {
-      if (mask & FIELDS) {
-        res[index++] = LpGetView(fptr, intbuf);
-      }
-      fptr = lpNext(lp, fptr);
-      if (mask & VALUES) {
-        res[index++] = LpGetView(fptr, intbuf);
-      }
-      fptr = lpNext(lp, fptr);
+    detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
+    res.resize(lw.size() * (keyval ? 2 : 1));
+    size_t index = 0;
+    for (const auto [key, value] : lw) {
+      if (mask & FIELDS)
+        res[index++] = key;
+      if (mask & VALUES)
+        res[index++] = value;
     }
   } else {
     DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
@@ -609,27 +578,6 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
   }
 
   return res;
-}
-
-OpResult<uint32_t> OpStrLen(const OpArgs& op_args, string_view key, string_view field) {
-  auto& db_slice = op_args.GetDbSlice();
-  auto [it_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
-  RETURN_ON_BAD_STATUS(it_res);
-
-  const PrimeValue& pv = (*it_res)->second;
-  void* ptr = pv.RObjPtr();
-  if (pv.Encoding() == kEncodingListPack) {
-    uint8_t intbuf[LP_INTBUF_SIZE];
-    optional<string_view> res = LpFind((uint8_t*)ptr, field, intbuf);
-
-    return res ? res->size() : 0;
-  }
-
-  DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
-  StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-
-  auto it = Find(sm, field, defer_cleanup);
-  return it != sm->end() ? sdslen(it->second) : 0;
 }
 
 struct OpSetParams {
@@ -1264,42 +1212,11 @@ void HSetFamily::Register(CommandRegistry* registry) {
 
 StringMap* HSetFamily::ConvertToStrMap(uint8_t* lp) {
   StringMap* sm = CompactObj::AllocateMR<StringMap>();
-  size_t lplen = lpLength(lp);
-  if (lplen == 0)
-    return sm;
 
-  sm->Reserve(lplen / 2);
-
-  uint8_t* lp_elem = lpFirst(lp);
-  uint8_t intbuf[2][LP_INTBUF_SIZE];
-
-  DCHECK(lp_elem);  // empty containers are not allowed.
-
-  do {
-    string_view key = LpGetView(lp_elem, intbuf[0]);
-    lp_elem = lpNext(lp, lp_elem);  // switch to value
-    DCHECK(lp_elem);
-    string_view value = LpGetView(lp_elem, intbuf[1]);
-    lp_elem = lpNext(lp, lp_elem);  // switch to next key
-
-    // must be unique
-    if (!sm->AddOrUpdate(key, value)) {
-      uint8_t tmpbuf[LP_INTBUF_SIZE];
-
-      uint8_t* it = lpFirst(lp);
-      LOG(ERROR) << "Internal error while converting listpack to stringmap when inserting key: "
-                 << key << " , listpack keys are:";
-      do {
-        string_view key = LpGetView(it, tmpbuf);
-        LOG(ERROR) << "Listpack key: " << key;
-        it = lpNext(lp, it);
-        CHECK(it);  // value must exist
-        it = lpNext(lp, it);
-      } while (it);
-      LOG(ERROR) << "Internal error, report to Dragonfly team! ------------";
-    }
-  } while (lp_elem);
-
+  detail::ListpackWrap lw{lp};
+  sm->Reserve(lw.size());
+  for (const auto [key, value] : lw)
+    LOG_IF(ERROR, !sm->AddOrUpdate(key, value)) << "Internal error: duplicate key " << key;
   return sm;
 }
 
