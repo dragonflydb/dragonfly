@@ -77,9 +77,6 @@ StringMap* GetStringMap(const PrimeValue& pv, const DbContext& db_context);
 // Get string_view from listpack poiner. Intbuf to store integer values as strings.
 std::string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]);
 
-// Find value by key and return stringview to it, otherwise nullopt.
-std::optional<std::string_view> LpFind(uint8_t* lp, std::string_view key, uint8_t int_buf[]);
-
 using BlockingResultCb =
     std::function<void(Transaction*, EngineShard*, std::string_view /* key */)>;
 

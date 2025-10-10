@@ -151,8 +151,9 @@ std::optional<BaseAccessor::StringList> BaseAccessor::GetTags(std::string_view a
 
 std::optional<BaseAccessor::StringList> ListPackAccessor::GetStrings(
     string_view active_field) const {
-  auto strsv = container_utils::LpFind(lp_, active_field, intbuf_[0].data());
-  return strsv.has_value() ? StringList{*strsv} : StringList{};
+  detail::ListpackWrap lw{lp_};
+  auto it = lw.Find(active_field);
+  return it != lw.end() ? StringList{(*it).second} : StringList{};
 }
 
 SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
