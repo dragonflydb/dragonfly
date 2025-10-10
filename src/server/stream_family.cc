@@ -2583,13 +2583,24 @@ void XReadGeneric2(CmdArgList args, bool read_group, Transaction* tx, SinkReplyB
       }
     }
   } else {
-    rb->StartArray(resolved_streams);
-    for (size_t i = 0; i < results.size(); i++) {
-      if (results[i].empty())
-        continue;
-      string_view key = ArgS(args, i + opts->streams_arg);
-      rb->StartArray(2);
-      StreamReplies{builder}.SendStreamRecords(key, results[i]);
+    if (rb->IsResp3()) {
+      rb->StartCollection(resolved_streams, RedisReplyBuilder::CollectionType::MAP);
+      for (size_t i = 0; i < results.size(); ++i) {
+        if (results[i].empty()) {
+          continue;
+        }
+        string_view key = ArgS(args, i + opts->streams_arg);
+        StreamReplies{builder}.SendStreamRecords(key, results[i]);
+      }
+    } else {
+      rb->StartArray(resolved_streams);
+      for (size_t i = 0; i < results.size(); i++) {
+        if (results[i].empty())
+          continue;
+        string_view key = ArgS(args, i + opts->streams_arg);
+        rb->StartArray(2);
+        StreamReplies{builder}.SendStreamRecords(key, results[i]);
+      }
     }
   }
 }
