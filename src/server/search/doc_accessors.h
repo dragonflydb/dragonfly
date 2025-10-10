@@ -49,7 +49,6 @@ struct ListPackAccessor : public BaseAccessor {
   SearchDocData Serialize(const search::Schema& schema) const override;
 
  private:
-  mutable std::array<uint8_t, 33> intbuf_[2];
   LpPtr lp_;
 };
 

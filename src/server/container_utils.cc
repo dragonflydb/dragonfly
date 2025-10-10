@@ -272,17 +272,6 @@ StringMap* GetStringMap(const PrimeValue& pv, const DbContext& db_context) {
   return res;
 }
 
-optional<string_view> LpFind(uint8_t* lp, string_view key, uint8_t int_buf[]) {
-  uint8_t* fptr = lpFirst(lp);
-  DCHECK(fptr);
-
-  fptr = lpFind(lp, fptr, (unsigned char*)key.data(), key.size(), 1);
-  if (!fptr)
-    return std::nullopt;
-  uint8_t* vptr = lpNext(lp, fptr);
-  return LpGetView(vptr, int_buf);
-}
-
 string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]) {
   int64_t ele_len = 0;
   uint8_t* elem = lpGet(lp_it, &ele_len, int_buf);
