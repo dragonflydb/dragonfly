@@ -11,8 +11,8 @@ extern "C" {
 
 namespace dfly::detail {
 
-ListpackWrap::Iterator::Iterator(uint8_t* lp, uint8_t* ptr)
-    : lp_{lp}, ptr_{ptr}, next_ptr_{nullptr} {
+ListpackWrap::Iterator::Iterator(uint8_t* lp, uint8_t* ptr, IntBuf& intbuf)
+    : lp_{lp}, ptr_{ptr}, next_ptr_{nullptr}, intbuf_(intbuf) {
   static_assert(sizeof(intbuf_[0]) >= LP_INTBUF_SIZE);  // to avoid header dependency
   Read();
 }
@@ -36,7 +36,7 @@ void ListpackWrap::Iterator::Read() {
 
 ListpackWrap::Iterator ListpackWrap::Find(std::string_view key) const {
   uint8_t* ptr = lpFind(lp_, lpFirst(lp_), (unsigned char*)key.data(), key.size(), 1);
-  return Iterator{lp_, ptr};
+  return Iterator{lp_, ptr, intbuf_};
 }
 
 size_t ListpackWrap::size() const {
@@ -44,11 +44,11 @@ size_t ListpackWrap::size() const {
 }
 
 ListpackWrap::Iterator ListpackWrap::begin() const {
-  return Iterator{lp_, lpFirst(lp_)};
+  return Iterator{lp_, lpFirst(lp_), intbuf_};
 }
 
 ListpackWrap::Iterator ListpackWrap::end() const {
-  return Iterator{lp_, nullptr};
+  return Iterator{lp_, nullptr, intbuf_};
 }
 
 bool ListpackWrap::Iterator::operator==(const Iterator& other) const {
