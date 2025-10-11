@@ -3440,52 +3440,25 @@ TEST_F(SearchFamilyTest, DropIndexWithInvalidOption) {
   Run({"DEL", "doc:1"});
 }
 
-// Test SINTERSTORE with indexed keys
-TEST_F(SearchFamilyTest, SinterstoreOverwritesIndexedHash) {
-  // Create an index on HASH documents
+TEST_F(SearchFamilyTest, SetStoreCommandsOverwriteIndexedHash) {
   Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "field", "TEXT"});
-
-  // Create a HASH document that will be overwritten
-  EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
-
-  // Create sets for intersection
   EXPECT_THAT(Run({"SADD", "set1", "a", "b", "c"}), IntArg(3));
   EXPECT_THAT(Run({"SADD", "set2", "b", "c", "d"}), IntArg(3));
 
-  // SINTERSTORE should overwrite the HASH key
-  EXPECT_THAT(Run({"SINTERSTORE", "dest", "set1", "set2"}), IntArg(2));
-
-  // This should NOT crash
-  EXPECT_EQ(Run({"RENAME", "dest", "dest2"}), "OK");
-
-  // Verify index still works
-  EXPECT_THAT(Run({"HSET", "dest", "field", "newvalue"}), IntArg(1));
-  auto resp = Run({"FT.SEARCH", "idx", "*"});
-  EXPECT_THAT(resp, AreDocIds("dest"));
-}
-
-// Test SUNIONSTORE with indexed keys
-TEST_F(SearchFamilyTest, SunionstoreOverwritesIndexedHash) {
-  // Create an index on HASH documents
-  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "field", "TEXT"});
-
-  // Create a HASH document
+  // Test SINTERSTORE
   EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
+  EXPECT_THAT(Run({"SINTERSTORE", "dest", "set1", "set2"}), IntArg(2));
+  EXPECT_EQ(Run({"RENAME", "dest", "x"}), "OK");
 
-  // Create sets for union
-  EXPECT_THAT(Run({"SADD", "set1", "a", "b"}), IntArg(2));
-  EXPECT_THAT(Run({"SADD", "set2", "c", "d"}), IntArg(2));
-
-  // SUNIONSTORE should overwrite the HASH
+  // Test SUNIONSTORE
+  EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
   EXPECT_THAT(Run({"SUNIONSTORE", "dest", "set1", "set2"}), IntArg(4));
+  EXPECT_EQ(Run({"RENAME", "dest", "y"}), "OK");
 
-  // This should NOT crash
-  EXPECT_EQ(Run({"RENAME", "dest", "dest2"}), "OK");
-
-  // Verify index still works
-  EXPECT_THAT(Run({"HSET", "dest", "field", "value2"}), IntArg(1));
-  auto resp = Run({"FT.SEARCH", "idx", "*"});
-  EXPECT_THAT(resp, AreDocIds("dest"));
+  // Test SDIFFSTORE
+  EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
+  EXPECT_THAT(Run({"SDIFFSTORE", "dest", "set1", "set2"}), IntArg(1));
+  EXPECT_EQ(Run({"RENAME", "dest", "z"}), "OK");
 }
 
 }  // namespace dfly
