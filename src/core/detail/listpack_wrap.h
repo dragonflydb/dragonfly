@@ -11,6 +11,10 @@ namespace dfly::detail {
 
 // Wrapper around map data structure based on listpack
 struct ListpackWrap {
+ private:
+  using IntBuf = uint8_t[2][24];
+
+ public:
   struct Iterator {
     using iterator_category = std::forward_iterator_tag;
     using difference_type = std::ptrdiff_t;
@@ -18,12 +22,7 @@ struct ListpackWrap {
     using reference = value_type;
     using pointer = value_type*;
 
-    Iterator(uint8_t* lp, uint8_t* ptr);
-    // Iterator(const Iterator&) = delete;  // self-referential with intbuf
-    // Iterator(Iterator&&) = delete;       // self-referential with intbuf
-    // Iterator& operator=(Iterator&&) = delete;
-    // Iterator& operator=(const Iterator&) = delete;
-
+    Iterator(uint8_t* lp, uint8_t* ptr, IntBuf& intbuf);
     Iterator& operator++();
 
     value_type operator*() const {
@@ -41,7 +40,7 @@ struct ListpackWrap {
 
     uint8_t *lp_ = nullptr, *ptr_ = nullptr, *next_ptr_ = nullptr;
     std::string_view key_v_, value_v_;
-    uint8_t intbuf_[2][24];
+    uint8_t (&intbuf_)[2][24];
   };
 
   explicit ListpackWrap(uint8_t* lp) : lp_{lp} {
@@ -54,6 +53,7 @@ struct ListpackWrap {
 
  private:
   uint8_t* lp_;
+  mutable IntBuf intbuf_;
 };
 
 }  // namespace dfly::detail
