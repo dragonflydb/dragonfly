@@ -169,6 +169,12 @@ OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams
   auto& it = add_res.it;
   PrimeValue& pv = it->second;
   if (add_res.is_new || zparams.override) {
+    // If we're overwriting an existing key (not a new one), we need to remove it from
+    // search indexes first. This prevents crashes when the key is indexed (e.g., HASH or JSON).
+    if (!add_res.is_new && zparams.override) {
+      RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, pv, op_args.shard);
+    }
+
     if (member_len > server.max_map_field_len) {
       pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_SKIPLIST, CompactObj::AllocateMR<detail::SortedMap>());
     } else {
