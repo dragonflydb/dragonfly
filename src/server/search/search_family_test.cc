@@ -3440,4 +3440,25 @@ TEST_F(SearchFamilyTest, DropIndexWithInvalidOption) {
   Run({"DEL", "doc:1"});
 }
 
+TEST_F(SearchFamilyTest, SetStoreCommandsOverwriteIndexedHash) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "field", "TEXT"});
+  EXPECT_THAT(Run({"SADD", "set1", "a", "b", "c"}), IntArg(3));
+  EXPECT_THAT(Run({"SADD", "set2", "b", "c", "d"}), IntArg(3));
+
+  // Test SINTERSTORE
+  EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
+  EXPECT_THAT(Run({"SINTERSTORE", "dest", "set1", "set2"}), IntArg(2));
+  EXPECT_EQ(Run({"RENAME", "dest", "x"}), "OK");
+
+  // Test SUNIONSTORE
+  EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
+  EXPECT_THAT(Run({"SUNIONSTORE", "dest", "set1", "set2"}), IntArg(4));
+  EXPECT_EQ(Run({"RENAME", "dest", "y"}), "OK");
+
+  // Test SDIFFSTORE
+  EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
+  EXPECT_THAT(Run({"SDIFFSTORE", "dest", "set1", "set2"}), IntArg(1));
+  EXPECT_EQ(Run({"RENAME", "dest", "z"}), "OK");
+}
+
 }  // namespace dfly
