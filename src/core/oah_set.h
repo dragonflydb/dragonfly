@@ -392,7 +392,7 @@ class OAHSet {  // Open Addressing Hash Set
 
  private:
   static constexpr std::uint32_t kMinCapacityLog = 3;                   // TODO make template
-  static constexpr std::uint32_t kShiftLog = 3;                         // TODO make template
+  static constexpr std::uint32_t kShiftLog = 2;                         // TODO make template
   static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog);  // TODO check
   std::uint32_t capacity_log_ = 0;
   std::uint32_t size_ = 0;  // number of elements in the set.
