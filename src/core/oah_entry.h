@@ -20,6 +20,111 @@ namespace dfly {
 #define PREFETCH_READ(x) __builtin_prefetch(x, 0, 1)
 #define FORCE_INLINE __attribute__((always_inline))
 
+// TODO add allocator support
+template <class T> class PtrVector {
+  static constexpr size_t kTagMask = 4095ULL << 52;  // we reserve 12 high bits.
+  static constexpr size_t kVectorBit = 1ULL << 54;
+
+  static constexpr size_t kLogSizeShift = 56;
+  static constexpr size_t kLogSizeMask = 0xFFULL;
+  static constexpr size_t kLogSizeShiftedMask = kLogSizeMask << kLogSizeShift;
+
+ public:
+  static PtrVector FromLogSize(uint64_t log_size) {
+    return PtrVector(log_size);
+  }
+
+  T* begin() const {
+    return &Raw()[0];
+  }
+
+  T* end() const {
+    return &Raw()[Size()];
+  }
+
+  PtrVector(PtrVector&& other) {
+    uptr_ = other.uptr_;
+    other.uptr_ = 0;
+  }
+
+  ~PtrVector() {
+    Clear();
+  }
+
+  size_t LogSize() const {
+    return (uptr_ >> kLogSizeShift) & kLogSizeMask;
+  }
+
+  size_t Size() const {
+    return 1 << LogSize();
+  }
+
+  uint64_t Release() {
+    uint64_t res = uptr_;
+    uptr_ = 0;
+    return res;
+  }
+
+  void ResizeLog(uint64_t new_log_size) {
+    auto new_ptr = reinterpret_cast<T*>(zmalloc(sizeof(T) << new_log_size));
+    size_t new_size = 1 << new_log_size;
+    const size_t size = std::min(Size(), new_size);
+    for (size_t i = 0; i < size; ++i) {
+      new (new_ptr + i) T(std::move(Raw()[i]));
+    }
+    for (size_t i = size; i < new_size; ++i) {
+      new (new_ptr + i) T();
+    }
+    Clear();
+    uptr_ = reinterpret_cast<uint64_t>(new_ptr);
+    SetLogSize(new_log_size);
+  }
+
+  T& operator[](size_t idx) {
+    return Raw()[idx];
+  }
+
+  const T& operator[](size_t idx) const {
+    return Raw()[idx];
+  }
+
+  T* Raw() const {
+    return (T*)(uptr_ & ~kTagMask);
+  }
+
+ private:
+  void Clear() {
+    const size_t size = Size();
+    T* raw = Raw();
+    if (!raw)
+      return;
+    for (size_t i = 0; i < size; ++i) {
+      if (raw[i])
+        raw[i].~T();
+    }
+
+    zfree(Raw());
+    uptr_ = 0;
+  }
+
+  // because of log_size I prefer to hide it
+  PtrVector(uint64_t log_size) {
+    DCHECK(log_size <= 32);
+    uptr_ = reinterpret_cast<uint64_t>(zmalloc(sizeof(T) << log_size));
+    const uint64_t size = 1 << log_size;
+    for (uint64_t i = 0; i < size; ++i) {
+      new (reinterpret_cast<T*>(uptr_) + i) T();
+    }
+    SetLogSize(log_size);
+  }
+
+  void SetLogSize(uint64_t log_size) {
+    uptr_ = (uptr_ & ~kLogSizeShiftedMask) | kVectorBit | (uint64_t(log_size) << kLogSizeShift);
+  }
+
+  uint64_t uptr_ = 0;
+};
+
 static uint64_t Hash(std::string_view str) {
   constexpr XXH64_hash_t kHashSeed = 24061983;
   return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
@@ -83,10 +188,8 @@ class OAHEntry {
   }
 
   // TODO add initializer list constructor
-  OAHEntry(size_t vector_size) {
-    // TODO rewrite to simple array
-    data_ = reinterpret_cast<char*>(new std::vector<OAHEntry>(vector_size));
-    SetVectorBit();
+  OAHEntry(PtrVector<OAHEntry>&& vec) {
+    data_ = reinterpret_cast<char*>(vec.Release() | kVectorBit);
   }
 
   OAHEntry(const OAHEntry& e) = delete;
@@ -114,12 +217,13 @@ class OAHEntry {
     return !Empty();
   }
 
-  FORCE_INLINE bool IsVector() const {
+  bool IsVector() const {
     return (uptr() & kVectorBit) != 0;
   }
 
-  std::vector<OAHEntry>& AsVector() {
-    return *reinterpret_cast<std::vector<OAHEntry>*>(Raw());
+  PtrVector<OAHEntry>& AsVector() {
+    static_assert(sizeof(PtrVector<OAHEntry>) == sizeof(uint64_t));
+    return *reinterpret_cast<PtrVector<OAHEntry>*>(&data_);
   }
 
   std::string_view Key() const {
@@ -253,7 +357,7 @@ class OAHEntry {
                    : std::optional<uint32_t>();
       }
       auto& vec = AsVector();
-      for (size_t i = 0, size = vec.size(); i < size; ++i) {
+      for (size_t i = 0, size = vec.Size(); i < size; ++i) {
         vec[i].ExpireIfNeeded(time_now, set_size);
         if (vec[i].CheckExtendedHash(ext_hash, capacity_log, shift_log) && vec[i].Key() == str) {
           return i;
@@ -277,7 +381,7 @@ class OAHEntry {
       *this = std::move(e);
       return 0;
     } else if (!IsVector()) {
-      OAHEntry tmp(2);
+      OAHEntry tmp(PtrVector<OAHEntry>::FromLogSize(1));
       auto& arr = tmp.AsVector();
       arr[0] = std::move(*this);
       arr[1] = std::move(e);
@@ -286,14 +390,16 @@ class OAHEntry {
     } else {
       auto& arr = AsVector();
       size_t i = 0;
-      for (; i < arr.size(); ++i) {
+      for (; i < arr.Size(); ++i) {
         if (!arr[i]) {
           arr[i] = std::move(e);
           return i;
         }
       }
-      arr.push_back(std::move(e));
-      return arr.size() - 1;
+      auto new_pos = arr.Size();
+      arr.ResizeLog(arr.LogSize() + 1);
+      arr[new_pos] = (std::move(e));
+      return new_pos;
     }
   }
 
@@ -303,7 +409,7 @@ class OAHEntry {
     } else if (!IsVector()) {
       return 1;
     }
-    return AsVector().size();
+    return AsVector().Size();
   }
 
   // TODO remove, it is inefficient
@@ -314,7 +420,7 @@ class OAHEntry {
       return *this;
     } else {
       auto& arr = AsVector();
-      DCHECK(pos < arr.size());
+      DCHECK(pos < arr.Size());
       return arr[pos];
     }
   }
@@ -329,7 +435,7 @@ class OAHEntry {
       return std::move(*this);
     } else {
       auto& arr = AsVector();
-      DCHECK(pos < arr.size());
+      DCHECK(pos < arr.Size());
       return std::move(arr[pos]);
     }
   }
@@ -357,7 +463,7 @@ class OAHEntry {
       return;
 
     if (IsVector()) {
-      delete &AsVector();
+      AsVector().~PtrVector<OAHEntry>();
     } else {
       zfree(Raw());
     }
