@@ -89,6 +89,28 @@ static string random_string(mt19937& rand, unsigned len) {
   return ret;
 }
 
+TEST_F(OAHSetTest, PtrVectorTest) {
+  PtrVector<int> vp(PtrVector<int>::FromLogSize(3));
+  EXPECT_EQ(vp.Size(), 8);
+  EXPECT_EQ(vp.LogSize(), 3);
+  size_t i = 0;
+  for (; i < vp.Size(); ++i) {
+    EXPECT_EQ(vp[i], 0);
+    vp[i] = i + 1;
+  }
+  vp.ResizeLog(4);
+
+  for (; i < vp.Size(); ++i) {
+    EXPECT_EQ(vp[i], 0);
+    vp[i] = i + 1;
+  }
+  EXPECT_EQ(vp.Size(), 16);
+  EXPECT_EQ(vp.LogSize(), 4);
+  for (size_t i = 0; i < vp.Size(); ++i) {
+    EXPECT_EQ(vp[i], i + 1);
+  }
+}
+
 TEST_F(OAHSetTest, OAHEntryTest) {
   OAHEntry test("0123456789", 2);
 
