@@ -3440,6 +3440,22 @@ TEST_F(SearchFamilyTest, DropIndexWithInvalidOption) {
   Run({"DEL", "doc:1"});
 }
 
+TEST_F(SearchFamilyTest, ZsetStoreCommandsOverwriteIndexedHash) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "field", "TEXT"});
+  EXPECT_THAT(Run({"ZADD", "zset1", "1", "a", "2", "b"}), IntArg(2));
+  EXPECT_THAT(Run({"ZADD", "zset2", "1.5", "a", "3", "c"}), IntArg(2));
+
+  // Test ZINTERSTORE
+  EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
+  EXPECT_THAT(Run({"ZINTERSTORE", "dest", "2", "zset1", "zset2"}), IntArg(1));
+  EXPECT_EQ(Run({"RENAME", "dest", "x"}), "OK");
+
+  // Test ZUNIONSTORE
+  EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
+  EXPECT_THAT(Run({"ZUNIONSTORE", "dest", "2", "zset1", "zset2"}), IntArg(3));
+  EXPECT_EQ(Run({"RENAME", "dest", "y"}), "OK");
+}
+
 TEST_F(SearchFamilyTest, SetStoreCommandsOverwriteIndexedHash) {
   Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "field", "TEXT"});
   EXPECT_THAT(Run({"SADD", "set1", "a", "b", "c"}), IntArg(3));
