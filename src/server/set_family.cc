@@ -506,6 +506,12 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   }
 
   if (add_res.is_new || overwrite) {
+    // If we're overwriting an existing key (not a new one), we need to remove it from
+    // search indexes first. This prevents crashes when the key is indexed (e.g., HASH or JSON).
+    if (!add_res.is_new && overwrite) {
+      RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, co, op_args.shard);
+    }
+
     // does not store the values, merely sets the encoding.
     // TODO: why not store the values as well?
     InitSet(vals, &co);
