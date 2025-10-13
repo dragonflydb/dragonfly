@@ -32,4 +32,5 @@ fi
 _healthcheck="nc -q1 $HOST $PORT"
 
 echo PING | ${_healthcheck}
+
 exit $?
