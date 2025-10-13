@@ -3477,4 +3477,51 @@ TEST_F(SearchFamilyTest, SetStoreCommandsOverwriteIndexedHash) {
   EXPECT_EQ(Run({"RENAME", "dest", "z"}), "OK");
 }
 
+TEST_F(SearchFamilyTest, IndexRaceOnRebuildAndMutations) {
+  // Create initial index.
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "name", "TEXT"});
+
+  // Launch concurrent writers across proactors.
+  std::vector<util::fb2::Fiber> writers;
+  const unsigned writers_per_pool = std::max(1u, num_threads_ > 0 ? num_threads_ - 1 : 1u);
+  for (unsigned i = 0; i < writers_per_pool; ++i) {
+    writers.push_back(pp_->at(i)->LaunchFiber([&, i] {
+      ThisFiber::SetName("writer");
+      for (unsigned iter = 0; iter < 5000; ++iter) {
+        unsigned k = (iter + i * 7) % 256;
+        std::string key = absl::StrFormat("doc:%u", k);
+        switch ((iter + i) % 3) {
+          case 0:
+            Run({"HSET", key, "name", "v"});
+            break;
+          case 1:
+            Run({"SET", key, "s"});
+            break;
+          default:
+            Run({"DEL", key});
+            break;
+        }
+        util::ThisFiber::SleepFor(std::chrono::microseconds(50));
+      }
+    }));
+  }
+
+  // Launch index drop/create churn in parallel.
+  auto churn = pp_->at(0)->LaunchFiber([&] {
+    ThisFiber::SetName("rebuild");
+    for (unsigned i = 0; i < 400; ++i) {
+      Run({"FT.DROPINDEX", "idx"});  // without DD – keep documents
+      Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "name", "TEXT"});
+      util::ThisFiber::SleepFor(std::chrono::milliseconds(1));
+    }
+  });
+
+  for (auto& f : writers)
+    f.Join();
+  churn.Join();
+
+  // Best-effort: verify service is responsive; primary goal was to surface a crash if present.
+  (void)Run({"FT._LIST"});
+}
+
 }  // namespace dfly
