@@ -67,9 +67,6 @@ jobs:
       - name: Enable corepack
         shell: bash
         run: corepack enable
-      - name: Corepack prepare yarn
-        shell: bash
-        run: corepack prepare yarn@4.10.3 --activate
       - name: Install all production yarn packages
         shell: bash
         run: yarn workspaces focus --production
