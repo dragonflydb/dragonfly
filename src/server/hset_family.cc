@@ -141,7 +141,7 @@ struct HMapWrap {
   }
 
   auto Range() const {
-    auto f = [](auto p) -> pair<string_view, string_view> { return p; };
+    auto f = [](auto p) -> pair<string_view, string_view> { return p; };  // implicit conversion
     using IT = base::it::CompoundIterator<decltype(f), detail::ListpackWrap::Iterator,
                                           StringMap::iterator>;
     auto cb = [f](auto& h) -> std::pair<IT, IT> {
