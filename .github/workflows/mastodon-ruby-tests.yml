@@ -64,16 +64,19 @@ jobs:
         with:
           ruby-version: 3.4
           bundler-cache: true
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: '.nvmrc'
       - name: Enable corepack
         shell: bash
         run: corepack enable
+      - name: Corepack prepare yarn
+        shell: bash
+        run: corepack prepare yarn@4.10.3 --activate
       - name: Install all production yarn packages
         shell: bash
         run: yarn workspaces focus --production
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version-file: '.nvmrc'
       - name: Precompile assets
         run: |-
           bin/rails assets:precompile
