@@ -645,15 +645,16 @@ void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
       });
 }
 
-bool ShardDocIndices::DropIndex(string_view name) {
+unique_ptr<ShardDocIndex> ShardDocIndices::DropIndex(string_view name) {
   auto it = indices_.find(name);
   if (it == indices_.end())
-    return false;
+    return nullptr;
 
   DropIndexCache(*it->second);
+  auto index = std::move(it->second);
   indices_.erase(it);
 
-  return true;
+  return index;
 }
 
 void ShardDocIndices::DropAllIndices() {

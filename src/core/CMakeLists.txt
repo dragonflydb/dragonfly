@@ -26,8 +26,8 @@ add_library(dfly_core allocation_tracker.cc bloom.cc compact_object.cc dense_set
     dragonfly_core.cc extent_tree.cc huff_coder.cc
     interpreter.cc glob_matcher.cc mi_memory_resource.cc qlist.cc sds_utils.cc
     segment_allocator.cc score_map.cc small_string.cc sorted_map.cc task_queue.cc
-    tx_queue.cc string_set.cc string_map.cc top_keys.cc detail/bitpacking.cc
-        page_usage_stats.cc)
+    tx_queue.cc string_set.cc string_map.cc top_keys.cc detail/bitpacking.cc detail/listpack_wrap.cc
+        page_usage_stats.cc count_min_sketch.cc)
 
 cxx_link(dfly_core base dfly_search_core fibers2 jsonpath
     absl::flat_hash_map absl::str_format absl::random_random redis_lib
@@ -56,6 +56,7 @@ cxx_test(qlist_test dfly_core DATA testdata/list.txt.zst LABELS DFLY)
 cxx_test(zstd_test dfly_core TRDP::zstd LABELS DFLY)
 cxx_test(top_keys_test dfly_core LABELS DFLY)
 cxx_test(page_usage_stats_test dfly_core LABELS DFLY)
+cxx_test(count_min_sketch_test dfly_core LABELS DFLY)
 
 if(LIB_PCRE2)
   target_compile_definitions(dfly_core_test PRIVATE USE_PCRE2=1)

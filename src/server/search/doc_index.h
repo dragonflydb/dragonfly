@@ -224,6 +224,11 @@ class ShardDocIndex {
     std::string_view Get(DocId id) const;
     size_t Size() const;
 
+    // Get const reference to the internal ids map
+    const absl::flat_hash_map<std::string, DocId>& GetDocKeysMap() const {
+      return ids_;
+    }
+
    private:
     absl::flat_hash_map<std::string, DocId> ids_;
     std::vector<std::string> keys_;
@@ -277,6 +282,11 @@ class ShardDocIndex {
   void RebuildForGroup(const OpArgs& op_args, const std::string_view& group_id,
                        const std::vector<std::string_view>& terms);
 
+  // Public access to key index for direct operations (e.g., when dropping index with DD)
+  const DocKeyIndex& key_index() const {
+    return key_index_;
+  }
+
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
@@ -309,8 +319,8 @@ class ShardDocIndices {
   void InitIndex(const OpArgs& op_args, std::string_view name,
                  std::shared_ptr<const DocIndex> index);
 
-  // Drop index, return true if it existed and was dropped
-  bool DropIndex(std::string_view name);
+  // Drop index, return the dropped index if it existed or nullptr otherwise
+  std::unique_ptr<ShardDocIndex> DropIndex(std::string_view name);
 
   // Drop all indices
   void DropAllIndices();

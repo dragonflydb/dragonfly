@@ -816,6 +816,11 @@ void DbSlice::Del(Context cntx, Iterator it) {
   PerformDeletion(it, db.get());
 }
 
+void DbSlice::DelMutable(Context cntx, ItAndUpdater it_updater) {
+  it_updater.post_updater.Run();
+  Del(cntx, it_updater.it);
+}
+
 void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   VLOG(1) << "Start FlushSlotsFb";
   // Slot deletion can take time as it traverses all the database, hence it runs in fiber.
