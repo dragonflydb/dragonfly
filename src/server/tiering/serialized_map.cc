@@ -48,7 +48,7 @@ size_t SerializedMap::size() const {
   return size_;
 }
 
-size_t SerializedMap::SerializeSize(SerializedMap::Input input) {
+size_t SerializedMap::SerializeSize(Input input) {
   size_t out = 4;  // 4 byte number of entries
   for (const auto& [key, value] : input)
     out += 8 + key.size() + value.size();  // two 4 byte lengths

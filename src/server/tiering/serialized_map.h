@@ -6,6 +6,7 @@
 
 namespace dfly::tiering {
 
+// Map built over single continuous byte slice to allow easy read operations.
 struct SerializedMap {
   struct Iterator {
     using iterator_category = std::forward_iterator_tag;
@@ -34,7 +35,7 @@ struct SerializedMap {
     explicit Iterator(std::string_view buffer);
     void Read();
 
-    std::string_view slice_;
+    std::string_view slice_;  // the part left
     std::string_view key_, value_;
   };
 
@@ -47,7 +48,12 @@ struct SerializedMap {
 
   // Input for serialization
   using Input = const absl::Span<const std::pair<std::string_view, std::string_view>>;
-  static size_t SerializeSize(Input);  // Upper bound of buffer size for serialization
+
+  // Buffer size required for serialization
+  static size_t SerializeSize(Input);
+
+  // Write a slice that can be used to a SerializedMap on top of it.
+  // Returns number of bytes written
   static size_t Serialize(Input, absl::Span<char> buffer);
 
  private:
