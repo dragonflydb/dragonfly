@@ -40,7 +40,7 @@ struct ListpackWrap {
 
     uint8_t *lp_ = nullptr, *ptr_ = nullptr, *next_ptr_ = nullptr;
     std::string_view key_v_, value_v_;
-    uint8_t (&intbuf_)[2][24];
+    IntBuf& intbuf_;
   };
 
   explicit ListpackWrap(uint8_t* lp) : lp_{lp} {
