@@ -264,7 +264,6 @@ class DflyShardReplica : public ProtocolClient {
 
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
   uint32_t flow_id_ = UINT32_MAX;  // Flow id if replica acts as a dfly flow.
-  uint64_t lsn_to_finish_partial_ = 0;
 };
 
 }  // namespace dfly
