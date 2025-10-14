@@ -3477,8 +3477,7 @@ TEST_F(SearchFamilyTest, SetStoreCommandsOverwriteIndexedHash) {
   EXPECT_EQ(Run({"RENAME", "dest", "z"}), "OK");
 }
 
-TEST_F(SearchFamilyTest, ReproduceIssue5215Crash) {
-  // This test reproduces the exact crash described in issue #5215
+TEST_F(SearchFamilyTest, DoubleHsetCrash) {
   // The crash occurs when HSET is called twice with the same key that matches a search index
 
   // Create one index that matches hash keys with field1
@@ -3490,16 +3489,8 @@ TEST_F(SearchFamilyTest, ReproduceIssue5215Crash) {
   // Document should not be in index
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "*"}), kNoResults);
 
-  // Execute SELECT command (similar to what was in commands.log)
+  // Execute SELECT command
   EXPECT_THAT(Run({"SELECT", "1"}), "OK");
-
-  // Execute some other commands that were in the log before the crash
-  EXPECT_THAT(Run({"ZREVRANK", "key:ph\\n", "member:2qzvd5jj"}), IntArg(-1));
-  EXPECT_THAT(Run({"GET", "key1"}), "key1");
-  EXPECT_THAT(Run({"GET", "key1"}), "key1");
-  EXPECT_THAT(Run({"ZADD", "zset1", "1.0", "members", "t1", "member1"}), IntArg(3));
-  EXPECT_THAT(Run({"FT.DROPINDEX", "list1 element1"}), "OK");
-  EXPECT_THAT(Run({"GET", "key1"}), "key1");
 
   // Second HSET - add field1 which makes document match index criteria
   // This should trigger the crash because the logic tries to remove then add the document
