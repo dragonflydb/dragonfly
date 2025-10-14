@@ -32,6 +32,7 @@ struct Decoder {
   size_t estimated_mem_usage = 0;  // Estimated usage if uploaded
 };
 
+// Basic "bare" decoder that just stores the provided slice
 struct BareDecoder : public Decoder {
   std::unique_ptr<Decoder> Clone() const override;
   void Initialize(std::string_view slice) override;

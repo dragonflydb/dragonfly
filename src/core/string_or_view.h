@@ -71,7 +71,7 @@ class StringOrView {
     return std::move(std::get<std::string>(val_));
   }
 
-  std::string* BorrowMut() {
+  std::string* GetMutable() {
     MakeOwned();
     return &std::get<std::string>(val_);
   }

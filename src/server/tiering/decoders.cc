@@ -47,7 +47,7 @@ std::string_view StringDecoder::Read() const {
 
 std::string* StringDecoder::Write() {
   modified = true;
-  return value_.BorrowMut();
+  return value_.GetMutable();
 }
 
 }  // namespace dfly::tiering
