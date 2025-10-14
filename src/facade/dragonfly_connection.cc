@@ -2142,10 +2142,13 @@ void Connection::IncrNumConns() {
 }
 
 void Connection::DecrNumConns() {
-  if (IsMainOrMemcache())
-    --stats_->num_conns_main;
-  else
-    --stats_->num_conns_other;
+  if (IsMainOrMemcache()) {
+    if (stats_->num_conns_main > 0)
+      --stats_->num_conns_main;
+  } else {
+    if (stats_->num_conns_other > 0)
+      --stats_->num_conns_other;
+  }
 }
 
 bool Connection::IsReplySizeOverLimit() const {
