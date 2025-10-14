@@ -17,6 +17,7 @@
 #include "core/huff_coder.h"
 #include "core/mi_memory_resource.h"
 #include "core/page_usage_stats.h"
+#include "core/string_map.h"
 #include "core/string_or_view.h"
 #include "core/string_set.h"
 
@@ -616,10 +617,26 @@ TEST_F(CompactObjectTest, StrEncodingAndMaterialize) {
       EXPECT_EQ(test_str, enc.Decode(raw_str).Take());
 
       // Test Materialize
-      obj.SetExternal(0, 0);  // dummy values
+      obj.SetExternal(0, 0, CompactObj::ExternalRep::STRING);  // dummy values
       obj.Materialize(raw_str, true);
       EXPECT_EQ(test_str, obj.ToString());
     }
+  }
+}
+
+TEST_F(CompactObjectTest, ExternalRepresentation) {
+  {
+    CompactObj obj;
+    obj.SetString("test", false);
+    obj.SetExternal(0, 4, CompactObj::ExternalRep::STRING);
+    EXPECT_EQ(obj.ObjType(), OBJ_STRING);
+  }
+  {
+    StringMap sm{};
+    CompactObj obj;
+    obj.SetRObjPtr(&sm);
+    obj.SetExternal(0, 4, CompactObj::ExternalRep::SERIALIZED_MAP);
+    EXPECT_EQ(obj.ObjType(), OBJ_HASH);
   }
 }
 
