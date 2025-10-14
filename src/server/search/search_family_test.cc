@@ -3477,26 +3477,32 @@ TEST_F(SearchFamilyTest, SetStoreCommandsOverwriteIndexedHash) {
   EXPECT_EQ(Run({"RENAME", "dest", "z"}), "OK");
 }
 
-TEST_F(SearchFamilyTest, DoubleHsetCrash) {
-  // The crash occurs when HSET is called twice with the same key that matches a search index
-
-  // Create one index that matches hash keys with field1
+TEST_F(SearchFamilyTest, HsetOnDifferentDatabasesCrash) {
+  // Create one index that matches hash keys with field1 on db 0
   Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "field1", "TEXT"});
 
-  // First HSET - document doesn't match index criteria yet (no field1)
-  EXPECT_THAT(Run({"HSET", "hash1", "other_field", "value"}), IntArg(1));
-
-  // Document should not be in index
-  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*"}), kNoResults);
-
-  // Execute SELECT command
-  EXPECT_THAT(Run({"SELECT", "1"}), "OK");
-
-  // Second HSET - add field1 which makes document match index criteria
-  // This should trigger the crash because the logic tries to remove then add the document
+  // First HSET on db 0 with field1
   EXPECT_THAT(Run({"HSET", "hash1", "field1", "value1"}), IntArg(1));
 
-  // Verify the document was indexed
+  // Document should be in the index
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "value1"}), AreDocIds("hash1"));
+
+  // Execute SELECT command to switch to db 1
+  EXPECT_THAT(Run({"SELECT", "1"}), "OK");
+
+  // HSET on db 1 with the same key name but different database
+  // This should NOT be indexed because the index belongs to db 0
+  // Previously this would crash due to key conflict in DocKeyIndex
+  EXPECT_THAT(Run({"HSET", "hash1", "field1", "another_value"}), IntArg(1));
+
+  // FT.SEARCH on db 1 should still find the document from db 0
+  // because the index is bound to db 0
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "value1"}), AreDocIds("hash1"));
+
+  // Switch back to db 0
+  EXPECT_THAT(Run({"SELECT", "0"}), "OK");
+
+  // The original document should still be in the index
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "value1"}), AreDocIds("hash1"));
 }
 
