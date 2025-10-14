@@ -160,6 +160,11 @@ class CompactObj {
   using PrefixArray = std::vector<std::string_view>;
   using MemoryResource = detail::RobjWrapper::MemoryResource;
 
+  enum class ExternalRep : uint8_t {
+    STRING,         // Basic representation of string
+    SERIALIZED_MAP  // Serialized map (hash)
+  };
+
   CompactObj() {  // By default - empty string.
   }
 
@@ -348,7 +353,8 @@ class CompactObj {
     return u_.ext_ptr.is_cool;
   }
 
-  void SetExternal(size_t offset, uint32_t sz);
+  void SetExternal(size_t offset, uint32_t sz, ExternalRep rep);
+  ExternalRep GetExternalRep() const;
 
   // Switches to empty, non-external string.
   // Preserves all the attributes.
@@ -368,8 +374,6 @@ class CompactObj {
   // Prerequisite: IsCool() is true.
   // Returns the external data of the object incuding its ColdRecord.
   CoolItem GetCool() const;
-
-  void ImportExternal(const CompactObj& src);
 
   std::pair<size_t, size_t> GetExternalSlice() const;
 
@@ -466,8 +470,9 @@ class CompactObj {
   struct ExternalPtr {
     uint32_t serialized_size;
     uint16_t page_offset;  // 0 for multi-page blobs. != 0 for small blobs.
-    uint16_t is_cool : 1;
-    uint16_t is_reserved : 15;
+    uint8_t is_cool : 1;
+    uint8_t representation : 2;  // See ExternalRep
+    uint16_t is_reserved : 13;
 
     // We do not have enough space in the common area to store page_index together with
     // cool_record pointer. Therefore, we moved this field into TieredColdRecord itself.
