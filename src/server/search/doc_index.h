@@ -217,21 +217,24 @@ class ShardDocIndex {
   using FieldsValues = absl::InlinedVector<search::SortableValue, 4>;
 
   // DocKeyIndex manages mapping document keys to ids and vice versa through a simple interface.
+  // Keys are stored with their database index to support multiple databases.
   struct DocKeyIndex {
-    DocId Add(std::string_view key);
-    std::optional<DocId> Remove(std::string_view key);
+    using KeyWithDb = std::pair<DbIndex, std::string>;
 
-    std::string_view Get(DocId id) const;
+    DocId Add(std::string_view key, DbIndex db_index);
+    std::optional<DocId> Remove(std::string_view key, DbIndex db_index);
+
+    KeyWithDb Get(DocId id) const;
     size_t Size() const;
 
     // Get const reference to the internal ids map
-    const absl::flat_hash_map<std::string, DocId>& GetDocKeysMap() const {
+    const absl::flat_hash_map<KeyWithDb, DocId>& GetDocKeysMap() const {
       return ids_;
     }
 
    private:
-    absl::flat_hash_map<std::string, DocId> ids_;
-    std::vector<std::string> keys_;
+    absl::flat_hash_map<KeyWithDb, DocId> ids_;
+    std::vector<KeyWithDb> keys_;
     std::vector<DocId> free_ids_;
     DocId last_id_ = 0;
   };

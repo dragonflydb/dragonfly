@@ -3478,32 +3478,97 @@ TEST_F(SearchFamilyTest, SetStoreCommandsOverwriteIndexedHash) {
 }
 
 TEST_F(SearchFamilyTest, HsetOnDifferentDatabasesCrash) {
-  // Create one index that matches hash keys with field1 on db 0
   Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "field1", "TEXT"});
 
-  // First HSET on db 0 with field1
   EXPECT_THAT(Run({"HSET", "hash1", "field1", "value1"}), IntArg(1));
-
-  // Document should be in the index
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "value1"}), AreDocIds("hash1"));
 
-  // Execute SELECT command to switch to db 1
   EXPECT_THAT(Run({"SELECT", "1"}), "OK");
 
-  // HSET on db 1 with the same key name but different database
-  // This should NOT be indexed because the index belongs to db 0
-  // Previously this would crash due to key conflict in DocKeyIndex
   EXPECT_THAT(Run({"HSET", "hash1", "field1", "another_value"}), IntArg(1));
 
-  // FT.SEARCH on db 1 should still find the document from db 0
-  // because the index is bound to db 0
-  EXPECT_THAT(Run({"FT.SEARCH", "idx", "value1"}), AreDocIds("hash1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "another_value"}), AreDocIds("hash1"));
 
-  // Switch back to db 0
+  auto resp = Run({"FT.SEARCH", "idx", "value1"});
+  EXPECT_THAT(resp, AreDocIds("hash1"));
+
   EXPECT_THAT(Run({"SELECT", "0"}), "OK");
 
-  // The original document should still be in the index
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "value1"}), AreDocIds("hash1"));
+
+  resp = Run({"FT.SEARCH", "idx", "another_value"});
+  EXPECT_THAT(resp, AreDocIds("hash1"));
+}
+
+TEST_F(SearchFamilyTest, IndexWorksAcrossMultipleDatabases) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT"});
+
+  Run({"HSET", "doc:a", "title", "alpha"});
+  Run({"HSET", "doc:b", "title", "beta"});
+
+  auto resp = Run({"FT.SEARCH", "idx", "*"});
+  EXPECT_THAT(resp,
+              IsMapWithSize("doc:a", IsMap("title", "alpha"), "doc:b", IsMap("title", "beta")));
+
+  EXPECT_EQ(Run({"SELECT", "1"}), "OK");
+
+  Run({"HSET", "doc:c", "title", "gamma"});
+
+  resp = Run({"FT.SEARCH", "idx", "*"});
+  EXPECT_THAT(resp,
+              IsMapWithSize("doc:a", IsMap(), "doc:b", IsMap(), "doc:c", IsMap("title", "gamma")));
+
+  resp = Run({"FT.SEARCH", "idx", "gamma"});
+  EXPECT_THAT(resp, IsMapWithSize("doc:c", IsMap("title", "gamma")));
+
+  resp = Run({"FT.SEARCH", "idx", "alpha"});
+  EXPECT_THAT(resp, IsMapWithSize("doc:a", IsMap()));
+
+  EXPECT_EQ(Run({"SELECT", "0"}), "OK");
+
+  resp = Run({"FT.SEARCH", "idx", "*"});
+  EXPECT_THAT(resp, IsMapWithSize("doc:a", IsMap("title", "alpha"), "doc:b", IsMap("title", "beta"),
+                                  "doc:c", IsMap()));
+
+  resp = Run({"FT.SEARCH", "idx", "gamma"});
+  EXPECT_THAT(resp, IsMapWithSize("doc:c", IsMap()));
+
+  resp = Run({"FT.SEARCH", "idx", "*", "NOCONTENT"});
+  EXPECT_THAT(resp, IsArray(IntArg(3), "doc:a", "doc:b", "doc:c"));
+
+  EXPECT_EQ(Run({"SELECT", "2"}), "OK");
+  Run({"HSET", "doc:d", "title", "delta"});
+
+  resp = Run({"FT.SEARCH", "idx", "*", "NOCONTENT"});
+  EXPECT_THAT(resp, RespElementsAre(IntArg(4), "doc:a", "doc:b", "doc:c", "doc:d"));
+}
+
+TEST_F(SearchFamilyTest, SynonymsWorkAcrossMultipleDatabases) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT"});
+
+  Run({"HSET", "doc:1", "title", "cat"});
+  Run({"HSET", "doc:2", "title", "feline"});
+
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "group1", "cat", "feline"}), "OK");
+
+  auto resp = Run({"FT.SEARCH", "idx", "cat"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
+
+  EXPECT_EQ(Run({"SELECT", "1"}), "OK");
+
+  Run({"HSET", "doc:3", "title", "cat"});
+  Run({"HSET", "doc:4", "title", "feline"});
+
+  resp = Run({"FT.SEARCH", "idx", "cat"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3", "doc:4"));
+
+  resp = Run({"FT.SEARCH", "idx", "feline"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3", "doc:4"));
+
+  EXPECT_EQ(Run({"SELECT", "0"}), "OK");
+
+  resp = Run({"FT.SEARCH", "idx", "cat"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3", "doc:4"));
 }
 
 }  // namespace dfly
