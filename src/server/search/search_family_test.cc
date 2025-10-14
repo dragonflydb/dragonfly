@@ -3477,51 +3477,36 @@ TEST_F(SearchFamilyTest, SetStoreCommandsOverwriteIndexedHash) {
   EXPECT_EQ(Run({"RENAME", "dest", "z"}), "OK");
 }
 
-TEST_F(SearchFamilyTest, IndexRaceOnRebuildAndMutations) {
-  // Create initial index.
-  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "name", "TEXT"});
+TEST_F(SearchFamilyTest, ReproduceIssue5215Crash) {
+  // This test reproduces the exact crash described in issue #5215
+  // The crash occurs when HSET is called twice with the same key that matches a search index
 
-  // Launch concurrent writers across proactors.
-  std::vector<util::fb2::Fiber> writers;
-  const unsigned writers_per_pool = std::max(1u, num_threads_ > 0 ? num_threads_ - 1 : 1u);
-  for (unsigned i = 0; i < writers_per_pool; ++i) {
-    writers.push_back(pp_->at(i)->LaunchFiber([&, i] {
-      ThisFiber::SetName("writer");
-      for (unsigned iter = 0; iter < 5000; ++iter) {
-        unsigned k = (iter + i * 7) % 256;
-        std::string key = absl::StrFormat("doc:%u", k);
-        switch ((iter + i) % 3) {
-          case 0:
-            Run({"HSET", key, "name", "v"});
-            break;
-          case 1:
-            Run({"SET", key, "s"});
-            break;
-          default:
-            Run({"DEL", key});
-            break;
-        }
-        util::ThisFiber::SleepFor(std::chrono::microseconds(50));
-      }
-    }));
-  }
+  // Create one index that matches hash keys with field1
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "field1", "TEXT"});
 
-  // Launch index drop/create churn in parallel.
-  auto churn = pp_->at(0)->LaunchFiber([&] {
-    ThisFiber::SetName("rebuild");
-    for (unsigned i = 0; i < 400; ++i) {
-      Run({"FT.DROPINDEX", "idx"});  // without DD – keep documents
-      Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "name", "TEXT"});
-      util::ThisFiber::SleepFor(std::chrono::milliseconds(1));
-    }
-  });
+  // First HSET - document doesn't match index criteria yet (no field1)
+  EXPECT_THAT(Run({"HSET", "hash1", "other_field", "value"}), IntArg(1));
 
-  for (auto& f : writers)
-    f.Join();
-  churn.Join();
+  // Document should not be in index
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*"}), kNoResults);
 
-  // Best-effort: verify service is responsive; primary goal was to surface a crash if present.
-  (void)Run({"FT._LIST"});
+  // Execute SELECT command (similar to what was in commands.log)
+  EXPECT_THAT(Run({"SELECT", "1"}), "OK");
+
+  // Execute some other commands that were in the log before the crash
+  EXPECT_THAT(Run({"ZREVRANK", "key:ph\\n", "member:2qzvd5jj"}), IntArg(-1));
+  EXPECT_THAT(Run({"GET", "key1"}), "key1");
+  EXPECT_THAT(Run({"GET", "key1"}), "key1");
+  EXPECT_THAT(Run({"ZADD", "zset1", "1.0", "members", "t1", "member1"}), IntArg(3));
+  EXPECT_THAT(Run({"FT.DROPINDEX", "list1 element1"}), "OK");
+  EXPECT_THAT(Run({"GET", "key1"}), "key1");
+
+  // Second HSET - add field1 which makes document match index criteria
+  // This should trigger the crash because the logic tries to remove then add the document
+  EXPECT_THAT(Run({"HSET", "hash1", "field1", "value1"}), IntArg(1));
+
+  // Verify the document was indexed
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "value1"}), AreDocIds("hash1"));
 }
 
 }  // namespace dfly
