@@ -301,6 +301,8 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect
   return page_usage.CollectedStats();
 }
 
+constexpr uint32_t kRunAtLowPriority = 0u;
+
 // the memory defragmentation task is as follow:
 //  1. Check if memory usage is high enough
 //  2. Check if diff between commited and used memory is high enough
@@ -310,7 +312,6 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect
 //     priority.
 //     otherwise lower the task priority so that it would not use the CPU when not required
 uint32_t EngineShard::DefragTask() {
-  constexpr uint32_t kRunAtLowPriority = 0u;
   if (!namespaces) {
     return kRunAtLowPriority;
   }
@@ -324,6 +325,10 @@ uint32_t EngineShard::DefragTask() {
     }
   }
   return 6;  // priority.
+}
+
+uint32_t EngineShard::UpdateExpiresTask() {
+  return kRunAtLowPriority;
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
@@ -347,6 +352,8 @@ void EngineShard::Shutdown() {
 
 void EngineShard::StopPeriodicFiber() {
   ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
+  ProactorBase::me()->RemoveOnIdleTask(update_expire_base_task_);
+
   fiber_heartbeat_periodic_done_.Notify();
   if (fiber_heartbeat_periodic_.IsJoinable()) {
     fiber_heartbeat_periodic_.Join();
@@ -394,6 +401,7 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
     RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
   });
   defrag_task_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
+  update_expire_base_task_ = pb->AddOnIdleTask([this]() { return UpdateExpiresTask(); });
 }
 
 void EngineShard::StartPeriodicShardHandlerFiber(util::ProactorBase* pb,

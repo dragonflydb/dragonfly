@@ -252,11 +252,11 @@ class DbSlice {
   }
 
   int64_t ExpireTime(const ExpirePeriod& val) const {
-    return expire_base_[0] + val.duration_ms();
+    return expire_base_[val.generation_id()] + val.duration_ms();
   }
 
   ExpirePeriod FromAbsoluteTime(uint64_t time_ms) const {
-    return ExpirePeriod{time_ms - expire_base_[0]};
+    return ExpirePeriod{time_ms - expire_base_[expire_base_index_], expire_base_index_};
   }
 
   struct ItAndUpdater {
@@ -612,11 +612,11 @@ class DbSlice {
 
   ShardId shard_id_;
   uint8_t cache_mode_ : 1;
-
+  uint8_t expire_allowed_ : 1;
+  uint8_t expire_base_index_ : 1;
   EngineShard* owner_;
 
   int64_t expire_base_[2];  // Used for expire logic, represents a real clock.
-  bool expire_allowed_ = true;
 
   uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
   uint64_t next_moved_id_ = 1;
