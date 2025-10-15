@@ -147,6 +147,44 @@ ABSL_FLAG(uint32_t, scheduler_background_warrant, 5,
 ABSL_FLAG(uint32_t, squash_stats_latency_lower_limit, 0,
           "If set, will not track latency stats below this threshold (usec). ");
 
+namespace {
+
+struct ShutdownWatchdog {
+  util::fb2::Fiber watchdog_fb;
+  util::fb2::Done watchdog_done;
+  util::ProactorPool& pool;
+
+  explicit ShutdownWatchdog(util::ProactorPool& pp);
+  void Disarm();
+};
+
+ShutdownWatchdog::ShutdownWatchdog(util::ProactorPool& pp) : pool{pp} {
+  watchdog_fb = pool.GetNextProactor()->LaunchFiber([&] {
+    util::ThisFiber::SetName("shutdown-watchdog");
+
+    if (!watchdog_done.WaitFor(20s)) {
+      LOG(ERROR) << "Deadlock detected during shutdown";
+      absl::SetFlag(&FLAGS_alsologtostderr, true);
+      util::fb2::Mutex m;
+      pool.AwaitFiberOnAll([&m](unsigned index, auto*) {
+        util::ThisFiber::SetName("shutdown-watchdog");
+        std::unique_lock lk(m);
+        LOG(ERROR) << "Proactor " << index << ":\n";
+        util::fb2::detail::FiberInterface::PrintAllFiberStackTraces();
+      });
+    }
+  });
+}
+
+void ShutdownWatchdog::Disarm() {
+  watchdog_done.Notify();
+  watchdog_fb.JoinIfNeeded();
+}
+
+std::optional<ShutdownWatchdog> swd = std::nullopt;
+
+}  // namespace
+
 namespace dfly {
 
 #if defined(__linux__)
@@ -1088,6 +1126,8 @@ void Service::Shutdown() {
   // wait for all the pending callbacks to stop.
   ThisFiber::SleepFor(10ms);
   facade::Connection::Shutdown();
+
+  DisarmShutdownWatchdog();
 }
 
 OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, CmdArgList args) {
@@ -3065,6 +3105,18 @@ void Service::RegisterCommands() {
 const acl::AclFamily* Service::TestInit() {
   acl_family_.Init(nullptr, &user_registry_);
   return &acl_family_;
+}
+
+void ArmShutdownWatchdog(ProactorPool& pp) {
+  if (!swd.has_value()) {
+    swd.emplace(pp);
+  }
+}
+
+void DisarmShutdownWatchdog() {
+  if (swd.has_value()) {
+    swd->Disarm();
+  }
 }
 
 }  // namespace dfly

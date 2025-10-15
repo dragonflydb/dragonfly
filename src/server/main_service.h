@@ -203,4 +203,8 @@ class Service : public facade::ServiceInterface {
   uint32_t loading_state_counter_ ABSL_GUARDED_BY(mu_) = 0;
 };
 
+void ArmShutdownWatchdog(util::ProactorPool& pp);
+
+void DisarmShutdownWatchdog();
+
 }  // namespace dfly

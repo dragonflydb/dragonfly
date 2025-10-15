@@ -1220,6 +1220,8 @@ void ServerFamily::Shutdown() {
     });
   }
 
+  ArmShutdownWatchdog(service_.proactor_pool());
+
   client_pause_ec_.await([this] { return active_pauses_.load() == 0; });
 
   pb_task_->Await([this] {
