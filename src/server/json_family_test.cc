@@ -2632,6 +2632,16 @@ TEST_F(JsonFamilyTest, MGetLegacy) {
   EXPECT_THAT(resp.GetVec(), ElementsAre(R"(3)", R"(6)"));
 }
 
+TEST_F(JsonFamilyTest, DebugHelp) {
+  auto resp = Run({"JSON.DEBUG", "HELP"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_EQ(resp.GetVec().size(), 3);
+
+  EXPECT_THAT(resp.GetVec()[0].GetString(), HasSubstr("MEMORY"));
+  EXPECT_THAT(resp.GetVec()[1].GetString(), HasSubstr("FIELDS"));
+  EXPECT_THAT(resp.GetVec()[2].GetString(), HasSubstr("HELP"));
+}
+
 TEST_F(JsonFamilyTest, DebugFields) {
   string json = R"(
     [1, 2.3, "foo", true, null, {}, [], {"a":1, "b":2}, [1,2,3]]

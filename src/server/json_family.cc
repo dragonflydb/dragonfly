@@ -29,6 +29,7 @@
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/search/doc_index.h"
+#include "server/sharding.h"
 #include "server/string_family.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
@@ -1738,11 +1739,15 @@ void JsonFamily::Debug(CmdArgList args, const CommandContext& cmd_cntx) {
 
     WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      return OpMemory(t->GetOpArgs(shard), key, json_path);
+    ShardId sid = Shard(key, shard_set->size());
+    auto cb = [&]() {
+      EngineShard* shard = EngineShard::tlocal();
+      DbContext db_cntx{cmd_cntx.conn_cntx->ns, cmd_cntx.conn_cntx->conn_state.db_index};
+      OpArgs op_args{shard, nullptr, db_cntx};
+      return OpMemory(op_args, key, json_path);
     };
 
-    auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+    auto result = shard_set->Await(sid, std::move(cb));
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
     reply_generic::Send(result, rb);
     return;
@@ -1755,11 +1760,15 @@ void JsonFamily::Debug(CmdArgList args, const CommandContext& cmd_cntx) {
 
     WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      return OpFields(t->GetOpArgs(shard), key, json_path);
+    ShardId sid = Shard(key, shard_set->size());
+    auto cb = [&]() {
+      EngineShard* shard = EngineShard::tlocal();
+      DbContext db_cntx{cmd_cntx.conn_cntx->ns, cmd_cntx.conn_cntx->conn_state.db_index};
+      OpArgs op_args{shard, nullptr, db_cntx};
+      return OpFields(op_args, key, json_path);
     };
 
-    auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+    auto result = shard_set->Await(sid, std::move(cb));
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
     reply_generic::Send(result, rb);
     return;
@@ -2221,8 +2230,7 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.ARRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(
       ArrAppend);
   *registry << CI{"JSON.ARRINDEX", CO::READONLY | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(ArrIndex);
-  // TODO: Support negative first_key index to revive the debug sub-command
-  *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -3, 2, 2, acl::JSON}.HFUNC(Debug)
+  *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 0, 0, acl::JSON}.HFUNC(Debug)
             << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Resp)
             << CI{"JSON.SET", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(Set)
             << CI{"JSON.MSET", kMsetFlags, -4, 1, -1, acl::JSON}.HFUNC(MSet)
