@@ -1484,6 +1484,22 @@ auto OpFields(const OpArgs& op_args, string_view key, const WrappedJsonPath& jso
   return JsonReadOnlyOperation<std::optional<std::size_t>>(op_args, key, json_path, std::move(cb));
 }
 
+// Returns numeric vector that represents the memory size in bytes of JSON value at each path.
+auto OpMemory(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_path) {
+  auto cb = [](const string_view&, const JsonType& val) -> std::optional<std::size_t> {
+    auto mem_cb = [](const void* ptr) -> std::size_t {
+      if (!ptr) {
+        return 0;
+      }
+      return mi_usable_size(const_cast<void*>(ptr));
+    };
+    return val.compute_memory_size(mem_cb);
+  };
+  return JsonReadOnlyOperation<std::optional<std::size_t>>(
+      op_args, key, json_path, std::move(cb),
+      ReadOnlyOperationOptions{false, CallbackResultOptions::DefaultReadOnlyOptions()});
+}
+
 // Returns json vector that represents the result of the json query.
 auto OpResp(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_path) {
   auto cb = [](const string_view&, const JsonType& val) { return val; };
@@ -1702,35 +1718,54 @@ void JsonFamily::Debug(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view command = parser.Next();
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  // The 'MEMORY' sub-command is not supported yet, calling to operation function should be added
-  // here.
+
   if (absl::EqualsIgnoreCase(command, "help")) {
-    builder->StartArray(2);
+    builder->StartArray(3);
     builder->SendBulkString(
-        "JSON.DEBUG FIELDS <key> <path> - report number of fields in the JSON element.");
+        "JSON.DEBUG MEMORY <key> [path] - report memory size (bytes) of the JSON element. "
+        "Path defaults to root if not provided.");
+    builder->SendBulkString(
+        "JSON.DEBUG FIELDS <key> [path] - report number of fields in the JSON element. "
+        "Path defaults to root if not provided.");
     builder->SendBulkString("JSON.DEBUG HELP - print help message.");
     return;
   }
 
-  if (!absl::EqualsIgnoreCase(command, "fields")) {
-    builder->SendError(facade::UnknownSubCmd(command, "JSON.DEBUG"), facade::kSyntaxErrType);
+  if (absl::EqualsIgnoreCase(command, "memory")) {
+    // JSON.DEBUG MEMORY
+    string_view key = parser.Next();
+    string_view path = parser.NextOrDefault();
+
+    WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
+
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return OpMemory(t->GetOpArgs(shard), key, json_path);
+    };
+
+    auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+    auto* rb = static_cast<RedisReplyBuilder*>(builder);
+    reply_generic::Send(result, rb);
     return;
   }
 
-  // JSON.DEBUG FIELDS
+  if (absl::EqualsIgnoreCase(command, "fields")) {
+    // JSON.DEBUG FIELDS
+    string_view key = parser.Next();
+    string_view path = parser.NextOrDefault();
 
-  string_view key = parser.Next();
-  string_view path = parser.NextOrDefault();
+    WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return OpFields(t->GetOpArgs(shard), key, json_path);
+    };
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpFields(t->GetOpArgs(shard), key, json_path);
-  };
+    auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+    auto* rb = static_cast<RedisReplyBuilder*>(builder);
+    reply_generic::Send(result, rb);
+    return;
+  }
 
-  auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  builder->SendError(facade::UnknownSubCmd(command, "JSON.DEBUG"), facade::kSyntaxErrType);
 }
 
 void JsonFamily::MGet(CmdArgList args, const CommandContext& cmd_cntx) {
