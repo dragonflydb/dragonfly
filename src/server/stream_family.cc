@@ -1596,9 +1596,11 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<stre
     } else if (first_entry) {
       streamGetEdgeID(stream_inst, 1, 1, &stream_inst->first_id);
     }
+    // Only update size tracking if we actually deleted something.
+    // This avoids issues with memory tracking noise from other operations
+    // in the same thread.
+    tracker.UpdateStreamSize(cobj);
   }
-
-  tracker.UpdateStreamSize(cobj);
   return deleted;
 }
 
