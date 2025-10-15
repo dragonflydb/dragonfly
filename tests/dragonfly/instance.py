@@ -489,9 +489,7 @@ class RedisServer:
         self.proc = None
 
     def start(self, redis7=None, **kwargs):
-        servers = ["redis-server-7.2.2"]
-        if not redis7:
-            servers += ["redis-server-6.2.11", "valkey-server-8.0.1"]
+        servers = ["valkey-server"]
         command = [
             random.choice(servers),
             f"--port {self.port}",

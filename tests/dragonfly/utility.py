@@ -98,7 +98,7 @@ async def info_tick_timer(client: aioredis.Redis, section=None, **kwargs):
 # for a master - waits that it finishes loading a snapshot if it's budy doing so,
 # and for replica it waits until it finishes its full sync stage and reaches the stable sync state.
 async def wait_available_async(
-    clients: Union[aioredis.Redis, Iterable[aioredis.Redis]], timeout=120
+    clients: Union[aioredis.Redis, Iterable[aioredis.Redis]], timeout=10
 ):
     if not isinstance(clients, aioredis.Redis):
         # Syntactic sugar to seamlessly handle an array of clients.

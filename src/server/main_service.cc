@@ -1297,6 +1297,11 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       break;
   }
 
+  if (cid->name() == "PING" || cid->name() == "ping") {
+    VLOG(1) << "Command " << cid->name() << " not executed because global state is " << gstate;
+    return ErrorReply(kLoadingErr);
+  }
+
   if (!allowed_by_state) {
     VLOG(1) << "Command " << cid->name() << " not executed because global state is " << gstate;
 

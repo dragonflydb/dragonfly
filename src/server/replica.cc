@@ -697,6 +697,14 @@ error_code Replica::ConsumeRedisStream() {
 
   acks_fb_ = fb2::Fiber("redis_acks", &Replica::RedisStreamAcksFb, this);
 
+  fb2::EnableSwitchToLog(true);
+  fb2::EnablePreemptLog(true);
+
+  absl::Cleanup deferred{[] {
+    fb2::EnableSwitchToLog(false);
+    fb2::EnablePreemptLog(false);
+  }};
+
   while (true) {
     auto response = ReadRespReply(&io_buf, /*copy_msg=*/false);
     if (!response.has_value()) {
