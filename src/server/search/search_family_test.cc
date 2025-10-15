@@ -227,24 +227,25 @@ TEST_F(SearchFamilyTest, CreateDropDifferentDatabases) {
       Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "doc-", "SCHEMA", "name", "TEXT"});
   EXPECT_EQ(resp, "OK");
 
+  // Add some data on database 0 (only db 0 is indexed)
+  Run({"hset", "doc-0", "name", "Name of 0"});
+
+  // Verify search works on db 0
+  resp = Run({"ft.search", "idx-1", "*"});
+  EXPECT_THAT(resp, IsMapWithSize("doc-0", IsMap("name", "Name of 0")));
+
   EXPECT_EQ(Run({"select", "1"}), "OK");  // change database
 
   // Creating an index on non zero database must fail
   resp = Run({"ft.create", "idx-2", "ON", "JSON", "PREFIX", "1", "prefix-2"});
   EXPECT_THAT(resp, ErrArg("ERR Cannot create index on db != 0"));
 
-  // Add some data to the index
-  Run({"hset", "doc-0", "name", "Name of 0"});
-
-  // ft.search must work on the another database
+  // Search from db 1 should return 0 results (only db 0 is indexed)
   resp = Run({"ft.search", "idx-1", "*"});
-  EXPECT_THAT(resp, IsMapWithSize("doc-0", IsMap("name", "Name of 0")));
+  EXPECT_THAT(resp, IntArg(0));
 
-  // ft.dropindex must work on the another database
+  // ft.dropindex must work from another database
   EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
-
-  EXPECT_THAT(Run({"ft.info", "idx-1"}), ErrArg("ERR Unknown Index name"));
-  EXPECT_EQ(Run({"select", "0"}), "OK");
   EXPECT_THAT(Run({"ft.info", "idx-1"}), ErrArg("ERR Unknown Index name"));
 }
 
@@ -3475,6 +3476,32 @@ TEST_F(SearchFamilyTest, SetStoreCommandsOverwriteIndexedHash) {
   EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
   EXPECT_THAT(Run({"SDIFFSTORE", "dest", "set1", "set2"}), IntArg(1));
   EXPECT_EQ(Run({"RENAME", "dest", "z"}), "OK");
+}
+
+TEST_F(SearchFamilyTest, HsetOnDifferentDatabasesCrash) {
+  // This test verifies that creating documents with the same key on different databases
+  // doesn't crash. Only database 0 is indexed.
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "field1", "TEXT"});
+
+  // Create document on database 0 - should be indexed
+  EXPECT_THAT(Run({"HSET", "hash1", "field1", "value1"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "value1"}), AreDocIds("hash1"));
+
+  // Switch to database 1
+  EXPECT_THAT(Run({"SELECT", "1"}), "OK");
+
+  // Create document with same key on database 1 - should NOT crash
+  EXPECT_THAT(Run({"HSET", "hash1", "field1", "another_value"}), IntArg(1));
+
+  // Search on database 1 should return no results (only db 0 is indexed)
+  auto resp = Run({"FT.SEARCH", "idx", "another_value"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // Switch back to database 0
+  EXPECT_THAT(Run({"SELECT", "0"}), "OK");
+
+  // Search on database 0 should still find the original document
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "value1"}), AreDocIds("hash1"));
 }
 
 }  // namespace dfly
