@@ -9,6 +9,7 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
 
+#include "base/histogram.h"
 #include "core/expire_period.h"
 #include "core/intent_lock.h"
 #include "server/conn_context.h"
@@ -68,6 +69,16 @@ struct DbTableStats {
 
   size_t tiered_entries = 0;
   size_t tiered_used_bytes = 0;
+
+  struct {
+    // Per-database hits/misses on keys
+    size_t hits = 0;
+    size_t misses = 0;
+
+    // Per-database expired/evicted keys
+    size_t expired_keys = 0;
+    size_t evicted_keys = 0;
+  } events;
 
   std::array<size_t, OBJ_TYPE_MAX> memory_usage_by_type = {};
 
@@ -129,8 +140,29 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   std::unique_ptr<SlotStats[]> slots_stats;
   ExpireTable::Cursor expire_cursor;
 
-  TopKeys* top_keys = nullptr;
-  uint8_t* dense_hll = nullptr;
+  struct SampleTopKeys {
+    TopKeys* top_keys = nullptr;
+    uint64_t total_samples = 0;
+
+    SampleTopKeys() = default;
+    ~SampleTopKeys();
+    void operator=(const SampleTopKeys& other) = delete;
+    SampleTopKeys(const SampleTopKeys& other) = delete;
+  };
+  SampleTopKeys* sample_top_keys = nullptr;
+
+  struct SampleUniqueKeys {
+    uint8_t* dense_hll = nullptr;
+    uint64_t total_samples = 0;
+
+    SampleUniqueKeys() = default;
+    ~SampleUniqueKeys();
+
+    void operator=(const SampleUniqueKeys& other) = delete;
+    SampleUniqueKeys(const SampleUniqueKeys& other) = delete;
+  };
+  SampleUniqueKeys* sample_unique_keys = nullptr;
+  base::Histogram* sample_values_hist = nullptr;
 
   DbIndex index;
   uint32_t thread_index;
@@ -150,5 +182,21 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
 // There we need to preserve the copy of the table in case someone flushes it during
 // the snapshot process. We copy the pointers in StartSnapshotInShard function.
 using DbTableArray = std::vector<boost::intrusive_ptr<DbTable>>;
+
+// ChangeReq - describes the change to the table.
+struct ChangeReq {
+  // If iterator is set then it's an update to the existing bucket.
+  // Otherwise (string_view is set) then it's a new key that is going to be added to the table.
+  std::variant<PrimeTable::bucket_iterator, std::string_view> change;
+
+  explicit ChangeReq(PrimeTable::bucket_iterator it) : change(it) {
+  }
+  explicit ChangeReq(std::string_view key) : change(key) {
+  }
+
+  const PrimeTable::bucket_iterator* update() const {
+    return std::get_if<PrimeTable::bucket_iterator>(&change);
+  }
+};
 
 }  // namespace dfly

@@ -6,7 +6,6 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
-#include <absl/strings/match.h>
 
 #include <memory>
 #include <optional>
@@ -16,13 +15,17 @@
 
 #include "base/pmr/memory_resource.h"
 #include "core/mi_memory_resource.h"
+#include "core/search/base.h"
 #include "core/search/search.h"
 #include "core/search/synonyms.h"
 #include "server/common.h"
 #include "server/search/aggregator.h"
+#include "server/search/index_join.h"
 #include "server/table.h"
 
 namespace dfly {
+
+struct BaseAccessor;
 
 using SearchDocData = absl::flat_hash_map<std::string /*field*/, search::SortableValue /*value*/>;
 using Synonyms = search::Synonyms;
@@ -32,10 +35,8 @@ std::string_view SearchFieldTypeToString(search::SchemaField::FieldType);
 struct SerializedSearchDoc {
   std::string key;
   SearchDocData values;
-  search::ResultScore score;
-
-  bool operator<(const SerializedSearchDoc& other) const;
-  bool operator>=(const SerializedSearchDoc& other) const;
+  float knn_score;
+  search::SortableValue sort_score;
 };
 
 struct SearchResult {
@@ -56,93 +57,40 @@ struct SearchResult {
   std::optional<facade::ErrorReply> error;
 };
 
-/* SearchField represents a field that can store combinations of identifiers and aliases in various
-   forms: [identifier and alias], [alias and new_alias], [new identifier and alias] (used for JSON
-   data) This class provides methods to retrieve the actual identifier and alias for a field,
-   handling different naming conventions and resolving names based on the schema. */
-class SearchField {
- private:
-  static bool IsJsonPath(std::string_view name) {
-    if (name.size() < 2) {
-      return false;
-    }
-    return name.front() == '$' && (name[1] == '.' || name[1] == '[');
+// Field reference with optional alias as parsed from RETURN [field AS alias], LOAD, etc...
+struct FieldReference {
+  explicit FieldReference(std::string_view name, std::string_view alias = "")
+      : name_{name}, alias_{alias} {
   }
 
- public:
-  SearchField() = default;
-
-  explicit SearchField(StringOrView name) : name_(std::move(name)) {
-    is_short_name_ = !IsJsonPath(NameView());
+  std::string_view Identifier(const search::Schema& schema, bool is_json) const {
+    return (is_json && IsJsonPath(name_)) ? name_ : schema.LookupAlias(name_);
   }
 
-  SearchField(StringOrView name, bool is_short_name)
-      : name_(std::move(name)), is_short_name_(is_short_name) {
+  std::string_view Name() const {
+    return name_;
   }
 
-  SearchField(StringOrView name, bool is_short_name, StringOrView new_alias)
-      : name_(std::move(name)), is_short_name_(is_short_name), new_alias_(std::move(new_alias)) {
-  }
-
-  std::string_view GetIdentifier(const search::Schema& schema, bool is_json_field) const {
-    auto as_view = NameView();
-    if (!is_short_name_ || (is_json_field && IsJsonPath(as_view))) {
-      return as_view;
-    }
-    return schema.LookupAlias(as_view);
-  }
-
-  std::string_view GetShortName() const {
-    if (HasNewAlias()) {
-      return AliasView();
-    }
-    return NameView();
-  }
-
-  std::string_view GetShortName(const search::Schema& schema) const {
-    if (HasNewAlias()) {
-      return AliasView();
-    }
-    return is_short_name_ ? NameView() : schema.LookupIdentifier(NameView());
-  }
-
-  /* Returns a new SearchField instance with name and alias stored as views to the values in this
-   * SearchField */
-  SearchField View() const {
-    if (HasNewAlias()) {
-      return SearchField{StringOrView::FromView(NameView()), is_short_name_,
-                         StringOrView::FromView(AliasView())};
-    }
-    return SearchField{StringOrView::FromView(NameView()), is_short_name_};
-  }
-
-  std::string_view NameView() const {
-    return name_.view();
+  std::string_view OutputName() const {
+    return alias_.empty() ? name_ : alias_;
   }
 
  private:
-  bool HasNewAlias() const {
-    return !new_alias_.empty();
-  }
+  static bool IsJsonPath(std::string_view name);
 
-  std::string_view AliasView() const {
-    return new_alias_.view();
-  }
-
- private:
-  StringOrView name_;
-  bool is_short_name_;
-  StringOrView new_alias_;
+  std::string_view name_, alias_;
 };
-
-using SearchFieldsList = std::vector<SearchField>;
 
 enum class SortOrder { ASC, DESC };
 
 struct SearchParams {
   struct SortOption {
-    SearchField field;
+    FieldReference field;
     SortOrder order = SortOrder::ASC;
+
+    bool IsSame(const search::KnnScoreSortOption& knn_sort) const {
+      return knn_sort.score_field_alias == field.OutputName();
+    }
   };
 
   // Parameters for "LIMIT offset total": select total amount documents with a specific offset from
@@ -155,17 +103,19 @@ struct SearchParams {
   2. If set but empty -> no fields should be returned
   3. If set and not empty -> return only these fields
   */
-  std::optional<SearchFieldsList> return_fields;
+  std::optional<std::vector<FieldReference>> return_fields;
 
   /*
     Fields that should be also loaded from the document.
 
     Only one of load_fields and return_fields should be set.
   */
-  std::optional<SearchFieldsList> load_fields;
-  bool no_content = false;
+  std::optional<std::vector<FieldReference>> load_fields;
 
   std::optional<SortOption> sort_option;
+
+  search::OptionalFilters optional_filters;
+
   search::QueryParams query_params;
 
   bool ShouldReturnAllFields() const {
@@ -173,17 +123,62 @@ struct SearchParams {
   }
 
   bool IdsOnly() const {
-    return no_content || (return_fields && return_fields->empty());
+    return return_fields && return_fields->empty();
   }
 
   bool ShouldReturnField(std::string_view alias) const;
 };
 
 struct AggregateParams {
+  struct JoinParams {
+    // Fist field is the index name, second is the field name.
+    using Field = std::pair<std::string, std::string>;
+
+    struct Condition {
+      Condition(std::string_view field_, std::string_view foreign_index_,
+                std::string_view foreign_field_)
+          : field{field_}, foreign_field{Field{foreign_index_, foreign_field_}} {
+      }
+
+      std::string field;
+      Field foreign_field;
+    };
+
+    std::string index;
+    std::string index_alias;
+    std::vector<Condition> conditions;
+    std::string query = "*";
+  };
+
+  /* Can have 2 scenarios:
+      1. No joins - then this is ignored
+      2. Has joins and SORTBY ... LIMIT option - then this is used to sort/limit right after join
+      3. Has joins and LIMIT option - then this is used to limit right after join.
+     Next aggregation steps after first LIMIT or first SORTBY will be applied on the final result,
+     after loading the data for all joined documents. */
+  struct JoinAggregateParams {
+    static constexpr size_t kDefaultLimit = std::numeric_limits<size_t>::max();
+
+    bool HasLimit() const {
+      return limit_total != kDefaultLimit;
+    }
+
+    bool HasValue() const {
+      return HasLimit() || sort.has_value();
+    }
+
+    size_t limit_offset = 0;
+    size_t limit_total = kDefaultLimit;
+    std::optional<aggregate::SortParams> sort;
+  };
+
   std::string_view index, query;
   search::QueryParams params;
 
-  std::optional<SearchFieldsList> load_fields;
+  std::vector<JoinParams> joins;
+  JoinAggregateParams join_agg_params;
+
+  std::optional<std::vector<FieldReference>> load_fields;
   std::vector<aggregate::AggregationStep> steps;
 };
 
@@ -218,6 +213,9 @@ class ShardDocIndex {
   friend class ShardDocIndices;
   using DocId = search::DocId;
 
+  // Used in FieldsValuesPerDocId to store values for each field per document
+  using FieldsValues = absl::InlinedVector<search::SortableValue, 4>;
+
   // DocKeyIndex manages mapping document keys to ids and vice versa through a simple interface.
   struct DocKeyIndex {
     DocId Add(std::string_view key);
@@ -225,6 +223,11 @@ class ShardDocIndex {
 
     std::string_view Get(DocId id) const;
     size_t Size() const;
+
+    // Get const reference to the internal ids map
+    const absl::flat_hash_map<std::string, DocId>& GetDocKeysMap() const {
+      return ids_;
+    }
 
    private:
     absl::flat_hash_map<std::string, DocId> ids_;
@@ -245,6 +248,16 @@ class ShardDocIndex {
   std::vector<SearchDocData> SearchForAggregator(const OpArgs& op_args,
                                                  const AggregateParams& params,
                                                  search::SearchAlgorithm* search_algo) const;
+
+  // Methods needed for join operation
+  join::Vector<join::OwnedEntry> PreagregateDataForJoin(
+      const OpArgs& op_args, absl::Span<const std::string_view> join_fields,
+      search::SearchAlgorithm* search_algo) const;
+
+  using FieldsValuesPerDocId = absl::flat_hash_map<DocId, FieldsValues>;
+  FieldsValuesPerDocId LoadKeysData(const OpArgs& op_args,
+                                    const absl::flat_hash_set<search::DocId>& doc_ids,
+                                    absl::Span<const std::string_view> fields_to_load) const;
 
   // Return whether base index matches
   bool Matches(std::string_view key, unsigned obj_code) const;
@@ -269,9 +282,22 @@ class ShardDocIndex {
   void RebuildForGroup(const OpArgs& op_args, const std::string_view& group_id,
                        const std::vector<std::string_view>& terms);
 
+  // Public access to key index for direct operations (e.g., when dropping index with DD)
+  const DocKeyIndex& key_index() const {
+    return key_index_;
+  }
+
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
+
+  using LoadedEntry = std::pair<std::string_view, std::unique_ptr<BaseAccessor>>;
+  std::optional<LoadedEntry> LoadEntry(search::DocId id, const OpArgs& op_args) const;
+
+  // Behaviour identical to SortIndex::Sort for non-sortable fields that need to be fetched first
+  std::vector<search::SortableValue> KeepTopKSorted(std::vector<DocId>* ids, size_t limit,
+                                                    const SearchParams::SortOption& sort,
+                                                    const OpArgs& op_args) const;
 
  private:
   std::shared_ptr<const DocIndex> base_;
@@ -293,8 +319,8 @@ class ShardDocIndices {
   void InitIndex(const OpArgs& op_args, std::string_view name,
                  std::shared_ptr<const DocIndex> index);
 
-  // Drop index, return true if it existed and was dropped
-  bool DropIndex(std::string_view name);
+  // Drop index, return the dropped index if it existed or nullptr otherwise
+  std::unique_ptr<ShardDocIndex> DropIndex(std::string_view name);
 
   // Drop all indices
   void DropAllIndices();

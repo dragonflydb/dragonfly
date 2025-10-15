@@ -323,7 +323,7 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> ResultConsumed {
     return {BAD_ARRAYLEN, res.second};
   }
 
-  if (server_mode_ && (parse_stack_.size() > 0 || !cached_expr_->empty()))
+  if (server_mode_ && (!parse_stack_.empty() || !cached_expr_->empty()))
     return {BAD_STRING, res.second};
 
   if (len <= 0) {

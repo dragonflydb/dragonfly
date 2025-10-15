@@ -36,10 +36,9 @@ class PendingBuf {
     if (bufs_.back().buf.size() == Buf::kMaxBufSize) {
       bufs_.emplace_back();
     }
-    auto& fron_buf = bufs_.back();
-
-    fron_buf.mem_size += str.size();
-    fron_buf.buf.push_back(std::move(str));
+    auto& front_buf = bufs_.back();
+    front_buf.mem_size += str.size();
+    front_buf.buf.push_back(std::move(str));
   }
 
   // should be called to get the next buffer for sending
@@ -49,6 +48,10 @@ class PendingBuf {
       bufs_.emplace_back();
     }
     return bufs_.front();
+  }
+
+  size_t FrontBufSize() const {
+    return bufs_.front().mem_size;
   }
 
   // should be called when the buf from PrepareSendingBuf() method was sent

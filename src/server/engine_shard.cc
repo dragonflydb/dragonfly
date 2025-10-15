@@ -7,7 +7,10 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
+#include <memory>
+
 #include "base/flags.h"
+#include "core/page_usage_stats.h"
 #include "io/proc_reader.h"
 
 extern "C" {
@@ -28,7 +31,7 @@ ABSL_FLAG(float, mem_defrag_threshold, 0.7,
           "Minimum percentage of used memory relative to maxmemory cap before running "
           "defragmentation");
 
-ABSL_FLAG(uint32_t, mem_defrag_check_sec_interval, 10,
+ABSL_FLAG(uint32_t, mem_defrag_check_sec_interval, 60,
           "Number of seconds between every defragmentation necessity check");
 
 ABSL_FLAG(float, mem_defrag_waste_threshold, 0.2,
@@ -42,12 +45,6 @@ ABSL_FLAG(int32_t, hz, 100,
           "Base frequency at which the server performs other background tasks. "
           "Warning: not advised to decrease in production.");
 
-ABSL_FLAG(string, shard_round_robin_prefix, "",
-          "When non-empty, keys which start with this prefix are not distributed across shards "
-          "based on their value but instead via round-robin. Use cautiously! This can efficiently "
-          "support up to a few hundreds of prefixes. Note: prefix is looked inside hash tags when "
-          "cluster mode is enabled.");
-
 ABSL_FLAG(string, tiered_prefix, "",
           "Enables tiered storage if set. "
           "The string denotes the path and prefix of the files "
@@ -55,16 +52,15 @@ ABSL_FLAG(string, tiered_prefix, "",
           "high performance NVME ssd disks for this. Also, seems that pipeline_squash does "
           "not work well with tiered storage, so it's advised to set it to 0.");
 
-ABSL_FLAG(float, tiered_offload_threshold, 0.5,
-          "The ratio of used/max memory above which we start offloading values to disk");
-
 ABSL_FLAG(bool, enable_heartbeat_eviction, true,
           "Enable eviction during heartbeat when memory is under pressure.");
-
+ABSL_FLAG(bool, enable_heartbeat_rss_eviction, true,
+          "Enable eviction during heartbeat when rss memory is under pressure. Evicition based "
+          "on used_memory will still be enabled.");
 ABSL_FLAG(double, eviction_memory_budget_threshold, 0.1,
           "Eviction starts when the free memory (including RSS memory) drops below "
           "eviction_memory_budget_threshold * max_memory_limit.");
-
+ABSL_FLAG(bool, background_heartbeat, false, "Whether to run heartbeat as a background fiber");
 ABSL_DECLARE_FLAG(uint32_t, max_eviction_per_heartbeat);
 
 namespace dfly {
@@ -75,96 +71,6 @@ using namespace util;
 namespace {
 
 constexpr uint64_t kCursorDoneState = 0u;
-
-struct ShardMemUsage {
-  std::size_t commited = 0;
-  std::size_t used = 0;
-  std::size_t wasted_mem = 0;
-};
-
-std::ostream& operator<<(std::ostream& os, const ShardMemUsage& mem) {
-  return os << "commited: " << mem.commited << " vs used " << mem.used << ", wasted memory "
-            << mem.wasted_mem;
-}
-
-ShardMemUsage ReadShardMemUsage(float wasted_ratio) {
-  ShardMemUsage usage;
-  zmalloc_get_allocator_wasted_blocks(wasted_ratio, &usage.used, &usage.commited,
-                                      &usage.wasted_mem);
-  return usage;
-}
-
-// RoundRobinSharder implements a way to distribute keys that begin with some prefix.
-// Round-robin is disabled by default. It is not a general use-case optimization, but instead only
-// reasonable when there are a few highly contended keys, which we'd like to spread between the
-// shards evenly.
-// When enabled, the distribution is done via hash table: the hash of the key is used to look into
-// a pre-allocated vector. This means that collisions are possible, but are very unlikely if only
-// a few keys are used.
-// Thread safe.
-class RoundRobinSharder {
- public:
-  static void Init() {
-    round_robin_prefix_ = absl::GetFlag(FLAGS_shard_round_robin_prefix);
-
-    if (IsEnabled()) {
-      // ~100k entries will consume 200kb per thread, and will allow 100 keys with < 2.5% collision
-      // probability. Since this has a considerable footprint, we only allocate when enabled. We're
-      // using a prime number close to 100k for better utilization.
-      constexpr size_t kRoundRobinSize = 100'003;
-      round_robin_shards_tl_cache_.resize(kRoundRobinSize);
-      std::fill(round_robin_shards_tl_cache_.begin(), round_robin_shards_tl_cache_.end(),
-                kInvalidSid);
-
-      util::fb2::LockGuard guard(mutex_);
-      if (round_robin_shards_.empty()) {
-        round_robin_shards_ = round_robin_shards_tl_cache_;
-      }
-    }
-  }
-
-  static void Destroy() ABSL_LOCKS_EXCLUDED(mutex_) {
-    round_robin_shards_tl_cache_.clear();
-
-    util::fb2::LockGuard guard(mutex_);
-    round_robin_shards_.clear();
-  }
-
-  static bool IsEnabled() {
-    return !round_robin_prefix_.empty();
-  }
-
-  static optional<ShardId> TryGetShardId(string_view key, XXH64_hash_t key_hash) {
-    DCHECK(!round_robin_shards_tl_cache_.empty());
-
-    if (!absl::StartsWith(key, round_robin_prefix_)) {
-      return nullopt;
-    }
-
-    size_t index = key_hash % round_robin_shards_tl_cache_.size();
-    ShardId sid = round_robin_shards_tl_cache_[index];
-
-    if (sid == kInvalidSid) {
-      util::fb2::LockGuard guard(mutex_);
-      sid = round_robin_shards_[index];
-      if (sid == kInvalidSid) {
-        sid = next_shard_;
-        round_robin_shards_[index] = sid;
-        next_shard_ = (next_shard_ + 1) % shard_set->size();
-      }
-      round_robin_shards_tl_cache_[index] = sid;
-    }
-
-    return sid;
-  }
-
- private:
-  static thread_local string round_robin_prefix_;
-  static thread_local vector<ShardId> round_robin_shards_tl_cache_;
-  static vector<ShardId> round_robin_shards_ ABSL_GUARDED_BY(mutex_);
-  static ShardId next_shard_ ABSL_GUARDED_BY(mutex_);
-  static fb2::Mutex mutex_;
-};
 
 bool HasContendedLocks(ShardId shard_id, Transaction* trx, const DbTable* table) {
   auto is_contended = [table](LockFp fp) { return table->trans_locks.Find(fp)->IsContended(); };
@@ -185,12 +91,6 @@ bool HasContendedLocks(ShardId shard_id, Transaction* trx, const DbTable* table)
 
   return false;
 }
-
-thread_local string RoundRobinSharder::round_robin_prefix_;
-thread_local vector<ShardId> RoundRobinSharder::round_robin_shards_tl_cache_;
-vector<ShardId> RoundRobinSharder::round_robin_shards_;
-ShardId RoundRobinSharder::next_shard_;
-fb2::Mutex RoundRobinSharder::mutex_;
 
 constexpr size_t kQueueLen = 64;
 
@@ -216,77 +116,10 @@ size_t CalculateHowManyBytesToEvictOnShard(size_t global_memory_limit, size_t gl
   return shard_budget < shard_memory_threshold ? (shard_memory_threshold - shard_budget) : 0;
 }
 
-/* Calculates the number of bytes to evict based on memory and rss memory usage. */
-size_t CalculateEvictionBytes() {
-  const size_t shards_count = shard_set->size();
-  const double eviction_memory_budget_threshold = GetFlag(FLAGS_eviction_memory_budget_threshold);
-
-  const size_t shard_memory_budget_threshold =
-      size_t(max_memory_limit * eviction_memory_budget_threshold) / shards_count;
-
-  const size_t global_used_memory = used_mem_current.load(memory_order_relaxed);
-
-  // Calculate how many bytes we need to evict on this shard
-  size_t goal_bytes = CalculateHowManyBytesToEvictOnShard(max_memory_limit, global_used_memory,
-                                                          shard_memory_budget_threshold);
-
-  // TODO: Eviction due to rss usage is not working well as it causes eviction
-  // of to many keys untill we finally see decrease in rss. We need to improve
-  // this logic before we enable it.
-  /*
-  const double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
-  // If rss_oom_deny_ratio is set, we should evict depending on rss memory too
-  if (rss_oom_deny_ratio > 0.0) {
-    const size_t max_rss_memory = size_t(rss_oom_deny_ratio * max_memory_limit);
-    // We start eviction when we have less than eviction_memory_budget_threshold * 100% of free rss
-    memory const size_t shard_rss_memory_budget_threshold =
-        size_t(max_rss_memory * eviction_memory_budget_threshold) / shards_count;
-
-    // Calculate how much rss memory is used by all shards
-    const size_t global_used_rss_memory = rss_mem_current.load(memory_order_relaxed);
-
-    // Try to evict more bytes if we are close to the rss memory limit
-    goal_bytes = std::max(
-        goal_bytes, CalculateHowManyBytesToEvictOnShard(max_rss_memory, global_used_rss_memory,
-                                                        shard_rss_memory_budget_threshold));
-  }
-  */
-
-  return goal_bytes;
-}
-
 }  // namespace
 
 __thread EngineShard* EngineShard::shard_ = nullptr;
 uint64_t TEST_current_time_ms = 0;
-
-ShardId Shard(string_view v, ShardId shard_num) {
-  // This cluster sharding is not necessary and may degrade keys distribution among shard threads.
-  // For example, if we have 3 shards, then no single-char keys will be assigned to shard 2 and
-  // 32 single char keys in range ['_' - '~'] will be assigned to shard 0.
-  // Yes, SlotId function does not have great distribution properties.
-  // On the other side, slot based sharding may help with pipeline squashing optimizations,
-  // because they rely on commands being single-sharded.
-  // TODO: once we improve our squashing logic, we can remove this.
-  if (IsClusterShardedBySlot()) {
-    return KeySlot(v) % shard_num;
-  }
-
-  if (IsClusterShardedByTag()) {
-    v = LockTagOptions::instance().Tag(v);
-  }
-
-  XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
-
-  if (RoundRobinSharder::IsEnabled()) {
-    auto round_robin = RoundRobinSharder::TryGetShardId(v, hash);
-    if (round_robin.has_value()) {
-      return *round_robin;
-    }
-  }
-
-  return hash % shard_num;
-}
 
 string EngineShard::TxQueueInfo::Format() const {
   string res;
@@ -348,47 +181,63 @@ void EngineShard::DefragTaskState::ResetScanState() {
 // 3. in case the above is OK, make sure that we have a "gap" between usage and commited memory
 // (control by mem_defrag_waste_threshold flag)
 bool EngineShard::DefragTaskState::CheckRequired() {
-  if (is_force_defrag || cursor > kCursorDoneState) {
-    is_force_defrag = false;
-    VLOG(2) << "cursor: " << cursor << " and is_force_defrag " << is_force_defrag;
+  if (cursor > kCursorDoneState) {
+    VLOG(2) << "cursor: " << cursor;
     return true;
   }
 
-  const std::size_t memory_per_shard = max_memory_limit / shard_set->size();
+  size_t limit = max_memory_limit.load(memory_order_relaxed);
+
+  const std::size_t memory_per_shard = limit / shard_set->size();
   if (memory_per_shard < (1 << 16)) {  // Too small.
     return false;
   }
 
-  const std::size_t global_threshold = max_memory_limit * GetFlag(FLAGS_mem_defrag_threshold);
+  thread_local fragmentation_info finfo{
+      .committed = 0, .committed_golden = 0, .wasted = 0, .bin = 0};
+
+  const std::size_t global_threshold = double(limit) * GetFlag(FLAGS_mem_defrag_threshold);
   if (global_threshold > rss_mem_current.load(memory_order_relaxed)) {
+    finfo.bin = 0;  // reset.
     return false;
   }
 
-  const auto now = time(nullptr);
-  const auto seconds_from_prev_check = now - last_check_time;
-  const auto mem_defrag_interval = GetFlag(FLAGS_mem_defrag_check_sec_interval);
+  if (finfo.bin == 0) {  // did not start the iterative checking yet
+    const auto now = time(nullptr);
+    const auto seconds_from_prev_check = now - last_check_time;
+    const auto mem_defrag_interval = GetFlag(FLAGS_mem_defrag_check_sec_interval);
 
-  if (seconds_from_prev_check < mem_defrag_interval) {
-    return false;
+    if (seconds_from_prev_check < mem_defrag_interval) {
+      return false;
+    }
+
+    // start checking.
+    finfo.committed = finfo.committed_golden = 0;
+    finfo.wasted = 0;
+    page_utilization_threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
   }
-  last_check_time = now;
 
-  ShardMemUsage usage = ReadShardMemUsage(GetFlag(FLAGS_mem_defrag_page_utilization_threshold));
+  uint64_t start = absl::GetCurrentTimeNanos();
+  int res = zmalloc_get_allocator_fragmentation_step(page_utilization_threshold, &finfo);
+  uint64_t duration = absl::GetCurrentTimeNanos() - start;
+  VLOG(1) << "Reading memory usage took " << duration << " ns on bin " << finfo.bin - 1;
 
-  const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
-  if (usage.wasted_mem > (uint64_t(usage.commited * waste_threshold))) {
-    VLOG(1) << "memory issue found for memory " << usage;
-    return true;
+  if (res == 0) {
+    // finished checking.
+    last_check_time = time(nullptr);
+
+    const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
+    if (finfo.wasted > size_t(finfo.committed * waste_threshold)) {
+      VLOG(1) << "memory fragmentation issue found: " << finfo.wasted << " " << finfo.committed;
+      return true;
+    }
   }
 
   return false;
 }
 
-void EngineShard::ForceDefrag() {
-  defrag_state_.is_force_defrag = true;
-}
-
-bool EngineShard::DoDefrag() {
+std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect_page_stats,
+                                                        const float threshold) {
   // --------------------------------------------------------------------------
   // NOTE: This task is running with exclusive access to the shard.
   // i.e. - Since we are using shared nothing access here, and all access
@@ -397,7 +246,6 @@ bool EngineShard::DoDefrag() {
   // --------------------------------------------------------------------------
 
   constexpr size_t kMaxTraverses = 40;
-  const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
 
   // TODO: enable tiered storage on non-default db slice
   DbSlice& slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
@@ -409,7 +257,7 @@ bool EngineShard::DoDefrag() {
   // If we found no valid db, we finished traversing and start from scratch next time
   if (!slice.IsDbValid(defrag_state_.dbid)) {
     defrag_state_.ResetScanState();
-    return false;
+    return std::nullopt;
   }
 
   DCHECK(slice.IsDbValid(defrag_state_.dbid));
@@ -419,11 +267,12 @@ bool EngineShard::DoDefrag() {
   unsigned traverses_count = 0;
   uint64_t attempts = 0;
 
+  PageUsage page_usage{collect_page_stats, threshold};
   do {
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       // for each value check whether we should move it because it
       // seats on underutilized page of memory, and if so, do it.
-      bool did = it->second.DefragIfNeeded(threshold);
+      bool did = it->second.DefragIfNeeded(&page_usage);
       attempts++;
       if (did) {
         reallocations++;
@@ -435,11 +284,11 @@ bool EngineShard::DoDefrag() {
   defrag_state_.UpdateScanState(cur.token());
 
   if (reallocations > 0) {
-    VLOG(1) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations
+    VLOG(2) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations
             << " times, did it in " << traverses_count << " cursor is at the "
             << (defrag_state_.cursor == kCursorDoneState ? "end" : "in progress");
   } else {
-    VLOG(1) << "shard " << slice.shard_id() << ": run the defrag " << traverses_count
+    VLOG(2) << "shard " << slice.shard_id() << ": run the defrag " << traverses_count
             << " times out of maximum " << kMaxTraverses << ", with cursor at "
             << (defrag_state_.cursor == kCursorDoneState ? "end" : "in progress")
             << " but no location for defrag were found";
@@ -449,7 +298,7 @@ bool EngineShard::DoDefrag() {
   stats_.defrag_task_invocation_total++;
   stats_.defrag_attempt_total += attempts;
 
-  return true;
+  return page_usage.CollectedStats();
 }
 
 // the memory defragmentation task is as follow:
@@ -468,20 +317,21 @@ uint32_t EngineShard::DefragTask() {
 
   if (defrag_state_.CheckRequired()) {
     VLOG(2) << shard_id_ << ": need to run defrag memory cursor state: " << defrag_state_.cursor;
-    if (DoDefrag()) {
+    static const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
+    if (DoDefrag(CollectPageStats::NO, threshold)) {
       // we didn't finish the scan
       return util::ProactorBase::kOnIdleMaxLevel;
     }
   }
-  return kRunAtLowPriority;
+  return 6;  // priority.
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
-    : queue_(kQueueLen, 1, 1),
+    : txq_([](const Transaction* t) { return t->txid(); }),
+      queue_(kQueueLen, 1, 1),
       queue2_(kQueueLen / 2, 2, 2),
-      txq_([](const Transaction* t) { return t->txid(); }),
-      mi_resource_(heap),
-      shard_id_(pb->GetPoolIndex()) {
+      shard_id_(pb->GetPoolIndex()),
+      mi_resource_(heap) {
   queue_.Start(absl::StrCat("shard_queue_", shard_id()));
   queue2_.Start(absl::StrCat("l2_queue_", shard_id()));
 }
@@ -533,13 +383,16 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
   }
   auto heartbeat = [this]() { Heartbeat(); };
 
+  eviction_state_.rss_eviction_enabled_ = GetFlag(FLAGS_enable_heartbeat_rss_eviction);
   std::chrono::milliseconds period_ms(*cycle_ms);
 
-  fiber_heartbeat_periodic_ =
-      MakeFiber([this, index = pb->GetPoolIndex(), period_ms, heartbeat]() mutable {
-        ThisFiber::SetName(absl::StrCat("heartbeat_periodic", index));
-        RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
-      });
+  fb2::Fiber::Opts fb_opts{.priority = absl::GetFlag(FLAGS_background_heartbeat)
+                                           ? fb2::FiberPriority::BACKGROUND
+                                           : fb2::FiberPriority::NORMAL,
+                           .name = absl::StrCat("heartbeat_periodic", pb->GetPoolIndex())};
+  fiber_heartbeat_periodic_ = fb2::Fiber(fb_opts, [this, period_ms, heartbeat]() mutable {
+    RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
+  });
   defrag_task_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
 }
 
@@ -570,9 +423,7 @@ void EngineShard::InitThreadLocal(ProactorBase* pb) {
   CompactObj::InitThreadLocal(shard_->memory_resource());
   SmallString::InitThreadLocal(data_heap);
 
-  RoundRobinSharder::Init();
-
-  shard_->shard_search_indices_.reset(new ShardDocIndices());
+  shard_->shard_search_indices_ = std::make_unique<ShardDocIndices>();
 }
 
 void EngineShard::InitTieredStorage(ProactorBase* pb, size_t max_file_size) {
@@ -603,7 +454,6 @@ void EngineShard::DestroyThreadLocal() {
   shard_ = nullptr;
   CompactObj::InitThreadLocal(nullptr);
   mi_heap_delete(tlh);
-  RoundRobinSharder::Destroy();
   VLOG(1) << "Shard reset " << shard_id;
 }
 
@@ -776,18 +626,8 @@ void EngineShard::Heartbeat() {
     RetireExpiredAndEvict();
   }
 
-  // Offset CoolMemoryUsage when consider background offloading.
-  // TODO: Another approach could be is to align the approach  similarly to how we do with
-  // FreeMemWithEvictionStep, i.e. if memory_budget is below the limit.
-  size_t tiering_offload_threshold =
-      tiered_storage_ ? tiered_storage_->CoolMemoryUsage() +
-                            size_t(max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) /
-                                shard_set->size()
-                      : std::numeric_limits<size_t>::max();
-  size_t used_memory = UsedMemory();
-  if (used_memory > tiering_offload_threshold) {
-    VLOG(1) << "Running Offloading, memory=" << used_memory
-            << " tiering_threshold: " << tiering_offload_threshold
+  if (tiered_storage_ && tiered_storage_->ShouldOffload()) {
+    VLOG(1) << "Running Offloading, memory=" << db_slice.memory_budget()
             << ", cool memory: " << tiered_storage_->CoolMemoryUsage();
 
     for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
@@ -821,6 +661,7 @@ void EngineShard::RetireExpiredAndEvict() {
   DbContext db_cntx;
   db_cntx.time_now_ms = GetCurrentTimeMs();
 
+  size_t deleted_bytes = 0;
   size_t eviction_goal = GetFlag(FLAGS_enable_heartbeat_eviction) ? CalculateEvictionBytes() : 0;
 
   for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
@@ -829,16 +670,17 @@ void EngineShard::RetireExpiredAndEvict() {
 
     db_cntx.db_index = i;
     auto [pt, expt] = db_slice.GetTables(i);
-    if (expt->size() > 0) {
+    if (!expt->Empty()) {
       DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
 
+      deleted_bytes += stats.deleted_bytes;
       eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
       counter_[TTL_TRAVERSE].IncBy(stats.traversed);
       counter_[TTL_DELETE].IncBy(stats.deleted);
       stats_.total_heartbeat_expired_keys += stats.deleted;
       stats_.total_heartbeat_expired_bytes += stats.deleted_bytes;
       ++stats_.total_heartbeat_expired_calls;
-      VLOG(1) << "Heartbeat expired " << stats.deleted << " keys with total bytes "
+      VLOG(2) << "Heartbeat expired " << stats.deleted << " keys with total bytes "
               << stats.deleted_bytes << " with total expire flow calls "
               << stats_.total_heartbeat_expired_calls;
     }
@@ -848,42 +690,121 @@ void EngineShard::RetireExpiredAndEvict() {
       auto [evicted_items, evicted_bytes] =
           db_slice.FreeMemWithEvictionStepAtomic(i, starting_segment_id, eviction_goal);
 
-      DVLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
-               << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
-               << " bytes. Max eviction per heartbeat: "
-               << GetFlag(FLAGS_max_eviction_per_heartbeat);
+      VLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
+              << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
+              << " bytes. Max eviction per heartbeat: "
+              << GetFlag(FLAGS_max_eviction_per_heartbeat);
 
+      deleted_bytes += evicted_bytes;
       eviction_goal -= std::min(eviction_goal, evicted_bytes);
     }
   }
+
+  // Track deleted bytes only if we expect to lower memory
+  if (eviction_state_.track_deleted_bytes)
+    eviction_state_.deleted_bytes_before_rss_update += deleted_bytes;
+}
+
+size_t EngineShard::CalculateEvictionBytes() {
+  const size_t shards_count = shard_set->size();
+  const double eviction_memory_budget_threshold = GetFlag(FLAGS_eviction_memory_budget_threshold);
+
+  // Calculate threshold for both used_memory and rss_memory
+  size_t limit = max_memory_limit.load(memory_order_relaxed);
+  const size_t shard_memory_budget_threshold =
+      size_t(limit * eviction_memory_budget_threshold) / shards_count;
+
+  const size_t global_used_memory = used_mem_current.load(memory_order_relaxed);
+
+  // Calculate how many bytes we need to evict on this shard
+  size_t goal_bytes =
+      CalculateHowManyBytesToEvictOnShard(limit, global_used_memory, shard_memory_budget_threshold);
+
+  VLOG_IF(2, goal_bytes > 0) << "Used memory goal bytes: " << goal_bytes
+                             << ", used memory: " << global_used_memory
+                             << ", memory limit: " << max_memory_limit;
+
+  // Check for `enable_heartbeat_rss_eviction` flag since it dynamic. And reset
+  // state if flag has changed.
+  bool rss_eviction_enabled_flag = GetFlag(FLAGS_enable_heartbeat_rss_eviction);
+  if (eviction_state_.rss_eviction_enabled_ != rss_eviction_enabled_flag) {
+    eviction_state_.global_rss_memory_at_prev_eviction =
+        eviction_state_.deleted_bytes_before_rss_update = 0;
+    eviction_state_.rss_eviction_enabled_ = rss_eviction_enabled_flag;
+  }
+  if (eviction_state_.rss_eviction_enabled_) {
+    // Calculate how much rss memory is used by all shards
+    const size_t global_used_rss_memory = rss_mem_current.load(memory_order_relaxed);
+    auto& global_rss_memory_at_prev_eviction = eviction_state_.global_rss_memory_at_prev_eviction;
+    auto& deleted_bytes_before_rss_update = eviction_state_.deleted_bytes_before_rss_update;
+    if (global_used_rss_memory < eviction_state_.global_rss_memory_at_prev_eviction) {
+      auto decrease_delete_bytes_before_rss_update =
+          std::min(deleted_bytes_before_rss_update,
+                   (global_rss_memory_at_prev_eviction - global_used_rss_memory) / shards_count);
+      VLOG(2) << "deleted_bytes_before_rss_update: " << deleted_bytes_before_rss_update
+              << " decrease_delete_bytes_before_rss_update: "
+              << decrease_delete_bytes_before_rss_update;
+      deleted_bytes_before_rss_update -= decrease_delete_bytes_before_rss_update;
+    }
+
+    global_rss_memory_at_prev_eviction = global_used_rss_memory;
+
+    LOG_IF(DFATAL, global_used_rss_memory < (deleted_bytes_before_rss_update * shards_count))
+        << "RSS evicition underflow "
+        << "global_used_rss_memory: " << global_used_rss_memory
+        << " deleted_bytes_before_rss_update: " << deleted_bytes_before_rss_update;
+
+    // If we underflow use limit as used_memory
+    size_t used_rss_memory_with_deleted_bytes =
+        std::min(global_used_rss_memory - deleted_bytes_before_rss_update * shards_count, limit);
+
+    // Try to evict more bytes if we are close to the rss memory limit
+    const size_t rss_goal_bytes = CalculateHowManyBytesToEvictOnShard(
+        limit, used_rss_memory_with_deleted_bytes, shard_memory_budget_threshold);
+
+    // RSS evictions starts so we should start tracking deleted_bytes
+    if (rss_goal_bytes) {
+      eviction_state_.track_deleted_bytes = true;
+    } else {
+      // There is no RSS eviction goal and we have cleared tracked deleted bytes
+      if (!deleted_bytes_before_rss_update) {
+        eviction_state_.track_deleted_bytes = false;
+      }
+    }
+
+    VLOG_IF(2, rss_goal_bytes > 0)
+        << "Rss memory goal bytes: " << rss_goal_bytes
+        << ", rss used memory: " << global_used_rss_memory << ", rss memory limit: " << limit
+        << ", deleted_bytes_before_rss_update: " << deleted_bytes_before_rss_update;
+
+    goal_bytes = std::max(goal_bytes, rss_goal_bytes);
+  }
+
+  return goal_bytes;
 }
 
 void EngineShard::CacheStats() {
   uint64_t now = fb2::ProactorBase::GetMonotonicTimeNs();
-  if (cache_stats_time_ + 1000000 > now)  // 1ms
+  if (last_mem_params_.updated_at + 1000000 > now)  // 1ms
     return;
 
-  cache_stats_time_ = now;
-  // Used memory for this shard.
   size_t used_mem = UsedMemory();
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
 
-  // delta can wrap if used_memory is smaller than last_cached_used_memory_ and it's fine.
-  size_t delta = used_mem - last_cached_used_memory_;
-  last_cached_used_memory_ = used_mem;
+  // Reflect local memory change on global value
+  size_t delta = used_mem - last_mem_params_.used_mem;  // negative value wraps safely
   size_t current = used_mem_current.fetch_add(delta, memory_order_relaxed) + delta;
-  ssize_t free_mem = max_memory_limit - current;
+  ssize_t free_mem = max_memory_limit.load(memory_order_relaxed) - current;
 
+  // Estimate bytes per object, excluding table memory
   size_t entries = db_slice.entries_count();
-  size_t table_memory = db_slice.table_memory();
-
-  if (tiered_storage_) {
-    table_memory += tiered_storage_->CoolMemoryUsage();
-  }
+  size_t table_memory =
+      db_slice.table_memory() + (tiered_storage_ ? tiered_storage_->CoolMemoryUsage() : 0);
   size_t obj_memory = table_memory <= used_mem ? used_mem - table_memory : 0;
-
   size_t bytes_per_obj = entries > 0 ? obj_memory / entries : 0;
-  db_slice.SetCachedParams(free_mem / shard_set->size(), bytes_per_obj);
+
+  db_slice.UpdateMemoryParams(free_mem / shard_set->size(), bytes_per_obj);
+  last_mem_params_ = {now, used_mem};
 }
 
 size_t EngineShard::UsedMemory() const {
@@ -891,16 +812,10 @@ size_t EngineShard::UsedMemory() const {
          search_indices()->GetUsedMemory();
 }
 
-bool EngineShard::ShouldThrottleForTiering() const {  // see header for formula justification
-  if (!tiered_storage_)
-    return false;
-
-  size_t tiering_redline =
-      (max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size();
-
-  // UsedMemory includes CoolMemoryUsage, so we are offsetting it to remove the cool cache impact.
-  return tiered_storage_->WriteDepthUsage() > 0.3 &&
-         (UsedMemory() > tiering_redline + tiered_storage_->CoolMemoryUsage());
+bool EngineShard::ShouldThrottleForTiering() const {
+  // Throttle if the tiered storage is busy offloading (at least 30% of allowed capacity)
+  return tiered_storage_ && tiered_storage_->WriteDepthUsage() > 0.3 &&
+         tiered_storage_->ShouldOffload();
 }
 
 void EngineShard::FinalizeMulti(Transaction* tx) {

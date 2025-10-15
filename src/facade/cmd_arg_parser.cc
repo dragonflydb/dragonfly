@@ -24,7 +24,12 @@ void CmdArgParser::ExpectTag(std::string_view tag) {
   }
 }
 
+CmdArgParser::ErrorInfo CmdArgParser::TakeError() {
+  return std::exchange(error_, {});
+}
+
 ErrorReply CmdArgParser::ErrorInfo::MakeReply() const {
+  DCHECK(operator bool());
   switch (type) {
     case INVALID_INT:
       return ErrorReply{kInvalidIntErr};
@@ -37,7 +42,7 @@ ErrorReply CmdArgParser::ErrorInfo::MakeReply() const {
 }
 
 CmdArgParser::~CmdArgParser() {
-  DCHECK(!error_.has_value()) << "Parsing error occured but not checked";
+  DCHECK(!error_) << "Parsing error occured but not checked";
   // TODO DCHECK(!HasNext()) << "Not all args were processed";
 }
 

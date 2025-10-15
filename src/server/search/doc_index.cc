@@ -7,6 +7,7 @@
 #include <absl/strings/str_join.h>
 
 #include <memory>
+#include <queue>
 
 #include "absl/strings/str_cat.h"
 #include "base/logging.h"
@@ -56,75 +57,72 @@ bool IsSortableField(std::string_view field_identifier, const search::Schema& sc
   return it != schema.fields.end() && (it->second.flags & search::SchemaField::SORTABLE);
 }
 
-SearchFieldsList ToSV(const search::Schema& schema, const std::optional<SearchFieldsList>& fields) {
-  SearchFieldsList sv_fields;
-  if (fields) {
-    sv_fields.reserve(fields->size());
-    for (const auto& field : fields.value()) {
-      sv_fields.push_back(field.View());
-    }
-  }
-  return sv_fields;
-}
-
 using SortIndiciesFieldsList =
     std::vector<std::pair<string_view /*identifier*/, string_view /*alias*/>>;
 
-std::pair<SearchFieldsList, SortIndiciesFieldsList> PreprocessAggregateFields(
+std::pair<std::vector<FieldReference>, SortIndiciesFieldsList> PreprocessAggregateFields(
     const search::Schema& schema, const AggregateParams& params,
-    const std::optional<SearchFieldsList>& load_fields) {
-  absl::flat_hash_map<std::string_view, SearchField> fields_by_identifier;
+    const std::optional<std::vector<FieldReference>>& load_fields) {
+  absl::flat_hash_map<std::string_view, FieldReference> fields_by_identifier;
   absl::flat_hash_map<std::string_view, std::string_view> sort_indicies_aliases;
   fields_by_identifier.reserve(schema.field_names.size());
   sort_indicies_aliases.reserve(schema.field_names.size());
 
   for (const auto& [fname, fident] : schema.field_names) {
     if (!IsSortableField(fident, schema)) {
-      fields_by_identifier[fident] = {StringOrView::FromView(fident), true,
-                                      StringOrView::FromView(fname)};
+      fields_by_identifier.emplace(fident, FieldReference{fident, fname});
     } else {
       sort_indicies_aliases[fident] = fname;
     }
   }
 
-  if (load_fields) {
-    for (const auto& field : load_fields.value()) {
-      const auto& fident = field.GetIdentifier(schema, false);
-      if (!IsSortableField(fident, schema)) {
-        fields_by_identifier[fident] = field.View();
-      } else {
-        sort_indicies_aliases[fident] = field.GetShortName();
-      }
+  for (const auto& field : load_fields.value_or(vector<FieldReference>{})) {
+    string_view fident = field.Identifier(schema, false);
+    if (!IsSortableField(fident, schema)) {
+      fields_by_identifier.insert_or_assign(fident, field);
+    } else {
+      sort_indicies_aliases[fident] = field.OutputName();
     }
   }
 
-  SearchFieldsList fields;
+  vector<FieldReference> fields;
   fields.reserve(fields_by_identifier.size());
   for (auto& [_, field] : fields_by_identifier) {
-    fields.emplace_back(std::move(field));
+    fields.emplace_back(field);
   }
 
-  SortIndiciesFieldsList sort_fields;
-  sort_fields.reserve(sort_indicies_aliases.size());
-  for (auto& [fident, fname] : sort_indicies_aliases) {
-    sort_fields.emplace_back(fident, fname);
-  }
+  return {std::move(fields), {sort_indicies_aliases.begin(), sort_indicies_aliases.end()}};
+}
 
-  return {std::move(fields), std::move(sort_fields)};
+/* Separate fields into basic and sortable. The second vector contains flags indicating
+   whether the field at the same index in the first vector is sortable or not. */
+std::pair<std::vector<FieldReference>, std::vector<bool>> GetBasicFields(
+    absl::Span<const std::string_view> fields, const search::Schema& schema) {
+  const size_t fields_count = fields.size();
+  std::vector<bool> is_sortable_field(fields_count);
+  std::vector<FieldReference> basic_fields;
+  basic_fields.reserve(fields_count);
+  for (size_t i = 0; i < fields_count; ++i) {
+    bool is_sortable = IsSortableField(fields[i], schema);
+    is_sortable_field[i] = is_sortable;
+    if (!is_sortable) {
+      basic_fields.emplace_back(fields[i]);
+    }
+  }
+  return {std::move(basic_fields), std::move(is_sortable_field)};
 }
 
 }  // namespace
 
-bool SerializedSearchDoc::operator<(const SerializedSearchDoc& other) const {
-  return this->score < other.score;
-}
-
-bool SerializedSearchDoc::operator>=(const SerializedSearchDoc& other) const {
-  return this->score >= other.score;
+bool FieldReference::IsJsonPath(std::string_view name) {
+  if (name.size() < 2) {
+    return false;
+  }
+  return name.front() == '$' && (name[1] == '.' || name[1] == '[');
 }
 
 bool SearchParams::ShouldReturnField(std::string_view alias) const {
-  auto cb = [alias](const auto& entry) { return entry.GetShortName() == alias; };
+  auto cb = [alias](const auto& entry) { return entry.OutputName() == alias; };
   return !return_fields || any_of(return_fields->begin(), return_fields->end(), cb);
 }
 
@@ -138,6 +136,8 @@ string_view SearchFieldTypeToString(search::SchemaField::FieldType type) {
       return "NUMERIC";
     case search::SchemaField::VECTOR:
       return "VECTOR";
+    case search::SchemaField::GEO:
+      return "GEO";
   }
   ABSL_UNREACHABLE();
   return "";
@@ -164,18 +164,13 @@ string DocIndexInfo::BuildRestoreCommand() const {
     absl::StrAppend(&out, " ", fident, " AS ", finfo.short_name, " ",
                     SearchFieldTypeToString(finfo.type));
 
-    // Store shared field flags
-    if (finfo.flags & search::SchemaField::SORTABLE)
-      absl::StrAppend(&out, " SORTABLE");
-
-    if (finfo.flags & search::SchemaField::NOINDEX)
-      absl::StrAppend(&out, " NOINDEX");
-
     // Store specific params
     Overloaded info{
         [](monostate) {},
         [out = &out](const search::SchemaField::VectorParams& params) {
-          auto sim = params.sim == search::VectorSimilarity::L2 ? "L2" : "COSINE";
+          auto sim = params.sim == search::VectorSimilarity::L2   ? "L2"
+                     : params.sim == search::VectorSimilarity::IP ? "IP"
+                                                                  : "COSINE";
           absl::StrAppend(out, " ", params.use_hnsw ? "HNSW" : "FLAT", " 6 ", "DIM ", params.dim,
                           " DISTANCE_METRIC ", sim, " INITIAL_CAP ", params.capacity);
         },
@@ -184,8 +179,21 @@ string DocIndexInfo::BuildRestoreCommand() const {
           if (params.case_sensitive)
             absl::StrAppend(out, " ", "CASESENSITIVE");
         },
-    };
+        [out = &out](const search::SchemaField::TextParams& params) {
+          if (params.with_suffixtrie)
+            absl::StrAppend(out, " ", "WITH_SUFFIXTRIE");
+        },
+        [out = &out](const search::SchemaField::NumericParams& params) {
+          absl::StrAppend(out, " ", "BLOCKSIZE", " ", std::to_string(params.block_size));
+        }};
     visit(info, finfo.special_params);
+
+    // Store shared field flags
+    if (finfo.flags & search::SchemaField::SORTABLE)
+      absl::StrAppend(&out, " SORTABLE");
+
+    if (finfo.flags & search::SchemaField::NOINDEX)
+      absl::StrAppend(&out, " NOINDEX");
   }
 
   return out;
@@ -258,6 +266,8 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) 
   };
 
   TraverseAllMatching(*base_, op_args, cb);
+
+  indices_->FinalizeInitialization();
 
   VLOG(1) << "Indexed " << key_index_.Size() << " docs on " << base_->prefix;
 }
@@ -335,72 +345,144 @@ bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
   return base_->Matches(key, obj_code);
 }
 
+optional<ShardDocIndex::LoadedEntry> ShardDocIndex::LoadEntry(DocId id,
+                                                              const OpArgs& op_args) const {
+  auto& db_slice = op_args.GetDbSlice();
+  string_view key = key_index_.Get(id);
+  auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
+  if (!it || !IsValid(*it))
+    return std::nullopt;
+
+  return {{key, GetAccessor(op_args.db_cntx, (*it)->second)}};
+}
+
+vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, size_t limit,
+                                                            const SearchParams::SortOption& sort,
+                                                            const OpArgs& op_args) const {
+  DCHECK_GT(limit, 0u) << "Limit=0 still has O(ids->size()) complexity";
+
+  auto comp = [order = sort.order](const auto& lhs, const auto& rhs) {
+    return order == SortOrder::ASC ? lhs < rhs : lhs > rhs;
+  };
+  // Priority queue keeps top-k values in reverse order (to compare against top - worst value)
+  using QPair = std::pair<search::SortableValue, DocId>;
+  std::priority_queue<QPair, std::vector<QPair>, decltype(comp)> q(comp);
+
+  // Iterate over all documents, extract sortable field and update the queue
+  for (DocId id : *ids) {
+    auto entry = LoadEntry(id, op_args);
+    if (!entry)
+      continue;
+
+    auto result = entry->second->Serialize(base_->schema, {sort.field});
+    if (result.empty())
+      continue;
+
+    // Check if the extracted value is better than the worst (q.top())
+    if (q.size() < limit || comp(result.begin()->second, q.top().first)) {
+      if (q.size() >= limit)
+        q.pop();
+      q.emplace(std::move(result.begin()->second), id);
+    }
+  }
+
+  // Reorder ids and collect scores
+  vector<search::SortableValue> out(q.size());
+  for (int i = 0; !q.empty(); i++) {
+    auto [v, id] = q.top();
+    (*ids)[i] = id;
+    out[i] = std::move(v);
+    q.pop();
+  }
+  return out;
+}
+
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
                                    search::SearchAlgorithm* search_algo) const {
-  auto& db_slice = op_args.GetDbSlice();
-  auto search_results = search_algo->Search(&*indices_);
+  size_t limit = params.limit_offset + params.limit_total;
+  auto result = search_algo->Search(&*indices_);
+  if (!result.error.empty())
+    return {facade::ErrorReply(std::move(result.error))};
 
-  if (!search_results.error.empty())
-    return SearchResult{facade::ErrorReply{std::move(search_results.error)}};
+  if (limit == 0)
+    return {result.total, {}, std::move(result.profile)};
 
-  SearchFieldsList fields_to_load = ToSV(
-      base_->schema, params.ShouldReturnAllFields() ? params.load_fields : params.return_fields);
+  // Tune sort for KNN: Skip if it's on the knn field, otherwise extend the limit if needed
+  bool skip_sort = false;
+  if (auto ko = search_algo->GetKnnScoreSortOption(); ko) {
+    skip_sort = !params.sort_option || params.sort_option->IsSame(*ko);
+    if (!skip_sort)
+      limit = max(limit, ko->limit);
+  }
 
+  auto return_fields = params.return_fields.value_or(vector<FieldReference>{});
+
+  // Apply SORTBY
+  // TODO(vlad): Write profiling up to here
+  vector<search::SortableValue> sort_scores;
+  if (params.sort_option && !skip_sort) {
+    const auto& so = *params.sort_option;
+    auto fident = so.field.Identifier(base_->schema, false);
+    if (IsSortableField(fident, base_->schema)) {
+      auto* idx = indices_->GetSortIndex(fident);
+      sort_scores = idx->Sort(&result.ids, limit, so.order == SortOrder::DESC);
+    } else {
+      sort_scores = KeepTopKSorted(&result.ids, limit, so, op_args);
+      if (params.ShouldReturnAllFields())
+        return_fields.push_back(so.field);
+    }
+
+    // If we sorted with knn_scores present, rearrange them
+    if (!sort_scores.empty() && !result.knn_scores.empty()) {
+      unordered_map<DocId, size_t> score_lookup(result.knn_scores.begin(), result.knn_scores.end());
+      for (size_t i = 0; i < min(limit, result.ids.size()); i++)
+        result.knn_scores[i] = {result.ids[i], score_lookup[result.ids[i]]};
+    }
+  }
+
+  // Cut off unnecessary items
+  result.ids.resize(min(result.ids.size(), limit));
+
+  // Serialize documents
   vector<SerializedSearchDoc> out;
-  out.reserve(search_results.ids.size());
+  out.reserve(min(limit, result.ids.size()));
 
   size_t expired_count = 0;
-  for (size_t i = 0; i < search_results.ids.size(); i++) {
-    const DocId doc = search_results.ids[i];
-    auto key = key_index_.Get(doc);
-    auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
+  for (size_t i = 0; i < result.ids.size(); i++) {
+    float knn_score = result.knn_scores.empty() ? 0 : result.knn_scores[i].second;
+    auto sort_score = sort_scores.empty() ? std::monostate{} : std::move(sort_scores[i]);
 
-    if (!it || !IsValid(*it)) {  // Item must have expired
+    // Don't load entry if we need only its key. Ignore expiration.
+    if (params.IdsOnly()) {
+      string_view key = key_index_.Get(result.ids[i]);
+      out.push_back({string{key}, {}, knn_score, sort_score});
+      continue;
+    }
+
+    auto entry = LoadEntry(result.ids[i], op_args);
+    if (!entry) {
       expired_count++;
       continue;
     }
 
-    auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
+    auto& [key, accessor] = *entry;
 
-    SearchDocData doc_data;
-    if (params.ShouldReturnAllFields()) {
-      /*
-      In this case we need to load the whole document or loaded fields.
-      For JSON indexes it would be {"$", <the whole document as string>}
-      */
-      doc_data = accessor->SerializeDocument(base_->schema);
-    }
+    // Load all specified fields from document
+    SearchDocData fields{};
+    if (params.ShouldReturnAllFields())
+      fields = accessor->Serialize(base_->schema);
 
-    SearchDocData loaded_fields = accessor->Serialize(base_->schema, fields_to_load);
-    doc_data.insert(std::make_move_iterator(loaded_fields.begin()),
-                    std::make_move_iterator(loaded_fields.end()));
-
-    if (params.sort_option) {
-      auto& field = params.sort_option->field;
-      auto fident = field.GetIdentifier(base_->schema, false);
-      if (IsSortableField(fident, base_->schema)) {
-        doc_data[field.NameView()] = indices_->GetSortIndexValue(doc, fident);
-      } else {
-        SearchDocData sort_field_data = accessor->Serialize(base_->schema, {field});
-        DCHECK_LE(sort_field_data.size(), 1u);
-        if (!sort_field_data.empty()) {
-          doc_data[field.NameView()] = sort_field_data.begin()->second;
-        }
-      }
-    }
-
-    auto score = search_results.scores.empty() ? monostate{} : std::move(search_results.scores[i]);
-    out.push_back(SerializedSearchDoc{string{key}, std::move(doc_data), std::move(score)});
+    auto more_fields = accessor->Serialize(base_->schema, return_fields);
+    fields.insert(make_move_iterator(more_fields.begin()), make_move_iterator(more_fields.end()));
+    out.push_back({string{key}, std::move(fields), knn_score, sort_score});
   }
 
-  return SearchResult{search_results.total - expired_count, std::move(out),
-                      std::move(search_results.profile)};
+  return {result.total - expired_count, std::move(out), std::move(result.profile)};
 }
 
 vector<SearchDocData> ShardDocIndex::SearchForAggregator(
     const OpArgs& op_args, const AggregateParams& params,
     search::SearchAlgorithm* search_algo) const {
-  auto& db_slice = op_args.GetDbSlice();
   auto search_results = search_algo->Search(&*indices_);
 
   if (!search_results.error.empty())
@@ -411,13 +493,10 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
 
   vector<absl::flat_hash_map<string, search::SortableValue>> out;
   for (DocId doc : search_results.ids) {
-    auto key = key_index_.Get(doc);
-    auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
-
-    if (!it || !IsValid(*it))  // Item must have expired
+    auto entry = LoadEntry(doc, op_args);
+    if (!entry)
       continue;
-
-    auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
+    auto& [_, accessor] = *entry;
 
     SearchDocData extracted_sort_indicies;
     extracted_sort_indicies.reserve(sort_indicies.size());
@@ -433,6 +512,95 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
   }
 
   return out;
+}
+
+join::Vector<join::OwnedEntry> ShardDocIndex::PreagregateDataForJoin(
+    const OpArgs& op_args, absl::Span<const std::string_view> join_fields,
+    search::SearchAlgorithm* search_algo) const {
+  auto search_results = search_algo->Search(&*indices_);
+
+  const size_t fields_count = join_fields.size();
+  const auto [basic_fields, is_sortable_field] = GetBasicFields(join_fields, base_->schema);
+
+  join::Vector<join::OwnedEntry> result;
+  result.reserve(search_results.ids.size());
+
+  const ShardId shard_id = op_args.shard->shard_id();
+  for (DocId doc : search_results.ids) {
+    auto entry = LoadEntry(doc, op_args);
+    if (!entry)
+      continue;
+
+    auto& [key, accessor] = *entry;
+
+    SearchDocData loaded_basic_fields = accessor->Serialize(base_->schema, basic_fields);
+
+    bool insert_key = true;
+    join::Vector<join::OwnedJoinableValue> join_fields_values(fields_count);
+    for (size_t i = 0; i < fields_count; ++i) {
+      search::SortableValue value;
+      if (is_sortable_field[i]) {
+        value = indices_->GetSortIndexValue(doc, join_fields[i]);
+      } else {
+        value = loaded_basic_fields[join_fields[i]];
+      }
+
+      auto copy = [&](auto&& v) {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (!std::is_same_v<T, std::monostate>) {
+          join_fields_values[i] = v;
+        } else {
+          // If the value is nil, we skip this key
+          insert_key = false;
+        }
+      };
+
+      std::visit(std::move(copy), value);
+    }
+
+    if (insert_key) {
+      result.emplace_back(std::piecewise_construct, std::forward_as_tuple(shard_id, doc),
+                          std::forward_as_tuple(std::make_move_iterator(join_fields_values.begin()),
+                                                std::make_move_iterator(join_fields_values.end())));
+    }
+  }
+
+  return result;
+}
+
+ShardDocIndex::FieldsValuesPerDocId ShardDocIndex::LoadKeysData(
+    const OpArgs& op_args, const absl::flat_hash_set<search::DocId>& doc_ids,
+    absl::Span<const std::string_view> fields_to_load) const {
+  const size_t fields_count = fields_to_load.size();
+  const auto [basic_fields, is_sortable_field] = GetBasicFields(fields_to_load, base_->schema);
+
+  FieldsValuesPerDocId result;
+  result.reserve(doc_ids.size());
+
+  for (DocId doc : doc_ids) {
+    auto entry = LoadEntry(doc, op_args);
+    if (!entry)
+      continue;
+
+    auto& [key, accessor] = *entry;
+
+    SearchDocData loaded_basic_fields = accessor->Serialize(base_->schema, basic_fields);
+
+    FieldsValues fields_values(fields_count);
+    for (size_t i = 0; i < fields_count; ++i) {
+      if (is_sortable_field[i]) {
+        fields_values[i] = indices_->GetSortIndexValue(doc, fields_to_load[i]);
+      } else {
+        fields_values[i] = loaded_basic_fields[fields_to_load[i]];
+      }
+    }
+
+    result.emplace(std::piecewise_construct, std::forward_as_tuple(doc),
+                   std::forward_as_tuple(std::make_move_iterator(fields_values.begin()),
+                                         std::make_move_iterator(fields_values.end())));
+  }
+
+  return result;
 }
 
 DocIndexInfo ShardDocIndex::GetInfo() const {
@@ -477,15 +645,16 @@ void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
       });
 }
 
-bool ShardDocIndices::DropIndex(string_view name) {
+unique_ptr<ShardDocIndex> ShardDocIndices::DropIndex(string_view name) {
   auto it = indices_.find(name);
   if (it == indices_.end())
-    return false;
+    return nullptr;
 
   DropIndexCache(*it->second);
+  auto index = std::move(it->second);
   indices_.erase(it);
 
-  return true;
+  return index;
 }
 
 void ShardDocIndices::DropAllIndices() {

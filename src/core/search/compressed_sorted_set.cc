@@ -192,14 +192,6 @@ bool CompressedSortedSet::Remove(IntType value) {
   return true;
 }
 
-size_t CompressedSortedSet::Size() const {
-  return size_;
-}
-
-size_t CompressedSortedSet::ByteSize() const {
-  return diffs_.size();
-}
-
 void CompressedSortedSet::Merge(CompressedSortedSet&& other) {
   // Quadratic compexity in theory, but in practice used only to merge with larger values.
   // Tail insert optimization makes it linear
@@ -214,7 +206,12 @@ std::pair<CompressedSortedSet, CompressedSortedSet> CompressedSortedSet::Split()
 
   // Move iterator to middle position and save size of diffs tail
   auto it = begin();
-  std::advance(it, size_ / 2);
+  std::advance(it, (size_ - 1) / 2);
+
+  // Save last value in the first set
+  tail_value_ = *it;
+  ++it;
+
   size_t keep_bytes = it.last_read_.data() - diffs_.data();
 
   // Copy second half into second set
@@ -223,7 +220,6 @@ std::pair<CompressedSortedSet, CompressedSortedSet> CompressedSortedSet::Split()
 
   // Erase diffs tail
   diffs_.resize(keep_bytes);
-  tail_value_ = std::nullopt;
   size_ -= second.Size();
 
   return std::make_pair(std::move(*this), std::move(second));

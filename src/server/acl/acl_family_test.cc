@@ -538,6 +538,15 @@ TEST_F(AclFamilyTest, TestPubSub) {
   vec = resp.GetVec();
   EXPECT_THAT(vec[8], "channels");
   EXPECT_THAT(vec[9], "resetchannels &foo");
+
+  resp =
+      Run("ACL setuser demo on resetkeys resetchannels ~app|managed-resources|* "
+          "&app|managed-resources|* +publish +ping >passwd");
+  resp = Run("AUTH demo passwd");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("publish app|managed-resources|xyz test");
+  EXPECT_THAT(resp, IntArg(0));
 }
 
 TEST_F(AclFamilyTest, TestAlias) {
@@ -556,6 +565,14 @@ TEST_F(AclFamilyTest, TestAlias) {
   resp = Run({"ACL", "DRYRUN", "jarjar", "___SET"});
   EXPECT_THAT(resp, ErrArg("ERR Command '___SET' not found"));
   EXPECT_EQ(Run({"ACL", "DRYRUN", "jarjar", "SET"}), "OK");
+}
+
+TEST_F(AclFamilyTest, TestAclLogUB) {
+  auto resp = Run({"ACL", "LOG"});
+  EXPECT_TRUE(resp.GetVec().empty());
+
+  resp = Run({"ACL", "LOG", "2", "RESET"});
+  EXPECT_THAT(resp, ErrArg("ERR index out of range"));
 }
 
 }  // namespace dfly

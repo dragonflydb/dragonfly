@@ -37,6 +37,12 @@ class ClusterConfig {
 
   ClusterShardInfos GetConfig() const;
 
+  // Use wisely, only after a deep copy of ClusterConfig and
+  // to edit the config in place.
+  ClusterShardInfos& GetMutableConfig() {
+    return config_;
+  }
+
   const SlotSet& GetOwnedSlots() const;
 
   std::vector<MigrationInfo> GetNewOutgoingMigrations(

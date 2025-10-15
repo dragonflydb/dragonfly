@@ -9,12 +9,15 @@
 #include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_format.h>
+#include <absl/strings/str_split.h>
+#include <absl/strings/string_view.h>
 
 #include <atomic>
 #include <variant>
 #include <vector>
 
 #include "base/logging.h"
+#include "core/search/query_driver.h"
 #include "core/search/search.h"
 #include "core/search/vector_utils.h"
 #include "facade/cmd_arg_parser.h"
@@ -22,6 +25,7 @@
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
+#include "server/config_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
@@ -32,12 +36,15 @@
 
 ABSL_FLAG(bool, search_reject_legacy_field, true, "FT.AGGREGATE: Reject legacy field names.");
 
+ABSL_FLAG(size_t, MAXSEARCHRESULTS, 1000000, "Maximum number of results from ft.search command");
 namespace dfly {
 
 using namespace std;
 using namespace facade;
 
 namespace {
+// we use it to find which flags are belong to search
+const std::string kCurrentFile = std::filesystem::path(__FILE__).filename().string();
 
 using nonstd::make_unexpected;
 
@@ -56,8 +63,8 @@ nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string_view message) 
 template <typename T>
 bool SendErrorIfOccurred(const ParseResult<T>& result, CmdArgParser* parser,
                          SinkReplyBuilder* builder) {
-  if (auto err = parser->Error(); err || !result) {
-    builder->SendError(!result ? result.error() : err->MakeReply());
+  if (auto err = parser->TakeError(); err || !result) {
+    builder->SendError(!result ? result.error() : err.MakeReply());
     return true;
   }
 
@@ -79,8 +86,9 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   for (size_t i = 0; i * 2 < num_args; i++) {
     if (parser->Check("DIM", &params.dim)) {
     } else if (parser->Check("DISTANCE_METRIC")) {
-      params.sim = parser->MapNext("L2", search::VectorSimilarity::L2, "COSINE",
-                                   search::VectorSimilarity::COSINE);
+      params.sim =
+          parser->MapNext("L2", search::VectorSimilarity::L2, "IP", search::VectorSimilarity::IP,
+                          "COSINE", search::VectorSimilarity::COSINE);
     } else if (parser->Check("INITIAL_CAP", &params.capacity)) {
     } else if (parser->Check("M", &params.hnsw_m)) {
     } else if (parser->Check("EF_CONSTRUCTION", &params.hnsw_ef_construction)) {
@@ -118,7 +126,26 @@ ParseResult<search::SchemaField::TagParams> ParseTagParams(CmdArgParser* parser)
       continue;
     }
 
+    if (parser->Check("WITHSUFFIXTRIE")) {
+      params.with_suffixtrie = true;
+      continue;
+    }
+
     break;
+  }
+  return params;
+}
+
+ParseResult<search::SchemaField::TextParams> ParseTextParams(CmdArgParser* parser) {
+  search::SchemaField::TextParams params{};
+  params.with_suffixtrie = parser->Check("WITHSUFFIXTRIE");
+  return params;
+}
+
+search::SchemaField::NumericParams ParseNumericParams(CmdArgParser* parser) {
+  search::SchemaField::NumericParams params{};
+  if (parser->Check("BLOCKSIZE")) {
+    params.block_size = parser->Next<size_t>();
   }
   return params;
 }
@@ -142,11 +169,14 @@ ParsedSchemaField ParseTag(CmdArgParser* parser) {
 }
 
 ParsedSchemaField ParseText(CmdArgParser* parser) {
-  return std::make_pair(search::SchemaField::TEXT, std::monostate{});
+  auto text_params = ParseTextParams(parser);
+  if (!text_params)
+    return make_unexpected(text_params.error());
+  return std::make_pair(search::SchemaField::TEXT, std::move(text_params).value());
 }
 
 ParsedSchemaField ParseNumeric(CmdArgParser* parser) {
-  return std::make_pair(search::SchemaField::NUMERIC, std::monostate{});
+  return std::make_pair(search::SchemaField::NUMERIC, ParseNumericParams(parser));
 }
 
 // Vector fields include: {algorithm} num_args args...
@@ -154,7 +184,7 @@ ParsedSchemaField ParseVector(CmdArgParser* parser) {
   auto vector_params = ParseVectorParams(parser);
 
   if (parser->HasError()) {
-    auto err = *parser->Error();
+    auto err = parser->TakeError();
     VLOG(1) << "Could not parse vector param " << err.index;
     return CreateSyntaxError("Parse error of vector parameters"sv);
   }
@@ -163,6 +193,10 @@ ParsedSchemaField ParseVector(CmdArgParser* parser) {
     return CreateSyntaxError("Knn vector dimension cannot be zero"sv);
   }
   return std::make_pair(search::SchemaField::VECTOR, vector_params);
+}
+
+ParsedSchemaField ParseGeo(CmdArgParser* parser) {
+  return std::make_pair(search::SchemaField::GEO, std::monostate{});
 }
 
 // ON HASH | JSON
@@ -189,10 +223,9 @@ ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
   return true;
 }
 
-constexpr std::array<const std::string_view, 6> kIgnoredOptions = {
-    "UNF"sv, "NOSTEM"sv, "CASESENSITIVE"sv, "WITHSUFFIXTRIE"sv, "INDEXMISSING"sv, "INDEXEMPTY"sv};
-constexpr std::array<const std::string_view, 3> kIgnoredOptionsWithArg = {"WEIGHT"sv, "SEPARATOR"sv,
-                                                                          "PHONETIC"sv};
+constexpr std::array<const std::string_view, 4> kIgnoredOptions = {
+    "UNF"sv, "NOSTEM"sv, "INDEXMISSING"sv, "INDEXEMPTY"sv};
+constexpr std::array<const std::string_view, 3> kIgnoredOptionsWithArg = {"WEIGHT"sv, "PHONETIC"sv};
 
 // SCHEMA field [AS alias] type [flags...]
 ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
@@ -220,8 +253,9 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
 
     // Determine type
     using search::SchemaField;
-    auto params_parser = parser->TryMapNext("TAG"sv, &ParseTag, "TEXT"sv, &ParseText, "NUMERIC"sv,
-                                            &ParseNumeric, "VECTOR"sv, &ParseVector);
+    auto params_parser =
+        parser->TryMapNext("TAG"sv, &ParseTag, "TEXT"sv, &ParseText, "NUMERIC"sv, &ParseNumeric,
+                           "VECTOR"sv, &ParseVector, "GEO", &ParseGeo);
     if (!params_parser) {
       return CreateSyntaxError(
           absl::StrCat("Field type "sv, parser->Next(), " is not supported"sv));
@@ -319,28 +353,32 @@ std::optional<std::string_view> ParseFieldWithAtSign(CmdArgParser* parser) {
   return field;
 }
 
-void ParseLoadFields(CmdArgParser* parser, std::optional<SearchFieldsList>* load_fields) {
-  // TODO: Change to num_strings. In Redis strings number is expected. For example: LOAD 3 $.a AS a
-  size_t num_fields = parser->Next<size_t>();
-  if (!load_fields->has_value()) {
-    load_fields->emplace();
+void ParseNumericFilter(CmdArgParser* parser, SearchParams* params) {
+  auto field = ParseField(parser);
+  size_t lo = parser->Next<size_t>();
+  size_t hi = parser->Next<size_t>();
+  if (auto it = params->optional_filters.find(field); it != params->optional_filters.end()) {
+    search::OptionalNumericFilter* numeric_filter =
+        dynamic_cast<search::OptionalNumericFilter*>(it->second.get());
+    numeric_filter->AddRange(lo, hi);
+  } else {
+    params->optional_filters.emplace(field,
+                                     std::make_unique<search::OptionalNumericFilter>(lo, hi));
   }
+}
+
+std::vector<FieldReference> ParseLoadOrReturnFields(CmdArgParser* parser, bool is_load) {
+  // TODO: Change to num_strings. In Redis strings number is expected. For example: LOAD 3 $.a AS a
+  std::vector<FieldReference> fields;
+  size_t num_fields = parser->Next<size_t>();
 
   while (parser->HasNext() && num_fields--) {
-    string_view str = parser->Next();
-
-    if (absl::StartsWith(str, "@"sv)) {
-      str.remove_prefix(1);  // remove leading @
-    }
-
-    StringOrView name = StringOrView::FromString(std::string{str});
-    if (parser->Check("AS")) {
-      load_fields->value().emplace_back(name, true,
-                                        StringOrView::FromString(parser->Next<std::string>()));
-    } else {
-      load_fields->value().emplace_back(name, true);
-    }
+    string_view field = is_load ? ParseField(parser) : parser->Next();
+    string_view alias;
+    parser->Check("AS", &alias);
+    fields.emplace_back(field, alias);
   }
+  return fields;
 }
 
 search::QueryParams ParseQueryParams(CmdArgParser* parser) {
@@ -356,51 +394,45 @@ search::QueryParams ParseQueryParams(CmdArgParser* parser) {
 ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
   SearchParams params;
 
+  const size_t max_results = absl::GetFlag(FLAGS_MAXSEARCHRESULTS);
+
   while (parser->HasNext()) {
     // [LIMIT offset total]
     if (parser->Check("LIMIT")) {
       params.limit_offset = parser->Next<size_t>();
       params.limit_total = parser->Next<size_t>();
+      if (params.limit_total > max_results) {
+        return CreateSyntaxError(absl::StrFormat("LIMIT exceeds maximum of %d", max_results));
+      }
     } else if (parser->Check("LOAD")) {
       if (params.return_fields) {
         return CreateSyntaxError("LOAD cannot be applied after RETURN"sv);
       }
 
-      ParseLoadFields(parser, &params.load_fields);
+      params.load_fields = ParseLoadOrReturnFields(parser, true);
     } else if (parser->Check("RETURN")) {
       if (params.load_fields) {
         return CreateSyntaxError("RETURN cannot be applied after LOAD"sv);
       }
-
-      // RETURN {num} [{ident} AS {name}...]
-      /* TODO: Change to num_strings. In Redis strings number is expected. For example: RETURN 3 $.a
-       * AS a */
-      size_t num_fields = parser->Next<size_t>();
-      params.return_fields.emplace();
-      while (parser->HasNext() && params.return_fields->size() < num_fields) {
-        StringOrView name = StringOrView::FromString(parser->Next<std::string>());
-
-        if (parser->Check("AS")) {
-          params.return_fields->emplace_back(std::move(name), true,
-                                             StringOrView::FromString(parser->Next<std::string>()));
-        } else {
-          params.return_fields->emplace_back(std::move(name), true);
-        }
-      }
+      if (!params.return_fields)  // after NOCONTENT it's silently ignored
+        params.return_fields = ParseLoadOrReturnFields(parser, false);
     } else if (parser->Check("NOCONTENT")) {  // NOCONTENT
-      params.no_content = true;
+      params.return_fields.emplace();
     } else if (parser->Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
       params.query_params = ParseQueryParams(parser);
     } else if (parser->Check("SORTBY")) {
-      auto parsed_field = ParseField(parser);
-      StringOrView field = StringOrView::FromString(std::string{parsed_field});
-      params.sort_option = SearchParams::SortOption{
-          SearchField{std::move(field)}, parser->Check("DESC") ? SortOrder::DESC : SortOrder::ASC};
+      FieldReference field{ParseField(parser)};
+      params.sort_option =
+          SearchParams::SortOption{field, parser->Check("DESC") ? SortOrder::DESC : SortOrder::ASC};
+    } else if (parser->Check("FILTER")) {
+      ParseNumericFilter(parser, &params);
     } else {
       // Unsupported parameters are ignored for now
       parser->Skip(1);
     }
   }
+
+  params.limit_total = std::min(params.limit_total, max_results);
 
   return params;
 }
@@ -444,6 +476,67 @@ ParseResult<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* parse
   return sort_params;
 }
 
+std::pair<std::string_view, std::string_view> Split(std::string_view s, char delim) {
+  return absl::StrSplit(s, absl::MaxSplits(absl::ByChar(delim), 1));
+}
+
+// Example: LOAD_FROM index AS alias num_conditions condition [condition ...] [QUERY query]
+// condition is in the form index.field=foreign_index.field or foreign_index.field=index.field
+ParseResult<AggregateParams::JoinParams> ParseAggregatorJoinParams(
+    CmdArgParser* parser, absl::flat_hash_set<std::string>* known_indexes) {
+  AggregateParams::JoinParams join_params;
+  join_params.index = parser->Next<std::string>();
+  if (parser->Check("AS")) {
+    join_params.index_alias = parser->Next<std::string>();
+  } else {
+    join_params.index_alias = join_params.index;
+  }
+
+  if (known_indexes->contains(join_params.index_alias)) {
+    return CreateSyntaxError(
+        absl::StrCat("Duplicate index alias in LOAD_FROM: '", join_params.index_alias, "'"));
+  }
+
+  // Validate index name
+  known_indexes->insert(join_params.index_alias);
+
+  size_t num_fields = parser->Next<size_t>();
+  join_params.conditions.reserve(num_fields);
+  // Conditions are in the form index.field=foreign_index.field or foreign_index.field=index.field
+  while (parser->HasNext() && num_fields > 0) {
+    auto [left, right] = Split(parser->Next(), '=');
+    auto [l_index, l_field] = Split(left, '.');
+    auto [r_index, r_field] = Split(right, '.');
+
+    if (right.empty() || l_field.empty() || r_field.empty()) {
+      return CreateSyntaxError(
+          "bad arguments for LOAD_FROM: expected 'index.field=foreign_index.field'"sv);
+    }
+
+    if (!known_indexes->contains(l_index) || !known_indexes->contains(r_index)) {
+      return CreateSyntaxError(absl::StrCat("bad arguments for LOAD_FROM: unknown index '",
+                                            known_indexes->contains(l_index) ? r_index : l_index,
+                                            "'"));
+    }
+
+    if (l_index == join_params.index_alias) {
+      join_params.conditions.emplace_back(l_field, r_index, r_field);
+    } else if (r_index == join_params.index_alias) {
+      join_params.conditions.emplace_back(r_field, l_index, l_field);
+    } else {
+      return CreateSyntaxError(absl::StrCat(
+          "bad arguments for LOAD_FROM: one of the field must be from the current index '",
+          join_params.index_alias, "'. Got '", left, "' and '", right, "'"));
+    }
+
+    num_fields--;
+  }
+
+  parser->Check("QUERY", &join_params.query);
+
+  return join_params;
+}
+
 ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
   AggregateParams params;
   tie(params.index, params.query) = parser->Next<string_view, string_view>();
@@ -451,8 +544,25 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
   // Parse LOAD count field [field ...]
   // LOAD options are at the beginning of the query, so we need to parse them first
   while (parser->HasNext() && parser->Check("LOAD")) {
-    ParseLoadFields(parser, &params.load_fields);
+    auto fields = ParseLoadOrReturnFields(parser, true);
+    if (!params.load_fields.has_value())
+      params.load_fields = std::move(fields);
+    else
+      params.load_fields->insert(params.load_fields->end(), make_move_iterator(fields.begin()),
+                                 make_move_iterator(fields.end()));
   }
+
+  // Used for join params
+  absl::flat_hash_set<std::string> current_known_indexes;
+  current_known_indexes.insert(std::string{params.index});
+  while (parser->HasNext() && parser->Check("LOAD_FROM")) {
+    auto join_params = ParseAggregatorJoinParams(parser, &current_known_indexes);
+    if (!join_params) {
+      return make_unexpected(join_params.error());
+    }
+    params.joins.emplace_back(std::move(join_params).value());
+  }
+  const bool joining_enabled = !params.joins.empty();
 
   while (parser->HasNext()) {
     // GROUPBY nargs property [property ...]
@@ -508,14 +618,23 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
         return make_unexpected(sort_params.error());  // Propagate the specific error
       }
 
-      params.steps.push_back(aggregate::MakeSortStep(std::move(sort_params).value()));
+      if (!joining_enabled || params.join_agg_params.HasValue()) {
+        params.steps.push_back(aggregate::MakeSortStep(std::move(sort_params).value()));
+      } else {
+        params.join_agg_params.sort = std::move(sort_params).value();
+      }
       continue;
     }
 
     // LIMIT
     if (parser->Check("LIMIT")) {
       auto [offset, num] = parser->Next<size_t, size_t>();
-      params.steps.push_back(aggregate::MakeLimitStep(offset, num));
+      if (!joining_enabled || params.join_agg_params.HasLimit()) {
+        params.steps.push_back(aggregate::MakeLimitStep(offset, num));
+      } else {
+        params.join_agg_params.limit_offset = offset;
+        params.join_agg_params.limit_total = num;
+      }
       continue;
     }
 
@@ -529,10 +648,286 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       return CreateSyntaxError("LOAD cannot be applied after projectors or reducers"sv);
     }
 
+    if (parser->Check("LOAD_FROM")) {
+      return CreateSyntaxError("LOAD_FROM cannot be applied after projectors or reducers"sv);
+    }
+
     return CreateSyntaxError(absl::StrCat("Unknown clause: ", parser->Peek()));
   }
 
   return params;
+}
+
+// Data that we need at the first step of join
+struct PreprocessedJoinData {
+  struct SortParam {
+    size_t index;
+    size_t field_index;
+    SortOrder order;
+  };
+
+  explicit PreprocessedJoinData(size_t n)
+      : indexes(n), needed_fields(n), joins_per_index(n), fields_to_load_per_index(n) {
+  }
+
+  // Index names
+  join::Vector<std::string_view> indexes;
+  // Maps index alias to its index in the indexes vector
+  absl::flat_hash_map<std::string_view, size_t> alias_to_index;
+
+  // For each index we store the fields that are needed for the join
+  join::Vector<join::Vector<std::string_view>> needed_fields;
+  // For each index we store the join expressions that are used to join this index
+  join::Vector<join::JoinExpressionsVec> joins_per_index;
+  // For each index we store the fields that should be loaded from the document after the join
+  join::Vector<join::Vector<std::string_view>> fields_to_load_per_index;
+  // Maps field names to the shard_id and their index in the needed_fields vector
+  join::Vector<SortParam> sort_params;
+};
+
+io::Result<PreprocessedJoinData, ErrorReply> PreprocessDataForJoin(std::string_view index,
+                                                                   const AggregateParams& params) {
+  DCHECK(!params.joins.empty());
+
+  const size_t n = params.joins.size();
+  PreprocessedJoinData result(n + 1);
+
+  // Collect aliases and initialize result.indexes
+  result.alias_to_index.reserve(n);
+  result.alias_to_index[index] = 0;
+  result.indexes[0] = index;
+  for (size_t i = 0; i < n; ++i) {
+    result.alias_to_index[params.joins[i].index_alias] = i + 1;
+    result.indexes[i + 1] = params.joins[i].index;
+  }
+
+  // Collect needed fields for joins for each index
+  // needed_fields[i] contains fields needed for index i
+  // for each field name we store its index
+  // Also collect joins for each index
+  std::vector<absl::flat_hash_map<std::string_view, size_t>> needed_fields(n + 1);
+
+  auto insert = [&](std::string_view field, auto* map) -> size_t {
+    auto it = map->find(field);
+    if (it == map->end()) {
+      const size_t field_index = map->size();
+      map->emplace(field, field_index);
+      return field_index;
+    }
+    return it->second;
+  };
+
+  for (size_t i = 0; i < n; ++i) {
+    const auto& join = params.joins[i];
+    for (const auto& condition : join.conditions) {
+      size_t field_index = insert(condition.field, &needed_fields[i + 1]);
+
+      DCHECK(result.alias_to_index.contains(condition.foreign_field.first))
+          << "Unknown foreign index alias: " << condition.foreign_field.first;
+      size_t foreign_index = result.alias_to_index[condition.foreign_field.first];
+      DCHECK_LE(foreign_index, i) << "Foreign index alias out of range: "
+                                  << condition.foreign_field.first;
+
+      size_t foreign_field_index =
+          insert(condition.foreign_field.second, &needed_fields[foreign_index]);
+
+      // Update joins for this index
+      result.joins_per_index[i + 1].emplace_back(
+          join::JoinExpression{field_index, foreign_index, foreign_field_index});
+    }
+  }
+
+  // Collect fields needed for sorting
+  // Max option will be temprorary ignored
+  if (params.join_agg_params.sort) {
+    for (const auto& sort_field : params.join_agg_params.sort.value().fields) {
+      auto [index_alias, field_name] = Split(sort_field.first, '.');
+
+      auto it = result.alias_to_index.find(index_alias);
+      if (it == result.alias_to_index.end()) {
+        return CreateSyntaxError(absl::StrCat("Unknown index alias '", index_alias,
+                                              "' in the SORTBY option. Field: '", field_name, "'"));
+      }
+
+      size_t index = it->second;
+      size_t field_index = insert(field_name, &needed_fields[index]);
+      result.sort_params.push_back(
+          PreprocessedJoinData::SortParam{index, field_index, sort_field.second});
+    }
+  }
+
+  // Map them to the result.needed_fields
+  for (size_t i = 0; i <= n; ++i) {
+    auto& from = needed_fields[i];
+    auto& to = result.needed_fields[i];
+
+    to.resize(from.size());
+    for (const auto& [field_name, field_index] : from) {
+      to[field_index] = field_name;
+    }
+  }
+
+  // Initialize fields_to_load_per_index
+  for (const auto& field : params.load_fields.value_or(std::vector<FieldReference>{})) {
+    auto [index_alias, field_name] = Split(field.Name(), '.');
+
+    auto it = result.alias_to_index.find(index_alias);
+    if (it == result.alias_to_index.end()) {
+      return CreateSyntaxError(absl::StrCat("Unknown index alias '", index_alias,
+                                            "' in the LOAD option. Field: '", field_name, "'"));
+    }
+
+    result.fields_to_load_per_index[it->second].emplace_back(field_name);
+  }
+
+  return result;
+}
+
+// Merge preaggregated results from all shards for each index
+join::Vector<join::Vector<join::Entry>> MergePreaggregatedShardJoinData(
+    absl::Span<const std::vector<join::Vector<join::OwnedEntry>>> preaggregated_shard_data) {
+  if (preaggregated_shard_data.empty()) {
+    return {};
+  }
+
+  // indexes_entries[i] contains the preaggregated data for index i
+  const size_t indexes_count = preaggregated_shard_data[0].size();
+  join::Vector<join::Vector<join::Entry>> indexes_entries(indexes_count);
+  for (size_t i = 0; i < indexes_count; ++i) {
+    auto& entries = indexes_entries[i];
+
+    size_t num_docs = 0;
+    for (size_t j = 0; j < shard_set->size(); ++j) {
+      num_docs += preaggregated_shard_data[j][i].size();
+    }
+
+    entries.reserve(num_docs);
+    for (size_t j = 0; j < shard_set->size(); ++j) {
+      for (const auto& entry : preaggregated_shard_data[j][i]) {
+        join::Vector<join::JoinableValue> field_values;
+        field_values.reserve(entry.second.size());
+
+        auto insert_copy = [&field_values](const auto& field_value) {
+          field_values.emplace_back(field_value);
+        };
+
+        for (const auto& field_value : entry.second) {
+          std::visit(insert_copy, field_value);
+        }
+
+        entries.emplace_back(entry.first, std::move(field_values));
+      }
+    }
+  }
+
+  return indexes_entries;
+}
+
+join::Vector<join::Vector<join::Key>> DoJoin(
+    absl::Span<const std::vector<join::Vector<join::OwnedEntry>>> preaggregated_shard_data,
+    const AggregateParams& params, const PreprocessedJoinData& join_data) {
+  using join::KeyIndexes;
+
+  auto indexes_entries = MergePreaggregatedShardJoinData(preaggregated_shard_data);
+
+  auto sort_and_limit = [&](std::vector<KeyIndexes>* joined_entries) {
+    const size_t offset = params.join_agg_params.limit_offset;
+    const size_t total = params.join_agg_params.limit_total;
+    if (offset >= joined_entries->size()) {
+      joined_entries->clear();
+      return;
+    }
+
+    const auto& sort_params = join_data.sort_params;
+    auto comparator = [&](const KeyIndexes& l, const KeyIndexes& r) {
+      for (const auto& sort_param : sort_params) {
+        size_t index = sort_param.index;
+        const join::JoinableValue& l_value =
+            indexes_entries[index][l[index]].second[sort_param.field_index];
+        const join::JoinableValue& r_value =
+            indexes_entries[index][r[index]].second[sort_param.field_index];
+
+        if (l_value == r_value) {
+          continue;
+        }
+        return sort_param.order == SortOrder::ASC ? l_value < r_value : l_value > r_value;
+      }
+      return false;
+    };
+
+    size_t limit = offset + total;
+    if (!sort_params.empty()) {
+      if (limit >= joined_entries->size()) {
+        std::sort(joined_entries->begin(), joined_entries->end(), std::move(comparator));
+      } else {
+        std::partial_sort(joined_entries->begin(), joined_entries->begin() + limit,
+                          joined_entries->end(), std::move(comparator));
+        joined_entries->resize(limit);
+      }
+    }
+
+    size_t new_limit = std::min(limit, joined_entries->size());
+    if (offset) {
+      for (size_t i = offset; i < new_limit; ++i) {
+        auto& dest = (*joined_entries)[i - offset];
+        auto& src = (*joined_entries)[i];
+        DCHECK(dest.size() == src.size());
+        dest = std::move(src);
+      }
+    }
+
+    size_t new_size = std::min(total, joined_entries->size() - offset);
+    joined_entries->resize(new_size);
+  };
+
+  return join::JoinAllIndexes(indexes_entries, join_data.joins_per_index, sort_and_limit);
+}
+
+std::vector<aggregate::DocValues> MergeJoinedKeysWithData(
+    const AggregateParams& agg_params, const PreprocessedJoinData& join_data,
+    absl::Span<const join::Vector<join::Key>> joined_entries,
+    absl::Span<const std::vector<ShardDocIndex::FieldsValuesPerDocId>> shard_keys_data) {
+  std::vector<aggregate::DocValues> merged_data;
+  merged_data.reserve(joined_entries.size());
+
+  const size_t indexes_count = join_data.indexes.size();
+  const auto& fields_per_index = join_data.fields_to_load_per_index;
+
+  for (const auto& entry : joined_entries) {
+    aggregate::DocValues doc_values;
+
+    // First reserve space for the total number of fields
+    size_t docs_count = 0;
+    for (size_t i = 0; i < indexes_count; ++i) {
+      docs_count += fields_per_index[i].size();
+    }
+    doc_values.reserve(docs_count);
+
+    for (size_t i = 0; i < indexes_count; ++i) {
+      std::string_view index_alias =
+          (i == 0) ? agg_params.index : agg_params.joins[i - 1].index_alias;
+
+      const auto [shard_id, doc_id] = entry[i];
+      const auto& field_values_per_doc_id = shard_keys_data[shard_id][i];
+
+      auto it = field_values_per_doc_id.find(doc_id);
+      if (it == field_values_per_doc_id.end()) {
+        /* This doc id was joined but not found on the second step. This can happen due to
+         * expiration for example. For now, just skip it */
+        continue;
+      }
+
+      const auto& field_values = it->second;
+
+      for (size_t j = 0; j < fields_per_index[i].size(); ++j) {
+        std::string_view field_alias = fields_per_index[i][j];  // tmp alias is identifier
+        doc_values.emplace(absl::StrCat(index_alias, "."sv, field_alias), field_values[j]);
+      }
+    }
+
+    merged_data.push_back(std::move(doc_values));
+  }
+  return merged_data;
 }
 
 auto SortableValueSender(RedisReplyBuilder* rb) {
@@ -555,6 +950,15 @@ void SendSerializedDoc(const SerializedSearchDoc& doc, SinkReplyBuilder* builder
   }
 }
 
+template <typename T>
+void PartialSort(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder order,
+                 T SerializedSearchDoc::*field) {
+  auto cb = [order, field](SerializedSearchDoc* l, SerializedSearchDoc* r) {
+    return order == SortOrder::ASC ? l->*field < r->*field : r->*field < l->*field;
+  };
+  partial_sort(docs.begin(), docs.begin() + min(limit, docs.size()), docs.end(), cb);
+}
+
 void SearchReply(const SearchParams& params,
                  std::optional<search::KnnScoreSortOption> knn_sort_option,
                  absl::Span<SearchResult> results, SinkReplyBuilder* builder) {
@@ -568,64 +972,30 @@ void SearchReply(const SearchParams& params,
     }
   }
 
-  size_t size = docs.size();
-  bool should_add_score_field = false;
-
+  // Reorder and cut KNN results before applying SORT and LIMIT
+  optional<string> knn_score_ret_field;
+  bool ignore_sort = false;
   if (knn_sort_option) {
-    size = std::min(size, knn_sort_option->limit);
-    total_hits = std::min(total_hits, knn_sort_option->limit);
-    should_add_score_field = params.ShouldReturnField(knn_sort_option->score_field_alias);
+    total_hits = min(total_hits, knn_sort_option->limit);
+    PartialSort(absl::MakeSpan(docs), total_hits, SortOrder::ASC, &SerializedSearchDoc::knn_score);
+    docs.resize(min(docs.size(), knn_sort_option->limit));
 
-    auto comparator = [](const SerializedSearchDoc* l, const SerializedSearchDoc* r) {
-      return *l < *r;
-    };
-
-    const size_t prefix_size_to_sort = std::min(params.limit_offset + params.limit_total, size);
-    if (prefix_size_to_sort == docs.size()) {
-      std::sort(docs.begin(), docs.end(), std::move(comparator));
-    } else {
-      std::partial_sort(docs.begin(), docs.begin() + prefix_size_to_sort, docs.end(),
-                        std::move(comparator));
-    }
+    ignore_sort = !params.sort_option || params.sort_option->IsSame(*knn_sort_option);
+    if (params.ShouldReturnField(knn_sort_option->score_field_alias))
+      knn_score_ret_field = knn_sort_option->score_field_alias;
   }
 
-  const size_t offset = std::min(params.limit_offset, size);
-  const size_t limit = std::min(size - offset, params.limit_total);
+  // Apply LIMIT
+  const size_t offset = std::min(params.limit_offset, docs.size());
+  const size_t limit = std::min(docs.size() - offset, params.limit_total);
   const size_t end = offset + limit;
-  DCHECK(end <= docs.size());
 
-  if (params.sort_option) {
-    auto field_alias = params.sort_option->field.NameView();
-
-    auto comparator = [&](const SerializedSearchDoc* l_doc, const SerializedSearchDoc* r_doc) {
-      auto& l = l_doc->values;
-      auto& r = r_doc->values;
-
-      auto l_it = l.find(field_alias);
-      auto r_it = r.find(field_alias);
-
-      // If some of the values is not present
-      if (l_it == l.end() || r_it == r.end()) {
-        return l_it != l.end();
-      }
-
-      const auto& lv = l_it->second;
-      const auto& rv = r_it->second;
-      return params.sort_option->order == SortOrder::ASC ? lv < rv : lv > rv;
-    };
-
-    auto sort_begin = docs.begin();
-    auto sort_end = docs.end();
-    // If we first sorted by knn, we need to sort only the result of knn
-    if (knn_sort_option) {
-      sort_begin = docs.begin() + offset;
-      sort_end = docs.begin() + end;
-    }
-    std::sort(sort_begin, sort_end, std::move(comparator));
-  }
+  // Apply SORTBY if its different from the KNN sort
+  if (params.sort_option && !ignore_sort)
+    PartialSort(absl::MakeSpan(docs), end, params.sort_option->order,
+                &SerializedSearchDoc::sort_score);
 
   const bool reply_with_ids_only = params.IdsOnly();
-
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   RedisReplyBuilder::ArrayScope scope{rb, reply_with_ids_only ? (limit + 1) : (limit * 2 + 1)};
 
@@ -636,17 +1006,30 @@ void SearchReply(const SearchParams& params,
       continue;
     }
 
-    if (should_add_score_field && holds_alternative<float>(docs[i]->score))
-      docs[i]->values[knn_sort_option->score_field_alias] =
-          absl::StrCat(get<float>(docs[i]->score));
+    if (knn_score_ret_field)
+      docs[i]->values[*knn_score_ret_field] = docs[i]->knn_score;
 
     SendSerializedDoc(*docs[i], builder);
   }
 }
 
+// Warms up the query parser to avoid first-call slowness
+void WarmupQueryParser() {
+  static std::once_flag warmed_up;
+  std::call_once(warmed_up, []() {
+    search::QueryParams params;
+    search::QueryDriver driver{};
+    driver.SetParams(&params);
+    driver.SetInput(std::string{""});
+    (void)search::Parser (&driver)();
+  });
+}
+
 }  // namespace
 
 void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
+  WarmupQueryParser();
+
   auto* builder = cmd_cntx.rb;
   if (cmd_cntx.conn_cntx->conn_state.db_index != 0) {
     return builder->SendError("Cannot create index on db != 0"sv);
@@ -694,8 +1077,8 @@ void SearchFamily::FtAlter(CmdArgList args, const CommandContext& cmd_cntx) {
   parser.ExpectTag("SCHEMA");
   parser.ExpectTag("ADD");
   auto* builder = cmd_cntx.rb;
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   // First, extract existing index info
   shared_ptr<DocIndex> index_info;
@@ -737,7 +1120,7 @@ void SearchFamily::FtAlter(CmdArgList args, const CommandContext& cmd_cntx) {
   // Rebuild index
   // TODO: Introduce partial rebuild
   auto upd_cb = [idx_name, index_info](Transaction* tx, EngineShard* es) {
-    es->search_indices()->DropIndex(idx_name);
+    (void)es->search_indices()->DropIndex(idx_name);
     es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info);
     return OpStatus::OK;
   };
@@ -748,14 +1131,40 @@ void SearchFamily::FtAlter(CmdArgList args, const CommandContext& cmd_cntx) {
 
 void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view idx_name = ArgS(args, 0);
-  // TODO: Handle optional DD param
+
+  // Parse optional DD (Delete Documents) parameter
+  bool delete_docs = args.size() > 1 && absl::EqualsIgnoreCase(args[1], "DD");
 
   atomic_uint num_deleted{0};
-  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (es->search_indices()->DropIndex(idx_name))
-      num_deleted.fetch_add(1);
+
+  auto cb = [&](Transaction* t, EngineShard* es) {
+    // Drop the index and get its pointer
+    auto index = es->search_indices()->DropIndex(idx_name);
+    if (!index)
+      return OpStatus::OK;
+
+    num_deleted.fetch_add(1);
+
+    // If DD is set, delete all documents that were in the index
+    if (delete_docs) {
+      // Get const reference to document keys map (index will be destroyed after this scope)
+      const auto& doc_keys = index->key_index().GetDocKeysMap();
+
+      auto op_args = t->GetOpArgs(es);
+      auto& db_slice = op_args.GetDbSlice();
+
+      for (const auto& [key, doc_id] : doc_keys) {
+        auto it = db_slice.FindMutable(op_args.db_cntx, key).it;
+        if (IsValid(it)) {
+          db_slice.Del(op_args.db_cntx, it);
+        }
+      }
+    }
+
     return OpStatus::OK;
-  });
+  };
+
+  cmd_cntx.tx->Execute(cb, true);
 
   DCHECK(num_deleted == 0u || num_deleted == shard_set->size());
   if (num_deleted == 0u)
@@ -814,15 +1223,22 @@ void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
     vector<string> info;
 
     string_view base[] = {"identifier"sv, string_view{field_ident},
-                          "attribute",    field_info.short_name,
+                          "attribute"sv,  field_info.short_name,
                           "type"sv,       SearchFieldTypeToString(field_info.type)};
     info.insert(info.end(), base, base + ABSL_ARRAYSIZE(base));
 
     if (field_info.flags & search::SchemaField::NOINDEX)
-      info.push_back("NOINDEX");
+      info.emplace_back("NOINDEX"sv);
 
     if (field_info.flags & search::SchemaField::SORTABLE)
-      info.push_back("SORTABLE");
+      info.emplace_back("SORTABLE"sv);
+
+    if (field_info.type == search::SchemaField::NUMERIC) {
+      auto& numeric_params =
+          std::get<search::SchemaField::NumericParams>(field_info.special_params);
+      info.emplace_back("blocksize"sv);
+      info.emplace_back(std::to_string(numeric_params.block_size));
+    }
 
     rb->SendSimpleStrArr(info);
   }
@@ -856,7 +1272,7 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
     return;
 
   search::SearchAlgorithm search_algo;
-  if (!search_algo.Init(query_str, &params->query_params))
+  if (!search_algo.Init(query_str, &params->query_params, &params->optional_filters))
     return builder->SendError("Query syntax error");
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
@@ -1061,41 +1477,127 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
   if (SendErrorIfOccurred(params, &parser, builder))
     return;
 
-  search::SearchAlgorithm search_algo;
-  if (!search_algo.Init(params->query, &params->params))
-    return builder->SendError("Query syntax error");
-
-  using ResultContainer = decltype(declval<ShardDocIndex>().SearchForAggregator(
-      declval<OpArgs>(), params.value(), &search_algo));
-
-  vector<ResultContainer> query_results(shard_set->size());
-  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (auto* index = es->search_indices()->GetIndex(params->index); index) {
-      query_results[es->shard_id()] =
-          index->SearchForAggregator(t->GetOpArgs(es), params.value(), &search_algo);
-    }
-    return OpStatus::OK;
-  });
-
-  // ResultContainer is absl::flat_hash_map<std::string, search::SortableValue>
-  // DocValues is absl::flat_hash_map<std::string_view, SortableValue>
-  // Keys of values should point to the keys of the query_results
   std::vector<aggregate::DocValues> values;
-  for (auto& sub_results : query_results) {
-    for (auto& docs : sub_results) {
-      aggregate::DocValues doc_value;
-      for (auto& doc : docs) {
-        doc_value[doc.first] = std::move(doc.second);
+
+  if (params->joins.empty()) {
+    search::SearchAlgorithm search_algo;
+    if (!search_algo.Init(params->query, &params->params))
+      return builder->SendError("Query syntax error");
+
+    using ResultContainer = decltype(declval<ShardDocIndex>().SearchForAggregator(
+        declval<OpArgs>(), params.value(), &search_algo));
+
+    vector<ResultContainer> query_results(shard_set->size());
+
+    cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+      if (auto* index = es->search_indices()->GetIndex(params->index); index) {
+        query_results[es->shard_id()] =
+            index->SearchForAggregator(t->GetOpArgs(es), params.value(), &search_algo);
       }
-      values.push_back(std::move(doc_value));
+      return OpStatus::OK;
+    });
+
+    // ResultContainer is absl::flat_hash_map<std::string, search::SortableValue>
+    // DocValues is absl::flat_hash_map<std::string_view, SortableValue>
+    // Keys of values should point to the keys of the query_results
+    size_t total_values = 0;
+    for (const auto& sub_results : query_results) {
+      total_values += sub_results.size();
     }
+
+    values.reserve(total_values);
+    for (auto& sub_results : query_results) {
+      for (auto& docs : sub_results) {
+        aggregate::DocValues doc_value;
+        for (auto& doc : docs) {
+          doc_value[doc.first] = std::move(doc.second);
+        }
+        values.emplace_back(std::move(doc_value));
+      }
+    }
+  } else {
+    const size_t indexes_count = params->joins.size() + 1;
+
+    std::vector<search::SearchAlgorithm> search_algos(indexes_count);
+    if (!search_algos[0].Init(params->query, &params->params)) {
+      return builder->SendError("Query syntax error");
+    }
+
+    for (size_t i = 0; i < params->joins.size(); ++i) {
+      search::QueryParams empty_params;
+      if (!search_algos[i + 1].Init(params->joins[i].query, &empty_params)) {
+        return builder->SendError("Query syntax error in JOIN");
+      }
+    }
+
+    auto data_for_join = PreprocessDataForJoin(params->index, *params);
+    if (!data_for_join) {
+      return builder->SendError(data_for_join.error());
+    }
+
+    // preaggregated_shard_data is preaggregation results per index per shard
+    // preaggregated_shard_data[shard_id][i] is the results of index i on shard shard_id
+    using JoinDataVector = join::Vector<join::OwnedEntry>;
+    std::vector<std::vector<JoinDataVector>> preaggregated_shard_data(
+        shard_set->size(), std::vector<JoinDataVector>(indexes_count));
+    cmd_cntx.tx->Execute(
+        [&](Transaction* t, EngineShard* es) {
+          auto& shard_data = preaggregated_shard_data[es->shard_id()];
+          for (size_t i = 0; i < indexes_count; ++i) {
+            if (auto* index = es->search_indices()->GetIndex(data_for_join->indexes[i]); index) {
+              shard_data[i] = index->PreagregateDataForJoin(
+                  t->GetOpArgs(es), data_for_join->needed_fields[i], &search_algos[i]);
+            }
+          }
+          return OpStatus::OK;
+        },
+        false);
+
+    // Do join
+    auto joined_entries = DoJoin(preaggregated_shard_data, *params, *data_for_join);
+
+    // Collect doc_ids per index that were joined
+    // Each shard stores set of doc_ids per each index that was joined
+    using DocIdsSet = absl::flat_hash_set<search::DocId>;
+    std::vector<std::vector<DocIdsSet>> doc_ids_per_shard(shard_set->size(),
+                                                          std::vector<DocIdsSet>(indexes_count));
+    for (const auto& entry : joined_entries) {
+      for (size_t index = 0; index < indexes_count; index++) {
+        const auto [shard_id, doc_id] = entry[index];
+        doc_ids_per_shard[shard_id][index].insert(doc_id);
+      }
+    }
+
+    // Load fields for keys that were joined
+    std::vector<std::vector<ShardDocIndex::FieldsValuesPerDocId>> shard_keys_data_per_index(
+        shard_set->size(), std::vector<ShardDocIndex::FieldsValuesPerDocId>(indexes_count));
+    cmd_cntx.tx->Execute(
+        [&](Transaction* t, EngineShard* es) {
+          const ShardId shard_id = es->shard_id();
+          auto& shard_keys_data = shard_keys_data_per_index[shard_id];
+          const auto& doc_ids_per_index = doc_ids_per_shard[shard_id];
+
+          for (size_t i = 0; i < indexes_count; ++i) {
+            if (auto* index = es->search_indices()->GetIndex(data_for_join->indexes[i]); index) {
+              shard_keys_data[i] = index->LoadKeysData(t->GetOpArgs(es), doc_ids_per_index[i],
+                                                       data_for_join->fields_to_load_per_index[i]);
+            }
+          }
+          return OpStatus::OK;
+        },
+        true);
+
+    // Now we have sets of keys that were joined and keys data.
+    // We need to build DocValues for each joined set.
+    values =
+        MergeJoinedKeysWithData(*params, *data_for_join, joined_entries, shard_keys_data_per_index);
   }
 
   std::vector<std::string_view> load_fields;
   if (params->load_fields) {
     load_fields.reserve(params->load_fields->size());
     for (const auto& field : params->load_fields.value()) {
-      load_fields.push_back(field.GetShortName());
+      load_fields.push_back(field.OutputName());
     }
   }
 
@@ -1189,6 +1691,97 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
+void FtConfigHelp(CmdArgParser* parser, RedisReplyBuilder* rb) {
+  string_view param = parser->Next();
+
+  vector<string> names = config_registry.List(param);
+  vector<absl::CommandLineFlag*> res;
+
+  for (const auto& name : names) {
+    auto* flag = config_registry.GetFlag(name);
+    DCHECK(flag);
+    if (flag && flag->Filename().find(kCurrentFile) != std::string::npos) {
+      res.push_back(flag);
+    }
+  }
+
+  rb->StartArray(res.size());
+  for (const auto& flag : res) {
+    rb->StartArray(5);
+    rb->SendBulkString(flag->Name());
+    rb->SendBulkString("Description"sv);
+    rb->SendBulkString(flag->Help());
+    rb->SendBulkString("Value"sv);
+    rb->SendBulkString(flag->CurrentValue());
+  }
+}
+
+void FtConfigGet(CmdArgParser* parser, RedisReplyBuilder* rb) {
+  string_view param = parser->Next();
+  vector<string> names = config_registry.List(param);
+
+  vector<string> res;
+
+  for (const auto& name : names) {
+    auto* flag = config_registry.GetFlag(name);
+    DCHECK(flag);
+    if (flag && flag->Filename().find(kCurrentFile) != std::string::npos) {
+      res.push_back(name);
+      res.push_back(flag->CurrentValue());
+    }
+  }
+  return rb->SendBulkStrArr(res, RedisReplyBuilder::MAP);
+}
+
+void FtConfigSet(CmdArgParser* parser, RedisReplyBuilder* rb) {
+  auto [param, value] = parser->Next<string_view, string_view>();
+
+  if (!parser->Finalize()) {
+    rb->SendError(parser->TakeError().MakeReply());
+    return;
+  }
+
+  vector<string> names = config_registry.List(param);
+  if (names.size() != 1 ||
+      config_registry.GetFlag(names[0])->Filename().find(kCurrentFile) == std::string::npos) {
+    return rb->SendError("Invalid option name");
+  }
+
+  ConfigRegistry::SetResult result = config_registry.Set(param, value);
+
+  const char kErrPrefix[] = "FT.CONFIG SET failed (possibly related to argument '";
+  switch (result) {
+    case ConfigRegistry::SetResult::OK:
+      return rb->SendOk();
+    case ConfigRegistry::SetResult::UNKNOWN:
+      return rb->SendError(
+          absl::StrCat("Unknown option or number of arguments for CONFIG SET - '", param, "'"),
+          kConfigErrType);
+
+    case ConfigRegistry::SetResult::READONLY:
+      return rb->SendError(absl::StrCat(kErrPrefix, param, "') - can't set immutable config"),
+                           kConfigErrType);
+
+    case ConfigRegistry::SetResult::INVALID:
+      return rb->SendError(absl::StrCat(kErrPrefix, param, "') - argument can not be set"),
+                           kConfigErrType);
+  }
+  ABSL_UNREACHABLE();
+}
+
+void SearchFamily::FtConfig(CmdArgList args, const CommandContext& cmd_cntx) {
+  CmdArgParser parser{args};
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+
+  auto func = parser.MapNext("GET", &FtConfigGet, "SET", &FtConfigSet, "HELP", &FtConfigHelp);
+
+  if (auto err = parser.TakeError(); err) {
+    rb->SendError("Unknown subcommand");
+    return;
+  }
+  func(&parser, rb);
+}
+
 void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [index_name, group_id] = parser.Next<string_view, string>();
@@ -1207,7 +1800,7 @@ void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) 
   }
 
   if (!parser.Finalize()) {
-    return cmd_cntx.rb->SendError(parser.Error()->MakeReply());
+    return cmd_cntx.rb->SendError(parser.TakeError().MakeReply());
   }
 
   std::atomic_bool index_not_found{true};
@@ -1248,24 +1841,26 @@ void SearchFamily::Register(CommandRegistry* registry) {
 
   // Disable journaling, because no-key-transactional enables it by default
   const uint32_t kReadOnlyMask =
-      CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL;
+      CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL | CO::IDEMPOTENT;
 
   registry->StartFamily();
-  *registry << CI{"FT.CREATE", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
-                   FtCreate)
-            << CI{"FT.ALTER", CO::WRITE | CO::GLOBAL_TRANS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAlter)
-            << CI{"FT.DROPINDEX", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
-                   FtDropIndex)
-            << CI{"FT.INFO", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
-            // Underscore same as in RediSearch because it's "temporary" (long time already)
-            << CI{"FT._LIST", kReadOnlyMask, 1, 0, 0, acl::FT_SEARCH}.HFUNC(FtList)
-            << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch)
-            << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAggregate)
-            << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile)
-            << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::FT_SEARCH}.HFUNC(FtTagVals)
-            << CI{"FT.SYNDUMP", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtSynDump)
-            << CI{"FT.SYNUPDATE", CO::WRITE | CO::GLOBAL_TRANS, -4, 0, 0, acl::FT_SEARCH}.HFUNC(
-                   FtSynUpdate);
+  *registry
+      << CI{"FT.CREATE", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(FtCreate)
+      << CI{"FT.ALTER", CO::WRITE | CO::GLOBAL_TRANS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAlter)
+      << CI{"FT.DROPINDEX", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
+             FtDropIndex)
+      << CI{"FT.INFO", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
+      << CI{"FT.CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(
+             FtConfig)
+      // Underscore same as in RediSearch because it's "temporary" (long time already)
+      << CI{"FT._LIST", kReadOnlyMask, 1, 0, 0, acl::FT_SEARCH}.HFUNC(FtList)
+      << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch)
+      << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAggregate)
+      << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile)
+      << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::FT_SEARCH}.HFUNC(FtTagVals)
+      << CI{"FT.SYNDUMP", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtSynDump)
+      << CI{"FT.SYNUPDATE", CO::WRITE | CO::GLOBAL_TRANS, -4, 0, 0, acl::FT_SEARCH}.HFUNC(
+             FtSynUpdate);
 }
 
 }  // namespace dfly

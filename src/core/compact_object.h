@@ -26,6 +26,7 @@ constexpr unsigned kEncodingJsonCons = 0;
 constexpr unsigned kEncodingJsonFlat = 1;
 
 class SBF;
+class PageUsage;
 
 namespace detail {
 
@@ -72,7 +73,7 @@ class RobjWrapper {
 
   // Try reducing memory fragmentation by re-allocating values from underutilized pages.
   // Returns true if re-allocated.
-  bool DefragIfNeeded(float ratio);
+  bool DefragIfNeeded(PageUsage* page_usage);
 
   // as defined in zset.h
   int ZsetAdd(double score, std::string_view ele, int in_flags, int* out_flags, double* newscore);
@@ -130,22 +131,40 @@ class CompactObj {
   // Therefore, in order to know the original length we introduce 2 states that
   // correct the length upon decoding. ASCII1_ENC rounds down the decoded length,
   // while ASCII2_ENC rounds it up. See DecodedLen implementation for more info.
-  enum Encoding : uint8_t {
+  enum EncodingEnum : uint8_t {
     NONE_ENC = 0,
     ASCII1_ENC = 1,
     ASCII2_ENC = 2,
-    HUFFMAN_ENC = 3,  // TBD
+    HUFFMAN_ENC = 3,
   };
 
  public:
+  // Utility class for working with different string encodings (ascii, huffman, etc)
+  struct StrEncoding {
+    size_t DecodedSize(std::string_view blob) const;         // Size of decoded blob
+    size_t Decode(std::string_view blob, char* dest) const;  // Decode into dest, return size
+    StringOrView Decode(std::string_view blob) const;
+
+   private:
+    friend class CompactObj;
+    explicit StrEncoding(uint8_t enc, bool is_key)
+        : enc_(static_cast<EncodingEnum>(enc)), is_key_(is_key) {
+    }
+
+    size_t DecodedSize(size_t compr_size, uint8_t first_byte) const;
+
+    EncodingEnum enc_;
+    bool is_key_;
+  };
+
   using PrefixArray = std::vector<std::string_view>;
   using MemoryResource = detail::RobjWrapper::MemoryResource;
 
   CompactObj() {  // By default - empty string.
   }
 
-  explicit CompactObj(std::string_view str) {
-    SetString(str);
+  explicit CompactObj(std::string_view str, bool is_key) {
+    SetString(str, is_key);
   }
 
   CompactObj(CompactObj&& cs) noexcept {
@@ -166,7 +185,7 @@ class CompactObj {
   CompactObj AsRef() const {
     CompactObj res;
     memcpy(&res.u_, &u_, sizeof(u_));
-    res.taglen_ = taglen_;
+    res.tagbyte_ = tagbyte_;
     res.mask_ = mask_;
     res.mask_bits_.ref = 1;
 
@@ -228,7 +247,7 @@ class CompactObj {
     mask_bits_.touched = e;
   }
 
-  bool DefragIfNeeded(float ratio);
+  bool DefragIfNeeded(PageUsage* page_usage);
 
   void SetAsyncDelete() {
     mask_bits_.io_pending = 1;  // io_pending flag is used for async delete for keys.
@@ -283,7 +302,11 @@ class CompactObj {
   }
 
   // For STR object.
-  void SetString(std::string_view str);
+  void SetString(std::string_view str, bool is_key);
+  void SetValue(std::string_view val) {
+    SetString(val, false);
+  }
+
   void GetString(std::string* res) const;
 
   void ReserveString(size_t size);
@@ -381,6 +404,7 @@ class CompactObj {
 
   enum HuffmanDomain : uint8_t {
     HUFF_KEYS = 0,
+    HUFF_STRING_VALUES = 1,
     // TODO: add more domains.
   };
 
@@ -406,6 +430,10 @@ class CompactObj {
   // Precondition: the object is a non-inline string.
   StringOrView GetRawString() const;
 
+  StrEncoding GetStrEncoding() const {
+    return StrEncoding{mask_bits_.encoding, bool(huffman_domain_)};
+  }
+
   bool HasAllocated() const;
 
   bool TagAllowsEmptyValue() const;
@@ -415,8 +443,7 @@ class CompactObj {
   }
 
  private:
-  void EncodeString(std::string_view str);
-  size_t DecodedLen(size_t sz, uint8_t firstb) const;
+  void EncodeString(std::string_view str, bool is_key);
 
   bool EqualNonInline(std::string_view sv) const;
 
@@ -519,7 +546,14 @@ class CompactObj {
   };
 
   // We currently reserve 5 bits for tags and 3 bits for extending the mask. currently reserved.
-  uint8_t taglen_ = 0;
+  union {
+    uint8_t tagbyte_ = 0;
+    struct {
+      uint8_t taglen_ : 5;
+      uint8_t huffman_domain_ : 1;  // value from HuffmanDomain enum.
+      uint8_t reserved : 2;
+    };
+  };
 };
 
 inline bool CompactObj::operator==(std::string_view sv) const {

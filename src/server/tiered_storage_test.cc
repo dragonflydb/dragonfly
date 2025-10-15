@@ -25,6 +25,7 @@ using namespace util;
 ABSL_DECLARE_FLAG(bool, force_epoll);
 ABSL_DECLARE_FLAG(string, tiered_prefix);
 ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
+ABSL_DECLARE_FLAG(float, tiered_upload_threshold);
 ABSL_DECLARE_FLAG(unsigned, tiered_storage_write_depth);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
 
@@ -56,12 +57,16 @@ class TieredStorageTest : public BaseFamilyTest {
 
     BaseFamilyTest::SetUp();
   }
+
+  void UpdateFromFlags() {
+    pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->UpdateFromFlags(); });
+  }
 };
 
 // Perform simple series of SET, GETSET and GET
 TEST_F(TieredStorageTest, SimpleGetSet) {
   absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 1.1f);  // disable offloading
+  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // disable offloading
   const int kMin = 256;
   const int kMax = tiering::kPageSize + 10;
 
@@ -201,10 +206,9 @@ TEST_F(TieredStorageTest, Defrag) {
 
 TEST_F(TieredStorageTest, BackgroundOffloading) {
   absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
-
-  // The setup works without cooling buffers.
-  SetFlag(&FLAGS_tiered_experimental_cooling, false);
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);      // offload all values
+  SetFlag(&FLAGS_tiered_experimental_cooling, false);  // The setup works without cooling buffers
+  UpdateFromFlags();
 
   const int kNum = 500;
 
@@ -249,7 +253,7 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
 
 TEST_F(TieredStorageTest, FlushAll) {
   absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // offload all values
 
   // We want to cover the interaction of FlushAll with concurrent reads from disk.
   // For that we disable tiered_experimental_cooling.
@@ -257,6 +261,7 @@ TEST_F(TieredStorageTest, FlushAll) {
   // making this test ineffective. We should add the ability to disable promotion of offloaded
   // entries to RAM upon reads.
   SetFlag(&FLAGS_tiered_experimental_cooling, false);
+  UpdateFromFlags();
 
   const int kNum = 500;
   for (size_t i = 0; i < kNum; i++) {
@@ -297,7 +302,7 @@ TEST_F(TieredStorageTest, FlushAll) {
 
 TEST_F(TieredStorageTest, FlushPending) {
   absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // offload all values
 
   const int kNum = 10;
   for (size_t i = 0; i < kNum; i++) {
@@ -311,8 +316,8 @@ TEST_F(TieredStorageTest, FlushPending) {
 
 TEST_F(TieredStorageTest, MemoryPressure) {
   max_memory_limit = 20_MB;
-  pp_->at(0)->AwaitBrief(
-      [] { EngineShard::tlocal()->tiered_storage()->SetMemoryLowWatermark(2_MB); });
+  absl::FlagSaver saver;
+  absl::SetFlag(&FLAGS_tiered_upload_threshold, float(2_MB) / float(max_memory_limit));
 
   constexpr size_t kNum = 10000;
   for (size_t i = 0; i < kNum; i++) {
@@ -324,7 +329,8 @@ TEST_F(TieredStorageTest, MemoryPressure) {
     ThisFiber::SleepFor(500us);
   }
 
-  EXPECT_LT(used_mem_peak.load(), 20_MB);
+  auto metrics = GetMetrics();
+  EXPECT_LT(metrics.used_mem_peak, 20_MB);
 }
 
 TEST_F(TieredStorageTest, Expiry) {
@@ -338,7 +344,7 @@ TEST_F(TieredStorageTest, Expiry) {
 
 TEST_F(TieredStorageTest, SetExistingExpire) {
   absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // offload all values
   SetFlag(&FLAGS_tiered_experimental_cooling, false);
 
   const int kNum = 20;
@@ -359,7 +365,7 @@ TEST_F(TieredStorageTest, SetExistingExpire) {
 
 TEST_F(TieredStorageTest, Dump) {
   absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // offload all values
 
   // we want to test without cooling to trigger disk I/O on reads.
   SetFlag(&FLAGS_tiered_experimental_cooling, false);

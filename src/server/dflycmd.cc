@@ -20,6 +20,7 @@
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
+#include "server/cluster_support.h"
 #include "server/debugcmd.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -34,10 +35,11 @@
 #include "util/fibers/synchronization.h"
 using namespace std;
 
-ABSL_FLAG(uint32_t, allow_partial_sync_with_lsn_diff, 0,
-          "Do partial sync in case lsn diff is less than the given threshold");
+ABSL_RETIRED_FLAG(uint32_t, allow_partial_sync_with_lsn_diff, 0,
+                  "Do partial sync in case lsn diff is less than the given threshold");
 ABSL_DECLARE_FLAG(bool, info_replication_valkey_compatible);
 ABSL_DECLARE_FLAG(uint32_t, replication_timeout);
+ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_len);
 
 namespace dfly {
 
@@ -84,6 +86,7 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
   shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
 
   const FlowInfo* flow = &replica->flows[shard->shard_id()];
+
   while (flow->last_acked_lsn < shard->journal()->GetLsn()) {
     if (absl::Now() > end_time) {
       LOG(WARNING) << "Couldn't synchronize with replica for takeover in time: " << replica->address
@@ -94,25 +97,12 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
     if (!replica->exec_st.IsRunning()) {
       return false;
     }
-    VLOG(1) << "Replica lsn:" << flow->last_acked_lsn
-            << " master lsn:" << shard->journal()->GetLsn();
+    LOG_EVERY_T(INFO, 1) << "Replica lsn:" << flow->last_acked_lsn
+                         << " master lsn:" << shard->journal()->GetLsn()
+                         << "; Journal streamer state: " << flow->streamer->FormatInternalState();
     ThisFiber::SleepFor(1ms);
   }
 
-  return true;
-}
-
-bool IsLSNDiffBellowThreshold(const std::vector<LSN>& lsn_vec1, const std::vector<LSN>& lsn_vec2) {
-  DCHECK_EQ(lsn_vec1.size(), lsn_vec2.size());
-  uint32_t allow_diff = absl::GetFlag(FLAGS_allow_partial_sync_with_lsn_diff);
-  for (size_t i = 0; i < lsn_vec1.size(); ++i) {
-    uint32_t diff =
-        lsn_vec1[i] > lsn_vec2[i] ? lsn_vec1[i] - lsn_vec2[i] : lsn_vec2[i] - lsn_vec1[i];
-    if (diff > allow_diff) {
-      VLOG(1) << "No partial sync due to diff: " << diff << " allow_diff is: " << allow_diff;
-      return false;
-    }
-  }
   return true;
 }
 
@@ -279,17 +269,19 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     return;
 
   string eof_token;
-  std::string_view sync_type{"FULL"};
+  std::string sync_type{"FULL"};
   {
     util::fb2::LockGuard lk{replica_ptr->shared_mu};
 
-    if (replica_ptr->replica_state != SyncState::PREPARATION)
+    if (replica_ptr->replica_state != SyncState::PREPARATION) {
       return rb->SendError(kInvalidState);
+    }
 
     // Set meta info on connection.
     cntx->conn()->SetName(absl::StrCat("repl_flow_", sync_id));
     cntx->conn_state.replication_info.repl_session_id = sync_id;
     cntx->conn_state.replication_info.repl_flow_id = flow_id;
+    cntx->replica_conn = true;
 
     absl::InsecureBitGen gen;
     eof_token = GetRandomHex(gen, 40);
@@ -311,43 +303,28 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     sf_->journal()->StartInThread();
 
     std::optional<Replica::LastMasterSyncData> data = sf_->GetLastMasterData();
+    std::optional<LSN> lsn_to_start_partial;
     // In this flow the master and the registered replica where synced from the same master.
-    if (last_master_id && data && data.value().id == last_master_id.value()) {
-      std::vector<std::string_view> lsn_str_vec = absl::StrSplit(last_master_lsn.value(), '-');
-      if (lsn_str_vec.size() != data.value().last_journal_LSNs.size()) {
-        return rb->SendError(facade::kSyntaxErr);  // Unexpected flow. LSN vector of same master
-                                                   // should be the same size on all replicas.
-      }
-      std::vector<LSN> lsn_vec;
-      lsn_vec.reserve(lsn_str_vec.size());
-      for (string_view lsn_str : lsn_str_vec) {
-        int64_t value;
-        if (!absl::SimpleAtoi(lsn_str, &value)) {
-          return rb->SendError(facade::kInvalidIntErr);
-        }
-        lsn_vec.push_back(value);
+    if (last_master_id && data && data->id == *last_master_id) {
+      ++ServerState::tlocal()->stats.psync_requests_total;
+      auto flow_lsn = ParseLsnVec(*last_master_lsn, data->last_journal_LSNs.size(), flow_id, rb);
+      if (!flow_lsn) {
+        return;  // ParseLsnVec replies in case of error
       }
 
-      if (IsLSNDiffBellowThreshold(data.value().last_journal_LSNs, lsn_vec)) {
-        sync_type = "PARTIAL";
-        flow.start_partial_sync_at = sf_->journal()->GetLsn();
-        VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
-                << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
+      if (IsLSNInPartialSyncBuffer(*flow_lsn)) {
+        lsn_to_start_partial.emplace(*flow_lsn);
       }
-    } else if (seqid.has_value()) {
-      if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
-        auto& flow = replica_ptr->flows[flow_id];
-        flow.start_partial_sync_at = *seqid;
-        VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
-                << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
-        sync_type = "PARTIAL";
-      } else {
-        LOG(INFO) << "Partial sync requested from stale LSN=" << *seqid
-                  << " that the replication buffer doesn't contain this anymore (current_lsn="
-                  << sf_->journal()->GetLsn() << "). Will perform a full sync of the data.";
-        LOG(INFO) << "If this happens often you can control the replication buffer's size with the "
-                     "--shard_repl_backlog_len option";
-      }
+
+    } else if (seqid.has_value() && IsLSNInPartialSyncBuffer(*seqid)) {
+      lsn_to_start_partial.emplace(*seqid);
+    }
+
+    if (lsn_to_start_partial) {
+      flow.start_partial_sync_at = *lsn_to_start_partial;
+      sync_type = "PARTIAL";
+      VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
+              << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
     }
   }
 
@@ -404,8 +381,20 @@ void DflyCmd::StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* r
     return;
 
   util::fb2::LockGuard lk{replica_ptr->shared_mu};
-  if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::FULL_SYNC, rb))
+  auto repl_state = replica_ptr->replica_state;
+  if (repl_state != SyncState::FULL_SYNC && repl_state != SyncState::PREPARATION) {
+    rb->SendError(kInvalidState);
     return;
+  }
+
+  // Check all flows are connected.
+  // This might happen if a flow abruptly disconnected before sending the SYNC request.
+  for (const FlowInfo& flow : replica_ptr->flows) {
+    if (!flow.conn) {
+      rb->SendError(kInvalidState);
+      return;
+    }
+  }
 
   {
     Transaction::Guard tg{tx};
@@ -414,10 +403,15 @@ void DflyCmd::StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* r
     auto cb = [this, &status, replica_ptr = replica_ptr](EngineShard* shard) {
       FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
 
-      status = StopFullSyncInThread(flow, &replica_ptr->exec_st, shard);
-      if (*status != OpStatus::OK) {
-        return;
+      // We are doing partial sync. We never started FullSync so we don't need to stop it.
+      bool is_partial = flow->start_partial_sync_at.has_value();
+      if (!is_partial) {
+        status = StopFullSyncInThread(flow, &replica_ptr->exec_st, shard);
+        if (*status != OpStatus::OK) {
+          return;
+        }
       }
+
       StartStableSyncInThread(flow, &replica_ptr->exec_st, shard);
     };
     shard_set->RunBlockingInParallel(std::move(cb));
@@ -431,6 +425,45 @@ void DflyCmd::StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* r
 
   replica_ptr->replica_state = SyncState::STABLE_SYNC;
   return rb->SendOk();
+}
+
+bool DflyCmd::IsLSNInPartialSyncBuffer(LSN lsn) const {
+  auto* jrnl = sf_->journal();
+
+  const bool exists = jrnl->GetLsn() == lsn || jrnl->IsLSNInBuffer(lsn);
+  if (!exists) {
+    LOG(INFO) << "Partial sync requested from stale LSN=" << lsn
+              << " that the replication buffer doesn't contain this anymore (current_lsn="
+              << sf_->journal()->GetLsn() << "). Will perform a full sync of the data.";
+    LOG(INFO) << "If this happens often you can control the replication buffer's size with the "
+                 "--shard_repl_backlog_len option";
+  }
+  return exists;
+}
+
+std::optional<LSN> DflyCmd::ParseLsnVec(std::string_view last_master_lsn,
+                                        size_t last_journal_lsn_size, size_t flow_id,
+                                        facade::RedisReplyBuilder* rb) {
+  std::vector<std::string_view> lsn_str_vec = absl::StrSplit(last_master_lsn, '-');
+  if (lsn_str_vec.size() != last_journal_lsn_size) {
+    rb->SendError(facade::kSyntaxErr);  // Unexpected flow. LSN vector of same master
+                                        // should be the same size on all replicas.
+    return std::nullopt;
+  }
+
+  std::vector<LSN> lsn_vec;
+  lsn_vec.reserve(lsn_str_vec.size());
+
+  for (string_view lsn_str : lsn_str_vec) {
+    int64_t value;
+    if (!absl::SimpleAtoi(lsn_str, &value)) {
+      rb->SendError(facade::kInvalidIntErr);
+      return std::nullopt;
+    }
+    lsn_vec.push_back(value);
+  }
+
+  return {lsn_vec[flow_id]};
 }
 
 // DFLY TAKEOVER <timeout_sec> [SAVE] <sync_id>
@@ -449,8 +482,8 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
 
   string_view sync_id_str = parser.Next<std::string_view>();
 
-  if (auto err = parser.Error(); err)
-    return rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
 
   VLOG(1) << "Got DFLY TAKEOVER " << sync_id_str << " time out:" << timeout;
 
@@ -509,8 +542,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
   atomic_bool catchup_success = true;
   if (*status == OpStatus::OK) {
     dfly::SharedLock lk{replica_ptr->shared_mu};
-    auto cb = [replica_ptr = std::move(replica_ptr), end_time,
-               &catchup_success](EngineShard* shard) {
+    auto cb = [replica_ptr = replica_ptr, end_time, &catchup_success](EngineShard* shard) {
       if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
         catchup_success.store(false);
       }
@@ -527,16 +559,44 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
 
   rb->SendOk();
 
+  atomic_bool rest_catchup_success = true;
+  {
+    util::fb2::LockGuard mu_lk(mu_);
+    for (auto [id, repl_ptr] : replica_infos_) {
+      if (replica_ptr == repl_ptr) {
+        continue;
+      }
+
+      auto cb = [&, end_time](EngineShard* shard) {
+        if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
+          rest_catchup_success.store(false);
+        }
+      };
+      shard_set->RunBlockingInParallel(std::move(cb));
+    }
+
+    if (!rest_catchup_success) {
+      LOG(WARNING) << "Some of the replica nodes did not sync in time.";
+    }
+  }
+
   if (save_flag) {
     VLOG(1) << "Save snapshot after Takeover.";
     if (auto ec = sf_->DoSave(true); ec) {
       LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
     }
   }
-  VLOG(1) << "Takeover accepted, shutting down.";
-  std::string save_arg = "NOSAVE";
-  MutableSlice sargs(save_arg);
-  return sf_->ShutdownCmd(CmdArgList(&sargs, 1), CommandContext{nullptr, rb, nullptr});
+
+  // For non-cluster mode we shutdown
+  if (detail::cluster_mode != detail::ClusterMode::kRealCluster) {
+    VLOG(1) << "Takeover accepted, shutting down.";
+    std::string save_arg = "NOSAVE";
+    MutableSlice sargs(save_arg);
+    sf_->ShutdownCmd(CmdArgList(&sargs, 1), CommandContext{nullptr, rb, nullptr});
+    return;
+  }
+
+  sf_->service().cluster_family().ReconcileMasterReplicaTakeoverSlots(true);
 }
 
 void DflyCmd::Expire(CmdArgList args, Transaction* tx, RedisReplyBuilder* rb) {
@@ -561,7 +621,7 @@ void DflyCmd::ReplicaOffset(CmdArgList args, RedisReplyBuilder* rb) {
 void DflyCmd::Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   parser.ExpectTag("LOAD");
-  string_view filename = parser.Next();
+  string filename = parser.Next<string>();
   ServerFamily::LoadExistingKeys existing_keys = ServerFamily::LoadExistingKeys::kFail;
 
   if (parser.HasNext()) {
@@ -569,7 +629,7 @@ void DflyCmd::Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     existing_keys = ServerFamily::LoadExistingKeys::kOverride;
   }
 
-  if (parser.Error() || parser.HasNext()) {
+  if (parser.TakeError() || parser.HasNext() || filename.empty()) {
     return rb->SendError(kSyntaxErr);
   }
 
@@ -598,7 +658,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, ExecutionState* exec_st,
   // of the flows also contain them.
   SaveMode save_mode =
       shard->shard_id() == 0 ? SaveMode::SINGLE_SHARD_WITH_SUMMARY : SaveMode::SINGLE_SHARD;
-  flow->saver = std::make_unique<RdbSaver>(flow->conn->socket(), save_mode, false);
+  flow->saver = std::make_unique<RdbSaver>(flow->conn->socket(), save_mode, false, "");
 
   flow->cleanup = [flow, shard]() {
     // socket shutdown is needed before calling saver->Cancel(). Because
@@ -623,10 +683,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, ExecutionState* exec_st,
     return OpStatus::CANCELLED;
   }
 
-  if (flow->start_partial_sync_at.has_value())
-    saver->StartIncrementalSnapshotInShard(*flow->start_partial_sync_at, exec_st, shard);
-  else
-    saver->StartSnapshotInShard(true, exec_st, shard);
+  saver->StartSnapshotInShard(true, exec_st, shard);
 
   return OpStatus::OK;
 }
@@ -658,7 +715,10 @@ void DflyCmd::StartStableSyncInThread(FlowInfo* flow, ExecutionState* exec_st, E
   DCHECK(shard);
   DCHECK(flow->conn);
 
-  flow->streamer.reset(new JournalStreamer(sf_->journal(), exec_st, JournalStreamer::SendLsn::YES));
+  LSN partial_lsn = flow->start_partial_sync_at.value_or(0);
+  JournalStreamer::Config config{
+      .should_sent_lsn = true, .init_from_stable_sync = true, .start_partial_sync_at = partial_lsn};
+  flow->streamer.reset(new JournalStreamer(sf_->journal(), exec_st, config));
   flow->streamer->Start(flow->conn->socket());
 
   // Register cleanup.
@@ -716,6 +776,7 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
   auto replica_ptr = GetReplicaInfo(sync_id);
   if (!replica_ptr)
     return;
+  VLOG(1) << "Stopping replication for sync_id: " << sync_id;
 
   // Because CancelReplication holds the per-replica mutex,
   // aborting connection will block here until cancellation finishes.

@@ -131,13 +131,19 @@ TEST_F(HSetFamilyTest, HIncrRespected) {
 }
 
 TEST_F(HSetFamilyTest, HScan) {
+  auto resp = Run("hscan non-existing-key 100 count 5");
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::STRING), ArgType(RespExpr::ARRAY)));
+  EXPECT_EQ(ToSV(resp.GetVec()[0].GetBuf()), "0");
+  EXPECT_EQ(StrArray(resp.GetVec()[1]).size(), 0);
+
   for (int i = 0; i < 10; i++) {
     Run({"HSET", "myhash", absl::StrCat("Field-", i), absl::StrCat("Value-", i)});
   }
 
   // Note that even though this limit by 4, it would return more because
   // all fields are on listpack
-  auto resp = Run({"hscan", "myhash", "0", "count", "4"});
+  resp = Run({"hscan", "myhash", "0", "count", "4"});
   EXPECT_THAT(resp, ArrLen(2));
   auto vec = StrArray(resp.GetVec()[1]);
   EXPECT_EQ(vec.size(), 20);
@@ -189,6 +195,20 @@ TEST_F(HSetFamilyTest, HincrbyFloat) {
   for (size_t i = 0; i < 500; ++i) {
     EXPECT_EQ(Run({"hget", "k", absl::StrCat("v", i)}), "1.5");
   }
+}
+
+TEST_F(HSetFamilyTest, HincrbyFloatCornerCases) {
+  Run({"hset", "k", "mhv", "-1.8E+308", "phv", "1.8E+308", "nd", "-+-inf", "+inf", "+inf", "nan",
+       "nan", "-inf", "-inf"});
+  // we don't support long doubles, so in all next cases we should return errors
+  EXPECT_THAT(Run({"hincrbyfloat", "k", "mhv", "-1"}), ErrArg("ERR hash value is not a float"));
+  EXPECT_THAT(Run({"hincrbyfloat", "k", "phv", "1"}), ErrArg("ERR hash value is not a float"));
+  EXPECT_THAT(Run({"hincrbyfloat", "k", "nd", "1"}), ErrArg("ERR hash value is not a float"));
+  EXPECT_THAT(Run({"hincrbyfloat", "k", "+inf", "1"}),
+              ErrArg("increment would produce NaN or Infinity"));
+  EXPECT_THAT(Run({"hincrbyfloat", "k", "nan", "1"}), ErrArg("ERR hash value is not a float"));
+  EXPECT_THAT(Run({"hincrbyfloat", "k", "-inf", "1"}),
+              ErrArg("increment would produce NaN or Infinity"));
 }
 
 TEST_F(HSetFamilyTest, HRandFloat) {
@@ -476,6 +496,15 @@ TEST_F(HSetFamilyTest, HExpireNoSuchKey) {
 TEST_F(HSetFamilyTest, HExpireNoAddNew) {
   Run({"HEXPIRE", "key", "10", "FIELDS", "1", "k0"});
   EXPECT_THAT(Run({"HGETALL", "key"}), RespArray(ElementsAre()));
+}
+
+TEST_F(HSetFamilyTest, HExpireWithNullChar) {
+  string val_with_null("test\0test", 9);
+  Run({"HSET", "hash", "field", val_with_null});
+  string expected_val("test\0test", 9);
+  EXPECT_EQ(ToSV(Run({"HGET", "hash", "field"}).GetBuf()), expected_val);
+  Run({"HEXPIRE", "hash", "15", "FIELDS", "1", "field"});
+  EXPECT_EQ(ToSV(Run({"HGET", "hash", "field"}).GetBuf()), expected_val);
 }
 
 TEST_F(HSetFamilyTest, RandomFieldAllExpired) {

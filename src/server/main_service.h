@@ -40,8 +40,9 @@ class Service : public facade::ServiceInterface {
                                          facade::ConnectionContext* cntx) final;
 
   // Execute multiple consecutive commands, possibly in parallel by squashing
-  size_t DispatchManyCommands(absl::Span<ArgSlice> args_list, facade::SinkReplyBuilder* builder,
-                              facade::ConnectionContext* cntx) final;
+  facade::DispatchManyResult DispatchManyCommands(absl::Span<ArgSlice> args_list,
+                                                  facade::SinkReplyBuilder* builder,
+                                                  facade::ConnectionContext* cntx) final;
 
   // Check VerifyCommandExecution and invoke command with args
   facade::DispatchResult InvokeCmd(const CommandId* cid, CmdArgList tail_args,
@@ -49,8 +50,7 @@ class Service : public facade::ServiceInterface {
 
   // Verify command can be executed now (check out of memory), always called immediately before
   // execution
-  std::optional<facade::ErrorReply> VerifyCommandExecution(const CommandId* cid,
-                                                           const ConnectionContext* cntx,
+  std::optional<facade::ErrorReply> VerifyCommandExecution(const ConnectionContext* cntx,
                                                            CmdArgList tail_args);
 
   // Verify command prepares excution in correct state.
@@ -80,6 +80,10 @@ class Service : public facade::ServiceInterface {
 
   bool RequestLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
   void RemoveLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
+
+  // Return true if state is LOADING and loading_state_counter_ == 0, that is,
+  // if no multiple operations require LOADING_STATE at the same time.
+  bool IsLoadingExclusively() ABSL_LOCKS_EXCLUDED(mu_);
 
   void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) final;
   void OnConnectionClose(facade::ConnectionContext* cntx) final;
@@ -136,11 +140,8 @@ class Service : public facade::ServiceInterface {
   void EvalShaRo(CmdArgList args, const CommandContext& cmd_cntx);
   void Exec(CmdArgList args, const CommandContext& cmd_cntx);
   void Publish(CmdArgList args, const CommandContext& cmd_cntx);
-  void SPublish(CmdArgList args, const CommandContext& cmd_cntx);
   void Subscribe(CmdArgList args, const CommandContext& cmd_cntx);
-  void SSubscribe(CmdArgList args, const CommandContext& cmd_cntx);
   void Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx);
-  void SUnsubscribe(CmdArgList args, const CommandContext& cmd_cntx);
   void PSubscribe(CmdArgList args, const CommandContext& cmd_cntx);
   void PUnsubscribe(CmdArgList args, const CommandContext& cmd_cntx);
   void Function(CmdArgList args, const CommandContext& cmd_cntx);
@@ -161,6 +162,11 @@ class Service : public facade::ServiceInterface {
   std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId* cid, CmdArgList args,
                                                        const ConnectionContext& dfly_cntx);
 
+  // Return moved error if we *own* the slot. This function is used from flows that assume our
+  // state is TAKEN_OVER which happens after a replica takeover.
+  std::optional<facade::ErrorReply> TakenOverSlotError(const CommandId* cid, CmdArgList args,
+                                                       const ConnectionContext& dfly_cntx);
+
   void EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
                     SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only);
   void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter,
@@ -176,6 +182,8 @@ class Service : public facade::ServiceInterface {
 
   void RegisterCommands();
   void Register(CommandRegistry* registry);
+  // Helper for registering tiering flags
+  void RegisterTieringFlags();
 
   base::VarzValue::Map GetVarzStats();
 
@@ -194,8 +202,5 @@ class Service : public facade::ServiceInterface {
   GlobalState global_state_ ABSL_GUARDED_BY(mu_) = GlobalState::ACTIVE;
   uint32_t loading_state_counter_ ABSL_GUARDED_BY(mu_) = 0;
 };
-
-uint64_t GetMaxMemoryFlag();
-void SetMaxMemoryFlag(uint64_t value);
 
 }  // namespace dfly

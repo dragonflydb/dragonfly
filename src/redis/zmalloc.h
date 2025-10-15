@@ -122,14 +122,29 @@ Note that if a block is not used, it would not counted as wasted
 */
 int zmalloc_get_allocator_wasted_blocks(float ratio, size_t* allocated, size_t* commited,
                                         size_t* wasted);
+struct fragmentation_info {
+  size_t committed;
+
+  // a temporary metric to compare against "committed" in production.
+  // TODO: delete it once we are confident committed is computed correctly.
+  size_t committed_golden;
+  size_t wasted;
+  unsigned bin;
+};
+
+// Like zmalloc_get_allocator_wasted_blocks but incremental.
+// struct fragmentation_info must be passed first set to zero. Returns -1 needs to continue,
+// 0 if done.
+int zmalloc_get_allocator_fragmentation_step(float ratio, struct fragmentation_info* info);
 
 /*
  * checks whether a page that the pointer ptr located at is underutilized.
  * This uses the current local thread heap.
  * return 0 if not, 1 if underutilized
  */
-int zmalloc_page_is_underutilized(void *ptr, float ratio);
-char *zstrdup(const char *s);
+struct mi_page_usage_stats_s;
+void zmalloc_page_is_underutilized(void* ptr, float ratio, int collect_stats, struct mi_page_usage_stats_s* result);
+char* zstrdup(const char* s);
 
 void init_zmalloc_threadlocal(void* heap);
 extern __thread ssize_t zmalloc_used_memory_tl;

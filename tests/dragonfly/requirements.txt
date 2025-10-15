@@ -27,3 +27,5 @@ pytest-timeout==2.2.0
 asyncio==3.4.3
 fakeredis[json]==2.26.2
 hiredis==2.4.0
+PyYAML>=6.0
+testcontainers>=3.7.1

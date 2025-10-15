@@ -110,19 +110,6 @@ std::string_view LockTagOptions::Tag(std::string_view key) const {
   return key.substr(start + 1, end - start - 1);
 }
 
-atomic_uint64_t used_mem_peak(0);
-atomic_uint64_t used_mem_current(0);
-atomic_uint64_t rss_mem_current(0);
-atomic_uint64_t rss_mem_peak(0);
-
-unsigned kernel_version = 0;
-size_t max_memory_limit = 0;
-Namespaces* namespaces = nullptr;
-
-size_t FetchRssMemory(io::StatusData sdata) {
-  return sdata.vm_rss + sdata.hugetlb_pages;
-}
-
 const char* GlobalStateName(GlobalState s) {
   switch (s) {
     case GlobalState::ACTIVE:
@@ -231,8 +218,6 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
       }
       if (scan_opts.limit == 0)
         scan_opts.limit = 1;
-      else if (scan_opts.limit > 4096)
-        scan_opts.limit = 4096;
     } else if (opt == "MATCH") {
       string_view pattern = ArgS(args, i + 1);
       if (pattern != "*")

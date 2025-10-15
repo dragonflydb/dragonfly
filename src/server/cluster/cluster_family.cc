@@ -643,8 +643,8 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, SinkReplyBuilder* bu
     slots_stats.emplace_back(sid, SlotStats{});
   } while (parser.HasNext());
 
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   fb2::Mutex mu;
 
@@ -667,13 +667,18 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, SinkReplyBuilder* bu
     rb->StartArray(9);
     rb->SendLong(slot_data.first);
     rb->SendBulkString("key_count");
-    rb->SendLong(static_cast<long>(slot_data.second.key_count));
+    rb->SendLong(slot_data.second.key_count);
     rb->SendBulkString("total_reads");
-    rb->SendLong(static_cast<long>(slot_data.second.total_reads));
+    rb->SendLong(slot_data.second.total_reads);
     rb->SendBulkString("total_writes");
-    rb->SendLong(static_cast<long>(slot_data.second.total_writes));
+    rb->SendLong(slot_data.second.total_writes);
+
+    // Account for both the values and the table space of the entries.
+    // Each entry is comprised from CompactObj for key and CompactObj for value.
+    // Sometimes the values are very small and table space becomes significant.
     rb->SendBulkString("memory_bytes");
-    rb->SendLong(static_cast<long>(slot_data.second.memory_bytes));
+    rb->SendLong(slot_data.second.memory_bytes +
+                 slot_data.second.key_count * sizeof(CompactObj) * 2);
   }
 }
 
@@ -688,8 +693,8 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, SinkReplyBuilder* bui
     slot_ranges.emplace_back(SlotRange{slot_start, slot_end});
   } while (parser.HasNext());
 
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   DeleteSlots(SlotRanges(std::move(slot_ranges)));
 
@@ -742,8 +747,8 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, SinkReplyBuilder* b
   string_view node_id;
   if (parser.HasNext()) {
     node_id = parser.Next<std::string_view>();
-    if (auto err = parser.Error(); err) {
-      return builder->SendError(err->MakeReply());
+    if (auto err = parser.TakeError(); err) {
+      return builder->SendError(err.MakeReply());
     }
   }
 
@@ -904,8 +909,8 @@ void ClusterFamily::InitMigration(CmdArgList args, SinkReplyBuilder* builder) {
     slots.emplace_back(SlotRange{slot_start, slot_end});
   } while (parser.HasNext());
 
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   SlotRanges slot_ranges(std::move(slots));
 
@@ -951,8 +956,8 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, SinkReplyBuilder* builder,
   CmdArgParser parser{args};
   auto [source_id, shard_id] = parser.Next<std::string_view, uint32_t>();
 
-  if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    return builder->SendError(err.MakeReply());
   }
 
   VLOG(1) << "Create flow " << source_id << " shard_id: " << shard_id;
@@ -971,6 +976,16 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, SinkReplyBuilder* builder,
   cntx->sync_dispatch = false;
 
   builder->SendOk();
+
+  // Try migrating the connection if we have the same shard configuration
+  if (migration->ShardNum() == shard_set->size() &&
+      int32_t(shard_id) != fb2::ProactorBase::me()->GetPoolIndex()) {
+    DCHECK_LT(shard_id, shard_set->size());
+    if (bool success = cntx->conn()->Migrate(shard_set->pool()->at(shard_id)); !success) {
+      builder->SendError("invalid state");
+      return;
+    }
+  }
 
   migration->StartFlow(shard_id, cntx->conn()->socket());
 }
@@ -1028,8 +1043,8 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, SinkReplyBuilder* builder) {
   CmdArgParser parser{args};
   auto [source_id, attempt] = parser.Next<std::string_view, long>();
 
-  if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    return builder->SendError(err.MakeReply());
   }
 
   VLOG(1) << "DFLYMIGRATE ACK" << args;
@@ -1083,6 +1098,70 @@ size_t ClusterFamily::MigrationsErrorsCount() const {
   return error_num;
 }
 
+void ClusterFamily::ReconcileMasterFlow() {
+  auto config = cluster::ClusterConfig::Current();
+
+  for (auto& info : config->GetMutableConfig()) {
+    if (info.master.id == id_) {
+      if (!info.replicas.empty()) {
+        LOG_IF(ERROR, info.replicas.size() > 1)
+            << "More than one replica found, slot redirection after takeover corrupted";
+
+        // assumes there is one replica per master node
+        // TODO figure a smart way to get the replica id_ so
+        // we can find it here
+        info.master = info.replicas.front();
+        info.replicas.clear();
+      }
+      break;
+    }
+  }
+}
+
+void ClusterFamily::ReconcileReplicaFlow() {
+  auto new_config = ClusterConfig::Current()->CloneWithChanges({}, {});
+  // Replace master with replica in shard config.
+  bool found = false;
+  for (ClusterShardInfo& info : new_config->GetMutableConfig()) {
+    for (const auto& replica : info.replicas) {
+      if (replica.id == id_) {
+        info.master = replica;
+        // New master has no replicas
+        info.replicas.clear();
+        found = true;
+        break;
+      }
+    }
+    if (found)
+      break;
+  }
+
+  LOG_IF(ERROR, !found) << "Did not find replica in the cluster map";
+
+  server_family_->service().proactor_pool().AwaitFiberOnAll(
+      [&new_config](util::ProactorBase*) { ClusterConfig::SetCurrent(new_config); });
+}
+
+void ClusterFamily::ReconcileMasterReplicaTakeoverSlots(bool was_master) {
+  util::fb2::LockGuard gu(set_config_mu);
+  util::fb2::LockGuard lk(migration_mu_);
+
+  auto config = ClusterConfig::Current();
+
+  // Sanity -- we should not reach there
+  if (!config) {
+    LOG(ERROR) << "Cluster config after takeover is empty";
+    return;
+  }
+
+  if (was_master) {
+    ReconcileMasterFlow();
+    return;
+  }
+
+  ReconcileReplicaFlow();
+}
+
 using EngineFunc = void (ClusterFamily::*)(CmdArgList args, const CommandContext& cmd_cntx);
 
 inline CommandId::Handler3 HandlerFunc(ClusterFamily* se, EngineFunc f) {
@@ -1093,7 +1172,7 @@ inline CommandId::Handler3 HandlerFunc(ClusterFamily* se, EngineFunc f) {
 
 void ClusterFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
-  *registry << CI{"CLUSTER", CO::READONLY, -2, 0, 0, acl::kCluster}.HFUNC(Cluster)
+  *registry << CI{"CLUSTER", CO::READONLY | CO::LOADING, -2, 0, 0, acl::kCluster}.HFUNC(Cluster)
             << CI{"DFLYCLUSTER",    CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0,
                   acl::kDflyCluster}
                    .HFUNC(DflyCluster)

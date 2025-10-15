@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -87,6 +89,9 @@ struct Metrics {
 
   size_t qps = 0;
 
+  size_t used_mem_peak = 0;
+  size_t used_mem_rss_peak = 0;
+
   size_t heap_used_bytes = 0;
   size_t small_string_bytes = 0;
   uint32_t traverse_ttl_per_sec = 0;
@@ -132,27 +137,54 @@ struct Metrics {
   size_t migration_errors_total;
 
   LoadingStats loading_stats;
+
+  absl::flat_hash_map<std::string, hdr_histogram*> cmd_latency_map;
 };
 
-struct LastSaveInfo {
-  // last success save info
-  void SetLastSaveError(const detail::SaveInfo& save_info) {
-    last_error = save_info.error;
-    last_error_time = save_info.save_time;
-    failed_duration_sec = save_info.duration_sec;
-  }
-
+// Contains the state of the last save operation.
+// This object is immutable.
+struct SaveInfoData {
   time_t save_time = 0;  // epoch time in seconds.
   uint32_t success_duration_sec = 0;
-  std::string file_name;                                      //
+  std::string file_name;
   std::vector<std::pair<std::string_view, size_t>> freq_map;  // RDB_TYPE_xxx -> count mapping.
+
   // last error save info
   GenericError last_error;
   time_t last_error_time = 0;      // epoch time in seconds.
   time_t failed_duration_sec = 0;  // epoch time in seconds.
+
   // false if last attempt failed
   bool last_bgsave_status = true;
   bool bgsave_in_progress = false;
+};
+
+// A thread-safe wrapper for SaveInfoData using the Copy-on-Write pattern.
+class ThreadSafeSaveInfo {
+ public:
+  // Returns a snapshot of the current save info.
+  SaveInfoData Get() const {
+    std::lock_guard<util::fb2::Mutex> lock(data_mutex_);
+    return data_;
+  }
+
+  // The modifier function is called under a lock.
+  void Update(std::function<void(SaveInfoData*)> modifier) {
+    std::lock_guard<util::fb2::Mutex> lock(writer_mutex_);
+    SaveInfoData new_data(Get());
+    modifier(&new_data);
+    UpdateData(new_data);
+  }
+
+ private:
+  void UpdateData(const SaveInfoData& new_data) {
+    std::lock_guard<util::fb2::Mutex> lock(data_mutex_);
+    data_ = new_data;
+  }
+
+  mutable util::fb2::Mutex writer_mutex_;
+  mutable util::fb2::Mutex data_mutex_;
+  SaveInfoData data_;
 };
 
 struct SnapshotSpec {
@@ -218,16 +250,17 @@ class ServerFamily {
 
   // Burns down and destroy all the data from the database.
   // if kDbAll is passed, burns all the databases to the ground.
-  std::error_code Drakarys(Transaction* transaction, DbIndex db_ind);
+  // `wait` makes it wait for all fibers to finish and decommit
+  void Drakarys(Transaction* transaction, DbIndex db_ind, bool wait);
 
-  LastSaveInfo GetLastSaveInfo() const ABSL_LOCKS_EXCLUDED(save_mu_);
+  SaveInfoData GetLastSaveInfo() const;
 
   void FlushAll(Namespace* ns);
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
-  enum class LoadExistingKeys { kFail, kOverride };
-  std::optional<util::fb2::Future<GenericError>> Load(std::string_view file_name,
+  enum class LoadExistingKeys : uint8_t { kFail, kOverride };
+  std::optional<util::fb2::Future<GenericError>> Load(const std::string& file_name,
                                                       LoadExistingKeys existing_keys);
 
   bool TEST_IsSaving() const;
@@ -290,6 +323,12 @@ class ServerFamily {
   }
 
  private:
+  // Helper to safely get save controller copy
+  std::shared_ptr<detail::SaveStagesController> GetSaveController() const {
+    util::fb2::LockGuard lk{save_mu_};
+    return save_controller_;
+  }
+
   bool HasPrivilegedInterface();
   void JoinSnapshotSchedule();
   void LoadFromSnapshot() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
@@ -306,11 +345,9 @@ class ServerFamily {
   void Dfly(CmdArgList args, const CommandContext& cmd_cntx);
   void Memory(CmdArgList args, const CommandContext& cmd_cntx);
   void FlushDb(CmdArgList args, const CommandContext& cmd_cntx);
-  void FlushAll(CmdArgList args, const CommandContext& cmd_cntx);
-  void Info(CmdArgList args, const CommandContext& cmd_cntx)
-      ABSL_LOCKS_EXCLUDED(save_mu_, replicaof_mu_);
+  void Info(CmdArgList args, const CommandContext& cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   void Hello(CmdArgList args, const CommandContext& cmd_cntx);
-  void LastSave(CmdArgList args, const CommandContext& cmd_cntx) ABSL_LOCKS_EXCLUDED(save_mu_);
+  void LastSave(CmdArgList args, const CommandContext& cmd_cntx);
   void Latency(CmdArgList args, const CommandContext& cmd_cntx);
   void ReplicaOf(CmdArgList args, const CommandContext& cmd_cntx);
   void AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx);
@@ -336,8 +373,21 @@ class ServerFamily {
   void ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                          ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
-  // Returns the number of loaded keys if successful.
-  io::Result<size_t> LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys);
+  void ReplicaOfNoOne(SinkReplyBuilder* builder) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  // REPLICAOF implementation without two phase locking.
+  void ReplicaOfInternalV2(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                           ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+
+  struct LoadOptions {
+    std::string snapshot_id;
+    uint32_t shard_count = 0;      // Shard count of the snapshot being loaded.
+    uint64_t num_loaded_keys = 0;  // Number of keys loaded.
+  };
+
+  // Updates LoadOptions if successful. If snapshot_id and shard_count are passed in,
+  // may use them for consistency checks.
+  std::error_code LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys,
+                          LoadOptions* load_opts);
 
   void SnapshotScheduling() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
 
@@ -364,6 +414,9 @@ class ServerFamily {
   void ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx);
   void ClientUnPauseCmd(CmdArgList args, SinkReplyBuilder* builder);
 
+  // Set accepting_connections_ and update listners according to it
+  void ChangeConnectionAccept(bool accept);
+
   util::fb2::Fiber snapshot_schedule_fb_;
   util::fb2::Fiber load_fiber_;
 
@@ -371,7 +424,7 @@ class ServerFamily {
 
   util::AcceptServer* acceptor_ = nullptr;
   std::vector<facade::Listener*> listeners_;
-  bool accepting_connections_ = true;
+  bool accepting_connections_ = true;  // reject connections near oom
   util::ProactorBase* pb_task_ = nullptr;
 
   mutable util::fb2::Mutex replicaof_mu_, save_mu_;
@@ -388,8 +441,8 @@ class ServerFamily {
 
   time_t start_time_ = 0;  // in seconds, epoch time.
 
-  LastSaveInfo last_save_info_ ABSL_GUARDED_BY(save_mu_);
-  std::unique_ptr<detail::SaveStagesController> save_controller_ ABSL_GUARDED_BY(save_mu_);
+  ThreadSafeSaveInfo thread_safe_save_info_;
+  std::shared_ptr<detail::SaveStagesController> save_controller_ ABSL_GUARDED_BY(save_mu_);
 
   // Used to override save on shutdown behavior that is usually set
   // be --dbfilename.
@@ -413,6 +466,8 @@ class ServerFamily {
 
   mutable util::fb2::Mutex loading_stats_mu_;
   LoadingStats loading_stats_ ABSL_GUARDED_BY(loading_stats_mu_);
+
+  bool legacy_format_metrics_ = true;
 };
 
 // Reusable CLIENT PAUSE implementation that blocks while polling is_pause_in_progress

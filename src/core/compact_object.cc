@@ -10,12 +10,10 @@
 extern "C" {
 #include "redis/intset.h"
 #include "redis/listpack.h"
-#include "redis/quicklist.h"
 #include "redis/redis_aux.h"
 #include "redis/stream.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"  // for non-string objects.
-#include "redis/zset.h"
 }
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
@@ -26,6 +24,7 @@ extern "C" {
 #include "core/bloom.h"
 #include "core/detail/bitpacking.h"
 #include "core/huff_coder.h"
+#include "core/page_usage_stats.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -42,18 +41,6 @@ namespace {
 
 constexpr XXH64_hash_t kHashSeed = 24061983;
 constexpr size_t kAlignSize = 8u;
-
-// Approximation since does not account for listpacks.
-size_t QlMAllocSize(quicklist* ql, bool slow) {
-  size_t node_size = ql->len * sizeof(quicklistNode) + znallocx(sizeof(quicklist));
-  if (slow) {
-    for (quicklistNode* node = ql->head; node; node = node->next) {
-      node_size += zmalloc_usable_size(node->entry);
-    }
-    return node_size;
-  }
-  return node_size + ql->count * 16;  // we account for each member 16 bytes.
-}
 
 size_t UpdateSize(size_t size, int64_t update) {
   int64_t result = static_cast<int64_t>(size) + update;
@@ -80,16 +67,8 @@ inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
 }
 
 void FreeList(unsigned encoding, void* ptr, MemoryResource* mr) {
-  switch (encoding) {
-    case OBJ_ENCODING_QUICKLIST:
-      quicklistRelease((quicklist*)ptr);
-      break;
-    case kEncodingQL2:
-      CompactObj::DeleteMR<QList>(ptr);
-      break;
-    default:
-      LOG(FATAL) << "Unknown list encoding type";
-  }
+  CHECK_EQ(encoding, kEncodingQL2);
+  CompactObj::DeleteMR<QList>(ptr);
 }
 
 size_t MallocUsedSet(unsigned encoding, void* ptr) {
@@ -247,17 +226,17 @@ inline void FreeObjZset(unsigned encoding, void* ptr) {
   }
 }
 
-pair<void*, bool> DefragStrMap2(StringMap* sm, float ratio) {
+pair<void*, bool> DefragStrMap2(StringMap* sm, PageUsage* page_usage) {
   bool realloced = false;
 
   for (auto it = sm->begin(); it != sm->end(); ++it)
-    realloced |= it.ReallocIfNeeded(ratio);
+    realloced |= it.ReallocIfNeeded(page_usage);
 
   return {sm, realloced};
 }
 
-pair<void*, bool> DefragListPack(uint8_t* lp, float ratio) {
-  if (!zmalloc_page_is_underutilized(lp, ratio))
+pair<void*, bool> DefragListPack(uint8_t* lp, PageUsage* page_usage) {
+  if (!page_usage->IsPageForObjectUnderUtilized(lp))
     return {lp, false};
 
   size_t lp_bytes = lpBytes(lp);
@@ -268,8 +247,8 @@ pair<void*, bool> DefragListPack(uint8_t* lp, float ratio) {
   return {replacement, true};
 }
 
-pair<void*, bool> DefragIntSet(intset* is, float ratio) {
-  if (!zmalloc_page_is_underutilized(is, ratio))
+pair<void*, bool> DefragIntSet(intset* is, PageUsage* page_usage) {
+  if (!page_usage->IsPageForObjectUnderUtilized(is))
     return {is, false};
 
   const size_t blob_len = intsetBlobLen(is);
@@ -280,16 +259,16 @@ pair<void*, bool> DefragIntSet(intset* is, float ratio) {
   return {replacement, true};
 }
 
-pair<void*, bool> DefragSortedMap(detail::SortedMap* sm, float ratio) {
-  const bool reallocated = sm->DefragIfNeeded(ratio);
+pair<void*, bool> DefragSortedMap(detail::SortedMap* sm, PageUsage* page_usage) {
+  const bool reallocated = sm->DefragIfNeeded(page_usage);
   return {sm, reallocated};
 }
 
-pair<void*, bool> DefragStrSet(StringSet* ss, float ratio) {
+pair<void*, bool> DefragStrSet(StringSet* ss, PageUsage* page_usage) {
   bool realloced = false;
 
   for (auto it = ss->begin(); it != ss->end(); ++it)
-    realloced |= it.ReallocIfNeeded(ratio);
+    realloced |= it.ReallocIfNeeded(page_usage);
 
   return {ss, realloced};
 }
@@ -297,16 +276,16 @@ pair<void*, bool> DefragStrSet(StringSet* ss, float ratio) {
 // Iterates over allocations of internal hash data structures and re-allocates
 // them if their pages are underutilized.
 // Returns pointer to new object ptr and whether any re-allocations happened.
-pair<void*, bool> DefragHash(unsigned encoding, void* ptr, float ratio) {
+pair<void*, bool> DefragHash(unsigned encoding, void* ptr, PageUsage* page_usage) {
   switch (encoding) {
     // Listpack is stored as a single contiguous array
     case kEncodingListPack: {
-      return DefragListPack((uint8_t*)ptr, ratio);
+      return DefragListPack((uint8_t*)ptr, page_usage);
     }
 
     // StringMap supports re-allocation of it's internal nodes
     case kEncodingStrMap2: {
-      return DefragStrMap2((StringMap*)ptr, ratio);
+      return DefragStrMap2((StringMap*)ptr, page_usage);
     }
 
     default:
@@ -314,15 +293,15 @@ pair<void*, bool> DefragHash(unsigned encoding, void* ptr, float ratio) {
   }
 }
 
-pair<void*, bool> DefragSet(unsigned encoding, void* ptr, float ratio) {
+pair<void*, bool> DefragSet(unsigned encoding, void* ptr, PageUsage* page_usage) {
   switch (encoding) {
     // Int sets have flat storage
     case kEncodingIntSet: {
-      return DefragIntSet((intset*)ptr, ratio);
+      return DefragIntSet((intset*)ptr, page_usage);
     }
 
     case kEncodingStrMap2: {
-      return DefragStrSet((StringSet*)ptr, ratio);
+      return DefragStrSet((StringSet*)ptr, page_usage);
     }
 
     default:
@@ -330,21 +309,27 @@ pair<void*, bool> DefragSet(unsigned encoding, void* ptr, float ratio) {
   }
 }
 
-pair<void*, bool> DefragZSet(unsigned encoding, void* ptr, float ratio) {
+pair<void*, bool> DefragZSet(unsigned encoding, void* ptr, PageUsage* page_usage) {
   switch (encoding) {
     // Listpack is stored as a single contiguous array
     case OBJ_ENCODING_LISTPACK: {
-      return DefragListPack((uint8_t*)ptr, ratio);
+      return DefragListPack((uint8_t*)ptr, page_usage);
     }
 
     // SKIPLIST really means ScoreMap
     case OBJ_ENCODING_SKIPLIST: {
-      return DefragSortedMap((detail::SortedMap*)ptr, ratio);
+      return DefragSortedMap((detail::SortedMap*)ptr, page_usage);
     }
 
     default:
       ABSL_UNREACHABLE();
   }
+}
+
+pair<void*, bool> DefragList(unsigned /**/, void* ptr, PageUsage* page_usage) {
+  auto* qlist_ptr = static_cast<QList*>(ptr);
+  bool reallocated = qlist_ptr->DefragIfNeeded(page_usage);
+  return {ptr, reallocated};
 }
 
 inline void FreeObjStream(void* ptr) {
@@ -385,8 +370,12 @@ struct TL {
   base::PODArray<uint8_t> tmp_buf;
   string tmp_str;
   size_t small_str_bytes;
-  Huffman huff_keys;
+  Huffman huff_keys, huff_string_values;
   uint64_t huff_encode_total = 0, huff_encode_success = 0;  // success/total metrics.
+
+  const HuffmanDecoder& GetHuffmanDecoder(uint8_t huffman_domain) const {
+    return huffman_domain == CompactObj::HUFF_KEYS ? huff_keys.decoder : huff_string_values.decoder;
+  }
 };
 
 thread_local TL tl;
@@ -409,8 +398,6 @@ size_t RobjWrapper::MallocUsed(bool slow) const {
       CHECK_EQ(OBJ_ENCODING_RAW, encoding_);
       return InnerObjMallocUsed();
     case OBJ_LIST:
-      if (encoding_ == OBJ_ENCODING_QUICKLIST)
-        return QlMAllocSize((quicklist*)inner_obj_, slow);
       return ((QList*)inner_obj_)->MallocUsed(slow);
     case OBJ_SET:
       return MallocUsedSet(encoding_, inner_obj_);
@@ -434,8 +421,6 @@ size_t RobjWrapper::Size() const {
       DCHECK_EQ(OBJ_ENCODING_RAW, encoding_);
       return sz_;
     case OBJ_LIST:
-      if (encoding_ == OBJ_ENCODING_QUICKLIST)
-        return quicklistCount((quicklist*)inner_obj_);
       return ((QList*)inner_obj_)->Size();
     case OBJ_ZSET: {
       switch (encoding_) {
@@ -587,15 +572,15 @@ void RobjWrapper::SetSize(uint64_t size) {
   sz_ = size;
 }
 
-bool RobjWrapper::DefragIfNeeded(float ratio) {
-  auto do_defrag = [this, ratio](auto defrag_fun) mutable {
-    auto [new_ptr, realloced] = defrag_fun(encoding_, inner_obj_, ratio);
+bool RobjWrapper::DefragIfNeeded(PageUsage* page_usage) {
+  auto do_defrag = [this, &page_usage](auto defrag_fun) mutable {
+    auto [new_ptr, realloced] = defrag_fun(encoding_, inner_obj_, page_usage);
     inner_obj_ = new_ptr;
     return realloced;
   };
 
   if (type() == OBJ_STRING) {
-    if (zmalloc_page_is_underutilized(inner_obj(), ratio)) {
+    if (page_usage->IsPageForObjectUnderUtilized(inner_obj())) {
       ReallocateString(tl.local_mr);
       return true;
     }
@@ -605,7 +590,11 @@ bool RobjWrapper::DefragIfNeeded(float ratio) {
     return do_defrag(DefragSet);
   } else if (type() == OBJ_ZSET) {
     return do_defrag(DefragZSet);
+  } else if (type() == OBJ_LIST) {
+    return do_defrag(DefragList);
   }
+
+  page_usage->RecordNotSupported();
   return false;
 }
 
@@ -629,10 +618,9 @@ int RobjWrapper::ZsetAdd(double score, std::string_view ele, int in_flags, int* 
     bool gt = (in_flags & ZADD_IN_GT) != 0;
     bool lt = (in_flags & ZADD_IN_LT) != 0;
 
-    unsigned char* eptr;
     uint8_t* lp = (uint8_t*)inner_obj_;
-
-    if ((eptr = ZzlFind(lp, ele, &curscore)) != NULL) {
+    uint8_t* eptr = ZzlFind(lp, ele, &curscore);
+    if (eptr != NULL) {
       /* NX? Return, same element already exists. */
       if (nx) {
         *out_flags |= ZADD_OUT_NOP;
@@ -763,6 +751,9 @@ bool CompactObj::InitHuffmanThreadLocal(HuffmanDomain domain, std::string_view h
     case HUFF_KEYS:
       huffman = &tl.huff_keys;
       break;
+    case HUFF_STRING_VALUES:
+      huffman = &tl.huff_string_values;
+      break;
   }
 
   // We do not allow overriding the existing huffman table once it is set.
@@ -794,8 +785,10 @@ CompactObj& CompactObj::operator=(CompactObj&& o) noexcept {
   SetMeta(o.taglen_, o.mask_);  // Frees underlying resources if needed.
   memcpy(&u_, &o.u_, sizeof(u_));
 
+  tagbyte_ = o.tagbyte_;
+
   // SetMeta deallocates the object and we only want reset it.
-  o.taglen_ = 0;
+  o.tagbyte_ = 0;
   o.mask_ = 0;
 
   return *this;
@@ -811,9 +804,7 @@ size_t CompactObj::Size() const {
     switch (taglen_) {
       case SMALL_TAG:
         raw_size = u_.small_str.size();
-        if (mask_bits_.encoding == HUFFMAN_ENC) {
-          return DecodedLen(raw_size, u_.small_str.first_byte());
-        }
+        first_byte = u_.small_str.first_byte();
         break;
       case INT_TAG: {
         absl::AlphaNum an(u_.ival);
@@ -826,9 +817,7 @@ size_t CompactObj::Size() const {
         break;
       case ROBJ_TAG:
         raw_size = u_.r_obj.Size();
-        if (mask_bits_.encoding == HUFFMAN_ENC) {
-          return DecodedLen(raw_size, *(uint8_t*)u_.r_obj.inner_obj());
-        }
+        first_byte = *(uint8_t*)u_.r_obj.inner_obj();
         break;
       case JSON_TAG:
         DCHECK_EQ(mask_bits_.encoding, NONE_ENC);
@@ -846,7 +835,7 @@ size_t CompactObj::Size() const {
         LOG(DFATAL) << "Should not reach " << int(taglen_);
     }
   }
-  return mask_bits_.encoding ? DecodedLen(raw_size, first_byte) : raw_size;
+  return GetStrEncoding().DecodedSize(raw_size, first_byte);
 }
 
 uint64_t CompactObj::HashCode() const {
@@ -873,16 +862,8 @@ uint64_t CompactObj::HashCode() const {
 
   if (IsInline()) {
     char buf[kInlineLen * 3];  // should suffice for most huffman decodings.
-    size_t decoded_len = DecodedLen(taglen_, u_.inline_str[0]);
-    if (mask_bits_.encoding == HUFFMAN_ENC) {
-      if (decoded_len <= sizeof(buf) &&
-          tl.huff_keys.decoder.Decode({u_.inline_str + 1, size_t(taglen_ - 1)}, decoded_len, buf)) {
-        return XXH3_64bits_withSeed(buf, decoded_len, kHashSeed);
-      }
-    } else {
-      detail::ascii_unpack(to_byte(u_.inline_str), decoded_len, buf);
-      return XXH3_64bits_withSeed(buf, decoded_len, kHashSeed);
-    }
+    size_t decoded_len = GetStrEncoding().Decode(string_view{u_.inline_str, taglen_}, buf);
+    return XXH3_64bits_withSeed(buf, decoded_len, kHashSeed);
   }
 
   string_view sv = GetSlice(&tl.tmp_str);
@@ -1019,7 +1000,7 @@ SBF* CompactObj::GetSBF() const {
   return u_.sbf;
 }
 
-void CompactObj::SetString(std::string_view str) {
+void CompactObj::SetString(std::string_view str, bool is_key) {
   CHECK(!IsExternal());
   mask_bits_.encoding = NONE_ENC;
 
@@ -1044,7 +1025,7 @@ void CompactObj::SetString(std::string_view str) {
     }
   }
 
-  EncodeString(str);
+  EncodeString(str, is_key);
 }
 
 void CompactObj::ReserveString(size_t size) {
@@ -1094,22 +1075,25 @@ string_view CompactObj::GetSlice(string* scratch) const {
   return string_view{};
 }
 
-bool CompactObj::DefragIfNeeded(float ratio) {
+bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
   switch (taglen_) {
     case ROBJ_TAG:
-      // currently only these objet types are supported for this operation
+      // currently only these object types are supported for this operation
       if (u_.r_obj.inner_obj() != nullptr) {
-        return u_.r_obj.DefragIfNeeded(ratio);
+        return u_.r_obj.DefragIfNeeded(page_usage);
       }
       return false;
     case SMALL_TAG:
-      return u_.small_str.DefragIfNeeded(ratio);
+      return u_.small_str.DefragIfNeeded(page_usage);
     case INT_TAG:
+      page_usage->RecordNotRequired();
       // this is not relevant in this case
       return false;
     case EXTERNAL_TAG:
+      page_usage->RecordNotRequired();
       return false;
     default:
+      page_usage->RecordNotRequired();
       // This is the case when the object is at inline_str
       return false;
   }
@@ -1139,21 +1123,7 @@ void CompactObj::GetString(char* dest) const {
   CHECK(!IsExternal());
 
   if (IsInline()) {
-    switch (mask_bits_.encoding) {
-      case ASCII2_ENC:
-        DCHECK_EQ(taglen_ + 2u, ascii_len(taglen_));
-        detail::ascii_unpack(to_byte(u_.inline_str), taglen_ + 2, dest);
-        break;
-      case HUFFMAN_ENC:
-        tl.huff_keys.decoder.Decode({u_.inline_str + 1, size_t(taglen_ - 1)},
-                                    u_.inline_str[0] + taglen_ - 1, dest);
-        break;
-      case NONE_ENC:
-        memcpy(dest, u_.inline_str, taglen_);
-        break;
-      default:
-        DLOG(FATAL) << "should not reach " << int(mask_bits_.encoding);
-    }
+    GetStrEncoding().Decode({u_.inline_str, taglen_}, dest);
     return;
   }
 
@@ -1167,19 +1137,15 @@ void CompactObj::GetString(char* dest) const {
     if (taglen_ == ROBJ_TAG) {
       CHECK_EQ(OBJ_STRING, u_.r_obj.type());
       DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-      size_t decoded_len = DecodedLen(u_.r_obj.Size(), *(const uint8_t*)u_.r_obj.inner_obj());
-      if (mask_bits_.encoding == HUFFMAN_ENC) {
-        CHECK(tl.huff_keys.decoder.Decode(
-            {(const char*)u_.r_obj.inner_obj() + 1, u_.r_obj.Size() - 1}, decoded_len, dest));
-        return;
-      }
-      detail::ascii_unpack_simd(to_byte(u_.r_obj.inner_obj()), decoded_len, dest);
+      string_view blob{(const char*)u_.r_obj.inner_obj(), u_.r_obj.Size()};
+      GetStrEncoding().Decode(blob, dest);
+      return;
     } else {
       CHECK_EQ(SMALL_TAG, taglen_);
       string_view slices[2];
       unsigned num = u_.small_str.GetV(slices);
       DCHECK_EQ(2u, num);
-      size_t decoded_len = DecodedLen(u_.small_str.size(), slices[0][0]);
+      size_t decoded_len = GetStrEncoding().DecodedSize(u_.small_str.size(), slices[0][0]);
 
       if (mask_bits_.encoding == HUFFMAN_ENC) {
         tl.tmp_buf.resize(slices[0].size() + slices[1].size() - 1);
@@ -1188,7 +1154,8 @@ void CompactObj::GetString(char* dest) const {
         next += slices[0].size() - 1;
         memcpy(next, slices[1].data(), slices[1].size());
         string_view src(reinterpret_cast<const char*>(tl.tmp_buf.data()), tl.tmp_buf.size());
-        CHECK(tl.huff_keys.decoder.Decode(src, decoded_len, dest));
+        const auto& decoder = tl.GetHuffmanDecoder(huffman_domain_);
+        CHECK(decoder.Decode(src, decoded_len, dest));
         return;
       }
 
@@ -1284,7 +1251,7 @@ void CompactObj::Materialize(std::string_view blob, bool is_raw) {
       u_.r_obj.SetString(blob, tl.local_mr);
     }
   } else {
-    EncodeString(blob);
+    EncodeString(blob, false);
   }
 }
 
@@ -1292,7 +1259,7 @@ void CompactObj::Reset() {
   if (HasAllocated()) {
     Free();
   }
-  taglen_ = 0;
+  tagbyte_ = 0;
   mask_ = 0;
 }
 
@@ -1402,7 +1369,8 @@ bool CompactObj::CmpEncoded(string_view sv) const {
       constexpr size_t kMaxHuffLen = kInlineLen * 3;
       if (sz <= kMaxHuffLen) {
         char buf[kMaxHuffLen];
-        CHECK(tl.huff_keys.decoder.Decode({u_.inline_str + 1, size_t(taglen_ - 1)}, sz, buf));
+        const auto& decoder = tl.GetHuffmanDecoder(huffman_domain_);
+        CHECK(decoder.Decode({u_.inline_str + 1, size_t(taglen_ - 1)}, sz, buf));
         return sv == string_view(buf, sz);
       }
     }
@@ -1484,7 +1452,7 @@ bool CompactObj::CmpEncoded(string_view sv) const {
   return false;
 }
 
-void CompactObj::EncodeString(string_view str) {
+void CompactObj::EncodeString(string_view str, bool is_key) {
   DCHECK_GT(str.size(), kInlineLen);
   DCHECK_EQ(NONE_ENC, mask_bits_.encoding);
 
@@ -1494,6 +1462,7 @@ void CompactObj::EncodeString(string_view str) {
   // We chose such length that we can store the decoded length delta into 1 byte.
   // The maximum huffman compression is 1/8, so 288 / 8 = 36.
   // 288 - 36 = 252, which is smaller than 256.
+  // TODO: introduce variable length huffman length.
   constexpr unsigned kMaxHuffLen = 288;
 
   // For sizes 17, 18 we would like to test ascii encoding first as it's more efficient.
@@ -1502,34 +1471,38 @@ void CompactObj::EncodeString(string_view str) {
       kUseAsciiEncoding && str.size() < 19 && detail::validate_ascii_fast(str.data(), str.size());
 
   // if !is_ascii, we try huffman encoding next.
-  if (!is_ascii && str.size() <= kMaxHuffLen && tl.huff_keys.encoder.valid()) {
-    unsigned dest_len = tl.huff_keys.encoder.CompressedBound(str.size());
-    // 1 byte for storing the size delta.
-    tl.tmp_buf.resize(1 + dest_len);
-    string err_msg;
-    ++tl.huff_encode_total;
-    bool res = tl.huff_keys.encoder.Encode(str, tl.tmp_buf.data() + 1, &dest_len, &err_msg);
-    if (res) {
-      // we accept huffman encoding only if it is:
-      // 1. smaller than the original string by 20%
-      // 2. allows us to store the encoded string in the inline buffer
-      if (dest_len && (dest_len < kInlineLen || (dest_len + dest_len / 5) < str.size())) {
-        huff_encoded = true;
-        tl.huff_encode_success++;
-        encoded = string_view{reinterpret_cast<char*>(tl.tmp_buf.data()), dest_len + 1};
-        unsigned delta = str.size() - dest_len;
-        DCHECK_LT(delta, 256u);
-        tl.tmp_buf[0] = static_cast<uint8_t>(delta);
-        mask_bits_.encoding = HUFFMAN_ENC;
-        if (encoded.size() <= kInlineLen) {
-          SetMeta(encoded.size(), mask_);
-          memcpy(u_.inline_str, tl.tmp_buf.data(), encoded.size());
-          return;
+  if (!is_ascii && str.size() <= kMaxHuffLen) {
+    auto& huffman = is_key ? tl.huff_keys : tl.huff_string_values;
+    if (huffman.encoder.valid()) {
+      unsigned dest_len = huffman.encoder.CompressedBound(str.size());
+      // 1 byte for storing the size delta.
+      tl.tmp_buf.resize(1 + dest_len);
+      string err_msg;
+      ++tl.huff_encode_total;
+      bool res = huffman.encoder.Encode(str, tl.tmp_buf.data() + 1, &dest_len, &err_msg);
+      if (res) {
+        // we accept huffman encoding only if it is:
+        // 1. smaller than the original string by 20%
+        // 2. allows us to store the encoded string in the inline buffer
+        if (dest_len && (dest_len < kInlineLen || (dest_len + dest_len / 5) < str.size())) {
+          huff_encoded = true;
+          tl.huff_encode_success++;
+          encoded = string_view{reinterpret_cast<char*>(tl.tmp_buf.data()), dest_len + 1};
+          unsigned delta = str.size() - dest_len;
+          DCHECK_LT(delta, 256u);
+          tl.tmp_buf[0] = static_cast<uint8_t>(delta);
+          mask_bits_.encoding = HUFFMAN_ENC;
+          huffman_domain_ = is_key ? HUFF_KEYS : HUFF_STRING_VALUES;
+          if (encoded.size() <= kInlineLen) {
+            SetMeta(encoded.size(), mask_);
+            memcpy(u_.inline_str, tl.tmp_buf.data(), encoded.size());
+            return;
+          }
         }
+      } else {
+        // Should not happen, means we have an internal buf.
+        LOG(DFATAL) << "Failed to encode string with huffman: " << err_msg;
       }
-    } else {
-      // Should not happen, means we have an internal buf.
-      LOG(DFATAL) << "Failed to encode string with huffman: " << err_msg;
     }
   }
 
@@ -1600,15 +1573,6 @@ StringOrView CompactObj::GetRawString() const {
   return {};
 }
 
-size_t CompactObj::DecodedLen(size_t sz, uint8_t b) const {
-  DCHECK(mask_bits_.encoding);
-  if (mask_bits_.encoding == HUFFMAN_ENC) {
-    return sz + b - 1;
-  }
-  unsigned delta = (mask_bits_.encoding == ASCII1_ENC) ? 1 : 0;
-  return ascii_len(sz) - delta;
-}
-
 MemoryResource* CompactObj::memory_resource() {
   return tl.local_mr;
 }
@@ -1636,6 +1600,56 @@ CompactObjType ObjTypeFromString(std::string_view sv) {
     }
   }
   return kInvalidCompactObjType;
+}
+
+size_t CompactObj::StrEncoding::DecodedSize(string_view blob) const {
+  return DecodedSize(blob.size(), blob[0]);
+}
+
+size_t CompactObj::StrEncoding::DecodedSize(size_t blob_size, uint8_t first_byte) const {
+  switch (enc_) {
+    case NONE_ENC:
+      return blob_size;
+    case ASCII1_ENC:
+    case ASCII2_ENC:
+      return ascii_len(blob_size) - (enc_ == ASCII1_ENC);
+    case HUFFMAN_ENC:
+      return blob_size + int(first_byte) - 1;
+  };
+  return 0;
+}
+
+size_t CompactObj::StrEncoding::Decode(std::string_view blob, char* dest) const {
+  size_t decoded_len = DecodedSize(blob);
+  switch (enc_) {
+    case NONE_ENC:
+      memcpy(dest, blob.data(), blob.size());
+      break;
+    case ASCII1_ENC:
+    case ASCII2_ENC:
+      detail::ascii_unpack(reinterpret_cast<const uint8_t*>(blob.data()), decoded_len, dest);
+      break;
+    case HUFFMAN_ENC: {
+      const auto& decoder = tl.GetHuffmanDecoder(is_key_);
+      decoder.Decode(blob.substr(1), decoded_len, dest);
+      break;
+    }
+  };
+  return decoded_len;
+}
+
+StringOrView CompactObj::StrEncoding::Decode(std::string_view blob) const {
+  switch (enc_) {
+    case NONE_ENC:
+      return StringOrView::FromView(blob);
+    default: {
+      string out;
+      out.resize(DecodedSize(blob));
+      Decode(blob, out.data());
+      return StringOrView::FromString(std::move(out));
+    }
+  }
+  return {};
 }
 
 }  // namespace dfly

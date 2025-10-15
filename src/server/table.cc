@@ -30,12 +30,16 @@ void DbTableStats::AddTypeMemoryUsage(unsigned type, int64_t delta) {
 
 DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
   constexpr size_t kDbSz = sizeof(DbTableStats) - sizeof(memory_usage_by_type);
-  static_assert(kDbSz == 32);
+  static_assert(kDbSz == 64);
 
   ADD(inline_keys);
   ADD(obj_memory_usage);
   ADD(tiered_entries);
   ADD(tiered_used_bytes);
+  ADD(events.hits);
+  ADD(events.misses);
+  ADD(events.expired_keys);
+  ADD(events.evicted_keys);
 
   for (size_t i = 0; i < o.memory_usage_by_type.size(); ++i) {
     memory_usage_by_type[i] += o.memory_usage_by_type[i];
@@ -78,6 +82,14 @@ void LockTable::Release(uint64_t fp, IntentLock::Mode mode) {
 
 [[maybe_unused]] constexpr size_t kSzTable = sizeof(DbTable);
 
+DbTable::SampleTopKeys::~SampleTopKeys() {
+  delete top_keys;
+}
+
+DbTable::SampleUniqueKeys::~SampleUniqueKeys() {
+  delete[] dense_hll;
+}
+
 DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
     : prime(kInitSegmentLog, detail::PrimeTablePolicy{}, mr),
       expire(0, detail::ExpireTablePolicy{}, mr),
@@ -91,8 +103,8 @@ DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
 
 DbTable::~DbTable() {
   DCHECK_EQ(thread_index, ServerState::tlocal()->thread_index());
-  delete top_keys;
-  delete[] dense_hll;
+  delete sample_top_keys;
+  delete sample_unique_keys;
 }
 
 void DbTable::Clear() {

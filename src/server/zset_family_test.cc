@@ -4,6 +4,8 @@
 
 #include "server/zset_family.h"
 
+#include <vector>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -305,7 +307,7 @@ TEST_F(ZSetFamilyTest, ZMScoreNonExistentKeys) {
               ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL), ArgType(RespExpr::NIL)));
 }
 
-TEST_F(ZSetFamilyTest, ZRangeRank) {
+TEST_F(ZSetFamilyTest, ByScore) {
   Run({"zadd", "x", "1.1", "a", "2.1", "b"});
   EXPECT_THAT(Run({"zrangebyscore", "x", "0", "(1.1"}), ArrLen(0));
   EXPECT_THAT(Run({"zrangebyscore", "x", "-inf", "1.1", "limit", "0", "10"}), "a");
@@ -506,6 +508,9 @@ TEST_F(ZSetFamilyTest, ZRange) {
   resp = Run({"zrange", "key", "+", "[cool", "BYLEX", "LIMIT", "2", "2", "REV"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre("great", "foo"));
+
+  resp = Run({"zrange", "key", "5", "2147483648"});
+  ASSERT_THAT(resp, RespElementsAre("foo", "great", "hill", "omega"));
 }
 
 TEST_F(ZSetFamilyTest, ZRevRange) {
@@ -538,6 +543,12 @@ TEST_F(ZSetFamilyTest, ZRevRange) {
 }
 
 TEST_F(ZSetFamilyTest, ZScan) {
+  auto resp = Run("zscan non-existing-key 100 count 5");
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::STRING), ArgType(RespExpr::ARRAY)));
+  EXPECT_EQ(ToSV(resp.GetVec()[0].GetBuf()), "0");
+  EXPECT_EQ(StrArray(resp.GetVec()[1]).size(), 0);
+
   string prefix(128, 'a');
   for (unsigned i = 0; i < 100; ++i) {
     Run({"zadd", "key", "1", absl::StrCat(prefix, i)});
@@ -903,6 +914,118 @@ TEST_F(ZSetFamilyTest, ZMPop) {
   EXPECT_THAT(resp, RespArray(ElementsAre("y1", "1")));
 }
 
+TEST_F(ZSetFamilyTest, BZMPopInvalidSyntax) {
+  // Not enough arguments.
+  auto resp = Run({"bzmpop", "1", "1", "a"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  // Zero keys.
+  resp = Run({"bzmpop", "1", "0", "MIN", "COUNT", "1"});
+  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
+
+  // Number of keys not uint.
+  resp = Run({"bzmpop", "1", "aa", "a", "MIN"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  // Missing MIN/MAX.
+  resp = Run({"bzmpop", "1", "1", "a", "COUNT", "1"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Wrong number of keys.
+  resp = Run({"bzmpop", "1", "1", "a", "b", "MAX"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Count with no number.
+  resp = Run({"bzmpop", "1", "1", "a", "MAX", "COUNT"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Count number is not uint.
+  resp = Run({"bzmpop", "1", "1", "a", "MIN", "COUNT", "boo"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  // Too many arguments.
+  resp = Run({"bzmpop", "1", "1", "c", "MAX", "COUNT", "2", "foo"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Negative time argument.
+  resp = Run({"bzmpop", "-1", "1", "a", "MIN"});
+  EXPECT_THAT(resp, ErrArg("timeout is negative"));
+}
+
+TEST_F(ZSetFamilyTest, BZMPop) {
+  // Min operation.
+  auto resp = Run({"zadd", "a", "1", "a1", "2", "a2"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"bzmpop", "1", "1", "a", "MIN"});
+  EXPECT_THAT(resp, ContainsLabeledScoredArray("a", {{"a1", "1"}}));
+
+  resp = Run({"ZRANGE", "a", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("a2", "2")));
+
+  // Max operation.
+  resp = Run({"zadd", "b", "1", "b1", "2", "b2"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"bzmpop", "1", "1", "b", "MAX"});
+  EXPECT_THAT(resp, ContainsLabeledScoredArray("b", {{"b2", "2"}}));
+
+  resp = Run({"ZRANGE", "b", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("b1", "1")));
+
+  // Count > 1.
+  resp = Run({"zadd", "c", "1", "c1", "2", "c2"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"bzmpop", "1", "1", "c", "MAX", "COUNT", "2"});
+  EXPECT_THAT(resp, ContainsLabeledScoredArray("c", {{"c1", "1"}, {"c2", "2"}}));
+
+  resp = Run({"zcard", "c"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // Count > #elements in set.
+  resp = Run({"zadd", "d", "1", "d1", "2", "d2"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"bzmpop", "1", "1", "d", "MAX", "COUNT", "3"});
+  EXPECT_THAT(resp, ContainsLabeledScoredArray("d", {{"d1", "1"}, {"d2", "2"}}));
+
+  resp = Run({"zcard", "d"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // First non empty set is not the first set.
+  resp = Run({"zadd", "x", "1", "x1"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"zadd", "y", "1", "y1"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"bzmpop", "1", "3", "empty", "x", "y", "MAX"});
+  EXPECT_THAT(resp, ContainsLabeledScoredArray("x", {{"x1", "1"}}));
+
+  resp = Run({"zcard", "x"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"ZRANGE", "y", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("y1", "1")));
+}
+
+TEST_F(ZSetFamilyTest, BMPOPBlockingTimeout) {
+  RespExpr resp0;
+
+  auto start = absl::Now();
+  auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    resp0 = Run({"BZMPOP", "1", "1", "zset1", "MIN"});
+    LOG(INFO) << "BZMPOP";
+  });
+  fb0.Join();
+  auto dur = absl::Now() - start;
+
+  // Check that the timeout duration is not too crazy.
+  EXPECT_LT(AbsDuration(dur - absl::Milliseconds(1000)), absl::Milliseconds(300));
+  EXPECT_THAT(resp0, ArgType(RespExpr::NIL));
+}
+
 TEST_F(ZSetFamilyTest, ZPopMin) {
   auto resp = Run({"zadd", "key", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e", "6", "f"});
   EXPECT_THAT(resp, IntArg(6));
@@ -1010,6 +1133,23 @@ TEST_F(ZSetFamilyTest, BlockingIsReleased) {
 
       ASSERT_THAT(resp0, ArrLen(3)) << cmd[0];
       EXPECT_THAT(resp0.GetVec(), ElementsAre(key, "x", "2")) << cmd[0];
+
+      Run({"DEL", key});
+    }
+
+    // Tests for BZMPOP command
+    for (auto& cmd : unblocking_commands) {
+      RespExpr resp0;
+      auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+        resp0 = Run({"BZMPOP", "0", "3", "zset1", "zset2", "zset3", "MIN"});
+        LOG(INFO) << "BZMPOP";
+      });
+
+      pp_->at(1)->Await([&] { return Run({cmd.data(), cmd.size()}); });
+      fb0.Join();
+
+      ASSERT_THAT(resp0, ArrLen(2)) << cmd[0];
+      EXPECT_THAT(resp0, ContainsLabeledScoredArray(key, {{"x", "2"}})) << cmd[0];
 
       Run({"DEL", key});
     }
@@ -1182,6 +1322,18 @@ TEST_F(ZSetFamilyTest, Count) {
 
   EXPECT_THAT(CheckedInt({"zcount", "key", "-inf", "+inf"}), 129);
   EXPECT_THAT(CheckedInt({"zlexcount", "key", "-", "+"}), 129);
+
+  // Listpack object
+  Run({"ZADD", "short", "0", "A"});
+  EXPECT_THAT(CheckedInt({"ZLEXCOUNT", "short", "-", "-"}), 0);
+  EXPECT_THAT(CheckedInt({"ZLEXCOUNT", "short", "+", "+"}), 0);
+  EXPECT_THAT(CheckedInt({"ZLEXCOUNT", "short", "+", "-"}), 0);
+
+  // Sortedset object
+  Run({"ZADD", "long", "0", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"});
+  EXPECT_THAT(CheckedInt({"ZLEXCOUNT", "long", "-", "-"}), 0);
+  EXPECT_THAT(CheckedInt({"ZLEXCOUNT", "long", "+", "+"}), 0);
+  EXPECT_THAT(CheckedInt({"ZLEXCOUNT", "long", "+", "-"}), 0);
 }
 
 TEST_F(ZSetFamilyTest, RangeLimit) {

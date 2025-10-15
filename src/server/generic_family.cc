@@ -53,7 +53,7 @@ namespace {
 constexpr uint32_t kMaxTtl = (1UL << 26);
 constexpr size_t DUMP_FOOTER_SIZE = sizeof(uint64_t) + sizeof(uint16_t);  // version number and crc
 
-std::optional<RdbVersion> GetRdbVersion(std::string_view msg) {
+std::optional<RdbVersion> GetRdbVersion(std::string_view msg, bool ignore_crc = false) {
   if (msg.size() <= DUMP_FOOTER_SIZE) {
     LOG(WARNING) << "got restore payload that is too short - " << msg.size();
     return std::nullopt;
@@ -70,18 +70,28 @@ std::optional<RdbVersion> GetRdbVersion(std::string_view msg) {
     return std::nullopt;
   }
 
-  // Compute expected crc64 based on the actual data upto the expected crc64 field.
-  uint64_t actual_cs =
-      crc64(0, reinterpret_cast<const uint8_t*>(msg.data()), msg.size() - sizeof(uint64_t));
   uint64_t expected_cs = absl::little_endian::Load64(footer + 2);  // skip the version
 
-  if (actual_cs != expected_cs) {
-    LOG(WARNING) << "CRC check failed for restore command, expecting: " << expected_cs << " got "
-                 << actual_cs;
-    return std::nullopt;
+  if (!ignore_crc) {
+    // Compute expected crc64 based on the actual data upto the expected crc64 field.
+    uint64_t actual_cs =
+        crc64(0, reinterpret_cast<const uint8_t*>(msg.data()), msg.size() - sizeof(uint64_t));
+
+    if (actual_cs != expected_cs) {
+      LOG(WARNING) << "CRC check failed for restore command, expecting: " << expected_cs << " got "
+                   << actual_cs;
+      return std::nullopt;
+    }
   }
 
   return version;
+}
+
+template <typename It> int64_t GetExpireTime(const DbSlice& db_slice, const It& exp_it) {
+  if (!IsValid(exp_it))
+    return 0;
+
+  return db_slice.ExpireTime(exp_it->second);
 }
 
 class InMemSource : public ::io::Source {
@@ -434,8 +444,8 @@ void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
   io::StringSink sink;
   SerializerBase::DumpObject(it->second, &sink);
 
-  auto rdb_version = GetRdbVersion(sink.str());
-  serialized_value_ = {std::move(sink).str(), rdb_version, db_slice.ExpireTime(exp_it),
+  optional rdb_version = GetRdbVersion(sink.str());
+  serialized_value_ = {std::move(sink).str(), rdb_version, GetExpireTime(db_slice, exp_it),
                        it->first.IsSticky()};
 }
 
@@ -448,8 +458,7 @@ OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
 
   DVLOG(1) << "Rename: removing the key '" << src_key_;
 
-  res.post_updater.Run();
-  db_slice.Del(t->GetDbContext(), it);
+  db_slice.DelMutable(t->GetDbContext(), std::move(res));
   if (shard->journal()) {
     RecordJournal(t->GetOpArgs(shard), "DEL"sv, ArgSlice{src_key_}, 2);
   }
@@ -470,8 +479,7 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
 
   if (dest_found_) {
     DVLOG(1) << "Rename: deleting the destiny key '" << dest_key_;
-    dest_res.post_updater.Run();
-    db_slice.Del(op_args.db_cntx, dest_res.it);
+    db_slice.DelMutable(op_args.db_cntx, std::move(dest_res));
   }
 
   if (restore_args.Expired()) {
@@ -497,7 +505,7 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
       << "Unexpected override for key " << dest_key_ << " " << dest_found_;
   auto bc = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (bc) {
-    bc->AwakeWatched(t->GetDbIndex(), dest_key_);
+    bc->Awaken(t->GetDbIndex(), dest_key_);
   }
 
   if (shard->journal()) {
@@ -541,11 +549,13 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
     const PrimeValue& pv = it->second;
 
     if (pv.IsExternal() && !pv.IsCool()) {
-      util::fb2::Future<string> future =
-          op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv);
+      // TODO: consider moving blocking point to coordinator to avoid stalling shard queue
+      auto res = op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv).Get();
+      if (!res.has_value())
+        return OpStatus::IO_ERROR;
 
-      CompactObj co(future.Get());
-      SerializerBase::DumpObject(co, &sink);
+      // TODO: allow saving string directly without proxy object
+      SerializerBase::DumpObject(PrimeValue{*res, false}, &sink);
     } else {
       SerializerBase::DumpObject(it->second, &sink);
     }
@@ -576,8 +586,7 @@ OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view
       if (restore_args.Replace()) {
         VLOG(1) << "restore command is running with replace, found old key '" << key
                 << "' and removing it";
-        res.post_updater.Run();
-        db_slice.Del(op_args.db_cntx, res.it);
+        db_slice.DelMutable(op_args.db_cntx, std::move(res));
       } else {
         // we are not allowed to replace it.
         return OpStatus::KEY_EXISTS;
@@ -755,6 +764,7 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
   return res.status();
 }
 
+#ifdef WITH_COLLECTION_CMDS
 OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uint32_t ttl_sec,
                                      CmdArgList values) {
   auto& db_slice = op_args.GetDbSlice();
@@ -794,6 +804,16 @@ OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, s
   }
   return res <= 0 ? res : int32_t(res - MemberTimeSeconds(db_cntx.time_now_ms));
 }
+#else
+OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uint32_t ttl_sec,
+                                     CmdArgList values) {
+  return OpStatus::SKIPPED;
+}
+OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, string_view field) {
+  return OpStatus::SKIPPED;
+}
+
+#endif
 
 OpResult<uint32_t> OpStick(const OpArgs& op_args, const ShardArgs& keys) {
   DVLOG(1) << "Stick: " << keys.Front();
@@ -821,7 +841,7 @@ OpResult<uint64_t> OpExpireTime(Transaction* t, EngineShard* shard, string_view 
   if (!IsValid(expire_it))
     return OpStatus::SKIPPED;
 
-  int64_t ttl_ms = db_slice.ExpireTime(expire_it);
+  int64_t ttl_ms = db_slice.ExpireTime(expire_it->second);
   DCHECK_GT(ttl_ms, 0);  // Otherwise FindReadOnly would return null.
   return ttl_ms;
 }
@@ -848,7 +868,7 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
     return OpStatus::KEY_EXISTS;
 
   bool sticky = from_res.it->first.IsSticky();
-  uint64_t exp_ts = db_slice.ExpireTime(from_res.exp_it);
+  uint64_t exp_ts = GetExpireTime(db_slice, from_res.exp_it);
   from_res.post_updater.Run();
   PrimeValue from_obj = std::move(from_res.it->second);
 
@@ -863,7 +883,7 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
 
   auto bc = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (add_res.it->second.ObjType() == OBJ_LIST && bc) {
-    bc->AwakeWatched(target_db, key);
+    bc->Awaken(target_db, key);
   }
 
   return OpStatus::OK;
@@ -894,7 +914,7 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
   RemoveKeyFromIndexesIfNeeded(from_key, op_args.db_cntx, from_res.it->second, op_args.shard);
 
   bool sticky = from_res.it->first.IsSticky();
-  uint64_t exp_ts = db_slice.ExpireTime(from_res.exp_it);
+  uint64_t exp_ts = GetExpireTime(db_slice, from_res.exp_it);
   from_res.post_updater.ReduceHeapUsage();
 
   // we keep the value we want to move.
@@ -915,14 +935,12 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     to_res.it->first.SetSticky(sticky);
     to_res.post_updater.Run();
 
-    from_res.post_updater.Run();
-    db_slice.Del(op_args.db_cntx, from_res.it);
+    db_slice.DelMutable(op_args.db_cntx, std::move(from_res));
   } else {
     // Here we first delete from_it because AddNew below could invalidate from_it.
     // On the other hand, AddNew does not rely on the iterators - this is why we keep
     // the value in `from_obj`.
-    from_res.post_updater.Run();
-    db_slice.Del(op_args.db_cntx, from_res.it);
+    db_slice.DelMutable(op_args.db_cntx, std::move(from_res));
     auto op_result = db_slice.AddNew(op_args.db_cntx, to_key, std::move(from_obj), exp_ts);
     RETURN_ON_BAD_STATUS(op_result);
     to_res = std::move(*op_result);
@@ -933,7 +951,7 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
 
   auto bc = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
   if (!is_prior_list && to_res.it->second.ObjType() == OBJ_LIST && bc) {
-    bc->AwakeWatched(op_args.db_cntx.db_index, to_key);
+    bc->Awaken(op_args.db_cntx.db_index, to_key);
   }
   return OpStatus::OK;
 }
@@ -1454,6 +1472,13 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
                            IteratorEnd&& end_it) {
   uint32_t len = 0;
 
+  // If we are about to overwrite an existing indexed document (HASH/JSON),
+  // remove it from search indices first to avoid duplicate entries.
+  auto existing = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
+  if (IsValid(existing)) {
+    RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, existing->second, op_args.shard);
+  }
+
   QList* ql_v2 = CompactObj::AllocateMR<QList>();
   QList::Where where = QList::TAIL;
   for (auto it = start_it; it != end_it; ++it) {
@@ -1471,7 +1496,7 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
   return len;
 }
 
-void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
+void SortGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_read_only) {
   std::string_view key = ArgS(args, 0);
   bool alpha = false;
   bool reversed = false;
@@ -1497,7 +1522,7 @@ void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
       }
       bounds = {offset, limit};
       i += 2;
-    } else if (arg == "STORE") {
+    } else if (!is_read_only && arg == "STORE") {
       if (i + 1 >= args.size()) {
         return builder->SendError(kSyntaxErr);
       }
@@ -1508,6 +1533,11 @@ void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
       return builder->SendError(kSyntaxErr, kSyntaxErrType);
     }
   }
+
+  // Asserting that if is_read_only as true, then store_key should not exist.
+  DLOG(INFO) << "is_read_only parameter: " << is_read_only
+             << " and store_key parameter: " << bool(store_key);
+  assert(((is_read_only && !bool(store_key)) || !is_read_only));
 
   ShardId source_sid = Shard(key, shard_set->size());
   OpResultTyped<SortEntryList> fetch_result;
@@ -1533,7 +1563,9 @@ void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   auto result_type = fetch_result.type();
-  auto sort_call = [builder, bounds, reversed, result_type, &store_key, &cmd_cntx](auto& entries) {
+
+  auto sort_call = [result_type, bounds, reversed, is_read_only, &rb, &store_key,
+                    &cmd_cntx](auto& entries) {
     using value_t = typename std::decay_t<decltype(entries)>::value_type;
     auto cmp = reversed ? &value_t::greater : &value_t::less;
     if (bounds) {
@@ -1550,9 +1582,15 @@ void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
       end_it = entries.begin() + std::min(bounds->first + bounds->second, entries.size());
     }
 
-    bool is_set = (result_type == OBJ_SET || result_type == OBJ_ZSET);
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    if (store_key) {
+    if (!bool(store_key)) {
+      bool is_set = (result_type == OBJ_SET || result_type == OBJ_ZSET);
+      rb->StartCollection(std::distance(start_it, end_it),
+                          is_set ? RedisReplyBuilder::SET : RedisReplyBuilder::ARRAY);
+
+      for (auto it = start_it; it != end_it; ++it) {
+        rb->SendBulkString(it->key);
+      }
+    } else {
       ShardId dest_sid = Shard(store_key.value(), shard_set->size());
       OpResult<uint32_t> store_len;
       auto store_callback = [&](Transaction* t, EngineShard* shard) {
@@ -1568,24 +1606,25 @@ void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
       } else {
         rb->SendError(store_len.status());
       }
-    } else {
-      rb->StartCollection(std::distance(start_it, end_it),
-                          is_set ? RedisReplyBuilder::SET : RedisReplyBuilder::ARRAY);
-
-      for (auto it = start_it; it != end_it; ++it) {
-        rb->SendBulkString(it->key);
-      }
     }
   };
 
-  std::visit(std::move(sort_call), fetch_result.value());
+  std::visit(sort_call, fetch_result.value());
+}
+
+void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
+  SortGeneric(args, cmd_cntx, false);
+}
+
+void GenericFamily::Sort_RO(CmdArgList args, const CommandContext& cmd_cntx) {
+  SortGeneric(args, cmd_cntx, true);
 }
 
 void GenericFamily::Restore(CmdArgList args, const CommandContext& cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view serialized_value = ArgS(args, 2);
 
-  auto rdb_version = GetRdbVersion(serialized_value);
+  auto rdb_version = GetRdbVersion(serialized_value, cmd_cntx.conn_cntx->journal_emulated);
   auto* builder = cmd_cntx.rb;
   if (!rdb_version) {
     return builder->SendError(kInvalidDumpValueErr);
@@ -1739,7 +1778,7 @@ void GenericFamily::Copy(CmdArgList args, const CommandContext& cmd_cntx) {
   bool replace = parser.Check("REPLACE");
 
   if (!parser.Finalize()) {
-    return cmd_cntx.rb->SendError(parser.Error()->MakeReply());
+    return cmd_cntx.rb->SendError(parser.TakeError().MakeReply());
   }
 
   if (k1 == k2) {
@@ -2004,6 +2043,7 @@ constexpr uint32_t kDump = KEYSPACE | READ | SLOW;
 constexpr uint32_t kUnlink = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kStick = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kSort = WRITE | SET | SORTEDSET | LIST | SLOW | DANGEROUS;
+constexpr uint32_t kSortRO = READ | SET | SORTEDSET | LIST | SLOW | DANGEROUS;
 constexpr uint32_t kMove = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kRestore = KEYSPACE | WRITE | SLOW | DANGEROUS;
 constexpr uint32_t kExpireTime = KEYSPACE | READ | FAST;
@@ -2050,6 +2090,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"UNLINK", CO::WRITE, -2, 1, -1, acl::kUnlink}.HFUNC(Unlink)
       << CI{"STICK", CO::WRITE, -2, 1, -1, acl::kStick}.HFUNC(Stick)
       << CI{"SORT", CO::WRITE, -2, 1, -1, acl::kSort}.HFUNC(Sort)
+      << CI{"SORT_RO", CO::READONLY, -2, 1, 1, acl::kSortRO}.HFUNC(Sort_RO)
       << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kMove}.HFUNC(
              Move)
       << CI{"RESTORE", CO::WRITE, -4, 1, 1, acl::kRestore}.HFUNC(Restore)

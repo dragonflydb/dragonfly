@@ -28,11 +28,6 @@ repos:
         name: Clang formatting
 
   - repo: https://github.com/psf/black
-    rev: 23.7.0
+    rev: 25.1.0
     hooks:
       - id: black
-
-  - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.16.3
-    hooks:
-      - id: gitleaks

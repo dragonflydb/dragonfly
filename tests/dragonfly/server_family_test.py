@@ -1,36 +1,47 @@
+import os.path
+from tempfile import NamedTemporaryFile
+from typing import Callable
+
+import yaml
 from prometheus_client.samples import Sample
 from pymemcache import Client
+from testcontainers.core.container import DockerContainer
+from testcontainers.core.waiting_utils import wait_for_logs
 
 from . import dfly_args
 from .instance import DflyInstance
 from .utility import *
 
 
-def test_quit(connection):
-    connection.send_command("QUIT")
-    assert connection.read_response() == b"OK"
+@pytest.fixture(scope="class")
+def connection(df_server: DflyInstance):
+    return redis.Connection(port=df_server.port)
 
-    with pytest.raises(redis.exceptions.ConnectionError) as e:
+
+class TestServer:
+    def test_quit(self, connection: redis.Connection):
+        connection.send_command("QUIT")
+        assert connection.read_response() == b"OK"
+
+        with pytest.raises(redis.exceptions.ConnectionError) as e:
+            connection.read_response()
+
+    def test_quit_after_sub(self, connection):
+        connection.send_command("SUBSCRIBE", "foo")
         connection.read_response()
 
+        connection.send_command("QUIT")
+        assert connection.read_response() == b"OK"
 
-def test_quit_after_sub(connection):
-    connection.send_command("SUBSCRIBE", "foo")
-    connection.read_response()
+        with pytest.raises(redis.exceptions.ConnectionError) as e:
+            connection.read_response()
 
-    connection.send_command("QUIT")
-    assert connection.read_response() == b"OK"
-
-    with pytest.raises(redis.exceptions.ConnectionError) as e:
-        connection.read_response()
-
-
-async def test_multi_exec(async_client: aioredis.Redis):
-    pipeline = async_client.pipeline()
-    pipeline.set("foo", "bar")
-    pipeline.get("foo")
-    val = await pipeline.execute()
-    assert val == [True, "bar"]
+    async def test_multi_exec(self, async_client: aioredis.Redis):
+        pipeline = async_client.pipeline()
+        pipeline.set("foo", "bar")
+        pipeline.get("foo")
+        val = await pipeline.execute()
+        assert val == [True, "bar"]
 
 
 """
@@ -44,18 +55,13 @@ For now we are expecting to get an error
 """
 
 
-@pytest.mark.skip("Skip until we decided on correct behaviour of eval inside multi")
 async def test_multi_eval(async_client: aioredis.Redis):
-    try:
-        pipeline = async_client.pipeline()
-        pipeline.set("foo", "bar")
-        pipeline.get("foo")
-        pipeline.eval("return 43", 0)
-        val = await pipeline.execute()
-        assert val == "foo"
-    except Exception as e:
-        msg = str(e)
-        assert "Dragonfly does not allow execution of" in msg
+    pipeline = async_client.pipeline()
+    pipeline.set("foo", "bar")
+    pipeline.get("foo")
+    pipeline.eval("return 43", 0)
+    val = await pipeline.execute()
+    assert val == [True, "bar", 43]
 
 
 async def test_connection_name(async_client: aioredis.Redis):
@@ -75,6 +81,7 @@ async def test_get_databases(async_client: aioredis.Redis):
     assert dbnum == {"databases": "16"}
 
 
+@pytest.mark.exclude_epoll  # Failing test. It should be turned on as soon as it is fixed.
 async def test_client_kill(df_factory):
     with df_factory.create(port=1111, admin_port=1112) as instance:
         client = aioredis.Redis(port=instance.port)
@@ -221,3 +228,95 @@ async def test_metric_labels(
         for sample in metrics["dragonfly_connected_clients"].samples:
             match_label_value(sample, "main", lambda v: v == 2)
             match_label_value(sample, "other", lambda v: v == 1)
+
+
+async def test_latency_stats(async_client: aioredis.Redis):
+    for _ in range(100):
+        await async_client.set("foo", "bar")
+        await async_client.get("foo")
+        await async_client.get("bar")
+        await async_client.hgetall("missing")
+
+    latency_stats = await async_client.info("LATENCYSTATS")
+    for expected in {"hgetall", "set", "get"}:
+        key = f"latency_percentiles_usec_{expected}"
+        assert key in latency_stats
+        assert latency_stats[key].keys() == {"p50", "p99", "p99.9"}
+
+    await async_client.config_resetstat()
+    latency_stats = await async_client.info("LATENCYSTATS")
+    # Only stats for the `config resetstat` command should remain in stats
+    assert (
+        len(latency_stats) == 1 and "latency_percentiles_usec_config" in latency_stats,
+        f"unexpected latency stats after reset: {latency_stats}",
+    )
+
+
+@dfly_args({"latency_tracking": False})
+async def test_latency_stats_disabled(async_client: aioredis.Redis):
+    for _ in range(100):
+        await async_client.set("foo", "bar")
+    assert await async_client.info("LATENCYSTATS") == {}
+
+
+async def test_metrics_sanity_check(df_server: DflyInstance):
+
+    def on_container_output(container: DockerContainer, fn: Callable):
+        for entry in container.get_logs():
+            for row in entry.decode("utf-8").split("\n"):
+                fn(row)
+
+    def extract_msg(s: str):
+        return re.search("""msg="([^"]*)""", s).group(1)
+
+    def assert_no_error(entry: str):
+        assert "level=ERROR" not in entry and "level=WARN" not in entry, extract_msg(entry)
+
+    # Piggyback on the first known mounted path if running in CI, the container running the test will start another
+    # container with prometheus. The prometheus container needs the file present on the host to be able to mount it.
+    # Fall back to /tmp so the test can be run on the local machine without using root.
+    parent = next((p for p in ("/var/crash", "/mnt", "/tmp") if os.access(p, os.W_OK)), None)
+
+    # TODO use python-docker api to find a valid mounted volume instead of hardcoded list
+    assert parent is not None, "Could not find a path to write prometheus config"
+    with NamedTemporaryFile("w", dir=parent) as f:
+        prometheus_config = {
+            "scrape_configs": [
+                {
+                    "job_name": "dfly",
+                    "scrape_interval": "1s",
+                    "static_configs": [{"targets": [f"host.docker.internal:{df_server.port}"]}],
+                }
+            ]
+        }
+        prometheus_config_path = "/etc/prometheus/prometheus.yml"
+
+        logging.info(f"Starting prometheus with file {f.name}:\n{yaml.dump(prometheus_config)}")
+
+        yaml.dump(prometheus_config, f)
+        path = os.path.abspath(f.name)
+        os.chmod(path, 0o644)
+
+        with (
+            DockerContainer(image="prom/prometheus")
+            .with_volume_mapping(path, prometheus_config_path)
+            .with_kwargs(extra_hosts={"host.docker.internal": "host-gateway"})
+        ) as prometheus:
+            try:
+                wait_for_logs(prometheus, "Server is ready to receive web requests.", timeout=5)
+
+                # Wait for a few seconds for any potential warnings or errors to appear, it can take several seconds.
+                wait_for_errors_sec, sleep_time_sec = 10, 0.5
+                start = time.monotonic()
+                while time.monotonic() < start + wait_for_errors_sec:
+                    on_container_output(prometheus, assert_no_error)
+                    await asyncio.sleep(sleep_time_sec)
+            except AssertionError:
+                # For assertion errors which we raise, skip printing full prometheus logs
+                raise
+            except Exception as e:
+                # For any other error such as timeout when starting the container, print all container logs
+                logging.error(f"failed to start prometheus: {e}")
+                on_container_output(
+                    prometheus, lambda entry: logging.info(f"prometheus log: {entry}")
+                )

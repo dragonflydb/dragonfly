@@ -4,15 +4,16 @@
 
 #include "server/command_registry.h"
 
+#include <absl/container/inlined_vector.h>
+#include <absl/strings/match.h>
+#include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 #include <absl/time/clock.h>
 
-#include "absl/container/inlined_vector.h"
-#include "absl/strings/match.h"
-#include "absl/strings/str_cat.h"
 #include "base/bits.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "base/stl_util.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
@@ -32,14 +33,14 @@ ABSL_FLAG(vector<string>, command_alias, {},
           "Add an alias for given command(s), format is: <alias>=<original>, <alias>=<original>. "
           "Aliases must be set identically on replicas, if applicable");
 
+ABSL_FLAG(bool, latency_tracking, false, "If true, track latency for commands");
+
 namespace dfly {
 
 using namespace facade;
 
 using absl::AsciiStrToUpper;
 using absl::GetFlag;
-using absl::StrAppend;
-using absl::StrCat;
 using absl::StrSplit;
 
 namespace {
@@ -121,6 +122,10 @@ CmdLineMapping OriginalToAliasMap() {
   return original_to_alias;
 }
 
+constexpr int64_t kLatencyHistogramMinValue = 1;        // Minimum value in usec
+constexpr int64_t kLatencyHistogramMaxValue = 1000000;  // Maximum value in usec (1s)
+constexpr int32_t kLatencyHistogramPrecision = 2;
+
 }  // namespace
 
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
@@ -128,6 +133,29 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
     : facade::CommandId(name, ImplicitCategories(mask), arity, first_key, last_key,
                         acl_categories.value_or(ImplicitAclCategories(mask))) {
   implicit_acl_ = !acl_categories.has_value();
+  hdr_histogram* hist = nullptr;
+  const int init_result = hdr_init(kLatencyHistogramMinValue, kLatencyHistogramMaxValue,
+                                   kLatencyHistogramPrecision, &hist);
+  CHECK_EQ(init_result, 0) << "failed to initialize histogram for command " << name;
+  latency_histogram_ = hist;
+
+  if (name_.rfind("EVAL", 0) == 0)
+    kind_multi_ctr_ = CO::MultiControlKind::EVAL;
+  else if (base::_in(name_, {"EXEC", "MULTI", "DISCARD"}))
+    kind_multi_ctr_ = CO::MultiControlKind::EXEC;
+  else if (base::_in(name_, {"PUBLISH", "SUBSCRIBE", "UNSUBSCRIBE"}))
+    kind_pubsub_ = CO::PubSubKind::REGULAR;
+  else if (base::_in(name_, {"PSUBSCRIBE", "PUNSUBSCRIBE"}))
+    kind_pubsub_ = CO::PubSubKind::PATTERN;
+  else if (base::_in(name_, {"SPUBLISH", "SSUBSCRIBE", "SUNSUBSCRIBE"}))
+    kind_pubsub_ = CO::PubSubKind::SHARDED;
+}
+
+CommandId::~CommandId() {
+  // Aliases share the same latency histogram, so we only close it if this is not an alias.
+  if (latency_histogram_ && !is_alias_) {
+    hdr_close(latency_histogram_);
+  }
 }
 
 CommandId CommandId::Clone(const std::string_view name) const {
@@ -138,6 +166,11 @@ CommandId CommandId::Clone(const std::string_view name) const {
   cloned.acl_categories_ = acl_categories_;
   cloned.implicit_acl_ = implicit_acl_;
   cloned.is_alias_ = true;
+
+  // explicit sharing of the object since it's an alias we can do that.
+  // I am assuming that the source object lifetime is at least as of the cloned object.
+  hdr_close(cloned.latency_histogram_);  // Free the histogram in the cloned object.
+  cloned.latency_histogram_ = static_cast<hdr_histogram*>(latency_histogram_);
   return cloned;
 }
 
@@ -153,11 +186,12 @@ bool CommandId::IsTransactional() const {
 }
 
 bool CommandId::IsMultiTransactional() const {
-  return CO::IsTransKind(name()) || CO::IsEvalKind(name());
+  return kind_multi_ctr_.has_value();
 }
 
 uint64_t CommandId::Invoke(CmdArgList args, const CommandContext& cmd_cntx) const {
-  int64_t before = absl::GetCurrentTimeNanos();
+  uint64_t before = cmd_cntx.conn_cntx->conn_state.cmd_start_time_ns;
+  DCHECK_GT(before, 0u);
   handler_(args, cmd_cntx);
   int64_t after = absl::GetCurrentTimeNanos();
 
@@ -168,7 +202,12 @@ uint64_t CommandId::Invoke(CmdArgList args, const CommandContext& cmd_cntx) cons
 
   ++ent.first;
   ent.second += execution_time_usec;
-
+  static const bool is_latency_tracked = GetFlag(FLAGS_latency_tracking);
+  if (is_latency_tracked) {
+    if (hdr_histogram* cmd_histogram = latency_histogram_; cmd_histogram != nullptr) {
+      hdr_record_value(cmd_histogram, execution_time_usec);
+    }
+  }
   return execution_time_usec;
 }
 
@@ -192,14 +231,25 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
   return nullopt;
 }
 
+void CommandId::ResetStats(unsigned thread_index) {
+  command_stats_[thread_index] = {0, 0};
+  if (hdr_histogram* h = latency_histogram_; h != nullptr) {
+    hdr_reset(h);
+  }
+}
+
+hdr_histogram* CommandId::LatencyHist() const {
+  return latency_histogram_;
+}
+
 CommandRegistry::CommandRegistry() {
   cmd_rename_map_ = ParseCmdlineArgMap(FLAGS_rename_command);
 
-  for (string name : GetFlag(FLAGS_restricted_commands)) {
+  for (const string& name : GetFlag(FLAGS_restricted_commands)) {
     restricted_cmds_.emplace(AsciiStrToUpper(name));
   }
 
-  for (string name : GetFlag(FLAGS_oom_deny_commands)) {
+  for (const string& name : GetFlag(FLAGS_oom_deny_commands)) {
     oomdeny_cmds_.emplace(AsciiStrToUpper(name));
   }
 }
@@ -301,54 +351,13 @@ std::pair<const CommandId*, ArgSlice> CommandRegistry::FindExtended(string_view 
   return {res, tail_args};
 }
 
-namespace CO {
-
-const char* OptName(CO::CommandOpt fl) {
-  using namespace CO;
-
-  switch (fl) {
-    case WRITE:
-      return "write";
-    case READONLY:
-      return "readonly";
-    case DENYOOM:
-      return "denyoom";
-    case FAST:
-      return "fast";
-    case LOADING:
-      return "loading";
-    case DANGEROUS:
-      return "dangerous";
-    case ADMIN:
-      return "admin";
-    case NOSCRIPT:
-      return "noscript";
-    case BLOCKING:
-      return "blocking";
-    case HIDDEN:
-      return "hidden";
-    case INTERLEAVED_KEYS:
-      return "interleaved-keys";
-    case GLOBAL_TRANS:
-      return "global-trans";
-    case STORE_LAST_KEY:
-      return "store-last-key";
-    case VARIADIC_KEYS:
-      return "variadic-keys";
-    case NO_AUTOJOURNAL:
-      return "custom-journal";
-    case NO_KEY_TRANSACTIONAL:
-      return "no-key-transactional";
-    case NO_KEY_TX_SPAN_ALL:
-      return "no-key-tx-span-all";
-    case IDEMPOTENT:
-      return "idempotent";
-    case SLOW:
-      return "slow";
+absl::flat_hash_map<std::string, hdr_histogram*> CommandRegistry::LatencyMap() const {
+  absl::flat_hash_map<std::string, hdr_histogram*> cmd_latencies;
+  cmd_latencies.reserve(cmd_map_.size());
+  for (const auto& [cmd_name, cmd] : cmd_map_) {
+    cmd_latencies.insert({absl::AsciiStrToLower(cmd_name), cmd.LatencyHist()});
   }
-  return "unknown";
+  return cmd_latencies;
 }
-
-}  // namespace CO
 
 }  // namespace dfly

@@ -5,6 +5,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/detail/listpack_wrap.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -19,7 +20,6 @@ extern "C" {
 #include "redis/listpack.h"
 #include "redis/redis_aux.h"
 #include "redis/util.h"
-#include "redis/zset.h"
 }
 
 namespace dfly::container_utils {
@@ -139,40 +139,9 @@ OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) 
 
 using namespace std;
 
-quicklistEntry QLEntry() {
-  quicklistEntry res{.quicklist = NULL,
-                     .node = NULL,
-                     .zi = NULL,
-                     .value = NULL,
-                     .longval = 0,
-                     .sz = 0,
-                     .offset = 0};
-  return res;
-}
-
 bool IterateList(const PrimeValue& pv, const IterateFunc& func, long start, long end) {
   bool success = true;
 
-  if (pv.Encoding() == OBJ_ENCODING_QUICKLIST) {
-    quicklist* ql = static_cast<quicklist*>(pv.RObjPtr());
-    long llen = quicklistCount(ql);
-    if (end < 0 || end >= llen)
-      end = llen - 1;
-
-    quicklistIter* qiter = quicklistGetIteratorAtIdx(ql, AL_START_HEAD, start);
-    quicklistEntry entry = QLEntry();
-    long lrange = end - start + 1;
-
-    while (success && quicklistNext(qiter, &entry) && lrange-- > 0) {
-      if (entry.value) {
-        success = func(ContainerEntry{reinterpret_cast<char*>(entry.value), entry.sz});
-      } else {
-        success = func(ContainerEntry{entry.longval});
-      }
-    }
-    quicklistReleaseIterator(qiter);
-    return success;
-  }
   DCHECK_EQ(pv.Encoding(), kEncodingQL2);
   QList* ql = static_cast<QList*>(pv.RObjPtr());
 
@@ -246,7 +215,7 @@ bool IterateSortedSet(const detail::RobjWrapper* robj_wrapper, const IterateSort
 
       // don't bother to extract the score if it's gonna be ignored.
       if (use_score)
-        score = zzlGetScore(sptr);
+        score = detail::ZzlGetScore(sptr);
 
       if (vstr == NULL) {
         success = func(ContainerEntry{vlong}, score);
@@ -255,9 +224,9 @@ bool IterateSortedSet(const detail::RobjWrapper* robj_wrapper, const IterateSort
       }
 
       if (reverse) {
-        zzlPrev(zl, &eptr, &sptr);
+        detail::ZzlPrev(zl, &eptr, &sptr);
       } else {
-        zzlNext(zl, &eptr, &sptr);
+        detail::ZzlNext(zl, &eptr, &sptr);
       };
     }
     return success;
@@ -275,14 +244,8 @@ bool IterateMap(const PrimeValue& pv, const IterateKVFunc& func) {
   bool finished = true;
 
   if (pv.Encoding() == kEncodingListPack) {
-    uint8_t k_intbuf[LP_INTBUF_SIZE], v_intbuf[LP_INTBUF_SIZE];
-    uint8_t* lp = (uint8_t*)pv.RObjPtr();
-    uint8_t* fptr = lpFirst(lp);
-    while (fptr) {
-      string_view key = LpGetView(fptr, k_intbuf);
-      fptr = lpNext(lp, fptr);
-      string_view val = LpGetView(fptr, v_intbuf);
-      fptr = lpNext(lp, fptr);
+    detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
+    for (const auto [key, val] : lw) {
       if (!func(ContainerEntry{key.data(), key.size()}, ContainerEntry{val.data(), val.size()})) {
         finished = false;
         break;
@@ -329,8 +292,7 @@ string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]) {
 
 OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
                                               BlockingResultCb func, unsigned limit_ms,
-                                              bool* block_flag, bool* pause_flag,
-                                              std::string* info) {
+                                              bool* block_flag, bool* pause_flag) {
   string result_key;
 
   // Fast path. If we have only a single shard, we can run opportunistically with a single hop.
@@ -340,8 +302,6 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
   if (trans->GetUniqueShardCnt() == 1) {
     auto res = FindFirstNonEmptySingleShard(trans, req_obj_type, func);
     if (res.ok()) {
-      if (info)
-        *info = "FF1S/";
       return res;
     } else {
       result = res.status();
@@ -360,8 +320,6 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
       return OpStatus::OK;
     };
     trans->Execute(std::move(cb), true);
-    if (info)
-      *info = "FFMS/";
     return result_key;
   }
 
@@ -407,18 +365,6 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
     return OpStatus::OK;
   };
   trans->Execute(std::move(cb), true);
-  if (info) {
-    *info = "BLOCK/";
-    for (unsigned sid = 0; sid < shard_set->size(); sid++) {
-      if (!trans->IsActive(sid))
-        continue;
-      if (auto wake_key = trans->GetWakeKey(sid); wake_key)
-        *info += absl::StrCat("sid:", sid, ",key:", *wake_key, ",");
-    }
-    *info += "/";
-    *info += trans->DEBUGV18_BlockInfo();
-    *info += "/";
-  }
   return result_key;
 }
 

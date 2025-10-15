@@ -19,6 +19,7 @@ namespace dfly::search {
 class CompressedSortedSet {
  public:
   using IntType = DocId;
+  using ElementType = IntType;
 
   // Const access iterator that decodes the compressed list on traversal
   struct ConstIterator {
@@ -38,9 +39,10 @@ class CompressedSortedSet {
     friend bool operator==(const ConstIterator& l, const ConstIterator& r);
     friend bool operator!=(const ConstIterator& l, const ConstIterator& r);
 
+    ConstIterator() = default;
+
    private:
     explicit ConstIterator(const CompressedSortedSet& list);
-    ConstIterator() = default;
 
     void ReadNext();  // Decode next value to stash
 
@@ -60,14 +62,34 @@ class CompressedSortedSet {
   bool Insert(IntType value);  // Insert arbitrary element, needs to scan whole list
   bool Remove(IntType value);  // Remove arbitrary element, needs to scan whole list
 
-  size_t Size() const;
-  size_t ByteSize() const;
+  size_t Size() const {
+    return size_;
+  }
+
+  size_t ByteSize() const {
+    return diffs_.size();
+  }
+
+  bool Empty() const {
+    return size_ == 0;
+  }
+
+  void Clear() {
+    size_ = 0;
+    tail_value_.reset();
+    diffs_.clear();
+  }
 
   // Add all values from other
   void Merge(CompressedSortedSet&& other);
 
   // Split into two equally sized halves
   std::pair<CompressedSortedSet, CompressedSortedSet> Split() &&;
+
+  IntType Back() const {
+    DCHECK(!Empty() && tail_value_.has_value());
+    return tail_value_.value();
+  }
 
  private:
   struct EntryLocation {

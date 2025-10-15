@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/types/span.h>
+#include <hdr/hdr_histogram.h>
 
 #include <functional>
 #include <optional>
@@ -52,22 +53,16 @@ enum CommandOpt : uint32_t {
   // The same callback can be run multiple times without corrupting the result. Used for
   // opportunistic optimizations where inconsistencies can only be detected afterwards.
   IDEMPOTENT = 1U << 18,
-  SLOW = 1U << 19  // Unused?
 };
 
-const char* OptName(CommandOpt fl);
+enum class PubSubKind : uint8_t { REGULAR = 0, PATTERN = 1, SHARDED = 2 };
 
-constexpr inline bool IsEvalKind(std::string_view name) {
-  return name.compare(0, 4, "EVAL") == 0;
-}
-
-constexpr inline bool IsTransKind(std::string_view name) {
-  return (name == "EXEC") || (name == "MULTI") || (name == "DISCARD");
-}
-
-static_assert(IsEvalKind("EVAL") && IsEvalKind("EVAL_RO") && IsEvalKind("EVALSHA") &&
-              IsEvalKind("EVALSHA_RO"));
-static_assert(!IsEvalKind(""));
+// Commands controlling any multi command execution.
+// They often need to be handled separately from regular commands in many contexts
+enum class MultiControlKind : uint8_t {
+  EVAL,  // EVAL, EVAL_RO, EVALSHA, EVALSHA_RO
+  EXEC,  // EXEC, MULTI, DISCARD
+};
 
 };  // namespace CO
 
@@ -84,6 +79,32 @@ struct CommandContext {
   ConnectionContext* conn_cntx;
 };
 
+// TODO: move it to helio
+// Makes sure that the POD T that is passed to the constructor is reset to default state
+template <typename T> class MoveOnly {
+ public:
+  MoveOnly() = default;
+
+  MoveOnly(const MoveOnly&) = delete;
+  MoveOnly& operator=(const MoveOnly&) = delete;
+
+  MoveOnly(MoveOnly&& t) noexcept : value_(std::move(t.value_)) {
+    t.value_ = T{};  // Reset the passed value to default state
+  }
+
+  MoveOnly& operator=(const T& t) noexcept {
+    value_ = t;
+    return *this;
+  }
+
+  operator const T&() const {  // NOLINT
+    return value_;
+  }
+
+ private:
+  T value_;
+};
+
 class CommandId : public facade::CommandId {
  public:
   // NOTICE: name must be a literal string, otherwise metrics break! (see cmd_stats_map in
@@ -91,7 +112,9 @@ class CommandId : public facade::CommandId {
   CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
             std::optional<uint32_t> acl_categories = std::nullopt);
 
-  CommandId(CommandId&&) = default;
+  CommandId(CommandId&& o) = default;
+
+  ~CommandId();
 
   [[nodiscard]] CommandId Clone(std::string_view name) const;
 
@@ -126,8 +149,6 @@ class CommandId : public facade::CommandId {
     return opt_mask_ & CO::BLOCKING;
   }
 
-  static const char* OptName(CO::CommandOpt fl);
-
   CommandId&& SetHandler(Handler3 f) && {
     handler_ = std::move(f);
     return std::move(*this);
@@ -142,9 +163,7 @@ class CommandId : public facade::CommandId {
     return (last_key_ != first_key_) || (opt_mask_ & CO::VARIADIC_KEYS);
   }
 
-  void ResetStats(unsigned thread_index) {
-    command_stats_[thread_index] = {0, 0};
-  }
+  void ResetStats(unsigned thread_index);
 
   CmdCallStats GetStats(unsigned thread_index) const {
     return command_stats_[thread_index];
@@ -159,12 +178,28 @@ class CommandId : public facade::CommandId {
     return is_alias_;
   }
 
+  hdr_histogram* LatencyHist() const;
+
+  std::optional<CO::PubSubKind> PubSubKind() const {
+    return kind_pubsub_;
+  }
+
+  // Returns value if this command controls multi command execution (EVAL, EXEC & helpers)
+  std::optional<CO::MultiControlKind> MultiControlKind() const {
+    return kind_multi_ctr_;
+  }
+
  private:
+  std::optional<CO::PubSubKind> kind_pubsub_;
+  std::optional<CO::MultiControlKind> kind_multi_ctr_;
+
+  // The following fields must copy manually in the move constructor.
   bool implicit_acl_;
+  bool is_alias_{false};
   std::unique_ptr<CmdCallStats[]> command_stats_;
   Handler3 handler_;
   ArgValidator validator_;
-  bool is_alias_{false};
+  MoveOnly<hdr_histogram*> latency_histogram_;  // Histogram for command latency in usec
 };
 
 class CommandRegistry {
@@ -218,6 +253,8 @@ class CommandRegistry {
 
   std::pair<const CommandId*, facade::ArgSlice> FindExtended(std::string_view cmd,
                                                              facade::ArgSlice tail_args) const;
+
+  absl::flat_hash_map<std::string, hdr_histogram*> LatencyMap() const;
 
  private:
   absl::flat_hash_map<std::string, CommandId> cmd_map_;

@@ -3,6 +3,7 @@
 //
 
 // GCC yields a spurious warning about uninitialized data in DocumentAccessor::StringList.
+
 #ifndef __clang__
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
@@ -14,6 +15,7 @@
 #include <absl/strings/str_join.h>
 
 #include "base/flags.h"
+#include "core/detail/listpack_wrap.h"
 #include "core/json/path.h"
 #include "core/overloaded.h"
 #include "core/search/search.h"
@@ -76,7 +78,7 @@ FieldValue ExtractSortableValueFromJson(const search::Schema& schema, string_vie
   if (json.is_null()) {
     return std::monostate{};
   }
-  auto json_as_string = json.to_string();
+  auto json_as_string = json.as_string();
   return ExtractSortableValue(schema, key, json_as_string);
 }
 
@@ -101,23 +103,17 @@ bool ProcessJsonElements(const std::vector<JsonType>& json_elements,
 }  // namespace
 
 SearchDocData BaseAccessor::Serialize(const search::Schema& schema,
-                                      absl::Span<const SearchField> fields) const {
+                                      absl::Span<const FieldReference> fields) const {
   SearchDocData out{};
   for (const auto& field : fields) {
-    const auto& fident = field.GetIdentifier(schema, false);
-    const auto& fname = field.GetShortName(schema);
-
+    string_view fident = field.Identifier(schema, false);
     auto field_value =
         ExtractSortableValue(schema, fident, absl::StrJoin(GetStrings(fident).value(), ","));
     if (field_value) {
-      out[fname] = std::move(field_value).value();
+      out[field.OutputName()] = std::move(field_value).value();
     }
   }
   return out;
-}
-
-SearchDocData BaseAccessor::SerializeDocument(const search::Schema& schema) const {
-  return Serialize(schema);
 }
 
 std::optional<BaseAccessor::VectorInfo> BaseAccessor::GetVector(
@@ -161,22 +157,12 @@ std::optional<BaseAccessor::StringList> ListPackAccessor::GetStrings(
 
 SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
   SearchDocData out{};
-
-  uint8_t* fptr = lpFirst(lp_);
-  DCHECK_NE(fptr, nullptr);
-
-  while (fptr) {
-    string_view k = container_utils::LpGetView(fptr, intbuf_[0].data());
-    fptr = lpNext(lp_, fptr);
-    string_view v = container_utils::LpGetView(fptr, intbuf_[1].data());
-    fptr = lpNext(lp_, fptr);
-
-    auto field_value = ExtractSortableValue(schema, k, v);
-    if (field_value) {
-      out[k] = std::move(field_value).value();
+  detail::ListpackWrap lw{lp_};
+  for (const auto [key, value] : lw) {
+    if (auto field_value = ExtractSortableValue(schema, key, value); field_value) {
+      out[key] = std::move(field_value).value();
     }
   }
-
   return out;
 }
 
@@ -376,24 +362,16 @@ JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) c
   return path;
 }
 
-SearchDocData JsonAccessor::Serialize(const search::Schema& schema) const {
-  SearchFieldsList fields{};
-  for (const auto& [fname, fident] : schema.field_names)
-    fields.emplace_back(StringOrView::FromView(fident), false, StringOrView::FromView(fname));
-  return Serialize(schema, fields);
-}
-
 SearchDocData JsonAccessor::Serialize(const search::Schema& schema,
-                                      absl::Span<const SearchField> fields) const {
+                                      absl::Span<const FieldReference> fields) const {
   SearchDocData out{};
   for (const auto& field : fields) {
-    const auto& ident = field.GetIdentifier(schema, true);
-    const auto& name = field.GetShortName(schema);
+    string_view ident = field.Identifier(schema, true);
     if (auto* path = GetPath(ident); path) {
       if (auto res = path->Evaluate(json_); !res.empty()) {
         auto field_value = ExtractSortableValueFromJson(schema, ident, res[0]);
         if (field_value) {
-          out[name] = std::move(field_value).value();
+          out[field.OutputName()] = std::move(field_value).value();
         }
       }
     }
@@ -401,7 +379,7 @@ SearchDocData JsonAccessor::Serialize(const search::Schema& schema,
   return out;
 }
 
-SearchDocData JsonAccessor::SerializeDocument(const search::Schema& schema) const {
+SearchDocData JsonAccessor::Serialize(const search::Schema& schema) const {
   return {{"$", json_.to_string()}};
 }
 

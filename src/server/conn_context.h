@@ -86,6 +86,18 @@ struct ConnectionState {
 
     size_t UsedMemory() const;
 
+    // Adds a StoredCmd and updates the stored_cmds_size
+    void AddStoredCmd(const CommandId* cid, bool own_args, CmdArgList args);
+
+    // Empties the body vector and resets stored_cmds_size to 0. Returns the size before data was
+    // cleared.
+    size_t ClearStoredCmds();
+
+    // Returns memory used by the body field without iterating over each stored command
+    size_t GetStoredCmdBytes() const {
+      return stored_cmd_bytes + body.capacity() * sizeof(StoredCmd);
+    }
+
     ExecState state = EXEC_INACTIVE;
     std::vector<StoredCmd> body;
     bool is_write = false;
@@ -99,6 +111,10 @@ struct ConnectionState {
     // executing the multi transaction, which can create deadlocks by blocking other transactions
     // that already borrowed all available interpreters but wait for keys to be unlocked.
     Interpreter* preborrowed_interpreter = nullptr;
+
+    // The total size of all stored commands kept in "body". Does not include memory allocated by
+    // the "body" vector.
+    size_t stored_cmd_bytes = 0;
   };
 
   // Lua-script related data.
@@ -147,7 +163,7 @@ struct ConnectionState {
     const ConnectionContext* owner = nullptr;
   };
 
-  enum MCGetMask { FETCH_CAS_VER = 1 };
+  enum MCGetMask : uint8_t { FETCH_CAS_VER = 1 };
 
   size_t UsedMemory() const;
 
@@ -265,6 +281,7 @@ struct ConnectionState {
   std::unique_ptr<ScriptInfo> script_info;
   std::unique_ptr<SubscribeInfo> subscribe_info;
   ClientTracking tracking_info_;
+  uint64_t cmd_start_time_ns = 0;  // time when the last command started executing
 };
 
 class ConnectionContext : public facade::ConnectionContext {
@@ -293,7 +310,7 @@ class ConnectionContext : public facade::ConnectionContext {
     return conn_state.db_index;
   }
 
-  void ChangeSubscription(bool to_add, bool to_reply, CmdArgList args,
+  void ChangeSubscription(bool to_add, bool to_reply, bool sharded, CmdArgList args,
                           facade::RedisReplyBuilder* rb);
 
   void ChangePSubscription(bool to_add, bool to_reply, CmdArgList args,

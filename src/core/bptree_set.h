@@ -61,6 +61,10 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
     return count_;  // number of items in the tree
   }
 
+  bool Empty() const {
+    return count_ == 0;
+  }
+
   size_t NodeCount() const {
     // number of nodes in the tree (usually, order of magnitude smaller than Size()).
     return num_nodes_;

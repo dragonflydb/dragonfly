@@ -809,9 +809,9 @@ def assert_eventually(wrapped=None, *, times=100):
     return wrapper(wrapped)
 
 
-def skip_if_not_in_github():
+def skip_if_not_in_github(reason: str = "Redis server not found"):
     if os.getenv("GITHUB_ACTIONS") == None:
-        pytest.skip("Redis server not found")
+        pytest.skip(reason)
 
 
 class ExpirySeeder:
@@ -848,3 +848,11 @@ def extract_int_after_prefix(prefix, line):
     match = re.search(prefix + "(\\d+)", line)
     assert match
     return int(match.group(1))
+
+
+async def wait_for_replicas_state(*clients, state="online", node_role="slave", timeout=0.05):
+    """Wait until all clients (replicas) reach passed state"""
+    while len(clients) > 0:
+        await asyncio.sleep(timeout)
+        roles = await asyncio.gather(*(c.role() for c in clients))
+        clients = [c for c, role in zip(clients, roles) if role[0] != node_role or role[3] != state]

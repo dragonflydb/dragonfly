@@ -13,6 +13,7 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "base/pmr/memory_resource.h"
 #include "core/string_map.h"
 
@@ -20,7 +21,7 @@ namespace dfly::search {
 
 using DocId = uint32_t;
 
-enum class VectorSimilarity { L2, COSINE };
+enum class VectorSimilarity { L2, IP, COSINE };
 
 using OwnedFtVector = std::pair<std::unique_ptr<float[]>, size_t /* dimension (size) */>;
 
@@ -37,26 +38,20 @@ struct QueryParams {
   absl::flat_hash_map<std::string, std::string> params;
 };
 
-// Comparable string stored as char[]. Used to reduce size of std::variant with strings.
-struct WrappedStrPtr {
-  // Intentionally implicit and const std::string& for use in templates
-  WrappedStrPtr(const PMR_NS::string& s);
-  WrappedStrPtr(const std::string& s);
-  bool operator<(const WrappedStrPtr& other) const;
-  bool operator>=(const WrappedStrPtr& other) const;
+// Base class for optional search filters
 
-  operator std::string_view() const;
+class AstNode;
 
- private:
-  std::unique_ptr<char[]> ptr;
+struct OptionalFilterBase {
+  virtual bool IsEmpty() const = 0;
+  virtual AstNode Node(std::string field) = 0;
+  virtual ~OptionalFilterBase() = default;
 };
 
-// Score produced either by KNN (float) or SORT (double / wrapped str)
-using ResultScore = std::variant<std::monostate, float, double, WrappedStrPtr>;
+using OptionalFilters =
+    absl::flat_hash_map<std::string /*field*/, std::unique_ptr<OptionalFilterBase> /* filter */>;
 
 // Values are either sortable as doubles or strings, or not sortable at all.
-// Contrary to ResultScore it doesn't include KNN results and is not optimized for smaller struct
-// size.
 using SortableValue = std::variant<std::monostate, double, std::string>;
 
 // Interface for accessing document values with different data structures underneath.
@@ -92,16 +87,30 @@ struct BaseIndex {
   virtual void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) = 0;
 
   // Returns documents that have non-null values for this field (used for @field:* queries)
-  virtual std::optional<std::vector<DocId>> GetAllResults() const {
-    return std::nullopt;
+  // Result must be sorted
+  virtual std::vector<DocId> GetAllDocsWithNonNullValues() const = 0;
+
+  /* Called at the end of indexes rebuilding after all initial Add calls are done.
+     Some indices may need to finalize internal structures. See RangeTree for example. */
+  virtual void FinalizeInitialization() {
   }
 };
 
 // Base class for type-specific sorting indices.
 struct BaseSortIndex : BaseIndex {
   virtual SortableValue Lookup(DocId doc) const = 0;
-  virtual std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const = 0;
+  virtual std::vector<SortableValue> Sort(std::vector<DocId>* ids, size_t limit,
+                                          bool desc) const = 0;
 };
+
+/* Used in iterators of inverse indices.
+   It is used to mark iterators that can be seeked to doc id that is greater than or equal to
+   the specified value (method name is SeekGE(DocId min_doc_id)).
+   This is used to optimize merging of results from different indices.
+   See index_result.h for more details. */
+struct SeekableTag {};
+
+template <typename Iterator> void BasicSeekGE(DocId min_doc_id, const Iterator& end, Iterator* it);
 
 /* Used for converting field values to double. Returns std::nullopt if the conversion fails */
 std::optional<double> ParseNumericField(std::string_view value);
@@ -123,6 +132,45 @@ template <typename InlinedVector> std::optional<InlinedVector> EmptyAccessResult
 #if !defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
+}
+
+// Implementation
+/******************************************************************/
+namespace details {
+inline size_t GetHighestPowerOfTwo(size_t n) {
+  static constexpr size_t kBitsNumber = sizeof(size_t) * 8;
+  return size_t(1) << (kBitsNumber - 1 - __builtin_clzl(n));
+}
+}  // namespace details
+
+template <typename Iterator> void BasicSeekGE(DocId min_doc_id, const Iterator& end, Iterator* it) {
+  using Category = typename std::iterator_traits<Iterator>::iterator_category;
+
+  auto extract_doc_id = [](const auto& value) {
+    using T = std::decay_t<decltype(value)>;
+    if constexpr (std::is_same_v<T, DocId>) {
+      return value;
+    } else {
+      return value.first;
+    }
+  };
+
+  if constexpr (std::is_base_of_v<std::random_access_iterator_tag, Category>) {
+    size_t length = std::distance(*it, end);
+    for (size_t step = details::GetHighestPowerOfTwo(length); step > 0; step >>= 1) {
+      if (step < length) {
+        auto next_it = *it + step;
+        if (extract_doc_id(*next_it) < min_doc_id) {
+          *it = next_it;
+          length -= step;
+        }
+      }
+    }
+  }
+
+  while (*it != end && extract_doc_id(**it) < min_doc_id) {
+    ++(*it);
+  }
 }
 
 }  // namespace dfly::search

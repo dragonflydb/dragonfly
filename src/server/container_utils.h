@@ -9,7 +9,6 @@
 
 extern "C" {
 #include "redis/listpack.h"
-#include "redis/quicklist.h"
 }
 
 #include <functional>
@@ -25,9 +24,6 @@ inline bool IsContainer(const PrimeValue& pv) {
   unsigned type = pv.ObjType();
   return (type == OBJ_LIST || type == OBJ_SET || type == OBJ_ZSET);
 }
-
-// Create empty quicklistEntry
-quicklistEntry QLEntry();
 
 // Stores either:
 // - A single long long value (longval) when value = nullptr
@@ -92,8 +88,7 @@ using BlockingResultCb =
 // immediately with the first key listed in the tx arguments.
 OpResult<std::string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
                                                    BlockingResultCb cb, unsigned limit_ms,
-                                                   bool* block_flag, bool* pause_flag,
-                                                   std::string* info = nullptr);
+                                                   bool* block_flag, bool* pause_flag);
 
 };  // namespace container_utils
 

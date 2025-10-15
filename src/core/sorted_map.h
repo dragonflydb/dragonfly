@@ -13,14 +13,46 @@
 #include <variant>
 #include <vector>
 
-extern "C" {
-#include "redis/zset.h"
-}
-
 #include "core/bptree_set.h"
 #include "core/score_map.h"
 
+extern "C" {
+
+/* Struct to hold an inclusive/exclusive range spec by score comparison. */
+typedef struct {
+  double min, max;
+  int minex, maxex; /* are min or max exclusive? */
+} zrangespec;
+
+/* Struct to hold an inclusive/exclusive range spec by lexicographic comparison. */
+typedef struct {
+  sds min, max;     /* May be set to shared.(minstring|maxstring) */
+  int minex, maxex; /* are min or max exclusive? */
+} zlexrangespec;
+
+}  // extern "C"
+
+/* Input flags. */
+#define ZADD_IN_NONE 0
+#define ZADD_IN_INCR (1 << 0) /* Increment the score instead of setting it. */
+#define ZADD_IN_NX (1 << 1)   /* Don't touch elements already existing. */
+#define ZADD_IN_XX (1 << 2)   /* Only touch elements already existing. */
+#define ZADD_IN_GT (1 << 3)   /* Only update existing when new scores are higher. */
+#define ZADD_IN_LT (1 << 4)   /* Only update existing when new scores are lower. */
+
+/* Output flags. */
+#define ZADD_OUT_NOP (1 << 0)     /* Operation not performed because of conditionals.*/
+#define ZADD_OUT_NAN (1 << 1)     /* Only touch elements already existing. */
+#define ZADD_OUT_ADDED (1 << 2)   /* The element was new and was added. */
+#define ZADD_OUT_UPDATED (1 << 3) /* The element already existed, score updated. */
+
 namespace dfly {
+
+class PageUsage;
+
+// Copied from zset.h
+extern sds cmaxstring;
+extern sds cminstring;
 
 namespace detail {
 
@@ -86,7 +118,7 @@ class SortedMap {
   uint8_t* ToListPack() const;
   static SortedMap* FromListPack(PMR_NS::memory_resource* res, const uint8_t* lp);
 
-  bool DefragIfNeeded(float ratio);
+  bool DefragIfNeeded(PageUsage* page_usage);
 
  private:
   struct Query {
@@ -119,6 +151,31 @@ class SortedMap {
 // Used by CompactObject.
 unsigned char* ZzlInsert(unsigned char* zl, std::string_view ele, double score);
 unsigned char* ZzlFind(unsigned char* lp, std::string_view ele, double* score);
+
+// Used by SortedMap and ZsetFamily.
+double ZzlGetScore(const uint8_t* sptr);
+void ZzlNext(const uint8_t* zl, uint8_t** eptr, uint8_t** sptr);
+void ZzlPrev(const uint8_t* zl, uint8_t** eptr, uint8_t** sptr);
+void ZslFreeLexRange(const zlexrangespec* spec);
+uint8_t* ZzlLastInRange(uint8_t* zl, const zrangespec* range);
+uint8_t* ZzlFirstInRange(uint8_t* zl, const zrangespec* range);
+
+uint8_t* ZzlFirstInLexRange(uint8_t* zl, const zlexrangespec* range);
+uint8_t* ZzlLastInLexRange(uint8_t* zl, const zlexrangespec* range);
+
+int ZzlLexValueGteMin(uint8_t* p, const zlexrangespec* spec);
+int ZzlLexValueLteMax(uint8_t* p, const zlexrangespec* spec);
+
+uint8_t* ZzlDeleteRangeByLex(uint8_t* zl, const zlexrangespec* range, unsigned long* deleted);
+uint8_t* ZzlDeleteRangeByScore(uint8_t* zl, const zrangespec* range, unsigned long* deleted);
+
+inline int ZslValueGteMin(double value, const zrangespec* spec) {
+  return spec->minex ? (value > spec->min) : (value >= spec->min);
+}
+
+inline int ZslValueLteMax(double value, const zrangespec* spec) {
+  return spec->maxex ? (value < spec->max) : (value <= spec->max);
+}
 
 }  // namespace detail
 }  // namespace dfly

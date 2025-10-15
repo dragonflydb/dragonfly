@@ -12,6 +12,7 @@ extern "C" {
 #include "redis/util.h"  // for string2ll
 }
 
+#include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
@@ -123,14 +124,23 @@ struct StringSetWrapper {
     uint32_t count = scan_op.limit;
     long maxiterations = count * 10;
 
+    const auto start_cycles = base::CycleClock::Now();
+    // Approximately 100usec
+    const uint64_t timeout_cycles = base::CycleClock::Now() + base::CycleClock::Frequency() / 10000;
+
     do {
       auto scan_callback = [&](const sds ptr) {
         if (string_view str{ptr, sdslen(ptr)}; scan_op.Matches(str))
           res->emplace_back(str);
       };
       curs = ss->Scan(curs, scan_callback);
-    } while (curs && maxiterations-- && res->size() < count);
+    } while (curs && maxiterations-- && res->size() < count &&
+             (base::CycleClock::Now() - start_cycles) < timeout_cycles);
     return curs;
+  }
+
+  explicit operator StringSet*() const {
+    return ss;
   }
 
   StringSet* operator->() const {
@@ -265,9 +275,33 @@ void InterStrSet(const DbContext& db_context, const vector<SetType>& vec, String
   }
 }
 
+template <typename C = absl::flat_hash_set<string>>
+StringVec RandMemberStrSetPicky(StringSet* strset, size_t count) {
+  C picks;
+  picks.reserve(count);
+
+  size_t tries = 0;
+  while (picks.size() < count && tries++ < count * 2)
+    picks.insert(picks.end(), string{*strset->GetRandomMember()});
+
+  if constexpr (is_same_v<StringVec, C>)
+    return picks;
+  return StringVec{make_move_iterator(picks.begin()), make_move_iterator(picks.end())};
+}
+
 StringVec RandMemberStrSet(const DbContext& db_context, const CompactObj& co,
-                           PicksGenerator& generator, std::size_t picks_count) {
+                           PicksGenerator& generator, size_t picks_count) {
   CHECK(IsDenseEncoding(co));
+  StringSetWrapper strset{co, db_context};
+
+  // If the set is small, extract entries with StringSet::GetRandomMember
+  if (picks_count * 5 < strset->UpperBoundSize()) {
+    StringSet* ss(strset);
+    if (bool unique = (dynamic_cast<UniquePicksGenerator*>(&generator) != nullptr); unique)
+      return RandMemberStrSetPicky(ss, picks_count);
+    else
+      return RandMemberStrSetPicky<StringVec>(ss, picks_count);
+  }
 
   std::unordered_map<RandomPick, std::uint32_t> times_index_is_picked;
   for (std::size_t i = 0; i < picks_count; i++) {
@@ -278,7 +312,7 @@ StringVec RandMemberStrSet(const DbContext& db_context, const CompactObj& co,
   result.reserve(picks_count);
 
   std::uint32_t ss_entry_index = 0;
-  for (string_view str : StringSetWrapper{co, db_context}.Range()) {
+  for (string_view str : strset.Range()) {
     auto it = times_index_is_picked.find(ss_entry_index++);
     if (it != times_index_is_picked.end()) {
       while (it->second--)
@@ -385,22 +419,27 @@ OpResult<SvArray> InterResultVec(const ResultStringVec& result_vec, unsigned req
       return OpStatus::OK;  // empty set.
   }
 
-  bool first = true;
+  std::vector<const StringVec*> sorted_vec;
   for (const auto& res : result_vec) {
     if (res.status() == OpStatus::SKIPPED)
       continue;
-
     DCHECK(res);  // we handled it above.
+    sorted_vec.push_back(&res.value());
+  }
 
-    // I use this awkward 'first' condition instead of table[s]++ deliberately.
-    // I do not want to add keys that I know will not stay in the set.
-    if (first) {
-      for (const string& s : res.value()) {
-        uniques.emplace(s, 1);
-      }
-      first = false;
-    } else {
-      for (const string& s : res.value()) {
+  // Sort the per shard-sorted sets
+  if (!sorted_vec.empty()) {
+    std::sort(sorted_vec.begin(), sorted_vec.end(),
+              [](const auto* lhs, const auto* rhs) { return lhs->size() < rhs->size(); });
+
+    for (const string& s : *sorted_vec[0]) {
+      uniques.emplace(s, 1);
+    }
+    // Remove the smallest
+    sorted_vec.erase(sorted_vec.begin());
+
+    for (const auto& res : sorted_vec) {
+      for (const string& s : *res) {
         auto it = uniques.find(s);
         if (it != uniques.end()) {
           ++it->second;
@@ -442,14 +481,14 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   // to overwrite the key. However, if the set is empty it means we should delete the
   // key if it exists.
   if (overwrite && (vals_it.begin() == vals_it.end())) {
-    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
-    if (IsValid(it)) {
-      db_slice.Del(op_args.db_cntx, it);
+    auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SET);
+    if (res_it) {
+      db_slice.DelMutable(op_args.db_cntx, std::move(*res_it));
       if (journal_update && op_args.shard->journal()) {
         RecordJournal(op_args, "DEL"sv, ArgSlice{key});
       }
     }
-    return 0;
+    return OpStatus::OK;
   }
 
   // We can use std::nullopt here because we check the type later.
@@ -467,6 +506,12 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   }
 
   if (add_res.is_new || overwrite) {
+    // If we're overwriting an existing key (not a new one), we need to remove it from
+    // search indexes first. This prevents crashes when the key is indexed (e.g., HASH or JSON).
+    if (!add_res.is_new && overwrite) {
+      RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, co, op_args.shard);
+    }
+
     // does not store the values, merely sets the encoding.
     // TODO: why not store the values as well?
     InitSet(vals, &co);
@@ -505,6 +550,8 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
     res = StringSetWrapper{co, op_args.db_cntx}.Add(vals, UINT32_MAX, false);
   }
 
+  // TODO: consider optimization to record real command if the replica is in stable_sync state
+  // and there is no slot migration process going on.
   if (journal_update && op_args.shard->journal()) {
     if (overwrite) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{key});
@@ -885,8 +932,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     });
 
     // Delete the set as it is now empty
-    find_res->post_updater.Run();
-    db_slice.Del(op_args.db_cntx, find_res->it);
+    db_slice.DelMutable(op_args.db_cntx, std::move(*find_res));
 
     // Replicate as DEL.
     if (op_args.shard->journal()) {
@@ -924,8 +970,10 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cur
                            const ScanOpts& scan_op) {
   auto find_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_SET);
 
-  if (!find_res)
+  if (!find_res) {
+    *cursor = 0;
     return find_res.status();
+  }
 
   auto it = find_res.value();
   StringVec res;
@@ -1222,8 +1270,8 @@ void SRandMember(CmdArgList args, const CommandContext& cmd_cntx) {
   if (parser.HasNext())
     return cmd_cntx.rb->SendError(WrongNumArgsError("SRANDMEMBER"));
 
-  if (auto err = parser.Error(); err)
-    return cmd_cntx.rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return cmd_cntx.rb->SendError(err.MakeReply());
 
   const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
     return OpRandMember(t->GetOpArgs(shard), key, count);
@@ -1430,8 +1478,8 @@ void SAddEx(CmdArgList args, const CommandContext& cmd_cntx) {
   const bool keepttl = parser.Check("KEEPTTL");
   const uint32_t ttl_sec = parser.Next<uint32_t>();
 
-  if (auto err = parser.Error(); err) {
-    return cmd_cntx.rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx.rb->SendError(err.MakeReply());
   }
   constexpr uint32_t kMaxTtl = (1UL << 26);
   if (ttl_sec == 0 || ttl_sec > kMaxTtl) {
@@ -1480,53 +1528,29 @@ using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&x)
 
-namespace acl {
-constexpr uint32_t kSAdd = WRITE | SET | FAST;
-constexpr uint32_t kSDiff = READ | SET | SLOW;
-constexpr uint32_t kSDiffStore = WRITE | SET | SLOW;
-constexpr uint32_t kSInter = READ | SET | SLOW;
-constexpr uint32_t kSInterStore = WRITE | SET | SLOW;
-constexpr uint32_t kSInterCard = READ | SET | SLOW;
-constexpr uint32_t kSMembers = READ | SET | SLOW;
-constexpr uint32_t kSIsMember = READ | SET | SLOW;
-constexpr uint32_t kSMIsMember = READ | SET | FAST;
-constexpr uint32_t kSMove = WRITE | SET | FAST;
-constexpr uint32_t kSRem = WRITE | SET | FAST;
-constexpr uint32_t kSCard = READ | SET | FAST;
-constexpr uint32_t kSPop = WRITE | SET | SLOW;
-constexpr uint32_t kSRandMember = READ | SET | SLOW;
-constexpr uint32_t kSUnion = READ | SET | SLOW;
-constexpr uint32_t kSUnionStore = WRITE | SET | SLOW;
-constexpr uint32_t kSScan = READ | SET | SLOW;
-}  // namespace acl
-
 void SetFamily::Register(CommandRegistry* registry) {
-  registry->StartFamily();
-  *registry
-      << CI{"SADD", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kSAdd}.HFUNC(SAdd)
-      << CI{"SDIFF", CO::READONLY, -2, 1, -1, acl::kSDiff}.HFUNC(SDiff)
-      << CI{"SDIFFSTORE", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1, acl::kSDiffStore}
-             .HFUNC(SDiffStore)
-      << CI{"SINTER", CO::READONLY, -2, 1, -1, acl::kSInter}.HFUNC(SInter)
-      << CI{"SINTERSTORE",    CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1,
-            acl::kSInterStore}
-             .HFUNC(SInterStore)
-      << CI{"SINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kSInterCard}.HFUNC(
-             SInterCard)
-      << CI{"SMEMBERS", CO::READONLY, 2, 1, 1, acl::kSMembers}.HFUNC(SMembers)
-      << CI{"SISMEMBER", CO::FAST | CO::READONLY, 3, 1, 1, acl::kSIsMember}.HFUNC(SIsMember)
-      << CI{"SMISMEMBER", CO::READONLY, -3, 1, 1, acl::kSMIsMember}.HFUNC(SMIsMember)
-      << CI{"SMOVE", CO::FAST | CO::WRITE | CO::NO_AUTOJOURNAL, 4, 1, 2, acl::kSMove}.HFUNC(SMove)
-      << CI{"SREM", CO::WRITE | CO::FAST, -3, 1, 1, acl::kSRem}.HFUNC(SRem)
-      << CI{"SCARD", CO::READONLY | CO::FAST, 2, 1, 1, acl::kSCard}.HFUNC(SCard)
-      << CI{"SPOP", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1, acl::kSPop}.HFUNC(SPop)
-      << CI{"SRANDMEMBER", CO::READONLY, -2, 1, 1, acl::kSRandMember}.HFUNC(SRandMember)
-      << CI{"SUNION", CO::READONLY, -2, 1, -1, acl::kSUnion}.HFUNC(SUnion)
-      << CI{"SUNIONSTORE",    CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1,
-            acl::kSUnionStore}
-             .HFUNC(SUnionStore)
-      << CI{"SSCAN", CO::READONLY, -3, 1, 1, acl::kSScan}.HFUNC(SScan)
-      << CI{"SADDEX", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kSAdd}.HFUNC(SAddEx);
+  registry->StartFamily(acl::SET);
+  *registry << CI{"SADD", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(SAdd)
+            << CI{"SDIFF", CO::READONLY, -2, 1, -1}.HFUNC(SDiff)
+            << CI{"SDIFFSTORE", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1}.HFUNC(
+                   SDiffStore)
+            << CI{"SINTER", CO::READONLY, -2, 1, -1}.HFUNC(SInter)
+            << CI{"SINTERSTORE", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1}.HFUNC(
+                   SInterStore)
+            << CI{"SINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(SInterCard)
+            << CI{"SMEMBERS", CO::READONLY, 2, 1, 1}.HFUNC(SMembers)
+            << CI{"SISMEMBER", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(SIsMember)
+            << CI{"SMISMEMBER", CO::FAST | CO::READONLY, -3, 1, 1}.HFUNC(SMIsMember)
+            << CI{"SMOVE", CO::FAST | CO::WRITE | CO::NO_AUTOJOURNAL, 4, 1, 2}.HFUNC(SMove)
+            << CI{"SREM", CO::WRITE | CO::FAST, -3, 1, 1}.HFUNC(SRem)
+            << CI{"SCARD", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(SCard)
+            << CI{"SPOP", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(SPop)
+            << CI{"SRANDMEMBER", CO::READONLY, -2, 1, 1}.HFUNC(SRandMember)
+            << CI{"SUNION", CO::READONLY, -2, 1, -1}.HFUNC(SUnion)
+            << CI{"SUNIONSTORE", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1}.HFUNC(
+                   SUnionStore)
+            << CI{"SSCAN", CO::READONLY, -3, 1, 1}.HFUNC(SScan)
+            << CI{"SADDEX", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(SAddEx);
 }
 
 uint32_t SetFamily::MaxIntsetEntries() {

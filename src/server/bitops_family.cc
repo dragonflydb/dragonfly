@@ -5,9 +5,9 @@
 #include "server/bitops_family.h"
 
 #include <bitset>
+#include <nonstd/expected.hpp>
 
 #include "absl/strings/match.h"
-#include "base/expected.hpp"
 #include "base/logging.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
@@ -339,7 +339,7 @@ void ElementAccess::Commit(string_view new_value) const {
       }
       context_.GetDbSlice(shard_->shard_id()).Del(context_, element_iter_);
     } else {
-      element_iter_->second.SetString(new_value);
+      element_iter_->second.SetValue(new_value);
       post_updater_.Run();
     }
   }
@@ -564,17 +564,21 @@ void BitCount(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser(args);
   auto key = parser.Next<string_view>();
 
-  auto [start, end] = parser.HasNext()
-                          ? parser.Next<int64_t, int64_t>()
-                          : std::pair<int64_t, int64_t>{0, std::numeric_limits<int64_t>::max()};
+  std::pair<int64_t, int64_t> start_end;
+  if (parser.HasNext()) {
+    auto tuple_result = parser.Next<int64_t, int64_t>();
+    start_end = std::make_pair(std::get<0>(tuple_result), std::get<1>(tuple_result));
+  } else {
+    start_end = std::make_pair(0, std::numeric_limits<int64_t>::max());
+  }
 
   bool as_bit = parser.HasNext() ? parser.MapNext("BYTE", false, "BIT", true) : false;
   auto* builder = cmd_cntx.rb;
   if (!parser.Finalize()) {
-    return builder->SendError(parser.Error()->MakeReply());
+    return builder->SendError(parser.TakeError().MakeReply());
   }
-  auto cb = [&, &start = start, &end = end](Transaction* t, EngineShard* shard) {
-    return CountBitsForValue(t->GetOpArgs(shard), key, start, end, as_bit);
+  auto cb = [&, start_end](Transaction* t, EngineShard* shard) {
+    return CountBitsForValue(t->GetOpArgs(shard), key, start_end.first, start_end.second, as_bit);
   };
   OpResult<std::size_t> res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   HandleOpValueResult(res, builder);
@@ -1028,27 +1032,25 @@ nonstd::expected<CommandList, string> ParseToCommandList(CmdArgList args, bool r
   while (parser.HasNext()) {
     auto cmd = parser.MapNext("OVERFLOW", Cmds::OVERFLOW_OPT, "GET", Cmds::GET_OPT, "SET",
                               Cmds::SET_OPT, "INCRBY", Cmds::INCRBY_OPT);
-    if (parser.Error()) {
+    if (parser.TakeError()) {
       return make_unexpected(kSyntaxErr);
     }
 
     if (cmd == Cmds::OVERFLOW_OPT) {
-      if (read_only) {
-        make_unexpected("BITFIELD_RO only supports the GET subcommand");
-      }
+      // BITFIELD_RO shouldn't support this cmd, but it is ignored in Valkey so we ignore it too
       using pol = Overflow::Policy;
       auto res = parser.MapNext("SAT", pol::SAT, "WRAP", pol::WRAP, "FAIL", pol::FAIL);
       if (!parser.HasError()) {
         result.push_back(Overflow{res});
         continue;
       }
-      parser.Error();
+      parser.TakeError();
       return make_unexpected(kSyntaxErr);
     }
 
     auto maybe_attr = ParseCommonAttr(&parser);
     if (!maybe_attr.has_value()) {
-      parser.Error();
+      parser.TakeError();
       return make_unexpected(std::move(maybe_attr.error()));
     }
 
@@ -1063,7 +1065,7 @@ nonstd::expected<CommandList, string> ParseToCommandList(CmdArgList args, bool r
     }
 
     int64_t value = parser.Next<int64_t>();
-    if (parser.Error()) {
+    if (parser.TakeError()) {
       return make_unexpected(kSyntaxErr);
     }
     if (cmd == Cmds::SET_OPT) {
@@ -1075,7 +1077,7 @@ nonstd::expected<CommandList, string> ParseToCommandList(CmdArgList args, bool r
       result.push_back(Command(IncrBy(attr, value)));
       continue;
     }
-    parser.Error();
+    parser.TakeError();
     return make_unexpected(kSyntaxErr);
   }
 
@@ -1086,7 +1088,7 @@ void SendResults(const vector<ResultType>& results, SinkReplyBuilder* builder) {
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   const size_t total = results.size();
   if (total == 0) {
-    rb->SendNullArray();
+    rb->SendEmptyArray();
     return;
   }
 
@@ -1102,7 +1104,7 @@ void SendResults(const vector<ResultType>& results, SinkReplyBuilder* builder) {
 void BitFieldGeneric(CmdArgList args, bool read_only, Transaction* tx, SinkReplyBuilder* builder) {
   if (args.size() == 1) {
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    rb->SendNullArray();
+    rb->SendEmptyArray();
     return;
   }
   auto key = ArgS(args, 0);
@@ -1239,8 +1241,8 @@ void SetBit(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser(args);
   auto [key, offset, value] = parser.Next<string_view, uint32_t, FInt<0, 1>>();
 
-  if (auto err = parser.Error(); err) {
-    return cmd_cntx.rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx.rb->SendError(err.MakeReply());
   }
 
   auto cb = [&, &key = key, &offset = offset, &value = value](Transaction* t, EngineShard* shard) {
@@ -1394,8 +1396,8 @@ void BitOpsFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
   *registry << CI{"BITPOS", CO::CommandOpt::READONLY, -3, 1, 1, acl::kBitPos}.SetHandler(&BitPos)
             << CI{"BITCOUNT", CO::READONLY, -2, 1, 1, acl::kBitCount}.SetHandler(&BitCount)
-            << CI{"BITFIELD", CO::WRITE, -3, 1, 1, acl::kBitField}.SetHandler(&BitField)
-            << CI{"BITFIELD_RO", CO::READONLY, -5, 1, 1, acl::kBitFieldRo}.SetHandler(&BitFieldRo)
+            << CI{"BITFIELD", CO::WRITE, -2, 1, 1, acl::kBitField}.SetHandler(&BitField)
+            << CI{"BITFIELD_RO", CO::READONLY, -2, 1, 1, acl::kBitFieldRo}.SetHandler(&BitFieldRo)
             << CI{"BITOP", CO::WRITE | CO::NO_AUTOJOURNAL, -4, 2, -1, acl::kBitOp}.SetHandler(
                    &BitOp)
             << CI{"GETBIT", CO::READONLY | CO::FAST, 3, 1, 1, acl::kGetBit}.SetHandler(&GetBit)

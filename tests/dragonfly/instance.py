@@ -126,6 +126,8 @@ class DflyInstance:
                 self.args["num_shards"] = threads - 1
 
     def __del__(self):
+        if self.proc:
+            self.stop()
         assert self.proc == None
 
     def client(self, *args, **kwargs) -> RedisClient:
@@ -417,15 +419,15 @@ class DflyInstanceFactory:
         args.setdefault("noversion_check", None)
         # MacOs does not set it automatically, so we need to set it manually
         args.setdefault("maxmemory", "8G")
-        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,proactor_pool=1,dflycmd=1,snapshot=1,streamer=1"
+        vmod = "dragonfly_connection=1,db_slice=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,engine_shard=1,dflycmd=1,snapshot=1,streamer=1"
         args.setdefault("vmodule", vmod)
         args.setdefault("jsonpathv2")
         if version > 1.27:
             args.setdefault("omit_basic_usage")
 
-        # If path is not set, we assume that we are running the latest dragonfly.
-        if not path:
-            args.setdefault("list_experimental_v2")
+        if version > 1.31:
+            args.setdefault("latency_tracking")
+
         args.setdefault("log_dir", self.params.log_dir)
 
         if version >= 1.21 and "serialization_max_chunk_size" not in args:
@@ -461,7 +463,11 @@ class DflyInstanceFactory:
         """Stop all launched instances."""
         exceptions = []  # To collect exceptions
         for instance in self.instances:
-            await instance.close_clients()
+            try:  # ioloop might be no longer running
+                await instance.close_clients()
+            except Exception as e:
+                pass
+
             try:
                 instance.stop()
             except Exception as e:

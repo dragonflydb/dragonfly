@@ -45,7 +45,8 @@ class RdbSnapshot {
       : snapshot_storage_{snapshot_storage} {
   }
 
-  GenericError Start(SaveMode save_mode, const string& path, const RdbSaver::GlobalData& glob_data);
+  GenericError Start(SaveMode save_mode, const string& path, const RdbSaver::GlobalData& glob_data,
+                     const std::string& snapshot_id);
   void StartInShard(EngineShard* shard);
 
   error_code SaveBody();
@@ -84,15 +85,15 @@ struct SaveStagesController : public SaveStagesInputs {
   // in a mutually exlusive context to avoid data races.
   // Also call this function before any call to `WaitAllSnapshots`
   // Returns empty optional on success and SaveInfo on failure
-  std::optional<SaveInfo> InitResourcesAndStart();
+  std::optional<SaveInfo> Init();
+  void Start();
 
   ~SaveStagesController();
 
   // Safe to call and no locks required
   void WaitAllSnapshots();
 
-  // Same semantics as InitResourcesAndStart. Must be used in a mutually exclusive
-  // context. Call this function after you `WaitAllSnapshots`to finalize the chore.
+  // Call this function after you `WaitAllSnapshots`to finalize the chore.
   // Performs cleanup of the object internally.
   SaveInfo Finalize();
   size_t GetSaveBuffersSize();
@@ -109,7 +110,7 @@ struct SaveStagesController : public SaveStagesInputs {
   void SaveDfs();
 
   // Start saving a dfs file on shard
-  void SaveDfsSingle(EngineShard* shard);
+  void SaveDfsSingle(EngineShard* shard, const std::string& snapshot_id);
   void SaveSnashot(EngineShard* shard);
   void WaitSnapshotInShard(EngineShard* shard);
 
@@ -117,8 +118,6 @@ struct SaveStagesController : public SaveStagesInputs {
   void SaveRdb();
 
   SaveInfo GetSaveInfo();
-
-  void InitResources();
 
   // Remove .tmp extension or delete files in case of error
   GenericError FinalizeFileMovement();

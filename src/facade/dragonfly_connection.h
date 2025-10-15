@@ -5,7 +5,6 @@
 #pragma once
 
 #include <absl/container/fixed_array.h>
-#include <mimalloc.h>
 #include <sys/socket.h>
 
 #include <deque>
@@ -24,7 +23,6 @@
 #include "util/http/http_handler.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
-typedef struct mi_heap_s mi_heap_t;
 
 // need to declare for older linux distributions like CentOS 7
 #ifndef SO_INCOMING_CPU
@@ -72,10 +70,13 @@ class Connection : public util::Connection {
 
   // PubSub message, either incoming message for active subscription or reply for new subscription.
   struct PubMessage {
-    std::string pattern{};              // non-empty for pattern subscriber
+    std::string pattern;                // non-empty for pattern subscriber
     std::shared_ptr<char[]> buf;        // stores channel name and message
     std::string_view channel, message;  // channel and message parts from buf
-    bool should_unsubscribe = false;    // unsubscribe from channel after sending the message
+    bool is_sharded = false;
+
+    // Unsubscribe simultaneously when sending unsubscribe message. Used for cluster migrations
+    bool force_unsubscribe = false;
   };
 
   // Pipeline message, accumulated Redis command to be executed.
@@ -91,7 +92,7 @@ class Connection : public util::Connection {
 
     // mi_stl_allocator uses mi heap internally.
     // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
-    using StorageType = absl::InlinedVector<char, kReqStorageSize, mi_stl_allocator<char>>;
+    using StorageType = absl::InlinedVector<char, kReqStorageSize>;
 
     absl::InlinedVector<std::string_view, 6> args;
     StorageType storage;
@@ -132,14 +133,9 @@ class Connection : public util::Connection {
     bool invalidate_due_to_flush = false;
   };
 
-  struct MessageDeleter {
-    void operator()(PipelineMessage* msg) const;
-    void operator()(PubMessage* msg) const;
-  };
-
   // Requests are allocated on the mimalloc heap and thus require a custom deleter.
-  using PipelineMessagePtr = std::unique_ptr<PipelineMessage, MessageDeleter>;
-  using PubMessagePtr = std::unique_ptr<PubMessage, MessageDeleter>;
+  using PipelineMessagePtr = std::unique_ptr<PipelineMessage>;
+  using PubMessagePtr = std::unique_ptr<PubMessage>;
 
   using MCPipelineMessagePtr = std::unique_ptr<MCPipelineMessage>;
   using AclUpdateMessagePtr = std::unique_ptr<AclUpdateMessage>;
@@ -176,22 +172,23 @@ class Connection : public util::Connection {
         handle;
 
     // time when the message was dispatched to the dispatch queue as reported by
-    // ProactorBase::GetMonotonicTimeNs()
-    uint64_t dispatch_ts = 0;
+    // CycleClock::Now()
+    uint64_t dispatch_cycle = 0;
   };
 
   static_assert(sizeof(MessageHandle) <= 80,
                 "Big structs should use indirection to avoid wasting deque space!");
 
-  enum Phase { SETUP, READ_SOCKET, PROCESS, SHUTTING_DOWN, PRECLOSE, NUM_PHASES };
+  enum Phase : uint8_t { SETUP, READ_SOCKET, PROCESS, SHUTTING_DOWN, PRECLOSE, NUM_PHASES };
 
   // Weak reference to a connection, invalidated upon connection close.
   // Used to dispatch async operations for the connection without worrying about pointer lifetime.
   struct WeakRef {
    public:
     // Get residing thread of connection. Thread-safe.
-    unsigned Thread() const;
-
+    unsigned LastKnownThreadId() const {
+      return last_known_thread_id_;
+    }
     // Get pointer to connection if still valid, nullptr if expired.
     // Can only be called from connection's thread. Validity is guaranteed
     // only until the next suspension point.
@@ -203,16 +200,16 @@ class Connection : public util::Connection {
     // Returns client id.Thread-safe.
     uint32_t GetClientId() const;
 
-    bool operator<(const WeakRef& other);
+    bool operator<(const WeakRef& other) const;
     bool operator==(const WeakRef& other) const;
 
    private:
     friend class Connection;
 
-    WeakRef(std::shared_ptr<Connection> ptr, unsigned thread_id, uint32_t client_id);
+    WeakRef(const std::shared_ptr<Connection>& ptr, unsigned thread_id, uint32_t client_id);
 
     std::weak_ptr<Connection> ptr_;
-    unsigned thread_id_;
+    unsigned last_known_thread_id_;
     uint32_t client_id_;
   };
 
@@ -238,7 +235,7 @@ class Connection : public util::Connection {
   void RegisterBreakHook(BreakerCb breaker_cb);
 
   // Manually shutdown self.
-  void ShutdownSelf();
+  void ShutdownSelfBlocking();
 
   // Migrate this connecton to a different thread.
   // Return true if Migrate succeeded
@@ -295,8 +292,9 @@ class Connection : public util::Connection {
   ConnectionContext* cntx();
 
   // Requests that at some point, this connection will be migrated to `dest` thread.
-  // Connections will migrate at most once, and only when the flag --migrate_connections is true.
-  void RequestAsyncMigration(util::fb2::ProactorBase* dest);
+  // If force is false, the connection will migrate at most once,
+  // and only when the flag --migrate_connections is true.
+  void RequestAsyncMigration(util::fb2::ProactorBase* dest, bool force);
 
   // Starts traffic logging in the calling thread. Must be a proactor thread.
   // Each thread creates its own log file combining requests from all the connections in
@@ -311,12 +309,12 @@ class Connection : public util::Connection {
 
   bool IsHttp() const;
 
-  // Sets max queue length locally in the calling thread.
-  static void SetMaxQueueLenThreadLocal(unsigned tid, uint32_t val);
-  static void SetPipelineBufferLimit(unsigned tid, size_t val);
-  static void GetRequestSizeHistogramThreadLocal(std::string* hist);
+  static void UpdateFromFlags();                          // Set values from flags
+  static std::vector<std::string> GetMutableFlagNames();  // Triggers UpdateFromFlags
+
   static void TrackRequestSize(bool enable);
   static void EnsureMemoryBudget(unsigned tid);
+  static void GetRequestSizeHistogramThreadLocal(std::string* hist);
 
   unsigned idle_time() const {
     return time(nullptr) - last_interaction_;
@@ -338,7 +336,7 @@ class Connection : public util::Connection {
   std::unique_ptr<ConnectionContext> cc_;  // Null for http connections
 
  private:
-  enum ParserStatus { OK, NEED_MORE, ERROR };
+  enum ParserStatus : uint8_t { OK, NEED_MORE, ERROR };
 
   struct AsyncOperations;
 
@@ -370,7 +368,7 @@ class Connection : public util::Connection {
   void RecycleMessage(MessageHandle msg);
 
   // Create new pipeline request, re-use from pool when possible.
-  PipelineMessagePtr FromArgs(RespVec args, mi_heap_t* heap);
+  PipelineMessagePtr FromArgs(const RespVec& args);
 
   ParserStatus ParseRedis(unsigned max_busy_cycles);
   ParserStatus ParseMemcache();
@@ -427,6 +425,8 @@ class Connection : public util::Connection {
   void IncrNumConns();
   void DecrNumConns();
 
+  bool IsReplySizeOverLimit() const;
+
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
   util::fb2::Fiber async_fb_;             // async fiber (if started)
@@ -444,6 +444,14 @@ class Connection : public util::Connection {
 
   uint32_t id_;
   Protocol protocol_;
+  Phase phase_ = SETUP;
+
+  struct {
+    size_t read_cnt = 0;                // total number of read calls
+    size_t net_bytes_in = 0;            // total number of bytes read
+    size_t dispatch_entries_added = 0;  // total number of dispatch queue entries
+    size_t cmds = 0;                    // total number of commands executed
+  } local_stats_;
   ConnectionStats* stats_ = nullptr;
 
   std::unique_ptr<SinkReplyBuilder> reply_builder_;
@@ -453,7 +461,6 @@ class Connection : public util::Connection {
   ServiceInterface* service_;
 
   time_t creation_time_, last_interaction_;
-  Phase phase_ = SETUP;
   std::string name_;
 
   std::string lib_name_;
@@ -495,6 +502,8 @@ class Connection : public util::Connection {
       bool is_main_ : 1;
     };
   };
+
+  bool request_shutdown_ = false;
 };
 
 }  // namespace facade

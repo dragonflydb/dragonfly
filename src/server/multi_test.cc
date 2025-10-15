@@ -69,7 +69,7 @@ TEST_F(MultiTest, MultiAndFlush) {
   resp = Run({"get", kKey1});
   ASSERT_EQ(resp, "QUEUED");
 
-  EXPECT_THAT(Run({"FLUSHALL"}), ErrArg("'FLUSHALL' inside MULTI is not allowed"));
+  EXPECT_THAT(Run({"FLUSHALL"}), ErrArg("not allowed inside a transaction"));
 }
 
 TEST_F(MultiTest, MultiWithError) {
@@ -148,6 +148,60 @@ TEST_F(MultiTest, HitMissStats) {
   auto metrics = GetMetrics();
   EXPECT_THAT(metrics.events.hits, 1);
   EXPECT_THAT(metrics.events.misses, 1);
+}
+
+TEST_F(MultiTest, PerDbHitMissStats) {
+  Run({"SELECT", "0"});
+  ASSERT_EQ(Run({"SET", "key1", "val1"}), "OK");
+  ASSERT_EQ(Run({"GET", "key1"}), "val1");
+  ASSERT_THAT(Run({"GET", "nonexistent1"}), ArgType(RespExpr::NIL));
+
+  Run({"SELECT", "1"});
+  ASSERT_EQ(Run({"SET", "key2", "val2"}), "OK");
+  ASSERT_EQ(Run({"GET", "key2"}), "val2");
+  ASSERT_THAT(Run({"GET", "nonexistent2"}), ArgType(RespExpr::NIL));
+
+  auto metrics = GetMetrics();
+
+  EXPECT_GE(metrics.db_stats.size(), 2u);
+  EXPECT_EQ(metrics.db_stats[0].events.hits, 1u);
+  EXPECT_EQ(metrics.db_stats[0].events.misses, 1u);
+  EXPECT_EQ(metrics.db_stats[1].events.hits, 1u);
+  EXPECT_EQ(metrics.db_stats[1].events.misses, 1u);
+
+  EXPECT_EQ(metrics.events.hits, 2u);
+  EXPECT_EQ(metrics.events.misses, 2u);
+}
+
+TEST_F(MultiTest, PerDbHitMissStatsReset) {
+  Run({"SELECT", "0"});
+  Run({"SET", "key1", "val1"});
+  Run({"GET", "key1"});
+  Run({"GET", "key2"});
+
+  auto before = GetMetrics();
+  ASSERT_GT(before.db_stats[0].events.hits, 0u);
+  ASSERT_GT(before.db_stats[0].events.misses, 0u);
+
+  EXPECT_EQ("OK", Run({"CONFIG", "RESETSTAT"}));
+
+  auto after = GetMetrics();
+  EXPECT_EQ(after.db_stats[0].events.hits, 0u);
+  EXPECT_EQ(after.db_stats[0].events.misses, 0u);
+}
+
+TEST_F(MultiTest, PerDbHitMissInfoOutput) {
+  Run({"SELECT", "0"});
+  Run({"SET", "testkey", "testval"});
+  Run({"GET", "testkey"});
+  Run({"GET", "missing"});
+
+  auto info_resp = Run({"INFO", "keyspace"});
+  ASSERT_TRUE(info_resp.type == RespExpr::STRING);
+  string info_str = info_resp.GetString();
+  EXPECT_THAT(info_str, HasSubstr("hits=1"));
+  EXPECT_THAT(info_str, HasSubstr("misses=1"));
+  EXPECT_THAT(info_str, HasSubstr("hit_ratio=50.00"));
 }
 
 TEST_F(MultiTest, MultiEmpty) {
@@ -509,7 +563,7 @@ TEST_F(MultiTest, Watch) {
 
   // Check watch doesn't run in multi.
   Run({"multi"});
-  ASSERT_THAT(Run({"watch", "a"}), ErrArg("'WATCH' inside MULTI is not allowed"));
+  ASSERT_THAT(Run({"watch", "a"}), ErrArg("not allowed inside a transaction"));
   Run({"discard"});
 
   // Check watch on existing key.
@@ -1221,6 +1275,24 @@ TEST_F(MultiTest, ForceAtomicityFlag) {
   // Now it doesn't work, because we force atomicity
   absl::SetFlag(&FLAGS_lua_force_atomicity_shas, {kHash});
   EXPECT_THAT(Run({"eval", kScript, "0"}), ErrArg("undeclared"));
+}
+
+TEST_F(MultiTest, StoredCmdBytesMetric) {
+  ASSERT_EQ(GetMetrics().coordinator_stats.stored_cmd_bytes, 0);
+
+  RespExpr resp = Run({"multi"});
+  ASSERT_EQ(resp, "OK");
+
+  for (auto i = 0; i < 100; ++i) {
+    ASSERT_EQ(Run({"get", kKey1}), "QUEUED");
+  }
+
+  ASSERT_GT(GetMetrics().coordinator_stats.stored_cmd_bytes, 0);
+
+  resp = Run({"exec"});
+  ASSERT_THAT(resp, ArrLen(100));
+  ASSERT_THAT(resp.GetVec(), Contains(ArgType(RespExpr::NIL)).Times(100));
+  ASSERT_EQ(GetMetrics().coordinator_stats.stored_cmd_bytes, 0);
 }
 
 }  // namespace dfly

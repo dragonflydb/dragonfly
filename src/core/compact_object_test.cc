@@ -8,14 +8,16 @@
 #include <mimalloc.h>
 #include <xxhash.h>
 
+#include <cstddef>
 #include <random>
 
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/detail/bitpacking.h"
-#include "core/flat_set.h"
 #include "core/huff_coder.h"
 #include "core/mi_memory_resource.h"
+#include "core/page_usage_stats.h"
+#include "core/string_or_view.h"
 #include "core/string_set.h"
 
 extern "C" {
@@ -61,8 +63,9 @@ std::vector<void*> AllocateForTest(int size, std::size_t allocate_size, int fact
 }
 
 bool HasUnderutilizedMemory(const std::vector<void*>& ptrs, float ratio) {
+  PageUsage page_usage{CollectPageStats::NO, ratio};
   auto it = std::find_if(ptrs.begin(), ptrs.end(), [&](auto p) {
-    int r = p && zmalloc_page_is_underutilized(p, ratio);
+    int r = p && page_usage.IsPageForObjectUnderUtilized(p);
     return r > 0;
   });
   return it != ptrs.end();
@@ -255,7 +258,7 @@ TEST_F(CompactObjectTest, WastedMemoryDontCount) {
 
 TEST_F(CompactObjectTest, NonInline) {
   string s(22, 'a');
-  CompactObj obj{s};
+  CompactObj obj{s, false};
 
   uint64_t expected_val = XXH3_64bits_withSeed(s.data(), s.size(), kSeed);
   EXPECT_EQ(18261733907982517826UL, expected_val);
@@ -263,7 +266,7 @@ TEST_F(CompactObjectTest, NonInline) {
   EXPECT_EQ(s, obj);
 
   s.assign(25, 'b');
-  obj.SetString(s);
+  obj.SetString(s, false);
   EXPECT_EQ(s, obj);
   EXPECT_EQ(s.size(), obj.Size());
 }
@@ -271,13 +274,13 @@ TEST_F(CompactObjectTest, NonInline) {
 TEST_F(CompactObjectTest, InlineAsciiEncoded) {
   string s = "key:0000000000000";
   uint64_t expected_val = XXH3_64bits_withSeed(s.data(), s.size(), kSeed);
-  CompactObj obj{s};
+  CompactObj obj{s, false};
   EXPECT_EQ(expected_val, obj.HashCode());
   EXPECT_EQ(s.size(), obj.Size());
 }
 
 TEST_F(CompactObjectTest, Int) {
-  cobj_.SetString("0");
+  cobj_.SetString("0", false);
   EXPECT_EQ(0, cobj_.TryGetInt());
   EXPECT_EQ(1, cobj_.Size());
   EXPECT_EQ(cobj_, "0");
@@ -285,7 +288,7 @@ TEST_F(CompactObjectTest, Int) {
   EXPECT_EQ(OBJ_STRING, cobj_.ObjType());
 
   cobj_.SetExpire(true);
-  cobj_.SetString("42");
+  cobj_.SetString("42", false);
   EXPECT_EQ(8181779779123079347, cobj_.HashCode());
   EXPECT_EQ(OBJ_ENCODING_INT, cobj_.Encoding());
   EXPECT_EQ(2, cobj_.Size());
@@ -295,15 +298,15 @@ TEST_F(CompactObjectTest, Int) {
 TEST_F(CompactObjectTest, MediumString) {
   string tmp(511, 'b');
 
-  cobj_.SetString(tmp);
+  cobj_.SetString(tmp, false);
   EXPECT_EQ(tmp.size(), cobj_.Size());
 
-  cobj_.SetString(tmp);
+  cobj_.SetString(tmp, false);
   EXPECT_EQ(tmp.size(), cobj_.Size());
   cobj_.Reset();
 
   tmp.assign(27463, 'c');
-  cobj_.SetString(tmp);
+  cobj_.SetString(tmp, false);
   EXPECT_EQ(27463, cobj_.Size());
 }
 
@@ -453,7 +456,7 @@ TEST_F(CompactObjectTest, JsonTypeTest) {
   std::optional<JsonType> json_option2 =
       JsonFromString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})", CompactObj::memory_resource());
 
-  cobj_.SetString(json_str);
+  cobj_.SetString(json_str, false);
   ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);  // we set this as a string
   JsonType* failed_json = cobj_.GetJson();
   ASSERT_TRUE(failed_json == nullptr);
@@ -475,7 +478,7 @@ TEST_F(CompactObjectTest, JsonTypeTest) {
   ASSERT_FALSE(json->contains("firstName"));
   std::optional<JsonType> set_array = JsonFromString("", CompactObj::memory_resource());
   // now set it to string again
-  cobj_.SetString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})");
+  cobj_.SetString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})", false);
   ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);  // we set this as a string
   failed_json = cobj_.GetJson();
   ASSERT_TRUE(failed_json == nullptr);
@@ -554,15 +557,16 @@ TEST_F(CompactObjectTest, DefragHash) {
 
   // Find a listpack that is located on a underutilized page
   uint8_t* target_lp = nullptr;
+  PageUsage page_usage{CollectPageStats::NO, 0.8};
   for (size_t i = 0; i < lps.size(); i += 10) {
-    if (zmalloc_page_is_underutilized(lps[i], 0.8))
+    if (page_usage.IsPageForObjectUnderUtilized(lps[i]))
       target_lp = lps[i];
   }
   CHECK_NE(target_lp, nullptr);
 
   // Trigger re-allocation
   cobj_.InitRobj(OBJ_HASH, kEncodingListPack, target_lp);
-  ASSERT_TRUE(cobj_.DefragIfNeeded(0.8));
+  ASSERT_TRUE(cobj_.DefragIfNeeded(&page_usage));
 
   // Check the pointer changes as the listpack needed defragmentation
   auto lp = (uint8_t*)cobj_.RObjPtr();
@@ -590,42 +594,37 @@ TEST_F(CompactObjectTest, DefragSet) {
   StringSet* s = CompactObj::AllocateMR<StringSet>();
   s->Add("str");
   cobj_.InitRobj(OBJ_SET, kEncodingStrMap2, s);
-  ASSERT_FALSE(cobj_.DefragIfNeeded(0.8));
+  PageUsage page_usage{CollectPageStats::NO, 0.8};
+  ASSERT_FALSE(cobj_.DefragIfNeeded(&page_usage));
 }
 
-TEST_F(CompactObjectTest, RawInterface) {
-  string str(50, 'a'), tmp, owned;
-  cobj_.SetString(str);
-  {
-    auto raw_blob = cobj_.GetRawString();
-    EXPECT_LT(raw_blob.view().size(), str.size());
+TEST_F(CompactObjectTest, StrEncodingAndMaterialize) {
+  for (bool ascii : {true, false}) {
+    for (size_t len : {64, 128, 256, 512, 1024}) {
+      string test_str(len, 'a');
+      for (size_t i = 0; i < len; i++)
+        test_str[i] = char('a' + (i % 10));
+      if (!ascii)
+        test_str.push_back(char(200));  // non-ascii
 
-    raw_blob.MakeOwned();
-    cobj_.SetExternal(0, 10);  // dummy external pointer
-    cobj_.Materialize(raw_blob.view(), true);
+      CompactObj obj;
+      obj.SetString(test_str, false);
 
-    EXPECT_EQ(str, cobj_.GetSlice(&tmp));
-  }
+      // Test StrEncoding helper
+      string raw_str = obj.GetRawString().Take();
+      CompactObj::StrEncoding enc = obj.GetStrEncoding();
+      EXPECT_EQ(test_str, enc.Decode(raw_str).Take());
 
-  str.assign(50, char(200));  // non ascii
-  cobj_.SetString(str);
-  ASSERT_EQ(str, cobj_.GetSlice(&tmp));
-
-  {
-    auto raw_blob = cobj_.GetRawString();
-
-    EXPECT_EQ(raw_blob.view(), str);
-
-    raw_blob.MakeOwned();
-    cobj_.SetExternal(0, 10);  // dummy external pointer
-    cobj_.Materialize(raw_blob.view(), true);
-
-    EXPECT_EQ(str, cobj_.GetSlice(&tmp));
+      // Test Materialize
+      obj.SetExternal(0, 0);  // dummy values
+      obj.Materialize(raw_str, true);
+      EXPECT_EQ(test_str, obj.ToString());
+    }
   }
 }
 
 TEST_F(CompactObjectTest, AsanTriggerReadOverflow) {
-  cobj_.SetString(string(32, 'a'));
+  cobj_.SetString(string(32, 'a'), false);
   auto dest = make_unique<char[]>(32);
   cobj_.GetString(dest.get());
 }
@@ -658,27 +657,33 @@ TEST_F(CompactObjectTest, lpGetInteger) {
   lpFree(lp);
 }
 
-TEST_F(CompactObjectTest, HuffMan) {
+static void BuildEncoderAB(HuffmanEncoder* encoder) {
   array<unsigned, 256> hist;
   hist.fill(1);
   hist['a'] = 100;
   hist['b'] = 50;
-  HuffmanEncoder encoder;
-  ASSERT_TRUE(encoder.Build(hist.data(), hist.size() - 1, nullptr));
-  string bindata = encoder.Export();
-  ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_KEYS, bindata));
-  for (unsigned i = 30; i < 2048; i += 10) {
-    string data(i, 'a');
-    cobj_.SetString(data);
-    bool malloc_used = i >= 60;
-    ASSERT_EQ(malloc_used, cobj_.MallocUsed() > 0) << i;
-    ASSERT_EQ(data.size(), cobj_.Size());
-    ASSERT_EQ(CompactObj::HashCode(data), cobj_.HashCode());
+  CHECK(encoder->Build(hist.data(), hist.size() - 1, nullptr));
+}
 
-    string actual;
-    cobj_.GetString(&actual);
-    EXPECT_EQ(data, actual);
-    EXPECT_EQ(cobj_, data);
+TEST_F(CompactObjectTest, Huffman) {
+  HuffmanEncoder encoder;
+  BuildEncoderAB(&encoder);
+  string bindata = encoder.Export();
+  for (CompactObj::HuffmanDomain domain : {CompactObj::HUFF_KEYS, CompactObj::HUFF_STRING_VALUES}) {
+    ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(domain, bindata));
+    for (unsigned i = 30; i < 2048; i += 10) {
+      string data(i, 'a');
+      cobj_.SetString(data, domain == CompactObj::HUFF_KEYS);
+      bool malloc_used = i >= 60;
+      ASSERT_EQ(malloc_used, cobj_.MallocUsed() > 0) << i;
+      ASSERT_EQ(data.size(), cobj_.Size());
+      ASSERT_EQ(CompactObj::HashCode(data), cobj_.HashCode());
+
+      string actual;
+      cobj_.GetString(&actual);
+      EXPECT_EQ(data, actual);
+      EXPECT_EQ(cobj_, data);
+    }
   }
 }
 

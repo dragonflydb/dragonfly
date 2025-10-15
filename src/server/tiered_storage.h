@@ -6,16 +6,17 @@
 #include <boost/intrusive/list.hpp>
 #include <memory>
 #include <utility>
-
-#include "server/tiering/common.h"
-#include "server/tx_base.h"
-#include "util/fibers/future.h"
-#ifdef __linux__
-
-#include <absl/container/flat_hash_map.h>
+#include <vector>
 
 #include "server/common.h"
 #include "server/table.h"
+#include "server/tiering/common.h"
+#include "server/tx_base.h"
+#include "util/fibers/future.h"
+
+#ifdef __linux__
+
+#include <absl/container/flat_hash_map.h>
 
 namespace dfly {
 
@@ -30,10 +31,10 @@ class TieredStorage {
   class ShardOpManager;
 
  public:
-  const static size_t kMinValueSize = 64;
-
   // Min sizes of values taking up full page on their own
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
+
+  template <typename T> using TResult = util::fb2::Future<io::Result<T>>;
 
   explicit TieredStorage(size_t max_file_size, DbSlice* db_slice);
   ~TieredStorage();  // drop forward declared unique_ptrs
@@ -44,21 +45,19 @@ class TieredStorage {
   std::error_code Open(std::string_view path);
   void Close();
 
-  void SetMemoryLowWatermark(size_t mem_limit);
-
   // Read offloaded value. It must be of external type
-  util::fb2::Future<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);
+  TResult<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);
 
   // Read offloaded value. It must be of external type
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-            std::function<void(const std::string&)> readf);
+            std::function<void(io::Result<std::string>)> readf);
 
   // Apply modification to offloaded value, return generic result from callback.
   // Unlike immutable Reads - the modified value must be uploaded back to memory.
   // This is handled by OpManager when modf completes.
   template <typename T>
-  util::fb2::Future<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
-                              std::function<T(std::string*)> modf);
+  TResult<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                    std::function<T(std::string*)> modf);
 
   // Stash value. Sets IO_PENDING flag and unsets it on error or when finished
   // Returns true if item was scheduled for stashing.
@@ -70,11 +69,6 @@ class TieredStorage {
   // Cancel pending stash for value, must have IO_PENDING flag set
   void CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value);
 
-  // Percentage (0-1) of currently used storage_write_depth for ongoing stashes
-  float WriteDepthUsage() const;
-
-  TieredStats GetStats() const;
-
   // Run offloading loop until i/o device is loaded or all entries were traversed
   void RunOffloading(DbIndex dbid);
 
@@ -84,6 +78,16 @@ class TieredStorage {
   // Returns the primary value, and deletes the cool item as well as its offloaded storage.
   PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item);
 
+  TieredStats GetStats() const;
+
+  void UpdateFromFlags();  // Update internal values based on current flag values
+  static std::vector<std::string> GetMutableFlagNames();  // Triggers UpdateFromFlags
+
+  bool ShouldOffload() const;     // True if below tiered_offload_threshold
+  float WriteDepthUsage() const;  // Ratio (0-1) of used storage_write_depth for stashes
+
+  // How much we are above tiered_upload_threshold. Can be negative!
+  int64_t UploadBudget() const;
   size_t CoolMemoryUsage() const {
     return stats_.cool_memory_used;
   }
@@ -103,11 +107,17 @@ class TieredStorage {
 
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
-  typedef ::boost::intrusive::list<detail::TieredColdRecord> CoolQueue;
 
+  using CoolQueue = ::boost::intrusive::list<detail::TieredColdRecord>;
   CoolQueue cool_queue_;
 
-  unsigned write_depth_limit_ = 10;
+  struct {
+    size_t min_value_size;
+    bool experimental_cooling;
+    unsigned write_depth_limit;
+    float offload_threshold;
+    float upload_threshold;
+  } config_;
   struct {
     uint64_t stash_overflow_cnt = 0;
     uint64_t total_deletes = 0;
@@ -121,8 +131,6 @@ class TieredStorage {
 
 #else
 
-#include "server/common.h"
-
 class DbSlice;
 
 // This is a stub implementation for non-linux platforms.
@@ -131,10 +139,10 @@ class TieredStorage {
   class ShardOpManager;
 
  public:
-  const static size_t kMinValueSize = 64;
-
   // Min sizes of values taking up full page on their own
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
+
+  template <typename T> using TResult = util::fb2::Future<io::Result<T>>;
 
   explicit TieredStorage(size_t max_size, DbSlice* db_slice) {
   }
@@ -149,17 +157,18 @@ class TieredStorage {
   void Close() {
   }
 
-  util::fb2::Future<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value) {
+  TResult<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value) {
     return {};
   }
 
+  // Read offloaded value. It must be of external type
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-            std::function<void(const std::string&)> readf) {
+            std::function<void(io::Result<std::string>)> readf) {
   }
 
   template <typename T>
-  util::fb2::Future<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
-                              std::function<T(std::string*)> modf) {
+  TResult<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                    std::function<T(std::string*)> modf) {
     return {};
   }
 
@@ -193,6 +202,21 @@ class TieredStorage {
   }
 
   void RunOffloading(DbIndex dbid) {
+  }
+
+  void UpdateFromFlags() {
+  }
+
+  static std::vector<std::string> GetMutableFlagNames() {
+    return {};
+  }
+
+  bool ShouldOffload() const {
+    return false;
+  }
+
+  int64_t UploadBudget() const {
+    return 0;
   }
 
   PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item) {

@@ -1,0 +1,62 @@
+diff --git a/src/alloc.c b/src/alloc.c
+index 893f3094..88318d0e 100644
+--- a/src/alloc.c
++++ b/src/alloc.c
+@@ -676,22 +676,45 @@ mi_decl_restrict void* _mi_heap_malloc_guarded(mi_heap_t* heap, size_t size, boo
+ }
+ #endif
+ 
+-bool mi_heap_page_is_underutilized(mi_heap_t* heap, void* p, float ratio) mi_attr_noexcept {
+-  mi_page_t* page = _mi_ptr_page(p);   // get the page that this belongs to
++mi_page_usage_stats_t mi_heap_page_is_underutilized(mi_heap_t *heap, void *p, float ratio,
++                                                    bool return_detailed_stats) mi_attr_noexcept {
++  mi_page_t *page = _mi_ptr_page(p); // get the page that this belongs to
++  mi_heap_t *page_heap = (mi_heap_t *) (mi_atomic_load_acquire(&(page)->xheap));
++
++  if (!return_detailed_stats) {
++    mi_page_usage_stats_t result = {.flags = 0};
++    if (mi_likely(page_heap == heap && page->flags.x.in_full == 0)) {
++      if (page->prev != NULL && page->used <= (unsigned) (page->capacity * ratio))
++        result.flags = MI_DFLY_PAGE_BELOW_THRESHOLD;
++    }
++    return result;
++  }
++
++  mi_page_usage_stats_t result = {
++    .page_address = (uintptr_t) page,
++    .block_size = page->block_size,
++    .capacity = page->capacity,
++    .reserved = page->reserved,
++    .used = page->used,
++    .flags = 0,
++  };
+
+-  mi_heap_t* page_heap = (mi_heap_t*)(mi_atomic_load_acquire(&(page)->xheap));
++  if (page->flags.x.in_full == 1) {
++    result.flags |= MI_DFLY_PAGE_FULL;
++  }
++
++  if (page_heap != heap) {
++    result.flags |= MI_DFLY_HEAP_MISMATCH;
++  }
+
+-  // the heap id matches and it is not a full page
+-  if (mi_likely(page_heap == heap && page->flags.x.in_full == 0)) {
+-    // first in the list, meaning it's the head of page queue, thus being used for malloc
+-    if (page->prev == NULL)
+-      return false;
++  if (page->prev == NULL) {
++    result.flags |= MI_DFLY_PAGE_USED_FOR_MALLOC;
++  }
+
+-    // this page belong to this heap and is not first in the page queue. Lets check its
+-    // utilization.
+-    return page->used <= (unsigned)(page->capacity * ratio);
++  if (result.flags == 0 && result.used <= (unsigned) (result.capacity * ratio)) {
++    result.flags = MI_DFLY_PAGE_BELOW_THRESHOLD;
+   }
+-  return false;
++  return result;
+ }
+ 
+ // ------------------------------------------------------

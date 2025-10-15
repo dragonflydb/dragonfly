@@ -100,7 +100,8 @@ GenericError ValidateFilename(const fs::path& filename, bool new_version) {
 }
 
 GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
-                                const RdbSaver::GlobalData& glob_data) {
+                                const RdbSaver::GlobalData& glob_data,
+                                const std::string& snapshot_id) {
   VLOG(1) << "Saving RDB " << path;
 
   CHECK_NOTNULL(snapshot_storage_);
@@ -114,7 +115,7 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
 
   is_linux_file_ = file_type & FileType::IO_URING;
   bool align_writes = (file_type & FileType::DIRECT) != 0;
-  saver_.reset(new RdbSaver(io_sink_.get(), save_mode, align_writes));
+  saver_.reset(new RdbSaver(io_sink_.get(), save_mode, align_writes, snapshot_id));
 
   return saver_->SaveHeader(std::move(glob_data));
 }
@@ -170,22 +171,31 @@ SaveStagesController::SaveStagesController(SaveStagesInputs&& inputs)
 }
 
 SaveStagesController::~SaveStagesController() {
+  if (!snapshots_.empty() && snapshots_[0].first) {
+    LOG(INFO) << "Forcefully closing save controller";
+    WaitAllSnapshots();
+    Finalize();
+  }
 }
 
-std::optional<SaveInfo> SaveStagesController::InitResourcesAndStart() {
+std::optional<SaveInfo> SaveStagesController::Init() {
   if (auto err = BuildFullPath(); err) {
     shared_err_ = err;
     return GetSaveInfo();
   }
 
-  InitResources();
+  snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
+  for (auto& [snapshot, _] : snapshots_)
+    snapshot = make_unique<RdbSnapshot>(fq_threadpool_, snapshot_storage_.get());
 
+  return {};
+}
+
+void SaveStagesController::Start() {
   if (use_dfs_format_)
     SaveDfs();
   else
     SaveRdb();
-
-  return {};
 }
 
 void SaveStagesController::WaitAllSnapshots() {
@@ -216,7 +226,7 @@ size_t SaveStagesController::GetSaveBuffersSize() {
     }
   };
 
-  if (snapshots_.size() > 0) {
+  if (!snapshots_.empty()) {
     if (use_dfs_format_) {
       shard_set->RunBriefInParallel([&](EngineShard* es) { add_snapshot_bytes(es->shard_id()); });
 
@@ -231,13 +241,13 @@ size_t SaveStagesController::GetSaveBuffersSize() {
 }
 
 RdbSaver::SnapshotStats SaveStagesController::GetCurrentSnapshotProgress() const {
-  if (snapshots_.size() == 0) {
+  if (snapshots_.empty()) {
     return {0, 0};
   }
 
   std::vector<RdbSaver::SnapshotStats> results(snapshots_.size());
   auto fetch = [this, &results](ShardId sid) {
-    if (auto& snapshot = snapshots_[sid].first; snapshot) {
+    if (auto& snapshot = snapshots_[sid].first; snapshot && snapshot->HasStarted()) {
       results[sid] = snapshot->GetCurrentSnapshotProgress();
     }
   };
@@ -268,26 +278,28 @@ void SaveStagesController::SaveDfs() {
       SetExtension("summary", ext, &filename);
   }
 
+  absl::InsecureBitGen gen;
+  std::string snapshot_id = GetRandomHex(gen, 32);
   // Save summary file.
-  SaveDfsSingle(nullptr);
+  SaveDfsSingle(nullptr, snapshot_id);
 
   // Save shard files.
-  auto cb = [this](Transaction* t, EngineShard* shard) {
-    SaveDfsSingle(shard);
+  auto cb = [this, &snapshot_id](Transaction* t, EngineShard* shard) {
+    SaveDfsSingle(shard, snapshot_id);
     return OpStatus::OK;
   };
   trans_->ScheduleSingleHop(std::move(cb));
 }
 
 // Start saving a dfs file on shard
-void SaveStagesController::SaveDfsSingle(EngineShard* shard) {
+void SaveStagesController::SaveDfsSingle(EngineShard* shard, const std::string& snapshot_id) {
   // for summary file, shard=null and index=shard_set->size(), see SaveDfs() above
   auto& [snapshot, filename] = snapshots_[shard ? shard->shard_id() : shard_set->size()];
 
   SaveMode mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
   auto glob_data = shard == nullptr ? RdbSaver::GetGlobalData(service_) : RdbSaver::GlobalData{};
 
-  if (auto err = snapshot->Start(mode, filename, glob_data); err) {
+  if (auto err = snapshot->Start(mode, filename, glob_data, snapshot_id); err) {
     shared_err_ = err;
     snapshot.reset();
     return;
@@ -307,7 +319,8 @@ void SaveStagesController::SaveRdb() {
   if (!snapshot_storage_->IsCloud())
     filename += ".tmp";
 
-  if (auto err = snapshot->Start(SaveMode::RDB, filename, RdbSaver::GetGlobalData(service_)); err) {
+  if (auto err = snapshot->Start(SaveMode::RDB, filename, RdbSaver::GetGlobalData(service_), "");
+      err) {
     snapshot.reset();
     return;
   }
@@ -350,12 +363,6 @@ SaveInfo SaveStagesController::GetSaveInfo() {
   info.file_name = resulting_path.generic_string();
 
   return info;
-}
-
-void SaveStagesController::InitResources() {
-  snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
-  for (auto& [snapshot, _] : snapshots_)
-    snapshot = make_unique<RdbSnapshot>(fq_threadpool_, snapshot_storage_.get());
 }
 
 // Remove .tmp extension or delete files in case of error
@@ -427,7 +434,7 @@ void SaveStagesController::WaitSnapshotInShard(EngineShard* shard) {
 }
 
 void SaveStagesController::CloseCb(unsigned index) {
-  if (auto& snapshot = snapshots_[index].first; snapshot) {
+  if (auto& snapshot = snapshots_[index].first; snapshot && snapshot->HasStarted()) {
     snapshot->FillFreqMap();
     shared_err_ = snapshot->Close();
 

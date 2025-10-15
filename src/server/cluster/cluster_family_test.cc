@@ -504,7 +504,7 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
           RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads", IntArg(0),
                                 "total_writes", IntArg(0), "memory_bytes", IntArg(0))),
           RespArray(ElementsAre(IntArg(slot), "key_count", IntArg(1), "total_reads", IntArg(1),
-                                "total_writes", IntArg(2), "memory_bytes", IntArg(0))))));
+                                "total_writes", IntArg(2), "memory_bytes", IntArg(36))))));
 }
 
 TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
@@ -558,9 +558,9 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
       RunPrivileged({"dflycluster", "getslotinfo", "slots", "1", "2"}),
       RespArray(ElementsAre(
           RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)), "total_reads", IntArg(0),
-                                "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))),
+                                "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(108))),
           RespArray(ElementsAre(IntArg(2), "key_count", Not(IntArg(0)), "total_reads", IntArg(0),
-                                "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))))));
+                                "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(360))))));
 
   ConfigSingleNodeCluster("abc");
 
@@ -585,9 +585,9 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlotsNoCrashOnShutdown) {
       RunPrivileged({"dflycluster", "getslotinfo", "slots", "1", "2"}),
       RespArray(ElementsAre(
           RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)), "total_reads", IntArg(0),
-                                "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))),
+                                "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(108))),
           RespArray(ElementsAre(IntArg(2), "key_count", Not(IntArg(0)), "total_reads", IntArg(0),
-                                "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))))));
+                                "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(360))))));
 
   // After running the new config we start a fiber that removes all slots from current instance
   // we immediately shut down to test that we do not crash.
@@ -670,6 +670,34 @@ TEST_F(ClusterFamilyTest, ClusterModePubSubNotAllowed) {
               ErrArg("PUNSUBSCRIBE is not supported in cluster mode yet"));
 }
 
+// SSUBSCRIBE and SPUBLISH work in cluster mode
+TEST_F(ClusterFamilyTest, ClusterModePubSub) {
+  single_response_ = false;
+  ConfigSingleNodeCluster(GetMyId());
+
+  // Ssubscribe works as expected
+  auto resp = pp_->at(1)->Await([&] { return Run({"SSUBSCRIBE", "cluster-channel"}); });
+  EXPECT_THAT(resp, RespElementsAre("ssubscribe", "cluster-channel", IntArg(1)));
+
+  // Send-receive a single message
+  resp = pp_->at(0)->Await([&] {
+    return Run({"SPUBLISH", "cluster-channel", "a simple message"});
+  });
+  EXPECT_THAT(resp, IntArg(1));
+
+  pp_->AwaitFiberOnAll([](util::ProactorBase* pb) {});
+
+  ASSERT_EQ(1, SubscriberMessagesLen("IO1"));
+  const auto& msg = GetPublishedMessage("IO1", 0);
+  EXPECT_TRUE(msg.is_sharded);
+  EXPECT_EQ("cluster-channel", msg.channel);
+  EXPECT_EQ("a simple message", msg.message);
+
+  // Sunsubscribe
+  resp = pp_->at(1)->Await([&] { return Run({"SUNSUBSCRIBE", "cluster-channel"}); });
+  EXPECT_THAT(resp, RespElementsAre("sunsubscribe", "cluster-channel", IntArg(0)));
+}
+
 TEST_F(ClusterFamilyTest, ClusterFirstConfigCallDropsEntriesNotOwnedByNode) {
   InitWithDbFilename();
 
@@ -723,7 +751,7 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
   ExpectConditionWithinTimeout([&]() {
     return RunPrivileged({"dflycluster", "flushslots", "0", "0"}) == "OK";
   });
-  util::ThisFiber::SleepFor(1ms);
+  util::ThisFiber::SleepFor(10ms);
   EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", "1"}),
               RespArray(ElementsAre(
                   RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads", _,
@@ -732,7 +760,7 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
                                         "total_writes", _, "memory_bytes", _)))));
 
   EXPECT_EQ(RunPrivileged({"dflycluster", "flushslots", "0", "1"}), "OK");
-  util::ThisFiber::SleepFor(1ms);
+  util::ThisFiber::SleepFor(10ms);
   EXPECT_THAT(
       RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", "1"}),
       RespArray(ElementsAre(RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads",

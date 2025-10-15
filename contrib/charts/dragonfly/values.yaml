@@ -62,7 +62,7 @@ service:
   # -- Extra annotations for the service
   annotations: {}
   # -- Extra labels for the service
-  lablels: {}
+  labels: {}
   metrics:
     # -- name for the metrics port
     portName: metrics
@@ -133,7 +133,7 @@ tls:
   #   HLunol88AeTOcKfD6hBYGvcRfu5NV29jJxZCOBfbFQXjnNlnrhRCag==
   #   -----END RSA PRIVATE KEY-----
 
-# If enabled will set DFLY_PASSOWRD environment variable with the specified existing secret value
+# If enabled will set DFLY_PASSWORD environment variable with the specified existing secret value
 # Note that if enabled and the secret does not exist pods will not start
 passwordFromSecret:
   enable: false

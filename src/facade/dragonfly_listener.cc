@@ -4,6 +4,7 @@
 
 #include "facade/dragonfly_listener.h"
 
+#include <mimalloc.h>
 #include <openssl/err.h>
 
 #include <memory>
@@ -64,6 +65,9 @@ CONFIG_enum(tls_auth_clients, "yes", "", tls_auth_clients_enum, tls_auth_clients
 #endif
 
 namespace facade {
+
+// See dragonfly_listener.h
+std::atomic<bool> g_shutdown_fast{false};
 
 using namespace util;
 using util::detail::SafeErrorMessage;
@@ -140,6 +144,11 @@ Listener::Listener(Protocol protocol, ServiceInterface* si, Role role)
 
   // Always initialise OpenSSL so we can enable TLS at runtime.
   OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, nullptr);
+  // Print this only for main interface
+  if (IsMainInterface()) {
+    std::string_view ssl_version = SSLeay_version(SSLEAY_VERSION);
+    LOG(INFO) << "SSL version: " << ssl_version;
+  }
   if (!ReconfigureTLS()) {
     exit(-1);
   }
@@ -246,7 +255,12 @@ bool Listener::IsMainInterface() const {
 }
 
 void Listener::PreShutdown() {
-  // Iterate on all connections and allow them to finish their commands for
+  // If NOW/FORCE requested, expedite shutdown without waiting.
+  if (g_shutdown_fast.load(std::memory_order_acquire)) {
+    return;
+  }
+
+  // Otherwise: Iterate on all connections and allow them to finish their commands for
   // a short period.
   // Executed commands can be visible in snapshots or replicas, but if we close the client
   // connections too fast we might not send the acknowledgment for those commands.

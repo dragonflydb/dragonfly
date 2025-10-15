@@ -18,9 +18,11 @@
 #include "core/overloaded.h"
 #include "core/search/ast_expr.h"
 #include "core/search/compressed_sorted_set.h"
+#include "core/search/index_result.h"
 #include "core/search/indices.h"
 #include "core/search/query_driver.h"
 #include "core/search/sort_indices.h"
+#include "core/search/tag_types.h"
 #include "core/search/vector_utils.h"
 
 using namespace std;
@@ -29,12 +31,14 @@ namespace dfly::search {
 
 namespace {
 
-AstExpr ParseQuery(std::string_view query, const QueryParams* params) {
+AstExpr ParseQuery(std::string_view query, const QueryParams* params,
+                   const OptionalFilters* filters) {
   QueryDriver driver{};
   driver.ResetScanner();
   driver.SetParams(params);
   driver.SetInput(std::string{query});
   (void)Parser (&driver)();  // can throw
+  driver.SetOptionalFilters(filters);
   return driver.Take();
 }
 
@@ -44,75 +48,6 @@ AstExpr ParseQuery(std::string_view query, const QueryParams* params) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
-
-// Represents an either owned or non-owned result set that can be accessed transparently.
-struct IndexResult {
-  using DocVec = vector<DocId>;
-  using BorrowedView =
-      variant<const DocVec*, const BlockList<CompressedSortedSet>*, const BlockList<SortedVector>*>;
-
-  IndexResult() : value_{DocVec{}} {
-  }
-
-  IndexResult(DocVec&& dv) : value_{std::move(dv)} {
-  }
-
-  template <typename C> IndexResult(const C* container = nullptr) : value_{container} {
-    if (container == nullptr)
-      value_ = DocVec{};
-  }
-
-  size_t Size() const {
-    return visit([](auto* set) { return set->size(); }, Borrowed());
-  }
-
-  bool IsOwned() const {
-    return holds_alternative<DocVec>(value_);
-  }
-
-  IndexResult& operator=(DocVec&& entries) {
-    if (holds_alternative<DocVec>(value_)) {
-      swap(get<DocVec>(value_), entries);  // swap to keep backing array
-      entries.clear();
-    } else {
-      value_ = std::move(entries);
-    }
-    return *this;
-  }
-
-  BorrowedView Borrowed() const {
-    auto cb = [](const auto& v) -> BorrowedView {
-      if constexpr (is_pointer_v<remove_reference_t<decltype(v)>>)
-        return v;
-      else
-        return &v;
-    };
-    return visit(cb, value_);
-  }
-
-  // Move out of owned or copy borrowed, truncate to limit if set
-  DocVec Take(optional<size_t> limit = nullopt) {
-    if (IsOwned()) {
-      auto out = std::move(get<DocVec>(value_));
-      out.resize(min(limit.value_or(out.size()), out.size()));
-      return out;
-    }
-
-    auto cb = [limit](auto* set) {
-      DocVec out(min(limit.value_or(set->size()), set->size()));
-      auto it = set->begin();
-      for (size_t i = 0; it != set->end() && i < out.size(); ++i, ++it)
-        out[i] = *it;
-      return out;
-    };
-    return visit(cb, Borrowed());
-  }
-
- private:
-  variant<DocVec /*owned*/, const DocVec*, const BlockList<CompressedSortedSet>*,
-          const BlockList<SortedVector>*>
-      value_;
-};
 
 struct ProfileBuilder {
   struct NodeFormatter {
@@ -144,6 +79,9 @@ struct ProfileBuilder {
         [](const AstNegateNode& n) { return absl::StrCat("Negate{}"); },
         [](const AstStarNode& n) { return absl::StrCat("Star{}"); },
         [](const AstStarFieldNode& n) { return absl::StrCat("StarField{}"); },
+        [](const AstGeoNode& n) {
+          return absl::StrCat("Geo{", n.lat, " ", n.lon, " ", n.radius, " ", n.unit, "}");
+        },
     };
     return visit(node_info, node.Variant());
   }
@@ -160,7 +98,7 @@ struct ProfileBuilder {
     auto took = chrono::steady_clock::now() - start;
     size_t micros = chrono::duration_cast<chrono::microseconds>(took).count();
     auto descr = GetNodeInfo(node);
-    profile_.events.push_back({std::move(descr), micros, depth_ - 1, result.Size()});
+    profile_.events.push_back({std::move(descr), micros, depth_ - 1, result.ApproximateSize()});
     depth_--;
   }
 
@@ -177,24 +115,32 @@ struct ProfileBuilder {
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
 
-  BasicSearch(const FieldIndices* indices) : indices_{indices}, tmp_vec_{} {
+  BasicSearch(const FieldIndices* indices) : indices_{indices} {
   }
 
   void EnableProfiling() {
     profile_builder_ = ProfileBuilder{};
   }
 
-  // Get casted sub index by field
-  template <typename T> T* GetIndex(string_view field) {
-    static_assert(is_base_of_v<BaseIndex, T>);
-
+  BaseIndex* GetBaseIndex(string_view field) {
     auto index = indices_->GetIndex(field);
     if (!index) {
       error_ = absl::StrCat("Invalid field: ", field);
       return nullptr;
     }
+    return index;
+  }
 
-    auto* casted_ptr = dynamic_cast<T*>(index);
+  // Get casted sub index by field
+  template <typename T> T* GetIndex(string_view field) {
+    static_assert(is_base_of_v<BaseIndex, T>);
+
+    auto base_index = GetBaseIndex(field);
+    if (!base_index) {
+      return nullptr;
+    }
+
+    auto* casted_ptr = dynamic_cast<T*>(base_index);
     if (!casted_ptr) {
       error_ = absl::StrCat("Wrong access type for field: ", field);
       return nullptr;
@@ -218,41 +164,26 @@ struct BasicSearch {
   vector<IndexResult> GetSubResults(const C& container, const F& f) {
     vector<IndexResult> sub_results(container.size());
     for (size_t i = 0; i < container.size(); i++)
-      sub_results[i] = f(container[i]);
+      sub_results[i] = IndexResult{f(container[i])};
     return sub_results;
   }
 
   void Merge(IndexResult matched, IndexResult* current_ptr, LogicOp op) {
     IndexResult& current = *current_ptr;
-    tmp_vec_.clear();
-
-    if (op == LogicOp::AND) {
-      tmp_vec_.reserve(min(matched.Size(), current.Size()));
-      auto cb = [this](auto* s1, auto* s2) {
-        set_intersection(s1->begin(), s1->end(), s2->begin(), s2->end(), back_inserter(tmp_vec_));
-      };
-      visit(cb, matched.Borrowed(), current.Borrowed());
-    } else {
-      tmp_vec_.reserve(matched.Size() + current.Size());
-      auto cb = [this](auto* s1, auto* s2) {
-        set_union(s1->begin(), s1->end(), s2->begin(), s2->end(), back_inserter(tmp_vec_));
-      };
-      visit(cb, matched.Borrowed(), current.Borrowed());
-    }
-
-    current = std::move(tmp_vec_);
+    auto vec = MergeIndexResults(matched, current, op);
+    current = IndexResult{std::move(vec)};
   }
 
   // Efficiently unify multiple sub results with specified logical op
   IndexResult UnifyResults(vector<IndexResult>&& sub_results, LogicOp op) {
     if (sub_results.empty())
-      return vector<DocId>{};
+      return IndexResult{};
 
     // Unifying from smallest to largest is more efficient.
     // AND: the result only shrinks, so starting with the smallest is most optimal.
     // OR: unifying smaller sets first reduces the number of element traversals on average.
     sort(sub_results.begin(), sub_results.end(),
-         [](const auto& l, const auto& r) { return l.Size() < r.Size(); });
+         [](const auto& l, const auto& r) { return l.ApproximateSize() < r.ApproximateSize(); });
 
     IndexResult out{std::move(sub_results[0])};
     for (auto& matched : absl::MakeSpan(sub_results).subspan(1))
@@ -260,39 +191,61 @@ struct BasicSearch {
     return out;
   }
 
-  template <typename C>
-  IndexResult CollectPrefixMatches(BaseStringIndex<C>* index, std::string_view prefix) {
+  template <typename C, typename F>
+  IndexResult CollectMatches(BaseStringIndex<C>* index, std::string_view word, F&& f) {
     IndexResult result{};
-    index->MatchingPrefix(
-        prefix, [&result, this](const auto* c) { Merge(IndexResult{c}, &result, LogicOp::OR); });
+    invoke(f, *index, word,
+           [&result, this](const auto* c) { Merge(IndexResult{c}, &result, LogicOp::OR); });
     return result;
   }
 
-  template <typename C>
-  IndexResult CollectSuffixMatches(BaseStringIndex<C>* index, std::string_view suffix) {
-    // TODO: Implement full text search for suffix
-    error_ = "Not implemented";
-    return IndexResult{};
-  }
-
-  template <typename C>
-  IndexResult CollectInfixMatches(BaseStringIndex<C>* index, std::string_view infix) {
-    // TODO: Implement full text search for infix
-    error_ = "Not implemented";
-    return IndexResult{};
-  }
-
   IndexResult Search(monostate, string_view) {
-    return vector<DocId>{};
+    return IndexResult{};
   }
 
   IndexResult Search(const AstStarNode& node, string_view active_field) {
     DCHECK(active_field.empty());
-    return {&indices_->GetAllDocs()};
+    return IndexResult{&indices_->GetAllDocs()};
+  }
+
+  IndexResult Search(const AstStarFieldNode& node, string_view active_field) {
+    // Try to get a sort index first, as `@field:*` might imply wanting sortable behavior
+    BaseSortIndex* sort_index = indices_->GetSortIndex(active_field);
+    if (sort_index) {
+      return IndexResult{sort_index->GetAllDocsWithNonNullValues()};
+    }
+
+    // If sort index doesn't exist try regular index
+    BaseIndex* base_index = GetBaseIndex(active_field);
+    return base_index ? IndexResult{base_index->GetAllDocsWithNonNullValues()} : IndexResult{};
+  }
+
+  template <TagType T> IndexResult Search(const AstAffixNode<T>& node, string_view active_field) {
+    vector<TextIndex*> indices;
+    if (!active_field.empty()) {
+      if (auto* index = GetIndex<TextIndex>(active_field); index)
+        indices = {index};
+      else
+        return IndexResult{};
+    } else {
+      indices = indices_->GetAllTextIndices();
+    }
+
+    auto mapping = [&node, this](TextIndex* index) {
+      if constexpr (T == TagType::PREFIX)
+        return CollectMatches(index, node.affix, &TextIndex::MatchPrefix);
+      else if constexpr (T == TagType::SUFFIX)
+        return CollectMatches(index, node.affix, &TextIndex::MatchSuffix);
+      else if constexpr (T == TagType::INFIX)
+        return CollectMatches(index, node.affix, &TextIndex::MatchInfix);
+      else
+        return vector<DocId>{};
+    };
+    return UnifyResults(GetSubResults(indices, mapping), LogicOp::OR);
   }
 
   // "term": access field's text index or unify results from all text indices if no field is set
-  IndexResult Search(const AstTermNode& node, string_view active_field) {
+  IndexResult Search(const AstAffixNode<TagType::REGULAR> node, string_view active_field) {
     std::string term = node.affix;
     bool strip_whitespace = true;
 
@@ -305,7 +258,7 @@ struct BasicSearch {
 
     if (!active_field.empty()) {
       if (auto* index = GetIndex<TextIndex>(active_field); index)
-        return index->Matching(term, strip_whitespace);
+        return IndexResult{index->Matching(term, strip_whitespace)};
       return IndexResult{};
     }
 
@@ -317,66 +270,20 @@ struct BasicSearch {
     return UnifyResults(GetSubResults(selected_indices, mapping), LogicOp::OR);
   }
 
-  IndexResult Search(const AstStarFieldNode& node, string_view active_field) {
-    // Try to get a sort index first, as `@field:*` might imply wanting sortable behavior
-    BaseSortIndex* sort_index = indices_->GetSortIndex(active_field);
-    if (sort_index) {
-      if (auto result = sort_index->GetAllResults()) {
-        return std::move(*result);
-      }
-    }
-
-    // If sort index doesn't exist or doesn't support GetAllResults, try regular index
-    BaseIndex* base_index = indices_->GetIndex(active_field);
-    if (base_index) {
-      if (auto result = base_index->GetAllResults()) {
-        return std::move(*result);
-      }
-    }
-
-    // If we get here, neither index could handle the request
-    if (!base_index && !sort_index) {
-      error_ = absl::StrCat("Invalid field: ", active_field);
-    } else {
-      error_ = absl::StrCat("Wrong access type for field: ", active_field);
-    }
-    return IndexResult{};
-  }
-
-  IndexResult Search(const AstPrefixNode& node, string_view active_field) {
-    vector<TextIndex*> indices;
-    if (!active_field.empty()) {
-      if (auto* index = GetIndex<TextIndex>(active_field); index)
-        indices = {index};
-      else
-        return IndexResult{};
-    } else {
-      indices = indices_->GetAllTextIndices();
-    }
-
-    auto mapping = [&node, this](TextIndex* index) {
-      return CollectPrefixMatches(index, node.affix);
-    };
-    return UnifyResults(GetSubResults(indices, mapping), LogicOp::OR);
-  }
-
-  IndexResult Search(const AstSuffixNode& node, string_view active_field) {
-    // TODO: Implement full text search for suffix
-    error_ = "Not implemented";
-    return IndexResult{};
-  }
-
-  IndexResult Search(const AstInfixNode& node, string_view active_field) {
-    // TODO: Implement full text search for infix
-    error_ = "Not implemented";
-    return IndexResult{};
-  }
-
   // [range]: access field's numeric index
   IndexResult Search(const AstRangeNode& node, string_view active_field) {
     DCHECK(!active_field.empty());
-    if (auto* index = GetIndex<NumericIndex>(active_field); index)
-      return index->Range(node.lo, node.hi);
+    if (auto* index = GetIndex<NumericIndex>(active_field); index) {
+      return IndexResult{index->Range(node.lo, node.hi)};
+    }
+    return IndexResult{};
+  }
+
+  IndexResult Search(const AstGeoNode& node, string_view active_field) {
+    DCHECK(!active_field.empty());
+    if (auto* index = GetIndex<GeoIndex>(active_field); index) {
+      return IndexResult{index->RadiusSearch(node.lon, node.lat, node.radius, node.unit)};
+    }
     return IndexResult{};
   }
 
@@ -391,7 +298,7 @@ struct BasicSearch {
       return binary_search(matched.begin(), matched.end(), doc);
     };
     all.erase(remove_if(all.begin(), all.end(), pred), all.end());
-    return all;
+    return IndexResult{std::move(all)};
   }
 
   // logical query: unify all sub results
@@ -414,23 +321,23 @@ struct BasicSearch {
       return IndexResult{};
 
     Overloaded ov{[tag_index](const AstTermNode& term) -> IndexResult {
-                    return tag_index->Matching(term.affix);
+                    return IndexResult{tag_index->Matching(term.affix)};
                   },
                   [tag_index, this](const AstPrefixNode& prefix) {
-                    return CollectPrefixMatches(tag_index, prefix.affix);
+                    return CollectMatches(tag_index, prefix.affix, &TagIndex::MatchPrefix);
                   },
                   [tag_index, this](const AstSuffixNode& suffix) {
-                    return CollectSuffixMatches(tag_index, suffix.affix);
+                    return CollectMatches(tag_index, suffix.affix, &TagIndex::MatchSuffix);
                   },
                   [tag_index, this](const AstInfixNode& infix) {
-                    return CollectInfixMatches(tag_index, infix.affix);
+                    return CollectMatches(tag_index, infix.affix, &TagIndex::MatchInfix);
                   }};
     auto mapping = [ov](const auto& tag) { return visit(ov, tag); };
     return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
   }
 
   void SearchKnnFlat(FlatVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {
-    knn_distances_.reserve(sub_results.Size());
+    knn_distances_.reserve(sub_results.ApproximateSize());
     auto cb = [&](auto* set) {
       auto [dim, sim] = vec_index->Info();
       for (DocId matched_doc : *set) {
@@ -447,7 +354,7 @@ struct BasicSearch {
   }
 
   void SearchKnnHnsw(HnswVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {
-    if (indices_->GetAllDocs().size() == sub_results.Size())
+    if (indices_->GetAllDocs().size() == sub_results.ApproximateSize())  // TODO: remove approx size
       knn_distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime);
     else
       knn_distances_ =
@@ -469,22 +376,21 @@ struct BasicSearch {
       return IndexResult{};
     }
 
-    preagg_total_ = sub_results.Size();
-    scores_.clear();
+    knn_scores_.clear();
     if (auto hnsw_index = dynamic_cast<HnswVectorIndex*>(vec_index); hnsw_index)
       SearchKnnHnsw(hnsw_index, knn, std::move(sub_results));
     else
       SearchKnnFlat(dynamic_cast<FlatVectorIndex*>(vec_index), knn, std::move(sub_results));
 
     vector<DocId> out(knn_distances_.size());
-    scores_.reserve(knn_distances_.size());
+    knn_scores_.reserve(knn_distances_.size());
 
     for (size_t i = 0; i < knn_distances_.size(); i++) {
-      scores_.emplace_back(knn_distances_[i].first);
+      knn_scores_.emplace_back(knn_distances_[i].second, knn_distances_[i].first);
       out[i] = knn_distances_[i].second;
     }
 
-    return out;
+    return IndexResult{std::move(out)};
   }
 
   // Determine node type and call specific search function
@@ -499,7 +405,9 @@ struct BasicSearch {
 
     // Top level results don't need to be sorted, because they will be scored, sorted by fields or
     // used by knn
+
     DCHECK(top_level || holds_alternative<AstKnnNode>(node.Variant()) ||
+           holds_alternative<AstGeoNode>(node.Variant()) ||
            visit([](auto* set) { return is_sorted(set->begin(), set->end()); }, result.Borrowed()));
 
     if (profile_builder_)
@@ -515,24 +423,18 @@ struct BasicSearch {
     optional<AlgorithmProfile> profile =
         profile_builder_ ? make_optional(profile_builder_->Take()) : nullopt;
 
-    size_t total = result.Size();
-    return SearchResult{total,
-                        max(total, preagg_total_),
-                        result.Take(),
-                        std::move(scores_),
-                        std::move(profile),
+    auto out = result.Take();
+    const size_t total = out.size();
+    return SearchResult{total, std::move(out), std::move(knn_scores_), std::move(profile),
                         std::move(error_)};
   }
 
   const FieldIndices* indices_;
 
-  size_t preagg_total_ = 0;
   string error_;
   optional<ProfileBuilder> profile_builder_ = ProfileBuilder{};
 
-  std::vector<ResultScore> scores_;
-
-  vector<DocId> tmp_vec_;
+  std::vector<pair<DocId, float>> knn_scores_;
   vector<pair<float, DocId>> knn_distances_;
 };
 
@@ -541,6 +443,10 @@ struct BasicSearch {
 #endif
 
 }  // namespace
+
+AstNode OptionalNumericFilter::Node(std::string field) {
+  return AstFieldNode{"@" + field, AstRangeNode(lo_, false, hi_, false)};
+}
 
 string_view Schema::LookupAlias(string_view alias) const {
   if (auto it = field_names.find(alias); it != field_names.end())
@@ -576,12 +482,17 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
       continue;
 
     switch (field_info.type) {
-      case SchemaField::TEXT:
-        indices_[field_ident] = make_unique<TextIndex>(mr, &options_.stopwords, synonyms_);
+      case SchemaField::TEXT: {
+        const auto& tparams = std::get<SchemaField::TextParams>(field_info.special_params);
+        indices_[field_ident] =
+            make_unique<TextIndex>(mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie);
         break;
-      case SchemaField::NUMERIC:
-        indices_[field_ident] = make_unique<NumericIndex>(mr);
+      }
+      case SchemaField::NUMERIC: {
+        const auto& nparams = std::get<SchemaField::NumericParams>(field_info.special_params);
+        indices_[field_ident] = make_unique<NumericIndex>(nparams.block_size, mr);
         break;
+      }
       case SchemaField::TAG: {
         const auto& tparams = std::get<SchemaField::TagParams>(field_info.special_params);
         indices_[field_ident] = make_unique<TagIndex>(mr, tparams);
@@ -599,6 +510,10 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
           vector_index = make_unique<FlatVectorIndex>(vparams, mr);
 
         indices_[field_ident] = std::move(vector_index);
+        break;
+      }
+      case SchemaField::GEO: {
+        indices_[field_ident] = make_unique<GeoIndex>(mr);
         break;
       }
     }
@@ -619,6 +534,7 @@ void FieldIndices::CreateSortIndices(PMR_NS::memory_resource* mr) {
         sort_indices_[field_ident] = make_unique<NumericSortIndex>(mr);
         break;
       case SchemaField::VECTOR:
+      case SchemaField::GEO:
         break;
     }
   }
@@ -705,6 +621,12 @@ SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view field_
   return it->second->Lookup(doc);
 }
 
+void FieldIndices::FinalizeInitialization() {
+  for (auto& [field, index] : indices_) {
+    index->FinalizeInitialization();
+  }
+}
+
 const Synonyms* FieldIndices::GetSynonyms() const {
   return synonyms_;
 }
@@ -712,9 +634,10 @@ const Synonyms* FieldIndices::GetSynonyms() const {
 SearchAlgorithm::SearchAlgorithm() = default;
 SearchAlgorithm::~SearchAlgorithm() = default;
 
-bool SearchAlgorithm::Init(string_view query, const QueryParams* params) {
+bool SearchAlgorithm::Init(string_view query, const QueryParams* params,
+                           const OptionalFilters* filters) {
   try {
-    query_ = make_unique<AstExpr>(ParseQuery(query, params));
+    query_ = make_unique<AstExpr>(ParseQuery(query, params, filters));
   } catch (const Parser::syntax_error& se) {
     LOG(INFO) << "Failed to parse query \"" << query << "\":" << se.what();
     return false;

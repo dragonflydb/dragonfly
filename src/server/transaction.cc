@@ -778,7 +778,7 @@ void Transaction::ScheduleInternal() {
         shard_set->Add(unique_shard_id_, &Transaction::ScheduleBatchInShard);
       }
     } else {
-      auto cb = [&schedule_ctx]() {
+      auto cb = [&schedule_ctx](unsigned) {
         if (!schedule_ctx.trans->ScheduleInShard(EngineShard::tlocal(),
                                                  schedule_ctx.optimistic_execution)) {
           schedule_ctx.fail_cnt.fetch_add(1, memory_order_relaxed);
@@ -824,7 +824,8 @@ void Transaction::ScheduleInternal() {
     // See https://github.com/dragonflydb/dragonfly/issues/150 for more info.
     if (should_poll_execution.load(memory_order_relaxed)) {
       IterateActiveShards([](const auto& sd, auto i) {
-        shard_set->Add(i, [] { EngineShard::tlocal()->PollExecution("cancel_cleanup", nullptr); });
+        shard_set->Add(
+            i, [](unsigned) { EngineShard::tlocal()->PollExecution("cancel_cleanup", nullptr); });
       });
     }
   }
@@ -853,7 +854,7 @@ void Transaction::UnlockMulti() {
   DCHECK_EQ(shard_data_.size(), shard_set->size());
   for (ShardId i = 0; i < shard_data_.size(); ++i) {
     vector<LockFp> fps = std::move(sharded_keys[i]);
-    shard_set->Add(i, [this, fps = std::move(fps)]() {
+    shard_set->Add(i, [this, fps = std::move(fps)](unsigned) {
       this->UnlockMultiShardCb(fps, EngineShard::tlocal());
       intrusive_ptr_release(this);
     });
@@ -939,7 +940,7 @@ void Transaction::DispatchHop() {
 
   use_count_.fetch_add(run_cnt, memory_order_relaxed);  // for each pointer from poll_cb
 
-  auto poll_cb = [this] {
+  auto poll_cb = [this](unsigned) {
     CHECK(namespace_ != nullptr);
     EngineShard::tlocal()->PollExecution("exec_cb", this);
     DVLOG(3) << "ptr_release " << DebugId();
@@ -1013,7 +1014,7 @@ void Transaction::ExpireBlocking(WaitKeys wkeys) {
   DVLOG(1) << "ExpireBlocking " << DebugId();
   run_barrier_.Start(unique_shard_cnt_);
 
-  auto expire_cb = [this, &wkeys] {
+  auto expire_cb = [this, &wkeys](unsigned) {
     EngineShard* es = EngineShard::tlocal();
     if (wkeys) {
       IndexSlice is(0, 1);
@@ -1184,7 +1185,7 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
   return true;
 }
 
-void Transaction::ScheduleBatchInShard() {
+void Transaction::ScheduleBatchInShard(unsigned) {
   EngineShard* shard = EngineShard::tlocal();
   auto& stats = shard->stats();
   stats.tx_batch_schedule_calls_total++;
@@ -1588,7 +1589,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
       bonus = 0;  // Z<xxx>STORE <key> commands
 
     unsigned num_keys_index;
-    if (absl::StartsWith(name, "EVAL"))
+    if (absl::StartsWith(name, "EVAL") || name == "BLMPOP" || name == "BZMPOP")
       num_keys_index = 1;
     else
       num_keys_index = bonus ? *bonus + 1 : 0;

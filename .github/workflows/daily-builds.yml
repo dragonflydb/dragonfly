@@ -33,7 +33,7 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: true
 
@@ -56,11 +56,23 @@ jobs:
             cd $GITHUB_WORKSPACE/build
             ctest -V -L DFLY
 
+      - name: Send notification on failure
+        if: failure() && github.ref == 'refs/heads/main'
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="Daily build (${{ matrix.name }}) failed.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
+
+          curl -s \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+            -d '{"text": "'"${message}"'"}'
+
   build-macos:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: true
 
@@ -87,15 +99,27 @@ jobs:
           which bison
           bison --version
 
-          gcc-12 --version
+          # Check system clang version
+          clang --version
+          clang++ --version
+
+          # Verify current macOS SDK
+          xcrun --show-sdk-path
 
           autoconf --help
           autoreconf --help
 
           echo "*************************** START BUILDING **************************************"
-          CC=gcc-12 CXX=g++-12 cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF \
-            -DCMAKE_CXX_FLAGS="-Wl,-ld_classic" \
-            -DCMAKE_C_COMPILER="gcc-12" -DCMAKE_CXX_COMPILER="g++-12"
+          # Configure for using current macOS SDK
+          export SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
+          echo "Using SDK: $SDKROOT"
+
+          # Use system clang/clang++ with macOS SDK
+          cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_OSX_SYSROOT="$SDKROOT" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0
 
           ninja src/all
 
@@ -103,3 +127,15 @@ jobs:
         run: |
             cd $GITHUB_WORKSPACE/build
             ctest -V -L DFLY
+
+      - name: Send notification on failure
+        if: failure() && github.ref == 'refs/heads/main'
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="Daily build (macOS) failed.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
+
+          curl -s \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+            -d '{"text": "'"${message}"'"}'

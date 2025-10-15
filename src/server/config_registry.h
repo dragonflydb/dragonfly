@@ -28,6 +28,9 @@ class ConfigRegistry {
 
   template <typename T>
   ConfigRegistry& RegisterSetter(std::string_view name, std::function<void(const T&)> f) {
+    ValidateCustomSetter(name,
+                         [](const absl::CommandLineFlag& flag) { return flag.IsOfType<T>(); });
+
     return RegisterMutable(name, [f](const absl::CommandLineFlag& flag) {
       auto res = flag.TryGet<T>();
       if (res.has_value()) {
@@ -50,6 +53,8 @@ class ConfigRegistry {
 
   std::optional<std::string> Get(std::string_view config_name) ABSL_LOCKS_EXCLUDED(mu_);
 
+  absl::CommandLineFlag* GetFlag(std::string_view config_name) ABSL_LOCKS_EXCLUDED(mu_);
+
   void Reset();
 
   std::vector<std::string> List(std::string_view glob) const ABSL_LOCKS_EXCLUDED(mu_);
@@ -57,6 +62,7 @@ class ConfigRegistry {
  private:
   void RegisterInternal(std::string_view name, bool is_mutable, WriteCb cb)
       ABSL_LOCKS_EXCLUDED(mu_);
+  void ValidateCustomSetter(std::string_view name, WriteCb setter) const;
 
   mutable util::fb2::Mutex mu_;
 
@@ -68,6 +74,6 @@ class ConfigRegistry {
   absl::flat_hash_map<std::string, Entry> registry_ ABSL_GUARDED_BY(mu_);
 };
 
-extern ConfigRegistry config_registry;
+inline ConfigRegistry config_registry;
 
 }  // namespace dfly

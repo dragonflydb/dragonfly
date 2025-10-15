@@ -11,16 +11,19 @@ local prefix = ARGV[1]
 local type = ARGV[2]
 local key_counter = tonumber(ARGV[3])
 local stop_key = ARGV[4]
-
 -- inputs: task specific
 local key_target = tonumber(ARGV[5])
 local total_ops = tonumber(ARGV[6])
 local min_dev = tonumber(ARGV[7])
 local data_size = tonumber(ARGV[8])
 local collection_size = tonumber(ARGV[9])
+local huge_value_keys_add_only = tonumber(ARGV[10])
 -- Probability of each key in key_target to be a big value
-local huge_value_target = tonumber(ARGV[10])
-local huge_value_size = tonumber(ARGV[11])
+local huge_value_target = tonumber(ARGV[11])
+local huge_value_size = tonumber(ARGV[12])
+-- Seed
+local seed = tonumber(ARGV[13])
+math.randomseed(seed)
 
 -- collect all keys belonging to this script
 -- assumes exclusive ownership
@@ -30,14 +33,31 @@ LG_funcs.init(data_size, collection_size, huge_value_target, huge_value_size)
 local addfunc = LG_funcs['add_' .. string.lower(type)]
 local modfunc = LG_funcs['mod_' .. string.lower(type)]
 local huge_entries = LG_funcs["get_huge_entries"]
+local is_huge_entry = LG_funcs["is_huge_entry"]
+-- Keep track of total number of keys including huge value keys. Intialize
+-- to number of keys that currently exists.
+local total_keys = #keys
 
 local function action_add()
     local key = prefix .. tostring(key_counter)
     local op_type = string.lower(type)
+    local is_next_huge_entry = false
     key_counter = key_counter + 1
+    total_keys = total_keys + 1
+
+    if huge_value_keys_add_only == 1 then
+        is_next_huge_entry = is_huge_entry(op_type)
+    end
 
     table.insert(keys, key)
     addfunc(key, keys)
+
+
+   -- If we allow adding only huge value keys we will now remove it from
+    -- table so it wouldn't be selected for any action_del / action_mod
+    if is_next_huge_entry then
+        table.remove(keys)
+    end
 end
 
 local function action_mod()
@@ -46,9 +66,9 @@ local function action_mod()
 end
 
 local function action_del()
+    total_keys = total_keys - 1
     local key_idx = math.random(#keys)
     keys[key_idx], keys[#keys] = keys[#keys], keys[key_idx]
-
     local key = table.remove(keys)
     redis.acall('DEL', key)
 end
@@ -71,7 +91,7 @@ while true do
     end
 
     -- break if we reached our target deviation
-    if min_dev > 0 and math.abs(#keys - real_target) / real_target < min_dev then
+    if min_dev > 0 and math.abs(total_keys - real_target) / real_target < min_dev then
         break
     end
 
@@ -81,7 +101,7 @@ while true do
     end
 
     -- fast path, if we have less than half of the target, always grow
-    if #keys * 2 < key_target then
+    if total_keys * 2 < key_target then
         action_add()
         goto continue
     end
@@ -96,8 +116,8 @@ while true do
         -- the delete intensity is monotonically increasing with keycount growing,
         -- the point where the intensities are equal is the equilibrium point,
         -- based on the formulas it's ~0.956 * key_target
-        local i_add = math.max(0, 1 - (#keys / key_target) ^ 16)
-        local i_del = (#keys / key_target) ^ 16
+        local i_add = math.max(0, 1 - (total_keys / key_target) ^ 16)
+        local i_del = (total_keys / key_target) ^ 16
 
         -- we are only interested in large amounts of modification commands when we are in an
         -- equilibrium, where there are no low intensities

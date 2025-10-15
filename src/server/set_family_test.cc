@@ -16,7 +16,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
-ABSL_DECLARE_FLAG(bool, legacy_saddex_keepttl);
+ABSL_DECLARE_FLAG(std::string, shard_round_robin_prefix);
 
 using namespace testing;
 using namespace std;
@@ -180,6 +180,21 @@ TEST_F(SetFamilyTest, SPop) {
   resp = Run({"smembers", "y"});
   ASSERT_THAT(resp, ArrLen(2));
   EXPECT_THAT(resp.GetVec(), IsSubsetOf({"a", "b", "c"}));
+
+  // Test POP on large set with small pop count
+  vector<string> xlarge{"sadd", "xlarge"};
+  for (size_t i = 0; i < 100; i++)
+    xlarge.push_back(to_string(i));
+  Run(absl::MakeSpan(xlarge));
+
+  resp = Run({"spop", "xlarge", "2"});
+  {
+    auto elems = resp.GetVec();
+    EXPECT_NE(elems[0].GetString(), elems[1].GetString());
+  }
+
+  resp = Run({"scard", "xlarge"});
+  EXPECT_THAT(resp, IntArg(98));
 }
 
 TEST_F(SetFamilyTest, SRandMember) {
@@ -320,6 +335,12 @@ TEST_F(SetFamilyTest, Empty) {
 }
 
 TEST_F(SetFamilyTest, SScan) {
+  auto resp = Run("sscan non-existing-key 100 count 5");
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::STRING), ArgType(RespExpr::ARRAY)));
+  EXPECT_EQ(ToSV(resp.GetVec()[0].GetBuf()), "0");
+  EXPECT_EQ(StrArray(resp.GetVec()[1]).size(), 0);
+
   // Test for int set
   for (int i = 0; i < 15; i++) {
     Run({"sadd", "myintset", absl::StrCat(i)});
@@ -327,7 +348,7 @@ TEST_F(SetFamilyTest, SScan) {
 
   // Note that even though this limit by 4, it would return more because
   // all fields are on intlist
-  auto resp = Run({"sscan", "myintset", "0", "count", "4"});
+  resp = Run({"sscan", "myintset", "0", "count", "4"});
   auto vec = StrArray(resp.GetVec()[1]);
   EXPECT_THAT(vec.size(), 15);
 
@@ -357,6 +378,17 @@ TEST_F(SetFamilyTest, SScan) {
   resp = Run({"sscan", "mystrset", "0", "match", "1*"});
   vec = StrArray(resp.GetVec()[1]);
   EXPECT_THAT(vec.size(), 0);
+}
+
+TEST_F(SetFamilyTest, HugeSScan) {
+  for (int i = 0; i < 60000; i += 5) {
+    Run({"sadd", "myintset", absl::StrCat(i), absl::StrCat(i + 1), absl::StrCat(i + 2),
+         absl::StrCat(i + 3), absl::StrCat(i + 4)});
+  }
+
+  auto resp = Run({"sscan", "myintset", "0", "count", "50000"});
+  auto vec = StrArray(resp.GetVec()[1]);
+  EXPECT_GE(vec.size(), 50000);
 }
 
 TEST_F(SetFamilyTest, IntSetMemcpy) {
@@ -416,15 +448,39 @@ TEST_F(SetFamilyTest, SAddEx) {
 
 TEST_F(SetFamilyTest, CheckSetLinkExpiryTransfer) {
   for (int i = 0; i < 10; i++) {
-    EXPECT_THAT(Run({"SADDEX", "key", "5", absl::StrCat(i)}), IntArg(1));
+    EXPECT_THAT(Run(absl::StrCat("SADDEX key 5 ", i)), IntArg(1));
   }
   for (int i = 0; i < 9; i++) {
-    Run({"SREM", "key", absl::StrCat(i)});
+    Run(absl::StrCat("SREM key ", i));
   }
-  EXPECT_THAT(Run({"SCARD", "key"}), IntArg(1));
+  EXPECT_THAT(Run("SCARD key"), IntArg(1));
   AdvanceTime(6000);
-  Run({"SMEMBERS", "key"});
-  EXPECT_THAT(Run({"SCARD", "key"}), IntArg(0));
+  Run("SMEMBERS key");
+  EXPECT_THAT(Run("SCARD key"), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, SetInter_5590) {
+  absl::FlagSaver fs;
+  SetTestFlag("num_shards", "2");
+  num_threads_ = 3;
+  SetTestFlag("shard_round_robin_prefix", "prefix-");
+  ResetService();
+
+  Run("DEBUG POPULATE 1 prefix- 5 RAND ELEMENTS 5000 TYPE SET");
+  Run("SADD prefix-:0 common");
+  // shard 0 has 1 key
+  EXPECT_THAT(GetShardKeyCount(), Contains(Pair(0, 1)));
+
+  Run("SADD prefix-foo bar hello common");
+  // shard 1 has 1 key
+  EXPECT_THAT(GetShardKeyCount(), Contains(Pair(0, 1)));
+  EXPECT_THAT(GetShardKeyCount(), Contains(Pair(1, 1)));
+
+  int64_t start = absl::GetCurrentTimeNanos();
+  Run("SINTER prefix-foo prefix-:0");
+  int64_t end = absl::GetCurrentTimeNanos();
+  // Less than 100 ms. Before the fix it took 3seconds.
+  EXPECT_LE(end - start, 100000000);
 }
 
 }  // namespace dfly

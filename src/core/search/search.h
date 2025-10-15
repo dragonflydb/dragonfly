@@ -16,6 +16,7 @@
 
 #include "base/pmr/memory_resource.h"
 #include "core/search/base.h"
+#include "core/search/range_tree.h"
 #include "core/search/synonyms.h"
 
 namespace dfly::search {
@@ -23,9 +24,38 @@ namespace dfly::search {
 struct AstNode;
 struct TextIndex;
 
+// Optional FILTER
+struct OptionalNumericFilter : public OptionalFilterBase {
+  OptionalNumericFilter(size_t lo, size_t hi) : empty_(false), lo_(lo), hi_(hi) {
+  }
+
+  bool IsEmpty() const override {
+    return empty_;
+  }
+
+  AstNode Node(std::string field) override;
+
+  void AddRange(size_t lo, size_t hi) {
+    if (empty_) {
+      return;
+    }
+    if ((hi_ < lo) || (hi < lo_)) {
+      empty_ = true;
+    } else {
+      lo_ = std::max(lo_, lo);
+      hi_ = std::min(hi_, hi);
+    }
+  }
+
+ private:
+  bool empty_;
+  size_t lo_;
+  size_t hi_;
+};
+
 // Describes a specific index field
 struct SchemaField {
-  enum FieldType { TAG, TEXT, NUMERIC, VECTOR };
+  enum FieldType { TAG, TEXT, NUMERIC, VECTOR, GEO };
   enum FieldFlags : uint8_t { NOINDEX = 1 << 0, SORTABLE = 1 << 1 };
 
   struct VectorParams {
@@ -41,9 +71,22 @@ struct SchemaField {
   struct TagParams {
     char separator = ',';
     bool case_sensitive = false;
+    bool with_suffixtrie = false;  // see TextParams
   };
 
-  using ParamsVariant = std::variant<std::monostate, VectorParams, TagParams>;
+  struct TextParams {
+    // if enabled, suffix trie is build for efficient suffix and infix queries
+    bool with_suffixtrie = false;
+  };
+
+  struct NumericParams {
+    // Block size of the range tree
+    // Check RangeTree for details.
+    size_t block_size = RangeTree::kDefaultMaxRangeBlockSize;
+  };
+
+  using ParamsVariant =
+      std::variant<std::monostate, VectorParams, TagParams, TextParams, NumericParams>;
 
   FieldType type;
   uint8_t flags;
@@ -97,6 +140,8 @@ class FieldIndices {
 
   SortableValue GetSortIndexValue(DocId doc, std::string_view field_identifier) const;
 
+  void FinalizeInitialization();
+
  private:
   void CreateIndices(PMR_NS::memory_resource* mr);
   void CreateSortIndices(PMR_NS::memory_resource* mr);
@@ -124,14 +169,11 @@ struct AlgorithmProfile {
 struct SearchResult {
   size_t total;  // how many documents were matched in total
 
-  // number of matches before any aggregation, used by multi-shard optimizations
-  size_t pre_aggregation_total;
-
   // The ids of the matched documents
   std::vector<DocId> ids;
 
   // Contains final scores if an aggregation was present
-  std::vector<ResultScore> scores;
+  std::vector<std::pair<DocId, float>> knn_scores;
 
   // If profiling was enabled
   std::optional<AlgorithmProfile> profile;
@@ -151,8 +193,9 @@ class SearchAlgorithm {
   SearchAlgorithm();
   ~SearchAlgorithm();
 
-  // Init with query and return true if successful.
-  bool Init(std::string_view query, const QueryParams* params);
+  // Init with query and optional filters and return true if successful.
+  bool Init(std::string_view query, const QueryParams* params,
+            const OptionalFilters* filters = nullptr);
 
   SearchResult Search(const FieldIndices* index) const;
 

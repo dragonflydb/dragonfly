@@ -12,6 +12,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include "base/flag_utils.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
@@ -20,11 +21,25 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "util/listener_interface.h"
 
+using facade::operator""_KB;
+
 ABSL_FLAG(uint32_t, interpreter_per_thread, 10, "Lua interpreters per thread");
 ABSL_FLAG(uint32_t, timeout, 0,
           "Close the connection after it is idle for N seconds (0 to disable)");
 ABSL_FLAG(uint32_t, send_timeout, 0,
           "Close the connection after it is stuck on send for N seconds (0 to disable)");
+
+ABSL_FLAG(double, rss_oom_deny_ratio, 1.25,
+          "When the ratio between maxmemory and RSS memory exceeds this value, commands marked as "
+          "DENYOOM will fail with OOM error and new connections to non-admin port will be "
+          "rejected. Negative value disables this feature.");
+
+ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
+          "Maximum size of a value that may be serialized at once during snapshotting or full "
+          "sync. Values bigger than this threshold will be serialized using streaming "
+          "serialization. 0 - to disable streaming mode");
+ABSL_FLAG(uint32_t, max_squashed_cmd_num, 100,
+          "Max number of commands squashed in a single shard during squash optimizaiton");
 
 namespace dfly {
 
@@ -33,11 +48,12 @@ using namespace std::chrono_literals;
 
 __thread ServerState* ServerState::state_ = nullptr;
 
-ServerState::Stats::Stats(unsigned num_shards) : tx_width_freq_arr(num_shards) {
+ServerState::Stats::Stats(unsigned num_shards)
+    : tx_width_freq_arr(num_shards), squash_width_freq_arr(num_shards) {
 }
 
 ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
-  static_assert(sizeof(Stats) == 20 * 8, "Stats size mismatch");
+  static_assert(sizeof(Stats) == 25 * 8, "Stats size mismatch");
 
 #define ADD(x) this->x += (other.x)
 
@@ -51,11 +67,11 @@ ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
   ADD(tx_inline_runs);
   ADD(tx_schedule_cancel_cnt);
 
-  ADD(multi_squash_executions);
+  ADD(multi_squash_hops);
   ADD(multi_squash_exec_hop_usec);
   ADD(multi_squash_exec_reply_usec);
   ADD(squashed_commands);
-
+  ADD(squash_stats_ignored);
   ADD(blocked_on_interpreter);
   ADD(rdb_save_usec);
   ADD(rdb_save_count);
@@ -65,12 +81,22 @@ ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
 
   ADD(oom_error_cmd_cnt);
   ADD(conn_timeout_events);
+  ADD(psync_requests_total);
+
   if (this->tx_width_freq_arr.size() > 0) {
     DCHECK_EQ(this->tx_width_freq_arr.size(), other.tx_width_freq_arr.size());
     this->tx_width_freq_arr += other.tx_width_freq_arr;
   } else {
     this->tx_width_freq_arr = other.tx_width_freq_arr;
   }
+  if (this->squash_width_freq_arr.size() > 0) {
+    DCHECK_EQ(this->squash_width_freq_arr.size(), other.squash_width_freq_arr.size());
+    this->squash_width_freq_arr += other.squash_width_freq_arr;
+  } else {
+    this->squash_width_freq_arr = other.squash_width_freq_arr;
+  }
+
+  ADD(stored_cmd_bytes);
   return *this;
 #undef ADD
 }
@@ -109,6 +135,8 @@ ServerState::ServerState() : interpreter_mgr_{absl::GetFlag(FLAGS_interpreter_pe
   mi_heap_t* tlh = mi_heap_new();
   init_zmalloc_threadlocal(tlh);
   data_heap_ = tlh;
+
+  UpdateFromFlags();
 }
 
 ServerState::~ServerState() {
@@ -200,6 +228,17 @@ void ServerState::DecommitMemory(uint8_t flags) {
 #endif
 #endif
   }
+}
+
+void ServerState::UpdateFromFlags() {
+  rss_oom_deny_ratio = absl::GetFlag(FLAGS_rss_oom_deny_ratio);
+  serialization_max_chunk_size = absl::GetFlag(FLAGS_serialization_max_chunk_size);
+  max_squash_cmd_num = absl::GetFlag(FLAGS_max_squashed_cmd_num);
+}
+
+vector<string> ServerState::GetMutableFlagNames() {
+  return base::GetFlagNames(FLAGS_rss_oom_deny_ratio, FLAGS_serialization_max_chunk_size,
+                            FLAGS_max_squashed_cmd_num);
 }
 
 Interpreter* ServerState::BorrowInterpreter() {
@@ -294,7 +333,7 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       facade::Connection* conn = ref.Get();
       if (conn) {
         VLOG(1) << "Closing connection due to timeout: " << conn->GetClientInfo();
-        conn->ShutdownSelf();
+        conn->ShutdownSelfBlocking();
         stats.conn_timeout_events++;
       }
     }

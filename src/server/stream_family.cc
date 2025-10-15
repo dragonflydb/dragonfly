@@ -432,6 +432,7 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
     /* Get a reference to the tail node listpack. */
     lp = (uint8_t*)ri.data;
     lp_bytes = lpBytes(lp);
+    CHECK_GT(lp_bytes, 0U);
   }
   raxStop(&ri);
 
@@ -525,6 +526,8 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
     }
     lp = lpAppendInteger(lp, 0); /* Master entry zero terminator. */
     raxInsert(s->rax_tree, (unsigned char*)&rax_key, sizeof(rax_key), lp, NULL);
+    // TODO remove this check
+    CHECK_GT(lpBytes(lp), 0U);
     /* The first entry we insert, has obviously the same fields of the
      * master entry. */
     flags |= STREAM_ITEM_FLAG_SAMEFIELDS;
@@ -609,8 +612,11 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
   lp = lpAppendInteger(lp, lp_count);
 
   /* Insert back into the tree in order to update the listpack pointer. */
-  if (ri.data != lp)
+  if (ri.data != lp) {
     raxInsert(s->rax_tree, (unsigned char*)&rax_key, sizeof(rax_key), lp, NULL);
+    // TODO remove this
+    CHECK_GT(lpBytes(lp), 0U);
+  }
   s->length++;
   s->entries_added++;
   s->last_id = id;
@@ -759,7 +765,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
 
   auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (blocking_controller) {
-    blocking_controller->AwakeWatched(op_args.db_cntx.db_index, key);
+    blocking_controller->Awaken(op_args.db_cntx.db_index, key);
   }
 
   return result_id;
@@ -1433,7 +1439,7 @@ OpStatus OpDestroyGroup(const OpArgs& op_args, string_view key, string_view gnam
   // Awake readers blocked on this group
   auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (blocking_controller) {
-    blocking_controller->AwakeWatched(op_args.db_cntx.db_index, key);
+    blocking_controller->Awaken(op_args.db_cntx.db_index, key);
   }
 
   return OpStatus::OK;
@@ -1866,8 +1872,8 @@ void CreateGroup(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder
     opts.flags |= kCreateOptMkstream;
   }
 
-  if (auto err = parser->Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser->TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpCreate(t->GetOpArgs(shard), key, opts);
@@ -1885,8 +1891,8 @@ void CreateGroup(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder
 void DestroyGroup(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* builder) {
   auto [key, gname] = parser->Next<string_view, string_view>();
 
-  if (auto err = parser->Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser->TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   if (parser->HasNext())
     return builder->SendError(UnknownSubCmd("DESTROY", "XGROUP"));
@@ -1911,8 +1917,8 @@ void DestroyGroup(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilde
 void CreateConsumer(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* builder) {
   auto [key, gname, consumer] = parser->Next<string_view, string_view, string_view>();
 
-  if (auto err = parser->Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser->TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   if (parser->HasNext())
     return builder->SendError(UnknownSubCmd("CREATECONSUMER", "XGROUP"));
@@ -1940,8 +1946,8 @@ void CreateConsumer(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuil
 void DelConsumer(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* builder) {
   auto [key, gname, consumer] = parser->Next<string_view, string_view, string_view>();
 
-  if (auto err = parser->Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser->TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   if (parser->HasNext())
     return builder->SendError(UnknownSubCmd("DELCONSUMER", "XGROUP"));
@@ -1977,8 +1983,8 @@ void SetId(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* buil
     }
   }
 
-  if (auto err = parser->Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser->TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   auto cb = [&, &key = key, &gname = gname, &id = id](Transaction* t, EngineShard* shard) {
     return OpSetId(t->GetOpArgs(shard), key, gname, id);
@@ -2328,7 +2334,7 @@ void XRangeGeneric(std::string_view key, std::string_view start, std::string_vie
     return builder->SendError("invalid end ID for the interval", kSyntaxErrType);
   }
 
-  if (args.size() > 0) {
+  if (!args.empty()) {
     if (args.size() != 2) {
       return builder->SendError(WrongNumArgsError("XRANGE"), kSyntaxErrType);
     }
@@ -2577,13 +2583,24 @@ void XReadGeneric2(CmdArgList args, bool read_group, Transaction* tx, SinkReplyB
       }
     }
   } else {
-    rb->StartArray(resolved_streams);
-    for (size_t i = 0; i < results.size(); i++) {
-      if (results[i].empty())
-        continue;
-      string_view key = ArgS(args, i + opts->streams_arg);
-      rb->StartArray(2);
-      StreamReplies{builder}.SendStreamRecords(key, results[i]);
+    if (rb->IsResp3()) {
+      rb->StartCollection(resolved_streams, RedisReplyBuilder::CollectionType::MAP);
+      for (size_t i = 0; i < results.size(); ++i) {
+        if (results[i].empty()) {
+          continue;
+        }
+        string_view key = ArgS(args, i + opts->streams_arg);
+        StreamReplies{builder}.SendStreamRecords(key, results[i]);
+      }
+    } else {
+      rb->StartArray(resolved_streams);
+      for (size_t i = 0; i < results.size(); i++) {
+        if (results[i].empty())
+          continue;
+        string_view key = ArgS(args, i + opts->streams_arg);
+        rb->StartArray(2);
+        StreamReplies{builder}.SendStreamRecords(key, results[i]);
+      }
     }
   }
 }
@@ -2661,8 +2678,8 @@ void StreamFamily::XAdd(CmdArgList args, const CommandContext& cmd_cntx) {
 
   auto parsed_add_opts = ParseAddOpts(&parser);
 
-  if (auto err = parser.Error(); err || !parsed_add_opts) {
-    rb->SendError(!parsed_add_opts ? parsed_add_opts.error() : err->MakeReply());
+  if (auto err = parser.TakeError(); err || !parsed_add_opts) {
+    rb->SendError(!parsed_add_opts ? parsed_add_opts.error() : err.MakeReply());
     return;
   }
 
@@ -2844,8 +2861,8 @@ void StreamFamily::XGroup(CmdArgList args, const CommandContext& cmd_cntx) {
                                      &DestroyGroup, "CREATECONSUMER", &CreateConsumer,
                                      "DELCONSUMER", &DelConsumer, "SETID", &SetId);
 
-  if (auto err = parser.Error(); err)
-    return cmd_cntx.rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return cmd_cntx.rb->SendError(err.MakeReply());
 
   sub_cmd_func(&parser, cmd_cntx.tx, cmd_cntx.rb);
 }
@@ -3294,8 +3311,8 @@ void StreamFamily::XTrim(CmdArgList args, const CommandContext& cmd_cntx) {
 
   auto parsed_trim_opts = ParseTrimOpts(&parser);
   if (!parser.Finalize() || !parsed_trim_opts) {
-    auto err = parser.Error();
-    rb->SendError(!parsed_trim_opts ? parsed_trim_opts.error() : err->MakeReply());
+    auto err = parser.TakeError();
+    rb->SendError(!parsed_trim_opts ? parsed_trim_opts.error() : err.MakeReply());
     return;
   }
 

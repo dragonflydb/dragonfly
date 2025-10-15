@@ -46,7 +46,7 @@ StoredCmd::StoredCmd(const CommandId* cid, bool own_args, ArgSlice args)
   own_storage.buffer.resize(total_size);
   char* next = own_storage.buffer.data();
   for (unsigned i = 0; i < args.size(); i++) {
-    if (args[i].size() > 0)
+    if (!args[i].empty())
       memcpy(next, args[i].data(), args[i].size());
     next += args[i].size();
     own_storage.sizes[i] = args[i].size();
@@ -174,14 +174,16 @@ void ConnectionContext::ChangeMonitor(bool start) {
   EnableMonitoring(start);
 }
 
-void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgList args,
-                                           facade::RedisReplyBuilder* rb) {
+void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, bool sharded,
+                                           CmdArgList args, facade::RedisReplyBuilder* rb) {
   vector<unsigned> result = ChangeSubscriptions(args, false, to_add, to_reply);
 
   if (to_reply) {
+    const string_view actionRegular[2] = {"unsubscribe", "subscribe"};
+    const string_view actionSharded[2] = {"sunsubscribe", "ssubscribe"};
+    const absl::Span<const string_view> action = sharded ? actionSharded : actionRegular;
     SinkReplyBuilder::ReplyScope scope{rb};
     for (size_t i = 0; i < result.size(); ++i) {
-      const char* action[2] = {"unsubscribe", "subscribe"};
       SendSubscriptionChangedResponse(action[to_add], ArgS(args, i), result[i], rb);
     }
   }
@@ -211,7 +213,7 @@ void ConnectionContext::UnsubscribeAll(bool to_reply, facade::RedisReplyBuilder*
   StringVec channels(conn_state.subscribe_info->channels.begin(),
                      conn_state.subscribe_info->channels.end());
   CmdArgVec arg_vec(channels.begin(), channels.end());
-  ChangeSubscription(false, to_reply, CmdArgList{arg_vec}, rb);
+  ChangeSubscription(false, to_reply, false, CmdArgList{arg_vec}, rb);
 }
 
 void ConnectionContext::PUnsubscribeAll(bool to_reply, facade::RedisReplyBuilder* rb) {
@@ -227,6 +229,18 @@ void ConnectionContext::PUnsubscribeAll(bool to_reply, facade::RedisReplyBuilder
 
 size_t ConnectionState::ExecInfo::UsedMemory() const {
   return dfly::HeapSize(body) + dfly::HeapSize(watched_keys);
+}
+
+void ConnectionState::ExecInfo::AddStoredCmd(const CommandId* cid, bool own_args, CmdArgList args) {
+  body.emplace_back(cid, own_args, args);
+  stored_cmd_bytes += body.back().UsedMemory();
+}
+
+size_t ConnectionState::ExecInfo::ClearStoredCmds() {
+  const size_t used = GetStoredCmdBytes();
+  vector<StoredCmd>{}.swap(body);
+  stored_cmd_bytes = 0;
+  return used;
 }
 
 size_t ConnectionState::ScriptInfo::UsedMemory() const {
@@ -307,7 +321,8 @@ vector<unsigned> ConnectionContext::ChangeSubscriptions(CmdArgList channels, boo
 void ConnectionState::ExecInfo::Clear() {
   DCHECK(!preborrowed_interpreter);  // Must have been released properly
   state = EXEC_INACTIVE;
-  body.clear();
+  const size_t cleared_size = ClearStoredCmds();
+  ServerState::tlocal()->stats.stored_cmd_bytes -= cleared_size;
   is_write = false;
   ClearWatched();
 }

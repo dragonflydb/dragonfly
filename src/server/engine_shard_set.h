@@ -10,7 +10,6 @@ extern "C" {
 
 #include <absl/container/btree_map.h>
 #include <absl/container/flat_hash_map.h>
-#include <xxhash.h>
 
 #include "core/mi_memory_resource.h"
 #include "server/db_slice.h"
@@ -100,7 +99,7 @@ class EngineShardSet {
   template <typename U> void AwaitRunningOnShardQueue(U&& func) {
     util::fb2::BlockingCounter bc(size_);
     for (size_t i = 0; i < size_; ++i) {
-      Add(i, [&func, bc]() mutable {
+      Add(i, [&func, bc](unsigned) mutable {
         func(EngineShard::tlocal());
         bc->Dec();
       });
@@ -169,6 +168,10 @@ extern uint64_t TEST_current_time_ms;
 
 inline uint64_t GetCurrentTimeMs() {
   return TEST_current_time_ms ? TEST_current_time_ms : absl::GetCurrentTimeNanos() / 1000000;
+}
+
+inline uint64_t GetCurrentTimeNs() {
+  return TEST_current_time_ms ? TEST_current_time_ms * 1000000 : absl::GetCurrentTimeNanos();
 }
 
 extern EngineShardSet* shard_set;

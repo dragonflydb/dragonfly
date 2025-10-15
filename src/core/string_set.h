@@ -18,6 +18,7 @@ extern "C" {
 }
 
 namespace dfly {
+class PageUsage;
 
 class StringSet : public DenseSet {
  public:
@@ -38,8 +39,6 @@ class StringSet : public DenseSet {
   bool Contains(std::string_view s1) const {
     return FindInternal(&s1, Hash(&s1, 1), 1) != nullptr;
   }
-
-  std::optional<std::string> Pop();
 
   class iterator : private IteratorBase {
    public:
@@ -88,7 +87,7 @@ class StringSet : public DenseSet {
 
     // Try reducing memory fragmentation of the value by re-allocating. Returns true if
     // re-allocation happened.
-    bool ReallocIfNeeded(float ratio);
+    bool ReallocIfNeeded(PageUsage* page_usage);
   };
 
   iterator begin() {
@@ -98,6 +97,11 @@ class StringSet : public DenseSet {
   iterator end() {
     return iterator{};
   }
+
+  // See DenseSet::GetRandomIterator
+  iterator GetRandomMember();
+
+  std::optional<std::string> Pop();
 
   uint32_t Scan(uint32_t, const std::function<void(sds)>&) const;
 
@@ -120,7 +124,7 @@ class StringSet : public DenseSet {
   sds MakeSetSds(std::string_view src, uint32_t ttl_sec) const;
 
  private:
-  std::pair<sds, bool> DuplicateEntryIfFragmented(void* obj, float ratio);
+  std::pair<sds, bool> DuplicateEntryIfFragmented(void* obj, PageUsage* page_usage);
 };
 
 }  // end namespace dfly

@@ -64,6 +64,8 @@ void SendAclSecurityEvents(const AclLog::LogEntry& entry, facade::RedisReplyBuil
 
 string AclDbToString(size_t db);
 
+template <typename P>
+void TraverseEvictImpl(P predicate, facade::Listener* main_listener, util::ProactorPool* pool);
 }  // namespace
 
 AclFamily::AclFamily(UserRegistry* registry, util::ProactorPool* pool)
@@ -164,34 +166,17 @@ void AclFamily::SetUser(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void AclFamily::EvictOpenConnectionsOnAllProactors(const absl::flat_hash_set<string_view>& users) {
-  auto close_cb = [&users]([[maybe_unused]] size_t id, util::Connection* conn) {
-    CHECK(conn);
-    auto connection = static_cast<facade::Connection*>(conn);
-    auto ctx = static_cast<ConnectionContext*>(connection->cntx());
-    if (ctx && users.contains(ctx->authed_username)) {
-      connection->ShutdownSelf();
-    }
-  };
-
-  if (main_listener_) {
-    main_listener_->TraverseConnections(close_cb);
-  }
+  return TraverseEvictImpl([&](auto* ctx) { return ctx && users.contains(ctx->authed_username); },
+                           main_listener_, pool_);
 }
 
 void AclFamily::EvictOpenConnectionsOnAllProactorsWithRegistry(
     const UserRegistry::RegistryType& registry) {
-  auto close_cb = [&registry]([[maybe_unused]] size_t id, util::Connection* conn) {
-    CHECK(conn);
-    auto connection = static_cast<facade::Connection*>(conn);
-    auto ctx = static_cast<ConnectionContext*>(connection->cntx());
-    if (ctx && ctx->authed_username != "default" && registry.contains(ctx->authed_username)) {
-      connection->ShutdownSelf();
-    }
-  };
-
-  if (main_listener_) {
-    main_listener_->TraverseConnections(close_cb);
-  }
+  return TraverseEvictImpl(
+      [&](auto* ctx) {
+        return ctx && ctx->authed_username != "default" && registry.contains(ctx->authed_username);
+      },
+      main_listener_, pool_);
 }
 
 void AclFamily::DelUser(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -378,11 +363,11 @@ void AclFamily::Load(CmdArgList args, const CommandContext& cmd_cntx) {
 void AclFamily::Log(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
   if (args.size() > 1) {
-    rb->SendError(facade::OpStatus::OUT_OF_RANGE);
+    return rb->SendError(facade::OpStatus::OUT_OF_RANGE);
   }
 
   size_t max_output = 10;
-  if (args.size() == 1) {
+  if (!args.empty()) {
     auto option = facade::ToSV(args[0]);
     if (absl::EqualsIgnoreCase(option, "RESET")) {
       pool_->AwaitFiberOnAll(
@@ -615,61 +600,6 @@ void AclFamily::DryRun(CmdArgList args, const CommandContext& cmd_cntx) {
 
   rb->SendBulkString(msg);
 }
-
-using MemberFunc = void (AclFamily::*)(CmdArgList args, const CommandContext& cmd_cntx);
-
-CommandId::Handler3 HandlerFunc(AclFamily* acl, MemberFunc f) {
-  return [=](CmdArgList args, const CommandContext& cmd_cntx) { return (acl->*f)(args, cmd_cntx); };
-}
-
-#define HFUNC(x) SetHandler(HandlerFunc(this, &AclFamily::x))
-
-constexpr uint32_t kAcl = acl::CONNECTION;
-constexpr uint32_t kList = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kSetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kDelUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kWhoAmI = acl::SLOW;
-constexpr uint32_t kSave = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kLoad = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kLog = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kUsers = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kCat = acl::SLOW;
-constexpr uint32_t kGetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kDryRun = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kGenPass = acl::SLOW;
-
-// We can't implement the ACL commands and its respective subcommands LIST, CAT, etc
-// the usual way, (that is, one command called ACL which then dispatches to the subcommand
-// based on the second argument) because each of the subcommands has different ACL
-// categories. Therefore, to keep it compatible with the CommandId, I need to treat them
-// as separate commands in the registry. This is the least intrusive change because it's very
-// easy to handle that case explicitly in `DispatchCommand`.
-
-void AclFamily::Register(dfly::CommandRegistry* registry) {
-  using CI = dfly::CommandId;
-  const uint32_t kAclMask = CO::ADMIN | CO::NOSCRIPT | CO::LOADING;
-  registry->StartFamily();
-  *registry << CI{"ACL", CO::NOSCRIPT | CO::LOADING, 0, 0, 0, acl::kAcl}.HFUNC(Acl);
-  *registry << CI{"ACL LIST", kAclMask, 1, 0, 0, acl::kList}.HFUNC(List);
-  *registry << CI{"ACL SETUSER", kAclMask, -2, 0, 0, acl::kSetUser}.HFUNC(SetUser);
-  *registry << CI{"ACL DELUSER", kAclMask, -2, 0, 0, acl::kDelUser}.HFUNC(DelUser);
-  *registry << CI{"ACL WHOAMI", kAclMask, 1, 0, 0, acl::kWhoAmI}.HFUNC(WhoAmI);
-  *registry << CI{"ACL SAVE", kAclMask, 1, 0, 0, acl::kSave}.HFUNC(Save);
-  *registry << CI{"ACL LOAD", kAclMask, 1, 0, 0, acl::kLoad}.HFUNC(Load);
-  *registry << CI{"ACL LOG", kAclMask, 0, 0, 0, acl::kLog}.HFUNC(Log);
-  *registry << CI{"ACL USERS", kAclMask, 1, 0, 0, acl::kUsers}.HFUNC(Users);
-  *registry << CI{"ACL CAT", kAclMask, -1, 0, 0, acl::kCat}.HFUNC(Cat);
-  *registry << CI{"ACL GETUSER", kAclMask, 2, 0, 0, acl::kGetUser}.HFUNC(GetUser);
-  *registry << CI{"ACL DRYRUN", kAclMask, 3, 0, 0, acl::kDryRun}.HFUNC(DryRun);
-  *registry << CI{"ACL GENPASS", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kGenPass}.HFUNC(
-      GenPass);
-  cmd_registry_ = registry;
-
-  // build indexers
-  BuildIndexers(cmd_registry_->GetFamilies());
-}
-
-#undef HFUNC
 
 void AclFamily::Init(facade::Listener* main_listener, UserRegistry* registry) {
   main_listener_ = main_listener;
@@ -986,6 +916,34 @@ std::string AclDbToString(size_t db) {
   return std::numeric_limits<size_t>::max() == db ? "all" : absl::StrCat(db);
 }
 
+// Fetches the connections that predicate P evaluates to true and shuts them
+// down gracefully.
+template <typename P>
+void TraverseEvictImpl(P predicate, facade::Listener* main_listener, util::ProactorPool* pool) {
+  auto close_cb = [&](unsigned idx, util::ProactorBase* p) {
+    std::vector<facade::Connection::WeakRef> connections;
+    auto traverse_cb = [&](unsigned id, util::Connection* conn) {
+      auto connection = static_cast<facade::Connection*>(conn);
+      auto ctx = connection->cntx();
+      if (predicate(ctx)) {
+        connections.push_back(connection->Borrow());
+      }
+    };
+
+    main_listener->TraverseConnectionsOnThread(traverse_cb, UINT32_MAX, nullptr);
+
+    for (auto& tcon : connections) {
+      facade::Connection* conn = tcon.Get();
+      if (conn && conn->socket()->proactor()->GetPoolIndex() == p->GetPoolIndex()) {
+        // preemptive for TlsSocket
+        conn->ShutdownSelfBlocking();
+      }
+    }
+  };
+
+  pool->AwaitFiberOnAll(close_cb);
+}
+
 }  // namespace
 
 std::string AclFamily::AclCatAndCommandToString(const User::CategoryChanges& cat,
@@ -1186,12 +1144,13 @@ std::variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(
 }
 
 void AclFamily::BuildIndexers(RevCommandsIndexStore families) {
-  acl::NumberOfFamilies(families.size());
+  size_t family_count = acl::NumberOfFamilies(families.size());
   CommandsRevIndexer(std::move(families));
   CategoryToCommandsIndexStore index;
   cmd_registry_->Traverse([&](std::string_view, auto& cid) {
     const uint32_t cat = cid.acl_categories();
     const size_t family = cid.GetFamily();
+    DCHECK_LT(family, family_count);
     const uint64_t bit_index = cid.GetBitIndex();
     for (size_t i = 0; i < 32; ++i) {
       if (cat & 1 << i) {
@@ -1211,5 +1170,97 @@ void AclFamily::BuildIndexers(RevCommandsIndexStore families) {
   }
   CategoryToIdx(std::move(idx_store));
 }
+
+void AclFamily::Help(CmdArgList args, const CommandContext& cmd_cntx) {
+  string_view help_arr[] = {
+      "ACL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+      "CAT [<category>]",
+      "    List all commands that belong to <category>, or all command categories",
+      "    when no category is specified.",
+      "DELUSER <username> [<username> ...]",
+      "    Delete a list of users.",
+      "DRYRUN <username> <command> [<arg> ...]",
+      "    Returns whether the user can execute the given command without executing the command.",
+      "GETUSER <username>",
+      "    Get the user's details.",
+      "GENPASS [<bits>]",
+      "    Generate a secure 256-bit user password. The optional `bits` argument can",
+      "    be used to specify a different size.",
+      "LIST",
+      "    Show users details in config file format.",
+      "LOAD",
+      "    Reload users from the ACL file.",
+      "LOG [<count> | RESET]",
+      "    Show the ACL log entries.",
+      "SAVE",
+      "    Save the current config to the ACL file.",
+      "SETUSER <username> <attribute> [<attribute> ...]",
+      "    Create or modify a user with the specified attributes.",
+      "USERS",
+      "    List all the registered usernames.",
+      "WHOAMI",
+      "    Return the current connection username.",
+      "HELP",
+      "    Print this help."};
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
+  return rb->SendSimpleStrArr(help_arr);
+}
+
+using MemberFunc = void (AclFamily::*)(CmdArgList args, const CommandContext& cmd_cntx);
+
+CommandId::Handler3 HandlerFunc(AclFamily* acl, MemberFunc f) {
+  return [=](CmdArgList args, const CommandContext& cmd_cntx) { return (acl->*f)(args, cmd_cntx); };
+}
+
+#define HFUNC(x) SetHandler(HandlerFunc(this, &AclFamily::x))
+
+constexpr uint32_t kAcl = acl::CONNECTION;
+constexpr uint32_t kList = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kSetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kDelUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kWhoAmI = acl::SLOW;
+constexpr uint32_t kSave = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kLoad = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kLog = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kUsers = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kCat = acl::SLOW;
+constexpr uint32_t kGetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kDryRun = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kGenPass = acl::SLOW;
+constexpr uint32_t kHelp = acl::SLOW;
+
+// We can't implement the ACL commands and its respective subcommands LIST, CAT, etc
+// the usual way, (that is, one command called ACL which then dispatches to the subcommand
+// based on the second argument) because each of the subcommands has different ACL
+// categories. Therefore, to keep it compatible with the CommandId, I need to treat them
+// as separate commands in the registry. This is the least intrusive change because it's very
+// easy to handle that case explicitly in `DispatchCommand`.
+
+void AclFamily::Register(dfly::CommandRegistry* registry) {
+  using CI = dfly::CommandId;
+  const uint32_t kAclMask = CO::ADMIN | CO::NOSCRIPT | CO::LOADING;
+  registry->StartFamily();
+  *registry << CI{"ACL", CO::NOSCRIPT | CO::LOADING, 0, 0, 0, acl::kAcl}.HFUNC(Acl);
+  *registry << CI{"ACL LIST", kAclMask, 1, 0, 0, acl::kList}.HFUNC(List);
+  *registry << CI{"ACL SETUSER", kAclMask, -2, 0, 0, acl::kSetUser}.HFUNC(SetUser);
+  *registry << CI{"ACL DELUSER", kAclMask, -2, 0, 0, acl::kDelUser}.HFUNC(DelUser);
+  *registry << CI{"ACL WHOAMI", kAclMask, 1, 0, 0, acl::kWhoAmI}.HFUNC(WhoAmI);
+  *registry << CI{"ACL SAVE", kAclMask, 1, 0, 0, acl::kSave}.HFUNC(Save);
+  *registry << CI{"ACL LOAD", kAclMask, 1, 0, 0, acl::kLoad}.HFUNC(Load);
+  *registry << CI{"ACL LOG", kAclMask, 0, 0, 0, acl::kLog}.HFUNC(Log);
+  *registry << CI{"ACL USERS", kAclMask, 1, 0, 0, acl::kUsers}.HFUNC(Users);
+  *registry << CI{"ACL CAT", kAclMask, -1, 0, 0, acl::kCat}.HFUNC(Cat);
+  *registry << CI{"ACL GETUSER", kAclMask, 2, 0, 0, acl::kGetUser}.HFUNC(GetUser);
+  *registry << CI{"ACL DRYRUN", kAclMask, 3, 0, 0, acl::kDryRun}.HFUNC(DryRun);
+  *registry << CI{"ACL GENPASS", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kGenPass}.HFUNC(
+      GenPass);
+  *registry << CI{"ACL HELP", kAclMask, 0, 0, 0, acl::kHelp}.HFUNC(Help);
+  cmd_registry_ = registry;
+
+  // build indexers
+  BuildIndexers(cmd_registry_->GetFamilies());
+}
+
+#undef HFUNC
 
 }  // namespace dfly::acl

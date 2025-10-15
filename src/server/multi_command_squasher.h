@@ -28,11 +28,25 @@ class MultiCommandSquasher {
     unsigned max_squash_size = 32;  // How many commands to squash at once
   };
 
+  struct Stats {
+    uint32_t squashed_commands = 0;  // Total number of squashed commands
+    uint32_t hop_usec = 0;           // Total time spent in hops (microseconds)
+    uint32_t reply_usec = 0;         // Total time spent in replies (microseconds)
+    uint32_t hops = 0;               // Total number of hops executed
+    uint32_t yields = 0;
+    Stats& operator+=(const Stats& o);
+  };
+
   // Returns number of processed commands.
-  static size_t Execute(absl::Span<StoredCmd> cmds, facade::RedisReplyBuilder* rb,
-                        ConnectionContext* cntx, Service* service, const Opts& opts) {
-    return MultiCommandSquasher{cmds, cntx, service, opts}.Run(rb);
+  static Stats Execute(absl::Span<StoredCmd> cmds, facade::RedisReplyBuilder* rb,
+                       ConnectionContext* cntx, Service* service, const Opts& opts) {
+    MultiCommandSquasher sq{cmds, cntx, service, opts};
+    sq.Run(rb);
+    return sq.stats_;
   }
+
+  static void UpdateFromFlags();
+  static std::vector<std::string> GetMutableFlagNames();
 
  private:
   // Per-shard execution info.
@@ -52,7 +66,7 @@ class MultiCommandSquasher {
     boost::intrusive_ptr<Transaction> local_tx;  // stub-mode tx for use inside shard
   };
 
-  enum class SquashResult { SQUASHED, SQUASHED_FULL, NOT_SQUASHED, ERROR };
+  enum class SquashResult : uint8_t { SQUASHED, SQUASHED_FULL, NOT_SQUASHED, ERROR };
 
   MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx, Service* Service,
                        const Opts& opts);
@@ -72,8 +86,7 @@ class MultiCommandSquasher {
   // Execute all currently squashed commands. Return false if aborting on error.
   bool ExecuteSquashed(facade::RedisReplyBuilder* rb);
 
-  // Run all commands until completion. Returns number of processed commands.
-  size_t Run(facade::RedisReplyBuilder* rb);
+  void Run(facade::RedisReplyBuilder* rb);
 
   bool IsAtomic() const;
 
@@ -89,10 +102,10 @@ class MultiCommandSquasher {
   std::vector<ShardExecInfo> sharded_;
   std::vector<ShardId> order_;  // reply order for squashed cmds
 
-  size_t num_squashed_ = 0;
   size_t num_shards_ = 0;
 
   std::vector<MutableSlice> tmp_keylist_;
+  Stats stats_;
 };
 
 }  // namespace dfly

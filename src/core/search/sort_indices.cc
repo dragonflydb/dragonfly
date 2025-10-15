@@ -18,7 +18,10 @@ namespace dfly::search {
 
 using namespace std;
 
-namespace {}  // namespace
+namespace {
+template <typename T>
+using ScoreT = std::conditional_t<is_same_v<T, PMR_NS::string>, std::string, T>;
+}  // namespace
 
 template <typename T> bool SimpleValueSortIndex<T>::ParsedSortValue::HasValue() const {
   return !std::holds_alternative<std::monostate>(value);
@@ -29,33 +32,34 @@ template <typename T> bool SimpleValueSortIndex<T>::ParsedSortValue::IsNullValue
 }
 
 template <typename T>
-SimpleValueSortIndex<T>::SimpleValueSortIndex(PMR_NS::memory_resource* mr) : values_{mr} {
+SimpleValueSortIndex<T>::SimpleValueSortIndex(PMR_NS::memory_resource* mr)
+    : values_{mr}, occupied_(mr) {
 }
 
 template <typename T> SortableValue SimpleValueSortIndex<T>::Lookup(DocId doc) const {
-  if (null_values_.contains(doc)) {
+  DCHECK_LT(doc, occupied_.size());
+  if (!occupied_[doc])
     return std::monostate{};
-  }
 
   DCHECK_LT(doc, values_.size());
-  if constexpr (is_same_v<T, PMR_NS::string>) {
-    return std::string(values_[doc]);
-  } else {
-    return values_[doc];
-  }
+  return ScoreT<T>{values_[doc]};
 }
 
 template <typename T>
-std::vector<ResultScore> SimpleValueSortIndex<T>::Sort(std::vector<DocId>* ids, size_t limit,
-                                                       bool desc) const {
+std::vector<SortableValue> SimpleValueSortIndex<T>::Sort(std::vector<DocId>* ids, size_t limit,
+                                                         bool desc) const {
   auto cb = [this, desc](const auto& lhs, const auto& rhs) {
-    return desc ? (values_[lhs] > values_[rhs]) : (values_[lhs] < values_[rhs]);
+    // null values are at the end
+    auto p1 = make_pair(!occupied_[lhs], cref(values_[lhs]));
+    auto p2 = make_pair(!occupied_[rhs], cref(values_[rhs]));
+    return desc ? (p1 > p2) : (p1 < p2);
   };
   std::partial_sort(ids->begin(), ids->begin() + std::min(ids->size(), limit), ids->end(), cb);
 
-  vector<ResultScore> out(min(ids->size(), limit));
+  // Turn PMR string into std::string
+  vector<SortableValue> out(min(ids->size(), limit));
   for (size_t i = 0; i < out.size(); i++)
-    out[i] = values_[(*ids)[i]];
+    out[i] = ScoreT<T>{values_[(*ids)[i]]};
   return out;
 }
 
@@ -66,28 +70,38 @@ bool SimpleValueSortIndex<T>::Add(DocId id, const DocumentAccessor& doc, std::st
     return false;
   }
 
-  if (field_value.IsNullValue()) {
-    null_values_.insert(id);
-    return true;
+  if (id >= values_.size()) {
+    values_.resize(id + 1);
+    occupied_.resize(id + 1);
   }
 
-  if (id >= values_.size())
-    values_.resize(id + 1);
-
-  values_[id] = std::move(std::get<T>(field_value.value));
+  if (!field_value.IsNullValue()) {
+    values_[id] = std::move(std::get<T>(field_value.value));
+    occupied_[id] = true;
+  }
   return true;
 }
 
 template <typename T>
 void SimpleValueSortIndex<T>::Remove(DocId id, const DocumentAccessor& doc,
                                      std::string_view field) {
-  if (auto it = null_values_.find(id); it != null_values_.end()) {
-    null_values_.erase(it);
-    return;
+  DCHECK_LT(id, values_.size());
+  DCHECK_EQ(values_.size(), occupied_.size());
+  values_[id] = T{};
+  occupied_[id] = false;
+}
+
+template <typename T>
+std::vector<DocId> SimpleValueSortIndex<T>::GetAllDocsWithNonNullValues() const {
+  std::vector<DocId> result;
+  result.reserve(values_.size());
+
+  for (DocId id = 0; id < values_.size(); ++id) {
+    if (occupied_[id])
+      result.push_back(id);
   }
 
-  DCHECK_LT(id, values_.size());
-  values_[id] = T{};
+  return result;
 }
 
 template <typename T> PMR_NS::memory_resource* SimpleValueSortIndex<T>::GetMemRes() const {

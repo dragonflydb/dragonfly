@@ -15,6 +15,10 @@ using namespace std;
 
 namespace {
 
+#ifdef WITH_SIMSIMD
+#include <simsimd/simsimd.h>
+#endif
+
 #if defined(__GNUC__) && !defined(__clang__)
 #define FAST_MATH __attribute__((optimize("fast-math")))
 #else
@@ -23,14 +27,40 @@ namespace {
 
 // Euclidean vector distance: sqrt( sum: (u[i] - v[i])^2  )
 FAST_MATH float L2Distance(const float* u, const float* v, size_t dims) {
+#ifdef WITH_SIMSIMD
+  simsimd_distance_t distance = 0;
+  simsimd_l2_f32(u, v, dims, &distance);
+  return static_cast<float>(distance);
+#else
   float sum = 0;
   for (size_t i = 0; i < dims; i++)
     sum += (u[i] - v[i]) * (u[i] - v[i]);
   return sqrt(sum);
+#endif
 }
 
-// TODO: Normalize vectors ahead if cosine distance is used
+// Inner product distance: 1 - dot_product(u, v)
+// For normalized vectors, this is equivalent to cosine distance
+FAST_MATH float IPDistance(const float* u, const float* v, size_t dims) {
+#ifdef WITH_SIMSIMD
+  // Use SimSIMD dot product and convert to inner product distance: 1 - dot(u, v).
+  simsimd_distance_t dot = 0;
+  simsimd_dot_f32(u, v, dims, &dot);
+  return 1.0f - static_cast<float>(dot);
+#else
+  float sum_uv = 0;
+  for (size_t i = 0; i < dims; i++)
+    sum_uv += u[i] * v[i];
+  return 1.0f - sum_uv;
+#endif
+}
+
 FAST_MATH float CosineDistance(const float* u, const float* v, size_t dims) {
+#ifdef WITH_SIMSIMD
+  simsimd_distance_t distance = 0;
+  simsimd_cos_f32(u, v, dims, &distance);
+  return static_cast<float>(distance);
+#else
   float sum_uv = 0, sum_uu = 0, sum_vv = 0;
   for (size_t i = 0; i < dims; i++) {
     sum_uv += u[i] * v[i];
@@ -41,6 +71,7 @@ FAST_MATH float CosineDistance(const float* u, const float* v, size_t dims) {
   if (float denom = sum_uu * sum_vv; denom != 0.0f)
     return 1 - sum_uv / sqrt(denom);
   return 0.0f;
+#endif
 }
 
 OwnedFtVector ConvertToFtVector(string_view value) {
@@ -71,10 +102,18 @@ float VectorDistance(const float* u, const float* v, size_t dims, VectorSimilari
   switch (sim) {
     case VectorSimilarity::L2:
       return L2Distance(u, v, dims);
+    case VectorSimilarity::IP:
+      return IPDistance(u, v, dims);
     case VectorSimilarity::COSINE:
       return CosineDistance(u, v, dims);
   };
   return 0.0f;
+}
+
+void InitSimSIMD() {
+#if defined(WITH_SIMSIMD)
+  (void)simsimd_capabilities();
+#endif
 }
 
 }  // namespace dfly::search
