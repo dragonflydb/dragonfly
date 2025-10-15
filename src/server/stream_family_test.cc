@@ -1311,4 +1311,13 @@ TEST_F(StreamFamilyTest, XClaimWithNonExistentGroup) {
   EXPECT_THAT(resp, ArrLen(0));
 }
 
+TEST_F(StreamFamilyTest, XDelNonExistentId) {
+  string key = R"(k1 "v1" k2 "v2 with spaces" "k3 with spaces" "v3")";
+  Run({"XADD", key, "0", "set1", "member1"});
+
+  // Try to delete a non-existent ID - should not crash (issue #5202)
+  auto resp = Run({"XDEL", key, "46-867"});
+  EXPECT_THAT(resp, IntArg(0));  // Nothing deleted
+}
+
 }  // namespace dfly
