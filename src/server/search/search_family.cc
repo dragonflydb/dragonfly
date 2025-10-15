@@ -1153,15 +1153,10 @@ void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) 
       auto op_args = t->GetOpArgs(es);
       auto& db_slice = op_args.GetDbSlice();
 
-      for (const auto& [key_with_db, doc_id] : doc_keys) {
-        auto [db_ind, key] = key_with_db;
-
-        DbContext doc_db_cntx = op_args.db_cntx;
-        doc_db_cntx.db_index = db_ind;
-
-        auto it = db_slice.FindMutable(doc_db_cntx, key).it;
+      for (const auto& [key, doc_id] : doc_keys) {
+        auto it = db_slice.FindMutable(op_args.db_cntx, key).it;
         if (IsValid(it)) {
-          db_slice.Del(doc_db_cntx, it);
+          db_slice.Del(op_args.db_cntx, it);
         }
       }
     }

@@ -29,35 +29,27 @@ namespace {
 template <typename F>
 void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
   auto& db_slice = op_args.GetDbSlice();
+  DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
+  auto [prime_table, _] = db_slice.GetTables(op_args.db_cntx.db_index);
 
-  for (DbIndex db_ind = 0; db_ind < db_slice.db_array_size(); ++db_ind) {
-    if (!db_slice.IsDbValid(db_ind))
-      continue;
+  string scratch;
+  auto cb = [&](PrimeTable::iterator it) {
+    const PrimeValue& pv = it->second;
+    if (pv.ObjType() != index.GetObjCode())
+      return;
 
-    auto [prime_table, _] = db_slice.GetTables(db_ind);
+    string_view key = it->first.GetSlice(&scratch);
+    if (key.rfind(index.prefix, 0) != 0)
+      return;
 
-    DbContext db_cntx = op_args.db_cntx;
-    db_cntx.db_index = db_ind;
+    auto accessor = GetAccessor(op_args.db_cntx, pv);
+    f(key, *accessor);
+  };
 
-    string scratch;
-    auto cb = [&](PrimeTable::iterator it) {
-      const PrimeValue& pv = it->second;
-      if (pv.ObjType() != index.GetObjCode())
-        return;
-
-      string_view key = it->first.GetSlice(&scratch);
-      if (key.rfind(index.prefix, 0) != 0)
-        return;
-
-      auto accessor = GetAccessor(db_cntx, pv);
-      f(key, db_ind, *accessor);
-    };
-
-    PrimeTable::Cursor cursor;
-    do {
-      cursor = prime_table->Traverse(cursor, cb);
-    } while (cursor);
-  }
+  PrimeTable::Cursor cursor;
+  do {
+    cursor = prime_table->Traverse(cursor, cb);
+  } while (cursor);
 }
 
 bool IsSortableField(std::string_view field_identifier, const search::Schema& schema) {
@@ -207,41 +199,38 @@ string DocIndexInfo::BuildRestoreCommand() const {
   return out;
 }
 
-ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::Add(string_view key, DbIndex db_index) {
-  KeyWithDb key_with_db = {db_index, string(key)};
-  DCHECK_EQ(ids_.count(key_with_db), 0u);
+ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::Add(string_view key) {
+  DCHECK_EQ(ids_.count(key), 0u);
 
   DocId id;
   if (!free_ids_.empty()) {
     id = free_ids_.back();
     free_ids_.pop_back();
-    keys_[id] = key_with_db;
+    keys_[id] = key;
   } else {
     id = last_id_++;
     DCHECK_EQ(keys_.size(), id);
-    keys_.emplace_back(key_with_db);
+    keys_.emplace_back(key);
   }
 
-  ids_[std::move(key_with_db)] = id;
+  ids_[key] = id;
   return id;
 }
 
-std::optional<ShardDocIndex::DocId> ShardDocIndex::DocKeyIndex::Remove(string_view key,
-                                                                       DbIndex db_index) {
-  KeyWithDb key_with_db = {db_index, string(key)};
-  auto it = ids_.extract(key_with_db);
+std::optional<ShardDocIndex::DocId> ShardDocIndex::DocKeyIndex::Remove(string_view key) {
+  auto it = ids_.extract(key);
   if (!it) {
     return std::nullopt;
   }
 
   const DocId id = it.mapped();
-  keys_[id] = {0, ""};
+  keys_[id] = "";
   free_ids_.push_back(id);
 
   return id;
 }
 
-ShardDocIndex::DocKeyIndex::KeyWithDb ShardDocIndex::DocKeyIndex::Get(DocId id) const {
+string_view ShardDocIndex::DocKeyIndex::Get(DocId id) const {
   DCHECK_LT(id, keys_.size());
   // Check that this id was not removed
   DCHECK(id < last_id_ && std::find(free_ids_.begin(), free_ids_.end(), id) == free_ids_.end());
@@ -269,10 +258,10 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) 
   key_index_ = DocKeyIndex{};
   indices_.emplace(base_->schema, base_->options, mr, &synonyms_);
 
-  auto cb = [this](string_view key, DbIndex db_ind, const BaseAccessor& doc) {
-    DocId id = key_index_.Add(key, db_ind);
+  auto cb = [this](string_view key, const BaseAccessor& doc) {
+    DocId id = key_index_.Add(key);
     if (!indices_->Add(id, doc)) {
-      key_index_.Remove(key, db_ind);
+      key_index_.Remove(key);
     }
   };
 
@@ -303,23 +292,18 @@ void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_vie
   }
 
   auto& db_slice = op_args.GetDbSlice();
+  DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
 
   auto update_indices = [&](bool remove) {
     for (DocId doc_id : docs_to_rebuild) {
-      auto [db_ind, key] = key_index_.Get(doc_id);
-
-      DCHECK(db_slice.IsDbValid(db_ind));
-
-      DbContext doc_db_cntx = op_args.db_cntx;
-      doc_db_cntx.db_index = db_ind;
-
-      auto it = db_slice.FindReadOnly(doc_db_cntx, key, base_->GetObjCode());
+      std::string_view key = key_index_.Get(doc_id);
+      auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
 
       if (!it || !IsValid(*it)) {
         continue;
       }
 
-      auto accessor = GetAccessor(doc_db_cntx, (*it)->second);
+      auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
       if (remove) {
         indices_->Remove(doc_id, *accessor);
       } else {
@@ -340,9 +324,9 @@ void ShardDocIndex::AddDoc(string_view key, const DbContext& db_cntx, const Prim
     return;
 
   auto accessor = GetAccessor(db_cntx, pv);
-  DocId id = key_index_.Add(key, db_cntx.db_index);
+  DocId id = key_index_.Add(key);
   if (!indices_->Add(id, *accessor)) {
-    key_index_.Remove(key, db_cntx.db_index);
+    key_index_.Remove(key);
   }
 }
 
@@ -351,7 +335,7 @@ void ShardDocIndex::RemoveDoc(string_view key, const DbContext& db_cntx, const P
     return;
 
   auto accessor = GetAccessor(db_cntx, pv);
-  auto id = key_index_.Remove(key, db_cntx.db_index);
+  auto id = key_index_.Remove(key);
   if (id) {
     indices_->Remove(id.value(), *accessor);
   }
@@ -364,8 +348,7 @@ bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
 optional<ShardDocIndex::LoadedEntry> ShardDocIndex::LoadEntry(DocId id,
                                                               const OpArgs& op_args) const {
   auto& db_slice = op_args.GetDbSlice();
-  auto [db_ind_stored, key] = key_index_.Get(id);
-
+  string_view key = key_index_.Get(id);
   auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
   if (!it || !IsValid(*it))
     return std::nullopt;
@@ -469,26 +452,20 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     float knn_score = result.knn_scores.empty() ? 0 : result.knn_scores[i].second;
     auto sort_score = sort_scores.empty() ? std::monostate{} : std::move(sort_scores[i]);
 
-    auto [db_ind_stored, key] = key_index_.Get(result.ids[i]);
-
     // Don't load entry if we need only its key. Ignore expiration.
     if (params.IdsOnly()) {
+      string_view key = key_index_.Get(result.ids[i]);
       out.push_back({string{key}, {}, knn_score, sort_score});
       continue;
     }
 
     auto entry = LoadEntry(result.ids[i], op_args);
-
     if (!entry) {
-      if (db_ind_stored != op_args.db_cntx.db_index) {
-        out.push_back({string{key}, {}, knn_score, sort_score});
-      } else {
-        expired_count++;
-      }
+      expired_count++;
       continue;
     }
 
-    auto& [loaded_key, accessor] = *entry;
+    auto& [key, accessor] = *entry;
 
     // Load all specified fields from document
     SearchDocData fields{};
