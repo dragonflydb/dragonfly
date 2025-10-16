@@ -58,13 +58,56 @@ TEST_F(HSetFamilyTest, Basic) {
 }
 
 TEST_F(HSetFamilyTest, HSet) {
-  string val(1024, 'b');
+  // Simulate HSET on mirror map
+  {
+    absl::flat_hash_map<string, string> mirror;  // mirror
 
-  EXPECT_EQ(1, CheckedInt({"hset", "large", "a", val}));
-  EXPECT_EQ(1, CheckedInt({"hlen", "large"}));
-  EXPECT_EQ(1024, CheckedInt({"hstrlen", "large", "a"}));
+    // Generate HSET commands and check how many new entries were added
+    absl::InsecureBitGen gen{};
+    while (mirror.size() < 600) {
+      vector<string> cmd = {"HSET", "hash"};
+      size_t new_values = 0;
+      for (int i = 0; i < 20; i++) {
+        string key = GetRandomHex(gen, 3);
+        string value = GetRandomHex(gen, 20, 10);
+        new_values += mirror.contains(key) ? 0 : 1;
+        mirror[key] = value;
 
-  EXPECT_EQ(1, CheckedInt({"hset", "small", "", "565323349817"}));
+        cmd.emplace_back(key);
+        cmd.emplace_back(value);
+      }
+
+      EXPECT_THAT(Run(cmd), IntArg(new_values));
+    }
+
+    // Verify consistency
+    EXPECT_THAT(Run({"HLEN", "hash"}), IntArg(mirror.size()));
+    for (const auto& [key, value] : mirror)
+      EXPECT_EQ(Run({"HGET", "hash", key}), mirror[key]);
+  }
+
+  // HSet with same key twice
+  Run({"HSET", "hash", "key1", "value1", "key1", "value2"});
+  EXPECT_EQ(Run({"HGET", "hash", "key1"}), "value2");
+
+  // Wrong value cases
+  EXPECT_THAT(Run({"HSET", "key"}), ErrArg("wrong number of arguments"));
+  EXPECT_THAT(Run({"HSET", "key", "key"}), ErrArg("wrong number of arguments"));
+  EXPECT_THAT(Run({"HSET", "key", "key", "value", "key2"}), ErrArg("wrong number of arguments"));
+}
+
+TEST_F(HSetFamilyTest, HSetNX) {
+  // Should create new field
+  EXPECT_THAT(Run({"HSETNX", "hash", "key1", "value1"}), IntArg(1));
+  EXPECT_EQ(Run({"HGET", "hash", "key1"}), "value1");
+
+  // Should not overwrite
+  EXPECT_THAT(Run({"HSETNX", "hash", "key1", "value2"}), IntArg(0));
+  EXPECT_EQ(Run({"HGET", "hash", "key1"}), "value1");
+
+  // Wrong value cases
+  EXPECT_THAT(Run({"HSETNX", "key"}), ErrArg("wrong number of arguments"));
+  EXPECT_THAT(Run({"HSET", "key", "key"}), ErrArg("wrong number of arguments"));
 }
 
 TEST_P(HestFamilyTestProtocolVersioned, Get) {
@@ -101,24 +144,22 @@ TEST_P(HestFamilyTestProtocolVersioned, Get) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "b", "2", "c", "3"));
 }
 
-TEST_F(HSetFamilyTest, HSetNx) {
-  EXPECT_EQ(1, CheckedInt({"hsetnx", "key", "field", "val"}));
-  EXPECT_EQ(Run({"hget", "key", "field"}), "val");
-
-  EXPECT_EQ(0, CheckedInt({"hsetnx", "key", "field", "val2"}));
-  EXPECT_EQ(Run({"hget", "key", "field"}), "val");
-
-  EXPECT_EQ(1, CheckedInt({"hsetnx", "key", "field2", "val2"}));
-  EXPECT_EQ(Run({"hget", "key", "field2"}), "val2");
-
-  // check dict path
-  EXPECT_EQ(0, CheckedInt({"hsetnx", "key", "field2", string(512, 'a')}));
-  EXPECT_EQ(Run({"hget", "key", "field2"}), "val2");
-}
-
-TEST_F(HSetFamilyTest, HIncr) {
+TEST_F(HSetFamilyTest, HIncrBy) {
+  int total = 10;
+  // Check new field is created
   EXPECT_EQ(10, CheckedInt({"hincrby", "key", "field", "10"}));
+  EXPECT_EQ(Run({"hget", "key", "field"}), "10");
+  // Simulate multiple additions
+  for (int i = -100; i < 100; i += 7) {
+    total += i;
+    EXPECT_EQ(total, CheckedInt({"hincrby", "key", "field", to_string(i)}));
+  }
 
+  // Overflow
+  Run({"hset", "key", "field2", to_string(numeric_limits<int64_t>::max() - 1)});
+  EXPECT_THAT(Run({"hincrby", "key", "field2", "2"}), ErrArg("would overflow"));
+
+  // Error case
   Run({"hset", "key", "a", " 1"});
   auto resp = Run({"hincrby", "key", "a", "10"});
   EXPECT_THAT(resp, ErrArg("hash value is not an integer"));
