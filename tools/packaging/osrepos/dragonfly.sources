@@ -1,0 +1,5 @@
+Types: deb
+URIs: http://{placeholder}/deb
+Suites: noble
+Components: main
+Signed-By: /usr/share/keyrings/dragonfly-keyring.public

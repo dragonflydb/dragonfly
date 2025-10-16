@@ -1,0 +1,6 @@
+[dragonfly]
+name=Dragonfly Packages
+baseurl=https://{placeholder}/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://{placeholder}/pgp-key.public
