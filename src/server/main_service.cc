@@ -159,15 +159,13 @@ struct ShutdownWatchdog {
 };
 
 ShutdownWatchdog::ShutdownWatchdog(util::ProactorPool& pp) : pool{pp} {
-  watchdog_fb = pool.GetNextProactor()->LaunchFiber([&] {
-    util::ThisFiber::SetName("shutdown-watchdog");
-
+  watchdog_fb = pool.GetNextProactor()->LaunchFiber("shutdown_watchdog", [&] {
     if (!watchdog_done.WaitFor(20s)) {
       LOG(ERROR) << "Deadlock detected during shutdown";
       absl::SetFlag(&FLAGS_alsologtostderr, true);
       util::fb2::Mutex m;
       pool.AwaitFiberOnAll([&m](unsigned index, auto*) {
-        util::ThisFiber::SetName("shutdown-watchdog");
+        util::ThisFiber::SetName(absl::StrFormat("print_stack_fib_%u", index));
         std::unique_lock lk(m);
         LOG(ERROR) << "Proactor " << index << ":\n";
         util::fb2::detail::FiberInterface::PrintAllFiberStackTraces();
@@ -181,7 +179,7 @@ void ShutdownWatchdog::Disarm() {
   watchdog_fb.JoinIfNeeded();
 }
 
-std::optional<ShutdownWatchdog> swd = std::nullopt;
+std::optional<ShutdownWatchdog> shutdown_watchdog = std::nullopt;
 
 }  // namespace
 
@@ -1113,6 +1111,9 @@ void Service::Shutdown() {
   cluster_family_.Shutdown();
 
   server_family_.Shutdown();
+
+  shutdown_watchdog.emplace(pp_);
+
   engine_varz.reset();
 
   ChannelStore::Destroy();
@@ -1127,7 +1128,7 @@ void Service::Shutdown() {
   ThisFiber::SleepFor(10ms);
   facade::Connection::Shutdown();
 
-  DisarmShutdownWatchdog();
+  shutdown_watchdog->Disarm();
 }
 
 OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, CmdArgList args) {
@@ -3105,18 +3106,6 @@ void Service::RegisterCommands() {
 const acl::AclFamily* Service::TestInit() {
   acl_family_.Init(nullptr, &user_registry_);
   return &acl_family_;
-}
-
-void ArmShutdownWatchdog(ProactorPool& pp) {
-  if (!swd.has_value()) {
-    swd.emplace(pp);
-  }
-}
-
-void DisarmShutdownWatchdog() {
-  if (swd.has_value()) {
-    swd->Disarm();
-  }
 }
 
 }  // namespace dfly
