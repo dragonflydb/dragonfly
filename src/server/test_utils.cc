@@ -429,7 +429,7 @@ RespExpr BaseFamilyTest::RunPrivileged(std::initializer_list<const std::string_v
   return res;
 }
 
-RespExpr BaseFamilyTest::Run(absl::Span<std::string> span) {
+RespExpr BaseFamilyTest::Run(absl::Span<const std::string> span) {
   vector<string_view> sv_vec(span.size());
   for (unsigned i = 0; i < span.size(); ++i) {
     sv_vec[i] = span[i];
