@@ -398,6 +398,8 @@ class DbSlice::PrimeBumpPolicy {
 DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
     : shard_id_(index),
       cache_mode_(cache_mode),
+      expire_allowed_(1),
+      expire_gen_id_(0),
       owner_(owner),
       client_tracking_map_(owner->memory_resource()) {
   db_arr_.emplace_back();

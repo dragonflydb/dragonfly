@@ -301,6 +301,8 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect
   return page_usage.CollectedStats();
 }
 
+constexpr uint32_t kRunAtLowPriority = 0u;
+
 // the memory defragmentation task is as follow:
 //  1. Check if memory usage is high enough
 //  2. Check if diff between commited and used memory is high enough
@@ -310,7 +312,6 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect
 //     priority.
 //     otherwise lower the task priority so that it would not use the CPU when not required
 uint32_t EngineShard::DefragTask() {
-  constexpr uint32_t kRunAtLowPriority = 0u;
   if (!namespaces) {
     return kRunAtLowPriority;
   }
@@ -324,6 +325,65 @@ uint32_t EngineShard::DefragTask() {
     }
   }
   return 6;  // priority.
+}
+
+// TODO: this is wrong. we can do better by updating the expire base in DeleteExpiredStep.
+uint32_t EngineShard::UpdateExpiresTask() {
+  if (!namespaces) {
+    return kRunAtLowPriority;
+  }
+
+  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
+  uint64_t now_ms = GetCurrentTimeMs();
+
+  if (update_expire_state_ == nullptr) {
+    ExpirePeriod period = db_slice.FromAbsoluteTime(now_ms);
+    if (period.duration_ms() < 1000 * 3600 * 24) {
+      // no need to update expire base if period is less than a day.
+      return kRunAtLowPriority;
+    }
+    db_slice.NextExpireGen(now_ms);
+    update_expire_state_ = new UpdateExpireState();
+    VLOG(1) << "shard " << shard_id_ << " updated expire base to " << now_ms
+            << ", generation: " << db_slice.expire_gen_id();
+  }
+
+  DCHECK(update_expire_state_ != nullptr);
+  if (update_expire_state_->db_index < db_slice.db_array_size()) {
+    unsigned current_gen_id = db_slice.expire_gen_id();
+    auto cb = [&](ExpireIterator it) {
+      if (it->second.generation_id() != current_gen_id) {
+        int64_t ms = db_slice.ExpireTime(it->second);
+        if (ms <= int64_t(now_ms)) {
+          // TODO: we've stumbled upon an expired entry, delete it.
+        } else {
+          it->second = db_slice.FromAbsoluteTime(ms);
+        }
+      }
+    };
+
+    auto& expire_table = db_slice.GetDBTable(update_expire_state_->db_index)->expire;
+    auto next = expire_table.Traverse(detail::DashCursor(update_expire_state_->cursor), cb);
+    if (next) {
+      update_expire_state_->cursor = next.token();
+    } else {
+      // finished this db, move to the next
+      update_expire_state_->cursor = 0;
+      ++update_expire_state_->db_index;
+      while (update_expire_state_->db_index < db_slice.db_array_size() &&
+             !db_slice.IsDbValid(update_expire_state_->db_index)) {
+        ++update_expire_state_->db_index;
+      }
+    }
+  }
+
+  if (update_expire_state_->db_index >= db_slice.db_array_size()) {
+    delete update_expire_state_;
+    update_expire_state_ = nullptr;
+    return kRunAtLowPriority;
+  }
+
+  return 5;  // run again soon, moderate frequency.
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
@@ -347,6 +407,8 @@ void EngineShard::Shutdown() {
 
 void EngineShard::StopPeriodicFiber() {
   ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
+  ProactorBase::me()->RemoveOnIdleTask(update_expire_base_task_);
+
   fiber_heartbeat_periodic_done_.Notify();
   if (fiber_heartbeat_periodic_.IsJoinable()) {
     fiber_heartbeat_periodic_.Join();
@@ -394,6 +456,7 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
     RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
   });
   defrag_task_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
+  update_expire_base_task_ = pb->AddOnIdleTask([this]() { return UpdateExpiresTask(); });
 }
 
 void EngineShard::StartPeriodicShardHandlerFiber(util::ProactorBase* pb,
