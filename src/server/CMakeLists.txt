@@ -25,8 +25,8 @@ set_property(SOURCE dfly_main.cc APPEND PROPERTY COMPILE_DEFINITIONS
              SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
 
 if (WITH_TIERING)
-    SET(TX_LINUX_SRCS tiering/disk_storage.cc tiering/op_manager.cc tiering/small_bins.cc
-      tiering/external_alloc.cc tiering/decoders.cc)
+    SET(TX_LINUX_SRCS tiering/disk_storage.cc tiering/op_manager.cc
+      tiering/small_bins.cc tiering/external_alloc.cc tiering/serialized_map.cc tiering/decoders.cc)
 
     add_executable(dfly_bench dfly_bench.cc)
     cxx_link(dfly_bench dfly_parser_lib fibers2 absl::random_random redis_lib)
@@ -34,6 +34,7 @@ if (WITH_TIERING)
     cxx_test(tiering/op_manager_test dfly_test_lib LABELS DFLY)
     cxx_test(tiering/small_bins_test dfly_test_lib LABELS DFLY)
     cxx_test(tiering/external_alloc_test dfly_test_lib LABELS DFLY)
+    cxx_test(tiering/serialized_map_test dfly_test_lib LABELS DFLY)
 endif()
 
 # Optionally include command families as needed
