@@ -17,7 +17,6 @@ extern "C" {
 using namespace testing;
 using namespace std;
 using namespace util;
-using namespace boost;
 using namespace facade;
 
 namespace dfly {
@@ -110,6 +109,26 @@ TEST_F(HSetFamilyTest, HSetNX) {
   EXPECT_THAT(Run({"HSET", "key", "key"}), ErrArg("wrong number of arguments"));
 }
 
+// Listpack handles integers separately, so create a mix of different types
+TEST_F(HSetFamilyTest, MixedTypes) {
+  absl::flat_hash_set<string> str_keys, int_keys;
+  for (int i = 0; i < 100; i++) {
+    auto key1 = absl::StrCat("s", i);
+    auto key2 = absl::StrCat("i", i);
+    Run({"HSET", "hash", key1, "VALUE", key2, "123456"});
+    str_keys.emplace(key1);
+    int_keys.emplace(key2);
+  }
+
+  for (string_view key : str_keys)
+    EXPECT_EQ(Run({{"HGET", "hash", key}}), "VALUE");
+
+  for (string_view key : int_keys) {
+    EXPECT_EQ(Run({{"HGET", "hash", key}}), "123456");
+    EXPECT_EQ(CheckedInt({"hincrby", "hash", key, "1"}), 123456 + 1);
+  }
+}
+
 TEST_P(HestFamilyTestProtocolVersioned, Get) {
   auto resp = Run({"hello", GetParam()});
   EXPECT_THAT(resp.GetVec()[6], "proto");
@@ -147,12 +166,12 @@ TEST_P(HestFamilyTestProtocolVersioned, Get) {
 TEST_F(HSetFamilyTest, HIncrBy) {
   int total = 10;
   // Check new field is created
-  EXPECT_EQ(10, CheckedInt({"hincrby", "key", "field", "10"}));
+  EXPECT_EQ(CheckedInt({"hincrby", "key", "field", "10"}), 10);
   EXPECT_EQ(Run({"hget", "key", "field"}), "10");
   // Simulate multiple additions
   for (int i = -100; i < 100; i += 7) {
     total += i;
-    EXPECT_EQ(total, CheckedInt({"hincrby", "key", "field", to_string(i)}));
+    EXPECT_EQ(CheckedInt({"hincrby", "key", "field", to_string(i)}), total);
   }
 
   // Overflow
