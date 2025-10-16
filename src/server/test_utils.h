@@ -81,7 +81,7 @@ class BaseFamilyTest : public ::testing::Test {
   RespExpr RunPrivileged(std::initializer_list<const std::string_view> list);
 
   RespExpr Run(ArgSlice list);
-  RespExpr Run(absl::Span<const std::string> list);
+  RespExpr Run(absl::Span<std::string> list);
 
   RespExpr Run(std::string_view id, ArgSlice list);
 

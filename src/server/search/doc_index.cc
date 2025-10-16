@@ -16,6 +16,7 @@
 #include "server/engine_shard_set.h"
 #include "server/family_utils.h"
 #include "server/search/doc_accessors.h"
+#include "server/search/global_vector_index.h"
 #include "server/server_state.h"
 
 namespace dfly {
@@ -236,6 +237,11 @@ string_view ShardDocIndex::DocKeyIndex::Get(DocId id) const {
   DCHECK(id < last_id_ && std::find(free_ids_.begin(), free_ids_.end(), id) == free_ids_.end());
 
   return keys_[id];
+}
+
+std::optional<ShardDocIndex::DocId> ShardDocIndex::DocKeyIndex::Find(string_view key) const {
+  auto it = ids_.find(key);
+  return it != ids_.end() ? std::make_optional(it->second) : std::nullopt;
 }
 
 size_t ShardDocIndex::DocKeyIndex::Size() const {
@@ -679,8 +685,11 @@ void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index)
 }
 
 void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
-  for (auto& [_, ptr] : indices_)
+  for (auto& [index_name, ptr] : indices_) {
     ptr->Rebuild(op_args, &local_mr_);
+    // PoC: Also rebuild global vector indices
+    ptr->RebuildGlobalVectorIndices(index_name, op_args);
+  }
 }
 
 vector<string> ShardDocIndices::GetIndexNames() const {
@@ -693,17 +702,23 @@ vector<string> ShardDocIndices::GetIndexNames() const {
 
 void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
   DCHECK(IsIndexedKeyType(pv));
-  for (auto& [_, index] : indices_) {
-    if (index->Matches(key, pv.ObjType()))
+  for (auto& [index_name, index] : indices_) {
+    if (index->Matches(key, pv.ObjType())) {
       index->AddDoc(key, db_cntx, pv);
+      // PoC: Also add to global vector index if document has vector fields
+      index->AddDocToGlobalVectorIndex(index_name, key, db_cntx, pv);
+    }
   }
 }
 
 void ShardDocIndices::RemoveDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
   DCHECK(IsIndexedKeyType(pv));
-  for (auto& [_, index] : indices_) {
-    if (index->Matches(key, pv.ObjType()))
+  for (auto& [index_name, index] : indices_) {
+    if (index->Matches(key, pv.ObjType())) {
+      // PoC: Remove from global vector index first (before local removal)
+      index->RemoveDocFromGlobalVectorIndex(index_name, key, db_cntx, pv);
       index->RemoveDoc(key, db_cntx, pv);
+    }
   }
 }
 
@@ -717,6 +732,84 @@ SearchStats ShardDocIndices::GetStats() const {
     total_entries += index->GetInfo().num_docs;
 
   return {GetUsedMemory(), indices_.size(), total_entries};
+}
+
+// PoC: Global vector index integration
+void ShardDocIndex::AddDocToGlobalVectorIndex(std::string_view index_name, std::string_view key,
+                                              const DbContext& db_cntx, const PrimeValue& pv) {
+  if (!indices_)
+    return;
+
+  auto accessor = GetAccessor(db_cntx, pv);
+  auto local_id = key_index_.Find(key);
+  if (!local_id)
+    return;
+
+  GlobalDocId global_id{EngineShard::tlocal()->shard_id(), *local_id};
+
+  for (const auto& [field_ident, field_info] : base_->schema.fields) {
+    if (field_info.type == search::SchemaField::VECTOR &&
+        !(field_info.flags & search::SchemaField::NOINDEX)) {
+      if (auto vector_info = accessor->GetVector(field_ident); vector_info && vector_info->first) {
+        const auto& vparams =
+            std::get<search::SchemaField::VectorParams>(field_info.special_params);
+        auto global_index = GlobalVectorIndexRegistry::Instance().GetOrCreateVectorIndex(
+            index_name, field_info.short_name, vparams);
+        global_index->AddVector(global_id, key, vector_info->first.get());
+      }
+    }
+  }
+}
+
+void ShardDocIndex::RemoveDocFromGlobalVectorIndex(std::string_view index_name,
+                                                   std::string_view key, const DbContext& db_cntx,
+                                                   const PrimeValue& pv) {
+  if (!indices_)
+    return;
+
+  auto local_id = key_index_.Find(key);
+  if (!local_id)
+    return;
+
+  GlobalDocId global_id{EngineShard::tlocal()->shard_id(), *local_id};
+
+  for (const auto& [field_ident, field_info] : base_->schema.fields) {
+    if (field_info.type == search::SchemaField::VECTOR &&
+        !(field_info.flags & search::SchemaField::NOINDEX)) {
+      if (auto global_index = GlobalVectorIndexRegistry::Instance().GetVectorIndex(
+              index_name, field_info.short_name)) {
+        global_index->RemoveVector(global_id, key);
+      }
+    }
+  }
+}
+
+void ShardDocIndex::RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args) {
+  if (!indices_)
+    return;
+
+  auto cb = [this, index_name](string_view key, const BaseAccessor& doc) {
+    auto local_id = key_index_.Find(key);
+    if (!local_id)
+      return;
+
+    GlobalDocId global_id{EngineShard::tlocal()->shard_id(), *local_id};
+
+    for (const auto& [field_ident, field_info] : base_->schema.fields) {
+      if (field_info.type == search::SchemaField::VECTOR &&
+          !(field_info.flags & search::SchemaField::NOINDEX)) {
+        if (auto vector_info = doc.GetVector(field_ident); vector_info && vector_info->first) {
+          const auto& vparams =
+              std::get<search::SchemaField::VectorParams>(field_info.special_params);
+          auto global_index = GlobalVectorIndexRegistry::Instance().GetOrCreateVectorIndex(
+              index_name, field_info.short_name, vparams);
+          global_index->AddVector(global_id, key, vector_info->first.get());
+        }
+      }
+    }
+  };
+
+  TraverseAllMatching(*base_, op_args, cb);
 }
 
 }  // namespace dfly
