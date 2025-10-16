@@ -693,11 +693,16 @@ error_code Replica::ConsumeRedisStream() {
   };
   RETURN_ON_ERR(exec_st_.SwitchErrorHandler(std::move(err_handler)));
 
-  facade::CmdArgVec args_vector;
+  CmdArgVec args_vector;
 
   acks_fb_ = fb2::Fiber("redis_acks", &Replica::RedisStreamAcksFb, this);
 
   while (true) {
+    // Yield if the fiber has been running for long.
+    if (base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) > 1000) {  // 1ms
+      ThisFiber::Yield();
+    }
+
     auto response = ReadRespReply(&io_buf, /*copy_msg=*/false);
     if (!response.has_value()) {
       LOG_REPL_ERROR("Error in Redis Stream at phase "
@@ -753,11 +758,6 @@ error_code Replica::ConsumeDflyStream() {
     multi_shard_exe_->CancelAllBlockingEntities();
   };
   RETURN_ON_ERR(exec_st_.SwitchErrorHandler(std::move(err_handler)));
-
-  size_t total_flows_to_finish_partial = 0;
-  for (const auto& flow : thread_flow_map_) {
-    total_flows_to_finish_partial += flow.size();
-  }
 
   LOG(INFO) << "Transitioned into stable sync";
   // Transition flows into stable sync.

@@ -35,7 +35,7 @@ COPY tools/docker/healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY --from=builder /build/build-release/dragonfly /usr/local/bin/
 
 RUN apk --no-cache add libgcc libstdc++  \
-     setpriv netcat-openbsd boost-context && ldd /usr/local/bin/dragonfly
+     setpriv netcat-openbsd boost-context tini && ldd /usr/local/bin/dragonfly
 
 RUN addgroup -S -g 1000 dfly && adduser -S -G dfly -u 999 dfly
 RUN mkdir /data && chown dfly:dfly /data
@@ -44,7 +44,9 @@ VOLUME /data
 WORKDIR /data
 
 HEALTHCHECK CMD /usr/local/bin/healthcheck.sh
-ENTRYPOINT ["entrypoint.sh"]
+
+# Use tini as PID 1 to properly reap zombie processes (issue #5844)
+ENTRYPOINT ["/sbin/tini", "--", "entrypoint.sh"]
 
 EXPOSE 6379
 

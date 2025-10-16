@@ -481,9 +481,9 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   // to overwrite the key. However, if the set is empty it means we should delete the
   // key if it exists.
   if (overwrite && (vals_it.begin() == vals_it.end())) {
-    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
-    if (IsValid(it)) {
-      db_slice.Del(op_args.db_cntx, it);
+    auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SET);
+    if (res_it) {
+      db_slice.DelMutable(op_args.db_cntx, std::move(*res_it));
       if (journal_update && op_args.shard->journal()) {
         RecordJournal(op_args, "DEL"sv, ArgSlice{key});
       }
@@ -506,6 +506,12 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   }
 
   if (add_res.is_new || overwrite) {
+    // If we're overwriting an existing key (not a new one), we need to remove it from
+    // search indexes first. This prevents crashes when the key is indexed (e.g., HASH or JSON).
+    if (!add_res.is_new && overwrite) {
+      RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, co, op_args.shard);
+    }
+
     // does not store the values, merely sets the encoding.
     // TODO: why not store the values as well?
     InitSet(vals, &co);
@@ -926,8 +932,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     });
 
     // Delete the set as it is now empty
-    find_res->post_updater.Run();
-    db_slice.Del(op_args.db_cntx, find_res->it);
+    db_slice.DelMutable(op_args.db_cntx, std::move(*find_res));
 
     // Replicate as DEL.
     if (op_args.shard->journal()) {

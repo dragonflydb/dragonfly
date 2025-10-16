@@ -32,6 +32,10 @@ class SdsPair {
     return this;
   }
 
+  operator std::pair<std::string_view, std::string_view>() const {
+    return {{first, sdslen(first)}, {second, sdslen(second)}};
+  }
+
   const sds first;
   const sds second;
 };
