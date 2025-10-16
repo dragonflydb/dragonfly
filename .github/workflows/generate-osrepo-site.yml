@@ -1,5 +1,6 @@
 name: generate-site
-on: [ push ]
+on:
+  workflow_dispatch:
 
 jobs:
   gen-site:
@@ -14,9 +15,11 @@ jobs:
         run: sudo apt install -y rpm gpg createrepo-c dpkg-dev reprepro
 
       - name: Setup requirements
+        working-directory: tools/packaging/osrepos
         run: pip install -r requirements.txt
 
       - name: Download packages
+        working-directory: tools/packaging/osrepos
         run: python scripts/fetch-releases.py
 
       - name: Import GPG key
@@ -27,40 +30,30 @@ jobs:
 
       - name: Sign RPMs
         shell: sh
+        working-directory: tools/packaging/osrepos
         run: sh scripts/sign-rpms.sh ${{ steps.gpg-import.outputs.fingerprint }}
 
       - name: Create YUM repository
         shell: sh
+        working-directory: tools/packaging/osrepos
         run: createrepo_c -v _site/rpm
 
       - name: Sign YUM repository
         shell: sh
+        working-directory: tools/packaging/osrepos
         run: gpg --armor --detach-sign _site/rpm/repodata/repomd.xml
 
       - name: Create APT repository
         shell: sh
+        working-directory: tools/packaging/osrepos
         run: sh -x scripts/generate-apt-repo.sh
 
       - name: Prepare assets
+        working-directory: tools/packaging/osrepos
         run: |
           cp -aRv dragonfly.repo pgp-key.public dragonfly.sources _site/
           rm -rf _site/deb/conf
 
       - name: Generate Directory Listings
+        working-directory: tools/packaging/osrepos
         run: python scripts/generate-index.py
-
-  deploy:
-    needs: gen-site
-    permissions:
-      pages: write
-      id-token: write
-
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
-    runs-on: ubuntu-latest
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4.0.0
