@@ -10,6 +10,7 @@
 #include <variant>
 
 #include "server/tiering/common.h"
+#include "server/tiering/decoders.h"
 #include "server/tiering/disk_storage.h"
 #include "server/tx_base.h"
 #include "util/fibers/future.h"
@@ -36,19 +37,6 @@ class OpManager {
   using EntryId = std::variant<unsigned, KeyRef>;
   using OwnedEntryId = std::variant<unsigned, std::pair<DbIndex, std::string>>;
 
-  using FetchedEntry = std::pair<std::string* /* ptr */, bool /* raw */>;
-
-  // Callback for post-read completion. Returns whether the value was modified.
-  // We use fu2 function to allow moveable semantics. The arguments are:
-  // bool - true if the string is raw as it was extracted from the prime value.
-  // string* - the string that may potentially be modified by the callbacks that subsribed to this
-  //           read. The callback run in the same order as the order of invocation, guaranteeing
-  //           consistent read after modifications.
-  using ReadCallback =
-      fu2::function_base<true /*owns*/, false /*moveable*/, fu2::capacity_fixed<40, 8>,
-                         false /* non-throwing*/, false /* strong exceptions guarantees*/,
-                         bool(io::Result<FetchedEntry>)>;
-
   explicit OpManager(size_t max_size);
   virtual ~OpManager();
 
@@ -60,7 +48,14 @@ class OpManager {
   // Enqueue callback to be executed once value is read. Trigger read if none is pending yet for
   // this segment. Multiple entries can be obtained from a single segment, but every distinct id
   // will have it's own independent callback loop that can safely modify the underlying value
-  void Enqueue(EntryId id, DiskSegment segment, ReadCallback cb);
+  template <typename D, typename F>
+  void Enqueue(EntryId id, DiskSegment segment, const D& decoder, F&& cb) {
+    static_assert(std::is_base_of_v<Decoder, D>);
+    auto erased_cb = [cb = std::forward<F>(cb)](io::Result<Decoder*> res) mutable {
+      cb(res.transform([](Decoder* ptr) { return static_cast<D*>(ptr); }));
+    };
+    EnqueueInternal(id, segment, decoder, std::move(erased_cb));
+  }
 
   // Delete entry with pending io
   void Delete(EntryId id);
@@ -74,14 +69,21 @@ class OpManager {
   Stats GetStats() const;
 
  protected:
+  using ReadCallback =
+      fu2::function_base<true /*owns*/, false /*moveable*/, fu2::capacity_fixed<40, 8>,
+                         false /* non-throwing*/, false /* strong exceptions guarantees*/,
+                         void(io::Result<Decoder*>)>;
+
+  // Type erased continuation of Enqueue
+  void EnqueueInternal(EntryId id, DiskSegment segment, const Decoder& decoder, ReadCallback cb);
+
   // Notify that a stash succeeded and the entry was stored at the provided segment or failed with
   // given error
   virtual void NotifyStashed(EntryId id, const io::Result<DiskSegment>& segment) = 0;
 
   // Notify that an entry was successfully fetched. Includes whether entry was modified.
   // Returns true if value needs to be deleted from the storage.
-  virtual bool NotifyFetched(EntryId id, std::string_view value, DiskSegment segment,
-                             bool modified) = 0;
+  virtual bool NotifyFetched(EntryId id, DiskSegment segment, Decoder*) = 0;
 
   // Notify delete. Return true if the filled segment needs to be marked as free.
   virtual bool NotifyDelete(DiskSegment segment) = 0;
@@ -89,12 +91,12 @@ class OpManager {
  protected:
   // Describes pending futures for a single entry
   struct EntryOps {
-    EntryOps(OwnedEntryId id, DiskSegment segment) : id(std::move(id)), segment(segment) {
-    }
+    EntryOps(OwnedEntryId id, DiskSegment segment, const Decoder& decoder);
 
     OwnedEntryId id;
     DiskSegment segment;
     absl::InlinedVector<ReadCallback, 1> callbacks;
+    std::unique_ptr<Decoder> decoder;
     bool deleting = false;
   };
 
@@ -104,7 +106,7 @@ class OpManager {
     }
 
     // Get ops for id or create new
-    EntryOps& ForSegment(DiskSegment segment, EntryId id);
+    EntryOps& ForSegment(DiskSegment segment, EntryId id, const Decoder& decoder);
 
     // Find if there are operations for the given segment, return nullptr otherwise
     EntryOps* Find(DiskSegment segment);
