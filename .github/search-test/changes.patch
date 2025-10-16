@@ -1,0 +1,30 @@
+diff --git a/tests/pytests/common.py b/tests/pytests/common.py
+index 059b637c7..88b5a7351 100644
+--- a/tests/pytests/common.py
++++ b/tests/pytests/common.py
+@@ -210,15 +210,16 @@ def server_version_less_than(env: Env, ver):
+     return not server_version_at_least(env, ver)
+
+ def server_version_is_at_least(ver):
+-    global server_ver
+-    if server_ver is None:
+-        import subprocess
+-        # Expecting something like "Redis server v=7.2.3 sha=******** malloc=jemalloc-5.3.0 bits=64 build=***************"
+-        v = subprocess.run([Defaults.binary, '--version'], stdout=subprocess.PIPE).stdout.decode().split()[2].split('=')[1]
+-        server_ver = version.parse(v)
+-    if not isinstance(ver, version.Version):
+-        ver = version.parse(ver)
+-    return server_ver >= ver
++    return True
++    #global server_ver
++    #if server_ver is None:
++    #    import subprocess
++    #    # Expecting something like "Redis server v=7.2.3 sha=******** malloc=jemalloc-5.3.0 bits=64 build=***************"
++    #    v = subprocess.run([Defaults.binary, '--version'], stdout=subprocess.PIPE).stdout.decode().split()[2].split('=')[1]
++    #    server_ver = version.parse(v)
++    #if not isinstance(ver, version.Version):
++    #    ver = version.parse(ver)
++    #return server_ver >= ver
+
+ def server_version_is_less_than(ver):
+     return not server_version_is_at_least(ver)
