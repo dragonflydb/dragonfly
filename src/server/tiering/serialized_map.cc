@@ -48,10 +48,12 @@ size_t SerializedMap::size() const {
   return size_;
 }
 
+constexpr size_t kLenBytes = 4;
+
 size_t SerializedMap::SerializeSize(Input input) {
-  size_t out = 4;  // 4 byte number of entries
+  size_t out = kLenBytes;  // number of entries
   for (const auto& [key, value] : input)
-    out += 8 + key.size() + value.size();  // two 4 byte lengths
+    out += kLenBytes * 2 /* string lengts */ + key.size() + value.size();
   return out;
 }
 
@@ -59,13 +61,13 @@ size_t SerializedMap::Serialize(Input input, absl::Span<char> buffer) {
   DCHECK_GE(buffer.size(), SerializeSize(input));
   char* ptr = buffer.data();
   absl::little_endian::Store32(ptr, input.size());
-  ptr += 4;
+  ptr += kLenBytes;
 
   for (const auto& [key, value] : input) {
     absl::little_endian::Store32(ptr, key.length());
-    ptr += 4;
+    ptr += kLenBytes;
     absl::little_endian::Store32(ptr, value.length());
-    ptr += 4;
+    ptr += kLenBytes;
     memcpy(ptr, key.data(), key.length());
     ptr += key.length();
     memcpy(ptr, value.data(), value.length());
