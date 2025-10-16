@@ -754,11 +754,6 @@ error_code Replica::ConsumeDflyStream() {
   };
   RETURN_ON_ERR(exec_st_.SwitchErrorHandler(std::move(err_handler)));
 
-  size_t total_flows_to_finish_partial = 0;
-  for (const auto& flow : thread_flow_map_) {
-    total_flows_to_finish_partial += flow.size();
-  }
-
   LOG(INFO) << "Transitioned into stable sync";
   // Transition flows into stable sync.
   {

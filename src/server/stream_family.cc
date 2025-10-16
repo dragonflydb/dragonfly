@@ -1596,9 +1596,11 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<stre
     } else if (first_entry) {
       streamGetEdgeID(stream_inst, 1, 1, &stream_inst->first_id);
     }
+    // Only update size tracking if we actually deleted something.
+    // This avoids issues with memory tracking noise from other operations
+    // in the same thread.
+    tracker.UpdateStreamSize(cobj);
   }
-
-  tracker.UpdateStreamSize(cobj);
   return deleted;
 }
 
@@ -2583,13 +2585,24 @@ void XReadGeneric2(CmdArgList args, bool read_group, Transaction* tx, SinkReplyB
       }
     }
   } else {
-    rb->StartArray(resolved_streams);
-    for (size_t i = 0; i < results.size(); i++) {
-      if (results[i].empty())
-        continue;
-      string_view key = ArgS(args, i + opts->streams_arg);
-      rb->StartArray(2);
-      StreamReplies{builder}.SendStreamRecords(key, results[i]);
+    if (rb->IsResp3()) {
+      rb->StartCollection(resolved_streams, RedisReplyBuilder::CollectionType::MAP);
+      for (size_t i = 0; i < results.size(); ++i) {
+        if (results[i].empty()) {
+          continue;
+        }
+        string_view key = ArgS(args, i + opts->streams_arg);
+        StreamReplies{builder}.SendStreamRecords(key, results[i]);
+      }
+    } else {
+      rb->StartArray(resolved_streams);
+      for (size_t i = 0; i < results.size(); i++) {
+        if (results[i].empty())
+          continue;
+        string_view key = ArgS(args, i + opts->streams_arg);
+        rb->StartArray(2);
+        StreamReplies{builder}.SendStreamRecords(key, results[i]);
+      }
     }
   }
 }

@@ -169,6 +169,12 @@ OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams
   auto& it = add_res.it;
   PrimeValue& pv = it->second;
   if (add_res.is_new || zparams.override) {
+    // If we're overwriting an existing key (not a new one), we need to remove it from
+    // search indexes first. This prevents crashes when the key is indexed (e.g., HASH or JSON).
+    if (!add_res.is_new && zparams.override) {
+      RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, pv, op_args.shard);
+    }
+
     if (member_len > server.max_map_field_len) {
       pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_SKIPLIST, CompactObj::AllocateMR<detail::SortedMap>());
     } else {
@@ -1045,7 +1051,6 @@ void BZPopMinMax(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
   }
   VLOG(1) << "BZPop timeout(" << timeout << ")";
 
-  std::string dinfo;
   optional<std::string> callback_ran_key;
   OpResult<ScoredArray> popped_array;
   auto cb = [is_max, &popped_array, &callback_ran_key](Transaction* t, EngineShard* shard,
@@ -1055,19 +1060,15 @@ void BZPopMinMax(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
   };
 
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      tx, OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked, &cntx->paused, &dinfo);
+      tx, OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked, &cntx->paused);
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (popped_key) {
     if (!callback_ran_key) {
-      LOG(ERROR) << "BUG: Callback didn't run! " << popped_key.value() << " " << dinfo;
       return rb->SendNullArray();
     }
 
-    DVLOG(1) << "BZPop " << tx->DebugId() << " popped from key " << popped_key;  // key.
-    CHECK(popped_array.ok()) << dinfo;
-    CHECK_EQ(popped_array->size(), 1u)
-        << popped_key << " ran " << *callback_ran_key << " info " << dinfo;
+    CHECK_EQ(popped_array->size(), 1u) << popped_key << " ran " << *callback_ran_key;
     rb->StartArray(3);
     rb->SendBulkString(*popped_key);
     rb->SendBulkString(popped_array->front().first);
@@ -1969,8 +1970,7 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
   if (zparams.override && members.empty()) {
     auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
     if (res_it && IsValid(res_it->it)) {
-      res_it->post_updater.Run();
-      db_slice.Del(op_args.db_cntx, res_it->it);
+      db_slice.DelMutable(op_args.db_cntx, std::move(*res_it));
       if (zparams.journal_update && op_args.shard->journal()) {
         RecordJournal(op_args, "DEL"sv, ArgSlice{key});
       }
@@ -2825,95 +2825,49 @@ void ZSetFamily::ZUnionStore(CmdArgList args, const CommandContext& cmd_cntx) {
 
 #define HFUNC(x) SetHandler(&ZSetFamily::x)
 
-namespace acl {
-constexpr uint32_t kZAdd = WRITE | SORTEDSET | FAST;
-constexpr uint32_t kBZPopMin = WRITE | SORTEDSET | FAST | BLOCKING;
-constexpr uint32_t kBZPopMax = WRITE | SORTEDSET | FAST | BLOCKING;
-constexpr uint32_t kZCard = READ | SORTEDSET | FAST;
-constexpr uint32_t kZCount = READ | SORTEDSET | FAST;
-constexpr uint32_t kZDiff = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZDiffStore = WRITE | SORTEDSET | SLOW;
-constexpr uint32_t kZIncrBy = WRITE | SORTEDSET | FAST;
-constexpr uint32_t kZInterStore = WRITE | SORTEDSET | SLOW;
-constexpr uint32_t kZInter = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZInterCard = WRITE | SORTEDSET | SLOW;
-constexpr uint32_t kZLexCount = READ | SORTEDSET | FAST;
-constexpr uint32_t kZMPop = WRITE | SORTEDSET | SLOW;
-constexpr uint32_t kBZMPop = WRITE | SORTEDSET | SLOW | BLOCKING;
-constexpr uint32_t kZPopMax = WRITE | SORTEDSET | FAST;
-constexpr uint32_t kZPopMin = WRITE | SORTEDSET | FAST;
-constexpr uint32_t kZRem = WRITE | SORTEDSET | FAST;
-constexpr uint32_t kZRange = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZRandMember = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZRank = READ | SORTEDSET | FAST;
-constexpr uint32_t kZRangeByLex = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZRangeByScore = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZRangeStore = WRITE | SORTEDSET | SLOW;
-constexpr uint32_t kZScore = READ | SORTEDSET | FAST;
-constexpr uint32_t kZMScore = READ | SORTEDSET | FAST;
-constexpr uint32_t kZRemRangeByRank = WRITE | SORTEDSET | SLOW;
-constexpr uint32_t kZRemRangeByScore = WRITE | SORTEDSET | SLOW;
-constexpr uint32_t kZRemRangeByLex = WRITE | SORTEDSET | SLOW;
-constexpr uint32_t kZRevRange = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZRevRangeByLex = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZRevRangeByScore = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZRevRank = READ | SORTEDSET | FAST;
-constexpr uint32_t kZScan = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZUnion = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZUnionStore = WRITE | SORTEDSET | SLOW;
-}  // namespace acl
-
 void ZSetFamily::Register(CommandRegistry* registry) {
   constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::DENYOOM | CO::NO_AUTOJOURNAL;
-  registry->StartFamily();
+  registry->StartFamily(acl::SORTEDSET);
   // TODO: to add support for SCRIPT for BZPOPMIN, BZPOPMAX similarly to BLPOP.
   *registry
-      << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1, acl::kZAdd}.HFUNC(ZAdd)
-      << CI{"BZPOPMIN",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2,
-            acl::kBZPopMin}
+      << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1}.HFUNC(ZAdd)
+      << CI{"BZPOPMIN", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}
              .HFUNC(BZPopMin)
-      << CI{"BZPOPMAX",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2,
-            acl::kBZPopMax}
+      << CI{"BZPOPMAX", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}
              .HFUNC(BZPopMax)
-      << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1, acl::kZCard}.HFUNC(ZCard)
-      << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1, acl::kZCount}.HFUNC(ZCount)
-      << CI{"ZDIFF", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZDiff}.HFUNC(ZDiff)
-      << CI{"ZDIFFSTORE", kStoreMask, -4, 3, 3, acl::kZDiffStore}.HFUNC(ZDiffStore)
-      << CI{"ZINCRBY", CO::FAST | CO::WRITE, 4, 1, 1, acl::kZIncrBy}.HFUNC(ZIncrBy)
-      << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3, acl::kZInterStore}.HFUNC(ZInterStore)
-      << CI{"ZINTER", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZInter}.HFUNC(ZInter)
-      << CI{"ZINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZInterCard}.HFUNC(
-             ZInterCard)
-      << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, acl::kZLexCount}.HFUNC(ZLexCount)
-      << CI{"ZMPOP", CO::WRITE | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2, acl::kZMPop}
-             .HFUNC(ZMPop)
-      << CI{"BZMPOP", CO::WRITE | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL,
-            -5,       3,
-            3,        acl::kBZMPop}
+      << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(ZCard)
+      << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1}.HFUNC(ZCount)
+      << CI{"ZDIFF", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZDiff)
+      << CI{"ZDIFFSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZDiffStore)
+      << CI{"ZINCRBY", CO::FAST | CO::WRITE, 4, 1, 1}.HFUNC(ZIncrBy)
+      << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZInterStore)
+      << CI{"ZINTER", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInter)
+      << CI{"ZINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInterCard)
+      << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1}.HFUNC(ZLexCount)
+      << CI{"ZMPOP", CO::WRITE | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(ZMPop)
+      << CI{"BZMPOP", CO::WRITE | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL, -5, 3, 3}
              .HFUNC(BZMPop)
-
-      << CI{"ZPOPMAX", CO::FAST | CO::WRITE, -2, 1, 1, acl::kZPopMax}.HFUNC(ZPopMax)
-      << CI{"ZPOPMIN", CO::FAST | CO::WRITE, -2, 1, 1, acl::kZPopMin}.HFUNC(ZPopMin)
-      << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1, acl::kZRem}.HFUNC(ZRem)
-      << CI{"ZRANGE", CO::READONLY, -4, 1, 1, acl::kZRange}.HFUNC(ZRange)
-      << CI{"ZRANDMEMBER", CO::READONLY, -2, 1, 1, acl::kZRandMember}.HFUNC(ZRandMember)
-      << CI{"ZRANK", CO::READONLY | CO::FAST, -3, 1, 1, acl::kZRank}.HFUNC(ZRank)
-      << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1, acl::kZRangeByLex}.HFUNC(ZRangeByLex)
-      << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1, acl::kZRangeByScore}.HFUNC(ZRangeByScore)
-      << CI{"ZRANGESTORE", CO::WRITE | CO::DENYOOM, -5, 1, 2, acl::kZRangeStore}.HFUNC(ZRangeStore)
-      << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1, acl::kZScore}.HFUNC(ZScore)
-      << CI{"ZMSCORE", CO::READONLY | CO::FAST, -3, 1, 1, acl::kZMScore}.HFUNC(ZMScore)
-      << CI{"ZREMRANGEBYRANK", CO::WRITE, 4, 1, 1, acl::kZRemRangeByRank}.HFUNC(ZRemRangeByRank)
-      << CI{"ZREMRANGEBYSCORE", CO::WRITE, 4, 1, 1, acl::kZRemRangeByScore}.HFUNC(ZRemRangeByScore)
-      << CI{"ZREMRANGEBYLEX", CO::WRITE, 4, 1, 1, acl::kZRemRangeByLex}.HFUNC(ZRemRangeByLex)
-      << CI{"ZREVRANGE", CO::READONLY, -4, 1, 1, acl::kZRevRange}.HFUNC(ZRevRange)
-      << CI{"ZREVRANGEBYLEX", CO::READONLY, -4, 1, 1, acl::kZRevRangeByLex}.HFUNC(ZRevRangeByLex)
-      << CI{"ZREVRANGEBYSCORE", CO::READONLY, -4, 1, 1, acl::kZRevRangeByScore}.HFUNC(
-             ZRevRangeByScore)
-      << CI{"ZREVRANK", CO::READONLY | CO::FAST, -3, 1, 1, acl::kZRevRank}.HFUNC(ZRevRank)
-      << CI{"ZSCAN", CO::READONLY, -3, 1, 1, acl::kZScan}.HFUNC(ZScan)
-      << CI{"ZUNION", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZUnion}.HFUNC(ZUnion)
-      << CI{"ZUNIONSTORE", kStoreMask, -4, 3, 3, acl::kZUnionStore}.HFUNC(ZUnionStore);
+      << CI{"ZPOPMAX", CO::FAST | CO::WRITE, -2, 1, 1}.HFUNC(ZPopMax)
+      << CI{"ZPOPMIN", CO::FAST | CO::WRITE, -2, 1, 1}.HFUNC(ZPopMin)
+      << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1}.HFUNC(ZRem)
+      << CI{"ZRANGE", CO::READONLY, -4, 1, 1}.HFUNC(ZRange)
+      << CI{"ZRANDMEMBER", CO::READONLY, -2, 1, 1}.HFUNC(ZRandMember)
+      << CI{"ZRANK", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZRank)
+      << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByLex)
+      << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByScore)
+      << CI{"ZRANGESTORE", CO::WRITE | CO::DENYOOM, -5, 1, 2}.HFUNC(ZRangeStore)
+      << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(ZScore)
+      << CI{"ZMSCORE", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZMScore)
+      << CI{"ZREMRANGEBYRANK", CO::WRITE, 4, 1, 1}.HFUNC(ZRemRangeByRank)
+      << CI{"ZREMRANGEBYSCORE", CO::WRITE, 4, 1, 1}.HFUNC(ZRemRangeByScore)
+      << CI{"ZREMRANGEBYLEX", CO::WRITE, 4, 1, 1}.HFUNC(ZRemRangeByLex)
+      << CI{"ZREVRANGE", CO::READONLY, -4, 1, 1}.HFUNC(ZRevRange)
+      << CI{"ZREVRANGEBYLEX", CO::READONLY, -4, 1, 1}.HFUNC(ZRevRangeByLex)
+      << CI{"ZREVRANGEBYSCORE", CO::READONLY, -4, 1, 1}.HFUNC(ZRevRangeByScore)
+      << CI{"ZREVRANK", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZRevRank)
+      << CI{"ZSCAN", CO::READONLY, -3, 1, 1}.HFUNC(ZScan)
+      << CI{"ZUNION", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZUnion)
+      << CI{"ZUNIONSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZUnionStore);
 }
 
 }  // namespace dfly

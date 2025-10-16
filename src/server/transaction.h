@@ -545,13 +545,6 @@ class Transaction {
 
   void UnlockMultiShardCb(absl::Span<const LockFp> fps, EngineShard* shard);
 
-  // In a multi-command transaction, we determine the number of shard journals that we wrote entries
-  // to by updating the shard_journal_write vector during command execution. The total number of
-  // shard journals written to can be found by summing the true values in the vector. This value is
-  // then written to each shard journal with the journal EXEC op, enabling replication to
-  // synchronize the multi-shard transaction.
-  uint32_t CalcMultiNumOfShardJournals() const;
-
   // Log command in shard's journal, if this is a write command with auto-journaling enabled.
   // Should be called immediately after the last hop.
   void LogAutoJournalOnShard(EngineShard* shard, RunnableResult shard_result);

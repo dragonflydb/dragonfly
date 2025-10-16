@@ -690,17 +690,19 @@ void EngineShard::RetireExpiredAndEvict() {
       auto [evicted_items, evicted_bytes] =
           db_slice.FreeMemWithEvictionStepAtomic(i, starting_segment_id, eviction_goal);
 
-      DVLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
-               << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
-               << " bytes. Max eviction per heartbeat: "
-               << GetFlag(FLAGS_max_eviction_per_heartbeat);
+      VLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
+              << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
+              << " bytes. Max eviction per heartbeat: "
+              << GetFlag(FLAGS_max_eviction_per_heartbeat);
 
       deleted_bytes += evicted_bytes;
       eviction_goal -= std::min(eviction_goal, evicted_bytes);
     }
   }
 
-  eviction_state_.deleted_bytes_before_rss_update += deleted_bytes;
+  // Track deleted bytes only if we expect to lower memory
+  if (eviction_state_.track_deleted_bytes)
+    eviction_state_.deleted_bytes_before_rss_update += deleted_bytes;
 }
 
 size_t EngineShard::CalculateEvictionBytes() {
@@ -718,9 +720,9 @@ size_t EngineShard::CalculateEvictionBytes() {
   size_t goal_bytes =
       CalculateHowManyBytesToEvictOnShard(limit, global_used_memory, shard_memory_budget_threshold);
 
-  VLOG_IF_EVERY_N(1, goal_bytes > 0, 50)
-      << "Used memory goal bytes: " << goal_bytes << ", used memory: " << global_used_memory
-      << ", memory limit: " << max_memory_limit;
+  VLOG_IF(2, goal_bytes > 0) << "Used memory goal bytes: " << goal_bytes
+                             << ", used memory: " << global_used_memory
+                             << ", memory limit: " << max_memory_limit;
 
   // Check for `enable_heartbeat_rss_eviction` flag since it dynamic. And reset
   // state if flag has changed.
@@ -739,26 +741,45 @@ size_t EngineShard::CalculateEvictionBytes() {
       auto decrease_delete_bytes_before_rss_update =
           std::min(deleted_bytes_before_rss_update,
                    (global_rss_memory_at_prev_eviction - global_used_rss_memory) / shards_count);
-      VLOG_EVERY_N(1, 50) << "deleted_bytes_before_rss_update: " << deleted_bytes_before_rss_update
-                          << " decrease_delete_bytes_before_rss_update: "
-                          << decrease_delete_bytes_before_rss_update;
+      VLOG(2) << "deleted_bytes_before_rss_update: " << deleted_bytes_before_rss_update
+              << " decrease_delete_bytes_before_rss_update: "
+              << decrease_delete_bytes_before_rss_update;
       deleted_bytes_before_rss_update -= decrease_delete_bytes_before_rss_update;
     }
 
     global_rss_memory_at_prev_eviction = global_used_rss_memory;
 
+    LOG_IF(DFATAL, global_used_rss_memory < (deleted_bytes_before_rss_update * shards_count))
+        << "RSS evicition underflow "
+        << "global_used_rss_memory: " << global_used_rss_memory
+        << " deleted_bytes_before_rss_update: " << deleted_bytes_before_rss_update;
+
+    // If we underflow use limit as used_memory
+    size_t used_rss_memory_with_deleted_bytes =
+        std::min(global_used_rss_memory - deleted_bytes_before_rss_update * shards_count, limit);
+
     // Try to evict more bytes if we are close to the rss memory limit
     const size_t rss_goal_bytes = CalculateHowManyBytesToEvictOnShard(
-        limit, global_used_rss_memory - deleted_bytes_before_rss_update * shards_count,
-        shard_memory_budget_threshold);
+        limit, used_rss_memory_with_deleted_bytes, shard_memory_budget_threshold);
 
-    VLOG_IF_EVERY_N(1, rss_goal_bytes > 0, 50)
+    // RSS evictions starts so we should start tracking deleted_bytes
+    if (rss_goal_bytes) {
+      eviction_state_.track_deleted_bytes = true;
+    } else {
+      // There is no RSS eviction goal and we have cleared tracked deleted bytes
+      if (!deleted_bytes_before_rss_update) {
+        eviction_state_.track_deleted_bytes = false;
+      }
+    }
+
+    VLOG_IF(2, rss_goal_bytes > 0)
         << "Rss memory goal bytes: " << rss_goal_bytes
         << ", rss used memory: " << global_used_rss_memory << ", rss memory limit: " << limit
         << ", deleted_bytes_before_rss_update: " << deleted_bytes_before_rss_update;
 
     goal_bytes = std::max(goal_bytes, rss_goal_bytes);
   }
+
   return goal_bytes;
 }
 

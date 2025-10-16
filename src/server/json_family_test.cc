@@ -2632,6 +2632,16 @@ TEST_F(JsonFamilyTest, MGetLegacy) {
   EXPECT_THAT(resp.GetVec(), ElementsAre(R"(3)", R"(6)"));
 }
 
+TEST_F(JsonFamilyTest, DebugHelp) {
+  auto resp = Run({"JSON.DEBUG", "HELP"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_EQ(resp.GetVec().size(), 3);
+
+  EXPECT_THAT(resp.GetVec()[0].GetString(), HasSubstr("MEMORY"));
+  EXPECT_THAT(resp.GetVec()[1].GetString(), HasSubstr("FIELDS"));
+  EXPECT_THAT(resp.GetVec()[2].GetString(), HasSubstr("HELP"));
+}
+
 TEST_F(JsonFamilyTest, DebugFields) {
   string json = R"(
     [1, 2.3, "foo", true, null, {}, [], {"a":1, "b":2}, [1,2,3]]
@@ -2714,6 +2724,80 @@ TEST_F(JsonFamilyTest, DebugFieldsLegacy) {
 
   resp = Run({"JSON.DEBUG", "fields", "obj_doc", ".a"});
   EXPECT_THAT(resp, IntArg(1));
+}
+
+TEST_F(JsonFamilyTest, DebugMemory) {
+  auto resp = Run({"JSON.SET", "json1", "$",
+                   R"([1, 2.3, "foo", true, null, {}, [], {"a":1, "b":2}, [1,2,3]])"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "memory", "json1", "$[*]"});
+  EXPECT_EQ(resp.type, RespExpr::ARRAY);
+  EXPECT_EQ(resp.GetVec().size(), 9);
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 0);
+  EXPECT_EQ(resp.GetVec()[1].GetInt(), 0);
+  EXPECT_EQ(resp.GetVec()[2].GetInt(), 0);
+  EXPECT_EQ(resp.GetVec()[3].GetInt(), 0);
+  EXPECT_EQ(resp.GetVec()[4].GetInt(), 0);
+  EXPECT_GE(resp.GetVec()[5].GetInt(), 0);
+  EXPECT_GE(resp.GetVec()[6].GetInt(), 0);
+  EXPECT_GT(resp.GetVec()[7].GetInt(), 0);
+  EXPECT_GT(resp.GetVec()[8].GetInt(), 0);
+
+  resp = Run({"JSON.DEBUG", "memory", "json1", "$"});
+  EXPECT_GT(resp.GetInt(), 0);
+
+  resp = Run({"JSON.SET", "bigstr", "$",
+              R"({"text":"This is a longer string that should definitely exceed SSO buffer"})"});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"JSON.DEBUG", "memory", "bigstr", "$.text"});
+  EXPECT_GT(resp.GetInt(), 0);
+
+  resp = Run({"JSON.SET", "obj_doc", "$", R"({"num":42, "obj":{"k1":1,"k2":2}})"});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"JSON.DEBUG", "MEMORY", "obj_doc", "$.num"});
+  EXPECT_EQ(resp.GetInt(), 0);
+  resp = Run({"JSON.DEBUG", "memory", "obj_doc", "$.obj"});
+  EXPECT_GT(resp.GetInt(), 0);
+}
+
+TEST_F(JsonFamilyTest, DebugMemoryLegacy) {
+  auto resp = Run({"JSON.SET", "json1", "$",
+                   R"([1, 2.3, "foo", true, null, {}, [], {"a":1, "b":2}, [1,2,3]])"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "memory", "json1", "."});
+  EXPECT_EQ(resp.type, RespExpr::INT64);
+  EXPECT_GT(resp.GetInt(), 0);
+
+  resp = Run({"JSON.DEBUG", "memory", "json1"});
+  EXPECT_EQ(resp.type, RespExpr::INT64);
+  EXPECT_GT(resp.GetInt(), 0);
+
+  resp = Run({"JSON.SET", "primitives", "$", R"({"num":42, "bool":true, "null":null})"});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"JSON.DEBUG", "memory", "primitives", ".num"});
+  EXPECT_EQ(resp.GetInt(), 0);
+  resp = Run({"JSON.DEBUG", "memory", "primitives", ".bool"});
+  EXPECT_EQ(resp.GetInt(), 0);
+  resp = Run({"JSON.DEBUG", "memory", "primitives", ".null"});
+  EXPECT_EQ(resp.GetInt(), 0);
+
+  resp = Run({"JSON.SET", "obj_doc", "$",
+              R"({"longstring":"This is a very long string that definitely exceeds SSO buffer"})"});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"JSON.DEBUG", "MEMORY", "obj_doc", ".longstring"});
+  EXPECT_GT(resp.GetInt(), 0);
+
+  resp = Run({"JSON.SET", "arr", "$", R"([1,2,3,4,5,6,7,8,9,10])"});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"JSON.DEBUG", "memory", "arr", "."});
+  EXPECT_GT(resp.GetInt(), 0);
+
+  resp = Run({"JSON.SET", "obj", "$", R"({"a":1, "b":2, "c":3})"});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"JSON.DEBUG", "memory", "obj", "."});
+  EXPECT_GT(resp.GetInt(), 0);
 }
 
 TEST_F(JsonFamilyTest, Resp) {

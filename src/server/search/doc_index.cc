@@ -323,6 +323,10 @@ void ShardDocIndex::AddDoc(string_view key, const DbContext& db_cntx, const Prim
   if (!indices_)
     return;
 
+  // Only index documents from database 0
+  if (db_cntx.db_index != 0)
+    return;
+
   auto accessor = GetAccessor(db_cntx, pv);
   DocId id = key_index_.Add(key);
   if (!indices_->Add(id, *accessor)) {
@@ -332,6 +336,10 @@ void ShardDocIndex::AddDoc(string_view key, const DbContext& db_cntx, const Prim
 
 void ShardDocIndex::RemoveDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
   if (!indices_)
+    return;
+
+  // Only handle documents from database 0
+  if (db_cntx.db_index != 0)
     return;
 
   auto accessor = GetAccessor(db_cntx, pv);
@@ -645,15 +653,16 @@ void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
       });
 }
 
-bool ShardDocIndices::DropIndex(string_view name) {
+unique_ptr<ShardDocIndex> ShardDocIndices::DropIndex(string_view name) {
   auto it = indices_.find(name);
   if (it == indices_.end())
-    return false;
+    return nullptr;
 
   DropIndexCache(*it->second);
+  auto index = std::move(it->second);
   indices_.erase(it);
 
-  return true;
+  return index;
 }
 
 void ShardDocIndices::DropAllIndices() {

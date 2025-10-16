@@ -227,24 +227,25 @@ TEST_F(SearchFamilyTest, CreateDropDifferentDatabases) {
       Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "doc-", "SCHEMA", "name", "TEXT"});
   EXPECT_EQ(resp, "OK");
 
+  // Add some data on database 0 (only db 0 is indexed)
+  Run({"hset", "doc-0", "name", "Name of 0"});
+
+  // Verify search works on db 0
+  resp = Run({"ft.search", "idx-1", "*"});
+  EXPECT_THAT(resp, IsMapWithSize("doc-0", IsMap("name", "Name of 0")));
+
   EXPECT_EQ(Run({"select", "1"}), "OK");  // change database
 
   // Creating an index on non zero database must fail
   resp = Run({"ft.create", "idx-2", "ON", "JSON", "PREFIX", "1", "prefix-2"});
   EXPECT_THAT(resp, ErrArg("ERR Cannot create index on db != 0"));
 
-  // Add some data to the index
-  Run({"hset", "doc-0", "name", "Name of 0"});
-
-  // ft.search must work on the another database
+  // Search from db 1 should return 0 results (only db 0 is indexed)
   resp = Run({"ft.search", "idx-1", "*"});
-  EXPECT_THAT(resp, IsMapWithSize("doc-0", IsMap("name", "Name of 0")));
+  EXPECT_THAT(resp, IntArg(0));
 
-  // ft.dropindex must work on the another database
+  // ft.dropindex must work from another database
   EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
-
-  EXPECT_THAT(Run({"ft.info", "idx-1"}), ErrArg("ERR Unknown Index name"));
-  EXPECT_EQ(Run({"select", "0"}), "OK");
   EXPECT_THAT(Run({"ft.info", "idx-1"}), ErrArg("ERR Unknown Index name"));
 }
 
@@ -543,6 +544,18 @@ TEST_F(SearchFamilyTest, TagOptions) {
   EXPECT_THAT(Run({"ft.search", "i1", "@color:{green}"}), AreDocIds("d:1", "d:4"));
   EXPECT_THAT(Run({"ft.search", "i1", "@color:{GReeN}"}), AreDocIds("d:2"));
   EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), AreDocIds("d:2", "d:4"));
+}
+
+TEST_F(SearchFamilyTest, SymbolsInTag) {
+  Run({"FT.CREATE", "demo_idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "tags", "TAG"});
+  Run({"HSET", "doc:1", "name", "First Item", "tags", "@first"});
+  Run({"HSET", "doc:2", "name", "Second Item", "tags", "?second"});
+  Run({"HSET", "doc:3", "name", "Third Item", "tags", ":third"});
+  Run({"HSET", "doc:4", "name", "Fourth Item", "tags", "\"fourth"});
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{\?second})"}), AreDocIds("doc:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{\@first})"}), AreDocIds("doc:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{\:third})"}), AreDocIds("doc:3"));
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{\"fourth})"}), AreDocIds("doc:4"));
 }
 
 TEST_F(SearchFamilyTest, TagNumbers) {
@@ -3350,6 +3363,145 @@ TEST_F(SearchFamilyTest, InvalidConfigOptions) {
   // Test with an invalid argument
   resp = Run({"FT.CONFIG", "HELP", "INVALIDARG"});
   EXPECT_THAT(resp, IsArray());
+}
+
+TEST_F(SearchFamilyTest, DropIndexWithDD) {
+  // Create an index on HASH documents
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "name", "TEXT"});
+
+  // Add some documents
+  Run({"HSET", "doc:1", "name", "Alice"});
+  Run({"HSET", "doc:2", "name", "Bob"});
+  Run({"HSET", "doc:3", "name", "Charlie"});
+
+  // Verify documents exist
+  auto resp = Run({"EXISTS", "doc:1", "doc:2", "doc:3"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  // Verify index works
+  resp = Run({"FT.SEARCH", "idx", "*"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3"));
+
+  // Drop index WITHOUT DD - documents should remain
+  Run({"FT.DROPINDEX", "idx"});
+  resp = Run({"EXISTS", "doc:1", "doc:2", "doc:3"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  // Create index again
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "name", "TEXT"});
+
+  // Verify index works again
+  resp = Run({"FT.SEARCH", "idx", "*"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3"));
+
+  // Drop index WITH DD - documents should be deleted
+  Run({"FT.DROPINDEX", "idx", "DD"});
+  resp = Run({"EXISTS", "doc:1", "doc:2", "doc:3"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
+TEST_F(SearchFamilyTest, DropIndexWithDDJson) {
+  // Create an index on JSON documents
+  Run({"FT.CREATE", "jidx", "ON", "JSON", "PREFIX", "1", "jdoc:", "SCHEMA", "$.name", "AS", "name",
+       "TEXT"});
+
+  // Add some JSON documents
+  Run({"JSON.SET", "jdoc:1", "$", R"({"name": "Alice"})"});
+  Run({"JSON.SET", "jdoc:2", "$", R"({"name": "Bob"})"});
+  Run({"JSON.SET", "jdoc:3", "$", R"({"name": "Charlie"})"});
+
+  // Verify documents exist
+  auto resp = Run({"EXISTS", "jdoc:1", "jdoc:2", "jdoc:3"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  // Verify index works
+  resp = Run({"FT.SEARCH", "jidx", "*"});
+  EXPECT_THAT(resp, AreDocIds("jdoc:1", "jdoc:2", "jdoc:3"));
+
+  // Drop index WITH DD - documents should be deleted
+  Run({"FT.DROPINDEX", "jidx", "DD"});
+  resp = Run({"EXISTS", "jdoc:1", "jdoc:2", "jdoc:3"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
+TEST_F(SearchFamilyTest, DropIndexWithInvalidOption) {
+  // Create an index
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "name", "TEXT"});
+  Run({"HSET", "doc:1", "name", "test"});
+
+  // Drop with unrecognized option (should be ignored, index dropped but documents remain)
+  auto resp = Run({"FT.DROPINDEX", "idx", "INVALID"});
+  EXPECT_THAT(resp, "OK");
+
+  // Document should still exist
+  resp = Run({"EXISTS", "doc:1"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // Clean up
+  Run({"DEL", "doc:1"});
+}
+
+TEST_F(SearchFamilyTest, ZsetStoreCommandsOverwriteIndexedHash) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "field", "TEXT"});
+  EXPECT_THAT(Run({"ZADD", "zset1", "1", "a", "2", "b"}), IntArg(2));
+  EXPECT_THAT(Run({"ZADD", "zset2", "1.5", "a", "3", "c"}), IntArg(2));
+
+  // Test ZINTERSTORE
+  EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
+  EXPECT_THAT(Run({"ZINTERSTORE", "dest", "2", "zset1", "zset2"}), IntArg(1));
+  EXPECT_EQ(Run({"RENAME", "dest", "x"}), "OK");
+
+  // Test ZUNIONSTORE
+  EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
+  EXPECT_THAT(Run({"ZUNIONSTORE", "dest", "2", "zset1", "zset2"}), IntArg(3));
+  EXPECT_EQ(Run({"RENAME", "dest", "y"}), "OK");
+}
+
+TEST_F(SearchFamilyTest, SetStoreCommandsOverwriteIndexedHash) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "field", "TEXT"});
+  EXPECT_THAT(Run({"SADD", "set1", "a", "b", "c"}), IntArg(3));
+  EXPECT_THAT(Run({"SADD", "set2", "b", "c", "d"}), IntArg(3));
+
+  // Test SINTERSTORE
+  EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
+  EXPECT_THAT(Run({"SINTERSTORE", "dest", "set1", "set2"}), IntArg(2));
+  EXPECT_EQ(Run({"RENAME", "dest", "x"}), "OK");
+
+  // Test SUNIONSTORE
+  EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
+  EXPECT_THAT(Run({"SUNIONSTORE", "dest", "set1", "set2"}), IntArg(4));
+  EXPECT_EQ(Run({"RENAME", "dest", "y"}), "OK");
+
+  // Test SDIFFSTORE
+  EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
+  EXPECT_THAT(Run({"SDIFFSTORE", "dest", "set1", "set2"}), IntArg(1));
+  EXPECT_EQ(Run({"RENAME", "dest", "z"}), "OK");
+}
+
+TEST_F(SearchFamilyTest, HsetOnDifferentDatabasesCrash) {
+  // This test verifies that creating documents with the same key on different databases
+  // doesn't crash. Only database 0 is indexed.
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "field1", "TEXT"});
+
+  // Create document on database 0 - should be indexed
+  EXPECT_THAT(Run({"HSET", "hash1", "field1", "value1"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "value1"}), AreDocIds("hash1"));
+
+  // Switch to database 1
+  EXPECT_THAT(Run({"SELECT", "1"}), "OK");
+
+  // Create document with same key on database 1 - should NOT crash
+  EXPECT_THAT(Run({"HSET", "hash1", "field1", "another_value"}), IntArg(1));
+
+  // Search on database 1 should return no results (only db 0 is indexed)
+  auto resp = Run({"FT.SEARCH", "idx", "another_value"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // Switch back to database 0
+  EXPECT_THAT(Run({"SELECT", "0"}), "OK");
+
+  // Search on database 0 should still find the original document
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "value1"}), AreDocIds("hash1"));
 }
 
 }  // namespace dfly

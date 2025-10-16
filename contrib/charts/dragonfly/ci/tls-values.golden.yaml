@@ -8,7 +8,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.34.1"
+    app.kubernetes.io/version: "v1.34.2"
     app.kubernetes.io/managed-by: Helm
 ---
 # Source: dragonfly/templates/extra-manifests.yaml
@@ -28,7 +28,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.34.1"
+    app.kubernetes.io/version: "v1.34.2"
     app.kubernetes.io/managed-by: Helm
 type: kubernetes.io/tls
 data:
@@ -44,7 +44,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.34.1"
+    app.kubernetes.io/version: "v1.34.2"
     app.kubernetes.io/managed-by: Helm
 spec:
   type: ClusterIP
@@ -66,7 +66,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.34.1"
+    app.kubernetes.io/version: "v1.34.2"
     app.kubernetes.io/managed-by: Helm
 spec:
   replicas: 1
@@ -77,7 +77,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/tls-secret: db8c27d0047f2b121e1e66e32d589871df65c04f80a07baaa0af1c5ffc56408d
+        checksum/tls-secret: 5afa8c49216ec2ade17e0f8d28688f9733c42c485e8f7620f7787fa555efdf97
       labels:
         app.kubernetes.io/name: dragonfly
         app.kubernetes.io/instance: test
@@ -85,7 +85,7 @@ spec:
       serviceAccountName: test-dragonfly
       containers:
         - name: dragonfly
-          image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.34.1"
+          image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.34.2"
           imagePullPolicy: IfNotPresent
           ports:
             - name: dragonfly

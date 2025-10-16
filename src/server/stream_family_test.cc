@@ -185,6 +185,18 @@ TEST_F(StreamFamilyTest, XRead) {
   // Not found.
   resp = Run({"xread", "streams", "notfound", "0"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+
+  // XREAD returns a map response on RESP3
+  Run({"HELLO", "3"});
+  resp = Run({"xread", "streams", "foo", "bar", "0", "0"});
+  ASSERT_THAT(resp, RespArray(ElementsAre("foo", ArrLen(3), "bar", ArrLen(1))));
+
+  const auto foo_resp = resp.GetVec()[1];
+  ASSERT_THAT(foo_resp, RespArray(ElementsAre(ArrLen(2), ArrLen(2), ArrLen(2))));
+
+  const auto first_kv_entry = foo_resp.GetVec()[0];
+  const auto expected = RespArray(ElementsAre("k1", "v1"));
+  ASSERT_THAT(first_kv_entry, RespArray(ElementsAre("1-0", expected)));
 }
 
 TEST_F(StreamFamilyTest, XReadGroup) {
@@ -1297,6 +1309,15 @@ TEST_F(StreamFamilyTest, XClaimWithNonExistentGroup) {
 
   resp = Run({"xclaim", "mystream", "nonexistent-group", "consumer1", "0", "1-0", "justid"});
   EXPECT_THAT(resp, ArrLen(0));
+}
+
+TEST_F(StreamFamilyTest, XDelNonExistentId) {
+  string key = R"(k1 "v1" k2 "v2 with spaces" "k3 with spaces" "v3")";
+  Run({"XADD", key, "0", "set1", "member1"});
+
+  // Try to delete a non-existent ID - should not crash (issue #5202)
+  auto resp = Run({"XDEL", key, "46-867"});
+  EXPECT_THAT(resp, IntArg(0));  // Nothing deleted
 }
 
 }  // namespace dfly
