@@ -44,11 +44,17 @@ uint8_t* ListpackWrap::GetPointer() {
 }
 
 ListpackWrap::Iterator ListpackWrap::Find(std::string_view key) const {
+  if (size() == 0)
+    return end();
+
   uint8_t* ptr = lpFind(lp_, lpFirst(lp_), (unsigned char*)key.data(), key.size(), 1);
   return Iterator{lp_, ptr, intbuf_};
 }
 
 bool ListpackWrap::Delete(std::string_view key) {
+  if (size() == 0)
+    return false;
+
   uint8_t* ptr = lpFind(lp_, lpFirst(lp_), (unsigned char*)key.data(), key.size(), 1);
   if (ptr == nullptr)
     return false;
