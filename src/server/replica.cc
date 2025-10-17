@@ -64,7 +64,7 @@ ABSL_DECLARE_FLAG(uint16_t, announce_port);
 ABSL_FLAG(
     int, replica_priority, 100,
     "Published by info command for sentinel to pick replica based on score during a failover");
-ABSL_FLAG(bool, experimental_replicaof_v2, true,
+ABSL_FLAG(bool, experimental_replicaof_v2, false,
           "Use ReplicaOfV2 algorithm for initiating replication");
 
 namespace dfly {
@@ -152,6 +152,8 @@ void Replica::StartMainReplicationFiber(std::optional<LastMasterSyncData> last_m
 void Replica::EnableReplication() {
   VLOG(1) << "Enabling replication";
 
+  socket_thread_ = ProactorBase::me();
+
   state_mask_ = R_ENABLED;                                           // set replica state to enabled
   sync_fb_ = MakeFiber(&Replica::MainReplicationFb, this, nullopt);  // call replication fiber
 }
@@ -170,9 +172,17 @@ std::optional<Replica::LastMasterSyncData> Replica::Stop() {
   sync_fb_.JoinIfNeeded();
   DVLOG(1) << "MainReplicationFb stopped " << this;
   acks_fb_.JoinIfNeeded();
-  for (auto& flow : shard_flows_) {
-    flow.reset();
-  }
+
+  proactor_->Await([this]() {
+    // Destructor is blocking, so other fibers can observe partial state
+    // of flows during clean up. To avoid this, we move them and clear the
+    // member before the preemption point
+    auto shard_flows = std::move(shard_flows_);
+    shard_flows_.clear();
+    for (auto& flow : shard_flows) {
+      flow.reset();
+    }
+  });
 
   if (last_journal_LSNs_.has_value()) {
     return LastMasterSyncData{master_context_.master_repl_id, last_journal_LSNs_.value()};
@@ -501,18 +511,12 @@ error_code Replica::InitiatePSync() {
   return error_code{};
 }
 
-// Initialize and start sub-replica for each flow.
-error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_master_sync_data) {
-  auto start_time = absl::Now();
-
-  // Initialize MultiShardExecution.
-  multi_shard_exe_.reset(new MultiShardExecution());
-
-  // Initialize shard flows.
+void Replica::InitializeShardFlows() {
   shard_flows_.resize(master_context_.num_flows);
   DCHECK(!shard_flows_.empty());
-  for (unsigned i = 0; i < shard_flows_.size(); ++i) {
-    // Transfer LSN state for partial sync
+  thread_flow_map_ = Partition(shard_flows_.size());
+
+  for (size_t i = 0; i < shard_flows_.size(); ++i) {
     uint64_t partial_sync_lsn = 0;
     if (shard_flows_[i]) {
       partial_sync_lsn = shard_flows_[i]->JournalExecutedCount();
@@ -523,7 +527,19 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
       shard_flows_[i]->SetRecordsExecuted(partial_sync_lsn);
     }
   }
-  thread_flow_map_ = Partition(shard_flows_.size());
+}
+
+// Initialize and start sub-replica for each flow.
+error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_master_sync_data) {
+  auto start_time = absl::Now();
+
+  // Initialize MultiShardExecution.
+  multi_shard_exe_.reset(new MultiShardExecution());
+
+  // Initialize shard flows. The update to the shard_flows_ should be done by this thread.
+  // Otherwise, there is a race condition between GetSummary() and the shard_flows_[i].reset()
+  // below.
+  InitializeShardFlows();
 
   // Blocked on until all flows got full sync cut.
   BlockingCounter sync_block{unsigned(shard_flows_.size())};
@@ -1210,11 +1226,12 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
 
 auto Replica::GetSummary() const -> Summary {
   auto f = [this]() {
+    DCHECK(this);
     auto last_io_time = LastIoTime();
 
-    // Note: we access LastIoTime from foreigh thread in unsafe manner. However, specifically here
-    // it's unlikely to cause a real bug.
-    for (const auto& flow : shard_flows_) {  // Get last io time from all sub flows.
+    for (const auto& flow : shard_flows_) {
+      DCHECK(Proactor() == ProactorBase::me());
+      DCHECK(flow);
       last_io_time = std::max(last_io_time, flow->LastIoTime());
     }
 
@@ -1246,25 +1263,14 @@ auto Replica::GetSummary() const -> Summary {
     return res;
   };
 
-  if (Sock())
-    return Proactor()->AwaitBrief(f);
-
-  /**
-   * when this branch happens: there is a very short grace period
-   * where Sock() is not initialized, yet the server can
-   * receive ROLE/INFO commands. That period happens when launching
-   * an instance with '--replicaof' and then immediately
-   * sending a command.
-   *
-   * In that instance, we have to run f() on the current fiber.
-   */
-  return f();
+  return Proactor()->AwaitBrief(f);
 }
 
 std::vector<uint64_t> Replica::GetReplicaOffset() const {
   std::vector<uint64_t> flow_rec_count;
   flow_rec_count.resize(shard_flows_.size());
   for (const auto& flow : shard_flows_) {
+    DCHECK(flow.get());
     uint32_t flow_id = flow->FlowId();
     uint64_t rec_count = flow->JournalExecutedCount();
     DCHECK_LT(flow_id, shard_flows_.size());

@@ -355,6 +355,7 @@ class ServerFamily {
       ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   void ReplConf(CmdArgList args, const CommandContext& cmd_cntx);
   void Role(CmdArgList args, const CommandContext& cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void RoleV2(CmdArgList args, const CommandContext& cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   void Save(CmdArgList args, const CommandContext& cmd_cntx);
   void BgSave(CmdArgList args, const CommandContext& cmd_cntx);
   void Script(CmdArgList args, const CommandContext& cmd_cntx);
@@ -377,6 +378,8 @@ class ServerFamily {
   // REPLICAOF implementation without two phase locking.
   void ReplicaOfInternalV2(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                            ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+
+  void UpdateReplicationThreadLocals(std::shared_ptr<Replica> repl);
 
   struct LoadOptions {
     std::string snapshot_id;
@@ -429,7 +432,7 @@ class ServerFamily {
 
   mutable util::fb2::Mutex replicaof_mu_, save_mu_;
   std::shared_ptr<Replica> replica_ ABSL_GUARDED_BY(replicaof_mu_);
-  std::vector<std::unique_ptr<Replica>> cluster_replicas_
+  std::vector<std::shared_ptr<Replica>> cluster_replicas_
       ABSL_GUARDED_BY(replicaof_mu_);  // used to replicating multiple nodes to single dragonfly
 
   std::unique_ptr<ScriptMgr> script_mgr_;
@@ -468,6 +471,7 @@ class ServerFamily {
   LoadingStats loading_stats_ ABSL_GUARDED_BY(loading_stats_mu_);
 
   bool legacy_format_metrics_ = true;
+  bool use_replica_of_v2_ = false;
 };
 
 // Reusable CLIENT PAUSE implementation that blocks while polling is_pause_in_progress
