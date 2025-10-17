@@ -100,7 +100,7 @@ run_fuzzer() {
         "$FUZZ_TARGET"
         --port=6379
         --logtostderr
-        --maxmemory=2G
+        --proactor_threads=2
         --dbfilename=""
         --omit_basic_usage
     )

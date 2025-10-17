@@ -2,12 +2,11 @@
 # -*- coding: utf-8 -*-
 #
 # prepare_system.sh — Helper script to configure the host OS for optimal AFL++ performance
-# Performs the same steps as documented in README (System Preparation for Testing)
 # 1) Sets /proc/sys/kernel/core_pattern to "core" so AFL++ can obtain core dumps.
 # 2) Forces all CPU frequency governors to "performance" to reduce fuzzing jitter.
 #
 # Usage:
-#   sudo ./scripts/prepare_system.sh
+#   sudo ./prepare_system.sh
 #
 # The script will attempt to re-execute itself under sudo if not already root.
 # For Linux only.

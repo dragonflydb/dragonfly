@@ -25,9 +25,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-// Track if we've already accepted a connection
-static int accepted_fd = -1;
-static int stdin_consumed = 0;
+// Track accepted connections
+static int accept_count = 0;
 static pthread_mutex_t accept_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Original functions
@@ -74,13 +73,15 @@ static int do_accept(struct sockaddr* addr, socklen_t* addrlen, int flags) {
   pthread_mutex_lock(&accept_mutex);
 
   // Only accept ONE connection - stdin data represents one client
-  if (accepted_fd >= 0) {
+  if (accept_count > 0) {
     fprintf(stderr, "[socketfuzz] Already accepted, blocking further accepts...\n");
     pthread_mutex_unlock(&accept_mutex);
     // Block forever - we only handle one connection
     pause();
     return -1;
   }
+
+  accept_count++;
 
   // Create a socketpair for bidirectional communication
   int sock_flags = SOCK_STREAM;
@@ -95,10 +96,6 @@ static int do_accept(struct sockaddr* addr, socklen_t* addrlen, int flags) {
     pthread_mutex_unlock(&accept_mutex);
     return -1;
   }
-
-  // fds[0] - we return this to Dragonfly
-  // fds[1] - we'll use for reading stdin
-  accepted_fd = fds[0];
 
   fprintf(stderr, "[socketfuzz] accept4() returning fd=%d (paired with %d)\n", fds[0], fds[1]);
 
@@ -154,12 +151,8 @@ static void* feed_stdin_to_socket(void* arg) {
   fprintf(stderr, "[socketfuzz] stdin EOF, closing write end\n");
   fflush(stderr);
   close(write_fd);
-  stdin_consumed = 1;
 
-  // Give server time to process the data
-  sleep(1);
-
-  // Exit the entire process - fuzzing test case complete
+  // Exit immediately - Dragonfly will see EOF on socket and finish processing
   fprintf(stderr, "[socketfuzz] Test case complete, exiting...\n");
   fflush(stderr);
   _exit(0);
@@ -167,22 +160,16 @@ static void* feed_stdin_to_socket(void* arg) {
 
 // Intercept recv - use real recv on socketpair
 ssize_t recv(int sockfd, void* buf, size_t len, int flags) {
-  // recv on our accepted fd works normally (it's a socketpair)
-  ssize_t result = original_recv(sockfd, buf, len, flags);
-  if (sockfd == accepted_fd && result > 0) {
-    fprintf(stderr, "[socketfuzz] recv() returned %zd bytes on fd=%d\n", result, sockfd);
-  }
-  return result;
+  // All recv calls work normally (socketpair behaves like a real socket)
+  return original_recv(sockfd, buf, len, flags);
 }
 
-// Intercept send - write to /dev/null (ignore responses for fuzzing)
+// Intercept send - drop responses (we don't validate them in fuzzing)
 ssize_t send(int sockfd, const void* buf, size_t len, int flags) {
-  if (sockfd == accepted_fd) {
-    fprintf(stderr, "[socketfuzz] send() dropping %zu bytes on fd=%d\n", len, sockfd);
-    return len;  // Pretend we sent it
-  }
-  // Other sockets - use real send
-  return original_send(sockfd, buf, len, flags);
+  // Just pretend we sent it - AFL++ doesn't care about responses
+  (void)sockfd;
+  (void)buf;
+  return len;
 }
 
 // Intercept setsockopt - just succeed
@@ -195,9 +182,10 @@ int setsockopt(int sockfd, int level, int optname, const void* optval, socklen_t
   return 0;
 }
 
-// Intercept getpeername - return fake address
+// Intercept getpeername - return fake address for all fds
 int getpeername(int sockfd, struct sockaddr* addr, socklen_t* addrlen) {
-  if (sockfd == accepted_fd && addr && addrlen && *addrlen >= sizeof(struct sockaddr_in)) {
+  (void)sockfd;
+  if (addr && addrlen && *addrlen >= sizeof(struct sockaddr_in)) {
     struct sockaddr_in* in_addr = (struct sockaddr_in*)addr;
     memset(in_addr, 0, sizeof(*in_addr));
     in_addr->sin_family = AF_INET;
@@ -206,10 +194,7 @@ int getpeername(int sockfd, struct sockaddr* addr, socklen_t* addrlen) {
     *addrlen = sizeof(struct sockaddr_in);
     return 0;
   }
-
-  // Call original for other fds
-  int (*original_getpeername)(int, struct sockaddr*, socklen_t*) = dlsym(RTLD_NEXT, "getpeername");
-  return original_getpeername(sockfd, addr, addrlen);
+  return -1;
 }
 
 // Intercept getsockname - return fake address
