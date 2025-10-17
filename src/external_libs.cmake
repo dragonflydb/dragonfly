@@ -5,8 +5,7 @@ add_third_party(
   CONFIGURE_COMMAND echo
   BUILD_IN_SOURCE 1
   BUILD_COMMAND ${DFLY_TOOLS_MAKE} all
-  INSTALL_COMMAND mkdir -p ${THIRD_PARTY_LIB_DIR}/lua/lib/
-  COMMAND cp <SOURCE_DIR>/liblua.a ${THIRD_PARTY_LIB_DIR}/lua/lib/
+  INSTALL_COMMAND cp <SOURCE_DIR>/liblua.a ${THIRD_PARTY_LIB_DIR}/lua/lib/
   COMMAND cp <SOURCE_DIR>/lualib.h <SOURCE_DIR>/lua.h <SOURCE_DIR>/lauxlib.h
           <SOURCE_DIR>/luaconf.h ${THIRD_PARTY_LIB_DIR}/lua/include
 )

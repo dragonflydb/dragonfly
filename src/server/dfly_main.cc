@@ -28,17 +28,8 @@
 #include <mimalloc.h>
 #include <signal.h>
 
-#include <atomic>
 #include <iostream>
 #include <memory>
-#include <thread>
-
-#ifdef USE_AFL
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#endif
 
 #include "base/init.h"
 #include "base/proc_util.h"  // for GetKernelVersion
@@ -328,7 +319,6 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   acceptor->Run();
   google::FlushLogFiles(google::INFO);  // Flush the header.
 
-  // Wait for server shutdown (always in RunEngine, AFL handles exit separately)
   acceptor->Wait();
 
   version_monitor.Shutdown();
@@ -870,8 +860,8 @@ Usage: dragonfly [FLAGS]
     AcceptServer acceptor(pool.get(), &fb2::std_malloc_resource, true);
     acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));
 
-    // Normal mode: run server and wait
     dfly::RunEngine(pool.get(), &acceptor);
+
     pool->Stop();
 
     if (!pidfile_path.empty()) {
