@@ -132,7 +132,7 @@ class ProtocolClient {
   std::string last_cmd_;
   std::string last_resp_;
 
-  uint64_t last_io_time_ = 0;  // in ns, monotonic clock.
+  std::atomic<uint64_t> last_io_time_ = 0;  // in ns, monotonic clock.
 
 #ifdef DFLY_USE_SSL
 
