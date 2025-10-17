@@ -888,6 +888,10 @@ GenericError RewriteConfigFile() {
   return {};
 }
 
+bool IsMaster() {
+  return ServerState::tlocal() && ServerState::tlocal()->is_master;
+}
+
 }  // namespace
 
 void SlowLogGet(dfly::CmdArgList args, std::string_view sub_cmd, util::ProactorPool* pp,
@@ -1303,7 +1307,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     return future;
   };
 
-  if (ServerState::tlocal() && !ServerState::tlocal()->is_master) {
+  if (IsMaster()) {
     return immediate(string("Replica cannot load data"));
   }
 
@@ -1533,9 +1537,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricHeader("version", "", MetricType::GAUGE, &resp->body());
   AppendMetricValue("version", 1, {"version"}, {GetVersion()}, &resp->body());
 
-  bool is_master = ServerState::tlocal()->is_master;
-
-  AppendMetricWithoutLabels("master", "1 if master 0 if replica", is_master ? 1 : 0,
+  AppendMetricWithoutLabels("master", "1 if master 0 if replica", IsMaster() ? 1 : 0,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("uptime_in_seconds", "", uptime, MetricType::COUNTER, &resp->body());
 
@@ -1828,10 +1830,10 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     absl::StrAppend(&resp->body(), command_metrics);
   }
 
-  if (m.replica_side_info) {  // slave side
-    auto& replica_info = *m.replica_side_info;
+  if (m.replica_side_info) {  // replica side
+    const auto reconnect_count = m.replica_side_info->summary.reconnect_count;
     AppendMetricWithoutLabels("replica_reconnect_count", "Number of replica reconnects",
-                              replica_info.reconnect_count, MetricType::COUNTER, &resp->body());
+                              reconnect_count, MetricType::COUNTER, &resp->body());
   } else {  // Master side
     string replication_lag_metrics;
     vector<ReplicaRoleInfo> replicas_info = dfly_cmd->GetReplicasRoleInfo();
@@ -1961,8 +1963,8 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
     StringResponse resp = util::http::MakeStringResponse(boost::beast::http::status::ok);
     util::http::SetMime(util::http::kTextMime, &resp);
     uint64_t uptime = time(NULL) - start_time_;
-    PrintPrometheusMetrics(uptime, this->GetMetrics(&namespaces->GetDefaultNamespace()),
-                           this->dfly_cmd_.get(), &resp, legacy_format_metrics_);
+    PrintPrometheusMetrics(uptime, GetMetrics(&namespaces->GetDefaultNamespace()), dfly_cmd_.get(),
+                           &resp, legacy_format_metrics_);
     return send->Invoke(std::move(resp));
   };
 
@@ -1973,7 +1975,7 @@ void ServerFamily::PauseReplication(bool pause) {
   util::fb2::LockGuard lk(replicaof_mu_);
 
   // Switch to primary mode.
-  if (!ServerState::tlocal()->is_master) {
+  if (!IsMaster()) {
     auto repl_ptr = replica_;
     CHECK(repl_ptr);
     repl_ptr->Pause(pause);
@@ -1984,7 +1986,7 @@ std::optional<ReplicaOffsetInfo> ServerFamily::GetReplicaOffsetInfo() {
   util::fb2::LockGuard lk(replicaof_mu_);
 
   // Switch to primary mode.
-  if (!ServerState::tlocal()->is_master) {
+  if (!IsMaster()) {
     auto repl_ptr = replica_;
     CHECK(repl_ptr);
     return ReplicaOffsetInfo{repl_ptr->GetSyncId(), repl_ptr->GetReplicaOffset()};
@@ -2003,13 +2005,19 @@ vector<facade::Listener*> ServerFamily::GetNonPriviligedListeners() const {
   return listeners;
 }
 
-optional<Replica::Summary> ServerFamily::GetReplicaSummary() const {
+optional<Metrics::ReplicaInfo> ServerFamily::GetReplicaSummary() const {
   util::fb2::LockGuard lk(replicaof_mu_);
   if (replica_ == nullptr) {
     return nullopt;
-  } else {
-    return replica_->GetSummary();
   }
+
+  Metrics::ReplicaInfo info;
+  info.summary = replica_->GetSummary();
+  for (const auto& cl_repl : cluster_replicas_) {
+    info.cl_repl_summary.push_back(cl_repl->GetSummary());
+  }
+
+  return info;
 }
 
 void ServerFamily::OnClose(ConnectionContext* cntx) {
@@ -2766,15 +2774,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   result.traverse_ttl_per_sec /= 6;
   result.delete_ttl_per_sec /= 6;
 
-  bool is_master = ServerState::tlocal() && ServerState::tlocal()->is_master;
-
-  if (!is_master) {
-    auto info = GetReplicaSummary();
-    if (info) {
-      result.replica_side_info = {
-          .reconnect_count = info->reconnect_count,
-      };
-    }
+  if (!IsMaster()) {
+    result.replica_side_info = GetReplicaSummary();
   }
 
   {
@@ -2950,7 +2951,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
       append("maxmemory_policy", "noeviction");
     }
 
-    if (!m.replica_side_info) {  // master
+    // master
+    if (!m.replica_side_info) {
       ReplicationMemoryStats repl_mem;
       dfly_cmd_->GetReplicationMemoryStats(&repl_mem);
       append("replication_streaming_buffer_bytes", repl_mem.streamer_buf_capacity_bytes);
@@ -3126,17 +3128,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
   };
 
   auto add_repl_info = [&] {
-    bool is_master = true;
-    // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
-    // ensuring eventual consistency of is_master. When determining if the server is a replica and
-    // accessing the replica_ object, we must lock replicaof_mu_. Using is_master alone is
-    // insufficient in this scenario.
-    // Please note that we we do not use Metrics object here.
-    {
-      fb2::LockGuard lk(replicaof_mu_);
-      is_master = !replica_;
-    }
-    if (is_master) {
+    if (!m.replica_side_info) {
       vector<ReplicaRoleInfo> replicas_info = dfly_cmd_->GetReplicasRoleInfo();
       append("role", "master");
       append("connected_slaves", replicas_info.size());
@@ -3169,13 +3161,13 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
         append("psync_attempts", rinfo.psync_attempts);
         append("psync_successes", rinfo.psync_successes);
       };
-      fb2::LockGuard lk(replicaof_mu_);
 
-      replication_info_cb(replica_->GetSummary());
+      const auto& info = *m.replica_side_info;
 
+      replication_info_cb(info.summary);
       // Special case, when multiple masters replicate to a single replica.
-      for (const auto& replica : cluster_replicas_) {
-        replication_info_cb(replica->GetSummary());
+      for (const auto& summary : info.cl_repl_summary) {
+        replication_info_cb(summary);
       }
     }
   };
@@ -3435,7 +3427,7 @@ void ServerFamily::Hello(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendBulkString("mode");
   rb->SendBulkString(GetRedisMode());
   rb->SendBulkString("role");
-  rb->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
+  rb->SendBulkString(IsMaster() ? "master" : "slave");
 
   // Add availability_zone to the response if flag is explicitly set and not empty
   if (!az.empty()) {
@@ -3446,7 +3438,7 @@ void ServerFamily::Hello(CmdArgList args, const CommandContext& cmd_cntx) {
 
 void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx) {
   util::fb2::LockGuard lk(replicaof_mu_);
-  if (ServerState::tlocal()->is_master) {
+  if (IsMaster()) {
     cmd_cntx.rb->SendError("Calling ADDREPLICAOFF allowed only after server is already a replica");
     return;
   }
@@ -3617,9 +3609,8 @@ void ServerFamily::Replicate(string_view host, string_view port) {
 
 void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
   util::fb2::LockGuard lk(replicaof_mu_);
-  ServerState* ss = ServerState::tlocal();
 
-  if (!ss->is_master) {
+  if (!IsMaster()) {
     CHECK(replica_);
 
     // flip flag before clearing replica_
@@ -3658,7 +3649,7 @@ void ServerFamily::ReplicaOfInternalV2(CmdArgList args, Transaction* tx, SinkRep
   // well defined semantics.
   ServerState* ss = ServerState::tlocal();
 
-  if (ss->is_master && ss->gstate() == GlobalState::LOADING) {
+  if (IsMaster() && ss->gstate() == GlobalState::LOADING) {
     builder->SendError(kLoadingErr);
     return;
   }
@@ -3733,7 +3724,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   }
 
   // We return OK, to support idempotency semantics.
-  if (ServerState::tlocal()->is_master)
+  if (IsMaster())
     return builder->SendOk();
 
   util::fb2::LockGuard lk(replicaof_mu_);
@@ -3775,7 +3766,7 @@ void ServerFamily::ReplConf(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* builder = cmd_cntx.rb;
   {
     util::fb2::LockGuard lk(replicaof_mu_);
-    if (!ServerState::tlocal()->is_master) {
+    if (!IsMaster()) {
       return builder->SendError("Replicating a replica is unsupported");
     }
   }
