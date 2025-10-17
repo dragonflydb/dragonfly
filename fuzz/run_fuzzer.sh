@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AFL++ Fuzzer runner for Dragonfly
+# AFL++ Fuzzer runner for Dragonfly (integrated mode)
 
 set -e
 
@@ -11,7 +11,7 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Default configuration (single target)
+# Default configuration
 TARGET="resp"
 BUILD_DIR="${BUILD_DIR:-$PROJECT_ROOT/build-fuzz}"
 FUZZ_DIR="$SCRIPT_DIR"
@@ -19,11 +19,12 @@ OUTPUT_DIR="${OUTPUT_DIR:-$FUZZ_DIR/artifacts/$TARGET}"
 CORPUS_DIR="${CORPUS_DIR:-$FUZZ_DIR/corpus/$TARGET}"
 SEEDS_DIR="${SEEDS_DIR:-$FUZZ_DIR/seeds/$TARGET}"
 DICT_FILE="${DICT_FILE:-$FUZZ_DIR/dict/$TARGET.dict}"
-TIMEOUT="1000"    # milliseconds (constant)
-MEM_LIMIT="2048"  # MB (constant)
+TIMEOUT="5000+"   # milliseconds (+ means don't count startup time)
+MEM_LIMIT="none"  # No memory limit for full dragonfly
 JOBS="1"          # single instance for determinism
 TIME_LIMIT="0"    # 0 = unlimited (constant)
-FUZZ_TARGET="$BUILD_DIR/fuzz/${TARGET}_fuzz"
+PORT="${FUZZ_PORT:-6379}"  # Port for dragonfly to listen on
+FUZZ_TARGET="$BUILD_DIR/dragonfly"
 
 print_warning() {
     echo -e "${YELLOW}WARNING: $1${NC}"
@@ -57,25 +58,28 @@ setup_directories() {
 show_config() {
     echo ""
     print_info "Configuration:"
-    echo "  Target:      $TARGET"
+    echo "  Protocol:    RESP (Redis)"
     echo "  Binary:      $FUZZ_TARGET"
+    echo "  Port:        $PORT"
     echo "  Seeds:       $SEEDS_DIR"
     echo "  Corpus:      $CORPUS_DIR"
     echo "  Output:      $OUTPUT_DIR"
     echo "  Dictionary:  $DICT_FILE"
     echo "  Timeout:     ${TIMEOUT}ms"
-    echo "  Memory:      ${MEM_LIMIT}MB"
+    echo "  Memory:      ${MEM_LIMIT}"
     echo "  Jobs:        $JOBS"
     echo "  Time limit:  ${TIME_LIMIT}s (0=unlimited)"
+    echo ""
+    print_warning "Fuzzing now tests the REAL dragonfly with full TCP stack!"
     echo ""
 }
 
 run_fuzzer() {
-    print_info "Starting AFL++ fuzzer..."
+    print_info "Starting AFL++ fuzzer in integrated mode..."
     print_info "Press Ctrl+C to stop"
     echo ""
 
-    # Build AFL++ command (no resume; always use corpus directory)
+    # Build AFL++ command
     AFL_CMD=(
         afl-fuzz
         -o "$OUTPUT_DIR"
@@ -94,16 +98,22 @@ run_fuzzer() {
         AFL_CMD+=(-V "$TIME_LIMIT")
     fi
 
-    # Single job: no -M/-S cluster
-
-    # Add the target binary (harness has fixed flags)
-    AFL_CMD+=("$FUZZ_TARGET")
+    # Add the target binary with dragonfly flags
+    # Note: --fuzz_mode is not needed, fuzzing is automatic when built with USE_AFL=ON
+    AFL_CMD+=(
+        "$FUZZ_TARGET"
+        --port="$PORT"
+        --logtostderr
+        --maxmemory=2G
+        --dbfilename=""
+        --omit_basic_usage
+    )
 
     # Display command
     print_info "Running: ${AFL_CMD[*]}"
     echo ""
 
-    # Ensure logs (dragonfly.* and crash_commands.log) go into artifacts dir
+    # Ensure logs go into artifacts dir
     cd "$OUTPUT_DIR"
 
     # Execute fuzzer
