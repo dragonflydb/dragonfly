@@ -10,6 +10,7 @@
 #include <string>
 #include <utility>
 
+#include "core/detail/listpack_wrap.h"
 #include "core/json/json_object.h"
 #include "core/search/search.h"
 #include "core/search/vector_utils.h"
@@ -40,17 +41,14 @@ struct BaseAccessor : public search::DocumentAccessor {
 
 // Accessor for hashes stored with listpack
 struct ListPackAccessor : public BaseAccessor {
-  using LpPtr = uint8_t*;
-
-  explicit ListPackAccessor(LpPtr ptr) : lp_{ptr} {
+  explicit ListPackAccessor(uint8_t* ptr /* listpack ptr */) : lw_{ptr} {
   }
 
   std::optional<StringList> GetStrings(std::string_view field) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
 
  private:
-  mutable std::array<uint8_t, 33> intbuf_[2];
-  LpPtr lp_;
+  detail::ListpackWrap lw_;
 };
 
 // Accessor for hashes stored with StringMap
