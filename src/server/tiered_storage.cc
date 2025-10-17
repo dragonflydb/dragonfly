@@ -134,6 +134,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Set value to be an in-memory type again. Update memory stats.
   void Upload(DbIndex dbid, string_view value, bool is_raw, size_t serialized_len, PrimeValue* pv) {
     DCHECK(!value.empty());
+    DCHECK_EQ(uint8_t(pv->GetExternalRep()), uint8_t(CompactObj::ExternalRep::STRING));
 
     pv->Materialize(value, is_raw);
     RecordDeleted(*pv, serialized_len, GetDbTableStats(dbid));
@@ -155,7 +156,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
         ts_->CoolDown(key.first, key.second, segment, pv);
       } else {
         stats->AddTypeMemoryUsage(pv->ObjType(), -pv->MallocUsed());
-        pv->SetExternal(segment.offset, segment.length);
+        pv->SetExternal(segment.offset, segment.length, CompactObj::ExternalRep::STRING);
       }
     } else {
       LOG(DFATAL) << "Should not reach here";
@@ -542,7 +543,7 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
     tiering::DiskSegment segment = FromCoolItem(pv.GetCool());
 
     // Now the item is only in storage.
-    pv.SetExternal(segment.offset, segment.length);
+    pv.SetExternal(segment.offset, segment.length, CompactObj::ExternalRep::STRING);
 
     auto* stats = op_manager_->GetDbTableStats(record->db_index);
     stats->AddTypeMemoryUsage(record->value.ObjType(), -record->value.MallocUsed());
