@@ -26,6 +26,7 @@
 namespace dfly {
 
 struct BaseAccessor;
+class GlobalVectorIndex;  // PoC: Forward declaration for global vector index
 
 using SearchDocData = absl::flat_hash_map<std::string /*field*/, search::SortableValue /*value*/>;
 using Synonyms = search::Synonyms;
@@ -222,6 +223,7 @@ class ShardDocIndex {
     std::optional<DocId> Remove(std::string_view key);
 
     std::string_view Get(DocId id) const;
+    std::optional<DocId> Find(std::string_view key) const;  // PoC: Find DocId by key
     size_t Size() const;
 
     // Get const reference to the internal ids map
@@ -287,12 +289,20 @@ class ShardDocIndex {
     return key_index_;
   }
 
+  // PoC: Global vector index support
+  void AddDocToGlobalVectorIndex(std::string_view index_name, std::string_view key,
+                                 const DbContext& db_cntx, const PrimeValue& pv);
+  void RemoveDocFromGlobalVectorIndex(std::string_view index_name, std::string_view key,
+                                      const DbContext& db_cntx, const PrimeValue& pv);
+  void RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args);
+
+  // PoC: Public access to LoadEntry for global search coordinator
+  using LoadedEntry = std::pair<std::string_view, std::unique_ptr<BaseAccessor>>;
+  std::optional<LoadedEntry> LoadEntry(search::DocId id, const OpArgs& op_args) const;
+
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
-
-  using LoadedEntry = std::pair<std::string_view, std::unique_ptr<BaseAccessor>>;
-  std::optional<LoadedEntry> LoadEntry(search::DocId id, const OpArgs& op_args) const;
 
   // Behaviour identical to SortIndex::Sort for non-sortable fields that need to be fetched first
   std::vector<search::SortableValue> KeepTopKSorted(std::vector<DocId>* ids, size_t limit,
