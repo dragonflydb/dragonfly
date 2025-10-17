@@ -1,9 +1,0 @@
-# AFL++ generated files
-artifacts/
-corpus/
-*.profraw
-*.profdata
-
-# Build artifacts
-*.o
-*.a
