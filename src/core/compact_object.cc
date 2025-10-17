@@ -875,8 +875,17 @@ uint64_t CompactObj::HashCode(string_view str) {
 }
 
 CompactObjType CompactObj::ObjType() const {
-  if (IsInline() || taglen_ == INT_TAG || taglen_ == SMALL_TAG || taglen_ == EXTERNAL_TAG)
+  if (IsInline() || taglen_ == INT_TAG || taglen_ == SMALL_TAG)
     return OBJ_STRING;
+
+  if (taglen_ == EXTERNAL_TAG) {
+    switch (static_cast<ExternalRep>(u_.ext_ptr.representation)) {
+      case ExternalRep::STRING:
+        return OBJ_STRING;
+      case ExternalRep::SERIALIZED_MAP:
+        return OBJ_HASH;
+    };
+  }
 
   if (taglen_ == ROBJ_TAG)
     return u_.r_obj.type();
@@ -1192,13 +1201,19 @@ void CompactObj::GetString(char* dest) const {
   LOG(FATAL) << "Bad tag " << int(taglen_);
 }
 
-void CompactObj::SetExternal(size_t offset, uint32_t sz) {
+void CompactObj::SetExternal(size_t offset, uint32_t sz, ExternalRep rep) {
   SetMeta(EXTERNAL_TAG, mask_);
 
   u_.ext_ptr.is_cool = 0;
+  u_.ext_ptr.representation = static_cast<uint8_t>(rep);
   u_.ext_ptr.page_offset = offset % 4096;
   u_.ext_ptr.serialized_size = sz;
   u_.ext_ptr.offload.page_index = offset / 4096;
+}
+
+CompactObj::ExternalRep CompactObj::GetExternalRep() const {
+  DCHECK(IsExternal());
+  return static_cast<CompactObj::ExternalRep>(u_.ext_ptr.representation);
 }
 
 void CompactObj::SetCool(size_t offset, uint32_t sz, detail::TieredColdRecord* record) {
@@ -1221,24 +1236,17 @@ auto CompactObj::GetCool() const -> CoolItem {
   return res;
 }
 
-void CompactObj::ImportExternal(const CompactObj& src) {
-  DCHECK(src.IsExternal());
-  uint8_t encoding = src.mask_bits_.encoding;
-  SetMeta(EXTERNAL_TAG, 0);
-  mask_bits_.encoding = encoding;
-  u_.ext_ptr = src.u_.ext_ptr;
-}
-
 std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
   DCHECK_EQ(EXTERNAL_TAG, taglen_);
   auto& ext = u_.ext_ptr;
   size_t offset = ext.page_offset;
   offset += size_t(ext.is_cool ? ext.cool_record->page_index : ext.offload.page_index) * 4096;
-  return pair<size_t, size_t>(offset, size_t(u_.ext_ptr.serialized_size));
+  return {offset, size_t(u_.ext_ptr.serialized_size)};
 }
 
 void CompactObj::Materialize(std::string_view blob, bool is_raw) {
   CHECK(IsExternal()) << int(taglen_);
+  DCHECK_EQ(u_.ext_ptr.representation, static_cast<uint8_t>(ExternalRep::STRING));
 
   DCHECK_GT(blob.size(), kInlineLen);
 
