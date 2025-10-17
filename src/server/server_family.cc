@@ -1307,7 +1307,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     return future;
   };
 
-  if (IsMaster()) {
+  if (!IsMaster()) {
     return immediate(string("Replica cannot load data"));
   }
 
