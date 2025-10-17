@@ -3335,6 +3335,8 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
   // Save time by not calculating metrics if we don't need them.
   if (!(section == "SERVER" || section == "REPLICATION")) {
     metrics = GetMetrics(cmd_cntx.conn_cntx->ns);
+  } else if (!IsMaster()) {
+    metrics.replica_side_info = GetReplicaSummary();
   }
 
   string info = FormatInfoMetrics(metrics, section, cmd_cntx.conn_cntx->conn()->IsPrivileged());
