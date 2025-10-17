@@ -116,9 +116,9 @@ ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) co
                         .replicas = {},
                         .migrations = {}};
 
-  optional<Replica::Summary> replication_info = server_family_->GetReplicaSummary();
+  optional<Metrics::ReplicaInfo> repl_info = server_family_->GetReplicaSummary();
   ServerState& etl = *ServerState::tlocal();
-  if (!replication_info.has_value()) {
+  if (!repl_info) {
     DCHECK(etl.is_master);
     std::string cluster_announce_ip = absl::GetFlag(FLAGS_cluster_announce_ip);
     std::string preferred_endpoint =
@@ -141,7 +141,7 @@ ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) co
     }
   } else {
     // TODO: We currently don't save the master's ID in the replica
-    info.master = {{.id = "", .ip = replication_info->host, .port = replication_info->port},
+    info.master = {{.id = "", .ip = repl_info->summary.host, .port = repl_info->summary.port},
                    NodeHealth::ONLINE};
     info.replicas.push_back({{.id = id_,
                               .ip = cntx->conn()->LocalBindAddress(),

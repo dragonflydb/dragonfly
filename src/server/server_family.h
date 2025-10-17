@@ -128,7 +128,10 @@ struct Metrics {
   absl::flat_hash_map<std::string, uint64_t> connections_lib_name_ver_map;
 
   struct ReplicaInfo {
-    uint32_t reconnect_count;
+    Replica::Summary summary;
+
+    // cluster
+    std::vector<Replica::Summary> cl_repl_summary;
   };
 
   // Replica reconnect stats on the replica side. Undefined for master
@@ -294,7 +297,7 @@ class ServerFamily {
 
   // Replica-side method. Returns replication summary if this server is a replica,
   // nullopt otherwise.
-  std::optional<Replica::Summary> GetReplicaSummary() const;
+  std::optional<Metrics::ReplicaInfo> GetReplicaSummary() const;
 
   // Master-side acces method to replication info of that connection.
   std::shared_ptr<DflyCmd::ReplicaInfo> GetReplicaInfoFromConnection(ConnectionState* state) const {
