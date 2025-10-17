@@ -89,11 +89,6 @@ ABSL_FLAG(
 ABSL_FLAG(bool, version_check, true,
           "If true, Will monitor for new releases on Dragonfly servers once a day.");
 
-#ifdef USE_AFL
-ABSL_FLAG(uint32_t, afl_loop_iterations, 10000,
-          "Number of iterations in AFL++ persistent mode loop before restart.");
-#endif
-
 ABSL_FLAG(uint16_t, tcp_backlog, 256, "TCP listen(2) backlog parameter.");
 ABSL_FLAG(uint16_t, uring_recv_buffer_cnt, 0,
           "How many socket recv buffers of size 256 to allocate per thread."
@@ -329,38 +324,12 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     version_monitor.Run(pool);
   }
 
-#ifdef USE_AFL
-  // Start AFL++ fuzzing thread automatically (build was configured with USE_AFL=ON)
-  std::unique_ptr<std::thread> fuzz_thread;
-  if (main_listener) {
-    // Get the actual port (important if port was 0 - auto-assigned)
-    uint16_t actual_port = main_listener->socket()->LocalEndpoint().port();
-    std::string target_host = "127.0.0.1";
-
-    LOG(INFO) << "AFL++ fuzzing mode enabled (USE_AFL build)";
-    LOG(INFO) << "Fuzzing target: " << target_host << ":" << actual_port;
-
-    g_fuzz_running = true;
-    fuzz_thread = std::make_unique<std::thread>(FuzzingThread, target_host, actual_port);
-
-    // Give fuzzing thread a moment to initialize
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  }
-#endif
-
   // Start the acceptor loop and wait for the server to shutdown.
   acceptor->Run();
   google::FlushLogFiles(google::INFO);  // Flush the header.
 
+  // Wait for server shutdown (always in RunEngine, AFL handles exit separately)
   acceptor->Wait();
-
-#ifdef USE_AFL
-  // Wait for fuzzing thread to finish
-  if (fuzz_thread && fuzz_thread->joinable()) {
-    LOG(INFO) << "Waiting for fuzzing thread to complete...";
-    fuzz_thread->join();
-  }
-#endif
 
   version_monitor.Shutdown();
   service.Shutdown();
@@ -681,93 +650,6 @@ void RegisterBufRings(ProactorPool* pool) {
 #endif
 }
 
-#ifdef USE_AFL
-// AFL++ fuzzing thread - reads from stdin and sends to local Dragonfly instance
-std::atomic<bool> g_fuzz_running{false};
-
-void FuzzingThread(const std::string& host, uint16_t port) {
-  uint32_t iterations = absl::GetFlag(FLAGS_afl_loop_iterations);
-  LOG(INFO) << "Fuzzing thread started, targeting " << host << ":" << port;
-  LOG(INFO) << "AFL++ persistent mode: " << iterations << " iterations per process";
-
-  // AFL++ persistent mode initialization
-#ifdef __AFL_HAVE_MANUAL_CONTROL
-  __AFL_INIT();
-#endif
-
-  // Buffer for reading fuzzer input from stdin
-  constexpr size_t kMaxInputSize = 64 * 1024;
-  std::vector<uint8_t> input_buffer(kMaxInputSize);
-
-  // AFL++ persistent loop - process stays alive for multiple test cases
-  while (__AFL_LOOP(iterations)) {
-    // Read input from stdin (AFL++ provides test case here)
-    ssize_t total_len = 0;
-    ssize_t n;
-    do {
-      n = read(STDIN_FILENO, input_buffer.data() + total_len, kMaxInputSize - total_len);
-      if (n > 0) {
-        total_len += n;
-      }
-    } while (n > 0 && total_len < static_cast<ssize_t>(kMaxInputSize));
-
-    if (total_len <= 0) {
-      continue;  // No input, skip this iteration
-    }
-
-    // Create TCP connection to local Dragonfly instance
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-      LOG(ERROR) << "Failed to create socket: " << strerror(errno);
-      continue;
-    }
-
-    // Set socket timeout to avoid hanging
-    struct timeval tv;
-    tv.tv_sec = 1;  // 1 second timeout
-    tv.tv_usec = 0;
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-    // Connect to localhost
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
-
-    if (inet_pton(AF_INET, host.c_str(), &server_addr.sin_addr) <= 0) {
-      LOG(ERROR) << "Invalid address: " << host;
-      close(sockfd);
-      continue;
-    }
-
-    if (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-      // Connection failed - server might not be ready yet
-      close(sockfd);
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-      continue;
-    }
-
-    // Send fuzzer input to Dragonfly
-    ssize_t sent = send(sockfd, input_buffer.data(), total_len, 0);
-    if (sent < 0) {
-      LOG(WARNING) << "Failed to send data: " << strerror(errno);
-    }
-
-    // Read response (optional, but helps detect crashes in protocol handling)
-    uint8_t response_buffer[4096];
-    ssize_t received = recv(sockfd, response_buffer, sizeof(response_buffer), 0);
-    (void)received;  // Ignore response for now
-
-    // Close connection
-    close(sockfd);
-  }
-
-  LOG(INFO) << "Fuzzing thread finished";
-  g_fuzz_running = false;
-}
-#endif
-
 }  // namespace
 }  // namespace dfly
 
@@ -988,8 +870,8 @@ Usage: dragonfly [FLAGS]
     AcceptServer acceptor(pool.get(), &fb2::std_malloc_resource, true);
     acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));
 
+    // Normal mode: run server and wait
     dfly::RunEngine(pool.get(), &acceptor);
-
     pool->Stop();
 
     if (!pidfile_path.empty()) {

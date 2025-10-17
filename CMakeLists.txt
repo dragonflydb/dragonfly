@@ -69,6 +69,9 @@ if(USE_AFL)
   message(STATUS "  C compiler: ${CMAKE_C_COMPILER}")
   message(STATUS "  C++ compiler: ${CMAKE_CXX_COMPILER}")
 
+  # CRITICAL: Add USE_AFL as compile definition so #ifdef USE_AFL works in code
+  add_compile_definitions(USE_AFL)
+
   # AFL++ requires specific compiler flags for coverage instrumentation
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g")

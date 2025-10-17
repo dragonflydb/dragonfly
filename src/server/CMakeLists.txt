@@ -175,3 +175,15 @@ add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  bitops_family_test set_family_test zset_family_test geo_family_test
                  hll_family_test cluster_config_test cluster_family_test acl_family_test
                  json_family_memory_test)
+
+# AFL++ socket fuzzing library
+if(USE_AFL)
+  add_library(socketfuzz SHARED ${CMAKE_SOURCE_DIR}/fuzz/socketfuzz.c)
+  target_link_libraries(socketfuzz PRIVATE dl pthread)
+  set_target_properties(socketfuzz PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    OUTPUT_NAME "socketfuzz"
+  )
+  add_dependencies(dragonfly socketfuzz)
+  message(STATUS "AFL++ socketfuzz will be built in: ${CMAKE_BINARY_DIR}/libsocketfuzz.so")
+endif()
