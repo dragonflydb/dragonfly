@@ -197,7 +197,9 @@ class SearchAlgorithm {
   bool Init(std::string_view query, const QueryParams* params,
             const OptionalFilters* filters = nullptr);
 
-  SearchResult Search(const FieldIndices* index) const;
+  // Search on given index with predefined limit for cutting off result ids
+  SearchResult Search(const FieldIndices* index,
+                      size_t cuttoff_limit = std::numeric_limits<size_t>::max()) const;
 
   // if enabled, return limit & alias for knn query
   std::optional<KnnScoreSortOption> GetKnnScoreSortOption() const;

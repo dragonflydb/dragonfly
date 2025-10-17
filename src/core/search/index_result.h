@@ -39,8 +39,8 @@ class IndexResult {
 
   BorrowedView Borrowed() const;
 
-  // Move out of owned or copy borrowed
-  DocVec Take();
+  // Move out of owned or copy borrowed. Take up to `limit` entries and return original size.
+  std::pair<DocVec, size_t /* full size */> Take(size_t limit = std::numeric_limits<size_t>::max());
 
  private:
   bool IsOwned() const;
@@ -82,18 +82,34 @@ inline IndexResult::BorrowedView IndexResult::Borrowed() const {
   return std::visit(cb, value_);
 }
 
-inline IndexResult::DocVec IndexResult::Take() {
+inline std::pair<IndexResult::DocVec, size_t> IndexResult::Take(size_t limit) {
   if (IsOwned()) {
-    return std::move(std::get<DocVec>(value_));
+    auto& vec = std::get<DocVec>(value_);
+    size_t size = vec.size();
+    return {std::move(vec), size};
   }
 
-  auto cb = [](auto* set) -> DocVec {
+  // Numeric ranges need to be filtered and don't know their size ahead
+  if (std::holds_alternative<RangeResult>(value_)) {
+    auto cb = [limit](auto* range) -> std::pair<DocVec, size_t> {
+      DocVec out;
+      out.reserve(range->size());
+      for (auto it = range->begin(); it != range->end(); ++it)
+        out.push_back(*it);
+      size_t total = out.size();
+      out.resize(std::min(out.size(), limit));
+      return {std::move(out), total};
+    };
+    return std::visit(cb, Borrowed());
+  }
+
+  // Generic borrowed results sets don't need to be filtered, so we can tell the result size ahead
+  auto cb = [limit](auto* set) -> std::pair<DocVec, size_t> {
     DocVec out;
     out.reserve(set->size());
-    for (auto it = set->begin(); it != set->end(); ++it) {
+    for (auto it = set->begin(); it != set->end() && out.size() < limit; ++it)
       out.push_back(*it);
-    }
-    return out;
+    return {std::move(out), set->size()};
   };
   return std::visit(cb, Borrowed());
 }
