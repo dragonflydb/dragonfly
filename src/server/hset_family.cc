@@ -51,63 +51,6 @@ bool IsGoodForListpack(CmdArgList args, const uint8_t* lp) {
 }
 
 using container_utils::GetStringMap;
-using container_utils::LpFind;
-
-pair<uint8_t*, bool> LpDelete(uint8_t* lp, string_view field) {
-  uint8_t* fptr = lpFirst(lp);
-  DCHECK(fptr);
-  fptr = lpFind(lp, fptr, (unsigned char*)field.data(), field.size(), 1);
-  if (fptr == NULL) {
-    return make_pair(lp, false);
-  }
-
-  /* Delete both of the key and the value. */
-  lp = lpDeleteRangeWithEntry(lp, &fptr, 2);
-  return make_pair(lp, true);
-}
-
-// returns a new pointer to lp. Returns true if field was inserted or false it it already existed.
-// skip_exists controls what happens if the field already existed. If skip_exists = true,
-// then val does not override the value and listpack is not changed. Otherwise, the corresponding
-// value is overridden by val.
-pair<uint8_t*, bool> LpInsert(uint8_t* lp, string_view field, string_view val, bool skip_exists) {
-  uint8_t* vptr;
-
-  uint8_t* fptr = lpFirst(lp);
-  uint8_t* fsrc = field.empty() ? lp : (uint8_t*)field.data();
-
-  // if we vsrc is NULL then lpReplace will delete the element, which is not what we want.
-  // therefore, for an empty val we set it to some other valid address so that lpReplace
-  // will do the right thing and encode empty string instead of deleting the element.
-  uint8_t* vsrc = val.empty() ? lp : (uint8_t*)val.data();
-
-  bool updated = false;
-
-  if (fptr) {
-    fptr = lpFind(lp, fptr, fsrc, field.size(), 1);
-    if (fptr) {
-      if (skip_exists) {
-        return make_pair(lp, false);
-      }
-      /* Grab pointer to the value (fptr points to the field) */
-      vptr = lpNext(lp, fptr);
-      updated = true;
-
-      /* Replace value */
-      lp = lpReplace(lp, &vptr, vsrc, val.size());
-      DCHECK_EQ(0u, lpLength(lp) % 2);
-    }
-  }
-
-  if (!updated) {
-    /* Push new field/value pair onto the tail of the listpack */
-    // TODO: we should at least allocate once for both elements.
-    lp = lpAppend(lp, fsrc, field.size());
-    lp = lpAppend(lp, vsrc, val.size());
-  }
-
-  return make_pair(lp, !updated);
-}
 
 struct HMapWrap {
  private:
@@ -126,7 +69,7 @@ struct HMapWrap {
   size_t Length() const {
     Overloaded ov{
         [](StringMap* s) { return s->UpperBoundSize(); },
-        [](detail::ListpackWrap lw) { return lw.size(); },
+        [](const detail::ListpackWrap& lw) { return lw.size(); },
     };
     return visit(ov, impl_);
   }
@@ -150,6 +93,26 @@ struct HMapWrap {
     return base::it::Range(visit2(cb));
   }
 
+  bool Erase(std::string_view key) {
+    Overloaded ov{[key](StringMap* s) { return s->Erase(key); },
+                  [key](detail::ListpackWrap& lw) { return lw.Delete(key); }};
+    return visit(ov, impl_);
+  }
+
+  void AddOrUpdate(std::string_view key, std::string_view value) {
+    Overloaded ov{[&](StringMap* sm) { sm->AddOrUpdate(key, value); },
+                  [&](detail::ListpackWrap& lw) { lw.Insert(key, value, false); }};
+    visit(ov, impl_);
+  }
+
+  void Launder(PrimeValue& pv) {
+    Overloaded ov{
+        [](StringMap* s) {},
+        [&](detail::ListpackWrap& lw) { pv.SetRObjPtr(lw.GetPointer()); },
+    };
+    visit(ov, impl_);
+  }
+
   template <typename T> optional<T> Get() const {
     if (holds_alternative<T>(impl_))
       return get<T>(impl_);
@@ -160,30 +123,63 @@ struct HMapWrap {
   variant<StringMap*, detail::ListpackWrap> impl_;
 };
 
+// Delete if length is zero
+void DeleteHw(HMapWrap& hw, const OpArgs& op_args, std::string_view key) {
+  auto& db_slice = op_args.GetDbSlice();
+  if (auto del_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH); del_it) {
+    del_it->post_updater.Run();
+    db_slice.Del(op_args.db_cntx, del_it->it);
+    if (op_args.shard->journal()) {
+      RecordJournal(op_args, "DEL"sv, {key});
+    }
+  }
+}
+
+auto KeyAndArgs(Transaction* t, EngineShard* es) {
+  return std::make_pair(t->GetShardArgs(es->shard_id()).Front(), t->GetOpArgs(es));
+}
+
 // Wrap read-only handler
 template <typename F> auto WrapRO(F&& f) {
   using RT = std::invoke_result_t<F, HMapWrap>;
   return [f = std::forward<F>(f)](Transaction* t, EngineShard* es) -> RT {
-    std::string_view key = t->GetShardArgs(es->shard_id()).Front();
-    auto op_args = t->GetOpArgs(es);
-    auto& db_slice = op_args.GetDbSlice();
-
-    auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+    auto [key, op_args] = KeyAndArgs(t, es);
+    auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
     RETURN_ON_BAD_STATUS(it_res);
 
     HMapWrap hw{(*it_res)->second, op_args.db_cntx};
     auto res = f(hw);
 
-    // Delete value if field expirations made it empty
-    if (hw.Length() == 0) {
-      if (auto del_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH); del_it) {
-        del_it->post_updater.Run();
-        db_slice.Del(op_args.db_cntx, del_it->it);
-        if (op_args.shard->journal()) {
-          RecordJournal(op_args, "DEL"sv, {key});
-        }
-      }
-    }
+    if (hw.Length() == 0)  // Expirations might have emptied it
+      DeleteHw(hw, op_args, key);
+    return res;
+  };
+}
+
+// Wrap write handler
+template <typename F> auto WrapW(F&& f) {
+  using RT = std::invoke_result_t<F, HMapWrap&>;
+  return [f = std::forward<F>(f)](Transaction* t, EngineShard* es) -> RT {
+    auto [key, op_args] = KeyAndArgs(t, es);
+
+    auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_HASH);
+    RETURN_ON_BAD_STATUS(it_res);
+    auto& pv = it_res->it->second;
+
+    // Remove document before modification
+    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
+
+    HMapWrap hw{pv, op_args.db_cntx};
+    auto res = f(hw);
+    hw.Launder(pv);
+
+    // Run post updater
+    it_res->post_updater.Run();
+
+    if (hw.Length() == 0)
+      DeleteHw(hw, op_args, key);
+    else
+      op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
 
     return res;
   };
@@ -260,68 +256,28 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
     }
   }
 
-  unsigned enc = pv.Encoding();
-
-  if (enc == kEncodingListPack) {
-    uint8_t intbuf[LP_INTBUF_SIZE];
-    uint8_t* lp = (uint8_t*)pv.RObjPtr();
-    optional<string_view> res;
-
-    if (!add_res.is_new)
-      res = LpFind(lp, field, intbuf);
-
-    OpStatus status = IncrementValue(res, param);
-    if (status != OpStatus::OK) {
-      return status;
-    }
-
-    if (holds_alternative<double>(*param)) {
-      double new_val = get<double>(*param);
-      char buf[128];
-      char* str = RedisReplyBuilder::FormatDouble(new_val, buf, sizeof(buf));
-      lp = LpInsert(lp, field, str, false).first;
-    } else {  // integer increment
-      int64_t new_val = get<int64_t>(*param);
-      absl::AlphaNum an(new_val);
-      lp = LpInsert(lp, field, an.Piece(), false).first;
-    }
-
-    pv.SetRObjPtr(lp);
-  } else {
-    DCHECK_EQ(enc, kEncodingStrMap2);
-    StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-
-    sds val = nullptr;
-    if (!add_res.is_new) {
-      auto it = sm->Find(field);
-      if (it != sm->end()) {
-        val = it->second;
-      }
-    }
-
-    optional<string_view> sv;
-    if (val) {
-      sv.emplace(val, sdslen(val));
-    }
-
-    OpStatus status = IncrementValue(sv, param);
-    if (status != OpStatus::OK) {
-      return status;
-    }
-
-    if (holds_alternative<double>(*param)) {
-      double new_val = get<double>(*param);
-
-      char buf[128];
-      char* str = RedisReplyBuilder::FormatDouble(new_val, buf, sizeof(buf));
-      sm->AddOrUpdate(field, str);
-    } else {  // integer increment
-      int64_t new_val = get<int64_t>(*param);
-      absl::AlphaNum an(new_val);
-      sm->AddOrUpdate(field, an.Piece());
-    }
+  HMapWrap hw{pv, op_args.db_cntx};
+  optional<string_view> res;
+  if (!add_res.is_new) {
+    if (auto it = hw.Find(field); it)
+      res = (*it).second;
   }
 
+  if (OpStatus status = IncrementValue(res, param); status != OpStatus::OK)
+    return status;
+
+  if (holds_alternative<double>(*param)) {
+    double new_val = get<double>(*param);
+    char buf[128];
+    char* str = RedisReplyBuilder::FormatDouble(new_val, buf, sizeof(buf));
+    hw.AddOrUpdate(field, str);
+  } else {  // integer increment
+    int64_t new_val = get<int64_t>(*param);
+    absl::AlphaNum an(new_val);
+    hw.AddOrUpdate(field, an.Piece());
+  }
+
+  hw.Launder(pv);
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
 
   return OpStatus::OK;
@@ -370,64 +326,6 @@ OpResult<StringVec> OpScan(const HMapWrap& hw, uint64_t* cursor, const ScanOpts&
   }
 
   return res;
-}
-
-OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList values) {
-  DCHECK(!values.empty());
-
-  auto& db_slice = op_args.GetDbSlice();
-  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH);
-  RETURN_ON_BAD_STATUS(it_res);
-
-  PrimeValue& pv = it_res->it->second;
-  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
-
-  unsigned deleted = 0;
-  bool key_remove = false;
-  unsigned enc = pv.Encoding();
-
-  if (enc == kEncodingListPack) {
-    uint8_t* lp = (uint8_t*)pv.RObjPtr();
-    for (auto s : values) {
-      auto res = LpDelete(lp, s);
-      if (res.second) {
-        ++deleted;
-        lp = res.first;
-        if (lpLength(lp) == 0) {
-          key_remove = true;
-          break;
-        }
-      }
-    }
-    pv.SetRObjPtr(lp);
-  } else {
-    DCHECK_EQ(enc, kEncodingStrMap2);
-    StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-
-    for (auto s : values) {
-      if (sm->Erase(s)) {
-        ++deleted;
-      }
-
-      // Even if the previous Erase op did not erase anything, it can remove expired fields as a
-      // side effect.
-      if (sm->Empty()) {
-        key_remove = true;
-        break;
-      }
-    }
-  }
-
-  it_res->post_updater.Run();
-
-  if (!key_remove)
-    op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
-
-  if (key_remove) {
-    db_slice.Del(op_args.db_cntx, it_res->it);
-  }
-
-  return deleted;
 }
 
 OpResult<vector<OptStr>> OpHMGet(const HMapWrap& hw, CmdArgList fields) {
@@ -505,17 +403,16 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   unsigned created = 0;
 
   if (lp) {
-    bool inserted;
     size_t malloc_reserved = zmalloc_size(lp);
     size_t min_sz = EstimateListpackMinBytes(values);
     if (min_sz > malloc_reserved) {
       lp = (uint8_t*)zrealloc(lp, min_sz);
     }
+    detail::ListpackWrap lw{lp};
     for (size_t i = 0; i < values.size(); i += 2) {
-      tie(lp, inserted) = LpInsert(lp, ArgS(values, i), ArgS(values, i + 1), op_sp.skip_if_exists);
-      created += inserted;
+      created += lw.Insert(values[i], values[i + 1], op_sp.skip_if_exists);
     }
-    pv.SetRObjPtr(lp);
+    pv.SetRObjPtr(lw.GetPointer());
   } else {
     DCHECK_EQ(kEncodingStrMap2, pv.Encoding());  // Dictionary
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
@@ -653,12 +550,13 @@ struct HSetReplies {
 }  // namespace
 
 void HSetFamily::HDel(CmdArgList args, const CommandContext& cmd_cntx) {
-  string_view key = ArgS(args, 0);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpDel(t->GetOpArgs(shard), key, args.subspan(1));
+  auto cb = [&](HMapWrap& hw) -> OpResult<uint32_t> {
+    unsigned deleted = 0;
+    for (string_view s : args.subspan(1))
+      deleted += hw.Erase(s);
+    return deleted;
   };
-  HSetReplies{cmd_cntx.rb}.Send(cmd_cntx.tx->ScheduleSingleHopT(cb));
+  HSetReplies{cmd_cntx.rb}.Send(cmd_cntx.tx->ScheduleSingleHopT(WrapW(cb)));
 }
 
 void HSetFamily::HExpire(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -1102,10 +1000,8 @@ int32_t HSetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValu
   DCHECK_EQ(OBJ_HASH, pv.ObjType());
 
   if (pv.Encoding() == kEncodingListPack) {
-    uint8_t intbuf[LP_INTBUF_SIZE];
-    uint8_t* lp = (uint8_t*)pv.RObjPtr();
-    optional<string_view> res = LpFind(lp, field, intbuf);
-    return res ? -1 : -3;
+    detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
+    return lw.Find(field) == lw.end() ? -3 : -1;
   } else {
     StringMap* string_map = (StringMap*)pv.RObjPtr();
     string_map->set_time(MemberTimeSeconds(db_context.time_now_ms));

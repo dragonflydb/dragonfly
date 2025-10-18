@@ -151,14 +151,13 @@ std::optional<BaseAccessor::StringList> BaseAccessor::GetTags(std::string_view a
 
 std::optional<BaseAccessor::StringList> ListPackAccessor::GetStrings(
     string_view active_field) const {
-  auto strsv = container_utils::LpFind(lp_, active_field, intbuf_[0].data());
-  return strsv.has_value() ? StringList{*strsv} : StringList{};
+  auto it = lw_.Find(active_field);
+  return it != lw_.end() ? StringList{(*it).second} : StringList{};
 }
 
 SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
   SearchDocData out{};
-  detail::ListpackWrap lw{lp_};
-  for (const auto [key, value] : lw) {
+  for (const auto [key, value] : lw_) {
     if (auto field_value = ExtractSortableValue(schema, key, value); field_value) {
       out[key] = std::move(field_value).value();
     }
@@ -399,7 +398,7 @@ unique_ptr<BaseAccessor> GetAccessor(const DbContext& db_cntx, const PrimeValue&
   }
 
   if (pv.Encoding() == kEncodingListPack) {
-    auto ptr = reinterpret_cast<ListPackAccessor::LpPtr>(pv.RObjPtr());
+    auto ptr = reinterpret_cast<uint8_t*>(pv.RObjPtr());
     return make_unique<ListPackAccessor>(ptr);
   } else {
     auto* sm = container_utils::GetStringMap(pv, db_cntx);
