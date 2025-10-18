@@ -129,6 +129,13 @@ class DflyCmd {
     util::fb2::SharedMutex shared_mu;  // See top of header for locking levels.
   };
 
+  struct ValkeyReplica {
+    ValkeyReplica(facade::Connection* conn, ExecutionState::ErrHandler h) : conn{conn}, exec_st{h} {
+    }
+    facade::Connection* conn = nullptr;
+    ExecutionState exec_st;
+  };
+
  public:
   DflyCmd(ServerFamily* server_family);
 
@@ -142,6 +149,7 @@ class DflyCmd {
 
   // Create new sync session. Returns (session_id, number of flows)
   std::pair<uint32_t, unsigned> CreateSyncSession(ConnectionState* state) ABSL_LOCKS_EXCLUDED(mu_);
+  void CreateValkeySyncSession(facade::Connection* conn);
 
   // Master side access method to replication info of that connection.
   std::shared_ptr<ReplicaInfo> GetReplicaInfoFromConnection(ConnectionState* state);
@@ -156,6 +164,7 @@ class DflyCmd {
 
   // Tries to break those flows that stuck on socket write for too long time.
   void BreakStalledFlowsInShard() ABSL_NO_THREAD_SAFETY_ANALYSIS;
+  void StartValkeySync();
 
  private:
   using RedisReplyBuilder = facade::RedisReplyBuilder;
@@ -237,6 +246,8 @@ class DflyCmd {
 
   using ReplicaInfoMap = absl::btree_map<uint32_t, std::shared_ptr<ReplicaInfo>>;
   ReplicaInfoMap replica_infos_ ABSL_GUARDED_BY(mu_);
+
+  std::optional<ValkeyReplica> _valkey_replica = std::nullopt;
 
   mutable util::fb2::Mutex mu_;  // Guard global operations. See header top for locking levels.
 };
