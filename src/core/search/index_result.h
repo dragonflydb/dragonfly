@@ -89,15 +89,17 @@ inline std::pair<IndexResult::DocVec, size_t> IndexResult::Take(size_t limit) {
     return {std::move(vec), size};
   }
 
-  // Numeric ranges need to be filtered and don't know their size ahead
+  // Numeric ranges need to be filtered and don't know their exact size ahead
   if (std::holds_alternative<RangeResult>(value_)) {
     auto cb = [limit](auto* range) -> std::pair<DocVec, size_t> {
       DocVec out;
-      out.reserve(range->size());
-      for (auto it = range->begin(); it != range->end(); ++it)
-        out.push_back(*it);
-      size_t total = out.size();
-      out.resize(std::min(out.size(), limit));
+      size_t total = 0;
+      out.reserve(std::min(limit, range->size()));
+      for (auto it = range->begin(); it != range->end(); ++it) {
+        total++;
+        if (out.size() < limit)
+          out.push_back(*it);
+      }
       return {std::move(out), total};
     };
     return std::visit(cb, Borrowed());
@@ -106,7 +108,7 @@ inline std::pair<IndexResult::DocVec, size_t> IndexResult::Take(size_t limit) {
   // Generic borrowed results sets don't need to be filtered, so we can tell the result size ahead
   auto cb = [limit](auto* set) -> std::pair<DocVec, size_t> {
     DocVec out;
-    out.reserve(set->size());
+    out.reserve(std::min(limit, set->size()));
     for (auto it = set->begin(); it != set->end() && out.size() < limit; ++it)
       out.push_back(*it);
     return {std::move(out), set->size()};
