@@ -649,6 +649,36 @@ void DflyCmd::Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
   rb->SendOk();
 }
 
+void DflyCmd::StartValkeySync() {
+  CHECK(_valkey_replica.has_value()) << "There is no valkey replica to sync with";
+  std::string eof_mark(40, 'X');
+  std::string eof_mark_ = absl::StrCat("$EOF:", eof_mark);
+  auto ec = _valkey_replica->conn->socket()->Write(
+      io::Bytes{reinterpret_cast<const unsigned char*>(eof_mark_.data()), eof_mark_.size()});
+  CHECK(!ec);
+  for (uint32_t i = 0; i < shard_set->size(); ++i) {
+    auto rdb = shard_set->Await(i, [&] {
+      const auto shard = EngineShard::tlocal();
+      io::StringSink s;
+      auto saver = RdbSaver{&s, SaveMode::SINGLE_SHARD, false, ""};
+      VLOG(1) << "starting snapshot on shard " << i;
+      if (saver.SaveHeader({})) {
+        _valkey_replica->exec_st.ReportError(saver.SaveHeader({}));
+      }
+      saver.StartSnapshotInShard(false, &_valkey_replica->exec_st, shard);
+      if (const auto ec = saver.WaitSnapshotInShard(shard); ec) {
+        _valkey_replica->exec_st.ReportError(ec);
+      }
+      return s.str();
+    });
+    ec = _valkey_replica->conn->socket()->Write(
+        io::Bytes{reinterpret_cast<const unsigned char*>(rdb.data()), rdb.size()});
+  }
+  ec = _valkey_replica->conn->socket()->Write(
+      io::Bytes{reinterpret_cast<const unsigned char*>(eof_mark.data()), eof_mark.size()});
+  CHECK(!ec);
+}
+
 OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, ExecutionState* exec_st,
                                         EngineShard* shard) {
   DCHECK(shard);
@@ -728,6 +758,11 @@ void DflyCmd::StartStableSyncInThread(FlowInfo* flow, ExecutionState* exec_st, E
       flow->streamer->Cancel();
     }
   };
+}
+
+void DflyCmd::CreateValkeySyncSession(facade::Connection* conn) {
+  fb2::LockGuard lk(mu_);
+  _valkey_replica.emplace(conn, [](const GenericError&) {});
 }
 
 auto DflyCmd::CreateSyncSession(ConnectionState* state) -> std::pair<uint32_t, unsigned> {
