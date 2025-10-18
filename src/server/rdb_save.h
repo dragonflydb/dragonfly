@@ -99,7 +99,7 @@ class RdbSaver {
   std::error_code StopFullSyncInShard(EngineShard* shard);
 
   // Wait for snapshotting finish in shard thread. Called from save flows in shard thread.
-  std::error_code WaitSnapshotInShard(EngineShard* shard);
+  std::error_code WaitSnapshotInShard(EngineShard* shard, bool skip_epilog = false);
 
   // Stores auxiliary (meta) values and header_info
   std::error_code SaveHeader(const GlobalData& header_info);
