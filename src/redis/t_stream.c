@@ -28,6 +28,7 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "endianconv.h"
@@ -277,6 +278,13 @@ void streamGetEdgeID(stream *s, int first, int skip_tombstones, streamID *edge_i
     streamIteratorStop(&si);
 }
 
+void checkListPackNotEmpty(unsigned char* lp) {
+  if(lpBytes(lp) == 0) {
+   fprintf(stderr, "Error: corrupted listpack found.");
+   abort();
+  }
+}
+
 /* Trim the stream 's' according to args->trim_strategy, and return the
  * number of elements removed from the stream. The 'approx' option, if non-zero,
  * specifies that the trimming must be performed in a approximated way in
@@ -345,7 +353,7 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
 
         if (remove_node) {
             lpFree(lp);
-            raxRemove(s->rax_tree,ri.key,ri.key_len,NULL);
+            checkedRaxRemove(s->rax_tree, ri.key, ri.key_len, NULL);
             raxSeek(&ri,">=",ri.key,ri.key_len);
             s->length -= entries;
             deleted += entries;
@@ -444,6 +452,7 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
 
         /* Update the listpack with the new pointer. */
         raxInsert(s->rax_tree,ri.key,ri.key_len,lp,NULL);
+        checkListPackNotEmpty(lp);
 
         break; /* If we are here, there was enough to delete in the current
                   node, so no need to go to the next node. */
@@ -739,7 +748,7 @@ void streamIteratorRemoveEntry(streamIterator *si, streamID *current) {
         /* If this is the last element in the listpack, we can remove the whole
          * node. */
         lpFree(lp);
-        raxRemove(si->stream->rax_tree,si->ri.key,si->ri.key_len,NULL);
+        checkedRaxRemove(si->stream->rax_tree, si->ri.key, si->ri.key_len, NULL);
     } else {
         /* In the base case we alter the counters of valid/deleted entries. */
         lp = lpReplaceInteger(lp,&p,aux-1);
@@ -750,6 +759,8 @@ void streamIteratorRemoveEntry(streamIterator *si, streamID *current) {
         /* Update the listpack with the new pointer. */
         if (si->lp != lp)
             raxInsert(si->stream->rax_tree,si->ri.key,si->ri.key_len,lp,NULL);
+
+        checkListPackNotEmpty(lp);
     }
 
     /* Update the number of entries counter. */

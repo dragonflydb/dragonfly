@@ -86,6 +86,11 @@ class CompressedSortedSet {
   // Split into two equally sized halves
   std::pair<CompressedSortedSet, CompressedSortedSet> Split() &&;
 
+  IntType Back() const {
+    DCHECK(!Empty() && tail_value_.has_value());
+    return tail_value_.value();
+  }
+
  private:
   struct EntryLocation {
     IntType value;                        // Value or 0

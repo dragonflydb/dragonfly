@@ -4,15 +4,16 @@
 
 #include "server/command_registry.h"
 
+#include <absl/container/inlined_vector.h>
+#include <absl/strings/match.h>
+#include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 #include <absl/time/clock.h>
 
-#include "absl/container/inlined_vector.h"
-#include "absl/strings/match.h"
-#include "absl/strings/str_cat.h"
 #include "base/bits.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "base/stl_util.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
@@ -40,8 +41,6 @@ using namespace facade;
 
 using absl::AsciiStrToUpper;
 using absl::GetFlag;
-using absl::StrAppend;
-using absl::StrCat;
 using absl::StrSplit;
 
 namespace {
@@ -135,8 +134,21 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
                         acl_categories.value_or(ImplicitAclCategories(mask))) {
   implicit_acl_ = !acl_categories.has_value();
   hdr_histogram* hist = nullptr;
-  hdr_init(kLatencyHistogramMinValue, kLatencyHistogramMaxValue, kLatencyHistogramPrecision, &hist);
+  const int init_result = hdr_init(kLatencyHistogramMinValue, kLatencyHistogramMaxValue,
+                                   kLatencyHistogramPrecision, &hist);
+  CHECK_EQ(init_result, 0) << "failed to initialize histogram for command " << name;
   latency_histogram_ = hist;
+
+  if (name_.rfind("EVAL", 0) == 0)
+    kind_multi_ctr_ = CO::MultiControlKind::EVAL;
+  else if (base::_in(name_, {"EXEC", "MULTI", "DISCARD"}))
+    kind_multi_ctr_ = CO::MultiControlKind::EXEC;
+  else if (base::_in(name_, {"PUBLISH", "SUBSCRIBE", "UNSUBSCRIBE"}))
+    kind_pubsub_ = CO::PubSubKind::REGULAR;
+  else if (base::_in(name_, {"PSUBSCRIBE", "PUNSUBSCRIBE"}))
+    kind_pubsub_ = CO::PubSubKind::PATTERN;
+  else if (base::_in(name_, {"SPUBLISH", "SSUBSCRIBE", "SUNSUBSCRIBE"}))
+    kind_pubsub_ = CO::PubSubKind::SHARDED;
 }
 
 CommandId::~CommandId() {
@@ -174,7 +186,7 @@ bool CommandId::IsTransactional() const {
 }
 
 bool CommandId::IsMultiTransactional() const {
-  return CO::IsTransKind(name()) || CO::IsEvalKind(name());
+  return kind_multi_ctr_.has_value();
 }
 
 uint64_t CommandId::Invoke(CmdArgList args, const CommandContext& cmd_cntx) const {
@@ -233,11 +245,11 @@ hdr_histogram* CommandId::LatencyHist() const {
 CommandRegistry::CommandRegistry() {
   cmd_rename_map_ = ParseCmdlineArgMap(FLAGS_rename_command);
 
-  for (string name : GetFlag(FLAGS_restricted_commands)) {
+  for (const string& name : GetFlag(FLAGS_restricted_commands)) {
     restricted_cmds_.emplace(AsciiStrToUpper(name));
   }
 
-  for (string name : GetFlag(FLAGS_oom_deny_commands)) {
+  for (const string& name : GetFlag(FLAGS_oom_deny_commands)) {
     oomdeny_cmds_.emplace(AsciiStrToUpper(name));
   }
 }
@@ -347,55 +359,5 @@ absl::flat_hash_map<std::string, hdr_histogram*> CommandRegistry::LatencyMap() c
   }
   return cmd_latencies;
 }
-
-namespace CO {
-
-const char* OptName(CO::CommandOpt fl) {
-  using namespace CO;
-
-  switch (fl) {
-    case WRITE:
-      return "write";
-    case READONLY:
-      return "readonly";
-    case DENYOOM:
-      return "denyoom";
-    case FAST:
-      return "fast";
-    case LOADING:
-      return "loading";
-    case DANGEROUS:
-      return "dangerous";
-    case ADMIN:
-      return "admin";
-    case NOSCRIPT:
-      return "noscript";
-    case BLOCKING:
-      return "blocking";
-    case HIDDEN:
-      return "hidden";
-    case INTERLEAVED_KEYS:
-      return "interleaved-keys";
-    case GLOBAL_TRANS:
-      return "global-trans";
-    case STORE_LAST_KEY:
-      return "store-last-key";
-    case VARIADIC_KEYS:
-      return "variadic-keys";
-    case NO_AUTOJOURNAL:
-      return "custom-journal";
-    case NO_KEY_TRANSACTIONAL:
-      return "no-key-transactional";
-    case NO_KEY_TX_SPAN_ALL:
-      return "no-key-tx-span-all";
-    case IDEMPOTENT:
-      return "idempotent";
-    case SLOW:
-      return "slow";
-  }
-  return "unknown";
-}
-
-}  // namespace CO
 
 }  // namespace dfly

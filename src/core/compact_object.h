@@ -135,7 +135,7 @@ class CompactObj {
     NONE_ENC = 0,
     ASCII1_ENC = 1,
     ASCII2_ENC = 2,
-    HUFFMAN_ENC = 3,  // TBD
+    HUFFMAN_ENC = 3,
   };
 
  public:
@@ -147,22 +147,30 @@ class CompactObj {
 
    private:
     friend class CompactObj;
-    explicit StrEncoding(uint8_t enc) : enc_(static_cast<EncodingEnum>(enc)) {
+    explicit StrEncoding(uint8_t enc, bool is_key)
+        : enc_(static_cast<EncodingEnum>(enc)), is_key_(is_key) {
     }
 
     size_t DecodedSize(size_t compr_size, uint8_t first_byte) const;
 
     EncodingEnum enc_;
+    bool is_key_;
   };
 
   using PrefixArray = std::vector<std::string_view>;
   using MemoryResource = detail::RobjWrapper::MemoryResource;
 
+  // Different representations of external values
+  enum class ExternalRep : uint8_t {
+    STRING,         // OBJ_STRING, Basic representation with various string encodings
+    SERIALIZED_MAP  // OBJ_HASH, Serialized map
+  };
+
   CompactObj() {  // By default - empty string.
   }
 
-  explicit CompactObj(std::string_view str) {
-    SetString(str);
+  explicit CompactObj(std::string_view str, bool is_key) {
+    SetString(str, is_key);
   }
 
   CompactObj(CompactObj&& cs) noexcept {
@@ -183,7 +191,7 @@ class CompactObj {
   CompactObj AsRef() const {
     CompactObj res;
     memcpy(&res.u_, &u_, sizeof(u_));
-    res.taglen_ = taglen_;
+    res.tagbyte_ = tagbyte_;
     res.mask_ = mask_;
     res.mask_bits_.ref = 1;
 
@@ -300,7 +308,11 @@ class CompactObj {
   }
 
   // For STR object.
-  void SetString(std::string_view str);
+  void SetString(std::string_view str, bool is_key);
+  void SetValue(std::string_view val) {
+    SetString(val, false);
+  }
+
   void GetString(std::string* res) const;
 
   void ReserveString(size_t size);
@@ -342,7 +354,8 @@ class CompactObj {
     return u_.ext_ptr.is_cool;
   }
 
-  void SetExternal(size_t offset, uint32_t sz);
+  void SetExternal(size_t offset, uint32_t sz, ExternalRep rep);
+  ExternalRep GetExternalRep() const;
 
   // Switches to empty, non-external string.
   // Preserves all the attributes.
@@ -362,8 +375,6 @@ class CompactObj {
   // Prerequisite: IsCool() is true.
   // Returns the external data of the object incuding its ColdRecord.
   CoolItem GetCool() const;
-
-  void ImportExternal(const CompactObj& src);
 
   std::pair<size_t, size_t> GetExternalSlice() const;
 
@@ -425,7 +436,7 @@ class CompactObj {
   StringOrView GetRawString() const;
 
   StrEncoding GetStrEncoding() const {
-    return StrEncoding{mask_bits_.encoding};
+    return StrEncoding{mask_bits_.encoding, bool(huffman_domain_)};
   }
 
   bool HasAllocated() const;
@@ -437,7 +448,7 @@ class CompactObj {
   }
 
  private:
-  void EncodeString(std::string_view str);
+  void EncodeString(std::string_view str, bool is_key);
 
   bool EqualNonInline(std::string_view sv) const;
 
@@ -460,8 +471,9 @@ class CompactObj {
   struct ExternalPtr {
     uint32_t serialized_size;
     uint16_t page_offset;  // 0 for multi-page blobs. != 0 for small blobs.
-    uint16_t is_cool : 1;
-    uint16_t is_reserved : 15;
+    uint8_t is_cool : 1;
+    uint8_t representation : 2;  // See ExternalRep
+    uint16_t is_reserved : 13;
 
     // We do not have enough space in the common area to store page_index together with
     // cool_record pointer. Therefore, we moved this field into TieredColdRecord itself.
@@ -540,7 +552,14 @@ class CompactObj {
   };
 
   // We currently reserve 5 bits for tags and 3 bits for extending the mask. currently reserved.
-  uint8_t taglen_ = 0;
+  union {
+    uint8_t tagbyte_ = 0;
+    struct {
+      uint8_t taglen_ : 5;
+      uint8_t huffman_domain_ : 1;  // value from HuffmanDomain enum.
+      uint8_t reserved : 2;
+    };
+  };
 };
 
 inline bool CompactObj::operator==(std::string_view sv) const {

@@ -87,16 +87,6 @@ ListDir ParseDir(facade::CmdArgParser* parser) {
   return parser->MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
 }
 
-string_view DirToSv(ListDir dir) {
-  switch (dir) {
-    case ListDir::LEFT:
-      return "LEFT"sv;
-    case ListDir::RIGHT:
-      return "RIGHT"sv;
-  }
-  return ""sv;
-}
-
 class BPopPusher {
  public:
   BPopPusher(string_view pop_key, string_view push_key, ListDir popdir, ListDir pushdir);
@@ -187,7 +177,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
     dest_res.it->second.InitRobj(OBJ_LIST, kEncodingQL2, destql_v2);
     auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
     if (blocking_controller) {
-      blocking_controller->AwakeWatched(op_args.db_cntx.db_index, dest);
+      blocking_controller->Awaken(op_args.db_cntx.db_index, dest);
     }
   } else {
     destql_v2 = GetQLV2(dest_res.it->second);
@@ -267,7 +257,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   if (res.is_new) {
     auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
     if (blocking_controller) {
-      blocking_controller->AwakeWatched(op_args.db_cntx.db_index, key);
+      blocking_controller->Awaken(op_args.db_cntx.db_index, key);
     }
   }
 
@@ -619,9 +609,18 @@ void MoveGeneric(string_view src, string_view dest, ListDir src_dir, ListDir des
   OpResult<string> result;
 
   if (tx->GetUniqueShardCnt() == 1) {
-    tx->ReviveAutoJournal();  // On single shard we can use the auto journal flow.
     auto cb = [&](Transaction* t, EngineShard* shard) {
-      return OpMoveSingleShard(t->GetOpArgs(shard), src, dest, src_dir, dest_dir);
+      OpArgs op_args = t->GetOpArgs(shard);
+      auto op_res = OpMoveSingleShard(op_args, src, dest, src_dir, dest_dir);
+      if (op_res) {
+        if (op_args.shard->journal()) {
+          std::string_view cmd = src_dir == ListDir::LEFT ? "LPOP" : "RPOP";
+          RecordJournal(op_args, cmd, ArgSlice{src}, 1);
+          cmd = dest_dir == ListDir::LEFT ? "LPUSH" : "RPUSH";
+          RecordJournal(op_args, cmd, ArgSlice{dest, op_res.value()}, 1);
+        }
+      }
+      return op_res;
     };
     result = tx->ScheduleSingleHopT(std::move(cb));
   } else {
@@ -656,8 +655,8 @@ void BRPopLPush(CmdArgList args, const CommandContext& cmd_cntx) {
   auto [src, dest] = parser.Next<string_view, string_view>();
   float timeout = parser.Next<float>();
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   if (timeout < 0)
     return builder->SendError("timeout is negative");
@@ -689,8 +688,8 @@ void BLMove(CmdArgList args, const CommandContext& cmd_cntx) {
   ListDir dest_dir = ParseDir(&parser);
   float timeout = parser.Next<float>();
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   if (timeout < 0)
     return builder->SendError("timeout is negative");
@@ -738,8 +737,10 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
     op_res = OpMoveSingleShard(op_args, pop_key_, push_key_, popdir_, pushdir_);
     if (op_res) {
       if (op_args.shard->journal()) {
-        std::array<string_view, 4> arr = {pop_key_, push_key_, DirToSv(popdir_), DirToSv(pushdir_)};
-        RecordJournal(op_args, "LMOVE", arr, 1);
+        std::string_view cmd = popdir_ == ListDir::LEFT ? "LPOP" : "RPOP";
+        RecordJournal(op_args, cmd, ArgSlice{pop_key_}, 1);
+        cmd = pushdir_ == ListDir::LEFT ? "LPUSH" : "RPUSH";
+        RecordJournal(op_args, cmd, ArgSlice{push_key_, op_res.value()}, 1);
       }
     }
     return OpStatus::OK;
@@ -823,8 +824,8 @@ void PopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder*
     return_arr = true;
   }
 
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return builder->SendError(err.MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpPop(t->GetOpArgs(shard), key, dir, count, true, false);
@@ -938,7 +939,7 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
     pop_count = parser.Next<size_t>();
 
   if (!parser.Finalize())
-    return response_builder->SendError(parser.Error()->MakeReply());
+    return response_builder->SendError(parser.TakeError().MakeReply());
 
   // Create a vector to store first found key for each shard
   vector<optional<pair<string_view, bool>>> found_keys_per_shard(shard_set->size());
@@ -992,7 +993,7 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   auto cb_pop = [dir, pop_count, key_shard, &result, key = *key_to_pop](Transaction* t,
                                                                         EngineShard* shard) {
     if (*key_shard == shard->shard_id()) {
-      result = OpPop(t->GetOpArgs(shard), key, dir, pop_count, true, false);
+      result = OpPop(t->GetOpArgs(shard), key, dir, pop_count, true, true);
     }
     return OpStatus::OK;
   };
@@ -1013,8 +1014,8 @@ void ListFamily::BLMPop(CmdArgList args, const CommandContext& cmd_cntx) {
 
   CmdArgParser parser{args};
   float timeout = parser.Next<float>();
-  if (auto err = parser.Error(); err)
-    return response_builder->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return response_builder->SendError(err.MakeReply());
 
   if (timeout < 0)
     return response_builder->SendError("timeout is negative");
@@ -1027,7 +1028,7 @@ void ListFamily::BLMPop(CmdArgList args, const CommandContext& cmd_cntx) {
     pop_count = parser.Next<size_t>();
 
   if (!parser.Finalize())
-    return response_builder->SendError(parser.Error()->MakeReply());
+    return response_builder->SendError(parser.TakeError().MakeReply());
 
   OpResult<StringVec> result;
   auto cb = [&](Transaction* t, EngineShard* shard, string_view key) {
@@ -1119,8 +1120,8 @@ void ListFamily::LPos(CmdArgList args, const CommandContext& cmd_cntx) {
   if (rank == 0)
     return rb->SendError(kInvalidIntErr);
 
-  if (auto err = parser.Error(); err)
-    return rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
 
   auto cb = [&, &key = key, &elem = elem](Transaction* t, EngineShard* shard) {
     return OpPos(t->GetOpArgs(shard), key, elem, rank, count, max_len);
@@ -1178,8 +1179,8 @@ void ListFamily::LInsert(CmdArgList args, const CommandContext& cmd_cntx) {
   InsertParam where = parser.MapNext("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
   auto [pivot, elem] = parser.Next<string_view, string_view>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (auto err = parser.Error(); err)
-    return rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
 
   DCHECK(pivot.data() && elem.data());
 
@@ -1297,8 +1298,8 @@ void ListFamily::LMove(CmdArgList args, const CommandContext& cmd_cntx) {
   ListDir src_dir = ParseDir(&parser);
   ListDir dest_dir = ParseDir(&parser);
 
-  if (auto err = parser.Error(); err)
-    return cmd_cntx.rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return cmd_cntx.rb->SendError(err.MakeReply());
 
   MoveGeneric(src, dest, src_dir, dest_dir, cmd_cntx.tx, cmd_cntx.rb);
 }
@@ -1307,66 +1308,34 @@ using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&ListFamily::x)
 
-namespace acl {
-constexpr uint32_t kLPush = WRITE | LIST | FAST;
-constexpr uint32_t kLPushX = WRITE | LIST | FAST;
-constexpr uint32_t kLPop = WRITE | LIST | FAST;
-constexpr uint32_t kLMPop = WRITE | LIST | FAST;
-constexpr uint32_t kBLMPop = WRITE | LIST | SLOW | BLOCKING;
-constexpr uint32_t kRPush = WRITE | LIST | FAST;
-constexpr uint32_t kRPushX = WRITE | LIST | FAST;
-constexpr uint32_t kRPop = WRITE | LIST | FAST;
-constexpr uint32_t kRPopLPush = WRITE | LIST | SLOW;
-constexpr uint32_t kBRPopLPush = WRITE | LIST | SLOW | BLOCKING;
-constexpr uint32_t kBLPop = WRITE | LIST | SLOW | BLOCKING;
-constexpr uint32_t kBRPop = WRITE | LIST | SLOW | BLOCKING;
-constexpr uint32_t kLLen = READ | LIST | FAST;
-constexpr uint32_t kLPos = READ | LIST | SLOW;
-constexpr uint32_t kLIndex = READ | LIST | SLOW;
-constexpr uint32_t kLInsert = READ | LIST | SLOW;
-constexpr uint32_t kLRange = READ | LIST | SLOW;
-constexpr uint32_t kLSet = WRITE | LIST | SLOW;
-constexpr uint32_t kLTrim = WRITE | LIST | SLOW;
-constexpr uint32_t kLRem = WRITE | LIST | SLOW;
-constexpr uint32_t kLMove = WRITE | LIST | SLOW;
-constexpr uint32_t kBLMove = READ | LIST | SLOW | BLOCKING;
-}  // namespace acl
-
 void ListFamily::Register(CommandRegistry* registry) {
-  registry->StartFamily();
+  registry->StartFamily(acl::LIST);
   *registry
-      << CI{"LPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kLPush}.HFUNC(LPush)
-      << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kLPushX}.HFUNC(LPushX)
-      << CI{"LPOP", CO::WRITE | CO::FAST, -2, 1, 1, acl::kLPop}.HFUNC(LPop)
-      << CI{"LMPOP", CO::WRITE | CO::SLOW | CO::VARIADIC_KEYS, -4, 2, 2, acl::kLMPop}.HFUNC(LMPop)
-      << CI{"BLMPOP",    CO::WRITE | CO::SLOW | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -5, 3, 3,
-            acl::kBLMPop}
+      << CI{"LPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(LPush)
+      << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(LPushX)
+      << CI{"LPOP", CO::WRITE | CO::FAST, -2, 1, 1}.HFUNC(LPop)
+      << CI{"LMPOP", CO::WRITE | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(LMPop)
+      << CI{"BLMPOP", CO::WRITE | CO::BLOCKING | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -5, 3, 3}
              .HFUNC(BLMPop)
-      << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kRPush}.HFUNC(RPush)
-      << CI{"RPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kRPushX}.HFUNC(RPushX)
-      << CI{"RPOP", CO::WRITE | CO::FAST, -2, 1, 1, acl::kRPop}.HFUNC(RPop)
-      << CI{"RPOPLPUSH", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRPopLPush}
-             .SetHandler(RPopLPush)
-      << CI{"BRPOPLPUSH",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, 4, 1, 2,
-            acl::kBRPopLPush}
+      << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(RPush)
+      << CI{"RPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(RPushX)
+      << CI{"RPOP", CO::WRITE | CO::FAST, -2, 1, 1}.HFUNC(RPop)
+      << CI{"RPOPLPUSH", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2}.SetHandler(RPopLPush)
+      << CI{"BRPOPLPUSH", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, 4, 1, 2}
              .SetHandler(BRPopLPush)
-      << CI{"BLPOP",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2,
-            acl::kBLPop}
-             .HFUNC(BLPop)
-      << CI{"BRPOP",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2,
-            acl::kBRPop}
-             .HFUNC(BRPop)
-      << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1, acl::kLLen}.HFUNC(LLen)
-      << CI{"LPOS", CO::READONLY | CO::FAST, -3, 1, 1, acl::kLPos}.HFUNC(LPos)
-      << CI{"LINDEX", CO::READONLY, 3, 1, 1, acl::kLIndex}.HFUNC(LIndex)
-      << CI{"LINSERT", CO::WRITE | CO::DENYOOM, 5, 1, 1, acl::kLInsert}.HFUNC(LInsert)
-      << CI{"LRANGE", CO::READONLY, 4, 1, 1, acl::kLRange}.HFUNC(LRange)
-      << CI{"LSET", CO::WRITE | CO::DENYOOM, 4, 1, 1, acl::kLSet}.HFUNC(LSet)
-      << CI{"LTRIM", CO::WRITE, 4, 1, 1, acl::kLTrim}.HFUNC(LTrim)
-      << CI{"LREM", CO::WRITE, 4, 1, 1, acl::kLRem}.HFUNC(LRem)
-      << CI{"LMOVE", CO::WRITE | CO::NO_AUTOJOURNAL, 5, 1, 2, acl::kLMove}.HFUNC(LMove)
-      << CI{"BLMOVE", CO::WRITE | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2, acl::kBLMove}
-             .SetHandler(BLMove);
+      << CI{"BLPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}.HFUNC(
+             BLPop)
+      << CI{"BRPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}.HFUNC(
+             BRPop)
+      << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(LLen)
+      << CI{"LPOS", CO::READONLY, -3, 1, 1}.HFUNC(LPos)
+      << CI{"LINDEX", CO::READONLY, 3, 1, 1}.HFUNC(LIndex)
+      << CI{"LINSERT", CO::WRITE | CO::DENYOOM, 5, 1, 1}.HFUNC(LInsert)
+      << CI{"LRANGE", CO::READONLY, 4, 1, 1}.HFUNC(LRange)
+      << CI{"LSET", CO::WRITE | CO::DENYOOM, 4, 1, 1}.HFUNC(LSet)
+      << CI{"LTRIM", CO::WRITE, 4, 1, 1}.HFUNC(LTrim) << CI{"LREM", CO::WRITE, 4, 1, 1}.HFUNC(LRem)
+      << CI{"LMOVE", CO::WRITE | CO::NO_AUTOJOURNAL, 5, 1, 2}.HFUNC(LMove)
+      << CI{"BLMOVE", CO::WRITE | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2}.SetHandler(BLMove);
 }
 
 }  // namespace dfly

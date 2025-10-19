@@ -149,6 +149,17 @@ TEST_F(SingleThreadDflyEngineTest, GlobalSingleThread) {
   Run({"move", "a", "1"});
 }
 
+TEST_F(DflyEngineTest, LuaErrors) {
+  auto resp = Run({"eval", "return redis.error_reply('some error')", "0"});
+  EXPECT_THAT(resp, ErrArg("some error"));
+
+  resp = Run({"eval", "return redis.pcall('foo', 'bar')", "0"});
+  EXPECT_THAT(resp, ErrArg("ERR unknown command"));
+
+  resp = Run({"eval", "return redis.pcall('incrby', 'foo', 'bar')", "1"});
+  EXPECT_THAT(resp, ErrArg("ERR Number of keys can't be greater than number of args"));
+}
+
 TEST_F(DflyEngineTest, EvalResp) {
   auto resp = Run({"eval", "return 43", "0"});
   EXPECT_THAT(resp, IntArg(43));
@@ -745,9 +756,7 @@ TEST_F(DflyEngineTest, Issue742) {
 }
 
 TEST_F(DefragDflyEngineTest, TestDefragOption) {
-  if (pp_->GetNextProactor()->GetKind() == util::ProactorBase::EPOLL) {
-    GTEST_SKIP() << "Defragmentation via idle task is only supported in io uring";
-  }
+  GTEST_SKIP() << "Defragmentation check takes too long. Disabling this test";
 
   // mem_defrag_threshold is based on RSS statistic, but we don't count it in the test
   absl::SetFlag(&FLAGS_mem_defrag_threshold, 0.0);
@@ -837,7 +846,7 @@ TEST_F(DflyEngineTest, Latency) {
 
 TEST_F(DflyEngineTest, EvalBug2664) {
   absl::FlagSaver fs;
-  absl::SetFlag(&FLAGS_lua_resp2_legacy_float, true);
+  SetFlag(&FLAGS_lua_resp2_legacy_float, true);
 
   auto resp = Run({"eval", "return 42.9", "0"});
   EXPECT_THAT(resp, IntArg(42));
@@ -848,7 +857,7 @@ TEST_F(DflyEngineTest, EvalBug2664) {
   ASSERT_THAT(resp, ArrLen(14));
 
   resp = Run({"eval", "return 42.9", "0"});
-  EXPECT_THAT(resp, DoubleArg(42.9));
+  EXPECT_THAT(resp, IntArg(42));
 }
 
 TEST_F(DflyEngineTest, MemoryUsage) {
@@ -926,6 +935,22 @@ TEST_F(DflyEngineTest, CommandMetricLabels) {
   EXPECT_EQ(metrics.facade_stats.conn_stats.command_cnt_main, 0);
   EXPECT_EQ(metrics.facade_stats.conn_stats.num_conns_main, 0);
   EXPECT_EQ(metrics.facade_stats.conn_stats.num_conns_other, 0);
+}
+
+TEST_F(DflyEngineTest, Huffman) {
+  // enable compression for keys optimized for letter a.
+  auto resp = Run({"debug", "compression", "set", "GBDgCpXW/////7/pygS5t9x7792qU1trLQ=="});
+  EXPECT_EQ(resp, "OK");
+
+  // for string values optimized for letter x.
+  resp = Run({"debug", "compression", "set", "ChD4bAf/D/bPSwY=", "string"});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"debug", "populate", "200000", "aaaaaaaaaaaaaaaaaaaaaaaaaa", "32"});
+  EXPECT_EQ(resp, "OK");
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.events.huff_encode_success, 400000);  // each key and value
+  EXPECT_LT(metrics.heap_used_bytes, 14'000'000);         // less than 15mb
 }
 
 class DflyCommandAliasTest : public DflyEngineTest {

@@ -8,6 +8,16 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
+// Wrong warning reported when geometry.hpp is loaded
+#ifndef __clang__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+#include <boost/geometry.hpp>
+#ifndef __clang__
+#pragma GCC diagnostic pop
+#endif
+
 #include <map>
 #include <memory>
 #include <optional>
@@ -43,6 +53,8 @@ struct NumericIndex : public BaseIndex {
     // Returns all DocIds that have non-null values in the index.
     virtual std::vector<DocId> GetAllDocIds() const = 0;
 
+    virtual void FinalizeInitialization(){};
+
     virtual ~RangeTreeBase() = default;
   };
 
@@ -52,6 +64,8 @@ struct NumericIndex : public BaseIndex {
 
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
+
+  void FinalizeInitialization() override;
 
   RangeResult Range(double l, double r) const;
 
@@ -199,6 +213,25 @@ struct HnswVectorIndex : public BaseVectorIndex {
 
  private:
   std::unique_ptr<HnswlibAdapter> adapter_;
+};
+
+struct GeoIndex : public BaseIndex {
+  using point =
+      boost::geometry::model::point<double, 2,
+                                    boost::geometry::cs::geographic<boost::geometry::degree>>;
+  using index_entry = std::pair<point, DocId>;
+
+  explicit GeoIndex(PMR_NS::memory_resource* mr);
+  ~GeoIndex();
+
+  bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
+  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
+  std::vector<DocId> RadiusSearch(double lon, double lat, double radius, std::string_view arg);
+  std::vector<DocId> GetAllDocsWithNonNullValues() const override;
+
+ private:
+  using rtree = boost::geometry::index::rtree<index_entry, boost::geometry::index::linear<16>>;
+  std::unique_ptr<rtree> rtree_;
 };
 
 }  // namespace dfly::search

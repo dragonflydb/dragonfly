@@ -19,7 +19,7 @@ using namespace std;
 
 namespace {
 
-inline XXH128_hash_t Hash(string_view str) {
+XXH128_hash_t Hash(string_view str) {
   return XXH3_128bits_withSeed(str.data(), str.size(), 0xc6a4a7935bd1e995ULL);  // murmur2 seed
 }
 
@@ -27,14 +27,14 @@ uint64_t GetMask(unsigned log) {
   return (1ULL << log) - 1;
 }
 
-inline uint64_t BitIndex(uint64_t low, uint64_t hi, unsigned i, uint64_t mask) {
+uint64_t BitIndex(uint64_t low, uint64_t hi, unsigned i, uint64_t mask) {
   return (low + hi * i) & mask;
 }
 
 constexpr double kDenom = M_LN2 * M_LN2;
 constexpr double kSBFErrorFactor = 0.5;
 
-inline double BPE(double fp_prob) {
+double BPE(double fp_prob) {
   return -log(fp_prob) / kDenom;
 }
 
@@ -44,7 +44,7 @@ Bloom::~Bloom() {
   CHECK(bf_ == nullptr);
 }
 
-Bloom::Bloom(Bloom&& o) : hash_cnt_(o.hash_cnt_), bit_log_(o.bit_log_), bf_(o.bf_) {
+Bloom::Bloom(Bloom&& o) noexcept : hash_cnt_(o.hash_cnt_), bit_log_(o.bit_log_), bf_(o.bf_) {
   o.bf_ = nullptr;
 }
 
@@ -166,7 +166,7 @@ SBF::~SBF() {
     f.Destroy(mr);
 }
 
-SBF& SBF::operator=(SBF&& src) {
+SBF& SBF::operator=(SBF&& src) noexcept {
   filters_.clear();
   filters_.swap(src.filters_);
   grow_factor_ = src.grow_factor_;

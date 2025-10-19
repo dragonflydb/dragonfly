@@ -19,8 +19,8 @@ enum class ClusterMode {
   kRealCluster,
 };
 
-extern ClusterMode cluster_mode;
-extern bool cluster_shard_by_slot;
+inline ClusterMode cluster_mode = ClusterMode::kUninitialized;
+inline bool cluster_shard_by_slot = false;
 
 };  // namespace detail
 

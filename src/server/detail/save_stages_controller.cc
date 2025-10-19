@@ -171,22 +171,31 @@ SaveStagesController::SaveStagesController(SaveStagesInputs&& inputs)
 }
 
 SaveStagesController::~SaveStagesController() {
+  if (!snapshots_.empty() && snapshots_[0].first) {
+    LOG(INFO) << "Forcefully closing save controller";
+    WaitAllSnapshots();
+    Finalize();
+  }
 }
 
-std::optional<SaveInfo> SaveStagesController::InitResourcesAndStart() {
+std::optional<SaveInfo> SaveStagesController::Init() {
   if (auto err = BuildFullPath(); err) {
     shared_err_ = err;
     return GetSaveInfo();
   }
 
-  InitResources();
+  snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
+  for (auto& [snapshot, _] : snapshots_)
+    snapshot = make_unique<RdbSnapshot>(fq_threadpool_, snapshot_storage_.get());
 
+  return {};
+}
+
+void SaveStagesController::Start() {
   if (use_dfs_format_)
     SaveDfs();
   else
     SaveRdb();
-
-  return {};
 }
 
 void SaveStagesController::WaitAllSnapshots() {
@@ -238,7 +247,7 @@ RdbSaver::SnapshotStats SaveStagesController::GetCurrentSnapshotProgress() const
 
   std::vector<RdbSaver::SnapshotStats> results(snapshots_.size());
   auto fetch = [this, &results](ShardId sid) {
-    if (auto& snapshot = snapshots_[sid].first; snapshot) {
+    if (auto& snapshot = snapshots_[sid].first; snapshot && snapshot->HasStarted()) {
       results[sid] = snapshot->GetCurrentSnapshotProgress();
     }
   };
@@ -356,12 +365,6 @@ SaveInfo SaveStagesController::GetSaveInfo() {
   return info;
 }
 
-void SaveStagesController::InitResources() {
-  snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
-  for (auto& [snapshot, _] : snapshots_)
-    snapshot = make_unique<RdbSnapshot>(fq_threadpool_, snapshot_storage_.get());
-}
-
 // Remove .tmp extension or delete files in case of error
 GenericError SaveStagesController::FinalizeFileMovement() {
   if (snapshot_storage_->IsCloud())
@@ -431,7 +434,7 @@ void SaveStagesController::WaitSnapshotInShard(EngineShard* shard) {
 }
 
 void SaveStagesController::CloseCb(unsigned index) {
-  if (auto& snapshot = snapshots_[index].first; snapshot) {
+  if (auto& snapshot = snapshots_[index].first; snapshot && snapshot->HasStarted()) {
     snapshot->FillFreqMap();
     shared_err_ = snapshot->Close();
 

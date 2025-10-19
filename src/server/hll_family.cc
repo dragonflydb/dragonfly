@@ -128,7 +128,7 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
     hll = string{hll_sds, sdslen(hll_sds)};
     sdsfree(hll_sds);
   }
-  res.it->second.SetString(hll);
+  res.it->second.SetValue(hll);
   return std::min(updated, 1);
 }
 
@@ -300,7 +300,7 @@ OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder
     auto op_res = db_slice.AddOrFind(t->GetDbContext(), key, OBJ_STRING);
     RETURN_ON_BAD_STATUS(op_res);
     auto& res = *op_res;
-    res.it->second.SetString(hll);
+    res.it->second.SetValue(hll);
 
     if (op_args.shard->journal()) {
       RecordJournal(op_args, "SET", ArgSlice{key, hll});

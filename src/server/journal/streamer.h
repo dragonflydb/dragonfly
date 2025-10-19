@@ -4,15 +4,11 @@
 
 #pragma once
 
-#include <deque>
-
+#include "base/cycle_clock.h"
 #include "server/cluster/slot_set.h"
 #include "server/common.h"
-#include "server/db_slice.h"
 #include "server/journal/journal.h"
 #include "server/journal/pending_buf.h"
-#include "server/journal/serializer.h"
-#include "server/rdb_save.h"
 
 namespace dfly {
 
@@ -20,9 +16,14 @@ namespace dfly {
 // journal listener and writes them to a destination sink in a separate fiber.
 class JournalStreamer : public journal::JournalConsumerInterface {
  public:
-  enum class SendLsn { NO = 0, YES = 1 };
-  JournalStreamer(journal::Journal* journal, ExecutionState* cntx, SendLsn send_lsn,
-                  bool is_stable_sync);
+  struct Config {
+    bool should_sent_lsn = false;
+    bool init_from_stable_sync = false;
+    LSN start_partial_sync_at = 0;
+  };
+
+  JournalStreamer(journal::Journal* journal, ExecutionState* cntx, Config config);
+
   virtual ~JournalStreamer();
 
   // Self referential.
@@ -32,13 +33,16 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   // Register journal listener and start writer in fiber.
   virtual void Start(util::FiberSocketBase* dest);
 
-  void ConsumeJournalChange(const journal::JournalItem& item);
+  void ConsumeJournalChange(const journal::JournalChangeItem& item);
 
   // Must be called on context cancellation for unblocking
   // and manual cleanup.
   virtual void Cancel();
 
   size_t UsedBytes() const;
+
+  // For debugging purposes. Return string with formatted internal state.
+  std::string FormatInternalState() const;
 
  protected:
   // TODO: we copy the string on each write because JournalItem may be passed to multiple
@@ -49,9 +53,9 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   void Write(std::string str);
 
   // Blocks the if the consumer if not keeping up.
-  void ThrottleIfNeeded();
+  void ThrottleIfNeeded() final;
 
-  virtual bool ShouldWrite(const journal::JournalItem& item) const {
+  virtual bool ShouldWrite(const journal::JournalChangeItem& item) const {
     return cntx_->IsRunning();
   }
 
@@ -67,7 +71,13 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   uint64_t total_throttle_wait_usec_ = 0;
   uint32_t throttle_waiters_ = 0;
 
+  PendingBuf pending_buf_;
+
  private:
+  // Return true if all lsn's from config_.start_partial_sync_at were sent (or if started from 0).
+  // Return false if not all lsn's were sent (stalled) in time. Cancels the context with error.
+  bool MaybePartialStreamLSNs();
+
   void AsyncWrite(bool force_send);
   void OnCompletion(std::error_code ec, size_t len);
 
@@ -81,10 +91,8 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   void StopStalledDataWriterFiber();
   void StalledDataWriterFiber(std::chrono::milliseconds period_ms, util::fb2::Done* waiter);
 
-  PendingBuf pending_buf_;
-
+  const Config config_;
   // If we are replication in stable sync we can aggregate data before sending
-  bool is_stable_sync_;
   size_t in_flight_bytes_ = 0, total_sent_ = 0;
   // Last time that send data in milliseconds
   uint64_t last_async_write_time_ = 0;
@@ -92,8 +100,9 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   LSN last_lsn_writen_ = 0;
   util::fb2::EventCount waker_;
   uint32_t journal_cb_id_{0};
-  SendLsn send_lsn_;
 };
+
+class CmdSerializer;
 
 // Serializes existing DB as RESTORE commands, and sends updates as regular commands.
 // Only handles relevant slots, while ignoring all others.
@@ -113,15 +122,15 @@ class RestoreStreamer : public JournalStreamer {
   void SendFinalize(long attempt);
 
  private:
-  void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
-  bool ShouldWrite(const journal::JournalItem& item) const override;
+  void OnDbChange(DbIndex db_index, const ChangeReq& req);
+  bool ShouldWrite(const journal::JournalChangeItem& item) const override;
   bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(SlotId slot_id) const;
 
   // Returns true if any entry was actually written
-  bool WriteBucket(PrimeTable::bucket_iterator it);
+  bool WriteBucket(PrimeTable::bucket_iterator it, const ExpireTable& expire_table);
 
-  void WriteEntry(std::string_view key, const PrimeValue& pk, const PrimeValue& pv,
+  void WriteEntry(std::string_view key, const PrimeKey& pk, const PrimeValue& pv,
                   uint64_t expire_ms);
 
   struct Stats {
@@ -142,8 +151,11 @@ class RestoreStreamer : public JournalStreamer {
   uint64_t snapshot_version_ = 0;
   cluster::SlotSet my_slots_;
 
+  std::unique_ptr<CmdSerializer> cmd_serializer_;
+
   ThreadLocalMutex big_value_mu_;
   Stats stats_;
+  base::RealTimeAggregator cpu_aggregator_;
 };
 
 }  // namespace dfly

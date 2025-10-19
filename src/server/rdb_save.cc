@@ -828,14 +828,15 @@ VersionBuffer MakeRdbVersion() {
   return buf;
 }
 
-CrcBuffer MakeCheckSum(std::string_view dump_res) {
-  uint64_t chksum = crc64(0, reinterpret_cast<const uint8_t*>(dump_res.data()), dump_res.size());
+CrcBuffer MakeCheckSum(std::string_view dump_res, bool ignore_crc) {
+  uint64_t chksum =
+      ignore_crc ? 0 : crc64(0, reinterpret_cast<const uint8_t*>(dump_res.data()), dump_res.size());
   CrcBuffer buf;
   absl::little_endian::Store64(buf.data(), chksum);
   return buf;
 }
 
-void AppendFooter(io::StringSink* dump_res) {
+void AppendFooter(io::StringSink* dump_res, bool ignore_crc) {
   auto to_bytes = [](const auto& buf) {
     return io::Bytes(reinterpret_cast<const uint8_t*>(buf.data()), buf.size());
   };
@@ -848,17 +849,17 @@ void AppendFooter(io::StringSink* dump_res) {
    */
   const auto ver = MakeRdbVersion();
   dump_res->Write(to_bytes(ver));
-  const auto crc = MakeCheckSum(dump_res->str());
+  const auto crc = MakeCheckSum(dump_res->str(), ignore_crc);
   dump_res->Write(to_bytes(crc));
 }
 }  // namespace
 
-void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out) {
-  CompressionMode compression_mode = GetDefaultCompressionMode();
-  if (compression_mode != CompressionMode::NONE) {
-    compression_mode = CompressionMode::SINGLE_ENTRY;
+void SerializerBase::DumpObject(RdbSerializer* serializer, const CompactObj& obj,
+                                io::StringSink* out, bool ignore_crc) {
+  CompressionMode serializer_used_compression_mode = serializer->compression_mode_;
+  if (serializer_used_compression_mode != CompressionMode::NONE) {
+    serializer->SetCompressionMode(CompressionMode::SINGLE_ENTRY);
   }
-  RdbSerializer serializer(compression_mode);
 
   // According to Redis code we need to
   // 1. Save the value itself - without the key
@@ -866,14 +867,21 @@ void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out) {
   auto type = RdbObjectType(obj);
   DVLOG(2) << "We are going to dump object type: " << int(type);
 
-  std::error_code ec = serializer.WriteOpcode(type);
+  std::error_code ec = serializer->WriteOpcode(type);
   CHECK(!ec);
-  ec = serializer.SaveValue(obj);
+  ec = serializer->SaveValue(obj);
   CHECK(!ec);  // make sure that fully was successful
-  ec = serializer.FlushToSink(out, SerializerBase::FlushState::kFlushMidEntry);
-  CHECK(!ec);         // make sure that fully was successful
-  AppendFooter(out);  // version and crc
+  ec = serializer->FlushToSink(out, SerializerBase::FlushState::kFlushMidEntry);
+  CHECK(!ec);                     // make sure that fully was successful
+  AppendFooter(out, ignore_crc);  // version and crc
   CHECK_GT(out->str().size(), 10u);
+
+  serializer->SetCompressionMode(serializer_used_compression_mode);
+}
+
+void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out, bool ignore_crc) {
+  RdbSerializer serializer(GetDefaultCompressionMode());
+  DumpObject(&serializer, obj, out, ignore_crc);
 }
 
 size_t SerializerBase::SerializedLen() const {
@@ -1015,9 +1023,39 @@ error_code AlignedBuffer::Flush() {
   return upstream_->Write(&ivec, 1);
 }
 
+// Ensures SliceSnapshot is destroyed on its owning shard thread.
+struct OwnerThreadDeleter {
+  ShardId owner_sid;
+
+  OwnerThreadDeleter() : owner_sid(0) {
+  }
+
+  explicit OwnerThreadDeleter(ShardId sid) : owner_sid(sid) {
+  }
+
+  static OwnerThreadDeleter FromShard(EngineShard* shard) {
+    return OwnerThreadDeleter(shard->shard_id());
+  }
+
+  void operator()(SliceSnapshot* ptr) const {
+    if (!ptr)
+      return;
+
+    if (EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == owner_sid) {
+      delete ptr;
+      return;
+    }
+
+    shard_set->Await(owner_sid, [ptr] { delete ptr; });
+  }
+};
+
+using SnapshotPtr = std::unique_ptr<SliceSnapshot, OwnerThreadDeleter>;
+
 class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface {
  private:
   void CleanShardSnapshots();
+  SnapshotPtr CreateSliceSnapshot(EngineShard* shard, DbSlice* db_slice, ExecutionState* cntx);
 
  public:
   // We pass K=sz to say how many producers are pushing data in order to maintain
@@ -1028,7 +1066,6 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
   ~Impl();
 
   void StartSnapshotting(bool stream_journal, ExecutionState* cntx, EngineShard* shard);
-  void StartIncrementalSnapshotting(LSN start_lsn, ExecutionState* cntx, EngineShard* shard);
 
   void StopSnapshotting(EngineShard* shard);
   void WaitForSnapshottingFinish(EngineShard* shard);
@@ -1072,11 +1109,11 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
  private:
   error_code WriteRecord(io::Bytes src);
 
-  unique_ptr<SliceSnapshot>& GetSnapshot(EngineShard* shard);
+  SnapshotPtr& GetSnapshot(EngineShard* shard);
 
   io::Sink* sink_;
   int64_t last_write_time_ns_ = -1;  // last write call.
-  vector<unique_ptr<SliceSnapshot>> shard_snapshots_;
+  vector<SnapshotPtr> shard_snapshots_;
   // used for serializing non-body components in the calling fiber.
   RdbSerializer meta_serializer_;
   using RecordChannel = SizeTrackingChannel<string, base::mpmc_bounded_queue<string>>;
@@ -1110,20 +1147,8 @@ RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode 
 }
 
 void RdbSaver::Impl::CleanShardSnapshots() {
-  if (shard_snapshots_.empty()) {
-    return;
-  }
-
-  auto cb = [this](ShardId sid) {
-    // Destroy SliceSnapshot in target thread, as it registers itself in a thread local set.
-    shard_snapshots_[sid].reset();
-  };
-
-  if (shard_snapshots_.size() == 1) {
-    cb(0);
-  } else {
-    shard_set->RunBlockingInParallel([&](EngineShard* es) { cb(es->shard_id()); });
-  }
+  // Deleter dispatches destruction to the owning shard thread when needed
+  shard_snapshots_.clear();
 }
 
 RdbSaver::Impl::~Impl() {
@@ -1210,7 +1235,7 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, ExecutionState* cntx
   auto& s = GetSnapshot(shard);
   auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
-  s = std::make_unique<SliceSnapshot>(compression_mode_, &db_slice, this, cntx);
+  s = CreateSliceSnapshot(shard, &db_slice, cntx);
 
   const auto allow_flush = (save_mode_ != SaveMode::RDB) ? SliceSnapshot::SnapshotFlush::kAllow
                                                          : SliceSnapshot::SnapshotFlush::kDisallow;
@@ -1218,14 +1243,10 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, ExecutionState* cntx
   s->Start(stream_journal, allow_flush);
 }
 
-void RdbSaver::Impl::StartIncrementalSnapshotting(LSN start_lsn, ExecutionState* cntx,
-                                                  EngineShard* shard) {
-  auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
-  auto& s = GetSnapshot(shard);
-
-  s = std::make_unique<SliceSnapshot>(compression_mode_, &db_slice, this, cntx);
-
-  s->StartIncremental(start_lsn);
+SnapshotPtr RdbSaver::Impl::CreateSliceSnapshot(EngineShard* shard, DbSlice* db_slice,
+                                                ExecutionState* cntx) {
+  return SnapshotPtr(new SliceSnapshot(compression_mode_, db_slice, this, cntx),
+                     OwnerThreadDeleter::FromShard(shard));
 }
 
 // called on save flow
@@ -1376,7 +1397,7 @@ void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
   }
 }
 
-unique_ptr<SliceSnapshot>& RdbSaver::Impl::GetSnapshot(EngineShard* shard) {
+SnapshotPtr& RdbSaver::Impl::GetSnapshot(EngineShard* shard) {
   // For single shard configuration, we maintain only one snapshot,
   // so we do not have to map it via shard_id.
   unsigned sid = shard_snapshots_.size() == 1 ? 0 : shard->shard_id();
@@ -1426,11 +1447,6 @@ RdbSaver::~RdbSaver() {
 
 void RdbSaver::StartSnapshotInShard(bool stream_journal, ExecutionState* cntx, EngineShard* shard) {
   impl_->StartSnapshotting(stream_journal, cntx, shard);
-}
-
-void RdbSaver::StartIncrementalSnapshotInShard(LSN start_lsn, ExecutionState* cntx,
-                                               EngineShard* shard) {
-  impl_->StartIncrementalSnapshotting(start_lsn, cntx, shard);
 }
 
 error_code RdbSaver::WaitSnapshotInShard(EngineShard* shard) {

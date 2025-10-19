@@ -20,6 +20,19 @@ namespace dfly::tiering {
 using namespace std;
 using namespace std::string_literals;
 
+struct TestDecoder : tiering::BareDecoder {
+  std::unique_ptr<tiering::Decoder> Clone() const override {
+    return std::make_unique<TestDecoder>();
+  }
+
+  void Initialize(std::string_view slice) override {
+    tiering::BareDecoder::Initialize(slice);
+    value = slice;
+  }
+
+  string value;
+};
+
 ostream& operator<<(ostream& os, const OpManager::Stats& stats) {
   return os << "pending_read_cnt: " << stats.pending_read_cnt
             << ", pending_stash_cnt: " << stats.pending_stash_cnt
@@ -46,9 +59,8 @@ struct OpManagerTest : PoolTestBase, OpManager {
 
   util::fb2::Future<std::string> Read(EntryId id, DiskSegment segment) {
     util::fb2::Future<std::string> future;
-    Enqueue(id, segment, [future](io::Result<OpManager::FetchedEntry> res) mutable {
-      auto [value, _] = *res;
-      future.Resolve(*value);
+    Enqueue(id, segment, TestDecoder{}, [future](io::Result<TestDecoder*> res) mutable {
+      future.Resolve((*res)->value);
       return false;
     });
     return future;
@@ -61,9 +73,9 @@ struct OpManagerTest : PoolTestBase, OpManager {
     ASSERT_TRUE(inserted);
   }
 
-  bool NotifyFetched(EntryId id, std::string_view value, DiskSegment segment,
-                     bool modified) override {
-    fetched_[id] = value;
+  bool NotifyFetched(EntryId id, DiskSegment segment, Decoder* decoder) override {
+    auto* tdecoder = static_cast<TestDecoder*>(decoder);
+    fetched_[id] = std::move(tdecoder->value);
     return false;
   }
 
@@ -165,8 +177,8 @@ TEST_F(OpManagerTest, Modify) {
     // Atomically issue sequence of modify-read operations
     std::vector<util::fb2::Future<std::string>> futures;
     for (size_t i = 0; i < 10; i++) {
-      Enqueue(0u, stashed_[0u], [i](auto res) {
-        absl::StrAppend(res->first, i);
+      Enqueue(0u, stashed_[0u], TestDecoder{}, [i](io::Result<TestDecoder*> res) {
+        absl::StrAppend(&(*res)->value, i);
         return true;
       });
       futures.emplace_back(Read(0u, stashed_[0u]));

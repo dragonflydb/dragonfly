@@ -74,13 +74,6 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
 
   void Start(bool stream_journal, SnapshotFlush allow_flush = SnapshotFlush::kDisallow);
 
-  // Initialize a snapshot that sends only the missing journal updates
-  // since start_lsn and then registers a callback switches into the
-  // journal streaming mode until stopped.
-  // If we're slower than the buffer and can't continue, `Cancel()` is
-  // called.
-  void StartIncremental(LSN start_lsn);
-
   // Finalizes journal streaming writes. Only called for replication.
   // Blocking. Must be called from the Snapshot thread.
   void FinalizeJournalStream(bool cancel);
@@ -102,16 +95,13 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
 
   // Journal listener
-  void ConsumeJournalChange(const journal::JournalItem& item);
+  void ConsumeJournalChange(const journal::JournalChangeItem& item);
   void ThrottleIfNeeded();
 
  private:
   // Main snapshotting fiber that iterates over all buckets in the db slice
   // and submits them to SerializeBucket.
   void IterateBucketsFb(bool send_full_sync_cut);
-
-  // A fiber function that switches to the incremental mode
-  void SwitchIncrementalFb(LSN lsn);
 
   // Called on traversing cursor by IterateBucketsFb.
   bool BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator it);
@@ -164,8 +154,10 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
+
   util::fb2::Fiber snapshot_fb_;  // IterateEntriesFb
   util::fb2::CondVarAny seq_cond_;
+
   const CompressionMode compression_mode_;
   RdbTypeFreqMap type_freq_map_;
 
@@ -175,6 +167,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   uint32_t journal_cb_id_ = 0;
   uint32_t moved_cb_id = 0;
 
+  bool use_background_mode_ = false;
   bool use_snapshot_version_ = true;
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;

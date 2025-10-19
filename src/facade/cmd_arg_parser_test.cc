@@ -44,7 +44,7 @@ TEST_F(CmdArgParserTest, BasicTypes) {
   EXPECT_EQ(b, 44u);
 
   EXPECT_FALSE(parser.HasNext());
-  EXPECT_FALSE(parser.Error());
+  EXPECT_FALSE(parser.HasError());
 }
 
 TEST_F(CmdArgParserTest, BoundError) {
@@ -52,10 +52,10 @@ TEST_F(CmdArgParserTest, BoundError) {
 
   EXPECT_EQ(absl::implicit_cast<string_view>(parser.Next()), ""sv);
 
-  auto err = parser.Error();
+  auto err = parser.TakeError();
   EXPECT_TRUE(err);
-  EXPECT_EQ(err->type, CmdArgParser::OUT_OF_BOUNDS);
-  EXPECT_EQ(err->index, 0);
+  EXPECT_EQ(err.type, CmdArgParser::OUT_OF_BOUNDS);
+  EXPECT_EQ(err.index, 0);
 }
 
 #ifndef __APPLE__
@@ -64,10 +64,10 @@ TEST_F(CmdArgParserTest, IntError) {
 
   EXPECT_EQ(parser.Next<size_t>(), 0u);
 
-  auto err = parser.Error();
+  auto err = parser.TakeError();
   EXPECT_TRUE(err);
-  EXPECT_EQ(err->type, CmdArgParser::INVALID_INT);
-  EXPECT_EQ(err->index, 0);
+  EXPECT_EQ(err.type, CmdArgParser::INVALID_INT);
+  EXPECT_EQ(err.index, 0);
 }
 #endif
 
@@ -86,13 +86,13 @@ TEST_F(CmdArgParserTest, NextStatement) {
   auto parser = Make({"TAG", "tag_2", "tag_3"});
 
   parser.ExpectTag("TAG");
-  EXPECT_FALSE(parser.Error());
+  EXPECT_FALSE(parser.TakeError());
 
   parser.ExpectTag("TAG_2");
-  EXPECT_FALSE(parser.Error());
+  EXPECT_FALSE(parser.TakeError());
 
   parser.ExpectTag("TAG_2");
-  EXPECT_TRUE(parser.Error());
+  EXPECT_TRUE(parser.TakeError());
 }
 
 TEST_F(CmdArgParserTest, CheckTailFail) {
@@ -106,7 +106,7 @@ TEST_F(CmdArgParserTest, CheckTailFail) {
 
   EXPECT_FALSE(parser.Check("TAG", &first, &second));
   EXPECT_TRUE(parser.Check("TAG", &first));
-  EXPECT_TRUE(parser.Error());
+  EXPECT_TRUE(parser.TakeError());
 }
 
 TEST_F(CmdArgParserTest, Map) {
@@ -115,10 +115,10 @@ TEST_F(CmdArgParserTest, Map) {
   EXPECT_EQ(parser.MapNext("ONE", 1, "TWO", 2), 2);
 
   EXPECT_EQ(parser.MapNext("ONE", 1, "TWO", 2), 0);
-  auto err = parser.Error();
+  auto err = parser.TakeError();
   EXPECT_TRUE(err);
-  EXPECT_EQ(err->type, CmdArgParser::INVALID_CASES);
-  EXPECT_EQ(err->index, 1);
+  EXPECT_EQ(err.type, CmdArgParser::INVALID_CASES);
+  EXPECT_EQ(err.index, 1);
 }
 
 TEST_F(CmdArgParserTest, TryMapNext) {
@@ -151,20 +151,20 @@ TEST_F(CmdArgParserTest, FixedRangeInt) {
     EXPECT_EQ((parser.Next<FInt<-11, 11>>().value), -10);
     EXPECT_EQ((parser.Next<FInt<-11, 11>>().value), 0);
 
-    auto err = parser.Error();
+    auto err = parser.TakeError();
     EXPECT_TRUE(err);
-    EXPECT_EQ(err->type, CmdArgParser::INVALID_INT);
-    EXPECT_EQ(err->index, 2);
+    EXPECT_EQ(err.type, CmdArgParser::INVALID_INT);
+    EXPECT_EQ(err.index, 2);
   }
 
   {
     auto parser = Make({"-12"});
     EXPECT_EQ((parser.Next<FInt<-11, 11>>().value), 0);
 
-    auto err = parser.Error();
+    auto err = parser.TakeError();
     EXPECT_TRUE(err);
-    EXPECT_EQ(err->type, CmdArgParser::INVALID_INT);
-    EXPECT_EQ(err->index, 0);
+    EXPECT_EQ(err.type, CmdArgParser::INVALID_INT);
+    EXPECT_EQ(err.index, 0);
   }
 }
 

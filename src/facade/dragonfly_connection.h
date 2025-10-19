@@ -73,7 +73,10 @@ class Connection : public util::Connection {
     std::string pattern;                // non-empty for pattern subscriber
     std::shared_ptr<char[]> buf;        // stores channel name and message
     std::string_view channel, message;  // channel and message parts from buf
-    bool should_unsubscribe = false;    // unsubscribe from channel after sending the message
+    bool is_sharded = false;
+
+    // Unsubscribe simultaneously when sending unsubscribe message. Used for cluster migrations
+    bool force_unsubscribe = false;
   };
 
   // Pipeline message, accumulated Redis command to be executed.
@@ -169,8 +172,8 @@ class Connection : public util::Connection {
         handle;
 
     // time when the message was dispatched to the dispatch queue as reported by
-    // ProactorBase::GetMonotonicTimeNs()
-    uint64_t dispatch_ts = 0;
+    // CycleClock::Now()
+    uint64_t dispatch_cycle = 0;
   };
 
   static_assert(sizeof(MessageHandle) <= 80,
@@ -203,7 +206,7 @@ class Connection : public util::Connection {
    private:
     friend class Connection;
 
-    WeakRef(std::shared_ptr<Connection> ptr, unsigned thread_id, uint32_t client_id);
+    WeakRef(const std::shared_ptr<Connection>& ptr, unsigned thread_id, uint32_t client_id);
 
     std::weak_ptr<Connection> ptr_;
     unsigned last_known_thread_id_;
@@ -306,16 +309,12 @@ class Connection : public util::Connection {
 
   bool IsHttp() const;
 
-  // Sets max queue length locally in the calling thread.
-  static void SetMaxQueueLenThreadLocal(unsigned tid, uint32_t val);
-  static void SetPipelineBufferLimit(unsigned tid, size_t val);
-  static void GetRequestSizeHistogramThreadLocal(std::string* hist);
+  static void UpdateFromFlags();                          // Set values from flags
+  static std::vector<std::string> GetMutableFlagNames();  // Triggers UpdateFromFlags
+
   static void TrackRequestSize(bool enable);
   static void EnsureMemoryBudget(unsigned tid);
-  static void SetMaxBusyReadUsecThreadLocal(unsigned usec);
-  static void SetAlwaysFlushPipelineThreadLocal(bool flush);
-  static void SetPipelineSquashLimitThreadLocal(unsigned limit);
-  static void SetPipelineLowBoundStats(unsigned limit);
+  static void GetRequestSizeHistogramThreadLocal(std::string* hist);
 
   unsigned idle_time() const {
     return time(nullptr) - last_interaction_;

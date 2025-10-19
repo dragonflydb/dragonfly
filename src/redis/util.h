@@ -47,7 +47,6 @@
 
 int ll2string(char *s, size_t len, long long value);
 int string2ll(const char *s, size_t slen, long long *value);
-int string2ld(const char *s, size_t slen, long double *dp);
 
 #define LOG_MAX_LEN    1024 /* Default maximum length of syslog messages.*/
 

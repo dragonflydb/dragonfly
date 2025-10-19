@@ -166,9 +166,9 @@ void StringMap::RandomPairs(unsigned int count, std::vector<sds>& keys, std::vec
   for (unsigned int i = 0; i < index; ++i)
     ++itr;
 
-  keys.reserve(count);
+  keys.resize(count);
   if (with_value)
-    vals.reserve(count);
+    vals.resize(count);
 
   while (itr != end() && pick_index < count) {
     auto [key, val] = *itr;
@@ -293,7 +293,10 @@ void* StringMap::ObjectClone(const void* obj, bool has_ttl, bool add_ttl) const 
   uint32_t ttl_sec = add_ttl ? 0 : (has_ttl ? ObjExpireTime(obj) : UINT32_MAX);
   sds str = (sds)obj;
   auto pair = detail::SdsPair(str, GetValue(str));
-  auto [newkey, sdsval_tag] = CreateEntry(pair->first, pair->second, time_now(), ttl_sec);
+  // Use explicit string_view constructor with length to preserve null characters
+  string_view key_sv(pair->first, sdslen(pair->first));
+  string_view value_sv(pair->second, sdslen(pair->second));
+  auto [newkey, sdsval_tag] = CreateEntry(key_sv, value_sv, time_now(), ttl_sec);
 
   return (void*)newkey;
 }

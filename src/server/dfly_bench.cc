@@ -45,7 +45,9 @@ ABSL_FLAG(int32_t, qps, 20,
 
 ABSL_FLAG(uint32_t, n, 1000, "Number of requests to send per connection");
 ABSL_FLAG(uint32_t, test_time, 0, "Testing time in seconds");
-ABSL_FLAG(uint32_t, d, 16, "Value size in bytes ");
+ABSL_FLAG(string, d, "16",
+          "Specify value size as single number for fixed length or use min:max to generate random "
+          "value length between min and max.");
 ABSL_FLAG(string, h, "localhost", "server hostname/ip");
 ABSL_FLAG(uint64_t, key_minimum, 0, "Min value for keys used");
 ABSL_FLAG(uint64_t, key_maximum, 50'000'000, "Max value for keys used");
@@ -258,6 +260,10 @@ class CommandGenerator {
   string FillSet(string_view key);
   string FillGet(string_view key);
 
+  bool IsRandomValueLen() const {
+    return value_len_min_ != value_len_max_;
+  }
+
   KeyGenerator* keygen_;
   uint32_t ratio_set_ = 0, ratio_get_ = 0;
   string command_;
@@ -265,7 +271,8 @@ class CommandGenerator {
   using CmdPart = variant<string_view, TemplateType>;
   vector<CmdPart> cmd_parts_;
 
-  string value_;
+  string fixed_len_value_;  // used for fixed value string
+  int32_t value_len_min_ = 0, value_len_max_ = 0;
   bool might_hit_ = false;
   bool noreply_ = false;
   bool is_ascii_ = true;
@@ -274,7 +281,25 @@ class CommandGenerator {
 CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
   command_ = GetFlag(FLAGS_command);
   is_ascii_ = GetFlag(FLAGS_ascii);
-  value_ = string(GetFlag(FLAGS_d), is_ascii_ ? 'a' : char(130));
+
+  pair<string, string> value_len_str = absl::StrSplit(GetFlag(FLAGS_d), ':');
+  CHECK(absl::SimpleAtoi(value_len_str.first, &value_len_min_));
+  if (!value_len_str.second.empty()) {
+    CHECK(absl::SimpleAtoi(value_len_str.second, &value_len_max_));
+  } else {
+    value_len_max_ = value_len_min_;
+  }
+
+  if ((value_len_min_ < 0) || (value_len_max_ < 0) || (value_len_min_ > value_len_max_)) {
+    LOG(ERROR) << "Invalid `-d " << GetFlag(FLAGS_d)
+               << "` argument. Min and max values should be bigger than 0 and min value should "
+                  "be smaller or equal to max. Setting to default (16).";
+    value_len_max_ = value_len_min_ = 16;
+  }
+
+  if (!IsRandomValueLen()) {
+    fixed_len_value_ = string(value_len_min_, is_ascii_ ? 'a' : char(130));
+  }
 
   if (command_.empty()) {
     pair<string, string> ratio_str = absl::StrSplit(GetFlag(FLAGS_ratio), ':');
@@ -335,9 +360,13 @@ string CommandGenerator::Next(SlotRange range) {
         case KEY:
           str = (*keygen_)(slot_id, slot_id);
           break;
-        case VALUE:
-          str = GetRandomHex(value_.size(), is_ascii_);
+        case VALUE: {
+          size_t value_len = IsRandomValueLen()
+                                 ? absl::Uniform(bit_gen, value_len_min_, value_len_max_)
+                                 : fixed_len_value_.size();
+          str = GetRandomHex(value_len, is_ascii_);
           break;
+        }
         case SCORE: {
           uniform_real_distribution<double> uniform(0, 1);
           str = absl::StrCat(uniform(bit_gen));
@@ -352,19 +381,26 @@ string CommandGenerator::Next(SlotRange range) {
 
 string CommandGenerator::FillSet(string_view key) {
   string res;
+  string_view value = fixed_len_value_;
+  string random_len_value;
+
+  if (IsRandomValueLen()) {
+    random_len_value = GetRandomHex(absl::Uniform(bit_gen, value_len_min_, value_len_max_), true);
+    value = random_len_value;
+  }
 
   if (protocol == RESP) {
     absl::StrAppend(&res, "*3\r\n$3\r\nset\r\n$", key.size(), "\r\n", key);
-    absl::StrAppend(&res, "\r\n$", value_.size(), "\r\n", value_, "\r\n");
+    absl::StrAppend(&res, "\r\n$", value.size(), "\r\n", value, "\r\n");
   } else {
     DCHECK_EQ(protocol, MC_TEXT);
-    absl::StrAppend(&res, "set ", key, " 0 0 ", value_.size());
+    absl::StrAppend(&res, "set ", key, " 0 0 ", value.size());
     if (GetFlag(FLAGS_noreply)) {
       absl::StrAppend(&res, " noreply");
       noreply_ = true;
     }
 
-    absl::StrAppend(&res, "\r\n", value_, "\r\n");
+    absl::StrAppend(&res, "\r\n", value, "\r\n");
   }
   return res;
 }
@@ -785,6 +821,7 @@ void Driver::ParseRESP() {
   RedisParser::Result result = RedisParser::OK;
   RespVec parse_args;
   constexpr string_view kMovedErrorKey = "MOVED"sv;
+  boost::system::error_code ec;
 
   do {
     result = parser_.Parse(io_buf_.InputBuffer(), &consumed, &parse_args);
@@ -804,7 +841,9 @@ void Driver::ParseRESP() {
           vector<string_view> addr_parts = absl::StrSplit(parts[1], ':');
           CHECK_EQ(2u, addr_parts.size());
 
-          auto host = ::boost::asio::ip::make_address(addr_parts[0]);
+          auto host = boost::asio::ip::make_address(addr_parts[0], ec);
+          CHECK(!ec) << "make_address failed with error: " << ec.message()
+                     << " while parsing address " << addr_parts[0];
 
           uint32_t port;
           CHECK(absl::SimpleAtoi(addr_parts[1], &port));

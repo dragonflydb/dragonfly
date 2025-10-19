@@ -10,6 +10,7 @@
 #include "core/task_queue.h"
 #include "core/tx_queue.h"
 #include "server/common.h"
+#include "server/sharding.h"
 #include "server/tx_base.h"
 #include "util/sliding_counter.h"
 
@@ -206,13 +207,14 @@ class EngineShard {
   // threshold can be passed, which will be used to determine if defragmentation should be
   // performed.
   // Returns true if defragmentation was performed.
-  bool DoDefrag(CollectPageStats collect_page_stats, float threshold);
+  std::optional<CollectedPageStats> DoDefrag(CollectPageStats collect_page_stats, float threshold);
 
  private:
   struct DefragTaskState {
     size_t dbid = 0u;
     uint64_t cursor = 0u;
     time_t last_check_time = 0;
+    float page_utilization_threshold = 0.8;
 
     // check the current threshold and return true if
     // we need to do the defragmentation
@@ -221,6 +223,13 @@ class EngineShard {
     void UpdateScanState(uint64_t cursor_val);
 
     void ResetScanState();
+  };
+
+  struct EvictionTaskState {
+    bool rss_eviction_enabled_ = true;
+    bool track_deleted_bytes = false;
+    size_t deleted_bytes_before_rss_update = 0;
+    size_t global_rss_memory_at_prev_eviction = 0;
   };
 
   EngineShard(util::ProactorBase* pb, mi_heap_t* heap);
@@ -233,6 +242,9 @@ class EngineShard {
 
   void Heartbeat();
   void RetireExpiredAndEvict();
+
+  /* Calculates the number of bytes to evict based on memory and rss memory usage. */
+  size_t CalculateEvictionBytes();
 
   void CacheStats();
 
@@ -273,6 +285,7 @@ class EngineShard {
   IntentLock shard_lock_;
 
   uint32_t defrag_task_ = 0;
+  EvictionTaskState eviction_state_;  // Used on eviction fiber
   util::fb2::Fiber fiber_heartbeat_periodic_;
   util::fb2::Done fiber_heartbeat_periodic_done_;
 

@@ -14,11 +14,10 @@ namespace dfly {
 
 /// Bloom filter based on the design of https://github.com/jvirkki/libbloom
 class Bloom {
-  Bloom(const Bloom&) = delete;
-  Bloom& operator=(const Bloom&) = delete;
-
  public:
   Bloom() = default;
+  Bloom(const Bloom&) = delete;
+  Bloom& operator=(const Bloom&) = delete;
 
   // Note, that Destroy() must be called before calling the d'tor
   ~Bloom();
@@ -36,7 +35,7 @@ class Bloom {
   // resource - resource with which the object was initialized.
   void Destroy(PMR_NS::memory_resource* resource);
 
-  Bloom(Bloom&& o);
+  Bloom(Bloom&& o) noexcept;
 
   bool Exists(std::string_view str) const;
 
@@ -84,10 +83,9 @@ class Bloom {
  * TODO: to test the actual rate of this filter.
  */
 class SBF {
-  SBF(const SBF&) = delete;
-
  public:
   SBF(uint64_t initial_capacity, double fp_prob, double grow_factor, PMR_NS::memory_resource* mr);
+  SBF(const SBF&) = delete;
 
   // C'tor used for loading persisted filters into SBF.
   // Should be followed by AddFilter.
@@ -95,7 +93,7 @@ class SBF {
       size_t current_size, PMR_NS::memory_resource* mr);
   ~SBF();
 
-  SBF& operator=(SBF&& src);
+  SBF& operator=(SBF&& src) noexcept;
 
   void AddFilter(const std::string& blob, unsigned hash_cnt);
 

@@ -177,11 +177,20 @@ void MemoryCmd::Run(CmdArgList args) {
     static const float default_threshold =
         absl::GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
     const float threshold = parser.NextOrDefault(default_threshold);
-    shard_set->pool()->AwaitFiberOnAll([threshold](util::ProactorBase*) {
-      if (auto* shard = EngineShard::tlocal(); shard)
-        shard->DoDefrag(CollectPageStats::YES, threshold);
+
+    std::vector<CollectedPageStats> results(shard_set->size());
+    shard_set->pool()->AwaitFiberOnAll([threshold, &results](util::ProactorBase*) {
+      if (auto* shard = EngineShard::tlocal(); shard) {
+        if (auto shard_res = shard->DoDefrag(CollectPageStats::YES, threshold);
+            shard_res.has_value()) {
+          results[shard->shard_id()] = std::move(shard_res.value());
+        }
+      }
     });
-    return builder_->SendSimpleString("OK");
+
+    const CollectedPageStats merged = CollectedPageStats::Merge(std::move(results), threshold);
+    auto* rb = static_cast<RedisReplyBuilder*>(builder_);
+    return rb->SendVerbatimString(merged.ToString());
   }
 
   string err = UnknownSubCmd(parser.Next(), "MEMORY");
@@ -389,7 +398,7 @@ void MemoryCmd::Track(CmdArgList args) {
     std::tie(tracking_info.lower_bound, tracking_info.upper_bound, tracking_info.sample_odds) =
         parser.Next<size_t, size_t, double>();
     if (parser.HasError()) {
-      return builder_->SendError(parser.Error()->MakeReply());
+      return builder_->SendError(parser.TakeError().MakeReply());
     }
 
     atomic_bool error{false};
@@ -409,7 +418,7 @@ void MemoryCmd::Track(CmdArgList args) {
   if (parser.Check("REMOVE")) {
     auto [lower_bound, upper_bound] = parser.Next<size_t, size_t>();
     if (parser.HasError()) {
-      return builder_->SendError(parser.Error()->MakeReply());
+      return builder_->SendError(parser.TakeError().MakeReply());
     }
 
     atomic_bool error{false};
@@ -445,7 +454,7 @@ void MemoryCmd::Track(CmdArgList args) {
   if (parser.Check("ADDRESS")) {
     string_view ptr_str = parser.Next();
     if (parser.HasError()) {
-      return builder_->SendError(parser.Error()->MakeReply());
+      return builder_->SendError(parser.TakeError().MakeReply());
     }
 
     size_t ptr = 0;

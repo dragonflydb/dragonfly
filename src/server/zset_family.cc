@@ -48,6 +48,13 @@ using ScoredArray = ZSetFamily::ScoredArray;
 using ScoredMemberView = ZSetFamily::ScoredMemberView;
 using ScoredMemberSpan = ZSetFamily::ScoredMemberSpan;
 
+struct ValidateZMPopResult {
+  uint32_t num_keys;
+  bool is_max;
+  int pop_count;
+  float timeout;
+};
+
 inline zrangespec GetZrangeSpec(bool reverse, const ZSetFamily::ScoreInterval& si) {
   auto interval = si;
   if (reverse)
@@ -145,9 +152,9 @@ void OutputScoredArrayResult(const OpResult<ScoredArray>& result, SinkReplyBuild
   rb->SendScoredArray(result.value(), true /* with scores */);
 }
 
-OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZSetFamily::ZParams& zparams,
-                                           const OpArgs& op_args, string_view key,
-                                           size_t member_len) {
+OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams,
+                                              const OpArgs& op_args, string_view key,
+                                              size_t member_len) {
   auto& db_slice = op_args.GetDbSlice();
   if (zparams.flags & ZADD_IN_XX) {
     return db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
@@ -162,6 +169,12 @@ OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZSetFamily::ZParams& zparams,
   auto& it = add_res.it;
   PrimeValue& pv = it->second;
   if (add_res.is_new || zparams.override) {
+    // If we're overwriting an existing key (not a new one), we need to remove it from
+    // search indexes first. This prevents crashes when the key is indexed (e.g., HASH or JSON).
+    if (!add_res.is_new && zparams.override) {
+      RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, pv, op_args.shard);
+    }
+
     if (member_len > server.max_map_field_len) {
       pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_SKIPLIST, CompactObj::AllocateMR<detail::SortedMap>());
     } else {
@@ -175,7 +188,7 @@ OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZSetFamily::ZParams& zparams,
 
   auto* blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (add_res.is_new && blocking_controller) {
-    blocking_controller->AwakeWatched(op_args.db_cntx.db_index, key);
+    blocking_controller->Awaken(op_args.db_cntx.db_index, key);
   }
 
   return DbSlice::ItAndUpdater{add_res.it, add_res.exp_it, std::move(add_res.post_updater)};
@@ -1038,7 +1051,6 @@ void BZPopMinMax(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
   }
   VLOG(1) << "BZPop timeout(" << timeout << ")";
 
-  std::string dinfo;
   optional<std::string> callback_ran_key;
   OpResult<ScoredArray> popped_array;
   auto cb = [is_max, &popped_array, &callback_ran_key](Transaction* t, EngineShard* shard,
@@ -1048,19 +1060,15 @@ void BZPopMinMax(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
   };
 
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      tx, OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked, &cntx->paused, &dinfo);
+      tx, OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked, &cntx->paused);
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (popped_key) {
     if (!callback_ran_key) {
-      LOG(ERROR) << "BUG: Callback didn't run! " << popped_key.value() << " " << dinfo;
       return rb->SendNullArray();
     }
 
-    DVLOG(1) << "BZPop " << tx->DebugId() << " popped from key " << popped_key;  // key.
-    CHECK(popped_array.ok()) << dinfo;
-    CHECK_EQ(popped_array->size(), 1u)
-        << popped_key << " ran " << *callback_ran_key << " info " << dinfo;
+    CHECK_EQ(popped_array->size(), 1u) << popped_key << " ran " << *callback_ran_key;
     rb->StartArray(3);
     rb->SendBulkString(*popped_key);
     rb->SendBulkString(popped_array->front().first);
@@ -1138,6 +1146,17 @@ auto OpPopCount(const ZSetFamily::ZRangeSpec& range_spec, const OpArgs& op_args,
   auto zlen = pv.Size();
   if (zlen == 0) {
     op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it);
+  }
+
+  // Checking if command conatins flag with no autojournal
+  // and we are assuming auto journaling is not re-enabled.
+  if ((op_args.tx->GetCId()->opt_mask() & CO::NO_AUTOJOURNAL) && op_args.shard->journal()) {
+    auto reverse = range_spec.params.reverse;
+    // Checking if interval is actually TopNScored or something else before proceeding.
+    DCHECK(std::holds_alternative<ZSetFamily::TopNScored>(range_spec.interval));
+    auto count = std::get<ZSetFamily::TopNScored>(range_spec.interval);
+    string command = (reverse ? "ZPOPMAX" : "ZPOPMIN");
+    RecordJournal(op_args, command, ArgSlice{key, absl::StrCat(count)}, 1);
   }
 
   return iv.PopResult();
@@ -1390,8 +1409,10 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
                            const ScanOpts& scan_op) {
   auto find_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
 
-  if (!find_res)
+  if (!find_res) {
+    *cursor = 0;
     return find_res.status();
+  }
 
   const PrimeValue& pv = (*find_res)->second;
   StringVec res;
@@ -1533,7 +1554,8 @@ void ZBooleanOperation(CmdArgList args, string_view cmd, bool is_union, bool sto
     auto store_cb = [&, dest_shard = Shard(dest_key, maps.size())](Transaction* t,
                                                                    EngineShard* shard) {
       if (shard->shard_id() == dest_shard)
-        ZSetFamily::OpAdd(t->GetOpArgs(shard), ZSetFamily::ZParams{.override = true}, dest_key,
+        ZSetFamily::OpAdd(t->GetOpArgs(shard),
+                          ZSetFamily::ZParams{.override = true, .journal_update = true}, dest_key,
                           smvec);
       return OpStatus::OK;
     };
@@ -1678,7 +1700,8 @@ void ZRangeInternal(CmdArgList args, ZSetFamily::RangeParams range_params, Trans
       mvec[i++] = {score, str};
     }
 
-    add_result = ZSetFamily::OpAdd(t->GetOpArgs(shard), ZSetFamily::ZParams{.override = true},
+    add_result = ZSetFamily::OpAdd(t->GetOpArgs(shard),
+                                   ZSetFamily::ZParams{.override = true, .journal_update = true},
                                    *range_params.store_key, mvec);
 
     return OpStatus::OK;
@@ -1699,8 +1722,8 @@ void ZRangeGeneric(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
   using RP = ZSetFamily::RangeParams;
 
   while (true) {
-    if (auto err = parser.Error(); err)
-      return builder->SendError(err->MakeReply());
+    if (auto err = parser.TakeError(); err)
+      return builder->SendError(err.MakeReply());
 
     if (!parser.HasNext())
       break;
@@ -1762,7 +1785,7 @@ void ZRankGeneric(CmdArgList args, bool reverse, Transaction* tx, SinkReplyBuild
   }
 
   if (!parser.Finalize()) {
-    return builder->SendError(parser.Error()->MakeReply());
+    return builder->SendError(parser.TakeError().MakeReply());
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1819,46 +1842,57 @@ std::optional<std::string_view> GetFirstNonEmptyKeyFound(EngineShard* shard, Tra
   return std::nullopt;
 }
 
-// Validates the ZMPop command arguments and extracts the values to the output params.
+// Validates the ZMPop and BZMPop command arguments and extracts the values to the output params.
 // If the arguments are invalid sends the appropiate error to builder and returns false.
-bool ValidateZMPopCommand(CmdArgList args, uint32* num_keys, bool* is_max, int* pop_count,
-                          SinkReplyBuilder* builder) {
+bool ValidateZMPopCommand(CmdArgList args, bool is_blocking, SinkReplyBuilder* builder,
+                          ValidateZMPopResult* result) {
   CmdArgParser parser{args};
 
-  if (!SimpleAtoi(parser.Next(), num_keys)) {
+  if (is_blocking) {
+    if (!absl::SimpleAtof(parser.Next(), &result->timeout)) {
+      builder->SendError("timeout is not a float or out of range");
+      return false;
+    }
+    if (result->timeout < 0) {
+      builder->SendError("timeout is negative");
+      return false;
+    }
+  }
+
+  if (!SimpleAtoi(parser.Next(), &(result->num_keys))) {
     builder->SendError(kUintErr);
     return false;
   }
 
-  if (*num_keys <= 0 || !parser.HasAtLeast(*num_keys + 1)) {
+  if (result->num_keys <= 0 || !parser.HasAtLeast(result->num_keys + 1)) {
     // We should have at least num_keys keys + a MIN/MAX arg.
     builder->SendError(kSyntaxErr);
     return false;
   }
   // Skip over the keys themselves.
-  parser.Skip(*num_keys);
+  parser.Skip(result->num_keys);
 
   // We know we have at least one more arg (we checked above).
   if (parser.Check("MAX")) {
-    *is_max = true;
+    result->is_max = true;
   } else if (parser.Check("MIN")) {
-    *is_max = false;
+    result->is_max = false;
   } else {
     builder->SendError(kSyntaxErr);
     return false;
   }
 
-  *pop_count = 1;
+  result->pop_count = 1;
   // Check if we have additional COUNT argument.
   if (parser.HasNext()) {
-    if (!parser.Check("COUNT", pop_count)) {
+    if (!parser.Check("COUNT", &result->pop_count)) {
       builder->SendError(kSyntaxErr);
       return false;
     }
   }
 
   if (!parser.Finalize()) {
-    builder->SendError(parser.Error()->MakeReply());
+    builder->SendError(parser.TakeError().MakeReply());
     return false;
   }
 
@@ -1936,8 +1970,10 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
   if (zparams.override && members.empty()) {
     auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
     if (res_it && IsValid(res_it->it)) {
-      res_it->post_updater.Run();
-      db_slice.Del(op_args.db_cntx, res_it->it);
+      db_slice.DelMutable(op_args.db_cntx, std::move(*res_it));
+      if (zparams.journal_update && op_args.shard->journal()) {
+        RecordJournal(op_args, "DEL"sv, ArgSlice{key});
+      }
     }
     return OpStatus::OK;
   }
@@ -1947,7 +1983,7 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
   size_t field_len = members.size() > server.zset_max_listpack_entries
                          ? UINT32_MAX
                          : members.front().second.size();
-  auto res_it = FindZEntry(zparams, op_args, key, field_len);
+  auto res_it = PrepareZEntry(zparams, op_args, key, field_len);
 
   if (!res_it)
     return res_it.status();
@@ -2010,6 +2046,26 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
 
   if (op_status != OpStatus::OK)
     return op_status;
+
+  // TODO: consider optimization to record real command if the replica is in stable_sync state
+  // and there is no slot migration process going on.
+  if (zparams.journal_update && op_args.shard->journal()) {
+    if (zparams.override) {
+      RecordJournal(op_args, "DEL"sv, ArgSlice{key});
+    }
+
+    vector<string> scores;
+    vector<string_view> mapped;
+    scores.reserve(members.size());
+    mapped.reserve(members.size() * 2 + 1);
+    mapped.push_back(key);
+    for (const auto& [score, member] : members) {
+      scores.push_back(absl::StrCat(score));
+      mapped.push_back(scores.back());
+      mapped.push_back(member);
+    }
+    RecordJournal(op_args, "ZADD"sv, mapped);
+  }
   return aresult;
 }
 
@@ -2307,7 +2363,8 @@ void ZSetFamily::ZDiffStore(CmdArgList args, const CommandContext& cmd_cntx) {
 
   auto store_cb = [&](Transaction* t, EngineShard* shard) {
     if (shard->shard_id() == dest_shard)
-      ZSetFamily::OpAdd(t->GetOpArgs(shard), ZSetFamily::ZParams{.override = true}, dest_key,
+      ZSetFamily::OpAdd(t->GetOpArgs(shard),
+                        ZSetFamily::ZParams{.override = true, .journal_update = true}, dest_key,
                         smvec);
     return OpStatus::OK;
   };
@@ -2401,11 +2458,10 @@ void ZSetFamily::ZInterCard(CmdArgList args, const CommandContext& cmd_cntx) {
   builder->SendLong(result.value().size());
 }
 
-void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  uint32 num_keys;
-  bool is_max;
-  int pop_count;
-  if (!ValidateZMPopCommand(args, &num_keys, &is_max, &pop_count, cmd_cntx.rb)) {
+// Generic function for ZMPop and BZMPop commands
+void ZMPopGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_blocking) {
+  ValidateZMPopResult zmpop_args;
+  if (!ValidateZMPopCommand(args, is_blocking, cmd_cntx.rb, &zmpop_args)) {
     return;
   }
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
@@ -2428,7 +2484,7 @@ void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   // Keep all the keys found (first only for each shard) in a set for fast lookups.
   absl::flat_hash_set<std::string_view> first_found_keys_for_shard;
   // We can have at most one result from each shard.
-  first_found_keys_for_shard.reserve(std::min(shard_set->size(), num_keys));
+  first_found_keys_for_shard.reserve(std::min(shard_set->size(), zmpop_args.num_keys));
   for (const auto& key : first_found_key_per_shard_vec) {
     if (!key.has_value()) {
       continue;
@@ -2439,7 +2495,8 @@ void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   // Now that we have the first non empty key from each shard, find the first overall first key and
   // pop elements from it.
   std::optional<std::string_view> key_to_pop = std::nullopt;
-  ArgRange arg_keys(args.subspan(1, num_keys));
+  // BZMPOP have 1 extra argument as compared to ZMPOP hence adding 1 is is_blocking is true
+  ArgRange arg_keys(args.subspan(1 + is_blocking, zmpop_args.num_keys));
   // Find the first arg_key which exists in any shard and is not empty.
   for (std::string_view key : arg_keys) {
     if (first_found_keys_for_shard.contains(key)) {
@@ -2448,15 +2505,52 @@ void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
     }
   }
 
-  if (!key_to_pop.has_value()) {
+  if (!key_to_pop.has_value() && (!is_blocking || cmd_cntx.tx->IsMulti())) {
     cmd_cntx.tx->Conclude();
     response_builder->SendNull();
     return;
   }
+  // if we don't have any key to pop and it's blocking then we will block it using `WaitOnWatch`
+  if (is_blocking && !key_to_pop.has_value()) {
+    auto trans = cmd_cntx.tx;
+    auto cntx = cmd_cntx.conn_cntx;
+    auto* ns = &trans->GetNamespace();
+
+    auto limit_tp = Transaction::time_point::max();
+    auto limit_ms = (unsigned)(zmpop_args.timeout * 1000);
+    if (limit_ms > 0) {
+      using namespace std::chrono;
+      limit_tp = steady_clock::now() + milliseconds(limit_ms);
+    }
+    const auto key_checker = [ns](EngineShard* owner, const DbContext& context, Transaction*,
+                                  std::string_view key) -> bool {
+      return ns->GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_ZSET).ok();
+    };
+
+    DCHECK(trans->IsScheduled());  // Checking if the transaction is scheduled before calling
+                                   // `WaitOnWatch`
+    auto status = trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker, &cntx->blocked,
+                                     &cntx->paused);
+
+    if (status != OpStatus::OK) {
+      response_builder->SendNull();
+      return;
+    }
+
+    auto cb = [&key_to_pop](Transaction* t, EngineShard* shard) {
+      if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {
+        key_to_pop = *wake_key;
+      }
+      return OpStatus::OK;
+    };
+    trans->Execute(std::move(cb), false);
+  }
+
+  DCHECK(key_to_pop.has_value());
 
   // Pop elements from relevant set.
-  OpResult<ScoredArray> pop_result =
-      ZPopMinMaxInternal(*key_to_pop, FilterShards::YES, pop_count, is_max, cmd_cntx.tx);
+  OpResult<ScoredArray> pop_result = ZPopMinMaxInternal(
+      *key_to_pop, FilterShards::YES, zmpop_args.pop_count, zmpop_args.is_max, cmd_cntx.tx);
 
   if (pop_result.status() == OpStatus::WRONG_TYPE) {
     return response_builder->SendError(kWrongTypeErr);
@@ -2464,6 +2558,14 @@ void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
 
   LOG_IF(WARNING, !pop_result) << "Unexpected status " << pop_result.status();
   response_builder->SendLabeledScoredArray(*key_to_pop, pop_result.value());
+}
+
+void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
+  ZMPopGeneric(args, cmd_cntx, false);
+}
+
+void ZSetFamily::BZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
+  ZMPopGeneric(args, cmd_cntx, true);
 }
 
 void ZSetFamily::ZPopMax(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2618,8 +2720,8 @@ void ZSetFamily::ZRandMember(CmdArgList args, const CommandContext& cmd_cntx) {
   if (parser.HasNext())
     return rb->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
 
-  if (auto err = parser.Error(); err)
-    return rb->SendError(err->MakeReply());
+  if (auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRandMember(count, params, t->GetOpArgs(shard), key);
@@ -2723,89 +2825,49 @@ void ZSetFamily::ZUnionStore(CmdArgList args, const CommandContext& cmd_cntx) {
 
 #define HFUNC(x) SetHandler(&ZSetFamily::x)
 
-namespace acl {
-constexpr uint32_t kZAdd = WRITE | SORTEDSET | FAST;
-constexpr uint32_t kBZPopMin = WRITE | SORTEDSET | FAST | BLOCKING;
-constexpr uint32_t kBZPopMax = WRITE | SORTEDSET | FAST | BLOCKING;
-constexpr uint32_t kZCard = READ | SORTEDSET | FAST;
-constexpr uint32_t kZCount = READ | SORTEDSET | FAST;
-constexpr uint32_t kZDiff = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZDiffStore = WRITE | SORTEDSET | SLOW;
-constexpr uint32_t kZIncrBy = WRITE | SORTEDSET | FAST;
-constexpr uint32_t kZInterStore = WRITE | SORTEDSET | SLOW;
-constexpr uint32_t kZInter = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZInterCard = WRITE | SORTEDSET | SLOW;
-constexpr uint32_t kZLexCount = READ | SORTEDSET | FAST;
-constexpr uint32_t kZMPop = WRITE | SORTEDSET | SLOW;
-constexpr uint32_t kZPopMax = WRITE | SORTEDSET | FAST;
-constexpr uint32_t kZPopMin = WRITE | SORTEDSET | FAST;
-constexpr uint32_t kZRem = WRITE | SORTEDSET | FAST;
-constexpr uint32_t kZRange = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZRandMember = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZRank = READ | SORTEDSET | FAST;
-constexpr uint32_t kZRangeByLex = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZRangeByScore = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZRangeStore = WRITE | SORTEDSET | SLOW;
-constexpr uint32_t kZScore = READ | SORTEDSET | FAST;
-constexpr uint32_t kZMScore = READ | SORTEDSET | FAST;
-constexpr uint32_t kZRemRangeByRank = WRITE | SORTEDSET | SLOW;
-constexpr uint32_t kZRemRangeByScore = WRITE | SORTEDSET | SLOW;
-constexpr uint32_t kZRemRangeByLex = WRITE | SORTEDSET | SLOW;
-constexpr uint32_t kZRevRange = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZRevRangeByLex = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZRevRangeByScore = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZRevRank = READ | SORTEDSET | FAST;
-constexpr uint32_t kZScan = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZUnion = READ | SORTEDSET | SLOW;
-constexpr uint32_t kZUnionStore = WRITE | SORTEDSET | SLOW;
-}  // namespace acl
-
 void ZSetFamily::Register(CommandRegistry* registry) {
-  constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::DENYOOM;
-  registry->StartFamily();
+  constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::DENYOOM | CO::NO_AUTOJOURNAL;
+  registry->StartFamily(acl::SORTEDSET);
   // TODO: to add support for SCRIPT for BZPOPMIN, BZPOPMAX similarly to BLPOP.
   *registry
-      << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1, acl::kZAdd}.HFUNC(ZAdd)
-      << CI{"BZPOPMIN",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2,
-            acl::kBZPopMin}
+      << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1}.HFUNC(ZAdd)
+      << CI{"BZPOPMIN", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}
              .HFUNC(BZPopMin)
-      << CI{"BZPOPMAX",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2,
-            acl::kBZPopMax}
+      << CI{"BZPOPMAX", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}
              .HFUNC(BZPopMax)
-      << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1, acl::kZCard}.HFUNC(ZCard)
-      << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1, acl::kZCount}.HFUNC(ZCount)
-      << CI{"ZDIFF", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZDiff}.HFUNC(ZDiff)
-      << CI{"ZDIFFSTORE", kStoreMask, -4, 3, 3, acl::kZDiffStore}.HFUNC(ZDiffStore)
-      << CI{"ZINCRBY", CO::FAST | CO::WRITE, 4, 1, 1, acl::kZIncrBy}.HFUNC(ZIncrBy)
-      << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3, acl::kZInterStore}.HFUNC(ZInterStore)
-      << CI{"ZINTER", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZInter}.HFUNC(ZInter)
-      << CI{"ZINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZInterCard}.HFUNC(
-             ZInterCard)
-      << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, acl::kZLexCount}.HFUNC(ZLexCount)
-      << CI{"ZMPOP", CO::SLOW | CO::WRITE | CO::VARIADIC_KEYS, -4, 2, 2, acl::kZMPop}.HFUNC(ZMPop)
-
-      << CI{"ZPOPMAX", CO::FAST | CO::WRITE, -2, 1, 1, acl::kZPopMax}.HFUNC(ZPopMax)
-      << CI{"ZPOPMIN", CO::FAST | CO::WRITE, -2, 1, 1, acl::kZPopMin}.HFUNC(ZPopMin)
-      << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1, acl::kZRem}.HFUNC(ZRem)
-      << CI{"ZRANGE", CO::READONLY, -4, 1, 1, acl::kZRange}.HFUNC(ZRange)
-      << CI{"ZRANDMEMBER", CO::READONLY, -2, 1, 1, acl::kZRandMember}.HFUNC(ZRandMember)
-      << CI{"ZRANK", CO::READONLY | CO::FAST, -3, 1, 1, acl::kZRank}.HFUNC(ZRank)
-      << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1, acl::kZRangeByLex}.HFUNC(ZRangeByLex)
-      << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1, acl::kZRangeByScore}.HFUNC(ZRangeByScore)
-      << CI{"ZRANGESTORE", CO::WRITE | CO::DENYOOM, -5, 1, 2, acl::kZRangeStore}.HFUNC(ZRangeStore)
-      << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1, acl::kZScore}.HFUNC(ZScore)
-      << CI{"ZMSCORE", CO::READONLY | CO::FAST, -3, 1, 1, acl::kZMScore}.HFUNC(ZMScore)
-      << CI{"ZREMRANGEBYRANK", CO::WRITE, 4, 1, 1, acl::kZRemRangeByRank}.HFUNC(ZRemRangeByRank)
-      << CI{"ZREMRANGEBYSCORE", CO::WRITE, 4, 1, 1, acl::kZRemRangeByScore}.HFUNC(ZRemRangeByScore)
-      << CI{"ZREMRANGEBYLEX", CO::WRITE, 4, 1, 1, acl::kZRemRangeByLex}.HFUNC(ZRemRangeByLex)
-      << CI{"ZREVRANGE", CO::READONLY, -4, 1, 1, acl::kZRevRange}.HFUNC(ZRevRange)
-      << CI{"ZREVRANGEBYLEX", CO::READONLY, -4, 1, 1, acl::kZRevRangeByLex}.HFUNC(ZRevRangeByLex)
-      << CI{"ZREVRANGEBYSCORE", CO::READONLY, -4, 1, 1, acl::kZRevRangeByScore}.HFUNC(
-             ZRevRangeByScore)
-      << CI{"ZREVRANK", CO::READONLY | CO::FAST, -3, 1, 1, acl::kZRevRank}.HFUNC(ZRevRank)
-      << CI{"ZSCAN", CO::READONLY, -3, 1, 1, acl::kZScan}.HFUNC(ZScan)
-      << CI{"ZUNION", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZUnion}.HFUNC(ZUnion)
-      << CI{"ZUNIONSTORE", kStoreMask, -4, 3, 3, acl::kZUnionStore}.HFUNC(ZUnionStore);
+      << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(ZCard)
+      << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1}.HFUNC(ZCount)
+      << CI{"ZDIFF", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZDiff)
+      << CI{"ZDIFFSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZDiffStore)
+      << CI{"ZINCRBY", CO::FAST | CO::WRITE, 4, 1, 1}.HFUNC(ZIncrBy)
+      << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZInterStore)
+      << CI{"ZINTER", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInter)
+      << CI{"ZINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInterCard)
+      << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1}.HFUNC(ZLexCount)
+      << CI{"ZMPOP", CO::WRITE | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(ZMPop)
+      << CI{"BZMPOP", CO::WRITE | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL, -5, 3, 3}
+             .HFUNC(BZMPop)
+      << CI{"ZPOPMAX", CO::FAST | CO::WRITE, -2, 1, 1}.HFUNC(ZPopMax)
+      << CI{"ZPOPMIN", CO::FAST | CO::WRITE, -2, 1, 1}.HFUNC(ZPopMin)
+      << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1}.HFUNC(ZRem)
+      << CI{"ZRANGE", CO::READONLY, -4, 1, 1}.HFUNC(ZRange)
+      << CI{"ZRANDMEMBER", CO::READONLY, -2, 1, 1}.HFUNC(ZRandMember)
+      << CI{"ZRANK", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZRank)
+      << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByLex)
+      << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByScore)
+      << CI{"ZRANGESTORE", CO::WRITE | CO::DENYOOM, -5, 1, 2}.HFUNC(ZRangeStore)
+      << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(ZScore)
+      << CI{"ZMSCORE", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZMScore)
+      << CI{"ZREMRANGEBYRANK", CO::WRITE, 4, 1, 1}.HFUNC(ZRemRangeByRank)
+      << CI{"ZREMRANGEBYSCORE", CO::WRITE, 4, 1, 1}.HFUNC(ZRemRangeByScore)
+      << CI{"ZREMRANGEBYLEX", CO::WRITE, 4, 1, 1}.HFUNC(ZRemRangeByLex)
+      << CI{"ZREVRANGE", CO::READONLY, -4, 1, 1}.HFUNC(ZRevRange)
+      << CI{"ZREVRANGEBYLEX", CO::READONLY, -4, 1, 1}.HFUNC(ZRevRangeByLex)
+      << CI{"ZREVRANGEBYSCORE", CO::READONLY, -4, 1, 1}.HFUNC(ZRevRangeByScore)
+      << CI{"ZREVRANK", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZRevRank)
+      << CI{"ZSCAN", CO::READONLY, -3, 1, 1}.HFUNC(ZScan)
+      << CI{"ZUNION", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZUnion)
+      << CI{"ZUNIONSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZUnionStore);
 }
 
 }  // namespace dfly

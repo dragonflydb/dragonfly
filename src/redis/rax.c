@@ -890,11 +890,12 @@ oom:
      * do that only if the node is a terminal node, otherwise if the OOM
      * happened reallocating a node in the middle, we don't need to free
      * anything. */
+    fprintf(stderr, "OOM during raxGenericInsert");
     if (h->size == 0) {
         h->isnull = 1;
         h->iskey = 1;
         rax->numele++; /* Compensate the next remove. */
-        assert(raxRemove(rax,s,i,NULL) != 0);
+        checkedRaxRemove(rax, s, i, NULL);
     }
     errno = ENOMEM;
     return 0;
@@ -1940,4 +1941,14 @@ unsigned long raxTouch(raxNode *n) {
         cp++;
     }
     return sum;
+}
+
+int checkedRaxRemove(rax *rax, unsigned char *s, size_t len, void **old) {
+  int res = raxRemove(rax, s, len, old);
+  if(res == 0) {
+    // lp freed but node not removed!
+    fprintf(stderr, "Error: corrupted listpack found.");
+    abort();
+  }
+  return res;
 }

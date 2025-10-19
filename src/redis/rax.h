@@ -209,6 +209,8 @@ uint64_t raxSize(rax *rax);
 unsigned long raxTouch(raxNode *n);
 void raxSetDebugMsg(int onoff);
 
+int checkedRaxRemove(rax *rax, unsigned char *s, size_t len, void **old);
+
 /* Internal API. May be used by the node callback in order to access rax nodes
  * in a low level way, so this function is exported as well. */
 void raxSetData(raxNode *n, void *data);

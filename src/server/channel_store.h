@@ -59,7 +59,7 @@ class ChannelStore {
   ChannelStore();
 
   // Send messages to channel, block on connection backpressure
-  unsigned SendMessages(std::string_view channel, facade::ArgRange messages) const;
+  unsigned SendMessages(std::string_view channel, facade::ArgRange messages, bool sharded) const;
 
   // Fetch all subscribers for channel, including matching patterns.
   std::vector<Subscriber> FetchSubscribers(std::string_view channel) const;

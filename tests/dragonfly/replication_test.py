@@ -51,27 +51,33 @@ Test full replication pipeline. Test full sync with streaming changes and stable
         pytest.param(8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, marks=M_STRESS),
     ],
 )
+@pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
+@pytest.mark.parametrize("background_snapshotting", [False, True])
 # Disabled cache_mode until #5371 is fixed
-# @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
-@pytest.mark.parametrize("point_in_time_replication", [True, False])
+# @pytest.mark.parametrize("point_in_time_replication", [True, False])
 async def test_replication_all(
     df_factory: DflyInstanceFactory,
     t_master,
     t_replicas,
     seeder_config,
     stream_target,
-    # mode,
-    point_in_time_replication,
+    mode,
+    background_snapshotting,
+    # point_in_time_replication,
 ):
     args = {}
-    # if mode:
-    #    args["cache_mode"] = "true"
-    #    args["maxmemory"] = str(t_master * 256) + "mb"
+    if mode:
+        args["cache_mode"] = "true"
+        args["maxmemory"] = str(t_master * 256) + "mb"
+
+    if background_snapshotting:
+        args["background_heartbeat"] = None
+        args["background_snapshotting"] = None
 
     master = df_factory.create(
         admin_port=ADMIN_PORT,
         proactor_threads=t_master,
-        point_in_time_snapshot=point_in_time_replication,
+        # point_in_time_snapshot=point_in_time_replication,
         **args,
     )
     replicas = [
@@ -87,7 +93,7 @@ async def test_replication_all(
     c_replicas = [replica.client() for replica in replicas]
 
     # Fill master with test data
-    seeder = SeederV2(**seeder_config)
+    seeder = SeederV2(**seeder_config, huge_value_add_only=True)
     await seeder.run(c_master, target_deviation=0.01)
 
     # Start data stream
@@ -448,9 +454,6 @@ async def test_cancel_replication_immediately(df_factory, df_seeder_factory: Dfl
     """
     Issue 100 replication commands. This checks that the replication state
     machine can handle cancellation well.
-    We assert that at least one command was cancelled.
-    After we finish the 'fuzzing' part, replicate the first master and check that
-    all the data is correct.
     """
     COMMANDS_TO_ISSUE = 100
 
@@ -469,12 +472,8 @@ async def test_cancel_replication_immediately(df_factory, df_seeder_factory: Dfl
             await asyncio.sleep(0.05)
 
     async def replicate():
-        try:
-            await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-            return True
-        except redis.exceptions.ResponseError as e:
-            assert e.args[0] == "replication cancelled"
-            return False
+        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        return True
 
     ping_job = asyncio.create_task(ping_status())
     replication_commands = [asyncio.create_task(replicate()) for _ in range(COMMANDS_TO_ISSUE)]
@@ -484,7 +483,7 @@ async def test_cancel_replication_immediately(df_factory, df_seeder_factory: Dfl
         num_successes += await result
 
     logging.info(f"succeses: {num_successes}")
-    assert COMMANDS_TO_ISSUE > num_successes, "At least one REPLICAOF must be cancelled"
+    assert COMMANDS_TO_ISSUE == num_successes
 
     await wait_available_async(c_replica)
     capture = await seeder.capture()
@@ -492,6 +491,12 @@ async def test_cancel_replication_immediately(df_factory, df_seeder_factory: Dfl
     assert await seeder.compare(capture, replica.port)
 
     ping_job.cancel()
+
+    replica.stop()
+    lines = replica.find_in_logs("Stopping replication")
+    # Cancelled 99 times by REPLICAOF command and once by Shutdown() because
+    # we stopped the instance
+    assert len(lines) == COMMANDS_TO_ISSUE
 
 
 """
@@ -674,6 +679,22 @@ async def test_rewrites(df_factory):
         # Check SUNIONSTORE turns into DEL and SADD
         await check_list_ooo("SUNIONSTORE k set1 set2", [r"DEL k", r"SADD k (.*?)"])
 
+        # Check ZDIFFSTORE turns into DEL and ZADD
+        await c_master.execute_command("zadd zet1 1 v1 2 v2 3 v3")
+        await c_master.execute_command("zadd zet2 1 v1 2 v2")
+        await skip_cmd()
+        await skip_cmd()
+        await check_list("ZDIFFSTORE k 2 zet1 zet2", [r"DEL k", r"ZADD k 3 v3"])
+
+        # Check ZINTERSTORE turns into DEL and ZADD
+        await check_list("ZINTERSTORE k 2 zet1 zet2", [r"DEL k", r"ZADD k (.*?)"])
+
+        # Check ZRANGESTORE turns into SREM and ZADD
+        await check_list_ooo("ZRANGESTORE k zet1 2 -1", [r"DEL k", r"ZADD k 3 v3"])
+
+        # Check ZUNIONSTORE turns into DEL and ZADD
+        await check_list_ooo("ZUNIONSTORE k 2 zet1 zet2", [r"DEL k", r"ZADD k (.*?)"])
+
         await c_master.set("k1", "1000")
         await c_master.set("k2", "1100")
         await skip_cmd()
@@ -693,12 +714,14 @@ async def test_rewrites(df_factory):
         # Check there is no rewrite for LMOVE on single shard
         await c_master.lpush("list", "v1", "v2", "v3", "v4")
         await skip_cmd()
-        await check("LMOVE list list LEFT RIGHT", r"LMOVE list list LEFT RIGHT")
+        # Check LMOVE/BLMOVE turns into POP PUSH
+        await check_list_ooo("LMOVE list list LEFT RIGHT", [r"LPOP list", r"RPUSH list v4"])
+        await check_list_ooo("BLMOVE list list RIGHT LEFT 0", [r"RPOP list", r"LPUSH list v4"])
 
-        # Check there is no rewrite for RPOPLPUSH on single shard
-        await check("RPOPLPUSH list list", r"RPOPLPUSH list list")
-        # Check BRPOPLPUSH on single shard turns into LMOVE
-        await check("BRPOPLPUSH list list 0", r"LMOVE list list RIGHT LEFT")
+        # Check RPOPLPUSH turns into RPOP LPUSH
+        await check_list_ooo("RPOPLPUSH list list", [r"RPOP list", r"LPUSH list v1"])
+        # Check BRPOPLPUSH turns into RPOP LPUSH
+        await check_list_ooo("BRPOPLPUSH list list 0", [r"RPOP list", r"LPUSH list v2"])
         # Check BLPOP turns into LPOP
         await check("BLPOP list list1 0", r"LPOP list")
         # Check BRPOP turns into RPOP
@@ -712,6 +735,9 @@ async def test_rewrites(df_factory):
         await check_list_ooo("RPOPLPUSH list1s list2s", [r"LPUSH list2s v1", r"RPOP list1s"])
         # Check BRPOPLPUSH turns into LPUSH RPOP on multi shard
         await check_list_ooo("BRPOPLPUSH list1s list2s 0", [r"LPUSH list2s v2", r"RPOP list1s"])
+
+        await check("LMPOP 2 list list1s LEFT", r"LPOP list")
+        await check("BLMPOP 0 2 list1s list RIGHT", r"RPOP list1s")
 
         # MOVE runs as global command, check only one journal entry is sent
         await check("MOVE list2s 2", r"MOVE list2s 2")
@@ -745,6 +771,25 @@ async def test_rewrites(df_factory):
             f"EVALSHA {sha} 2 k-stream k-one-element-set",
             [r"XTRIM k-stream MINID 0", r"SREM k-one-element-set value[12]"],
         )
+
+        # TODO next Z-tests won't work with no-point-in-time replication
+        # check BZMPOP turns into ZPOPMAX and ZPOPMIN command
+        await c_master.zadd("key", {"a": 1, "b": 2, "c": 3})
+        await skip_cmd()
+        await check("BZMPOP 0 3 key3 key2 key MAX COUNT 3", r"ZPOPMAX key 3")
+
+        await c_master.zadd("key", {"a": 1, "b": 2, "c": 3})
+        await skip_cmd()
+        await check("BZMPOP 0 3 key3 key2 key MIN", r"ZPOPMIN key 1")
+
+        # Check ZMPOP turns into ZPOPMAX and ZPOPMIN commands
+        await c_master.zadd("key", {"a": 1, "b": 2, "c": 3})
+        await skip_cmd()
+        await check("ZMPOP 3 key3 key2 key MIN COUNT 3", r"ZPOPMIN key 3")
+
+        await c_master.zadd("key", {"a": 1, "b": 2, "c": 3})
+        await skip_cmd()
+        await check("ZMPOP 3 key3 key2 key MAX", r"ZPOPMAX key 1")
 
 
 """
@@ -1838,8 +1883,9 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
             await proxy.close(task)
 
     info = await c_replica.info("replication")
-    assert info["psync_attempts"] > 0
-    assert info["psync_successes"] == 0
+    master.stop()
+    lines = master.find_in_logs("Partial sync requested from stale LSN")
+    assert len(lines) > 0
 
 
 async def test_replica_reconnections_after_network_disconnect(df_factory, df_seeder_factory):
@@ -2013,13 +2059,16 @@ async def test_client_pause_with_replica(df_factory, df_seeder_factory):
     assert await seeder.compare(capture, port=replica.port)
 
 
+@pytest.mark.debug_only
+@dfly_args({"proactor_threads": 2})
 async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     master = df_factory.create()
     replica = df_factory.create(dbfilename=f"dump_{tmp_file_name()}")
     df_factory.start_all([master, replica])
 
     c_replica = replica.client()
-    await c_replica.execute_command(f"DEBUG POPULATE 1000 key 1000 RAND type set elements 2000")
+
+    await c_replica.execute_command(f"DEBUG POPULATE 1000 key 500 RAND type set elements 500")
 
     replica.stop()
     replica.start()
@@ -2929,8 +2978,7 @@ async def test_replicaof_inside_multi(df_factory):
         num_successes += await result
 
     logging.info(f"succeses: {num_successes}")
-    assert MULTI_COMMANDS_TO_ISSUE > num_successes, "At least one REPLICAOF must be cancelled"
-    assert num_successes > 0, "At least one REPLICAOF must success"
+    assert MULTI_COMMANDS_TO_ISSUE == num_successes
 
 
 async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFactory):
@@ -3053,12 +3101,12 @@ async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyIn
 
 
 @pytest.mark.parametrize(
-    "use_takeover, allowed_diff",
-    [(False, 2), (False, 0), (True, 1)],
+    "use_takeover, backlog_len",
+    [(False, 2), (False, 1), (True, 1), (True, 10)],
 )
-async def test_partial_replication_on_same_source_master(df_factory, use_takeover, allowed_diff):
+async def test_partial_replication_on_same_source_master(df_factory, use_takeover, backlog_len):
     master = df_factory.create()
-    replica1 = df_factory.create(allow_partial_sync_with_lsn_diff=allowed_diff)
+    replica1 = df_factory.create(shard_repl_backlog_len=backlog_len)
     replica2 = df_factory.create()
 
     df_factory.start_all([master, replica1, replica2])
@@ -3086,11 +3134,13 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
     if use_takeover:
         # Promote first replica to master
         await c_replica1.execute_command(f"REPLTAKEOVER 5")
+        if backlog_len > 1:
+            await c_replica1.execute_command("SET bar foo")
+            await c_replica1.execute_command("SET foo bar")
+
     else:
         # Promote first replica to master
         await c_replica1.execute_command(f"REPLICAOF NO ONE")
-        # Send 2 more commands to be propagated to second replica
-        # Sending 2 more commands will result in partial sync if allow_partial_sync_with_lsn_diff is equal or higher
         await c_master.set("x", "y")
         await c_master.set("x", "y")
         await check_all_replicas_finished([c_replica2], c_master)
@@ -3105,23 +3155,28 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
             *(SeederV2.capture(c) for c in (c_replica1, c_replica2))
         )
         assert hash1 == hash2
+        s1 = await c_replica1.execute_command("dbsize")
+        s2 = await c_replica1.execute_command("dbsize")
+        assert s1 == s2
 
     # Check we can takeover to the second replica
     await c_replica2.execute_command(f"REPLTAKEOVER 5")
 
     replica1.stop()
     replica2.stop()
-    if use_takeover or (allowed_diff > 0 and not use_takeover):
+    if use_takeover:
         # Check logs for partial replication
         lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
         assert len(lines) == 1
         # Check no full sync logs
-        lines = replica2.find_in_logs(f"Started full with localhost:{replica1.port}")
+        lines = replica2.find_in_logs(f"Started full sync with localhost:{replica1.port}")
         assert len(lines) == 0
     else:
-        lines = replica2.find_in_logs(f"Started full with localhost:{replica1.port}")
+        lines = replica2.find_in_logs(f"Started full sync with localhost:{replica1.port}")
+        assert len(lines) == 1
+        # No partial sync after NO ONE
+        lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
         assert len(lines) == 0
-        assert len(replica1.find_in_logs("No partial sync due to diff")) > 0
 
 
 async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df_factory):
@@ -3142,7 +3197,7 @@ async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df
     await wait_for_replicas_state(c_s3)
 
     # Promote server 2 to master
-    await c_s2.execute_command(f"REPLICAOF NO ONE")
+    await c_s2.execute_command(f"REPLTAKEOVER 20")
     # Make server 4 replica of server 2
     await c_s4.execute_command(f"REPLICAOF localhost {server2.port}")
     # Send some write command for lsn inc
@@ -3150,8 +3205,17 @@ async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df
         await c_s2.set(i, "val")
     # Make server 3 replica of server 2
     await c_s3.execute_command(f"REPLICAOF localhost {server2.port}")
+
     await check_all_replicas_finished([c_s3], c_s2)
     await check_all_replicas_finished([c_s4], c_s2)
+
+    s2_sz = await c_s2.dbsize()
+    s3_sz = await c_s3.dbsize()
+    assert s2_sz == 100
+    assert s2_sz == s3_sz
+
+    s4_sz = await c_s4.dbsize()
+    assert s3_sz == s4_sz
 
     server3.stop()
     # Check logs for partial replication
@@ -3265,9 +3329,18 @@ async def test_partial_sync(df_factory, proactors, backlog_len):
         finally:
             await proxy.close(task)
 
-    info = await c_replica.info("replication")
-    assert info["psync_attempts"] == 2
-    assert info["psync_successes"] == 1
+    master.stop()
+    replica.stop()
+    # Partial sync worked
+    lines = master.find_in_logs("Partial sync requested from LSN")
+    # Because we run with num_shards = proactors - 1
+    total_attempts = 1
+    if proactors > 1:
+        total_attempts = proactors - 1 + proactors - 2
+    assert len(lines) == total_attempts
+    # Second partial sync failed because of stale LSN
+    lines = master.find_in_logs("Partial sync requested from stale LSN")
+    assert len(lines) == 1
 
 
 async def test_mc_gat_replication(df_factory):

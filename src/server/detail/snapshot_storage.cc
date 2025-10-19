@@ -19,6 +19,10 @@
 #include "util/aws/s3_write_file.h"
 #endif
 
+#ifdef WITH_GCP
+#include "util/cloud/gcp/gcs_file.h"
+#endif
+
 #include <regex>
 
 #include "base/logging.h"
@@ -26,7 +30,6 @@
 #include "server/engine_shard_set.h"
 #include "util/cloud/azure/creds_provider.h"
 #include "util/cloud/azure/storage.h"
-#include "util/cloud/gcp/gcs_file.h"
 #include "util/fibers/fiber_file.h"
 namespace dfly {
 namespace detail {
@@ -234,6 +237,7 @@ error_code FileSnapshotStorage::CheckPath(const string& path) {
   return ec;
 }
 
+#ifdef WITH_GCP
 GcsSnapshotStorage::~GcsSnapshotStorage() {
   util::http::TlsClient::FreeContext(ctx_);
 }
@@ -370,6 +374,7 @@ io::Result<vector<string>, GenericError> GcsSnapshotStorage::ExpandFromPath(
 error_code GcsSnapshotStorage::CheckPath(const std::string& path) {
   return {};
 }
+#endif
 
 // AZURE
 

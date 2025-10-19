@@ -69,7 +69,7 @@ cd build-opt && ninja dragonfly
 Minimal debug build:
 
 ```bash
-./helio/blaze.sh -DWITH_AWS=OFF -DWITH_SEARCH=OFF -WITH_COLLECTION_CMDS=OFF -DWITH_EXTENSION_CMDS=OFF
+./helio/blaze.sh -DWITH_AWS=OFF -DWITH_SEARCH=OFF -DWITH_COLLECTION_CMDS=OFF -DWITH_EXTENSION_CMDS=OFF
 ```
 
 ## Step 4 - voilà

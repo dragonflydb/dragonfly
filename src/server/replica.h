@@ -5,6 +5,7 @@
 
 #include <absl/container/inlined_vector.h>
 
+#include <atomic>
 #include <boost/fiber/barrier.hpp>
 #include <queue>
 #include <variant>
@@ -145,6 +146,13 @@ class Replica : ProtocolClient {
   // Get the current replication phase based on state_mask_
   std::string GetCurrentPhase() const;
 
+  // Used *only* in TakeOver flow. There is small data race if
+  // thread_flow_map_ gets written by the MainReplicationFiber thread but
+  // the chances for that are extremely rare.
+  std::vector<unsigned> GetFlowMapAtIndex(size_t index) const;
+
+  size_t GetRecCountExecutedPerShard(const std::vector<unsigned>& indexes) const;
+
  private:
   util::fb2::ProactorBase* proactor_ = nullptr;
   Service& service_;
@@ -221,6 +229,10 @@ class DflyShardReplica : public ProtocolClient {
     return journal_rec_executed_.load(std::memory_order_relaxed);
   }
 
+  uint64_t SetRecordsExecuted(uint64_t value) {
+    return journal_rec_executed_ = value;
+  }
+
   // Can be called from any thread.
   void Pause(bool pause);
 
@@ -243,7 +255,7 @@ class DflyShardReplica : public ProtocolClient {
   // **executed** records, which might be received interleaved when commands
   // run out-of-order on the master instance.
   // Atomic, because JournalExecutedCount() can be called from any thread.
-  std::atomic_uint64_t journal_rec_executed_ = 0;
+  std::atomic_uint64_t journal_rec_executed_ = 1;
 
   util::fb2::Fiber sync_fb_, acks_fb_;
   size_t ack_offs_ = 0;

@@ -7,6 +7,7 @@
 #include <absl/base/internal/spinlock.h>
 #include <absl/time/time.h>
 
+#include <atomic>
 #include <memory>
 #include <system_error>
 #include <utility>
@@ -106,5 +107,10 @@ class DispatchTracker {
   bool ignore_paused_;
   bool ignore_blocked_;
 };
+
+// Global shutdown tuning flag, controlled by SHUTDOWN options.
+// When true, listeners perform expedited shutdown without waiting for
+// in-flight dispatches (used by NOW/FORCE).
+extern std::atomic<bool> g_shutdown_fast;
 
 }  // namespace facade

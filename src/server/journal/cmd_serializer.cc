@@ -18,14 +18,14 @@ class CommandAggregator {
   using WriteCmdCallback = std::function<void(absl::Span<const string_view>)>;
 
   CommandAggregator(string_view key, WriteCmdCallback cb, size_t max_agg_bytes)
-      : key_(key), cb_(cb), max_aggragation_bytes_(max_agg_bytes) {
+      : key_(key), cb_(std::move(cb)), max_aggragation_bytes_(max_agg_bytes) {
   }
 
   ~CommandAggregator() {
     CommitPending();
   }
 
-  enum class CommitMode { kAuto, kNoCommit };
+  enum class CommitMode : uint8_t { kAuto, kNoCommit };
 
   // Returns whether CommitPending() was called
   bool AddArg(string arg, CommitMode commit_mode = CommitMode::kAuto) {
@@ -68,40 +68,44 @@ class CommandAggregator {
 
 CmdSerializer::CmdSerializer(FlushSerialized cb, size_t max_serialization_buffer_size)
     : cb_(std::move(cb)), max_serialization_buffer_size_(max_serialization_buffer_size) {
+  serializer_ = std::make_unique<RdbSerializer>(GetDefaultCompressionMode());
 }
 
-size_t CmdSerializer::SerializeEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
+size_t CmdSerializer::SerializeEntry(string_view key, const PrimeKey& pk, const PrimeValue& pv,
                                      uint64_t expire_ms) {
-  // We send RESTORE commands for small objects, or objects we don't support breaking.
+  // We send RESTORE commands objects we don't support breaking.
   bool use_restore_serialization = true;
   size_t commands = 1;
-  if (max_serialization_buffer_size_ > 0 && pv.MallocUsed() > max_serialization_buffer_size_) {
-    switch (pv.ObjType()) {
-      case OBJ_SET:
-        commands = SerializeSet(key, pv);
-        use_restore_serialization = false;
-        break;
-      case OBJ_ZSET:
-        commands = SerializeZSet(key, pv);
-        use_restore_serialization = false;
-        break;
-      case OBJ_HASH:
-        commands = SerializeHash(key, pv);
-        use_restore_serialization = false;
-        break;
-      case OBJ_LIST:
-        commands = SerializeList(key, pv);
-        use_restore_serialization = false;
-        break;
-      case OBJ_STRING:
-      case OBJ_STREAM:
-      case OBJ_JSON:
-      case OBJ_SBF:
-      default:
-        // These types are unsupported wrt splitting huge values to multiple commands, so we send
-        // them as a RESTORE command.
-        break;
-    }
+  switch (pv.ObjType()) {
+    case OBJ_SET:
+      commands = SerializeSet(key, pv);
+      use_restore_serialization = false;
+      break;
+    case OBJ_ZSET:
+      commands = SerializeZSet(key, pv);
+      use_restore_serialization = false;
+      break;
+    case OBJ_HASH:
+      commands = SerializeHash(key, pv);
+      use_restore_serialization = false;
+      break;
+    case OBJ_LIST:
+      commands = SerializeList(key, pv);
+      use_restore_serialization = false;
+      break;
+    case OBJ_STRING:
+      commands = SerializeString(key, pv, expire_ms);
+      use_restore_serialization = false;
+      // reset expire_ms to skip it in SerializeExpireIfNeeded
+      expire_ms = 0;
+      break;
+    case OBJ_STREAM:
+    case OBJ_JSON:
+    case OBJ_SBF:
+    default:
+      // These types are unsupported wrt splitting huge values to multiple commands, so we send
+      // them as a RESTORE command.
+      break;
   }
 
   if (use_restore_serialization) {
@@ -130,7 +134,7 @@ void CmdSerializer::SerializeCommand(string_view cmd, absl::Span<const string_vi
   cb_(std::move(cmd_sink).str());
 }
 
-void CmdSerializer::SerializeStickIfNeeded(string_view key, const PrimeValue& pk) {
+void CmdSerializer::SerializeStickIfNeeded(string_view key, const PrimeKey& pk) {
   if (!pk.IsSticky()) {
     return;
   }
@@ -143,7 +147,7 @@ void CmdSerializer::SerializeExpireIfNeeded(string_view key, uint64_t expire_ms)
     return;
   }
 
-  SerializeCommand("PEXIRE", {key, absl::StrCat(expire_ms)});
+  SerializeCommand("PEXPIREAT", {key, absl::StrCat(expire_ms)});
 }
 
 size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
@@ -204,7 +208,30 @@ size_t CmdSerializer::SerializeList(string_view key, const PrimeValue& pv) {
   return commands;
 }
 
-void CmdSerializer::SerializeRestore(string_view key, const PrimeValue& pk, const PrimeValue& pv,
+size_t CmdSerializer::SerializeString(string_view key, const PrimeValue& pv, uint64_t expire_ms) {
+  string str;
+  if (pv.IsExternal()) {
+    if (pv.IsCool()) {
+      pv.GetCool().record->value.GetString(&str);
+    }
+    LOG(FATAL) << "External string not supported yet";
+  } else {
+    pv.GetString(&str);
+  }
+
+  if (expire_ms) {
+    std::string expire_ms_str = to_string(expire_ms);
+    std::string_view args[] = {key, string_view(str), "PXAT", string_view(expire_ms_str)};
+    SerializeCommand("SET", args);
+  } else {
+    std::string_view args[] = {key, string_view(str)};
+    SerializeCommand("SET", args);
+  }
+
+  return 1;
+}
+
+void CmdSerializer::SerializeRestore(string_view key, const PrimeKey& pk, const PrimeValue& pv,
                                      uint64_t expire_ms) {
   absl::InlinedVector<string_view, 5> args;
   args.push_back(key);
@@ -213,7 +240,9 @@ void CmdSerializer::SerializeRestore(string_view key, const PrimeValue& pk, cons
   args.push_back(expire_str);
 
   io::StringSink value_dump_sink;
-  SerializerBase::DumpObject(pv, &value_dump_sink);
+  // TODO we already ignore CRC in the load rdb code during migration, we need to provide ignore_crc
+  // = true when we are sure that all shards ignore crc during migration process
+  SerializerBase::DumpObject(serializer_.get(), pv, &value_dump_sink, false);
   args.push_back(value_dump_sink.str());
 
   args.push_back("ABSTTL");  // Means expire string is since epoch

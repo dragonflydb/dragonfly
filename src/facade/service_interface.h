@@ -21,7 +21,15 @@ class Connection;
 class SinkReplyBuilder;
 class MCReplyBuilder;
 
-enum class DispatchResult { OK, OOM, ERROR };
+enum class DispatchResult : uint8_t { OK, OOM, ERROR };
+
+struct DispatchManyResult {
+  uint32_t processed;  // how many commands out of passed were actually processed
+
+  // whether to account the processed commands in stats. This is needed to consistently
+  // account commands that were included based on squash_stats_latency_lower_limit filter.
+  bool account_in_stats;
+};
 
 class ServiceInterface {
  public:
@@ -31,9 +39,9 @@ class ServiceInterface {
   virtual DispatchResult DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
                                          ConnectionContext* cntx) = 0;
 
-  // Returns number of processed commands
-  virtual size_t DispatchManyCommands(absl::Span<ArgSlice> args_list, SinkReplyBuilder* builder,
-                                      ConnectionContext* cntx) = 0;
+  virtual DispatchManyResult DispatchManyCommands(absl::Span<ArgSlice> commands,
+                                                  SinkReplyBuilder* builder,
+                                                  ConnectionContext* cntx) = 0;
 
   virtual void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
                           MCReplyBuilder* builder, ConnectionContext* cntx) = 0;

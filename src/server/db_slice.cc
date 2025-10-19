@@ -40,6 +40,8 @@ ABSL_FLAG(double, table_growth_margin, 0.4,
 ABSL_FLAG(std::string, notify_keyspace_events, "",
           "notify-keyspace-events. Only Ex is supported for now");
 
+ABSL_FLAG(bool, cluster_flush_decommit_memory, false, "Decommit memory after flushing slots");
+
 namespace dfly {
 
 using namespace std;
@@ -304,19 +306,32 @@ int32_t AsyncDeleter::IdleCb() {
   return ProactorBase::kOnIdleMaxLevel;
 };
 
-inline void TouchTopKeysIfNeeded(string_view key, TopKeys* top_keys) {
-  if (top_keys) {
-    top_keys->Touch(key);
+inline void TouchTopKeysIfNeeded(string_view key, DbTable::SampleTopKeys* sample) {
+  if (sample) {
+    sample->top_keys->Touch(key);
+    ++sample->total_samples;
   }
 }
 
-inline void TouchHllIfNeeded(string_view key, uint8_t* hll) {
-  if (hll) {
+inline void TouchHllIfNeeded(string_view key, DbTable::SampleUniqueKeys* sample) {
+  if (sample) {
     HllBufferPtr hll_buf;
     hll_buf.size = getDenseHllSize();
-    hll_buf.hll = hll;
+    hll_buf.hll = sample->dense_hll;
     pfadd_dense(hll_buf, reinterpret_cast<const uint8_t*>(key.data()), key.size());
+    ++sample->total_samples;
   }
+}
+
+inline void TouchValuesHistogramIfNeeded(const PrimeValue& pv, base::Histogram* hist) {
+  if (hist) {
+    hist->Add(pv.Size());
+  }
+}
+
+inline bool MayDeleteAsynchronously(const PrimeValue& pv) {
+  unsigned obj_type = pv.ObjType();
+  return (obj_type == OBJ_SET || obj_type == OBJ_HASH) && pv.Encoding() == kEncodingStrMap2;
 }
 
 }  // namespace
@@ -388,7 +403,6 @@ DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
   db_arr_.emplace_back();
   CreateDb(0);
   expire_base_[0] = expire_base_[1] = 0;
-  soft_budget_limit_ = (0.3 * max_memory_limit / shard_set->size());
 
   std::string keyspace_events = GetFlag(FLAGS_notify_keyspace_events);
   if (!keyspace_events.empty() && keyspace_events != "Ex") {
@@ -457,7 +471,7 @@ DbSlice::AutoUpdater::AutoUpdater(AutoUpdater&& o) noexcept {
   *this = std::move(o);
 }
 
-DbSlice::AutoUpdater& DbSlice::AutoUpdater::operator=(AutoUpdater&& o) {
+DbSlice::AutoUpdater& DbSlice::AutoUpdater::operator=(AutoUpdater&& o) noexcept {
   Run();
   fields_ = o.fields_;
   o.Cancel();
@@ -566,14 +580,17 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
   if (!IsValid(res.it)) {
     events_.misses += miss_weight;
+    db.stats.events.misses += miss_weight;
     return OpStatus::KEY_NOTFOUND;
   }
 
-  TouchTopKeysIfNeeded(key, db.top_keys);
-  TouchHllIfNeeded(key, db.dense_hll);
+  TouchTopKeysIfNeeded(key, db.sample_top_keys);
+  TouchHllIfNeeded(key, db.sample_unique_keys);
+  TouchValuesHistogramIfNeeded(res.it->second, db.sample_values_hist);
 
   if (req_obj_type.has_value() && res.it->second.ObjType() != req_obj_type.value()) {
     events_.misses += miss_weight;
+    db.stats.events.misses += miss_weight;
     return OpStatus::WRONG_TYPE;
   }
 
@@ -581,6 +598,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     res = ExpireIfNeeded(cntx, res.it);
     if (!IsValid(res.it)) {
       events_.misses += miss_weight;
+      db.stats.events.misses += miss_weight;
       return OpStatus::KEY_NOTFOUND;
     }
   }
@@ -597,6 +615,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
       break;
     case UpdateStatsMode::kReadStats:
       events_.hits++;
+      db.stats.events.hits++;
       if (db.slots_stats) {
         db.slots_stats[KeySlot(key)].total_reads++;
       }
@@ -702,13 +721,15 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
     return OpStatus::OUT_OF_MEMORY;
   }
 
+  ssize_t soft_budget_limit =
+      (0.3 * max_memory_limit.load(memory_order_relaxed)) / shard_set->size();
   PrimeEvictionPolicy evp{cntx,          (IsCacheMode() && !owner_->IsReplica()),
-                          memory_offset, ssize_t(soft_budget_limit_),
+                          memory_offset, soft_budget_limit,
                           this,          apply_memory_limit};
 
   // Fast-path if change_cb_ is empty so we Find or Add using
   // the insert operation: twice more efficient.
-  CompactObj co_key{key};
+  PrimeKey co_key{key, true};
   PrimeIterator it;
 
   ssize_t table_before = db.prime.mem_usage();
@@ -755,12 +776,13 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
   it.SetVersion(NextVersion());
 
-  TouchTopKeysIfNeeded(key, db.top_keys);
-  TouchHllIfNeeded(key, db.dense_hll);
+  TouchTopKeysIfNeeded(key, db.sample_top_keys);
+  TouchHllIfNeeded(key, db.sample_unique_keys);
 
   events_.garbage_collected = db.prime.garbage_collected();
   events_.stash_unloaded = db.prime.stash_unloaded();
   events_.evicted_keys += evp.evicted();
+  db.stats.events.evicted_keys += evp.evicted();
   events_.garbage_checked += evp.checked();
   if (db.slots_stats) {
     SlotId sid = KeySlot(key);
@@ -794,6 +816,11 @@ void DbSlice::Del(Context cntx, Iterator it) {
   PerformDeletion(it, db.get());
 }
 
+void DbSlice::DelMutable(Context cntx, ItAndUpdater it_updater) {
+  it_updater.post_updater.Run();
+  Del(cntx, it_updater.it);
+}
+
 void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   VLOG(1) << "Start FlushSlotsFb";
   // Slot deletion can take time as it traverses all the database, hence it runs in fiber.
@@ -804,6 +831,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
 
   // Explicitly copy table smart pointer to keep reference count up (flushall drops it)
   boost::intrusive_ptr<DbTable> table = db_arr_.front();
+  size_t memory_before = table->table_memory() + table->stats.obj_memory_usage;
 
   std::string tmp;
   auto iterate_bucket = [&](PrimeTable::bucket_iterator it) {
@@ -847,10 +875,19 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
     cursor = next;
     ThisFiber::Yield();
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
+
   VLOG(1) << "FlushSlotsFb del count is: " << del_count;
   UnregisterOnChange(next_version);
 
-  etl.DecommitMemory(ServerState::kDataHeap);
+  if (absl::GetFlag(FLAGS_cluster_flush_decommit_memory)) {
+    int64_t start = absl::GetCurrentTimeNanos();
+    etl.DecommitMemory(ServerState::kDataHeap);
+    int64_t took = absl::GetCurrentTimeNanos() - start;
+    size_t memory_after = table->table_memory() + table->stats.obj_memory_usage;
+
+    LOG(INFO) << "Memory decommit took " << took << "ns, deleted " << del_count << ", memory delta "
+              << (memory_before - memory_after);
+  }
 }
 
 void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
@@ -861,16 +898,16 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
   }).Detach();
 }
 
-void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
+util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   bool clear_tiered = owner_->tiered_storage() != nullptr;
 
   if (clear_tiered)
-    ClearOffloadedEntries(indexes, db_arr_);
+    RemoveOffloadedEntriesFromTieredStorage(indexes, db_arr_);
 
   DbTableArray flush_db_arr(db_arr_.size());
 
   for (DbIndex index : indexes) {
-    if (!index) {
+    if (index == 0) {  // TODO: Async dealloc?
       owner_->search_indices()->DropAllIndices();
     }
 
@@ -893,20 +930,17 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
                                           ServerState::kGlibcmalloc);
   };
 
-  fb2::Fiber("flush_dbs", std::move(cb)).Detach();
+  return {"flush_dbs", std::move(cb)};
 }
 
-void DbSlice::FlushDb(DbIndex db_ind) {
+util::fb2::Fiber DbSlice::FlushDb(DbIndex db_ind) {
   DVLOG(1) << "Flushing db " << db_ind;
 
   // clear client tracking map.
   client_tracking_map_.clear();
 
-  if (db_ind != kDbAll) {
-    // Flush a single database if a specific index is provided
-    FlushDbIndexes({db_ind});
-    return;
-  }
+  if (db_ind != kDbAll)  // Flush a single database if a specific index is provided
+    return FlushDbIndexes({db_ind});
 
   std::vector<DbIndex> indexes;
   indexes.reserve(db_arr_.size());
@@ -916,10 +950,10 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     }
   }
 
-  FlushDbIndexes(indexes);
+  return FlushDbIndexes(indexes);
 }
 
-void DbSlice::AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at) {
+void DbSlice::AddExpire(DbIndex db_ind, const Iterator& main_it, uint64_t at) {
   uint64_t delta = at - expire_base_[0];  // TODO: employ multigen expire updates.
   auto& db = *db_arr_[db_ind];
   size_t table_before = db.expire.mem_usage();
@@ -928,7 +962,7 @@ void DbSlice::AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at) {
   main_it->second.SetExpire(true);
 }
 
-bool DbSlice::RemoveExpire(DbIndex db_ind, Iterator main_it) {
+bool DbSlice::RemoveExpire(DbIndex db_ind, const Iterator& main_it) {
   if (main_it->second.HasExpire()) {
     auto& db = *db_arr_[db_ind];
     size_t table_before = db.expire.mem_usage();
@@ -941,7 +975,7 @@ bool DbSlice::RemoveExpire(DbIndex db_ind, Iterator main_it) {
 }
 
 // Returns true if a state has changed, false otherwise.
-bool DbSlice::UpdateExpire(DbIndex db_ind, Iterator it, uint64_t at) {
+bool DbSlice::UpdateExpire(DbIndex db_ind, const Iterator& it, uint64_t at) {
   if (at == 0) {
     return RemoveExpire(db_ind, it);
   }
@@ -1027,7 +1061,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     Del(cntx, prime_it);
     return -1;
   } else if (IsValid(expire_it) && !params.persist) {
-    auto current = ExpireTime(expire_it);
+    int64_t current = ExpireTime(expire_it->second);
     if (params.expire_options & ExpireFlags::EXPIRE_NX) {
       return OpStatus::SKIPPED;
     }
@@ -1154,9 +1188,10 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const 
   return true;
 }
 
-void DbSlice::PreUpdateBlocking(DbIndex db_ind, Iterator it) {
-  CallChangeCallbacks(db_ind, ChangeReq{it.GetInnerIt()});
-  it.GetInnerIt().SetVersion(NextVersion());
+void DbSlice::PreUpdateBlocking(DbIndex db_ind, const Iterator& it) {
+  CallChangeCallbacks(db_ind, ChangeReq{it.GetInnerIt()});  // blocking point.
+  auto inner_it = it.GetInnerIt();                          // must call again to launder.
+  inner_it.SetVersion(NextVersion());
 }
 
 void DbSlice::PostUpdate(DbIndex db_ind, std::string_view key) {
@@ -1207,10 +1242,10 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
   }
 
   // TODO: to employ multi-generation update of expire-base and the underlying values.
-  time_t expire_time = ExpireTime(expire_it);
+  int64_t expire_time = ExpireTime(expire_it->second);
 
   // Never do expiration on replica or if expiration is disabled or global lock was taken.
-  if (time_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_ ||
+  if (int64_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_ ||
       !shard_owner()->shard_lock()->Check(IntentLock::Mode::EXCLUSIVE)) {
     return {it, expire_it};
   }
@@ -1236,6 +1271,7 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
       ExpIterator(expire_it, StringOrView::FromView(key)), db.get());
 
   ++events_.expired_keys;
+  db->stats.events.expired_keys++;
 
   return {PrimeIterator{}, ExpireIterator{}};
 }
@@ -1330,7 +1366,7 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
       return;
 
     result.traversed++;
-    time_t ttl = ExpireTime(it) - cntx.time_now_ms;
+    int64_t ttl = ExpireTime(it->second) - cntx.time_now_ms;
     if (ttl <= 0) {
       auto prime_it = db.prime.Find(it->first);
       if (prime_it.is_done()) {  // A workaround for the case our tables are inconsistent.
@@ -1364,7 +1400,7 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
   // Send and clear accumulated expired key events
   if (auto& events = db_arr_[cntx.db_index]->expired_keys_events_; !events.empty()) {
     ChannelStore* store = ServerState::tlocal()->channel_store();
-    store->SendMessages(absl::StrCat("__keyevent@", cntx.db_index, "__:expired"), events);
+    store->SendMessages(absl::StrCat("__keyevent@", cntx.db_index, "__:expired"), events, false);
     events.clear();
   }
 
@@ -1465,6 +1501,7 @@ finish:
   SendQueuedInvalidationMessagesAsync();
   auto time_finish = absl::GetCurrentTimeNanos();
   events_.evicted_keys += evicted_items;
+  db_arr_[db_ind]->stats.events.evicted_keys += evicted_items;
   DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
   return pair<uint64_t, size_t>{evicted_items, evicted_bytes};
 }
@@ -1515,7 +1552,8 @@ void DbSlice::InvalidateSlotWatches(const cluster::SlotSet& slot_ids) {
   }
 }
 
-void DbSlice::ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbTableArray& db_arr) {
+void DbSlice::RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> indices,
+                                                      const DbTableArray& db_arr) {
   // Currently being used only for tiered storage.
   TieredStorage* tiered_storage = shard_owner()->tiered_storage();
   string scratch;
@@ -1553,6 +1591,11 @@ void DbSlice::ResetUpdateEvents() {
 
 void DbSlice::ResetEvents() {
   events_ = {};
+  for (auto& db : db_arr_) {
+    if (db) {
+      db->stats.events = {};
+    }
+  }
 }
 
 void DbSlice::SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events) {
@@ -1601,6 +1644,7 @@ void DbSlice::SendQueuedInvalidationMessages() {
     // Notify all the clients. this function is not efficient,
     // because it broadcasts to all threads unrelated to the subscribers for the key.
     auto local_map = std::move(pending_send_map_);
+    pending_send_map_ = {};
     auto cb = [&](unsigned thread_id, util::ProactorBase*) {
       SendQueuedInvalidationMessagesCb(local_map, thread_id);
     };
@@ -1625,67 +1669,96 @@ void DbSlice::SendQueuedInvalidationMessagesAsync() {
 
 void DbSlice::StartSampleTopK(DbIndex db_ind, uint32_t min_freq) {
   auto& db = *db_arr_[db_ind];
-  if (db.top_keys) {
+  if (db.sample_top_keys) {
     LOG(INFO) << "Sampling already started for db " << db_ind;
     return;
   }
 
   TopKeys::Options opts;
   opts.min_key_count_to_record = min_freq;
-  db.top_keys = new TopKeys(opts);
+  db.sample_top_keys = new DbTable::SampleTopKeys;
+  db.sample_top_keys->top_keys = new TopKeys(opts);
 }
 
 auto DbSlice::StopSampleTopK(DbIndex db_ind) -> SamplingResult {
   auto& db = *db_arr_[db_ind];
 
-  if (!db.top_keys) {
+  if (!db.sample_top_keys) {
     LOG(WARNING) << "Sampling not started for db " << db_ind;
     return {};
   }
-  auto fmap = db.top_keys->GetTopKeys();
-  delete db.top_keys;
-  db.top_keys = nullptr;
+
+  auto fmap = db.sample_top_keys->top_keys->GetTopKeys();
   SamplingResult result;
+  result.total_samples = db.sample_top_keys->total_samples;
+  delete db.sample_top_keys;
+  db.sample_top_keys = nullptr;
+
   result.top_keys.reserve(fmap.size());
-  for (auto& [key, count] : fmap) {
-    result.top_keys.emplace_back(std::move(key), count);
+  while (!fmap.empty()) {
+    auto node = fmap.extract(fmap.begin());  // Clear the map to avoid memory leak.
+    result.top_keys.emplace_back(std::move(node.key()), node.mapped());
   }
   return result;
 }
 
 void DbSlice::StartSampleKeys(DbIndex db_ind) {
   auto& db = *db_arr_[db_ind];
-  if (db.dense_hll) {
+  if (db.sample_unique_keys) {
     LOG(INFO) << "Sampling already started for db " << db_ind;
     return;
   }
 
   HllBufferPtr hll_buf;
   hll_buf.size = getDenseHllSize();
-  db.dense_hll = new uint8_t[hll_buf.size];
-  hll_buf.hll = db.dense_hll;
+  hll_buf.hll = new uint8_t[hll_buf.size];
   CHECK_EQ(0, createDenseHll(hll_buf));
+  db.sample_unique_keys = new DbTable::SampleUniqueKeys;
+  db.sample_unique_keys->dense_hll = hll_buf.hll;
 }
 
 // Returns number of unique keys sampled.
-size_t DbSlice::StopSampleKeys(DbIndex db_ind) {
+auto DbSlice::StopSampleKeys(DbIndex db_ind) -> UniqueSampleResult {
   auto& db = *db_arr_[db_ind];
-  if (!db.dense_hll) {
+  if (!db.sample_unique_keys) {
     LOG(INFO) << "Keys sampling not started for db " << db_ind;
-    return 0;
+    return {};
   }
   HllBufferPtr hll_buf;
-  hll_buf.hll = db.dense_hll;
+  hll_buf.hll = db.sample_unique_keys->dense_hll;
   hll_buf.size = getDenseHllSize();
-  int64_t count = pfcountSingle(hll_buf);
+  UniqueSampleResult result;
+  result.unique_keys_count = pfcountSingle(hll_buf);
+  result.total_samples = db.sample_unique_keys->total_samples;
 
-  delete[] db.dense_hll;
-  db.dense_hll = nullptr;
+  delete db.sample_unique_keys;
+  db.sample_unique_keys = nullptr;
 
-  return count;
+  return result;
 }
 
-void DbSlice::PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable* table) {
+void DbSlice::StartSampleValues(DbIndex db_ind) {
+  auto& db = *db_arr_[db_ind];
+  if (db.sample_values_hist) {
+    LOG(INFO) << "Sampling already started for db " << db_ind;
+    return;
+  }
+
+  db.sample_values_hist = new base::Histogram();
+}
+
+unique_ptr<base::Histogram> DbSlice::StopSampleValues(DbIndex db_ind) {
+  auto& db = *db_arr_[db_ind];
+  if (!db.sample_values_hist) {
+    LOG(INFO) << "Values sampling not started for db " << db_ind;
+    return {};
+  }
+
+  return unique_ptr<base::Histogram>{exchange(db.sample_values_hist, nullptr)};
+}
+
+void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& exp_it,
+                                    DbTable* table) {
   FiberAtomicGuard guard;
   size_t table_before = table->table_memory();
   if (!exp_it.is_done()) {
@@ -1719,8 +1792,7 @@ void DbSlice::PerformDeletionAtomic(Iterator del_it, ExpIterator exp_it, DbTable
   }
   AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
 
-  if (del_it->first.IsAsyncDelete() && pv.ObjType() == OBJ_SET &&
-      pv.Encoding() == kEncodingStrMap2) {
+  if (del_it->first.IsAsyncDelete() && MayDeleteAsynchronously(pv)) {
     DenseSet* ds = (DenseSet*)pv.RObjPtr();
     pv.SetRObjPtr(nullptr);
     const size_t kClearStepSize = 512;
@@ -1767,6 +1839,7 @@ void DbSlice::OnCbFinishBlocking() {
   if (IsCacheMode()) {
     // move fetched items to local variable
     auto fetched_items = std::move(fetched_items_);
+    fetched_items_ = {};
     for (const auto& [key_hash, db_index] : fetched_items) {
       auto& db = *db_arr_[db_index];
 

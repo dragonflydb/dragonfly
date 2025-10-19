@@ -31,15 +31,9 @@ struct WatchItem {
 
 struct BlockingController::WatchQueue {
   deque<WatchItem> items;
-  TxId notify_txid = UINT64_MAX;
 
   // Updated  by both coordinator and shard threads but at different times.
   enum State { SUSPENDED, ACTIVE } state = SUSPENDED;
-
-  void Suspend() {
-    state = SUSPENDED;
-    notify_txid = UINT64_MAX;
-  }
 
   auto Find(Transaction* tx) const {
     return find_if(items.begin(), items.end(),
@@ -49,7 +43,8 @@ struct BlockingController::WatchQueue {
 
 // Watch state per db.
 struct BlockingController::DbWatchTable {
-  WatchQueueMap queue_map;
+  // Watch queues per key
+  absl::flat_hash_map<std::string, std::unique_ptr<WatchQueue>> queue_map;
 
   // awakened keys point to blocked keys that can potentially be unblocked.
   absl::flat_hash_set<std::string> awakened_keys;
@@ -163,32 +158,16 @@ void BlockingController::NotifyPending() {
       continue;
 
     context.db_index = index;
-    DbWatchTable& wt = *dbit->second;
-    for (const auto& key : wt.awakened_keys) {
-      string_view sv_key = key;
-      DVLOG(1) << "Processing awakened key " << sv_key;
-      auto w_it = wt.queue_map.find(sv_key);
-      if (w_it == wt.queue_map.end()) {
-        // This should not happen because we remove keys from awakened_keys every type we remove
-        // the entry from queue_map. TODO: to make it a CHECK after Dec 2024
-        LOG(ERROR) << "Internal error: Key " << sv_key
-                   << " was not found in the watch queue, wt.awakened_keys len is "
-                   << wt.awakened_keys.size() << " wt.queue_map len is " << wt.queue_map.size();
-        for (const auto& item : wt.awakened_keys) {
-          LOG(ERROR) << "Awakened key: " << item;
-        }
-
-        continue;
-      }
-
+    DbWatchTable& wt = *dbit->second;  // pointer stability due to node_hash_map
+    for (string_view key : wt.awakened_keys) {
+      DVLOG(1) << "Processing awakened key " << key;
+      auto w_it = wt.queue_map.find(key);
       CHECK(w_it != wt.queue_map.end());
-      DVLOG(1) << "Notify WQ: [" << owner_->shard_id() << "] " << key;
+
       WatchQueue* wq = w_it->second.get();
-      NotifyWatchQueue(sv_key, wq, context);
-      if (wq->items.empty()) {
-        // we erase awakened_keys right after this loop finishes running.
+      NotifyWatchQueue(key, wq, context);
+      if (wq->items.empty())
         wt.queue_map.erase(w_it);
-      }
     }
     wt.awakened_keys.clear();
 
@@ -202,16 +181,15 @@ void BlockingController::NotifyPending() {
 void BlockingController::AddWatched(Keys watch_keys, KeyReadyChecker krc, Transaction* trans) {
   auto [dbit, added] = watched_dbs_.emplace(trans->GetDbIndex(), nullptr);
   if (added) {
-    dbit->second.reset(new DbWatchTable);
+    dbit->second = make_unique<DbWatchTable>();
   }
 
   DbWatchTable& wt = *dbit->second;
 
   for (auto key : watch_keys) {
     auto [res, inserted] = wt.queue_map.emplace(key, nullptr);
-    if (inserted) {
-      res->second.reset(new WatchQueue);
-    }
+    if (inserted)
+      res->second = make_unique<WatchQueue>();
 
     if (!res->second->items.empty()) {
       Transaction* last = res->second->items.back().get();
@@ -227,7 +205,7 @@ void BlockingController::AddWatched(Keys watch_keys, KeyReadyChecker krc, Transa
 }
 
 // Called from commands like lpush.
-void BlockingController::AwakeWatched(DbIndex db_index, string_view db_key) {
+void BlockingController::Awaken(DbIndex db_index, string_view db_key) {
   auto it = watched_dbs_.find(db_index);
   if (it == watched_dbs_.end())
     return;
@@ -236,8 +214,7 @@ void BlockingController::AwakeWatched(DbIndex db_index, string_view db_key) {
   DCHECK(!wt.queue_map.empty());
 
   if (wt.AddAwakeEvent(db_key)) {
-    VLOG(1) << "AwakeWatched: db(" << db_index << ") " << db_key;
-
+    VLOG(1) << "Touch: db(" << db_index << ") " << db_key;
     awakened_indices_.insert(db_index);
   }
 }
@@ -263,7 +240,6 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueue* wq,
         wq->state = WatchQueue::ACTIVE;
         // We deliberately keep the notified transaction in the queue to know which queue
         // must handled when this transaction finished.
-        wq->notify_txid = owner_->committed_txid();
         awakened_transactions_.insert(head);
         break;
       }

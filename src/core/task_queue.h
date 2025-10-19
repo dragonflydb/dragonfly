@@ -22,6 +22,7 @@ class TaskQueue {
     return queue_.TryAdd(std::forward<F>(f));
   }
 
+  // Returns true if task queue was blocked when adding the task.
   template <typename F> bool Add(F&& f) {
     if (queue_.TryAdd(std::forward<F>(f)))
       return false;
@@ -38,7 +39,7 @@ class TaskQueue {
     util::detail::ResultMover<ResultType> mover;
 
     ++blocked_submitters_;
-    Add([&mover, f = std::forward<F>(f), done]() mutable {
+    Add([&mover, f = std::forward<F>(f), done](unsigned) mutable {
       mover.Apply(f);
       done.Notify();
     });

@@ -5,26 +5,26 @@ Pytest fixtures to be provided for all tests without import
 import asyncio
 import logging
 import os
-import sys
-from time import sleep
-from typing import Dict, List, Union
-from redis import asyncio as aioredis
-import pytest
-import pytest_asyncio
-import redis
-import pymemcache
 import random
-import subprocess
 import shutil
+import subprocess
+import sys
 import time
 import typing
 from copy import deepcopy
-
 from pathlib import Path
 from tempfile import gettempdir, mkdtemp
+from time import sleep
+from typing import Dict, List, Union
 
+import pymemcache
+import pytest
+import pytest_asyncio
+import redis
+from redis import asyncio as aioredis
+
+from . import PortPicker
 from .instance import DflyInstance, DflyParams, DflyInstanceFactory, RedisServer
-from . import PortPicker, dfly_args
 from .utility import DflySeederFactory, gen_ca_cert, gen_certificate, skip_if_not_in_github
 
 logging.getLogger("asyncio").setLevel(logging.WARNING)
@@ -67,7 +67,14 @@ def df_log_dir(request):
     return log_dir
 
 
-@pytest.fixture(scope="session")
+def determine_scope(fixture_name, config):
+    drop_data_after_each_test = config.getoption("--drop-data-after-each-test", False)
+    if drop_data_after_each_test:
+        return "class"
+    return "session"
+
+
+@pytest.fixture(scope=determine_scope)
 def tmp_dir():
     """
     Pytest fixture to provide the test temporary directory for the session
@@ -82,7 +89,7 @@ def tmp_dir():
     shutil.rmtree(tmp_name, ignore_errors=True)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope=determine_scope)
 def test_env(tmp_dir: Path):
     """
     Provide the environment the Dragonfly executable is running in as a
@@ -278,6 +285,13 @@ def pytest_addoption(parser):
     )
 
     parser.addoption("--repeat", action="store", help="Number of times to repeat each test")
+    parser.addoption(
+        "--drop-data-after-each-test",
+        action="store_true",
+        default=False,
+        help="Remove test data after each test, instead of after each session, "
+        "useful when running tests on repeat to avoid filling up disk",
+    )
 
 
 def pytest_generate_tests(metafunc):
