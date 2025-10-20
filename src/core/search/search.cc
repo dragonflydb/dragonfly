@@ -5,6 +5,7 @@
 #include "core/search/search.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/flags/flag.h>
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
@@ -26,6 +27,8 @@
 #include "core/search/vector_utils.h"
 
 using namespace std;
+
+ABSL_DECLARE_FLAG(bool, enable_global_vector_search);
 
 namespace dfly::search {
 
@@ -499,17 +502,20 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
         break;
       }
       case SchemaField::VECTOR: {
-        unique_ptr<BaseVectorIndex> vector_index;
+        // PoC:Use global vector index only
+        if (!absl::GetFlag(FLAGS_enable_global_vector_search)) {
+          unique_ptr<BaseVectorIndex> vector_index;
 
-        DCHECK(holds_alternative<SchemaField::VectorParams>(field_info.special_params));
-        const auto& vparams = std::get<SchemaField::VectorParams>(field_info.special_params);
+          DCHECK(holds_alternative<SchemaField::VectorParams>(field_info.special_params));
+          const auto& vparams = std::get<SchemaField::VectorParams>(field_info.special_params);
 
-        if (vparams.use_hnsw)
-          vector_index = make_unique<HnswVectorIndex>(vparams, mr);
-        else
-          vector_index = make_unique<FlatVectorIndex>(vparams, mr);
+          if (vparams.use_hnsw)
+            vector_index = make_unique<HnswVectorIndex>(vparams, mr);
+          else
+            vector_index = make_unique<FlatVectorIndex>(vparams, mr);
 
-        indices_[field_ident] = std::move(vector_index);
+          indices_[field_ident] = std::move(vector_index);
+        }
         break;
       }
       case SchemaField::GEO: {

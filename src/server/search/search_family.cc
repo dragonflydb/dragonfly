@@ -37,10 +37,11 @@
 #include "src/core/overloaded.h"
 
 ABSL_FLAG(bool, search_reject_legacy_field, true, "FT.AGGREGATE: Reject legacy field names.");
-ABSL_FLAG(bool, enable_global_vector_search, true,
+ABSL_FLAG(bool, enable_global_vector_search, false,
           "PoC: Enable global vector search for KNN queries.");
 
 ABSL_FLAG(size_t, MAXSEARCHRESULTS, 1000000, "Maximum number of results from ft.search command");
+
 namespace dfly {
 
 using namespace std;
@@ -1228,15 +1229,18 @@ void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
   auto idx_ptr = make_shared<DocIndex>(std::move(parsed_index).value());
 
   // PoC: Create global vector indices for vector fields
-  for (const auto& [field_ident, field_info] : idx_ptr->schema.fields) {
-    if (field_info.type == search::SchemaField::VECTOR &&
-        !(field_info.flags & search::SchemaField::NOINDEX)) {
-      const auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
-      // Use field alias (short_name) for global index key, as that's what queries use
-      GlobalVectorIndexRegistry::Instance().GetOrCreateVectorIndex(idx_name, field_info.short_name,
-                                                                   vparams);
-      LOG(INFO) << "Created global vector index for " << idx_name << ":" << field_info.short_name
-                << " (dim=" << vparams.dim << ", hnsw=" << vparams.use_hnsw << ")";
+  if (absl::GetFlag(FLAGS_enable_global_vector_search)) {
+    for (const auto& [field_ident, field_info] : idx_ptr->schema.fields) {
+      if (field_info.type == search::SchemaField::VECTOR &&
+          !(field_info.flags & search::SchemaField::NOINDEX)) {
+        const auto& vparams =
+            std::get<search::SchemaField::VectorParams>(field_info.special_params);
+        // Use field alias (short_name) for global index key, as that's what queries use
+        GlobalVectorIndexRegistry::Instance().GetOrCreateVectorIndex(
+            idx_name, field_info.short_name, vparams);
+        LOG(INFO) << "Created global vector index for " << idx_name << ":" << field_info.short_name
+                  << " (dim=" << vparams.dim << ", hnsw=" << vparams.use_hnsw << ")";
+      }
     }
   }
 

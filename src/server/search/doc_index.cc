@@ -4,6 +4,7 @@
 
 #include "server/search/doc_index.h"
 
+#include <absl/flags/flag.h>
 #include <absl/strings/str_join.h>
 
 #include <memory>
@@ -18,6 +19,8 @@
 #include "server/search/doc_accessors.h"
 #include "server/search/global_vector_index.h"
 #include "server/server_state.h"
+
+ABSL_DECLARE_FLAG(bool, enable_global_vector_search);
 
 namespace dfly {
 
@@ -687,8 +690,10 @@ void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index)
 void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
   for (auto& [index_name, ptr] : indices_) {
     ptr->Rebuild(op_args, &local_mr_);
-    // PoC: Also rebuild global vector indices
-    ptr->RebuildGlobalVectorIndices(index_name, op_args);
+    if (absl::GetFlag(FLAGS_enable_global_vector_search)) {
+      // PoC: Also rebuild global vector indices
+      ptr->RebuildGlobalVectorIndices(index_name, op_args);
+    }
   }
 }
 
@@ -705,8 +710,10 @@ void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, const Pr
   for (auto& [index_name, index] : indices_) {
     if (index->Matches(key, pv.ObjType())) {
       index->AddDoc(key, db_cntx, pv);
-      // PoC: Also add to global vector index if document has vector fields
-      index->AddDocToGlobalVectorIndex(index_name, key, db_cntx, pv);
+      if (absl::GetFlag(FLAGS_enable_global_vector_search)) {
+        // PoC: Also add to global vector index if document has vector fields
+        index->AddDocToGlobalVectorIndex(index_name, key, db_cntx, pv);
+      }
     }
   }
 }
@@ -715,8 +722,10 @@ void ShardDocIndices::RemoveDoc(string_view key, const DbContext& db_cntx, const
   DCHECK(IsIndexedKeyType(pv));
   for (auto& [index_name, index] : indices_) {
     if (index->Matches(key, pv.ObjType())) {
-      // PoC: Remove from global vector index first (before local removal)
-      index->RemoveDocFromGlobalVectorIndex(index_name, key, db_cntx, pv);
+      if (absl::GetFlag(FLAGS_enable_global_vector_search)) {
+        // PoC: Remove from global vector index first (before local removal)
+        index->RemoveDocFromGlobalVectorIndex(index_name, key, db_cntx, pv);
+      }
       index->RemoveDoc(key, db_cntx, pv);
     }
   }
