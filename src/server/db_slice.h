@@ -368,6 +368,10 @@ class DbSlice {
     return id < db_arr_.size() && bool(db_arr_[id]);
   }
 
+  auto CopyDBTablePtr(DbIndex id) {
+    return db_arr_[id];
+  }
+
   DbTable* GetDBTable(DbIndex id) {
     return db_arr_[id].get();
   }
