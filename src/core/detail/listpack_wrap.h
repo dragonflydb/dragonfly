@@ -15,6 +15,8 @@ struct ListpackWrap {
   using IntBuf = uint8_t[2][24];
 
  public:
+  ~ListpackWrap();
+
   struct Iterator {
     using iterator_category = std::forward_iterator_tag;
     using difference_type = std::ptrdiff_t;
@@ -46,14 +48,19 @@ struct ListpackWrap {
   explicit ListpackWrap(uint8_t* lp) : lp_{lp} {
   }
 
+  uint8_t* GetPointer();                      // Get new updated pointer
   Iterator Find(std::string_view key) const;  // Linear search
+  bool Delete(std::string_view key);
+  bool Insert(std::string_view key, std::string_view value, bool skip_exists);
+
   Iterator begin() const;
   Iterator end() const;
   size_t size() const;  // number of entries
 
  private:
-  uint8_t* lp_;
-  mutable IntBuf intbuf_;
+  uint8_t* lp_;            // the listpack itself
+  mutable IntBuf intbuf_;  // buffer for integers decoded to strings
+  bool dirty_ = false;     // whether lp_ was updated, but never retrieved with GetPointer
 };
 
 }  // namespace dfly::detail

@@ -51,63 +51,6 @@ bool IsGoodForListpack(CmdArgList args, const uint8_t* lp) {
 }
 
 using container_utils::GetStringMap;
-using container_utils::LpFind;
-
-pair<uint8_t*, bool> LpDelete(uint8_t* lp, string_view field) {
-  uint8_t* fptr = lpFirst(lp);
-  DCHECK(fptr);
-  fptr = lpFind(lp, fptr, (unsigned char*)field.data(), field.size(), 1);
-  if (fptr == NULL) {
-    return make_pair(lp, false);
-  }
-
-  /* Delete both of the key and the value. */
-  lp = lpDeleteRangeWithEntry(lp, &fptr, 2);
-  return make_pair(lp, true);
-}
-
-// returns a new pointer to lp. Returns true if field was inserted or false it it already existed.
-// skip_exists controls what happens if the field already existed. If skip_exists = true,
-// then val does not override the value and listpack is not changed. Otherwise, the corresponding
-// value is overridden by val.
-pair<uint8_t*, bool> LpInsert(uint8_t* lp, string_view field, string_view val, bool skip_exists) {
-  uint8_t* vptr;
-
-  uint8_t* fptr = lpFirst(lp);
-  uint8_t* fsrc = field.empty() ? lp : (uint8_t*)field.data();
-
-  // if we vsrc is NULL then lpReplace will delete the element, which is not what we want.
-  // therefore, for an empty val we set it to some other valid address so that lpReplace
-  // will do the right thing and encode empty string instead of deleting the element.
-  uint8_t* vsrc = val.empty() ? lp : (uint8_t*)val.data();
-
-  bool updated = false;
-
-  if (fptr) {
-    fptr = lpFind(lp, fptr, fsrc, field.size(), 1);
-    if (fptr) {
-      if (skip_exists) {
-        return make_pair(lp, false);
-      }
-      /* Grab pointer to the value (fptr points to the field) */
-      vptr = lpNext(lp, fptr);
-      updated = true;
-
-      /* Replace value */
-      lp = lpReplace(lp, &vptr, vsrc, val.size());
-      DCHECK_EQ(0u, lpLength(lp) % 2);
-    }
-  }
-
-  if (!updated) {
-    /* Push new field/value pair onto the tail of the listpack */
-    // TODO: we should at least allocate once for both elements.
-    lp = lpAppend(lp, fsrc, field.size());
-    lp = lpAppend(lp, vsrc, val.size());
-  }
-
-  return make_pair(lp, !updated);
-}
 
 struct HMapWrap {
  private:
@@ -263,12 +206,13 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   unsigned enc = pv.Encoding();
 
   if (enc == kEncodingListPack) {
-    uint8_t intbuf[LP_INTBUF_SIZE];
-    uint8_t* lp = (uint8_t*)pv.RObjPtr();
+    detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
     optional<string_view> res;
 
-    if (!add_res.is_new)
-      res = LpFind(lp, field, intbuf);
+    if (!add_res.is_new) {
+      if (auto it = lw.Find(field); it != lw.end())
+        res = (*it).second;
+    }
 
     OpStatus status = IncrementValue(res, param);
     if (status != OpStatus::OK) {
@@ -279,14 +223,14 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
       double new_val = get<double>(*param);
       char buf[128];
       char* str = RedisReplyBuilder::FormatDouble(new_val, buf, sizeof(buf));
-      lp = LpInsert(lp, field, str, false).first;
+      lw.Insert(field, str, false);
     } else {  // integer increment
       int64_t new_val = get<int64_t>(*param);
       absl::AlphaNum an(new_val);
-      lp = LpInsert(lp, field, an.Piece(), false).first;
+      lw.Insert(field, an.Piece(), false);
     }
 
-    pv.SetRObjPtr(lp);
+    pv.SetRObjPtr(lw.GetPointer());
   } else {
     DCHECK_EQ(enc, kEncodingStrMap2);
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
@@ -387,19 +331,13 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
   unsigned enc = pv.Encoding();
 
   if (enc == kEncodingListPack) {
-    uint8_t* lp = (uint8_t*)pv.RObjPtr();
-    for (auto s : values) {
-      auto res = LpDelete(lp, s);
-      if (res.second) {
+    detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
+    for (string_view s : values) {
+      if (lw.Delete(s))
         ++deleted;
-        lp = res.first;
-        if (lpLength(lp) == 0) {
-          key_remove = true;
-          break;
-        }
-      }
     }
-    pv.SetRObjPtr(lp);
+    pv.SetRObjPtr(lw.GetPointer());
+    key_remove = lw.size() == 0;
   } else {
     DCHECK_EQ(enc, kEncodingStrMap2);
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
@@ -505,17 +443,16 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   unsigned created = 0;
 
   if (lp) {
-    bool inserted;
     size_t malloc_reserved = zmalloc_size(lp);
     size_t min_sz = EstimateListpackMinBytes(values);
     if (min_sz > malloc_reserved) {
       lp = (uint8_t*)zrealloc(lp, min_sz);
     }
+    detail::ListpackWrap lw{lp};
     for (size_t i = 0; i < values.size(); i += 2) {
-      tie(lp, inserted) = LpInsert(lp, ArgS(values, i), ArgS(values, i + 1), op_sp.skip_if_exists);
-      created += inserted;
+      created += lw.Insert(values[i], values[i + 1], op_sp.skip_if_exists);
     }
-    pv.SetRObjPtr(lp);
+    pv.SetRObjPtr(lw.GetPointer());
   } else {
     DCHECK_EQ(kEncodingStrMap2, pv.Encoding());  // Dictionary
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
@@ -1102,10 +1039,8 @@ int32_t HSetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValu
   DCHECK_EQ(OBJ_HASH, pv.ObjType());
 
   if (pv.Encoding() == kEncodingListPack) {
-    uint8_t intbuf[LP_INTBUF_SIZE];
-    uint8_t* lp = (uint8_t*)pv.RObjPtr();
-    optional<string_view> res = LpFind(lp, field, intbuf);
-    return res ? -1 : -3;
+    detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
+    return lw.Find(field) == lw.end() ? -3 : -1;
   } else {
     StringMap* string_map = (StringMap*)pv.RObjPtr();
     string_map->set_time(MemberTimeSeconds(db_context.time_now_ms));
