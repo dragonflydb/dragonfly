@@ -5,6 +5,7 @@ from redis import asyncio as aioredis
 from pathlib import Path
 
 from . import dfly_args
+from .utility import wait_available_async
 
 BASIC_ARGS = {"dir": "{DRAGONFLY_TMP}/"}
 
@@ -104,6 +105,7 @@ class TestShutdownOptions:
         # Restart and verify data persisted
         df_server.start()
         client = aioredis.Redis(port=df_server.port)
+        await wait_available_async(client)
         val = await client.get("safe_key")
         assert val == b"safe_value"
         await client.connection_pool.disconnect()
@@ -130,6 +132,7 @@ class TestShutdownOptions:
 
         df_server.start()
         client = aioredis.Redis(port=df_server.port)
+        await wait_available_async(client)
         val = await client.get("save_key")
         assert val == b"save_value"
         await client.connection_pool.disconnect()
