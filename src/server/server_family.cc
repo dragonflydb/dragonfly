@@ -889,7 +889,10 @@ GenericError RewriteConfigFile() {
 }
 
 bool IsMaster() {
-  return ServerState::tlocal() && ServerState::tlocal()->is_master;
+  if (!ServerState::tlocal()) {
+    return true;
+  }
+  return ServerState::tlocal()->is_master;
 }
 
 }  // namespace
