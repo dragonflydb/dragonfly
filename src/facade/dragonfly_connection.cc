@@ -1241,6 +1241,8 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
         break;
       }
 
+      DVLOG(2) << "Got Args with first token " << ToSV(tmp_parse_args_.front().GetBuf());
+
       if (io_req_size_hist)
         io_req_size_hist->Add(request_consumed_bytes_);
       request_consumed_bytes_ = 0;
