@@ -889,6 +889,8 @@ GenericError RewriteConfigFile() {
 }
 
 bool IsMaster() {
+  // We call this function on startup where tlocal() == nullptr. We handle
+  // this case below.
   if (!ServerState::tlocal()) {
     return true;
   }
