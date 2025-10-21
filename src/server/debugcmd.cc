@@ -562,7 +562,7 @@ template <typename F> void TraverseAllEntries(bool background, ConnectionContext
 
       for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
         boost::intrusive_ptr<DbTable> dbt = db_slice.CopyDBTablePtr(i);
-        if (dbt.get() == nullptr)
+        if (!dbt)
           continue;
 
         PrimeTable::Cursor cursor;
