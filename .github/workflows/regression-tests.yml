@@ -13,7 +13,7 @@ jobs:
         container: ["ubuntu-dev:20"]
         proactor: [Uring]
         build-type: [Debug, Release]
-        runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
+        runner: [CI-LARGE-86, CI-LARGE-ARM]
 
     runs-on: ${{ matrix.runner }}
 
