@@ -1382,3 +1382,48 @@ async def test_client_migrate(df_server: DflyInstance):
     assert resp == 0  # Not migrated as the client does not exist
     resp = await client2.execute_command("CLIENT", "MIGRATE", client_id, dest_tid)
     assert resp == 1  # migrated successfully
+
+
+@dfly_args({})
+async def test_issue_5931_malformed_protocol_crash(df_server: DflyInstance):
+    """
+    Regression test for #5931
+
+    The crash.txt file contains malformed RESP protocol that caused the server to crash
+    with: "Check failed: RespExpr::STRING == arg.type" in FromArgs()
+
+    This test sends the exact bytes from crash.txt to verify the server handles it
+    gracefully without crashing.
+    """
+    # Open raw TCP connection to send malformed protocol
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+
+    try:
+        # Send the exact bytes from crash.txt:
+        # *0\r\n$5\r\nMULTI\r\n*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n1\r<0xf4>)1\r\n$4\r\nEXEC\r\n
+        crash_data = b"*0\r\n$5\r\nMULTI\r\n*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n1\r"
+        crash_data += bytes([0xF4])  # Binary byte instead of \n
+        crash_data += b")1\r\n$4\r\nEXEC\r\n"
+
+        writer.write(crash_data)
+        await writer.drain()
+
+        try:
+            response = await asyncio.wait_for(reader.read(1024), timeout=2.0)
+            # If we get a response, it should be an error, not a crash
+            # The server is still running if we got here
+        except asyncio.TimeoutError:
+            # Timeout is acceptable - connection might be closed
+            pass
+        except ConnectionError:
+            # Connection closed is acceptable - server detected bad protocol
+            pass
+
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+    # Verify server is still running by making a normal request
+    client = df_server.client()
+    await client.ping()
+    assert await client.ping() == True

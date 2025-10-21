@@ -1231,6 +1231,16 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
     result = redis_parser_->Parse(read_buffer.slice, &consumed, &tmp_parse_args_);
     request_consumed_bytes_ += consumed;
     if (result == RedisParser::OK && !tmp_parse_args_.empty()) {
+      // Check if the first argument is a STRING type. Commands must be strings.
+      // If we get a non-STRING type (e.g., ARRAY from empty array *0), it's a protocol error.
+      if (tmp_parse_args_.front().type != RespExpr::STRING) {
+        LOG(WARNING) << "Invalid command - expected STRING type, got type: "
+                     << tmp_parse_args_.front().type;
+        // Treat this as a parser error
+        result = RedisParser::BAD_STRING;
+        break;
+      }
+
       if (RespExpr& first = tmp_parse_args_.front(); first.type == RespExpr::STRING)
         DVLOG(2) << "Got Args with first token " << ToSV(first.GetBuf());
 
