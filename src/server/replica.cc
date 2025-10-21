@@ -995,7 +995,12 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
         // lsn of the master and this lsn entry will be lost.
         journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
       } else {
-        LOG(DFATAL) << "ExecuteTx() on replica should be successful.";
+        // We only report DFATAL:
+        // 1. Context is running
+        // 2. We are ACTIVE global state
+        if (cntx->IsRunning() && ((*ServerState::tlocal()).gstate() == GlobalState::ACTIVE)) {
+          LOG(DFATAL) << "ExecuteTx() on replica should be successful.";
+        }
       }
     }
 
