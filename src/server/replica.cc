@@ -994,6 +994,8 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
         // inconsistent data because the replica will resume from the next
         // lsn of the master and this lsn entry will be lost.
         journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        LOG(DFATAL) << "ExecuteTx() on replica should be successful.";
       }
     }
 
