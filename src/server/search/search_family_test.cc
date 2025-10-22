@@ -291,7 +291,8 @@ TEST_F(SearchFamilyTest, InfoIndex) {
 
   auto info = Run({"ft.info", "idx-1"});
   EXPECT_THAT(info,
-              IsArray(_, _, _, IsArray("key_type", "HASH", "prefix", "doc-"), "attributes",
+              IsArray(_, _, _, IsArray("key_type", "HASH", "prefix", "doc-", "default_score", 1),
+                      "attributes",
                       IsArray(IsArray("identifier", "name", "attribute", "name", "type", "TEXT")),
                       "num_docs", IntArg(15)));
 }
