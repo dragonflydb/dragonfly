@@ -47,6 +47,8 @@ ABSL_DECLARE_FLAG(string, dir);
 ABSL_DECLARE_FLAG(string, dbfilename);
 ABSL_DECLARE_FLAG(bool, df_snapshot_format);
 
+ABSL_FLAG(bool, background_debug_jobs, false, "Use background fibers for debug jobs");
+
 namespace dfly {
 
 using namespace util;
@@ -153,11 +155,10 @@ struct ObjHist {
 };
 
 // Returns number of O(1) steps executed.
-unsigned AddObjHist(PrimeIterator it, ObjHist* hist) {
+void AddObjHist(PrimeIterator it, ObjHist* hist) {
   using namespace container_utils;
   const PrimeValue& pv = it->second;
   size_t val_len = 0;
-  unsigned steps = 1;
 
   auto per_entry_cb = [&](ContainerEntry entry) {
     if (entry.value) {
@@ -166,7 +167,6 @@ unsigned AddObjHist(PrimeIterator it, ObjHist* hist) {
     } else {
       val_len += 8;  // size of long
     }
-    ++steps;
     return true;
   };
 
@@ -194,7 +194,6 @@ unsigned AddObjHist(PrimeIterator it, ObjHist* hist) {
   } else if (pv.ObjType() == OBJ_HASH) {
     IterateMap(pv, [&](ContainerEntry key, ContainerEntry value) {
       hist->entry_len.Add(key.length + value.length);
-      steps += 2;
       return true;
     });
     if (pv.Encoding() == kEncodingListPack) {
@@ -212,8 +211,6 @@ unsigned AddObjHist(PrimeIterator it, ObjHist* hist) {
 
   if (pv.ObjType() != OBJ_STRING && pv.ObjType() != OBJ_JSON)
     hist->card.Add(pv.Size());
-
-  return steps;
 }
 
 // ObjType -> ObjHist
@@ -232,33 +229,6 @@ void MergeObjHistMap(ObjHistMap&& src, ObjHistMap* dest) {
       dest_hist->entry_len.Merge(src_hist->entry_len);
       dest_hist->listpack.Merge(src_hist->listpack);
     }
-  }
-}
-
-void DoBuildObjHist(EngineShard* shard, ConnectionContext* cntx, ObjHistMap* obj_hist_map) {
-  auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
-  unsigned steps = 0;
-
-  for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
-    DbTable* dbt = db_slice.GetDBTable(i);
-    if (dbt == nullptr)
-      continue;
-    PrimeTable::Cursor cursor;
-    do {
-      cursor = dbt->prime.Traverse(cursor, [&](PrimeIterator it) {
-        unsigned obj_type = it->second.ObjType();
-        auto& hist_ptr = (*obj_hist_map)[obj_type];
-        if (!hist_ptr) {
-          hist_ptr.reset(new ObjHist);
-        }
-        steps += AddObjHist(it, hist_ptr.get());
-      });
-
-      if (steps >= 20000) {
-        steps = 0;
-        ThisFiber::Yield();
-      }
-    } while (cursor);
   }
 }
 
@@ -577,6 +547,46 @@ IOStat& IOStat::operator-=(const IOStat& other) {
   io_reads_total -= other.io_reads_total;
 
   return *this;
+}
+
+// Traverse over all entries on all databases, manage cpu time automatically
+template <typename F> void TraverseAllEntries(bool background, ConnectionContext* cntx, F&& f) {
+  util::fb2::BlockingCounter bc{0};
+  for (uint32_t i = 0; i < shard_set->size(); ++i) {
+    bc->Add(1);
+    util::ProactorBase* dest = shard_set->pool()->at(i);
+
+    auto cb = [f /* copy per thread */, bc, cntx, background]() mutable {
+      auto* shard = EngineShard::tlocal();
+      auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
+
+      for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
+        boost::intrusive_ptr<DbTable> dbt = db_slice.CopyDBTablePtr(i);
+        if (!dbt)
+          continue;
+
+        PrimeTable::Cursor cursor;
+        do {
+          cursor = dbt->prime.Traverse(cursor, f);
+          if (background) {
+            ThisFiber::Yield();
+          } else if (base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) >= 500) {
+            ThisFiber::Yield();
+          }
+        } while (cursor);
+      }
+      bc->Dec();
+    };
+    dest->DispatchBrief([cb, background]() mutable {
+      using namespace util::fb2;
+      Fiber::Opts opts{
+          .priority = background ? FiberPriority::BACKGROUND : FiberPriority::NORMAL,
+          .name = "Debug/Traverse",
+      };
+      Fiber(opts, std::move(cb)).Detach();
+    });
+  }
+  bc->Wait();
 }
 
 }  // namespace
@@ -1138,10 +1148,15 @@ void DebugCmd::TxAnalysis(facade::SinkReplyBuilder* builder) {
 
 void DebugCmd::ObjHist(facade::SinkReplyBuilder* builder) {
   vector<ObjHistMap> obj_hist_map_arr(shard_set->size());
-
-  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
-    DoBuildObjHist(shard, cntx_, &obj_hist_map_arr[shard->shard_id()]);
-  });
+  auto cb = [&obj_hist_map_arr](PrimeIterator it) {
+    unsigned obj_type = it->second.ObjType();
+    auto& hist_ptr = obj_hist_map_arr[EngineShard::tlocal()->shard_id()][obj_type];
+    if (!hist_ptr) {
+      hist_ptr.reset(new struct ObjHist);
+    }
+    AddObjHist(it, hist_ptr.get());
+  };
+  TraverseAllEntries(absl::GetFlag(FLAGS_background_debug_jobs), cntx_, cb);
 
   for (size_t i = shard_set->size() - 1; i > 0; --i) {
     MergeObjHistMap(std::move(obj_hist_map_arr[i]), &obj_hist_map_arr[0]);

@@ -108,6 +108,7 @@ GenericError Replica::Start() {
   VLOG(1) << "Starting replication " << this;
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
+  DCHECK(proactor_ == mythread);
 
   auto check_connection_error = [this](error_code ec, const char* msg) -> GenericError {
     if (!exec_st_.IsRunning()) {
@@ -1212,9 +1213,7 @@ auto Replica::GetSummary() const -> Summary {
   auto f = [this]() {
     auto last_io_time = LastIoTime();
 
-    // Note: we access LastIoTime from foreigh thread in unsafe manner. However, specifically here
-    // it's unlikely to cause a real bug.
-    for (const auto& flow : shard_flows_) {  // Get last io time from all sub flows.
+    for (const auto& flow : shard_flows_) {
       last_io_time = std::max(last_io_time, flow->LastIoTime());
     }
 
@@ -1246,19 +1245,7 @@ auto Replica::GetSummary() const -> Summary {
     return res;
   };
 
-  if (Sock())
-    return Proactor()->AwaitBrief(f);
-
-  /**
-   * when this branch happens: there is a very short grace period
-   * where Sock() is not initialized, yet the server can
-   * receive ROLE/INFO commands. That period happens when launching
-   * an instance with '--replicaof' and then immediately
-   * sending a command.
-   *
-   * In that instance, we have to run f() on the current fiber.
-   */
-  return f();
+  return proactor_->AwaitBrief(f);
 }
 
 std::vector<uint64_t> Replica::GetReplicaOffset() const {
