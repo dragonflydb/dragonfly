@@ -1203,7 +1203,7 @@ void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
   const auto& info = infos.front();
   const auto& schema = info.base_index.schema;
 
-  rb->StartCollection(4, RedisReplyBuilder::MAP);
+  rb->StartCollection(5, RedisReplyBuilder::MAP);
 
   rb->SendSimpleString("index_name");
   rb->SendSimpleString(idx_name);
@@ -1218,6 +1218,9 @@ void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
     rb->SendSimpleString("default_score");
     rb->SendLong(1);
   }
+
+  rb->SendSimpleString("index_options");
+  rb->SendEmptyArray();
 
   rb->SendSimpleString("attributes");
   rb->StartArray(schema.fields.size());

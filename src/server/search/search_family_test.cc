@@ -292,7 +292,7 @@ TEST_F(SearchFamilyTest, InfoIndex) {
   auto info = Run({"ft.info", "idx-1"});
   EXPECT_THAT(info,
               IsArray(_, _, _, IsArray("key_type", "HASH", "prefix", "doc-", "default_score", 1),
-                      "attributes",
+                      "index_options", RespArray(IsEmpty()), "attributes",
                       IsArray(IsArray("identifier", "name", "attribute", "name", "type", "TEXT")),
                       "num_docs", IntArg(15)));
 }
@@ -2774,7 +2774,7 @@ TEST_F(SearchFamilyTest, BlockSizeOptionFtCreate) {
 
   // Verify that the index was created successfully
   resp = Run({"FT.INFO", "index"});
-  EXPECT_THAT(resp, IsArray(_, _, _, _, "attributes",
+  EXPECT_THAT(resp, IsArray(_, _, _, _, _, _, "attributes",
                             IsUnordArray(IsArray("identifier", "number1", "attribute", "number1",
                                                  "type", "NUMERIC", "blocksize", "2"),
                                          IsArray("identifier", "number2", "attribute", "number2",
