@@ -670,6 +670,33 @@ TEST_F(RdbTest, SBF) {
   EXPECT_THAT(Run({"BF.EXISTS", "k", "1"}), IntArg(1));
 }
 
+TEST_F(RdbTest, SBFLargeFilterChunking) {
+  max_memory_limit = 200000000;
+
+  // Using this set of parameters for the BF.RESERVE command resulted in a
+  // filter size large enough to require chunking (> 64 MB).
+  const double error_rate = 0.001;
+  const size_t capacity = 50'000'000;
+  const size_t num_items = 100;
+
+  size_t collisions = 0;
+
+  Run({"BF.RESERVE", "large_key", std::to_string(error_rate), std::to_string(capacity)});
+  for (size_t i = 0; i < num_items; i++) {
+    auto res = Run({"BF.ADD", "large_key", absl::StrCat("item", i)});
+    if (*res.GetInt() == 0)
+      collisions++;
+  }
+  EXPECT_LT(static_cast<double>(collisions) / num_items, error_rate);
+
+  Run({"debug", "reload"});
+  EXPECT_EQ(Run({"type", "large_key"}), "MBbloom--");
+
+  for (size_t i = 0; i < num_items; i++) {
+    EXPECT_THAT(Run({"BF.EXISTS", "large_key", absl::StrCat("item", i)}), IntArg(1));
+  }
+}
+
 TEST_F(RdbTest, RestoreSearchIndexNameStartingWithColon) {
   // Create an index with a name that starts with ':' and add a sample document
   EXPECT_EQ(Run({"FT.CREATE", ":Order:index", "ON", "HASH", "PREFIX", "1", ":Order:", "SCHEMA",
