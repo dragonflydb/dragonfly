@@ -21,3 +21,5 @@ releases
 .secrets
 cmake-build-debug
 .venv/
+fuzz/artifacts/
+fuzz/corpus/

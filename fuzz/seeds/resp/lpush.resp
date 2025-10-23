@@ -1,0 +1,7 @@
+*3
+$5
+LPUSH
+$4
+list
+$4
+item
