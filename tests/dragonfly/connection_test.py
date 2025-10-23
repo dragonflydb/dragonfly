@@ -120,7 +120,7 @@ async def test_monitor_command_multi(async_pool):
     expected = CollectedRedisMsg.all_from_src(*expected)
 
     # The order is random due to squashing
-    assert set(expected) == set(collected[2:])
+    assert set(expected) == set(collected[1:-1])
 
 
 """
