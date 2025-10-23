@@ -707,11 +707,10 @@ error_code Replica::ConsumeRedisStream() {
     // If the acks-fb or something else triggered a shutdown, then do not attempt to read from the
     // stream.
     if (!exec_st_.IsRunning()) {
-      if (exec_st_.IsError()) {
-        LOG_REPL_ERROR("Stopping stream consumer in phase "
-                       << GetCurrentPhase()
-                       << " because of external error: " << exec_st_.GetError().Format());
-      }
+      DCHECK(exec_st_.IsError());
+      LOG_REPL_ERROR("Stopping stream consumer in phase "
+                     << GetCurrentPhase()
+                     << " because of external error: " << exec_st_.GetError().Format());
       acks_fb_.JoinIfNeeded();
       return exec_st_.GetError();
     }
