@@ -1231,18 +1231,11 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
     result = redis_parser_->Parse(read_buffer.slice, &consumed, &tmp_parse_args_);
     request_consumed_bytes_ += consumed;
     if (result == RedisParser::OK && !tmp_parse_args_.empty()) {
-      // Check if all arguments are STRING type. Commands and their arguments must be strings.
       // If we get a non-STRING type (e.g., NIL, ARRAY), it's a protocol error.
-      bool has_invalid_arg = false;
-      for (size_t i = 0; i < tmp_parse_args_.size(); ++i) {
-        if (tmp_parse_args_[i].type != RespExpr::STRING) {
-          LOG(WARNING) << "Invalid argument at position " << i << " - expected STRING type";
-          has_invalid_arg = true;
-          break;
-        }
-      }
-      if (has_invalid_arg) {
-        // Treat this as a parser error
+      bool valid_input = std::all_of(tmp_parse_args_.begin(), tmp_parse_args_.end(),
+                                     [](const auto& arg) { return arg.type == RespExpr::STRING; });
+      if (!valid_input) {
+        LOG(WARNING) << "Invalid argument - expected all STRING types";
         result = RedisParser::BAD_STRING;
         break;
       }
