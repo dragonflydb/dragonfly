@@ -31,6 +31,16 @@
 #include <iostream>
 #include <memory>
 
+#ifdef USE_AFL
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <thread>
+#endif
+
 #include "base/init.h"
 #include "base/proc_util.h"  // for GetKernelVersion
 #include "facade/dragonfly_listener.h"
@@ -86,6 +96,13 @@ ABSL_FLAG(uint16_t, uring_recv_buffer_cnt, 0,
           "Relevant only for modern kernels with io_uring enabled");
 
 ABSL_FLAG(bool, omit_basic_usage, false, "Omit printing basic usage info.");
+
+#ifdef USE_AFL
+ABSL_FLAG(uint32_t, afl_loop_limit, UINT_MAX,
+          "AFL++ persistent mode loop limit. Specifies how many fuzzing iterations "
+          "to run before restarting the process. Higher values improve performance but "
+          "may accumulate state.");
+#endif
 
 using namespace util;
 using namespace facade;
@@ -640,6 +657,133 @@ void RegisterBufRings(ProactorPool* pool) {
 #endif
 }
 
+#ifdef USE_AFL
+// AFL++ fuzzing helper functions
+// These functions support AFL++ persistent mode fuzzing by handling server readiness checks,
+// input reading, and test case execution. The __AFL_LOOP macro itself must remain in main()
+// due to AFL++ instrumentation requirements.
+
+// Waits for the Dragonfly server to become ready by attempting TCP connections.
+// Returns true if server is ready, false otherwise.
+// This is necessary because the server starts in a separate thread and we need to
+// wait for it to be fully initialized before starting the fuzzing loop.
+bool WaitForServerReady(uint16_t port, int max_attempts = 100) {
+  for (int i = 0; i < max_attempts; i++) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s >= 0) {
+      struct sockaddr_in a = {};
+      a.sin_family = AF_INET;
+      a.sin_port = htons(port);
+      inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+      if (connect(s, (struct sockaddr*)&a, sizeof(a)) == 0) {
+        close(s);
+        return true;
+      }
+      close(s);
+    }
+  }
+  return false;
+}
+
+// Configures stdin to non-blocking mode for AFL++ fuzzing.
+// Non-blocking mode is required because AFL++ feeds input through stdin,
+// and we need to handle cases where input might not be immediately available.
+void ConfigureStdinNonBlocking() {
+  fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL) | O_NONBLOCK);
+}
+
+// Reads fuzzing input from stdin with retry logic.
+// AFL++ provides test cases through stdin, and this function handles reading them
+// with appropriate retry logic for non-blocking I/O.
+// Returns the number of bytes read, or -1 on error, or 0 if no data available after retries.
+ssize_t ReadFuzzInput(char* buffer, size_t buffer_size) {
+  ssize_t len = 0;
+  for (int attempt = 0; attempt < 100 && len == 0; attempt++) {
+    len = read(STDIN_FILENO, buffer, buffer_size);
+    if (len < 0 && errno == EAGAIN) {
+      usleep(10000);  // Wait 10ms and retry
+      continue;
+    }
+    if (len < 0)
+      break;
+  }
+  return len;
+}
+
+// Sends fuzzing input to the Dragonfly server and reads the response.
+// This executes one fuzzing iteration by:
+// 1. Creating a TCP socket connection to the server
+// 2. Sending the fuzzed data
+// 3. Reading a response (with timeout to prevent hangs)
+// The function uses short timeouts to keep fuzzing fast and prevent AFL++ from stalling.
+void SendFuzzInputToServer(uint16_t port, const char* data, ssize_t len) {
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  if (s >= 0) {
+    // Set short timeout to prevent hanging on slow responses
+    struct timeval tv = {.tv_sec = 0, .tv_usec = 100000};  // 100ms
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in a = {};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+    if (connect(s, (struct sockaddr*)&a, sizeof(a)) == 0) {
+      send(s, data, len, 0);
+      // Just read once - don't wait for full response
+      char r[4096];
+      recv(s, r, sizeof(r), 0);  // Single read, timeout after 100ms
+    }
+    close(s);
+  }
+}
+
+// Initializes AFL++ fuzzing by starting the server in a separate thread,
+// waiting for it to become ready, and preparing stdin for fuzzing input.
+// Returns the server thread handle. The caller is responsible for the fuzzing loop.
+std::thread InitAflFuzzing(ProactorPool* pool, AcceptServer* acceptor) {
+  // Start server in a separate thread
+  std::thread server_thread([pool, acceptor]() {
+    dfly::RunEngine(pool, acceptor);
+    pool->Stop();
+  });
+
+  uint16_t port = GetFlag(FLAGS_port);
+
+  // Wait for server to become ready
+  if (!WaitForServerReady(port)) {
+    LOG(ERROR) << "AFL++: Server not ready after 100 attempts, exiting...";
+    exit(1);
+  }
+
+  uint32_t afl_loop_limit = GetFlag(FLAGS_afl_loop_limit);
+  LOG(INFO) << "AFL++: Server ready, starting fuzzing loop with limit " << afl_loop_limit
+            << " iterations...";
+
+  // Configure stdin for AFL++ input
+  ConfigureStdinNonBlocking();
+
+  return server_thread;
+}
+
+// Executes one AFL++ fuzzing iteration: reads input from stdin and sends it to the server.
+// Returns true if the iteration was successful, false if stdin EOF or error occurred.
+bool RunAflFuzzingIteration(uint16_t port) {
+  char buf[64 * 1024];
+
+  // Read fuzzing input from stdin
+  ssize_t len = ReadFuzzInput(buf, sizeof(buf));
+
+  if (len <= 0)
+    return false;  // stdin EOF or error
+
+  // Send fuzzed input to the server
+  SendFuzzInputToServer(port, buf, len);
+  return true;
+}
+#endif  // USE_AFL
+
 }  // namespace
 }  // namespace dfly
 
@@ -860,9 +1004,43 @@ Usage: dragonfly [FLAGS]
     AcceptServer acceptor(pool.get(), &fb2::std_malloc_resource, true);
     acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));
 
-    dfly::RunEngine(pool.get(), &acceptor);
+#ifdef USE_AFL
+    //  Persistent mode fuzzing integration:
+    // - AFL++ generates test cases and feeds them through stdin
+    // - This code reads from stdin and forwards the data to a real TCP connection to the Dragonfly
+    //   server
+    // - The server runs in a separate thread and processes the fuzzed input as if it came from a
+    //   normal client
+    // - Each fuzzing iteration: read stdin -> send to server via TCP -> read response -> repeat
+    //
+    // Process lifecycle:
+    // - When stdin closes (EOF), the fuzzing process exits - this is expected behavior
+    // - When the fuzzing session completes (__AFL_LOOP finishes), the process exits with code 0
+    // - Exiting with code 0 is REQUIRED for AFL++ to work correctly
+    // - This also enables "dry run" mode where AFL++ tests that the target can be fuzzed before
+    //   starting the actual fuzzing campaign
 
+    std::thread server_thread = dfly::InitAflFuzzing(pool.get(), &acceptor);
+
+    uint16_t port = GetFlag(FLAGS_port);
+    uint32_t afl_loop_limit = GetFlag(FLAGS_afl_loop_limit);
+    unsigned int loop_iteration = 0;
+
+    // AFL++ persistent mode loop - this macro MUST stay in main() for proper instrumentation
+    while (__AFL_LOOP(afl_loop_limit)) {
+      loop_iteration++;
+      if (!dfly::RunAflFuzzingIteration(port))
+        break;  // stdin EOF or error
+    }
+
+    // AFL++ fuzzing session completed successfully
+    LOG(INFO) << "AFL++: Loop finished after " << loop_iteration << " iterations, exiting...";
+    // Use _exit(0) to skip cleanup - required by AFL++ persistent mode
+    _exit(0);
+#else
+    dfly::RunEngine(pool.get(), &acceptor);
     pool->Stop();
+#endif
 
     if (!pidfile_path.empty()) {
       unlink(pidfile_path.c_str());

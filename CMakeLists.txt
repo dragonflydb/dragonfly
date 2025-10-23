@@ -7,6 +7,27 @@ enable_testing()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS 1)
 
+# AFL++ fuzzing support - must be set BEFORE project() command
+option(USE_AFL "Enable AFL++ fuzzing" OFF)
+if(USE_AFL)
+  # Automatically set AFL++ compilers if not already set
+  if(NOT CMAKE_C_COMPILER MATCHES "afl-" AND NOT CMAKE_CXX_COMPILER MATCHES "afl-")
+    # Try to find afl-clang-fast
+    find_program(AFL_CC afl-clang-lto)
+    find_program(AFL_CXX afl-clang-lto++)
+
+    if(AFL_CC AND AFL_CXX)
+      message(STATUS "AFL++ fuzzing enabled - setting compilers")
+      set(CMAKE_C_COMPILER ${AFL_CC})
+      set(CMAKE_CXX_COMPILER ${AFL_CXX})
+    else()
+      message(FATAL_ERROR "USE_AFL=ON but AFL++ compilers not found!\n"
+              "Please install AFL++: apt install afl++ or build from source\n"
+              "https://github.com/AFLplusplus/AFLplusplus")
+    endif()
+  endif()
+endif()
+
 # Set targets in folders
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 project(DRAGONFLY C CXX)
@@ -41,6 +62,30 @@ option(DF_USE_SSL "Provide support for SSL connections" ON)
 find_package(OpenSSL)
 
 SET(SANITIZERS OFF)
+
+# AFL++ configuration - must be before sanitizer checks
+if(USE_AFL)
+  message(STATUS "AFL++ fuzzing mode active")
+  message(STATUS "  C compiler: ${CMAKE_C_COMPILER}")
+  message(STATUS "  C++ compiler: ${CMAKE_CXX_COMPILER}")
+
+  # Add USE_AFL as compile definition so #ifdef USE_AFL works in code
+  add_compile_definitions(USE_AFL)
+
+  # AFL++ requires specific compiler flags for coverage instrumentation
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g")
+
+  # Force disable sanitizers when fuzzing (AFL++ incompatible with ASAN/UBSAN)
+  message(STATUS "Disabling sanitizers (incompatible with AFL++ fuzzing)")
+  set(WITH_ASAN OFF CACHE BOOL "Disable ASAN for fuzzing" FORCE)
+  set(WITH_USAN OFF CACHE BOOL "Disable UBSAN for fuzzing" FORCE)
+
+  # Disable AWS and GCP for fuzzing builds (not needed, reduces build time)
+  message(STATUS "Disabling AWS and GCP integrations for fuzzing")
+  set(WITH_AWS OFF CACHE BOOL "Disable AWS for fuzzing" FORCE)
+  set(WITH_GCP OFF CACHE BOOL "Disable GCP for fuzzing" FORCE)
+endif()
 
 option(WITH_ASAN "Enable -fsanitize=address" OFF)
 if (SUPPORT_ASAN AND WITH_ASAN)
