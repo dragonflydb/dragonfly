@@ -2808,8 +2808,10 @@ void StreamFamily::XClaim(CmdArgList args, const CommandContext& cmd_cntx) {
   if (!ParseXclaimOptions(args, opts, cmd_cntx.rb))
     return;
 
-  if (uint64_t now = cmd_cntx.tx->GetDbContext().time_now_ms;
-      opts.delivery_time < 0 || static_cast<uint64_t>(opts.delivery_time) > now)
+  uint64_t now = cmd_cntx.tx->GetDbContext().time_now_ms;
+  DCHECK_GT(now, 0u);
+
+  if (opts.delivery_time < 0 || static_cast<uint64_t>(opts.delivery_time) > now)
     opts.delivery_time = now;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {

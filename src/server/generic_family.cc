@@ -960,7 +960,10 @@ OpResult<uint64_t> OpTtl(Transaction* t, EngineShard* shard, string_view key) {
   auto opExpireTimeResult = OpExpireTime(t, shard, key);
 
   if (opExpireTimeResult) {
-    int64_t ttl_ms = opExpireTimeResult.value() - t->GetDbContext().time_now_ms;
+    auto now = t->GetDbContext().time_now_ms;
+    DCHECK_GT(now, 0u);
+
+    int64_t ttl_ms = opExpireTimeResult.value() - now;
     DCHECK_GT(ttl_ms, 0);  // Otherwise FindReadOnly would return null.
     return ttl_ms;
   } else {
@@ -1898,6 +1901,7 @@ void GenericFamily::Time(CmdArgList args, const CommandContext& cmd_cntx) {
   } else {
     now_usec = absl::GetCurrentTimeNanos() / 1000;
   }
+  DCHECK_GT(now_usec, 0u);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   rb->StartArray(2);

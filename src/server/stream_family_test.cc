@@ -599,9 +599,11 @@ TEST_F(StreamFamilyTest, Xclaim) {
   resp = Run({"xclaim", "foo", "group", "alice", "0", "1-4", "TIME",
               absl::StrCat(TEST_current_time_ms - 500), "justid"});
   EXPECT_THAT(resp.GetString(), "1-4");
+
   // min idle time is exceeded for this entry
   resp = Run({"xclaim", "foo", "group", "bob", "600", "1-4"});
-  EXPECT_THAT(resp, ArrLen(0));
+  ASSERT_THAT(resp, ArrLen(0));
+
   resp = Run({"xclaim", "foo", "group", "bob", "400", "1-4", "justid"});
   EXPECT_THAT(resp.GetString(), "1-4");
 
