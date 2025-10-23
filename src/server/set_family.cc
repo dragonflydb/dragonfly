@@ -604,7 +604,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, facade::ArgRang
   if (isempty) {
     db_slice.Del(op_args.db_cntx, find_res->it);
   }
-  if (journal_rewrite && op_args.shard->journal()) {
+  if (removed && journal_rewrite && op_args.shard->journal()) {
     vector<string_view> mapped(vals.Size() + 1);
     mapped[0] = key;
     std::copy(vals.begin(), vals.end(), mapped.begin() + 1);
@@ -945,13 +945,13 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
   StringVec result = RandMemberSet(db_cntx, co, generator, picks_count);
 
   // Remove selected members
-  bool is_empty = RemoveSet(db_cntx, result, &co).second;
+  auto [removed, is_empty] = RemoveSet(db_cntx, result, &co);
   find_res->post_updater.Run();
 
   CHECK(!is_empty);
 
   // Replicate as SREM with removed keys, because SPOP is not deterministic.
-  if (op_args.shard->journal()) {
+  if (removed && op_args.shard->journal()) {
     vector<string_view> mapped(result.size() + 1);
     mapped[0] = key;
     copy(result.begin(), result.end(), mapped.begin() + 1);
