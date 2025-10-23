@@ -1203,19 +1203,24 @@ void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
   const auto& info = infos.front();
   const auto& schema = info.base_index.schema;
 
-  rb->StartCollection(4, RedisReplyBuilder::MAP);
+  rb->StartCollection(5, RedisReplyBuilder::MAP);
 
   rb->SendSimpleString("index_name");
   rb->SendSimpleString(idx_name);
 
   rb->SendSimpleString("index_definition");
   {
-    rb->StartCollection(2, RedisReplyBuilder::MAP);
+    rb->StartCollection(3, RedisReplyBuilder::MAP);
     rb->SendSimpleString("key_type");
     rb->SendSimpleString(info.base_index.type == DocIndex::JSON ? "JSON" : "HASH");
     rb->SendSimpleString("prefix");
     rb->SendSimpleString(info.base_index.prefix);
+    rb->SendSimpleString("default_score");
+    rb->SendLong(1);
   }
+
+  rb->SendSimpleString("index_options");
+  rb->SendEmptyArray();
 
   rb->SendSimpleString("attributes");
   rb->StartArray(schema.fields.size());
