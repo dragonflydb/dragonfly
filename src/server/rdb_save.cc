@@ -623,11 +623,18 @@ std::error_code RdbSerializer::SaveSBFObject(const PrimeValue& pv) {
     RETURN_ON_ERR(SaveLen(sbf->hashfunc_cnt(i)));
 
     string_view blob = sbf->data(i);
-    RETURN_ON_ERR(SaveString(blob));
+    size_t num_chunks = (blob.size() + kFilterChunkSize - 1) / kFilterChunkSize;
+    RETURN_ON_ERR(SaveLen(blob.size()));
+
+    for (size_t chunk_idx = 0; chunk_idx < num_chunks; ++chunk_idx) {
+      size_t offset = chunk_idx * kFilterChunkSize;
+      size_t chunk_len = std::min(kFilterChunkSize, blob.size() - offset);
+      RETURN_ON_ERR(SaveString(blob.substr(offset, chunk_len)));
+    }
+
     FlushState flush_state = FlushState::kFlushMidEntry;
     if ((i + 1) == sbf->num_filters())
       flush_state = FlushState::kFlushEndEntry;
-
     FlushIfNeeded(flush_state);
   }
 

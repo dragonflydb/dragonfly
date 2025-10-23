@@ -20,6 +20,8 @@ extern "C" {
 #include "server/journal/types.h"
 #include "server/table.h"
 
+constexpr size_t kFilterChunkSize = 1ULL << 26;
+
 typedef struct rax rax;
 typedef struct streamCG streamCG;
 typedef struct quicklistNode quicklistNode;
