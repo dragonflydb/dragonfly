@@ -1427,3 +1427,48 @@ async def test_issue_5931_malformed_protocol_crash(df_server: DflyInstance):
     client = df_server.client()
     await client.ping()
     assert await client.ping() == True
+
+
+@dfly_args({})
+async def test_issue_5949_nil_bulk_string_crash(df_server: DflyInstance):
+    """
+    Regression test for #5949
+
+    The crash1.txt and crash2.txt files contain malformed RESP protocol with NIL bulk
+    strings ($-1) as command arguments, which caused the server to crash with:
+    "Check failed: RespExpr::STRING == arg.type" in FromArgs()
+
+    According to RESP protocol spec, NIL bulk strings are valid for server responses
+    but NOT for command arguments sent by clients. Commands must be arrays of bulk strings.
+    """
+    # Open raw TCP connection to send malformed protocol
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+
+    try:
+        # Test crash1.txt: MULTI followed by SET with NIL bulk string argument
+        # *1\r\n$5\r\nMULTI\r\n*3\r\n$3\r\nSET\r\n$1\r\na\r\n$-1\r\n1\r\n*1\r\n$4\r\nEXEC\r\n
+        crash_data = (
+            b"*1\r\n$5\r\nMULTI\r\n*3\r\n$3\r\nSET\r\n$1\r\na\r\n$-1\r\n1\r\n*1\r\n$4\r\nEXEC\r\n"
+        )
+
+        writer.write(crash_data)
+        await writer.drain()
+
+        try:
+            response = await asyncio.wait_for(reader.read(1024), timeout=2.0)
+            # If we get a response, it should be an error, not a crash
+        except asyncio.TimeoutError:
+            # Timeout is acceptable - connection might be closed
+            pass
+        except ConnectionError:
+            # Connection closed is acceptable - server detected bad protocol
+            pass
+
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+    # Verify server is still running by making a normal request
+    client = df_server.client()
+    await client.ping()
+    assert await client.ping() == True
