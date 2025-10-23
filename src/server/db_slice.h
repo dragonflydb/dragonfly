@@ -234,8 +234,9 @@ class DbSlice {
   // Returns slot statistics for db 0.
   SlotStats GetSlotStats(SlotId sid) const;
 
-  void UpdateExpireBase(uint64_t now, unsigned generation) {
-    expire_base_[generation & 1] = now;
+  void NextExpireGen(uint64_t now_ms) {
+    expire_gen_id_ ^= 1;
+    expire_base_[expire_gen_id_] = now_ms;
   }
 
   void UpdateMemoryParams(int64_t budget, size_t bytes_per_object) {
@@ -251,12 +252,17 @@ class DbSlice {
     return bytes_per_object_;
   }
 
+  // returns expire time in ms.
   int64_t ExpireTime(const ExpirePeriod& val) const {
-    return expire_base_[0] + val.duration_ms();
+    return expire_base_[val.generation_id()] + val.duration_ms();
   }
 
   ExpirePeriod FromAbsoluteTime(uint64_t time_ms) const {
-    return ExpirePeriod{time_ms - expire_base_[0]};
+    return ExpirePeriod{time_ms - expire_base_[expire_gen_id_], expire_gen_id_};
+  }
+
+  unsigned expire_gen_id() const {
+    return expire_gen_id_;
   }
 
   struct ItAndUpdater {
@@ -616,11 +622,17 @@ class DbSlice {
 
   ShardId shard_id_;
   uint8_t cache_mode_ : 1;
+  uint8_t expire_allowed_ : 1;
+  uint8_t expire_gen_id_ : 1;
 
   EngineShard* owner_;
 
+  // base time for computing expirations.
+  // the absolute expiration time is expire_base_ + relative_time.
+  // In order to allow rolling updates of expire_base_ we maintain two
+  // generations of expire_base_ and each expiration entry has a generation_id
+  // that tells which expire_base_ to use.
   int64_t expire_base_[2];  // Used for expire logic, represents a real clock.
-  bool expire_allowed_ = true;
 
   uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
   uint64_t next_moved_id_ = 1;

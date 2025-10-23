@@ -398,6 +398,8 @@ class DbSlice::PrimeBumpPolicy {
 DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
     : shard_id_(index),
       cache_mode_(cache_mode),
+      expire_allowed_(1),
+      expire_gen_id_(0),
       owner_(owner),
       client_tracking_map_(owner->memory_resource()) {
   db_arr_.emplace_back();
@@ -1241,12 +1243,16 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
     return {it, ExpireIterator{}};
   }
 
-  // TODO: to employ multi-generation update of expire-base and the underlying values.
   int64_t expire_time = ExpireTime(expire_it->second);
 
   // Never do expiration on replica or if expiration is disabled or global lock was taken.
   if (int64_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_ ||
       !shard_owner()->shard_lock()->Check(IntentLock::Mode::EXCLUSIVE)) {
+    // Update expiry if needed.
+    if (expire_it->second.generation_id() != expire_gen_id_) {
+      expire_it->second = FromAbsoluteTime(expire_time);
+    }
+    // Keeping the entry.
     return {it, expire_it};
   }
 

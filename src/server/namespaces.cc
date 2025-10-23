@@ -22,7 +22,7 @@ Namespace::Namespace() {
     CHECK(es != nullptr);
     ShardId sid = es->shard_id();
     shard_db_slices_[sid] = make_unique<DbSlice>(sid, absl::GetFlag(FLAGS_cache_mode), es);
-    shard_db_slices_[sid]->UpdateExpireBase(absl::GetCurrentTimeNanos() / 1000000, 0);
+    shard_db_slices_[sid]->NextExpireGen(absl::GetCurrentTimeNanos() / 1000000);
   });
 }
 
