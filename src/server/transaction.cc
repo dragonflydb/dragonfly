@@ -542,6 +542,8 @@ void Transaction::MultiUpdateWithParent(const Transaction* parent) {
   // DCHECK(multi_);
   // DCHECK(parent->multi_);  // it might not be a squasher yet, but certainly is multi
   DCHECK_EQ(multi_->role, SQUASHED_STUB);
+  DCHECK(parent->time_now_ms_);
+
   txid_ = parent->txid_;
   time_now_ms_ = parent->time_now_ms_;
   unique_slot_checker_ = parent->unique_slot_checker_;
@@ -752,8 +754,6 @@ void Transaction::ScheduleInternal() {
     if (unique_shard_cnt_ > 1)
       txid_ = op_seq.fetch_add(1, memory_order_relaxed);
 
-    InitTxTime();
-
     run_barrier_.Start(unique_shard_cnt_);
 
     if (CanRunInlined()) {
@@ -828,6 +828,7 @@ void Transaction::ScheduleInternal() {
             i, [](unsigned) { EngineShard::tlocal()->PollExecution("cancel_cleanup", nullptr); });
       });
     }
+    InitTxTime();  // update time for next scheduling attempt
   }
 
   coordinator_state_ |= COORD_SCHED;

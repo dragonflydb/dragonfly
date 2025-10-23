@@ -3886,7 +3886,7 @@ void ServerFamily::Role(CmdArgList args, const CommandContext& cmd_cntx) {
     rb->StartArray(4 + cluster_replicas_.size() * 3);
     rb->SendBulkString(GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
 
-    auto send_replica_info = [rb](Replica::Summary rinfo) {
+    auto send_replica_info = [rb](const Replica::Summary& rinfo) {
       rb->SendBulkString(rinfo.host);
       rb->SendBulkString(absl::StrCat(rinfo.port));
       if (rinfo.full_sync_done) {
@@ -3908,7 +3908,7 @@ void ServerFamily::Role(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void ServerFamily::Script(CmdArgList args, const CommandContext& cmd_cntx) {
-  script_mgr_->Run(std::move(args), cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx);
+  script_mgr_->Run(args, cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx);
 }
 
 void ServerFamily::LastSave(CmdArgList args, const CommandContext& cmd_cntx) {
