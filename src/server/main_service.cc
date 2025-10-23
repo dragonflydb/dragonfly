@@ -1620,7 +1620,11 @@ DispatchResult Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
   // We are not sending any admin command in the monitor, and we do not want to
   // do any processing if we don't have any waiting connections with monitor
   // enabled on them - see https://redis.io/commands/monitor/
-  if (!ServerState::tlocal()->Monitors().Empty() && (cid->opt_mask() & CO::ADMIN) == 0) {
+  // For EXEC command specifically, we dispatch monitor after executing all queued commands
+  // to preserve correct ordering (MULTI, commands, EXEC) instead of (MULTI, EXEC, commands)
+  bool should_dispatch_monitor = !ServerState::tlocal()->Monitors().Empty() &&
+                                 (cid->opt_mask() & CO::ADMIN) == 0 && cid->name() != "EXEC";
+  if (should_dispatch_monitor) {
     DispatchMonitor(cntx, cid, tail_args);
   }
 
@@ -2585,6 +2589,13 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   cntx->cid = exec_cid_;
+
+  // Dispatch EXEC to monitor after all queued commands have been executed
+  // to preserve correct ordering (MULTI, commands, EXEC)
+  if (!ServerState::tlocal()->Monitors().Empty() && (exec_cid_->opt_mask() & CO::ADMIN) == 0) {
+    DispatchMonitor(cntx, exec_cid_, args);
+  }
+
   VLOG(2) << "Exec completed";
 }
 

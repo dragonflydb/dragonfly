@@ -124,6 +124,35 @@ async def test_monitor_command_multi(async_pool):
 
 
 """
+Test MONITOR command preserves correct order for MULTI/EXEC sequences
+Regression test for https://github.com/dragonflydb/dragonfly/issues/5953
+"""
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_monitor_command_multi_exec_order(async_pool):
+    monitor = CollectingMonitor(aioredis.Redis(connection_pool=async_pool))
+    await monitor.start()
+
+    c = aioredis.Redis(connection_pool=async_pool)
+    p = c.pipeline(transaction=True)
+    p.ping()
+    p.set("key1", "value1")
+    p.get("key1")
+    await p.execute()
+
+    collected = await monitor.stop()
+
+    # Verify the commands appear in the correct order: MULTI, PING, SET, GET, EXEC
+    assert len(collected) == 5
+    assert "MULTI" in collected[0].cmd.upper()
+    assert "PING" in collected[1].cmd.upper()
+    assert "SET" in collected[2].cmd.upper()
+    assert "GET" in collected[3].cmd.upper()
+    assert "EXEC" in collected[4].cmd.upper()
+
+
+"""
 Test MONITOR command with lua script
 https://github.com/dragonflydb/dragonfly/issues/756
 """
