@@ -1623,7 +1623,7 @@ DispatchResult Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
   // For EXEC command specifically, we dispatch monitor after executing all queued commands
   // to preserve correct ordering (MULTI, commands, EXEC) instead of (MULTI, EXEC, commands)
   bool should_dispatch_monitor = !ServerState::tlocal()->Monitors().Empty() &&
-                                 (cid->opt_mask() & CO::ADMIN) == 0 && cid->name() != "EXEC";
+                                 (cid->opt_mask() & CO::ADMIN) == 0 && cid != exec_cid_;
   if (should_dispatch_monitor) {
     DispatchMonitor(cntx, cid, tail_args);
   }
