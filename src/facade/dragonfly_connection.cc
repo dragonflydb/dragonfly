@@ -6,6 +6,7 @@
 #include "facade/dragonfly_connection.h"
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/time/time.h>
@@ -1224,12 +1225,15 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
 
   ReadBuffer read_buffer = GetReadBuffer();
 
+  bool valid_resp = true;
   do {
     if (read_buffer.ShouldAdvance()) {  // can happen only with io_uring/bundles
       read_buffer.slice = NextBundleBuffer(read_buffer.available_bytes);
     }
     result = redis_parser_->Parse(read_buffer.slice, &consumed, &tmp_parse_args_);
     request_consumed_bytes_ += consumed;
+
+    valid_resp = (result == RedisParser::OK || result == RedisParser::INPUT_PENDING);
     if (result == RedisParser::OK && !tmp_parse_args_.empty()) {
       // Check if the first argument is a STRING type. Commands must be strings.
       // If we get a non-STRING type (e.g., ARRAY from empty array *0), it's a protocol error.
@@ -1254,8 +1258,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
       }
 
       DispatchSingle(has_more, dispatch_sync, dispatch_async);
-    }
-    if (result != RedisParser::OK && result != RedisParser::INPUT_PENDING) {
+    } else if (!valid_resp) {
       // We do not expect that a replica sends an invalid command so we log if it happens.
       LOG_IF(WARNING, cntx()->replica_conn)
           << "Redis parser error: " << result << " during parse: " << ToSV(read_buffer.slice);
@@ -1269,8 +1272,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
       stats_->num_read_yields++;
       ThisFiber::Yield();
     }
-  } while (RedisParser::OK == result && read_buffer.available_bytes > 0 &&
-           !reply_builder_->GetError());
+  } while (valid_resp && read_buffer.available_bytes > 0 && !reply_builder_->GetError());
 
   MarkReadBufferConsumed();
 
@@ -1284,7 +1286,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
     return NEED_MORE;
   }
 
-  VLOG(1) << "Parser error " << result;
+  VLOG(1) << "Parser error " << int(result);
 
   return ERROR;
 }
@@ -1426,7 +1428,7 @@ error_code Connection::HandleRecvSocket() {
     }
 
     CHECK_EQ(recv_buf_.type, FiberSocketBase::kBufRingType);  // We only support this type.
-    CHECK_GT(recv_buf_.res_len, 0);
+    CHECK_GT(recv_buf_.res_len, 0);                           // Must be a positive buffer length.
 
     stats_->io_read_bytes += recv_buf_.res_len;
     local_stats_.net_bytes_in += recv_buf_.res_len;
@@ -2093,6 +2095,8 @@ void Connection::ConfigureProvidedBuffer() {
     // If bufring is enabled, configure the socket to use it.
     recv_provided_ = up->BufRingEntrySize(kRecvSockGid) > 0;
     if (recv_provided_) {
+      // TODO: remove this line, once helio properly initializes ProvidedBuffer.
+      recv_buf_.res_len = 0;
       auto* us = static_cast<fb2::UringSocket*>(socket_.get());
       us->set_bufring_id(kRecvSockGid);
       us->EnableRecvMultishot();
@@ -2106,6 +2110,8 @@ auto Connection::GetReadBuffer() -> ReadBuffer {
   ReadBuffer res;
 
   if (use_recv_buf) {
+    DCHECK_EQ(recv_buf_.type, FiberSocketBase::kBufRingType);
+
     uint8_t* src = nullptr;
 #ifdef __linux__
     fb2::UringProactor* up = static_cast<fb2::UringProactor*>(socket_->proactor());
@@ -2113,6 +2119,13 @@ auto Connection::GetReadBuffer() -> ReadBuffer {
 #endif
     res.available_bytes = recv_buf_.res_len;
     res.slice = {src, std::min<size_t>(kRecvBufSize, res.available_bytes)};
+    if (res.available_bytes > kRecvBufSize) {
+      unsigned next_buf_id = up->GetBufIdByPos(kRecvSockGid, recv_buf_.buf_pos + 1);
+      uint8_t* next_src = up->GetBufRingPtr(kRecvSockGid, next_buf_id);
+      LOG(INFO) << "Read buffer " << recv_buf_.buf_id << " "
+                << absl::CHexEscape(io::View(res.slice)) << " next buf " << next_buf_id << " "
+                << absl::CHexEscape(io::View(io::Bytes{next_src, 16}));
+    }
   } else {
     res.slice = io_buf_.InputBuffer();
     res.available_bytes = io_buf_.InputLen();
