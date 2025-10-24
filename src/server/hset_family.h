@@ -28,8 +28,8 @@ class HSetFamily {
                                  std::string_view field);
 
   static std::vector<long> SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
-                                               std::string_view key, CmdArgList values,
-                                               PrimeValue* pv);
+                                               ExpireFlags flags, std::string_view key,
+                                               CmdArgList values, PrimeValue* pv);
 
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;

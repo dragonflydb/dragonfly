@@ -24,7 +24,8 @@ typedef struct streamCG streamCG;
 namespace dfly {
 
 template <typename DenseSet>
-std::vector<long> ExpireElements(DenseSet* owner, facade::CmdArgList values, uint32_t ttl_sec);
+std::vector<long> ExpireElements(DenseSet* owner, facade::CmdArgList values, uint32_t ttl_sec,
+                                 ExpireFlags flags = ExpireFlags::EXPIRE_ALWAYS);
 
 // Copy str to thread local sds instance. Valid until next WrapSds call on thread
 sds WrapSds(std::string_view str);
@@ -90,7 +91,7 @@ bool IsIndexedKeyType(const PrimeValue& pv);
 /******************************************************************/
 template <typename DenseSet>
 inline std::vector<long> ExpireElements(DenseSet* owner, facade::CmdArgList values,
-                                        uint32_t ttl_sec) {
+                                        uint32_t ttl_sec, ExpireFlags flags) {
   std::vector<long> res;
   res.reserve(values.size());
 
@@ -98,6 +99,34 @@ inline std::vector<long> ExpireElements(DenseSet* owner, facade::CmdArgList valu
     std::string_view field = facade::ToSV(values[i]);
     auto it = owner->Find(field);
     if (it != owner->end()) {
+      switch (flags) {
+        case ExpireFlags::EXPIRE_NX:
+          if (it.HasExpiry()) {
+            res.emplace_back(0);
+            continue;
+          }
+          break;
+        case ExpireFlags::EXPIRE_XX:
+          if (!it.HasExpiry()) {
+            res.emplace_back(0);
+            continue;
+          }
+          break;
+        case ExpireFlags::EXPIRE_GT:
+          if (it.ExpiryTime() - owner->time_now() >= ttl_sec) {
+            res.emplace_back(0);
+            continue;
+          }
+          break;
+        case ExpireFlags::EXPIRE_LT:
+          if (it.ExpiryTime() <= ttl_sec) {
+            res.emplace_back(0);
+            continue;
+          }
+          break;
+        case ExpireFlags::EXPIRE_ALWAYS:
+          break;
+      }
       it.SetExpiryTime(ttl_sec);
       res.emplace_back(ttl_sec == 0 ? 0 : 1);
     } else {
