@@ -255,7 +255,7 @@ void BaseFamilyTest::ResetService() {
   TEST_current_time_ms = absl::GetCurrentTimeNanos() / 1000000;
   auto default_ns = &namespaces->GetDefaultNamespace();
   auto cb = [&](EngineShard* s) {
-    default_ns->GetDbSlice(s->shard_id()).UpdateExpireBase(TEST_current_time_ms - 1000, 0);
+    default_ns->GetDbSlice(s->shard_id()).NextExpireGen(TEST_current_time_ms - 1000);
   };
   shard_set->RunBriefInParallel(cb);
 

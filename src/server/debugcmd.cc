@@ -872,7 +872,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
       }
       case FLAG_EXPIRE: {
         auto [min_ttl, max_ttl] = parser.Next<uint32_t, uint32_t>();
-        if (min_ttl >= max_ttl) {
+        if (min_ttl > max_ttl) {
           builder->SendError(kExpiryOutOfRange);
           (void)parser.TakeError();
           return nullopt;
@@ -1641,7 +1641,8 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
     if (options.expire_ttl_range.has_value()) {
       uint32_t start = options.expire_ttl_range->first;
       uint32_t end = options.expire_ttl_range->second;
-      uint32_t expire_ttl = rand() % (end - start) + start;
+      uint32_t expire_ttl = start + ((end > start) ? rand() % (end - start) : 0);
+
       VLOG(1) << "set key " << key << " expire ttl as " << expire_ttl;
       auto cid = sf_.service().mutable_registry()->Find("EXPIRE");
       absl::InlinedVector<string, 5> args;

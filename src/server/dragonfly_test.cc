@@ -953,6 +953,24 @@ TEST_F(DflyEngineTest, Huffman) {
   EXPECT_LT(metrics.heap_used_bytes, 14'000'000);         // less than 15mb
 }
 
+TEST_F(DflyEngineTest, RebaseExpire) {
+  // expire: two weeks in seconds
+  auto resp = Run({"debug", "populate", "20000", "key", "10", "EXPIRE", "1209600", "1209600"});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"EXPIRETIME", "key:42"});
+  long exp_time = *resp.GetInt();
+  EXPECT_GT(exp_time, 0);
+  AdvanceTime(2 * 24 * 3600 * 1000);  // advance 2 days.
+
+  // verify that all keys have been updated.
+  ExpectConditionWithinTimeout([&] {
+    auto metrics = GetMetrics();
+    return metrics.shard_stats.total_update_expire_calls == 20'000;
+  });
+  resp = Run({"EXPIRETIME", "key:42"});
+  EXPECT_EQ(*resp.GetInt(), exp_time);
+}
+
 class DflyCommandAliasTest : public DflyEngineTest {
  protected:
   DflyCommandAliasTest() {
