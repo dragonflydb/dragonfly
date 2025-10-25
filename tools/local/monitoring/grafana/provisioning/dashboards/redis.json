@@ -96,7 +96,8 @@
             "type": "prometheus",
             "uid": "PBFA97CFB590B2093"
           },
-          "expr": "max(max_over_time(redis_uptime_in_seconds{instance=~\"$instance\"}[$__interval]))",
+          "expr":
+              "max(max_over_time(redis_uptime_in_seconds{instance=~\"$instance\"}[$__interval]))",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -272,7 +273,8 @@
             "type": "prometheus",
             "uid": "PBFA97CFB590B2093"
           },
-          "expr": "sum(100 * (redis_memory_used_bytes{instance=~\"$instance\"}  / redis_memory_max_bytes{instance=~\"$instance\"}))",
+          "expr":
+              "sum(100 * (redis_memory_used_bytes{instance=~\"$instance\"}  / redis_memory_max_bytes{instance=~\"$instance\"}))",
           "format": "time_series",
           "intervalFactor": 2,
           "legendFormat": "",
@@ -372,7 +374,8 @@
             "type": "prometheus",
             "uid": "PBFA97CFB590B2093"
           },
-          "expr": "sum(rate(redis_commands_total{instance=~\"$instance\"} [1m])) by (cmd)",
+          "expr":
+              "sum(rate(redis_commands_total{instance=~\"$instance\"} [$__rate_interval])) by (cmd)",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -473,7 +476,7 @@
             "type": "prometheus",
             "uid": "PBFA97CFB590B2093"
           },
-          "expr": "irate(redis_keyspace_hits_total{instance=~\"$instance\"}[5m])",
+          "expr": "irate(redis_keyspace_hits_total{instance=~\"$instance\"}[$__rate_interval])",
           "format": "time_series",
           "hide": false,
           "interval": "",
@@ -489,7 +492,7 @@
             "type": "prometheus",
             "uid": "PBFA97CFB590B2093"
           },
-          "expr": "irate(redis_keyspace_misses_total{instance=~\"$instance\"}[5m])",
+          "expr": "irate(redis_keyspace_misses_total{instance=~\"$instance\"}[$__rate_interval])",
           "format": "time_series",
           "hide": false,
           "interval": "",
@@ -721,7 +724,8 @@
             "type": "prometheus",
             "uid": "PBFA97CFB590B2093"
           },
-          "expr": "sum(rate(redis_net_input_bytes_total{instance=~\"$instance\"}[5m]))",
+          "expr":
+              "sum(rate(redis_net_input_bytes_total{instance=~\"$instance\"}[$__rate_interval]))",
           "format": "time_series",
           "intervalFactor": 2,
           "legendFormat": "{{ input }}",
@@ -733,7 +737,8 @@
             "type": "prometheus",
             "uid": "PBFA97CFB590B2093"
           },
-          "expr": "sum(rate(redis_net_output_bytes_total{instance=~\"$instance\"}[5m]))",
+          "expr":
+              "sum(rate(redis_net_output_bytes_total{instance=~\"$instance\"}[$__rate_interval]))",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -955,7 +960,8 @@
             "type": "prometheus",
             "uid": "PBFA97CFB590B2093"
           },
-          "expr": "sum (redis_db_keys{instance=~\"$instance\"}) by (instance) - sum (redis_db_keys_expiring{instance=~\"$instance\"}) by (instance)",
+          "expr":
+              "sum (redis_db_keys{instance=~\"$instance\"}) by (instance) - sum (redis_db_keys_expiring{instance=~\"$instance\"}) by (instance)",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -1059,7 +1065,8 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "memcached_items_evicted_total{instance=\"172.17.0.1:9150\",job=\"prometheus\"}"
+              "options":
+                  "memcached_items_evicted_total{instance=\"172.17.0.1:9150\",job=\"prometheus\"}"
             },
             "properties": [
               {
@@ -1115,7 +1122,8 @@
             "type": "prometheus",
             "uid": "PBFA97CFB590B2093"
           },
-          "expr": "sum(rate(redis_expired_keys_total{instance=~\"$instance\"}[5m])) by (instance)",
+          "expr":
+              "sum(rate(redis_expired_keys_total{instance=~\"$instance\"}[$__rate_interval])) by (instance)",
           "format": "time_series",
           "hide": false,
           "interval": "",
@@ -1131,7 +1139,8 @@
             "type": "prometheus",
             "uid": "PBFA97CFB590B2093"
           },
-          "expr": "sum(rate(redis_evicted_keys_total{instance=~\"$instance\"}[5m])) by (instance)",
+          "expr":
+              "sum(rate(redis_evicted_keys_total{instance=~\"$instance\"}[$__rate_interval])) by (instance)",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -1360,7 +1369,8 @@
             "type": "prometheus",
             "uid": "PBFA97CFB590B2093"
           },
-          "expr": "sum(irate(redis_commands_duration_seconds_total{instance =~ \"$instance\"}[1m])) by (cmd)\n  /\nsum(irate(redis_commands_total{instance =~ \"$instance\"}[1m])) by (cmd)\n",
+          "expr":
+              "sum(irate(redis_commands_duration_seconds_total{instance =~ \"$instance\"}[$__rate_interval])) by (cmd)\n  /\nsum(irate(redis_commands_total{instance =~ \"$instance\"}[$__rate_interval])) by (cmd)\n",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -1461,7 +1471,8 @@
             "type": "prometheus",
             "uid": "PBFA97CFB590B2093"
           },
-          "expr": "sum(irate(redis_commands_duration_seconds_total{instance=~\"$instance\"}[1m])) by (cmd) != 0",
+          "expr":
+              "sum(irate(redis_commands_duration_seconds_total{instance=~\"$instance\"}[$__rate_interval])) by (cmd) != 0",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
