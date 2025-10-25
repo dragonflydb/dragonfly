@@ -403,7 +403,7 @@
           "editorMode": "code",
           "exemplar": true,
           "expr":
-              "sum(irate(dragonfly_commands_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[1m])) by (cmd)",
+              "sum(irate(dragonfly_commands_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])) by (cmd)",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -991,7 +991,7 @@
           "editorMode": "code",
           "exemplar": true,
           "expr":
-              "sum(irate(dragonfly_expired_keys_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[5m])) by (pod)",
+              "sum(irate(dragonfly_expired_keys_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])) by (pod)",
           "format": "time_series",
           "hide": false,
           "interval": "",
@@ -1011,7 +1011,7 @@
           "editorMode": "code",
           "exemplar": true,
           "expr":
-              "sum(irate(dragonfly_evicted_keys_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[5m])) by (pod)",
+              "sum(irate(dragonfly_evicted_keys_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])) by (pod)",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -1113,7 +1113,7 @@
           "editorMode": "code",
           "exemplar": true,
           "expr":
-              "irate(dragonfly_net_input_bytes_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[5m])",
+              "irate(dragonfly_net_input_bytes_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -1130,7 +1130,7 @@
           "editorMode": "code",
           "exemplar": true,
           "expr":
-              "irate(dragonfly_net_output_bytes_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[5m])",
+              "irate(dragonfly_net_output_bytes_total{namespace=\"$namespace\",pod=~\"$pod_name\"}[$__rate_interval])",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
