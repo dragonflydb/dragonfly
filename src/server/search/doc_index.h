@@ -264,7 +264,7 @@ class ShardDocIndex {
   // Return whether base index matches
   bool Matches(std::string_view key, unsigned obj_code) const;
 
-  void AddDoc(std::string_view key, const DbContext& db_cntx, const PrimeValue& pv);
+  std::optional<DocId> AddDoc(std::string_view key, const DbContext& db_cntx, const PrimeValue& pv);
   void RemoveDoc(std::string_view key, const DbContext& db_cntx, const PrimeValue& pv);
 
   DocIndexInfo GetInfo() const;
@@ -290,7 +290,7 @@ class ShardDocIndex {
   }
 
   // PoC: Global vector index support
-  void AddDocToGlobalVectorIndex(std::string_view index_name, std::string_view key,
+  void AddDocToGlobalVectorIndex(std::string_view index_name, DocId local_doc_id,
                                  const DbContext& db_cntx, const PrimeValue& pv);
   void RemoveDocFromGlobalVectorIndex(std::string_view index_name, std::string_view key,
                                       const DbContext& db_cntx, const PrimeValue& pv);

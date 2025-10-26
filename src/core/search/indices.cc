@@ -11,6 +11,13 @@
 #include <absl/strings/str_split.h>
 
 #include <boost/iterator/function_output_iterator.hpp>
+#include <exception>
+#include <mutex>
+#include <shared_mutex>
+
+#include "absl/status/status.h"
+#include "absl/synchronization/mutex.h"
+#include "util/fibers/synchronization.h"
 
 #define UNI_ALGO_DISABLE_NFKC_NFKD
 
@@ -480,7 +487,7 @@ std::pair<size_t /*dim*/, VectorSimilarity> BaseVectorIndex::Info() const {
   return {dim_, sim_};
 }
 
-bool BaseVectorIndex::Add(DocId id, const DocumentAccessor& doc, std::string_view field) {
+bool BaseVectorIndex::Add(uint64_t id, const DocumentAccessor& doc, std::string_view field) {
   auto vector = doc.GetVector(field);
   if (!vector)
     return false;
@@ -501,7 +508,7 @@ FlatVectorIndex::FlatVectorIndex(const SchemaField::VectorParams& params,
   entries_.reserve(params.capacity * params.dim);
 }
 
-void FlatVectorIndex::AddVector(DocId id, const VectorPtr& vector) {
+void FlatVectorIndex::AddVector(uint64_t id, const VectorPtr& vector) {
   DCHECK_LE(id * dim_, entries_.size());
   if (id * dim_ == entries_.size())
     entries_.resize((id + 1) * dim_);
@@ -512,16 +519,16 @@ void FlatVectorIndex::AddVector(DocId id, const VectorPtr& vector) {
   }
 }
 
-void FlatVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
+void FlatVectorIndex::Remove(uint64_t id, const DocumentAccessor& doc, string_view field) {
   // noop
 }
 
-const float* FlatVectorIndex::Get(DocId doc) const {
+const float* FlatVectorIndex::Get(uint64_t doc) const {
   return &entries_[doc * dim_];
 }
 
-std::vector<DocId> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
-  std::vector<DocId> result;
+std::vector<uint64_t> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
+  std::vector<uint64_t> result;
 
   size_t num_vectors = entries_.size() / dim_;
   result.reserve(num_vectors);
@@ -550,7 +557,8 @@ std::vector<DocId> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
   return result;
 }
 
-struct HnswlibAdapter {
+class HnswlibAdapter {
+ public:
   // Default setting of hnswlib/hnswalg
   constexpr static size_t kDefaultEfRuntime = 10;
 
@@ -558,36 +566,48 @@ struct HnswlibAdapter {
       : space_{MakeSpace(params.dim, params.sim)},
         world_{GetSpacePtr(), params.capacity, params.hnsw_m, params.hnsw_ef_construction,
                100 /* seed*/} {
+    world_.resizeIndex(4096);
   }
 
-  void Add(const float* data, DocId id) {
-    if (world_.cur_element_count + 1 >= world_.max_elements_)
-      world_.resizeIndex(world_.cur_element_count * 2);
-    world_.addPoint(data, id);
+  void Add(const float* data, uint64_t id) {
+    while (true) {
+      try {
+        absl::ReaderMutexLock lock(&resize_mutex_);
+        world_.addPoint(data, id);
+        return;
+      } catch (const std::exception& e) {
+        std::string error_msg = e.what();
+        if (absl::StrContains(error_msg, "The number of elements exceeds the specified limit")) {
+          ResizeIfFull();
+          continue;
+        }
+        throw e;
+      }
+    }
   }
 
-  void Remove(DocId id) {
+  void Remove(uint64_t id) {
     try {
       world_.markDelete(id);
     } catch (const std::exception& e) {
     }
   }
 
-  vector<pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
+  vector<pair<float, uint64_t>> Knn(float* target, size_t k, std::optional<size_t> ef) {
     world_.setEf(ef.value_or(kDefaultEfRuntime));
     return QueueToVec(world_.searchKnn(target, k));
   }
 
-  vector<pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
-                                 const vector<DocId>& allowed) {
+  vector<pair<float, uint64_t>> Knn(float* target, size_t k, std::optional<size_t> ef,
+                                    const vector<uint64_t>& allowed) {
     struct BinsearchFilter : hnswlib::BaseFilterFunctor {
       virtual bool operator()(hnswlib::labeltype id) {
         return binary_search(allowed->begin(), allowed->end(), id);
       }
 
-      BinsearchFilter(const vector<DocId>* allowed) : allowed{allowed} {
+      BinsearchFilter(const vector<uint64_t>* allowed) : allowed{allowed} {
       }
-      const vector<DocId>* allowed;
+      const vector<uint64_t>* allowed;
     };
 
     world_.setEf(ef.value_or(kDefaultEfRuntime));
@@ -609,8 +629,8 @@ struct HnswlibAdapter {
     return visit([](auto& space) -> hnswlib::SpaceInterface<float>* { return &space; }, space_);
   }
 
-  template <typename Q> static vector<pair<float, DocId>> QueueToVec(Q queue) {
-    vector<pair<float, DocId>> out(queue.size());
+  template <typename Q> static vector<pair<float, uint64_t>> QueueToVec(Q queue) {
+    vector<pair<float, uint64_t>> out(queue.size());
     size_t idx = out.size();
     while (!queue.empty()) {
       out[--idx] = queue.top();
@@ -619,8 +639,32 @@ struct HnswlibAdapter {
     return out;
   }
 
+  void ResizeIfFull() {
+    {
+      absl::ReaderMutexLock lock(&resize_mutex_);
+      if (world_.getCurrentElementCount() < world_.getMaxElements() ||
+          (world_.allow_replace_deleted_ && world_.getDeletedCount() > 0)) {
+        return;
+      }
+    }
+    try {
+      absl::WriterMutexLock lock(&resize_mutex_);
+      if (world_.getCurrentElementCount() == world_.getMaxElements() &&
+          (!world_.allow_replace_deleted_ || world_.getDeletedCount() == 0)) {
+        auto max_elements = world_.getMaxElements();
+        world_.resizeIndex(max_elements * 2);
+        LOG(INFO) << "Resizing HNSW Index, current size: " << max_elements
+                  << ", expand by: " << max_elements * 2;
+      }
+    } catch (const std::exception& e) {
+      throw e;
+    }
+  }
+
   SpaceUnion space_;
   hnswlib::HierarchicalNSW<float> world_;
+  util::fb2::SharedMutex mutex_;
+  absl::Mutex resize_mutex_;
 };
 
 HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource*)
@@ -632,23 +676,23 @@ HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS
 HnswVectorIndex::~HnswVectorIndex() {
 }
 
-void HnswVectorIndex::AddVector(DocId id, const VectorPtr& vector) {
+void HnswVectorIndex::AddVector(uint64_t id, const VectorPtr& vector) {
   if (vector) {
     adapter_->Add(vector.get(), id);
   }
 }
 
-std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t k,
-                                                          std::optional<size_t> ef) const {
+std::vector<std::pair<float, uint64_t>> HnswVectorIndex::Knn(float* target, size_t k,
+                                                             std::optional<size_t> ef) const {
   return adapter_->Knn(target, k, ef);
 }
-std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t k,
-                                                          std::optional<size_t> ef,
-                                                          const std::vector<DocId>& allowed) const {
+
+std::vector<std::pair<float, uint64_t>> HnswVectorIndex::Knn(
+    float* target, size_t k, std::optional<size_t> ef, const std::vector<uint64_t>& allowed) const {
   return adapter_->Knn(target, k, ef, allowed);
 }
 
-void HnswVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
+void HnswVectorIndex::Remove(uint64_t id, const DocumentAccessor& doc, string_view field) {
   adapter_->Remove(id);
 }
 

@@ -1,0 +1,13 @@
+diff --git a/hnswlib/hnswlib.h b/hnswlib/hnswlib.h
+index 7ccfbba..4842d6c 100644
+--- a/hnswlib/hnswlib.h
++++ b/hnswlib/hnswlib.h
+@@ -122,7 +122,7 @@ static bool AVX512Capable() {
+ #include <string.h>
+ 
+ namespace hnswlib {
+-typedef size_t labeltype;
++typedef uint64_t labeltype;
+ 
+ // This can be extended to store state for filtering (e.g. from a std::set)
+ class BaseFilterFunctor {

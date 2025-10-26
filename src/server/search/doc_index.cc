@@ -328,19 +328,22 @@ void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_vie
   update_indices(false);
 }
 
-void ShardDocIndex::AddDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
+std::optional<ShardDocIndex::DocId> ShardDocIndex::AddDoc(string_view key, const DbContext& db_cntx,
+                                                          const PrimeValue& pv) {
   if (!indices_)
-    return;
+    return {};
 
   // Only index documents from database 0
   if (db_cntx.db_index != 0)
-    return;
+    return {};
 
   auto accessor = GetAccessor(db_cntx, pv);
   DocId id = key_index_.Add(key);
   if (!indices_->Add(id, *accessor)) {
     key_index_.Remove(key);
+    return {};
   }
+  return id;
 }
 
 void ShardDocIndex::RemoveDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
@@ -625,7 +628,7 @@ DocIndexInfo ShardDocIndex::GetInfo() const {
 }
 
 io::Result<StringVec, ErrorReply> ShardDocIndex::GetTagVals(string_view field) const {
-  search::BaseIndex* base_index = indices_->GetIndex(field);
+  search::BaseIndex<DocId>* base_index = indices_->GetIndex(field);
   if (base_index == nullptr) {
     return make_unexpected(ErrorReply{"-No such field"});
   }
@@ -709,10 +712,10 @@ void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, const Pr
   DCHECK(IsIndexedKeyType(pv));
   for (auto& [index_name, index] : indices_) {
     if (index->Matches(key, pv.ObjType())) {
-      index->AddDoc(key, db_cntx, pv);
-      if (absl::GetFlag(FLAGS_enable_global_vector_search)) {
+      std::optional<search::DocId> doc_id = index->AddDoc(key, db_cntx, pv);
+      if (absl::GetFlag(FLAGS_enable_global_vector_search) && doc_id.has_value()) {
         // PoC: Also add to global vector index if document has vector fields
-        index->AddDocToGlobalVectorIndex(index_name, key, db_cntx, pv);
+        index->AddDocToGlobalVectorIndex(index_name, *doc_id, db_cntx, pv);
       }
     }
   }
@@ -744,17 +747,14 @@ SearchStats ShardDocIndices::GetStats() const {
 }
 
 // PoC: Global vector index integration
-void ShardDocIndex::AddDocToGlobalVectorIndex(std::string_view index_name, std::string_view key,
+void ShardDocIndex::AddDocToGlobalVectorIndex(std::string_view index_name, DocId local_doc_id,
                                               const DbContext& db_cntx, const PrimeValue& pv) {
   if (!indices_)
     return;
 
   auto accessor = GetAccessor(db_cntx, pv);
-  auto local_id = key_index_.Find(key);
-  if (!local_id)
-    return;
 
-  GlobalDocId global_id{EngineShard::tlocal()->shard_id(), *local_id};
+  GlobalDocId global_id{EngineShard::tlocal()->shard_id(), local_doc_id};
 
   for (const auto& [field_ident, field_info] : base_->schema.fields) {
     if (field_info.type == search::SchemaField::VECTOR &&
@@ -764,7 +764,7 @@ void ShardDocIndex::AddDocToGlobalVectorIndex(std::string_view index_name, std::
             std::get<search::SchemaField::VectorParams>(field_info.special_params);
         auto global_index = GlobalVectorIndexRegistry::Instance().GetOrCreateVectorIndex(
             index_name, field_info.short_name, vparams);
-        global_index->AddVector(global_id, key, vector_info->first.get());
+        global_index->AddVector(global_id, vector_info->first.get());
       }
     }
   }
@@ -777,6 +777,7 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(std::string_view index_name,
     return;
 
   auto local_id = key_index_.Find(key);
+
   if (!local_id)
     return;
 
@@ -812,7 +813,7 @@ void ShardDocIndex::RebuildGlobalVectorIndices(std::string_view index_name, cons
               std::get<search::SchemaField::VectorParams>(field_info.special_params);
           auto global_index = GlobalVectorIndexRegistry::Instance().GetOrCreateVectorIndex(
               index_name, field_info.short_name, vparams);
-          global_index->AddVector(global_id, key, vector_info->first.get());
+          global_index->AddVector(global_id, vector_info->first.get());
         }
       }
     }

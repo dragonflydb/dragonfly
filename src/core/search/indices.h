@@ -39,7 +39,7 @@ namespace dfly::search {
 
 // Index for integer fields.
 // Range bounds are queried in logarithmic time, iteration is constant.
-struct NumericIndex : public BaseIndex {
+struct NumericIndex : public BaseIndex<DocId> {
   // Temporary base class for range tree.
   // It is used to use two different range trees depending on the flag use_range_tree.
   // If the flag is true, RangeTree is used, otherwise a simple implementation with btree_set.
@@ -76,7 +76,7 @@ struct NumericIndex : public BaseIndex {
 };
 
 // Base index for string based indices.
-template <typename C> struct BaseStringIndex : public BaseIndex {
+template <typename C> struct BaseStringIndex : public BaseIndex<DocId> {
   using Container = BlockList<C>;
   using VecOrPtr = std::variant<std::vector<DocId>, const Container*>;
 
@@ -157,16 +157,16 @@ struct TagIndex : public BaseStringIndex<SortedVector<DocId>> {
   char separator_;
 };
 
-struct BaseVectorIndex : public BaseIndex {
+struct BaseVectorIndex : public BaseIndex<uint64_t> {
   std::pair<size_t /*dim*/, VectorSimilarity> Info() const;
 
-  bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override final;
+  bool Add(uint64_t id, const DocumentAccessor& doc, std::string_view field) override final;
 
  protected:
   BaseVectorIndex(size_t dim, VectorSimilarity sim);
 
   using VectorPtr = decltype(std::declval<OwnedFtVector>().first);
-  virtual void AddVector(DocId id, const VectorPtr& vector) = 0;
+  virtual void AddVector(uint64_t id, const VectorPtr& vector) = 0;
 
   size_t dim_;
   VectorSimilarity sim_;
@@ -177,45 +177,46 @@ struct BaseVectorIndex : public BaseIndex {
 struct FlatVectorIndex : public BaseVectorIndex {
   FlatVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
 
-  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
+  void Remove(uint64_t id, const DocumentAccessor& doc, std::string_view field) override;
 
-  const float* Get(DocId doc) const;
+  const float* Get(uint64_t doc) const;
 
   // Return all documents that have vectors in this index
-  std::vector<DocId> GetAllDocsWithNonNullValues() const override;
+  std::vector<uint64_t> GetAllDocsWithNonNullValues() const override;
 
  protected:
-  void AddVector(DocId id, const VectorPtr& vector) override;
+  void AddVector(uint64_t id, const VectorPtr& vector) override;
 
  private:
   PMR_NS::vector<float> entries_;
 };
 
-struct HnswlibAdapter;
+class HnswlibAdapter;
 
 struct HnswVectorIndex : public BaseVectorIndex {
   HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
   ~HnswVectorIndex();
 
-  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
+  void Remove(uint64_t id, const DocumentAccessor& doc, std::string_view field) override;
 
-  std::vector<std::pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef) const;
-  std::vector<std::pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
-                                           const std::vector<DocId>& allowed) const;
+  std::vector<std::pair<float, uint64_t>> Knn(float* target, size_t k,
+                                              std::optional<size_t> ef) const;
+  std::vector<std::pair<float, uint64_t>> Knn(float* target, size_t k, std::optional<size_t> ef,
+                                              const std::vector<uint64_t>& allowed) const;
 
   // TODO: Implement if needed
-  std::vector<DocId> GetAllDocsWithNonNullValues() const override {
-    return std::vector<DocId>{};
+  std::vector<uint64_t> GetAllDocsWithNonNullValues() const override {
+    return std::vector<uint64_t>{};
   }
 
  protected:
-  void AddVector(DocId id, const VectorPtr& vector) override;
+  void AddVector(uint64_t id, const VectorPtr& vector) override;
 
  private:
   std::unique_ptr<HnswlibAdapter> adapter_;
 };
 
-struct GeoIndex : public BaseIndex {
+struct GeoIndex : public BaseIndex<DocId> {
   using point =
       boost::geometry::model::point<double, 2,
                                     boost::geometry::cs::geographic<boost::geometry::degree>>;

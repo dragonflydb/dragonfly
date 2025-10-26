@@ -132,12 +132,15 @@ if (WITH_SEARCH)
     CMAKE_PASS_FLAGS "-DCMAKE_CXX_STANDARD:STRING=17"
   )
 
+  set(HNSWLIB_PATCH_DIR ${CMAKE_CURRENT_LIST_DIR}/../patches/hnswlib-v0.8.0)
   add_third_party(
     hnswlib
     URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.8.0.tar.gz
 
     BUILD_COMMAND echo SKIP
     INSTALL_COMMAND cp -R <SOURCE_DIR>/hnswlib ${THIRD_PARTY_LIB_DIR}/hnswlib/include/
+    PATCH_COMMAND
+      patch -p1 -d ${THIRD_PARTY_DIR}/hnswlib -i ${HNSWLIB_PATCH_DIR}/0.patch
     LIB "none"
   )
 endif()

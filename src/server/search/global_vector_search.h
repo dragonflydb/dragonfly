@@ -14,7 +14,7 @@ namespace dfly {
 // Global vector search result with global document IDs
 struct GlobalSearchResult {
   size_t total_hits = 0;
-  std::vector<std::pair<float, GlobalDocId>> knn_results;
+  std::vector<std::pair<float, uint64_t>> knn_results;
   std::vector<SerializedSearchDoc> docs;
   std::optional<facade::ErrorReply> error;
 
@@ -61,26 +61,6 @@ class GlobalVectorSearchAlgorithm {
 
   // Extract vector field name from KNN query
   std::optional<std::string> ExtractVectorField(const search::AstNode& node) const;
-};
-
-// Helper class to coordinate between global vector index and shard-based document fetching
-class GlobalVectorSearchCoordinator {
- public:
-  // Execute global vector search and fetch document fields from appropriate shards
-  static GlobalSearchResult ExecuteGlobalVectorSearch(
-      std::string_view index_name, std::string_view query_str, const SearchParams& params,
-      const search::QueryParams& query_params, const std::vector<ShardDocIndex*>& shard_indices);
-
- private:
-  // Group global doc IDs by shard for efficient fetching
-  static absl::flat_hash_map<ShardId, std::vector<GlobalDocId>> GroupByShard(
-      const std::vector<GlobalDocId>& global_ids);
-
-  // Fetch document fields from specific shard
-  static std::vector<SerializedSearchDoc> FetchDocumentFields(
-      ShardId shard_id, const std::vector<GlobalDocId>& shard_global_ids,
-      const std::vector<std::pair<search::DocId, float>>& knn_scores, const SearchParams& params,
-      ShardDocIndex* shard_index, const OpArgs& op_args);
 };
 
 }  // namespace dfly

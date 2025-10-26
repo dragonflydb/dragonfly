@@ -21,15 +21,29 @@ namespace dfly {
 
 // Global document ID that uniquely identifies a document across all shards
 struct GlobalDocId {
-  ShardId shard_id;
-  search::DocId local_doc_id;
+  uint64_t id;
 
-  bool operator<(const GlobalDocId& other) const {
-    return std::tie(shard_id, local_doc_id) < std::tie(other.shard_id, other.local_doc_id);
+  explicit GlobalDocId(uint64_t id) : id(id) {
   }
 
+  GlobalDocId(ShardId shard_id, search::DocId local_doc_id) {
+    id = ((uint64_t)shard_id << 32) | local_doc_id;
+  }
+
+  ShardId Shard() const {
+    return (id >> 32);
+  }
+
+  search::DocId LocalDocId() const {
+    return (id)&0xFFFF;
+  }
+
+  // bool operator<(const GlobalDocId& other) const {
+  //   return std::tie(Shard(), LocalDocId()) < std::tie(other.Shard(), other.LocalDocId());
+  // }
+
   bool operator==(const GlobalDocId& other) const {
-    return shard_id == other.shard_id && local_doc_id == other.local_doc_id;
+    return ShardId() == other.Shard() && LocalDocId() == other.LocalDocId();
   }
 
   bool operator!=(const GlobalDocId& other) const {
@@ -38,7 +52,7 @@ struct GlobalDocId {
 
   // Hash function for use in absl containers
   template <typename H> friend H AbslHashValue(H h, const GlobalDocId& id) {
-    return H::combine(std::move(h), id.shard_id, id.local_doc_id);
+    return H::combine(std::move(h), id.Shard(), id.LocalDocId());
   }
 };
 
@@ -52,43 +66,24 @@ class GlobalVectorIndex {
   ~GlobalVectorIndex();
 
   // Thread-safe read operations (multiple readers can access simultaneously)
-  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k,
-                                                 std::optional<size_t> ef = std::nullopt) const;
+  std::vector<std::pair<float, uint64_t>> Knn(float* target, size_t k,
+                                              std::optional<size_t> ef = std::nullopt) const;
 
-  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
-                                                 const std::vector<GlobalDocId>& allowed) const;
+  std::vector<std::pair<float, uint64_t>> Knn(float* target, size_t k, std::optional<size_t> ef,
+                                              const std::vector<GlobalDocId>& allowed) const;
 
   // Get vector info (dimensions, similarity metric)
   std::pair<size_t, search::VectorSimilarity> Info() const;
 
   // Thread-safe write operations (exclusive access)
-  bool AddVector(GlobalDocId global_id, std::string_view key, const float* vector);
+  bool AddVector(GlobalDocId global_id, const float* vector);
   void RemoveVector(GlobalDocId global_id, std::string_view key);
 
-  // Get statistics
-  size_t Size() const;
-  std::vector<GlobalDocId> GetAllDocsWithVectors() const;
-
-  // Get key for global doc id (for fetching document fields)
-  std::optional<std::string> GetKey(GlobalDocId global_id) const;
-
  private:
-  // Convert between GlobalDocId and internal DocId used by vector index
-  search::DocId ToInternalDocId(GlobalDocId global_id) const;
-  GlobalDocId FromInternalDocId(search::DocId internal_id) const;
-
-  mutable std::shared_mutex rw_mutex_;
   std::unique_ptr<search::BaseVectorIndex> vector_index_;
-
-  // Mapping between GlobalDocId and internal DocId
-  absl::flat_hash_map<GlobalDocId, search::DocId> global_to_internal_;
-  absl::flat_hash_map<search::DocId, GlobalDocId> internal_to_global_;
 
   // Mapping from GlobalDocId to document key (for fetching fields later)
   absl::flat_hash_map<GlobalDocId, std::string> global_to_key_;
-
-  // Counter for generating internal DocIds
-  search::DocId next_internal_id_{0};
 
   // Vector parameters
   search::SchemaField::VectorParams params_;

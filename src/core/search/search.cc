@@ -125,7 +125,7 @@ struct BasicSearch {
     profile_builder_ = ProfileBuilder{};
   }
 
-  BaseIndex* GetBaseIndex(string_view field) {
+  BaseIndex<DocId>* GetBaseIndex(string_view field) {
     auto index = indices_->GetIndex(field);
     if (!index) {
       error_ = absl::StrCat("Invalid field: ", field);
@@ -136,7 +136,7 @@ struct BasicSearch {
 
   // Get casted sub index by field
   template <typename T> T* GetIndex(string_view field) {
-    static_assert(is_base_of_v<BaseIndex, T>);
+    static_assert(is_base_of_v<BaseIndex<DocId>, T>);
 
     auto base_index = GetBaseIndex(field);
     if (!base_index) {
@@ -219,7 +219,7 @@ struct BasicSearch {
     }
 
     // If sort index doesn't exist try regular index
-    BaseIndex* base_index = GetBaseIndex(active_field);
+    BaseIndex<DocId>* base_index = GetBaseIndex(active_field);
     return base_index ? IndexResult{base_index->GetAllDocsWithNonNullValues()} : IndexResult{};
   }
 
@@ -340,60 +340,64 @@ struct BasicSearch {
   }
 
   void SearchKnnFlat(FlatVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {
-    knn_distances_.reserve(sub_results.ApproximateSize());
-    auto cb = [&](auto* set) {
-      auto [dim, sim] = vec_index->Info();
-      for (DocId matched_doc : *set) {
-        float dist = VectorDistance(knn.vec.first.get(), vec_index->Get(matched_doc), dim, sim);
-        knn_distances_.emplace_back(dist, matched_doc);
-      }
-    };
-    visit(cb, sub_results.Borrowed());
+    // knn_distances_.reserve(sub_results.ApproximateSize());
+    // auto cb = [&](auto* set) {
+    //   auto [dim, sim] = vec_index->Info();
+    //   for (DocId matched_doc : *set) {
+    //     float dist = VectorDistance(knn.vec.first.get(), vec_index->Get(matched_doc), dim, sim);
+    //     knn_distances_.emplace_back(dist, matched_doc);
+    //   }
+    // };
+    // visit(cb, sub_results.Borrowed());
 
-    size_t prefix_size = min(knn.limit, knn_distances_.size());
-    partial_sort(knn_distances_.begin(), knn_distances_.begin() + prefix_size,
-                 knn_distances_.end());
-    knn_distances_.resize(prefix_size);
+    // size_t prefix_size = min(knn.limit, knn_distances_.size());
+    // partial_sort(knn_distances_.begin(), knn_distances_.begin() + prefix_size,
+    //              knn_distances_.end());
+    // knn_distances_.resize(prefix_size);
   }
 
   void SearchKnnHnsw(HnswVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {
-    if (indices_->GetAllDocs().size() == sub_results.ApproximateSize())  // TODO: remove approx size
-      knn_distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime);
-    else
-      knn_distances_ =
-          vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime, sub_results.Take());
+    // if (indices_->GetAllDocs().size() == sub_results.ApproximateSize())  // TODO: remove approx
+    // size
+    //   knn_distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime);
+    // else
+    //   knn_distances_ =
+    //       vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime, sub_results.Take());
   }
 
   // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`
   IndexResult Search(const AstKnnNode& knn, string_view active_field) {
-    DCHECK(active_field.empty());
-    auto sub_results = SearchGeneric(*knn.filter, active_field);
+    // DCHECK(active_field.empty());
+    // auto sub_results = SearchGeneric(*knn.filter, active_field);
 
-    auto* vec_index = GetIndex<BaseVectorIndex>(knn.field);
-    if (!vec_index)
-      return IndexResult{};
+    // auto* vec_index = GetIndex<BaseVectorIndex<DocId>>(knn.field);
+    // if (!vec_index)
+    //   return IndexResult{};
 
-    if (auto [dim, _] = vec_index->Info(); dim != knn.vec.second) {
-      error_ =
-          absl::StrCat("Wrong vector index dimensions, got: ", knn.vec.second, ", expected: ", dim);
-      return IndexResult{};
-    }
+    // if (auto [dim, _] = vec_index->Info(); dim != knn.vec.second) {
+    //   error_ =
+    //       absl::StrCat("Wrong vector index dimensions, got: ", knn.vec.second, ", expected: ",
+    //       dim);
+    //   return IndexResult{};
+    // }
 
-    knn_scores_.clear();
-    if (auto hnsw_index = dynamic_cast<HnswVectorIndex*>(vec_index); hnsw_index)
-      SearchKnnHnsw(hnsw_index, knn, std::move(sub_results));
-    else
-      SearchKnnFlat(dynamic_cast<FlatVectorIndex*>(vec_index), knn, std::move(sub_results));
+    // knn_scores_.clear();
+    // if (auto hnsw_index = dynamic_cast<HnswVectorIndex<DocId>*>(vec_index); hnsw_index)
+    //   SearchKnnHnsw(hnsw_index, knn, std::move(sub_results));
+    // else
+    //   SearchKnnFlat(dynamic_cast<FlatVectorIndex<DocId>*>(vec_index), knn,
+    //   std::move(sub_results));
 
-    vector<DocId> out(knn_distances_.size());
-    knn_scores_.reserve(knn_distances_.size());
+    // vector<DocId> out(knn_distances_.size());
+    // knn_scores_.reserve(knn_distances_.size());
 
-    for (size_t i = 0; i < knn_distances_.size(); i++) {
-      knn_scores_.emplace_back(knn_distances_[i].second, knn_distances_[i].first);
-      out[i] = knn_distances_[i].second;
-    }
+    // for (size_t i = 0; i < knn_distances_.size(); i++) {
+    //   knn_scores_.emplace_back(knn_distances_[i].second, knn_distances_[i].first);
+    //   out[i] = knn_distances_[i].second;
+    // }
 
-    return IndexResult{std::move(out)};
+    // return IndexResult{std::move(out)};
+    return {};
   }
 
   // Determine node type and call specific search function
@@ -504,17 +508,7 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
       case SchemaField::VECTOR: {
         // PoC:Use global vector index only
         if (!absl::GetFlag(FLAGS_enable_global_vector_search)) {
-          unique_ptr<BaseVectorIndex> vector_index;
-
-          DCHECK(holds_alternative<SchemaField::VectorParams>(field_info.special_params));
-          const auto& vparams = std::get<SchemaField::VectorParams>(field_info.special_params);
-
-          if (vparams.use_hnsw)
-            vector_index = make_unique<HnswVectorIndex>(vparams, mr);
-          else
-            vector_index = make_unique<FlatVectorIndex>(vparams, mr);
-
-          indices_[field_ident] = std::move(vector_index);
+          LOG(DFATAL) << "Can't use shard vector index";
         }
         break;
       }
@@ -549,7 +543,7 @@ void FieldIndices::CreateSortIndices(PMR_NS::memory_resource* mr) {
 bool FieldIndices::Add(DocId doc, const DocumentAccessor& access) {
   bool was_added = true;
 
-  std::vector<std::pair<std::string_view, BaseIndex*>> successfully_added_indices;
+  std::vector<std::pair<std::string_view, BaseIndex<DocId>*>> successfully_added_indices;
   successfully_added_indices.reserve(indices_.size() + sort_indices_.size());
 
   auto try_add = [&](const auto& indices_container) {
@@ -591,7 +585,7 @@ void FieldIndices::Remove(DocId doc, const DocumentAccessor& access) {
   all_ids_.erase(it);
 }
 
-BaseIndex* FieldIndices::GetIndex(string_view field) const {
+BaseIndex<DocId>* FieldIndices::GetIndex(string_view field) const {
   auto it = indices_.find(schema_.LookupAlias(field));
   return it != indices_.end() ? it->second.get() : nullptr;
 }

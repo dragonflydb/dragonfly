@@ -32,6 +32,7 @@
 #include "server/search/aggregator.h"
 #include "server/search/doc_accessors.h"
 #include "server/search/doc_index.h"
+#include "server/search/global_vector_index.h"
 #include "server/search/global_vector_search.h"
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
@@ -1033,7 +1034,7 @@ static void ExecuteGlobalVectorSearch(string_view index_name, string_view query_
 
   auto global_index =
       GlobalVectorIndexRegistry::Instance().GetVectorIndex(index_name, *vector_field);
-  if (!global_index || global_index->Size() == 0) {
+  if (!global_index) {
     LOG(INFO) << "Global index not available for " << index_name << ":" << *vector_field
               << ", falling back to shard-based search";
     return builder->SendError("Global index not available and fallback not implemented");
@@ -1063,7 +1064,8 @@ static void ExecuteGlobalVectorSearch(string_view index_name, string_view query_
   // Group by shard with minimal allocations
   vector<vector<pair<float, search::DocId>>> shard_doc_ids(shard_set->size());
   for (const auto& [score, global_id] : knn_results) {
-    shard_doc_ids[global_id.shard_id].emplace_back(score, global_id.local_doc_id);
+    GlobalDocId global_doc_id = static_cast<GlobalDocId>(global_id);
+    shard_doc_ids[global_doc_id.Shard()].emplace_back(score, global_doc_id.LocalDocId());
   }
 
   // Use per-shard vectors to avoid race conditions, but keep them minimal
