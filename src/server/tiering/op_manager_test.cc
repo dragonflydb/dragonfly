@@ -54,7 +54,6 @@ struct OpManagerTest : PoolTestBase, OpManager {
 
   void Close() {
     OpManager::Close();
-    EXPECT_EQ(unlink("op_manager_test_backing"), 0);
   }
 
   util::fb2::Future<std::string> Read(EntryId id, DiskSegment segment) {

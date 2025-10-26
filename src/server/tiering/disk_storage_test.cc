@@ -32,7 +32,9 @@ struct DiskStorageTest : public PoolTestBase {
   void Close() {
     storage_->Close();
     storage_.reset();
-    unlink(filename_.c_str());
+
+    // Disk storage deletes its files on exit
+    EXPECT_FALSE(std::filesystem::exists(filename_));
   }
 
   void Stash(size_t index, string value) {

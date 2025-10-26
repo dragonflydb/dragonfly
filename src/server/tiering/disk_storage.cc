@@ -74,6 +74,7 @@ error_code DiskStorage::Open(string_view path) {
   if (absl::GetFlag(FLAGS_backing_file_direct))
     kFlags |= O_DIRECT;
 
+  backing_file_path_ = path;
   auto res = OpenLinux(path, kFlags, 0666);
   if (!res)
     return res.error();
@@ -104,8 +105,13 @@ void DiskStorage::Close() {
   while (pending_ops_ > 0 || grow_.pending)
     util::ThisFiber::SleepFor(10ms);
 
-  backing_file_->Close();
+  auto ec = backing_file_->Close();
+  LOG_IF(ERROR, ec) << "Failed to close backing file: " << ec;
   backing_file_.reset();
+
+  int errc = unlink(backing_file_path_.c_str());
+  LOG_IF(ERROR, errc != 0) << "Failed to unlink backing file: "
+                           << std::error_code{errc, std::system_category()};
 }
 
 void DiskStorage::Read(DiskSegment segment, ReadCb cb) {
