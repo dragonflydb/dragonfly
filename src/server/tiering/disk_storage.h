@@ -70,6 +70,7 @@ class DiskStorage {
     util::fb2::EventCount ev;  // woken up when in-progress op finishes
   } grow_;                     // status of latest blocking Grow() operation
 
+  std::string backing_file_path_;
   std::unique_ptr<util::fb2::LinuxFile> backing_file_;
   ExternalAllocator alloc_;
 };
