@@ -1,7 +1,12 @@
 name: AFL++ Long Fuzzing Campaign
 
 on:
-  # TODO: Uncomment after testing manual runs
+  push:
+    branches:
+      - '**'  # Run on push to any branch for testing
+    paths:
+      - '.github/workflows/fuzz-long.yml'  # Only trigger on workflow changes
+  # TODO: Uncomment after testing
   # schedule:
   #   # Run nightly at 2 AM UTC
   #   - cron: '0 2 * * *'

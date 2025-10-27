@@ -1,7 +1,12 @@
 name: AFL++ Fuzzing Smoke Test
 
 on:
-  # TODO: Uncomment after testing manual runs
+  push:
+    branches:
+      - '**'  # Run on push to any branch for testing
+    paths:
+      - '.github/workflows/fuzz-smoke.yml'  # Only trigger on workflow changes
+  # TODO: Uncomment after testing
   # pull_request:
   #   branches: [main]
   #   paths:
