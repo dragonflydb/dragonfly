@@ -154,6 +154,22 @@ jobs:
             ls -lh "$HANGS_DIR"
           fi
 
+      - name: Prepare artifacts (rename files with colons)
+        if: always()
+        run: |
+          # AFL++ creates files with colons which GitHub Actions can't upload
+          # Rename id:* files to id_* before uploading
+          cd fuzz/artifacts/resp/default
+          for dir in crashes hangs queue; do
+            if [ -d "$dir" ]; then
+              cd "$dir"
+              for file in id:*; do
+                [ -f "$file" ] && mv "$file" "${file//:/_}" || true
+              done
+              cd ..
+            fi
+          done
+
       - name: Upload fuzzing artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -175,6 +191,7 @@ jobs:
           path: fuzz/artifacts/resp/default/queue/
           retention-days: 7
           if-no-files-found: ignore
+          include-hidden-files: true
 
       - name: Generate fuzzing report
         if: always()

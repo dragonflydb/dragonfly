@@ -169,6 +169,22 @@ jobs:
             grep -E "execs_done|execs_per_sec|paths_total|corpus_count|unique_crashes|unique_hangs|last_crash|last_hang" "$STATS_FILE" || true
           fi
 
+      - name: Prepare artifacts (rename files with colons)
+        if: always()
+        run: |
+          # AFL++ creates files with colons which GitHub Actions can't upload
+          # Rename id:* files to id_* before uploading
+          cd fuzz/artifacts/resp/default
+          for dir in crashes hangs queue; do
+            if [ -d "$dir" ]; then
+              cd "$dir"
+              for file in id:*; do
+                [ -f "$file" ] && mv "$file" "${file//:/_}" || true
+              done
+              cd ..
+            fi
+          done
+
       - name: Upload crash artifacts
         if: always() && steps.analyze.outputs.crash_count > 0
         uses: actions/upload-artifact@v4
