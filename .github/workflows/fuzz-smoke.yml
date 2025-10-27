@@ -154,21 +154,26 @@ jobs:
             ls -lh "$HANGS_DIR"
           fi
 
-      - name: Prepare artifacts (rename files with colons)
+      - name: Archive fuzzing artifacts
         if: always()
         run: |
-          # AFL++ creates files with colons which GitHub Actions can't upload
-          # Rename id:* files to id_* before uploading
+          # Archive artifacts to avoid filename issues (AFL++ uses colons which GitHub Actions can't handle)
           cd fuzz/artifacts/resp/default
-          for dir in crashes hangs queue; do
-            if [ -d "$dir" ]; then
-              cd "$dir"
-              for file in id:*; do
-                [ -f "$file" ] && mv "$file" "${file//:/_}" || true
-              done
-              cd ..
-            fi
-          done
+
+          # Archive crashes if they exist
+          if [ -d crashes ] && [ "$(ls -A crashes 2>/dev/null)" ]; then
+            tar -czf crashes.tar.gz crashes/
+          fi
+
+          # Archive hangs if they exist
+          if [ -d hangs ] && [ "$(ls -A hangs 2>/dev/null)" ]; then
+            tar -czf hangs.tar.gz hangs/
+          fi
+
+          # Archive corpus/queue if it exists
+          if [ -d queue ] && [ "$(ls -A queue 2>/dev/null)" ]; then
+            tar -czf corpus.tar.gz queue/
+          fi
 
       - name: Upload fuzzing artifacts
         if: always()
@@ -176,38 +181,8 @@ jobs:
         with:
           name: fuzz-smoke-artifacts-${{ github.run_number }}
           path: |
-            fuzz/artifacts/resp/default/crashes/
-            fuzz/artifacts/resp/default/hangs/
+            fuzz/artifacts/resp/default/*.tar.gz
             fuzz/artifacts/resp/default/fuzzer_stats
             fuzz/artifacts/resp/default/plot_data
           retention-days: 10
           if-no-files-found: ignore
-
-      - name: Upload enhanced corpus
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fuzz-smoke-corpus-${{ github.run_number }}
-          path: fuzz/artifacts/resp/default/queue/
-          retention-days: 7
-          if-no-files-found: ignore
-          include-hidden-files: true
-
-      - name: Generate fuzzing report
-        if: always()
-        run: |
-          echo "Fuzzing Statistics Report"
-          echo "-------------------------"
-
-          STATS_FILE="fuzz/artifacts/resp/default/fuzzer_stats"
-
-          if [ -f "$STATS_FILE" ]; then
-            echo ""
-            echo "Key metrics:"
-            grep -E "execs_done|execs_per_sec|paths_total|unique_crashes|unique_hangs|last_find" "$STATS_FILE" || true
-            echo ""
-            echo "Full stats:"
-            cat "$STATS_FILE"
-          else
-            echo "Stats file not found"
-          fi
