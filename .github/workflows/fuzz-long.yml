@@ -67,6 +67,10 @@ jobs:
         run: |
           echo "Configuring system for AFL++ fuzzing..."
           afl-system-config
+
+          # Explicitly set core_pattern (afl-system-config might not work in containers)
+          echo core > /proc/sys/kernel/core_pattern || echo "Warning: Could not set core_pattern"
+
           echo "System configured"
 
       - name: Build Dragonfly with AFL++
