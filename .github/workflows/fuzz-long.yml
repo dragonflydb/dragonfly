@@ -14,10 +14,10 @@ on:
   #   - cron: '0 3 * * 0'
   workflow_dispatch:
     inputs:
-      duration_hours:
-        description: 'Fuzzing duration in hours'
+      duration_minutes:
+        description: 'Fuzzing duration in minutes'
         required: false
-        default: '0.5'
+        default: '30'
         type: string
       parallel_instances:
         description: 'Number of parallel AFL++ instances'
@@ -72,7 +72,7 @@ jobs:
       - name: Build Dragonfly with AFL++
         run: |
           echo "Building Dragonfly with AFL++ instrumentation..."
-          ./helio/blaze.sh -DUSE_MOLD:BOOL=ON -DUSE_AFL:BOOL=ON
+          ./helio/blaze.sh -DUSE_AFL:BOOL=ON
           cd ./build-dbg && ninja dragonfly && cd ..
           echo "Build complete"
           ls -lh ./build-dbg/dragonfly
@@ -89,11 +89,11 @@ jobs:
         run: |
           echo "Starting AFL++ long fuzzing campaign..."
 
-          DURATION_HOURS="${{ github.event.inputs.duration_hours || '0.5' }}"
+          DURATION_MINUTES="${{ github.event.inputs.duration_minutes || '30' }}"
           INSTANCE_ID="${{ matrix.instance }}"
 
           echo "Configuration:"
-          echo "  Duration: ${DURATION_HOURS} hours"
+          echo "  Duration: ${DURATION_MINUTES} minutes"
           echo "  Instance: ${INSTANCE_ID}"
           echo "  Mode: Long campaign (collect all crashes)"
 
@@ -101,23 +101,20 @@ jobs:
 
           export BUILD_DIR="${GITHUB_WORKSPACE}/build-dbg"
 
-          # Calculate timeout in minutes
-          TIMEOUT_MINUTES=$((DURATION_HOURS * 60))
-
           # For parallel fuzzing, modify the fuzzer name
           # Instance 0 = main fuzzer, others = secondary fuzzers
           if [ "$INSTANCE_ID" -eq 0 ]; then
             # Main fuzzer with deterministic mode
             export AFL_FINAL_SYNC=1
-            timeout ${TIMEOUT_MINUTES}m ./run_fuzzer.sh || EXIT_CODE=$?
+            timeout ${DURATION_MINUTES}m ./run_fuzzer.sh || EXIT_CODE=$?
           else
             # Secondary fuzzers would need modified run_fuzzer.sh
             # For now, just run main fuzzer
-            timeout ${TIMEOUT_MINUTES}m ./run_fuzzer.sh || EXIT_CODE=$?
+            timeout ${DURATION_MINUTES}m ./run_fuzzer.sh || EXIT_CODE=$?
           fi
 
           if [ "${EXIT_CODE:-0}" -eq 124 ]; then
-            echo "Fuzzing completed (timeout reached after ${DURATION_HOURS} hours)"
+            echo "Fuzzing completed (timeout reached after ${DURATION_MINUTES} minutes)"
           elif [ "${EXIT_CODE:-0}" -eq 0 ]; then
             echo "Fuzzing completed normally"
           else
