@@ -28,7 +28,7 @@ concurrency:
 jobs:
   fuzz-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 20  # Total job timeout including build (5 min fuzz + 15 min build)
+    timeout-minutes: 45
 
     container:
       image: ghcr.io/romange/ubuntu-dev:24
@@ -143,16 +143,21 @@ jobs:
             echo "Crash files:"
             ls -lh "$CRASHES_DIR"
             echo ""
-            echo "::error::Fuzzing discovered crashes - PR cannot be merged"
+            echo "::error::Fuzzing discovered crashes"
             exit 1
           fi
 
           if [ "$HANG_COUNT" -gt 0 ]; then
-            echo "::warning::Found $HANG_COUNT hang(s)"
+            echo "::error::Found $HANG_COUNT hang(s)!"
             echo ""
             echo "Hang files:"
             ls -lh "$HANGS_DIR"
+            echo ""
+            echo "::error::Fuzzing discovered hangs"
+            exit 1
           fi
+
+          echo "No crashes or hangs found - fuzzing smoke test passed!"
 
       - name: Archive fuzzing artifacts
         if: always()

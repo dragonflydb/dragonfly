@@ -32,7 +32,7 @@ concurrency:
 jobs:
   fuzz-long:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # 1 hour max (includes build time)
+    timeout-minutes: 90
 
     strategy:
       fail-fast: false
@@ -168,6 +168,19 @@ jobs:
             echo "Key Statistics:"
             grep -E "execs_done|execs_per_sec|paths_total|corpus_count|unique_crashes|unique_hangs|last_crash|last_hang" "$STATS_FILE" || true
           fi
+
+          # Fail the job if crashes or hangs were found
+          if [ "$CRASH_COUNT" -gt 0 ]; then
+            echo "::error::Found $CRASH_COUNT crash(es) during fuzzing campaign!"
+            exit 1
+          fi
+
+          if [ "$HANG_COUNT" -gt 0 ]; then
+            echo "::error::Found $HANG_COUNT hang(s) during fuzzing campaign!"
+            exit 1
+          fi
+
+          echo "Fuzzing completed successfully with no crashes or hangs"
 
       - name: Archive fuzzing artifacts
         if: always()
