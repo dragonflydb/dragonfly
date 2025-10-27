@@ -1,0 +1,186 @@
+name: AFL++ Fuzzing Smoke Test
+
+on:
+  # TODO: Uncomment after testing manual runs
+  # pull_request:
+  #   branches: [main]
+  #   paths:
+  #     - 'src/**'
+  #     - 'fuzz/**'
+  #     - '.github/workflows/fuzz-smoke.yml'
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Fuzzing duration in minutes'
+        required: false
+        default: '5'
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20  # Total job timeout including build (5 min fuzz + 15 min build)
+
+    container:
+      image: ghcr.io/romange/ubuntu-dev:24
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Install AFL++
+        run: |
+          echo "Installing AFL++..."
+          apt-get update -qq
+          apt-get install -y -qq afl++ > /dev/null
+
+          echo "AFL++ installed successfully"
+          afl-fuzz -h | head -5
+
+          # Verify AFL++ compilers are available
+          which afl-clang-lto
+          which afl-clang-lto++
+          afl-clang-lto --version
+
+      - name: Configure system for fuzzing
+        run: |
+          echo "Configuring system for AFL++ fuzzing..."
+          afl-system-config
+          echo "System configured"
+
+      - name: Build Dragonfly with AFL++
+        run: |
+          echo "Building Dragonfly with AFL++ instrumentation..."
+          ./helio/blaze.sh -DUSE_MOLD:BOOL=ON -DUSE_AFL:BOOL=ON
+          cd ./build-dbg && ninja dragonfly && cd ..
+          echo "Build complete"
+          ls -lh ./build-dbg/dragonfly
+
+      - name: Run AFL++ smoke test
+        env:
+          AFL_BENCH_UNTIL_CRASH: 1  # Stop on first crash
+          AFL_NO_UI: 1              # Disable UI for CI
+          AFL_AUTORESUME: 1         # Auto-resume if output dir exists
+          AFL_TESTCACHE_SIZE: 50    # Smaller cache for smoke test
+        run: |
+          echo "Starting AFL++ fuzzing smoke test..."
+
+          DURATION_MINUTES="${{ github.event.inputs.duration || '5' }}"
+          echo "Duration: ${DURATION_MINUTES} minutes"
+
+          cd fuzz
+
+          # Set build directory
+          export BUILD_DIR="${GITHUB_WORKSPACE}/build-dbg"
+
+          # Run fuzzer with timeout
+          # Use 'timeout' with kill signal to ensure AFL++ stops cleanly
+          timeout ${DURATION_MINUTES}m ./run_fuzzer.sh || EXIT_CODE=$?
+
+          # timeout returns 124 if it timed out (expected), 0 if finished naturally
+          if [ "${EXIT_CODE:-0}" -eq 124 ]; then
+            echo "Fuzzing completed (timeout reached)"
+          elif [ "${EXIT_CODE:-0}" -eq 0 ]; then
+            echo "Fuzzing completed normally"
+          else
+            echo "Fuzzing exited with code ${EXIT_CODE}"
+            # Don't fail yet - check for crashes in next step
+          fi
+
+      - name: Check for crashes
+        if: always()
+        id: check_crashes
+        run: |
+          echo "Checking for crashes..."
+
+          CRASHES_DIR="fuzz/artifacts/resp/default/crashes"
+          HANGS_DIR="fuzz/artifacts/resp/default/hangs"
+
+          # Count crashes (excluding README.txt)
+          if [ -d "$CRASHES_DIR" ]; then
+            CRASH_COUNT=$(find "$CRASHES_DIR" -type f ! -name "README.txt" 2>/dev/null | wc -l)
+          else
+            CRASH_COUNT=0
+          fi
+
+          # Count hangs
+          if [ -d "$HANGS_DIR" ]; then
+            HANG_COUNT=$(find "$HANGS_DIR" -type f ! -name "README.txt" 2>/dev/null | wc -l)
+          else
+            HANG_COUNT=0
+          fi
+
+          echo "crash_count=$CRASH_COUNT" >> $GITHUB_OUTPUT
+          echo "hang_count=$HANG_COUNT" >> $GITHUB_OUTPUT
+
+          echo "Fuzzing Results:"
+          echo "   Crashes: $CRASH_COUNT"
+          echo "   Hangs: $HANG_COUNT"
+
+          if [ "$CRASH_COUNT" -gt 0 ]; then
+            echo "::error::Found $CRASH_COUNT crash(es)!"
+            echo ""
+            echo "Crash files:"
+            ls -lh "$CRASHES_DIR"
+            echo ""
+            echo "::error::Fuzzing discovered crashes - PR cannot be merged"
+            exit 1
+          fi
+
+          if [ "$HANG_COUNT" -gt 0 ]; then
+            echo "::warning::Found $HANG_COUNT hang(s)"
+            echo ""
+            echo "Hang files:"
+            ls -lh "$HANGS_DIR"
+          fi
+
+      - name: Upload fuzzing artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-smoke-artifacts-${{ github.run_number }}
+          path: |
+            fuzz/artifacts/resp/default/crashes/
+            fuzz/artifacts/resp/default/hangs/
+            fuzz/artifacts/resp/default/fuzzer_stats
+            fuzz/artifacts/resp/default/plot_data
+          retention-days: 10
+          if-no-files-found: ignore
+
+      - name: Upload enhanced corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-smoke-corpus-${{ github.run_number }}
+          path: fuzz/artifacts/resp/default/queue/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Generate fuzzing report
+        if: always()
+        run: |
+          echo "Fuzzing Statistics Report"
+          echo "-------------------------"
+
+          STATS_FILE="fuzz/artifacts/resp/default/fuzzer_stats"
+
+          if [ -f "$STATS_FILE" ]; then
+            echo ""
+            echo "Key metrics:"
+            grep -E "execs_done|execs_per_sec|paths_total|unique_crashes|unique_hangs|last_find" "$STATS_FILE" || true
+            echo ""
+            echo "Full stats:"
+            cat "$STATS_FILE"
+          else
+            echo "Stats file not found"
+          fi
