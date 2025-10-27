@@ -57,7 +57,7 @@ jobs:
         run: |
           echo "Installing AFL++..."
           apt-get update -qq
-          apt-get install -y -qq afl++ > /dev/null
+          apt-get install -y -qq afl++ lld-17 > /dev/null
 
           echo "AFL++ installed successfully"
           afl-fuzz -h | head -5
