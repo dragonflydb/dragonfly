@@ -73,6 +73,7 @@ jobs:
         run: |
           echo "Building Dragonfly with AFL++ instrumentation..."
           ./helio/blaze.sh -DUSE_MOLD:BOOL=ON -DUSE_AFL:BOOL=ON
+          cd ./build-dbg && ninja dragonfly && cd ..
           echo "Build complete"
           ls -lh ./build-dbg/dragonfly
 
