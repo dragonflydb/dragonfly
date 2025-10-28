@@ -22,8 +22,8 @@ namespace dfly {
 
 // TODO add allocator support
 template <class T> class PtrVector {
-  static constexpr size_t kTagMask = 4095ULL << 52;  // we reserve 12 high bits.
-  static constexpr size_t kVectorBit = 1ULL << 54;
+  static constexpr size_t kVectorBit = 1ULL << 54;     // first 3 bits aren't used by pointer
+  static constexpr size_t kTagMask = (4095ULL << 52);  // we reserve 12 high bits and 3 low bits
 
   static constexpr size_t kLogSizeShift = 56;
   static constexpr size_t kLogSizeMask = 0xFFULL;
@@ -140,6 +140,7 @@ class OAHEntry {
   // can be used for tagging. At most 52 bits of address are reserved for
   // some configurations, and usually it's 48 bits.
   // https://docs.kernel.org/arch/arm64/memory.html
+  // first 3 bits aren't used by pointer
   static constexpr size_t kExpiryBit = 1ULL << 52;
 
   // if bit is set the string length field is 1 byte instead of 4
@@ -152,7 +153,7 @@ class OAHEntry {
   static constexpr size_t kExtHashMask = 0xFFULL;
   static constexpr size_t kExtHashShiftedMask = kExtHashMask << kExtHashShift;
 
-  static constexpr size_t kTagMask = 4095ULL << 52;  // we reserve 12 high bits.
+  static constexpr size_t kTagMask = (4095ULL << 52);  // we reserve 12 high bits and 3 low.
 
  public:
   OAHEntry() = default;

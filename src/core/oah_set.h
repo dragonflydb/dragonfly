@@ -310,9 +310,34 @@ class OAHSet {  // Open Addressing Hash Set
  private:
   // was Grow in StringSet
   void Rehash(uint32_t prev_capacity_log) {
-    auto prev_size = 1 << prev_capacity_log;
-    for (int64_t bucket_id = prev_size - 1; bucket_id >= 0; --bucket_id) {
-      auto bucket = std::move(entries_[bucket_id]);
+    size_t prev_size = 1ul << prev_capacity_log;
+    // we should prevent moving elements before current possition to avoid double processing
+    constexpr size_t mix_size = 2 << kShiftLog;
+    for (size_t bucket_id = prev_size - 1; bucket_id >= mix_size; --bucket_id) {
+      auto bucket = std::move(entries_[bucket_id]);  // can be redundant
+      // TODO add optimization for package processing
+      for (uint32_t pos = 0, size = bucket.ElementsNum(); pos < size; ++pos) {
+        // TODO operator [] is inefficient and it is better to avoid it
+        if (bucket[pos]) {
+          auto new_bucket_id =
+              bucket[pos].Rehash(bucket_id, prev_capacity_log, capacity_log_, kShiftLog);
+
+          // TODO add optimization for package processing
+          new_bucket_id = FindEmptyAround(new_bucket_id);
+
+          // insert method is inefficient
+          entries_[new_bucket_id]->Insert(std::move(bucket[pos]));
+        }
+      }
+    }
+    auto max_element = std::min(mix_size, prev_size);
+    std::array<OAHEntry, mix_size> old_buckets{};
+    for (size_t i = 0; i < max_element; ++i) {
+      old_buckets[i] = std::move(entries_[i]);
+    }
+
+    for (size_t bucket_id = 0; bucket_id < max_element; ++bucket_id) {
+      auto& bucket = old_buckets[bucket_id];
       // TODO add optimization for package processing
       for (uint32_t pos = 0, size = bucket.ElementsNum(); pos < size; ++pos) {
         // TODO operator [] is inefficient and it is better to avoid it
