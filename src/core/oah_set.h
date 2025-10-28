@@ -114,8 +114,10 @@ class OAHSet {  // Open Addressing Hash Set
     uint64_t hash = Hash(str);
     const auto bucket_id = BucketId(hash, capacity_log_);
 
-    PREFETCH_READ(entries_[bucket_id].Raw());
+    PREFETCH_READ(entries_.data() + bucket_id);
     uint32_t at = EntryTTL(ttl_sec);
+    // TODO maybe we should split memory allocation and copying for the case when we can't add it
+    // into set
     OAHEntry entry(str, at);
 
     if (auto item = FastCheck(bucket_id, str, hash); item != end()) {
@@ -357,14 +359,13 @@ class OAHSet {  // Open Addressing Hash Set
     const uint32_t displacement_size = std::min(kDisplacementSize, BucketCount());
     const uint32_t capacity_mask = Capacity() - 1;
     const auto ext_hash = OAHEntry::CalcExtHash(hash, capacity_log_, kShiftLog);
-    std::array<bool, kDisplacementSize> checked{};
 
+    bool res = false;
     for (uint32_t i = 0; i < displacement_size; i++) {
       const uint32_t bucket_id = (bid + i) & capacity_mask;
-      checked[i] = entries_[bucket_id].CheckExtendedHash(ext_hash, capacity_log_, kShiftLog);
+      res |= entries_[bucket_id].CheckExtendedHash(ext_hash, capacity_log_, kShiftLog);
     }
 
-    bool res = std::any_of(checked.begin(), checked.end(), [](bool v) { return v; });
     if (!res) {
       const uint32_t extension_point_shift = displacement_size - 1;
       auto ext_bid = bid | extension_point_shift;
