@@ -60,8 +60,9 @@ class TieredStorage {
                     std::function<T(std::string*)> modf);
 
   // Stash value. Sets IO_PENDING flag and unsets it on error or when finished
-  // Returns true if item was scheduled for stashing.
-  bool TryStash(DbIndex dbid, std::string_view key, PrimeValue* value);
+  // Returns opional backpressure.
+  std::optional<util::fb2::Future<bool>> TryStash(DbIndex dbid, std::string_view key,
+                                                  PrimeValue* value);
 
   // Delete value, must be offloaded (external type)
   void Delete(DbIndex dbid, PrimeValue* value);
@@ -104,6 +105,8 @@ class TieredStorage {
   detail::TieredColdRecord* PopCool();
 
   PrimeTable::Cursor offloading_cursor_{};  // where RunOffloading left off
+
+  absl::flat_hash_map<std::pair<DbIndex, std::string>, ::util::fb2::Future<bool>> backpressure_;
 
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
