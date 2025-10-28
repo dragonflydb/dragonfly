@@ -1,0 +1,201 @@
+name: Run AFL++ Fuzzing
+description: "Run AFL++ fuzzing campaign with configurable parameters"
+
+inputs:
+  mode:
+    description: "Fuzzing mode: 'smoke' (stop on first crash) or 'long' (collect all crashes)"
+    required: true
+    type: string
+  duration-minutes:
+    description: "Fuzzing duration in minutes"
+    required: true
+    type: string
+  instance:
+    description: "Instance ID for parallel fuzzing (0 = main fuzzer)"
+    required: false
+    type: string
+    default: "0"
+  run-number:
+    description: "GitHub run number for artifact naming"
+    required: true
+    type: string
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install AFL++
+      shell: bash
+      run: |
+        echo "Installing AFL++..."
+        apt-get update -qq
+        apt-get install -y -qq afl++ lld-17 > /dev/null
+
+        echo "AFL++ installed successfully"
+        afl-fuzz -h | head -5
+
+        # Verify AFL++ compilers are available
+        which afl-clang-lto
+        which afl-clang-lto++
+        afl-clang-lto --version
+
+    - name: Configure system for fuzzing
+      shell: bash
+      run: |
+        echo "Configuring system for AFL++ fuzzing..."
+        afl-system-config
+
+        # Explicitly set core_pattern (afl-system-config might not work in containers)
+        echo core > /proc/sys/kernel/core_pattern || echo "Warning: Could not set core_pattern"
+
+        echo "System configured"
+
+    - name: Build Dragonfly with AFL++
+      shell: bash
+      run: |
+        echo "Building Dragonfly with AFL++ instrumentation..."
+        ./helio/blaze.sh -DUSE_AFL:BOOL=ON
+        cd ./build-dbg && ninja dragonfly && cd ..
+        echo "Build complete"
+        ls -lh ./build-dbg/dragonfly
+
+    - name: Run AFL++ fuzzing
+      shell: bash
+      run: |
+        MODE="${{ inputs.mode }}"
+        DURATION_MINUTES="${{ inputs.duration-minutes }}"
+        INSTANCE_ID="${{ inputs.instance }}"
+
+        echo "Starting AFL++ fuzzing..."
+        echo "Configuration:"
+        echo "  Mode: ${MODE}"
+        echo "  Duration: ${DURATION_MINUTES} minutes"
+        echo "  Instance: ${INSTANCE_ID}"
+
+        cd fuzz
+        export BUILD_DIR="${GITHUB_WORKSPACE}/build-dbg"
+
+        # For parallel fuzzing, modify the fuzzer name
+        if [ "$INSTANCE_ID" -eq 0 ]; then
+          export AFL_FINAL_SYNC=1
+        fi
+
+        # Run fuzzer with timeout
+        timeout ${DURATION_MINUTES}m ./run_fuzzer.sh || EXIT_CODE=$?
+
+        # timeout returns 124 if it timed out (expected), 0 if finished naturally
+        if [ "${EXIT_CODE:-0}" -eq 124 ]; then
+          echo "Fuzzing completed (timeout reached)"
+        elif [ "${EXIT_CODE:-0}" -eq 0 ]; then
+          echo "Fuzzing completed normally"
+        else
+          echo "Fuzzing exited with code ${EXIT_CODE}"
+        fi
+      env:
+        # Mode-specific environment variables
+        AFL_BENCH_UNTIL_CRASH: ${{ inputs.mode == 'smoke' && '1' || '' }}
+        AFL_NO_UI: 1
+        AFL_AUTORESUME: 1
+        AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES: 1
+        AFL_TESTCACHE_SIZE: ${{ inputs.mode == 'smoke' && '50' || '500' }}
+        AFL_SKIP_CPUFREQ: ${{ inputs.mode == 'long' && '1' || '' }}
+        AFL_FAST_CAL: ${{ inputs.mode == 'long' && '1' || '' }}
+
+    - name: Analyze fuzzing results
+      shell: bash
+      if: always()
+      id: analyze
+      run: |
+        echo "Analyzing fuzzing results..."
+
+        CRASHES_DIR="fuzz/artifacts/resp/default/crashes"
+        HANGS_DIR="fuzz/artifacts/resp/default/hangs"
+        QUEUE_DIR="fuzz/artifacts/resp/default/queue"
+
+        # Count results
+        CRASH_COUNT=0
+        HANG_COUNT=0
+        CORPUS_SIZE=0
+
+        if [ -d "$CRASHES_DIR" ]; then
+          CRASH_COUNT=$(find "$CRASHES_DIR" -type f ! -name "README.txt" 2>/dev/null | wc -l)
+        fi
+
+        if [ -d "$HANGS_DIR" ]; then
+          HANG_COUNT=$(find "$HANGS_DIR" -type f ! -name "README.txt" 2>/dev/null | wc -l)
+        fi
+
+        if [ -d "$QUEUE_DIR" ]; then
+          CORPUS_SIZE=$(find "$QUEUE_DIR" -type f ! -name ".state" 2>/dev/null | wc -l)
+        fi
+
+        echo "Fuzzing Results:"
+        echo "   Crashes: $CRASH_COUNT"
+        echo "   Hangs: $HANG_COUNT"
+        echo "   Corpus size: $CORPUS_SIZE"
+
+        # Show statistics for long mode
+        if [ "${{ inputs.mode }}" = "long" ]; then
+          STATS_FILE="fuzz/artifacts/resp/default/fuzzer_stats"
+          if [ -f "$STATS_FILE" ]; then
+            echo ""
+            echo "Key Statistics:"
+            grep -E "execs_done|execs_per_sec|paths_total|corpus_count|unique_crashes|unique_hangs|last_crash|last_hang" "$STATS_FILE" || true
+          fi
+        fi
+
+        # Fail the job if crashes or hangs were found
+        if [ "$CRASH_COUNT" -gt 0 ]; then
+          echo "::error::Found $CRASH_COUNT crash(es)!"
+          if [ "${{ inputs.mode }}" = "smoke" ]; then
+            echo ""
+            echo "Crash files:"
+            ls -lh "$CRASHES_DIR" || true
+          fi
+          exit 1
+        fi
+
+        if [ "$HANG_COUNT" -gt 0 ]; then
+          echo "::error::Found $HANG_COUNT hang(s)!"
+          if [ "${{ inputs.mode }}" = "smoke" ]; then
+            echo ""
+            echo "Hang files:"
+            ls -lh "$HANGS_DIR" || true
+          fi
+          exit 1
+        fi
+
+        echo "No crashes or hangs found - fuzzing test passed!"
+
+    - name: Archive fuzzing artifacts
+      shell: bash
+      if: failure()
+      run: |
+        # Archive artifacts to avoid filename issues (AFL++ uses colons which GitHub Actions can't handle)
+        cd fuzz/artifacts/resp/default
+
+        # Archive crashes if they exist
+        if [ -d crashes ] && [ "$(ls -A crashes 2>/dev/null)" ]; then
+          tar -czf crashes.tar.gz crashes/
+        fi
+
+        # Archive hangs if they exist
+        if [ -d hangs ] && [ "$(ls -A hangs 2>/dev/null)" ]; then
+          tar -czf hangs.tar.gz hangs/
+        fi
+
+        # Archive corpus/queue if it exists
+        if [ -d queue ] && [ "$(ls -A queue 2>/dev/null)" ]; then
+          tar -czf corpus.tar.gz queue/
+        fi
+
+    - name: Upload fuzzing artifacts
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: fuzz-${{ inputs.mode }}-artifacts-${{ inputs.run-number }}${{ inputs.instance != '0' && format('-instance-{0}', inputs.instance) || '' }}
+        path: |
+          fuzz/artifacts/resp/default/*.tar.gz
+          fuzz/artifacts/resp/default/fuzzer_stats
+          fuzz/artifacts/resp/default/plot_data
+        retention-days: 10
+        if-no-files-found: ignore
