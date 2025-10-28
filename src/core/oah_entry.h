@@ -22,8 +22,8 @@ namespace dfly {
 
 // TODO add allocator support
 template <class T> class PtrVector {
-  static constexpr size_t kVectorBit = 1ULL << 54;     // first 3 bits aren't used by pointer
-  static constexpr size_t kTagMask = (4095ULL << 52);  // we reserve 12 high bits and 3 low bits
+  static constexpr size_t kVectorBit = 1ULL << 0;          // first 3 bits aren't used by pointer
+  static constexpr size_t kTagMask = (4095ULL << 52) | 7;  // we reserve 12 high bits and 3 low bits
 
   static constexpr size_t kLogSizeShift = 56;
   static constexpr size_t kLogSizeMask = 0xFFULL;
@@ -141,19 +141,18 @@ class OAHEntry {
   // some configurations, and usually it's 48 bits.
   // https://docs.kernel.org/arch/arm64/memory.html
   // first 3 bits aren't used by pointer
-  static constexpr size_t kExpiryBit = 1ULL << 52;
-
+  static constexpr size_t kVectorBit = 1ULL << 0;
+  static constexpr size_t kExpiryBit = 1ULL << 1;
   // if bit is set the string length field is 1 byte instead of 4
-  static constexpr size_t kSsoBit = 1ULL << 53;
-  static constexpr size_t kVectorBit = 1ULL << 54;
+  static constexpr size_t kSsoBit = 1ULL << 2;
 
   // extended hash allows us to reduce keys comparisons
-  static constexpr size_t kExtHashShift = 56;
-  static constexpr uint32_t kExtHashSize = 8;
-  static constexpr size_t kExtHashMask = 0xFFULL;
+  static constexpr size_t kExtHashShift = 52;
+  static constexpr uint32_t kExtHashSize = 12;
+  static constexpr size_t kExtHashMask = 0xFFFULL;
   static constexpr size_t kExtHashShiftedMask = kExtHashMask << kExtHashShift;
 
-  static constexpr size_t kTagMask = (4095ULL << 52);  // we reserve 12 high bits and 3 low.
+  static constexpr size_t kTagMask = (4095ULL << 52) | 7;  // we reserve 12 high bits and 3 low.
 
  public:
   OAHEntry() = default;
