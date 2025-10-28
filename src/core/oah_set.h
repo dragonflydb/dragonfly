@@ -120,8 +120,7 @@ class OAHSet {  // Open Addressing Hash Set
     uint32_t at = EntryTTL(ttl_sec);
     OAHEntry entry(str, at);
 
-    // TODO FindInternal and FindEmptyAround can be one function to get better performance
-    if (auto item = FindInternal(bucket_id, str, hash); item != end()) {
+    if (auto item = FastCheck(bucket_id, str, hash); item != end()) {
       return false;
     }
 
@@ -355,6 +354,32 @@ class OAHSet {  // Open Addressing Hash Set
     }
   }
 
+  // return bucket_id and position otherwise max
+  iterator FastCheck(const uint32_t bid, std::string_view str, uint64_t hash) {
+    const uint32_t displacement_size = std::min(kDisplacementSize, BucketCount());
+    const uint32_t capacity_mask = Capacity() - 1;
+    const auto ext_hash = OAHEntry::CalcExtHash(hash, capacity_log_, kShiftLog);
+    std::array<bool, kDisplacementSize> checked{};
+
+    for (uint32_t i = 0; i < displacement_size; i++) {
+      const uint32_t bucket_id = (bid + i) & capacity_mask;
+      checked[i] = entries_[bucket_id].CheckExtendedHash(ext_hash, capacity_log_, kShiftLog);
+    }
+
+    bool res = std::any_of(checked.begin(), checked.end(), [](bool v) { return v; });
+    if (!res) {
+      const uint32_t extension_point_shift = displacement_size - 1;
+      auto ext_bid = bid | extension_point_shift;
+      auto pos = entries_[ext_bid].Find(str, ext_hash, capacity_log_, kShiftLog, &size_, time_now_);
+      if (pos) {
+        return iterator{this, ext_bid, *pos};
+      }
+    } else {
+      return FindInternal(bid, str, hash);
+    }
+    return end();
+  }
+
   template <class T, std::enable_if_t<std::is_invocable_v<T, std::string_view>>* = nullptr>
   bool ScanBucket(OAHEntry& entry, const T& cb, uint32_t bucket_id) {
     if (!entry.IsVector()) {
@@ -393,7 +418,7 @@ class OAHSet {  // Open Addressing Hash Set
     }
 
     DCHECK(Capacity() > kDisplacementSize);
-    uint32_t extension_point_shift = displacement_size - 1;
+    const uint32_t extension_point_shift = displacement_size - 1;
     bid |= extension_point_shift;
     DCHECK(bid < Capacity());
     return bid;

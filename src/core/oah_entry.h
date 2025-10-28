@@ -167,9 +167,8 @@ class OAHEntry {
 
     auto size = key_len_field_size + key_size + expiry_size;
 
-    data_ = (char*)zmalloc(size);
-
-    auto* expiry_pos = data_;
+    auto* expiry_pos = (char*)zmalloc(size);
+    data_ = reinterpret_cast<uint64_t>(expiry_pos);
     if (expiry_size) {
       SetExpiryBit(true);
       std::memcpy(expiry_pos, &expiry, sizeof(expiry));
@@ -190,13 +189,13 @@ class OAHEntry {
 
   // TODO add initializer list constructor
   OAHEntry(PtrVector<OAHEntry>&& vec) {
-    data_ = reinterpret_cast<char*>(vec.Release() | kVectorBit);
+    data_ = vec.Release() | kVectorBit;
   }
 
   OAHEntry(const OAHEntry& e) = delete;
   OAHEntry(OAHEntry&& e) {
     data_ = e.data_;
-    e.data_ = nullptr;
+    e.data_ = 0;
   }
 
   // consider manual removing, we waste a lot of time to check nullptr
@@ -211,7 +210,7 @@ class OAHEntry {
   }
 
   FORCE_INLINE bool Empty() const {
-    return data_ == nullptr;
+    return data_ == 0;
   }
 
   FORCE_INLINE operator bool() const {
@@ -219,7 +218,7 @@ class OAHEntry {
   }
 
   bool IsVector() const {
-    return (uptr() & kVectorBit) != 0;
+    return (data_ & kVectorBit) != 0;
   }
 
   PtrVector<OAHEntry>& AsVector() {
@@ -233,7 +232,7 @@ class OAHEntry {
   }
 
   FORCE_INLINE bool HasExpiry() const {
-    return (uptr() & kExpiryBit) != 0;
+    return (data_ & kExpiryBit) != 0;
   }
 
   // returns the expiry time of the current entry or UINT32_MAX if no expiry is set.
@@ -252,7 +251,7 @@ class OAHEntry {
   }
 
   uint64_t GetHash() const {
-    return (uptr() & kExtHashShiftedMask) >> kExtHashShift;
+    return (data_ & kExtHashShiftedMask) >> kExtHashShift;
   }
 
   bool CheckBucketAffiliation(uint32_t bucket_id, uint32_t capacity_log, uint32_t shift_log) {
@@ -287,19 +286,18 @@ class OAHEntry {
     return stored_hash == ext_hash;
   }
 
-  // TODO rename to SetHash
   // shift_log identify which bucket the element belongs to
   uint64_t SetHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) {
     DCHECK(data_);
     DCHECK(!IsVector());
     const uint64_t result_hash = CalcExtHash(hash, capacity_log, shift_log);
     const uint64_t ext_hash = result_hash << kExtHashShift;
-    data_ = (char*)((uptr() & ~kExtHashShiftedMask) | ext_hash);
+    data_ = (data_ & ~kExtHashShiftedMask) | ext_hash;
     return result_hash;
   }
 
   void ClearHash() {
-    data_ = (char*)((uptr() & ~kExtHashShiftedMask));
+    data_ &= ~kExtHashShiftedMask;
   }
 
   // return new bucket_id
@@ -454,7 +452,7 @@ class OAHEntry {
   }
 
   FORCE_INLINE char* Raw() const {
-    return (char*)(uptr() & ~kTagMask);
+    return (char*)(data_ & ~kTagMask);
   }
 
  protected:
@@ -468,7 +466,7 @@ class OAHEntry {
     } else {
       zfree(Raw());
     }
-    data_ = nullptr;
+    data_ = 0;
   }
 
   const char* GetKeyData() const {
@@ -487,27 +485,23 @@ class OAHEntry {
     return size;
   }
 
-  FORCE_INLINE uint64_t uptr() const {
-    return uint64_t(data_);
-  }
-
   void SetExpiryBit(bool b) {
     if (b)
-      data_ = (char*)(uptr() | kExpiryBit);
+      data_ |= kExpiryBit;
     else
-      data_ = (char*)(uptr() & (~kExpiryBit));
+      data_ &= ~kExpiryBit;
   }
 
   void SetVectorBit() {
-    data_ = (char*)(uptr() | kVectorBit);
+    data_ |= kVectorBit;
   }
 
   void SetSsoBit() {
-    data_ = (char*)(uptr() | kSsoBit);
+    data_ |= kSsoBit;
   }
 
   bool HasSso() const {
-    return (uptr() & kSsoBit) != 0;
+    return (data_ & kSsoBit) != 0;
   }
 
   size_t Size() {
@@ -521,7 +515,7 @@ class OAHEntry {
   }
 
   // memory daya layout [Expiry, key_size, key]
-  char* data_ = nullptr;
+  uint64_t data_ = 0;
 };
 
 }  // namespace dfly
