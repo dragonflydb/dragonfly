@@ -107,8 +107,6 @@ class OAHSet {  // Open Addressing Hash Set
   explicit OAHSet(PMR_NS::memory_resource* mr = PMR_NS::get_default_resource()) : entries_(mr) {
   }
 
-  static constexpr uint32_t kMaxBatchLen = 32;
-
   bool Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX) {
     if (entries_.empty() || size_ >= entries_.size()) {
       Reserve(Capacity() * 2);
