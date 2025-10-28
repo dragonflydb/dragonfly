@@ -155,7 +155,7 @@ jobs:
           echo "No crashes or hangs found - fuzzing smoke test passed!"
 
       - name: Archive fuzzing artifacts
-        if: always()
+        if: failure()
         run: |
           # Archive artifacts to avoid filename issues (AFL++ uses colons which GitHub Actions can't handle)
           cd fuzz/artifacts/resp/default
@@ -176,7 +176,7 @@ jobs:
           fi
 
       - name: Upload fuzzing artifacts
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-smoke-artifacts-${{ github.run_number }}
