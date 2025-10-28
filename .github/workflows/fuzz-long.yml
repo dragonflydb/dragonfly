@@ -1,7 +1,6 @@
 name: AFL++ Long Fuzzing Campaign
 
 on:
-  push:
   # TODO: Uncomment after testing manual runs
   # schedule:
   #   # Run nightly at 2 AM UTC

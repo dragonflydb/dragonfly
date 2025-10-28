@@ -1,7 +1,6 @@
 name: AFL++ Fuzzing Smoke Test
 
 on:
-  push:
   # TODO: Uncomment after testing manual runs
   # pull_request:
   #   branches: [main]
