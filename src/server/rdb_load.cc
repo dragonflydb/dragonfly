@@ -1874,7 +1874,23 @@ auto RdbLoaderBase::ReadSBF() -> io::Result<OpaqueObj> {
     unsigned hash_cnt;
     string filter_data;
     SET_OR_UNEXPECT(LoadLen(nullptr), hash_cnt);
-    SET_OR_UNEXPECT(FetchGenericString(), filter_data);
+
+    unsigned total_size = 0;
+    SET_OR_UNEXPECT(LoadLen(nullptr), total_size);
+
+    filter_data.resize(total_size);
+    size_t offset = 0;
+    while (offset < total_size) {
+      unsigned chunk_size = 0;
+      SET_OR_UNEXPECT(LoadLen(nullptr), chunk_size);
+      error_code ec = FetchBuf(chunk_size, filter_data.data() + offset);
+      if (ec) {
+        return make_unexpected(ec);
+      }
+
+      offset += chunk_size;
+    }
+
     size_t bit_len = filter_data.size() * 8;
     if (!is_power2(bit_len)) {  // must be power of two
       return Unexpected(errc::rdb_file_corrupted);
