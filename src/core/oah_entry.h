@@ -208,11 +208,11 @@ class OAHEntry {
     return *this;
   }
 
-  FORCE_INLINE bool Empty() const {
+  bool Empty() const {
     return data_ == 0;
   }
 
-  FORCE_INLINE operator bool() const {
+  operator bool() const {
     return !Empty();
   }
 
@@ -230,12 +230,12 @@ class OAHEntry {
     return {GetKeyData(), GetKeySize()};
   }
 
-  FORCE_INLINE bool HasExpiry() const {
+  bool HasExpiry() const {
     return (data_ & kExpiryBit) != 0;
   }
 
   // returns the expiry time of the current entry or UINT32_MAX if no expiry is set.
-  FORCE_INLINE uint32_t GetExpiry() const {
+  uint32_t GetExpiry() const {
     std::uint32_t res = UINT32_MAX;
     if (HasExpiry()) {
       DCHECK(!IsVector());
@@ -355,9 +355,11 @@ class OAHEntry {
                    : std::optional<uint32_t>();
       }
       auto& vec = AsVector();
+      auto raw_arr = vec.Raw();
       for (size_t i = 0, size = vec.Size(); i < size; ++i) {
-        vec[i].ExpireIfNeeded(time_now, set_size);
-        if (vec[i].CheckExtendedHash(ext_hash, capacity_log, shift_log) && vec[i].Key() == str) {
+        raw_arr[i].ExpireIfNeeded(time_now, set_size);
+        if (raw_arr[i].CheckExtendedHash(ext_hash, capacity_log, shift_log) &&
+            raw_arr[i].Key() == str) {
           return i;
         }
       }
@@ -365,7 +367,7 @@ class OAHEntry {
     return std::nullopt;
   }
 
-  FORCE_INLINE void ExpireIfNeeded(uint32_t time_now, uint32_t* set_size) {
+  void ExpireIfNeeded(uint32_t time_now, uint32_t* set_size) {
     DCHECK(!IsVector());
     if (GetExpiry() <= time_now) {
       Clear();
@@ -450,7 +452,7 @@ class OAHEntry {
     return std::move(*this);
   }
 
-  FORCE_INLINE char* Raw() const {
+  char* Raw() const {
     return (char*)(data_ & ~kTagMask);
   }
 
