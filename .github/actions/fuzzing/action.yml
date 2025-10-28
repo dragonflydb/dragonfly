@@ -31,7 +31,7 @@ runs:
         apt-get install -y -qq afl++ lld-17 > /dev/null
 
         echo "AFL++ installed successfully"
-        afl-fuzz -h | head -5
+        afl-fuzz -h | head -5 || true
 
         # Verify AFL++ compilers are available
         which afl-clang-lto
@@ -171,7 +171,14 @@ runs:
       if: failure()
       run: |
         # Archive artifacts to avoid filename issues (AFL++ uses colons which GitHub Actions can't handle)
-        cd fuzz/artifacts/resp/default
+        ARTIFACTS_DIR="fuzz/artifacts/resp/default"
+
+        if [ ! -d "$ARTIFACTS_DIR" ]; then
+          echo "No artifacts directory found, skipping archiving"
+          exit 0
+        fi
+
+        cd "$ARTIFACTS_DIR"
 
         # Archive crashes if they exist
         if [ -d crashes ] && [ "$(ls -A crashes 2>/dev/null)" ]; then
