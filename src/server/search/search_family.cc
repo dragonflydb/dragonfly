@@ -58,6 +58,10 @@ nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string_view message) 
   return make_unexpected(ErrorReply{message, kSyntaxErrType});
 }
 
+string IndexNotFoundMsg(string_view index_name) {
+  return absl::StrCat("Index with name '", index_name, "' not found");
+}
+
 // Send error from parser or result
 // Returns false if no errors occured
 template <typename T>
@@ -1168,7 +1172,7 @@ void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) 
 
   DCHECK(num_deleted == 0u || num_deleted == shard_set->size());
   if (num_deleted == 0u)
-    return cmd_cntx.rb->SendError(absl::StrCat("Index with name '", idx_name, "' not found"));
+    return cmd_cntx.rb->SendError(IndexNotFoundMsg(idx_name));
   return cmd_cntx.rb->SendOk();
 }
 
@@ -1191,7 +1195,7 @@ void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
   if (num_notfound > 0u)
-    return rb->SendError(absl::StrCat("Index with name '", idx_name, "' not found"));
+    return rb->SendError(IndexNotFoundMsg(idx_name));
 
   DCHECK(infos.front().base_index.schema.fields.size() ==
          infos.back().base_index.schema.fields.size());
@@ -1450,8 +1454,8 @@ void SearchFamily::FtTagVals(CmdArgList args, const CommandContext& cmd_cntx) {
     if (auto* index = es->search_indices()->GetIndex(index_name); index)
       shard_results[es->shard_id()] = index->GetTagVals(field_name);
     else
-      shard_results[es->shard_id()] = nonstd::make_unexpected(
-          ErrorReply(absl::StrCat("Index with name '", index_name, "' not found")));
+      shard_results[es->shard_id()] =
+          nonstd::make_unexpected(ErrorReply(IndexNotFoundMsg(index_name)));
 
     return OpStatus::OK;
   });
