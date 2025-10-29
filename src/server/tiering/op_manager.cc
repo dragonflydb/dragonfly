@@ -87,20 +87,17 @@ void OpManager::DeleteOffloaded(DiskSegment segment) {
   }
 }
 
-std::error_code OpManager::Stash(EntryId id_ref, std::string_view value) {
+void OpManager::Stash(EntryId id_ref, tiering::DiskSegment segment, util::fb2::UringBuf buf) {
   auto id = ToOwned(id_ref);
   unsigned version = pending_stash_ver_[id] = ++pending_stash_counter_;
 
-  io::Bytes buf_view = io::Buffer(value);
-  auto io_cb = [this, version, id = std::move(id)](io::Result<DiskSegment> segment) {
-    ProcessStashed(Borrowed(id), version, segment);
+  auto io_cb = [this, version, id = std::move(id), segment](std::error_code ec) {
+    ProcessStashed(Borrowed(id), version,
+                   ec ? nonstd::make_unexpected(ec) : io::Result<DiskSegment>(segment));
   };
 
   // May block due to blocking call to Grow.
-  auto ec = storage_.Stash(buf_view, std::move(io_cb));
-  if (ec)
-    pending_stash_ver_.erase(ToOwned(id_ref));
-  return ec;
+  storage_.Stash(segment, buf, std::move(io_cb));
 }
 
 OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {

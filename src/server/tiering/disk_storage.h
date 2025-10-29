@@ -29,7 +29,7 @@ class DiskStorage {
   };
 
   using ReadCb = std::function<void(io::Result<std::string_view>)>;
-  using StashCb = std::function<void(io::Result<DiskSegment>)>;
+  using StashCb = std::function<void(std::error_code)>;
 
   explicit DiskStorage(size_t max_size);
 
@@ -42,11 +42,12 @@ class DiskStorage {
   // Mark segment as free, performed immediately
   void MarkAsFree(DiskSegment segment);
 
-  // Request bytes to be stored, cb will be called with assigned segment on completion. Can block to
-  // grow backing file. Returns error code if operation failed  immediately (most likely it failed
-  // to grow the backing file) or passes an empty segment if the final write operation failed.
-  // Bytes are copied and can be dropped before cb is resolved
-  std::error_code Stash(io::Bytes bytes, StashCb cb);
+  // Allocate segment of at least given length and prepare buffer. Migh block to grow backing.
+  // Return error if not enough space is available or growing failed.
+  io::Result<std::pair<size_t /* offset */, util::fb2::UringBuf>> PrepareStash(size_t length);
+
+  // Write prepared buffer to given segment and resolve completion callback when write is done.
+  void Stash(DiskSegment segment, util::fb2::UringBuf buf, StashCb cb);
 
   Stats GetStats() const;
 
