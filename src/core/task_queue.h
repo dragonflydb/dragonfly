@@ -39,7 +39,7 @@ class TaskQueue {
     util::detail::ResultMover<ResultType> mover;
 
     ++blocked_submitters_;
-    Add([&mover, f = std::forward<F>(f), done](unsigned) mutable {
+    Add([&mover, f = std::forward<F>(f), done]() mutable {
       mover.Apply(f);
       done.Notify();
     });
