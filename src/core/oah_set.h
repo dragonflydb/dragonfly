@@ -108,26 +108,26 @@ class OAHSet {  // Open Addressing Hash Set
   }
 
   bool Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX) {
+    uint64_t hash = Hash(str);
+    auto bucket_id = BucketId(hash, capacity_log_);
+    PREFETCH_READ(entries_.data() + bucket_id);
+
     if (entries_.empty() || size_ >= entries_.size()) {
       Reserve(Capacity() * 2);
+      bucket_id = BucketId(hash, capacity_log_);
     }
-    uint64_t hash = Hash(str);
-    const auto bucket_id = BucketId(hash, capacity_log_);
 
-    PREFETCH_READ(entries_.data() + bucket_id);
     uint32_t at = EntryTTL(ttl_sec);
     // TODO maybe we should split memory allocation and copying for the case when we can't add it
     // into set
     OAHEntry entry(str, at);
+    entry.SetHash(hash, capacity_log_, kShiftLog);
 
     if (auto item = FastFind(bucket_id, str, hash); item != end()) {
       return false;
     }
 
-    uint32_t bucket = FindEmptyAround(bucket_id);
-
-    DCHECK(bucket_id + kDisplacementSize > bucket);
-    AddUnique(std::move(entry), bucket, hash, ttl_sec);
+    AddUnique(std::move(entry), bucket_id, ttl_sec);
     return true;
   }
 
@@ -139,6 +139,7 @@ class OAHSet {  // Open Addressing Hash Set
       entries_.resize(Capacity());
       Rehash(prev_capacity_log);
     }
+    DCHECK(Capacity() >= kDisplacementSize);
   }
 
   void Clear() {
@@ -147,11 +148,24 @@ class OAHSet {  // Open Addressing Hash Set
     size_ = 0;
   }
 
-  iterator AddUnique(OAHEntry&& e, uint32_t bucket, uint64_t hash, uint32_t ttl_sec = UINT32_MAX) {
+  void AddUnique(OAHEntry&& e, uint32_t bid, uint32_t ttl_sec = UINT32_MAX) {
     ++size_;
-    uint32_t pos = entries_[bucket].Insert(std::move(e));
-    entries_[bucket][pos].SetHash(hash, capacity_log_, kShiftLog);
-    return iterator(this, bucket, pos);
+    DCHECK(Capacity() >= kDisplacementSize);
+    const uint32_t capacity_mask = Capacity() - 1;
+    for (uint32_t i = 0; i < kDisplacementSize; i++) {
+      const uint32_t bucket_id = (bid + i) & capacity_mask;
+      if (entries_[bucket_id].Empty()) {
+        entries_[bucket_id] = std::move(e);
+        return;
+      }
+
+      // TODO add expiration logic
+    }
+
+    bid = GetExtensionPoint(bid);
+    DCHECK(bid < Capacity());
+
+    entries_[bid].Insert(std::move(e));
   }
 
   unsigned AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec = UINT32_MAX) {
@@ -353,10 +367,16 @@ class OAHSet {  // Open Addressing Hash Set
     }
   }
 
+  uint32_t GetExtensionPoint(const uint32_t bid) const {
+    constexpr uint32_t extension_point_shift = kDisplacementSize - 1;
+    return bid | extension_point_shift;
+  }
+
   // return bucket_id and position otherwise max
   iterator FastFind(const uint32_t bid, std::string_view str, uint64_t hash) {
     const uint32_t capacity_mask = Capacity() - 1;
     const auto ext_hash = OAHEntry::CalcExtHash(hash, capacity_log_, kShiftLog);
+    const auto ext_bid = GetExtensionPoint(bid);
 
     bool res = false;
     for (uint32_t i = 0; i < kDisplacementSize; i++) {
@@ -365,8 +385,6 @@ class OAHSet {  // Open Addressing Hash Set
     }
 
     if (!res) {
-      constexpr uint32_t extension_point_shift = kDisplacementSize - 1;
-      auto ext_bid = bid | extension_point_shift;
       if (entries_[ext_bid].IsVector()) {
         auto& vec = entries_[ext_bid].AsVector();
         auto raw_arr = vec.Raw();
@@ -423,9 +441,8 @@ class OAHSet {  // Open Addressing Hash Set
       // TODO add expiration logic
     }
 
-    DCHECK(Capacity() > kDisplacementSize);
-    const uint32_t extension_point_shift = kDisplacementSize - 1;
-    bid |= extension_point_shift;
+    DCHECK(Capacity() >= kDisplacementSize);
+    bid = GetExtensionPoint(bid);
     DCHECK(bid < Capacity());
     return bid;
   }
