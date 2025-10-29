@@ -778,7 +778,7 @@ void Transaction::ScheduleInternal() {
         shard_set->Add(unique_shard_id_, &Transaction::ScheduleBatchInShard);
       }
     } else {
-      auto cb = [&schedule_ctx](unsigned) {
+      auto cb = [&schedule_ctx] {
         if (!schedule_ctx.trans->ScheduleInShard(EngineShard::tlocal(),
                                                  schedule_ctx.optimistic_execution)) {
           schedule_ctx.fail_cnt.fetch_add(1, memory_order_relaxed);
@@ -824,8 +824,7 @@ void Transaction::ScheduleInternal() {
     // See https://github.com/dragonflydb/dragonfly/issues/150 for more info.
     if (should_poll_execution.load(memory_order_relaxed)) {
       IterateActiveShards([](const auto& sd, auto i) {
-        shard_set->Add(
-            i, [](unsigned) { EngineShard::tlocal()->PollExecution("cancel_cleanup", nullptr); });
+        shard_set->Add(i, [] { EngineShard::tlocal()->PollExecution("cancel_cleanup", nullptr); });
       });
     }
     InitTxTime();  // update time for next scheduling attempt
@@ -855,7 +854,7 @@ void Transaction::UnlockMulti() {
   DCHECK_EQ(shard_data_.size(), shard_set->size());
   for (ShardId i = 0; i < shard_data_.size(); ++i) {
     vector<LockFp> fps = std::move(sharded_keys[i]);
-    shard_set->Add(i, [this, fps = std::move(fps)](unsigned) {
+    shard_set->Add(i, [this, fps = std::move(fps)] {
       this->UnlockMultiShardCb(fps, EngineShard::tlocal());
       intrusive_ptr_release(this);
     });
@@ -941,7 +940,7 @@ void Transaction::DispatchHop() {
 
   use_count_.fetch_add(run_cnt, memory_order_relaxed);  // for each pointer from poll_cb
 
-  auto poll_cb = [this](unsigned) {
+  auto poll_cb = [this] {
     CHECK(namespace_ != nullptr);
     EngineShard::tlocal()->PollExecution("exec_cb", this);
     DVLOG(3) << "ptr_release " << DebugId();
@@ -1015,7 +1014,7 @@ void Transaction::ExpireBlocking(WaitKeys wkeys) {
   DVLOG(1) << "ExpireBlocking " << DebugId();
   run_barrier_.Start(unique_shard_cnt_);
 
-  auto expire_cb = [this, &wkeys](unsigned) {
+  auto expire_cb = [this, &wkeys] {
     EngineShard* es = EngineShard::tlocal();
     if (wkeys) {
       IndexSlice is(0, 1);
@@ -1186,7 +1185,7 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
   return true;
 }
 
-void Transaction::ScheduleBatchInShard(unsigned) {
+void Transaction::ScheduleBatchInShard() {
   EngineShard* shard = EngineShard::tlocal();
   auto& stats = shard->stats();
   stats.tx_batch_schedule_calls_total++;

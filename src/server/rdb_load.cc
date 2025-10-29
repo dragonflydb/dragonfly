@@ -2107,7 +2107,7 @@ error_code RdbLoader::Load(io::Source* src) {
         FlushShardAsync(i);
 
         // Active database if not existed before.
-        shard_set->Add(i, [dbid](unsigned) { GetCurrentDbSlice().ActivateDb(dbid); });
+        shard_set->Add(i, [dbid] { GetCurrentDbSlice().ActivateDb(dbid); });
       }
 
       cur_db_index_ = dbid;
@@ -2202,7 +2202,7 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
     FlushShardAsync(i);
 
     // Send sentinel callbacks to ensure that all previous messages have been processed.
-    shard_set->Add(i, [bc](unsigned) mutable { bc->Dec(); });
+    shard_set->Add(i, [bc]() mutable { bc->Dec(); });
   }
   bc->Wait();  // wait for sentinels to report.
   // Decrement local one if it exists
@@ -2523,7 +2523,7 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
   if (out_buf.empty())
     return;
 
-  auto cb = [indx = this->cur_db_index_, this, ib = std::move(out_buf)](unsigned) {
+  auto cb = [indx = this->cur_db_index_, this, ib = std::move(out_buf)] {
     auto& db_slice = GetCurrentDbSlice();
 
     // Before we start loading, increment LoadInProgress.
@@ -2793,7 +2793,7 @@ bool RdbLoader::ShouldDiscardKey(std::string_view key, const ObjSettings& settin
 void RdbLoader::LoadScriptFromAux(string&& body) {
   ServerState* ss = ServerState::tlocal();
   auto interpreter = ss->BorrowInterpreter();
-  absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
+  absl::Cleanup clean = [ss, interpreter] { ss->ReturnInterpreter(interpreter); };
 
   if (script_mgr_) {
     auto res = script_mgr_->Insert(body, interpreter);
