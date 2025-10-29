@@ -23,3 +23,6 @@ cmake-build-debug
 .venv/
 fuzz/artifacts/
 fuzz/corpus/
+
+# Valkey-search integration tests (synced from external repo)
+tests/dragonfly/valkey_search/integration/

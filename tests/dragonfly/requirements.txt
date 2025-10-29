@@ -29,3 +29,4 @@ fakeredis[json]==2.26.2
 hiredis==2.4.0
 PyYAML>=6.0
 testcontainers>=3.7.1
+valkey==6.0.2
