@@ -131,7 +131,6 @@ static uint64_t Hash(std::string_view str) {
 }
 
 static uint32_t BucketId(uint64_t hash, uint32_t capacity_log) {
-  assert(capacity_log > 0);
   return hash >> (64 - capacity_log);
 }
 // doesn't possess memory, it should be created and release manually
@@ -280,11 +279,13 @@ class OAHEntry {
   }
 
   bool CheckExtendedHash(const uint64_t ext_hash, uint32_t capacity_log, uint32_t shift_log) {
-    if (Empty())
-      return false;
     auto stored_hash = GetHash();
-    if (!stored_hash && !IsVector()) {
-      stored_hash = SetHash(Hash(Key()), capacity_log, shift_log);
+    if (!stored_hash) {
+      if (IsEntry()) {
+        stored_hash = SetHash(Hash(Key()), capacity_log, shift_log);
+      } else {
+        return false;
+      }
     }
     return stored_hash == ext_hash;
   }
