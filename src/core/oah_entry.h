@@ -220,6 +220,10 @@ class OAHEntry {
     return (data_ & kVectorBit) != 0;
   }
 
+  bool IsEntry() const {
+    return (data_ != 0) && !(data_ & kVectorBit);
+  }
+
   PtrVector<OAHEntry>& AsVector() {
     static_assert(sizeof(PtrVector<OAHEntry>) == sizeof(uint64_t));
     return *reinterpret_cast<PtrVector<OAHEntry>*>(&data_);
@@ -347,13 +351,13 @@ class OAHEntry {
   // TODO refactor, because it's inefficient
   std::optional<uint32_t> Find(std::string_view str, uint64_t ext_hash, uint32_t capacity_log,
                                uint32_t shift_log, uint32_t* set_size, uint32_t time_now = 0) {
-    if (!Empty()) {
-      if (!IsVector()) {
-        ExpireIfNeeded(time_now, set_size);
-        return CheckExtendedHash(ext_hash, capacity_log, shift_log) && Key() == str
-                   ? 0
-                   : std::optional<uint32_t>();
-      }
+    if (IsEntry()) {
+      ExpireIfNeeded(time_now, set_size);
+      return CheckExtendedHash(ext_hash, capacity_log, shift_log) && Key() == str
+                 ? 0
+                 : std::optional<uint32_t>();
+    }
+    if (IsVector()) {
       auto& vec = AsVector();
       auto raw_arr = vec.Raw();
       for (size_t i = 0, size = vec.Size(); i < size; ++i) {
@@ -364,6 +368,7 @@ class OAHEntry {
         }
       }
     }
+
     return std::nullopt;
   }
 

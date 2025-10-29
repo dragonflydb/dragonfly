@@ -120,7 +120,7 @@ class OAHSet {  // Open Addressing Hash Set
     // into set
     OAHEntry entry(str, at);
 
-    if (auto item = FastCheck(bucket_id, str, hash); item != end()) {
+    if (auto item = FastFind(bucket_id, str, hash); item != end()) {
       return false;
     }
 
@@ -195,12 +195,11 @@ class OAHSet {  // Open Addressing Hash Set
   uint32_t Scan(uint32_t cursor, const ItemCb& cb) {
     const uint32_t capacity_mask = Capacity() - 1;
     uint32_t bucket_id = cursor >> (32 - capacity_log_);
-    const uint32_t displacement_size = std::min(kDisplacementSize, BucketCount());
 
     // First find the bucket to scan, skip empty buckets.
     for (; bucket_id < entries_.size(); ++bucket_id) {
       bool res = false;
-      for (uint32_t i = 0; i < displacement_size; i++) {
+      for (uint32_t i = 0; i < kDisplacementSize; i++) {
         const uint32_t shifted_bid = (bucket_id + i) & capacity_mask;
         res |= ScanBucket(entries_[shifted_bid], cb, bucket_id);
       }
@@ -355,23 +354,32 @@ class OAHSet {  // Open Addressing Hash Set
   }
 
   // return bucket_id and position otherwise max
-  iterator FastCheck(const uint32_t bid, std::string_view str, uint64_t hash) {
-    const uint32_t displacement_size = std::min(kDisplacementSize, BucketCount());
+  iterator FastFind(const uint32_t bid, std::string_view str, uint64_t hash) {
     const uint32_t capacity_mask = Capacity() - 1;
     const auto ext_hash = OAHEntry::CalcExtHash(hash, capacity_log_, kShiftLog);
 
     bool res = false;
-    for (uint32_t i = 0; i < displacement_size; i++) {
+    for (uint32_t i = 0; i < kDisplacementSize; i++) {
       const uint32_t bucket_id = (bid + i) & capacity_mask;
       res |= entries_[bucket_id].CheckExtendedHash(ext_hash, capacity_log_, kShiftLog);
     }
 
     if (!res) {
-      const uint32_t extension_point_shift = displacement_size - 1;
+      constexpr uint32_t extension_point_shift = kDisplacementSize - 1;
       auto ext_bid = bid | extension_point_shift;
-      auto pos = entries_[ext_bid].Find(str, ext_hash, capacity_log_, kShiftLog, &size_, time_now_);
-      if (pos) {
-        return iterator{this, ext_bid, *pos};
+      if (entries_[ext_bid].IsVector()) {
+        auto& vec = entries_[ext_bid].AsVector();
+        auto raw_arr = vec.Raw();
+        for (size_t i = 0, size = vec.Size(); i < size; ++i) {
+          res |= raw_arr[i].CheckExtendedHash(ext_hash, capacity_log_, kShiftLog);
+        }
+      }
+      if (res) {
+        auto pos =
+            entries_[ext_bid].Find(str, ext_hash, capacity_log_, kShiftLog, &size_, time_now_);
+        if (pos) {
+          return iterator{this, ext_bid, *pos};
+        }
       }
     } else {
       return FindInternal(bid, str, hash);
@@ -407,9 +415,8 @@ class OAHSet {  // Open Addressing Hash Set
   }
 
   uint32_t FindEmptyAround(uint32_t bid) {
-    const uint32_t displacement_size = std::min(kDisplacementSize, BucketCount());
     const uint32_t capacity_mask = Capacity() - 1;
-    for (uint32_t i = 0; i < displacement_size; i++) {
+    for (uint32_t i = 0; i < kDisplacementSize; i++) {
       const uint32_t bucket_id = (bid + i) & capacity_mask;
       if (entries_[bucket_id].Empty())
         return bucket_id;
@@ -417,7 +424,7 @@ class OAHSet {  // Open Addressing Hash Set
     }
 
     DCHECK(Capacity() > kDisplacementSize);
-    const uint32_t extension_point_shift = displacement_size - 1;
+    const uint32_t extension_point_shift = kDisplacementSize - 1;
     bid |= extension_point_shift;
     DCHECK(bid < Capacity());
     return bid;
@@ -425,10 +432,9 @@ class OAHSet {  // Open Addressing Hash Set
 
   // return bucket_id and position otherwise max
   iterator FindInternal(uint32_t bid, std::string_view str, uint64_t hash) {
-    const uint32_t displacement_size = std::min(kDisplacementSize, BucketCount());
     const uint32_t capacity_mask = Capacity() - 1;
     const auto ext_hash = OAHEntry::CalcExtHash(hash, capacity_log_, kShiftLog);
-    for (uint32_t i = 0; i < displacement_size; i++) {
+    for (uint32_t i = 0; i < kDisplacementSize; i++) {
       const uint32_t bucket_id = (bid + i) & capacity_mask;
       auto pos =
           entries_[bucket_id].Find(str, ext_hash, capacity_log_, kShiftLog, &size_, time_now_);
@@ -440,8 +446,8 @@ class OAHSet {  // Open Addressing Hash Set
   }
 
  private:
-  static constexpr std::uint32_t kMinCapacityLog = 3;                   // TODO make template
   static constexpr std::uint32_t kShiftLog = 2;                         // TODO make template
+  static constexpr std::uint32_t kMinCapacityLog = kShiftLog;           // should be >= ShiftLog
   static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog);  // TODO check
   std::uint32_t capacity_log_ = 0;
   std::uint32_t size_ = 0;  // number of elements in the set.
