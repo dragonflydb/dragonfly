@@ -82,6 +82,17 @@ struct OpManagerTest : PoolTestBase, OpManager {
     return true;
   }
 
+  std::error_code Stash(EntryId id, std::string_view value) {
+    auto prepared = storage_.PrepareStash(value.size());
+    if (!prepared.has_value())
+      return prepared.error();
+
+    auto [offset, buf] = *prepared;
+    memcpy(buf.bytes.data(), value.data(), value.size());
+    DiskSegment segment{offset, value.size()};
+    OpManager::Stash(id, segment, buf);
+  }
+
   absl::flat_hash_map<EntryId, std::string> fetched_;
   absl::flat_hash_map<EntryId, DiskSegment> stashed_;
 };
