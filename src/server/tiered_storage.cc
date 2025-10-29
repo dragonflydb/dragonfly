@@ -485,6 +485,7 @@ int64_t TieredStorage::UploadBudget() const {
 }
 
 void TieredStorage::RunOffloading(DbIndex dbid) {
+  using namespace tiering::literals;
   if (SliceSnapshot::IsSnaphotInProgress())
     return;
 
@@ -492,7 +493,7 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
 
   // Don't run offloading if there's only very little space left
   auto disk_stats = op_manager_->GetStats().disk_stats;
-  if (disk_stats.allocated_bytes + 50 * tiering::kPageSize > disk_stats.max_file_size)
+  if (disk_stats.allocated_bytes + 1_MB > disk_stats.max_file_size)
     return;
 
   string tmp;
