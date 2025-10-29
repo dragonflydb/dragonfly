@@ -172,11 +172,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   }
 
   void FlagBackpressure(OpManager::KeyRef id, bool result) {
-    const auto& [dbid, key] = id;
-    if (auto it = ts_->backpressure_.find({dbid, string{key}}); it != ts_->backpressure_.end()) {
-      it->second.Resolve(result);
-      ts_->backpressure_.erase(it);
-    }
+    if (auto node = ts_->stash_backpressure_.extract(id); !node.empty())
+      node.mapped().Resolve(result);
   }
 
   struct {
@@ -319,7 +316,7 @@ error_code TieredStorage::Open(string_view base_path) {
 }
 
 void TieredStorage::Close() {
-  for (auto& [_, f] : backpressure_)
+  for (auto& [_, f] : stash_backpressure_)
     f.Resolve(false);
   op_manager_->Close();
 }
@@ -363,7 +360,7 @@ template TieredStorage::TResult<size_t> TieredStorage::Modify(
     std::function<size_t(std::string*)> modf);
 
 std::optional<util::fb2::Future<bool>> TieredStorage::TryStash(DbIndex dbid, string_view key,
-                                                               PrimeValue* value) {
+                                                               PrimeValue* value, bool provide_bp) {
   if (!ShouldStash(*value))
     return {};
 
@@ -398,12 +395,9 @@ std::optional<util::fb2::Future<bool>> TieredStorage::TryStash(DbIndex dbid, str
     return {};
   }
 
-  // Throttle stashes over the offload boundary
-  if (ShouldOffload()) {
-    util::fb2::Future<bool> fut;
-    backpressure_[{dbid, string{key}}] = fut;
-    return fut;
-  }
+  // If we are in the active offloading phase, throttle stashes by providing backpressure future
+  if (provide_bp && ShouldOffload())
+    return stash_backpressure_[{dbid, string{key}}];
 
   return {};
 }
@@ -429,7 +423,7 @@ void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* 
   DCHECK(value->HasStashPending());
 
   // If any previous write was happening, it has been cancelled
-  if (auto node = backpressure_.extract({dbid, string{key}}); !node.empty())
+  if (auto node = stash_backpressure_.extract(make_pair(dbid, key)); !node.empty())
     std::move(node.mapped()).Resolve(false);
 
   if (OccupiesWholePages(value->Size())) {
