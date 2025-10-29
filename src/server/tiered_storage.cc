@@ -506,15 +506,15 @@ int64_t TieredStorage::UploadBudget() const {
 }
 
 void TieredStorage::RunOffloading(DbIndex dbid) {
-  const size_t kMaxIterations = 500;
-
+  using namespace tiering::literals;
   if (SliceSnapshot::IsSnaphotInProgress())
     return;
 
+  const auto start_cycles = base::CycleClock::Now();
+
   // Don't run offloading if there's only very little space left
   auto disk_stats = op_manager_->GetStats().disk_stats;
-  if (disk_stats.allocated_bytes + kMaxIterations / 2 * tiering::kPageSize >
-      disk_stats.max_file_size)
+  if (disk_stats.allocated_bytes + 1_MB > disk_stats.max_file_size)
     return;
 
   string tmp;
@@ -532,14 +532,19 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
 
   PrimeTable& table = op_manager_->db_slice_.GetDBTable(dbid)->prime;
 
-  // Loop while we haven't traversed all entries or reached our stash io device limit.
-  // Keep number of iterations below resonable limit to keep datastore always responsive
-  size_t iterations = 0;
+  // Loop over entry with time and max stash budget.
+  uint64_t cycles = 0;
   do {
+    offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
+
     if (op_manager_->GetStats().pending_stash_cnt >= config_.write_depth_limit)
       break;
-    offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
-  } while (offloading_cursor_ && iterations++ < kMaxIterations);
+
+    // TODO: yield as background fiber to perform more work on idle
+    cycles = base::CycleClock::Now() - start_cycles;
+    if (base::CycleClock::ToUsec(cycles) >= 100)
+      break;
+  } while (offloading_cursor_);
 }
 
 size_t TieredStorage::ReclaimMemory(size_t goal) {
