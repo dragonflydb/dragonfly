@@ -1168,7 +1168,7 @@ void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) 
 
   DCHECK(num_deleted == 0u || num_deleted == shard_set->size());
   if (num_deleted == 0u)
-    return cmd_cntx.rb->SendError("-Unknown Index name");
+    return cmd_cntx.rb->SendError(absl::StrCat("Index with name '", idx_name, "' not found"));
   return cmd_cntx.rb->SendOk();
 }
 
@@ -1191,7 +1191,7 @@ void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
   if (num_notfound > 0u)
-    return rb->SendError("Unknown Index name");
+    return rb->SendError(absl::StrCat("Index with name '", idx_name, "' not found"));
 
   DCHECK(infos.front().base_index.schema.fields.size() ==
          infos.back().base_index.schema.fields.size());
@@ -1450,7 +1450,8 @@ void SearchFamily::FtTagVals(CmdArgList args, const CommandContext& cmd_cntx) {
     if (auto* index = es->search_indices()->GetIndex(index_name); index)
       shard_results[es->shard_id()] = index->GetTagVals(field_name);
     else
-      shard_results[es->shard_id()] = nonstd::make_unexpected(ErrorReply("-Unknown Index name"));
+      shard_results[es->shard_id()] = nonstd::make_unexpected(
+          ErrorReply(absl::StrCat("Index with name '", index_name, "' not found")));
 
     return OpStatus::OK;
   });
@@ -1854,7 +1855,7 @@ void SearchFamily::Register(CommandRegistry* registry) {
       << CI{"FT.ALTER", CO::WRITE | CO::GLOBAL_TRANS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAlter)
       << CI{"FT.DROPINDEX", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
              FtDropIndex)
-      << CI{"FT.INFO", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
+      << CI{"FT.INFO", kReadOnlyMask, -2, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
       << CI{"FT.CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(
              FtConfig)
       // Underscore same as in RediSearch because it's "temporary" (long time already)
