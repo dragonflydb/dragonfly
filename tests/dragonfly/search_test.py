@@ -128,7 +128,14 @@ async def test_management(async_client: aioredis.Redis):
     assert sorted(await async_client.execute_command("FT._LIST")) == ["i1", "i2"]
 
     i1info = await i1.info()
-    assert i1info["index_definition"] == ["key_type", "HASH", "prefix", "p1", "default_score", 1]
+    assert i1info["index_definition"] == [
+        "key_type",
+        "HASH",
+        "prefixes",
+        ["p1"],
+        "default_score",
+        1,
+    ]
     assert i1info["num_docs"] == 10
     assert sorted(i1info["attributes"]) == [
         ["identifier", "f1", "attribute", "f1", "type", "TEXT"],
@@ -136,7 +143,14 @@ async def test_management(async_client: aioredis.Redis):
     ]
 
     i2info = await i2.info()
-    assert i2info["index_definition"] == ["key_type", "HASH", "prefix", "p2", "default_score", 1]
+    assert i2info["index_definition"] == [
+        "key_type",
+        "HASH",
+        "prefixes",
+        ["p2"],
+        "default_score",
+        1,
+    ]
     assert i2info["num_docs"] == 15
     assert sorted(i2info["attributes"]) == [
         [
