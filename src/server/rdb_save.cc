@@ -1367,9 +1367,27 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
     if (shard->shard_id() == 0) {
       auto* indices = shard->search_indices();
       for (const auto& index_name : indices->GetIndexNames()) {
-        auto index_info = indices->GetIndex(index_name)->GetInfo();
+        auto* index = indices->GetIndex(index_name);
+        auto index_info = index->GetInfo();
+
+        // Save index definition
         search_indices.emplace_back(
             absl::StrCat(index_name, " ", index_info.BuildRestoreCommand()));
+
+        // Save synonym groups for this index
+        const auto& synonym_groups = index->GetSynonyms().GetGroups();
+        for (const auto& [group_id, terms] : synonym_groups) {
+          if (!terms.empty()) {
+            // Convert set<string> to vector for joining
+            std::vector<std::string_view> terms_vec(terms.begin(), terms.end());
+
+            // Format: "SYNUPDATE index_name group_id term1 term2 term3"
+            std::string syn_cmd = absl::StrCat("SYNUPDATE ", index_name, " ", group_id, " ",
+                                               absl::StrJoin(terms_vec, " "));
+
+            search_indices.emplace_back(std::move(syn_cmd));
+          }
+        }
       }
     }
 #endif

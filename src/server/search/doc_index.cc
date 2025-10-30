@@ -274,8 +274,11 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) 
 
 void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_view& group_id,
                                     const std::vector<std::string_view>& terms) {
-  if (!indices_)
+  // Always update synonyms, even if indices are not yet built (during RDB load)
+  if (!indices_) {
+    synonyms_.UpdateGroup(group_id, terms);
     return;
+  }
 
   absl::flat_hash_set<DocId> docs_to_rebuild;
   std::vector<search::TextIndex*> text_indices = indices_->GetAllTextIndices();

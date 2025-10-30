@@ -2825,11 +2825,28 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
     return;
   }
 
-  // Prepend FT.CREATE to index definiton
+  // Determine command type and prepend appropriate prefix
   CmdArgVec arg_vec;
   facade::RespExpr::VecToArgList(resp_vec, &arg_vec);
-  string ft_create = "FT.CREATE";
-  arg_vec.insert(arg_vec.begin(), MutableSlice{ft_create.data(), ft_create.size()});
+
+  // Check if this is a SYNUPDATE command or a CREATE command
+  string command_name;
+  if (!arg_vec.empty()) {
+    string_view first_token = facade::ToSV(arg_vec[0]);
+    if (first_token == "SYNUPDATE") {
+      // Replace first token with FT.SYNUPDATE
+      command_name = "FT.SYNUPDATE";
+      arg_vec[0] = MutableSlice{command_name.data(), command_name.size()};
+    } else {
+      // Prepend FT.CREATE for index definition
+      command_name = "FT.CREATE";
+      arg_vec.insert(arg_vec.begin(), MutableSlice{command_name.data(), command_name.size()});
+    }
+  } else {
+    // Default: prepend FT.CREATE
+    command_name = "FT.CREATE";
+    arg_vec.insert(arg_vec.begin(), MutableSlice{command_name.data(), command_name.size()});
+  }
 
   service_->DispatchCommand(absl::MakeSpan(arg_vec), &crb, &cntx);
 
