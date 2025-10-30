@@ -1,0 +1,46 @@
+name: AFL++ Fuzzing Smoke Test
+
+on:
+  # TODO: Uncomment after testing manual runs
+  # pull_request:
+  #   branches: [main]
+  #   paths:
+  #     - 'src/**'
+  #     - 'fuzz/**'
+  #     - '.github/workflows/fuzz-smoke.yml'
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Fuzzing duration in minutes'
+        required: false
+        default: '5'
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    container:
+      image: ghcr.io/romange/ubuntu-dev:24
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Run AFL++ smoke test
+        uses: ./.github/actions/fuzzing
+        with:
+          mode: smoke
+          duration-minutes: ${{ github.event.inputs.duration || '5' }}
+          run-number: ${{ github.run_number }}

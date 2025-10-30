@@ -1,0 +1,57 @@
+name: AFL++ Long Fuzzing Campaign
+
+on:
+  # TODO: Uncomment after testing manual runs
+  # schedule:
+  #   # Run nightly at 2 AM UTC
+  #   - cron: '0 2 * * *'
+  #   # Run weekly deep fuzzing on Sunday at 3 AM UTC
+  #   - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'Fuzzing duration in minutes'
+        required: false
+        default: '30'
+        type: string
+      parallel_instances:
+        description: 'Number of parallel AFL++ instances'
+        required: false
+        default: '1'
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz-long:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Run multiple parallel instances for better coverage
+        instance: [0]  # Can be expanded to [0, 1, 2, 3] for parallel fuzzing
+
+    container:
+      image: ghcr.io/romange/ubuntu-dev:24
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Run AFL++ long fuzzing campaign
+        uses: ./.github/actions/fuzzing
+        with:
+          mode: long
+          duration-minutes: ${{ github.event.inputs.duration_minutes || '30' }}
+          instance: ${{ matrix.instance }}
+          run-number: ${{ github.run_number }}
