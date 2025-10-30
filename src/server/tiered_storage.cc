@@ -85,7 +85,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
   // Clear IO pending flag for entry
   void ClearIoPending(OpManager::KeyRef key) {
-    FlagBackpressure(key, false);
+    UnblockBackpressure(key, false);
     if (auto pv = Find(key); pv) {
       pv->SetStashPending(false);
       stats_.total_cancels++;
@@ -144,7 +144,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Find entry by key in db_slice and store external segment in place of original value.
   // Update memory stats
   void SetExternal(OpManager::KeyRef key, tiering::DiskSegment segment) {
-    FlagBackpressure(key, true);
+    UnblockBackpressure(key, true);
     if (auto* pv = Find(key); pv) {
       auto* stats = GetDbTableStats(key.first);
 
@@ -171,7 +171,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       SetExternal({sub_dbid, sub_key}, sub_segment);
   }
 
-  void FlagBackpressure(OpManager::KeyRef id, bool result) {
+  // If any backpressure (throttling) is active, notify that the operation finished
+  void UnblockBackpressure(OpManager::KeyRef id, bool result) {
     if (auto node = ts_->stash_backpressure_.extract(id); !node.empty())
       node.mapped().Resolve(result);
   }
