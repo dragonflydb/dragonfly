@@ -30,6 +30,12 @@ class DebugCmd {
     std::optional<std::pair<uint32_t, uint32_t>> expire_ttl_range;
   };
 
+  enum SyncFlags { SYNC_ADD, SYNC_DEL };
+  struct SyncOptions {
+    std::string sync_point_name;
+    SyncFlags sync_action;
+  };
+
  public:
   DebugCmd(ServerFamily* owner, cluster::ClusterFamily* cf, ConnectionContext* cntx);
 
@@ -42,6 +48,10 @@ class DebugCmd {
   static std::optional<PopulateOptions> ParsePopulateArgs(CmdArgList args,
                                                           facade::SinkReplyBuilder* builder);
   void PopulateRangeFiber(uint64_t from, uint64_t count, const PopulateOptions& opts);
+
+  static std::optional<SyncOptions> ParseSyncArgs(CmdArgList args,
+                                                  facade::SinkReplyBuilder* builder);
+  void Sync(CmdArgList args, facade::SinkReplyBuilder* builder);
 
   void Reload(CmdArgList args, facade::SinkReplyBuilder* builder);
   void Replica(CmdArgList args, facade::SinkReplyBuilder* builder);
