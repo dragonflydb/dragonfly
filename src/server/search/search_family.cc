@@ -211,10 +211,11 @@ ParseResult<bool> ParseOnOption(CmdArgParser* parser, DocIndex* index) {
 
 // PREFIX count prefix [prefix ...]
 ParseResult<bool> ParsePrefix(CmdArgParser* parser, DocIndex* index) {
-  if (!parser->Check("1")) {
-    return CreateSyntaxError("Multiple prefixes are not supported"sv);
+  size_t count = parser->Next<size_t>();
+  index->prefixes.reserve(count);
+  for (size_t i = 0; i < count; i++) {
+    index->prefixes.push_back(parser->Next<std::string>());
   }
-  index->prefix = parser->Next<std::string>();
   return true;
 }
 
@@ -1217,8 +1218,11 @@ void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
     rb->StartCollection(3, RedisReplyBuilder::MAP);
     rb->SendSimpleString("key_type");
     rb->SendSimpleString(info.base_index.type == DocIndex::JSON ? "JSON" : "HASH");
-    rb->SendSimpleString("prefix");
-    rb->SendSimpleString(info.base_index.prefix);
+    rb->SendSimpleString("prefixes");
+    rb->StartArray(info.base_index.prefixes.size());
+    for (const auto& prefix : info.base_index.prefixes) {
+      rb->SendBulkString(prefix);
+    }
     rb->SendSimpleString("default_score");
     rb->SendLong(1);
   }

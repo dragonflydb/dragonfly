@@ -39,8 +39,19 @@ void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
       return;
 
     string_view key = it->first.GetSlice(&scratch);
-    if (key.rfind(index.prefix, 0) != 0)
-      return;
+
+    // Empty prefixes means match all keys
+    if (!index.prefixes.empty()) {
+      bool matches_prefix = false;
+      for (const auto& prefix : index.prefixes) {
+        if (key.rfind(prefix, 0) == 0) {
+          matches_prefix = true;
+          break;
+        }
+      }
+      if (!matches_prefix)
+        return;
+    }
 
     auto accessor = GetAccessor(op_args.db_cntx, pv);
     f(key, *accessor);
@@ -149,9 +160,13 @@ string DocIndexInfo::BuildRestoreCommand() const {
   // ON HASH/JSON
   absl::StrAppend(&out, "ON", " ", base_index.type == DocIndex::HASH ? "HASH" : "JSON");
 
-  // optional PREFIX 1 *prefix*
-  if (!base_index.prefix.empty())
-    absl::StrAppend(&out, " PREFIX", " 1 ", base_index.prefix);
+  // optional PREFIX count *prefix1* *prefix2* ...
+  if (!base_index.prefixes.empty()) {
+    absl::StrAppend(&out, " PREFIX", " ", base_index.prefixes.size());
+    for (const auto& prefix : base_index.prefixes) {
+      absl::StrAppend(&out, " ", prefix);
+    }
+  }
 
   // STOPWORDS
   absl::StrAppend(&out, " STOPWORDS ", base_index.options.stopwords.size());
@@ -247,7 +262,18 @@ uint8_t DocIndex::GetObjCode() const {
 }
 
 bool DocIndex::Matches(string_view key, unsigned obj_code) const {
-  return obj_code == GetObjCode() && key.rfind(prefix, 0) == 0;
+  if (obj_code != GetObjCode())
+    return false;
+
+  // Empty prefixes means match all keys
+  if (prefixes.empty())
+    return true;
+
+  for (const auto& prefix : prefixes) {
+    if (key.rfind(prefix, 0) == 0)
+      return true;
+  }
+  return false;
 }
 
 ShardDocIndex::ShardDocIndex(shared_ptr<const DocIndex> index)
@@ -269,7 +295,8 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) 
 
   indices_->FinalizeInitialization();
 
-  VLOG(1) << "Indexed " << key_index_.Size() << " docs on " << base_->prefix;
+  VLOG(1) << "Indexed " << key_index_.Size()
+          << " docs on prefixes: " << absl::StrJoin(base_->prefixes, ", ");
 }
 
 void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_view& group_id,
