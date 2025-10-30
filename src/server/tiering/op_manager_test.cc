@@ -91,6 +91,7 @@ struct OpManagerTest : PoolTestBase, OpManager {
     memcpy(buf.bytes.data(), value.data(), value.size());
     DiskSegment segment{offset, value.size()};
     OpManager::Stash(id, segment, buf);
+    return {};
   }
 
   absl::flat_hash_map<EntryId, std::string> fetched_;
