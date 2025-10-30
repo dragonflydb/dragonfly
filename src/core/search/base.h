@@ -20,6 +20,16 @@
 namespace dfly::search {
 
 using DocId = uint32_t;
+using GlobalDocId = uint64_t;
+using ShardId = uint16_t;
+
+inline GlobalDocId CreateGlobalDocId(ShardId shard_id, DocId local_doc_id) {
+  return ((uint64_t)shard_id << 32) | local_doc_id;
+}
+
+inline std::pair<ShardId, DocId> DecomposeGlobalDocId(GlobalDocId id) {
+  return {(id >> 32), (id)&0xFFFF};
+}
 
 enum class VectorSimilarity { L2, IP, COSINE };
 

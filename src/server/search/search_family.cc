@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "base/logging.h"
+#include "core/search/indices.h"
 #include "core/search/query_driver.h"
 #include "core/search/search.h"
 #include "core/search/vector_utils.h"
@@ -34,6 +35,7 @@
 #include "server/engine_shard_set.h"
 #include "server/search/aggregator.h"
 #include "server/search/doc_index.h"
+#include "server/search/global_hnsw_index.h"
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 
@@ -1039,6 +1041,160 @@ void WarmupQueryParser() {
   });
 }
 
+vector<SearchResult> SearchGlobalHnswIndex(
+    const search::AstKnnNode* knn, const shared_ptr<search::HnswVectorIndex>& index,
+    const std::string_view index_name,
+    const std::optional<search::KnnScoreSortOption>& knn_score_option,
+    const std::vector<SearchResult>& sharded_prefilter_docs, const SearchParams& params,
+    const CommandContext& cmd_cntx) {
+  std::vector<SearchResult> results(1);
+
+  std::optional<std::vector<search::GlobalDocId>> prefilter_global_docs_ids = std::nullopt;
+
+  // Quick lookup to match global id to serialized doc
+  std::map<search::GlobalDocId, const SerializedSearchDoc*> prefilter_docs_lookup;
+
+  const bool has_prefilter_docs = knn->HasPreFilter();
+  const ShardId shard_size = sharded_prefilter_docs.size();
+
+  // We have pre filter docs so all documents should already be fetched
+  if (has_prefilter_docs) {
+    std::vector<search::GlobalDocId> global_doc_ids;
+    for (size_t shard_id = 0; shard_id < shard_size; shard_id++) {
+      for (auto& doc : sharded_prefilter_docs[shard_id].docs) {
+        auto global_doc_id = search::CreateGlobalDocId(shard_id, doc.id);
+        global_doc_ids.emplace_back(global_doc_id);
+        prefilter_docs_lookup[global_doc_id] = &doc;
+      }
+    }
+    prefilter_global_docs_ids = std::move(global_doc_ids);
+  }
+
+  // Search HNSW index
+  std::vector<std::pair<float, search::GlobalDocId>> knn_results;
+
+  if (prefilter_global_docs_ids)
+    knn_results =
+        index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime, *prefilter_global_docs_ids);
+  else
+    knn_results = index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime);
+
+  std::vector<SerializedSearchDoc> knn_search_serialized_docs;
+  knn_search_serialized_docs.reserve(knn_results.size());
+
+  // Serialized docs for each shard
+  std::vector<std::vector<SerializedSearchDoc>> shard_docs(shard_size);
+
+  for (const auto& [score, global_doc_id] : knn_results) {
+    if (has_prefilter_docs) {
+      knn_search_serialized_docs.emplace_back(*prefilter_docs_lookup[global_doc_id]);
+      knn_search_serialized_docs.back().knn_score = score;
+    } else {
+      // Create SerializedSearchDoc and fill only knn information
+      auto [shard_id, local_doc_id] = search::DecomposeGlobalDocId(global_doc_id);
+      shard_docs[shard_id].emplace_back(
+          SerializedSearchDoc{.id = local_doc_id, .knn_score = score});
+    }
+  }
+
+  // If we have prefilter docs we don't need to fetch docs so can return early
+  if (has_prefilter_docs) {
+    results[0].total_hits = knn_search_serialized_docs.size();
+    results[0].docs = std::move(knn_search_serialized_docs);
+    return results;
+  }
+
+  // Do we need to set sort score
+  bool set_sort_score = params.sort_option && !params.sort_option->IsSame(*knn_score_option);
+
+  // Do we need to remove sort field from reponse
+  bool remove_sort_field = false;
+
+  std::optional<std::vector<FieldReference>> return_fields = params.return_fields;
+
+  // If we don't return all fields
+  if (return_fields) {
+    // We have sort_option and it's different than knn score
+    if (set_sort_score) {
+      bool found_sort_return_field = false;
+      for (const auto& return_field : *return_fields) {
+        if (params.sort_option->field.Name() == return_field.Name()) {
+          found_sort_return_field = true;
+          break;
+        }
+      }
+      // Sort return field is not found so we need to add it for request and
+      // remove this field in response
+      if (found_sort_return_field) {
+        (*return_fields).push_back(params.sort_option->field);
+        remove_sort_field = true;
+      }
+    }
+  }
+
+  // Indicator if we serialized document on shard
+  std::vector<std::vector<bool>> shard_docs_serialized_indicator(shard_size);
+
+  // Fetch all docs from shards
+  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    auto* index = es->search_indices()->GetIndex(index_name);
+
+    // No index found or no docs on this shard
+    if (!index || shard_docs[es->shard_id()].empty()) {
+      return OpStatus::OK;
+    }
+
+    const auto& schema = index->GetInfo().base_index.schema;
+
+    // Resize shard with default `true` value
+    shard_docs_serialized_indicator[es->shard_id()].resize(shard_docs[es->shard_id()].size(), true);
+
+    for (size_t i = 0; i < shard_docs[es->shard_id()].size(); i++) {
+      auto& shard_doc = shard_docs[es->shard_id()][i];
+      if (auto doc =
+              index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), schema, return_fields);
+          doc) {
+        auto& [key, fields] = *doc;
+
+        // Handle sort_score and remove field if we don't need it
+        search::SortableValue sort_score = std::monostate{};
+        if (set_sort_score) {
+          sort_score = fields[params.sort_option->field.Name()];
+          if (remove_sort_field) {
+            fields.erase(params.sort_option->field.Name());
+          }
+        }
+
+        shard_doc.key = std::string{key};
+        shard_doc.values = std::move(fields);
+        shard_doc.sort_score = sort_score;
+      } else {
+        // If we coudn't serialize requested doc
+        shard_docs_serialized_indicator[es->shard_id()][i] = false;
+      }
+    }
+    return OpStatus::OK;
+  });
+
+  // Transform shard results back to
+  size_t shard_id = 0;
+  std::for_each(shard_docs.begin(), shard_docs.end(),
+                [&](const std::vector<SerializedSearchDoc>& shard) {
+                  for (size_t doc_index = 0; doc_index < shard.size(); ++doc_index) {
+                    // Check if we serialized doc
+                    if (shard_docs_serialized_indicator[shard_id][doc_index]) {
+                      knn_search_serialized_docs.push_back(shard[doc_index]);
+                    }
+                  }
+                  shard_id++;
+                });
+
+  results[0].total_hits = knn_search_serialized_docs.size();
+  results[0].docs = std::move(knn_search_serialized_docs);
+
+  return results;
+}
+
 }  // namespace
 
 void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -1086,9 +1242,25 @@ void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   auto idx_ptr = make_shared<DocIndex>(std::move(parsed_index).value());
+
+  for (const auto& [field_ident, field_info] : idx_ptr->schema.fields) {
+    if (field_info.type == search::SchemaField::VECTOR &&
+        !(field_info.flags & search::SchemaField::NOINDEX)) {
+      const auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
+      if (vparams.use_hnsw &&
+          !GlobalHnswIndexRegistry::Instance().Create(idx_name, field_info.short_name, vparams)) {
+        cmd_cntx.tx->Conclude();
+        return builder->SendError("Index already exists");
+      }
+    }
+  }
+
   cmd_cntx.tx->Execute(
       [idx_name, idx_ptr](auto* tx, auto* es) {
         es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr);
+        if (auto* index = es->search_indices()->GetIndex(idx_name); index) {
+          index->RebuildGlobalVectorIndices(idx_name, tx->GetOpArgs(es));
+        }
         return OpStatus::OK;
       },
       true);
@@ -1160,9 +1332,16 @@ void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) 
   // Parse optional DD (Delete Documents) parameter
   bool delete_docs = args.size() > 1 && absl::EqualsIgnoreCase(args[1], "DD");
 
+  shared_ptr<DocIndex> index_info;
   atomic_uint num_deleted{0};
 
   auto cb = [&](Transaction* t, EngineShard* es) {
+    // Get index info from first shard for global cleanup
+    if (es->shard_id() == 0) {
+      if (auto* idx = es->search_indices()->GetIndex(idx_name); idx != nullptr) {
+        index_info = make_shared<DocIndex>(idx->GetInfo().base_index);
+      }
+    }
     // Drop the index and get its pointer
     auto index = es->search_indices()->DropIndex(idx_name);
     if (!index)
@@ -1191,7 +1370,17 @@ void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) 
 
   cmd_cntx.tx->Execute(cb, true);
 
-  DCHECK(num_deleted == 0u || num_deleted == shard_set->size());
+  if (index_info) {
+    for (const auto& [field_ident, field_info] : index_info->schema.fields) {
+      if (field_info.type == search::SchemaField::VECTOR &&
+          !(field_info.flags & search::SchemaField::NOINDEX)) {
+        if (GlobalHnswIndexRegistry::Instance().Remove(idx_name, field_info.short_name)) {
+          num_deleted.fetch_add(1);
+        }
+      }
+    }
+  }
+
   if (num_deleted == 0u)
     return cmd_cntx.rb->SendError(IndexNotFoundMsg(idx_name));
   return cmd_cntx.rb->SendOk();
@@ -1384,24 +1573,47 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   if (!search_algo.Init(query_str, &params->query_params, &params->optional_filters))
     return builder->SendError("Query syntax error");
 
+  std::unique_ptr<search::AstNode> knn_node = nullptr;
+  search::AstKnnNode* knn = nullptr;
+
+  if (search_algo.IsKnnQuery()) {
+    // Check if it is HNSW node
+    if (GlobalHnswIndexRegistry::Instance().Exist(index_name, search_algo.GetKnnNode()->field)) {
+      knn_node = search_algo.PopKnnNode();
+      knn = std::get_if<search::AstKnnNode>(knn_node.get());
+    }
+  }
+
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
   atomic<bool> index_not_found{false};
   vector<SearchResult> docs(shard_set->size());
 
-  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (auto* index = es->search_indices()->GetIndex(index_name); index)
-      docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
-    else
-      index_not_found.store(true, memory_order_relaxed);
-    return OpStatus::OK;
-  });
+  // If it is HNSW knn node and we have pre filter query
+  if (!knn || (knn && knn->HasPreFilter())) {
+    cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+      if (auto* index = es->search_indices()->GetIndex(index_name); index)
+        docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
+      else
+        index_not_found.store(true, memory_order_relaxed);
+      return OpStatus::OK;
+    });
 
-  if (index_not_found.load())
-    return builder->SendError(string{index_name} + ": no such index");
+    if (index_not_found.load())
+      return builder->SendError(string{index_name} + ": no such index");
 
-  for (const auto& res : docs) {
-    if (res.error)
-      return builder->SendError(*res.error);
+    for (const auto& res : docs) {
+      if (res.error)
+        return builder->SendError(*res.error);
+    }
+  }
+
+  if (knn_node) {
+    auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, knn->field);
+    if (!hnsw_index) {
+      return builder->SendError(string{index_name} + ": no such global hnsw index");
+    }
+    docs = SearchGlobalHnswIndex(knn, hnsw_index, index_name, search_algo.GetKnnScoreSortOption(),
+                                 docs, *params, cmd_cntx);
   }
 
   // TODO add merging of CSS results with local results (SORT, LIMIT, etc)
@@ -2024,6 +2236,10 @@ void SearchFamily::Register(CommandRegistry* registry) {
       << CI{"FT.SYNUPDATE", CO::WRITE | CO::GLOBAL_TRANS, -4, 0, 0, acl::FT_SEARCH}.HFUNC(
              FtSynUpdate)
       << CI{"FT._DEBUG", kReadOnlyMask, -1, 0, 0, acl::FT_SEARCH}.HFUNC(FtDebug);
+}
+
+void SearchFamily::Shutdown() {
+  GlobalHnswIndexRegistry::Instance().Reset();
 }
 
 }  // namespace dfly

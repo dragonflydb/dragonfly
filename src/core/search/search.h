@@ -23,6 +23,7 @@ namespace dfly::search {
 
 struct AstNode;
 struct TextIndex;
+struct AstKnnNode;
 
 // Optional FILTER
 struct OptionalNumericFilter : public OptionalFilterBase {
@@ -201,14 +202,20 @@ class SearchAlgorithm {
   SearchResult Search(const FieldIndices* index,
                       size_t cuttoff_limit = std::numeric_limits<size_t>::max()) const;
 
-  // if enabled, return limit & alias for knn query
   std::optional<KnnScoreSortOption> GetKnnScoreSortOption() const;
+
+  bool IsKnnQuery() const;
+
+  AstKnnNode* GetKnnNode() const;
+
+  std::unique_ptr<AstNode> PopKnnNode();
 
   void EnableProfiling();
 
  private:
   bool profiling_enabled_ = false;
   std::unique_ptr<AstNode> query_;
+  std::optional<KnnScoreSortOption> knn_hnsw_score_sort_option_;
 };
 
 }  // namespace dfly::search

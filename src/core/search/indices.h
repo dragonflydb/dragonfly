@@ -191,27 +191,45 @@ struct FlatVectorIndex : public BaseVectorIndex {
   PMR_NS::vector<float> entries_;
 };
 
-struct HnswlibAdapter;
+// We still need to have hnsw index on each shard. This is empty implementation
+// that doesn't do anything and it serves only as placeholder.
+struct ShardHnswVectorIndex : public BaseVectorIndex {
+  explicit ShardHnswVectorIndex(const SchemaField::VectorParams& params);
 
-struct HnswVectorIndex : public BaseVectorIndex {
-  HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
-  ~HnswVectorIndex();
+  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override {
+    // noop
+  }
 
-  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
-
-  std::vector<std::pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef) const;
-  std::vector<std::pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
-                                           const std::vector<DocId>& allowed) const;
-
-  // TODO: Implement if needed
+  // Return all documents that have vectors in this index
   std::vector<DocId> GetAllDocsWithNonNullValues() const override {
-    return std::vector<DocId>{};
+    return {};
   }
 
  protected:
-  void AddVector(DocId id, const VectorPtr& vector) override;
+  void AddVector(DocId id, const VectorPtr& vector) override {
+    // noop
+  }
+};
+
+struct HnswlibAdapter;
+class HnswVectorIndex {
+ public:
+  explicit HnswVectorIndex(const search::SchemaField::VectorParams& params,
+                           PMR_NS::memory_resource* mr = PMR_NS::get_default_resource());
+
+  ~HnswVectorIndex();
+
+  bool Add(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field);
+  void Remove(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field);
+
+  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k,
+                                                 std::optional<size_t> ef) const;
+  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
+                                                 const std::vector<GlobalDocId>& allowed) const;
 
  private:
+  size_t dim_;
+  VectorSimilarity sim_;
   std::unique_ptr<HnswlibAdapter> adapter_;
 };
 

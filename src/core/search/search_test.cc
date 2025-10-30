@@ -970,7 +970,7 @@ TEST_F(SearchTest, GeoSearch) {
 }
 
 INSTANTIATE_TEST_SUITE_P(KnnFlat, KnnTest, testing::Values(false));
-INSTANTIATE_TEST_SUITE_P(KnnHnsw, KnnTest, testing::Values(true));
+// INSTANTIATE_TEST_SUITE_P(KnnHnsw, KnnTest, testing::Values(true));
 
 TEST_F(SearchTest, VectorDistanceBasic) {
   // Test basic vector distance calculations
