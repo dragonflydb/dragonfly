@@ -49,6 +49,7 @@ class EngineShard {
     uint64_t total_heartbeat_expired_keys = 0;
     uint64_t total_heartbeat_expired_bytes = 0;
     uint64_t total_heartbeat_expired_calls = 0;
+    uint64_t total_update_expire_calls = 0;
 
     // cluster stats
     uint64_t total_migrated_keys = 0;
@@ -258,6 +259,7 @@ class EngineShard {
   // context of the controlling thread will access this shard!
   // --------------------------------------------------------------------------
   uint32_t DefragTask();
+  uint32_t UpdateExpiresTask();
 
   TxQueue txq_;
   TaskQueue queue_, queue2_;
@@ -284,8 +286,18 @@ class EngineShard {
   journal::Journal* journal_ = nullptr;
   IntentLock shard_lock_;
 
-  uint32_t defrag_task_ = 0;
+  // Idle tasks.
+  uint32_t defrag_task_ = 0, update_expire_base_task_ = 0;
+
   EvictionTaskState eviction_state_;  // Used on eviction fiber
+  struct UpdateExpireState {
+    uint64_t cursor = 0;
+    DbIndex db_index = 0;
+    uint64_t stale_entries = 0;
+  };
+
+  UpdateExpireState* update_expire_state_ = nullptr;
+
   util::fb2::Fiber fiber_heartbeat_periodic_;
   util::fb2::Done fiber_heartbeat_periodic_done_;
 

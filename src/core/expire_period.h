@@ -10,13 +10,13 @@ namespace dfly {
 
 class ExpirePeriod {
  public:
-  static constexpr size_t kMaxGenId = 15;
+  static constexpr std::size_t kMaxGenId = 15;
 
   ExpirePeriod() : val_(0), gen_(0), precision_(0) {
     static_assert(sizeof(ExpirePeriod) == 8);  // TODO
   }
 
-  explicit ExpirePeriod(uint64_t ms, unsigned gen = 0) : ExpirePeriod() {
+  explicit ExpirePeriod(uint64_t ms, unsigned gen = 0) : gen_(gen) {
     Set(ms);
   }
 
@@ -35,7 +35,9 @@ class ExpirePeriod {
 
   void Set(uint64_t ms);
 
-  bool is_second_precision() { return precision_ == 1;}
+  bool is_second_precision() {
+    return precision_ == 1;
+  }
 
  private:
   uint64_t val_ : 59;
@@ -48,13 +50,13 @@ inline void ExpirePeriod::Set(uint64_t ms) {
 
   if (ms < kBarrier) {
     val_ = ms;
-    precision_ = 0;   // ms
+    precision_ = 0;  // ms
     return;
   }
 
   precision_ = 1;
   if (ms < kBarrier << 10) {
-    ms = (ms + 500) / 1000;   // seconds
+    ms = (ms + 500) / 1000;  // seconds
   }
   val_ = ms >= kBarrier ? kBarrier - 1 : ms;
 }

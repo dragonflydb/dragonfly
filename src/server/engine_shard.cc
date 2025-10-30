@@ -141,7 +141,7 @@ string EngineShard::TxQueueInfo::Format() const {
 }
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
-  static_assert(sizeof(Stats) == 96);
+  static_assert(sizeof(Stats) == 104);
 
 #define ADD(x) x += o.x
 
@@ -157,6 +157,7 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
   ADD(total_heartbeat_expired_bytes);
   ADD(total_heartbeat_expired_calls);
   ADD(total_migrated_keys);
+  ADD(total_update_expire_calls);
 
 #undef ADD
   return *this;
@@ -301,6 +302,8 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect
   return page_usage.CollectedStats();
 }
 
+constexpr uint32_t kRunAtLowPriority = 0u;
+
 // the memory defragmentation task is as follow:
 //  1. Check if memory usage is high enough
 //  2. Check if diff between commited and used memory is high enough
@@ -310,7 +313,6 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect
 //     priority.
 //     otherwise lower the task priority so that it would not use the CPU when not required
 uint32_t EngineShard::DefragTask() {
-  constexpr uint32_t kRunAtLowPriority = 0u;
   if (!namespaces) {
     return kRunAtLowPriority;
   }
@@ -324,6 +326,97 @@ uint32_t EngineShard::DefragTask() {
     }
   }
   return 6;  // priority.
+}
+
+// TODO: this is wrong. we can do better by updating the expire base in DeleteExpiredStep.
+uint32_t EngineShard::UpdateExpiresTask() {
+  if (!namespaces) {
+    return kRunAtLowPriority;
+  }
+
+  DVLOG(1) << "EngineShard::UpdateExpiresTask shard_id: " << shard_id_;
+
+  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
+  uint64_t now_ms = GetCurrentTimeMs();
+
+  // measure the age of the current expire base.
+  unsigned base_age_sec = db_slice.FromAbsoluteTime(now_ms).duration_ms() / 1000;
+
+  const uint64_t kLowThresholdSec = 3600 * 24 * 2;   // 2 days
+  const uint64_t kHighThresholdSec = 3600 * 24 * 7;  // 7 days
+  if (update_expire_state_ == nullptr) {
+    if (base_age_sec < kLowThresholdSec) {
+      // no need to update expire base if period is less than a few days.
+      return kRunAtLowPriority;
+    }
+
+    db_slice.NextExpireGen(now_ms);
+    update_expire_state_ = new UpdateExpireState();
+    VLOG(1) << "shard " << shard_id_ << " updated expire base to " << now_ms
+            << ", generation: " << db_slice.expire_gen_id();
+  }
+
+  DCHECK(update_expire_state_ != nullptr);
+  if (base_age_sec > kHighThresholdSec) {
+    LOG_EVERY_T(ERROR, 3600) << "Expire base age is very high: " << base_age_sec;
+  }
+
+  if (update_expire_state_->db_index < db_slice.db_array_size()) {
+    unsigned current_gen_id = db_slice.expire_gen_id();
+
+    auto cb = [&](ExpireIterator it) {
+      if (it->second.generation_id() != current_gen_id) {
+        int64_t ms = db_slice.ExpireTime(it->second);
+
+        // only update if the expire time is in the future.
+        // we rely on DeleteExpiredStep to delete expired keys because we may need to propagate
+        // deletions to the journal.
+        if (ms > int64_t(now_ms)) {
+          DVLOG(2) << "Update expire generation from " << it->second.generation_id() << " to "
+                   << current_gen_id;
+          it->second = db_slice.FromAbsoluteTime(ms);
+
+          DCHECK_EQ(current_gen_id, db_slice.expire_gen_id());
+          DCHECK_EQ(ms, db_slice.ExpireTime(it->second));
+
+          stats_.total_update_expire_calls++;
+        } else {
+          update_expire_state_->stale_entries++;
+        }
+      }
+    };
+
+    auto& expire_table = db_slice.GetDBTable(update_expire_state_->db_index)->expire;
+    unsigned iters = 0;
+    do {
+      auto next = expire_table.Traverse(detail::DashCursor(update_expire_state_->cursor), cb);
+      if (next) {
+        update_expire_state_->cursor = next.token();
+      } else {
+        // finished this db, move to the next
+        update_expire_state_->cursor = 0;
+        ++update_expire_state_->db_index;
+        while (update_expire_state_->db_index < db_slice.db_array_size() &&
+               !db_slice.IsDbValid(update_expire_state_->db_index)) {
+          ++update_expire_state_->db_index;
+        }
+      }
+    } while (update_expire_state_->cursor && ++iters < 100);
+  }
+
+  if (update_expire_state_->db_index >= db_slice.db_array_size()) {
+    if (update_expire_state_->stale_entries == 0) {
+      // We went over all the items and not stale items were found, we are done.
+      delete update_expire_state_;
+      update_expire_state_ = nullptr;
+      return kRunAtLowPriority;
+    }
+
+    // Repeat the process if we found stale entries to update.
+    *update_expire_state_ = {};
+  }
+
+  return 5;  // run again soon, moderate frequency.
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
@@ -347,6 +440,8 @@ void EngineShard::Shutdown() {
 
 void EngineShard::StopPeriodicFiber() {
   ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
+  ProactorBase::me()->RemoveOnIdleTask(update_expire_base_task_);
+
   fiber_heartbeat_periodic_done_.Notify();
   if (fiber_heartbeat_periodic_.IsJoinable()) {
     fiber_heartbeat_periodic_.Join();
@@ -394,6 +489,7 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
     RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
   });
   defrag_task_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
+  update_expire_base_task_ = pb->AddOnIdleTask([this]() { return UpdateExpiresTask(); });
 }
 
 void EngineShard::StartPeriodicShardHandlerFiber(util::ProactorBase* pb,
@@ -605,8 +701,10 @@ void EngineShard::Heartbeat() {
 
   // TODO: iterate over all namespaces
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
+
   // Skip heartbeat if we are serializing a big value
   static auto start = std::chrono::system_clock::now();
+
   // Skip heartbeat if global transaction is in process.
   // This is determined by attempting to check if shard lock can be acquired.
   const bool can_acquire_global_lock = shard_lock()->Check(IntentLock::Mode::EXCLUSIVE);
@@ -620,6 +718,7 @@ void EngineShard::Heartbeat() {
     }
     return;
   }
+
   start = std::chrono::system_clock::now();
 
   if (!IsReplica()) {  // Never run expiry/evictions on replica.
