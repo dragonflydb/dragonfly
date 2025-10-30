@@ -35,23 +35,10 @@ void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
   string scratch;
   auto cb = [&](PrimeTable::iterator it) {
     const PrimeValue& pv = it->second;
-    if (pv.ObjType() != index.GetObjCode())
-      return;
-
     string_view key = it->first.GetSlice(&scratch);
 
-    // Empty prefixes means match all keys
-    if (!index.prefixes.empty()) {
-      bool matches_prefix = false;
-      for (const auto& prefix : index.prefixes) {
-        if (key.rfind(prefix, 0) == 0) {
-          matches_prefix = true;
-          break;
-        }
-      }
-      if (!matches_prefix)
-        return;
-    }
+    if (!index.Matches(key, pv.ObjType()))
+      return;
 
     auto accessor = GetAccessor(op_args.db_cntx, pv);
     f(key, *accessor);
