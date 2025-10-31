@@ -290,11 +290,12 @@ TEST_F(SearchFamilyTest, InfoIndex) {
   }
 
   auto info = Run({"ft.info", "idx-1"});
-  EXPECT_THAT(info,
-              IsArray(_, _, _, IsArray("key_type", "HASH", "prefix", "doc-", "default_score", 1),
-                      "index_options", RespArray(IsEmpty()), "attributes",
-                      IsArray(IsArray("identifier", "name", "attribute", "name", "type", "TEXT")),
-                      "num_docs", IntArg(15)));
+  EXPECT_THAT(
+      info,
+      IsArray(_, _, _, IsArray("key_type", "HASH", "prefixes", IsArray("doc-"), "default_score", 1),
+              "index_options", RespArray(IsEmpty()), "attributes",
+              IsArray(IsArray("identifier", "name", "attribute", "name", "type", "TEXT")),
+              "num_docs", IntArg(15)));
 }
 
 TEST_F(SearchFamilyTest, Stats) {
