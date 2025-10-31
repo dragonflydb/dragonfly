@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "server/tiering/disk_storage.h"
+#include "server/tiering/entry_map.h"
 
 namespace dfly::tiering {
 
@@ -84,12 +85,10 @@ class SmallBins {
   BinId last_bin_id_ = 0;
 
   unsigned current_bin_bytes_ = 0;
-  absl::flat_hash_map<std::pair<DbIndex, std::string>, std::string> current_bin_;
+  tiering::EntryMap<std::string> current_bin_;
 
   // Pending stashes, their keys and value sizes
-  absl::flat_hash_map<unsigned /* id */,
-                      absl::flat_hash_map<std::pair<DbIndex, std::string> /* key*/, DiskSegment>>
-      pending_bins_;
+  absl::flat_hash_map<unsigned /* id */, tiering::EntryMap<DiskSegment>> pending_bins_;
 
   // Map of bins that were stashed and should be deleted when number of entries reaches 0
   absl::flat_hash_map<size_t /*offset*/, StashInfo> stashed_bins_;
