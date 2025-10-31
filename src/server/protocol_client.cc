@@ -220,25 +220,34 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
   return error_code{};
 }
 
-void ProtocolClient::CloseSocket() {
+void ProtocolClient::ShutdownSocketImpl(bool should_close) {
   unique_lock lk(sock_mu_);
   if (sock_) {
-    sock_->proactor()->Await([this] {
+    sock_->proactor()->Await([this, should_close] {
       if (sock_->IsOpen()) {
         auto ec = sock_->Shutdown(SHUT_RDWR);
         LOG_IF(ERROR, ec) << "Could not shutdown socket " << ec;
       }
-
-      auto ec = sock_->Close();  // Quietly close.
-      LOG_IF(WARNING, ec) << "Error closing socket " << ec << "/" << ec.message();
+      if (should_close) {
+        auto ec = sock_->Close();  // Quietly close.
+        LOG_IF(WARNING, ec) << "Error closing socket " << ec << "/" << ec.message();
+      }
     });
   }
+}
+
+void ProtocolClient::CloseSocket() {
+  return ShutdownSocketImpl(true);
+}
+
+void ProtocolClient::ShutdownSocket() {
+  return ShutdownSocketImpl(false);
 }
 
 void ProtocolClient::DefaultErrorHandler(const GenericError& err) {
   LOG(WARNING) << "Socket error: " << err.Format() << " in " << server_context_.Description()
                << ", socket info: " << GetSocketInfo(sock_ ? sock_->native_handle() : -1);
-  CloseSocket();
+  ShutdownSocket();
 }
 
 io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(base::IoBuf* buffer,

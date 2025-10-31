@@ -40,7 +40,15 @@ class ProtocolClient {
   ProtocolClient(std::string master_host, uint16_t port);
   virtual ~ProtocolClient();
 
-  void CloseSocket();  // Close replica sockets.
+  // First Shutdown() the socket and immediately Close() it.
+  // Any attempt for IO in the socket after Close() will crash with CHECK fail.
+  void CloseSocket();
+
+  // Shutdown the underline socket but do not Close() it. By decoupling this, api
+  // callers can shutdown the socket, wait for the relevant flows to gracefully exit
+  // (by observing during an IO operation that the socket was shut down) and then finally
+  // Close() the socket.
+  void ShutdownSocket();
 
   uint64_t LastIoTime() const;
   void TouchIoTime();
@@ -116,6 +124,8 @@ class ProtocolClient {
 
  private:
   std::error_code Recv(util::FiberSocketBase* input, base::IoBuf* dest);
+
+  void ShutdownSocketImpl(bool should_close);
 
   ServerContext server_context_;
 
