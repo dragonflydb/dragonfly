@@ -129,6 +129,7 @@ class AclFamily final {
                                       {"SCRIPTING", SCRIPTING},
                                       {"BLOOM", BLOOM},
                                       {"FT_SEARCH", FT_SEARCH},
+                                      {"SEARCH", FT_SEARCH},  // Alias for FT_SEARCH
                                       {"THROTTLE", THROTTLE},
                                       {"JSON", JSON},
                                       {"ALL", ALL}};
