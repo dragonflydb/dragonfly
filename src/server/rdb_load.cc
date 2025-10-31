@@ -2804,7 +2804,10 @@ void RdbLoader::LoadScriptFromAux(string&& body) {
   }
 }
 
-void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
+namespace {
+
+void LoadSearchCommandFromAux(Service* service, string&& def, string_view command_name,
+                              string_view error_context) {
   facade::CapturingReplyBuilder crb{};
   ConnectionContext cntx{nullptr, nullptr};
   cntx.is_replicating = true;
@@ -2823,60 +2826,33 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   auto res = parser.Parse(buffer, &consumed, &resp_vec);
 
   if (res != facade::RedisParser::Result::OK) {
-    LOG(ERROR) << "Bad index definition: " << def;
+    LOG(ERROR) << "Bad " << error_context << ": " << def;
     return;
   }
 
-  // Prepend FT.CREATE to index definiton
   CmdArgVec arg_vec;
   facade::RespExpr::VecToArgList(resp_vec, &arg_vec);
-  string ft_create = "FT.CREATE";
-  arg_vec.insert(arg_vec.begin(), MutableSlice{ft_create.data(), ft_create.size()});
 
-  service_->DispatchCommand(absl::MakeSpan(arg_vec), &crb, &cntx);
+  // Prepend command name (FT.CREATE or FT.SYNUPDATE)
+  string cmd_str{command_name};
+  arg_vec.insert(arg_vec.begin(), MutableSlice{cmd_str.data(), cmd_str.size()});
+
+  service->DispatchCommand(absl::MakeSpan(arg_vec), &crb, &cntx);
 
   auto response = crb.Take();
   if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
-    LOG(ERROR) << "Bad index definition: " << def << " " << err->first;
+    LOG(ERROR) << "Bad " << error_context << ": " << def << " " << err->first;
   }
 }
 
+}  // namespace
+
+void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
+  LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition");
+}
+
 void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
-  facade::CapturingReplyBuilder crb{};
-  ConnectionContext cntx{nullptr, nullptr};
-  cntx.is_replicating = true;
-  cntx.journal_emulated = true;
-  cntx.skip_acl_validation = true;
-  cntx.ns = &namespaces->GetDefaultNamespace();
-
-  uint32_t consumed = 0;
-  facade::RespVec resp_vec;
-  facade::RedisParser parser;
-
-  // Prepend a whitespace so names starting with ':' are treated as names, not RESP tokens.
-  def.insert(def.begin(), ' ');
-  def += "\r\n";  // RESP terminator
-  io::MutableBytes buffer{reinterpret_cast<uint8_t*>(def.data()), def.size()};
-  auto res = parser.Parse(buffer, &consumed, &resp_vec);
-
-  if (res != facade::RedisParser::Result::OK) {
-    LOG(ERROR) << "Bad synonym definition: " << def;
-    return;
-  }
-
-  CmdArgVec arg_vec;
-  facade::RespExpr::VecToArgList(resp_vec, &arg_vec);
-
-  // Prepend FT.SYNUPDATE
-  string command_name = "FT.SYNUPDATE";
-  arg_vec.insert(arg_vec.begin(), MutableSlice{command_name.data(), command_name.size()});
-
-  service_->DispatchCommand(absl::MakeSpan(arg_vec), &crb, &cntx);
-
-  auto response = crb.Take();
-  if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
-    LOG(ERROR) << "Bad synonym definition: " << def << " " << err->first;
-  }
+  LoadSearchCommandFromAux(service_, std::move(def), "FT.SYNUPDATE", "synonym definition");
 }
 
 void RdbLoader::PerformPostLoad(Service* service) {
