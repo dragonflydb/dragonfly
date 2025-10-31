@@ -2482,6 +2482,8 @@ error_code RdbLoader::HandleAux() {
     /* Just ignored. */
   } else if (auxkey == "search-index") {
     LoadSearchIndexDefFromAux(std::move(auxval));
+  } else if (auxkey == "search-synonyms") {
+    LoadSearchIndexDefFromAux(std::move(auxval));
   } else if (auxkey == "shard-count") {
     uint32_t shard_count;
     if (absl::SimpleAtoi(auxval, &shard_count)) {
