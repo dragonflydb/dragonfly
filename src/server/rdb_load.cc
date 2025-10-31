@@ -2827,12 +2827,11 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
     return;
   }
 
+  // Prepend FT.CREATE to index definiton
   CmdArgVec arg_vec;
   facade::RespExpr::VecToArgList(resp_vec, &arg_vec);
-
-  // Prepend FT.CREATE
-  string command_name = "FT.CREATE";
-  arg_vec.insert(arg_vec.begin(), MutableSlice{command_name.data(), command_name.size()});
+  string ft_create = "FT.CREATE";
+  arg_vec.insert(arg_vec.begin(), MutableSlice{ft_create.data(), ft_create.size()});
 
   service_->DispatchCommand(absl::MakeSpan(arg_vec), &crb, &cntx);
 
