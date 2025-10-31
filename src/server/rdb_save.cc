@@ -1378,12 +1378,9 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
         const auto& synonym_groups = index->GetSynonyms().GetGroups();
         for (const auto& [group_id, terms] : synonym_groups) {
           if (!terms.empty()) {
-            // Convert set<string> to vector for joining
-            std::vector<std::string_view> terms_vec(terms.begin(), terms.end());
-
-            // Format: "SYNUPDATE index_name group_id term1 term2 term3"
-            std::string syn_cmd = absl::StrCat("SYNUPDATE ", index_name, " ", group_id, " ",
-                                               absl::StrJoin(terms_vec, " "));
+            // Format: "index_name group_id term1 term2 term3"
+            std::string syn_cmd =
+                absl::StrCat(index_name, " ", group_id, " ", absl::StrJoin(terms, " "));
 
             search_synonyms.emplace_back(std::move(syn_cmd));
           }

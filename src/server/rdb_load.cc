@@ -2483,7 +2483,7 @@ error_code RdbLoader::HandleAux() {
   } else if (auxkey == "search-index") {
     LoadSearchIndexDefFromAux(std::move(auxval));
   } else if (auxkey == "search-synonyms") {
-    LoadSearchIndexDefFromAux(std::move(auxval));
+    LoadSearchSynonymsFromAux(std::move(auxval));
   } else if (auxkey == "shard-count") {
     uint32_t shard_count;
     if (absl::SimpleAtoi(auxval, &shard_count)) {
@@ -2827,34 +2827,56 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
     return;
   }
 
-  // Determine command type and prepend appropriate prefix
   CmdArgVec arg_vec;
   facade::RespExpr::VecToArgList(resp_vec, &arg_vec);
 
-  // Check if this is a SYNUPDATE command or a CREATE command
-  string command_name;
-  if (!arg_vec.empty()) {
-    string_view first_token = facade::ToSV(arg_vec[0]);
-    if (first_token == "SYNUPDATE") {
-      // Replace first token with FT.SYNUPDATE
-      command_name = "FT.SYNUPDATE";
-      arg_vec[0] = MutableSlice{command_name.data(), command_name.size()};
-    } else {
-      // Prepend FT.CREATE for index definition
-      command_name = "FT.CREATE";
-      arg_vec.insert(arg_vec.begin(), MutableSlice{command_name.data(), command_name.size()});
-    }
-  } else {
-    // Default: prepend FT.CREATE
-    command_name = "FT.CREATE";
-    arg_vec.insert(arg_vec.begin(), MutableSlice{command_name.data(), command_name.size()});
-  }
+  // Prepend FT.CREATE
+  string command_name = "FT.CREATE";
+  arg_vec.insert(arg_vec.begin(), MutableSlice{command_name.data(), command_name.size()});
 
   service_->DispatchCommand(absl::MakeSpan(arg_vec), &crb, &cntx);
 
   auto response = crb.Take();
   if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
     LOG(ERROR) << "Bad index definition: " << def << " " << err->first;
+  }
+}
+
+void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
+  facade::CapturingReplyBuilder crb{};
+  ConnectionContext cntx{nullptr, nullptr};
+  cntx.is_replicating = true;
+  cntx.journal_emulated = true;
+  cntx.skip_acl_validation = true;
+  cntx.ns = &namespaces->GetDefaultNamespace();
+
+  uint32_t consumed = 0;
+  facade::RespVec resp_vec;
+  facade::RedisParser parser;
+
+  // Prepend a whitespace so names starting with ':' are treated as names, not RESP tokens.
+  def.insert(def.begin(), ' ');
+  def += "\r\n";  // RESP terminator
+  io::MutableBytes buffer{reinterpret_cast<uint8_t*>(def.data()), def.size()};
+  auto res = parser.Parse(buffer, &consumed, &resp_vec);
+
+  if (res != facade::RedisParser::Result::OK) {
+    LOG(ERROR) << "Bad synonym definition: " << def;
+    return;
+  }
+
+  CmdArgVec arg_vec;
+  facade::RespExpr::VecToArgList(resp_vec, &arg_vec);
+
+  // Prepend FT.SYNUPDATE
+  string command_name = "FT.SYNUPDATE";
+  arg_vec.insert(arg_vec.begin(), MutableSlice{command_name.data(), command_name.size()});
+
+  service_->DispatchCommand(absl::MakeSpan(arg_vec), &crb, &cntx);
+
+  auto response = crb.Take();
+  if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
+    LOG(ERROR) << "Bad synonym definition: " << def << " " << err->first;
   }
 }
 
