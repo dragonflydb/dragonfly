@@ -150,6 +150,9 @@ ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(int32_t, hz);
 ABSL_DECLARE_FLAG(bool, tls);
+#ifdef WITH_SEARCH
+ABSL_DECLARE_FLAG(bool, search_info_developer_visible);
+#endif
 ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
 ABSL_DECLARE_FLAG(int, replica_priority);
@@ -3246,11 +3249,78 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
            "errors]");
   }
 
+#ifdef WITH_SEARCH
   if (should_enter("SEARCH", true)) {
     append("search_memory", m.search_stats.used_memory);
     append("search_num_indices", m.search_stats.num_indices);
     append("search_num_entries", m.search_stats.num_entries);
+
+    // Developer-visible fields - controlled by search_info_developer_visible flag
+    // These fields provide detailed internal statistics useful for debugging and monitoring
+    bool show_developer_fields = absl::GetFlag(FLAGS_search_info_developer_visible);
+
+    if (show_developer_fields) {
+      // Queue and worker pool statistics
+      append("search_query_queue_size", 0);
+      append("search_writer_queue_size", 0);
+      append("search_worker_pool_suspend_cnt", 0);
+      append("search_writer_resumed_cnt", 0);
+      append("search_reader_resumed_cnt", 0);
+      append("search_writer_suspension_expired_cnt", 0);
+
+      // RDB save/load statistics
+      append("search_rdb_load_success_cnt", 0);
+      append("search_rdb_load_failure_cnt", 0);
+      append("search_rdb_save_success_cnt", 0);
+      append("search_rdb_save_failure_cnt", 0);
+
+      // Request statistics
+      append("search_successful_requests_count", 0);
+      append("search_failure_requests_count", 0);
+      append("search_hybrid_requests_count", 0);
+      append("search_inline_filtering_requests_count", 0);
+
+      // HNSW exception counters
+      append("search_hnsw_add_exceptions_count", 0);
+      append("search_hnsw_remove_exceptions_count", 0);
+      append("search_hnsw_modify_exceptions_count", 0);
+      append("search_hnsw_search_exceptions_count", 0);
+      append("search_hnsw_create_exceptions_count", 0);
+
+      // String interning statistics
+      append("search_string_interning_store_size", 0);
+      append("search_string_interning_memory_bytes", 0);
+      append("search_string_interning_memory_human", "0B");
+
+      // Vector externing statistics
+      append("search_vector_externing_entry_count", 0);
+      append("search_vector_externing_hash_extern_errors", 0);
+      append("search_vector_externing_generated_value_cnt", 0);
+      append("search_vector_externing_num_lru_entries", 0);
+      append("search_vector_externing_lru_promote_cnt", 0);
+      append("search_vector_externing_deferred_entry_cnt", 0);
+
+      // Cancel/timeout statistics
+      append("search_cancel-timeouts", 0);
+    }
+
+    // Always visible fields - public API
+    append("search_index_reclaimable_memory", 0);
+    append("search_number_of_attributes", 0);
+    append("search_number_of_indexes", m.search_stats.num_indices);
+    append("search_total_indexed_documents", m.search_stats.num_entries);
+    append("search_number_of_active_indexes", 0);
+    append("search_number_of_active_indexes_running_queries", 0);
+    append("search_number_of_active_indexes_indexing", 0);
+    append("search_total_active_write_threads", 0);
+    append("search_total_indexing_time", 0);
+    append("search_used_memory_bytes", m.search_stats.used_memory);
+    append("search_used_memory_human", HumanReadableNumBytes(m.search_stats.used_memory));
+    append("search_background_indexing_status", "idle");
+    append("search_used_read_cpu", 0.0);
+    append("search_used_write_cpu", 0.0);
   }
+#endif
 
   if (should_enter("ERRORSTATS", true)) {
     for (const auto& k_v : m.facade_stats.reply_stats.err_count) {

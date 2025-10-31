@@ -3330,11 +3330,14 @@ TEST_F(SearchFamilyTest, MAXSEARCHRESULTS) {
                             "Maximum number of results from ft.search command", "Value", "1"));
 
   resp = Run({"FT.CONFIG", "GET", "*"});
-  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1"));
+  EXPECT_THAT(resp, IsUnordArray("MAXSEARCHRESULTS", "1", "search_info_developer_visible", "true"));
 
   resp = Run({"FT.CONFIG", "HELP", "*"});
-  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "Description",
-                            "Maximum number of results from ft.search command", "Value", "1"));
+  EXPECT_THAT(resp, IsUnordArray(
+                        IsArray("search_info_developer_visible", "Description",
+                                "Enable developer-visible fields in INFO SEARCH", "Value", "true"),
+                        IsArray("MAXSEARCHRESULTS", "Description",
+                                "Maximum number of results from ft.search command", "Value", "1")));
 
   // restore normal value for other tests
   Run({"FT.CONFIG", "SET", "MAXSEARCHRESULTS", "1000000"});
