@@ -649,6 +649,242 @@ void DflyCmd::Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
   rb->SendOk();
 }
 
+namespace {
+
+struct ShardJournalChannel : journal::JournalConsumerInterface {
+  explicit ShardJournalChannel(fb2::EventCount& e, journal::Journal* journal)
+      : ec{e}, journal_{journal} {
+    CHECK(journal);
+    journal_cb_id = journal_->RegisterOnChange(this);
+  }
+
+  void Stop() {
+    journal_->UnregisterOnChange(journal_cb_id);
+  }
+
+  void ConsumeJournalChange(const journal::JournalChangeItem& item) override {
+    if (rpos == wpos) {
+      rpos = 0;
+      wpos = 0;
+      buffer = {};
+    }
+
+    buffer.emplace_back(item.journal_item.data);
+    wpos++;
+
+    ec.notifyAll();
+  }
+
+  void ThrottleIfNeeded() override {
+  }
+
+  std::vector<std::string> Read() {
+    CHECK_LT(rpos, wpos) << "Invalid read attempt";
+
+    auto i = rpos;
+    std::vector<std::string> result;
+    while (i < wpos) {
+      result.emplace_back(std::move(buffer[i++]));
+    }
+    rpos = i;
+    return result;
+  }
+
+  bool HasData() const {
+    return rpos < wpos;
+  }
+
+  fb2::EventCount& ec;
+  size_t rpos{0};
+  size_t wpos{0};
+  std::vector<std::string> buffer;
+  uint32_t journal_cb_id;
+  journal::Journal* journal_;
+};
+
+struct Pipe final : io::Source, io::Sink {
+  io::Result<unsigned long> ReadSome(const iovec* v, uint32_t len) override {
+    if (done) {
+      return 0;
+    }
+
+    ec.await([&] { return rpos < wpos || done; });
+    if (done && rpos == wpos) {
+      return 0;
+    }
+
+    auto bytes_read = 0;
+
+    while (rpos < wpos && len > 0) {
+      const auto chunk_size = min(wpos - rpos, v->iov_len);
+      std::copy_n(buffer.begin() + rpos, chunk_size, static_cast<char*>(v->iov_base));
+      bytes_read += chunk_size;
+      rpos += chunk_size;
+      ++v;
+      --len;
+    }
+
+    if (rpos == wpos && wpos == cap) {
+      rpos = 0;
+      wpos = 0;
+      ec.notifyAll();
+    }
+
+    return bytes_read;
+  }
+
+  io::Result<unsigned long> WriteSome(const iovec* v, uint32_t len) override {
+    CHECK(!done);
+    ec.await([&] { return wpos < cap || done; });
+    if (done && wpos == cap) {
+      return 0;
+    }
+
+    int bytes_written = 0;
+
+    while (wpos < cap && len > 0) {
+      const auto chunk_size = std::min(cap - wpos, v->iov_len);
+      auto p = static_cast<const char*>(v->iov_base);
+      std::copy_n(p, chunk_size, buffer.begin() + wpos);
+      bytes_written += chunk_size;
+      wpos += chunk_size;
+      ++v;
+      --len;
+    }
+
+    ec.notifyAll();
+    return bytes_written;
+  }
+
+  void Stop() {
+    done = true;
+    ec.notifyAll();
+  }
+
+  std::array<uint8_t, 1024> buffer;
+  size_t rpos{0};
+  size_t wpos{0};
+  size_t cap{1024};
+  std::atomic_bool done{false};
+  fb2::EventCount ec;
+};
+
+}  // namespace
+
+void DflyCmd::StartValkeySync() {
+  auto Write = [this](auto v) {
+    const auto buf = io::Bytes(reinterpret_cast<const unsigned char*>(v.data()), v.size());
+    CHECK(!_valkey_replica->conn->socket()->Write(buf));
+  };
+
+  CHECK(_valkey_replica.has_value()) << "There is no valkey replica to sync with";
+
+  // Since we do not know the size of rdb up front, use the EOF protocol, send
+  // "$EOF:<40-random-chars>\n" first, then the same 40 chars at the end
+  std::string eof_mark(40, 'X');
+  std::string eof_mark_with_prefix = absl::StrCat("$EOF:", eof_mark, "\n");
+
+  Write(eof_mark_with_prefix);
+
+  for (unsigned i = 0; i < shard_set->size(); ++i) {
+    Pipe p;
+    auto cb = [&] {
+      std::array<uint8_t, 128> backing;
+      const io::MutableBytes mb{backing};
+      while (!p.done) {
+        auto n = p.Read(mb);
+        if (!n.has_value() || n.value() == 0) {
+          break;
+        }
+        CHECK(!_valkey_replica->conn->socket()->Write(mb.subspan(0, n.value())));
+      }
+
+      if (auto n = p.Read(mb); n.has_value() && n.value()) {
+        CHECK(!_valkey_replica->conn->socket()->Write(mb.subspan(0, n.value())));
+      }
+    };
+    auto drain_fb = fb2::Fiber("replica-drain-fb", cb);
+
+    shard_set->Await(i, [&p, this, i] {
+      auto shard = EngineShard::tlocal();
+      RdbSaver saver{&p, SaveMode::SINGLE_SHARD, false, ""};
+      if (i == 0) {
+        CHECK(!saver.SaveHeader(saver.GetGlobalData(&sf_->service())));
+      }
+
+      saver.StartSnapshotInShard(false, &_valkey_replica->exec_st, shard);
+      bool skip_epilog = i < shard_set->size() - 1;
+      CHECK(!saver.WaitSnapshotInShard(shard, skip_epilog));
+      p.Stop();
+      VLOG(1) << "finished writing snapshot for shard " << shard->shard_id();
+    });
+
+    drain_fb.JoinIfNeeded();
+  }
+
+  Write(eof_mark);
+
+  // Stable sync
+  VLOG(1) << "Entering stable sync..";
+
+  std::vector<std::unique_ptr<ShardJournalChannel>> channels(shard_set->size());
+  fb2::EventCount ec;
+  JournalReader reader{nullptr, 0};
+
+  auto cb = [&channels, &ec, this](EngineShard* shard) {
+    auto& channel = channels[shard->shard_id()];
+    sf_->journal()->StartInThread();
+    channel.reset(new ShardJournalChannel(ec, sf_->journal()));
+    VLOG(1) << "Set channel for shard " << shard->shard_id();
+  };
+  shard_set->RunBlockingInParallel(cb);
+
+  RedisReplyBuilder rb{_valkey_replica->conn->socket()};
+  DbIndex current_dbid = std::numeric_limits<DbIndex>::max();
+
+  while (true) {
+    ec.await([&channels] {
+      return std::any_of(channels.begin(), channels.end(),
+                         [](const auto& channel) { return channel->HasData(); });
+    });
+    for (const auto& channel : channels) {
+      if (channel->HasData()) {
+        auto data = channel->Read();
+        auto total_size =
+            std::accumulate(data.begin(), data.end(), 0,
+                            [](auto currsum, const auto& str) { return currsum + str.size(); });
+        auto span = io::Bytes(reinterpret_cast<uint8_t*>(data.begin()->data()), total_size);
+        auto src = io::BytesSource{span};
+        reader.SetSource(&src);
+        while (true) {
+          auto entry = reader.ReadEntry();
+          if (!entry.has_value()) {
+            // We read all the commands in the buffer
+            CHECK_EQ(entry.error().value(), EIO);
+            break;
+          }
+
+          auto& parsed = entry.value();
+          if (parsed.dbid != current_dbid) {
+            VLOG(1) << "Database changed from " << current_dbid << " to " << parsed.dbid;
+            std::string parsed_dbid = std::to_string(parsed.dbid);
+            std::vector<std::string_view> select_cmd = {"SELECT", parsed_dbid};
+
+            VLOG(1) << "sending command: " << select_cmd;
+            rb.SendBulkStrArr(select_cmd);
+            current_dbid = parsed.dbid;
+          }
+
+          VLOG(1) << "sending command: " << parsed.ToString() << " of size " << parsed.cmd.cmd_len;
+
+          // valkey expects commands propagated as bulk array
+          rb.SendBulkStrArr(parsed.cmd.cmd_args);
+        }
+      }
+    }
+  }
+}
+
 OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, ExecutionState* exec_st,
                                         EngineShard* shard) {
   DCHECK(shard);
@@ -728,6 +964,12 @@ void DflyCmd::StartStableSyncInThread(FlowInfo* flow, ExecutionState* exec_st, E
       flow->streamer->Cancel();
     }
   };
+}
+
+void DflyCmd::CreateValkeySyncSession(facade::Connection* conn) {
+  CHECK(!_valkey_replica.has_value());
+  fb2::LockGuard lk(mu_);
+  _valkey_replica.emplace(conn, [](const GenericError&) {});
 }
 
 auto DflyCmd::CreateSyncSession(ConnectionState* state) -> std::pair<uint32_t, unsigned> {
