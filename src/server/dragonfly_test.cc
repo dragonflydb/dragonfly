@@ -575,9 +575,7 @@ TEST_F(DflyEngineTest, ZeroAllocationEviction) {
   int successful_sets = 0;
   for (int i = 0; i < 1000; ++i) {
     string key = StrCat(long_key_prefix, i);
-    // Use value >16 bytes to ensure it's not inline (kInlineLen=16)
-    string value = StrCat("value_", i, "_padding");  // >16 bytes, allocated
-    auto result = Run({"set", key, value});
+    auto result = Run({"set", key, to_string(i)});  // small integer value
     if (result == "OK") {
       keys.emplace_back(key);
       successful_sets++;
