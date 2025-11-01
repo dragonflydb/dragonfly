@@ -2482,6 +2482,8 @@ error_code RdbLoader::HandleAux() {
     /* Just ignored. */
   } else if (auxkey == "search-index") {
     LoadSearchIndexDefFromAux(std::move(auxval));
+  } else if (auxkey == "search-synonyms") {
+    LoadSearchSynonymsFromAux(std::move(auxval));
   } else if (auxkey == "shard-count") {
     uint32_t shard_count;
     if (absl::SimpleAtoi(auxval, &shard_count)) {
@@ -2802,7 +2804,10 @@ void RdbLoader::LoadScriptFromAux(string&& body) {
   }
 }
 
-void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
+namespace {
+
+void LoadSearchCommandFromAux(Service* service, string&& def, string_view command_name,
+                              string_view error_context) {
   facade::CapturingReplyBuilder crb{};
   ConnectionContext cntx{nullptr, nullptr};
   cntx.is_replicating = true;
@@ -2821,22 +2826,45 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   auto res = parser.Parse(buffer, &consumed, &resp_vec);
 
   if (res != facade::RedisParser::Result::OK) {
-    LOG(ERROR) << "Bad index definition: " << def;
+    LOG(ERROR) << "Bad " << error_context << ": " << def;
     return;
   }
 
-  // Prepend FT.CREATE to index definiton
   CmdArgVec arg_vec;
   facade::RespExpr::VecToArgList(resp_vec, &arg_vec);
-  string ft_create = "FT.CREATE";
-  arg_vec.insert(arg_vec.begin(), MutableSlice{ft_create.data(), ft_create.size()});
 
-  service_->DispatchCommand(absl::MakeSpan(arg_vec), &crb, &cntx);
+  // Prepend command name (FT.CREATE or FT.SYNUPDATE)
+  string cmd_str{command_name};
+  arg_vec.insert(arg_vec.begin(), MutableSlice{cmd_str.data(), cmd_str.size()});
+
+  service->DispatchCommand(absl::MakeSpan(arg_vec), &crb, &cntx);
 
   auto response = crb.Take();
   if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
-    LOG(ERROR) << "Bad index definition: " << def << " " << err->first;
+    LOG(ERROR) << "Bad " << error_context << ": " << def << " " << err->first;
   }
+}
+
+}  // namespace
+
+// Static storage for synonym commands collected from all RdbLoader instances
+std::vector<std::string> RdbLoader::pending_synonym_cmds_;
+
+std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
+  std::vector<std::string> result;
+  result.swap(pending_synonym_cmds_);
+  return result;
+}
+
+void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
+  // FT.CREATE command - execute immediately during RDB load
+  LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition");
+}
+
+void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
+  // FT.SYNUPDATE command - defer execution until after RebuildAllIndices
+  // Add to shared static vector (may be called from multiple RdbLoader instances)
+  pending_synonym_cmds_.push_back(std::move(def));
 }
 
 void RdbLoader::PerformPostLoad(Service* service) {
@@ -2849,6 +2877,12 @@ void RdbLoader::PerformPostLoad(Service* service) {
     es->search_indices()->RebuildAllIndices(
         OpArgs{es, nullptr, DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}});
   });
+
+  // Now execute all pending synonym commands after indices are rebuilt
+  std::vector<std::string> synonym_cmds = TakePendingSynonymCommands();
+  for (auto& syn_cmd : synonym_cmds) {
+    LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
+  }
 }
 
 }  // namespace dfly

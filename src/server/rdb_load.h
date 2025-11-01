@@ -328,7 +328,14 @@ class RdbLoader : protected RdbLoaderBase {
   // issues an FT.CREATE call, but does not start indexing
   void LoadSearchIndexDefFromAux(std::string&& value);
 
+  // Load synonyms from RESP string and issue FT.SYNUPDATE call
+  void LoadSearchSynonymsFromAux(std::string&& value);
+
+  // Get pending synonym commands collected from all RdbLoader instances
+  static std::vector<std::string> TakePendingSynonymCommands();
+
   Service* service_;
+  static std::vector<std::string> pending_synonym_cmds_;
   std::string snapshot_id_;
   bool override_existing_keys_ = false;
   bool load_unowned_slots_ = false;

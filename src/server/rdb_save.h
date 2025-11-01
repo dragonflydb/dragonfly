@@ -75,9 +75,10 @@ class RdbSaver {
  public:
   // Global data which doesn't belong to shards and is serialized in header
   struct GlobalData {
-    const StringVec lua_scripts;     // bodies of lua scripts
-    const StringVec search_indices;  // ft.create commands to re-create search indices
-    size_t table_used_memory = 0;    // total memory used by all tables in all shards
+    const StringVec lua_scripts;      // bodies of lua scripts
+    const StringVec search_indices;   // ft.create commands to re-create search indices
+    const StringVec search_synonyms;  // ft.synupdate commands to restore synonyms
+    size_t table_used_memory = 0;     // total memory used by all tables in all shards
   };
 
   // single_shard - true means that we run RdbSaver on a single shard and we do not use
