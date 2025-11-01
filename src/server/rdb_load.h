@@ -331,8 +331,7 @@ class RdbLoader : protected RdbLoaderBase {
   // Load synonyms from RESP string and issue FT.SYNUPDATE call
   void LoadSearchSynonymsFromAux(std::string&& value);
 
-  // Store synonym commands to be executed after RebuildAllIndices in PerformPostLoad
-  static void AddPendingSynonymCommand(std::string cmd);
+  // Get pending synonym commands collected from all RdbLoader instances
   static std::vector<std::string> TakePendingSynonymCommands();
 
   Service* service_;

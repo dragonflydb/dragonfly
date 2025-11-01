@@ -2847,12 +2847,8 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
 
 }  // namespace
 
-// Static storage for synonym commands to be executed after RebuildAllIndices
+// Static storage for synonym commands collected from all RdbLoader instances
 std::vector<std::string> RdbLoader::pending_synonym_cmds_;
-
-void RdbLoader::AddPendingSynonymCommand(std::string cmd) {
-  pending_synonym_cmds_.push_back(std::move(cmd));
-}
 
 std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
   std::vector<std::string> result;
@@ -2867,7 +2863,8 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
 
 void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
   // FT.SYNUPDATE command - defer execution until after RebuildAllIndices
-  AddPendingSynonymCommand(std::move(def));
+  // Add to shared static vector (may be called from multiple RdbLoader instances)
+  pending_synonym_cmds_.push_back(std::move(def));
 }
 
 void RdbLoader::PerformPostLoad(Service* service) {
