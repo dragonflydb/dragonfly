@@ -35,8 +35,6 @@
 #include "src/core/overloaded.h"
 
 ABSL_FLAG(bool, search_reject_legacy_field, true, "FT.AGGREGATE: Reject legacy field names.");
-ABSL_FLAG(bool, search_info_developer_visible, true,
-          "Enable developer-visible fields in INFO SEARCH");
 
 ABSL_FLAG(size_t, MAXSEARCHRESULTS, 1000000, "Maximum number of results from ft.search command");
 namespace dfly {

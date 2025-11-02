@@ -1014,7 +1014,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("send_timeout");
   config_registry.RegisterMutable("managed_service_info");
 #ifdef WITH_SEARCH
-  config_registry.RegisterMutable("search_info_developer_visible");
   config_registry.RegisterMutable("MAXSEARCHRESULTS");
 #endif
 
