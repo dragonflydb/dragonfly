@@ -61,7 +61,7 @@ class TieredStorage {
                     std::function<T(std::string*)> modf);
 
   // Stash value. Sets IO_PENDING flag and unsets it on error or when finished.
-  // Returns optional future for backpressure if `provide_bp` is set and conditons are met.
+  // Returns optional future for backpressure if `provide_bp` is set and conditions are met.
   std::optional<util::fb2::Future<bool>> TryStash(DbIndex dbid, std::string_view key,
                                                   PrimeValue* value, bool provide_bp = false);
 
