@@ -1071,7 +1071,7 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
 
   // If backpressure was provided, wait with reasonable limit (to avoid client deadlocking).
   if (backpressure) {
-    std::move(backpressure)->GetFor(10ms);
+    std::move(backpressure)->GetFor(5ms);
   }
 
   if (sparams.flags & SetCmd::SET_GET) {
