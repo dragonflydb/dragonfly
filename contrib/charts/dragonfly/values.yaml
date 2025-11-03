@@ -5,6 +5,9 @@
 # -- Number of replicas to deploy
 replicaCount: 1
 
+# -- Valid values are "deployment" or "statefulset".
+mode: "deployment"
+
 image:
   # -- Container Image Registry to pull the image from
   repository: docker.dragonflydb.io/dragonflydb/dragonfly
