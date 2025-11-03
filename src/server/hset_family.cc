@@ -5,6 +5,9 @@
 #include "server/hset_family.h"
 
 #include "server/family_utils.h"
+#include "server/tiered_storage.h"
+#include "server/tiering/decoders.h"
+#include "server/tiering/serialized_map.h"
 
 extern "C" {
 #include "redis/listpack.h"
@@ -54,8 +57,16 @@ using container_utils::GetStringMap;
 
 struct HMapWrap {
  private:
-  template <typename F> decltype(auto) visit2(F f) const {  // Cast T* to T&
-    return std::visit(Overloaded{[&f](StringMap* s) { return f(*s); }, f}, impl_);
+  template <typename F> decltype(auto) VisitRef(F f) const {  // Cast T* to T&
+    return std::visit(Overloaded{[&f](auto* s) { return f(*s); }, f}, impl_);
+  }
+
+  template <typename F> decltype(auto) VisitMut(F& f) {
+    auto serialized_bust = [&](tiering::SerializedMap* s) {
+      ABSL_UNREACHABLE();                          // Serialized maps should never be mutable
+      return f(static_cast<StringMap*>(nullptr));  // purely for same return type
+    };
+    return std::visit(Overloaded{f, serialized_bust}, impl_);
   }
 
  public:
@@ -66,17 +77,21 @@ struct HMapWrap {
       impl_ = GetStringMap(pv, db_cntx);
   }
 
+  explicit HMapWrap(tiering::SerializedMap* sm) : impl_{sm} {
+  }
+
   size_t Length() const {
     Overloaded ov{
         [](StringMap* s) { return s->UpperBoundSize(); },
         [](const detail::ListpackWrap& lw) { return lw.size(); },
+        [](tiering::SerializedMap* s) { return s->size(); },
     };
     return visit(ov, impl_);
   }
 
   auto Find(std::string_view key) const {
     using RT = optional<pair<string_view, string_view>>;
-    return visit2([key](auto& h) -> RT {
+    return VisitRef([key](auto& h) -> RT {
       if (auto it = h.Find(key); it != h.end())
         return *it;
       return std::nullopt;
@@ -86,23 +101,23 @@ struct HMapWrap {
   auto Range() const {
     auto f = [](auto p) -> pair<string_view, string_view> { return p; };  // implicit conversion
     using IT = base::it::CompoundIterator<decltype(f), detail::ListpackWrap::Iterator,
-                                          StringMap::iterator>;
+                                          StringMap::iterator, tiering::SerializedMap::Iterator>;
     auto cb = [f](auto& h) -> std::pair<IT, IT> {
       return {{f, h.begin()}, {std::nullopt, h.end()}};
     };
-    return base::it::Range(visit2(cb));
+    return base::it::Range(VisitRef(cb));
   }
 
   bool Erase(std::string_view key) {
     Overloaded ov{[key](StringMap* s) { return s->Erase(key); },
                   [key](detail::ListpackWrap& lw) { return lw.Delete(key); }};
-    return visit(ov, impl_);
+    return VisitMut(ov);
   }
 
   void AddOrUpdate(std::string_view key, std::string_view value) {
     Overloaded ov{[&](StringMap* sm) { sm->AddOrUpdate(key, value); },
                   [&](detail::ListpackWrap& lw) { lw.Insert(key, value, false); }};
-    visit(ov, impl_);
+    VisitMut(ov);
   }
 
   void Launder(PrimeValue& pv) {
@@ -110,7 +125,7 @@ struct HMapWrap {
         [](StringMap* s) {},
         [&](detail::ListpackWrap& lw) { pv.SetRObjPtr(lw.GetPointer()); },
     };
-    visit(ov, impl_);
+    VisitMut(ov);
   }
 
   template <typename T> optional<T> Get() const {
@@ -120,8 +135,8 @@ struct HMapWrap {
   }
 
  private:
-  variant<StringMap*, detail::ListpackWrap> impl_;
-};
+  variant<StringMap*, tiering::SerializedMap*, detail::ListpackWrap> impl_;
+};  // namespace dfly
 
 // Delete if length is zero
 void DeleteHw(HMapWrap& hw, const OpArgs& op_args, std::string_view key) {
@@ -139,20 +154,51 @@ auto KeyAndArgs(Transaction* t, EngineShard* es) {
   return std::make_pair(t->GetShardArgs(es->shard_id()).Front(), t->GetOpArgs(es));
 }
 
+template <typename T> using CbResult = OpResult<std::variant<T, ::util::fb2::Future<OpResult<T>>>>;
+
+template <typename T> OpResult<T> Unwrap(CbResult<T> result) {
+  if (!result.ok())
+    return result.status();
+
+  Overloaded ov{
+      [](T res) -> OpResult<T> { return std::move(res); },
+      [](util::fb2::Future<OpResult<T>> fut) -> OpResult<T> { return fut.Get(); },
+  };
+  return visit(ov, std::move(result).value());
+}
+
 // Wrap read-only handler
 template <typename F> auto WrapRO(F&& f) {
-  using RT = std::invoke_result_t<F, HMapWrap>;
+  using T = typename std::invoke_result_t<F, HMapWrap>::Type;
+  using VT = std::variant<T, util::fb2::Future<OpResult<T>>>;
+  using RT = OpResult<VT>;
+
   return [f = std::forward<F>(f)](Transaction* t, EngineShard* es) -> RT {
     auto [key, op_args] = KeyAndArgs(t, es);
     auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
     RETURN_ON_BAD_STATUS(it_res);
 
-    HMapWrap hw{(*it_res)->second, op_args.db_cntx};
+    auto& pv = (*it_res)->second;
+    if (pv.IsExternal() && !pv.IsCool()) {
+      util::fb2::Future<OpResult<T>> fut;
+      auto* ts = es->tiered_storage();
+      // auto cb = [fut, f = std::move(f)](io::Result<tiering::SerializedMapDecoder*> res) mutable {
+      //   HMapWrap hw{res.value()->Get()};
+      //   fut.Resolve(f(hw));
+      // };
+      std::function<void(io::Result<tiering::SerializedMapDecoder*>)> cb(nullptr);
+      ts->Read(op_args.db_cntx.db_index, key, pv, tiering::SerializedMapDecoder{}, cb);
+      return VT{std::move(fut)};
+    }
+
+    HMapWrap hw{pv, op_args.db_cntx};
     auto res = f(hw);
 
     if (hw.Length() == 0)  // Expirations might have emptied it
       DeleteHw(hw, op_args, key);
-    return res;
+
+    RETURN_ON_BAD_STATUS(res);
+    return VT{std::move(res).value()};
   };
 }
 
@@ -452,7 +498,7 @@ void HGetGeneric(CmdArgList args, uint8_t getall_mask, Transaction* tx, SinkRepl
     return res;
   };
 
-  OpResult<vector<string>> result = tx->ScheduleSingleHopT(WrapRO(cb));
+  OpResult<vector<string>> result = Unwrap(tx->ScheduleSingleHopT(WrapRO(cb)));
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   switch (result.status()) {
     case OpStatus::OK:
@@ -611,7 +657,7 @@ void HSetFamily::HGet(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::KEY_NOTFOUND;
   };
 
-  OpResult<string> result = cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb));
+  OpResult<string> result = Unwrap(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb)));
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   switch (result.status()) {
     case OpStatus::OK:
@@ -627,7 +673,7 @@ void HSetFamily::HMGet(CmdArgList args, const CommandContext& cmd_cntx) {
   auto fields = args.subspan(1);
   auto cb = [fields](const HMapWrap& hw) { return OpHMGet(hw, fields); };
 
-  OpResult<vector<OptStr>> result = cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb));
+  OpResult<vector<OptStr>> result = Unwrap(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb)));
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   switch (result.status()) {
     case OpStatus::OK:
@@ -651,19 +697,19 @@ void HSetFamily::HStrLen(CmdArgList args, const CommandContext& cmd_cntx) {
       return it->second.length();
     return OpStatus::KEY_NOTFOUND;
   };
-  HSetReplies{cmd_cntx.rb}.Send(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb)));
+  HSetReplies{cmd_cntx.rb}.Send(Unwrap(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb))));
 }
 
 void HSetFamily::HLen(CmdArgList args, const CommandContext& cmd_cntx) {
   auto cb = [](const HMapWrap& hw) -> OpResult<uint32_t> { return hw.Length(); };
-  HSetReplies{cmd_cntx.rb}.Send(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb)));
+  HSetReplies{cmd_cntx.rb}.Send(Unwrap(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb))));
 }
 
 void HSetFamily::HExists(CmdArgList args, const CommandContext& cmd_cntx) {
   auto cb = [field = args[1]](const HMapWrap& hw) -> OpResult<uint32_t> {
     return hw.Find(field) ? 1 : 0;
   };
-  HSetReplies{cmd_cntx.rb}.Send(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb)));
+  HSetReplies{cmd_cntx.rb}.Send(Unwrap(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb))));
 }
 
 void HSetFamily::HIncrBy(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -768,7 +814,7 @@ void HSetFamily::HScan(CmdArgList args, const CommandContext& cmd_cntx) {
   const ScanOpts& scan_op = ops.value();
   auto cb = [&](const HMapWrap& hw) { return OpScan(hw, &cursor, scan_op); };
 
-  OpResult<StringVec> result = cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb));
+  OpResult<StringVec> result = Unwrap(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb)));
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   switch (result.status()) {
     case OpStatus::KEY_NOTFOUND:

@@ -4,6 +4,8 @@
 
 #include "server/tiering/decoders.h"
 
+#include "server/tiering/serialized_map.h"
+
 namespace dfly::tiering {
 
 std::unique_ptr<Decoder> BareDecoder::Clone() const {
@@ -59,6 +61,23 @@ std::string_view StringDecoder::Read() const {
 std::string* StringDecoder::Write() {
   modified_ = true;
   return value_.GetMutable();
+}
+
+std::unique_ptr<Decoder> SerializedMapDecoder::Clone() const {
+  return std::make_unique<SerializedMapDecoder>();
+}
+
+void SerializedMapDecoder::Initialize(std::string_view slice) {
+  map_ = std::make_unique<SerializedMap>(slice);
+  estimated_mem_usage = slice.size() + map_->size() * 8 /* bytes per ptr */;
+}
+
+void SerializedMapDecoder::Upload(CompactObj* obj) {
+  ABSL_UNREACHABLE();
+}
+
+SerializedMap* SerializedMapDecoder::Get() const {
+  return map_.get();
 }
 
 }  // namespace dfly::tiering

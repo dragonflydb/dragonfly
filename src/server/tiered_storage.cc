@@ -324,6 +324,18 @@ void TieredStorage::Close() {
   op_manager_->Close();
 }
 
+template <typename D>
+void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                         const D& decoder, std::function<void(io::Result<D*>)> cb) {
+  DCHECK(value.IsExternal());
+  DCHECK(!value.IsCool());
+  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), decoder, std::move(cb));
+}
+
+template void TieredStorage::Read(DbIndex, std::string_view, const PrimeValue&,
+                                  const tiering::SerializedMapDecoder&,
+                                  std::function<void(io::Result<tiering::SerializedMapDecoder*>)>);
+
 TieredStorage::TResult<string> TieredStorage::Read(DbIndex dbid, string_view key,
                                                    const PrimeValue& value) {
   util::fb2::Future<io::Result<string>> fut;
