@@ -94,16 +94,20 @@ class ClusterFamily {
 
   void DflyMigrateAck(CmdArgList args, SinkReplyBuilder* builder);
 
-  std::shared_ptr<IncomingSlotMigration> GetIncomingMigration(std::string_view source_id)
+  IncomingSlotMigration* GetIncomingMigration(std::string_view source_id)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
 
   void StartNewSlotMigrations(const ClusterConfig& new_config);
 
   // must be destroyed excluded set_config_mu and migration_mu_ locks
   struct PreparedToRemoveOutgoingMigrations {
-    std::vector<std::shared_ptr<OutgoingMigration>> migrations;
+    std::vector<std::unique_ptr<OutgoingMigration>> migrations;
     SlotRanges slot_ranges;
-    ~PreparedToRemoveOutgoingMigrations() ABSL_LOCKS_EXCLUDED(migration_mu_, set_config_mu);
+    PreparedToRemoveOutgoingMigrations() = default;
+    PreparedToRemoveOutgoingMigrations(PreparedToRemoveOutgoingMigrations&&) = default;
+    PreparedToRemoveOutgoingMigrations& operator=(PreparedToRemoveOutgoingMigrations&&) = default;
+    ~PreparedToRemoveOutgoingMigrations()
+        ABSL_LOCKS_EXCLUDED(migration_mu_, set_config_mu) = default;
   };
 
   [[nodiscard]] PreparedToRemoveOutgoingMigrations TakeOutOutgoingMigrations(
@@ -114,11 +118,11 @@ class ClusterFamily {
 
   mutable util::fb2::Mutex migration_mu_;  // guard migrations operations
   // holds all incoming slots migrations that are currently in progress.
-  std::vector<std::shared_ptr<IncomingSlotMigration>> incoming_migrations_jobs_
+  std::vector<std::unique_ptr<IncomingSlotMigration>> incoming_migrations_jobs_
       ABSL_GUARDED_BY(migration_mu_);
 
   // holds all outgoing slots migrations that are currently in progress
-  std::vector<std::shared_ptr<OutgoingMigration>> outgoing_migration_jobs_
+  std::vector<std::unique_ptr<OutgoingMigration>> outgoing_migration_jobs_
       ABSL_GUARDED_BY(migration_mu_);
 
   std::optional<ClusterShardInfos> GetShardInfos(ConnectionContext* cntx) const;
