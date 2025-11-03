@@ -228,7 +228,9 @@ class EngineShard {
   struct EvictionTaskState {
     bool rss_eviction_enabled_ = true;
     bool track_deleted_bytes = false;
-    size_t deleted_bytes_before_rss_update = 0;
+    size_t acc_deleted_bytes_during_eviction = 0;  // Bytes that were deleted during eviction
+    size_t deleted_bytes_at_prev_eviction = 0;     // Bytes that were deleted in previous eviction
+    size_t shard_used_memory_at_prev_eviction = 0;
     size_t global_rss_memory_at_prev_eviction = 0;
   };
 
