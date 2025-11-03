@@ -58,6 +58,10 @@ nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string_view message) 
   return make_unexpected(ErrorReply{message, kSyntaxErrType});
 }
 
+string IndexNotFoundMsg(string_view index_name) {
+  return absl::StrCat("Index with name '", index_name, "' not found");
+}
+
 // Send error from parser or result
 // Returns false if no errors occured
 template <typename T>
@@ -207,10 +211,11 @@ ParseResult<bool> ParseOnOption(CmdArgParser* parser, DocIndex* index) {
 
 // PREFIX count prefix [prefix ...]
 ParseResult<bool> ParsePrefix(CmdArgParser* parser, DocIndex* index) {
-  if (!parser->Check("1")) {
-    return CreateSyntaxError("Multiple prefixes are not supported"sv);
+  size_t count = parser->Next<size_t>();
+  index->prefixes.reserve(count);
+  for (size_t i = 0; i < count; i++) {
+    index->prefixes.push_back(parser->Next<std::string>());
   }
-  index->prefix = parser->Next<std::string>();
   return true;
 }
 
@@ -1168,7 +1173,7 @@ void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) 
 
   DCHECK(num_deleted == 0u || num_deleted == shard_set->size());
   if (num_deleted == 0u)
-    return cmd_cntx.rb->SendError("-Unknown Index name");
+    return cmd_cntx.rb->SendError(IndexNotFoundMsg(idx_name));
   return cmd_cntx.rb->SendOk();
 }
 
@@ -1191,7 +1196,7 @@ void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
   if (num_notfound > 0u)
-    return rb->SendError("Unknown Index name");
+    return rb->SendError(IndexNotFoundMsg(idx_name));
 
   DCHECK(infos.front().base_index.schema.fields.size() ==
          infos.back().base_index.schema.fields.size());
@@ -1213,8 +1218,11 @@ void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
     rb->StartCollection(3, RedisReplyBuilder::MAP);
     rb->SendSimpleString("key_type");
     rb->SendSimpleString(info.base_index.type == DocIndex::JSON ? "JSON" : "HASH");
-    rb->SendSimpleString("prefix");
-    rb->SendSimpleString(info.base_index.prefix);
+    rb->SendSimpleString("prefixes");
+    rb->StartArray(info.base_index.prefixes.size());
+    for (const auto& prefix : info.base_index.prefixes) {
+      rb->SendBulkString(prefix);
+    }
     rb->SendSimpleString("default_score");
     rb->SendLong(1);
   }
@@ -1450,7 +1458,8 @@ void SearchFamily::FtTagVals(CmdArgList args, const CommandContext& cmd_cntx) {
     if (auto* index = es->search_indices()->GetIndex(index_name); index)
       shard_results[es->shard_id()] = index->GetTagVals(field_name);
     else
-      shard_results[es->shard_id()] = nonstd::make_unexpected(ErrorReply("-Unknown Index name"));
+      shard_results[es->shard_id()] =
+          nonstd::make_unexpected(ErrorReply(IndexNotFoundMsg(index_name)));
 
     return OpStatus::OK;
   });
@@ -1854,7 +1863,7 @@ void SearchFamily::Register(CommandRegistry* registry) {
       << CI{"FT.ALTER", CO::WRITE | CO::GLOBAL_TRANS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAlter)
       << CI{"FT.DROPINDEX", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
              FtDropIndex)
-      << CI{"FT.INFO", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
+      << CI{"FT.INFO", kReadOnlyMask, -2, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
       << CI{"FT.CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(
              FtConfig)
       // Underscore same as in RediSearch because it's "temporary" (long time already)

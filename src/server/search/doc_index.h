@@ -194,7 +194,7 @@ struct DocIndex {
 
   search::Schema schema;
   search::IndicesOptions options{};
-  std::string prefix{};
+  std::vector<std::string> prefixes{};
   DataType type{HASH};
 };
 

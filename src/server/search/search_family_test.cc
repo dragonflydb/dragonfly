@@ -215,7 +215,7 @@ TEST_F(SearchFamilyTest, CreateDropListIndex) {
 
   EXPECT_THAT(Run({"ft.create", "idx-1"}), ErrArg("Index already exists"));
 
-  EXPECT_THAT(Run({"ft.dropindex", "idx-100"}), ErrArg("Unknown Index name"));
+  EXPECT_THAT(Run({"ft.dropindex", "idx-100"}), ErrArg("Index with name 'idx-100' not found"));
 
   EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
   EXPECT_EQ(Run({"ft._list"}), "idx-3");
@@ -246,7 +246,7 @@ TEST_F(SearchFamilyTest, CreateDropDifferentDatabases) {
 
   // ft.dropindex must work from another database
   EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
-  EXPECT_THAT(Run({"ft.info", "idx-1"}), ErrArg("ERR Unknown Index name"));
+  EXPECT_THAT(Run({"ft.info", "idx-1"}), ErrArg("Index with name 'idx-1' not found"));
 }
 
 TEST_F(SearchFamilyTest, AlterIndex) {
@@ -290,11 +290,12 @@ TEST_F(SearchFamilyTest, InfoIndex) {
   }
 
   auto info = Run({"ft.info", "idx-1"});
-  EXPECT_THAT(info,
-              IsArray(_, _, _, IsArray("key_type", "HASH", "prefix", "doc-", "default_score", 1),
-                      "index_options", RespArray(IsEmpty()), "attributes",
-                      IsArray(IsArray("identifier", "name", "attribute", "name", "type", "TEXT")),
-                      "num_docs", IntArg(15)));
+  EXPECT_THAT(
+      info,
+      IsArray(_, _, _, IsArray("key_type", "HASH", "prefixes", IsArray("doc-"), "default_score", 1),
+              "index_options", RespArray(IsEmpty()), "attributes",
+              IsArray(IsArray("identifier", "name", "attribute", "name", "type", "TEXT")),
+              "num_docs", IntArg(15)));
 }
 
 TEST_F(SearchFamilyTest, Stats) {
@@ -505,7 +506,7 @@ TEST_F(SearchFamilyTest, Tags) {
 
   EXPECT_EQ(Run({"ft.create", "i1", "on", "hash", "schema", "color", "tag", "dummy", "numeric"}),
             "OK");
-  EXPECT_THAT(Run({"ft.tagvals", "i2", "color"}), ErrArg("Unknown Index name"));
+  EXPECT_THAT(Run({"ft.tagvals", "i2", "color"}), ErrArg("Index with name 'i2' not found"));
   EXPECT_THAT(Run({"ft.tagvals", "i1", "foo"}), ErrArg("No such field"));
   EXPECT_THAT(Run({"ft.tagvals", "i1", "dummy"}), ErrArg("Not a tag field"));
   auto resp = Run({"ft.tagvals", "i1", "color"});
