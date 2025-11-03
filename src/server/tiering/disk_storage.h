@@ -44,6 +44,7 @@ class DiskStorage {
 
   // Allocate segment of at least given length and prepare buffer. Migh block to grow backing.
   // Return error if not enough space is available or growing failed.
+  // Every successful preparation must end in a Stash(), otherwise resources are leaked.
   io::Result<std::pair<size_t /* offset */, util::fb2::UringBuf>> PrepareStash(size_t length);
 
   // Write prepared buffer to given segment and resolve completion callback when write is done.

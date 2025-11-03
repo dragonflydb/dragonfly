@@ -380,6 +380,8 @@ std::optional<util::fb2::Future<bool>> TieredStorage::TryStash(DbIndex dbid, str
 
   tiering::OpManager::EntryId id;
   error_code ec;
+
+  // TODO(vlad): Replace with encoders for different types
   auto stash_string = [&](std::string_view str) {
     if (auto prepared = op_manager_->PrepareStash(str.size()); prepared) {
       auto [offset, buf] = *prepared;
