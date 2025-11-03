@@ -171,9 +171,8 @@ template <typename T> OpResult<T> Unwrap(CbResult<T> result) {
 template <typename F> auto WrapRO(F&& f) {
   using T = typename std::invoke_result_t<F, HMapWrap>::Type;
   using VT = std::variant<T, util::fb2::Future<OpResult<T>>>;
-  using RT = OpResult<VT>;
 
-  return [f = std::forward<F>(f)](Transaction* t, EngineShard* es) -> RT {
+  return [f = std::forward<F>(f)](Transaction* t, EngineShard* es) -> OpResult<VT> {
     auto [key, op_args] = KeyAndArgs(t, es);
     auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
     RETURN_ON_BAD_STATUS(it_res);
@@ -181,13 +180,14 @@ template <typename F> auto WrapRO(F&& f) {
     auto& pv = (*it_res)->second;
     if (pv.IsExternal() && !pv.IsCool()) {
       util::fb2::Future<OpResult<T>> fut;
-      auto* ts = es->tiered_storage();
-      // auto cb = [fut, f = std::move(f)](io::Result<tiering::SerializedMapDecoder*> res) mutable {
-      //   HMapWrap hw{res.value()->Get()};
-      //   fut.Resolve(f(hw));
-      // };
-      std::function<void(io::Result<tiering::SerializedMapDecoder*>)> cb(nullptr);
-      ts->Read(op_args.db_cntx.db_index, key, pv, tiering::SerializedMapDecoder{}, cb);
+      auto cb = [fut, &f](io::Result<tiering::SerializedMapDecoder*> res) mutable {
+        HMapWrap hw{res.value()->Get()};
+        fut.Resolve(f(hw));
+      };
+
+      es->tiered_storage()->Read(
+          op_args.db_cntx.db_index, key, pv, tiering::SerializedMapDecoder{},
+          std::function<void(io::Result<tiering::SerializedMapDecoder*>)>(std::move(cb)));
       return VT{std::move(fut)};
     }
 
