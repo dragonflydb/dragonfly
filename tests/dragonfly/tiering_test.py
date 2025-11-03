@@ -98,9 +98,9 @@ async def test_mixed_append(async_client: aioredis.Redis):
         "tiered_prefix": "/tmp/tiered/backing_master",
         "maxmemory": "2.0G",
         "cache_mode": True,
-        "tiered_offload_threshold": "0.9",
+        "tiered_offload_threshold": "0.6",
         "tiered_upload_threshold": "0.2",
-        "tiered_storage_write_depth": 100,
+        "tiered_storage_write_depth": 1000,
     }
 )
 async def test_full_sync(async_client: aioredis.Redis, df_factory: DflyInstanceFactory):
@@ -109,7 +109,7 @@ async def test_full_sync(async_client: aioredis.Redis, df_factory: DflyInstanceF
         cache_mode=True,
         maxmemory="2.0G",
         tiered_prefix="/tmp/tiered/backing_replica",
-        tiered_offload_threshold="0.8",
+        tiered_offload_threshold="0.5",
         tiered_storage_write_depth=1000,
     )
     replica.start()

@@ -84,6 +84,7 @@ class SetCmd {
     uint32_t memcache_flags = 0;
     uint64_t expire_after_ms = 0;  // Relative value based on now. 0 means no expiration.
     optional<StringResult>* prev_val = nullptr;  // if set, previous value will be stored if found
+    optional<util::fb2::Future<bool>>* backpressure = nullptr;
 
     constexpr bool IsConditionalSet() const {
       return flags & SET_IF_NOTEXIST || flags & SET_IF_EXISTS;
@@ -935,8 +936,12 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
   EngineShard* shard = op_args_.shard;
 
   // Currently we always try to offload, but Stash may ignore it, if disk I/O is overloaded.
-  if (auto* ts = shard->tiered_storage(); ts)
-    ts->TryStash(op_args_.db_cntx.db_index, key, pv);
+  // If we are beyond the offloading threshold, TryStash might return a backpressure future.
+  if (auto* ts = shard->tiered_storage(); ts) {
+    auto bp = ts->TryStash(op_args_.db_cntx.db_index, key, pv, true);
+    if (bp && params.backpressure)
+      *params.backpressure = std::move(*bp);
+  }
 
   if (explicit_journal_ && op_args_.shard->journal()) {
     RecordJournal(params, key, value);
@@ -1056,9 +1061,17 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
   if (sparams.flags & SetCmd::SET_GET)
     sparams.prev_val = &prev;
 
+  optional<util::fb2::Future<bool>> backpressure;
+  sparams.backpressure = &backpressure;
+
   OpStatus result = SetGeneric(sparams, key, value, cmnd_cntx);
   if (result == OpStatus::WRONG_TYPE) {
     return builder->SendError(kWrongTypeErr);
+  }
+
+  // If backpressure was provided, wait with reasonable limit (to avoid client deadlocking).
+  if (backpressure) {
+    std::move(backpressure)->GetFor(5ms);
   }
 
   if (sparams.flags & SetCmd::SET_GET) {

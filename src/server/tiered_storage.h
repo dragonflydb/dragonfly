@@ -11,6 +11,7 @@
 #include "server/common.h"
 #include "server/table.h"
 #include "server/tiering/common.h"
+#include "server/tiering/entry_map.h"
 #include "server/tx_base.h"
 #include "util/fibers/future.h"
 
@@ -59,9 +60,10 @@ class TieredStorage {
   TResult<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
                     std::function<T(std::string*)> modf);
 
-  // Stash value. Sets IO_PENDING flag and unsets it on error or when finished
-  // Returns true if item was scheduled for stashing.
-  bool TryStash(DbIndex dbid, std::string_view key, PrimeValue* value);
+  // Stash value. Sets IO_PENDING flag and unsets it on error or when finished.
+  // Returns optional future for backpressure if `provide_bp` is set and conditions are met.
+  std::optional<util::fb2::Future<bool>> TryStash(DbIndex dbid, std::string_view key,
+                                                  PrimeValue* value, bool provide_bp = false);
 
   // Delete value, must be offloaded (external type)
   void Delete(DbIndex dbid, PrimeValue* value);
@@ -104,6 +106,9 @@ class TieredStorage {
   detail::TieredColdRecord* PopCool();
 
   PrimeTable::Cursor offloading_cursor_{};  // where RunOffloading left off
+
+  // Stash operations waiting for completion to throttle
+  tiering::EntryMap<::util::fb2::Future<bool>> stash_backpressure_;
 
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
