@@ -51,7 +51,7 @@ class DiskStorage {
   Stats GetStats() const;
 
  private:
-  // Try growing backing file by requested size async
+  // Try asynchronously growing backing file by requested size
   std::error_code RequestGrow(off_t grow_size);
 
   // Returns a buffer with size greater or equal to len.

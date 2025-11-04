@@ -194,7 +194,8 @@ DiskStorage::Stats DiskStorage::GetStats() const {
 }
 
 error_code DiskStorage::RequestGrow(off_t grow_size) {
-  if (alloc_.capacity() + ExternalAllocator::kExtAlignment >= static_cast<size_t>(max_size_))
+  DCHECK_EQ(grow_size % ExternalAllocator::kExtAlignment, 0u);
+  if (alloc_.capacity() + grow_size >= static_cast<size_t>(max_size_))
     return make_error_code(errc::file_too_large);
 
   // Don't try again immediately, most likely it won't succeed ever.
