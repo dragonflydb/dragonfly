@@ -177,7 +177,9 @@ class TieredStorage {
     return {};
   }
 
-  void TryStash(DbIndex dbid, std::string_view key, PrimeValue* value) {
+  std::optional<util::fb2::Future<bool>> TryStash(DbIndex dbid, std::string_view key,
+                                                  PrimeValue* value, bool provide_bp = false) {
+    return {};
   }
 
   void Delete(DbIndex dbid, PrimeValue* value) {
