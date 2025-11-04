@@ -43,7 +43,7 @@ jobs:
       matrix:
         container: ["ubuntu-dev:20"]
         proactor: [Uring]
-        build-type: [Debug]
+        build-type: [Release]
         runner: [ubuntu-latest]
 
     runs-on: ${{ matrix.runner }}
@@ -59,6 +59,13 @@ jobs:
         with:
           submodules: true
           ref: ${{ inputs.branch }}
+
+      - name: Cache build artifacts
+        id: cache-build
+        uses: actions/cache@v4
+        with:
+          path: ${GITHUB_WORKSPACE}/build
+          key: "temp-build-cache"
 
       - name: Print environment info
         run: |
@@ -79,13 +86,17 @@ jobs:
 
       - name: Configure & Build
         shell: bash
-        if: ${{ inputs.use_release != 'yes' }}
+        if: ${{ inputs.use_release != 'yes' && steps.cache-build.outputs.cache-hit != 'true' }}
         run: |
           # -no-pie to disable address randomization so we could symbolize stacktraces
-          cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
+          cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=Release -GNinja \
                 -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPRINT_STACKTRACES_ON_SIGNAL=ON \
                 -DCMAKE_CXX_FLAGS=-no-pie -DHELIO_STACK_CHECK:STRING=4096
-          cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly
+
+      - name: Build
+        shell: bash
+        run: |
+          cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly_test
           pwd
           ls -l ..
 

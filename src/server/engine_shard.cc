@@ -113,7 +113,7 @@ size_t CalculateHowManyBytesToEvictOnShard(size_t global_memory_limit, size_t gl
   }
 
   const size_t shard_budget = (global_memory_limit - global_used_memory) / shard_set->size();
-  return shard_budget < shard_memory_threshold ? (shard_memory_threshold - shard_budget) : 0;
+  return shard_budget < shard_memory_threshold ? shard_memory_threshold - shard_budget : 0;
 }
 
 }  // namespace
@@ -720,9 +720,8 @@ size_t EngineShard::CalculateEvictionBytes() {
   size_t goal_bytes =
       CalculateHowManyBytesToEvictOnShard(limit, global_used_memory, shard_memory_budget_threshold);
 
-  VLOG_IF(2, goal_bytes > 0) << "Used memory goal bytes: " << goal_bytes
-                             << ", used memory: " << global_used_memory
-                             << ", memory limit: " << max_memory_limit;
+  VLOG(2) << "Used memory goal bytes: " << goal_bytes << ", used memory: " << global_used_memory
+          << ", memory limit: " << max_memory_limit;
 
   // Check for `enable_heartbeat_rss_eviction` flag since it dynamic. And reset
   // state if flag has changed.
@@ -737,6 +736,9 @@ size_t EngineShard::CalculateEvictionBytes() {
     const size_t global_used_rss_memory = rss_mem_current.load(memory_order_relaxed);
     auto& global_rss_memory_at_prev_eviction = eviction_state_.global_rss_memory_at_prev_eviction;
     auto& deleted_bytes_before_rss_update = eviction_state_.deleted_bytes_before_rss_update;
+    VLOG(2) << "global_used_rss_memory " << global_used_rss_memory
+            << " global_rss_memory_at_prev_eviction " << global_rss_memory_at_prev_eviction
+            << " deleted_bytes_before_rss_update " << deleted_bytes_before_rss_update;
     if (global_used_rss_memory < eviction_state_.global_rss_memory_at_prev_eviction) {
       auto decrease_delete_bytes_before_rss_update =
           std::min(deleted_bytes_before_rss_update,
@@ -772,10 +774,9 @@ size_t EngineShard::CalculateEvictionBytes() {
       }
     }
 
-    VLOG_IF(2, rss_goal_bytes > 0)
-        << "Rss memory goal bytes: " << rss_goal_bytes
-        << ", rss used memory: " << global_used_rss_memory << ", rss memory limit: " << limit
-        << ", deleted_bytes_before_rss_update: " << deleted_bytes_before_rss_update;
+    VLOG(2) << "Rss memory goal bytes: " << rss_goal_bytes
+            << ", rss used memory: " << global_used_rss_memory << ", rss memory limit: " << limit
+            << ", deleted_bytes_before_rss_update: " << deleted_bytes_before_rss_update;
 
     goal_bytes = std::max(goal_bytes, rss_goal_bytes);
   }
@@ -793,7 +794,10 @@ void EngineShard::CacheStats() {
 
   // Reflect local memory change on global value
   size_t delta = used_mem - last_mem_params_.used_mem;  // negative value wraps safely
+  VLOG_EVERY_N(2, 1) << "used_mem " << used_mem << " last mem " << last_mem_params_.used_mem
+                     << " delta " << delta << " used mem current " << used_mem_current;
   size_t current = used_mem_current.fetch_add(delta, memory_order_relaxed) + delta;
+  VLOG_EVERY_N(2, 1) << "new used mem " << used_mem_current;
   ssize_t free_mem = max_memory_limit.load(memory_order_relaxed) - current;
 
   // Estimate bytes per object, excluding table memory
@@ -808,6 +812,7 @@ void EngineShard::CacheStats() {
 }
 
 size_t EngineShard::UsedMemory() const {
+  VLOG_EVERY_N(2, 1) << "UsedMemory: mi_resource_.used() " << mi_resource_.used();
   return mi_resource_.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal() +
          search_indices()->GetUsedMemory();
 }
