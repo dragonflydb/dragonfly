@@ -1012,8 +1012,13 @@ int32_t HSetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValu
   }
 }
 
-static std::vector<long> ExpireElements(facade::CmdArgList values, uint32_t ttl_sec,
-                                        ExpireFlags flags, StringMap* owner) {
+// returns vector of results for each field in values:
+// -2 if the provided key does not exist.
+// 0 if the specified NX | XX | GT | LT condition has not been met.
+// 1 if the expiration time was set/updated.
+// 2 when HEXPIRE/HPEXPIRE is called with 0 seconds and the field is deleted.
+static std::vector<long> UpdateTTL(facade::CmdArgList values, uint32_t ttl_sec, ExpireFlags flags,
+                                   StringMap* owner) {
   std::vector<long> res;
   res.reserve(values.size());
 
@@ -1079,7 +1084,7 @@ vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl
 
   // This needs to be explicitly fetched again since the pv might have changed.
   StringMap* sm = container_utils::GetStringMap(*pv, op_args.db_cntx);
-  vector<long> res = ExpireElements(values, ttl_sec, flags, sm);
+  vector<long> res = UpdateTTL(values, ttl_sec, flags, sm);
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, *pv);
   return res;
 }
