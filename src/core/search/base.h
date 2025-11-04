@@ -40,7 +40,7 @@ struct QueryParams {
 
 // Base class for optional search filters
 
-class AstNode;
+struct AstNode;
 
 struct OptionalFilterBase {
   virtual bool IsEmpty() const = 0;
