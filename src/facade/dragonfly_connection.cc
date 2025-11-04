@@ -13,6 +13,7 @@
 #include <numeric>
 #include <variant>
 
+#include "absl/strings/str_split.h"
 #include "base/cycle_clock.h"
 #include "base/flag_utils.h"
 #include "base/flags.h"
@@ -27,7 +28,6 @@
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
 #include "facade/socket_utils.h"
-#include "io/file.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/proactor_base.h"
 
@@ -111,6 +111,16 @@ ABSL_FLAG(uint32_t, pipeline_squash_limit, 1 << 30, "Limit on the size of a squa
 ABSL_FLAG(uint32_t, pipeline_wait_batch_usec, 0,
           "If non-zero, waits for this time for more I/O "
           " events to come for the connection in case there is only one command in the pipeline. ");
+
+ABSL_FLAG(size_t, connection_disk_backpressure_watermark, 0,
+          "Offload dispach queue backpressure to disk when it crosses watermark. (0 to disable)");
+
+ABSL_FLAG(size_t, connection_disk_backpressure_file_max_bytes, 50_MB,
+          "Maximum size of the backing file. When the watermark is reached, connection will "
+          "stop offloading backpressure to disk");
+
+ABSL_FLAG(size_t, connection_disk_backpressure_load_size, 30,
+          "How many queue backpressure items to load from disk when dispatch queue is drained");
 
 using namespace util;
 using namespace std;
@@ -434,6 +444,10 @@ size_t Connection::PipelineMessage::StorageCapacity() const {
   return storage.capacity() + args.capacity();
 }
 
+size_t Connection::PipelineMessage::StorageBytes() const {
+  return storage.size();
+}
+
 size_t Connection::MessageHandle::UsedMemory() const {
   struct MessageSize {
     size_t operator()(const PubMessagePtr& msg) {
@@ -676,6 +690,11 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 #endif
 
   UpdateLibNameVerMap(lib_name_, lib_ver_, +1);
+
+  const size_t disk_watermark = absl::GetFlag(FLAGS_connection_disk_backpressure_watermark);
+  if (disk_watermark) {
+    backing_queue_ = std::make_unique<DiskBackedBackpressureQueue>();
+  }
 }
 
 Connection::~Connection() {
@@ -1162,8 +1181,12 @@ void Connection::ConnectionFlow() {
 
 void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
                                 absl::FunctionRef<MessageHandle()> cmd_msg_cb) {
-  bool optimize_for_async = has_more;
   QueueBackpressure& qbp = GetQueueBackpressure();
+  if (OffloadBackpressureToDiskIfNeeded(cmd_msg_cb)) {
+    return;
+  }
+
+  bool optimize_for_async = has_more;
   if (optimize_for_async &&
       qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, dispatch_q_.size())) {
     stats_->pipeline_throttle_count++;
@@ -1683,11 +1706,22 @@ void Connection::AsyncFiber() {
   QueueBackpressure& qbp = GetQueueBackpressure();
   while (!reply_builder_->GetError()) {
     DCHECK_EQ(socket()->proactor(), ProactorBase::me());
+
+    LoadBackpressureFromDiskIfNeeded();
+
     cnd_.wait(noop_lk, [this] {
-      return cc_->conn_closing || (!dispatch_q_.empty() && !cc_->sync_dispatch);
+      return cc_->conn_closing || (!dispatch_q_.empty() && !cc_->sync_dispatch) ||
+             disk_backpressure_available_;
     });
+
     if (cc_->conn_closing)
       break;
+
+    if (disk_backpressure_available_) {
+      LoadBackpressureFromDiskIfNeeded();
+      DCHECK(dispatch_q_.size() > 0);
+      disk_backpressure_available_ = false;
+    }
 
     // We really want to have batching in the builder if possible. This is especially
     // critical in situations where Nagle's algorithm can introduce unwanted high
@@ -2252,6 +2286,175 @@ void ResetStats() {
   tl_facade_stats->reply_stats = {};
   if (io_req_size_hist)
     io_req_size_hist->Clear();
+}
+
+bool Connection::OffloadBackpressureToDiskIfNeeded(absl::FunctionRef<MessageHandle()> handle) {
+  // Offload only when dispatch_q_ crosses watermark or when backing queue already
+  // has pending items.
+  if (backing_queue_ &&
+      ((dispatch_q_.size() > backing_queue_->Watermark()) || !backing_queue_->Empty())) {
+    auto ec = backing_queue_->Init();
+    LOG_IF(ERROR, ec) << "Failed to init disk backed backpressure with error " << ec.message();
+
+    MessageHandle msg;
+    if (!ec) {
+      msg = handle();
+      PipelineMessage* pmsg = std::get<Connection::PipelineMessagePtr>(msg.handle).get();
+      if (backing_queue_->HasEnoughBackingSpace(pmsg)) {
+        backing_queue_->OffloadToBacking(pmsg);
+        if (dispatch_q_.size() == 0) {
+          disk_backpressure_available_ = true;
+          cnd_.notify_one();
+        }
+        // Recycle message
+        QueueBackpressure& qbp = GetQueueBackpressure();
+        if (stats_->pipeline_cmd_cache_bytes < qbp.pipeline_cache_limit) {
+          stats_->pipeline_cmd_cache_bytes += pmsg->StorageCapacity();
+          pipeline_req_pool_.push_back(
+              std::move(std::get<Connection::PipelineMessagePtr>(msg.handle)));
+        }
+        // item offloaded to disk without errors, unblock connection fiber
+        return true;
+      }
+      LOG(WARNING) << "Disk backpressure file size limit reached. Could not offload backpressure.";
+    }
+  }
+  return false;
+}
+
+void Connection::LoadBackpressureFromDiskIfNeeded() {
+  if (HasDiskBacked()) {
+    auto q_insert_cb = [this](io::MutableBytes bytes) {
+      PipelineMessagePtr ptr;
+      if (ptr = GetFromPipelinePool(); ptr) {
+        ptr->storage.resize(bytes.size());
+      } else {
+        ptr = make_unique<PipelineMessage>(1, 1);
+        ptr->storage.resize(bytes.size());
+      }
+
+      memcpy(ptr->storage.begin(), bytes.begin(), bytes.size());
+      std::string_view read{reinterpret_cast<char*>(ptr->storage.data()), bytes.size()};
+      ptr->args = absl::StrSplit(read, '\0', absl::SkipEmpty());
+
+      SendAsync({.handle = std::move(ptr)});
+    };
+
+    backing_queue_->LoadFromDiskToQueue(q_insert_cb);
+  }
+}
+
+size_t Connection::DiskBackedBackpressureQueue::unique_id = 0;
+
+Connection::DiskBackedBackpressureQueue::DiskBackedBackpressureQueue()
+    : max_backing_size_(absl::GetFlag(FLAGS_connection_disk_backpressure_file_max_bytes)),
+      max_queue_load_size_(absl::GetFlag(FLAGS_connection_disk_backpressure_load_size)),
+      watermark_(absl::GetFlag(FLAGS_connection_disk_backpressure_watermark)) {
+  id_ = ++unique_id;
+}
+
+std::error_code Connection::DiskBackedBackpressureQueue::Init() {
+  if (init_) {
+    return {};
+  }
+
+  std::string backing_name = absl::StrCat("/tmp/backing_", id_);
+  {
+    // Kernel transparently handles buffering via the page cache.
+    auto res = util::fb2::OpenWrite(backing_name, {} /* overwrite mode + non direct io */);
+    if (!res) {
+      return res.error();
+    }
+    writer_.reset(*res);
+  }
+
+  auto res = util::fb2::OpenRead(backing_name);
+  if (!res) {
+    return res.error();
+  }
+  reader_.reset(*res);
+
+  VLOG(3) << "Created backing for connection " << this << " " << backing_name;
+  init_ = true;
+
+  return {};
+}
+
+bool Connection::DiskBackedBackpressureQueue::Empty() const {
+  return total_backing_bytes_ == 0;
+}
+
+bool Connection::DiskBackedBackpressureQueue::HasEnoughBackingSpace(
+    const Connection::PipelineMessage* msg) const {
+  return (msg->StorageBytes() + total_backing_bytes_) < max_backing_size_;
+}
+
+size_t Connection::DiskBackedBackpressureQueue::TotalInMemoryBytes() const {
+  return offsets_.size() * sizeof(ItemOffset);
+}
+
+void Connection::DiskBackedBackpressureQueue::OffloadToBacking(
+    const Connection::PipelineMessage* msg) {
+  ItemOffset item;
+  item.offset = next_offset_;
+  item.total_bytes = msg->FullCommand().size();
+
+  size_t start = absl::GetCurrentTimeNanos();
+
+  // TODO we should truncate as the file grows. That way we never end up with large files
+  // on disk.
+  auto res = writer_->Write(msg->FullCommand());
+  if (res) {
+    VLOG(2) << "Failed to offload connection " << this << " backpressure with offset "
+            << item.offset << " of size " << item.total_bytes << " to backing with error: " << res;
+    return;
+  }
+
+  // Only update for non error paths
+  size_t end = absl::GetCurrentTimeNanos();
+  max_io_write_latency_ = std::max(max_io_write_latency_, (end - start));
+
+  total_backing_bytes_ += msg->FullCommand().size();
+  offsets_.push_back(item);
+  next_offset_ += item.total_bytes;
+
+  VLOG(2) << "Offload connection " << this << " backpressure of " << item.total_bytes
+          << " bytes to disk at offset: " << item.offset;
+  VLOG(3) << "Command offloaded: " << msg->FullCommand();
+}
+
+template <typename F> void Connection::DiskBackedBackpressureQueue::LoadFromDiskToQueue(F f) {
+  std::string buffer;
+  size_t up_to = max_queue_load_size_;
+
+  size_t start = absl::GetCurrentTimeNanos();
+
+  while (!offsets_.empty() && up_to--) {
+    ItemOffset item = offsets_.front();
+
+    buffer.resize(item.total_bytes);
+
+    io::MutableBytes bytes{reinterpret_cast<uint8_t*>(buffer.data()), item.total_bytes};
+    auto result = reader_->Read(item.offset, bytes);
+    if (!result) {
+      LOG(ERROR) << "Could not load item at offset " << item.offset << " of size "
+                 << item.total_bytes << " from disk with error: " << result.error().value() << " "
+                 << result.error().message();
+      return;
+    }
+
+    VLOG(2) << "Loaded item with offset " << item.offset << " of size " << item.total_bytes
+            << " for connection " << this;
+
+    f(bytes);
+
+    offsets_.pop_front();
+    total_backing_bytes_ -= item.total_bytes;
+  }
+
+  // Only update for non error paths
+  size_t end = absl::GetCurrentTimeNanos();
+  max_io_read_latency_ = std::max(max_io_read_latency_, (end - start));
 }
 
 }  // namespace facade
