@@ -17,6 +17,7 @@
 #include "base/flag_utils.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/detail/listpack_wrap.h"
 #include "server/common.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
@@ -24,8 +25,13 @@
 #include "server/table.h"
 #include "server/tiering/common.h"
 #include "server/tiering/op_manager.h"
+#include "server/tiering/serialized_map.h"
 #include "server/tiering/small_bins.h"
 #include "server/tx_base.h"
+
+extern "C" {
+#include "redis/listpack.h"
+}
 
 using namespace facade;
 
@@ -71,6 +77,53 @@ void RecordDeleted(const PrimeValue& pv, size_t tiered_len, DbTableStats* stats)
 
 tiering::DiskSegment FromCoolItem(const PrimeValue::CoolItem& item) {
   return {item.record->page_index * tiering::kPageSize + item.page_offset, item.serialized_size};
+}
+
+optional<size_t> EstimateSerializedSize(const PrimeValue& pv) {
+  switch (pv.ObjType()) {
+    case OBJ_STRING:
+      return pv.GetRawString().view().size();
+    case OBJ_HASH:
+      if (pv.Encoding() == kEncodingListPack) {
+        auto* lp = static_cast<uint8_t*>(pv.RObjPtr());
+        size_t bytes = lpBytes(lp);
+        bytes += lpLength(lp) * 2 * 4;
+        return bytes;
+      }
+      return {};
+    default:
+      return {};
+  };
+}
+
+size_t Serialize(const PrimeValue& pv, io::MutableBytes buffer) {
+  DCHECK_LE(EstimateSerializedSize(pv), buffer.size());
+  switch (pv.ObjType()) {
+    case OBJ_STRING: {
+      auto sv = pv.GetRawString();
+      memcpy(buffer.data(), sv.view().data(), sv.view().size());
+      return sv.view().size();
+    }
+    case OBJ_HASH: {
+      DCHECK_EQ(pv.Encoding(), kEncodingListPack);
+
+      detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
+      vector<pair<string, string>> entries(lw.begin(), lw.end());
+      vector<pair<string_view, string_view>> entries_sv(entries.begin(), entries.end());
+      return tiering::SerializedMap::Serialize(
+          entries_sv, {reinterpret_cast<char*>(buffer.data()), buffer.length()});
+    }
+    default:
+      DCHECK(false);
+      return 0;
+  }
+}
+
+string SerializeString(const PrimeValue& pv) {
+  string s(*EstimateSerializedSize(pv), 0);
+  size_t written = Serialize(pv, {reinterpret_cast<uint8_t*>(s.data()), s.size()});
+  s.resize(written);
+  return s;
 }
 
 }  // anonymous namespace
@@ -386,36 +439,41 @@ std::optional<util::fb2::Future<bool>> TieredStorage::TryStash(DbIndex dbid, str
     return {};
   }
 
-  StringOrView raw_string = value->GetRawString();
-  value->SetStashPending(true);
+  optional<size_t> estimated = EstimateSerializedSize(*value);
+  DCHECK(estimated);
 
   tiering::OpManager::EntryId id;
   error_code ec;
 
-  // TODO(vlad): Replace with encoders for different types
-  auto stash_string = [&](std::string_view str) {
-    if (auto prepared = op_manager_->PrepareStash(str.size()); prepared) {
+  value->SetStashPending(true);
+  if (OccupiesWholePages(*estimated)) {  // large enough for own page
+    id = KeyRef(dbid, key);
+    if (auto prepared = op_manager_->PrepareStash(*estimated); prepared) {
       auto [offset, buf] = *prepared;
-      memcpy(buf.bytes.data(), str.data(), str.size());
-      tiering::DiskSegment segment{offset, str.size()};
+      size_t written = Serialize(*value, buf.bytes);
+      tiering::DiskSegment segment{offset, written};
       op_manager_->Stash(id, segment, buf);
     } else {
       ec = prepared.error();
     }
-  };
-
-  if (OccupiesWholePages(value->Size())) {  // large enough for own page
-    id = KeyRef(dbid, key);
-    stash_string(raw_string.view());
-  } else if (auto bin = bins_->Stash(dbid, key, raw_string.view()); bin) {
+  } else if (auto bin = bins_->Stash(dbid, key, SerializeString(*value)); bin) {
     id = bin->first;
     // TODO(vlad): Write bin to prepared buffer instead of allocating one
-    stash_string(bin->second);
+    if (auto prepared = op_manager_->PrepareStash(*estimated); prepared) {
+      auto [offset, buf] = *prepared;
+      memcpy(buf.bytes.data(), bin->second.data(), bin->second.size());
+      tiering::DiskSegment segment{offset, bin->second.size()};
+      op_manager_->Stash(id, segment, buf);
+    } else {
+      CHECK(false);
+      ec = prepared.error();
+    }
   } else {
     return {};  // silently added to bin
   }
 
   if (ec) {
+    value->SetStashPending(false);
     LOG_IF(ERROR, ec != errc::file_too_large) << "Stash failed immediately" << ec.message();
     visit([this](auto id) { op_manager_->ClearIoPending(id); }, id);
     return {};
@@ -610,10 +668,18 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
 }
 
 bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
+  // Check value state
+  if (pv.IsExternal() || pv.HasStashPending())
+    return false;
+
+  // Estimate value size
+  optional<size_t> size = EstimateSerializedSize(pv);
+  if (!size)
+    return false;
+
   const auto& disk_stats = op_manager_->GetStats().disk_stats;
-  return !pv.IsExternal() && !pv.HasStashPending() && pv.ObjType() == OBJ_STRING &&
-         pv.Size() >= config_.min_value_size &&
-         disk_stats.allocated_bytes + tiering::kPageSize + pv.Size() < disk_stats.max_file_size;
+  return *size >= config_.min_value_size &&
+         disk_stats.allocated_bytes + tiering::kPageSize + *size < disk_stats.max_file_size;
 }
 
 void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
