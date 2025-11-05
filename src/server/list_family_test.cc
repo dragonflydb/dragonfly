@@ -173,9 +173,9 @@ TEST_F(ListFamilyTest, BLMPopBlocking) {
   auto fb2 = pp_->at(2)->LaunchFiber(Launch::dispatch, [&] {
     resp = Run({"blmpop", "0.1", "1", kKey1, "LEFT"});
   });
-  ThisFiber::SleepFor(1ms);
 
   // key should be locked while waiting
+  WaitUntilLocked(0, kKey1);
   ASSERT_TRUE(IsLocked(0, kKey1));
 
   auto push_resp = Run({"lpush", kKey1, "1"});

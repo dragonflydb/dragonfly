@@ -112,9 +112,11 @@ GenericError Replica::Start() {
 
   auto check_connection_error = [this](error_code ec, const char* msg) -> GenericError {
     if (!exec_st_.IsRunning()) {
+      CloseSocket();
       return {"replication cancelled"};
     }
     if (ec) {
+      CloseSocket();
       exec_st_.ReportCancelError();
       return {absl::StrCat(msg, ec.message())};
     }
@@ -169,6 +171,7 @@ std::optional<Replica::LastMasterSyncData> Replica::Stop() {
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
   sync_fb_.JoinIfNeeded();
+  CloseSocket();
   DVLOG(1) << "MainReplicationFb stopped " << this;
   acks_fb_.JoinIfNeeded();
   for (auto& flow : shard_flows_) {
@@ -1091,6 +1094,7 @@ DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext m
 }
 
 DflyShardReplica::~DflyShardReplica() {
+  CloseSocket();
   JoinFlow();
 }
 
@@ -1328,7 +1332,7 @@ void DflyShardReplica::JoinFlow() {
 void DflyShardReplica::Cancel() {
   if (rdb_loader_)
     rdb_loader_->stop();
-  CloseSocket();
+  ShutdownSocket();
   shard_replica_waker_.notifyAll();
 }
 

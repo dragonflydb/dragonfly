@@ -85,6 +85,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
   // Clear IO pending flag for entry
   void ClearIoPending(OpManager::KeyRef key) {
+    UnblockBackpressure(key, false);
     if (auto pv = Find(key); pv) {
       pv->SetStashPending(false);
       stats_.total_cancels++;
@@ -143,6 +144,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Find entry by key in db_slice and store external segment in place of original value.
   // Update memory stats
   void SetExternal(OpManager::KeyRef key, tiering::DiskSegment segment) {
+    UnblockBackpressure(key, true);
     if (auto* pv = Find(key); pv) {
       auto* stats = GetDbTableStats(key.first);
 
@@ -167,6 +169,12 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   void SetExternal(tiering::SmallBins::BinId id, tiering::DiskSegment segment) {
     for (const auto& [sub_dbid, sub_key, sub_segment] : ts_->bins_->ReportStashed(id, segment))
       SetExternal({sub_dbid, sub_key}, sub_segment);
+  }
+
+  // If any backpressure (throttling) is active, notify that the operation finished
+  void UnblockBackpressure(OpManager::KeyRef id, bool result) {
+    if (auto node = ts_->stash_backpressure_.extract(id); !node.empty())
+      node.mapped().Resolve(result);
   }
 
   struct {
@@ -309,6 +317,8 @@ error_code TieredStorage::Open(string_view base_path) {
 }
 
 void TieredStorage::Close() {
+  for (auto& [_, f] : stash_backpressure_)
+    f.Resolve(false);
   op_manager_->Close();
 }
 
@@ -350,9 +360,10 @@ template TieredStorage::TResult<size_t> TieredStorage::Modify(
     DbIndex dbid, std::string_view key, const PrimeValue& value,
     std::function<size_t(std::string*)> modf);
 
-bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
+std::optional<util::fb2::Future<bool>> TieredStorage::TryStash(DbIndex dbid, string_view key,
+                                                               PrimeValue* value, bool provide_bp) {
   if (!ShouldStash(*value))
-    return false;
+    return {};
 
   // This invariant should always hold because ShouldStash tests for IoPending flag.
   CHECK(!bins_->IsPending(dbid, key));
@@ -361,7 +372,7 @@ bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
   // with a lot of underutilized disk space.
   if (op_manager_->GetStats().pending_stash_cnt >= config_.write_depth_limit) {
     ++stats_.stash_overflow_cnt;
-    return false;
+    return {};
   }
 
   StringOrView raw_string = value->GetRawString();
@@ -375,15 +386,21 @@ bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
   } else if (auto bin = bins_->Stash(dbid, key, raw_string.view()); bin) {
     id = bin->first;
     ec = op_manager_->Stash(id, bin->second);
+  } else {
+    return {};  // Silently added to bin
   }
 
   if (ec) {
     LOG_IF(ERROR, ec != errc::file_too_large) << "Stash failed immediately" << ec.message();
     visit([this](auto id) { op_manager_->ClearIoPending(id); }, id);
-    return false;
+    return {};
   }
 
-  return true;
+  // If we are in the active offloading phase, throttle stashes by providing backpressure future
+  if (provide_bp && ShouldOffload())
+    return stash_backpressure_[{dbid, string{key}}];
+
+  return {};
 }
 
 void TieredStorage::Delete(DbIndex dbid, PrimeValue* value) {
@@ -405,6 +422,11 @@ void TieredStorage::Delete(DbIndex dbid, PrimeValue* value) {
 
 void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {
   DCHECK(value->HasStashPending());
+
+  // If any previous write was happening, it has been cancelled
+  if (auto node = stash_backpressure_.extract(make_pair(dbid, key)); !node.empty())
+    std::move(node.mapped()).Resolve(false);
+
   if (OccupiesWholePages(value->Size())) {
     op_manager_->Delete(KeyRef(dbid, key));
   } else if (auto bin = bins_->Delete(dbid, key); bin) {
