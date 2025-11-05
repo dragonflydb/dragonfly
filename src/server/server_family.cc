@@ -3246,11 +3246,13 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
            "errors]");
   }
 
+#ifdef WITH_SEARCH
   if (should_enter("SEARCH", true)) {
     append("search_memory", m.search_stats.used_memory);
     append("search_num_indices", m.search_stats.num_indices);
     append("search_num_entries", m.search_stats.num_entries);
   }
+#endif
 
   if (should_enter("ERRORSTATS", true)) {
     for (const auto& k_v : m.facade_stats.reply_stats.err_count) {

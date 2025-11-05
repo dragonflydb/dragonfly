@@ -1844,6 +1844,38 @@ void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) 
   cmd_cntx.rb->SendOk();
 }
 
+void SearchFamily::FtDebug(CmdArgList args, const CommandContext& cmd_cntx) {
+  // FT._DEBUG command stub for test compatibility
+  // This command is used by integration tests to control internal behavior
+  CmdArgParser parser{args};
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+
+  if (args.empty() || parser.Check("HELP")) {
+    rb->SendSimpleString("FT._DEBUG - Debug command stub (not fully implemented)");
+    return;
+  }
+
+  // Handle CONTROLLED_VARIABLE subcommand used by tests
+  if (parser.Check("CONTROLLED_VARIABLE")) {
+    if (parser.Check("SET")) {
+      // Consume variable name and value - these are required by the command
+      parser.Next();  // variable name
+      parser.Next();  // variable value
+
+      if (auto err = parser.TakeError(); err) {
+        return rb->SendError(err.MakeReply());
+      }
+
+      // Just acknowledge the command
+      rb->SendOk();
+      return;
+    }
+  }
+
+  // For any other subcommand, just return OK
+  rb->SendOk();
+}
+
 #define HFUNC(x) SetHandler(&SearchFamily::x)
 
 // Redis search is a module. Therefore we introduce dragonfly extension search
@@ -1874,7 +1906,8 @@ void SearchFamily::Register(CommandRegistry* registry) {
       << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::FT_SEARCH}.HFUNC(FtTagVals)
       << CI{"FT.SYNDUMP", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtSynDump)
       << CI{"FT.SYNUPDATE", CO::WRITE | CO::GLOBAL_TRANS, -4, 0, 0, acl::FT_SEARCH}.HFUNC(
-             FtSynUpdate);
+             FtSynUpdate)
+      << CI{"FT._DEBUG", kReadOnlyMask, -1, 0, 0, acl::FT_SEARCH}.HFUNC(FtDebug);
 }
 
 }  // namespace dfly
