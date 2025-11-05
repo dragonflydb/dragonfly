@@ -380,14 +380,28 @@ std::optional<util::fb2::Future<bool>> TieredStorage::TryStash(DbIndex dbid, str
 
   tiering::OpManager::EntryId id;
   error_code ec;
+
+  // TODO(vlad): Replace with encoders for different types
+  auto stash_string = [&](std::string_view str) {
+    if (auto prepared = op_manager_->PrepareStash(str.size()); prepared) {
+      auto [offset, buf] = *prepared;
+      memcpy(buf.bytes.data(), str.data(), str.size());
+      tiering::DiskSegment segment{offset, str.size()};
+      op_manager_->Stash(id, segment, buf);
+    } else {
+      ec = prepared.error();
+    }
+  };
+
   if (OccupiesWholePages(value->Size())) {  // large enough for own page
     id = KeyRef(dbid, key);
-    ec = op_manager_->Stash(id, raw_string.view());
+    stash_string(raw_string.view());
   } else if (auto bin = bins_->Stash(dbid, key, raw_string.view()); bin) {
     id = bin->first;
-    ec = op_manager_->Stash(id, bin->second);
+    // TODO(vlad): Write bin to prepared buffer instead of allocating one
+    stash_string(bin->second);
   } else {
-    return {};  // Silently added to bin
+    return {};  // silently added to bin
   }
 
   if (ec) {

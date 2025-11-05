@@ -63,8 +63,12 @@ class OpManager {
   // Delete offloaded entry located at the segment.
   void DeleteOffloaded(DiskSegment segment);
 
+  auto PrepareStash(size_t length) {
+    return storage_.PrepareStash(length);
+  }
+
   // Stash value to be offloaded. It is opaque to OpManager.
-  std::error_code Stash(EntryId id, std::string_view value);
+  void Stash(EntryId id, tiering::DiskSegment segment, util::fb2::UringBuf buf);
 
   Stats GetStats() const;
 

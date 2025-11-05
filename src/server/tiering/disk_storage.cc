@@ -144,33 +144,40 @@ void DiskStorage::MarkAsFree(DiskSegment segment) {
   alloc_.Free(segment.offset, segment.length);
 }
 
-std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
-  DCHECK_GT(bytes.length(), 0u);
+io::Result<std::pair<size_t, UringBuf>> DiskStorage::PrepareStash(size_t length) {
+  using namespace nonstd;
 
-  size_t len = bytes.size();
-  int64_t offset = alloc_.Malloc(len);
+  int64_t offset = alloc_.Malloc(length);
+  if (offset >= 0)
+    return std::make_pair(offset, PrepareBuf(length));
 
   // If we don't have enough space, request grow and return to avoid blocking
   if (offset < 0) {
     auto ec = RequestGrow(-offset);
-    return ec ? ec : make_error_code(errc::operation_would_block);
+    return make_unexpected(ec ? ec : make_error_code(errc::operation_would_block));
   }
 
-  UringBuf buf = PrepareBuf(len);
-  memcpy(buf.bytes.data(), bytes.data(), bytes.length());
+  offset = alloc_.Malloc(length);
+  if (offset < 0)  // we can't fit it even after resizing
+    return make_unexpected(make_error_code(errc::file_too_large));
 
-  auto io_cb = [this, cb, offset, buf, len](int io_res) {
+  return std::make_pair(offset, PrepareBuf(length));
+}
+
+void DiskStorage::Stash(DiskSegment segment, UringBuf buf, StashCb cb) {
+  auto io_cb = [this, cb, buf, segment](int io_res) {
     if (io_res < 0) {
-      MarkAsFree({size_t(offset), len});
-      cb(nonstd::make_unexpected(error_code{-io_res, std::system_category()}));
+      MarkAsFree(segment);
+      cb(error_code{-io_res, std::system_category()});
     } else {
-      cb(DiskSegment{size_t(offset), len});
+      cb({});
     }
     ReturnBuf(buf);
     pending_ops_--;
   };
 
   pending_ops_++;
+  size_t offset = segment.offset;
   if (buf.buf_idx)
     backing_file_->WriteFixedAsync(buf.bytes, offset, *buf.buf_idx, std::move(io_cb));
   else
@@ -183,8 +190,6 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
     auto ec = RequestGrow(256_MB);
     LOG_IF(ERROR, ec && ec != errc::file_too_large) << "Could not call grow :" << ec.message();
   }
-
-  return {};  // Must succeed after the operation was scheduled to run cleanup
 }
 
 DiskStorage::Stats DiskStorage::GetStats() const {
