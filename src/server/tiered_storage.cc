@@ -223,7 +223,11 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       stats->tiered_used_bytes += segment.length;
       stats_.total_stashes++;
 
+<<<<<<< HEAD
       CompactObj::ExternalRep rep = DetermineSerializationParams(*pv).second;
+=======
+      CompactObj::ExternalRep rep = EstimateSerializedSize(*pv)->second;
+>>>>>>> 77a24f54 (feat(tiering): Serialize hashes)
       if (ts_->config_.experimental_cooling) {
         RetireColdEntries(pv->MallocUsed());
         ts_->CoolDown(key.first, key.second, segment, rep, pv);
