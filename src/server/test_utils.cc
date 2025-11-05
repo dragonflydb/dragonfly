@@ -249,8 +249,8 @@ void BaseFamilyTest::ResetService() {
   pp_->Run();
   service_ = std::make_unique<Service>(pp_.get());
 
-  service_->Init(nullptr, {});
   used_mem_current = 0;
+  service_->Init(nullptr, {});
 
   TEST_current_time_ms = absl::GetCurrentTimeNanos() / 1000000;
   auto default_ns = &namespaces->GetDefaultNamespace();
