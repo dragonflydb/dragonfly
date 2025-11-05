@@ -467,13 +467,13 @@ void HGetGeneric(CmdArgList args, uint8_t getall_mask, Transaction* tx, SinkRepl
 }
 
 OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_t ttl_sec,
-                                 CmdArgList values) {
+                                 ExpireFlags flags, CmdArgList values) {
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH);
   RETURN_ON_BAD_STATUS(op_res);
 
   PrimeValue* pv = &((*op_res).it->second);
-  return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, key, values, pv);
+  return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, flags, key, values, pv);
 }
 
 // HSETEX key [NX] [KEEPTTL] tll_sec field value field value ...
@@ -561,23 +561,23 @@ void HSetFamily::HDel(CmdArgList args, const CommandContext& cmd_cntx) {
 
 void HSetFamily::HExpire(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser{args};
-  string_view key = parser.Next();
-  string_view ttl_str = parser.Next();
-  uint32_t ttl_sec;
-  constexpr uint32_t kMaxTtl = (1UL << 26);
-  if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
-    return cmd_cntx.rb->SendError(kInvalidIntErr);
+  using MinMaxTtl = FInt<0, (1 << 26)>;
+  auto [key, ttl_sec] = parser.Next<string_view, MinMaxTtl>();
+
+  ExpireFlags flags = parser
+                          .TryMapNext("NX", ExpireFlags::EXPIRE_NX, "XX", ExpireFlags::EXPIRE_XX,
+                                      "GT", ExpireFlags::EXPIRE_GT, "LT", ExpireFlags::EXPIRE_LT)
+                          .value_or(ExpireFlags::EXPIRE_ALWAYS);
+
+  if (parser.HasError()) {
+    return cmd_cntx.rb->SendError(parser.TakeError().MakeReply());
   }
-  if (!static_cast<bool>(parser.Check("FIELDS"sv))) {
+  if (!parser.Check("FIELDS"sv)) {
     return cmd_cntx.rb->SendError(
         "Mandatory argument FIELDS is missing or not at the right position", kSyntaxErrType);
   }
 
-  string_view numFieldsStr = parser.Next();
-  uint32_t numFields;
-  if (!absl::SimpleAtoi(numFieldsStr, &numFields) || numFields == 0) {
-    return cmd_cntx.rb->SendError(kInvalidIntErr);
-  }
+  uint32_t numFields = parser.Next<uint32_t>();
 
   CmdArgList fields = parser.Tail();
   if (fields.size() != numFields) {
@@ -589,7 +589,7 @@ void HSetFamily::HExpire(CmdArgList args, const CommandContext& cmd_cntx) {
     return cmd_cntx.rb->SendError(err.MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpHExpire(t->GetOpArgs(shard), key, ttl_sec, fields);
+    return OpHExpire(t->GetOpArgs(shard), key, ttl_sec, flags, fields);
   };
   OpResult<vector<long>> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
 
@@ -1012,8 +1012,66 @@ int32_t HSetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValu
   }
 }
 
+// returns vector of results for each field in values:
+// -2 if the provided key does not exist.
+// 0 if the specified NX | XX | GT | LT condition has not been met.
+// 1 if the expiration time was set/updated.
+// 2 when HEXPIRE/HPEXPIRE is called with 0 seconds and the field is deleted.
+static std::vector<long> UpdateTTL(facade::CmdArgList values, uint32_t ttl_sec, ExpireFlags flags,
+                                   StringMap* owner) {
+  std::vector<long> res;
+  res.reserve(values.size());
+
+  for (size_t i = 0; i < values.size(); i++) {
+    std::string_view field = facade::ToSV(values[i]);
+    auto it = owner->Find(field);
+    if (it != owner->end()) {
+      switch (flags) {
+        case ExpireFlags::EXPIRE_NX:
+          if (it.HasExpiry()) {
+            res.emplace_back(0);
+            continue;
+          }
+          break;
+        case ExpireFlags::EXPIRE_XX:
+          if (!it.HasExpiry()) {
+            res.emplace_back(0);
+            continue;
+          }
+          break;
+        case ExpireFlags::EXPIRE_GT:
+          if (it.ExpiryTime() - owner->time_now() >= ttl_sec) {
+            res.emplace_back(0);
+            continue;
+          }
+          break;
+        case ExpireFlags::EXPIRE_LT:
+          if (it.ExpiryTime() - owner->time_now() <= ttl_sec) {
+            res.emplace_back(0);
+            continue;
+          }
+          break;
+        case ExpireFlags::EXPIRE_ALWAYS:
+          break;
+      }
+      if (ttl_sec == 0) {
+        owner->Erase(field);
+        res.emplace_back(2);
+      } else {
+        it.SetExpiryTime(ttl_sec);
+        res.emplace_back(1);
+      }
+    } else {
+      res.emplace_back(-2);
+    }
+  }
+
+  return res;
+}
+
 vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
-                                             string_view key, CmdArgList values, PrimeValue* pv) {
+                                             ExpireFlags flags, string_view key, CmdArgList values,
+                                             PrimeValue* pv) {
   DCHECK_EQ(OBJ_HASH, pv->ObjType());
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, *pv);
 
@@ -1026,7 +1084,7 @@ vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl
 
   // This needs to be explicitly fetched again since the pv might have changed.
   StringMap* sm = container_utils::GetStringMap(*pv, op_args.db_cntx);
-  vector<long> res = ExpireElements(sm, values, ttl_sec);
+  vector<long> res = UpdateTTL(values, ttl_sec, flags, sm);
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, *pv);
   return res;
 }

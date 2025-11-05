@@ -779,7 +779,8 @@ OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uin
   if (pv->ObjType() == OBJ_SET) {
     return SetFamily::SetFieldsExpireTime(op_args, ttl_sec, values, pv);
   } else {
-    return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, key, values, pv);
+    return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, ExpireFlags::EXPIRE_ALWAYS, key,
+                                           values, pv);
   }
 }
 

@@ -532,6 +532,48 @@ TEST_F(HSetFamilyTest, HExpire) {
               RespArray(ElementsAre(IntArg(1), IntArg(1))));
   AdvanceTime(10'000);
   EXPECT_THAT(Run({"HGETALL", "key2"}), RespArray(ElementsAre()));
+
+  EXPECT_EQ(CheckedInt({"HSET", "key3", "k0", "v0", "k1", "v1", "k2", "v2", "k3", "v3", "k4", "v4",
+                        "k5", "v5"}),
+            6);
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "XX", "FIELDS", "1", "k0"}), IntArg(0));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "NX", "FIELDS", "1", "k0"}), IntArg(1));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "NX", "FIELDS", "1", "k0"}), IntArg(0));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "XX", "FIELDS", "1", "k0"}), IntArg(1));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "NX", "FIELDS", "3", "k1", "k2", "k3"}),
+              RespArray(ElementsAre(IntArg(1), IntArg(1), IntArg(1))));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "8", "GT", "FIELDS", "1", "k2"}), IntArg(0));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "12", "GT", "FIELDS", "1", "k2"}), IntArg(1));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "8", "LT", "FIELDS", "1", "k3"}), IntArg(1));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "12", "LT", "FIELDS", "1", "k3"}), IntArg(0));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "GT", "FIELDS", "1", "k4"}), IntArg(0));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "LT", "FIELDS", "1", "k5"}), IntArg(1));
+  AdvanceTime(8'000);
+  EXPECT_THAT(
+      Run({"HGETALL", "key3"}),
+      RespArray(UnorderedElementsAre("k0", "v0", "k1", "v1", "k2", "v2", "k4", "v4", "k5", "v5")));
+  AdvanceTime(2'000);
+  EXPECT_THAT(Run({"HGETALL", "key3"}), RespArray(UnorderedElementsAre("k2", "v2", "k4", "v4")));
+  AdvanceTime(2'000);
+  EXPECT_THAT(Run({"HGETALL", "key3"}), RespArray(ElementsAre("k4", "v4")));
+
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "10", "FIELDS", "1", "k4"}), IntArg(1));
+  EXPECT_THAT(Run({"HEXPIRE", "key3", "0", "XX", "FIELDS", "1", "k4"}), IntArg(2));
+  EXPECT_THAT(Run({"HGETALL", "key3"}), RespArray(ElementsAre()));
+
+  EXPECT_EQ(
+      CheckedInt({"HSET", "key4", "k0", "v0", "k1", "v1", "k2", "v2", "k3", "v3", "k4", "v4"}), 5);
+  EXPECT_THAT(Run({"HEXPIRE", "key4", "0", "NX", "FIELDS", "2", "k0", "k1"}),
+              RespElementsAre(IntArg(2), IntArg(2)));
+  EXPECT_THAT(Run({"HEXPIRE", "key4", "0", "LT", "FIELDS", "2", "k2", "k3"}),
+              RespElementsAre(IntArg(2), IntArg(2)));
+
+  EXPECT_THAT(Run({"HEXPIRE", "key4", "0", "XX", "FIELDS", "1", "k4"}), IntArg(0));
+  EXPECT_THAT(Run({"HEXPIRE", "key4", "10", "NX", "FIELDS", "1", "k4"}), IntArg(1));
+  EXPECT_THAT(Run({"HEXPIRE", "key4", "0", "NX", "FIELDS", "1", "k4"}), IntArg(0));
+  EXPECT_THAT(Run({"HEXPIRE", "key4", "0", "GT", "FIELDS", "1", "k4"}), IntArg(0));
+  EXPECT_THAT(Run({"HEXPIRE", "key4", "0", "FIELDS", "1", "k4"}), IntArg(2));
+  EXPECT_THAT(Run({"HGETALL", "key4"}), RespArray(ElementsAre()));
 }
 
 TEST_F(HSetFamilyTest, HExpireNoExpireEarly) {
