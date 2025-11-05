@@ -150,23 +150,10 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
   size_t len = bytes.size();
   int64_t offset = alloc_.Malloc(len);
 
-  // If we've run out of space, block and grow as much as needed
+  // If we don't have enough space, request grow and return to avoid blocking
   if (offset < 0) {
-    auto ec = TryGrow(-offset);
-
-    // If a grow is in progress, wait until it completes and possibly retry
-    if (ec == errc::operation_in_progress) {
-      grow_.ev.await([this]() { return !grow_.pending; });
-      RETURN_ON_ERR(grow_.last_err);
-      // If grown, retry from the start (in case we need even more space)
-      // TODO(vlad): Stack overflow possible?
-      return Stash(bytes, std::move(cb));
-    }
-
-    RETURN_ON_ERR(ec);
-    offset = alloc_.Malloc(len);
-    if (offset < 0)  // we can't fit it even after resizing
-      return make_error_code(errc::file_too_large);
+    auto ec = RequestGrow(-offset);
+    return ec ? ec : make_error_code(errc::operation_would_block);
   }
 
   UringBuf buf = PrepareBuf(len);
@@ -193,7 +180,7 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
   size_t capacity = alloc_.capacity();
   size_t available = capacity - alloc_.allocated_bytes();
   if ((available < 256_MB) && (available < capacity * 0.15) && !grow_.pending) {
-    auto ec = TryGrow(256_MB);
+    auto ec = RequestGrow(256_MB);
     LOG_IF(ERROR, ec && ec != errc::file_too_large) << "Could not call grow :" << ec.message();
   }
 
@@ -206,8 +193,9 @@ DiskStorage::Stats DiskStorage::GetStats() const {
       static_cast<size_t>(max_size_), pending_ops_};
 }
 
-error_code DiskStorage::TryGrow(off_t grow_size) {
-  if (alloc_.capacity() + ExternalAllocator::kExtAlignment >= static_cast<size_t>(max_size_))
+error_code DiskStorage::RequestGrow(off_t grow_size) {
+  DCHECK_EQ(grow_size % ExternalAllocator::kExtAlignment, 0u);
+  if (alloc_.capacity() + grow_size >= static_cast<size_t>(max_size_))
     return make_error_code(errc::file_too_large);
 
   // Don't try again immediately, most likely it won't succeed ever.
@@ -221,14 +209,16 @@ error_code DiskStorage::TryGrow(off_t grow_size) {
   }
 
   off_t end = alloc_.capacity();
-  grow_.last_err = DoFiberCall(&SubmitEntry::PrepFallocate, backing_file_->fd(), 0, end, grow_size);
-  grow_.pending = false;
-  grow_.timestamp_ns = ProactorBase::GetMonotonicTimeNs();
-  grow_.ev.notifyAll();
+  backing_file_->FallocateAsync(0, end, grow_size, [=](int res) {
+    auto ec = (res < 0) ? std::error_code{-res, std::system_category()} : std::error_code{};
+    grow_.pending = false;
+    grow_.last_err = ec;
+    grow_.timestamp_ns = ProactorBase::GetMonotonicTimeNs();
+    if (!ec)
+      alloc_.AddStorage(end, grow_size);
+  });
 
-  if (!grow_.last_err)
-    alloc_.AddStorage(end, grow_size);
-  return grow_.last_err;
+  return {};
 }
 
 UringBuf DiskStorage::PrepareBuf(size_t size) {

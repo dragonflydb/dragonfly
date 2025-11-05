@@ -51,8 +51,8 @@ class DiskStorage {
   Stats GetStats() const;
 
  private:
-  // Try growing backing file by requested size
-  std::error_code TryGrow(off_t grow_size);
+  // Try asynchronously growing backing file by requested size
+  std::error_code RequestGrow(off_t grow_size);
 
   // Returns a buffer with size greater or equal to len.
   util::fb2::UringBuf PrepareBuf(size_t len);
@@ -64,11 +64,10 @@ class DiskStorage {
   uint64_t heap_buf_alloc_cnt_ = 0, reg_buf_alloc_cnt_ = 0;
 
   struct {
-    bool pending = false;  // whether currently in progress
+    bool pending = false;  // currently in progress
     std::error_code last_err;
-    uint64_t timestamp_ns;     // when last os finished (with any status)
-    util::fb2::EventCount ev;  // woken up when in-progress op finishes
-  } grow_;                     // status of latest blocking Grow() operation
+    uint64_t timestamp_ns;  // last grow finished
+  } grow_;                  // status of last RequestGrow() operation
 
   std::string backing_file_path_;
   std::unique_ptr<util::fb2::LinuxFile> backing_file_;
