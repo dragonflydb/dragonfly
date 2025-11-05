@@ -1858,11 +1858,14 @@ void SearchFamily::FtDebug(CmdArgList args, const CommandContext& cmd_cntx) {
   // Handle CONTROLLED_VARIABLE subcommand used by tests
   if (parser.Check("CONTROLLED_VARIABLE")) {
     if (parser.Check("SET")) {
-      // Consume variable name and value
-      if (parser.HasNext())
-        parser.Next();  // variable name
-      if (parser.HasNext())
-        parser.Next();  // variable value
+      // Consume variable name and value - these are required by the command
+      parser.Next();  // variable name
+      parser.Next();  // variable value
+
+      if (auto err = parser.TakeError(); err) {
+        return rb->SendError(err.MakeReply());
+      }
+
       // Just acknowledge the command
       rb->SendOk();
       return;
