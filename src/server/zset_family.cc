@@ -2318,9 +2318,12 @@ void ZSetFamily::ZDiff(CmdArgList args, const CommandContext& cmd_cntx) {
     return;
   }
 
-  const bool with_scores = ArgS(args, args.size() - 1) == "WITHSCORES";
-  rb->StartArray(smvec.size() * (with_scores ? 2 : 1));
+  const bool with_scores = absl::EqualsIgnoreCase(ArgS(args, args.size() - 1), "WITHSCORES");
+  bool is_resp3 = rb->IsResp3();
+  rb->StartArray(smvec.size() * ((with_scores && !is_resp3) ? 2 : 1));
   for (const auto& [score, key] : smvec) {
+    if (is_resp3)
+      rb->StartArray(with_scores ? 2 : 1);
     rb->SendBulkString(key);
     if (with_scores) {
       rb->SendDouble(score);

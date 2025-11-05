@@ -1249,8 +1249,20 @@ TEST_F(ZSetFamilyTest, ZDiff) {
   resp = Run({"zdiff", "1", "z1", "WITHSCORES"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("one", "1", "two", "2", "three", "3", "four", "4"));
 
-  resp = Run({"zdiff", "2", "z1", "z2", "WITHSCORES"});
+  resp = Run({"zdiff", "2", "z1", "z2", "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("two", "2", "three", "3", "four", "4"));
+}
+
+TEST_F(ZSetFamilyTest, ZDiff_Resp3) {
+  Run({"hello", "3"});
+  EXPECT_EQ(4, CheckedInt({"zadd", "z1", "1", "one", "2", "two", "3", "three", "4", "four"}));
+
+  auto resp = Run({"zdiff", "1", "z1", "withscores"});
+  ASSERT_THAT(resp, ArrLen(4));
+  ASSERT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("one", DoubleArg(1)));
+  ASSERT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("two", DoubleArg(2)));
+  ASSERT_THAT(resp.GetVec()[2].GetVec(), ElementsAre("three", DoubleArg(3)));
+  ASSERT_THAT(resp.GetVec()[3].GetVec(), ElementsAre("four", DoubleArg(4)));
 }
 
 TEST_F(ZSetFamilyTest, ZDiffStoreError) {
