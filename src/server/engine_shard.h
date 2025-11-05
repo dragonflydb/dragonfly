@@ -231,25 +231,9 @@ class EngineShard {
       shard_used_memory_at_prev_eviction = global_rss_memory_at_prev_eviction =
           acc_deleted_bytes_during_eviction = deleted_bytes_at_prev_eviction = 0;
     }
-    void AdjustDeletedBytes(size_t shard_rss_over_memory_budget, size_t shard_used_memory) {
-      // Adjust deleted bytes w.r.t shard used memory. If we increase shard used
-      // memory in current heartbeat we can invalidate deleted_bytes. Otherwise we adjust deleted
-      // bytes by diff.
-      if (shard_used_memory >= shard_used_memory_at_prev_eviction) {
-        deleted_bytes_at_prev_eviction = 0;
-      } else if (shard_used_memory < shard_used_memory_at_prev_eviction) {
-        auto diff = std::min(deleted_bytes_at_prev_eviction,
-                             shard_used_memory_at_prev_eviction - shard_used_memory);
-        deleted_bytes_at_prev_eviction -= (deleted_bytes_at_prev_eviction - diff);
-      }
-      // Check if adding value of previous deleted bytes will be higher than rss memory budget and
-      // limit if needed.
-      const size_t next_acc_deleted_bytes =
-          acc_deleted_bytes_during_eviction + deleted_bytes_at_prev_eviction;
-      acc_deleted_bytes_during_eviction = shard_rss_over_memory_budget > next_acc_deleted_bytes
-                                              ? next_acc_deleted_bytes
-                                              : shard_rss_over_memory_budget;
-    }
+    void AdjustDeletedBytes(size_t shard_used_memory);
+    void LimitAccumulatedDeletedBytes(size_t shard_rss_over_memory_budget);
+    void AdjustAccumulatedDeletedBytes(size_t global_used_rss_memory);
     bool rss_eviction_enabled = true;
     bool track_deleted_bytes = false;
     size_t acc_deleted_bytes_during_eviction = 0;  // Accumulated deleted bytes during eviction
