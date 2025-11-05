@@ -398,14 +398,10 @@ std::optional<util::fb2::Future<bool>> TieredStorage::TryStash(DbIndex dbid, str
     stash_string(raw_string.view());
   } else if (auto bin = bins_->Stash(dbid, key, raw_string.view()); bin) {
     id = bin->first;
-<<<<<<< HEAD
-    ec = op_manager_->Stash(id, bin->second);
-  } else {
-    return {};  // Silently added to bin
-=======
     // TODO(vlad): Write bin to prepared buffer instead of allocating one
     stash_string(bin->second);
->>>>>>> ce5e1647 (feat(tiering): Two phase stash)
+  } else {
+    return {};  // silently added to bin
   }
 
   if (ec) {
