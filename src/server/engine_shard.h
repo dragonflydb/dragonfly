@@ -226,10 +226,34 @@ class EngineShard {
   };
 
   struct EvictionTaskState {
-    bool rss_eviction_enabled_ = true;
+    void Reset(bool rss_eviction_enabled_flag) {
+      rss_eviction_enabled = rss_eviction_enabled_flag;
+      shard_used_memory_at_prev_eviction = global_rss_memory_at_prev_eviction =
+          acc_deleted_bytes_during_eviction = deleted_bytes_at_prev_eviction = 0;
+    }
+    void AdjustDeletedBytes(size_t shard_rss_over_memory_budget, size_t shard_used_memory) {
+      // Adjust deleted bytes w.r.t shard used memory. If we increase shard used
+      // memory in current heartbeat we can invalidate deleted_bytes. Otherwise we adjust deleted
+      // bytes by diff.
+      if (shard_used_memory >= shard_used_memory_at_prev_eviction) {
+        deleted_bytes_at_prev_eviction = 0;
+      } else if (shard_used_memory < shard_used_memory_at_prev_eviction) {
+        auto diff = std::min(deleted_bytes_at_prev_eviction,
+                             shard_used_memory_at_prev_eviction - shard_used_memory);
+        deleted_bytes_at_prev_eviction -= (deleted_bytes_at_prev_eviction - diff);
+      }
+      // Check if adding value of previous deleted bytes will be higher than rss memory budget and
+      // limit if needed.
+      const size_t next_acc_deleted_bytes =
+          acc_deleted_bytes_during_eviction + deleted_bytes_at_prev_eviction;
+      acc_deleted_bytes_during_eviction = shard_rss_over_memory_budget > next_acc_deleted_bytes
+                                              ? next_acc_deleted_bytes
+                                              : shard_rss_over_memory_budget;
+    }
+    bool rss_eviction_enabled = true;
     bool track_deleted_bytes = false;
-    size_t acc_deleted_bytes_during_eviction = 0;  // Bytes that were deleted during eviction
-    size_t deleted_bytes_at_prev_eviction = 0;     // Bytes that were deleted in previous eviction
+    size_t acc_deleted_bytes_during_eviction = 0;  // Accumulated deleted bytes during eviction
+    size_t deleted_bytes_at_prev_eviction = 0;     // Bytes deleted in previous eviction
     size_t shard_used_memory_at_prev_eviction = 0;
     size_t global_rss_memory_at_prev_eviction = 0;
   };
