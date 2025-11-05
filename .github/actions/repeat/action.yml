@@ -45,4 +45,4 @@ runs:
       run: |
         ls -l ${GITHUB_WORKSPACE}/
         cd ${GITHUB_WORKSPACE}/build
-        ./dragonfly_test --gtest_filter=DflyEngineTest.ZeroAllocationEviction --gtest_repeat=10000 --gtest_break_on_failure
+        ./dragonfly_test --gtest_repeat=5000 --gtest_break_on_failure
