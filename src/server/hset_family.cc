@@ -161,7 +161,7 @@ template <typename T> OpResult<T> Unwrap(CbResult<T> result) {
     return result.status();
 
   Overloaded ov{
-      [](T res) -> OpResult<T> { return std::move(res); },
+      [](T res) -> OpResult<T> { return res; },
       [](util::fb2::Future<OpResult<T>> fut) -> OpResult<T> { return fut.Get(); },
   };
   return visit(ov, std::move(result).value());
