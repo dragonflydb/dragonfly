@@ -1444,8 +1444,8 @@ template <typename F> bool Iterate(const PrimeValue& pv, F&& func) {
 }
 
 // Create a SortEntryList from given key
-OpResultTyped<SortEntryList> OpFetchSortEntries(const OpArgs& op_args, std::string_view key,
-                                                bool alpha) {
+OpResult<pair<SortEntryList, CompactObjType>> OpFetchSortEntries(const OpArgs& op_args,
+                                                                 std::string_view key, bool alpha) {
   using namespace container_utils;
 
   auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
@@ -1465,9 +1465,10 @@ OpResultTyped<SortEntryList> OpFetchSortEntries(const OpArgs& op_args, std::stri
         });
       },
       result);
-  auto res = OpResultTyped{std::move(result)};
-  res.setType(it->second.ObjType());
-  return success ? res : OpStatus::INVALID_NUMERIC_RESULT;
+  if (!success)
+    return OpStatus::INVALID_NUMERIC_RESULT;
+
+  return std::make_pair(std::move(result), it->second.ObjType());
 }
 
 template <typename IteratorBegin, typename IteratorEnd>
@@ -1543,11 +1544,10 @@ void SortGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_read_o
   assert(((is_read_only && !bool(store_key)) || !is_read_only));
 
   ShardId source_sid = Shard(key, shard_set->size());
-  OpResultTyped<SortEntryList> fetch_result;
+  OpResult<pair<SortEntryList, CompactObjType>> fetch_result;
   auto fetch_cb = [&](Transaction* t, EngineShard* shard) {
-    ShardId shard_id = shard->shard_id();
     // in case of SORT option, we fetch only on the source shard
-    if (shard_id == source_sid) {
+    if (shard->shard_id() == source_sid) {
       fetch_result = OpFetchSortEntries(t->GetOpArgs(shard), key, alpha);
     }
     return OpStatus::OK;
@@ -1565,7 +1565,7 @@ void SortGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_read_o
       return rb->SendEmptyArray();
   }
 
-  auto result_type = fetch_result.type();
+  auto result_type = fetch_result->second;
 
   auto sort_call = [result_type, bounds, reversed, is_read_only, &rb, &store_key,
                     &cmd_cntx](auto& entries) {
@@ -1612,7 +1612,7 @@ void SortGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_read_o
     }
   };
 
-  std::visit(sort_call, fetch_result.value());
+  std::visit(sort_call, fetch_result.value().first);
 }
 
 void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {

@@ -41,7 +41,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   }
 
   ~SliceSlotMigration() {
-    Cancel();
+    CloseSocket();
     exec_st_.JoinErrorHandler();
   }
 
@@ -87,8 +87,8 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   }
 
   void Cancel() {
-    // Close socket for clean disconnect.
-    CloseSocket();
+    // Shutdown socket and allow IO loops to return.
+    ShutdownSocket();
     streamer_.Cancel();
   }
 
@@ -99,6 +99,8 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   const dfly::GenericError GetError() const {
     return exec_st_.GetError();
   }
+
+  using ProtocolClient::CloseSocket;
 
  private:
   RestoreStreamer streamer_;
@@ -120,7 +122,13 @@ OutgoingMigration::~OutgoingMigration() {
   exec_st_.JoinErrorHandler();
   // Destroy each flow in its dedicated thread, because we could be the last
   // owner of the db tables
-  OnAllShards([](auto& migration) { migration.reset(); });
+  OnAllShards([](auto& migration) {
+    if (migration) {
+      migration.reset();
+    }
+  });
+
+  CloseSocket();
 }
 
 bool OutgoingMigration::ChangeState(MigrationState new_state) {
@@ -161,7 +169,7 @@ void OutgoingMigration::Finish(const GenericError& error) {
   }
 
   bool should_cancel_flows = false;
-  absl::Cleanup on_exit([this]() { CloseSocket(); });
+  absl::Cleanup on_exit([this]() { ShutdownSocket(); });
 
   {
     util::fb2::LockGuard lk(state_mu_);
@@ -315,7 +323,6 @@ void OutgoingMigration::SyncFb() {
     break;
   }
 
-  CloseSocket();
   VLOG(1) << "Exiting outgoing migration fiber for migration " << migration_info_.ToString();
 }
 

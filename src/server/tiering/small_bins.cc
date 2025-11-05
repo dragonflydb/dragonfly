@@ -122,10 +122,7 @@ std::vector<std::pair<DbIndex, std::string>> SmallBins::ReportStashAborted(BinId
 }
 
 std::optional<SmallBins::BinId> SmallBins::Delete(DbIndex dbid, std::string_view key) {
-  std::pair<DbIndex, std::string> key_pair{dbid, key};
-  auto it = current_bin_.find(key_pair);
-
-  if (it != current_bin_.end()) {
+  if (auto it = current_bin_.find(make_pair(dbid, key)); it != current_bin_.end()) {
     size_t stashed_size = StashedValueSize(it->second);
     DCHECK_GE(current_bin_bytes_, stashed_size);
 
@@ -135,7 +132,7 @@ std::optional<SmallBins::BinId> SmallBins::Delete(DbIndex dbid, std::string_view
   }
 
   for (auto& [id, keys] : pending_bins_) {
-    if (keys.erase(key_pair))
+    if (keys.erase(make_pair(dbid, key)))
       return keys.empty() ? std::make_optional(id) : std::nullopt;
   }
   return std::nullopt;
