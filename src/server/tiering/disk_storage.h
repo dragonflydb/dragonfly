@@ -42,7 +42,7 @@ class DiskStorage {
   // Mark segment as free, performed immediately
   void MarkAsFree(DiskSegment segment);
 
-  // Allocate segment of at least given length and prepare buffer. Migh block to grow backing.
+  // Allocate segment of at least given length and prepare buffer. Might block to grow backing file.
   // Return error if not enough space is available or growing failed.
   // Every successful preparation must end in a Stash(), otherwise resources are leaked.
   io::Result<std::pair<size_t /* offset */, util::fb2::UringBuf>> PrepareStash(size_t length);
