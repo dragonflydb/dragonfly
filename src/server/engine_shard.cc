@@ -774,9 +774,10 @@ size_t EngineShard::CalculateEvictionBytes() {
   if (eviction_state_.rss_eviction_enabled) {
     const size_t global_used_rss_memory = rss_mem_current.load(memory_order_relaxed);
     const size_t rss_memory_threshold_start = limit * (1. - eviction_memory_budget_threshold);
+    const size_t shard_used_memory = UsedMemory();
 
-    // Adjustor or limit number of accumulated deleted bytes
-    eviction_state_.AdjustDeletedBytes(UsedMemory());
+    // Adjust previous deleted bytes
+    eviction_state_.AdjustDeletedBytes(shard_used_memory);
 
     // Calculate memory budget that is higher than rss_memory_threshold_start. This is our limit
     // for accumulated_deleted_bytes.
@@ -791,7 +792,7 @@ size_t EngineShard::CalculateEvictionBytes() {
 
     // Update rss/used memory for this heartbeat
     eviction_state_.global_rss_memory_at_prev_eviction = global_used_rss_memory;
-    eviction_state_.shard_used_memory_at_prev_eviction = global_used_memory;
+    eviction_state_.shard_used_memory_at_prev_eviction = shard_used_memory;
 
     // If we underflow use limit as used_memory
     size_t used_rss_memory_with_deleted_bytes = std::min(
