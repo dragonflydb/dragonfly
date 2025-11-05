@@ -153,6 +153,14 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_EQ(TOK_TAG_VAL, string, "blue]1#-");
   NEXT_TOK(TOK_RCURLBR);
 
+  // Colon in tag value (unescaped)
+  SetInput("@t:{Tag:value}");
+  NEXT_EQ(TOK_FIELD, string, "@t");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TAG_VAL, string, "Tag:value");
+  NEXT_TOK(TOK_RCURLBR);
+
   // Prefix simple
   SetInput("pre*");
   NEXT_EQ(TOK_PREFIX, string, "pre");
@@ -231,6 +239,11 @@ TEST_F(SearchParserTest, Parse) {
   EXPECT_EQ(0, Parse("@foo:{1|hello|3.0|world|4}"));
 
   EXPECT_EQ(0, Parse("@name:{escape\\-err*}"));
+
+  // Colon in tag value
+  EXPECT_EQ(0, Parse("@t:{Tag:value}"));
+  EXPECT_EQ(0, Parse("@t:{Tag:*}"));
+  EXPECT_EQ(0, Parse("@category:{Product:Electronics}"));
 
   EXPECT_EQ(1, Parse(" -(foo "));
   EXPECT_EQ(1, Parse(" foo:bar "));

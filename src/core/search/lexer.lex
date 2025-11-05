@@ -37,7 +37,8 @@ sq         \'
 esc_chars  ['"\?\\abfnrtv]
 esc_seq    \\{esc_chars}
 term_ch    \w
-tag_val_ch [^,.<>{}\[\]\\\"\?':;!@#$%^&*()\-+=~\/| ]|\\.
+tag_val_base_ch [^,.<>{}\[\]\\\"\?':;!@#$%^&*()\-+=~\/| ]|\\.
+tag_val_ch {tag_val_base_ch}+(:+{tag_val_base_ch}*)*
 astrsk_ch  \*
 
 
