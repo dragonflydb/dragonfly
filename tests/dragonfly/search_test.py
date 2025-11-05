@@ -586,3 +586,29 @@ def test_redis_om(df_server):
 
     for index in client.execute_command("FT._LIST"):
         client.ft(index.decode()).dropindex()
+
+
+@dfly_args({"proactor_threads": 4, "dbfilename": "synonym-persistence"})
+async def test_synonym_persistence(df_server):
+    """Test that synonyms are persisted across server restarts"""
+    client = aioredis.Redis(port=df_server.port)
+
+    # Create index and add documents
+    idx = client.ft("idx")
+    await idx.create_index([TextField("txt")], definition=IndexDefinition(prefix=["d:"]))
+    await client.hset("d:1", mapping={"txt": "car"})
+    await client.hset("d:2", mapping={"txt": "automobile"})
+
+    # Add synonyms and verify they work
+    await client.execute_command("FT.SYNUPDATE", "idx", "grp", "car", "automobile")
+    assert (await idx.search(Query("car"))).total == 2
+
+    # Restart server
+    df_server.stop()
+    df_server.start()
+    client = aioredis.Redis(port=df_server.port)
+    await wait_available_async(client)
+    idx = client.ft("idx")
+
+    # Verify synonyms still work after restart
+    assert (await idx.search(Query("car"))).total == 2

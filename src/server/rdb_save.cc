@@ -1352,7 +1352,7 @@ error_code RdbSaver::Impl::FlushSerializer() {
 }
 
 RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
-  StringVec script_bodies, search_indices;
+  StringVec script_bodies, search_indices, search_synonyms;
 
   {
     auto scripts = service->script_mgr()->GetAll();
@@ -1367,9 +1367,23 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
     if (shard->shard_id() == 0) {
       auto* indices = shard->search_indices();
       for (const auto& index_name : indices->GetIndexNames()) {
-        auto index_info = indices->GetIndex(index_name)->GetInfo();
+        auto* index = indices->GetIndex(index_name);
+        auto index_info = index->GetInfo();
+
+        // Save index definition
         search_indices.emplace_back(
             absl::StrCat(index_name, " ", index_info.BuildRestoreCommand()));
+
+        // Save synonym groups to separate vector
+        const auto& synonym_groups = index->GetSynonyms().GetGroups();
+        for (const auto& [group_id, terms] : synonym_groups) {
+          if (!terms.empty()) {
+            // Format: "index_name group_id term1 term2 term3"
+            std::string syn_cmd =
+                absl::StrCat(index_name, " ", group_id, " ", absl::StrJoin(terms, " "));
+            search_synonyms.emplace_back(std::move(syn_cmd));
+          }
+        }
       }
     }
 #endif
@@ -1386,7 +1400,7 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
   });
 
   return RdbSaver::GlobalData{std::move(script_bodies), std::move(search_indices),
-                              table_mem.load(memory_order_relaxed)};
+                              std::move(search_synonyms), table_mem.load(memory_order_relaxed)};
 }
 
 void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
@@ -1526,6 +1540,12 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
     DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_indices.empty());
     for (const string& s : glob_state.search_indices)
       RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));
+
+    // Save synonyms in separate aux fields
+    DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_synonyms.empty());
+    for (const string& s : glob_state.search_synonyms)
+      RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-synonyms", s));
+
     if (save_mode_ == SaveMode::SINGLE_SHARD_WITH_SUMMARY || save_mode_ == SaveMode::SUMMARY) {
       // We save the shard id in the summary file, so that we can restore it later.
       RETURN_ON_ERR(SaveAuxFieldStrInt("shard-count", shard_set->size()));
