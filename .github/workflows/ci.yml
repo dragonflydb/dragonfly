@@ -195,6 +195,13 @@ jobs:
           name: unit_logs
           path: /tmp/*INFO*
 
+      - name: Setup Python 3.10 for valkey-search tests
+        if: matrix.container == 'ubuntu-dev:24'
+        run: |
+          apt update && apt install -y software-properties-common
+          add-apt-repository ppa:deadsnakes/ppa -y
+          apt update && apt install -y python3.10 python3.10-venv
+
       - name: Run regression tests
         if: matrix.container == 'ubuntu-dev:20' || matrix.container == 'ubuntu-dev:24'
         uses: ./.github/actions/regression-tests
