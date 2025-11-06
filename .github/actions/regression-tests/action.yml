@@ -49,9 +49,10 @@ runs:
         ls -l ${GITHUB_WORKSPACE}/
         cd ${GITHUB_WORKSPACE}/tests
         echo "Current commit is ${{github.sha}}"
-        pip3 install --user -r dragonfly/requirements.txt
-        # Add user bin to PATH for pytest
-        export PATH="$HOME/.local/bin:$PATH"
+        # Create virtual environment
+        python3 -m venv venv
+        source venv/bin/activate
+        pip3 install -r dragonfly/requirements.txt
         # used by PyTests
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export ROOT_DIR="${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search"
