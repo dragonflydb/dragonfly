@@ -94,7 +94,10 @@
           "type": "string"
         },
         "clusterIP": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "port": {
           "type": "integer"
