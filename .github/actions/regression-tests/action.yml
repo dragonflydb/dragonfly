@@ -49,7 +49,7 @@ runs:
         ls -l ${GITHUB_WORKSPACE}/
         cd ${GITHUB_WORKSPACE}/tests
         echo "Current commit is ${{github.sha}}"
-        pip3 install -r dragonfly/requirements.txt
+        pip3 install --user -r dragonfly/requirements.txt
         # used by PyTests
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export ROOT_DIR="${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search"
