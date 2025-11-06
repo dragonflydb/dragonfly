@@ -154,9 +154,13 @@ auto KeyAndArgs(Transaction* t, EngineShard* es) {
   return std::make_pair(t->GetShardArgs(es->shard_id()).Front(), t->GetOpArgs(es));
 }
 
-template <typename T> using CbResult = OpResult<std::variant<T, ::util::fb2::Future<OpResult<T>>>>;
+// A wrappable callback returns a OpResult<T> or the future version of it for tiered values.
+// Because the top-level value needs to be an OpResult, the variant is wrapped as an OpResult again.
+// However, we can take the "result" out of the bare value and keep it only on the top-level.
+template <typename T> using CbVariant = std::variant<T, ::util::fb2::Future<OpResult<T>>>;
 
-template <typename T> OpResult<T> Unwrap(CbResult<T> result) {
+// Unwrap possibly future result to a regular one
+template <typename T> OpResult<T> Unwrap(OpResult<CbVariant<T>> result) {
   if (!result.ok())
     return result.status();
 
@@ -167,28 +171,29 @@ template <typename T> OpResult<T> Unwrap(CbResult<T> result) {
   return visit(ov, std::move(result).value());
 }
 
-// Wrap read-only handler
-template <typename F> auto WrapRO(F&& f) {
+template <typename F> auto ExecuteRO(Transaction* tx, F&& f) {
   using T = typename std::invoke_result_t<F, HMapWrap>::Type;
-  using VT = std::variant<T, util::fb2::Future<OpResult<T>>>;
-
-  return [f = std::forward<F>(f)](Transaction* t, EngineShard* es) -> OpResult<VT> {
+  auto cb = [f = std::forward<F>(f)](Transaction* t, EngineShard* es) -> OpResult<CbVariant<T>> {
+    // Fetch value of hash type
     auto [key, op_args] = KeyAndArgs(t, es);
     auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
     RETURN_ON_BAD_STATUS(it_res);
-
     auto& pv = (*it_res)->second;
+
+    // Enqueue read for future values
     if (pv.IsExternal() && !pv.IsCool()) {
+      using D = tiering::SerializedMapDecoder;
+      using RD = io::Result<D*>;
+
       util::fb2::Future<OpResult<T>> fut;
-      auto cb = [fut, &f](io::Result<tiering::SerializedMapDecoder*> res) mutable {
+      auto cb = [fut, &f](RD res) mutable {
         HMapWrap hw{res.value()->Get()};
         fut.Resolve(f(hw));
       };
 
-      es->tiered_storage()->Read(
-          op_args.db_cntx.db_index, key, pv, tiering::SerializedMapDecoder{},
-          std::function<void(io::Result<tiering::SerializedMapDecoder*>)>(std::move(cb)));
-      return VT{std::move(fut)};
+      es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv, D{},
+                                 std::function<void(RD)>(std::move(cb)));
+      return CbVariant<T>{std::move(fut)};
     }
 
     HMapWrap hw{pv, op_args.db_cntx};
@@ -197,9 +202,12 @@ template <typename F> auto WrapRO(F&& f) {
     if (hw.Length() == 0)  // Expirations might have emptied it
       DeleteHw(hw, op_args, key);
 
+    // Move result into variant or keep error status
     RETURN_ON_BAD_STATUS(res);
-    return VT{std::move(res).value()};
+    return CbVariant<T>{std::move(res).value()};
   };
+
+  return Unwrap(tx->ScheduleSingleHopT(std::move(cb)));
 }
 
 // Wrap write handler
@@ -498,7 +506,7 @@ void HGetGeneric(CmdArgList args, uint8_t getall_mask, Transaction* tx, SinkRepl
     return res;
   };
 
-  OpResult<vector<string>> result = Unwrap(tx->ScheduleSingleHopT(WrapRO(cb)));
+  OpResult<vector<string>> result = ExecuteRO(tx, cb);
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   switch (result.status()) {
     case OpStatus::OK:
@@ -657,7 +665,7 @@ void HSetFamily::HGet(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::KEY_NOTFOUND;
   };
 
-  OpResult<string> result = Unwrap(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb)));
+  OpResult<string> result = ExecuteRO(cmd_cntx.tx, cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   switch (result.status()) {
     case OpStatus::OK:
@@ -673,7 +681,7 @@ void HSetFamily::HMGet(CmdArgList args, const CommandContext& cmd_cntx) {
   auto fields = args.subspan(1);
   auto cb = [fields](const HMapWrap& hw) { return OpHMGet(hw, fields); };
 
-  OpResult<vector<OptStr>> result = Unwrap(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb)));
+  OpResult<vector<OptStr>> result = ExecuteRO(cmd_cntx.tx, cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   switch (result.status()) {
     case OpStatus::OK:
@@ -697,19 +705,19 @@ void HSetFamily::HStrLen(CmdArgList args, const CommandContext& cmd_cntx) {
       return it->second.length();
     return OpStatus::KEY_NOTFOUND;
   };
-  HSetReplies{cmd_cntx.rb}.Send(Unwrap(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb))));
+  HSetReplies{cmd_cntx.rb}.Send(ExecuteRO(cmd_cntx.tx, cb));
 }
 
 void HSetFamily::HLen(CmdArgList args, const CommandContext& cmd_cntx) {
   auto cb = [](const HMapWrap& hw) -> OpResult<uint32_t> { return hw.Length(); };
-  HSetReplies{cmd_cntx.rb}.Send(Unwrap(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb))));
+  HSetReplies{cmd_cntx.rb}.Send(ExecuteRO(cmd_cntx.tx, cb));
 }
 
 void HSetFamily::HExists(CmdArgList args, const CommandContext& cmd_cntx) {
   auto cb = [field = args[1]](const HMapWrap& hw) -> OpResult<uint32_t> {
     return hw.Find(field) ? 1 : 0;
   };
-  HSetReplies{cmd_cntx.rb}.Send(Unwrap(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb))));
+  HSetReplies{cmd_cntx.rb}.Send(ExecuteRO(cmd_cntx.tx, cb));
 }
 
 void HSetFamily::HIncrBy(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -814,7 +822,7 @@ void HSetFamily::HScan(CmdArgList args, const CommandContext& cmd_cntx) {
   const ScanOpts& scan_op = ops.value();
   auto cb = [&](const HMapWrap& hw) { return OpScan(hw, &cursor, scan_op); };
 
-  OpResult<StringVec> result = Unwrap(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb)));
+  OpResult<StringVec> result = ExecuteRO(cmd_cntx.tx, cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   switch (result.status()) {
     case OpStatus::KEY_NOTFOUND:

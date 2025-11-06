@@ -46,10 +46,10 @@ class TieredStorage {
   std::error_code Open(std::string_view path);
   void Close();
 
-  // Generic read function with decoder
+  // Enqueue read external value with generic decoder.
   template <typename D>
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value, const D& decoder,
-            std::function<void(io::Result<D*>)>);
+            std::function<void(io::Result<D*>)> cb);
 
   // Read offloaded value. It must be of external type
   TResult<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);

@@ -329,12 +329,17 @@ void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& v
                          const D& decoder, std::function<void(io::Result<D*>)> cb) {
   DCHECK(value.IsExternal());
   DCHECK(!value.IsCool());
+  // TODO: imporve performance by avoiding one more function wrap
   op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), decoder, std::move(cb));
 }
 
 template void TieredStorage::Read(DbIndex, std::string_view, const PrimeValue&,
                                   const tiering::SerializedMapDecoder&,
                                   std::function<void(io::Result<tiering::SerializedMapDecoder*>)>);
+
+template void TieredStorage::Read(DbIndex, std::string_view, const PrimeValue&,
+                                  const tiering::StringDecoder&,
+                                  std::function<void(io::Result<tiering::StringDecoder*>)>);
 
 TieredStorage::TResult<string> TieredStorage::Read(DbIndex dbid, string_view key,
                                                    const PrimeValue& value) {
@@ -345,13 +350,11 @@ TieredStorage::TResult<string> TieredStorage::Read(DbIndex dbid, string_view key
 
 void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
                          std::function<void(io::Result<std::string>)> readf) {
-  DCHECK(value.IsExternal());
-  DCHECK(!value.IsCool());
   auto cb = [readf = std::move(readf)](io::Result<tiering::StringDecoder*> res) mutable {
     readf(res.transform([](auto* d) { return string{d->Read()}; }));
   };
-  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), tiering::StringDecoder{value},
-                       std::move(cb));
+  Read(dbid, key, value, tiering::StringDecoder{value},
+       std::function<void(io::Result<tiering::StringDecoder*>)>(std::move(cb)));
 }
 
 template <typename T>
