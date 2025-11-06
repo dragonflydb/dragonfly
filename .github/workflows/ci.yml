@@ -196,7 +196,7 @@ jobs:
           path: /tmp/*INFO*
 
       - name: Run regression tests
-        if: matrix.container == 'ubuntu-dev:20'
+        if: matrix.container == 'ubuntu-dev:20' || matrix.container == 'ubuntu-dev:24'
         uses: ./.github/actions/regression-tests
         with:
           dfly-executable: dragonfly
