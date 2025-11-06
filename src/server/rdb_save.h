@@ -20,8 +20,6 @@ extern "C" {
 #include "server/journal/types.h"
 #include "server/table.h"
 
-constexpr size_t kFilterChunkSize = 1ULL << 26;
-
 typedef struct rax rax;
 typedef struct streamCG streamCG;
 typedef struct quicklistNode quicklistNode;
@@ -211,6 +209,7 @@ class SerializerBase {
   io::IoBuf mem_buf_;
   std::unique_ptr<detail::CompressorImpl> compressor_impl_;
 
+  static constexpr size_t kFilterChunkSize = 1ULL << 26;
   static constexpr size_t kMinStrSizeToCompress = 256;
   static constexpr size_t kMaxStrSizeToCompress = 1 * 1024 * 1024;
   static constexpr double kMinCompressionReductionPrecentage = 0.95;

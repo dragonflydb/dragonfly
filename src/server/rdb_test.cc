@@ -35,6 +35,7 @@ ABSL_DECLARE_FLAG(int32, list_max_listpack_size);
 ABSL_DECLARE_FLAG(dfly::CompressionMode, compression_mode);
 ABSL_DECLARE_FLAG(bool, rdb_ignore_expiry);
 ABSL_DECLARE_FLAG(uint32_t, num_shards);
+ABSL_DECLARE_FLAG(bool, rdb_sbf_chunked);
 
 namespace dfly {
 
@@ -671,6 +672,7 @@ TEST_F(RdbTest, SBF) {
 }
 
 TEST_F(RdbTest, SBFLargeFilterChunking) {
+  absl::SetFlag(&FLAGS_rdb_sbf_chunked, true);
   max_memory_limit = 200000000;
 
   // Using this set of parameters for the BF.RESERVE command resulted in a
