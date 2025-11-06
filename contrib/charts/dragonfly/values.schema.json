@@ -86,7 +86,8 @@
           "enum": [
             "ClusterIP",
             "NodePort",
-            "LoadBalancer"
+            "LoadBalancer",
+            ""
           ]
         },
         "loadBalancerIP": {
