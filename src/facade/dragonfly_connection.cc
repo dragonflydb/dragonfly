@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2025, DragonflyDB authors.  All rights reserved.
 //
 // See LICENSE for licensing terms.
 //
@@ -13,6 +13,7 @@
 #include <numeric>
 #include <variant>
 
+#include "absl/flags/internal/flag.h"
 #include "base/cycle_clock.h"
 #include "base/flag_utils.h"
 #include "base/flags.h"
@@ -22,6 +23,7 @@
 #include "base/stl_util.h"
 #include "core/heap_size.h"
 #include "facade/conn_context.h"
+#include "facade/disk_connection_backpressure.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
@@ -111,6 +113,9 @@ ABSL_FLAG(uint32_t, pipeline_squash_limit, 1 << 30, "Limit on the size of a squa
 ABSL_FLAG(uint32_t, pipeline_wait_batch_usec, 0,
           "If non-zero, waits for this time for more I/O "
           " events to come for the connection in case there is only one command in the pipeline. ");
+
+ABSL_FLAG(size_t, disk_backpressure_offload_watermark, 0,
+          "Offload backpressure to disk when dispatch queue size crosses the watermark.");
 
 using namespace util;
 using namespace std;
@@ -676,6 +681,16 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 #endif
 
   UpdateLibNameVerMap(lib_name_, lib_ver_, +1);
+
+  backpressure_to_disk_watermark_ = absl::GetFlag(FLAGS_disk_backpressure_offload_watermark);
+  if (backpressure_to_disk_watermark_ > 0) {
+    backing_queue_ = std::make_unique<DiskBackedBackpressureQueue>(id_);
+    auto ec = backing_queue_->Init();
+    if (ec) {
+      LOG(ERROR) << "Error while initializing backpressure file " << ec.message();
+      backing_queue_.reset();
+    }
+  }
 }
 
 Connection::~Connection() {

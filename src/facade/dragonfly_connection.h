@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2025, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -45,6 +45,7 @@ class ConnectionContext;
 class RedisParser;
 class ServiceInterface;
 class SinkReplyBuilder;
+class DiskBackedBackpressureQueue;
 
 // Connection represents an active connection for a client.
 //
@@ -502,6 +503,9 @@ class Connection : public util::Connection {
       bool is_main_ : 1;
     };
   };
+
+  std::unique_ptr<DiskBackedBackpressureQueue> backing_queue_;
+  size_t backpressure_to_disk_watermark_ = 0;
 
   bool request_shutdown_ = false;
 };
