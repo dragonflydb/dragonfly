@@ -3330,11 +3330,15 @@ TEST_F(SearchFamilyTest, MAXSEARCHRESULTS) {
                             "Maximum number of results from ft.search command", "Value", "1"));
 
   resp = Run({"FT.CONFIG", "GET", "*"});
-  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1"));
+  // Should contain MAXSEARCHRESULTS among other search config parameters
+  EXPECT_THAT(resp, RespArray(Contains("MAXSEARCHRESULTS")));
+  EXPECT_THAT(resp, RespArray(Contains("1")));
 
   resp = Run({"FT.CONFIG", "HELP", "*"});
-  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "Description",
-                            "Maximum number of results from ft.search command", "Value", "1"));
+  // Should contain MAXSEARCHRESULTS description among other search configs
+  EXPECT_THAT(resp.GetVec(),
+              Contains(IsArray("MAXSEARCHRESULTS", "Description",
+                               "Maximum number of results from ft.search command", "Value", "1")));
 
   // restore normal value for other tests
   Run({"FT.CONFIG", "SET", "MAXSEARCHRESULTS", "1000000"});

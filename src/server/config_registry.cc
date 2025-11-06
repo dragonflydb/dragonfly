@@ -15,7 +15,7 @@ namespace {
 using namespace std;
 
 string NormalizeConfigName(string_view name) {
-  return absl::StrReplaceAll(name, {{"-", "_"}});
+  return absl::StrReplaceAll(name, {{"-", "_"}, {".", "_"}});
 }
 }  // namespace
 

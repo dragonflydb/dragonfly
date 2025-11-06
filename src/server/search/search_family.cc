@@ -37,6 +37,10 @@
 ABSL_FLAG(bool, search_reject_legacy_field, true, "FT.AGGREGATE: Reject legacy field names.");
 
 ABSL_FLAG(size_t, MAXSEARCHRESULTS, 1000000, "Maximum number of results from ft.search command");
+
+ABSL_FLAG(size_t, search_query_string_bytes, 10240,
+          "Maximum number of bytes in search query string");
+
 namespace dfly {
 
 using namespace std;
@@ -1284,6 +1288,13 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   if (SendErrorIfOccurred(params, &parser, builder))
     return;
 
+  // Check query string length limit
+  size_t max_query_bytes = absl::GetFlag(FLAGS_search_query_string_bytes);
+  if (query_str.size() > max_query_bytes) {
+    return builder->SendError(
+        absl::StrCat("Query string is too long, max length is ", max_query_bytes, " bytes"));
+  }
+
   search::SearchAlgorithm search_algo;
   if (!search_algo.Init(query_str, &params->query_params, &params->optional_filters))
     return builder->SendError("Query syntax error");
@@ -1740,7 +1751,20 @@ void FtConfigGet(CmdArgParser* parser, RedisReplyBuilder* rb) {
     auto* flag = config_registry.GetFlag(name);
     DCHECK(flag);
     if (flag && flag->Filename().find(kCurrentFile) != std::string::npos) {
-      res.push_back(name);
+      // Convert internal name (search_query_string_bytes) back to user-facing format
+      // (search.query-string-bytes)
+      string display_name = name;
+      if (absl::StartsWith(display_name, "search_")) {
+        // Replace first underscore after "search" with dot
+        display_name.replace(6, 1, ".");
+        // Replace remaining underscores with dashes
+        for (size_t i = 7; i < display_name.size(); ++i) {
+          if (display_name[i] == '_') {
+            display_name[i] = '-';
+          }
+        }
+      }
+      res.push_back(display_name);
       res.push_back(flag->CurrentValue());
     }
   }
