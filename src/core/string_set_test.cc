@@ -722,6 +722,28 @@ void BM_Grow(benchmark::State& state) {
 }
 BENCHMARK(BM_Grow);
 
+void BM_Spop1000(benchmark::State& state) {
+  mt19937 generator(0);
+  StringSet src;
+  unsigned elems = 1 << 14;
+  for (size_t i = 0; i < elems; ++i) {
+    src.Add(random_string(generator, 16), UINT32_MAX);
+  }
+
+  auto sparseness = state.range(0);
+  while (state.KeepRunning()) {
+    state.PauseTiming();
+    StringSet tmp;
+    src.Fill(&tmp);
+    src.Reserve(elems * sparseness);
+    state.ResumeTiming();
+    for (int i = 0; i < 1000; ++i) {
+      src.Pop();
+    }
+  }
+}
+BENCHMARK(BM_Spop1000)->ArgName("sparseness")->ArgsProduct({{1, 4, 10}});
+
 unsigned total_wasted_memory = 0;
 
 TEST_F(StringSetTest, ReallocIfNeeded) {
