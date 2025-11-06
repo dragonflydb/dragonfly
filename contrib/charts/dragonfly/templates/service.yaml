@@ -19,8 +19,10 @@ spec:
   {{- if and (eq .Values.service.type "LoadBalancer") (ne .Values.service.loadBalancerIP "") }}
   loadBalancerIP: {{ .Values.service.loadBalancerIP }}
   {{- end }}
-  {{- if or (and (eq .Values.service.type "ClusterIP") (ne .Values.service.clusterIP "")) (eq .Values.service.type "") }}
+  {{- if and (eq .Values.service.type "ClusterIP") (ne .Values.service.clusterIP "") }}
   clusterIP: {{ .Values.service.clusterIP }}
+  {{- else if eq .Values.service.type ""}}
+  clusterIP: None
   {{- end }}
   ports:
     - port: {{ .Values.service.port }}
