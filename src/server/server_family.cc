@@ -2538,17 +2538,7 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
         if (value.has_value()) {
           // Convert internal name (search_query_string_bytes) back to user-facing format
           // (search.query-string-bytes)
-          string display_name = name;
-          if (absl::StartsWith(display_name, "search_")) {
-            // Replace first underscore after "search" with dot
-            display_name.replace(6, 1, ".");
-            // Replace remaining underscores with dashes
-            for (size_t i = 7; i < display_name.size(); ++i) {
-              if (display_name[i] == '_') {
-                display_name[i] = '-';
-              }
-            }
-          }
+          string display_name = DenormalizeConfigName(name);
           res.push_back(display_name);
           res.push_back(*value);
         }

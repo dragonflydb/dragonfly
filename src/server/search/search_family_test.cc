@@ -22,6 +22,7 @@ using namespace util;
 using namespace facade;
 
 ABSL_DECLARE_FLAG(bool, search_reject_legacy_field);
+ABSL_DECLARE_FLAG(size_t, search_query_string_bytes);
 
 namespace dfly {
 
@@ -3508,6 +3509,43 @@ TEST_F(SearchFamilyTest, HsetOnDifferentDatabasesCrash) {
 
   // Search on database 0 should still find the original document
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "value1"}), AreDocIds("hash1"));
+}
+
+TEST_F(SearchFamilyTest, QueryStringBytesLimit) {
+  Run({"hset", "doc1", "name", "alice", "age", "30"});
+  Run({"hset", "doc2", "name", "bob", "age", "25"});
+
+  EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "SCHEMA", "name", "TEXT", "age", "NUMERIC"}),
+            "OK");
+
+  absl::FlagSaver fs;
+
+  string query = "@name:alice @age:[25 30]";
+  size_t query_len = query.size();
+
+  // Set limit to query_len - 1 (just below query length)
+  absl::SetFlag(&FLAGS_search_query_string_bytes, query_len - 1);
+
+  auto resp = Run({"ft.search", "idx", query});
+  EXPECT_THAT(resp, ErrArg(absl::StrCat("Query string is too long, max length is ", query_len - 1,
+                                        " bytes")));
+
+  absl::SetFlag(&FLAGS_search_query_string_bytes, query_len);
+
+  resp = Run({"ft.search", "idx", query});
+  EXPECT_THAT(resp, AreDocIds("doc1"));
+
+  // Test FT.AGGREGATE with same query
+  absl::SetFlag(&FLAGS_search_query_string_bytes, query_len - 1);
+
+  resp = Run({"ft.aggregate", "idx", query, "LOAD", "1", "name"});
+  EXPECT_THAT(resp, ErrArg(absl::StrCat("Query string is too long, max length is ", query_len - 1,
+                                        " bytes")));
+
+  absl::SetFlag(&FLAGS_search_query_string_bytes, query_len);
+
+  resp = Run({"ft.aggregate", "idx", query, "LOAD", "1", "name"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "alice")));
 }
 
 }  // namespace dfly
