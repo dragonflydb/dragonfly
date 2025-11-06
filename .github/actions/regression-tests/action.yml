@@ -49,6 +49,10 @@ runs:
         ls -l ${GITHUB_WORKSPACE}/
         cd ${GITHUB_WORKSPACE}/tests
         echo "Current commit is ${{github.sha}}"
+        # Install python3-venv if not available
+        if ! python3 -m venv --help >/dev/null 2>&1; then
+          apt update && apt install -y python3-venv
+        fi
         # Create virtual environment
         python3 -m venv venv
         source venv/bin/activate
