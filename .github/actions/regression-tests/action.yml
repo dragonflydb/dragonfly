@@ -49,12 +49,7 @@ runs:
         ls -l ${GITHUB_WORKSPACE}/
         cd ${GITHUB_WORKSPACE}/tests
         echo "Current commit is ${{github.sha}}"
-
-        apt update && apt install -y python3-venv
-        python3 -m venv venv
-        source venv/bin/activate
         pip3 install -r dragonfly/requirements.txt
-
         # used by PyTests
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export ROOT_DIR="${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search"
