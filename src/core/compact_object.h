@@ -479,11 +479,13 @@ class CompactObj {
   struct JsonConsT {
     JsonType* json_ptr;
     size_t bytes_used;
+    bool DefragIfNeeded(PageUsage* page_usage);
   };
 
   struct FlatJsonT {
     uint32_t json_len;
     uint8_t* flat_ptr;
+    bool DefragIfNeeded(PageUsage* page_usage);
   };
 
   struct JsonWrapper {
@@ -491,6 +493,8 @@ class CompactObj {
       JsonConsT cons;
       FlatJsonT flat;
     };
+
+    bool DefragIfNeeded(PageUsage* page_usage);
   };
 
   // My main data structure. Union of representations.

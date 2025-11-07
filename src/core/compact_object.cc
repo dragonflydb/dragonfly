@@ -1072,6 +1072,8 @@ bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
       return false;
     case SMALL_TAG:
       return u_.small_str.DefragIfNeeded(page_usage);
+    case JSON_TAG:
+      return u_.json_obj.DefragIfNeeded(page_usage);
     case INT_TAG:
       page_usage->RecordNotRequired();
       // this is not relevant in this case
@@ -1435,6 +1437,35 @@ bool CompactObj::CmpEncoded(string_view sv) const {
   }
   LOG(FATAL) << "Unsupported tag " << int(taglen_);
   return false;
+}
+
+bool CompactObj::JsonConsT::DefragIfNeeded(PageUsage* page_usage) {
+  if (JsonType* old = json_ptr; page_usage->IsPageForObjectUnderUtilized(old)) {
+    json_ptr = AllocateMR<JsonType>(std::move(*old));
+    DeleteMR<JsonType>(old);
+    return true;
+  }
+  return false;
+}
+
+bool CompactObj::FlatJsonT::DefragIfNeeded(PageUsage* page_usage) {
+  if (uint8_t* old = flat_ptr; page_usage->IsPageForObjectUnderUtilized(old)) {
+    const uint32_t size = json_len;
+    flat_ptr = static_cast<uint8_t*>(tl.local_mr->allocate(size, kAlignSize));
+    memcpy(flat_ptr, old, size);
+    tl.local_mr->deallocate(old, 0, kAlignSize);
+    return true;
+  }
+
+  return false;
+}
+
+bool CompactObj::JsonWrapper::DefragIfNeeded(PageUsage* page_usage) {
+  if (JsonEnconding() == kEncodingJsonCons) {
+    return cons.DefragIfNeeded(page_usage);
+  }
+
+  return flat.DefragIfNeeded(page_usage);
 }
 
 void CompactObj::EncodeString(string_view str) {
