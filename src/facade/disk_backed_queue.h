@@ -30,7 +30,7 @@ class DiskBackedQueue {
 
   // For each item loaded from disk it calls f(item) to consume it.
   // Reads up to max_queue_load_size_ items on each call
-  std::error_code PopN(std::function<void(io::MutableBytes)> f);
+  std::error_code Pop(std::string* out);
 
   // Check if backing file is empty, i.e. backing file has 0 bytes.
   bool Empty() const;
@@ -52,6 +52,8 @@ class DiskBackedQueue {
 
   // same as connection id. Used to uniquely identify the backed file
   const size_t id_ = 0;
+
+  std::string buffer;
 };
 
 }  // namespace facade

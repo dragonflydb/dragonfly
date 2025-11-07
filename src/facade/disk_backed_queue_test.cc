@@ -42,12 +42,11 @@ TEST(DiskBackedQueueTest, ReadWrite) {
     }
 
     std::vector<std::string> results;
-    for (size_t i = 0; i < 4; ++i) {
-      auto ec = backing.PopN([&](io::MutableBytes read) {
-        std::string str(reinterpret_cast<const char*>(read.data()), read.size());
-        results.push_back(std::move(str));
-      });
+    for (size_t i = 0; i < 100; ++i) {
+      std::string res;
+      auto ec = backing.Pop(&res);
       EXPECT_FALSE(ec);
+      results.push_back(std::move(res));
     }
 
     EXPECT_EQ(results.size(), commands.size());

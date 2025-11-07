@@ -99,44 +99,40 @@ std::error_code DiskBackedQueue::Push(std::string_view blob) {
   return {};
 }
 
-std::error_code DiskBackedQueue::PopN(std::function<void(io::MutableBytes)> f) {
-  std::string buffer;
-  size_t up_to = max_queue_load_size_;
+std::error_code DiskBackedQueue::Pop(std::string* out) {
+  // We read the next item and (if there are more) we also prefetch the next item's size.
+  uint32_t read_sz = next_item_total_bytes_ + (total_backing_items_ > 1 ? sizeof(uint32_t) : 0);
+  buffer.resize(read_sz);
 
-  while (total_backing_items_ > 0 && up_to--) {
-    // We read the next item and (if there are more) we also prefetch the next item's size.
-    uint32_t read_sz = next_item_total_bytes_ + (total_backing_items_ > 1 ? sizeof(uint32_t) : 0);
-    buffer.resize(read_sz);
-
-    io::MutableBytes bytes{reinterpret_cast<uint8_t*>(buffer.data()), read_sz};
-    auto result = reader_->Read(next_read_offset_, bytes);
-    if (!result) {
-      LOG(ERROR) << "Could not load item at offset " << next_read_offset_ << " of size " << read_sz
-                 << " from disk with error: " << result.error().value() << " "
-                 << result.error().message();
-      return result.error();
-    }
-
-    VLOG(2) << "Loaded item with offset " << next_read_offset_ << " of size " << read_sz
-            << " for connection " << this;
-
-    next_read_offset_ += bytes.size();
-
-    if (total_backing_items_ > 1) {
-      auto buf = bytes.subspan(bytes.size() - sizeof(uint32_t));
-      uint32_t val = ((uint32_t)buf[0]) | ((uint32_t)buf[1] << 8) | ((uint32_t)buf[2] << 16) |
-                     ((uint32_t)buf[3] << 24);
-      bytes = bytes.subspan(0, next_item_total_bytes_);
-      next_item_total_bytes_ = val;
-    } else {
-      next_item_total_bytes_ = 0;
-    }
-
-    f(bytes);
-
-    total_backing_bytes_ -= next_item_total_bytes_;
-    --total_backing_items_;
+  io::MutableBytes bytes{reinterpret_cast<uint8_t*>(buffer.data()), read_sz};
+  auto result = reader_->Read(next_read_offset_, bytes);
+  if (!result) {
+    LOG(ERROR) << "Could not load item at offset " << next_read_offset_ << " of size " << read_sz
+               << " from disk with error: " << result.error().value() << " "
+               << result.error().message();
+    return result.error();
   }
+
+  VLOG(2) << "Loaded item with offset " << next_read_offset_ << " of size " << read_sz
+          << " for connection " << this;
+
+  next_read_offset_ += bytes.size();
+
+  if (total_backing_items_ > 1) {
+    auto buf = bytes.subspan(bytes.size() - sizeof(uint32_t));
+    uint32_t val = ((uint32_t)buf[0]) | ((uint32_t)buf[1] << 8) | ((uint32_t)buf[2] << 16) |
+                   ((uint32_t)buf[3] << 24);
+    bytes = bytes.subspan(0, next_item_total_bytes_);
+    next_item_total_bytes_ = val;
+  } else {
+    next_item_total_bytes_ = 0;
+  }
+
+  std::string read(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+  *out = std::move(read);
+
+  total_backing_bytes_ -= next_item_total_bytes_;
+  --total_backing_items_;
 
   return {};
 }
