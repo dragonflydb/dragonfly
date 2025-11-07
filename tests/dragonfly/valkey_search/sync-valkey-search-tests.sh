@@ -33,12 +33,15 @@ fi
 # Copy integration directory
 cp -r "$TEMP_DIR/integration" "$INTEGRATION_DIR"
 
-# Patch indexes.py for Python 3.8 compatibility
+# Patch all Python files for Python 3.8 compatibility
 # Add 'from __future__ import annotations' to support modern type hints
-if [ -f "$INTEGRATION_DIR/indexes.py" ]; then
-  echo "Patching indexes.py for Python 3.8 compatibility..."
-  sed -i '1i from __future__ import annotations' "$INTEGRATION_DIR/indexes.py"
-fi
+echo "Patching Python files for Python 3.8 compatibility..."
+find "$INTEGRATION_DIR" -name "*.py" -type f | while read -r file; do
+  # Check if the file doesn't already have 'from __future__ import annotations'
+  if ! grep -q "from __future__ import annotations" "$file"; then
+    sed -i '1i from __future__ import annotations' "$file"
+  fi
+done
 
 # Cleanup
 rm -rf "$TEMP_DIR"
