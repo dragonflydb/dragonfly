@@ -183,16 +183,13 @@ template <typename F> auto ExecuteRO(Transaction* tx, F&& f) {
     // Enqueue read for future values
     if (pv.IsExternal() && !pv.IsCool()) {
       using D = tiering::SerializedMapDecoder;
-      using RD = io::Result<D*>;
-
       util::fb2::Future<OpResult<T>> fut;
-      auto cb = [fut, &f](RD res) mutable {
+      auto cb = [fut, &f](io::Result<D*> res) mutable {
         HMapWrap hw{res.value()->Get()};
         fut.Resolve(f(hw));
       };
 
-      es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv, D{},
-                                 std::function<void(RD)>(std::move(cb)));
+      es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv, D{}, std::move(cb));
       return CbVariant<T>{std::move(fut)};
     }
 

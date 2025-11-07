@@ -47,9 +47,13 @@ class TieredStorage {
   void Close();
 
   // Enqueue read external value with generic decoder.
-  template <typename D>
-  void Read(DbIndex dbid, std::string_view key, const PrimeValue& value, const D& decoder,
-            std::function<void(io::Result<D*>)> cb);
+  template <typename D, typename F>
+  void Read(DbIndex dbid, std::string_view key, const PrimeValue& value, const D& decoder, F&& f) {
+    // TODO(vlad): untangle endless callback wrapping!
+    // Templates don't consider implicit conversions, so explicitly convert to std::function
+    ReadInternal(dbid, key, value, decoder,
+                 std::function<void(io::Result<D*>)>(std::forward<F>(f)));
+  }
 
   // Read offloaded value. It must be of external type
   TResult<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);
@@ -100,6 +104,10 @@ class TieredStorage {
   }
 
  private:
+  template <typename D>
+  void ReadInternal(DbIndex dbid, std::string_view key, const PrimeValue& value, const D& decoder,
+                    std::function<void(io::Result<D*>)> cb);
+
   // Returns if a value should be stashed
   bool ShouldStash(const PrimeValue& pv) const;
 

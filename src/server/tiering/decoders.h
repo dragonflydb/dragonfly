@@ -49,6 +49,7 @@ struct BareDecoder : public Decoder {
   std::string_view slice;
 };
 
+// Decodes string value with objects StrEncoding
 struct StringDecoder : public Decoder {
   explicit StringDecoder(const CompactObj& obj);
 
@@ -69,6 +70,7 @@ struct StringDecoder : public Decoder {
   dfly::StringOrView value_;
 };
 
+// Decodes SerializedMaps
 struct SerializedMapDecoder : public Decoder {
   std::unique_ptr<Decoder> Clone() const override;
   void Initialize(std::string_view slice) override;
