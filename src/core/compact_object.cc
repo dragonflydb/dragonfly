@@ -1094,6 +1094,8 @@ bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
       return false;
     case SMALL_TAG:
       return u_.small_str.DefragIfNeeded(page_usage);
+    case JSON_TAG:
+      return u_.json_obj.DefragIfNeeded(page_usage);
     case INT_TAG:
       page_usage->RecordNotRequired();
       // this is not relevant in this case
@@ -1583,6 +1585,44 @@ StringOrView CompactObj::GetRawString() const {
 
 MemoryResource* CompactObj::memory_resource() {
   return tl.local_mr;
+}
+
+bool CompactObj::JsonConsT::DefragIfNeeded(PageUsage* page_usage) {
+  if (JsonType* old = json_ptr; ShouldDefragment(page_usage)) {
+    json_ptr = AllocateMR<JsonType>(DeepCopyJSON(old, memory_resource()));
+    DeleteMR<JsonType>(old);
+    return true;
+  }
+  return false;
+}
+
+bool CompactObj::JsonConsT::ShouldDefragment(PageUsage* page_usage) const {
+  bool should_defragment = false;
+  json_ptr->compute_memory_size([&page_usage, &should_defragment](const void* p) {
+    should_defragment |= page_usage->IsPageForObjectUnderUtilized(const_cast<void*>(p));
+    return 0;
+  });
+  return should_defragment;
+}
+
+bool CompactObj::FlatJsonT::DefragIfNeeded(PageUsage* page_usage) {
+  if (uint8_t* old = flat_ptr; page_usage->IsPageForObjectUnderUtilized(old)) {
+    const uint32_t size = json_len;
+    flat_ptr = static_cast<uint8_t*>(tl.local_mr->allocate(size, kAlignSize));
+    memcpy(flat_ptr, old, size);
+    tl.local_mr->deallocate(old, size, kAlignSize);
+    return true;
+  }
+
+  return false;
+}
+
+bool CompactObj::JsonWrapper::DefragIfNeeded(PageUsage* page_usage) {
+  if (JsonEnconding() == kEncodingJsonCons) {
+    return cons.DefragIfNeeded(page_usage);
+  }
+
+  return flat.DefragIfNeeded(page_usage);
 }
 
 constexpr std::pair<CompactObjType, std::string_view> kObjTypeToString[8] = {
