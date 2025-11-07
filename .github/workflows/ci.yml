@@ -200,7 +200,7 @@ jobs:
         run: |
           apt update && apt install -y software-properties-common
           add-apt-repository ppa:deadsnakes/ppa -y
-          apt update && apt install -y python3.10 python3.10-venv
+          apt update && apt install -y python3.10 python3.10-venv python3.10-dev python3.10-distutils
 
       - name: Run regression tests
         if: matrix.container == 'ubuntu-dev:20' || matrix.container == 'ubuntu-dev:24'
