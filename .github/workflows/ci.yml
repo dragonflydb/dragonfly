@@ -195,15 +195,8 @@ jobs:
           name: unit_logs
           path: /tmp/*INFO*
 
-      - name: Setup Python 3.10 for valkey-search tests
-        if: matrix.container == 'ubuntu-dev:24'
-        run: |
-          apt update && apt install -y software-properties-common
-          add-apt-repository ppa:deadsnakes/ppa -y
-          apt update && apt install -y python3.10 python3.10-venv python3.10-dev python3.10-distutils
-
       - name: Run regression tests
-        if: matrix.container == 'ubuntu-dev:20' || matrix.container == 'ubuntu-dev:24'
+        if: matrix.container == 'ubuntu-dev:20'
         uses: ./.github/actions/regression-tests
         with:
           dfly-executable: dragonfly

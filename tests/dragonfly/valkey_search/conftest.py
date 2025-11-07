@@ -7,11 +7,6 @@ import pytest
 from .. import dfly_args
 
 
-def pytest_ignore_collect(collection_path, path, config):
-    """Skip collecting valkey-search tests on Python < 3.10"""
-    return sys.version_info < (3, 10)
-
-
 # List of tests to skip - add test node IDs here
 # Example format: "integration/test_file.py::TestClass::test_method"
 SKIP_TESTS = [

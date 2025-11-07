@@ -50,18 +50,11 @@ runs:
         cd ${GITHUB_WORKSPACE}/tests
         echo "Current commit is ${{github.sha}}"
 
-        # Use Python 3.10 if available (for valkey-search tests), otherwise use default
-        if command -v python3.10 &> /dev/null; then
-          echo "Using Python 3.10 for compatibility"
-          python3.10 -m venv venv
-        else
-          echo "Using default Python"
-          apt update && apt install -y python3-venv
-          python3 -m venv venv
-        fi
-
+        apt update && apt install -y python3-venv
+        python3 -m venv venv
         source venv/bin/activate
-        pip install -r dragonfly/requirements.txt
+        pip3 install -r dragonfly/requirements.txt
+
         # used by PyTests
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export ROOT_DIR="${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search"
