@@ -8,9 +8,13 @@
 
 namespace dfly {
 
+// ExpirePeriod encapsulates the expiration period of a key.
+// It can represent periods in milliseconds up to ~49 days and in seconds up to ~136 years.
+// If value in milliseconds is too high, it switches to seconds precision.
+// And if it's still too high, it silently clamps to the max value.
 class ExpirePeriod {
  public:
-  static constexpr size_t kMaxGenId = 15;
+  static constexpr uint32_t kMaxGenId = 15;
 
   ExpirePeriod() : val_(0), gen_(0), precision_(0) {
     static_assert(sizeof(ExpirePeriod) == 8);  // TODO
@@ -35,28 +39,30 @@ class ExpirePeriod {
 
   void Set(uint64_t ms);
 
-  bool is_second_precision() { return precision_ == 1;}
+  bool is_second_precision() const {
+    return precision_ == 1;
+  }
 
  private:
-  uint64_t val_ : 59;
-  uint64_t gen_ : 4;
-  uint64_t precision_ : 1;  // 0 - ms, 1 - sec.
+  uint32_t val_;
+  uint8_t gen_ : 2;        // generation id.
+  uint8_t precision_ : 1;  // 0 - ms, 1 - sec.
 };
 
 inline void ExpirePeriod::Set(uint64_t ms) {
-  constexpr uint64_t kBarrier = (1ULL << 48);
-
-  if (ms < kBarrier) {
-    val_ = ms;
-    precision_ = 0;   // ms
+  if (ms < UINT32_MAX) {
+    val_ = ms;       // about 49 days in ms.
+    precision_ = 0;  // ms
     return;
   }
 
-  precision_ = 1;
-  if (ms < kBarrier << 10) {
-    ms = (ms + 500) / 1000;   // seconds
+  precision_ = 1;  // seconds
+  if (ms < UINT64_MAX / 2) {
+    ms = (ms + 500) / 1000;
+    val_ = ms >= UINT32_MAX ? UINT32_MAX - 1 : ms;
+  } else {
+    val_ = UINT32_MAX - 1;
   }
-  val_ = ms >= kBarrier ? kBarrier - 1 : ms;
 }
 
 }  // namespace dfly
