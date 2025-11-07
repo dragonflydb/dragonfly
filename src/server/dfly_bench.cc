@@ -413,6 +413,7 @@ struct ClientStats {
   base::Histogram total_hist, online_hist;
 
   uint64_t num_responses = 0;
+  uint64_t qps = 0;
   uint64_t hit_count = 0;
   uint64_t hit_opportunities = 0;
   uint64_t num_errors = 0;
@@ -423,10 +424,12 @@ struct ClientStats {
     online_hist.Merge(o.online_hist);
 
     num_responses += o.num_responses;
+    qps += o.qps;
     hit_count += o.hit_count;
     hit_opportunities += o.hit_opportunities;
     num_errors += o.num_errors;
     num_clients += o.num_clients;
+
     return *this;
   }
 };
@@ -789,6 +792,7 @@ void Driver::PopRequest() {
 }
 
 void Driver::ReceiveFb() {
+  uint64_t now = absl::GetCurrentTimeNanos();
   while (true) {
     io_buf_.EnsureCapacity(256);
     auto buf = io_buf_.AppendBuffer();
@@ -813,6 +817,9 @@ void Driver::ReceiveFb() {
       ParseMC();
     }
   }
+  double usec = (absl::GetCurrentTimeNanos() - now) / 1000;
+  if (usec > 0)
+    stats_.qps += uint64_t(double(received_) * 1e6 / usec);
   VLOG(1) << "ReceiveFb done";
 }
 
@@ -1218,9 +1225,9 @@ int main(int argc, char* argv[]) {
     CHECK_LE(key_minimum, key_maximum);
 
     uint32_t thread_key_step = 0;
-    uint32_t qps = abs(GetFlag(FLAGS_qps));
+    uint32_t desired_qps = abs(GetFlag(FLAGS_qps));
     bool throttle = GetFlag(FLAGS_qps) > 0;
-    const int64_t interval = qps ? 1'000'000'000LL / qps : 0;
+    const int64_t interval = desired_qps ? 1'000'000'000LL / desired_qps : 0;
     uint64_t num_reqs = GetFlag(FLAGS_n);
 
     uint64_t total_conn_num = GetFlag(FLAGS_c) * pp->size();
@@ -1242,9 +1249,9 @@ int main(int argc, char* argv[]) {
                    << (throttle ? "with" : "without") << " throttling";
     }
     if (interval) {
-      CONSOLE_INFO << "At a rate of " << qps << " rps per connection, i.e. request every "
+      CONSOLE_INFO << "At a rate of " << desired_qps << " rps per connection, i.e. request every "
                    << interval / 1000 << "us";
-      CONSOLE_INFO << "Overall scheduled RPS: " << qps * total_conn_num;
+      CONSOLE_INFO << "Overall scheduled RPS: " << desired_qps * total_conn_num;
     } else {
       CONSOLE_INFO << "Coordinated omission mode - the rate is determined by the server";
     }
@@ -1281,12 +1288,10 @@ int main(int argc, char* argv[]) {
     client.reset();
   });
 
-  unsigned dur_sec = duration / absl::Seconds(1);
-
   CONSOLE_INFO << "\nTotal time: " << duration
                << ". Overall number of requests: " << summary.num_responses
-               << ", QPS: " << (dur_sec ? StrCat(summary.num_responses / dur_sec) : "nan")
-               << ", P99 lat: " << summary.total_hist.Percentile(99) << "us";
+               << ", QPS: " << summary.qps << ", P99 lat: " << summary.total_hist.Percentile(99)
+               << "us";
 
   if (summary.num_errors) {
     CONSOLE_INFO << "Got " << summary.num_errors << " error responses!";
