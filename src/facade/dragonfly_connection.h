@@ -45,7 +45,7 @@ class ConnectionContext;
 class RedisParser;
 class ServiceInterface;
 class SinkReplyBuilder;
-class DiskBackedBackpressureQueue;
+class DiskBackedQueue;
 
 // Connection represents an active connection for a client.
 //
@@ -504,7 +504,7 @@ class Connection : public util::Connection {
     };
   };
 
-  std::unique_ptr<DiskBackedBackpressureQueue> backing_queue_;
+  std::unique_ptr<DiskBackedQueue> backing_queue_;
   size_t backpressure_to_disk_watermark_ = 0;
 
   bool request_shutdown_ = false;
