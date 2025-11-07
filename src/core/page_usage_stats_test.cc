@@ -4,22 +4,25 @@
 
 #include "core/page_usage_stats.h"
 
+#include <absl/flags/reflection.h>
 #include <gmock/gmock-matchers.h>
 
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
-#include "core/mi_memory_resource.h"
 #include "core/qlist.h"
 #include "core/score_map.h"
 #include "core/small_string.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
+#include "redis/redis_aux.h"
 
 extern "C" {
 #include "redis/zmalloc.h"
 }
+
+ABSL_DECLARE_FLAG(bool, experimental_flat_json);
 
 using namespace dfly;
 
@@ -45,6 +48,8 @@ class PageUsageStatsTest : public ::testing::Test {
   }
 
   void SetUp() override {
+    CompactObj::InitThreadLocal(&m_);
+
     score_map_ = std::make_unique<ScoreMap>(&m_);
     sorted_map_ = std::make_unique<detail::SortedMap>(&m_);
     string_set_ = std::make_unique<StringSet>(&m_);
@@ -175,4 +180,35 @@ TEST_F(PageUsageStatsTest, StatCollection) {
 
   const CollectedPageStats::ShardUsageSummary expected{{50, 65}, {90, 85}, {99, 89}};
   EXPECT_EQ(usage.at(1), expected);
+}
+
+TEST_F(PageUsageStatsTest, JSONCons) {
+  // Because of the static encoding it is not possible to easily test the flat encoding. Once the
+  // encoding flag is set, it is not re-read. If friend class is used to access the compact object
+  // inner fields and call `DefragIfNeeded` directly on the flat variant of the union, the test will
+  // still fail. This is because freeing the compact object code path takes the wrong branch based
+  // on encoding. The flat encoding was tested manually adjusting this same test with changed
+  // encoding.
+  std::string_view data{R"#({"data": "some", "count": 1, "checked": false})#"};
+
+  auto parsed = JsonFromString(data, &m_);
+  EXPECT_TRUE(parsed.has_value());
+
+  c_obj_.SetJson(std::move(parsed.value()));
+
+  PageUsage p{CollectPageStats::YES, 0.1};
+  p.SetForceReallocate(true);
+
+  c_obj_.DefragIfNeeded(&p);
+
+  const auto stats = p.CollectedStats();
+  EXPECT_GT(stats.pages_scanned, 0);
+  EXPECT_EQ(stats.objects_skipped_not_required, 0);
+
+  EXPECT_EQ(c_obj_.ObjType(), OBJ_JSON);
+
+  auto json_obj = c_obj_.GetJson();
+  EXPECT_EQ(json_obj->at("data").as_string_view(), "some");
+  EXPECT_EQ(json_obj->at("count").as_integer<uint8_t>(), 1);
+  EXPECT_EQ(json_obj->at("checked").as_bool(), false);
 }

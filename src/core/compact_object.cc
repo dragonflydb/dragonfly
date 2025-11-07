@@ -723,7 +723,7 @@ void RobjWrapper::MakeInnerRoom(size_t current_cap, size_t desired, MemoryResour
 }  // namespace detail
 
 uint32_t JsonEnconding() {
-  static thread_local uint32_t json_enc =
+  thread_local uint32_t json_enc =
       absl::GetFlag(FLAGS_experimental_flat_json) ? kEncodingJsonFlat : kEncodingJsonCons;
   return json_enc;
 }
