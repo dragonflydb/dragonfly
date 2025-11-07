@@ -54,6 +54,8 @@ TEST(DiskBackedQueueTest, ReadWrite) {
     for (size_t i = 0; i < results.size(); ++i) {
       EXPECT_EQ(results[i], commands[i]);
     }
+    EXPECT_FALSE(backing.CloseReader());
+    EXPECT_FALSE(backing.CloseWriter());
   });
 
   proactor->Stop();

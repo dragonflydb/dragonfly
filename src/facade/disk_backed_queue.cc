@@ -58,10 +58,24 @@ std::error_code DiskBackedQueue::Init() {
 }
 
 DiskBackedQueue::~DiskBackedQueue() {
-  auto ec = writer_->Close();
-  LOG_IF(WARNING, ec) << ec.message();
-  ec = reader_->Close();
-  LOG_IF(WARNING, ec) << ec.message();
+}
+
+std::error_code DiskBackedQueue::CloseWriter() {
+  if (writer_) {
+    auto ec = writer_->Close();
+    LOG_IF(WARNING, ec) << ec.message();
+    return ec;
+  }
+  return {};
+}
+
+std::error_code DiskBackedQueue::CloseReader() {
+  if (reader_) {
+    auto ec = reader_->Close();
+    LOG_IF(WARNING, ec) << ec.message();
+    return ec;
+  }
+  return {};
 }
 
 // Check if backing file is empty, i.e. backing file has 0 bytes.

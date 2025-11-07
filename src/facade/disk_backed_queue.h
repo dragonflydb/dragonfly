@@ -28,12 +28,13 @@ class DiskBackedQueue {
 
   std::error_code Push(std::string_view blob);
 
-  // For each item loaded from disk it calls f(item) to consume it.
-  // Reads up to max_queue_load_size_ items on each call
   std::error_code Pop(std::string* out);
 
   // Check if backing file is empty, i.e. backing file has 0 bytes.
   bool Empty() const;
+
+  std::error_code CloseReader();
+  std::error_code CloseWriter();
 
  private:
   // File Reader/Writer
