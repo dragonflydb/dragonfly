@@ -2,7 +2,6 @@
 Pytest configuration for valkey-search tests on Dragonfly
 """
 
-import sys
 import pytest
 from .. import dfly_args
 

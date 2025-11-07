@@ -33,6 +33,13 @@ fi
 # Copy integration directory
 cp -r "$TEMP_DIR/integration" "$INTEGRATION_DIR"
 
+# Patch indexes.py for Python 3.8 compatibility
+# Add 'from __future__ import annotations' to support modern type hints
+if [ -f "$INTEGRATION_DIR/indexes.py" ]; then
+  echo "Patching indexes.py for Python 3.8 compatibility..."
+  sed -i '1i from __future__ import annotations' "$INTEGRATION_DIR/indexes.py"
+fi
+
 # Cleanup
 rm -rf "$TEMP_DIR"
 
