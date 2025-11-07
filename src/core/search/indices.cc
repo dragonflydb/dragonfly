@@ -473,14 +473,12 @@ absl::flat_hash_set<std::string> TagIndex::Tokenize(std::string_view value) cons
   return NormalizeTags(value, case_sensitive_, separator_);
 }
 
-BaseVectorIndex::BaseVectorIndex(size_t dim, VectorSimilarity sim) : dim_{dim}, sim_{sim} {
+template <typename T>
+BaseVectorIndex<T>::BaseVectorIndex(size_t dim, VectorSimilarity sim) : dim_{dim}, sim_{sim} {
 }
 
-std::pair<size_t /*dim*/, VectorSimilarity> BaseVectorIndex::Info() const {
-  return {dim_, sim_};
-}
-
-bool BaseVectorIndex::Add(DocId id, const DocumentAccessor& doc, std::string_view field) {
+template <typename T>
+bool BaseVectorIndex<T>::Add(T id, const DocumentAccessor& doc, std::string_view field) {
   auto vector = doc.GetVector(field);
   if (!vector)
     return false;
@@ -494,36 +492,40 @@ bool BaseVectorIndex::Add(DocId id, const DocumentAccessor& doc, std::string_vie
   return true;
 }
 
-FlatVectorIndex::FlatVectorIndex(const SchemaField::VectorParams& params,
-                                 PMR_NS::memory_resource* mr)
-    : BaseVectorIndex{params.dim, params.sim}, entries_{mr} {
+template <typename T>
+FlatVectorIndex<T>::FlatVectorIndex(const SchemaField::VectorParams& params,
+                                    PMR_NS::memory_resource* mr)
+    : BaseVectorIndex<T>{params.dim, params.sim}, entries_{mr} {
   DCHECK(!params.use_hnsw);
   entries_.reserve(params.capacity * params.dim);
 }
 
-void FlatVectorIndex::AddVector(DocId id, const VectorPtr& vector) {
-  DCHECK_LE(id * dim_, entries_.size());
-  if (id * dim_ == entries_.size())
-    entries_.resize((id + 1) * dim_);
+template <typename T>
+void FlatVectorIndex<T>::AddVector(T id, const typename BaseVectorIndex<T>::VectorPtr& vector) {
+  DCHECK_LE(id * BaseVectorIndex<T>::dim_, entries_.size());
+  if (id * BaseVectorIndex<T>::dim_ == entries_.size())
+    entries_.resize((id + 1) * BaseVectorIndex<T>::dim_);
 
   // TODO: Let get vector write to buf itself
   if (vector) {
-    memcpy(&entries_[id * dim_], vector.get(), dim_ * sizeof(float));
+    memcpy(&entries_[id * BaseVectorIndex<T>::dim_], vector.get(),
+           BaseVectorIndex<T>::dim_ * sizeof(float));
   }
 }
 
-void FlatVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
+template <typename T>
+void FlatVectorIndex<T>::Remove(T id, const DocumentAccessor& doc, string_view field) {
   // noop
 }
 
-const float* FlatVectorIndex::Get(DocId doc) const {
+template <typename T> const float* FlatVectorIndex<T>::Get(T doc) const {
   return &entries_[doc * dim_];
 }
 
-std::vector<DocId> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
+template <typename T> std::vector<T> FlatVectorIndex<T>::GetAllDocsWithNonNullValues() const {
   std::vector<DocId> result;
 
-  size_t num_vectors = entries_.size() / dim_;
+  size_t num_vectors = entries_.size() / BaseVectorIndex<T>::dim_;
   result.reserve(num_vectors);
 
   for (DocId id = 0; id < num_vectors; ++id) {
@@ -533,7 +535,7 @@ std::vector<DocId> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
     bool is_zero_vector = true;
 
     // TODO: Consider don't use check for zero vector
-    for (size_t i = 0; i < dim_; ++i) {
+    for (size_t i = 0; i < BaseVectorIndex<T>::dim_; ++i) {
       if (vec[i] != 0.0f) {  // TODO: Consider using a threshold for float comparison
         is_zero_vector = false;
         break;
@@ -549,6 +551,8 @@ std::vector<DocId> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
   // Also it has no duplicates
   return result;
 }
+
+template struct FlatVectorIndex<DocId>;
 
 struct HnswlibAdapter {
   // Default setting of hnswlib/hnswalg
@@ -623,34 +627,42 @@ struct HnswlibAdapter {
   hnswlib::HierarchicalNSW<float> world_;
 };
 
-HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource*)
-    : BaseVectorIndex{params.dim, params.sim}, adapter_{make_unique<HnswlibAdapter>(params)} {
+template <typename T>
+HnswVectorIndex<T>::HnswVectorIndex(const SchemaField::VectorParams& params,
+                                    PMR_NS::memory_resource*)
+    : BaseVectorIndex<T>{params.dim, params.sim}, adapter_{make_unique<HnswlibAdapter>(params)} {
   DCHECK(params.use_hnsw);
   // TODO: Patch hnsw to use MR
 }
-
-HnswVectorIndex::~HnswVectorIndex() {
+template <typename T> HnswVectorIndex<T>::~HnswVectorIndex() {
 }
 
-void HnswVectorIndex::AddVector(DocId id, const VectorPtr& vector) {
+template <typename T>
+void HnswVectorIndex<T>::AddVector(T id, const typename BaseVectorIndex<T>::VectorPtr& vector) {
   if (vector) {
     adapter_->Add(vector.get(), id);
   }
 }
 
-std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t k,
-                                                          std::optional<size_t> ef) const {
+template <typename T>
+std::vector<std::pair<float, T>> HnswVectorIndex<T>::Knn(float* target, size_t k,
+                                                         std::optional<size_t> ef) const {
   return adapter_->Knn(target, k, ef);
 }
-std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t k,
-                                                          std::optional<size_t> ef,
-                                                          const std::vector<DocId>& allowed) const {
+
+template <typename T>
+std::vector<std::pair<float, T>> HnswVectorIndex<T>::Knn(float* target, size_t k,
+                                                         std::optional<size_t> ef,
+                                                         const std::vector<T>& allowed) const {
   return adapter_->Knn(target, k, ef, allowed);
 }
 
-void HnswVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
+template <typename T>
+void HnswVectorIndex<T>::Remove(T id, const DocumentAccessor& doc, string_view field) {
   adapter_->Remove(id);
 }
+
+template struct HnswVectorIndex<DocId>;
 
 GeoIndex::GeoIndex(PMR_NS::memory_resource* mr) : rtree_(make_unique<rtree>()) {
 }

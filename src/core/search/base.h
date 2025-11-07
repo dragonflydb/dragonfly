@@ -79,16 +79,16 @@ struct DocumentAccessor {
 //
 // Queries should be done directly on subclasses with their distinc
 // query functions. All results for all index types should be sorted.
-struct BaseIndex {
+template <typename T> struct BaseIndex {
   virtual ~BaseIndex() = default;
 
   // Returns true if the document was added / indexed
-  virtual bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) = 0;
-  virtual void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) = 0;
+  virtual bool Add(T id, const DocumentAccessor& doc, std::string_view field) = 0;
+  virtual void Remove(T id, const DocumentAccessor& doc, std::string_view field) = 0;
 
   // Returns documents that have non-null values for this field (used for @field:* queries)
   // Result must be sorted
-  virtual std::vector<DocId> GetAllDocsWithNonNullValues() const = 0;
+  virtual std::vector<T> GetAllDocsWithNonNullValues() const = 0;
 
   /* Called at the end of indexes rebuilding after all initial Add calls are done.
      Some indices may need to finalize internal structures. See RangeTree for example. */
@@ -97,10 +97,9 @@ struct BaseIndex {
 };
 
 // Base class for type-specific sorting indices.
-struct BaseSortIndex : BaseIndex {
-  virtual SortableValue Lookup(DocId doc) const = 0;
-  virtual std::vector<SortableValue> Sort(std::vector<DocId>* ids, size_t limit,
-                                          bool desc) const = 0;
+template <typename T> struct BaseSortIndex : BaseIndex<T> {
+  virtual SortableValue Lookup(T doc) const = 0;
+  virtual std::vector<SortableValue> Sort(std::vector<T>* ids, size_t limit, bool desc) const = 0;
 };
 
 /* Used in iterators of inverse indices.

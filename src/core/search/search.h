@@ -129,8 +129,8 @@ class FieldIndices {
   bool Add(DocId doc, const DocumentAccessor& access);
   void Remove(DocId doc, const DocumentAccessor& access);
 
-  BaseIndex* GetIndex(std::string_view field) const;
-  BaseSortIndex* GetSortIndex(std::string_view field) const;
+  BaseIndex<DocId>* GetIndex(std::string_view field) const;
+  BaseSortIndex<DocId>* GetSortIndex(std::string_view field) const;
   std::vector<TextIndex*> GetAllTextIndices() const;
 
   const std::vector<DocId>& GetAllDocs() const;
@@ -149,8 +149,8 @@ class FieldIndices {
   const Schema& schema_;
   const IndicesOptions& options_;
   std::vector<DocId> all_ids_;
-  absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>> indices_;
-  absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>> sort_indices_;
+  absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex<DocId>>> indices_;
+  absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex<DocId>>> sort_indices_;
   const Synonyms* synonyms_;
 };
 

@@ -122,7 +122,7 @@ struct BasicSearch {
     profile_builder_ = ProfileBuilder{};
   }
 
-  BaseIndex* GetBaseIndex(string_view field) {
+  BaseIndex<DocId>* GetBaseIndex(string_view field) {
     auto index = indices_->GetIndex(field);
     if (!index) {
       error_ = absl::StrCat("Invalid field: ", field);
@@ -133,7 +133,7 @@ struct BasicSearch {
 
   // Get casted sub index by field
   template <typename T> T* GetIndex(string_view field) {
-    static_assert(is_base_of_v<BaseIndex, T>);
+    static_assert(is_base_of_v<BaseIndex<DocId>, T>);
 
     auto base_index = GetBaseIndex(field);
     if (!base_index) {
@@ -149,7 +149,7 @@ struct BasicSearch {
     return casted_ptr;
   }
 
-  BaseSortIndex* GetSortIndex(string_view field) {
+  BaseSortIndex<DocId>* GetSortIndex(string_view field) {
     auto index = indices_->GetSortIndex(field);
     if (!index) {
       error_ = absl::StrCat("Invalid sort field: ", field);
@@ -210,13 +210,13 @@ struct BasicSearch {
 
   IndexResult Search(const AstStarFieldNode& node, string_view active_field) {
     // Try to get a sort index first, as `@field:*` might imply wanting sortable behavior
-    BaseSortIndex* sort_index = indices_->GetSortIndex(active_field);
+    BaseSortIndex<DocId>* sort_index = indices_->GetSortIndex(active_field);
     if (sort_index) {
       return IndexResult{sort_index->GetAllDocsWithNonNullValues()};
     }
 
     // If sort index doesn't exist try regular index
-    BaseIndex* base_index = GetBaseIndex(active_field);
+    BaseIndex<DocId>* base_index = GetBaseIndex(active_field);
     return base_index ? IndexResult{base_index->GetAllDocsWithNonNullValues()} : IndexResult{};
   }
 
@@ -336,7 +336,8 @@ struct BasicSearch {
     return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
   }
 
-  void SearchKnnFlat(FlatVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {
+  void SearchKnnFlat(FlatVectorIndex<DocId>* vec_index, const AstKnnNode& knn,
+                     IndexResult&& sub_results) {
     knn_distances_.reserve(sub_results.ApproximateSize());
     auto cb = [&](auto* set) {
       auto [dim, sim] = vec_index->Info();
@@ -353,7 +354,8 @@ struct BasicSearch {
     knn_distances_.resize(prefix_size);
   }
 
-  void SearchKnnHnsw(HnswVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {
+  void SearchKnnHnsw(HnswVectorIndex<DocId>* vec_index, const AstKnnNode& knn,
+                     IndexResult&& sub_results) {
     if (indices_->GetAllDocs().size() == sub_results.ApproximateSize())  // TODO: remove approx size
       knn_distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime);
     else
@@ -366,7 +368,7 @@ struct BasicSearch {
     DCHECK(active_field.empty());
     auto sub_results = SearchGeneric(*knn.filter, active_field);
 
-    auto* vec_index = GetIndex<BaseVectorIndex>(knn.field);
+    auto* vec_index = GetIndex<BaseVectorIndex<DocId>>(knn.field);
     if (!vec_index)
       return IndexResult{};
 
@@ -382,10 +384,10 @@ struct BasicSearch {
     }
 
     knn_scores_.clear();
-    if (auto hnsw_index = dynamic_cast<HnswVectorIndex*>(vec_index); hnsw_index)
+    if (auto hnsw_index = dynamic_cast<HnswVectorIndex<DocId>*>(vec_index); hnsw_index)
       SearchKnnHnsw(hnsw_index, knn, std::move(sub_results));
     else
-      SearchKnnFlat(dynamic_cast<FlatVectorIndex*>(vec_index), knn, std::move(sub_results));
+      SearchKnnFlat(dynamic_cast<FlatVectorIndex<DocId>*>(vec_index), knn, std::move(sub_results));
 
     vector<DocId> out(knn_distances_.size());
     knn_scores_.reserve(knn_distances_.size());
@@ -502,15 +504,15 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
         break;
       }
       case SchemaField::VECTOR: {
-        unique_ptr<BaseVectorIndex> vector_index;
+        unique_ptr<BaseVectorIndex<DocId>> vector_index;
 
         DCHECK(holds_alternative<SchemaField::VectorParams>(field_info.special_params));
         const auto& vparams = std::get<SchemaField::VectorParams>(field_info.special_params);
 
         if (vparams.use_hnsw)
-          vector_index = make_unique<HnswVectorIndex>(vparams, mr);
+          vector_index = make_unique<HnswVectorIndex<DocId>>(vparams, mr);
         else
-          vector_index = make_unique<FlatVectorIndex>(vparams, mr);
+          vector_index = make_unique<FlatVectorIndex<DocId>>(vparams, mr);
 
         indices_[field_ident] = std::move(vector_index);
         break;
@@ -546,7 +548,7 @@ void FieldIndices::CreateSortIndices(PMR_NS::memory_resource* mr) {
 bool FieldIndices::Add(DocId doc, const DocumentAccessor& access) {
   bool was_added = true;
 
-  std::vector<std::pair<std::string_view, BaseIndex*>> successfully_added_indices;
+  std::vector<std::pair<std::string_view, BaseIndex<DocId>*>> successfully_added_indices;
   successfully_added_indices.reserve(indices_.size() + sort_indices_.size());
 
   auto try_add = [&](const auto& indices_container) {
@@ -588,12 +590,12 @@ void FieldIndices::Remove(DocId doc, const DocumentAccessor& access) {
   all_ids_.erase(it);
 }
 
-BaseIndex* FieldIndices::GetIndex(string_view field) const {
+BaseIndex<DocId>* FieldIndices::GetIndex(string_view field) const {
   auto it = indices_.find(schema_.LookupAlias(field));
   return it != indices_.end() ? it->second.get() : nullptr;
 }
 
-BaseSortIndex* FieldIndices::GetSortIndex(string_view field) const {
+BaseSortIndex<DocId>* FieldIndices::GetSortIndex(string_view field) const {
   auto it = sort_indices_.find(schema_.LookupAlias(field));
   return it != sort_indices_.end() ? it->second.get() : nullptr;
 }

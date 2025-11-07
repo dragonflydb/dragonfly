@@ -20,7 +20,7 @@
 
 namespace dfly::search {
 
-template <typename T> struct SimpleValueSortIndex : public BaseSortIndex {
+template <typename T> struct SimpleValueSortIndex : public BaseSortIndex<DocId> {
  protected:
   struct ParsedSortValue {
     bool HasValue() const;

@@ -635,7 +635,7 @@ DocIndexInfo ShardDocIndex::GetInfo() const {
 }
 
 io::Result<StringVec, ErrorReply> ShardDocIndex::GetTagVals(string_view field) const {
-  search::BaseIndex* base_index = indices_->GetIndex(field);
+  search::BaseIndex<DocId>* base_index = indices_->GetIndex(field);
   if (base_index == nullptr) {
     return make_unexpected(ErrorReply{"-No such field"});
   }

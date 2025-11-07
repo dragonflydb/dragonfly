@@ -39,7 +39,7 @@ namespace dfly::search {
 
 // Index for integer fields.
 // Range bounds are queried in logarithmic time, iteration is constant.
-struct NumericIndex : public BaseIndex {
+struct NumericIndex : public BaseIndex<DocId> {
   // Temporary base class for range tree.
   // It is used to use two different range trees depending on the flag use_range_tree.
   // If the flag is true, RangeTree is used, otherwise a simple implementation with btree_set.
@@ -76,7 +76,7 @@ struct NumericIndex : public BaseIndex {
 };
 
 // Base index for string based indices.
-template <typename C> struct BaseStringIndex : public BaseIndex {
+template <typename C> struct BaseStringIndex : public BaseIndex<DocId> {
   using Container = BlockList<C>;
   using VecOrPtr = std::variant<std::vector<DocId>, const Container*>;
 
@@ -157,16 +157,18 @@ struct TagIndex : public BaseStringIndex<SortedVector<DocId>> {
   char separator_;
 };
 
-struct BaseVectorIndex : public BaseIndex {
-  std::pair<size_t /*dim*/, VectorSimilarity> Info() const;
+template <typename T> struct BaseVectorIndex : public BaseIndex<T> {
+  std::pair<size_t /*dim*/, VectorSimilarity> Info() const {
+    return {dim_, sim_};
+  }
 
-  bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override final;
+  bool Add(T id, const DocumentAccessor& doc, std::string_view field) override final;
 
  protected:
   BaseVectorIndex(size_t dim, VectorSimilarity sim);
 
   using VectorPtr = decltype(std::declval<OwnedFtVector>().first);
-  virtual void AddVector(DocId id, const VectorPtr& vector) = 0;
+  virtual void AddVector(T id, const VectorPtr& vector) = 0;
 
   size_t dim_;
   VectorSimilarity sim_;
@@ -174,48 +176,53 @@ struct BaseVectorIndex : public BaseIndex {
 
 // Index for vector fields.
 // Only supports lookup by id.
-struct FlatVectorIndex : public BaseVectorIndex {
+template <typename T> struct FlatVectorIndex : public BaseVectorIndex<T> {
   FlatVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
 
-  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
+  void Remove(T id, const DocumentAccessor& doc, std::string_view field) override;
 
-  const float* Get(DocId doc) const;
+  const float* Get(T doc) const;
 
   // Return all documents that have vectors in this index
-  std::vector<DocId> GetAllDocsWithNonNullValues() const override;
+  std::vector<T> GetAllDocsWithNonNullValues() const override;
 
  protected:
-  void AddVector(DocId id, const VectorPtr& vector) override;
+  using BaseVectorIndex<T>::dim_;
+  void AddVector(T id, const typename BaseVectorIndex<T>::VectorPtr& vector) override;
 
  private:
   PMR_NS::vector<float> entries_;
 };
 
+extern template struct FlatVectorIndex<DocId>;
+
 struct HnswlibAdapter;
 
-struct HnswVectorIndex : public BaseVectorIndex {
+template <typename T> struct HnswVectorIndex : public BaseVectorIndex<T> {
   HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
   ~HnswVectorIndex();
 
-  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
+  void Remove(T id, const DocumentAccessor& doc, std::string_view field) override;
 
-  std::vector<std::pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef) const;
-  std::vector<std::pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
-                                           const std::vector<DocId>& allowed) const;
+  std::vector<std::pair<float, T>> Knn(float* target, size_t k, std::optional<size_t> ef) const;
+  std::vector<std::pair<float, T>> Knn(float* target, size_t k, std::optional<size_t> ef,
+                                       const std::vector<T>& allowed) const;
 
   // TODO: Implement if needed
-  std::vector<DocId> GetAllDocsWithNonNullValues() const override {
-    return std::vector<DocId>{};
+  std::vector<T> GetAllDocsWithNonNullValues() const override {
+    return std::vector<T>{};
   }
 
  protected:
-  void AddVector(DocId id, const VectorPtr& vector) override;
+  void AddVector(T id, const typename BaseVectorIndex<T>::VectorPtr& vector) override;
 
  private:
   std::unique_ptr<HnswlibAdapter> adapter_;
 };
 
-struct GeoIndex : public BaseIndex {
+extern template struct HnswVectorIndex<DocId>;
+
+struct GeoIndex : public BaseIndex<DocId> {
   using point =
       boost::geometry::model::point<double, 2,
                                     boost::geometry::cs::geographic<boost::geometry::degree>>;
