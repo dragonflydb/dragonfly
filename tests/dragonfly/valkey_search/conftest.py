@@ -32,7 +32,6 @@ SKIP_TESTS = [
     "integration/test_info_primary.py::TestFTInfoPrimary::test_ft_info_primary_retry",
     "integration/test_oom_handling.py::TestSearchOOMHandlingCME::test_search_oom_cme",
     "integration/test_oom_handling.py::TestSearchOOMHandlingCMD::test_search_oom_cmd",
-    "integration/test_query_parser.py::TestQueryParser::test_query_string_bytes_limit",
     "integration/test_query_parser.py::TestQueryParser::test_query_string_depth_limit",
     "integration/test_query_parser.py::TestQueryParser::test_query_string_terms_count_limit",
     "integration/test_reclaimable_memory.py::TestReclaimableMemory::test_reclaimable_memory_with_vector_operations",
