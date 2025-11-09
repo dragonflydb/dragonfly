@@ -37,6 +37,11 @@ runs:
   # bring back timeouts once composite actions start supporting them
   # timeout-minutes: 20
   steps:
+    - name: Sync valkey-search tests
+      shell: bash
+      run: |
+        cd ${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search
+        ./sync-valkey-search-tests.sh 90124dc91756b24cb2e58e5c4eea5b8d53004ea6 # main branch revision
     - name: Run PyTests
       id: main
       shell: bash
@@ -47,6 +52,7 @@ runs:
         pip3 install -r dragonfly/requirements.txt
         # used by PyTests
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
+        export ROOT_DIR="${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
         if [[ "${{inputs.epoll}}" == 'epoll' ]]; then
