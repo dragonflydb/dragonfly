@@ -125,8 +125,9 @@ ABSL_FLAG(uint32_t, shard_thread_busy_polling_usec, 0,
 
 ABSL_FLAG(string, huffman_table, "",
           "a comma separated map: domain1:code1,domain2:code2,... where "
-          "domain can currently be only KEYS, code is base64 encoded huffman table exported via "
-          "DEBUG COMPRESSION EXPORT. if empty no huffman compression is appplied.");
+          "domain can currently be only KEYS or STRINGS, code is a base64-encoded huffman table"
+          " exported via "
+          "DEBUG COMPRESSION EXPORT. if the flag is empty no huffman compression is applied.");
 
 ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "

@@ -307,7 +307,7 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
           it->first.GetString(&scratch);
         }
       } else if (type == OBJ_STRING && it->second.ObjType() == OBJ_STRING) {
-        if (it->first.MallocUsed() > 0) {
+        if (it->second.MallocUsed() > 0) {
           it->second.GetString(&scratch);
         }
       } else if (type == OBJ_ZSET && it->second.ObjType() == OBJ_ZSET) {
