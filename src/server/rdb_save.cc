@@ -201,7 +201,7 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
     case OBJ_JSON:
       return RDB_TYPE_JSON;
     case OBJ_SBF:
-      return RDB_TYPE_SBF;
+      return absl::GetFlag(FLAGS_rdb_sbf_chunked) ? RDB_TYPE_SBF2 : RDB_TYPE_SBF;
   }
   LOG(FATAL) << "Unknown encoding " << compact_enc << " for type " << type;
   return 0; /* avoid warning */

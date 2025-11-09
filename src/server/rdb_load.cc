@@ -1879,7 +1879,7 @@ auto RdbLoaderBase::ReadSBFImpl(bool chunking) -> io::Result<OpaqueObj> {
     string filter_data;
     SET_OR_UNEXPECT(LoadLen(nullptr), hash_cnt);
 
-    if (absl::GetFlag(FLAGS_rdb_sbf_chunked)) {
+    if (chunking) {
       unsigned total_size = 0;
       SET_OR_UNEXPECT(LoadLen(nullptr), total_size);
 
