@@ -55,6 +55,11 @@ bool IsGoodForListpack(CmdArgList args, const uint8_t* lp) {
 
 using container_utils::GetStringMap;
 
+// Generic wrapper for multiple underlying map <string, string> types
+// holding a variant of:
+// 1. Listpack
+// 2. StringMap
+// 3. SerializedMap (tiered)
 struct HMapWrap {
  private:
   template <typename F> decltype(auto) VisitRef(F f) const {  // Cast T* to T&
@@ -71,6 +76,7 @@ struct HMapWrap {
 
  public:
   HMapWrap(const PrimeValue& pv, DbContext db_cntx) {
+    DCHECK(!pv.IsExternal() || pv.IsCool());
     if (pv.Encoding() == kEncodingListPack)
       impl_ = detail::ListpackWrap{static_cast<uint8_t*>(pv.RObjPtr())};
     else
@@ -173,7 +179,8 @@ template <typename T> OpResult<T> Unwrap(OpResult<CbVariant<T>> result) {
 
 template <typename F> auto ExecuteRO(Transaction* tx, F&& f) {
   using T = typename std::invoke_result_t<F, HMapWrap>::Type;
-  auto cb = [f = std::forward<F>(f)](Transaction* t, EngineShard* es) -> OpResult<CbVariant<T>> {
+  auto shard_cb = [f = std::forward<F>(f)](Transaction* t,
+                                           EngineShard* es) -> OpResult<CbVariant<T>> {
     // Fetch value of hash type
     auto [key, op_args] = KeyAndArgs(t, es);
     auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
@@ -184,12 +191,12 @@ template <typename F> auto ExecuteRO(Transaction* tx, F&& f) {
     if (pv.IsExternal() && !pv.IsCool()) {
       using D = tiering::SerializedMapDecoder;
       util::fb2::Future<OpResult<T>> fut;
-      auto cb = [fut, &f](io::Result<D*> res) mutable {
+      auto read_cb = [fut, f = std::move(f)](io::Result<D*> res) mutable {
         HMapWrap hw{res.value()->Get()};
         fut.Resolve(f(hw));
       };
 
-      es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv, D{}, std::move(cb));
+      es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv, D{}, std::move(read_cb));
       return CbVariant<T>{std::move(fut)};
     }
 
@@ -204,7 +211,7 @@ template <typename F> auto ExecuteRO(Transaction* tx, F&& f) {
     return CbVariant<T>{std::move(res).value()};
   };
 
-  return Unwrap(tx->ScheduleSingleHopT(std::move(cb)));
+  return Unwrap(tx->ScheduleSingleHopT(std::move(shard_cb)));
 }
 
 // Wrap write handler

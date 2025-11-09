@@ -25,7 +25,8 @@ class DbSlice;
 
 namespace tiering {
 class SmallBins;
-};
+struct Decoder;
+};  // namespace tiering
 
 // Manages offloaded values
 class TieredStorage {
@@ -51,8 +52,10 @@ class TieredStorage {
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value, const D& decoder, F&& f) {
     // TODO(vlad): untangle endless callback wrapping!
     // Templates don't consider implicit conversions, so explicitly convert to std::function
-    ReadInternal(dbid, key, value, decoder,
-                 std::function<void(io::Result<D*>)>(std::forward<F>(f)));
+    auto wrapped_cb = [f = std::forward<F>(f)](io::Result<tiering::Decoder*> res) mutable {
+      f(res.transform([](auto* d) { return static_cast<D*>(d); }));
+    };
+    ReadInternal(dbid, key, value, decoder, wrapped_cb);
   }
 
   // Read offloaded value. It must be of external type
@@ -104,9 +107,9 @@ class TieredStorage {
   }
 
  private:
-  template <typename D>
-  void ReadInternal(DbIndex dbid, std::string_view key, const PrimeValue& value, const D& decoder,
-                    std::function<void(io::Result<D*>)> cb);
+  void ReadInternal(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                    const tiering::Decoder& decoder,
+                    std::function<void(io::Result<tiering::Decoder*>)> cb);
 
   // Returns if a value should be stashed
   bool ShouldStash(const PrimeValue& pv) const;

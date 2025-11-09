@@ -324,22 +324,14 @@ void TieredStorage::Close() {
   op_manager_->Close();
 }
 
-template <typename D>
 void TieredStorage::ReadInternal(DbIndex dbid, std::string_view key, const PrimeValue& value,
-                                 const D& decoder, std::function<void(io::Result<D*>)> cb) {
+                                 const tiering::Decoder& decoder,
+                                 std::function<void(io::Result<tiering::Decoder*>)> cb) {
   DCHECK(value.IsExternal());
   DCHECK(!value.IsCool());
   // TODO: imporve performance by avoiding one more function wrap
   op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), decoder, std::move(cb));
 }
-
-template void TieredStorage::ReadInternal(
-    DbIndex, std::string_view, const PrimeValue&, const tiering::SerializedMapDecoder&,
-    std::function<void(io::Result<tiering::SerializedMapDecoder*>)>);
-
-template void TieredStorage::ReadInternal(DbIndex, std::string_view, const PrimeValue&,
-                                          const tiering::StringDecoder&,
-                                          std::function<void(io::Result<tiering::StringDecoder*>)>);
 
 TieredStorage::TResult<string> TieredStorage::Read(DbIndex dbid, string_view key,
                                                    const PrimeValue& value) {
@@ -363,8 +355,10 @@ TieredStorage::TResult<T> TieredStorage::Modify(DbIndex dbid, std::string_view k
   DCHECK(value.IsExternal());
 
   util::fb2::Future<io::Result<T>> future;
-  auto cb = [future, modf = std::move(modf)](io::Result<tiering::StringDecoder*> res) mutable {
-    future.Resolve(res.transform([&modf](auto* d) { return modf(d->Write()); }));
+  auto cb = [future, modf = std::move(modf)](io::Result<tiering::Decoder*> res) mutable {
+    future.Resolve(
+        res.transform([](auto* d) { return static_cast<tiering::StringDecoder*>(d); })  //
+            .transform([&modf](auto* d) { return modf(d->Write()); }));
   };
   op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), tiering::StringDecoder{value},
                        std::move(cb));
