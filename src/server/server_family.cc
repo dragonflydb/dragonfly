@@ -2536,7 +2536,10 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
         auto value = config_registry.Get(name);
         DCHECK(value.has_value());
         if (value.has_value()) {
-          res.push_back(name);
+          // Convert internal name (search_query_string_bytes) back to user-facing format
+          // (search.query-string-bytes)
+          string display_name = DenormalizeConfigName(name);
+          res.push_back(display_name);
           res.push_back(*value);
         }
       }

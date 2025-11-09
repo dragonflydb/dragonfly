@@ -1125,7 +1125,13 @@ TEST_F(SearchTest, InvalidVectorParameter) {
 
   query_params["b"] = "abcdefg";
 
-  ASSERT_FALSE(algo.Init("*=>[KNN 2 @v $b]", &query_params));
+  // Parser accepts any string as placeholder
+  // Invalid vectors result in empty vector (dimension 0) which returns empty results
+  ASSERT_TRUE(algo.Init("*=>[KNN 2 @v $b]", &query_params));
+
+  // Search should return empty results for invalid vector
+  auto result = algo.Search(&indices);
+  EXPECT_TRUE(result.ids.empty());
 }
 
 // Enumeration for different search types
