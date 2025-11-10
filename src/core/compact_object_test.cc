@@ -620,6 +620,12 @@ TEST_F(CompactObjectTest, StrEncodingAndMaterialize) {
       obj.SetExternal(0, 0, CompactObj::ExternalRep::STRING);  // dummy values
       obj.Materialize(raw_str, true);
       EXPECT_EQ(test_str, obj.ToString());
+
+      // Restore from external again, but not as a raw value
+      obj.SetExternal(0, 0, CompactObj::ExternalRep::STRING);
+      auto test_str2 = test_str + "updated";
+      obj.Materialize(test_str2, false);
+      EXPECT_EQ(obj.ToString(), test_str2);
     }
   }
 }
