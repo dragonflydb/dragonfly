@@ -813,7 +813,7 @@ size_t CompactObj::Size() const {
       }
       case EXTERNAL_TAG:
         raw_size = u_.ext_ptr.serialized_size;
-        CHECK(mask_bits_.encoding != HUFFMAN_ENC);
+        first_byte = GetFirstByte();
         break;
       case ROBJ_TAG:
         raw_size = u_.r_obj.Size();
@@ -1202,10 +1202,16 @@ void CompactObj::GetString(char* dest) const {
 }
 
 void CompactObj::SetExternal(size_t offset, uint32_t sz, ExternalRep rep) {
+  uint8_t first_byte = 0;
+  if (mask_bits_.encoding == HUFFMAN_ENC) {
+    CHECK(rep == ExternalRep::STRING);
+    first_byte = GetFirstByte();
+  }
   SetMeta(EXTERNAL_TAG, mask_);
 
   u_.ext_ptr.is_cool = 0;
   u_.ext_ptr.representation = static_cast<uint8_t>(rep);
+  u_.ext_ptr.first_byte = first_byte;
   u_.ext_ptr.page_offset = offset % 4096;
   u_.ext_ptr.serialized_size = sz;
   u_.ext_ptr.offload.page_index = offset / 4096;
@@ -1269,6 +1275,35 @@ void CompactObj::Reset() {
   }
   tagbyte_ = 0;
   mask_ = 0;
+}
+
+uint8_t CompactObj::GetFirstByte() const {
+  DCHECK_EQ(ObjType(), OBJ_STRING);
+
+  if (IsInline()) {
+    return u_.inline_str[0];
+  }
+
+  if (taglen_ == ROBJ_TAG) {
+    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
+    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+    return *(uint8_t*)u_.r_obj.inner_obj();
+  }
+
+  if (taglen_ == SMALL_TAG) {
+    return u_.small_str.first_byte();
+  }
+
+  if (taglen_ == EXTERNAL_TAG) {
+    if (u_.ext_ptr.is_cool) {
+      const CompactObj& cooled_obj = u_.ext_ptr.cool_record->value;
+      return cooled_obj.GetFirstByte();
+    }
+    return u_.ext_ptr.first_byte;
+  }
+
+  LOG(DFATAL) << "Bad tag " << int(taglen_);
+  return 0;
 }
 
 // Frees all resources if owns.

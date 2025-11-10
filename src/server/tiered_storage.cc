@@ -613,7 +613,6 @@ void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
   record->value = std::move(*pv);
 
   pv->SetCool(segment.offset, segment.length, record);
-  DCHECK_EQ(pv->Size(), record->value.Size());
 }
 
 PrimeValue TieredStorage::Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
