@@ -61,7 +61,6 @@ struct OpManagerTest : PoolTestBase, OpManager {
     Enqueue(id, segment, TestDecoder{}, [future](io::Result<tiering::Decoder*> res) mutable {
       auto* decoder = static_cast<TestDecoder*>(*res);
       future.Resolve(decoder->value);
-      return false;
     });
     return future;
   }
@@ -192,7 +191,6 @@ TEST_F(OpManagerTest, Modify) {
       Enqueue(0u, stashed_[0u], TestDecoder{}, [i](io::Result<tiering::Decoder*> res) {
         auto* decoder = static_cast<TestDecoder*>(*res);
         absl::StrAppend(&decoder->value, i);
-        return true;
       });
       futures.emplace_back(Read(0u, stashed_[0u]));
     }
