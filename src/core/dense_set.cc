@@ -673,7 +673,28 @@ void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
 }
 
 DenseSet::ChainVectorIterator DenseSet::GetRandomChain() {
-  size_t offset = absl::Uniform(absl::BitGen{}, 0u, entries_.size());
+  if (entries_.empty() || size_ == 0) {
+    return entries_.end();
+  }
+
+  // Use thread-local generator to avoid repeated construction overhead
+  thread_local absl::BitGen gen;
+
+  // Try up to 32 random probes before falling back to linear scan
+  // Expected probes needed = 1 / utilization
+  // For 10% util, expected = 10 probes, so 32 gives good probability
+  constexpr int kMaxProbes = 32;
+  for (int probe = 0; probe < kMaxProbes; probe++) {
+    size_t idx = absl::Uniform<size_t>(gen, 0u, entries_.size());
+    auto it = entries_.begin() + idx;
+    ExpireIfNeeded(nullptr, &*it);
+    if (!it->IsEmpty()) {
+      return it;
+    }
+  }
+
+  // Fallback or normal path: linear scan from random offset
+  size_t offset = absl::Uniform<size_t>(gen, 0u, entries_.size());
   for (size_t i = offset; i < entries_.size() + offset; i++) {
     auto it = entries_.begin() + (i % entries_.size());
     ExpireIfNeeded(nullptr, &*it);
