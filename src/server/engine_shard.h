@@ -226,9 +226,19 @@ class EngineShard {
   };
 
   struct EvictionTaskState {
-    bool rss_eviction_enabled_ = true;
+    void Reset(bool rss_eviction_enabled_flag) {
+      rss_eviction_enabled = rss_eviction_enabled_flag;
+      shard_used_memory_at_prev_eviction = global_rss_memory_at_prev_eviction =
+          acc_deleted_bytes_during_eviction = deleted_bytes_at_prev_eviction = 0;
+    }
+    void AdjustDeletedBytes(size_t shard_used_memory);
+    void LimitAccumulatedDeletedBytes(size_t shard_rss_over_memory_budget);
+    void AdjustAccumulatedDeletedBytes(size_t global_used_rss_memory);
+    bool rss_eviction_enabled = true;
     bool track_deleted_bytes = false;
-    size_t deleted_bytes_before_rss_update = 0;
+    size_t acc_deleted_bytes_during_eviction = 0;  // Accumulated deleted bytes during eviction
+    size_t deleted_bytes_at_prev_eviction = 0;     // Bytes deleted in previous eviction
+    size_t shard_used_memory_at_prev_eviction = 0;
     size_t global_rss_memory_at_prev_eviction = 0;
   };
 
