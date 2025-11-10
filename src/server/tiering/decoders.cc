@@ -18,6 +18,11 @@ void BareDecoder::Upload(CompactObj* obj) {
   ABSL_UNREACHABLE();
 }
 
+Decoder::UploadMetrics BareDecoder::GetMetrics() const {
+  ABSL_UNREACHABLE();
+  return UploadMetrics{};
+}
+
 StringDecoder::StringDecoder(const CompactObj& obj) : StringDecoder{obj.GetStrEncoding()} {
 }
 
@@ -31,14 +36,20 @@ std::unique_ptr<Decoder> StringDecoder::Clone() const {
 void StringDecoder::Initialize(std::string_view slice) {
   slice_ = slice;
   value_ = encoding_.Decode(slice);
-  estimated_mem_usage = slice.length();  // will be encoded back
 }
 
 void StringDecoder::Upload(CompactObj* obj) {
-  if (modified)
+  if (modified_)
     obj->Materialize(value_.view(), false);
   else
     obj->Materialize(slice_, true);
+}
+
+Decoder::UploadMetrics StringDecoder::GetMetrics() const {
+  return UploadMetrics{
+      .modified = modified_,
+      .estimated_mem_usage = value_.view().size(),
+  };
 }
 
 std::string_view StringDecoder::Read() const {
@@ -46,7 +57,7 @@ std::string_view StringDecoder::Read() const {
 }
 
 std::string* StringDecoder::Write() {
-  modified = true;
+  modified_ = true;
   return value_.GetMutable();
 }
 

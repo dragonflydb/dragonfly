@@ -230,13 +230,15 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, tiering::DiskSegme
     return true;  // delete
   }
 
+  tiering::Decoder::UploadMetrics metrics = decoder->GetMetrics();
+
   // 1. When modified is true we MUST upload the value back to memory.
   // 2. On the other hand, if read is caused by snapshotting we do not want to fetch it.
   //    Currently, our heuristic is not very smart, because we stop uploading any reads during
   //    the snapshotting.
   // TODO: to revisit this when we rewrite it with more efficient snapshotting algorithm.
-  bool should_upload = decoder->modified;
-  should_upload |= (ts_->UploadBudget() > int64_t(decoder->estimated_mem_usage)) &&
+  bool should_upload = metrics.modified;
+  should_upload |= (ts_->UploadBudget() > int64_t(metrics.estimated_mem_usage)) &&
                    !SliceSnapshot::IsSnaphotInProgress();
 
   if (!should_upload)
@@ -245,7 +247,7 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, tiering::DiskSegme
   auto key = get<OpManager::KeyRef>(id);
   auto* pv = Find(key);
   if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
-    if (decoder->modified || pv->WasTouched()) {
+    if (metrics.modified || pv->WasTouched()) {
       ++stats_.total_uploads;
       decoder->Upload(pv);
       RecordDeleted(*pv, segment.length, GetDbTableStats(key.first));
