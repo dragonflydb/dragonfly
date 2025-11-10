@@ -17,6 +17,7 @@
 #include "facade/facade_types.h"
 #include "facade/memcache_parser.h"
 #include "facade/resp_expr.h"
+#include "io/file.h"
 #include "io/io_buf.h"
 #include "util/connection.h"
 #include "util/fibers/fibers.h"
@@ -89,6 +90,13 @@ class Connection : public util::Connection {
     void SetArgs(const RespVec& args);
 
     size_t StorageCapacity() const;
+
+    // Used by file backed queue back pressure to reconstruct a PipelineMessage
+    size_t StorageBytes() const;
+
+    std::string_view FullCommand() const {
+      return {storage.data(), storage.size()};
+    }
 
     // mi_stl_allocator uses mi heap internally.
     // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
@@ -401,6 +409,13 @@ class Connection : public util::Connection {
 
   void ConfigureProvidedBuffer();
 
+  bool HasDiskBacked() const {
+    return backing_queue_ && !backing_queue_->Empty();
+  }
+
+  bool OffloadBackpressureToDiskIfNeeded(absl::FunctionRef<MessageHandle()> handle);
+
+  void LoadBackpressureFromDiskIfNeeded();
   // The read buffer with read data that needs to be parsed and processed.
   // For io_uring bundles we may have available_bytes larger than slice.size()
   // which means that there are more buffers available to read.
@@ -504,6 +519,68 @@ class Connection : public util::Connection {
   };
 
   bool request_shutdown_ = false;
+
+  class DiskBackedBackpressureQueue {
+   public:
+    DiskBackedBackpressureQueue();
+
+    // Init on first call, no-op afterwards.
+    std::error_code Init();
+
+    // Check if backing file is empty, i.e. backing file has 0 bytes.
+    bool Empty() const;
+
+    // Check if we can offload msg to backing file.
+    bool HasEnoughBackingSpace(const Connection::PipelineMessage* msg) const;
+
+    // Total size of internal buffers/structures.
+    size_t TotalInMemoryBytes() const;
+
+    void OffloadToBacking(const Connection::PipelineMessage* msg);
+
+    // For each item loaded from disk it calls f(item) to consume it.
+    // Reads up to max_queue_load_size_ items on each call
+    template <typename F> void LoadFromDiskToQueue(F f);
+
+    size_t Watermark() const {
+      return watermark_;
+    }
+
+   private:
+    static size_t unique_id;
+
+    // File Reader/Writer
+    std::unique_ptr<io::WriteFile> writer_;
+    std::unique_ptr<io::ReadonlyFile> reader_;
+
+    // In memory backed file map
+    struct ItemOffset {
+      size_t offset = 0;
+      size_t total_bytes = 0;
+    };
+
+    std::deque<ItemOffset> offsets_;
+
+    // unique id for the file backed
+    size_t id_ = 0;
+
+    // stats
+    size_t total_backing_bytes_ = 0;
+    size_t next_offset_ = 0;
+    size_t max_io_read_latency_ = 0;
+    size_t max_io_write_latency_ = 0;
+
+    // Read only constants
+    const size_t max_backing_size_ = 0;
+    const size_t max_queue_load_size_ = 0;
+    const size_t watermark_ = 0;
+
+    // Idempotent init
+    bool init_ = false;
+  };
+
+  std::unique_ptr<DiskBackedBackpressureQueue> backing_queue_;
+  bool disk_backpressure_available_ = false;
 };
 
 }  // namespace facade

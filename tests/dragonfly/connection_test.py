@@ -1501,3 +1501,41 @@ async def test_issue_5949_nil_bulk_string_crash(df_server: DflyInstance):
     client = df_server.client()
     await client.ping()
     assert await client.ping() == True
+
+
+@dfly_args(
+    {
+        "connection_disk_backpressure_watermark": 10,
+        "connection_disk_backpressure_file_max_bytes": 10000000000,
+    }
+)
+async def test_send_disk_backpressure(df_server, async_client: aioredis.Redis):
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+    total_items_send = 5000
+    total_per_item_cmds = 200
+    total = total_items_send * total_per_item_cmds
+
+    async def set_task():
+        stride = 0
+        for i in range(0, total_items_send):
+            pipe = ""
+            for j in range(0, total_per_item_cmds):
+                pipe = pipe + f"SET a{stride + j} foo\n"
+            stride = stride + total_per_item_cmds
+            writer.write(pipe.encode())
+            await writer.drain()
+
+    set = asyncio.create_task(set_task())
+
+    await set
+    logging.info("Offloaded all data to socket. Draining responses...")
+    # Drain the read buffer
+    while True:
+        try:
+            response = await asyncio.wait_for(reader.readline(), timeout=2)
+        except asyncio.TimeoutError:
+            break
+
+    # Check that the offloaded backpressure was peroperly handled
+    res = await async_client.dbsize()
+    assert res == total
