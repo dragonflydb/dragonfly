@@ -1278,6 +1278,8 @@ void CompactObj::Reset() {
 }
 
 uint8_t CompactObj::GetFirstByte() const {
+  DCHECK_EQ(ObjType(), OBJ_STRING);
+
   if (IsInline()) {
     return u_.inline_str[0];
   }
