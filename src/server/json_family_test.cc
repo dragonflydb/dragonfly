@@ -20,8 +20,191 @@ using namespace util;
 
 ABSL_DECLARE_FLAG(bool, jsonpathv2);
 
-namespace dfly {
+namespace {
+constexpr std::string_view xxx =
+    "{\"page\":{\"pageIndex\":1,\"pageSize\":5000,\"total\":1,\"totalPage\":1},\"list\":[{"
+    "\"view\":\"<?xml version=\\\"1.0\\\" encoding=\\\"UTF-8\\\"?>\\n<bpmn:definitions "
+    "xmlns:bpmn=\\\"http://www.omg.org/spec/BPMN/20100524/MODEL\\\" "
+    "xmlns:bpmndi=\\\"http://www.omg.org/spec/BPMN/20100524/DI\\\" "
+    "xmlns:dc=\\\"http://www.omg.org/spec/DD/20100524/DC\\\" "
+    "xmlns:zeebe=\\\"http://camunda.org/schema/zeebe/1.0\\\" "
+    "xmlns:di=\\\"http://www.omg.org/spec/DD/20100524/DI\\\" "
+    "xmlns:modeler=\\\"http://camunda.org/schema/modeler/1.0\\\" "
+    "targetNamespace=\\\"http://bpmn.io/schema/bpmn\\\" exporter=\\\"Camunda Modeler\\\" "
+    "exporterVersion=\\\"5.16.0\\\" modeler:executionPlatform=\\\"Camunda Cloud\\\" "
+    "modeler:executionPlatformVersion=\\\"8.3.0\\\">\\n <bpmn:process "
+    "id=\\\"onClick-page_lcfbxiqq-button_9976a\\\" isExecutable=\\\"true\\\">\\n "
+    "<bpmn:startEvent id=\\\"StartEvent_1\\\">\\n <bpmn:outgoing>Flow_05a9zzk</bpmn:outgoing>\\n "
+    "</bpmn:startEvent>\\n <bpmn:serviceTask id=\\\"node_9q6sjq\\\" "
+    "name=\\\"自动获取表单数据\\\" zeebe:modelerTemplate=\\\"GetFormDataAutoAction\\\">\\n "
+    "<bpmn:extensionElements>\\n <zeebe:taskDefinition type=\\\"GetFormDataAutoAction\\\" "
+    "retries=\\\"0\\\" />\\n </bpmn:extensionElements>\\n "
+    "<bpmn:incoming>Flow_05a9zzk</bpmn:incoming>\\n "
+    "<bpmn:outgoing>Flow_1wl4bek</bpmn:outgoing>\\n </bpmn:serviceTask>\\n <bpmn:sequenceFlow "
+    "id=\\\"Flow_05a9zzk\\\" sourceRef=\\\"StartEvent_1\\\" targetRef=\\\"node_9q6sjq\\\" />\\n "
+    "<bpmn:serviceTask id=\\\"node_57qe6y\\\" name=\\\"调用接口\\\" "
+    "zeebe:modelerTemplate=\\\"InvokeApiAction\\\">\\n <bpmn:extensionElements>\\n "
+    "<zeebe:taskDefinition type=\\\"InvokeApiAction\\\" retries=\\\"0\\\" />\\n "
+    "</bpmn:extensionElements>\\n <bpmn:incoming>Flow_1wl4bek</bpmn:incoming>\\n "
+    "<bpmn:outgoing>Flow_1fwxzti</bpmn:outgoing>\\n </bpmn:serviceTask>\\n <bpmn:sequenceFlow "
+    "id=\\\"Flow_1wl4bek\\\" sourceRef=\\\"node_9q6sjq\\\" targetRef=\\\"node_57qe6y\\\" />\\n "
+    "<bpmn:exclusiveGateway id=\\\"Gateway_03r4yn4\\\">\\n "
+    "<bpmn:incoming>Flow_1fwxzti</bpmn:incoming>\\n "
+    "<bpmn:outgoing>Flow_1gul43x</bpmn:outgoing>\\n "
+    "<bpmn:outgoing>Flow_04ip05h</bpmn:outgoing>\\n </bpmn:exclusiveGateway>\\n "
+    "<bpmn:sequenceFlow id=\\\"Flow_1fwxzti\\\" sourceRef=\\\"node_57qe6y\\\" "
+    "targetRef=\\\"Gateway_03r4yn4\\\" />\\n <bpmn:endEvent id=\\\"Event_14o8ze4\\\">\\n "
+    "<bpmn:incoming>Flow_0mfaize</bpmn:incoming>\\n </bpmn:endEvent>\\n <bpmn:sequenceFlow "
+    "id=\\\"Flow_1gul43x\\\" sourceRef=\\\"Gateway_03r4yn4\\\" targetRef=\\\"node_ffaiql\\\" "
+    "/>\\n <bpmn:serviceTask id=\\\"node_ffaiql\\\" name=\\\"通知提醒\\\" "
+    "zeebe:modelerTemplate=\\\"ShowMessageAction\\\">\\n <bpmn:extensionElements>\\n "
+    "<zeebe:taskDefinition type=\\\"ShowMessageAction\\\" retries=\\\"0\\\" />\\n "
+    "</bpmn:extensionElements>\\n <bpmn:incoming>Flow_1gul43x</bpmn:incoming>\\n "
+    "<bpmn:outgoing>Flow_0mfaize</bpmn:outgoing>\\n </bpmn:serviceTask>\\n <bpmn:sequenceFlow "
+    "id=\\\"Flow_0mfaize\\\" sourceRef=\\\"node_ffaiql\\\" targetRef=\\\"Event_14o8ze4\\\" />\\n "
+    "<bpmn:serviceTask id=\\\"f_m9xw8l\\\" name=\\\"通知提醒\\\" "
+    "zeebe:modelerTemplate=\\\"ShowMessageAction\\\">\\n <bpmn:extensionElements>\\n "
+    "<zeebe:taskDefinition type=\\\"ShowMessageAction\\\" retries=\\\"0\\\" />\\n "
+    "</bpmn:extensionElements>\\n <bpmn:incoming>Flow_04ip05h</bpmn:incoming>\\n "
+    "</bpmn:serviceTask>\\n <bpmn:sequenceFlow id=\\\"Flow_04ip05h\\\" "
+    "sourceRef=\\\"Gateway_03r4yn4\\\" targetRef=\\\"f_m9xw8l\\\" />\\n </bpmn:process>\\n "
+    "<bpmndi:BPMNDiagram id=\\\"BPMNDiagram_1\\\">\\n <bpmndi:BPMNPlane id=\\\"BPMNPlane_1\\\" "
+    "bpmnElement=\\\"onClick-page_lcfbxiqq-button_9976a\\\">\\n <bpmndi:BPMNShape "
+    "id=\\\"node_9q6sjq_di\\\" bpmnElement=\\\"node_9q6sjq\\\">\\n <dc:Bounds x=\\\"300\\\" "
+    "y=\\\"190\\\" width=\\\"100\\\" height=\\\"80\\\" />\\n </bpmndi:BPMNShape>\\n "
+    "<bpmndi:BPMNShape id=\\\"_BPMNShape_StartEvent_2\\\" bpmnElement=\\\"StartEvent_1\\\">\\n "
+    "<dc:Bounds x=\\\"179\\\" y=\\\"142\\\" width=\\\"36\\\" height=\\\"36\\\" />\\n "
+    "</bpmndi:BPMNShape>\\n <bpmndi:BPMNShape id=\\\"node_57qe6y_di\\\" "
+    "bpmnElement=\\\"node_57qe6y\\\">\\n <dc:Bounds x=\\\"560\\\" y=\\\"190\\\" "
+    "width=\\\"100\\\" height=\\\"80\\\" />\\n </bpmndi:BPMNShape>\\n <bpmndi:BPMNShape "
+    "id=\\\"Gateway_03r4yn4_di\\\" bpmnElement=\\\"Gateway_03r4yn4\\\" "
+    "isMarkerVisible=\\\"true\\\">\\n <dc:Bounds x=\\\"825\\\" y=\\\"205\\\" width=\\\"50\\\" "
+    "height=\\\"50\\\" />\\n </bpmndi:BPMNShape>\\n <bpmndi:BPMNShape "
+    "id=\\\"Event_14o8ze4_di\\\" bpmnElement=\\\"Event_14o8ze4\\\">\\n <dc:Bounds x=\\\"1032\\\" "
+    "y=\\\"102\\\" width=\\\"36\\\" height=\\\"36\\\" />\\n </bpmndi:BPMNShape>\\n "
+    "<bpmndi:BPMNShape id=\\\"node_ffaiql_di\\\" bpmnElement=\\\"node_ffaiql\\\">\\n <dc:Bounds "
+    "x=\\\"900\\\" y=\\\"80\\\" width=\\\"100\\\" height=\\\"80\\\" />\\n </bpmndi:BPMNShape>\\n "
+    "<bpmndi:BPMNShape id=\\\"f_m9xw8l_di\\\" bpmnElement=\\\"f_m9xw8l\\\">\\n <dc:Bounds "
+    "x=\\\"990\\\" y=\\\"290\\\" width=\\\"100\\\" height=\\\"80\\\" />\\n "
+    "</bpmndi:BPMNShape>\\n <bpmndi:BPMNEdge id=\\\"Flow_05a9zzk_di\\\" "
+    "bpmnElement=\\\"Flow_05a9zzk\\\">\\n <di:waypoint x=\\\"215\\\" y=\\\"160\\\" />\\n "
+    "<di:waypoint x=\\\"258\\\" y=\\\"160\\\" />\\n <di:waypoint x=\\\"258\\\" y=\\\"230\\\" "
+    "/>\\n <di:waypoint x=\\\"300\\\" y=\\\"230\\\" />\\n </bpmndi:BPMNEdge>\\n <bpmndi:BPMNEdge "
+    "id=\\\"Flow_1wl4bek_di\\\" bpmnElement=\\\"Flow_1wl4bek\\\">\\n <di:waypoint x=\\\"400\\\" "
+    "y=\\\"230\\\" />\\n <di:waypoint x=\\\"560\\\" y=\\\"230\\\" />\\n </bpmndi:BPMNEdge>\\n "
+    "<bpmndi:BPMNEdge id=\\\"Flow_1fwxzti_di\\\" bpmnElement=\\\"Flow_1fwxzti\\\">\\n "
+    "<di:waypoint x=\\\"660\\\" y=\\\"230\\\" />\\n <di:waypoint x=\\\"825\\\" y=\\\"230\\\" "
+    "/>\\n </bpmndi:BPMNEdge>\\n <bpmndi:BPMNEdge id=\\\"Flow_1gul43x_di\\\" "
+    "bpmnElement=\\\"Flow_1gul43x\\\">\\n <di:waypoint x=\\\"850\\\" y=\\\"205\\\" />\\n "
+    "<di:waypoint x=\\\"850\\\" y=\\\"120\\\" />\\n <di:waypoint x=\\\"900\\\" y=\\\"120\\\" "
+    "/>\\n </bpmndi:BPMNEdge>\\n <bpmndi:BPMNEdge id=\\\"Flow_0mfaize_di\\\" "
+    "bpmnElement=\\\"Flow_0mfaize\\\">\\n <di:waypoint x=\\\"1000\\\" y=\\\"120\\\" />\\n "
+    "<di:waypoint x=\\\"1032\\\" y=\\\"120\\\" />\\n </bpmndi:BPMNEdge>\\n <bpmndi:BPMNEdge "
+    "id=\\\"Flow_04ip05h_di\\\" bpmnElement=\\\"Flow_04ip05h\\\">\\n <di:waypoint x=\\\"850\\\" "
+    "y=\\\"255\\\" />\\n <di:waypoint x=\\\"850\\\" y=\\\"330\\\" />\\n <di:waypoint "
+    "x=\\\"990\\\" y=\\\"330\\\" />\\n </bpmndi:BPMNEdge>\\n </bpmndi:BPMNPlane>\\n "
+    "</bpmndi:BPMNDiagram>\\n</"
+    "bpmn:definitions>\\n\",\"data\":{\"id\":\"onClick-page_lcfbxiqq-button_9976a\",\"name\":"
+    "\"\",\"showName\":\"\",\"steps\":[{\"id\":\"StartEvent_1\",\"stepCategory\":0,\"nextId\":["
+    "\"Flow_05a9zzk\"],\"config\":{\"type\":1,\"hasOutput\":false,\"inputs\":[],\"outputs\":{"
+    "\"type\":\"string\"},\"id\":\"StartEvent_1\",\"guid\":\"StartEvent_1\",\"name\":"
+    "\"StartAction\",\"data\":{\"data\":{\"type\":\"string\"}}},\"name\":\"StartAction\"},{"
+    "\"id\":\"node_9q6sjq\",\"stepCategory\":1,\"nextId\":[\"Flow_1wl4bek\"],\"config\":{"
+    "\"category\":\"\",\"type\":1,\"hasOutput\":false,\"inputs\":[],\"outputs\":{\"type\":"
+    "\"object\",\"properties\":{}},\"id\":\"node_9q6sjq\",\"guid\":\"node_9q6sjq\",\"name\":"
+    "\"GetFormDataAutoAction\",\"data\":{\"baseCom\":\"\",\"com_container\":[\"page_lcfbxiqq~"
+    "pack_modal_kzhew\"],\"auto_prefix\":\"v_\",\"comIds\":[],\"not_in_comIds\":[]}},\"name\":"
+    "\"GetFormDataAutoAction\"},{\"id\":\"node_57qe6y\",\"stepCategory\":1,\"nextId\":[\"Flow_"
+    "1fwxzti\"],\"config\":{\"category\":\"\",\"type\":1,\"hasOutput\":false,\"inputs\":[],"
+    "\"outputs\":{\"type\":\"object\",\"properties\":{\"response_body\":{\"title\":"
+    "\"请求返回结果\",\"type\":\"object\",\"properties\":{\"message_data\":{\"type\":\"object\","
+    "\"properties\":{}},\"code\":{\"type\":\"number\"},\"data\":{\"type\":\"object\","
+    "\"properties\":{\"page\":{\"type\":\"object\",\"properties\":{\"pageIndex\":{\"type\":"
+    "\"number\"},\"pageSize\":{\"type\":\"number\"},\"total\":{\"type\":\"number\"},"
+    "\"totalPage\":{\"type\":\"number\"}}},\"list\":{\"type\":\"array\",\"items\":{\"type\":"
+    "\"object\",\"properties\":{\"REALM_ID\":{\"type\":\"string\"},\"EMAIL_CONSTRAINT\":{"
+    "\"type\":\"string\"},\"EMAIL\":{\"type\":\"string\"},\"LAST_NAME\":{\"type\":\"string\"},"
+    "\"FIRST_NAME\":{\"type\":\"string\"},\"EMAIL_VERIFIED\":{\"type\":\"boolean\"},\"SERVICE_"
+    "ACCOUNT_CLIENT_LINK\":{\"type\":\"string\"},\"NOT_BEFORE\":{\"type\":\"number\"},"
+    "\"USERNAME\":{\"type\":\"string\"},\"ENABLED\":{\"type\":\"boolean\"},\"ID\":{\"type\":"
+    "\"string\"},\"CREATED_TIMESTAMP\":{\"type\":\"number\"},\"FEDERATION_LINK\":{\"type\":"
+    "\"string\"}}}}}},\"v_post_data\":{\"type\":\"object\",\"properties\":{\"lastName\":{"
+    "\"type\":\"string\"},\"username\":{\"type\":\"string\"},\"email\":{\"type\":\"string\"},"
+    "\"enabled\":{\"type\":\"string\"}}},\"message\":{\"type\":\"string\"}}},\"status_code\":{"
+    "\"type\":\"enum\",\"title\":\"状态码\"}}},\"id\":\"node_57qe6y\",\"guid\":\"node_57qe6y\","
+    "\"name\":\"InvokeApiAction\",\"data\":{\"api\":\"l4uonyft\",\"req_body_from\":2,"
+    "\"requestInfo\":{\"adapter\":null,\"app_id\":\"x3eo2mmjnh\",\"cache\":null,\"category\":"
+    "null,\"content_type\":\"3\",\"create_time\":\"2025-09-12 "
+    "14:44:27\",\"create_user_id\":null,\"guid\":\"l4uonyft\",\"headers\":[],\"id\":1830,"
+    "\"method\":\"POST\",\"model_id\":null,\"modify_time\":\"2025-09-12 "
+    "22:36:41\",\"modify_user_id\":\"1f1cc3d5-18c8-4bed-97ef-95f8fed1f028\",\"name\":\"中台相关-"
+    "kc-用户-创建\",\"note\":null,\"params\":[],\"pathParams\":null,\"realm\":\"master\",\"ref_"
+    "model_id\":null,\"ref_process\":\"master_172omb21oq_center-kc-user-create\",\"ref_table\":"
+    "null,\"ref_template\":null,\"ref_type\":null,\"request_body\":[{\"key\":\"v_lastName\","
+    "\"value\":{\"type\":4,\"value\":\"sss\"},\"note\":\"\",\"type\":\"string\",\"enable\":true},"
+    "{\"key\":\"v_username\",\"value\":{\"type\":4,\"value\":\"ssss%E8%AF%95%E8%AF%95\"},"
+    "\"note\":\"\",\"type\":\"string\",\"enable\":true},{\"key\":\"v_enabled\",\"value\":{"
+    "\"type\":4,\"value\":\"true\"},\"note\":\"\",\"type\":\"string\",\"enable\":true},{\"key\":"
+    "\"v_email\",\"value\":{\"type\":4,\"value\":\"555%401.com\"},\"note\":\"\",\"type\":"
+    "\"string\",\"enable\":true}],\"response_body\":{\"type\":\"object\",\"properties\":{"
+    "\"message_data\":{\"type\":\"object\",\"properties\":{}},\"code\":{\"type\":\"number\"},"
+    "\"data\":{\"type\":\"object\",\"properties\":{\"page\":{\"type\":\"object\",\"properties\":{"
+    "\"pageIndex\":{\"type\":\"number\"},\"pageSize\":{\"type\":\"number\"},\"total\":{\"type\":"
+    "\"number\"},\"totalPage\":{\"type\":\"number\"}}},\"list\":{\"type\":\"array\",\"items\":{"
+    "\"type\":\"object\",\"properties\":{\"REALM_ID\":{\"type\":\"string\"},\"EMAIL_CONSTRAINT\":"
+    "{\"type\":\"string\"},\"EMAIL\":{\"type\":\"string\"},\"LAST_NAME\":{\"type\":\"string\"},"
+    "\"FIRST_NAME\":{\"type\":\"string\"},\"EMAIL_VERIFIED\":{\"type\":\"boolean\"},\"SERVICE_"
+    "ACCOUNT_CLIENT_LINK\":{\"type\":\"string\"},\"NOT_BEFORE\":{\"type\":\"number\"},"
+    "\"USERNAME\":{\"type\":\"string\"},\"ENABLED\":{\"type\":\"boolean\"},\"ID\":{\"type\":"
+    "\"string\"},\"CREATED_TIMESTAMP\":{\"type\":\"number\"},\"FEDERATION_LINK\":{\"type\":"
+    "\"string\"}}}}}},\"v_post_data\":{\"type\":\"object\",\"properties\":{\"lastName\":{"
+    "\"type\":\"string\"},\"username\":{\"type\":\"string\"},\"email\":{\"type\":\"string\"},"
+    "\"enabled\":{\"type\":\"string\"}}},\"message\":{\"type\":\"string\"}}},\"status_code\":\"{}"
+    "\",\"type\":1,\"url\":\"/proccess/start/"
+    "master_172omb21oq_center-kc-user-create\",\"use_domain\":true,\"version\":\"master\"},\"var_"
+    "value\":{\"type\":1,\"value\":{\"type\":3,\"value\":\"node_9q6sjq\",\"map\":\"\"}}}},"
+    "\"name\":\"InvokeApiAction\"},{\"id\":\"node_ffaiql\",\"stepCategory\":1,\"nextId\":[\"Flow_"
+    "0mfaize\"],\"config\":{\"category\":\"\",\"type\":1,\"hasOutput\":false,\"inputs\":[],"
+    "\"outputs\":[],\"id\":\"node_ffaiql\",\"guid\":\"node_ffaiql\",\"name\":"
+    "\"ShowMessageAction\",\"data\":{\"type\":\"success\",\"message\":{\"type\":4,\"value\":"
+    "\"创建成功\",\"dataType\":\"string\"}}},\"name\":\"ShowMessageAction\"},{\"id\":\"f_"
+    "m9xw8l\",\"stepCategory\":1,\"nextId\":[],\"config\":{\"category\":\"\",\"type\":1,"
+    "\"hasOutput\":false,\"inputs\":[],\"outputs\":[],\"id\":\"f_m9xw8l\",\"guid\":\"f_m9xw8l\","
+    "\"name\":\"ShowMessageAction\",\"data\":{\"type\":\"warn\",\"message\":{\"type\":4,"
+    "\"value\":\"创建失败\",\"dataType\":\"string\"}}},\"name\":\"ShowMessageAction\"},{\"id\":"
+    "\"Gateway_03r4yn4\",\"stepCategory\":2,\"nextId\":[\"Flow_1gul43x\",\"Flow_04ip05h\"],"
+    "\"config\":{\"category\":\"\",\"type\":1,\"hasOutput\":false,\"inputs\":[],\"outputs\":[],"
+    "\"id\":\"Gateway_03r4yn4\",\"guid\":\"Gateway_03r4yn4\",\"name\":\"SwitchAction\",\"data\":{"
+    "}},\"name\":\"SwitchAction\"},{\"id\":\"Event_14o8ze4\",\"stepCategory\":-1,\"nextId\":[],"
+    "\"config\":{\"category\":\"\",\"type\":1,\"hasOutput\":false,\"inputs\":[],\"outputs\":[],"
+    "\"id\":\"Event_14o8ze4\",\"guid\":\"Event_14o8ze4\",\"name\":\"EndAction\",\"data\":{"
+    "\"value\":{\"type\":4,\"value\":\"\"}}},\"name\":\"EndAction\"}],\"edges\":[{\"id\":\"Flow_"
+    "05a9zzk\",\"from\":[\"StartEvent_1\"],\"nextId\":[\"node_9q6sjq\"],\"config\":{\"category\":"
+    "\"\",\"type\":1,\"hasOutput\":false,\"inputs\":[],\"outputs\":[],\"id\":\"Flow_05a9zzk\","
+    "\"guid\":\"Flow_05a9zzk\",\"name\":\"SwitchActionLine\",\"data\":{}}},{\"id\":\"Flow_"
+    "1wl4bek\",\"from\":[\"node_9q6sjq\"],\"nextId\":[\"node_57qe6y\"],\"config\":{\"category\":"
+    "\"\",\"type\":1,\"hasOutput\":false,\"inputs\":[],\"outputs\":[],\"id\":\"Flow_1wl4bek\","
+    "\"guid\":\"Flow_1wl4bek\",\"name\":\"SwitchActionLine\",\"data\":{}}},{\"id\":\"Flow_"
+    "1fwxzti\",\"from\":[\"node_57qe6y\"],\"nextId\":[\"Gateway_03r4yn4\"],\"config\":{}},{"
+    "\"id\":\"Flow_1gul43x\",\"from\":[\"Gateway_03r4yn4\"],\"nextId\":[\"node_ffaiql\"],"
+    "\"config\":{\"category\":\"\",\"type\":1,\"hasOutput\":false,\"inputs\":[],\"outputs\":[],"
+    "\"id\":\"Flow_1gul43x\",\"guid\":\"Flow_1gul43x\",\"name\":\"SwitchActionLine\",\"data\":{"
+    "\"data\":[{\"id\":0,\"operator\":\"and\",\"order\":1,\"pid\":-1,\"is_leaf\":false},{\"id\":"
+    "8736,\"pid\":0,\"field\":{\"type\":1,\"value\":{\"type\":3,\"value\":\"node_57qe6y~response_"
+    "body~code\",\"map\":\"\"}},\"operator\":\"==\",\"value\":{\"type\":4,\"value\":\"0\","
+    "\"dataType\":\"int\"},\"is_leaf\":true,\"key\":8736,\"order\":1,\"children\":[]}]}}},{"
+    "\"id\":\"Flow_0mfaize\",\"from\":[\"node_ffaiql\"],\"nextId\":[\"Event_14o8ze4\"],"
+    "\"config\":{}},{\"id\":\"Flow_04ip05h\",\"from\":[\"Gateway_03r4yn4\"],\"nextId\":[\"f_"
+    "m9xw8l\"],\"config\":{\"category\":\"\",\"type\":1,\"hasOutput\":false,\"inputs\":[],"
+    "\"outputs\":[],\"id\":\"Flow_04ip05h\",\"guid\":\"Flow_04ip05h\",\"name\":"
+    "\"SwitchActionLine\",\"data\":{\"data\":[{\"id\":0,\"operator\":\"and\",\"order\":1,\"pid\":"
+    "-1,\"is_leaf\":false},{\"id\":4344,\"pid\":0,\"field\":{\"type\":1,\"value\":{\"type\":3,"
+    "\"value\":\"node_57qe6y~response_body~code\",\"map\":\"\"}},\"operator\":\"!=\",\"value\":{"
+    "\"type\":4,\"value\":\"0\",\"dataType\":\"int\"},\"is_leaf\":true,\"key\":4344,\"order\":1,"
+    "\"children\":[]}]}}}]},\"guid\":\"onClick-page_lcfbxiqq~button_9976a\",\"id\":9324}]}";
+}
 
+namespace dfly {
 class JsonFamilyTest : public BaseFamilyTest {
  protected:
 };
@@ -3503,6 +3686,86 @@ TEST_F(JsonFamilyTest, TOGGLE_RESP3NestedArrayBug) {
   EXPECT_THAT(resp.GetVec()[1], Not(ArgType(RespExpr::ARRAY)));
   EXPECT_THAT(resp.GetVec()[0], IntArg(0));
   EXPECT_THAT(resp.GetVec()[1], IntArg(1));
+}
+
+template <typename T> void time_taken(T then, std::string_view msg) {
+  using namespace std::chrono;
+  auto now = high_resolution_clock::now();
+  auto duration = now - then;
+  std::cerr << "time taken to " << msg << " (ms) " << duration_cast<milliseconds>(duration).count()
+            << "\n";
+}
+
+TEST_F(JsonFamilyTest, Slow) {
+  using namespace jsoncons;
+
+  auto now = std::chrono::high_resolution_clock::now();
+  {
+    json_decoder<basic_json<char, sorted_policy, std::pmr::polymorphic_allocator<char>>> decoder(
+        CompactObj::memory_resource());
+    json_parser parser(json_options{});
+    parser.update(xxx.data(), xxx.size());
+    error_code ec;
+
+    now = std::chrono::high_resolution_clock::now();
+    parser.finish_parse(decoder, ec);
+    time_taken(now, "parse json");
+
+    EXPECT_FALSE(ec);
+    EXPECT_TRUE(decoder.is_valid());
+    std::cerr << decoder.get_result() << "\n";
+  }
+
+  time_taken(now, "destroy");
+}
+
+TEST_F(JsonFamilyTest, FastDefaultAlloc) {
+  using namespace jsoncons;
+
+  auto now = std::chrono::high_resolution_clock::now();
+  {
+    json_decoder<basic_json<char>> decoder(std::allocator<char>{});
+    json_parser parser(json_options{});
+    parser.update(xxx.data(), xxx.size());
+    error_code ec;
+
+    now = std::chrono::high_resolution_clock::now();
+    parser.finish_parse(decoder, ec);
+    time_taken(now, "parse json");
+
+    parser.check_done();
+    EXPECT_FALSE(ec);
+    EXPECT_TRUE(decoder.is_valid());
+    std::cerr << decoder.get_result() << "\n";
+  }
+
+  time_taken(now, "destroy");
+}
+
+TEST_F(JsonFamilyTest, SlowPMRAlloc) {
+  using namespace jsoncons;
+
+  std::pmr::monotonic_buffer_resource m;
+  std::pmr::polymorphic_allocator<char> alloc{&m};
+
+  auto now = std::chrono::high_resolution_clock::now();
+  {
+    json_decoder<basic_json<char, sorted_policy, std::pmr::polymorphic_allocator<char>>> decoder(
+        alloc);
+    json_parser parser(json_options{});
+    parser.update(xxx.data(), xxx.size());
+    error_code ec;
+
+    now = std::chrono::high_resolution_clock::now();
+    parser.finish_parse(decoder, ec);
+    time_taken(now, "parse json");
+
+    parser.check_done();
+    EXPECT_FALSE(ec);
+    EXPECT_TRUE(decoder.is_valid());
+    std::cerr << decoder.get_result() << "\n";
+  }
+  time_taken(now, "destroy");
 }
 
 }  // namespace dfly
