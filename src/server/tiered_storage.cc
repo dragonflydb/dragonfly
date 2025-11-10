@@ -353,6 +353,7 @@ TieredStorage::TResult<T> TieredStorage::Modify(DbIndex dbid, std::string_view k
                                                 const PrimeValue& value,
                                                 std::function<T(std::string*)> modf) {
   DCHECK(value.IsExternal());
+  DCHECK_EQ(value.ObjType(), OBJ_STRING);
 
   util::fb2::Future<io::Result<T>> future;
   auto cb = [future, modf = std::move(modf)](io::Result<tiering::Decoder*> res) mutable {

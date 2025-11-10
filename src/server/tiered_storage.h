@@ -58,10 +58,10 @@ class TieredStorage {
     ReadInternal(dbid, key, value, decoder, wrapped_cb);
   }
 
-  // Read offloaded value. It must be of external type
+  // Read offloaded value. It must be of external string type
   TResult<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);
 
-  // Read offloaded value. It must be of external type
+  // Read offloaded value. It must be of external string type
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
             std::function<void(io::Result<std::string>)> readf);
 
