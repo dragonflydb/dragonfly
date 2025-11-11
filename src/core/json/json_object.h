@@ -26,6 +26,11 @@ using JsonType = jsoncons::pmr::json;
 // Build a json object from string. If the string is not legal json, will return nullopt
 std::optional<JsonType> JsonFromString(std::string_view input, PMR_NS::memory_resource* mr);
 
+// Deep copy a JSON object, by first serializing it to a string and then deserializing the string.
+// The operation is intended to help during defragmentation, by copying into a page reserved for
+// malloc.
+JsonType DeepCopyJSON(const JsonType* j, PMR_NS::memory_resource* mr);
+
 inline auto MakeJsonPathExpr(std::string_view path, std::error_code& ec)
     -> jsoncons::jsonpath::jsonpath_expression<JsonType> {
   return jsoncons::jsonpath::make_expression<JsonType, std::allocator<char>>(
