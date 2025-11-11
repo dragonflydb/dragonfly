@@ -283,8 +283,8 @@ unsigned HufHist::MaxFreqCount() const {
   return max_freq;
 }
 
-unsigned kMaxFreqPerShard = 1U << 19;
-unsigned kMaxFreqTotal = 1U << 23;
+unsigned kMaxFreqPerShard = 1U << 20;
+unsigned kMaxFreqTotal = static_cast<unsigned>((1U << 31) * 0.9);
 
 void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* cntx,
                    HufHist* dest) {
@@ -1403,23 +1403,20 @@ void DebugCmd::Values(CmdArgList args, facade::SinkReplyBuilder* builder) {
 }
 
 static size_t PostProcessHist(HufHist* dest) {
-  size_t raw_size = 0;
+  size_t total_freq = 0;
   auto& hist = dest->hist;
   unsigned max_freq = 0;
 
   for (unsigned i = 0; i <= HufHist::kMaxSymbol; i++) {
     // raw_size may count less characters than the actual size because
     // we may cut the counting early.
-    raw_size += hist[i];
-    if (hist[i] > max_freq) {
-      max_freq = hist[i];
-    }
+    total_freq += hist[i];
     if (hist[i] == 0) {
       hist[i] = 1;  // Avoid zero frequency symbols.
     }
   }
 
-  if (max_freq > kMaxFreqTotal) {
+  if (total_freq > kMaxFreqTotal) {
     // huffman encoder has a bug with frequencies too high, so we scale down everything
     // to avoid overflow.
     double scale = static_cast<double>(max_freq) / kMaxFreqTotal;
@@ -1430,7 +1427,7 @@ static size_t PostProcessHist(HufHist* dest) {
       }
     }
   }
-  return raw_size;
+  return total_freq;
 }
 
 void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
