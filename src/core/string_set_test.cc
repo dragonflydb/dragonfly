@@ -735,10 +735,10 @@ void BM_Spop1000(benchmark::State& state) {
     state.PauseTiming();
     StringSet tmp;
     src.Fill(&tmp);
-    src.Reserve(elems * sparseness);
+    tmp.Reserve(elems * sparseness);
     state.ResumeTiming();
     for (int i = 0; i < 1000; ++i) {
-      src.Pop();
+      tmp.Pop();
     }
   }
 }
