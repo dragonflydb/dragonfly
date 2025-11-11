@@ -43,4 +43,12 @@ optional<JsonType> JsonFromString(string_view input, PMR_NS::memory_resource* mr
   return nullopt;
 }
 
+JsonType DeepCopyJSON(const JsonType* j, PMR_NS::memory_resource* mr) {
+  std::string serialized;
+  j->dump(serialized);
+  auto deserialized = JsonFromString(serialized, mr);
+  DCHECK(deserialized.has_value());
+  return std::move(deserialized.value());
+}
+
 }  // namespace dfly
