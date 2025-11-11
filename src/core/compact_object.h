@@ -395,6 +395,8 @@ class CompactObj {
     return taglen_ <= kInlineLen;
   }
 
+  uint8_t GetFirstByte() const;
+
   static constexpr unsigned InlineLen() {
     return kInlineLen;
   }
@@ -430,8 +432,7 @@ class CompactObj {
     memory_resource()->deallocate(ptr, sizeof(T), alignof(T));
   }
 
-  // returns raw (non-decoded) string together with the encoding mask.
-  // Used to bypass decoding layer.
+  // returns raw (non-decoded) string. Used to bypass decoding layer.
   // Precondition: the object is a non-inline string.
   StringOrView GetRawString() const;
 
@@ -467,13 +468,13 @@ class CompactObj {
     mask_ = mask;
   }
 
-  // Must be 16 bytes.
   struct ExternalPtr {
     uint32_t serialized_size;
     uint16_t page_offset;  // 0 for multi-page blobs. != 0 for small blobs.
     uint8_t is_cool : 1;
     uint8_t representation : 2;  // See ExternalRep
-    uint16_t is_reserved : 13;
+    uint8_t is_reserved : 5;
+    uint8_t first_byte;
 
     // We do not have enough space in the common area to store page_index together with
     // cool_record pointer. Therefore, we moved this field into TieredColdRecord itself.
@@ -487,15 +488,23 @@ class CompactObj {
       detail::TieredColdRecord* cool_record;
     };
   } __attribute__((packed));
-
+  static_assert(sizeof(ExternalPtr) == 16);
   struct JsonConsT {
     JsonType* json_ptr;
     size_t bytes_used;
+
+    bool DefragIfNeeded(PageUsage* page_usage);
+
+    // Computes if the contained object should be defragmented, by examining pointers within it and
+    // returning true if any of them reside in an underutilized page.
+    bool ShouldDefragment(PageUsage* page_usage) const;
   };
 
   struct FlatJsonT {
     uint32_t json_len;
     uint8_t* flat_ptr;
+
+    bool DefragIfNeeded(PageUsage* page_usage);
   };
 
   struct JsonWrapper {
@@ -503,6 +512,8 @@ class CompactObj {
       JsonConsT cons;
       FlatJsonT flat;
     };
+
+    bool DefragIfNeeded(PageUsage* page_usage);
   };
 
   // My main data structure. Union of representations.
@@ -535,7 +546,7 @@ class CompactObj {
       uint8_t expire : 1;
       uint8_t mc_flag : 1;  // Marks keys that have memcache flags assigned.
 
-      // See the Encoding enum for the meaning of these bits.
+      // See the EncodingEnum for the meaning of these bits.
       uint8_t encoding : 2;
 
       // IO_PENDING is set when the tiered storage has issued an i/o request to save the value.

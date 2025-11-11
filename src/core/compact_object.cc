@@ -723,7 +723,7 @@ void RobjWrapper::MakeInnerRoom(size_t current_cap, size_t desired, MemoryResour
 }  // namespace detail
 
 uint32_t JsonEnconding() {
-  static thread_local uint32_t json_enc =
+  thread_local uint32_t json_enc =
       absl::GetFlag(FLAGS_experimental_flat_json) ? kEncodingJsonFlat : kEncodingJsonCons;
   return json_enc;
 }
@@ -813,7 +813,7 @@ size_t CompactObj::Size() const {
       }
       case EXTERNAL_TAG:
         raw_size = u_.ext_ptr.serialized_size;
-        CHECK(mask_bits_.encoding != HUFFMAN_ENC);
+        first_byte = GetFirstByte();
         break;
       case ROBJ_TAG:
         raw_size = u_.r_obj.Size();
@@ -1094,6 +1094,8 @@ bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
       return false;
     case SMALL_TAG:
       return u_.small_str.DefragIfNeeded(page_usage);
+    case JSON_TAG:
+      return u_.json_obj.DefragIfNeeded(page_usage);
     case INT_TAG:
       page_usage->RecordNotRequired();
       // this is not relevant in this case
@@ -1202,10 +1204,16 @@ void CompactObj::GetString(char* dest) const {
 }
 
 void CompactObj::SetExternal(size_t offset, uint32_t sz, ExternalRep rep) {
+  uint8_t first_byte = 0;
+  if (mask_bits_.encoding == HUFFMAN_ENC) {
+    CHECK(rep == ExternalRep::STRING);
+    first_byte = GetFirstByte();
+  }
   SetMeta(EXTERNAL_TAG, mask_);
 
   u_.ext_ptr.is_cool = 0;
   u_.ext_ptr.representation = static_cast<uint8_t>(rep);
+  u_.ext_ptr.first_byte = first_byte;
   u_.ext_ptr.page_offset = offset % 4096;
   u_.ext_ptr.serialized_size = sz;
   u_.ext_ptr.offload.page_index = offset / 4096;
@@ -1269,6 +1277,35 @@ void CompactObj::Reset() {
   }
   tagbyte_ = 0;
   mask_ = 0;
+}
+
+uint8_t CompactObj::GetFirstByte() const {
+  DCHECK_EQ(ObjType(), OBJ_STRING);
+
+  if (IsInline()) {
+    return u_.inline_str[0];
+  }
+
+  if (taglen_ == ROBJ_TAG) {
+    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
+    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+    return *(uint8_t*)u_.r_obj.inner_obj();
+  }
+
+  if (taglen_ == SMALL_TAG) {
+    return u_.small_str.first_byte();
+  }
+
+  if (taglen_ == EXTERNAL_TAG) {
+    if (u_.ext_ptr.is_cool) {
+      const CompactObj& cooled_obj = u_.ext_ptr.cool_record->value;
+      return cooled_obj.GetFirstByte();
+    }
+    return u_.ext_ptr.first_byte;
+  }
+
+  LOG(DFATAL) << "Bad tag " << int(taglen_);
+  return 0;
 }
 
 // Frees all resources if owns.
@@ -1583,6 +1620,44 @@ StringOrView CompactObj::GetRawString() const {
 
 MemoryResource* CompactObj::memory_resource() {
   return tl.local_mr;
+}
+
+bool CompactObj::JsonConsT::DefragIfNeeded(PageUsage* page_usage) {
+  if (JsonType* old = json_ptr; ShouldDefragment(page_usage)) {
+    json_ptr = AllocateMR<JsonType>(DeepCopyJSON(old, memory_resource()));
+    DeleteMR<JsonType>(old);
+    return true;
+  }
+  return false;
+}
+
+bool CompactObj::JsonConsT::ShouldDefragment(PageUsage* page_usage) const {
+  bool should_defragment = false;
+  json_ptr->compute_memory_size([&page_usage, &should_defragment](const void* p) {
+    should_defragment |= page_usage->IsPageForObjectUnderUtilized(const_cast<void*>(p));
+    return 0;
+  });
+  return should_defragment;
+}
+
+bool CompactObj::FlatJsonT::DefragIfNeeded(PageUsage* page_usage) {
+  if (uint8_t* old = flat_ptr; page_usage->IsPageForObjectUnderUtilized(old)) {
+    const uint32_t size = json_len;
+    flat_ptr = static_cast<uint8_t*>(tl.local_mr->allocate(size, kAlignSize));
+    memcpy(flat_ptr, old, size);
+    tl.local_mr->deallocate(old, size, kAlignSize);
+    return true;
+  }
+
+  return false;
+}
+
+bool CompactObj::JsonWrapper::DefragIfNeeded(PageUsage* page_usage) {
+  if (JsonEnconding() == kEncodingJsonCons) {
+    return cons.DefragIfNeeded(page_usage);
+  }
+
+  return flat.DefragIfNeeded(page_usage);
 }
 
 constexpr std::pair<CompactObjType, std::string_view> kObjTypeToString[8] = {
