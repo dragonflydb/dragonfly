@@ -1010,6 +1010,7 @@ SBF* CompactObj::GetSBF() const {
 }
 
 void CompactObj::SetString(std::string_view str, bool is_key) {
+  CHECK(!IsExternal());
   mask_bits_.encoding = NONE_ENC;
 
   // Trying auto-detection heuristics first.
@@ -1246,9 +1247,9 @@ std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
 void CompactObj::Materialize(std::string_view blob, bool is_raw) {
   CHECK(IsExternal()) << int(taglen_);
   DCHECK_EQ(u_.ext_ptr.representation, static_cast<uint8_t>(ExternalRep::STRING));
+  DCHECK_GT(blob.size(), kInlineLen);  // There are no mutable commands that shrink strings
 
   if (is_raw) {
-    DCHECK_GT(blob.size(), kInlineLen);
     if (kUseSmallStrings && SmallString::CanAllocate(blob.size())) {
       SetMeta(SMALL_TAG, mask_);
       tl.small_str_bytes += u_.small_str.Assign(blob);
@@ -1257,8 +1258,8 @@ void CompactObj::Materialize(std::string_view blob, bool is_raw) {
       u_.r_obj.SetString(blob, tl.local_mr);
     }
   } else {
-    SetMeta(SMALL_TAG, mask_);
-    SetString(blob, false);
+    mask_bits_.encoding = NONE_ENC;  // reset encoding
+    EncodeString(blob, false);
   }
 }
 

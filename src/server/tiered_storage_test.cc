@@ -67,6 +67,8 @@ class TieredStorageTest : public BaseFamilyTest {
 TEST_F(TieredStorageTest, SimpleGetSet) {
   absl::FlagSaver saver;
   SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // disable offloading
+  UpdateFromFlags();
+
   const int kMin = 256;
   const int kMax = tiering::kPageSize + 10;
 
@@ -122,16 +124,58 @@ TEST_F(TieredStorageTest, MGET) {
     EXPECT_EQ(elements[i], values[i]);
 }
 
-TEST_F(TieredStorageTest, SimpleAppend) {
-  // TODO: use pipelines to issue APPEND/GET/APPEND sequence,
-  // currently it's covered only for op_manager_test
-  for (size_t sleep : {0, 100, 500, 1000}) {
-    Run({"SET", "k0", BuildString(3000)});
-    if (sleep)
-      util::ThisFiber::SleepFor(sleep * 1us);
-    EXPECT_THAT(Run({"APPEND", "k0", "B"}), IntArg(3001));
-    ASSERT_EQ(Run({"GET", "k0"}), BuildString(3000) + 'B') << sleep;
+// Issue many APPEND commands to an offloaded value that are executed at once (with CLIENT PAUSE).
+// They should all finish within the same io completion loop.
+TEST_F(TieredStorageTest, AppendStorm) {
+  const size_t kAppends = 20;
+
+  absl::FlagSaver saver;
+  absl::SetFlag(&FLAGS_tiered_offload_threshold, 1.0);
+  absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);
+  absl::SetFlag(&FLAGS_tiered_experimental_cooling, false);
+  UpdateFromFlags();
+
+  // Offload single value
+  string base_value(4096, 'a');
+  Run({"SET", "key", base_value});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes == 1; });
+
+  // Accumulate APPENDs
+  Run({"CLIENT", "pause", "1000"});
+  vector<Fiber> fibs;
+  for (size_t i = 0; i < kAppends; i++) {
+    fibs.emplace_back(pp_->at(0)->LaunchFiber([this, i] {
+      Run(absl::StrCat(i), {"APPEND", "key", string(96, 'b')});
+    }));
   }
+
+  // Throw in a SETRANGE
+  fibs.emplace_back(pp_->at(0)->LaunchFiber([this] {
+    Run("range", {"SETRANGE", "key", "0", string(96, 'x')});
+  }));
+
+  // Throw in a GETRANGE to a range that keeps constant
+  string get_range;
+  fibs.emplace_back(pp_->at(0)->LaunchFiber([this, &get_range] {
+    get_range = Run("get", {"GETRANGE", "key", "96", "191"}).GetString();
+  }));
+
+  // Unlock and wait
+  Run({"CLIENT", "unpause"});
+  for (auto& f : fibs)
+    f.JoinIfNeeded();
+
+  // Check partial result is right
+  EXPECT_EQ(get_range, string(96, 'a'));
+
+  // Get value and verify it
+  auto value = Run({"GET", "key"});
+  EXPECT_EQ(value, string(96, 'x') + string(4000, 'a') + string(kAppends * 96, 'b'));
+
+  // Check value was read no more than once for APPENDs and once for GET
+  auto metrics = GetMetrics();
+  EXPECT_LE(metrics.tiered_stats.total_fetches, 2u);
+  EXPECT_LE(metrics.tiered_stats.total_uploads, 2u);
 }
 
 TEST_F(TieredStorageTest, Ranges) {
