@@ -596,7 +596,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
     return;
   }
 
-  sf_->service().cluster_family().ReconcileMasterReplicaTakeoverSlots(true);
+  sf_->service().cluster_family().ReconcileMasterSlots(replica_ptr->id);
 }
 
 void DflyCmd::Expire(CmdArgList args, Transaction* tx, RedisReplyBuilder* rb) {

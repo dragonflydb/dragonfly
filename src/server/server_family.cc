@@ -3764,7 +3764,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   LOG(INFO) << "Takeover successful, promoting this instance to master.";
 
   if (IsClusterEnabled()) {
-    service().cluster_family().ReconcileMasterReplicaTakeoverSlots(false);
+    service().cluster_family().ReconcileReplicaSlots();
   }
 
   last_master_data_ = replica_->Stop();
