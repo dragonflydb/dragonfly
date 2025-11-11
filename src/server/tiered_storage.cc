@@ -485,6 +485,7 @@ TieredStats TieredStorage::GetStats() const {
     stats.cold_storage_bytes = stats_.cool_memory_used;
     stats.total_offloading_steps = stats_.offloading_steps;
     stats.total_offloading_stashes = stats_.offloading_stashes;
+    stats.throttled_clients = stash_backpressure_.size();
   }
   return stats;
 }

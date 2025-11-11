@@ -3063,6 +3063,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("tiered_ram_hits", m.events.ram_hits);
     append("tiered_ram_cool_hits", m.events.ram_cool_hits);
     append("tiered_ram_misses", m.events.ram_misses);
+
+    append("tiered_clients_throttled", m.tiered_stats.throttled_clients);
   };
 
   auto add_persistence_info = [&] {
