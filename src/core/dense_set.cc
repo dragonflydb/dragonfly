@@ -27,6 +27,8 @@ constexpr size_t kMinSizeShift = 2;
 constexpr size_t kMinSize = 1 << kMinSizeShift;
 constexpr bool kAllowDisplacements = true;
 
+thread_local absl::InsecureBitGen tl_bit_gen;
+
 #define PREFETCH_READ(x) __builtin_prefetch(x, 0, 1)
 
 DenseSet::IteratorBase::IteratorBase(const DenseSet* owner, bool is_end)
@@ -677,10 +679,7 @@ DenseSet::ChainVectorIterator DenseSet::GetRandomChain() {
     return entries_.end();
   }
 
-  // Use thread-local generator to avoid construction overhead
-  thread_local absl::InsecureBitGen gen;
-
-  size_t offset = absl::Uniform<size_t>(gen, 0u, entries_.size());
+  size_t offset = absl::Uniform<size_t>(tl_bit_gen, 0u, entries_.size());
 
   // Start at random position and scan linearly with wrap-around
   auto it = entries_.begin() + offset;
@@ -707,8 +706,7 @@ DenseSet::IteratorBase DenseSet::GetRandomIterator() {
     return IteratorBase{};
 
   DensePtr* ptr = &*chain_it;
-  thread_local absl::InsecureBitGen bg{};
-  while (ptr->IsLink() && absl::Bernoulli(bg, 0.5)) {
+  while (ptr->IsLink() && absl::Bernoulli(tl_bit_gen, 0.5)) {
     DensePtr* next = ptr->Next();
     if (ExpireIfNeeded(ptr, next))  // stop if we break the chain with expiration
       break;
