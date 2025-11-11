@@ -174,7 +174,7 @@ class DbSlice {
       std::string_view key;
 
       // The following fields are calculated at init time
-      size_t orig_heap_size = 0;
+      size_t orig_value_heap_size = 0;
     };
 
     AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it, DbSlice* db_slice);
@@ -570,7 +570,7 @@ class DbSlice {
 
   // Clear tiered storage entries for the specified indices. Called during flushing some indices.
   void RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> indices,
-                                               const DbTableArray& db_arr);
+                                               const DbTableArray& db_arr) const;
 
   void PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& exp_it, DbTable* table);
 
