@@ -1255,8 +1255,7 @@ std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
 void CompactObj::Materialize(std::string_view blob, bool is_raw) {
   CHECK(IsExternal()) << int(taglen_);
   DCHECK_EQ(u_.ext_ptr.representation, static_cast<uint8_t>(ExternalRep::STRING));
-
-  DCHECK_GT(blob.size(), kInlineLen);
+  DCHECK_GT(blob.size(), kInlineLen);  // There are no mutable commands that shrink strings
 
   if (is_raw) {
     if (kUseSmallStrings && SmallString::CanAllocate(blob.size())) {
@@ -1267,6 +1266,7 @@ void CompactObj::Materialize(std::string_view blob, bool is_raw) {
       u_.r_obj.SetString(blob, tl.local_mr);
     }
   } else {
+    mask_bits_.encoding = NONE_ENC;  // reset encoding
     EncodeString(blob, false);
   }
 }
