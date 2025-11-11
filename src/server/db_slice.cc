@@ -483,9 +483,9 @@ DbSlice::AutoUpdater::~AutoUpdater() {
 }
 
 void DbSlice::AutoUpdater::ReduceHeapUsage() {
-  AccountObjectMemory(fields_.key, fields_.it->second.ObjType(), -fields_.orig_heap_size,
+  AccountObjectMemory(fields_.key, fields_.it->second.ObjType(), -fields_.orig_value_heap_size,
                       fields_.db_slice->GetDBTable(fields_.db_ind));
-  fields_.orig_heap_size = 0;  // Reset to avoid double accounting.
+  fields_.orig_value_heap_size = 0;  // Reset to avoid double accounting.
 }
 
 void DbSlice::AutoUpdater::Run() {
@@ -501,7 +501,7 @@ void DbSlice::AutoUpdater::Run() {
   CHECK_NE(fields_.db_slice, nullptr);
 
   ssize_t delta = static_cast<int64_t>(fields_.it->second.MallocUsed()) -
-                  static_cast<int64_t>(fields_.orig_heap_size);
+                  static_cast<int64_t>(fields_.orig_value_heap_size);
   AccountObjectMemory(fields_.key, fields_.it->second.ObjType(), delta,
                       fields_.db_slice->GetDBTable(fields_.db_ind));
   fields_.db_slice->PostUpdate(fields_.db_ind, fields_.key);
@@ -518,7 +518,7 @@ DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const It
               .db_ind = db_ind,
               .it = it,
               .key = key,
-              .orig_heap_size = it->second.MallocUsed()} {
+              .orig_value_heap_size = it->second.MallocUsed()} {
   DCHECK(IsValid(it));
 }
 
@@ -770,7 +770,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   if (it->first.IsInline()) {
     ++db.stats.inline_keys;
   } else {
-    AccountObjectMemory(key, it->first.ObjType(), it->first.MallocUsed(), &db);  // Account for key
+    AccountObjectMemory(key, OBJ_KEY, it->first.MallocUsed(), &db);  // Account for key
   }
 
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
@@ -1553,7 +1553,7 @@ void DbSlice::InvalidateSlotWatches(const cluster::SlotSet& slot_ids) {
 }
 
 void DbSlice::RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> indices,
-                                                      const DbTableArray& db_arr) {
+                                                      const DbTableArray& db_arr) const {
   // Currently being used only for tiered storage.
   TieredStorage* tiered_storage = shard_owner()->tiered_storage();
   string scratch;
@@ -1787,8 +1787,7 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
   if (del_it->first.IsInline()) {
     --stats.inline_keys;
   } else {
-    AccountObjectMemory(del_it.key(), del_it->first.ObjType(), -key_size_used,
-                        table);  // Key
+    AccountObjectMemory(del_it.key(), OBJ_KEY, -key_size_used, table);  // Key
   }
   AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
 

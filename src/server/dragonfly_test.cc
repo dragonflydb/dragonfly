@@ -953,6 +953,12 @@ TEST_F(DflyEngineTest, Huffman) {
   EXPECT_LT(metrics.heap_used_bytes, 14'000'000);         // less than 15mb
 }
 
+TEST_F(DflyEngineTest, MemoryKeys) {
+  Run({"debug", "populate", "10000", "abcd_efgh_ijkl_mnop", "10"});
+  auto metrics = GetMetrics();
+  EXPECT_GT(metrics.db_stats[0].memory_usage_by_type[OBJ_KEY], 100000);
+}
+
 class DflyCommandAliasTest : public DflyEngineTest {
  protected:
   DflyCommandAliasTest() {

@@ -294,7 +294,7 @@ class EngineShard {
   journal::Journal* journal_ = nullptr;
   IntentLock shard_lock_;
 
-  uint32_t defrag_task_ = 0;
+  uint32_t defrag_task_id_ = 0;
   EvictionTaskState eviction_state_;  // Used on eviction fiber
   util::fb2::Fiber fiber_heartbeat_periodic_;
   util::fb2::Done fiber_heartbeat_periodic_done_;

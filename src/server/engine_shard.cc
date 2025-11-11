@@ -346,7 +346,7 @@ void EngineShard::Shutdown() {
 }
 
 void EngineShard::StopPeriodicFiber() {
-  ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
+  ProactorBase::me()->RemoveOnIdleTask(defrag_task_id_);
   fiber_heartbeat_periodic_done_.Notify();
   if (fiber_heartbeat_periodic_.IsJoinable()) {
     fiber_heartbeat_periodic_.Join();
@@ -393,7 +393,7 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
   fiber_heartbeat_periodic_ = fb2::Fiber(fb_opts, [this, period_ms, heartbeat]() mutable {
     RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
   });
-  defrag_task_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
+  defrag_task_id_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
 }
 
 void EngineShard::StartPeriodicShardHandlerFiber(util::ProactorBase* pb,

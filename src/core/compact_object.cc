@@ -1660,10 +1660,12 @@ bool CompactObj::JsonWrapper::DefragIfNeeded(PageUsage* page_usage) {
   return flat.DefragIfNeeded(page_usage);
 }
 
-constexpr std::pair<CompactObjType, std::string_view> kObjTypeToString[8] = {
-    {OBJ_STRING, "string"sv},  {OBJ_LIST, "list"sv},    {OBJ_SET, "set"sv},
-    {OBJ_ZSET, "zset"sv},      {OBJ_HASH, "hash"sv},    {OBJ_STREAM, "stream"sv},
-    {OBJ_JSON, "ReJSON-RL"sv}, {OBJ_SBF, "MBbloom--"sv}};
+constexpr std::pair<CompactObjType, std::string_view> kObjTypeToString[] =
+    {
+        {OBJ_STRING, "string"sv},  {OBJ_LIST, "list"sv},    {OBJ_SET, "set"sv},
+        {OBJ_ZSET, "zset"sv},      {OBJ_HASH, "hash"sv},    {OBJ_STREAM, "stream"sv},
+        {OBJ_KEY, "key"sv},  // pseudo-type used for memory tracking
+        {OBJ_JSON, "ReJSON-RL"sv}, {OBJ_SBF, "MBbloom--"sv}};
 
 std::string_view ObjTypeToString(CompactObjType type) {
   for (auto& p : kObjTypeToString) {

@@ -9,6 +9,9 @@
 #define OBJ_JSON 15U
 #define OBJ_SBF  16U
 
+// A pseudo type for keys stored in the db, same as OBJ_MODULE which is not used in Dragonfly.
+#define OBJ_KEY  5U
+
 /* How many types of objects exist */
 #define OBJ_TYPE_MAX 17U
 
