@@ -677,30 +677,27 @@ DenseSet::ChainVectorIterator DenseSet::GetRandomChain() {
     return entries_.end();
   }
 
-  // Use thread-local generator to avoid repeated construction overhead
-  thread_local absl::BitGen gen;
+  // Use thread-local generator to avoid construction overhead
+  thread_local absl::InsecureBitGen gen;
 
-  // Try up to 32 random probes before falling back to linear scan
-  // Expected probes needed = 1 / utilization
-  // For 10% util, expected = 10 probes, so 32 gives good probability
-  constexpr int kMaxProbes = 32;
-  for (int probe = 0; probe < kMaxProbes; probe++) {
-    size_t idx = absl::Uniform<size_t>(gen, 0u, entries_.size());
-    auto it = entries_.begin() + idx;
-    ExpireIfNeeded(nullptr, &*it);
+  size_t offset = absl::Uniform<size_t>(gen, 0u, entries_.size());
+
+  // Start at random position and scan linearly with wrap-around
+  auto it = entries_.begin() + offset;
+  for (size_t n = 0; n < entries_.size(); n++) {
+    // Check IsEmpty first to avoid ExpireIfNeeded overhead on empty buckets
     if (!it->IsEmpty()) {
-      return it;
+      ExpireIfNeeded(nullptr, &*it);
+      if (!it->IsEmpty()) {
+        return it;
+      }
+    }
+
+    if (++it == entries_.end()) {
+      it = entries_.begin();
     }
   }
 
-  // Fallback or normal path: linear scan from random offset
-  size_t offset = absl::Uniform<size_t>(gen, 0u, entries_.size());
-  for (size_t i = offset; i < entries_.size() + offset; i++) {
-    auto it = entries_.begin() + (i % entries_.size());
-    ExpireIfNeeded(nullptr, &*it);
-    if (!it->IsEmpty())
-      return it;
-  }
   return entries_.end();
 }
 
@@ -710,7 +707,7 @@ DenseSet::IteratorBase DenseSet::GetRandomIterator() {
     return IteratorBase{};
 
   DensePtr* ptr = &*chain_it;
-  absl::BitGen bg{};
+  thread_local absl::InsecureBitGen bg{};
   while (ptr->IsLink() && absl::Bernoulli(bg, 0.5)) {
     DensePtr* next = ptr->Next();
     if (ExpireIfNeeded(ptr, next))  // stop if we break the chain with expiration
