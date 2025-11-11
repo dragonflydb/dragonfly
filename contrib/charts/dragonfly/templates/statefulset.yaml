@@ -23,6 +23,9 @@ spec:
         {{- end }}
       labels:
         {{- include "dragonfly.selectorLabels" . | nindent 8 }}
+        {{- if .Values.commonLabels }}
+        {{- include "dragonfly.commonLabels" . | trim | nindent 8 }}
+        {{- end }}
     spec:
       {{- include "dragonfly.pod" . | trim | nindent 6 }}
   volumeClaimTemplates:
