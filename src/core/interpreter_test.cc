@@ -493,7 +493,7 @@ TEST_F(InterpreterTest, ReplicateCommands) {
 TEST_F(InterpreterTest, Log) {
   EXPECT_FALSE(Execute(R"(redis.log('nonsense', 'nonsense'))"));
   EXPECT_THAT(error_, testing::HasSubstr("First argument must be a number (log level)."));
-  EXPECT_TRUE(Execute(R"(redis.log(0, 'warn'))"));
+  EXPECT_TRUE(Execute(R"(redis.log(redis.LOG_WARNING, 'warn'))"));
   EXPECT_EQ("nil", ser_.res);
   EXPECT_FALSE(Execute(R"(redis.log(4))"));
   EXPECT_THAT(error_, testing::HasSubstr("requires two arguments or more"));
