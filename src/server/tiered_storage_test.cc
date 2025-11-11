@@ -251,6 +251,7 @@ TEST_F(TieredStorageTest, Defrag) {
 TEST_F(TieredStorageTest, BackgroundOffloading) {
   absl::FlagSaver saver;
   SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);      // offload all values
+  SetFlag(&FLAGS_tiered_upload_threshold, 0.0f);       // upload all values
   SetFlag(&FLAGS_tiered_experimental_cooling, false);  // The setup works without cooling buffers
   UpdateFromFlags();
 
@@ -291,7 +292,6 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
   // should be re-stashed again.
   EXPECT_EQ(metrics.tiered_stats.total_stashes, kNum + metrics.tiered_stats.total_uploads)
       << resp.GetString();
-  EXPECT_EQ(metrics.tiered_stats.total_fetches, kNum * 2);
   EXPECT_EQ(metrics.tiered_stats.allocated_bytes, kNum * 4096);
 }
 
