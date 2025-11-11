@@ -27,6 +27,8 @@ constexpr size_t kMinSizeShift = 2;
 constexpr size_t kMinSize = 1 << kMinSizeShift;
 constexpr bool kAllowDisplacements = true;
 
+thread_local absl::InsecureBitGen tl_bit_gen;
+
 #define PREFETCH_READ(x) __builtin_prefetch(x, 0, 1)
 
 DenseSet::IteratorBase::IteratorBase(const DenseSet* owner, bool is_end)
@@ -673,13 +675,28 @@ void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
 }
 
 DenseSet::ChainVectorIterator DenseSet::GetRandomChain() {
-  size_t offset = absl::Uniform(absl::BitGen{}, 0u, entries_.size());
-  for (size_t i = offset; i < entries_.size() + offset; i++) {
-    auto it = entries_.begin() + (i % entries_.size());
-    ExpireIfNeeded(nullptr, &*it);
-    if (!it->IsEmpty())
-      return it;
+  if (entries_.empty() || size_ == 0) {
+    return entries_.end();
   }
+
+  size_t offset = absl::Uniform<size_t>(tl_bit_gen, 0u, entries_.size());
+
+  // Start at random position and scan linearly with wrap-around
+  auto it = entries_.begin() + offset;
+  for (size_t n = 0; n < entries_.size(); n++) {
+    // Check IsEmpty first to avoid ExpireIfNeeded overhead on empty buckets
+    if (!it->IsEmpty()) {
+      ExpireIfNeeded(nullptr, &*it);
+      if (!it->IsEmpty()) {
+        return it;
+      }
+    }
+
+    if (++it == entries_.end()) {
+      it = entries_.begin();
+    }
+  }
+
   return entries_.end();
 }
 
@@ -689,8 +706,7 @@ DenseSet::IteratorBase DenseSet::GetRandomIterator() {
     return IteratorBase{};
 
   DensePtr* ptr = &*chain_it;
-  absl::BitGen bg{};
-  while (ptr->IsLink() && absl::Bernoulli(bg, 0.5)) {
+  while (ptr->IsLink() && absl::Bernoulli(tl_bit_gen, 0.5)) {
     DensePtr* next = ptr->Next();
     if (ExpireIfNeeded(ptr, next))  // stop if we break the chain with expiration
       break;
