@@ -622,9 +622,9 @@ void EngineShard::Heartbeat() {
   }
   start = std::chrono::system_clock::now();
 
-  if (!IsReplica()) {  // Never run expiry/evictions on replica.
-    RetireExpiredAndEvict();
-  }
+  // if (!IsReplica()) {  // Never run expiry/evictions on replica.
+  RetireExpiredAndEvict();
+  //}
 
   if (tiered_storage_ && tiered_storage_->ShouldOffload()) {
     VLOG(1) << "Running Offloading, memory=" << db_slice.memory_budget()
