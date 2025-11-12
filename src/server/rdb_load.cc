@@ -2599,12 +2599,10 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
                         item->val.rdb_type);
   };
 
-  // Streamed big values are stored in a separate map. unique_ptr for pointer stability
-  thread_local std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_streamed;
   LoadConfig config_copy = item->load_config;
   if (item->load_config.streamed && item->load_config.append) {
-    if (auto it = now_streamed.find(item->key); it != now_streamed.end()) {
-      pv_ptr = &*now_streamed[item->key];
+    if (auto it = now_streamed_.find(item->key); it != now_streamed_.end()) {
+      pv_ptr = &*now_streamed_[item->key];
     } else {
       // Sets and hashes are deleted when all their entries are expired.
       // If it's the case, set reset append flag and start from scratch.
@@ -2637,18 +2635,18 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
     }
     LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
     stop_early_ = true;
-    now_streamed.clear();
+    now_streamed_.clear();
     return;
   }
 
   if (item->load_config.streamed) {
-    if (now_streamed.find(item->key) == now_streamed.end())
-      now_streamed.emplace(item->key, make_unique<PrimeValue>(std::move(pv)));
+    if (now_streamed_.find(item->key) == now_streamed_.end())
+      now_streamed_.emplace(item->key, make_unique<PrimeValue>(std::move(pv)));
 
     if (!item->load_config.finalize)
       return;
 
-    pv = std::move(*now_streamed.extract(item->key).mapped());
+    pv = std::move(*now_streamed_.extract(item->key).mapped());
   }
 
   // We need this extra check because we don't return empty_key
@@ -2678,7 +2676,8 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   }
 
   if (!override_existing_keys_ && !res.is_new) {
-    LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
+    LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind << " of type "
+                 << res.it->second.ObjType();
   }
 
   if (auto* ts = db_slice->shard_owner()->tiered_storage(); ts) {
