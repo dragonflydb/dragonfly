@@ -3442,3 +3442,37 @@ async def test_replica_takeover_moved(
     await m1.client.execute_command(f"replicaof localhost {r1.instance.port}")
     await check_all_replicas_finished([m1.client], r1.client)
     assert await m1.client.execute_command("GET newk") == "foo"
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
+    """
+    Create cluster of 3 nodes.
+    Send FT.CREATE to first node and check that index was created on all nodes.
+    """
+
+    instances = [
+        df_factory.create(port=next(next_port), admin_port=next(next_port), vmodule="coordinator=2")
+        for i in range(3)
+    ]
+
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 5259)]
+    nodes[1].slots = [(5260, 10519)]
+    nodes[2].slots = [(10520, 16383)]
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    assert (
+        await nodes[0].client.execute_command(
+            "FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT"
+        )
+        == "OK"
+    )
+
+    await asyncio.sleep(3)
+    assert await nodes[0].client.execute_command("ft._list") == ["idx"]
+    assert await nodes[1].client.execute_command("ft._list") == ["idx"]
+    assert await nodes[2].client.execute_command("ft._list") == ["idx"]
