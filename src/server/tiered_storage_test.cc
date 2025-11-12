@@ -76,9 +76,11 @@ class LatentCoolingTSTest : public TieredStorageTest, public testing::WithParamI
 
 INSTANTIATE_TEST_SUITE_P(TS, LatentCoolingTSTest, testing::Values(true, false));
 
-class NoCoolingTSTest : public TieredStorageTest {
+// Disabled cooling and all values are offloaded
+class PureDiskTSTest : public TieredStorageTest {
   void SetUp() override {
     fs.emplace();
+    SetFlag(&FLAGS_tiered_offload_threshold, 1.0);
     SetFlag(&FLAGS_tiered_experimental_cooling, false);
     TieredStorageTest::SetUp();
   }
@@ -275,11 +277,9 @@ TEST_F(TieredStorageTest, Defrag) {
   EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
 }
 
-TEST_F(TieredStorageTest, BackgroundOffloading) {
+TEST_F(PureDiskTSTest, BackgroundOffloading) {
   absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);      // offload all values
-  SetFlag(&FLAGS_tiered_upload_threshold, 0.0f);       // upload all values
-  SetFlag(&FLAGS_tiered_experimental_cooling, false);  // The setup works without cooling buffers
+  SetFlag(&FLAGS_tiered_upload_threshold, 0.0f);  // upload all values
   UpdateFromFlags();
 
   const int kNum = 500;
@@ -323,18 +323,7 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
 }
 
 // Test FLUSHALL while reading entries
-TEST_F(TieredStorageTest, FlushAll) {
-  absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // offload all values
-
-  // We want to cover the interaction of FlushAll with concurrent reads from disk.
-  // For that we disable tiered_experimental_cooling.
-  // TODO: seems that our replacement policy will upload the entries to RAM in any case,
-  // making this test ineffective. We should add the ability to disable promotion of offloaded
-  // entries to RAM upon reads.
-  SetFlag(&FLAGS_tiered_experimental_cooling, false);
-  UpdateFromFlags();
-
+TEST_F(PureDiskTSTest, FlushAll) {
   const int kNum = 500;
   for (size_t i = 0; i < kNum; i++) {
     Run({"SET", absl::StrCat("k", i), BuildString(3000)});
@@ -389,10 +378,9 @@ TEST_F(TieredStorageTest, FlushPending) {
 
 // Test that clients are throttled if many stashes are issued.
 // Stashes are released with CLIENT UNPAUSE to occur at the same time
-TEST_F(NoCoolingTSTest, ThrottleClients) {
+TEST_F(PureDiskTSTest, ThrottleClients) {
   max_memory_limit = 20_MB;
   absl::FlagSaver saver;
-  absl::SetFlag(&FLAGS_tiered_offload_threshold, 1.0);
   absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);
   UpdateFromFlags();
 
@@ -432,11 +420,7 @@ TEST_F(TieredStorageTest, Expiry) {
   EXPECT_EQ(resp, val);
 }
 
-TEST_F(TieredStorageTest, SetExistingExpire) {
-  absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // offload all values
-  SetFlag(&FLAGS_tiered_experimental_cooling, false);
-
+TEST_F(PureDiskTSTest, SetExistingExpire) {
   const int kNum = 20;
   for (size_t i = 0; i < kNum; i++) {
     Run({"SETEX", absl::StrCat("k", i), "100", BuildString(256)});
@@ -453,13 +437,7 @@ TEST_F(TieredStorageTest, SetExistingExpire) {
   }
 }
 
-TEST_F(TieredStorageTest, Dump) {
-  absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // offload all values
-
-  // we want to test without cooling to trigger disk I/O on reads.
-  SetFlag(&FLAGS_tiered_experimental_cooling, false);
-
+TEST_F(PureDiskTSTest, Dump) {
   const int kNum = 10;
   for (size_t i = 0; i < kNum; i++) {
     Run({"SET", absl::StrCat("k", i), BuildString(3000)});  // big enough to trigger offloading.
