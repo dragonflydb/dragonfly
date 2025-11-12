@@ -35,6 +35,7 @@ ABSL_DECLARE_FLAG(int32, list_max_listpack_size);
 ABSL_DECLARE_FLAG(dfly::CompressionMode, compression_mode);
 ABSL_DECLARE_FLAG(bool, rdb_ignore_expiry);
 ABSL_DECLARE_FLAG(uint32_t, num_shards);
+ABSL_DECLARE_FLAG(bool, rdb_sbf_chunked);
 
 namespace dfly {
 
@@ -668,6 +669,34 @@ TEST_F(RdbTest, SBF) {
   Run({"debug", "reload"});
   EXPECT_EQ(Run({"type", "k"}), "MBbloom--");
   EXPECT_THAT(Run({"BF.EXISTS", "k", "1"}), IntArg(1));
+}
+
+TEST_F(RdbTest, SBFLargeFilterChunking) {
+  absl::SetFlag(&FLAGS_rdb_sbf_chunked, true);
+  max_memory_limit = 200000000;
+
+  // Using this set of parameters for the BF.RESERVE command resulted in a
+  // filter size large enough to require chunking (> 64 MB).
+  const double error_rate = 0.001;
+  const size_t capacity = 50'000'000;
+  const size_t num_items = 100;
+
+  size_t collisions = 0;
+
+  Run({"BF.RESERVE", "large_key", std::to_string(error_rate), std::to_string(capacity)});
+  for (size_t i = 0; i < num_items; i++) {
+    auto res = Run({"BF.ADD", "large_key", absl::StrCat("item", i)});
+    if (*res.GetInt() == 0)
+      collisions++;
+  }
+  EXPECT_LT(static_cast<double>(collisions) / num_items, error_rate);
+
+  Run({"debug", "reload"});
+  EXPECT_EQ(Run({"type", "large_key"}), "MBbloom--");
+
+  for (size_t i = 0; i < num_items; i++) {
+    EXPECT_THAT(Run({"BF.EXISTS", "large_key", absl::StrCat("item", i)}), IntArg(1));
+  }
 }
 
 TEST_F(RdbTest, RestoreSearchIndexNameStartingWithColon) {

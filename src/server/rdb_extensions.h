@@ -13,11 +13,12 @@ constexpr uint8_t RDB_TYPE_JSON = 30;
 constexpr uint8_t RDB_TYPE_HASH_WITH_EXPIRY = 31;
 constexpr uint8_t RDB_TYPE_SET_WITH_EXPIRY = 32;
 constexpr uint8_t RDB_TYPE_SBF = 33;
+constexpr uint8_t RDB_TYPE_SBF2 = 34;
 
 constexpr bool rdbIsObjectTypeDF(uint8_t type) {
   return __rdbIsObjectType(type) || (type == RDB_TYPE_JSON) ||
          (type == RDB_TYPE_HASH_WITH_EXPIRY) || (type == RDB_TYPE_SET_WITH_EXPIRY) ||
-         (type == RDB_TYPE_SBF);
+         (type == RDB_TYPE_SBF) || (type == RDB_TYPE_SBF2);
 }
 
 //  Opcodes: Range 200-240 is used by DF extensions.
