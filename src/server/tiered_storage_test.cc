@@ -379,7 +379,6 @@ TEST_F(TieredStorageTest, FlushPending) {
 // Test that clients are throttled if many stashes are issued.
 // Stashes are released with CLIENT UNPAUSE to occur at the same time
 TEST_F(PureDiskTSTest, ThrottleClients) {
-  max_memory_limit = 20_MB;
   absl::FlagSaver saver;
   absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);
   UpdateFromFlags();
@@ -407,8 +406,10 @@ TEST_F(PureDiskTSTest, ThrottleClients) {
   for (auto& fib : fibs)
     fib.JoinIfNeeded();
 
-  metrics = GetMetrics();
-  EXPECT_EQ(metrics.tiered_stats.total_stashes, fibs.size());
+  // Because of the 5ms max wait time for backpressure, we can't rely on the stashes to have
+  // finished even after all the fibers joined, so expect the condition with a timeout
+  ExpectConditionWithinTimeout(
+      [&] { return GetMetrics().tiered_stats.total_stashes == fibs.size(); });
 }
 
 TEST_F(TieredStorageTest, Expiry) {
