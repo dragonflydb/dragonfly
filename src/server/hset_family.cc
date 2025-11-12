@@ -178,7 +178,7 @@ template <typename T> OpResult<T> Unwrap(OpResult<CbVariant<T>> result) {
 }
 
 // Execute callback on generic HMapWrap, possibly on offloaded value and waiting for result
-template <typename F, typename T = std::invoke_result_t<F, HMapWrap>::Type>
+template <typename F, typename T = typename std::invoke_result_t<F, HMapWrap>::Type>
 OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
   auto shard_cb = [f = std::forward<F>(f)](Transaction* t,
                                            EngineShard* es) -> OpResult<CbVariant<T>> {

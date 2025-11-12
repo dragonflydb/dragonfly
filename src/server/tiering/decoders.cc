@@ -69,7 +69,11 @@ std::unique_ptr<Decoder> SerializedMapDecoder::Clone() const {
 
 void SerializedMapDecoder::Initialize(std::string_view slice) {
   map_ = std::make_unique<SerializedMap>(slice);
-  estimated_mem_usage = slice.size() + map_->size() * 8 /* bytes per ptr */;
+}
+
+Decoder::UploadMetrics SerializedMapDecoder::GetMetrics() const {
+  return UploadMetrics{.modified = false,
+                       .estimated_mem_usage = map_->DataBytes() + map_->size() * 2 * 8};
 }
 
 void SerializedMapDecoder::Upload(CompactObj* obj) {

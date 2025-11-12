@@ -48,6 +48,10 @@ size_t SerializedMap::size() const {
   return size_;
 }
 
+size_t SerializedMap::DataBytes() const {
+  return slice_.size() - 4 - size() * 2 * 4;
+}
+
 constexpr size_t kLenBytes = 4;
 
 size_t SerializedMap::SerializeSize(Input input) {
