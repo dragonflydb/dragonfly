@@ -67,6 +67,11 @@ jobs:
     container:
       image: ghcr.io/romange/${{ matrix.container }}
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      # Some tests which launch their own containers need a mounted volume to write through files
+      # into child containers
+      volumes:
+        - /mnt:/mnt
+
     steps:
     - uses: actions/checkout@v5
       with:
