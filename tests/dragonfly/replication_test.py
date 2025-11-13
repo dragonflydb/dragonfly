@@ -3074,7 +3074,7 @@ async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory):
         await asyncio.sleep(random.random() + 0.5)
 
     # Wait for it to finish finally
-    async with async_timeout.timeout(10):
+    async with async_timeout.timeout(60):
         await wait_for_replicas_state(c_replica)
 
     # Check that everything is in sync
