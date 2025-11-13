@@ -12,7 +12,6 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/facade_types.h"
-#include "io/io.h"
 #include "util/fibers/uring_file.h"
 
 using facade::operator""_MB;
@@ -88,25 +87,13 @@ bool DiskBackedQueue::HasEnoughBackingSpaceFor(size_t bytes) const {
 }
 
 std::error_code DiskBackedQueue::Push(std::string_view blob) {
-  // TODO we should truncate as the file grows. That way we never end up with large files
-  // on disk.
-  uint32_t sz = blob.size();
-  // We serialize the string as is and we prefix with 4 bytes denoting its size. The layout is:
-  // 4bytes(str size) + followed by blob.size() bytes
-  iovec offset_data[2]{{&sz, sizeof(uint32_t)}, {const_cast<char*>(blob.data()), blob.size()}};
-
-  auto ec = writer_->Write(offset_data, 2);
+  auto ec = writer_->Write(blob);
   if (ec) {
-    VLOG(2) << "Failed to offload blob of size " << sz << " to backing with error: " << ec;
+    VLOG(2) << "Failed to offload blob of size " << blob.size() << " to backing with error: " << ec;
     return ec;
   }
 
   total_backing_bytes_ += blob.size();
-  ++total_backing_items_;
-
-  if (next_item_total_bytes_ == 0) {
-    next_item_total_bytes_ = blob.size();
-  }
 
   VLOG(2) << "Offload connection " << this << " backpressure of " << blob.size();
   VLOG(3) << "Command offloaded: " << blob;
@@ -114,39 +101,24 @@ std::error_code DiskBackedQueue::Push(std::string_view blob) {
 }
 
 std::error_code DiskBackedQueue::Pop(std::string* out) {
-  // We read the next item and (if there are more) we also prefetch the next item's size.
-  uint32_t read_sz = next_item_total_bytes_ + (total_backing_items_ > 1 ? sizeof(uint32_t) : 0);
-  buffer.resize(read_sz);
+  const size_t k_read_size = 4096;
+  const size_t to_read = std::min(k_read_size, total_backing_bytes_);
+  out->resize(to_read);
 
-  io::MutableBytes bytes{reinterpret_cast<uint8_t*>(buffer.data()), read_sz};
+  io::MutableBytes bytes{reinterpret_cast<uint8_t*>(out->data()), to_read};
   auto result = reader_->Read(next_read_offset_, bytes);
   if (!result) {
-    LOG(ERROR) << "Could not load item at offset " << next_read_offset_ << " of size " << read_sz
+    LOG(ERROR) << "Could not load item at offset " << next_read_offset_ << " of size " << to_read
                << " from disk with error: " << result.error().value() << " "
                << result.error().message();
     return result.error();
   }
 
-  VLOG(2) << "Loaded item with offset " << next_read_offset_ << " of size " << read_sz
+  VLOG(2) << "Loaded item with offset " << next_read_offset_ << " of size " << to_read
           << " for connection " << this;
 
   next_read_offset_ += bytes.size();
-
-  if (total_backing_items_ > 1) {
-    auto buf = bytes.subspan(bytes.size() - sizeof(uint32_t));
-    uint32_t val = ((uint32_t)buf[0]) | ((uint32_t)buf[1] << 8) | ((uint32_t)buf[2] << 16) |
-                   ((uint32_t)buf[3] << 24);
-    bytes = bytes.subspan(0, next_item_total_bytes_);
-    next_item_total_bytes_ = val;
-  } else {
-    next_item_total_bytes_ = 0;
-  }
-
-  std::string read(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-  *out = std::move(read);
-
-  total_backing_bytes_ -= next_item_total_bytes_;
-  --total_backing_items_;
+  total_backing_bytes_ -= bytes.size();
 
   return {};
 }

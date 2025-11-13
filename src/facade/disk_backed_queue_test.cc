@@ -34,26 +34,24 @@ TEST(DiskBackedQueueTest, ReadWrite) {
     DiskBackedQueue backing(1 /* id */);
     EXPECT_FALSE(backing.Init());
 
-    std::vector<std::string> commands;
+    std::string commands;
     for (size_t i = 0; i < 100; ++i) {
-      commands.push_back(absl::StrCat("SET FOO", i, " BAR"));
-      auto ec = backing.Push(commands.back());
-      EXPECT_FALSE(ec);
+      auto cmd = absl::StrCat("SET FOO", i, " BAR");
+      EXPECT_FALSE(backing.Push(cmd));
+      absl::StrAppend(&commands, cmd);
     }
 
-    std::vector<std::string> results;
-    for (size_t i = 0; i < 100; ++i) {
+    std::string results;
+    while (!backing.Empty()) {
       std::string res;
       auto ec = backing.Pop(&res);
       EXPECT_FALSE(ec);
-      results.push_back(std::move(res));
+      absl::StrAppend(&results, res);
     }
 
     EXPECT_EQ(results.size(), commands.size());
+    EXPECT_EQ(results, commands);
 
-    for (size_t i = 0; i < results.size(); ++i) {
-      EXPECT_EQ(results[i], commands[i]);
-    }
     EXPECT_FALSE(backing.CloseReader());
     EXPECT_FALSE(backing.CloseWriter());
   });

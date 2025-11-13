@@ -4,15 +4,12 @@
 
 #pragma once
 
-#include <util/fibers/uring_file.h>
+#include <io/file.h>
 
-#include <deque>
 #include <functional>
 #include <memory>
 #include <string_view>
 #include <system_error>
-
-#include "io/io.h"
 
 namespace facade {
 
@@ -44,8 +41,7 @@ class DiskBackedQueue {
   size_t total_backing_bytes_ = 0;
   size_t total_backing_items_ = 0;
 
-  size_t next_read_offset_ = 4;
-  size_t next_item_total_bytes_ = 0;
+  size_t next_read_offset_ = 0;
 
   // Read only constants
   const size_t max_backing_size_ = 0;
