@@ -3053,6 +3053,41 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     await fill_task
 
 
+@pytest.mark.opt_only
+@dfly_args({"proactor_threads": 2, "serialization_max_chunk_size": 5000, "compression_mode": "0"})
+async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory):
+    """
+    Restart replicating instance with huge values. Tests that interrupting the streaming process doesn't hinder retrying replication
+    """
+
+    master, replica = df_factory.create(), df_factory.create(proactor_threads=1)
+    df_factory.start_all([master, replica])
+    c_master, c_replica = master.client(), replica.client()
+
+    # Create huge values
+    await c_master.execute_command(
+        "debug", "populate", "2", "test", "1000", "rand", "type", "zset", "elements", "1000000"
+    )
+
+    # Restart replication a few times
+    for _ in range(3):
+        assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        await asyncio.sleep(random.random() + 0.5)
+
+    # Wait for it to finish finally
+    async with async_timeout.timeout(60):
+        await wait_for_replicas_state(c_replica)
+
+    # Check that everything is in sync
+    hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master, c_replica]))
+    assert len(set(hashes)) == 1
+
+    # No in-between errors occured
+    replica.stop()
+    lines = replica.find_in_logs("Duplicate zset fields detected")
+    assert len(lines) == 0
+
+
 async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyInstanceFactory):
     proactors = 4
     master = df_factory.create(proactor_threads=proactors, dbfilename="")
