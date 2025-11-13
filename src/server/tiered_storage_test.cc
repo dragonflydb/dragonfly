@@ -400,8 +400,10 @@ TEST_F(PureDiskTSTest, ThrottleClients) {
   Run({"CLIENT", "UNPAUSE"});
 
   // Check if at least some of the clients were caugth throttling
+  // but we provided backpressure for all of them
   auto metrics = GetMetrics();
-  EXPECT_GT(metrics.tiered_stats.throttled_clients, fibs.size() / 10);
+  EXPECT_GT(metrics.tiered_stats.clients_throttled, fibs.size() / 10);
+  EXPECT_EQ(metrics.tiered_stats.total_clients_throttled, fibs.size());
 
   for (auto& fib : fibs)
     fib.JoinIfNeeded();
