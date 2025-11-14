@@ -1065,8 +1065,6 @@ io::Result<bool> Connection::CheckForHttpProto() {
 void Connection::ConnectionFlow() {
   DCHECK(reply_builder_);
 
-  ConfigureProvidedBuffer();
-
   IncrNumConns();
   ++stats_->conn_received_cnt;
   stats_->read_buf_capacity += io_buf_.Capacity();
@@ -1222,7 +1220,9 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
 
   auto dispatch_async = [this]() -> MessageHandle { return {FromArgs(tmp_parse_args_)}; };
 
-  ReadBuffer read_buffer = GetReadBuffer();
+  ReadBuffer read_buffer;
+  read_buffer.slice = io_buf_.InputBuffer();
+  read_buffer.available_bytes = io_buf_.InputLen();
 
   do {
     if (read_buffer.ShouldAdvance()) {  // can happen only with io_uring/bundles
@@ -1271,7 +1271,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
   } while (RedisParser::OK == result && read_buffer.available_bytes > 0 &&
            !reply_builder_->GetError());
 
-  MarkReadBufferConsumed();
+  io_buf_.ConsumeInput(io_buf_.InputLen());
 
   parser_error_ = result;
   if (result == RedisParser::OK)
@@ -1414,37 +1414,20 @@ void Connection::HandleMigrateRequest() {
 error_code Connection::HandleRecvSocket() {
   phase_ = READ_SOCKET;
 
-  // We can use provided buffers only after we emptied io_buf_.
-  if (recv_provided_ && io_buf_.InputBuffer().empty()) {
-    stats_->num_recv_provided_calls++;
+  io::MutableBytes append_buf = io_buf_.AppendBuffer();
+  DCHECK(!append_buf.empty());
+  ::io::Result<size_t> recv_sz = socket_->Recv(append_buf);
+  last_interaction_ = time(nullptr);
 
-    unsigned res = socket_->RecvProvided(1, &recv_buf_);
-    CHECK_EQ(res, 1u);
-    if (recv_buf_.res_len < 0) {
-      return error_code{-recv_buf_.res_len, system_category()};
-    }
-
-    CHECK_EQ(recv_buf_.type, FiberSocketBase::kBufRingType);  // We only support this type.
-    CHECK_GT(recv_buf_.res_len, 0);
-
-    stats_->io_read_bytes += recv_buf_.res_len;
-    local_stats_.net_bytes_in += recv_buf_.res_len;
-  } else {
-    io::MutableBytes append_buf = io_buf_.AppendBuffer();
-    DCHECK(!append_buf.empty());
-    ::io::Result<size_t> recv_sz = socket_->Recv(append_buf);
-    last_interaction_ = time(nullptr);
-
-    if (!recv_sz) {
-      return recv_sz.error();
-    }
-
-    size_t commit_sz = *recv_sz;
-    io_buf_.CommitWrite(commit_sz);
-
-    stats_->io_read_bytes += commit_sz;
-    local_stats_.net_bytes_in += commit_sz;
+  if (!recv_sz) {
+    return recv_sz.error();
   }
+
+  size_t commit_sz = *recv_sz;
+  io_buf_.CommitWrite(commit_sz);
+
+  stats_->io_read_bytes += commit_sz;
+  local_stats_.net_bytes_in += commit_sz;
 
   ++stats_->io_read_cnt;
   ++local_stats_.read_cnt;
@@ -2082,43 +2065,6 @@ void Connection::BreakOnce(uint32_t ev_mask) {
   }
 }
 
-void Connection::ConfigureProvidedBuffer() {
-  // Provided buffers are supported by IOURING.
-  // We currently support them for TCP sockets only.
-  if (socket_->proactor()->GetKind() == ProactorBase::IOURING && !is_tls_) {
-#ifdef __linux__
-    auto* up = static_cast<fb2::UringProactor*>(socket_->proactor());
-
-    // If bufring is enabled, configure the socket to use it.
-    recv_provided_ = up->BufRingEntrySize(kRecvSockGid) > 0;
-    if (recv_provided_) {
-      auto* us = static_cast<fb2::UringSocket*>(socket_.get());
-      us->set_bufring_id(kRecvSockGid);
-      us->EnableRecvMultishot();
-    }
-#endif
-  }
-}
-
-auto Connection::GetReadBuffer() -> ReadBuffer {
-  bool use_recv_buf = recv_provided_ && recv_buf_.res_len > 0;
-  ReadBuffer res;
-
-  if (use_recv_buf) {
-    uint8_t* src = nullptr;
-#ifdef __linux__
-    fb2::UringProactor* up = static_cast<fb2::UringProactor*>(socket_->proactor());
-    src = up->GetBufRingPtr(kRecvSockGid, recv_buf_.buf_id);
-#endif
-    res.available_bytes = recv_buf_.res_len;
-    res.slice = {src, std::min<size_t>(kRecvBufSize, res.available_bytes)};
-  } else {
-    res.slice = io_buf_.InputBuffer();
-    res.available_bytes = io_buf_.InputLen();
-  }
-  return res;
-}
-
 io::Bytes Connection::NextBundleBuffer(size_t total_len) {
   ++recv_buf_.buf_pos;
   io::Bytes res;
@@ -2130,16 +2076,6 @@ io::Bytes Connection::NextBundleBuffer(size_t total_len) {
 #endif
 
   return res;
-}
-
-void Connection::MarkReadBufferConsumed() {
-  bool use_recv_buf = recv_provided_ && recv_buf_.res_len > 0;
-  if (use_recv_buf) {
-    socket_->ReturnProvided(recv_buf_);
-    recv_buf_.res_len = 0;
-  } else {
-    io_buf_.ConsumeInput(io_buf_.InputLen());
-  }
 }
 
 void Connection::IncrNumConns() {

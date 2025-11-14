@@ -399,8 +399,6 @@ class Connection : public util::Connection {
   void DecreaseStatsOnClose();
   void BreakOnce(uint32_t ev_mask);
 
-  void ConfigureProvidedBuffer();
-
   // The read buffer with read data that needs to be parsed and processed.
   // For io_uring bundles we may have available_bytes larger than slice.size()
   // which means that there are more buffers available to read.
@@ -418,9 +416,7 @@ class Connection : public util::Connection {
     }
   };
 
-  ReadBuffer GetReadBuffer();
   io::Bytes NextBundleBuffer(size_t total_len);
-  void MarkReadBufferConsumed();
 
   void IncrNumConns();
   void DecrNumConns();
@@ -498,7 +494,6 @@ class Connection : public util::Connection {
       // whether the connection is TLS. We can be sure our socket is TlsSocket
       // if the flag is set.
       bool is_tls_ : 1;
-      bool recv_provided_ : 1;
       bool is_main_ : 1;
     };
   };
