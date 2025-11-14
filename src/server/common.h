@@ -93,6 +93,9 @@ struct TieredStats {
   size_t small_bins_filling_bytes = 0;
   size_t cold_storage_bytes = 0;
 
+  uint64_t clients_throttled = 0;        // current number of throttled clients
+  uint64_t total_clients_throttled = 0;  // total number of throttles
+
   TieredStats& operator+=(const TieredStats&);
 };
 

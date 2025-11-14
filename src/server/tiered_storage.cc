@@ -413,8 +413,10 @@ std::optional<util::fb2::Future<bool>> TieredStorage::TryStash(DbIndex dbid, str
   }
 
   // If we are in the active offloading phase, throttle stashes by providing backpressure future
-  if (provide_bp && ShouldOffload())
+  if (provide_bp && ShouldOffload()) {
+    stats_.total_clients_throttled++;
     return stash_backpressure_[{dbid, string{key}}];
+  }
 
   return {};
 }
@@ -485,6 +487,8 @@ TieredStats TieredStorage::GetStats() const {
     stats.cold_storage_bytes = stats_.cool_memory_used;
     stats.total_offloading_steps = stats_.offloading_steps;
     stats.total_offloading_stashes = stats_.offloading_stashes;
+    stats.clients_throttled = stash_backpressure_.size();
+    stats.total_clients_throttled = stats_.total_clients_throttled;
   }
   return stats;
 }
