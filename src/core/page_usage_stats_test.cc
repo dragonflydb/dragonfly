@@ -190,17 +190,31 @@ TEST_F(PageUsageStatsTest, JSONCons) {
   // still fail. This is because freeing the compact object code path takes the wrong branch based
   // on encoding. The flat encoding was tested manually adjusting this same test with changed
   // encoding.
-  std::string_view data{R"#({"data": "some", "count": 1, "checked": false})#"};
+  std::string data = R"({"contents":[)";
+  for (size_t i = 0; i < 1000; ++i) {
+    const auto si = std::to_string(i);
+    data += R"({"id":)" + si + R"(,"class":"v___)" + si + R"("})";
+    if (i < 999) {
+      data += ",";
+    }
+  }
+  data += R"(], "data": "some", "count": 1, "checked": false})";
+
+  auto* mr = static_cast<MiMemoryResource*>(CompactObj::memory_resource());
+  size_t before = mr->used();
 
   auto parsed = ParseJsonUsingShardHeap(data);
   EXPECT_TRUE(parsed.has_value());
 
   c_obj_.SetJson(std::move(parsed.value()));
+  c_obj_.SetJsonSize(mr->used() - before);
+  EXPECT_GT(c_obj_.MallocUsed(), 0);
 
   PageUsage p{CollectPageStats::YES, 0.1};
   p.SetForceReallocate(true);
 
   c_obj_.DefragIfNeeded(&p);
+  EXPECT_GT(c_obj_.MallocUsed(), 0);
 
   const auto stats = p.CollectedStats();
   EXPECT_GT(stats.pages_scanned, 0);
