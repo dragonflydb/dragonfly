@@ -351,14 +351,20 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect
   uint64_t attempts = 0;
 
   PageUsage page_usage{collect_page_stats, threshold};
+  DbTable* db_table = slice.GetDBTable(defrag_state_.dbid);
   do {
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       // for each value check whether we should move it because it
       // seats on underutilized page of memory, and if so, do it.
-      bool did = it->second.DefragIfNeeded(&page_usage);
+      const ssize_t original_size = it->second.MallocUsed();
+      const bool did = it->second.DefragIfNeeded(&page_usage);
       attempts++;
       if (did) {
         reallocations++;
+        if (const ssize_t delta = it->second.MallocUsed() - original_size;
+            delta != 0 && db_table != nullptr) {
+          db_table->stats.AddTypeMemoryUsage(it->second.ObjType(), delta);
+        }
       }
     });
     traverses_count++;
