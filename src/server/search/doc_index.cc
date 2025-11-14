@@ -422,7 +422,12 @@ vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, 
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
                                    search::SearchAlgorithm* search_algo) const {
   size_t limit = params.limit_offset + params.limit_total;
-  auto result = search_algo->Search(&*indices_);
+
+  // If we don't sort the documents, we don't need to copy more ids than are requested
+  bool can_cut = !params.sort_option && !search_algo->GetKnnScoreSortOption();
+  size_t id_cutoff_limit = can_cut ? limit : numeric_limits<size_t>::max();
+
+  auto result = search_algo->Search(&*indices_, id_cutoff_limit);
   if (!result.error.empty())
     return {facade::ErrorReply(std::move(result.error))};
 

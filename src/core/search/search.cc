@@ -289,7 +289,7 @@ struct BasicSearch {
 
   // negate -(*subquery*): explicitly compute result complement. Needs further optimizations
   IndexResult Search(const AstNegateNode& node, string_view active_field) {
-    vector<DocId> matched = SearchGeneric(*node.node, active_field).Take();
+    auto matched = SearchGeneric(*node.node, active_field).Take().first;
     vector<DocId> all = indices_->GetAllDocs();
 
     // To negate a result, we have to find the complement of matched to all documents,
@@ -358,7 +358,7 @@ struct BasicSearch {
       knn_distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime);
     else
       knn_distances_ =
-          vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime, sub_results.Take());
+          vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime, sub_results.Take().first);
   }
 
   // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`
@@ -410,7 +410,6 @@ struct BasicSearch {
 
     // Top level results don't need to be sorted, because they will be scored, sorted by fields or
     // used by knn
-
     DCHECK(top_level || holds_alternative<AstKnnNode>(node.Variant()) ||
            holds_alternative<AstGeoNode>(node.Variant()) ||
            visit([](auto* set) { return is_sorted(set->begin(), set->end()); }, result.Borrowed()));
@@ -421,16 +420,15 @@ struct BasicSearch {
     return result;
   }
 
-  SearchResult Search(const AstNode& query) {
+  SearchResult Search(const AstNode& query, size_t cuttoff_limit) {
     IndexResult result = SearchGeneric(query, "", true);
 
     // Extract profile if enabled
     optional<AlgorithmProfile> profile =
         profile_builder_ ? make_optional(profile_builder_->Take()) : nullopt;
 
-    auto out = result.Take();
-    const size_t total = out.size();
-    return SearchResult{total, std::move(out), std::move(knn_scores_), std::move(profile),
+    auto [out, total_size] = result.Take(cuttoff_limit);
+    return SearchResult{total_size, std::move(out), std::move(knn_scores_), std::move(profile),
                         std::move(error_)};
   }
 
@@ -659,11 +657,11 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params,
   return true;
 }
 
-SearchResult SearchAlgorithm::Search(const FieldIndices* index) const {
+SearchResult SearchAlgorithm::Search(const FieldIndices* index, size_t cuttoff_limit) const {
   auto bs = BasicSearch{index};
   if (profiling_enabled_)
     bs.EnableProfiling();
-  return bs.Search(*query_);
+  return bs.Search(*query_, cuttoff_limit);
 }
 
 optional<KnnScoreSortOption> SearchAlgorithm::GetKnnScoreSortOption() const {
