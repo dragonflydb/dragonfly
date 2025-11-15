@@ -1,4 +1,4 @@
-{{- if not .Values.storage.enabled }}
+{{- if and (not .Values.storage.enabled) (eq .Values.mode "deployment") }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

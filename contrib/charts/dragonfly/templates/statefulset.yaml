@@ -1,4 +1,4 @@
-{{- if .Values.storage.enabled }}
+{{- if or (.Values.storage.enabled) (eq .Values.mode "statefulset") }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -25,6 +25,7 @@ spec:
         {{- include "dragonfly.selectorLabels" . | nindent 8 }}
     spec:
       {{- include "dragonfly.pod" . | trim | nindent 6 }}
+  {{- if .Values.storage.enabled }}
   volumeClaimTemplates:
     - metadata:
         name: "{{ .Release.Name }}-data"
@@ -34,4 +35,5 @@ spec:
         resources:
           requests:
             storage: {{ .Values.storage.requests }}
+  {{- end }}
 {{- end }}
