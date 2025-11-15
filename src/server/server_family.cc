@@ -1729,27 +1729,24 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricValue("listener_accept_error_total", m.facade_stats.conn_stats.tls_accept_disconnects,
                     {"reason"}, {"tls_error"}, &resp->body());
 
-  // DB stats
-  AppendMetricWithoutLabels("expired_keys_total", "", m.events.expired_keys, MetricType::COUNTER,
-                            &resp->body());
-  AppendMetricWithoutLabels("evicted_keys_total", "", m.events.evicted_keys, MetricType::COUNTER,
-                            &resp->body());
   // Per-DB expired/evicted totals
   {
-    string perdb_str;
-    AppendMetricHeader("expired_keys_total", "", MetricType::COUNTER, &perdb_str);
-    AppendMetricHeader("evicted_keys_total", "", MetricType::COUNTER, &perdb_str);
+    string exp_str, evict_str;
     for (size_t i = 0; i < m.db_stats.size(); ++i) {
       const auto& s = m.db_stats[i];
       if (s.events.expired_keys > 0)
         AppendMetricValue("expired_keys_total", s.events.expired_keys, {"db"}, {StrCat("db", i)},
-                          &perdb_str);
+                          &exp_str);
       if (s.events.evicted_keys > 0)
         AppendMetricValue("evicted_keys_total", s.events.evicted_keys, {"db"}, {StrCat("db", i)},
-                          &perdb_str);
+                          &evict_str);
     }
-    absl::StrAppend(&resp->body(), perdb_str);
+    AppendMetricHeader("expired_keys_total", "", MetricType::COUNTER, &resp->body());
+    absl::StrAppend(&resp->body(), exp_str);
+    AppendMetricHeader("evicted_keys_total", "", MetricType::COUNTER, &resp->body());
+    absl::StrAppend(&resp->body(), evict_str);
   }
+
   // Memory stats
   if (legacy) {
     AppendMetricWithoutLabels("memory_fiberstack_vms_bytes",
