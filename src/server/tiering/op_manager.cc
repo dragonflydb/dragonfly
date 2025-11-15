@@ -58,8 +58,7 @@ void OpManager::Close() {
   DCHECK(pending_reads_.empty());
 }
 
-void OpManager::EnqueueInternal(EntryId id, DiskSegment segment, const Decoder& decoder,
-                                ReadCallback cb) {
+void OpManager::Enqueue(EntryId id, DiskSegment segment, const Decoder& decoder, ReadCallback cb) {
   // Fill pages for prepared read as it has no penalty and potentially covers more small segments
   PrepareRead(segment.ContainingPages())
       .ForSegment(segment, id, decoder)

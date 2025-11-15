@@ -45,17 +45,15 @@ class OpManager {
 
   void Close();
 
+  using ReadCallback =
+      fu2::function_base<true /*owns*/, false /*moveable*/, fu2::capacity_fixed<40, 8>,
+                         false /* non-throwing*/, false /* strong exceptions guarantees*/,
+                         void(io::Result<Decoder*>)>;
+
   // Enqueue callback to be executed once value is read. Trigger read if none is pending yet for
   // this segment. Multiple entries can be obtained from a single segment, but every distinct id
   // will have it's own independent callback loop that can safely modify the underlying value
-  template <typename D, typename F>
-  void Enqueue(EntryId id, DiskSegment segment, const D& decoder, F&& cb) {
-    static_assert(std::is_base_of_v<Decoder, D>);
-    auto erased_cb = [cb = std::forward<F>(cb)](io::Result<Decoder*> res) mutable {
-      cb(res.transform([](Decoder* ptr) { return static_cast<D*>(ptr); }));
-    };
-    EnqueueInternal(id, segment, decoder, std::move(erased_cb));
-  }
+  void Enqueue(EntryId id, DiskSegment segment, const Decoder& decoder, ReadCallback cb);
 
   // Delete entry with pending io
   void Delete(EntryId id);
@@ -73,14 +71,6 @@ class OpManager {
   Stats GetStats() const;
 
  protected:
-  using ReadCallback =
-      fu2::function_base<true /*owns*/, false /*moveable*/, fu2::capacity_fixed<40, 8>,
-                         false /* non-throwing*/, false /* strong exceptions guarantees*/,
-                         void(io::Result<Decoder*>)>;
-
-  // Type erased continuation of Enqueue
-  void EnqueueInternal(EntryId id, DiskSegment segment, const Decoder& decoder, ReadCallback cb);
-
   // Notify that a stash succeeded and the entry was stored at the provided segment or failed with
   // given error
   virtual void NotifyStashed(EntryId id, const io::Result<DiskSegment>& segment) = 0;

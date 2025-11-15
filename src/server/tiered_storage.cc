@@ -324,6 +324,15 @@ void TieredStorage::Close() {
   op_manager_->Close();
 }
 
+void TieredStorage::ReadInternal(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                                 const tiering::Decoder& decoder,
+                                 std::function<void(io::Result<tiering::Decoder*>)> cb) {
+  DCHECK(value.IsExternal());
+  DCHECK(!value.IsCool());
+  // TODO: imporve performance by avoiding one more function wrap
+  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), decoder, std::move(cb));
+}
+
 TieredStorage::TResult<string> TieredStorage::Read(DbIndex dbid, string_view key,
                                                    const PrimeValue& value) {
   util::fb2::Future<io::Result<string>> fut;
@@ -333,13 +342,10 @@ TieredStorage::TResult<string> TieredStorage::Read(DbIndex dbid, string_view key
 
 void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
                          std::function<void(io::Result<std::string>)> readf) {
-  DCHECK(value.IsExternal());
-  DCHECK(!value.IsCool());
   auto cb = [readf = std::move(readf)](io::Result<tiering::StringDecoder*> res) mutable {
     readf(res.transform([](auto* d) { return string{d->Read()}; }));
   };
-  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), tiering::StringDecoder{value},
-                       std::move(cb));
+  Read(dbid, key, value, tiering::StringDecoder{value}, std::move(cb));
 }
 
 template <typename T>
@@ -347,10 +353,13 @@ TieredStorage::TResult<T> TieredStorage::Modify(DbIndex dbid, std::string_view k
                                                 const PrimeValue& value,
                                                 std::function<T(std::string*)> modf) {
   DCHECK(value.IsExternal());
+  DCHECK_EQ(value.ObjType(), OBJ_STRING);
 
   util::fb2::Future<io::Result<T>> future;
-  auto cb = [future, modf = std::move(modf)](io::Result<tiering::StringDecoder*> res) mutable {
-    future.Resolve(res.transform([&modf](auto* d) { return modf(d->Write()); }));
+  auto cb = [future, modf = std::move(modf)](io::Result<tiering::Decoder*> res) mutable {
+    future.Resolve(
+        res.transform([](auto* d) { return static_cast<tiering::StringDecoder*>(d); })  //
+            .transform([&modf](auto* d) { return modf(d->Write()); }));
   };
   op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), tiering::StringDecoder{value},
                        std::move(cb));
