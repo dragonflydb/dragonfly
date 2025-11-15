@@ -22,6 +22,9 @@ spec:
         {{- end }}
       labels:
         {{- include "dragonfly.selectorLabels" . | nindent 8 }}
+        {{- with .Values.commonLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       {{- include "dragonfly.pod" . | trim | nindent 6 }}
 {{- end }}

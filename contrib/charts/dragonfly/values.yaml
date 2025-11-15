@@ -22,6 +22,9 @@ nameOverride: ""
 # -- String to fully override dragonfly.fullname
 fullnameOverride: ""
 
+# -- Common labels to add to all resources
+commonLabels: {}
+
 serviceAccount:
   # -- Specifies whether a service account should be created
   create: true
