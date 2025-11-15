@@ -85,6 +85,78 @@ TEST_F(JsonTest, Errors) {
   EXPECT_FALSE(decoder.is_valid());
 }
 
+// Callback type for getting usable size of allocated memory
+using filter = std::function<bool(const void*)>;
+
+void defragment(json& j, filter cb) {
+  // Use explicit stack for iterative traversal (avoids recursion/stack overflow)
+  std::vector<json*> stack;
+  stack.reserve(8);  // Reserve some space to reduce allocations
+  stack.push_back(&j);
+
+  while (!stack.empty()) {
+    auto* current = stack.back();
+    stack.pop_back();
+
+    switch (current->storage_kind()) {
+      case json_storage_kind::long_str: {
+        std::string_view sv = current->as_string_view();
+        if (cb(sv.data())) {
+          // Perform defragmentation logic here
+          *current = json(sv);  // Reassign to trigger reallocation
+        }
+
+        break;
+      }
+
+      case json_storage_kind::byte_str: {
+        // Similar to long_str
+        auto byte_view = current->as_byte_string_view();
+        // Use callback to get actual allocated size
+        if (cb(byte_view.data())) {
+          *current = json(byte_view);  // Reassign to trigger reallocation
+        }
+        break;
+      }
+
+      case json_storage_kind::array: {
+        // array_storage.ptr points to vector<json>
+        // so array_storage.ptr might be fragmented,
+        // but also array_storage.ptr->data() might be fragmented
+        for (auto& item : current->array_range()) {
+          if (!is_trivial_storage(item.storage_kind())) {
+            stack.push_back(&item);
+          }
+        }
+        break;
+      }
+      case json_storage_kind::object: {
+        // object_storage.ptr points to vector<key_value_type>
+        // so object_storage.ptr might be fragmented,
+        // but also keys and values inside might be fragmented
+        for (auto& kv : current->object_range()) {
+          // TODO: to check kv.key();
+          if (!is_trivial_storage(kv.value().storage_kind())) {
+            stack.push_back(&kv.value());
+          }
+        }
+        break;
+      }
+      case json_storage_kind::const_json_pointer:
+        // This is just a pointer to another JSON value, no ownership
+        stack.push_back(&current->const_json_pointer_value().get());
+        break;
+      default:
+    }
+  }
+}
+
+TEST_F(JsonTest, CStr) {
+  json j1 = json("hellohellohellohellohellohellohellohellohellohellohello");
+  EXPECT_EQ(json_type::string_value, j1.type());
+  j1.as_cstring();
+}
+
 TEST_F(JsonTest, Path) {
   std::error_code ec;
   json j1 = R"({"field" : 1, "field-dash": 2})"_json;
