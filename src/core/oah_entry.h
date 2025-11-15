@@ -278,6 +278,11 @@ class OAHEntry {
     return ext_hash;
   }
 
+  bool CheckNoCollisions(const uint64_t ext_hash) {
+    auto stored_hash = GetHash();
+    return ((stored_hash != ext_hash) & (stored_hash != 0)) | (Empty());
+  }
+
   bool CheckExtendedHash(const uint64_t ext_hash, uint32_t capacity_log, uint32_t shift_log) {
     auto stored_hash = GetHash();
     if (!stored_hash) {

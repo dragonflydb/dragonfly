@@ -111,6 +111,7 @@ class OAHSet {  // Open Addressing Hash Set
     uint64_t hash = Hash(str);
     auto bucket_id = BucketId(hash, capacity_log_);
     PREFETCH_READ(entries_.data() + bucket_id);
+    PREFETCH_READ(entries_.data() + bucket_id + 8);
 
     if (entries_.empty() || size_ >= entries_.size()) {
       Reserve(Capacity() * 2);
@@ -123,7 +124,7 @@ class OAHSet {  // Open Addressing Hash Set
     OAHEntry entry(str, at);
     entry.SetHash(hash, capacity_log_, kShiftLog);
 
-    if (auto item = FastFind(bucket_id, str, hash); item != end()) {
+    if (FastCheck(bucket_id, str, hash)) {
       return false;
     }
 
@@ -373,36 +374,36 @@ class OAHSet {  // Open Addressing Hash Set
   }
 
   // return bucket_id and position otherwise max
-  iterator FastFind(const uint32_t bid, std::string_view str, uint64_t hash) {
+  bool FastCheck(const uint32_t bid, std::string_view str, uint64_t hash) {
     const uint32_t capacity_mask = Capacity() - 1;
     const auto ext_hash = OAHEntry::CalcExtHash(hash, capacity_log_, kShiftLog);
     const auto ext_bid = GetExtensionPoint(bid);
 
-    bool res = false;
+    bool res = true;
     for (uint32_t i = 0; i < kDisplacementSize; i++) {
       const uint32_t bucket_id = (bid + i) & capacity_mask;
-      res |= entries_[bucket_id].CheckExtendedHash(ext_hash, capacity_log_, kShiftLog);
+      res &= entries_[bucket_id].CheckNoCollisions(ext_hash);
     }
 
-    if (!res) {
+    if (res) {
       if (entries_[ext_bid].IsVector()) {
         auto& vec = entries_[ext_bid].AsVector();
         auto raw_arr = vec.Raw();
         for (size_t i = 0, size = vec.Size(); i < size; ++i) {
-          res |= raw_arr[i].CheckExtendedHash(ext_hash, capacity_log_, kShiftLog);
+          res &= raw_arr[i].CheckNoCollisions(ext_hash);
         }
       }
-      if (res) {
+      if (!res) {
         auto pos =
             entries_[ext_bid].Find(str, ext_hash, capacity_log_, kShiftLog, &size_, time_now_);
         if (pos) {
-          return iterator{this, ext_bid, *pos};
+          return true;
         }
       }
     } else {
       return FindInternal(bid, str, hash);
     }
-    return end();
+    return false;
   }
 
   template <class T, std::enable_if_t<std::is_invocable_v<T, std::string_view>>* = nullptr>
