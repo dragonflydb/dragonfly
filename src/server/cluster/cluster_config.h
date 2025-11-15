@@ -32,6 +32,10 @@ class ClusterConfig {
   bool IsMySlot(SlotId id) const;
   bool IsMySlot(std::string_view key) const;
 
+  const std::string& MyId() const {
+    return my_id_;
+  }
+
   // Returns the master configured for `id`.
   ClusterNodeInfo GetMasterNodeForSlot(SlotId id) const;
 
