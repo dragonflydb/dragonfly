@@ -470,18 +470,13 @@ std::optional<std::string> ConvertJsonPathToJsonPointer(string_view json_path) {
   return pointer;
 }
 
-// Use this method on the coordinator thread
-std::optional<JsonType> JsonFromString(std::string_view input) {
-  return dfly::JsonFromString(input, PMR_NS::get_default_resource());
-}
-
 /* Use this method on the shard thread
 
    If you do memory tracking, make sure to initialize it before calling this method, and reset the
    result before invoking SetJsonSize. Note that even after calling std::move on an optional, it may
    still hold the JSON value, which can lead to incorrect memory tracking. */
 std::optional<JsonType> ShardJsonFromString(std::string_view input) {
-  return dfly::JsonFromString(input, CompactObj::memory_resource());
+  return JsonFromString(input, CompactObj::memory_resource());
 }
 
 OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_str) {
@@ -1307,7 +1302,19 @@ auto OpArrTrim(const OpArgs& op_args, string_view key, const WrappedJsonPath& pa
 // Returns numeric vector that represents the new length of the array at each path.
 OpResult<JsonCallbackResult<OptSize>> OpArrInsert(const OpArgs& op_args, string_view key,
                                                   const WrappedJsonPath& json_path, int index,
-                                                  const vector<JsonType>& new_values) {
+                                                  const vector<string_view>& new_values) {
+  vector<JsonType> parsed_values;
+  parsed_values.reserve(new_values.size());
+
+  for (const auto& nv : new_values) {
+    const optional<JsonType> v = ShardJsonFromString(nv);
+    if (!v) {
+      return OpStatus::SYNTAX_ERR;
+    }
+
+    parsed_values.emplace_back(std::move(*v));
+  }
+
   bool out_of_boundaries_encountered = false;
 
   // Insert user-supplied value into the supplied index that should be valid.
@@ -1336,7 +1343,7 @@ OpResult<JsonCallbackResult<OptSize>> OpArrInsert(const OpArgs& op_args, string_
     }
 
     auto it = GetJsonArrayIterator(val, insert_before_index);
-    for (auto& new_val : new_values) {
+    for (auto& new_val : parsed_values) {
       it = val->insert(it, new_val);
       it++;
     }
@@ -1350,14 +1357,26 @@ OpResult<JsonCallbackResult<OptSize>> OpArrInsert(const OpArgs& op_args, string_
   return res;
 }
 
-auto OpArrAppend(const OpArgs& op_args, string_view key, const WrappedJsonPath& path,
-                 const vector<JsonType>& append_values) {
+OpResult<JsonCallbackResult<optional<optional<unsigned long>>>> OpArrAppend(
+    const OpArgs& op_args, string_view key, const WrappedJsonPath& path,
+    const vector<string_view>& append_values) {
+  vector<JsonType> parsed_values;
+  parsed_values.reserve(append_values.size());
+
+  for (const auto& v : append_values) {
+    const optional<JsonType> parsed = ShardJsonFromString(v);
+    if (!parsed) {
+      return OpStatus::SYNTAX_ERR;
+    }
+    parsed_values.emplace_back(std::move(*parsed));
+  }
+
   auto cb = [&](std::optional<std::string_view>,
                 JsonType* val) -> MutateCallbackResult<std::optional<std::size_t>> {
     if (!val->is_array()) {
       return {};
     }
-    for (auto& new_val : append_values) {
+    for (auto& new_val : parsed_values) {
       val->emplace_back(new_val);
     }
     return {false, val->size()};
@@ -1368,8 +1387,15 @@ auto OpArrAppend(const OpArgs& op_args, string_view key, const WrappedJsonPath& 
 // Returns a numeric vector representing each JSON value first index of the JSON scalar.
 // An index value of -1 represents unfound in the array.
 // JSON scalar has types of string, boolean, null, and number.
-auto OpArrIndex(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_path,
-                const JsonType& search_val, int start_index, int end_index) {
+OpResult<JsonCallbackResult<optional<long>>> OpArrIndex(const OpArgs& op_args, string_view key,
+                                                        const WrappedJsonPath& json_path,
+                                                        string_view search_val, int start_index,
+                                                        int end_index) {
+  const optional<JsonType> search_value_json = ShardJsonFromString(search_val);
+  if (!search_value_json) {
+    return OpStatus::SYNTAX_ERR;
+  }
+
   auto cb = [&](const string_view&, const JsonType& val) -> std::optional<long> {
     if (!val.is_array()) {
       return std::nullopt;
@@ -1403,7 +1429,7 @@ auto OpArrIndex(const OpArgs& op_args, string_view key, const WrappedJsonPath& j
     size_t pos = -1;
     auto it = GetJsonArrayIterator(val, pos_start_index);
     while (it != val.array_range().end()) {
-      if (JsonAreEquals(search_val, *it)) {
+      if (JsonAreEquals(search_value_json, *it)) {
         pos = pos_start_index;
         break;
       }
@@ -1826,11 +1852,7 @@ void JsonFamily::ArrIndex(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  optional<JsonType> search_value = JsonFromString(parser.Next());
-  if (!search_value) {
-    builder->SendError(kSyntaxErr);
-    return;
-  }
+  string_view search_value = parser.Next();
 
   int start_index = 0;
   if (parser.HasNext()) {
@@ -1851,12 +1873,11 @@ void JsonFamily::ArrIndex(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpArrIndex(t->GetOpArgs(shard), key, json_path, *search_value, start_index, end_index);
+    return OpArrIndex(t->GetOpArgs(shard), key, json_path, search_value, start_index, end_index);
   };
 
   auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  reply_generic::Send(result, builder);
 }
 
 void JsonFamily::ArrInsert(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -1873,15 +1894,9 @@ void JsonFamily::ArrInsert(CmdArgList args, const CommandContext& cmd_cntx) {
 
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  vector<JsonType> new_values;
+  vector<string_view> new_values;
   for (size_t i = 3; i < args.size(); i++) {
-    optional<JsonType> val = JsonFromString(ArgS(args, i));
-    if (!val) {
-      builder->SendError(kSyntaxErr);
-      return;
-    }
-
-    new_values.emplace_back(std::move(*val));
+    new_values.emplace_back(ArgS(args, i));
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1900,17 +1915,9 @@ void JsonFamily::ArrAppend(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  vector<JsonType> append_values;
-
-  // TODO: there is a bug here, because we parse json using the allocator from
-  // the coordinator thread, and we pass it to the shard thread, which is not safe.
+  vector<string_view> append_values;
   for (size_t i = 2; i < args.size(); ++i) {
-    optional<JsonType> converted_val = JsonFromString(ArgS(args, i));
-    if (!converted_val) {
-      builder->SendError(kSyntaxErr);
-      return;
-    }
-    append_values.emplace_back(converted_val);
+    append_values.emplace_back(ArgS(args, i));
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1918,8 +1925,7 @@ void JsonFamily::ArrAppend(CmdArgList args, const CommandContext& cmd_cntx) {
   };
 
   auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  reply_generic::Send(result, builder);
 }
 
 void JsonFamily::ArrTrim(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2000,7 +2006,7 @@ void JsonFamily::StrAppend(CmdArgList args, const CommandContext& cmd_cntx) {
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   // We try parsing the value into json string object first.
-  optional<JsonType> parsed_json = JsonFromString(value);
+  optional<JsonType> parsed_json = dfly::JsonFromString(value, PMR_NS::get_default_resource());
   if (!parsed_json || !parsed_json->is_string()) {
     return builder->SendError("expected string value", kSyntaxErrType);
   };
@@ -2011,8 +2017,7 @@ void JsonFamily::StrAppend(CmdArgList args, const CommandContext& cmd_cntx) {
   };
 
   auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  reply_generic::Send(result, builder);
 }
 
 void JsonFamily::ObjKeys(CmdArgList args, const CommandContext& cmd_cntx) {
