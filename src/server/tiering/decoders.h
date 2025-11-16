@@ -12,6 +12,10 @@
 #include "core/compact_object.h"
 #include "core/string_or_view.h"
 
+namespace dfly::detail {
+struct ListpackWrap;
+}
+
 namespace dfly::tiering {
 
 struct SerializedMap;
@@ -77,10 +81,14 @@ struct SerializedMapDecoder : public Decoder {
   UploadMetrics GetMetrics() const override;
   void Upload(CompactObj* obj) override;
 
-  SerializedMap* Get() const;
+  std::variant<SerializedMap*, dfly::detail::ListpackWrap*> Read() const;
+  dfly::detail::ListpackWrap* Write();
 
  private:
-  std::unique_ptr<SerializedMap> map_;
+  void MakeOwned();  // Convert to listpack
+
+  bool modified_;
+  std::variant<std::unique_ptr<SerializedMap>, std::unique_ptr<dfly::detail::ListpackWrap>> map_;
 };
 
 }  // namespace dfly::tiering

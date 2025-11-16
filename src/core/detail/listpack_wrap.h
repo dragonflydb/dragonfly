@@ -15,8 +15,6 @@ struct ListpackWrap {
   using IntBuf = uint8_t[2][24];
 
  public:
-  ~ListpackWrap();
-
   struct Iterator {
     using iterator_category = std::forward_iterator_tag;
     using difference_type = std::ptrdiff_t;
@@ -66,7 +64,6 @@ struct ListpackWrap {
  private:
   uint8_t* lp_;            // the listpack itself
   mutable IntBuf intbuf_;  // buffer for integers decoded to strings
-  bool dirty_ = false;     // whether lp_ was updated, but never retrieved with GetPointer
 };
 
 }  // namespace dfly::detail

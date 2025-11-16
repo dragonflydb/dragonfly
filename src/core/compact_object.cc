@@ -879,13 +879,10 @@ CompactObjType CompactObj::ObjType() const {
     return OBJ_STRING;
 
   if (taglen_ == EXTERNAL_TAG) {
-    VLOG(0) << "My type is external";
     switch (static_cast<ExternalRep>(u_.ext_ptr.representation)) {
       case ExternalRep::STRING:
-        VLOG(0) << "My type is a string";
         return OBJ_STRING;
       case ExternalRep::SERIALIZED_MAP:
-        VLOG(0) << "Mype is a hash map";
         return OBJ_HASH;
     };
   }
