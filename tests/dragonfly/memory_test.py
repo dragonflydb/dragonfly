@@ -323,3 +323,45 @@ async def test_throttle_on_commands_squashing_replies_bytes(df_factory: DflyInst
     df.stop()
     found = df.find_in_logs("Commands squashing current reply size is overlimit")
     assert len(found) > 0
+
+
+@pytest.mark.asyncio
+async def test_delete_doc_on_eviction(df_factory):
+    max_memory = 256 * 1024**2  # 256MB
+    df_server = df_factory.create(
+        proactor_threads=1,
+        cache_mode="yes",
+        maxmemory=max_memory,
+        vmodule="engine_shard=2",
+        eviction_memory_budget_threshold=0.99,
+        enable_heartbeat_rss_eviction="no",
+    )
+    df_server.start()
+    client = df_server.client()
+
+    await client.execute_command(
+        "FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "v", "TEXT"
+    )
+
+    i = 0
+    while True:
+        random_string = "".join(random.choices(string.ascii_letters + string.digits, k=1_000))
+        await client.execute_command("HSET", f"doc:{i}", "v", random_string)
+        stats_info = await client.info("stats")
+        # Done when see at least 50 evictions
+        if stats_info["evicted_keys"] > 50:
+            break
+        i = i + 1
+
+    # Give some time to eviction stabilize
+    await asyncio.sleep(1)
+
+    # Get number of docs in index
+    index_info = await client.execute_command(f"FT.INFO idx")
+    index_info_num_docs = index_info[9]
+
+    # Get number of keys in datbase
+    keyspace_info = await client.info("keyspace")
+    keyspace_keys = keyspace_info["db0"]["keys"]
+
+    assert index_info_num_docs == keyspace_keys
