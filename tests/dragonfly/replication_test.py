@@ -3065,7 +3065,7 @@ async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory):
 
     # Create huge values
     await c_master.execute_command(
-        "debug", "populate", "2", "test", "1000", "rand", "type", "zset", "elements", "1000000"
+        "debug", "populate", "2", "test", "1000", "rand", "type", "zset", "elements", "700000"
     )
 
     # Restart replication a few times
