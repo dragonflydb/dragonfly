@@ -184,7 +184,6 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Set value to be an in-memory type again. Update memory stats.
   void Upload(DbIndex dbid, string_view value, PrimeValue* pv) {
     DCHECK(!value.empty());
-
     switch (pv->GetExternalRep()) {
       case CompactObj::ExternalRep::STRING:
         pv->Materialize(value, true);
@@ -212,6 +211,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       stats_.total_stashes++;
 
 <<<<<<< HEAD
+<<<<<<< HEAD
       StashDescriptor blobs{FragmentRef{*pv}.GetSerializationDescr()};
 =======
 <<<<<<< HEAD
@@ -220,6 +220,9 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       CompactObj::ExternalRep rep = EstimateSerializedSize(*pv)->second;
 >>>>>>> 77a24f54 (feat(tiering): Serialize hashes)
 >>>>>>> 8e41a4d3 (feat(tiering): Serialize hashes)
+=======
+      CompactObj::ExternalRep rep = DetermineSerializationParams(*pv).second;
+>>>>>>> b76c9a44 (more than POc)
       if (ts_->config_.experimental_cooling) {
         RetireColdEntries(pv->MallocUsed());
         ts_->CoolDown(key.first, key.second, segment, blobs.rep, pv);

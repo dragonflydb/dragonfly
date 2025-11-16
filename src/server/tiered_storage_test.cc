@@ -521,8 +521,7 @@ TEST_F(PureDiskTSTest, Dump) {
 TEST_P(LatentCoolingTSTest, SimpleHash) {
   absl::FlagSaver saver;
   absl::SetFlag(&FLAGS_tiered_experimental_hash_support, true);
-  // For now, never upload as its not implemented yet
-  absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);
+  absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);  // never upload
   UpdateFromFlags();
 
   static constexpr size_t kNUM = 100;
@@ -544,9 +543,9 @@ TEST_P(LatentCoolingTSTest, SimpleHash) {
   // Wait for all to be stashed or in end up in bins
   ExpectConditionWithinTimeout([this] {
     auto metrics = GetMetrics();
-    return metrics.tiered_stats.total_stashes +
-               metrics.tiered_stats.small_bins_filling_entries_cnt ==
-           kNUM;
+    size_t sum =
+        metrics.tiered_stats.total_stashes + metrics.tiered_stats.small_bins_filling_entries_cnt;
+    return sum == kNUM;
   });
 
   // Verify correctness
@@ -557,6 +556,49 @@ TEST_P(LatentCoolingTSTest, SimpleHash) {
     auto resp = Run({"HGET", key, string{1, 'f'}});
     auto v = string{31, 'x'} + 'f';
     EXPECT_EQ(resp, v);
+  }
+
+  // Start offloading
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0);
+  UpdateFromFlags();
+  auto wait_offloaded = [=] {
+    auto metrics = GetMetrics();
+    size_t sum =
+        metrics.db_stats[0].tiered_entries + metrics.tiered_stats.small_bins_filling_entries_cnt;
+    return sum == kNUM;
+  };
+
+  // Wait for all offloads again
+  ExpectConditionWithinTimeout(wait_offloaded);
+
+  auto c_key = string{1, 'c'};
+
+  // HDEL
+  for (size_t i = 0; i < kNUM; i++) {
+    string key = absl::StrCat("k", i);
+    EXPECT_THAT(Run({"HDEL", key, c_key}), IntArg(1));
+    EXPECT_THAT(Run({"HLEN", key}), IntArg(25));
+  }
+
+  // Wait for all offloads again
+  ExpectConditionWithinTimeout(wait_offloaded);
+
+  // HSET new field
+  for (size_t i = 0; i < kNUM; i++) {
+    string key = absl::StrCat("k", i);
+    EXPECT_THAT(Run({"HSET", key, c_key, "Some new value"}), IntArg(1));
+    EXPECT_THAT(Run({"HLEN", key}), IntArg(26));
+    EXPECT_EQ(Run({"HGET", key, c_key}), "Some new value");
+  }
+
+  // Wait for all offloads again
+  ExpectConditionWithinTimeout(wait_offloaded);
+
+  // HSET replace field
+  for (size_t i = 0; i < kNUM; i++) {
+    string key = absl::StrCat("k", i);
+    EXPECT_THAT(Run({"HSET", key, c_key, "Even more recent value"}), IntArg(0));
+    EXPECT_EQ(Run({"HGET", key, c_key}), "Even more recent value");
   }
 }
 
