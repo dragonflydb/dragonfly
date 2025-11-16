@@ -4,7 +4,11 @@
 
 #include "server/tiering/decoders.h"
 
+<<<<<<< HEAD
 #include "base/logging.h"
+=======
+#include "core/compact_object.h"
+>>>>>>> fbcc8d59 (more than POc)
 #include "core/detail/listpack_wrap.h"
 #include "server/tiering/serialized_map.h"
 
@@ -78,19 +82,40 @@ void SerializedMapDecoder::Initialize(std::string_view slice) {
 }
 
 Decoder::UploadMetrics SerializedMapDecoder::GetMetrics() const {
-  return UploadMetrics{.modified = false,
+  return UploadMetrics{.modified = modified_,
                        .estimated_mem_usage = map_->DataBytes() + map_->size() * 2 * 8};
 }
 
 void SerializedMapDecoder::Upload(CompactObj* obj) {
-  auto lw = detail::ListpackWrap::WithCapacity(GetMetrics().estimated_mem_usage);
-  for (const auto& [key, value] : *map_)
-    lw.Insert(key, value, true);
-  obj->InitRobj(OBJ_HASH, kEncodingListPack, lw.GetPointer());
+  if (std::holds_alternative<std::unique_ptr<SerializedMap>>(map_))
+    MakeOwned();
+
+  obj->InitRobj(OBJ_HASH, kEncodingListPack, Write()->GetPointer());
 }
 
-SerializedMap* SerializedMapDecoder::Get() const {
-  return map_.get();
+std::variant<SerializedMap*, detail::ListpackWrap*> SerializedMapDecoder::Read() const {
+  using RT = std::variant<SerializedMap*, detail::ListpackWrap*>;
+  return std::visit([](auto& ptr) -> RT { return ptr.get(); }, map_);
+}
+
+detail::ListpackWrap* SerializedMapDecoder::Write() {
+  if (std::holds_alternative<std::unique_ptr<detail::ListpackWrap>>(map_))
+    return std::get<std::unique_ptr<detail::ListpackWrap>>(map_).get();
+
+  // Convert SerializedMap to listpack
+  MakeOwned();
+  modified_ = true;
+  return Write();
+}
+
+void SerializedMapDecoder::MakeOwned() {
+  auto& map = std::get<std::unique_ptr<SerializedMap>>(map_);
+
+  auto lw = detail::ListpackWrap::WithCapacity(GetMetrics().estimated_mem_usage);
+  for (const auto& [key, value] : *map)
+    lw.Insert(key, value, true);
+
+  map_ = std::make_unique<detail::ListpackWrap>(lw);
 }
 
 }  // namespace dfly::tiering

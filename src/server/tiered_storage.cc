@@ -196,7 +196,6 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Set value to be an in-memory type again. Update memory stats.
   void Upload(DbIndex dbid, string_view value, PrimeValue* pv) {
     DCHECK(!value.empty());
-
     switch (pv->GetExternalRep()) {
       case CompactObj::ExternalRep::STRING:
         pv->Materialize(value, true);
@@ -322,6 +321,7 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, tiering::DiskSegme
   auto key = get<OpManager::KeyRef>(id);
   auto* pv = Find(key);
   if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
+    VLOG(0) << "Touched? " << pv->WasTouched();
     if (metrics.modified || pv->WasTouched()) {
       ++stats_.total_uploads;
       decoder->Upload(pv);
