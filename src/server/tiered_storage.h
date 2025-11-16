@@ -144,6 +144,7 @@ class TieredStorage {
     uint64_t total_deletes = 0;
     uint64_t offloading_steps = 0;
     uint64_t offloading_stashes = 0;
+    uint64_t total_clients_throttled = 0;
     size_t cool_memory_used = 0;
   } stats_;
 };
