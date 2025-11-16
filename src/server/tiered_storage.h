@@ -25,7 +25,8 @@ class DbSlice;
 
 namespace tiering {
 class SmallBins;
-};
+struct Decoder;
+};  // namespace tiering
 
 // Manages offloaded values
 class TieredStorage {
@@ -46,10 +47,21 @@ class TieredStorage {
   std::error_code Open(std::string_view path);
   void Close();
 
-  // Read offloaded value. It must be of external type
+  // Enqueue read external value with generic decoder.
+  template <typename D, typename F>
+  void Read(DbIndex dbid, std::string_view key, const PrimeValue& value, const D& decoder, F&& f) {
+    // TODO(vlad): untangle endless callback wrapping!
+    // Templates don't consider implicit conversions, so explicitly convert to std::function
+    auto wrapped_cb = [f = std::forward<F>(f)](io::Result<tiering::Decoder*> res) mutable {
+      f(res.transform([](auto* d) { return static_cast<D*>(d); }));
+    };
+    ReadInternal(dbid, key, value, decoder, wrapped_cb);
+  }
+
+  // Read offloaded value. It must be of external string type
   TResult<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);
 
-  // Read offloaded value. It must be of external type
+  // Read offloaded value. It must be of external string type
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
             std::function<void(io::Result<std::string>)> readf);
 
@@ -95,6 +107,10 @@ class TieredStorage {
   }
 
  private:
+  void ReadInternal(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                    const tiering::Decoder& decoder,
+                    std::function<void(io::Result<tiering::Decoder*>)> cb);
+
   // Returns if a value should be stashed
   bool ShouldStash(const PrimeValue& pv) const;
 

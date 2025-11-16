@@ -5,6 +5,9 @@
 #include "server/hset_family.h"
 
 #include "server/family_utils.h"
+#include "server/tiered_storage.h"
+#include "server/tiering/decoders.h"
+#include "server/tiering/serialized_map.h"
 
 extern "C" {
 #include "redis/listpack.h"
@@ -52,31 +55,49 @@ bool IsGoodForListpack(CmdArgList args, const uint8_t* lp) {
 
 using container_utils::GetStringMap;
 
+// Generic wrapper for multiple underlying map <string, string> types
+// holding a variant of:
+// 1. Listpack
+// 2. StringMap
+// 3. SerializedMap (tiered)
 struct HMapWrap {
  private:
-  template <typename F> decltype(auto) visit2(F f) const {  // Cast T* to T&
-    return std::visit(Overloaded{[&f](StringMap* s) { return f(*s); }, f}, impl_);
+  template <typename F> decltype(auto) VisitRef(F f) const {  // Cast T* to T&
+    return std::visit(Overloaded{[&f](auto* s) { return f(*s); }, f}, impl_);
+  }
+
+  template <typename F> decltype(auto) VisitMut(F& f) {
+    auto serialized_bust = [&](tiering::SerializedMap* s) {
+      ABSL_UNREACHABLE();                          // Serialized maps should never be mutable
+      return f(static_cast<StringMap*>(nullptr));  // purely for same return type
+    };
+    return std::visit(Overloaded{f, serialized_bust}, impl_);
   }
 
  public:
   HMapWrap(const PrimeValue& pv, DbContext db_cntx) {
+    DCHECK(!pv.IsExternal() || pv.IsCool());
     if (pv.Encoding() == kEncodingListPack)
       impl_ = detail::ListpackWrap{static_cast<uint8_t*>(pv.RObjPtr())};
     else
       impl_ = GetStringMap(pv, db_cntx);
   }
 
+  explicit HMapWrap(tiering::SerializedMap* sm) : impl_{sm} {
+  }
+
   size_t Length() const {
     Overloaded ov{
         [](StringMap* s) { return s->UpperBoundSize(); },
         [](const detail::ListpackWrap& lw) { return lw.size(); },
+        [](tiering::SerializedMap* s) { return s->size(); },
     };
     return visit(ov, impl_);
   }
 
   auto Find(std::string_view key) const {
     using RT = optional<pair<string_view, string_view>>;
-    return visit2([key](auto& h) -> RT {
+    return VisitRef([key](auto& h) -> RT {
       if (auto it = h.Find(key); it != h.end())
         return *it;
       return std::nullopt;
@@ -86,23 +107,23 @@ struct HMapWrap {
   auto Range() const {
     auto f = [](auto p) -> pair<string_view, string_view> { return p; };  // implicit conversion
     using IT = base::it::CompoundIterator<decltype(f), detail::ListpackWrap::Iterator,
-                                          StringMap::iterator>;
+                                          StringMap::iterator, tiering::SerializedMap::Iterator>;
     auto cb = [f](auto& h) -> std::pair<IT, IT> {
       return {{f, h.begin()}, {std::nullopt, h.end()}};
     };
-    return base::it::Range(visit2(cb));
+    return base::it::Range(VisitRef(cb));
   }
 
   bool Erase(std::string_view key) {
     Overloaded ov{[key](StringMap* s) { return s->Erase(key); },
                   [key](detail::ListpackWrap& lw) { return lw.Delete(key); }};
-    return visit(ov, impl_);
+    return VisitMut(ov);
   }
 
   void AddOrUpdate(std::string_view key, std::string_view value) {
     Overloaded ov{[&](StringMap* sm) { sm->AddOrUpdate(key, value); },
                   [&](detail::ListpackWrap& lw) { lw.Insert(key, value, false); }};
-    visit(ov, impl_);
+    VisitMut(ov);
   }
 
   void Launder(PrimeValue& pv) {
@@ -110,7 +131,7 @@ struct HMapWrap {
         [](StringMap* s) {},
         [&](detail::ListpackWrap& lw) { pv.SetRObjPtr(lw.GetPointer()); },
     };
-    visit(ov, impl_);
+    VisitMut(ov);
   }
 
   template <typename T> optional<T> Get() const {
@@ -120,8 +141,8 @@ struct HMapWrap {
   }
 
  private:
-  variant<StringMap*, detail::ListpackWrap> impl_;
-};
+  variant<StringMap*, tiering::SerializedMap*, detail::ListpackWrap> impl_;
+};  // namespace dfly
 
 // Delete if length is zero
 void DeleteHw(HMapWrap& hw, const OpArgs& op_args, std::string_view key) {
@@ -139,21 +160,59 @@ auto KeyAndArgs(Transaction* t, EngineShard* es) {
   return std::make_pair(t->GetShardArgs(es->shard_id()).Front(), t->GetOpArgs(es));
 }
 
-// Wrap read-only handler
-template <typename F> auto WrapRO(F&& f) {
-  using RT = std::invoke_result_t<F, HMapWrap>;
-  return [f = std::forward<F>(f)](Transaction* t, EngineShard* es) -> RT {
+// A wrappable callback returns a OpResult<T> or the future version of it for tiered values.
+// Because the top-level value needs to be an OpResult, the variant is wrapped as an OpResult again.
+// However, we can take the "result" out of the bare value and keep it only on the top-level.
+template <typename T> using CbVariant = std::variant<T, ::util::fb2::Future<OpResult<T>>>;
+
+// Unwrap possibly future result to a regular one
+template <typename T> OpResult<T> Unwrap(OpResult<CbVariant<T>> result) {
+  if (!result.ok())
+    return result.status();
+
+  Overloaded ov{
+      [](T res) -> OpResult<T> { return res; },
+      [](util::fb2::Future<OpResult<T>> fut) -> OpResult<T> { return fut.Get(); },
+  };
+  return visit(ov, std::move(result).value());
+}
+
+// Execute callback on generic HMapWrap, possibly on offloaded value and waiting for result
+template <typename F, typename T = typename std::invoke_result_t<F, HMapWrap>::Type>
+OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
+  auto shard_cb = [f = std::forward<F>(f)](Transaction* t,
+                                           EngineShard* es) -> OpResult<CbVariant<T>> {
+    // Fetch value of hash type
     auto [key, op_args] = KeyAndArgs(t, es);
     auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
     RETURN_ON_BAD_STATUS(it_res);
+    auto& pv = (*it_res)->second;
 
-    HMapWrap hw{(*it_res)->second, op_args.db_cntx};
+    // Enqueue read for future values
+    if (pv.IsExternal() && !pv.IsCool()) {
+      using D = tiering::SerializedMapDecoder;
+      util::fb2::Future<OpResult<T>> fut;
+      auto read_cb = [fut, f = std::move(f)](io::Result<D*> res) mutable {
+        HMapWrap hw{res.value()->Get()};
+        fut.Resolve(f(hw));
+      };
+
+      es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv, D{}, std::move(read_cb));
+      return CbVariant<T>{std::move(fut)};
+    }
+
+    HMapWrap hw{pv, op_args.db_cntx};
     auto res = f(hw);
 
     if (hw.Length() == 0)  // Expirations might have emptied it
       DeleteHw(hw, op_args, key);
-    return res;
+
+    // Move result into variant or keep error status
+    RETURN_ON_BAD_STATUS(res);
+    return CbVariant<T>{std::move(res).value()};
   };
+
+  return Unwrap(tx->ScheduleSingleHopT(std::move(shard_cb)));
 }
 
 // Wrap write handler
@@ -452,7 +511,7 @@ void HGetGeneric(CmdArgList args, uint8_t getall_mask, Transaction* tx, SinkRepl
     return res;
   };
 
-  OpResult<vector<string>> result = tx->ScheduleSingleHopT(WrapRO(cb));
+  OpResult<vector<string>> result = ExecuteRO(tx, cb);
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   switch (result.status()) {
     case OpStatus::OK:
@@ -611,7 +670,7 @@ void HSetFamily::HGet(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::KEY_NOTFOUND;
   };
 
-  OpResult<string> result = cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb));
+  OpResult<string> result = ExecuteRO(cmd_cntx.tx, cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   switch (result.status()) {
     case OpStatus::OK:
@@ -627,7 +686,7 @@ void HSetFamily::HMGet(CmdArgList args, const CommandContext& cmd_cntx) {
   auto fields = args.subspan(1);
   auto cb = [fields](const HMapWrap& hw) { return OpHMGet(hw, fields); };
 
-  OpResult<vector<OptStr>> result = cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb));
+  OpResult<vector<OptStr>> result = ExecuteRO(cmd_cntx.tx, cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   switch (result.status()) {
     case OpStatus::OK:
@@ -651,19 +710,19 @@ void HSetFamily::HStrLen(CmdArgList args, const CommandContext& cmd_cntx) {
       return it->second.length();
     return OpStatus::KEY_NOTFOUND;
   };
-  HSetReplies{cmd_cntx.rb}.Send(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb)));
+  HSetReplies{cmd_cntx.rb}.Send(ExecuteRO(cmd_cntx.tx, cb));
 }
 
 void HSetFamily::HLen(CmdArgList args, const CommandContext& cmd_cntx) {
   auto cb = [](const HMapWrap& hw) -> OpResult<uint32_t> { return hw.Length(); };
-  HSetReplies{cmd_cntx.rb}.Send(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb)));
+  HSetReplies{cmd_cntx.rb}.Send(ExecuteRO(cmd_cntx.tx, cb));
 }
 
 void HSetFamily::HExists(CmdArgList args, const CommandContext& cmd_cntx) {
   auto cb = [field = args[1]](const HMapWrap& hw) -> OpResult<uint32_t> {
     return hw.Find(field) ? 1 : 0;
   };
-  HSetReplies{cmd_cntx.rb}.Send(cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb)));
+  HSetReplies{cmd_cntx.rb}.Send(ExecuteRO(cmd_cntx.tx, cb));
 }
 
 void HSetFamily::HIncrBy(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -768,7 +827,7 @@ void HSetFamily::HScan(CmdArgList args, const CommandContext& cmd_cntx) {
   const ScanOpts& scan_op = ops.value();
   auto cb = [&](const HMapWrap& hw) { return OpScan(hw, &cursor, scan_op); };
 
-  OpResult<StringVec> result = cmd_cntx.tx->ScheduleSingleHopT(WrapRO(cb));
+  OpResult<StringVec> result = ExecuteRO(cmd_cntx.tx, cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   switch (result.status()) {
     case OpStatus::KEY_NOTFOUND:

@@ -14,6 +14,8 @@
 
 namespace dfly::tiering {
 
+struct SerializedMap;
+
 // Decodes serialized value and provides it to callbacks.
 // Acts as generic interface to callback driver (OpManager)
 struct Decoder {
@@ -47,6 +49,7 @@ struct BareDecoder : public Decoder {
   std::string_view slice;
 };
 
+// Decodes string value with objects StrEncoding
 struct StringDecoder : public Decoder {
   explicit StringDecoder(const CompactObj& obj);
 
@@ -65,6 +68,19 @@ struct StringDecoder : public Decoder {
   std::string_view slice_;
   CompactObj::StrEncoding encoding_;
   dfly::StringOrView value_;
+};
+
+// Decodes SerializedMaps
+struct SerializedMapDecoder : public Decoder {
+  std::unique_ptr<Decoder> Clone() const override;
+  void Initialize(std::string_view slice) override;
+  UploadMetrics GetMetrics() const override;
+  void Upload(CompactObj* obj) override;
+
+  SerializedMap* Get() const;
+
+ private:
+  std::unique_ptr<SerializedMap> map_;
 };
 
 }  // namespace dfly::tiering
