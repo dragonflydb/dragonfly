@@ -376,6 +376,10 @@ class CompactObj {
   // Returns the external data of the object incuding its ColdRecord.
   CoolItem GetCool() const;
 
+  // Prequisite: IsCool() is true.
+  // Keeps cool record only as external value.
+  void KeepExternal(size_t offset, size_t sz);
+
   std::pair<size_t, size_t> GetExternalSlice() const;
 
   // Injects either the the raw string (extracted with GetRawString()) or the usual string

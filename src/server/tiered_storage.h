@@ -138,6 +138,7 @@ class TieredStorage {
     unsigned write_depth_limit;
     float offload_threshold;
     float upload_threshold;
+    bool experimental_hash_offload;
   } config_;
   struct {
     uint64_t stash_overflow_cnt = 0;

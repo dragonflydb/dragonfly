@@ -1244,6 +1244,10 @@ auto CompactObj::GetCool() const -> CoolItem {
   return res;
 }
 
+void CompactObj::KeepExternal(size_t offset, size_t sz) {
+  SetExternal(offset, sz, GetExternalRep());
+}
+
 std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
   DCHECK_EQ(EXTERNAL_TAG, taglen_);
   auto& ext = u_.ext_ptr;

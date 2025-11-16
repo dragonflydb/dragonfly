@@ -52,6 +52,8 @@ ABSL_FLAG(float, tiered_offload_threshold, 0.5,
 ABSL_FLAG(float, tiered_upload_threshold, 0.1,
           "Ratio of free memory (free/max memory) below which uploading stops");
 
+ABSL_FLAG(bool, tiered_experimental_hash_offload, false, "Experimental hash datatype offloading");
+
 namespace dfly {
 
 using namespace std;
@@ -79,16 +81,18 @@ tiering::DiskSegment FromCoolItem(const PrimeValue::CoolItem& item) {
   return {item.record->page_index * tiering::kPageSize + item.page_offset, item.serialized_size};
 }
 
-optional<size_t> EstimateSerializedSize(const PrimeValue& pv) {
+// Do NOT enforce rules depending on dynamic runtime values as this is called
+// when scheduling stash and just before succeeeding and is expected to return the same results
+optional<std::pair<size_t, CompactObj::ExternalRep>> EstimateSerializedSize(const PrimeValue& pv) {
   switch (pv.ObjType()) {
     case OBJ_STRING:
-      return pv.GetRawString().view().size();
+      return std::make_pair(pv.GetRawString().view().size(), CompactObj::ExternalRep::STRING);
     case OBJ_HASH:
       if (pv.Encoding() == kEncodingListPack) {
         auto* lp = static_cast<uint8_t*>(pv.RObjPtr());
         size_t bytes = lpBytes(lp);
         bytes += lpLength(lp) * 2 * 4;
-        return bytes;
+        return std::make_pair(bytes, CompactObj::ExternalRep::SERIALIZED_MAP);
       }
       return {};
     default:
@@ -96,15 +100,15 @@ optional<size_t> EstimateSerializedSize(const PrimeValue& pv) {
   };
 }
 
-size_t Serialize(const PrimeValue& pv, io::MutableBytes buffer) {
-  DCHECK_LE(EstimateSerializedSize(pv), buffer.size());
-  switch (pv.ObjType()) {
-    case OBJ_STRING: {
+size_t Serialize(CompactObj::ExternalRep rep, const PrimeValue& pv, io::MutableBytes buffer) {
+  DCHECK_LE(EstimateSerializedSize(pv)->first, buffer.size());
+  switch (rep) {
+    case CompactObj::ExternalRep::STRING: {
       auto sv = pv.GetRawString();
       memcpy(buffer.data(), sv.view().data(), sv.view().size());
       return sv.view().size();
     }
-    case OBJ_HASH: {
+    case CompactObj::ExternalRep::SERIALIZED_MAP: {
       DCHECK_EQ(pv.Encoding(), kEncodingListPack);
 
       detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
@@ -113,15 +117,15 @@ size_t Serialize(const PrimeValue& pv, io::MutableBytes buffer) {
       return tiering::SerializedMap::Serialize(
           entries_sv, {reinterpret_cast<char*>(buffer.data()), buffer.length()});
     }
-    default:
-      DCHECK(false);
-      return 0;
-  }
+  };
+  return 0;
 }
 
 string SerializeString(const PrimeValue& pv) {
-  string s(*EstimateSerializedSize(pv), 0);
-  size_t written = Serialize(pv, {reinterpret_cast<uint8_t*>(s.data()), s.size()});
+  auto estimate = EstimateSerializedSize(pv);
+  string s(estimate->first, 0);
+  size_t written =
+      Serialize(estimate->second, pv, {reinterpret_cast<uint8_t*>(s.data()), s.size()});
   s.resize(written);
   return s;
 }
@@ -186,12 +190,20 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   void RetireColdEntries(size_t additional_memory);
 
   // Set value to be an in-memory type again. Update memory stats.
-  void Upload(DbIndex dbid, string_view value, bool is_raw, size_t serialized_len, PrimeValue* pv) {
+  void Upload(DbIndex dbid, string_view value, PrimeValue* pv) {
     DCHECK(!value.empty());
     DCHECK_EQ(uint8_t(pv->GetExternalRep()), uint8_t(CompactObj::ExternalRep::STRING));
 
-    pv->Materialize(value, is_raw);
-    RecordDeleted(*pv, serialized_len, GetDbTableStats(dbid));
+    switch (pv->GetExternalRep()) {
+      case CompactObj::ExternalRep::STRING:
+        pv->Materialize(value, true);
+        break;
+      case CompactObj::ExternalRep::SERIALIZED_MAP:
+        pv->InitRobj(OBJ_HASH, kEncodingListPack, nullptr);
+        break;
+    };
+
+    RecordDeleted(*pv, value.size(), GetDbTableStats(dbid));
   }
 
   // Find entry by key in db_slice and store external segment in place of original value.
@@ -211,7 +223,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
         ts_->CoolDown(key.first, key.second, segment, pv);
       } else {
         stats->AddTypeMemoryUsage(pv->ObjType(), -pv->MallocUsed());
-        pv->SetExternal(segment.offset, segment.length, CompactObj::ExternalRep::STRING);
+        auto estimation = EstimateSerializedSize(*pv);
+        pv->SetExternal(segment.offset, segment.length, estimation->second);
       }
     } else {
       LOG(DFATAL) << "Should not reach here";
@@ -268,7 +281,7 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
     } else {
       // Cut out relevant part of value and restore it to memory
       string_view value = page.substr(item_segment.offset - segment.offset, item_segment.length);
-      Upload(dbid, value, true, item_segment.length, &pv);
+      Upload(dbid, value, &pv);
     }
   }
 }
@@ -439,18 +452,18 @@ std::optional<util::fb2::Future<bool>> TieredStorage::TryStash(DbIndex dbid, str
     return {};
   }
 
-  optional<size_t> estimated = EstimateSerializedSize(*value);
+  auto estimated = EstimateSerializedSize(*value);
   DCHECK(estimated);
 
   tiering::OpManager::EntryId id;
   error_code ec;
 
   value->SetStashPending(true);
-  if (OccupiesWholePages(*estimated)) {  // large enough for own page
+  if (true /*OccupiesWholePages(*estimated)*/) {  // large enough for own page
     id = KeyRef(dbid, key);
-    if (auto prepared = op_manager_->PrepareStash(*estimated); prepared) {
+    if (auto prepared = op_manager_->PrepareStash(estimated->first); prepared) {
       auto [offset, buf] = *prepared;
-      size_t written = Serialize(*value, buf.bytes);
+      size_t written = Serialize(estimated->second, *value, buf.bytes);
       tiering::DiskSegment segment{offset, written};
       op_manager_->Stash(id, segment, buf);
     } else {
@@ -459,7 +472,7 @@ std::optional<util::fb2::Future<bool>> TieredStorage::TryStash(DbIndex dbid, str
   } else if (auto bin = bins_->Stash(dbid, key, SerializeString(*value)); bin) {
     id = bin->first;
     // TODO(vlad): Write bin to prepared buffer instead of allocating one
-    if (auto prepared = op_manager_->PrepareStash(*estimated); prepared) {
+    if (auto prepared = op_manager_->PrepareStash(estimated->first); prepared) {
       auto [offset, buf] = *prepared;
       memcpy(buf.bytes.data(), bin->second.data(), bin->second.size());
       tiering::DiskSegment segment{offset, bin->second.size()};
@@ -571,13 +584,14 @@ void TieredStorage::UpdateFromFlags() {
       .write_depth_limit = absl::GetFlag(FLAGS_tiered_storage_write_depth),
       .offload_threshold = absl::GetFlag(FLAGS_tiered_offload_threshold),
       .upload_threshold = absl::GetFlag(FLAGS_tiered_upload_threshold),
+      .experimental_hash_offload = absl::GetFlag(FLAGS_tiered_experimental_hash_offload),
   };
 }
 
 std::vector<std::string> TieredStorage::GetMutableFlagNames() {
   return base::GetFlagNames(FLAGS_tiered_min_value_size, FLAGS_tiered_experimental_cooling,
                             FLAGS_tiered_storage_write_depth, FLAGS_tiered_offload_threshold,
-                            FLAGS_tiered_upload_threshold);
+                            FLAGS_tiered_upload_threshold, FLAGS_tiered_experimental_hash_offload);
 }
 
 bool TieredStorage::ShouldOffload() const {
@@ -654,10 +668,10 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
                            ->prime.FindFirst(record->key_hash, predicate);
     CHECK(IsValid(it));
     PrimeValue& pv = it->second;
-    tiering::DiskSegment segment = FromCoolItem(pv.GetCool());
 
     // Now the item is only in storage.
-    pv.SetExternal(segment.offset, segment.length, CompactObj::ExternalRep::STRING);
+    tiering::DiskSegment segment = FromCoolItem(pv.GetCool());
+    pv.KeepExternal(segment.offset, segment.length);
 
     auto* stats = op_manager_->GetDbTableStats(record->db_index);
     stats->AddTypeMemoryUsage(record->value.ObjType(), -record->value.MallocUsed());
@@ -673,13 +687,18 @@ bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
     return false;
 
   // Estimate value size
-  optional<size_t> size = EstimateSerializedSize(pv);
-  if (!size)
+  auto estimation = EstimateSerializedSize(pv);
+  if (!estimation)
+    return false;
+
+  // For now, hash offloading is conditional
+  if (pv.ObjType() == OBJ_HASH && !config_.experimental_hash_offload)
     return false;
 
   const auto& disk_stats = op_manager_->GetStats().disk_stats;
-  return *size >= config_.min_value_size &&
-         disk_stats.allocated_bytes + tiering::kPageSize + *size < disk_stats.max_file_size;
+  return estimation->first >= config_.min_value_size &&
+         disk_stats.allocated_bytes + tiering::kPageSize + estimation->first <
+             disk_stats.max_file_size;
 }
 
 void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
