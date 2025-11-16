@@ -63,8 +63,33 @@ class TieredStorageTest : public BaseFamilyTest {
   }
 };
 
+// Test that should run with both modes of "cooling"
+class LatentCoolingTSTest : public TieredStorageTest, public testing::WithParamInterface<bool> {
+  void SetUp() override {
+    fs.emplace();
+    SetFlag(&FLAGS_tiered_experimental_cooling, GetParam());
+    TieredStorageTest::SetUp();
+  }
+
+  optional<absl::FlagSaver> fs;
+};
+
+INSTANTIATE_TEST_SUITE_P(TS, LatentCoolingTSTest, testing::Values(true, false));
+
+// Disabled cooling and all values are offloaded
+class PureDiskTSTest : public TieredStorageTest {
+  void SetUp() override {
+    fs.emplace();
+    SetFlag(&FLAGS_tiered_offload_threshold, 1.0);
+    SetFlag(&FLAGS_tiered_experimental_cooling, false);
+    TieredStorageTest::SetUp();
+  }
+
+  optional<absl::FlagSaver> fs;
+};
+
 // Perform simple series of SET, GETSET and GET
-TEST_F(TieredStorageTest, SimpleGetSet) {
+TEST_P(LatentCoolingTSTest, SimpleGetSet) {
   absl::FlagSaver saver;
   SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // disable offloading
   UpdateFromFlags();
@@ -107,7 +132,8 @@ TEST_F(TieredStorageTest, SimpleGetSet) {
   EXPECT_EQ(metrics.db_stats[0].tiered_used_bytes, 0);
 }
 
-TEST_F(TieredStorageTest, MGET) {
+// Use MGET to load multiple offloaded values
+TEST_P(LatentCoolingTSTest, MGET) {
   vector<string> command = {"MGET"}, values = {};
   for (char key = 'A'; key <= 'Z'; key++) {
     command.emplace_back(1, key);
@@ -178,7 +204,8 @@ TEST_F(TieredStorageTest, AppendStorm) {
   EXPECT_LE(metrics.tiered_stats.total_uploads, 2u);
 }
 
-TEST_F(TieredStorageTest, Ranges) {
+// SETRANGE and GETRANGE
+TEST_P(LatentCoolingTSTest, Ranges) {
   Run({"SET", "key", string(3000, 'a')});
   ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
 
@@ -194,7 +221,8 @@ TEST_F(TieredStorageTest, Ranges) {
   EXPECT_EQ(resp, string(500, 'c') + string(500, 'd'));
 }
 
-TEST_F(TieredStorageTest, MultiDb) {
+// Stash values from different databases and read them back
+TEST_P(LatentCoolingTSTest, MultiDb) {
   for (size_t i = 0; i < 10; i++) {
     Run({"SELECT", absl::StrCat(i)});
     Run({"SET", absl::StrCat("k", i), BuildString(3000, char('A' + i))});
@@ -212,6 +240,7 @@ TEST_F(TieredStorageTest, MultiDb) {
   }
 }
 
+// Trigger defragmentation
 TEST_F(TieredStorageTest, Defrag) {
   for (char k = 'a'; k < 'a' + 8; k++) {
     Run({"SET", string(1, k), string(600, k)});
@@ -248,11 +277,9 @@ TEST_F(TieredStorageTest, Defrag) {
   EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
 }
 
-TEST_F(TieredStorageTest, BackgroundOffloading) {
+TEST_F(PureDiskTSTest, BackgroundOffloading) {
   absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);      // offload all values
-  SetFlag(&FLAGS_tiered_upload_threshold, 0.0f);       // upload all values
-  SetFlag(&FLAGS_tiered_experimental_cooling, false);  // The setup works without cooling buffers
+  SetFlag(&FLAGS_tiered_upload_threshold, 0.0f);  // upload all values
   UpdateFromFlags();
 
   const int kNum = 500;
@@ -369,6 +396,7 @@ TEST_F(PureDiskTSTest, FlushAll) {
   EXPECT_EQ(metrics.db_stats.front().tiered_entries, 0u);
 }
 
+// Check FLUSHALL clears filling bytes of small bins
 TEST_F(TieredStorageTest, FlushPending) {
   absl::FlagSaver saver;
   SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // offload all values
@@ -383,23 +411,42 @@ TEST_F(TieredStorageTest, FlushPending) {
   EXPECT_EQ(GetMetrics().tiered_stats.small_bins_filling_bytes, 0u);
 }
 
-TEST_F(TieredStorageTest, MemoryPressure) {
-  max_memory_limit = 20_MB;
+// Test that clients are throttled if many stashes are issued.
+// Stashes are released with CLIENT UNPAUSE to occur at the same time
+TEST_F(PureDiskTSTest, ThrottleClients) {
   absl::FlagSaver saver;
-  absl::SetFlag(&FLAGS_tiered_upload_threshold, float(2_MB) / float(max_memory_limit));
+  absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);
+  UpdateFromFlags();
 
-  constexpr size_t kNum = 10000;
-  for (size_t i = 0; i < kNum; i++) {
-    auto resp = Run({"SET", absl::StrCat("k", i), BuildString(10000)});
-    if (resp != "OK"sv) {
-      resp = Run({"INFO", "ALL"});
-      ASSERT_FALSE(true) << i << "\nInfo ALL:\n" << resp.GetString();
-    }
-    ThisFiber::SleepFor(500us);
+  // issue client pause to accumualte SETs
+  Run({"CLIENT", "PAUSE", "1000"});
+
+  string value(4096, 'a');
+  vector<Fiber> fibs;
+  for (size_t i = 0; i < 100; i++) {
+    fibs.emplace_back(pp_->at(0)->LaunchFiber([this, i, &value] {
+      string key = absl::StrCat("k", i);
+      Run(key, {"SET", key, value});
+    }));
   }
+  ThisFiber::Yield();
 
+  // Unpause
+  Run({"CLIENT", "UNPAUSE"});
+
+  // Check if at least some of the clients were caugth throttling
+  // but we provided backpressure for all of them
   auto metrics = GetMetrics();
-  EXPECT_LT(metrics.used_mem_peak, 20_MB);
+  EXPECT_GT(metrics.tiered_stats.clients_throttled, fibs.size() / 10);
+  EXPECT_EQ(metrics.tiered_stats.total_clients_throttled, fibs.size());
+
+  for (auto& fib : fibs)
+    fib.JoinIfNeeded();
+
+  // Because of the 5ms max wait time for backpressure, we can't rely on the stashes to have
+  // finished even after all the fibers joined, so expect the condition with a timeout
+  ExpectConditionWithinTimeout(
+      [&] { return GetMetrics().tiered_stats.total_stashes == fibs.size(); });
 }
 
 TEST_F(TieredStorageTest, Expiry) {
@@ -411,11 +458,7 @@ TEST_F(TieredStorageTest, Expiry) {
   EXPECT_EQ(resp, val);
 }
 
-TEST_F(TieredStorageTest, SetExistingExpire) {
-  absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // offload all values
-  SetFlag(&FLAGS_tiered_experimental_cooling, false);
-
+TEST_F(PureDiskTSTest, SetExistingExpire) {
   const int kNum = 20;
   for (size_t i = 0; i < kNum; i++) {
     Run({"SETEX", absl::StrCat("k", i), "100", BuildString(256)});
@@ -432,13 +475,7 @@ TEST_F(TieredStorageTest, SetExistingExpire) {
   }
 }
 
-TEST_F(TieredStorageTest, Dump) {
-  absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // offload all values
-
-  // we want to test without cooling to trigger disk I/O on reads.
-  SetFlag(&FLAGS_tiered_experimental_cooling, false);
-
+TEST_F(PureDiskTSTest, Dump) {
   const int kNum = 10;
   for (size_t i = 0; i < kNum; i++) {
     Run({"SET", absl::StrCat("k", i), BuildString(3000)});  // big enough to trigger offloading.
