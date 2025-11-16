@@ -1088,7 +1088,7 @@ async def test_tls_when_read_write_is_interleaved(
     server: DflyInstance = df_factory.create(
         port=1211, **with_ca_tls_server_args, proactor_threads=1
     )
-    # TODO(kostas): to fix the deadlock in the test
+
     server.start()
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1096,13 +1096,14 @@ async def test_tls_when_read_write_is_interleaved(
     ssl_key = with_ca_tls_client_args["ssl_keyfile"]
     ssl_cert = with_ca_tls_client_args["ssl_certfile"]
     ssl_ca_cert = with_ca_tls_client_args["ssl_ca_certs"]
-    ssl_sock = ssl.wrap_socket(
-        s,
-        keyfile=ssl_key,
-        certfile=ssl_cert,
-        ca_certs=ssl_ca_cert,
-        ssl_version=ssl.PROTOCOL_TLSv1_2,
-    )
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.load_verify_locations(ssl_ca_cert)
+    context.load_cert_chain(certfile=ssl_cert, keyfile=ssl_key)
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.maximum_version = ssl.TLSVersion.TLSv1_2
+
+    ssl_sock = context.wrap_socket(s, server_hostname="localhost")
     ssl_sock.connect(("127.0.0.1", server.port))
     ssl_sock.settimeout(0.1)
 
