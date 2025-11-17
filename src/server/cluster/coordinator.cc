@@ -50,8 +50,8 @@ class Coordinator::CrossShardClient : private ProtocolClient {
 
   void SendCommand(std::string_view cmd) {
     if (auto ec = SendCommandAndReadResponse(cmd); ec) {
-      LOG(WARNING) << "Coordinator could not send command to : " << ec.message()
-                   << ", socket state: " << GetSocketInfo(Sock()->native_handle());
+      LOG(WARNING) << "Coordinator could not send command to : " << server().Description() << ": "
+                   << ec.message() << ", socket state: " << GetSocketInfo(Sock()->native_handle());
       exec_st_.ReportError(GenericError(ec, "Could not send command."));
     }
     // add response processing

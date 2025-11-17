@@ -319,7 +319,7 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
 #pragma GCC diagnostic pop
 #endif
 
-ParseResult<DocIndex> ParseCreateParams(CmdArgParser* parser) {
+ParseResult<DocIndex> CreateDocIndex(CmdArgParser* parser) {
   DocIndex index{};
 
   while (parser->HasNext()) {
@@ -1052,7 +1052,7 @@ void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
 
   bool is_cross_shard = parser.Check("CSS");
 
-  auto parsed_index = ParseCreateParams(&parser);
+  auto parsed_index = CreateDocIndex(&parser);
   if (SendErrorIfOccurred(parsed_index, &parser, builder)) {
     return;
   }
@@ -1078,6 +1078,8 @@ void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
     std::string args_str = absl::StrJoin(args.subspan(1), " ");
     std::string cmd = absl::StrCat("FT.CREATE ", idx_name, " CSS ", args_str);
 
+    // TODO add processing of the reply to make sure index was created successfully on all shards,
+    // and prevent simultaneous creation of the same index.
     cluster::Coordinator::Current().DispatchAll(cmd);
   }
 

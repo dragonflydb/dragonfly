@@ -181,6 +181,14 @@ async def wait_for_status(admin_client, node_id, status, timeout=10):
             assert len(states) != 0 and all(state[2] in status for state in states), states
 
 
+async def wait_for_ft_index_creation(client, idx_name, timeout=5):
+    get_status = lambda: client.execute_command("FT.INFO", idx_name)
+
+    async for states, breaker in tick_timer(get_status, timeout=timeout):
+        with breaker:
+            assert len(states) != 0, states
+
+
 async def wait_for_error(admin_client, node_id, error, timeout=10):
     get_status = lambda: admin_client.execute_command(
         "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id
@@ -3473,6 +3481,5 @@ async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
     )
 
     await asyncio.sleep(3)
-    assert await nodes[0].client.execute_command("ft._list") == ["idx"]
-    assert await nodes[1].client.execute_command("ft._list") == ["idx"]
-    assert await nodes[2].client.execute_command("ft._list") == ["idx"]
+    for node in nodes:
+        await wait_for_ft_index_creation(node.client, "idx")
