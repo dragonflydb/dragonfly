@@ -3558,3 +3558,46 @@ async def test_big_strings(df_factory):
     line = lines[0]
     peak_bytes = extract_int_after_prefix("Serialization peak bytes: ", line)
     assert peak_bytes < value_size
+
+
+@pytest.mark.slow
+async def test_takeover_bug_wrong_replica_checked_in_logs(df_factory):
+    master = df_factory.create(proactor_threads=4, vmodule="dflycmd=1")
+    replicas = [df_factory.create(proactor_threads=2) for _ in range(3)]
+    df_factory.start_all([master] + replicas)
+
+    c_master = master.client()
+    clients = [r.client() for r in replicas]
+
+    # Connect all replicas
+    for c in clients:
+        await c.execute_command(f"REPLICAOF localhost {master.port}")
+    await asyncio.gather(*[wait_available_async(c) for c in clients])
+
+    # Disconnect replica[1] to create lag
+    await clients[1].execute_command("REPLICAOF NO ONE")
+
+    # Write data that replica[1] will miss
+    pipe = c_master.pipeline()
+    for i in range(10000):
+        pipe.set(f"k{i}", "x" * 100)
+    await pipe.execute()
+
+    # Reconnect replica[1] and immediately takeover from replica[0]
+    await clients[1].execute_command(f"REPLICAOF localhost {master.port}")
+    try:
+        await clients[0].execute_command("REPLTAKEOVER 1")
+    except Exception:
+        pass
+
+    # Check master logs
+    master.stop(kill=False)
+    timeout_logs = master.find_in_logs("Couldn't synchronize with replica")
+
+    # BUG: logs show replica[0] port (initiating), should show replica[1] or replica[2]
+    # After fix: no timeout logs (replicas sync correctly) OR logs show correct replica
+    if timeout_logs:
+        for log in timeout_logs:
+            assert (
+                str(replicas[0].port) not in log
+            ), f"BUG: Checked initiating replica {replicas[0].port} instead of others"
