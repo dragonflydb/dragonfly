@@ -851,6 +851,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
       std::string_view key = it->first.GetSlice(&tmp);
       SlotId sid = KeySlot(key);
       if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
+        // We use copy of table smart pointer and pass it as table because FLLUSHALL can drop table.
         Del(db_cntx, Iterator::FromPrime(it), table.get());
         ++del_count;
       }
