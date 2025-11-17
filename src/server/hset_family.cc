@@ -456,7 +456,8 @@ struct OpSetParams {
 };
 
 OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdArgList values,
-                                    const OpSetParams& op_sp = OpSetParams{}) {
+                                    const OpSetParams& op_sp = OpSetParams{},
+                                    optional<util::fb2::Future<bool>>* bp_anker = nullptr) {
   DCHECK(!values.empty() && 0 == values.size() % 2);
   VLOG(2) << "OpSet(" << key << ")";
 
@@ -543,8 +544,11 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
 
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
 
-  if (auto* ts = op_args.shard->tiered_storage(); ts)
-    ts->TryStash(op_args.db_cntx.db_index, key, &pv);
+  if (auto* ts = op_args.shard->tiered_storage(); ts) {
+    auto bp = ts->TryStash(op_args.db_cntx.db_index, key, &pv, true);
+    if (bp && bp_anker)
+      *bp_anker = std::move(*bp);
+  }
 
   return CbVariant<uint32_t>{created};
 }
@@ -905,13 +909,18 @@ void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
   }
 
+  optional<util::fb2::Future<bool>> tiered_backpressure;
+
   args.remove_prefix(1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, args);
+    return OpSet(t->GetOpArgs(shard), key, args, OpSetParams{}, &tiered_backpressure);
   };
 
   auto delayed_result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   OpResult<uint32_t> result = Unwrap(std::move(delayed_result));
+
+  if (tiered_backpressure)
+    tiered_backpressure->GetFor(10ms);
 
   if (result && cmd == "HSET") {
     rb->SendLong(*result);
