@@ -323,7 +323,9 @@ class DbSlice {
   void ActivateDb(DbIndex db_ind);
 
   // Deletes the iterator. The iterator must be valid.
-  void Del(Context cntx, Iterator it);
+  // Context argument is used only for document removal and it just needs
+  // timestamp field. Last argument, db_table, is optional and is used only in FlushSlotsCb.
+  void Del(Context cntx, Iterator it, DbTable* db_table = nullptr);
 
   // Deletes a key after FindMutable(). Runs post_updater before deletion
   // to update memory accounting while the key is still valid.
