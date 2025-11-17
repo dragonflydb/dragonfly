@@ -230,7 +230,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
       RecordExpiryBlocking(cntx_.db_index, key);
     }
-    db_slice_->PerformDeletion(DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)), table);
+    db_slice_->Del(cntx_, DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)));
 
     ++evicted_;
   }
@@ -802,10 +802,11 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
   CreateDb(db_ind);
 }
 
-void DbSlice::Del(Context cntx, Iterator it) {
+void DbSlice::Del(Context cntx, Iterator it, DbTable* db_table) {
   CHECK(IsValid(it));
 
-  auto& db = db_arr_[cntx.db_index];
+  ExpIterator exp_it;
+  DbTable* table = db_table ? db_table : db_arr_[cntx.db_index].get();
   auto obj_type = it->second.ObjType();
 
   if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
@@ -813,7 +814,13 @@ void DbSlice::Del(Context cntx, Iterator it) {
     string_view key = it->first.GetSlice(&tmp);
     doc_del_cb_(key, cntx, it->second);
   }
-  PerformDeletion(it, db.get());
+
+  if (it->second.HasExpire()) {
+    exp_it = ExpIterator::FromPrime(table->expire.Find(it->first));
+    DCHECK(!exp_it.is_done());
+  }
+
+  PerformDeletionAtomic(it, exp_it, table);
 }
 
 void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
@@ -828,6 +835,10 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   boost::intrusive_ptr<DbTable> table = db_arr_.front();
   size_t memory_before = table->table_memory() + table->stats.obj_memory_usage;
 
+  DbContext db_cntx;
+  db_cntx.time_now_ms = GetCurrentTimeMs();
+  db_cntx.db_index = table->index;
+
   std::string tmp;
   auto iterate_bucket = [&](PrimeTable::bucket_iterator it) {
     it.AdvanceIfNotOccupied();
@@ -835,7 +846,8 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
       std::string_view key = it->first.GetSlice(&tmp);
       SlotId sid = KeySlot(key);
       if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
-        PerformDeletion(Iterator::FromPrime(it), table.get());
+        // We use copy of table smart pointer and pass it as table because FLLUSHALL can drop table.
+        Del(db_cntx, Iterator::FromPrime(it), table.get());
         ++del_count;
       }
       ++it;
@@ -1411,7 +1423,7 @@ int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) c
          db_arr_[db_ind]->prime.GetSegmentCount();
 }
 
-pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind,
+pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, const Context& cntx,
                                                               size_t starting_segment_id,
                                                               size_t increase_goal_bytes) {
   // Disable flush journal changes to prevent preemtion
@@ -1474,7 +1486,8 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind,
 
         evicted_bytes += evict_it->first.MallocUsed() + evict_it->second.MallocUsed();
         ++evicted_items;
-        PerformDeletion(Iterator(evict_it, StringOrView::FromView(key)), db_table.get());
+
+        Del(cntx, Iterator(evict_it, StringOrView::FromView(key)));
 
         // returns when whichever condition is met first
         if ((evicted_items == max_eviction_per_hb) || (evicted_bytes >= increase_goal_bytes))
@@ -1821,16 +1834,6 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
   if (!client_tracking_map_.empty()) {
     QueueInvalidationTrackingMessageAtomic(del_it.key());
   }
-}
-
-void DbSlice::PerformDeletion(Iterator del_it, DbTable* table) {
-  ExpIterator exp_it;
-  if (del_it->second.HasExpire()) {
-    exp_it = ExpIterator::FromPrime(table->expire.Find(del_it->first));
-    DCHECK(!exp_it.is_done());
-  }
-
-  PerformDeletionAtomic(del_it, exp_it, table);
 }
 
 void DbSlice::OnCbFinishBlocking() {
