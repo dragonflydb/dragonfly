@@ -360,7 +360,7 @@ async def test_remove_docs_on_eviction(df_factory):
     index_info = await client.execute_command(f"FT.INFO idx")
     index_info_num_docs = index_info[9]
 
-    # Get number of keys in datbase
+    # Get number of keys in database
     keyspace_info = await client.info("keyspace")
     keyspace_keys = keyspace_info["db0"]["keys"]
 

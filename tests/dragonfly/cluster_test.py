@@ -3486,7 +3486,7 @@ async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
 
 
 async def verify_keys_match_number_of_index_docs(client, expected_num_keys):
-    # Get number of docs in index o
+    # Get number of docs in index
     index_info = await client.execute_command(f"FT.INFO idx")
     index_info_num_docs = index_info[9]
 
