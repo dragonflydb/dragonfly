@@ -805,7 +805,8 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
 void DbSlice::Del(Context cntx, Iterator it) {
   CHECK(IsValid(it));
 
-  auto& db = db_arr_[cntx.db_index];
+  ExpIterator exp_it;
+  DbTable* table = db_arr_[cntx.db_index].get();
   auto obj_type = it->second.ObjType();
 
   if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
@@ -813,7 +814,13 @@ void DbSlice::Del(Context cntx, Iterator it) {
     string_view key = it->first.GetSlice(&tmp);
     doc_del_cb_(key, cntx, it->second);
   }
-  PerformDeletion(it, db.get());
+
+  if (it->second.HasExpire()) {
+    exp_it = ExpIterator::FromPrime(table->expire.Find(it->first));
+    DCHECK(!exp_it.is_done());
+  }
+
+  PerformDeletionAtomic(it, exp_it, table);
 }
 
 void DbSlice::DelMutable(Context cntx, ItAndUpdater it_updater) {
@@ -1831,16 +1838,6 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
   if (!client_tracking_map_.empty()) {
     QueueInvalidationTrackingMessageAtomic(del_it.key());
   }
-}
-
-void DbSlice::PerformDeletion(Iterator del_it, DbTable* table) {
-  ExpIterator exp_it;
-  if (del_it->second.HasExpire()) {
-    exp_it = ExpIterator::FromPrime(table->expire.Find(del_it->first));
-    DCHECK(!exp_it.is_done());
-  }
-
-  PerformDeletionAtomic(del_it, exp_it, table);
 }
 
 void DbSlice::OnCbFinishBlocking() {

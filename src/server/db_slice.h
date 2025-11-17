@@ -322,9 +322,6 @@ class DbSlice {
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
 
-  // Delete a key referred by its iterator.
-  void PerformDeletion(Iterator del_it, DbTable* table);
-
   // Deletes the iterator. The iterator must be valid.
   void Del(Context cntx, Iterator it);
 
