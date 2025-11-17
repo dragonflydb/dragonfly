@@ -9,9 +9,10 @@
 using namespace jsoncons;
 using namespace std;
 
-namespace dfly {
+namespace {
 
-optional<JsonType> JsonFromString(string_view input, PMR_NS::memory_resource* mr) {
+template <typename T>
+std::optional<T> ParseWithDecoder(std::string_view input, json_decoder<T>&& decoder) {
   error_code ec;
   auto JsonErrorHandler = [](json_errc ec, const ser_context&) {
     VLOG(1) << "Error while decode JSON: " << make_error_code(ec).message();
@@ -31,7 +32,6 @@ optional<JsonType> JsonFromString(string_view input, PMR_NS::memory_resource* mr
   auto parser_options = jsoncons::json_options{}.max_nesting_depth(
       std::min(json_nesting_depth_limit, uint32_t(input.size() / 2)));
 
-  json_decoder<JsonType> decoder(std::pmr::polymorphic_allocator<char>{mr});
   json_parser parser(parser_options, JsonErrorHandler);
 
   parser.update(input);
@@ -41,6 +41,18 @@ optional<JsonType> JsonFromString(string_view input, PMR_NS::memory_resource* mr
     return decoder.get_result();
   }
   return nullopt;
+}
+
+}  // namespace
+
+namespace dfly {
+
+std::optional<ShortLivedJSON> JsonFromString(std::string_view input) {
+  return ParseWithDecoder(input, json_decoder<ShortLivedJSON>{});
+}
+
+optional<JsonType> JsonFromString(string_view input, PMR_NS::memory_resource* mr) {
+  return ParseWithDecoder(input, json_decoder<JsonType>{std::pmr::polymorphic_allocator<char>{mr}});
 }
 
 JsonType DeepCopyJSON(const JsonType* j, PMR_NS::memory_resource* mr) {

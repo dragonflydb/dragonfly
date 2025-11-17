@@ -235,11 +235,12 @@ void Send(const std::vector<std::string>& vec, RedisReplyBuilder* rb) {
   Send(vec.begin(), vec.end(), rb);
 }
 
-void Send(const JsonType& value, RedisReplyBuilder* rb) {
+template <typename Allocator>
+void Send(const JsonWithAllocator<Allocator>& value, RedisReplyBuilder* rb) {
   if (value.is_double()) {
     Send(value.as_double(), rb);
   } else if (value.is_number()) {
-    Send(value.as_integer<long>(), rb);
+    Send(value.template as_integer<long>(), rb);
   } else if (value.is_bool()) {
     rb->SendSimpleString(value.as_bool() ? "true" : "false");
   } else if (value.is_null()) {
@@ -341,9 +342,7 @@ void SendJsonString(const OpResult<string>& result, RedisReplyBuilder* rb) {
   if (result) {
     const string& json_str = result.value();
     if (rb->IsResp3()) {
-      std::optional<JsonType> parsed_json =
-          JsonFromString(json_str, PMR_NS::get_default_resource());
-      if (parsed_json) {
+      if (const std::optional<ShortLivedJSON> parsed_json = JsonFromString(json_str)) {
         Send(parsed_json.value(), rb);
         return;
       }
@@ -1736,8 +1735,7 @@ void JsonFamily::Resp(CmdArgList args, const CommandContext& cmd_cntx) {
   };
 
   auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  reply_generic::Send(result, builder);
 }
 
 void JsonFamily::Debug(CmdArgList args, const CommandContext& cmd_cntx) {
