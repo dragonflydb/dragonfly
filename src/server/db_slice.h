@@ -322,11 +322,10 @@ class DbSlice {
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
 
-  // Delete a key referred by its iterator.
-  void PerformDeletion(Iterator del_it, DbTable* table);
-
   // Deletes the iterator. The iterator must be valid.
-  void Del(Context cntx, Iterator it);
+  // Context argument is used only for document removal and it just needs
+  // timestamp field. Last argument, db_table, is optional and is used only in FlushSlotsCb.
+  void Del(Context cntx, Iterator it, DbTable* db_table = nullptr);
 
   constexpr static DbIndex kDbAll = 0xFFFF;
 
@@ -447,7 +446,7 @@ class DbSlice {
   // Evicts items with dynamically allocated data from the primary table.
   // Does not shrink tables.
   // Returns number of (elements,bytes) freed due to evictions.
-  std::pair<uint64_t, size_t> FreeMemWithEvictionStepAtomic(DbIndex db_indx,
+  std::pair<uint64_t, size_t> FreeMemWithEvictionStepAtomic(DbIndex db_indx, const Context& cntx,
                                                             size_t starting_segment_id,
                                                             size_t increase_goal_bytes);
 
