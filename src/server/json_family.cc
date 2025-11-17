@@ -2004,7 +2004,7 @@ void JsonFamily::StrAppend(CmdArgList args, const CommandContext& cmd_cntx) {
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   // We try parsing the value into json string object first.
-  optional<JsonType> parsed_json = dfly::JsonFromString(value, PMR_NS::get_default_resource());
+  optional<ShortLivedJSON> parsed_json = JsonFromString(value);
   if (!parsed_json || !parsed_json->is_string()) {
     return builder->SendError("expected string value", kSyntaxErrType);
   };
