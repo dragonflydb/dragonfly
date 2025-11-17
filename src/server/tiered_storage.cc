@@ -321,7 +321,6 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, tiering::DiskSegme
   auto key = get<OpManager::KeyRef>(id);
   auto* pv = Find(key);
   if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
-    VLOG(0) << "Touched? " << pv->WasTouched();
     if (metrics.modified || pv->WasTouched()) {
       ++stats_.total_uploads;
       decoder->Upload(pv);
