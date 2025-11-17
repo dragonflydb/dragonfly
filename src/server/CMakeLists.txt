@@ -26,7 +26,7 @@ set_property(SOURCE dfly_main.cc APPEND PROPERTY COMPILE_DEFINITIONS
 
 if (WITH_TIERING)
     SET(TX_LINUX_SRCS tiering/disk_storage.cc tiering/op_manager.cc
-      tiering/small_bins.cc tiering/external_alloc.cc tiering/serialized_map.cc tiering/decoders.cc)
+      tiering/small_bins.cc tiering/external_alloc.cc)
 
     add_executable(dfly_bench dfly_bench.cc)
     cxx_link(dfly_bench dfly_parser_lib fibers2 absl::random_random redis_lib)
@@ -63,6 +63,7 @@ add_library(dfly_transaction db_slice.cc blocking_controller.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
             server_state.cc table.cc  transaction.cc tx_base.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
+            tiering/serialized_map.cc tiering/decoders.cc
             ${TX_LINUX_SRCS} acl/acl_log.cc slowlog.cc channel_store.cc)
 
 

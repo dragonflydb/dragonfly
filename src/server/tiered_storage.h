@@ -188,6 +188,10 @@ class TieredStorage {
             std::function<void(io::Result<std::string>)> readf) {
   }
 
+  template <typename D, typename F>
+  void Read(DbIndex dbid, std::string_view key, const PrimeValue& value, const D& decoder, F&& f) {
+  }
+
   template <typename T>
   TResult<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
                     std::function<T(std::string*)> modf) {
