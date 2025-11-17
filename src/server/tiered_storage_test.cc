@@ -343,7 +343,7 @@ TEST_F(PureDiskTSTest, OffloadingStrategy) {
     EXPECT_EQ(metrics.tiered_stats.total_fetches, 2 * i - 1);
     EXPECT_EQ(metrics.tiered_stats.total_uploads, i - 1);
 
-    // But on second read
+    // But on second read upload should happend at the end of chain due to two touches
     Run({"get", "key"});
     ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.total_uploads == i; });
     metrics = GetMetrics();
