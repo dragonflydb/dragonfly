@@ -230,7 +230,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
       RecordExpiryBlocking(cntx_.db_index, key);
     }
-    db_slice_->PerformDeletion(DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)), table);
+    db_slice_->Del(cntx_, DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)));
 
     ++evicted_;
   }
@@ -834,13 +834,13 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   size_t memory_before = table->table_memory() + table->stats.obj_memory_usage;
 
   std::string tmp;
-  auto iterate_bucket = [&](PrimeTable::bucket_iterator it) {
+  auto iterate_bucket = [&](PrimeTable::bucket_iterator it, const Context& cntx) {
     it.AdvanceIfNotOccupied();
     while (!it.is_done()) {
       std::string_view key = it->first.GetSlice(&tmp);
       SlotId sid = KeySlot(key);
       if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
-        PerformDeletion(Iterator::FromPrime(it), table.get());
+        Del(cntx, Iterator::FromPrime(it));
         ++del_count;
       }
       ++it;
@@ -849,18 +849,21 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
 
   auto on_change = [&](DbIndex db_index, const ChangeReq& req) {
     FiberAtomicGuard fg;
+    DbContext db_cntx;
     PrimeTable* table = GetTables(db_index).first;
+    db_cntx.time_now_ms = GetCurrentTimeMs();
+    db_cntx.db_index = db_index;
 
     if (const PrimeTable::bucket_iterator* bit = req.update()) {
       if (!bit->is_done() && bit->GetVersion() < next_version) {
-        iterate_bucket(*bit);
+        iterate_bucket(*bit, db_cntx);
       }
     } else {
       string_view key = get<string_view>(req.change);
       table->CVCUponInsert(next_version, key,
-                           [next_version, iterate_bucket](PrimeTable::bucket_iterator it) {
+                           [next_version, iterate_bucket, db_cntx](PrimeTable::bucket_iterator it) {
                              DCHECK_LT(it.GetVersion(), next_version);
-                             iterate_bucket(it);
+                             iterate_bucket(it, db_cntx);
                            });
     }
   };
@@ -869,9 +872,14 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   ServerState& etl = *ServerState::tlocal();
   PrimeTable* pt = &table->prime;
   PrimeTable::Cursor cursor;
+  DbContext db_cntx;
+  db_cntx.time_now_ms = GetCurrentTimeMs();
+  db_cntx.db_index = table->index;
 
   do {
-    PrimeTable::Cursor next = pt->TraverseBuckets(cursor, iterate_bucket);
+    PrimeTable::Cursor next = pt->TraverseBuckets(
+        cursor,
+        [iterate_bucket, db_cntx](PrimeTable::bucket_iterator it) { iterate_bucket(it, db_cntx); });
     cursor = next;
     ThisFiber::Yield();
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
