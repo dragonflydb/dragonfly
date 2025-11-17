@@ -322,6 +322,30 @@ TEST_F(PureDiskTSTest, BackgroundOffloading) {
   EXPECT_EQ(metrics.tiered_stats.allocated_bytes, kNum * 4096);
 }
 
+TEST_F(PureDiskTSTest, OffloadingStrategy) {
+  // Create value and wait to be offlaoded
+  string value = BuildString(3000);
+  Run({"set", "key", value});
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 1; });
+  EXPECT_EQ(GetMetrics().tiered_stats.total_uploads, 0);
+
+  // Repeat a few times
+  for (size_t i = 0; i < 3; i++) {
+    // Value is not uploaded after first read
+    Run({"get", "key"});
+    EXPECT_EQ(GetMetrics().tiered_stats.total_uploads, i);
+
+    // But on second read
+    Run({"get", "key"});
+    EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 0u);
+    EXPECT_EQ(GetMetrics().tiered_stats.total_uploads, i + 1);
+
+    // Wait for offloading again
+    ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 1; });
+    EXPECT_EQ(GetMetrics().tiered_stats.total_stashes, i + 2);
+  }
+}
+
 // Test FLUSHALL while reading entries
 TEST_F(PureDiskTSTest, FlushAll) {
   const int kNum = 500;
