@@ -3518,10 +3518,6 @@ async def test_remove_docs_on_cluster_migration(df_factory):
         "FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "v", "TEXT"
     )
 
-    await nodes[1].client.execute_command(
-        "FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "v", "TEXT"
-    )
-
     # Populate node 0
     keys = 100
     for i in range(0, keys):
