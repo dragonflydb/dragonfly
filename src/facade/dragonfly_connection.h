@@ -382,7 +382,7 @@ class Connection : public util::Connection {
   PipelineMessagePtr GetFromPipelinePool();
 
   void HandleMigrateRequest();
-  std::error_code HandleRecvSocket();
+  io::Result<size_t> HandleRecvSocket();
 
   bool ShouldEndAsyncFiber(const MessageHandle& msg);
 
@@ -406,17 +406,11 @@ class Connection : public util::Connection {
     size_t available_bytes;
     io::Bytes slice;
 
-    bool ShouldAdvance() const {
-      return slice.empty();
-    }
-
     void Consume(size_t len) {
       available_bytes -= len;
       slice.remove_prefix(len);
     }
   };
-
-  io::Bytes NextBundleBuffer(size_t total_len);
 
   void IncrNumConns();
   void DecrNumConns();

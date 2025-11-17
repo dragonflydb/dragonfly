@@ -61,6 +61,11 @@ error_code ProtocolClient::Recv(FiberSocketBase* input, base::IoBuf* dest) {
     return exp_size.error();
   }
 
+  if (*exp_size == 0) {
+    VLOG(1) << "Connection closed by peer";
+    return make_error_code(errc::connection_aborted);
+  }
+
   TouchIoTime();
 
   dest->CommitWrite(*exp_size);
@@ -72,21 +77,21 @@ std::string ProtocolClient::ServerContext::Description() const {
 }
 
 void ValidateClientTlsFlags() {
-  if (!absl::GetFlag(FLAGS_tls_replication)) {
+  if (!GetFlag(FLAGS_tls_replication)) {
     return;
   }
 
   bool has_auth = false;
 
-  if (!absl::GetFlag(FLAGS_tls_key_file).empty()) {
-    if (absl::GetFlag(FLAGS_tls_cert_file).empty()) {
+  if (!GetFlag(FLAGS_tls_key_file).empty()) {
+    if (GetFlag(FLAGS_tls_cert_file).empty()) {
       LOG(ERROR) << "tls_cert_file flag should be set";
       exit(1);
     }
     has_auth = true;
   }
 
-  if (!absl::GetFlag(FLAGS_masterauth).empty())
+  if (!GetFlag(FLAGS_masterauth).empty())
     has_auth = true;
 
   if (!has_auth) {
@@ -97,7 +102,7 @@ void ValidateClientTlsFlags() {
 
 void ProtocolClient::MaybeInitSslCtx() {
 #ifdef DFLY_USE_SSL
-  if (absl::GetFlag(FLAGS_tls_replication)) {
+  if (GetFlag(FLAGS_tls_replication)) {
     ssl_ctx_ = CreateSslCntx(facade::TlsContextRole::CLIENT);
   }
 #endif
@@ -207,8 +212,8 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
 
   // CHECK_EQ(0, setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)));
 
-  auto masterauth = absl::GetFlag(FLAGS_masterauth);
-  auto masteruser = absl::GetFlag(FLAGS_masteruser);
+  auto masterauth = GetFlag(FLAGS_masterauth);
+  auto masteruser = GetFlag(FLAGS_masteruser);
   ResetParser(RedisParser::Mode::CLIENT);
   if (!masterauth.empty()) {
     auto cmd = masteruser.empty() ? StrCat("AUTH ", masterauth)
