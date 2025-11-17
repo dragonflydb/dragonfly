@@ -840,12 +840,13 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   boost::intrusive_ptr<DbTable> table = db_arr_.front();
   size_t memory_before = table->table_memory() + table->stats.obj_memory_usage;
 
+  DbContext db_cntx;
+  db_cntx.time_now_ms = GetCurrentTimeMs();
+  db_cntx.db_index = table->index;
+
   std::string tmp;
   auto iterate_bucket = [&](PrimeTable::bucket_iterator it) {
     it.AdvanceIfNotOccupied();
-    DbContext db_cntx;
-    db_cntx.time_now_ms = GetCurrentTimeMs();
-    db_cntx.db_index = table->index;
     while (!it.is_done()) {
       std::string_view key = it->first.GetSlice(&tmp);
       SlotId sid = KeySlot(key);
