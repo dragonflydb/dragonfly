@@ -326,7 +326,7 @@ async def test_throttle_on_commands_squashing_replies_bytes(df_factory: DflyInst
 
 
 @pytest.mark.asyncio
-async def test_delete_doc_on_eviction(df_factory):
+async def test_remove_docs_on_eviction(df_factory):
     max_memory = 256 * 1024**2  # 256MB
     df_server = df_factory.create(
         proactor_threads=1,
