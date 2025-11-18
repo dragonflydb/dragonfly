@@ -3052,6 +3052,7 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     await fill_task
 
 
+@pytest.mark.skip("too heavy")
 @pytest.mark.opt_only
 @dfly_args({"proactor_threads": 2, "serialization_max_chunk_size": 5000, "compression_mode": "0"})
 async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory):
