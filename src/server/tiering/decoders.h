@@ -61,7 +61,7 @@ struct StringDecoder : public Decoder {
  private:
   explicit StringDecoder(CompactObj::StrEncoding encoding);
 
-  bool modified_;
+  bool modified_ = false;
   std::string_view slice_;
   CompactObj::StrEncoding encoding_;
   dfly::StringOrView value_;
