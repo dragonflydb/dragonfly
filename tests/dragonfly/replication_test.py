@@ -1418,7 +1418,10 @@ async def test_take_over_timeout(df_factory, df_seeder_factory):
     try:
         await c_replica.execute_command(f"REPLTAKEOVER 0")
     except redis.exceptions.ResponseError as e:
-        assert str(e) == "Couldn't execute takeover"
+        # Should fail with detailed error message
+        assert str(e).startswith("Couldn't execute takeover")
+        # Verify it includes diagnostic information
+        assert ":" in str(e), "Error message should include diagnostic details"
     else:
         assert False, "Takeover should not succeed."
     seeder.stop()
