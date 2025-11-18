@@ -481,7 +481,6 @@ std::optional<util::fb2::Future<bool>> TieredStorage::TryStash(DbIndex dbid, str
       tiering::DiskSegment segment{offset, bin->second.size()};
       op_manager_->Stash(id, segment, buf);
     } else {
-      CHECK(false);
       ec = prepared.error();
     }
   } else {
