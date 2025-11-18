@@ -486,7 +486,10 @@ TEST_P(LatentCoolingTSTest, SimpleHash) {
 
   // Verify correctness
   for (size_t i = 0; i < kNUM; i++) {
-    auto resp = Run({"HGET", absl::StrCat("k", i), string{1, 'f'}});
+    string key = absl::StrCat("k", i);
+    EXPECT_THAT(Run({"HLEN", key}), IntArg(26));
+
+    auto resp = Run({"HGET", key, string{1, 'f'}});
     auto v = string{31, 'x'} + 'f';
     EXPECT_EQ(resp, v);
   }
