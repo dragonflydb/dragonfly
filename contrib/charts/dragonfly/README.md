@@ -1,6 +1,6 @@
 # dragonfly
 
-![Version: v0.12.0](https://img.shields.io/badge/Version-v0.12.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v0.12.0](https://img.shields.io/badge/AppVersion-v0.12.0-informational?style=flat-square)
+![Version: v1.34.2](https://img.shields.io/badge/Version-v1.34.2-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v1.34.2](https://img.shields.io/badge/AppVersion-v1.34.2-informational?style=flat-square)
 
 Dragonfly is a modern in-memory datastore, fully compatible with Redis and Memcached APIs.
 
@@ -32,21 +32,29 @@ helm upgrade --install dragonfly oci://ghcr.io/dragonflydb/dragonfly/helm/dragon
 |-----|------|---------|-------------|
 | affinity | object | `{}` | Affinity for pod assignment |
 | command | list | `[]` | Allow overriding the container's command |
+| env | list | `[]` | extra environment variables |
+| envFrom | list | `[]` | extra environment variables from K8s objects |
 | extraArgs | list | `[]` | Extra arguments to pass to the dragonfly binary |
 | extraContainers | list | `[]` | Additional sidecar containers |
 | extraObjects | list | `[]` | extra K8s manifests to deploy |
 | extraVolumeMounts | list | `[]` | Extra volume mounts corresponding to the volumes mounted above |
 | extraVolumes | list | `[]` | Extra volumes to mount into the pods |
 | fullnameOverride | string | `""` | String to fully override dragonfly.fullname |
+| hostNetwork | bool | `false` | Set hostNetwork for pod |
 | image.pullPolicy | string | `"IfNotPresent"` | Dragonfly image pull policy |
 | image.repository | string | `"docker.dragonflydb.io/dragonflydb/dragonfly"` | Container Image Registry to pull the image from |
 | image.tag | string | `""` | Overrides the image tag whose default is the chart appVersion. |
 | imagePullSecrets | list | `[]` | Container Registry Secret names in an array |
 | initContainers | list | `[]` | A list of initContainers to run before each pod starts |
+| mode | string | `"deployment"` | Valid values are "deployment" or "statefulset". |
 | nameOverride | string | `""` | String to partially override dragonfly.fullname |
 | nodeSelector | object | `{}` | Node labels for pod assignment |
+| passwordFromSecret.enable | bool | `false` |  |
+| passwordFromSecret.existingSecret.key | string | `""` |  |
+| passwordFromSecret.existingSecret.name | string | `""` |  |
 | podAnnotations | object | `{}` | Annotations for pods |
 | podSecurityContext | object | `{}` | Set securityContext for pod itself |
+| priorityClassName | string | `""` | Priority class name for pod assignment |
 | probes.livenessProbe.exec.command[0] | string | `"/bin/sh"` |  |
 | probes.livenessProbe.exec.command[1] | string | `"/usr/local/bin/healthcheck.sh"` |  |
 | probes.livenessProbe.failureThreshold | int | `3` |  |
@@ -66,11 +74,11 @@ helm upgrade --install dragonfly oci://ghcr.io/dragonflydb/dragonfly/helm/dragon
 | replicaCount | int | `1` | Number of replicas to deploy |
 | resources.limits | object | `{}` | The resource limits for the containers |
 | resources.requests | object | `{}` | The requested resources for the containers |
-| env | list | `[]` | Extra environment variables |
-| envFrom | list | `[]` | Extra environment variables from K8s objects |
 | securityContext | object | `{}` | Set securityContext for containers |
 | service.annotations | object | `{}` | Extra annotations for the service |
+| service.clusterIP | string | `""` | Cluster IP address to assign to the service. Leave empty to auto-allocate |
 | service.labels | object | `{}` | Extra labels for the service |
+| service.loadBalancerIP | string | `""` | Load balancer static ip to use when service type is set to LoadBalancer |
 | service.metrics.portName | string | `"metrics"` | name for the metrics port |
 | service.metrics.serviceType | string | `"ClusterIP"` | serviceType for the metrics service |
 | service.port | int | `6379` | Dragonfly service port |
@@ -92,10 +100,12 @@ helm upgrade --install dragonfly oci://ghcr.io/dragonflydb/dragonfly/helm/dragon
 | tls.duration | string | `"87600h0m0s"` | duration or ttl of the validity of the created certificate |
 | tls.enabled | bool | `false` | enable TLS |
 | tls.existing_secret | string | `""` | use TLS certificates from existing secret |
+| tls.issuer.group | string | `"cert-manager.io"` | group of the referenced issuer if you are using an external issuer, change this to that issuer group. |
 | tls.issuer.kind | string | `"ClusterIssuer"` | cert-manager issuer kind. Usually Issuer or ClusterIssuer |
 | tls.issuer.name | string | `"selfsigned"` | name of the referenced issuer |
 | tls.key | string | `""` | TLS private key |
 | tolerations | list | `[]` | Tolerations for pod assignment |
+| topologySpreadConstraints | list | `[]` | Topology Spread Constraints for pod assignment |
 
 ----------------------------------------------
-Autogenerated from chart metadata using [helm-docs v1.11.0](https://github.com/norwoodj/helm-docs/releases/v1.11.0)
+Autogenerated from chart metadata using [helm-docs v1.14.2](https://github.com/norwoodj/helm-docs/releases/v1.14.2)
