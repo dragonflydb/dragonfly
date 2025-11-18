@@ -1098,19 +1098,31 @@ size_t ClusterFamily::MigrationsErrorsCount() const {
   return error_num;
 }
 
-void ClusterFamily::ReconcileMasterFlow() {
-  auto config = cluster::ClusterConfig::Current();
+void ClusterFamily::ReconcileMasterSlots(std::string_view repl_id) {
+  util::fb2::LockGuard gu(set_config_mu);
+  util::fb2::LockGuard lk(migration_mu_);
+
+  auto config = ClusterConfig::Current();
+
+  // Sanity -- we should not reach there
+  if (!config) {
+    LOG(ERROR) << "Cluster config after takeover is empty";
+    return;
+  }
 
   for (auto& info : config->GetMutableConfig()) {
     if (info.master.id == id_) {
       if (!info.replicas.empty()) {
-        LOG_IF(ERROR, info.replicas.size() > 1)
-            << "More than one replica found, slot redirection after takeover corrupted";
+        auto target = std::find_if(info.replicas.begin(), info.replicas.end(),
+                                   [repl_id](const auto& e) { return e.id == repl_id; });
 
-        // assumes there is one replica per master node
-        // TODO figure a smart way to get the replica id_ so
-        // we can find it here
-        info.master = info.replicas.front();
+        if (target == info.replicas.end()) {
+          LOG(ERROR) << "Could not find repl_id: " << repl_id
+                     << " in cluster topology. Slot redirection after takeover corrupted";
+          return;
+        }
+
+        info.master = *target;
         info.replicas.clear();
       }
       break;
@@ -1118,7 +1130,18 @@ void ClusterFamily::ReconcileMasterFlow() {
   }
 }
 
-void ClusterFamily::ReconcileReplicaFlow() {
+void ClusterFamily::ReconcileReplicaSlots() {
+  util::fb2::LockGuard gu(set_config_mu);
+  util::fb2::LockGuard lk(migration_mu_);
+
+  auto config = ClusterConfig::Current();
+
+  // Sanity -- we should not reach there
+  if (!config) {
+    LOG(ERROR) << "Cluster config after takeover is empty";
+    return;
+  }
+
   auto new_config = ClusterConfig::Current()->CloneWithChanges({}, {});
   // Replace master with replica in shard config.
   bool found = false;
@@ -1140,26 +1163,6 @@ void ClusterFamily::ReconcileReplicaFlow() {
 
   server_family_->service().proactor_pool().AwaitFiberOnAll(
       [&new_config](util::ProactorBase*) { ClusterConfig::SetCurrent(new_config); });
-}
-
-void ClusterFamily::ReconcileMasterReplicaTakeoverSlots(bool was_master) {
-  util::fb2::LockGuard gu(set_config_mu);
-  util::fb2::LockGuard lk(migration_mu_);
-
-  auto config = ClusterConfig::Current();
-
-  // Sanity -- we should not reach there
-  if (!config) {
-    LOG(ERROR) << "Cluster config after takeover is empty";
-    return;
-  }
-
-  if (was_master) {
-    ReconcileMasterFlow();
-    return;
-  }
-
-  ReconcileReplicaFlow();
 }
 
 using EngineFunc = void (ClusterFamily::*)(CmdArgList args, const CommandContext& cmd_cntx);
