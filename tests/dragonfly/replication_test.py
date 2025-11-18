@@ -3589,8 +3589,11 @@ async def test_takeover_bug_wrong_replica_checked_in_logs(df_factory):
 
     # Reconnect replica[1] and immediately takeover from replica[0]
     await clients[1].execute_command(f"REPLICAOF localhost {master.port}")
+
+    await asyncio.sleep(0.5)
+
     try:
-        await clients[0].execute_command("REPLTAKEOVER 1")
+        await clients[0].execute_command("REPLTAKEOVER 10")
     except Exception:
         pass
 
