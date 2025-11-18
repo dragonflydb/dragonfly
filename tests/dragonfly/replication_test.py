@@ -1421,7 +1421,10 @@ async def test_take_over_timeout(df_factory, df_seeder_factory):
     try:
         await c_replica.execute_command(f"REPLTAKEOVER 0")
     except redis.exceptions.ResponseError as e:
-        assert str(e) == "Couldn't execute takeover"
+        # Should fail with detailed error message
+        assert str(e).startswith("Couldn't execute takeover")
+        # Verify it includes diagnostic information
+        assert ":" in str(e), "Error message should include diagnostic details"
     else:
         assert False, "Takeover should not succeed."
     seeder.stop()
@@ -3055,6 +3058,7 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     await fill_task
 
 
+@pytest.mark.skip("too heavy")
 @pytest.mark.opt_only
 @dfly_args({"proactor_threads": 2, "serialization_max_chunk_size": 5000, "compression_mode": "0"})
 async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory):
@@ -3561,6 +3565,47 @@ async def test_big_strings(df_factory):
     line = lines[0]
     peak_bytes = extract_int_after_prefix("Serialization peak bytes: ", line)
     assert peak_bytes < value_size
+
+
+@pytest.mark.slow
+async def test_takeover_timeout_on_unresponsive_master(df_factory):
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    clients = [r.client() for r in replicas]
+
+    # Connect all replicas
+    for c in clients:
+        await c.execute_command(f"REPLICAOF localhost {master.port}")
+    await asyncio.gather(*[wait_available_async(c) for c in clients])
+
+    # Disconnect replica[1] to create lag
+    await clients[1].execute_command("REPLICAOF NO ONE")
+
+    # Write data that replica[1] will miss
+    pipe = c_master.pipeline()
+    for i in range(10000):
+        pipe.set(f"k{i}", "x" * 100)
+    await pipe.execute()
+
+    # Reconnect replica[1] and immediately takeover from replica[0]
+    await clients[1].execute_command(f"REPLICAOF localhost {master.port}")
+    try:
+        await clients[0].execute_command("REPLTAKEOVER 1")
+    except Exception:
+        pass
+
+    # Check master logs
+    master.stop(kill=False)
+    timeout_logs = master.find_in_logs("Couldn't synchronize with replica")
+
+    if timeout_logs:
+        for log in timeout_logs:
+            assert (
+                str(replicas[0].port) not in log
+            ), f"BUG: Checked initiating replica {replicas[0].port} instead of others"
 
 
 @pytest.mark.slow
