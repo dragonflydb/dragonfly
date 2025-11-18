@@ -3594,8 +3594,6 @@ async def test_takeover_bug_wrong_replica_checked_in_logs(df_factory):
     master.stop(kill=False)
     timeout_logs = master.find_in_logs("Couldn't synchronize with replica")
 
-    # BUG: logs show replica[0] port (initiating), should show replica[1] or replica[2]
-    # After fix: no timeout logs (replicas sync correctly) OR logs show correct replica
     if timeout_logs:
         for log in timeout_logs:
             assert (
