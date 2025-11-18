@@ -89,7 +89,7 @@ jobs:
           echo ls covout
           ls covout/
       - name: Upload coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: coverage-report
           path: build/covout/

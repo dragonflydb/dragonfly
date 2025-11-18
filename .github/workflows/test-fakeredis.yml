@@ -74,7 +74,7 @@ jobs:
           redis-cli -p 6380 INFO ALL
       - name: Upload Tests Result xml
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: tests-result-logs
           path: |
@@ -82,14 +82,14 @@ jobs:
 
       - name: Upload Tests Result html
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: report-tests.html
           path: tests/fakeredis/report-tests.html
 
       - name: Publish Test Report
         if: ${{ github.event_name == 'pull_request' }}
-        uses: mikepenz/action-junit-report@v5
+        uses: mikepenz/action-junit-report@v6
         with:
           report_paths: tests/fakeredis/results-tests.xml
           # Do not create a check run
@@ -108,14 +108,14 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Bundle Tests Result to one artifact
-        uses: actions/upload-artifact/merge@v4
+        uses: actions/upload-artifact/merge@v5
         with:
           delete-merged: true
           name: test-results-html
           pattern: '*.html'
 
       - name: Download html pages
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: test-results-html
           path: results/
