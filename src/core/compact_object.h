@@ -364,7 +364,8 @@ class CompactObj {
   }
 
   // Assigns a cooling record to the object together with its external slice.
-  void SetCool(size_t offset, uint32_t serialized_size, detail::TieredColdRecord* record);
+  void SetCool(size_t offset, uint32_t serialized_size, ExternalRep rep,
+               detail::TieredColdRecord* record);
 
   struct CoolItem {
     uint16_t page_offset;
@@ -377,7 +378,7 @@ class CompactObj {
   CoolItem GetCool() const;
 
   // Prequisite: IsCool() is true.
-  // Keeps cool record only as external value.
+  // Keeps cool record only as external value and discard in-memory part.
   void KeepExternal(size_t offset, size_t sz);
 
   std::pair<size_t, size_t> GetExternalSlice() const;

@@ -28,6 +28,7 @@ ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 ABSL_DECLARE_FLAG(float, tiered_upload_threshold);
 ABSL_DECLARE_FLAG(unsigned, tiered_storage_write_depth);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
+ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
 
 namespace dfly {
 
@@ -452,6 +453,43 @@ TEST_F(PureDiskTSTest, Dump) {
   EXPECT_THAT(Run({"del", "k0"}), IntArg(1));
   resp = Run({"restore", "k0", "0", facade::ToSV(resp.GetBuf())});
   EXPECT_EQ(resp, "OK");
+}
+
+TEST_P(LatentCoolingTSTest, SimpleHash) {
+  absl::FlagSaver saver;
+  absl::SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+  UpdateFromFlags();
+
+  const size_t kNUM = 100;
+
+  auto build_command = [](string_view key) {
+    vector<string> cmd = {"HSET", string{key}};
+    for (char c = 'a'; c <= 'z'; c++) {
+      cmd.push_back(string{1, c});
+      cmd.push_back(string{31, 'x'} + c);
+    }
+    return cmd;
+  };
+
+  // Create some hashes
+  for (size_t i = 0; i < kNUM; i++) {
+    Run(build_command(absl::StrCat("k", i)));
+  }
+
+  // Wait for all to be stashed or in end up in bins
+  ExpectConditionWithinTimeout([=] {
+    auto metrics = GetMetrics();
+    return metrics.tiered_stats.total_stashes +
+               metrics.tiered_stats.small_bins_filling_entries_cnt ==
+           kNUM;
+  });
+
+  // Verify correctness
+  for (size_t i = 0; i < kNUM; i++) {
+    auto resp = Run({"HGET", absl::StrCat("k", i), string{1, 'f'}});
+    auto v = string{31, 'x'} + 'f';
+    EXPECT_EQ(resp, v);
+  }
 }
 
 }  // namespace dfly

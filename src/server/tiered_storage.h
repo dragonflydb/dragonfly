@@ -116,7 +116,7 @@ class TieredStorage {
 
   // Moves pv contents to the cool storage and updates pv to point to it.
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
-                PrimeValue* pv);
+                CompactObj::ExternalRep rep, PrimeValue* pv);
 
   PrimeValue DeleteCool(detail::TieredColdRecord* record);
   detail::TieredColdRecord* PopCool();

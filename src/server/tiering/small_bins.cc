@@ -164,7 +164,8 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
 SmallBins::Stats SmallBins::GetStats() const {
   return Stats{.stashed_bins_cnt = stashed_bins_.size(),
                .stashed_entries_cnt = stats_.stashed_entries_cnt,
-               .current_bin_bytes = current_bin_bytes_};
+               .current_bin_bytes = current_bin_bytes_,
+               .current_entries_cnt = current_bin_.size()};
 }
 
 SmallBins::KeyHashDbList SmallBins::DeleteBin(DiskSegment segment, std::string_view value) {
