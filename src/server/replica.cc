@@ -203,9 +203,24 @@ void Replica::Pause(bool pause) {
 std::error_code Replica::TakeOver(std::string_view timeout, bool save_flag) {
   VLOG(1) << "Taking over";
 
+  // Parse timeout value for socket timeout
+  int timeout_sec = 0;
+  if (!absl::SimpleAtoi(timeout, &timeout_sec)) {
+    return make_error_code(errc::invalid_argument);
+  }
+
   std::error_code ec;
   auto takeOverCmd = absl::StrCat("TAKEOVER ", timeout, (save_flag ? " SAVE" : ""));
-  Proactor()->Await([this, &ec, cmd = std::move(takeOverCmd)] { ec = SendNextPhaseRequest(cmd); });
+  Proactor()->Await([this, &ec, cmd = std::move(takeOverCmd), timeout_sec] {
+    // Set socket timeout to prevent hanging on unresponsive master
+    // Add buffer time for master processing (timeout + 10 seconds)
+    auto prev_timeout = Sock()->timeout();
+    Sock()->set_timeout((timeout_sec + 10) * 1000);  // milliseconds
+
+    ec = SendNextPhaseRequest(cmd);
+
+    Sock()->set_timeout(prev_timeout);
+  });
 
   // If we successfully taken over, return and let server_family stop the replication.
   return ec;

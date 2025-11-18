@@ -1,6 +1,9 @@
+import os
 import platform
 import shutil
+import signal
 import tarfile
+import time
 import urllib.request
 from itertools import chain, repeat
 
@@ -3603,3 +3606,56 @@ async def test_takeover_bug_wrong_replica_checked_in_logs(df_factory):
             assert (
                 str(replicas[0].port) not in log
             ), f"BUG: Checked initiating replica {replicas[0].port} instead of others"
+
+
+@pytest.mark.slow
+async def test_takeover_timeout_on_unresponsive_master(df_factory):
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # Setup replication
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    # Write some data
+    for i in range(10):
+        await c_master.set(f"key{i}", f"val{i}")
+    await asyncio.sleep(0.2)
+
+    # PAUSE master process (SIGSTOP) - socket stays open but doesn't respondExpand commentComment on line R3629Code has comments. Press enter to view.
+    os.kill(master.proc.pid, signal.SIGSTOP)
+    logging.info(f"Paused master process {master.proc.pid}")
+
+    # Try takeover with 5 second timeout
+    # BUG: This will hang forever because SendNextPhaseRequest has no timeout
+    # FIXED: Should return error within ~15 seconds (5 + buffer)
+    start_time = time.time()
+    try:
+        await asyncio.wait_for(
+            c_replica.execute_command("REPLTAKEOVER 5"),
+            timeout=20,  # Should complete within 20 seconds
+        )
+        elapsed = time.time() - start_time
+        logging.info(f"Takeover completed in {elapsed:.1f}s")
+    except asyncio.TimeoutError:
+        elapsed = time.time() - start_time
+        pytest.fail(
+            f"BUG: REPLTAKEOVER hung for {elapsed:.1f}s without timeout. "
+            f"SendNextPhaseRequest in replica.cc has no socket timeout."
+        )
+    except Exception as e:
+        # Expected: connection error or timeout error
+        elapsed = time.time() - start_time
+        logging.info(f"Takeover failed after {elapsed:.1f}s: {e}")
+        # Should fail quickly, not hang
+        assert elapsed < 20, f"Took too long: {elapsed:.1f}s"
+    finally:
+        # Resume master so it can be stopped properly
+        try:
+            os.kill(master.proc.pid, signal.SIGCONT)
+        except Exception:
+            pass
