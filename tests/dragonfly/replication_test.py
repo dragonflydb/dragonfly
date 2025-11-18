@@ -3568,10 +3568,10 @@ async def test_big_strings(df_factory):
 
 
 @pytest.mark.slow
-async def test_takeover_timeout_on_unresponsive_master(df_factory):
-    master = df_factory.create(proactor_threads=4)
-    replica = df_factory.create(proactor_threads=2)
-    df_factory.start_all([master, replica])
+async def test_takeover_bug_wrong_replica_checked_in_logs(df_factory):
+    master = df_factory.create(proactor_threads=4, vmodule="dflycmd=1")
+    replicas = [df_factory.create(proactor_threads=2) for _ in range(3)]
+    df_factory.start_all([master] + replicas)
 
     c_master = master.client()
     clients = [r.client() for r in replicas]
@@ -3626,7 +3626,7 @@ async def test_takeover_timeout_on_unresponsive_master(df_factory):
         await c_master.set(f"key{i}", f"val{i}")
     await asyncio.sleep(0.2)
 
-    # PAUSE master process (SIGSTOP) - socket stays open but doesn't respond
+    # PAUSE master process (SIGSTOP) - socket stays open but doesn't respondExpand commentComment on line R3629Code has comments. Press enter to view.
     os.kill(master.proc.pid, signal.SIGSTOP)
     logging.info(f"Paused master process {master.proc.pid}")
 
