@@ -3759,7 +3759,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
 
   std::error_code res = replica_->TakeOver(ArgS(args, 0), save_flag);
   if (res) {
-    LOG(ERROR) << "Takeover failed with error: " << res << " - " << res.message();
+    LOG(WARNING) << "Takeover failed with error: " << res << " - " << res.message();
     return builder->SendError(absl::StrCat("Couldn't execute takeover: ", res.message()));
   }
 
