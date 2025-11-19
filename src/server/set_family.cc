@@ -96,7 +96,7 @@ struct StringSetWrapper {
     size_t entries_len = std::visit([](const auto& e) { return e.size(); }, entries);
     unsigned len = 0;
     if (ss->BucketCount() < entries_len) {
-      ss->Reserve(entries_len);
+      ss->Resize(entries_len);
     }
     for (string_view member : EntriesRange(entries)) {
       members[len++] = member;
@@ -1512,7 +1512,7 @@ StringSet* SetFamily::ConvertToStrSet(const intset* is, size_t expected_len) {
 
   StringSet* ss = CompactObj::AllocateMR<StringSet>();
   if (expected_len) {
-    ss->Reserve(expected_len);
+    ss->Resize(expected_len);
   }
 
   while (intsetGet(const_cast<intset*>(is), ii++, &intele)) {

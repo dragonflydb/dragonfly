@@ -487,7 +487,7 @@ TEST_F(StringSetTest, Ttl) {
 TEST_F(StringSetTest, Grow) {
   for (size_t j = 0; j < 10; ++j) {
     for (size_t i = 0; i < 4098; ++i) {
-      ss_->Reserve(generator_() % 256);
+      ss_->Resize(generator_() % 256);
       auto str = random_string(generator_, 3);
       ss_->Add(str);
     }
@@ -495,7 +495,7 @@ TEST_F(StringSetTest, Grow) {
   }
 }
 
-TEST_F(StringSetTest, Reserve) {
+TEST_F(StringSetTest, Resize) {
   vector<string> strs;
 
   for (size_t i = 0; i < 10; ++i) {
@@ -504,7 +504,7 @@ TEST_F(StringSetTest, Reserve) {
   }
 
   for (size_t j = 2; j < 20; j += 3) {
-    ss_->Reserve(j * 20);
+    ss_->Resize(j * 20);
     for (size_t i = 0; i < 10; ++i) {
       ASSERT_TRUE(ss_->Contains(strs[i]));
     }
@@ -543,14 +543,14 @@ void BM_Clone(benchmark::State& state) {
     string str = random_string(generator, 10);
     ss1.Add(str);
   }
-  ss2.Reserve(ss1.UpperBoundSize());
+  ss2.Resize(ss1.UpperBoundSize());
   while (state.KeepRunning()) {
     for (auto src : ss1) {
       ss2.Add(src);
     }
     state.PauseTiming();
     ss2.Clear();
-    ss2.Reserve(ss1.UpperBoundSize());
+    ss2.Resize(ss1.UpperBoundSize());
     state.ResumeTiming();
   }
 }
@@ -601,14 +601,14 @@ void BM_Add(benchmark::State& state) {
     string str = random_string(generator, keySize);
     strs.push_back(str);
   }
-  ss.Reserve(elems);
+  ss.Resize(elems);
   while (state.KeepRunning()) {
     for (auto& str : strs)
       ss.Add(str);
     state.PauseTiming();
     state.counters["Memory_Used"] = memUsed(ss);
     ss.Clear();
-    ss.Reserve(elems);
+    ss.Resize(elems);
     state.ResumeTiming();
   }
 }
@@ -626,7 +626,7 @@ void BM_AddMany(benchmark::State& state) {
     string str = random_string(generator, keySize);
     strs.push_back(str);
   }
-  ss.Reserve(elems);
+  ss.Resize(elems);
   vector<string_view> svs;
   for (const auto& str : strs) {
     svs.push_back(str);
@@ -637,7 +637,7 @@ void BM_AddMany(benchmark::State& state) {
     CHECK_EQ(ss.UpperBoundSize(), elems);
     state.counters["Memory_Used"] = memUsed(ss);
     ss.Clear();
-    ss.Reserve(elems);
+    ss.Resize(elems);
     state.ResumeTiming();
   }
 }
@@ -735,7 +735,7 @@ void BM_Spop1000(benchmark::State& state) {
     state.PauseTiming();
     StringSet tmp;
     src.Fill(&tmp);
-    tmp.Reserve(elems * sparseness);
+    tmp.Resize(elems * sparseness);
     state.ResumeTiming();
     for (int i = 0; i < 1000; ++i) {
       tmp.Pop();
@@ -801,6 +801,150 @@ TEST_F(StringSetTest, TransferTTLFlagLinkToObjectOnDelete) {
   auto it = ss_->Find("9"sv);
   EXPECT_TRUE(it.HasExpiry());
   EXPECT_EQ(1u, it.ExpiryTime());
+}
+
+TEST_F(StringSetTest, BasicShrink) {
+  // Add elements and then grow to have extra capacity
+  constexpr size_t num_strs = 32;
+  vector<string> strs;
+  for (size_t i = 0; i < num_strs; ++i) {
+    strs.push_back(random_string(generator_, 10));
+    EXPECT_TRUE(ss_->Add(strs.back()));
+  }
+
+  // Grow to a larger size
+  ss_->Resize(256);
+  size_t original_bucket_count = ss_->BucketCount();
+  EXPECT_EQ(original_bucket_count, 256u);
+
+  // Shrink to half the size using Resize
+  size_t new_size = original_bucket_count / 2;
+  ss_->Resize(new_size);
+
+  EXPECT_EQ(ss_->BucketCount(), new_size);
+  EXPECT_EQ(ss_->UpperBoundSize(), num_strs);
+
+  // Verify all elements are still accessible
+  for (const auto& str : strs) {
+    EXPECT_TRUE(ss_->Contains(str)) << "Missing: " << str;
+  }
+}
+
+TEST_F(StringSetTest, ShrinkGrowRoundtrip) {
+  // Add elements
+  constexpr size_t num_strs = 16;
+  vector<string> strs;
+  for (size_t i = 0; i < num_strs; ++i) {
+    strs.push_back(random_string(generator_, 10));
+    EXPECT_TRUE(ss_->Add(strs.back()));
+  }
+
+  // Grow to larger size
+  ss_->Resize(128);
+  size_t original_bucket_count = ss_->BucketCount();
+
+  // Shrink using Resize
+  size_t shrunk_size = original_bucket_count / 2;
+  ss_->Resize(shrunk_size);
+  EXPECT_EQ(ss_->BucketCount(), shrunk_size);
+
+  // Grow back
+  ss_->Resize(original_bucket_count);
+  EXPECT_EQ(ss_->BucketCount(), original_bucket_count);
+
+  // Verify all elements are still accessible
+  for (const auto& str : strs) {
+    EXPECT_TRUE(ss_->Contains(str)) << "Missing: " << str;
+  }
+}
+
+TEST_F(StringSetTest, ShrinkWithTTL) {
+  // Add elements with TTL
+  constexpr size_t num_strs = 16;
+  vector<string> strs;
+  for (size_t i = 0; i < num_strs; ++i) {
+    strs.push_back(random_string(generator_, 10));
+    EXPECT_TRUE(ss_->Add(strs.back(), 100));  // TTL of 100
+  }
+
+  // Grow to larger size
+  ss_->Resize(128);
+  size_t original_bucket_count = ss_->BucketCount();
+
+  // Shrink using Resize
+  size_t new_size = original_bucket_count / 2;
+  ss_->Resize(new_size);
+
+  EXPECT_EQ(ss_->BucketCount(), new_size);
+  EXPECT_EQ(ss_->UpperBoundSize(), num_strs);
+
+  // Verify all elements are still accessible with correct TTL
+  for (const auto& str : strs) {
+    auto it = ss_->Find(str);
+    ASSERT_NE(it, ss_->end()) << "Missing: " << str;
+    EXPECT_TRUE(it.HasExpiry());
+    EXPECT_EQ(it.ExpiryTime(), 100);
+  }
+}
+
+TEST_F(StringSetTest, MultipleShrinks) {
+  // Add few elements then grow to large size
+  constexpr size_t num_strs = 8;
+  vector<string> strs;
+  for (size_t i = 0; i < num_strs; ++i) {
+    strs.push_back(random_string(generator_, 10));
+    EXPECT_TRUE(ss_->Add(strs.back()));
+  }
+
+  // Grow to large size
+  ss_->Resize(256);
+  size_t bucket_count = ss_->BucketCount();
+
+  // Shrink multiple times using Resize
+  while (bucket_count > 8) {  // Stop at 8 since we have 8 elements
+    size_t new_size = bucket_count / 2;
+    ss_->Resize(new_size);
+    bucket_count = ss_->BucketCount();
+    EXPECT_EQ(bucket_count, new_size);
+
+    // Verify all elements are still accessible after each shrink
+    for (const auto& str : strs) {
+      EXPECT_TRUE(ss_->Contains(str)) << "Missing after shrink to " << new_size << ": " << str;
+    }
+  }
+}
+
+TEST_F(StringSetTest, ShrinkThenAddMore) {
+  // Add initial elements
+  constexpr size_t initial_strs = 16;
+  vector<string> strs;
+  for (size_t i = 0; i < initial_strs; ++i) {
+    strs.push_back(random_string(generator_, 10));
+    EXPECT_TRUE(ss_->Add(strs.back()));
+  }
+
+  // Grow to larger size
+  ss_->Resize(128);
+  size_t original_bucket_count = ss_->BucketCount();
+
+  // Shrink using Resize
+  size_t new_size = original_bucket_count / 2;
+  ss_->Resize(new_size);
+  EXPECT_EQ(ss_->BucketCount(), new_size);
+
+  // Add more elements after shrink
+  constexpr size_t additional_strs = 32;
+  for (size_t i = 0; i < additional_strs; ++i) {
+    strs.push_back(random_string(generator_, 10));
+    EXPECT_TRUE(ss_->Add(strs.back()));
+  }
+
+  EXPECT_EQ(ss_->UpperBoundSize(), initial_strs + additional_strs);
+
+  // Verify all elements are accessible
+  for (const auto& str : strs) {
+    EXPECT_TRUE(ss_->Contains(str)) << "Missing: " << str;
+  }
 }
 
 }  // namespace dfly

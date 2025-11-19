@@ -40,6 +40,7 @@ DenseSet::IteratorBase::IteratorBase(const DenseSet* owner, bool is_end)
     curr_entry_ = nullptr;
     owner_ = nullptr;
   } else {
+    ++owner_->num_iterators_;
     curr_entry_ = &(*curr_list_);
     owner->ExpireIfNeeded(nullptr, curr_entry_);
 
@@ -373,8 +374,10 @@ auto DenseSet::FindEmptyAround(uint32_t bid) -> ChainVectorIterator {
   return entries_.end();
 }
 
-void DenseSet::Reserve(size_t sz) {
+void DenseSet::Resize(size_t sz) {
   sz = std::max<size_t>(sz, kMinSize);
+  // Don't shrink below the current number of elements
+  sz = std::max<size_t>(sz, size_);
 
   sz = absl::bit_ceil(sz);
   if (sz > entries_.size()) {
@@ -382,13 +385,122 @@ void DenseSet::Reserve(size_t sz) {
     entries_.resize(sz);
     capacity_log_ = absl::bit_width(sz) - 1;
     Grow(prev_size);
+  } else if (sz < entries_.size()) {
+    Shrink(sz);
   }
+}
+
+void DenseSet::Shrink(size_t new_size) {
+  DCHECK(absl::has_single_bit(new_size));
+  DCHECK_GE(new_size, kMinSize);
+  DCHECK_LT(new_size, entries_.size());
+
+  // Guard against recursive shrink (e.g., if ExpireIfNeeded triggers Delete)
+  if (shrinking_) {
+    return;
+  }
+  shrinking_ = true;
+
+  size_t prev_size = entries_.size();
+  capacity_log_ = absl::bit_width(new_size) - 1;
+
+  // Clear all displaced flags first. During shrinking, we'll recalculate all bucket
+  // positions based on hash, so the displaced markers are no longer valid.
+  // This also ensures PushFront's DCHECK(!it->IsDisplaced()) passes.
+  for (size_t i = 0; i < prev_size; ++i) {
+    if (!entries_[i].IsEmpty()) {
+      entries_[i].ClearDisplaced();
+    }
+  }
+
+  // Process from high to low. This mirrors Grow's iteration order.
+  // Elements move to lower buckets (not yet processed) based on their hash.
+  for (long i = prev_size - 1; i >= 0; --i) {
+    DensePtr* curr = &entries_[i];
+    DensePtr* prev = nullptr;
+
+    do {
+      if (ExpireIfNeeded(prev, curr)) {
+        // If curr has disappeared due to expiry and prev was converted from Link
+        // to a regular DensePtr
+        if (prev && !prev->IsLink())
+          break;
+      }
+
+      if (curr->IsEmpty())
+        break;
+
+      void* ptr = curr->GetObject();
+
+      DCHECK(ptr != nullptr && ObjectAllocSize(ptr));
+
+      uint32_t new_bid = BucketId(ptr, 0);
+
+      // If the item stays in the current bucket, ensure it is not marked as
+      // displaced and move to the next item in the chain
+      if (new_bid == static_cast<uint32_t>(i)) {
+        curr->ClearDisplaced();
+        prev = curr;
+        curr = curr->Next();
+        if (curr == nullptr)
+          break;
+      } else {
+        // Element needs to move to a different bucket
+        auto dest = entries_.begin() + new_bid;
+        DensePtr dptr = *curr;
+
+        if (curr->IsObject()) {
+          if (prev) {
+            DCHECK(prev->IsLink());
+
+            DenseLinkKey* plink = prev->AsLink();
+            DCHECK(&plink->next == curr);
+
+            // We want to make *prev a DensePtr instead of DenseLink and we
+            // want to deallocate the link.
+            DensePtr tmp = DensePtr::From(plink);
+
+            // Important to transfer the ttl flag.
+            tmp.SetTtl(prev->HasTtl());
+            DCHECK(ObjectAllocSize(tmp.GetObject()));
+
+            FreeLink(plink);
+            // We deallocated the link, curr is invalid now.
+            curr = nullptr;
+            *prev = tmp;
+          } else {
+            // prev == nullptr
+            curr->Reset();  // Reset the root placeholder.
+          }
+        } else {
+          // !curr.IsObject
+          *curr = *dptr.Next();
+          DCHECK(!curr->IsEmpty());
+        }
+
+        DVLOG(2) << " Shrink: Moving from " << i << " to " << new_bid;
+        dptr.ClearDisplaced();
+        PushFront(dest, dptr);
+      }
+    } while (curr);
+  }
+
+  // Recount used buckets after shrinking
+  num_used_buckets_ = 0;
+  for (size_t i = 0; i < new_size; ++i) {
+    if (!entries_[i].IsEmpty()) {
+      ++num_used_buckets_;
+    }
+  }
+
+  entries_.resize(new_size);
+  shrinking_ = false;
 }
 
 void DenseSet::Fill(DenseSet* other) const {
   DCHECK(other->entries_.empty());
 
-  other->Reserve(UpperBoundSize());
+  other->Resize(UpperBoundSize());
 
   constexpr unsigned kArrLen = 32;
   CloneItem arr[kArrLen];
@@ -672,6 +784,14 @@ void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
   obj_malloc_used_ -= ObjectAllocSize(obj);
   --size_;
   ObjDelete(obj, false);
+
+  // Automatically shrink when utilization drops below 25%
+  // Check shrinking_ to prevent recursive shrink during Shrink operation
+  // Check num_iterators_ to prevent shrink during iteration (would invalidate iterators)
+  if (!shrinking_ && num_iterators_ == 0 && entries_.size() > kMinSize &&
+      size_ < entries_.size() / 4) {
+    Shrink(entries_.size() / 2);
+  }
 }
 
 DenseSet::ChainVectorIterator DenseSet::GetRandomChain() {
