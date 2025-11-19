@@ -222,11 +222,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       stats->tiered_used_bytes += segment.length;
       stats_.total_stashes++;
 
-<<<<<<< HEAD
       CompactObj::ExternalRep rep = DetermineSerializationParams(*pv).second;
-=======
-      CompactObj::ExternalRep rep = EstimateSerializedSize(*pv)->second;
->>>>>>> 77a24f54 (feat(tiering): Serialize hashes)
       if (ts_->config_.experimental_cooling) {
         RetireColdEntries(pv->MallocUsed());
         ts_->CoolDown(key.first, key.second, segment, rep, pv);
@@ -711,13 +707,8 @@ bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
 }
 
 void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
-<<<<<<< HEAD
                              const tiering::DiskSegment& segment, CompactObj::ExternalRep rep,
                              PrimeValue* pv) {
-=======
-                             const tiering::DiskSegment& segment, PrimeValue* pv,
-                             CompactObj::ExternalRep rep) {
->>>>>>> 5b1ceb13 (cooling fixes)
   detail::TieredColdRecord* record = CompactObj::AllocateMR<detail::TieredColdRecord>();
   cool_queue_.push_front(*record);
   stats_.cool_memory_used += (sizeof(detail::TieredColdRecord) + pv->MallocUsed());
@@ -727,11 +718,7 @@ void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
   record->page_index = segment.offset / tiering::kPageSize;
   record->value = std::move(*pv);
 
-<<<<<<< HEAD
   pv->SetCool(segment.offset, segment.length, rep, record);
-=======
-  pv->SetCool(segment.offset, segment.length, record, rep);
->>>>>>> 5b1ceb13 (cooling fixes)
 }
 
 PrimeValue TieredStorage::Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
