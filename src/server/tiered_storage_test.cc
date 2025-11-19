@@ -458,6 +458,8 @@ TEST_F(PureDiskTSTest, Dump) {
 TEST_P(LatentCoolingTSTest, SimpleHash) {
   absl::FlagSaver saver;
   absl::SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+  // For now, never upload as its not implemented yet
+  absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);
   UpdateFromFlags();
 
   const size_t kNUM = 100;

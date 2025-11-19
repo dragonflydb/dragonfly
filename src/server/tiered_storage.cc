@@ -195,14 +195,15 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Set value to be an in-memory type again. Update memory stats.
   void Upload(DbIndex dbid, string_view value, PrimeValue* pv) {
     DCHECK(!value.empty());
-    DCHECK_EQ(uint8_t(pv->GetExternalRep()), uint8_t(CompactObj::ExternalRep::STRING));
 
     switch (pv->GetExternalRep()) {
       case CompactObj::ExternalRep::STRING:
         pv->Materialize(value, true);
         break;
       case CompactObj::ExternalRep::SERIALIZED_MAP:
-        pv->InitRobj(OBJ_HASH, kEncodingListPack, nullptr);
+        tiering::SerializedMapDecoder decoder{};
+        decoder.Initialize(value);
+        decoder.Upload(pv);
         break;
     };
 
