@@ -4,12 +4,9 @@
 
 #include "server/tiering/decoders.h"
 
-<<<<<<< HEAD
-#include "base/logging.h"
-=======
 #include "core/compact_object.h"
->>>>>>> fbcc8d59 (more than POc)
 #include "core/detail/listpack_wrap.h"
+#include "core/overloaded.h"
 #include "server/tiering/serialized_map.h"
 
 extern "C" {
@@ -82,8 +79,12 @@ void SerializedMapDecoder::Initialize(std::string_view slice) {
 }
 
 Decoder::UploadMetrics SerializedMapDecoder::GetMetrics() const {
-  return UploadMetrics{.modified = modified_,
-                       .estimated_mem_usage = map_->DataBytes() + map_->size() * 2 * 8};
+  Overloaded ov{
+      [](const SerializedMap& sm) { return sm.DataBytes() + sm.size() * 8; },
+      [](const detail::ListpackWrap& lw) { return lw.DataBytes(); },
+  };
+  size_t bytes = visit(Overloaded{ov, [&](const auto& ptr) { return ov(*ptr); }}, map_);
+  return UploadMetrics{.modified = modified_, .estimated_mem_usage = bytes};
 }
 
 void SerializedMapDecoder::Upload(CompactObj* obj) {

@@ -37,10 +37,6 @@ ListpackWrap ListpackWrap::WithCapacity(size_t capacity) {
   return ListpackWrap{lpNew(capacity)};
 }
 
-ListpackWrap ListpackWrap::WithCapacity(size_t capacity) {
-  return ListpackWrap{lpNew(capacity)};
-}
-
 uint8_t* ListpackWrap::GetPointer() {
   return lp_;
 }
@@ -104,6 +100,10 @@ bool ListpackWrap::Insert(std::string_view key, std::string_view value, bool ski
 
 size_t ListpackWrap::size() const {
   return lpLength(lp_) / 2;
+}
+
+size_t ListpackWrap::DataBytes() const {
+  return lpBytes(lp_);
 }
 
 ListpackWrap::Iterator ListpackWrap::begin() const {

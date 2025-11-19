@@ -522,6 +522,8 @@ TEST_P(LatentCoolingTSTest, SimpleHash) {
   // Wait for all to be stashed or in end up in bins
   ExpectConditionWithinTimeout([=] {
     auto metrics = GetMetrics();
+    VLOG(0) << metrics.tiered_stats.total_stashes << " "
+            << metrics.tiered_stats.small_bins_entries_cnt;
     return metrics.tiered_stats.total_stashes +
                metrics.tiered_stats.small_bins_filling_entries_cnt ==
            kNUM;
@@ -535,6 +537,21 @@ TEST_P(LatentCoolingTSTest, SimpleHash) {
     auto resp = Run({"HGET", key, string{1, 'f'}});
     auto v = string{31, 'x'} + 'f';
     EXPECT_EQ(resp, v);
+  }
+
+  // Wait for all offloads again
+  ExpectConditionWithinTimeout([=] {
+    auto metrics = GetMetrics();
+    return metrics.db_stats[0].tiered_entries +
+               metrics.tiered_stats.small_bins_filling_entries_cnt ==
+           kNUM;
+  });
+
+  // HDEL
+  for (size_t i = 0; i < kNUM; i++) {
+    string key = absl::StrCat("k", i);
+    EXPECT_THAT(Run({"DEL", key, string{1, 'c'}}), IntArg(1));
+    EXPECT_THAT(Run({"HLEN", key}), IntArg(25));
   }
 }
 
