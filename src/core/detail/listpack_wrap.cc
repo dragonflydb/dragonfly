@@ -3,7 +3,7 @@
 //
 #include "core/detail/listpack_wrap.h"
 
-#include "server/container_utils.h"
+#include "base/logging.h"
 
 extern "C" {
 #include "redis/listpack.h"
@@ -27,10 +27,9 @@ void ListpackWrap::Iterator::Read() {
   if (!ptr_)
     return;
 
-  using container_utils::LpGetView;
-  key_v_ = LpGetView(ptr_, intbuf_[0]);
+  key_v_ = GetView(ptr_, intbuf_[0]);
   next_ptr_ = lpNext(lp_, ptr_);
-  value_v_ = LpGetView(next_ptr_, intbuf_[1]);
+  value_v_ = GetView(next_ptr_, intbuf_[1]);
   next_ptr_ = lpNext(lp_, next_ptr_);
 }
 
@@ -113,6 +112,13 @@ ListpackWrap::Iterator ListpackWrap::begin() const {
 
 ListpackWrap::Iterator ListpackWrap::end() const {
   return Iterator{lp_, nullptr, intbuf_};
+}
+
+std::string_view ListpackWrap::GetView(uint8_t* lp_it, uint8_t int_buf[]) {
+  int64_t ele_len = 0;
+  uint8_t* elem = lpGet(lp_it, &ele_len, int_buf);
+  DCHECK(elem);
+  return std::string_view{reinterpret_cast<char*>(elem), size_t(ele_len)};
 }
 
 bool ListpackWrap::Iterator::operator==(const Iterator& other) const {
