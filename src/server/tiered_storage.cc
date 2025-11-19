@@ -627,8 +627,8 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   auto cb = [this, dbid, &tmp](PrimeIterator it) mutable {
     stats_.offloading_steps++;
     if (ShouldStash(it->second)) {
-      if (it->first.WasTouched()) {
-        it->first.SetTouched(false);
+      if (it->second.WasTouched()) {
+        it->second.SetTouched(false);
       } else {
         stats_.offloading_stashes++;
         TryStash(dbid, it->first.GetSlice(&tmp), &it->second);

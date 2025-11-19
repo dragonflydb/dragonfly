@@ -323,6 +323,41 @@ TEST_F(PureDiskTSTest, BackgroundOffloading) {
   EXPECT_EQ(metrics.tiered_stats.allocated_bytes, kNum * 4096);
 }
 
+// Verify correctness of our offloading startegy, offloading values only after second access.
+TEST_F(PureDiskTSTest, OffloadingStrategy) {
+  // Create value and wait to be offlaoded
+  string value = BuildString(3000);
+  Run({"set", "key", value});
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 1; });
+
+  // Check base values
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.tiered_stats.total_fetches, 0);
+  EXPECT_EQ(metrics.tiered_stats.total_uploads, 0);
+  EXPECT_EQ(metrics.tiered_stats.total_stashes, 1);
+
+  // Repeat a few times
+  for (size_t i = 1; i <= 3; i++) {
+    // Value is not uploaded after first read
+    Run({"get", "key"});
+    metrics = GetMetrics();
+    EXPECT_EQ(metrics.tiered_stats.total_fetches, 2 * i - 1);
+    EXPECT_EQ(metrics.tiered_stats.total_uploads, i - 1);
+
+    // But on second read upload should happend at the end of chain due to two touches
+    Run({"get", "key"});
+    ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.total_uploads == i; });
+    metrics = GetMetrics();
+    EXPECT_EQ(metrics.tiered_stats.total_fetches, 2 * i);
+
+    // Wait for offloading again
+    ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 1; });
+    metrics = GetMetrics();
+    EXPECT_EQ(metrics.tiered_stats.total_offloading_stashes, i);
+    EXPECT_EQ(metrics.tiered_stats.total_stashes, i + 1);
+  }
+}
+
 // Test FLUSHALL while reading entries
 TEST_F(PureDiskTSTest, FlushAll) {
   const int kNum = 500;

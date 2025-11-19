@@ -10,6 +10,8 @@ metadata:
     app.kubernetes.io/instance: test
     app.kubernetes.io/version: "v1.35.0"
     app.kubernetes.io/managed-by: Helm
+    project: cache-infrastructure
+    team: platform
 ---
 # Source: dragonfly/templates/service.yaml
 apiVersion: v1
@@ -22,6 +24,8 @@ metadata:
     app.kubernetes.io/instance: test
     app.kubernetes.io/version: "v1.35.0"
     app.kubernetes.io/managed-by: Helm
+    project: cache-infrastructure
+    team: platform
 spec:
   type: ClusterIP
   ports:
@@ -44,6 +48,8 @@ metadata:
     app.kubernetes.io/instance: test
     app.kubernetes.io/version: "v1.35.0"
     app.kubernetes.io/managed-by: Helm
+    project: cache-infrastructure
+    team: platform
 spec:
   replicas: 1
   selector:
@@ -56,13 +62,10 @@ spec:
       labels:
         app.kubernetes.io/name: dragonfly
         app.kubernetes.io/instance: test
+        project: cache-infrastructure
+        team: platform
     spec:
       serviceAccountName: test-dragonfly
-      initContainers:
-        - name: initcontainer-tpl
-          image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
-          command: ["/bin/sh"]
-          args: ["-c", "date; sleep 1;"]
       containers:
         - name: dragonfly
           image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.35.0"

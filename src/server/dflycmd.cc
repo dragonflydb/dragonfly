@@ -567,8 +567,8 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
         continue;
       }
 
-      auto cb = [&, end_time](EngineShard* shard) {
-        if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
+      auto cb = [repl_ptr = repl_ptr, end_time, &rest_catchup_success](EngineShard* shard) {
+        if (!WaitReplicaFlowToCatchup(end_time, repl_ptr.get(), shard)) {
           rest_catchup_success.store(false);
         }
       };
@@ -596,7 +596,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
     return;
   }
 
-  sf_->service().cluster_family().ReconcileMasterReplicaTakeoverSlots(true);
+  sf_->service().cluster_family().ReconcileMasterSlots(replica_ptr->id);
 }
 
 void DflyCmd::Expire(CmdArgList args, Transaction* tx, RedisReplyBuilder* rb) {

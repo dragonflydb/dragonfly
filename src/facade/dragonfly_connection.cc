@@ -1037,6 +1037,11 @@ io::Result<bool> Connection::CheckForHttpProto() {
     if (!recv_sz) {
       return make_unexpected(recv_sz.error());
     }
+    if (recv_sz == 0) {
+      // Peer closed connection.
+      return false;
+    }
+
     io_buf_.CommitWrite(*recv_sz);
     string_view ib = ToSV(io_buf_.InputBuffer());
     if (ib.size() >= 2 && ib[0] == 22 && ib[1] == 3) {
@@ -1139,13 +1144,12 @@ void Connection::ConnectionFlow() {
     // to reproduce: nc localhost 6379  and then run invalid sequence: *1 <enter> *1 <enter>
     error_code ec2 = socket_->Shutdown(SHUT_WR);
     LOG_IF(WARNING, ec2) << "Could not shutdown socket " << ec2;
-    if (!ec2) {
-      while (true) {
-        // Discard any received data.
-        io_buf_.Clear();
-        if (!socket_->Recv(io_buf_.AppendBuffer())) {
-          break;
-        }
+    while (!ec2) {
+      // Discard any received data.
+      io_buf_.Clear();
+      auto recv_sz = socket_->Recv(io_buf_.AppendBuffer());
+      if (!recv_sz || *recv_sz == 0) {
+        break;  // Peer closed connection.
       }
     }
   }
@@ -1220,15 +1224,9 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
 
   auto dispatch_async = [this]() -> MessageHandle { return {FromArgs(tmp_parse_args_)}; };
 
-  ReadBuffer read_buffer;
-  read_buffer.slice = io_buf_.InputBuffer();
-  read_buffer.available_bytes = io_buf_.InputLen();
-
+  io::Bytes read_buffer = io_buf_.InputBuffer();
   do {
-    if (read_buffer.ShouldAdvance()) {  // can happen only with io_uring/bundles
-      read_buffer.slice = NextBundleBuffer(read_buffer.available_bytes);
-    }
-    result = redis_parser_->Parse(read_buffer.slice, &consumed, &tmp_parse_args_);
+    result = redis_parser_->Parse(read_buffer, &consumed, &tmp_parse_args_);
     request_consumed_bytes_ += consumed;
     if (result == RedisParser::OK && !tmp_parse_args_.empty()) {
       // If we get a non-STRING type (e.g., NIL, ARRAY), it's a protocol error.
@@ -1245,7 +1243,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
       if (io_req_size_hist)
         io_req_size_hist->Add(request_consumed_bytes_);
       request_consumed_bytes_ = 0;
-      bool has_more = consumed < read_buffer.available_bytes;
+      bool has_more = consumed < read_buffer.size();
 
       if (tl_traffic_logger.log_file && IsMain() /* log only on the main interface */) {
         LogTraffic(id_, has_more, absl::MakeSpan(tmp_parse_args_),
@@ -1257,9 +1255,9 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
     if (result != RedisParser::OK && result != RedisParser::INPUT_PENDING) {
       // We do not expect that a replica sends an invalid command so we log if it happens.
       LOG_IF(WARNING, cntx()->replica_conn)
-          << "Redis parser error: " << result << " during parse: " << ToSV(read_buffer.slice);
+          << "Redis parser error: " << result << " during parse: " << ToSV(read_buffer);
     }
-    read_buffer.Consume(consumed);
+    read_buffer.remove_prefix(consumed);
 
     // We must yield from time to time to allow other fibers to run.
     // Specifically, if a client sends a huge chunk of data resulting in a very long pipeline,
@@ -1268,8 +1266,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
       stats_->num_read_yields++;
       ThisFiber::Yield();
     }
-  } while (RedisParser::OK == result && read_buffer.available_bytes > 0 &&
-           !reply_builder_->GetError());
+  } while (RedisParser::OK == result && read_buffer.size() > 0 && !reply_builder_->GetError());
 
   io_buf_.ConsumeInput(io_buf_.InputLen());
 
@@ -1278,7 +1275,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
     return OK;
 
   if (result == RedisParser::INPUT_PENDING) {
-    DCHECK_EQ(read_buffer.available_bytes, 0u);
+    DCHECK_EQ(read_buffer.size(), 0u);
 
     return NEED_MORE;
   }
@@ -1411,7 +1408,7 @@ void Connection::HandleMigrateRequest() {
   }
 }
 
-error_code Connection::HandleRecvSocket() {
+io::Result<size_t> Connection::HandleRecvSocket() {
   phase_ = READ_SOCKET;
 
   io::MutableBytes append_buf = io_buf_.AppendBuffer();
@@ -1419,20 +1416,18 @@ error_code Connection::HandleRecvSocket() {
   ::io::Result<size_t> recv_sz = socket_->Recv(append_buf);
   last_interaction_ = time(nullptr);
 
-  if (!recv_sz) {
-    return recv_sz.error();
+  // In case the socket was closed orderly, we get 0 bytes read.
+  if (recv_sz && *recv_sz) {
+    size_t commit_sz = *recv_sz;
+    io_buf_.CommitWrite(commit_sz);
+
+    stats_->io_read_bytes += commit_sz;
+    local_stats_.net_bytes_in += commit_sz;
+
+    ++stats_->io_read_cnt;
+    ++local_stats_.read_cnt;
   }
-
-  size_t commit_sz = *recv_sz;
-  io_buf_.CommitWrite(commit_sz);
-
-  stats_->io_read_bytes += commit_sz;
-  local_stats_.net_bytes_in += commit_sz;
-
-  ++stats_->io_read_cnt;
-  ++local_stats_.read_cnt;
-
-  return {};
+  return recv_sz;
 }
 
 auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
@@ -1446,10 +1441,13 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
 
   do {
     HandleMigrateRequest();
-    ec = HandleRecvSocket();
-    if (ec) {
-      LOG_IF(WARNING, cntx()->replica_conn) << "HandleRecvSocket() error: " << ec;
-      return ec;
+    auto recv_sz = HandleRecvSocket();
+    if (!recv_sz) {
+      LOG_IF(WARNING, cntx()->replica_conn) << "HandleRecvSocket() error: " << recv_sz.error();
+      return recv_sz.error();
+    }
+    if (*recv_sz == 0) {
+      break;
     }
 
     phase_ = PROCESS;
@@ -2063,19 +2061,6 @@ void Connection::BreakOnce(uint32_t ev_mask) {
     DCHECK(!breaker_cb_);
     fun(ev_mask);
   }
-}
-
-io::Bytes Connection::NextBundleBuffer(size_t total_len) {
-  ++recv_buf_.buf_pos;
-  io::Bytes res;
-#ifdef __linux__
-  fb2::UringProactor* up = static_cast<fb2::UringProactor*>(socket_->proactor());
-  recv_buf_.buf_id = up->GetBufIdByPos(kRecvSockGid, recv_buf_.buf_pos);
-  uint8_t* src = up->GetBufRingPtr(kRecvSockGid, recv_buf_.buf_id);
-  res = {src, std::min<size_t>(kRecvBufSize, total_len)};
-#endif
-
-  return res;
 }
 
 void Connection::IncrNumConns() {

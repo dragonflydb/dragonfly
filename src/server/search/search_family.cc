@@ -9,6 +9,7 @@
 #include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_format.h>
+#include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
 #include <absl/strings/string_view.h>
 
@@ -24,6 +25,8 @@
 #include "facade/error.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/cluster/cluster_config.h"
+#include "server/cluster/coordinator.h"
 #include "server/command_registry.h"
 #include "server/config_registry.h"
 #include "server/conn_context.h"
@@ -316,7 +319,7 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
 #pragma GCC diagnostic pop
 #endif
 
-ParseResult<DocIndex> ParseCreateParams(CmdArgParser* parser) {
+ParseResult<DocIndex> CreateDocIndex(CmdArgParser* parser) {
   DocIndex index{};
 
   while (parser->HasNext()) {
@@ -1047,7 +1050,9 @@ void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser{args};
   string_view idx_name = parser.Next();
 
-  auto parsed_index = ParseCreateParams(&parser);
+  bool is_cross_shard = parser.Check("CSS");
+
+  auto parsed_index = CreateDocIndex(&parser);
   if (SendErrorIfOccurred(parsed_index, &parser, builder)) {
     return;
   }
@@ -1067,6 +1072,15 @@ void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
   if (exists_cnt.load(memory_order_relaxed) > 0) {
     cmd_cntx.tx->Conclude();
     return builder->SendError("Index already exists");
+  }
+
+  if (!is_cross_shard && IsClusterEnabled()) {
+    std::string args_str = absl::StrJoin(args.subspan(1), " ");
+    std::string cmd = absl::StrCat("FT.CREATE ", idx_name, " CSS ", args_str);
+
+    // TODO add processing of the reply to make sure index was created successfully on all shards,
+    // and prevent simultaneous creation of the same index.
+    cluster::Coordinator::Current().DispatchAll(cmd);
   }
 
   auto idx_ptr = make_shared<DocIndex>(std::move(parsed_index).value());
@@ -1283,6 +1297,8 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view index_name = parser.Next();
   string_view query_str = parser.Next();
 
+  bool is_cross_shard = parser.Check("CSS");
+
   auto* builder = cmd_cntx.rb;
   auto params = ParseSearchParams(&parser);
   if (SendErrorIfOccurred(params, &parser, builder))
@@ -1293,6 +1309,13 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   if (query_str.size() > max_query_bytes) {
     return builder->SendError(
         absl::StrCat("Query string is too long, max length is ", max_query_bytes, " bytes"));
+  }
+
+  if (!is_cross_shard && IsClusterEnabled()) {
+    std::string args_str = absl::StrJoin(args.subspan(2), " ");
+    std::string cmd = absl::StrCat("FT.SEARCH ", index_name, " ", query_str, " CSS ", args_str);
+
+    cluster::Coordinator::Current().DispatchAll(cmd);
   }
 
   search::SearchAlgorithm search_algo;

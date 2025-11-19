@@ -60,6 +60,9 @@ struct ListpackWrap {
   Iterator end() const;
   size_t size() const;  // number of entries
 
+  // Get view from raw listpack iterator
+  static std::string_view GetView(uint8_t* lp_it, uint8_t int_buf[]);
+
  private:
   uint8_t* lp_;            // the listpack itself
   mutable IntBuf intbuf_;  // buffer for integers decoded to strings
