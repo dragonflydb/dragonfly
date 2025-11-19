@@ -32,7 +32,6 @@ helm upgrade --install dragonfly oci://ghcr.io/dragonflydb/dragonfly/helm/dragon
 |-----|------|---------|-------------|
 | affinity | object | `{}` | Affinity for pod assignment |
 | command | list | `[]` | Allow overriding the container's command |
-| commonLabels | object | `{}` | Common labels to add to all K8s resources |
 | extraArgs | list | `[]` | Extra arguments to pass to the dragonfly binary |
 | extraContainers | list | `[]` | Additional sidecar containers |
 | extraObjects | list | `[]` | extra K8s manifests to deploy |
