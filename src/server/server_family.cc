@@ -3758,13 +3758,15 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   }
 
   std::error_code res = replica_->TakeOver(ArgS(args, 0), save_flag);
-  if (res)
-    return builder->SendError("Couldn't execute takeover");
+  if (res) {
+    LOG(WARNING) << "Takeover failed with error: " << res << " - " << res.message();
+    return builder->SendError(absl::StrCat("Couldn't execute takeover: ", res.message()));
+  }
 
   LOG(INFO) << "Takeover successful, promoting this instance to master.";
 
   if (IsClusterEnabled()) {
-    service().cluster_family().ReconcileMasterReplicaTakeoverSlots(false);
+    service().cluster_family().ReconcileReplicaSlots();
   }
 
   last_master_data_ = replica_->Stop();
