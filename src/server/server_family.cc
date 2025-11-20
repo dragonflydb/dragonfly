@@ -3331,7 +3331,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 
 void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
   std::vector<std::string> sections;
-  auto need_metrics{false};  // Save time - do not fetch metrics if we don't need them.
+  bool need_metrics{false};  // Save time - do not fetch metrics if we don't need them.
   Metrics metrics;
 
   sections.reserve(args.size());
@@ -3340,18 +3340,19 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     const auto& section = sections.back();
     if (!need_metrics && (section != "SERVER") && (section != "REPLICATION")) {
       need_metrics = true;
-      metrics = GetMetrics(cmd_cntx.conn_cntx->ns);
     }
   }
 
-  if (!need_metrics && !IsMaster()) {
+  if (need_metrics || sections.empty()) {
+    metrics = GetMetrics(cmd_cntx.conn_cntx->ns);
+  } else if (!IsMaster()) {
     metrics.replica_side_info = GetReplicaSummary();
   }
 
   std::string info;
   // For multiple requested sections, invalid section names are ignored (not included in the
   // output). The command does not abort or return an error if some sections are invalid. This
-  // matches Redis behavior.
+  // matches Valkey behavior.
   if (sections.empty()) {  // No sections: default to all sections.
     info = FormatInfoMetrics(metrics, "", cmd_cntx.conn_cntx->conn()->IsPrivileged());
   } else if (sections.size() == 1) {  // Single section
