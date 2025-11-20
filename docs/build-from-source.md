@@ -5,11 +5,6 @@
 Dragonfly runs on linux. We advise running it on linux version 5.11 or later
 but you can also run Dragonfly on older kernels as well.
 
-> :warning: **Dragonfly releases are compiled with LTO (link time optimization)**:
-  Depending on the workload this can notably improve performance. If you want to
-  benchmark Dragonfly or use it in production, you should enable LTO by giving
-  `blaze.sh` the `-DCMAKE_CXX_FLAGS="-flto"` argument.
-
 ## Step 1 - install dependencies
 
 On Debian/Ubuntu:
@@ -59,12 +54,14 @@ cd build-opt && ninja dragonfly
 
 ### Build options
 
-| Option | Description |
-|--|--|
-| WITH_AWS | Include AWS client. Required for cloud snapshots |
-| WITH_SEARCH | Include Search module |
-| WITH_COLLECTION_CMDS | Include commands for collections (SET, HSET, ZSET) |
-| WITH_EXTENSION_CMDS | Include extension commands (Bloom, HLL, JSON, ...) |
+
+| Option               | Description                                                                                                                                                                                                                              |
+| ---------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| WITH_AWS             | Include AWS client. Required for cloud snapshots                                                                                                                                                                                         |
+| WITH_SEARCH          | Include Search module                                                                                                                                                                                                                    |
+| WITH_COLLECTION_CMDS | Include commands for collections (SET, HSET, ZSET)                                                                                                                                                                                       |
+| WITH_EXTENSION_CMDS  | Include extension commands (Bloom, HLL, JSON, ...)                                                                                                                                                                                       |
+| USE_MOLD             | Uses the mold linker to reduce link time overhead while enabling Link Time Optimization (LTO) for improved runtime performance. Recommended for benchmarking and production. |
 
 Minimal debug build:
 
