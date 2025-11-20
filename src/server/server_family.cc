@@ -1955,6 +1955,49 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             m.shard_stats.defrag_attempt_total, COUNTER, &resp->body());
   AppendMetricWithoutLabels("defrag_objects_moved", "Objects moved",
                             m.shard_stats.defrag_realloc_total, COUNTER, &resp->body());
+
+  // Tiered metrics
+  {
+    AppendMetricWithoutLabels("tiered_entries", "Tiered entries", total.tiered_entries,
+                              MetricType::GAUGE, &resp->body());
+
+    // Bytes: used, allocated, capacity
+    AppendMetricHeader("tiered_bytes", "Tiered bytes", MetricType::GAUGE, &resp->body());
+    AppendMetricValue("tiered_bytes", total.tiered_used_bytes, {"type"}, {"used"}, &resp->body());
+    AppendMetricValue("tiered_bytes", m.tiered_stats.cold_storage_bytes, {"type"}, {"cold"},
+                      &resp->body());
+    AppendMetricValue("tiered_bytes", m.tiered_stats.allocated_bytes, {"type"}, {"allocated"},
+                      &resp->body());
+    AppendMetricValue("tiered_bytes", m.tiered_stats.capacity_bytes, {"type"}, {"capacity"},
+                      &resp->body());
+
+    // Events: stash, fetch, upload, cancel
+    AppendMetricHeader("tiered_events", "Tiered events", MetricType::COUNTER, &resp->body());
+    AppendMetricValue("tiered_events", m.tiered_stats.total_stashes, {"type"}, {"stash"},
+                      &resp->body());
+    AppendMetricValue("tiered_events", m.tiered_stats.total_fetches, {"type"}, {"fetch"},
+                      &resp->body());
+    AppendMetricValue("tiered_events", m.tiered_stats.total_uploads, {"type"}, {"upload"},
+                      &resp->body());
+    AppendMetricValue("tiered_events", m.tiered_stats.total_cancels, {"type"}, {"cancel"},
+                      &resp->body());
+    AppendMetricValue("tiered_events", m.tiered_stats.total_deletes, {"type"}, {"delete"},
+                      &resp->body());
+
+    // Hits: ram, cool, missed
+    AppendMetricHeader("tiered_hits", "Tiered hits", MetricType::COUNTER, &resp->body());
+    AppendMetricValue("tiered_hits", m.events.ram_hits, {"type"}, {"ram"}, &resp->body());
+    AppendMetricValue("tiered_hits", m.events.ram_cool_hits, {"type"}, {"cool"}, &resp->body());
+    AppendMetricValue("tiered_hits", m.events.ram_misses, {"type"}, {"disk"}, &resp->body());
+
+    // Potential problems due to overloading system
+    AppendMetricHeader("tiered_overload", "Potential problems due to overlaoding",
+                       MetricType::COUNTER, &resp->body());
+    AppendMetricValue("tiered_overload", m.tiered_stats.total_clients_throttled, {"type"},
+                      {"client throttling"}, &resp->body());
+    AppendMetricValue("tiered_overload", m.tiered_stats.total_stash_overflows, {"type"},
+                      {"stash overflows"}, &resp->body());
+  }
 }
 
 void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
