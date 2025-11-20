@@ -528,7 +528,8 @@ void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* 
   if (auto node = stash_backpressure_.extract(make_pair(dbid, key)); !node.empty())
     std::move(node.mapped()).Resolve(false);
 
-  if (OccupiesWholePages(value->Size())) {
+  auto estimated = EstimateSerializedSize(*value);
+  if (OccupiesWholePages(estimated->first)) {
     op_manager_->Delete(KeyRef(dbid, key));
   } else if (auto bin = bins_->Delete(dbid, key); bin) {
     op_manager_->Delete(*bin);

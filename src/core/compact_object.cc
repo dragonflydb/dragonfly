@@ -694,7 +694,6 @@ void RobjWrapper::ReallocateString(MemoryResource* mr) {
 void RobjWrapper::Init(unsigned type, unsigned encoding, void* inner) {
   type_ = type;
   encoding_ = encoding;
-  CHECK(inner != nullptr);
   Set(inner, 0);
 }
 
