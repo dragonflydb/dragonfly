@@ -475,7 +475,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   } else {
     DCHECK_EQ(kEncodingStrMap2, pv.Encoding());  // Dictionary
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-    sm->Resize(sm->UpperBoundSize() + values.size() / 2);
+    sm->Resize(values.size() / 2);
     bool added;
 
     for (size_t i = 0; i < values.size(); i += 2) {
