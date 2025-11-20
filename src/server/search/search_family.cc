@@ -1296,9 +1296,11 @@ void SearchFamily::FtList(CmdArgList args, const CommandContext& cmd_cntx) {
 
 static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view query,
                                         std::string_view args_str) {
-  util::fb2::Mutex result_mu;
-  vector<SearchResult> results;  // todo resize to number of shards
+  vector<SearchResult> results;
   std::string cmd = absl::StrCat("FT.SEARCH ", idx, " ", query, " CSS ", args_str);
+
+  // TODO for now we suppose that callback is called synchronously. If not, we need to add
+  // synchronization here for results vector modification.
   cluster::Coordinator::Current().DispatchAll(cmd, [&](const facade::RespVec& res) {
     VLOG(3) << "FT.SEARCH CSS reply: " << res;
 
@@ -1317,7 +1319,6 @@ static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view q
       return;
     }
 
-    std::lock_guard lock{result_mu};
     results.emplace_back();
     results.back().total_hits = *size;
     for (size_t i = 2; i < res.size(); i += 2) {
