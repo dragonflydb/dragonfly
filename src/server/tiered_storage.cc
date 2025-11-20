@@ -89,6 +89,8 @@ optional<pair<size_t /*size*/, CompactObj::ExternalRep>> EstimateSerializedSize(
     const PrimeValue& pv) {
   switch (pv.ObjType()) {
     case OBJ_STRING:
+      if (pv.IsInline())
+        return {};
       return std::make_pair(pv.GetRawString().view().size(), CompactObj::ExternalRep::STRING);
     case OBJ_HASH:
       if (pv.Encoding() == kEncodingListPack) {

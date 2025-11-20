@@ -1620,7 +1620,7 @@ StringOrView CompactObj::GetRawString() const {
     return StringOrView::FromString(std::move(tmp));
   }
 
-  LOG(FATAL) << "Unsupported tag for GetRawString(): " << taglen_;
+  LOG(FATAL) << "Unsupported tag for GetRawString(): " << int(taglen_);
   return {};
 }
 
