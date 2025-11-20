@@ -399,6 +399,12 @@ void DenseSet::Shrink(size_t new_size) {
   if (shrinking_) {
     return;
   }
+
+  // Check num_iterators_ to prevent shrink during iteration (would invalidate iterators)
+  if (num_iterators_ != 0) {
+    return;
+  }
+
   shrinking_ = true;
 
   size_t prev_size = entries_.size();
@@ -786,10 +792,7 @@ void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
   ObjDelete(obj, false);
 
   // Automatically shrink when utilization drops below 25%
-  // Check shrinking_ to prevent recursive shrink during Shrink operation
-  // Check num_iterators_ to prevent shrink during iteration (would invalidate iterators)
-  if (!shrinking_ && num_iterators_ == 0 && entries_.size() > kMinSize &&
-      size_ < entries_.size() / 4) {
+  if (entries_.size() > kMinSize && size_ < entries_.size() / 4) {
     Shrink(entries_.size() / 2);
   }
 }
