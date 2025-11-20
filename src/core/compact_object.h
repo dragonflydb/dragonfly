@@ -379,7 +379,7 @@ class CompactObj {
 
   // Prequisite: IsCool() is true.
   // Keeps cool record only as external value and discard in-memory part.
-  void KeepExternal(size_t offset, size_t sz);
+  void Freeze(size_t offset, size_t sz);
 
   std::pair<size_t, size_t> GetExternalSlice() const;
 

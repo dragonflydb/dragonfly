@@ -1246,7 +1246,7 @@ auto CompactObj::GetCool() const -> CoolItem {
   return res;
 }
 
-void CompactObj::KeepExternal(size_t offset, size_t sz) {
+void CompactObj::Freeze(size_t offset, size_t sz) {
   SetExternal(offset, sz, GetExternalRep());
 }
 

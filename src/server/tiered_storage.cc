@@ -676,7 +676,7 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
 
     // Now the item is only in storage.
     tiering::DiskSegment segment = FromCoolItem(pv.GetCool());
-    pv.KeepExternal(segment.offset, segment.length);
+    pv.Freeze(segment.offset, segment.length);
 
     auto* stats = op_manager_->GetDbTableStats(record->db_index);
     stats->AddTypeMemoryUsage(record->value.ObjType(), -record->value.MallocUsed());
