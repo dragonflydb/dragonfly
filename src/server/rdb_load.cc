@@ -27,13 +27,13 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/bloom.h"
+#include "core/detail/listpack_wrap.h"
 #include "core/json/json_object.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
 #include "server/cluster/cluster_config.h"
-#include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
@@ -893,7 +893,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     StringSet* set = CompactObj::AllocateMR<StringSet>();
     for (unsigned char* cur = lpFirst(lp); cur != nullptr; cur = lpNext(lp, cur)) {
       unsigned char field_buf[LP_INTBUF_SIZE];
-      string_view elem = container_utils::LpGetView(cur, field_buf);
+      string_view elem = detail::ListpackWrap::GetView(cur, field_buf);
       if (!set->Add(elem)) {
         LOG(ERROR) << "Duplicate member " << elem;
         ec_ = RdbError(errc::duplicate_key);
