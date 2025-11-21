@@ -46,6 +46,10 @@ std::optional<T> ParseWithDecoder(std::string_view input, json_decoder<T>&& deco
 
 namespace dfly {
 
+void InitTLJsonHeap(PMR_NS::memory_resource* mr) {
+  detail::tl_mr = mr;
+}
+
 std::optional<ShortLivedJSON> JsonFromString(std::string_view input) {
   return ParseWithDecoder(input, json_decoder<ShortLivedJSON>{});
 }

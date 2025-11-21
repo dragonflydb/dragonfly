@@ -21,6 +21,52 @@
 
 namespace dfly {
 
+namespace detail {
+
+inline thread_local PMR_NS::memory_resource* tl_mr = nullptr;
+
+template <typename T> class StatelessJsonAllocator {
+ public:
+  using value_type = T;
+  using size_type = std::size_t;
+  using difference_type = std::ptrdiff_t;
+  using is_always_equal = std::true_type;
+
+  template <typename U> StatelessJsonAllocator(const StatelessJsonAllocator<U>&) noexcept {
+  }
+
+  StatelessJsonAllocator() noexcept {
+    DCHECK_NE(tl_mr, nullptr) << "json allocator created without backing memory resource";
+  };
+
+  static value_type* allocate(size_type n) {
+    void* ptr = tl_mr->allocate(n * sizeof(value_type), alignof(value_type));
+    return static_cast<value_type*>(ptr);
+  }
+
+  static void deallocate(value_type* ptr, size_type n) noexcept {
+    tl_mr->deallocate(ptr, n * sizeof(value_type), alignof(value_type));
+  }
+
+  static PMR_NS::memory_resource* resource() {
+    return tl_mr;
+  }
+};
+
+template <typename T, typename U>
+bool operator==(const StatelessJsonAllocator<T>&, const StatelessJsonAllocator<U>&) noexcept {
+  return true;
+}
+
+template <typename T, typename U>
+bool operator!=(const StatelessJsonAllocator<T>&, const StatelessJsonAllocator<U>&) noexcept {
+  return false;
+}
+
+}  // namespace detail
+
+void InitTLJsonHeap(PMR_NS::memory_resource* mr);
+
 using ShortLivedJSON = jsoncons::json;
 using JsonType = jsoncons::pmr::json;
 
