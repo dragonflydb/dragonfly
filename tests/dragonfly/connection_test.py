@@ -607,21 +607,23 @@ async def test_keyspace_events_config_set(async_client: aioredis.Redis):
 
 
 @dfly_args({"max_busy_read_usec": 50000})
-async def test_reply_count(async_client: aioredis.Redis):
+async def test_reply_count(df_server: DflyInstance):
     """Make sure reply aggregations reduce reply counts for common cases"""
 
     async def get_reply_count():
-        return (await async_client.info("STATS"))["reply_count"]
+        metrics = await df_server.metrics()
+        return int(metrics["dragonfly_reply"].samples[0].value)
 
     async def measure(aw):
         before = await get_reply_count()
         await aw
-        return await get_reply_count() - before - 1
+        return await get_reply_count() - before
 
+    async_client = df_server.client()
     await async_client.config_resetstat()
     base = await get_reply_count()
     info_diff = await get_reply_count() - base
-    assert info_diff == 1
+    assert info_diff == 0  # no commands yet
 
     # Warm client buffer up
     await async_client.lpush("warmup", *(i for i in range(500)))

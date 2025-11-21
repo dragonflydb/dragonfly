@@ -1713,7 +1713,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             MetricType::COUNTER, &resp->body());
   {
     AppendMetricWithoutLabels("reply_duration_seconds", "",
-                              m.facade_stats.reply_stats.send_stats.total_duration * 1e-6,
+                              m.facade_stats.reply_stats.send_stats.total_duration * 1e-9,
                               MetricType::COUNTER, &resp->body());
     AppendMetricWithoutLabels("reply_total", "", m.facade_stats.reply_stats.send_stats.count,
                               MetricType::COUNTER, &resp->body());
@@ -3015,8 +3015,6 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
-    append("reply_count", reply_stats.send_stats.count);
-    append("reply_latency_usec", reply_stats.send_stats.total_duration);
 
     // Number of connections that are currently blocked on grabbing interpreter.
     append("blocked_on_interpreter", m.coordinator_stats.blocked_on_interpreter);
