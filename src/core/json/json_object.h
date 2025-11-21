@@ -68,7 +68,8 @@ bool operator!=(const StatelessJsonAllocator<T>&, const StatelessJsonAllocator<U
 void InitTLJsonHeap(PMR_NS::memory_resource* mr);
 
 using ShortLivedJSON = jsoncons::json;
-using JsonType = jsoncons::pmr::json;
+using JsonType =
+    jsoncons::basic_json<char, jsoncons::sorted_policy, detail::StatelessJsonAllocator<char>>;
 
 // A helper type to use in template functions which are expected to work with both ShortLivedJSON
 // and JsonType
@@ -82,12 +83,12 @@ std::optional<ShortLivedJSON> JsonFromString(std::string_view input);
 
 // Parses string into JSON, using mimalloc heap for allocations. This method should only be used on
 // shards where mimalloc heap is initialized.
-std::optional<JsonType> JsonFromString(std::string_view input, PMR_NS::memory_resource* mr);
+std::optional<JsonType> ParseJsonUsingShardHeap(std::string_view input);
 
 // Deep copy a JSON object, by first serializing it to a string and then deserializing the string.
 // The operation is intended to help during defragmentation, by copying into a page reserved for
 // malloc.
-JsonType DeepCopyJSON(const JsonType* j, PMR_NS::memory_resource* mr);
+JsonType DeepCopyJSON(const JsonType* j);
 
 inline auto MakeJsonPathExpr(std::string_view path, std::error_code& ec)
     -> jsoncons::jsonpath::jsonpath_expression<JsonType> {

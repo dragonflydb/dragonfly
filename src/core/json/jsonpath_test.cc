@@ -39,7 +39,7 @@ class TestDriver : public Driver {
 template <typename JSON> JSON ValidJson(string_view str);
 
 template <> JsonType ValidJson<JsonType>(string_view str) {
-  auto res = ::dfly::JsonFromString(str, pmr::get_default_resource());
+  auto res = ParseJsonUsingShardHeap(str);
   CHECK(res) << "Failed to parse json: " << str;
   return *res;
 }

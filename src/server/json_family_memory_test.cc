@@ -111,9 +111,8 @@ TEST_F(JsonFamilyMemoryTest, JsonConsDelTest) {
 
   size_t start = GetMemoryUsage();
 
-  auto json = dfly::JsonFromString(start_json, JsonFamilyMemoryTest::GetMemoryResource());
-  void* ptr =
-      JsonFamilyMemoryTest::GetMemoryResource()->allocate(sizeof(JsonType), alignof(JsonType));
+  auto json = ParseJsonUsingShardHeap(start_json);
+  void* ptr = GetMemoryResource()->allocate(sizeof(JsonType), alignof(JsonType));
   JsonType* json_on_heap = new (ptr) JsonType(std::move(json).value());
 
   size_t memory_usage_before_erase = GetMemoryUsage() - start;
