@@ -81,7 +81,7 @@ bool SendErrorIfOccurred(const ParseResult<T>& result, CmdArgParser* parser,
 
 bool IsValidJsonPath(string_view path) {
   error_code ec;
-  MakeJsonPathExpr(path, ec);
+  MakeJsonPathExpr<ShortLivedJSON>(path, ec);
   return !ec;
 }
 

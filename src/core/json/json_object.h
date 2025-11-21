@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <glog/logging.h>
+
 #include <version>  // for __cpp_lib_to_chars macro.
 
 // std::from_chars is available in C++17 if __cpp_lib_to_chars is defined.
@@ -90,10 +92,13 @@ std::optional<JsonType> ParseJsonUsingShardHeap(std::string_view input);
 // malloc.
 JsonType DeepCopyJSON(const JsonType* j);
 
-inline auto MakeJsonPathExpr(std::string_view path, std::error_code& ec)
-    -> jsoncons::jsonpath::jsonpath_expression<JsonType> {
-  return jsoncons::jsonpath::make_expression<JsonType, std::allocator<char>>(
-      jsoncons::allocator_set<JsonType::allocator_type, std::allocator<char>>(), path, ec);
+template <typename Json = JsonType>
+auto MakeJsonPathExpr(std::string_view path, std::error_code& ec)
+    -> jsoncons::jsonpath::jsonpath_expression<Json> {
+  using result_allocator_t = typename Json::allocator_type;
+  using temp_allocator_t = std::allocator<char>;
+  using allocator_set_t = jsoncons::allocator_set<result_allocator_t, temp_allocator_t>;
+  return jsoncons::jsonpath::make_expression<Json, temp_allocator_t>(allocator_set_t(), path, ec);
 }
 
 }  // namespace dfly
