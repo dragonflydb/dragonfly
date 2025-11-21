@@ -88,6 +88,7 @@ static void InitThreadStructs() {
   SmallString::InitThreadLocal(tlh);
   thread_local MiMemoryResource mi_resource(tlh);
   CompactObj::InitThreadLocal(&mi_resource);
+  InitTLJsonHeap(&mi_resource);
 };
 
 static void CheckEverythingDeallocated() {

@@ -89,6 +89,11 @@ bool is_array(FlatJson ref) {
 
 class ScannerTest : public ::testing::Test {
  protected:
+  void SetUp() override {
+    Test::SetUp();
+    InitTLJsonHeap(PMR_NS::get_default_resource());
+  }
+
   ScannerTest() {
     driver_.lexer()->set_debug(1);
   }

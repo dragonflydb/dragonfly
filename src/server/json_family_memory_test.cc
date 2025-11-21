@@ -6,7 +6,6 @@
 #include "base/logging.h"
 #include "facade/facade_test.h"
 #include "server/command_registry.h"
-#include "server/json_family.h"
 #include "server/test_utils.h"
 
 using namespace testing;
@@ -19,25 +18,33 @@ namespace dfly {
 
 class JsonFamilyMemoryTest : public BaseFamilyTest {
  public:
-  static dfly::MiMemoryResource* GetMemoryResource() {
-    static thread_local mi_heap_t* heap = mi_heap_new();
-    static thread_local dfly::MiMemoryResource memory_resource{heap};
+  static MiMemoryResource* GetMemoryResource() {
+    thread_local mi_heap_t* heap = mi_heap_new();
+    thread_local MiMemoryResource memory_resource{heap};
     return &memory_resource;
   }
 
  protected:
+  void SetUp() override {
+    BaseFamilyTest::SetUp();
+    // Make the core running the thread use the same resource as the rest of the test. Although
+    // BaseFamilyTest initializes the heap on shards serving transactions, the core running the test
+    // needs this initialized explicitly.
+    InitTLJsonHeap(GetMemoryResource());
+  }
+
   auto GetJsonMemoryUsageFromDb(std::string_view key) {
     return Run({"MEMORY", "USAGE", key, "WITHOUTKEY"});
   }
 };
 
 size_t GetMemoryUsage() {
-  return static_cast<MiMemoryResource*>(JsonFamilyMemoryTest::GetMemoryResource())->used();
+  return JsonFamilyMemoryTest::GetMemoryResource()->used();
 }
 
 size_t GetJsonMemoryUsageFromString(std::string_view json_str) {
   size_t start = GetMemoryUsage();
-  auto json = dfly::JsonFromString(json_str, JsonFamilyMemoryTest::GetMemoryResource());
+  auto json = ParseJsonUsingShardHeap(json_str);
   if (!json) {
     return 0;
   }

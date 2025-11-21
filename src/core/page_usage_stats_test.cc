@@ -45,6 +45,7 @@ class PageUsageStatsTest : public ::testing::Test {
   }
 
   PageUsageStatsTest() : m_(mi_heap_get_backing()) {
+    InitTLJsonHeap(&m_);
   }
 
   void SetUp() override {
