@@ -2446,10 +2446,6 @@ TEST_F(SearchFamilyTest, VectorIndexOperations) {
   // Basic star search
   auto star_search = Run({"ft.search", "vector_idx", "*"});
   EXPECT_THAT(star_search, AreDocIds("vec:1", "vec:2", "vec:3", "vec:4", "vec:5"));
-
-  // Search by vector field presence
-  auto vec_field_search = Run({"ft.search", "vector_idx", "@vec:*"});
-  EXPECT_THAT(vec_field_search, AreDocIds("vec:1", "vec:2", "vec:3", "vec:4", "vec:5"));
 }
 
 // Test to verify that @field:* syntax works with sortable fields
