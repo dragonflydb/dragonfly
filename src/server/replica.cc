@@ -144,6 +144,11 @@ GenericError Replica::Start() {
   ec = Greet();
   RETURN_ON_ERR(check_connection_error(ec, "could not greet master "));
 
+  // 4. Check if we connected to ourselves
+  if (IsConnectedToItself()) {
+    return {"replicaof host is the same"};
+  }
+
   return {};
 }
 

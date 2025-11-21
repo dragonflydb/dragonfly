@@ -137,6 +137,8 @@ class ProtocolClient {
   util::fb2::Mutex sock_mu_;
 
  protected:
+  bool IsConnectedToItself() const;
+
   ExecutionState exec_st_;  // context for tasks in replica.
 
   std::string last_cmd_;

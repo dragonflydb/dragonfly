@@ -43,6 +43,8 @@ ABSL_DECLARE_FLAG(std::string, tls_cert_file);
 ABSL_DECLARE_FLAG(std::string, tls_key_file);
 ABSL_DECLARE_FLAG(std::string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(std::string, tls_ca_cert_dir);
+ABSL_DECLARE_FLAG(int32_t, port);
+ABSL_DECLARE_FLAG(uint16_t, admin_port);
 
 namespace dfly {
 
@@ -400,6 +402,51 @@ uint64_t ProtocolClient::LastIoTime() const {
 
 void ProtocolClient::TouchIoTime() {
   last_io_time_.store(Proactor()->GetMonotonicTimeNs(), std::memory_order_relaxed);
+}
+
+bool ProtocolClient::IsConnectedToItself() const {
+  if (!(sock_ && sock_->IsOpen())) {
+    return false;
+  }
+
+  const int fd = sock_->native_handle();
+
+  struct sockaddr_storage addr;
+  socklen_t len = sizeof(addr);
+
+  if (int res = getsockname(fd, (struct sockaddr*)&addr, &len); res != 0) {
+    // reject it
+    LOG(WARNING) << "getsockname failed " << res;
+    return true;
+  }
+
+  auto get_addr = [](const sockaddr_storage* addr, socklen_t len) {
+    char ipstr[INET6_ADDRSTRLEN];
+    if (addr->ss_family == AF_INET) {
+      struct sockaddr_in* s = (struct sockaddr_in*)addr;
+      inet_ntop(AF_INET, &s->sin_addr, ipstr, sizeof(ipstr));
+      return std::make_pair(std::string{ipstr}, ntohs(s->sin_port));
+    }
+    // addr->ss_family == AF_INET6
+    struct sockaddr_in6* s = (struct sockaddr_in6*)addr;
+    return std::make_pair(std::string{ipstr}, ntohs(s->sin6_port));
+  };
+
+  // port won't work with get_addr
+  auto [source, _] = get_addr(&addr, len);
+  size_t main_port = absl::GetFlag(FLAGS_port);
+  size_t admin_port = absl::GetFlag(FLAGS_admin_port);
+
+  struct sockaddr_storage peer_addr;
+  socklen_t peer_len = sizeof(peer_addr);
+
+  if (int res = getpeername(fd, (struct sockaddr*)&peer_addr, &peer_len); res != 0) {
+    LOG(WARNING) << "getsockname failed " << res;
+    return true;
+  }
+
+  auto [peer, peer_port] = get_addr(&peer_addr, peer_len);
+  return source == peer && (peer_port == main_port || peer_port == admin_port);
 }
 
 }  // namespace dfly
