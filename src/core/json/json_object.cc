@@ -46,18 +46,22 @@ std::optional<T> ParseWithDecoder(std::string_view input, json_decoder<T>&& deco
 
 namespace dfly {
 
-std::optional<ShortLivedJSON> JsonFromString(std::string_view input) {
-  return ParseWithDecoder(input, json_decoder<ShortLivedJSON>{});
+void InitTLJsonHeap(PMR_NS::memory_resource* mr) {
+  detail::tl_mr = mr;
 }
 
-optional<JsonType> JsonFromString(string_view input, PMR_NS::memory_resource* mr) {
-  return ParseWithDecoder(input, json_decoder<JsonType>{PMR_NS::polymorphic_allocator<char>{mr}});
+std::optional<TmpJson> JsonFromString(std::string_view input) {
+  return ParseWithDecoder(input, json_decoder<TmpJson>{});
 }
 
-JsonType DeepCopyJSON(const JsonType* j, PMR_NS::memory_resource* mr) {
+optional<JsonType> ParseJsonUsingShardHeap(string_view input) {
+  return ParseWithDecoder(input, json_decoder<JsonType>{detail::StatelessJsonAllocator<char>{}});
+}
+
+JsonType DeepCopyJSON(const JsonType* j) {
   std::string serialized;
   j->dump(serialized);
-  auto deserialized = JsonFromString(serialized, mr);
+  auto deserialized = ParseJsonUsingShardHeap(serialized);
   DCHECK(deserialized.has_value());
   return std::move(deserialized.value());
 }
