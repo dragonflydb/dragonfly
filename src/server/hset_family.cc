@@ -492,6 +492,9 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
 
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
 
+  if (auto* ts = op_args.shard->tiered_storage(); ts)
+    ts->TryStash(op_args.db_cntx.db_index, key, &pv);
+
   return created;
 }
 
