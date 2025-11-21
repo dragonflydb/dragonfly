@@ -1612,7 +1612,9 @@ DispatchResult Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
       res = DispatchResult::OOM;
     }
     VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
-    LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
+    if (!absl::StartsWith(reason, "-BUSYGROUP")) {
+      LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
+    }
   }
 
   auto cid_name = cid->name();
