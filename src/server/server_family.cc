@@ -3374,26 +3374,46 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 }
 
 void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (args.size() > 1) {
-    return cmd_cntx.rb->SendError(kSyntaxErr);
-  }
-
-  string section;
-
-  if (args.size() == 1) {
-    section = absl::AsciiStrToUpper(ArgS(args, 0));
-  }
-
+  std::vector<std::string> sections;
+  bool need_metrics{false};  // Save time - do not fetch metrics if we don't need them.
   Metrics metrics;
 
-  // Save time by not calculating metrics if we don't need them.
-  if (!(section == "SERVER" || section == "REPLICATION")) {
+  sections.reserve(args.size());
+  for (const auto& arg : args) {
+    sections.emplace_back(absl::AsciiStrToUpper(arg));
+    const auto& section = sections.back();
+    if (!need_metrics && (section != "SERVER") && (section != "REPLICATION")) {
+      need_metrics = true;
+    }
+  }
+
+  if (need_metrics || sections.empty()) {
     metrics = GetMetrics(cmd_cntx.conn_cntx->ns);
   } else if (!IsMaster()) {
     metrics.replica_side_info = GetReplicaSummary();
   }
 
-  string info = FormatInfoMetrics(metrics, section, cmd_cntx.conn_cntx->conn()->IsPrivileged());
+  std::string info;
+  // For multiple requested sections, invalid section names are ignored (not included in the
+  // output). The command does not abort or return an error if some sections are invalid. This
+  // matches Valkey behavior.
+  if (sections.empty()) {  // No sections: default to all sections.
+    info = FormatInfoMetrics(metrics, "", cmd_cntx.conn_cntx->conn()->IsPrivileged());
+  } else if (sections.size() == 1) {  // Single section
+    info = FormatInfoMetrics(metrics, sections[0], cmd_cntx.conn_cntx->conn()->IsPrivileged());
+  } else {  // Multiple sections: concatenate results for each requested section.
+    for (const auto& section : sections) {
+      const std::string section_str =
+          FormatInfoMetrics(metrics, section, cmd_cntx.conn_cntx->conn()->IsPrivileged());
+      if (!section_str.empty()) {
+        if (!info.empty()) {
+          absl::StrAppend(&info, "\r\n", section_str);
+        } else {
+          info = section_str;
+        }
+      }
+    }
+  }
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   rb->SendVerbatimString(info);
