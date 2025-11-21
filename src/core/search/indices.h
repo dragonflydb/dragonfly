@@ -8,6 +8,9 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
+// #include "server/search/global_vector_index.h"
+#include "util/fibers/synchronization.h"
+
 // Wrong warning reported when geometry.hpp is loaded
 #ifndef __clang__
 #pragma GCC diagnostic push
@@ -39,7 +42,7 @@ namespace dfly::search {
 
 // Index for integer fields.
 // Range bounds are queried in logarithmic time, iteration is constant.
-struct NumericIndex : public BaseIndex {
+struct NumericIndex : public BaseIndex<DocId> {
   // Temporary base class for range tree.
   // It is used to use two different range trees depending on the flag use_range_tree.
   // If the flag is true, RangeTree is used, otherwise a simple implementation with btree_set.
@@ -76,7 +79,7 @@ struct NumericIndex : public BaseIndex {
 };
 
 // Base index for string based indices.
-template <typename C> struct BaseStringIndex : public BaseIndex {
+template <typename C> struct BaseStringIndex : public BaseIndex<DocId> {
   using Container = BlockList<C>;
   using VecOrPtr = std::variant<std::vector<DocId>, const Container*>;
 
@@ -157,65 +160,100 @@ struct TagIndex : public BaseStringIndex<SortedVector<DocId>> {
   char separator_;
 };
 
-struct BaseVectorIndex : public BaseIndex {
-  std::pair<size_t /*dim*/, VectorSimilarity> Info() const;
+template <typename T> struct BaseVectorIndex : public BaseIndex<T> {
+  std::pair<size_t /*dim*/, VectorSimilarity> Info() const {
+    return {dim_, sim_};
+  }
 
-  bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override final;
+  bool Add(T id, const DocumentAccessor& doc, std::string_view field) override final;
 
  protected:
   BaseVectorIndex(size_t dim, VectorSimilarity sim);
 
   using VectorPtr = decltype(std::declval<OwnedFtVector>().first);
-  virtual void AddVector(DocId id, const VectorPtr& vector) = 0;
+  virtual void AddVector(T id, const VectorPtr& vector) = 0;
 
   size_t dim_;
   VectorSimilarity sim_;
 };
 
-// Index for vector fields.
-// Only supports lookup by id.
-struct FlatVectorIndex : public BaseVectorIndex {
-  FlatVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
+// ShardNoOpVectorIndex is used as placeholder as vector index in each shard. It doesn't implement
+// any functionality so adding documents will not have any effect on it. It is used to support
+// as filter when adding fields.
+struct ShardNoOpVectorIndex : public BaseVectorIndex<DocId> {
+  explicit ShardNoOpVectorIndex(const SchemaField::VectorParams& params);
 
-  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
-
-  const float* Get(DocId doc) const;
+  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override {
+    // noop
+  }
 
   // Return all documents that have vectors in this index
-  std::vector<DocId> GetAllDocsWithNonNullValues() const override;
-
- protected:
-  void AddVector(DocId id, const VectorPtr& vector) override;
-
- private:
-  PMR_NS::vector<float> entries_;
-};
-
-struct HnswlibAdapter;
-
-struct HnswVectorIndex : public BaseVectorIndex {
-  HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
-  ~HnswVectorIndex();
-
-  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
-
-  std::vector<std::pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef) const;
-  std::vector<std::pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
-                                           const std::vector<DocId>& allowed) const;
-
-  // TODO: Implement if needed
   std::vector<DocId> GetAllDocsWithNonNullValues() const override {
-    return std::vector<DocId>{};
+    return {};
   }
 
  protected:
-  void AddVector(DocId id, const VectorPtr& vector) override;
-
- private:
-  std::unique_ptr<HnswlibAdapter> adapter_;
+  using BaseVectorIndex<DocId>::dim_;
+  void AddVector(DocId id, const typename BaseVectorIndex<DocId>::VectorPtr& vector) override {
+    // noop
+  }
 };
 
-struct GeoIndex : public BaseIndex {
+// Index for vector fields.
+// Only supports lookup by id.
+struct FlatVectorIndex : public BaseVectorIndex<GlobalDocId> {
+  FlatVectorIndex(const SchemaField::VectorParams& params, ShardId shard_set_size,
+                  PMR_NS::memory_resource* mr);
+
+  void Remove(GlobalDocId id, const DocumentAccessor& doc, std::string_view field) override;
+
+  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k) const;
+
+  using FilterShardDocs = std::vector<search::DocId>;
+
+  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k,
+                                                 const std::vector<FilterShardDocs>& allowed) const;
+
+  std::vector<GlobalDocId> GetAllDocsWithNonNullValues() const override {
+    return std::vector<GlobalDocId>{};
+  }
+
+ protected:
+  using BaseVectorIndex<GlobalDocId>::dim_;
+  void AddVector(GlobalDocId id,
+                 const typename BaseVectorIndex<GlobalDocId>::VectorPtr& vector) override;
+
+ private:
+  PMR_NS::vector<PMR_NS::vector<float>> entries_;
+  mutable std::vector<util::fb2::SharedMutex> shard_vector_locks_;
+};
+
+template <typename T> struct HnswlibAdapter;
+struct HnswVectorIndex : public BaseVectorIndex<GlobalDocId> {
+  HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
+  ~HnswVectorIndex();
+
+  void Remove(GlobalDocId id, const DocumentAccessor& doc, std::string_view field) override;
+
+  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k,
+                                                 std::optional<size_t> ef) const;
+  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
+                                                 const std::vector<GlobalDocId>& allowed) const;
+
+  // TODO: Implement if needed
+  std::vector<GlobalDocId> GetAllDocsWithNonNullValues() const override {
+    return std::vector<GlobalDocId>{};
+  }
+
+ protected:
+  void AddVector(GlobalDocId id,
+                 const typename BaseVectorIndex<GlobalDocId>::VectorPtr& vector) override;
+
+ private:
+  std::unique_ptr<HnswlibAdapter<GlobalDocId>> adapter_;
+};
+
+struct GeoIndex : public BaseIndex<DocId> {
   using point =
       boost::geometry::model::point<double, 2,
                                     boost::geometry::cs::geographic<boost::geometry::degree>>;

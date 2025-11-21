@@ -33,6 +33,7 @@ using Synonyms = search::Synonyms;
 std::string_view SearchFieldTypeToString(search::SchemaField::FieldType);
 
 struct SerializedSearchDoc {
+  search::DocId id;
   std::string key;
   SearchDocData values;
   float knn_score;
@@ -212,6 +213,7 @@ class ShardDocIndices;
 class ShardDocIndex {
   friend class ShardDocIndices;
   using DocId = search::DocId;
+  using GlobalDocId = search::GlobalDocId;
 
   // Used in FieldsValuesPerDocId to store values for each field per document
   using FieldsValues = absl::InlinedVector<search::SortableValue, 4>;
@@ -219,9 +221,10 @@ class ShardDocIndex {
   // DocKeyIndex manages mapping document keys to ids and vice versa through a simple interface.
   struct DocKeyIndex {
     DocId Add(std::string_view key);
-    std::optional<DocId> Remove(std::string_view key);
+    void Remove(DocId id);
 
     std::string_view Get(DocId id) const;
+    std::optional<DocId> Find(std::string_view key) const;
     size_t Size() const;
 
     // Get const reference to the internal ids map
@@ -262,8 +265,12 @@ class ShardDocIndex {
   // Return whether base index matches
   bool Matches(std::string_view key, unsigned obj_code) const;
 
-  void AddDoc(std::string_view key, const DbContext& db_cntx, const PrimeValue& pv);
-  void RemoveDoc(std::string_view key, const DbContext& db_cntx, const PrimeValue& pv);
+  std::optional<ShardDocIndex::DocId> GetDocId(std::string_view key, const DbContext& db_cntx);
+
+  std::optional<ShardDocIndex::DocId> AddDoc(std::string_view key, const DbContext& db_cntx,
+                                             const PrimeValue& pv);
+
+  void RemoveDoc(DocId id, const DbContext& db_cntx, const PrimeValue& pv);
 
   DocIndexInfo GetInfo() const;
 
@@ -287,12 +294,18 @@ class ShardDocIndex {
     return key_index_;
   }
 
- private:
-  // Clears internal data. Traverses all matching documents and assigns ids.
-  void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
+  void AddDocToGlobalVectorIndex(std::string_view index_name, ShardDocIndex::DocId doc_id,
+                                 const DbContext& db_cntx, const PrimeValue& pv);
+  void RemoveDocFromGlobalVectorIndex(std::string_view index_name, ShardDocIndex::DocId doc_id,
+                                      const DbContext& db_cntx, const PrimeValue& pv);
+  void RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args);
 
   using LoadedEntry = std::pair<std::string_view, std::unique_ptr<BaseAccessor>>;
   std::optional<LoadedEntry> LoadEntry(search::DocId id, const OpArgs& op_args) const;
+
+ private:
+  // Clears internal data. Traverses all matching documents and assigns ids.
+  void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
 
   // Behaviour identical to SortIndex::Sort for non-sortable fields that need to be fetched first
   std::vector<search::SortableValue> KeepTopKSorted(std::vector<DocId>* ids, size_t limit,

@@ -23,6 +23,7 @@ namespace dfly::search {
 
 struct AstNode;
 struct TextIndex;
+struct AstKnnNode;
 
 // Optional FILTER
 struct OptionalNumericFilter : public OptionalFilterBase {
@@ -129,8 +130,8 @@ class FieldIndices {
   bool Add(DocId doc, const DocumentAccessor& access);
   void Remove(DocId doc, const DocumentAccessor& access);
 
-  BaseIndex* GetIndex(std::string_view field) const;
-  BaseSortIndex* GetSortIndex(std::string_view field) const;
+  BaseIndex<DocId>* GetIndex(std::string_view field) const;
+  BaseSortIndex<DocId>* GetSortIndex(std::string_view field) const;
   std::vector<TextIndex*> GetAllTextIndices() const;
 
   const std::vector<DocId>& GetAllDocs() const;
@@ -149,8 +150,8 @@ class FieldIndices {
   const Schema& schema_;
   const IndicesOptions& options_;
   std::vector<DocId> all_ids_;
-  absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>> indices_;
-  absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>> sort_indices_;
+  absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex<DocId>>> indices_;
+  absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex<DocId>>> sort_indices_;
   const Synonyms* synonyms_;
 };
 
@@ -201,14 +202,20 @@ class SearchAlgorithm {
   SearchResult Search(const FieldIndices* index,
                       size_t cuttoff_limit = std::numeric_limits<size_t>::max()) const;
 
-  // if enabled, return limit & alias for knn query
-  std::optional<KnnScoreSortOption> GetKnnScoreSortOption() const;
+  const std::optional<KnnScoreSortOption>& GetKnnScoreSortOption() const {
+    return knn_score_sort_option_;
+  }
+
+  bool IsKnnQuery() const;
+
+  std::unique_ptr<AstNode> GetKnnNode();
 
   void EnableProfiling();
 
  private:
   bool profiling_enabled_ = false;
   std::unique_ptr<AstNode> query_;
+  std::optional<KnnScoreSortOption> knn_score_sort_option_;
 };
 
 }  // namespace dfly::search
