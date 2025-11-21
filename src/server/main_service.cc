@@ -59,6 +59,7 @@ extern "C" {
 #include "server/multi_command_squasher.h"
 #include "server/namespaces.h"
 #include "server/script_mgr.h"
+#include "server/search/global_vector_index.h"
 #include "server/search/search_family.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
@@ -1123,6 +1124,11 @@ void Service::Shutdown() {
 
   shard_set->PreShutdown();
   shard_set->Shutdown();
+
+#ifdef WITH_SEARCH
+  GlobalVectorIndexRegistry::Instance().Reset();
+#endif
+
   Transaction::Shutdown();
 
   pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });

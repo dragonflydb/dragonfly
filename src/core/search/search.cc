@@ -336,68 +336,10 @@ struct BasicSearch {
     return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
   }
 
-  void SearchKnnFlat(FlatVectorIndex<DocId>* vec_index, const AstKnnNode& knn,
-                     IndexResult&& sub_results) {
-    knn_distances_.reserve(sub_results.ApproximateSize());
-    auto cb = [&](auto* set) {
-      auto [dim, sim] = vec_index->Info();
-      for (DocId matched_doc : *set) {
-        float dist = VectorDistance(knn.vec.first.get(), vec_index->Get(matched_doc), dim, sim);
-        knn_distances_.emplace_back(dist, matched_doc);
-      }
-    };
-    visit(cb, sub_results.Borrowed());
-
-    size_t prefix_size = min(knn.limit, knn_distances_.size());
-    partial_sort(knn_distances_.begin(), knn_distances_.begin() + prefix_size,
-                 knn_distances_.end());
-    knn_distances_.resize(prefix_size);
-  }
-
-  void SearchKnnHnsw(HnswVectorIndex<DocId>* vec_index, const AstKnnNode& knn,
-                     IndexResult&& sub_results) {
-    if (indices_->GetAllDocs().size() == sub_results.ApproximateSize())  // TODO: remove approx size
-      knn_distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime);
-    else
-      knn_distances_ =
-          vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime, sub_results.Take().first);
-  }
-
   // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`
   IndexResult Search(const AstKnnNode& knn, string_view active_field) {
-    DCHECK(active_field.empty());
-    auto sub_results = SearchGeneric(*knn.filter, active_field);
-
-    auto* vec_index = GetIndex<BaseVectorIndex<DocId>>(knn.field);
-    if (!vec_index)
-      return IndexResult{};
-
-    // If vector dimension is 0, treat as placeholder/invalid - return empty results
-    // This allows tests to use dummy vector values like "<your_vector_blob>"
-    if (knn.vec.second == 0)
-      return IndexResult{};
-
-    if (auto [dim, _] = vec_index->Info(); dim != knn.vec.second) {
-      error_ =
-          absl::StrCat("Wrong vector index dimensions, got: ", knn.vec.second, ", expected: ", dim);
-      return IndexResult{};
-    }
-
-    knn_scores_.clear();
-    if (auto hnsw_index = dynamic_cast<HnswVectorIndex<DocId>*>(vec_index); hnsw_index)
-      SearchKnnHnsw(hnsw_index, knn, std::move(sub_results));
-    else
-      SearchKnnFlat(dynamic_cast<FlatVectorIndex<DocId>*>(vec_index), knn, std::move(sub_results));
-
-    vector<DocId> out(knn_distances_.size());
-    knn_scores_.reserve(knn_distances_.size());
-
-    for (size_t i = 0; i < knn_distances_.size(); i++) {
-      knn_scores_.emplace_back(knn_distances_[i].second, knn_distances_[i].first);
-      out[i] = knn_distances_[i].second;
-    }
-
-    return IndexResult{std::move(out)};
+    LOG(DFATAL) << "KNN node should not be searched in shard";
+    return IndexResult{};
   }
 
   // Determine node type and call specific search function
@@ -503,22 +445,13 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
         indices_[field_ident] = make_unique<TagIndex>(mr, tparams);
         break;
       }
-      case SchemaField::VECTOR: {
-        unique_ptr<BaseVectorIndex<DocId>> vector_index;
-
-        DCHECK(holds_alternative<SchemaField::VectorParams>(field_info.special_params));
-        const auto& vparams = std::get<SchemaField::VectorParams>(field_info.special_params);
-
-        if (vparams.use_hnsw)
-          vector_index = make_unique<HnswVectorIndex<DocId>>(vparams, mr);
-        else
-          vector_index = make_unique<FlatVectorIndex<DocId>>(vparams, mr);
-
-        indices_[field_ident] = std::move(vector_index);
-        break;
-      }
       case SchemaField::GEO: {
         indices_[field_ident] = make_unique<GeoIndex>(mr);
+        break;
+      }
+      case SchemaField::VECTOR: {
+        const auto& vparams = std::get<SchemaField::VectorParams>(field_info.special_params);
+        indices_[field_ident] = make_unique<ShardNoOpVectorIndex>(vparams);
         break;
       }
     }
@@ -666,14 +599,21 @@ SearchResult SearchAlgorithm::Search(const FieldIndices* index, size_t cuttoff_l
   return bs.Search(*query_, cuttoff_limit);
 }
 
-optional<KnnScoreSortOption> SearchAlgorithm::GetKnnScoreSortOption() const {
-  DCHECK(query_);
+bool SearchAlgorithm::IsKnnQuery() const {
+  return std::holds_alternative<AstKnnNode>(*query_);
+}
 
-  // KNN query
-  if (auto* knn = get_if<AstKnnNode>(query_.get()); knn)
-    return KnnScoreSortOption{string_view{knn->score_alias}, knn->limit};
-
-  return nullopt;
+std::unique_ptr<AstNode> SearchAlgorithm::GetKnnNode() {
+  if (auto* knn = get_if<AstKnnNode>(query_.get()); knn) {
+    // Save knn score sort option
+    knn_score_sort_option_ = KnnScoreSortOption{string_view{knn->score_alias}, knn->limit};
+    auto node = std::move(query_);
+    if (!std::holds_alternative<AstStarNode>(*(knn)->filter))
+      query_.swap(knn->filter);
+    return node;
+  }
+  LOG(DFATAL) << "Should not reach here";
+  return nullptr;
 }
 
 void SearchAlgorithm::EnableProfiling() {

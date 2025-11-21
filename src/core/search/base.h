@@ -16,10 +16,24 @@
 #include "absl/container/flat_hash_set.h"
 #include "base/pmr/memory_resource.h"
 #include "core/string_map.h"
+#include "server/tx_base.h"
 
 namespace dfly::search {
 
 using DocId = uint32_t;
+using GlobalDocId = uint64_t;
+
+inline GlobalDocId CreateGlobalDocId(ShardId shard_id, DocId local_doc_id) {
+  return ((uint64_t)shard_id << 32) | local_doc_id;
+}
+
+inline ShardId GlobalDocIdShardId(GlobalDocId id) {
+  return (id >> 32);
+}
+
+inline search::DocId GlobalDocIdLocalId(GlobalDocId id) {
+  return (id)&0xFFFF;
+}
 
 enum class VectorSimilarity { L2, IP, COSINE };
 

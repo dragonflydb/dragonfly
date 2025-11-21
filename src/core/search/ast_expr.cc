@@ -73,6 +73,10 @@ AstKnnNode::AstKnnNode(AstNode&& filter, AstKnnNode&& self) {
   this->filter = make_unique<AstNode>(std::move(filter));
 }
 
+bool AstKnnNode::Filter() const {
+  return filter == nullptr;
+}
+
 }  // namespace dfly::search
 
 namespace std {

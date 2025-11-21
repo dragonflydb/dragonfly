@@ -34,6 +34,7 @@
 #include "server/engine_shard_set.h"
 #include "server/search/aggregator.h"
 #include "server/search/doc_index.h"
+#include "server/search/global_vector_index.h"
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 
@@ -1084,9 +1085,25 @@ void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   auto idx_ptr = make_shared<DocIndex>(std::move(parsed_index).value());
+
+  for (const auto& [field_ident, field_info] : idx_ptr->schema.fields) {
+    if (field_info.type == search::SchemaField::VECTOR &&
+        !(field_info.flags & search::SchemaField::NOINDEX)) {
+      const auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
+      if (!GlobalVectorIndexRegistry::Instance().CreateVectorIndex(idx_name, field_info.short_name,
+                                                                   vparams)) {
+        cmd_cntx.tx->Conclude();
+        return builder->SendError("Index already exists");
+      }
+    }
+  }
+
   cmd_cntx.tx->Execute(
       [idx_name, idx_ptr](auto* tx, auto* es) {
         es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr);
+        if (auto* index = es->search_indices()->GetIndex(idx_name); index) {
+          index->RebuildGlobalVectorIndices(idx_name, tx->GetOpArgs(es));
+        }
         return OpStatus::OK;
       },
       true);
@@ -1158,9 +1175,16 @@ void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) 
   // Parse optional DD (Delete Documents) parameter
   bool delete_docs = args.size() > 1 && absl::EqualsIgnoreCase(args[1], "DD");
 
+  shared_ptr<DocIndex> index_info;
   atomic_uint num_deleted{0};
 
   auto cb = [&](Transaction* t, EngineShard* es) {
+    // Get index info from first shard for global cleanup
+    if (es->shard_id() == 0) {
+      if (auto* idx = es->search_indices()->GetIndex(idx_name); idx != nullptr) {
+        index_info = make_shared<DocIndex>(idx->GetInfo().base_index);
+      }
+    }
     // Drop the index and get its pointer
     auto index = es->search_indices()->DropIndex(idx_name);
     if (!index)
@@ -1188,6 +1212,15 @@ void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) 
   };
 
   cmd_cntx.tx->Execute(cb, true);
+
+  if (index_info) {
+    for (const auto& [field_ident, field_info] : index_info->schema.fields) {
+      if (field_info.type == search::SchemaField::VECTOR &&
+          !(field_info.flags & search::SchemaField::NOINDEX)) {
+        GlobalVectorIndexRegistry::Instance().RemoveVectorIndex(idx_name, field_info.short_name);
+      }
+    }
+  }
 
   DCHECK(num_deleted == 0u || num_deleted == shard_set->size());
   if (num_deleted == 0u)
@@ -1322,24 +1355,45 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   if (!search_algo.Init(query_str, &params->query_params, &params->optional_filters))
     return builder->SendError("Query syntax error");
 
+  std::unique_ptr<search::AstNode> knn_node = nullptr;
+  search::AstKnnNode* knn = nullptr;
+
+  if (search_algo.IsKnnQuery()) {
+    knn_node = search_algo.GetKnnNode();
+    knn = std::get_if<search::AstKnnNode>(knn_node.get());
+  }
+
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
   atomic<bool> index_not_found{false};
   vector<SearchResult> docs(shard_set->size());
 
-  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (auto* index = es->search_indices()->GetIndex(index_name); index)
-      docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
-    else
-      index_not_found.store(true, memory_order_relaxed);
-    return OpStatus::OK;
-  });
+  if (!knn || (knn && knn->Filter())) {
+    cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+      if (auto* index = es->search_indices()->GetIndex(index_name); index)
+        docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
+      else
+        index_not_found.store(true, memory_order_relaxed);
+      return OpStatus::OK;
+    });
 
-  if (index_not_found.load())
-    return builder->SendError(string{index_name} + ": no such index");
+    if (index_not_found.load())
+      return builder->SendError(string{index_name} + ": no such index");
 
-  for (const auto& res : docs) {
-    if (res.error)
-      return builder->SendError(*res.error);
+    for (const auto& res : docs) {
+      if (res.error)
+        return builder->SendError(*res.error);
+    }
+  }
+
+  if (knn_node) {
+    auto vector_index =
+        GlobalVectorIndexRegistry::Instance().GetVectorIndex(index_name, knn->field);
+
+    if (!vector_index) {
+      return builder->SendError(string{index_name} + ": no such index");
+    }
+
+    docs = vector_index->Search(knn, search_algo.GetKnnScoreSortOption(), docs, *params, cmd_cntx);
   }
 
   SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(docs), builder);
