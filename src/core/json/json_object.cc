@@ -50,8 +50,8 @@ void InitTLJsonHeap(PMR_NS::memory_resource* mr) {
   detail::tl_mr = mr;
 }
 
-std::optional<ShortLivedJSON> JsonFromString(std::string_view input) {
-  return ParseWithDecoder(input, json_decoder<ShortLivedJSON>{});
+std::optional<TmpJson> JsonFromString(std::string_view input) {
+  return ParseWithDecoder(input, json_decoder<TmpJson>{});
 }
 
 optional<JsonType> ParseJsonUsingShardHeap(string_view input) {

@@ -342,7 +342,7 @@ void SendJsonString(const OpResult<string>& result, RedisReplyBuilder* rb) {
   if (result) {
     const string& json_str = result.value();
     if (rb->IsResp3()) {
-      if (const std::optional<ShortLivedJSON> parsed_json = JsonFromString(json_str)) {
+      if (const std::optional<TmpJson> parsed_json = JsonFromString(json_str)) {
         Send(parsed_json.value(), rb);
         return;
       }
@@ -1525,18 +1525,19 @@ auto OpMemory(const OpArgs& op_args, string_view key, const WrappedJsonPath& jso
       ReadOnlyOperationOptions{false, CallbackResultOptions::DefaultReadOnlyOptions()});
 }
 
-// Returns json vector that represents the result of the json query. A shard local
-// heap allocated JSON cannot be copied and then destroyed on another shard because we use stateless
-// allocators which forward all requests to thread local memory resource. So the value is first
-// copied to the std allocator-backed type ShortLivedJSON.
-OpResult<JsonCallbackResult<ShortLivedJSON>> OpResp(const OpArgs& op_args, string_view key,
-                                                    const WrappedJsonPath& json_path) {
+// Returns json vector that represents the result of the json query. A shard local allocated JSON
+// cannot be copied and then destroyed on another shard. We use stateless allocators which forward
+// all requests to thread local memory resource which uses mimalloc, and the coordinator thread may
+// not have a mimalloc backed heap set up. So the value is first copied to the std allocator-backed
+// type TmpJson.
+OpResult<JsonCallbackResult<TmpJson>> OpResp(const OpArgs& op_args, string_view key,
+                                             const WrappedJsonPath& json_path) {
   auto cb = [](const string_view&, const JsonType& val) {
     string s;
     val.dump(s);
     return JsonFromString(s);
   };
-  return JsonReadOnlyOperation<ShortLivedJSON>(op_args, key, json_path, std::move(cb));
+  return JsonReadOnlyOperation<TmpJson>(op_args, key, json_path, std::move(cb));
 }
 
 // Returns boolean that represents the result of the operation.
@@ -2011,7 +2012,7 @@ void JsonFamily::StrAppend(CmdArgList args, const CommandContext& cmd_cntx) {
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   // We try parsing the value into json string object first.
-  optional<ShortLivedJSON> parsed_json = JsonFromString(value);
+  optional<TmpJson> parsed_json = JsonFromString(value);
   if (!parsed_json || !parsed_json->is_string()) {
     return builder->SendError("expected string value", kSyntaxErrType);
   };

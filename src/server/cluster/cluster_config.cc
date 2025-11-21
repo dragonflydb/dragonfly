@@ -127,7 +127,7 @@ shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
 namespace {
 constexpr string_view kInvalidConfigPrefix = "Invalid JSON cluster config: "sv;
 
-template <typename T> optional<T> ReadNumeric(const ShortLivedJSON& obj) {
+template <typename T> optional<T> ReadNumeric(const TmpJson& obj) {
   if (!obj.is_number()) {
     LOG(ERROR) << kInvalidConfigPrefix << "object is not a number " << obj;
     return nullopt;
@@ -136,7 +136,7 @@ template <typename T> optional<T> ReadNumeric(const ShortLivedJSON& obj) {
   return obj.as<T>();
 }
 
-optional<SlotRanges> GetClusterSlotRanges(const ShortLivedJSON& slots) {
+optional<SlotRanges> GetClusterSlotRanges(const TmpJson& slots) {
   if (!slots.is_array()) {
     LOG(ERROR) << kInvalidConfigPrefix << "slot_ranges is not an array " << slots;
     return nullopt;
@@ -162,7 +162,7 @@ optional<SlotRanges> GetClusterSlotRanges(const ShortLivedJSON& slots) {
   return SlotRanges(ranges);
 }
 
-optional<ClusterExtendedNodeInfo> ParseClusterNode(const ShortLivedJSON& json) {
+optional<ClusterExtendedNodeInfo> ParseClusterNode(const TmpJson& json) {
   if (!json.is_object()) {
     LOG(ERROR) << kInvalidConfigPrefix << "node config is not an object " << json;
     return nullopt;
@@ -221,7 +221,7 @@ optional<ClusterExtendedNodeInfo> ParseClusterNode(const ShortLivedJSON& json) {
   return node;
 }
 
-optional<std::vector<MigrationInfo>> ParseMigrations(const ShortLivedJSON& json) {
+optional<std::vector<MigrationInfo>> ParseMigrations(const TmpJson& json) {
   std::vector<MigrationInfo> res;
   if (json.is_null()) {
     return res;
@@ -251,7 +251,7 @@ optional<std::vector<MigrationInfo>> ParseMigrations(const ShortLivedJSON& json)
   return res;
 }
 
-optional<ClusterShardInfos> BuildClusterConfigFromJson(const ShortLivedJSON& json) {
+optional<ClusterShardInfos> BuildClusterConfigFromJson(const TmpJson& json) {
   std::vector<ClusterShardInfo> config;
 
   if (!json.is_array()) {
@@ -309,7 +309,7 @@ optional<ClusterShardInfos> BuildClusterConfigFromJson(const ShortLivedJSON& jso
 /* static */
 shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
                                                           std::string_view json_str) {
-  optional<ShortLivedJSON> json_config = JsonFromString(json_str);
+  optional<TmpJson> json_config = JsonFromString(json_str);
   if (!json_config.has_value()) {
     LOG(ERROR) << "Can't parse JSON for ClusterConfig " << json_str;
     return nullptr;
