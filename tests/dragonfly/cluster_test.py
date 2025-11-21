@@ -3452,7 +3452,7 @@ async def test_replica_takeover_moved(
     assert await m1.client.execute_command("GET newk") == "foo"
 
 
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "cluster_search": "yes"})
 async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
     """
     Create cluster of 3 nodes.
@@ -3460,7 +3460,11 @@ async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
     """
 
     instances = [
-        df_factory.create(port=next(next_port), admin_port=next(next_port), vmodule="coordinator=2")
+        df_factory.create(
+            port=next(next_port),
+            admin_port=next(next_port),
+            vmodule="coordinator=2,search_family=3",
+        )
         for i in range(3)
     ]
 
@@ -3480,9 +3484,18 @@ async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
         == "OK"
     )
 
-    await asyncio.sleep(3)
     for node in nodes:
         await wait_for_ft_index_creation(node.client, "idx")
+
+    cclient = instances[0].cluster_client()
+
+    for i in range(0, 10):
+        assert await cclient.execute_command("HSET", f"s{i}", "title", f"test {i}") == 1
+
+    res = await nodes[0].client.execute_command("FT.SEARCH", "idx", "@title:test", "text")
+    assert res[0] == 10
+    for i in range(0, 10):
+        assert f"s{i}" in res
 
 
 async def verify_keys_match_number_of_index_docs(client, expected_num_keys):
@@ -3499,7 +3512,7 @@ async def verify_keys_match_number_of_index_docs(client, expected_num_keys):
     assert keyspace_keys == expected_num_keys
 
 
-@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes", "cluster_search": "yes"})
 async def test_remove_docs_on_cluster_migration(df_factory):
     instances = [
         df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)
