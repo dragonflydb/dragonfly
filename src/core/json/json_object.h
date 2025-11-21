@@ -24,7 +24,7 @@ namespace dfly {
 using TmpJson = jsoncons::json;
 using JsonType = jsoncons::pmr::json;
 
-// A helper type to use in template functions which are expected to work with both ShortLivedJSON
+// A helper type to use in template functions which are expected to work with both TmpJson
 // and JsonType
 template <typename Allocator>
 using JsonWithAllocator = jsoncons::basic_json<char, jsoncons::sorted_policy, Allocator>;
@@ -43,10 +43,13 @@ std::optional<JsonType> JsonFromString(std::string_view input, PMR_NS::memory_re
 // malloc.
 JsonType DeepCopyJSON(const JsonType* j, PMR_NS::memory_resource* mr);
 
-inline auto MakeJsonPathExpr(std::string_view path, std::error_code& ec)
-    -> jsoncons::jsonpath::jsonpath_expression<JsonType> {
-  return jsoncons::jsonpath::make_expression<JsonType, std::allocator<char>>(
-      jsoncons::allocator_set<JsonType::allocator_type, std::allocator<char>>(), path, ec);
+template <typename Json = JsonType>
+auto MakeJsonPathExpr(std::string_view path, std::error_code& ec)
+    -> jsoncons::jsonpath::jsonpath_expression<Json> {
+  using result_allocator_t = typename Json::allocator_type;
+  using temp_allocator_t = std::allocator<char>;
+  using allocator_set_t = jsoncons::allocator_set<result_allocator_t, temp_allocator_t>;
+  return jsoncons::jsonpath::make_expression<Json, temp_allocator_t>(allocator_set_t(), path, ec);
 }
 
 }  // namespace dfly
