@@ -60,7 +60,7 @@ unsigned StringSet::AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec,
   std::string_view views[kMaxBatchLen];
   unsigned res = 0;
   if (BucketCount() < span.size()) {
-    Reserve(span.size());
+    Resize(span.size());
   }
 
   while (span.size() >= kMaxBatchLen) {
