@@ -8,6 +8,9 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
+// #include "server/search/global_vector_index.h"
+#include "util/fibers/synchronization.h"
+
 // Wrong warning reported when geometry.hpp is loaded
 #ifndef __clang__
 #pragma GCC diagnostic push
@@ -174,53 +177,81 @@ template <typename T> struct BaseVectorIndex : public BaseIndex<T> {
   VectorSimilarity sim_;
 };
 
-// Index for vector fields.
-// Only supports lookup by id.
-template <typename T> struct FlatVectorIndex : public BaseVectorIndex<T> {
-  FlatVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
+// ShardNoOpVectorIndex is used as placeholder as vector index in each shard. It doesn't implement
+// any functionality so adding documents will not have any effect on it. It is used to support
+// as filter when adding fields.
+struct ShardNoOpVectorIndex : public BaseVectorIndex<DocId> {
+  explicit ShardNoOpVectorIndex(const SchemaField::VectorParams& params);
 
-  void Remove(T id, const DocumentAccessor& doc, std::string_view field) override;
-
-  const float* Get(T doc) const;
+  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override {
+    // noop
+  }
 
   // Return all documents that have vectors in this index
-  std::vector<T> GetAllDocsWithNonNullValues() const override;
-
- protected:
-  using BaseVectorIndex<T>::dim_;
-  void AddVector(T id, const typename BaseVectorIndex<T>::VectorPtr& vector) override;
-
- private:
-  PMR_NS::vector<float> entries_;
-};
-
-extern template struct FlatVectorIndex<DocId>;
-
-struct HnswlibAdapter;
-
-template <typename T> struct HnswVectorIndex : public BaseVectorIndex<T> {
-  HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
-  ~HnswVectorIndex();
-
-  void Remove(T id, const DocumentAccessor& doc, std::string_view field) override;
-
-  std::vector<std::pair<float, T>> Knn(float* target, size_t k, std::optional<size_t> ef) const;
-  std::vector<std::pair<float, T>> Knn(float* target, size_t k, std::optional<size_t> ef,
-                                       const std::vector<T>& allowed) const;
-
-  // TODO: Implement if needed
-  std::vector<T> GetAllDocsWithNonNullValues() const override {
-    return std::vector<T>{};
+  std::vector<DocId> GetAllDocsWithNonNullValues() const override {
+    return {};
   }
 
  protected:
-  void AddVector(T id, const typename BaseVectorIndex<T>::VectorPtr& vector) override;
-
- private:
-  std::unique_ptr<HnswlibAdapter> adapter_;
+  using BaseVectorIndex<DocId>::dim_;
+  void AddVector(DocId id, const typename BaseVectorIndex<DocId>::VectorPtr& vector) override {
+    // noop
+  }
 };
 
-extern template struct HnswVectorIndex<DocId>;
+// Index for vector fields.
+// Only supports lookup by id.
+struct FlatVectorIndex : public BaseVectorIndex<GlobalDocId> {
+  FlatVectorIndex(const SchemaField::VectorParams& params, ShardId shard_set_size,
+                  PMR_NS::memory_resource* mr);
+
+  void Remove(GlobalDocId id, const DocumentAccessor& doc, std::string_view field) override;
+
+  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k) const;
+
+  using FilterShardDocs = std::vector<search::DocId>;
+
+  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k,
+                                                 const std::vector<FilterShardDocs>& allowed) const;
+
+  std::vector<GlobalDocId> GetAllDocsWithNonNullValues() const override {
+    return std::vector<GlobalDocId>{};
+  }
+
+ protected:
+  using BaseVectorIndex<GlobalDocId>::dim_;
+  void AddVector(GlobalDocId id,
+                 const typename BaseVectorIndex<GlobalDocId>::VectorPtr& vector) override;
+
+ private:
+  PMR_NS::vector<PMR_NS::vector<float>> entries_;
+  mutable std::vector<util::fb2::SharedMutex> shard_vector_locks_;
+};
+
+template <typename T> struct HnswlibAdapter;
+struct HnswVectorIndex : public BaseVectorIndex<GlobalDocId> {
+  HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
+  ~HnswVectorIndex();
+
+  void Remove(GlobalDocId id, const DocumentAccessor& doc, std::string_view field) override;
+
+  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k,
+                                                 std::optional<size_t> ef) const;
+  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
+                                                 const std::vector<GlobalDocId>& allowed) const;
+
+  // TODO: Implement if needed
+  std::vector<GlobalDocId> GetAllDocsWithNonNullValues() const override {
+    return std::vector<GlobalDocId>{};
+  }
+
+ protected:
+  void AddVector(GlobalDocId id,
+                 const typename BaseVectorIndex<GlobalDocId>::VectorPtr& vector) override;
+
+ private:
+  std::unique_ptr<HnswlibAdapter<GlobalDocId>> adapter_;
+};
 
 struct GeoIndex : public BaseIndex<DocId> {
   using point =

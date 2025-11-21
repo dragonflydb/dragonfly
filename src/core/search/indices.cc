@@ -11,6 +11,11 @@
 #include <absl/strings/str_split.h>
 
 #include <boost/iterator/function_output_iterator.hpp>
+#include <shared_mutex>
+
+#include "core/search/base.h"
+#include "core/search/vector_utils.h"
+#include "util/fibers/synchronization.h"
 
 #define UNI_ALGO_DISABLE_NFKC_NFKD
 
@@ -126,6 +131,16 @@ std::optional<GeoIndex::point> GetGeoPoint(const DocumentAccessor& doc, string_v
     return nullopt;
 
   return GeoIndex::point{lon, lat};
+}
+
+template <typename Q, typename T = GlobalDocId> vector<pair<float, T>> QueueToVec(Q queue) {
+  vector<pair<float, T>> out(queue.size());
+  size_t idx = out.size();
+  while (!queue.empty()) {
+    out[--idx] = queue.top();
+    queue.pop();
+  }
+  return out;
 }
 
 };  // namespace
@@ -492,69 +507,73 @@ bool BaseVectorIndex<T>::Add(T id, const DocumentAccessor& doc, std::string_view
   return true;
 }
 
-template <typename T>
-FlatVectorIndex<T>::FlatVectorIndex(const SchemaField::VectorParams& params,
-                                    PMR_NS::memory_resource* mr)
-    : BaseVectorIndex<T>{params.dim, params.sim}, entries_{mr} {
-  DCHECK(!params.use_hnsw);
-  entries_.reserve(params.capacity * params.dim);
+ShardNoOpVectorIndex::ShardNoOpVectorIndex(const SchemaField::VectorParams& params)
+    : BaseVectorIndex<DocId>{params.dim, params.sim} {
 }
 
-template <typename T>
-void FlatVectorIndex<T>::AddVector(T id, const typename BaseVectorIndex<T>::VectorPtr& vector) {
-  DCHECK_LE(id * BaseVectorIndex<T>::dim_, entries_.size());
-  if (id * BaseVectorIndex<T>::dim_ == entries_.size())
-    entries_.resize((id + 1) * BaseVectorIndex<T>::dim_);
-
-  // TODO: Let get vector write to buf itself
-  if (vector) {
-    memcpy(&entries_[id * BaseVectorIndex<T>::dim_], vector.get(),
-           BaseVectorIndex<T>::dim_ * sizeof(float));
+FlatVectorIndex::FlatVectorIndex(const SchemaField::VectorParams& params, ShardId shard_set_size,
+                                 PMR_NS::memory_resource* mr)
+    : BaseVectorIndex<GlobalDocId>{params.dim, params.sim},
+      entries_{mr},
+      shard_vector_locks_(shard_set_size) {
+  DCHECK(!params.use_hnsw);
+  entries_.resize(shard_set_size);
+  for (size_t i = 0; i < shard_set_size; i++) {
+    entries_[i].reserve(params.capacity * params.dim);
   }
 }
 
-template <typename T>
-void FlatVectorIndex<T>::Remove(T id, const DocumentAccessor& doc, string_view field) {
+void FlatVectorIndex::AddVector(GlobalDocId id,
+                                const typename BaseVectorIndex<GlobalDocId>::VectorPtr& vector) {
+  auto shard_id = search::GlobalDocIdShardId(id);
+  auto shard_doc_id = search::GlobalDocIdLocalId(id);
+  DCHECK_LE(shard_doc_id * BaseVectorIndex<GlobalDocId>::dim_, entries_[shard_id].size());
+  if (shard_doc_id * BaseVectorIndex<GlobalDocId>::dim_ == entries_[shard_id].size()) {
+    unique_lock<util::fb2::SharedMutex> lock{shard_vector_locks_[shard_id]};
+    entries_[shard_id].resize((shard_doc_id + 1) * BaseVectorIndex<GlobalDocId>::dim_);
+  }
+  if (vector) {
+    memcpy(&entries_[shard_id][shard_doc_id * BaseVectorIndex<GlobalDocId>::dim_], vector.get(),
+           BaseVectorIndex<GlobalDocId>::dim_ * sizeof(float));
+  }
+}
+
+void FlatVectorIndex::Remove(GlobalDocId id, const DocumentAccessor& doc, string_view field) {
   // noop
 }
 
-template <typename T> const float* FlatVectorIndex<T>::Get(T doc) const {
-  return &entries_[doc * dim_];
-}
+std::vector<std::pair<float, GlobalDocId>> FlatVectorIndex::Knn(float* target, size_t k) const {
+  std::priority_queue<std::pair<float, search::GlobalDocId>> queue;
 
-template <typename T> std::vector<T> FlatVectorIndex<T>::GetAllDocsWithNonNullValues() const {
-  std::vector<DocId> result;
-
-  size_t num_vectors = entries_.size() / BaseVectorIndex<T>::dim_;
-  result.reserve(num_vectors);
-
-  for (DocId id = 0; id < num_vectors; ++id) {
-    // Check if the vector is not zero (all elements are 0)
-    // TODO: Valid vector can contain 0s, we should use a better approach
-    const float* vec = Get(id);
-    bool is_zero_vector = true;
-
-    // TODO: Consider don't use check for zero vector
-    for (size_t i = 0; i < BaseVectorIndex<T>::dim_; ++i) {
-      if (vec[i] != 0.0f) {  // TODO: Consider using a threshold for float comparison
-        is_zero_vector = false;
-        break;
-      }
-    }
-
-    if (!is_zero_vector) {
-      result.push_back(id);
+  for (size_t shard_id = 0; shard_id < entries_.size(); shard_id++) {
+    shared_lock<util::fb2::SharedMutex> lock{shard_vector_locks_[shard_id]};
+    size_t num_vectors = entries_[shard_id].size() / BaseVectorIndex<GlobalDocId>::dim_;
+    for (GlobalDocId id = 0; id < num_vectors; ++id) {
+      const float* vec = &entries_[shard_id][id * dim_];
+      float dist = VectorDistance(target, vec, dim_, sim_);
+      queue.emplace(dist, CreateGlobalDocId(shard_id, id));
     }
   }
 
-  // Result is already sorted by id, no need to sort again
-  // Also it has no duplicates
-  return result;
+  return QueueToVec(queue);
 }
 
-template struct FlatVectorIndex<DocId>;
+std::vector<std::pair<float, GlobalDocId>> FlatVectorIndex::Knn(
+    float* target, size_t k, const std::vector<FilterShardDocs>& allowed_docs) const {
+  std::priority_queue<std::pair<float, search::GlobalDocId>> queue;
 
-struct HnswlibAdapter {
+  for (size_t shard_id = 0; shard_id < allowed_docs.size(); shard_id++) {
+    shared_lock<util::fb2::SharedMutex> lock{shard_vector_locks_[shard_id]};
+    for (auto& shard_doc_id : allowed_docs[shard_id]) {
+      const float* vec = &entries_[shard_id][shard_doc_id * dim_];
+      float dist = VectorDistance(target, vec, dim_, sim_);
+      queue.emplace(dist, CreateGlobalDocId(shard_id, shard_doc_id));
+    }
+  }
+  return QueueToVec(queue);
+}
+
+template <typename T> struct HnswlibAdapter {
   // Default setting of hnswlib/hnswalg
   constexpr static size_t kDefaultEfRuntime = 10;
 
@@ -564,34 +583,45 @@ struct HnswlibAdapter {
                100 /* seed*/} {
   }
 
-  void Add(const float* data, DocId id) {
-    if (world_.cur_element_count + 1 >= world_.max_elements_)
-      world_.resizeIndex(world_.cur_element_count * 2);
-    world_.addPoint(data, id);
+  void Add(const float* data, T id) {
+    while (true) {
+      try {
+        absl::ReaderMutexLock lock(&resize_mutex_);
+        world_.addPoint(data, id);
+        return;
+      } catch (const std::exception& e) {
+        std::string error_msg = e.what();
+        if (absl::StrContains(error_msg, "The number of elements exceeds the specified limit")) {
+          ResizeIfFull();
+          continue;
+        }
+        throw e;
+      }
+    }
   }
 
-  void Remove(DocId id) {
+  void Remove(T id) {
     try {
       world_.markDelete(id);
     } catch (const std::exception& e) {
     }
   }
 
-  vector<pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
+  vector<pair<float, T>> Knn(float* target, size_t k, std::optional<size_t> ef) {
     world_.setEf(ef.value_or(kDefaultEfRuntime));
     return QueueToVec(world_.searchKnn(target, k));
   }
 
-  vector<pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
-                                 const vector<DocId>& allowed) {
+  vector<pair<float, T>> Knn(float* target, size_t k, std::optional<size_t> ef,
+                             const vector<T>& allowed) {
     struct BinsearchFilter : hnswlib::BaseFilterFunctor {
       virtual bool operator()(hnswlib::labeltype id) {
         return binary_search(allowed->begin(), allowed->end(), id);
       }
 
-      BinsearchFilter(const vector<DocId>* allowed) : allowed{allowed} {
+      BinsearchFilter(const vector<T>* allowed) : allowed{allowed} {
       }
-      const vector<DocId>* allowed;
+      const vector<T>* allowed;
     };
 
     world_.setEf(ef.value_or(kDefaultEfRuntime));
@@ -613,56 +643,63 @@ struct HnswlibAdapter {
     return visit([](auto& space) -> hnswlib::SpaceInterface<float>* { return &space; }, space_);
   }
 
-  template <typename Q> static vector<pair<float, DocId>> QueueToVec(Q queue) {
-    vector<pair<float, DocId>> out(queue.size());
-    size_t idx = out.size();
-    while (!queue.empty()) {
-      out[--idx] = queue.top();
-      queue.pop();
+  void ResizeIfFull() {
+    {
+      absl::ReaderMutexLock lock(&resize_mutex_);
+      if (world_.getCurrentElementCount() < world_.getMaxElements() ||
+          (world_.allow_replace_deleted_ && world_.getDeletedCount() > 0)) {
+        return;
+      }
     }
-    return out;
+    try {
+      absl::WriterMutexLock lock(&resize_mutex_);
+      if (world_.getCurrentElementCount() == world_.getMaxElements() &&
+          (!world_.allow_replace_deleted_ || world_.getDeletedCount() == 0)) {
+        auto max_elements = world_.getMaxElements();
+        world_.resizeIndex(max_elements * 2);
+        LOG(INFO) << "Resizing HNSW Index, current size: " << max_elements
+                  << ", expand by: " << max_elements * 2;
+      }
+    } catch (const std::exception& e) {
+      throw e;
+    }
   }
 
   SpaceUnion space_;
   hnswlib::HierarchicalNSW<float> world_;
+  absl::Mutex resize_mutex_;
 };
 
-template <typename T>
-HnswVectorIndex<T>::HnswVectorIndex(const SchemaField::VectorParams& params,
-                                    PMR_NS::memory_resource*)
-    : BaseVectorIndex<T>{params.dim, params.sim}, adapter_{make_unique<HnswlibAdapter>(params)} {
+HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource*)
+    : BaseVectorIndex<GlobalDocId>{params.dim, params.sim},
+      adapter_{make_unique<HnswlibAdapter<GlobalDocId>>(params)} {
   DCHECK(params.use_hnsw);
   // TODO: Patch hnsw to use MR
 }
-template <typename T> HnswVectorIndex<T>::~HnswVectorIndex() {
+HnswVectorIndex::~HnswVectorIndex() {
 }
 
-template <typename T>
-void HnswVectorIndex<T>::AddVector(T id, const typename BaseVectorIndex<T>::VectorPtr& vector) {
+void HnswVectorIndex::AddVector(GlobalDocId id,
+                                const typename BaseVectorIndex<GlobalDocId>::VectorPtr& vector) {
   if (vector) {
     adapter_->Add(vector.get(), id);
   }
 }
 
-template <typename T>
-std::vector<std::pair<float, T>> HnswVectorIndex<T>::Knn(float* target, size_t k,
-                                                         std::optional<size_t> ef) const {
+std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(float* target, size_t k,
+                                                                std::optional<size_t> ef) const {
   return adapter_->Knn(target, k, ef);
 }
 
-template <typename T>
-std::vector<std::pair<float, T>> HnswVectorIndex<T>::Knn(float* target, size_t k,
-                                                         std::optional<size_t> ef,
-                                                         const std::vector<T>& allowed) const {
+std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(
+    float* target, size_t k, std::optional<size_t> ef,
+    const std::vector<GlobalDocId>& allowed) const {
   return adapter_->Knn(target, k, ef, allowed);
 }
 
-template <typename T>
-void HnswVectorIndex<T>::Remove(T id, const DocumentAccessor& doc, string_view field) {
+void HnswVectorIndex::Remove(GlobalDocId id, const DocumentAccessor& doc, string_view field) {
   adapter_->Remove(id);
 }
-
-template struct HnswVectorIndex<DocId>;
 
 GeoIndex::GeoIndex(PMR_NS::memory_resource* mr) : rtree_(make_unique<rtree>()) {
 }
