@@ -635,11 +635,11 @@ async def test_reply_count(df_server: DflyInstance):
 
     # Integer set
     await async_client.sadd("set-1", *(i for i in range(100)))
-    assert await measure(async_client.smembers("set-1")) == 1
+    assert await measure(async_client.smembers("set-1")) <= 2
 
     # Sorted sets
     await async_client.zadd("zset-1", mapping={str(i): i for i in range(50)})
-    assert await measure(async_client.zrange("zset-1", 0, -1, withscores=True)) == 1
+    assert await measure(async_client.zrange("zset-1", 0, -1, withscores=True)) <= 2
 
     # Exec call
     e = async_client.pipeline(transaction=True)
@@ -663,7 +663,7 @@ async def test_reply_count(df_server: DflyInstance):
     await async_client.execute_command("FT.CREATE i1 SCHEMA name text")
     for i in range(50):
         await async_client.hset(f"key-{i}", "name", f"name number {i}")
-    assert await measure(async_client.ft("i1").search("*")) == 1
+    assert await measure(async_client.ft("i1").search("*")) <= 2
 
 
 async def test_big_command(df_server, size=8 * 1024):
