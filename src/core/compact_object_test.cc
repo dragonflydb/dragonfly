@@ -710,6 +710,38 @@ TEST_F(CompactObjectTest, Huffman) {
   }
 }
 
+// Regression test for zstd 1.5.7 buffer overflow bug
+// This test WILL crash with stack smashing when max_symbol=255
+// BUG: HUF_WriteCTableWksp.huffWeight has size [255] but code writes to index [255]
+TEST_F(CompactObjectTest, HuffmanMaxSymbol255Crash) {
+  HuffmanEncoder encoder;
+
+  // Create histogram with all 256 symbols (0-255)
+  array<unsigned, 256> hist;
+  hist.fill(1);  // All symbols have frequency 1
+
+  string err_msg;
+
+  // This triggers the bug: max_symbol=255 causes buffer overflow in HUF_writeCTable_wksp
+  // The huffWeight array has size [HUF_SYMBOLVALUE_MAX] = 255 (indices 0-254)
+  // But the code writes: huffWeight[maxSymbolValue] = 0  where maxSymbolValue=255
+  // And reads: huffWeight[254] and huffWeight[255] in the loop
+  bool success = encoder.Build(hist.data(), 255, &err_msg);  // ← BUG HERE!
+
+  if (!success) {
+    // Build might fail on some platforms
+    GTEST_SKIP() << "Build failed: " << err_msg;
+  }
+
+  // The Export() call triggers HUF_writeCTable_wksp which does the actual overflow
+  // On ARM with stack protector, this will detect the corruption and abort
+  string bindata = encoder.Export();
+
+  // If we got here without crashing, the platform doesn't detect the overflow
+  // But it's still a bug! ASAN/MSAN would catch it.
+  SUCCEED() << "Platform did not detect buffer overflow (but bug still exists!)";
+}
+
 static void ascii_pack_naive(const char* ascii, size_t len, uint8_t* bin) {
   const char* end = ascii + len;
 
