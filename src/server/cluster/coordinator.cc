@@ -48,12 +48,18 @@ class Coordinator::CrossShardClient : private ProtocolClient {
     ShutdownSocket();
   }
 
-  void SendCommand(std::string_view cmd) {
-    if (auto ec = SendCommandAndReadResponse(cmd); ec) {
+  void SendCommand(std::string_view cmd, const RespCB& cb) {
+    if (auto ec = ProtocolClient::SendCommand(cmd); ec) {
       LOG(WARNING) << "Coordinator could not send command to : " << server().Description() << ": "
                    << ec.message() << ", socket state: " << GetSocketInfo(Sock()->native_handle());
       exec_st_.ReportError(GenericError(ec, "Could not send command."));
     }
+    auto timeout = 30000;  // TODO add flag;
+    if (auto resp = ReadRespReply(timeout); !resp) {
+      LOG(WARNING) << "Error reading response from " << server().Description() << ": "
+                   << resp.error() << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+    }
+    cb(LastResponseArgs());
     // add response processing
   }
 };
@@ -63,7 +69,7 @@ Coordinator& Coordinator::Current() {
   return instance;
 }
 
-void Coordinator::DispatchAll(std::string_view command) {
+void Coordinator::DispatchAll(std::string_view command, RespCB cb) {
   auto cluster_config = ClusterConfig::Current();
   if (!cluster_config) {
     VLOG(2) << "No cluster config found for coordinator plan creation.";
@@ -79,7 +85,7 @@ void Coordinator::DispatchAll(std::string_view command) {
     }
     clients.emplace_back(std::make_unique<CrossShardClient>(shard.master.ip, shard.master.port));
     clients.back()->Init();
-    clients.back()->SendCommand(std::string(command));
+    clients.back()->SendCommand(std::string(command), cb);
   }
 }
 

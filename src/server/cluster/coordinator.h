@@ -13,8 +13,10 @@ namespace dfly::cluster {
 // It can be used to exeute commands on all shards or specific shards.
 class Coordinator {
  public:
+  using RespCB = std::function<void(const facade::RespVec&)>;
+
   static Coordinator& Current();
-  void DispatchAll(std::string_view command);
+  void DispatchAll(std::string_view command, RespCB cb);
 
  private:
   Coordinator() = default;
