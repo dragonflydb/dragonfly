@@ -38,6 +38,8 @@
 #include "src/core/overloaded.h"
 
 ABSL_FLAG(bool, search_reject_legacy_field, true, "FT.AGGREGATE: Reject legacy field names.");
+ABSL_FLAG(bool, cluster_search, false,
+          "Enable search commands for cross-shard search. turned off by default for safety.");
 
 ABSL_FLAG(size_t, MAXSEARCHRESULTS, 1000000, "Maximum number of results from ft.search command");
 
@@ -1074,13 +1076,13 @@ void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
     return builder->SendError("Index already exists");
   }
 
-  if (!is_cross_shard && IsClusterEnabled()) {
+  if (absl::GetFlag(FLAGS_cluster_search) && !is_cross_shard && IsClusterEnabled()) {
     std::string args_str = absl::StrJoin(args.subspan(1), " ");
     std::string cmd = absl::StrCat("FT.CREATE ", idx_name, " CSS ", args_str);
 
     // TODO add processing of the reply to make sure index was created successfully on all shards,
     // and prevent simultaneous creation of the same index.
-    cluster::Coordinator::Current().DispatchAll(cmd);
+    cluster::Coordinator::Current().DispatchAll(cmd, [](const facade::RespVec&) {});
   }
 
   auto idx_ptr = make_shared<DocIndex>(std::move(parsed_index).value());
@@ -1292,6 +1294,66 @@ void SearchFamily::FtList(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendBulkStrArr(names);
 }
 
+static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view query,
+                                        std::string_view args_str) {
+  vector<SearchResult> results;
+  std::string cmd = absl::StrCat("FT.SEARCH ", idx, " ", query, " CSS ", args_str);
+
+  // TODO for now we suppose that callback is called synchronously. If not, we need to add
+  // synchronization here for results vector modification.
+  cluster::Coordinator::Current().DispatchAll(cmd, [&](const facade::RespVec& res) {
+    VLOG(3) << "FT.SEARCH CSS reply: " << res;
+
+    if (res.empty()) {
+      LOG(ERROR) << "FT.SEARCH CSS reply is empty";
+      return;
+    }
+    if (res[0].type == facade::RespExpr::Type::ERROR) {
+      LOG(WARNING) << "FT.SEARCH CSS reply error: " << res[0].GetView();
+      return;
+    }
+
+    const auto size = res[0].GetInt();
+    if (!size.has_value()) {
+      LOG(ERROR) << "FT.SEARCH CSS reply unexpected type: " << static_cast<int>(res[0].type);
+      return;
+    }
+
+    results.emplace_back();
+    results.back().total_hits = *size;
+    for (size_t i = 2; i < res.size(); i += 2) {
+      auto& search_doc = results.back().docs.emplace_back();
+      search_doc.key = res[i - 1].GetString();
+      if (res[i].type != facade::RespExpr::Type::ARRAY) {
+        LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data: "
+                   << static_cast<int>(res[i].type);
+        return;
+      }
+      const auto& arr_res = res[i].GetVec();
+      if (arr_res.size() % 2 != 0) {
+        LOG(ERROR) << "FT.SEARCH CSS reply unexpected number of elements for document data: "
+                   << arr_res.size();
+        return;
+      }
+
+      for (size_t j = 0; j < arr_res.size(); j += 2) {
+        if (arr_res[j].type != facade::RespExpr::Type::STRING) {
+          LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data: "
+                     << static_cast<int>(arr_res[j].type);
+          return;
+        }
+        if (arr_res[j + 1].type != facade::RespExpr::Type::STRING) {
+          LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data: "
+                     << static_cast<int>(arr_res[j].type);
+          return;
+        }
+        search_doc.values.emplace(arr_res[j].GetString(), arr_res[j + 1].GetString());
+      }
+    }
+  });
+  return results;
+}
+
 void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser{args};
   string_view index_name = parser.Next();
@@ -1311,11 +1373,11 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
         absl::StrCat("Query string is too long, max length is ", max_query_bytes, " bytes"));
   }
 
-  if (!is_cross_shard && IsClusterEnabled()) {
+  vector<SearchResult> css_docs;
+  if (absl::GetFlag(FLAGS_cluster_search) && !is_cross_shard && IsClusterEnabled()) {
     std::string args_str = absl::StrJoin(args.subspan(2), " ");
-    std::string cmd = absl::StrCat("FT.SEARCH ", index_name, " ", query_str, " CSS ", args_str);
 
-    cluster::Coordinator::Current().DispatchAll(cmd);
+    css_docs = FtSearchCSS(index_name, query_str, args_str);
   }
 
   search::SearchAlgorithm search_algo;
@@ -1341,6 +1403,10 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
     if (res.error)
       return builder->SendError(*res.error);
   }
+
+  // TODO add merging of CSS results with local results (SORT, LIMIT, etc)
+  docs.insert(docs.end(), std::make_move_iterator(css_docs.begin()),
+              std::make_move_iterator(css_docs.end()));
 
   SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(docs), builder);
 }
