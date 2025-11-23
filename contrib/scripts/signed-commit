@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+if [[ -z "$1" ]] || [[ ! -f "$1" ]]; then
+  echo "ERROR: Commit message file not provided or does not exist."
+  exit 1
+fi
+
+# Check if signed-off-by line is present (automatically added using -s flag)
+if ! grep -q 'Signed-off-by:' "$1"; then
+  echo "ERROR: Commit message must contain a Signed-off-by line."
+  echo ""
+  echo "To sign your commits, use the -s flag:"
+  echo "  git commit -s -m \"your commit message\""
+  exit 1
+fi
+
+exit 0
