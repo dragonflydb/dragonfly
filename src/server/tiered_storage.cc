@@ -693,13 +693,13 @@ bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
   if (pv.IsExternal() || pv.HasStashPending())
     return false;
 
+  // For now, hash offloading is conditional
+  if (pv.ObjType() == OBJ_HASH && !config_.experimental_hash_offload)
+    return false;
+
   // Estimate value size
   auto [size, rep] = DetermineSerializationParams(pv);
   if (size < config_.min_value_size)
-    return false;
-
-  // For now, hash offloading is conditional
-  if (pv.ObjType() == OBJ_HASH && !config_.experimental_hash_offload)
     return false;
 
   const auto& disk_stats = op_manager_->GetStats().disk_stats;
