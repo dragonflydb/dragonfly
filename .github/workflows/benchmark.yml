@@ -50,7 +50,7 @@ jobs:
         id: setup
         run: echo "namespace=benchmark-$(date +"%Y-%m-%d-%s")" >> $GITHUB_OUTPUT
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           submodules: true
 
