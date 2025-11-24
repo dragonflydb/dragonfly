@@ -44,7 +44,7 @@ jobs:
 
     steps:
       - name: checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           submodules: true
@@ -133,7 +133,7 @@ jobs:
         flavor: [ubuntu]
     steps:
       - name: checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Login to Registries
         uses: ./.github/actions/multi-registry-docker-login
@@ -276,7 +276,7 @@ jobs:
       run: env
 
     - name: checkout
-      uses: actions/checkout@v5
+      uses: actions/checkout@v6
       with:
         fetch-depth: 0
 
