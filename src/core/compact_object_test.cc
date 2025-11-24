@@ -710,29 +710,22 @@ TEST_F(CompactObjectTest, Huffman) {
   }
 }
 
-// Regression test for buffer overflow bug
-// WITHOUT buffer fix (kInlineLen * 3 = 48 bytes), this test causes stack smashing
-// WITH buffer fix (kInlineLen * 8 = 128 bytes), this test passes
-// The key is data size between 48-60 bytes: stays inline but overflows small buffer
+// Regression test: buffer overflow with inline Huffman decoding
+// Data size 50 bytes: stays inline but overflows buf[kInlineLen * 3]
 TEST_F(CompactObjectTest, HuffmanInlineBufferOverflow) {
   HuffmanEncoder encoder;
   BuildEncoderAB(&encoder);
   string bindata = encoder.Export();
-  ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_STRING_VALUES, bindata));
+  // May already be initialized from previous test - both outcomes OK
+  CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_STRING_VALUES, bindata);
 
-  // Critical data size: 50 bytes
-  // - Larger than buf[kInlineLen * 3] = 48 bytes → will overflow
-  // - Smaller than 60 bytes → stays inline (doesn't use malloc)
-  // - With buf[kInlineLen * 8] = 128 bytes → no overflow
   string data(50, 'a');
   cobj_.SetString(data, false);
-  ASSERT_FALSE(cobj_.MallocUsed()) << "Data must stay inline to trigger overflow";
+  ASSERT_FALSE(cobj_.MallocUsed());
 
-  // HashCode() decodes inline data into buf[] - triggers overflow if buf too small
   uint64_t hash = cobj_.HashCode();
   EXPECT_EQ(CompactObj::HashCode(data), hash);
 
-  // GetString() also triggers the overflow
   string actual;
   cobj_.GetString(&actual);
   EXPECT_EQ(data, actual);
