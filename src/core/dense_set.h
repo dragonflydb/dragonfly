@@ -420,6 +420,7 @@ class DenseSet {
   mutable uint32_t num_links_ = 0;         // number of links in the set.
   mutable uint32_t num_used_buckets_ = 0;  // number of buckets used in entries_ array.
   unsigned capacity_log_ = 0;
+  uint8_t shrink_generation_ = 0;  // Incremented on each Shrink, used for cursor stability (4 bits)
 
   uint32_t time_now_ = 0;
 

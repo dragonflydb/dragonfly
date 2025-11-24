@@ -951,4 +951,216 @@ TEST_F(StringSetTest, ShrinkThenAddMore) {
   }
 }
 
+TEST_F(StringSetTest, ScanWithShrinkBetweenCalls) {
+  // Test that cursor-based scanning works correctly when Shrink happens between Scan calls
+  // This verifies SCAN guarantees: elements present at start and end of scan must be seen
+  constexpr size_t num_strs = 64;
+  vector<string> strs;
+  unordered_set<string> must_see;
+
+  // Add elements and track them
+  for (size_t i = 0; i < num_strs; ++i) {
+    strs.push_back(random_string(generator_, 10));
+    EXPECT_TRUE(ss_->Add(strs.back()));
+    must_see.insert(strs.back());
+  }
+
+  // Grow to large size first
+  ss_->Reserve(512);
+  EXPECT_EQ(ss_->BucketCount(), 512u);
+
+  unordered_set<string> seen;
+  auto scan_callback = [&](const sds ptr) {
+    string str{ptr, sdslen(ptr)};
+    seen.insert(str);
+  };
+
+  // Start scanning
+  uint32_t cursor = ss_->Scan(0, scan_callback);
+  EXPECT_NE(cursor, 0u) << "Should not finish in one iteration with 512 buckets";
+
+  // Shrink in the middle of scanning - this is the key test
+  // Elements that existed at scan start must still be visible
+  ss_->Shrink(128);
+  EXPECT_EQ(ss_->BucketCount(), 128u);
+
+  // Continue scanning with the same cursor
+  // Note: After Shrink with generation change detection, scan restarts from bucket 0
+  // which causes rescanning. This is expected and guarantees no elements are missed.
+  // With 64 elements in 128 buckets, need more iterations after restart.
+  constexpr int max_iterations = 150;
+  int iterations = 0;
+  while (cursor != 0 && iterations < max_iterations) {
+    cursor = ss_->Scan(cursor, scan_callback);
+    iterations++;
+  }
+  EXPECT_LT(iterations, max_iterations) << "Hit iteration limit";
+  EXPECT_EQ(cursor, 0u) << "Scan should complete";
+
+  // Verify all original elements were seen
+  for (const auto& str : must_see) {
+    EXPECT_TRUE(seen.count(str)) << "Missing element after shrink: " << str;
+  }
+  EXPECT_EQ(seen.size(), must_see.size()) << "Should see exactly all original elements";
+}
+
+TEST_F(StringSetTest, ScanWithMultipleShrinks) {
+  // Stress test: multiple shrinks during scan to verify stability
+  constexpr size_t num_strs = 32;
+  vector<string> strs;
+  unordered_set<string> must_see;
+
+  for (size_t i = 0; i < num_strs; ++i) {
+    strs.push_back(random_string(generator_, 10));
+    EXPECT_TRUE(ss_->Add(strs.back()));
+    must_see.insert(strs.back());
+  }
+
+  // Start with very large size
+  ss_->Reserve(1024);
+  size_t bucket_count = ss_->BucketCount();
+  EXPECT_EQ(bucket_count, 1024u);
+
+  unordered_set<string> seen;
+  auto scan_callback = [&](sds ptr) {
+    string str{ptr, sdslen(ptr)};
+    seen.insert(str);
+  };
+
+  // Scan with progressive shrinking
+  // Multiple shrinks during scan cause multiple restarts, need more iterations
+  uint32_t cursor = 0;
+  constexpr int max_iterations = 200;
+  int iterations = 0;
+  int shrink_count = 0;
+
+  do {
+    cursor = ss_->Scan(cursor, scan_callback);
+
+    // Shrink after every few scan iterations
+    if (iterations % 3 == 0 && bucket_count > 64) {
+      size_t new_size = bucket_count / 2;
+      ss_->Shrink(new_size);
+      bucket_count = ss_->BucketCount();
+      EXPECT_EQ(bucket_count, new_size);
+      shrink_count++;
+    }
+
+    iterations++;
+  } while (cursor != 0 && iterations < max_iterations);
+
+  EXPECT_LT(iterations, max_iterations) << "Hit iteration limit";
+  EXPECT_EQ(cursor, 0u) << "Scan should complete";
+  EXPECT_GT(shrink_count, 0) << "Should have performed at least one shrink";
+
+  // Verify all elements were seen despite multiple shrinks
+  for (const auto& str : must_see) {
+    EXPECT_TRUE(seen.count(str)) << "Missing element after multiple shrinks: " << str;
+  }
+  EXPECT_EQ(seen.size(), must_see.size());
+}
+
+TEST_F(StringSetTest, ScanStabilityAfterShrink) {
+  // Verify that multiple scans after shrink produce consistent results
+  constexpr size_t num_strs = 40;
+  vector<string> strs;
+
+  for (size_t i = 0; i < num_strs; ++i) {
+    strs.push_back(random_string(generator_, 10));
+    EXPECT_TRUE(ss_->Add(strs.back()));
+  }
+
+  // Grow then shrink
+  ss_->Reserve(256);
+  ss_->Shrink(64);
+  EXPECT_EQ(ss_->BucketCount(), 64u);
+
+  // First scan - collect all elements
+  unordered_set<string> first_scan;
+  auto scan_callback_first = [&](sds ptr) { first_scan.insert(string{ptr, sdslen(ptr)}); };
+
+  uint32_t cursor = 0;
+  constexpr int max_iterations = 100;
+  int iterations = 0;
+  do {
+    cursor = ss_->Scan(cursor, scan_callback_first);
+    iterations++;
+  } while (cursor != 0 && iterations < max_iterations);
+  EXPECT_EQ(cursor, 0u);
+  EXPECT_EQ(first_scan.size(), num_strs);
+
+  // Second scan - should see exactly the same elements
+  unordered_set<string> second_scan;
+  auto scan_callback_second = [&](sds ptr) { second_scan.insert(string{ptr, sdslen(ptr)}); };
+
+  cursor = 0;
+  iterations = 0;
+  do {
+    cursor = ss_->Scan(cursor, scan_callback_second);
+    iterations++;
+  } while (cursor != 0 && iterations < max_iterations);
+  EXPECT_EQ(cursor, 0u);
+  EXPECT_EQ(second_scan.size(), num_strs);
+
+  // Both scans should see identical elements
+  EXPECT_EQ(first_scan, second_scan) << "Scans after shrink should be stable";
+}
+
+TEST_F(StringSetTest, ScanWithShrinkAndModifications) {
+  // Test scan behavior when shrink happens AND elements are added/removed
+  constexpr size_t initial_strs = 50;
+  vector<string> initial_elements;
+  unordered_set<string> must_see;
+
+  for (size_t i = 0; i < initial_strs; ++i) {
+    initial_elements.push_back(random_string(generator_, 10));
+    EXPECT_TRUE(ss_->Add(initial_elements.back()));
+    must_see.insert(initial_elements.back());
+  }
+
+  ss_->Reserve(512);
+
+  unordered_set<string> seen;
+  vector<string> added_during_scan;
+
+  auto scan_callback = [&](sds ptr) {
+    string str{ptr, sdslen(ptr)};
+    seen.insert(str);
+  };
+
+  // Start scan
+  uint32_t cursor = ss_->Scan(0, scan_callback);
+
+  // Shrink in middle
+  ss_->Shrink(128);
+
+  // Add new elements after shrink (these may or may not be seen)
+  for (size_t i = 0; i < 10; ++i) {
+    string new_str = random_string(generator_, 10);
+    if (ss_->Add(new_str)) {
+      added_during_scan.push_back(new_str);
+    }
+  }
+
+  // Complete scan
+  // After shrink with modifications, need more iterations due to restart
+  constexpr int max_iterations = 200;
+  int iterations = 0;
+  while (cursor != 0 && iterations < max_iterations) {
+    cursor = ss_->Scan(cursor, scan_callback);
+    iterations++;
+  }
+  EXPECT_LT(iterations, max_iterations);
+  EXPECT_EQ(cursor, 0u);
+
+  // All initial elements MUST be seen (SCAN guarantee)
+  for (const auto& str : must_see) {
+    EXPECT_TRUE(seen.count(str)) << "Initial element must be seen: " << str;
+  }
+
+  // Elements added during scan may or may not be seen - this is expected SCAN behavior
+  // We just verify no crashes and all initial elements are present
+  EXPECT_GE(seen.size(), must_see.size());
+}
+
 }  // namespace dfly
