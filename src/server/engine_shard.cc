@@ -723,17 +723,13 @@ void EngineShard::Heartbeat() {
 
         // launch the task
         auto task = std::make_unique<HuffmanCheckTask>();
-        huffman_check_task_id_ = ProactorBase::me()->AddOnIdleTask([task = std::move(task)]() mutable {
+        huffman_check_task_id_ = ProactorBase::me()->AddOnIdleTask([task = std::move(task)] {
           if (!shard_ || !namespaces) {
-            task.reset();
             return -1;
           }
 
           DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
-          int32_t res = task->Run(&db_slice);
-          if (res == -1)
-            task.reset();
-          return res;
+          return task->Run(&db_slice);
         });
       }
     }
