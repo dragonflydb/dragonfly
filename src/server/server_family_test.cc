@@ -646,4 +646,22 @@ TEST_F(ServerFamilyTest, PubSubCommandErr) {
                      "PUBSUB HELP."));
 }
 
+TEST_F(ServerFamilyTest, InfoMultipleSections) {
+  // Check that when querying multiple valid sections, both are returned non empty.
+  Run({"set", "foo", "bar"});  // set some data
+  auto resp = Run({"info", "replication", "persistence"});
+  auto info = resp.GetString();
+  EXPECT_NE(info.find("# Replication"), std::string::npos);
+  EXPECT_NE(info.find("# Persistence"), std::string::npos);
+}
+
+TEST_F(ServerFamilyTest, InfoMultipleSectionsInvalid) {
+  // Check that when querying a valid and an invalid section, only the valid section is returned.
+  Run({"set", "foo", "bar"});  // set some data
+  auto resp = Run({"info", "replication", "invalidsection"});
+  auto info = resp.GetString();
+  EXPECT_NE(info.find("# Replication"), std::string::npos);
+  EXPECT_EQ(info.find("# invalidsection"), std::string::npos);
+}
+
 }  // namespace dfly

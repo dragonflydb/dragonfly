@@ -181,7 +181,7 @@ void SinkReplyBuilder::Send() {
 
   uint64_t after_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
   reply_stats.send_stats.count++;
-  reply_stats.send_stats.total_duration += (after_ns - pin.timestamp_ns) / 1'000;
+  reply_stats.send_stats.total_duration += (after_ns - pin.timestamp_ns);
   DVLOG(2) << "Finished writing " << total_size_ << " bytes";
 }
 

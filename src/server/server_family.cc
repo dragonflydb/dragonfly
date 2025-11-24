@@ -1713,7 +1713,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             MetricType::COUNTER, &resp->body());
   {
     AppendMetricWithoutLabels("reply_duration_seconds", "",
-                              m.facade_stats.reply_stats.send_stats.total_duration * 1e-6,
+                              m.facade_stats.reply_stats.send_stats.total_duration * 1e-9,
                               MetricType::COUNTER, &resp->body());
     AppendMetricWithoutLabels("reply_total", "", m.facade_stats.reply_stats.send_stats.count,
                               MetricType::COUNTER, &resp->body());
@@ -1809,6 +1809,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
 
   AppendMetricValue("memory_by_class_bytes", m.coordinator_stats.stored_cmd_bytes, {"class"},
                     {"conn_stored_commands"}, &memory_by_class_bytes);
+
+  AppendMetricValue("memory_by_class_bytes", m.search_stats.used_memory, {"class"}, {"search_used"},
+                    &memory_by_class_bytes);
 
   // Command stats
   if (!m.cmd_stats_map.empty()) {
@@ -1955,6 +1958,49 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             m.shard_stats.defrag_attempt_total, COUNTER, &resp->body());
   AppendMetricWithoutLabels("defrag_objects_moved", "Objects moved",
                             m.shard_stats.defrag_realloc_total, COUNTER, &resp->body());
+
+  // Tiered metrics
+  {
+    AppendMetricWithoutLabels("tiered_entries", "Tiered entries", total.tiered_entries,
+                              MetricType::GAUGE, &resp->body());
+
+    // Bytes: used, allocated, capacity
+    AppendMetricHeader("tiered_bytes", "Tiered bytes", MetricType::GAUGE, &resp->body());
+    AppendMetricValue("tiered_bytes", total.tiered_used_bytes, {"type"}, {"used"}, &resp->body());
+    AppendMetricValue("tiered_bytes", m.tiered_stats.cold_storage_bytes, {"type"}, {"cold"},
+                      &resp->body());
+    AppendMetricValue("tiered_bytes", m.tiered_stats.allocated_bytes, {"type"}, {"allocated"},
+                      &resp->body());
+    AppendMetricValue("tiered_bytes", m.tiered_stats.capacity_bytes, {"type"}, {"capacity"},
+                      &resp->body());
+
+    // Events: stash, fetch, upload, cancel
+    AppendMetricHeader("tiered_events", "Tiered events", MetricType::COUNTER, &resp->body());
+    AppendMetricValue("tiered_events", m.tiered_stats.total_stashes, {"type"}, {"stash"},
+                      &resp->body());
+    AppendMetricValue("tiered_events", m.tiered_stats.total_fetches, {"type"}, {"fetch"},
+                      &resp->body());
+    AppendMetricValue("tiered_events", m.tiered_stats.total_uploads, {"type"}, {"upload"},
+                      &resp->body());
+    AppendMetricValue("tiered_events", m.tiered_stats.total_cancels, {"type"}, {"cancel"},
+                      &resp->body());
+    AppendMetricValue("tiered_events", m.tiered_stats.total_deletes, {"type"}, {"delete"},
+                      &resp->body());
+
+    // Hits: ram, cool, missed
+    AppendMetricHeader("tiered_hits", "Tiered hits", MetricType::COUNTER, &resp->body());
+    AppendMetricValue("tiered_hits", m.events.ram_hits, {"type"}, {"ram"}, &resp->body());
+    AppendMetricValue("tiered_hits", m.events.ram_cool_hits, {"type"}, {"cool"}, &resp->body());
+    AppendMetricValue("tiered_hits", m.events.ram_misses, {"type"}, {"disk"}, &resp->body());
+
+    // Potential problems due to overloading system
+    AppendMetricHeader("tiered_overload", "Potential problems due to overlaoding",
+                       MetricType::COUNTER, &resp->body());
+    AppendMetricValue("tiered_overload", m.tiered_stats.total_clients_throttled, {"type"},
+                      {"client throttling"}, &resp->body());
+    AppendMetricValue("tiered_overload", m.tiered_stats.total_stash_overflows, {"type"},
+                      {"stash overflows"}, &resp->body());
+  }
 }
 
 void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
@@ -3015,8 +3061,6 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
-    append("reply_count", reply_stats.send_stats.count);
-    append("reply_latency_usec", reply_stats.send_stats.total_duration);
 
     // Number of connections that are currently blocked on grabbing interpreter.
     append("blocked_on_interpreter", m.coordinator_stats.blocked_on_interpreter);
@@ -3330,26 +3374,46 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 }
 
 void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (args.size() > 1) {
-    return cmd_cntx.rb->SendError(kSyntaxErr);
-  }
-
-  string section;
-
-  if (args.size() == 1) {
-    section = absl::AsciiStrToUpper(ArgS(args, 0));
-  }
-
+  std::vector<std::string> sections;
+  bool need_metrics{false};  // Save time - do not fetch metrics if we don't need them.
   Metrics metrics;
 
-  // Save time by not calculating metrics if we don't need them.
-  if (!(section == "SERVER" || section == "REPLICATION")) {
+  sections.reserve(args.size());
+  for (const auto& arg : args) {
+    sections.emplace_back(absl::AsciiStrToUpper(arg));
+    const auto& section = sections.back();
+    if (!need_metrics && (section != "SERVER") && (section != "REPLICATION")) {
+      need_metrics = true;
+    }
+  }
+
+  if (need_metrics || sections.empty()) {
     metrics = GetMetrics(cmd_cntx.conn_cntx->ns);
   } else if (!IsMaster()) {
     metrics.replica_side_info = GetReplicaSummary();
   }
 
-  string info = FormatInfoMetrics(metrics, section, cmd_cntx.conn_cntx->conn()->IsPrivileged());
+  std::string info;
+  // For multiple requested sections, invalid section names are ignored (not included in the
+  // output). The command does not abort or return an error if some sections are invalid. This
+  // matches Valkey behavior.
+  if (sections.empty()) {  // No sections: default to all sections.
+    info = FormatInfoMetrics(metrics, "", cmd_cntx.conn_cntx->conn()->IsPrivileged());
+  } else if (sections.size() == 1) {  // Single section
+    info = FormatInfoMetrics(metrics, sections[0], cmd_cntx.conn_cntx->conn()->IsPrivileged());
+  } else {  // Multiple sections: concatenate results for each requested section.
+    for (const auto& section : sections) {
+      const std::string section_str =
+          FormatInfoMetrics(metrics, section, cmd_cntx.conn_cntx->conn()->IsPrivileged());
+      if (!section_str.empty()) {
+        if (!info.empty()) {
+          absl::StrAppend(&info, "\r\n", section_str);
+        } else {
+          info = section_str;
+        }
+      }
+    }
+  }
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   rb->SendVerbatimString(info);
