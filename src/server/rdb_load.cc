@@ -370,7 +370,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       inner_obj = set;
 
       // Expand the set up front to avoid rehashing.
-      set->Resize((config_.reserve > len) ? config_.reserve : len);
+      set->Reserve((config_.reserve > len) ? config_.reserve : len);
     }
 
     size_t increment = 1;
@@ -480,7 +480,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
       string_map->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
 
       // Expand the map up front to avoid rehashing.
-      string_map->Resize((config_.reserve > len) ? config_.reserve : len);
+      string_map->Reserve((config_.reserve > len) ? config_.reserve : len);
     }
 
     auto cleanup = absl::MakeCleanup([&] {

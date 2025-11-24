@@ -862,7 +862,7 @@ size_t SortedMap::MallocSize() const {
 }
 
 bool SortedMap::Reserve(size_t sz) {
-  score_map->Resize(sz);
+  score_map->Reserve(sz);
   return true;
 }
 

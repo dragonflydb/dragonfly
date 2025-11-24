@@ -181,39 +181,6 @@ class DenseSet {
    public:
     IteratorBase(DenseSet* owner, ChainVectorIterator list_it, DensePtr* e)
         : owner_(owner), curr_list_(list_it), curr_entry_(e) {
-      if (owner_) {
-        ++owner_->num_iterators_;
-      }
-    }
-
-    ~IteratorBase() {
-      if (owner_) {
-        --owner_->num_iterators_;
-      }
-    }
-
-    // Copy constructor - increment iterator count
-    IteratorBase(const IteratorBase& other)
-        : owner_(other.owner_), curr_list_(other.curr_list_), curr_entry_(other.curr_entry_) {
-      if (owner_) {
-        ++owner_->num_iterators_;
-      }
-    }
-
-    // Copy assignment - handle iterator counts
-    IteratorBase& operator=(const IteratorBase& other) {
-      if (this != &other) {
-        if (owner_) {
-          --owner_->num_iterators_;
-        }
-        owner_ = other.owner_;
-        curr_list_ = other.curr_list_;
-        curr_entry_ = other.curr_entry_;
-        if (owner_) {
-          ++owner_->num_iterators_;
-        }
-      }
-      return *this;
     }
 
     // returns the expiry time of the current entry or UINT32_MAX if no ttl is set.
@@ -288,9 +255,12 @@ class DenseSet {
 
   uint32_t Scan(uint32_t cursor, const ItemCb& cb) const;
 
-  // Resizes the table to the specified size. Can both grow and shrink.
-  // The size will be rounded up to the nearest power of 2, with minimum of kMinSize.
-  void Resize(size_t sz);
+  void Reserve(size_t sz);
+
+  // Shrinks the table to the specified size. The size must be a power of 2,
+  // >= kMinSize, and >= current number of elements.
+  // This method should be called explicitly when memory reclamation is needed.
+  void Shrink(size_t new_size);
 
   void Fill(DenseSet* other) const;
 
@@ -403,7 +373,6 @@ class DenseSet {
   // belong to given bid
   bool NoItemBelongsBucket(uint32_t bid) const;
   void Grow(size_t prev_size);
-  void Shrink(size_t new_size);
 
   // ============ Pseudo Linked List Functions for interacting with Chains ==================
   size_t PushFront(ChainVectorIterator, void* obj, bool has_ttl);
@@ -455,8 +424,6 @@ class DenseSet {
   uint32_t time_now_ = 0;
 
   mutable bool expiration_used_ = false;
-  mutable bool shrinking_ = false;      // Guard against recursive shrink
-  mutable uint32_t num_iterators_ = 0;  // Number of active iterators
 };
 
 inline void* DenseSet::FindInternal(const void* obj, uint64_t hashcode, uint32_t cookie) const {

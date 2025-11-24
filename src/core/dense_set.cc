@@ -40,7 +40,6 @@ DenseSet::IteratorBase::IteratorBase(const DenseSet* owner, bool is_end)
     curr_entry_ = nullptr;
     owner_ = nullptr;
   } else {
-    ++owner_->num_iterators_;
     curr_entry_ = &(*curr_list_);
     owner->ExpireIfNeeded(nullptr, curr_entry_);
 
@@ -374,9 +373,8 @@ auto DenseSet::FindEmptyAround(uint32_t bid) -> ChainVectorIterator {
   return entries_.end();
 }
 
-void DenseSet::Resize(size_t sz) {
+void DenseSet::Reserve(size_t sz) {
   sz = std::max<size_t>(sz, kMinSize);
-  // Don't shrink below the current number of elements
   sz = std::max<size_t>(sz, size_);
 
   sz = absl::bit_ceil(sz);
@@ -385,8 +383,6 @@ void DenseSet::Resize(size_t sz) {
     entries_.resize(sz);
     capacity_log_ = absl::bit_width(sz) - 1;
     Grow(prev_size);
-  } else if (sz < entries_.size()) {
-    Shrink(sz);
   }
 }
 
@@ -394,18 +390,6 @@ void DenseSet::Shrink(size_t new_size) {
   DCHECK(absl::has_single_bit(new_size));
   DCHECK_GE(new_size, kMinSize);
   DCHECK_LT(new_size, entries_.size());
-
-  // Guard against recursive shrink (e.g., if ExpireIfNeeded triggers Delete)
-  if (shrinking_) {
-    return;
-  }
-
-  // Check num_iterators_ to prevent shrink during iteration (would invalidate iterators)
-  if (num_iterators_ != 0) {
-    return;
-  }
-
-  shrinking_ = true;
 
   size_t prev_size = entries_.size();
   capacity_log_ = absl::bit_width(new_size) - 1;
@@ -419,9 +403,10 @@ void DenseSet::Shrink(size_t new_size) {
     }
   }
 
-  // Process from high to low. This mirrors Grow's iteration order.
-  // Elements move to lower buckets (not yet processed) based on their hash.
-  for (long i = prev_size - 1; i >= 0; --i) {
+  // Process from low to high (opposite of Grow).
+  // This prevents double-processing: when moving elements from bucket i to bucket j < i,
+  // bucket j has already been processed, so the element won't be processed again.
+  for (size_t i = 0; i < prev_size; ++i) {
     DensePtr* curr = &entries_[i];
     DensePtr* prev = nullptr;
 
@@ -444,7 +429,7 @@ void DenseSet::Shrink(size_t new_size) {
 
       // If the item stays in the current bucket, ensure it is not marked as
       // displaced and move to the next item in the chain
-      if (new_bid == static_cast<uint32_t>(i)) {
+      if (new_bid == i) {
         curr->ClearDisplaced();
         prev = curr;
         curr = curr->Next();
@@ -500,13 +485,12 @@ void DenseSet::Shrink(size_t new_size) {
   }
 
   entries_.resize(new_size);
-  shrinking_ = false;
 }
 
 void DenseSet::Fill(DenseSet* other) const {
   DCHECK(other->entries_.empty());
 
-  other->Resize(UpperBoundSize());
+  other->Reserve(UpperBoundSize());
 
   constexpr unsigned kArrLen = 32;
   CloneItem arr[kArrLen];
@@ -790,11 +774,6 @@ void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
   obj_malloc_used_ -= ObjectAllocSize(obj);
   --size_;
   ObjDelete(obj, false);
-
-  // Automatically shrink when utilization drops below 25%
-  if (entries_.size() > kMinSize && size_ < entries_.size() / 4) {
-    Shrink(entries_.size() / 2);
-  }
 }
 
 DenseSet::ChainVectorIterator DenseSet::GetRandomChain() {
