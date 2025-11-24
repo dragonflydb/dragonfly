@@ -3903,11 +3903,6 @@ void ServerFamily::ReplConf(CmdArgList args, const CommandContext& cmd_cntx) {
       if (info) {
         info->id = arg;
       }
-      // If we tried to replicate from ourself reply with an error
-      if (arg == master_replid_) {
-        builder->SendError("Can't connect to myself");
-        return;
-      }
     } else if (cmd == "CLIENT-VERSION" && args.size() == 2) {
       unsigned version;
       if (!absl::SimpleAtoi(arg, &version)) {
