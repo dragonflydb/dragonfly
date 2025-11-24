@@ -118,6 +118,9 @@ size_t CalculateHowManyBytesToEvictOnShard(size_t global_memory_limit, size_t gl
   return shard_budget < shard_memory_threshold ? (shard_memory_threshold - shard_budget) : 0;
 }
 
+// Background task that analyzes key patterns to build Huffman encoding tables for compression.
+// Runs once on shard 0, incrementally scanning keys with a cursor to build character frequency
+// histograms. Returns -1 when complete, or 4 to continue with low priority on next idle cycle.
 class HuffmanCheckTask {
  public:
   HuffmanCheckTask() {
@@ -707,9 +710,9 @@ void EngineShard::Heartbeat() {
       size_t obj_usage = ptr->stats.obj_memory_usage;
 
 #ifdef NDEBUG
-#define MB_THRESHOLD (50 * 1024 * 1024)
+      constexpr size_t MB_THRESHOLD = 50 * 1024 * 1024;
 #else
-#define MB_THRESHOLD (5 * 1024 * 1024)
+      constexpr size_t MB_THRESHOLD = 5 * 1024 * 1024;
 #endif
 
       if (key_usage > MB_THRESHOLD && key_usage > obj_usage / 8) {
@@ -719,17 +722,17 @@ void EngineShard::Heartbeat() {
         check_huffman = false;  // trigger only once.
 
         // launch the task
-        HuffmanCheckTask* task = new HuffmanCheckTask();
-        huffman_check_task_id_ = ProactorBase::me()->AddOnIdleTask([task] {
+        auto task = std::make_unique<HuffmanCheckTask>();
+        huffman_check_task_id_ = ProactorBase::me()->AddOnIdleTask([task = std::move(task)]() mutable {
           if (!shard_ || !namespaces) {
-            delete task;
+            task.reset();
             return -1;
           }
 
           DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
           int32_t res = task->Run(&db_slice);
           if (res == -1)
-            delete task;
+            task.reset();
           return res;
         });
       }
