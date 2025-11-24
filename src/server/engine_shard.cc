@@ -4,12 +4,14 @@
 
 #include "server/engine_shard.h"
 
+#include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
 #include <memory>
 
 #include "base/flags.h"
+#include "core/huff_coder.h"
 #include "core/page_usage_stats.h"
 #include "io/proc_reader.h"
 
@@ -116,6 +118,79 @@ size_t CalculateHowManyBytesToEvictOnShard(size_t global_memory_limit, size_t gl
   return shard_budget < shard_memory_threshold ? (shard_memory_threshold - shard_budget) : 0;
 }
 
+class HuffmanCheckTask {
+ public:
+  HuffmanCheckTask() {
+    hist_.fill(0);
+  }
+
+  int32_t Run(DbSlice* db_slice);
+
+ private:
+  PrimeTable::Cursor cursor_;
+
+  static constexpr unsigned kMaxSymbol = 255;
+  array<unsigned, kMaxSymbol + 1> hist_;  // histogram of symbols.
+  string scratch_;
+};
+
+int32_t HuffmanCheckTask::Run(DbSlice* db_slice) {
+  DbTable* db_table = db_slice->GetDBTable(0);  // we currently support only default db.
+  if (!db_table)
+    return -1;
+
+  // incrementally aggregate frequency histogram.
+  auto& prime = db_table->prime;
+
+  constexpr uint32_t kMaxTraverses = 512;
+  uint32_t traverses_count = 0;
+  do {
+    cursor_ = prime.Traverse(cursor_, [&](PrimeIterator it) {
+      if (!it->first.IsInline()) {
+        string_view val = it->first.GetSlice(&scratch_);
+        for (unsigned char c : val) {
+          hist_[c]++;
+        }
+      }
+    });
+    traverses_count++;
+  } while (traverses_count < kMaxTraverses && cursor_);
+
+  if (cursor_)
+    return 4;  // priority to continue later.
+
+  // Finished scanning the table, now normalize the table.
+  constexpr unsigned kMaxFreqTotal = static_cast<unsigned>((1U << 31) * 0.9);
+  size_t total_freq = std::accumulate(hist_.begin(), hist_.end(), 0UL);
+
+  // to avoid overflow.
+  double scale = total_freq > kMaxFreqTotal ? static_cast<double>(total_freq) / kMaxFreqTotal : 1.0;
+  for (unsigned i = 0; i <= kMaxSymbol; i++) {
+    hist_[i] = static_cast<unsigned>(hist_[i] / scale);
+    if (hist_[i] == 0) {
+      hist_[i] = 1;  // Avoid zero frequency symbols.
+    }
+  }
+
+  // Build the huffman table. We currently output the table to logs and just increase
+  // the metric counter to signal that we built a table.
+
+  HuffmanEncoder huff_enc;
+  string error_msg;
+  if (huff_enc.Build(hist_.data(), kMaxSymbol, &error_msg)) {
+    size_t compressed_size = huff_enc.EstimateCompressedSize(hist_.data(), kMaxSymbol);
+    LOG(INFO) << "Huffman table built, reducing memory usage from " << total_freq << " to "
+              << compressed_size << " bytes, ratio " << double(compressed_size) / total_freq;
+    string bintable = huff_enc.Export();
+    LOG(INFO) << "Huffman binary table: " << absl::Base64Escape(bintable);
+    db_slice->shard_owner()->stats().huffman_tables_built++;
+  } else {
+    LOG(WARNING) << "Huffman build failed: " << error_msg;
+  }
+
+  return -1;  // task completed.
+}
+
 }  // namespace
 
 __thread EngineShard* EngineShard::shard_ = nullptr;
@@ -141,7 +216,7 @@ string EngineShard::TxQueueInfo::Format() const {
 }
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
-  static_assert(sizeof(Stats) == 96);
+  static_assert(sizeof(Stats) == 104);
 
 #define ADD(x) x += o.x
 
@@ -157,6 +232,7 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
   ADD(total_heartbeat_expired_bytes);
   ADD(total_heartbeat_expired_calls);
   ADD(total_migrated_keys);
+  ADD(huffman_tables_built);
 
 #undef ADD
   return *this;
@@ -347,6 +423,8 @@ void EngineShard::Shutdown() {
 
 void EngineShard::StopPeriodicFiber() {
   ProactorBase::me()->RemoveOnIdleTask(defrag_task_id_);
+  ProactorBase::me()->RemoveOnIdleTask(huffman_check_task_id_);
+
   fiber_heartbeat_periodic_done_.Notify();
   if (fiber_heartbeat_periodic_.IsJoinable()) {
     fiber_heartbeat_periodic_.Join();
@@ -620,7 +698,43 @@ void EngineShard::Heartbeat() {
     }
     return;
   }
-  start = std::chrono::system_clock::now();
+
+  thread_local bool check_huffman = (shard_id_ == 0);  // run it only on shard 0.
+  if (check_huffman) {
+    auto* ptr = db_slice.GetDBTable(0);
+    if (ptr) {
+      size_t key_usage = ptr->stats.memory_usage_by_type[OBJ_KEY];
+      size_t obj_usage = ptr->stats.obj_memory_usage;
+
+#ifdef NDEBUG
+#define MB_THRESHOLD (50 * 1024 * 1024)
+#else
+#define MB_THRESHOLD (5 * 1024 * 1024)
+#endif
+
+      if (key_usage > MB_THRESHOLD && key_usage > obj_usage / 8) {
+        VLOG(1) << "Scheduling huffman check task, key usage: " << key_usage
+                << ", obj usage: " << obj_usage;
+
+        check_huffman = false;  // trigger only once.
+
+        // launch the task
+        HuffmanCheckTask* task = new HuffmanCheckTask();
+        huffman_check_task_id_ = ProactorBase::me()->AddOnIdleTask([task] {
+          if (!shard_ || !namespaces) {
+            delete task;
+            return -1;
+          }
+
+          DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
+          int32_t res = task->Run(&db_slice);
+          if (res == -1)
+            delete task;
+          return res;
+        });
+      }
+    }
+  }
 
   if (!IsReplica()) {  // Never run expiry/evictions on replica.
     RetireExpiredAndEvict();
@@ -655,7 +769,7 @@ void EngineShard::RetireExpiredAndEvict() {
     // hence we map our delete/traversed ratio into a range [0, kTtlDeleteLimit).
     // The higher ttl_delete_target the more likely we have lots of expired items that need
     // to be deleted.
-    ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
+    ttl_delete_target = unsigned(kTtlDeleteLimit * double(deleted) / (double(traversed) + 10));
   }
 
   DbContext db_cntx;
