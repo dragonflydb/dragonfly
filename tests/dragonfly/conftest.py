@@ -433,10 +433,11 @@ def pytest_runtest_makereport(item, call):
     if report.when == "teardown":
         call_outcome = getattr(item, "call_outcome", None)
         log_dir = item.funcargs.get("df_log_dir")
-        if report.failed:
-            copy_failed_logs(log_dir, report)
-        if call_outcome and call_outcome.failed:
-            copy_failed_logs(log_dir, call_outcome)
+        if log_dir:
+            if report.failed:
+                copy_failed_logs(log_dir, report)
+            if call_outcome and call_outcome.failed:
+                copy_failed_logs(log_dir, call_outcome)
 
 
 @pytest.fixture(scope="function")
