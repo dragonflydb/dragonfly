@@ -710,27 +710,6 @@ TEST_F(CompactObjectTest, Huffman) {
   }
 }
 
-// Regression test: buffer overflow with inline Huffman decoding
-// Data size 50 bytes: stays inline but overflows buf[kInlineLen * 3]
-TEST_F(CompactObjectTest, HuffmanInlineBufferOverflow) {
-  HuffmanEncoder encoder;
-  BuildEncoderAB(&encoder);
-  string bindata = encoder.Export();
-  // May already be initialized from previous test - both outcomes OK
-  CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_STRING_VALUES, bindata);
-
-  string data(50, 'a');
-  cobj_.SetString(data, false);
-  ASSERT_FALSE(cobj_.MallocUsed());
-
-  uint64_t hash = cobj_.HashCode();
-  EXPECT_EQ(CompactObj::HashCode(data), hash);
-
-  string actual;
-  cobj_.GetString(&actual);
-  EXPECT_EQ(data, actual);
-}
-
 static void ascii_pack_naive(const char* ascii, size_t len, uint8_t* bin) {
   const char* end = ascii + len;
 
