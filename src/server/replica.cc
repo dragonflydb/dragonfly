@@ -144,11 +144,6 @@ GenericError Replica::Start() {
   ec = Greet();
   RETURN_ON_ERR(check_connection_error(ec, "could not greet master "));
 
-  // 4. Check if we connected to ourselves
-  if (IsConnectedToItself()) {
-    return {"replicaof host is the same"};
-  }
-
   return {};
 }
 
@@ -421,9 +416,7 @@ std::error_code Replica::ConfigureDflyMaster() {
   // this reason to send this here is that in other context we can get an error reply
   // since we are budy with the replication
   RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF CLIENT-ID ", id_)));
-  if (!CheckRespIsSimpleReply("OK")) {
-    LOG(WARNING) << "Bad REPLCONF CLIENT-ID response";
-  }
+  PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
 
   RETURN_ON_ERR(
       SendCommandAndReadResponse(StrCat("REPLCONF CLIENT-VERSION ", DflyVersion::CURRENT_VER)));
