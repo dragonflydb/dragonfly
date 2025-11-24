@@ -3748,7 +3748,6 @@ void ServerFamily::ReplicaOfInternalV2(CmdArgList args, Transaction* tx, SinkRep
   };
 
   if (ec || new_replica->IsContextCancelled()) {
-    new_replica->Stop();
     return builder->SendError(ec ? ec.Format() : "replication cancelled");
   }
 
