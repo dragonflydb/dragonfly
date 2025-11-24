@@ -861,9 +861,9 @@ uint64_t CompactObj::HashCode() const {
   DCHECK(mask_bits_.encoding);
 
   if (IsInline()) {
-    // Buffer size must handle worst-case Huffman expansion
-    // With max_symbol=255, expansion can be up to 8x (worst case)
-    // kInlineLen * 8 ensures we never overflow
+    // Buffer must accommodate maximum decompressed size from inline storage
+    // Highly compressible data can achieve ~8x compression (e.g., repeated character)
+    // kInlineLen (16 bytes) compressed -> up to 128 bytes decompressed
     char buf[kInlineLen * 8];
     size_t decoded_len = GetStrEncoding().Decode(string_view{u_.inline_str, taglen_}, buf);
     return XXH3_64bits_withSeed(buf, decoded_len, kHashSeed);
@@ -1414,7 +1414,7 @@ bool CompactObj::CmpEncoded(string_view sv) const {
       return false;
 
     if (IsInline()) {
-      // Buffer size must handle worst-case Huffman expansion (8x for max_symbol=255)
+      // Buffer must accommodate maximum decompressed size from inline storage (~8x compression)
       constexpr size_t kMaxHuffLen = kInlineLen * 8;
       if (sz <= kMaxHuffLen) {
         char buf[kMaxHuffLen];
