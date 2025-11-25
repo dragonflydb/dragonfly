@@ -1082,7 +1082,10 @@ void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
 
     // TODO add processing of the reply to make sure index was created successfully on all shards,
     // and prevent simultaneous creation of the same index.
-    cluster::Coordinator::Current().DispatchAll(cmd, [](const facade::RespVec&) {});
+    auto req_future =
+        cluster::Coordinator::Current().DispatchAll(cmd, [](const facade::RespVec&) {});
+    // TODO add error handling
+    CHECK(!req_future.Get());
   }
 
   auto idx_ptr = make_shared<DocIndex>(std::move(parsed_index).value());
@@ -1299,58 +1302,64 @@ static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view q
   vector<SearchResult> results;
   std::string cmd = absl::StrCat("FT.SEARCH ", idx, " ", query, " CSS ", args_str);
 
+  util::fb2::Mutex mu_;
   // TODO for now we suppose that callback is called synchronously. If not, we need to add
   // synchronization here for results vector modification.
-  cluster::Coordinator::Current().DispatchAll(cmd, [&](const facade::RespVec& res) {
-    VLOG(3) << "FT.SEARCH CSS reply: " << res;
+  auto req_future =
+      cluster::Coordinator::Current().DispatchAll(cmd, [&](const facade::RespVec& res) {
+        VLOG(3) << "FT.SEARCH CSS reply: " << res;
 
-    if (res.empty()) {
-      LOG(ERROR) << "FT.SEARCH CSS reply is empty";
-      return;
-    }
-    if (res[0].type == facade::RespExpr::Type::ERROR) {
-      LOG(WARNING) << "FT.SEARCH CSS reply error: " << res[0].GetView();
-      return;
-    }
-
-    const auto size = res[0].GetInt();
-    if (!size.has_value()) {
-      LOG(ERROR) << "FT.SEARCH CSS reply unexpected type: " << static_cast<int>(res[0].type);
-      return;
-    }
-
-    results.emplace_back();
-    results.back().total_hits = *size;
-    for (size_t i = 2; i < res.size(); i += 2) {
-      auto& search_doc = results.back().docs.emplace_back();
-      search_doc.key = res[i - 1].GetString();
-      if (res[i].type != facade::RespExpr::Type::ARRAY) {
-        LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data: "
-                   << static_cast<int>(res[i].type);
-        return;
-      }
-      const auto& arr_res = res[i].GetVec();
-      if (arr_res.size() % 2 != 0) {
-        LOG(ERROR) << "FT.SEARCH CSS reply unexpected number of elements for document data: "
-                   << arr_res.size();
-        return;
-      }
-
-      for (size_t j = 0; j < arr_res.size(); j += 2) {
-        if (arr_res[j].type != facade::RespExpr::Type::STRING) {
-          LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data: "
-                     << static_cast<int>(arr_res[j].type);
+        if (res.empty()) {
+          LOG(ERROR) << "FT.SEARCH CSS reply is empty";
           return;
         }
-        if (arr_res[j + 1].type != facade::RespExpr::Type::STRING) {
-          LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data: "
-                     << static_cast<int>(arr_res[j].type);
+        if (res[0].type == facade::RespExpr::Type::ERROR) {
+          LOG(WARNING) << "FT.SEARCH CSS reply error: " << res[0].GetView();
           return;
         }
-        search_doc.values.emplace(arr_res[j].GetString(), arr_res[j + 1].GetString());
-      }
-    }
-  });
+
+        const auto size = res[0].GetInt();
+        if (!size.has_value()) {
+          LOG(ERROR) << "FT.SEARCH CSS reply unexpected type: " << static_cast<int>(res[0].type)
+                     << "\n Cmd: " << cmd << "\n Reply: " << res;
+          return;
+        }
+
+        std::lock_guard lock{mu_};
+        results.emplace_back();
+        results.back().total_hits = *size;
+        for (size_t i = 2; i < res.size(); i += 2) {
+          auto& search_doc = results.back().docs.emplace_back();
+          search_doc.key = res[i - 1].GetString();
+          if (res[i].type != facade::RespExpr::Type::ARRAY) {
+            LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data: "
+                       << static_cast<int>(res[i].type);
+            return;
+          }
+          const auto& arr_res = res[i].GetVec();
+          if (arr_res.size() % 2 != 0) {
+            LOG(ERROR) << "FT.SEARCH CSS reply unexpected number of elements for document data: "
+                       << arr_res.size();
+            return;
+          }
+
+          for (size_t j = 0; j < arr_res.size(); j += 2) {
+            if (arr_res[j].type != facade::RespExpr::Type::STRING) {
+              LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data: "
+                         << static_cast<int>(arr_res[j].type);
+              return;
+            }
+            if (arr_res[j + 1].type != facade::RespExpr::Type::STRING) {
+              LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data: "
+                         << static_cast<int>(arr_res[j].type);
+              return;
+            }
+            search_doc.values.emplace(arr_res[j].GetString(), arr_res[j + 1].GetString());
+          }
+        }
+      });
+  // TODO add error handling
+  CHECK(!req_future.Get());
   return results;
 }
 

@@ -53,6 +53,14 @@ class ProtocolClient {
   uint64_t LastIoTime() const;
   void TouchIoTime();
 
+  const std::string& GetHost() const {
+    return server().host;
+  };
+
+  uint16_t GetPort() const {
+    return server().port;
+  };
+
  protected:
   struct ServerContext {
     std::string host;

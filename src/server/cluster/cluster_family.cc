@@ -16,6 +16,7 @@
 #include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/channel_store.h"
+#include "server/cluster/coordinator.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/dflycmd.h"
@@ -80,6 +81,7 @@ ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(serve
 }
 
 void ClusterFamily::Shutdown() {
+  Coordinator::Current().Shutdown();
   shard_set->pool()->at(0)->Await([this]() ABSL_LOCKS_EXCLUDED(set_config_mu) {
     PreparedToRemoveOutgoingMigrations outgoing_migrations;  // should be removed without mutex lock
     {
