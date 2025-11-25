@@ -21,7 +21,7 @@
 
 namespace dfly {
 
-using ShortLivedJSON = jsoncons::json;
+using TmpJson = jsoncons::json;
 using JsonType = jsoncons::pmr::json;
 
 // A helper type to use in template functions which are expected to work with both ShortLivedJSON
@@ -32,7 +32,7 @@ using JsonWithAllocator = jsoncons::basic_json<char, jsoncons::sorted_policy, Al
 // Parses string into JSON. Any allocatons are done using the std allocator. This method should be
 // used for generic JSON parsing, in particular, it should not be used to parse objects which will
 // be stored in the db, as the backing storage is not managed by mimalloc.
-std::optional<ShortLivedJSON> JsonFromString(std::string_view input);
+std::optional<TmpJson> JsonFromString(std::string_view input);
 
 // Parses string into JSON, using mimalloc heap for allocations. This method should only be used on
 // shards where mimalloc heap is initialized.
