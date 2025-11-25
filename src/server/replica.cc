@@ -385,6 +385,13 @@ std::error_code Replica::HandleCapaDflyResp() {
 
   // If we're syncing a different replication ID, drop the saved LSNs.
   string_view master_repl_id = ToSV(LastResponseArgs()[0].GetBuf());
+
+  // If we tried to replicate from ourself return an error
+  if (master_repl_id == id_) {
+    LOG(WARNING) << "Can't connect to myself";
+    return make_error_code(errc::connection_aborted);
+  }
+
   if (master_context_.master_repl_id != master_repl_id) {
     if (absl::GetFlag(FLAGS_break_replication_on_master_restart) &&
         !master_context_.master_repl_id.empty()) {
