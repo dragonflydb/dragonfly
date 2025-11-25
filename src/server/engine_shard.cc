@@ -162,6 +162,8 @@ int32_t HuffmanCheckTask::Run(DbSlice* db_slice) {
   // Finished scanning the table, now normalize the table.
   constexpr unsigned kMaxFreqTotal = static_cast<unsigned>((1U << 31) * 0.9);
   size_t total_freq = std::accumulate(hist_.begin(), hist_.end(), 0UL);
+  if (total_freq == 0)
+    return -1;
 
   // to avoid overflow.
   double scale = total_freq > kMaxFreqTotal ? static_cast<double>(total_freq) / kMaxFreqTotal : 1.0;
@@ -179,8 +181,8 @@ int32_t HuffmanCheckTask::Run(DbSlice* db_slice) {
   string error_msg;
   if (huff_enc.Build(hist_.data(), kMaxSymbol, &error_msg)) {
     size_t compressed_size = huff_enc.EstimateCompressedSize(hist_.data(), kMaxSymbol);
-    LOG(INFO) << "Huffman table built, reducing memory usage from " << total_freq << " to "
-              << compressed_size << " bytes, ratio " << double(compressed_size) / total_freq;
+    LOG(INFO) << "Huffman table built, reducing character count from " << total_freq << " to "
+              << compressed_size << ", compression ratio " << double(compressed_size) / total_freq;
     string bintable = huff_enc.Export();
     LOG(INFO) << "Huffman binary table: " << absl::Base64Escape(bintable);
     db_slice->shard_owner()->stats().huffman_tables_built++;
