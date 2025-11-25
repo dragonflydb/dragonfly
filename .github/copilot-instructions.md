@@ -34,6 +34,16 @@ sudo apt install ninja-build libunwind-dev libboost-context-dev libssl-dev \
      autoconf-archive libtool cmake g++ bison zlib1g-dev
 ```
 
+### Alternative: Build with Docker (all prerequisites included)
+
+Use pre-built development containers that have all dependencies installed:
+
+```bash
+docker run -it --rm -v $(pwd):/src -w /src ghcr.io/romange/ubuntu-dev:24 bash
+# Or use Ubuntu 22.04:
+docker run -it --rm -v $(pwd):/src -w /src ghcr.io/romange/ubuntu-dev:22 bash
+```
+
 ### Initialize Submodules (REQUIRED)
 
 ```bash
