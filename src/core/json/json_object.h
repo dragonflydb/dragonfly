@@ -46,10 +46,10 @@ JsonType DeepCopyJSON(const JsonType* j);
 template <typename Json = JsonType>
 auto MakeJsonPathExpr(std::string_view path, std::error_code& ec)
     -> jsoncons::jsonpath::jsonpath_expression<Json> {
-  using result_allocator_t = typename Json::allocator_type;
-  using temp_allocator_t = std::allocator<char>;
-  using allocator_set_t = jsoncons::allocator_set<result_allocator_t, temp_allocator_t>;
-  return jsoncons::jsonpath::make_expression<Json, temp_allocator_t>(allocator_set_t(), path, ec);
+  using ResultAllocT = typename Json::allocator_type;
+  using TmpAllocT = std::allocator<char>;
+  using AllocSetT = jsoncons::allocator_set<ResultAllocT, TmpAllocT>;
+  return jsoncons::jsonpath::make_expression<Json, TmpAllocT>(AllocSetT(), path, ec);
 }
 
 }  // namespace dfly
