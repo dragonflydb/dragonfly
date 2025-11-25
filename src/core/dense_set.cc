@@ -396,15 +396,6 @@ void DenseSet::Shrink(size_t new_size) {
   // Increment shrink generation (use only 4 bits, so wrap at 16)
   shrink_generation_ = (shrink_generation_ + 1) & 0x0F;
 
-  // Clear all displaced flags first. During shrinking, we'll recalculate all bucket
-  // positions based on hash, so the displaced markers are no longer valid.
-  // This also ensures PushFront's DCHECK(!it->IsDisplaced()) passes.
-  for (size_t i = 0; i < prev_size; ++i) {
-    if (!entries_[i].IsEmpty()) {
-      entries_[i].ClearDisplaced();
-    }
-  }
-
   // Process from low to high (opposite of Grow).
   // This prevents double-processing: when moving elements from bucket i to bucket j < i,
   // bucket j has already been processed, so the element won't be processed again.
