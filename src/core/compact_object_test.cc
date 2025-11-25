@@ -88,6 +88,7 @@ static void InitThreadStructs() {
   SmallString::InitThreadLocal(tlh);
   thread_local MiMemoryResource mi_resource(tlh);
   CompactObj::InitThreadLocal(&mi_resource);
+  InitTLStatelessAllocMR(&mi_resource);
 };
 
 static void CheckEverythingDeallocated() {
@@ -455,14 +456,14 @@ TEST_F(CompactObjectTest, JsonTypeTest) {
     "children":[],"spouse":null}
   )";
   std::optional<JsonType> json_option2 =
-      JsonFromString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})", CompactObj::memory_resource());
+      ParseJsonUsingShardHeap(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})");
 
   cobj_.SetString(json_str, false);
   ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);  // we set this as a string
   JsonType* failed_json = cobj_.GetJson();
   ASSERT_TRUE(failed_json == nullptr);
   ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);
-  std::optional<JsonType> json_option = JsonFromString(json_str, CompactObj::memory_resource());
+  std::optional<JsonType> json_option = ParseJsonUsingShardHeap(json_str);
   ASSERT_TRUE(json_option.has_value());
   cobj_.SetJson(std::move(json_option.value()));
   ASSERT_TRUE(cobj_.ObjType() == OBJ_JSON);  // and now this is a JSON type
@@ -477,7 +478,7 @@ TEST_F(CompactObjectTest, JsonTypeTest) {
   ASSERT_TRUE(json != nullptr);
   ASSERT_TRUE(json->contains("b"));
   ASSERT_FALSE(json->contains("firstName"));
-  std::optional<JsonType> set_array = JsonFromString("", CompactObj::memory_resource());
+  std::optional<JsonType> set_array = ParseJsonUsingShardHeap("");
   // now set it to string again
   cobj_.SetString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})", false);
   ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);  // we set this as a string
@@ -504,7 +505,7 @@ TEST_F(CompactObjectTest, JsonTypeWithPathTest) {
             "title" : "The Night Watch",
             "author" : "Phillips, David Atlee"
         }]})";
-  std::optional<JsonType> json_array = JsonFromString(books_json, CompactObj::memory_resource());
+  std::optional<JsonType> json_array = ParseJsonUsingShardHeap(books_json);
   ASSERT_TRUE(json_array.has_value());
   cobj_.SetJson(std::move(json_array.value()));
   ASSERT_TRUE(cobj_.ObjType() == OBJ_JSON);  // and now this is a JSON type

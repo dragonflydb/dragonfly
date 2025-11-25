@@ -475,7 +475,7 @@ std::optional<std::string> ConvertJsonPathToJsonPointer(string_view json_path) {
    result before invoking SetJsonSize. Note that even after calling std::move on an optional, it may
    still hold the JSON value, which can lead to incorrect memory tracking. */
 std::optional<JsonType> ShardJsonFromString(std::string_view input) {
-  return JsonFromString(input, CompactObj::memory_resource());
+  return ParseJsonUsingShardHeap(input);
 }
 
 OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_str) {
@@ -556,8 +556,7 @@ OpResult<bool> SetPartialJson(const OpArgs& op_args, string_view key,
     path_exists = true;
     if (!is_nx_condition) {
       value_was_set = true;
-      *val = JsonType(parsed_json.value(),
-                      std::pmr::polymorphic_allocator<char>{CompactObj::memory_resource()});
+      *val = JsonType(parsed_json.value(), StatelessAllocator<char>{});
     }
     return {};
   };
@@ -1526,10 +1525,19 @@ auto OpMemory(const OpArgs& op_args, string_view key, const WrappedJsonPath& jso
       ReadOnlyOperationOptions{false, CallbackResultOptions::DefaultReadOnlyOptions()});
 }
 
-// Returns json vector that represents the result of the json query.
-auto OpResp(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_path) {
-  auto cb = [](const string_view&, const JsonType& val) { return val; };
-  return JsonReadOnlyOperation<JsonType>(op_args, key, json_path, std::move(cb));
+// Returns json vector that represents the result of the json query. A shard local
+// heap allocated JSON cannot be copied and then destroyed on another shard because we use stateless
+// allocators which forward all requests to thread local memory resource. This resource is
+// initialized by the engine shard, and it is possible that the coordinator thread may not have this
+// resource initialized. So the value is first copied to the std allocator-backed type TmpJson.
+OpResult<JsonCallbackResult<TmpJson>> OpResp(const OpArgs& op_args, string_view key,
+                                             const WrappedJsonPath& json_path) {
+  auto cb = [](const string_view&, const JsonType& val) {
+    string s;
+    val.dump(s);
+    return JsonFromString(s);
+  };
+  return JsonReadOnlyOperation<TmpJson>(op_args, key, json_path, std::move(cb));
 }
 
 // Returns boolean that represents the result of the operation.

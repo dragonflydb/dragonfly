@@ -39,7 +39,7 @@ class TestDriver : public Driver {
 template <typename JSON> JSON ValidJson(string_view str);
 
 template <> JsonType ValidJson<JsonType>(string_view str) {
-  auto res = ::dfly::JsonFromString(str, pmr::get_default_resource());
+  auto res = ParseJsonUsingShardHeap(str);
   CHECK(res) << "Failed to parse json: " << str;
   return *res;
 }
@@ -89,6 +89,11 @@ bool is_array(FlatJson ref) {
 
 class ScannerTest : public ::testing::Test {
  protected:
+  void SetUp() override {
+    Test::SetUp();
+    InitTLStatelessAllocMR(PMR_NS::get_default_resource());
+  }
+
   ScannerTest() {
     driver_.lexer()->set_debug(1);
   }

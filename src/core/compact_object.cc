@@ -1628,7 +1628,7 @@ MemoryResource* CompactObj::memory_resource() {
 
 bool CompactObj::JsonConsT::DefragIfNeeded(PageUsage* page_usage) {
   if (JsonType* old = json_ptr; ShouldDefragment(page_usage)) {
-    json_ptr = AllocateMR<JsonType>(DeepCopyJSON(old, memory_resource()));
+    json_ptr = AllocateMR<JsonType>(DeepCopyJSON(old));
     DeleteMR<JsonType>(old);
     return true;
   }

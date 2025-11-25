@@ -50,14 +50,14 @@ std::optional<TmpJson> JsonFromString(std::string_view input) {
   return ParseWithDecoder(input, json_decoder<TmpJson>{});
 }
 
-optional<JsonType> JsonFromString(string_view input, PMR_NS::memory_resource* mr) {
-  return ParseWithDecoder(input, json_decoder<JsonType>{PMR_NS::polymorphic_allocator<char>{mr}});
+optional<JsonType> ParseJsonUsingShardHeap(string_view input) {
+  return ParseWithDecoder(input, json_decoder<JsonType>{StatelessAllocator<char>{}});
 }
 
-JsonType DeepCopyJSON(const JsonType* j, PMR_NS::memory_resource* mr) {
+JsonType DeepCopyJSON(const JsonType* j) {
   std::string serialized;
   j->dump(serialized);
-  auto deserialized = JsonFromString(serialized, mr);
+  auto deserialized = ParseJsonUsingShardHeap(serialized);
   DCHECK(deserialized.has_value());
   return std::move(deserialized.value());
 }
