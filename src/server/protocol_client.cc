@@ -287,6 +287,7 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(base::IoBu
           std::string_view(reinterpret_cast<char*>(buffer->InputBuffer().data()), consumed);
 
     if (result == RedisParser::OK) {
+      LOG(INFO) << "Last resp: " << last_resp_;
       return ReadRespRes{processed_bytes, consumed};  // success path
     }
 
