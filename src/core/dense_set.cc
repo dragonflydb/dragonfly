@@ -375,7 +375,6 @@ auto DenseSet::FindEmptyAround(uint32_t bid) -> ChainVectorIterator {
 
 void DenseSet::Reserve(size_t sz) {
   sz = std::max<size_t>(sz, kMinSize);
-  sz = std::max<size_t>(sz, size_);
 
   sz = absl::bit_ceil(sz);
   if (sz > entries_.size()) {

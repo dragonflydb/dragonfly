@@ -141,7 +141,7 @@ void MemoryCmd::Run(CmdArgList args) {
         "    Pages used less than the threshold percentage (default 0.8) are targeted for moving "
         "out data.",
         "SHRINK",
-        "    Shrinks DenseSet-based data structures (sets, hashes, sorted sets) to optimal size.",
+        "    Shrinks DenseSet-based data structures to optimal size.",
         "    Automatically calculates and applies the minimal size needed for current elements.",
         "    Returns per-shard statistics showing total objects examined and successfully shrunk.",
     };
