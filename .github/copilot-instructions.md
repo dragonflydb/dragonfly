@@ -115,7 +115,7 @@ pre-commit install
 ```
 
 **Style guidelines:**
-- C++: Google style guide (older version), clang-format v14.0.6, 100 column limit
+- C++: [Google C++ Style Guide (2020 version)](https://github.com/google/styleguide/blob/505ba68c74eb97e6966f60907ce893001bedc706/cppguide.html), clang-format v14.0.6, 100 column limit
 - Python: Black formatter, 100 character line length
 - Commits: Conventional Commits format, must be signed (`git commit -s`)
 
@@ -133,7 +133,7 @@ Example: `fix(server): correct memory leak in db_slice #123`
 The main CI workflow (`.github/workflows/ci.yml`) runs on PRs to main:
 
 1. **pre-commit**: Validates formatting and commit messages
-2. **build**: Tests on ubuntu-dev:20, ubuntu-dev:24, alpine-dev containers
+2. **build**: Tests on ghcr.io/romange containers (ubuntu-dev:20, ubuntu-dev:24, alpine-dev)
    - Debug and Release configurations
    - GCC and Clang compilers
    - With/without ASAN/UBSAN sanitizers
