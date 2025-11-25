@@ -522,11 +522,14 @@ void MemoryCmd::Shrink() {
           if (current_size > 0 && bucket_count > 0) {
             size_t optimal_size = std::max(size_t(8), absl::bit_ceil(current_size));
             if (optimal_size < bucket_count) {
-              size_t bytes_before = ds->SetMallocUsed();
+              size_t bucket_bytes_before = ds->BucketCount() * 8;  // sizeof(DensePtr) = 8
               ds->Shrink(optimal_size);
-              size_t bytes_after = ds->SetMallocUsed();
+              size_t bucket_bytes_after = ds->BucketCount() * 8;
+              size_t saved = (bucket_bytes_before > bucket_bytes_after)
+                                 ? (bucket_bytes_before - bucket_bytes_after)
+                                 : 0;
               stats.shrunk_objects++;
-              stats.bytes_saved += (bytes_before > bytes_after) ? (bytes_before - bytes_after) : 0;
+              stats.bytes_saved += saved;
             }
           }
         }
