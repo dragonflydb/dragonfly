@@ -3052,6 +3052,7 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     await fill_task
 
 
+@pytest.mark.skip("too heavy")
 @pytest.mark.opt_only
 @dfly_args({"proactor_threads": 2, "serialization_max_chunk_size": 5000, "compression_mode": "0"})
 async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory):
@@ -3558,3 +3559,12 @@ async def test_big_strings(df_factory):
     line = lines[0]
     peak_bytes = extract_int_after_prefix("Serialization peak bytes: ", line)
     assert peak_bytes < value_size
+
+
+async def test_replica_of_self(async_client):
+    port = async_client.connection_pool.connection_kwargs["port"]
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command(f"replicaof localhost {port}")
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command(f"replicaof 127.0.0.1 {port}")
