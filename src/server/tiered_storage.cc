@@ -37,7 +37,7 @@ ABSL_FLAG(bool, tiered_experimental_cooling, true,
           "If true, uses intermediate cooling layer "
           "when offloading values to storage");
 
-ABSL_FLAG(unsigned, tiered_storage_write_depth, 50,
+ABSL_FLAG(unsigned, tiered_storage_write_depth, 200,
           "Maximum number of concurrent stash requests issued by background offload");
 
 ABSL_FLAG(float, tiered_offload_threshold, 0.5,
