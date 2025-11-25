@@ -45,6 +45,7 @@ class PageUsageStatsTest : public ::testing::Test {
   }
 
   PageUsageStatsTest() : m_(mi_heap_get_backing()) {
+    InitTLStatelessAllocMR(&m_);
   }
 
   void SetUp() override {
@@ -191,7 +192,7 @@ TEST_F(PageUsageStatsTest, JSONCons) {
   // encoding.
   std::string_view data{R"#({"data": "some", "count": 1, "checked": false})#"};
 
-  auto parsed = JsonFromString(data, &m_);
+  auto parsed = ParseJsonUsingShardHeap(data);
   EXPECT_TRUE(parsed.has_value());
 
   c_obj_.SetJson(std::move(parsed.value()));

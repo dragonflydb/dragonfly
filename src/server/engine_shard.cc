@@ -422,6 +422,7 @@ void EngineShard::InitThreadLocal(ProactorBase* pb) {
 
   CompactObj::InitThreadLocal(shard_->memory_resource());
   SmallString::InitThreadLocal(data_heap);
+  InitTLStatelessAllocMR(shard_->memory_resource());
 
   shard_->shard_search_indices_ = std::make_unique<ShardDocIndices>();
 }

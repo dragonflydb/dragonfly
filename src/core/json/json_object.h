@@ -6,6 +6,8 @@
 
 #include <version>  // for __cpp_lib_to_chars macro.
 
+#include "core/detail/stateless_allocator.h"
+
 // std::from_chars is available in C++17 if __cpp_lib_to_chars is defined.
 #if __cpp_lib_to_chars >= 201611L
 #define JSONCONS_HAS_STD_FROM_CHARS 1
@@ -17,12 +19,10 @@
 #include <optional>
 #include <string_view>
 
-#include "base/pmr/memory_resource.h"
-
 namespace dfly {
 
 using TmpJson = jsoncons::json;
-using JsonType = jsoncons::pmr::json;
+using JsonType = jsoncons::basic_json<char, jsoncons::sorted_policy, StatelessAllocator<char>>;
 
 // A helper type to use in template functions which are expected to work with both TmpJson
 // and JsonType
@@ -36,20 +36,20 @@ std::optional<TmpJson> JsonFromString(std::string_view input);
 
 // Parses string into JSON, using mimalloc heap for allocations. This method should only be used on
 // shards where mimalloc heap is initialized.
-std::optional<JsonType> JsonFromString(std::string_view input, PMR_NS::memory_resource* mr);
+std::optional<JsonType> ParseJsonUsingShardHeap(std::string_view input);
 
 // Deep copy a JSON object, by first serializing it to a string and then deserializing the string.
 // The operation is intended to help during defragmentation, by copying into a page reserved for
 // malloc.
-JsonType DeepCopyJSON(const JsonType* j, PMR_NS::memory_resource* mr);
+JsonType DeepCopyJSON(const JsonType* j);
 
 template <typename Json = JsonType>
 auto MakeJsonPathExpr(std::string_view path, std::error_code& ec)
     -> jsoncons::jsonpath::jsonpath_expression<Json> {
-  using result_allocator_t = typename Json::allocator_type;
-  using temp_allocator_t = std::allocator<char>;
-  using allocator_set_t = jsoncons::allocator_set<result_allocator_t, temp_allocator_t>;
-  return jsoncons::jsonpath::make_expression<Json, temp_allocator_t>(allocator_set_t(), path, ec);
+  using ResultAllocT = typename Json::allocator_type;
+  using TmpAllocT = std::allocator<char>;
+  using AllocSetT = jsoncons::allocator_set<ResultAllocT, TmpAllocT>;
+  return jsoncons::jsonpath::make_expression<Json, TmpAllocT>(AllocSetT(), path, ec);
 }
 
 }  // namespace dfly
