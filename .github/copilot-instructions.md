@@ -180,7 +180,7 @@ Before submitting changes:
 
 1. ✅ Code compiles: `cd build-dbg && ninja dragonfly`
 2. ✅ Unit tests pass: `ctest -V -L DFLY`
-3. ✅ Pre-commit checks pass: `pre-commit run --all-files`
+3. ✅ Pre-commit checks pass: `pre-commit run` (runs on staged files) or `pre-commit run --files path/to/file1 path/to/file2`
 4. ✅ Commits are signed and follow conventional format
 5. ✅ For Python changes: `pytest tests/dragonfly/ -k <test_name>`
 
