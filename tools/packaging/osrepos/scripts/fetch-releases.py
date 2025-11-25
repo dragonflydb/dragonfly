@@ -66,14 +66,15 @@ def collect_download_urls() -> list[Package]:
 def download_packages(root: str, packages: list[Package]):
     # The debian repository building tool, reprepo, only supports a single package per version by default.
     # The ability to support multiple versions has been added but is not present in ubuntu-latest on
-    # github action runners yet. So we only download one package, the latest, for ubuntu.
+    # github action runners yet. So we only download one package per architecture, the latest, for ubuntu.
     # The rest of the scripts work on a set of packages, so that when the Limit parameter is supported,
     # we can remove this flag and start hosting more than the latest versions.
     # Another alternative would be to use the components feature of reprepo, but it would involve updating
     # the repository definition itself for each release, which is a bad experience for end users.
-    deb_done = False
+    deb_done = 0
     for package in packages:
-        if package.kind == AssetKind.DEB and deb_done:
+        # Download the latest arm and amd64 package for .deb format
+        if package.kind == AssetKind.DEB and deb_done == 2:
             continue
 
         print(f"Downloading {package.download_url}")
@@ -89,7 +90,7 @@ def download_packages(root: str, packages: list[Package]):
         print(f"Downloaded {package.download_url}")
         time.sleep(0.5)
         if package.kind == AssetKind.DEB:
-            deb_done = True
+            deb_done += 1
 
 
 def main(root: str):

@@ -1,3 +1,6 @@
+import platform
+
+import pytest
 from testcontainers.core.container import DockerContainer
 
 
@@ -6,6 +9,7 @@ def check(container: DockerContainer, cmd: str):
     assert result.exit_code == 0, f"command {cmd} failed with result {result}"
 
 
+@pytest.mark.skipif(platform.processor() != "x86_64", reason="rpm is only built for x86_64")
 async def test_install_package_on_fedora():
     with DockerContainer(image="fedora:latest", tty=True) as fedora:
         check(
