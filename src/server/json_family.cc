@@ -342,7 +342,7 @@ void SendJsonString(const OpResult<string>& result, RedisReplyBuilder* rb) {
   if (result) {
     const string& json_str = result.value();
     if (rb->IsResp3()) {
-      if (const std::optional<ShortLivedJSON> parsed_json = JsonFromString(json_str)) {
+      if (const std::optional<TmpJson> parsed_json = JsonFromString(json_str)) {
         Send(parsed_json.value(), rb);
         return;
       }
@@ -2004,7 +2004,7 @@ void JsonFamily::StrAppend(CmdArgList args, const CommandContext& cmd_cntx) {
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   // We try parsing the value into json string object first.
-  optional<ShortLivedJSON> parsed_json = JsonFromString(value);
+  optional<TmpJson> parsed_json = JsonFromString(value);
   if (!parsed_json || !parsed_json->is_string()) {
     return builder->SendError("expected string value", kSyntaxErrType);
   };
