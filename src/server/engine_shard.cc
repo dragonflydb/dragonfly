@@ -151,6 +151,11 @@ int32_t HuffmanCheckTask::Run(DbSlice* db_slice) {
         for (unsigned char c : val) {
           hist_[c]++;
         }
+
+        if (val.size() > 1024) {
+          traverses_count = kMaxTraverses;  // return early.
+          string{}.swap(scratch_);          // free memory.
+        }
       }
     });
     traverses_count++;
@@ -721,19 +726,15 @@ void EngineShard::Heartbeat() {
         check_huffman = false;  // trigger only once.
 
         // launch the task
-        HuffmanCheckTask* task = new HuffmanCheckTask();
-        huffman_check_task_id_ = ProactorBase::me()->AddOnIdleTask([task] {
-          if (!shard_ || !namespaces) {
-            delete task;
-            return -1;
-          }
+        huffman_check_task_id_ =
+            ProactorBase::me()->AddOnIdleTask([task = HuffmanCheckTask{}]() mutable {
+              if (!shard_ || !namespaces) {
+                return -1;
+              }
 
-          DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
-          int32_t res = task->Run(&db_slice);
-          if (res == -1)
-            delete task;
-          return res;
-        });
+              DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
+              return task.Run(&db_slice);
+            });
       }
     }
   }
