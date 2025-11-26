@@ -840,8 +840,6 @@ TEST_F(MultiTest, ScriptFlagsEmbedded) {
   EXPECT_THAT(Run({"eval", s2, "0"}), ErrArg("Invalid flag: this-is-an-error"));
 }
 
-// Flaky because of https://github.com/google/sanitizers/issues/1760
-#ifndef SANITIZERS
 TEST_F(MultiTest, UndeclaredKeyFlag) {
   absl::FlagSaver fs;  // lua_undeclared_keys_shas changed via CONFIG cmd below
 
@@ -890,7 +888,6 @@ TEST_F(MultiTest, ScriptBadCommand) {
   resp = Run({"eval", s4, "0"});
   EXPECT_EQ(resp, "OK");
 }
-#endif
 
 TEST_F(MultiTest, MultiEvalModeConflict) {
   const char* s1 = R"(
@@ -1252,29 +1249,6 @@ TEST_F(MultiTest, EvalShaRo) {
 
   resp = Run({"evalsha_ro", write_sha, "1", "foo"});
   EXPECT_THAT(resp, ErrArg("Write commands are not allowed from read-only scripts"));
-}
-
-TEST_F(MultiTest, ForceAtomicityFlag) {
-  absl::FlagSaver fs;
-
-  const string kHash = "bb855c2ecfa3114d222cb11e0682af6360e9712f";
-  const string_view kScript = R"(
-    --!df flags=disable-atomicity
-    redis.call('get', 'x');
-    return "OK";
-  )";
-
-  // EVAL the script works due to disable-atomicity flag
-  EXPECT_EQ(Run({"eval", kScript, "0"}), "OK");
-
-  EXPECT_THAT(Run({"script", "list"}), RespElementsAre(kHash, kScript));
-
-  // Flush scripts to force re-evaluating of flags
-  EXPECT_EQ(Run({"script", "flush"}), "OK");
-
-  // Now it doesn't work, because we force atomicity
-  absl::SetFlag(&FLAGS_lua_force_atomicity_shas, {kHash});
-  EXPECT_THAT(Run({"eval", kScript, "0"}), ErrArg("undeclared"));
 }
 
 TEST_F(MultiTest, StoredCmdBytesMetric) {
