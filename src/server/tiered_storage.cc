@@ -477,13 +477,14 @@ std::optional<util::fb2::Future<bool>> TieredStorage::TryStash(DbIndex dbid, str
   } else if (auto bin = bins_->Stash(dbid, key, SerializeToString(*value)); bin) {
     id = bin->first;
     // TODO(vlad): Write bin to prepared buffer instead of allocating one
-    if (auto prepared = op_manager_->PrepareStash(est_size); prepared) {
+    if (auto prepared = op_manager_->PrepareStash(bin->second.length()); prepared) {
       auto [offset, buf] = *prepared;
       memcpy(buf.bytes.data(), bin->second.data(), bin->second.size());
       tiering::DiskSegment segment{offset, bin->second.size()};
       op_manager_->Stash(id, segment, buf);
     } else {
       ec = prepared.error();
+      bins_->ReportStashAborted(bin->first);
     }
   } else {
     return {};  // silently added to bin
