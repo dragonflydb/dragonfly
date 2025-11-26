@@ -39,20 +39,9 @@ ABSL_FLAG(bool, lua_allow_undeclared_auto_correct, false,
           "undeclared key.");
 
 ABSL_FLAG(
-    std::vector<std::string>, lua_undeclared_keys_shas,
-    std::vector<std::string>({"351130589c64523cb98978dc32c64173a31244f3",    // Sidekiq, see #2442
-                              "6ae15ef4678593dc61f991c9953722d67d822776",    // Sidekiq, see #2442
-                              "34b1048274c8e50a0cc587a3ed9c383a82bb78c5",    // Sidekiq
-                              "b725ca33e5b36f318ab1150b8ac955a3d997c872"}),  // Sentry, see #5495
+    std::vector<std::string>, lua_undeclared_keys_shas, {},
     "Comma-separated list of Lua script SHAs which are allowed to access undeclared keys. SHAs are "
     "only looked at when loading the script, and new values do not affect already-loaded script.");
-
-ABSL_FLAG(std::vector<std::string>, lua_force_atomicity_shas,
-          std::vector<std::string>({
-              "f8133be7f04abd9dfefa83c3b29a9d837cfbda86",  // Sidekiq, see #4522
-          }),
-          "Comma-separated list of Lua script SHAs which are forced to run in atomic mode, even if "
-          "the script specifies disable-atomicity.");
 
 namespace dfly {
 using namespace std;
@@ -272,17 +261,30 @@ io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter
   auto params = params_opt->value_or(default_params_);
 
   if (!params.atomic) {
-    auto force_atomic_shas = absl::GetFlag(FLAGS_lua_force_atomicity_shas);
-    if (find(force_atomic_shas.begin(), force_atomic_shas.end(), sha) != force_atomic_shas.end()) {
+    // override atomicity for a specific buggy script.
+    constexpr string_view sha_4522 =
+        "f8133be7f04abd9dfefa83c3b29a9d837cfbda86"sv;  // Sidekiq, see #4522
+    if (sha == sha_4522) {
       params.atomic = true;
     }
   }
 
-  auto undeclared_shas = absl::GetFlag(FLAGS_lua_undeclared_keys_shas);
-  if (find(undeclared_shas.begin(), undeclared_shas.end(), sha) != undeclared_shas.end()) {
-    params.undeclared_keys = true;
-  }
+  const char* kUndeclaredShas[] = {
+      "351130589c64523cb98978dc32c64173a31244f3",  // Sidekiq, see #2442
+      "6ae15ef4678593dc61f991c9953722d67d822776",  // Sidekiq, see #2442
+      "34b1048274c8e50a0cc587a3ed9c383a82bb78c5",  // Sidekiq
+      "b725ca33e5b36f318ab1150b8ac955a3d997c872",  // Sentry, see #5495
+      "8c4dafdf9b6b7bcf511a0d1ec0518bed9260e16d",  // django-ops see #6119
+  };
 
+  if (find(begin(kUndeclaredShas), end(kUndeclaredShas), sha) != end(kUndeclaredShas)) {
+    params.undeclared_keys = true;
+  } else {
+    auto undeclared_shas = absl::GetFlag(FLAGS_lua_undeclared_keys_shas);
+    if (find(undeclared_shas.begin(), undeclared_shas.end(), sha) != undeclared_shas.end()) {
+      params.undeclared_keys = true;
+    }
+  }
   // If the script is atomic, check for possible squashing optimizations.
   // For non atomic modes, squashing increases the time locks are held, which
   // can decrease throughput with frequently accessed keys.
