@@ -21,7 +21,7 @@ jobs:
             container: alpine-dev
             flags: "-DMARCH_OPT=-march=x86-64"
           - name: fedora
-            container: fedora:30
+            container: fedora:30-gcc14
 
     timeout-minutes: 45
 
@@ -37,14 +37,15 @@ jobs:
         with:
           submodules: true
 
-      - name: Install dependencies
+      - name: Show compiler version
         run: |
+          echo "=== Compiler Version ==="
+          ${CXX:-g++} --version
+          echo "=== CMake Version ==="
           cmake --version
+          echo "=== glibc Version ==="
+          ldd --version | head -1 || true
           mkdir -p $GITHUB_WORKSPACE/build
-      - name: Install packages
-        if: matrix.container == 'fedora:30'
-        run: |
-          echo Passed
 
       - name: Configure & Build
         run: |
