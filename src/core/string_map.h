@@ -44,7 +44,7 @@ class SdsPair {
 
 class StringMap : public DenseSet {
  public:
-  StringMap(MemoryResource* res = PMR_NS::get_default_resource()) : DenseSet(res) {
+  explicit StringMap(void* unused = nullptr) {
   }
 
   ~StringMap();

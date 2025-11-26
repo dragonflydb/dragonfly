@@ -10,7 +10,7 @@
 #include <type_traits>
 #include <vector>
 
-#include "base/pmr/memory_resource.h"
+#include "core/detail/stateless_allocator.h"
 
 namespace dfly {
 
@@ -170,8 +170,7 @@ class DenseSet {
   static_assert(sizeof(DenseLinkKey) == 2 * sizeof(uintptr_t));
 
  protected:
-  using LinkAllocator = PMR_NS::polymorphic_allocator<DenseLinkKey>;
-  using DensePtrAllocator = PMR_NS::polymorphic_allocator<DensePtr>;
+  using DensePtrAllocator = StatelessAllocator<DensePtr>;
   using ChainVectorIterator = std::vector<DensePtr, DensePtrAllocator>::iterator;
   using ChainVectorConstIterator = std::vector<DensePtr, DensePtrAllocator>::const_iterator;
 
@@ -208,10 +207,9 @@ class DenseSet {
   };
 
  public:
-  using MemoryResource = PMR_NS::memory_resource;
   static constexpr uint32_t kMaxBatchLen = 32;
 
-  explicit DenseSet(MemoryResource* mr = PMR_NS::get_default_resource());
+  explicit DenseSet();
   virtual ~DenseSet();
 
   void Clear() {
@@ -347,10 +345,6 @@ class DenseSet {
   using ClearItem = CloneItem;
   void ClearBatch(unsigned len, ClearItem* items);
 
-  MemoryResource* mr() {
-    return entries_.get_allocator().resource();
-  }
-
   uint32_t BucketId(uint64_t hash) const {
     assert(capacity_log_ > 0);
     return hash >> (64 - capacity_log_);
@@ -389,7 +383,7 @@ class DenseSet {
 
   inline void FreeLink(DenseLinkKey* plink) {
     // deallocate the link if it is no longer a link as it is now in an empty list
-    mr()->deallocate(plink, sizeof(DenseLinkKey), alignof(DenseLinkKey));
+    DensePtrAllocator::resource()->deallocate(plink, sizeof(DenseLinkKey), alignof(DenseLinkKey));
     --num_links_;
   }
 
