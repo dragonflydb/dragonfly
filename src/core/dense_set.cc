@@ -381,6 +381,8 @@ void DenseSet::Reserve(size_t sz) {
     size_t prev_size = entries_.size();
     entries_.resize(sz);
     capacity_log_ = absl::bit_width(sz) - 1;
+    // Scan() cursor uses 28 bits for bucket position, limiting max capacity.
+    DCHECK_LE(capacity_log_, 28u);
     Grow(prev_size);
   }
 }
@@ -393,7 +395,7 @@ void DenseSet::Shrink(size_t new_size) {
   size_t prev_size = entries_.size();
   capacity_log_ = absl::bit_width(new_size) - 1;
 
-  // Increment shrink generation (use only 4 bits, so wrap at 16)
+  // Increment shrink generation (use only 4 bits, so cycles through 0-15)
   shrink_generation_ = (shrink_generation_ + 1) & 0x0F;
 
   // Process from low to high (opposite of Grow).
@@ -406,9 +408,12 @@ void DenseSet::Shrink(size_t new_size) {
     do {
       if (ExpireIfNeeded(prev, curr)) {
         // If curr has disappeared due to expiry and prev was converted from Link
-        // to a regular DensePtr
-        if (prev && !prev->IsLink())
-          break;
+        // to a regular DensePtr, re-process prev to check if it needs to move.
+        if (prev && !prev->IsLink()) {
+          curr = prev;
+          prev = nullptr;
+          continue;
+        }
       }
 
       if (curr->IsEmpty())
@@ -426,8 +431,6 @@ void DenseSet::Shrink(size_t new_size) {
         curr->ClearDisplaced();
         prev = curr;
         curr = curr->Next();
-        if (curr == nullptr)
-          break;
       } else {
         // Element needs to move to a different bucket
         auto dest = entries_.begin() + new_bid;
