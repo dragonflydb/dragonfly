@@ -140,10 +140,9 @@ void MemoryCmd::Run(CmdArgList args) {
         "page.",
         "    Pages used less than the threshold percentage (default 0.8) are targeted for moving "
         "out data.",
-        "SHRINK",
-        "    Shrinks DenseSet-based data structures to optimal size.",
-        "    Automatically calculates and applies the minimal size needed for current elements.",
-        "    Returns per-shard statistics showing total objects examined and successfully shrunk.",
+        "SHRINK <key>",
+        "    Shrinks DenseSet-based data structure (set or hash) to optimal size.",
+        "    Returns bytes saved, or 0 if already optimal. Returns null if key not found.",
     };
     auto* rb = static_cast<RedisReplyBuilder*>(builder_);
     return rb->SendSimpleStrArr(help_arr);
@@ -198,8 +197,9 @@ void MemoryCmd::Run(CmdArgList args) {
     return rb->SendVerbatimString(merged.ToString());
   }
 
-  if (parser.Check("SHRINK")) {
-    return Shrink();
+  if (parser.Check("SHRINK") && args.size() > 1) {
+    string_view key = parser.Next();
+    return Shrink(key);
   }
 
   string err = UnknownSubCmd(parser.Next(), "MEMORY");
@@ -484,89 +484,66 @@ void MemoryCmd::Track(CmdArgList args) {
   return builder_->SendError(kSyntaxErrType);
 }
 
-void MemoryCmd::Shrink() {
-  struct ShardShrinkStats {
-    size_t total_examined = 0;
-    size_t shrunk_objects = 0;
-    size_t bytes_saved = 0;
-  };
-
-  vector<ShardShrinkStats> shard_stats(shard_set->size());
-
-  shard_set->RunBriefInParallel([&](EngineShard* shard) {
-    auto sid = shard->shard_id();
-    auto& stats = shard_stats[sid];
-    DbSlice& db_slice = cntx_->ns->GetDbSlice(sid);
-
-    // Iterate over all databases in this shard
-    for (DbIndex db_indx = 0; db_indx < db_slice.db_array_size(); ++db_indx) {
-      if (!db_slice.IsDbValid(db_indx))
-        continue;
-
-      auto [prime_table, expire_table] = db_slice.GetTables(db_indx);
-
-      // Iterate over all entries in the prime table
-      for (auto it = prime_table->begin(); it != prime_table->end(); ++it) {
-        const PrimeValue& pv = it->second;
-        unsigned obj_type = pv.ObjType();
-        unsigned encoding = pv.Encoding();
-
-        stats.total_examined++;
-
-        // Process DenseSet-based structures (StringSet and StringMap)
-        if (encoding == kEncodingStrMap2 && (obj_type == OBJ_SET || obj_type == OBJ_HASH)) {
-          DenseSet* ds = static_cast<DenseSet*>(pv.RObjPtr());
-          size_t current_size = ds->UpperBoundSize();
-          size_t bucket_count = ds->BucketCount();
-
-          if (current_size > 0 && bucket_count > 0) {
-            size_t optimal_size = std::max(size_t(8), absl::bit_ceil(current_size));
-            if (optimal_size < bucket_count) {
-              size_t bucket_bytes_before = ds->BucketCount() * sizeof(void*);
-              ds->Shrink(optimal_size);
-              size_t bucket_bytes_after = ds->BucketCount() * sizeof(void*);
-              size_t saved = (bucket_bytes_before > bucket_bytes_after)
-                                 ? (bucket_bytes_before - bucket_bytes_after)
-                                 : 0;
-              stats.shrunk_objects++;
-              stats.bytes_saved += saved;
-            }
-          }
-        }
-      }
-    }
-  });
-
-  // Aggregate statistics
-  size_t total_examined = 0;
-  size_t total_shrunk = 0;
-  size_t total_bytes_saved = 0;
-
-  for (const auto& stats : shard_stats) {
-    total_examined += stats.total_examined;
-    total_shrunk += stats.shrunk_objects;
-    total_bytes_saved += stats.bytes_saved;
-  }
-
-  // Build detailed response
-  string response;
-  absl::StrAppend(&response, "=== MEMORY SHRINK Results ===\n\n");
-  absl::StrAppend(&response, "Overall Statistics:\n");
-  absl::StrAppend(&response, "  Objects examined: ", total_examined, "\n");
-  absl::StrAppend(&response, "  Objects shrunk: ", total_shrunk, "\n");
-  absl::StrAppend(&response, "  Bytes saved: ", total_bytes_saved, "\n\n");
-
-  absl::StrAppend(&response, "Per-Shard Statistics:\n");
-  for (size_t i = 0; i < shard_stats.size(); ++i) {
-    const auto& stats = shard_stats[i];
-    absl::StrAppend(&response, "  Shard ", i, ": ");
-    absl::StrAppend(&response, "examined=", stats.total_examined);
-    absl::StrAppend(&response, ", shrunk=", stats.shrunk_objects);
-    absl::StrAppend(&response, ", bytes_saved=", stats.bytes_saved, "\n");
-  }
+void MemoryCmd::Shrink(string_view key) {
+  ShardId sid = Shard(key, shard_set->size());
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder_);
-  rb->SendVerbatimString(response);
+
+  auto result = shard_set->pool()->at(sid)->AwaitBrief([key, this, sid]() -> tuple<int, size_t> {
+    auto& db_slice = cntx_->ns->GetDbSlice(sid);
+    auto [pt, exp_t] = db_slice.GetTables(cntx_->db_index());
+    PrimeIterator it = pt->Find(key);
+
+    if (!IsValid(it)) {
+      return {-1, 0};  // Key not found
+    }
+
+    const PrimeValue& pv = it->second;
+    unsigned obj_type = pv.ObjType();
+    unsigned encoding = pv.Encoding();
+
+    // Only process DenseSet-based structures (StringSet and StringMap)
+    if (encoding != kEncodingStrMap2 || (obj_type != OBJ_SET && obj_type != OBJ_HASH)) {
+      return {-2, 0};  // Wrong type
+    }
+
+    DenseSet* ds = static_cast<DenseSet*>(pv.RObjPtr());
+    size_t current_size = ds->UpperBoundSize();
+    size_t bucket_count = ds->BucketCount();
+
+    if (current_size == 0 || bucket_count == 0) {
+      return {0, 0};  // Nothing to shrink
+    }
+
+    size_t optimal_size = std::max(size_t(8), absl::bit_ceil(current_size));
+    if (optimal_size >= bucket_count) {
+      return {0, 0};  // Already optimal
+    }
+
+    size_t bucket_bytes_before = bucket_count * sizeof(void*);
+    ds->Shrink(optimal_size);
+    size_t bucket_bytes_after = ds->BucketCount() * sizeof(void*);
+    size_t saved =
+        (bucket_bytes_before > bucket_bytes_after) ? (bucket_bytes_before - bucket_bytes_after) : 0;
+
+    return {1, saved};  // Success
+  });
+
+  auto [status, bytes_saved] = result;
+
+  if (status == -1) {
+    return rb->SendNull();  // Key not found
+  }
+
+  if (status == -2) {
+    return rb->SendError("WRONGTYPE Key is not a set or hash with DenseSet encoding");
+  }
+
+  if (status == 0) {
+    return rb->SendLong(0);  // Nothing to shrink
+  }
+
+  rb->SendLong(bytes_saved);
 }
 
 }  // namespace dfly

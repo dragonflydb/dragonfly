@@ -381,28 +381,17 @@ async def test_memory_shrink_basic(df_factory: DflyInstanceFactory):
     for i in range(9900):
         await client.srem("myset", f"elem_{i}")
 
-    # Create sparse hash
-    for i in range(10000):
-        await client.hset("myhash", f"field_{i}", f"value_{i}")
-
-    # Delete 99% (10000 -> 100)
-    for i in range(9900):
-        await client.hdel("myhash", f"field_{i}")
-
-    result = await client.execute_command("MEMORY SHRINK")
-
-    # Parse and verify shrink worked
-    lines = result.split("\n")
-    bytes_saved = 0
-    objects_shrunk = 0
-    for line in lines:
-        if "Bytes saved:" in line:
-            bytes_saved += int(line.split(":")[1].strip())
-        elif "Objects shrunk:" in line:
-            objects_shrunk += int(line.split(":")[1].strip())
-
-    assert objects_shrunk > 0, f"Expected objects_shrunk > 0, got {objects_shrunk}"
+    # Shrink the set and verify bytes saved
+    bytes_saved = await client.execute_command("MEMORY SHRINK", "myset")
     assert bytes_saved > 0, f"Expected bytes_saved > 0, got {bytes_saved}"
+
+    # Shrinking again should return 0 (already optimal)
+    bytes_saved_again = await client.execute_command("MEMORY SHRINK", "myset")
+    assert bytes_saved_again == 0, f"Expected 0, got {bytes_saved_again}"
+
+    # Non-existent key returns null
+    result = await client.execute_command("MEMORY SHRINK", "nonexistent")
+    assert result is None
 
 
 @pytest.mark.asyncio
@@ -413,13 +402,13 @@ async def test_memory_shrink_with_scan(df_factory: DflyInstanceFactory):
 
     # Create set with many elements
     for i in range(100):
-        await client.sadd(f"set:0", *[f"elem_{j}" for j in range(i * 10, (i + 1) * 10)])
+        await client.sadd("set:0", *[f"elem_{j}" for j in range(i * 10, (i + 1) * 10)])
 
     # Start SCAN
     cursor, keys = await client.sscan("set:0", 0, count=50)
 
     # Shrink during scan
-    await client.execute_command("MEMORY SHRINK")
+    await client.execute_command("MEMORY SHRINK", "set:0")
 
     # Continue and complete scan
     all_keys = set(keys)
