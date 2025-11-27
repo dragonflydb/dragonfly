@@ -475,13 +475,14 @@ void DenseSet::Shrink(size_t new_size) {
   // This prevents double-processing: when moving elements from bucket i to bucket j < i,
   // bucket j has already been processed, so the element won't be processed again.
   for (size_t i = 0; i < prev_size; ++i) {
+    bool was_empty = entries_[i].IsEmpty();
     ShrinkBucket(i);
-  }
+    bool is_empty = entries_[i].IsEmpty();
 
-  // Recount used buckets after shrinking
-  num_used_buckets_ = 0;
-  for (size_t i = 0; i < new_size; ++i) {
-    if (!entries_[i].IsEmpty()) {
+    // Track bucket state changes to maintain num_used_buckets_
+    if (!was_empty && is_empty) {
+      --num_used_buckets_;
+    } else if (was_empty && !is_empty) {
       ++num_used_buckets_;
     }
   }
