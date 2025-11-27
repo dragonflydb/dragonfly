@@ -985,7 +985,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
   // blocked connections because: a) If the connection is blocked it is puased. b) We read pause
   // state after waking from blocking so if the trasaction was waken by another running
   //    command that did not pause on the new state yet we will pause after waking up.
-  DispatchTracker tracker{std::move(listeners), conn, true /* ignore paused commands */,
+  DispatchTracker tracker{listeners, conn, true /* ignore paused commands */,
                           true /*ignore blocking*/};
   shard_set->pool()->AwaitFiberOnAll([&tracker, pause_state](unsigned, util::ProactorBase*) {
     // Commands don't suspend before checking the pause state, so
@@ -3824,7 +3824,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
     return builder->SendError("Full sync not done");
   }
 
-  std::error_code res = replica_->TakeOver(ArgS(args, 0), save_flag);
+  std::error_code res = replica_->TakeOver(timeout_sec, save_flag);
   if (res) {
     LOG(WARNING) << "Takeover failed with error: " << res << " - " << res.message();
     return builder->SendError(absl::StrCat("Couldn't execute takeover: ", res.message()));
