@@ -381,8 +381,6 @@ void DenseSet::Reserve(size_t sz) {
     size_t prev_size = entries_.size();
     entries_.resize(sz);
     capacity_log_ = absl::bit_width(sz) - 1;
-    // Scan() cursor uses 28 bits for bucket position, limiting max capacity.
-    DCHECK_LE(capacity_log_, 28u);
     Grow(prev_size);
   }
 }
@@ -467,9 +465,6 @@ void DenseSet::Shrink(size_t new_size) {
 
   size_t prev_size = entries_.size();
   capacity_log_ = absl::bit_width(new_size) - 1;
-
-  // Increment shrink generation (use only 4 bits, so cycles through 0-15)
-  shrink_generation_ = (shrink_generation_ + 1) & 0x0F;
 
   // Process from low to high (opposite of Grow).
   // This prevents double-processing: when moving elements from bucket i to bucket j < i,
@@ -892,17 +887,7 @@ uint32_t DenseSet::Scan(uint32_t cursor, const ItemCb& cb) const {
     return 0;
   }
 
-  // Decode cursor: [4 bits generation | 28 bits bucket position]
-  uint8_t cursor_generation = (cursor >> 28) & 0x0F;
-  uint32_t cursor_bits = cursor & 0x0FFFFFFF;  // Lower 28 bits
-  uint32_t entries_idx = cursor_bits >> (28 - capacity_log_);
-
-  // Detect if Shrink happened since cursor was created
-  // If generation changed, restart from bucket 0 to avoid missing elements
-  // (may result in duplicates, but this is acceptable per Redis SCAN semantics)
-  if (cursor != 0 && cursor_generation != shrink_generation_) {
-    entries_idx = 0;
-  }
+  uint32_t entries_idx = cursor >> (32 - capacity_log_);
 
   auto& entries = const_cast<DenseSet*>(this)->entries_;
 
@@ -962,9 +947,7 @@ uint32_t DenseSet::Scan(uint32_t cursor, const ItemCb& cb) const {
     cb(right_bucket->GetObject());
   }
 
-  // Encode cursor: [4 bits generation | 28 bits bucket position]
-  uint32_t encoded_position = entries_idx << (28 - capacity_log_);
-  return (static_cast<uint32_t>(shrink_generation_) << 28) | encoded_position;
+  return entries_idx << (32 - capacity_log_);
 }
 
 auto DenseSet::NewLink(void* data, DensePtr next) -> DenseLinkKey* {
