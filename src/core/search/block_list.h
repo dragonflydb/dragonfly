@@ -143,7 +143,6 @@ template <typename Container /* underlying container */> class BlockList {
 
   friend SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list);
 
- private:
   const size_t block_size_ = 1000;
   size_t size_ = 0;
   PMR_NS::vector<Container> blocks_;

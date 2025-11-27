@@ -117,7 +117,6 @@ class ChannelStore {
     util::fb2::Mutex update_mu;  // locked during updates.
   };
 
- private:
   static ControlBlock control_block;
 
   ChannelStore(ChannelMap* channels, ChannelMap* patterns);
@@ -155,7 +154,6 @@ class ChannelStoreUpdater {
   // Apply modify operation to target map.
   void Modify(ChannelMap* target, std::string_view key);
 
- private:
   bool pattern_;
   bool to_add_;
   ConnectionContext* cntx_;

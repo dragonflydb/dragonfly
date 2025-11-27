@@ -35,7 +35,6 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   void SendNullArray() override;
   void SendNull() override;
 
- public:
   using Error = std::pair<std::string, std::string>;  // SendError (msg, type)
   using Null = std::nullptr_t;                        // SendNull or SendNullArray
 

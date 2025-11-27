@@ -43,7 +43,6 @@ class ScriptMgr {
     ScriptKey(std::string_view sha);
   };
 
- public:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
   ScriptMgr();
@@ -78,7 +77,6 @@ class ScriptMgr {
 
   void UpdateScriptCaches(ScriptKey sha, ScriptParams params) const;
 
- private:
   struct InternalScriptData : public ScriptParams {
     std::unique_ptr<char[]> body{};
     std::unique_ptr<char[]> orig_body{};

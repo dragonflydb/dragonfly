@@ -144,7 +144,6 @@ class JsonAutoUpdater {
     }
   }
 
- private:
   const OpArgs& op_args_;
   string_view key_;
   DbSlice::ItAndUpdater it_;

@@ -82,7 +82,6 @@ class OpManager {
   // Notify delete. Return true if the filled segment needs to be marked as free.
   virtual bool NotifyDelete(DiskSegment segment) = 0;
 
- protected:
   // Describes pending futures for a single entry
   struct EntryOps {
     EntryOps(OwnedEntryId id, DiskSegment segment, const Decoder& decoder);
@@ -119,7 +118,6 @@ class OpManager {
   // Called once Stash finished
   void ProcessStashed(EntryId id, unsigned version, const io::Result<DiskSegment>& segment);
 
- protected:
   DiskStorage storage_;
 
   absl::flat_hash_map<size_t /* offset */, ReadOp> pending_reads_;

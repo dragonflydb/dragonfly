@@ -52,7 +52,6 @@ class Scanner : public Lexer {
     return Parser::make_UINT32(std::string{str}, loc);
   }
 
- private:
   const QueryParams* params_;
 };
 

@@ -75,7 +75,6 @@ class SmallBins {
   // Flush current bin
   FilledBin FlushBin();
 
- private:
   struct StashInfo {
     uint8_t entries = 0;
     uint16_t bytes = 0;

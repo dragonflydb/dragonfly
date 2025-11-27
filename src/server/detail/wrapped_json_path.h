@@ -127,7 +127,6 @@ class WrappedJsonPath {
  private:
   CallbackResultOptions InitializePathType(CallbackResultOptions options) const;
 
- private:
   std::variant<json::Path, JsonExpression> parsed_path_;
   StringOrView path_;
   JsonPathType path_type_ = kDefaultJsonPathType;

@@ -92,7 +92,6 @@ class OutgoingMigration : private ProtocolClient {
 
   void OnAllShards(std::function<void(std::unique_ptr<SliceSlotMigration>&)>);
 
- private:
   MigrationInfo migration_info_;
   std::vector<std::unique_ptr<SliceSlotMigration>> slot_migrations_;
   ServerFamily* server_family_;

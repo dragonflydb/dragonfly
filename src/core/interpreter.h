@@ -174,7 +174,6 @@ class InterpreterManager {
     int64_t gc_freed_memory = 0;
   };
 
- public:
   InterpreterManager(unsigned num) : waker_{}, available_{}, storage_{} {
     // We pre-allocate the backing storage during initialization and
     // start storing pointers to slots in the available vector.

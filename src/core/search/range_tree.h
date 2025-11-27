@@ -73,7 +73,6 @@ class RangeTree {
   // Used for DCHECKs
   bool TreeIsInCorrectState() const;
 
- private:
   // The maximum size of a range block. If a block exceeds this size, it will be split
   size_t max_range_block_size_;
   Map entries_;

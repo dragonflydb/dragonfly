@@ -644,7 +644,6 @@ class Transaction {
 
   std::function<void(Transaction* trans)> tracking_cb_;
 
- private:
   struct TLTmpSpace {
     std::vector<PerShardCache>& GetShardIndex(unsigned size);
 

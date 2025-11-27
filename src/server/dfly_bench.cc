@@ -226,7 +226,6 @@ class ShardSlots {
     }
   };
 
- private:
   fb2::SharedMutex mu_;
   absl::flat_hash_map<tcp::endpoint, IntervalSet, Hasher, Eq> shards_slots_;
 };

@@ -129,7 +129,6 @@ class DflyCmd {
     util::fb2::SharedMutex shared_mu;  // See top of header for locking levels.
   };
 
- public:
   DflyCmd(ServerFamily* server_family);
 
   void Run(CmdArgList args, Transaction* tx, facade::RedisReplyBuilder* rb,

@@ -343,7 +343,6 @@ class Renamer {
     bool sticky;
   };
 
- private:
   Transaction* const transaction_;
 
   const std::string_view src_key_;

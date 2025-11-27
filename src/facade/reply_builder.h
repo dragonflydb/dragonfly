@@ -103,7 +103,7 @@ class SinkReplyBuilder {
     return tl_facade_stats->reply_stats;
   }
 
- public:  // High level interface
+  // High level interface
   virtual Protocol GetProtocol() const = 0;
 
   virtual void SendLong(long val) = 0;
@@ -134,7 +134,6 @@ class SinkReplyBuilder {
   void FinishScope();  // Called when scope ends to flush buffer if needed
   void Send();
 
- protected:
   size_t replies_recorded_ = 0;
   std::string last_error_;
 

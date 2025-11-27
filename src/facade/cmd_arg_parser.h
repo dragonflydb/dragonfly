@@ -273,7 +273,6 @@ struct CmdArgParser {
     return {};
   }
 
- private:
   size_t cur_i_ = 0;
   CmdArgList args_;
 

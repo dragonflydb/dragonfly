@@ -28,7 +28,6 @@ class JournalWriter {
   void Write(std::string_view sv);  // Write string.
   void Write(const journal::Entry::Payload& payload);
 
- private:
   io::Sink* sink_;
   std::optional<DbIndex> cur_dbid_{};
 };
@@ -59,7 +58,6 @@ struct JournalReader {
   // Read argument array into string buffer.
   std::error_code ReadCommand(journal::ParsedEntry::CmdData* entry);
 
- private:
   io::Source* source_;
   base::IoBuf buf_;
   DbIndex dbid_;

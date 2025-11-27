@@ -93,7 +93,6 @@ class SlotSet {
     slots_ = std::move(s);
   }
 
- private:
   std::unique_ptr<TBitSet> slots_;
 };
 

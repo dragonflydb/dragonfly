@@ -53,7 +53,6 @@ class CompressedSortedSet {
 
   using iterator = ConstIterator;
 
- public:
   explicit CompressedSortedSet(PMR_NS::memory_resource* mr);
 
   ConstIterator begin() const;
@@ -98,7 +97,6 @@ class CompressedSortedSet {
     absl::Span<const uint8_t> diff_span;  // Location of value encoded diff, empty if none read
   };
 
- private:
   // Find EntryLocation of first entry that is not less than value (std::lower_bound)
   EntryLocation LowerBound(IntType value) const;
 
@@ -112,7 +110,6 @@ class CompressedSortedSet {
   // Decode integer with variable length encoding from source
   static std::pair<IntType /*value*/, size_t /*read*/> ReadVarLen(absl::Span<const uint8_t> source);
 
- private:
   uint32_t size_{0};
 
   std::optional<IntType> tail_value_{};

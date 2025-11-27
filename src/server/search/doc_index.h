@@ -299,7 +299,6 @@ class ShardDocIndex {
                                                     const SearchParams::SortOption& sort,
                                                     const OpArgs& op_args) const;
 
- private:
   std::shared_ptr<const DocIndex> base_;
   std::optional<search::FieldIndices> indices_;
   DocKeyIndex key_index_;
@@ -340,7 +339,6 @@ class ShardDocIndices {
   // Clean caches that might have data from this index
   void DropIndexCache(const dfly::ShardDocIndex& shard_doc_index);
 
- private:
   MiMemoryResource local_mr_;
   absl::flat_hash_map<std::string, std::unique_ptr<ShardDocIndex>> indices_;
 };
