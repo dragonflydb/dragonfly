@@ -200,17 +200,11 @@ void Replica::Pause(bool pause) {
   });
 }
 
-std::error_code Replica::TakeOver(std::string_view timeout, bool save_flag) {
-  VLOG(1) << "Taking over";
-
-  // Parse timeout value for socket timeout
-  int timeout_sec = 0;
-  if (!absl::SimpleAtoi(timeout, &timeout_sec)) {
-    return make_error_code(errc::invalid_argument);
-  }
+std::error_code Replica::TakeOver(unsigned timeout_sec, bool save_flag) {
+  VLOG(1) << "Taking over " << timeout_sec << " seconds, save_flag=" << save_flag;
 
   std::error_code ec;
-  auto takeOverCmd = absl::StrCat("TAKEOVER ", timeout, (save_flag ? " SAVE" : ""));
+  auto takeOverCmd = absl::StrCat("TAKEOVER ", timeout_sec, (save_flag ? " SAVE" : ""));
   Proactor()->Await([this, &ec, cmd = std::move(takeOverCmd), timeout_sec] {
     // Set socket timeout to prevent hanging on unresponsive master
     // Add buffer time for master processing (timeout + 10 seconds)
