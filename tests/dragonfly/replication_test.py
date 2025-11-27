@@ -4,6 +4,7 @@ import shutil
 import signal
 import tarfile
 import time
+import threading
 import urllib.request
 from itertools import chain, repeat
 
@@ -1440,6 +1441,96 @@ async def test_take_over_timeout(df_factory, df_seeder_factory):
         str(master.port),
         "online",
     ]
+
+
+async def test_take_over_throttled_pipeline(df_factory, df_seeder_factory):
+    master = df_factory.create(
+        proactor_threads=3, num_shards=3, pipeline_queue_limit=500, port=6379
+    )
+    replica = df_factory.create(proactor_threads=3, num_shards=3, port=6380)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    # Start background threads that send large pipelines to the master
+    # to trigger throttling.
+    stop_event = threading.Event()
+
+    def send_pipeline_thread():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def _run():
+            try:
+                reader, writer = await asyncio.open_connection("127.0.0.1", master.port)
+            except Exception as e:
+                logging.error(f"Failed to connect: {e}")
+                return
+
+            async def read_loop():
+                try:
+                    while not stop_event.is_set():
+                        data = await reader.read(65536)
+                        if not data:
+                            break
+                except Exception:
+                    pass
+
+            async def write_loop():
+                # Create a buffer of commands
+                cmds = []
+                for i in range(100):
+                    cmds.append(f"*3\r\n$3\r\nSET\r\n$6\r\nkey-{i:02d}\r\n$5\r\nvalue\r\n".encode())
+                data = b"".join(cmds)
+
+                try:
+                    while not stop_event.is_set():
+                        writer.write(data)
+                        await writer.drain()
+                except Exception:
+                    pass
+
+            t_read = asyncio.create_task(read_loop())
+            t_write = asyncio.create_task(write_loop())
+
+            while not stop_event.is_set():
+                await asyncio.sleep(0.1)
+
+            t_write.cancel()
+            t_read.cancel()
+            try:
+                await t_write
+                await t_read
+            except asyncio.CancelledError:
+                pass
+            writer.close()
+            await writer.wait_closed()
+
+        loop.run_until_complete(_run())
+        loop.close()
+
+    threads = [threading.Thread(target=send_pipeline_thread) for _ in range(3)]
+    for t in threads:
+        t.start()
+
+    # Wait for the pipeline to start and potentially throttle
+    await asyncio.sleep(2000)
+
+    try:
+        resp = await c_replica.execute_command(f"REPLTAKEOVER 10")
+        assert resp == "OK"
+    finally:
+        stop_event.set()
+        for t in threads:
+            t.join()
+    breakpoint()
+    # Replica should be master now
+    role = await c_replica.role()
+    assert role[0] == "master"
 
 
 # 1. Number of master threads
