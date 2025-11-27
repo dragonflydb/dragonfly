@@ -7,8 +7,8 @@
 #include <functional>
 #include <optional>
 
-#include "base/pmr/memory_resource.h"
 #include "core/detail/bptree_internal.h"
+#include "core/detail/stateless_allocator.h"
 
 namespace dfly {
 

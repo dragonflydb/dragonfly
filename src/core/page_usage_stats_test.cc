@@ -51,10 +51,10 @@ class PageUsageStatsTest : public ::testing::Test {
   void SetUp() override {
     CompactObj::InitThreadLocal(&m_);
 
-    score_map_ = std::make_unique<ScoreMap>(&m_);
-    sorted_map_ = std::make_unique<detail::SortedMap>(&m_);
-    string_set_ = std::make_unique<StringSet>(&m_);
-    string_map_ = std::make_unique<StringMap>(&m_);
+    score_map_ = std::make_unique<ScoreMap>();
+    sorted_map_ = std::make_unique<detail::SortedMap>();
+    string_set_ = std::make_unique<StringSet>();
+    string_map_ = std::make_unique<StringMap>();
     SmallString::InitThreadLocal(m_.heap());
     qlist_ = std::make_unique<QList>(2, 2);
   }

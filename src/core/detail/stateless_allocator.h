@@ -20,12 +20,16 @@ template <typename T> class StatelessAllocator {
   using difference_type = std::ptrdiff_t;
   using is_always_equal = std::true_type;
 
-  template <typename U> StatelessAllocator(const StatelessAllocator<U>&) noexcept {
+  template <typename U> StatelessAllocator(const StatelessAllocator<U>&) noexcept {  // NOLINT
   }
 
   StatelessAllocator() noexcept {
     assert(detail::tl_mr != nullptr);
   };
+
+  template <typename U, typename... _Args> void construct(U* __p, _Args&&... __args) {
+    ::new (static_cast<void*>(__p)) U(std::forward<_Args>(__args)...);
+  }
 
   static value_type* allocate(size_type n) {
     void* ptr = detail::tl_mr->allocate(n * sizeof(value_type), alignof(value_type));
