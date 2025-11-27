@@ -498,12 +498,13 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
         DCHECK(holds_alternative<SchemaField::VectorParams>(field_info.special_params));
         const auto& vparams = std::get<SchemaField::VectorParams>(field_info.special_params);
 
+        // Use global HNSW index
         if (vparams.use_hnsw)
-          vector_index = make_unique<ShardHnswVectorIndex>(vparams);
-        else
-          vector_index = make_unique<FlatVectorIndex>(vparams, mr);
+          break;
 
+        vector_index = make_unique<FlatVectorIndex>(vparams, mr);
         indices_[field_ident] = std::move(vector_index);
+
         break;
       }
       case SchemaField::GEO: {
@@ -683,9 +684,9 @@ std::unique_ptr<AstNode> SearchAlgorithm::PopKnnNode() {
   if (auto* knn = get_if<AstKnnNode>(query_.get()); knn) {
     // Save knn score sort option
     knn_hnsw_score_sort_option_ = KnnScoreSortOption{string_view{knn->score_alias}, knn->limit};
-    auto node = std::move(query_);
     if (!std::holds_alternative<AstStarNode>(*(knn)->filter))
       query_.swap(knn->filter);
+    auto node = std::move(query_);
     return node;
   }
   LOG(DFATAL) << "Should not reach here";

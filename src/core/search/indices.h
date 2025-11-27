@@ -191,26 +191,6 @@ struct FlatVectorIndex : public BaseVectorIndex {
   PMR_NS::vector<float> entries_;
 };
 
-// We still need to have hnsw index on each shard. This is empty implementation
-// that doesn't do anything and it serves only as placeholder.
-struct ShardHnswVectorIndex : public BaseVectorIndex {
-  explicit ShardHnswVectorIndex(const SchemaField::VectorParams& params);
-
-  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override {
-    // noop
-  }
-
-  // Return all documents that have vectors in this index
-  std::vector<DocId> GetAllDocsWithNonNullValues() const override {
-    return {};
-  }
-
- protected:
-  void AddVector(DocId id, const VectorPtr& vector) override {
-    // noop
-  }
-};
-
 struct HnswlibAdapter;
 class HnswVectorIndex {
  public:

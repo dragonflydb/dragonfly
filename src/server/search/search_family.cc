@@ -1092,8 +1092,10 @@ vector<SearchResult> SearchGlobalHnswIndex(
     } else {
       // Create SerializedSearchDoc and fill only knn information
       auto [shard_id, local_doc_id] = search::DecomposeGlobalDocId(global_doc_id);
-      shard_docs[shard_id].emplace_back(
-          SerializedSearchDoc{.id = local_doc_id, .knn_score = score});
+      SerializedSearchDoc doc;
+      doc.id = local_doc_id;
+      doc.knn_score = score;
+      shard_docs[shard_id].emplace_back(doc);
     }
   }
 
@@ -1107,7 +1109,7 @@ vector<SearchResult> SearchGlobalHnswIndex(
   // Do we need to set sort score
   bool set_sort_score = params.sort_option && !params.sort_option->IsSame(*knn_score_option);
 
-  // Do we need to remove sort field from reponse
+  // Do we need to remove sort field from response
   bool remove_sort_field = false;
 
   std::optional<std::vector<FieldReference>> return_fields = params.return_fields;
@@ -1125,7 +1127,7 @@ vector<SearchResult> SearchGlobalHnswIndex(
       }
       // Sort return field is not found so we need to add it for request and
       // remove this field in response
-      if (found_sort_return_field) {
+      if (!found_sort_return_field) {
         (*return_fields).push_back(params.sort_option->field);
         remove_sort_field = true;
       }
@@ -1164,12 +1166,11 @@ vector<SearchResult> SearchGlobalHnswIndex(
             fields.erase(params.sort_option->field.Name());
           }
         }
-
         shard_doc.key = std::string{key};
         shard_doc.values = std::move(fields);
         shard_doc.sort_score = sort_score;
       } else {
-        // If we coudn't serialize requested doc
+        // If we couldn't serialize requested doc
         shard_docs_serialized_indicator[es->shard_id()][i] = false;
       }
     }
@@ -1573,7 +1574,7 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   if (!search_algo.Init(query_str, &params->query_params, &params->optional_filters))
     return builder->SendError("Query syntax error");
 
-  std::unique_ptr<search::AstNode> knn_node = nullptr;
+  std::unique_ptr<search::AstNode> knn_node;
   search::AstKnnNode* knn = nullptr;
 
   if (search_algo.IsKnnQuery()) {
@@ -1588,7 +1589,7 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   atomic<bool> index_not_found{false};
   vector<SearchResult> docs(shard_set->size());
 
-  // If it is HNSW knn node and we have pre filter query
+  // If the query does not contain knn component, or it is a hybrid query
   if (!knn || (knn && knn->HasPreFilter())) {
     cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
       if (auto* index = es->search_indices()->GetIndex(index_name); index)
@@ -1598,7 +1599,7 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
       return OpStatus::OK;
     });
 
-    if (index_not_found.load())
+    if (index_not_found.load(memory_order_relaxed))
       return builder->SendError(string{index_name} + ": no such index");
 
     for (const auto& res : docs) {

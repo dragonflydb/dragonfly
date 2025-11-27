@@ -28,7 +28,7 @@ inline GlobalDocId CreateGlobalDocId(ShardId shard_id, DocId local_doc_id) {
 }
 
 inline std::pair<ShardId, DocId> DecomposeGlobalDocId(GlobalDocId id) {
-  return {(id >> 32), (id)&0xFFFF};
+  return {(id >> 32), (id)&0xFFFFFFFF};
 }
 
 enum class VectorSimilarity { L2, IP, COSINE };

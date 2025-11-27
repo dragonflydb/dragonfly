@@ -550,10 +550,6 @@ std::vector<DocId> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
   return result;
 }
 
-ShardHnswVectorIndex::ShardHnswVectorIndex(const SchemaField::VectorParams& params)
-    : BaseVectorIndex{params.dim, params.sim} {
-}
-
 struct HnswlibAdapter {
   // Default setting of hnswlib/hnswalg
   constexpr static size_t kDefaultEfRuntime = 10;
@@ -576,7 +572,7 @@ struct HnswlibAdapter {
           ResizeIfFull();
           continue;
         }
-        throw e;
+        LOG(ERROR) << "HnswlibAdapter::Add exception: " << e.what();
       }
     }
   }
@@ -585,6 +581,7 @@ struct HnswlibAdapter {
     try {
       world_.markDelete(id);
     } catch (const std::exception& e) {
+      LOG(WARNING) << "HnswlibAdapter::Remove exception: " << e.what();
     }
   }
 
@@ -640,11 +637,10 @@ struct HnswlibAdapter {
           (!world_.allow_replace_deleted_ || world_.getDeletedCount() == 0)) {
         auto max_elements = world_.getMaxElements();
         world_.resizeIndex(max_elements * 2);
-        LOG(INFO) << "Resizing HNSW Index, current size: " << max_elements
-                  << ", expand by: " << max_elements * 2;
+        VLOG(1) << "Resizing HNSW Index from " << max_elements << " to " << max_elements * 2;
       }
     } catch (const std::exception& e) {
-      throw e;
+      LOG(FATAL) << "HnswlibAdapter::ResizeIfFull exception: " << e.what();
     }
   }
 

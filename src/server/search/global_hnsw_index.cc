@@ -32,7 +32,7 @@ bool GlobalHnswIndexRegistry::Create(std::string_view index_name, std::string_vi
                                      const search::SchemaField::VectorParams& params) {
   std::string key = MakeKey(index_name, field_name);
 
-  std::shared_lock<std::shared_mutex> lock(registry_mutex_);
+  std::unique_lock<std::shared_mutex> lock(registry_mutex_);
 
   auto it = indices_.find(key);
 

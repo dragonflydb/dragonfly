@@ -646,11 +646,11 @@ TEST_F(SearchTest, MatchNumericRangeWithCommas) {
   }
 }
 
-class KnnTest : public SearchTest, public testing::WithParamInterface<bool /* hnsw */> {};
+class KnnTest : public SearchTest {};
 
-TEST_P(KnnTest, Simple1D) {
+TEST_F(KnnTest, Simple1D) {
   auto schema = MakeSimpleSchema({{"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params = SchemaField::VectorParams{GetParam(), 1};
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   // Place points on a straight line
@@ -708,7 +708,7 @@ TEST_P(KnnTest, Simple1D) {
   }
 }
 
-TEST_P(KnnTest, Simple2D) {
+TEST_F(KnnTest, Simple2D) {
   // Square:
   // 3      2
   //    4
@@ -716,7 +716,7 @@ TEST_P(KnnTest, Simple2D) {
   const pair<float, float> kTestCoords[] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}, {0.5, 0.5}};
 
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params = SchemaField::VectorParams{GetParam(), 2};
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 2};
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
@@ -771,14 +771,14 @@ TEST_P(KnnTest, Simple2D) {
   }
 }
 
-TEST_P(KnnTest, Cosine) {
+TEST_F(KnnTest, Cosine) {
   // Four arrows, closest cosing distance will be closes by angle
   // 0 🡢 1 🡣 2 🡠 3 🡡
   const pair<float, float> kTestCoords[] = {{1, 0}, {0, -1}, {-1, 0}, {0, 1}};
 
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params =
-      SchemaField::VectorParams{GetParam(), 2, VectorSimilarity::COSINE};
+      SchemaField::VectorParams{false, 2, VectorSimilarity::COSINE};
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
@@ -819,15 +819,14 @@ TEST_P(KnnTest, Cosine) {
   }
 }
 
-TEST_P(KnnTest, IP) {
+TEST_F(KnnTest, IP) {
   // Test with normalized unit vectors for IP distance
   // Using unit vectors pointing in different directions
   const pair<float, float> kTestCoords[] = {
       {1.0f, 0.0f}, {0.0f, 1.0f}, {-1.0f, 0.0f}, {0.0f, -1.0f}};
 
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params =
-      SchemaField::VectorParams{GetParam(), 2, VectorSimilarity::IP};
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 2, VectorSimilarity::IP};
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
@@ -854,10 +853,9 @@ TEST_P(KnnTest, IP) {
   }
 }
 
-TEST_P(KnnTest, AddRemove) {
+TEST_F(KnnTest, AddRemove) {
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params =
-      SchemaField::VectorParams{GetParam(), 1, VectorSimilarity::L2};
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1, VectorSimilarity::L2};
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   vector<MockedDocument> documents(10);
@@ -899,13 +897,13 @@ TEST_P(KnnTest, AddRemove) {
   }
 }
 
-TEST_P(KnnTest, AutoResize) {
+TEST_F(KnnTest, AutoResize) {
   // Make sure index resizes automatically even with a small initial capacity
   const size_t kInitialCapacity = 5;
 
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params =
-      SchemaField::VectorParams{GetParam(), 1, VectorSimilarity::L2, kInitialCapacity};
+      SchemaField::VectorParams{false, 1, VectorSimilarity::L2, kInitialCapacity};
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
   for (size_t i = 0; i < 100; i++) {
@@ -968,9 +966,6 @@ TEST_F(SearchTest, GeoSearch) {
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(2, 4));
   }
 }
-
-INSTANTIATE_TEST_SUITE_P(KnnFlat, KnnTest, testing::Values(false));
-// INSTANTIATE_TEST_SUITE_P(KnnHnsw, KnnTest, testing::Values(true));
 
 TEST_F(SearchTest, VectorDistanceBasic) {
   // Test basic vector distance calculations
