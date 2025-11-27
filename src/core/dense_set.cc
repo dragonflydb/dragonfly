@@ -387,6 +387,79 @@ void DenseSet::Reserve(size_t sz) {
   }
 }
 
+// WARNING: If returned DensePtr is a Link, caller MUST either:
+// - Pass it to PushFront (which handles freeing/reusing the link), or
+// - Manually call FreeLink(result.AsLink())
+auto DenseSet::ExtractFromChain(DensePtr* prev, DensePtr*& curr) -> DensePtr {
+  DensePtr dptr = *curr;
+
+  if (curr->IsObject()) {
+    if (prev) {
+      // prev is Link, curr is &prev->next
+      DCHECK(prev->IsLink());
+      DenseLinkKey* plink = prev->AsLink();
+      DCHECK(&plink->next == curr);
+
+      // Convert prev from Link to Object and deallocate the link.
+      DensePtr tmp = DensePtr::From(plink);
+      tmp.SetTtl(prev->HasTtl());
+      DCHECK(ObjectAllocSize(tmp.GetObject()));
+
+      FreeLink(plink);
+      curr = nullptr;  // Link deallocated, stop iteration
+      *prev = tmp;
+    } else {
+      // curr is root of bucket, just clear it
+      curr->Reset();
+    }
+  } else {
+    // curr is Link - copy next element to curr position
+    *curr = *dptr.Next();
+    DCHECK(!curr->IsEmpty());
+    // curr pointer stays the same, now contains next element
+  }
+
+  return dptr;
+}
+
+void DenseSet::ShrinkBucket(size_t bucket_idx) {
+  DensePtr* curr = &entries_[bucket_idx];
+  DensePtr* prev = nullptr;
+
+  do {
+    if (ExpireIfNeeded(prev, curr)) {
+      // If curr has disappeared due to expiry and prev was converted from Link
+      // to a regular DensePtr, re-process prev to check if it needs to move.
+      if (prev && !prev->IsLink()) {
+        curr = prev;
+        prev = nullptr;
+        continue;
+      }
+    }
+
+    if (curr->IsEmpty())
+      break;
+
+    void* ptr = curr->GetObject();
+    DCHECK(ptr != nullptr && ObjectAllocSize(ptr));
+
+    uint32_t new_bid = BucketId(ptr, 0);
+
+    if (new_bid == bucket_idx) {
+      // Element stays in the current bucket
+      curr->ClearDisplaced();
+      prev = curr;
+      curr = curr->Next();
+    } else {
+      // Element needs to move to a different bucket
+      DensePtr dptr = ExtractFromChain(prev, curr);
+      DVLOG(2) << " Shrink: Moving from " << bucket_idx << " to " << new_bid;
+      dptr.ClearDisplaced();
+      PushFront(entries_.begin() + new_bid, dptr);
+    }
+  } while (curr);
+}
+
 void DenseSet::Shrink(size_t new_size) {
   DCHECK(absl::has_single_bit(new_size));
   DCHECK_GE(new_size, kMinSize);
@@ -402,74 +475,7 @@ void DenseSet::Shrink(size_t new_size) {
   // This prevents double-processing: when moving elements from bucket i to bucket j < i,
   // bucket j has already been processed, so the element won't be processed again.
   for (size_t i = 0; i < prev_size; ++i) {
-    DensePtr* curr = &entries_[i];
-    DensePtr* prev = nullptr;
-
-    do {
-      if (ExpireIfNeeded(prev, curr)) {
-        // If curr has disappeared due to expiry and prev was converted from Link
-        // to a regular DensePtr, re-process prev to check if it needs to move.
-        if (prev && !prev->IsLink()) {
-          curr = prev;
-          prev = nullptr;
-          continue;
-        }
-      }
-
-      if (curr->IsEmpty())
-        break;
-
-      void* ptr = curr->GetObject();
-
-      DCHECK(ptr != nullptr && ObjectAllocSize(ptr));
-
-      uint32_t new_bid = BucketId(ptr, 0);
-
-      // If the item stays in the current bucket, ensure it is not marked as
-      // displaced and move to the next item in the chain
-      if (new_bid == i) {
-        curr->ClearDisplaced();
-        prev = curr;
-        curr = curr->Next();
-      } else {
-        // Element needs to move to a different bucket
-        auto dest = entries_.begin() + new_bid;
-        DensePtr dptr = *curr;
-
-        if (curr->IsObject()) {
-          if (prev) {
-            DCHECK(prev->IsLink());
-
-            DenseLinkKey* plink = prev->AsLink();
-            DCHECK(&plink->next == curr);
-
-            // We want to make *prev a DensePtr instead of DenseLink and we
-            // want to deallocate the link.
-            DensePtr tmp = DensePtr::From(plink);
-
-            // Important to transfer the ttl flag.
-            tmp.SetTtl(prev->HasTtl());
-            DCHECK(ObjectAllocSize(tmp.GetObject()));
-
-            FreeLink(plink);
-            // We deallocated the link, curr is invalid now.
-            curr = nullptr;
-            *prev = tmp;
-          } else {
-            // prev == nullptr
-            curr->Reset();  // Reset the root placeholder.
-          }
-        } else {
-          // !curr.IsObject
-          *curr = *dptr.Next();
-          DCHECK(!curr->IsEmpty());
-        }
-
-        DVLOG(2) << " Shrink: Moving from " << i << " to " << new_bid;
-        dptr.ClearDisplaced();
-        PushFront(dest, dptr);
-      }
-    } while (curr);
+    ShrinkBucket(i);
   }
 
   // Recount used buckets after shrinking
