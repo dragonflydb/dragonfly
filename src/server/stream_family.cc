@@ -3470,7 +3470,7 @@ void StreamFamily::Register(CommandRegistry* registry) {
             << CI{"XCLAIM", CO::WRITE | CO::FAST, -6, 1, 1, acl::kXClaim}.HFUNC(XClaim)
             << CI{"XDEL", CO::WRITE | CO::FAST, -3, 1, 1, acl::kXDel}.HFUNC(XDel)
             << CI{"XGROUP", CO::WRITE | CO::DENYOOM, -3, 2, 2, acl::kXGroup}.HFUNC(XGroup)
-            << CI{"XINFO", CO::READONLY | CO::NOSCRIPT, -2, 0, 0, acl::kXInfo}.HFUNC(XInfo)
+            << CI{"XINFO", CO::READONLY, -2, 0, 0, acl::kXInfo}.HFUNC(XInfo)
             << CI{"XLEN", CO::READONLY | CO::FAST, 2, 1, 1, acl::kXLen}.HFUNC(XLen)
             << CI{"XPENDING", CO::READONLY, -2, 1, 1, acl::kXPending}.HFUNC(XPending)
             << CI{"XRANGE", CO::READONLY, -4, 1, 1, acl::kXRange}.HFUNC(XRange)
