@@ -109,7 +109,8 @@ void DenseSet::IteratorBase::Advance() {
   DCHECK(!curr_entry_->IsEmpty());
 }
 
-DenseSet::DenseSet(MemoryResource* mr) : entries_(mr) {
+DenseSet::DenseSet() {
+  static_assert(sizeof(entries_) == 24);
 }
 
 DenseSet::~DenseSet() {
@@ -951,7 +952,9 @@ uint32_t DenseSet::Scan(uint32_t cursor, const ItemCb& cb) const {
 }
 
 auto DenseSet::NewLink(void* data, DensePtr next) -> DenseLinkKey* {
-  LinkAllocator la(mr());
+  using LinkAllocator = StatelessAllocator<DenseLinkKey>;
+
+  LinkAllocator la;
   DenseLinkKey* lk = la.allocate(1);
   la.construct(lk);
 

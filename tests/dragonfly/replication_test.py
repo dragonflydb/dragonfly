@@ -3657,3 +3657,12 @@ async def test_takeover_timeout_on_unresponsive_master(df_factory):
             os.kill(master.proc.pid, signal.SIGCONT)
         except Exception:
             pass
+
+
+async def test_replica_of_self(async_client):
+    port = async_client.connection_pool.connection_kwargs["port"]
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command(f"replicaof localhost {port}")
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command(f"replicaof 127.0.0.1 {port}")

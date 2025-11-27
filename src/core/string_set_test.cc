@@ -17,10 +17,9 @@
 #include <vector>
 
 #include "base/gtest.h"
+#include "base/logging.h"
 #include "core/compact_object.h"
-#include "core/mi_memory_resource.h"
 #include "core/page_usage_stats.h"
-#include "glog/logging.h"
 #include "redis/sds.h"
 
 extern "C" {
@@ -62,13 +61,14 @@ class StringSetTest : public ::testing::Test {
   static void SetUpTestSuite() {
     auto* tlh = mi_heap_get_backing();
     init_zmalloc_threadlocal(tlh);
+    InitTLStatelessAllocMR(PMR_NS::get_default_resource());
   }
 
   static void TearDownTestSuite() {
   }
 
   void SetUp() override {
-    ss_ = new StringSet(&alloc_);
+    ss_ = new StringSet;
     generator_.seed(0);
   }
 

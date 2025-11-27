@@ -41,6 +41,7 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
+
 using namespace std;
 
 ABSL_DECLARE_FLAG(string, dir);
@@ -283,8 +284,8 @@ unsigned HufHist::MaxFreqCount() const {
   return max_freq;
 }
 
-unsigned kMaxFreqPerShard = 1U << 20;
-unsigned kMaxFreqTotal = static_cast<unsigned>((1U << 31) * 0.9);
+constexpr unsigned kMaxFreqPerShard = 1U << 20;
+constexpr unsigned kMaxFreqTotal = static_cast<unsigned>((1U << 31) * 0.9);
 
 void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* cntx,
                    HufHist* dest) {

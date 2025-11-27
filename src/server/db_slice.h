@@ -39,7 +39,7 @@ struct DbStats : public DbTableStats {
   // Memory used by dictionaries.
   size_t table_mem_usage = 0;
 
-  using DbTableStats::operator+=;
+  // We override additional DbStats fields explicitly in DbSlice::GetStats().
   using DbTableStats::operator=;
 
   DbStats& operator+=(const DbStats& o);

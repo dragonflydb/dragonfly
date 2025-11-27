@@ -28,16 +28,13 @@ using detail::SortedMap;
 
 class SortedMapTest : public ::testing::Test {
  protected:
-  SortedMapTest() : mr_(mi_heap_get_backing()), sm_(&mr_) {
-  }
-
   static void SetUpTestSuite() {
     // configure redis lib zmalloc which requires mimalloc heap to work.
     auto* tlh = mi_heap_get_backing();
     init_zmalloc_threadlocal(tlh);
+    InitTLStatelessAllocMR(PMR_NS::get_default_resource());
   }
 
-  MiMemoryResource mr_;
   SortedMap sm_;
 };
 

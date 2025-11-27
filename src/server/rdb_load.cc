@@ -984,8 +984,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
   } else if (rdb_type_ == RDB_TYPE_JSON) {
     size_t start_size = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
     {
-      auto json = JsonFromString(blob, CompactObj::memory_resource());
-      if (json) {
+      if (auto json = ParseJsonUsingShardHeap(blob)) {
         pv_->SetJson(std::move(*json));
       } else {
         LOG(INFO) << "Invalid JSON string during rdb load of JSON object: " << blob;

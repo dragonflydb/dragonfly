@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cassert>
+#include <cstdint>
 #include <cstring>
 
 namespace dfly {

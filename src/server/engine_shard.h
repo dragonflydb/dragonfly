@@ -53,6 +53,9 @@ class EngineShard {
     // cluster stats
     uint64_t total_migrated_keys = 0;
 
+    // how many huffman tables were built successfully in the background
+    uint32_t huffman_tables_built = 0;
+
     Stats& operator+=(const Stats&);
   };
 
@@ -135,7 +138,7 @@ class EngineShard {
   }
 
   // Moving average counters.
-  enum MovingCnt { TTL_TRAVERSE, TTL_DELETE, COUNTER_TOTAL };
+  enum MovingCnt : uint8_t { TTL_TRAVERSE, TTL_DELETE, COUNTER_TOTAL };
 
   // Returns moving sum over the last 6 seconds.
   uint32_t GetMovingSum6(MovingCnt type) const {
@@ -294,7 +297,7 @@ class EngineShard {
   journal::Journal* journal_ = nullptr;
   IntentLock shard_lock_;
 
-  uint32_t defrag_task_id_ = 0;
+  uint32_t defrag_task_id_ = UINT32_MAX, huffman_check_task_id_ = UINT32_MAX;
   EvictionTaskState eviction_state_;  // Used on eviction fiber
   util::fb2::Fiber fiber_heartbeat_periodic_;
   util::fb2::Done fiber_heartbeat_periodic_done_;
