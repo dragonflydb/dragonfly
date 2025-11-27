@@ -1959,6 +1959,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("defrag_objects_moved", "Objects moved",
                             m.shard_stats.defrag_realloc_total, COUNTER, &resp->body());
 
+  AppendMetricWithoutLabels("huffman_tables_built", "Huffman tables built",
+                            m.shard_stats.huffman_tables_built, MetricType::COUNTER, &resp->body());
+
   // Tiered metrics
   {
     AppendMetricWithoutLabels("tiered_entries", "Tiered entries", total.tiered_entries,
