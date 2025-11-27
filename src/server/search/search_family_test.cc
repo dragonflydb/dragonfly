@@ -3560,9 +3560,9 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
   };
 
   // Add some test documents with vector data
-  // Run({"HSET", "doc1", "even", "yes", "pos", FloatToBytes(1.0f)});
-  // Run({"HSET", "doc2", "even", "no", "pos", FloatToBytes(2.0f)});
-  // Run({"HSET", "doc3", "even", "yes", "pos", FloatToBytes(3.0f)});
+  Run({"HSET", "doc1", "even", "yes", "pos", FloatToBytes(1.0f)});
+  Run({"HSET", "doc2", "even", "no", "pos", FloatToBytes(2.0f)});
+  Run({"HSET", "doc3", "even", "yes", "pos", FloatToBytes(3.0f)});
 
   // Query vector (2.0f - should find doc2 closest, but filtered to "yes" docs)
   string query_vec = FloatToBytes(2.0f);

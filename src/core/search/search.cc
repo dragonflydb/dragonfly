@@ -687,9 +687,10 @@ std::unique_ptr<AstNode> SearchAlgorithm::PopKnnNode() {
   if (auto* knn = get_if<AstKnnNode>(query_.get()); knn) {
     // Save knn score sort option
     knn_hnsw_score_sort_option_ = KnnScoreSortOption{string_view{knn->score_alias}, knn->limit};
-    if (!std::holds_alternative<AstStarNode>(*(knn)->filter))
-      query_.swap(knn->filter);
     auto node = std::move(query_);
+    AstKnnNode* moved_knn_node = reinterpret_cast<AstKnnNode*>(node.get());
+    if (!std::holds_alternative<AstStarNode>(*moved_knn_node->filter))
+      query_.swap(moved_knn_node->filter);
     return node;
   }
   LOG(DFATAL) << "Should not reach here";
