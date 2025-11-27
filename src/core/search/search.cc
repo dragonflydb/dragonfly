@@ -650,6 +650,8 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params,
 }
 
 SearchResult SearchAlgorithm::Search(const FieldIndices* index, size_t cuttoff_limit) const {
+  DCHECK(query_);
+
   auto bs = BasicSearch{index};
   if (profiling_enabled_)
     bs.EnableProfiling();
@@ -670,6 +672,7 @@ std::optional<KnnScoreSortOption> SearchAlgorithm::GetKnnScoreSortOption() const
 }
 
 bool SearchAlgorithm::IsKnnQuery() const {
+  DCHECK(query_);
   return std::holds_alternative<AstKnnNode>(*query_);
 }
 
