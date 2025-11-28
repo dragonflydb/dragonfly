@@ -6,12 +6,12 @@
 
 #include <absl/strings/match.h>
 #include <absl/synchronization/mutex.h>
-#include <hnswlib/hnswalg.h>
 #include <hnswlib/hnswlib.h>
 #include <hnswlib/space_ip.h>
 #include <hnswlib/space_l2.h>
 
 #include "base/logging.h"
+#include "core/search/hnsw_alg.h"
 #include "core/search/vector_utils.h"
 
 namespace dfly::search {
@@ -56,6 +56,7 @@ class HnswSpace : public hnswlib::SpaceInterface<float> {
 };
 }  // namespace
 
+// TODO: to replace it and use HierarchicalNSW directly.
 struct HnswlibAdapter {
   // Default setting of hnswlib/hnswalg
   constexpr static size_t kDefaultEfRuntime = 10;
@@ -150,7 +151,7 @@ struct HnswlibAdapter {
   }
 
   HnswSpace space_;
-  hnswlib::HierarchicalNSW<float> world_;
+  HierarchicalNSW<float> world_;
   absl::Mutex resize_mutex_;
 };
 
