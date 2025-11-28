@@ -274,7 +274,9 @@ io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter
       "6ae15ef4678593dc61f991c9953722d67d822776",  // Sidekiq, see #2442
       "34b1048274c8e50a0cc587a3ed9c383a82bb78c5",  // Sidekiq
       "b725ca33e5b36f318ab1150b8ac955a3d997c872",  // Sentry, see #5495
-      "8c4dafdf9b6b7bcf511a0d1ec0518bed9260e16d",  // django-ops see #6119
+      "8c4dafdf9b6b7bcf511a0d1ec0518bed9260e16d",  // django-cacheops see #6119
+      "3fc258d735c924d5652fceb90b41bea1f1f29e4b",  // django-cacheops see #6119
+      "43d401bd2bd0ad864c3ca221512cda1b6215ec23",  // django-cacheops see #272
   };
 
   if (find(begin(kUndeclaredShas), end(kUndeclaredShas), sha) != end(kUndeclaredShas)) {
