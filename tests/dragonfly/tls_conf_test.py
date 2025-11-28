@@ -4,6 +4,7 @@ from .utility import *
 from .instance import DflyStartException
 
 
+@pytest.mark.tls
 async def test_tls_no_auth(df_factory, with_tls_server_args):
     # Needs some authentication
     server = df_factory.create(**with_tls_server_args)
@@ -11,6 +12,7 @@ async def test_tls_no_auth(df_factory, with_tls_server_args):
         server.start()
 
 
+@pytest.mark.tls
 async def test_tls_no_key(df_factory):
     # Needs a private key and certificate.
     server = df_factory.create(tls=None, requirepass="XXX")
@@ -18,6 +20,7 @@ async def test_tls_no_key(df_factory):
         server.start()
 
 
+@pytest.mark.tls
 async def test_tls_password(df_factory, with_tls_server_args, with_tls_ca_cert_args):
     with df_factory.create(requirepass="XXX", **with_tls_server_args) as server:
         async with server.client(
@@ -26,6 +29,7 @@ async def test_tls_password(df_factory, with_tls_server_args, with_tls_ca_cert_a
             await client.ping()
 
 
+@pytest.mark.tls
 async def test_tls_client_certs(
     df_factory, with_ca_tls_server_args, with_tls_client_args, with_tls_ca_cert_args
 ):
@@ -36,17 +40,20 @@ async def test_tls_client_certs(
             await client.ping()
 
 
+@pytest.mark.tls
 async def test_client_tls_no_auth(df_factory):
     server = df_factory.create(tls_replication=None)
     with pytest.raises(DflyStartException):
         server.start()
 
 
+@pytest.mark.tls
 async def test_client_tls_password(df_factory):
     with df_factory.create(tls_replication=None, masterauth="XXX"):
         pass
 
 
+@pytest.mark.tls
 async def test_client_tls_cert(df_factory, with_tls_server_args):
     key_args = with_tls_server_args.copy()
     key_args.pop("tls")
@@ -54,6 +61,7 @@ async def test_client_tls_cert(df_factory, with_tls_server_args):
         pass
 
 
+@pytest.mark.tls
 async def test_config_enable_tls_with_ca_dir(
     df_factory, with_ca_dir_tls_server_args, with_tls_client_args
 ):
@@ -67,6 +75,7 @@ async def test_config_enable_tls_with_ca_dir(
             assert res == "44"
 
 
+@pytest.mark.tls
 async def test_config_update_tls_certs(
     df_factory, with_tls_server_args, with_tls_ca_cert_args, tmp_dir
 ):
@@ -112,6 +121,7 @@ async def test_config_update_tls_certs(
             await client.ping()
 
 
+@pytest.mark.tls
 async def test_config_enable_tls(
     df_factory, with_ca_tls_server_args, with_tls_client_args, with_tls_ca_cert_args
 ):
@@ -152,6 +162,7 @@ async def test_config_enable_tls(
             await client_tls.ping()
 
 
+@pytest.mark.tls
 async def test_config_disable_tls(
     df_factory, with_ca_tls_server_args, with_tls_client_args, with_tls_ca_cert_args
 ):

@@ -1447,6 +1447,7 @@ async def test_take_over_timeout(df_factory, df_seeder_factory):
 replication_cases = [(8, 8)]
 
 
+@pytest.mark.tls
 @pytest.mark.parametrize("t_master, t_replica", replication_cases)
 async def test_no_tls_on_admin_port(
     df_factory: DflyInstanceFactory,
@@ -1495,6 +1496,7 @@ async def test_no_tls_on_admin_port(
 replication_cases = [(8, 8, False), (8, 8, True)]
 
 
+@pytest.mark.tls
 @pytest.mark.parametrize("t_master, t_replica, test_admin_port", replication_cases)
 async def test_tls_replication(
     df_factory,
@@ -1559,6 +1561,7 @@ async def test_tls_replication(
     await proxy.close(proxy_task)
 
 
+@pytest.mark.tls
 @dfly_args({"proactor_threads": 2})
 async def test_tls_replication_without_ca(
     df_factory,

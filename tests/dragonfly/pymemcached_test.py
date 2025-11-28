@@ -176,6 +176,7 @@ def test_expiration(memcached_client: MCClient):
     assert memcached_client.get("key3") == None
 
 
+@pytest.mark.tls
 @dfly_args(DEFAULT_ARGS)
 def test_memcached_tls_no_requirepass(df_factory, with_tls_server_args, with_tls_ca_cert_args):
     """
