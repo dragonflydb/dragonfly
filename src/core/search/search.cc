@@ -353,14 +353,6 @@ struct BasicSearch {
     knn_distances_.resize(prefix_size);
   }
 
-  void SearchKnnHnsw(HnswVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {
-    if (indices_->GetAllDocs().size() == sub_results.ApproximateSize())  // TODO: remove approx size
-      knn_distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime);
-    else
-      knn_distances_ =
-          vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime, sub_results.Take().first);
-  }
-
   // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`
   IndexResult Search(const AstKnnNode& knn, string_view active_field) {
     DCHECK(active_field.empty());
@@ -382,9 +374,8 @@ struct BasicSearch {
     }
 
     knn_scores_.clear();
-    if (auto hnsw_index = dynamic_cast<HnswVectorIndex*>(vec_index); hnsw_index)
-      SearchKnnHnsw(hnsw_index, knn, std::move(sub_results));
-    else
+
+    if (auto flat_index = dynamic_cast<FlatVectorIndex*>(vec_index); flat_index)
       SearchKnnFlat(dynamic_cast<FlatVectorIndex*>(vec_index), knn, std::move(sub_results));
 
     vector<DocId> out(knn_distances_.size());
@@ -507,12 +498,13 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
         DCHECK(holds_alternative<SchemaField::VectorParams>(field_info.special_params));
         const auto& vparams = std::get<SchemaField::VectorParams>(field_info.special_params);
 
+        // Use global HNSW index
         if (vparams.use_hnsw)
-          vector_index = make_unique<HnswVectorIndex>(vparams, mr);
-        else
-          vector_index = make_unique<FlatVectorIndex>(vparams, mr);
+          break;
 
+        vector_index = make_unique<FlatVectorIndex>(vparams, mr);
         indices_[field_ident] = std::move(vector_index);
+
         break;
       }
       case SchemaField::GEO: {
@@ -658,20 +650,51 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params,
 }
 
 SearchResult SearchAlgorithm::Search(const FieldIndices* index, size_t cuttoff_limit) const {
+  DCHECK(query_);
+
   auto bs = BasicSearch{index};
   if (profiling_enabled_)
     bs.EnableProfiling();
   return bs.Search(*query_, cuttoff_limit);
 }
 
-optional<KnnScoreSortOption> SearchAlgorithm::GetKnnScoreSortOption() const {
-  DCHECK(query_);
+std::optional<KnnScoreSortOption> SearchAlgorithm::GetKnnScoreSortOption() const {
+  // HNSW KNN query
+  if (knn_hnsw_score_sort_option_) {
+    return knn_hnsw_score_sort_option_;
+  }
 
-  // KNN query
+  // FLAT KNN query
   if (auto* knn = get_if<AstKnnNode>(query_.get()); knn)
     return KnnScoreSortOption{string_view{knn->score_alias}, knn->limit};
 
   return nullopt;
+}
+
+bool SearchAlgorithm::IsKnnQuery() const {
+  DCHECK(query_);
+  return std::holds_alternative<AstKnnNode>(*query_);
+}
+
+AstKnnNode* SearchAlgorithm::GetKnnNode() const {
+  if (auto* knn = get_if<AstKnnNode>(query_.get()); knn) {
+    return knn;
+  }
+  return nullptr;
+}
+
+std::unique_ptr<AstNode> SearchAlgorithm::PopKnnNode() {
+  if (auto* knn = get_if<AstKnnNode>(query_.get()); knn) {
+    // Save knn score sort option
+    knn_hnsw_score_sort_option_ = KnnScoreSortOption{string_view{knn->score_alias}, knn->limit};
+    auto node = std::move(query_);
+    AstKnnNode* moved_knn_node = reinterpret_cast<AstKnnNode*>(node.get());
+    if (!std::holds_alternative<AstStarNode>(*moved_knn_node->filter))
+      query_.swap(moved_knn_node->filter);
+    return node;
+  }
+  LOG(DFATAL) << "Should not reach here";
+  return nullptr;
 }
 
 void SearchAlgorithm::EnableProfiling() {

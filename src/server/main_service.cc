@@ -1123,6 +1123,11 @@ void Service::Shutdown() {
 
   shard_set->PreShutdown();
   shard_set->Shutdown();
+
+#ifdef WITH_SEARCH
+  SearchFamily::Shutdown();
+#endif
+
   Transaction::Shutdown();
 
   pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });

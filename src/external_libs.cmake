@@ -134,7 +134,9 @@ if (WITH_SEARCH)
 
   add_third_party(
     hnswlib
-    URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.8.0.tar.gz
+    GIT_REPOSITORY https://github.com/dragonflydb/hnswlib.git
+    # HEAD of dragonfly branch
+    GIT_TAG d07dd1da2bf48b85d2f03b8396193ad7120f75c2
 
     BUILD_COMMAND echo SKIP
     INSTALL_COMMAND cp -R <SOURCE_DIR>/hnswlib ${THIRD_PARTY_LIB_DIR}/hnswlib/include/
