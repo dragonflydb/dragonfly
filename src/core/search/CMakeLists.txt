@@ -5,8 +5,8 @@ cur_gen_dir(gen_dir)
 
 set_source_files_properties(${gen_dir}/parser.cc PROPERTIES
                             COMPILE_FLAGS "-Wno-maybe-uninitialized")
-add_library(dfly_search_core base.cc ast_expr.cc query_driver.cc search.cc indices.cc
-            sort_indices.cc vector_utils.cc compressed_sorted_set.cc block_list.cc
+add_library(dfly_search_core ast_expr.cc base.cc hnsw_index.cc query_driver.cc search.cc
+            indices.cc sort_indices.cc vector_utils.cc compressed_sorted_set.cc block_list.cc
             range_tree.cc synonyms.cc ${gen_dir}/parser.cc ${gen_dir}/lexer.cc)
 
 target_link_libraries(dfly_search_core base redis_lib absl::strings
