@@ -810,6 +810,16 @@ TEST_F(SearchFamilyTest, Unicode) {
   auto resp = Run({"ft.search", "i1", "λιβελλούλη"});
   EXPECT_THAT(resp,
               IsMapWithSize("d:4", IsMap("visits", "100", "title", "πανίσχυρη ΛΙΒΕΛΛΟΎΛΗ Δίας")));
+
+  // Repeat with tags
+  Run({"ft.create", "i2", "schema", "color", "tag", "separator", "/"});
+
+  Run({"hset", "d:5", "color", "зеЛеный/żółtY"});
+  Run({"hset", "d:6", "color", "κόκκινος/Білий"});
+
+  auto tagvals = Run({"ft.tagvals", "i2", "color"});
+  EXPECT_THAT(tagvals.GetVec(), UnorderedElementsAre("зеленый", "żółty", "κόκκινος", "білий"));
+  EXPECT_THAT(Run({"ft.search", "i2", "@color:{зеленый|білий}"}), AreDocIds("d:5", "d:6"));
 }
 
 TEST_F(SearchFamilyTest, UnicodeWords) {
