@@ -109,10 +109,10 @@ TEST_F(OpManagerTest, SimpleStashesWithReads) {
     }
 
     EXPECT_EQ(GetStats().pending_stash_cnt, 100);
-
-    while (stashed_.size() < 100)
+    while (GetStats().disk_stats.pending_ops > 0)
       util::ThisFiber::SleepFor(1ms);
 
+    EXPECT_EQ(stashed_.size(), 100u);
     EXPECT_EQ(GetStats().disk_stats.allocated_bytes, 100 * kPageSize) << GetStats();
 
     for (unsigned i = 0; i < 100; i++) {
