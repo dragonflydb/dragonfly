@@ -408,33 +408,23 @@ async def test_publish_stuck(df_server: DflyInstance, async_client: aioredis.Red
 
 
 @pytest.mark.slow
-@dfly_args({"proactor_threads": "4", "migrate_connections": False})
+@dfly_args({"proactor_threads": "4"})
 async def test_pubsub_busy_connections(df_server: DflyInstance):
-    sleep = 10
-
-    idd = 0
+    sleep = 60
 
     async def sub_thread():
         i = 0
 
         async def sub_task():
             nonlocal i
-            nonlocal idd
             sleep_task = asyncio.create_task(asyncio.sleep(sleep))
-            j = idd
-            idd = idd + 1
             while not sleep_task.done():
                 client = df_server.client()
                 pubsub = client.pubsub()
-                try:
-                    await pubsub.subscribe("channel")
-                except Exception as e:
-                    logging.info(f"ERRRRRRRROR {j}")
-                    pass
+                await pubsub.subscribe("channel")
                 # await pubsub.unsubscribe("channel")
                 i = i + 1
                 await client.close()
-            logging.info(f"SUB DONE {j}")
 
         subs = [asyncio.create_task(sub_task()) for _ in range(10)]
         for s in subs:
@@ -446,11 +436,8 @@ async def test_pubsub_busy_connections(df_server: DflyInstance):
         i = 0
         sleep_task = asyncio.create_task(asyncio.sleep(sleep))
         while not sleep_task.done():
-            # logging.info("before")
             await pub.publish("channel", f"message-{i}")
             i = i + 1
-            # logging.info("after")
-        logging.info("DONE")
 
     def run_in_thread():
         loop = asyncio.new_event_loop()
@@ -458,17 +445,15 @@ async def test_pubsub_busy_connections(df_server: DflyInstance):
         loop.run_until_complete(sub_thread())
 
     threads = []
-    for _ in range(1):
+    for _ in range(10):
         thread = Thread(target=run_in_thread)
         thread.start()
         threads.append(thread)
 
     await pub_task()
 
-    logging.info("==================")
     for thread in threads:
         thread.join()
-    logging.info("==================")
 
 
 async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_connections=100):
