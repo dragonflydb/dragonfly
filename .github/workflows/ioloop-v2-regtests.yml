@@ -3,6 +3,7 @@ name: RegTests IoLoopV2
 # Manually triggered only
 on:
   workflow_dispatch:
+  push:
 
 jobs:
   build:
