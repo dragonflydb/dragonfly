@@ -25,6 +25,7 @@
 #include <cctype>
 
 #include "base/flags.h"
+#include "core/search/vector_utils.h"
 
 ABSL_FLAG(bool, use_numeric_range_tree, true,
           "Use range tree for numeric index. "
@@ -127,6 +128,41 @@ std::optional<GeoIndex::point> GetGeoPoint(const DocumentAccessor& doc, string_v
 
   return GeoIndex::point{lon, lat};
 }
+
+class HnswSpace : public hnswlib::SpaceInterface<float> {
+  unsigned dim_;
+  VectorSimilarity sim_;
+
+  static float L2DistanceStatic(const void* pVect1, const void* pVect2, const void* param) {
+    return L2Distance(static_cast<const float*>(pVect1), static_cast<const float*>(pVect2),
+                      *static_cast<const unsigned*>(param));
+  }
+
+  static float IPDistanceStatic(const void* pVect1, const void* pVect2, const void* param) {
+    return IPDistance(static_cast<const float*>(pVect1), static_cast<const float*>(pVect2),
+                      *static_cast<const unsigned*>(param));
+  }
+
+ public:
+  explicit HnswSpace(size_t dim, VectorSimilarity sim) : dim_(dim), sim_(sim) {
+  }
+
+  size_t get_data_size() {
+    return dim_ * sizeof(float);
+  }
+
+  hnswlib::DISTFUNC<float> get_dist_func() {
+    if (sim_ == VectorSimilarity::L2) {
+      return L2DistanceStatic;
+    } else {
+      return IPDistanceStatic;
+    }
+  }
+
+  void* get_dist_func_param() {
+    return &dim_;
+  }
+};
 
 };  // namespace
 
@@ -555,8 +591,8 @@ struct HnswlibAdapter {
   constexpr static size_t kDefaultEfRuntime = 10;
 
   HnswlibAdapter(const SchemaField::VectorParams& params)
-      : space_{MakeSpace(params.dim, params.sim)},
-        world_{GetSpacePtr(), params.capacity, params.hnsw_m, params.hnsw_ef_construction,
+      : space_{params.dim, params.sim},
+        world_{&space_, params.capacity, params.hnsw_m, params.hnsw_ef_construction,
                100 /* seed*/} {
   }
 
@@ -608,23 +644,11 @@ struct HnswlibAdapter {
   }
 
  private:
-  using SpaceUnion = std::variant<hnswlib::L2Space, hnswlib::InnerProductSpace>;
-
-  static SpaceUnion MakeSpace(size_t dim, VectorSimilarity sim) {
-    if (sim == VectorSimilarity::L2)
-      return hnswlib::L2Space{dim};
-    else
-      return hnswlib::InnerProductSpace{dim};
-  }
-
-  hnswlib::SpaceInterface<float>* GetSpacePtr() {
-    return visit([](auto& space) -> hnswlib::SpaceInterface<float>* { return &space; }, space_);
-  }
-
   // Function requires that we hold mutex while resizing index. resizeIndex is not thread safe with
   // insertion (https://github.com/nmslib/hnswlib/issues/267)
   void ResizeIfFull() {
     {
+      // First check with reader lock to avoid contention.
       absl::ReaderMutexLock lock(&resize_mutex_);
       if (world_.getCurrentElementCount() < world_.getMaxElements() ||
           (world_.allow_replace_deleted_ && world_.getDeletedCount() > 0)) {
@@ -632,6 +656,7 @@ struct HnswlibAdapter {
       }
     }
     try {
+      // Upgrade to writer lock.
       absl::WriterMutexLock lock(&resize_mutex_);
       if (world_.getCurrentElementCount() == world_.getMaxElements() &&
           (!world_.allow_replace_deleted_ || world_.getDeletedCount() == 0)) {
@@ -654,7 +679,7 @@ struct HnswlibAdapter {
     return out;
   }
 
-  SpaceUnion space_;
+  HnswSpace space_;
   hnswlib::HierarchicalNSW<float> world_;
   absl::Mutex resize_mutex_;
 };
