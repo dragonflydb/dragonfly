@@ -2273,11 +2273,16 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     phase_ = PROCESS;
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
 
-    if (redis_parser_) {
-      parse_status = ParseRedis(max_busy_read_cycles_cached);
+    if (io_buf_.InputLen() > 0) {
+      if (redis_parser_) {
+        parse_status = ParseRedis(max_busy_read_cycles_cached);
+      } else {
+        DCHECK(memcache_parser_);
+        parse_status = ParseMemcache();
+      }
     } else {
-      DCHECK(memcache_parser_);
-      parse_status = ParseMemcache();
+      parse_status = NEED_MORE;
+      DCHECK(io_buf_.AppendLen() == 0);
     }
 
     if (reply_builder_->GetError()) {
