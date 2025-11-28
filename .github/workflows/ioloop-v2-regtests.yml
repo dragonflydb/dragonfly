@@ -2,11 +2,6 @@ name: RegTests IoLoopV2
 
 # Manually triggered only
 on:
-  pull_request:
-    types: [opened]
-    branches:
-      - main
-      - kpr31
   workflow_dispatch:
 
 jobs:
