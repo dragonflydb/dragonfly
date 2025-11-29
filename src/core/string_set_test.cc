@@ -803,4 +803,113 @@ TEST_F(StringSetTest, TransferTTLFlagLinkToObjectOnDelete) {
   EXPECT_EQ(1u, it.ExpiryTime());
 }
 
+TEST_F(StringSetTest, BasicShrink) {
+  // Add elements and then grow to have extra capacity
+  constexpr size_t num_strs = 32;
+  vector<string> strs;
+  for (size_t i = 0; i < num_strs; ++i) {
+    strs.push_back(random_string(generator_, 10));
+    EXPECT_TRUE(ss_->Add(strs.back()));
+  }
+
+  // Grow to a larger size
+  ss_->Reserve(256);
+  size_t original_bucket_count = ss_->BucketCount();
+  EXPECT_EQ(original_bucket_count, 256u);
+
+  // Shrink to half the size using Shrink
+  size_t new_size = original_bucket_count / 2;
+  ss_->Shrink(new_size);
+
+  EXPECT_EQ(ss_->BucketCount(), new_size);
+  EXPECT_EQ(ss_->UpperBoundSize(), num_strs);
+
+  // Verify all elements are still accessible
+  for (const auto& str : strs) {
+    EXPECT_TRUE(ss_->Contains(str)) << "Missing: " << str;
+  }
+}
+
+TEST_F(StringSetTest, ShrinkWithTTL) {
+  // Add elements with TTL
+  constexpr size_t num_strs = 16;
+  vector<string> strs;
+  for (size_t i = 0; i < num_strs; ++i) {
+    strs.push_back(random_string(generator_, 10));
+    EXPECT_TRUE(ss_->Add(strs.back(), 100));  // TTL of 100
+  }
+
+  // Grow to larger size
+  ss_->Reserve(128);
+  size_t original_bucket_count = ss_->BucketCount();
+
+  // Shrink using Shrink
+  size_t new_size = original_bucket_count / 2;
+  ss_->Shrink(new_size);
+
+  EXPECT_EQ(ss_->BucketCount(), new_size);
+  EXPECT_EQ(ss_->UpperBoundSize(), num_strs);
+
+  // Verify all elements are still accessible with correct TTL
+  for (const auto& str : strs) {
+    auto it = ss_->Find(str);
+    ASSERT_NE(it, ss_->end()) << "Missing: " << str;
+    EXPECT_TRUE(it.HasExpiry());
+    EXPECT_EQ(it.ExpiryTime(), 100);
+  }
+}
+
+TEST_F(StringSetTest, ScanWithShrinkBetweenCalls) {
+  // Test that cursor-based scanning works correctly when Shrink happens between Scan calls
+  // This verifies SCAN guarantees: elements present at start and end of scan must be seen
+  constexpr size_t num_strs = 64;
+  vector<string> strs;
+  unordered_set<string> must_see;
+
+  // Add elements and track them
+  for (size_t i = 0; i < num_strs; ++i) {
+    strs.push_back(random_string(generator_, 10));
+    EXPECT_TRUE(ss_->Add(strs.back()));
+    must_see.insert(strs.back());
+  }
+
+  // Grow to large size first
+  ss_->Reserve(512);
+  EXPECT_EQ(ss_->BucketCount(), 512u);
+
+  unordered_set<string> seen;
+  auto scan_callback = [&](const sds ptr) {
+    string str{ptr, sdslen(ptr)};
+    seen.insert(str);
+  };
+
+  // Start scanning
+  uint32_t cursor = ss_->Scan(0, scan_callback);
+  EXPECT_NE(cursor, 0u) << "Should not finish in one iteration with 512 buckets";
+
+  // Shrink in the middle of scanning - this is the key test
+  // Elements that existed at scan start must still be visible
+  ss_->Shrink(128);
+  EXPECT_EQ(ss_->BucketCount(), 128u);
+
+  // Continue scanning with the same cursor
+  // Note: After Shrink with generation change detection, scan restarts from bucket 0
+  // which causes rescanning. This is expected and guarantees no elements are missed.
+  // With 64 elements in 128 buckets, need more iterations after restart.
+  constexpr int max_iterations = 150;
+  int iterations = 0;
+  while (cursor != 0 && iterations < max_iterations) {
+    cursor = ss_->Scan(cursor, scan_callback);
+    iterations++;
+  }
+  EXPECT_LT(iterations, max_iterations) << "Hit iteration limit";
+  EXPECT_EQ(cursor, 0u) << "Scan should complete";
+
+  // Verify all original elements were seen
+  for (const auto& str : must_see) {
+    EXPECT_TRUE(seen.count(str)) << "Missing element after shrink: " << str;
+  }
+  EXPECT_EQ(seen.size(), must_see.size()) << "Should see exactly all original elements";
+}
+
 }  // namespace dfly
