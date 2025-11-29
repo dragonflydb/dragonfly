@@ -10,10 +10,8 @@ namespace dfly {
 
 class PageUsage;
 
-// blob strings of upto ~256B. Small sizes are probably predominant
-// for in-memory workloads, especially for keys.
-// Please note that this class does not have automatic constructors and destructors, therefore
-// it requires explicit management.
+// Efficient storage of strings longer than 10 bytes and up to 256 bytes.
+// Requires explicit memory management
 class SmallString {
   static constexpr unsigned kPrefLen = 10;
   static constexpr unsigned kMaxSize = (1 << 8) - 1;
@@ -23,10 +21,6 @@ class SmallString {
   static size_t UsedThreadLocal();
   static bool CanAllocate(size_t size);
 
-  void Reset() {
-    size_ = 0;
-  }
-
   // Returns malloc used.
   size_t Assign(std::string_view s);
   void Free();
@@ -34,30 +28,25 @@ class SmallString {
   bool Equal(std::string_view o) const;
   bool Equal(const SmallString& mps) const;
 
-  uint16_t size() const {
-    return size_;
-  }
-
   uint64_t HashCode() const;
-
-  // I am lying here. we should use mi_malloc_usable size really.
   uint16_t MallocUsed() const;
 
+  void Get(std::string_view dest[2]) const;
+  void Get(char* out) const;
   void Get(std::string* dest) const;
 
-  // returns 1 or 2 slices representing this small string.
-  // Guarantees zero copy, i.e. dest will not point to any of external buffers.
-  // With current implementation, it will return 2 slices for a non-empty string.
-  unsigned GetV(std::string_view dest[2]) const;
-
   bool DefragIfNeeded(PageUsage* page_usage);
+
+  size_t size() const {
+    return size_;
+  }
 
   uint8_t first_byte() const {
     return prefix_[0];
   }
 
  private:
-  // prefix of the string that is broken down into 2 parts.
+  // The string is stored broken up into two parts, the first one - in this array
   char prefix_[kPrefLen];
 
   uint32_t small_ptr_;  // 32GB capacity because we ignore 3 lsb bits (i.e. x8).
