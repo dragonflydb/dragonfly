@@ -1227,11 +1227,13 @@ CompactObj::ExternalRep CompactObj::GetExternalRep() const {
   return static_cast<CompactObj::ExternalRep>(u_.ext_ptr.representation);
 }
 
-void CompactObj::SetCool(size_t offset, uint32_t sz, detail::TieredColdRecord* record) {
+void CompactObj::SetCool(size_t offset, uint32_t sz, ExternalRep rep,
+                         detail::TieredColdRecord* record) {
   // We copy the mask of the "cooled" referenced object because it contains the encoding info.
   SetMeta(EXTERNAL_TAG, record->value.mask_);
 
   u_.ext_ptr.is_cool = 1;
+  u_.ext_ptr.representation = static_cast<uint8_t>(rep);
   u_.ext_ptr.page_offset = offset % 4096;
   u_.ext_ptr.serialized_size = sz;
   u_.ext_ptr.cool_record = record;
@@ -1245,6 +1247,10 @@ auto CompactObj::GetCool() const -> CoolItem {
   res.serialized_size = u_.ext_ptr.serialized_size;
   res.record = u_.ext_ptr.cool_record;
   return res;
+}
+
+void CompactObj::Freeze(size_t offset, size_t sz) {
+  SetExternal(offset, sz, GetExternalRep());
 }
 
 std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
@@ -1618,7 +1624,7 @@ StringOrView CompactObj::GetRawString() const {
     return StringOrView::FromString(std::move(tmp));
   }
 
-  LOG(FATAL) << "Unsupported tag for GetRawString(): " << taglen_;
+  LOG(FATAL) << "Unsupported tag for GetRawString(): " << int(taglen_);
   return {};
 }
 

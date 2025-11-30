@@ -25,6 +25,7 @@ class SmallBins {
     size_t stashed_bins_cnt = 0;
     size_t stashed_entries_cnt = 0;
     size_t current_bin_bytes = 0;
+    size_t current_entries_cnt = 0;
   };
 
   using BinId = unsigned;

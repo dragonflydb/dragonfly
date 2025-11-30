@@ -17,6 +17,7 @@
 #include "base/flag_utils.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/detail/listpack_wrap.h"
 #include "server/common.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
@@ -24,8 +25,13 @@
 #include "server/table.h"
 #include "server/tiering/common.h"
 #include "server/tiering/op_manager.h"
+#include "server/tiering/serialized_map.h"
 #include "server/tiering/small_bins.h"
 #include "server/tx_base.h"
+
+extern "C" {
+#include "redis/listpack.h"
+}
 
 using namespace facade;
 
@@ -45,6 +51,8 @@ ABSL_FLAG(float, tiered_offload_threshold, 0.5,
 
 ABSL_FLAG(float, tiered_upload_threshold, 0.1,
           "Ratio of free memory (free/max memory) below which uploading stops");
+
+ABSL_FLAG(bool, tiered_experimental_hash_support, false, "Experimental hash datatype offloading");
 
 namespace dfly {
 
@@ -71,6 +79,59 @@ void RecordDeleted(const PrimeValue& pv, size_t tiered_len, DbTableStats* stats)
 
 tiering::DiskSegment FromCoolItem(const PrimeValue::CoolItem& item) {
   return {item.record->page_index * tiering::kPageSize + item.page_offset, item.serialized_size};
+}
+
+// Determine required byte size and encoding type based on value.
+// TODO(vlad): Maybe split into different accessors?
+// Do NOT enforce rules depending on dynamic runtime values as this is called
+// when scheduling stash and just before succeeeding and is expected to return the same results
+pair<size_t /*size*/, CompactObj::ExternalRep> DetermineSerializationParams(const PrimeValue& pv) {
+  switch (pv.ObjType()) {
+    case OBJ_STRING:
+      if (pv.IsInline())
+        return {};
+      return std::make_pair(pv.GetRawString().view().size(), CompactObj::ExternalRep::STRING);
+    case OBJ_HASH:
+      if (pv.Encoding() == kEncodingListPack) {
+        auto* lp = static_cast<uint8_t*>(pv.RObjPtr());
+        size_t bytes = 4 + lpBytes(lp);  // encoded length and data bytes
+        bytes += lpLength(lp) * 2 * 4;   // 4 bytes for encoded key/value lengths
+        return std::make_pair(bytes, CompactObj::ExternalRep::SERIALIZED_MAP);
+      }
+      return {};
+    default:
+      return {};
+  };
+}
+
+size_t Serialize(CompactObj::ExternalRep rep, const PrimeValue& pv, io::MutableBytes buffer) {
+  DCHECK_LE(DetermineSerializationParams(pv).first, buffer.size());
+  switch (rep) {
+    case CompactObj::ExternalRep::STRING: {
+      auto sv = pv.GetRawString();
+      memcpy(buffer.data(), sv.view().data(), sv.view().size());
+      return sv.view().size();
+    }
+    case CompactObj::ExternalRep::SERIALIZED_MAP: {
+      DCHECK_EQ(pv.Encoding(), kEncodingListPack);
+
+      // TODO(vlad): Optimize copy for serialization
+      detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
+      vector<pair<string, string>> entries(lw.begin(), lw.end());
+      return tiering::SerializedMap::Serialize(
+          entries, {reinterpret_cast<char*>(buffer.data()), buffer.length()});
+    }
+  };
+  return 0;
+}
+
+// TODO: Remove with proper no-copy serialization
+string SerializeToString(const PrimeValue& pv) {
+  auto [size, type] = DetermineSerializationParams(pv);
+  string s(size, 0);
+  size_t written = Serialize(type, pv, {reinterpret_cast<uint8_t*>(s.data()), s.size()});
+  s.resize(written);
+  return s;
 }
 
 }  // anonymous namespace
@@ -133,12 +194,21 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   void RetireColdEntries(size_t additional_memory);
 
   // Set value to be an in-memory type again. Update memory stats.
-  void Upload(DbIndex dbid, string_view value, bool is_raw, size_t serialized_len, PrimeValue* pv) {
+  void Upload(DbIndex dbid, string_view value, PrimeValue* pv) {
     DCHECK(!value.empty());
-    DCHECK_EQ(uint8_t(pv->GetExternalRep()), uint8_t(CompactObj::ExternalRep::STRING));
 
-    pv->Materialize(value, is_raw);
-    RecordDeleted(*pv, serialized_len, GetDbTableStats(dbid));
+    switch (pv->GetExternalRep()) {
+      case CompactObj::ExternalRep::STRING:
+        pv->Materialize(value, true);
+        break;
+      case CompactObj::ExternalRep::SERIALIZED_MAP:
+        tiering::SerializedMapDecoder decoder{};
+        decoder.Initialize(value);
+        decoder.Upload(pv);
+        break;
+    };
+
+    RecordDeleted(*pv, value.size(), GetDbTableStats(dbid));
   }
 
   // Find entry by key in db_slice and store external segment in place of original value.
@@ -153,12 +223,13 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       stats->tiered_used_bytes += segment.length;
       stats_.total_stashes++;
 
+      CompactObj::ExternalRep rep = DetermineSerializationParams(*pv).second;
       if (ts_->config_.experimental_cooling) {
         RetireColdEntries(pv->MallocUsed());
-        ts_->CoolDown(key.first, key.second, segment, pv);
+        ts_->CoolDown(key.first, key.second, segment, rep, pv);
       } else {
         stats->AddTypeMemoryUsage(pv->ObjType(), -pv->MallocUsed());
-        pv->SetExternal(segment.offset, segment.length, CompactObj::ExternalRep::STRING);
+        pv->SetExternal(segment.offset, segment.length, rep);
       }
     } else {
       LOG(DFATAL) << "Should not reach here";
@@ -215,7 +286,7 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
     } else {
       // Cut out relevant part of value and restore it to memory
       string_view value = page.substr(item_segment.offset - segment.offset, item_segment.length);
-      Upload(dbid, value, true, item_segment.length, &pv);
+      Upload(dbid, value, &pv);
     }
   }
 }
@@ -386,36 +457,41 @@ std::optional<util::fb2::Future<bool>> TieredStorage::TryStash(DbIndex dbid, str
     return {};
   }
 
-  StringOrView raw_string = value->GetRawString();
-  value->SetStashPending(true);
+  auto [est_size, rep] = DetermineSerializationParams(*value);
+  DCHECK_GT(est_size, 0u);
 
   tiering::OpManager::EntryId id;
   error_code ec;
 
-  // TODO(vlad): Replace with encoders for different types
-  auto stash_string = [&](std::string_view str) {
-    if (auto prepared = op_manager_->PrepareStash(str.size()); prepared) {
+  value->SetStashPending(true);
+  if (OccupiesWholePages(est_size)) {  // large enough for own page
+    id = KeyRef(dbid, key);
+    if (auto prepared = op_manager_->PrepareStash(est_size); prepared) {
       auto [offset, buf] = *prepared;
-      memcpy(buf.bytes.data(), str.data(), str.size());
-      tiering::DiskSegment segment{offset, str.size()};
+      size_t written = Serialize(rep, *value, buf.bytes);
+      tiering::DiskSegment segment{offset, written};
       op_manager_->Stash(id, segment, buf);
     } else {
       ec = prepared.error();
     }
-  };
-
-  if (OccupiesWholePages(value->Size())) {  // large enough for own page
-    id = KeyRef(dbid, key);
-    stash_string(raw_string.view());
-  } else if (auto bin = bins_->Stash(dbid, key, raw_string.view()); bin) {
+  } else if (auto bin = bins_->Stash(dbid, key, SerializeToString(*value)); bin) {
     id = bin->first;
     // TODO(vlad): Write bin to prepared buffer instead of allocating one
-    stash_string(bin->second);
+    if (auto prepared = op_manager_->PrepareStash(bin->second.length()); prepared) {
+      auto [offset, buf] = *prepared;
+      memcpy(buf.bytes.data(), bin->second.data(), bin->second.size());
+      tiering::DiskSegment segment{offset, bin->second.size()};
+      op_manager_->Stash(id, segment, buf);
+    } else {
+      ec = prepared.error();
+      bins_->ReportStashAborted(bin->first);
+    }
   } else {
     return {};  // silently added to bin
   }
 
   if (ec) {
+    value->SetStashPending(false);
     LOG_IF(ERROR, ec != errc::file_too_large) << "Stash failed immediately" << ec.message();
     visit([this](auto id) { op_manager_->ClearIoPending(id); }, id);
     return {};
@@ -454,7 +530,9 @@ void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* 
   if (auto node = stash_backpressure_.extract(make_pair(dbid, key)); !node.empty())
     std::move(node.mapped()).Resolve(false);
 
-  if (OccupiesWholePages(value->Size())) {
+  // TODO: Don't recompute size estimate, try-delete bin first
+  size_t size = DetermineSerializationParams(*value).first;
+  if (OccupiesWholePages(size)) {
     op_manager_->Delete(KeyRef(dbid, key));
   } else if (auto bin = bins_->Delete(dbid, key); bin) {
     op_manager_->Delete(*bin);
@@ -489,6 +567,7 @@ TieredStats TieredStorage::GetStats() const {
     stats.small_bins_cnt = bins_stats.stashed_bins_cnt;
     stats.small_bins_entries_cnt = bins_stats.stashed_entries_cnt;
     stats.small_bins_filling_bytes = bins_stats.current_bin_bytes;
+    stats.small_bins_filling_entries_cnt = bins_stats.current_entries_cnt;
   }
 
   {  // Own stats
@@ -513,13 +592,14 @@ void TieredStorage::UpdateFromFlags() {
       .write_depth_limit = absl::GetFlag(FLAGS_tiered_storage_write_depth),
       .offload_threshold = absl::GetFlag(FLAGS_tiered_offload_threshold),
       .upload_threshold = absl::GetFlag(FLAGS_tiered_upload_threshold),
+      .experimental_hash_offload = absl::GetFlag(FLAGS_tiered_experimental_hash_support),
   };
 }
 
 std::vector<std::string> TieredStorage::GetMutableFlagNames() {
   return base::GetFlagNames(FLAGS_tiered_min_value_size, FLAGS_tiered_experimental_cooling,
                             FLAGS_tiered_storage_write_depth, FLAGS_tiered_offload_threshold,
-                            FLAGS_tiered_upload_threshold);
+                            FLAGS_tiered_upload_threshold, FLAGS_tiered_experimental_hash_support);
 }
 
 bool TieredStorage::ShouldOffload() const {
@@ -596,10 +676,10 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
                            ->prime.FindFirst(record->key_hash, predicate);
     CHECK(IsValid(it));
     PrimeValue& pv = it->second;
-    tiering::DiskSegment segment = FromCoolItem(pv.GetCool());
 
     // Now the item is only in storage.
-    pv.SetExternal(segment.offset, segment.length, CompactObj::ExternalRep::STRING);
+    tiering::DiskSegment segment = FromCoolItem(pv.GetCool());
+    pv.Freeze(segment.offset, segment.length);
 
     auto* stats = op_manager_->GetDbTableStats(record->db_index);
     stats->AddTypeMemoryUsage(record->value.ObjType(), -record->value.MallocUsed());
@@ -610,14 +690,26 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
 }
 
 bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
+  // Check value state
+  if (pv.IsExternal() || pv.HasStashPending())
+    return false;
+
+  // For now, hash offloading is conditional
+  if (pv.ObjType() == OBJ_HASH && !config_.experimental_hash_offload)
+    return false;
+
+  // Estimate value size
+  auto [size, rep] = DetermineSerializationParams(pv);
+  if (size < config_.min_value_size)
+    return false;
+
   const auto& disk_stats = op_manager_->GetStats().disk_stats;
-  return !pv.IsExternal() && !pv.HasStashPending() && pv.ObjType() == OBJ_STRING &&
-         pv.Size() >= config_.min_value_size &&
-         disk_stats.allocated_bytes + tiering::kPageSize + pv.Size() < disk_stats.max_file_size;
+  return disk_stats.allocated_bytes + tiering::kPageSize + size < disk_stats.max_file_size;
 }
 
 void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
-                             const tiering::DiskSegment& segment, PrimeValue* pv) {
+                             const tiering::DiskSegment& segment, CompactObj::ExternalRep rep,
+                             PrimeValue* pv) {
   detail::TieredColdRecord* record = CompactObj::AllocateMR<detail::TieredColdRecord>();
   cool_queue_.push_front(*record);
   stats_.cool_memory_used += (sizeof(detail::TieredColdRecord) + pv->MallocUsed());
@@ -627,7 +719,7 @@ void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
   record->page_index = segment.offset / tiering::kPageSize;
   record->value = std::move(*pv);
 
-  pv->SetCool(segment.offset, segment.length, record);
+  pv->SetCool(segment.offset, segment.length, rep, record);
 }
 
 PrimeValue TieredStorage::Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
@@ -636,10 +728,6 @@ PrimeValue TieredStorage::Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
   // We remove it from both cool storage and the offline storage.
   PrimeValue hot = DeleteCool(item.record);
   op_manager_->DeleteOffloaded(dbid, segment);
-
-  // Bring it back to the PrimeTable.
-  DCHECK(hot.ObjType() == OBJ_STRING);
-
   return hot;
 }
 
