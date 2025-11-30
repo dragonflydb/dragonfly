@@ -10,7 +10,7 @@ namespace dfly {
 
 class PageUsage;
 
-// Efficient storage of strings longer than 10 bytes and up to 256 bytes.
+// Efficient storage of strings longer than 10 bytes.
 // Requires explicit memory management
 class SmallString {
   static constexpr unsigned kPrefLen = 10;

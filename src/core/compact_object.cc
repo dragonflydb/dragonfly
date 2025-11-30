@@ -1144,33 +1144,32 @@ void CompactObj::GetString(char* dest) const {
   }
 
   if (mask_bits_.encoding) {
+    StrEncoding str_encoding = GetStrEncoding();
+    string_view decode_blob;
+
     if (taglen_ == ROBJ_TAG) {
       CHECK_EQ(OBJ_STRING, u_.r_obj.type());
       DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-      string_view blob{(const char*)u_.r_obj.inner_obj(), u_.r_obj.Size()};
-      GetStrEncoding().Decode(blob, dest);
-      return;
+      decode_blob = {(const char*)u_.r_obj.inner_obj(), u_.r_obj.Size()};
     } else {
       CHECK_EQ(SMALL_TAG, taglen_);
       auto& ss = u_.small_str;
 
-      size_t decoded_len = GetStrEncoding().DecodedSize(ss.size(), ss.first_byte());
-
-      if (mask_bits_.encoding == HUFFMAN_ENC) {
+      char* copy_dest;
+      if (str_encoding.enc_ == HUFFMAN_ENC) {
         tl.tmp_buf.resize(ss.size());
-        auto* base = reinterpret_cast<char*>(tl.tmp_buf.data());
-        ss.Get(base);
-
-        const auto& decoder = tl.GetHuffmanDecoder(huffman_domain_);
-        CHECK(decoder.Decode({base + 1, ss.size() - 1}, decoded_len, dest));  // skip first char
-        return;
+        copy_dest = reinterpret_cast<char*>(tl.tmp_buf.data());
+      } else {
+        // Write to rightmost location of dest buffer to leave some bytes for inline unpacking
+        size_t decoded_len = str_encoding.DecodedSize(ss.size(), ss.first_byte());
+        copy_dest = dest + (decoded_len - ss.size());
       }
 
-      // we left some space on the left to allow inplace ascii unpacking.
-      char* offset_dest = dest + (decoded_len - u_.small_str.size());
-      ss.Get(offset_dest);
-      detail::ascii_unpack_simd(reinterpret_cast<uint8_t*>(offset_dest), decoded_len, dest);
+      ss.Get(copy_dest);
+      decode_blob = {copy_dest, ss.size()};
     }
+
+    str_encoding.Decode(decode_blob, dest);
     return;
   }
 

@@ -61,11 +61,13 @@ size_t SmallString::Assign(std::string_view s) {
 
   // If the allocation is large enough and space efficient, we can avoid allocating
   if (s.size() >= size_ || s.size() * 2 < MallocUsed()) {
-    if (size_)
-      Free();
+    Free();
+
     auto [sp, rp] = tl.seg_alloc->Allocate(s.size() - kPrefLen);
     small_ptr_ = sp;
     realptr = rp;
+  } else {
+    realptr = tl.seg_alloc->Translate(small_ptr_);
   }
 
   size_ = s.size();
@@ -75,7 +77,8 @@ size_t SmallString::Assign(std::string_view s) {
 }
 
 void SmallString::Free() {
-  tl.seg_alloc->Free(small_ptr_);
+  if (size_)
+    tl.seg_alloc->Free(small_ptr_);
   size_ = 0;
 }
 
