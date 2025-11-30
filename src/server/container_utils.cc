@@ -180,9 +180,9 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func) {
   return success;
 }
 
-bool IterateSortedSet(const detail::RobjWrapper* robj_wrapper, const IterateSortedFunc& func,
-                      int32_t start, int32_t end, bool reverse, bool use_score) {
-  unsigned long llen = robj_wrapper->Size();
+bool IterateSortedSet(const PrimeValue& pv, const IterateSortedFunc& func, int32_t start,
+                      int32_t end, bool reverse, bool use_score) {
+  unsigned long llen = pv.Size();
   if (end < 0 || unsigned(end) >= llen)
     end = llen - 1;
 
@@ -191,8 +191,8 @@ bool IterateSortedSet(const detail::RobjWrapper* robj_wrapper, const IterateSort
 
   unsigned rangelen = unsigned(end - start) + 1;
 
-  if (robj_wrapper->encoding() == OBJ_ENCODING_LISTPACK) {
-    uint8_t* zl = static_cast<uint8_t*>(robj_wrapper->inner_obj());
+  if (pv.Encoding() == OBJ_ENCODING_LISTPACK) {
+    uint8_t* zl = static_cast<uint8_t*>(pv.RObjPtr());
     uint8_t *eptr, *sptr;
     uint8_t* vstr;
     unsigned int vlen;
@@ -231,8 +231,8 @@ bool IterateSortedSet(const detail::RobjWrapper* robj_wrapper, const IterateSort
     }
     return success;
   } else {
-    CHECK_EQ(robj_wrapper->encoding(), OBJ_ENCODING_SKIPLIST);
-    detail::SortedMap* smap = (detail::SortedMap*)robj_wrapper->inner_obj();
+    CHECK_EQ(pv.Encoding(), OBJ_ENCODING_SKIPLIST);
+    auto* smap = static_cast<detail::SortedMap*>(pv.RObjPtr());
     return smap->Iterate(start, rangelen, reverse, [&](sds ele, double score) {
       return func(ContainerEntry{ele, sdslen(ele)}, score);
     });
