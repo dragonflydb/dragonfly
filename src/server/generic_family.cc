@@ -1111,7 +1111,7 @@ OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& 
     if (!IsValid(it))
       continue;
 
-    db_slice.Del(op_args.db_cntx, it, aync);
+    db_slice.Del(op_args.db_cntx, it, nullptr, async);
     ++res;
   }
 
