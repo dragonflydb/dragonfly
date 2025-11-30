@@ -802,7 +802,7 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
   CreateDb(db_ind);
 }
 
-void DbSlice::Del(Context cntx, Iterator it, DbTable* db_table) {
+void DbSlice::Del(Context cntx, Iterator it, DbTable* db_table, bool async) {
   CHECK(IsValid(it));
 
   ExpIterator exp_it;
@@ -820,7 +820,7 @@ void DbSlice::Del(Context cntx, Iterator it, DbTable* db_table) {
     DCHECK(!exp_it.is_done());
   }
 
-  PerformDeletionAtomic(it, exp_it, table);
+  PerformDeletionAtomic(it, exp_it, table, async);
 }
 
 void DbSlice::DelMutable(Context cntx, ItAndUpdater it_updater) {
@@ -1771,7 +1771,7 @@ unique_ptr<base::Histogram> DbSlice::StopSampleValues(DbIndex db_ind) {
 }
 
 void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& exp_it,
-                                    DbTable* table) {
+                                    DbTable* table, bool async) {
   FiberAtomicGuard guard;
   size_t table_before = table->table_memory();
   if (!exp_it.is_done()) {
@@ -1804,7 +1804,7 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
   }
   AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
 
-  if (del_it->first.IsAsyncDelete() && MayDeleteAsynchronously(pv)) {
+  if (async && MayDeleteAsynchronously(pv)) {
     DenseSet* ds = (DenseSet*)pv.RObjPtr();
     pv.SetRObjPtr(nullptr);
     const size_t kClearStepSize = 512;
@@ -1815,7 +1815,7 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
     } else {
       CompactObj::DeleteMR<DenseSet>(ds);
     }
-  }  // del_it->first.IsAsyncDelete()
+  }
 
   if (table->slots_stats) {
     SlotId sid = KeySlot(del_it.key());
