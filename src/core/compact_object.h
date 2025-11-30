@@ -75,9 +75,6 @@ class RobjWrapper {
   // Returns true if re-allocated.
   bool DefragIfNeeded(PageUsage* page_usage);
 
-  // as defined in zset.h
-  int ZsetAdd(double score, std::string_view ele, int in_flags, int* out_flags, double* newscore);
-
  private:
   void ReallocateString(MemoryResource* mr);
 
@@ -297,15 +294,6 @@ class CompactObj {
   // For STR object.
   void SetInt(int64_t val);
   std::optional<int64_t> TryGetInt() const;
-
-  // We temporary expose this function to avoid passing around robj objects.
-  detail::RobjWrapper* GetRobjWrapper() {
-    return &u_.r_obj;
-  }
-
-  const detail::RobjWrapper* GetRobjWrapper() const {
-    return &u_.r_obj;
-  }
 
   // For STR object.
   void SetString(std::string_view str, bool is_key);
