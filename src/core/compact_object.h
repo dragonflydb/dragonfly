@@ -255,14 +255,6 @@ class CompactObj {
 
   bool DefragIfNeeded(PageUsage* page_usage);
 
-  void SetAsyncDelete() {
-    mask_bits_.io_pending = 1;  // io_pending flag is used for async delete for keys.
-  }
-
-  bool IsAsyncDelete() const {
-    return mask_bits_.io_pending;
-  }
-
   bool HasStashPending() const {
     return mask_bits_.io_pending;
   }
