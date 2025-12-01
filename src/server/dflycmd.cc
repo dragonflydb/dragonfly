@@ -40,6 +40,8 @@ ABSL_RETIRED_FLAG(uint32_t, allow_partial_sync_with_lsn_diff, 0,
 ABSL_DECLARE_FLAG(bool, info_replication_valkey_compatible);
 ABSL_DECLARE_FLAG(uint32_t, replication_timeout);
 ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_len);
+ABSL_FLAG(bool, experimental_force_takeover, false,
+          "Attempts to force takeover in case of stuck connections");
 
 namespace dfly {
 
@@ -466,6 +468,45 @@ std::optional<LSN> DflyCmd::ParseLsnVec(std::string_view last_master_lsn,
   return {lsn_vec[flow_id]};
 }
 
+void DflyCmd::ForceShutdownStuckConnections(uint64_t timeout) {
+  vector<facade::Connection::WeakRef> conn_refs;
+  auto cb = [&](unsigned thread_index, util::Connection* conn) {
+    facade::Connection* dcon = static_cast<facade::Connection*>(conn);
+    LOG(INFO) << dcon->DebugInfo();
+    // Kill Connection here
+    facade::Connection* dfly_conn = static_cast<facade::Connection*>(conn);
+    using Phase = facade::Connection::Phase;
+    auto phase = dfly_conn->phase();
+    if (dfly_conn->cntx() && dfly_conn->cntx()->replica_conn) {
+      return;
+    }
+
+    bool idle_read = phase == Phase::READ_SOCKET && dfly_conn->idle_time() > timeout;
+
+    bool stuck_sending = dfly_conn->IsSending() && dfly_conn->GetSendWaitTimeSec() > timeout;
+
+    if (idle_read || stuck_sending) {
+      LOG(INFO) << "Connection check: " << dfly_conn->GetClientInfo()
+                << ", phase=" << static_cast<int>(phase) << ", idle_time=" << dfly_conn->idle_time()
+                << ", is_sending=" << dfly_conn->IsSending() << ", idle_read=" << idle_read
+                << ", stuck_sending=" << stuck_sending;
+    }
+    conn_refs.push_back(dfly_conn->Borrow());
+  };
+
+  for (auto* listener : sf_->GetListeners()) {
+    listener->TraverseConnections(cb);
+  }
+
+  VLOG(1) << "Found " << conn_refs.size() << " stucked connections ";
+  for (auto& ref : conn_refs) {
+    facade::Connection* conn = ref.Get();
+    if (conn) {
+      conn->ShutdownSelfBlocking();
+    }
+  }
+}
+
 // DFLY TAKEOVER <timeout_sec> [SAVE] <sync_id>
 // timeout_sec - number of seconds to wait for TAKEOVER to converge.
 // SAVE option is used only by tests.
@@ -506,7 +547,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
   LOG(INFO) << "Takeover initiated, locking down the database.";
   absl::Duration timeout_dur = absl::Seconds(timeout);
   absl::Time end_time = absl::Now() + timeout_dur;
-  AggregateStatus status;
+  OpStatus status = OpStatus::OK;
 
   // We need to await for all dispatches to finish: Otherwise a transaction might be scheduled
   // after this function exits but before the actual shutdown.
@@ -520,13 +561,22 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
     LOG(WARNING) << "Couldn't wait for commands to finish dispatching. " << timeout_dur;
     status = OpStatus::TIMED_OUT;
 
-    auto cb = [&](unsigned thread_index, util::Connection* conn) {
-      facade::Connection* dcon = static_cast<facade::Connection*>(conn);
-      LOG(INFO) << dcon->DebugInfo();
-    };
+    // Force takeover on the same duration if flag is set
+    if (absl::GetFlag(FLAGS_experimental_force_takeover)) {
+      ForceShutdownStuckConnections(uint64_t(timeout));
 
-    for (auto* listener : sf_->GetListeners()) {
-      listener->TraverseConnections(cb);
+      // Safety net.
+      facade::DispatchTracker tracker{sf_->GetNonPriviligedListeners(), cntx->conn(), false, false};
+      shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto* pb) {
+        sf_->CancelBlockingOnThread();
+        tracker.TrackOnThread();
+      });
+
+      status = OpStatus::OK;
+      if (!tracker.Wait(timeout_dur)) {
+        LOG(ERROR) << "Could not force execute takeover";
+        status = OpStatus::TIMED_OUT;
+      }
     }
   }
 
@@ -540,10 +590,11 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
   });
 
   atomic_bool catchup_success = true;
-  if (*status == OpStatus::OK) {
+  if (status == OpStatus::OK) {
     dfly::SharedLock lk{replica_ptr->shared_mu};
-    auto cb = [replica_ptr = replica_ptr, end_time, &catchup_success](EngineShard* shard) {
-      if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
+    auto time = end_time + timeout_dur;
+    auto cb = [replica_ptr = replica_ptr, time, &catchup_success](EngineShard* shard) {
+      if (!WaitReplicaFlowToCatchup(time, replica_ptr.get(), shard)) {
         catchup_success.store(false);
       }
     };
@@ -552,8 +603,9 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
 
   VLOG(1) << "WaitReplicaFlowToCatchup done";
 
-  if (*status != OpStatus::OK || !catchup_success.load()) {
+  if (status != OpStatus::OK || !catchup_success.load()) {
     sf_->service().SwitchState(GlobalState::TAKEN_OVER, GlobalState::ACTIVE);
+    LOG(INFO) << status << " " << catchup_success.load() << " " << &status;
     return rb->SendError("Takeover failed!");
   }
 

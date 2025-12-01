@@ -183,6 +183,11 @@ class DflyCmd {
   // Switch to stable state replication.
   void StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* rb);
 
+  // Helper for takeover flow. Sometimes connections get stuck on send (because of pipelines)
+  // and this causes the takeover flow to fail because checkpoint messages are not processed.
+  // This function force shuts down those connection and allows the node to complete the takeover.
+  void ForceShutdownStuckConnections(uint64_t timeout);
+
   // TAKEOVER <syncid>
   // Shut this master down atomically with replica promotion.
   void TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
