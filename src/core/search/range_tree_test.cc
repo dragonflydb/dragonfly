@@ -310,6 +310,58 @@ TEST_F(RangeTreeTest, Range) {
   }
 }
 
+// Don't split single block with same value
+TEST_F(RangeTreeTest, SingleBlockSplit) {
+  RangeTree tree{PMR_NS::get_default_resource(), 4};
+
+  for (DocId id = 1; id <= 16; id++)
+    tree.Add(id, 5.0);
+
+  // One split was made to create an empty leftmost block
+  auto stats = tree.GetStats();
+  EXPECT_EQ(stats.splits, 1u);
+  EXPECT_EQ(stats.block_count, 2u);
+
+  // Add value that causes one more split
+  tree.Add(20, 6.0);
+
+  stats = tree.GetStats();
+  EXPECT_EQ(stats.splits, 2u);
+  EXPECT_EQ(stats.block_count, 3u);
+
+  // No more splits with same 5.0
+  tree.Add(17, 5.0);
+  stats = tree.GetStats();
+  EXPECT_EQ(stats.splits, 2u);
+
+  // Verify block sizes
+  auto blocks = tree.GetAllBlocks();
+  EXPECT_EQ(blocks[0]->Size(), 0u);
+  EXPECT_EQ(blocks[1]->Size(), 17u);
+  EXPECT_EQ(blocks[2]->Size(), 1u);
+}
+
+TEST_F(RangeTreeTest, BlockMerge) {
+  RangeTree tree{PMR_NS::get_default_resource(), 8};
+  for (DocId id = 1; id <= 8; id++)
+    tree.Add(id, id);
+
+  tree.Add(9, 9.0);  // will cause split
+
+  auto stats = tree.GetStats();
+  EXPECT_EQ(stats.splits, 1u);
+  EXPECT_EQ(stats.block_count, 2u);
+
+  // Delete all except first and last, should trigger merge
+  for (DocId id = 2; id <= 8; id++)
+    tree.Remove(id, id);
+
+  // Only one block left now
+  stats = tree.GetStats();
+  EXPECT_EQ(stats.merges, 1u);
+  EXPECT_EQ(stats.block_count, 1u);
+}
+
 TEST_F(RangeTreeTest, BugNotUniqueDoubleValues) {
   // TODO: fix the bug
   GTEST_SKIP() << "Bug not fixed yet";

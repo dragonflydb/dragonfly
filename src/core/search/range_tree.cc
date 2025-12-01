@@ -96,7 +96,8 @@ void RangeTree::Add(DocId id, double value) {
     return;
 
   // Block consists just of a single value, not worth trying
-  if (lb == block.maxv)
+  // TODO: Detect even before inserting
+  if (lb == block.max_seen)
     return;
 
   SplitBlock(it);
@@ -119,6 +120,7 @@ void RangeTree::Remove(DocId id, double value) {
       for (auto e : block)
         lblock.Insert(e);
       entries_.erase(it);
+      stats_.merges++;
     }
   }
 }
@@ -237,6 +239,7 @@ void RangeTree::SplitBlock(Map::iterator it) {
   DCHECK(!split_result.right.Empty());
 
   entries_.erase(it);
+  stats_.splits++;
 
   if (l != m) {
     // If l == m, it means that all values in the block were equal to the median value
@@ -249,6 +252,10 @@ void RangeTree::SplitBlock(Map::iterator it) {
                    std::forward_as_tuple(std::move(split_result.right), split_result.rmax));
 
   DCHECK(TreeIsInCorrectState());
+}
+
+RangeTree::Stats RangeTree::GetStats() const {
+  return Stats{.splits = stats_.splits, .merges = stats_.merges, .block_count = entries_.size()};
 }
 
 // Used for DCHECKs to check that the tree is in a correct state.

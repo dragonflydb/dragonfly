@@ -42,22 +42,22 @@ class RangeTree {
     }
 
     RangeBlock(BlockList<SortedVector<Entry>>&& bs, double maxv)
-        : BlockList{std::move(bs)}, maxv{maxv} {
+        : BlockList{std::move(bs)}, max_seen{maxv} {
     }
 
     bool Insert(Entry e) {
-      maxv = std::max(maxv, e.second);
+      max_seen = std::max(max_seen, e.second);
       return BlockList::Insert(e);
     }
 
-    double maxv = -std::numeric_limits<double>::infinity();  // max value seen
+    // Max value seen, might be not present anymore
+    double max_seen = -std::numeric_limits<double>::infinity();
   };
 
   using Map = absl::btree_map<double, RangeBlock, std::less<>,
                               PMR_NS::polymorphic_allocator<std::pair<double, RangeBlock>>>;
 
   static constexpr size_t kDefaultMaxRangeBlockSize = 10'000;
-  static constexpr size_t kBlockSize = 400;
 
   explicit RangeTree(PMR_NS::memory_resource* mr,
                      size_t max_range_block_size = kDefaultMaxRangeBlockSize,
@@ -80,6 +80,14 @@ class RangeTree {
 
   void FinalizeInitialization();
 
+  struct Stats {
+    size_t splits = 0;
+    size_t merges = 0;
+    size_t block_count = 0;
+  };
+
+  Stats GetStats() const;
+
  private:
   Map::iterator FindRangeBlock(double value);
   Map::const_iterator FindRangeBlock(double value) const;
@@ -93,6 +101,11 @@ class RangeTree {
   // The maximum size of a range block. If a block exceeds this size, it will be split
   size_t max_range_block_size_;
   Map entries_;
+
+  struct {
+    size_t splits = 0;
+    size_t merges = 0;
+  } stats_;
 
   /* During index initialization, we are using temporary buffer to store all entries.
      That is needed to avoid unnecessary complexity of splitting blocks.

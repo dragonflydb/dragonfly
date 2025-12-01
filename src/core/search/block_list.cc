@@ -59,9 +59,9 @@ SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list
 
   if (left.Size() < right.Size()) {
     // If left is smaller, we can add median entries to it
-    // We need to change median value to the right part
-    median_value = rmin;
+    // We need to change median value to the right part and update lmax
     lmax = median_value;
+    median_value = rmin;
     for (const auto& entry : median_entries) {
       left.Insert(entry);
     }
