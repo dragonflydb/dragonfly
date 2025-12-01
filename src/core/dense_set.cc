@@ -415,13 +415,7 @@ void DenseSet::ShrinkBucket(size_t bucket_idx) {
     uint32_t new_bid = BucketId(obj, 0);
     DVLOG(2) << " Shrink: Moving from " << bucket_idx << " to " << new_bid;
     bool was_empty = entries_[new_bid].IsEmpty();
-
-    DensePtr obj_ptr;
-    obj_ptr.SetObject(obj);
-    if (has_ttl) {
-      obj_ptr.SetTtl(true);
-    }
-    PushFront(entries_.begin() + new_bid, obj_ptr);
+    PushFront(entries_.begin() + new_bid, obj, has_ttl);
     if (was_empty) {
       ++num_used_buckets_;
     }
