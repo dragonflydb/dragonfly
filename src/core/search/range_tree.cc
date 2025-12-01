@@ -79,8 +79,7 @@ RangeTree::RangeTree(PMR_NS::memory_resource* mr, size_t max_range_block_size,
       entries_(mr),
       enable_splitting_(enable_splitting) {
   entries_.emplace(
-      std::piecewise_construct,
-      std::forward_as_tuple(-std::numeric_limits<RangeNumber>::infinity()),
+      std::piecewise_construct, std::forward_as_tuple(-std::numeric_limits<double>::infinity()),
       std::forward_as_tuple(entries_.get_allocator().resource(), max_range_block_size_));
 }
 
@@ -88,16 +87,19 @@ void RangeTree::Add(DocId id, double value) {
   DCHECK(std::isfinite(value));
 
   auto it = FindRangeBlock(value);
-  RangeBlock& block = it->second;
+  auto& [lb, block] = *it;
 
   auto insert_result = block.Insert({id, value});
   LOG_IF(ERROR, !insert_result) << "RangeTree: Failed to insert id: " << id << ", value: " << value;
 
-  if (!enable_splitting_ || block.Size() <= max_range_block_size_) {
+  if (!enable_splitting_ || block.Size() <= max_range_block_size_)
     return;
-  }
 
-  SplitBlock(std::move(it));
+  // Block consists just of a single value, not worth trying
+  if (lb == block.maxv)
+    return;
+
+  SplitBlock(it);
 }
 
 void RangeTree::Remove(DocId id, double value) {
@@ -109,10 +111,16 @@ void RangeTree::Remove(DocId id, double value) {
   auto remove_result = block.Remove({id, value});
   LOG_IF(ERROR, !remove_result) << "RangeTree: Failed to remove id: " << id << ", value: " << value;
 
-  // TODO: maybe merging blocks if they are too small
-  // The problem that for each mutable operation we do Remove and then Add,
-  // So we can do merge and split for one operation.
-  // Or in common cases users do not remove a lot of documents?
+  // Merge with left block if both are relatively small and won't be forced to split soon
+  if (block.size() < max_range_block_size_ / 4 && it != entries_.begin()) {
+    auto lit = --it;
+    auto& lblock = lit->second;
+    if (block.Size() + lblock.Size() < max_range_block_size_ / 2) {
+      for (auto e : block)
+        lblock.Insert(e);
+      entries_.erase(it);
+    }
+  }
 }
 
 RangeResult RangeTree::Range(double l, double r) const {
@@ -221,11 +229,11 @@ TODO: we can optimize this case by splitting to three blocks:
  - empty right block with range [std::nextafter(m, +inf), r)
 */
 void RangeTree::SplitBlock(Map::iterator it) {
-  const RangeNumber l = it->first;
+  const double l = it->first;
 
   auto split_result = Split(std::move(it->second));
 
-  const RangeNumber m = split_result.median;
+  const double m = split_result.median;
   DCHECK(!split_result.right.Empty());
 
   entries_.erase(it);
@@ -234,11 +242,11 @@ void RangeTree::SplitBlock(Map::iterator it) {
     // If l == m, it means that all values in the block were equal to the median value
     // We can not insert an empty block with range [l, l) because it is not valid.
     entries_.emplace(std::piecewise_construct, std::forward_as_tuple(l),
-                     std::forward_as_tuple(std::move(split_result.left)));
+                     std::forward_as_tuple(std::move(split_result.left), split_result.lmax));
   }
 
   entries_.emplace(std::piecewise_construct, std::forward_as_tuple(m),
-                   std::forward_as_tuple(std::move(split_result.right)));
+                   std::forward_as_tuple(std::move(split_result.right), split_result.rmax));
 
   DCHECK(TreeIsInCorrectState());
 }
@@ -249,9 +257,9 @@ void RangeTree::SplitBlock(Map::iterator it) {
     return false;
   }
 
-  Key prev_range = entries_.begin()->first;
+  double prev_range = entries_.begin()->first;
   for (auto it = std::next(entries_.begin()); it != entries_.end(); ++it) {
-    const Key& current_range = it->first;
+    const double& current_range = it->first;
 
     // Check that ranges are non-overlapping and sorted
     // Also there can not be gaps between ranges

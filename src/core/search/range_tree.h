@@ -33,14 +33,30 @@ class RangeTree {
  public:
   friend class RangeResult;
 
-  using RangeNumber = double;
-  using Key = RangeNumber;
   using Entry = std::pair<DocId, double>;
-  using RangeBlock = BlockList<SortedVector<Entry>>;
-  using Map = absl::btree_map<Key, RangeBlock, std::less<Key>,
-                              PMR_NS::polymorphic_allocator<std::pair<const Key, RangeBlock>>>;
 
-  static constexpr size_t kDefaultMaxRangeBlockSize = 7000;
+  // Main node of numeric tree
+  struct RangeBlock : public BlockList<SortedVector<Entry>> {
+    template <typename... Ts>
+    explicit RangeBlock(PMR_NS::memory_resource* mr, Ts... ts) : BlockList{mr, ts...} {
+    }
+
+    RangeBlock(BlockList<SortedVector<Entry>>&& bs, double maxv)
+        : BlockList{std::move(bs)}, maxv{maxv} {
+    }
+
+    bool Insert(Entry e) {
+      maxv = std::max(maxv, e.second);
+      return BlockList::Insert(e);
+    }
+
+    double maxv = -std::numeric_limits<double>::infinity();  // max value seen
+  };
+
+  using Map = absl::btree_map<double, RangeBlock, std::less<>,
+                              PMR_NS::polymorphic_allocator<std::pair<double, RangeBlock>>>;
+
+  static constexpr size_t kDefaultMaxRangeBlockSize = 10'000;
   static constexpr size_t kBlockSize = 400;
 
   explicit RangeTree(PMR_NS::memory_resource* mr,
