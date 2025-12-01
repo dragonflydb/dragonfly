@@ -12,6 +12,7 @@
 
 #include "base/logging.h"
 #include "core/search/hnsw_alg.h"
+#include "core/search/time_sliced_mrmw_mutex.h"
 #include "core/search/vector_utils.h"
 
 namespace dfly::search {
@@ -54,6 +55,16 @@ class HnswSpace : public hnswlib::SpaceInterface<float> {
     return &dim_;
   }
 };
+
+MRMWMutexOptions CreateMrmwMutexOptions() {
+  MRMWMutexOptions options;
+  options.read_quota_duration = absl::Milliseconds(10);
+  options.read_switch_grace_period = absl::Milliseconds(1);
+  options.write_quota_duration = absl::Milliseconds(1);
+  options.write_switch_grace_period = absl::Microseconds(200);
+  return options;
+}
+
 }  // namespace
 
 // TODO: to replace it and use HierarchicalNSW directly.
@@ -63,13 +74,14 @@ struct HnswlibAdapter {
 
   explicit HnswlibAdapter(const SchemaField::VectorParams& params)
       : space_{params.dim, params.sim},
-        world_{&space_, params.capacity, params.hnsw_m, params.hnsw_ef_construction,
-               100 /* seed*/} {
+        world_{&space_, params.capacity, params.hnsw_m, params.hnsw_ef_construction, 100 /* seed*/},
+        time_sliced_mutex_(CreateMrmwMutexOptions()) {
   }
 
   void Add(const float* data, GlobalDocId id) {
     while (true) {
       try {
+        MRMWWriterMutexLock mrmw_lock(&time_sliced_mutex_);
         absl::ReaderMutexLock lock(&resize_mutex_);
         world_.addPoint(data, id);
         return;
@@ -94,6 +106,7 @@ struct HnswlibAdapter {
 
   vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
     world_.setEf(ef.value_or(kDefaultEfRuntime));
+    MRMWReaderMutexLock mrmw_lock(&time_sliced_mutex_);
     return QueueToVec(world_.searchKnn(target, k));
   }
 
@@ -111,6 +124,7 @@ struct HnswlibAdapter {
 
     world_.setEf(ef.value_or(kDefaultEfRuntime));
     BinsearchFilter filter{&allowed};
+    MRMWReaderMutexLock mrmw_lock(&time_sliced_mutex_);
     return QueueToVec(world_.searchKnn(target, k, &filter));
   }
 
@@ -153,6 +167,7 @@ struct HnswlibAdapter {
   HnswSpace space_;
   HierarchicalNSW<float> world_;
   absl::Mutex resize_mutex_;
+  mutable TimeSlicedMRMWMutex time_sliced_mutex_;
 };
 
 HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource*)
