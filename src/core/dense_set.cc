@@ -390,33 +390,41 @@ void DenseSet::ShrinkBucket(size_t bucket_idx) {
   // Take the entire bucket to avoid infinite loop when new_bid == bucket_idx
   DensePtr bucket = entries_[bucket_idx];
   entries_[bucket_idx].Reset();
+  --num_used_buckets_;
 
   // Process the taken bucket chain
   while (!bucket.IsEmpty()) {
     // Pop front from local chain
     DensePtr dptr = bucket;
-    if (bucket.IsObject()) {
-      bucket.Reset();
-    } else {
-      bucket = bucket.AsLink()->next;
-    }
+    bucket = bucket.IsObject() ? DensePtr{} : bucket.AsLink()->next;
 
     void* obj = dptr.GetObject();
+    bool has_ttl = dptr.HasTtl();
 
-    // Check expiry
-    if (dptr.HasTtl() && ObjExpireTime(obj) <= time_now_) {
+    // Free link unconditionally - PushFront will create new one if needed
+    if (dptr.IsLink()) {
+      FreeLink(dptr.AsLink());
+    }
+
+    if (has_ttl && ObjExpireTime(obj) <= time_now_) {
       ObjDelete(obj, true);
-      if (dptr.IsLink()) {
-        FreeLink(dptr.AsLink());
-      }
       --size_;
       continue;
     }
 
     uint32_t new_bid = BucketId(obj, 0);
     DVLOG(2) << " Shrink: Moving from " << bucket_idx << " to " << new_bid;
-    dptr.ClearDisplaced();
-    PushFront(entries_.begin() + new_bid, dptr);
+    bool was_empty = entries_[new_bid].IsEmpty();
+
+    DensePtr obj_ptr;
+    obj_ptr.SetObject(obj);
+    if (has_ttl) {
+      obj_ptr.SetTtl(true);
+    }
+    PushFront(entries_.begin() + new_bid, obj_ptr);
+    if (was_empty) {
+      ++num_used_buckets_;
+    }
   }
 }
 
