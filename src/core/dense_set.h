@@ -406,11 +406,6 @@ class DenseSet {
   // If ptr is a link then it will be deleted internally.
   void Delete(DensePtr* prev, DensePtr* ptr);
 
-  // Extracts an element from its chain position for relocation during Shrink.
-  // Returns the DensePtr that was removed.
-  // Updates curr to the next element to process, or nullptr if iteration should stop.
-  DensePtr ExtractFromChain(DensePtr* prev, DensePtr*& curr);
-
   // Processes a single bucket during Shrink, relocating elements as needed.
   void ShrinkBucket(size_t bucket_idx);
 

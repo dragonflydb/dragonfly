@@ -382,15 +382,15 @@ async def test_memory_shrink_basic(df_factory: DflyInstanceFactory):
         await client.srem("myset", f"elem_{i}")
 
     # Shrink the set and verify bytes saved
-    bytes_saved = await client.execute_command("MEMORY SHRINK", "myset")
+    bytes_saved = await client.execute_command("SHRINK", "myset")
     assert bytes_saved > 0, f"Expected bytes_saved > 0, got {bytes_saved}"
 
     # Shrinking again should return 0 (already optimal)
-    bytes_saved_again = await client.execute_command("MEMORY SHRINK", "myset")
+    bytes_saved_again = await client.execute_command("SHRINK", "myset")
     assert bytes_saved_again == 0, f"Expected 0, got {bytes_saved_again}"
 
     # Non-existent key returns null
-    result = await client.execute_command("MEMORY SHRINK", "nonexistent")
+    result = await client.execute_command("SHRINK", "nonexistent")
     assert result is None
 
 
@@ -408,7 +408,7 @@ async def test_memory_shrink_with_scan(df_factory: DflyInstanceFactory):
     cursor, keys = await client.sscan("set:0", 0, count=50)
 
     # Shrink during scan
-    await client.execute_command("MEMORY SHRINK", "set:0")
+    await client.execute_command("SHRINK", "set:0")
 
     # Continue and complete scan
     all_keys = set(keys)

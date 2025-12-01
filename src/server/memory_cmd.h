@@ -22,7 +22,6 @@ class MemoryCmd {
   void ArenaStats(CmdArgList args);
   void Usage(std::string_view key, bool account_key_memory_usage);
   void Track(CmdArgList args);
-  void Shrink(std::string_view key);
 
   ConnectionContext* cntx_;
   ServerFamily* owner_;

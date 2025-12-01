@@ -803,9 +803,12 @@ TEST_F(StringSetTest, TransferTTLFlagLinkToObjectOnDelete) {
   EXPECT_EQ(1u, it.ExpiryTime());
 }
 
-TEST_F(StringSetTest, BasicShrink) {
-  // Add elements and then grow to have extra capacity
-  constexpr size_t num_strs = 32;
+class ShrinkTest : public StringSetTest, public ::testing::WithParamInterface<size_t> {};
+
+TEST_P(ShrinkTest, BasicShrink) {
+  constexpr size_t num_strs = 1000000;
+  size_t shrink_to = GetParam();
+
   vector<string> strs;
   for (size_t i = 0; i < num_strs; ++i) {
     strs.push_back(random_string(generator_, 10));
@@ -813,15 +816,14 @@ TEST_F(StringSetTest, BasicShrink) {
   }
 
   // Grow to a larger size
-  ss_->Reserve(256);
+  ss_->Reserve(1 << 22);
   size_t original_bucket_count = ss_->BucketCount();
-  EXPECT_EQ(original_bucket_count, 256u);
+  EXPECT_EQ(original_bucket_count, 1u << 22);
 
-  // Shrink to half the size using Shrink
-  size_t new_size = original_bucket_count / 2;
-  ss_->Shrink(new_size);
+  // Shrink to the parameterized size
+  ss_->Shrink(shrink_to);
 
-  EXPECT_EQ(ss_->BucketCount(), new_size);
+  EXPECT_EQ(ss_->BucketCount(), shrink_to);
   EXPECT_EQ(ss_->UpperBoundSize(), num_strs);
 
   // Verify all elements are still accessible
@@ -830,39 +832,74 @@ TEST_F(StringSetTest, BasicShrink) {
   }
 }
 
+INSTANTIATE_TEST_SUITE_P(ShrinkSizes, ShrinkTest,
+                         ::testing::Values(1u << 21,   // 2M buckets (sparse)
+                                           1u << 20,   // 1M buckets (~1 per bucket)
+                                           1u << 19),  // 512K buckets (~2 per bucket)
+                         [](const auto& info) { return absl::StrCat("buckets_", info.param); });
+
 TEST_F(StringSetTest, ShrinkWithTTL) {
-  // Add elements with TTL
-  constexpr size_t num_strs = 16;
-  vector<string> strs;
+  constexpr size_t num_strs = 1000000;
+
+  // Track elements by their TTL category
+  vector<string> expired_strs;    // TTL 1-50, will expire
+  vector<string> surviving_strs;  // TTL 51-100, will survive
+  vector<string> no_ttl_strs;     // No TTL, will survive
+
   for (size_t i = 0; i < num_strs; ++i) {
-    strs.push_back(random_string(generator_, 10));
-    EXPECT_TRUE(ss_->Add(strs.back(), 100));  // TTL of 100
+    string str = random_string(generator_, 10);
+    if (i % 3 == 0) {
+      // No TTL
+      EXPECT_TRUE(ss_->Add(str));
+      no_ttl_strs.push_back(str);
+    } else if (i % 3 == 1) {
+      // TTL 1-50 (will expire when time=50)
+      uint32_t ttl = (i % 50) + 1;
+      EXPECT_TRUE(ss_->Add(str, ttl));
+      expired_strs.push_back(str);
+    } else {
+      // TTL 51-100 (will survive when time=50)
+      uint32_t ttl = (i % 50) + 51;
+      EXPECT_TRUE(ss_->Add(str, ttl));
+      surviving_strs.push_back(str);
+    }
   }
 
   // Grow to larger size
-  ss_->Reserve(128);
-  size_t original_bucket_count = ss_->BucketCount();
+  ss_->Reserve(1 << 22);
 
-  // Shrink using Shrink
-  size_t new_size = original_bucket_count / 2;
-  ss_->Shrink(new_size);
+  // Set time to 50 - this will expire elements with TTL <= 50
+  ss_->set_time(50);
 
-  EXPECT_EQ(ss_->BucketCount(), new_size);
-  EXPECT_EQ(ss_->UpperBoundSize(), num_strs);
+  // Shrink
+  ss_->Shrink(1 << 21);
+  EXPECT_EQ(ss_->BucketCount(), 1u << 21);
 
-  // Verify all elements are still accessible with correct TTL
-  for (const auto& str : strs) {
+  // Verify expired elements are gone
+  for (const auto& str : expired_strs) {
+    EXPECT_EQ(ss_->Find(str), ss_->end()) << "Should be expired: " << str;
+  }
+
+  // Verify surviving TTL elements are still accessible with correct TTL
+  for (const auto& str : surviving_strs) {
     auto it = ss_->Find(str);
-    ASSERT_NE(it, ss_->end()) << "Missing: " << str;
+    ASSERT_NE(it, ss_->end()) << "Missing surviving TTL element: " << str;
     EXPECT_TRUE(it.HasExpiry());
-    EXPECT_EQ(it.ExpiryTime(), 100);
+    EXPECT_GT(it.ExpiryTime(), 50u);
+  }
+
+  // Verify no-TTL elements are still accessible
+  for (const auto& str : no_ttl_strs) {
+    auto it = ss_->Find(str);
+    ASSERT_NE(it, ss_->end()) << "Missing no-TTL element: " << str;
+    EXPECT_FALSE(it.HasExpiry());
   }
 }
 
 TEST_F(StringSetTest, ScanWithShrinkBetweenCalls) {
-  // Test that cursor-based scanning works correctly when Shrink happens between Scan calls
+  // Test that cursor-based scanning works correctly when Grow and Shrink happen between Scan calls
   // This verifies SCAN guarantees: elements present at start and end of scan must be seen
-  constexpr size_t num_strs = 64;
+  constexpr size_t num_strs = 1000000;
   vector<string> strs;
   unordered_set<string> must_see;
 
@@ -873,9 +910,8 @@ TEST_F(StringSetTest, ScanWithShrinkBetweenCalls) {
     must_see.insert(strs.back());
   }
 
-  // Grow to large size first
-  ss_->Reserve(512);
-  EXPECT_EQ(ss_->BucketCount(), 512u);
+  // Note initial bucket count (will be ~1M after adding 1M elements)
+  size_t initial_bucket_count = ss_->BucketCount();
 
   unordered_set<string> seen;
   auto scan_callback = [&](const sds ptr) {
@@ -883,20 +919,25 @@ TEST_F(StringSetTest, ScanWithShrinkBetweenCalls) {
     seen.insert(str);
   };
 
-  // Start scanning
+  // Start scanning BEFORE Grow
   uint32_t cursor = ss_->Scan(0, scan_callback);
-  EXPECT_NE(cursor, 0u) << "Should not finish in one iteration with 512 buckets";
+  EXPECT_NE(cursor, 0u) << "Should not finish in one iteration";
 
-  // Shrink in the middle of scanning - this is the key test
+  // Grow to large size in the middle of scanning
+  ss_->Reserve(1 << 22);
+  EXPECT_EQ(ss_->BucketCount(), 1u << 22);
+  EXPECT_GT(ss_->BucketCount(), initial_bucket_count);
+
+  // Continue scanning a bit after Grow
+  cursor = ss_->Scan(cursor, scan_callback);
+
+  // Now Shrink in the middle of scanning - this is the key test
   // Elements that existed at scan start must still be visible
-  ss_->Shrink(128);
-  EXPECT_EQ(ss_->BucketCount(), 128u);
+  ss_->Shrink(1 << 21);
+  EXPECT_EQ(ss_->BucketCount(), 1u << 21);
 
   // Continue scanning with the same cursor
-  // Note: After Shrink with generation change detection, scan restarts from bucket 0
-  // which causes rescanning. This is expected and guarantees no elements are missed.
-  // With 64 elements in 128 buckets, need more iterations after restart.
-  constexpr int max_iterations = 150;
+  constexpr int max_iterations = 1 << 22;
   int iterations = 0;
   while (cursor != 0 && iterations < max_iterations) {
     cursor = ss_->Scan(cursor, scan_callback);
