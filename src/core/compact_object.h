@@ -255,14 +255,6 @@ class CompactObj {
 
   bool DefragIfNeeded(PageUsage* page_usage);
 
-  void SetAsyncDelete() {
-    mask_bits_.io_pending = 1;  // io_pending flag is used for async delete for keys.
-  }
-
-  bool IsAsyncDelete() const {
-    return mask_bits_.io_pending;
-  }
-
   bool HasStashPending() const {
     return mask_bits_.io_pending;
   }
@@ -547,8 +539,8 @@ class CompactObj {
   union {
     uint8_t mask_ = 0;
     struct {
-      uint8_t ref : 1;  // Mark objects that have expiry timestamp assigned.
-      uint8_t expire : 1;
+      uint8_t ref : 1;      // Mark objects that don't own their allocation.
+      uint8_t expire : 1;   // Mark objects that have expiry timestamp assigned.
       uint8_t mc_flag : 1;  // Marks keys that have memcache flags assigned.
 
       // See the EncodingEnum for the meaning of these bits.
@@ -556,7 +548,7 @@ class CompactObj {
 
       // IO_PENDING is set when the tiered storage has issued an i/o request to save the value.
       // It is cleared when the io request finishes or is cancelled.
-      uint8_t io_pending : 1;  // also serves as async-delete for keys.
+      uint8_t io_pending : 1;
       uint8_t sticky : 1;
 
       // TOUCHED used to determin which items are hot/cold.
