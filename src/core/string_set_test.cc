@@ -19,7 +19,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
-#include "core/page_usage_stats.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "redis/sds.h"
 
 extern "C" {

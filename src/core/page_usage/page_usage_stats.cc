@@ -2,7 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
-#include "core/page_usage_stats.h"
+#include "core/page_usage/page_usage_stats.h"
 
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>

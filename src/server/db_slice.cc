@@ -4,6 +4,8 @@
 
 #include "server/db_slice.h"
 
+#include "core/dense_set.h"
+
 extern "C" {
 #include "redis/hyperloglog.h"
 }

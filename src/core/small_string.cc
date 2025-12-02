@@ -10,7 +10,7 @@
 #include <memory>
 
 #include "base/logging.h"
-#include "core/page_usage_stats.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "core/segment_allocator.h"
 
 namespace dfly {
