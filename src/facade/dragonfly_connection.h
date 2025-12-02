@@ -427,7 +427,7 @@ class Connection : public util::Connection {
   util::fb2::Fiber async_fb_;             // async fiber (if started)
 
   std::error_code io_ec_;
-  util::fb2::EventCount io_event_;
+  util::fb2::CondVarAny io_event_;
 
   uint64_t pending_pipeline_cmd_cnt_ = 0;  // how many queued Redis async commands in dispatch_q
   size_t pending_pipeline_bytes_ = 0;      // how many bytes of the queued Redis async commands

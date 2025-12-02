@@ -10,13 +10,9 @@
 #include <absl/strings/str_cat.h>
 #include <absl/time/time.h>
 
-#include <condition_variable>
 #include <numeric>
-#include <utility>
 #include <variant>
 
-#include "absl/cleanup/cleanup.h"
-#include "absl/types/span.h"
 #include "base/cycle_clock.h"
 #include "base/flag_utils.h"
 #include "base/flags.h"
@@ -32,6 +28,7 @@
 #include "facade/service_interface.h"
 #include "facade/socket_utils.h"
 #include "io/file.h"
+#include "util/fiber_socket_base.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/proactor_base.h"
 
@@ -702,7 +699,7 @@ void Connection::OnShutdown() {
 
   BreakOnce(POLLHUP);
   io_ec_ = make_error_code(errc::connection_aborted);
-  io_event_.notify();
+  io_event_.notify_one();
 }
 
 void Connection::OnPreMigrateThread() {
@@ -1105,7 +1102,7 @@ void Connection::ConnectionFlow() {
   if (parse_status != ERROR && !ec) {
     UpdateIoBufCapacity(io_buf_, stats_, [&]() { io_buf_.EnsureCapacity(64); });
     variant<error_code, Connection::ParserStatus> res;
-    if (GetFlag(FLAGS_expiremental_io_loop_v2)) {
+    if (GetFlag(FLAGS_expiremental_io_loop_v2) && !is_tls_) {
       res = IoLoopV2();
     } else {
       res = IoLoop();
@@ -1167,7 +1164,7 @@ void Connection::ConnectionFlow() {
     }
   }
 
-  if (GetFlag(FLAGS_expiremental_io_loop_v2)) {
+  if (GetFlag(FLAGS_expiremental_io_loop_v2) && !is_tls_) {
     socket_->ResetOnRecvHook();
   }
 
@@ -2188,8 +2185,8 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
 
   // TODO non epoll API via EnableRecvMultishot
   // if (std::holds_alternative<io::MutableBytes>(n.read_result))
-
-  if (std::holds_alternative<bool>(n.read_result)) {
+  using RecvNot = util::FiberSocketBase::RecvNotification::RecvCompletion;
+  if (std::holds_alternative<RecvNot>(n.read_result)) {
     if (!std::get<bool>(n.read_result)) {
       io_ec_ = make_error_code(errc::connection_aborted);
       return;
@@ -2201,25 +2198,28 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
     }
 
     io::MutableBytes buf = io_buf_.AppendBuffer();
-    int res = recv(socket_->native_handle(), buf.data(), buf.size(), 0);
+    io::Result<size_t> res = socket_->TryRecv(buf);
 
     // error path
-    if (res < 0) {
-      // LOG(INFO) << "ERROR";
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+    if (!res) {
+      auto ec = res.error();
+      // EAGAIN and EWOULDBLOCK
+      if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block) {
         return;
       }
 
-      if (errno == ECONNRESET) {
+      if (ec == errc::connection_aborted || ec == errc::connection_reset) {
         // The peer can shutdown the connection abruptly.
-        io_ec_ = make_error_code(errc::connection_aborted);
+        io_ec_ = ec;
+        return;
       }
 
-      LOG_IF(FATAL, !io_ec_) << "Recv error: " << strerror(-res) << " errno " << errno;
+      LOG_EVERY_T(ERROR, 10) << "Recv error: " << ec;
+      io_ec_ = ec;
       return;
     }
 
-    if (res == 0) {
+    if (*res == 0) {
       io_ec_ = make_error_code(errc::connection_aborted);
       return;
     }
@@ -2228,7 +2228,7 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
     // TODO maybe worth looping here and try another recv call until it fails
     // with EAGAIN or EWOULDBLOCK. The problem there is that we need to handle
     // resizing if AppendBuffer is zero.
-    io_buf_.CommitWrite(res);
+    io_buf_.CommitWrite(*res);
     return;
   }
 
@@ -2249,7 +2249,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   // Breaks with TLS. RegisterOnRecv is unimplemented.
   peer->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
     DoReadOnRecv(n);
-    io_event_.notify();
+    io_event_.notify_one();
   });
 
   do {
@@ -2262,11 +2262,12 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     // and do not attempt to read from the socket again we can deadlock. To avoid this,
     // we poll once for readiness before preempting.
     DoReadOnRecv(FiberSocketBase::RecvNotification{true});
-    io_event_.await(
-        [this]() { return io_buf_.InputLen() > 0 || io_ec_ || io_buf_.AppendLen() == 0; });
+    fb2::NoOpLock noop;
+    io_event_.wait(
+        noop, [this]() { return io_buf_.InputLen() > 0 || io_ec_ || io_buf_.AppendLen() == 0; });
 
     if (io_ec_) {
-      LOG_IF(WARNING, cntx()->replica_conn) << "async io error: " << ec;
+      LOG_IF(WARNING, cntx()->replica_conn) << "async io error: " << io_ec_;
       return std::exchange(io_ec_, {});
     }
 

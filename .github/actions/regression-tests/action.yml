@@ -58,14 +58,14 @@ runs:
         export ROOT_DIR="${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
-        if [[ "${{inputs.df-arg}}" == 'epoll' ]]; then
-          export DF_ARG="--df ${{inputs.df-arg}}"
+        if [[ "${{inputs.df-arg}}" == 'experimental_io_loop_v2' ]]; then
+          export DF_ARG="--df experimental_io_loop_v2=true"
         fi
 
         if [[ "${{inputs.epoll}}" == 'epoll' ]]; then
           export FILTER="${{inputs.filter}} and not exclude_epoll"
           # Run only replication tests with epoll
-          timeout 80m pytest -m "$FILTER" $DF_ARG --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --df force_epoll=true --df --log-cli-level=INFO || code=$?
+          timeout 80m pytest -m "$FILTER" $DF_ARG --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --df force_epoll=true --log-cli-level=INFO || code=$?
         else
           export FILTER="${{inputs.filter}}"
           # Run only replication tests with iouring

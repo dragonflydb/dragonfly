@@ -860,7 +860,6 @@ async def test_parser_memory_stats(df_server, async_client: aioredis.Redis):
     await check_stats()
 
 
-@pytest.mark.tls
 async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_factory):
     server: DflyInstance = df_factory.create(
         no_tls_on_admin_port="true",
@@ -880,7 +879,6 @@ async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_factor
     assert await client.dbsize() == 0
 
 
-@pytest.mark.tls
 async def test_tls_insecure(with_ca_tls_server_args, with_tls_client_args, df_factory):
     server = df_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
     server.start()
@@ -889,7 +887,6 @@ async def test_tls_insecure(with_ca_tls_server_args, with_tls_client_args, df_fa
     assert await client.dbsize() == 0
 
 
-@pytest.mark.tls
 async def test_tls_full_auth(with_ca_tls_server_args, with_ca_tls_client_args, df_factory):
     server = df_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
     server.start()
@@ -898,7 +895,6 @@ async def test_tls_full_auth(with_ca_tls_server_args, with_ca_tls_client_args, d
     assert await client.dbsize() == 0
 
 
-@pytest.mark.tls
 async def test_tls_reject(
     with_ca_tls_server_args, with_tls_client_args, df_factory: DflyInstanceFactory
 ):
@@ -1083,7 +1079,6 @@ async def test_multiple_blocking_commands_client_pause(async_client: aioredis.Re
     await all
 
 
-@pytest.mark.tls
 async def test_tls_when_read_write_is_interleaved(
     with_ca_tls_server_args, with_ca_tls_client_args, df_factory
 ):
@@ -1361,7 +1356,6 @@ async def test_client_detached_crash(df_factory):
     server.stop()
 
 
-@pytest.mark.tls
 async def test_tls_client_kill_preemption(
     with_ca_tls_server_args, with_ca_tls_client_args, df_factory
 ):
