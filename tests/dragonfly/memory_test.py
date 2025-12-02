@@ -365,3 +365,55 @@ async def test_remove_docs_on_eviction(df_factory):
     keyspace_keys = keyspace_info["db0"]["keys"]
 
     assert index_info_num_docs == keyspace_keys
+
+
+@pytest.mark.asyncio
+async def test_memory_shrink_basic(df_factory: DflyInstanceFactory):
+    df_server = df_factory.create(proactor_threads=2)
+    df_server.start()
+    client = df_server.client()
+
+    # Create sparse set - add many elements then delete most
+    for i in range(10000):
+        await client.sadd("myset", f"elem_{i}")
+
+    # Delete 99% to make it sparse (10000 -> 100)
+    for i in range(9900):
+        await client.srem("myset", f"elem_{i}")
+
+    # Shrink the set and verify bytes saved
+    bytes_saved = await client.execute_command("SHRINK", "myset")
+    assert bytes_saved > 0, f"Expected bytes_saved > 0, got {bytes_saved}"
+
+    # Shrinking again should return 0 (already optimal)
+    bytes_saved_again = await client.execute_command("SHRINK", "myset")
+    assert bytes_saved_again == 0, f"Expected 0, got {bytes_saved_again}"
+
+    # Non-existent key returns null
+    result = await client.execute_command("SHRINK", "nonexistent")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_memory_shrink_with_scan(df_factory: DflyInstanceFactory):
+    df_server = df_factory.create(proactor_threads=1)
+    df_server.start()
+    client = df_server.client()
+
+    # Create set with many elements
+    for i in range(100):
+        await client.sadd("set:0", *[f"elem_{j}" for j in range(i * 10, (i + 1) * 10)])
+
+    # Start SCAN
+    cursor, keys = await client.sscan("set:0", 0, count=50)
+
+    # Shrink during scan
+    await client.execute_command("SHRINK", "set:0")
+
+    # Continue and complete scan
+    all_keys = set(keys)
+    while cursor != 0:
+        cursor, keys = await client.sscan("set:0", cursor, count=50)
+        all_keys.update(keys)
+
+    assert len(all_keys) == 1000
