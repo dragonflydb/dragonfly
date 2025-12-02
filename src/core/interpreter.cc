@@ -818,7 +818,7 @@ void Interpreter::SetLegacyFloatMode(bool enable) {
   // but are converted to integers on return.
   // Note: We use the __dfly__ table (created in InitLua before strict mode) to store state.
   static const char kEnableLegacyFloat[] = R"(
-if not __dfly__.orig_tostring then
+if type(__dfly__) == "table" and not __dfly__.orig_tostring then
   __dfly__.orig_tostring = tostring
   __dfly__.orig_cjson_decode = cjson.decode
 
@@ -851,7 +851,7 @@ end
 )";
 
   static const char kDisableLegacyFloat[] = R"(
-if __dfly__.orig_tostring then
+if type(__dfly__) == "table" and __dfly__.orig_tostring then
   tostring = __dfly__.orig_tostring
   cjson.decode = __dfly__.orig_cjson_decode
   __dfly__.orig_tostring = nil
