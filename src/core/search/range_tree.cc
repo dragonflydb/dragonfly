@@ -91,6 +91,8 @@ void RangeTree::Add(DocId id, double value) {
   if (enable_splitting_ && block.Size() >= max_range_block_size_ &&
       lb == block.max_seen /* monovalue */ && value != lb /* but new value is different*/
   ) {
+    // We use nextafter as the lower bound to "catch" all other possible inserts into the block,
+    // as a decreasing `value` sequence would otherwise create lots of single-value blocks
     double lb2 = std::nextafter(lb, std::numeric_limits<double>::infinity());
     CreateEmptyBlock(lb2)->second.Insert({id, value});
     return;
