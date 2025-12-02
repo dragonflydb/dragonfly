@@ -26,11 +26,13 @@ class ScriptMgr {
   struct ScriptParams {
     bool atomic = true;            // Whether script must run atomically.
     bool undeclared_keys = false;  // Whether script accesses undeclared keys.
+    bool float_as_int = false;     // Whether to return floats as integers.
 
     // Return GenericError if some flag was invalid.
     // Valid flags are:
     // - allow-undeclared-keys -> undeclared_keys=true
     // - disable-atomicity     -> atomic=false
+    // - legacy-float          -> float_as_int=true
     static GenericError ApplyFlags(std::string_view flags, ScriptParams* params);
   };
 

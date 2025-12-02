@@ -866,6 +866,69 @@ TEST_F(MultiTest, UndeclaredKeyFlag) {
   EXPECT_EQ(Run({"evalsha", sha, "0"}), "works");
 }
 
+TEST_F(MultiTest, LegacyFloatFlag) {
+  const char* script_with_flag = R"(
+  --!df flags=legacy-float
+  return 42.9
+)";
+  EXPECT_THAT(Run({"eval", script_with_flag, "0"}), IntArg(42));
+
+  const char* script_negative = R"(
+  --!df flags=legacy-float
+  return -3.8
+)";
+  EXPECT_THAT(Run({"eval", script_negative, "0"}), IntArg(-3));
+
+  EXPECT_THAT(Run({"eval", "return 42.9", "0"}), DoubleArg(42.9));
+
+  const char* script = "return 42.9";
+  char sha_buf[41];
+  Interpreter::FuncSha1(script, sha_buf);
+  string_view sha{sha_buf, 40};
+
+  EXPECT_EQ(Run({"script", "flags", string(sha), "legacy-float"}), "OK");
+
+  EXPECT_THAT(Run({"eval", script, "0"}), IntArg(42));
+}
+
+TEST_F(MultiTest, LegacyFloatShaFlag) {
+  absl::FlagSaver fs;
+
+  const char* script = "return 42.9";
+  string sha = Run({"script", "load", script}).GetString();
+
+  EXPECT_THAT(Run({"evalsha", sha, "0"}), DoubleArg(42.9));
+
+  Run({"script", "flush"});
+  EXPECT_THAT(Run({"config", "set", "lua_float_as_int_shas", sha}), "OK");
+
+  EXPECT_THAT(Run({"eval", script, "0"}), IntArg(42));
+}
+
+TEST_F(MultiTest, LegacyFloatInternalBehavior) {
+  const char* script_tostring = R"(
+    --!df flags=legacy-float
+    return tostring(1.0)
+  )";
+  EXPECT_EQ(Run({"eval", script_tostring, "0"}), "1");
+
+  const char* script_tostring_noflag = "return tostring(1.0)";
+  EXPECT_EQ(Run({"eval", script_tostring_noflag, "0"}), "1.0");
+
+  const char* script_cjson = R"(
+    --!df flags=legacy-float
+    local obj = cjson.decode('{"value": 42}')
+    return tostring(obj.value)
+  )";
+  EXPECT_EQ(Run({"eval", script_cjson, "0"}), "42");
+
+  const char* script_cjson_noflag = R"(
+    local obj = cjson.decode('{"value": 42}')
+    return tostring(obj.value)
+  )";
+  EXPECT_EQ(Run({"eval", script_cjson_noflag, "0"}), "42.0");
+}
+
 TEST_F(MultiTest, ScriptBadCommand) {
   const char* s1 = "redis.call('FLUSHALL')";
   const char* s2 = "redis.call('FLUSHALL'); redis.set(KEYS[1], ARGS[1]);";

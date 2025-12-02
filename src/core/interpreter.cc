@@ -360,6 +360,11 @@ void InitLua(lua_State* lua) {
   LoadLibrary(lua, "cmsgpack", luaopen_cmsgpack);
   LoadLibrary(lua, "bit", luaopen_bit);
 
+  // Create a table to store dragonfly internal state (before strict mode is enabled).
+  // This table will be used by SetLegacyFloatMode to store original function references.
+  lua_newtable(lua);
+  lua_setglobal(lua, "__dfly__");
+
   /* Add a helper function we use for pcall error reporting.
    * Note that when the error is in the C function we want to report the
    * information about the caller, that's what makes sense from the point
@@ -805,6 +810,57 @@ auto Interpreter::RunFunction(string_view sha, std::string* error) -> RunResult 
   }
 
   return err == 0 ? RUN_OK : RUN_ERR;
+}
+
+void Interpreter::SetLegacyFloatMode(bool enable) {
+  // This Lua code wraps cjson.decode and tostring to convert whole-number floats to integers.
+  // This provides compatibility with Lua 5.1 behavior where all numbers are doubles
+  // but are converted to integers on return.
+  // Note: We use the __dfly__ table (created in InitLua before strict mode) to store state.
+  static const char kEnableLegacyFloat[] = R"(
+if not __dfly__.orig_tostring then
+  __dfly__.orig_tostring = tostring
+  __dfly__.orig_cjson_decode = cjson.decode
+
+  local orig_tostring = tostring
+  local orig_cjson_decode = cjson.decode
+  local floor = math.floor
+
+  tostring = function(v)
+    if type(v) == "number" and v == floor(v) then
+      return orig_tostring(floor(v))
+    end
+    return orig_tostring(v)
+  end
+
+  local function fix_numbers(obj)
+    if type(obj) == "table" then
+      for k, v in pairs(obj) do
+        obj[k] = fix_numbers(v)
+      end
+    elseif type(obj) == "number" and obj == floor(obj) then
+      return floor(obj)
+    end
+    return obj
+  end
+
+  cjson.decode = function(str)
+    return fix_numbers(orig_cjson_decode(str))
+  end
+end
+)";
+
+  static const char kDisableLegacyFloat[] = R"(
+if __dfly__.orig_tostring then
+  tostring = __dfly__.orig_tostring
+  cjson.decode = __dfly__.orig_cjson_decode
+  __dfly__.orig_tostring = nil
+  __dfly__.orig_cjson_decode = nil
+end
+)";
+
+  const char* code = enable ? kEnableLegacyFloat : kDisableLegacyFloat;
+  RunSafe(lua_, code, enable ? "@enable_legacy_float" : "@disable_legacy_float");
 }
 
 void Interpreter::SetGlobalArray(const char* name, SliceSpan args) {

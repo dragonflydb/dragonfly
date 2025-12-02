@@ -378,7 +378,8 @@ class InterpreterReplier : public RedisReplyBuilder {
 // Serialized result of script invocation to Redis protocol
 class EvalSerializer : public ObjectExplorer {
  public:
-  explicit EvalSerializer(RedisReplyBuilder* rb) : rb_(rb) {
+  explicit EvalSerializer(RedisReplyBuilder* rb, bool float_as_int = false)
+      : rb_(rb), float_as_int_(float_as_int) {
   }
 
   void OnBool(bool b) final {
@@ -394,7 +395,7 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnDouble(double d) final {
-    if (GetFlag(FLAGS_lua_resp2_legacy_float)) {
+    if (float_as_int_ || GetFlag(FLAGS_lua_resp2_legacy_float)) {
       const long val = d >= 0 ? static_cast<long>(floor(d)) : static_cast<long>(ceil(d));
       rb_->SendLong(val);
     } else {
@@ -438,6 +439,7 @@ class EvalSerializer : public ObjectExplorer {
 
  private:
   RedisReplyBuilder* rb_;
+  bool float_as_int_;
 };
 
 void InterpreterReplier::PostItem() {
@@ -2285,6 +2287,10 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   if (!params)
     return builder->SendError(facade::kScriptNotFound);
 
+  // Enable legacy float mode for scripts that need it (e.g., django-cacheops).
+  // This makes cjson.decode and tostring behave like Lua 5.1.
+  interpreter->SetLegacyFloatMode(params->float_as_int);
+
   string error;
 
   DCHECK(!cntx->conn_state.script_info);  // we should not call eval from the script.
@@ -2321,8 +2327,11 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
 
-  absl::Cleanup clean = [interpreter, &sinfo]() {
+  absl::Cleanup clean = [interpreter, &sinfo, float_as_int = params->float_as_int]() {
     interpreter->ResetStack();
+    if (float_as_int) {
+      interpreter->SetLegacyFloatMode(false);  // Restore original behavior
+    }
     sinfo.reset();
   };
 
@@ -2399,7 +2408,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   // TODO(vlad): Investigate if using ReplyScope here is possible with a different serialization
   // strategy due to currently SerializeResult destructuring a value while serializing
   SinkReplyBuilder::ReplyAggregator agg(builder);
-  EvalSerializer ser{static_cast<RedisReplyBuilder*>(builder)};
+  EvalSerializer ser{static_cast<RedisReplyBuilder*>(builder), params->float_as_int};
   if (!interpreter->IsResultSafe()) {
     builder->SendError("reached lua stack limit");
   } else {
