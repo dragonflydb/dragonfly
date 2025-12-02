@@ -2643,6 +2643,7 @@ void ServerFamily::Shrink(CmdArgList args, const CommandContext& cmd_cntx) {
     }
 
     DenseSet* ds = static_cast<DenseSet*>(pv.RObjPtr());
+    ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
     size_t current_size = ds->UpperBoundSize();
     size_t bucket_count = ds->BucketCount();
 
