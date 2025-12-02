@@ -12,7 +12,7 @@
 
 #include "base/flags.h"
 #include "core/huff_coder.h"
-#include "core/page_usage_stats.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "io/proc_reader.h"
 
 extern "C" {

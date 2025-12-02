@@ -13,7 +13,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/mi_memory_resource.h"
-#include "core/page_usage_stats.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "io/file.h"
 #include "io/line_reader.h"
 
