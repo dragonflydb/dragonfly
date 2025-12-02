@@ -114,10 +114,12 @@ TEST_F(RangeTreeTest, Add) {
   tree.Add(3, 20.0);
   tree.Add(4, 30.0);
   tree.Add(5, 30.0);
+  tree.Add(6, 30.0);
 
   auto result = tree.RangeBlocks(10.0, 30.0);
-  EXPECT_THAT(result, UnorderedElementsAreDocPairs(
-                          {{1, 10.0}, {1, 20.0}, {2, 20.0}, {3, 20.0}, {4, 30.0}, {5, 30.0}}));
+  EXPECT_THAT(result,
+              UnorderedElementsAreDocPairs(
+                  {{1, 10.0}, {1, 20.0}, {2, 20.0}, {3, 20.0}, {4, 30.0}, {5, 30.0}, {6, 30.0}}));
 
   // Test that the ranges was split correctly
   result = tree.RangeBlocks(kMinRangeValue, 19.0);
@@ -127,7 +129,7 @@ TEST_F(RangeTreeTest, Add) {
   EXPECT_THAT(result, UnorderedElementsAreDocPairs({{1, 20.0}, {2, 20.0}, {3, 20.0}}));
 
   result = tree.RangeBlocks(30.0, kMaxRangeValue);
-  EXPECT_THAT(result, UnorderedElementsAreDocPairs({{4, 30.0}, {5, 30.0}}));
+  EXPECT_THAT(result, UnorderedElementsAreDocPairs({{4, 30.0}, {5, 30.0}, {6, 30.0}}));
 }
 
 TEST_F(RangeTreeTest, RemoveSimple) {
@@ -322,17 +324,17 @@ TEST_F(RangeTreeTest, SingleBlockSplit) {
   EXPECT_EQ(stats.splits, 1u);
   EXPECT_EQ(stats.block_count, 2u);
 
-  // Add value that causes one more split
+  // Add value that causes one a new block started
   tree.Add(20, 6.0);
 
   stats = tree.GetStats();
-  EXPECT_EQ(stats.splits, 2u);
-  EXPECT_EQ(stats.block_count, 3u);
+  EXPECT_EQ(stats.splits, 1u);       // detected ahead, so no split
+  EXPECT_EQ(stats.block_count, 3u);  // but new block
 
   // No more splits with same 5.0
   tree.Add(17, 5.0);
   stats = tree.GetStats();
-  EXPECT_EQ(stats.splits, 2u);
+  EXPECT_EQ(stats.splits, 1u);
 
   // Verify block sizes
   auto blocks = tree.GetAllBlocks();

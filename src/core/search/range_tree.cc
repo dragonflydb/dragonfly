@@ -78,9 +78,7 @@ RangeTree::RangeTree(PMR_NS::memory_resource* mr, size_t max_range_block_size,
     : max_range_block_size_(max_range_block_size),
       entries_(mr),
       enable_splitting_(enable_splitting) {
-  entries_.emplace(
-      std::piecewise_construct, std::forward_as_tuple(-std::numeric_limits<double>::infinity()),
-      std::forward_as_tuple(entries_.get_allocator().resource(), max_range_block_size_));
+  CreateEmptyBlock(-std::numeric_limits<double>::infinity());
 }
 
 void RangeTree::Add(DocId id, double value) {
@@ -89,14 +87,22 @@ void RangeTree::Add(DocId id, double value) {
   auto it = FindRangeBlock(value);
   auto& [lb, block] = *it;
 
+  // Don't disrupt large monovalue blocks, instead create new nextafter block
+  if (enable_splitting_ && block.Size() >= max_range_block_size_ &&
+      lb == block.max_seen /* monovalue */ && value != lb /* but new value is different*/
+  ) {
+    double lb2 = std::nextafter(lb, std::numeric_limits<double>::infinity());
+    CreateEmptyBlock(lb2)->second.Insert({id, value});
+    return;
+  }
+
   auto insert_result = block.Insert({id, value});
   LOG_IF(ERROR, !insert_result) << "RangeTree: Failed to insert id: " << id << ", value: " << value;
 
   if (!enable_splitting_ || block.Size() <= max_range_block_size_)
     return;
 
-  // Block consists just of a single value, not worth trying
-  // TODO: Detect even before inserting
+  // Large monovalue block, not reducable by splitting
   if (lb == block.max_seen)
     return;
 
@@ -185,10 +191,7 @@ void RangeTree::FinalizeInitialization() {
   for (size_t b = 0; b < entries.size(); b += max_range_block_size_) {
     RangeBlock* range_block;
     if (b) {
-      auto it = entries_.emplace(
-          std::piecewise_construct, std::forward_as_tuple(entries[b].second),
-          std::forward_as_tuple(entries_.get_allocator().resource(), max_range_block_size_));
-      range_block = &it.first->second;
+      range_block = &CreateEmptyBlock(entries[b].second)->second;
     } else {
       range_block = &block;
     }
@@ -208,6 +211,13 @@ RangeTree::Map::iterator RangeTree::FindRangeBlock(double value) {
 
 RangeTree::Map::const_iterator RangeTree::FindRangeBlock(double value) const {
   return FindRangeBlockImpl(entries_, value);
+}
+
+RangeTree::Map::iterator RangeTree::CreateEmptyBlock(double lb) {
+  return entries_
+      .emplace(std::piecewise_construct, std::forward_as_tuple(lb),
+               std::forward_as_tuple(entries_.get_allocator().resource(), max_range_block_size_))
+      .first;
 }
 
 /*
@@ -231,7 +241,7 @@ TODO: we can optimize this case by splitting to three blocks:
  - empty right block with range [std::nextafter(m, +inf), r)
 */
 void RangeTree::SplitBlock(Map::iterator it) {
-  const double l = it->first;
+  double l = it->first;
 
   auto split_result = Split(std::move(it->second));
 
@@ -241,9 +251,11 @@ void RangeTree::SplitBlock(Map::iterator it) {
   entries_.erase(it);
   stats_.splits++;
 
-  if (l != m) {
-    // If l == m, it means that all values in the block were equal to the median value
-    // We can not insert an empty block with range [l, l) because it is not valid.
+  // Insert left block if its not empty, but always keep left infinity bound
+  if (!split_result.left.Empty() || std::isinf(l)) {
+    if (!std::isinf(l))
+      l = split_result.lmin;
+
     entries_.emplace(std::piecewise_construct, std::forward_as_tuple(l),
                      std::forward_as_tuple(std::move(split_result.left), split_result.lmax));
   }

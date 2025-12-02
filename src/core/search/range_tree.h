@@ -92,6 +92,7 @@ class RangeTree {
   Map::iterator FindRangeBlock(double value);
   Map::const_iterator FindRangeBlock(double value) const;
 
+  Map::iterator CreateEmptyBlock(double lb);
   void SplitBlock(Map::iterator it);
 
   // Used for DCHECKs

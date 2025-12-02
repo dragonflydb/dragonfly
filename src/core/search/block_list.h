@@ -219,6 +219,6 @@ struct SplitResult {
   Container right;
   double median;
 
-  double lmax, rmax;
+  double lmin, lmax, rmax;
 };
 }  // namespace dfly::search
