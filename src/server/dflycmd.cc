@@ -469,7 +469,9 @@ std::optional<LSN> DflyCmd::ParseLsnVec(std::string_view last_master_lsn,
 }
 
 void DflyCmd::ForceShutdownStuckConnections(uint64_t timeout) {
+  // per proactor map
   vector<facade::Connection::WeakRef> conn_refs;
+
   auto cb = [&](unsigned thread_index, util::Connection* conn) {
     facade::Connection* dcon = static_cast<facade::Connection*>(conn);
     LOG(INFO) << dcon->DebugInfo();
@@ -495,7 +497,9 @@ void DflyCmd::ForceShutdownStuckConnections(uint64_t timeout) {
   };
 
   for (auto* listener : sf_->GetListeners()) {
-    listener->TraverseConnections(cb);
+    if (listener->IsMainInterface()) {
+      listener->TraverseConnectionsOnThread(cb, UINT32_MAX, nullptr);
+    }
   }
 
   VLOG(1) << "Found " << conn_refs.size() << " stucked connections ";
@@ -563,11 +567,9 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
 
     // Force takeover on the same duration if flag is set
     if (absl::GetFlag(FLAGS_experimental_force_takeover)) {
-      ForceShutdownStuckConnections(uint64_t(timeout));
-
-      // Safety net.
       facade::DispatchTracker tracker{sf_->GetNonPriviligedListeners(), cntx->conn(), false, false};
       shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto* pb) {
+        ForceShutdownStuckConnections(uint64_t(timeout));
         sf_->CancelBlockingOnThread();
         tracker.TrackOnThread();
       });
