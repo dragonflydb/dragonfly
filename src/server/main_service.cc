@@ -378,7 +378,7 @@ class InterpreterReplier : public RedisReplyBuilder {
 // Serialized result of script invocation to Redis protocol
 class EvalSerializer : public ObjectExplorer {
  public:
-  explicit EvalSerializer(RedisReplyBuilder* rb, bool float_as_int = false)
+  explicit EvalSerializer(RedisReplyBuilder* rb, bool float_as_int)
       : rb_(rb), float_as_int_(float_as_int) {
   }
 
