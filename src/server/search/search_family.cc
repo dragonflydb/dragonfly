@@ -1083,7 +1083,7 @@ void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
     // TODO add processing of the reply to make sure index was created successfully on all shards,
     // and prevent simultaneous creation of the same index.
     auto req_future =
-        cluster::Coordinator::Current().DispatchAll(cmd, [](const facade::RespVec&) {});
+        cluster::Coordinator::Current().DispatchAll(cmd, [](const TakeRespExpr::Vec&) {});
     // TODO add error handling
     CHECK(!req_future.Get());
   }
@@ -1306,7 +1306,7 @@ static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view q
   // TODO for now we suppose that callback is called synchronously. If not, we need to add
   // synchronization here for results vector modification.
   auto req_future =
-      cluster::Coordinator::Current().DispatchAll(cmd, [&](const facade::RespVec& res) {
+      cluster::Coordinator::Current().DispatchAll(cmd, [&](const TakeRespExpr::Vec& res) {
         VLOG(3) << "FT.SEARCH CSS reply: " << res;
 
         if (res.empty()) {
