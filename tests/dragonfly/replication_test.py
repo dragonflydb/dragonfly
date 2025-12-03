@@ -3668,7 +3668,7 @@ async def test_replica_of_self(async_client):
         await async_client.execute_command(f"replicaof 127.0.0.1 {port}")
 
 
-@dfly_args({"proactor_threads": 2})
+@dfly_args({"proactor_threads": 2, "experimental_force_takeover": True})
 async def test_takeover_with_stuck_connections(df_factory: DflyInstanceFactory):
     master = df_factory.create()
     master.start()
@@ -3686,8 +3686,13 @@ async def test_takeover_with_stuck_connections(df_factory: DflyInstanceFactory):
 
     async def get_task():
         while True:
-            writer.write(f"GET a\n".encode())
-            await writer.drain()
+            # Will get killed by takeover because it's stucked
+            try:
+                writer.write(f"GET a\n".encode())
+                await writer.drain()
+            except:
+                return
+
             await asyncio.sleep(0.1)
 
     get = asyncio.create_task(get_task())
@@ -3715,5 +3720,7 @@ async def test_takeover_with_stuck_connections(df_factory: DflyInstanceFactory):
     async with async_timeout.timeout(240):
         await wait_for_replicas_state(replica_cl)
 
-    with pytest.raises(redis.exceptions.ResponseError) as e:
-        await replica_cl.execute_command("REPLTAKEOVER 5")
+    res = await replica_cl.execute_command("REPLTAKEOVER 5")
+    assert res == "OK"
+
+    await get
