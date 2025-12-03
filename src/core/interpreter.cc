@@ -807,11 +807,6 @@ auto Interpreter::RunFunction(string_view sha, std::string* error) -> RunResult 
   return err == 0 ? RUN_OK : RUN_ERR;
 }
 
-void Interpreter::SetLegacyFloatMode(bool enable) {
-  lua_pushboolean(lua_, enable ? 1 : 0);
-  lua_setglobal(lua_, "__dfly_legacy_float__");
-}
-
 void Interpreter::SetGlobalArray(const char* name, SliceSpan args) {
   SetGlobalArrayInternal(lua_, name, args);
 }

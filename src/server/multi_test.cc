@@ -905,25 +905,16 @@ TEST_F(MultiTest, LegacyFloatShaFlag) {
   EXPECT_THAT(Run({"eval", script, "0"}), IntArg(42));
 }
 
-TEST_F(MultiTest, LegacyFloatInternalBehavior) {
-  // With legacy-float flag, cjson.decode returns integers for whole numbers
+TEST_F(MultiTest, CjsonDecodeIntegerBehavior) {
+  // cjson.decode always returns integers for whole numbers (Redis/Lua 5.1 compatible)
   const char* script_cjson = R"(
-    --!df flags=legacy-float
     local obj = cjson.decode('{"value": 42}')
     return tostring(obj.value)
   )";
   EXPECT_EQ(Run({"eval", script_cjson, "0"}), "42");
 
-  // Without the flag, cjson.decode returns floats
-  const char* script_cjson_noflag = R"(
-    local obj = cjson.decode('{"value": 42}')
-    return tostring(obj.value)
-  )";
-  EXPECT_EQ(Run({"eval", script_cjson_noflag, "0"}), "42.0");
-
-  // Floats with fractional parts remain as floats regardless of flag
+  // Floats with fractional parts remain as floats
   const char* script_cjson_float = R"(
-    --!df flags=legacy-float
     local obj = cjson.decode('{"value": 42.5}')
     return tostring(obj.value)
   )";

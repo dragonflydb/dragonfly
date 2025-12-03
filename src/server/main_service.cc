@@ -2287,9 +2287,6 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   if (!params)
     return builder->SendError(facade::kScriptNotFound);
 
-  // Set legacy float mode for cjson.decode if script needs it.
-  interpreter->SetLegacyFloatMode(params->float_as_int);
-
   string error;
 
   DCHECK(!cntx->conn_state.script_info);  // we should not call eval from the script.

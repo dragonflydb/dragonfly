@@ -1229,11 +1229,9 @@ static void json_process_value(lua_State *l, json_parse_t *json,
     case T_NUMBER: {
         double num = token->value.number;
         double intpart;
-        /* Check if legacy float mode is enabled via global variable */
-        lua_getglobal(l, "__dfly_legacy_float__");
-        int legacy = lua_toboolean(l, -1);
-        lua_pop(l, 1);
-        if (legacy && modf(num, &intpart) == 0.0 &&
+        /* Convert to integer when possible for Lua 5.1 compatibility.
+         * This ensures tostring(cjson.decode('{"id":42}').id) returns "42" not "42.0" */
+        if (modf(num, &intpart) == 0.0 &&
             intpart >= LUA_MININTEGER && intpart <= LUA_MAXINTEGER) {
             lua_pushinteger(l, (lua_Integer)intpart);
         } else {

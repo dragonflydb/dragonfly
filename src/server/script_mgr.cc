@@ -294,19 +294,9 @@ io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter
     }
   }
 
-  const char* kFloatAsIntShas[] = {
-      "8c4dafdf9b6b7bcf511a0d1ec0518bed9260e16d",  // django-cacheops
-      "3fc258d735c924d5652fceb90b41bea1f1f29e4b",  // django-cacheops
-      "43d401bd2bd0ad864c3ca221512cda1b6215ec23",  // django-cacheops
-  };
-
-  if (find(begin(kFloatAsIntShas), end(kFloatAsIntShas), sha) != end(kFloatAsIntShas)) {
+  auto float_as_int_shas = absl::GetFlag(FLAGS_lua_float_as_int_shas);
+  if (find(float_as_int_shas.begin(), float_as_int_shas.end(), sha) != float_as_int_shas.end()) {
     params.float_as_int = true;
-  } else {
-    auto float_as_int_shas = absl::GetFlag(FLAGS_lua_float_as_int_shas);
-    if (find(float_as_int_shas.begin(), float_as_int_shas.end(), sha) != float_as_int_shas.end()) {
-      params.float_as_int = true;
-    }
   }
 
   // If the script is atomic, check for possible squashing optimizations.
