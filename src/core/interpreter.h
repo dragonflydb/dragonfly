@@ -108,9 +108,8 @@ class Interpreter {
   // sha must be 40 char length.
   RunResult RunFunction(std::string_view sha, std::string* err);
 
-  // Enable or disable legacy float mode for internal Lua operations.
-  // When enabled, cjson.decode converts whole-number floats to integers,
-  // and tostring returns "1" instead of "1.0" for whole numbers.
+  // Enable or disable legacy float mode for cjson.decode.
+  // When enabled, cjson.decode converts whole-number floats to integers.
   void SetLegacyFloatMode(bool enable);
 
   // Checks whether the result is safe to serialize.

@@ -1226,9 +1226,21 @@ static void json_process_value(lua_State *l, json_parse_t *json,
     case T_STRING:
         lua_pushlstring(l, token->value.string, token->string_len);
         break;;
-    case T_NUMBER:
-        lua_pushnumber(l, token->value.number);
-        break;;
+    case T_NUMBER: {
+        double num = token->value.number;
+        double intpart;
+        /* Check if legacy float mode is enabled via global variable */
+        lua_getglobal(l, "__dfly_legacy_float__");
+        int legacy = lua_toboolean(l, -1);
+        lua_pop(l, 1);
+        if (legacy && modf(num, &intpart) == 0.0 &&
+            intpart >= LUA_MININTEGER && intpart <= LUA_MAXINTEGER) {
+            lua_pushinteger(l, (lua_Integer)intpart);
+        } else {
+            lua_pushnumber(l, num);
+        }
+        break;
+    }
     case T_BOOLEAN:
         lua_pushboolean(l, token->value.boolean);
         break;;

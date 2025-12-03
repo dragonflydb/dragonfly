@@ -2287,8 +2287,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   if (!params)
     return builder->SendError(facade::kScriptNotFound);
 
-  // Enable legacy float mode for scripts that need it (e.g., django-cacheops).
-  // This makes cjson.decode and tostring behave like Lua 5.1.
+  // Set legacy float mode for cjson.decode if script needs it.
   interpreter->SetLegacyFloatMode(params->float_as_int);
 
   string error;
@@ -2327,11 +2326,8 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
 
-  absl::Cleanup clean = [interpreter, &sinfo, float_as_int = params->float_as_int]() {
+  absl::Cleanup clean = [interpreter, &sinfo]() {
     interpreter->ResetStack();
-    if (float_as_int) {
-      interpreter->SetLegacyFloatMode(false);  // Restore original behavior
-    }
     sinfo.reset();
   };
 
