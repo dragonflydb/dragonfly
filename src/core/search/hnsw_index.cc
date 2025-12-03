@@ -5,13 +5,13 @@
 #include "core/search/hnsw_index.h"
 
 #include <absl/strings/match.h>
-#include <absl/synchronization/mutex.h>
 #include <hnswlib/hnswlib.h>
 #include <hnswlib/space_ip.h>
 #include <hnswlib/space_l2.h>
 
 #include "base/logging.h"
 #include "core/search/hnsw_alg.h"
+#include "core/search/mrmw_mutex.h"
 #include "core/search/vector_utils.h"
 
 namespace dfly::search {
@@ -70,7 +70,8 @@ struct HnswlibAdapter {
   void Add(const float* data, GlobalDocId id) {
     while (true) {
       try {
-        absl::ReaderMutexLock lock(&resize_mutex_);
+        MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
+        absl::ReaderMutexLock resize_lock(&resize_mutex_);
         world_.addPoint(data, id);
         return;
       } catch (const std::exception& e) {
@@ -86,6 +87,7 @@ struct HnswlibAdapter {
 
   void Remove(GlobalDocId id) {
     try {
+      MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
       world_.markDelete(id);
     } catch (const std::exception& e) {
       LOG(WARNING) << "HnswlibAdapter::Remove exception: " << e.what();
@@ -94,6 +96,7 @@ struct HnswlibAdapter {
 
   vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
     world_.setEf(ef.value_or(kDefaultEfRuntime));
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     return QueueToVec(world_.searchKnn(target, k));
   }
 
@@ -111,6 +114,7 @@ struct HnswlibAdapter {
 
     world_.setEf(ef.value_or(kDefaultEfRuntime));
     BinsearchFilter filter{&allowed};
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     return QueueToVec(world_.searchKnn(target, k, &filter));
   }
 
@@ -153,6 +157,7 @@ struct HnswlibAdapter {
   HnswSpace space_;
   HierarchicalNSW<float> world_;
   absl::Mutex resize_mutex_;
+  mutable MRMWMutex mrmw_mutex_;
 };
 
 HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource*)
