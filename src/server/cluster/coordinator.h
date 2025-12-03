@@ -14,7 +14,7 @@ namespace dfly::cluster {
 // It can be used to exeute commands on all shards or specific shards.
 class Coordinator {
  public:
-  using RespCB = std::function<void(const facade::RespVec&)>;  // TODO add error.
+  using RespCB = std::function<void(const TakeRespExpr::Vec&)>;  // TODO add error.
 
   static Coordinator& Current();
   [[nodiscard]] util::fb2::Future<GenericError> DispatchAll(std::string command, RespCB cb);

@@ -315,6 +315,60 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(uint32_t t
   return res;
 }
 
+io::Result<TakeRespExpr::Vec> ProtocolClient::TakeRespReply(base::IoBuf* buffer, bool copy_msg) {
+  DCHECK(parser_);
+
+  error_code ec;
+  if (!buffer) {
+    buffer = &resp_buf_;
+    buffer->Clear();
+  }
+  last_resp_ = "";
+
+  uint32_t processed_bytes = 0;
+
+  RedisParser::Result result = RedisParser::OK;
+  TakeRespExpr::Vec res_vec;
+  while (!ec) {
+    uint32_t consumed;
+    if (buffer->InputLen() == 0 || result == RedisParser::INPUT_PENDING) {
+      DCHECK_GT(buffer->AppendLen(), 0u);
+
+      ec = Recv(sock_.get(), buffer);
+      if (ec) {
+        return nonstd::make_unexpected(ec);
+      }
+    }
+
+    result = parser_->Parse(buffer->InputBuffer(), &consumed, &resp_args_);
+    for (const auto& expr : resp_args_) {
+      res_vec.emplace_back(expr);
+    }
+    processed_bytes += consumed;
+    if (copy_msg)
+      last_resp_ +=
+          std::string_view(reinterpret_cast<char*>(buffer->InputBuffer().data()), consumed);
+
+    buffer->ConsumeInput(consumed);
+    if (result == RedisParser::OK) {
+      LOG(INFO) << "Last resp: " << last_resp_;
+      return res_vec;  // success path
+    }
+
+    if (result != RedisParser::INPUT_PENDING) {
+      LOG(ERROR) << "Invalid parser status " << result << " for response " << last_resp_;
+      return nonstd::make_unexpected(std::make_error_code(std::errc::bad_message));
+    }
+
+    // We need to read more data. Check that we have enough space.
+    if (buffer->AppendLen() < 64u) {
+      buffer->EnsureCapacity(buffer->Capacity() * 2);
+    }
+  }
+
+  return nonstd::make_unexpected(ec);
+}
+
 error_code ProtocolClient::ReadLine(base::IoBuf* io_buf, string_view* line) {
   size_t eol_pos;
   std::string_view input_str = ToSV(io_buf->InputBuffer());

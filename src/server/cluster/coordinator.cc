@@ -88,13 +88,13 @@ class Coordinator::CrossShardClient : public ProtocolClient {
     std::lock_guard lk(mu_);
     send_queue_.push(req);
     resp_queue_.push(req);
-    redy_to_send_ = true;
+    ready_to_send_ = true;
     waker_.notifyAll();
   }
 
   void SendFb() {
     while (!exec_st_.IsCancelled()) {
-      waker_.await([this] { return exec_st_.IsCancelled() || redy_to_send_; });
+      waker_.await([this] { return exec_st_.IsCancelled() || ready_to_send_; });
       if (exec_st_.IsCancelled())
         return;
       std::lock_guard lk(mu_);
@@ -108,19 +108,22 @@ class Coordinator::CrossShardClient : public ProtocolClient {
         }
         send_queue_.pop();
       }
-      redy_to_send_ = false;
+      ready_to_send_ = false;
     }
   }
 
   void RespFb() {
+    // temp workaround buffer because ReadRespReply contains bugs.
+    base::IoBuf io_buf(16_KB);
     while (!exec_st_.IsCancelled()) {
-      waker_.await([this] { return exec_st_.IsCancelled() || redy_to_send_; });
+      waker_.await([this] { return exec_st_.IsCancelled() || ready_to_send_; });
       if (exec_st_.IsCancelled())
         return;
       std::lock_guard lk(mu_);
-      constexpr auto timeout = 10000;  // TODO add flag;
+      // constexpr auto timeout = 10000;  // TODO add flag and add usage in ReadRespReply.
       while (!resp_queue_.empty()) {
-        if (auto resp = ReadRespReply(timeout); !resp) {
+        auto resp = TakeRespReply(&io_buf, true);
+        if (!resp) {
           LOG(WARNING) << "Error reading response from " << server().Description() << ": "
                        << resp.error()
                        << ", socket state: " + GetSocketInfo(Sock()->native_handle());
@@ -130,7 +133,7 @@ class Coordinator::CrossShardClient : public ProtocolClient {
           LOG(FATAL) << "Coordinator RespFb read error, not implemented recovery yet.";
           break;
         }
-        resp_queue_.front()->Exec(LastResponseArgs());
+        resp_queue_.front()->Exec(*resp);
         resp_queue_.pop();
       }
     }
@@ -145,7 +148,7 @@ class Coordinator::CrossShardClient : public ProtocolClient {
   util::fb2::EventCount waker_;
 
   mutable util::fb2::Mutex mu_;
-  std::atomic_bool redy_to_send_ = false;
+  std::atomic_bool ready_to_send_ = false;
 };
 
 Coordinator& Coordinator::Current() {

@@ -13,6 +13,7 @@
 #include "io/io_buf.h"
 #include "server/common.h"
 #include "server/journal/types.h"
+#include "server/take_resp_expr.h"
 #include "server/version.h"
 #include "util/fiber_socket_base.h"
 
@@ -93,8 +94,11 @@ class ProtocolClient {
   // It is the responsibility of the caller to call buffer->ConsumeInput(rv.left_in_buffer) when it
   // is done with the result of the call; Calling ConsumeInput may invalidate the data in the result
   // if the buffer relocates.
+  // TODO these functions contains bugs related to partial reads and parser state management.
   io::Result<ReadRespRes> ReadRespReply(base::IoBuf* buffer = nullptr, bool copy_msg = true);
   io::Result<ReadRespRes> ReadRespReply(uint32_t timeout);
+
+  io::Result<TakeRespExpr::Vec> TakeRespReply(base::IoBuf* buffer = nullptr, bool copy_msg = true);
 
   std::error_code ReadLine(base::IoBuf* io_buf, std::string_view* line);
 
@@ -118,6 +122,8 @@ class ProtocolClient {
 
   void ResetParser(facade::RedisParser::Mode mode);
 
+  // TODO can return invalid results if response answer was bigger than provided buffer into
+  // ReadRespReply
   auto& LastResponseArgs() {
     return resp_args_;
   }
