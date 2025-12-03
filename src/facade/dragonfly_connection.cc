@@ -1239,6 +1239,9 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
   auto dispatch_async = [this]() -> MessageHandle { return {FromArgs(tmp_parse_args_)}; };
 
   io::Bytes read_buffer = io_buf_.InputBuffer();
+  // Keep track of total bytes consumed/parsed. The do/while{} loop below preempts,
+  // and InputBuffer() size might change between preemption points. Hence, count
+  // the bytes read and consume them from the io_buf_ at the end.
   size_t total = 0;
   do {
     result = redis_parser_->Parse(read_buffer, &consumed, &tmp_parse_args_);
@@ -2255,12 +2258,11 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   do {
     HandleMigrateRequest();
 
-    // We *must* poll again for readiness. The event handler we registered above
-    // with RegisterOnRecv() will get called *once* for each socket readiness event.
-    // So, when we get notified below in io_event_.wait() we might read less data
-    // than it is available because io_buf_ does not have enough capacity. If we loop,
-    // and do not attempt to read from the socket again we can deadlock. To avoid this,
-    // we poll once for readiness before preempting.
+    // Poll again for readiness. The event handler registered above is edge triggered
+    // (called once per socket readiness event). So, for example, it could be that the
+    // cb read less data than it is available because of io_buf_ capacity. If after
+    // an iteration the fiber does not poll the socket for more data it might deadlock.
+    // TODO maybe use a flag instead of a poll
     DoReadOnRecv(FiberSocketBase::RecvNotification{true});
     fb2::NoOpLock noop;
     io_event_.wait(
