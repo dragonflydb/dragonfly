@@ -8,7 +8,6 @@ from pymemcache.client.base import Client as MCClient
 
 from . import dfly_args
 from .instance import DflyInstance
-from .utility import *
 
 DEFAULT_ARGS = {"memcached_port": 11211, "proactor_threads": 4}
 

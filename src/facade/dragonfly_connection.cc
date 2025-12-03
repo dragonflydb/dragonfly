@@ -1097,12 +1097,14 @@ void Connection::ConnectionFlow() {
   }
 
   error_code ec = reply_builder_->GetError();
+  const bool io_loop_v2 = GetFlag(FLAGS_expiremental_io_loop_v2);
 
   // Main loop.
   if (parse_status != ERROR && !ec) {
     UpdateIoBufCapacity(io_buf_, stats_, [&]() { io_buf_.EnsureCapacity(64); });
     variant<error_code, Connection::ParserStatus> res;
-    if (GetFlag(FLAGS_expiremental_io_loop_v2) && !is_tls_) {
+    if (io_loop_v2 && !is_tls_) {
+      // Breaks with TLS. RegisterOnRecv is unimplemented.
       res = IoLoopV2();
     } else {
       res = IoLoop();
@@ -1164,7 +1166,7 @@ void Connection::ConnectionFlow() {
     }
   }
 
-  if (GetFlag(FLAGS_expiremental_io_loop_v2) && !is_tls_) {
+  if (io_loop_v2 && !is_tls_) {
     socket_->ResetOnRecvHook();
   }
 
@@ -2203,35 +2205,29 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
     io::MutableBytes buf = io_buf_.AppendBuffer();
     io::Result<size_t> res = socket_->TryRecv(buf);
 
-    // error path
-    if (!res) {
-      auto ec = res.error();
-      // EAGAIN and EWOULDBLOCK
-      if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block) {
+    if (res) {
+      if (*res > 0) {
+        // A recv call can return fewer bytes than requested even if the
+        // socket buffer actually contains enough data to satisfy the full request.
+        // TODO maybe worth looping here and try another recv call until it fails
+        // with EAGAIN or EWOULDBLOCK. The problem there is that we need to handle
+        // resizing if AppendBuffer is zero.
+        io_buf_.CommitWrite(*res);
         return;
       }
-
-      if (ec == errc::connection_aborted || ec == errc::connection_reset) {
-        // The peer can shutdown the connection abruptly.
-        io_ec_ = ec;
-        return;
-      }
-
-      LOG_EVERY_T(ERROR, 10) << "Recv error: " << ec;
-      io_ec_ = ec;
-      return;
-    }
-
-    if (*res == 0) {
+      // *res == 0
       io_ec_ = make_error_code(errc::connection_aborted);
       return;
     }
-    // A recv call can return fewer bytes than requested even if the
-    // socket buffer actually contains enough data to satisfy the full request.
-    // TODO maybe worth looping here and try another recv call until it fails
-    // with EAGAIN or EWOULDBLOCK. The problem there is that we need to handle
-    // resizing if AppendBuffer is zero.
-    io_buf_.CommitWrite(*res);
+
+    // error path (!res)
+    auto ec = res.error();
+    // EAGAIN and EWOULDBLOCK
+    if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block) {
+      return;
+    }
+
+    io_ec_ = ec;
     return;
   }
 
@@ -2249,7 +2245,6 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
   // TODO EnableRecvMultishot
 
-  // Breaks with TLS. RegisterOnRecv is unimplemented.
   peer->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
     DoReadOnRecv(n);
     io_event_.notify_one();
