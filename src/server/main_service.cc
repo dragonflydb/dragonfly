@@ -378,7 +378,8 @@ class InterpreterReplier : public RedisReplyBuilder {
 // Serialized result of script invocation to Redis protocol
 class EvalSerializer : public ObjectExplorer {
  public:
-  explicit EvalSerializer(RedisReplyBuilder* rb) : rb_(rb) {
+  explicit EvalSerializer(RedisReplyBuilder* rb, bool float_as_int)
+      : rb_(rb), float_as_int_(float_as_int) {
   }
 
   void OnBool(bool b) final {
@@ -394,7 +395,7 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnDouble(double d) final {
-    if (GetFlag(FLAGS_lua_resp2_legacy_float)) {
+    if (float_as_int_ || GetFlag(FLAGS_lua_resp2_legacy_float)) {
       const long val = d >= 0 ? static_cast<long>(floor(d)) : static_cast<long>(ceil(d));
       rb_->SendLong(val);
     } else {
@@ -438,6 +439,7 @@ class EvalSerializer : public ObjectExplorer {
 
  private:
   RedisReplyBuilder* rb_;
+  bool float_as_int_;
 };
 
 void InterpreterReplier::PostItem() {
@@ -2399,7 +2401,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   // TODO(vlad): Investigate if using ReplyScope here is possible with a different serialization
   // strategy due to currently SerializeResult destructuring a value while serializing
   SinkReplyBuilder::ReplyAggregator agg(builder);
-  EvalSerializer ser{static_cast<RedisReplyBuilder*>(builder)};
+  EvalSerializer ser{static_cast<RedisReplyBuilder*>(builder), params->float_as_int};
   if (!interpreter->IsResultSafe()) {
     builder->SendError("reached lua stack limit");
   } else {
