@@ -309,7 +309,7 @@ class EngineShard {
   std::unique_ptr<TieredStorage> tiered_storage_;
   // TODO: Move indices to Namespace
   std::unique_ptr<ShardDocIndices> shard_search_indices_;
-
+  uint64_t stalled_start_ns_ = 0;
   using Counter = util::SlidingCounter<7>;
 
   Counter counter_[COUNTER_TOTAL];
