@@ -23,12 +23,10 @@ class MRMWMutex {
 
     // If we have any active_runners we need to check lock mode
     if (active_runners_) {
-      while (lock_mode_ != mode) {
-        auto& waiters = GetWaiters(mode);
-        waiters++;
-        GetCondVar(mode).wait(lk);
-        waiters--;
-      }
+      auto& waiters = GetWaiters(mode);
+      waiters++;
+      GetCondVar(mode).wait(lk, [&] { return lock_mode_ == mode; });
+      waiters--;
     } else {
       // No active runners so just update to requested lock mode
       lock_mode_ = mode;
