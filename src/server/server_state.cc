@@ -252,7 +252,8 @@ void ServerState::ReturnInterpreter(Interpreter* ir) {
   interpreter_mgr_.Return(ir);
 }
 
-void ServerState::ResetInterpreter() {
+void ServerState::FlushScriptCache() {
+  cached_script_params_.clear();
   interpreter_mgr_.Reset();
 }
 
