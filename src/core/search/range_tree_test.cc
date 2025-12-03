@@ -4,6 +4,8 @@
 
 #include "core/search/range_tree.h"
 
+#include <absl/random/random.h>
+#include <benchmark/benchmark.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -481,5 +483,21 @@ TEST_F(RangeTreeTest, FinalizeInitialization) {
       BlocksAre(
           {{{1, 10.0}}, {{2, 20.0}, {3, 20.0}, {5, 20.0}}, {{4, 30.0}, {6, 30.0}}, {{7, 40.0}}}));
 }
+
+// Benchmark tree insertion performance with set of discrete values
+static void BM_DiscreteInsertion(benchmark::State& state) {
+  RangeTree tree{PMR_NS::get_default_resource()};
+
+  absl::InsecureBitGen gen{};
+  size_t variety = state.range(0);
+
+  DocId id = 0;
+  for (auto _ : state) {
+    double v = absl::Uniform(gen, 0u, variety);
+    tree.Add(id++, v);
+  }
+}
+
+BENCHMARK(BM_DiscreteInsertion)->Arg(2)->Arg(12)->Arg(128)->Arg(1024);
 
 }  // namespace dfly::search
