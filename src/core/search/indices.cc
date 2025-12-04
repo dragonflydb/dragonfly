@@ -14,6 +14,7 @@
 
 #define UNI_ALGO_DISABLE_NFKC_NFKD
 
+#include <absl/container/btree_set.h>
 #include <uni_algo/case.h>
 #include <uni_algo/ranges_word.h>
 
@@ -456,6 +457,21 @@ std::optional<DocumentAccessor::StringList> TextIndex::GetStrings(const Document
 
 absl::flat_hash_set<std::string> TextIndex::Tokenize(std::string_view value) const {
   return TokenizeWords(value, *stopwords_, synonyms_);
+}
+
+DefragmentResult TagIndex::Defragment(PageUsage* page_usage) {
+  auto defrag = [&](auto& tree, string* key) {
+    DefragmentMap dm{tree, [&] { return key->empty() ? tree.begin() : tree.lower_bound(*key); }};
+    return dm.Defragment(page_usage, key);
+  };
+
+  DefragmentResult result = defrag(entries_, &next_defrag_entry_);
+
+  if (suffix_trie_) {
+    result.Merge(defrag(suffix_trie_.value(), &next_defrag_suffix_entry_));
+  }
+
+  return result;
 }
 
 std::optional<DocumentAccessor::StringList> TagIndex::GetStrings(const DocumentAccessor& doc,

@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include <absl/container/btree_set.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
@@ -18,12 +17,12 @@
 #pragma GCC diagnostic pop
 #endif
 
-#include <map>
+#include <absl/functional/function_ref.h>
+
 #include <memory>
 #include <optional>
 #include <vector>
 
-#include "absl/functional/function_ref.h"
 #include "base/pmr/memory_resource.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "core/search/base.h"
@@ -149,6 +148,8 @@ struct TagIndex : public BaseStringIndex<SortedVector<DocId>> {
         separator_{params.separator} {
   }
 
+  DefragmentResult Defragment(PageUsage* page_usage) override;
+
  protected:
   std::optional<StringList> GetStrings(const DocumentAccessor& doc,
                                        std::string_view field) const override;
@@ -156,6 +157,8 @@ struct TagIndex : public BaseStringIndex<SortedVector<DocId>> {
 
  private:
   char separator_;
+  std::string next_defrag_entry_;
+  std::string next_defrag_suffix_entry_;
 };
 
 struct BaseVectorIndex : public BaseIndex {

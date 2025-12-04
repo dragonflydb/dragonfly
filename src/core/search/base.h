@@ -14,6 +14,10 @@
 #include <string_view>
 #include <vector>
 
+namespace dfly {
+class PageUsage;
+}
+
 namespace dfly::search {
 
 struct DefragmentResult {
@@ -106,6 +110,11 @@ struct BaseIndex {
   /* Called at the end of indexes rebuilding after all initial Add calls are done.
      Some indices may need to finalize internal structures. See RangeTree for example. */
   virtual void FinalizeInitialization() {
+  }
+
+  // Defragments the index by moving objects in underutilized pages to the current malloc page.
+  virtual DefragmentResult Defragment(PageUsage* page_usage) {
+    return DefragmentResult{.quota_depleted = false, .objects_moved = 0};
   }
 };
 
