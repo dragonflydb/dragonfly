@@ -78,26 +78,40 @@ RangeTree::RangeTree(PMR_NS::memory_resource* mr, size_t max_range_block_size,
     : max_range_block_size_(max_range_block_size),
       entries_(mr),
       enable_splitting_(enable_splitting) {
-  entries_.emplace(
-      std::piecewise_construct,
-      std::forward_as_tuple(-std::numeric_limits<RangeNumber>::infinity()),
-      std::forward_as_tuple(entries_.get_allocator().resource(), max_range_block_size_));
+  // The tree has at least always a block with a negative infinity bound, so that any new insertion
+  // goes at least somewhere
+  CreateEmptyBlock(-std::numeric_limits<double>::infinity());
 }
 
 void RangeTree::Add(DocId id, double value) {
   DCHECK(std::isfinite(value));
 
   auto it = FindRangeBlock(value);
-  RangeBlock& block = it->second;
+  auto& [lower_bound, block] = *it;
+
+  // Don't disrupt large monovalue blocks, instead create new nextafter block
+  if (enable_splitting_ && block.Size() >= max_range_block_size_ &&
+      lower_bound == block.max_seen /* monovalue */ &&
+      value != lower_bound /* but new value is different*/
+  ) {
+    // We use nextafter as the lower bound to "catch" all other possible inserts into the block,
+    // as a decreasing `value` sequence would otherwise create lots of single-value blocks
+    double lb2 = std::nextafter(lower_bound, std::numeric_limits<double>::infinity());
+    CreateEmptyBlock(lb2)->second.Insert({id, value});
+    return;
+  }
 
   auto insert_result = block.Insert({id, value});
   LOG_IF(ERROR, !insert_result) << "RangeTree: Failed to insert id: " << id << ", value: " << value;
 
-  if (!enable_splitting_ || block.Size() <= max_range_block_size_) {
+  if (!enable_splitting_ || block.Size() <= max_range_block_size_)
     return;
-  }
 
-  SplitBlock(std::move(it));
+  // Large monovalue block, not reducable by splitting
+  if (lower_bound == block.max_seen)
+    return;
+
+  SplitBlock(it);
 }
 
 void RangeTree::Remove(DocId id, double value) {
@@ -109,10 +123,19 @@ void RangeTree::Remove(DocId id, double value) {
   auto remove_result = block.Remove({id, value});
   LOG_IF(ERROR, !remove_result) << "RangeTree: Failed to remove id: " << id << ", value: " << value;
 
-  // TODO: maybe merging blocks if they are too small
-  // The problem that for each mutable operation we do Remove and then Add,
-  // So we can do merge and split for one operation.
-  // Or in common cases users do not remove a lot of documents?
+  // Merge with left block if both are relatively small and won't be forced to split soon
+  if (block.size() < max_range_block_size_ / 4 && it != entries_.begin()) {
+    auto lit = it;
+    --lit;
+
+    auto& lblock = lit->second;
+    if (block.Size() + lblock.Size() < max_range_block_size_ / 2) {
+      for (auto e : block)
+        lblock.Insert(e);
+      entries_.erase(it);
+      stats_.merges++;
+    }
+  }
 }
 
 RangeResult RangeTree::Range(double l, double r) const {
@@ -175,10 +198,7 @@ void RangeTree::FinalizeInitialization() {
   for (size_t b = 0; b < entries.size(); b += max_range_block_size_) {
     RangeBlock* range_block;
     if (b) {
-      auto it = entries_.emplace(
-          std::piecewise_construct, std::forward_as_tuple(entries[b].second),
-          std::forward_as_tuple(entries_.get_allocator().resource(), max_range_block_size_));
-      range_block = &it.first->second;
+      range_block = &CreateEmptyBlock(entries[b].second)->second;
     } else {
       range_block = &block;
     }
@@ -198,6 +218,13 @@ RangeTree::Map::iterator RangeTree::FindRangeBlock(double value) {
 
 RangeTree::Map::const_iterator RangeTree::FindRangeBlock(double value) const {
   return FindRangeBlockImpl(entries_, value);
+}
+
+RangeTree::Map::iterator RangeTree::CreateEmptyBlock(double lb) {
+  return entries_
+      .emplace(std::piecewise_construct, std::forward_as_tuple(lb),
+               std::forward_as_tuple(entries_.get_allocator().resource(), max_range_block_size_))
+      .first;
 }
 
 /*
@@ -221,26 +248,33 @@ TODO: we can optimize this case by splitting to three blocks:
  - empty right block with range [std::nextafter(m, +inf), r)
 */
 void RangeTree::SplitBlock(Map::iterator it) {
-  const RangeNumber l = it->first;
+  double lower_bound = it->first;
 
   auto split_result = Split(std::move(it->second));
 
-  const RangeNumber m = split_result.median;
+  const double m = split_result.median;
   DCHECK(!split_result.right.Empty());
 
   entries_.erase(it);
+  stats_.splits++;
 
-  if (l != m) {
-    // If l == m, it means that all values in the block were equal to the median value
-    // We can not insert an empty block with range [l, l) because it is not valid.
-    entries_.emplace(std::piecewise_construct, std::forward_as_tuple(l),
-                     std::forward_as_tuple(std::move(split_result.left)));
+  // Insert left block if it's not empty or if its the first one (negative inf bound)
+  if (!split_result.left.Empty() || std::isinf(lower_bound)) {
+    if (!std::isinf(lower_bound))  // keep negative inf bound
+      lower_bound = split_result.lmin;
+
+    entries_.emplace(std::piecewise_construct, std::forward_as_tuple(lower_bound),
+                     std::forward_as_tuple(std::move(split_result.left), split_result.lmax));
   }
 
   entries_.emplace(std::piecewise_construct, std::forward_as_tuple(m),
-                   std::forward_as_tuple(std::move(split_result.right)));
+                   std::forward_as_tuple(std::move(split_result.right), split_result.rmax));
 
   DCHECK(TreeIsInCorrectState());
+}
+
+RangeTree::Stats RangeTree::GetStats() const {
+  return Stats{.splits = stats_.splits, .merges = stats_.merges, .block_count = entries_.size()};
 }
 
 // Used for DCHECKs to check that the tree is in a correct state.
@@ -249,9 +283,9 @@ void RangeTree::SplitBlock(Map::iterator it) {
     return false;
   }
 
-  Key prev_range = entries_.begin()->first;
+  double prev_range = entries_.begin()->first;
   for (auto it = std::next(entries_.begin()); it != entries_.end(); ++it) {
-    const Key& current_range = it->first;
+    const double& current_range = it->first;
 
     // Check that ranges are non-overlapping and sorted
     // Also there can not be gaps between ranges

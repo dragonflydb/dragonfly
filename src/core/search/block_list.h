@@ -217,6 +217,11 @@ struct SplitResult {
 
   Container left;
   Container right;
+
+  // Median value of split, used as minimum value of right block
   double median;
+
+  // Min/max values of left (lmin, lmax) and right (rmin=median, rmax) blocks
+  double lmin, lmax, rmax;
 };
 }  // namespace dfly::search

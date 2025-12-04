@@ -14,7 +14,7 @@ target_link_libraries(dfly_search_core base redis_lib absl::strings
 
 cxx_test(compressed_sorted_set_test dfly_search_core LABELS DFLY)
 cxx_test(block_list_test dfly_search_core LABELS DFLY)
-cxx_test(range_tree_test dfly_search_core LABELS DFLY)
+cxx_test(range_tree_test dfly_search_core absl::random_random LABELS DFLY)
 cxx_test(rax_tree_test redis_test_lib LABELS DFLY)
 cxx_test(search_parser_test dfly_search_core LABELS DFLY)
 cxx_test(search_test redis_test_lib dfly_search_core LABELS DFLY)
