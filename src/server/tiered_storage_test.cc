@@ -30,7 +30,6 @@ ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
 ABSL_DECLARE_FLAG(uint64_t, registered_buffer_size);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
 
-
 namespace dfly {
 
 using absl::GetFlag;
