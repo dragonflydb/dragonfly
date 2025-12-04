@@ -9,154 +9,90 @@
 #include <hnswlib/space_ip.h>
 #include <hnswlib/space_l2.h>
 
+#include <mutex>
+
 #include "base/logging.h"
+#include "core/search/base.h"
 #include "core/search/hnsw_alg.h"
 #include "core/search/mrmw_mutex.h"
 #include "core/search/vector_utils.h"
 
+#define USEARCH_USE_SIMSIMD WITH_SIMSIMD
+#define USEARCH_USE_FP16LIB 1
+#define USEARCH_USE_OPENMP 0
+
+#include "core/search/usearch/index.hpp"
+#include "core/search/usearch/index_dense.hpp"
+
 namespace dfly::search {
 
 using namespace std;
-
-namespace {
-
-class HnswSpace : public hnswlib::SpaceInterface<float> {
-  unsigned dim_;
-  VectorSimilarity sim_;
-
-  static float L2DistanceStatic(const void* pVect1, const void* pVect2, const void* param) {
-    return L2Distance(static_cast<const float*>(pVect1), static_cast<const float*>(pVect2),
-                      *static_cast<const unsigned*>(param));
-  }
-
-  static float IPDistanceStatic(const void* pVect1, const void* pVect2, const void* param) {
-    return IPDistance(static_cast<const float*>(pVect1), static_cast<const float*>(pVect2),
-                      *static_cast<const unsigned*>(param));
-  }
-
- public:
-  explicit HnswSpace(size_t dim, VectorSimilarity sim) : dim_(dim), sim_(sim) {
-  }
-
-  size_t get_data_size() {
-    return dim_ * sizeof(float);
-  }
-
-  hnswlib::DISTFUNC<float> get_dist_func() {
-    if (sim_ == VectorSimilarity::L2) {
-      return L2DistanceStatic;
-    } else {
-      return IPDistanceStatic;
-    }
-  }
-
-  void* get_dist_func_param() {
-    return &dim_;
-  }
-};
-}  // namespace
-
-// TODO: to replace it and use HierarchicalNSW directly.
 struct HnswlibAdapter {
   // Default setting of hnswlib/hnswalg
   constexpr static size_t kDefaultEfRuntime = 10;
+  constexpr static size_t kIndexInitCapacitySize = 16384;
 
-  explicit HnswlibAdapter(const SchemaField::VectorParams& params)
-      : space_{params.dim, params.sim},
-        world_{&space_, params.capacity, params.hnsw_m, params.hnsw_ef_construction,
-               100 /* seed*/} {
+  explicit HnswlibAdapter(const SchemaField::VectorParams& params) : size_(0) {
+    auto similarity_metric = [](VectorSimilarity sim) {
+      switch (sim) {
+        case dfly::search::VectorSimilarity::COSINE:
+          return unum::usearch::metric_kind_t::cos_k;
+        case dfly::search::VectorSimilarity::IP:
+          return unum::usearch::metric_kind_t::ip_k;
+        case dfly::search::VectorSimilarity::L2:
+          return unum::usearch::metric_kind_t::l2sq_k;
+        default:
+          LOG(FATAL) << "Unknown metric kind";
+      }
+    };
+
+    unum::usearch::metric_punned_t metric(params.dim, similarity_metric(params.sim),
+                                          unum::usearch::scalar_kind_t::f32_k);
+
+    unum::usearch::index_dense_config_t config =
+        unum::usearch::index_dense_config_t{params.hnsw_m, params.hnsw_ef_construction};
+
+    index_ = unum::usearch::index_dense_gt<GlobalDocId>::make(metric, config);
+
+    index_.reserve(kIndexInitCapacitySize);
   }
 
   void Add(const float* data, GlobalDocId id) {
-    while (true) {
-      try {
+    size_.fetch_add(1);
+    {
+      absl::WriterMutexLock lk(&resize_mutex_);
+      if (size_ == index_.capacity()) {
+        index_.try_reserve(index_.capacity() * 2);
         MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
-        absl::ReaderMutexLock resize_lock(&resize_mutex_);
-        world_.addPoint(data, id);
-        return;
-      } catch (const std::exception& e) {
-        std::string error_msg = e.what();
-        if (absl::StrContains(error_msg, "The number of elements exceeds the specified limit")) {
-          ResizeIfFull();
-          continue;
-        }
-        LOG(ERROR) << "HnswlibAdapter::Add exception: " << e.what();
       }
     }
+    auto add_result = index_.add(id, data);
   }
 
   void Remove(GlobalDocId id) {
-    try {
-      MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
-      world_.markDelete(id);
-    } catch (const std::exception& e) {
-      LOG(WARNING) << "HnswlibAdapter::Remove exception: " << e.what();
-    }
+    index_.remove(id);
   }
 
   vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
-    world_.setEf(ef.value_or(kDefaultEfRuntime));
-    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
-    return QueueToVec(world_.searchKnn(target, k));
+    std::vector<pair<float, GlobalDocId>> results;
+    auto search_result = index_.search(target, k, unum::usearch::index_dense_t::any_thread(), false,
+                                       ef.value_or(kDefaultEfRuntime));
+    for (std::size_t i = 0; i != search_result.size(); ++i)
+      results.emplace_back(search_result[i].distance, search_result[i].member.key);
+    return results;
   }
 
   vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
                                        const vector<GlobalDocId>& allowed) {
-    struct BinsearchFilter : hnswlib::BaseFilterFunctor {
-      virtual bool operator()(hnswlib::labeltype id) {
-        return binary_search(allowed->begin(), allowed->end(), id);
-      }
-
-      BinsearchFilter(const vector<GlobalDocId>* allowed) : allowed{allowed} {
-      }
-      const vector<GlobalDocId>* allowed;
-    };
-
-    world_.setEf(ef.value_or(kDefaultEfRuntime));
-    BinsearchFilter filter{&allowed};
+    // to implement
+    return {};
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
-    return QueueToVec(world_.searchKnn(target, k, &filter));
   }
 
  private:
-  // Function requires that we hold mutex while resizing index. resizeIndex is not thread safe with
-  // insertion (https://github.com/nmslib/hnswlib/issues/267)
-  void ResizeIfFull() {
-    {
-      // First check with reader lock to avoid contention.
-      absl::ReaderMutexLock lock(&resize_mutex_);
-      if (world_.getCurrentElementCount() < world_.getMaxElements() ||
-          (world_.allow_replace_deleted_ && world_.getDeletedCount() > 0)) {
-        return;
-      }
-    }
-    try {
-      // Upgrade to writer lock.
-      absl::WriterMutexLock lock(&resize_mutex_);
-      if (world_.getCurrentElementCount() == world_.getMaxElements() &&
-          (!world_.allow_replace_deleted_ || world_.getDeletedCount() == 0)) {
-        auto max_elements = world_.getMaxElements();
-        world_.resizeIndex(max_elements * 2);
-        VLOG(1) << "Resizing HNSW Index from " << max_elements << " to " << max_elements * 2;
-      }
-    } catch (const std::exception& e) {
-      LOG(FATAL) << "HnswlibAdapter::ResizeIfFull exception: " << e.what();
-    }
-  }
-
-  template <typename Q> static vector<pair<float, GlobalDocId>> QueueToVec(Q queue) {
-    vector<pair<float, GlobalDocId>> out(queue.size());
-    size_t idx = out.size();
-    while (!queue.empty()) {
-      out[--idx] = queue.top();
-      queue.pop();
-    }
-    return out;
-  }
-
-  HnswSpace space_;
-  HierarchicalNSW<float> world_;
+  unum::usearch::index_dense_t index_;
   absl::Mutex resize_mutex_;
+  std::atomic<size_t> size_;
   mutable MRMWMutex mrmw_mutex_;
 };
 
@@ -203,4 +139,5 @@ std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(
 void HnswVectorIndex::Remove(GlobalDocId id, const DocumentAccessor& doc, string_view field) {
   adapter_->Remove(id);
 }
+
 }  // namespace dfly::search
