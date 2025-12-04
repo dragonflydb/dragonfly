@@ -705,6 +705,11 @@ void Connection::OnShutdown() {
 void Connection::OnPreMigrateThread() {
   DVLOG(1) << "OnPreMigrateThread " << GetClientId();
 
+  const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
+  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen()) {
+    socket_->ResetOnRecvHook();
+  }
+
   CHECK(!cc_->conn_closing);
 
   DCHECK(!migration_in_process_);
@@ -727,6 +732,12 @@ void Connection::OnPostMigrateThread() {
   if (breaker_cb_ && socket()->IsOpen()) {
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
   }
+
+  const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
+  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen()) {
+    socket_->ResetOnRecvHook();
+  }
+
   migration_in_process_ = false;
   self_ = {make_shared<std::monostate>(), this};  // Recreate shared_ptr to self.
   DCHECK(!async_fb_.IsJoinable());
@@ -1133,6 +1144,11 @@ void Connection::ConnectionFlow() {
   service_->OnConnectionClose(cc_.get());
   DecreaseStatsOnClose();
 
+  if (io_loop_v2 && !is_tls_) {
+    done_ = true;
+    socket_->ResetOnRecvHook();
+  }
+
   // We wait for dispatch_fb to finish writing the previous replies before replying to the last
   // offending request.
   if (parse_status == ERROR) {
@@ -1164,10 +1180,6 @@ void Connection::ConnectionFlow() {
         break;  // Peer closed connection.
       }
     }
-  }
-
-  if (io_loop_v2 && !is_tls_) {
-    socket_->ResetOnRecvHook();
   }
 
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {
@@ -1392,7 +1404,7 @@ void Connection::OnBreakCb(int32_t mask) {
   cnd_.notify_one();  // Notify dispatch fiber.
 }
 
-void Connection::HandleMigrateRequest() {
+void Connection::HandleMigrateRequest(bool unregister) {
   if (cc_->conn_closing || !migration_request_) {
     return;
   }
@@ -1406,6 +1418,7 @@ void Connection::HandleMigrateRequest() {
 
   // We don't support migrating with subscriptions as it would require moving thread local
   // handles. We can't check above, as the queue might have contained a subscribe request.
+
   if (cc_->subscriptions == 0) {
     stats_->num_migrations++;
     migration_request_ = nullptr;
@@ -1419,9 +1432,7 @@ void Connection::HandleMigrateRequest() {
     // which can never trigger since we Joined on the async_fb_ above and we are
     // atomic in respect to our proactor meaning that no other fiber will
     // launch the DispatchFiber.
-    if (!this->Migrate(dest)) {
-      return;
-    }
+    std::ignore = !this->Migrate(dest);
   }
 }
 
@@ -1838,6 +1849,7 @@ bool Connection::Migrate(util::fb2::ProactorBase* dest) {
   if (!socket()->IsOpen()) {
     return false;
   }
+
   return true;
 }
 
@@ -2242,6 +2254,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   // TODO EnableRecvMultishot
 
   peer->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
+    CHECK(!done_);
+    CHECK(this);
     DoReadOnRecv(n);
     io_event_.notify_one();
   });

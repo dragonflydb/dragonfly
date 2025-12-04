@@ -386,7 +386,7 @@ class Connection : public util::Connection {
   // Returns non-null request ptr if pool has vacant entries.
   PipelineMessagePtr GetFromPipelinePool();
 
-  void HandleMigrateRequest();
+  void HandleMigrateRequest(bool unregister = false);
   io::Result<size_t> HandleRecvSocket();
 
   bool ShouldEndAsyncFiber(const MessageHandle& msg);
@@ -501,6 +501,7 @@ class Connection : public util::Connection {
   };
 
   bool request_shutdown_ = false;
+  bool done_ = false;
 };
 
 }  // namespace facade
