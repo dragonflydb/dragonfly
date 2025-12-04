@@ -829,4 +829,20 @@ SearchStats ShardDocIndices::GetStats() const {
   return {GetUsedMemory(), indices_.size(), total_entries};
 }
 
+search::DefragmentResult ShardDocIndices::Defragment(PageUsage* page_usage) {
+  // In case of resumed defragmentation, iteration order may change in case there were insertions
+  // after the last defragment operation completed, so there is no guarantee that an entry will only
+  // be defragmented once per cycle. This will only happen in case of a new index being added
+  // though, so it is an acceptable anomaly.
+  auto begin_it = [&] {
+    auto it = next_defrag_index_.empty() ? indices_.end() : indices_.find(next_defrag_index_);
+    if (it == indices_.end()) {
+      it = indices_.begin();
+    }
+    return it;
+  };
+  search::DefragmentMap dm{indices_, std::move(begin_it)};
+  return dm.Defragment<true>(quota_usec, page_usage, &next_defrag_index_);
+}
+
 }  // namespace dfly
