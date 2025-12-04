@@ -820,7 +820,9 @@ void Driver::ReceiveFb() {
     VLOG(3) << "Socket read: " << reqs_.size();
 
     ::io::Result<size_t> recv_sz = socket_->Recv(buf);
-    if (!recv_sz && FiberSocketBase::IsConnClosed(recv_sz.error())) {
+    CHECK(recv_sz) << recv_sz.error().message();
+
+    if (*recv_sz == 0) {
       LOG_IF(DFATAL, !reqs_.empty())
           << "Broke with " << reqs_.size() << " requests,  received: " << received_;
       // clear reqs - to prevent Driver::Run block on them indefinitely.
@@ -828,7 +830,6 @@ void Driver::ReceiveFb() {
       break;
     }
 
-    CHECK(recv_sz) << recv_sz.error().message();
     io_buf_.CommitWrite(*recv_sz);
 
     if (protocol == RESP) {
