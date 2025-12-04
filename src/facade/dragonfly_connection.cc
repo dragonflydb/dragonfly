@@ -113,7 +113,7 @@ ABSL_FLAG(uint32_t, pipeline_wait_batch_usec, 0,
           "If non-zero, waits for this time for more I/O "
           " events to come for the connection in case there is only one command in the pipeline. ");
 
-ABSL_FLAG(bool, expiremental_io_loop_v2, false, "new io loop");
+ABSL_FLAG(bool, experimental_io_loop_v2, false, "new io loop");
 
 using namespace util;
 using namespace std;
@@ -1097,7 +1097,7 @@ void Connection::ConnectionFlow() {
   }
 
   error_code ec = reply_builder_->GetError();
-  const bool io_loop_v2 = GetFlag(FLAGS_expiremental_io_loop_v2);
+  const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
 
   // Main loop.
   if (parse_status != ERROR && !ec) {
@@ -1243,8 +1243,6 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
   io::Bytes read_buffer = io_buf_.InputBuffer();
   // Keep track of total bytes consumed/parsed. The do/while{} loop below preempts,
   // and InputBuffer() size might change between preemption points. Hence, count
-  // the bytes read and consume them from the io_buf_ at the end.
-  size_t total = 0;
   do {
     result = redis_parser_->Parse(read_buffer, &consumed, &tmp_parse_args_);
     request_consumed_bytes_ += consumed;
@@ -1278,7 +1276,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
           << "Redis parser error: " << result << " during parse: " << ToSV(read_buffer);
     }
     read_buffer.remove_prefix(consumed);
-    total += consumed;
+    io_buf_.ConsumeInput(consumed);
 
     // We must yield from time to time to allow other fibers to run.
     // Specifically, if a client sends a huge chunk of data resulting in a very long pipeline,
@@ -1288,8 +1286,6 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
       ThisFiber::Yield();
     }
   } while (RedisParser::OK == result && read_buffer.size() > 0 && !reply_builder_->GetError());
-
-  io_buf_.ConsumeInput(total);
 
   parser_error_ = result;
   if (result == RedisParser::OK)
@@ -2190,15 +2186,15 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
 
   // TODO non epoll API via EnableRecvMultishot
   // if (std::holds_alternative<io::MutableBytes>(n.read_result))
-  using RecvNot = util::FiberSocketBase::RecvNotification::RecvCompletion;
-  if (std::holds_alternative<RecvNot>(n.read_result)) {
-    if (!std::get<bool>(n.read_result)) {
+  using RecvNoti = util::FiberSocketBase::RecvNotification::RecvCompletion;
+  if (std::holds_alternative<RecvNoti>(n.read_result)) {
+    if (!std::get<RecvNoti>(n.read_result)) {
       io_ec_ = make_error_code(errc::connection_aborted);
       return;
     }
 
     if (io_buf_.AppendLen() == 0) {
-      // We will regrow in IoLoop
+      // We will regrow in IoLoopV2
       return;
     }
 
@@ -2231,14 +2227,14 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
     return;
   }
 
-  DCHECK(false) << "Sould not reach here";
+  DCHECK(false) << "Should not reach here";
 }
 
 variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   error_code ec;
   ParserStatus parse_status = OK;
 
-  size_t max_iobfuf_len = GetFlag(FLAGS_max_client_iobuf_len);
+  size_t max_io_buf_len = GetFlag(FLAGS_max_client_iobuf_len);
 
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
@@ -2291,7 +2287,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       parse_status = OK;
 
       size_t capacity = io_buf_.Capacity();
-      if (capacity < max_iobfuf_len) {
+      if (capacity < max_io_buf_len) {
         size_t parser_hint = 0;
         if (redis_parser_)
           parser_hint = redis_parser_->parselen_hint();  // Could be done for MC as well.
@@ -2303,12 +2299,12 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         // so there's no danger of accidental O(n^2) behavior.)
         if (parser_hint > capacity) {
           UpdateIoBufCapacity(io_buf_, stats_,
-                              [&]() { io_buf_.Reserve(std::min(max_iobfuf_len, parser_hint)); });
+                              [&]() { io_buf_.Reserve(std::min(max_io_buf_len, parser_hint)); });
         }
 
         // If we got a partial request because iobuf was full, grow it up to
         // a reasonable limit to save on Recv() calls.
-        if (is_iobuf_full && capacity < max_iobfuf_len / 2) {
+        if (is_iobuf_full && capacity < max_io_buf_len / 2) {
           // Last io used most of the io_buf to the end.
           UpdateIoBufCapacity(io_buf_, stats_, [&]() {
             io_buf_.Reserve(capacity * 2);  // Valid growth range.
