@@ -1,5 +1,21 @@
 #include "core/search/block_list.h"
 
+#include "core/page_usage/page_usage_stats.h"
+
+namespace {
+
+template <typename T>
+using CanDefragmentT = decltype(std::declval<T>().Defragment(std::declval<size_t>(),
+                                                             std::declval<dfly::PageUsage*>()));
+
+template <typename, typename = void> struct CanDefragment : std::false_type {};
+
+template <typename T> struct CanDefragment<T, std::void_t<CanDefragmentT<T>>> : std::true_type {};
+
+template <typename T> inline constexpr bool CanDefragmentV = CanDefragment<T>::value;
+
+}  // namespace
+
 namespace dfly::search {
 
 using namespace std;
@@ -108,6 +124,27 @@ template <typename C> bool BlockList<C>::Remove(ElementType t) {
   }
 
   return false;
+}
+
+template <typename Container>
+DefragmentResult BlockList<Container>::Defragment(PageUsage* page_usage) {
+  if (page_usage->QuotaDepleted()) {
+    return DefragmentResult{.quota_depleted = true, .objects_moved = 0};
+  }
+
+  DefragmentResult result;
+  if (DefragmentVector(blocks_, page_usage)) {
+    result.objects_moved += 1;
+  }
+
+  if constexpr (CanDefragmentV<Container>) {
+    for (Container& block : blocks_) {
+      if (result.Merge(block.Defragment(quota_usec, page_usage)).quota_depleted) {
+        break;
+      }
+    }
+  }
+  return result;
 }
 
 template <typename C> typename BlockList<C>::BlockIt BlockList<C>::FindBlock(const ElementType& t) {
@@ -260,6 +297,13 @@ template <typename T> std::pair<SortedVector<T>, SortedVector<T>> SortedVector<T
   entries_.resize(entries_.size() / 2);
 
   return std::make_pair(std::move(*this), SortedVector<T>{std::move(tail)});
+}
+
+template <typename T> DefragmentResult SortedVector<T>::Defragment(PageUsage* page_usage) {
+  if (DefragmentVector(entries_, page_usage)) {
+    return DefragmentResult{.quota_depleted = false, .objects_moved = 1};
+  }
+  return DefragmentResult{};
 }
 
 template class SortedVector<DocId>;
