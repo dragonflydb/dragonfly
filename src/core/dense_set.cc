@@ -109,7 +109,8 @@ void DenseSet::IteratorBase::Advance() {
   DCHECK(!curr_entry_->IsEmpty());
 }
 
-DenseSet::DenseSet(MemoryResource* mr) : entries_(mr) {
+DenseSet::DenseSet() {
+  static_assert(sizeof(entries_) == 24);
 }
 
 DenseSet::~DenseSet() {
@@ -383,6 +384,57 @@ void DenseSet::Reserve(size_t sz) {
     capacity_log_ = absl::bit_width(sz) - 1;
     Grow(prev_size);
   }
+}
+
+void DenseSet::ShrinkBucket(size_t bucket_idx) {
+  // Take the entire bucket to avoid infinite loop when new_bid == bucket_idx
+  DensePtr bucket = entries_[bucket_idx];
+  entries_[bucket_idx].Reset();
+  --num_used_buckets_;
+
+  // Process the taken bucket chain
+  while (!bucket.IsEmpty()) {
+    // Pop front from local chain
+    DensePtr dptr = bucket;
+    bucket = bucket.IsObject() ? DensePtr{} : bucket.AsLink()->next;
+
+    void* obj = dptr.GetObject();
+    bool has_ttl = dptr.HasTtl();
+
+    // Free link unconditionally - PushFront will create new one if needed
+    if (dptr.IsLink()) {
+      FreeLink(dptr.AsLink());
+    }
+
+    if (has_ttl && ObjExpireTime(obj) <= time_now_) {
+      ObjDelete(obj, true);
+      --size_;
+      continue;
+    }
+
+    uint32_t new_bid = BucketId(obj, 0);
+    DVLOG(2) << " Shrink: Moving from " << bucket_idx << " to " << new_bid;
+    num_used_buckets_ += entries_[new_bid].IsEmpty();
+    PushFront(entries_.begin() + new_bid, obj, has_ttl);
+  }
+}
+
+void DenseSet::Shrink(size_t new_size) {
+  DCHECK(absl::has_single_bit(new_size));
+  DCHECK_GE(new_size, kMinSize);
+  DCHECK_LT(new_size, entries_.size());
+
+  size_t prev_size = entries_.size();
+  capacity_log_ = absl::bit_width(new_size) - 1;
+
+  // Process from low to high (opposite of Grow).
+  // This prevents double-processing: when moving elements from bucket i to bucket j < i,
+  // bucket j has already been processed, so the element won't be processed again.
+  for (size_t i = 0; i < prev_size; ++i) {
+    ShrinkBucket(i);
+  }
+
+  entries_.resize(new_size);
 }
 
 void DenseSet::Fill(DenseSet* other) const {
@@ -851,7 +903,9 @@ uint32_t DenseSet::Scan(uint32_t cursor, const ItemCb& cb) const {
 }
 
 auto DenseSet::NewLink(void* data, DensePtr next) -> DenseLinkKey* {
-  LinkAllocator la(mr());
+  using LinkAllocator = StatelessAllocator<DenseLinkKey>;
+
+  LinkAllocator la;
   DenseLinkKey* lk = la.allocate(1);
   la.construct(lk);
 

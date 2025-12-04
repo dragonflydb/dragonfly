@@ -1,0 +1,81 @@
+name: generate-site
+on:
+  workflow_dispatch:
+
+jobs:
+  gen-site:
+    runs-on: ubuntu-latest
+    env:
+      SiteRoot: _site
+
+    name: Generate index and site assets
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Install packaging tools
+        # RPM tools are available on ubuntu
+        run: sudo apt install -y rpm gpg createrepo-c dpkg-dev reprepro
+
+      - name: Setup requirements
+        working-directory: tools/packaging/osrepos
+        run: pip install -r requirements.txt
+
+      - name: Download packages
+        working-directory: tools/packaging/osrepos
+        run: python scripts/fetch-releases.py $SiteRoot
+
+      - name: Import GPG key
+        id: gpg-import
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+
+      - name: Sign RPMs
+        shell: sh
+        working-directory: tools/packaging/osrepos
+        run: sh scripts/sign-rpms.sh ${{ steps.gpg-import.outputs.fingerprint }}
+
+      - name: Create YUM repository
+        # Creates metadata for YUM/DNF repository, the files were copied in the download step
+        shell: sh
+        working-directory: tools/packaging/osrepos
+        run: createrepo_c -v $SiteRoot/rpm
+
+      - name: Sign YUM repository
+        shell: sh
+        working-directory: tools/packaging/osrepos
+        run: gpg --armor --detach-sign $SiteRoot/rpm/repodata/repomd.xml
+
+      - name: Create APT repository
+        # The configuration for apt repo is in tools/packaging/osrepos/reprepro-config,
+        # which ensures the same GPG key used elsewhere in this action is used to sign
+        # the repository
+        shell: sh
+        working-directory: tools/packaging/osrepos
+        run: sh -x scripts/generate-apt-repo.sh
+
+      - name: Prepare assets
+        working-directory: tools/packaging/osrepos
+        run: |
+          cp -aRv dragonfly.repo pgp-key.public dragonfly.sources $SiteRoot/
+          rm -rf $SiteRoot/deb/conf
+
+      - name: Generate Directory Listings
+        working-directory: tools/packaging/osrepos
+        run: python scripts/generate-index.py $SiteRoot
+
+      - name: Authenticate
+        uses: 'google-github-actions/auth@v3'
+        with:
+          project_id: 'dragonflydb'
+          credentials_json: ${{ secrets.GCP_BUCKET_CREDENTIALS }}
+
+      - name: GCloud setup
+        uses: 'google-github-actions/setup-gcloud@v3'
+
+      - name: Deploy site
+        working-directory: tools/packaging/osrepos
+        run: |
+          gcloud storage rm ${{ secrets.GCP_PACKAGES_BUCKET }}/**
+          gcloud storage rsync $SiteRoot ${{ secrets.GCP_PACKAGES_BUCKET }} --recursive --delete-unmatched-destination-objects

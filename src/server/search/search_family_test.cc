@@ -839,6 +839,16 @@ TEST_F(SearchFamilyTest, Unicode) {
   auto resp = Run({"ft.search", "i1", "λιβελλούλη"});
   EXPECT_THAT(resp,
               IsMapWithSize("d:4", IsMap("visits", "100", "title", "πανίσχυρη ΛΙΒΕΛΛΟΎΛΗ Δίας")));
+
+  // Repeat with tags
+  Run({"ft.create", "i2", "schema", "color", "tag", "separator", "/"});
+
+  Run({"hset", "d:5", "color", "зеЛеный/żółtY"});
+  Run({"hset", "d:6", "color", "κόκκινος/Білий"});
+
+  auto tagvals = Run({"ft.tagvals", "i2", "color"});
+  EXPECT_THAT(tagvals.GetVec(), UnorderedElementsAre("зеленый", "żółty", "κόκκινος", "білий"));
+  EXPECT_THAT(Run({"ft.search", "i2", "@color:{зеленый|білий}"}), AreDocIds("d:5", "d:6"));
 }
 
 TEST_F(SearchFamilyTest, UnicodeWords) {
@@ -3546,6 +3556,32 @@ TEST_F(SearchFamilyTest, QueryStringBytesLimit) {
 
   resp = Run({"ft.aggregate", "idx", query, "LOAD", "1", "name"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "alice")));
+}
+
+TEST_F(SearchFamilyTest, KnnHnsw) {
+  // Create an index with a vector field using HASH documents
+  auto resp = Run({"FT.CREATE", "knn_idx", "ON", "HASH", "SCHEMA", "even", "TAG", "pos", "VECTOR",
+                   "HNSW", "6", "TYPE", "FLOAT32", "DIM", "1", "DISTANCE_METRIC", "L2"});
+  EXPECT_EQ(resp, "OK");
+
+  // Helper to convert float to binary format
+  auto FloatToBytes = [](float f) -> string {
+    return string(reinterpret_cast<const char*>(&f), sizeof(float));
+  };
+
+  // Add some test documents with vector data
+  Run({"HSET", "doc1", "even", "yes", "pos", FloatToBytes(1.0f)});
+  Run({"HSET", "doc2", "even", "no", "pos", FloatToBytes(2.0f)});
+  Run({"HSET", "doc3", "even", "yes", "pos", FloatToBytes(3.0f)});
+
+  // Query vector (2.0f - should find doc2 closest, but filtered to "yes" docs)
+  string query_vec = FloatToBytes(2.0f);
+
+  // Perform KNN search with tag filter
+  resp = Run({"FT.SEARCH", "knn_idx", "@even:{yes} => [KNN 3 @pos $vec]", "PARAMS", "2", "vec",
+              query_vec});
+  // Should return documents with "even": "yes" sorted by vector distance to 2.0
+  EXPECT_THAT(resp, AreDocIds("doc3", "doc1"));
 }
 
 }  // namespace dfly

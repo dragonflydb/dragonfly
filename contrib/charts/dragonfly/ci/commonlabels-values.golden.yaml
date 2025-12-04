@@ -8,7 +8,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.35.0"
+    app.kubernetes.io/version: "v1.35.1"
     app.kubernetes.io/managed-by: Helm
     project: cache-infrastructure
     team: platform
@@ -22,7 +22,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.35.0"
+    app.kubernetes.io/version: "v1.35.1"
     app.kubernetes.io/managed-by: Helm
     project: cache-infrastructure
     team: platform
@@ -46,7 +46,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.35.0"
+    app.kubernetes.io/version: "v1.35.1"
     app.kubernetes.io/managed-by: Helm
     project: cache-infrastructure
     team: platform
@@ -68,7 +68,7 @@ spec:
       serviceAccountName: test-dragonfly
       containers:
         - name: dragonfly
-          image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.35.0"
+          image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.35.1"
           imagePullPolicy: IfNotPresent
           ports:
             - name: dragonfly

@@ -12,11 +12,11 @@ using namespace std;
 class SerializedMapTest : public ::testing::Test {};
 
 TEST_F(SerializedMapTest, TestBasic) {
-  const vector<std::pair<string_view, string_view>> kBase = {{"first key", "first value"},
-                                                             {"second key", "second value"},
-                                                             {"third key", "third value"},
-                                                             {"fourth key", "fourth value"},
-                                                             {"fifth key", "fifth value"}};
+  const vector<std::pair<string, string>> kBase = {{"first key", "first value"},
+                                                   {"second key", "second value"},
+                                                   {"third key", "third value"},
+                                                   {"fourth key", "fourth value"},
+                                                   {"fifth key", "fifth value"}};
 
   // Serialize kBase to buffer
   std::string buffer;
@@ -31,7 +31,8 @@ TEST_F(SerializedMapTest, TestBasic) {
   // Check entries
   size_t idx = 0;
   for (auto it = map.begin(); it != map.end(); ++it, ++idx) {
-    EXPECT_EQ(*it, kBase[idx]);
+    EXPECT_EQ((*it).first, kBase[idx].first);
+    EXPECT_EQ((*it).second, kBase[idx].second);
   }
 }
 

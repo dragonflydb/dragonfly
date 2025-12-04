@@ -24,7 +24,7 @@ extern "C" {
 #include "core/bloom.h"
 #include "core/detail/bitpacking.h"
 #include "core/huff_coder.h"
-#include "core/page_usage_stats.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -861,7 +861,10 @@ uint64_t CompactObj::HashCode() const {
   DCHECK(mask_bits_.encoding);
 
   if (IsInline()) {
-    char buf[kInlineLen * 3];  // should suffice for most huffman decodings.
+    // Buffer must accommodate maximum decompressed size from inline storage
+    // Highly compressible data can achieve ~8x compression (e.g., repeated character)
+    // kInlineLen (16 bytes) compressed -> up to 128 bytes decompressed
+    char buf[kInlineLen * 8];
     size_t decoded_len = GetStrEncoding().Decode(string_view{u_.inline_str, taglen_}, buf);
     return XXH3_64bits_withSeed(buf, decoded_len, kHashSeed);
   }
@@ -1224,11 +1227,13 @@ CompactObj::ExternalRep CompactObj::GetExternalRep() const {
   return static_cast<CompactObj::ExternalRep>(u_.ext_ptr.representation);
 }
 
-void CompactObj::SetCool(size_t offset, uint32_t sz, detail::TieredColdRecord* record) {
+void CompactObj::SetCool(size_t offset, uint32_t sz, ExternalRep rep,
+                         detail::TieredColdRecord* record) {
   // We copy the mask of the "cooled" referenced object because it contains the encoding info.
   SetMeta(EXTERNAL_TAG, record->value.mask_);
 
   u_.ext_ptr.is_cool = 1;
+  u_.ext_ptr.representation = static_cast<uint8_t>(rep);
   u_.ext_ptr.page_offset = offset % 4096;
   u_.ext_ptr.serialized_size = sz;
   u_.ext_ptr.cool_record = record;
@@ -1242,6 +1247,10 @@ auto CompactObj::GetCool() const -> CoolItem {
   res.serialized_size = u_.ext_ptr.serialized_size;
   res.record = u_.ext_ptr.cool_record;
   return res;
+}
+
+void CompactObj::Freeze(size_t offset, size_t sz) {
+  SetExternal(offset, sz, GetExternalRep());
 }
 
 std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
@@ -1411,7 +1420,8 @@ bool CompactObj::CmpEncoded(string_view sv) const {
       return false;
 
     if (IsInline()) {
-      constexpr size_t kMaxHuffLen = kInlineLen * 3;
+      // Buffer must accommodate maximum decompressed size from inline storage (~8x compression)
+      constexpr size_t kMaxHuffLen = kInlineLen * 8;
       if (sz <= kMaxHuffLen) {
         char buf[kMaxHuffLen];
         const auto& decoder = tl.GetHuffmanDecoder(huffman_domain_);
@@ -1614,7 +1624,7 @@ StringOrView CompactObj::GetRawString() const {
     return StringOrView::FromString(std::move(tmp));
   }
 
-  LOG(FATAL) << "Unsupported tag for GetRawString(): " << taglen_;
+  LOG(FATAL) << "Unsupported tag for GetRawString(): " << int(taglen_);
   return {};
 }
 
@@ -1624,7 +1634,7 @@ MemoryResource* CompactObj::memory_resource() {
 
 bool CompactObj::JsonConsT::DefragIfNeeded(PageUsage* page_usage) {
   if (JsonType* old = json_ptr; ShouldDefragment(page_usage)) {
-    json_ptr = AllocateMR<JsonType>(DeepCopyJSON(old, memory_resource()));
+    json_ptr = AllocateMR<JsonType>(DeepCopyJSON(old));
     DeleteMR<JsonType>(old);
     return true;
   }

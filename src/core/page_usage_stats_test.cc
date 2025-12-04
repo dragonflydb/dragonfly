@@ -2,7 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
-#include "core/page_usage_stats.h"
+#include "core/page_usage/page_usage_stats.h"
 
 #include <absl/flags/reflection.h>
 #include <gmock/gmock-matchers.h>
@@ -45,15 +45,16 @@ class PageUsageStatsTest : public ::testing::Test {
   }
 
   PageUsageStatsTest() : m_(mi_heap_get_backing()) {
+    InitTLStatelessAllocMR(&m_);
   }
 
   void SetUp() override {
     CompactObj::InitThreadLocal(&m_);
 
-    score_map_ = std::make_unique<ScoreMap>(&m_);
-    sorted_map_ = std::make_unique<detail::SortedMap>(&m_);
-    string_set_ = std::make_unique<StringSet>(&m_);
-    string_map_ = std::make_unique<StringMap>(&m_);
+    score_map_ = std::make_unique<ScoreMap>();
+    sorted_map_ = std::make_unique<detail::SortedMap>();
+    string_set_ = std::make_unique<StringSet>();
+    string_map_ = std::make_unique<StringMap>();
     SmallString::InitThreadLocal(m_.heap());
     qlist_ = std::make_unique<QList>(2, 2);
   }
@@ -191,7 +192,7 @@ TEST_F(PageUsageStatsTest, JSONCons) {
   // encoding.
   std::string_view data{R"#({"data": "some", "count": 1, "checked": false})#"};
 
-  auto parsed = JsonFromString(data, &m_);
+  auto parsed = ParseJsonUsingShardHeap(data);
   EXPECT_TRUE(parsed.has_value());
 
   c_obj_.SetJson(std::move(parsed.value()));

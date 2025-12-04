@@ -6,7 +6,7 @@
 
 #include "absl/flags/flag.h"
 #include "core/compact_object.h"
-#include "core/page_usage_stats.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "core/sds_utils.h"
 
 extern "C" {
@@ -15,9 +15,6 @@ extern "C" {
 }
 
 #include "base/logging.h"
-
-ABSL_FLAG(bool, legacy_saddex_keepttl, false,
-          "If true SADDEX does not update TTL for existing fields");
 
 using namespace std;
 
@@ -93,19 +90,13 @@ unsigned StringSet::AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec
     Prefetch(hash[i]);
   }
 
-  // update ttl if legacy_saddex_keepttl is off (which is default). This variable is intended for
-  // SADDEX, but this method is called from SADD as well, where ttl is set to UINT32_MAX value,
-  // which results in has_ttl being false. This means that ObjUpdateExpireTime is never called from
-  // SADD code path even when update_ttl is true.
-  const thread_local bool update_ttl = !absl::GetFlag(FLAGS_legacy_saddex_keepttl);
-
   for (unsigned i = 0; i < count; ++i) {
     void* prev = FindInternal(&span[i], hash[i], 1);
     if (prev == nullptr) {
       ++res;
       sds field = MakeSetSds(span[i], ttl_sec);
       AddUnique(field, has_ttl, hash[i]);
-    } else if (update_ttl && has_ttl && !keepttl) {
+    } else if (has_ttl && !keepttl) {
       ObjUpdateExpireTime(prev, ttl_sec);
     }
   }

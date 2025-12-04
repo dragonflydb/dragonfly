@@ -39,7 +39,7 @@ struct DbStats : public DbTableStats {
   // Memory used by dictionaries.
   size_t table_mem_usage = 0;
 
-  using DbTableStats::operator+=;
+  // We override additional DbStats fields explicitly in DbSlice::GetStats().
   using DbTableStats::operator=;
 
   DbStats& operator+=(const DbStats& o);
@@ -325,7 +325,8 @@ class DbSlice {
   // Deletes the iterator. The iterator must be valid.
   // Context argument is used only for document removal and it just needs
   // timestamp field. Last argument, db_table, is optional and is used only in FlushSlotsCb.
-  void Del(Context cntx, Iterator it, DbTable* db_table = nullptr);
+  // If async is set, AsyncDeleter will enqueue deletion of the object
+  void Del(Context cntx, Iterator it, DbTable* db_table = nullptr, bool async = false);
 
   // Deletes a key after FindMutable(). Runs post_updater before deletion
   // to update memory accounting while the key is still valid.
@@ -571,7 +572,8 @@ class DbSlice {
   void RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> indices,
                                                const DbTableArray& db_arr) const;
 
-  void PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& exp_it, DbTable* table);
+  void PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& exp_it, DbTable* table,
+                             bool async = false);
 
   // Queues invalidation message to the clients that are tracking the change to a key.
   void QueueInvalidationTrackingMessageAtomic(std::string_view key);

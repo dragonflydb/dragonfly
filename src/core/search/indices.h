@@ -191,30 +191,6 @@ struct FlatVectorIndex : public BaseVectorIndex {
   PMR_NS::vector<float> entries_;
 };
 
-struct HnswlibAdapter;
-
-struct HnswVectorIndex : public BaseVectorIndex {
-  HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
-  ~HnswVectorIndex();
-
-  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
-
-  std::vector<std::pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef) const;
-  std::vector<std::pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
-                                           const std::vector<DocId>& allowed) const;
-
-  // TODO: Implement if needed
-  std::vector<DocId> GetAllDocsWithNonNullValues() const override {
-    return std::vector<DocId>{};
-  }
-
- protected:
-  void AddVector(DocId id, const VectorPtr& vector) override;
-
- private:
-  std::unique_ptr<HnswlibAdapter> adapter_;
-};
-
 struct GeoIndex : public BaseIndex {
   using point =
       boost::geometry::model::point<double, 2,

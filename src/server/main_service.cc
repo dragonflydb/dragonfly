@@ -378,7 +378,8 @@ class InterpreterReplier : public RedisReplyBuilder {
 // Serialized result of script invocation to Redis protocol
 class EvalSerializer : public ObjectExplorer {
  public:
-  explicit EvalSerializer(RedisReplyBuilder* rb) : rb_(rb) {
+  explicit EvalSerializer(RedisReplyBuilder* rb, bool float_as_int)
+      : rb_(rb), float_as_int_(float_as_int) {
   }
 
   void OnBool(bool b) final {
@@ -394,7 +395,7 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnDouble(double d) final {
-    if (GetFlag(FLAGS_lua_resp2_legacy_float)) {
+    if (float_as_int_ || GetFlag(FLAGS_lua_resp2_legacy_float)) {
       const long val = d >= 0 ? static_cast<long>(floor(d)) : static_cast<long>(ceil(d));
       rb_->SendLong(val);
     } else {
@@ -438,6 +439,7 @@ class EvalSerializer : public ObjectExplorer {
 
  private:
   RedisReplyBuilder* rb_;
+  bool float_as_int_;
 };
 
 void InterpreterReplier::PostItem() {
@@ -1123,6 +1125,11 @@ void Service::Shutdown() {
 
   shard_set->PreShutdown();
   shard_set->Shutdown();
+
+#ifdef WITH_SEARCH
+  SearchFamily::Shutdown();
+#endif
+
   Transaction::Shutdown();
 
   pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
@@ -2189,26 +2196,21 @@ void Service::CallSHA(CmdArgList args, string_view sha, Interpreter* interpreter
   ServerState::tlocal()->RecordCallLatency(sha, (end - start) / 1000);
 }
 
-optional<ScriptMgr::ScriptParams> LoadScript(string_view sha, ScriptMgr* script_mgr,
-                                             Interpreter* interpreter) {
-  auto ss = ServerState::tlocal();
+void LoadScript(string_view sha, ScriptMgr* script_mgr, Interpreter* interpreter) {
+  if (interpreter->Exists(sha))
+    return;
 
-  if (!interpreter->Exists(sha)) {
-    auto script_data = script_mgr->Find(sha);
-    if (!script_data)
-      return std::nullopt;
-
-    string err;
-    Interpreter::AddResult add_res = interpreter->AddFunction(sha, script_data->body, &err);
-    if (add_res != Interpreter::ADD_OK) {
-      LOG(ERROR) << "Error adding " << sha << " to database, err " << err;
-      return std::nullopt;
-    }
-
-    return script_data;
+  auto script_data = script_mgr->Find(sha);
+  if (!script_data) {
+    LOG(DFATAL) << "Script " << sha << " not found in script mgr";
+    return;
   }
 
-  return ss->GetScriptParams(sha);
+  string err;
+  Interpreter::AddResult add_res = interpreter->AddFunction(sha, script_data->body, &err);
+  if (add_res != Interpreter::ADD_OK) {
+    LOG(DFATAL) << "Error adding " << sha << " to database, err " << err;
+  }
 }
 
 // Determine multi mode based on script params.
@@ -2247,13 +2249,9 @@ bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode, CmdArgL
   return false;
 }
 
-static bool CanRunSingleShardMulti(optional<ShardId> sid, const ScriptMgr::ScriptParams& params,
+static bool CanRunSingleShardMulti(optional<ShardId> sid, Transaction::MultiMode multi_mode,
                                    const Transaction& tx) {
-  if (!sid.has_value()) {
-    return false;
-  }
-
-  if (DetermineMultiMode(params) != Transaction::LOCK_AHEAD) {
+  if (!sid.has_value() || multi_mode != Transaction::LOCK_AHEAD) {
     return false;
   }
 
@@ -2276,9 +2274,13 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     return builder->SendError(facade::kScriptNotFound);
   }
 
-  auto params = LoadScript(eval_args.sha, server_family_.script_mgr(), interpreter);
-  if (!params)
+  auto* ss = ServerState::tlocal();
+  auto params = ss->GetScriptParams(eval_args.sha);
+  if (!params) {
     return builder->SendError(facade::kScriptNotFound);
+  }
+
+  LoadScript(eval_args.sha, server_family_.script_mgr(), interpreter);
 
   string error;
 
@@ -2313,6 +2315,9 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   Transaction* tx = cntx->transaction;
   CHECK(tx != nullptr);
 
+  Interpreter::RunResult result;
+  Transaction::MultiMode script_mode = DetermineMultiMode(*params);
+
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
 
@@ -2321,9 +2326,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     sinfo.reset();
   };
 
-  Interpreter::RunResult result;
-
-  if (CanRunSingleShardMulti(sid, *params, *tx)) {
+  if (CanRunSingleShardMulti(sid, script_mode, *tx)) {
     // If script runs on a single shard, we run it remotely to save hops.
     interpreter->SetRedisFunc([cntx, this](Interpreter::CallArgs args) {
       // Disable squashing, as we're using the squashing mechanism to run remotely.
@@ -2331,7 +2334,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
       CallFromScript(cntx, args);
     });
 
-    ++ServerState::tlocal()->stats.eval_shardlocal_coordination_cnt;
+    ++ss->stats.eval_shardlocal_coordination_cnt;
     tx->PrepareMultiForScheduleSingleHop(cntx->ns, *sid, cntx->db_index(), args);
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       boost::intrusive_ptr<Transaction> stub_tx =
@@ -2344,13 +2347,12 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
       return OpStatus::OK;
     });
 
-    if (*sid != ServerState::tlocal()->thread_index()) {
+    if (*sid != ss->thread_index()) {
       VLOG(2) << "Migrating connection " << cntx->conn() << " from "
               << ProactorBase::me()->GetPoolIndex() << " to " << *sid;
       cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid), false);
     }
   } else {
-    Transaction::MultiMode script_mode = DetermineMultiMode(*params);
     Transaction::MultiMode tx_mode = tx->GetMultiMode();
     bool scheduled = false;
 
@@ -2366,7 +2368,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
       scheduled = StartMulti(cntx, script_mode, eval_args.keys);
     }
 
-    ++ServerState::tlocal()->stats.eval_io_coordination_cnt;
+    ++ss->stats.eval_io_coordination_cnt;
     interpreter->SetRedisFunc(
         [cntx, this](Interpreter::CallArgs args) { CallFromScript(cntx, args); });
 
@@ -2394,7 +2396,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   // TODO(vlad): Investigate if using ReplyScope here is possible with a different serialization
   // strategy due to currently SerializeResult destructuring a value while serializing
   SinkReplyBuilder::ReplyAggregator agg(builder);
-  EvalSerializer ser{static_cast<RedisReplyBuilder*>(builder)};
+  EvalSerializer ser{static_cast<RedisReplyBuilder*>(builder), params->float_as_int};
   if (!interpreter->IsResultSafe()) {
     builder->SendError("reached lua stack limit");
   } else {

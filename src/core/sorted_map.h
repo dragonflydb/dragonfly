@@ -69,7 +69,7 @@ class SortedMap {
   using ScoreSds = void*;
   using RankAndScore = std::pair<unsigned, double>;
 
-  SortedMap(PMR_NS::memory_resource* res);
+  SortedMap();
   ~SortedMap();
 
   SortedMap(const SortedMap&) = delete;

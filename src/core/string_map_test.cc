@@ -18,11 +18,10 @@
 #include <unordered_set>
 #include <vector>
 
+#include "base/logging.h"
 #include "core/compact_object.h"
-#include "core/mi_memory_resource.h"
-#include "core/page_usage_stats.h"
-#include "glog/logging.h"
-#include "redis/sds.h"
+#include "core/detail/stateless_allocator.h"
+#include "core/page_usage/page_usage_stats.h"
 
 extern "C" {
 #include "redis/zmalloc.h"
@@ -31,13 +30,13 @@ extern "C" {
 namespace dfly {
 
 using namespace std;
-using absl::StrCat;
 
 class StringMapTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
     auto* tlh = mi_heap_get_backing();
     init_zmalloc_threadlocal(tlh);
+    InitTLStatelessAllocMR(PMR_NS::get_default_resource());
   }
 
   static void TearDownTestSuite() {

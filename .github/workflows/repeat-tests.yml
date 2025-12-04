@@ -55,7 +55,7 @@ jobs:
         - /var/crash:/var/crash
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           submodules: true
           ref: ${{ inputs.branch }}
@@ -106,7 +106,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: logs
           path: /tmp/failed/*

@@ -37,6 +37,10 @@ ListpackWrap::~ListpackWrap() {
   DCHECK(!dirty_);
 }
 
+ListpackWrap ListpackWrap::WithCapacity(size_t capacity) {
+  return ListpackWrap{lpNew(capacity)};
+}
+
 uint8_t* ListpackWrap::GetPointer() {
   dirty_ = false;
   return lp_;

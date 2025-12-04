@@ -1621,19 +1621,19 @@ void Connection::ClearPipelinedMessages() {
 string Connection::DebugInfo() const {
   string info = "{";
 
-  absl::StrAppend(&info, "address=", uint64_t(this), ", ");
+  absl::StrAppend(&info, "id=", id_, ", ");
   absl::StrAppend(&info, "phase=", phase_, ", ");
   if (cc_) {
     // In some rare cases cc_ can be null, see https://github.com/dragonflydb/dragonfly/pull/3873
     absl::StrAppend(&info, "dispatch(s/a)=", cc_->sync_dispatch, " ", cc_->async_dispatch, ", ");
     absl::StrAppend(&info, "closing=", cc_->conn_closing, ", ");
   }
-  absl::StrAppend(&info, "dispatch_fiber:joinable=", async_fb_.IsJoinable(), ", ");
+  absl::StrAppend(&info, "df:joinable=", async_fb_.IsJoinable(), ", ");
 
   bool intrusive_front = !dispatch_q_.empty() && dispatch_q_.front().IsControl();
-  absl::StrAppend(&info, "dispatch_queue:size=", dispatch_q_.size(), ", ");
-  absl::StrAppend(&info, "dispatch_queue:pipelined=", pending_pipeline_cmd_cnt_, ", ");
-  absl::StrAppend(&info, "dispatch_queue:intrusive=", intrusive_front, ", ");
+  absl::StrAppend(&info, "dq:size=", dispatch_q_.size(), ", ");
+  absl::StrAppend(&info, "dq:pipelined=", pending_pipeline_cmd_cnt_, ", ");
+  absl::StrAppend(&info, "dq:intrusive=", intrusive_front, ", ");
 
   if (cc_) {
     absl::StrAppend(&info, "state=");
@@ -1642,8 +1642,9 @@ string Connection::DebugInfo() const {
     if (cc_->blocked)
       absl::StrAppend(&info, "b");
   }
+  time_t now = time(nullptr);
+  absl::StrAppend(&info, " age=", now - creation_time_, " idle=", now - last_interaction_, "}");
 
-  absl::StrAppend(&info, "}");
   return info;
 }
 

@@ -1226,9 +1226,19 @@ static void json_process_value(lua_State *l, json_parse_t *json,
     case T_STRING:
         lua_pushlstring(l, token->value.string, token->string_len);
         break;;
-    case T_NUMBER:
-        lua_pushnumber(l, token->value.number);
-        break;;
+    case T_NUMBER: {
+        double num = token->value.number;
+        double intpart;
+        /* Convert to integer when possible for Lua 5.1 compatibility.
+         * This ensures tostring(cjson.decode('{"id":42}').id) returns "42" not "42.0" */
+        if (modf(num, &intpart) == 0.0 &&
+            intpart >= LUA_MININTEGER && intpart <= LUA_MAXINTEGER) {
+            lua_pushinteger(l, (lua_Integer)intpart);
+        } else {
+            lua_pushnumber(l, num);
+        }
+        break;
+    }
     case T_BOOLEAN:
         lua_pushboolean(l, token->value.boolean);
         break;;

@@ -4,7 +4,13 @@
 
 #include "server/tiering/decoders.h"
 
+#include "base/logging.h"
+#include "core/detail/listpack_wrap.h"
 #include "server/tiering/serialized_map.h"
+
+extern "C" {
+#include "redis/redis_aux.h"  // for OBJ_HASH
+}
 
 namespace dfly::tiering {
 
@@ -77,7 +83,10 @@ Decoder::UploadMetrics SerializedMapDecoder::GetMetrics() const {
 }
 
 void SerializedMapDecoder::Upload(CompactObj* obj) {
-  ABSL_UNREACHABLE();
+  auto lw = detail::ListpackWrap::WithCapacity(GetMetrics().estimated_mem_usage);
+  for (const auto& [key, value] : *map_)
+    lw.Insert(key, value, true);
+  obj->InitRobj(OBJ_HASH, kEncodingListPack, lw.GetPointer());
 }
 
 SerializedMap* SerializedMapDecoder::Get() const {

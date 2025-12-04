@@ -347,6 +347,7 @@ class ServerFamily {
   void Debug(CmdArgList args, const CommandContext& cmd_cntx);
   void Dfly(CmdArgList args, const CommandContext& cmd_cntx);
   void Memory(CmdArgList args, const CommandContext& cmd_cntx);
+  void Shrink(CmdArgList args, const CommandContext& cmd_cntx);
   void FlushDb(CmdArgList args, const CommandContext& cmd_cntx);
   void Info(CmdArgList args, const CommandContext& cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   void Hello(CmdArgList args, const CommandContext& cmd_cntx);

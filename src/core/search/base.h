@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 #include <absl/container/inlined_vector.h>
 
 #include <cstdint>
@@ -13,13 +14,19 @@
 #include <string_view>
 #include <vector>
 
-#include "absl/container/flat_hash_set.h"
-#include "base/pmr/memory_resource.h"
-#include "core/string_map.h"
-
 namespace dfly::search {
 
 using DocId = uint32_t;
+using GlobalDocId = uint64_t;
+using ShardId = uint16_t;
+
+inline GlobalDocId CreateGlobalDocId(ShardId shard_id, DocId local_doc_id) {
+  return ((uint64_t)shard_id << 32) | local_doc_id;
+}
+
+inline std::pair<ShardId, DocId> DecomposeGlobalDocId(GlobalDocId id) {
+  return {(id >> 32), (id)&0xFFFFFFFF};
+}
 
 enum class VectorSimilarity { L2, IP, COSINE };
 

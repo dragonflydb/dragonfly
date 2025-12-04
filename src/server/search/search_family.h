@@ -36,6 +36,7 @@ class SearchFamily {
 
  public:
   static void Register(CommandRegistry* registry);
+  static void Shutdown();
 };
 
 }  // namespace dfly

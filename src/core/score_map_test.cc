@@ -9,7 +9,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/mi_memory_resource.h"
-#include "core/page_usage_stats.h"
+#include "core/page_usage/page_usage_stats.h"
 
 extern "C" {
 #include "redis/zmalloc.h"
@@ -24,6 +24,7 @@ class ScoreMapTest : public ::testing::Test {
   static void SetUpTestSuite() {
     auto* tlh = mi_heap_get_backing();
     init_zmalloc_threadlocal(tlh);
+    InitTLStatelessAllocMR(PMR_NS::get_default_resource());
   }
 
   static void TearDownTestSuite() {
@@ -44,7 +45,7 @@ class ScoreMapTest : public ::testing::Test {
   }
 
   void SetUp() override {
-    sm_.reset(new ScoreMap(&mi_alloc_));
+    sm_.reset(new ScoreMap());
   }
 
   void TearDown() override {

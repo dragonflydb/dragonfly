@@ -38,6 +38,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
+#include "core/dense_set.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
@@ -985,7 +986,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
   // blocked connections because: a) If the connection is blocked it is puased. b) We read pause
   // state after waking from blocking so if the trasaction was waken by another running
   //    command that did not pause on the new state yet we will pause after waking up.
-  DispatchTracker tracker{std::move(listeners), conn, true /* ignore paused commands */,
+  DispatchTracker tracker{listeners, conn, true /* ignore paused commands */,
                           true /*ignore blocking*/};
   shard_set->pool()->AwaitFiberOnAll([&tracker, pause_state](unsigned, util::ProactorBase*) {
     // Commands don't suspend before checking the pause state, so
@@ -1127,6 +1128,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   config_registry.RegisterMutable("tls_ca_cert_dir");
   config_registry.RegisterMutable("replica_priority");
   config_registry.RegisterMutable("lua_undeclared_keys_shas");
+  config_registry.RegisterMutable("lua_float_as_int_shas");
   config_registry.RegisterMutable("point_in_time_snapshot");
 
   pb_task_ = shard_set->pool()->GetNextProactor();
@@ -1959,6 +1961,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("defrag_objects_moved", "Objects moved",
                             m.shard_stats.defrag_realloc_total, COUNTER, &resp->body());
 
+  AppendMetricWithoutLabels("huffman_tables_built", "Huffman tables built",
+                            m.shard_stats.huffman_tables_built, MetricType::COUNTER, &resp->body());
+
   // Tiered metrics
   {
     AppendMetricWithoutLabels("tiered_entries", "Tiered entries", total.tiered_entries,
@@ -2616,6 +2621,62 @@ void ServerFamily::Memory(CmdArgList args, const CommandContext& cmd_cntx) {
   MemoryCmd mem_cmd{this, cmd_cntx.rb, cmd_cntx.conn_cntx};
 
   return mem_cmd.Run(args);
+}
+
+void ServerFamily::Shrink(CmdArgList args, const CommandContext& cmd_cntx) {
+  string_view key = ArgS(args, 0);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+
+  auto cb = [key](Transaction* t, EngineShard* shard) -> OpResult<int64_t> {
+    auto& db_slice = t->GetDbSlice(shard->shard_id());
+    auto it = db_slice.FindReadOnly(t->GetDbContext(), key).it;
+    if (!IsValid(it)) {
+      return OpStatus::KEY_NOTFOUND;
+    }
+
+    const PrimeValue& pv = it->second;
+    unsigned encoding = pv.Encoding();
+    unsigned obj_type = pv.ObjType();
+
+    // Only DenseSet-based structures (set or hash with kEncodingStrMap2)
+    if (encoding != kEncodingStrMap2 || (obj_type != OBJ_SET && obj_type != OBJ_HASH)) {
+      return OpStatus::WRONG_TYPE;
+    }
+
+    DenseSet* ds = static_cast<DenseSet*>(pv.RObjPtr());
+    ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
+    size_t current_size = ds->UpperBoundSize();
+    size_t bucket_count = ds->BucketCount();
+
+    if (current_size == 0 || bucket_count == 0) {
+      return 0;
+    }
+
+    size_t optimal_size = std::max(size_t(8), absl::bit_ceil(current_size));
+    if (optimal_size >= bucket_count) {
+      return 0;
+    }
+
+    size_t bucket_bytes_before = bucket_count * sizeof(void*);
+    ds->Shrink(optimal_size);
+    size_t bucket_bytes_after = ds->BucketCount() * sizeof(void*);
+
+    return bucket_bytes_before - bucket_bytes_after;
+  };
+
+  OpResult<int64_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+
+  if (result.status() == OpStatus::KEY_NOTFOUND) {
+    return rb->SendNull();
+  }
+  if (result.status() == OpStatus::WRONG_TYPE) {
+    return rb->SendError("WRONGTYPE Key is not a set or hash with DenseSet encoding");
+  }
+  if (!result) {
+    return rb->SendError(result.status());
+  }
+
+  rb->SendLong(*result);
 }
 
 void ServerFamily::BgSaveFb(boost::intrusive_ptr<Transaction> trans) {
@@ -3821,7 +3882,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
     return builder->SendError("Full sync not done");
   }
 
-  std::error_code res = replica_->TakeOver(ArgS(args, 0), save_flag);
+  std::error_code res = replica_->TakeOver(timeout_sec, save_flag);
   if (res) {
     LOG(WARNING) << "Takeover failed with error: " << res << " - " << res.message();
     return builder->SendError(absl::StrCat("Couldn't execute takeover: ", res.message()));
@@ -3991,7 +4052,7 @@ void ServerFamily::Latency(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
-  if (sub_cmd == "LATEST") {
+  if (sub_cmd == "LATEST" || sub_cmd == "HISTOGRAM") {
     return rb->SendEmptyArray();
   }
 
@@ -4216,6 +4277,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, acl::kLatency}.HFUNC(
              Latency)
       << CI{"MEMORY", kMemOpts, -2, 0, 0, acl::kMemory}.HFUNC(Memory)
+      << CI{"SHRINK", CO::WRITE | CO::FAST, 2, 1, 1, acl::kMemory}.HFUNC(Shrink)
       << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, acl::kSave}.HFUNC(Save)
       << CI{"SHUTDOWN",    CO::ADMIN | CO::NOSCRIPT | CO::LOADING | CO::DANGEROUS, -1, 0, 0,
             acl::kShutDown}

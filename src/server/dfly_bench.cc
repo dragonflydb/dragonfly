@@ -499,6 +499,7 @@ class Driver {
 
   facade::RedisParser parser_{RedisParser::Mode::CLIENT, 1 << 16};
   io::IoBuf io_buf_{512};
+  unsigned blob_len_ = 0;
 };
 
 // Per thread client.
@@ -819,7 +820,9 @@ void Driver::ReceiveFb() {
     VLOG(3) << "Socket read: " << reqs_.size();
 
     ::io::Result<size_t> recv_sz = socket_->Recv(buf);
-    if (!recv_sz && FiberSocketBase::IsConnClosed(recv_sz.error())) {
+    CHECK(recv_sz) << recv_sz.error().message();
+
+    if (*recv_sz == 0) {
       LOG_IF(DFATAL, !reqs_.empty())
           << "Broke with " << reqs_.size() << " requests,  received: " << received_;
       // clear reqs - to prevent Driver::Run block on them indefinitely.
@@ -827,7 +830,6 @@ void Driver::ReceiveFb() {
       break;
     }
 
-    CHECK(recv_sz) << recv_sz.error().message();
     io_buf_.CommitWrite(*recv_sz);
 
     if (protocol == RESP) {
@@ -890,8 +892,6 @@ void Driver::ParseRESP() {
 }
 
 void Driver::ParseMC() {
-  unsigned blob_len = 0;
-
   while (true) {
     string_view line = FindLine(io_buf_.InputBuffer());
     if (line.empty())
@@ -900,7 +900,7 @@ void Driver::ParseMC() {
     CHECK_EQ(line.back(), '\n');
     if (line == "STORED\r\n" || line == "END\r\n") {
       PopRequest();
-      blob_len = 0;
+      blob_len_ = 0;
     } else if (absl::StartsWith(line, "VALUE")) {
       // last token is a blob length.
       auto it = line.rbegin();
@@ -908,7 +908,7 @@ void Driver::ParseMC() {
         ++it;
       size_t len = it - line.rbegin() - 2;
       const char* start = &(*it) + 1;
-      if (!absl::SimpleAtoi(string(start, len), &blob_len)) {
+      if (!absl::SimpleAtoi(string(start, len), &blob_len_)) {
         LOG(ERROR) << "Invalid blob len " << line;
         return;
       }
@@ -916,11 +916,11 @@ void Driver::ParseMC() {
     } else if (absl::StartsWith(line, "SERVER_ERROR")) {
       ++stats_.num_errors;
       PopRequest();
-      blob_len = 0;
+      blob_len_ = 0;
     } else {
       auto handle = socket_->native_handle();
-      CHECK_EQ(blob_len + 2, line.size()) << line;
-      blob_len = 0;
+      CHECK_EQ(blob_len_ + 2, line.size()) << line;
+      blob_len_ = 0;
       VLOG(2) << "Got line " << handle << ": " << line;
     }
     io_buf_.ConsumeInput(line.size());

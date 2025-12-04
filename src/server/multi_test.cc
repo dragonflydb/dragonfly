@@ -840,8 +840,6 @@ TEST_F(MultiTest, ScriptFlagsEmbedded) {
   EXPECT_THAT(Run({"eval", s2, "0"}), ErrArg("Invalid flag: this-is-an-error"));
 }
 
-// Flaky because of https://github.com/google/sanitizers/issues/1760
-#ifndef SANITIZERS
 TEST_F(MultiTest, UndeclaredKeyFlag) {
   absl::FlagSaver fs;  // lua_undeclared_keys_shas changed via CONFIG cmd below
 
@@ -868,6 +866,61 @@ TEST_F(MultiTest, UndeclaredKeyFlag) {
   EXPECT_EQ(Run({"evalsha", sha, "0"}), "works");
 }
 
+TEST_F(MultiTest, LegacyFloatFlag) {
+  const char* script_with_flag = R"(
+  --!df flags=legacy-float
+  return 42.9
+)";
+  EXPECT_THAT(Run({"eval", script_with_flag, "0"}), IntArg(42));
+
+  const char* script_negative = R"(
+  --!df flags=legacy-float
+  return -3.8
+)";
+  EXPECT_THAT(Run({"eval", script_negative, "0"}), IntArg(-3));
+
+  EXPECT_THAT(Run({"eval", "return 42.9", "0"}), DoubleArg(42.9));
+
+  const char* script = "return 42.9";
+  char sha_buf[41];
+  Interpreter::FuncSha1(script, sha_buf);
+  string_view sha{sha_buf, 40};
+
+  EXPECT_EQ(Run({"script", "flags", string(sha), "legacy-float"}), "OK");
+
+  EXPECT_THAT(Run({"eval", script, "0"}), IntArg(42));
+}
+
+TEST_F(MultiTest, LegacyFloatShaFlag) {
+  absl::FlagSaver fs;
+
+  const char* script = "return 42.9";
+  string sha = Run({"script", "load", script}).GetString();
+
+  EXPECT_THAT(Run({"evalsha", sha, "0"}), DoubleArg(42.9));
+
+  Run({"script", "flush"});
+  EXPECT_THAT(Run({"config", "set", "lua_float_as_int_shas", sha}), "OK");
+
+  EXPECT_THAT(Run({"eval", script, "0"}), IntArg(42));
+}
+
+TEST_F(MultiTest, CjsonDecodeIntegerBehavior) {
+  // cjson.decode always returns integers for whole numbers (Redis/Lua 5.1 compatible)
+  const char* script_cjson = R"(
+    local obj = cjson.decode('{"value": 42}')
+    return tostring(obj.value)
+  )";
+  EXPECT_EQ(Run({"eval", script_cjson, "0"}), "42");
+
+  // Floats with fractional parts remain as floats
+  const char* script_cjson_float = R"(
+    local obj = cjson.decode('{"value": 42.5}')
+    return tostring(obj.value)
+  )";
+  EXPECT_EQ(Run({"eval", script_cjson_float, "0"}), "42.5");
+}
+
 TEST_F(MultiTest, ScriptBadCommand) {
   const char* s1 = "redis.call('FLUSHALL')";
   const char* s2 = "redis.call('FLUSHALL'); redis.set(KEYS[1], ARGS[1]);";
@@ -890,7 +943,6 @@ TEST_F(MultiTest, ScriptBadCommand) {
   resp = Run({"eval", s4, "0"});
   EXPECT_EQ(resp, "OK");
 }
-#endif
 
 TEST_F(MultiTest, MultiEvalModeConflict) {
   const char* s1 = R"(
@@ -1252,29 +1304,6 @@ TEST_F(MultiTest, EvalShaRo) {
 
   resp = Run({"evalsha_ro", write_sha, "1", "foo"});
   EXPECT_THAT(resp, ErrArg("Write commands are not allowed from read-only scripts"));
-}
-
-TEST_F(MultiTest, ForceAtomicityFlag) {
-  absl::FlagSaver fs;
-
-  const string kHash = "bb855c2ecfa3114d222cb11e0682af6360e9712f";
-  const string_view kScript = R"(
-    --!df flags=disable-atomicity
-    redis.call('get', 'x');
-    return "OK";
-  )";
-
-  // EVAL the script works due to disable-atomicity flag
-  EXPECT_EQ(Run({"eval", kScript, "0"}), "OK");
-
-  EXPECT_THAT(Run({"script", "list"}), RespElementsAre(kHash, kScript));
-
-  // Flush scripts to force re-evaluating of flags
-  EXPECT_EQ(Run({"script", "flush"}), "OK");
-
-  // Now it doesn't work, because we force atomicity
-  absl::SetFlag(&FLAGS_lua_force_atomicity_shas, {kHash});
-  EXPECT_THAT(Run({"eval", kScript, "0"}), ErrArg("undeclared"));
 }
 
 TEST_F(MultiTest, StoredCmdBytesMetric) {
