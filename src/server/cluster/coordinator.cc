@@ -113,16 +113,14 @@ class Coordinator::CrossShardClient : public ProtocolClient {
   }
 
   void RespFb() {
-    // temp workaround buffer because ReadRespReply contains bugs.
-    base::IoBuf io_buf(16_KB);
     while (!exec_st_.IsCancelled()) {
       waker_.await([this] { return exec_st_.IsCancelled() || ready_to_send_; });
       if (exec_st_.IsCancelled())
         return;
       std::lock_guard lk(mu_);
-      // constexpr auto timeout = 10000;  // TODO add flag and add usage in ReadRespReply.
+      constexpr auto timeout = 3000;  // TODO add flag and add usage in ReadRespReply.
       while (!resp_queue_.empty()) {
-        auto resp = TakeRespReply(&io_buf, true);
+        auto resp = TakeRespReply(timeout);
         if (!resp) {
           LOG(WARNING) << "Error reading response from " << server().Description() << ": "
                        << resp.error()

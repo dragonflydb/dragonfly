@@ -99,6 +99,7 @@ class ProtocolClient {
   io::Result<ReadRespRes> ReadRespReply(uint32_t timeout);
 
   io::Result<TakeRespExpr::Vec> TakeRespReply(base::IoBuf* buffer = nullptr, bool copy_msg = true);
+  io::Result<TakeRespExpr::Vec> TakeRespReply(uint32_t timeout);
 
   std::error_code ReadLine(base::IoBuf* io_buf, std::string_view* line);
 
