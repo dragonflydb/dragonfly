@@ -7,11 +7,9 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
-#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <variant>
 
 #include "base/pmr/memory_resource.h"
@@ -143,6 +141,8 @@ class FieldIndices {
 
   void FinalizeInitialization();
 
+  DefragmentResult Defragment(PageUsage* page_usage);
+
  private:
   void CreateIndices(PMR_NS::memory_resource* mr);
   void CreateSortIndices(PMR_NS::memory_resource* mr);
@@ -153,6 +153,9 @@ class FieldIndices {
   absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>> indices_;
   absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>> sort_indices_;
   const Synonyms* synonyms_;
+
+  std::string next_defrag_field_;
+  std::string next_defrag_sort_field_;
 };
 
 struct AlgorithmProfile {
