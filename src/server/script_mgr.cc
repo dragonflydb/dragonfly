@@ -366,7 +366,7 @@ void ScriptMgr::FlushAllScript() {
 
   shard_set->pool()->AwaitFiberOnAll([](auto* pb) {
     ServerState* ss = ServerState::tlocal();
-    ss->ResetInterpreter();
+    ss->FlushScriptCache();
   });
 }
 
