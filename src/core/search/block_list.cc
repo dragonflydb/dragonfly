@@ -40,15 +40,18 @@ SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list
   left.ReserveBlocks(block_list.blocks_.size() / 2 + 1);
   right.ReserveBlocks(block_list.blocks_.size() / 2 + 1);
 
-  double min_value_in_right_part = std::numeric_limits<double>::infinity();
+  double lmin = std::numeric_limits<double>::infinity(), rmin = lmin;
+  double lmax = -std::numeric_limits<double>::infinity(), rmax = lmax;
+
   for (const Entry& entry : block_list) {
     if (entry.second < median_value) {
       left.PushBack(entry);
+      lmin = std::min(lmin, entry.second);
+      lmax = std::max(lmax, entry.second);
     } else if (entry.second > median_value) {
       right.PushBack(entry);
-      if (entry.second < min_value_in_right_part) {
-        min_value_in_right_part = entry.second;
-      }
+      rmin = std::min(rmin, entry.second);
+      rmax = std::max(rmax, entry.second);
     } else {
       median_entries.push_back(entry);
     }
@@ -57,20 +60,23 @@ SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list
 
   if (left.Size() < right.Size()) {
     // If left is smaller, we can add median entries to it
-    // We need to change median value to the right part
-    median_value = min_value_in_right_part;
+    // We need to change median value to the right part and update lmax
+    lmax = median_value;
+    lmin = std::min(lmin, median_value);
+    median_value = rmin;
     for (const auto& entry : median_entries) {
       left.Insert(entry);
     }
   } else {
     // If right part is smaller, we can add median entries to it
     // Median value is still the same
+    rmax = std::max(rmax, median_value);
     for (const auto& entry : median_entries) {
       right.Insert(entry);
     }
   }
 
-  return {std::move(left), std::move(right), median_value};
+  return {std::move(left), std::move(right), median_value, lmin, lmax, rmax};
 }
 
 template <typename C> bool BlockList<C>::Insert(ElementType t) {
