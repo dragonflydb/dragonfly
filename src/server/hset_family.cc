@@ -139,6 +139,14 @@ struct HMapWrap {
     VisitMut(ov);
   }
 
+  void Launder(tiering::SerializedMapDecoder* dec) {
+    Overloaded ov{
+        [](StringMap* s) {},
+        [&](detail::ListpackWrap& lw) { *dec->Write() = lw; },
+    };
+    VisitMut(ov);
+  }
+
   template <typename T> optional<T> Get() const {
     if (holds_alternative<T>(impl_))
       return get<T>(impl_);
@@ -245,9 +253,7 @@ template <typename F> auto ExecuteW(Transaction* tx, F&& f) {
         // Create wrapper from different types
         HMapWrap hw{*res.value()->Write()};
         fut.Resolve(f(hw));
-
-        // soak listpack wrapper back to get updated value
-        *res.value()->Write() = *hw.Get<detail::ListpackWrap>();
+        hw.Launder(*res);
       };
 
       es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv, D{}, std::move(read_cb));
@@ -331,6 +337,10 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
 
   auto& add_res = *op_res;
   PrimeValue& pv = add_res.it->second;
+
+  if (pv.IsExternal() && !pv.IsCool())
+    return OpStatus::CANCELLED;  // Not supported for offloaded values
+
   if (add_res.is_new) {
     pv.InitRobj(OBJ_HASH, kEncodingListPack, lpNew(0));
   } else {
@@ -472,11 +482,12 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
 
   // If the value is external, enqueue read and modify it there
   if (pv.IsExternal() && !pv.IsCool()) {
-    CHECK(op_sp.ttl == UINT32_MAX);  // TODO: remove
+    if (op_sp.ttl != UINT32_MAX)
+      return OpStatus::CANCELLED;  // Don't support expiry with offloaded hashes
+
     using D = tiering::SerializedMapDecoder;
     util::fb2::Future<OpResult<uint32_t>> fut;
     auto read_cb = [fut, values, &op_sp](io::Result<D*> res) mutable {
-      // Create wrapper from different types
       auto& lw = *res.value()->Write();
       uint32_t created = 0;
       for (size_t i = 0; i < values.size(); i += 2) {
