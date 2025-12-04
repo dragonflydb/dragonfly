@@ -326,7 +326,7 @@ TEST_F(RangeTreeTest, SingleBlockSplit) {
   EXPECT_EQ(stats.splits, 1u);
   EXPECT_EQ(stats.block_count, 2u);
 
-  // Add value that causes one a new block started
+  // Add value that causes a new block to be started
   tree.Add(20, 6.0);
 
   stats = tree.GetStats();
@@ -345,25 +345,38 @@ TEST_F(RangeTreeTest, SingleBlockSplit) {
   EXPECT_EQ(blocks[2]->Size(), 1u);
 }
 
+// Make tree split and then delete every nth value to see if blocks merge properly
 TEST_F(RangeTreeTest, BlockMerge) {
   RangeTree tree{PMR_NS::get_default_resource(), 8};
-  for (DocId id = 1; id <= 8; id++)
+  for (DocId id = 1; id <= 64; id++)
     tree.Add(id, id);
 
-  tree.Add(9, 9.0);  // will cause split
-
   auto stats = tree.GetStats();
-  EXPECT_EQ(stats.splits, 1u);
-  EXPECT_EQ(stats.block_count, 2u);
+  uint64_t splits = stats.splits;
+  EXPECT_GT(splits, 8u);
 
-  // Delete all except first and last, should trigger merge
-  for (DocId id = 2; id <= 8; id++)
-    tree.Remove(id, id);
+  // Blocks have at least half occupancy
+  EXPECT_GT(stats.block_count, 64 / 8);
+  EXPECT_LT(stats.block_count, 2 * 64 / 8);
+
+  // Delete all except  %8 = 0, should trigger merge
+  std::vector<Entry> expected;
+  for (DocId id = 1; id <= 64; id++) {
+    if (id % 8)
+      tree.Remove(id, id);
+    else
+      expected.emplace_back(id, id);
+  }
 
   // Only one block left now
   stats = tree.GetStats();
-  EXPECT_EQ(stats.merges, 1u);
-  EXPECT_EQ(stats.block_count, 1u);
+  size_t blocks = stats.block_count;
+  EXPECT_LT(blocks, 4u);
+  EXPECT_EQ(stats.merges + blocks - 1, splits);
+
+  // Check the two entries remained
+  auto result = tree.GetAllBlocks();
+  EXPECT_THAT(result, UnorderedElementsAreDocPairs(expected));
 }
 
 TEST_F(RangeTreeTest, BugNotUniqueDoubleValues) {

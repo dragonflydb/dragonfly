@@ -78,6 +78,8 @@ RangeTree::RangeTree(PMR_NS::memory_resource* mr, size_t max_range_block_size,
     : max_range_block_size_(max_range_block_size),
       entries_(mr),
       enable_splitting_(enable_splitting) {
+  // The tree has at least always a block with a negative infinity bound, so that any new insertion
+  // goes at least somewhere
   CreateEmptyBlock(-std::numeric_limits<double>::infinity());
 }
 
@@ -85,15 +87,16 @@ void RangeTree::Add(DocId id, double value) {
   DCHECK(std::isfinite(value));
 
   auto it = FindRangeBlock(value);
-  auto& [lb, block] = *it;
+  auto& [lower_bound, block] = *it;
 
   // Don't disrupt large monovalue blocks, instead create new nextafter block
   if (enable_splitting_ && block.Size() >= max_range_block_size_ &&
-      lb == block.max_seen /* monovalue */ && value != lb /* but new value is different*/
+      lower_bound == block.max_seen /* monovalue */ &&
+      value != lower_bound /* but new value is different*/
   ) {
     // We use nextafter as the lower bound to "catch" all other possible inserts into the block,
     // as a decreasing `value` sequence would otherwise create lots of single-value blocks
-    double lb2 = std::nextafter(lb, std::numeric_limits<double>::infinity());
+    double lb2 = std::nextafter(lower_bound, std::numeric_limits<double>::infinity());
     CreateEmptyBlock(lb2)->second.Insert({id, value});
     return;
   }
@@ -105,7 +108,7 @@ void RangeTree::Add(DocId id, double value) {
     return;
 
   // Large monovalue block, not reducable by splitting
-  if (lb == block.max_seen)
+  if (lower_bound == block.max_seen)
     return;
 
   SplitBlock(it);
@@ -122,7 +125,9 @@ void RangeTree::Remove(DocId id, double value) {
 
   // Merge with left block if both are relatively small and won't be forced to split soon
   if (block.size() < max_range_block_size_ / 4 && it != entries_.begin()) {
-    auto lit = --it;
+    auto lit = it;
+    --lit;
+
     auto& lblock = lit->second;
     if (block.Size() + lblock.Size() < max_range_block_size_ / 2) {
       for (auto e : block)
@@ -243,7 +248,7 @@ TODO: we can optimize this case by splitting to three blocks:
  - empty right block with range [std::nextafter(m, +inf), r)
 */
 void RangeTree::SplitBlock(Map::iterator it) {
-  double l = it->first;
+  double lower_bound = it->first;
 
   auto split_result = Split(std::move(it->second));
 
@@ -253,12 +258,12 @@ void RangeTree::SplitBlock(Map::iterator it) {
   entries_.erase(it);
   stats_.splits++;
 
-  // Insert left block if its not empty, but always keep left infinity bound
-  if (!split_result.left.Empty() || std::isinf(l)) {
-    if (!std::isinf(l))
-      l = split_result.lmin;
+  // Insert left block if it's not empty or if its the first one (negative inf bound)
+  if (!split_result.left.Empty() || std::isinf(lower_bound)) {
+    if (!std::isinf(lower_bound))  // keep negative inf bound
+      lower_bound = split_result.lmin;
 
-    entries_.emplace(std::piecewise_construct, std::forward_as_tuple(l),
+    entries_.emplace(std::piecewise_construct, std::forward_as_tuple(lower_bound),
                      std::forward_as_tuple(std::move(split_result.left), split_result.lmax));
   }
 
