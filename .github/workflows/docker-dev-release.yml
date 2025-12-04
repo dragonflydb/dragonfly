@@ -52,10 +52,9 @@ jobs:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v5
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_S3_ACCESS_KEY }}
-          aws-secret-access-key: ${{ secrets.AWS_S3_ACCESS_SECRET }}
+          role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Get Build Information
