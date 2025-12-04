@@ -65,11 +65,11 @@ runs:
         if [[ "${{inputs.epoll}}" == 'epoll' ]]; then
           export FILTER="${{inputs.filter}} and not exclude_epoll"
           # Run only replication tests with epoll
-          timeout 80m pytest -m "$FILTER" $DF_ARG --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --df force_epoll=true --log-cli-level=INFO || code=$?
+          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly $DF_ARG --df force_epoll=true --log-cli-level=INFO || code=$?
         else
           export FILTER="${{inputs.filter}}"
           # Run only replication tests with iouring
-          timeout 80m pytest -m "$FILTER" $DF_ARG --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --log-cli-level=INFO || code=$?
+          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly $DF_ARG --log-cli-level=INFO || code=$?
         fi
 
         # timeout returns 124 if we exceeded the timeout duration
