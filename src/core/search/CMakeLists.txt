@@ -9,7 +9,7 @@ add_library(dfly_search_core ast_expr.cc base.cc hnsw_index.cc query_driver.cc s
             indices.cc sort_indices.cc vector_utils.cc compressed_sorted_set.cc block_list.cc
             range_tree.cc synonyms.cc ${gen_dir}/parser.cc ${gen_dir}/lexer.cc)
 
-target_link_libraries(dfly_search_core base redis_lib absl::strings
+target_link_libraries(dfly_search_core dfly_page_usage base redis_lib absl::strings
   TRDP::reflex TRDP::uni-algo TRDP::hnswlib Boost::headers)
 
 if(WITH_SIMSIMD)

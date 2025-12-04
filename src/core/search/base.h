@@ -16,6 +16,12 @@
 
 namespace dfly::search {
 
+struct DefragmentResult {
+  bool quota_depleted{false};
+  size_t objects_moved{0};
+  DefragmentResult& Merge(DefragmentResult&& other);
+};
+
 using DocId = uint32_t;
 using GlobalDocId = uint64_t;
 using ShardId = uint16_t;
