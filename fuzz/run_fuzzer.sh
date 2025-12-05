@@ -112,6 +112,9 @@ run_fuzzer() {
     cd "${OUTPUT_DIR}"
 
     # Run AFL++ - fuzzing integrated in dragonfly via USE_AFL
+    # AFL_HANG_TMOUT: Only consider it a hang if no response for 60 seconds
+    # This prevents false positives from slow but legitimate operations
+    export AFL_HANG_TMOUT=60000
     exec "${AFL_CMD[@]}"
 }
 

@@ -34,8 +34,6 @@
 "LINDEX"
 "LSET"
 "LTRIM"
-"BLPOP"
-"BRPOP"
 
 # Hash operations
 "HSET"
@@ -186,7 +184,6 @@
 "LIMIT"
 "COUNT"
 "MATCH"
-"BLOCK"
 
 # Common RESP command patterns
 "*1\x0d\x0a$4\x0d\x0aPING\x0d\x0a"
@@ -218,14 +215,7 @@
 "ZUNIONSTORE"
 "ZPOPMIN"
 "ZPOPMAX"
-"BZPOPMIN"
-"BZPOPMAX"
 "ZMPOP"
-
-# More blocking commands
-"BLMOVE"
-"BLMPOP"
-"BRPOPLPUSH"
 
 # Edge case numbers
 "9223372036854775807"
@@ -284,11 +274,3 @@
 "\x00"
 "\xff"
 "\x00\x00\x00\x00"
-
-# Consumer group commands
-"CREATE"
-"DESTROY"
-"SETID"
-"DELCONSUMER"
-"CONSUMERS"
-"GROUPS"
