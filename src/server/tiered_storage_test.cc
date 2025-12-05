@@ -13,7 +13,6 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
-#include "gtest/gtest.h"
 #include "server/engine_shard_set.h"
 #include "server/test_utils.h"
 #include "util/fibers/fibers.h"
@@ -28,6 +27,7 @@ ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 ABSL_DECLARE_FLAG(float, tiered_upload_threshold);
 ABSL_DECLARE_FLAG(unsigned, tiered_storage_write_depth);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
+ABSL_DECLARE_FLAG(uint64_t, registered_buffer_size);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
 
 namespace dfly {
@@ -49,6 +49,12 @@ class TieredStorageTest : public BaseFamilyTest {
     if (GetFlag(FLAGS_force_epoll)) {
       LOG(WARNING) << "Can't run tiered tests on EPOLL";
       exit(0);
+    }
+
+    // Disable registered buffers in half of the runs to use only small heap allocated buffers
+    // to possibly catch out of bounds reads/writes with sanitizers
+    if (absl::InsecureBitGen{}() % 2) {
+      SetFlag(&FLAGS_registered_buffer_size, 0);
     }
 
     SetFlag(&FLAGS_tiered_storage_write_depth, 15000);
