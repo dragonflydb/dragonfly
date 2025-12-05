@@ -59,6 +59,7 @@ runs:
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
         if [[ "${{inputs.df-arg}}" == 'experimental_io_loop_v2' ]]; then
+          echo "df-arg: experimental io loop v2"
           export DF_ARG="--df experimental_io_loop_v2=true"
         fi
 

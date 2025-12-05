@@ -679,6 +679,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 #endif
 
   UpdateLibNameVerMap(lib_name_, lib_ver_, +1);
+  allowed_to_register_ = false;
 }
 
 Connection::~Connection() {
@@ -726,7 +727,7 @@ void Connection::OnPreMigrateThread() {
 }
 
 void Connection::OnPostMigrateThread() {
-  DVLOG(1) << "[" << id_ << "] OnPostMigrateThread";
+  DVLOG(1) << "[" << id_ << "] OnPostMigrateThread " << GetClientId();
 
   // Once we migrated, we should rearm OnBreakCb callback.
   if (breaker_cb_ && socket()->IsOpen()) {
@@ -734,8 +735,12 @@ void Connection::OnPostMigrateThread() {
   }
 
   const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
-  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen()) {
-    socket_->ResetOnRecvHook();
+  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen() && allowed_to_register_) {
+    socket_->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
+      CHECK(this);
+      DoReadOnRecv(n);
+      io_event_.notify_one();
+    });
   }
 
   migration_in_process_ = false;
@@ -1115,6 +1120,10 @@ void Connection::ConnectionFlow() {
     UpdateIoBufCapacity(io_buf_, stats_, [&]() { io_buf_.EnsureCapacity(64); });
     variant<error_code, Connection::ParserStatus> res;
     if (io_loop_v2 && !is_tls_) {
+      // Migrations should call RegisterRecv if the connection has reached here once.
+      // Otherwise, migration will code won't register and wait for the connection to
+      // reach here first and then  RegisterRecv inside IoLoopV2
+      allowed_to_register_ = true;
       // Breaks with TLS. RegisterOnRecv is unimplemented.
       res = IoLoopV2();
     } else {
@@ -1145,7 +1154,6 @@ void Connection::ConnectionFlow() {
   DecreaseStatsOnClose();
 
   if (io_loop_v2 && !is_tls_) {
-    done_ = true;
     socket_->ResetOnRecvHook();
   }
 
@@ -2254,8 +2262,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   // TODO EnableRecvMultishot
 
   peer->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
-    CHECK(!done_);
-    CHECK(this);
+    DCHECK(this);
     DoReadOnRecv(n);
     io_event_.notify_one();
   });
