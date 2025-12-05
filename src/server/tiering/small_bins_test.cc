@@ -21,7 +21,14 @@ string SmallString(size_t len) {
   return string(len, 'a');
 }
 
-class SmallBinsTest : public ::testing::Test {
+struct SmallBinsTest : public ::testing::Test {
+  std::pair<tiering::SmallBins::BinId, std::string> Serialize(SmallBins::FilledBin& bin) {
+    std::string out(4_KB, 'c');
+    size_t written = bins_.SerializeBin(&bin, {reinterpret_cast<uint8_t*>(out.data()), out.size()});
+    out.resize(written);
+    return {bin.id, out};
+  }
+
  protected:
   SmallBins bins_;
 };
@@ -31,12 +38,13 @@ TEST_F(SmallBinsTest, SimpleStashRead) {
   std::optional<SmallBins::FilledBin> bin;
   for (unsigned i = 0; !bin; i++)
     bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i));
+  auto [id, data] = Serialize(*bin);
 
   // Verify cut locations point to correct values
-  auto segments = bins_.ReportStashed(bin->first, DiskSegment{0, 4_KB});
+  auto segments = bins_.ReportStashed(id, DiskSegment{0, 4_KB});
   for (auto [dbid, key, location] : segments) {
     auto value = "v"s + key.substr(1);
-    EXPECT_EQ(value, bin->second.substr(location.offset, location.length));
+    EXPECT_EQ(value, data.substr(location.offset, location.length));
   }
 }
 
@@ -48,12 +56,13 @@ TEST_F(SmallBinsTest, SimpleDeleteAbort) {
   unsigned i = 0;
   for (; !bin; i++)
     bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i));
+  auto [id, data] = Serialize(*bin);
 
   // Delete all even values
   for (unsigned j = 0; j <= i; j += 2)
     bins_.Delete(0, absl::StrCat("k", j));
 
-  auto remaining = bins_.ReportStashAborted(bin->first);
+  auto remaining = bins_.ReportStashAborted(id);
   sort(remaining.begin(), remaining.end());
 
   // Expect all odd keys still to exist
@@ -70,17 +79,18 @@ TEST_F(SmallBinsTest, PartialStashDelete) {
   unsigned i = 0;
   for (; !bin; i++)
     bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i));
+  auto [id, data] = Serialize(*bin);
 
   // Delete all even values
   for (unsigned j = 0; j <= i; j += 2)
     bins_.Delete(0, absl::StrCat("k", j));
 
-  auto segments = bins_.ReportStashed(bin->first, DiskSegment{0, 4_KB});
+  auto segments = bins_.ReportStashed(id, DiskSegment{0, 4_KB});
 
   // Expect all odd keys still to exist
   EXPECT_EQ(segments.size(), i / 2);
   for (auto& [dbid, key, segment] : segments) {
-    EXPECT_EQ(key, "k"s + bin->second.substr(segment.offset, segment.length).substr(1));
+    EXPECT_EQ(key, "k"s + data.substr(segment.offset, segment.length).substr(1));
   }
 
   // Delete all stashed values

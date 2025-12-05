@@ -33,36 +33,30 @@ std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_v
   size_t value_bytes = StashedValueSize(value);
 
   std::optional<FilledBin> filled_bin;
-  if (2 /* num entries */ + current_bin_bytes_ + value_bytes >= kPageSize) {
-    filled_bin = FlushBin();
+  if (2 /* num entries */ + current_bin_.bytes_ + value_bytes >= kPageSize) {
+    filled_bin = exchange(current_bin_, FilledBin{++last_bin_id_});  // todo-optimize entries shrink
   }
 
-  current_bin_bytes_ += value_bytes;
-  auto [it, inserted] = current_bin_.emplace(std::make_pair(dbid, key), string(value));
+  current_bin_.bytes_ += value_bytes;
+  auto [it, inserted] = current_bin_.entries_.emplace(std::make_pair(dbid, key), string(value));
   CHECK(inserted);
 
-  DVLOG(2) << "current_bin_bytes: " << current_bin_bytes_
-           << ", current_bin_size:" << current_bin_.size();
   return filled_bin;
 }
 
-SmallBins::FilledBin SmallBins::FlushBin() {
-  DCHECK_GT(current_bin_.size(), 0u);
+size_t SmallBins::SerializeBin(FilledBin* bin, io::MutableBytes bytes) {
+  DCHECK_GT(bin->entries_.size(), 0u);
 
-  std::string out;
-  out.resize(current_bin_bytes_ + 2);
+  auto& pending_set = pending_bins_[bin->id];
 
-  BinId id = ++last_bin_id_;
-  auto& pending_set = pending_bins_[id];
-
-  char* data = out.data();
+  uint8_t* data = bytes.data();
 
   // Store number of entries, 2 bytes
-  absl::little_endian::Store16(data, current_bin_.size());
+  absl::little_endian::Store16(data, bin->entries_.size());
   data += sizeof(uint16_t);
 
   // Store all dbids and hashes, n * 10 bytes
-  for (const auto& [key, _] : current_bin_) {
+  for (const auto& [key, _] : bin->entries_) {
     absl::little_endian::Store16(data, key.first);
     data += sizeof(DbIndex);
 
@@ -71,21 +65,18 @@ SmallBins::FilledBin SmallBins::FlushBin() {
   }
 
   // Store all values with sizes, n * (2 + x) bytes
-  for (const auto& [key, value] : current_bin_) {
+  for (const auto& [key, value] : bin->entries_) {
     absl::little_endian::Store16(data, value.size());
     data += sizeof(uint16_t);
 
-    pending_set[key] = {size_t(data - out.data()), value.size()};
+    pending_set[key] = {size_t(data - bytes.data()), value.size()};
     memcpy(data, value.data(), value.size());
     data += value.size();
   }
 
-  current_bin_bytes_ = 0;
-
   // erase does not shrink, unlike clear().
-  current_bin_.erase(current_bin_.begin(), current_bin_.end());
-
-  return {id, std::move(out)};
+  // current_bin_.entries_.erase(current_bin_.entries_.begin(), current_bin_.entries_.end());
+  return bin->bytes_ + 2;
 }
 
 SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment) {
@@ -122,12 +113,13 @@ std::vector<std::pair<DbIndex, std::string>> SmallBins::ReportStashAborted(BinId
 }
 
 std::optional<SmallBins::BinId> SmallBins::Delete(DbIndex dbid, std::string_view key) {
-  if (auto it = current_bin_.find(make_pair(dbid, key)); it != current_bin_.end()) {
+  auto& entries = current_bin_.entries_;
+  if (auto it = entries.find(make_pair(dbid, key)); it != entries.end()) {
     size_t stashed_size = StashedValueSize(it->second);
-    DCHECK_GE(current_bin_bytes_, stashed_size);
+    DCHECK_GE(current_bin_.bytes_, stashed_size);
 
-    current_bin_bytes_ -= stashed_size;
-    current_bin_.erase(it);
+    current_bin_.bytes_ -= stashed_size;
+    entries.erase(it);
     return std::nullopt;
   }
 
@@ -164,8 +156,8 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
 SmallBins::Stats SmallBins::GetStats() const {
   return Stats{.stashed_bins_cnt = stashed_bins_.size(),
                .stashed_entries_cnt = stats_.stashed_entries_cnt,
-               .current_bin_bytes = current_bin_bytes_,
-               .current_entries_cnt = current_bin_.size()};
+               .current_bin_bytes = current_bin_.bytes_,
+               .current_entries_cnt = current_bin_.entries_.size()};
 }
 
 SmallBins::KeyHashDbList SmallBins::DeleteBin(DiskSegment segment, std::string_view value) {
