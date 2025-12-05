@@ -7,6 +7,8 @@
 // #define XXH_INLINE_ALL
 #include <xxhash.h>
 
+#include <array>
+
 extern "C" {
 #include "redis/intset.h"
 #include "redis/listpack.h"
@@ -1588,19 +1590,22 @@ void CompactObj::EncodeString(string_view str, bool is_key) {
   u_.r_obj.SetString(encoded, tl.local_mr);
 }
 
-StringOrView CompactObj::GetRawString() const {
+std::array<std::string_view, 2> CompactObj::GetRawString() const {
   DCHECK(!IsExternal());
 
   if (taglen_ == ROBJ_TAG) {
     CHECK_EQ(OBJ_STRING, u_.r_obj.type());
     DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-    return StringOrView::FromView(u_.r_obj.AsView());
+    return {u_.r_obj.AsView(), {}};
   }
 
   if (taglen_ == SMALL_TAG) {
-    string tmp;
-    u_.small_str.Get(&tmp);
-    return StringOrView::FromString(std::move(tmp));
+    std::string_view arr[2];
+    u_.small_str.GetV(arr);
+    std::array<std::string_view, 2> out;  // TODO: use c++ 20 to_array
+    out[0] = arr[0];
+    out[1] = arr[1];
+    return out;
   }
 
   LOG(FATAL) << "Unsupported tag for GetRawString(): " << int(taglen_);

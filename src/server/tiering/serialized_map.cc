@@ -3,11 +3,14 @@
 #include <absl/base/internal/endian.h>
 
 #include "base/logging.h"
+#include "core/detail/listpack_wrap.h"
 
 namespace dfly::tiering {
 
+constexpr size_t kLenBytes = 4;
+
 SerializedMap::Iterator& SerializedMap::Iterator::operator++() {
-  slice_.remove_prefix(8 + key_.size() + value_.size());
+  slice_.remove_prefix(2 * kLenBytes + key_.size() + value_.size());
   Read();
   return *this;
 }
@@ -37,7 +40,7 @@ SerializedMap::Iterator SerializedMap::Find(std::string_view key) const {
 }
 
 SerializedMap::Iterator SerializedMap::begin() const {
-  return Iterator{slice_.substr(4)};
+  return Iterator{slice_.substr(kLenBytes)};
 }
 
 SerializedMap::Iterator SerializedMap::end() const {
@@ -52,22 +55,18 @@ size_t SerializedMap::DataBytes() const {
   return slice_.size() - 4 - size() * 2 * 4;
 }
 
-constexpr size_t kLenBytes = 4;
-
-size_t SerializedMap::SerializeSize(Input input) {
-  size_t out = kLenBytes;  // number of entries
-  for (const auto& [key, value] : input)
-    out += kLenBytes * 2 /* string lengts */ + key.size() + value.size();
-  return out;
+size_t SerializedMap::EstimateSize(size_t data_bytes, size_t entries) {
+  return kLenBytes /* entry number */ + data_bytes + entries * 2 * kLenBytes /* string lenghts */;
 }
 
-size_t SerializedMap::Serialize(Input input, absl::Span<char> buffer) {
-  DCHECK_GE(buffer.size(), SerializeSize(input));
+size_t SerializedMap::Serialize(const detail::ListpackWrap& lw, absl::Span<char> buffer) {
+  DCHECK_GE(buffer.size(), EstimateSize(lw.Bytes(), lw.size()));
+
   char* ptr = buffer.data();
-  absl::little_endian::Store32(ptr, input.size());
+  absl::little_endian::Store32(ptr, lw.size());
   ptr += kLenBytes;
 
-  for (const auto& [key, value] : input) {
+  for (const auto& [key, value] : lw) {
     absl::little_endian::Store32(ptr, key.length());
     ptr += kLenBytes;
     absl::little_endian::Store32(ptr, value.length());

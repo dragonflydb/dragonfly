@@ -1,15 +1,26 @@
 #include "server/tiering/serialized_map.h"
 
+#include <mimalloc.h>
+
 #include <map>
 
 #include "base/logging.h"
+#include "core/detail/listpack_wrap.h"
 #include "gmock/gmock.h"
+
+extern "C" {
+#include "redis/zmalloc.h"
+}
 
 namespace dfly::tiering {
 
 using namespace std;
 
-class SerializedMapTest : public ::testing::Test {};
+struct SerializedMapTest : public ::testing::Test {
+  static void SetUpTestSuite() {
+    init_zmalloc_threadlocal(mi_heap_get_backing());  // to use ListpackWrap
+  }
+};
 
 TEST_F(SerializedMapTest, TestBasic) {
   const vector<std::pair<string, string>> kBase = {{"first key", "first value"},
@@ -17,12 +28,16 @@ TEST_F(SerializedMapTest, TestBasic) {
                                                    {"third key", "third value"},
                                                    {"fourth key", "fourth value"},
                                                    {"fifth key", "fifth value"}};
+  auto lw = detail::ListpackWrap::WithCapacity(100);
+  for (const auto& [k, v] : kBase)
+    lw.Insert(k, v, false);
 
   // Serialize kBase to buffer
   std::string buffer;
-  buffer.resize(SerializedMap::SerializeSize(kBase));
-  size_t written = SerializedMap::Serialize(kBase, absl::MakeSpan(buffer));
+  buffer.resize(SerializedMap::EstimateSize(lw.Bytes(), lw.size()));
+  size_t written = SerializedMap::Serialize(lw, absl::MakeSpan(buffer));
   EXPECT_GT(written, 0u);
+  buffer.resize(written);
 
   // Build map over buffer and check size
   SerializedMap map{buffer};
