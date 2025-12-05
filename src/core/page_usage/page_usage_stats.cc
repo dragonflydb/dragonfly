@@ -157,7 +157,9 @@ CollectedPageStats PageUsage::UniquePages::CollectedStats() const {
 }
 
 PageUsage::PageUsage(CollectPageStats collect_stats, float threshold)
-    : collect_stats_{collect_stats}, threshold_{threshold} {
+    : collect_stats_{collect_stats},
+      threshold_{threshold},
+      start_time_usec_(absl::GetCurrentTimeNanos() / 1000) {
 }
 
 bool PageUsage::IsPageForObjectUnderUtilized(void* object) {
@@ -177,6 +179,12 @@ bool PageUsage::ConsumePageStats(mi_page_usage_stats_t stat) {
     unique_pages_.AddStat(stat);
   }
   return force_reallocate_ || should_reallocate;
+}
+
+bool PageUsage::QuotaDepleted(const size_t quota_usec) const {
+  static constexpr auto MAX_QUOTA = std::numeric_limits<size_t>::max();
+  return quota_usec < MAX_QUOTA &&
+         static_cast<size_t>(absl::GetCurrentTimeNanos() / 1000) - start_time_usec_ >= quota_usec;
 }
 
 }  // namespace dfly

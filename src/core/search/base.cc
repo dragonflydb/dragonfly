@@ -25,4 +25,10 @@ std::optional<double> ParseNumericField(std::string_view value) {
   return std::nullopt;
 }
 
+DefragmentResult& DefragmentResult::Merge(DefragmentResult&& other) {
+  quota_depleted |= other.quota_depleted;
+  objects_moved += other.objects_moved;
+  return *this;
+}
+
 }  // namespace dfly::search
