@@ -211,4 +211,50 @@ struct GeoIndex : public BaseIndex {
   std::unique_ptr<rtree> rtree_;
 };
 
+// Defragments a map like data structure. The values in the map must have a `Defragment` method.
+// Works with rax tree map and hash based maps
+template <typename Container, typename ItFunc> struct DefragmentMap {
+  // ItFunc is necessary because RaxTreeMap does not allow copying or moving iterators, so this
+  // class cannot accept begin,end iterators from caller. It must construct the begin iterator
+  using Iterator = std::invoke_result_t<ItFunc>;
+  DefragmentMap(Container& container, ItFunc&& f)
+      : container(container), it(f()), end(container.end()) {
+  }
+
+  // Deref should be true if the value is wrapped in a pointer. Set here instead of at class level
+  // to allow overriding without specifying other parameters.
+  template <bool Deref = false>
+  // The key is set if the defragmentation has to stop mid way due to depleted quota
+  DefragmentResult Defragment(PageUsage* page_usage, std::string* key) {
+    if (page_usage->QuotaDepleted()) {
+      return DefragmentResult{.quota_depleted = true, .objects_moved = 0};
+    }
+
+    DefragmentResult result;
+    for (; it != end; ++it) {
+      const auto& [k, map] = *it;
+      DefragmentResult r;
+      if constexpr (Deref) {
+        r = map->Defragment(quota_usec, page_usage);
+      } else {
+        r = map.Defragment(quota_usec, page_usage);
+      }
+      if (result.Merge(std::move(r)).quota_depleted) {
+        *key = k;
+        break;
+      }
+    }
+
+    if (it == end) {
+      key->clear();
+    }
+
+    return result;
+  }
+
+  Container& container;
+  Iterator it;
+  Iterator end;
+};
+
 }  // namespace dfly::search
