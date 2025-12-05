@@ -12,11 +12,14 @@
 #include "core/compact_object.h"
 #include "core/qlist.h"
 #include "core/score_map.h"
+#include "core/search/block_list.h"
+#include "core/search/search.h"
 #include "core/small_string.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
 #include "redis/redis_aux.h"
+#include "util/fibers/fibers.h"
 
 extern "C" {
 #include "redis/zmalloc.h"
@@ -25,6 +28,7 @@ extern "C" {
 ABSL_DECLARE_FLAG(bool, experimental_flat_json);
 
 using namespace dfly;
+using namespace std::chrono_literals;
 
 class PageUsageStatsTest : public ::testing::Test {
  protected:
@@ -212,4 +216,198 @@ TEST_F(PageUsageStatsTest, JSONCons) {
   EXPECT_EQ(json_obj->at("data").as_string_view(), "some");
   EXPECT_EQ(json_obj->at("count").as_integer<uint8_t>(), 1);
   EXPECT_EQ(json_obj->at("checked").as_bool(), false);
+}
+
+TEST_F(PageUsageStatsTest, QuotaChecks) {
+  {
+    PageUsage p{CollectPageStats::NO, 0};
+    EXPECT_FALSE(p.QuotaDepleted());
+  }
+  {
+    PageUsage p{CollectPageStats::NO, 0, 4};
+    util::ThisFiber::SleepFor(5us);
+    EXPECT_TRUE(p.QuotaDepleted());
+  }
+}
+
+TEST_F(PageUsageStatsTest, BlockList) {
+  search::BlockList<search::SortedVector<search::DocId>> bl{&m_, 20};
+  PageUsage p{CollectPageStats::NO, 0.1};
+  p.SetForceReallocate(true);
+
+  // empty list
+  auto result = bl.Defragment(&p);
+  EXPECT_FALSE(result.quota_depleted);
+  EXPECT_EQ(result.objects_moved, 0);
+
+  // single item will move twice, once for the blocklist and once for the sorted vector
+  bl.Insert(1);
+  result = bl.Defragment(&p);
+  EXPECT_FALSE(result.quota_depleted);
+  EXPECT_EQ(result.objects_moved, 2);
+
+  // quota depleted without defragmentation
+  PageUsage p_zero{CollectPageStats::NO, 0.1, 0};
+  p_zero.SetForceReallocate(true);
+  result = bl.Defragment(&p_zero);
+  EXPECT_TRUE(result.quota_depleted);
+  EXPECT_EQ(result.objects_moved, 0);
+}
+
+TEST_F(PageUsageStatsTest, BlockListDefragmentResumes) {
+  search::BlockList<search::SortedVector<search::DocId>> bl{&m_, 20};
+  PageUsage p{CollectPageStats::NO, 0.1};
+  p.SetForceReallocate(true);
+
+  for (size_t i = 0; i < 1000; ++i) {
+    bl.Insert(i);
+  }
+
+  PageUsage p_small_quota{CollectPageStats::NO, 0.1, 10};
+  p_small_quota.SetForceReallocate(true);
+  util::ThisFiber::SleepFor(10us);
+  auto result = bl.Defragment(&p_small_quota);
+  EXPECT_TRUE(result.quota_depleted);
+  EXPECT_GE(result.objects_moved, 0);
+
+  result = bl.Defragment(&p);
+  EXPECT_FALSE(result.quota_depleted);
+  EXPECT_GT(result.objects_moved, 0);
+}
+
+TEST_F(PageUsageStatsTest, BlockListWithPairs) {
+  search::BlockList<search::SortedVector<std::pair<search::DocId, double>>> bl{&m_, 20};
+  PageUsage p{CollectPageStats::NO, 0.1};
+  p.SetForceReallocate(true);
+
+  for (size_t i = 0; i < 100; ++i) {
+    bl.Insert({i, i * 1.1});
+  }
+
+  const auto result = bl.Defragment(&p);
+  EXPECT_FALSE(result.quota_depleted);
+  EXPECT_GT(result.objects_moved, 0);
+}
+
+TEST_F(PageUsageStatsTest, BlockListWithNonDefragmentableContainer) {
+  search::BlockList<search::CompressedSortedSet> bl{&m_, 20};
+  PageUsage p{CollectPageStats::NO, 0.1};
+  p.SetForceReallocate(true);
+
+  // empty list
+  auto result = bl.Defragment(&p);
+  EXPECT_FALSE(result.quota_depleted);
+  EXPECT_EQ(result.objects_moved, 0);
+
+  // will reallocate once for the blocklist, the inner sorted set will be skipped
+  bl.Insert(1);
+  result = bl.Defragment(&p);
+  EXPECT_FALSE(result.quota_depleted);
+  EXPECT_EQ(result.objects_moved, 1);
+}
+
+class MockDocument final : public search::DocumentAccessor {
+ public:
+  MockDocument() {
+    words.reserve(1000);
+    for (size_t i = 0; i < 1000; ++i) {
+      words.push_back(absl::StrFormat("word-%d", i));
+    }
+  }
+
+  std::optional<StringList> GetStrings(std::string_view active_field) const override {
+    return {{words[absl::GetCurrentTimeNanos() % words.size()]}};
+  }
+  std::optional<VectorInfo> GetVector(std::string_view active_field) const override {
+    return std::nullopt;
+  }
+  std::optional<NumsList> GetNumbers(std::string_view active_field) const override {
+    return {{1, 2, 3, 4}};
+  }
+  std::optional<StringList> GetTags(std::string_view active_field) const override {
+    return {{words[absl::GetCurrentTimeNanos() % words.size()]}};
+  }
+
+  std::vector<std::string> words;
+};
+
+TEST_F(PageUsageStatsTest, DefragmentTagIndex) {
+  search::Schema schema;
+  schema.fields["field_name"] =
+      search::SchemaField{search::SchemaField::TAG, 0, "fn", search::SchemaField::TagParams{}};
+  search::FieldIndices index{schema, {}, &m_, nullptr};
+
+  PageUsage p{CollectPageStats::NO, 0.1};
+  p.SetForceReallocate(true);
+
+  // Empty index
+  search::DefragmentResult result = index.Defragment(&p);
+  EXPECT_FALSE(result.quota_depleted);
+  EXPECT_EQ(result.objects_moved, 0);
+
+  const MockDocument md;
+  index.Add(1, md);
+
+  result = index.Defragment(&p);
+  EXPECT_FALSE(result.quota_depleted);
+  // single doc with single term returned by `GetTags` should result in two reallocations.
+  EXPECT_EQ(result.objects_moved, 2);
+
+  PageUsage p_zero{CollectPageStats::NO, 0.1, 0};
+  p_zero.SetForceReallocate(true);
+  result = index.Defragment(&p_zero);
+  EXPECT_TRUE(result.quota_depleted);
+  EXPECT_EQ(result.objects_moved, 0);
+}
+
+TEST_F(PageUsageStatsTest, TagIndexDefragResumeWithChanges) {
+  search::Schema schema;
+  schema.fields["field_name"] =
+      search::SchemaField{search::SchemaField::TAG, 0, "fn", search::SchemaField::TagParams{}};
+  search::FieldIndices index{schema, {}, &m_, nullptr};
+
+  PageUsage p{CollectPageStats::NO, 0.1};
+  p.SetForceReallocate(true);
+
+  const MockDocument md;
+  for (size_t i = 0; i < 100; ++i) {
+    index.Add(i, md);
+  }
+
+  PageUsage p_small_quota{CollectPageStats::NO, 0.1, 10};
+  p_small_quota.SetForceReallocate(true);
+  search::DefragmentResult result = index.Defragment(&p_small_quota);
+  EXPECT_TRUE(result.quota_depleted);
+  EXPECT_GE(result.objects_moved, 0);
+
+  index.Remove(99, md);
+
+  for (size_t i = 200; i < 300; ++i) {
+    index.Add(i, md);
+  }
+
+  result = index.Defragment(&p);
+  EXPECT_FALSE(result.quota_depleted);
+  EXPECT_GT(result.objects_moved, 0);
+}
+
+TEST_F(PageUsageStatsTest, DefragmentIndexWithNonDefragmentableFields) {
+  search::Schema schema;
+  schema.fields["text"] =
+      search::SchemaField{search::SchemaField::TEXT, 0, "fn", search::SchemaField::TextParams{}};
+  schema.fields["num"] = search::SchemaField{search::SchemaField::NUMERIC, 0, "fn",
+                                             search::SchemaField::NumericParams{}};
+  search::IndicesOptions options{{}};
+  search::FieldIndices index{schema, options, &m_, nullptr};
+
+  PageUsage p{CollectPageStats::NO, 0.1};
+  p.SetForceReallocate(true);
+
+  const MockDocument md;
+  index.Add(1, md);
+
+  // Unsupported index types will skip defragmenting themselves
+  const search::DefragmentResult result = index.Defragment(&p);
+  EXPECT_FALSE(result.quota_depleted);
+  EXPECT_EQ(result.objects_moved, 0);
 }
