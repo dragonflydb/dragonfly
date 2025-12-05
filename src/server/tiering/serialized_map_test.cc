@@ -31,6 +31,7 @@ TEST_F(SerializedMapTest, TestBasic) {
   auto lw = detail::ListpackWrap::WithCapacity(100);
   for (const auto& [k, v] : kBase)
     lw.Insert(k, v, false);
+  lw.GetPointer();  // to mark as non dirty // TODO: remove
 
   // Serialize kBase to buffer
   std::string buffer;
