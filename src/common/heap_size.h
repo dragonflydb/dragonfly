@@ -25,7 +25,7 @@
 #include <type_traits>
 #include <vector>
 
-namespace dfly {
+namespace cmn {
 
 namespace heap_size_detail {
 
@@ -142,4 +142,4 @@ template <typename Container> size_t AccumulateContainer(const Container& c) {
 }
 }  // namespace heap_size_detail
 
-}  // namespace dfly
+}  // namespace cmn

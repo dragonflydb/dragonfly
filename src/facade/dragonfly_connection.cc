@@ -20,7 +20,7 @@
 #include "base/io_buf.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
-#include "core/heap_size.h"
+#include "common/heap_size.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/memcache_parser.h"
@@ -2034,10 +2034,10 @@ bool Connection::IsHttp() const {
 }
 
 Connection::MemoryUsage Connection::GetMemoryUsage() const {
-  size_t mem = sizeof(*this) + dfly::HeapSize(dispatch_q_) + dfly::HeapSize(name_) +
-               dfly::HeapSize(tmp_parse_args_) + dfly::HeapSize(tmp_cmd_vec_) +
-               dfly::HeapSize(memcache_parser_) + dfly::HeapSize(redis_parser_) +
-               dfly::HeapSize(cc_) + dfly::HeapSize(reply_builder_);
+  size_t mem = sizeof(*this) + cmn::HeapSize(dispatch_q_) + cmn::HeapSize(name_) +
+               cmn::HeapSize(tmp_parse_args_) + cmn::HeapSize(tmp_cmd_vec_) +
+               cmn::HeapSize(memcache_parser_) + cmn::HeapSize(redis_parser_) + cmn::HeapSize(cc_) +
+               cmn::HeapSize(reply_builder_);
 
   // We add a hardcoded 9k value to accomodate for the part of the Fiber stack that is in use.
   // The allocated stack is actually larger (~130k), but only a small fraction of that (9k
