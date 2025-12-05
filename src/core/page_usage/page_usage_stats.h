@@ -66,6 +66,8 @@ class PageUsage {
     force_reallocate_ = force_reallocate;
   }
 
+  bool QuotaDepleted(size_t quota_usec) const;
+
  private:
   CollectPageStats collect_stats_{CollectPageStats::NO};
   float threshold_;
@@ -93,6 +95,8 @@ class PageUsage {
 
   // For use in testing, forces reallocate check to always return true
   bool force_reallocate_{false};
+
+  size_t start_time_usec_{0};
 };
 
 }  // namespace dfly
