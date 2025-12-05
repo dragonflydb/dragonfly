@@ -9,9 +9,9 @@
 #include <variant>
 
 #include "base/logging.h"
+#include "common/string_or_view.h"
 #include "core/json/json_object.h"
 #include "core/json/path.h"
-#include "core/string_or_view.h"
 #include "facade/op_status.h"
 
 namespace dfly {
@@ -95,9 +95,9 @@ class WrappedJsonPath {
   static constexpr std::string_view kV1PathRootElement = ".";
   static constexpr std::string_view kV2PathRootElement = "$";
 
-  WrappedJsonPath(json::Path json_path, StringOrView path, JsonPathType path_type);
+  WrappedJsonPath(json::Path json_path, cmn::StringOrView path, JsonPathType path_type);
 
-  WrappedJsonPath(JsonExpression expression, StringOrView path, JsonPathType path_type);
+  WrappedJsonPath(JsonExpression expression, cmn::StringOrView path, JsonPathType path_type);
 
   template <typename T>
   JsonCallbackResult<T> ExecuteReadOnlyCallback(const JsonType* json_entry,
@@ -129,7 +129,7 @@ class WrappedJsonPath {
 
  private:
   std::variant<json::Path, JsonExpression> parsed_path_;
-  StringOrView path_;
+  cmn::StringOrView path_;
   JsonPathType path_type_ = kDefaultJsonPathType;
 };
 
@@ -207,12 +207,12 @@ template <typename T> bool JsonCallbackResult<T>::ShouldSendWrongType() const {
   return false;
 }
 
-inline WrappedJsonPath::WrappedJsonPath(json::Path json_path, StringOrView path,
+inline WrappedJsonPath::WrappedJsonPath(json::Path json_path, cmn::StringOrView path,
                                         JsonPathType path_type)
     : parsed_path_(std::move(json_path)), path_(std::move(path)), path_type_(path_type) {
 }
 
-inline WrappedJsonPath::WrappedJsonPath(JsonExpression expression, StringOrView path,
+inline WrappedJsonPath::WrappedJsonPath(JsonExpression expression, cmn::StringOrView path,
                                         JsonPathType path_type)
     : parsed_path_(std::move(expression)), path_(std::move(path)), path_type_(path_type) {
 }

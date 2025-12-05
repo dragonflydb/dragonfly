@@ -31,6 +31,7 @@ ABSL_FLAG(bool, use_numeric_range_tree, true,
 namespace dfly::search {
 
 using namespace std;
+using cmn::StringOrView;
 
 namespace {
 
