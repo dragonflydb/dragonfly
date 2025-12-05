@@ -18,7 +18,6 @@
 #include "core/mi_memory_resource.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "core/string_map.h"
-#include "core/string_or_view.h"
 #include "core/string_set.h"
 
 extern "C" {

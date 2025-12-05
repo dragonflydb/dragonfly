@@ -10,7 +10,7 @@
 #include "absl/strings/str_cat.h"
 #include "base/gtest.h"
 #include "base/logging.h"
-#include "core/heap_size.h"
+#include "common/heap_size.h"
 #include "facade/facade_test.h"
 
 using namespace testing;
@@ -280,7 +280,7 @@ TEST_F(RedisParserTest, UsedMemory) {
   for (size_t i = 0; i < 100; ++i) {
     blobs.emplace_back(vector<uint8_t>(200));
   }
-  EXPECT_GT(dfly::HeapSize(blobs), 20000);
+  EXPECT_GT(cmn::HeapSize(blobs), 20000);
 
   std::vector<std::unique_ptr<RespVec>> stash;
   RespVec vec;
@@ -292,7 +292,7 @@ TEST_F(RedisParserTest, UsedMemory) {
   for (unsigned i = 0; i < 100; i++) {
     stash.emplace_back(new RespExpr::Vec(vec));
   }
-  EXPECT_GT(dfly::HeapSize(stash), 30000);
+  EXPECT_GT(cmn::HeapSize(stash), 30000);
 }
 
 TEST_F(RedisParserTest, Eol) {

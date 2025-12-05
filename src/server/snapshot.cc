@@ -10,7 +10,6 @@
 #include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
-#include "core/heap_size.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
