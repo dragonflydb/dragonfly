@@ -170,7 +170,7 @@ size_t CmdSerializer::SerializeZSet(string_view key, const PrimeValue& pv) {
 
   size_t commands = 0;
   container_utils::IterateSortedSet(
-      pv.GetRobjWrapper(),
+      pv,
       [&](container_utils::ContainerEntry ce, double score) {
         aggregator.AddArg(absl::StrCat(score), CommandAggregator::CommitMode::kNoCommit);
         commands += aggregator.AddArg(ce.ToString());
