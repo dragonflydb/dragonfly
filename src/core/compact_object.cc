@@ -784,7 +784,6 @@ CompactObj& CompactObj::operator=(CompactObj&& o) noexcept {
 
   SetMeta(o.taglen_, o.mask_);  // frees own previous resources
   memcpy(&u_, &o.u_, sizeof(u_));
-  taglen_ = o.taglen_;
   huffman_domain_ = o.huffman_domain_;
 
   o.taglen_ = 0;  // forget all data

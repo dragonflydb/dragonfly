@@ -165,7 +165,7 @@ class CompactObj {
     SERIALIZED_MAP  // OBJ_HASH, Serialized map
   };
 
-  CompactObj() {  // By default - empty string.
+  CompactObj() : taglen_{0}, huffman_domain_{0} {  // default - empty string
   }
 
   explicit CompactObj(std::string_view str, bool is_key) {
@@ -553,6 +553,7 @@ class CompactObj {
     } mask_bits_;
   };
 
+  // TODO: use c++20 bitfield initializers
   uint8_t taglen_ : 5;          // Either length of inline string or tag of type
   uint8_t huffman_domain_ : 1;  // Value from HuffmanDomain enum. TODO: replace as is_key
 };
