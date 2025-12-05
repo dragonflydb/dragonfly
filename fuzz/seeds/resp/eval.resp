@@ -1,0 +1,6 @@
+*3
+$4
+EVAL
+$26
+return redis.call("PING")
+$0

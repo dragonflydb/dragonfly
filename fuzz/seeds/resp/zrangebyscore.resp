@@ -1,0 +1,11 @@
+*5
+$13
+ZRANGEBYSCORE
+$4
+zset
+$4
+-inf
+$4
++inf
+$10
+WITHSCORES

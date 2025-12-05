@@ -23,14 +23,10 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Install AFL++
+    - name: Verify AFL++ installation
       shell: bash
       run: |
-        echo "Installing AFL++..."
-        apt-get update -qq
-        apt-get install -y -qq afl++ lld-17 > /dev/null
-
-        echo "AFL++ installed successfully"
+        echo "Verifying AFL++ installation..."
         afl-fuzz -h | head -5 || true
 
         # Verify AFL++ compilers are available
@@ -99,6 +95,7 @@ runs:
         AFL_TESTCACHE_SIZE: ${{ inputs.mode == 'smoke' && '50' || '500' }}
         AFL_SKIP_CPUFREQ: ${{ inputs.mode == 'long' && '1' || '' }}
         AFL_FAST_CAL: ${{ inputs.mode == 'long' && '1' || '' }}
+        AFL_PERSISTENT_RECORD: 1000
 
     - name: Analyze fuzzing results
       shell: bash
