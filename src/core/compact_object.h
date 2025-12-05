@@ -168,11 +168,11 @@ class CompactObj {
   CompactObj() : taglen_{0}, huffman_domain_{0} {  // default - empty string
   }
 
-  explicit CompactObj(std::string_view str, bool is_key) {
+  explicit CompactObj(std::string_view str, bool is_key) : CompactObj() {
     SetString(str, is_key);
   }
 
-  CompactObj(CompactObj&& cs) noexcept {
+  CompactObj(CompactObj&& cs) noexcept : CompactObj() {
     operator=(std::move(cs));
   };
 

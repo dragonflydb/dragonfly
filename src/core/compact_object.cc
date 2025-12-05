@@ -787,7 +787,8 @@ CompactObj& CompactObj::operator=(CompactObj&& o) noexcept {
   huffman_domain_ = o.huffman_domain_;
 
   o.taglen_ = 0;  // forget all data
-  o.Reset();
+  o.huffman_domain_ = 0;
+  o.mask_ = 0;
   return *this;
 }
 
