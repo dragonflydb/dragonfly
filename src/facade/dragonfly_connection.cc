@@ -28,6 +28,7 @@
 #include "facade/service_interface.h"
 #include "facade/socket_utils.h"
 #include "io/file.h"
+#include "util/fiber_socket_base.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/proactor_base.h"
 
@@ -111,6 +112,8 @@ ABSL_FLAG(uint32_t, pipeline_squash_limit, 1 << 30, "Limit on the size of a squa
 ABSL_FLAG(uint32_t, pipeline_wait_batch_usec, 0,
           "If non-zero, waits for this time for more I/O "
           " events to come for the connection in case there is only one command in the pipeline. ");
+
+ABSL_FLAG(bool, experimental_io_loop_v2, false, "new io loop");
 
 using namespace util;
 using namespace std;
@@ -676,6 +679,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 #endif
 
   UpdateLibNameVerMap(lib_name_, lib_ver_, +1);
+  allowed_to_register_ = false;
 }
 
 Connection::~Connection() {
@@ -695,10 +699,17 @@ void Connection::OnShutdown() {
   VLOG(1) << "Connection::OnShutdown";
 
   BreakOnce(POLLHUP);
+  io_ec_ = make_error_code(errc::connection_aborted);
+  io_event_.notify_one();
 }
 
 void Connection::OnPreMigrateThread() {
   DVLOG(1) << "OnPreMigrateThread " << GetClientId();
+
+  const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
+  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen()) {
+    socket_->ResetOnRecvHook();
+  }
 
   CHECK(!cc_->conn_closing);
 
@@ -716,12 +727,22 @@ void Connection::OnPreMigrateThread() {
 }
 
 void Connection::OnPostMigrateThread() {
-  DVLOG(1) << "[" << id_ << "] OnPostMigrateThread";
+  DVLOG(1) << "[" << id_ << "] OnPostMigrateThread " << GetClientId();
 
   // Once we migrated, we should rearm OnBreakCb callback.
   if (breaker_cb_ && socket()->IsOpen()) {
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
   }
+
+  const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
+  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen() && allowed_to_register_) {
+    socket_->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
+      CHECK(this);
+      DoReadOnRecv(n);
+      io_event_.notify_one();
+    });
+  }
+
   migration_in_process_ = false;
   self_ = {make_shared<std::monostate>(), this};  // Recreate shared_ptr to self.
   DCHECK(!async_fb_.IsJoinable());
@@ -1092,11 +1113,22 @@ void Connection::ConnectionFlow() {
   }
 
   error_code ec = reply_builder_->GetError();
+  const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
 
   // Main loop.
   if (parse_status != ERROR && !ec) {
     UpdateIoBufCapacity(io_buf_, stats_, [&]() { io_buf_.EnsureCapacity(64); });
-    auto res = IoLoop();
+    variant<error_code, Connection::ParserStatus> res;
+    if (io_loop_v2 && !is_tls_) {
+      // Migrations should call RegisterRecv if the connection has reached here once.
+      // Otherwise, migration will code won't register and wait for the connection to
+      // reach here first and then  RegisterRecv inside IoLoopV2
+      allowed_to_register_ = true;
+      // Breaks with TLS. RegisterOnRecv is unimplemented.
+      res = IoLoopV2();
+    } else {
+      res = IoLoop();
+    }
 
     if (holds_alternative<error_code>(res)) {
       ec = get<error_code>(res);
@@ -1120,6 +1152,10 @@ void Connection::ConnectionFlow() {
 
   service_->OnConnectionClose(cc_.get());
   DecreaseStatsOnClose();
+
+  if (io_loop_v2 && !is_tls_) {
+    socket_->ResetOnRecvHook();
+  }
 
   // We wait for dispatch_fb to finish writing the previous replies before replying to the last
   // offending request.
@@ -1225,6 +1261,8 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
   auto dispatch_async = [this]() -> MessageHandle { return {FromArgs(tmp_parse_args_)}; };
 
   io::Bytes read_buffer = io_buf_.InputBuffer();
+  // Keep track of total bytes consumed/parsed. The do/while{} loop below preempts,
+  // and InputBuffer() size might change between preemption points. Hence, count
   do {
     result = redis_parser_->Parse(read_buffer, &consumed, &tmp_parse_args_);
     request_consumed_bytes_ += consumed;
@@ -1258,6 +1296,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
           << "Redis parser error: " << result << " during parse: " << ToSV(read_buffer);
     }
     read_buffer.remove_prefix(consumed);
+    io_buf_.ConsumeInput(consumed);
 
     // We must yield from time to time to allow other fibers to run.
     // Specifically, if a client sends a huge chunk of data resulting in a very long pipeline,
@@ -1267,8 +1306,6 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
       ThisFiber::Yield();
     }
   } while (RedisParser::OK == result && read_buffer.size() > 0 && !reply_builder_->GetError());
-
-  io_buf_.ConsumeInput(io_buf_.InputLen());
 
   parser_error_ = result;
   if (result == RedisParser::OK)
@@ -1375,7 +1412,7 @@ void Connection::OnBreakCb(int32_t mask) {
   cnd_.notify_one();  // Notify dispatch fiber.
 }
 
-void Connection::HandleMigrateRequest() {
+void Connection::HandleMigrateRequest(bool unregister) {
   if (cc_->conn_closing || !migration_request_) {
     return;
   }
@@ -1389,6 +1426,7 @@ void Connection::HandleMigrateRequest() {
 
   // We don't support migrating with subscriptions as it would require moving thread local
   // handles. We can't check above, as the queue might have contained a subscribe request.
+
   if (cc_->subscriptions == 0) {
     stats_->num_migrations++;
     migration_request_ = nullptr;
@@ -1402,9 +1440,7 @@ void Connection::HandleMigrateRequest() {
     // which can never trigger since we Joined on the async_fb_ above and we are
     // atomic in respect to our proactor meaning that no other fiber will
     // launch the DispatchFiber.
-    if (!this->Migrate(dest)) {
-      return;
-    }
+    std::ignore = !this->Migrate(dest);
   }
 }
 
@@ -1430,7 +1466,7 @@ io::Result<size_t> Connection::HandleRecvSocket() {
   return recv_sz;
 }
 
-auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
+variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
   error_code ec;
   ParserStatus parse_status = OK;
 
@@ -1821,6 +1857,7 @@ bool Connection::Migrate(util::fb2::ProactorBase* dest) {
   if (!socket()->IsOpen()) {
     return false;
   }
+
   return true;
 }
 
@@ -2159,6 +2196,155 @@ bool Connection::WeakRef::operator<(const WeakRef& other) const {
 
 bool Connection::WeakRef::operator==(const WeakRef& other) const {
   return client_id_ == other.client_id_;
+}
+
+void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) {
+  if (std::holds_alternative<std::error_code>(n.read_result)) {
+    io_ec_ = std::get<std::error_code>(n.read_result);
+    return;
+  }
+
+  // TODO non epoll API via EnableRecvMultishot
+  // if (std::holds_alternative<io::MutableBytes>(n.read_result))
+  using RecvNoti = util::FiberSocketBase::RecvNotification::RecvCompletion;
+  if (std::holds_alternative<RecvNoti>(n.read_result)) {
+    if (!std::get<RecvNoti>(n.read_result)) {
+      io_ec_ = make_error_code(errc::connection_aborted);
+      return;
+    }
+
+    if (io_buf_.AppendLen() == 0) {
+      // We will regrow in IoLoopV2
+      return;
+    }
+
+    io::MutableBytes buf = io_buf_.AppendBuffer();
+    io::Result<size_t> res = socket_->TryRecv(buf);
+
+    if (res) {
+      if (*res > 0) {
+        // A recv call can return fewer bytes than requested even if the
+        // socket buffer actually contains enough data to satisfy the full request.
+        // TODO maybe worth looping here and try another recv call until it fails
+        // with EAGAIN or EWOULDBLOCK. The problem there is that we need to handle
+        // resizing if AppendBuffer is zero.
+        io_buf_.CommitWrite(*res);
+        return;
+      }
+      // *res == 0
+      io_ec_ = make_error_code(errc::connection_aborted);
+      return;
+    }
+
+    // error path (!res)
+    auto ec = res.error();
+    // EAGAIN and EWOULDBLOCK
+    if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block) {
+      return;
+    }
+
+    io_ec_ = ec;
+    return;
+  }
+
+  DCHECK(false) << "Should not reach here";
+}
+
+variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
+  error_code ec;
+  ParserStatus parse_status = OK;
+
+  size_t max_io_buf_len = GetFlag(FLAGS_max_client_iobuf_len);
+
+  auto* peer = socket_.get();
+  recv_buf_.res_len = 0;
+
+  // TODO EnableRecvMultishot
+
+  peer->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
+    DCHECK(this);
+    DoReadOnRecv(n);
+    io_event_.notify_one();
+  });
+
+  do {
+    HandleMigrateRequest();
+
+    // Poll again for readiness. The event handler registered above is edge triggered
+    // (called once per socket readiness event). So, for example, it could be that the
+    // cb read less data than it is available because of io_buf_ capacity. If after
+    // an iteration the fiber does not poll the socket for more data it might deadlock.
+    // TODO maybe use a flag instead of a poll
+    DoReadOnRecv(FiberSocketBase::RecvNotification{true});
+    fb2::NoOpLock noop;
+    io_event_.wait(
+        noop, [this]() { return io_buf_.InputLen() > 0 || io_ec_ || io_buf_.AppendLen() == 0; });
+
+    if (io_ec_) {
+      LOG_IF(WARNING, cntx()->replica_conn) << "async io error: " << io_ec_;
+      return std::exchange(io_ec_, {});
+    }
+
+    phase_ = PROCESS;
+    bool is_iobuf_full = io_buf_.AppendLen() == 0;
+
+    if (io_buf_.InputLen() > 0) {
+      if (redis_parser_) {
+        parse_status = ParseRedis(max_busy_read_cycles_cached);
+      } else {
+        DCHECK(memcache_parser_);
+        parse_status = ParseMemcache();
+      }
+    } else {
+      parse_status = NEED_MORE;
+      DCHECK(io_buf_.AppendLen() == 0);
+    }
+
+    if (reply_builder_->GetError()) {
+      return reply_builder_->GetError();
+    }
+
+    if (parse_status == NEED_MORE) {
+      parse_status = OK;
+
+      size_t capacity = io_buf_.Capacity();
+      if (capacity < max_io_buf_len) {
+        size_t parser_hint = 0;
+        if (redis_parser_)
+          parser_hint = redis_parser_->parselen_hint();  // Could be done for MC as well.
+
+        // If we got a partial request and we managed to parse its
+        // length, make sure we have space to store it instead of
+        // increasing space incrementally.
+        // (Note: The buffer object is only working in power-of-2 sizes,
+        // so there's no danger of accidental O(n^2) behavior.)
+        if (parser_hint > capacity) {
+          UpdateIoBufCapacity(io_buf_, stats_,
+                              [&]() { io_buf_.Reserve(std::min(max_io_buf_len, parser_hint)); });
+        }
+
+        // If we got a partial request because iobuf was full, grow it up to
+        // a reasonable limit to save on Recv() calls.
+        if (is_iobuf_full && capacity < max_io_buf_len / 2) {
+          // Last io used most of the io_buf to the end.
+          UpdateIoBufCapacity(io_buf_, stats_, [&]() {
+            io_buf_.Reserve(capacity * 2);  // Valid growth range.
+          });
+        }
+
+        if (io_buf_.AppendLen() == 0U) {
+          // it can happen with memcached but not for RedisParser, because RedisParser fully
+          // consumes the passed buffer
+          LOG_EVERY_T(WARNING, 10)
+              << "Maximum io_buf length reached, consider to increase max_client_iobuf_len flag";
+        }
+      }
+    } else if (parse_status != OK) {
+      break;
+    }
+  } while (peer->IsOpen());
+
+  return parse_status;
 }
 
 void ResetStats() {

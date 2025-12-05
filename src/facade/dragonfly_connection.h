@@ -20,6 +20,7 @@
 #include "io/io_buf.h"
 #include "util/connection.h"
 #include "util/fibers/fibers.h"
+#include "util/fibers/synchronization.h"
 #include "util/http/http_handler.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
@@ -349,6 +350,10 @@ class Connection : public util::Connection {
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoop();
 
+  void DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n);
+  // Main loop reading client messages and passing requests to dispatch queue.
+  std::variant<std::error_code, ParserStatus> IoLoopV2();
+
   // Returns true if HTTP header is detected.
   io::Result<bool> CheckForHttpProto();
 
@@ -381,7 +386,7 @@ class Connection : public util::Connection {
   // Returns non-null request ptr if pool has vacant entries.
   PipelineMessagePtr GetFromPipelinePool();
 
-  void HandleMigrateRequest();
+  void HandleMigrateRequest(bool unregister = false);
   io::Result<size_t> HandleRecvSocket();
 
   bool ShouldEndAsyncFiber(const MessageHandle& msg);
@@ -420,6 +425,9 @@ class Connection : public util::Connection {
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
   util::fb2::Fiber async_fb_;             // async fiber (if started)
+
+  std::error_code io_ec_;
+  util::fb2::CondVarAny io_event_;
 
   uint64_t pending_pipeline_cmd_cnt_ = 0;  // how many queued Redis async commands in dispatch_q
   size_t pending_pipeline_bytes_ = 0;      // how many bytes of the queued Redis async commands
@@ -489,6 +497,8 @@ class Connection : public util::Connection {
       // if the flag is set.
       bool is_tls_ : 1;
       bool is_main_ : 1;
+      // If post migration is allowed to call RegisterRecv
+      bool allowed_to_register_ : 1;
     };
   };
 
