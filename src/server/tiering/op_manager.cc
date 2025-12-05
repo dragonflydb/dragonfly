@@ -107,6 +107,7 @@ std::error_code OpManager::PrepareAndStash(EntryId id, size_t length,
 
   size_t written = writer(buf->second.bytes);
   Stash(id, {buf->first, written}, buf->second);
+  return {};
 }
 
 OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {
