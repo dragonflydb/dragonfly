@@ -194,3 +194,101 @@
 "*3\x0d\x0a$3\x0d\x0aSET\x0d\x0a$3\x0d\x0akey\x0d\x0a$5\x0d\x0avalue\x0d\x0a"
 "*2\x0d\x0a$3\x0d\x0aDEL\x0d\x0a$3\x0d\x0akey\x0d\x0a"
 "*2\x0d\x0a$6\x0d\x0aEXISTS\x0d\x0a$3\x0d\x0akey\x0d\x0a"
+
+# Scripting commands
+"EVAL"
+"EVALSHA"
+"EVAL_RO"
+"EVALSHA_RO"
+"SCRIPT"
+
+# Bitfield commands
+"BITFIELD"
+"BITFIELD_RO"
+"BITOP"
+"BITCOUNT"
+"BITPOS"
+"GETBIT"
+"SETBIT"
+
+# More sorted set operations
+"ZINTER"
+"ZUNION"
+"ZINTERSTORE"
+"ZUNIONSTORE"
+"ZPOPMIN"
+"ZPOPMAX"
+"BZPOPMIN"
+"BZPOPMAX"
+"ZMPOP"
+
+# More blocking commands
+"BLMOVE"
+"BLMPOP"
+"BRPOPLPUSH"
+
+# Edge case numbers
+"9223372036854775807"
+"-9223372036854775808"
+"2147483647"
+"-2147483648"
+"0.0"
+"-0.0"
+"inf"
+"-inf"
+"+inf"
+"nan"
+
+# Stream IDs and patterns
+"0-0"
+"0-*"
+"$"
+">"
+"*"
+"MAXLEN"
+"MINID"
+
+# JSON paths
+"$.."
+"$[*]"
+"$[-1]"
+"$.name"
+"$..name"
+
+# RESP protocol edge cases
+"*-1\x0d\x0a"
+"$-1\x0d\x0a"
+"*0\x0d\x0a"
+"$0\x0d\x0a\x0d\x0a"
+
+# Lua scripting patterns
+"return redis.call"
+"redis.pcall"
+"KEYS[1]"
+"ARGV[1]"
+
+# Bitfield subcommands
+"OVERFLOW"
+"WRAP"
+"SAT"
+"FAIL"
+
+# Aggregate options
+"AGGREGATE"
+"SUM"
+"MIN"
+"MAX"
+"WEIGHTS"
+
+# Binary edge cases
+"\x00"
+"\xff"
+"\x00\x00\x00\x00"
+
+# Consumer group commands
+"CREATE"
+"DESTROY"
+"SETID"
+"DELCONSUMER"
+"CONSUMERS"
+"GROUPS"

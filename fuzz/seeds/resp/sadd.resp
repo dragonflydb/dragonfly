@@ -1,0 +1,7 @@
+*3
+$4
+SADD
+$3
+set
+$6
+member
