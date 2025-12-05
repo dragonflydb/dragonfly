@@ -42,7 +42,9 @@ struct CollectedPageStats {
 
 class PageUsage {
  public:
-  PageUsage(CollectPageStats collect_stats, float threshold);
+  static constexpr uint64_t kMaxQuota = std::numeric_limits<uint64_t>::max();
+
+  PageUsage(CollectPageStats collect_stats, float threshold, uint64_t quota_usec = kMaxQuota);
 
   bool IsPageForObjectUnderUtilized(void* object);
 
@@ -65,6 +67,8 @@ class PageUsage {
   void SetForceReallocate(bool force_reallocate) {
     force_reallocate_ = force_reallocate;
   }
+
+  bool QuotaDepleted() const;
 
  private:
   CollectPageStats collect_stats_{CollectPageStats::NO};
@@ -93,6 +97,9 @@ class PageUsage {
 
   // For use in testing, forces reallocate check to always return true
   bool force_reallocate_{false};
+
+  uint64_t quota_cycles_;
+  uint64_t start_cycles_;
 };
 
 }  // namespace dfly

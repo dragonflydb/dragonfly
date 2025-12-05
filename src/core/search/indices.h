@@ -25,6 +25,7 @@
 
 #include "absl/functional/function_ref.h"
 #include "base/pmr/memory_resource.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "core/search/base.h"
 #include "core/search/block_list.h"
 #include "core/search/compressed_sorted_set.h"
