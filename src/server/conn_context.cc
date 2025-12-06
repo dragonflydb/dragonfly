@@ -5,7 +5,7 @@
 #include "server/conn_context.h"
 
 #include "base/logging.h"
-#include "core/heap_size.h"
+#include "common/heap_size.h"
 #include "facade/acl_commands_def.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
@@ -21,6 +21,7 @@ namespace dfly {
 
 using namespace std;
 using namespace facade;
+using cmn::HeapSize;
 
 static void SendSubscriptionChangedResponse(string_view action, std::optional<string_view> topic,
                                             unsigned count, RedisReplyBuilder* rb) {
@@ -228,7 +229,7 @@ void ConnectionContext::PUnsubscribeAll(bool to_reply, facade::RedisReplyBuilder
 }
 
 size_t ConnectionState::ExecInfo::UsedMemory() const {
-  return dfly::HeapSize(body) + dfly::HeapSize(watched_keys);
+  return HeapSize(body) + HeapSize(watched_keys);
 }
 
 void ConnectionState::ExecInfo::AddStoredCmd(const CommandId* cid, bool own_args, CmdArgList args) {
@@ -244,19 +245,19 @@ size_t ConnectionState::ExecInfo::ClearStoredCmds() {
 }
 
 size_t ConnectionState::ScriptInfo::UsedMemory() const {
-  return dfly::HeapSize(lock_tags) + async_cmds_heap_mem;
+  return HeapSize(lock_tags) + async_cmds_heap_mem;
 }
 
 size_t ConnectionState::SubscribeInfo::UsedMemory() const {
-  return dfly::HeapSize(channels) + dfly::HeapSize(patterns);
+  return HeapSize(channels) + HeapSize(patterns);
 }
 
 size_t ConnectionState::UsedMemory() const {
-  return dfly::HeapSize(exec_info) + dfly::HeapSize(script_info) + dfly::HeapSize(subscribe_info);
+  return HeapSize(exec_info) + HeapSize(script_info) + HeapSize(subscribe_info);
 }
 
 size_t ConnectionContext::UsedMemory() const {
-  return facade::ConnectionContext::UsedMemory() + dfly::HeapSize(conn_state);
+  return facade::ConnectionContext::UsedMemory() + HeapSize(conn_state);
 }
 
 void ConnectionContext::Unsubscribe(std::string_view channel) {

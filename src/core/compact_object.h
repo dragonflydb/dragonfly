@@ -11,10 +11,10 @@
 #include <type_traits>
 
 #include "base/pmr/memory_resource.h"
+#include "common/string_or_view.h"
 #include "core/json/json_object.h"
 #include "core/mi_memory_resource.h"
 #include "core/small_string.h"
-#include "core/string_or_view.h"
 
 namespace dfly {
 
@@ -28,6 +28,7 @@ constexpr unsigned kEncodingJsonFlat = 1;
 class SBF;
 class PageUsage;
 
+using cmn::StringOrView;
 namespace detail {
 
 // redis objects or blobs of upto 4GB size.
