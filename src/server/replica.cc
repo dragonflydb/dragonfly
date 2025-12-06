@@ -761,8 +761,7 @@ error_code Replica::ConsumeRedisStream() {
         }
 
         facade::RespExpr::VecToArgList(LastResponseArgs(), &args_vector);
-        CmdArgList arg_list{args_vector.data(), args_vector.size()};
-        service_.DispatchCommand(arg_list, &null_builder, &conn_context);
+        service_.DispatchCommand(facade::ParsedArgs{args_vector}, &null_builder, &conn_context);
       }
     }
 

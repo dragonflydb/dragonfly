@@ -1423,7 +1423,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
-DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
+DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilder* builder,
                                         facade::ConnectionContext* cntx) {
   DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
@@ -1431,8 +1431,8 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
   absl::Cleanup clear_last_error([builder]() { builder->ConsumeLastError(); });
   ServerState& etl = *ServerState::tlocal();
 
-  string cmd = absl::AsciiStrToUpper(args[0]);
-  const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.subspan(1));
+  string cmd = absl::AsciiStrToUpper(args.Front());
+  const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.Tail());
 
   if (cid == nullptr) {
     builder->SendError(ReportUnknownCmd(cmd));
@@ -1446,7 +1446,7 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
 
   if (VLOG_IS_ON(2) && cntx->conn() /* no owner in replica context */) {
     LOG(INFO) << "Got (" << cntx->conn()->GetClientId() << "): " << (under_script ? "LUA " : "")
-              << args << " in dbid=" << dfly_cntx->conn_state.db_index;
+              << args.ToSlice() << " in dbid=" << dfly_cntx->conn_state.db_index;
   }
 
   // Don't interrupt running multi commands or admin connections.
@@ -1460,7 +1460,8 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
     cntx->paused = false;
   }
 
-  if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {
+  auto tail_args = args_no_cmd.ToSlice();
+  if (auto err = VerifyCommandState(cid, tail_args, *dfly_cntx); err) {
     LOG_IF(WARNING, cntx->replica_conn || !cntx->conn() /* no owner in replica context */)
         << "VerifyCommandState error: " << err->ToSv();
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
@@ -1469,9 +1470,14 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
     // We need to skip this because ACK's should not be replied to
     // Bonus points because this allows to continue replication with ACL users who got
     // their access revoked and reinstated
-    if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(args_no_cmd, 0), "ACK")) {
-      server_family_.GetDflyCmd()->OnClose(dfly_cntx->conn_state.replication_info.repl_session_id);
-      return DispatchResult::ERROR;
+
+    if (cid->name() == "REPLCONF") {
+      DCHECK_GE(args_no_cmd.size(), 1u);
+      if (absl::EqualsIgnoreCase(args_no_cmd.Front(), "ACK")) {
+        server_family_.GetDflyCmd()->OnClose(
+            dfly_cntx->conn_state.replication_info.repl_session_id);
+        return DispatchResult::ERROR;
+      }
     }
     builder->SendError(std::move(*err));
     return DispatchResult::ERROR;
@@ -1486,7 +1492,7 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
     // TODO: protect against aggregating huge transactions.
     auto& exec_info = dfly_cntx->conn_state.exec_info;
     const size_t old_size = exec_info.GetStoredCmdBytes();
-    exec_info.AddStoredCmd(cid, true, args_no_cmd);
+    exec_info.AddStoredCmd(cid, true, tail_args);
     etl.stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
     if (cid->IsWriteOnly()) {
       exec_info.is_write = true;
@@ -1503,7 +1509,7 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
     if (cid->IsTransactional()) {
       dfly_cntx->transaction->MultiSwitchCmd(cid);
       OpStatus status = dfly_cntx->transaction->InitByArgs(
-          dfly_cntx->ns, dfly_cntx->conn_state.db_index, args_no_cmd);
+          dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
 
       if (status != OpStatus::OK) {
         builder->SendError(status);
@@ -1519,7 +1525,7 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
       if (!dist_trans->IsMulti()) {  // Multi command initialize themself based on their mode.
         CHECK(dfly_cntx->ns != nullptr);
         if (auto st =
-                dist_trans->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, args_no_cmd);
+                dist_trans->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
             st != OpStatus::OK) {
           builder->SendError(st);
           return DispatchResult::ERROR;
@@ -1535,8 +1541,7 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
 
   dfly_cntx->cid = cid;
 
-  auto res =
-      InvokeCmd(cid, args_no_cmd, CommandContext{dfly_cntx->transaction, builder, dfly_cntx});
+  auto res = InvokeCmd(cid, tail_args, CommandContext{dfly_cntx->transaction, builder, dfly_cntx});
   if ((res != DispatchResult::OK) && (res != DispatchResult::OOM)) {
     builder->SendError("Internal Error");
     builder->CloseConnection();
@@ -1722,7 +1727,7 @@ DispatchResult Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
   return res;
 }
 
-DispatchManyResult Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
+DispatchManyResult Service::DispatchManyCommands(absl::Span<facade::ParsedArgs> args_list,
                                                  SinkReplyBuilder* builder,
                                                  facade::ConnectionContext* cntx) {
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
@@ -1768,9 +1773,9 @@ DispatchManyResult Service::DispatchManyCommands(absl::Span<CmdArgList> args_lis
     stored_cmds.clear();
   };
 
-  for (auto args : args_list) {
-    string cmd = absl::AsciiStrToUpper(ArgS(args, 0));
-    const auto [cid, tail_args] = registry_.FindExtended(cmd, args.subspan(1));
+  for (const auto& args : args_list) {
+    string cmd = absl::AsciiStrToUpper(args.Front());
+    const auto [cid, tail_args] = registry_.FindExtended(cmd, args.Tail());
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible
@@ -1787,7 +1792,7 @@ DispatchManyResult Service::DispatchManyCommands(absl::Span<CmdArgList> args_lis
 
     if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
       stored_cmds.reserve(args_list.size());
-      stored_cmds.emplace_back(cid, false /* do not deep-copy commands*/, tail_args);
+      stored_cmds.emplace_back(cid, false /* do not deep-copy commands*/, tail_args.ToSlice());
       continue;
     }
 
@@ -1945,7 +1950,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     }
   }
 
-  DispatchCommand(CmdArgList{args}, mc_builder, cntx);
+  DispatchCommand(ParsedArgs{args}, mc_builder, cntx);
 
   // Reset back.
   dfly_cntx->conn_state.memcache_flag = 0;
@@ -2143,7 +2148,7 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
   if (ca.async)
     return;
 
-  DispatchCommand(ca.args, &replier, cntx);
+  DispatchCommand(ParsedArgs{ca.args}, &replier, cntx);
 }
 
 void Service::Eval(CmdArgList args, const CommandContext& cmd_cntx, bool read_only) {

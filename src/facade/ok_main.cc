@@ -22,13 +22,13 @@ namespace {
 
 class OkService : public ServiceInterface {
  public:
-  DispatchResult DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
+  DispatchResult DispatchCommand(ParsedArgs args, SinkReplyBuilder* builder,
                                  ConnectionContext* cntx) final {
     builder->SendOk();
     return DispatchResult::OK;
   }
 
-  DispatchManyResult DispatchManyCommands(absl::Span<ArgSlice> args_lists,
+  DispatchManyResult DispatchManyCommands(absl::Span<ParsedArgs> args_lists,
                                           SinkReplyBuilder* builder,
                                           ConnectionContext* cntx) final {
     for (auto args : args_lists)
