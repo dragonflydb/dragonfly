@@ -36,7 +36,7 @@ class SmallBins {
     bool fragmented = false, empty = false;
   };
 
-  // Packaged bin ready to be serialized
+  // Packaged bin ready to be serialized with SerializeBin()
   struct FilledBin {
     friend class SmallBins;
     BinId id;
@@ -45,8 +45,8 @@ class SmallBins {
     explicit FilledBin(BinId id) : id{id} {
     }
 
-    unsigned bytes_ = 0;
-    tiering::EntryMap<std::string> entries_;
+    unsigned bytes = 0;
+    tiering::EntryMap<std::string> entries;
   };
 
   // List of locations of values for corresponding keys of previously filled bin
@@ -57,7 +57,7 @@ class SmallBins {
 
   // Returns true if the entry is pending inside SmallBins.
   bool IsPending(DbIndex dbid, std::string_view key) const {
-    return current_bin_.entries_.count(std::make_pair(dbid, key)) > 0;
+    return current_bin_.entries.count(std::make_pair(dbid, key)) > 0;
   }
 
   // Enqueue key/value pair for stash. Returns page to be stashed if it filled up.
@@ -80,9 +80,10 @@ class SmallBins {
   // Mainly used for defragmentation
   KeyHashDbList DeleteBin(DiskSegment segment, std::string_view value);
 
-  Stats GetStats() const;
+  // Serialize filled bin to destination buffer (4kb)
+  size_t SerializeBin(FilledBin* bin, io::MutableBytes dest);
 
-  size_t SerializeBin(FilledBin* bin, io::MutableBytes bytes);
+  Stats GetStats() const;
 
  private:
   struct StashInfo {
