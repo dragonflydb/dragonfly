@@ -4,16 +4,14 @@
 
 #pragma once
 
+#include <cstdint>
+#include <string>
 #include <string_view>
-
-#include "facade/facade_types.h"
 
 namespace facade {
 
 class CommandId {
  public:
-  using CmdArgList = facade::CmdArgList;
-
   /**
    * @brief Construct a new Command Id object
    *

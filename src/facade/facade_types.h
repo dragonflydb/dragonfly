@@ -41,6 +41,37 @@ using CmdArgVec = std::vector<std::string_view>;
 using ArgSlice = absl::Span<const std::string_view>;
 using OwnedArgSlice = absl::Span<const std::string>;
 
+class ParsedArgs {
+ public:
+  ParsedArgs() = default;
+
+  explicit ParsedArgs(ArgSlice args) : args_(args) {  // NOLINT google-explicit-constructor
+  }
+
+  size_t size() const {
+    return args_.size();
+  }
+
+  bool empty() const {
+    return args_.empty();
+  }
+
+  ParsedArgs Tail() const {
+    return ParsedArgs{args_.subspan(1)};
+  }
+
+  std::string_view Front() const {
+    return args_.front();
+  }
+
+  ArgSlice ToSlice() const {
+    return args_;
+  }
+
+ private:
+  absl::Span<const std::string_view> args_;
+};
+
 inline std::string_view ToSV(std::string_view slice) {
   return slice;
 }
