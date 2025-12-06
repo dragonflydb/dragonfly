@@ -198,7 +198,7 @@ void HttpAPI(const http::QueryArgs& args, HttpRequest&& req, Service* service,
   facade::CapturingReplyBuilder reply_builder;
 
   // TODO: to finish this.
-  service->DispatchCommand(absl::MakeSpan(cmd_slices), &reply_builder, context);
+  service->DispatchCommand(facade::ParsedArgs{cmd_slices}, &reply_builder, context);
   facade::CapturingReplyBuilder::Payload payload = reply_builder.Take();
 
   auto response = http::MakeStringResponse();

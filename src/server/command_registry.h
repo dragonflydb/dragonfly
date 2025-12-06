@@ -14,6 +14,7 @@
 
 #include "base/function2.hpp"
 #include "facade/command_id.h"
+#include "facade/facade_types.h"
 
 namespace facade {
 class SinkReplyBuilder;
@@ -107,6 +108,8 @@ template <typename T> class MoveOnly {
 
 class CommandId : public facade::CommandId {
  public:
+  using CmdArgList = facade::CmdArgList;
+
   // NOTICE: name must be a literal string, otherwise metrics break! (see cmd_stats_map in
   // server_state.h)
   CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
@@ -251,8 +254,8 @@ class CommandRegistry {
   using FamiliesVec = std::vector<std::vector<std::string>>;
   FamiliesVec GetFamilies();
 
-  std::pair<const CommandId*, facade::ArgSlice> FindExtended(std::string_view cmd,
-                                                             facade::ArgSlice tail_args) const;
+  std::pair<const CommandId*, facade::ParsedArgs> FindExtended(std::string_view cmd,
+                                                               facade::ParsedArgs tail_args) const;
 
   absl::flat_hash_map<std::string, hdr_histogram*> LatencyMap() const;
 

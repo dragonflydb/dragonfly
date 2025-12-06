@@ -2866,7 +2866,7 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
   string cmd_str{command_name};
   arg_vec.insert(arg_vec.begin(), MutableSlice{cmd_str.data(), cmd_str.size()});
 
-  service->DispatchCommand(absl::MakeSpan(arg_vec), &crb, &cntx);
+  service->DispatchCommand(facade::ParsedArgs{arg_vec}, &crb, &cntx);
 
   auto response = crb.Take();
   if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {

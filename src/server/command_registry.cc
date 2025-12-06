@@ -325,17 +325,17 @@ CommandRegistry::FamiliesVec CommandRegistry::GetFamilies() {
   return std::move(family_of_commands_);
 }
 
-std::pair<const CommandId*, ArgSlice> CommandRegistry::FindExtended(string_view cmd,
-                                                                    ArgSlice tail_args) const {
+std::pair<const CommandId*, ParsedArgs> CommandRegistry::FindExtended(string_view cmd,
+                                                                      ParsedArgs tail_args) const {
   if (cmd == RenamedOrOriginal("ACL"sv)) {
     if (tail_args.empty()) {
       return {Find(cmd), {}};
     }
 
-    auto second_cmd = absl::AsciiStrToUpper(ArgS(tail_args, 0));
+    auto second_cmd = absl::AsciiStrToUpper(tail_args.Front());
     string full_cmd = absl::StrCat(cmd, " ", second_cmd);
 
-    return {Find(full_cmd), tail_args.subspan(1)};
+    return {Find(full_cmd), tail_args.Tail()};
   }
 
   const CommandId* res = Find(cmd);
@@ -344,7 +344,7 @@ std::pair<const CommandId*, ArgSlice> CommandRegistry::FindExtended(string_view 
 
   // A workaround for XGROUP HELP that does not fit our static taxonomy of commands.
   if (tail_args.size() == 1 && res->name() == "XGROUP") {
-    if (absl::EqualsIgnoreCase(ArgS(tail_args, 0), "HELP")) {
+    if (absl::EqualsIgnoreCase(tail_args.Front(), "HELP")) {
       res = Find("_XGROUP_HELP");
     }
   }

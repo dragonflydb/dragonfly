@@ -36,10 +36,10 @@ class ServiceInterface {
   virtual ~ServiceInterface() {
   }
 
-  virtual DispatchResult DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
+  virtual DispatchResult DispatchCommand(ParsedArgs args, SinkReplyBuilder* builder,
                                          ConnectionContext* cntx) = 0;
 
-  virtual DispatchManyResult DispatchManyCommands(absl::Span<ArgSlice> commands,
+  virtual DispatchManyResult DispatchManyCommands(absl::Span<ParsedArgs> commands,
                                                   SinkReplyBuilder* builder,
                                                   ConnectionContext* cntx) = 0;
 

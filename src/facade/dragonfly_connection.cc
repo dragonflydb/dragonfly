@@ -558,8 +558,8 @@ void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
   DVLOG(2) << "Dispatching pipeline: " << ToSV(msg.args.front());
 
   ++self->local_stats_.cmds;
-  self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()},
-                                  self->reply_builder_.get(), self->cc_.get());
+  self->service_->DispatchCommand(ParsedArgs{msg.args}, self->reply_builder_.get(),
+                                  self->cc_.get());
 
   self->last_interaction_ = time(nullptr);
   self->skip_next_squashing_ = false;
@@ -1219,7 +1219,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
 
   auto dispatch_sync = [this] {
     RespExpr::VecToArgList(tmp_parse_args_, &tmp_cmd_vec_);
-    service_->DispatchCommand(absl::MakeSpan(tmp_cmd_vec_), reply_builder_.get(), cc_.get());
+    service_->DispatchCommand(ParsedArgs{tmp_cmd_vec_}, reply_builder_.get(), cc_.get());
   };
 
   auto dispatch_async = [this]() -> MessageHandle { return {FromArgs(tmp_parse_args_)}; };
@@ -1536,7 +1536,7 @@ void Connection::SquashPipeline() {
   DCHECK_EQ(dispatch_q_.size(), pending_pipeline_cmd_cnt_);
   DCHECK_EQ(reply_builder_->GetProtocol(), Protocol::REDIS);  // Only Redis is supported.
 
-  vector<ArgSlice> squash_cmds;
+  vector<ParsedArgs> squash_cmds;
   squash_cmds.reserve(dispatch_q_.size());
 
   uint64_t start = CycleClock::Now();
@@ -1546,7 +1546,7 @@ void Connection::SquashPipeline() {
         << msg.handle.index() << " on " << DebugInfo();
 
     auto& pmsg = get<PipelineMessagePtr>(msg.handle);
-    squash_cmds.emplace_back(absl::MakeSpan(pmsg->args));
+    squash_cmds.emplace_back(ParsedArgs(pmsg->args));
     if (squash_cmds.size() >= pipeline_squash_limit_cached) {
       // We reached the limit of commands to squash, so we dispatch them.
       break;
