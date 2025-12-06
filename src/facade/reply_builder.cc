@@ -14,7 +14,6 @@
 #include "absl/strings/escaping.h"
 #include "absl/types/span.h"
 #include "base/logging.h"
-#include "core/heap_size.h"
 #include "facade/error.h"
 #include "util/fibers/proactor_base.h"
 

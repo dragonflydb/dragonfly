@@ -1,4 +1,4 @@
-// Copyright 2024, DragonflyDB authors.  All rights reserved.
+// Copyright 2025, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -8,7 +8,7 @@
 #include <string_view>
 #include <variant>
 
-namespace dfly {
+namespace cmn {
 
 class StringOrView {
  public:
@@ -84,4 +84,4 @@ class StringOrView {
   std::variant<std::string_view, std::string> val_;
 };
 
-}  // namespace dfly
+}  // namespace cmn

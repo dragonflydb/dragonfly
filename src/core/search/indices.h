@@ -32,8 +32,8 @@
 #include "core/search/rax_tree.h"
 
 // TODO: move core field definitions out of big header
+#include "common/string_or_view.h"
 #include "core/search/search.h"
-#include "core/string_or_view.h"
 
 namespace dfly::search {
 
@@ -112,7 +112,7 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // Used by Add & Remove to tokenize text value
   virtual absl::flat_hash_set<std::string> Tokenize(std::string_view value) const = 0;
 
-  StringOrView NormalizeQueryWord(std::string_view word) const;
+  cmn::StringOrView NormalizeQueryWord(std::string_view word) const;
   static Container* GetOrCreate(search::RaxTreeMap<Container>* map, std::string_view word);
   static void Remove(search::RaxTreeMap<Container>* map, DocId id, std::string_view word);
 

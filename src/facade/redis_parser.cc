@@ -8,7 +8,7 @@
 #include <absl/strings/numbers.h>
 
 #include "base/logging.h"
-#include "core/heap_size.h"
+#include "common/heap_size.h"
 
 namespace facade {
 
@@ -602,7 +602,7 @@ void RedisParser::ExtendBulkString(Buffer str) {
 }
 
 size_t RedisParser::UsedMemory() const {
-  return dfly::HeapSize(parse_stack_) + dfly::HeapSize(stash_) + dfly::HeapSize(buf_stash_);
+  return cmn::HeapSize(parse_stack_) + cmn::HeapSize(stash_) + cmn::HeapSize(buf_stash_);
 }
 
 }  // namespace facade
