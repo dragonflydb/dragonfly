@@ -18,6 +18,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "core/detail/listpack_wrap.h"
+#include "core/overloaded.h"
 #include "core/string_map.h"
 #include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"

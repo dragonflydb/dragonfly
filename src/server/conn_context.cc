@@ -34,88 +34,21 @@ static void SendSubscriptionChangedResponse(string_view action, std::optional<st
   rb->SendLong(count);
 }
 
-StoredCmd::StoredCmd(const CommandId* cid, bool own_args, ArgSlice args)
-    : cid_{cid}, args_{args}, reply_mode_{facade::ReplyMode::FULL} {
-  if (!own_args)
-    return;
-
-  auto& own_storage = args_.emplace<OwnStorage>(args.size());
-  size_t total_size = 0;
-  for (auto args : args) {
-    total_size += args.size();
-  }
-  own_storage.buffer.resize(total_size);
-  char* next = own_storage.buffer.data();
-  for (unsigned i = 0; i < args.size(); i++) {
-    if (!args[i].empty())
-      memcpy(next, args[i].data(), args[i].size());
-    next += args[i].size();
-    own_storage.sizes[i] = args[i].size();
-  }
-}
-
-StoredCmd::StoredCmd(string&& buffer, const CommandId* cid, ArgSlice args, facade::ReplyMode mode)
-    : cid_{cid}, args_{OwnStorage{args.size()}}, reply_mode_{mode} {
-  OwnStorage& own_storage = std::get<OwnStorage>(args_);
-  own_storage.buffer = std::move(buffer);
-
-  for (unsigned i = 0; i < args.size(); i++) {
-    // Assume tightly packed list.
-    DCHECK(i + 1 == args.size() || args[i].data() + args[i].size() == args[i + 1].data());
-    own_storage.sizes[i] = args[i].size();
-  }
+StoredCmd::StoredCmd(const CommandId* cid, facade::ArgSlice args, facade::ReplyMode mode)
+    : cid_{cid}, args_{args}, reply_mode_{mode} {
+  backed_ = std::make_unique<cmn::BackedArguments>(args.begin(), args.end());
+  args_ = facade::ParsedArgs{*backed_};
 }
 
 CmdArgList StoredCmd::ArgList(CmdArgVec* scratch) const {
-  return std::visit(
-      Overloaded{[&](const OwnStorage& s) {
-                   unsigned offset = 0;
-                   scratch->resize(s.sizes.size());
-                   for (unsigned i = 0; i < s.sizes.size(); i++) {
-                     (*scratch)[i] = string_view{s.buffer.data() + offset, s.sizes[i]};
-                     offset += s.sizes[i];
-                   }
-                   return CmdArgList{*scratch};
-                 },
-                 [&](const CmdArgList& s) { return s; }},
-      args_);
+  return args_.ToSlice(scratch);
 }
 
 std::string StoredCmd::FirstArg() const {
   if (NumArgs() == 0) {
     return {};
   }
-  return std::visit(Overloaded{[&](const OwnStorage& s) { return s.buffer.substr(0, s.sizes[0]); },
-                               [&](const ArgSlice& s) {
-                                 return std::string{s[0].data(), s[0].size()};
-                               }},
-                    args_);
-}
-
-facade::ReplyMode StoredCmd::ReplyMode() const {
-  return reply_mode_;
-}
-
-template <typename C> size_t IsStoredInlined(const C& c) {
-  const char* start = reinterpret_cast<const char*>(&c);
-  const char* end = start + sizeof(C);
-  const char* data = reinterpret_cast<const char*>(c.data());
-  return data >= start && data <= end;
-}
-
-size_t StoredCmd::UsedMemory() const {
-  return std::visit(Overloaded{[&](const OwnStorage& s) {
-                                 size_t buffer_size =
-                                     IsStoredInlined(s.buffer) ? 0 : s.buffer.capacity();
-                                 size_t sz_size = IsStoredInlined(s.sizes) ? 0 : s.sizes.memsize();
-                                 return buffer_size + sz_size;
-                               },
-                               [&](const ArgSlice&) -> size_t { return 0U; }},
-                    args_);
-}
-
-const CommandId* StoredCmd::Cid() const {
-  return cid_;
+  return string{args_.Front()};
 }
 
 ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredentials cred)
@@ -232,8 +165,8 @@ size_t ConnectionState::ExecInfo::UsedMemory() const {
   return HeapSize(body) + HeapSize(watched_keys);
 }
 
-void ConnectionState::ExecInfo::AddStoredCmd(const CommandId* cid, bool own_args, CmdArgList args) {
-  body.emplace_back(cid, own_args, args);
+void ConnectionState::ExecInfo::AddStoredCmd(const CommandId* cid, ArgSlice args) {
+  body.emplace_back(cid, args);
   stored_cmd_bytes += body.back().UsedMemory();
 }
 

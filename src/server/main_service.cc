@@ -1442,9 +1442,12 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilde
   bool under_exec = dfly_cntx->conn_state.exec_info.IsRunning();
   bool dispatching_in_multi = under_script || under_exec;
 
+  CmdArgVec tmp_vec;
+  ArgSlice tail_args = args_no_cmd.ToSlice(&tmp_vec);
+
   if (VLOG_IS_ON(2) && cntx->conn() /* no owner in replica context */) {
     LOG(INFO) << "Got (" << cntx->conn()->GetClientId() << "): " << (under_script ? "LUA " : "")
-              << args.ToSlice() << " in dbid=" << dfly_cntx->conn_state.db_index;
+              << cid->name() << " " << tail_args << " in dbid=" << dfly_cntx->conn_state.db_index;
   }
 
   // Don't interrupt running multi commands or admin connections.
@@ -1458,7 +1461,6 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilde
     cntx->paused = false;
   }
 
-  auto tail_args = args_no_cmd.ToSlice();
   if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {
     LOG_IF(WARNING, cntx->replica_conn || !cntx->conn() /* no owner in replica context */)
         << "VerifyCommandState error: " << err->ToSv();
@@ -1490,7 +1492,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilde
     // TODO: protect against aggregating huge transactions.
     auto& exec_info = dfly_cntx->conn_state.exec_info;
     const size_t old_size = exec_info.GetStoredCmdBytes();
-    exec_info.AddStoredCmd(cid, true, tail_args);
+    exec_info.AddStoredCmd(cid, tail_args);  // Deep copy of args.
     etl.stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
     if (cid->IsJournaled()) {
       exec_info.is_write = true;
@@ -1790,7 +1792,7 @@ DispatchManyResult Service::DispatchManyCommands(absl::Span<facade::ParsedArgs> 
 
     if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
       stored_cmds.reserve(args_list.size());
-      stored_cmds.emplace_back(cid, false /* do not deep-copy commands*/, tail_args.ToSlice());
+      stored_cmds.emplace_back(cid, tail_args);  // Shallow copy
       continue;
     }
 
@@ -2087,6 +2089,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   auto& info = cntx->conn_state.script_info;
   auto* tx = cntx->transaction;
   size_t used_mem = info->async_cmds_heap_mem + info->async_cmds.size() * sizeof(StoredCmd);
+
   if ((info->async_cmds.empty() || !force) && used_mem < info->async_cmds_heap_limit)
     return nullopt;
 
@@ -2124,8 +2127,8 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
 
     // Full command verification happens during squashed execution
     if (auto* cid = registry_.Find(cmd); cid != nullptr) {
-      auto replies = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
-      info->async_cmds.emplace_back(std::move(*ca.buffer), cid, ca.args.subspan(1), replies);
+      auto reply_mode = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
+      info->async_cmds.emplace_back(cid, ca.args.subspan(1), reply_mode);
       info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
     } else if (ca.error_abort) {  // If we don't abort on errors, we can ignore it completely
       findcmd_err = ReportUnknownCmd(ca.args[0]);
