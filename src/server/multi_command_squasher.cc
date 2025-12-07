@@ -120,11 +120,12 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
 MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(const StoredCmd* cmd) {
   DCHECK(cmd->Cid());
 
-  if (!cmd->Cid()->IsTransactional() || (cmd->Cid()->opt_mask() & CO::BLOCKING) ||
-      (cmd->Cid()->opt_mask() & CO::GLOBAL_TRANS))
+  const CommandId& cid = *cmd->Cid();
+  if (!cid.IsTransactional() || (cid.opt_mask() & CO::BLOCKING) ||
+      (cid.opt_mask() & CO::GLOBAL_TRANS))
     return SquashResult::NOT_SQUASHED;
 
-  if (cmd->Cid()->name() == "CLIENT" || cntx_->conn_state.tracking_info_.IsTrackingOn()) {
+  if (cid.name() == "CLIENT" || cntx_->conn_state.tracking_info_.IsTrackingOn()) {
     return SquashResult::NOT_SQUASHED;
   }
 
@@ -132,10 +133,14 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(const StoredC
   if (args.empty())
     return SquashResult::NOT_SQUASHED;
 
-  auto keys = DetermineKeys(cmd->Cid(), args);
-  if (!keys.ok())
-    return SquashResult::ERROR;
-  if (keys->NumArgs() == 0)
+  // Instead of returning an error, we treat command as non-squashable, allowing the
+  // standalone execution path to handle it.
+  // Validate returns an optional ErrorReply
+  if (cid.Validate(args).has_value())
+    return SquashResult::NOT_SQUASHED;
+
+  auto keys = DetermineKeys(&cid, args);
+  if (!keys.ok() || keys->NumArgs() == 0)
     return SquashResult::NOT_SQUASHED;
 
   // Check if all command keys belong to one shard
@@ -381,9 +386,6 @@ void MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
 
   for (auto& cmd : cmds_) {
     auto res = TrySquash(&cmd);
-
-    if (res == SquashResult::ERROR)
-      break;
 
     if (res == SquashResult::NOT_SQUASHED || res == SquashResult::SQUASHED_FULL) {
       if (!ExecuteSquashed(rb))
