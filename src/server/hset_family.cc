@@ -463,11 +463,12 @@ struct OpSetParams {
   bool skip_if_exists = false;
   uint32_t ttl = UINT32_MAX;
   bool keepttl = false;
+
+  optional<util::fb2::Future<bool>>* backpressure = nullptr;
 };
 
 OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdArgList values,
-                                    const OpSetParams& op_sp = OpSetParams{},
-                                    optional<util::fb2::Future<bool>>* bp_anker = nullptr) {
+                                    const OpSetParams& op_sp = OpSetParams{}) {
   DCHECK(!values.empty() && 0 == values.size() % 2);
   VLOG(2) << "OpSet(" << key << ")";
 
@@ -487,7 +488,7 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
 
     using D = tiering::SerializedMapDecoder;
     util::fb2::Future<OpResult<uint32_t>> fut;
-    auto read_cb = [fut, values, &op_sp](io::Result<D*> res) mutable {
+    auto read_cb = [fut, values, op_sp](io::Result<D*> res) mutable {
       auto& lw = *res.value()->Write();
       uint32_t created = 0;
       for (size_t i = 0; i < values.size(); i += 2) {
@@ -557,8 +558,8 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
 
   if (auto* ts = op_args.shard->tiered_storage(); ts) {
     auto bp = ts->TryStash(op_args.db_cntx.db_index, key, &pv, true);
-    if (bp && bp_anker)
-      *bp_anker = std::move(*bp);
+    if (bp && op_sp.backpressure)
+      *op_sp.backpressure = std::move(*bp);
   }
 
   return CbVariant<uint32_t>{created};
@@ -921,10 +922,11 @@ void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   optional<util::fb2::Future<bool>> tiered_backpressure;
+  OpSetParams params{.backpressure = &tiered_backpressure};
 
   args.remove_prefix(1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, args, OpSetParams{}, &tiered_backpressure);
+    return OpSet(t->GetOpArgs(shard), key, args, params);
   };
 
   auto delayed_result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
