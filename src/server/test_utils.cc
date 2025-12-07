@@ -487,12 +487,10 @@ void BaseFamilyTest::RunMany(const std::vector<std::vector<std::string>>& cmds) 
   auto* context = conn_wrapper->cmd_cntx();
   context->ns = &namespaces->GetDefaultNamespace();
   vector<facade::ParsedArgs> args_vec(cmds.size());
-  vector<vector<string_view>> cmd_views(cmds.size());
+  vector<cmn::BackedArguments> backed_args_vec(cmds.size());
   for (size_t i = 0; i < cmds.size(); ++i) {
-    for (const auto& arg : cmds[i]) {
-      cmd_views[i].emplace_back(arg);
-    }
-    args_vec[i] = ParsedArgs{cmd_views[i]};
+    backed_args_vec[i] = cmn::BackedArguments(cmds[i].begin(), cmds[i].end());
+    args_vec[i] = facade::ParsedArgs{backed_args_vec[i]};
   }
   service_->DispatchManyCommands(absl::MakeSpan(args_vec), conn_wrapper->builder(), context);
   DCHECK(context->transaction == nullptr);
