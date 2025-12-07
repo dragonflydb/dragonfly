@@ -2567,10 +2567,8 @@ TEST_F(JsonFamilyTest, MGet) {
   resp = Run({"JSON.SET", "json2", ".", json[1]});
   ASSERT_THAT(resp, "OK");
 
-#ifndef SANITIZERS
   resp = Run({"JSON.MGET", "json1", "??INNNNVALID??"});
   EXPECT_THAT(resp, ErrArg("ERR syntax error"));
-#endif
 
   resp = Run({"JSON.MGET", "json1", "json2", "json3", "$.address.country"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);

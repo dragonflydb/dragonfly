@@ -463,7 +463,6 @@ TEST_F(MultiTest, FlushDb) {
 // Triggers a false possitive and therefore we turn it off
 // There seem not to be a good solution to handle these false positives
 // since sanitizers work well with u_context which is *very* slow
-#ifndef SANITIZERS
 TEST_F(MultiTest, Eval) {
   if (auto config = absl::GetFlag(FLAGS_default_lua_flags); config != "") {
     GTEST_SKIP() << "Skipped Eval test because default_lua_flags is set";
@@ -555,7 +554,6 @@ TEST_F(MultiTest, Eval) {
   EXPECT_EQ(resp.GetVec()[0], "0");
   EXPECT_EQ(resp.GetVec()[1].type, RespExpr::Type::ARRAY);
 }
-#endif
 
 TEST_F(MultiTest, Watch) {
   auto kExecFail = ArgType(RespExpr::NIL);
@@ -784,7 +782,6 @@ TEST_F(MultiTest, ExecGlobalFallback) {
   EXPECT_EQ(1, GetMetrics().coordinator_stats.tx_global_cnt);
 }
 
-#ifndef SANITIZERS
 TEST_F(MultiTest, ScriptFlagsCommand) {
   if (auto flags = absl::GetFlag(FLAGS_default_lua_flags); flags != "") {
     GTEST_SKIP() << "Skipped ScriptFlagsCommand test because default_lua_flags is set";
@@ -820,7 +817,6 @@ TEST_F(MultiTest, ScriptFlagsCommand) {
     EXPECT_THAT(Run({"eval", kUndeclared2, "0"}), "works");
   }
 }
-#endif
 
 TEST_F(MultiTest, ScriptFlagsEmbedded) {
   const char* s1 = R"(
@@ -1200,8 +1196,6 @@ TEST_F(MultiEvalTest, MultiSomeEval) {
   EXPECT_THAT(brpop_resp, ArgType(RespExpr::NIL_ARRAY));
 }
 
-// Flaky because of https://github.com/google/sanitizers/issues/1760
-#ifndef SANITIZERS
 TEST_F(MultiEvalTest, ScriptSquashingUknownCmd) {
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_lua_auto_async, true);
@@ -1220,7 +1214,6 @@ TEST_F(MultiEvalTest, ScriptSquashingUknownCmd) {
   EXPECT_THAT(Run({"EVAL", s, "1", "A"}), ErrArg("unknown command `SECOND WRONG`"));
   EXPECT_EQ(Run({"get", "A"}), "2");
 }
-#endif
 
 TEST_F(MultiEvalTest, MultiAndEval) {
   // We had a bug in borrowing interpreters which caused a crash in this scenario

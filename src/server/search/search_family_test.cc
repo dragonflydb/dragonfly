@@ -323,8 +323,6 @@ TEST_F(SearchFamilyTest, Stats) {
   EXPECT_LE(metrics.search_stats.used_memory, 3 * expected_usage);
 }
 
-// todo: ASAN fails heres on arm
-#ifndef SANITIZERS
 TEST_F(SearchFamilyTest, Simple) {
   Run({"hset", "d:1", "foo", "baz", "k", "v"});
   Run({"hset", "d:2", "foo", "bar", "k", "v"});
@@ -346,7 +344,6 @@ TEST_F(SearchFamilyTest, Simple) {
   Run({"hset", "w:2", "foo", "this", "k", "v"});
   EXPECT_THAT(Run({"ft.search", "i1", "@foo:this"}), kNoResults);
 }
-#endif
 
 TEST_F(SearchFamilyTest, Errors) {
   Run({"ft.create", "i1", "PREFIX", "1", "d:", "SCHEMA", "foo", "TAG", "bar", "TEXT"});
@@ -419,8 +416,6 @@ TEST_F(SearchFamilyTest, JsonIdentifierWithBrackets) {
   EXPECT_THAT(Run({"ft.search", "i1", "(@continent:{Europe})"}), AreDocIds("k1", "k2"));
 }
 
-// todo: fails on arm build
-#ifndef SANITIZERS
 TEST_F(SearchFamilyTest, JsonArrayValues) {
   string_view D1 = R"(
 {
@@ -495,7 +490,6 @@ TEST_F(SearchFamilyTest, JsonArrayValues) {
   res = Run({"ft.search", "i1", "@name:alex", "return", "1", "::??INVALID??::", "as", "retval"});
   EXPECT_THAT(res, IsMapWithSize("k1", IsMap()));
 }
-#endif
 
 TEST_F(SearchFamilyTest, Tags) {
   Run({"hset", "d:1", "color", "red, green"});
@@ -963,7 +957,6 @@ TEST_F(SearchFamilyTest, FtProfile) {
   ASSERT_ARRAY_OF_TWO_ARRAYS(resp);
 }
 
-#ifndef SANITIZERS
 TEST_F(SearchFamilyTest, FtProfileInvalidQuery) {
   Run({"json.set", "j1", ".", R"({"id":"1"})"});
   Run({"ft.create", "i1", "on", "json", "schema", "$.id", "as", "id", "tag"});
@@ -976,7 +969,6 @@ TEST_F(SearchFamilyTest, FtProfileInvalidQuery) {
   resp = Run({"ft.profile", "i1", "search", "query", "@{invalid13289}"});
   EXPECT_THAT(resp, ErrArg("query syntax error"));
 }
-#endif
 
 TEST_F(SearchFamilyTest, FtProfileErrorReply) {
   Run({"ft.create", "i1", "schema", "name", "text"});
@@ -1286,8 +1278,6 @@ TEST_F(SearchFamilyTest, FlushSearchIndices) {
   EXPECT_THAT(resp, ErrArg("ERR Index already exists"));
 }
 
-// todo: ASAN fails heres on arm
-#ifndef SANITIZERS
 TEST_F(SearchFamilyTest, AggregateWithLoadOptionHard) {
   // Test HASH
   Run({"HSET", "h1", "word", "item1", "foo", "10", "text", "first key"});
@@ -1327,7 +1317,6 @@ TEST_F(SearchFamilyTest, AggregateWithLoadOptionHard) {
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("foo_total", "20", "word", "item2"),
                                          IsMap("foo_total", "10", "word", "item1")));
 }
-#endif
 
 TEST_F(SearchFamilyTest, WrongFieldTypeJson) {
   // Test simple

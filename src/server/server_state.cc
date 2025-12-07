@@ -223,7 +223,7 @@ void ServerState::DecommitMemory(uint8_t flags) {
 #ifdef __GLIBC__
 // There is an issue with malloc_trim and sanitizers because the asan replace malloc but is not
 // aware of malloc_trim which causes malloc_trim to segfault because it's not initialized properly
-#ifndef SANITIZERS
+#ifndef ABSL_HAVE_ADDRESS_SANITIZER
     malloc_trim(0);
 #endif
 #endif
