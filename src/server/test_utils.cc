@@ -454,7 +454,7 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
 
   DCHECK(context->transaction == nullptr) << id;
 
-  service_->DispatchCommand(CmdArgList{args}, conn_wrapper->builder(), context);
+  service_->DispatchCommand(ParsedArgs{args}, conn_wrapper->builder(), context);
 
   DCHECK(context->transaction == nullptr);
 
@@ -486,13 +486,13 @@ void BaseFamilyTest::RunMany(const std::vector<std::vector<std::string>>& cmds) 
   TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, GetId());
   auto* context = conn_wrapper->cmd_cntx();
   context->ns = &namespaces->GetDefaultNamespace();
-  vector<ArgSlice> args_vec(cmds.size());
+  vector<facade::ParsedArgs> args_vec(cmds.size());
   vector<vector<string_view>> cmd_views(cmds.size());
   for (size_t i = 0; i < cmds.size(); ++i) {
     for (const auto& arg : cmds[i]) {
       cmd_views[i].emplace_back(arg);
     }
-    args_vec[i] = absl::MakeSpan(cmd_views[i]);
+    args_vec[i] = ParsedArgs{cmd_views[i]};
   }
   service_->DispatchManyCommands(absl::MakeSpan(args_vec), conn_wrapper->builder(), context);
   DCHECK(context->transaction == nullptr);

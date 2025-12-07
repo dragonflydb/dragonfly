@@ -36,11 +36,11 @@ class Service : public facade::ServiceInterface {
   void Shutdown();
 
   // Prepare command execution, verify and execute, reply to context
-  facade::DispatchResult DispatchCommand(ArgSlice args, facade::SinkReplyBuilder* builder,
+  facade::DispatchResult DispatchCommand(facade::ParsedArgs args, facade::SinkReplyBuilder* builder,
                                          facade::ConnectionContext* cntx) final;
 
   // Execute multiple consecutive commands, possibly in parallel by squashing
-  facade::DispatchManyResult DispatchManyCommands(absl::Span<ArgSlice> args_list,
+  facade::DispatchManyResult DispatchManyCommands(absl::Span<facade::ParsedArgs> args_list,
                                                   facade::SinkReplyBuilder* builder,
                                                   facade::ConnectionContext* cntx) final;
 
