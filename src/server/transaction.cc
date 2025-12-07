@@ -1472,7 +1472,7 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult resul
     return;
 
   // Only write commands and/or no-key-transactional commands are logged
-  if (cid_->IsWriteOnly() == 0 && (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0)
+  if (!cid_->IsJournaled() && (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0)
     return;
 
   auto journal = shard->journal();

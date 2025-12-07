@@ -2829,42 +2829,44 @@ void ZSetFamily::ZUnionStore(CmdArgList args, const CommandContext& cmd_cntx) {
 #define HFUNC(x) SetHandler(&ZSetFamily::x)
 
 void ZSetFamily::Register(CommandRegistry* registry) {
-  constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::DENYOOM | CO::NO_AUTOJOURNAL;
+  constexpr uint32_t kStoreMask =
+      CO::JOURNALED | CO::VARIADIC_KEYS | CO::DENYOOM | CO::NO_AUTOJOURNAL;
   registry->StartFamily(acl::SORTEDSET);
   // TODO: to add support for SCRIPT for BZPOPMIN, BZPOPMAX similarly to BLPOP.
   *registry
-      << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1}.HFUNC(ZAdd)
-      << CI{"BZPOPMIN", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}
+      << CI{"ZADD", CO::FAST | CO::JOURNALED | CO::DENYOOM, -4, 1, 1}.HFUNC(ZAdd)
+      << CI{"BZPOPMIN", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}
              .HFUNC(BZPopMin)
-      << CI{"BZPOPMAX", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}
+      << CI{"BZPOPMAX", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}
              .HFUNC(BZPopMax)
       << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(ZCard)
       << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1}.HFUNC(ZCount)
       << CI{"ZDIFF", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZDiff)
       << CI{"ZDIFFSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZDiffStore)
-      << CI{"ZINCRBY", CO::FAST | CO::WRITE, 4, 1, 1}.HFUNC(ZIncrBy)
+      << CI{"ZINCRBY", CO::FAST | CO::JOURNALED, 4, 1, 1}.HFUNC(ZIncrBy)
       << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZInterStore)
       << CI{"ZINTER", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInter)
       << CI{"ZINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInterCard)
       << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1}.HFUNC(ZLexCount)
-      << CI{"ZMPOP", CO::WRITE | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(ZMPop)
-      << CI{"BZMPOP", CO::WRITE | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL, -5, 3, 3}
+      << CI{"ZMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(ZMPop)
+      << CI{"BZMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL, -5, 3,
+            3}
              .HFUNC(BZMPop)
-      << CI{"ZPOPMAX", CO::FAST | CO::WRITE, -2, 1, 1}.HFUNC(ZPopMax)
-      << CI{"ZPOPMIN", CO::FAST | CO::WRITE, -2, 1, 1}.HFUNC(ZPopMin)
-      << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1}.HFUNC(ZRem)
+      << CI{"ZPOPMAX", CO::FAST | CO::JOURNALED, -2, 1, 1}.HFUNC(ZPopMax)
+      << CI{"ZPOPMIN", CO::FAST | CO::JOURNALED, -2, 1, 1}.HFUNC(ZPopMin)
+      << CI{"ZREM", CO::FAST | CO::JOURNALED, -3, 1, 1}.HFUNC(ZRem)
       << CI{"ZRANGE", CO::READONLY, -4, 1, 1}.HFUNC(ZRange)
       << CI{"ZRANDMEMBER", CO::READONLY, -2, 1, 1}.HFUNC(ZRandMember)
       << CI{"ZRANK", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZRank)
       << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByLex)
       << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByScore)
-      << CI{"ZRANGESTORE", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -5, 1, 2}.HFUNC(
+      << CI{"ZRANGESTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -5, 1, 2}.HFUNC(
              ZRangeStore)
       << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(ZScore)
       << CI{"ZMSCORE", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZMScore)
-      << CI{"ZREMRANGEBYRANK", CO::WRITE, 4, 1, 1}.HFUNC(ZRemRangeByRank)
-      << CI{"ZREMRANGEBYSCORE", CO::WRITE, 4, 1, 1}.HFUNC(ZRemRangeByScore)
-      << CI{"ZREMRANGEBYLEX", CO::WRITE, 4, 1, 1}.HFUNC(ZRemRangeByLex)
+      << CI{"ZREMRANGEBYRANK", CO::JOURNALED, 4, 1, 1}.HFUNC(ZRemRangeByRank)
+      << CI{"ZREMRANGEBYSCORE", CO::JOURNALED, 4, 1, 1}.HFUNC(ZRemRangeByScore)
+      << CI{"ZREMRANGEBYLEX", CO::JOURNALED, 4, 1, 1}.HFUNC(ZRemRangeByLex)
       << CI{"ZREVRANGE", CO::READONLY, -4, 1, 1}.HFUNC(ZRevRange)
       << CI{"ZREVRANGEBYLEX", CO::READONLY, -4, 1, 1}.HFUNC(ZRevRangeByLex)
       << CI{"ZREVRANGEBYSCORE", CO::READONLY, -4, 1, 1}.HFUNC(ZRevRangeByScore)

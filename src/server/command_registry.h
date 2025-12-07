@@ -28,10 +28,10 @@ namespace CO {
 
 enum CommandOpt : uint32_t {
   READONLY = 1U << 0,
-  FAST = 1U << 1,  // Unused?
-  WRITE = 1U << 2,
-  LOADING = 1U << 3,  // Command allowed during LOADING state.
-  DENYOOM = 1U << 4,  // use-memory in redis.
+  FAST = 1U << 1,       // Unused?
+  JOURNALED = 1U << 2,  // Command is logged to AOF / Journal.
+  LOADING = 1U << 3,    // Command allowed during LOADING state.
+  DENYOOM = 1U << 4,    // use-memory in redis.
 
   DANGEROUS = 1U << 5,  // Dangerous commands are logged when used
 
@@ -144,8 +144,8 @@ class CommandId : public facade::CommandId {
     return opt_mask_ & CO::READONLY;
   }
 
-  bool IsWriteOnly() const {
-    return opt_mask_ & CO::WRITE;
+  bool IsJournaled() const {
+    return opt_mask_ & CO::JOURNALED;
   }
 
   bool IsBlocking() const {

@@ -862,7 +862,7 @@ string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
   }
 
   switch (opt) {
-    case WRITE:
+    case JOURNALED:
       return "write";
     case READONLY:
       return "readonly";
@@ -1153,18 +1153,18 @@ OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, CmdArgList args) {
   return DetermineKeys(cid, args);
 }
 
-optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
+optional<ErrorReply> Service::CheckKeysOwnership(const CommandId& cid, CmdArgList args,
                                                  const ConnectionContext& dfly_cntx) {
   if (dfly_cntx.is_replicating) {
     // Always allow commands on the replication port, as it might be for future-owned keys.
     return nullopt;
   }
 
-  if (cid->first_key_pos() == 0 && cid->PubSubKind() != CO::PubSubKind::SHARDED) {
+  if (cid.first_key_pos() == 0 && cid.PubSubKind() != CO::PubSubKind::SHARDED) {
     return nullopt;  // No key command.
   }
 
-  OpResult<KeyIndex> key_index_res = FindKeys(cid, args);
+  OpResult<KeyIndex> key_index_res = FindKeys(&cid, args);
 
   if (!key_index_res) {
     return ErrorReply{key_index_res.status()};
@@ -1194,13 +1194,13 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
 }
 
 // TODO(kostas) refactor. Almost 1-1 with CheckKeyOwnership() above.
-std::optional<facade::ErrorReply> Service::TakenOverSlotError(const CommandId* cid, CmdArgList args,
+std::optional<facade::ErrorReply> Service::TakenOverSlotError(const CommandId& cid, CmdArgList args,
                                                               const ConnectionContext& dfly_cntx) {
-  if (cid->first_key_pos() == 0 && cid->PubSubKind() != CO::PubSubKind::SHARDED) {
+  if (cid.first_key_pos() == 0 && cid.PubSubKind() != CO::PubSubKind::SHARDED) {
     return nullopt;  // No key command.
   }
 
-  OpResult<KeyIndex> key_index_res = FindKeys(cid, args);
+  OpResult<KeyIndex> key_index_res = FindKeys(&cid, args);
 
   if (!key_index_res) {
     return ErrorReply{key_index_res.status()};
@@ -1305,34 +1305,27 @@ optional<ErrorReply> Service::VerifyCommandExecution(const ConnectionContext* cn
                                    tail_args);
 }
 
-std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdArgList tail_args,
+std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdArgList tail_args,
                                                       const ConnectionContext& dfly_cntx) {
-  DCHECK(cid);
-
   ServerState& etl = *ServerState::tlocal();
 
   // If there is no connection owner, it means the command it being called
   // from another command or used internally, therefore is always permitted.
-  if (dfly_cntx.conn() != nullptr && !dfly_cntx.conn()->IsPrivileged() && cid->IsRestricted()) {
-    VLOG(1) << "Non-admin attempt to execute " << cid->name() << " " << tail_args << " "
+  if (dfly_cntx.conn() != nullptr && !dfly_cntx.conn()->IsPrivileged() && cid.IsRestricted()) {
+    VLOG(1) << "Non-admin attempt to execute " << cid.name() << " " << tail_args << " "
             << ConnectionLogContext(dfly_cntx.conn());
     return ErrorReply{"Cannot execute restricted command (admin only)", kRestrictDenied};
   }
 
-  if (auto err = cid->Validate(tail_args); err)
+  if (auto err = cid.Validate(tail_args); err)
     return err;
-
-  bool is_trans_cmd = cid->MultiControlKind() == CO::MultiControlKind::EXEC;
-  bool under_script = dfly_cntx.conn_state.script_info != nullptr;
-  bool is_write_cmd = cid->IsWriteOnly();
-  bool multi_active = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
 
   // Check if the command is allowed to execute under this global state
   bool allowed_by_state = true;
   const GlobalState gstate = etl.gstate();
   switch (gstate) {
     case GlobalState::LOADING:
-      allowed_by_state = dfly_cntx.journal_emulated || (cid->opt_mask() & CO::LOADING);
+      allowed_by_state = dfly_cntx.journal_emulated || (cid.opt_mask() & CO::LOADING);
       break;
     case GlobalState::SHUTTING_DOWN:
       allowed_by_state = false;
@@ -1341,15 +1334,15 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       // Only PING, admin commands, and all commands via admin connections are allowed
       // we prohibit even read commands, because read commands running in pipeline can take a while
       // to send all data to a client which leads to fail in takeover
-      allowed_by_state = dfly_cntx.conn()->IsPrivileged() || (cid->opt_mask() & CO::ADMIN) ||
-                         cid->name() == "PING";
+      allowed_by_state =
+          dfly_cntx.conn()->IsPrivileged() || (cid.opt_mask() & CO::ADMIN) || cid.name() == "PING";
       break;
     default:
       break;
   }
 
   if (!allowed_by_state) {
-    VLOG(1) << "Command " << cid->name() << " not executed because global state is " << gstate;
+    VLOG(1) << "Command " << cid.name() << " not executed because global state is " << gstate;
 
     if (gstate == GlobalState::LOADING) {
       return ErrorReply(kLoadingErr);
@@ -1367,7 +1360,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
     return ErrorReply{StrCat("Can not execute during ", GlobalStateName(gstate))};
   }
 
-  string_view cmd_name{cid->name()};
+  string_view cmd_name{cid.name()};
 
   if (dfly_cntx.req_auth && !dfly_cntx.authenticated) {
     if (cmd_name != "AUTH" && cmd_name != "QUIT" && cmd_name != "HELLO") {
@@ -1378,6 +1371,11 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   // only reset and quit are allow if this connection is used for monitoring
   if (dfly_cntx.monitor && (cmd_name != "RESET" && cmd_name != "QUIT"))
     return ErrorReply{"Replica can't interact with the keyspace"};
+
+  bool is_write_cmd = cid.IsJournaled();
+  bool is_trans_cmd = cid.MultiControlKind() == CO::MultiControlKind::EXEC;
+  bool under_script = dfly_cntx.conn_state.script_info != nullptr;
+  bool multi_active = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
 
   if (!etl.is_master && is_write_cmd && !dfly_cntx.is_replicating)
     return ErrorReply{"-READONLY You can't write against a read only replica."};
@@ -1393,7 +1391,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       return err;
   }
 
-  if (under_script && (cid->opt_mask() & CO::NOSCRIPT))
+  if (under_script && (cid.opt_mask() & CO::NOSCRIPT))
     return ErrorReply{"This Redis command is not allowed from script"};
 
   if (under_script) {
@@ -1401,17 +1399,17 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
     // The following commands access shards arbitrarily without having keys, so they can only be run
     // non atomically or globally.
     Transaction::MultiMode mode = dfly_cntx.transaction->GetMultiMode();
-    bool shard_access = (cid->opt_mask()) & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL);
+    bool shard_access = (cid.opt_mask()) & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL);
     if (shard_access && (mode != Transaction::GLOBAL && mode != Transaction::NON_ATOMIC))
       return ErrorReply("This Redis command is not allowed from script");
 
-    if (cid->IsTransactional()) {
-      auto err = CheckKeysDeclared(*dfly_cntx.conn_state.script_info, cid, tail_args, mode);
+    if (cid.IsTransactional()) {
+      auto err = CheckKeysDeclared(*dfly_cntx.conn_state.script_info, &cid, tail_args, mode);
 
       if (err.has_value()) {
         VLOG(1) << "CheckKeysDeclared failed with error " << err->ToSv() << " for command "
-                << cid->name();
-        return err.value();
+                << cid.name();
+        return err;
       }
     }
 
@@ -1420,7 +1418,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
     }
   }
 
-  return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
+  return VerifyConnectionAclStatus(&cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
 DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilder* builder,
@@ -1451,7 +1449,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilde
 
   // Don't interrupt running multi commands or admin connections.
   if (etl.IsPaused() && !dispatching_in_multi && cntx->conn() && !cntx->conn()->IsPrivileged()) {
-    bool is_write = cid->IsWriteOnly();
+    bool is_write = cid->IsJournaled();
     is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
     is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
 
@@ -1461,7 +1459,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilde
   }
 
   auto tail_args = args_no_cmd.ToSlice();
-  if (auto err = VerifyCommandState(cid, tail_args, *dfly_cntx); err) {
+  if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {
     LOG_IF(WARNING, cntx->replica_conn || !cntx->conn() /* no owner in replica context */)
         << "VerifyCommandState error: " << err->ToSv();
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
@@ -1494,7 +1492,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilde
     const size_t old_size = exec_info.GetStoredCmdBytes();
     exec_info.AddStoredCmd(cid, true, tail_args);
     etl.stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
-    if (cid->IsWriteOnly()) {
+    if (cid->IsJournaled()) {
       exec_info.is_write = true;
     }
     builder->SendSimpleString("QUEUED");

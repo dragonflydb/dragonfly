@@ -164,7 +164,7 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const Stored
   auto args = cmd->ArgList(&tmp_keylist_);
 
   if (opts_.verify_commands) {
-    if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
+    if (auto err = service_->VerifyCommandState(*cmd->Cid(), args, *cntx_); err) {
       rb->SendError(std::move(*err));
       rb->ConsumeLastError();
       return !opts_.error_abort;
@@ -210,7 +210,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     auto args = dispatched.cmd->ArgList(&arg_vec);
     if (opts_.verify_commands) {
       // The shared context is used for state verification, the local one is only for replies
-      if (auto err = service_->VerifyCommandState(dispatched.cmd->Cid(), args, *cntx_); err) {
+      if (auto err = service_->VerifyCommandState(*dispatched.cmd->Cid(), args, *cntx_); err) {
         crb.SendError(std::move(*err));
         move_reply(crb.Take(), &dispatched.reply);
         continue;

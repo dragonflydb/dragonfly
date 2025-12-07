@@ -4267,9 +4267,9 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -2, 0, 0, acl::kConfig}.HFUNC(Config)
       << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDbSize}.HFUNC(DbSize)
       << CI{"DEBUG", CO::ADMIN | CO::LOADING, -2, 0, 0, acl::kDebug}.HFUNC(Debug)
-      << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushDB}.HFUNC(
-             FlushDb)
-      << CI{"FLUSHALL", CO::WRITE | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushAll}
+      << CI{"FLUSHDB", CO::JOURNALED | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushDB}
+             .HFUNC(FlushDb)
+      << CI{"FLUSHALL", CO::JOURNALED | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushAll}
              .HFUNC(FlushDb)
       << CI{"INFO", CO::LOADING, -1, 0, 0, acl::kInfo}.HFUNC(Info)
       << CI{"HELLO", CO::LOADING, -1, 0, 0, acl::kHello}.HFUNC(Hello)
@@ -4277,7 +4277,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, acl::kLatency}.HFUNC(
              Latency)
       << CI{"MEMORY", kMemOpts, -2, 0, 0, acl::kMemory}.HFUNC(Memory)
-      << CI{"SHRINK", CO::WRITE | CO::FAST, 2, 1, 1, acl::kMemory}.HFUNC(Shrink)
+      << CI{"SHRINK", CO::JOURNALED | CO::FAST, 2, 1, 1, acl::kMemory}.HFUNC(Shrink)
       << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, acl::kSave}.HFUNC(Save)
       << CI{"SHUTDOWN",    CO::ADMIN | CO::NOSCRIPT | CO::LOADING | CO::DANGEROUS, -1, 0, 0,
             acl::kShutDown}

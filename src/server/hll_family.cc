@@ -337,10 +337,10 @@ constexpr uint32_t kPFMerge = WRITE | HYPERLOGLOG | SLOW;
 void HllFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
   registry->StartFamily();
-  *registry << CI{"PFADD", CO::WRITE, -3, 1, 1, acl::kPFAdd}.SetHandler(PFAdd)
+  *registry << CI{"PFADD", CO::JOURNALED, -3, 1, 1, acl::kPFAdd}.SetHandler(PFAdd)
             << CI{"PFCOUNT", CO::READONLY, -2, 1, -1, acl::kPFCount}.SetHandler(PFCount)
-            << CI{"PFMERGE", CO::WRITE | CO::NO_AUTOJOURNAL, -2, 1, -1, acl::kPFMerge}.SetHandler(
-                   PFMerge);
+            << CI{"PFMERGE", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 1, -1, acl::kPFMerge}
+                   .SetHandler(PFMerge);
 }
 
 const char HllFamily::kInvalidHllErr[] = "Key is not a valid HyperLogLog string value.";
