@@ -59,7 +59,8 @@ size_t SmallString::Assign(std::string_view s) {
   DCHECK(CanAllocate(s.size()));
   uint8_t* realptr = nullptr;
 
-  // If the allocation is large enough and space efficient, we can avoid allocating
+  // reallocate if we need a larger allocation or it becomes space-inefficient
+  // TODO: check if mi_usable_size is has space before growing (like listpack)
   if (s.size() >= size_ || s.size() * 2 < MallocUsed()) {
     Free();
 
