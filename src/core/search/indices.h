@@ -224,9 +224,6 @@ template <typename Container, typename ItFunc> struct DefragmentMap {
       : container(container), it(f()), end(container.end()) {
   }
 
-  // Deref should be true if the value is wrapped in a pointer. Set here instead of at class level
-  // to allow overriding without specifying other parameters.
-  template <bool Deref = false>
   // The key is set if the defragmentation has to stop mid way due to depleted quota
   DefragmentResult Defragment(PageUsage* page_usage, std::string* key) {
     if (page_usage->QuotaDepleted()) {
@@ -236,13 +233,7 @@ template <typename Container, typename ItFunc> struct DefragmentMap {
     DefragmentResult result;
     for (; it != end; ++it) {
       const auto& [k, map] = *it;
-      DefragmentResult r;
-      if constexpr (Deref) {
-        r = map->Defragment(quota_usec, page_usage);
-      } else {
-        r = map.Defragment(quota_usec, page_usage);
-      }
-      if (result.Merge(std::move(r)).quota_depleted) {
+      if (result.Merge(DefragmentIndex(map, page_usage, 0)).quota_depleted) {
         *key = k;
         break;
       }
@@ -253,6 +244,19 @@ template <typename Container, typename ItFunc> struct DefragmentMap {
     }
 
     return result;
+  }
+
+ private:
+  template <typename T>
+  static auto DefragmentIndex(T& t, PageUsage* page_usage, int /*tag*/)
+      -> decltype(t->Defragment(page_usage)) {
+    return t->Defragment(page_usage);
+  }
+
+  template <typename T>
+  static auto DefragmentIndex(T& t, PageUsage* page_usage, char /*tag*/)
+      -> decltype(t.Defragment(page_usage)) {
+    return t.Defragment(page_usage);
   }
 
   Container& container;

@@ -842,7 +842,7 @@ search::DefragmentResult ShardDocIndices::Defragment(PageUsage* page_usage) {
     return it;
   };
   search::DefragmentMap dm{indices_, std::move(begin_it)};
-  return dm.Defragment<true>(quota_usec, page_usage, &next_defrag_index_);
+  return dm.Defragment(page_usage, &next_defrag_index_);
 }
 
 }  // namespace dfly

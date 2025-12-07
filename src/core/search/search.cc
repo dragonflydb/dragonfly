@@ -629,7 +629,7 @@ DefragmentResult FieldIndices::Defragment(PageUsage* page_usage) {
                        }
                        return it;
                      }};
-    return dm.template Defragment<true>(quota_usec, page_usage, key);
+    return dm.Defragment(page_usage, key);
   };
 
   DefragmentResult result = defrag(indices_, &next_defrag_field_);
