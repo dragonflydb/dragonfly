@@ -12,11 +12,8 @@ namespace cmn {
 
 class BackedArguments {
   constexpr static size_t kLenCap = 5;
-#ifdef ABSL_HAVE_ADDRESS_SANITIZER
   constexpr static size_t kStorageCap = 88;
-#else
-  constexpr static size_t kStorageCap = 88;
-#endif
+
  public:
   BackedArguments() {
   }
