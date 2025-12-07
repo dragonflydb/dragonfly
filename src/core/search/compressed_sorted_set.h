@@ -91,6 +91,10 @@ class CompressedSortedSet {
     return tail_value_.value();
   }
 
+  static DefragmentResult Defragment([[maybe_unused]] PageUsage* page_usage) {
+    return {};
+  }
+
  private:
   struct EntryLocation {
     IntType value;                        // Value or 0

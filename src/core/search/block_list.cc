@@ -4,15 +4,19 @@
 
 namespace {
 
-template <typename T>
-using CanDefragmentT = decltype(std::declval<T>().Defragment(std::declval<size_t>(),
-                                                             std::declval<dfly::PageUsage*>()));
+template <typename T> bool DefragmentVector(PMR_NS::vector<T>& vec, dfly::PageUsage* page_usage) {
+  if (vec.empty() || !page_usage->IsPageForObjectUnderUtilized(vec.data())) {
+    return false;
+  }
 
-template <typename, typename = void> struct CanDefragment : std::false_type {};
-
-template <typename T> struct CanDefragment<T, std::void_t<CanDefragmentT<T>>> : std::true_type {};
-
-template <typename T> inline constexpr bool CanDefragmentV = CanDefragment<T>::value;
+  PMR_NS::vector<T> new_vec(vec.get_allocator());
+  new_vec.reserve(vec.size());
+  for (auto&& element : vec) {
+    new_vec.push_back(std::move(element));
+  }
+  vec = std::move(new_vec);
+  return true;
+}
 
 }  // namespace
 
@@ -137,11 +141,9 @@ DefragmentResult BlockList<Container>::Defragment(PageUsage* page_usage) {
     result.objects_moved += 1;
   }
 
-  if constexpr (CanDefragmentV<Container>) {
-    for (Container& block : blocks_) {
-      if (result.Merge(block.Defragment(quota_usec, page_usage)).quota_depleted) {
-        break;
-      }
+  for (Container& block : blocks_) {
+    if (result.Merge(block.Defragment(page_usage)).quota_depleted) {
+      break;
     }
   }
   return result;
