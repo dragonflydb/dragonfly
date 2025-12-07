@@ -55,7 +55,7 @@ uint32_t ImplicitAclCategories(uint32_t mask) {
   mask = ImplicitCategories(mask);
   uint32_t out = 0;
 
-  if (mask & CO::WRITE)
+  if (mask & CO::JOURNALED)
     out |= acl::WRITE;
 
   if ((mask & CO::READONLY) && ((mask & CO::NOSCRIPT) == 0))

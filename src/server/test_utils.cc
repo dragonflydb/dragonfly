@@ -97,7 +97,7 @@ std::string TestConnection::RemoteEndpointStr() const {
 }
 
 void TransactionSuspension::Start() {
-  static CommandId cid{"TEST", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, acl::NONE};
+  static CommandId cid{"TEST", CO::JOURNALED | CO::GLOBAL_TRANS, -1, 0, 0, acl::NONE};
 
   transaction_ = new dfly::Transaction{&cid};
 
