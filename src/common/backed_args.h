@@ -18,7 +18,15 @@ class BackedArguments {
   BackedArguments() {
   }
 
-  template <typename I> BackedArguments(I begin, I end);
+  // Construct the arguments from iterator range.
+  // TODO: In general we could get away without the len argument,
+  // but that would require fixing base::it::CompoundIterator to support subtraction.
+  // Similarly, I wish that CompoundIterator supported the -> operator.
+  template <typename I> BackedArguments(I begin, I end, size_t len) {
+    Assign(begin, end, len);
+  }
+
+  template <typename I> void Assign(I begin, I end, size_t len);
 
   size_t HeapMemory() const {
     size_t s1 = lens_.capacity() <= kLenCap ? 0 : lens_.capacity() * sizeof(uint32_t);
@@ -57,22 +65,29 @@ class BackedArguments {
 
 static_assert(sizeof(BackedArguments) == 128);
 
-template <typename I> BackedArguments::BackedArguments(I begin, I end) {
-  lens_.reserve(end - begin);
+template <typename I> void BackedArguments::Assign(I begin, I end, size_t len) {
+  lens_.resize(len);
   size_t total_size = 0;
+  unsigned idx = 0;
   for (auto it = begin; it != end; ++it) {
-    lens_.push_back(it->size());
-    total_size += it->size() + 1;  // +1 for '\0'
+    size_t sz = (*it).size();
+    lens_[idx++] = sz;
+    total_size += sz + 1;  // +1 for '\0'
   }
   storage_.resize(total_size);
 
+  // Reclaim memory if we have too much allocated.
+  if (storage_.capacity() > kStorageCap && total_size < storage_.capacity() / 2)
+    storage_.shrink_to_fit();
+
   char* next = storage_.data();
   for (auto it = begin; it != end; ++it) {
-    if (!it->empty()) {
-      memcpy(next, it->data(), it->size());
+    size_t sz = (*it).size();
+    if (sz > 0) {
+      memcpy(next, (*it).data(), sz);
     }
-    next[it->size()] = '\0';
-    next += it->size() + 1;
+    next[sz] = '\0';
+    next += sz + 1;
   }
 }
 

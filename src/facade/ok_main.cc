@@ -28,13 +28,15 @@ class OkService : public ServiceInterface {
     return DispatchResult::OK;
   }
 
-  DispatchManyResult DispatchManyCommands(absl::Span<ParsedArgs> args_lists,
+  DispatchManyResult DispatchManyCommands(std::function<ParsedArgs()> arg_gen, unsigned count,
                                           SinkReplyBuilder* builder,
                                           ConnectionContext* cntx) final {
-    for (auto args : args_lists)
+    for (unsigned i = 0; i < count; i++) {
+      ParsedArgs args = arg_gen();
       DispatchCommand(args, builder, cntx);
+    }
     DispatchManyResult result{
-        .processed = static_cast<uint32_t>(args_lists.size()),
+        .processed = static_cast<uint32_t>(count),
         .account_in_stats = true,
     };
     return result;
