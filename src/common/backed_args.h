@@ -133,6 +133,13 @@ class BackedArguments {
     storage_.clear();
   }
 
+  // Reserves space for additional argument of given length at the end.
+  void PushArg(size_t len) {
+    size_t old_size = storage_.size();
+    offsets_.push_back(old_size);
+    storage_.resize(old_size + len + 1);
+  }
+
  protected:
   absl::InlinedVector<uint32_t, kLenCap> offsets_;
   StorageType storage_;

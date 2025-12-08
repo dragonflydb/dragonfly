@@ -507,9 +507,10 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view va
 
   MP::Command cmd;
   cmd.type = cmd_type;
-  cmd.Assign(&key, &key + 1, 1);
+
+  string_view kv[2] = {key, value};
+  cmd.Assign(kv, kv + 2, 2);
   cmd.flags = flags;
-  cmd.bytes_len = value.size();
   cmd.expire_ts = ttl.count();
 
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
