@@ -13,6 +13,7 @@
 #include <utility>
 #include <variant>
 
+#include "common/backed_args.h"
 #include "facade/acl_commands_def.h"
 #include "facade/facade_types.h"
 #include "facade/memcache_parser.h"
@@ -80,23 +81,7 @@ class Connection : public util::Connection {
   };
 
   // Pipeline message, accumulated Redis command to be executed.
-  struct PipelineMessage {
-    PipelineMessage(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
-    }
-
-    void Reset(size_t nargs, size_t capacity);
-
-    void SetArgs(const RespVec& args);
-
-    size_t StorageCapacity() const;
-
-    // mi_stl_allocator uses mi heap internally.
-    // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
-    using StorageType = absl::InlinedVector<char, kReqStorageSize>;
-
-    absl::InlinedVector<std::string_view, 6> args;
-    StorageType storage;
-  };
+  using PipelineMessage = cmn::BackedArguments;
 
   // Pipeline message, accumulated Memcached command to be executed.
   struct MCPipelineMessage {

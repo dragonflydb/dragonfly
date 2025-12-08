@@ -36,7 +36,7 @@ static void SendSubscriptionChangedResponse(string_view action, std::optional<st
 
 StoredCmd::StoredCmd(const CommandId* cid, facade::ArgSlice args, facade::ReplyMode mode)
     : cid_{cid}, args_{args}, reply_mode_{mode} {
-  backed_ = std::make_unique<cmn::BackedArguments>(args.begin(), args.end());
+  backed_ = std::make_unique<cmn::BackedArguments>(args.begin(), args.end(), args.size());
   args_ = facade::ParsedArgs{*backed_};
 }
 

@@ -1725,13 +1725,13 @@ DispatchResult Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
   return res;
 }
 
-DispatchManyResult Service::DispatchManyCommands(absl::Span<facade::ParsedArgs> args_list,
-                                                 SinkReplyBuilder* builder,
+DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArgs()> arg_gen,
+                                                 unsigned count, SinkReplyBuilder* builder,
                                                  facade::ConnectionContext* cntx) {
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
   DCHECK_EQ(builder->GetProtocol(), Protocol::REDIS);
-  DCHECK_GT(args_list.size(), 1u);
+  DCHECK_GT(count, 1u);
 
   auto* ss = dfly::ServerState::tlocal();
   // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
@@ -1771,7 +1771,8 @@ DispatchManyResult Service::DispatchManyCommands(absl::Span<facade::ParsedArgs> 
     stored_cmds.clear();
   };
 
-  for (const auto& args : args_list) {
+  for (unsigned i = 0; i < count; i++) {
+    ParsedArgs args = arg_gen();
     string cmd = absl::AsciiStrToUpper(args.Front());
     const auto [cid, tail_args] = registry_.FindExtended(cmd, args.Tail());
 
@@ -1789,7 +1790,7 @@ DispatchManyResult Service::DispatchManyCommands(absl::Span<facade::ParsedArgs> 
     const bool is_blocking = cid != nullptr && cid->IsBlocking();
 
     if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
-      stored_cmds.reserve(args_list.size());
+      stored_cmds.reserve(count);
       stored_cmds.emplace_back(cid, tail_args);  // Shallow copy
       continue;
     }

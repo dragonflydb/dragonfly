@@ -40,8 +40,8 @@ class Service : public facade::ServiceInterface {
                                          facade::ConnectionContext* cntx) final;
 
   // Execute multiple consecutive commands, possibly in parallel by squashing
-  facade::DispatchManyResult DispatchManyCommands(absl::Span<facade::ParsedArgs> args_list,
-                                                  facade::SinkReplyBuilder* builder,
+  facade::DispatchManyResult DispatchManyCommands(std::function<facade::ParsedArgs()> arg_gen,
+                                                  unsigned count, facade::SinkReplyBuilder* builder,
                                                   facade::ConnectionContext* cntx) final;
 
   // Check VerifyCommandExecution and invoke command with args
