@@ -174,7 +174,7 @@ util::fb2::Future<GenericError> Coordinator::DispatchAll(std::string command, Re
   if (!cluster_config) {
     VLOG(2) << "No cluster config found for coordinator plan creation.";
     LOG(FATAL) << "No cluster config, not implemented logic yet.";
-    // return;
+    return {};
   }
   VLOG(2) << "Dispatching command to all shards: " << command;
   auto shards_config = cluster_config->GetConfig();
@@ -192,7 +192,7 @@ util::fb2::Future<GenericError> Coordinator::DispatchAll(std::string command, Re
               << shard.master.port;
       cb({});  // TODO add error propagation.
       LOG(FATAL) << "No error processing, not implemented logic yet.";
-      // return;
+      return {};
     }
     client->EnqueueCommand(shard_request);
   }

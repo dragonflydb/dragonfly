@@ -3465,15 +3465,15 @@ async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
             admin_port=next(next_port),
             vmodule="coordinator=2,search_family=3,redis_parser=3",
         )
-        for i in range(2)
+        for i in range(3)
     ]
 
     df_factory.start_all(instances)
 
     nodes = [(await create_node_info(instance)) for instance in instances]
     nodes[0].slots = [(0, 5259)]
-    nodes[1].slots = [(5260, 16383)]
-    # nodes[2].slots = [(10520, 16383)]
+    nodes[1].slots = [(5260, 10519)]
+    nodes[2].slots = [(10520, 16383)]
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
@@ -3489,7 +3489,7 @@ async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
 
     cclient = instances[0].cluster_client()
 
-    docs_num = 10
+    docs_num = 3
     for i in range(0, docs_num):
         assert await cclient.execute_command("HSET", f"s{i}", "title", f"test {i}") == 1
 

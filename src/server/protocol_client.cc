@@ -287,7 +287,6 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(base::IoBu
           std::string_view(reinterpret_cast<char*>(buffer->InputBuffer().data()), consumed);
 
     if (result == RedisParser::OK) {
-      LOG(INFO) << "Last resp: " << last_resp_;
       return ReadRespRes{processed_bytes, consumed};  // success path
     }
 
@@ -331,18 +330,6 @@ io::Result<TakeRespExpr::Vec> ProtocolClient::TakeRespReply(base::IoBuf* buffer,
     buffer = &resp_buf_;
   }
 
-  // TODO remove debug logging
-  const auto& tosv = [](absl::Span<uint8_t> buf) {
-    std::string res(std::string_view{reinterpret_cast<const char*>(buf.data()), buf.size()});
-    for (auto& c : res) {
-      if (absl::ascii_iscntrl(c)) {
-        c = ' ';
-      }
-    }
-    return res;
-  };
-
-  LOG(INFO) << "start TakeRespReply: " << tosv(buffer->InputBuffer());  // TODO remove debug logging
   last_resp_ = "";
 
   uint32_t processed_bytes = 0;
@@ -360,11 +347,7 @@ io::Result<TakeRespExpr::Vec> ProtocolClient::TakeRespReply(base::IoBuf* buffer,
       }
     }
 
-    LOG(INFO) << "before buffer contains: "
-              << tosv(buffer->InputBuffer());  // TODO remove debug logging
-
     result = parser_->Parse(buffer->InputBuffer(), &consumed, &resp_args_);
-    LOG(INFO) << "parsed: " << resp_args_;  // TODO remove debug logging
     for (const auto& expr : resp_args_) {
       res_vec.emplace_back(expr);
     }
@@ -374,10 +357,7 @@ io::Result<TakeRespExpr::Vec> ProtocolClient::TakeRespReply(base::IoBuf* buffer,
           std::string_view(reinterpret_cast<char*>(buffer->InputBuffer().data()), consumed);
 
     buffer->ConsumeInput(consumed);
-    LOG(INFO) << "after buffer contains: "
-              << tosv(buffer->InputBuffer());  // TODO remove debug logging
     if (result == RedisParser::OK) {
-      LOG(INFO) << "Last resp: " << last_resp_;
       return res_vec;  // success path
     }
 
