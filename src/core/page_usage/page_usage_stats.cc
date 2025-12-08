@@ -12,6 +12,8 @@
 
 #include <string>
 
+#include "base/cycle_clock.h"
+
 extern "C" {
 #include <unistd.h>
 
@@ -156,8 +158,11 @@ CollectedPageStats PageUsage::UniquePages::CollectedStats() const {
       .shard_wide_summary = {}};
 }
 
-PageUsage::PageUsage(CollectPageStats collect_stats, float threshold)
-    : collect_stats_{collect_stats}, threshold_{threshold} {
+PageUsage::PageUsage(CollectPageStats collect_stats, float threshold, uint64_t quota_usec)
+    : collect_stats_{collect_stats},
+      threshold_{threshold},
+      quota_cycles_{quota_usec == kMaxQuota ? kMaxQuota : base::CycleClock::FromUsec(quota_usec)},
+      start_cycles_(base::CycleClock::Now()) {
 }
 
 bool PageUsage::IsPageForObjectUnderUtilized(void* object) {
@@ -177,6 +182,14 @@ bool PageUsage::ConsumePageStats(mi_page_usage_stats_t stat) {
     unique_pages_.AddStat(stat);
   }
   return force_reallocate_ || should_reallocate;
+}
+
+bool PageUsage::QuotaDepleted() const {
+  if (quota_cycles_ == kMaxQuota) {
+    return false;
+  }
+
+  return base::CycleClock::Now() - start_cycles_ >= quota_cycles_;
 }
 
 }  // namespace dfly

@@ -1,12 +1,8 @@
 #pragma once
 
-#include <absl/types/span.h>
-
 #include <algorithm>
 #include <cstdint>
 #include <iterator>
-#include <optional>
-#include <type_traits>
 #include <vector>
 
 #include "core/search/base.h"
@@ -130,6 +126,8 @@ template <typename Container /* underlying container */> class BlockList {
     return BlockListIterator{blocks_.end(), blocks_.end()};
   }
 
+  DefragmentResult Defragment(PageUsage* page_usage);
+
  private:
   // Find block that should contain t. Returns end() only if empty
   BlockIt FindBlock(const ElementType& t);
@@ -196,6 +194,8 @@ template <typename T> class SortedVector {
   iterator end() const {
     return entries_.cend();
   }
+
+  DefragmentResult Defragment(PageUsage* page_usage);
 
  private:
   SortedVector(PMR_NS::vector<T>&& v) : entries_{std::move(v)} {
