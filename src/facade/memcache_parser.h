@@ -98,6 +98,10 @@ class MemcacheParser {
     return type >= SET && type <= CAS;
   }
 
+  size_t UsedMemory() const {
+    return tmp_args_.capacity() * sizeof(std::string_view);
+  }
+
   Result Parse(std::string_view str, uint32_t* consumed, Command* res);
 
  private:

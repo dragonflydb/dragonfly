@@ -20,6 +20,12 @@ class BackedArguments {
 
   class iterator {
    public:
+    using iterator_category = std::forward_iterator_tag;
+    using value_type = std::string_view;
+    using difference_type = std::ptrdiff_t;
+    using pointer = const std::string_view*;
+    using reference = std::string_view;
+
     iterator(const BackedArguments* ba, size_t index) : ba_(ba), index_(index) {
     }
 
@@ -30,7 +36,7 @@ class BackedArguments {
     }
 
     bool operator==(const iterator& other) const {
-      return index_ == other.index_;
+      return index_ == other.index_ && ba_ == other.ba_;
     }
 
     bool operator!=(const iterator& other) const {

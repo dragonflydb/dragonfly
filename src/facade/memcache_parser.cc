@@ -61,25 +61,22 @@ MP::CmdType From(string_view token) {
   return MP::INVALID;
 }
 
-void MaterializeArgs(absl::Span<std::string_view> args, MP::Command* dest) {
-  dest->Assign(args.begin(), args.end(), args.size());
-}
-
 MP::Result ParseStore(ArgSlice tokens, MP::Command* res) {
   const size_t num_tokens = tokens.size();
-  unsigned opt_pos = 3;
+  unsigned opt_pos = 4;
   if (res->type == MP::CAS) {
     if (num_tokens <= opt_pos)
       return MP::PARSE_ERROR;
     ++opt_pos;
   }
 
+  // tokens[0] is key
   uint32_t flags;
-  if (!absl::SimpleAtoi(tokens[0], &flags) || !absl::SimpleAtoi(tokens[1], &res->expire_ts) ||
-      !absl::SimpleAtoi(tokens[2], &res->bytes_len))
+  if (!absl::SimpleAtoi(tokens[1], &flags) || !absl::SimpleAtoi(tokens[2], &res->expire_ts) ||
+      !absl::SimpleAtoi(tokens[3], &res->bytes_len))
     return MP::BAD_INT;
 
-  if (res->type == MP::CAS && !absl::SimpleAtoi(tokens[3], &res->cas_unique)) {
+  if (res->type == MP::CAS && !absl::SimpleAtoi(tokens[4], &res->cas_unique)) {
     return MP::BAD_INT;
   }
 
@@ -93,6 +90,9 @@ MP::Result ParseStore(ArgSlice tokens, MP::Command* res) {
   } else if (num_tokens > opt_pos + 1) {
     return MP::PARSE_ERROR;
   }
+
+  string_view key = tokens[0];
+  res->Assign(&key, &key + 1, 1);
 
   return MP::OK;
 }
@@ -142,7 +142,7 @@ MP::Result ParseValueless(ArgSlice tokens, vector<string_view>* args, MP::Comman
     }
   }
 
-  MaterializeArgs(absl::MakeSpan(*args), res);
+  res->Assign(args->begin(), args->end(), args->size());
   return MP::OK;
 }
 
@@ -187,7 +187,7 @@ bool ParseMetaMode(char m, MP::Command* res) {
 }
 
 // See https://raw.githubusercontent.com/memcached/memcached/refs/heads/master/doc/protocol.txt
-MP::Result ParseMeta(ArgSlice tokens, vector<string_view>* args, MP::Command* res) {
+MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
   DCHECK(!tokens.empty());
 
   if (res->type == MP::META_DEBUG) {
@@ -203,7 +203,7 @@ MP::Result ParseMeta(ArgSlice tokens, vector<string_view>* args, MP::Command* re
   res->flags = 0;
   res->expire_ts = 0;
 
-  args->push_back(tokens[0]);
+  string_view arg0 = tokens[0];
   tokens.remove_prefix(1);
 
   // We emulate the behavior by returning the high level commands.
@@ -248,9 +248,9 @@ MP::Result ParseMeta(ArgSlice tokens, vector<string_view>* args, MP::Command* re
       case 'b':
         if (token.size() != 1)
           return MP::PARSE_ERROR;
-        if (!absl::Base64Unescape(args->front(), &blob))
+        if (!absl::Base64Unescape(arg0, &blob))
           return MP::PARSE_ERROR;
-        args->front() = blob;
+        arg0 = blob;
         res->base64 = true;
         break;
       case 'F':
@@ -291,7 +291,7 @@ MP::Result ParseMeta(ArgSlice tokens, vector<string_view>* args, MP::Command* re
         return MP::PARSE_ERROR;
     }
   }
-  MaterializeArgs(absl::MakeSpan(*args), res);
+  res->Assign(&arg0, &arg0 + 1, 1);
 
   return MP::OK;
 }
@@ -332,26 +332,17 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
   ArgSlice tokens_view{tokens};
   tokens_view.remove_prefix(1);
   cmd->clear();
-  tmp_args_.clear();
 
   if (cmd->type <= CAS) {                                    // Store command
     if (tokens_view.size() < 4 || tokens[0].size() > 250) {  // key length limit
       return MP::PARSE_ERROR;
     }
 
-    tmp_args_.push_back(tokens_view[0]);
-    tokens_view.remove_prefix(1);
-    auto res = ParseStore(tokens_view, cmd);
-    if (res != MP::OK) {
-      return res;
-    }
-    MaterializeArgs(absl::MakeSpan(tmp_args_), cmd);
-
-    return MP::OK;
+    return ParseStore(tokens_view, cmd);
   }
 
   if (cmd->type >= META_SET) {
-    return tokens_view.empty() ? MP::PARSE_ERROR : ParseMeta(tokens_view, &tmp_args_, cmd);
+    return tokens_view.empty() ? MP::PARSE_ERROR : ParseMeta(tokens_view, cmd);
   }
 
   if (tokens_view.empty()) {
@@ -361,6 +352,7 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
     return MP::PARSE_ERROR;
   }
 
+  tmp_args_.clear();
   return ParseValueless(tokens_view, &tmp_args_, cmd);
 };
 
