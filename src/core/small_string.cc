@@ -60,11 +60,11 @@ size_t SmallString::Assign(std::string_view s) {
   uint8_t* realptr = nullptr;
 
   // reallocate if we need a larger allocation or it becomes space-inefficient
-  // TODO: check if mi_usable_size is has space before growing (like listpack)
-  if (s.size() >= size_ || s.size() * 2 < MallocUsed()) {
+  size_t heap_len = s.size() - kPrefLen;
+  if (size_t available = MallocUsed(); available < heap_len || heap_len * 2 < available) {
     Free();
 
-    auto [sp, rp] = tl.seg_alloc->Allocate(s.size() - kPrefLen);
+    auto [sp, rp] = tl.seg_alloc->Allocate(heap_len);
     small_ptr_ = sp;
     realptr = rp;
   } else {
@@ -73,7 +73,7 @@ size_t SmallString::Assign(std::string_view s) {
 
   size_ = s.size();
   memcpy(prefix_, s.data(), kPrefLen);
-  memcpy(realptr, s.data() + kPrefLen, s.size() - kPrefLen);
+  memcpy(realptr, s.data() + kPrefLen, heap_len);
   return mi_malloc_usable_size(realptr);
 }
 
@@ -84,7 +84,9 @@ void SmallString::Free() {
 }
 
 uint16_t SmallString::MallocUsed() const {
-  return mi_malloc_usable_size(tl.seg_alloc->Translate(small_ptr_));
+  if (size_)
+    return mi_malloc_usable_size(tl.seg_alloc->Translate(small_ptr_));
+  return 0;
 }
 
 bool SmallString::Equal(std::string_view o) const {
