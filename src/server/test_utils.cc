@@ -97,7 +97,7 @@ std::string TestConnection::RemoteEndpointStr() const {
 }
 
 void TransactionSuspension::Start() {
-  static CommandId cid{"TEST", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, acl::NONE};
+  static CommandId cid{"TEST", CO::JOURNALED | CO::GLOBAL_TRANS, -1, 0, 0, acl::NONE};
 
   transaction_ = new dfly::Transaction{&cid};
 
@@ -454,7 +454,7 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
 
   DCHECK(context->transaction == nullptr) << id;
 
-  service_->DispatchCommand(CmdArgList{args}, conn_wrapper->builder(), context);
+  service_->DispatchCommand(ParsedArgs{args}, conn_wrapper->builder(), context);
 
   DCHECK(context->transaction == nullptr);
 
@@ -486,13 +486,11 @@ void BaseFamilyTest::RunMany(const std::vector<std::vector<std::string>>& cmds) 
   TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, GetId());
   auto* context = conn_wrapper->cmd_cntx();
   context->ns = &namespaces->GetDefaultNamespace();
-  vector<ArgSlice> args_vec(cmds.size());
-  vector<vector<string_view>> cmd_views(cmds.size());
+  vector<facade::ParsedArgs> args_vec(cmds.size());
+  vector<cmn::BackedArguments> backed_args_vec(cmds.size());
   for (size_t i = 0; i < cmds.size(); ++i) {
-    for (const auto& arg : cmds[i]) {
-      cmd_views[i].emplace_back(arg);
-    }
-    args_vec[i] = absl::MakeSpan(cmd_views[i]);
+    backed_args_vec[i] = cmn::BackedArguments(cmds[i].begin(), cmds[i].end());
+    args_vec[i] = facade::ParsedArgs{backed_args_vec[i]};
   }
   service_->DispatchManyCommands(absl::MakeSpan(args_vec), conn_wrapper->builder(), context);
   DCHECK(context->transaction == nullptr);

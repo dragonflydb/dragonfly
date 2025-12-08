@@ -18,6 +18,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "core/detail/listpack_wrap.h"
+#include "core/overloaded.h"
 #include "core/string_map.h"
 #include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
@@ -1026,22 +1027,23 @@ using CI = CommandId;
 
 void HSetFamily::Register(CommandRegistry* registry) {
   registry->StartFamily(acl::HASH);
-  *registry << CI{"HDEL", CO::FAST | CO::WRITE, -3, 1, 1}.HFUNC(HDel)
+  *registry << CI{"HDEL", CO::FAST | CO::JOURNALED, -3, 1, 1}.HFUNC(HDel)
             << CI{"HLEN", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(HLen)
             << CI{"HEXISTS", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(HExists)
             << CI{"HGET", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(HGet)
             << CI{"HGETALL", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(HGetAll)
             << CI{"HMGET", CO::FAST | CO::READONLY, -3, 1, 1}.HFUNC(HMGet)
-            << CI{"HMSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HSet)
-            << CI{"HINCRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HIncrBy)
-            << CI{"HINCRBYFLOAT", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HIncrByFloat)
+            << CI{"HMSET", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HSet)
+            << CI{"HINCRBY", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HIncrBy)
+            << CI{"HINCRBYFLOAT", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(
+                   HIncrByFloat)
             << CI{"HKEYS", CO::READONLY, 2, 1, 1}.HFUNC(HKeys)
-            << CI{"HEXPIRE", CO::WRITE | CO::FAST | CO::DENYOOM, -5, 1, 1}.HFUNC(HExpire)
+            << CI{"HEXPIRE", CO::JOURNALED | CO::FAST | CO::DENYOOM, -5, 1, 1}.HFUNC(HExpire)
             << CI{"HRANDFIELD", CO::READONLY, -2, 1, 1}.HFUNC(HRandField)
             << CI{"HSCAN", CO::READONLY, -3, 1, 1}.HFUNC(HScan)
-            << CI{"HSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HSet)
-            << CI{"HSETEX", CO::WRITE | CO::FAST | CO::DENYOOM, -5, 1, 1}.SetHandler(HSetEx)
-            << CI{"HSETNX", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HSetNx)
+            << CI{"HSET", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HSet)
+            << CI{"HSETEX", CO::JOURNALED | CO::FAST | CO::DENYOOM, -5, 1, 1}.SetHandler(HSetEx)
+            << CI{"HSETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HSetNx)
             << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(HStrLen)
             << CI{"HVALS", CO::READONLY, 2, 1, 1}.HFUNC(HVals);
 }

@@ -10,7 +10,6 @@
 #include <string_view>
 
 #include "core/compact_object.h"
-#include "core/string_or_view.h"
 
 namespace dfly::tiering {
 

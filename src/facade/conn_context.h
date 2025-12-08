@@ -9,7 +9,6 @@
 #include <memory>
 #include <string_view>
 
-#include "core/heap_size.h"
 #include "facade/acl_commands_def.h"
 #include "facade/facade_types.h"
 #include "facade/reply_builder.h"

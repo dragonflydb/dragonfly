@@ -1416,7 +1416,6 @@ async def test_client_migrate(df_server: DflyInstance):
     assert resp == 1  # migrated successfully
 
 
-@dfly_args({})
 async def test_issue_5931_malformed_protocol_crash(df_server: DflyInstance):
     """
     Regression test for #5931
@@ -1461,7 +1460,6 @@ async def test_issue_5931_malformed_protocol_crash(df_server: DflyInstance):
     assert await client.ping() == True
 
 
-@dfly_args({})
 async def test_issue_5949_nil_bulk_string_crash(df_server: DflyInstance):
     """
     Regression test for #5949
@@ -1504,3 +1502,20 @@ async def test_issue_5949_nil_bulk_string_crash(df_server: DflyInstance):
     client = df_server.client()
     await client.ping()
     assert await client.ping() == True
+
+
+async def test_issue_6165_squash_invalid_syntax(async_client):
+    pipe = async_client.pipeline(transaction=False)
+    pipe.set("k", "v")
+    pipe.execute_command("RENAME bar")
+    res = await pipe.execute(raise_on_error=False)
+
+    assert res[0] == True  # SET key1
+    assert isinstance(res[1], aioredis.ResponseError)  # INVALID SYNTAX COMMAND
+
+    pip = async_client.pipeline(transaction=False)
+    pip.set("k", "v")
+    pip.execute_command("ZUNION 2 set1")
+    res = await pip.execute(raise_on_error=False)
+    assert res[0] == True  # SET key1
+    assert isinstance(res[1], aioredis.ResponseError)  # INVALID SYNTAX

@@ -36,11 +36,11 @@ class Service : public facade::ServiceInterface {
   void Shutdown();
 
   // Prepare command execution, verify and execute, reply to context
-  facade::DispatchResult DispatchCommand(ArgSlice args, facade::SinkReplyBuilder* builder,
+  facade::DispatchResult DispatchCommand(facade::ParsedArgs args, facade::SinkReplyBuilder* builder,
                                          facade::ConnectionContext* cntx) final;
 
   // Execute multiple consecutive commands, possibly in parallel by squashing
-  facade::DispatchManyResult DispatchManyCommands(absl::Span<ArgSlice> args_list,
+  facade::DispatchManyResult DispatchManyCommands(absl::Span<facade::ParsedArgs> args_list,
                                                   facade::SinkReplyBuilder* builder,
                                                   facade::ConnectionContext* cntx) final;
 
@@ -56,7 +56,7 @@ class Service : public facade::ServiceInterface {
   // Verify command prepares excution in correct state.
   // It's usually called before command execution. Only for multi/exec transactions it's checked
   // when the command is queued for execution, not before the execution itself.
-  std::optional<facade::ErrorReply> VerifyCommandState(const CommandId* cid, ArgSlice tail_args,
+  std::optional<facade::ErrorReply> VerifyCommandState(const CommandId& cid, ArgSlice tail_args,
                                                        const ConnectionContext& cntx);
 
   void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
@@ -159,12 +159,12 @@ class Service : public facade::ServiceInterface {
   };
 
   // Return error if not all keys are owned by the server when running in cluster mode
-  std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId* cid, CmdArgList args,
+  std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId& cid, CmdArgList args,
                                                        const ConnectionContext& dfly_cntx);
 
   // Return moved error if we *own* the slot. This function is used from flows that assume our
   // state is TAKEN_OVER which happens after a replica takeover.
-  std::optional<facade::ErrorReply> TakenOverSlotError(const CommandId* cid, CmdArgList args,
+  std::optional<facade::ErrorReply> TakenOverSlotError(const CommandId& cid, CmdArgList args,
                                                        const ConnectionContext& dfly_cntx);
 
   void EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,

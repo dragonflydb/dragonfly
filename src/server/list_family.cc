@@ -1311,31 +1311,34 @@ using CI = CommandId;
 void ListFamily::Register(CommandRegistry* registry) {
   registry->StartFamily(acl::LIST);
   *registry
-      << CI{"LPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(LPush)
-      << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(LPushX)
-      << CI{"LPOP", CO::WRITE | CO::FAST, -2, 1, 1}.HFUNC(LPop)
-      << CI{"LMPOP", CO::WRITE | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(LMPop)
-      << CI{"BLMPOP", CO::WRITE | CO::BLOCKING | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -5, 3, 3}
+      << CI{"LPUSH", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(LPush)
+      << CI{"LPUSHX", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(LPushX)
+      << CI{"LPOP", CO::JOURNALED | CO::FAST, -2, 1, 1}.HFUNC(LPop)
+      << CI{"LMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(LMPop)
+      << CI{"BLMPOP", CO::JOURNALED | CO::BLOCKING | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -5, 3,
+            3}
              .HFUNC(BLMPop)
-      << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(RPush)
-      << CI{"RPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(RPushX)
-      << CI{"RPOP", CO::WRITE | CO::FAST, -2, 1, 1}.HFUNC(RPop)
-      << CI{"RPOPLPUSH", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2}.SetHandler(RPopLPush)
-      << CI{"BRPOPLPUSH", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, 4, 1, 2}
+      << CI{"RPUSH", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(RPush)
+      << CI{"RPUSHX", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(RPushX)
+      << CI{"RPOP", CO::JOURNALED | CO::FAST, -2, 1, 1}.HFUNC(RPop)
+      << CI{"RPOPLPUSH", CO::JOURNALED | CO::NO_AUTOJOURNAL, 3, 1, 2}.SetHandler(RPopLPush)
+      << CI{"BRPOPLPUSH", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, 4, 1, 2}
              .SetHandler(BRPopLPush)
-      << CI{"BLPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}.HFUNC(
-             BLPop)
-      << CI{"BRPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}.HFUNC(
-             BRPop)
+      << CI{"BLPOP", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}
+             .HFUNC(BLPop)
+      << CI{"BRPOP", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}
+             .HFUNC(BRPop)
       << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(LLen)
       << CI{"LPOS", CO::READONLY, -3, 1, 1}.HFUNC(LPos)
       << CI{"LINDEX", CO::READONLY, 3, 1, 1}.HFUNC(LIndex)
-      << CI{"LINSERT", CO::WRITE | CO::DENYOOM, 5, 1, 1}.HFUNC(LInsert)
+      << CI{"LINSERT", CO::JOURNALED | CO::DENYOOM, 5, 1, 1}.HFUNC(LInsert)
       << CI{"LRANGE", CO::READONLY, 4, 1, 1}.HFUNC(LRange)
-      << CI{"LSET", CO::WRITE | CO::DENYOOM, 4, 1, 1}.HFUNC(LSet)
-      << CI{"LTRIM", CO::WRITE, 4, 1, 1}.HFUNC(LTrim) << CI{"LREM", CO::WRITE, 4, 1, 1}.HFUNC(LRem)
-      << CI{"LMOVE", CO::WRITE | CO::NO_AUTOJOURNAL, 5, 1, 2}.HFUNC(LMove)
-      << CI{"BLMOVE", CO::WRITE | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2}.SetHandler(BLMove);
+      << CI{"LSET", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.HFUNC(LSet)
+      << CI{"LTRIM", CO::JOURNALED, 4, 1, 1}.HFUNC(LTrim)
+      << CI{"LREM", CO::JOURNALED, 4, 1, 1}.HFUNC(LRem)
+      << CI{"LMOVE", CO::JOURNALED | CO::NO_AUTOJOURNAL, 5, 1, 2}.HFUNC(LMove)
+      << CI{"BLMOVE", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2}.SetHandler(
+             BLMove);
 }
 
 }  // namespace dfly
