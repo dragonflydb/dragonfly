@@ -142,14 +142,14 @@ if (WITH_SEARCH)
   )
 endif()
 
-  add_third_party(
-    hiredis
-    URL https://github.com/redis/hiredis/archive/refs/tags/v1.3.0.tar.gz
+add_third_party(
+  hiredis
+  GIT_REPOSITORY https://github.com/redis/hiredis/
 
-    CMAKE_PASS_FLAGS "-DBUILD_SHARED_LIBS=OFF -DDISABLE_TESTS=ON -DENABLE_EXAMPLES=OFF -DENABLE_ASYNC_TESTS=OFF"
-    INSTALL_COMMAND cp -R <SOURCE_DIR>/hiredis ${THIRD_PARTY_LIB_DIR}/hiredis/include/
-    LIB libhiredis.a
-  )
+  CMAKE_PASS_FLAGS "-DBUILD_SHARED_LIBS=ON -DDISABLE_TESTS=ON -DENABLE_EXAMPLES=OFF -DENABLE_ASYNC_TESTS=OFF"
+  #  INSTALL_COMMAND cp -R <SOURCE_DIR>/hiredis ${THIRD_PARTY_LIB_DIR}/hiredis/include/
+  LIB libhiredis.so
+)
 
 add_third_party(
   fast_float
@@ -225,8 +225,3 @@ add_library(TRDP::fast_float INTERFACE IMPORTED)
 add_dependencies(TRDP::fast_float fast_float_project)
 set_target_properties(TRDP::fast_float PROPERTIES
                       INTERFACE_INCLUDE_DIRECTORIES "${FAST_FLOAT_INCLUDE_DIR}")
-
-# add_library(TRDP::hiredis INTERFACE IMPORTED)
-# add_dependencies(TRDP::hiredis hiredis_project)
-# set_target_properties(TRDP::hiredis PROPERTIES
-#                       INTERFACE_INCLUDE_DIRECTORIES "${HIREDIS_INCLUDE_DIR}")

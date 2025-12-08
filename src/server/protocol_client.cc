@@ -15,7 +15,6 @@ extern "C" {
 #include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
-#include <hiredis/hiredis.h>
 
 #include <boost/asio/ip/tcp.hpp>
 #include <string>
@@ -25,6 +24,7 @@ extern "C" {
 #include "facade/redis_parser.h"
 #include "facade/socket_utils.h"
 #include "server/error.h"
+#include "server/hiredis_wrap.h"
 #include "server/journal/executor.h"
 #include "server/journal/serializer.h"
 #include "server/main_service.h"
@@ -318,7 +318,7 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(uint32_t t
 
 io::Result<TakeRespExpr::Vec> ProtocolClient::TakeRespReply(uint32_t timeout) {
   {
-    redisReader* reader = redisReaderCreate();
+    redisReader* reader = hiredis::redisReaderCreate();
     std::string msg1 =
         "*17\r\n:8\r\n$2\r\ns0\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
         "0\r\n$2\r\ns3\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
@@ -330,20 +330,20 @@ io::Result<TakeRespExpr::Vec> ProtocolClient::TakeRespReply(uint32_t timeout) {
         "$2\r\ns1\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
         "1\r\n$2\r\ns5\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest 5\r\n";
 
-    redisReaderFeed(reader, msg1.c_str(), msg1.size());
+    hiredis::redisReaderFeed(reader, msg1.c_str(), msg1.size());
 
     void* reply_obj = nullptr;
-    int status = redisReaderGetReply(reader, &reply_obj);
+    int status = hiredis::redisReaderGetReply(reader, &reply_obj);
 
-    redisReaderFeed(reader, msg2.c_str(), msg2.size());
+    hiredis::redisReaderFeed(reader, msg2.c_str(), msg2.size());
 
-    status = redisReaderGetReply(reader, &reply_obj);
+    status = hiredis::redisReaderGetReply(reader, &reply_obj);
 
     redisReply* r = (redisReply*)reply_obj;
 
-    freeReplyObject(r);
+    hiredis::freeReplyObject(r);
 
-    redisReaderFree(reader);
+    hiredis::redisReaderFree(reader);
   }
   auto prev_timeout = sock_->timeout();
   sock_->set_timeout(timeout);

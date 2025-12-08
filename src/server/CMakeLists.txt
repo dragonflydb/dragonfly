@@ -117,12 +117,19 @@ if (WITH_GCP)
   add_definitions(-DWITH_GCP)
 endif()
 
+# (kostas): Lord, forgive me for my sins. :pray:
+# 1. build hiredis as a shared lib such that we can have our own sds.h/c headers
+# 2. wrap the lib to avoid collisions
+add_library(myhiredis hiredis_wrap.cc)
+# Hide internal symbols
+target_link_libraries(myhiredis PRIVATE TRDP::hiredis)
+
 cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float TRDP::hdr_histogram)
 cxx_link(dragonfly_lib dfly_transaction dfly_facade dfly_search_server
          redis_lib ${AWS_LIB} ${GCP_LIB} azure_lib jsonpath
          strings_lib html_lib
          http_client_lib absl::random_random TRDP::jsoncons TRDP::zstd TRDP::lz4
-         TRDP::croncpp TRDP::flatbuffers TRDP::hiredis)
+         TRDP::croncpp TRDP::flatbuffers myhiredis)
 
 if (DF_USE_SSL)
   set(TLS_LIB tls_lib)
