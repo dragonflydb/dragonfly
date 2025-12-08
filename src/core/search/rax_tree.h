@@ -44,6 +44,8 @@ namespace dfly::search {
 // pointers.
 // TODO: Add full support for polymorphic allocators, including rax trie node allocations
 template <typename V> struct RaxTreeMap {
+  using value_type = V;
+
   struct FindIterator;
 
   // Simple seeking iterator
@@ -132,6 +134,7 @@ template <typename V> struct RaxTreeMap {
 
     raxIterator it_;
   };
+  using iterator = SeekIterator;
 
   // Result of find() call. Inherits from pair to mimic iterator interface, not incrementable.
   struct FindIterator : public std::optional<std::pair<std::string, V&>> {
