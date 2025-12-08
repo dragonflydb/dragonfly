@@ -402,6 +402,11 @@ class DflyInstance:
         mem_info = process.memory_info()
         return mem_info.rss
 
+    def has_arg(self, arg):
+        if arg in self.args and self.args[arg] == True:
+            return True
+        return False
+
 
 class DflyInstanceFactory:
     """
