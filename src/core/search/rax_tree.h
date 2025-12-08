@@ -13,6 +13,30 @@ extern "C" {
 #include "redis/rax.h"
 }
 
+namespace detail {
+
+// Copies an iterators state into another by performing a fresh seek on the source's key. While this
+// is a little more expensive, it is done to avoid deep copying pointers from raxIterator and
+// raxStart while taking care of self-reference links in both structs. The return value is used to
+// decide whether to advance iterator after a successful seek.
+inline bool CopyIteratorState(raxIterator& destination, raxIterator& source) {
+  raxStart(&destination, source.rt);
+  if (!destination.rt)
+    return false;
+
+  if (!raxSeek(&destination, "=", source.key, source.key_len)) {
+    // called from constructor, so no error can be returned. but set up the same state as
+    // the SeekIterator constructor, so that it will return true on comparison to RaxTreeMap::end()
+    raxStop(&destination);
+    destination.rt = nullptr;
+    return false;
+  }
+
+  return true;
+}
+
+}  // namespace detail
+
 namespace dfly::search {
 
 // absl::flat_hash_map/std::unordered_map compatible tree map based on rax tree.
@@ -40,10 +64,28 @@ template <typename V> struct RaxTreeMap {
     explicit SeekIterator(rax* tree) : SeekIterator(tree, "^", std::string_view{nullptr, 0}) {
     }
 
-    /* Remove copy/move constructors to avoid double iterator invalidation */
-    SeekIterator(SeekIterator&&) = delete;
+    SeekIterator(SeekIterator&& other) noexcept {
+      if (::detail::CopyIteratorState(it_, other.it_))
+        operator++();
+      if (other.IsValid())
+        other.InvalidateIterator();
+    }
+
+    SeekIterator& operator=(SeekIterator&& other) noexcept {
+      if (this != &other) {
+        if (IsValid()) {
+          InvalidateIterator();
+        }
+        if (::detail::CopyIteratorState(it_, other.it_))
+          operator++();
+        if (other.IsValid())
+          other.InvalidateIterator();
+      }
+      return *this;
+    }
+
+    /* Copy constructor deleted to avoid double iterator invalidation */
     SeekIterator(const SeekIterator&) = delete;
-    SeekIterator& operator=(SeekIterator&&) = delete;
     SeekIterator& operator=(const SeekIterator&) = delete;
 
     ~SeekIterator() {
