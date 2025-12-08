@@ -46,7 +46,16 @@ runs:
       shell: bash
       run: |
         DOCKER_VERSION="26.1.4"
-        curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz" | tar xz --strip 1 docker/docker -C ./docker
+        RUNNER_ARCH="${{ runner.arch }}"
+        if [ "$RUNNER_ARCH" == "X64" ]; then
+          ARCH="x86_64"
+        elif [ "$RUNNER_ARCH" == "ARM64" ]; then
+          ARCH="aarch64"
+        else
+          echo "Unknown architecture: ${RUNNER_ARCH}"
+          exit 1
+        fi
+        curl -fsSL "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_VERSION}.tgz" | tar xz --strip 1 docker/docker -C ./docker
         registry="public.ecr.aws/docker/library" && for image in fedora:latest ubuntu:noble; do ./docker pull "$registry/$image"; done
     - name: Run PyTests
       id: main
