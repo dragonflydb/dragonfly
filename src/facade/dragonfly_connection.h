@@ -85,12 +85,10 @@ class Connection : public util::Connection {
 
   // Pipeline message, accumulated Memcached command to be executed.
   struct MCPipelineMessage {
-    MCPipelineMessage(MemcacheParser::Command cmd, std::string_view value);
+    MCPipelineMessage(MemcacheParser::Command&& cmd, std::string_view value);
 
     MemcacheParser::Command cmd;
-    std::string_view value;
-    size_t backing_size;
-    std::unique_ptr<char[]> backing;  // backing for cmd and value
+    std::string value;
   };
 
   // Monitor message, carries a simple payload with the registered event to be sent.

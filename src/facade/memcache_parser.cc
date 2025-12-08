@@ -61,6 +61,10 @@ MP::CmdType From(string_view token) {
   return MP::INVALID;
 }
 
+void MaterializeArgs(absl::Span<std::string_view> args, MP::Command* dest) {
+  dest->Assign(args.begin(), args.end(), args.size());
+}
+
 MP::Result ParseStore(ArgSlice tokens, MP::Command* res) {
   const size_t num_tokens = tokens.size();
   unsigned opt_pos = 3;
@@ -93,7 +97,7 @@ MP::Result ParseStore(ArgSlice tokens, MP::Command* res) {
   return MP::OK;
 }
 
-MP::Result ParseValueless(ArgSlice tokens, MP::Command* res) {
+MP::Result ParseValueless(ArgSlice tokens, vector<string_view>* args, MP::Command* res) {
   const size_t num_tokens = tokens.size();
   size_t key_pos = 0;
   if (res->type == MP::GAT || res->type == MP::GATS) {
@@ -105,13 +109,15 @@ MP::Result ParseValueless(ArgSlice tokens, MP::Command* res) {
 
   // We support only `flushall` or `flushall 0`
   if (key_pos < num_tokens && res->type == MP::FLUSHALL) {
+    DCHECK(args->empty());
+
     int delay = 0;
     if (key_pos + 1 == num_tokens && absl::SimpleAtoi(tokens[key_pos], &delay) && delay == 0)
       return MP::OK;
     return MP::PARSE_ERROR;
   }
 
-  res->key = tokens[key_pos++];
+  args->push_back(tokens[key_pos++]);
 
   if (key_pos < num_tokens && res->type == MP::STATS)
     return MP::PARSE_ERROR;  // we don't support additional arguments to stats for now
@@ -126,16 +132,17 @@ MP::Result ParseValueless(ArgSlice tokens, MP::Command* res) {
   }
 
   while (key_pos < num_tokens) {
-    res->keys_ext.push_back(tokens[key_pos++]);
+    args->push_back(tokens[key_pos++]);
   }
 
   if (res->type >= MP::DELETE) {  // write commands
-    if (!res->keys_ext.empty() && res->keys_ext.back() == "noreply") {
+    if (args->size() > 1 && args->back() == "noreply") {
       res->no_reply = true;
-      res->keys_ext.pop_back();
+      args->pop_back();
     }
   }
 
+  MaterializeArgs(absl::MakeSpan(*args), res);
   return MP::OK;
 }
 
@@ -180,7 +187,7 @@ bool ParseMetaMode(char m, MP::Command* res) {
 }
 
 // See https://raw.githubusercontent.com/memcached/memcached/refs/heads/master/doc/protocol.txt
-MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
+MP::Result ParseMeta(ArgSlice tokens, vector<string_view>* args, MP::Command* res) {
   DCHECK(!tokens.empty());
 
   if (res->type == MP::META_DEBUG) {
@@ -192,11 +199,11 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
     return MP::PARSE_ERROR;
 
   res->meta = true;
-  res->key = tokens[0];
   res->bytes_len = 0;
   res->flags = 0;
   res->expire_ts = 0;
 
+  args->push_back(tokens[0]);
   tokens.remove_prefix(1);
 
   // We emulate the behavior by returning the high level commands.
@@ -228,6 +235,8 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
       return MP::PARSE_ERROR;
   }
 
+  string blob;
+
   for (size_t i = 0; i < tokens.size(); ++i) {
     string_view token = tokens[i];
 
@@ -239,9 +248,9 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
       case 'b':
         if (token.size() != 1)
           return MP::PARSE_ERROR;
-        if (!absl::Base64Unescape(res->key, &res->blob))
+        if (!absl::Base64Unescape(args->front(), &blob))
           return MP::PARSE_ERROR;
-        res->key = res->blob;
+        args->front() = blob;
         res->base64 = true;
         break;
       case 'F':
@@ -282,6 +291,7 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
         return MP::PARSE_ERROR;
     }
   }
+  MaterializeArgs(absl::MakeSpan(*args), res);
 
   return MP::OK;
 }
@@ -321,20 +331,27 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
 
   ArgSlice tokens_view{tokens};
   tokens_view.remove_prefix(1);
+  cmd->clear();
+  tmp_args_.clear();
 
   if (cmd->type <= CAS) {                                    // Store command
     if (tokens_view.size() < 4 || tokens[0].size() > 250) {  // key length limit
       return MP::PARSE_ERROR;
     }
 
-    cmd->key = tokens_view[0];
-
+    tmp_args_.push_back(tokens_view[0]);
     tokens_view.remove_prefix(1);
-    return ParseStore(tokens_view, cmd);
+    auto res = ParseStore(tokens_view, cmd);
+    if (res != MP::OK) {
+      return res;
+    }
+    MaterializeArgs(absl::MakeSpan(tmp_args_), cmd);
+
+    return MP::OK;
   }
 
   if (cmd->type >= META_SET) {
-    return tokens_view.empty() ? MP::PARSE_ERROR : ParseMeta(tokens_view, cmd);
+    return tokens_view.empty() ? MP::PARSE_ERROR : ParseMeta(tokens_view, &tmp_args_, cmd);
   }
 
   if (tokens_view.empty()) {
@@ -344,7 +361,7 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
     return MP::PARSE_ERROR;
   }
 
-  return ParseValueless(tokens_view, cmd);
+  return ParseValueless(tokens_view, &tmp_args_, cmd);
 };
 
 }  // namespace facade
