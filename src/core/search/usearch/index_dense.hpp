@@ -14,6 +14,8 @@
 #include <shared_mutex>  // `std::shared_mutex`
 #endif
 
+#include "util/fibers/synchronization.h"
+
 namespace unum {
 namespace usearch {
 
@@ -514,7 +516,7 @@ class index_dense_gt {
   mutable std::mutex available_threads_mutex_;
 
 #if defined(USEARCH_DEFINED_CPP17)
-  using shared_mutex_t = std::shared_mutex;
+  using shared_mutex_t = util::fb2::SharedMutex;
 #else
   using shared_mutex_t = unfair_shared_mutex_t;
 #endif

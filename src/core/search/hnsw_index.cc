@@ -10,12 +10,14 @@
 #include <hnswlib/space_l2.h>
 
 #include <mutex>
+#include <shared_mutex>
 
 #include "base/logging.h"
 #include "core/search/base.h"
 #include "core/search/hnsw_alg.h"
 #include "core/search/mrmw_mutex.h"
 #include "core/search/vector_utils.h"
+#include "util/fibers/synchronization.h"
 
 #define USEARCH_USE_SIMSIMD WITH_SIMSIMD
 #define USEARCH_USE_FP16LIB 1
@@ -27,12 +29,13 @@
 namespace dfly::search {
 
 using namespace std;
+
 struct HnswlibAdapter {
   // Default setting of hnswlib/hnswalg
   constexpr static size_t kDefaultEfRuntime = 10;
-  constexpr static size_t kIndexInitCapacitySize = 16384;
+  constexpr static size_t kIndexCapacitySize = 2 << 14;
 
-  explicit HnswlibAdapter(const SchemaField::VectorParams& params) : size_(0) {
+  explicit HnswlibAdapter(const SchemaField::VectorParams& params) : index_size_(0) {
     auto similarity_metric = [](VectorSimilarity sim) {
       switch (sim) {
         case dfly::search::VectorSimilarity::COSINE:
@@ -51,29 +54,49 @@ struct HnswlibAdapter {
 
     unum::usearch::index_dense_config_t config =
         unum::usearch::index_dense_config_t{params.hnsw_m, params.hnsw_ef_construction};
+    config.connectivity_base = params.hnsw_m * 2;
+    // We dont need to do key lookups (id -> vector) in the index.
+    config.enable_key_lookups = false;
 
     index_ = unum::usearch::index_dense_gt<GlobalDocId>::make(metric, config);
 
-    index_.reserve(kIndexInitCapacitySize);
+    // What about thread number here ?!
+    index_.reserve(kIndexCapacitySize);
   }
 
   void Add(const float* data, GlobalDocId id) {
-    size_.fetch_add(1);
+    // Check if we need to resize the index
+    // We keep the size of the index in a separate atomic to avoid
+    // locking exclusively when checking
+    bool needs_resize = false;
     {
-      absl::WriterMutexLock lk(&resize_mutex_);
-      if (size_ == index_.capacity()) {
-        index_.try_reserve(index_.capacity() * 2);
-        MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
+      std::shared_lock lk(mutex_);
+      if (index_size_.fetch_add(1) + 1 > index_.capacity()) {
+        needs_resize = true;
       }
     }
-    auto add_result = index_.add(id, data);
+
+    if (needs_resize) {
+      std::unique_lock ln(mutex_);
+      // Do we still need to resize?
+      // Another thread might have resized it already
+      auto size = index_size_.load();
+      if (size > index_.capacity()) {
+        index_.reserve(size * 2);
+      }
+    }
+
+    std::shared_lock lk(mutex_);
+    index_.add(id, data);
   }
 
   void Remove(GlobalDocId id) {
+    std::shared_lock lk(mutex_);
     index_.remove(id);
   }
 
   vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
+    std::shared_lock lk(mutex_);
     std::vector<pair<float, GlobalDocId>> results;
     auto search_result = index_.search(target, k, unum::usearch::index_dense_t::any_thread(), false,
                                        ef.value_or(kDefaultEfRuntime));
@@ -90,9 +113,9 @@ struct HnswlibAdapter {
   }
 
  private:
+  util::fb2::SharedMutex mutex_;
+  std::atomic<size_t> index_size_;
   unum::usearch::index_dense_t index_;
-  absl::Mutex resize_mutex_;
-  std::atomic<size_t> size_;
   mutable MRMWMutex mrmw_mutex_;
 };
 
