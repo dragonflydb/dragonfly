@@ -440,8 +440,7 @@ class DflyInstanceFactory:
             args.setdefault("fiber_safety_margin=4096")
 
         if version < 1.35:
-            if "experimental_io_loop_v2" in args:
-                del args["experimental_io_loop_v2"]
+            args.pop("experimental_io_loop_v2", None)
 
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v
