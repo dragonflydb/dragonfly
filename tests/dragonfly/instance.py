@@ -403,9 +403,7 @@ class DflyInstance:
         return mem_info.rss
 
     def has_arg(self, arg):
-        if arg in self.args and self.args[arg] == True:
-            return True
-        return False
+        return arg in self.args
 
 
 class DflyInstanceFactory:
