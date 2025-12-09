@@ -2,13 +2,13 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/take_resp_expr.h"
+#include "server/owned_resp_expr.h"
 
 #include <core/overloaded.h>
 
 namespace dfly {
 
-TakeRespExpr::TakeRespExpr(const facade::RespExpr& expr) {
+OwnedRespExpr::OwnedRespExpr(const facade::RespExpr& expr) {
   type = expr.type;
   std::visit(dfly::Overloaded{
                  [&](facade::RespExpr::Buffer buf) { u = Buffer(buf.begin(), buf.end()); },
@@ -25,38 +25,38 @@ TakeRespExpr::TakeRespExpr(const facade::RespExpr& expr) {
              expr.u);
 }
 
-std::string_view ToSV(TakeRespExpr::Buffer buf) {
+std::string_view ToSV(OwnedRespExpr::Buffer buf) {
   return std::string_view{reinterpret_cast<const char*>(buf.data()), buf.size()};
 }
 
 }  // namespace dfly
 
 namespace std {
-ostream& operator<<(ostream& os, const dfly::TakeRespExpr& e) {
-  using dfly::TakeRespExpr;
+ostream& operator<<(ostream& os, const dfly::OwnedRespExpr& e) {
+  using dfly::OwnedRespExpr;
   using dfly::ToSV;
 
   switch (e.type) {
-    case TakeRespExpr::Type::INT64:
+    case OwnedRespExpr::Type::INT64:
       os << "i" << get<int64_t>(e.u);
       break;
-    case TakeRespExpr::Type::DOUBLE:
+    case OwnedRespExpr::Type::DOUBLE:
       os << "d" << get<double>(e.u);
       break;
-    case TakeRespExpr::Type::STRING:
-      os << "'" << ToSV(get<TakeRespExpr::Buffer>(e.u)) << "'";
+    case OwnedRespExpr::Type::STRING:
+      os << "'" << ToSV(get<OwnedRespExpr::Buffer>(e.u)) << "'";
       break;
-    case TakeRespExpr::Type::NIL:
+    case OwnedRespExpr::Type::NIL:
       os << "nil";
       break;
-    case TakeRespExpr::Type::NIL_ARRAY:
+    case OwnedRespExpr::Type::NIL_ARRAY:
       os << "[]";
       break;
-    case TakeRespExpr::Type::ARRAY:
-      os << dfly::TakeRespSpan{std::get<TakeRespExpr::Vec>(e.u)};
+    case OwnedRespExpr::Type::ARRAY:
+      os << dfly::TakeRespSpan{std::get<OwnedRespExpr::Vec>(e.u)};
       break;
-    case TakeRespExpr::Type::ERROR:
-      os << "e(" << ToSV(get<TakeRespExpr::Buffer>(e.u)) << ")";
+    case OwnedRespExpr::Type::ERROR:
+      os << "e(" << ToSV(get<OwnedRespExpr::Buffer>(e.u)) << ")";
       break;
   }
 

@@ -9,18 +9,18 @@
 
 namespace dfly {
 
-class TakeRespExpr {
+class OwnedRespExpr {
  public:
   using Buffer = std::vector<uint8_t>;
 
   using Type = facade::RespExpr::Type;
 
-  using Vec = std::vector<TakeRespExpr>;
+  using Vec = std::vector<OwnedRespExpr>;
   Type type;
 
   std::variant<int64_t, double, Buffer, Vec> u;
 
-  TakeRespExpr(const facade::RespExpr& expr);
+  OwnedRespExpr(const facade::RespExpr& expr);
 
   std::string_view GetView() const {
     const Buffer& buffer = GetBuf();
@@ -45,14 +45,14 @@ class TakeRespExpr {
   }
 };
 
-using TakeRespVec = TakeRespExpr::Vec;
-using TakeRespSpan = absl::Span<const TakeRespExpr>;
+using TakeRespVec = OwnedRespExpr::Vec;
+using TakeRespSpan = absl::Span<const OwnedRespExpr>;
 
 }  // namespace dfly
 
 namespace std {
 
-ostream& operator<<(ostream& os, const dfly::TakeRespExpr& e);
+ostream& operator<<(ostream& os, const dfly::OwnedRespExpr& e);
 ostream& operator<<(ostream& os, dfly::TakeRespSpan rspan);
 
 }  // namespace std

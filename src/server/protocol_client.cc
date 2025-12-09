@@ -314,16 +314,13 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(uint32_t t
   return res;
 }
 
-io::Result<TakeRespExpr::Vec> ProtocolClient::TakeRespReply(uint32_t timeout) {
+io::Result<OwnedRespExpr::Vec> ProtocolClient::TakeRespReply(uint32_t timeout, base::IoBuf* buffer,
+                                                             bool copy_msg) {
+  DCHECK(parser_);
+
   auto prev_timeout = sock_->timeout();
   sock_->set_timeout(timeout);
-  auto res = TakeRespReply(nullptr, false);
-  sock_->set_timeout(prev_timeout);
-  return res;
-}
-
-io::Result<TakeRespExpr::Vec> ProtocolClient::TakeRespReply(base::IoBuf* buffer, bool copy_msg) {
-  DCHECK(parser_);
+  absl::Cleanup on_exit([this, prev_timeout]() { sock_->set_timeout(prev_timeout); });
 
   error_code ec;
   if (!buffer) {
@@ -335,12 +332,11 @@ io::Result<TakeRespExpr::Vec> ProtocolClient::TakeRespReply(base::IoBuf* buffer,
   uint32_t processed_bytes = 0;
 
   RedisParser::Result result = RedisParser::OK;
-  TakeRespExpr::Vec res_vec;
+  OwnedRespExpr::Vec res_vec;
   while (!ec) {
     uint32_t consumed;
     if (buffer->InputLen() == 0 || result == RedisParser::INPUT_PENDING) {
       DCHECK_GT(buffer->AppendLen(), 0u);
-
       ec = Recv(sock_.get(), buffer);
       if (ec) {
         return nonstd::make_unexpected(ec);

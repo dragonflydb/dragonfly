@@ -82,7 +82,7 @@ add_library(dragonfly_lib
             server_family.cc string_family.cc list_family.cc generic_family.cc
             ${DF_FAMILY_SRCS}
             main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc http_api.cc
-            protocol_client.cc take_resp_expr.cc
+            protocol_client.cc owned_resp_expr.cc
             snapshot.cc script_mgr.cc
             detail/compressor.cc detail/decompress.cc detail/save_stages_controller.cc detail/snapshot_storage.cc
             version.cc container_utils.cc
