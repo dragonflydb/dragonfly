@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include <absl/container/btree_set.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
@@ -18,13 +17,14 @@
 #pragma GCC diagnostic pop
 #endif
 
-#include <map>
+#include <absl/functional/function_ref.h>
+
 #include <memory>
 #include <optional>
 #include <vector>
 
-#include "absl/functional/function_ref.h"
 #include "base/pmr/memory_resource.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "core/search/base.h"
 #include "core/search/block_list.h"
 #include "core/search/compressed_sorted_set.h"
@@ -148,6 +148,8 @@ struct TagIndex : public BaseStringIndex<SortedVector<DocId>> {
         separator_{params.separator} {
   }
 
+  DefragmentResult Defragment(PageUsage* page_usage) override;
+
  protected:
   std::optional<StringList> GetStrings(const DocumentAccessor& doc,
                                        std::string_view field) const override;
@@ -155,6 +157,8 @@ struct TagIndex : public BaseStringIndex<SortedVector<DocId>> {
 
  private:
   char separator_;
+  std::string next_defrag_entry_;
+  std::string next_defrag_suffix_entry_;
 };
 
 struct BaseVectorIndex : public BaseIndex {
@@ -208,6 +212,56 @@ struct GeoIndex : public BaseIndex {
  private:
   using rtree = boost::geometry::index::rtree<index_entry, boost::geometry::index::linear<16>>;
   std::unique_ptr<rtree> rtree_;
+};
+
+// Defragments a map like data structure. The values in the map must have a `Defragment` method.
+// Works with rax tree map and hash based maps
+template <typename Container, typename ItFunc> struct DefragmentMap {
+  // ItFunc is necessary because RaxTreeMap does not allow copying or moving iterators, so this
+  // class cannot accept begin,end iterators from caller. It must construct the begin iterator
+  using Iterator = std::invoke_result_t<ItFunc>;
+  DefragmentMap(Container& container, ItFunc&& f)
+      : container(container), it(f()), end(container.end()) {
+  }
+
+  // The key is set if the defragmentation has to stop mid way due to depleted quota
+  DefragmentResult Defragment(PageUsage* page_usage, std::string* key) {
+    if (page_usage->QuotaDepleted()) {
+      return DefragmentResult{.quota_depleted = true, .objects_moved = 0};
+    }
+
+    DefragmentResult result;
+    for (; it != end; ++it) {
+      const auto& [k, map] = *it;
+      if (result.Merge(DefragmentIndex(map, page_usage, 0)).quota_depleted) {
+        *key = k;
+        break;
+      }
+    }
+
+    if (it == end) {
+      key->clear();
+    }
+
+    return result;
+  }
+
+ private:
+  template <typename T>
+  static auto DefragmentIndex(T& t, PageUsage* page_usage, int /*tag*/)
+      -> decltype(t->Defragment(page_usage)) {
+    return t->Defragment(page_usage);
+  }
+
+  template <typename T>
+  static auto DefragmentIndex(T& t, PageUsage* page_usage, char /*tag*/)
+      -> decltype(t.Defragment(page_usage)) {
+    return t.Defragment(page_usage);
+  }
+
+  Container& container;
+  Iterator it;
+  Iterator end;
 };
 
 }  // namespace dfly::search

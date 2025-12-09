@@ -5,7 +5,7 @@
 #include "core/search/search.h"
 
 #include <absl/cleanup/cleanup.h>
-#include <absl/strings/numbers.h>
+#include <absl/container/flat_hash_set.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 
@@ -13,11 +13,9 @@
 #include <type_traits>
 #include <variant>
 
-#include "absl/container/flat_hash_set.h"
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "core/search/ast_expr.h"
-#include "core/search/compressed_sorted_set.h"
 #include "core/search/index_result.h"
 #include "core/search/indices.h"
 #include "core/search/query_driver.h"
@@ -620,6 +618,23 @@ void FieldIndices::FinalizeInitialization() {
   for (auto& [field, index] : indices_) {
     index->FinalizeInitialization();
   }
+}
+
+DefragmentResult FieldIndices::Defragment(PageUsage* page_usage) {
+  auto defrag = [&](auto& indices, string* key) {
+    DefragmentMap dm{indices, [&] {
+                       auto it = key->empty() ? indices.end() : indices.find(*key);
+                       if (it == indices.end()) {
+                         it = indices.begin();
+                       }
+                       return it;
+                     }};
+    return dm.Defragment(page_usage, key);
+  };
+
+  DefragmentResult result = defrag(indices_, &next_defrag_field_);
+  result.Merge(defrag(sort_indices_, &next_defrag_sort_field_));
+  return result;
 }
 
 const Synonyms* FieldIndices::GetSynonyms() const {

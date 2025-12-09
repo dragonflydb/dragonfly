@@ -9,6 +9,8 @@
 #include <string_view>
 #include <vector>
 
+#include "common/backed_args.h"
+
 namespace facade {
 
 // Memcache parser does not parse value blobs, only the commands.
@@ -51,11 +53,16 @@ class MemcacheParser {
   };
 
   // According to https://github.com/memcached/memcached/wiki/Commands#standard-protocol
-  struct Command {
-    CmdType type = INVALID;
-    std::string_view key;
-    std::vector<std::string_view> keys_ext;
+  struct Command : public cmn::BackedArguments {
+    Command() = default;
+    Command(const Command&) = delete;
+    Command(Command&&) noexcept = default;
 
+    CmdType type = INVALID;
+
+    std::string_view key() const {
+      return lens_.empty() ? std::string_view{} : Front();
+    }
     union {
       uint64_t cas_unique = 0;  // for CAS COMMAND
       uint64_t delta;           // for DECR/INCR commands.
@@ -76,9 +83,6 @@ class MemcacheParser {
     bool return_access_time = false;  // l
     bool return_hit = false;          // h
     bool return_version = false;      // c
-
-    // Used internally by meta parsing.
-    std::string blob;
   };
 
   enum Result {
@@ -94,7 +98,14 @@ class MemcacheParser {
     return type >= SET && type <= CAS;
   }
 
+  size_t UsedMemory() const {
+    return tmp_args_.capacity() * sizeof(std::string_view);
+  }
+
   Result Parse(std::string_view str, uint32_t* consumed, Command* res);
+
+ private:
+  std::vector<std::string_view> tmp_args_;
 };
 
 }  // namespace facade

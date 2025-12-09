@@ -380,7 +380,6 @@ struct TL {
 
 thread_local TL tl;
 
-constexpr bool kUseSmallStrings = true;
 constexpr bool kUseAsciiEncoding = true;
 
 }  // namespace
@@ -1148,40 +1147,32 @@ void CompactObj::GetString(char* dest) const {
   }
 
   if (mask_bits_.encoding) {
+    StrEncoding str_encoding = GetStrEncoding();
+    string_view decode_blob;
+
     if (taglen_ == ROBJ_TAG) {
       CHECK_EQ(OBJ_STRING, u_.r_obj.type());
       DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-      string_view blob{(const char*)u_.r_obj.inner_obj(), u_.r_obj.Size()};
-      GetStrEncoding().Decode(blob, dest);
-      return;
+      decode_blob = {(const char*)u_.r_obj.inner_obj(), u_.r_obj.Size()};
     } else {
       CHECK_EQ(SMALL_TAG, taglen_);
-      string_view slices[2];
-      unsigned num = u_.small_str.GetV(slices);
-      DCHECK_EQ(2u, num);
-      size_t decoded_len = GetStrEncoding().DecodedSize(u_.small_str.size(), slices[0][0]);
+      auto& ss = u_.small_str;
 
-      if (mask_bits_.encoding == HUFFMAN_ENC) {
-        tl.tmp_buf.resize(slices[0].size() + slices[1].size() - 1);
-        uint8_t* next = tl.tmp_buf.data();
-        memcpy(next, slices[0].data() + 1, slices[0].size() - 1);
-        next += slices[0].size() - 1;
-        memcpy(next, slices[1].data(), slices[1].size());
-        string_view src(reinterpret_cast<const char*>(tl.tmp_buf.data()), tl.tmp_buf.size());
-        const auto& decoder = tl.GetHuffmanDecoder(huffman_domain_);
-        CHECK(decoder.Decode(src, decoded_len, dest));
-        return;
+      char* copy_dest;
+      if (str_encoding.enc_ == HUFFMAN_ENC) {
+        tl.tmp_buf.resize(ss.size());
+        copy_dest = reinterpret_cast<char*>(tl.tmp_buf.data());
+      } else {
+        // Write to rightmost location of dest buffer to leave some bytes for inline unpacking
+        size_t decoded_len = str_encoding.DecodedSize(ss.size(), ss.first_byte());
+        copy_dest = dest + (decoded_len - ss.size());
       }
 
-      // we left some space on the left to allow inplace ascii unpacking.
-      size_t space_left = decoded_len - u_.small_str.size();
-
-      char* next = dest + space_left;
-      memcpy(next, slices[0].data(), slices[0].size());
-      next += slices[0].size();
-      memcpy(next, slices[1].data(), slices[1].size());
-      detail::ascii_unpack_simd(reinterpret_cast<uint8_t*>(dest + space_left), decoded_len, dest);
+      ss.Get(copy_dest);
+      decode_blob = {copy_dest, ss.size()};
     }
+
+    str_encoding.Decode(decode_blob, dest);
     return;
   }
 
@@ -1193,15 +1184,8 @@ void CompactObj::GetString(char* dest) const {
     return;
   }
 
-  if (taglen_ == SMALL_TAG) {
-    string_view slices[2];
-    unsigned num = u_.small_str.GetV(slices);
-    DCHECK_EQ(2u, num);
-    memcpy(dest, slices[0].data(), slices[0].size());
-    dest += slices[0].size();
-    memcpy(dest, slices[1].data(), slices[1].size());
-    return;
-  }
+  if (taglen_ == SMALL_TAG)
+    return u_.small_str.Get(dest);
 
   LOG(FATAL) << "Bad tag " << int(taglen_);
 }
@@ -1267,7 +1251,7 @@ void CompactObj::Materialize(std::string_view blob, bool is_raw) {
   DCHECK_GT(blob.size(), kInlineLen);  // There are no mutable commands that shrink strings
 
   if (is_raw) {
-    if (kUseSmallStrings && SmallString::CanAllocate(blob.size())) {
+    if (SmallString::CanAllocate(blob.size())) {
       SetMeta(SMALL_TAG, mask_);
       tl.small_str_bytes += u_.small_str.Assign(blob);
     } else {
@@ -1481,8 +1465,7 @@ bool CompactObj::CmpEncoded(string_view sv) const {
     DCHECK_GT(sv.size(), 16u);  // we would not be in SMALL_TAG, otherwise.
 
     string_view slice[2];
-    unsigned num = u_.small_str.GetV(slice);
-    DCHECK_EQ(2u, num);
+    u_.small_str.Get(slice);
     DCHECK_LT(slice[0].size(), 14u);
 
     uint8_t tmpbuf[14];
@@ -1591,18 +1574,14 @@ void CompactObj::EncodeString(string_view str, bool is_key) {
 
   DCHECK_GT(encoded.size(), kInlineLen);
 
-  if (kUseSmallStrings && SmallString::CanAllocate(encoded.size())) {
-    if (taglen_ == 0) {
-      SetMeta(SMALL_TAG, mask_);
-      tl.small_str_bytes += u_.small_str.Assign(encoded);
-      return;
-    }
-
-    if (taglen_ == SMALL_TAG && encoded.size() <= u_.small_str.size()) {
+  if (SmallString::CanAllocate(encoded.size())) {
+    if (taglen_ == SMALL_TAG)
       tl.small_str_bytes -= u_.small_str.MallocUsed();
-      tl.small_str_bytes += u_.small_str.Assign(encoded);
-      return;
-    }
+    else
+      SetMeta(SMALL_TAG, mask_);
+
+    tl.small_str_bytes += u_.small_str.Assign(encoded);
+    return;
   }
 
   SetMeta(ROBJ_TAG, mask_);
