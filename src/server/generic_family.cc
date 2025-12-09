@@ -477,7 +477,10 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto dest_res = db_slice.FindMutable(op_args.db_cntx, dest_key_);
 
-  if (dest_found_) {
+  // Use the current state of the key, not the stale dest_found_ from phase 1.
+  // Another transaction might have created/deleted the key between phases.
+  const bool dest_exists = !dest_res.it.is_done();
+  if (dest_exists) {
     DVLOG(1) << "Rename: deleting the destiny key '" << dest_key_;
     db_slice.DelMutable(op_args.db_cntx, std::move(dest_res));
   }
@@ -485,7 +488,7 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
   if (restore_args.Expired()) {
     VLOG(1) << "Rename: the new key '" << dest_key_ << "' already expired, will not save the value";
 
-    if (dest_found_ && shard->journal()) {  // We need to delete old dest_key_ from replica
+    if (dest_exists && shard->journal()) {  // We need to delete old dest_key_ from replica
       RecordJournal(op_args, "DEL"sv, ArgSlice{dest_key_}, 2);
     }
 
@@ -502,7 +505,7 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
     return add_res.status();
 
   LOG_IF(DFATAL, !add_res->is_new)
-      << "Unexpected override for key " << dest_key_ << " " << dest_found_;
+      << "Unexpected override for key " << dest_key_ << " dest_exists=" << dest_exists;
   auto bc = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (bc) {
     bc->Awaken(t->GetDbIndex(), dest_key_);

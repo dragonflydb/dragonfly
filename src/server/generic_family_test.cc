@@ -8,6 +8,8 @@ extern "C" {
 #include "redis/rdb.h"
 }
 
+#include <random>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -1453,6 +1455,60 @@ TEST_F(GenericFamilyTest, CopyKeyExists) {
 
   ASSERT_THAT(Run({"COPY", "source", "destination", "REPLACE"}), IntArg(1));
   EXPECT_EQ(Run({"get", "destination"}), "value1");
+}
+
+TEST_F(GenericFamilyTest, RenameWithBrpoplpushBug) {
+  const std::vector<std::string> keys = {"x", "b", "x1", "b1", "x2", "b2", "x3", "b3"};
+  constexpr int kIterations = 300;
+  constexpr int kWorkersPerOp = 3;
+
+  Run({"mset", "x", "val", "b", "val"});
+  ASSERT_EQ(2, last_cmd_dbg_info_.shards_count) << "Test requires multi-shard setup";
+
+  for (const auto& key : keys) {
+    Run({"del", key});
+    Run({"rpush", key, "a", "b", "c"});
+  }
+
+  std::vector<util::fb2::Fiber> fibers;
+  const int num_keys = keys.size();
+
+  // BRPOPLPUSH workers - randomly pick source and dest keys
+  for (int w = 0; w < kWorkersPerOp; ++w) {
+    fibers.push_back(pp_->at(w % pp_->size())->LaunchFiber([&, w] {
+      std::mt19937 rng(w);
+      std::uniform_int_distribution<int> dist(0, num_keys - 1);
+      for (int i = 0; i < kIterations; ++i) {
+        Run(absl::StrCat("brpop", w), {"brpoplpush", keys[dist(rng)], keys[dist(rng)], "0.001"});
+      }
+    }));
+  }
+
+  // LPUSH workers - randomly pick key
+  for (int w = 0; w < kWorkersPerOp; ++w) {
+    fibers.push_back(pp_->at((w + 1) % pp_->size())->LaunchFiber([&, w] {
+      std::mt19937 rng(w + 100);
+      std::uniform_int_distribution<int> dist(0, num_keys - 1);
+      for (int i = 0; i < kIterations; ++i) {
+        Run(absl::StrCat("lpush", w), {"lpush", keys[dist(rng)], "x"});
+      }
+    }));
+  }
+
+  // RENAME workers - randomly pick source and dest keys
+  for (int w = 0; w < kWorkersPerOp; ++w) {
+    fibers.push_back(pp_->at((w + 2) % pp_->size())->LaunchFiber([&, w] {
+      std::mt19937 rng(w + 200);
+      std::uniform_int_distribution<int> dist(0, num_keys - 1);
+      for (int i = 0; i < kIterations; ++i) {
+        Run(absl::StrCat("rename", w), {"rename", keys[dist(rng)], keys[dist(rng)]});
+      }
+    }));
+  }
+
+  for (auto& fb : fibers) {
+    fb.Join();
+  }
 }
 
 }  // namespace dfly
