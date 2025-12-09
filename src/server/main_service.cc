@@ -1828,7 +1828,7 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
 
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
                          MCReplyBuilder* mc_builder, facade::ConnectionContext* cntx) {
-  absl::InlinedVector<MutableSlice, 8> args;
+  absl::InlinedVector<string_view, 8> args;
   char cmd_name[16];
   char ttl[absl::numbers_internal::kFastToBufferSize];
   char store_opt[32] = {0};
@@ -1889,7 +1889,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       strcpy(cmd_name, "QUIT");
       break;
     case MemcacheParser::STATS:
-      server_family_.StatsMC(cmd.key, mc_builder);
+      server_family_.StatsMC(cmd.key(), mc_builder);
       return;
     case MemcacheParser::VERSION:
       mc_builder->SendSimpleString("VERSION 1.6.0 DF");
@@ -1915,15 +1915,13 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     args.emplace_back(ttl, next - ttl);
   }
 
-  if (!cmd.key.empty()) {
-    char* key = const_cast<char*>(cmd.key.data());
-    args.emplace_back(key, cmd.key.size());
+  if (!cmd.empty()) {
+    args.emplace_back(cmd.Front());
   }
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   if (MemcacheParser::IsStoreCmd(cmd.type)) {
-    char* v = const_cast<char*>(value.data());
-    args.emplace_back(v, value.size());
+    args.emplace_back(value);
 
     if (store_opt[0]) {
       args.emplace_back(store_opt, strlen(store_opt));
@@ -1936,9 +1934,12 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     }
     dfly_cntx->conn_state.memcache_flag = cmd.flags;
   } else if (cmd.type < MemcacheParser::QUIT) {  // read commands
-    for (auto s : cmd.keys_ext) {
-      char* key = const_cast<char*>(s.data());
-      args.emplace_back(key, s.size());
+    if (cmd.size() > 1) {
+      auto it = cmd.begin();
+      ++it;  // skip first key
+      for (auto end = cmd.end(); it != end; ++it) {
+        args.emplace_back(*it);
+      }
     }
     if (cmd.type == MemcacheParser::GETS || cmd.type == MemcacheParser::GATS) {
       dfly_cntx->conn_state.memcache_flag |= ConnectionState::FETCH_CAS_VER;

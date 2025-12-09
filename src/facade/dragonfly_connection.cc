@@ -381,39 +381,9 @@ class PipelineCacheSizeTracker {
 
 thread_local PipelineCacheSizeTracker tl_pipe_cache_sz_tracker;
 
-Connection::MCPipelineMessage::MCPipelineMessage(MemcacheParser::Command cmd_in,
+Connection::MCPipelineMessage::MCPipelineMessage(MemcacheParser::Command&& cmd_in,
                                                  std::string_view value_in)
-    : cmd{std::move(cmd_in)}, value{value_in}, backing_size{0} {
-  // Note: The process of laundering string_views should be placed in an utility function,
-  // but there are no other uses like this so far.
-
-  // Compute total size and create backing
-  backing_size = cmd.key.size() + value.size();
-  for (const auto& ext_key : cmd.keys_ext)
-    backing_size += ext_key.size();
-
-  backing = make_unique<char[]>(backing_size);
-
-  // Copy everything into backing
-  if (!cmd.key.empty())
-    memcpy(backing.get(), cmd.key.data(), cmd.key.size());
-  if (!value.empty())
-    memcpy(backing.get() + cmd.key.size(), value.data(), value.size());
-  size_t offset = cmd.key.size() + value.size();
-  for (const auto& ext_key : cmd.keys_ext) {
-    if (!ext_key.empty())
-      memcpy(backing.get() + offset, ext_key.data(), ext_key.size());
-    offset += ext_key.size();
-  }
-
-  // Update string_views
-  cmd.key = string_view{backing.get(), cmd.key.size()};
-  value = string_view{backing.get() + cmd.key.size(), value.size()};
-  offset = cmd.key.size() + value.size();
-  for (auto& key : cmd.keys_ext) {
-    key = {backing.get() + offset, key.size()};
-    offset += key.size();
-  }
+    : cmd{std::move(cmd_in)}, value{value_in} {
 }
 
 size_t Connection::MessageHandle::UsedMemory() const {
@@ -445,8 +415,7 @@ size_t Connection::MessageHandle::UsedMemory() const {
       return 0;
     }
     size_t operator()(const MCPipelineMessagePtr& msg) {
-      return sizeof(MCPipelineMessage) + msg->backing_size +
-             msg->cmd.keys_ext.size() * sizeof(string_view);
+      return sizeof(MCPipelineMessage) + msg->cmd.HeapMemory() + msg->value.capacity();
     }
   };
 

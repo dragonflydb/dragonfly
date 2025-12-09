@@ -18,6 +18,41 @@ class BackedArguments {
   BackedArguments() {
   }
 
+  class iterator {
+   public:
+    using iterator_category = std::forward_iterator_tag;
+    using value_type = std::string_view;
+    using difference_type = std::ptrdiff_t;
+    using pointer = const std::string_view*;
+    using reference = std::string_view;
+
+    iterator(const BackedArguments* ba, size_t index) : ba_(ba), index_(index) {
+    }
+
+    iterator& operator++() {
+      offset_ += ba_->elem_capacity(index_);
+      ++index_;
+      return *this;
+    }
+
+    bool operator==(const iterator& other) const {
+      return index_ == other.index_ && ba_ == other.ba_;
+    }
+
+    bool operator!=(const iterator& other) const {
+      return !(*this == other);
+    }
+
+    std::string_view operator*() const {
+      return ba_->at(index_, offset_);
+    }
+
+   private:
+    const BackedArguments* ba_;
+    size_t index_;
+    size_t offset_ = 0;
+  };
+
   // Construct the arguments from iterator range.
   // TODO: In general we could get away without the len argument,
   // but that would require fixing base::it::CompoundIterator to support subtraction.
@@ -45,6 +80,10 @@ class BackedArguments {
     return lens_.size();
   }
 
+  bool empty() const {
+    return lens_.empty();
+  }
+
   size_t elem_len(size_t i) const {
     return lens_[i];
   }
@@ -56,6 +95,19 @@ class BackedArguments {
   std::string_view at(uint32_t index, uint32_t offset) const {
     const char* ptr = storage_.data() + offset;
     return std::string_view{ptr, lens_[index]};
+  }
+
+  iterator begin() const {
+    return {this, 0};
+  }
+
+  iterator end() const {
+    return {this, lens_.size()};
+  }
+
+  void clear() {
+    lens_.clear();
+    storage_.clear();
   }
 
  protected:

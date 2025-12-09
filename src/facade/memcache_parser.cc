@@ -63,19 +63,20 @@ MP::CmdType From(string_view token) {
 
 MP::Result ParseStore(ArgSlice tokens, MP::Command* res) {
   const size_t num_tokens = tokens.size();
-  unsigned opt_pos = 3;
+  unsigned opt_pos = 4;
   if (res->type == MP::CAS) {
     if (num_tokens <= opt_pos)
       return MP::PARSE_ERROR;
     ++opt_pos;
   }
 
+  // tokens[0] is key
   uint32_t flags;
-  if (!absl::SimpleAtoi(tokens[0], &flags) || !absl::SimpleAtoi(tokens[1], &res->expire_ts) ||
-      !absl::SimpleAtoi(tokens[2], &res->bytes_len))
+  if (!absl::SimpleAtoi(tokens[1], &flags) || !absl::SimpleAtoi(tokens[2], &res->expire_ts) ||
+      !absl::SimpleAtoi(tokens[3], &res->bytes_len))
     return MP::BAD_INT;
 
-  if (res->type == MP::CAS && !absl::SimpleAtoi(tokens[3], &res->cas_unique)) {
+  if (res->type == MP::CAS && !absl::SimpleAtoi(tokens[4], &res->cas_unique)) {
     return MP::BAD_INT;
   }
 
@@ -90,10 +91,13 @@ MP::Result ParseStore(ArgSlice tokens, MP::Command* res) {
     return MP::PARSE_ERROR;
   }
 
+  string_view key = tokens[0];
+  res->Assign(&key, &key + 1, 1);
+
   return MP::OK;
 }
 
-MP::Result ParseValueless(ArgSlice tokens, MP::Command* res) {
+MP::Result ParseValueless(ArgSlice tokens, vector<string_view>* args, MP::Command* res) {
   const size_t num_tokens = tokens.size();
   size_t key_pos = 0;
   if (res->type == MP::GAT || res->type == MP::GATS) {
@@ -105,13 +109,15 @@ MP::Result ParseValueless(ArgSlice tokens, MP::Command* res) {
 
   // We support only `flushall` or `flushall 0`
   if (key_pos < num_tokens && res->type == MP::FLUSHALL) {
+    DCHECK(args->empty());
+
     int delay = 0;
     if (key_pos + 1 == num_tokens && absl::SimpleAtoi(tokens[key_pos], &delay) && delay == 0)
       return MP::OK;
     return MP::PARSE_ERROR;
   }
 
-  res->key = tokens[key_pos++];
+  args->push_back(tokens[key_pos++]);
 
   if (key_pos < num_tokens && res->type == MP::STATS)
     return MP::PARSE_ERROR;  // we don't support additional arguments to stats for now
@@ -126,16 +132,17 @@ MP::Result ParseValueless(ArgSlice tokens, MP::Command* res) {
   }
 
   while (key_pos < num_tokens) {
-    res->keys_ext.push_back(tokens[key_pos++]);
+    args->push_back(tokens[key_pos++]);
   }
 
   if (res->type >= MP::DELETE) {  // write commands
-    if (!res->keys_ext.empty() && res->keys_ext.back() == "noreply") {
+    if (args->size() > 1 && args->back() == "noreply") {
       res->no_reply = true;
-      res->keys_ext.pop_back();
+      args->pop_back();
     }
   }
 
+  res->Assign(args->begin(), args->end(), args->size());
   return MP::OK;
 }
 
@@ -192,11 +199,11 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
     return MP::PARSE_ERROR;
 
   res->meta = true;
-  res->key = tokens[0];
   res->bytes_len = 0;
   res->flags = 0;
   res->expire_ts = 0;
 
+  string_view arg0 = tokens[0];
   tokens.remove_prefix(1);
 
   // We emulate the behavior by returning the high level commands.
@@ -228,6 +235,8 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
       return MP::PARSE_ERROR;
   }
 
+  string blob;
+
   for (size_t i = 0; i < tokens.size(); ++i) {
     string_view token = tokens[i];
 
@@ -239,9 +248,9 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
       case 'b':
         if (token.size() != 1)
           return MP::PARSE_ERROR;
-        if (!absl::Base64Unescape(res->key, &res->blob))
+        if (!absl::Base64Unescape(arg0, &blob))
           return MP::PARSE_ERROR;
-        res->key = res->blob;
+        arg0 = blob;
         res->base64 = true;
         break;
       case 'F':
@@ -282,6 +291,7 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
         return MP::PARSE_ERROR;
     }
   }
+  res->Assign(&arg0, &arg0 + 1, 1);
 
   return MP::OK;
 }
@@ -321,15 +331,13 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
 
   ArgSlice tokens_view{tokens};
   tokens_view.remove_prefix(1);
+  cmd->clear();
 
   if (cmd->type <= CAS) {                                    // Store command
     if (tokens_view.size() < 4 || tokens[0].size() > 250) {  // key length limit
       return MP::PARSE_ERROR;
     }
 
-    cmd->key = tokens_view[0];
-
-    tokens_view.remove_prefix(1);
     return ParseStore(tokens_view, cmd);
   }
 
@@ -344,7 +352,8 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
     return MP::PARSE_ERROR;
   }
 
-  return ParseValueless(tokens_view, cmd);
+  tmp_args_.clear();
+  return ParseValueless(tokens_view, &tmp_args_, cmd);
 };
 
 }  // namespace facade

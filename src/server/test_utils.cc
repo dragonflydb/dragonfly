@@ -507,7 +507,7 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view va
 
   MP::Command cmd;
   cmd.type = cmd_type;
-  cmd.key = key;
+  cmd.Assign(&key, &key + 1, 1);
   cmd.flags = flags;
   cmd.bytes_len = value.size();
   cmd.expire_ts = ttl.count();
@@ -547,13 +547,9 @@ auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::stri
   auto src = list.begin();
   if (cmd.type == MP::GAT || cmd.type == MP::GATS) {
     CHECK(absl::SimpleAtoi(*src++, &cmd.expire_ts));
-  } else {
-    cmd.key = *src++;
   }
 
-  for (; src != list.end(); ++src) {
-    cmd.keys_ext.push_back(*src);
-  }
+  cmd.Assign(src, list.end(), list.end() - src);
 
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
 
