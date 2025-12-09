@@ -78,6 +78,7 @@ class RangeTree {
   // Returns all blocks in the tree.
   absl::InlinedVector<const RangeBlock*, 5> GetAllBlocks() const;
 
+  // Build tree ouf of a single block after replication
   void FinalizeInitialization();
 
   struct Stats {
