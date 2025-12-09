@@ -56,7 +56,7 @@ runs:
           exit 1
         fi
         curl -fsSL "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_VERSION}.tgz" | tar xz --strip 1 docker/docker -C ./docker
-        registry="public.ecr.aws/docker/library" && for image in fedora:latest ubuntu:noble; do ./docker pull "$registry/$image"; done
+        registry="ghcr.io/romange" && for image in fedora:30 ubuntu:noble; do ./docker pull "$registry/$image"; done
     - name: Run PyTests
       id: main
       shell: bash
