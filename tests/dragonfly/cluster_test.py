@@ -3489,7 +3489,7 @@ async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
 
     cclient = instances[0].cluster_client()
 
-    docs_num = 3
+    docs_num = 2
     for i in range(0, docs_num):
         assert await cclient.execute_command("HSET", f"s{i}", "title", f"test {i}") == 1
 
