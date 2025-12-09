@@ -13,6 +13,7 @@
 #include <variant>
 
 #include "base/iterator.h"
+#include "common/backed_args.h"
 #include "facade/op_status.h"
 
 namespace facade {
@@ -40,6 +41,94 @@ using CmdArgList = absl::Span<const std::string_view>;
 using CmdArgVec = std::vector<std::string_view>;
 using ArgSlice = absl::Span<const std::string_view>;
 using OwnedArgSlice = absl::Span<const std::string>;
+
+class ParsedArgs {
+ public:
+  ParsedArgs() = default;
+
+  // References backed arguments. The object must outlive this ParsedArgs.
+  ParsedArgs(const cmn::BackedArguments& bargs)  // NOLINT google-explicit-constructor
+      : args_(&bargs) {
+  }
+
+  ParsedArgs(ArgSlice slice)  // NOLINT google-explicit-constructor
+      : args_(slice) {
+  }
+
+  ParsedArgs(const ParsedArgs& other) = default;
+  ParsedArgs& operator=(const ParsedArgs& bargs) = default;
+
+  size_t size() const {
+    return std::visit([](const auto& args) { return args.size(); }, args_);
+  }
+
+  bool empty() const {
+    return size() == 0;
+  }
+
+  ParsedArgs Tail() const {
+    return std::visit([](const auto& args) { return args.Tail(); }, args_);
+  }
+
+  std::string_view Front() const {
+    return std::visit([](const auto& args) { return args.front(); }, args_);
+  }
+
+  ArgSlice ToSlice(CmdArgVec* scratch) const {
+    return std::visit([scratch](const auto& args) { return args.ToSlice(scratch); }, args_);
+  }
+
+ private:
+  struct WrapperBacked {
+    WrapperBacked(const cmn::BackedArguments* args) : args_(args) {  // NOLINT
+    }
+
+    const cmn::BackedArguments* args_;
+    uint32_t index_ = 0;
+    uint32_t ofs_bytes_ = 0;
+
+    ParsedArgs Tail() const {
+      ParsedArgs res(*args_);
+      WrapperBacked* wb = std::get_if<WrapperBacked>(&res.args_);
+      wb->index_ = index_ + 1;
+      wb->ofs_bytes_ = ofs_bytes_ + args_->elem_capacity(index_);
+      return res;
+    };
+
+    size_t size() const {
+      return args_->size() - index_;
+    }
+
+    std::string_view front() const {
+      return args_->at(index_, ofs_bytes_);
+    }
+
+    ArgSlice ToSlice(CmdArgVec* scratch) const {
+      scratch->resize(size());
+      size_t offset = ofs_bytes_;
+      for (size_t i = 0; i < scratch->size(); ++i) {
+        (*scratch)[i] = args_->at(index_ + i, offset);
+        offset += args_->elem_capacity(index_ + i);
+      }
+      return ArgSlice{scratch->data(), scratch->size()};
+    }
+  };
+
+  struct Slice : public ArgSlice {
+    using ArgSlice::ArgSlice;
+    Slice(ArgSlice other) : ArgSlice(other) {  // NOLINT
+    }
+
+    ParsedArgs Tail() const {
+      return ParsedArgs{subspan(1)};
+    }
+
+    ArgSlice ToSlice(std::vector<std::string_view>* /*scratch*/) const {
+      return *this;
+    }
+  };
+  std::variant<Slice, WrapperBacked> args_;
+};
 
 inline std::string_view ToSV(std::string_view slice) {
   return slice;

@@ -36,11 +36,11 @@ class ServiceInterface {
   virtual ~ServiceInterface() {
   }
 
-  virtual DispatchResult DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
+  virtual DispatchResult DispatchCommand(ParsedArgs args, SinkReplyBuilder* builder,
                                          ConnectionContext* cntx) = 0;
 
-  virtual DispatchManyResult DispatchManyCommands(absl::Span<ArgSlice> commands,
-                                                  SinkReplyBuilder* builder,
+  virtual DispatchManyResult DispatchManyCommands(std::function<ParsedArgs()> arg_gen,
+                                                  unsigned count, SinkReplyBuilder* builder,
                                                   ConnectionContext* cntx) = 0;
 
   virtual void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,

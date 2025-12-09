@@ -116,7 +116,7 @@ class TieredStorage {
 
   // Moves pv contents to the cool storage and updates pv to point to it.
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
-                PrimeValue* pv);
+                CompactObj::ExternalRep rep, PrimeValue* pv);
 
   PrimeValue DeleteCool(detail::TieredColdRecord* record);
   detail::TieredColdRecord* PopCool();
@@ -138,6 +138,7 @@ class TieredStorage {
     unsigned write_depth_limit;
     float offload_threshold;
     float upload_threshold;
+    bool experimental_hash_offload;
   } config_;
   struct {
     uint64_t stash_overflow_cnt = 0;

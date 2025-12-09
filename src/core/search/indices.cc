@@ -14,10 +14,6 @@
 
 #define UNI_ALGO_DISABLE_NFKC_NFKD
 
-#include <hnswlib/hnswalg.h>
-#include <hnswlib/hnswlib.h>
-#include <hnswlib/space_ip.h>
-#include <hnswlib/space_l2.h>
 #include <uni_algo/case.h>
 #include <uni_algo/ranges_word.h>
 
@@ -35,6 +31,7 @@ ABSL_FLAG(bool, use_numeric_range_tree, true,
 namespace dfly::search {
 
 using namespace std;
+using cmn::StringOrView;
 
 namespace {
 
@@ -546,159 +543,6 @@ std::vector<DocId> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
   // Result is already sorted by id, no need to sort again
   // Also it has no duplicates
   return result;
-}
-
-struct HnswlibAdapter {
-  // Default setting of hnswlib/hnswalg
-  constexpr static size_t kDefaultEfRuntime = 10;
-
-  HnswlibAdapter(const SchemaField::VectorParams& params)
-      : space_{MakeSpace(params.dim, params.sim)},
-        world_{GetSpacePtr(), params.capacity, params.hnsw_m, params.hnsw_ef_construction,
-               100 /* seed*/} {
-  }
-
-  void Add(const float* data, GlobalDocId id) {
-    while (true) {
-      try {
-        absl::ReaderMutexLock lock(&resize_mutex_);
-        world_.addPoint(data, id);
-        return;
-      } catch (const std::exception& e) {
-        std::string error_msg = e.what();
-        if (absl::StrContains(error_msg, "The number of elements exceeds the specified limit")) {
-          ResizeIfFull();
-          continue;
-        }
-        LOG(ERROR) << "HnswlibAdapter::Add exception: " << e.what();
-      }
-    }
-  }
-
-  void Remove(GlobalDocId id) {
-    try {
-      world_.markDelete(id);
-    } catch (const std::exception& e) {
-      LOG(WARNING) << "HnswlibAdapter::Remove exception: " << e.what();
-    }
-  }
-
-  vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
-    world_.setEf(ef.value_or(kDefaultEfRuntime));
-    return QueueToVec(world_.searchKnn(target, k));
-  }
-
-  vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
-                                       const vector<GlobalDocId>& allowed) {
-    struct BinsearchFilter : hnswlib::BaseFilterFunctor {
-      virtual bool operator()(hnswlib::labeltype id) {
-        return binary_search(allowed->begin(), allowed->end(), id);
-      }
-
-      BinsearchFilter(const vector<GlobalDocId>* allowed) : allowed{allowed} {
-      }
-      const vector<GlobalDocId>* allowed;
-    };
-
-    world_.setEf(ef.value_or(kDefaultEfRuntime));
-    BinsearchFilter filter{&allowed};
-    return QueueToVec(world_.searchKnn(target, k, &filter));
-  }
-
- private:
-  using SpaceUnion = std::variant<hnswlib::L2Space, hnswlib::InnerProductSpace>;
-
-  static SpaceUnion MakeSpace(size_t dim, VectorSimilarity sim) {
-    if (sim == VectorSimilarity::L2)
-      return hnswlib::L2Space{dim};
-    else
-      return hnswlib::InnerProductSpace{dim};
-  }
-
-  hnswlib::SpaceInterface<float>* GetSpacePtr() {
-    return visit([](auto& space) -> hnswlib::SpaceInterface<float>* { return &space; }, space_);
-  }
-
-  // Function requires that we hold mutex while resizing index. resizeIndex is not thread safe with
-  // insertion (https://github.com/nmslib/hnswlib/issues/267)
-  void ResizeIfFull() {
-    {
-      absl::ReaderMutexLock lock(&resize_mutex_);
-      if (world_.getCurrentElementCount() < world_.getMaxElements() ||
-          (world_.allow_replace_deleted_ && world_.getDeletedCount() > 0)) {
-        return;
-      }
-    }
-    try {
-      absl::WriterMutexLock lock(&resize_mutex_);
-      if (world_.getCurrentElementCount() == world_.getMaxElements() &&
-          (!world_.allow_replace_deleted_ || world_.getDeletedCount() == 0)) {
-        auto max_elements = world_.getMaxElements();
-        world_.resizeIndex(max_elements * 2);
-        VLOG(1) << "Resizing HNSW Index from " << max_elements << " to " << max_elements * 2;
-      }
-    } catch (const std::exception& e) {
-      LOG(FATAL) << "HnswlibAdapter::ResizeIfFull exception: " << e.what();
-    }
-  }
-
-  template <typename Q> static vector<pair<float, GlobalDocId>> QueueToVec(Q queue) {
-    vector<pair<float, GlobalDocId>> out(queue.size());
-    size_t idx = out.size();
-    while (!queue.empty()) {
-      out[--idx] = queue.top();
-      queue.pop();
-    }
-    return out;
-  }
-
-  SpaceUnion space_;
-  hnswlib::HierarchicalNSW<float> world_;
-  absl::Mutex resize_mutex_;
-};
-
-HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource*)
-    : dim_{params.dim}, sim_{params.sim}, adapter_{make_unique<HnswlibAdapter>(params)} {
-  DCHECK(params.use_hnsw);
-  // TODO: Patch hnsw to use MR
-}
-
-HnswVectorIndex::~HnswVectorIndex() {
-}
-
-bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::string_view field) {
-  auto vector = doc.GetVector(field);
-
-  if (!vector) {
-    return false;
-  }
-
-  auto& [ptr, size] = vector.value();
-
-  if (ptr && size != dim_) {
-    return false;
-  }
-
-  if (ptr) {
-    adapter_->Add(ptr.get(), id);
-  }
-
-  return true;
-}
-
-std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(float* target, size_t k,
-                                                                std::optional<size_t> ef) const {
-  return adapter_->Knn(target, k, ef);
-}
-
-std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(
-    float* target, size_t k, std::optional<size_t> ef,
-    const std::vector<GlobalDocId>& allowed) const {
-  return adapter_->Knn(target, k, ef, allowed);
-}
-
-void HnswVectorIndex::Remove(GlobalDocId id, const DocumentAccessor& doc, string_view field) {
-  adapter_->Remove(id);
 }
 
 GeoIndex::GeoIndex(PMR_NS::memory_resource* mr) : rtree_(make_unique<rtree>()) {

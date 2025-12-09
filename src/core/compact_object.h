@@ -11,10 +11,10 @@
 #include <type_traits>
 
 #include "base/pmr/memory_resource.h"
+#include "common/string_or_view.h"
 #include "core/json/json_object.h"
 #include "core/mi_memory_resource.h"
 #include "core/small_string.h"
-#include "core/string_or_view.h"
 
 namespace dfly {
 
@@ -28,6 +28,7 @@ constexpr unsigned kEncodingJsonFlat = 1;
 class SBF;
 class PageUsage;
 
+using cmn::StringOrView;
 namespace detail {
 
 // redis objects or blobs of upto 4GB size.
@@ -255,14 +256,6 @@ class CompactObj {
 
   bool DefragIfNeeded(PageUsage* page_usage);
 
-  void SetAsyncDelete() {
-    mask_bits_.io_pending = 1;  // io_pending flag is used for async delete for keys.
-  }
-
-  bool IsAsyncDelete() const {
-    return mask_bits_.io_pending;
-  }
-
   bool HasStashPending() const {
     return mask_bits_.io_pending;
   }
@@ -364,7 +357,8 @@ class CompactObj {
   }
 
   // Assigns a cooling record to the object together with its external slice.
-  void SetCool(size_t offset, uint32_t serialized_size, detail::TieredColdRecord* record);
+  void SetCool(size_t offset, uint32_t serialized_size, ExternalRep rep,
+               detail::TieredColdRecord* record);
 
   struct CoolItem {
     uint16_t page_offset;
@@ -375,6 +369,10 @@ class CompactObj {
   // Prerequisite: IsCool() is true.
   // Returns the external data of the object incuding its ColdRecord.
   CoolItem GetCool() const;
+
+  // Prequisite: IsCool() is true.
+  // Keeps cool record only as external value and discard in-memory part.
+  void Freeze(size_t offset, size_t sz);
 
   std::pair<size_t, size_t> GetExternalSlice() const;
 
@@ -542,8 +540,8 @@ class CompactObj {
   union {
     uint8_t mask_ = 0;
     struct {
-      uint8_t ref : 1;  // Mark objects that have expiry timestamp assigned.
-      uint8_t expire : 1;
+      uint8_t ref : 1;      // Mark objects that don't own their allocation.
+      uint8_t expire : 1;   // Mark objects that have expiry timestamp assigned.
       uint8_t mc_flag : 1;  // Marks keys that have memcache flags assigned.
 
       // See the EncodingEnum for the meaning of these bits.
@@ -551,7 +549,7 @@ class CompactObj {
 
       // IO_PENDING is set when the tiered storage has issued an i/o request to save the value.
       // It is cleared when the io request finishes or is cancelled.
-      uint8_t io_pending : 1;  // also serves as async-delete for keys.
+      uint8_t io_pending : 1;
       uint8_t sticky : 1;
 
       // TOUCHED used to determin which items are hot/cold.

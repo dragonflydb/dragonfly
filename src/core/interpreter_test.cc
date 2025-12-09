@@ -356,7 +356,7 @@ TEST_F(InterpreterTest, Modules) {
   EXPECT_TRUE(Execute("return cjson.encode({1, 2, 3})"));
   EXPECT_EQ("str([1,2,3])", ser_.res);
   EXPECT_TRUE(Execute("return cjson.decode('{\"a\": 1}')['a']"));
-  EXPECT_EQ("d(1)", ser_.res);
+  EXPECT_EQ("i(1)", ser_.res);
 
   // cmsgpack module
   EXPECT_TRUE(Execute("return cmsgpack.pack('ok', true)"));

@@ -254,6 +254,11 @@ class DenseSet {
   uint32_t Scan(uint32_t cursor, const ItemCb& cb) const;
   void Reserve(size_t sz);
 
+  // Shrinks the table to the specified size. The size must be a power of 2,
+  // >= kMinSize, and >= current number of elements.
+  // This method should be called explicitly when memory reclamation is needed.
+  void Shrink(size_t new_size);
+
   void Fill(DenseSet* other) const;
 
   // set an abstract time that allows expiry.
@@ -400,6 +405,9 @@ class DenseSet {
   // Deletes the object pointed by ptr and removes it from the set.
   // If ptr is a link then it will be deleted internally.
   void Delete(DensePtr* prev, DensePtr* ptr);
+
+  // Processes a single bucket during Shrink, relocating elements as needed.
+  void ShrinkBucket(size_t bucket_idx);
 
   std::vector<DensePtr, DensePtrAllocator> entries_;
 

@@ -20,7 +20,7 @@
 #include "base/io_buf.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
-#include "core/heap_size.h"
+#include "common/heap_size.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/memcache_parser.h"
@@ -153,6 +153,10 @@ void UpdateIoBufCapacity(const io::IoBuf& io_buf, ConnectionStats* stats,
     VLOG(2) << "Grown io_buf to " << capacity;
     stats->read_buf_capacity += capacity - prev_capacity;
   }
+}
+
+size_t UsedMemoryInternal(const Connection::PipelineMessage& msg) {
+  return sizeof(msg) + msg.HeapMemory();
 }
 
 struct TrafficLogger {
@@ -380,19 +384,6 @@ class PipelineCacheSizeTracker {
 
 thread_local PipelineCacheSizeTracker tl_pipe_cache_sz_tracker;
 
-void Connection::PipelineMessage::SetArgs(const RespVec& args) {
-  auto* next = storage.data();
-  for (size_t i = 0; i < args.size(); ++i) {
-    RespExpr::Buffer buf = args[i].GetBuf();
-    size_t s = buf.size();
-    if (s)
-      memcpy(next, buf.data(), s);
-    next[s] = '\0';
-    this->args[i] = MutableSlice(next, s);
-    next += (s + 1);
-  }
-}
-
 Connection::MCPipelineMessage::MCPipelineMessage(MemcacheParser::Command cmd_in,
                                                  std::string_view value_in)
     : cmd{std::move(cmd_in)}, value{value_in}, backing_size{0} {
@@ -428,23 +419,13 @@ Connection::MCPipelineMessage::MCPipelineMessage(MemcacheParser::Command cmd_in,
   }
 }
 
-void Connection::PipelineMessage::Reset(size_t nargs, size_t capacity) {
-  storage.resize(capacity);
-  args.resize(nargs);
-}
-
-size_t Connection::PipelineMessage::StorageCapacity() const {
-  return storage.capacity() + args.capacity();
-}
-
 size_t Connection::MessageHandle::UsedMemory() const {
   struct MessageSize {
     size_t operator()(const PubMessagePtr& msg) {
       return sizeof(PubMessage) + (msg->channel.size() + msg->message.size());
     }
     size_t operator()(const PipelineMessagePtr& msg) {
-      return sizeof(PipelineMessage) + msg->args.capacity() * sizeof(MutableSlice) +
-             msg->storage.capacity();
+      return UsedMemoryInternal(*msg);
     }
     size_t operator()(const MonitorMessage& msg) {
       return msg.capacity();
@@ -558,11 +539,10 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
 }
 
 void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
-  DVLOG(2) << "Dispatching pipeline: " << ToSV(msg.args.front());
+  DVLOG(2) << "Dispatching pipeline: " << msg.Front();
 
   ++self->local_stats_.cmds;
-  self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()},
-                                  self->reply_builder_.get(), self->cc_.get());
+  self->service_->DispatchCommand(ParsedArgs{msg}, self->reply_builder_.get(), self->cc_.get());
 
   self->last_interaction_ = time(nullptr);
   self->skip_next_squashing_ = false;
@@ -647,7 +627,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   static atomic_uint32_t next_id{1};
 
   constexpr size_t kReqSz = sizeof(Connection::PipelineMessage);
-  static_assert(kReqSz <= 256 && kReqSz >= 200);
+  static_assert(kReqSz <= 256);
 
   switch (protocol) {
     case Protocol::REDIS:
@@ -1255,7 +1235,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
 
   auto dispatch_sync = [this] {
     RespExpr::VecToArgList(tmp_parse_args_, &tmp_cmd_vec_);
-    service_->DispatchCommand(absl::MakeSpan(tmp_cmd_vec_), reply_builder_.get(), cc_.get());
+    service_->DispatchCommand(ParsedArgs{tmp_cmd_vec_}, reply_builder_.get(), cc_.get());
   };
 
   auto dispatch_async = [this]() -> MessageHandle { return {FromArgs(tmp_parse_args_)}; };
@@ -1578,36 +1558,32 @@ void Connection::SquashPipeline() {
   DCHECK_EQ(dispatch_q_.size(), pending_pipeline_cmd_cnt_);
   DCHECK_EQ(reply_builder_->GetProtocol(), Protocol::REDIS);  // Only Redis is supported.
 
-  vector<ArgSlice> squash_cmds;
-  squash_cmds.reserve(dispatch_q_.size());
+  unsigned pipeline_count = std::min<uint32_t>(dispatch_q_.size(), pipeline_squash_limit_cached);
 
   uint64_t start = CycleClock::Now();
 
-  for (const auto& msg : dispatch_q_) {
-    CHECK(holds_alternative<PipelineMessagePtr>(msg.handle))
-        << msg.handle.index() << " on " << DebugInfo();
+  // We use indexes as iterators are invalidated when pushing into the queue.
+  auto get_next_fn = [i = 0, this]() mutable -> ParsedArgs {
+    const auto& elem = dispatch_q_[i++];
+    CHECK(holds_alternative<PipelineMessagePtr>(elem.handle));
+    const auto& pmsg = get<PipelineMessagePtr>(elem.handle);
 
-    auto& pmsg = get<PipelineMessagePtr>(msg.handle);
-    squash_cmds.emplace_back(absl::MakeSpan(pmsg->args));
-    if (squash_cmds.size() >= pipeline_squash_limit_cached) {
-      // We reached the limit of commands to squash, so we dispatch them.
-      break;
-    }
-  }
+    return *pmsg;
+  };
 
   // async_dispatch is a guard to prevent concurrent writes into reply_builder_, hence
   // it must guard the Flush() as well.
   cc_->async_dispatch = true;
 
   DispatchManyResult result =
-      service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), reply_builder_.get(), cc_.get());
+      service_->DispatchManyCommands(get_next_fn, pipeline_count, reply_builder_.get(), cc_.get());
 
   uint32_t dispatched = result.processed;
   uint64_t before_flush = CycleClock::Now();
   //
   // TODO: to investigate if always flushing will improve P99 latency because otherwise we
   // wait for the next batch to finish before fully flushing the current response.
-  if (pending_pipeline_cmd_cnt_ == squash_cmds.size() ||
+  if (pending_pipeline_cmd_cnt_ == pipeline_count ||
       always_flush_pipeline_cached) {  // Flush if no new commands appeared
     reply_builder_->Flush();
     reply_builder_->SetBatchMode(false);  // in case the next dispatch is sync
@@ -1639,7 +1615,7 @@ void Connection::SquashPipeline() {
   dispatch_q_.erase(it, it + dispatched);
 
   // If interrupted due to pause, fall back to regular dispatch
-  skip_next_squashing_ = dispatched != squash_cmds.size();
+  skip_next_squashing_ = dispatched != pipeline_count;
 }
 
 void Connection::ClearPipelinedMessages() {
@@ -1797,25 +1773,15 @@ void Connection::AsyncFiber() {
 }
 
 Connection::PipelineMessagePtr Connection::FromArgs(const RespVec& args) {
-  DCHECK(!args.empty());
-  size_t backed_sz = 0;
-  for (const auto& arg : args) {
-    CHECK_EQ(RespExpr::STRING, arg.type);
-    backed_sz += arg.GetBuf().size() + 1;  // for '\0'
-  }
-  DCHECK(backed_sz);
-
-  static_assert(alignof(PipelineMessage) == 8);
-
   PipelineMessagePtr ptr;
-  if (ptr = GetFromPipelinePool(); ptr) {
-    ptr->Reset(args.size(), backed_sz);
-  } else {
+  if (ptr = GetFromPipelinePool(); !ptr) {
     // We must construct in place here, since there is a slice that uses memory locations
-    ptr = make_unique<PipelineMessage>(args.size(), backed_sz);
+    ptr = make_unique<PipelineMessage>();
   }
 
-  ptr->SetArgs(args);
+  auto map = [](const RespExpr& expr) { return expr.GetView(); };
+  auto range = base::it::Transform(map, base::it::Range(args.begin(), args.end()));
+  ptr->Assign(range.begin(), range.end(), args.size());
   return ptr;
 }
 
@@ -1824,7 +1790,7 @@ void Connection::ShrinkPipelinePool() {
     return;
 
   if (tl_pipe_cache_sz_tracker.CheckAndUpdateWatermark(pipeline_req_pool_.size())) {
-    stats_->pipeline_cmd_cache_bytes -= pipeline_req_pool_.back()->StorageCapacity();
+    stats_->pipeline_cmd_cache_bytes -= UsedMemoryInternal(*pipeline_req_pool_.back());
     pipeline_req_pool_.pop_back();
   }
 }
@@ -1834,7 +1800,7 @@ Connection::PipelineMessagePtr Connection::GetFromPipelinePool() {
     return nullptr;
 
   auto ptr = std::move(pipeline_req_pool_.back());
-  stats_->pipeline_cmd_cache_bytes -= ptr->StorageCapacity();
+  stats_->pipeline_cmd_cache_bytes -= UsedMemoryInternal(*ptr);
   pipeline_req_pool_.pop_back();
   return ptr;
 }
@@ -2011,7 +1977,7 @@ void Connection::RecycleMessage(MessageHandle msg) {
     pending_pipeline_cmd_cnt_--;
     pending_pipeline_bytes_ -= used_mem;
     if (stats_->pipeline_cmd_cache_bytes < qbp.pipeline_cache_limit) {
-      stats_->pipeline_cmd_cache_bytes += (*pipe)->StorageCapacity();
+      stats_->pipeline_cmd_cache_bytes += UsedMemoryInternal(*(*pipe));
       pipeline_req_pool_.push_back(std::move(*pipe));
     }
   }
@@ -2077,10 +2043,10 @@ bool Connection::IsHttp() const {
 }
 
 Connection::MemoryUsage Connection::GetMemoryUsage() const {
-  size_t mem = sizeof(*this) + dfly::HeapSize(dispatch_q_) + dfly::HeapSize(name_) +
-               dfly::HeapSize(tmp_parse_args_) + dfly::HeapSize(tmp_cmd_vec_) +
-               dfly::HeapSize(memcache_parser_) + dfly::HeapSize(redis_parser_) +
-               dfly::HeapSize(cc_) + dfly::HeapSize(reply_builder_);
+  size_t mem = sizeof(*this) + cmn::HeapSize(dispatch_q_) + cmn::HeapSize(name_) +
+               cmn::HeapSize(tmp_parse_args_) + cmn::HeapSize(tmp_cmd_vec_) +
+               cmn::HeapSize(memcache_parser_) + cmn::HeapSize(redis_parser_) + cmn::HeapSize(cc_) +
+               cmn::HeapSize(reply_builder_);
 
   // We add a hardcoded 9k value to accomodate for the part of the Fiber stack that is in use.
   // The allocated stack is actually larger (~130k), but only a small fraction of that (9k

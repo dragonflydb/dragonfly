@@ -14,6 +14,7 @@
 
 #include "base/function2.hpp"
 #include "facade/command_id.h"
+#include "facade/facade_types.h"
 
 namespace facade {
 class SinkReplyBuilder;
@@ -27,10 +28,10 @@ namespace CO {
 
 enum CommandOpt : uint32_t {
   READONLY = 1U << 0,
-  FAST = 1U << 1,  // Unused?
-  WRITE = 1U << 2,
-  LOADING = 1U << 3,  // Command allowed during LOADING state.
-  DENYOOM = 1U << 4,  // use-memory in redis.
+  FAST = 1U << 1,       // Unused?
+  JOURNALED = 1U << 2,  // Command is logged to AOF / Journal.
+  LOADING = 1U << 3,    // Command allowed during LOADING state.
+  DENYOOM = 1U << 4,    // use-memory in redis.
 
   DANGEROUS = 1U << 5,  // Dangerous commands are logged when used
 
@@ -107,6 +108,8 @@ template <typename T> class MoveOnly {
 
 class CommandId : public facade::CommandId {
  public:
+  using CmdArgList = facade::CmdArgList;
+
   // NOTICE: name must be a literal string, otherwise metrics break! (see cmd_stats_map in
   // server_state.h)
   CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
@@ -141,8 +144,8 @@ class CommandId : public facade::CommandId {
     return opt_mask_ & CO::READONLY;
   }
 
-  bool IsWriteOnly() const {
-    return opt_mask_ & CO::WRITE;
+  bool IsJournaled() const {
+    return opt_mask_ & CO::JOURNALED;
   }
 
   bool IsBlocking() const {
@@ -251,8 +254,8 @@ class CommandRegistry {
   using FamiliesVec = std::vector<std::vector<std::string>>;
   FamiliesVec GetFamilies();
 
-  std::pair<const CommandId*, facade::ArgSlice> FindExtended(std::string_view cmd,
-                                                             facade::ArgSlice tail_args) const;
+  std::pair<const CommandId*, facade::ParsedArgs> FindExtended(std::string_view cmd,
+                                                               facade::ParsedArgs tail_args) const;
 
   absl::flat_hash_map<std::string, hdr_histogram*> LatencyMap() const;
 

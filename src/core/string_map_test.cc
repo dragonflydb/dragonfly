@@ -21,7 +21,7 @@
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "core/detail/stateless_allocator.h"
-#include "core/page_usage_stats.h"
+#include "core/page_usage/page_usage_stats.h"
 
 extern "C" {
 #include "redis/zmalloc.h"

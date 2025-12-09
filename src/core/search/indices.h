@@ -32,8 +32,8 @@
 #include "core/search/rax_tree.h"
 
 // TODO: move core field definitions out of big header
+#include "common/string_or_view.h"
 #include "core/search/search.h"
-#include "core/string_or_view.h"
 
 namespace dfly::search {
 
@@ -112,7 +112,7 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // Used by Add & Remove to tokenize text value
   virtual absl::flat_hash_set<std::string> Tokenize(std::string_view value) const = 0;
 
-  StringOrView NormalizeQueryWord(std::string_view word) const;
+  cmn::StringOrView NormalizeQueryWord(std::string_view word) const;
   static Container* GetOrCreate(search::RaxTreeMap<Container>* map, std::string_view word);
   static void Remove(search::RaxTreeMap<Container>* map, DocId id, std::string_view word);
 
@@ -189,28 +189,6 @@ struct FlatVectorIndex : public BaseVectorIndex {
 
  private:
   PMR_NS::vector<float> entries_;
-};
-
-struct HnswlibAdapter;
-class HnswVectorIndex {
- public:
-  explicit HnswVectorIndex(const search::SchemaField::VectorParams& params,
-                           PMR_NS::memory_resource* mr = PMR_NS::get_default_resource());
-
-  ~HnswVectorIndex();
-
-  bool Add(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field);
-  void Remove(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field);
-
-  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k,
-                                                 std::optional<size_t> ef) const;
-  std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
-                                                 const std::vector<GlobalDocId>& allowed) const;
-
- private:
-  size_t dim_;
-  VectorSimilarity sim_;
-  std::unique_ptr<HnswlibAdapter> adapter_;
 };
 
 struct GeoIndex : public BaseIndex {

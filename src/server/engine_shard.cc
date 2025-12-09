@@ -12,7 +12,7 @@
 
 #include "base/flags.h"
 #include "core/huff_coder.h"
-#include "core/page_usage_stats.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "io/proc_reader.h"
 
 extern "C" {
@@ -691,21 +691,24 @@ void EngineShard::Heartbeat() {
 
   // TODO: iterate over all namespaces
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
-  // Skip heartbeat if we are serializing a big value
-  static auto start = std::chrono::system_clock::now();
+
   // Skip heartbeat if global transaction is in process.
   // This is determined by attempting to check if shard lock can be acquired.
   const bool can_acquire_global_lock = shard_lock()->Check(IntentLock::Mode::EXCLUSIVE);
 
   if (db_slice.WillBlockOnJournalWrite() || !can_acquire_global_lock) {
-    const auto elapsed = std::chrono::system_clock::now() - start;
-    if (elapsed > std::chrono::seconds(1)) {
-      const auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed);
-      LOG_EVERY_T(WARNING, 5) << "Stalled heartbeat() fiber for " << elapsed_seconds.count()
+    uint64_t now = absl::GetCurrentTimeNanos();
+
+    uint64_t elapsed_ms = (now - stalled_start_ns_) / 1000000;
+
+    if (stalled_start_ns_ && elapsed_ms > 1000) {
+      LOG_EVERY_T(WARNING, 5) << "Stalled heartbeat() fiber for " << elapsed_ms / 1000
                               << " seconds";
     }
+    stalled_start_ns_ = now;
     return;
   }
+  stalled_start_ns_ = 0;
 
   thread_local bool check_huffman = (shard_id_ == 0);  // run it only on shard 0.
   if (check_huffman) {

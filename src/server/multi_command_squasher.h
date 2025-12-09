@@ -66,7 +66,7 @@ class MultiCommandSquasher {
     boost::intrusive_ptr<Transaction> local_tx;  // stub-mode tx for use inside shard
   };
 
-  enum class SquashResult : uint8_t { SQUASHED, SQUASHED_FULL, NOT_SQUASHED, ERROR };
+  enum class SquashResult : uint8_t { SQUASHED, SQUASHED_FULL, NOT_SQUASHED };
 
   MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx, Service* Service,
                        const Opts& opts);

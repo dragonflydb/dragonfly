@@ -38,6 +38,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
+#include "core/dense_set.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
@@ -1127,6 +1128,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   config_registry.RegisterMutable("tls_ca_cert_dir");
   config_registry.RegisterMutable("replica_priority");
   config_registry.RegisterMutable("lua_undeclared_keys_shas");
+  config_registry.RegisterMutable("lua_float_as_int_shas");
   config_registry.RegisterMutable("point_in_time_snapshot");
 
   pb_task_ = shard_set->pool()->GetNextProactor();
@@ -2621,6 +2623,62 @@ void ServerFamily::Memory(CmdArgList args, const CommandContext& cmd_cntx) {
   return mem_cmd.Run(args);
 }
 
+void ServerFamily::Shrink(CmdArgList args, const CommandContext& cmd_cntx) {
+  string_view key = ArgS(args, 0);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+
+  auto cb = [key](Transaction* t, EngineShard* shard) -> OpResult<int64_t> {
+    auto& db_slice = t->GetDbSlice(shard->shard_id());
+    auto it = db_slice.FindReadOnly(t->GetDbContext(), key).it;
+    if (!IsValid(it)) {
+      return OpStatus::KEY_NOTFOUND;
+    }
+
+    const PrimeValue& pv = it->second;
+    unsigned encoding = pv.Encoding();
+    unsigned obj_type = pv.ObjType();
+
+    // Only DenseSet-based structures (set or hash with kEncodingStrMap2)
+    if (encoding != kEncodingStrMap2 || (obj_type != OBJ_SET && obj_type != OBJ_HASH)) {
+      return OpStatus::WRONG_TYPE;
+    }
+
+    DenseSet* ds = static_cast<DenseSet*>(pv.RObjPtr());
+    ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
+    size_t current_size = ds->UpperBoundSize();
+    size_t bucket_count = ds->BucketCount();
+
+    if (current_size == 0 || bucket_count == 0) {
+      return 0;
+    }
+
+    size_t optimal_size = std::max(size_t(8), absl::bit_ceil(current_size));
+    if (optimal_size >= bucket_count) {
+      return 0;
+    }
+
+    size_t bucket_bytes_before = bucket_count * sizeof(void*);
+    ds->Shrink(optimal_size);
+    size_t bucket_bytes_after = ds->BucketCount() * sizeof(void*);
+
+    return bucket_bytes_before - bucket_bytes_after;
+  };
+
+  OpResult<int64_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+
+  if (result.status() == OpStatus::KEY_NOTFOUND) {
+    return rb->SendNull();
+  }
+  if (result.status() == OpStatus::WRONG_TYPE) {
+    return rb->SendError("WRONGTYPE Key is not a set or hash with DenseSet encoding");
+  }
+  if (!result) {
+    return rb->SendError(result.status());
+  }
+
+  rb->SendLong(*result);
+}
+
 void ServerFamily::BgSaveFb(boost::intrusive_ptr<Transaction> trans) {
   GenericError ec = WaitUntilSaveFinished(trans.get());
   if (ec) {
@@ -3994,7 +4052,7 @@ void ServerFamily::Latency(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
-  if (sub_cmd == "LATEST") {
+  if (sub_cmd == "LATEST" || sub_cmd == "HISTOGRAM") {
     return rb->SendEmptyArray();
   }
 
@@ -4209,9 +4267,9 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -2, 0, 0, acl::kConfig}.HFUNC(Config)
       << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDbSize}.HFUNC(DbSize)
       << CI{"DEBUG", CO::ADMIN | CO::LOADING, -2, 0, 0, acl::kDebug}.HFUNC(Debug)
-      << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushDB}.HFUNC(
-             FlushDb)
-      << CI{"FLUSHALL", CO::WRITE | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushAll}
+      << CI{"FLUSHDB", CO::JOURNALED | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushDB}
+             .HFUNC(FlushDb)
+      << CI{"FLUSHALL", CO::JOURNALED | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushAll}
              .HFUNC(FlushDb)
       << CI{"INFO", CO::LOADING, -1, 0, 0, acl::kInfo}.HFUNC(Info)
       << CI{"HELLO", CO::LOADING, -1, 0, 0, acl::kHello}.HFUNC(Hello)
@@ -4219,6 +4277,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, acl::kLatency}.HFUNC(
              Latency)
       << CI{"MEMORY", kMemOpts, -2, 0, 0, acl::kMemory}.HFUNC(Memory)
+      << CI{"SHRINK", CO::JOURNALED | CO::FAST, 2, 1, 1, acl::kMemory}.HFUNC(Shrink)
       << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, acl::kSave}.HFUNC(Save)
       << CI{"SHUTDOWN",    CO::ADMIN | CO::NOSCRIPT | CO::LOADING | CO::DANGEROUS, -1, 0, 0,
             acl::kShutDown}

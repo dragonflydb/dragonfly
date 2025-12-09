@@ -25,36 +25,6 @@ namespace {
 #define FAST_MATH
 #endif
 
-// Euclidean vector distance: sqrt( sum: (u[i] - v[i])^2  )
-FAST_MATH float L2Distance(const float* u, const float* v, size_t dims) {
-#ifdef WITH_SIMSIMD
-  simsimd_distance_t distance = 0;
-  simsimd_l2_f32(u, v, dims, &distance);
-  return static_cast<float>(distance);
-#else
-  float sum = 0;
-  for (size_t i = 0; i < dims; i++)
-    sum += (u[i] - v[i]) * (u[i] - v[i]);
-  return sqrt(sum);
-#endif
-}
-
-// Inner product distance: 1 - dot_product(u, v)
-// For normalized vectors, this is equivalent to cosine distance
-FAST_MATH float IPDistance(const float* u, const float* v, size_t dims) {
-#ifdef WITH_SIMSIMD
-  // Use SimSIMD dot product and convert to inner product distance: 1 - dot(u, v).
-  simsimd_distance_t dot = 0;
-  simsimd_dot_f32(u, v, dims, &dot);
-  return 1.0f - static_cast<float>(dot);
-#else
-  float sum_uv = 0;
-  for (size_t i = 0; i < dims; i++)
-    sum_uv += u[i] * v[i];
-  return 1.0f - sum_uv;
-#endif
-}
-
 FAST_MATH float CosineDistance(const float* u, const float* v, size_t dims) {
 #ifdef WITH_SIMSIMD
   simsimd_distance_t distance = 0;
@@ -85,6 +55,36 @@ OwnedFtVector ConvertToFtVector(string_view value) {
 }
 
 }  // namespace
+
+// Euclidean vector distance: sqrt( sum: (u[i] - v[i])^2  )
+FAST_MATH float L2Distance(const float* u, const float* v, size_t dims) {
+#ifdef WITH_SIMSIMD
+  simsimd_distance_t distance = 0;
+  simsimd_l2_f32(u, v, dims, &distance);
+  return static_cast<float>(distance);
+#else
+  float sum = 0;
+  for (size_t i = 0; i < dims; i++)
+    sum += (u[i] - v[i]) * (u[i] - v[i]);
+  return sqrt(sum);
+#endif
+}
+
+// Inner product distance: 1 - dot_product(u, v)
+// For normalized vectors, this is equivalent to cosine distance
+FAST_MATH float IPDistance(const float* u, const float* v, size_t dims) {
+#ifdef WITH_SIMSIMD
+  // Use SimSIMD dot product and convert to inner product distance: 1 - dot(u, v).
+  simsimd_distance_t dot = 0;
+  simsimd_dot_f32(u, v, dims, &dot);
+  return 1.0f - static_cast<float>(dot);
+#else
+  float sum_uv = 0;
+  for (size_t i = 0; i < dims; i++)
+    sum_uv += u[i] * v[i];
+  return 1.0f - sum_uv;
+#endif
+}
 
 OwnedFtVector BytesToFtVector(string_view value) {
   DCHECK_EQ(value.size() % sizeof(float), 0u) << value.size();
