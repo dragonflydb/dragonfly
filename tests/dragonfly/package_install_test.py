@@ -14,8 +14,10 @@ async def test_install_package_on_fedora():
     with DockerContainer(image="ghcr.io/romange/fedora:30", tty=True) as fedora:
         check(
             fedora,
-            "dnf config-manager addrepo --from-repofile=https://packages.dragonflydb.io/dragonfly.repo",
+            "curl -Lo /etc/yum.repos.d/dragonfly.repo https://packages.dragonflydb.io/dragonfly.repo",
         )
+        check(fedora, "dnf clean all")
+        check(fedora, "dnf makecache")
         check(fedora, "dnf -y install dragonfly")
         check(fedora, "dragonfly --version")
 
