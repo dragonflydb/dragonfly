@@ -1121,8 +1121,8 @@ void Connection::ConnectionFlow() {
     variant<error_code, Connection::ParserStatus> res;
     if (io_loop_v2 && !is_tls_) {
       // Migrations should call RegisterRecv if the connection has reached here once.
-      // Otherwise, migration will code won't register and wait for the connection to
-      // reach here first and then  RegisterRecv inside IoLoopV2
+      // Otherwise, a migration won't register and instead wait for the connection state
+      // to first reach here and then call RegisterRecv inside IoLoopV2.
       allowed_to_register_ = true;
       // Breaks with TLS. RegisterOnRecv is unimplemented.
       res = IoLoopV2();
@@ -1262,10 +1262,15 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
 
   io::Bytes read_buffer = io_buf_.InputBuffer();
   // Keep track of total bytes consumed/parsed. The do/while{} loop below preempts,
-  // and InputBuffer() size might change between preemption points. Hence, count
+  // and InputBuffer() size might change between preemption points. There is a corner case,
+  // that ConsumeInput() will strip a portion of the request which makes the test_publish_stuck
+  // test fail.
+  // TODO(kostas): follow up on this
+  size_t total_consumed = 0;
   do {
     result = redis_parser_->Parse(read_buffer, &consumed, &tmp_parse_args_);
     request_consumed_bytes_ += consumed;
+    total_consumed += consumed;
     if (result == RedisParser::OK && !tmp_parse_args_.empty()) {
       // If we get a non-STRING type (e.g., NIL, ARRAY), it's a protocol error.
       bool valid_input = std::all_of(tmp_parse_args_.begin(), tmp_parse_args_.end(),
@@ -1296,7 +1301,6 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
           << "Redis parser error: " << result << " during parse: " << ToSV(read_buffer);
     }
     read_buffer.remove_prefix(consumed);
-    io_buf_.ConsumeInput(consumed);
 
     // We must yield from time to time to allow other fibers to run.
     // Specifically, if a client sends a huge chunk of data resulting in a very long pipeline,
@@ -1306,6 +1310,8 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
       ThisFiber::Yield();
     }
   } while (RedisParser::OK == result && read_buffer.size() > 0 && !reply_builder_->GetError());
+
+  io_buf_.ConsumeInput(total_consumed);
 
   parser_error_ = result;
   if (result == RedisParser::OK)
