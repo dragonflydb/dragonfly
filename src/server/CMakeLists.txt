@@ -103,10 +103,6 @@ if (PRINT_STACKTRACES_ON_SIGNAL)
   target_compile_definitions(dragonfly_lib PRIVATE PRINT_STACKTRACES_ON_SIGNAL)
 endif()
 
-if (WITH_ASAN OR WITH_USAN)
-  target_compile_definitions(dfly_transaction PRIVATE SANITIZERS)
-endif()
-
 if (WITH_AWS)
   SET(AWS_LIB awsv2_lib)
   add_definitions(-DWITH_AWS)
@@ -131,10 +127,6 @@ endif()
 
 add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)
-
-if (WITH_ASAN OR WITH_USAN)
-  target_compile_definitions(dfly_test_lib PRIVATE SANITIZERS)
-endif()
 
 cxx_test(dragonfly_test dfly_test_lib LABELS DFLY)
 cxx_test(multi_test dfly_test_lib LABELS DFLY)
@@ -162,14 +154,6 @@ cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
 cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
-if (WITH_ASAN OR WITH_USAN)
-  target_compile_definitions(stream_family_test PRIVATE SANITIZERS)
-  target_compile_definitions(multi_test PRIVATE SANITIZERS)
-  target_compile_definitions(search_family_test PRIVATE SANITIZERS)
-  target_compile_definitions(json_family_test PRIVATE SANITIZERS)
-  target_compile_definitions(json_family_memory_test PRIVATE SANITIZERS)
-  target_compile_definitions(dragonfly_test PRIVATE SANITIZERS)
-endif()
 
 add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  generic_family_test memcache_parser_test rdb_test journal_test
