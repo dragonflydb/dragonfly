@@ -2231,6 +2231,12 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
 
+  // Return early because RegisterOnRecv() should not be called if the socket
+  // is not open. Both migrations and replication hit this flow upon cancellations.
+  if (!peer->IsOpen()) {
+    return parse_status;
+  }
+
   // TODO EnableRecvMultishot
 
   peer->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
