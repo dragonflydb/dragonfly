@@ -333,8 +333,8 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
   tokens_view.remove_prefix(1);
   cmd->clear();
 
-  if (cmd->type <= CAS) {                                    // Store command
-    if (tokens_view.size() < 4 || tokens[0].size() > 250) {  // key length limit
+  if (cmd->type <= CAS) {                                         // Store command
+    if (tokens_view.size() < 4 || tokens_view[0].size() > 250) {  // key length limit
       return MP::PARSE_ERROR;
     }
 
