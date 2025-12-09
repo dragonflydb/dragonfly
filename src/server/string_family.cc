@@ -26,6 +26,7 @@
 #include "server/command_registry.h"
 #include "server/common.h"
 #include "server/conn_context.h"
+#include "server/debug_sync_point.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
@@ -1145,6 +1146,9 @@ void StringFamily::SetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
 void StringFamily::Get(CmdArgList args, const CommandContext& cmnd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
+
+    DEBUG_SYNC("return_get_key_not_found", [&]() { it_res = OpStatus::KEY_NOTFOUND; })
+
     if (!it_res.ok())
       return it_res.status();
 
