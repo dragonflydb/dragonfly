@@ -1,0 +1,9 @@
+*4
+$4
+HSET
+$4
+hash
+$5
+field
+$5
+value
