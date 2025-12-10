@@ -11,6 +11,8 @@
 #include <string_view>
 #include <system_error>
 
+#include "io/io.h"
+
 namespace facade {
 
 class DiskBackedQueue {
@@ -23,15 +25,14 @@ class DiskBackedQueue {
   // Check if we can offload bytes to backing file.
   bool HasEnoughBackingSpaceFor(size_t bytes) const;
 
-  std::error_code Push(std::string_view blob);
+  std::error_code Write(io::Bytes bytes);
 
-  std::error_code Pop(std::string* out);
+  io::Result<size_t> ReadTo(io::MutableBytes out);
 
   // Check if backing file is empty, i.e. backing file has 0 bytes.
   bool Empty() const;
 
-  std::error_code CloseReader();
-  std::error_code CloseWriter();
+  std::error_code Close();
 
  private:
   // File Reader/Writer
@@ -39,8 +40,6 @@ class DiskBackedQueue {
   std::unique_ptr<io::ReadonlyFile> reader_;
 
   size_t total_backing_bytes_ = 0;
-  size_t total_backing_items_ = 0;
-
   size_t next_read_offset_ = 0;
 
   // Read only constants
@@ -49,8 +48,6 @@ class DiskBackedQueue {
 
   // same as connection id. Used to uniquely identify the backed file
   const size_t id_ = 0;
-
-  std::string buffer;
 };
 
 }  // namespace facade

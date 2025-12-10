@@ -37,23 +37,25 @@ TEST(DiskBackedQueueTest, ReadWrite) {
     std::string commands;
     for (size_t i = 0; i < 100; ++i) {
       auto cmd = absl::StrCat("SET FOO", i, " BAR");
-      EXPECT_FALSE(backing.Push(cmd));
+      auto bytes = io::MutableBytes(reinterpret_cast<uint8_t*>(cmd.data()), cmd.size());
+      EXPECT_FALSE(backing.Write(bytes));
       absl::StrAppend(&commands, cmd);
     }
 
     std::string results;
     while (!backing.Empty()) {
-      std::string res;
-      auto ec = backing.Pop(&res);
-      EXPECT_FALSE(ec);
-      absl::StrAppend(&results, res);
+      LOG(INFO) << "ping";
+      std::string buf(1024, 'c');
+      auto bytes = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
+      auto res = backing.ReadTo(bytes);
+      EXPECT_TRUE(res);
+      absl::StrAppend(&results, buf.substr(0, *res));
     }
 
     EXPECT_EQ(results.size(), commands.size());
     EXPECT_EQ(results, commands);
 
-    EXPECT_FALSE(backing.CloseReader());
-    EXPECT_FALSE(backing.CloseWriter());
+    EXPECT_FALSE(backing.Close());
   });
 
   proactor->Stop();

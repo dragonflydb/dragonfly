@@ -12,6 +12,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/facade_types.h"
+#include "io/io.h"
 #include "util/fibers/uring_file.h"
 
 using facade::operator""_MB;
@@ -59,21 +60,17 @@ std::error_code DiskBackedQueue::Init() {
 DiskBackedQueue::~DiskBackedQueue() {
 }
 
-std::error_code DiskBackedQueue::CloseWriter() {
-  if (writer_) {
+std::error_code DiskBackedQueue::Close() {
+  if (writer_ && reader_) {
     auto ec = writer_->Close();
     LOG_IF(WARNING, ec) << ec.message();
-    return ec;
-  }
-  return {};
-}
 
-std::error_code DiskBackedQueue::CloseReader() {
-  if (reader_) {
-    auto ec = reader_->Close();
-    LOG_IF(WARNING, ec) << ec.message();
-    return ec;
+    auto ec2 = reader_->Close();
+    LOG_IF(WARNING, ec2) << ec.message();
+    // Return the first error.
+    return ec ? ec : ec2;
   }
+
   return {};
 }
 
@@ -86,41 +83,39 @@ bool DiskBackedQueue::HasEnoughBackingSpaceFor(size_t bytes) const {
   return (bytes + total_backing_bytes_) < max_backing_size_;
 }
 
-std::error_code DiskBackedQueue::Push(std::string_view blob) {
-  auto ec = writer_->Write(blob);
+std::error_code DiskBackedQueue::Write(io::Bytes bytes) {
+  auto ec = writer_->Write(bytes);
   if (ec) {
-    VLOG(2) << "Failed to offload blob of size " << blob.size() << " to backing with error: " << ec;
+    VLOG(2) << "Failed to offload blob of size " << bytes.size()
+            << " to backing with error: " << ec;
     return ec;
   }
 
-  total_backing_bytes_ += blob.size();
+  total_backing_bytes_ += bytes.size();
 
-  VLOG(2) << "Offload connection " << this << " backpressure of " << blob.size();
-  VLOG(3) << "Command offloaded: " << blob;
+  VLOG(2) << "Offload connection " << this << " backpressure of " << bytes.size();
   return {};
 }
 
-std::error_code DiskBackedQueue::Pop(std::string* out) {
+io::Result<size_t> DiskBackedQueue::ReadTo(io::MutableBytes out) {
   const size_t k_read_size = 4096;
-  const size_t to_read = std::min(k_read_size, total_backing_bytes_);
-  out->resize(to_read);
+  const size_t to_read = std::min(std::min(k_read_size, total_backing_bytes_), out.size());
 
-  io::MutableBytes bytes{reinterpret_cast<uint8_t*>(out->data()), to_read};
-  auto result = reader_->Read(next_read_offset_, bytes);
+  auto result = reader_->Read(next_read_offset_, out);
   if (!result) {
     LOG(ERROR) << "Could not load item at offset " << next_read_offset_ << " of size " << to_read
                << " from disk with error: " << result.error().value() << " "
                << result.error().message();
-    return result.error();
+    return result;
   }
 
   VLOG(2) << "Loaded item with offset " << next_read_offset_ << " of size " << to_read
           << " for connection " << this;
 
-  next_read_offset_ += bytes.size();
-  total_backing_bytes_ -= bytes.size();
+  next_read_offset_ += to_read;
+  total_backing_bytes_ -= to_read;
 
-  return {};
+  return {to_read};
 }
 
 }  // namespace facade
