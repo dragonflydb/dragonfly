@@ -54,6 +54,11 @@ pair<sds, uint64_t> CreateEntry(string_view field, string_view value, uint32_t t
   return {newkey, sdsval_tag};
 }
 
+bool HasTtl(sds entry) {
+  const uint64_t tag = absl::little_endian::Load64(entry + sdslen(entry) + 1);
+  return (tag & kValTtlBit) != 0;
+}
+
 }  // namespace
 
 StringMap::~StringMap() {
@@ -62,21 +67,28 @@ StringMap::~StringMap() {
 
 bool StringMap::AddOrUpdate(std::string_view field, std::string_view value, uint32_t ttl_sec,
                             bool keepttl) {
-  // 8 additional bytes for a pointer to value.
-  auto [newkey, sdsval_tag] = CreateEntry(field, value, time_now(), ttl_sec);
-
-  // Replace the whole entry.
-  if (sds prev_entry = (sds)AddOrReplaceObj(newkey, sdsval_tag & kValTtlBit); prev_entry) {
-    const bool prev_has_ttl =
-        absl::little_endian::Load64(prev_entry + sdslen(prev_entry) + 1) & kValTtlBit;
-    if (keepttl && prev_has_ttl) {
-      SdsUpdateExpireTime(newkey, ObjExpireTime(prev_entry), 8);
-    }
+  const uint32_t computed_ttl = ComputeTtl(field, ttl_sec, keepttl);
+  auto [newkey, sdsval_tag] = CreateEntry(field, value, time_now(), computed_ttl);
+  if (auto prev_entry = static_cast<sds>(AddOrReplaceObj(newkey, sdsval_tag & kValTtlBit));
+      prev_entry) {
     ObjDelete(prev_entry, false);
     return false;
   }
-
   return true;
+}
+
+uint32_t StringMap::ComputeTtl(string_view field, uint32_t ttl_sec, bool keepttl) const {
+  if (!keepttl)
+    return ttl_sec;
+
+  auto* prev = static_cast<sds>(FindInternal(&field, Hash(&field, 1), 1));
+  if (!prev)
+    return ttl_sec;
+
+  if (!HasTtl(prev))
+    return ttl_sec;
+
+  return ObjExpireTime(prev) - time_now();
 }
 
 bool StringMap::AddOrSkip(std::string_view field, std::string_view value, uint32_t ttl_sec) {
