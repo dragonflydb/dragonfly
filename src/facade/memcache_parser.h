@@ -61,7 +61,7 @@ class MemcacheParser {
     CmdType type = INVALID;
 
     std::string_view key() const {
-      return lens_.empty() ? std::string_view{} : Front();
+      return empty() ? std::string_view{} : Front();
     }
     union {
       uint64_t cas_unique = 0;  // for CAS COMMAND

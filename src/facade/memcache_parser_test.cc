@@ -23,9 +23,7 @@ class MCParserTest : public testing::Test {
   }
 
   vector<string_view> ToArgs() {
-    vector<string_view> res;
-    ParsedArgs{cmd_}.ToSlice(&res);
-    return res;
+    return {cmd_.begin(), cmd_.end()};
   }
 
   MemcacheParser parser_;
