@@ -628,7 +628,6 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 #endif
 
   UpdateLibNameVerMap(lib_name_, lib_ver_, +1);
-  allowed_to_register_ = false;
 }
 
 Connection::~Connection() {
@@ -1061,10 +1060,6 @@ void Connection::ConnectionFlow() {
     UpdateIoBufCapacity(io_buf_, stats_, [&]() { io_buf_.EnsureCapacity(64); });
     variant<error_code, Connection::ParserStatus> res;
     if (io_loop_v2 && !is_tls_) {
-      // Migrations should call RegisterRecv if the connection has reached here once.
-      // Otherwise, a migration won't register and instead wait for the connection state
-      // to first reach here and then call RegisterRecv inside IoLoopV2.
-      allowed_to_register_ = true;
       // Breaks with TLS. RegisterOnRecv is unimplemented.
       res = IoLoopV2();
     } else {
