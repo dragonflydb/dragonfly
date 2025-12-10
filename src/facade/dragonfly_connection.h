@@ -480,6 +480,8 @@ class Connection : public util::Connection {
       // if the flag is set.
       bool is_tls_ : 1;
       bool is_main_ : 1;
+      // If post migration is allowed to call RegisterRecv
+      bool migration_allowed_to_register_ : 1;
     };
   };
 

@@ -628,6 +628,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 #endif
 
   UpdateLibNameVerMap(lib_name_, lib_ver_, +1);
+  migration_allowed_to_register_ = false;
 }
 
 Connection::~Connection() {
@@ -676,7 +677,7 @@ void Connection::OnPostMigrateThread() {
   }
 
   const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
-  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen()) {
+  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen() && migration_allowed_to_register_) {
     socket_->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
       DoReadOnRecv(n);
       io_event_.notify_one();
@@ -1060,6 +1061,10 @@ void Connection::ConnectionFlow() {
     UpdateIoBufCapacity(io_buf_, stats_, [&]() { io_buf_.EnsureCapacity(64); });
     variant<error_code, Connection::ParserStatus> res;
     if (io_loop_v2 && !is_tls_) {
+      // Everything above the IoLoopV2 is fiber blocking. A connection can migrate before
+      // it reaches here and will cause a double RegisterOnRecv check fail. To avoid this,
+      // a migration shall only call RegisterOnRev if it reached the main IoLoopV2 below.
+      migration_allowed_to_register_ = true;
       // Breaks with TLS. RegisterOnRecv is unimplemented.
       res = IoLoopV2();
     } else {
