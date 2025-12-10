@@ -3463,7 +3463,7 @@ async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
         df_factory.create(
             port=next(next_port),
             admin_port=next(next_port),
-            vmodule="coordinator=2,search_family=3",
+            vmodule="coordinator=2,search_family=3,redis_parser=3",
         )
         for i in range(3)
     ]
@@ -3489,13 +3489,17 @@ async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
 
     cclient = instances[0].cluster_client()
 
-    for i in range(0, 10):
+    docs_num = 2
+    for i in range(0, docs_num):
         assert await cclient.execute_command("HSET", f"s{i}", "title", f"test {i}") == 1
 
-    res = await nodes[0].client.execute_command("FT.SEARCH", "idx", "@title:test", "text")
-    assert res[0] == 10
-    for i in range(0, 10):
-        assert f"s{i}" in res
+    async def search_test():
+        res = await nodes[0].client.execute_command("FT.SEARCH", "idx", "@title:test", "text")
+        assert res[0] == docs_num
+        for i in range(0, docs_num):
+            assert f"s{i}" in res
+
+    await asyncio.gather(*(search_test() for _ in range(docs_num)))
 
 
 async def verify_keys_match_number_of_index_docs(client, expected_num_keys):
