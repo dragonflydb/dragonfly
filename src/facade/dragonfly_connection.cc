@@ -1374,22 +1374,16 @@ void Connection::HandleMigrateRequest(bool unregister) {
     async_fb_.Join();
   }
 
-  // Must be done here because it's a preemption point
-  const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
-  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen()) {
-    socket_->ResetOnRecvHook();
-  }
-
-  // RegisterOnErrorCb might be called on POLLHUP and the join above is a preemption point.
-  // So, it could be the case that after this fiber wakes up the connection might be closing.
-  if (cc_->conn_closing) {
-    return;
-  }
-
   // We don't support migrating with subscriptions as it would require moving thread local
   // handles. We can't check above, as the queue might have contained a subscribe request.
 
   if (cc_->subscriptions == 0) {
+    // RegisterOnErrorCb might be called on POLLHUP and the join above is a preemption point.
+    // So, it could be the case that after this fiber wakes up the connection might be closing.
+    if (cc_->conn_closing) {
+      return;
+    }
+
     stats_->num_migrations++;
     migration_request_ = nullptr;
 
@@ -1791,6 +1785,12 @@ bool Connection::Migrate(util::fb2::ProactorBase* dest) {
   CHECK(!cc_->async_dispatch);
   CHECK_EQ(cc_->subscriptions, 0);  // are bound to thread local caches
   CHECK_EQ(self_.use_count(), 1u);  // references cache our thread and backpressure
+                                    //
+  const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
+  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen()) {
+    socket_->ResetOnRecvHook();
+  }
+
   // Migrate is only used by DFLY Thread and Flow command which both check against
   // the result of Migration and handle it explicitly in their flows so this can act
   // as a weak if condition instead of a crash prone CHECK.
